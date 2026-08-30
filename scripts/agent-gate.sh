@@ -134,12 +134,26 @@
 #                      The full pytest run includes the #1231 Python write→read
 #                      content proof (test_write_readback_content.py), so a core
 #                      write-format regression reds a binding content test.
-#   node-bindings      napi build + the #1231 Node write→read content proof
-#                      (npx jest write-readback-content) in bindings/node; SKIPs
-#                      (never silently PASSes) if node/npm is unavailable. Scoped
-#                      to the content proof (not full `npm test`) so it stays
-#                      fast and corpus-free while still failing closed on a Node
-#                      write-path regression (#1255).
+#   node-bindings      napi build + the WHOLE jest suite (`npm test`) in
+#                      bindings/node; SKIPs (never silently PASSes) if node/npm is
+#                      unavailable. WIDENED from 1 of 27 jest files to all of them
+#                      (#3522, superseding the #1255 narrowing): node-ci.yml is
+#                      `required`-EXEMPT on the stated grounds that this component is
+#                      the merge-gating half, which was true of one file. Measured
+#                      before widening: the slow half (npm ci + the release-unwind
+#                      napi build) is already paid here, and the full suite adds
+#                      ~15-35s — 504 tests / 27 suites, green on two consecutive runs.
+#                      Now IN DATASET_COMPONENTS (7 suites read CQLITE_DATASETS_ROOT)
+#                      and the FULL gate exports CQLITE_REQUIRE_FIXTURES=1, so an
+#                      absent corpus THROWS instead of letting those suites silently
+#                      describe.skip; --only/--lite stay lenient and the #2078 opt-out
+#                      is honoured, with the mode PRINTED. check_jest_suites_ran is
+#                      the affirmative guard: the reported suite total must equal the
+#                      count of __test__/*.test.js DERIVED FROM DISK, no suite may be
+#                      failed or skipped, and the passed-test count must be non-zero
+#                      (jest reports an all-skipped suite as PASSED). cqlite-node's
+#                      RUST unit tests are binding-rust-tests' subject, deliberately
+#                      NOT behind this component's SKIP.
 #   binding-rust-tests EXECUTES the RUST test suites of the two binding-side crates no
 #                      other component runs (#3522): `cargo test -p cqlite-ffi-common`
 #                      (ALL targets — lib + tests/dependency_boundary.rs +
@@ -5305,6 +5319,81 @@ check_unittest_targets_ran() {
 }
 export -f check_unittest_targets_ran
 
+# check_jest_suites_ran <label> <logfile> <expected-suite-count>
+#
+# The jest ANALOGUE of check_unittest_targets_ran (issue #3522). A green `npm test`
+# exit is not evidence that anything ran: jest reports a suite whose every `describe`
+# was skipped as PASSED, so a corpus-less box (or a `describe.skip` someone left in)
+# produces `Test Suites: 27 passed, 27 total` over zero real assertions — the vacuous
+# green this whole issue exists to remove, arriving through the widened lane's own
+# plumbing.
+#
+# AFFIRMATIVE, in three directions, all parsed from jest's OWN summary:
+#   * the reported TOTAL suite count must equal <expected-suite-count>, which the
+#     caller DERIVES from the `__test__/*.test.js` files on disk — so a suite file that
+#     jest never picked up (a testPathIgnorePatterns edit, a rename, a filter left on
+#     the command line) FAILs instead of shrinking the lane silently;
+#   * no suite may be reported failed or skipped; and
+#   * the PASSED test count must be NON-ZERO.
+# A positive verdict PRINTS the counts, so a pasted log shows the check RAN and on what.
+#
+# Fail-closed on an unreadable/unparseable log for the same reason as its siblings: a
+# guard that consumed nothing has measured nothing and must never report OK. In
+# particular an ABSENT `Test Suites:` line is a FAIL, never "no problems found" — that
+# is the shape where the absence of a bad signal is read as a positive verdict.
+check_jest_suites_ran() {
+  local label="$1" logfile="$2" expected="$3"
+  case "$expected" in
+    ''|*[!0-9]*)
+      echo "$label: FAIL-CLOSED — check_jest_suites_ran was called with a non-numeric expected suite count ('$expected'); a guard whose subject size is unknown has no subject (issue #3522)" >&2
+      return 1 ;;
+  esac
+  if [ "$expected" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — check_jest_suites_ran was called expecting ZERO suites; a guard with an empty subject set would report OK having measured nothing (issue #3522)" >&2
+    return 1
+  fi
+  local _parse_src
+  _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+  if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing (resolved to '${_parse_src:-<empty>}'), so this guard parsed NOTHING (issue #3522)" >&2
+    return 1
+  fi
+  # The LAST summary block, so a nested/retried run cannot leave an older line in play.
+  local suites tests
+  suites=$(grep -E '^Test Suites:' "$_parse_src" | tail -1)
+  tests=$(grep -E '^Tests:' "$_parse_src" | tail -1)
+  if [ -z "$suites" ] || [ -z "$tests" ]; then
+    echo "$label: FAIL-CLOSED — no parseable jest summary in '$logfile' (Test Suites: '${suites:-<absent>}', Tests: '${tests:-<absent>}'). jest ran to a successful exit, so a summary must exist: a truncated log, a changed jest output format, or a run that never started. A guard that judged nothing must never report OK (issue #3522)" >&2
+    return 1
+  fi
+  # `<n> total` / `<n> passed` / `<n> failed` / `<n> skipped`, read by name rather than
+  # by position — jest omits a category entirely when its count is zero, so a
+  # positional parse would silently misread every line whose shape it did not expect.
+  local s_total s_failed s_skipped t_passed
+  s_total=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) total.*/\1/p')
+  s_failed=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) failed.*/\1/p')
+  s_skipped=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) skipped.*/\1/p')
+  t_passed=$(printf '%s' "$tests" | sed -nE 's/.*[^0-9]([0-9]+) passed.*/\1/p')
+  : "${s_failed:=0}" "${s_skipped:=0}" "${t_passed:=0}"
+  case "$s_total" in
+    ''|*[!0-9]*)
+      echo "$label: FAIL-CLOSED — could not read a suite TOTAL out of jest's summary line ('$suites'). The parse is broken, which is never a pass (issue #3522)" >&2
+      return 1 ;;
+  esac
+  local bad=""
+  [ "$s_total" -eq "$expected" ] || bad="$bad jest ran $s_total suite(s) but $expected '*.test.js' file(s) exist on disk — a suite file was not picked up (a filter, a rename, or testPathIgnorePatterns);"
+  [ "$s_failed" -eq 0 ] || bad="$bad $s_failed suite(s) FAILED;"
+  [ "$s_skipped" -eq 0 ] || bad="$bad $s_skipped suite(s) were SKIPPED — a skipped suite is reported by jest as neither passed nor failed and would otherwise pass unnoticed;"
+  [ "$t_passed" -gt 0 ] || bad="$bad ZERO tests PASSED — jest reports an all-skipped suite as passing, so a green exit over no assertions is exactly the vacuous result this guard exists to catch;"
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED —$bad (issue #3522; jest summary was: '$suites' / '$tests')" >&2
+    return 1
+  fi
+  echo "$label: jest suites OK — $s_total/$expected suite(s) ran (0 failed, 0 skipped) and $t_passed test(s) PASSED (affirmative measurement, parsed from jest's own summary)" >&2
+  return 0
+}
+export -f check_jest_suites_ran
+
 # _package_test_targets <package>: print one TAB-separated line per declared
 # INTEGRATION (`test`) target of that workspace package — `<name>\t<required-features
 # comma-joined, empty when none>` (issue #1699, roborev round-2 finding 2).
@@ -5679,20 +5768,57 @@ run_python_bindings() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
-# node-bindings: build the napi-rs native module and run the #1231 Node
-# write→read CONTENT proof. Symmetric to run_python_bindings and SKIP-aware:
-# if there is no node/npm on PATH the component records SKIP (loudly, never
-# silently PASS) so a missing toolchain can't mask a real Node write-path
-# regression. Anything else (install/build/test failure) is a hard FAIL.
+# node-bindings: build the napi-rs native module and run the WHOLE jest suite
+# against it. Symmetric to run_python_bindings and SKIP-aware: if there is no
+# node/npm on PATH the component records SKIP (loudly, never silently PASS) so a
+# missing toolchain can't mask a real Node regression. Anything else
+# (install/build/test failure) is a hard FAIL.
 #
-# Scope (#1255): we run the content proof specifically (npx jest
-# write-readback-content) rather than the full `npm test`. The full Node suite
-# pulls in corpus-dependent parity/smoke tests and a slow `--release` napi
-# build; scoping to the content proof keeps the gate fast and reliable while
-# guaranteeing the load-bearing #1231 test executes fail-closed. The content
-# test self-generates its SSTables, so it needs no fixture corpus (hence
-# node-bindings is NOT in DATASET_COMPONENTS); CQLITE_DATASETS_ROOT is still
-# exported defensively for any test that reads it.
+# SCOPE — WIDENED FROM ONE FILE TO THE WHOLE SUITE (issue #3522; supersedes the
+# #1255 narrowing). This component used to run `npx jest write-readback-content`,
+# i.e. ONE of the 27 jest suites, guaranteeing only the #1231 write→read content
+# proof. The other 26 executed nowhere that gates a merge: node-ci.yml's PR lane is
+# path-filtered to bindings/node/** (a cqlite-core-only diff does not trigger it) and
+# is `required`-EXEMPT, and the full `npm test` there is label/schedule gated — while
+# .github/ci-gating-tiers.yml justifies that exemption with "the merge-gating half is
+# the local gate's node-bindings component". That claim was true of 1 file in 27.
+# Among the 26 were shared-vectors.test.js (the cross-binding SHA-256 EXACT oracles,
+# whose whole value is that Python, Node and Rust agree byte-for-byte) and
+# prepared.test.js (export-surface named-set assertions).
+#
+# The #1255 rationale for narrowing was cost + corpus dependence, and it was
+# re-MEASURED rather than re-argued: the slow half (`npm ci` + the
+# `--profile release-unwind` napi build) is paid by this component ALREADY, and the
+# full suite adds ~15–35s on top of it — 504 passing tests across 27/27 suites, green
+# on two consecutive runs. That is not a cost worth 26 suites of blindness.
+#
+# THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED. 7 of the suite's files read
+# CQLITE_DATASETS_ROOT, so node-bindings IS now in DATASET_COMPONENTS (it was NOT
+# before, and that comment was correct then and would be a stale rationale now).
+# Enrollment alone is not enough: without CQLITE_REQUIRE_FIXTURES=1 the suite's
+# setup.js leaves DATASETS_AVAILABLE=false and the corpus-dependent describes
+# `describe.skip` SILENTLY — a green run over zero real assertions, which is #3220's
+# rule and this issue's own thesis in one. So the FULL gate exports
+# CQLITE_REQUIRE_FIXTURES=1, making an absent corpus throw. `--only`/`--lite` stay
+# lenient (they are probes; `--only` cannot be a verdict — it exits 3 on success),
+# and the documented #2078 opt-out AGENT_GATE_ALLOW_MISSING_FIXTURES=1 is honoured,
+# the same split flight-tests uses. Which mode was taken is PRINTED, never implicit.
+#
+# AFFIRMATIVE MEASUREMENT, not a green exit code (the same rule as the Rust lanes).
+# jest reports a suite whose every describe was skipped as PASSED, so `npm test`
+# exiting 0 does not establish that anything ran. check_jest_suites_ran requires the
+# reported total to equal the count of `__test__/*.test.js` files DERIVED FROM DISK,
+# requires no suite to have failed or been skipped, and requires a non-zero count of
+# PASSED tests.
+#
+# RUN_SLOW_TESTS is forwarded exactly as python-bindings forwards it (default 0). Two
+# tests opt into it (publish.test.js's `npm pack --dry-run`, streaming.test.js's
+# `memory stays bounded for large result sets`); the census names them.
+#
+# `npm test`, NOT `npx jest`: the package's own test script is the derived answer to
+# "what is this suite", it runs the `pretest` loader generation, and it passes
+# `--expose-gc`, which the memory tests need. A retyped jest invocation here would
+# drift from the package the moment either changes.
 run_node_bindings() {
   local name=node-bindings
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -5707,16 +5833,94 @@ run_node_bindings() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] npm ci + npm run build + jest write-readback-content (#1231)"
-  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
+  # The expected suite count, DERIVED FROM DISK at run time so a new
+  # `__test__/*.test.js` is covered with no gate edit — the property the old
+  # single-file filter could never have. A failed derivation is a FAIL naming the
+  # derivation, never a guard with no subject.
+  local test_dir="$REPO_ROOT/bindings/node/__test__" suite_n=""
+  if [ ! -d "$test_dir" ] || [ ! -r "$test_dir" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: bindings/node/__test__ is missing or unreadable, so the"
+      echo "        expected jest suite count cannot be DERIVED and the affirmative guard"
+      echo "        would have no subject (issue #3522)."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  # `find`, not a glob: a glob's meaning depends on ambient shell options this script
+  # never sets (nullglob/failglob), both reachable through BASHOPTS.
+  suite_n=$(find -H "$test_dir" -maxdepth 1 -type f -name '*.test.js' 2>/dev/null | grep -c . || true)
+  case "$suite_n" in
+    ''|*[!0-9]*) suite_n=0 ;;
+  esac
+  if [ "$suite_n" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: found 0 '*.test.js' files under bindings/node/__test__."
+      echo "        The COUNT failed (or the suite vanished), and a guard expecting zero"
+      echo "        suites would report OK having measured nothing (issue #3522)."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Strict-fixture mode on the FULL gate only, honouring the documented #2078 opt-out.
+  # See the scope note above for why enrollment in DATASET_COMPONENTS is not enough.
+  local require_fixtures=0 fixture_note
+  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
+    require_fixtures=1
+    fixture_note="CQLITE_REQUIRE_FIXTURES=1 (an absent corpus THROWS; the corpus-dependent suites cannot silently describe.skip)"
+  elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ]; then
+    fixture_note="CQLITE_REQUIRE_FIXTURES unset (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — corpus-dependent suites MAY silently skip, so this run does NOT validate them"
+  else
+    fixture_note="CQLITE_REQUIRE_FIXTURES unset (--only/--lite probe run) — corpus-dependent suites MAY silently skip"
+  fi
+
+  local -a census=()
+  census+=("npm ci + npm run build + npm test — the WHOLE jest suite ($suite_n files, derived from disk), #3522")
+  census+=("  supersedes the #1255 narrowing to 1 of 27 files; node-ci.yml is required-EXEMPT on the")
+  census+=("  grounds that THIS component is the merge-gating half, which was true of 1 file in 27.")
+  census+=("  fixtures: $fixture_note")
+  census+=("  RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0} — 2 tests opt in (publish.test.js 'npm pack --dry-run';")
+  census+=("       streaming.test.js 'memory stays bounded for large result sets'). At 0 they skip;")
+  census+=("       that is the suite's OWN gate, identical to python-bindings' convention.")
+  census+=("  NOT RUN HERE: cqlite-node's RUST unit tests — that is binding-rust-tests' subject,")
+  census+=("       deliberately a separate component because THIS one SKIPs without node/npm and a")
+  census+=("       Rust suite behind that SKIP would be a coverage hole wearing a SKIP's clothes.")
+  local cl
+  for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
+  {
+    echo "==== [$name] COVERAGE CENSUS (issue #3522) ===="
+    for cl in "${census[@]}"; do echo "$cl"; done
+    echo "==== end census ===="
+  } > "$log"
+
+  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+     RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" \
+     CQLITE_REQUIRE_FIXTURES_ARG="$require_fixtures" bash -c '
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
       if [ -f package-lock.json ]; then npm ci; else npm install; fi
       npm run build
-      npx jest write-readback-content' >"$log" 2>&1; then
-    status=PASS
+      if [ "$CQLITE_REQUIRE_FIXTURES_ARG" = 1 ]; then export CQLITE_REQUIRE_FIXTURES=1; fi
+      npm test' >>"$log" 2>&1; then
+    # A green `npm test` is NOT sufficient: jest reports a suite whose every describe
+    # was skipped as PASSED, so the exit code alone cannot distinguish 27 suites of
+    # assertions from 27 suites of nothing.
+    if check_jest_suites_ran "$name" "$log" "$suite_n" 2>>"$log"; then
+      status=PASS
+    else
+      status=FAIL
+    fi
   else
     status=FAIL
+  fi
+  if [ "$status" = FAIL ]; then
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
@@ -11652,7 +11856,7 @@ run_file_size
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings smoke flight-tests legacy-heuristics"
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings node-bindings smoke flight-tests legacy-heuristics"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
