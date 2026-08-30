@@ -5783,6 +5783,35 @@ run_python_bindings() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# _node_bindings_corpus_present: does CQLITE_DATASETS_ROOT hold a corpus the node jest
+# suite will consider USABLE? (issue #3522, roborev round 2 C2.)
+#
+# A DELIBERATE, BOUNDED MIRROR of ONE line of the consumer:
+# `bindings/node/__test__/setup.js`'s
+#   DATASETS_AVAILABLE = fs.existsSync(SSTABLES_DIR) && hasDataDbFile(TEST_BASIC_DIR)
+# Named here with that file:line so the pair stays findable, because it IS a second
+# implementation and this repo's rule is to say so rather than let it drift silently. It is
+# used for ONE decision only — whether to SKIP under the #2078 opt-out — never to decide
+# what the suite runs, so a divergence costs at most an unnecessary SKIP in a mode that
+# already declares fixtures missing. That is the lenient direction on purpose.
+#
+# `[ -f "$f" ]` per candidate rather than `find -type f`, matching setup.js's
+# `statSync().isFile()`: it FOLLOWS a symlink and tests that the TARGET is a regular file. A
+# bare `-type f` would miss a symlinked Data.db, and `-xtype f` is unavailable on macOS's
+# BSD find, which this gate treats as a first-class host.
+_node_bindings_corpus_present() {
+  local root="${CQLITE_DATASETS_ROOT:-}" f
+  [ -n "$root" ] || return 1
+  [ -d "$root/sstables" ] || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] && return 0
+  done <<EOF
+$(find -H "$root/sstables/test_basic" -name '*-Data.db' -print 2>/dev/null)
+EOF
+  return 1
+}
+
 # node-bindings: build the napi-rs native module and run the WHOLE jest suite
 # against it. Symmetric to run_python_bindings and SKIP-aware: if there is no
 # node/npm on PATH the component records SKIP (loudly, never silently PASS) so a
@@ -5865,6 +5894,41 @@ run_node_bindings() {
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no node/npm on PATH)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  # #2078 OPT-OUT REGRESSION, FIXED BY SKIPPING (roborev round 2, C2). Widening this
+  # component to the whole jest suite made `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` + no corpus
+  # FAIL where it used to PASS: the old scope was `write-readback-content` alone, which
+  # self-generates its SSTables. `env -u`'ing the strict variables (correct for B2, and kept)
+  # does NOT help here, because the suites do not gate on them — `helpers.js`'s
+  # `skipIfNoDatasets()` throws on `!global.DATASETS_AVAILABLE` and never consults
+  # `REQUIRE_FIXTURES` at all. So 14 suites throw whenever the corpus is absent, opt-out or
+  # not.
+  #
+  # That is precisely what the flight-tests header warns about in its own words: "an opt-out
+  # that the SUMMARY reports as taken did not, in fact, let the gate finish". The block would
+  # print `missing-fixtures: OPT-OUT` and the gate would die anyway; an opt-out's value is
+  # that it is BOTH visible AND effective.
+  #
+  # A SKIP, not a corpus-free subset. Running "just the suites that need no corpus" would
+  # reintroduce exactly the curation D2 removed, and nothing DERIVES which suites need a
+  # corpus without running them. A declared SKIP matches this component's existing
+  # SKIP-aware shape for a missing toolchain, and it names the coverage it is giving up.
+  #
+  # Checked BEFORE `npm ci` so the opt-out costs nothing. `--only`/`--lite` are unaffected:
+  # this branch keys on the opt-out alone, and under `--only` without it the component still
+  # runs (a probe, never a verdict).
+  if [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && ! _node_bindings_corpus_present; then
+    status=SKIP
+    echo ">>> [$name] SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and no usable corpus at CQLITE_DATASETS_ROOT='${CQLITE_DATASETS_ROOT:-<unset>}')"
+    echo ">>> [$name]   NOT VALIDATED by this run: the 14 dataset-gated jest suites. helpers.js's"
+    echo ">>> [$name]   skipIfNoDatasets() THROWS on an absent corpus and never consults the strict-mode"
+    echo ">>> [$name]   env vars, so they cannot be run leniently — the honest options are SKIP or FAIL,"
+    echo ">>> [$name]   and FAIL would make the documented #2078 opt-out ineffective (roborev C2)."
+    echo ">>> [$name]   The corpus-free half (incl. the #1231 write-readback content proof) is ALSO"
+    echo ">>> [$name]   skipped: nothing derives which suites need a corpus without running them, and"
+    echo ">>> [$name]   curating that list is what D2 removed."
     record_result "$name" "$status" 0
     return 0
   fi
