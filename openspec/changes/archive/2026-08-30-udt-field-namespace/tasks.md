@@ -114,7 +114,7 @@ cannot be fabricated off-thread, so `udt_to_object`'s produced object cannot be 
   (CLI-parity suite needs `RUN_SLOW_TESTS=1`).
 - [x] 5.8 Stub fidelity: `test_stub_fidelity.py` green with `TYPE_ONLY_STUB_NAMES` still **empty**;
   `typescript-definitions.test.js` drift alarm + the no-`any` rule green.
-- [ ] 5.9 **State the SKIP exposure in the PR rather than papering over it**: both `python-bindings`
+- [x] 5.9 **State the SKIP exposure in the PR rather than papering over it**: both `python-bindings`
   and `node-bindings` SKIP without their toolchain, so AC2's evidence rides on SKIP-able components.
   Do NOT manufacture a never-SKIP `binding-rust-tests` test by inventing an Env-free abstraction the
   fix does not otherwise need — a harness that never reaches the code is worse than a declared SKIP.
@@ -129,7 +129,7 @@ cannot be fabricated off-thread, so `udt_to_object`'s produced object cannot be 
   (`udt["_type"]` → `udt.type_name` / `result._type` → `result.typeName`).
 
 ## 7. Certification
-- [ ] 7.1 `scripts/agent-gate.sh --lite` PASS each fix round (summary-file redirect).
-- [ ] 7.2 `rust-reviewer` + sanctioned roborev clean on the lite-green diff, BEFORE any full gate.
-- [ ] 7.3 ONE full `scripts/agent-gate.sh` (gate of record) in `flow-closer`; `spec-auditor` C PASS
+- [x] 7.1 `scripts/agent-gate.sh --lite` PASS each fix round (summary-file redirect).
+- [x] 7.2 `rust-reviewer` + sanctioned roborev clean on the lite-green diff, BEFORE any full gate.
+- [x] 7.3 ONE full `scripts/agent-gate.sh` (gate of record) in `flow-closer`; `spec-auditor` C PASS
   against this spec; final roborev clean; then `gh pr merge --auto --squash --delete-branch`.
