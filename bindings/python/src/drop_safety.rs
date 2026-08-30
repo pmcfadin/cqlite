@@ -53,7 +53,29 @@
 //!   `blocking_lock()` *panics* in an async context. `try_lock()` cannot panic,
 //!   so contention degrades to a skipped step instead.
 //! * No `unwrap()`, `expect()`, slicing, or arithmetic appears below, so there
-//!   is no implicit panic site left.
+//!   is no implicit panic site in THIS FILE's own statements.
+//!
+//! That qualifier is load-bearing, so it is stated rather than implied: the two
+//! `block_on`s await third-party-scale code (`WriteEngine::close` reaches the
+//! whole SSTable writer; `cqlite-core/src/storage/write_engine/mod.rs` alone
+//! holds ~200 `unwrap`/`expect` occurrences) and this module cannot make those
+//! infallible. A panic escaping them would unwind out of `drop` into pyo3's
+//! trampoline and vanish into `sys.unraisablehook`. Because the profile really
+//! is `panic = "unwind"`, `catch_unwind` IS available and useful — the original
+//! "no `catch_unwind`, abort would catch nothing" reasoning died with the abort
+//! premise — so each awaited step runs inside [`catch_unwind_step`], which turns
+//! an escaping panic into a `tracing::error!` and lets the REMAINING steps run.
+//! That preserves the attempt-each-step-independently policy under a panic
+//! instead of losing every later step to the unwind.
+//!
+//! ## Fork safety
+//!
+//! A separate hazard from the panic ones, and the only DESTRUCTIVE one this
+//! module could have shipped: after `fork()` the child inherits the memtable and
+//! SHARES the parent's file descriptors, so a drop in the child would flush a
+//! duplicate generation, truncate the PARENT's WAL and release its `write_dir`
+//! lock. Step (0) refuses to act on inherited state by comparing the PID that
+//! built the runtime against the current one.
 //!
 //! ## No GIL is taken
 //!
@@ -70,8 +92,9 @@
 //! their duration — where an explicit `close()` releases the GIL around the
 //! same work via `py.allow_threads`. Reviewers have raised this twice, so the
 //! answer is recorded here rather than re-argued: **releasing the GIL requires
-//! first ACQUIRING a token, and every mechanism for that can PANIC in `drop`,
-//! which is a process ABORT under `panic = "abort"`.** In pyo3 0.23.5,
+//! first ACQUIRING a token, and every mechanism for that can PANIC in `drop` —
+//! which, per the section above, is a SILENT `PanicException` on
+//! `sys.unraisablehook`, cleanup half-done, exit code 0.** In pyo3 0.23.5,
 //! `Python::with_gil` panics "If the `auto-initialize` feature is not enabled
 //! and the Python interpreter is not initialized" (`src/marker.rs`, and this
 //! crate does NOT enable `auto-initialize`), which is precisely the
@@ -83,8 +106,8 @@
 //! released from a Rust thread holding no GIL.
 //!
 //! So the trade is a bounded stall on the *implicit* cleanup path versus a
-//! possible abort — and abort is the exact failure class this issue exists to
-//! prevent. The mitigation is the one the class docs already recommend:
+//! silent half-done teardown that reports nothing — the failure class this issue
+//! exists to prevent, and the harder one to notice. The mitigation is the one the class docs already recommend:
 //! `close()`, or the `with` block, both of which release the GIL properly. This
 //! hook is the net for code that forgot, not the recommended path.
 //!
@@ -156,7 +179,7 @@
 //! opened through `block_on`, so the runtime is always already built. Both are
 //! stated rather than left implicit, because an untested branch whose absence
 //! is unmentioned reads as a covered one — and these two are precisely the
-//! branches whose failure mode is a process abort.
+//! branches whose failure mode is a silent, unreported half-teardown.
 //!
 //! Completing that census by the same standard: the `try_lock()` `Err` arm and
 //! both `Err(err)` log arms are likewise unexercised and, as far as can be
@@ -175,15 +198,92 @@
 //! cleanup a read-only handle has, but it is the one place this module spends
 //! real time on a path with nothing else to do. Tracked in #3566.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 
 use tokio::runtime::Handle;
 
 use crate::database::Database;
-use crate::runtime::existing_runtime;
+use crate::runtime::{existing_runtime, runtime_belongs_to_this_process};
+
+/// Run one teardown step behind a panic firewall.
+///
+/// A panic escaping the awaited futures would unwind out of `drop`, be caught by
+/// pyo3's `tp_dealloc` trampoline and reported through `sys.unraisablehook` —
+/// silent, exit code 0 — and it would take every LATER cleanup step with it.
+/// This contains it to the one step: the payload is logged, the caller continues.
+///
+/// `AssertUnwindSafe` is sound for the same reason the swallow-after-attempting
+/// policy is: a panicking step leaves engine state this module never touches
+/// again, and the process is on its way to freeing the handle regardless.
+fn catch_unwind_step<T>(step: &str, f: impl FnOnce() -> T) -> Option<T> {
+    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => Some(value),
+        Err(_payload) => {
+            // The payload is deliberately not downcast/formatted: that could
+            // allocate during teardown, and Rust's own panic hook has ALREADY
+            // written the message + location to fd 2 before unwinding began.
+            // Naming the step is the part not already on stderr.
+            tracing::error!(
+                "cqlite: panic escaped {step} during Database drop; that step's \
+                 cleanup is incomplete, later steps still ran"
+            );
+            None
+        }
+    }
+}
 
 impl Drop for Database {
     fn drop(&mut self) {
+        // (0) FORK SAFETY — refuse to act on inherited state (roborev job 168).
+        //
+        // This is a DESTRUCTIVE hazard, not a hygiene one, and it exists only
+        // because this module added a `Drop` at all. `fork()` copies the
+        // memtable and the `Database` object, and SHARES the file descriptors.
+        // `multiprocessing`'s default start method on Linux is `fork`, so a
+        // child that exits (or GCs the inherited handle) is an ordinary thing
+        // for a Python program to do. If this drop ran there, the write-engine
+        // close would, using the PARENT's descriptors:
+        //   * write a duplicate SSTable generation into the parent's data dir,
+        //   * TRUNCATE THE PARENT'S WAL after that flush
+        //     (`cqlite-core/src/storage/write_engine/mod.rs`: "After successful
+        //     flush -> truncate WAL"), destroying the recovery data for rows the
+        //     parent still holds only in memory, and
+        //   * release the parent's exclusive `write_dir` advisory lock — and
+        //     THIS ONE IS NOT PREVENTED BY RETURNING EARLY (rust-reviewer BL-2).
+        //     `impl Drop for WriteEngine` calls
+        //     `fs2::FileExt::unlock(&self.dir_lock)` UNCONDITIONALLY
+        //     (`cqlite-core/src/storage/write_engine/mod.rs`), and flock
+        //     ownership is per open-file-description, which `fork()` SHARES — so
+        //     the child's `LOCK_UN` releases the lock the parent believes it
+        //     holds, admitting a third writer with no error anywhere. An early
+        //     `return` cannot help: this `Drop` returning is exactly when the
+        //     struct's fields are dropped. Hence the `std::mem::forget` below —
+        //     in a child about to `_exit`, LEAKING the inherited engine is
+        //     strictly better than unlocking the parent's write dir.
+        // The inherited multi-threaded runtime cannot be driven either — its
+        // worker threads did not survive the fork.
+        //
+        // Accepted cost, stated: a child that opens its OWN `Database` also
+        // skips its drop cleanup, because the PID anchor belongs to the
+        // inherited runtime rather than to the handle. That child is already
+        // broken for a larger reason — every `block_on` in it drives a
+        // worker-less runtime — so the skip forfeits nothing that worked.
+        if !runtime_belongs_to_this_process() {
+            tracing::debug!(
+                "cqlite: Database dropped in a forked child (runtime belongs to \
+                 another process); skipping teardown and leaking the inherited \
+                 write engine to avoid acting on the parent's descriptors"
+            );
+            // Deliberate leak, scoped to a forked child: stops
+            // `WriteEngine::drop` releasing the PARENT's advisory lock (above).
+            // `self.inner` needs no such treatment — neither
+            // `cqlite_core::Database` nor `StorageEngine` implements `Drop`, and
+            // closing read-only descriptors here mutates no shared lock state.
+            std::mem::forget(self.write_engine.take());
+            return;
+        }
+
         // (1) READ the `closed` flag; never CLAIM it. Two independent review
         // rounds landed here, so the reasoning is recorded rather than left to
         // be rediscovered.
@@ -193,9 +293,16 @@ impl Drop for Database {
         // #1462), so SETTING it makes those iterators raise `RuntimeError` from
         // `__next__`. And setting it buys nothing, because the double-cleanup it
         // would guard against cannot happen: `Drop` runs at most once per
-        // object, and pyo3 holds a strong reference to the pyclass for the whole
-        // of any `&self` pymethod, so `close()` can never overlap this `drop` on
-        // the same handle. Issue #1461's step 1 asks for a `swap` so that "a
+        // object, and `tp_dealloc` only runs at refcount ZERO while CPython's
+        // caller holds a strong reference (the bound method on the frame's value
+        // stack) for the whole of any `&self` pymethod — so `close()` can never
+        // overlap this `drop` on the same handle. Attribute that to CPython
+        // REFCOUNTING, not to pyo3's borrow flag: `Drop` bypasses the borrow flag
+        // entirely, since `tp_dealloc` never checks it. The distinction matters
+        // if this class is ever made `frozen`, or the engine `Arc` handed to a
+        // second pyclass — at that point the read-then-teardown below becomes a
+        // real TOCTOU whose only remaining backstop is `WriteEngine::close`'s own
+        // internal `closed` swap. Issue #1461's step 1 asks for a `swap` so that "a
         // drop that ran makes a later `close()` a no-op" — that sequence is
         // unreachable, so the `swap`'s only observable effect would be breaking
         // a pattern that works today:
@@ -216,6 +323,14 @@ impl Drop for Database {
         // A `load` still satisfies the "AtomicBool-guarded" acceptance
         // criterion: a `close()` that already cleaned up makes this a no-op,
         // which is the half of the guard that is actually reachable.
+        //
+        // CONDITIONAL, and the condition must be re-checked if core changes:
+        // "continuing to iterate is safe" holds because `StorageEngine::shutdown`
+        // is a no-op, and the streaming producer holds its own `Arc` to the SAME
+        // `StorageEngine` instance — not a copy. If read-side shutdown ever
+        // becomes real teardown, step (5) will tear down an engine live iterators
+        // are still reading, and after this change there is NO FLAG LEFT to stop
+        // them. Whoever makes that change owns revisiting this `load`.
         if !self.closed.load(Ordering::SeqCst) {
             self.drop_teardown();
         }
@@ -223,18 +338,20 @@ impl Drop for Database {
 }
 
 impl Database {
-    /// The engine half of the drop cleanup: everything that must happen at most
-    /// once, and only when this drop won the `closed` race.
+    /// The engine half of the drop cleanup: runs when the flag READ in step (1)
+    /// came back false. There is no race to win — the flag is never claimed.
     ///
     /// Takes `&self` — nothing here mutates through the reference (`swap`,
     /// `try_lock` and `block_on` all take `&`).
     fn drop_teardown(&self) {
         // (2) Re-entrancy guard. `Runtime::block_on` PANICS when the calling
-        // thread is already inside a runtime context, and a panic in `drop`
-        // aborts the process under `panic = "abort"`. If we are inside a
-        // runtime there is no safe way to drive the async cleanup from here, so
-        // skip it silently. The flag is already set, so the handle is
-        // consistently "closed" either way.
+        // thread is already inside a tokio runtime context, and a panic in
+        // `drop` is silently swallowed into `sys.unraisablehook` (module docs) —
+        // the worst outcome available, not a loud one. Inside a runtime there is
+        // no safe way to drive the async cleanup, so skip it. Note the flag is
+        // deliberately NOT set here (see step (1)): `closed` stays false and any
+        // outstanding iterator keeps working, which is right precisely because
+        // this branch tore nothing down.
         //
         // Skipping is not merely the lesser evil, and the tempting alternative
         // is WORSE. Dispatching the cleanup onto the live runtime
@@ -270,7 +387,7 @@ impl Database {
 
         // (4) Write engine: close (which flushes any remaining memtable), the
         // same call `close()` makes. `try_lock` rather than `blocking_lock`:
-        // the latter panics in an async context, and a panic here is fatal.
+        // the latter panics in an async context, and a panic here is silent.
         //
         // Contention is an ACCEPTABLE skip: a held lock means another live
         // caller is inside a write operation on this same engine, and that
@@ -279,11 +396,15 @@ impl Database {
         // this hook; the durable guarantee remains explicit `close()`.
         if let Some(engine_arc) = self.write_engine.as_ref() {
             match engine_arc.try_lock() {
-                Ok(mut guard) => match runtime.block_on(guard.inner.close()) {
+                Ok(mut guard) => match catch_unwind_step("write-engine close", || {
+                    runtime.block_on(guard.inner.close())
+                })
+                .unwrap_or(Ok(()))
+                {
                     Ok(()) => {}
                     // Swallowed AFTER being attempted: `drop` has no caller to
-                    // return an error to, and propagating (panicking) would
-                    // abort the interpreter.
+                    // return an error to, and propagating (panicking) would only
+                    // become an unreported `sys.unraisablehook` report.
                     Err(err) => tracing::debug!(
                         "cqlite: write-engine close failed during Database drop: {err}"
                     ),
@@ -310,7 +431,9 @@ impl Database {
         // holding the GIL, which is safe ONLY because both awaited futures are
         // plain Rust that never touch a `Python<'_>`. If anything ever spawns a
         // tokio task that acquires the GIL, this becomes a hard deadlock.
-        if let Err(err) = runtime.block_on(self.inner.shutdown()) {
+        if let Some(Err(err)) = catch_unwind_step("storage shutdown", || {
+            runtime.block_on(self.inner.shutdown())
+        }) {
             tracing::debug!("cqlite: storage shutdown failed during Database drop: {err}");
         }
 

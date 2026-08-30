@@ -14,6 +14,16 @@ static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 /// constructed, even under concurrent first use.
 static INIT_LOCK: Mutex<()> = Mutex::new(());
 
+/// PID of the process that built [`RUNTIME`] — the fork-safety anchor (#1461).
+///
+/// `fork()` copies this memory and the `RUNTIME` cell along with it, but it does
+/// NOT copy the runtime's worker threads: only the forking thread exists in the
+/// child. So a child inheriting a built runtime holds a handle that cannot be
+/// driven, while ALSO inheriting the parent's open file descriptors. Comparing
+/// this against `std::process::id()` is how a teardown path tells "my runtime"
+/// from "a runtime I inherited". See [`runtime_belongs_to_this_process`].
+static RUNTIME_OWNER_PID: OnceLock<u32> = OnceLock::new();
+
 /// Returns a reference to the global tokio runtime, building it on first use.
 ///
 /// The runtime is lazily initialized on first access using a multi-threaded
@@ -33,11 +43,43 @@ static INIT_LOCK: Mutex<()> = Mutex::new(());
 /// form is preferred here regardless.)
 pub fn try_get_runtime() -> Result<&'static Runtime, std::io::Error> {
     get_or_try_init(&RUNTIME, &INIT_LOCK, || {
+        // Record the owning PID INSIDE the initializer, BEFORE the runtime is
+        // published (rust-reviewer NIT-1). Setting it after `get_or_try_init`
+        // returned would leave a window in which `RUNTIME` is visible but the
+        // PID is not, and a `fork()` there gives a child whose
+        // `RUNTIME_OWNER_PID` is `None` — which the accessor has to treat as
+        // "nothing inherited", the PERMISSIVE answer, so the child would go on
+        // to drive the parent's descriptors. Ordered this way the only reachable
+        // skew is PID-set-but-runtime-unset, which every caller already handles
+        // via `existing_runtime()` returning `None`.
+        //
+        // A `set` on an already-populated cell is a no-op, so a forked child
+        // calling this inherits the PARENT's pid rather than overwriting it,
+        // which is exactly the signal the accessor needs.
+        let _ = RUNTIME_OWNER_PID.set(std::process::id());
         tokio::runtime::Builder::new_multi_thread()
             .thread_name("cqlite-py-worker")
             .enable_all()
             .build()
     })
+}
+
+/// Whether the shared runtime (if any) was built by THIS process.
+///
+/// `false` means the runtime — and any `Database` reachable from this code — was
+/// inherited across a `fork()`. Nothing in that state is safe to drive: the
+/// runtime's worker threads did not survive the fork, and every open file
+/// descriptor is shared with the parent, so acting on them corrupts the
+/// PARENT's state (issue #1461, roborev job 168).
+///
+/// `true` when no runtime has been built at all — there is then nothing
+/// inherited to get wrong, and the caller's own `existing_runtime()` check is
+/// what handles that case.
+pub fn runtime_belongs_to_this_process() -> bool {
+    match RUNTIME_OWNER_PID.get() {
+        Some(pid) => *pid == std::process::id(),
+        None => true,
+    }
 }
 
 /// Returns the global tokio runtime **only if it has already been built**.

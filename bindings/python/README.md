@@ -77,8 +77,8 @@ db.close()
 
 A handle that is garbage-collected without `close()` still cleans up
 best-effort: the write engine is closed (flushing any remaining memtable to an
-SSTable), the read engine is shut down, and buffered telemetry is flushed. Two
-things are worth knowing about relying on it:
+SSTable), the read engine's shutdown hook is called (today a no-op), and
+buffered telemetry is flushed. Some things are worth knowing about relying on it:
 
 - **It runs with the GIL held**, because CPython frees the object from its
   deallocator. The flush and fsync therefore block other Python threads for
