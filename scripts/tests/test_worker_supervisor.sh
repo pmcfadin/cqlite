@@ -6,6 +6,10 @@
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This file's own path: cases that extract a HARNESS function into a scratch driver read it from here,
+# the same way the lock cases read the shipped supervisor out of `$SUPERVISOR` — the subject is always
+# the shipped text, never a re-implementation.
+SELF_FILE="$SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 SUPERVISOR="$REPO_ROOT/scripts/local/worker-supervisor.sh"
 
@@ -55,16 +59,16 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cqlite-supervisor-test.XXXXXX")"
 T_LOCKFN="$TMP_ROOT/lockfn"
 
 # ---------------------------------------------------------------------------
-# Background fixture processes: process-GROUP launch, guaranteed reap (#3549, roborev job 196 F2)
+# Background fixture processes: process-GROUP launch, OWNERSHIP-CHECKED reap (#3549, roborev jobs
+# 196 F2 + 198 F2)
 # ---------------------------------------------------------------------------
-# THE LEAK THIS CLOSES. Cases stage REAL processes — this suite's standing technique, because a staged
-# string tests the RULE and not the PROBE — and several of those fixtures are a SHELL THAT FORKS A
-# CHILD: `bash <script-whose-body-is-sleep-300>`, `sh -c 'sleep 300; :' …`, `bash --rcfile <script> -i`
-# (the rcfile's own `sleep 300` is what keeps the shell alive). Killing the pid the case recorded kills
-# only the SHELL. The `sleep 300` is NOT an exec replacement, so it is orphaned, reparented, and sits on
-# the box for five minutes holding whatever descriptors it inherited — which is not merely untidy: THIS
-# BOX RUNS FOUR LANES, so every run degraded a shared machine, and a held output descriptor can make a
-# harness look hung.
+# THE LEAK THIS CLOSES (job 196 F2). Cases stage REAL processes — this suite's standing technique,
+# because a staged string tests the RULE and not the PROBE — and several of those fixtures are a SHELL
+# THAT FORKS A CHILD: `bash <script-whose-body-is-sleep-300>`, `sh -c 'sleep 300; :' …`. Killing the pid
+# the case recorded kills only the SHELL. The `sleep 300` is NOT an exec replacement, so it is orphaned,
+# reparented, and sits on the box for five minutes holding whatever descriptors it inherited — which is
+# not merely untidy: THIS BOX RUNS FOUR LANES, so every run degraded a shared machine, and a held output
+# descriptor can make a harness look hung.
 #
 # THE FIX IS STRUCTURAL, NOT PER CALL SITE. `fixture_bg` enables job control for exactly the duration of
 # the spawn (`set -m`), which makes the background job a PROCESS GROUP LEADER whose pgid equals its pid.
@@ -72,18 +76,79 @@ T_LOCKFN="$TMP_ROOT/lockfn"
 # turned out to spawn — including children a future fixture adds without anyone re-reading this comment.
 # It is also why a fixture that DOES `exec` needs no special case: a group of one reaps identically.
 #
-# GUARANTEED ON EVERY EXIT PATH. The reap hangs off the suite's EXIT trap, so a `fail` that returns
-# early, an abort, the end of the run and INT/TERM all reach it. Per-case teardown (`fixture_kill`) is
-# an OPTIMISATION — it frees the box sooner — never the guarantee.
+# AND THE REAP MUST NEVER SIGNAL A GROUP IT NO LONGER OWNS (#3549, roborev job 198 F2). THE PREVIOUS
+# VERSION OF THIS BLOCK WAS MORE DANGEROUS THAN THE LEAK IT FIXED. It kept one HISTORICAL list and sent
+# TERM and then KILL to every pgid in it on every reap — including groups that had already been cleaned
+# up per case, and including groups reaped by an earlier call. A pgid is a PID NUMBER and pid numbers are
+# REUSED, so on this four-lane box the suite could deliver SIGKILL to an unrelated process GROUP: a
+# sibling lane's supervisor, its gate, its worker. The old comment reasoned only about a false test
+# FAILURE from a recycled number; the destructive direction is the one that matters.
+#
+# SO OWNERSHIP IS TRACKED, AND IT IS SURRENDERED AS SOON AS IT CAN BE:
+#   * `FIXTURE_OWNED` holds one record per group this run CURRENTLY owns. A group is REMOVED from it the
+#     moment we can prove we no longer own it, which happens BEFORE any later signal can reach it.
+#   * `fixture_group_state` is the proof, and it is THREE-VALUED for the same reason the code under test
+#     is: `kill -0` on a negative pid fails with ESRCH (the group is gone — release it) and with EPERM
+#     (the group EXISTS and we may not signal it, i.e. the number now belongs to somebody else — release
+#     it, and NEVER signal it). Only an affirmatively `live` group is signalled at all.
+#   * SIGNAL-TIME INCARNATION CHECK, where the host can answer it. `fixture_bg` records the group
+#     leader's procfs start time; before signalling, if the leader pid is alive and its start time
+#     DIFFERS from the recorded one, the pid number has been reused and the group is released
+#     UNSIGNALLED (`FIXTURE_FOREIGN`), never killed. This is a REFUTATION-ONLY use: it can prove a group
+#     is not ours, and it is not required to prove that it IS.
+#
+# WHY THE CHECK CANNOT BE A PRECONDITION FOR SIGNALLING. The leak this reaps is an ORPHANED CHILD whose
+# leader — the shell — has ALREADY EXITED, so "the leader is alive and matches" is FALSE for exactly the
+# case that matters most. Requiring it would refuse to reap the orphan. And on a host with no procfs
+# (macOS) there is no start time at all. So the registry is the primary authority and the incarnation
+# check only ever REMOVES a group from it. RESIDUAL, stated rather than implied: a group that dies
+# between `fixture_group_state` and the `kill` a moment later, whose number is then immediately reused,
+# is still signalled. That window is irreducible for any check-then-act on a pid number; what the
+# registry removes is the LARGE window — a group reaped minutes ago and re-signalled at every later reap.
 #
 # WHY NOT `pgrep -f`, HERE OR IN THE ASSERT: this box runs sibling lanes staging the same fixture names,
 # and `pgrep` also self-matches. A pid/pgid recorded at spawn time is the only identity that is ours.
-FIXTURE_PGIDS=()
+FIXTURE_OWNED=()      # records "<pgid>|<leader-start-time>" for the groups this run CURRENTLY owns
+FIXTURE_FOREIGN=()    # pgids released WITHOUT being signalled, because the number was proven reused
+FIXTURE_STAGED=0      # monotone count of groups ever staged — the non-vacuity floor, since FIXTURE_OWNED shrinks
 FIXTURE_LAST_PID=""
 
-# fixture_bg <cmd> [arg...] — start a background fixture in its OWN process group and register it for
-# the reap. Sets `FIXTURE_LAST_PID` (== the pgid); it CANNOT echo the pid, because `$(fixture_bg …)`
-# would run the append to `FIXTURE_PGIDS` in a subshell and lose the registration.
+# fixture_leader_ident <pid> — echo an incarnation token for a pid (procfs start time), or NOTHING when
+# this host cannot answer (no procfs, e.g. macOS; an unreadable or unparseable `stat`). EMPTY MEANS
+# UNMEASURED and is never compared as a value.
+fixture_leader_ident() {
+  local pid="$1" line="" rest=""
+  local -a f=()
+  [[ -r "/proc/$pid/stat" ]] || return 0
+  IFS= read -r line <"/proc/$pid/stat" 2>/dev/null || return 0
+  # `comm` (field 2) is parenthesised and may itself contain spaces and parentheses, so the fields are
+  # taken from AFTER THE LAST `) ` — the documented way to parse this file. `rest` field 1 is then
+  # `state` (stat field 3), so `starttime` (stat field 22) is `rest` field 20.
+  rest="${line##*) }"
+  [[ "$rest" != "$line" ]] || return 0
+  f=($rest)
+  [[ "${#f[@]}" -ge 20 ]] || return 0
+  printf '%s' "${f[19]}"
+}
+
+# fixture_group_state <pgid> — echo `live`, `dead` or `foreign`. `foreign` = the group exists and we are
+# NOT permitted to signal it, which on this box means the number has been recycled by another user's
+# process group; it must never be signalled and must not be counted as a leak of ours.
+fixture_group_state() {
+  local pgid="$1" err=""
+  if err="$(LC_ALL=C kill -0 "-$pgid" 2>&1)"; then
+    printf 'live\n'
+    return 0
+  fi
+  case "$err" in
+    *'not permitted'*) printf 'foreign\n' ;;
+    *) printf 'dead\n' ;;
+  esac
+}
+
+# fixture_bg <cmd> [arg...] — start a background fixture in its OWN process group and register it as
+# OWNED. Sets `FIXTURE_LAST_PID` (== the pgid); it CANNOT echo the pid, because `$(fixture_bg …)` would
+# run the append to `FIXTURE_OWNED` in a subshell and lose the registration.
 # Redirections belong at the CALL SITE (`fixture_bg tail -f "$f" >/dev/null 2>&1`): they are applied by
 # this function's caller and inherited by the job, so nothing is forced on fixtures that need a tty-less
 # stdin or a captured stream.
@@ -95,46 +160,105 @@ fixture_bg() {
   FIXTURE_LAST_PID=$!
   # Restore the previous monitor state rather than blindly clearing it.
   [[ "$had_m" == on ]] || set +m
-  FIXTURE_PGIDS+=("$FIXTURE_LAST_PID")
+  FIXTURE_OWNED+=("$FIXTURE_LAST_PID|$(fixture_leader_ident "$FIXTURE_LAST_PID")")
+  FIXTURE_STAGED=$((FIXTURE_STAGED + 1))
 }
 
-# fixture_kill <pid>... — per-case teardown: kill the whole GROUP of each fixture, then reap the direct
-# child so no zombie is left in this shell's job table. The pgid stays REGISTERED on purpose, so the
-# end-of-run assert re-checks the groups a case believed it had cleaned up.
+# fixture_release_unowned — drop from `FIXTURE_OWNED` every group we can PROVE we no longer own (dead,
+# or existing-but-unsignallable). Called before every signalling pass, so a released group can never be
+# signalled by a later reap.
+fixture_release_unowned() {
+  local rec pgid
+  local -a keep=()
+  for rec in ${FIXTURE_OWNED[@]+"${FIXTURE_OWNED[@]}"}; do
+    pgid="${rec%%|*}"
+    case "$(fixture_group_state "$pgid")" in
+      live) keep+=("$rec") ;;
+      foreign) FIXTURE_FOREIGN+=("$pgid") ;;
+      *) ;;  # dead: released, and never signalled again
+    esac
+  done
+  FIXTURE_OWNED=(${keep[@]+"${keep[@]}"})
+  return 0
+}
+
+# fixture_signal_owned <sig> [pgid...] — signal ONLY groups this run currently owns. With no pgid
+# argument every owned group is signalled; with arguments, only those (per-case teardown). A group whose
+# leader incarnation is refuted is released UNSIGNALLED.
+fixture_signal_owned() {
+  local sig="$1" rec pgid ident now want=""
+  shift
+  [[ "$#" -eq 0 ]] || want=" $* "
+  local -a keep=()
+  for rec in ${FIXTURE_OWNED[@]+"${FIXTURE_OWNED[@]}"}; do
+    pgid="${rec%%|*}"; ident="${rec#*|}"
+    if [[ -n "$want" && "$want" != *" $pgid "* ]]; then
+      keep+=("$rec")
+      continue
+    fi
+    case "$(fixture_group_state "$pgid")" in
+      dead) continue ;;                                  # released
+      foreign) FIXTURE_FOREIGN+=("$pgid"); continue ;;    # released, UNSIGNALLED
+      *) ;;
+    esac
+    now="$(fixture_leader_ident "$pgid")"
+    if [[ -n "$ident" && -n "$now" && "$ident" != "$now" ]]; then
+      # The leader pid is alive and is NOT the incarnation staged here: the number was recycled, so this
+      # group is not ours. Released without a signal — killing it would hit somebody else's tree.
+      FIXTURE_FOREIGN+=("$pgid")
+      continue
+    fi
+    kill "-$sig" "-$pgid" 2>/dev/null || true
+    keep+=("$rec")
+  done
+  FIXTURE_OWNED=(${keep[@]+"${keep[@]}"})
+  return 0
+}
+
+# fixture_kill <pid>... — per-case teardown: TERM the whole GROUP of each named fixture (only if still
+# owned), then reap the direct child so no zombie is left in this shell's job table. A group that is
+# already gone stays gone: it is released, not re-signalled by the end-of-run reap.
 fixture_kill() {
   local pid
   for pid in "$@"; do
     [[ -n "$pid" ]] || continue
-    # A group kill first; the plain-pid fallback covers a pid that was NOT group-launched.
-    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    fixture_signal_owned TERM "$pid"
     wait "$pid" 2>/dev/null || true
   done
+  fixture_release_unowned
   return 0
 }
 
-# fixture_live_groups — echo every registered pgid that still has ANY live member. `kill -0` on a
-# NEGATIVE pid succeeds if the signal could be delivered to at least one process in the group, so this
-# sees an orphaned child even after its parent shell is gone (a pgid survives reparenting).
-# Residual, stated: pid numbers are reused, so a recycled pgid could read as live. That direction is a
-# LOUD FALSE FAILURE, never a silent pass, which is the acceptable one for a leak check.
+# fixture_live_groups — echo every group still OWNED and live after a release pass. Anything here after
+# `fixture_reap` is a leak of ours: still alive, and still provably ours to reap.
+# Residual, stated: a recycled pgid whose leader we cannot refute (no procfs) could read as live. That
+# direction is a LOUD FALSE FAILURE, never a silent pass, which is the acceptable one for a leak check.
 fixture_live_groups() {
-  local pgid
-  for pgid in ${FIXTURE_PGIDS[@]+"${FIXTURE_PGIDS[@]}"}; do
-    kill -0 "-$pgid" 2>/dev/null && printf '%s\n' "$pgid"
+  local rec
+  fixture_release_unowned
+  for rec in ${FIXTURE_OWNED[@]+"${FIXTURE_OWNED[@]}"}; do
+    printf '%s\n' "${rec%%|*}"
   done
   return 0
 }
 
-# fixture_reap — TERM then KILL every registered group. Idempotent: already-dead groups just fail the
-# signal. Called from the EXIT trap AND from the end-of-run assert.
+# fixture_reap — TERM then KILL every group this run still OWNS, releasing each group the moment it can
+# be proven gone (or proven not ours). Idempotent, and after the first call it signals NOTHING, because
+# every group it reaped has been released. Called from the EXIT trap AND from the end-of-run assert.
+#
+# THE RELEASE PASS BEFORE EACH SIGNALLING PASS IS THE WHOLE POINT, AND IT IS NOT ABOUT TEST HYGIENE
+# (#3549, roborev job 198 F2): a signal aimed at a pgid this run has already reaped is a signal aimed at
+# whatever now holds that NUMBER, and on a four-lane box that is plausibly a sibling lane's supervisor,
+# gate or worker being SIGKILLed by somebody else's test suite. `scripts/tests/` has no licence to
+# signal a process it did not start. Do not "simplify" this back to iterating a historical list.
 fixture_reap() {
-  local pgid sig
+  local sig
   for sig in TERM KILL; do
-    for pgid in ${FIXTURE_PGIDS[@]+"${FIXTURE_PGIDS[@]}"}; do
-      kill "-$sig" "-$pgid" 2>/dev/null || true
-    done
+    fixture_release_unowned
+    fixture_signal_owned "$sig"
     sleep 0.2
   done
+  fixture_release_unowned
   return 0
 }
 
@@ -5931,16 +6055,161 @@ t test_legacy_lock_pid_file_unreadable_at_open_is_named
 t test_legacy_lock_ps_liveness_fallback_is_three_valued
 
 # ---------------------------------------------------------------------------
+# Test 47b (#3549, roborev job 198 F2): THE REAP NEVER SIGNALS A GROUP IT NO LONGER OWNS.
+#
+# THE DEFECT, and it is the most dangerous thing this issue produced. The previous reap kept one
+# HISTORICAL list of every pgid ever staged and sent TERM then KILL to all of them on every call —
+# including groups already cleaned up per case, and including groups an earlier reap had already killed.
+# A pgid is a PID NUMBER; pid numbers are REUSED; THIS BOX RUNS FOUR LANES. So the suite could deliver
+# SIGKILL to an unrelated process GROUP — a sibling lane's supervisor, gate or worker. The leak fix had
+# introduced something worse than the leak.
+#
+# HOW IT IS MEASURED WITHOUT SIGNALLING ANYTHING. The harness functions are extracted from THIS FILE at
+# run time into a scratch driver (the technique used throughout this suite: the subject is the shipped
+# code, never a re-implementation) and `kill` is overridden by a shell FUNCTION that LOGS its arguments
+# instead of delivering a signal. So the property under test — WHICH GROUPS GET SIGNALLED — is read
+# directly, and no process anywhere is touched. The pgids are synthetic numbers; the state each one
+# reports is supplied by the stub.
+#
+# NO PROCFS DEPENDENCY (#3549, roborev job 198 F3): `fixture_leader_ident` returns EMPTY for these
+# synthetic pgids on any host — on Linux because no such `/proc/<pid>/stat` exists, on a host without
+# procfs because there is no procfs — so this case exercises the REGISTRY path, which is the one the
+# finding is about, and it behaves identically on macOS.
+# ---------------------------------------------------------------------------
+test_fixture_reap_never_signals_a_disowned_group() {
+  local d drv log out g1=2999901 g2=2999902 g3=2999903
+  d="$(new_case_dir)"
+  drv="$d/reapdrv.sh"
+  log="$d/kill.log"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    printf '%s\n' 'KILL_LOG="$1"; DEAD_GROUPS="${2:-}"'
+    # The stub: every invocation is logged; a `-0` probe answers from DEAD_GROUPS with the errno text
+    # `fixture_group_state` reads, so a released group is released for the shipped reason.
+    printf '%s\n' 'kill() {'
+    printf '%s\n' '  printf "%s\n" "$*" >>"$KILL_LOG"'
+    printf '%s\n' '  if [[ "${1:-}" == "-0" ]]; then'
+    printf '%s\n' '    case " $DEAD_GROUPS " in *" ${2#-} "*) printf "%s\n" "bash: kill: (${2}) - No such process" >&2; return 1 ;; esac'
+    printf '%s\n' '  fi'
+    printf '%s\n' '  return 0'
+    printf '%s\n' '}'
+    printf '%s\n' 'sleep() { :; }'
+    sed -n '/^fixture_leader_ident()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_group_state()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_release_unowned()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_signal_owned()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_kill()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_reap()/,/^}/p' "$SELF_FILE"
+    printf '%s\n' 'FIXTURE_OWNED=("2999901|" "2999902|" "2999903|")'
+    printf '%s\n' 'FIXTURE_FOREIGN=()'
+    printf '%s\n' 'wait() { :; }'
+    # (1) g1 is ALREADY GONE when the first reap runs; g2 and g3 are live.
+    printf '%s\n' 'fixture_reap'
+    # (2) g3 dies, and is THEN cleaned up per case, the shipped way. `fixture_kill` must signal nothing:
+    #     the group is provably gone, so its number is no longer ours to signal.
+    printf '%s\n' 'DEAD_GROUPS="$DEAD_GROUPS 2999903"'
+    printf '%s\n' 'echo "--- PER-CASE KILL ---" >>"$KILL_LOG"'
+    printf '%s\n' 'fixture_kill 2999903'
+    # (3) ...and now EVERYTHING is gone. A later reap must signal NOTHING: this is the pgid-reuse
+    #     window, where each of those numbers may already belong to another lane.
+    printf '%s\n' 'DEAD_GROUPS="$DEAD_GROUPS 2999902"'
+    printf '%s\n' 'echo "--- LATER REAP ---" >>"$KILL_LOG"'
+    printf '%s\n' 'fixture_reap'
+  } >"$drv"
+  # THE HARNESS ITSELF MUST BE EXTRACTABLE, or the driver would test an empty file and pass vacuously.
+  local fns
+  fns="$(grep -c '^fixture_\(leader_ident\|group_state\|release_unowned\|signal_owned\|kill\|reap\)() {$' "$drv" || true)"
+  if [[ "$fns" == "6" ]]; then
+    pass "reap-ownership PREMISE: all 6 harness functions were extracted from this file into the driver (the subject is the shipped harness, not a re-implementation)"
+  else
+    fail "reap-ownership-premise: extracted $fns/6 harness functions into the driver; the case below would measure nothing"
+    return 0
+  fi
+
+  # ---- THE FIXED FORM. g1 was dead before the first reap, so it is RELEASED and never signalled.
+  : >"$log"
+  bash "$drv" "$log" "$g1" >/dev/null 2>&1 || true
+  out="$(tr '\n' ';' <"$log")"
+  if [[ "$out" != *"-TERM -$g1"* && "$out" != *"-KILL -$g1"* ]]; then
+    pass "reap-ownership: a group that was ALREADY GONE at reap time is released and NEVER signalled — its pgid may already belong to another lane (log=[$out])"
+  else
+    fail "reap-ownership-dead-signalled: the reap signalled pgid $g1, which it had proven dead; log=[$out]"
+  fi
+  # NON-VACUITY: it is not simply signalling nothing. A live owned group DOES get TERM and then KILL.
+  if [[ "$out" == *"-TERM -$g2"* && "$out" == *"-KILL -$g2"* ]]; then
+    pass "reap-ownership NON-VACUITY: a LIVE owned group is still TERMed and KILLed, so the silence above is a decision and not a broken reap"
+  else
+    fail "reap-ownership-live-unsignalled: the reap did not signal the live owned pgid $g2; log=[$out]"
+  fi
+  # THE FINDING'S EXACT CASE: after everything has been reaped or cleaned up, a LATER reap signals
+  # nothing at all. That is the window in which a recycled pgid belongs to somebody else.
+  local later="${out##*--- LATER REAP ---;}"
+  if [[ "$later" != *"-TERM -"* && "$later" != *"-KILL -"* ]]; then
+    pass "reap-ownership: a LATER reap, after every group has been reaped or per-case cleaned, delivers NO signal to ANY historical pgid (later=[$later])"
+  else
+    fail "reap-ownership-later-signalled: a later reap signalled a group it no longer owns; later=[$later]"
+  fi
+  # And the per-case teardown path releases too: `fixture_kill` on a group that has already died signals
+  # NOTHING — the probe runs, the group is released, and no signal is delivered to a number that may
+  # already have been recycled. (The window between the two markers is that call and nothing else.)
+  local percase="${out##*--- PER-CASE KILL ---;}"
+  percase="${percase%%--- LATER REAP ---*}"
+  if [[ "$percase" == *"-0 -$g3"* && "$percase" != *"-TERM -$g3"* && "$percase" != *"-KILL -$g3"* ]]; then
+    pass "reap-ownership: fixture_kill PROBES a group that has since died and then signals NOTHING — the per-case teardown path releases as well (window=[$percase])"
+  else
+    fail "reap-ownership-percase: the per-case teardown window was [$percase]; expected a liveness probe for $g3 and no signal to it"
+  fi
+
+  # ---- MUTANT CONTRAST: the HISTORICAL-LIST reap this replaced. Same driver, same stub, with
+  # `fixture_reap`/`fixture_signal_owned` replaced by the form that iterates every pgid ever staged. It
+  # must be shown to signal a group it no longer owns, or the asserts above prove nothing.
+  local mut="$d/reapdrv-mutant.sh" mout
+  {
+    sed -e '/^fixture_signal_owned() {$/,/^}$/d' -e '/^fixture_reap() {$/,/^}$/d' "$drv"
+  } >"$mut.body"
+  {
+    # The historical list is captured at definition time, exactly as the pre-fix harness kept it.
+    printf '%s\n' 'FIXTURE_HISTORICAL=("2999901" "2999902" "2999903")'
+    printf '%s\n' 'fixture_signal_owned() { local sig="$1" pgid; shift; for pgid in "${FIXTURE_HISTORICAL[@]}"; do kill "-$sig" "-$pgid" 2>/dev/null || true; done; }'
+    printf '%s\n' 'fixture_reap() { local sig pgid; for sig in TERM KILL; do for pgid in "${FIXTURE_HISTORICAL[@]}"; do kill "-$sig" "-$pgid" 2>/dev/null || true; done; done; return 0; }'
+  } >"$mut.defs"
+  # The overrides are appended AFTER the extracted definitions and BEFORE the driver's first call, which
+  # is the `fixture_reap` line — so the mutant differs from the driver above in those two functions only.
+  awk 'BEGIN{ins=0} /^fixture_reap$/ && ins==0 {while ((getline l < DEFS) > 0) print l; ins=1} {print}' \
+    DEFS="$mut.defs" "$mut.body" >"$mut"
+  : >"$log"
+  bash "$mut" "$log" "$g1" >/dev/null 2>&1 || true
+  mout="$(tr '\n' ';' <"$log")"
+  local mlater="${mout##*--- LATER REAP ---;}"
+  if [[ "$mout" == *"-KILL -$g1"* ]] && [[ "$mlater" == *"-KILL -$g2"* ]]; then
+    pass "reap-ownership MUTANT CONTRAST: the historical-list reap SIGKILLs pgid $g1 (proven dead before it ever ran) and re-SIGKILLs $g2 in a later reap — signals to groups it no longer owns, on a box where those numbers may have been recycled"
+  else
+    fail "reap-ownership-mutant: the historical-list form did not signal a disowned group (log=[$mout]); the contrast proves nothing"
+  fi
+}
+
+t test_fixture_reap_never_signals_a_disowned_group
+
+# ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
 #
 # This is the assert the leak had no equivalent of: the fixtures were reaped per case, by pid, and
 # nothing ever CHECKED, so five-minute orphans accumulated invisibly behind a green summary on a
 # four-lane box. Cleanup that is not asserted is a comment.
 #
-# WHAT IT MEASURES. Every `fixture_bg` registers its pgid; this runs the same reap the EXIT trap runs and
-# then asks each registered GROUP whether any member is still alive (`kill -0` on a negative pid). A
-# group is the right unit: it sees an ORPHANED CHILD whose parent shell is already gone, which is exactly
-# the leak — a `sleep 300` inside `bash <script>`, and the `bash -i` fixture that IGNORES SIGTERM.
+# WHAT IT MEASURES. Every `fixture_bg` registers its pgid as OWNED; this runs the same reap the EXIT trap
+# runs and then asks each STILL-OWNED group whether any member is still alive (`kill -0` on a negative
+# pid). A group is the right unit: it sees an ORPHANED CHILD whose parent shell is already gone, which is
+# exactly the leak — a `sleep 300` inside `bash <script>`.
+#
+# THE COUNT AND THE SUBJECT SET ARE NOW DIFFERENT THINGS (#3549, roborev job 198 F2). `FIXTURE_OWNED`
+# SHRINKS: a group is released the moment it is proven gone, which is what stops a later reap signalling
+# a recycled pgid. So the non-vacuity floor is taken from `FIXTURE_STAGED`, the monotone count of groups
+# ever staged, and the leak set is what remains OWNED after the reap. A group released as `foreign`
+# (existing but unsignallable — the number now belongs to another user) is NOT a leak of ours and is
+# reported separately if it ever happens, because calling it a leak would blame this suite for a pid
+# number the kernel reassigned.
 #
 # IT MUST BE THE LAST `t`: a case running after it would register groups nobody checks.
 #
@@ -5958,19 +6227,21 @@ t test_legacy_lock_ps_liveness_fallback_is_three_valued
 # same names, and `pgrep -f` also self-matches, so a recorded pid is the only identity that is ours.
 # ---------------------------------------------------------------------------
 test_no_fixture_processes_leak() {
-  local n leaked
-  n=${#FIXTURE_PGIDS[@]}
+  local n leaked foreign
+  n=$FIXTURE_STAGED
   if [[ "$n" -lt 10 ]]; then
-    fail "fixture-leak-check-vacuous: only $n fixture process group(s) were registered this run — the check has no subject, so a green here would measure nothing"
+    fail "fixture-leak-check-vacuous: only $n fixture process group(s) were staged this run — the check has no subject, so a green here would measure nothing"
     return 0
   fi
   fixture_reap
   leaked="$(fixture_live_groups | tr '\n' ' ')"
   leaked="${leaked% }"
+  foreign="$(printf '%s ' ${FIXTURE_FOREIGN[@]+"${FIXTURE_FOREIGN[@]}"})"
+  foreign="${foreign% }"
   if [[ -z "$leaked" ]]; then
-    pass "fixtures: every one of the $n background fixture process GROUPS staged by this run is gone — nothing orphaned, children included (the reap is by group, so it covers a child whose parent shell already exited)"
+    pass "fixtures: every one of the $n background fixture process GROUPS staged by this run is gone — nothing orphaned, children included (the reap is by group, so it covers a child whose parent shell already exited)${foreign:+; groups released UNSIGNALLED as recycled: [$foreign]}"
   else
-    fail "fixture-leak: registered process group(s) [$leaked] still have live members after the reap — a fixture child (a non-exec \`sleep\`, or a SIGTERM-ignoring \`bash -i\`) has been orphaned; see fixture_bg"
+    fail "fixture-leak: still-owned process group(s) [$leaked] have live members after the reap — a fixture child (a non-exec \`sleep\`) has been orphaned; see fixture_bg"
   fi
 }
 
