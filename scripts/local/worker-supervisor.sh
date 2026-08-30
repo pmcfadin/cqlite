@@ -1478,8 +1478,23 @@ supervisor_legacy_lock_state() {
     printf 'absent\n'
     return 0
   fi
+  # A SYMLINK IS AN UNRECOGNISED SHAPE, AND IT IS TESTED BEFORE EVERY `-d`/`-f`/`-r`/`-x` BELOW,
+  # BECAUSE THOSE FOLLOW THE LINK (#3549, roborev job 180 Medium). A symlink pointing at a real lock
+  # directory — someone else's, or any directory that happens to hold a well-formed `pid` — answers
+  # `-d`/`-f`/`-r` exactly like a genuine lock, so the permissive classification would be `stale`, and
+  # a downstream reclaim then MOVES AND DELETES an object that is not a legacy lock at all. That is the
+  # destructive direction, so it is refused rather than followed. It is an unrecognised SHAPE, not a
+  # malformed lock: no supervisor at any version has ever created either path as a symlink, so there is
+  # nothing here to be compatible with, and the cause token is deliberately distinct from
+  # `not-a-directory` / `pid-file-not-a-readable-file` so an operator can tell "wrong kind of object"
+  # from "a link we refuse to follow". A BROKEN symlink also lands here: the verified-absence test
+  # above is `! -e && ! -L`, so a dangling link is not absence.
+  [[ ! -L "$legacy" ]] || { printf 'unknown path-is-a-symlink\n'; return 0; }
   [[ -d "$legacy" ]] || { printf 'unknown not-a-directory\n'; return 0; }
   [[ -r "$legacy" && -x "$legacy" ]] || { printf 'unknown lock-directory-not-readable\n'; return 0; }
+  # Before `-e`, not after: `-e` follows the link too, so a DANGLING `pid` symlink would otherwise be
+  # reported as `pid-file-missing` — a different, wrong cause for the same unrecognised shape.
+  [[ ! -L "$legacy/pid" ]] || { printf 'unknown pid-path-is-a-symlink\n'; return 0; }
   [[ -e "$legacy/pid" ]] || { printf 'unknown pid-file-missing\n'; return 0; }
   [[ -f "$legacy/pid" && -r "$legacy/pid" ]] || { printf 'unknown pid-file-not-a-readable-file\n'; return 0; }
   # `read`, not `cat`: a builtin, and default-IFS trimming handles the trailing newline. A read that
