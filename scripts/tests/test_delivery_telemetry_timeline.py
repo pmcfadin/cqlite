@@ -74,9 +74,10 @@ class TimelineReplayTests(unittest.TestCase):
 
     MERGED = "2026-06-10T03:00:00Z"
 
-    def _state(self, pages, merged=None, url=ISSUE_URL):
+    def _state(self, pages, merged=_OMIT, url=ISSUE_URL):
         with mock.patch.object(dt.subprocess, "run", _fake_gh(pages)):
-            return dt._issue_state_at(url, 3393, merged or self.MERGED)
+            return dt._issue_state_at(
+                url, 3393, self.MERGED if merged is _OMIT else merged)
 
     # ---- what it asks GitHub -------------------------------------------------------
     def test_it_queries_the_timeline_of_the_issues_own_repository(self):
@@ -249,7 +250,9 @@ class GithubFieldsTimelineTests(unittest.TestCase):
                 with mock.patch.object(dt.subprocess, "run", fake):
                     with self.assertRaises(SystemExit) as cm:
                         dt._github_fields(3393, 3467)
-                self.assertIn("mergedAt", str(cm.exception))
+                # absent/blank is named as gh's `mergedAt`; a malformed instant is named by
+                # the shared strict-RFC-3339 check as `merged_at` — both are named refusals
+                self.assertRegex(str(cm.exception), r"merged.?[aA]t")
 
     def test_the_state_reason_mechanism_is_gone_not_layered(self):
         """#3550's `stateReason` proxy answered 'has this issue EVER been closed'; the replay
