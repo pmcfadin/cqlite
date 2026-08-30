@@ -398,14 +398,17 @@ component is exercised by neither. Measured: PR #3467's gate would have certifie
 components.
 
 At the mode dispatch — before the #1825 slot and before any component — every mode now compares
-its component **set** against `origin/main`'s, both derived at run time from `--list` (never a
-line count, never a blob hash: a 2,000-line refactor that leaves the set alone is not a coverage
-problem). The baseline is **fetched in the same invocation as the comparison**, because a
-remote-tracking ref is a *cached observable* and a stale one returns "no skew" against a
-superseded `main`. Every SUMMARY block carries a `component-set:` line:
+its component **set** against `origin/main`'s (never a line count, never a blob hash: a
+2,000-line refactor that leaves the set alone is not a coverage problem). The branch side is the
+running gate's own in-process `COMPONENTS` array; the baseline side is **read as DATA**, from the
+committed manifest `scripts/agent-gate.components` — see *The baseline is data, never code* below.
+The baseline is **fetched in the same invocation as the comparison**, because a remote-tracking
+ref is a *cached observable* and a stale one returns "no skew" against a superseded `main`. Every
+SUMMARY block carries a `component-set:` line:
 
-- `component-set: PASS (35/35 vs origin/main <sha40>)` — affirmative, and it **names the
-  baseline sha**: a verdict that does not name its baseline cannot be audited;
+- `component-set: PASS (36/36 vs origin/main <sha40> via the committed manifest)` — affirmative,
+  and it **names the baseline sha and how the baseline was read**: a verdict that does not name
+  its baseline cannot be audited;
 - `component-set: FAIL-CLOSED (#3544) — this tree is BEHIND origin/main <sha40>; N …
   MISSING … : <names>` — the branch is behind (`origin/main` is **not** an ancestor of `HEAD`).
   Remedy: `git fetch origin && git rebase origin/main`;
@@ -427,16 +430,63 @@ superseded `main`. Every SUMMARY block carries a `component-set:` line:
   removal, or restore the component; never rebase.
 - `component-set: FAIL-CLOSED (#3544) — baseline NOT measured (<kind>: <detail>)` — the fetch
   failed, `origin` is missing, **`origin` does not NAME the canonical upstream**, `git` is
-  absent, `HEAD`'s copy of the gate script is unreadable, the probe could not be BOUNDED, or the
-  baseline's own `--list` errored, printed nothing, or printed a non-component line. **Never a
+  absent, neither the baseline's manifest nor its gate script could be read, the manifest was
+  empty or ungrammatical, the gate script's `COMPONENTS=(…)` declaration could not be read as
+  text, `HEAD`'s own set is unmeasurable, or the probe could not be BOUNDED. **Never a
   SKIP and never a fallback to an empty baseline**: an empty baseline excuses every branch,
   which is the vacuous pass inverted. The bound is itself a named capability
   (`timeout`/`gtimeout`/a pure-bash watchdog/`none`) and an **unboundable host does not run
   the fetch at all** — a missing capability must not inherit the permissive branch, and an
   unbounded fetch could hang `--lite` on a network stall or an auth prompt.
 
+- `component-set: FAIL-CLOSED (#3544) — the LOCAL component manifest is not usable
+  (`manifest-missing` | `manifest-garbage` | `manifest-stale`)` — **this tree's own**
+  `scripts/agent-gate.components` is absent, ungrammatical, or out of step with its `COMPONENTS`
+  array (order included). Remedy: regenerate and commit it — never anything to do with `origin`.
+
 A component present on the branch but absent from `main` is **not** skew (this branch may be the
 one adding it) and is recorded as `[branch-only, NOT skew: …]` inside a PASS.
+
+**The baseline is data, never code (`REQ-3544-01`).** The first design derived the baseline set
+by extracting `origin/main:scripts/agent-gate.sh` and **running** it (`bash <fetched> --list`).
+**Six of that mechanism's seven High-severity review findings traced to that one decision**, and
+its three fixes each moved the hole one layer outward — a symbolic remote name, then the validated
+URL, then the URL in `argv`. That is the signature of a **shared channel between data and
+control**, where this project's standing ruling (issue #3312) is to *remove* the channel rather
+than choose a rarer delimiter. So the baseline now comes from `git show
+<sha>:scripts/agent-gate.components`, parsed under a **closed grammar**: one component name per
+line, blank lines and `#` comments skipped, and anything else — including a name with leading or
+trailing whitespace — a **named refusal** (a parser that trims is a parser that guesses).
+
+State what this **converts** the findings into rather than claiming they are gone: a redirected or
+hostile baseline now yields a **wrong component list, which the comparison itself detects**,
+instead of arbitrary code execution with the developer's credentials. Everything built for the old
+mechanism is **kept as defence in depth**: the canonical-identity and transport/host/port/path
+pinning, the isolated fetch (the validated URL written into a `0600` config by a shell builtin, so
+it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
+handling and the redact-and-flatten detail path.
+
+**The local manifest is asserted against the running array on every run**, fail-closed, before
+anything is fetched. That assert is what makes a manifest baseline trustworthy at all: without it
+the file is an unverified claim, and a branch that grew `COMPONENTS` without regenerating the
+manifest would — once merged — leave `main`'s manifest **short**, so every later branch would
+compare against a too-small baseline and silently excuse real skew. Regenerate with:
+
+```bash
+{ sed -n -e '/^[^#]/q' -e p scripts/agent-gate.components; scripts/agent-gate.sh --list; } \
+  > /tmp/agent-gate.components && mv /tmp/agent-gate.components scripts/agent-gate.components
+```
+
+**One transitional fallback, also data-only.** When the manifest is *absent* at the baseline rev,
+the gate script's single-line top-level `COMPONENTS=(…)` declaration is extracted **as text** —
+never executed — and the reader **refuses loudly** on any other shape (a multi-line or computed
+array, more than one declaration, a character outside the name grammar). It exists because
+`origin/main` carried no manifest until the change that introduced it merged, so a manifest-only
+read would have left that PR unable to certify itself. It is self-limiting (unreachable for any
+baseline at or after that merge) and format-brittle in a **shared** direction: a reflow on `main`
+refuses for every branch at once, which is fail-closed rather than a false green — the other
+reason the manifest is primary. A PASS line naming `via the baseline's COMPONENTS declaration read
+as TEXT` is that path.
 
 **The baseline's identity is validated before the fetch.** Trusting a remote merely *named*
 `origin` made `git remote set-url origin <anything>` a git-config-shaped opt-out — and it fires
@@ -450,9 +500,10 @@ an optional `.git`, any case).
 
 **Owner/repo alone is not enough, and "err toward accepting an ambiguous host" was wrong here.**
 It accepted `https://evil.example/pmcfadin/cqlite` and — needing no hostile host at all — **any
-local path** ending in those two segments. That compounds with the execution surface: the
-pre-flight *extracts and runs* the baseline's copy of the gate, so a loose identity admits
-arbitrary code, not merely a wrong baseline. Anything unverifiable from the string (an ssh config
+local path** ending in those two segments. While the pre-flight still *ran* the baseline's copy
+of the gate that admitted arbitrary code and not merely a wrong baseline; under `REQ-3544-01` what
+it buys is a baseline of unknown **provenance**, from which no PASS may be derived, so the check
+stays exactly as strict — as defence in depth. Anything unverifiable from the string (an ssh config
 alias, a mirror, a bare local path, `file://`, a look-alike host such as `github.com.evil.tld`) is
 a **named non-PASS** (`remote-not-canonical`), as is an `origin` with no URL
 (`remote-unreadable`) — each with its own remedy, never a silent pass and never a SKIP.
@@ -461,8 +512,9 @@ a **named non-PASS** (`remote-not-canonical`), as is an `origin` with no URL
 stated rule, because three successive rounds were "too permissive" in a *new* place (no host;
 host but no transport; `http://`/`git://` accepted). Only **authenticated** transports are
 accepted (`https://`, `ssh://`, `git+ssh://`, scp-form `git@host:path`): `http://` and `git://`
-authenticate nothing, and since the pre-flight *executes* the fetched repository's gate script,
-an on-path impersonator of the hostname would get **code execution**. A non-default port is a
+authenticate nothing, so an on-path impersonator of the hostname supplies the objects this run
+certifies against — and when the rule was written those objects were *executed*, which is why it
+was a High. A non-default port is a
 different endpoint and is rejected. **Userinfo is accepted** — GitHub Actions rewrites `origin`
 to `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red a legitimate CI
 checkout — and is therefore **redacted** from every rendering, because SUMMARY blocks are routinely
@@ -472,7 +524,7 @@ Two related properties of the same pre-flight. The baseline is fetched into a **
 `refs/worktree/…` ref**, never `FETCH_HEAD`: `--refmap=` removed the shared *tracking-ref* write
 and left `FETCH_HEAD` carrying the baseline, and `FETCH_HEAD` is itself a single shared mutable
 file that a concurrent fetch overwrites between the fetch and the read — the run would then
-compare against, and execute, a commit it never fetched. And `git merge-base --is-ancestor`'s
+compare against a commit it never fetched. And `git merge-base --is-ancestor`'s
 **rc 1 is three-valued too**: in a shallow clone it also means "the connecting history is
 absent", so it is read as "not an ancestor" only in a repository *proven* complete (unmeasurable
 shallowness ⇒ `INDETERMINATE`); otherwise a legitimate committed removal in a shallow checkout
