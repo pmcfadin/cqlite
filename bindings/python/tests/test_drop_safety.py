@@ -25,7 +25,10 @@ asserted by its *effect*, never by how long it took.
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import gc
+import os
 import signal
 import subprocess
 import sys
@@ -207,10 +210,13 @@ def test_drop_does_not_raise_at_teardown(tmp_path, schema_file):
     trampoline catches an escaping panic and reports it via
     ``sys.unraisablehook``. So a panic in ``Drop`` does NOT change the exit code:
     the child still exits 0. The detector for a panic is therefore the
-    ``"panicked at"`` stderr needle (Rust's default hook prints before
-    unwinding, independently of ``catch_unwind``), plus ``"exception ignored
-    in"``, which is what CPython prints for an unraisable. ``returncode`` is the
-    detector for a hard abort/segfault only.
+    ``"panicked at"`` stderr needle: Rust's default hook writes the message and
+    location to fd 2 before unwinding begins, so it survives interpreter
+    finalization and is independent of ``catch_unwind``. ``"panicexception"``
+    carries it too. ``"exception ignored in"`` is kept as a cheap extra but is
+    NOT reliable here — pyo3's trampoline passes a null context object, and
+    CPython prints that prefix only when it has a context or an ``err_msg``.
+    ``returncode`` detects a hard abort/segfault only.
     """
     data_dir = tmp_path / "teardown-data"
     data_dir.mkdir()
@@ -286,7 +292,15 @@ def test_writable_iterator_survives_drop(tmp_path, schema_file):
     ``StopIteration`` means the iterator is still valid and merely exhausted;
     ``RuntimeError: Database is closed`` would mean the drop invalidated it.
     """
-    db, _write_dir = _open_writable(tmp_path, schema_file, "iterdrop")
+    db, write_dir = _open_writable(tmp_path, schema_file, "iterdrop")
+
+    # Round 4's claim is a CONJUNCTION — the teardown still happens AND the flag
+    # is not flipped — so this test pins both halves. Without the row, it would
+    # pass with `impl Drop` deleted entirely.
+    db.execute(
+        "INSERT INTO drop_test.items (id, name, value) VALUES (5, 'conj', 12)"
+    )
+    assert _count_data_db(write_dir) == 0, "precondition: nothing flushed yet"
 
     iterator = db.execute_streaming("SELECT * FROM drop_test.items")
 
@@ -294,6 +308,13 @@ def test_writable_iterator_survives_drop(tmp_path, schema_file):
     del db
     gc.collect()
 
+    # Half 1: the teardown RAN (the memtable reached an SSTable).
+    assert _count_data_db(write_dir) >= 1, (
+        "the writable drop did not flush, so this test would pass with the Drop "
+        "impl deleted and proves nothing about the flag"
+    )
+
+    # Half 2: and it did NOT invalidate the iterator.
     with pytest.raises(StopIteration):
         next(iterator)
 
@@ -330,7 +351,12 @@ def test_readonly_iterator_survives_drop(tmp_path):
     producer = cqlite.open(
         str(data_dir), schema=str(schema), writable=True, write_dir=str(write_dir)
     )
-    for i in range(3):
+    # Enough rows that a buffer_size=1 stream CANNOT have them all in flight, so
+    # the detached producer task must still be running after the handle dies.
+    # With 3 rows and the default 1024-row buffer, `list(iterator)` would just
+    # drain a full buffer and prove nothing about producer survival.
+    row_count = 50
+    for i in range(row_count):
         producer.execute(
             f"INSERT INTO drop_test.items (id, name, value) VALUES ({i}, 'r{i}', {i})"
         )
@@ -345,7 +371,14 @@ def test_readonly_iterator_survives_drop(tmp_path):
 
     # Phase 2: read-only handle, pull one row, then drop the handle mid-stream.
     db = cqlite.open(str(sstable_dir), schema=str(schema))
-    iterator = db.execute_streaming("SELECT * FROM drop_test.items")
+    # buffer_size=1 keeps at most one row in flight, so the rows that arrive
+    # after the handle is collected can only have come from a producer task that
+    # is STILL RUNNING — which is the actual claim (it owns its own
+    # Arc<StorageEngine>, so handle teardown cannot stop it).
+    iterator = db.execute_streaming(
+        "SELECT * FROM drop_test.items",
+        config=cqlite.StreamingConfig(buffer_size=1),
+    )
 
     first = next(iterator)
     assert isinstance(first, cqlite.Row)
@@ -353,9 +386,109 @@ def test_readonly_iterator_survives_drop(tmp_path):
     del db
     gc.collect()
 
-    # The remaining rows must still arrive — not merely "no RuntimeError".
+    # The remaining rows must still ARRIVE — not merely "no RuntimeError".
     rest = list(iterator)
-    assert len(rest) == 2, (
-        "read-only drop broke a live iterator: expected the remaining 2 rows "
-        f"after the handle was collected, got {len(rest)}"
+    assert len(rest) == row_count - 1, (
+        "read-only drop broke a live iterator: expected the remaining "
+        f"{row_count - 1} rows after the handle was collected, got {len(rest)}"
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork() is Unix-only")
+def test_fork_child_drop_does_not_touch_parent_state(tmp_path, schema_file):
+    """A forked child's drop must NOT act on the parent's inherited descriptors.
+
+    The one DESTRUCTIVE hazard adding a ``Drop`` could introduce, so it gets a
+    real regression test rather than a comment.  ``fork()`` copies the memtable
+    and the ``Database`` object and SHARES the file descriptors, and
+    ``multiprocessing``'s default start method on Linux is ``fork`` — so a child
+    exiting or collecting the inherited handle is ordinary Python.  If the
+    child's drop ran the write-engine close it would, through the PARENT's fds:
+    write a duplicate SSTable generation, TRUNCATE THE PARENT'S WAL (the write
+    engine truncates after a successful flush), and release the parent's
+    exclusive ``write_dir`` lock.
+
+    The parent asserts all three stayed intact — no duplicate generation, WAL
+    unchanged, and its exclusive ``write_dir`` lock still held — then closes
+    normally to prove the guard suppressed only the child's teardown, not its own.
+
+    The lock assertion is the load-bearing one, because an early ``return`` alone
+    does NOT prevent that effect: ``WriteEngine``'s own ``Drop`` unlocks
+    unconditionally, and returning from ``Database::drop`` is precisely when its
+    fields get dropped. The guard therefore leaks the inherited engine.
+    """
+    db, write_dir = _open_writable(tmp_path, schema_file, "forked")
+    db.execute(
+        "INSERT INTO drop_test.items (id, name, value) VALUES (4, 'forked', 11)"
+    )
+
+    wal = write_dir / "wal" / "commitlog.wal"
+    if not wal.is_file():
+        pytest.fail(
+            f"fixture setup failed: no WAL at {wal}, so this test could not "
+            "detect a truncation and would prove nothing"
+        )
+    wal_size_before = wal.stat().st_size
+    assert wal_size_before > 0, "WAL is empty before the fork; nothing to protect"
+    assert _count_data_db(write_dir) == 0, "precondition: nothing flushed yet"
+
+    pid = os.fork()
+    if pid == 0:
+        # CHILD. Drop the inherited handle deterministically, then leave without
+        # running interpreter finalization or pytest teardown. _exit(0) skips
+        # atexit/flush handlers on purpose: the Rust Drop above is the only thing
+        # under test here.
+        try:
+            del db
+            gc.collect()
+            os._exit(0)
+        except BaseException:
+            os._exit(70)
+
+    _waited_pid, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status), f"forked child did not exit normally: {status!r}"
+    assert os.WEXITSTATUS(status) == 0, (
+        f"forked child exited {os.WEXITSTATUS(status)} (70 = it raised)"
+    )
+
+    assert _count_data_db(write_dir) == 0, (
+        "the forked child's drop flushed an SSTable into the PARENT's data dir: "
+        f"{sorted(str(x) for x in (write_dir / 'data').rglob('*-Data.db'))}"
+    )
+    assert wal.stat().st_size == wal_size_before, (
+        "the forked child's drop truncated the PARENT's WAL: "
+        f"{wal_size_before} -> {wal.stat().st_size} bytes"
+    )
+
+    # THIRD effect, and the one an early `return` alone does NOT prevent:
+    # `impl Drop for WriteEngine` releases the write_dir advisory lock
+    # unconditionally, and flock ownership is per open-file-description — which
+    # fork() SHARES — so an inherited engine's drop would unlock the lock the
+    # PARENT holds. The guard therefore leaks the inherited engine instead.
+    #
+    # The probe must use a FRESH open(): a duplicated/inherited fd shares the
+    # open-file-description and would not conflict with itself.
+    lock_path = write_dir / "wal" / ".lock"
+    if not lock_path.is_file():
+        pytest.fail(
+            f"fixture setup failed: no advisory lock file at {lock_path}, so the "
+            "lock half of this test could not be checked and would prove nothing"
+        )
+    probe_fd = os.open(str(lock_path), os.O_RDWR)
+    try:
+        with pytest.raises(OSError) as lock_attempt:
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert lock_attempt.value.errno in (errno.EACCES, errno.EAGAIN), (
+            "expected the parent's exclusive write_dir lock to block this probe, "
+            f"got errno={lock_attempt.value.errno}"
+        )
+    finally:
+        os.close(probe_fd)
+
+    # The parent's own cleanup must still work — the guard is about inherited
+    # state, not a blanket disable.
+    db.close()
+    assert _count_data_db(write_dir) >= 1, (
+        "parent close() after the fork failed to flush, so the fork guard is "
+        "suppressing more than the child's teardown"
     )
