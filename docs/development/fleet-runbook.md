@@ -610,7 +610,20 @@ What it guarantees:
   delete contents no supervisor created. Anything undeterminable (not a directory, a SYMLINK at
   either the lock path or its `pid`, no/garbled `pid` file, an extra entry beside `pid`, more than one
   line in `pid`, unreadable) refuses the same way — **and carries no deletion instruction at all**, since
-  the shape was never established. **This guard DETECTS AND
+  the shape was never established. **And none of those verdicts depends on the shell that
+  launched the supervisor (#3549).** The classifier runs in the caller's shell, and several of its steps
+  were decided by state the caller owns — so it now pins that state itself: the whole glob/match option
+  family plus `GLOBIGNORE` and `set -f` are neutralised around the shape check (an inherited
+  `GLOBIGNORE` could hide the extra entry, making a FOREIGN directory look like the canonical `{pid}`
+  shape and earning it a deletion remedy; an inherited `noglob` made a genuine stale lock read as an
+  unrecognised shape), the caller's options are restored exactly as found, diagnostics are emitted with
+  `printf` rather than `echo` (under bash's `xpg_echo` an `echo` re-expands the escapes the one-line
+  renderer just produced, splitting the diagnostics back across physical lines), and the pid
+  well-formedness test uses an explicit character list rather than a `[0-9]` range, which is
+  collation-dependent: under `LC_ALL=en_US.utf8` a range accepts ARABIC-INDIC DIGIT THREE as a digit,
+  so a `pid` file no supervisor wrote reached the `dead` verdict and a deletion remedy. Practical
+  consequence for an operator: a refusal you disagree with is not explained by your shell — read the
+  named cause. **This guard DETECTS AND
   REFUSES: it never renames, deletes, adopts or re-creates the legacy lock, so it cannot corrupt any
   holder's lock, live or dead.** The reclaim it used to perform was removed because a reclaim must be
   able to RESTORE on its abort paths, and restoring a directory-with-contents is not atomic here —
