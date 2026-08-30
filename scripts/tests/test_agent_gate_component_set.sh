@@ -470,6 +470,64 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7b. A REAL --lite run (not the hook): the LITE block must CARRY the advisory line AND
+#     the run must reach the components — the fail-closed path exits BEFORE any component
+#     and emits no per-component row, so the presence of a `fmt:` row is what proves the
+#     pre-flight let the run through. (The fixture has no Cargo.toml, so the cargo
+#     components legitimately FAIL and RESULT is FAIL; that is why "did not fail on the
+#     component set" is asserted from the ABSENCE of the fail-closed marker plus the
+#     PRESENCE of component rows, never from RESULT.)
+# ---------------------------------------------------------------------------
+lsum="$tmp/lite-summary.txt"
+( cd "$behind" && AGENT_GATE_SUMMARY_FILE="$lsum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+    bash scripts/agent-gate.sh --lite >"$tmp/lite.log" 2>&1 ) >/dev/null 2>&1
+if grep -q '^==== AGENT-GATE LITE SUMMARY ====' "$lsum" 2>/dev/null \
+   && grep -q "^component-set: ADVISORY-BEHIND (#3544).*$SENTINEL" "$lsum" 2>/dev/null \
+   && grep -q -- '--lite is lenient' "$lsum" 2>/dev/null \
+   && ! grep -q 'component-set: FAIL-CLOSED' "$lsum" 2>/dev/null \
+   && ! grep -q 'preflight: FAIL (component-set' "$lsum" 2>/dev/null \
+   && grep -qE '^fmt: +(PASS|FAIL)' "$lsum" 2>/dev/null; then
+  ok "3544-lite-emit: a real --lite run stamps the advisory line and still reaches its components"
+else
+  bad "3544-lite-emit: expected a LITE block with the ADVISORY-BEHIND line AND component rows"
+  sed -n '1,25p' "$lsum" 2>/dev/null
+fi
+
+# ---------------------------------------------------------------------------
+# 7c. EVERY summary emitter reachable AFTER the pre-flight must stamp the line —
+#     asserted STRUCTURALLY, and deliberately so: reaching the --delta TERMINAL block or
+#     the full gate's terminal block requires a real re-cert (cargo fmt + scoped tests +
+#     a corpus + an #1825 slot), which no hermetic fixture can supply, so a behavioural
+#     case for those two would either not exist or would queue behind a real gate (it
+#     did, for 13 minutes, before this file was restructured). The check is per-ANCHOR
+#     rather than a stamp COUNT: a count reds when someone ADDS a correctly-stamped
+#     emitter, and a guard that reds on correct input is the guard agents learn to waive.
+# ---------------------------------------------------------------------------
+stamped_within() { # stamped_within <anchor-substring> <lines-after>
+  grep -F -A "$2" -- "$1" "$GATE" 2>/dev/null | grep -q 'COMPONENT_SET_LINE\|_component_set_meta'
+}
+emitters_ok=1
+while IFS='|' read -r span emitter_anchor; do
+  [ -n "$emitter_anchor" ] || continue
+  stamped_within "$emitter_anchor" "$span" \
+    || { emitters_ok=0; echo "   (emitter does not stamp component-set: $emitter_anchor)"; }
+done <<'EMITTERS'
+8|lite-scope: file-size fmt clippy roborev-lints scoped-tests (full gate NOT run
+8|delta-scope: file-size fmt scoped-tests (test/docs-only re-cert
+6|delta-scope: file-size fmt scoped-tests (python tier REQUIRED
+6|delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN
+8|SUMMARY_META+=("$SCHEMAS_LINE")
+6|missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP
+6|missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic
+6|preflight: FAIL (no Data.db files under
+EMITTERS
+if [ "$emitters_ok" -eq 1 ]; then
+  ok "3544-every-emitter: every post-pre-flight summary emitter stamps the component-set line"
+else
+  bad "3544-every-emitter: a summary emitter would publish a block with no component-set line"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. NO OPT-OUT. The remedy (rebase) is universally available, so an escape hatch could
 #    only buy a vacuous green. Structural, because the absence of a variable cannot be
 #    observed behaviourally: assert no env read inside the pre-flight block gates it.
