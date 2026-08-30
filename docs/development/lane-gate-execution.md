@@ -642,6 +642,61 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### The fifth audit question: DOES THIS FIX ASSUME SEQUENTIAL EXECUTION?
+
+Job 256 returned a High that none of the four existing audit questions could have found. The job-251
+artifact-set check was **check-then-lock**: two concurrent launches with `--summary x` and
+`--summary x.heartbeat` could both observe no foreign reservation, both acquire their DISTINCT locks, and
+then overwrite each other's files. The sequential case was closed; the concurrent one was not.
+
+| audit | asks | would it have caught this? |
+|---|---|---|
+| sibling | where else does this rule apply? | no — the rule was applied everywhere it belonged |
+| property | what property do these N instances violate? | no — the property was right |
+| time | what changes while this code SLEEPS? | no — the race is not during a sleep |
+| precondition | which guarantee did an earlier fix weaken? | no — none was weakened |
+| **concurrency** | **what if two of these run at once?** | **yes** |
+
+This is not a theoretical addition. CLAUDE.md's standing model is **multiple lanes per machine**, and
+#3393's entire subject was per-machine refs colliding across lanes. A launcher that is only correct
+one-at-a-time is wrong by design here.
+
+**And the answer must be tested CONCURRENTLY.** The sequential case (`4b.144`) passed throughout; only
+`4b.150`, which launches both at once and requires exactly one to win, can see the race. Its failure
+message names both directions on purpose — *both accepted* means the serialisation is broken, *neither*
+means the lock deadlocks — because those need opposite fixes and "expected 1, got 0" would send the
+reader hunting the wrong one.
+
+The fix keys the lock on what the colliding launches SHARE. Every per-summary name differs by
+construction (`x.launch-lock` vs `x.heartbeat.launch-lock`, likewise their mutexes), so the key is the
+**directory** — and a launch's artifacts all live in it. One lock means no acquisition order and no
+deadlock; it is held only across check-and-acquire, and released AFTER the reservation exists (`4b.149`),
+since releasing early reopens the race and holding it for the gate's lifetime would block every later
+launch in that directory for 30-50 minutes.
+
+### A fix can be INERT, and a passing test can be measuring a different path
+
+Job 256's second finding is the first case here where one of my fixes **did nothing at all**. Job 251 made
+the fallback blocking so an unproven-clock gate could be accepted — and left `if bash ...; then`, which
+succeeds only on exit 0, while that case returns **2 (RUNNING)**. The verdict was received and discarded.
+
+My verification had reported success, and it was invalid: `4b.142` used `--only fmt`, which finishes in
+about a second, so the **terminal-summary** path answered `COMPLETE=0` and the fallback never ran. Two
+component guesses were wrong — `--only scoped-tests` is also ~5s on a warm cache.
+
+**What made the verification sound was not a better component but a DISCRIMINATOR.** The fast loop runs
+20s before the fallback is reachable, so an acceptance in >20s can only have come from the fallback:
+`--only roborev-lints` (~41s) gives exit 0 at 45s. The rule generalises — **when several paths can
+produce the same observable, the test must measure something that DIFFERS between them.** `4b.142` now
+asserts the premise (`host` absent from the beat), the outcome (exit 0), and the discriminator (>20s).
+
+A postscript on that premise check, which failed against correct code before it worked: `grep -c` **exits
+1 when the count is zero**, so `$(grep -c ... || echo 0)` yields `"0"` from grep AND `"0"` from the
+fallback — a two-line value that compares unequal to `0`. The guard misread its own measurement, in the
+failing direction. Fourth instance tonight of treating an exit code as a proxy for an answer when it
+encodes something else (after `head` swallowing a status, `pgrep` matching its own ancestor, and
+`ls-remote` proving nothing about a push).
+
 ### Scope narrower than the thing it protects — and a bound that made a verdict unreachable
 
 Job 251's two findings share a shape distinct from the earlier ones: each control was correct *locally*

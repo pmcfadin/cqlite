@@ -1324,6 +1324,80 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# The fallback must accept 0 OR 2. As first written it was `if bash ...; then`, which succeeds only on
+# exit 0 — so a healthy unproven-clock gate returning 2 (RUNNING) was DISCARDED and the unit stopped
+# anyway. The fix job 251 added did not work for the case it was added for (job 256).
+if sed -n '/THIS ONE CALL IS ALLOWED TO BLOCK/,/esac/p' "$LAUNCHER" | grep -q '0|2) _hb_seen=1'; then
+  ok "4b.147 the blocking fallback accepts COMPLETE or RUNNING, not just COMPLETE"
+else
+  bad "4b.147 the blocking fallback accepts COMPLETE or RUNNING" "a RUNNING gate would still be stopped"
+fi
+
+# --- roborev job 256: the artifact-set check must be ATOMIC with the reservation -------------------
+# Job 251 added the check but left it CHECK-THEN-LOCK: two concurrent launches with `--summary x` and
+# `--summary x.heartbeat` could both observe no foreign reservation, both acquire their DISTINCT locks,
+# and then overwrite each other's files. The sequential case was closed and the concurrent one was not.
+#
+# The lock must key on something the colliding launches SHARE. Every per-summary name differs by
+# construction, so the key is the DIRECTORY — and a launch's artifacts all live in it. One lock, so no
+# acquisition order and no deadlock; held only across check-and-acquire.
+if grep -q '_dirlock=' "$LAUNCHER" && grep -q 'flock -w 30 8' "$LAUNCHER"; then
+  ok "4b.148 the artifact-set check and the reservation are serialised by a per-directory lock"
+else
+  bad "4b.148 the check and the reservation are serialised" "check-then-lock leaves the concurrent case open"
+fi
+# The lock must be RELEASED after the reservation exists, not before — releasing early reopens the race,
+# holding it for the gate's lifetime would block every later launch in that directory.
+if sed -n '/flock -u 9/,/exec 8>&-/p' "$LAUNCHER" | grep -q 'flock -u 8'; then
+  ok "4b.149 the directory lock is released AFTER the reservation is acquired"
+else
+  bad "4b.149 the directory lock is released after the reservation" "released too early, or never"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  # TRULY CONCURRENT, as the finding asked. A sequential proxy cannot see a check-then-lock race.
+  _cd="$TMP/conc"
+  mkdir -p "$_cd"
+  ( bash "$LAUNCHER" --summary "$_cd/x" --log "$_cd/a.log" -- --only fmt > "$_cd/a.out" 2>&1; echo $? > "$_cd/a.rc" ) &
+  _c1=$!
+  ( bash "$LAUNCHER" --summary "$_cd/x.heartbeat" --log "$_cd/b.log" -- --only fmt > "$_cd/b.out" 2>&1; echo $? > "$_cd/b.rc" ) &
+  _c2=$!
+  wait "$_c1" 2>/dev/null; wait "$_c2" 2>/dev/null
+  for _u in $(sed -n 's/^unit:  *//p' "$_cd/a.out" "$_cd/b.out" 2>/dev/null); do echo "$_u" >> "$UNITS_FILE"; done
+  _ca=$(cat "$_cd/a.rc" 2>/dev/null); _cb=$(cat "$_cd/b.rc" 2>/dev/null)
+  _cwon=0
+  [ "$_ca" = 0 ] && _cwon=$((_cwon+1))
+  [ "$_cb" = 0 ] && _cwon=$((_cwon+1))
+  if [ "$_cwon" = 1 ]; then
+    ok "4b.150 of two CONCURRENT aliasing launches, exactly one wins (A=$_ca B=$_cb)"
+  else
+    bad "4b.150 of two concurrent aliasing launches, exactly one wins" \
+        "$_cwon accepted (A=$_ca B=$_cb) — both means the race is open, neither means the lock deadlocks"
+  fi
+  for _u in $(sed -n 's/^unit:  *//p' "$_cd/a.out" "$_cd/b.out" 2>/dev/null); do systemctl --user stop "$_u" >/dev/null 2>&1; done
+else
+  skip=$((skip+1)); echo "SKIP 4b.150 (no user systemd manager on this host)"
+fi
+
+# --- CROSS-FILE AGREEMENT: the launcher's advertised confirmation cap vs the READER's real cap -----
+# The launcher's refusal now tells the operator the wait can add "up to 65s where the clock domain is
+# unproven". That 65 is enforced in a DIFFERENT FILE — `gate-liveness.sh`'s
+# `[ "$_confirm_wait" -le 65 ] || _confirm_wait=65`. Today they agree, but only by coincidence: nothing
+# tied them together, so changing the reader's cap would silently turn the launcher's message into a
+# lie. Two cross-file contracts have already broken in this change that way (the probe names vs the
+# gate's carve-out shape, and the pub-surface banner vs its invocation), so this one is asserted rather
+# than left to luck.
+_reader_cap=$(grep -oE '_confirm_wait" -le [0-9]+' "$REPO_ROOT/scripts/gate-liveness.sh" | grep -oE '[0-9]+$' | head -1)
+_adv_cap=$(grep -oE 'up to [0-9]+s where the clock domain is unproven' "$LAUNCHER" | grep -oE '[0-9]+' | head -1)
+if [ -z "$_reader_cap" ] || [ -z "$_adv_cap" ]; then
+  bad "4b.146 the advertised confirmation cap matches the reader's real cap" \
+      "could not extract one of them (reader='${_reader_cap:-?}' advertised='${_adv_cap:-?}') — this proves nothing"
+elif [ "$_reader_cap" = "$_adv_cap" ]; then
+  ok "4b.146 the advertised confirmation cap (${_adv_cap}s) matches the reader's enforced cap"
+else
+  bad "4b.146 the advertised confirmation cap matches the reader's real cap" \
+      "launcher advertises ${_adv_cap}s, reader enforces ${_reader_cap}s"
+fi
+
 # --- roborev job 251: an UNPROVEN clock domain must not get a healthy gate killed ------------------
 # Two earlier fixes interacted. Job 221 made an unverifiable hostname ABSENT, so the clock domain reads
 # unproven. Job 231 put `--no-wait` on every launcher call, so the reader cannot take a second sample.
@@ -1336,7 +1410,10 @@ fi
 # reader's progression grammar, which jobs 172 and 198 exist to prevent.
 _lcode2=$(grep -vE '^[[:space:]]*#' "$LAUNCHER")
 _loop_nw=$(printf '%s' "$_lcode2" | grep -c 'bash "\$REPO_ROOT/scripts/gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" --no-wait' || true)
-_fallback=$(printf '%s' "$_lcode2" | grep -c 'if bash "\$REPO_ROOT/scripts/gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" >' || true)
+# Re-pointed by job 256: the fallback is no longer `if bash ...; then` — it is a bare call followed by
+# `case "$?" in 0|2)`, because accepting only exit 0 discarded the RUNNING verdict this fallback exists to
+# receive. Matching the OLD shape made this assertion report fallback-blocking=0 against a correct fix.
+_fallback=$(printf '%s' "$_lcode2" | grep -c 'gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" >/dev/null 2>&1$' || true)
 if [ "$_loop_nw" -ge 1 ] && [ "$_fallback" = 1 ]; then
   ok "4b.141 the loop call is non-blocking and exactly ONE fallback may block"
 else
@@ -1347,10 +1424,38 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   # the configuration that killed every launch.
   _ud2=$(mktemp -d "$TMP/unamefail.XXXXXX")
   printf '#!/usr/bin/env bash\nexit 1\n' > "$_ud2/uname"; chmod +x "$_ud2/uname"
-  _uo=$(PATH="$_ud2:$PATH" bash "$LAUNCHER" --summary "$TMP/unproven.txt" --log "$TMP/unproven.log" -- --only fmt 2>&1); _ur=$?
+  # THE TEST NEEDS A DISCRIMINATOR, NOT A SLOWER COMPONENT. `exit 0` cannot distinguish "the blocking
+  # fallback accepted RUNNING" from "the gate finished before we looked", and this case passed for the
+  # second reason while the fallback still discarded RUNNING=2 (job 256). Two component guesses were both
+  # wrong: `--only fmt` finishes in ~1s, and `--only scoped-tests` in ~5s on a warm cache.
+  #
+  # ELAPSED TIME is the discriminator: the fast loop runs 20s before the fallback is even reached, so an
+  # acceptance in >20s can only have come from the fallback. `--only roborev-lints` (~41s) outlives the
+  # loop reliably. Measured: exit 0 at 45s with `host:` absent from the beat.
+  _ut0=$(date +%s)
+  _uo=$(PATH="$_ud2:$PATH" bash "$LAUNCHER" --summary "$TMP/unproven.txt" --log "$TMP/unproven.log" -- --only roborev-lints 2>&1); _ur=$?
+  _uel=$(( $(date +%s) - _ut0 ))
+  # The premise, asserted rather than assumed: the beater must have OMITTED host, or the clock domain was
+  # never unproven and this case tests nothing about job 251.
+  # `grep -c` EXITS 1 WHEN THE COUNT IS ZERO, so `$(grep -c ... || echo 0)` yields "0" from grep AND "0"
+  # from the fallback — a two-line value that compares unequal to 0 and fired this very premise check
+  # against a beat that correctly omitted host. The guard misread its own measurement, in the failing
+  # direction. No `||`: capture the count, and default only when grep printed NOTHING (a missing file,
+  # which exits 2).
+  _uhost=$(grep -c '^host:' "$TMP/unproven.txt.heartbeat" 2>/dev/null)
+  _uhost=${_uhost:-0}
   _uu=$(printf '%s' "$_uo" | sed -n 's/^unit:  *//p'); [ -n "$_uu" ] && echo "$_uu" >> "$UNITS_FILE"
-  [ "$_ur" = 0 ] && ok "4b.142 a healthy gate launches even when the clock domain is UNPROVEN" \
-                 || bad "4b.142 a healthy gate launches with an unproven clock domain" "exit $_ur: $_uo"
+  if [ "$_uhost" != 0 ]; then
+    bad "4b.142 a healthy gate launches with an UNPROVEN clock domain" \
+        "the beat carries host, so the clock domain was PROVEN — the premise failed and this proves nothing"
+  elif [ "$_ur" != 0 ]; then
+    bad "4b.142 a healthy gate launches with an UNPROVEN clock domain" "exit $_ur after ${_uel}s: $_uo"
+  elif [ "$_uel" -le 20 ]; then
+    bad "4b.142 a healthy gate launches with an UNPROVEN clock domain" \
+        "accepted in ${_uel}s, so COMPLETION answered, not the blocking fallback — the job-256 path is untested"
+  else
+    ok "4b.142 an unproven-clock gate is accepted by the BLOCKING FALLBACK (${_uel}s > 20s loop)"
+  fi
   [ -n "$_uu" ] && systemctl --user stop "$_uu" >/dev/null 2>&1
 else
   skip=$((skip+1)); echo "SKIP 4b.142 (no user systemd manager on this host)"

@@ -714,6 +714,32 @@ _foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another
 }
 # Our artifact set: the beat destination, the log, and — if our own summary looks like another launch's
 # beat destination — the path it would have been derived from.
+# CHECK-THEN-LOCK IS A RACE, so the check and the acquire happen under ONE shared lock (roborev job 256).
+# Two concurrent launches with `--summary x` and `--summary x.heartbeat` could BOTH observe no foreign
+# reservation, BOTH acquire their distinct locks, and then overwrite each other's files — the detection
+# added by job 251 closed the sequential case and left the concurrent one open.
+#
+# The lock has to be keyed on something the colliding launches SHARE, and every per-summary name differs
+# by construction (x.launch-lock vs x.heartbeat.launch-lock, and likewise their mutexes). What they share
+# is the DIRECTORY, and a launch's artifacts all live in it. One lock means no acquisition order and so
+# no deadlock; it is held only across the check and the reservation, not across the gate's lifetime.
+#
+# `flock` rather than a lock file we would have to reclaim: the kernel releases it when the fd closes, so
+# a launcher dying mid-check leaves nothing stale — the same reason the reclamation mutex uses it.
+_dirlock="${_sumdir}/.cqlite-gate-dirlock"
+if ! ( : >> "$_dirlock" ) 2>/dev/null; then
+  echo "gate-detached: cannot create the directory lock '$_dirlock', so the artifact-set check and the" >&2
+  echo "               reservation cannot be made atomic together. Refusing rather than racing another" >&2
+  echo "               launch onto overlapping paths (#3473)." >&2
+  exit 1
+fi
+exec 8>>"$_dirlock"
+if ! flock -w 30 8; then
+  echo "gate-detached: another launch holds the directory lock for '$_sumdir'." >&2
+  echo "               Refusing rather than racing it (#3473). Retry, or use a distinct directory." >&2
+  exit 1
+fi
+
 _collide=""
 for _cand in "$SUMMARY.heartbeat" "$LOGFILE"; do
   case "$(_foreign_reservation "$_cand")" in
@@ -844,6 +870,10 @@ if ! ln -s "$_res_target" "$_reserve" 2>/dev/null; then
   flock -u 9 2>/dev/null || true
   exec 9>&-
 fi
+# The reservation now exists, so a concurrent launch checking the artifact set will SEE it. Releasing the
+# directory lock here — and not before — is what makes the check-and-acquire atomic.
+flock -u 8 2>/dev/null || true
+exec 8>&-
 
 # NOW truncate the log: every refusal path is behind us, so this cannot destroy a previous log for
 # a launch that never happens.
@@ -1025,9 +1055,19 @@ if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ]; then
   # second implementation of the reader's progression grammar, which jobs 172 and 198 exist to prevent.
   # Instead the FAST loop stays bounded and non-blocking, and this single fallback, which runs at most
   # once, is permitted its confirmation wait: `interval + 5`, capped at 65s by the reader itself.
-  if bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1; then
-    _hb_seen=1   # exit 0 == COMPLETE, and only for THIS run
-  fi
+  # ACCEPT 0 OR 2, matching the fast loop (roborev job 256). As first written this was
+  # `if bash ...; then`, which succeeds only on exit 0 — so the very case job 251 added it for, a healthy
+  # gate with an unproven clock domain, returns 2 (RUNNING) and was DISCARDED, and the launcher stopped
+  # the unit anyway. The fix did not work for the case it was written for.
+  #
+  # Worse, my verification of it was invalid: 4b.142 used `--only fmt`, which finishes in about a second,
+  # so the TERMINAL SUMMARY answered COMPLETE=0 and this branch never ran. A test can exercise a
+  # different path than its name claims and still pass — which is why the case now uses a component slow
+  # enough that liveness, not completion, is what answers.
+  bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1
+  case "$?" in
+    0|2) _hb_seen=1 ;;   # COMPLETE or RUNNING — the reader can answer about THIS run
+  esac
 fi
 if [ "$_hb_seen" -ne 1 ]; then
   systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
