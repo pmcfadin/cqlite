@@ -6247,6 +6247,57 @@ test_fixture_reap_never_signals_a_disowned_group() {
     fail "reap-ownership-percase: the per-case teardown window was [$percase]; expected a liveness probe for $g3 and no signal to it"
   fi
 
+  # ---- THE SIGNAL-TIME INCARNATION REFUTATION, both directions. This is the defence-in-depth half:
+  # a recorded leader that is ALIVE with a DIFFERENT procfs start time proves the pid NUMBER was reused,
+  # so the group is released UNSIGNALLED rather than killed. It is refutation-only — it can prove a group
+  # is not ours and is never required to prove that it is — because the orphan this reaps has a leader
+  # that already exited.
+  #
+  # PROCFS IS THE ORACLE, SO A HOST WITHOUT PROCFS IS AN EXPLICIT SKIP, NOT A SILENT PASS (#3549, roborev
+  # job 198 F3). macOS has no `/proc/<pid>/stat`, `fixture_leader_ident` correctly returns nothing there,
+  # and the registry asserts above are what carry the property on such a host.
+  if [[ ! -r "/proc/$$/stat" ]]; then
+    skip "reap-ownership: the leader-incarnation refutation needs /proc/<pid>/stat and this host has no procfs — the registry-only asserts above are what hold the property here"
+  else
+    local idrv="$d/identdrv.sh" iout ipid ilog
+    ilog="$d/ident-kill.log"
+    {
+      printf '%s\n' '#!/usr/bin/env bash'
+      printf '%s\n' 'set -uo pipefail'
+      printf '%s\n' 'KILL_LOG="$1"; MODE="$2"'
+      # Every group reads LIVE here, so the ONLY thing that can stop a signal is the incarnation check.
+      printf '%s\n' 'kill() { printf "%s\n" "$*" >>"$KILL_LOG"; return 0; }'
+      printf '%s\n' 'sleep() { :; }'
+      sed -n '/^fixture_leader_ident()/,/^}/p' "$SELF_FILE"
+      sed -n '/^fixture_group_state()/,/^}/p' "$SELF_FILE"
+      sed -n '/^fixture_signal_owned()/,/^}/p' "$SELF_FILE"
+      printf '%s\n' 'FIXTURE_FOREIGN=()'
+      printf '%s\n' 'me=$$'
+      printf '%s\n' 'if [[ "$MODE" == match ]]; then FIXTURE_OWNED=("$me|$(fixture_leader_ident "$me")"); else FIXTURE_OWNED=("$me|1"); fi'
+      printf '%s\n' 'fixture_signal_owned TERM'
+      printf '%s\n' 'printf "PID=%s FOREIGN=[%s] OWNED=[%s]\n" "$me" "${FIXTURE_FOREIGN[*]:-}" "${FIXTURE_OWNED[*]:-}"'
+    } >"$idrv"
+    # (a) MISMATCHED recorded incarnation: the number was reused, so no signal is delivered.
+    : >"$ilog"
+    iout="$(bash "$idrv" "$ilog" mismatch 2>&1)"
+    ipid="${iout#PID=}"; ipid="${ipid%% *}"
+    if [[ "$iout" == *"FOREIGN=[$ipid]"* ]] && ! grep -q -- "-TERM -$ipid" "$ilog"; then
+      pass "reap-ownership (incarnation): a live leader whose recorded start time does NOT match is released UNSIGNALLED — the pgid was recycled, so killing it would hit another tree ($iout)"
+    else
+      fail "reap-ownership-incarnation-mismatch: out=[$iout] log=[$(tr '\n' ';' <"$ilog")] — a refuted incarnation must be released without a signal"
+    fi
+    # (b) NON-VACUITY: with the incarnation MATCHED, the same group is signalled — the check refutes, it
+    #     does not veto everything.
+    : >"$ilog"
+    iout="$(bash "$idrv" "$ilog" match 2>&1)"
+    ipid="${iout#PID=}"; ipid="${ipid%% *}"
+    if [[ "$iout" == *"FOREIGN=[]"* ]] && grep -q -- "-TERM -$ipid" "$ilog"; then
+      pass "reap-ownership (incarnation) NON-VACUITY: with the recorded start time MATCHING, that same group IS signalled — the check is a refutation, not a blanket veto ($iout)"
+    else
+      fail "reap-ownership-incarnation-match: out=[$iout] log=[$(tr '\n' ';' <"$ilog")] — a matching incarnation must still be signalled"
+    fi
+  fi
+
   # ---- MUTANT CONTRAST: the HISTORICAL-LIST reap this replaced. Same driver, same stub, with
   # `fixture_reap`/`fixture_signal_owned` replaced by the form that iterates every pgid ever staged. It
   # must be shown to signal a group it no longer owns, or the asserts above prove nothing.

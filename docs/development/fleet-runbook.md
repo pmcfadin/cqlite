@@ -572,23 +572,30 @@ What it guarantees:
   would otherwise co-run in the same worktree. A LIVE holder there refuses the start with a
   `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane "another instance is
   already running") — remedy: stop that supervisor or upgrade its checkout past #3467. **But read the
-  wording: PID NUMBERS ARE REUSED, so the diagnostic only tells you to stop the pid when it CORROBORATED
-  the process as a worker-supervisor**, which is read from `/proc/<pid>/cmdline` **and nowhere else**
-  (#3549): a `ps -o args=` rendering is space-joined and unescaped, so splitting it both FABRICATES
-  argument boundaries (one argument `/tmp/worker-supervisor.sh extra` renders exactly like two, carving
-  out a basename no argument had) and ERASES them (a genuine supervisor under a path containing a space
-  matches nothing), which makes it useless for a match AND for a non-match. So on a host with no
-  readable `/proc/<pid>/cmdline` the identity is simply **not determined**, and the diagnostic says so.
-  If it says the identity was not corroborated — or could not be determined — the pid is active but may
-  be an unrelated process that inherited the number: **verify what it is before stopping anything**
-  (the uncorroborated refusal prints a `ps -p <pid> -o args=` line for exactly that, where a HUMAN reads
-  the rendering — reading it is fine, machine-parsing it is not). The
-  refusal itself is unconditional either way; the identity probe changes only what you are told to do,
-  never whether the supervisor starts. **A holder whose
+  wording, because there is exactly ONE live wording and it never tells you to stop a pid (#3549):
+  THIS GUARD CANNOT DETERMINE WHAT THE RECORDED PID IS.** The legacy lock records a bare `pid` file —
+  no start time, no boot id, no lane, no path — so nothing can bind a process INCARNATION to it, and
+  pid numbers are reused. The basename is no help either: up to four lanes run on one box, each with
+  its own `worker-supervisor.sh`, so "that process is running worker-supervisor.sh" does not even
+  narrow it to one process, and the most likely false match is **a live sibling lane's supervisor**.
+  An earlier version of this guard did corroborate identity from `/proc/<pid>/cmdline` and printed
+  "stop pid N first"; that probe absorbed four consecutive review rounds and was **deleted** (roborev
+  jobs 182/192/194/196/198), because positive corroboration is unachievable in principle from what the
+  lock records and its only consumer was the wording — while its false positive was an instruction to
+  kill an unrelated, possibly production, process. So the live refusal says: the pid is active, pid
+  numbers are reused, several lanes here run a supervisor with the same script name, **verify what pid
+  N actually is before stopping anything** — and it prints a bare `ps -p <pid> -o args=` line for
+  exactly that, where a HUMAN reads the rendering (reading it is fine; machine-parsing a space-joined,
+  unescaped rendering is not, which is why nothing here does). The refusal itself is unconditional
+  either way: an unverifiable holder is never a licence to start a second supervisor in the worktree.
+  **A holder whose
   recorded pid is CONFIRMED DEAD also REFUSES; it is NOT reclaimed (lead ruling, #3549)** — the
   diagnostic names the legacy path, the recorded pid, the classified state and an exact **non-recursive**
-  one-liner to clear it (`rm -f <legacy path>/pid && rmdir <legacy path>`, shell-quoted so it is
-  paste-safe), and the remedy is state-specific so a run never tells you to stop a
+  one-liner to clear it (`rm -f -- <legacy path>/pid && rmdir -- <legacy path>`, with the paths rendered
+  in a **one-line** escaping form so the printed command is paste-safe AND never wraps — a newline in
+  `TMPDIR` would otherwise split it, and the diagnostic paths, across physical lines and leave prose
+  fragments indistinguishable from the one bare command line, #3549), and the remedy is state-specific
+  so a run never tells you to stop a
   process that is already dead. **Two things about that one-liner (#3549).** It is printed **on a line
   of its own, bare and complete** — no prefix, no trailing prose — because a command with an
   explanation appended to it is not pasteable: the prose becomes extra `rmdir` operands and the command
