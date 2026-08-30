@@ -403,6 +403,12 @@ pub fn compare_rows(
 /// Keyed on the primary key alone (the rows are paired by it), and reported ONCE
 /// with the first divergent position rather than per row: a single moved row makes
 /// every later position differ, and 900 lines saying so name nothing.
+///
+/// The key is [`row_message_key`], i.e. the PERMISSIVE untyped projection the
+/// pairing uses, so two rows whose keys canonicalize identically (a `text` key
+/// `"1"` beside `"1.0"`) are indistinguishable HERE. That is the pairing's own
+/// ambiguity rather than a new one, and the value comparison — which is typed —
+/// is what reports the consequence.
 fn row_order_divergence(
     golden: &[&Row],
     cli: &[&Row],
