@@ -158,6 +158,13 @@ pub mod dump_shapes;
 #[path = "golden_strict_json.rs"]
 pub mod strict_json;
 
+/// THREE-VALUED filesystem answers (`verified-absent` / `present` / `unreadable`),
+/// through which every filesystem question in this lane is asked — a two-valued
+/// `Path::is_dir`/`is_file`/`exists` collapses "cannot tell" onto "not there"
+/// (issue #1491 review finding V1 and its two predecessors).
+#[path = "golden_fs_probe.rs"]
+pub mod fs_probe;
+
 /// WHICH root supplies a case's fixture: a git-committed case is pinned to the
 /// checkout copy, a fetched-corpus case walks the candidate roots by evidence
 /// (issue #1491 review finding J1).

@@ -40,6 +40,7 @@
 //! `cqlite-core/tests/support/datasets_root.rs` resolver is untouched — other lanes
 //! depend on its rule, and generalizing it is #3104's territory.
 
+use super::fs_probe;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -227,13 +228,36 @@ pub fn committed_fixture_dir(
     };
     let fixture = checkout.join(keyspace).join(dir);
     let data_db = fixture.join(file);
-    if !data_db.is_file() {
-        return Err(format!(
-            "the git-tracked {} is missing from the checkout — a committed fixture is \
-             the oracle for its committed values and is never served from an external \
-             corpus root",
-            data_db.display()
-        ));
+    // Three-valued (issue #1491 review finding V1's sweep). `is_file()` answers
+    // `false` for a path it could not describe, so an UNREADABLE committed fixture
+    // was reported as one that is "missing from the checkout" — the right verdict
+    // (both fail) reached through a false statement, and the reader is then sent
+    // looking for a file that is right there.
+    match fs_probe::presence(&data_db) {
+        Ok(fs_probe::Presence::File) => {}
+        Ok(fs_probe::Presence::Absent) => {
+            return Err(format!(
+                "the git-tracked {} is missing from the checkout — a committed fixture \
+                 is the oracle for its committed values and is never served from an \
+                 external corpus root",
+                data_db.display()
+            ))
+        }
+        Ok(other) => {
+            return Err(format!(
+                "the git-tracked {} is {}, where a *-Data.db must be — a committed \
+                 fixture is the oracle for its committed values and is never served \
+                 from an external corpus root",
+                data_db.display(),
+                other.describe()
+            ))
+        }
+        Err(why) => {
+            return Err(format!(
+                "the git-tracked {} could not be examined: {why}",
+                data_db.display()
+            ))
+        }
     }
     let dirs: BTreeSet<&String> = sstables
         .map(|s| s.iter().map(|(dir, _)| dir).collect())
@@ -386,42 +410,39 @@ pub fn corpus_fixture_in(
 /// in sorted order — or [`CorpusMiss::Unusable`] when the filesystem could not
 /// answer.
 ///
-/// The lane's own scan rather than `compare::staging::fixture_dirs_in`, because that one
-/// answers "no `*-Data.db`" for a fixture directory it could not READ
-/// (`has_data_db` ends in `.unwrap_or(false)`), which is this finding's shape one
-/// level in: an unreadable directory would make the root verifiably absent and the
-/// case skip.
+/// The lane's own scan rather than `compare::staging::fixture_dirs_in`, because the
+/// two answer different questions: that one serves an ALREADY CHOSEN root and
+/// answers `Result<_, String>`, i.e. "readable and holds nothing" and "could not be
+/// read" both end the search, while this one is choosing AMONG roots and must tell
+/// [`CorpusMiss::Absent`] (keep walking, and a legal skip if no root has it) from
+/// [`CorpusMiss::Unusable`] (stop, and fail). Both are now three-valued at the
+/// filesystem — every question here and there goes through `super::fs_probe`.
 fn table_dirs_in(root: &Path, keyspace: &str, table: &str) -> Result<Vec<PathBuf>, CorpusMiss> {
     let ks_dir = root.join(keyspace);
-    let entries = match std::fs::read_dir(&ks_dir) {
-        Ok(entries) => entries,
-        // The filesystem ANSWERED: there is no such keyspace under this root.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(CorpusMiss::Unusable(format!(
-                "{keyspace}.{table}: cannot read {} ({e}) — a candidate corpus root \
-                 that cannot be READ is not a root that verifiably lacks the table, \
-                 so this is a failure and not a NOT PRESENT skip",
-                ks_dir.display()
-            )))
-        }
+    let unusable = |why: String| {
+        CorpusMiss::Unusable(format!(
+            "{keyspace}.{table}: {why}. A candidate corpus root that cannot be READ is \
+             not a root that verifiably lacks the table, so this is a failure and not a \
+             NOT PRESENT skip"
+        ))
+    };
+    // `Ok(None)`: the filesystem ANSWERED that there is no such keyspace here.
+    let Some(entries) = fs_probe::dir_entries(&ks_dir).map_err(unusable)? else {
+        return Ok(Vec::new());
     };
     let prefix = format!("{table}-");
     let mut matches: Vec<PathBuf> = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            CorpusMiss::Unusable(format!(
-                "{keyspace}.{table}: cannot enumerate {} ({e})",
-                ks_dir.display()
-            ))
-        })?;
+        if !fs_probe::name_starts_with(&entry.file_name(), &prefix) {
+            continue;
+        }
         let path = entry.path();
-        let is_candidate = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(&prefix))
-            .unwrap_or(false);
-        if !is_candidate || !path.is_dir() {
+        // THREE-VALUED, where `path.is_dir()` stood (issue #1491 review finding V1):
+        // that predicate answers `false` for an entry it could not describe, so an
+        // INACCESSIBLE `<table>-*` entry was skipped, the root then read as
+        // verifiably lacking the table, and an optional corpus case passed with a
+        // `NOT PRESENT` it had not established.
+        if !fs_probe::is_dir(&path).map_err(unusable)? {
             continue;
         }
         if holds_data_db(&path, keyspace, table)? {
@@ -435,34 +456,18 @@ fn table_dirs_in(root: &Path, keyspace: &str, table: &str) -> Result<Vec<PathBuf
 /// Does this fixture directory hold a `*-Data.db`? Three-valued like its caller: a
 /// directory that cannot be listed is `Unusable`, never "holds none".
 fn holds_data_db(dir: &Path, keyspace: &str, table: &str) -> Result<bool, CorpusMiss> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        // Gone between the listing and the read: verifiably not there now.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(CorpusMiss::Unusable(format!(
-                "{keyspace}.{table}: cannot read the fixture directory {} ({e})",
-                dir.display()
-            )))
-        }
+    let unusable = |why: String| {
+        CorpusMiss::Unusable(format!(
+            "{keyspace}.{table}: cannot read the fixture directory — {why}"
+        ))
     };
-    for entry in entries {
-        let entry = entry.map_err(|e| {
-            CorpusMiss::Unusable(format!(
-                "{keyspace}.{table}: cannot enumerate {} ({e})",
-                dir.display()
-            ))
-        })?;
-        if entry
-            .file_name()
-            .to_str()
-            .map(|n| n.ends_with("-Data.db"))
-            .unwrap_or(false)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    // Gone between the listing and the read: verifiably not there now.
+    let Some(entries) = fs_probe::dir_entries(dir).map_err(unusable)? else {
+        return Ok(false);
+    };
+    Ok(entries
+        .iter()
+        .any(|e| fs_probe::name_ends_with(&e.file_name(), "-Data.db")))
 }
 
 #[cfg(test)]
@@ -621,7 +626,7 @@ mod tests {
         };
         match miss {
             CorpusMiss::Unusable(why) => assert!(
-                why.contains("ks.t") && why.contains("cannot read"),
+                why.contains("ks.t") && why.contains("cannot be listed"),
                 "the failure must name the table and the cause: {why}"
             ),
             CorpusMiss::Absent(why) => {
@@ -677,8 +682,9 @@ mod tests {
     ///
     /// "I could not tell" is not "there is nothing there". The shared
     /// `sstables_root_for_table` answers `Option` and every predicate beneath it
-    /// ends in `.unwrap_or(false)`, so an inaccessible corpus read as absent and
-    /// EVERY optional corpus case reported `NOT PRESENT` and passed. And falling
+    /// collapses a read failure onto `false`, so an inaccessible corpus read as
+    /// absent and EVERY optional corpus case reported `NOT PRESENT` and passed. This
+    /// lane's walk therefore asks `super::fs_probe` instead. And falling
     /// through would be the same defect wearing a different hat: the unreadable
     /// root is the one the walk would have picked, so a later root's answer cannot
     /// stand in for it.
@@ -711,14 +717,65 @@ mod tests {
         }
     }
 
+    /// V1's own site: a `<table>-*` ENTRY the filesystem cannot DESCRIBE is
+    /// unusable, and a verified-absent one is still a legal skip.
+    ///
+    /// `path.is_dir()` stood here and answers `false` for both, so an inaccessible
+    /// candidate directory was indistinguishable from one that is not there: the
+    /// root read as verifiably lacking the table and an optional corpus case passed
+    /// reporting `NOT PRESENT`.
+    ///
+    /// Both directions are staged with symlinks (`#[cfg(unix)]`) because that is the
+    /// one way to make `metadata` fail on an entry that IS in the listing without a
+    /// chmod, which passes vacuously as root: a SELF-REFERENTIAL link cannot be
+    /// resolved (`ELOOP`), while a DANGLING one resolves to `ENOENT`, which is an
+    /// answer.
+    #[cfg(unix)]
+    #[test]
+    fn an_undescribable_table_entry_is_unusable_and_an_absent_one_still_skips() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(root.join("ks")).expect("mkdir");
+        std::os::unix::fs::symlink("t-dangling-target", root.join("ks/t-dangling"))
+            .expect("symlink");
+        match corpus_fixture_in(&root, "ks", "t", tmp.path()) {
+            Err(CorpusMiss::Absent(why)) => assert!(
+                why.contains("ks.t") || why.contains("t-"),
+                "a dangling link resolves to ENOENT, which IS an answer: {why}"
+            ),
+            Err(CorpusMiss::Unusable(why)) => {
+                panic!("a verified absence must stay a legal skip: {why}")
+            }
+            Ok(_) => panic!("nothing to resolve"),
+        }
+
+        // Self-referential: the entry is in the listing and cannot be described.
+        std::os::unix::fs::symlink("t-loop", root.join("ks/t-loop")).expect("symlink");
+        match corpus_fixture_in(&root, "ks", "t", tmp.path()) {
+            Err(CorpusMiss::Unusable(why)) => {
+                assert!(
+                    why.contains("t-loop") && why.contains("cannot be described"),
+                    "the failure must name the entry and the cause: {why}"
+                );
+                assert!(
+                    why.contains("NOT PRESENT"),
+                    "and must say why it is not a skip: {why}"
+                );
+            }
+            Err(CorpusMiss::Absent(why)) => {
+                panic!("an entry the filesystem could not describe must not read as absent: {why}")
+            }
+            Ok(_) => panic!("an undescribable candidate cannot resolve"),
+        }
+    }
+
     /// The same three-valued rule ONE LEVEL IN: a fixture directory that cannot be
     /// listed is unusable, never "holds no `*-Data.db`".
     ///
-    /// `compare::staging::fixture_dirs_in`'s `has_data_db` ends in `.unwrap_or(false)`, so
-    /// reusing it would have made an unreadable fixture directory a verified
-    /// absence and skipped the case — the finding's own shape, one level down.
-    /// Classification is by `ErrorKind::NotFound` alone, so a permission failure
-    /// takes exactly this branch.
+    /// `has_data_db` used to end in `.unwrap_or(false)`, which made an unreadable
+    /// fixture directory a verified absence and skipped the case — the finding's own
+    /// shape, one level down. Classification is by `ErrorKind::NotFound` alone (in
+    /// `super::fs_probe`), so a permission failure takes exactly this branch.
     #[test]
     fn an_unlistable_fixture_directory_is_unusable_not_empty() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
