@@ -707,10 +707,15 @@ impl Config {
         // Smaller memory usage for tests. The cache budget is scaled WITH
         // `max_memory` (the same 1/4 ratio `MemoryConfig::default` uses), not
         // left at the 1GB default's 256MB: `validate` requires
-        // `block_cache.max_size <= max_memory`, and `Database::open` now enforces
-        // that (#1696 roborev F2). A constructor that emitted a config its own
-        // `validate` rejects was a latent contradiction — it only went unnoticed
-        // because nothing on the open path ever validated.
+        // `block_cache.max_size <= max_memory`, and a constructor that emits a
+        // config its own `validate` rejects is a latent contradiction — it went
+        // unnoticed only because nothing on the open path ever validated.
+        //
+        // This is NO LONGER load-bearing for any open path: `Database::open`
+        // enforces the `direct_io_memory_fraction` range alone, not the cache
+        // budget (#1696 roborev r3 F3 narrowed it, residual #3525). It is kept
+        // because it is correct on its own merits — the fix is to the
+        // constructor's self-consistency, not to whoever happens to validate.
         config.memory.max_memory = 64 * 1024 * 1024; // 64MB
         config.memory.block_cache.max_size = config.memory.max_memory / 4; // 16MB
         config.storage.memtable_size_threshold = 1024 * 1024; // 1MB

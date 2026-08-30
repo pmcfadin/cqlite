@@ -13,8 +13,20 @@
 //!
 //! By this repo's wiring-evidence rule a feature is done only when its public
 //! surface exercises it — a named surface, a call chain, and an end-to-end test.
-//! Every case here therefore goes through `Database::open` or
-//! `SSTableReader::open`, never through `validate()`.
+//! Every case here therefore goes through a real open boundary — `Database::open`,
+//! `StorageEngine::open`, `StorageEngine::open_with_sstables`,
+//! `SSTableManager::new`, `SSTableManager::new_from_discovered_paths`,
+//! `SSTableReader::open` — never through `validate()`.
+//!
+//! # The discovery boundaries, and why they are the DANGEROUS ones (roborev r3 F2)
+//!
+//! On the engine/manager boundaries the unvalidated failure mode was not a clamp.
+//! Discovery treats a per-file reader-open error as best-effort — it logs and
+//! skips — so a fraction the readers reject fails EVERY reader open and the open
+//! reports SUCCESS with ZERO SSTables. A silent empty result is strictly worse
+//! than a wrong-but-visible value, and it is asserted directly by
+//! `an_invalid_fraction_is_an_error_not_a_successful_open_with_zero_sstables`,
+//! whose control demonstrates the swallowing mechanism rather than assuming it.
 //!
 //! # The decisions this pins
 //!
@@ -236,4 +248,260 @@ async fn sstable_reader_open_reports_the_config_error_not_the_missing_file() {
         "a legal fraction on a missing file must fail for the FILE's reason: \
          {control_message}"
     );
+}
+
+/// `StorageEngine::open` — public, and reachable without a `Database` — REJECTS
+/// every illegal fraction (#1696 roborev r3 F2).
+///
+/// Before this it validated nothing, and the failure mode was not "the fraction
+/// gets clamped": discovery treats a per-file reader-open error as best-effort
+/// (log and skip), so a fraction the readers reject fails EVERY reader open and
+/// the engine reports SUCCESS with ZERO SSTables. A silent empty result is worse
+/// than a clamp — the caller is told nothing at all.
+#[tokio::test]
+async fn storage_engine_open_rejects_an_out_of_range_fraction() {
+    use cqlite_core::storage::StorageEngine;
+
+    for (fraction, why) in illegal_fractions() {
+        let temp = TempDir::new().expect("temp dir");
+        let config = config_with_fraction(fraction);
+        let platform = Arc::new(
+            Platform::new(&config)
+                .await
+                .expect("platform for a config whose only defect is the fraction"),
+        );
+        let error = StorageEngine::open(
+            temp.path(),
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("StorageEngine::open MUST reject fraction = {fraction} ({why})"));
+        assert!(
+            error.to_string().contains("direct_io_memory_fraction"),
+            "the error must NAME the knob (fraction {fraction}, {why}): {error}"
+        );
+    }
+
+    // Control: a legal fraction opens fine on the same empty directory, so the
+    // rejections above are about the fraction and not about the path.
+    let temp = TempDir::new().expect("temp dir");
+    let config = config_with_fraction(0.5);
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    StorageEngine::open(
+        temp.path(),
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("0.5 is the default and must open");
+}
+
+/// Same for `StorageEngine::open_with_sstables`, the pre-discovered-paths
+/// boundary (#1696 roborev r3 F2).
+#[tokio::test]
+async fn storage_engine_open_with_sstables_rejects_an_out_of_range_fraction() {
+    use cqlite_core::storage::StorageEngine;
+
+    let temp = TempDir::new().expect("temp dir");
+    let table_dir = temp.path().join("ks/table-0123456789abcdef");
+    std::fs::create_dir_all(&table_dir).expect("table dir");
+
+    for (fraction, why) in illegal_fractions() {
+        let config = config_with_fraction(fraction);
+        let platform = Arc::new(
+            Platform::new(&config)
+                .await
+                .expect("platform for a config whose only defect is the fraction"),
+        );
+        let error = StorageEngine::open_with_sstables(
+            temp.path().join("storage").as_path(),
+            vec![table_dir.clone()],
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("open_with_sstables MUST reject fraction = {fraction} ({why})"));
+        assert!(
+            error.to_string().contains("direct_io_memory_fraction"),
+            "the error must NAME the knob (fraction {fraction}, {why}): {error}"
+        );
+    }
+
+    // Control: legal fraction, same directories, opens.
+    let config = config_with_fraction(1.0);
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    StorageEngine::open_with_sstables(
+        temp.path().join("storage").as_path(),
+        vec![table_dir],
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("a legal fraction must open");
+}
+
+/// The SILENT-OMISSION scenario stated as an assertion (#1696 roborev r3 F2): an
+/// invalid fraction must be a config ERROR, never a successful open reporting
+/// fewer SSTables than are on disk.
+///
+/// # What the control establishes, measured rather than assumed
+///
+/// The subject directory holds one discoverable `*-Data.db`. With a LEGAL
+/// fraction the open succeeds and `sstable_count == 1` — the reader is registered
+/// (opens are lazy, so unparseable bytes do not fail registration). So this
+/// directory is a case where a caller SHOULD see one SSTable.
+///
+/// Now the hazard: `SSTableReader::open` rejects an illegal fraction (pinned by
+/// `sstable_reader_open_rejects_an_out_of_range_fraction_before_reading` above),
+/// and discovery treats a per-file reader-open error as best-effort — it LOGS AND
+/// SKIPS. Without a check at this boundary the invalid fraction therefore turns
+/// that 1 into a 0 and still returns `Ok`: the SSTable is present on disk and the
+/// caller is told nothing. Hence the assertion below is not merely "it errors" but
+/// "it does not succeed with a reduced count", and the failure message reports the
+/// count it saw.
+#[tokio::test]
+async fn an_invalid_fraction_is_an_error_not_a_successful_open_with_zero_sstables() {
+    use cqlite_core::storage::StorageEngine;
+
+    let temp = TempDir::new().expect("temp dir");
+    let table_dir = temp.path().join("ks/table-0123456789abcdef");
+    std::fs::create_dir_all(&table_dir).expect("table dir");
+    std::fs::write(table_dir.join("nb-1-big-Data.db"), b"not an sstable").expect("subject");
+
+    // Control FIRST, because it establishes the hazard rather than just passing:
+    // with a legal fraction this directory yields ONE discovered SSTable, so a
+    // later open reporting zero would be a silent omission and not an empty
+    // directory.
+    let config = config_with_fraction(0.5);
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let engine = StorageEngine::open_with_sstables(
+        temp.path().join("storage").as_path(),
+        vec![table_dir.clone()],
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("a legal fraction must open");
+    let stats = engine.stats().await.expect("stats");
+    assert_eq!(
+        stats.sstables.sstable_count, 1,
+        "the control must find the SSTable that IS there — otherwise a later \
+         zero would prove nothing about omission"
+    );
+
+    // Now the same shape with an invalid fraction: an ERROR, not Ok-with-zero.
+    let config = config_with_fraction(2.0);
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let outcome = StorageEngine::open_with_sstables(
+        temp.path().join("storage2").as_path(),
+        vec![table_dir],
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await;
+    match outcome {
+        Ok(engine) => {
+            let count = engine
+                .stats()
+                .await
+                .map(|s| s.sstables.sstable_count)
+                .unwrap_or_default();
+            panic!(
+                "an invalid fraction must be REJECTED; instead the open succeeded \
+                 reporting {count} SSTables where the control found 1 — a silent \
+                 omission the caller cannot detect"
+            );
+        }
+        Err(e) => assert!(
+            e.to_string().contains("direct_io_memory_fraction"),
+            "the error must name the knob, not blame the data: {e}"
+        ),
+    }
+}
+
+/// `SSTableManager::new` is public too, so it enforces the rule itself rather
+/// than trusting whichever engine happened to construct it (#1696 roborev r3 F2).
+#[tokio::test]
+async fn sstable_manager_constructors_reject_an_out_of_range_fraction() {
+    use cqlite_core::storage::sstable::SSTableManager;
+
+    let temp = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp.path().join("base")).expect("base dir");
+
+    for (fraction, why) in illegal_fractions() {
+        let config = config_with_fraction(fraction);
+        let platform = Arc::new(
+            Platform::new(&config)
+                .await
+                .expect("platform for a config whose only defect is the fraction"),
+        );
+        let error = SSTableManager::new(
+            temp.path().join("base").as_path(),
+            &config,
+            platform.clone(),
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("SSTableManager::new MUST reject {fraction} ({why})"));
+        assert!(
+            error.to_string().contains("direct_io_memory_fraction"),
+            "the error must NAME the knob (fraction {fraction}, {why}): {error}"
+        );
+
+        let error = SSTableManager::new_from_discovered_paths(
+            temp.path().join("base").as_path(),
+            vec![temp.path().join("base")],
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("new_from_discovered_paths MUST reject {fraction} ({why})"));
+        assert!(
+            error.to_string().contains("direct_io_memory_fraction"),
+            "the error must NAME the knob (fraction {fraction}, {why}): {error}"
+        );
+    }
+
+    // Control: a legal fraction builds both.
+    let config = config_with_fraction(0.5);
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    SSTableManager::new(
+        temp.path().join("base").as_path(),
+        &config,
+        platform.clone(),
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("a legal fraction must construct");
+    SSTableManager::new_from_discovered_paths(
+        temp.path().join("base").as_path(),
+        vec![temp.path().join("base")],
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("a legal fraction must construct");
 }

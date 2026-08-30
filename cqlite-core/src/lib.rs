@@ -200,7 +200,8 @@ impl Database {
     /// Returns an error if:
     /// - The path cannot be created or accessed
     /// - Database files are corrupted
-    /// - Configuration is invalid
+    /// - Configuration is invalid — currently the `storage.direct_io_memory_fraction`
+    ///   range only, not every rule `Config::validate` states (residual: #3525)
     ///
     /// # Examples
     ///
@@ -215,16 +216,21 @@ impl Database {
     /// # });
     /// ```
     pub async fn open(path: &Path, config: Config) -> Result<Self> {
-        // Judge the configuration BEFORE building anything from it (#1696
-        // roborev F2). This method has always documented "Configuration is
-        // invalid" as a failure mode, but nothing here ever called `validate`,
-        // so every rule it states — the memtable headroom rule, the cache
-        // budget, the `direct_io_memory_fraction` range — was reachable only by
-        // a caller who happened to invoke `Config::validate` by hand. An
-        // out-of-range fraction was therefore still silently clamped when set
-        // through the documented database-open API, which is the exact defect
-        // #1696's AC2 exists to fix.
-        config.validate()?;
+        // Judge the ONE rule this issue is about — the
+        // `direct_io_memory_fraction` range — BEFORE building anything from the
+        // config (#1696 AC2). Out of range it used to be silently CLAMPED by the
+        // reader, so a value set through the documented database-open API was not
+        // the value that ran.
+        //
+        // This is deliberately NOT `config.validate()`. Calling the full
+        // validator here was a scope overreach (roborev r3 F3): it also enforces
+        // the cache-budget rule, which the Node binding's documented and tested
+        // `memoryLimit: 1` contract violates (a 1-byte memory limit leaves the
+        // default 256 MiB block cache in place), so full validation broke a
+        // public contract this issue never proposed to change. The residual —
+        // that this method documents "Configuration is invalid" while enforcing
+        // only the fraction — is tracked in #3525.
+        config.storage.validated_direct_io_memory_fraction()?;
 
         // Initialize platform abstraction layer
         let platform = Arc::new(Platform::new(&config).await?);
@@ -361,9 +367,12 @@ impl Database {
         config: Config,
         schema_registry: Option<Arc<tokio::sync::RwLock<schema::SchemaRegistry>>>,
     ) -> Result<Self> {
-        // Same contract as `Database::open` (#1696 roborev F2): a config is
-        // judged before anything is built from it.
-        config.validate()?;
+        // Same contract as `Database::open` (#1696 roborev F2/r3 F3): the
+        // `direct_io_memory_fraction` range — and only it — is judged before
+        // anything is built from the config. Not the full `Config::validate`:
+        // see the note on `open` for why widening this boundary's contract is a
+        // separate product decision (#3525).
+        config.storage.validated_direct_io_memory_fraction()?;
 
         // Initialize platform abstraction layer
         let platform = Arc::new(Platform::new(&config).await?);

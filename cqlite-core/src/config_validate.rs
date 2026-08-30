@@ -150,9 +150,11 @@ impl Config {
         // value that ran.
         //
         // The rule itself, the range's endpoints and the reasoning for each live
-        // on `StorageConfig::validated_direct_io_memory_fraction`, because
-        // `SSTableReader::open` enforces the same rule without going through
-        // here (#1696 roborev F2) and one rule must have one definition.
+        // on `StorageConfig::validated_direct_io_memory_fraction`, because the
+        // open boundaries — `Database::open`, `StorageEngine::open`,
+        // `SSTableManager::new`, `SSTableReader::open` — enforce the same rule
+        // without going through here (#1696 roborev F2/r3 F2) and one rule must
+        // have one definition.
         self.storage.validated_direct_io_memory_fraction()?;
 
         Ok(())
@@ -165,9 +167,18 @@ impl StorageConfig {
     ///
     /// # Why this is a method and not an inline check in `validate`
     ///
-    /// It is enforced at TWO boundaries — [`Config::validate`] (called by
-    /// `Database::open`) and `SSTableReader::open`, which is reachable without a
-    /// `Database` — so the rule needs ONE definition or the two can drift.
+    /// It is enforced at EVERY public boundary that can act on the value, and
+    /// several of them are reachable without a `Database`: [`Config::validate`],
+    /// `Database::open`, `StorageEngine::open`, `StorageEngine::open_with_sstables`,
+    /// `SSTableManager::new`, `SSTableManager::new_from_discovered_paths` and
+    /// `SSTableReader::open`. That many call sites is precisely why the rule needs
+    /// ONE definition — restated inline they would drift.
+    ///
+    /// The discovery boundaries matter for a second reason (#1696 roborev r3 F2):
+    /// discovery treats a per-file reader-open error as best-effort, logging and
+    /// skipping it, so an unvalidated bad fraction there would fail every reader
+    /// open and the engine would report SUCCESS with ZERO SSTables — a silent
+    /// empty result instead of a named config error.
     ///
     /// # The rule, and why the ends of the range are where they are
     ///
