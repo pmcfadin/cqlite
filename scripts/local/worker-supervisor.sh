@@ -1725,16 +1725,65 @@ supervisor_legacy_lock_state() {
   # all. So: `|| true` on the capture, `|| true` on the `eval` restore, `if` rather than `&&` on the two
   # value restores, and no restore that is the last element of a list.
   local _sv_shopts="" _sv_noglob=off _sv_globignore_set=no _sv_globignore="" _shape_ok=no
+  local _sv_globignore_unset=no _pins_bad="" _opt="" _opt_state=""
   local -a _entries=()
+  # SAVES ONLY, NOTHING MUTATED YET — which is what lets the verification below BAIL OUT with the
+  # caller's shell untouched (#3549, roborev job 206 F1). Do not move a mutation above this point.
   _sv_shopts="$(shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true)"
   case $- in *f*) _sv_noglob=on ;; esac
   if [[ -n "${GLOBIGNORE+set}" ]]; then _sv_globignore_set=yes; _sv_globignore="$GLOBIGNORE"; fi
-  # `unset GLOBIGNORE` PRECEDES `shopt -s dotglob` for the same coupling the restore documents below:
-  # unsetting the variable disables `dotglob`, so the reverse order would leave it off.
-  unset GLOBIGNORE
+  # THE NEUTRALISATION IS VERIFIED, NOT ASSUMED (#3549, roborev job 206 F1) — this issue's own rule one
+  # level further in: A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT, and the verdict at risk
+  # here is the DESTRUCTIVE one. `unset GLOBIGNORE` FAILS when the caller made the variable `readonly`
+  # (measured: rc=1, value intact) — and the old unchecked spelling then walked on into the enumeration
+  # with the filter STILL ACTIVE, i.e. exactly the `{pid}`-forging state the pin exists to remove, and
+  # handed the operator `rm -f … && rmdir …` for a foreign directory. So the STATE is re-read: an unset
+  # or NULL `GLOBIGNORE` is inert (bash consults it only when it is set and non-null), anything else is
+  # a refusal with its own cause token.
+  #
+  # AND THE CHECK COMES BEFORE EVERY OTHER PIN, WHICH IS LOAD-BEARING: on this path we return without
+  # having changed one option or one variable, so there is no restore to get right on the way out —
+  # and a save/restore that corrupts the caller is worse than none (this file's own restore-order case).
+  #
+  # `if unset …` RATHER THAN A BARE `unset`: it records whether the unset TOOK, and the restore below
+  # assigns ONLY when it did. That is not tidiness — MEASURED, a `GLOBIGNORE=…` assignment to a
+  # `readonly` variable under `set -o posix` KILLS A NON-INTERACTIVE SHELL OUTRIGHT (rc=127, and
+  # `2>/dev/null` does not even suppress the message), so a restore that assigns unconditionally would
+  # destroy the caller on the very path this check exists for. The `unset` itself is survivable in the
+  # same configuration (measured: rc=1, shell alive, even inside `$( )` with `inherit_errexit`).
+  #
+  # It also PRECEDES `shopt -s dotglob` for the coupling the restore documents below: unsetting the
+  # variable disables `dotglob`, so the reverse order would leave it off.
+  if unset GLOBIGNORE 2>/dev/null; then _sv_globignore_unset=yes; fi
+  if [[ -n "${GLOBIGNORE:-}" ]]; then
+    printf 'unknown globignore-not-neutralisable\n'
+    return 0
+  fi
   set +f
   shopt -s dotglob nullglob
   shopt -u failglob extglob globstar nocaseglob nocasematch
+  # EVERY REMAINING PIN IS VERIFIED THE SAME WAY, AND BY ITS RESULTING **STATE** RATHER THAN BY THE
+  # `shopt` COMMAND'S EXIT STATUS (#3549, job 206 F1, applied to the whole block rather than the one
+  # reported variable). The exit status is the wrong oracle in BOTH directions: `shopt -s`/`-u` returns
+  # non-zero when ANY name is unknown to this bash — `globstar` does not exist before bash 4.0 and this
+  # file supports the 3.2 macOS ships — while (measured) STILL APPLYING every name it does recognise, so
+  # a status check would refuse on a working 3.2 host, and a check that reds on correct input is the
+  # check people learn to waive. The three-valued read below is exact: `shopt -p <opt>` prints
+  # `shopt -s <opt>` / `shopt -u <opt>` for an option this bash HAS, and prints NOTHING for one it does
+  # not (measured) — and an option bash does not have cannot filter, expand or match anything, so
+  # `absent` is an affirmative OK rather than an unknown. The inner `|| true` is required: `shopt -p`
+  # exits non-zero precisely when the option is DISABLED, which is the common case here, and a bare
+  # assignment-from-substitution is a genuine abort site under an `inherit_errexit` caller (job 201 F3).
+  for _opt in dotglob nullglob; do
+    _opt_state="$(shopt -p "$_opt" 2>/dev/null || true)"
+    if [[ -n "$_opt_state" && "$_opt_state" != "shopt -s $_opt" ]]; then _pins_bad+="$_opt!=on "; fi
+  done
+  for _opt in failglob extglob globstar nocaseglob nocasematch; do
+    _opt_state="$(shopt -p "$_opt" 2>/dev/null || true)"
+    if [[ -n "$_opt_state" && "$_opt_state" != "shopt -u $_opt" ]]; then _pins_bad+="$_opt!=off "; fi
+  done
+  # `set +f` has no `shopt -p` spelling; `$-` is its authoritative state and needs no subshell.
+  case $- in *f*) _pins_bad+="noglob!=off " ;; esac
   # The array form counts exactly even for names containing whitespace or newlines. The VERDICT is
   # computed inside the neutralised region and acted on after the restore, so the comparison gets the
   # pinned matching options and the diagnostics below run in the caller's own shell state.
@@ -1747,9 +1796,20 @@ supervisor_legacy_lock_state() {
   # and the variable second let the variable restore silently re-clear `dotglob` — MEASURED: a caller
   # that entered with `dotglob` ON came back out with it OFF. Variable first, options second, and the
   # options restore therefore has the last word on every option it names.
-  if [[ "$_sv_globignore_set" == yes ]]; then GLOBIGNORE="$_sv_globignore"; else unset GLOBIGNORE; fi
+  # RESTORED ONLY IF IT WAS ACTUALLY UNSET (see the measurement above: assigning a `readonly`
+  # `GLOBIGNORE` under `set -o posix` kills the shell). When the unset did not take we changed nothing,
+  # so there is nothing to put back — and when it did take, the variable is provably not readonly and
+  # the assignment cannot fail.
+  if [[ "$_sv_globignore_unset" == yes && "$_sv_globignore_set" == yes ]]; then GLOBIGNORE="$_sv_globignore"; fi
   eval "$_sv_shopts" || true
   if [[ "$_sv_noglob" == on ]]; then set -f; fi
+  # A PIN THAT DID NOT TAKE INVALIDATES THE ENUMERATION, SO IT IS REPORTED BEFORE THE SHAPE VERDICT —
+  # never alongside it. `_entries` was computed under state we could not confirm, so neither the
+  # `{pid}` shape nor the entry list it would print is evidence of anything.
+  if [[ -n "$_pins_bad" ]]; then
+    printf 'unknown glob-state-pins-not-verified:[%s]\n' "${_pins_bad% }"
+    return 0
+  fi
   if [[ "$_shape_ok" != yes ]]; then
     # RENDERED THROUGH `supervisor_shell_quote`, not a bare `printf '%q'` (#3549, roborev job 201 F1).
     # A newline or control character in an entry name must break neither the one-line state string this
@@ -1801,6 +1861,36 @@ supervisor_legacy_lock_state() {
   # The `|| true` on the FIRST read is correctly permissive and stays: `read` returns non-zero at EOF
   # while still ASSIGNING, so a single-line file with no trailing newline is a normal, well-formed lock
   # whose read "fails". Open failure is what is now distinguished, not read status.
+  # A NUL BYTE MAKES THE FILE AN UNRECOGNISED SHAPE, AND IT IS PROBED FOR **BEFORE** THE FILE IS PARSED,
+  # BECAUSE `read` CANNOT SEE IT (#3549, roborev job 206 F2). Measured: `IFS= read -r pid` on the bytes
+  # `123<NUL>\n` — and on `<NUL>123\n` — assigns the canonical-looking value `123`, because a bash
+  # variable cannot hold a NUL and `read` DISCARDS it silently. So the exact-shape validation the
+  # deletion remedy rests on was not exact: the pre-#3467 supervisor writes `echo $$ >"$LOCK/pid"`,
+  # i.e. digits and ONE newline, a file containing a NUL is therefore NOT a file it could have written,
+  # and it was nevertheless reaching the `stale` verdict and earning an `rm -f … && rmdir …` line.
+  #
+  # THE PROBE IS A BUILTIN, DELIBERATELY, AND THAT CHOICE IS PART OF THE FIX: `read -r -d ''` sets the
+  # delimiter to NUL, so a SUCCESSFUL read means a NUL is present (and a read that runs to EOF returns
+  # non-zero, meaning there is none). `od`/`wc`/`cmp`/`tr` would each answer the same question and would
+  # each reintroduce PATH EXPOSURE into a function that currently executes NO external command at all —
+  # a property this guard's inherited-state sweep relies on, so it is not traded away for a byte probe.
+  # All four lossy shapes are caught by one read (each measured): a NUL after the digits, a NUL before
+  # them, a file that is only a NUL, and a NUL after the trailing newline.
+  #
+  # `2>/dev/null` PRECEDES the input redirection for the reason spelled out below, and the OPEN's
+  # success is tracked here too, so an unmeasurable probe is never reported as an affirmative "no NUL".
+  local has_nul=no nul_open_ok=no _nul_discard=""
+  if { if IFS= read -r -d '' _nul_discard; then has_nul=yes; fi; } 2>/dev/null <"$legacy/pid"; then
+    nul_open_ok=yes
+  fi
+  if [[ "$nul_open_ok" != yes ]]; then
+    printf 'unknown pid-file-unreadable-at-open\n'
+    return 0
+  fi
+  if [[ "$has_nul" == yes ]]; then
+    printf 'unknown pid-file-contains-nul\n'
+    return 0
+  fi
   local extra="" more=no open_ok=no
   if { IFS= read -r pid || true; if IFS= read -r extra; then more=yes; fi; } 2>/dev/null <"$legacy/pid"; then
     open_ok=yes
