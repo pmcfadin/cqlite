@@ -19,8 +19,22 @@ column           exception
 s_tuple_udt      ``TypeError: unhashable type: 'dict'``
 s_set_udt        ``TypeError: unhashable type: 'list'``
 f_set_tuple_udt  ``TypeError: unhashable type: 'dict'``
+f_map_tuple_udt  ``TypeError: unhashable type: 'dict'``
+f_map_set_udt    ``TypeError: unhashable type: 'list'``
 ``SELECT *``     ``TypeError: unhashable type: 'dict'``
 ===============  ===========================================
+
+WHICH COLUMNS COVER ``value_to_hashable_key``, AND WHICH DO NOT
+---------------------------------------------------------------
+Only the two FROZEN-MAP columns reach that function. A ``set`` whose elements
+contain a UDT takes ``set_to_py``'s list fallback and converts elements with
+``value_to_py``; a MULTICELL map's keys arrive as opaque ``Value::Blob`` from
+the scalar-only ``parse_cell_path_key`` (#3612). A frozen map escapes both: its
+keys are decoded structurally and ``map_to_py`` projects every one of them
+through ``value_to_hashable_key``. So ``f_map_tuple_udt`` covers the ``Tuple``
+arm, ``f_map_set_udt`` the ``Set`` arm, and their id=2 keys are the only values
+in this repository that execute the ``Udt`` arm's ``None => py.None()`` branch.
+Without those two columns all three could regress with zero test failures.
 
 THE ORACLE
 ----------
@@ -61,6 +75,7 @@ suite-wide ``assert ran > 0`` (which cannot see one case skipping behind its
 siblings).
 """
 
+import ast
 import os
 from pathlib import Path
 
@@ -71,6 +86,99 @@ import cqlite
 KEYSPACE = "test_nested_udt_keys"
 TABLE = "nested_udt_keys"
 SCHEMA_FILE = "nested-udt-keys.cql"
+
+
+# =============================================================================
+# The no-skip detector — ONE definition, used by BOTH the guard and its
+# RED-verify test (issue #3500)
+# =============================================================================
+
+#: The ONLY ``pytest`` attributes this module may touch. An ALLOWLIST, not a
+#: blocklist: a blocklist can only ever name the evasion someone already thought
+#: of, and the first version of this guard proved it — it caught
+#: ``pytest.skip`` / ``pytest.mark.skip`` / ``pytest.mark.skipif`` and missed
+#: ``pytest.importorskip``, ``pytest.mark.xfail`` and
+#: ``from pytest import skip as _skip``, all of which skip just as green.
+#: Inverting it closes the whole family in one move: anything not named here
+#: FAILS, including a construct nobody has invented yet. Extend it only when
+#: this module genuinely needs another pytest API — and never with a
+#: skip/xfail-capable one.
+_PYTEST_ALLOWED_ATTRS = frozenset({"fixture", "raises", "fail", "approx"})
+
+#: Names that must never be imported OUT of pytest, under any alias: importing
+#: them detaches the call from the ``pytest.`` prefix the attribute scan reads.
+_PYTEST_FORBIDDEN_IMPORTS = frozenset(
+    {"skip", "skipif", "xfail", "importorskip", "exit", "mark"}
+)
+
+
+def _dotted_name(node: ast.AST) -> str:
+    """``a.b.c`` for a chain of ``Attribute`` nodes rooted at a ``Name``."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ""
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _skip_offenders(source: str) -> list[str]:
+    """Every skip-capable construct in ``source``, judged over the SYNTAX TREE.
+
+    THE SINGLE DEFINITION. The guard
+    (``test_no_skip_anywhere_in_this_module``) and its RED-verify
+    (``test_the_no_skip_guard_can_actually_fail``) both call THIS function, so
+    weakening the predicate — the exact edit someone makes in order to land a
+    skip — reds the RED-verify too. The two used to hold verbatim COPIES of the
+    predicate, which meant the anti-vacuity proof was bound to a copy and not to
+    the detector, i.e. the proof could stay green while the detector was gutted.
+
+    Judged over the parsed tree, not the file's text: this module discusses
+    skipping at length in its docstrings, and a text search would red on its own
+    prose — an assertion that fails on correct input is one that gets waived.
+    Docstrings are ``Constant`` nodes and are invisible here.
+
+    Three shapes are recognised:
+
+    * any ``pytest.<x>`` attribute access whose first attribute is not in
+      :data:`_PYTEST_ALLOWED_ATTRS` (so ``pytest.mark.anything``,
+      ``pytest.importorskip`` and ``pytest.skip`` are all offenders);
+    * ``from pytest import <forbidden>``, under any ``as`` alias;
+    * ``import pytest as <other>``, which would route every later call through a
+      name the attribute scan does not read.
+
+    STATED LIMIT: this is a scan for STATIC constructs. A dynamic
+    ``getattr(pytest, "skip")()`` or a skip raised from an imported helper is
+    not visible to it, and no AST scan can make it so. The guard is a ratchet
+    against the ordinary ways a skip gets added, not a proof that none exists.
+    """
+    tree = ast.parse(source)
+    # An attribute chain reports ONCE, at its outermost node: without this,
+    # `pytest.mark.skip` would report both "pytest.mark" and "pytest.mark.skip"
+    # and the RED-verify's exact-match assertions would be about noise.
+    nested = {
+        node.value for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    offenders: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node not in nested:
+            name = _dotted_name(node)
+            if not name.startswith("pytest."):
+                continue
+            if name.split(".")[1] not in _PYTEST_ALLOWED_ATTRS:
+                offenders.add(name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "pytest":
+            for alias in node.names:
+                if alias.name in _PYTEST_FORBIDDEN_IMPORTS:
+                    bound = f" as {alias.asname}" if alias.asname else ""
+                    offenders.add(f"from pytest import {alias.name}{bound}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "pytest" and alias.asname not in (None, "pytest"):
+                    offenders.add(f"import pytest as {alias.asname}")
+    return sorted(offenders)
 
 
 # =============================================================================
@@ -113,6 +221,11 @@ def _schemas_root() -> Path:
     absolute: the gate resolves a relative value against the repo root while
     pytest runs from the package dir, so it would certify one schemas root while
     the tests read another (#3148). A relative value is REJECTED, never resolved.
+
+    An override that is absolute but NOT a readable directory is rejected too.
+    It used to fall back silently to the checkout, which is the guessing posture
+    #3148 exists to remove: the operator asked for one schemas root, the run
+    used another, and the report said nothing. Both refusals name the value.
     """
     raw = os.environ.get("CQLITE_SCHEMAS_ROOT")
     if raw is not None and raw.strip():
@@ -128,8 +241,14 @@ def _schemas_root() -> Path:
                 "root) and to pytest (CWD = package dir), so the gate would certify "
                 "a schemas root the run never used (#3148)"
             )
-        if override.is_dir():
-            return override
+        if not override.is_dir():
+            pytest.fail(
+                f"CQLITE_SCHEMAS_ROOT={raw!r} is absolute but is not a readable "
+                "directory — refused rather than silently falling back to the "
+                "checkout, which would run against a schemas root the operator "
+                "did not ask for (#3148)"
+            )
+        return override
     return _workspace_root() / "test-data" / "schemas"
 
 
@@ -215,8 +334,26 @@ def db():
 
 
 def _rows_by_id(database, projection: str) -> dict:
-    """``{id: row}`` for a projection, asserting all four partitions arrived."""
+    """``{id: row}`` for a projection, pinning the partitions AND the shape.
+
+    The shape assertion is what makes every ``row.get(col) is None`` assertion
+    below SELF-SUFFICIENT. ``Row.get`` returns ``None`` for a column that is not
+    in the result at all (``bindings/python/src/result.rs``: a miss falls back to
+    the default, which is ``None``), so on its own ``assert row.get(col) is
+    None`` cannot tell "absent for THIS row" from "never selected" or "silently
+    dropped from the projection" — it would be leaning on a sibling test for the
+    half that matters. Asserting the row's key set here removes that dependency
+    once for every caller.
+    """
+    columns = [c.strip() for c in projection.split(",")]
+    expected_shape = sorted(["id", *columns])
     result = database.execute(f"SELECT id, {projection} FROM {KEYSPACE}.{TABLE}")
+    for row in result.rows:
+        assert sorted(row.to_dict()) == expected_shape, (
+            f"projection 'id, {projection}' returned columns "
+            f"{sorted(row.to_dict())}, expected {expected_shape} — a None below "
+            "would otherwise be indistinguishable from a dropped column"
+        )
     rows = {row.get("id"): row for row in result.rows}
     assert sorted(rows) == [1, 2, 3, 4], (
         f"expected partitions 1..4 from the committed fixture, got {sorted(rows)}"
@@ -242,6 +379,26 @@ def kp(label, rank) -> dict:
         "label": label,
         "rank": rank,
     }
+
+
+def kp_hashable(label, rank) -> frozenset:
+    """The HASHABLE projection of one ``key_part`` UDT value.
+
+    ``value_to_hashable_key``'s ``Udt`` arm emits a ``frozenset`` of
+    ``(field_name, value)`` pairs — the two metadata fields plus every schema
+    field, with a NULL field arriving as ``None`` from its
+    ``None => py.None()`` branch. Deliberately DIFFERENT from :func:`kp`, which
+    is ``udt_to_py``'s ``dict``: the two functions are separate code paths and
+    conflating them is what made #3500 invisible.
+    """
+    return frozenset(
+        {
+            ("_type", "key_part"),
+            ("_keyspace", KEYSPACE),
+            ("label", label),
+            ("rank", rank),
+        }
+    )
 
 
 def _component(payload) -> bytes:
@@ -318,11 +475,12 @@ class TestTupleBorneUdtInSetElement:
         assert row.get("s_tuple_udt") == [(kp("solo", 99), 42)]
 
     def test_sparse_row(self, db):
-        """id=4: the ONLY column written in that partition.
+        """id=4: this column decodes even though it is the only one written.
 
-        The sparse row exercises the missing-column path alongside a populated
-        hashable-position column: every other column of id=4 must be ``None``
-        while this one decodes.
+        Asserts THIS column only. The other six columns of id=4 are checked
+        where they belong — each column class has its own
+        ``test_absent_in_sparse_row``, and ``TestSelectStarWholeRow`` checks all
+        of them together in one ``SELECT *``.
         """
         rows = _rows_by_id(db, "s_tuple_udt")
         assert rows[4].get("s_tuple_udt") == [(kp("partial", 4), 4)]
@@ -437,12 +595,15 @@ class TestNestedListBorneUdtInSetElement:
     def test_intended_new_shape_is_not_a_frozenset(self, db):
         """The pre-fix container types are gone at BOTH levels.
 
-        Pinned explicitly so a revert of AC1 reds here rather than silently
-        restoring the asymmetry between ``s_list_udt`` and ``s_set_udt``.
+        ``type(value) is list`` is the assertion that reds on a revert of AC1
+        (the pre-fix projection was a ``frozenset``), and the two nested checks
+        pin the inner levels. A further ``assert not isinstance(value,
+        frozenset)`` used to sit here and has been removed: after ``type(value)
+        is list`` it cannot fail for any input, so it read as coverage while
+        testing nothing.
         """
         value = _rows_by_id(db, "s_list_udt")[1].get("s_list_udt")
         assert type(value) is list, f"expected list, got {type(value).__name__}"
-        assert not isinstance(value, frozenset)
         assert type(value[0]) is list
         assert type(value[0][0]) is dict
 
@@ -474,9 +635,13 @@ class TestFrozenOuterSetOfTupleBorneUdt:
     * frozen outer:  ``Frozen(Set([Tuple([Udt, Integer]), …]))``  — NO inner
       ``Frozen`` wrappers at all.
 
-    So the traversal must handle ``Frozen`` PRESENT and ABSENT at every level;
-    a fix that only unwrapped ``Frozen`` would still raise here. Before the fix
-    this column raised ``TypeError: unhashable type: 'dict'``.
+    What this column therefore proves, precisely: the SINGLE-VALUE-CELL decode
+    path produces a tree with NO inner ``Frozen`` wrappers, and the traversal
+    handles it. It does NOT prove anything ``s_tuple_udt`` does not — that
+    column reds on an unwrap-only fix too. The claim once made here, that "a fix
+    that only unwrapped ``Frozen`` would still raise here", was true and not
+    distinguishing. Before the fix this column raised
+    ``TypeError: unhashable type: 'dict'``.
     """
 
     def test_multi_element_partition(self, db):
@@ -525,9 +690,10 @@ class TestTupleBorneUdtAsMapKey:
 
     The expected bytes below are built from Cassandra's composite framing
     (int32 BE length per component, ``-1`` for null) and cross-check against the
-    golden's ``path`` values. The day ``parse_cell_path_key`` learns composites,
-    these assertions FAIL — which is the point: the failure is the reminder to
-    finish the map-key half of the hashable projection.
+    golden's ``path`` values. The day ``parse_cell_path_key`` learns composites
+    (#3612), these assertions FAIL — which is the point: the failure is the
+    reminder to re-pin this column against the structured shape the frozen-map
+    columns already produce.
     """
 
     def test_map_key_is_currently_opaque_bytes(self, db):
@@ -561,6 +727,152 @@ class TestTupleBorneUdtAsMapKey:
         assert _rows_by_id(db, "m_tuple_udt")[4].get("m_tuple_udt") is None
 
 
+class TestFrozenMapWithTupleBorneUdtKey:
+    """``f_map_tuple_udt`` — ``frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>``.
+
+    THE COLUMN THAT COVERS ``value_to_hashable_key``'s ``Tuple`` ARM. Read this
+    before deleting it as redundant with ``s_tuple_udt``.
+
+    Every OTHER column in this fixture leaves the new arm unexecuted, for two
+    independent reasons:
+
+    * a ``set`` whose elements contain a UDT takes ``set_to_py``'s LIST
+      fallback, which converts elements with ``value_to_py`` and never calls
+      ``value_to_hashable_key``. Issue #3500's own AC1 — make ``contains_udt``
+      total — is what makes that true of every UDT-bearing set column;
+    * a MULTICELL map's keys arrive as opaque ``Value::Blob`` from the
+      scalar-only ``parse_cell_path_key`` (see ``TestTupleBorneUdtAsMapKey``
+      and #3612), so they never reach the ``Tuple`` arm either.
+
+    A FROZEN map escapes both. It arrives as ONE value cell, and
+    ``parse_frozen_map_value`` → ``read_frozen_element`` →
+    ``parse_value_from_raw_bytes``
+    (``cqlite-core/src/storage/sstable/reader/parsing/row_decoder/``) decodes
+    each KEY structurally into a real ``Value::Frozen(Value::Tuple([...]))``.
+    ``map_to_py`` then projects every key through ``value_to_hashable_key``.
+
+    RED-VERIFIED, not argued: with this fixture and the PRE-FIX binding
+    (commit ``01c28646b``) this column raises
+    ``TypeError: unhashable type: 'dict'`` — issue #3500's shape-1 signature,
+    reached through the map-key path. So the arm is load-bearing here and a
+    revert reds this class.
+    """
+
+    def test_two_composite_keys_project_hashably(self, db):
+        """id=1: two structured keys, each ``(frozenset, int)``.
+
+        Cassandra's frozen-map key order (``mkey-a`` before ``mkey-b``) is the
+        golden's; a Python ``dict`` preserves it on iteration, but the assertion
+        is on the mapping, which is order-insensitive by construction.
+        """
+        value = _rows_by_id(db, "f_map_tuple_udt")[1].get("f_map_tuple_udt")
+        assert value == {
+            (kp_hashable("mkey-a", 21), 1): 210,
+            (kp_hashable("mkey-b", 22), 2): 220,
+        }
+
+    def test_key_is_a_tuple_of_a_frozenset(self, db):
+        """Exact container TYPES, not merely equal structures.
+
+        A ``dict`` key that is a ``tuple`` whose first element is a
+        ``frozenset`` is the observable signature of the ``Tuple`` arm having
+        recursed via ``value_to_hashable_key`` instead of ``value_to_py``: the
+        latter builds a ``tuple`` holding a ``dict``, which cannot be a key at
+        all.
+        """
+        value = _rows_by_id(db, "f_map_tuple_udt")[3].get("f_map_tuple_udt")
+        assert type(value) is dict
+        [key] = list(value)
+        assert type(key) is tuple
+        assert type(key[0]) is frozenset
+        assert type(key[1]) is int
+        assert value[key] == 7
+
+    def test_null_udt_field_inside_a_hashable_key(self, db):
+        """id=2: ``None`` field values INSIDE a dict key — the ``Udt`` ``None`` arm.
+
+        This is the ONLY place in the repository that executes
+        ``value_to_hashable_key``'s ``Udt``-arm ``None => py.None()`` branch. The
+        set columns' null fields travel ``udt_to_py``'s own ``None`` branch — a
+        DIFFERENT function — so ``test_null_udt_fields`` above does not cover it.
+
+        Both directions are pinned: a null ``rank`` and a null ``label``, in two
+        keys that must stay DISTINCT (a projection that collapsed ``None`` onto a
+        default would merge them and the dict would hold one entry).
+        """
+        value = _rows_by_id(db, "f_map_tuple_udt")[2].get("f_map_tuple_udt")
+        assert value == {
+            (kp_hashable("nullrank3", None), 1): 51,
+            (kp_hashable(None, 5), 2): 52,
+        }
+        assert len(value) == 2, "the two null-bearing keys must not collapse"
+        nulls = {
+            field_value
+            for key in value
+            for field_name, field_value in key[0]
+            if field_name in ("label", "rank")
+        }
+        assert None in nulls, (
+            "no None reached a hashable key — the Udt arm's None branch did not "
+            "execute, so this test would be covering nothing"
+        )
+
+    def test_absent_in_sparse_row(self, db):
+        """id=4 never wrote this column, so it must be ``None``, not ``{}``."""
+        assert _rows_by_id(db, "f_map_tuple_udt")[4].get("f_map_tuple_udt") is None
+
+
+class TestFrozenMapWithNestedSetUdtKey:
+    """``f_map_set_udt`` — ``frozen<map<frozen<set<frozen<key_part>>>, int>>``.
+
+    THE COLUMN THAT COVERS ``value_to_hashable_key``'s ``Set`` ARM, by the same
+    frozen-map route as the class above — see its docstring for why no set
+    column can do this.
+
+    The ``Set`` arm deliberately does NOT delegate to ``set_to_py``, whose UDT
+    fallback returns a ``list``: a ``list`` cannot be a ``dict`` key, and that
+    is precisely issue #3500's shape-2 crash. RED-VERIFIED: with this fixture
+    and the pre-fix binding this column raises
+    ``TypeError: unhashable type: 'list'``.
+    """
+
+    def test_nested_set_keys_project_to_nested_frozensets(self, db):
+        """id=1: a two-element inner set and a one-element inner set, as keys."""
+        value = _rows_by_id(db, "f_map_set_udt")[1].get("f_map_set_udt")
+        assert value == {
+            frozenset({kp_hashable("mset-a", 31), kp_hashable("mset-b", 32)}): 310,
+            frozenset({kp_hashable("mset-c", 33)}): 330,
+        }
+
+    def test_key_is_a_frozenset_of_frozensets(self, db):
+        """Exact container types: ``frozenset`` at BOTH levels, never a ``list``."""
+        value = _rows_by_id(db, "f_map_set_udt")[3].get("f_map_set_udt")
+        assert type(value) is dict
+        [key] = list(value)
+        assert type(key) is frozenset
+        [inner] = list(key)
+        assert type(inner) is frozenset
+        assert value[key] == 7
+
+    def test_null_and_empty_udt_fields_stay_distinct(self, db):
+        """id=2: an all-null UDT key and an empty-string/zero one, both hashable.
+
+        ``''`` is not ``None``: two keys, two entries. The all-null key also
+        drives the ``Udt`` arm's ``None`` branch through the ``Set`` arm rather
+        than the ``Tuple`` arm, so the branch is covered on both routes.
+        """
+        value = _rows_by_id(db, "f_map_set_udt")[2].get("f_map_set_udt")
+        assert value == {
+            frozenset({kp_hashable(None, None)}): 61,
+            frozenset({kp_hashable("", 0)}): 62,
+        }
+        assert len(value) == 2
+
+    def test_absent_in_sparse_row(self, db):
+        """id=4 never wrote this column."""
+        assert _rows_by_id(db, "f_map_set_udt")[4].get("f_map_set_udt") is None
+
+
 class TestSelectStarWholeRow:
     """``SELECT *`` over every partition — the shape a user actually runs.
 
@@ -577,6 +889,29 @@ class TestSelectStarWholeRow:
             f"{ids}"
         )
 
+    def test_select_star_returns_every_column(self, db):
+        """``SELECT *`` yields exactly the seven declared columns plus ``id``.
+
+        Pinned so the ``is None`` assertions in the sparse-row test below cannot
+        be satisfied by a column having been dropped from the projection
+        (``Row.get`` answers ``None`` for an unknown column too).
+        """
+        result = db.execute(f"SELECT * FROM {KEYSPACE}.{TABLE}")
+        expected = sorted(
+            [
+                "id",
+                "s_tuple_udt",
+                "s_set_udt",
+                "m_tuple_udt",
+                "s_list_udt",
+                "f_set_tuple_udt",
+                "f_map_tuple_udt",
+                "f_map_set_udt",
+            ]
+        )
+        for row in result.rows:
+            assert sorted(row.to_dict()) == expected
+
     def test_select_star_whole_row_values(self, db):
         """id=3's complete row — every column at once, exact values."""
         result = db.execute(f"SELECT * FROM {KEYSPACE}.{TABLE}")
@@ -589,14 +924,25 @@ class TestSelectStarWholeRow:
         assert row.get("m_tuple_udt") == {
             tuple_udt_int_serialized("solo", 99, 42): 7
         }
+        assert row.get("f_map_tuple_udt") == {(kp_hashable("solo", 99), 42): 7}
+        assert row.get("f_map_set_udt") == {
+            frozenset({kp_hashable("solo", 99)}): 7
+        }
 
     def test_select_star_sparse_row_values(self, db):
-        """id=4: one populated column, four absent ones, in one ``SELECT *``."""
+        """id=4: one populated column, six absent ones, in one ``SELECT *``."""
         result = db.execute(f"SELECT * FROM {KEYSPACE}.{TABLE}")
         rows = {row.get("id"): row for row in result.rows}
         row = rows[4]
         assert row.get("s_tuple_udt") == [(kp("partial", 4), 4)]
-        for absent in ("s_set_udt", "s_list_udt", "f_set_tuple_udt", "m_tuple_udt"):
+        for absent in (
+            "s_set_udt",
+            "s_list_udt",
+            "f_set_tuple_udt",
+            "m_tuple_udt",
+            "f_map_tuple_udt",
+            "f_map_set_udt",
+        ):
             assert row.get(absent) is None, f"{absent} should be absent for id=4"
 
 
@@ -613,15 +959,44 @@ class TestFixtureResolutionContract:
     def test_selection_is_by_evidence_not_by_root_order(self):
         """The chosen root must be one that actually holds the table.
 
-        This is the #3220 defect in miniature: the old shape picked a root by
-        KEYSPACE and committed to it, so a root holding the keyspace but not the
-        table won the selection and the table was then declared absent.
+        WEAK BY ITSELF, and kept only as a live-environment smoke check: it
+        asserts a property ("the chosen root holds the table") that is true
+        under ANY selection rule, so it exercises order-independence only when
+        the environment happens to supply a first root that lacks the fixture.
+        The deterministic case is the next test.
         """
         chosen = _sstables_root_for_table(KEYSPACE, TABLE)
         assert _table_has_data(chosen, KEYSPACE, TABLE), (
             f"resolver returned {chosen}, which does not carry {KEYSPACE}.{TABLE}"
         )
         assert chosen in _sstables_root_candidates()
+
+    def test_first_searched_root_without_a_data_db_loses_to_the_checkout(
+        self, tmp_path, monkeypatch
+    ):
+        """A DECOY env root, searched FIRST, must still lose to the checkout.
+
+        Deterministic, environment-independent: the decoy is constructed here
+        with the keyspace dir AND a plausible ``<table>-<id>/`` dir but no
+        ``*-Data.db``, and ``CQLITE_DATASETS_ROOT`` points at it, so it is
+        candidate ZERO. An env-first resolver — the #3104 shape — returns the
+        decoy; an evidence-first one returns the checkout.
+
+        This is the case the test above cannot make: on this fleet the real
+        ``CQLITE_DATASETS_ROOT`` merely LACKS the keyspace, which the weaker
+        assertion cannot distinguish from a correct rule.
+        """
+        decoy = tmp_path / "decoy"
+        (decoy / "sstables" / KEYSPACE / f"{TABLE}-0badc0de").mkdir(parents=True)
+        monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(decoy))
+
+        candidates = _sstables_root_candidates()
+        assert candidates[0] == decoy / "sstables", (
+            "the decoy must be searched FIRST or this test proves nothing about "
+            f"ordering; candidates were {candidates}"
+        )
+        checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
+        assert _sstables_root_for_table(KEYSPACE, TABLE) == checkout
 
     def test_keyspace_present_but_table_absent_is_not_a_match(self, tmp_path):
         """A root with the keyspace dir but no table dir must not qualify."""
@@ -656,89 +1031,114 @@ class TestFixtureResolutionContract:
             assert str(root) in message, f"diagnostic omits candidate root {root}"
         assert "must never be skipped" in message
 
+    def test_absolute_but_unreadable_schemas_root_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        """An absolute ``CQLITE_SCHEMAS_ROOT`` that is not a directory FAILS.
+
+        It used to fall back silently to the checkout, so an operator pointing
+        at a typo'd path got a green run against a schemas root they never
+        named. Both this and the relative-path refusal name the offending value.
+        """
+        missing = tmp_path / "no_such_schemas_root"
+        monkeypatch.setenv("CQLITE_SCHEMAS_ROOT", str(missing))
+        with pytest.raises(BaseException) as excinfo:
+            _schemas_root()
+        assert str(missing) in str(excinfo.value)
+
+    def test_relative_schemas_root_is_rejected_not_resolved(self, monkeypatch):
+        """A RELATIVE override is refused: it would mean two different roots.
+
+        The gate resolves a relative value against the repo root, pytest against
+        the package dir — so it could certify one schemas root while the run
+        read another (#3148).
+        """
+        monkeypatch.setenv("CQLITE_SCHEMAS_ROOT", "test-data/schemas")
+        with pytest.raises(BaseException) as excinfo:
+            _schemas_root()
+        assert "ABSOLUTE" in str(excinfo.value)
+
+    def test_unset_schemas_root_resolves_to_the_checkout(self, monkeypatch):
+        """With no override, the committed checkout-relative root is used.
+
+        The positive half of the two refusals above: without it, a bug that made
+        ``_schemas_root`` raise unconditionally would still satisfy them.
+        """
+        monkeypatch.delenv("CQLITE_SCHEMAS_ROOT", raising=False)
+        expected = _workspace_root() / "test-data" / "schemas"
+        assert _schemas_root() == expected
+        assert (expected / SCHEMA_FILE).is_file()
+
     def test_no_skip_anywhere_in_this_module(self):
         """Structural: this module must contain no skip of any kind.
 
-        A ``pytest.skip(...)`` call or a ``@pytest.mark.skip``/``skipif``
-        decorator added later would silently restore exactly the failure mode
-        the rest of this class exists to prevent, and no behavioural test can
-        see a skip that was never added.
+        A skip added later would silently restore exactly the failure mode the
+        rest of this class exists to prevent, and no behavioural test can see a
+        skip that was never added.
 
-        Judged over the PARSED SYNTAX TREE, not the file's text: this module
-        discusses skipping at length in its docstrings, and a text search would
-        red on its own prose — an assertion that fails on correct input is one
-        that gets waived. Docstrings are ``Constant`` nodes and are therefore
-        invisible here; only real attribute access counts.
+        The detection lives in the module-level :func:`_skip_offenders`, which
+        this test and its RED-verify BOTH call — see that function for the
+        allowlist rationale and for the limit it does not cover.
         """
-        import ast
-
-        def dotted(node) -> str:
-            parts: list[str] = []
-            while isinstance(node, ast.Attribute):
-                parts.append(node.attr)
-                node = node.value
-            if not isinstance(node, ast.Name):
-                return ""
-            parts.append(node.id)
-            return ".".join(reversed(parts))
-
-        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-        offenders = sorted(
-            {
-                name
-                for node in ast.walk(tree)
-                if isinstance(node, ast.Attribute)
-                for name in (dotted(node),)
-                if name.startswith("pytest.")
-                and any(part in ("skip", "skipif") for part in name.split("."))
-            }
-        )
+        offenders = _skip_offenders(Path(__file__).read_text(encoding="utf-8"))
         assert offenders == [], (
-            f"skip constructs found in {Path(__file__).name}: {offenders} — this "
-            "module is fail-closed by contract (#3220) and must never skip"
+            f"skip-capable constructs found in {Path(__file__).name}: "
+            f"{offenders} — this module is fail-closed by contract (#3220) and "
+            "must never skip"
         )
 
     def test_the_no_skip_guard_can_actually_fail(self):
-        """RED-verify the guard above against a planted skip.
+        """RED-verify the guard against planted skips, one per evasion shape.
 
         A structural assert over a file that legitimately contains none of the
         forbidden constructs passes whether or not its detection works, so the
         detection is exercised here against source that DOES contain them.
         Without this, ``test_no_skip_anywhere_in_this_module`` would be a
         vacuous green.
+
+        This calls the SAME :func:`_skip_offenders` the guard calls. It used to
+        hold a verbatim COPY of the predicate, which bound the anti-vacuity
+        proof to the copy: gutting the real detector — the exact edit someone
+        makes in order to land a skip — left this test green.
+
+        The last four cases are the shapes the previous BLOCKLIST missed. They
+        are listed individually rather than as a loop so a failure names the
+        shape that regressed.
         """
-        import ast
-
-        def dotted(node) -> str:
-            parts: list[str] = []
-            while isinstance(node, ast.Attribute):
-                parts.append(node.attr)
-                node = node.value
-            if not isinstance(node, ast.Name):
-                return ""
-            parts.append(node.id)
-            return ".".join(reversed(parts))
-
-        def offenders_in(source: str) -> list[str]:
-            tree = ast.parse(source)
-            return sorted(
-                {
-                    name
-                    for node in ast.walk(tree)
-                    if isinstance(node, ast.Attribute)
-                    for name in (dotted(node),)
-                    if name.startswith("pytest.")
-                    and any(part in ("skip", "skipif") for part in name.split("."))
-                }
-            )
-
-        # A skip CALL, a mark decorator, and a conditional mark are each caught.
-        assert offenders_in("pytest.skip('nope')") == ["pytest.skip"]
-        assert offenders_in(
-            "@pytest.mark.skip\ndef t():\n    pass\n"
-        ) == ["pytest.mark.skip"]
-        assert offenders_in(
+        # The shapes the old blocklist DID catch.
+        assert _skip_offenders("pytest.skip('nope')") == ["pytest.skip"]
+        assert _skip_offenders("@pytest.mark.skip\ndef t():\n    pass\n") == [
+            "pytest.mark.skip"
+        ]
+        assert _skip_offenders(
             "@pytest.mark.skipif(True, reason='x')\ndef t():\n    pass\n"
         ) == ["pytest.mark.skipif"]
+        # The shapes it MISSED — each of these skipped green under the blocklist.
+        assert _skip_offenders("pytest.importorskip('numpy')") == [
+            "pytest.importorskip"
+        ]
+        assert _skip_offenders("@pytest.mark.xfail\ndef t():\n    pass\n") == [
+            "pytest.mark.xfail"
+        ]
+        assert _skip_offenders("from pytest import skip as _skip\n_skip('x')\n") == [
+            "from pytest import skip as _skip"
+        ]
+        assert _skip_offenders("import pytest as pt\npt.skip('x')\n") == [
+            "import pytest as pt"
+        ]
+        # An UNKNOWN pytest attribute is an offender too: the allowlist is what
+        # makes a construct nobody has invented yet fail closed.
+        assert _skip_offenders("pytest.some_future_skipper()") == [
+            "pytest.some_future_skipper"
+        ]
+        # ...and the APIs this module legitimately uses must NOT be offenders,
+        # or the guard would red on correct input and get waived.
+        assert _skip_offenders(
+            "@pytest.fixture\ndef f():\n    pass\n"
+            "def t():\n"
+            "    with pytest.raises(AssertionError):\n        pass\n"
+            "    pytest.fail('x')\n"
+            "    assert 1 == pytest.approx(1)\n"
+        ) == []
         # Prose mentioning them is NOT a violation — the point of using the AST.
-        assert offenders_in('"""never pytest.skip; no pytest.mark.skipif."""') == []
+        assert _skip_offenders('"""never pytest.skip; no pytest.mark.skipif."""') == []
