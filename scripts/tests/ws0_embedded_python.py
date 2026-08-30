@@ -179,6 +179,32 @@ _PY_WORD = re.compile(r"python[0-9]*(?:\.[0-9]+)*(?![\w.])")
 # own inline block at line 941 uses.
 _CONCATENATION_BEFORE_WORD = frozenset("\"'`)}" + chr(92))
 
+# IS A COMMAND WORD A PLAIN LITERAL? (#3451 review round 12.)
+#
+# The flag anchor used to report EVERY `-c '…'` whose command word was not literally `python3`,
+# which false-red on `grep -c '_RN'` the moment #3455 added one to the driver. `-c` is a common
+# flag — `grep -c` counts, `sort -c` checks, `tar -c` creates — so "not python3" was the wrong
+# question. The right one is decidable in three states:
+#
+#   a literal CONTAINING `python`      the allowlisted shape; the word anchor handles it
+#   a literal NOT containing `python`  SKIP. `grep` is definitively not python, so there is no
+#                                      python program here and nothing to compile. Deciding this
+#                                      needs no list of known commands — only that the word is
+#                                      literal, and that literals can be compared.
+#   NOT a plain literal                FINDING. `$PYTHON`, `"prefix"python3`, `$(which python3)`
+#                                      cannot be resolved without executing the shell, so they
+#                                      may carry code and fail closed.
+#
+# A word is a PLAIN LITERAL when it contains no expansion or quoting character. That is the same
+# closed metacharacter set used elsewhere in this file, applied to a different question.
+_NON_LITERAL_IN_WORD = frozenset("$`\"'*?[]{}" + chr(92))
+
+
+def _is_plain_literal(word: str) -> bool:
+    """True when `word` is a shell word whose text IS its value — no expansion, no quoting."""
+    return bool(word) and not any(ch in _NON_LITERAL_IN_WORD for ch in word)
+
+
 # THE SECOND DISCOVERY ANCHOR: the FLAG, not the command word (#3451 review round 7, finding 1).
 #
 # The allowlist closed CLASSIFICATION — anything not allowlisted is a finding — but not
@@ -422,14 +448,21 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             # contradicted itself and told its reader nothing actionable.
             before = text[line_start:match_start].rstrip()
             cmd_word = before[max((before.rfind(c) for c in _WORD_BREAK), default=-1) + 1 :]
+            if _is_plain_literal(cmd_word) and "python" not in cmd_word.rsplit("/", 1)[-1]:
+                # A LITERAL non-python command: `grep -c '_RN'`, `sort -c`, `tar -c`. Its text is
+                # its value, so this is decidably not a python invocation and there is no program
+                # to compile. Skipped rather than reported — reporting it is the false-red
+                # direction, and a guard that reds on correct code is the guard people waive.
+                continue
             findings.append({
                 "line": idx + 1,
-                "reason": "a `-c '<program>'` invocation for which NO literal `python3` command"
-                          f" word was found (nearest preceding word: {cmd_word or '(none)'!r})."
-                          " Anchored on the FLAG rather than the command word, because an"
-                          " indirectly-spelled word — a variable, a concatenation — carries code"
-                          " exactly as a literal one does and was INVISIBLE before #3451 round 7."
-                          " Teach the allowlist if the spelling is intended.",
+                "reason": "a `-c '<program>'` invocation whose command word"
+                          f" ({cmd_word or '(none)'!r}) is NOT A PLAIN LITERAL, so what it runs"
+                          " cannot be decided without executing the shell — it may be python"
+                          " carrying a program this check would never see. Anchored on the FLAG"
+                          " rather than the command word, because an indirectly-spelled word was"
+                          " INVISIBLE before #3451 round 7. A LITERAL non-python command"
+                          " (`grep -c`, `sort -c`) is skipped, not reported.",
             })
             continue
         # Walk left to the start of the shell WORD, so a path prefix travels with the candidate.

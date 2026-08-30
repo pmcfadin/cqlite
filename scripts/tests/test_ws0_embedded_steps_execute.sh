@@ -199,6 +199,36 @@ findings_of() {
     | grep -v '^$'
 }
 
+# local_binding_of <driver> <block-needle> — the first `NAME = MAPPING["KEY"]` line in the block
+# that calls <block-needle>, printed as `NAME MAPPING KEY`.
+#
+# DERIVED, NOT HARDCODED (#3451 review round 12). The injection controls used the literal names
+# `pin_sha` / `rec_server_cpus`, and #3455 renamed those bindings to `_sha` / `_scpus` — so after
+# the rebase every injection reported INJECTION IMPOSSIBLE and four controls could not fire. They
+# failed loudly, which is the vacuity guard working, but a control keyed on a name the driver is
+# free to change is a control that breaks on maintenance. The binding SHAPE is what the fix is
+# about (a subscript bound to a local before the f-string), so the shape is what is matched.
+local_binding_of() {
+  python3 - "$REPO_ROOT/scripts/tests" "$1" "$2" <<'PY'
+import pathlib, re, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_embedded_python import census
+records, _findings = census(pathlib.Path(sys.argv[2]))
+owners = [r for r in records if r["kind"] == "BLOCK" and sys.argv[3] in r["body"]]
+if len(owners) != 1:
+    print(f"AMBIGUOUS: {len(owners)} block(s) call {sys.argv[3]!r}", file=sys.stderr)
+    raise SystemExit(2)
+pattern = re.compile(r'^([A-Za-z_]\w*) = ([A-Za-z_]\w*)\["(\w+)"\]$', re.M)
+found = pattern.search(owners[0]["body"])
+if not found:
+    print(f"NO LOCAL BINDING found in the block calling {sys.argv[3]!r} — the step no longer"
+          " binds a subscript to a local before its f-string, which is the very shape #3451"
+          " exists to keep. Check the driver before relaxing this.", file=sys.stderr)
+    raise SystemExit(3)
+print(" ".join(found.groups()))
+PY
+}
+
 # defective_copy <src> <dest> <placeholder> <mapping> <key> — a scratch copy of the driver whose
 # f-string placeholder `{<placeholder>}` has been rewritten to the INLINE SUBSCRIPT spelling that
 # NO CPython parses: a backslash inside the expression, which the tokenizer reads as a line
@@ -315,16 +345,18 @@ fi
 
 block_count="$(grep -c '^BLOCK	' <<<"$census_out")"
 # EXACTLY the blocks this driver carries, not a floor. An under-count is the vacuous-green shape
-# and a floor cannot see it once the floor is met: a delimiter that silently stopped recognising
-# one shape would drop that block from BOTH the census and the compile check while the count still
-# cleared a floor. (MEASURED tree-wide while building this: a column-0-only closer rule found 31
-# blocks where the correct rule finds 59 — a loose delimiter under-counts SUBJECTS, it does not
-# merely mis-cut them.) The three are the two fatal pin STEPS plus the inline monotonic-clock read.
-# Adding an embedded step to this driver is a deliberate act, so bump this constant deliberately;
-# the compile property below then covers the new block automatically.
-EXPECTED_BLOCKS=3
+# and a floor cannot see it once met: a delimiter that silently stopped recognising one shape
+# would drop that block from BOTH the census and the compile check while the count still cleared
+# a floor. (MEASURED tree-wide: a column-0-only closer rule found 31 blocks where the correct rule
+# finds 59 — a loose delimiter under-counts SUBJECTS, it does not merely mis-cut them.)
+#
+# THE COUNT IS THE DRIVER'S, AND THE DRIVER MOVES. #3455 took it from 3 blocks to 5, so bumping
+# this is the expected maintenance and the failure message says so. Everything else about the two
+# steps is located STRUCTURALLY — by the shipped writer each body calls — precisely so that a
+# driver edit costs one constant here and nothing more.
+EXPECTED_BLOCKS=5
 if [ "$block_count" -eq "$EXPECTED_BLOCKS" ]; then
-  pass "census: exactly $block_count embedded python block(s) in the driver — the 2 fatal pin steps plus the inline monotonic-clock read"
+  pass "census: exactly $block_count embedded python block(s) in the driver — the count is the DRIVER\x27s and moves with it; the two pin steps are located structurally, not by position"
 else
   fail "census: $block_count embedded block(s) found in $DRIVER, expected $EXPECTED_BLOCKS. If a step was ADDED, bump EXPECTED_BLOCKS; if the count DROPPED, the extractor has stopped seeing a shape and the missing block is being compiled by nothing"
 fi
@@ -730,8 +762,10 @@ control_compile() { # control_compile <label> <placeholder> <mapping> <key>
     fail "compile CONTROL did NOT fire ($label): the injected defect must be reported, got: $(findings_of "$out" | head -2)"
   fi
 }
-control_compile "session-corpus-pin step" pin_sha pin data_db_sha256
-control_compile "CPU-pin-verification step" rec_server_cpus rec server_cpus
+read -r cb_name cb_map cb_key <<<"$(local_binding_of "$DRIVER" write_session_corpus_pin)"
+control_compile "session-corpus-pin step" "$cb_name" "$cb_map" "$cb_key"
+read -r pb_name pb_map pb_key <<<"$(local_binding_of "$DRIVER" pinning_record_path)"
+control_compile "CPU-pin-verification step" "$pb_name" "$pb_map" "$pb_key"
 
 # ============================================================================
 # PART 3 — THE SESSION-CORPUS-PIN STEP **RUNS**
@@ -775,13 +809,17 @@ fi
 CFG_PAIRS=(
   "reps=1" "temps=warm" "arms=bypass" "scan_passes=1"
   "server_cpus=2,10" "client_cpus=4,12" "step_duration=45s/1s"
-  # THE DRIVER'S OWN SHAPE (#3451 review round 8, finding 2). `ws0-baseline.sh:298` sets
-  # `FLIGHT_ENDPOINT="http://127.0.0.1:$PORT"` and `ws0_session` validates the field with
-  # `http_endpoint` as an ABSOLUTE http URL, so the `grpc://…` this suite used before was a value
-  # the driver never produces and the shipped reader would REJECT — the round trip was approving
-  # an artifact production would refuse. Taken from the sibling fixture constant rather than
-  # spelled again, so the two cannot drift.
   "flight_endpoint=$WS0_FIXTURE_ENDPOINT"
+  # ...and the fields #3455 added. Each value is THE DRIVER'S OWN DEFAULT SHAPE, not merely
+  # something the validator accepts — the round-8 lesson about the Flight endpoint applied here
+  # before it could cost a round: a fixture pinning a value the driver never produces makes the
+  # round trip approve an artifact production would refuse. `events` is the driver's counter list,
+  # `profile`/`quiescence` are its own closed-grammar defaults (`off`, and the unverified
+  # sentinel), and `bin_dir` is a release bin path.
+  "events=cycles,instructions"
+  "bin_dir=target/release"
+  "profile=off"
+  "quiescence=NOT VERIFIED (no timeseries supplied)"
   # `non-baseline`, and that is the only honest value available here: this is a few-KB synthetic
   # corpus, and the shipped `require_canonical_or_declared` REFUSES a divergent corpus in
   # `baseline` mode — correctly. Declaring the mode is the supported way past it, not a way round
@@ -1099,7 +1137,7 @@ fi
 
 # --- POSITIVE CONTROL 3a: the same harness OBSERVES the defective step failing -----------------
 DEFECTIVE_PIN="$TMP/defect-exec-pin.sh"
-if defective_copy "$DRIVER" "$DEFECTIVE_PIN" pin_sha pin data_db_sha256 2>"$TMP/inject-pin.err"; then
+if defective_copy "$DRIVER" "$DEFECTIVE_PIN" "$cb_name" "$cb_map" "$cb_key" 2>"$TMP/inject-pin.err"; then
   OUT_BAD="$TMP/session-bad"; mkdir -p "$OUT_BAD"
   python3 - "$PERF_DIR" "$OUT_BAD" "$CORPUS" <<'PY'
 import pathlib, sys
@@ -1215,7 +1253,7 @@ fi
 
 # --- POSITIVE CONTROL 4: the same harness OBSERVES the defective CPU step failing ---------------
 DEFECTIVE_CPU="$TMP/defect-exec-cpu.sh"
-if defective_copy "$DRIVER" "$DEFECTIVE_CPU" rec_server_cpus rec server_cpus 2>"$TMP/inject-cpu.err"; then
+if defective_copy "$DRIVER" "$DEFECTIVE_CPU" "$pb_name" "$pb_map" "$pb_key" 2>"$TMP/inject-cpu.err"; then
   OUT_BAD2="$TMP/session-bad-cpu"; mkdir -p "$OUT_BAD2"
   run_cpu_rc=0
   run_cpu_step "$DEFECTIVE_CPU" "$OUT_BAD2"; bad_cpu_out="$(cat "$STEP_OUT")"
