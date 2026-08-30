@@ -156,18 +156,45 @@ class TimelineReplayTests(unittest.TestCase):
                 self.assertIn("UNMEASURABLE", msg)
                 self.assertIn("#3559", msg)
 
-    def test_a_tie_strictly_before_the_merge_is_still_ordered_by_the_api_order(self):
-        """The refusal is scoped to a tie WITH mergedAt, not to ties in general.
+    def test_conflicting_kinds_tied_at_the_deciding_second_are_refused(self):
+        """A `closed` and a `reopened` in the SAME second cannot be ordered, and they imply
+        OPPOSITE classifications (roborev round 5).
 
-        Two events sharing a second well before the merge fall unambiguously on the same
-        side of it, so the classification is decidable and must not be refused — otherwise
-        the fix for the mergedAt tie would red an ordinary correct invocation.
+        An earlier version of this suite asserted that such a tie was resolved by the API's
+        RESPONSE ORDER — i.e. it pinned the bug as intended behaviour, which is worse than
+        the bug, because a test asserting a wrong invariant is what stops the next person
+        fixing it. Response position is not an authoritative sequence, so a reordered reply
+        would invert the verdict.
         """
         tie = "2026-06-10T01:00:00Z"
-        self.assertEqual(self._state([[_ev("closed", tie), _ev("reopened", tie)]]),
-                         (True, None))
-        self.assertEqual(self._state([[_ev("reopened", tie), _ev("closed", tie)]]),
+        for label, pages in (
+            ("closed then reopened", [[_ev("closed", tie), _ev("reopened", tie)]]),
+            ("reopened then closed", [[_ev("reopened", tie), _ev("closed", tie)]]),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(SystemExit) as caught:
+                    self._state(pages)
+                msg = str(caught.exception)
+                self.assertIn("UNMEASURABLE", msg)
+                self.assertIn("OPPOSITE", msg)
+
+    def test_a_tie_among_events_of_the_SAME_kind_is_still_decidable(self):
+        """The refusal must be scoped to CONFLICTING kinds, or it reds correct invocations.
+
+        Every ordering of a same-kind tie yields the same verdict, so there is nothing
+        unmeasurable about it — and a check that reds on decidable input is one agents learn
+        to waive.
+        """
+        tie = "2026-06-10T01:00:00Z"
+        self.assertEqual(self._state([[_ev("closed", tie), _ev("closed", tie)]]),
                          (False, tie))
+        self.assertEqual(self._state([[_ev("reopened", tie), _ev("reopened", tie)]]),
+                         (True, None))
+        # and an earlier tie is still superseded by a later single event
+        self.assertEqual(
+            self._state([[_ev("closed", tie), _ev("closed", tie),
+                          _ev("reopened", "2026-06-10T02:00:00Z")]]),
+            (True, None))
 
     def test_the_decision_does_not_depend_on_the_apis_delivery_order(self):
         """Ordering is established by the parsed timestamps here, not assumed of the API."""

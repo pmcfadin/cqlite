@@ -608,7 +608,30 @@ def _issue_state_at(issue_url, issue: int, merged_at):
     if not deciding:
         # No state event at or before the merge: the issue had never been closed by then.
         return True, None
-    _, _, kind, at = max(deciding, key=lambda e: (e[0], e[1]))
+    # CONFLICTING KINDS TIED AT THE DECIDING SECOND ARE UNMEASURABLE (roborev round 5).
+    # The mergedAt tie was refused one branch up, and preserving "API order decides" for
+    # ties STRICTLY BEFORE the merge quietly reintroduced the same class here: if the
+    # latest pre-merge second holds BOTH a `closed` and a `reopened`, the answer depends
+    # on response POSITION, which is not an authoritative ordering and is not validated
+    # anywhere. A reordered response would INVERT the slice classification.
+    #
+    # Scoped to CONFLICTING kinds only, deliberately. A tie among events of the SAME kind
+    # is harmless — every ordering yields the same verdict — and refusing it would red a
+    # decidable invocation, which is how a check becomes one agents learn to waive.
+    latest_ts = max(e[0] for e in deciding)
+    tied = [e for e in deciding if e[0] == latest_ts]
+    tied_kinds = {e[2] for e in tied}
+    if len(tied_kinds) > 1:
+        raise SystemExit(
+            f"error: issue's timeline has BOTH a `closed` and a `reopened` event at "
+            f"{tied[0][3]}, the latest instant before PR mergedAt {merged_at} — GitHub "
+            f"timestamps to one-second resolution, so which of them happened last is "
+            f"UNMEASURABLE, and the two imply OPPOSITE classifications. Refusing rather "
+            f"than letting the API's response order decide: that order is not an "
+            f"authoritative sequence. Resolve it from the issue's own event log and stamp "
+            f"accordingly, and do NOT hand-append the record past the validator "
+            f"(issue #3559).")
+    _, _, kind, at = max(tied, key=lambda e: e[1])
     return (kind == "reopened"), (None if kind == "reopened" else at)
 
 
