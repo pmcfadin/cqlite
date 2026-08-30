@@ -230,7 +230,7 @@ fi
 # pre-#3465 two-argument invocation must FAIL LOUDLY (usage, exit 3).
 if run 3 "pre-#3465 two-arg invocation -> exit 3 (usage)" 2421 "$CERTIFIED"; then
   case "$OUT" in
-    *"gate-summary-file"*) ok "usage: two-arg call fails closed and names <gate-summary-file>" ;;
+    *"gate-of-record-summary"*) ok "usage: two-arg call fails closed and names <gate-of-record-summary>" ;;
     *) bad "usage: two-arg refusal must name the missing argument (got: $OUT)" ;;
   esac
 fi
@@ -283,14 +283,14 @@ refused "launch sentinel (RESULT: INCOMPLETE) alone -> refuse" "$T/sentinel.txt"
 
 # --- Case 14: RESULT: FAIL -> refuse -----------------------------------------
 full_summary "$T/result-fail.txt" "$C7" "$C12" PASS FAIL
-refused "RESULT: FAIL -> refuse" "$T/result-fail.txt" "RESULT verdict token is 'FAIL'"
+refused "RESULT: FAIL -> refuse" "$T/result-fail.txt" "RESULT verdict token in the full-gate block is 'FAIL'"
 
 # --- Case 15: near-miss RESULT verdict tokens -> refuse (token-exact) --------
 # A `PASS*` prefix test would check a SPELLING rather than a STATE.
 for near in PASSthisNeverRan PASS-MEASUREMENT-DID-NOT-HAPPEN PASSED; do
   full_summary "$T/near-$near.txt" "$C7" "$C12" PASS "$near"
   refused "near-miss RESULT token '$near' -> refuse (token-exact, not a prefix)" \
-    "$T/near-$near.txt" "RESULT verdict token is '$near'"
+    "$T/near-$near.txt" "RESULT verdict token in the full-gate block is '$near'"
 done
 
 # --- Case 16: tree-integrity FAIL / PENDING / SKIP -> refuse -----------------
@@ -298,11 +298,11 @@ done
 # means it never reached the terminal emit; SKIP means the check never ran.
 full_summary "$T/ti-fail.txt" "$C7" "$C12" \
   "FAIL (tree-mutated-midrun; head da9a7cb->ca8eb01; changed: src/lib.rs)" PASS
-refused "tree-integrity: FAIL -> refuse" "$T/ti-fail.txt" "tree-integrity verdict token is 'FAIL'"
+refused "tree-integrity: FAIL -> refuse" "$T/ti-fail.txt" "tree-integrity verdict token in the full-gate block is 'FAIL'"
 full_summary "$T/ti-pending.txt" "$C7" "$C12" PENDING PASS
-refused "tree-integrity: PENDING -> refuse" "$T/ti-pending.txt" "token is 'PENDING'"
+refused "tree-integrity: PENDING -> refuse" "$T/ti-pending.txt" "token in the full-gate block is 'PENDING'"
 full_summary "$T/ti-skip.txt" "$C7" "$C12" "SKIP (no capture)" PASS
-refused "tree-integrity: SKIP -> refuse" "$T/ti-skip.txt" "token is 'SKIP'"
+refused "tree-integrity: SKIP -> refuse" "$T/ti-skip.txt" "token in the full-gate block is 'SKIP'"
 
 # --- Case 17: missing RESULT / tree-integrity lines -> refuse ----------------
 full_summary "$T/no-result.txt" "$C7" "$C12" PASS "-"
@@ -330,23 +330,31 @@ refused "#3616: a valid full-gate PASS naming a PEER LANE's sha -> refuse" \
 # ...and the single-field variants, which is where the two independent widths pay.
 full_summary "$T/commit-mismatch.txt" "ca8eb01" "$C12" PASS PASS
 refused "commit: mismatch (7 hex of a different sha) -> refuse" \
-  "$T/commit-mismatch.txt" "'commit:' value 'ca8eb01' does not match"
+  "$T/commit-mismatch.txt" "'commit:' value 'ca8eb01' in the full-gate block does not match the certified sha at 7 chars"
 full_summary "$T/tstart-mismatch.txt" "$C7" "ca8eb016def1" PASS PASS
 refused "tree-start: mismatch (12 hex of a different sha) -> refuse" \
-  "$T/tstart-mismatch.txt" "'tree-start:' value 'ca8eb016def1' does not match"
+  "$T/tstart-mismatch.txt" "'tree-start:' value 'ca8eb016def1' in the full-gate block does not match the certified sha at 12 chars"
 # A tree-start that agrees on the FIRST 7 chars but diverges at 8..12 is exactly
 # what the second, wider compare buys over the 7-hex one.
 full_summary "$T/tstart-wide.txt" "$C7" "da9a7cbffff0" PASS PASS
 refused "tree-start: diverges only beyond 7 chars -> refuse (the wider compare pays)" \
-  "$T/tstart-wide.txt" "'tree-start:' value 'da9a7cbffff0' does not match"
-# ...and one that matches at 7 but is TRUNCATED there still has to match at its
-# own width, which it does — proving the compare uses the VALUE's length, not a
-# fixed assumed width.
-full_summary "$T/tstart-short.txt" "$C7" "da9a" PASS PASS
-if run 0 "4-hex tree-start that prefixes the certified sha -> accepted at ITS width" \
+  "$T/tstart-wide.txt" "'tree-start:' value 'da9a7cbffff0' in the full-gate block does not match"
+# ...and one that is NARROWER than the 12 the gate emits still has to match at
+# its OWN width, which it does — proving the compare uses the VALUE's length, not
+# a fixed assumed width. 8 hex, not 4: 4 would be BELOW the floor (next case), and
+# pinning the loosest accepted width would make that leniency a requirement.
+full_summary "$T/tstart-short.txt" "$C7" "da9a7cb2" PASS PASS
+if run 0 "8-hex tree-start that prefixes the certified sha -> accepted at ITS width" \
   2421 "$CERTIFIED" "$T/tstart-short.txt"; then
-  ok "width: the compare uses the VALUE's own length (4 hex accepted, not padded/globbed)"
+  ok "width: the compare uses the VALUE's own length (8 hex accepted, not padded/globbed)"
 fi
+# The FLOOR is 7 — the narrowest abbreviation the gate ever emits (commit: is
+# printf '%.7s'). A 4-hex value that DOES prefix the certified sha is refused
+# anyway: accepted at its own width it would be a 1-in-65536 accidental
+# cross-lane match, i.e. the #3616 class this compare exists to refuse.
+full_summary "$T/tstart-4hex.txt" "$C7" "da9a" PASS PASS
+refused "4-hex tree-start (below the 7 floor) -> refuse even though it prefixes" \
+  "$T/tstart-4hex.txt" "is 4 hex chars — outside the 7..40 range"
 
 # --- Case 19: non-hex commit:/tree-start: -> refuse, never skipped -----------
 # The gate writes these placeholders when its capture failed or there was no git
