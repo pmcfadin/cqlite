@@ -54,11 +54,31 @@
 # committed HEAD, so uncommitted changes are silently excluded and a PASS would describe
 # code other than the code in front of you.
 #
-# OPT-IN, NOT A GATE COMPONENT. It performs real `--all-features` compiles (the OTel
-# stack), several times over; taxing every full gate to re-prove a static property is
-# disproportionate. Same convention as scripts/tests/test_agent_gate_feature_matrix_lanes.sh
-# (issue #1699 design D5): deliberately absent from COMPONENTS / LITE_COMPONENTS /
-# DELTA_COMPONENTS.
+# OPT-IN, NOT A GATE COMPONENT — AND THE DECIDING NUMBER IS DISK, NOT TIME. It performs
+# real `--all-features` compiles (the OTel stack) several times over: MEASURED 2617s and a
+# **47G peak** throwaway target dir for a full two-plant run. Slow is recoverable; filling a
+# shared box is not — on this fleet a lane's target dir has reached 89G and filled the host,
+# and the symptom is a confusing unrelated-looking red that costs a diagnosis cycle before
+# anyone greps for ENOSPC. 47G per run is the strongest single argument that this must never
+# join `tooling-tests`, so it is recorded as a measurement rather than left to be assumed.
+# Same convention as scripts/tests/test_agent_gate_feature_matrix_lanes.sh (issue #1699
+# design D5): deliberately absent from COMPONENTS / LITE_COMPONENTS / DELTA_COMPONENTS.
+#
+# WHERE THAT 47G LANDS IS CHOSEN, NOT INHERITED. `mktemp -d` would default to $TMPDIR
+# (i.e. /tmp, which on the worker boxes lives on the 145G root filesystem alongside every
+# other lane), so this harness instead defaults its scratch to $REPO_ROOT/target/ — the
+# same filesystem as the checkout, which is the volume with the headroom (295G) and the one
+# a lane's own cleanup already targets. `target/` is gitignored, so a throwaway worktree
+# there leaves `git status --porcelain` untouched, which this harness asserts. Override with
+# an ABSOLUTE CQLITE_HARNESS_SCRATCH. It also PREFLIGHTS free space and REFUSES rather than
+# starting a run it has measured cause to believe cannot finish: an ENOSPC halfway through
+# is indistinguishable from a real lane failure, and it takes the whole box with it.
+#
+# ONE TREE, ONE TARGET DIR, SERIAL BY CONSTRUCTION. The plants share a single throwaway
+# worktree and a single target dir, reverted between plants — never two concurrent trees, so
+# the peak above is the peak and not a per-plant multiple. Removal happens in a `trap` on
+# EXIT/INT/TERM, i.e. on the FAILURE paths too (verified: a run that ended
+# `RESULT: FAIL` on an unattributed plant left no `afc-3453-*` directory behind).
 #
 # Usage:
 #   bash scripts/tests/test_agent_gate_all_features_lane.sh                  # both plants
@@ -157,7 +177,47 @@ assert_live_checkout_untouched() { # <phase>
   return 0
 }
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/afc-3453-XXXXXX") || exit 1
+# The scratch root — CHOSEN, not inherited from $TMPDIR (see the header). Default is this
+# checkout's own gitignored target/, which is on the big volume; an absolute
+# CQLITE_HARNESS_SCRATCH overrides it.
+SCRATCH_ROOT="${CQLITE_HARNESS_SCRATCH:-$REPO_ROOT/target/afc-3453-harness}"
+case "$SCRATCH_ROOT" in
+  /*) ;;
+  *) echo "CQLITE_HARNESS_SCRATCH must be ABSOLUTE (got: $SCRATCH_ROOT)" >&2; exit 2 ;;
+esac
+mkdir -p "$SCRATCH_ROOT" || { echo "FATAL: could not create scratch root $SCRATCH_ROOT" >&2; exit 1; }
+
+# PREFLIGHT THE SPACE, and refuse rather than start. The measured peak for a full run is
+# 47G; the floor below is that plus a deliberately thin margin, because the failure being
+# avoided is not this run's but the BOX's — three other lanes share this filesystem, and an
+# ENOSPC surfaces as an unrelated-looking red in somebody else's gate. `df -Pk` for the
+# POSIX-portable single-line form; an unreadable df is treated as UNKNOWN and REFUSED, never
+# as enough room (an unmeasured resource is not a measured one).
+AFC_MIN_FREE_GB=60
+free_kb=$(df -Pk "$SCRATCH_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
+case "${free_kb:-}" in
+  ''|*[!0-9]*)
+    echo "REFUSING TO RUN: could not measure free space on $SCRATCH_ROOT (df unreadable)." >&2
+    echo "  A full run peaks at 47G of throwaway build output; starting one against an" >&2
+    echo "  unmeasured filesystem risks an ENOSPC that reds every other lane on this box." >&2
+    exit 2 ;;
+esac
+free_gb=$((free_kb / 1024 / 1024))
+if [ "$free_gb" -lt "$AFC_MIN_FREE_GB" ]; then
+  {
+    echo "REFUSING TO RUN: only ${free_gb}G free on $SCRATCH_ROOT (need >= ${AFC_MIN_FREE_GB}G)."
+    echo
+    echo "  A full two-plant run peaks at a MEASURED 47G of throwaway --all-features build"
+    echo "  output. Finishing is not the concern; an ENOSPC mid-run is, because it surfaces"
+    echo "  as a confusing unrelated red in whatever else shares this filesystem."
+    echo
+    echo "  Free some space, or point CQLITE_HARNESS_SCRATCH at an absolute path on a volume"
+    echo "  that has room."
+  } >&2
+  exit 2
+fi
+
+WORK=$(mktemp -d "$SCRATCH_ROOT/run-XXXXXX") || exit 1
 TREE="$WORK/tree"
 # OUTSIDE the throwaway tree so the clean and planted runs share compilation (otherwise
 # each planted run pays a full cold --all-features build), and PRIVATE (under an
@@ -195,6 +255,7 @@ echo "plants:   ${PLANTS[*]}"
 echo "control:  $CONTROL_NOTE"
 echo "worktree: $TREE (throwaway; the live checkout is never mutated)"
 echo "target:   $TARGET"
+echo "scratch:  $SCRATCH_ROOT (${free_gb}G free; a full run peaks at a measured 47G)"
 echo
 
 git worktree add --detach "$TREE" "$LIVE_HEAD_BEFORE" >/dev/null 2>&1 || {
@@ -428,6 +489,9 @@ echo "observed-commit: $LIVE_HEAD_BEFORE (captured at start; the throwaway copy 
 echo "live-tree: $([ "$LIVE_TREE_VIOLATED" -eq 0 ] && echo "UNCHANGED (verified: git status --porcelain AND HEAD identical to start)" || echo "MUTATED — HARNESS FAILURE")"
 echo "control:   $CONTROL_NOTE"
 echo "elapsed:   $((END - START))s"
+# The PEAK is not measurable after cleanup, so report what is: the size still on disk at
+# summary time. Stated as what it is rather than labelled a peak it cannot observe.
+echo "disk:      $(du -sh "$WORK" 2>/dev/null | awk '{print $1}') in $WORK at summary time (measured peak for a full run: 47G; removed by the EXIT trap)"
 [ "$SUBSET" -eq 1 ] && echo "mode:      SUBSET (${PLANTS[*]}) — a partial observation"
 for r in "${RESULTS[@]}"; do
   printf '%-22s %-20s %s\n' "${r%%|*}" "$(echo "$r" | cut -d'|' -f2)" "$(echo "$r" | cut -d'|' -f3-)"
