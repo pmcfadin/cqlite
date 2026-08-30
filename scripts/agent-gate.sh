@@ -2649,9 +2649,22 @@ _component_set_bound_mechanism() {
 # granularity is 1s, which is irrelevant against a 120s bound and costs the normal path
 # nothing: the loop exits as soon as the child is gone.
 _CS_UNBOUNDABLE_RC=199
-# Bound applied to every network-capable operation in this pre-flight, in seconds. One
-# constant so the enumeration below cannot describe a bound the code does not apply.
-_CS_BOUND_HINT=120
+# Bound applied to every network-capable operation in this pre-flight, in seconds. ONE
+# variable, read by every call site AND by the diagnostics, so the enumeration below cannot
+# describe a bound the code does not apply — it used to be a `120` literal at five call sites
+# plus a separate hint constant, which is two places that can drift.
+#
+# MODE-DEPENDENT (roborev job 234): a strict run is a certification and may spend two minutes
+# establishing its baseline, but `--lite` runs EVERY fix round and its contract is fast and
+# network-lenient. Being lenient in the VERDICT is not the same as being lenient in COST, and
+# the first cut conflated them: a stalled or offline remote blocked `--lite` for the full 120s
+# before printing an ADVISORY result nobody was going to fail on. Lenient modes get a short
+# deadline and fall through to ADVISORY-UNMEASURED, which is the honest answer — the baseline
+# genuinely was not measured — rather than a slow one.
+_CS_BOUND_STRICT_SECS=120
+_CS_BOUND_LENIENT_SECS=15
+_CS_BOUND_SECS="$_CS_BOUND_STRICT_SECS"   # resolved per mode at probe entry
+_CS_BOUND_HINT="$_CS_BOUND_SECS"          # legacy alias kept in step with the above
 _component_set_bounded() {
   local secs="$1"; shift
   # THE LADDER IS TERM -> grace -> unconditional group KILL, AND IT IS COMPLETE. There is
@@ -2955,7 +2968,7 @@ _component_set_head_set() {
   # apparently-local read is network-capable. `HEAD` is a LITERAL, like `origin`/`main`
   # above: a variable rev would be a way to point the provenance check at a commit of the
   # invoker's choosing.
-  _component_set_bounded 120 git -C "$REPO_ROOT" show "HEAD:$rel" \
+  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "HEAD:$rel" \
       >"$tmpd/scripts/$base" 2>"$tmpd/show.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -2971,7 +2984,7 @@ _component_set_head_set() {
     AGENT_GATE_SUMMARY_FILE="$tmpd/head-summary.txt" \
     AGENT_GATE_PARENT_RUN_ID="${RUN_ID:-component-set-preflight}" \
     CQLITE_GATE_NO_NICE=1 \
-    _component_set_bounded 120 bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
+    _component_set_bounded "$_CS_BOUND_SECS" bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
   ); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_HEAD_ERR="'bash <HEAD:$rel> --list' exited $rc: $(_component_set_flatten "$(cat "$tmpd/list.err" 2>/dev/null)")"
@@ -3073,6 +3086,14 @@ _component_set_drop_fetch_ref() {
 # _component_set_probe: the EFFECTFUL probe, wrapped so the private fetch ref is dropped on
 # every path out — including the early returns that report an unmeasurable baseline.
 _component_set_probe() {
+  # Resolve the bound for THIS mode before anything network-capable runs. Safe here:
+  # `_component_set_strict` reads $ONLY/$LITE, both settled during arg parsing.
+  if _component_set_strict; then
+    _CS_BOUND_SECS="$_CS_BOUND_STRICT_SECS"
+  else
+    _CS_BOUND_SECS="$_CS_BOUND_LENIENT_SECS"
+  fi
+  _CS_BOUND_HINT="$_CS_BOUND_SECS"
   _component_set_probe_inner
   _component_set_drop_fetch_ref
   return 0
@@ -3116,7 +3137,18 @@ _component_set_probe_inner() {
     _CS_KIND=remote-not-canonical
     # REDACTED, never the raw URL (job 227): this detail is rendered into the SUMMARY block,
     # which the delivery workflow tells agents to paste into PR comments.
-    _CS_DETAIL="origin is '$(_component_set_redact_url "$origin_url")' (normalised '$(_component_set_normalise_remote "$origin_url")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork, a re-pointed remote, an unauthenticated transport (http/git) or a non-default port is a DIFFERENT baseline — and this pre-flight EXECUTES the baseline's copy of this script, so it must be the upstream and nothing else"
+    # FLATTENED as well as redacted (roborev job 234). Redaction (job 227) removed the
+    # CREDENTIAL from this value; it did not remove the NEWLINES. `_CS_DETAIL` is rendered
+    # into the SUMMARY block, so an origin URL containing a newline could inject arbitrary
+    # lines — summary MARKERS included — into an artifact this repo's workflow tells agents
+    # to paste into PR comments, and an oversized value could bloat it. Two properties of
+    # the same untrusted string, and only one of them was fixed the first time round.
+    #
+    # This is the umbrella rule in CLAUDE.md: control and data must not share a channel when
+    # the data is attacker-controlled. `_component_set_flatten` is the existing answer and is
+    # already applied to every command-output interpolation in this function; the origin URL
+    # is the one external value that was missing it.
+    _CS_DETAIL="origin is '$(_component_set_flatten "$(_component_set_redact_url "$origin_url")")' (normalised '$(_component_set_flatten "$(_component_set_normalise_remote "$origin_url")")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork, a re-pointed remote, an unauthenticated transport (http/git) or a non-default port is a DIFFERENT baseline — and this pre-flight EXECUTES the baseline's copy of this script, so it must be the upstream and nothing else"
     return 0
   fi
 
@@ -3164,7 +3196,7 @@ _component_set_probe_inner() {
   # `git` invocation's BOUND from the line the invocation is on, so splitting this across a
   # `\` continuation makes the audit report the continuation's first word as an unclassified
   # external program (measured: it reported `origin`). Keep every git call here on one line.
-  err=$(_component_set_bounded 120 git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags origin "refs/heads/main:$csref" 2>&1); rc=$?
+  err=$(_component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags origin "refs/heads/main:$csref" 2>&1); rc=$?
   [ "$rc" -eq 0 ] && _CS_FETCH_REF="$csref"
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
@@ -3206,7 +3238,7 @@ _component_set_probe_inner() {
   # fleet boxes) the blob is fetched LAZILY — so this apparently-local read is a network
   # operation that can hang on a stall or an auth prompt, exactly like the fetch above.
   # Nothing distinguishes the two cases from inside the gate, so it takes the same bound.
-  _component_set_bounded 120 git -C "$REPO_ROOT" show "$_CS_SHA:$rel" \
+  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$_CS_SHA:$rel" \
       >"$tmpd/scripts/$base" 2>"$tmpd/show.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -3233,7 +3265,7 @@ _component_set_probe_inner() {
     AGENT_GATE_SUMMARY_FILE="$tmpd/baseline-summary.txt" \
     AGENT_GATE_PARENT_RUN_ID="${RUN_ID:-component-set-preflight}" \
     CQLITE_GATE_NO_NICE=1 \
-    _component_set_bounded 120 bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
+    _component_set_bounded "$_CS_BOUND_SECS" bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
   ); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=baseline-list-failed
@@ -4002,6 +4034,11 @@ case "${1:-}" in
     echo "MISSING: ${_CS_MISSING:-}"
     echo "EXTRA: ${_CS_EXTRA:-}"
     echo "ANCESTOR: ${_CS_ANCESTOR:-unknown}"
+    # BOUND is exposed so scripts/tests can assert the mode-dependent deadline (job 234)
+    # WITHOUT a wall-clock threshold. A timing assert would be the flakier test AND would
+    # trip this repo's own wall-clock lint in `roborev-lints`; asserting the RESOLVED value
+    # tests the decision instead of the weather.
+    echo "BOUND: ${_CS_BOUND_SECS:-<unset>}"
     echo "COMPONENT_SET_LINE: ${COMPONENT_SET_LINE:-<none>}"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and

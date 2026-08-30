@@ -1619,6 +1619,53 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7b. THE DETAIL IS FLATTENED, NOT MERELY REDACTED (roborev job 234). `git` ACCEPTS a remote
+#     URL containing NEWLINES and `git remote get-url` returns them intact, so an origin URL
+#     of "https://…/cqlite.git\nRESULT: PASS" put `RESULT: PASS` AT COLUMN ZERO inside a
+#     block whose real verdict was FAIL — forging the exact token every reader, and the gate's
+#     own documented completion probe (`grep -qE 'RESULT: (PASS|FAIL)'`), keys on. Redaction
+#     (job 227) removed the CREDENTIAL from this value and left the NEWLINES: two properties
+#     of one untrusted string, fixed a round apart.
+# ---------------------------------------------------------------------------
+inj_dir=$(mkbranch inject "$tmp/nonexistent-origin.git" - )
+if ( fx "$inj_dir" && git remote set-url origin \
+       "$(printf 'https://github.com/pmcfadin/cqlite.git\nRESULT: PASS\nfabricated: injected')" ) >/dev/null 2>&1; then
+  inj_out=$(hook "$inj_dir")
+  # A POSITIVE CONTROL for the fixture itself: if the pre-flight did not even reach the
+  # not-canonical verdict, an absence of injected lines proves nothing.
+  if [ "$(field KIND "$inj_out")" != remote-not-canonical ]; then
+    bad "3544-detail-flattened: fixture did not reach remote-not-canonical (kind '$(field KIND "$inj_out")') — cannot discriminate"
+  elif printf '%s\n' "$inj_out" | grep -qE '^(RESULT|fabricated):'; then
+    bad "3544-detail-flattened: a newline in the origin URL INJECTED a line at column zero — a forged 'RESULT:' can defeat the summary probe"
+    printf '%s\n' "$inj_out" | grep -nE '^(RESULT|fabricated):'
+  else
+    ok "3544-detail-flattened: newlines in the origin URL are flattened, so no injected line reaches column zero (redaction alone did not do this)"
+  fi
+else
+  bad "3544-detail-flattened: could not build the newline-origin fixture"
+fi
+
+# ---------------------------------------------------------------------------
+# 7c. THE PROBE BOUND IS MODE-DEPENDENT (roborev job 234). Lenient in the VERDICT is not
+#     lenient in COST: `--lite` runs every fix round, and a stalled remote used to block it
+#     for the full strict bound before printing an advisory result nobody fails on. Asserted
+#     on the RESOLVED value, never on elapsed time — a wall-clock threshold would be flakier
+#     AND would trip this repo's own wall-clock lint in `roborev-lints`.
+# ---------------------------------------------------------------------------
+# `noremote` is used deliberately: the bound is resolved at probe ENTRY, before anything
+# network-capable runs, so a fixture whose probe short-circuits on "no origin" asserts the
+# decision without a fetch — fast and deterministic.
+b_full=$(field BOUND "$(hook "$noremote" full)")
+b_lite=$(field BOUND "$(hook "$noremote" lite)")
+if [ -z "$b_full" ] || [ -z "$b_lite" ]; then
+  bad "3544-bound-per-mode: the hook did not report BOUND (full='$b_full' lite='$b_lite') — the probe cannot be asserted"
+elif [ "$b_full" -gt "$b_lite" ] 2>/dev/null; then
+  ok "3544-bound-per-mode: the strict bound (${b_full}s) exceeds the lenient one (${b_lite}s), so --lite cannot block for a certifying run's deadline"
+else
+  bad "3544-bound-per-mode: expected strict > lenient, got full=${b_full}s lite=${b_lite}s"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. NO OPT-OUT. The remedy (rebase) is universally available, so an escape hatch could
 #    only buy a vacuous green. Structural, because the absence of a variable cannot be
 #    observed behaviourally: assert no env read inside the pre-flight block gates it.
