@@ -128,6 +128,13 @@ pub enum Divergence {
     /// from the golden's — the 30-digit exactness this lane exists to check — is
     /// NOT this gap and is reported.
     ///
+    /// This is the ONE place the CLI side is read with [`Kinding::Stringified`],
+    /// the relaxation reserved for the golden (`super::compare_value_body` holds
+    /// the CLI to [`Kinding::Natural`] at every position — finding M1). It is
+    /// scoped to deciding THIS gap's own question, "is the kind the only
+    /// difference?", and it decides nothing else: a non-match here becomes an
+    /// ordinary diff, compared under the normal asymmetry.
+    ///
     /// NOT COVERED: a different number, a null, a non-numeric string, and the CSV
     /// lane (where every cell is text and the 30-digit values match exactly).
     DecimalRendersAsJsonString,
