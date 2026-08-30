@@ -1234,10 +1234,11 @@ fn a_correct_boolean_partition_key_is_not_a_divergence() {
 /// anything: the WRONG boolean still diverges, and so does a CLI that spells the
 /// column as a string instead of a boolean.
 ///
-/// A wrong PARTITION KEY value also moves the emitted key sequence, so the
-/// row-ORDER check reports its own line beside the value diff. Both are true and
-/// both are asserted by NAME rather than by count, so neither can be satisfied by
-/// the other.
+/// A wrong PARTITION KEY value changes the emitted key SET rather than reordering
+/// it, so no `row order:` line accompanies the value diff (only a reordering — the
+/// same keys in a different sequence — is reported as one, finding V2). The value
+/// diff is therefore asserted by NAME rather than by count, so it cannot be
+/// satisfied by some other line.
 #[test]
 fn a_wrong_boolean_partition_key_still_diverges() {
     let schema = schema_of("CREATE TABLE t (flag boolean PRIMARY KEY, v text);", "t");
@@ -1271,9 +1272,10 @@ fn a_wrong_boolean_partition_key_still_diverges() {
     );
 
     // The ASYMMETRY: the CLI may not spell a boolean column as a JSON string, even
-    // at a position where the golden is stringified. The row key is unchanged here
-    // (the untyped pairing projection reads both spellings as the same boolean), so
-    // this one stands alone.
+    // at a position where the golden is stringified. This one stands alone: the two
+    // sides' key SETS differ rather than being a permutation of each other, so the
+    // row-order check reports nothing (finding V2), and the untyped pairing
+    // projection reads both spellings as the same boolean, so the rows still pair.
     let stringy = vec![row(&[("flag", json!("true")), ("v", json!("x"))])];
     let report = compare_rows(
         &golden,

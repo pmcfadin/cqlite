@@ -73,6 +73,106 @@ fn the_emitted_row_order_is_compared_and_the_pairing_still_works() {
     assert_eq!(report.diffs.len(), 2, "{:?}", report.diffs);
 }
 
+/// V2: the row-order key is TYPED, so two DISTINCT legal `text` keys that both look
+/// numeric are ordered distinctly.
+///
+/// The key used to be the untyped `row_message_key`, whose `canon_text` reads any
+/// numeric-looking string as a number — so `"1"` and `"1.0"` produced the SAME key
+/// and swapping those two rows was invisible here. It was then invisible altogether:
+/// the pairing sort that follows re-sorts both sides by a key that embeds the whole
+/// row, so it handed the value comparison a matched pair and the run was green
+/// (issue #1491 review finding V2).
+///
+/// Both sides spell a `text` value the same way — `cassandra-5.0.8`
+/// `UTF8Serializer.toString` and `UTF8Type.toJSONString` both emit the string
+/// itself — so the expectation needs no relaxation: `"1"` and `"1.0"` are two
+/// different keys in both egress formats.
+#[test]
+fn two_distinct_text_keys_that_look_numeric_are_ordered_distinctly() {
+    const TEXT_KEY_DDL: &str = "CREATE TABLE t (id text PRIMARY KEY, n int);";
+    let schema = schema_of(TEXT_KEY_DDL, "t");
+    let first = row(&[("id", json!("1")), ("n", json!(10))]);
+    let second = row(&[("id", json!("1.0")), ("n", json!(20))]);
+    let golden = vec![first.clone(), second.clone()];
+
+    for egress in [Egress::Json, Egress::Csv] {
+        let report = compare_rows(
+            &golden,
+            &[first.clone(), second.clone()],
+            &schema,
+            &["id"],
+            &[],
+            &[],
+            egress,
+        );
+        assert!(
+            report.diffs.is_empty(),
+            "{egress:?}: the emitted order agrees: {:?}",
+            report.diffs
+        );
+
+        let reversed = vec![second.clone(), first.clone()];
+        let report = compare_rows(&golden, &reversed, &schema, &["id"], &[], &[], egress);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{egress:?}: a reordering of two distinct text keys must fail exactly once: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].starts_with("row order:")
+                && report.diffs[0].contains("id=text:1.0")
+                && report.diffs[0].contains("id=text:1`"),
+            "{egress:?}: the diagnostic must name both keys, distinctly: {:?}",
+            report.diffs
+        );
+    }
+}
+
+/// The other half of the same rule: DIFFERING keys are a divergence of a key
+/// column's VALUE, and only a REORDERING is reported as one.
+///
+/// Making the key typed made every key-column value divergence produce a second,
+/// spurious `row order:` line whose stated cause — "the read path stopped emitting
+/// `(token, key)` order" — was not the cause. A false divergence is a defect in its
+/// own right in this lane (finding T1), so the order line is reported only when the
+/// two sides carry the SAME keys in a different sequence. It cannot hide a
+/// reordering: differing keys mean some pair disagrees on a key column, which the
+/// value comparison reports.
+#[test]
+fn a_divergent_key_value_is_reported_as_a_value_divergence_only() {
+    const TEXT_KEY_DDL: &str = "CREATE TABLE t (id text PRIMARY KEY, n int);";
+    let schema = schema_of(TEXT_KEY_DDL, "t");
+    let golden = vec![
+        row(&[("id", json!("1")), ("n", json!(10))]),
+        row(&[("id", json!("1.0")), ("n", json!(20))]),
+    ];
+    let wrong_key = vec![
+        row(&[("id", json!("1")), ("n", json!(10))]),
+        row(&[("id", json!("2")), ("n", json!(20))]),
+    ];
+    let report = compare_rows(
+        &golden,
+        &wrong_key,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "exactly the value divergence, and no order line: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("declared text") && !report.diffs[0].contains("row order:"),
+        "{:?}",
+        report.diffs
+    );
+}
+
 /// A UDT's fields are emitted in DECLARATION order, on both sides.
 ///
 /// `cassandra-5.0.8 UserType.toJSONString` iterates `stringFieldNames` in order,

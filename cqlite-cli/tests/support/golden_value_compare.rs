@@ -367,7 +367,7 @@ pub fn compare_rows(
     // (a #1577 invariant violation, not a licensed change); the golden is paired
     // with a different SSTable; or `export` gained a sort, which is a deliberate
     // contract change that must update this pin.
-    if let Some(why) = row_order_divergence(&golden, &cli, pk, ck, egress) {
+    if let Some(why) = row_order_divergence(&golden, &cli, pk, ck, schema, egress) {
         report.diffs.push(why);
     }
     // `sort_by_cached_key`: the key embeds the whole row (see `row_sort_key`), so a
@@ -537,22 +537,95 @@ fn count_cell(
 /// with the first divergent position rather than per row: a single moved row makes
 /// every later position differ, and 900 lines saying so name nothing.
 ///
-/// The key is [`row_message_key`], i.e. the PERMISSIVE untyped projection the
-/// pairing uses, so two rows whose keys canonicalize identically (a `text` key
-/// `"1"` beside `"1.0"`) are indistinguishable HERE. That is the pairing's own
-/// ambiguity rather than a new one, and the value comparison — which is typed —
-/// is what reports the consequence.
+/// # The key is TYPED, under the declared key-column types
+///
+/// Each component goes through `canon_typed` with its `CREATE TABLE` type and with
+/// the same ASYMMETRY [`compare_value_at`] applies to a cell value: the GOLDEN's
+/// spelling is the one [`column_kinding`] states (`sstabledump` writes every
+/// partition-key component with `writeString`, so an `int` key arrives as `"1"`),
+/// while the CLI is held to [`Kinding::Natural`] at every position.
+///
+/// It used to be [`row_message_key`], the PERMISSIVE untyped projection the pairing
+/// uses, and that could not see a real reordering (issue #1491 review finding V2).
+/// Untyped, `canon_text` reads any numeric-looking string as a number, so two
+/// DISTINCT legal `text` keys — `"1"` and `"1.0"` — produce the same key: swapping
+/// those two rows was invisible here, and then invisible altogether, because the
+/// pairing sort that follows re-sorts both sides by a key that embeds the whole row
+/// and hands the comparison a matched pair. A `text` column holding `"1"` beside one
+/// holding `"1.0"` is an ordinary table, so this was not an exotic gap.
+///
+/// A component that cannot be canonicalized under its declared type, or a key column
+/// the committed DDL does not declare, is REPORTED rather than swallowed: without a
+/// canonical key for every key column there is no order to compare, and a `<reason>`
+/// string would meet an identical `<reason>` on the other side and compare equal.
+///
+/// Only a REORDERING is reported — the same keys in a different sequence. Differing
+/// keys are a divergence of a key column's VALUE, which the typed per-row comparison
+/// names; see the comment at the check itself for why an order line there would state
+/// a cause that is not the cause.
 fn row_order_divergence(
     golden: &[&Row],
     cli: &[&Row],
     pk: &[&str],
     ck: &[&str],
+    schema: &TableSchema,
     egress: Egress,
 ) -> Option<String> {
-    let key = |r: &&Row| row_message_key(r, pk, ck, egress);
-    let g: Vec<String> = golden.iter().map(key).collect();
-    let c: Vec<String> = cli.iter().map(key).collect();
+    // `golden_side` selects the kinding, which is a statement about the GOLDEN's
+    // spelling alone (see [`column_kinding`] and finding M1).
+    let key = |r: &&Row, golden_side: bool| -> Result<String, String> {
+        let mut parts: Vec<String> = Vec::new();
+        for name in pk.iter().chain(ck.iter()) {
+            let column = schema.column(name).ok_or_else(|| {
+                format!(
+                    "the case names key column `{name}`, which the committed CREATE TABLE \
+                     {} does not declare",
+                    schema.table
+                )
+            })?;
+            let kinding = if golden_side {
+                column_kinding(column)
+            } else {
+                Kinding::Natural
+            };
+            let value = r.get(*name).unwrap_or(&Value::Null);
+            let canon = canon_typed(value, egress, &column.ty, Depth::TopLevel, kinding)
+                .map_err(|why| format!("key column `{name}`: {why}"))?;
+            parts.push(format!("{name}={}", brief(&canon.describe())));
+        }
+        Ok(parts.join(","))
+    };
+    let keys = |rows: &[&Row], golden_side: bool| -> Result<Vec<String>, String> {
+        rows.iter().map(|r| key(r, golden_side)).collect()
+    };
+    let (g, c) = match (keys(golden, true), keys(cli, false)) {
+        (Ok(g), Ok(c)) => (g, c),
+        (Err(why), _) | (_, Err(why)) => {
+            return Some(format!(
+                "row order: the emitted order cannot be compared — {why}"
+            ))
+        }
+    };
     let at = g.iter().zip(c.iter()).position(|(a, b)| a != b)?;
+    // A REORDERING is the SAME keys in a different sequence, and that is the only
+    // shape reported here. When the two sides carry DIFFERENT keys the divergence is
+    // in a key column's VALUE, not in the order, and the typed comparison below
+    // names it per row — so reporting an order line too would state a cause that is
+    // not the cause ("the read path stopped emitting `(token, key)` order"), which is
+    // the false-divergence class this lane treats as a defect in its own right
+    // (finding T1). Measured while making this key typed: an `int` partition key
+    // wrongly rendered `"1"` produced a second, spurious `row order:` line beside the
+    // spelling diff it really was.
+    //
+    // It cannot hide a reordering: differing key sets mean some pair disagrees on a
+    // key column, which the value comparison reports, so the case still fails.
+    let mut g_sorted = g.clone();
+    let mut c_sorted = c.clone();
+    g_sorted.sort();
+    c_sorted.sort();
+    if g_sorted != c_sorted {
+        return None;
+    }
     Some(format!(
         "row order: the {egress:?} egress emits row {at} as `{}` where the golden \
          emits `{}` — both sides walk ONE Cassandra-written SSTable, which is in \
@@ -560,8 +633,7 @@ fn row_order_divergence(
          order (see `compare_rows` for the invariant and its preconditions); so \
          either the read path stopped emitting `(token, key)` order (issue #1577) \
          or this golden describes a different SSTable",
-        brief(&c[at]),
-        brief(&g[at])
+        c[at], g[at]
     ))
 }
 
@@ -671,9 +743,14 @@ fn csv_decoded(
     csv_container::decode_at(gv, text, ty, path, &|p: &str| skips.excludes(p)).map(Some)
 }
 
-/// A total, side-independent ordering key: the canonical primary key, then the
-/// whole canonicalized row as a tie-break so pairing stays deterministic even if
-/// a fixture ever carried duplicate keys.
+/// A total, side-independent PAIRING key: the canonical primary key, then the whole
+/// canonicalized row as a tie-break so pairing stays deterministic even if a fixture
+/// ever carried duplicate keys.
+///
+/// Deliberately the UNTYPED projection: pairing has to see through `sstabledump`'s
+/// two spellings of one value or it pairs the wrong rows (finding T1). The emitted
+/// ROW ORDER is a verdict, not a pairing, and is compared under the declared types
+/// before this sort runs (see [`row_order_divergence`], finding V2).
 fn row_sort_key(row: &Row, pk: &[&str], ck: &[&str], egress: Egress) -> String {
     let mut parts: Vec<String> = Vec::new();
     for name in pk.iter().chain(ck.iter()) {
@@ -714,7 +791,9 @@ fn brief(s: &str) -> String {
     format!("{head}…({} chars total)", s.chars().count())
 }
 
-/// A stable textual description of any value, for ordering and diagnostics only.
+/// A stable textual description of any value, for the PAIRING sort and diagnostics
+/// only — never for a verdict. It reads the untyped projection (see
+/// `super::canon_text`), so it collapses distinctions a declared type keeps.
 fn describe(value: &Value, egress: Egress) -> String {
     match value {
         Value::Array(items) => format!(

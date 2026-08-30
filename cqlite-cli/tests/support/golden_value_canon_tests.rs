@@ -424,12 +424,13 @@ fn the_blob_relaxation_does_not_reach_a_cli_csv_cell() {
 }
 
 /// The PAIRING-key half of finding T1. `compare::describe` reads the UNTYPED
-/// projection, and `compare::row_order_divergence` reads the same key — so a key
-/// that cannot see through `sstabledump`'s two spellings does not merely mis-pair,
-/// it reports a FALSE row-order divergence for a correct egress.
+/// projection, so a key that cannot see through `sstabledump`'s two spellings pairs
+/// the golden's stringified value against the wrong row and reports a divergence in
+/// every column of both.
 ///
 /// Pinned for all three relaxations, and against the typed rule, so the
-/// permissiveness stays confined to the ordering key.
+/// permissiveness stays confined to the pairing key — `compare::row_order_divergence`
+/// is typed (finding V2), and value EQUALITY always was.
 #[test]
 fn the_untyped_key_pairs_the_two_spellings_of_a_boolean_and_a_blob() {
     assert_eq!(untyped(&json!("true")), untyped(&json!(true)));

@@ -520,13 +520,12 @@ fn is_bare_lowercase_hex(s: &str) -> bool {
 /// blob and a numeric spelling, else opaque text.
 ///
 /// The UNTYPED projection, so every rule here is deliberately permissive — it
-/// serves only the pairing key, the row-ORDER key and diagnostics (see
-/// [`canon_scalar`]). Each one exists because `sstabledump`'s two writers spell the
-/// SAME value differently at a stringified position, and a key that cannot see
-/// through that difference does not merely mis-pair: `compare::row_order_divergence`
-/// reads the same key, so it reported a FALSE row-order divergence for a correct
-/// egress (issue #1491 review finding T1, the pairing-key half). The three
-/// relaxations therefore mirror the golden-side ones in [`canon_typed`]:
+/// serves only the PAIRING key and diagnostics (see [`canon_scalar`]). Each rule
+/// exists because `sstabledump`'s two writers spell the SAME value differently at a
+/// stringified position, so a key that cannot see through that difference pairs the
+/// golden's `"1"` against some other row than the CLI's `1` and reports a divergence
+/// in every column of both (issue #1491 review finding T1, the pairing-key half).
+/// The three relaxations therefore mirror the golden-side ones in [`canon_typed`]:
 ///
 ///   * a numeric spelling → a number (`"1"` pairs with `1`);
 ///   * `true`/`false` → a boolean (a stringified boolean partition key `"true"`
@@ -539,7 +538,11 @@ fn is_bare_lowercase_hex(s: &str) -> bool {
 ///
 /// None of this touches value EQUALITY, which is [`canon_typed`]'s and is driven by
 /// the declared type: a `text` column holding `"true"` or `"0xdeadbeef"` still
-/// compares as the exact string it is.
+/// compares as the exact string it is. Nor does it touch the emitted ROW ORDER,
+/// which used to read this projection and no longer does: two distinct legal `text`
+/// keys `"1"` and `"1.0"` canonicalize alike here, so a swap of those two rows was
+/// invisible — `compare::row_order_divergence` is typed for exactly that reason
+/// (finding V2).
 pub fn canon_text(s: &str) -> Canon {
     if let Some(ts) = canon_timestamp(s) {
         return Canon::Text(ts);
