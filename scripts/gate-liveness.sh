@@ -228,13 +228,26 @@ _beat_valid() {
   # beater relaunch and therefore as PROGRESS, which yields RUNNING. Checking only uniqueness and
   # placement meant two DIFFERENT malformed values read as a restart, so a pair of invalid beats could
   # produce a RUNNING verdict. Absent stays safe (progression decides); present-but-nonsense must not.
+  # EVERY refusal NAMES ITS CAUSE — the invariant this whole file is built on, and the first version of
+  # this validation broke it (roborev job 226): the branches returned 1 without setting BEAT_ERR, so
+  # the diagnostic degraded to a literal `gate-liveness: UNKNOWN ()` or carried an unrelated earlier
+  # reason. My own test for it asserted only the exit code, so it passed while the cause was EMPTY —
+  # the "assert the message, not just the code" lesson from 4b.76, not propagated to a test written one
+  # round later.
   _bp=$(printf '%s\n' "$1" | sed -n 's/^beater-pid: //p' | head -1)
   if [ -n "$_bp" ]; then
     case "$_bp" in
-      ''|*[!0-9]*) return 1 ;;          # not a decimal
-      0) return 1 ;;                    # never a real pid
+      *[!0-9]*)
+        BEAT_ERR="heartbeat-beater-pid-not-a-pid; 'beater-pid: $_bp' is not a decimal pid — the field is optional, but when present a CHANGED value counts as a beater relaunch and therefore as PROGRESS, so a value that cannot be a pid must not be compared"
+        return 1 ;;
+      0)
+        BEAT_ERR="heartbeat-beater-pid-zero; 'beater-pid: 0' is never a real process — see above: this field moves a verdict when it changes, so it may not hold a placeholder"
+        return 1 ;;
     esac
-    [ "${#_bp}" -le 7 ] || return 1     # bounded: no pid namespace goes past 7 digits
+    if [ "${#_bp}" -gt 7 ]; then
+      BEAT_ERR="heartbeat-beater-pid-out-of-range; 'beater-pid: $_bp' has ${#_bp} digits and no pid namespace goes past 7, so this cannot be a pid this reader may compare"
+      return 1
+    fi
   fi
   for f in host beater-pid; do
     cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")

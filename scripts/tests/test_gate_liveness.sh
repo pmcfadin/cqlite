@@ -119,6 +119,15 @@ _dump_artifacts() {  # <label>: show the artifacts the reader was pointed at
 expect_reader() {
   local label="$1" want="$2" wantrc="$3" needle="$4"; shift 5
   run_reader "$@"
+  # A VERDICT MAY NEVER CARRY AN EMPTY CAUSE — enforced here, for EVERY case, rather than case by case.
+  # Job 226 was a refusal that returned without setting BEAT_ERR, so the reader printed the literal
+  # `gate-liveness: UNKNOWN ()`. The case covering it asserted only the exit code and passed. A sibling
+  # audit then found FOUR more cases asserting `UNKNOWN 4 ""` — any of which could have hidden the same
+  # thing — so the invariant belongs in the helper: every one of this suite's assertions now checks it,
+  # and a case added later inherits it without anyone remembering to ask.
+  if printf '%s' "$OUT" | grep -qE '^gate-liveness: [A-Z]+ \(\)[[:space:]]*$'; then
+    bad "$label" "verdict carried an EMPTY cause: $(printf '%s' "$OUT" | head -1)"; _dump_artifacts "$@"; return
+  fi
   if ! printf '%s' "$OUT" | grep -q "^gate-liveness: $want "; then
     bad "$label" "expected status $want, got: $(printf '%s' "$OUT" | head -1)"; _dump_artifacts "$@"; return
   fi
@@ -1575,14 +1584,31 @@ _mkbeat_bp() {  # <beater-pid-value> <age> ; empty value omits the field
     echo "interval: 20"; echo "beat-seq: 7"; echo "beat-epoch: $(( $(date +%s) - $2 ))"
     echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$_bp.heartbeat"
 }
+# ASSERT THE MESSAGE, NOT JUST THE EXIT CODE. The first version of this case checked only `RC = 4`,
+# so it PASSED while the diagnostic was the literal `gate-liveness: UNKNOWN ()` — the validation
+# returned without setting BEAT_ERR, breaking the invariant that every refusal names its cause
+# (roborev job 226). That is the lesson 4b.76 taught in the detached suite one round earlier, not
+# propagated to a test written here. An exit code alone cannot distinguish a named refusal from a
+# silent one, which is exactly the distinction this reader exists to make.
 _bp_bad=0
-for _v in garbage-one 0 123456789012 " " -5 12.3; do
+for _spec in "garbage-one:not-a-pid" "0:zero" "123456789012:out-of-range" " :not-a-pid" "-5:not-a-pid" "12.3:not-a-pid"; do
+  _v=${_spec%:*}; _want=${_spec##*:}
   _mkbeat_bp "$_v" 4000
   run_reader "$_bp" --run-id run-P
-  [ "$RC" = 4 ] || { _bp_bad=$((_bp_bad+1)); echo "     beater-pid '$_v' accepted (rc=$RC)"; }
+  if [ "$RC" != 4 ]; then
+    _bp_bad=$((_bp_bad+1)); echo "     beater-pid '$_v' accepted (rc=$RC)"
+  elif ! printf '%s' "$OUT" | grep -q "heartbeat-beater-pid-$_want"; then
+    _bp_bad=$((_bp_bad+1)); echo "     beater-pid '$_v' refused WITHOUT the named cause: $(printf '%s' "$OUT" | head -1)"
+  fi
 done
-[ "$_bp_bad" = 0 ] && ok "11t.1 a malformed beater-pid invalidates the beat (6 shapes)" \
-                   || bad "11t.1 a malformed beater-pid invalidates the beat" "$_bp_bad shape(s) accepted"
+[ "$_bp_bad" = 0 ] && ok "11t.1 a malformed beater-pid invalidates the beat AND names its cause (6 shapes)" \
+                   || bad "11t.1 a malformed beater-pid invalidates the beat and names its cause" "$_bp_bad shape(s) wrong"
+# The invariant itself, so no future refusal in this validator can return silently.
+if sed -n '/beater-pid: \$_bp. is not a decimal/,/^  fi$/p' "$READER" | grep -c 'BEAT_ERR=' | grep -qx 3; then
+  ok "11t.1b every beater-pid refusal sets BEAT_ERR (3 of 3)"
+else
+  bad "11t.1b every beater-pid refusal sets BEAT_ERR" "$(sed -n '/_bp=/,/^  fi$/p' "$READER" | grep -c 'BEAT_ERR=') of 3 branches"
+fi
 # CONTROL 1: a VALID beater-pid must still be accepted, or 11t.1 passes by rejecting everything.
 _mkbeat_bp 12345 4000
 expect_reader "11t.2 control: a VALID beater-pid is accepted (stale => STALLED)" \

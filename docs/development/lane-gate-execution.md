@@ -642,6 +642,31 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### When a finding names N instances, find the property and enforce it where all N pass through
+
+Three times in this change an enumeration was fixed and the class stayed open, and each time the
+enumeration was *complete for the sites it named*:
+
+| the finding named | the enumeration missed | what closed it |
+|---|---|---|
+| the launcher's probe shapes (2) | there were **5** `$SUMMARY.`-anchored artifacts | a test that DERIVES the shapes from source |
+| four summary refusals guarded | **nine** existed; one had no `\|\| break` at all | one funnel every refusal must pass through |
+| three `beater-pid` branches missing `BEAT_ERR` | **four** other cases asserted `UNKNOWN 4 ""` and could hide the same defect elsewhere | the invariant enforced inside `expect_reader`, for all 234 cases |
+
+The pattern is not that the enumerations were careless — it is that **a list is a snapshot of what someone
+could see, and the property is what they were trying to express.** So the question to ask on receiving a
+finding of the form "these N places are wrong" is *what property do they violate, and is there a point
+every instance passes through where it can be enforced?* If yes, enforce it there; the list then becomes
+a set of test cases rather than the fix.
+
+The `beater-pid` instance is the sharpest, because both halves were mine one round apart. `4b.76` in the
+detached suite had already taught that **asserting an exit code cannot see a SILENT refusal** — it caught
+a launcher that exited non-zero while printing nothing. One round later I wrote a liveness case asserting
+only `RC = 4`, and it passed green while the reader emitted the literal `gate-liveness: UNKNOWN ()`, in
+the file whose whole doctrine is that every refusal names its cause. Knowing the lesson, writing it in a
+commit message, and then not applying it to the next test is the same propagation failure as the
+component-sibling table above — one level down, in the tests.
+
 ### The recurring shape in the LATE rounds: discipline present in one component, absent in its sibling
 
 The early findings here were genuine design mistakes — a lock that could not tell *slow* from *dead*,
