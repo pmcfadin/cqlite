@@ -86,12 +86,16 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # own origin, which then made the next gate run report an unmeasurable baseline about itself.
 # Every fixture `cd` in this file goes through this, so that class is a loud failure instead of
 # a silent mutation of the developer's tree.
+# `builtin cd`, not a bare `cd`: this body is the one place a bare `cd "$…"` must remain, and
+# the mechanical conversion that routed all 48 call sites through this helper REWROTE ITS OWN
+# BODY into `fx "$1"` — infinite recursion, every fixture build failing at once. A guard must
+# not match its own line. `builtin` also makes the helper immune to any later `cd` function.
 fx() {
   if [ -z "${1:-}" ] || [ ! -d "$1" ]; then
     echo "FATAL: fixture path '${1:-}' is empty or not a directory — refusing to run in the CURRENT tree" >&2
     return 1
   fi
-  fx "$1"
+  builtin cd -- "$1"
 }
 
 # Scratch root VALIDATED before anything is built under it: this script runs without
