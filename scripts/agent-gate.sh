@@ -12676,10 +12676,42 @@ DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-
 # With no --only, every component runs, so it's always true. With --only, it's true
 # only when the selection intersects DATASET_COMPONENTS — so e.g. `--only
 # tooling-tests` or `--only fmt` skips the (dataset-requiring) preflight entirely.
+# _component_will_skip_for_toolchain <component> — true when a SKIP-AWARE component is going to
+# SKIP anyway because its toolchain is absent (issue #3522, roborev round 7 H2).
+#
+# THE DEFECT IT EXISTS FOR. Enrolling node-bindings in DATASET_COMPONENTS (correct — 14 of its
+# jest suites read the corpus) meant `--only node-bindings` on a fixture-less host exited during
+# the GLOBAL DATASET PREFLIGHT, before the component could perform its documented
+# node/npm-missing SKIP. A widening that made the component stricter thereby made a documented
+# escape hatch UNREACHABLE — the same family as C2, where the same widening had made the #2078
+# opt-out ineffective.
+#
+# The ORDERING is the fix, not an exclusion list: a component that is going to SKIP for a
+# missing toolchain should never have been subject to a FIXTURE requirement in the first place.
+# Fixtures are an input to work that will not happen.
+#
+# Deliberately NARROW. It answers only "is this component's TOOLCHAIN absent", never "should
+# this component run" — the corpus question stays with the preflight, and a component whose
+# toolchain IS present is still fully subject to it. Each entry mirrors that component's OWN
+# SKIP predicate, and the two must be changed together; there is no way to derive one from the
+# other in shell, so this is a recorded pairing, like the census guards elsewhere in this file.
+_component_will_skip_for_toolchain() {
+  case "$1" in
+    node-bindings)   ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 ;;
+    python-bindings) ! command -v python3 >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
 selected_needs_datasets() {
   [ -z "$ONLY" ] && return 0
   local sel comp
   for sel in ${ONLY//,/ }; do
+    # A component that will SKIP for a missing toolchain contributes NO dataset requirement:
+    # it is not going to read a fixture, so demanding one would fail the run before its
+    # documented SKIP could be reported (H2). Checked per SELECTED component, so a selection
+    # mixing a skipping component with a real dataset consumer still requires the corpus.
+    _component_will_skip_for_toolchain "$sel" && continue
     for comp in $DATASET_COMPONENTS; do
       [ "$sel" = "$comp" ] && return 0
     done
