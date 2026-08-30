@@ -105,7 +105,12 @@ esac
 # Published purely so a HUMAN reading a heartbeat knows which box wrote it. No verdict
 # depends on it: a reader cannot inspect a pid across machines, and rather than model that,
 # #3473 descoped the death claim entirely (see gate-liveness.sh).
-HOST_NAME=$(uname -n 2>/dev/null || echo unknown)
+# OMIT the field rather than publish a placeholder (roborev job 221). `|| echo unknown` made a FAILED
+# lookup indistinguishable from a real hostname, and because the reader used the same fallback, two
+# failures compared EQUAL and were accepted as proof of a shared clock domain. A reader already treats
+# an ABSENT host as unproven, so absence is the honest encoding of "could not determine".
+HOST_NAME=$(uname -n 2>/dev/null || true)
+case "$HOST_NAME" in unknown) HOST_NAME="" ;; esac
 
 # _gate_alive: AFFIRMATIVE liveness. Returns 0 only on a positive answer.
 # The identity COMPARISON must cover every tier that HAS an identity (roborev job 188). The
@@ -187,11 +192,17 @@ _beat() {
     echo "run-id: $RUN_ID"
     [ -n "$MODE" ] && echo "mode: $MODE"
     echo "gate-pid: $GATE_PID"
-    # `host` is a DIAGNOSTIC for whoever reads this file, not an input to any verdict.
+    # `host` IS AN INPUT TO A VERDICT, and the comment here previously said the opposite — which is
+    # exactly the belief that made `|| echo unknown` look harmless (roborev job 221). The reader uses
+    # this field to decide whether it shares a CLOCK DOMAIN with the beater, and that decision gates
+    # whether freshness may be judged from `beat-epoch` at all. Publish a real hostname or NOTHING;
+    # never a placeholder, which a reader with the same failed lookup would match against.
     # `gate-starttime` and `boot-id` were published so a reader could infer the gate's
     # DEATH from them; that inference is descoped (see gate-liveness.sh), so they are no
     # longer published — an unused field is surface that invites the inference back.
-    echo "host: $HOST_NAME"
+    # OMITTED entirely when undeterminable, so "absent" and "unverified" are the SAME state to a
+    # reader rather than two spellings of it (roborev job 221).
+    [ -n "$HOST_NAME" ] && echo "host: $HOST_NAME"
     [ -n "$LAUNCH_NONCE" ] && echo "launch-nonce: $LAUNCH_NONCE"
     echo "beater-pid: $$"
     echo "parent-check: $PARENT_CHECK"

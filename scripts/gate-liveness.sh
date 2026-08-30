@@ -342,9 +342,17 @@ if [ -n "$WANT_RUN_ID" ] && [ -f "$HB" ] && [ -r "$HB" ] && _ensure_snap_dir; th
       # pre-sentinel tree capture could NEVER be reported STALLED — exactly the startup interval that
       # moving the beater before the tree capture exists to cover.
       _beat_matches=yes
+      # A FAILED LOOKUP MUST NOT COMPARE EQUAL TO ANOTHER FAILED LOOKUP (roborev job 221). Both this
+      # reader and the beater used `uname -n || echo unknown`, so when BOTH lookups failed the two
+      # literal `unknown`s matched and were accepted as proof of a SHARED CLOCK DOMAIN — which then
+      # licenses judging freshness by epoch and could report RUNNING for a dead cross-host beat.
+      # That is absence of measurement read as a positive match, the shape this file refuses
+      # everywhere else. An unverified host is now EMPTY, and empty never matches.
       _sb_host=$(_field "$_sb_text" host)
-      _sb_myhost=$(uname -n 2>/dev/null || echo unknown)
-      if [ -n "$_sb_host" ] && [ "$_sb_host" = "$_sb_myhost" ]; then
+      _sb_myhost=$(uname -n 2>/dev/null || true)
+      case "$_sb_host" in unknown) _sb_host="" ;; esac
+      case "$_sb_myhost" in unknown) _sb_myhost="" ;; esac
+      if [ -n "$_sb_host" ] && [ -n "$_sb_myhost" ] && [ "$_sb_host" = "$_sb_myhost" ]; then
         _sb_iv=$(_field "$_sb_text" interval); _sb_iv=$((10#${_sb_iv:-0}))
         _sb_ep=$(_field "$_sb_text" beat-epoch); _sb_ep=$((10#${_sb_ep:-0}))
         _sb_win=$(( _sb_iv * 3 )); [ "$_sb_win" -ge 90 ] || _sb_win=90
@@ -657,7 +665,17 @@ case "$RESULT_TOKEN" in
   INCOMPLETE)
     : ;;  # the interesting case: fall through to the heartbeat
   *)
-    _summary_terminal_unknown "unrecognised-result; verdict token '$RESULT_TOKEN' (from '$RESULT_LINE') is not a value this reader knows — the summary is well-formed and names this run, so the gate TERMINATED; this reader cannot name the verdict, and a heartbeat cannot answer for it" ;;
+    # TERMINATION IS ONLY PROVEN BY A COMPLETE BLOCK (roborev job 221). Job 220 established that an
+    # unrecognised RESULT token means the gate terminated, so it must not defer to a beat. But that
+    # is true only of a summary that was actually FINISHED: a truncated or interrupted write can
+    # contain a partial `RESULT:` line and no closer, and treating that as termination bypasses the
+    # heartbeat confirmation exactly when a stale matching beat should establish STALLED. The
+    # recognised-terminal path above already required the closer for this reason; this branch was
+    # added without it.
+    if [ "$_n_end" -eq 0 ]; then
+      _summary_refusal_or_defer "the summary at this path was cut short mid-write" "summary-truncated; '$RESULT_LINE' is present but the closing '==== END AGENT-GATE … SUMMARY ====' marker is not — the write was cut short (kill or ENOSPC), so nothing in it proves the gate terminated" || break
+    fi
+    _summary_terminal_unknown "unrecognised-result; verdict token '$RESULT_TOKEN' (from '$RESULT_LINE') is not a value this reader knows — the summary is COMPLETE and names this run, so the gate TERMINATED; this reader cannot name the verdict, and a heartbeat cannot answer for it" ;;
 esac
 
   break
@@ -763,9 +781,12 @@ _where="run-id $HB_RUN_ID, gate-pid ${HB_PID:-unknown}, beat ${HB_SEQ:-?}, age $
 # Outside a proven shared clock domain, BOTH answers come from counter progression below, which
 # compares no clocks at all.
 HB_HOST=$(_field "$HB_TEXT" host)
-MY_HOST=$(uname -n 2>/dev/null || echo unknown)
+# Unverified means EMPTY, never the literal `unknown` (roborev job 221) — see the startup probe above.
+MY_HOST=$(uname -n 2>/dev/null || true)
+case "$MY_HOST" in unknown) MY_HOST="" ;; esac
 _shared_clock=no
-if [ -n "$HB_HOST" ] && [ "$HB_HOST" = "$MY_HOST" ]; then
+case "$HB_HOST" in unknown) HB_HOST="" ;; esac
+if [ -n "$HB_HOST" ] && [ -n "$MY_HOST" ] && [ "$HB_HOST" = "$MY_HOST" ]; then
   _shared_clock=yes
   _where="$_where, clock-domain shared ($MY_HOST)"
 else

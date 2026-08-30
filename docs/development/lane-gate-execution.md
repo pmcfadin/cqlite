@@ -642,6 +642,37 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### A false COMMENT licensed a real defect — and prose has been the weak layer throughout
+
+The beater read `HOST_NAME=$(uname -n 2>/dev/null || echo unknown)`, and the comment directly above it
+said `host` is *"a DIAGNOSTIC for whoever reads this file, not an input to any verdict."* **If that were
+true the placeholder would be harmless.** It is not true: the reader compares that field against its
+own hostname to decide whether the two share a **CLOCK DOMAIN**, and that decision gates whether
+freshness may be judged from `beat-epoch` at all. Since the reader used the *same* `|| echo unknown`
+fallback, two FAILED lookups compared equal, "proved" a shared clock, and a dead cross-host beat could
+report `RUNNING` on incomparable timestamps — absence of measurement read as a positive match, in the
+one field that licenses the epoch comparison.
+
+The fix is in three places, and the shape matters: the beater now **omits** the field when it cannot
+determine a host (so "absent" and "unverified" are ONE state rather than two spellings), the reader
+treats an empty or literal-`unknown` value as unproven on both its comparison sites, and the comment
+is corrected. **The comment was the most valuable of the three**, because it is what would have
+reassured the next reader that the placeholder was safe.
+
+**Prose has been the weak layer in this entire change**, consistently enough to be worth stating as a
+rule. Four false statements were found in comments and docs — "atomic rename is a compare-and-swap",
+"the detached launch survives logout", the fresh/stale verdict rows, and this one — against zero false
+statements in code that the tests did not also catch. The asymmetry has a cause: **code is checked
+against reality, prose against plausibility.** A confident explanatory comment sitting next to a
+suspicious line is therefore a LEAD, not reassurance — and the more authoritative it sounds, the more
+it is worth checking, because that is exactly what stops anyone checking it.
+
+A companion finding in the same round is the smaller half of the same lesson: an unrecognised `RESULT`
+token was treated as proof of termination **without requiring the closing marker**, so a truncated
+write bypassed heartbeat confirmation. The recognised-terminal path had always required the closer; the
+branch added one round earlier simply did not inherit it. Sibling paths through the same decision must
+share their preconditions explicitly, or the newer one silently omits what the older one learned.
+
 ### A correct rule, over-applied: uniformity is not a substitute for asking what an artifact SAYS
 
 Job 218's rule was right and hard-won: **do not make per-site judgements about which paths may skip

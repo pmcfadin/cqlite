@@ -1560,6 +1560,72 @@ grep -q '^run-id: okprobe$' "$_dok.heartbeat" 2>/dev/null \
   && ok "11o.4 control: an ordinary file destination IS still published" \
   || bad "11o.4 control: an ordinary file destination is still published" "no beat at $_dok.heartbeat"
 
+echo "=== section 11r: a FAILED lookup never proves a shared clock domain (job 221) ==="
+# Both the reader and the beater used `uname -n 2>/dev/null || echo unknown`. When BOTH lookups fail
+# the two literal `unknown`s compare EQUAL and were accepted as proof of a SHARED CLOCK DOMAIN — which
+# licenses judging freshness from `beat-epoch`, so a dead cross-host beat could report RUNNING on
+# incomparable timestamps. Absence of measurement read as a positive match: the shape this file
+# refuses everywhere else, sitting in the one field that gates the epoch comparison.
+#
+# The root misconception was written down in the beater: a comment claimed `host` was "a DIAGNOSTIC
+# ... not an input to any verdict". It is an input, and that belief is what made the placeholder look
+# harmless.
+_ck="$TMP/clock.txt"
+mk_summary "$_ck" run-C "INCOMPLETE (gate did not finish)"
+_mkbeat_host() {  # <host-value> <age>
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-C"; echo "gate-pid: 4242"
+    echo "parent-check: starttime"; [ -n "$1" ] && echo "host: $1"
+    echo "interval: 20"; echo "beat-seq: 7"; echo "beat-epoch: $(( $(date +%s) - $2 ))"
+    echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$_ck.heartbeat"
+}
+# A FRESH epoch with host `unknown` must NOT be believed: no proven clock domain, static counter.
+_mkbeat_host unknown 5
+expect_reader "11r.1 host 'unknown' + fresh epoch => NOT a false RUNNING" \
+  STALLED 3 "clock-domain UNPROVEN" -- "$_ck" --run-id run-C
+# An ABSENT host behaves identically — absence and unverified are ONE state, not two spellings.
+_mkbeat_host "" 5
+expect_reader "11r.2 an ABSENT host behaves the same as 'unknown'" \
+  STALLED 3 "clock-domain UNPROVEN" -- "$_ck" --run-id run-C
+# CONTROL: a REAL matching host still proves the domain, or 11r.1/2 would be satisfied by a reader
+# that never trusts any host.
+_mkbeat_host "$(uname -n 2>/dev/null || echo somebox)" 5
+expect_reader "11r.3 control: a REAL matching host still proves the clock domain => RUNNING" \
+  RUNNING 2 "clock-domain shared" -- "$_ck" --run-id run-C
+# Neither side may reintroduce the placeholder.
+# CODE ONLY, comments stripped. The first version of this case failed against the comments EXPLAINING
+# the defect, which quote `|| echo unknown` verbatim — the same self-defeating shape as 4b.81c in the
+# detached suite, and the second time in this change that documenting a defect tripped the guard
+# written to catch it. The fix is to separate the channels, not to reword the explanation.
+_ph_bad=0
+for _f in "$READER" "$BEATER"; do
+  grep -vE '^[[:space:]]*#' "$_f" | grep -q 'echo unknown' && { _ph_bad=$((_ph_bad+1)); echo "     placeholder in $(basename "$_f")"; }
+done
+[ "$_ph_bad" = 0 ] && ok "11r.4 neither reader nor beater falls back to the literal 'unknown'" \
+                   || bad "11r.4 neither reader nor beater falls back to 'unknown'" "$_ph_bad file(s) still do"
+# And the beater must OMIT the field rather than publish an empty one.
+if grep -q '\[ -n "$HOST_NAME" \] && echo "host: $HOST_NAME"' "$BEATER"; then
+  ok "11r.5 the beater omits host entirely when it cannot determine one"
+else
+  bad "11r.5 the beater omits host when undeterminable" "it publishes the field regardless"
+fi
+
+echo "=== section 11s: termination needs a COMPLETE block (job 221) ==="
+# Job 220 established that an unrecognised RESULT token means the gate terminated, so it must not
+# defer. That holds only for a FINISHED write: a truncated summary can carry a partial `RESULT:` line
+# and no closer, and treating that as termination bypasses the heartbeat exactly when a stale matching
+# beat should establish STALLED. The recognised-terminal path already required the closer; the branch
+# added for job 220 did not.
+_tr="$TMP/trunc.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-T"; echo "RESULT: FUTURETHING"; } > "$_tr"
+mk_beat "$_tr.heartbeat" run-T 4000 20
+expect_reader "11s.1 unrecognised token in a TRUNCATED write + stale beat => STALLED" \
+  STALLED 3 "" -- "$_tr" --run-id run-T
+# CONTROL: the same token in a COMPLETE block is termination, and no beat overrides it.
+mk_summary "$TMP/complete.txt" run-T "FUTURETHING"
+mk_beat "$TMP/complete.txt.heartbeat" run-T 4000 20
+expect_reader "11s.2 control: the same token in a COMPLETE block => UNKNOWN (termination)" \
+  UNKNOWN 4 "unrecognised-result" -- "$TMP/complete.txt" --run-id run-T
+
 echo "=== section 11q: NO summary-side path may verdict UNKNOWN alone (job 218) ==="
 # THE GUARD THAT SHOULD HAVE EXISTED THREE ROUNDS AGO. Job 209 built `_summary_refusal` as "one
 # decision point for every summary-side refusal" and asserted it with a grep for
