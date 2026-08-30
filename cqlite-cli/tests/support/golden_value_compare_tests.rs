@@ -570,27 +570,60 @@ fn a_multicell_set_element_the_cli_stringifies_is_a_divergence() {
     assert!(report.diffs[0].contains(".s"), "{:?}", report.diffs);
 }
 
-/// A map KEY is the one position the relaxation is still two-sided, and that is a
-/// stated cost rather than an oversight: the golden renders a map as a JSON object,
-/// whose key can only be a string, so it makes no statement about kind there.
-/// Pinned so the asymmetry above cannot be widened onto map keys without this
-/// case saying so — and so the `map<text,…>` half stays strict.
+/// Finding M1's asymmetry AT A MAP KEY (issue #1491 review finding N1).
+///
+/// The relaxation belongs to the GOLDEN alone here too. A JSON object's key can
+/// only be a string, so the golden's `{"-5": …}` is stringified BY THE FORMAT and
+/// states nothing about kind; the CLI spells a map as an array of
+/// `{"key":…,"value":…}` objects, whose `key` keeps the JSON kind its declared
+/// type implies. So a `map<int,…>` key must be a JSON NUMBER on the CLI side, and
+/// the string spelling is a divergence — which the two-sided rule accepted.
 #[test]
-fn a_map_key_is_still_compared_with_the_two_sided_kinding() {
+fn a_map_key_relaxation_is_the_goldens_and_the_cli_keeps_its_declared_kind() {
     let schema = schema_of(INT_MAP_DDL, "t");
     let golden = vec![row(&[("id", json!("1")), ("mi", json!({"-5": "x"}))])];
-    for key in [json!(-5), json!("-5")] {
-        let cli = vec![row(&[
-            ("id", json!(1)),
-            ("mi", json!([{"key": key, "value": "x"}])),
-        ])];
-        let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
-        assert!(
-            report.diffs.is_empty(),
-            "a `map<int,…>` key pairs by value in either spelling: {:?}",
-            report.diffs
-        );
-    }
+
+    let natural = vec![row(&[
+        ("id", json!(1)),
+        ("mi", json!([{"key": -5, "value": "x"}])),
+    ])];
+    let report = compare_rows(&golden, &natural, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(
+        report.diffs.is_empty(),
+        "the golden's stringified key pairs with the CLI's number: {:?}",
+        report.diffs
+    );
+
+    let stringified = vec![row(&[
+        ("id", json!(1)),
+        ("mi", json!([{"key": "-5", "value": "x"}])),
+    ])];
+    let report = compare_rows(
+        &golden,
+        &stringified,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a `map<int,…>` key the JSON egress spells as a string must fail: {:?}",
+        report.diffs
+    );
+    assert!(report.diffs[0].contains(".mi"), "{:?}", report.diffs);
+
+    // CSV carries no JSON kinds at all, so the same CLI spelling is correct there
+    // and must NOT be read as this divergence.
+    let csv = vec![row(&[("id", json!("1")), ("mi", json!("{-5: x}"))])];
+    let report = compare_rows(&golden, &csv, &schema, &["id"], &[], &[], Egress::Csv);
+    assert!(
+        report.diffs.is_empty(),
+        "CSV has no kinds, so its textual key still pairs: {:?}",
+        report.diffs
+    );
 }
 
 /// Finding R1 at collection elements, where `frozen` decides the answer and the

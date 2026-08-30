@@ -640,10 +640,9 @@ fn compare_value_body(
         // Applying the golden's relaxation to both sides made the mechanism
         // symmetric, so at a stringified position an egress regression that
         // rendered `"id":"1"` for an `int` partition key still compared equal
-        // (issue #1491 review finding M1). A map KEY is deliberately still
-        // symmetric, and [`compare_map`] says why: the golden renders a map as a
-        // JSON object, whose key can only be a string, so the golden carries no
-        // statement about kind there to hold the CLI to.
+        // (issue #1491 review finding M1). [`compare_map`] applies the same
+        // asymmetry to a map KEY: the golden's object key is stringified by the
+        // format, the CLI's `{"key","value"}` key is not (finding N1).
         _ => {
             let g = canon_typed(golden, egress, ty, at.depth, at.kinding)?;
             let c = canon_typed(cli, egress, ty, at.depth, Kinding::Natural)?;
@@ -945,25 +944,35 @@ fn compare_map(
             key_ty.describe()
         ));
     }
-    // A key canonicalization FAILURE is propagated, never folded into the sort
-    // key: a `<reason>` string would still pair with an identical `<reason>` on
-    // the other side and compare equal.
-    // A map KEY is `Kinding::Stringified` on BOTH sides and wherever the map
-    // appears, frozen or not: the golden renders a map as a JSON OBJECT, and a
-    // JSON object's key can only be a string. So the kind carries no information
-    // here and the declared key type is what decides equality.
-    let canon_key = |v: &Value| -> Result<String, String> {
+    // A key canonicalization FAILURE is propagated, never swallowed into the
+    // comparison key: a `<reason>` string would still meet an identical
+    // `<reason>` on the other side and compare equal.
+    //
+    // ASYMMETRIC, exactly as for a cell value (finding M1) and for the same
+    // reason. A JSON object's key can only be a string, so the GOLDEN's map key
+    // is stringified BY THE FORMAT and says nothing about kind: it is read with
+    // `Kinding::Stringified`. The CLI is under no such constraint — it spells a
+    // map as an ARRAY of `{"key":…,"value":…}` objects, whose `key` keeps the JSON
+    // kind of its declared type — so the CLI key is held to `Kinding::Natural`,
+    // i.e. to the kind its declared key type implies. Relaxing BOTH sides made a
+    // regression from the `map<int,…>` key `-5` to the string `"-5"` compare equal
+    // (issue #1491 review finding N1).
+    let canon_golden_key = |v: &Value| -> Result<String, String> {
         canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Stringified)
+            .map(|canon| canon.describe())
+    };
+    let canon_cli_key = |v: &Value| -> Result<String, String> {
+        canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Natural)
             .map(|canon| canon.describe())
     };
     let mut g: Vec<(String, &Value)> = Vec::with_capacity(golden.len());
     for (k, v) in golden {
-        g.push((canon_key(&Value::String(k.clone()))?, v));
+        g.push((canon_golden_key(&Value::String(k.clone()))?, v));
     }
     let mut c: Vec<(String, &Value)> = Vec::with_capacity(cli.len());
     for entry in cli {
         let (key, value) = pair(entry, egress)?;
-        c.push((canon_key(key)?, value));
+        c.push((canon_cli_key(key)?, value));
     }
     if g.len() != c.len() {
         return Err(format!("map size golden {} vs cli {}", g.len(), c.len()));

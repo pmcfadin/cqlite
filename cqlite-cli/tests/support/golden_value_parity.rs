@@ -48,9 +48,10 @@
 //!   keys). There the GOLDEN's string is read as a number — and only the
 //!   golden's: the CLI is held to its declared type's JSON kind everywhere, so a
 //!   CLI `"id":"1"` for an `int` partition key is a divergence (finding M1). A
-//!   map key is the one two-sided case, because the dump renders a map as a JSON
-//!   object and an object key can only be a string, so the golden states nothing
-//!   about kind there. See [`Kinding`], which derives the rule from
+//!   map KEY works the same way: the dump renders a map as a JSON object and an
+//!   object key can only be a string, so the GOLDEN key is relaxed while the
+//!   CLI's `{"key","value"}` key keeps its declared type's kind (finding N1).
+//!   See [`Kinding`], which derives the rule from
 //!   `cassandra-5.0.8 JsonTransformer` and the committed DDL. The comparison
 //!   itself is the pure-string [`normalize_decimal`] (no `10^scale`
 //!   materialization, no `f64` round-trip, so a 30-digit `decimal` is exact).
@@ -222,11 +223,12 @@ pub enum Kinding {
     /// SPELLED as and never what the CLI may emit: at a stringified position the
     /// CLI must still render a numeric column as a JSON number.
     ///
-    /// The one residual, stated rather than hidden: a map KEY is compared with
-    /// this kinding on BOTH sides, because the golden renders a map as a JSON
-    /// object whose key can only be a string — so there the golden makes no
-    /// statement about kind, and the JSON lane cannot tell a CLI `1` from a CLI
-    /// `"1"`. See `compare::compare_map`.
+    /// That holds at a map KEY too. The golden spells a map as a JSON object,
+    /// whose key can only be a string, so the golden key is read with this
+    /// kinding — but the CLI spells a map as an array of `{"key","value"}`
+    /// objects, whose `key` keeps its declared type's JSON kind, so the CLI key is
+    /// held to [`Kinding::Natural`] like every other CLI value (issue #1491 review
+    /// finding N1). See `compare::compare_map`.
     Stringified,
 }
 
