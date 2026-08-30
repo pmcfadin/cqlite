@@ -601,10 +601,12 @@ fn a_text_map_key_is_compared_by_kind_and_a_numeric_one_still_pairs() {
     let schema = schema_of(UDT_MAP_DDL, "t");
     let address = json!({"street": "s", "city": "c", "zip": "z"});
     let golden = vec![row(&[("id", json!(1)), ("ma", json!({"0": address}))])];
+    // The JSON egress names a UDT's type in `_type`; the golden does not carry it.
+    let cli_address = json!({"_type": "address", "street": "s", "city": "c", "zip": "z"});
 
     let right = vec![row(&[
         ("id", json!(1)),
-        ("ma", json!([{"key": "0", "value": address}])),
+        ("ma", json!([{"key": "0", "value": cli_address}])),
     ])];
     let report = compare_rows(&golden, &right, &schema, &["id"], &[], &[], Egress::Json);
     assert!(
@@ -615,7 +617,7 @@ fn a_text_map_key_is_compared_by_kind_and_a_numeric_one_still_pairs() {
 
     let numeric = vec![row(&[
         ("id", json!(1)),
-        ("ma", json!([{"key": 0, "value": address}])),
+        ("ma", json!([{"key": 0, "value": cli_address}])),
     ])];
     let report = compare_rows(&golden, &numeric, &schema, &["id"], &[], &[], Egress::Json);
     assert_eq!(
@@ -635,6 +637,91 @@ fn a_text_map_key_is_compared_by_kind_and_a_numeric_one_still_pairs() {
     ])];
     let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+}
+
+/// R3: the JSON egress's `_type` discriminator is REQUIRED — present, a string,
+/// and the name the committed `CREATE TYPE` declares. It used to be stripped
+/// unconditionally, so all three of these regressions passed.
+#[test]
+fn the_json_udt_discriminator_must_name_the_declared_type() {
+    let schema = schema_of(PERSON_DDL, "t");
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        ("p", json!({"first_name": "A", "last_name": "B", "age": 30})),
+    ])];
+    let fields = json!({"first_name": "A", "last_name": "B", "age": 30});
+
+    // The shape that must PASS: the declared name, in the field the egress uses.
+    let right = vec![row(&[
+        ("id", json!(1)),
+        (
+            "p",
+            json!({"_type": "person", "first_name": "A", "last_name": "B", "age": 30}),
+        ),
+    ])];
+    let report = compare_rows(&golden, &right, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+
+    // An unquoted CQL identifier is case-insensitive, so the case of the name is
+    // not a divergence.
+    let folded = vec![row(&[
+        ("id", json!(1)),
+        (
+            "p",
+            json!({"_type": "PERSON", "first_name": "A", "last_name": "B", "age": 30}),
+        ),
+    ])];
+    let report = compare_rows(&golden, &folded, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+
+    // The three shapes that must FAIL, each naming the column and the type.
+    for (why, cli_value) in [
+        ("absent", fields.clone()),
+        ("wrong name", {
+            let mut o = fields.clone();
+            o["_type"] = json!("address");
+            o
+        }),
+        ("not a string", {
+            let mut o = fields.clone();
+            o["_type"] = json!(7);
+            o
+        }),
+    ] {
+        let cli = vec![row(&[("id", json!(1)), ("p", cli_value)])];
+        let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "a `_type` that is {why} must fail: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].contains(".p:") && report.diffs[0].contains("person"),
+            "the failure must name the column and the declared type: {:?}",
+            report.diffs
+        );
+    }
+}
+
+/// The CSV lane has NO discriminator to check, and that is a property of the
+/// format: `ValueFormatter` renders a UDT as `{field: value, …}` with no type
+/// name, so the CSV decoder produces the `{key,value}` list and this rule
+/// deliberately does not apply there.
+#[test]
+fn the_csv_lane_carries_no_udt_discriminator() {
+    let schema = schema_of(PERSON_DDL, "t");
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        ("p", json!({"first_name": "A", "last_name": "B", "age": 30})),
+    ])];
+    let cli = vec![row(&[
+        ("id", json!("1")),
+        ("p", json!("{first_name: A, last_name: B, age: 30}")),
+    ])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(report.container_cells, 1, "the UDT cell must be compared");
 }
 
 /// F3: each egress format renders a UDT exactly one way, so only that way is

@@ -626,10 +626,15 @@ fn udt_spelling(egress: Egress) -> &'static str {
 /// representation is FORMAT-SCOPED, because each format has exactly one:
 ///
 ///   * **JSON** — a field→value object, plus a `_type` discriminator the CLI adds
-///     and the golden does not carry (dropped from the CLI side only). A
-///     `{key,value}` pair array is the CLI's *map* spelling, so accepting one here
-///     would let a UDT that regressed to the map representation pass; it is
-///     therefore rejected (issue #1491 review finding F3).
+///     and the golden does not carry. It is REQUIRED to be present, to be a
+///     string, and to name the type the committed `CREATE TYPE` declares (folded
+///     for case, because an unquoted CQL identifier is case-insensitive); only
+///     then is it dropped from the field set, and only from the CLI side. It used
+///     to be stripped unconditionally, so a missing or wrongly-named
+///     discriminator passed even though the DDL knows the answer (issue #1491
+///     review finding R3). A `{key,value}` pair array is the CLI's *map*
+///     spelling, so accepting one here would let a UDT that regressed to the map
+///     representation pass; it is therefore rejected (review finding F3).
 ///   * **CSV** — a `{key,value}` list, and only that. CSV delivers the whole cell
 ///     as one flat `{k: v, …}` text carrying nothing that could distinguish a map
 ///     from a UDT, so [`super::csv_container`] decodes EVERY brace-delimited body
@@ -648,11 +653,14 @@ fn compare_udt(
     skips: &SkipPaths<'_>,
 ) -> Result<(), String> {
     let c: Map<String, Value> = match (egress, cli) {
-        (Egress::Json, Value::Object(fields)) => fields
-            .iter()
-            .filter(|(k, _)| k.as_str() != "_type")
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
+        (Egress::Json, Value::Object(fields)) => {
+            check_udt_discriminator(fields, udt)?;
+            fields
+                .iter()
+                .filter(|(k, _)| k.as_str() != DISCRIMINATOR)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        }
         (Egress::Csv, Value::Array(entries)) => {
             let mut out = Map::new();
             for entry in entries {
@@ -718,6 +726,46 @@ fn compare_udt(
         .map_err(|why| format!(".{field} {why}"))?;
     }
     Ok(())
+}
+
+/// The field name the JSON egress adds to a UDT object to name its type.
+const DISCRIMINATOR: &str = "_type";
+
+/// The JSON egress's UDT `_type` field must be PRESENT, a STRING, and the type
+/// name the committed `CREATE TYPE` declares.
+///
+/// Stripping it unconditionally (the first cut of this file) made the
+/// discriminator untestable in the one lane that renders it: a UDT object with no
+/// `_type` at all, or one naming the wrong type — which is what a UDT resolved
+/// against the wrong `CREATE TYPE` would produce — compared equal (issue #1491
+/// review finding R3). The expected name comes from the DDL, so this is an
+/// assertion against the committed schema and not against CQLite's own output.
+///
+/// The comparison folds ASCII case because an UNQUOTED CQL identifier is
+/// case-insensitive — Cassandra stores `Person` and `person` as the same type
+/// name — so requiring exact case would assert something CQL does not mean. Every
+/// `CREATE TYPE` in `test-data/schemas/` is unquoted.
+fn check_udt_discriminator(fields: &Map<String, Value>, udt: &UdtType) -> Result<(), String> {
+    match fields.get(DISCRIMINATOR) {
+        Some(Value::String(name)) if name.eq_ignore_ascii_case(&udt.name) => Ok(()),
+        Some(Value::String(name)) => Err(format!(
+            "udt `{}`: the JSON egress names the type `{name}` in its `{DISCRIMINATOR}` \
+             discriminator, but the committed CREATE TYPE declares `{}`",
+            udt.name, udt.name
+        )),
+        Some(other) => Err(format!(
+            "udt `{}`: the JSON egress's `{DISCRIMINATOR}` discriminator is {}, not a \
+             string naming the type",
+            udt.name,
+            brief(&describe(other, Egress::Json))
+        )),
+        None => Err(format!(
+            "udt `{}`: the JSON egress object carries no `{DISCRIMINATOR}` discriminator \
+             — the committed CREATE TYPE declares this value as `{}`, and the JSON \
+             egress names a UDT's type in that field",
+            udt.name, udt.name
+        )),
+    }
 }
 
 /// One `{"key":…,"value":…}` entry of the CLI's map/UDT spelling, with the key
