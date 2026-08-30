@@ -1737,3 +1737,146 @@ first committed with **no product plant evidence at all** while plant worktrees 
 caught the omission, pruned them and ran both plants directly. Mandatory evidence that is merely
 *planned* is absent evidence; and after a near-miss in which a plant was committed onto this very
 branch, product-source plants are now run by the lead in verified isolation rather than delegated.
+
+---
+
+## Round 14 — the three job-253 findings: a mis-placed timer, post-expiry initiation, and an undercounted census
+
+roborev job 253 returned three findings. All three are localized; one of them is the most
+consequential this change has had. Design of record: **design.md D6d**.
+
+### Finding 1 — the calibration was nearly RE-INERTED by a mis-placed timer (`:104`, `:279`)
+
+Both tests started their acknowledgement timer **after** the `writeln!`/`flush()` — the SIGINT test by
+opening stage (b) late, the five-write loop by taking its `Instant` late. `t_ack` is a **calibration
+input** (`scale = max(1, t_ack / QUIET_OBSERVATION_BASELINE)`), so a fast child — or a test thread
+descheduled across the write — could have its `OK` recorded before timing began. The measured
+round-trip then collapses to nearly zero, `scale` stays at **1.000**, and the deadline does not expand
+under contention: **#3515's own original defect, reintroduced through a mis-placed timer.**
+
+This outranks its severity label. AC1's whole claim rests on the deadline growing on a contended host,
+and that has been *observed* exactly once — the round-13 lead-run plant derived `scale 1.557` from
+`t_boot` (68.512 ms) while `t_ack` measured **4.094 ms** and contributed **1.000**. `calibrate` takes
+the LARGEST scale, so **`t_boot` masked it**; under-measure both and the mechanism is silently inert
+again, with a green suite and a deadline that never moves.
+
+**Fix.** Stage (b) and stage (c) are now opened *before* the operation they measure (the write, the
+`libc::kill`), and the five-write loop takes its per-write instant before its mark. New test
+`the_measured_acknowledgement_includes_the_write_itself` — a LOWER bound on a measurement, not a
+latency budget: `thread::sleep` overshoot, the only thing a loaded host can do to it, makes the
+assertion *more* true, so it is not the #2642 class.
+
+### Finding 2 — an operation ISSUED after expiry could still satisfy its wait (`:96`, `:112`, `:271`)
+
+The evidence-producing operations — a write, the SIGINT, both child spawns, the stdin `drop` — were
+issued without checking the one deadline was still live, and every expiry site deliberately accepts a
+matching snapshot when `remaining()` is already zero. So work *started* after the deadline could
+manufacture fresh evidence and carry the test past its sole bound.
+
+**The round-9 ruling is preserved, and the distinction is the fix.** Accepting evidence **already in
+hand** as the deadline lapses is correct and stays — rejecting an observed success is a false failure
+on a working product, which is the flake class this change removes. What is unsound is *manufacturing*
+evidence after expiry, and by the time such a line exists it is indistinguishable from one that
+arrived late: no care inside `wait_for` can separate them. So the check goes at the point of
+**INITIATION**, the only place they are still distinguishable — `Stage::check_live`,
+`Stage::require_live`, `require_live_or_kill` (which kills the child first, so a post-expiry failure
+does not leak it). `wait_for` and `poll_with_progress` are **unchanged**. New test
+`an_operation_initiated_after_expiry_cannot_satisfy_its_wait` asserts BOTH halves in one test, because
+the boundary between them is the property.
+
+### Finding 3 — the aggregate floor counted fewer stages than it claimed: the ASSERT-CLAIM class, a fourth time (`budgets.rs:528`)
+
+The assert said it counted "EVERY stage that draws on the one deadline" and added exactly ONE
+hand-written term to the old waits: `NEW_READINESS_WAITS`. Since it was written, `c.handler-entry`
+became a separate wait from clean exit (exactly as acknowledgement is separate from readiness) and
+`e.durability-read` became BOUNDED — and neither joined the sum; the durability read was missing from
+**both** censuses. So the invariant could stay green on an **undercounted base**.
+
+That is the fourth instance of one class in this issue — **an assert named for more than it tests**,
+after three anchor instances and two floor ones — and it is closed the way rounds 6-10 closed the
+anchors: **derive the number, do not label it.**
+
+* `WaitCensus` declares, per test, every wait GRANTED `stage.remaining()`. **The unit is a WAIT, not a
+  stage**: `b.write-acks` is one stage holding five, each of which replaced an independent 60 s bound.
+  Work merely *charged* to a stage (the spawn inside `select_rows`) is not a wait and is not counted.
+* `Replaced` (`OldBound` / `Folded` / `Unbounded`) records what the pre-#3515 code bounded each with,
+  so `T1_OLD_WAITS`, `T2_OLD_WAITS` and `NEW_READINESS_WAITS` are **deleted** — 2 and 7 are derived.
+* `aggregate_floor` reserves an `OLD_BOUND` per wait: **6 × 60 s = 360 s** (T1), **10 × 60 s = 600 s**
+  (T2). Bases move **180 s → 360 s** and **480 s → 600 s**; caps **360 → 720** and **720 → 900**.
+  The reserve for a wait the old code did not bound is recorded as a **CHOICE, not a measurement**.
+* **The base stays hand-written and the assert requires `base == floor`.** Deriving the base would make
+  the invariant a **tautology no undercount could fail** — the trade is explicit, and equality fails in
+  both directions.
+* **The stage SET is verified against the run.** `assert_census_matches_run`, the last statement of each
+  integration test, compares the census with the stages the test actually finished. Residual stated
+  where it lives: a wait added INSIDE an already-declared stage changes `waits` and nothing detects it.
+* T2's cap sits at **exactly** `MAX_TEST_DEADLINE`, deliberately: the next wait added raises the floor
+  past what the test-length limit permits and FAILS, because that conflict is a human decision.
+
+### RED verification — one committed plant, throwaway worktree, all three findings
+
+`git worktree add --detach /tmp/plant-3515 a41e8c0db`, plant committed as `3c3316394` **inside that
+worktree only** (worktree pruned afterwards; the lane branch never carried it). Test-code only — no
+`src/`, no product plant.
+
+```
+$ git diff a41e8c0db HEAD --stat        # inside /tmp/plant-3515
+ cqlite-cli/tests/graceful_shutdown_support/budgets.rs       | 10 +---------
+ cqlite-cli/tests/graceful_shutdown_support/harness_tests.rs |  5 +----
+```
+
+The three plants, verbatim:
+
+1. **finding 3 — undercount the census**: the whole `WaitCensus { stage: "c.handler-entry", … }` entry
+   deleted from `T1_WAIT_CENSUS`.
+2. **finding 2 — disable the initiation guard**: `if self.remaining().is_zero() {` → `if false {` in
+   `Stage::check_live`.
+3. **finding 1 — start the ack timer after the write**: in
+   `the_measured_acknowledgement_includes_the_write_itself`, `let stage = deadline.stage("b.write-ack");`
+   moved from before `mark`/sleep/`record` to after them.
+
+`cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests -- --test-threads=1`
+→ **FAILED. 22 passed; 4 failed** (three plants, one of them caught twice):
+
+```text
+--- no_stage_in_isolation_is_tighter_than_the_bound_it_replaced (plant 1)
+sigint_in_writable_session_flushes_before_exit: the base 360s is not the 300s aggregate its wait
+census derives (5 waits across 4 stages, of which 2 replaced an independent 60s wait, at 60s each).
+… the census having gained `c.handler-entry` and `e.durability-read` without gaining the terms for them.
+  left: 360s
+ right: 300s
+
+--- sigint_in_writable_session_flushes_before_exit (plant 1, caught a SECOND way)
+the stages this run COMPLETED are not the stages its wait census declares.
+declared: ["a.session-up", "b.write-ack", "d.clean-exit", "e.durability-read"]
+ran:      ["a.session-up", "b.write-ack", "c.handler-entry", "d.clean-exit", "e.durability-read"]
+
+--- an_operation_initiated_after_expiry_cannot_satisfy_its_wait (plant 2)
+an exhausted deadline must refuse to initiate new work: ()
+
+--- the_measured_acknowledgement_includes_the_write_itself (plant 3)
+the acknowledgement measurement must span the write it acknowledges: got 2.996µs for a write that
+took at least 50ms. A measurement that excludes the write collapses to ~0 whenever the ack is already
+in hand, `scale` stays at 1.000, and the one deadline does not expand under contention — #3515's own
+original defect, reintroduced through a mis-placed timer
+```
+
+**`got 2.996µs` for a 50 ms write is finding 1 measured rather than argued**: the mis-placed timer
+reports a round-trip four orders of magnitude short, which is exactly the collapse-to-`scale 1.000`
+the finding describes. And plant 1 is caught **twice, independently** — by the arithmetic (base ≠
+derived floor) and by the run itself (a stage ran that the census does not declare) — which is the
+point of verifying the stage set against reality instead of trusting the census.
+
+### State at the end of round 14
+
+* **26 tests** in `graceful_shutdown_tests` (was 24 at the start of the round; the round-13 record's
+  "21" undercounted by one — the file held 22 before this round's 4 additions: 2 for findings 1 and 2,
+  2 for the census checker's accept/reject directions).
+* `T1_DEADLINE_BASE` **360s** / cap **720s**; `T2_DEADLINE_BASE` **600s** / cap **900s** — the latter
+  exactly at `MAX_TEST_DEADLINE`, deliberately. Every value derived from `T1/T2_WAIT_CENSUS`.
+* Stale-claim sweep for the rescoped constants: `transcript.rs`'s poll-cost note and design.md's D6b
+  cost paragraph and D6c mitigation line all quoted the old **180s** base; all three updated. Earlier
+  `tasks.md` rounds keep their numbers — they are dated records of what was true then, not claims
+  about the shipped constants.
+* `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --features write-support --tests`: clean.
+* Every `.rs` in the change under the 1500-line test threshold (largest: `budgets.rs` 1330).

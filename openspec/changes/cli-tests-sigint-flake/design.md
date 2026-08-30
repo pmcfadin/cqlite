@@ -327,7 +327,7 @@ iteration there is no second sample.
 **Accepted cost:** waits poll the log rather than blocking on a channel, so a wait wakes on a short
 interval instead of on delivery. Measured latency cost is bounded by the poll interval and is
 irrelevant at this test's timescales (stage timings are microseconds to tens of milliseconds against a
-180s deadline). What is bought is the removal of two defect families by construction.
+360s+ deadline). What is bought is the removal of two defect families by construction.
 
 ## D6c. The floor claim, corrected: one deadline CANNOT guarantee a fresh allowance per wait
 
@@ -349,8 +349,8 @@ twelve findings across four rounds. It is fixed by stating the trade truthfully:
   deliberately taken.
 
 The floor assertion and its name must say the property that holds, not the stronger one. Practically
-the starvation path requires an early stage to consume ~180s while the product works, at which point
-the run is failing regardless — but that is a mitigation, not the claim, and it is recorded as such.
+the starvation path requires an early stage to consume the whole base (360s / 600s after D6d) while
+the product works, at which point the run is failing regardless — but that is a mitigation, not the claim, and it is recorded as such.
 
 **Landed in round 13.** `the_deadline_is_never_tighter_than_the_bounds_it_replaced` is renamed
 `no_stage_in_isolation_is_tighter_than_the_bound_it_replaced`, and both of its assertion messages now
@@ -359,6 +359,81 @@ aggregate one says in as many words that it does NOT give a later stage a fresh 
 stages have consumed the deadline. The property that does NOT hold is pinned by its own test,
 `an_exhausted_deadline_leaves_a_later_stage_nothing` — arithmetic on a zero-base deadline, no sleep
 and no threshold — so the stronger claim cannot quietly return as a comment.
+
+## D6d. Round 14: the timer that nearly re-inerted the calibration, post-expiry initiation, and a DERIVED census
+
+roborev job 253 returned three findings. None asks for a new mechanism; all three are localized, and
+one of them is the most consequential finding this change has had.
+
+**1. `t_ack` was measured too late, which can make the whole calibration INERT.** Both tests started
+their acknowledgement timer *after* the `writeln!`/`flush()` — the SIGINT test by opening stage (b)
+late, the five-write loop by taking its `Instant` late. `t_ack` is a *calibration input*
+(`scale = max(1, t_ack / QUIET_OBSERVATION_BASELINE)`), so a fast child, or a test thread descheduled
+across the write, could have its `OK` recorded before timing began: the measured round-trip collapses
+to nearly zero, `scale` stays at **1.000**, and the deadline does not expand under contention. That is
+**#3515's original defect, reintroduced through a mis-placed timer**, and it is why this finding
+outranks its severity label: AC1's entire claim rests on the deadline growing on a contended host, and
+that has been *observed* exactly once — the round-13 plant derived `scale 1.557` from `t_boot`
+(68.5 ms) while `t_ack` measured 4.094 ms and contributed 1.000. `calibrate` takes the LARGEST scale,
+so `t_boot` **masked** it; under-measure both and the mechanism is silently inert again.
+
+Fixed by opening each acknowledgement stage — and the handler-entry stage — *before* the operation it
+measures, and by taking the five-write loop's per-write instant before its mark. Pinned by
+`the_measured_acknowledgement_includes_the_write_itself`, which is a LOWER bound on a measurement and
+not a latency budget: `thread::sleep` overshoot, the only thing a loaded host can do to it, makes the
+assertion more true.
+
+**2. An operation ISSUED after expiry could still satisfy its wait.** The evidence-producing
+operations — a write, the `libc::kill`, both child spawns, the stdin `drop` — were issued without
+checking that the one deadline was still live, and every expiry site deliberately accepts a matching
+snapshot even when `remaining()` is already zero. So work *started* after the deadline could
+manufacture fresh evidence and carry the test past its sole bound.
+
+**The round-9 ruling is preserved exactly, and the distinction is the whole fix.** Accepting evidence
+already in hand as the deadline lapses is CORRECT and stays: rejecting an observed success would be a
+false failure on a working product, which is the flake class this change exists to remove. What is
+unsound is *manufacturing* evidence after expiry — and by the time such a line exists it is
+indistinguishable from one that arrived late, so no amount of care inside `wait_for` can separate the
+two. The check therefore belongs at the point of **initiation**, the only place they are still
+distinguishable: `Stage::check_live` / `Stage::require_live` / `require_live_or_kill`, called
+immediately before each write, the signal, both spawns and the stdin close. `wait_for` and
+`poll_with_progress` are unchanged. `an_operation_initiated_after_expiry_cannot_satisfy_its_wait`
+asserts both halves in one test, because the boundary between them is the property.
+
+**3. The aggregate floor counted fewer stages than it claimed — the fourth instance of one class.**
+The assert said it counted "EVERY stage that draws on the one deadline" and added exactly ONE
+hand-written term (readiness, `NEW_READINESS_WAITS`) to the old waits. Since it was written,
+`c.handler-entry` became a separate wait from clean exit (exactly as acknowledgement is separate from
+readiness) and `e.durability-read` became BOUNDED — and neither joined the sum; the durability read
+was missing from *both* censuses. So the invariant could stay green on an **undercounted base**. An
+assert named for more than it tests is this issue's most repeated defect (three anchor instances, two
+floor instances), and it is closed the way rounds 6-10 closed the anchors: **derive the number, do not
+label it.**
+
+* `WaitCensus` declares, per test, every wait that is GRANTED `stage.remaining()`. **The unit is a
+  WAIT, not a stage**, because `b.write-acks` is one stage holding five of them, each of which
+  replaced an independent 60 s bound; work merely *charged* to a stage (the spawn inside `select_rows`)
+  is not a wait and is not counted. `Replaced` records what the pre-#3515 code bounded each with
+  (`OldBound` / `Folded` / `Unbounded`), so `T1_OLD_WAITS`, `T2_OLD_WAITS` and `NEW_READINESS_WAITS`
+  are **deleted**: 2 and 7 are now derived.
+* `aggregate_floor` reserves an `OLD_BOUND` per wait — **6 x 60 s = 360 s** (T1) and
+  **10 x 60 s = 600 s** (T2) — moving the bases 180 s -> 360 s and 480 s -> 600 s, and the caps
+  360 -> 720 and 720 -> 900. **The reserve for a wait the old code did not bound is a CHOICE, not a
+  measurement**, and it is recorded as one: there is no old bound to preserve for a `Folded` or
+  `Unbounded` wait, and the term exists so the base is large enough for every wait sharing the
+  deadline to take a full `OLD_BOUND` — which is precisely what job 232's finding 2 asked for.
+* **The base stays hand-written and the assert requires `base == floor`.** Deriving the base from the
+  census would make the invariant a **tautology no undercount could fail**; equality fails in both
+  directions — an undercounted census, and a base carrying margin the census does not explain.
+* **The census's STAGE SET is verified against the run.** `assert_census_matches_run`, called as the
+  last statement of each integration test, compares the census against the stages the test actually
+  finished, so a stage cannot join the deadline unannounced. The residual is stated where it lives: a
+  wait added INSIDE an already-declared stage changes `waits` and nothing detects that it did. The
+  stage set is derived; the per-stage counts are declared.
+* T2's cap sits at **exactly** `MAX_TEST_DEADLINE`, deliberately: the next wait added raises the floor
+  past what the test-length limit permits and FAILS the assert, because a conflict between the floor
+  claim and "a test may not outlast the gate it runs in" is a decision for a human, not something to
+  absorb silently.
 
 ## D7. Drain stderr
 

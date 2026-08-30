@@ -51,10 +51,11 @@ use super::Stage;
 /// late. At 2ms that inflates a stage measurement by at most 2ms, which is far
 /// below the 43ms slowest RECORDED quiet observation the calibration baseline is
 /// derived from (`budgets.rs`), so the calibration stays quiet-inert; and it is
-/// irrelevant against a 180s+ deadline. The cost in the other direction is
-/// wakeups on a HANGING run — at most one lock acquisition and one clone of a
-/// short `Vec` per 2ms, i.e. sub-second CPU over a whole 180s expiry, and only
-/// ever on a run that is already failing.
+/// irrelevant against a 360s+ deadline (the bases the wait census derives in
+/// `budgets.rs`: 360s and 600s). The cost in the other direction is wakeups on a
+/// HANGING run — at most one lock acquisition and one clone of a short `Vec` per
+/// 2ms, i.e. sub-second CPU over a whole 360s expiry, and only ever on a run that
+/// is already failing.
 const WAIT_POLL: Duration = Duration::from_millis(2);
 
 /// Which of the child's two pipes a record came from.
