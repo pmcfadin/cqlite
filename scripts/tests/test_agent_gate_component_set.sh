@@ -21,23 +21,26 @@
 #   7. the REAL full-gate emit path                                     -> FAIL block + exit 1, no cargo
 #
 # CENSUS, stated so a later reader can tell "covered" from "forgotten" (a silent gap is
-# the shape this whole issue is about). The pre-flight has FOUR verdicts and NINE non-`ok`
+# the shape this whole issue is about). The pre-flight has FOUR verdicts and TEN non-`ok`
 # probe kinds, and EVERY one is exercised below:
 #   verdicts (4) — PASS (case 5), DECLARED (4), BEHIND (1), INDETERMINATE (4c).
-#   kinds    (9) — fetch-failed, no-remote (case 2); baseline-list-failed,
+#   kinds   (10) — fetch-failed, no-remote (case 2); baseline-list-failed,
 #                  baseline-list-empty, baseline-list-garbage, baseline-missing (3a–3d);
-#                  no-git, baseline-workspace, no-tool (3f).
-# NINE is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (eleven assignment
-# SITES: `fetch-failed` is set from two places, and `ok` is the tenth value). It was
+#                  no-git, baseline-workspace, no-tool (3f); unboundable (3g).
+# TEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (twelve assignment
+# SITES: `fetch-failed` is set from two places, and `ok` is the eleventh value). It was
 # written as "six" for two rounds while the enumeration beneath it listed nine — a census
 # that miscounts its own list is worse than none, because a reader who trusts the number
 # and counts the entries concludes three kinds are uncovered extras. The count is now
 # ASSERTED against the gate at run time (`3544-kind-census`, near the end of this file),
 # so the two cannot drift again silently.
-# None is declared unreachable. The ONE conditional case is `no-tool`, which needs a
-# curated git-less PATH: it verifies that PATH can start the gate at all (a positive
-# control that must reach `KIND: ok`) and, if it cannot on this host, prints a `skip -`
-# line naming that precondition rather than passing silently or reporting a false defect.
+# None is declared unreachable. TWO cases are conditional — `no-tool` and `unboundable` —
+# because each needs a curated PATH with a tool omitted (`git`, and `timeout`/`gtimeout`/
+# `sleep` respectively). Each first verifies the SAME PATH can reach a real verdict (a
+# positive control that must report `KIND: ok`) and, if it cannot on this host, prints a
+# `skip -` naming that precondition rather than passing silently or reporting a false
+# defect. Both absence branches are unreachable naturally on any box we develop on — this
+# one has git, timeout and sleep — which is exactly why they are FORCED rather than awaited.
 #
 # The PASS/FAIL counters are incremented ONLY at top level — never inside `( … )` or the
 # right-hand side of a pipe, either of which would increment a copy that dies with the
@@ -144,6 +147,27 @@ mkbranch() {
   ( cd "$root" && git add -A && git "${GIT_ID[@]}" commit -qm branch ) >/dev/null 2>&1 \
     || { echo "FATAL: could not commit branch fixture '$name'" >&2; exit 1; }
   printf '%s\n' "$root"
+}
+
+# mkbin <name> [tool-to-OMIT ...] -> echoes a curated tool directory holding symlinks to
+# the host's real tools MINUS the named ones. Used to force capability-absence states
+# (`no-tool`, `unboundable`) that no box we develop on can reach naturally — this one has
+# `git`, `timeout` and `sleep`, so the absence branches are unreachable without this.
+#
+# Every case that uses it pairs it with a POSITIVE CONTROL: a curated PATH that cannot
+# start the gate at all would make an absence case pass for the wrong reason, so the case
+# first proves the SAME PATH plus the omitted tool reaches the expected non-absence answer.
+mkbin() {
+  local name="$1"; shift
+  local dir="$tmp/$name-bin" t src omit=" $* "
+  mkdir -p "$dir"
+  for t in bash sh sed awk grep cut tr mktemp date basename dirname cat head tail wc sort \
+           uniq rm mkdir cp mv ln uname nproc env find touch stat comm od xargs kill ps df \
+           readlink id iconv git sleep timeout gtimeout nice; do
+    case "$omit" in *" $t "*) continue ;; esac
+    src=$(command -v "$t" 2>/dev/null) && [ -n "$src" ] && ln -sf "$src" "$dir/$t"
+  done
+  printf '%s\n' "$dir"
 }
 
 # The transformation that makes a gate script's component set DIFFER: append a sentinel
@@ -317,10 +341,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3f. THE REMAINING UNMEASURED KINDS. `_component_set_probe` has NINE non-`ok` kinds; 3a–3d
+# 3f. THE REMAINING UNMEASURED KINDS. `_component_set_probe` has TEN non-`ok` kinds; 3a–3d
 #     cover the three baseline-derivation ones plus `baseline-missing` (4), and case 2
-#     covers `fetch-failed`/`no-remote` (2). These three are the last (3), completing 9, so
-#     no fail-closed branch of the pre-flight is untested in either direction. Nothing here is declared
+#     covers `fetch-failed`/`no-remote` (2). These three (3) plus `unboundable` in 3g (1)
+#     complete 10, so no fail-closed branch of the pre-flight is untested in either
+#     direction. The count is machine-checked at the end of this file, so a new kind cannot
+#     land without this prose being re-read. Nothing here is declared
 #     unreachable: all three are reachable in a throwaway tree, which is why they are
 #     asserted rather than excused.
 # ---------------------------------------------------------------------------
@@ -396,6 +422,98 @@ else
   else
     bad "3544-no-tool: expected KIND no-tool naming git (control reached KIND ok, so the PATH is sufficient)"
     printf '%s\n' "$nt_out"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3g. THE PROBE IS ALWAYS BOUNDED — and when it cannot be, it is NOT RUN (roborev job 207,
+#     Medium). The pre-flight used to fall back to `else shift; "$@"` when neither `timeout`
+#     nor `gtimeout` was on PATH: a missing CAPABILITY inheriting the PERMISSIVE branch, the
+#     same error as deriving a pass from the absence of a bad signal. On a default macOS box
+#     that meant a hung fetch or an auth prompt could stall `--lite` INDEFINITELY, in the
+#     mode that runs every fix round — and a wedged `--lite` is how a worker gets
+#     stall-watchdog-killed.
+#
+#     NOTHING ON THIS BOX WOULD EVER HAVE CAUGHT IT: it has `timeout`, so the fallback is
+#     dead code here. Hence every case below FORCES the absence with a curated PATH and asks
+#     the code what it DECIDED, rather than hoping a host lacks a tool.
+#
+#     No timing is asserted anywhere here (a wall-clock threshold in a correctness test is
+#     itself a defect class, #2642): the evidence is the returned STATUS, whether the child
+#     is still running, and whether the command ran at all.
+# ---------------------------------------------------------------------------
+bound_of() { # bound_of <PATH> -> the mechanism token the gate reports under that PATH
+  ( cd "$behind" && PATH="$1" bash "$behind/scripts/agent-gate.sh" --component-set-bound 2>/dev/null ) \
+    | sed -n 's/^MECHANISM: //p'
+}
+bin_no_timeout=$(mkbin nowd timeout gtimeout)          # watchdog territory
+bin_no_bound=$(mkbin nobound timeout gtimeout sleep)   # nothing can bound
+host_mech=$(bound_of "$PATH")
+wd_mech=$(bound_of "$bin_no_timeout")
+none_mech=$(bound_of "$bin_no_bound")
+case "$host_mech" in timeout|gtimeout|bash-watchdog) host_ok=1 ;; *) host_ok=0 ;; esac
+if [ "$host_ok" -eq 1 ] && [ "$wd_mech" = bash-watchdog ] && [ "$none_mech" = none ]; then
+  ok "3544-bound-mechanism: the bound is NAMED per host capability (here '$host_mech'; no timeout -> bash-watchdog; no sleep -> none) — never 'unbounded'"
+else
+  bad "3544-bound-mechanism: expected host in {timeout,gtimeout,bash-watchdog} (got '$host_mech'), bash-watchdog without timeout (got '$wd_mech'), none without sleep (got '$none_mech')"
+fi
+
+# The pure-bash watchdog must actually BOUND a hanging command and leave no live child.
+# Liveness is judged by whether the child is still WORKING (its output file keeps growing),
+# not by elapsed time: a `sleep` here only SEQUENCES the two observations.
+tick="$tmp/watchdog-tick.txt"
+ticker="$tmp/watchdog-ticker.sh"
+{ printf '#!/bin/sh\n'; printf 'while : ; do echo tick >> "%s"; sleep 1; done\n' "$tick"; } >"$ticker"
+chmod +x "$ticker"
+: >"$tick"
+wd_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" bash "$behind/scripts/agent-gate.sh" \
+                --component-set-bounded-run 1 "$ticker" 2>/dev/null | sed -n 's/^RC: //p' )
+ticks_at_return=$(wc -l <"$tick" | tr -d ' ')
+sleep 3
+ticks_later=$(wc -l <"$tick" | tr -d ' ')
+if [ "$wd_rc_line" = 124 ] && [ "$ticks_later" = "$ticks_at_return" ]; then
+  ok "3544-bound-enforced: the bash watchdog bounds a hanging command (rc 124) and leaves no live child"
+else
+  bad "3544-bound-enforced: expected rc 124 and a dead child (rc='$wd_rc_line' ticks $ticks_at_return -> $ticks_later)"
+fi
+
+# …and with NO mechanism at all the command must NOT RUN. This is the load-bearing half:
+# reporting "unboundable" while still running the command unbounded would fix nothing.
+nb_marker="$tmp/must-not-run-marker"
+rm -f "$nb_marker"
+nb_rc_line=$( cd "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
+                --component-set-bounded-run 1 touch "$nb_marker" 2>/dev/null | sed -n 's/^RC: //p' )
+if [ "$nb_rc_line" = 199 ] && [ ! -e "$nb_marker" ]; then
+  ok "3544-bound-none-refuses: with no bounding mechanism the command is REFUSED (rc 199), not run unbounded"
+else
+  bad "3544-bound-none-refuses: expected rc 199 and NO side effect (rc='$nb_rc_line', marker $( [ -e "$nb_marker" ] && echo CREATED || echo absent ))"
+fi
+
+# Probe level: an unboundable host is its own named UNMEASURED kind, fail-closed in the
+# certifying modes and ADVISORY under --lite — and the fetch is never attempted, so there is
+# no branch on which this pre-flight can hang. Positive control first: the SAME curated PATH
+# WITH a bounding tool must reach a real verdict, or the case would pass for the wrong reason.
+ub_control=$( cd "$behind" && PATH="$bin_no_timeout" bash "$behind/scripts/agent-gate.sh" \
+                --component-set-line full 2>/dev/null )
+if [ "$(field KIND "$ub_control")" != ok ]; then
+  echo "skip - 3544-unboundable: the curated tool PATH cannot complete a probe on this host (control KIND='$(field KIND "$ub_control")') — the unboundable branch is not exercisable here"
+else
+  ub_out=$( cd "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
+              --component-set-line full 2>/dev/null )
+  ub_lite=$( cd "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
+              --component-set-line lite 2>/dev/null )
+  ub_line=$(field COMPONENT_SET_LINE "$ub_out")
+  if [ "$(field VERDICT "$ub_out")" = UNMEASURED ] \
+     && [ "$(field KIND "$ub_out")" = unboundable ] \
+     && [ "$(field SHA "$ub_out")" = "-" ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$ub_line" \
+     && grep -q 'UNBOUNDED' <<<"$ub_line" \
+     && grep -q '^component-set: ADVISORY-UNMEASURED (#3544)' <<<"$(field COMPONENT_SET_LINE "$ub_lite")" \
+     && grep -q 'unboundable' <<<"$(field COMPONENT_SET_LINE "$ub_lite")"; then
+    ok "3544-unboundable: an unboundable host FAILs closed naming the refusal (full) and is ADVISORY under --lite (control reached KIND ok)"
+  else
+    bad "3544-unboundable: expected KIND unboundable + FAIL-CLOSED (full) and ADVISORY-UNMEASURED (lite)"
+    printf '%s\n' "$ub_out"; printf '%s\n' "$ub_lite"
   fi
 fi
 
@@ -896,7 +1014,7 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=9
+DECLARED_KIND_COUNT=10
 # Scan the WHOLE gate, not just `_component_set_probe`: every assignment lives inside that
 # function today, but a scan scoped to it would MISS a kind set elsewhere later and the
 # count would silently keep agreeing with this constant. A superset scan cannot miss.

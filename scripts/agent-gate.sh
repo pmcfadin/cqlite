@@ -2539,7 +2539,7 @@ apply_schemas_preflight() {
 # Globals rather than a parsed multi-line stdout: the probe does real I/O (fetch, git
 # show, a baseline `--list`), and routing its result through `$( )` would add a
 # newline-stripping value path for no benefit (the #3148 lesson, one guard over).
-_CS_KIND=""        # ok | no-tool | no-git | no-remote | fetch-failed | baseline-*
+_CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
@@ -2554,15 +2554,65 @@ _component_set_flatten() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | cut -c1-200
 }
 
-# _component_set_timeout: prefix a command with a bounded timeout WHEN the platform has
-# one, so a hung fetch cannot stall the gate (a timeout is a FETCH FAILURE, which is
-# fail-closed in the certifying modes — never a permissive pass). macOS ships no
-# `timeout`; `gtimeout` arrives with coreutils. Absent both, the command runs unbounded
-# rather than not at all: a missing tool must not become a reason to skip the check.
-_component_set_timeout() {
-  if command -v timeout >/dev/null 2>&1; then timeout "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
-  else shift; "$@"; fi
+# _component_set_bound_mechanism: WHICH bounded-run mechanism is available, as one token —
+# `timeout` | `gtimeout` | `bash-watchdog` | `none`. Never "unbounded".
+#
+# THE DEFECT THIS REPLACES, stated because it is the repo's own recurring shape and this is
+# its cleanest instance: the first cut ran the command UNBOUNDED when neither `timeout` nor
+# `gtimeout` existed (`else shift; "$@"`), reasoning that "a missing tool must not become a
+# reason to skip the check". That inherits the PERMISSIVE branch for a missing CAPABILITY —
+# the same error as deriving a pass from the absence of a bad signal. Its consequence is
+# concrete rather than theoretical: on a default macOS box (no coreutils) a hung fetch or an
+# auth prompt would stall `--lite` INDEFINITELY, in the mode that runs every fix round, and
+# a wedged `--lite` is exactly how a worker gets stall-watchdog-killed. Nothing local would
+# ever have caught it, because this box HAS `timeout`.
+#
+# So "cannot bound the probe" is now its own NAMED state, and it is genuinely narrow:
+# `bash-watchdog` needs only bash plus a `sleep`, so `none` requires a tree with no
+# `timeout`, no `gtimeout` AND no `sleep`. A busy-wait is deliberately NOT offered as a
+# fallback — burning a core for up to the whole bound is not a bound worth having.
+_component_set_bound_mechanism() {
+  if command -v timeout >/dev/null 2>&1; then printf timeout
+  elif command -v gtimeout >/dev/null 2>&1; then printf gtimeout
+  elif command -v sleep >/dev/null 2>&1; then printf bash-watchdog
+  else printf none; fi
+}
+
+# _component_set_bounded <secs> <cmd...>: run <cmd> under a bound, whatever this host has.
+# Returns the command's status, the bound-exceeded status of the mechanism used, or
+# _CS_UNBOUNDABLE_RC when NO mechanism exists — in which case the command is NOT RUN. The
+# caller MUST treat that rc as "could not measure", never as a command failure.
+#
+# The pure-bash arm backgrounds the command, polls to a deadline, then TERMs, gives one
+# grace poll, KILLs, and `wait`s — so the normal path leaks nothing (the child is reaped by
+# the same `wait` that returns its status) and the timeout path leaves no orphan. Poll
+# granularity is 1s, which is irrelevant against a 120s bound and costs the normal path
+# nothing: the loop exits as soon as the child is gone.
+_CS_UNBOUNDABLE_RC=199
+_component_set_bounded() {
+  local secs="$1"; shift
+  case "$(_component_set_bound_mechanism)" in
+    timeout)  timeout "$secs" "$@" ;;
+    gtimeout) gtimeout "$secs" "$@" ;;
+    none)     return "$_CS_UNBOUNDABLE_RC" ;;
+    *)
+      local pid waited=0 rc
+      "$@" &
+      pid=$!
+      while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$secs" ]; then
+          kill -TERM "$pid" 2>/dev/null || true
+          sleep 1
+          kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+          wait "$pid" 2>/dev/null
+          return 124            # same status GNU timeout reports for a bound exceeded
+        fi
+        sleep 1
+        waited=$((waited + 1))
+      done
+      wait "$pid" 2>/dev/null; rc=$?
+      return "$rc" ;;
+  esac
 }
 
 # _component_set_probe: perform the fetch + the two set derivations + the ancestry
@@ -2585,6 +2635,16 @@ _component_set_probe() {
     return 0
   fi
 
+  # NO UNBOUNDED PROBE. Checked BEFORE the fetch, not after it fails: the whole point is
+  # that an unboundable command must never be RUN, so there is no branch on which this
+  # pre-flight can hang. A missing bound is an unmeasurable baseline (UNMEASURED ⇒ FAIL in
+  # the certifying modes, ADVISORY-UNMEASURED under --lite/--only), never a permissive pass.
+  if [ "$(_component_set_bound_mechanism)" = none ]; then
+    _CS_KIND=unboundable
+    _CS_DETAIL="no bounded-run mechanism on PATH (no timeout, no gtimeout, and no sleep for the bash watchdog) — refusing to run an UNBOUNDED fetch, which could hang the gate"
+    return 0
+  fi
+
   # THE FETCH. `origin` and `main` are LITERALS, not variables: a configurable remote or
   # branch would be an env-settable way to point the comparison at a baseline of the
   # invoker's choosing, i.e. the opt-out this guard must not have.
@@ -2602,7 +2662,7 @@ _component_set_probe() {
   #   2. NO SIDE EFFECT ON A PEER. A pre-flight must not move a ref another lane's run may
   #      be reading mid-flight; the check exists to distrust that cached ref, not to
   #      rewrite it.
-  err=$(_component_set_timeout 120 git -C "$REPO_ROOT" fetch --quiet --refmap= origin main 2>&1); rc=$?
+  err=$(_component_set_bounded 120 git -C "$REPO_ROOT" fetch --quiet --refmap= origin main 2>&1); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
     _CS_DETAIL="git fetch origin main exited $rc: $(_component_set_flatten "$err")"
@@ -2647,7 +2707,7 @@ _component_set_probe() {
     AGENT_GATE_SUMMARY_FILE="$tmpd/baseline-summary.txt" \
     AGENT_GATE_PARENT_RUN_ID="${RUN_ID:-component-set-preflight}" \
     CQLITE_GATE_NO_NICE=1 \
-    _component_set_timeout 120 bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
+    _component_set_bounded 120 bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
   ); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=baseline-list-failed
@@ -3286,6 +3346,19 @@ case "${1:-}" in
   # printing anything. Drives the EFFECTFUL function on purpose (`report-only`, an
   # ARGUMENT: see that function's header): the property under test is that a positive
   # line is never stamped for a check that could not fail.
+  # Hidden self-test hooks (issue #3544, roborev job 207 Medium): expose the BOUND
+  # mechanism and drive the bounded runner directly. The defect they exist for is that the
+  # pre-flight used to run the fetch UNBOUNDED when neither `timeout` nor `gtimeout` was on
+  # PATH — invisible on any box that HAS `timeout`, which is every box we develop on, so the
+  # only way to test it is to force the absence and ask the code what it decided.
+  --component-set-bound) echo "MECHANISM: $(_component_set_bound_mechanism)"; exit 0 ;;
+  # --component-set-bounded-run <secs> <cmd...>: run <cmd> through the real bounded runner
+  # and print its status. `RC: 124` = bound exceeded, `RC: 199` = NO mechanism, in which
+  # case the command must NOT have run at all (the property that makes an unboundable probe
+  # safe rather than merely reported).
+  --component-set-bounded-run)
+    _csb_secs="${2:?--component-set-bounded-run needs <secs> <cmd...>}"; shift 2
+    _component_set_bounded "$_csb_secs" "$@"; echo "RC: $?"; exit 0 ;;
   --component-set-line)
     case "${2:-full}" in
       full) : ;;
