@@ -415,9 +415,13 @@ superseded `main`. Every SUMMARY block carries a `component-set:` line:
   a guard that reds on correct input is the guard agents learn to waive. (Behind **and**
   removing fails as BEHIND first, and reaches DECLARED only after a rebase.)
 - `component-set: FAIL-CLOSED (#3544) — baseline NOT measured (<kind>: <detail>)` — the fetch
-  failed, `origin` is missing, or the baseline's own `--list` errored, printed nothing, or
-  printed a non-component line. **Never a SKIP and never a fallback to an empty baseline**: an
-  empty baseline excuses every branch, which is the vacuous pass inverted.
+  failed, `origin` is missing, `git` is absent, the probe could not be BOUNDED, or the
+  baseline's own `--list` errored, printed nothing, or printed a non-component line. **Never a
+  SKIP and never a fallback to an empty baseline**: an empty baseline excuses every branch,
+  which is the vacuous pass inverted. The bound is itself a named capability
+  (`timeout`/`gtimeout`/a pure-bash watchdog/`none`) and an **unboundable host does not run
+  the fetch at all** — a missing capability must not inherit the permissive branch, and an
+  unbounded fetch could hang `--lite` on a network stall or an auth prompt.
 
 A component present on the branch but absent from `main` is **not** skew (this branch may be the
 one adding it) and is recorded as `[branch-only, NOT skew: …]` inside a PASS.

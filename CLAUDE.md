@@ -328,8 +328,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `origin/main` IS an ancestor of `HEAD`, i.e. the removal is the branch's own diff — **loud,
   not fatal**, because the author has nothing to rebase and a guard that reds on correct input
   is the guard agents learn to waive; or `FAIL-CLOSED … baseline NOT measured (<kind>)` for a
-  failed fetch/absent `origin`/erroring-empty-garbage baseline `--list` — **never a SKIP and
-  never a fallback to an empty baseline**, which would excuse every branch. A branch-only
+  failed fetch/absent `origin`/erroring-empty-garbage baseline `--list`/**a host on which the
+  probe cannot be BOUNDED** (in which case the fetch is not run at all — an unbounded fetch
+  could hang `--lite` on a stall or an auth prompt, and a missing capability must not inherit
+  the permissive branch) — **never a SKIP and never a fallback to an empty baseline**, which
+  would excuse every branch. A branch-only
   component is NOT skew. Fail-closed in the **certifying** modes (full, `--delta`); `--lite`
   and `--only` stamp the same line `ADVISORY-*` and cannot fail on it. **No opt-out env var,
   and none may be added** — rebasing is always available, so an escape hatch could only buy a
