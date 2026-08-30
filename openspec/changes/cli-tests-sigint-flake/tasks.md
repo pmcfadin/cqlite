@@ -1174,11 +1174,65 @@ test result: ok. 1 passed; 0 failed; 11 filtered out
 **The old guard PASSED at a baseline that left the SIGINT run inert at load average 30.** That is the
 finding, reproduced against the shipped pre-round-10 source rather than argued from it.
 
-#### Product RED plants (AC3)
+#### Product RED plant B, RE-RUN against the round-10 harness (AC3)
 
 Round 10 changed **no product code** — the branch diff contains no `cqlite-cli/src/` and no `Cargo.*`
-— so round 8's plant-A/plant-B evidence stands unchanged and re-running it would be cost without
-information. **Plant B re-run: lead-run, isolated worktree; result appended.**
+— so plant A's evidence stands unchanged. Plant B was nevertheless re-run, because finding 1 changed
+the **failure** path: a fix that drains already-arrived evidence before declaring expiry could in
+principle weaken the red. **Lead-run, in an isolated throwaway worktree, now removed** (the lane's
+`main.rs` is 0 lines against `origin/main` throughout).
+
+**Plant B — `engine.close()` wrapped behind `std::future::pending()`: RED at stage (d), at the
+deadline.** `test result: FAILED. 0 passed; 1 failed; 11 filtered out; finished in 180.00s.` So the
+finding-1 fix did not weaken the failure path: it still reds, at the right stage, at the right time.
+
+**THE PARAGRAPH THAT IS THIS ENTIRE ISSUE, ANSWERED.** #3515 opened on a message that asserted
+`no graceful shutdown handler` from a bare 60s timeout — a cause the measurement could not establish.
+The same physical failure, against the same planted hang, now prints:
+
+```text
+WHAT THIS ESTABLISHES: the handler-entry marker "Received Ctrl-C" WAS observed 79.938µs after SIGINT,
+so the shutdown handler exists, was entered, and the child was scheduled. This failure therefore
+establishes ONLY that the flush did not complete in time; it says nothing about whether a handler is
+present.
+```
+
+It *proves the handler exists*, timestamps its entry at **79.938µs** after the signal, and then states
+explicitly what it does **not** establish. And the transcript printed underneath it carries the
+`[stderr] Received Ctrl-C — flushing memtable before exit...` line itself — so the diagnostic is
+**corroborated by its own evidence**, which is the exact inverse of the finding-1 hazard above (a
+timeout contradicted by its own transcript).
+
+The rest of the message, and two facts worth having from it:
+
+```text
+stage (d) clean-exit: the shutdown flush did not complete before the deadline.
+gave up after 179.98s, when the test's ONE deadline passed while this stage was pending — which is
+what attributes the failure to this stage and to nothing else.
+stage d.clean-exit has been running 179.98s. ONE per-test deadline 180.0s = clamp(base 180.0s x scale
+1.000, base, cap 360.0s), where scale is the LARGEST of [t_boot 13.408ms => scale 1.000, t_ack
+1.676ms => scale 1.000] over quiet baseline 44ms. ANY single stage may consume the whole of it: there
+are no per-stage budgets. Observed progress is reported as evidence and NEVER extends it. Spent
+180.00s, remaining 0.00ns
+progress observed while polling: NONE — 0 new output lines and 0 new durable artifacts in 179.98s
+durable -Data.db artifacts under /tmp/.tmpe20y5n/wd/data: 0
+stage timings: a.session-up 13.408ms, b.write-ack 1.677ms, c.handler-entry 80.022µs; slowest
+completed stage: a.session-up 13.408ms
+```
+
+* **The deadline's derivation is in the failure message** — `base × scale`, BOTH candidate scales with
+  the observation each came from, and the baseline — so a future reader can see why the bound was what
+  it was without opening the source. This run is also the first recorded observation against the
+  round-10 baseline: `quiet baseline 44ms`, with `t_boot` 13.408ms and `t_ack` 1.676ms both yielding
+  `scale 1.000`, i.e. **quiet-inert on a quiet host, exactly as the derived window requires**.
+* **`remaining 0.00ns` at `Spent 180.00s`** — the deadline was respected on the FAILURE path too. The
+  declared-at-the-next-loop-top lag that round 9 rescoped and quantified measured **~20ms** here
+  (stage spend 179.98s at declaration against a 180.00s deadline spend), comfortably inside the stated
+  bound of one `SLICE.min(remaining)` (≤100ms) plus one `count_data_db` scan. That is a measurement of
+  the residual round 9 wrote down, not a new claim.
+
+Full captured message (ANSI-stripped, 15 lines) was retained by the lead outside the repo; the
+essential lines are quoted above in full.
 
 ### THE PLANT-ON-THE-LANE INCIDENT — the method is part of what this change delivers
 
@@ -1207,7 +1261,9 @@ ship, so the file list is the check that catches it.
 * `cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests` — **12 passed, 0
   failed**, 0.31s (2 integration + 6 deadline unit tests in `budgets.rs` + 4 harness unit tests in
   `mod.rs`). 9 → 12: the three new tests are the per-site ones for finding 1.
-* The three committed, isolated RED plants above (F1, F2, F2b).
+* The three committed, isolated test-only RED plants above (F1, F2, F2b), **plus product plant B
+  re-run** (lead-run, isolated worktree): RED at stage (d) in 180.00s, so finding 1's pre-expiry drain
+  did not weaken the failure path.
 * `grep -rn` sweep for what round 10 rescoped — `60ms`, `81ms`, `fastest loaded`, `fastest
   observation`, `RECORDED_LOADED_FASTEST`, `RECORDED_QUIET_SLOWEST` — across `cqlite-cli/tests/` and
   the whole OpenSpec change. One live stale claim found and fixed (`68a21c7af`): the round-8 "What
