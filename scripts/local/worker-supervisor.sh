@@ -1416,7 +1416,7 @@ supervisor_lock_path() {
 # run, in the same worktree, sharing markers, branch, logs and `.worker-last-iteration.json`. The
 # window opens during any rolling update of the fleet's checkouts.
 #
-# REMOVAL CONDITION (AC6). Delete `supervisor_legacy_lock_state`, `supervisor_legacy_lock_refuse`,
+# REMOVAL CONDITION (AC6). Delete `supervisor_legacy_lock_presence`, `supervisor_legacy_lock_refuse`,
 # `supervisor_legacy_lock_guard`, their call site in `acquire_lock`, and their suite cases once EVERY
 # checkout that can launch a supervisor on this fleet is at or past #3467 — i.e. once no pre-#3467
 # `worker-supervisor.sh` can run again. How to check it: on each box,
@@ -1424,9 +1424,13 @@ supervisor_lock_path() {
 # for every checkout that a launcher can reach, and confirm no legacy lock is present
 # (`ls -d "${TMPDIR:-/tmp}"/cqlite-worker-supervisor.lock`). Both halves are required: an old checkout
 # that is merely idle can still be launched. Until then this guard is load-bearing.
+# (`supervisor_shell_quote` and `supervisor_one_line` are NOT part of that removal — see the note at
+# each; they are general emitters.)
 #
 # The legacy lock's ON-DISK SHAPE is a DIRECTORY containing a single file `pid` (atomic `mkdir` +
-# pid-liveness, never flock) — read out of the pre-#3467 file, not assumed.
+# pid-liveness, never flock) — read out of the pre-#3467 file, not assumed. IT IS RECORDED HERE FOR
+# CONTEXT AND NOTHING READS IT: per the lead's second ruling the guard tests for EXISTENCE only, so no
+# behaviour of this script depends on that shape being what it says. Do not reintroduce a shape check.
 # ---------------------------------------------------------------------------
 
 # The two bytes that break the one-physical-line contract, held as VALUES rather than spelled as `$'…'`
@@ -1527,524 +1531,96 @@ supervisor_one_line() {
   s="${s//"$SUPERVISOR_ESC"/\\e}"
   printf '%s' "$s"
 }
-# supervisor_pid_liveness <pid> — echo `live`, `dead` or `unknown`. THREE-VALUED, and `dead` requires
-# an AFFIRMATIVE measurement.
+# supervisor_legacy_lock_presence <path> — echo EXACTLY one of
+#   verified-absent | present | could-not-tell <cause>
 #
-# `kill -0` FAILING DOES NOT MEAN DEAD: it fails with ESRCH (dead) *and* with EPERM (alive, owned by
-# another user). A supervisor started by a different user during a rolling update is exactly the case
-# this guard exists for, so collapsing EPERM onto "dead" would RECLAIM A LIVE HOLDER'S LOCK — the worst
-# outcome available here. So a failed `kill -0` is corroborated before it is believed, and when no
-# corroborating oracle exists the answer is `unknown`, never `dead` (a verdict derived from the absence
-# of a bad signal is the defect class; require an affirmative measurement).
+# THE GUARD DETECTS THE LEGACY LOCK AND STOPS THERE — IT DOES NOT PARSE IT (#3549, lead ruling).
 #
-# SCOPED TO THE LEGACY GUARD, deliberately, AND THE RESIDUAL IS WRITTEN RATHER THAN IMPLIED (#3549,
-# roborev job 182 class sweep). `acquire_lock`'s handling of its OWN per-lane lock, below, carries the
-# same three defect shapes this function fixes for the legacy one:
-#   1. the holder pid is read with `cat` and used UNPARSED — no digit check, no single-line check — so a
-#      garbled or partially-written `pid` makes `kill -0` fail and the lock be RECLAIMED;
-#   2. its liveness test is the plain TWO-VALUED `kill -0`, so an EPERM holder (another user's live
-#      supervisor) reads as dead;
-#   3. its message asserts "another instance is already running (pid N)" with no identity corroboration,
-#      i.e. the pid-reuse claim F2 removed from the legacy diagnostic.
-# That is a DIFFERENT lock with its own tests and its own reclaim semantics (it may legitimately mutate
-# a lock it owns, which the legacy guard may not), so widening the change to it is out of scope for
-# #3549 rather than forgotten. The asymmetry is known; see the pointer at `acquire_lock`.
-supervisor_pid_liveness() {
-  local pid="${1:-}"
-  # Well-formed = non-empty, all digits, > 0. A leading zero is rejected as malformed rather than
-  # parsed: `[[ 008 -gt 0 ]]` is a bash arithmetic ERROR (invalid octal), and `kill -0 0` signals the
-  # whole PROCESS GROUP.
-  #
-  # THE CHARACTER LIST IS EXPLICIT BECAUSE A RANGE IS COLLATION-DEPENDENT — i.e. THE DIGIT TEST WOULD
-  # OTHERWISE INHERIT THE CALLER'S LOCALE (#3549, roborev job 205 class sweep). A bracket RANGE is
-  # resolved through the locale's collation order, so `[!0-9]` is not "not an ASCII digit" outside the C
-  # locale. MEASURED on this box under `LC_ALL=en_US.utf8`: ARABIC-INDIC DIGIT THREE (U+0663) is NOT
-  # matched by `[!0-9]`, i.e. it PASSES as a well-formed pid — and it then reaches the reclaim-adjacent
-  # end of the classifier, where `kill -0` fails, procfs has no such entry, and the verdict is `dead`,
-  # so a `pid` file no supervisor ever wrote earns the operator a DELETION remedy. The same string is
-  # REJECTED by the explicit list under the identical locale, and by both spellings under `LC_ALL=C`.
-  #
-  # THE DEPENDENCY IS REMOVED, NOT NEUTRALISED: an explicit list contains no range for collation to
-  # reorder, so this holds under any inherited `LC_ALL`/`LC_COLLATE`/`LANG` with no save/restore, no
-  # `local LC_ALL=C` (which would silently change `printf %q`'s rendering and every message this
-  # function's callees produce) and nothing that can abort. Do not "tidy" it back to `[0-9]`.
-  case "$pid" in
-    '' | *[!0123456789]* | 0*) printf 'unknown\n'; return 0 ;;
-  esac
-  local err=""
-  if err="$(LC_ALL=C kill -0 "$pid" 2>&1)"; then
-    printf 'live\n'
-    return 0
-  fi
-  # EPERM, READ FROM THE ERRNO ITSELF: alive, owned by another user. This is the one oracle that
-  # survives a `hidepid` procfs, where /proc/<pid> AND `ps` are BOTH blind to another user's LIVE
-  # process and would jointly answer "dead" — reclaiming a live holder's lock, the outcome this whole
-  # probe exists to prevent. Used ONLY to say `live`, never to say `dead`, so the corroboration below
-  # remains the sole decider for a reclaim and an unrecognised message (odd locale, other shell) costs
-  # nothing but a fall-through.
-  case "$err" in
-    *'not permitted'*) printf 'live\n'; return 0 ;;
-  esac
-  # AN INVALID PROCESS SPEC IS NOT AN ABSENCE, AND IT MUST BE READ BEFORE PROCFS IS ASKED (#3549,
-  # roborev job 208 F2). `kill -0` fails for a THIRD reason besides ESRCH and EPERM: the value is not a
-  # process specification at all. `pid_t` is an `int`, so bash's own `kill` builtin refuses anything
-  # above `INT_MAX` outright. MEASURED under `LC_ALL=C` on this box:
-  #   kill -0 99999999999999999999 -> "kill: 99999999999999999999: arguments must be process or job IDs"
-  #   kill -0 2147483648           -> the same message (2^31, the first value out of range)
-  #   kill -0 4194305              -> "kill: (4194305) - No such process"   [ESRCH, in `int` range]
-  # So the errno text distinguishes "not a pid" from "no such pid" — but only ABOVE `INT_MAX`, which is
-  # why the platform bound in `supervisor_legacy_lock_state` is the PRIMARY rule and this is the
-  # fallback for a host where that bound cannot be read (a BSD/macOS box has no
-  # `/proc/sys/kernel/pid_max`).
-  #
-  # WITHOUT THIS BRANCH the value falls through to the procfs corroboration below, which reports
-  # `/proc/99999999999999999999` ABSENT — an affirmative-looking absence for an entry that could never
-  # exist — and the answer becomes `dead`. `dead` is what the classifier turns into `stale`, and `stale`
-  # is the ONE verdict that earns the operator a `rm -f … && rmdir …` line: a deletion instruction for a
-  # pid file no supervisor could have written. Hence the ordering: this case must precede the procfs
-  # branch, not follow it.
-  #
-  # `LC_ALL=C` is already set at the `kill` above, which is what licenses reading the message CONTENT;
-  # an unrecognised message (a bash built without its message catalogue, some other shell) costs only a
-  # fall-through, and the platform bound remains the primary rule. Like the EPERM branch, this one is
-  # used for exactly ONE verdict — here `unknown` — and never to say `live` or `dead`.
-  case "$err" in
-    *'must be process or job'*) printf 'unknown\n'; return 0 ;;
-  esac
-  # Corroborate the absence. PROCFS IS THE ONLY CORROBORATING ORACLE — there is deliberately no `ps`
-  # fallback (see below). procfs distinguishes EPERM: the entry exists for a live process owned by
-  # anyone.
-  # `/proc/self`, not `/proc/1`: this asks "is procfs mounted", and it is the one entry no `hidepid`
-  # setting can hide from us. `/proc/1` can be invisible to a non-root user in a hardened container,
-  # which would silently route a Linux box off procfs.
-  if [[ -d /proc/self ]]; then
-    if [[ -d "/proc/$pid" ]]; then printf 'live\n'; else printf 'dead\n'; fi
-    return 0
-  fi
-  # THE `ps` FALLBACK IS DELETED, NOT NARROWED (#3549, roborev job 203 F1) — the identity-probe
-  # precedent, applied to the third finding in one probe.
-  #
-  # THE TWO FORMS IT HAD, AND WHY BOTH WERE INFERENCES.
-  #   1. `if ps -p "$pid" >/dev/null 2>&1; then live; else dead; fi` — every non-zero exit read as an
-  #      affirmative absence, including a `ps` that failed for its OWN reasons.
-  #   2. Job 185 F3 narrowed it to `output present => live` / `exit 1 with no stdout => dead` /
-  #      anything else => `unknown`. Still an inference: `ps` also exits 1 on a usage error, and with
-  #      stderr discarded the two answers are IDENTICAL.
-  # A third narrowing (require empty STDERR too) was considered and rejected: "exit 1, nothing on
-  # either stream" is still a verdict derived from the ABSENCE of a bad signal, which is the named
-  # defect class, and no `ps` documents a distinguishable no-such-process status. Each round narrowed
-  # the window rather than closing it — the same census that ended `supervisor_pid_identity`.
-  #
-  # AND THE FALSE `dead` WAS MEASURED, NOT HYPOTHESISED. On BusyBox v1.36.1, `ps -p 1 -o pid=` (pid 1
-  # is ALIVE) exits 1 with EMPTY STDOUT and `ps: invalid option -- 'p'` plus a usage block on STDERR —
-  # `-p` is not a BusyBox option at all. Form 2 therefore answered `dead` for a LIVE process, i.e. it
-  # classified a live holder's lock STALE and earned the operator a deletion remedy. (A BusyBox host
-  # has procfs, so it never reached this branch — which is precisely the point below.)
-  #
-  # WHAT THE FALLBACK WAS WORTH, WHICH IS WHAT SETTLED IT. Since the reclaim was removed, `stale` and
-  # `unknown` BOTH REFUSE and this run mutates nothing either way; the only consumer of the
-  # `dead`-vs-`unknown` distinction is the DIAGNOSTIC WORDING and which remedy line is printed. That is
-  # the identity probe's argument verbatim: all risk (a deletion remedy aimed at a live holder), no
-  # protection. It is reached ONLY when procfs is absent — a BSD/macOS host — so on the fleet (Linux,
-  # procfs always mounted) it never ran at all outside the suite's scratch copies.
-  #
-  # THE COST, STATED: on a non-procfs host a genuinely stale legacy lock now reports
-  # `unknown liveness-unmeasurable-for-pid:N` instead of `stale N`, so the operator gets the
-  # "state could not be determined" refusal and no ready-made `rmdir` line, and must establish the
-  # pid's fate themselves. A correct, less specific refusal — strictly more conservative than a
-  # possibly-wrong specific one. Do not reintroduce a `ps` (or any other) fallback for this verdict
-  # unless it can answer AFFIRMATIVELY that a pid does not exist.
-  printf 'unknown\n'
-}
-
-# supervisor_legacy_lock_state <path> — classify the legacy lock into EXACTLY one of
-#   absent | live <pid> | stale <pid> | unknown <reason>
-# THREE-VALUED, AND "CANNOT TELL" NEVER COLLAPSES ONTO THE PERMISSIVE ANSWER. Every `test`/`[` file
-# predicate is two-valued, so it must fold "cannot tell" onto one of its answers and always picks the
-# permissive one — named doctrine in CLAUDE.md. So `absent` is a VERIFIED absence (the containing
-# directory is itself readable AND searchable, and the path is not there); everything else that is not
-# affirmatively live or affirmatively stale is `unknown`, and `unknown` refuses.
-supervisor_legacy_lock_state() {
-  local legacy="$1" dir pid=""
+# WHAT WAS DELETED AND WHY, so nobody rebuilds it as an improvement. There used to be a classifier
+# (`supervisor_legacy_lock_state`) that opened the lock directory, enumerated it, parsed its `pid` file
+# and measured the recorded pid's liveness, producing `live <pid>` / `stale <pid>` / `unknown <cause>`;
+# it needed a pid-liveness probe (`supervisor_pid_liveness`, deleted with it — this was its only
+# caller), a platform pid bound read from `/proc/sys/kernel/pid_max`, a NUL probe, a single-line parse,
+# a collation-free digit test, and a wholesale neutralisation of the caller's inherited glob/match state
+# (`GLOBIGNORE`, `dotglob`, `nullglob`, `failglob`, `noglob`, `nocasematch`, …) with per-option
+# verification and an order-sensitive restore — because the enumeration's correctness depended on all of
+# it.
+#
+# THE ARGUMENT THAT ENDED IT: SINCE THE RECLAIM WAS REMOVED, `live`, `stale` AND `unknown` ALL REFUSE.
+# The classification therefore CANNOT CHANGE THE DECISION. Its only outputs were the wording of the
+# refusal and which remedy line printed — and the remedy it licensed was a DELETION, which is the one
+# thing a guard that mutates nothing has no business recommending about an object it does not own.
+# Machinery whose output cannot change the decision is not a guard; it is a description generator
+# sitting on the decision path. Every one of those parts had also been the subject of its own review
+# round (a false `{pid}` shape forged by `GLOBIGNORE`, a NUL silently discarded by `read`, an
+# out-of-range pid read as dead, a locale-dependent digit test, a `ps` fallback that called a live
+# BusyBox pid 1 dead) — one defect class, reached through a new door each time, all of it in service of
+# a distinction with no consumer.
+#
+# SO THE QUESTION IS NARROWED TO THE ONE THE DECISION ACTUALLY NEEDS: IS SOMETHING THERE?
+#   present         => refuse. Name the path. Claim NOTHING about staleness, about what the object is,
+#                      or about whether removing it is safe.
+#   verified-absent => proceed.
+#   could-not-tell  => refuse, with a cause that says THE PROBE FAILED — never that a lock exists.
+#
+# ABSENCE MUST BE VERIFIED ABSENCE, WHICH IS WHY THIS IS THREE-VALUED AT ALL. Every `test`/`[[ ]]` file
+# predicate is TWO-VALUED, so it must fold "cannot tell" onto one of its answers and always picks the
+# permissive one (named doctrine in CLAUDE.md). Existence of a known child name is decided by `lstat(2)`
+# on that name, which needs SEARCH (`-x`) on the container and nothing else — we never enumerate the
+# container, so `-r` on it is NOT required and demanding it would be a false STOP on a legitimate
+# write-and-search-only `TMPDIR` (mode 0311/0711). An UNSEARCHABLE container is the case that matters:
+# `[[ -e ]]` then answers "not there" for a lock that IS there, which is the permissive collapse this
+# probe exists to avoid, so it is `could-not-tell` and refuses.
+#
+# A SYMLINK COUNTS AS PRESENT, INCLUDING A DANGLING ONE. The existence test is `-e || -L`: `-e` follows
+# the link and is FALSE for a broken one, so `-e` alone would report a dangling symlink at the legacy
+# path as absence. No supervisor at any version creates that path as a symlink, so there is nothing
+# there to be compatible with — but something IS at the name, our own `mkdir` of a per-lane path is
+# unaffected, and a pre-#3467 supervisor's `mkdir` of THIS name would fail against it, so the honest
+# answer is `present` and the operator is told to look.
+#
+# WHAT THIS PROBE CAN AND CANNOT DISTINGUISH — RECORDED, NOT PAPERED OVER. Bash's file tests expose no
+# errno. `[[ -e X ]]` is false when `lstat(X)` fails for ANY reason, so an `lstat` that fails with EIO
+# (failing disk), ELOOP, ENOMEM or an ENOTCONN stale network mount is INDISTINGUISHABLE FROM ENOENT to
+# this program. Concretely:
+#   DECIDABLE, and each is measured by the suite:
+#     * the container is missing or not searchable => `could-not-tell` (refuse). This is the dominant
+#       real cause of a blind existence test, and it is the one the two-valued form got wrong.
+#     * `lstat` of the child SUCCEEDS => `present` (refuse), for every object type including a symlink.
+#     * container searchable AND `lstat` of the child reports ENOENT => `verified-absent` (proceed).
+#   NOT DECIDABLE, therefore reported as `verified-absent`:
+#     * an `lstat` of the CHILD that fails for a reason other than ENOENT, on a searchable container.
+#     * a divergence between `access(2)` (what `-x` asks) and actual traversal — a MAC layer
+#       (SELinux/AppArmor) or an NFS ACL can deny a traversal that `-x` permits; and as root, `-x` is
+#       false on a mode-0000 directory that root can nevertheless traverse (that direction lands on
+#       `could-not-tell`, i.e. the refusing side).
+# NO PROBE HERE CLOSES THE FIRST GAP, AND ONE IS DELIBERATELY NOT INVENTED. Distinguishing EIO from
+# ENOENT needs the errno, which means an external command (`stat`, `test` from coreutils) — PATH
+# exposure and an output format to parse, in a function that today executes NO external command and
+# whose verdicts therefore cannot be changed by the caller's `PATH`. Trading that for a rarer failure
+# mode would buy the appearance of completeness, which is worse than a written-down gap: an `lstat`
+# failing with EIO is a box with a broken filesystem, where a supervisor refusing to start is not the
+# problem anyone has. So the residual is stated here and left open.
+supervisor_legacy_lock_presence() {
+  local legacy="$1" dir
   dir="${legacy%/*}"
-  # No slash at all => the current directory; a single LEADING slash (a TMPDIR of `/`) strips to the
+  # No slash at all => the current directory; a single LEADING slash (a `TMPDIR` of `/`) strips to the
   # empty string, which is not a path and would misreport an undeterminable container.
-  # `if`, NOT `[[ … ]] && x` — AND THIS ONE WAS **NOT** AN ABORT SITE, WHICH WAS MEASURED RATHER THAN
-  # ARGUED (#3549, roborev job 201 F3 class sweep). Both tests are FALSE in the ordinary case (an
-  # absolute `TMPDIR` contains a slash and is non-empty), so each statement's own value is 1 — and the
-  # sweep for "non-zero is NORMAL here, under a caller that may propagate errexit" listed them as
-  # suspects. They are EXEMPT: errexit ignores a failing command that is part of an `&&`/`||` list
-  # other than its LAST element, and the exemption is inherited into the `$( )` a caller wraps this
-  # function in. Verified under `set -e; shopt -s inherit_errexit`: the following statement still ran.
-  # The `if` form is kept anyway because the exemption is POSITIONAL — the same line as a function's
-  # LAST statement returns 1 and would abort an errexit caller — so writing it as an `if` removes a
-  # correctness property that depends on where in the function the line happens to sit. The genuine
-  # abort site in this function is the `shopt -p` capture below (a simple assignment, not part of any
-  # list), and that is where the behaviour actually changed.
+  # `if`, NOT `[[ … ]] && x`: both tests are FALSE in the ordinary case, so each statement's own value
+  # is 1, and the same line as a function's LAST statement would return 1 and abort an errexit caller.
+  # Writing them as `if` removes a correctness property that depends on where the line happens to sit.
   if [[ "$dir" == "$legacy" ]]; then dir="."; fi
   if [[ -z "$dir" ]]; then dir="/"; fi
-  # PERMISSION SCOPE, AND THE TWO DIRECTORIES NEED DIFFERENT THINGS — keep them distinct (#3549,
-  # roborev job 182 Low). Existence of a KNOWN CHILD NAME is decided by `stat(2)` on that name, which
-  # needs SEARCH (`-x`) on the container and nothing else; we never enumerate the container, so
-  # requiring `-r` here was a FALSE STOP that refused legitimate write-and-search-only `TMPDIR`
-  # configurations (mode 0311/0711) even when the legacy path is definitively absent and our own
-  # per-lane lock can be created. An UNSEARCHABLE container is a different matter: `[[ -e ]]` then
-  # answers "absent" for a lock that is really there, which is the permissive collapse this classifier
-  # exists to avoid, so it stays a refusal.
-  # `-r` IS genuinely required on `$legacy` ITSELF, further down, because that directory IS enumerated
-  # (the exactly-`{pid}` shape check). Do not "tidy" the two gates back together: the container is
-  # statted, the lock directory is read.
   if [[ ! -d "$dir" || ! -x "$dir" ]]; then
-    printf 'unknown container-not-searchable:%s\n' "$(supervisor_shell_quote "$dir")"
+    printf 'could-not-tell container-not-searchable:%s\n' "$(supervisor_shell_quote "$dir")"
     return 0
   fi
-  if [[ ! -e "$legacy" && ! -L "$legacy" ]]; then
-    printf 'absent\n'
+  # `-e || -L`, in that order and both required: see the symlink note above.
+  if [[ -e "$legacy" || -L "$legacy" ]]; then
+    printf 'present\n'
     return 0
   fi
-  # A SYMLINK IS AN UNRECOGNISED SHAPE, AND IT IS TESTED BEFORE EVERY `-d`/`-f`/`-r`/`-x` BELOW,
-  # BECAUSE THOSE FOLLOW THE LINK (#3549, roborev job 180 Medium). A symlink pointing at a real lock
-  # directory — someone else's, or any directory that happens to hold a well-formed `pid` — answers
-  # `-d`/`-f`/`-r` exactly like a genuine lock, so the permissive classification would be `stale`, and
-  # a downstream reclaim then MOVES AND DELETES an object that is not a legacy lock at all. That is the
-  # destructive direction, so it is refused rather than followed. It is an unrecognised SHAPE, not a
-  # malformed lock: no supervisor at any version has ever created either path as a symlink, so there is
-  # nothing here to be compatible with, and the cause token is deliberately distinct from
-  # `not-a-directory` / `pid-file-not-a-readable-file` so an operator can tell "wrong kind of object"
-  # from "a link we refuse to follow". A BROKEN symlink also lands here: the verified-absence test
-  # above is `! -e && ! -L`, so a dangling link is not absence.
-  [[ ! -L "$legacy" ]] || { printf 'unknown path-is-a-symlink\n'; return 0; }
-  [[ -d "$legacy" ]] || { printf 'unknown not-a-directory\n'; return 0; }
-  # `-r` HERE, unlike the container above: this directory IS enumerated below (the exactly-`{pid}`
-  # shape check), and an unreadable one cannot be enumerated at all.
-  [[ -r "$legacy" && -x "$legacy" ]] || { printf 'unknown lock-directory-not-readable\n'; return 0; }
-  # Before `-e`, not after: `-e` follows the link too, so a DANGLING `pid` symlink would otherwise be
-  # reported as `pid-file-missing` — a different, wrong cause for the same unrecognised shape.
-  [[ ! -L "$legacy/pid" ]] || { printf 'unknown pid-path-is-a-symlink\n'; return 0; }
-  [[ -e "$legacy/pid" ]] || { printf 'unknown pid-file-missing\n'; return 0; }
-  [[ -f "$legacy/pid" && -r "$legacy/pid" ]] || { printf 'unknown pid-file-not-a-readable-file\n'; return 0; }
-  # THE DOCUMENTED SHAPE IS VERIFIED, NOT ASSUMED — because the diagnostic RECOMMENDS A DELETION
-  # (#3549, roborev job 182 Medium). The pre-#3467 lock is a directory holding ONLY `pid`. A directory
-  # that also holds something else is NOT that shape, and calling it a lock would point an operator's
-  # `rm` at contents no supervisor ever created. So it is ENUMERATED and required to contain exactly
-  # one entry, named `pid`. That verification is what licenses PRINTING a deletion at all — but it is an
-  # observation made HERE AND NOW, and the operator acts later, so it is NOT a safety claim about the
-  # state at deletion time (#3549, roborev job 185 F1; the honest wording is at the `stale` branch).
-  # What makes the printed command non-destructive whenever it runs is `rmdir` itself, which refuses a
-  # non-empty directory, where `rm -rf` would silently delete contents this run does not own.
-  #
-  # ONE NEUTRALISATION POINT FOR THE WHOLE INHERITED GLOB/MATCH STATE — NOT AN ENUMERATION OF THE
-  # EXPOSED SUBSET (#3549, roborev job 205 F1).
-  #
-  # THE DEFECT CLASS: THIS ENUMERATION'S CORRECTNESS DEPENDS ON SHELL STATE THE CALLER OWNS. The two
-  # earlier rounds each pinned the setting they had been told about (`dotglob`, `nullglob`) and left
-  # every sibling raw — and `GLOBIGNORE` is the one that matters most, because it can make a FOREIGN
-  # directory look like the canonical `{pid}` shape and it is the shape check that LICENSES PRINTING A
-  # DELETION. Measured: with `GLOBIGNORE` naming the extra entry's path, a directory holding `pid` AND
-  # `other` enumerates as exactly `{pid}`, so a directory no supervisor created is classified `stale`
-  # and the operator is handed `rm -f … && rmdir …` for it. `GLOBIGNORE` also implicitly enables
-  # `dotglob` (measured), i.e. it changes two things at once.
-  #
-  # SO THE FAMILY IS PINNED WHOLESALE, and that is the point rather than an accident: the invariant is
-  # "no inherited glob or match option reaches this block", which cannot rot when a pattern in the block
-  # changes, where "the exposed ones were enumerated correctly" has to be re-derived by every future
-  # reader. Load-bearing today, each MEASURED:
-  #   GLOBIGNORE  — filters entries out of the result: the false-`{pid}` shape above. Unset, restored.
-  #   dotglob     — a HIDDEN extra entry must still count as an unexpected entry. Set.
-  #   nullglob    — an empty directory must yield 0 entries, not the literal pattern. Set.
-  #   failglob    — errors and leaves `_entries` UNASSIGNED when nothing matches, and prints its own
-  #                 "no match" line on the caller's stderr. Reachable only if `pid` is unlinked between
-  #                 the `-e` test above and this glob, and fail-closed when it fires — but pinned, since
-  #                 it is in the family and free to pin here.
-  #   noglob (`set -f`) — the glob is NOT EXPANDED AT ALL: `_entries` becomes the one literal string
-  #                 `<legacy>/*`, so a GENUINE stale lock is misreported `unknown` — a false refusal on
-  #                 a correct configuration. It arrives from the environment (`env SHELLOPTS=noglob`
-  #                 is imported by bash — measured), which is why it is neutralised, not argued away.
-  #   nocasematch — the SHAPE COMPARISON below is `[[ != ]]`: with it on, an entry named `PID` compares
-  #                 EQUAL to `pid` (measured), so the comparison is inside the neutralised region too.
-  # Pinned for uniformity, exposure not established: `extglob` (this block's only pattern is a bare
-  # `*`, extglob-inert), `globstar` (affects `**` only), `nocaseglob` (the literal path components are
-  # not globbed at all, so it can only affect the `*`, where it is a no-op).
-  #
-  # `BASHOPTS`/`SHELLOPTS` from the environment are what make all of these reachable without anyone
-  # running `shopt` (both measured to be imported by bash), so this is inherited state, not a caller's
-  # local choice.
-  #
-  # NOTHING IN THE SAVE OR THE RESTORE MAY ABORT (#3549, roborev job 201 F3, and the reason it is still
-  # spelled this way). `shopt -p` EXITS NON-ZERO IF ANY NAMED OPTION IS UNSET — with seven names that is
-  # the COMMON path, not an edge case — and under a caller with `inherit_errexit` (or POSIX mode, where
-  # bash propagates errexit into `$( )` unconditionally) an unguarded capture killed the classifier
-  # BETWEEN the mutation and the restore, leaving the caller's shell changed and printing no refusal at
-  # all. So: `|| true` on the capture, `|| true` on the `eval` restore, `if` rather than `&&` on the two
-  # value restores, and no restore that is the last element of a list.
-  local _sv_shopts="" _sv_noglob=off _sv_globignore_set=no _sv_globignore="" _shape_ok=no
-  local _sv_globignore_unset=no _pins_bad="" _opt="" _opt_state=""
-  local -a _entries=()
-  # SAVES ONLY, NOTHING MUTATED YET — which is what lets the verification below BAIL OUT with the
-  # caller's shell untouched (#3549, roborev job 206 F1). Do not move a mutation above this point.
-  # `2>/dev/null` AND `|| true`, FOR TWO DIFFERENT BASHES (#3549, roborev job 209 F2). The `|| true` is
-  # for every bash: `shopt -p` exits non-zero when any named option is UNSET, which with seven names is
-  # the common case. The redirect is for BASH 3.2, which macOS ships and this file supports: `globstar`
-  # arrived in bash 4.0, so on 3.2 this line writes `shopt: globstar: invalid shell option name` to the
-  # caller's stderr — an UNPREFIXED line in the middle of a refusal whose contract is that every line it
-  # emits is prefixed or is a single bare runnable command. Suppressed here rather than dropped from the
-  # pin set: the option does not exist on 3.2 and therefore cannot affect anything, while on bash 4+ it
-  # exists and the pin is correct, so removing the name would trade a cosmetic problem for a real gap.
-  _sv_shopts="$(shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true)"
-  case $- in *f*) _sv_noglob=on ;; esac
-  if [[ -n "${GLOBIGNORE+set}" ]]; then _sv_globignore_set=yes; _sv_globignore="$GLOBIGNORE"; fi
-  # THE NEUTRALISATION IS VERIFIED, NOT ASSUMED (#3549, roborev job 206 F1) — this issue's own rule one
-  # level further in: A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT, and the verdict at risk
-  # here is the DESTRUCTIVE one. `unset GLOBIGNORE` FAILS when the caller made the variable `readonly`
-  # (measured: rc=1, value intact) — and the old unchecked spelling then walked on into the enumeration
-  # with the filter STILL ACTIVE, i.e. exactly the `{pid}`-forging state the pin exists to remove, and
-  # handed the operator `rm -f … && rmdir …` for a foreign directory. So the STATE is re-read: an unset
-  # or NULL `GLOBIGNORE` is inert (bash consults it only when it is set and non-null), anything else is
-  # a refusal with its own cause token.
-  #
-  # AND THE CHECK COMES BEFORE EVERY OTHER PIN, WHICH IS LOAD-BEARING: on this path we return without
-  # having changed one option or one variable, so there is no restore to get right on the way out —
-  # and a save/restore that corrupts the caller is worse than none (this file's own restore-order case).
-  #
-  # `if unset …` RATHER THAN A BARE `unset`: it records whether the unset TOOK, and the restore below
-  # assigns ONLY when it did. That is not tidiness — MEASURED, a `GLOBIGNORE=…` assignment to a
-  # `readonly` variable under `set -o posix` KILLS A NON-INTERACTIVE SHELL OUTRIGHT (rc=127, and
-  # `2>/dev/null` does not even suppress the message), so a restore that assigns unconditionally would
-  # destroy the caller on the very path this check exists for. The `unset` itself is survivable in the
-  # same configuration (measured: rc=1, shell alive, even inside `$( )` with `inherit_errexit`).
-  #
-  # It also PRECEDES `shopt -s dotglob` for the coupling the restore documents below: unsetting the
-  # variable disables `dotglob`, so the reverse order would leave it off.
-  if unset GLOBIGNORE 2>/dev/null; then _sv_globignore_unset=yes; fi
-  if [[ -n "${GLOBIGNORE:-}" ]]; then
-    printf 'unknown globignore-not-neutralisable\n'
-    return 0
-  fi
-  set +f
-  # SAME TWO REASONS AS THE SAVE, plus one more that is not cosmetic (#3549, roborev job 209 F2): on
-  # bash 3.2 the `-u` line names `globstar` and therefore EXITS NON-ZERO, and as the last command of a
-  # list — or under a direct caller with `errexit` — that aborts between the mutation and the restore,
-  # leaving the caller's shell changed and printing no refusal. So both status and stderr are tolerated.
-  #
-  # WHAT MAKES TOLERATING THE STATUS SAFE IS THE PER-OPTION STATE VERIFICATION IMMEDIATELY BELOW, not an
-  # assumption about what bash did. Measured on this bash: `shopt -s`/`shopt -u` given an unknown name
-  # STILL APPLIES every name it does recognise and returns 1 for the one it does not — so the aggregate
-  # status cannot distinguish "nothing applied" from "one name does not exist here", and it is the wrong
-  # oracle in both directions. The loops below re-read each option's RESULTING STATE with `shopt -p`,
-  # which prints nothing at all for an option this bash lacks; an option bash does not have cannot
-  # filter, expand or match anything, so `absent` is an affirmative OK. That reading is what this
-  # suppression relies on, and it covers the mutation exactly as it covers the save.
-  shopt -s dotglob nullglob 2>/dev/null || true
-  shopt -u failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true
-  # EVERY REMAINING PIN IS VERIFIED THE SAME WAY, AND BY ITS RESULTING **STATE** RATHER THAN BY THE
-  # `shopt` COMMAND'S EXIT STATUS (#3549, job 206 F1, applied to the whole block rather than the one
-  # reported variable). The exit status is the wrong oracle in BOTH directions: `shopt -s`/`-u` returns
-  # non-zero when ANY name is unknown to this bash — `globstar` does not exist before bash 4.0 and this
-  # file supports the 3.2 macOS ships — while (measured) STILL APPLYING every name it does recognise, so
-  # a status check would refuse on a working 3.2 host, and a check that reds on correct input is the
-  # check people learn to waive. The three-valued read below is exact: `shopt -p <opt>` prints
-  # `shopt -s <opt>` / `shopt -u <opt>` for an option this bash HAS, and prints NOTHING for one it does
-  # not (measured) — and an option bash does not have cannot filter, expand or match anything, so
-  # `absent` is an affirmative OK rather than an unknown. The inner `|| true` is required: `shopt -p`
-  # exits non-zero precisely when the option is DISABLED, which is the common case here, and a bare
-  # assignment-from-substitution is a genuine abort site under an `inherit_errexit` caller (job 201 F3).
-  for _opt in dotglob nullglob; do
-    _opt_state="$(shopt -p "$_opt" 2>/dev/null || true)"
-    if [[ -n "$_opt_state" && "$_opt_state" != "shopt -s $_opt" ]]; then _pins_bad+="$_opt!=on "; fi
-  done
-  for _opt in failglob extglob globstar nocaseglob nocasematch; do
-    _opt_state="$(shopt -p "$_opt" 2>/dev/null || true)"
-    if [[ -n "$_opt_state" && "$_opt_state" != "shopt -u $_opt" ]]; then _pins_bad+="$_opt!=off "; fi
-  done
-  # `set +f` has no `shopt -p` spelling; `$-` is its authoritative state and needs no subshell.
-  case $- in *f*) _pins_bad+="noglob!=off " ;; esac
-  # The array form counts exactly even for names containing whitespace or newlines. The VERDICT is
-  # computed inside the neutralised region and acted on after the restore, so the comparison gets the
-  # pinned matching options and the diagnostics below run in the caller's own shell state.
-  _entries=("$legacy"/*)
-  if (( ${#_entries[@]} == 1 )) && [[ "${_entries[0]}" == "$legacy/pid" ]]; then _shape_ok=yes; fi
-  # THE GLOBIGNORE RESTORE COMES **FIRST**, AND THE ORDER IS LOAD-BEARING (#3549, job 205; caught by
-  # this file's own pre-existing shell-option-hygiene case, which went RED on the obvious order).
-  # Assigning or unsetting `GLOBIGNORE` has a DOCUMENTED SIDE EFFECT ON `dotglob`: a non-null value
-  # implicitly ENABLES it and unsetting the variable DISABLES it again. So restoring the options first
-  # and the variable second let the variable restore silently re-clear `dotglob` — MEASURED: a caller
-  # that entered with `dotglob` ON came back out with it OFF. Variable first, options second, and the
-  # options restore therefore has the last word on every option it names.
-  # RESTORED ONLY IF IT WAS ACTUALLY UNSET (see the measurement above: assigning a `readonly`
-  # `GLOBIGNORE` under `set -o posix` kills the shell). When the unset did not take we changed nothing,
-  # so there is nothing to put back — and when it did take, the variable is provably not readonly and
-  # the assignment cannot fail.
-  if [[ "$_sv_globignore_unset" == yes && "$_sv_globignore_set" == yes ]]; then GLOBIGNORE="$_sv_globignore"; fi
-  eval "$_sv_shopts" || true
-  if [[ "$_sv_noglob" == on ]]; then set -f; fi
-  # A PIN THAT DID NOT TAKE INVALIDATES THE ENUMERATION, SO IT IS REPORTED BEFORE THE SHAPE VERDICT —
-  # never alongside it. `_entries` was computed under state we could not confirm, so neither the
-  # `{pid}` shape nor the entry list it would print is evidence of anything.
-  if [[ -n "$_pins_bad" ]]; then
-    printf 'unknown glob-state-pins-not-verified:[%s]\n' "${_pins_bad% }"
-    return 0
-  fi
-  if [[ "$_shape_ok" != yes ]]; then
-    # RENDERED THROUGH `supervisor_shell_quote`, not a bare `printf '%q'` (#3549, roborev job 201 F1).
-    # A newline or control character in an entry name must break neither the one-line state string this
-    # function's callers parse nor the prose line it is later printed on — and `%q` ALONE does not
-    # guarantee that: this file supports the bash 3.2 macOS ships, whose `%q` may render a control
-    # character LITERALLY, which is the entire reason `supervisor_shell_quote` verifies its own output
-    # and repairs it. A bare `%q` here was that same assumption, one function over.
-    local _names="" _e
-    for _e in ${_entries[@]+"${_entries[@]}"}; do
-      _names+="$(supervisor_shell_quote "${_e##*/}") "
-    done
-    printf 'unknown lock-directory-not-exactly-one-pid-file:entries=%s:[%s]\n' "${#_entries[@]}" "${_names% }"
-    return 0
-  fi
-  # THE FILE IS PARSED IN FULL, not just its first line (#3549, roborev job 182 Medium). A bare
-  # `read -r pid <file` SILENTLY IGNORES everything after line 1, so a file whose first line happens to
-  # be a number and whose remainder is anything at all would be trusted as a well-formed pid — a value
-  # trusted beyond what was actually parsed, and that pid then drives an operator-facing instruction
-  # about a process. The documented shape is ONE line; a single trailing newline is normal and stays
-  # acceptable, a second line of any kind (including a blank or whitespace-only one) does not.
-  #
-  # `IFS=` ON **BOTH** READS (#3549, roborev job 201 F2). The second read had it and the first did not,
-  # so the first read TRIMMED leading and trailing whitespace: a `pid` file containing ` 123 ` was
-  # accepted as the well-formed value `123` and, if that pid was dead, received the DELETION remedy —
-  # for a file that is not the shape any supervisor writes. The pre-#3467 supervisor writes
-  # `echo $$ >"$LOCK/pid"`, i.e. digits and ONE newline; anything else is an unrecognised shape and must
-  # refuse, exactly as a non-digit byte does. With `IFS=` the surrounding spaces survive into `$pid`,
-  # the `*[!0123456789]*` test rejects them, and the run refuses with `pid-not-well-formed` and NO deletion
-  # instruction. The trimming was silently generous in the other direction too: it made a space- or
-  # tab-only line 1 read as an EMPTY pid, i.e. one unrecognised shape reported as another.
-  #
-  # ONE redirection for BOTH reads so they share the file descriptor: the first takes line 1, the
-  # second must hit EOF. A `read` that returns non-zero at EOF still ASSIGNS, so a final line with no
-  # trailing newline is caught by the VALUE of `$extra`, never by the status alone; `IFS=` on the second
-  # read keeps a whitespace-only second line from being trimmed into an empty one.
-  #
-  # THE OPEN'S SUCCESS IS TRACKED, so an UNMEASURED read is not reported as an affirmative measurement
-  # (#3549, roborev job 185 F3, class sweep). The file passed `-f -r` a moment ago and can still vanish
-  # or lose its permissions before the open. Both the verdict and the CAUSE TOKEN would then have been
-  # wrong in the same direction: an empty `$pid` fell into `pid-not-well-formed:[]`, which states we
-  # PARSED the file and its contents were bad. The verdict stays a refusal either way (`unknown` refuses
-  # in every spelling), so this is the diagnostic being made true, not a behaviour change.
-  #
-  # `2>/dev/null` PRECEDES the input redirection deliberately: redirections are applied left to right,
-  # so with the input first bash prints its own "No such file or directory" to a stderr that is not yet
-  # discarded. Order-dependent and silent if reversed. (This note used to live at
-  # `supervisor_pid_identity`, which was deleted for #3549 job 198 F1; this is now its only site.)
-  #
-  # The `|| true` on the FIRST read is correctly permissive and stays: `read` returns non-zero at EOF
-  # while still ASSIGNING, so a single-line file with no trailing newline is a normal, well-formed lock
-  # whose read "fails". Open failure is what is now distinguished, not read status.
-  # A NUL BYTE MAKES THE FILE AN UNRECOGNISED SHAPE, AND IT IS PROBED FOR **BEFORE** THE FILE IS PARSED,
-  # BECAUSE `read` CANNOT SEE IT (#3549, roborev job 206 F2). Measured: a plain `read -r pid` on the bytes
-  # `123<NUL>\n` — and on `<NUL>123\n` — assigns the canonical-looking value `123`, because a bash
-  # variable cannot hold a NUL and `read` DISCARDS it silently. So the exact-shape validation the
-  # deletion remedy rests on was not exact: the pre-#3467 supervisor writes `echo $$ >"$LOCK/pid"`,
-  # i.e. digits and ONE newline, a file containing a NUL is therefore NOT a file it could have written,
-  # and it was nevertheless reaching the `stale` verdict and earning an `rm -f … && rmdir …` line.
-  #
-  # THE PROBE IS A BUILTIN, DELIBERATELY, AND THAT CHOICE IS PART OF THE FIX: `read -r -d ''` sets the
-  # delimiter to NUL, so a SUCCESSFUL read means a NUL is present (and a read that runs to EOF returns
-  # non-zero, meaning there is none). `od`/`wc`/`cmp`/`tr` would each answer the same question and would
-  # each reintroduce PATH EXPOSURE into a function that currently executes NO external command at all —
-  # a property this guard's inherited-state sweep relies on, so it is not traded away for a byte probe.
-  # All four lossy shapes are caught by one read (each measured): a NUL after the digits, a NUL before
-  # them, a file that is only a NUL, and a NUL after the trailing newline.
-  #
-  # `2>/dev/null` PRECEDES the input redirection for the reason spelled out below, and the OPEN's
-  # success is tracked here too, so an unmeasurable probe is never reported as an affirmative "no NUL".
-  local has_nul=no nul_open_ok=no _nul_discard=""
-  if { if IFS= read -r -d '' _nul_discard; then has_nul=yes; fi; } 2>/dev/null <"$legacy/pid"; then
-    nul_open_ok=yes
-  fi
-  if [[ "$nul_open_ok" != yes ]]; then
-    printf 'unknown pid-file-unreadable-at-open\n'
-    return 0
-  fi
-  if [[ "$has_nul" == yes ]]; then
-    printf 'unknown pid-file-contains-nul\n'
-    return 0
-  fi
-  local extra="" more=no open_ok=no
-  if { IFS= read -r pid || true; if IFS= read -r extra; then more=yes; fi; } 2>/dev/null <"$legacy/pid"; then
-    open_ok=yes
-  fi
-  if [[ "$open_ok" != yes ]]; then
-    printf 'unknown pid-file-unreadable-at-open\n'
-    return 0
-  fi
-  if [[ "$more" == yes || -n "$extra" ]]; then
-    printf 'unknown pid-file-not-a-single-line\n'
-    return 0
-  fi
-  # EXPLICIT CHARACTER LIST, NOT A RANGE — the digit test must not inherit the caller's collation; the
-  # measurement and the harm it produces are recorded at `supervisor_pid_liveness` (#3549, job 205 sweep).
-  case "$pid" in
-    '' | *[!0123456789]* | 0*) printf 'unknown pid-not-well-formed:[%s]\n' "$(supervisor_shell_quote "$pid")"; return 0 ;;
-  esac
-  # AN OUT-OF-RANGE VALUE IS NOT A DEAD PID (#3549, roborev job 208 F2). The shape test above accepts
-  # ANY non-zero digit string, and a 20-digit one then fails every liveness probe FOR A REASON THAT IS
-  # NOT "the process is gone": `kill -0` rejects it as not a process specification and procfs has no
-  # entry for a number that could never have one. The verdict was `dead`, which this classifier prints
-  # as `stale`, and `stale` is the ONE state that hands the operator a `rm -f … && rmdir …` line — a
-  # deletion instruction for a `pid` file no supervisor could have written. Same harm as the collation
-  # and NUL defects above, reached through a third door, so it is closed the same way: an unrecognisable
-  # value is `unknown` WITH ITS OWN CAUSE, and `unknown` refuses without a deletion.
-  #
-  # THE BOUND IS READ FROM THE PLATFORM, NEVER INVENTED. `/proc/sys/kernel/pid_max` is the kernel's own
-  # answer, and it is a PLAIN FILE READ through the `read` builtin — so this classifier still executes NO
-  # external command and none of its verdicts can be changed by the caller's `PATH`, a property the
-  # inherited-state sweep relies on and the suite asserts structurally.
-  #
-  # `>=`, NOT `>`: `man 5 proc` documents pid_max as "the value at which PIDs wrap around (i.e., the
-  # value in this file is one greater than the maximum PID)", so the boundary value itself is not
-  # allocatable. If that reading were ever wrong the cost is a REFUSAL for exactly one value, never a
-  # deletion — the safe direction, which is why the boundary is taken this way rather than left open.
-  #
-  # THE LENGTH TEST IS AN OVERFLOW GUARD, NOT A DIGIT-COUNT HEURISTIC. Both operands are validated
-  # decimal strings with no leading zero, so ordering by LENGTH *is* decimal ordering — exact, not
-  # approximate. It comes first because bash arithmetic on a huge digit string does NOT error: MEASURED,
-  # `[[ 999999999999999999999999999999 -gt 5 ]]` succeeds by SATURATING at `INTMAX_MAX`, so a verdict
-  # taken from it would be a verdict about a number nobody computed. Arithmetic is therefore used ONLY
-  # when the two lengths are equal AND the bound is at most 18 digits, where it cannot overflow; a
-  # longer bound leaves this check abstaining rather than guessing (unreachable for a kernel value,
-  # which is 7 digits here).
-  #
-  # AN UNMEASURABLE BOUND ABSTAINS — it never refuses and never invents a limit. A missing, unreadable,
-  # multi-line or non-decimal `pid_max` (a BSD/macOS host has no such file at all) must not turn a
-  # LEGITIMATE pid into a refusal, so this check simply does not fire. The `dead` direction is held
-  # closed one level down instead: `supervisor_pid_liveness` reads the invalid-process-spec errno for
-  # anything above `INT_MAX`, and on a host with no procfs it has no corroborating oracle and answers
-  # `unknown` for every non-live pid anyway.
-  local pid_max="" _pm_extra="" _pm_more=no
-  if { IFS= read -r pid_max || true; if IFS= read -r _pm_extra; then _pm_more=yes; fi; } 2>/dev/null </proc/sys/kernel/pid_max; then
-    if [[ "$_pm_more" == yes || -n "$_pm_extra" ]]; then
-      pid_max=""
-    else
-      case "$pid_max" in
-        '' | *[!0123456789]* | 0*) pid_max="" ;;
-      esac
-    fi
-  else
-    pid_max=""
-  fi
-  local pid_over=no
-  if [[ -n "$pid_max" ]]; then
-    if (( ${#pid} > ${#pid_max} )); then
-      pid_over=yes
-    elif (( ${#pid} == ${#pid_max} && ${#pid_max} <= 18 )) && (( pid >= pid_max )); then
-      pid_over=yes
-    fi
-  fi
-  if [[ "$pid_over" == yes ]]; then
-    printf 'unknown pid-exceeds-platform-pid-max:%s:recorded:%s\n' "$pid_max" "$(supervisor_shell_quote "$pid")"
-    return 0
-  fi
-  case "$(supervisor_pid_liveness "$pid")" in
-    live) printf 'live %s\n' "$pid" ;;
-    dead) printf 'stale %s\n' "$pid" ;;
-    *) printf 'unknown liveness-unmeasurable-for-pid:%s\n' "$(supervisor_shell_quote "$pid")" ;;
-  esac
+  printf 'verified-absent\n'
 }
 
 # supervisor_legacy_lock_refuse <path> <detail> [remedy-prose] [remedy-command] — LOUD, DIAGNOSTIC, and
@@ -2122,10 +1698,10 @@ supervisor_legacy_lock_refuse() {
   own_shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")" || true
   printf '%s\n' "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy_shown: $detail" >&2
   printf '%s\n' "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($own_shown), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
-  # A CASE-SPECIFIC remedy, when there is one. The states differ in what an operator should DO — a LIVE
-  # holder means "something is running, stop it"; a STALE one means "an old supervisor left this behind,
-  # delete it" — so the generic line below is not sufficient on its own, and a run that told an operator
-  # to stop a process that is already dead would be actively misleading.
+  # A CASE-SPECIFIC remedy, when there is one. The two refusing states differ in what an operator should
+  # DO — a PRESENT lock means "something is at that path; find out what it is"; a probe that COULD NOT
+  # ANSWER means "the question was undecidable here; make it decidable" — so the generic line below is
+  # not sufficient on its own.
   [[ -z "$remedy" ]] || printf '%s\n' "worker-supervisor: remedy for THIS state — $remedy" >&2
   [[ -z "$cmd_broken" ]] || printf '%s\n' "worker-supervisor: a remedy command for this state was built with an embedded control character, so it is NOT printed as a runnable line (it could not be one); rendered for reading only: $cmd_broken" >&2
   [[ -z "$remedy_cmd" ]] || printf '%s\n' "$remedy_cmd" >&2
@@ -2150,8 +1726,9 @@ supervisor_legacy_lock_refuse() {
 # THIS GUARD DETECTS AND REFUSES. IT NEVER MUTATES THE FOREIGN LOCK (#3549, lead ruling).
 #
 # Nothing on this path touches an object this run does not own — no rename-aside, no delete, no
-# adoption, no re-creation. A legacy lock in ANY state that is not verified absence stops the start and
-# prints what was found. That is a deliberate REDUCTION in capability, and the reason is recorded here
+# adoption, no re-creation, and since the lead's second ruling NO READ OF ITS CONTENTS EITHER: the
+# guard tests for EXISTENCE and stops. Anything other than a verified absence stops the start and names
+# the path. That is a deliberate REDUCTION in capability, twice over, and the reason is recorded here
 # because the deleted version was written three times and produced the same harm each time.
 #
 # WHY RECLAIMING WAS REMOVED. Reclaiming a stale lock means renaming it aside, and every abort path
@@ -2175,20 +1752,28 @@ supervisor_legacy_lock_refuse() {
 # is why this guard refuses instead.
 #
 # AC2 OF #3549 ("reclaimed rather than blocking forever") IS SATISFIED BY THE REFUSAL, per the lead's
-# ruling: a LOUD refusal that names the legacy path, the recorded pid, the classified state, the
-# precondition (stop or upgrade the legacy launcher FIRST) and an exact NON-RECURSIVE remedy on a line
-# of its own (`rm -f <dir>/pid && rmdir <dir>`) is not "blocking forever" — an operator (or an upgrade
-# past #3467) clears it in one command, and the alternative is a supervisor that silently mutates
-# another supervisor's lock.
+# ruling: a LOUD refusal that names the legacy path, the precondition (stop or upgrade the legacy
+# launcher FIRST) and a READ-ONLY inspection line of its own is not "blocking forever" — an operator
+# who has established that no pre-#3467 supervisor can run on the box removes the path themselves, and
+# the alternative is a supervisor that silently mutates another supervisor's lock.
+#
+# AND THE PRINTED LINE IS AN INSPECTION, NOT A DELETION — WHICH IS WHAT THE SECOND RULING CHANGED
+# (#3549). While the classifier existed, an enumerated exactly-`{pid}` shape was what LICENSED printing
+# `rm -f -- <dir>/pid && rmdir -- <dir>`. With no inspection there is no such licence, and the deletion
+# line is not merely unjustified but measurably DESTRUCTIVE on a shape we no longer look at: MEASURED,
+# with a SYMLINK at the legacy path pointing at a foreign directory, `rm -f -- <legacy>/pid` follows the
+# link and DELETES THAT DIRECTORY'S `pid` FILE (rc=0), after which `rmdir -- <legacy>` fails with "Not a
+# directory" — so the operator destroys a file this run never examined and the lock is still there.
+# See the `present` branch for the line that is printed instead, and why printing one at all is right.
 
 # RESIDUAL (#3549, roborev job 178) — THIS GUARD REDUCES THE COLLISION WINDOW; IT DOES NOT ELIMINATE
 # IT. Read plainly: it is a STARTUP CHECK, not machine-wide mutual exclusion.
 #
 # 1. THE UNCLOSED WINDOW. A pre-#3467 supervisor that starts AFTER this check completes is not stopped
 #    by anything here. It consults ONLY the legacy global path and knows nothing of our per-lane lock,
-#    so once we have passed the check — or once an operator has cleared a stale lock we refused over —
-#    it can take the legacy name and run alongside us in the same worktree. The check is a single read:
-#    the window is "after that read", and nothing here can shrink it further.
+#    so once we have passed the check — or once an operator has removed a lock we refused over — it can
+#    take the legacy name and run alongside us in the same worktree. The check is a single existence
+#    test: the window is "after that test", and nothing here can shrink it further. Tracked as #3596.
 # 2. WHY IT IS NOT CLOSED HERE. The only construction that closes it is for THIS supervisor to acquire
 #    and HOLD the legacy global lock for its whole lifetime — which reimposes MACHINE-GLOBAL exclusion
 #    and would make the second post-#3467 lane on a box refuse to start. That is precisely what #3467
@@ -2201,7 +1786,7 @@ supervisor_legacy_lock_refuse() {
 #    PERMANENTLY once every checkout a launcher can reach is at or past #3467 — the same condition as
 #    this guard's own REMOVAL CONDITION above.
 # 4. SO: do not read the guard as complete mutual exclusion. It refuses a start under a lock that is
-#    ALREADY PRESENT in any state (the case #3467 regressed) and MUTATES NOTHING — it cannot destroy or
+#    ALREADY PRESENT, whatever it is (the case #3467 regressed), and MUTATES NOTHING — it cannot destroy or
 #    corrupt any holder's lock, live or dead, because it never writes to the legacy path at all; a
 #    supervisor that starts later from an old checkout remains a documented, bounded risk. Per #3549's own doctrine: a
 #    deferred defect whose activation condition is unwritten is a landmine; one whose condition is
@@ -2219,102 +1804,57 @@ supervisor_legacy_lock_guard() {
   case "$SUPERVISOR_LOCK_DERIVED" in
     no) return 0 ;;
   esac
-  local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state pid
-  # A CLASSIFIER THAT COULD NOT ANSWER IS A REFUSAL, NEVER A SILENT EXIT (#3549, roborev job 201 F3).
-  # The classifier returns 0 on every path it takes, but under a caller with `inherit_errexit` any
+  local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state
+  # A PROBE THAT COULD NOT ANSWER IS A REFUSAL, NEVER A SILENT EXIT (#3549, roborev job 201 F3).
+  # The probe returns 0 on every path it takes, but under a caller with `inherit_errexit` any
   # unforeseen non-zero inside the `$( )` makes THIS ASSIGNMENT non-zero, and with the script's own
   # `set -e` that ends the whole supervisor with no message at all — a start neither permitted nor
-  # explained. The individual commands whose non-zero exit is NORMAL are fixed at their sites; this is
-  # the fail-closed backstop for the ones nobody has thought of, and it lands in the `unknown` branch,
-  # which refuses.
-  state="$(supervisor_legacy_lock_state "$legacy")" || state="unknown state-classifier-exited-nonzero"
+  # explained. This is the fail-closed backstop, and it lands in the `could-not-tell` branch, which
+  # refuses.
+  state="$(supervisor_legacy_lock_presence "$legacy")" || state="could-not-tell presence-probe-exited-nonzero"
   case "$state" in
-    absent)
+    verified-absent)
       return 0
       ;;
-    'live '*)
-      pid="${state#live }"
-      # THE REFUSAL IS UNCONDITIONAL, AND THERE IS NOW EXACTLY ONE LIVE WORDING (#3549, roborev job 198
-      # F1). Every live case refuses and every live case says VERIFY FIRST, because THIS GUARD CANNOT
-      # DETERMINE WHAT THE RECORDED PID IS — not "does not", cannot.
+    present)
+      # THE REFUSAL CLAIMS NOTHING ABOUT WHAT IS THERE (#3549, lead ruling). It does not say the holder
+      # is dead, it does not say the holder is alive, it does not say the object is a lock, and it does
+      # not promise that removing it will succeed — because this guard did not look. Every sentence
+      # below is a statement about what WE did, or an instruction whose precondition the OPERATOR must
+      # establish. The previous version's `live`/`stale` wordings asserted a process's fate from a bare
+      # pid, and each such assertion cost a review round.
       #
-      # WHAT WAS DELETED, AND WHY IT CANNOT COME BACK. There used to be a `supervisor_pid_identity`
-      # probe that read `/proc/<pid>/cmdline` and, when the argument vector named `worker-supervisor.sh`
-      # as the program being run, printed "CORROBORATED — stop pid N first". The three facts that make
-      # any such corroboration UNSOUND HERE are properties of the data, not of the implementation:
-      #   1. THE LOCK RECORDS ONLY A PID. The pre-#3467 lock directory holds a single `pid` file — no
-      #      start time, no boot id, no lane, no path. So there is NOTHING to bind a process INCARNATION
-      #      to this lock: a pid that is alive may be the recorder, or may be anything the kernel later
-      #      handed that number to.
-      #   2. THE BASENAME IS NOT UNIQUE ON THIS FLEET. Up to four lanes run on one box, each with its
-      #      own `worker-supervisor.sh`. So "this process is running worker-supervisor.sh" does not even
-      #      narrow it to one process, let alone to the holder of THIS lock — the most likely false
-      #      positive is A LIVE SIBLING LANE'S SUPERVISOR.
-      #   3. THE ONLY CONSUMER WAS WORDING. The refusal was identical in every branch, so the probe
-      #      never protected anything; it only chose which sentence to print. Its false positive,
-      #      however, printed "stop pid N first" — an instruction to KILL AN UNRELATED, POSSIBLY
-      #      PRODUCTION, PROCESS. All risk, no benefit.
-      # Together: positive corroboration is unachievable IN PRINCIPLE from what the legacy lock records,
-      # not merely unimplemented. FOUR CONSECUTIVE REVIEW ROUNDS landed inside the probe that tried
-      # (roborev jobs 182, 192, 194, 196, 198) — a substring match, an option-skipping walk, an argv
-      # arity rule, a `ps` rendering — each fixing the previous one's false corroboration and each
-      # introducing the next. That census is the reason this is a DELETION and not a fifth attempt: do
-      # not reintroduce an identity probe for this lock unless the lock itself starts recording
-      # something that binds an incarnation.
+      # WHY A COMMAND IS PRINTED AT ALL, AND WHY IT IS READ-ONLY. The refusal's entire content is
+      # "something is at this path and we deliberately did not look inside", so the operator's next
+      # question is necessarily "what IS it?" — and that is precisely the question a read-only line can
+      # answer without this guard making a single claim. It is also the only shape whose mis-paste is
+      # harmless: `ls` cannot destroy anything, so the worst outcome is an uninformative line. (Same
+      # reasoning that kept the read-only `ps -p` line in the deleted `live` branch, and the exact
+      # opposite of the deletion line, which was measurably destructive on a symlink — see above.)
+      # `ls -ldn` names the OBJECT without following a symlink (link vs directory vs plain file);
+      # `ls -lna` then shows the CONTENTS when it is a directory. Measured rc=0 on all three shapes, so
+      # the line is not noise on any of them. `--` because the path is `TMPDIR`-derived and an
+      # option-shaped one would otherwise be parsed as flags (quoting is not option-safety); paths are
+      # rendered through `supervisor_shell_quote` so the line is paste-safe and stays on ONE physical
+      # line; and it is the FOURTH argument, so the emitter prints it BARE on its own line rather than
+      # inlined in prose where pasting it would append prose words as operands.
       #
-      # The `ps` invocation is the FOURTH argument, not a parenthetical inside the prose (#3549, roborev
-      # job 185 F2): a command wrapped in prose is not pasteable, and the class of defect is recorded at
-      # `supervisor_legacy_lock_refuse`. This one is read-only, so a mis-paste could only ever be
-      # uninformative — but the rule is about the shape, not this command's blast radius.
-      supervisor_legacy_lock_refuse "$legacy" "recorded pid $pid is ACTIVE (this guard reads the recorded pid and its LIVENESS only; nothing here can determine WHAT that process is, because the legacy lock records a bare pid and nothing that binds a process incarnation to it — #3549)" \
-        "pid $pid is running; PID NUMBERS ARE REUSED, so it may be an unrelated process that inherited the number — and on this fleet SEVERAL LANES run a supervisor with the SAME script name, so even finding that pid $pid is a worker-supervisor.sh would NOT show it to be the one holding THIS lock. VERIFY what pid $pid actually is with the next line BEFORE stopping anything, and do NOT delete this lock while it may still be held" \
-        "ps -p $pid -o args="
-      ;;
-    'stale '*)
-      # STALE = a pre-#3467 supervisor that is GONE left its lock behind. This run REFUSES and removes
-      # NOTHING: see "THIS GUARD DETECTS AND REFUSES" above for why the reclaim was deleted. The
-      # diagnostic is deliberately distinct from the `live` one — both refuse, but the remedies differ.
-      pid="${state#stale }"
-      # THE PRECONDITION COMES FIRST, AND THE COMMAND IS NOT CALLED SAFE (#3549, roborev job 185 F1).
-      # Two separate things are true and were previously conflated.
-      #
-      # (a) ORDERING. Deleting this lock FREES THE LEGACY NAME, and a pre-#3467 supervisor can take it
-      #     immediately — the very concurrency this guard refuses. So the instruction is: stop or
-      #     upgrade the legacy launcher FIRST, delete SECOND. Reversed, the remedy opens the window.
-      #
-      # (b) NO SAFETY CLAIM ABOUT CURRENT CONTENTS. The old text said the verified shape made the
-      #     command fail loudly on anything unexpected. That was a statement about the shape AT
-      #     CLASSIFICATION TIME, printed for an operator who acts at an ARBITRARY LATER TIME — a TOCTOU
-      #     on the operator's own timeline, and an unbounded one. NO revalidating one-liner closes it
-      #     (whatever it checks, it checks before it acts), and building a clever inode/pid-rechecking
-      #     pipeline here would be a fourth repetition of exactly the check-then-act mistake this issue
-      #     has already made three times in code. So the honest wording ships instead: the shape was
-      #     verified WHEN THIS RAN.
-      #
-      # What DOES survive is `rmdir`'s own guarantee — it refuses a non-empty directory — which is a
-      # property of the command, not of an observation, and therefore still true whenever it is run.
-      # That is why the remedy stays non-recursive; `rm -rf` would silently delete contents this run
-      # does not own. Paths are shell-quoted so the printed line is paste-safe for a `TMPDIR`
-      # containing a space or a quote, and the command occupies its own line (see F2 at
-      # `supervisor_legacy_lock_refuse`).
-      #
-      # (c) QUOTING IS NOT OPTION-SAFETY, AND THEY ARE DIFFERENT HAZARDS (#3549, roborev job 192 F2).
-      #     `supervisor_shell_quote` stops word-splitting, globbing and metacharacters; it does NOTHING
-      #     about OPTION PARSING, because the shell hands `rm` the bytes and `rm` reads a leading `-`
-      #     as flags whatever quoting produced it. With a relative option-shaped `TMPDIR` (`-scratch`)
-      #     the printed `rm -f '-scratch/…/pid' && rmdir '-scratch/…'` fails with "invalid option" —
-      #     an operator-facing line advertised as executable that is not, on a legitimate
-      #     configuration. `--` terminates option parsing, which is a property of the COMMANDS and
-      #     therefore holds for EVERY path shape: absolute, relative, option-shaped or not. It is used
-      #     instead of requiring an absolute `TMPDIR` (that would be a new refusal for a working
-      #     configuration, i.e. a false STOP) and instead of special-casing a leading `-` (which fixes
-      #     one window and leaves the next one).
-      supervisor_legacy_lock_refuse "$legacy" "state $state — LEFT BEHIND by a pre-#3467 supervisor that is GONE (recorded pid $pid is affirmatively dead). This guard never mutates a lock it does not own, so it is NOT removed automatically" \
-        "PRECONDITION FIRST — stop the legacy launcher(s) on this box, or upgrade that checkout past #3467; a lock deleted before that is a free name a pre-#3467 supervisor can take at once. ONLY THEN run the next line, on its own, exactly as printed. Its shape was verified WHEN THIS RAN, not when you run it, so if a legacy supervisor has started since it may no longer be the lock described above; the rmdir is non-recursive and refuses a non-empty directory, which is the guarantee that still holds later" \
-        "rm -f -- $(supervisor_shell_quote "$legacy/pid") && rmdir -- $(supervisor_shell_quote "$legacy")"
+      # NO REMOVAL COMMAND IS PRINTED, DELIBERATELY. A removal that is correct depends on what the
+      # object is, which is the thing we chose not to determine; and printing one would be an implicit
+      # claim that removal is safe now. The prose says removal is the operator's call once they have
+      # established the precondition, and says what makes it safe when they do (non-recursive, so it
+      # cannot silently delete contents nobody examined).
+      supervisor_legacy_lock_refuse "$legacy" "a path EXISTS there (this guard tests for EXISTENCE ONLY — it does not open, read, enumerate or inspect that path, so it makes NO claim about what the object is, whether any holder is alive, or whether removing it would be safe)" \
+        "PRECONDITION FIRST — stop the pre-#3467 supervisor(s) on this box, or upgrade that checkout past #3467. That path becomes removable only once YOU have established that no pre-#3467 supervisor can run here; this guard has established no such thing, and it has NOT verified that any removal will succeed. Removing it before the precondition frees the legacy name for a pre-#3467 supervisor to take at once, which is the concurrency this refusal exists to prevent. To see WHAT is actually there, run the next line, on its own, exactly as printed — it only reads. If you then remove the path, use a NON-RECURSIVE removal (rmdir refuses a non-empty directory) so nothing you have not examined is deleted" \
+        "ls -ldn -- $(supervisor_shell_quote "$legacy") && ls -lna -- $(supervisor_shell_quote "$legacy")"
       ;;
     *)
-      supervisor_legacy_lock_refuse "$legacy" "state could not be determined (${state#unknown }) — 'cannot tell' is a refusal here, never a green light"
+      # THE CAUSE SAYS THE PROBE FAILED — IT DOES NOT SAY A LOCK EXISTS (#3549, lead ruling). "Cannot
+      # tell" and "something is there" are different facts with different remedies, and reporting the
+      # first as the second would send an operator hunting for a lock that may not exist. The refusal
+      # is identical in force, and only in force.
+      supervisor_legacy_lock_refuse "$legacy" "THE EXISTENCE PROBE FAILED (${state#could-not-tell }) — this is NOT a report that a legacy lock exists; it is a report that this run could not decide whether one does, and 'cannot tell' is a refusal here, never a green light" \
+        "make the question decidable and re-run: the container directory named in the cause must exist and be SEARCHABLE by this user (mode +x — the probe stats a known child name and never enumerates, so read permission is not needed). Until then a legacy lock sitting at that path would be invisible to this check"
       ;;
   esac
 }
@@ -2337,10 +1877,13 @@ acquire_lock() {
     trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT
     return 0
   fi
-  # KNOWN RESIDUAL, recorded at the site (#3549 class sweep — the enumerated shapes are listed at
-  # `supervisor_pid_liveness`): this pid is used UNPARSED, the liveness test below is two-valued, and
-  # the message asserts "another instance" without corroborating the process identity. Out of scope for
-  # #3549 (a different lock, with reclaim semantics of its own), not an oversight.
+  # KNOWN RESIDUAL, recorded at the site (#3549 class sweep): this pid is used UNPARSED, the liveness
+  # test below is TWO-VALUED (a `kill -0` failing with EPERM — a live process owned by another user —
+  # reads as dead and the lock is RECLAIMED), and the message asserts "another instance" without
+  # corroborating the process identity. Out of scope for #3549 (a different lock, with reclaim
+  # semantics of its own), not an oversight. The three-valued liveness probe that used to be quoted
+  # here was DELETED with the legacy classifier (lead's second ruling), so this residual now stands on
+  # its own description rather than pointing at code.
   # FOURTH SHAPE, same scope decision (#3549, job 205 F2 sweep): this lock's own refusals below still
   # emit with `echo` and interpolate an unrendered `$SUPERVISOR_LOCK`, so they inherit `xpg_echo` and a
   # control character in `TMPDIR` exactly as the legacy guard's did before F2. Listed, not fixed here.
