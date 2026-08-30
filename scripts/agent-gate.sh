@@ -7251,7 +7251,7 @@ run_file_size() {
   fi
   if [ -n "$log_persist_err" ]; then
     local ratchet_verdict="$status" sib="$LOG_DIR/$name.persistence-error.log" _m _g
-    local sib_ok=1 _sib_lines=0
+    local sib_ok=1 _sib_lines=0 _allow_shown=""
     local -a msg=()
     status=FAIL
     # The diagnostic MUST NOT live on stdout alone: stdout is gate.log, the one file agents
@@ -7325,10 +7325,19 @@ run_file_size() {
       # Without it the sibling shows grown files beside a non-FAIL verdict with no
       # provenance — and, from the test side, the allowed-growth state emits bytes
       # identical to the FAIL state, so nothing can tell the two apart.
+      # "unset" was a CLAIM about a state never determined — the predicate only tested
+      # `!= 1`, so `CQLITE_ALLOW_FILE_GROWTH=0` or a typo (`true`, `yes`) was reported as
+      # never set, hiding from the reader the one fact that fixes their invocation (#3401
+      # review, sixth instance of the compute-claim class). `${VAR+set}` distinguishes the
+      # two without a second read. The value is flattened to one line and capped because a
+      # multi-line value would break the sibling's landed-line-count check below.
       if [ "${CQLITE_ALLOW_FILE_GROWTH:-0}" = 1 ]; then
         msg+=("    growth allowance: ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1")
+      elif [ -n "${CQLITE_ALLOW_FILE_GROWTH+set}" ]; then
+        _allow_shown=$(printf '%s' "$CQLITE_ALLOW_FILE_GROWTH" | tr -d '\n\r' | cut -c1-40)
+        msg+=("    growth allowance: NOT enabled — CQLITE_ALLOW_FILE_GROWTH is set to '$_allow_shown', expected exactly 1; this IS a ratchet violation")
       else
-        msg+=("    growth allowance: none (CQLITE_ALLOW_FILE_GROWTH unset) — this IS a ratchet violation")
+        msg+=("    growth allowance: NOT enabled — CQLITE_ALLOW_FILE_GROWTH is not set, expected exactly 1; this IS a ratchet violation")
       fi
     fi
 
@@ -7377,11 +7386,12 @@ run_file_size() {
   # review round (#3401 review A2, re-raised as job 138 F1):
   #   * CIRCULARITY: this line's CONTENT IS THE VERDICT, and the verdict depends on the
   #     persistence decision. It cannot be written before the decision it reports.
-  #   * A POST-WRITE RE-CHECK BUYS NOTHING: verifying a write requires a later write TO THE
-  #     SAME SINK, whose own success is then unverified — the same one-write window, moved
-  #     along. Checking this append and reporting the failure on STDOUT *is* implementable
-  #     (a different sink needs no further log write), but it would only restate what
-  #     stdout already prints, which is why the bullet below is the load-bearing one.
+  #   * A POST-WRITE RE-CHECK BUYS NOTHING: a read-back can VERIFY the append without
+  #     writing anything, but RECORDING that outcome in the same sink requires a later
+  #     write, whose own success is then unverified — the same one-write window, moved
+  #     along. Reporting it on STDOUT *is* implementable (a different sink needs no further
+  #     log write), but it would only restate what stdout already prints, which is why the
+  #     bullet below is the load-bearing one.
   #   * THE LOSS IS BOUNDED: everything #3401 exists for (thresholds, base ref, over/grown
   #     entries) is written AND checked above; a failure here costs only the terminal
   #     verdict LINE, which the SUMMARY carries independently.
