@@ -53,7 +53,10 @@ testing nothing. So every iteration is counted: the error-path test asserts it
 observed exactly one ``cqlite.QueryError`` per iteration, and the stream test
 asserts it pulled exactly ``STREAM_ROWS`` rows per iteration AND (separately,
 outside the measurement) that the fixture holds MORE than ``STREAM_ROWS`` rows,
-without which "abandoned mid-stream" would silently mean "exhausted". Those
+without which "abandoned mid-stream" would silently mean "exhausted", AND that the
+query->consumer channel is too small to swallow the fixture (a CONFIGURATION
+property -- see ``STREAM_BUFFER_SIZE`` for exactly what that does and does not
+establish). Those
 checks run OUTSIDE the measurement window so they cost the budget nothing.
 
 Dataset rule (issue #1230): the stream test is dataset-dependent, and reuses the
@@ -137,30 +140,44 @@ WARMUP_ITERATIONS = 10
 # (50 on disk) so the iterator is genuinely abandoned mid-stream, never exhausted.
 STREAM_ROWS = 5
 
-# THE ABANDONMENT MUST LEAVE THE NATIVE PRODUCER IN FLIGHT (issue #1465 round 5).
-# The same defect roborev filed against the Node lane applies here: `buffer_size`
-# is the capacity of the bounded channel the core streaming executor creates
-# (`mpsc::channel(config.buffer_size)` in cqlite-core's select_executor), and it
-# DEFAULTS to 1024 -- larger than this fixture's 50 rows. With the default the
-# producer task runs to completion before the break at row 5, so the budget
-# measured a fully-drained stream and no native cancellation at all.
+# THE ABANDONMENT MUST LEAVE THE QUERY PRODUCER IN FLIGHT (issue #1465 rounds 5-6).
+# Scope this claim carefully -- the first version of it overreached, and the
+# corrected version is narrower than it looks.
 #
-# With capacity 2 the producer can never be more than 2 rows ahead of the
-# consumer, so after STREAM_ROWS pulls at most STREAM_ROWS + 2 of the 50 rows
-# have been produced and the scan is genuinely mid-flight at the break. The
-# contract test asserts that bound from MEASURED quantities rather than trusting
-# this comment.
+# WHAT `buffer_size` IS: the capacity of the OUTER, query->consumer channel
+# (`mpsc::channel(config.buffer_size)` in cqlite-core's select_executor). The query
+# task builds rows from a scan batch and pushes them one at a time into that
+# channel with `tx.send(..).await`, so with capacity 2 it is PARKED in that send
+# after a handful of rows, still owning every remaining row it has built. With the
+# DEFAULT 1024 -- larger than this fixture's 50 rows -- it sends all 50 and
+# RETURNS, so there is nothing outstanding anywhere and the budget below would
+# measure a fully drained pipeline. That difference is the whole point of pinning
+# the capacity here.
 #
-# HOW THIS DIFFERS FROM THE NODE LANE, stated because the docstring claims to
-# mirror it: Node's `stream.rowsReceived` is the NATIVE iterator's fetch counter,
-# so that lane can read the in-flight state back (and reads 0 after close, which
-# is its closure proof). Python's `StreamingIterator.rows_received` is a
-# CONSUMER-side count -- measured [1, 2, 3, 4, 5] for every buffer_size from 1 to
-# 1024 -- so there is nothing to read back here. The in-flight property is
-# therefore established by the capacity BOUND above (a property of core's bounded
-# channel), not by a runtime getter, and python has no equivalent of Node's
-# native-closure assertion. Do not "port" that assertion here; there is no signal
-# for it.
+# WHAT THIS DOES *NOT* ESTABLISH, verified in core rather than assumed: the
+# reader-level scan may ALREADY BE COMPLETE at the break. Downstream of that outer
+# channel the reader's batching subsystem holds its own pool, documented as
+# INDEPENDENT of `buffer_size`:
+# `MAX_INFLIGHT_BATCH_ROWS = (BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS = (2 + 2) *
+# 256 = 1024` rows (cqlite-core's reader/scan_stream_windowed), and the batched
+# surface's channel holds `ceil(buffer_size / BATCH_EMIT_ROWS)` = ONE batch of up
+# to 256 rows (`batched_channel_capacity` in reader/data_access/batched_scan_stream).
+# A 50-row fixture fits entirely inside one batch, so the native scan can finish
+# before the consumer's first pull no matter what `buffer_size` is. The property
+# pinned here is therefore OUTSTANDING WORK AT THE QUERY->CONSUMER BOUNDARY, not
+# "the native scan was still running".
+#
+# AND THE ASSERTION BELOW IS A CONFIGURATION PROPERTY, NOT A RUNTIME ONE. It is
+# computed from a configured constant and one measured row count, so it proves the
+# capacity was not raised above the fixture size -- the regression that silently
+# drained the pipeline. Only an OBSERVATION could prove what was in flight at the
+# instant of the break, and python exposes no such observation:
+# `StreamingIterator.rows_received` is a CONSUMER-side count (measured
+# [1, 2, 3, 4, 5] for every buffer_size from 1 to 1024). The NODE lane does carry
+# the runtime property, because `stream.rowsReceived` there is the NATIVE
+# iterator's fetch counter and that lane MEASURES it at the break (and reads 0
+# after close, which is its closure proof). Do not "port" those assertions here;
+# there is no signal behind them in this binding.
 STREAM_BUFFER_SIZE = 2
 
 # ---------------------------------------------------------------------------
@@ -509,21 +526,21 @@ def test_abandoned_stream_is_really_abandoned(leak_db):
         "iterator instead of abandoning it mid-stream (issues #1230, #1465)"
     )
 
-    # THE IN-FLIGHT BOUND (issue #1465 round 5), every term MEASURED or
-    # configured -- never hardcoded: the producer is at most STREAM_BUFFER_SIZE
-    # rows ahead of the consumer, so an abandonment at STREAM_ROWS can have
-    # produced at most STREAM_ROWS + STREAM_BUFFER_SIZE rows. If that ceiling is
-    # not strictly below the fixture's measured row count, the producer may have
-    # finished and the budget below would measure a drained stream -- which is
-    # exactly what the default buffer_size=1024 did.
-    produced_ceiling = STREAM_ROWS + STREAM_BUFFER_SIZE
-    assert produced_ceiling < total, (
-        f"at most {produced_ceiling} of {total} rows can have been produced when "
-        f"the loop breaks (STREAM_ROWS={STREAM_ROWS} consumed + "
-        f"buffer_size={STREAM_BUFFER_SIZE} of channel capacity), which is not "
-        f"below the fixture's {total} rows: the native producer may run to "
-        "completion before the break, leaving nothing in flight to abandon "
-        "(issue #1465)"
+    # THE OUTER-CHANNEL BOUND (issue #1465 rounds 5-6). A CONFIGURATION property:
+    # every term is a configured constant or the measured row count, so what it
+    # proves is that the query->consumer channel cannot swallow the whole fixture
+    # -- i.e. the query task is still parked in `tx.send` holding the remainder
+    # when the loop breaks. It does NOT prove what the reader-level scan was doing;
+    # see STREAM_BUFFER_SIZE for why (MAX_INFLIGHT_BATCH_ROWS = 1024, independent
+    # of buffer_size).
+    channel_ceiling = STREAM_ROWS + STREAM_BUFFER_SIZE
+    assert channel_ceiling < total, (
+        f"the query->consumer channel can hold at most {channel_ceiling} of "
+        f"{total} rows before the break (STREAM_ROWS={STREAM_ROWS} consumed + "
+        f"buffer_size={STREAM_BUFFER_SIZE} of capacity), which is not below the "
+        f"fixture's {total} rows: raise the fixture or lower buffer_size, or the "
+        "query task drains into the channel and returns, leaving nothing "
+        "outstanding to abandon (issue #1465)"
     )
 
     # And the consumer really did stop at STREAM_ROWS: `rows_received` is
