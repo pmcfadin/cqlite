@@ -95,17 +95,34 @@ failure message **name the substring it expected** and print the full transcript
 distinguishable from a real defect at a glance by the person reading the failure. This is a
 reduction, not an elimination, and it is the honest cost of D1's choice over a product-side marker.
 
-## D6. Why the envelope is bounded — and it is not a free choice
+## D6. Why the envelope is bounded — and the FALSE PREMISE this section originally gave (round 7)
 
-`.config/nextest.toml` sets `slow-timeout = { period = "60s", terminate-after = 4 }`: a **240s hard
-kill**. A literally unbounded loop under nextest therefore does not produce an honest diagnostic — it
-produces a **nextest kill**, which is a strictly *worse* message than the one being removed. So the
-test **owns its own total budget**, tracked across stages and set safely under 240s, and always emits
-its own attributed failure before the harness can kill it.
+**CORRECTION. The first version of this section asserted that `.config/nextest.toml`'s
+`slow-timeout = { period = "60s", terminate-after = 4 }` imposes a 240s hard kill on this test, and
+required the total budget to sit "safely under 240s". THAT IS FALSE FOR THIS TEST, and it was the
+lead's error, asserted in the original design note without being checked.** Verified:
 
-Raising the slow-timeout for this binary was considered and rejected: it would put a gate-read
-config file in the diff (voiding `--delta` re-certification, which fails closed on config) to buy
-headroom that only matters on a run that is already failing.
+* `scripts/agent-gate.sh`'s `cli-tests` component runs **plain `cargo test --package cqlite-cli`**;
+* the gate's only `cargo nextest run` is `--package cqlite-core`;
+* `ci.yml`'s nextest lanes are "Core integration" only.
+
+**Nothing anywhere runs `cqlite-cli`'s tests under nextest**, so that slow-timeout never applies to
+`graceful_shutdown_tests`. The cost of the error was not theoretical: squeezing the budget against a
+limit that does not exist is what forced the sibling test's promised per-stage allowances to exceed
+its total, which in turn produced the "declared exception" that consumed three review rounds and a
+roborev blocker (a later stage could be starved into a FALSE failure while the product worked — the
+exact flake class this change exists to remove).
+
+**What survives the correction, and why the budget is still bounded.** Because no harness timeout
+applies, the test's own total budget is now the ONLY thing that stops a genuinely wedged run from
+hanging a gate component indefinitely. So the test still owns a total budget and still emits its own
+attributed failure — but that budget is sized so that **every stage's promised allowance fits inside
+it**, rather than being compressed under a fictional ceiling. The self-imposed bound is load-bearing
+for a different reason than originally stated: not to beat a harness to the punch, but to be the only
+bound there is.
+
+Raising nextest's slow-timeout was considered and rejected in the original draft as a way to buy
+headroom. That rejection is now moot rather than right: there was no ceiling to raise.
 
 ## D7. Drain stderr
 

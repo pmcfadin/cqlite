@@ -153,17 +153,52 @@ loop "did not use the threshold-flushing path", neither of which a timeout estab
 - **WHEN** the host is contended and the threshold-flushing path is working
 - **THEN** the sibling test SHALL NOT fail on any of its three waits
 
-### Requirement: The test owns a total budget below the harness hard-kill
+### Requirement: The test owns a total budget that every stage's allowance fits inside
 
-Each test SHALL track its elapsed time across stages against a total budget set below nextest's
-configured hard kill (`.config/nextest.toml`: `slow-timeout` period `60s`, `terminate-after` 4 = **240s**),
-and SHALL emit its own attributed failure rather than being killed by the harness. Per-stage caps SHALL
-be chosen so their sum cannot exceed that total budget.
+Each test SHALL track its elapsed time across stages against a total budget, and SHALL emit its own
+attributed failure on exhausting it.
+
+**This requirement previously required that budget to sit "below nextest's configured hard kill
+(240s)". That premise was FALSE for this test and is withdrawn** — `cli-tests` runs plain
+`cargo test`, and nothing in the gate or CI runs `cqlite-cli` under nextest, so no harness timeout
+applies (see `design.md` D6). Because no harness bound exists, this self-imposed budget is the ONLY
+bound on a wedged run, and it SHALL therefore still exist.
+
+The total budget SHALL be large enough that **the sum of every stage's declared maximum fits inside
+it**, and that property SHALL be asserted. A stage's declared maximum SHALL include any legitimate
+extension of that stage (notably the progress-checked poll's stall-window extension); an extension
+that is not counted in the declared maximum makes the cap a number rather than a bound.
+
+No stage SHALL be starved by an earlier stage's legitimate consumption. Starvation of a later stage
+while the product is working is a FALSE failure of the same class this change exists to remove.
+
+#### Scenario: every allowance fits
+- **WHEN** the per-stage declared maxima are summed, including progress extensions
+- **THEN** the sum SHALL be within the total budget, and a unit test SHALL assert it
+
+#### Scenario: a slow but working host
+- **WHEN** several stages legitimately run slowly while the product behaves correctly
+- **THEN** no later stage SHALL be starved into failing
 
 #### Scenario: everything is slow
 - **WHEN** stages are slow enough that the total budget is reached
 - **THEN** the test SHALL fail with its own attributed message naming the stage that consumed the budget
-- **AND** SHALL NOT be terminated by the harness slow-timeout instead
+
+### Requirement: A stage's declared cap is its actual maximum, by construction
+
+A stage SHALL own a single deadline computed once when its budget is derived, and every wait within
+that stage SHALL derive its timeout from that deadline. There SHALL be exactly one place that computes
+a per-wait timeout.
+
+**Rationale, from four observed instances.** Where each wait site separately subtracts elapsed time,
+one site always omits it: roborev found a stage exceeding its cap at four separate sites across two
+review rounds (pipe collection given a fresh full allowance, the read-side spawn excluded from the
+stage's own timing, and the progress extension omitted from the cap sum). Those are one defect, and
+the per-site fix does not close it.
+
+#### Scenario: two waits in one stage
+- **WHEN** a stage performs more than one bounded wait
+- **THEN** their combined elapsed time SHALL NOT exceed the stage's declared maximum
 
 ### Requirement: The new oracle is observed to red on a genuinely broken handler
 
