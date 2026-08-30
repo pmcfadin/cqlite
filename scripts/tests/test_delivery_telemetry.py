@@ -610,8 +610,7 @@ class SliceDeliveryTests(unittest.TestCase):
         self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
 
     def _ghfields(self, tmp, closed_at, merged_at="2026-06-10T03:00:00Z", name="ghfields.json",
-                  state_reason="", closes_issues=(),
-                  issue_url="https://github.com/pmcfadin/cqlite/issues/3393"):
+                  state_reason="", pr_closes_this_issue=False):
         p = tmp / name
         fields = {
             "created_at": "2026-06-10T00:00:00Z",
@@ -623,10 +622,8 @@ class SliceDeliveryTests(unittest.TestCase):
         }
         if state_reason is not _OMIT:
             fields["state_reason"] = state_reason
-        if closes_issues is not _OMIT:
-            fields["closes_issues"] = closes_issues
-        if issue_url is not _OMIT:
-            fields["issue_url"] = issue_url
+        if pr_closes_this_issue is not _OMIT:
+            fields["pr_closes_this_issue"] = pr_closes_this_issue
         p.write_text(json.dumps(fields))
         return str(p)
 
@@ -841,6 +838,65 @@ class SliceDeliveryTests(unittest.TestCase):
                     ledger, self._ghfields(tmp, None, state_reason=never_closed), "--slice")))
                 self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
 
+    def test_a_slice_pr_closes_nothing_so_the_window_guard_does_not_fire(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            self.assertEqual(0, dt.main(self._rec_argv(
+                ledger, self._ghfields(tmp, None, pr_closes_this_issue=False), "--slice")))
+            self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
+
+    def test_record_refuses_an_unmeasured_pr_closes_this_issue(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, pr_closes_this_issue=_OMIT),
+                    "--slice"))
+            self.assertIn("pr_closes_this_issue", str(cm.exception))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_refuses_a_non_boolean_pr_closes_this_issue(self):
+        """A bool cannot half-agree with itself, but a truthy/falsy STAND-IN can still be
+        unmeasured input taking the affirmative branch — the shape this whole seam kept
+        re-finding. Only a real bool is an answer."""
+        for bogus in (None, 0, 1, "", "false", "true", [], {}):
+            with self.subTest(value=bogus), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(
+                        ledger, self._ghfields(tmp, None, pr_closes_this_issue=bogus),
+                        "--slice"))
+                self.assertIn("must be a boolean", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_issue_identity_is_the_full_triple_and_rejects_whitespace(self):
+        """Unit-level, because this is where the recurring defect lived. Identity is
+        (owner, repo, number) — a number alone collides across repositories — and a value
+        with surrounding whitespace is UNRECOGNISED, never normalised: a lenient reader plus
+        a strict consumer is how a non-match becomes indistinguishable from a correct
+        non-match, which fails OPEN."""
+        self.assertEqual(dt._issue_identity("https://github.com/pmcfadin/cqlite/issues/3393"),
+                         ("pmcfadin", "cqlite", 3393))
+        # same number, different repository -> different identity
+        self.assertNotEqual(
+            dt._issue_identity("https://github.com/other/repo/issues/3393"),
+            dt._issue_identity("https://github.com/pmcfadin/cqlite/issues/3393"))
+        for bad in (" https://github.com/pmcfadin/cqlite/issues/3393",
+                    "https://github.com/pmcfadin/cqlite/issues/3393 ",
+                    "https://github.com/pmcfadin/cqlite/issues/3393\n",
+                    "https://github.com/pmcfadin/cqlite/pull/3393",
+                    "http://github.com/pmcfadin/cqlite/issues/3393",
+                    "https://example.com/pmcfadin/cqlite/issues/3393",
+                    "https://github.com/cqlite/issues/3393",
+                    "https://github.com/pmcfadin/cqlite/issues/",
+                    "https://github.com/pmcfadin/cqlite/issues/3393#c1",
+                    "3393", "", None, 3393, [], {}):
+            with self.subTest(value=bad):
+                self.assertIsNone(dt._issue_identity(bad))
+
     def test_record_refused_in_the_merge_to_autoclose_window(self):
         """The propagation window: GitHub records an auto-close AFTER the merge, so for a few
         seconds an ordinary COMPLETED delivery presents EXACTLY as a never-closed issue —
@@ -851,132 +907,14 @@ class SliceDeliveryTests(unittest.TestCase):
             with self.subTest(slice_flag=bool(extra)), tempfile.TemporaryDirectory() as d:
                 tmp = Path(d)
                 ledger = tmp / "ledger.jsonl"
-                gh = self._ghfields(tmp, None, closes_issues=["https://github.com/pmcfadin/cqlite/issues/3393"])
+                gh = self._ghfields(tmp, None, pr_closes_this_issue=True)
                 with self.assertRaises(SystemExit) as cm:
                     dt.main(self._rec_argv(ledger, gh, *extra))
                 msg = str(cm.exception)
-                self.assertIn("CLOSES https://github.com/pmcfadin/cqlite/issues/3393", msg)
+                self.assertIn("CLOSES issue #3393", msg)
                 self.assertIn("auto-close", msg)
                 self.assertIn("WITHOUT --slice", msg)
                 self.assertIn("3550", msg)
-                self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_a_slice_pr_closes_nothing_so_the_window_guard_does_not_fire(self):
-        """The discriminator must not block a real slice. Verified against reality: PRs
-        #3407/#3429/#3467 (the three genuine #3393 slices) each declare no closing issue,
-        while PR #3565 (a completed delivery) declares #3550."""
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            self.assertEqual(0, dt.main(self._rec_argv(
-                ledger, self._ghfields(tmp, None, closes_issues=[]), "--slice")))
-            self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
-
-    def test_window_guard_is_repository_scoped_not_number_scoped(self):
-        """Issue NUMBERS are repository-scoped. A PR closing other-repo#3393 must NOT be read
-        as closing THIS repo's #3393 — that would refuse a genuine slice. Comparison is by
-        URL, GitHub's own global identity; a number-scoped comparison fails this."""
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            self.assertEqual(0, dt.main(self._rec_argv(
-                ledger, self._ghfields(
-                    tmp, None,
-                    closes_issues=["https://github.com/other/repo/issues/3393"]),
-                "--slice")))
-            self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
-
-    def test_record_refuses_a_malformed_issue_url(self):
-        """issue_url is the left operand of the identity test. Absent or malformed, the
-        comparison silently cannot match -> the window guard is off -> a false slice record.
-        Same class as the closes_issues blocker, one branch over."""
-        for bogus in (_OMIT, None, "", "   ", 0, 3393, [], {}):
-            with self.subTest(issue_url=bogus), tempfile.TemporaryDirectory() as d:
-                tmp = Path(d)
-                ledger = tmp / "ledger.jsonl"
-                with self.assertRaises(SystemExit) as cm:
-                    dt.main(self._rec_argv(
-                        ledger, self._ghfields(tmp, None, closes_issues=[_U],
-                                               issue_url=bogus), "--slice"))
-                self.assertIn("issue_url", str(cm.exception))
-                self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_record_refuses_an_issue_url_that_names_a_different_issue(self):
-        """The guard compares issue_url against the PR's closing refs, so a well-formed URL
-        naming ANOTHER issue never matches — silently disabling the guard and recording a
-        completed delivery as a slice. It is the likeliest --from-json copy/paste error, and
-        it is indistinguishable from a malformed URL in effect, so it must be bound to
-        --issue rather than merely well-formed."""
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            with self.assertRaises(SystemExit) as cm:
-                dt.main(self._rec_argv(
-                    ledger, self._ghfields(
-                        tmp, None, closes_issues=[_U],
-                        issue_url="https://github.com/pmcfadin/cqlite/issues/9999"),
-                    "--slice"))
-            msg = str(cm.exception)
-            self.assertIn("identifies issue #9999", msg)
-            self.assertIn("--issue is 3393", msg)
-            self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_record_refuses_non_canonical_issue_urls_on_either_side(self):
-        """An unrecognised URL never matches, so it disables the guard rather than failing
-        it. Both operands must be canonical GitHub issue URLs."""
-        bad = ("https://github.com/pmcfadin/cqlite/pull/3393",      # a PR, not an issue
-               "https://example.com/pmcfadin/cqlite/issues/3393",   # wrong host
-               "http://github.com/pmcfadin/cqlite/issues/3393",     # not https
-               "https://github.com/cqlite/issues/3393",             # missing owner segment
-               "https://github.com/pmcfadin/cqlite/issues/",        # no number
-               "https://github.com/pmcfadin/cqlite/issues/3393#c1", # trailing fragment
-               "3393")
-        for u in bad:
-            with self.subTest(side="issue_url", url=u), tempfile.TemporaryDirectory() as d:
-                tmp = Path(d)
-                ledger = tmp / "ledger.jsonl"
-                with self.assertRaises(SystemExit) as cm:
-                    dt.main(self._rec_argv(
-                        ledger, self._ghfields(tmp, None, closes_issues=[_U], issue_url=u),
-                        "--slice"))
-                self.assertIn("issue_url", str(cm.exception))
-                self.assertFalse(ledger.exists() and ledger.read_text().strip())
-            with self.subTest(side="closes_issues", url=u), tempfile.TemporaryDirectory() as d:
-                tmp = Path(d)
-                ledger = tmp / "ledger.jsonl"
-                with self.assertRaises(SystemExit) as cm:
-                    dt.main(self._rec_argv(
-                        ledger, self._ghfields(tmp, None, closes_issues=[u]), "--slice"))
-                self.assertIn("closes_issues", str(cm.exception))
-                self.assertFalse(ledger.exists() and ledger.read_text().strip())
-
-    def test_window_guard_ignores_an_unrelated_closing_reference(self):
-        """A PR closing some OTHER issue is not evidence about this one."""
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            self.assertEqual(0, dt.main(self._rec_argv(
-                ledger, self._ghfields(tmp, None,
-                       closes_issues=["https://github.com/pmcfadin/cqlite/issues/9999"]),
-                "--slice")))
-            self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
-
-    def test_record_refuses_a_malformed_closes_issues_value(self):
-        """Presence is not a measurement. `x or []` folds null/0/false/""/{} onto the
-        permissive "closes nothing", and the RAW `gh` shape [{"number": N}] does the same
-        while looking right — it is the likeliest hand-built --from-json mistake, since the
-        natural way to build that file is to paste `gh pr view --json` output. Every one of
-        these silently filed the false slice record the guard exists to prevent, and a
-        str/int tracebacked out of the `in` test."""
-        for bogus in (None, 0, False, "", {}, [{"url": _U}], "x", 3393, [True],
-                      [None], [3393], [""], ["   "]):
-            with self.subTest(closes_issues=bogus), tempfile.TemporaryDirectory() as d:
-                tmp = Path(d)
-                ledger = tmp / "ledger.jsonl"
-                with self.assertRaises(SystemExit) as cm:
-                    dt.main(self._rec_argv(
-                        ledger, self._ghfields(tmp, None, closes_issues=bogus), "--slice"))
-                self.assertIn("closes_issues", str(cm.exception))
                 self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
     def test_github_fields_refuses_a_malformed_closing_issues_reference(self):
@@ -1002,16 +940,6 @@ class SliceDeliveryTests(unittest.TestCase):
                     with self.assertRaises(SystemExit) as cm:
                         dt._github_fields(1, 2)
                 self.assertIn("closingIssuesReferences", str(cm.exception))
-
-    def test_record_refuses_an_unmeasured_closes_issues(self):
-        with tempfile.TemporaryDirectory() as d:
-            tmp = Path(d)
-            ledger = tmp / "ledger.jsonl"
-            with self.assertRaises(SystemExit) as cm:
-                dt.main(self._rec_argv(
-                    ledger, self._ghfields(tmp, None, closes_issues=_OMIT), "--slice"))
-            self.assertIn("closingIssuesReferences", str(cm.exception))
-            self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
     def test_github_fields_refuses_an_absent_closing_issues_references(self):
         """`.get` would map an absent field to None -> "closes nothing" -> the window guard
@@ -1457,10 +1385,9 @@ class GhPathTests(unittest.TestCase):
         # the live path must ALWAYS supply state_reason: --slice refuses when the key is
         # absent, so omitting it here would make every real slice stamp fail (issue #3550)
         self.assertEqual(fields["state_reason"], "COMPLETED")
-        self.assertEqual(fields["closes_issues"],
-                         ["https://github.com/pmcfadin/cqlite/issues/1234"])
-        self.assertEqual(fields["issue_url"],
-                         "https://github.com/pmcfadin/cqlite/issues/1234")
+        # the live path DERIVES the boolean from both authoritative queries; the operands
+        # never leave this function, so they cannot be made to disagree
+        self.assertIs(fields["pr_closes_this_issue"], True)
 
     def test_github_fields_refuses_an_absent_state_reason_rather_than_nulling_it(self):
         """A `.get` would map an ABSENT stateReason (a gh/API change, an older gh) to None,

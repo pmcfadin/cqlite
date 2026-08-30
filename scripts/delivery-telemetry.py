@@ -339,21 +339,27 @@ def _require_full_timestamp(value: str, field: str) -> None:
                          f"parses but cannot be differenced against one that has an offset)")
 
 
-_ISSUE_URL_RE = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)$")
+# \Z, not $: Python's `$` also matches immediately BEFORE a trailing newline, so a value
+# ending "\n" would be accepted here and then compared raw — the lenient-reader/strict-
+# consumer split that fails OPEN. \Z is the true end of string.
+_ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/\s]+)/([^/\s]+)/issues/(\d+)\Z")
 
 
-def _issue_url_number(value: str):
-    """Return the issue number a canonical GitHub issue URL identifies, else None.
+def _issue_identity(value):
+    """Return a canonical ``(owner, repo, number)`` identity, or None if unrecognised.
 
-    The window guard (issue #3550) compares this issue's URL against the PR's closing
-    references. A non-empty STRING is not enough for either side: an unrecognised or
-    mismatched URL simply never matches, which silently disables the guard and records a
-    completed delivery as a slice — the same shape as every other defect on this seam, one
-    level up. So both sides must be recognisable AND the left side must identify the issue
-    actually being recorded.
+    Deliberately does NOT strip: a value with surrounding whitespace is UNRECOGNISED, not
+    normalised. Normalising here is the defect that recurred throughout issue #3550 — a
+    lenient reader accepts a value, a strict consumer then fails to match it, and a
+    non-match is indistinguishable from a correct non-match, so the guard fails OPEN.
+
+    Identity is the full triple, never the number alone: issue numbers are repository-scoped,
+    so `other/repo#3393` and `pmcfadin/cqlite#3393` are different issues that share a number.
     """
-    m = _ISSUE_URL_RE.match(value.strip())
-    return int(m.group(1)) if m else None
+    if not isinstance(value, str):
+        return None
+    m = _ISSUE_URL_RE.match(value)
+    return (m.group(1), m.group(2), int(m.group(3))) if m else None
 
 
 def _assert_never_closed(gh_fields: dict, issue: int) -> None:
@@ -452,17 +458,19 @@ def _github_fields(issue: int, pr: int) -> dict:
             f"error: `gh pr view {pr}` returned closingIssuesReferences of type "
             f"{type(refs).__name__}, expected a list — refusing rather than reading an "
             f"unparseable reply as 'closes nothing' (issue #3550)")
+    closing_identities = []
     for ref in refs:
-        # The URL, not the number: an issue NUMBER is REPOSITORY-SCOPED, so a PR closing
-        # other-repo#3393 would collide with this repo's #3393 and wrongly refuse a genuine
-        # slice. The url is GitHub's own global identity and needs no parsing or extra call.
-        if not (isinstance(ref, dict)
-                and isinstance(ref.get("url"), str)
-                and ref["url"].strip()):
+        # Identity by (owner, repo, number), never by number: issue numbers are
+        # repository-scoped, so a PR closing other-repo#N must not read as closing this
+        # repo's #N. Refuse an unparseable entry rather than discard it — discarding shrinks
+        # the set toward "closes nothing", the permissive answer.
+        identity = _issue_identity(ref.get("url")) if isinstance(ref, dict) else None
+        if identity is None:
             raise SystemExit(
-                f"error: `gh pr view {pr}` returned a closingIssuesReferences entry with no "
-                f"'url': {ref!r} — refusing rather than discarding it, which would read as "
-                f"'closes nothing' (issue #3550)")
+                f"error: `gh pr view {pr}` returned a closingIssuesReferences entry whose "
+                f"'url' is not a canonical GitHub issue URL: {ref!r} — refusing rather than "
+                f"discarding it, which would read as 'closes nothing' (issue #3550)")
+        closing_identities.append(identity)
     # Every field we asked for must have come back. `stateReason` in particular is the sole
     # never-closed-vs-REOPENED signal, so its absence must be a named refusal here rather
     # than a None that reads downstream as "never closed" (issue #3550).
@@ -472,6 +480,11 @@ def _github_fields(issue: int, pr: int) -> dict:
         raise SystemExit(
             f"error: `gh issue view {issue}` returned no {', '.join(missing)} field(s) — "
             f"refusing rather than treating an unmeasured field as a value (issue #3550)")
+    if _issue_identity(issue_json["url"]) is None:
+        raise SystemExit(
+            f"error: `gh issue view {issue}` returned a 'url' that is not a canonical GitHub "
+            f"issue URL: {issue_json['url']!r} — refusing rather than comparing an "
+            f"unrecognised identity, which could never match (issue #3550)")
     labels = [l.get("name") for l in issue_json.get("labels", []) if l.get("name")]
     prio_labels = [l for l in labels if re.fullmatch(r"P[0-3]", l)]
     # one-priority invariant: a multi-priority issue is a labeling error — surface it
@@ -501,8 +514,6 @@ def _github_fields(issue: int, pr: int) -> dict:
         # defect that guard exists to prevent. The presence check above makes it a clean
         # refusal instead.
         "state_reason": issue_json["stateReason"],
-        # This issue's own global identity, compared against closes_issues (see below).
-        "issue_url": issue_json["url"],
         "pr_opened_at": pr_json["createdAt"],
         "merged_at": pr_json["mergedAt"],
         # The issues THIS PR declares it closes ("Closes #N"). A SLICE pr by definition
@@ -511,7 +522,12 @@ def _github_fields(issue: int, pr: int) -> dict:
         # (issue #3550). Measured, not timed: during that window closed_at is null AND
         # stateReason is empty, so both of the other signals look exactly like a never-closed
         # issue and only this one tells the truth.
-        "closes_issues": [ref["url"] for ref in refs],
+        # ONE BOOLEAN, not two operands. Both sides are derived here from the SAME two
+        # authoritative queries, so they cannot disagree. Passing the URLs through the
+        # --from-json seam instead put two values that MUST AGREE in an operator's hands,
+        # and every mismatch failed OPEN (a non-match silently disables the guard rather
+        # than failing it) — six successive defects on that seam before this collapse.
+        "pr_closes_this_issue": _issue_identity(issue_json["url"]) in closing_identities,
         "priority": priority,
         "routing": routing,
     }
@@ -627,70 +643,30 @@ def build_record(args, gh_fields: dict) -> dict:
         # does not lie: a slice pr closes NOTHING, because its issue deliberately stays open.
         # Checked regardless of --slice, and it is NOT a timing heuristic — no clock, no
         # threshold, just an authoritative field already on the PR query.
-        if "closes_issues" not in gh_fields:
+        # ONE MEASUREMENT, affirmatively required. Everything this guard needs is "did this
+        # PR declare it closes this issue" — a single fact both sides of which are derived in
+        # _github_fields from the same two authoritative queries. It was previously TWO
+        # operands (issue_url + closes_issues) carried across the --from-json seam, where an
+        # operator could make them disagree; every mismatch failed OPEN, because a non-match
+        # and a correct non-match are the same observation. Six consecutive defects on that
+        # seam (closed_at truthiness, stateReason x3, closes_issues value, issue_url binding)
+        # were all that one shape, so the operands were removed rather than validated a
+        # seventh time. A bool cannot half-agree with itself.
+        if "pr_closes_this_issue" not in gh_fields:
             raise SystemExit(
-                f"error: the PR's closingIssuesReferences is required to tell a slice from a "
-                f"completed delivery whose auto-close has not propagated yet (both show a "
-                f"null closed_at), and it was not supplied — an unmeasured signal is never "
-                f"read as 'closes nothing' (issue #3550)")
-        # Presence is not enough: the VALUE must be a measurement. This is the FOURTH place in
-        # this file that has to say so (closed_at, stateReason's type, stateReason's value, and
-        # here), because `x or []` folds null/0/false/""/{} onto the permissive answer "closes
-        # nothing" and the raw `gh` shape [{"number": N}] — the likeliest hand-built
-        # --from-json mistake, since the natural way to make that file is to paste `gh pr view
-        # --json` output — would do the same while LOOKING right. Both silently file the false
-        # slice record this guard exists to prevent, and a str/int value tracebacks out of the
-        # `in` test. Affirmative or refuse; no `or []`.
-        closes = gh_fields["closes_issues"]
-        if not isinstance(closes, list):
+                "error: 'pr_closes_this_issue' is required to tell a slice from a completed "
+                "delivery whose auto-close has not propagated yet (both show a null "
+                "closed_at) — an unmeasured signal is never read as 'closes nothing' "
+                "(issue #3550)")
+        closes_this = gh_fields["pr_closes_this_issue"]
+        if not isinstance(closes_this, bool):
             raise SystemExit(
-                f"error: 'closes_issues' must be a list of issue URLs, got {closes!r} "
-                f"({type(closes).__name__}) — a non-list is unmeasured, never 'closes "
-                f"nothing'. Note the raw `gh pr view --json closingIssuesReferences` shape is "
-                f"a list of OBJECTS; this seam wants their 'url' values (issue #3550)")
-        for url in closes:
-            if not isinstance(url, str) or not url.strip():
-                raise SystemExit(
-                    f"error: 'closes_issues' must contain issue URLs, got {url!r} "
-                    f"({type(url).__name__}) — the raw `gh` shape [{{\"url\": ...}}] is a "
-                    f"list of objects and must be reduced to [url] (issue #3550)")
-            if _issue_url_number(url) is None:
-                raise SystemExit(
-                    f"error: 'closes_issues' entry {url!r} is not a canonical GitHub issue "
-                    f"URL (https://github.com/<owner>/<repo>/issues/<n>) — an unrecognised "
-                    f"URL would never match and would silently disable the guard, recording "
-                    f"a completed delivery as a slice (issue #3550)")
-        # Compared by URL, never by NUMBER: an issue number is REPOSITORY-SCOPED, so a PR
-        # closing other-repo#<N> would collide with this repo's #<N> and wrongly refuse a
-        # genuine slice. The url is GitHub's own global identity.
-        if "issue_url" not in gh_fields:
+                f"error: 'pr_closes_this_issue' must be a boolean, got {closes_this!r} "
+                f"({type(closes_this).__name__}) — a truthy/falsy stand-in is unmeasured "
+                f"input, never an affirmative answer (issue #3550)")
+        if closes_this:
             raise SystemExit(
-                "error: 'issue_url' is required to compare this issue against the PR's "
-                "closing references by GLOBAL identity — issue numbers are repository-scoped "
-                "and collide across repos (issue #3550)")
-        issue_url = gh_fields["issue_url"]
-        if not isinstance(issue_url, str) or not issue_url.strip():
-            raise SystemExit(
-                f"error: 'issue_url' must be a non-empty string, got {issue_url!r} "
-                f"({type(issue_url).__name__}) (issue #3550)")
-        url_issue = _issue_url_number(issue_url)
-        if url_issue is None:
-            raise SystemExit(
-                f"error: 'issue_url' {issue_url!r} is not a canonical GitHub issue URL "
-                f"(https://github.com/<owner>/<repo>/issues/<n>) — an unrecognised URL never "
-                f"matches, which silently disables the guard rather than failing it "
-                f"(issue #3550)")
-        # BOUND to --issue: a well-formed URL naming a DIFFERENT issue is the same silent
-        # failure as a malformed one, and it is the likeliest --from-json copy/paste error.
-        if url_issue != args.issue:
-            raise SystemExit(
-                f"error: 'issue_url' identifies issue #{url_issue} but --issue is "
-                f"{args.issue} ({issue_url!r}) — the guard compares this URL against the PR's "
-                f"closing references, so a mismatched one would never match and would record "
-                f"a completed delivery as a slice (issue #3550)")
-        if issue_url in closes:
-            raise SystemExit(
-                f"error: PR #{args.pr} declares it CLOSES {issue_url}, so this is a "
+                f"error: PR #{args.pr} declares it CLOSES issue #{args.issue}, so this is a "
                 f"completed delivery, not a slice — its closed_at is null only because "
                 f"GitHub has not recorded the auto-close yet (it lands after the merge). "
                 f"Re-run once the close is recorded and stamp it WITHOUT --slice; passing "
