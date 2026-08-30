@@ -441,39 +441,38 @@ def _rows_by_id(database, projection: str) -> dict:
 # =============================================================================
 
 
-def kp(label, rank) -> dict:
-    """The Python projection of one ``key_part`` UDT value.
+def kp(label, rank) -> cqlite.Udt:
+    """The Python projection of one ``key_part`` UDT value (``udt_to_py``).
 
-    ``udt_to_py`` emits the two metadata keys plus every schema field, including
-    fields whose value is NULL (they arrive as ``None``, matching the golden's
-    ``"label": null``).
+    Since issue #3504 a UDT is a ``cqlite.Udt`` carrying ``type_name`` and
+    ``keyspace`` OUT OF BAND, with ``fields`` holding the declared fields and
+    nothing else — no injected ``_type``/``_keyspace`` entries, so a field of
+    either name could not displace them. Every schema field is present,
+    including one whose value is NULL (it arrives as ``None``, matching the
+    golden's ``"label": null``).
     """
-    return {
-        "_type": "key_part",
-        "_keyspace": KEYSPACE,
-        "label": label,
-        "rank": rank,
-    }
+    return cqlite.Udt("key_part", KEYSPACE, {"label": label, "rank": rank})
 
 
-def kp_hashable(label, rank) -> frozenset:
+def kp_hashable(label, rank) -> cqlite.Udt:
     """The HASHABLE projection of one ``key_part`` UDT value.
 
-    ``value_to_hashable_key``'s ``Udt`` arm emits a ``frozenset`` of
-    ``(field_name, value)`` pairs — the two metadata fields plus every schema
-    field, with a NULL field arriving as ``None`` from its
-    ``None => py.None()`` branch. Deliberately DIFFERENT from :func:`kp`, which
-    is ``udt_to_py``'s ``dict``: the two functions are separate code paths and
-    conflating them is what made #3500 invisible.
+    ``value_to_hashable_key``'s ``Udt`` arm. Kept as a SEPARATE helper from
+    :func:`kp` even though the two now return equal objects, because they remain
+    separate code paths and conflating them in the tests is what made #3500
+    invisible. That they AGREE is asserted, not assumed, by
+    :func:`test_the_two_udt_projections_agree_for_a_scalar_field_udt` below.
+
+    Why they agree, and the precise scope of it: both paths call the one
+    ``build_udt``, differing ONLY in the per-field converter (``value_to_py`` vs
+    ``value_to_hashable_key``). ``key_part``'s fields are a ``text`` and an
+    ``int``, whose two conversions are identical, so for THIS UDT the outputs
+    coincide. They would NOT coincide for a UDT with a collection field, where
+    only the hashable path projects the field value — a shape this fixture cannot
+    reach, because a collection field inside a frozen UDT decodes to
+    ``Value::Blob`` and arrives as ``bytes`` on both paths (measured on #3504).
     """
-    return frozenset(
-        {
-            ("_type", "key_part"),
-            ("_keyspace", KEYSPACE),
-            ("label", label),
-            ("rank", rank),
-        }
-    )
+    return kp(label, rank)
 
 
 def _component(payload) -> bytes:
