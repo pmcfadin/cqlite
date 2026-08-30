@@ -568,6 +568,8 @@ fn run_lane(egress: Egress) {
     };
     let mut failures: Vec<String> = Vec::new();
     let mut census: Vec<String> = Vec::new();
+    let mut containers_compared = 0usize;
+    let mut containers_refused = 0usize;
 
     for case in CASES {
         let qualified = format!("{}.{}", case.keyspace, case.table);
@@ -666,15 +668,22 @@ fn run_lane(egress: Egress) {
             ));
             continue;
         }
+        containers_compared += report.container_cells;
+        containers_refused += report.ambiguous_container_cells;
         if report.diffs.is_empty() {
             census.push(format!(
-                "  {qualified}: {} rows, {} cells compared{}{}",
+                "  {qualified}: {} rows, {} cells compared ({} of them containers){}{}",
                 expected.len(),
                 report.compared_cells,
-                if report.skipped_container_cells > 0 {
+                report.container_cells,
+                // A refusal is a DECLARED GAP in the same style as `skip_columns`:
+                // named at run time, never left as a bare counter.
+                if report.ambiguous_container_cells > 0 {
                     format!(
-                        ", {} container cells not compared",
-                        report.skipped_container_cells
+                        ", DECLARED GAP: {} container cell(s) REFUSED as \
+                         CSV-unrepresentable: {}",
+                        report.ambiguous_container_cells,
+                        report.ambiguity_reasons.join("; ")
                     )
                 } else {
                     String::new()
@@ -708,6 +717,20 @@ fn run_lane(egress: Egress) {
     for line in &census {
         eprintln!("{line}");
     }
+    // A narrowed lane DECLARES its narrowing at run time (CLAUDE.md), and states
+    // it affirmatively: `0 REFUSED` is a measurement that the ambiguity scan ran
+    // and found nothing, which a bare absent line could never convey. Only the
+    // CSV lane has an ambiguity scan to report — JSON carries its own types, so
+    // there is nothing there to refuse and claiming `0 REFUSED` would advertise a
+    // check that does not exist.
+    let refusals = match egress {
+        Egress::Csv => format!(", {containers_refused} REFUSED as CSV-unrepresentable"),
+        Egress::Json => String::new(),
+    };
+    eprintln!(
+        "AD2 {format} container coverage: {containers_compared} collection/UDT cell(s) \
+         value-compared{refusals}"
+    );
     assert!(
         failures.is_empty(),
         "AD2 {format} egress value parity failed for {} case(s):\n{}",

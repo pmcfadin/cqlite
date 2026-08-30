@@ -20,7 +20,7 @@
 //! renders a value there (or drops a column the golden has) the comparison fails
 //! and names the column.
 
-use super::{canon_scalar, Egress, Row};
+use super::{canon_scalar, csv_container, Egress, Row};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -32,9 +32,17 @@ pub struct Report {
     /// Cells actually value-compared. Zero on a non-empty table is a failure the
     /// caller must treat as such (a comparison that compared nothing is vacuous).
     pub compared_cells: usize,
-    /// Container-valued cells the CSV lane deliberately did not compare (see the
-    /// type-level rule in the parent module).
-    pub skipped_container_cells: usize,
+    /// How many of [`Self::compared_cells`] were collection/UDT cells. Reported
+    /// affirmatively in the census so "containers are covered" is a measurement
+    /// rather than an assumption.
+    pub container_cells: usize,
+    /// Container cells REFUSED because the golden's own content cannot survive
+    /// the unquoted CSV rendering (see `csv_container::ambiguity`). Counted, and
+    /// named in [`Self::ambiguity_reasons`], so the narrowing is declared at run
+    /// time rather than inferred from a silent gap.
+    pub ambiguous_container_cells: usize,
+    /// One deduplicated `column (reason)` entry per refusal cause.
+    pub ambiguity_reasons: Vec<String>,
 }
 
 /// Pair rows by primary key and compare every column.
@@ -74,17 +82,69 @@ pub fn compare_rows(
             }
             let gv = g.get(column).unwrap_or(&Value::Null);
             let cv = c.get(column).unwrap_or(&Value::Null);
-            if egress == Egress::Csv && matches!(gv, Value::Array(_) | Value::Object(_)) {
-                report.skipped_container_cells += 1;
-                continue;
-            }
+            // CSV has no types, so a container arrives as one flat text field and
+            // has to be decoded back into the golden's shape before comparison.
+            let decoded = match csv_decoded(gv, cv, egress) {
+                Ok(decoded) => decoded,
+                Err(Refusal::Ambiguous(why)) => {
+                    report.ambiguous_container_cells += 1;
+                    let entry = format!("{column} ({why})");
+                    if !report.ambiguity_reasons.contains(&entry) {
+                        report.ambiguity_reasons.push(entry);
+                    }
+                    continue;
+                }
+                Err(Refusal::Unparseable(why)) => {
+                    report.compared_cells += 1;
+                    report.container_cells += 1;
+                    report.diffs.push(format!(
+                        "row[{key}].{column}: unparseable CSV container: {why}"
+                    ));
+                    continue;
+                }
+            };
+            let cv = decoded.as_ref().unwrap_or(cv);
             report.compared_cells += 1;
+            if matches!(gv, Value::Array(_) | Value::Object(_)) {
+                report.container_cells += 1;
+            }
             if let Err(why) = compare_value(gv, cv, egress) {
                 report.diffs.push(format!("row[{key}].{column}: {why}"));
             }
         }
     }
     report
+}
+
+/// Why a CSV container cell could not be decoded.
+enum Refusal {
+    /// The GOLDEN's own content cannot survive the unquoted rendering, so no
+    /// reading of the CLI's text is trustworthy. Decided from the golden alone,
+    /// so it can never be caused by the defect under test.
+    Ambiguous(String),
+    /// The CLI's text is not the grammar at all (wrong bracket, unbalanced
+    /// brackets, a map entry with no `: `). That IS a divergence, so it is
+    /// reported as one rather than refused.
+    Unparseable(String),
+}
+
+/// Decode a CSV cell whose golden counterpart is a container. `Ok(None)` means
+/// no decoding applies — the JSON lane, a scalar column, or a CSV cell that is
+/// not text (an empty field decodes to `null`, and `compare_value` is what
+/// should name that shape mismatch).
+fn csv_decoded(gv: &Value, cv: &Value, egress: Egress) -> Result<Option<Value>, Refusal> {
+    if egress != Egress::Csv || !matches!(gv, Value::Array(_) | Value::Object(_)) {
+        return Ok(None);
+    }
+    if let Some(why) = csv_container::ambiguity(gv) {
+        return Err(Refusal::Ambiguous(why));
+    }
+    let Value::String(text) = cv else {
+        return Ok(None);
+    };
+    csv_container::decode(gv, text)
+        .map(Some)
+        .map_err(Refusal::Unparseable)
 }
 
 /// A total, side-independent ordering key: the canonical primary key, then the

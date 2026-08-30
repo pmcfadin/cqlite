@@ -53,19 +53,23 @@
 //! * **UDT `_type`.** `sstabledump` renders a UDT as a plain field→value object;
 //!   the CLI adds a `_type` discriminator naming the type. It is dropped from the
 //!   CLI side (and only from the CLI side).
+//! * **CSV containers.** CSV carries no types, so a collection/UDT arrives as
+//!   one flat text field (`{a, b}`, `[1, 2]`, `{k: v}`) and is decoded back into
+//!   the shape the GOLDEN declares before comparison — see [`csv_container`],
+//!   which states the grammar, why the decoder is deliberately strict, and the
+//!   three ambiguities CSV genuinely cannot express. A cell whose GOLDEN content
+//!   cannot survive an unquoted rendering is REFUSED, never guessed, and the
+//!   refusal is counted and named in the run census.
 //!
 //! Everything else is compared byte-exactly, including blob `0x…` hex, decimal
 //! text, booleans, UUID text and `null`.
 //!
 //! # What is NOT normalized, on purpose
 //!
-//! The CSV lane compares **scalar** columns only. A collection/UDT in CSV is
-//! rendered in a CQLite-specific text syntax (`{a, b}`, `[1, 2]`, `{k: v}`) which
-//! has no counterpart in the physical dump's flattened per-path cell form and no
-//! external authority whatsoever — the only place that syntax is defined is
-//! CQLite's own writer, so "expecting" it would be CQLite-vs-CQLite circularity
-//! (CLAUDE.md, format authority). That is a TYPE-level rule, declared once here
-//! and reported in the run census, not a per-case escape hatch.
+//! Everything not listed above. In particular the decoder above never *repairs*
+//! a container: a changed separator, a changed bracket, a dropped/re-ordered
+//! member and a wrongly rendered scalar all fail, because the expected values
+//! come from the golden and the grammar is matched exactly.
 
 #![allow(dead_code)]
 
@@ -80,6 +84,10 @@ pub mod datasets_root;
 /// files well inside the campsite-rule size target).
 #[path = "golden_value_compare.rs"]
 pub mod compare;
+
+/// Decoding a CSV container cell back into the golden's shape.
+#[path = "golden_csv_container.rs"]
+pub mod csv_container;
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
