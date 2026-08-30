@@ -257,11 +257,16 @@ insert_rows() {
 # would make the succeeding one unobservable.
 #
 #   id 1 — stu + mtu: the two shapes that NOW SUCCEED (set element, map key).
-#   id 2 — ssu: still fails — the INNER set has a UDT element, so it renders as a
-#          Python `list` for CLI parity (#804) and a list is unhashable in the
-#          outer set. Nothing to do with #3504.
-#   id 3 — stn: still fails — `Udt.__hash__` hashes its field values and this
-#          UDT has a `map` field, i.e. a `dict`.
+#   id 2 — ssu: STILL FAILS, measured identically before and after — the INNER
+#          set has a UDT element, so it renders as a Python `list` for CLI parity
+#          (#804) and a list is unhashable in the outer set. Nothing to do with
+#          #3504.
+#   id 3 — stn: MEASURED to SUCCEED, against the obvious prediction. Its UDT
+#          declares a `map`-typed field, which WOULD be an unhashable `dict` —
+#          but CQLite decodes a collection field inside a frozen UDT as
+#          `Value::Blob`, so it arrives as hashable `bytes`. That decode gap is
+#          orthogonal to #3504 and is pinned as characterization by the Python
+#          suite; the row stays here as the subject of that pin.
 # ----------------------------------------------------------------------------
 insert_shape_rows() {
   log "=== $TABLE2: inserting rows (USING TIMESTAMP $T_FIXED) ==="

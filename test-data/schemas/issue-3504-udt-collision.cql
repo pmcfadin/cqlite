@@ -129,10 +129,11 @@ CREATE TYPE IF NOT EXISTS plain (
     real_field int
 );
 
--- unhashable_fields: a UDT whose field values are NOT hashable in Python (a
--- `map` renders to a `dict`). It exists for the SECOND table below: making
--- `cqlite.Udt` hashable resolved some previously-`TypeError`ing nested shapes,
--- and this type is the subject that pins which ones it did NOT (roborev R1-2).
+-- unhashable_fields: a UDT declaring a `map`-typed field — the shape that WOULD
+-- be unhashable in Python if the field decoded to a `dict`. It exists for the
+-- SECOND table below, as the subject that turned a prediction into a
+-- MEASUREMENT: it projects successfully today only because a collection field
+-- inside a frozen UDT decodes to `Value::Blob` (roborev R1-2).
 CREATE TYPE IF NOT EXISTS unhashable_fields (
     label text,
     m     frozen<map<text, int>>
@@ -176,12 +177,21 @@ CREATE TABLE IF NOT EXISTS udt_collide (
 --                      for CLI parity (#804), and a list is unhashable in the
 --                      outer set. Unchanged by #3504.
 --   * stn frozen<set<frozen<tuple<frozen<unhashable_fields>, int>>>>
---                    — STILL FAILS: `Udt.__hash__` hashes its field values, and
---                      this UDT has a `map` field, which renders to a `dict`.
+--                    — MEASURED: also SUCCEEDS, contradicting the obvious
+--                      prediction. `Udt.__hash__` does hash its field values, and
+--                      a `dict` would be unhashable — but CQLite decodes a
+--                      collection field inside a FROZEN UDT as `Value::Blob`, so
+--                      the field arrives as `bytes`, which is hashable. That
+--                      decode gap is orthogonal to #3504 and is pinned as
+--                      characterization by the Python suite, together with the
+--                      real residual (a hand-built `cqlite.Udt` with a `dict`
+--                      field still raises).
 --
--- The failing shapes live in SEPARATE ROWS from the succeeding ones: the
--- `TypeError` is raised while converting the row, so a row carrying both would
--- make the succeeding columns unobservable.
+-- Each shape lives in its OWN ROW (`stu`+`mtu` in row 1, `ssu` in row 2, `stn` in
+-- row 3): the `TypeError` is raised while CONVERTING a row, so a row carrying
+-- both a projectable and an unprojectable cell would make the projectable one
+-- unobservable — which is also why the Python suite reads this table by primary
+-- key rather than scanning it.
 CREATE TABLE IF NOT EXISTS udt_hashable_shapes (
     id  INT PRIMARY KEY,
     stu frozen<set<frozen<tuple<frozen<collide>, int>>>>,
