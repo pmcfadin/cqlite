@@ -114,7 +114,11 @@ fn collect_data_db(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) 
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if name.ends_with("-Data.db") {
             out.push(path);
         } else if depth > 0 && path.is_dir() {
@@ -141,7 +145,9 @@ fn flush_one_sstable(rows: i32) -> (TempDir, PathBuf, TableSchema) {
     for id in 0..rows {
         engine.write(write_row(id)).expect("write row");
     }
-    rt.block_on(engine.flush()).expect("flush").expect("flush info");
+    rt.block_on(engine.flush())
+        .expect("flush")
+        .expect("flush info");
     rt.block_on(engine.close()).expect("close engine");
 
     let mut found = Vec::new();
@@ -174,8 +180,7 @@ fn cell_text(cells: &[cqlite_core::storage::write_engine::merge::CellData]) -> O
 /// Drain a merge over `path` through the production `KWayMerger`, i.e. THROUGH the
 /// batched egress fan-in. Returns the rows in emitted order.
 fn merged_rows(path: &std::path::Path, schema: &TableSchema) -> Vec<Row> {
-    let mut merger =
-        KWayMerger::new(vec![path.to_path_buf()], schema).expect("KWayMerger::new");
+    let mut merger = KWayMerger::new(vec![path.to_path_buf()], schema).expect("KWayMerger::new");
     let mut out = Vec::new();
     while let MergeStep::Partition { key, rows } = merger.step().expect("merge step") {
         for entry in rows {
@@ -265,7 +270,10 @@ fn the_merge_fan_in_sends_one_message_per_batch_and_loses_no_row() {
         "the batched merge must emit exactly the rows an unbatched direct walk sees"
     );
     for (i, (got, want)) in merged.iter().zip(oracle.iter()).enumerate() {
-        assert_eq!(got.0, want.0, "row {i}: partition key mismatch batched-vs-direct");
+        assert_eq!(
+            got.0, want.0,
+            "row {i}: partition key mismatch batched-vs-direct"
+        );
         assert_eq!(got.1, want.1, "row {i}: value mismatch batched-vs-direct");
     }
     assert_eq!(

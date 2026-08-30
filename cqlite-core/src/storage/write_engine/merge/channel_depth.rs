@@ -454,8 +454,7 @@ mod tests {
             let mut sent_count: i64 = 0;
             let mut received_count: i64 = 0;
 
-            let mut stream: Vec<MergeMsg> =
-                BATCH_ROWS.iter().copied().map(data_batch).collect();
+            let mut stream: Vec<MergeMsg> = BATCH_ROWS.iter().copied().map(data_batch).collect();
             stream.push(terminator);
 
             // SEND side: exactly what `egress_batch::EgressBatcher::flush` does.

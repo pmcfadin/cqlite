@@ -6474,7 +6474,6 @@ mod merge_property_tests {
 #[path = "streaming_channel_tests.rs"]
 mod streaming_channel_tests;
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Issue #823 (Epic #817): complex-column (multi-cell collection / non-frozen UDT)
 // merge behaviour.

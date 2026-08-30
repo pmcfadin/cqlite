@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use super::*;
 use crate::storage::write_engine::merge::model::RowData;
-use crate::storage::write_engine::mutation::DecoratedKey;
 use crate::storage::write_engine::merge::MergeEntry;
+use crate::storage::write_engine::mutation::DecoratedKey;
 
 fn entry(n: i64) -> MergeEntry {
     MergeEntry::new(
@@ -50,7 +50,10 @@ fn the_row_budget_is_256_and_the_batch_size_is_256() {
         "the first batch of a run must be one row, so batching NEVER delays the \
          first row (issue #2820 design item 7)"
     );
-    assert_eq!(MIN_MSG_CAP, 2, "a capacity-1 channel kills producer/consumer overlap");
+    assert_eq!(
+        MIN_MSG_CAP, 2,
+        "a capacity-1 channel kills producer/consumer overlap"
+    );
 }
 
 /// The ROWS→MESSAGES conversion (issue #2820 design item 2) — the single most
@@ -133,7 +136,11 @@ fn the_ramp_doubles_from_one_row_and_saturates() {
         "the ramp must saturate at the full batch size, never grow past it"
     );
 
-    assert_eq!(rows_in_full_channel(2), 3, "1 + 2 rows for a 2-message channel");
+    assert_eq!(
+        rows_in_full_channel(2),
+        3,
+        "1 + 2 rows for a 2-message channel"
+    );
     assert_eq!(rows_in_full_channel(4), 15, "1 + 2 + 4 + 8");
     // Strictly below the saturated bound for every capacity: a fixture that
     // derived "the producer is blocked" from `max_inflight_rows` would wait for
@@ -224,7 +231,9 @@ fn a_sub_batch_result_set_emits_its_first_row_immediately_and_loses_none() {
     // ONE row pushed, and it is already on the channel: first-row latency is not
     // gated on a full batch.
     let _ = batcher.push(entry(0));
-    let first = rx.try_recv().expect("the first row must be sent immediately");
+    let first = rx
+        .try_recv()
+        .expect("the first row must be sent immediately");
     let MergeMsg::Batch(batch) = first else {
         panic!("DATA batch expected")
     };
