@@ -767,11 +767,20 @@ fn resolve_field_path(ty: &CqlType, rest: &str) -> Result<(), String> {
 /// Run `export` for one table into `out`, returning its contents.
 fn export(case: &Case, data_dir: &Path, out: &Path, format: &str) -> String {
     let schema = schema_file(case.schema);
-    assert!(
-        schema.is_file(),
-        "committed schema {} is unreadable (see #3148)",
-        schema.display()
-    );
+    // Three-valued (issue #1491 review finding V1's sweep): `is_file()` collapses an
+    // unreadable path onto an absent one, so both were reported as "unreadable" —
+    // fail-closed either way, but naming the wrong cause sends the reader looking for
+    // a file that is right there. The committed schemas are checkout-relative source,
+    // so any answer but "a regular file" is a broken checkout (#3148).
+    match golden::fs_probe::presence(&schema) {
+        Ok(golden::fs_probe::Presence::File) => {}
+        Ok(other) => panic!(
+            "committed schema {} is {} (see #3148)",
+            schema.display(),
+            other.describe()
+        ),
+        Err(why) => panic!("committed schema: {why} (see #3148)"),
+    }
     let qualified = format!("{}.{}", case.keyspace, case.table);
     let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args([
