@@ -4814,8 +4814,8 @@ fi
 # So the floor is `measured - largest single displacement` = 401 - 9 (the r32 section's
 # nine want_ cases): it still catches a whole section dying silently, which is what the
 # floor exists for, while a single undiscovered non-1:1 site cannot false-RED a legitimate
-# host. Tightening it to the exact count is tracked separately (see the issue linked in the
-# report) with the enumeration, the four defects and the eight host shapes as its
+# host. Tightening it to the exact count is tracked separately in issue #3611, with the
+# enumeration, the four defects and the eight host shapes as its
 # acceptance criteria (issue #3611); the durable contribution here is the SKIPPED_TOOLING
 # accounting and the four 1:1 fixes, not the number.
 ASSERT_FLOOR=392
