@@ -2861,11 +2861,15 @@ _component_set_bounded() {
 # HOST" WAS WRONG (job 225). Matching on OWNER/REPO alone accepted `https://evil.example/
 # pmcfadin/cqlite` — and, needing no hostile host at all, ANY LOCAL PATH ending in
 # `pmcfadin/cqlite`. Two reasons that is not a tolerable boundary:
-#   1. IT COMPOUNDS WITH THE EXECUTION SURFACE. This pre-flight EXTRACTS AND RUNS the
-#      baseline's copy of this script (`bash <origin/main:scripts/agent-gate.sh> --list`), so
-#      a loose identity does not merely admit a wrong baseline — it admits arbitrary code
-#      from any repository whose path ends in the right two segments. Identity and execution
-#      were triaged as separate concerns; they MULTIPLY.
+#   1. IT USED TO COMPOUND WITH AN EXECUTION SURFACE, and the pinning is kept for what
+#      remains. When this was written the pre-flight EXTRACTED AND RAN the baseline's copy of
+#      this script, so a loose identity admitted arbitrary code from any repository whose path
+#      ended in the right two segments — identity and execution MULTIPLIED. Since #3544
+#      REQ-3544-01 the baseline is read as DATA and nothing fetched is executed, so what a
+#      loose identity now buys is a WRONG COMPONENT SET: a baseline of unknown provenance,
+#      from which no PASS may be derived. That is a smaller consequence, not a removed one,
+#      and the check stays exactly as strict — it is now defence in depth rather than the
+#      only thing standing between a re-pointed remote and code execution.
 #   2. THE TEST HOOK AND THE VULNERABILITY WERE THE SAME FACT. The self-test's local file
 #      remotes were "genuinely canonical" only because the check was weak enough to accept a
 #      local path — i.e. the property that made the fixtures work WAS the hole. The fixtures
@@ -2892,10 +2896,12 @@ _CS_CANONICAL_REMOTE="github.com/pmcfadin/cqlite"
 # URL syntax, not a gap in this list.
 #
 #   TRANSPORT  ACCEPT `https://`, `ssh://`, `git+ssh://`, and the scp-form `git@host:path`.
-#              REJECT `http://` and `git://` — both are UNAUTHENTICATED, and this pre-flight
-#              EXTRACTS AND RUNS the fetched repository's own `agent-gate.sh`, so anyone able
-#              to impersonate the hostname on the wire supplies arbitrary git objects and gets
-#              CODE EXECUTION (job 227, the High). Also REJECT `file://`, any other scheme,
+#              REJECT `http://` and `git://` — both are UNAUTHENTICATED, so anyone able to
+#              impersonate the hostname on the wire supplies arbitrary git objects. When this
+#              rule was written those objects were EXECUTED (`bash <fetched gate> --list`),
+#              which is why it was a High; since REQ-3544-01 they are read as DATA and the
+#              consequence is a forged component set instead — still a baseline whose
+#              provenance is unknown, so still rejected. Also REJECT `file://`, any scheme,
 #              and a bare LOCAL PATH: their integrity rests on a filesystem this gate cannot
 #              vouch for, and a local path needs no attacker at all (round 5's finding).
 #   USERINFO   ACCEPTED (any), and REDACTED from every rendering — see
@@ -2930,7 +2936,7 @@ _CS_CANONICAL_REMOTE="github.com/pmcfadin/cqlite"
 # stripping a single leading space turns " https://github.com/pmcfadin/cqlite.git" — a local
 # path as far as git is concerned — into a canonical HTTPS verdict. It did not turn a fork into
 # upstream; it turned an ATTACKER-CONTROLLED LOCAL REPOSITORY into upstream, and this pre-flight
-# EXECUTES the baseline. A whitespace-bearing value is now refused outright, before normalising.
+# reads the baseline. A whitespace-bearing value is now refused outright, before normalising.
 # The wrong version is quoted here on purpose: it is exactly the plausible argument that would
 # otherwise get the strip restored.
 _component_set_normalise_remote() {
@@ -2939,7 +2945,7 @@ _component_set_normalise_remote() {
   # READING of the value: git resolves a remote whose scheme is not at byte ZERO as a LOCAL
   # PATH, so " https://github.com/pmcfadin/cqlite.git" is a local path to git while a
   # whitespace-stripping normaliser sees a canonical HTTPS URL — a canonical verdict on an
-  # attacker-controlled local repository, which this pre-flight then EXECUTES.
+  # attacker-controlled local repository, which this pre-flight would then read as its baseline.
   #
   # The general rule, and the reason this is a REFUSAL rather than one more accepted shape:
   # VALIDATE THE BYTES GIT WILL CONSUME. Any value whose interpretation a transformation could
@@ -2965,7 +2971,7 @@ _component_set_normalise_remote() {
     ssh+git://*) scheme=ssh;   u="${u#ssh+git://}" ;;
     # UNAUTHENTICATED TRANSPORTS, named individually so nobody "restores" one as a spelling:
     # with no server authentication, an on-path attacker IS the baseline, and the baseline is
-    # EXECUTED.
+    # read as the baseline.
     #
     # THE MARKER NAMES THE SCHEME AND NOT THE URL, deliberately: the rejected value may carry
     # USERINFO (`http://x-access-token:<TOKEN>@…`), this output is rendered into `_CS_DETAIL`,
@@ -3382,7 +3388,7 @@ _component_set_is_shallow() {
 # left `FETCH_HEAD` as the carrier; but `FETCH_HEAD` is a single per-repository file, so a
 # CONCURRENT fetch in the same worktree (a sibling lane, a hook, an editor's auto-fetch)
 # overwrites it between the fetch and the read. This pre-flight then compares against — and
-# EXECUTES — a commit other than the `origin/main` it fetched, silently. The fix is a
+# compares against — a commit other than the `origin/main` it fetched, silently. The fix is a
 # destination this run OWNS.
 #
 # `refs/worktree/…` is git's PER-WORKTREE ref namespace, so on this fleet's layout (lanes are
@@ -3459,7 +3465,6 @@ _component_set_probe_inner() {
     _CS_KIND=no-git; _CS_DETAIL="$REPO_ROOT is not a git worktree"; return 0
   fi
   local origin_url origin_rc
-  # local-only: a config read. It NAMES a remote; it does not contact one.
   # CAPTURE THE RAW CONFIGURED URL, with rewrites neutralised (roborev job 242). `git remote
   # get-url` APPLIES `url.*.insteadOf`, measured: with a hostile global rewrite in place this
   # returned the rewritten value and the identity check then rejected it as non-canonical. That
@@ -3468,6 +3473,7 @@ _component_set_probe_inner() {
   # rewrite-INDEPENDENT: the raw configured URL is what is validated and, below, what is
   # fetched. A contributor who legitimately uses `insteadOf` for convenience is unaffected —
   # the raw canonical URL is fetched directly, which is what their rewrite was aiming at.
+  # local-only: a config read. It NAMES a remote; it does not contact one.
   origin_url=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$REPO_ROOT" remote get-url origin 2>/dev/null); origin_rc=$?
   if [ "$origin_rc" -ne 0 ]; then
     _CS_KIND=no-remote
@@ -3498,7 +3504,7 @@ _component_set_probe_inner() {
     # the data is attacker-controlled. `_component_set_flatten` is the existing answer and is
     # already applied to every command-output interpolation in this function; the origin URL
     # is the one external value that was missing it.
-    _CS_DETAIL="origin is '$(_component_set_flatten "$(_component_set_redact_url "$origin_url")")' (normalised '$(_component_set_flatten "$(_component_set_normalise_remote "$origin_url")")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork, a re-pointed remote, an unauthenticated transport (http/git) or a non-default port is a DIFFERENT baseline — and this pre-flight EXECUTES the baseline's copy of this script, so it must be the upstream and nothing else"
+    _CS_DETAIL="origin is '$(_component_set_flatten "$(_component_set_redact_url "$origin_url")")' (normalised '$(_component_set_flatten "$(_component_set_normalise_remote "$origin_url")")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork, a re-pointed remote, an unauthenticated transport (http/git) or a non-default port is a DIFFERENT baseline, and no PASS may be derived from a baseline of unknown provenance, so it must be the upstream and nothing else"
     return 0
   fi
 
@@ -3560,7 +3566,7 @@ _component_set_probe_inner() {
   #
   # THE DESTINATION IS THIS RUN'S PRIVATE PER-WORKTREE REF (job 227), not `FETCH_HEAD` and not
   # a shared tracking ref: see _component_set_fetch_ref_name above for why a shared mutable
-  # name cannot carry a baseline that is about to be EXECUTED. `--refmap=` is retained so the
+  # name cannot carry the baseline this run is about to compare against. `--refmap=` is retained so the
   # opportunistic `refs/remotes/origin/*` update stays suppressed.
   local csref; csref="$(_component_set_fetch_ref_name)"
   # ONE LINE, deliberately: the structural audit in test_agent_gate_component_set.sh reads a
@@ -3586,7 +3592,7 @@ _component_set_probe_inner() {
   # mid-run. This lane proved it the hard way — a `git remote set-url` from a throwaway worktree
   # re-pointed `origin` for four live lanes (#3617). Passing the exact bytes that passed
   # validation closes the window: what was approved is what is fetched, and therefore what is
-  # EXECUTED as the baseline.
+  # READ as the baseline.
   #
   # The diagnostics below deliberately say "the validated origin URL" rather than interpolating
   # it: an accepted canonical URL may carry a token, and `_CS_DETAIL` reaches the SUMMARY block.
@@ -3597,7 +3603,8 @@ _component_set_probe_inner() {
   #     worktree's SHARED `.git/config`. MEASURED in an isolated sandbox: with a global-config
   #     `insteadOf` in place, `git fetch <upstream-url>` retrieved the ATTACKER's commit; with
   #     GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM neutralised it retrieved upstream's. The
-  #     rewrite is SILENT — nothing in the output names it — and the fetched script is EXECUTED.
+  #     rewrite is SILENT — nothing in the output names it, and the fetched bytes ARE the
+  #     baseline this run certifies against.
   #
   # (b) CREDENTIAL IN ARGV: an accepted canonical URL may carry a token, and a URL in a `git`
   #     argument is readable by any process via `ps` / `/proc/<pid>/cmdline` for the call's life.
@@ -3629,6 +3636,8 @@ _component_set_probe_inner() {
   # could seed the "isolated" repo's own LOCAL config, which the fetch below DOES read. Both
   # hops would then agree on the wrong commit, so the transfer assert cannot see it. One env
   # prefix closes it; cheap hardening beats a hole whose only defence is that it is obscure.
+  # local-only: creates an empty repository in a directory we just made. No remote is named,
+  # no object is read, and with global/system config neutralised no template can be pulled in.
   if ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git init -q "$csdir/repo" >/dev/null 2>&1; then
     _CS_KIND=baseline-workspace
     _CS_DETAIL="could not initialise the isolated scratch repository for the baseline fetch"
@@ -3668,6 +3677,8 @@ _component_set_probe_inner() {
     _CS_DETAIL="transferring the isolated baseline into this repository exited $rc2: $(_component_set_safe_detail "$err2")"
     return 0
   fi
+  # local-only: resolves THIS run's private ref plus the COMMIT object hop 2 just wrote.
+  # Commit objects are never filtered out of a partial clone, so no lazy fetch is possible.
   _CS_SHA=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$csref^{commit}" 2>/dev/null || true)
   # THE AFFIRMATIVE CHECK that makes hop 2 untrusted-but-safe: a rewrite of the scratch path
   # would deliver a DIFFERENT commit, so requiring equality with the sha the isolated hop
@@ -3675,7 +3686,7 @@ _component_set_probe_inner() {
   # two measured values.
   if [ -n "$_CS_SHA" ] && [ "$_CS_SHA" != "$cssha" ]; then
     _CS_KIND=baseline-transfer-mismatch
-    _CS_DETAIL="the isolated fetch observed baseline ${cssha} but the copy transferred into this repository is ${_CS_SHA} — the transfer was redirected (a url.*.insteadOf rewrite on the scratch path is the way this happens), and the baseline is EXECUTED, so it is not used"
+    _CS_DETAIL="the isolated fetch observed baseline ${cssha} but the copy transferred into this repository is ${_CS_SHA} — the transfer was redirected (a url.*.insteadOf rewrite on the scratch path is the way this happens), so the transferred copy is NOT used as the baseline"
     _CS_SHA="-"
     return 0
   fi

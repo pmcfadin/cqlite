@@ -15,7 +15,10 @@
 #   0b. `origin` does not NAME the canonical upstream (a fork/re-pointed)-> FAIL naming it
 #   1. baseline has a component the branch lacks, main NOT an ancestor  -> FAIL naming it
 #   2. `git fetch` fails (unreachable origin)                           -> non-PASS naming the fetch
-#   3. baseline `--list` broken / empty / non-component output          -> FAIL naming the derivation
+#   3. baseline set unreadable AS DATA: an unreadable/reflowed COMPONENTS declaration, an
+#      empty or ungrammatical manifest, neither file present        -> FAIL naming the derivation
+#   3e2. THIS TREE's manifest missing / ungrammatical / out of step with COMPONENTS
+#                                                                   -> FAIL naming the file
 #   4. deliberate removal (main IS an ancestor of HEAD, absent at HEAD)  -> DECLARED, run NOT failed
 #   4b. removal that is only an UNCOMMITTED working-tree edit            -> FAIL naming it
 #   4d. a SHALLOW clone where rc 1 is ambiguous                          -> INDETERMINATE, never BEHIND
@@ -29,13 +32,20 @@
 # probe kinds, and EVERY one is exercised below:
 #   verdicts (6) — PASS (case 5), DECLARED (4), UNCOMMITTED (4b), BEHIND (1),
 #                  INDETERMINATE (4c), UNMEASURED (2, 3a–3g, 4b-ii).
-#   kinds   (13) — fetch-failed, no-remote (case 2); baseline-list-failed,
-#                  baseline-list-empty, baseline-list-garbage, baseline-missing (3a–3d);
-#                  no-git, baseline-workspace, no-tool (3f); unboundable (3g);
+#   kinds   (17) — fetch-failed, no-remote (case 2); baseline-decl-unrecognised (3a),
+#                  baseline-set-empty (3b), baseline-set-garbage (3c/3c-ii),
+#                  baseline-unreadable (3d); manifest-missing, manifest-garbage,
+#                  manifest-stale (3e2); no-git, baseline-workspace, no-tool (3f);
+#                  unboundable (3g); baseline-transfer-mismatch (5f);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10).
-# THIRTEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
-# set from two places, and `ok` is the fourteenth value). It was
+# SEVENTEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
+# set from several places, and `ok` is the eighteenth value). THE SET CHANGED SHAPE with #3544
+# REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
+# `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
+# fail at (`baseline-unreadable`, `baseline-set-garbage`, `baseline-set-empty`,
+# `baseline-decl-unrecognised`), and the three `manifest-*` kinds are new — a kind name that
+# describes a `--list` run nobody performs any more is a false statement in a diagnostic. It was
 # written as "six" for two rounds while the enumeration beneath it listed nine — a census
 # that miscounts its own list is worse than none, because a reader who trusts the number
 # and counts the entries concludes three kinds are uncovered extras. The count is now
@@ -52,8 +62,9 @@
 # The PASS/FAIL counters are incremented ONLY at top level — never inside `( … )` or the
 # right-hand side of a pipe, either of which would increment a copy that dies with the
 # subshell and leave the suite printing FAILs while reporting `failed: 0`. Verified
-# EMPIRICALLY, not by reading: overriding `ok()` to call `bad()` makes all 33 cases print
-# FAIL and the tally read `failed: 33` with exit 1 (a lexical paren scan cannot answer this
+# EMPIRICALLY, not by reading: overriding `ok()` to call `bad()` made EVERY case print FAIL and
+# the tally match the case count exactly, with exit 1 (33 of 33 on the tree of the day; the set
+# has grown since, and the PROPERTY is the claim, not the number) (a lexical paren scan cannot answer this
 # — `case` patterns and same-line `( … )` closes defeat it, and the first attempt at one
 # reported a bogus growing depth for every case in the file).
 #
@@ -127,14 +138,58 @@ GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 # REPO_ROOT to <root>, so every path the fixture touches stays inside this run's mktemp
 # namespace.
 # ---------------------------------------------------------------------------
+# mkmanifest <repo-root> <mode> [literal-text] : install (or deliberately omit) the component
+# manifest `scripts/agent-gate.components` that the pre-flight now reads as its DATA baseline
+# (#3544 REQ-3544-01, replacing `bash <fetched gate> --list`).
+#
+#   derive  — the DEFAULT: generated from THAT fixture's OWN gate `--list`, so a fixture whose
+#             sed changed the COMPONENTS array gets a manifest that matches it and the gate's
+#             local staleness guard (manifest == COMPONENTS) passes. FAIL-CLOSED on a manifest
+#             that comes out empty or implausibly short: a fixture whose manifest silently
+#             failed to generate would report `manifest-*` in every case built on it, i.e. a
+#             suite that tests nothing while looking busy.
+#   none    — no manifest at all (drives `manifest-missing`, and the baseline's transitional
+#             TEXT-extraction fallback).
+#   literal — exact text, for the garbage/empty/stale shapes.
+mkmanifest() {
+  # SEPARATE `local` statements, deliberately: in ONE `local` a later assignment does NOT see
+  # an earlier one in the same statement, so `out="$root/…"` read an UNBOUND `root` — under
+  # `set -u` that killed the fixture builder's subshell and every fixture came back EMPTY.
+  local root="$1" mode="$2" text="${3:-}"
+  local out="$root/scripts/agent-gate.components" n
+  case "$mode" in
+    none)    rm -f "$out"; return 0 ;;
+    literal) printf '%s\n' "$text" >"$out"; return 0 ;;
+    derive)
+      ( fx "$root" && bash scripts/agent-gate.sh --list 2>/dev/null ) >"$out" || return 1
+      n=$(grep -c . "$out" 2>/dev/null || true)
+      case "${n:-0}" in ''|*[!0-9]*) return 1 ;; esac
+      [ "$n" -gt 10 ] || return 1
+      return 0 ;;
+  esac
+  return 1
+}
+
 mkbaseline() {
   local name="$1" prog="$2" work="$tmp/$1-src" bare="$tmp/$1.git"
+  shift 2
+  local man_mode=derive man_text=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-manifest)    man_mode=none ;;
+      --manifest-lines) man_mode=literal; man_text="${2:-}"; shift ;;
+      *) echo "FATAL: mkbaseline '$name': unknown flag '$1'" >&2; exit 1 ;;
+    esac
+    shift
+  done
   mkdir -p "$work/scripts"
   if [ "$prog" = - ]; then
     cp "$GATE" "$work/scripts/agent-gate.sh"
   else
     sed "$prog" "$GATE" >"$work/scripts/agent-gate.sh"
   fi
+  mkmanifest "$work" "$man_mode" "$man_text" \
+    || { echo "FATAL: could not install the component manifest in baseline fixture '$name'" >&2; exit 1; }
   printf 'baseline fixture\n' >"$work/README.md"
   git init -q --bare "$bare" >/dev/null 2>&1
   # Point the bare repo's HEAD at `main` BEFORE any clone: with `init.defaultBranch`
@@ -159,7 +214,18 @@ mkbaseline() {
 #      cloned from <origin-bare> first (so origin/main IS an ancestor: the DECLARED /
 #      no-skew shape). `-` for <origin-bare> configures no remote at all.
 mkbranch() {
-  local name="$1" bare="$2" prog="$3" from_origin="${4:-}" root="$tmp/$1"
+  local name="$1" bare="$2" prog="$3" root="$tmp/$1"
+  shift 3
+  local from_origin="" man_mode=derive man_text=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --from-origin)    from_origin=--from-origin ;;
+      --no-manifest)    man_mode=none ;;
+      --manifest-lines) man_mode=literal; man_text="${2:-}"; shift ;;
+      *) echo "FATAL: mkbranch '$name': unknown flag '$1'" >&2; exit 1 ;;
+    esac
+    shift
+  done
   if [ "$from_origin" = --from-origin ]; then
     git clone -q "$bare" "$root" >/dev/null 2>&1 \
       || { echo "FATAL: could not clone baseline for branch '$name'" >&2; exit 1; }
@@ -188,6 +254,10 @@ mkbranch() {
   # that has nothing to do with what it tests.
   agent_gate_pin_canonical_remote "$root/scripts/agent-gate.sh" "$bare" \
     || { echo "FATAL: could not pin the canonical identity in branch fixture '$name'" >&2; exit 1; }
+  # The manifest goes in BEFORE the commit, so HEAD carries it too: the pre-flight reads HEAD's
+  # committed manifest for removal provenance, exactly as it reads the baseline's.
+  mkmanifest "$root" "$man_mode" "$man_text" \
+    || { echo "FATAL: could not install the component manifest in branch fixture '$name'" >&2; exit 1; }
   ( fx "$root" && git add -A && git "${GIT_ID[@]}" commit -qm branch ) >/dev/null 2>&1 \
     || { echo "FATAL: could not commit branch fixture '$name'" >&2; exit 1; }
   printf '%s\n' "$root"
@@ -365,71 +435,214 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. FAILED BASELINE DERIVATION. Three shapes, each a FAIL that NAMES the derivation —
-#    never a fallback to an empty or assumed baseline, which would excuse every branch
-#    (the vacuous pass this issue exists to close, inverted).
+# 3. FAILED BASELINE DERIVATION — now a DATA read, never an execution (#3544 REQ-3544-01).
+#    Four shapes, each a FAIL that NAMES the derivation, never a fallback to an empty or
+#    assumed baseline (which would excuse every branch: the vacuous pass this issue exists to
+#    close, inverted).
+#
+#    WHAT CHANGED AND WHY THE SHAPES ARE DIFFERENT: the baseline set used to be derived by
+#    running `bash <fetched gate> --list`, so the failure shapes were "the script exited
+#    non-zero / printed nothing / printed prose". Nothing is executed any more, so the shapes
+#    are the ones a DATA read has: an ungrammatical manifest, an empty one, a gate script whose
+#    COMPONENTS declaration cannot be read AS TEXT, and neither file readable at all.
 # ---------------------------------------------------------------------------
-# 3a. the baseline script errors out before it can list anything
-base_broken=$(mkbaseline base-broken '2i\
-echo "baseline exploded" >\&2; exit 7')
-broken=$(mkbranch broken "$base_broken" - )
-br_out=$(hook "$broken")
-br_line=$(field COMPONENT_SET_LINE "$br_out")
-if [ "$(field VERDICT "$br_out")" = UNMEASURED ] \
-   && [ "$(field KIND "$br_out")" = baseline-list-failed ] \
-   && grep -q 'FAIL-CLOSED (#3544)' <<<"$br_line" \
-   && grep -q -- '--list' <<<"$br_line"; then
-  ok "3544-baseline-broken: a baseline whose --list exits non-zero FAILs, naming the derivation"
+# 3a. the baseline has NO manifest and its COMPONENTS array has been REFLOWED across lines, so
+#     the transitional TEXT extraction cannot read it. It must REFUSE — never guess at a
+#     multi-line or computed array, and never fall back to executing the script.
+base_reflow=$(mkbaseline base-reflow 's|^COMPONENTS=(file-size|COMPONENTS=(\
+    file-size|' --no-manifest)
+reflow=$(mkbranch reflow "$base_reflow" - )
+rf_out=$(hook "$reflow")
+rf_line=$(field COMPONENT_SET_LINE "$rf_out")
+if [ "$(field VERDICT "$rf_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$rf_out")" = baseline-decl-unrecognised ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$rf_line" \
+   && grep -q 'does not CLOSE on its own line' <<<"$rf_line" \
+   && grep -q 'scripts/agent-gate.components' <<<"$rf_line"; then
+  ok "3544-baseline-decl-unrecognised: a manifest-less baseline whose COMPONENTS array is REFLOWED is REFUSED by name, not guessed at"
 else
-  bad "3544-baseline-broken: expected KIND baseline-list-failed naming --list"
-  printf '%s\n' "$br_out"
+  bad "3544-baseline-decl-unrecognised: expected KIND baseline-decl-unrecognised naming the unreadable declaration"
+  printf '%s\n' "$rf_out"
 fi
 
-# 3b. the baseline lists NOTHING (an empty baseline must never be accepted)
-base_empty=$(mkbaseline base-empty 's|^  --list) printf|  --list) : \&\& printf|; s|printf '"'"'%s\\n'"'"' "${COMPONENTS\[@\]}"; exit 0 ;;|exit 0 ;;|')
+# 3a-ii. THE FALLBACK'S POSITIVE CONTROL, and the path THIS PR's own gate runs on: the same
+#     manifest-less baseline with its declaration INTACT must be measured correctly, from TEXT,
+#     and must SAY that is what it did. Without this, 3a would be satisfied by a fallback that
+#     never works at all.
+base_decl=$(mkbaseline base-decl "$ADD_SENTINEL" --no-manifest)
+decl=$(mkbranch decl "$base_decl" - )
+dcl_out=$(hook "$decl")
+if [ "$(field VERDICT "$dcl_out")" = BEHIND ] \
+   && [ "$(field KIND "$dcl_out")" = ok ] \
+   && [ "$(field BASELINE_SRC "$dcl_out")" = declaration ] \
+   && grep -qw -- "$SENTINEL" <<<"$(field MISSING "$dcl_out")"; then
+  ok "3544-baseline-src-declaration: a manifest-less baseline is measured from its declaration AS TEXT and names the missing component"
+else
+  bad "3544-baseline-src-declaration: expected KIND ok + BASELINE_SRC declaration + $SENTINEL missing"
+  printf '%s\n' "$dcl_out"
+fi
+
+# …and the PRIMARY path is the manifest whenever the baseline has one. Asserted on its own
+# because both paths produce the same VERDICT: a suite that could not tell them apart could not
+# tell whether the manifest was ever read.
+if [ "$(field BASELINE_SRC "$b_out")" = manifest ] \
+   && [ "$(field KIND "$b_out")" = ok ]; then
+  ok "3544-baseline-src-manifest: a baseline that HAS the manifest is read from it (data), not from the script text"
+else
+  bad "3544-baseline-src-manifest: expected BASELINE_SRC manifest for a manifest-carrying baseline (got '$(field BASELINE_SRC "$b_out")')"
+fi
+
+# 3b. the baseline's manifest lists NOTHING (an empty baseline must never be accepted). A
+#     comment-only file is the shape a truncation or a bad merge produces.
+base_empty=$(mkbaseline base-empty - --manifest-lines '# every line here is a comment')
 empty=$(mkbranch empty "$base_empty" - )
 e_out=$(hook "$empty")
 e_line=$(field COMPONENT_SET_LINE "$e_out")
 if [ "$(field VERDICT "$e_out")" = UNMEASURED ] \
-   && [ "$(field KIND "$e_out")" = baseline-list-empty ] \
+   && [ "$(field KIND "$e_out")" = baseline-set-empty ] \
    && grep -q 'FAIL-CLOSED (#3544)' <<<"$e_line" \
    && grep -q 'excuse' <<<"$e_line"; then
-  ok "3544-baseline-empty: an EMPTY baseline is a FAIL, never a set that excuses the branch"
+  ok "3544-baseline-empty: an EMPTY baseline manifest is a FAIL, never a set that excuses the branch"
 else
-  bad "3544-baseline-empty: expected KIND baseline-list-empty"
+  bad "3544-baseline-empty: expected KIND baseline-set-empty"
   printf '%s\n' "$e_out"
 fi
 
-# 3c. the baseline prints something that is NOT a component name. A filter that skipped
-#     unrecognised lines would silently SHRINK the baseline; the grammar is closed.
-base_garbage=$(mkbaseline base-garbage 's|^  --list) printf|  --list) echo "Compiling cqlite v0.15.0"; printf|')
+# 3c. the baseline's manifest holds a line that is NOT a component name. A parser that skipped
+#     unrecognised lines would silently SHRINK the baseline; the grammar is closed, and a
+#     parser that TRIMMED would be guessing.
+base_garbage=$(mkbaseline base-garbage - --manifest-lines "$(printf 'file-size\nCompiling cqlite v0.15.0')")
 garbage=$(mkbranch garbage "$base_garbage" - )
 g_out=$(hook "$garbage")
 g_line=$(field COMPONENT_SET_LINE "$g_out")
 if [ "$(field VERDICT "$g_out")" = UNMEASURED ] \
-   && [ "$(field KIND "$g_out")" = baseline-list-garbage ] \
+   && [ "$(field KIND "$g_out")" = baseline-set-garbage ] \
    && grep -q 'FAIL-CLOSED (#3544)' <<<"$g_line" \
    && grep -q 'Compiling' <<<"$g_line"; then
   ok "3544-baseline-garbage: a non-component line FAILs the derivation and is quoted back"
 else
-  bad "3544-baseline-garbage: expected KIND baseline-list-garbage quoting the offending line"
+  bad "3544-baseline-garbage: expected KIND baseline-set-garbage quoting the offending line"
   printf '%s\n' "$g_out"
 fi
 
-# 3d. the baseline does not carry the gate script at all under scripts/
+# 3c-ii. …and the grammar refuses an UNTRIMMED name rather than trimming it. Stated as its own
+#     case because "trim it" is the tempting fix and it is the one that turns a refusing parser
+#     into a guessing one.
+base_ws=$(mkbaseline base-ws - --manifest-lines "$(printf 'file-size\n  fmt')")
+wsb=$(mkbranch wsbranch "$base_ws" - )
+ws_out=$(hook "$wsb")
+if [ "$(field KIND "$ws_out")" = baseline-set-garbage ] \
+   && grep -q 'not a component name' <<<"$(field COMPONENT_SET_LINE "$ws_out")"; then
+  ok "3544-baseline-untrimmed: a manifest line with leading whitespace is REFUSED, not trimmed"
+else
+  bad "3544-baseline-untrimmed: expected KIND baseline-set-garbage for an indented name"
+  printf '%s\n' "$ws_out"
+fi
+
+# 3d. the baseline carries NEITHER the manifest NOR the gate script under scripts/
 base_nofile=$(mkbaseline base-nofile - )
-( fx "$tmp/base-nofile-src" && git rm -q scripts/agent-gate.sh \
-  && git "${GIT_ID[@]}" commit -qm "drop the gate" \
+( fx "$tmp/base-nofile-src" && git rm -q scripts/agent-gate.sh scripts/agent-gate.components \
+  && git "${GIT_ID[@]}" commit -qm "drop the gate and the manifest" \
   && git push -qf "$base_nofile" HEAD:refs/heads/main ) >/dev/null 2>&1
 nofile=$(mkbranch nofile "$base_nofile" - )
 nf_out=$(hook "$nofile")
-if [ "$(field KIND "$nf_out")" = baseline-missing ] \
-   && grep -q 'FAIL-CLOSED (#3544)' <<<"$(field COMPONENT_SET_LINE "$nf_out")" \
-   && grep -q 'scripts/agent-gate.sh' <<<"$(field COMPONENT_SET_LINE "$nf_out")"; then
-  ok "3544-baseline-missing: an absent baseline script FAILs, naming the path it looked for"
+nf_line=$(field COMPONENT_SET_LINE "$nf_out")
+if [ "$(field KIND "$nf_out")" = baseline-unreadable ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$nf_line" \
+   && grep -q 'scripts/agent-gate.sh' <<<"$nf_line" \
+   && grep -q 'scripts/agent-gate.components' <<<"$nf_line"; then
+  ok "3544-baseline-unreadable: a baseline with neither file FAILs, naming BOTH paths it looked for"
 else
-  bad "3544-baseline-missing: expected KIND baseline-missing naming scripts/agent-gate.sh"
+  bad "3544-baseline-unreadable: expected KIND baseline-unreadable naming both paths"
   printf '%s\n' "$nf_out"
+fi
+
+# ---------------------------------------------------------------------------
+# 3e2. THE LOCAL MANIFEST IS THE VERIFIED HALF, AND THAT IS WHAT MAKES A MANIFEST BASELINE
+#     TRUSTWORTHY AT ALL (#3544 REQ-3544-01). The pre-flight asserts THIS TREE's manifest
+#     equals THIS gate's COMPONENTS array before it fetches anything: without that assert the
+#     file is an unverified claim, and a branch that added a component to the array and not to
+#     the manifest would — once merged — leave `main`'s manifest SHORT, so every later branch
+#     would compare against a too-small baseline and silently excuse real skew.
+#
+#     Three kinds, each driven through the shipped code. The POSITIVE CONTROL for all three is
+#     `behind` above: the SAME baseline with a DERIVED manifest reaches `KIND: ok`, so a
+#     `manifest-*` verdict here cannot be a fixture that was broken some other way.
+# ---------------------------------------------------------------------------
+nomani=$(mkbranch nomanifest "$base_ok" - --no-manifest)
+nm_out=$(hook "$nomani")
+nm_line=$(field COMPONENT_SET_LINE "$nm_out")
+if [ "$(field VERDICT "$nm_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$nm_out")" = manifest-missing ] \
+   && [ "$(field SHA "$nm_out")" = "-" ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$nm_line" \
+   && grep -q 'scripts/agent-gate.components' <<<"$nm_line" \
+   && grep -q 'LOCAL component manifest' <<<"$nm_line"; then
+  ok "3544-manifest-missing: a tree with no manifest FAILs closed BEFORE the fetch, naming the file (control: 'behind' reached KIND ok)"
+else
+  bad "3544-manifest-missing: expected KIND manifest-missing + no baseline sha"
+  printf '%s\n' "$nm_out"
+fi
+
+badmani=$(mkbranch badmanifest "$base_ok" - --manifest-lines "$(printf 'file-size\nwarning: unused variable')")
+bm_out=$(hook "$badmani")
+bm_line=$(field COMPONENT_SET_LINE "$bm_out")
+if [ "$(field KIND "$bm_out")" = manifest-garbage ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$bm_line" \
+   && grep -q 'warning: unused variable' <<<"$bm_line"; then
+  ok "3544-manifest-garbage: an ungrammatical local manifest FAILs closed, quoting the line it refused"
+else
+  bad "3544-manifest-garbage: expected KIND manifest-garbage quoting the offending line"
+  printf '%s\n' "$bm_out"
+fi
+
+# STALE: the manifest parses and is well-formed but does NOT match the gate's own array. Built
+# by DERIVING a correct manifest and then dropping one line, so the diagnostic must name that
+# exact component — a bare "does not match" would not tell an author what to fix.
+stalemani=$(mkbranch stalemanifest "$base_ok" - )
+STALE_DROPPED=smoke
+sm_pre=$( fx "$stalemani" && grep -cx -- "$STALE_DROPPED" scripts/agent-gate.components )
+grep -vx -- "$STALE_DROPPED" "$stalemani/scripts/agent-gate.components" >"$tmp/stale-manifest.txt"
+cp "$tmp/stale-manifest.txt" "$stalemani/scripts/agent-gate.components"
+sm_out=$(hook "$stalemani")
+sm_line=$(field COMPONENT_SET_LINE "$sm_out")
+if [ "$sm_pre" -eq 1 ] \
+   && [ "$(field KIND "$sm_out")" = manifest-stale ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$sm_line" \
+   && grep -q 'missing from the manifest: '"$STALE_DROPPED" <<<"$sm_line"; then
+  ok "3544-manifest-stale: a manifest out of step with COMPONENTS FAILs closed and NAMES the component it is missing"
+else
+  bad "3544-manifest-stale: expected KIND manifest-stale naming '$STALE_DROPPED' (fixture had it: $sm_pre)"
+  printf '%s\n' "$sm_out"
+fi
+
+# …and REORDERING alone is stale too: the manifest claims to be what `--list` prints, and
+# `--list` prints dispatch ORDER. Its own arm of the diagnostic, because "same names, different
+# order" and "wrong names" are different repairs.
+reordmani=$(mkbranch reorderedmanifest "$base_ok" - )
+( fx "$reordmani" && bash scripts/agent-gate.sh --list 2>/dev/null | tail -1 >"$tmp/reord.txt" \
+   && bash scripts/agent-gate.sh --list 2>/dev/null | sed '$d' >>"$tmp/reord.txt" ) >/dev/null 2>&1
+cp "$tmp/reord.txt" "$reordmani/scripts/agent-gate.components"
+ro_out=$(hook "$reordmani")
+if [ "$(field KIND "$ro_out")" = manifest-stale ] \
+   && grep -q 'DIFFERENT ORDER' <<<"$(field COMPONENT_SET_LINE "$ro_out")"; then
+  ok "3544-manifest-reordered: a manifest with the same names in a different ORDER is stale, and says so"
+else
+  bad "3544-manifest-reordered: expected KIND manifest-stale naming the order"
+  printf '%s\n' "$ro_out"
+fi
+
+# …and every manifest kind is ADVISORY under --lite, like every other verdict: the fast loop
+# must not require the network OR a freshly regenerated manifest to function.
+nm_lite=$(hook "$nomani" lite)
+if [ "$(field STRICT "$nm_lite")" = no ] \
+   && grep -q '^component-set: ADVISORY-UNMEASURED (#3544)' <<<"$(field COMPONENT_SET_LINE "$nm_lite")" \
+   && grep -q 'manifest-missing' <<<"$(field COMPONENT_SET_LINE "$nm_lite")" \
+   && ! grep -q 'FAIL-CLOSED' <<<"$(field COMPONENT_SET_LINE "$nm_lite")"; then
+  ok "3544-manifest-lite: --lite stamps ADVISORY-UNMEASURED naming the manifest kind and does not fail on it"
+else
+  bad "3544-manifest-lite: expected ADVISORY-UNMEASURED naming manifest-missing under --lite"
+  printf '%s\n' "$nm_lite"
 fi
 
 # ---------------------------------------------------------------------------
@@ -790,12 +1003,19 @@ if cmp -s "$unc/scripts/agent-gate.sh" "$tmp/unc-gate.sh"; then
   bad "3544-uncommitted: could not build the fixture — the COMPONENTS edit removing '$UNC_REMOVED' matched nothing, so the case would test nothing"
 else
   cp "$tmp/unc-gate.sh" "$unc/scripts/agent-gate.sh"
+  # THE MANIFEST MOVES WITH THE EDIT, uncommitted, and that is not fixture bookkeeping: the
+  # pre-flight asserts the WORKING manifest equals the WORKING COMPONENTS array, so a fixture
+  # that edited only the array would stop at `manifest-stale` and never reach the UNCOMMITTED
+  # verdict this case exists for. Removing it from BOTH — and committing NEITHER — is the real
+  # shape of the bypass: HEAD's committed manifest still lists the component.
+  grep -vx -- "$UNC_REMOVED" "$unc/scripts/agent-gate.components" >"$tmp/unc-manifest.txt"
+  cp "$tmp/unc-manifest.txt" "$unc/scripts/agent-gate.components"
   # The fixture's own precondition, asserted rather than assumed: the WORKING copy must no
   # longer list the component while HEAD's committed copy still does. Without this the case
   # could pass because the clone was broken rather than because the guard works.
   unc_wt_has=$( fx "$unc" && bash scripts/agent-gate.sh --list 2>/dev/null | grep -cx -- "$UNC_REMOVED" )
-  unc_head_has=$( fx "$unc" && git show "HEAD:scripts/agent-gate.sh" 2>/dev/null \
-                    | grep -c "^COMPONENTS=(.* $UNC_REMOVED " )
+  unc_head_has=$( fx "$unc" && git show "HEAD:scripts/agent-gate.components" 2>/dev/null \
+                    | grep -cx -- "$UNC_REMOVED" )
   unc_out=$(hook "$unc")
   unc_line=$(field COMPONENT_SET_LINE "$unc_out")
   if [ "$unc_wt_has" -eq 0 ] && [ "$unc_head_has" -ge 1 ] \
@@ -803,6 +1023,7 @@ else
      && [ "$(field KIND "$unc_out")" = ok ] \
      && [ "$(field ANCESTOR "$unc_out")" = yes ] \
      && grep -qw -- "$UNC_REMOVED" <<<"$(field MISSING "$unc_out")" \
+     && [ "$(field HEAD_SRC "$unc_out")" = manifest ] \
      && grep -q 'FAIL-CLOSED (#3544)' <<<"$unc_line" \
      && grep -q 'UNCOMMITTED WORKING-TREE EDIT' <<<"$unc_line" \
      && grep -q 'PRESENT in the gate script AT HEAD' <<<"$unc_line" \
@@ -858,6 +1079,11 @@ if cmp -s "$add/scripts/agent-gate.sh" "$tmp/add-gate.sh"; then
   bad "3544-uncommitted-add: could not build the fixture (the COMPONENTS edit matched nothing)"
 else
   cp "$tmp/add-gate.sh" "$add/scripts/agent-gate.sh"
+  # Same reason as the removal case: the working manifest must match the working array or the
+  # run stops at `manifest-stale` instead of exercising the ADDITION path. The sed puts the
+  # sentinel FIRST in the array, and the local check compares ORDER too, so it goes first here.
+  { printf '%s\n' "$SENTINEL"; cat "$add/scripts/agent-gate.components"; } >"$tmp/add-manifest.txt"
+  cp "$tmp/add-manifest.txt" "$add/scripts/agent-gate.components"
   add_out=$(hook "$add")
   add_line=$(field COMPONENT_SET_LINE "$add_out")
   if [ "$(field VERDICT "$add_out")" = PASS ] \
@@ -879,8 +1105,11 @@ fi
 #     real, through the shipped code path, with ancestry still `yes`.
 base_hu=$(mkbaseline base-headmiss "$ADD_SENTINEL")
 hu=$(mkbranch headmiss "$base_hu" - --from-origin)
-( fx "$hu" && git rm -q --cached scripts/agent-gate.sh \
-   && git "${GIT_ID[@]}" commit -qm "drop the gate from the index" ) >/dev/null 2>&1
+# BOTH files leave the index: HEAD's set is read from the manifest FIRST and only falls back
+# to the script text, so dropping the script alone would leave HEAD perfectly measurable and
+# the case would assert nothing.
+( fx "$hu" && git rm -q --cached scripts/agent-gate.sh scripts/agent-gate.components \
+   && git "${GIT_ID[@]}" commit -qm "drop the gate and manifest from the index" ) >/dev/null 2>&1
 hu_out=$(hook "$hu")
 hu_line=$(field COMPONENT_SET_LINE "$hu_out")
 if [ "$(field VERDICT "$hu_out")" = UNMEASURED ] \
@@ -1074,11 +1303,15 @@ s_out=$(hook "$same")
 s_line=$(field COMPONENT_SET_LINE "$s_out")
 s_sha=$(git -C "$base_same" rev-parse refs/heads/main)
 n_components=$( fx "$same" && bash scripts/agent-gate.sh --list 2>/dev/null | wc -l | tr -d ' ' )
+# The line names WHICH data-only read path certified it (#3544 REQ-3544-01) — asserted as part
+# of the exact match, because a PASS whose baseline source is unstated cannot be audited: the
+# transitional TEXT path is format-brittle and becomes unreachable once the manifest is on main.
 if [ "$(field VERDICT "$s_out")" = PASS ] \
-   && grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha)$" <<<"$s_line"; then
-  ok "3544-no-skew: an in-sync tree stamps an affirmative PASS naming its baseline sha"
+   && [ "$(field BASELINE_SRC "$s_out")" = manifest ] \
+   && grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha via the committed manifest)$" <<<"$s_line"; then
+  ok "3544-no-skew: an in-sync tree stamps an affirmative PASS naming its baseline sha AND the read path"
 else
-  bad "3544-no-skew: expected 'component-set: PASS ($n_components/$n_components vs origin/main $s_sha)'"
+  bad "3544-no-skew: expected 'component-set: PASS ($n_components/$n_components vs origin/main $s_sha via the committed manifest)'"
   printf '%s\n' "$s_out"
 fi
 
@@ -1807,7 +2040,10 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=14   # +baseline-transfer-mismatch (job 242)
+DECLARED_KIND_COUNT=17   # +manifest-{missing,garbage,stale} +baseline-decl-unrecognised
+                         # (#3544 REQ-3544-01); baseline-list-{failed,garbage,empty} and
+                         # baseline-missing became baseline-{unreadable,set-garbage,set-empty}
+                         # when the baseline stopped being derived by EXECUTING a script.
 # Scan the WHOLE gate, not just `_component_set_probe`: every assignment lives inside that
 # function today, but a scan scoped to it would MISS a kind set elsewhere later and the
 # count would silently keep agreeing with this constant. A superset scan cannot miss.
@@ -1900,8 +2136,16 @@ END {
       t = frag[f]
       sub(/^[ \t]*/, "", t)
       sub(/^![ \t]*/, "", t)
-      while (t ~ /^(if|while|until|then|else|elif|do|not)[ \t]+/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)
+      # A LEADING `!` IS STRIPPED INSIDE THE LOOP, not once before it: `if ! VAR=x git init …`
+      # leaves the `!` at the front only AFTER `if ` comes off, and a `!` is not a program name,
+      # so the whole fragment was DISCARDED and the git call was invisible to this audit
+      # (measured: `git init` in the isolated-fetch hop had never been audited). One more
+      # instance of the same family this awk keeps finding — a strip whose ORDER decides
+      # whether the check sees anything at all.
+      while (t ~ /^(if|while|until|then|else|elif|do|not)[ \t]+/ || t ~ /^![ \t]*/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/) {
+        sub(/^![ \t]*/, "", t)
         sub(/^([A-Za-z_][A-Za-z0-9_]*=[^ \t]*|[a-z]+)[ \t]+/, "", t)
+      }
       split(t, w, /[ \t]/)
       cmd = w[1]
       if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) continue
@@ -1929,7 +2173,14 @@ else
   # with no network reach and no spawn, used to redact userinfo out of free text before it
   # reaches _CS_DETAIL. Classified rather than merely added — that classification is the whole
   # point of the list.
-  declared_externals="basename bash cat cut git gtimeout kill mkdir mktemp rm sed sleep timeout tr true"
+  # `chmod` (job 246): the 0600 applied to the isolated fetch config BEFORE the URL — which may
+  # carry a credential — is written into it. A mode change on a path this pre-flight just
+  # created: no network, no spawn, bounded work. LOCAL UTILITY.
+  # `bash` and `mkdir` LEFT the set with #3544 REQ-3544-01: the two `bash <extracted gate>
+  # --list` spawns are gone (the component set is read as DATA now) and with them the scripts/
+  # directory those extractions needed. Removed rather than left in place, because a stale entry
+  # here would silently pre-authorise a re-introduced spawn.
+  declared_externals="basename cat chmod cut git gtimeout kill mktemp rm sed sleep timeout tr true"
   externals=$(printf '%s\n' "$audit_out" | sed -n 's/^EXT\t//p' | sort -u)
   undeclared=""
   for _w in $externals; do
