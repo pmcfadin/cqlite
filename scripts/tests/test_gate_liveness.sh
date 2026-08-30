@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+# test_gate_liveness.sh — non-vacuity proof for the #3473 gate liveness mechanism:
+# scripts/lib/gate-heartbeat.sh (the beater) and scripts/gate-liveness.sh (the reader).
+#
+# WHAT THIS HAS TO PROVE, and why the obvious test is not enough
+# -------------------------------------------------------------
+# The mechanism's whole job is to distinguish three states that #3041's INCOMPLETE
+# sentinel collapses into one: queued/running, reaped, and finished. A test that only
+# drives the happy path ("a live gate reads RUNNING") would pass against a reader
+# hard-wired to say RUNNING — which is the fail-OPEN direction, and the direction that
+# costs a lane a silently-lost 40-minute gate. So every state is asserted with its own
+# green AND its own red, and the two dangerous confusions get dedicated cases:
+#
+#   * a MISSING heartbeat must read UNKNOWN, never REAPED. A gate predating this
+#     mechanism, or one whose summary path is unwritable, produces the same absence,
+#     and "absence of a beat" is not evidence of death (CLAUDE.md: never derive a
+#     verdict from the absence of a bad signal).
+#   * a beat left by a CONCURRENT PEER must read UNKNOWN, never RUNNING/COMPLETE —
+#     the #2874 reader contract, which holds for a PASS block just as much as for a
+#     beat.
+#
+# Hermetic: temp dirs only, no cargo, no datasets, no network, no gh. The one nested
+# gate invocation is `--only file-size` (~2s, self-exempt from the #1825 slot, and
+# --only file-size can never select tooling-tests, so it cannot recurse).
+set -uo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+READER="$REPO_ROOT/scripts/gate-liveness.sh"
+BEATER="$REPO_ROOT/scripts/lib/gate-heartbeat.sh"
+GATE="$REPO_ROOT/scripts/agent-gate.sh"
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/gate-liveness-test.XXXXXX")
+# Reap any beater this suite started, whatever the exit path: a leaked beater would
+# outlive the test and keep rewriting a file under $TMP.
+# shellcheck disable=SC2317
+cleanup() {
+  local p
+  for p in $(cat "$TMP/beater-pids" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
+  chmod -R u+rwX "$TMP" 2>/dev/null || true
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+pass=0; fail=0
+# NOTE: these counters are incremented in the TOP-LEVEL shell only. Never wrap a case
+# in `( … )` — a subshell's increments are discarded and the suite reports failed:0
+# while printing FAILs (a real incident in this repo's tooling tests).
+ok()   { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
+bad()  { fail=$((fail+1)); printf 'FAIL %s\n' "$1"; [ $# -ge 2 ] && printf '     %s\n' "$2"; }
+
+# run_reader <args...> -> sets RC and OUT
+run_reader() {
+  OUT=$(bash "$READER" "$@" 2>&1)
+  RC=$?
+}
+
+# expect_reader <label> <want-status> <want-rc> <want-substring> -- <reader args...>
+expect_reader() {
+  local label="$1" want="$2" wantrc="$3" needle="$4"; shift 5
+  run_reader "$@"
+  if ! printf '%s' "$OUT" | grep -q "^gate-liveness: $want "; then
+    bad "$label" "expected status $want, got: $(printf '%s' "$OUT" | head -1)"; return
+  fi
+  if [ "$RC" != "$wantrc" ]; then
+    bad "$label" "expected exit $wantrc, got $RC"; return
+  fi
+  if [ -n "$needle" ] && ! printf '%s' "$OUT" | grep -q "$needle"; then
+    bad "$label" "expected cause to mention '$needle', got: $(printf '%s' "$OUT" | head -1)"; return
+  fi
+  ok "$label"
+}
+
+# mk_summary <path> <run-id> <result-line-or-empty>
+mk_summary() {
+  { echo "==== AGENT-GATE SUMMARY ===="
+    echo "run-id: $2"
+    [ -n "${3:-}" ] && echo "RESULT: $3"
+    echo "==== END AGENT-GATE SUMMARY ===="
+  } > "$1"
+}
+# mk_beat <path> <run-id> <age-secs> [interval]
+mk_beat() {
+  local iv="${4:-20}"
+  { echo "==== AGENT-GATE HEARTBEAT ===="
+    echo "run-id: $2"
+    echo "gate-pid: 4242"
+    echo "parent-check: starttime"
+    echo "interval: $iv"
+    echo "beat-seq: 7"
+    echo "beat-epoch: $(( $(date +%s) - $3 ))"
+    echo "==== END AGENT-GATE HEARTBEAT ===="
+  } > "$1"
+}
+
+echo "=== section 1: usage (a reader that guesses its subject is worse than one that refuses) ==="
+run_reader;                                   [ "$RC" = 64 ] && ok "1.1 no args => 64"            || bad "1.1 no args => 64" "rc=$RC"
+run_reader --bogus x;                          [ "$RC" = 64 ] && ok "1.2 unknown option => 64"     || bad "1.2 unknown option => 64" "rc=$RC"
+run_reader /a /b;                              [ "$RC" = 64 ] && ok "1.3 two positionals => 64"    || bad "1.3 two positionals => 64" "rc=$RC"
+run_reader --help;                             [ "$RC" = 0  ] && ok "1.4 --help => 0"              || bad "1.4 --help => 0" "rc=$RC"
+
+echo "=== section 2: the terminal verdict set, enumerated (not assumed to be two values) ==="
+i=0
+for r in PASS FAIL PARTIAL ERROR REFUSED; do
+  i=$((i+1)); f="$TMP/s-$r.txt"; mk_summary "$f" run-$r "$r"
+  expect_reader "2.$i RESULT: $r => COMPLETE" COMPLETE 0 "terminal verdict" -- "$f"
+done
+# A verdict this reader does not know must NOT be classified. Fail-closed: a lane reads
+# UNKNOWN and asks, rather than the reader inventing a meaning for a future value.
+mk_summary "$TMP/s-weird.txt" run-w "MAGENTA"
+expect_reader "2.6 unknown RESULT value => UNKNOWN" UNKNOWN 4 "unrecognised-result" -- "$TMP/s-weird.txt"
+mk_summary "$TMP/s-nores.txt" run-n ""
+expect_reader "2.7 no RESULT line => UNKNOWN" UNKNOWN 4 "no-result-line" -- "$TMP/s-nores.txt"
+
+echo "=== section 3: the summary artifact itself ==="
+expect_reader "3.1 missing summary => UNKNOWN" UNKNOWN 4 "no-summary-artifact" -- "$TMP/does-not-exist.txt"
+if [ "$(id -u)" != 0 ]; then
+  f="$TMP/s-noperm.txt"; mk_summary "$f" run-p "PASS"; chmod 000 "$f"
+  expect_reader "3.2 unreadable summary => UNKNOWN" UNKNOWN 4 "summary-unreadable" -- "$f"
+  chmod 644 "$f"
+else
+  echo "skip 3.2 unreadable summary (running as root: chmod 000 does not deny root)"
+fi
+
+echo "=== section 4: THE CORE STATE SPLIT — the three faces of INCOMPLETE ==="
+# 4.1 is the case #3473 exists for: before this mechanism, this was the ONLY state, and
+# it was indistinguishable from 4.2 and 4.3.
+mk_summary "$TMP/a.txt" run-a "INCOMPLETE (gate did not finish)"
+expect_reader "4.1 INCOMPLETE + no beat => UNKNOWN (absence is NOT death)" UNKNOWN 4 "no-heartbeat-artifact" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 5
+expect_reader "4.2 INCOMPLETE + fresh beat => RUNNING" RUNNING 2 "alive" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 4000
+expect_reader "4.3 INCOMPLETE + stale beat => REAPED" REAPED 3 "stopped beating" -- "$TMP/a.txt"
+# The INCOMPLETE (foreign) variant (#2874) is likewise not a verdict.
+mk_summary "$TMP/b.txt" run-b "INCOMPLETE (foreign)"
+mk_beat "$TMP/b.txt.heartbeat" run-b 5
+expect_reader "4.4 INCOMPLETE (foreign) + fresh beat => RUNNING" RUNNING 2 "" -- "$TMP/b.txt"
+
+echo "=== section 5: the staleness window is derived from the beat, and its boundary holds ==="
+# The window is 3*interval with a 90s floor, read from the beat's OWN interval line, so
+# the reader carries no duplicate of the gate's beat period.
+mk_beat "$TMP/a.txt.heartbeat" run-a 89 20
+expect_reader "5.1 age 89s, floor window 90s => RUNNING"  RUNNING 2 "" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 90 20
+expect_reader "5.2 age 90s == window => RUNNING"          RUNNING 2 "" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 91 20
+expect_reader "5.3 age 91s > window => REAPED"            REAPED  3 "" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 179 60
+expect_reader "5.4 interval 60 => window 180, age 179 RUNNING" RUNNING 2 "window 180s" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 181 60
+expect_reader "5.5 interval 60 => window 180, age 181 REAPED"  REAPED  3 "window 180s" -- "$TMP/a.txt"
+
+echo "=== section 6: a peer's artifacts are never read as ours (#2874 reader contract) ==="
+mk_summary "$TMP/p.txt" peer-run "PASS"
+expect_reader "6.1 foreign run-id on a PASS => UNKNOWN, not COMPLETE" \
+  UNKNOWN 4 "summary-run-id-mismatch" -- "$TMP/p.txt" --run-id my-run
+mk_summary "$TMP/q.txt" my-run "INCOMPLETE (gate did not finish)"
+mk_beat "$TMP/q.txt.heartbeat" peer-run 5
+expect_reader "6.2 foreign run-id on a fresh beat => UNKNOWN, not RUNNING" \
+  UNKNOWN 4 "heartbeat-run-id-mismatch" -- "$TMP/q.txt" --run-id my-run
+# With NO --run-id the reader still refuses when the two artifacts disagree: they
+# describe different runs, so neither is evidence about the other.
+expect_reader "6.3 summary/beat disagree, no --run-id => UNKNOWN" \
+  UNKNOWN 4 "run-id-disagree" -- "$TMP/q.txt"
+# Control: matching run-ids and a matching --run-id must still answer.
+mk_beat "$TMP/q.txt.heartbeat" my-run 5
+expect_reader "6.4 control: matching run-ids => RUNNING" RUNNING 2 "" -- "$TMP/q.txt" --run-id my-run
+
+echo "=== section 7: malformed beats are UNKNOWN, never silently fresh ==="
+mk_summary "$TMP/m.txt" run-m "INCOMPLETE (gate did not finish)"
+hb="$TMP/m.txt.heartbeat"
+mk_beat "$hb" run-m 5; sed -i 's/^run-id: .*//' "$hb"
+expect_reader "7.1 beat with no run-id => UNKNOWN" UNKNOWN 4 "heartbeat-no-run-id" -- "$TMP/m.txt"
+mk_beat "$hb" run-m 5; sed -i 's/^beat-epoch: .*/beat-epoch: soon/' "$hb"
+expect_reader "7.2 non-numeric beat-epoch => UNKNOWN" UNKNOWN 4 "unparseable-epoch" -- "$TMP/m.txt"
+mk_beat "$hb" run-m 5; sed -i 's/^interval: .*/interval: often/' "$hb"
+expect_reader "7.3 non-numeric interval => UNKNOWN" UNKNOWN 4 "unparseable-interval" -- "$TMP/m.txt"
+mk_beat "$hb" run-m 5; sed -i 's/^interval: .*/interval: 0/' "$hb"
+expect_reader "7.4 interval 0 => UNKNOWN" UNKNOWN 4 "bad-interval" -- "$TMP/m.txt"
+# A future-dated beat would otherwise be fresh FOREVER — a clock step or a hand-edited
+# artifact must not buy an unlimited RUNNING.
+mk_beat "$hb" run-m -600
+expect_reader "7.5 beat dated in the future => UNKNOWN" UNKNOWN 4 "in-the-future" -- "$TMP/m.txt"
+# ...but a beat a hair ahead of the reader's clock is ordinary jitter, not a fault.
+mk_beat "$hb" run-m -5
+expect_reader "7.6 beat 5s ahead (within one interval) => RUNNING" RUNNING 2 "" -- "$TMP/m.txt"
+if [ "$(id -u)" != 0 ]; then
+  mk_beat "$hb" run-m 5; chmod 000 "$hb"
+  expect_reader "7.7 unreadable beat => UNKNOWN" UNKNOWN 4 "heartbeat-unreadable" -- "$TMP/m.txt"
+  chmod 644 "$hb"
+else
+  echo "skip 7.7 unreadable beat (running as root)"
+fi
+# --heartbeat override: the default is a fixed suffix, but a caller may point elsewhere.
+mk_beat "$TMP/elsewhere.hb" run-m 5; rm -f "$hb"
+expect_reader "7.8 --heartbeat override is honoured" RUNNING 2 "" -- "$TMP/m.txt" --heartbeat "$TMP/elsewhere.hb"
+
+echo "=== section 8: the beater's usage contract ==="
+b_usage() { # b_usage <label> <args...>
+  local label="$1"; shift
+  local out rc
+  out=$(bash "$BEATER" "$@" 2>&1); rc=$?
+  [ "$rc" = 64 ] && ok "$label" || bad "$label" "expected 64, got $rc ($out)"
+}
+b_usage "8.1 no args => 64"
+b_usage "8.2 missing --gate-pid => 64"       --file "$TMP/x" --run-id r
+b_usage "8.3 missing --run-id => 64"         --file "$TMP/x" --gate-pid 1
+b_usage "8.4 missing --file => 64"           --run-id r --gate-pid 1
+b_usage "8.5 non-numeric --gate-pid => 64"   --file "$TMP/x" --run-id r --gate-pid self
+b_usage "8.6 interval 0 => 64"               --file "$TMP/x" --run-id r --gate-pid 1 --interval 0
+b_usage "8.7 unknown argument => 64"         --file "$TMP/x" --run-id r --gate-pid 1 --forever
+
+echo "=== section 9: the beater beats for a live gate, and STOPS when the gate dies ==="
+# This is the mechanism's load-bearing behaviour. A beater that outlived its gate would
+# report a dead gate as RUNNING forever — #3473's own defect, one level down.
+sleep_pid=""
+start_fake_gate() {                     # a stand-in "gate" process we can kill on cue
+  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
+  sleep_pid=$!
+}
+start_fake_gate
+hbf="$TMP/live.hb"
+bash "$BEATER" --file "$hbf" --run-id live-run --gate-pid "$sleep_pid" --mode full --interval 1 \
+  </dev/null >/dev/null 2>&1 &
+beater_pid=$!
+echo "$beater_pid" >> "$TMP/beater-pids"
+# Wait for the first beat rather than assuming a timing (bounded, so a broken beater
+# fails the case instead of hanging the suite).
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$hbf" ] && break; sleep 0.3; done
+if [ -f "$hbf" ]; then
+  ok "9.1 beater writes a beat for a live gate"
+  grep -q "^run-id: live-run$"      "$hbf" && ok "9.2 beat carries the run-id"       || bad "9.2 beat carries the run-id" "$(cat "$hbf")"
+  grep -q "^gate-pid: $sleep_pid$"  "$hbf" && ok "9.3 beat names the gate pid"       || bad "9.3 beat names the gate pid"
+  grep -q "^mode: full$"            "$hbf" && ok "9.4 beat carries the mode"         || bad "9.4 beat carries the mode"
+  grep -q "^parent-check: starttime$" "$hbf" && ok "9.5 /proc host => reuse-proof parent-check" \
+    || ok "9.5 non-/proc host => parent-check kill0 (declared, not assumed)"
+else
+  bad "9.1 beater writes a beat for a live gate" "no beat file appeared"
+fi
+# Freshness control: the reader must see this live beat as RUNNING.
+mk_summary "$TMP/live.txt" live-run "INCOMPLETE (gate did not finish)"
+expect_reader "9.6 live beater => reader says RUNNING" RUNNING 2 "" -- "$TMP/live.txt" --heartbeat "$hbf" --run-id live-run
+# Now kill the "gate". The beater must notice and EXIT, leaving the last beat to age.
+kill -9 "$sleep_pid" 2>/dev/null; wait "$sleep_pid" 2>/dev/null
+beater_gone=no
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  kill -0 "$beater_pid" 2>/dev/null || { beater_gone=yes; break; }
+  sleep 0.4
+done
+[ "$beater_gone" = yes ] && ok "9.7 beater exits when its gate dies" \
+                         || bad "9.7 beater exits when its gate dies" "beater $beater_pid still alive"
+# And the beat must not advance after the gate's death: a terminating beater that wrote
+# one last beat would date the gate's liveness to the moment it was killed.
+before=$(grep '^beat-epoch: ' "$hbf" 2>/dev/null)
+sleep 2
+after=$(grep '^beat-epoch: ' "$hbf" 2>/dev/null)
+[ "$before" = "$after" ] && ok "9.8 no beat is written after the gate dies" \
+                         || bad "9.8 no beat is written after the gate dies" "$before -> $after"
+
+echo "=== section 10: the beater refuses to beat for a gate that is ALREADY dead ==="
+# Affirmative liveness, not "absence of a death signal": with a dead pid there must be
+# no artifact at all, so a reader reports UNKNOWN (no beat) rather than RUNNING.
+start_fake_gate; dead_pid="$sleep_pid"
+kill -9 "$dead_pid" 2>/dev/null; wait "$dead_pid" 2>/dev/null
+deadf="$TMP/dead.hb"
+bash "$BEATER" --file "$deadf" --run-id dead-run --gate-pid "$dead_pid" --interval 1 </dev/null >/dev/null 2>&1
+[ ! -f "$deadf" ] && ok "10.1 dead gate pid => no beat is ever written" \
+                  || bad "10.1 dead gate pid => no beat is ever written" "$(cat "$deadf")"
+
+echo "=== section 11: the /proc starttime parser, differentially vs awk ==="
+# The reuse-proofing rests entirely on field 22 of /proc/<pid>/stat, whose field 2 may
+# contain spaces AND parens. A port is only as good as the original it was tested
+# against (CLAUDE.md, #3283), so the parser is compared against an INDEPENDENT
+# implementation over every pid on this host, not against a model of one.
+if [ -d /proc/1 ]; then
+  fn=$(sed -n '/^_starttime() {$/,/^}$/p' "$BEATER")
+  if ! printf '%s' "$fn" | grep -q '_starttime()'; then
+    # A failed derivation is a FAIL naming the derivation, never a silent skip: a
+    # renamed function would otherwise make this whole section vacuous.
+    bad "11.0 extract _starttime from the beater" "sed found no _starttime() { ... } block in $BEATER"
+  else
+    ok "11.0 extract _starttime from the beater"
+    harness="$TMP/starttime-harness.sh"
+    { echo 'set -uo pipefail'; printf '%s\n' "$fn"
+      echo 'for p in "$@"; do printf "%s %s\n" "$p" "$(_starttime "$p" 2>/dev/null)"; done'
+    } > "$harness"
+    pids=$(ls -1 /proc 2>/dev/null | grep -E '^[0-9]+$' | head -400)
+    mismatch=0; compared=0
+    while read -r pid mine; do
+      theirs=$(awk '{ for(i=NF;i>0;i--) if ($i ~ /\)$/) { print $(i+20); exit } }' "/proc/$pid/stat" 2>/dev/null)
+      # A pid that exited between the two reads yields empty on one side; that is a
+      # race, not a disagreement, so it is not counted either way.
+      [ -n "$mine" ] && [ -n "$theirs" ] || continue
+      compared=$((compared+1))
+      [ "$mine" = "$theirs" ] || { mismatch=$((mismatch+1)); echo "     pid $pid: beater=$mine awk=$theirs"; }
+    done <<< "$(bash "$harness" $pids)"
+    # An empty comparison set is a FAILED measurement, not a pass.
+    if [ "$compared" -lt 5 ]; then
+      bad "11.1 parser matches awk over live pids" "only $compared pids compared — measurement did not happen"
+    elif [ "$mismatch" -eq 0 ]; then
+      ok "11.1 parser matches awk over $compared live pids"
+    else
+      bad "11.1 parser matches awk over live pids" "$mismatch of $compared disagreed"
+    fi
+    # The shape a naive `awk '{print $22}'` gets wrong: a comm containing BOTH a space
+    # and a ')'. Fields below are numbered as /proc/<pid>/stat numbers them: f1=pid,
+    # f2=comm, f3=state, so starttime (f22) is the 20th token AFTER the comm. The 18
+    # fillers below are f4..f21, putting 987654 at f22 exactly.
+    weird='4242 (my ) proc) S 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 987654 23 24'
+    got=$(printf '%s' "$weird" | { read -r raw; rest="${raw##*) }"; set -- $rest; printf '%s' "${20}"; })
+    [ "$got" = 987654 ] && ok "11.2 comm with a space and ')' parses to field 22" \
+                        || bad "11.2 comm with a space and ')' parses to field 22" "got '$got', want 987654"
+    # RED control for 11.2: the naive whole-line `$22` reads INTO the comm on this
+    # input, so the case above is proving something a wrong parser would fail.
+    naive=$(printf '%s\n' "$weird" | awk '{print $22}')
+    [ "$naive" != 987654 ] && ok "11.3 naive awk \$22 is wrong on this input (case 11.2 is non-vacuous)" \
+                           || bad "11.3 naive awk \$22 is wrong on this input" "naive also got 987654 — 11.2 proves nothing"
+  fi
+else
+  echo "skip section 11 (no /proc on this host)"
+fi
+
+echo "=== section 12: structural asserts on the gate wiring ==="
+# Behavioural cases only cover the shapes someone already thought of, so the two
+# invariants that are easy to silently undo are asserted against the source.
+#
+# (a) bash traps do NOT compose: a second `trap ... EXIT` REPLACES the first. The slot
+#     trap used to be armed on its own; if anyone re-adds that bare form, the beater is
+#     orphaned on every full gate and outlives it.
+if grep -qE "^[[:space:]]*trap '_gate_release_slot' EXIT" "$GATE"; then
+  bad "12.1 no bare _gate_release_slot EXIT trap" "found one — it would replace the composed _gate_atexit trap and orphan the beater"
+else
+  ok "12.1 no bare _gate_release_slot EXIT trap"
+fi
+grep -qE "^[[:space:]]*trap '_gate_atexit' EXIT" "$GATE" && ok "12.2 the composed _gate_atexit trap is armed" \
+  || bad "12.2 the composed _gate_atexit trap is armed" "not found in $GATE"
+# (b) the EXIT trap is inherited by backgrounded pool subshells (#1737), so both
+#     at-exit helpers need the BASHPID guard or a pool subshell's exit kills the
+#     parent's beater and freezes the beat under a LIVE gate.
+for f in _hb_stop _hb_ensure; do
+  body=$(sed -n "/^$f() {\$/,/^}\$/p" "$GATE")
+  if ! printf '%s' "$body" | grep -q "$f()"; then
+    bad "12.3 $f is present and extractable" "no $f() { ... } block in $GATE"
+  elif printf '%s' "$body" | grep -q 'BASHPID:-\$\$'; then
+    ok "12.3 $f carries the BASHPID pool-subshell guard"
+  else
+    bad "12.3 $f carries the BASHPID pool-subshell guard" "guard missing from $f"
+  fi
+done
+# (c) no opt-out env var may widen the staleness window or disable the beat: that is
+#     the escape hatch that would buy a vacuous "RUNNING" for a dead gate.
+if grep -qE 'CQLITE_GATE_(DISABLE_HEARTBEAT|HEARTBEAT_INTERVAL)|AGENT_GATE_HEARTBEAT' "$GATE" "$READER" "$BEATER"; then
+  bad "12.4 no heartbeat opt-out env var" "found an env override for the heartbeat"
+else
+  ok "12.4 no heartbeat opt-out env var"
+fi
+
+echo "=== section 13: end-to-end through the real gate (wiring evidence) ==="
+# A mechanism is only done when its PUBLIC surface exercises it. --only file-size is
+# ~2s, self-exempt from the #1825 slot, and cannot select tooling-tests (no recursion).
+e2e="$TMP/e2e-summary.txt"
+if AGENT_GATE_SUMMARY_FILE="$e2e" timeout 600 bash "$GATE" --only file-size >"$TMP/e2e.log" 2>&1 </dev/null; then :; fi
+if [ ! -f "$e2e" ]; then
+  bad "13.1 real gate writes its summary" "no $e2e (last 20 lines: $(tail -20 "$TMP/e2e.log"))"
+else
+  ok "13.1 real gate writes its summary"
+  rid=$(grep -m1 '^run-id: ' "$e2e" | sed 's/^run-id: //')
+  [ -f "$e2e.heartbeat" ] && ok "13.2 real gate publishes a heartbeat at <summary>.heartbeat" \
+    || bad "13.2 real gate publishes a heartbeat at <summary>.heartbeat" "absent"
+  if [ -f "$e2e.heartbeat" ]; then
+    grep -q "^run-id: $rid$" "$e2e.heartbeat" && ok "13.3 beat run-id matches the summary's" \
+      || bad "13.3 beat run-id matches the summary's" "$(grep '^run-id: ' "$e2e.heartbeat")"
+    grep -q '^mode: only$' "$e2e.heartbeat" && ok "13.4 an --only run stamps mode: only, never full" \
+      || bad "13.4 an --only run stamps mode: only, never full" "$(grep '^mode: ' "$e2e.heartbeat")"
+  fi
+  # The block must DECLARE the mechanism ran — a pasted SUMMARY with no heartbeat line
+  # is indistinguishable from one whose beater was never wired.
+  grep -q '^heartbeat: on file: ' "$e2e" && ok "13.5 SUMMARY declares heartbeat: on" \
+    || bad "13.5 SUMMARY declares heartbeat: on" "$(grep '^heartbeat' "$e2e")"
+  # And the reader, bound to that run-id, must resolve it.
+  expect_reader "13.6 reader resolves the real run" COMPLETE 0 "terminal verdict" -- "$e2e" --run-id "$rid"
+  # No beater may outlive the gate that started it.
+  if [ -n "${rid:-}" ] && pgrep -f "gate-heartbeat.sh --file $e2e" >/dev/null 2>&1; then
+    bad "13.7 no beater outlives the gate" "a beater for $e2e is still running"
+  else
+    ok "13.7 no beater outlives the gate"
+  fi
+fi
+
+echo
+echo "==== test_gate_liveness.sh: passed=$pass failed=$fail ===="
+[ "$fail" -eq 0 ] || exit 1
+exit 0

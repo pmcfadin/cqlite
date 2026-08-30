@@ -3550,6 +3550,16 @@ _hb_stop() {
   [ "${BASHPID:-$$}" = "$$" ] || return 0
   [ -n "${HEARTBEAT_PID:-}" ] || return 0
   kill "$HEARTBEAT_PID" 2>/dev/null || true
+  # BOUNDED reap. The beater handles SIGTERM promptly by design (it waits on a
+  # backgrounded sleep precisely so its trap is not deferred), so this normally spins
+  # once. It is bounded rather than a bare `wait` because an at-exit handler must never
+  # be able to hang the gate: if the beater somehow does not go, we leave it — its own
+  # pid check retires it within one interval, and it cannot beat for a dead gate.
+  local _i=0
+  while [ "$_i" -lt 20 ] && kill -0 "$HEARTBEAT_PID" 2>/dev/null; do
+    sleep 0.05
+    _i=$((_i + 1))
+  done
   HEARTBEAT_PID=""
 }
 

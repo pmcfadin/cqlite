@@ -125,13 +125,31 @@ _beat() {
 
 # Exit quietly on a signal WITHOUT beating: a terminating beater must never leave a
 # beat newer than its own death, or the reader would date the gate's liveness to the
-# moment the beater was killed.
-trap 'exit 0' HUP TERM INT QUIT PIPE
+# moment the beater was killed. Also drop the in-flight temp file, so a beater killed
+# mid-write leaves no `<file>.tmp.<pid>` litter beside the caller's summary.
+SLEEP_PID=""
+# shellcheck disable=SC2317  # reached only via the trap below
+_shutdown() {
+  [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2>/dev/null
+  rm -f "$FILE.tmp.$$" 2>/dev/null
+  exit 0
+}
+trap _shutdown HUP TERM INT QUIT PIPE
 
 seq=0
 while :; do
-  _gate_alive || exit 0
+  _gate_alive || { rm -f "$FILE.tmp.$$" 2>/dev/null; exit 0; }
   seq=$((seq + 1))
   _beat "$seq"
-  sleep "$INTERVAL"
+  # `sleep &` + `wait`, NOT a foreground `sleep`. bash does not run a trap handler
+  # while a FOREGROUND child is running — it defers until the child reaps — so a
+  # foreground `sleep $INTERVAL` made this process ignore the gate's SIGTERM for up to
+  # a full interval, and a beater still alive after its gate exited is exactly the
+  # "orphaned beater" this script's pid check exists to prevent (measured: the #3473
+  # end-to-end case caught a 20s straggler). `wait` IS interruptible by a trap, so the
+  # handler runs immediately and kills the pending sleep on its way out.
+  sleep "$INTERVAL" &
+  SLEEP_PID=$!
+  wait "$SLEEP_PID" 2>/dev/null
+  SLEEP_PID=""
 done
