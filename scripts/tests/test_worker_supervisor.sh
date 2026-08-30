@@ -5807,11 +5807,142 @@ PY
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Test 47-lock (#3549, roborev job 185 F3, class sweep): THE `ps` LIVENESS FALLBACK DISTINGUISHES "no
+# such process" FROM "`ps` could not answer".
+#
+# The pre-fix form was `if ps -p "$pid" >/dev/null 2>&1; then live; else dead; fi` — every non-zero
+# exit, including `ps` failing for its OWN reasons, read as an affirmative absence. Same shape as
+# reporting an unread `cmdline` as a non-match, and here the verdict is what makes a lock "stale" and
+# earns an operator a deletion instruction, so the permissive collapse is the expensive direction.
+#
+# REACHING THE BRANCH TAKES TWO STAGED FACTS, and both are the established scratch-copy technique
+# (no seam in the shipped script): the procfs literal substituted for a nonexistent root, so procfs
+# cannot corroborate; and, for a subject that is genuinely ALIVE, the errno branch deleted — otherwise
+# `kill -0` answers `live` first and the fallback is never reached at all. With both applied, pid 1
+# under a non-root run is a LIVE process whose liveness only `ps` can establish, which is exactly the
+# macOS/hidepid shape the fallback exists for. Under root there is no EPERM subject and the live
+# sub-assertions SKIP rather than silently pass.
+# ---------------------------------------------------------------------------
+test_legacy_lock_ps_liveness_fallback_is_three_valued() {
+  local d body noerrno mutant blind stubdir dead ans
+  d="$(new_case_dir)"
+  blind="/nonexistent-procfs-for-3549-ps"
+  body="$T_LOCKFN/liveness-ps.sh"
+  noerrno="$T_LOCKFN/liveness-ps-noerrno.sh"
+  mutant="$T_LOCKFN/liveness-ps-mutant.sh"
+  stubdir="$d/psstub"
+  mkdir -p "$T_LOCKFN" "$stubdir"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_pid_liveness()/,/^}/p' "$SUPERVISOR" | sed "s#/proc#$blind#g"
+    printf '%s\n' 'supervisor_pid_liveness "$1"'
+  } >"$body"
+  if diff -q <(sed -n '/^supervisor_pid_liveness()/,/^}/p' "$SUPERVISOR") \
+             <(sed -n '/^supervisor_pid_liveness()/,/^}/p' "$body" | sed "s#$blind#/proc#g") >/dev/null; then
+    pass "liveness-ps: the scratch copy differs from the shipped function ONLY in the procfs literal (inverse substitution is byte-identical)"
+  else
+    fail "liveness-ps-scratch-drift: the scratch copy is not the shipped function with only the procfs substitution applied"
+  fi
+  if [[ ! -d "$blind/self" ]]; then
+    pass "liveness-ps PREMISE: the substituted procfs root does not exist, so the ps fallback is the only corroboration left"
+  else
+    fail "liveness-ps-premise: $blind/self exists; the case below would not reach the ps branch"
+  fi
+  if ! command -v ps >/dev/null 2>&1; then
+    skip "liveness-ps: no ps on this host — the fallback under test is unreachable"
+    return 0
+  fi
+
+  # (1) A REAL reaped pid, answered by the REAL ps: `kill -0` fails with ESRCH, procfs is blind, and ps
+  # exits 1 with no output — the documented no-such-process answer, which IS an affirmative absence.
+  sleep 0.1 &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  ans="$(bash "$body" "$dead")"
+  if [[ "$ans" == dead ]]; then
+    pass "liveness-ps: procfs blind + real ps — a REAL reaped pid answers 'dead' (ps exit 1, no output: the documented no-such-process answer)"
+  else
+    fail "liveness-ps-dead: answered [$ans] for reaped pid $dead via the ps fallback"
+  fi
+
+  # The errno branch removed as well, so a LIVE subject reaches the fallback. One line, and the
+  # difference is asserted before anything is concluded from the copy.
+  sed "/not permitted/d" "$body" >"$noerrno"
+  if [[ "$(diff "$body" "$noerrno" | grep -c '^<')" == "1" ]] && bash -n "$noerrno" 2>/dev/null; then
+    pass "liveness-ps: the live-subject copy differs from the scratch copy by EXACTLY the one errno-branch line, and parses"
+  else
+    fail "liveness-ps-noerrno-shape: the copy differs by $(diff "$body" "$noerrno" | grep -c '^<') line(s) or does not parse"
+    return 0
+  fi
+  if kill -0 1 2>/dev/null; then
+    skip "liveness-ps: this run can signal pid 1 (root), so no EPERM subject exists and a LIVE pid cannot be routed to the ps fallback"
+  else
+    # (2) LIVE subject, REAL ps: the fallback names pid 1, so it answers `live`. This is the direction
+    # that proves the branch is not blanket-cautious.
+    ans="$(bash "$noerrno" 1)"
+    if [[ "$ans" == live ]]; then
+      pass "liveness-ps: procfs blind, errno branch gone, real ps — LIVE pid 1 answers 'live' because ps NAMED it (output, not exit status)"
+    else
+      fail "liveness-ps-live: answered [$ans] for LIVE pid 1 with the real ps as the only oracle"
+    fi
+    # (3) LIVE subject, a `ps` THAT CANNOT ANSWER (exit 2, no output): the verdict is `unknown`, which
+    # refuses — never `dead`, which would call a live holder's lock stale.
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 2' >"$stubdir/ps"
+    chmod +x "$stubdir/ps"
+    ans="$(env PATH="$stubdir" "$BASH" "$noerrno" 1)"
+    if [[ "$ans" == unknown ]]; then
+      pass "liveness-ps: a ps that FAILS (exit 2, no output) yields 'unknown' for LIVE pid 1 — an unmeasured probe is not an affirmative absence"
+    else
+      fail "liveness-ps-unknown: answered [$ans] with a failing ps for LIVE pid 1; 'dead' here is the call-a-live-holder-stale outcome"
+    fi
+    # MUTANT CONTRAST: the pre-fix status-only form answers `dead` for that same failing ps.
+    python3 - "$noerrno" "$mutant" <<'PYEOF'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+old = """    local psout="" psrc=0
+    psout="$(ps -p "$pid" -o pid= 2>/dev/null)" || psrc=$?
+    if [[ -n "$psout" ]]; then
+      printf 'live\\n'
+    elif [[ "$psrc" -eq 1 ]]; then
+      printf 'dead\\n'
+    else
+      printf 'unknown\\n'
+    fi
+"""
+new = """    if ps -p "$pid" >/dev/null 2>&1; then printf 'live\\n'; else printf 'dead\\n'; fi
+"""
+assert s.count(old) == 1, "the shipped ps fallback no longer has the expected shape"
+open(dst, 'w').write(s.replace(old, new))
+PYEOF
+    if [[ -s "$mutant" ]] && bash -n "$mutant" 2>/dev/null; then
+      ans="$(env PATH="$stubdir" "$BASH" "$mutant" 1)"
+      if [[ "$ans" == dead ]]; then
+        pass "liveness-ps MUTANT CONTRAST: the pre-fix status-only form answers 'dead' for LIVE pid 1 whose ps FAILED — the affirmative absence the fix removes"
+      else
+        fail "liveness-ps-mutant: the pre-fix form answered [$ans]; expected the false 'dead', or the contrast proves nothing"
+      fi
+    else
+      fail "liveness-ps-mutant-build: the pre-fix mutant could not be built from the live-subject copy"
+    fi
+    # ...and the same stub really is what `ps` resolves to, or the two asserts above are accidental.
+    if [[ "$(env PATH="$stubdir" "$BASH" -c 'command -v ps')" == "$stubdir/ps" ]]; then
+      pass "liveness-ps NON-VACUITY: ps resolves to the failing stub under the scoped PATH, so both verdicts above are attributable to it"
+    else
+      fail "liveness-ps-stub-leak: ps resolves to [$(env PATH="$stubdir" "$BASH" -c 'command -v ps')] under PATH=$stubdir"
+    fi
+  fi
+}
+
 t test_legacy_lock_eperm_errno_branch_is_load_bearing
 t test_legacy_lock_liveness_is_three_valued
 t test_legacy_lock_remedy_lines_are_executable_as_printed
 t test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed
 t test_legacy_lock_pid_file_unreadable_at_open_is_named
+t test_legacy_lock_ps_liveness_fallback_is_three_valued
 
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

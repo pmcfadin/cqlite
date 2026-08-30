@@ -1469,8 +1469,26 @@ supervisor_pid_liveness() {
     if [[ -d "/proc/$pid" ]]; then printf 'live\n'; else printf 'dead\n'; fi
     return 0
   fi
+  # `ps` IS ASKED FOR ITS OUTPUT, NOT JUST ITS STATUS (#3549, roborev job 185 F3, class sweep). The
+  # previous form was `if ps -p "$pid" >/dev/null 2>&1; then live; else dead; fi`, which reads EVERY
+  # non-zero exit as an affirmative absence — including a `ps` that failed for its own reasons (bad
+  # option on an unexpected implementation, resource failure). That is the same defect as reporting an
+  # unread `cmdline` as a non-match, one function over, and here the verdict feeds an operator
+  # instruction to delete a lock. So the three states are kept apart:
+  #   - output present            => `live` (it named the process);
+  #   - exit 1 with no output     => `dead` (the documented "no process selected" answer, on procps and
+  #                                  on the BSD `ps` macOS ships);
+  #   - anything else             => `unknown` — `ps` could not answer, and `unknown` refuses.
   if command -v ps >/dev/null 2>&1; then
-    if ps -p "$pid" >/dev/null 2>&1; then printf 'live\n'; else printf 'dead\n'; fi
+    local psout="" psrc=0
+    psout="$(ps -p "$pid" -o pid= 2>/dev/null)" || psrc=$?
+    if [[ -n "$psout" ]]; then
+      printf 'live\n'
+    elif [[ "$psrc" -eq 1 ]]; then
+      printf 'dead\n'
+    else
+      printf 'unknown\n'
+    fi
     return 0
   fi
   printf 'unknown\n'
