@@ -37,14 +37,17 @@ mod parquet_parity;
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Int32Array, StringArray, UInt32Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{ArrayRef, Decimal128Array, Int32Array, StringArray, StructArray, UInt32Array};
+use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::record_batch::RecordBatch;
 
 use parquet_parity::canonical_jsonl::CanonicalValue;
 use parquet_parity::cql_type::{parse_column, ColumnType};
 use parquet_parity::golden_rows::GoldenRow;
-use parquet_parity::{compare, project_rows_for_test, CaseOutcome, ParityCase, Row, SchemaCheck};
+use parquet_parity::{
+    compare, project_rows_for_test, types_and_projection_for_test, CaseOutcome, ParityCase, Row,
+    SchemaCheck,
+};
 
 /// A case declaring `id int` (partition key), `age int` and `name text`. Only
 /// its column/key DECLARATION is used: the projection never reads a fixture.
@@ -285,4 +288,151 @@ fn the_sibling_columns_still_compare_and_are_counted() {
         }
         CaseOutcome::Skipped(reason) => panic!("must not skip: {reason}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The SECOND route into the same leak — issue #1490 round 12.
+//
+// A column can be undecodable not because its Arrow type diverged but because
+// the harness's DECLARATION does not reach into it: a case declares a UDT by
+// NAME only, so every UDT field arrives with `DeclaredType::Unavailable`, and an
+// ambiguous Arrow representation inside the Struct — a scale-zero `Decimal128`,
+// which is both a `varint` and a whole-valued `decimal` — is REFUSED rather than
+// guessed (`declared.rs`).
+//
+// The TYPE stage already reports such a column `unsupported-representation`
+// (`UDT_STRUCT_FIELD_TYPES`), and it used to hand the column to the projection
+// anyway. The refusal then aborted the projection WHOLESALE and took every
+// unrelated column's value comparison with it — the round-7 finding again, by a
+// different route. So the TYPE stage's refusal now blocks the column's values
+// too.
+//
+// These two tests go through `types_and_projection_for_test`, i.e. the REAL
+// coupling: the blocked set is the one the TYPE stage computed, not one this file
+// assembled. A hand-assembled blocked list would assert nothing about the wiring
+// that was broken.
+// ---------------------------------------------------------------------------
+
+/// A case declaring `id int` (partition key), `p frozen<person>` and
+/// `name text` — a UDT column between two ordinary comparable ones.
+const UDT_CASE: ParityCase = ParityCase {
+    keyspace: "test_isolation",
+    table: "synthetic_udt",
+    schema: "compaction-parity-udt.cql",
+    udts: &["person"],
+    columns: &[("id", "int"), ("p", "frozen<person>"), ("name", "text")],
+    partition_key: &["id"],
+    clustering: &[],
+    schema_check: SchemaCheck::Synthetic {
+        why: "a hand-built RecordBatch, not a corpus table — no committed schema declares it",
+    },
+    must_run: false,
+    covers: "CONTROL for per-column isolation around an UNMEASURABLE UDT column",
+    known_gap: None,
+    known_type_gaps: &[],
+};
+
+fn udt_columns() -> Vec<ColumnType> {
+    UDT_CASE
+        .columns
+        .iter()
+        .map(|(n, t)| parse_column(n, t, UDT_CASE.udts).expect("declared type must parse"))
+        .collect()
+}
+
+/// One row: `id` `Int32`, `p` an Arrow `Struct` holding a `Decimal128` field —
+/// a VALID export of a UDT with a `decimal` field, which is undecodable ONLY
+/// because the field's declared type is unavailable — and `name` `Utf8`.
+///
+/// Hand-built because no real export can produce it: a UDT reaching the type
+/// stage as a `Struct` is exactly what #3556 prevents today (the export aborts,
+/// or flattens the UDT to `Utf8`).
+fn batch_with_decimal_field_udt() -> RecordBatch {
+    let bonus = Field::new("bonus", DataType::Decimal128(38, 3), true);
+    let udt_fields = Fields::from(vec![bonus.clone()]);
+    let schema = Schema::new(vec![
+        Field::new("id", DataType::Int32, true),
+        Field::new("p", DataType::Struct(udt_fields.clone()), true),
+        Field::new("name", DataType::Utf8, true),
+    ]);
+    let decimals: ArrayRef = Arc::new(
+        Decimal128Array::from(vec![12_500i128])
+            .with_precision_and_scale(38, 3)
+            .expect("a valid Decimal128(38, 3)"),
+    );
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(Int32Array::from(vec![7i32])),
+        Arc::new(StructArray::new(udt_fields, vec![decimals], None)),
+        Arc::new(StringArray::from(vec!["ada"])),
+    ];
+    RecordBatch::try_new(Arc::new(schema), cols).expect("synthetic UDT batch")
+}
+
+/// The premise: the UDT's `Decimal128` field really IS undecodable without the
+/// field's declared type, so the test below is about isolation and not about a
+/// decoder that quietly handles it.
+#[test]
+fn the_negative_control_an_unblocked_udt_decimal_field_still_fails_loudly() {
+    let rendered = match project_rows_for_test(
+        &UDT_CASE,
+        &[batch_with_decimal_field_udt()],
+        &udt_columns(),
+        &[],
+        false,
+    ) {
+        Err(err) => format!("{err}"),
+        Ok(_) => panic!("a UDT field with no declared type must not decode a Decimal128"),
+    };
+    assert!(
+        rendered.contains("Decimal128") && rendered.contains("UDT field 'bonus'"),
+        "the refusal must name the ambiguous representation and the position: {rendered}"
+    );
+}
+
+/// THE round-12 finding: the TYPE stage's own refusal blocks the UDT column's
+/// VALUES, so the projection succeeds and both sibling columns still carry
+/// theirs. Before the fix this projection failed and NO column was compared.
+#[test]
+fn an_unmeasurable_udt_column_does_not_cancel_its_siblings() {
+    let (failures, rows) =
+        types_and_projection_for_test(&UDT_CASE, &[batch_with_decimal_field_udt()], &udt_columns());
+    let rows = rows.unwrap_or_else(|err| {
+        panic!(
+            "the TYPE stage refused column 'p', so the projection must SKIP it rather than \
+             abort every other column's value comparison: {err}"
+        )
+    });
+
+    let signatures: Vec<String> = failures.iter().map(|f| f.signature()).collect();
+    assert_eq!(
+        signatures,
+        vec!["unsupported-representation[arrow-types:column 'p'] \
+             representation=udt-struct-field-types"
+            .to_string()],
+        "the refusal must be REPORTED, by column and representation — a column that is not \
+         compared must never be silently absent"
+    );
+
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(
+        row.cell("name"),
+        Some(&CanonicalValue::Text("ada".to_string())),
+        "the sibling column after the refused one must still be decoded and comparable"
+    );
+    assert_eq!(
+        row.cell("id"),
+        Some(&CanonicalValue::Int(7)),
+        "the KEY column must still be decoded — it is what aligns the two sides' rows"
+    );
+    assert!(
+        row.is_undecoded("p"),
+        "the refused UDT column must be RECORDED as undecoded, not silently absent"
+    );
+    assert_eq!(
+        row.cell("p"),
+        None,
+        "a refused column must carry NO value: an `Absent` could compare EQUAL to a golden \
+         absence and report coverage that never happened"
+    );
 }

@@ -488,6 +488,9 @@ struct TypeCheck {
     /// value comparison is recorded UNRUNNABLE for exactly these columns and
     /// RUNS for every other one.
     blocked_columns: Vec<String>,
+    /// Columns whose Arrow type the stage could not MEASURE — today a UDT as a
+    /// `Struct`. Blocked before the projection too: see `project_rows`, round 12.
+    refused_columns: Vec<(String, unsupported::Unsupported)>,
     /// A harness bookkeeping refusal (a gap naming an undeclared column, an
     /// unclassifiable Arrow type): the type stage did not answer at all, so the
     /// value comparison cannot be scoped and is blocked whole.
@@ -502,6 +505,23 @@ impl TypeCheck {
             self.blocked_columns.push(mismatch.column.clone());
         }
         self.failures.push(failure);
+    }
+
+    /// Same as `blocked_column`, for an UNMEASURABLE column's refusal.
+    fn refused_column(&mut self, column: String, refused: unsupported::Unsupported) {
+        self.failures.push(Failure::UnsupportedRepresentation {
+            stage: Stage::ArrowTypes,
+            column: column.clone(),
+            refused,
+        });
+        self.refused_columns.push((column, refused));
+    }
+
+    /// Every column the projection must NOT decode: type DIVERGED or UNMEASURABLE.
+    fn value_blocked_names(&self) -> Vec<String> {
+        let mut names = self.blocked_columns.clone();
+        names.extend(self.refused_columns.iter().map(|(c, _)| c.clone()));
+        names
     }
 }
 
@@ -567,16 +587,16 @@ fn validate_arrow_types(
             // currently produces, and nothing measured that. The refusal fails
             // the case on its own, which is the fail-closed answer.
             //
-            // It does NOT block the column's VALUES: they are still projected on
-            // both sides and compared per cell. Only the TYPE claim is
-            // unmeasurable, and a refusal must be exactly as wide as what it
-            // refuses.
+            // It DOES block the column's VALUES (round 12). The refusal is as
+            // wide as what it refuses; what was measured wrong is how wide that
+            // is — the missing declaration is a UDT's FIELD types, which the
+            // value decode needs too, so its refusal used to abort the ROW
+            // PROJECTION and cancel every sibling (`project_rows`). Blocking is
+            // also truthful on its own terms: canonicalization is width-blind,
+            // so values "compared" over unverified field types are a pass the
+            // harness never measured.
             arrow_expect::FieldVerdict::Unmeasurable(refused) => {
-                check.failures.push(Failure::UnsupportedRepresentation {
-                    stage: Stage::ArrowTypes,
-                    column: col.name.clone(),
-                    refused,
-                });
+                check.refused_column(col.name.clone(), refused);
             }
             arrow_expect::FieldVerdict::Mismatch(mismatch) => match gap {
                 // Equality, not a substring: a DIFFERENT wrong type on this
@@ -663,10 +683,12 @@ fn read_parquet(case: &ParityCase, path: &Path) -> Result<Vec<RecordBatch>, Fail
 }
 
 /// Which columns the value comparison cannot cover, as the row projection needs
-/// to know it: a column whose Arrow TYPE diverged is not going to be compared,
-/// so decoding it can only manufacture a failure.
+/// to know it: a column whose Arrow TYPE diverged — or whose Arrow type could
+/// not be MEASURED at all — is not going to be compared, so decoding it can only
+/// manufacture a failure.
 struct ValueBlocks<'a> {
-    /// Columns whose exported Arrow type DIVERGED (`TypeCheck::blocked_columns`).
+    /// Columns whose exported Arrow type DIVERGED or was UNMEASURABLE
+    /// (`TypeCheck::value_blocked_names`).
     columns: &'a [String],
     /// The type stage did not answer at all, so NO column's values are compared.
     all: bool,
@@ -687,7 +709,19 @@ struct ValueBlocks<'a> {
 ///
 /// So a blocked NON-KEY column is not decoded at all; it is recorded in the
 /// row's `undecoded` set and its per-column deferral is reported (once, by
-/// `comparable_columns`). A blocked KEY column IS still decoded, because the
+/// `comparable_columns`).
+///
+/// # The second route into the same leak (issue #1490 round 12)
+///
+/// A column can also be undecodable because the DECLARATION does not reach into
+/// it: a UDT is declared by NAME only, so a UDT field carries
+/// `DeclaredType::Unavailable` and an ambiguous representation inside the Struct
+/// (a scale-zero `Decimal128`) is refused. Its TYPE claim is already
+/// `unsupported-representation` for that same missing declaration, so the type
+/// stage blocks it here too (`TypeCheck::value_blocked_names`) rather than let
+/// its refusal abort the projection and cancel its siblings.
+///
+/// A blocked KEY column IS still decoded, because the
 /// primary key is what ALIGNS the two sides' rows: without it no column can be
 /// compared, and that — and only that — blocks the comparison whole, with a
 /// message saying so.
@@ -866,6 +900,9 @@ pub struct Stages {
     blocked_by: Option<Stage>,
     /// Columns whose values cannot be compared because their TYPE diverged.
     type_blocked_columns: Vec<String>,
+    /// Columns whose values the TYPE stage's own refusal blocks (round 12) —
+    /// reported as `UnsupportedRepresentation`, never as compared-and-equal.
+    type_refused_columns: Vec<(String, unsupported::Unsupported)>,
     /// A type-stage refusal blocks the value comparison whole.
     type_blocks_all_values: bool,
     /// Everything that went wrong, across ALL stages.
@@ -921,6 +958,7 @@ fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
         parquet: None,
         blocked_by: None,
         type_blocked_columns: Vec::new(),
+        type_refused_columns: Vec::new(),
         type_blocks_all_values: false,
         failures: Vec::new(),
     };
@@ -955,24 +993,12 @@ fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
                 // The batches are read, so the TYPE stage and the ROW
                 // PROJECTION are both runnable and both run — neither cancels
                 // the other.
-                let schema = batches
-                    .first()
-                    .map(|b| b.schema())
-                    .expect("read_parquet refuses an empty batch list");
-                let check = validate_arrow_types(case, &stages.columns, &schema);
+                let (check, rows) = types_and_projection(case, &batches, &stages.columns);
                 stages.failures.extend(check.failures);
                 stages.type_blocked_columns = check.blocked_columns;
+                stages.type_refused_columns = check.refused_columns;
                 stages.type_blocks_all_values = check.blocks_all_values;
-
-                // The row projection is told what the TYPE stage blocked, so a
-                // blocked column's UNDECODABLE Arrow type cannot cancel its
-                // siblings' value comparison (issue #1490 round 7, finding 1).
-                let blocked_names = stages.type_blocked_columns.clone();
-                let blocks = ValueBlocks {
-                    columns: &blocked_names,
-                    all: stages.type_blocks_all_values,
-                };
-                match project_rows(case, &batches, &stages.columns, &blocks) {
+                match rows {
                     Ok(rows) => stages.parquet = Some(rows),
                     Err(f) => {
                         stages.failures.extend(f.into_items());
@@ -983,6 +1009,52 @@ fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
         },
     }
     Ok(Some(stages))
+}
+
+/// Stage ARROW-TYPES and the ROW PROJECTION, wired the ONE way: what the type
+/// stage found divergent or could not measure is what the projection is told not
+/// to decode (`TypeCheck::value_blocked_names`). One function because the
+/// COUPLING is the property: the leak rounds 7 and 12 both found was the
+/// projection decoding a column the type stage had already given up on.
+fn types_and_projection(
+    case: &ParityCase,
+    batches: &[RecordBatch],
+    columns: &[ColumnType],
+) -> (TypeCheck, Result<Vec<Row>, Failures>) {
+    // The batch list is non-empty by construction on both paths: `read_parquet`
+    // refuses an empty one, and the test wrapper documents the same requirement.
+    let schema = batches
+        .first()
+        .map(|b| b.schema())
+        .expect("read_parquet refuses an empty batch list");
+    let check = validate_arrow_types(case, columns, &schema);
+    let blocked = check.value_blocked_names();
+    let rows = project_rows(
+        case,
+        batches,
+        columns,
+        &ValueBlocks {
+            columns: &blocked,
+            all: check.blocks_all_values,
+        },
+    );
+    (check, rows)
+}
+
+/// TEST-SUPPORT ONLY: the TYPE stage and the ROW PROJECTION over SYNTHETIC
+/// batches, through the SAME [`types_and_projection`] a real run uses — so the
+/// round-12 control asserts the WIRING (the type stage's own refusal is what
+/// blocks the projection), which a hand-assembled blocked list could not. No real
+/// export can supply the input: a UDT reaching the type stage as an Arrow
+/// `Struct` is what #3556 prevents. Nothing in the harness calls it; like a real
+/// run it requires a NON-EMPTY batch list.
+pub fn types_and_projection_for_test(
+    case: &ParityCase,
+    batches: &[RecordBatch],
+    columns: &[ColumnType],
+) -> (Vec<Failure>, Result<Vec<Row>, Failures>) {
+    let (check, rows) = types_and_projection(case, batches, columns);
+    (check.failures, rows)
 }
 
 impl Stages {
@@ -1018,19 +1090,36 @@ impl Stages {
     /// REFUSED column is one the harness cannot compare at all (issue #1490
     /// round 4). Both remove the column from the compared set, so its cells are
     /// NOT counted in the census — the smaller number is the true one.
+    ///
+    /// A column is refused for its VALUES either because its DECLARED type is a
+    /// representation the harness cannot compare (`unsupported.rs`) or because
+    /// the TYPE stage could not measure it and the missing declaration is the one
+    /// the value decode needs (a UDT's field types — round 12). Either way it is
+    /// REFUSED by name, never silently "compared and equal".
     fn comparable_columns(&mut self) -> Vec<ColumnType> {
         // Refusals FIRST, and unconditionally: a refusal is a property of the
         // DECLARED type, so it holds whether or not the export produced
         // anything. Recording it even when a later stage was also blocked is
         // deliberate — the case declares a column the harness cannot compare,
         // and that stays true.
-        let refused: Vec<(String, unsupported::Unsupported)> = self
+        let mut refused: Vec<(String, unsupported::Unsupported)> = self
             .columns
             .iter()
             .filter_map(|c| {
                 unsupported::refused_value_representation(&c.spec).map(|u| (c.name.clone(), u))
             })
             .collect();
+        // The TYPE stage's OWN refusals join them (round 12): the declaration it
+        // lacked — a UDT's FIELD types — is the one the value decode needs, so
+        // such a column is refused for its VALUES too and the projection already
+        // skipped it. Recorded at VALUE-COMPARISON as well as at ARROW-TYPES:
+        // "the type claim is unmeasurable" and "the values were not compared
+        // either" are two different facts.
+        for (column, representation) in std::mem::take(&mut self.type_refused_columns) {
+            if !refused.iter().any(|(c, _)| *c == column) {
+                refused.push((column, representation));
+            }
+        }
         for (column, refused) in &refused {
             self.failures.push(Failure::UnsupportedRepresentation {
                 stage: Stage::ValueComparison,

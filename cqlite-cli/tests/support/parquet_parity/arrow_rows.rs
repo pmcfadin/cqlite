@@ -44,8 +44,13 @@
 //! DECODING a `Struct` is not the same as being able to COMPARE it: a declared
 //! CQL `tuple` lands here as a named `Tuple` while its golden lands as a
 //! positional `List`, so the harness REFUSES that column's values rather than
-//! comparing two representations (`unsupported.rs`). A UDT's Struct decodes and
-//! compares; only its Arrow FIELD TYPES are unmeasurable.
+//! comparing two representations (`unsupported.rs`). A UDT's Struct is refused
+//! too, and for the same missing declaration: a case declares a UDT by NAME
+//! only, so each field arrives with `DeclaredType::Unavailable` and an ambiguous
+//! field representation (a scale-zero `Decimal128`) cannot be decoded at all.
+//! The TYPE stage therefore blocks such a column BEFORE this module sees it
+//! (issue #1490 round 12), so its refusal can never abort the projection and
+//! cancel its sibling columns.
 //!
 //! An Arrow type NOT in that table is an ERROR. A permissive fallback (render it
 //! with `Debug`, say) would let an unexpected mapping compare equal to something

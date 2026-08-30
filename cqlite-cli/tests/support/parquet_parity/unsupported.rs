@@ -80,12 +80,32 @@ pub struct Unsupported {
 /// way to declare its UDTs' field types (copied from the committed
 /// `test-data/schemas/*.cql`, never from CQLite's mapping — #3041) and
 /// validating the Struct's children recursively.
+///
+/// # It refuses the column's VALUES too (issue #1490 round 12)
+///
+/// The refusal was first written as covering the TYPE claim alone, on the
+/// grounds that sstabledump types the field values so both sides land on a named
+/// Tuple. That is true of most field types and false of the ambiguous ones: a
+/// UDT field reaches `declared.rs` with `DeclaredType::Unavailable`, so a
+/// scale-zero `Decimal128` inside the Struct — both a `varint` and a whole
+/// `decimal` — is REFUSED rather than guessed, and that refusal aborted the
+/// whole ROW PROJECTION, cancelling every SIBLING column's value comparison.
+///
+/// It is also the truthful verdict on its own terms: canonicalization is
+/// width-blind, so a UDT `int` field exported as `Int64` compares EQUAL. Values
+/// "compared" over a column whose field types were never verified are a pass the
+/// harness did not measure — which is what this refusal exists to prevent. So
+/// the column is blocked before the row projection and reported refused at BOTH
+/// stages; the retirement path is unchanged (declare the field types).
 pub const UDT_STRUCT_FIELD_TYPES: Unsupported = Unsupported {
     representation: "udt-struct-field-types",
     why: "a case declares a UDT by NAME only, so the harness has no independently declared \
           field schema to validate the Arrow Struct's field types against — and a UDT field \
           exported at the wrong width round-trips its VALUES unchanged, so accepting any \
-          Struct would be a pass the harness never measured",
+          Struct would be a pass the harness never measured. The same missing declaration \
+          blocks the column's VALUES: a UDT field's declared type is unavailable, so an \
+          ambiguous representation inside the Struct (a scale-zero Decimal128, which is both \
+          a varint and a whole decimal) cannot be decoded either",
 };
 
 /// A CQL `tuple`'s VALUES cannot be compared.
@@ -131,9 +151,15 @@ pub fn refused_value_representation(spec: &CqlTypeSpec) -> Option<Unsupported> {
         CqlTypeSpec::Map { key, value } => {
             refused_value_representation(key).or_else(|| refused_value_representation(value))
         }
-        // A UDT's VALUES are comparable (sstabledump types the field values and
-        // both sides land on a named Tuple); it is the Arrow TYPE claim that is
-        // unmeasurable — see `UDT_STRUCT_FIELD_TYPES`.
+        // A declared UDT is NOT refused here, and that is deliberate: the
+        // refusal that covers it is the TYPE stage's own
+        // [`UDT_STRUCT_FIELD_TYPES`], which is keyed on the export actually
+        // producing a `Struct` — an AFFIRMATIVE measurement. Refusing every
+        // declared UDT from the declaration alone would also swallow #3556's
+        // `Utf8` flattening, which must stay a reported type MISMATCH (a `list<
+        // frozen<person>>` exported as `list<utf8>` is a real defect, and
+        // `UDT_COLLECTIONS` records it by name). See `mod.rs`'s
+        // `TypeCheck::refused_column` for where the value block is applied.
         CqlTypeSpec::Udt(_) | CqlTypeSpec::Scalar(_) => None,
     }
 }

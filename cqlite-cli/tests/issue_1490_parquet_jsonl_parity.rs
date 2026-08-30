@@ -31,8 +31,12 @@
 //!   query-semantics oracle, not this one. **Not fixable here.**
 //! * `refused` — the harness declines the representation (`unsupported.rs`): a
 //!   UDT's Arrow Struct field types are undeclarable, or a declared CQL tuple's
-//!   golden and export land in different canonical representations. Fixable by
-//!   TEACHING the harness the representation.
+//!   golden and export land in different canonical representations. For a UDT the
+//!   refusal covers BOTH the type claim and the column's values — the same
+//!   missing field declaration blocks the decode of an ambiguous field
+//!   representation (round 12) — and the column is excluded before the row
+//!   projection, so its siblings still compare. Fixable by TEACHING the harness
+//!   the representation.
 //! * `counter` — counter columns; the export side is unverified and a counter's
 //!   dump rendering needs its own decision before a case can be declared.
 //! * `redundant` — its type surface is a subset of an INCLUDED table's; adding
