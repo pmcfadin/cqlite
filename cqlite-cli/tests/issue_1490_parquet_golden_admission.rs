@@ -452,3 +452,272 @@ fn a_present_but_invalid_eligibility_field_is_refused_not_read_as_absent() {
             .unwrap_or_else(|e| panic!("an eligible well-formed line must be accepted: {e}"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// A PRESENT cell with NO `value` is not a NULL (#1490 round 15)
+//
+// A Cassandra NULL is the ABSENCE OF A CELL: sstabledump omits the cell and the
+// projection answers `Absent`. A cell that is PRESENT but carries no `value` is
+// a DIFFERENT state, and the shared parser renders it as the SAME
+// `CanonicalValue::Absent` (`parse_cell` maps a missing `value` key to it). Read
+// that way, a golden that lost a value AGREES with an export that wrongly writes
+// NULL — so the harness would report parity for the silent NULL-coercion it was
+// built to catch (AC1, #1485).
+//
+// So `project_column` decides the two apart — presence IS representable, a
+// present cell being an entry in the column's cell list — and REFUSES the second
+// unless the cell is one of the shapes whose value legitimately lives elsewhere
+// (a tombstone, a collection-shell deletion, or a non-frozen SET element whose
+// value is its stringified `path`).
+//
+// Measured on the committed corpus, not argued: across all 162 `*-Data.db.jsonl`
+// goldens, every one of the 5,812 cells carrying no `value` also carries a
+// `deletion_info`. The refusal therefore reds on the defect, not on the shape of
+// an ordinary golden.
+// ---------------------------------------------------------------------------
+
+/// The declared columns the value-bearing cases use: an `int` partition key, a
+/// `text` scalar, a `frozen<map<text,text>>`, a `list<int>`, a `map<int,text>`
+/// and a `set<int>` — one per POSITION at which a cell's value is consumed.
+fn shape_columns() -> Vec<parquet_parity::cql_type::ColumnType> {
+    [
+        ("id", "int"),
+        ("v", "text"),
+        ("fm", "frozen<map<text,text>>"),
+        ("l", "list<int>"),
+        ("m", "map<int,text>"),
+        ("s", "set<int>"),
+    ]
+    .iter()
+    .map(|(n, t)| parquet_parity::cql_type::parse_column(n, t, &[]).expect("declared type parses"))
+    .collect()
+}
+
+/// Project ONE synthetic sstabledump line through the REAL parser and the REAL
+/// projection, over [`shape_columns`].
+fn project_shape_line(line: &str) -> Result<Vec<parquet_parity::golden_rows::GoldenRow>, String> {
+    use parquet_parity::canonical_jsonl::{parse_document_str_with_keys, KeySpec};
+
+    let columns = shape_columns();
+    let doc = parse_document_str_with_keys(
+        &format!("{line}\n"),
+        std::path::Path::new("<synthetic value-shape golden>"),
+        true,
+        &KeySpec::from_cql_types(&["int"], &[]),
+    )
+    .map_err(|e| format!("the synthetic golden must parse: {e}"))?;
+    parquet_parity::golden_rows::project_golden(&doc, &columns, &["id"], &[])
+}
+
+/// THE finding: at every position where a cell's `value` is what carries the
+/// column's data, a PRESENT cell with no `value` is REFUSED — never read as
+/// NULL.
+#[test]
+fn a_present_cell_with_no_value_is_refused_rather_than_read_as_null() {
+    // Each line is well-formed JSON whose ONE malformed cell is present and
+    // carries neither `value` nor `deletion_info`. `column` is what the refusal
+    // must name.
+    #[rustfmt::skip]
+    let malformed: &[(&str, &str)] = &[
+        // A scalar `text` cell.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"v"}]}]}"#, "v"),
+        // A FROZEN collection is one cell too, and its value is that cell's.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"fm"}]}]}"#, "fm"),
+        // A non-frozen LIST element: its value is the cell's `value` (only the
+        // element's identity is in the `path`).
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"l","path":["6ac52100-a251-11f0-a3fe-f1a551383fb9"]}]}]}"#, "l"),
+        // A MAP entry: the KEY is the stringified `path`, the entry's VALUE is
+        // the cell's `value` — so a map cell with no `value` has lost the value
+        // half of the entry.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"m","path":["5"]}]}]}"#, "m"),
+        // A path-less cell on a non-frozen collection with no deletion marker is
+        // neither a shell deletion nor an element: it would have contributed
+        // NOTHING, leaving the whole collection to project as NULL.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"m"}]}]}"#, "m"),
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"s"}]}]}"#, "s"),
+    ];
+    for (line, column) in malformed {
+        let err = project_shape_line(line)
+            .expect_err("a PRESENT cell carrying no `value` must be REFUSED, not read as NULL");
+        assert!(
+            err.contains("PRESENT but carries no `value`"),
+            "the refusal must say what it found, got: {err}"
+        );
+        assert!(
+            err.contains(&format!("column '{column}'")),
+            "the refusal must name the column ('{column}'), got: {err}"
+        );
+        assert!(
+            err.contains("partition 0 row 0"),
+            "the refusal must name the partition and row, got: {err}"
+        );
+        assert!(
+            err.contains("#1485"),
+            "the refusal must name the defect it prevents (AC1, #1485), got: {err}"
+        );
+    }
+}
+
+/// The CONTROLS, in the same projection: each shape that legitimately carries no
+/// `value` still projects exactly as before, so the refusal above reds on the
+/// defect and not on an ordinary golden.
+#[test]
+fn an_absent_cell_a_tombstone_and_a_set_element_still_project_as_before() {
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+
+    // CONTROL 1 — a Cassandra NULL is the ABSENCE of a cell: `v` has a cell,
+    // every other column has none, and they project to `Absent`.
+    let rows = project_shape_line(
+        r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+    )
+    .expect("a row whose other columns have NO cell must still project");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cells.get("v"),
+        Some(&CanonicalValue::Text("x".to_string()))
+    );
+    for null_column in ["fm", "l", "m", "s"] {
+        assert_eq!(
+            rows[0].cells.get(null_column),
+            Some(&CanonicalValue::Absent),
+            "a column with NO cell is a Cassandra NULL and must still project as Absent"
+        );
+    }
+
+    // CONTROL 2 — a real collection-shell deletion (`deletion_info`, no `value`)
+    // is still read as the shadowing marker it is: the element written AFTER it
+    // survives, and the element at-or-before it is shadowed away.
+    let rows = project_shape_line(
+        r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[
+             {"name":"m","deletion_info":{"local_delete_time":"2025-01-01T00:00:00Z"},"tstamp":"2025-01-01T00:00:00Z"},
+             {"name":"m","path":["5"],"value":"after","tstamp":"2025-01-02T00:00:00Z"},
+             {"name":"m","path":["6"],"value":"before","tstamp":"2024-12-31T00:00:00Z"}
+           ]}]}"#
+            .replace('\n', " ")
+            .as_str(),
+    )
+    .expect("a well-formed collection-shell deletion must still project");
+    assert_eq!(
+        rows[0].cells.get("m"),
+        Some(&CanonicalValue::Map(vec![(
+            CanonicalValue::Int(5),
+            CanonicalValue::Text("after".to_string())
+        )])),
+        "the shell deletion must still shadow the older element and keep the newer one"
+    );
+
+    // CONTROL 3 — a non-frozen SET element's value IS its stringified `path`, so
+    // it legitimately carries no `value` and must still project from the path.
+    let rows = project_shape_line(
+        r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"s","path":["5"]}]}]}"#,
+    )
+    .expect("a set element carries its value in its `path` and must still project");
+    assert_eq!(
+        rows[0].cells.get("s"),
+        Some(&CanonicalValue::List(vec![CanonicalValue::Int(5)])),
+        "a set element must still be projected from its path"
+    );
+}
+
+/// THE NEGATIVE the fix exists for, measured end to end: a golden that lost a
+/// value and an export that wrongly writes NULL used to compare EQUAL.
+///
+/// The first half MEASURES the false PASS — it hands `compare` exactly what the
+/// pre-fix projection produced for the malformed cell (`Absent`) against a real
+/// Arrow NULL, and the comparison PASSES, counting the cell as compared. The
+/// second half shows the same golden TEXT can no longer reach `compare` at all:
+/// the projection refuses it. Without the first half the fix is unverified;
+/// without the second the harness is still blessing the defect.
+#[test]
+fn a_golden_missing_a_value_and_an_export_null_can_no_longer_compare_equal() {
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, Int32Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::golden_rows::GoldenRow;
+    use parquet_parity::{compare, project_rows_for_test, CaseOutcome, ParityCase, SchemaCheck};
+
+    const CASE: ParityCase = ParityCase {
+        keyspace: "test_value_shape",
+        table: "synthetic",
+        schema: "da-test.cql",
+        udts: &[],
+        columns: &[("id", "int"), ("v", "text")],
+        partition_key: &["id"],
+        clustering: &[],
+        schema_check: SchemaCheck::Synthetic {
+            why: "a hand-built RecordBatch and a literal golden line — no committed schema \
+                  declares it",
+        },
+        must_run: false,
+        covers: "CONTROL: a golden cell with no `value` must not compare equal to an export NULL",
+        known_gap: None,
+        known_type_gaps: &[],
+    };
+    let columns = CASE
+        .columns
+        .iter()
+        .map(|(n, t)| parse_column(n, t, &[]).expect("declared type parses"))
+        .collect::<Vec<_>>();
+
+    // The EXPORT side: `v` exported as a real Arrow NULL — the silent
+    // NULL-coercion of AC1 (#1485).
+    let schema = Schema::new(vec![
+        Field::new("id", DataType::Int32, true),
+        Field::new("v", DataType::Utf8, true),
+    ]);
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(Int32Array::from(vec![7i32])),
+        Arc::new(StringArray::from(vec![None::<&str>])),
+    ];
+    let batch = RecordBatch::try_new(Arc::new(schema), cols).expect("synthetic batch");
+    let exported = project_rows_for_test(&CASE, &[batch], &columns, &[], false)
+        .expect("the export side must project");
+    assert_eq!(
+        exported[0].cell("v"),
+        Some(&CanonicalValue::Absent),
+        "this test's premise is that the export wrote NULL for 'v'"
+    );
+
+    // HALF 1 — the false PASS, measured: the value the PRE-FIX projection
+    // produced for a cell with no `value` was `Absent`, and against the export's
+    // NULL that compares EQUAL and is COUNTED as covered.
+    let mut cells = std::collections::BTreeMap::new();
+    cells.insert("id".to_string(), CanonicalValue::Int(7));
+    cells.insert("v".to_string(), CanonicalValue::Absent);
+    let pre_fix_golden = vec![GoldenRow {
+        keys: vec![CanonicalValue::Int(7)],
+        cells,
+    }];
+    match compare(&CASE, &columns, pre_fix_golden, exported)
+        .expect("the premise of this test is that Absent-vs-NULL compares EQUAL")
+    {
+        CaseOutcome::Ran { rows, cells } => assert_eq!(
+            (rows, cells),
+            (1, 2),
+            "the false PASS this fix removes: the malformed cell was compared and PASSED"
+        ),
+        CaseOutcome::Skipped(why) => panic!("must not skip: {why}"),
+    }
+
+    // HALF 2 — that golden TEXT can no longer produce those rows: the
+    // projection REFUSES it, so the pair never reaches `compare`.
+    use parquet_parity::canonical_jsonl::{parse_document_str_with_keys, KeySpec};
+    let doc = parse_document_str_with_keys(
+        r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"v"}]}]}
+"#,
+        std::path::Path::new("<synthetic golden missing a value>"),
+        true,
+        &KeySpec::from_cql_types(&["int"], &[]),
+    )
+    .expect("the synthetic golden must parse");
+    let err = parquet_parity::golden_rows::project_golden(&doc, &columns, &["id"], &[])
+        .expect_err("the golden that lost its value must be REFUSED, not compared as NULL");
+    assert!(
+        err.contains("column 'v'") && err.contains("#1485"),
+        "the refusal must name the column and the defect it prevents: {err}"
+    );
+}

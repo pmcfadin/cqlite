@@ -21,6 +21,10 @@
 //!     generation and test time,
 //!   * a per-cell tombstone.
 //!
+//! …and, for the same reason in the other direction, on a golden cell that is
+//! PRESENT but carries no `value` and is not one of the tombstone shapes above:
+//! see [`require_recognized_cell_shape`].
+//!
 //! A fixture that grows one of those turns RED here instead of silently
 //! comparing the wrong things. Reconciliation-sensitive tables belong to the
 //! query-semantics oracle (`test-data/query-semantics-oracle.json`), not to a
@@ -557,6 +561,18 @@ fn reject_undeclared_cells(
 }
 
 /// Project ONE column of ONE golden row.
+///
+/// # An ABSENT cell and a PRESENT cell with no value are two different things
+///
+/// A Cassandra NULL is the ABSENCE OF A CELL: sstabledump omits the cell
+/// entirely, `mine` comes out empty, and `Absent` is the right answer — that is
+/// the first thing this function decides, and it must keep working. A cell that
+/// is PRESENT but carries no `value` is a different state, and the shared parser
+/// renders it as the SAME `CanonicalValue::Absent` (`canonical_jsonl::parse_cell`
+/// maps a missing `value` key to `Absent`). Presence is still representable
+/// here, though — a present cell IS an entry in `mine` — so this function
+/// decides the two apart itself rather than letting the second one become NULL.
+/// [`require_recognized_cell_shape`] is that decision.
 fn project_column(
     where_: &str,
     row: &CanonicalRow,
@@ -564,7 +580,14 @@ fn project_column(
 ) -> Result<CanonicalValue, String> {
     let mine: Vec<_> = row.cells.iter().filter(|c| c.name == col.name).collect();
     if mine.is_empty() {
+        // The column has NO cell in this row: a Cassandra NULL.
         return Ok(CanonicalValue::Absent);
+    }
+    // Every PRESENT cell must be a shape this oracle recognizes, decided ONCE
+    // here — the one place that knows both the declared type and which piece of
+    // a cell carries the value at each position.
+    for cell in &mine {
+        require_recognized_cell_shape(where_, col, cell)?;
     }
 
     // A complex (collection-shell) deletion is the normal marker an INSERT of a
@@ -714,6 +737,69 @@ fn project_column(
         ));
     }
     Ok(fold_null(value_cells[0].value.clone()))
+}
+
+/// REFUSE a PRESENT golden cell that carries no `value` and is not one of the
+/// shapes whose value legitimately lives somewhere other than `value`.
+///
+/// # Why this is a refusal and not a NULL
+///
+/// The shared parser maps a cell with no `value` key onto
+/// `CanonicalValue::Absent` — the very value an ABSENT cell (a Cassandra NULL)
+/// projects to. Without this refusal such a cell is compared as NULL, so a
+/// golden that lost a value AGREES with an export that wrongly writes NULL, and
+/// the harness reports parity for the silent NULL-coercion this issue exists to
+/// catch (AC1, #1485). A malformed oracle must red, never bless.
+///
+/// # The three shapes that carry no `value` and are legitimate
+///
+/// Each is recognized HERE and classified by its own rule elsewhere, so this
+/// check never fires on one:
+///
+///   * a **cell tombstone** and a **non-frozen collection SHELL deletion** —
+///     both carry `deletion_info` and no `value`. `project_column` refuses the
+///     scalar tombstone as ineligible (#1742) and reads the shell's
+///     `markedForDeleteAt` to decide which elements are shadowed.
+///   * a **per-element tombstone** inside a collection — `deletion_info` plus a
+///     `path`, refused as ineligible by the element loop.
+///   * a **non-frozen SET element**, whose value IS its stringified `path`
+///     (`sstabledump` writes `"value": ""`, or omits it): there is no `value` to
+///     require, and the path is what gets canonicalized. A map KEY arrives the
+///     same way, but a map cell also carries the entry's VALUE in `value`, so a
+///     map cell with no `value` is malformed and IS refused.
+fn require_recognized_cell_shape(
+    where_: &str,
+    col: &ColumnType,
+    cell: &super::canonical_jsonl::CanonicalCell,
+) -> Result<(), String> {
+    if !matches!(cell.value, CanonicalValue::Absent) {
+        return Ok(());
+    }
+    if cell.deletion.is_some() {
+        return Ok(());
+    }
+    let is_set_element = !cell.path.is_empty()
+        && col.is_multicell_collection()
+        && matches!(
+            col.spec,
+            CqlTypeSpec::Seq {
+                kind: SeqKind::Set,
+                ..
+            }
+        );
+    if is_set_element {
+        return Ok(());
+    }
+    Err(format!(
+        "{where_}: column '{}' (declared '{}') has a cell that is PRESENT but carries no \
+         `value`, and it is none of the shapes whose value lives elsewhere (a tombstone, a \
+         collection-shell deletion, or a set element whose value is its `path`). A Cassandra \
+         NULL is the ABSENCE OF A CELL, not a present cell with no value, so the harness \
+         REFUSES this golden instead of reading it as NULL: read as NULL it would AGREE with \
+         an export that wrongly writes NULL, which is the silent NULL-coercion (AC1, #1485) \
+         this oracle exists to catch",
+        col.name, col.declared
+    ))
 }
 
 /// Recursively fold an explicit JSON `null` into `Absent` — Arrow has only one
