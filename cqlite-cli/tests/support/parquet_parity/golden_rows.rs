@@ -67,9 +67,12 @@
 
 use std::collections::BTreeMap;
 
-use super::canonical_jsonl::{CanonicalDocument, CanonicalRow, CanonicalValue};
+use super::canonical_jsonl::{self, CanonicalDocument, CanonicalRow, CanonicalValue};
 use super::cql_type::{ColumnType, CqlTypeSpec, SeqKind};
 use super::declared::{canonicalize_golden, Declared};
+use super::failure::Failures;
+use super::golden_text;
+use super::{Fixture, ParityCase};
 
 /// One row projected out of the golden: the primary-key components in declared
 /// order, plus every declared column's canonical value.
@@ -77,6 +80,66 @@ use super::declared::{canonicalize_golden, Declared};
 pub struct GoldenRow {
     pub keys: Vec<CanonicalValue>,
     pub cells: BTreeMap<String, CanonicalValue>,
+}
+
+/// Stage GOLDEN: load the committed sstabledump dump and project it, including
+/// its physical-dump ELIGIBILITY refusals (#1742).
+pub fn load_golden(
+    case: &ParityCase,
+    fixture: &Fixture,
+    columns: &[ColumnType],
+) -> Result<Vec<GoldenRow>, Failures> {
+    // The golden TEXT is read here rather than through
+    // `canonical_jsonl::load_golden_document_with_keys` so that a declared
+    // `decimal`'s LITERAL survives the parse: the shared comparator turns a bare
+    // JSON number into an `f64`, and an `f64` cannot identify the decimal it was
+    // parsed from (`0.100000000000000001` and `0.1` are the same double).
+    // `golden_text.rs` keeps every value's ORIGINAL TEXT through the
+    // deserialization itself, quotes only the DECLARED `decimal`/`varint`
+    // positions (round 11) and reaches a cell only at `rows[].cells[]` (round
+    // 12). Two refusals keep it fail-closed: it errors on any line whose
+    // sstabledump structure does not hold, and `declared.rs` REFUSES a declared
+    // `decimal`/`varint` position that still arrives as a double.
+    let raw = std::fs::read_to_string(&fixture.golden).map_err(|e| {
+        Failures::refusal(format!(
+            "reading the sstabledump golden {} failed: {e}",
+            fixture.golden.display()
+        ))
+    })?;
+    if let Some(marker) = golden_text::placeholder_marker(&raw) {
+        return Err(Failures::refusal(format!(
+            "the sstabledump golden {} carries the placeholder marker {marker} — it is not a \
+             real Cassandra dump and cannot be an oracle",
+            fixture.golden.display()
+        )));
+    }
+    let content = golden_text::preserve_exact_lexemes(&raw, columns).map_err(|e| {
+        Failures::refusal(format!(
+            "preserving the exact literals of the sstabledump golden {} failed: {e}",
+            fixture.golden.display()
+        ))
+    })?;
+    // ELIGIBILITY is decided from the TEXT the parser is about to read, not from
+    // what the parser managed to parse out of it: the shared parser is lenient by
+    // design and turns a PRESENT-BUT-INVALID `ttl`, `deletion_info` or `rows`
+    // into an absence or an empty collection, which is exactly how a golden that
+    // this oracle must refuse (#1742) reads as live data. See
+    // [`reject_ineligible_or_malformed_text`].
+    reject_ineligible_or_malformed_text(&content).map_err(|e| {
+        Failures::refusal(format!(
+            "the sstabledump golden {} is not usable as a physical-dump oracle: {e}",
+            fixture.golden.display()
+        ))
+    })?;
+    let golden_doc = canonical_jsonl::parse_document_str_with_keys(
+        &content,
+        &fixture.golden,
+        true,
+        &case.key_spec(),
+    )
+    .map_err(|e| Failures::refusal(format!("loading the sstabledump golden failed: {e}")))?;
+    project_golden(&golden_doc, columns, case.partition_key, case.clustering)
+        .map_err(Failures::refusal)
 }
 
 /// Project a whole golden document into canonical rows.
@@ -216,6 +279,244 @@ pub fn project_golden(
         }
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// ELIGIBILITY, DECIDED FROM THE TEXT — before a malformed field can become an
+// absence
+// ---------------------------------------------------------------------------
+//
+// The refusals above are the load-bearing half of this oracle (#1742), and they
+// were decided from fields the SHARED parser had already parsed SUCCESSFULLY.
+// That parser is `cqlite-core`-owned and deliberately lenient: it reads every
+// optional field through `get(..).and_then(as_str/as_i64/as_array)`, so a field
+// that is PRESENT BUT INVALID becomes `None` — indistinguishable from a field
+// that is absent. Three consequences, each of which turned an ineligible or
+// malformed golden into "live data":
+//
+//   * `"ttl": "3600"` (a string, or any non-integer) → `ttl_secs: None` → the
+//     TTL refusal above never fires, and the harness compares a dump whose rows
+//     can EXPIRE between fixture generation and test time.
+//   * `"deletion_info": 7` (or any non-object) at partition level →
+//     `parse_deletion_info` returns `None` → the deletion refusal never fires,
+//     and the dump's shadowed rows are compared against a reconciled export.
+//   * `"rows": 7` / no `rows` at all → an EMPTY row list → a partition that
+//     silently contributes NOTHING to the oracle.
+//
+// So eligibility is decided HERE, from the golden TEXT the parser is about to
+// read, and PRESENT-BUT-INVALID is a REFUSAL rather than an absence. For the two
+// markers whose mere presence is already disqualifying — a partition/row
+// deletion and a TTL — the check is on PRESENCE ALONE, which is stronger than
+// any shape check could be: there is no valid spelling of a field this oracle
+// would accept anyway. For the fields a valid golden does carry (`rows`,
+// `cells`, `type`, `name`, a collection-shell `deletion_info` and the timestamps
+// a shadowing decision reads) the REQUIRED SHAPE is asserted, because the parser
+// would otherwise silently substitute an absence for each of them.
+//
+// This is a shape/presence check only: it reads no VALUE, decides no position
+// and no type, and produces nothing the comparison consumes.
+
+/// REFUSE a golden document whose eligibility-bearing fields or required
+/// containers are absent-or-invalid, BEFORE the shared parser turns either into
+/// an absence.
+///
+/// Run on the very text handed to `canonical_jsonl::parse_document_str_with_keys`
+/// (see [`load_golden`]), so what is validated is what is parsed.
+pub fn reject_ineligible_or_malformed_text(content: &str) -> Result<(), String> {
+    for (idx, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        check_line(line.trim()).map_err(|e| format!("line {}: {e}", idx + 1))?;
+    }
+    Ok(())
+}
+
+/// One sstabledump line — one PARTITION.
+fn check_line(line: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| format!("an sstabledump line must be one JSON object: {e}"))?;
+    let top = value
+        .as_object()
+        .ok_or_else(|| "an sstabledump line must be one JSON object".to_string())?;
+
+    let partition = require_object(top, "partition", "the sstabledump line")?;
+    require_array(partition, "key", "`partition`")?;
+    // PRESENCE alone, whatever the shape: a partition tombstone disqualifies the
+    // fixture, so there is no spelling of `deletion_info` to validate.
+    if partition.contains_key("deletion_info") {
+        return Err(ineligible_at("the partition", "a partition-level deletion"));
+    }
+
+    let rows = require_array(top, "rows", "the sstabledump line")?;
+    for (ri, row) in rows.iter().enumerate() {
+        let where_ = format!("row {ri}");
+        let row = row
+            .as_object()
+            .ok_or_else(|| format!("{where_}: `rows` must hold JSON objects"))?;
+        check_row(row, &where_)?;
+    }
+    Ok(())
+}
+
+/// One `rows` entry. Only a `"row"` is eligible; every other entry type is a
+/// construct this oracle refuses (or one it does not recognise at all).
+fn check_row(row: &serde_json::Map<String, serde_json::Value>, where_: &str) -> Result<(), String> {
+    match require_string(row, "type", where_)? {
+        "row" => {}
+        // The dump's other entry types, each already refused downstream — named
+        // HERE too so a malformed or missing `type` cannot become an empty
+        // string that reads as "not one of the above".
+        rtype @ ("static_block" | "range_tombstone_bound" | "range_tombstone_boundary") => {
+            return Err(ineligible_at(where_, &format!("a '{rtype}' entry")))
+        }
+        other => {
+            return Err(format!(
+                "{where_}: unrecognized sstabledump entry type {other:?} — the harness refuses \
+                 an entry it cannot classify rather than treat it as a row"
+            ))
+        }
+    }
+    if row.contains_key("deletion_info") {
+        return Err(ineligible_at(where_, "a row-level deletion"));
+    }
+    if let Some(liveness) = row.get("liveness_info") {
+        let liveness = liveness.as_object().ok_or_else(|| {
+            present_but_invalid(where_, "liveness_info", "a JSON object", liveness)
+        })?;
+        // PRESENCE alone: any row TTL disqualifies the fixture.
+        if liveness.contains_key("ttl") {
+            return Err(ineligible_at(where_, "a row TTL"));
+        }
+        // The row writetime a collection-shell shadowing decision falls back to.
+        // A non-string here parses to `None`, which would silently move that
+        // decision onto a different (or missing) timestamp.
+        require_optional_string(liveness, "tstamp", &format!("{where_} `liveness_info`"))?;
+    }
+    if let Some(clustering) = row.get("clustering") {
+        if !clustering.is_array() {
+            return Err(present_but_invalid(
+                where_,
+                "clustering",
+                "a JSON array",
+                clustering,
+            ));
+        }
+    }
+    let cells = require_array(row, "cells", where_)?;
+    for (ci, cell) in cells.iter().enumerate() {
+        let cell = cell
+            .as_object()
+            .ok_or_else(|| format!("{where_}: `cells` must hold JSON objects"))?;
+        check_cell(cell, &format!("{where_} cells[{ci}]"))?;
+    }
+    Ok(())
+}
+
+/// One cell.
+fn check_cell(
+    cell: &serde_json::Map<String, serde_json::Value>,
+    where_: &str,
+) -> Result<(), String> {
+    let name = require_string(cell, "name", where_)?;
+    // PRESENCE alone: any per-cell TTL disqualifies the fixture.
+    if cell.contains_key("ttl") {
+        return Err(ineligible_at(where_, &format!("a TTL on column '{name}'")));
+    }
+    // A cell `deletion_info` is NOT disqualifying on its own — a collection-shell
+    // deletion is the ordinary marker an INSERT of a whole non-frozen collection
+    // writes, and `project_column` decides from it which elements are shadowed.
+    // So its SHAPE is what must hold: the parser reads the shell's
+    // markedForDeleteAt from the sibling `tstamp` or from `marked_deleted`, and a
+    // non-string in either becomes `None` — which moves a shadowing decision
+    // rather than reporting a malformed marker.
+    if let Some(deletion) = cell.get("deletion_info") {
+        let deletion = deletion.as_object().ok_or_else(|| {
+            present_but_invalid(where_, "deletion_info", "a JSON object", deletion)
+        })?;
+        let at = format!("{where_} `deletion_info`");
+        require_optional_string(deletion, "marked_deleted", &at)?;
+        require_optional_string(deletion, "local_delete_time", &at)?;
+    }
+    require_optional_string(cell, "tstamp", where_)?;
+    if let Some(path) = cell.get("path") {
+        if !path.is_array() {
+            return Err(present_but_invalid(where_, "path", "a JSON array", path));
+        }
+    }
+    Ok(())
+}
+
+fn require_object<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    owner: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, String> {
+    match object.get(key) {
+        Some(v) => v
+            .as_object()
+            .ok_or_else(|| present_but_invalid(owner, key, "a JSON object", v)),
+        None => Err(format!("{owner} has no `{key}`")),
+    }
+}
+
+fn require_array<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    owner: &str,
+) -> Result<&'a Vec<serde_json::Value>, String> {
+    match object.get(key) {
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| present_but_invalid(owner, key, "a JSON array", v)),
+        None => Err(format!(
+            "{owner} has no `{key}`; the harness refuses a golden with no `{key}` rather than \
+             read it as an empty one"
+        )),
+    }
+}
+
+fn require_string<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    owner: &str,
+) -> Result<&'a str, String> {
+    match object.get(key) {
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| present_but_invalid(owner, key, "a JSON string", v)),
+        None => Err(format!("{owner} has no `{key}`")),
+    }
+}
+
+fn require_optional_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    owner: &str,
+) -> Result<(), String> {
+    match object.get(key) {
+        Some(v) if v.is_string() => Ok(()),
+        Some(v) => Err(present_but_invalid(owner, key, "a JSON string", v)),
+        None => Ok(()),
+    }
+}
+
+/// A field that is there but is not what it must be. Named as its OWN state,
+/// because the whole point is that the shared parser would have reported it as an
+/// ABSENCE.
+fn present_but_invalid(owner: &str, key: &str, want: &str, got: &serde_json::Value) -> String {
+    // Truncated on a CHAR boundary — a golden can carry any UTF-8, and slicing
+    // a byte offset would panic on a multi-byte one.
+    let got = got.to_string();
+    let got = match got.char_indices().nth(60) {
+        Some((cut, _)) => format!("{}…", &got[..cut]),
+        None => got,
+    };
+    format!(
+        "{owner}: `{key}` is PRESENT but is not {want} (it is {got}); the harness refuses it \
+         rather than read a malformed field as an ABSENT one, which is how a physical-dump \
+         eligibility check (#1742) gets silently satisfied"
+    )
 }
 
 fn ineligible(pi: usize, what: &str) -> String {

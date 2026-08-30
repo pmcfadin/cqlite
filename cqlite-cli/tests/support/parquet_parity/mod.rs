@@ -966,7 +966,7 @@ fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
     // Stage GOLDEN — FIRST and unconditionally, because it depends on nothing
     // the export does. Running it before the export is what makes it impossible
     // for a recorded export abort to suppress it.
-    match load_golden(case, &fixture, &stages.columns) {
+    match golden_rows::load_golden(case, &fixture, &stages.columns) {
         Ok(golden) => stages.golden = Some(golden),
         Err(f) => {
             stages.failures.extend(f.into_items());
@@ -1154,54 +1154,6 @@ impl Stages {
             .cloned()
             .collect()
     }
-}
-
-/// Stage GOLDEN: load the committed sstabledump dump and project it, including
-/// its physical-dump ELIGIBILITY refusals (#1742).
-fn load_golden(
-    case: &ParityCase,
-    fixture: &Fixture,
-    columns: &[ColumnType],
-) -> Result<Vec<GoldenRow>, Failures> {
-    // The golden TEXT is read here rather than through
-    // `canonical_jsonl::load_golden_document_with_keys` so that a declared
-    // `decimal`'s LITERAL survives the parse: the shared comparator turns a bare
-    // JSON number into an `f64`, and an `f64` cannot identify the decimal it was
-    // parsed from (`0.100000000000000001` and `0.1` are the same double).
-    // `golden_text.rs` keeps every value's ORIGINAL TEXT through the
-    // deserialization itself, quotes only the DECLARED `decimal`/`varint`
-    // positions (round 11) and reaches a cell only at `rows[].cells[]` (round
-    // 12). Two refusals keep it fail-closed: it errors on any line whose
-    // sstabledump structure does not hold, and `declared.rs` REFUSES a declared
-    // `decimal`/`varint` position that still arrives as a double.
-    let raw = std::fs::read_to_string(&fixture.golden).map_err(|e| {
-        Failures::refusal(format!(
-            "reading the sstabledump golden {} failed: {e}",
-            fixture.golden.display()
-        ))
-    })?;
-    if let Some(marker) = golden_text::placeholder_marker(&raw) {
-        return Err(Failures::refusal(format!(
-            "the sstabledump golden {} carries the placeholder marker {marker} — it is not a \
-             real Cassandra dump and cannot be an oracle",
-            fixture.golden.display()
-        )));
-    }
-    let content = golden_text::preserve_exact_lexemes(&raw, columns).map_err(|e| {
-        Failures::refusal(format!(
-            "preserving the exact literals of the sstabledump golden {} failed: {e}",
-            fixture.golden.display()
-        ))
-    })?;
-    let golden_doc = canonical_jsonl::parse_document_str_with_keys(
-        &content,
-        &fixture.golden,
-        true,
-        &case.key_spec(),
-    )
-    .map_err(|e| Failures::refusal(format!("loading the sstabledump golden failed: {e}")))?;
-    golden_rows::project_golden(&golden_doc, columns, case.partition_key, case.clustering)
-        .map_err(Failures::refusal)
 }
 
 /// Export, read back and project both sides. `Ok(None)` only when no candidate
