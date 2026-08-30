@@ -41,7 +41,6 @@ use super::{canon_scalar, canon_typed, csv_container, Depth, Egress, Kinding, Ro
 use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 
 /// The outcome of one table × one egress format.
 #[derive(Debug, Default)]
@@ -55,18 +54,21 @@ pub struct Report {
     /// affirmatively in the census so "containers are covered" is a measurement
     /// rather than an assumption.
     pub container_cells: usize,
-    /// Container cells REFUSED because the golden's own content cannot survive
-    /// the unquoted CSV rendering (see `csv_container::ambiguity`). Counted, and
-    /// named in [`Self::ambiguity_reasons`], so the narrowing is declared at run
-    /// time rather than inferred from a silent gap.
+    /// Container cells holding at least one REFUSED position, because the
+    /// golden's own content cannot survive the unquoted CSV rendering there (see
+    /// `csv_container::cell_refusal` and `csv_container::node_refusal`). Counted,
+    /// and named in [`Self::ambiguity_reasons`], so the narrowing is declared at
+    /// run time rather than inferred from a silent gap.
     ///
-    /// A refused cell is NOT uncompared: what the ambiguity cannot reach — the
-    /// bracket frame and the decidable member counts — is still compared, and a
-    /// divergence there is an ordinary diff (`decidable_despite_ambiguity`,
-    /// finding N3). It is not counted as compared coverage, because only part of
-    /// the value was decided.
+    /// A refusal is NOT a blind spot the size of the cell, nor even of the node:
+    /// what it cannot reach — the bracket frame at every depth, the decidable
+    /// member counts, and every unambiguous sibling and enclosing level — is still
+    /// compared, and a divergence there is an ordinary diff (finding N3, at member
+    /// granularity since finding P2). The CELL is not counted as compared
+    /// coverage, because only part of its value was decided.
     pub ambiguous_container_cells: usize,
-    /// One deduplicated `column (reason)` entry per refusal cause.
+    /// One deduplicated `path (reason)` entry per refused POSITION — `s (…)` for a
+    /// whole cell, `sl[0] (…)` for one indistinguishable member of it.
     pub ambiguity_reasons: Vec<String>,
     /// Declared skip paths that did NOT suppress a divergence in this table's
     /// walk, each with the cause (they agreed, they were never reached, or the
@@ -179,6 +181,49 @@ impl<'a> SkipPaths<'a> {
     }
 }
 
+/// The CSV positions this table's walk REFUSED, in walk order, each with its
+/// fully-qualified path and cause.
+///
+/// Recorded at the granularity the walk itself has — per member, per depth — so an
+/// indistinguishable NESTED member is refused where it lives while its siblings,
+/// its container's member count and its bracket frame keep being compared (issue
+/// #1491 review finding P2). Deciding it one node up is what let a golden `[[]]`
+/// accept a CLI `[]`.
+///
+/// A separate channel from the value tree on purpose: a refusal is CONTROL
+/// information about a position, and putting it into the decoded `Value` as a
+/// sentinel would make it indistinguishable from data the egress could itself
+/// produce.
+#[derive(Default)]
+struct Refusals {
+    recorded: RefCell<Vec<(String, String)>>,
+}
+
+impl Refusals {
+    /// How many refusals have been recorded so far. A caller takes this as a MARK
+    /// before a subtree and compares it after, which is how one cell's (or one
+    /// excluded path's) refusals are attributed to it.
+    fn mark(&self) -> usize {
+        self.recorded.borrow().len()
+    }
+
+    fn record(&self, path: &str, why: &str) {
+        self.recorded
+            .borrow_mut()
+            .push((path.to_string(), why.to_string()));
+    }
+
+    /// The refusals recorded since `mark`, as `path (why)` entries.
+    fn since(&self, mark: usize) -> Vec<String> {
+        self.recorded
+            .borrow()
+            .iter()
+            .skip(mark)
+            .map(|(path, why)| format!("{path} ({why})"))
+            .collect()
+    }
+}
+
 /// Everything the walk knows about ONE position in a row's value tree.
 ///
 /// Kept as one value rather than four parallel parameters because all four are
@@ -196,16 +241,24 @@ struct At<'s, 'p> {
     /// name one UDT field rather than a whole column.
     path: String,
     skips: &'s SkipPaths<'p>,
+    /// Where a refusal at THIS position is recorded (see [`Refusals`]).
+    refusals: &'s Refusals,
 }
 
 impl<'s, 'p> At<'s, 'p> {
     /// A whole column's value.
-    fn column(name: &str, kinding: Kinding, skips: &'s SkipPaths<'p>) -> Self {
+    fn column(
+        name: &str,
+        kinding: Kinding,
+        skips: &'s SkipPaths<'p>,
+        refusals: &'s Refusals,
+    ) -> Self {
         At {
             depth: Depth::TopLevel,
             kinding,
             path: name.to_string(),
             skips,
+            refusals,
         }
     }
 
@@ -221,6 +274,7 @@ impl<'s, 'p> At<'s, 'p> {
             kinding,
             path,
             skips: self.skips,
+            refusals: self.refusals,
         }
     }
 
@@ -232,6 +286,7 @@ impl<'s, 'p> At<'s, 'p> {
             kinding,
             path: format!("{}[{index}]", self.path),
             skips: self.skips,
+            refusals: self.refusals,
         }
     }
 }
@@ -251,6 +306,7 @@ pub fn compare_rows(
 ) -> Report {
     let mut report = Report::default();
     let skips = SkipPaths::new(skip_columns);
+    let refusals = Refusals::default();
     if golden.len() != cli.len() {
         report.diffs.push(format!(
             "row count: golden {} vs {egress:?} egress {}",
@@ -307,6 +363,8 @@ pub fn compare_rows(
             // observed inside the walk, so the column's other fields keep being
             // compared and counted.
             let excluded_column = skips.excludes(name);
+            // Where this cell's own refusals start (see [`Refusals::mark`]).
+            let cell_mark = refusals.mark();
             // The CLI must render EVERY declared column. An omitted one is a
             // divergence, NOT an implicit null: reading it as null is what made
             // the absent-cell property untestable.
@@ -360,18 +418,12 @@ pub fn compare_rows(
             // has to be decoded back into the golden's shape before comparison.
             let decoded = match csv_decoded(gv, cv, egress, &column.ty, name, &skips) {
                 Ok(decoded) => decoded,
-                Err(Refusal::Ambiguous(why)) => {
-                    report.ambiguous_container_cells += 1;
-                    let entry = format!("{name} ({why})");
-                    if !report.ambiguity_reasons.contains(&entry) {
-                        report.ambiguity_reasons.push(entry);
-                    }
+                Err(Refusal::Cell(why)) => {
+                    refusals.record(name, &why);
                     // The refusal suppresses the INDISTINGUISHABLE readings, not
                     // the whole cell: the frame and the two decidable member
-                    // counts are still compared (finding N3). The cell stays
-                    // counted as REFUSED rather than as compared coverage,
-                    // because what was checked is a proper part of the value.
-                    match csv_container::decidable_despite_ambiguity(gv, cv, &column.ty) {
+                    // counts are still compared (finding N3).
+                    match csv_container::decidable_despite_cell_refusal(gv, cv, &column.ty) {
                         Ok(()) => {
                             if excluded_column {
                                 skips.observe(
@@ -394,6 +446,7 @@ pub fn compare_rows(
                             }
                         }
                     }
+                    count_cell(&mut report, &refusals, cell_mark, gv, excluded_column);
                     continue;
                 }
                 Err(Refusal::Unparseable(why)) => {
@@ -413,22 +466,60 @@ pub fn compare_rows(
                 }
             };
             let cv = decoded.as_ref().unwrap_or(cv);
-            if !excluded_column {
-                report.compared_cells += 1;
-                if matches!(gv, Value::Array(_) | Value::Object(_)) {
-                    report.container_cells += 1;
-                }
-            }
-            let at = At::column(name, column_kinding(column), &skips);
+            let at = At::column(name, column_kinding(column), &skips, &refusals);
             // `compare_value_at` swallows (and RECORDS) the outcome at an excluded
             // path itself, so an excluded column can never reach `diffs` here.
-            if let Err(why) = compare_value_at(gv, cv, egress, &column.ty, &at) {
+            let outcome = compare_value_at(gv, cv, egress, &column.ty, &at);
+            // The counters are read AFTER the walk, because whether this cell was
+            // fully decided is only known once its members have been visited: a
+            // refusal anywhere inside it means a proper PART of the value was
+            // compared, which is not container coverage (finding N3, now at member
+            // granularity — finding P2).
+            count_cell(&mut report, &refusals, cell_mark, gv, excluded_column);
+            if let Err(why) = outcome {
                 report.diffs.push(format!("row[{key}].{name}: {why}"));
             }
         }
     }
     report.stale_skips = skips.stale();
     report
+}
+
+/// Count ONE cell into the census, once its walk is finished.
+///
+/// A cell holding at least one REFUSED position is counted as refused and NOT as
+/// compared coverage: what was decided there is a proper part of the value, so
+/// calling it a compared container cell would overstate the measurement. Every
+/// refused position is named (`path (why)`), deduplicated, so the census states
+/// the gap at the granularity the walk found it.
+///
+/// An EXCLUDED column contributes no compared/container coverage either way — its
+/// divergence is discarded — but its refusals are still counted and named, because
+/// a refusal is a property of the golden and the format, not of the exclusion.
+fn count_cell(
+    report: &mut Report,
+    refusals: &Refusals,
+    mark: usize,
+    gv: &Value,
+    excluded_column: bool,
+) {
+    let refused = refusals.since(mark);
+    if !refused.is_empty() {
+        report.ambiguous_container_cells += 1;
+        for entry in refused {
+            if !report.ambiguity_reasons.contains(&entry) {
+                report.ambiguity_reasons.push(entry);
+            }
+        }
+        return;
+    }
+    if excluded_column {
+        return;
+    }
+    report.compared_cells += 1;
+    if matches!(gv, Value::Array(_) | Value::Object(_)) {
+        report.container_cells += 1;
+    }
 }
 
 /// The first position where the two sides' EMITTED row order differs, or `None`.
@@ -532,12 +623,17 @@ fn column_kinding(column: &Column) -> Kinding {
 
 /// Why a CSV container cell could not be decoded.
 enum Refusal {
-    /// The GOLDEN's own content cannot survive the unquoted rendering, so the
-    /// CLI text cannot be read back into members. Decided from the golden alone,
-    /// so it can never be caused by the defect under test — and it suppresses
-    /// only the readings that are genuinely indistinguishable: the caller still
-    /// applies `csv_container::decidable_despite_ambiguity` (finding N3).
-    Ambiguous(String),
+    /// The GOLDEN's own content cannot survive the unquoted rendering AT ANY
+    /// LEVEL — a structural character unbalances the bracket depth the whole
+    /// rendering is split on — so no part of the cell can be read back into
+    /// members. Decided from the golden alone, so it can never be caused by the
+    /// defect under test, and it still suppresses only the indistinguishable
+    /// readings: the caller applies
+    /// `csv_container::decidable_despite_cell_refusal` (finding N3).
+    ///
+    /// Every NARROWER cause is refused per NODE inside the walk instead
+    /// (`csv_container::node_refusal`, finding P2) and never reaches here.
+    Cell(String),
     /// The CLI's text is not the grammar at all (wrong bracket, unbalanced
     /// brackets, a map entry with no `: `). That IS a divergence, so it is
     /// reported as one rather than refused.
@@ -559,8 +655,8 @@ fn csv_decoded(
     if egress != Egress::Csv || !matches!(gv, Value::Array(_) | Value::Object(_)) {
         return Ok(None);
     }
-    if let Some(why) = csv_container::ambiguity(gv, ty) {
-        return Err(Refusal::Ambiguous(why));
+    if let Some(why) = csv_container::cell_refusal(gv) {
+        return Err(Refusal::Cell(why));
     }
     let Value::String(text) = cv else {
         return Ok(None);
@@ -665,10 +761,21 @@ fn compare_value_at(
         // exists: a divergence means the exclusion suppressed something, agreement
         // means it is stale and must be retired (finding L1). Visiting the path
         // used to be the whole test, which no fix to CQLite could ever falsify.
-        let outcome = if compare_value_body(golden, cli, egress, ty, at).is_err() {
-            Observed::Suppressed
-        } else {
-            Observed::Agreed
+        let mark = at.refusals.mark();
+        let outcome = match compare_value_body(golden, cli, egress, ty, at) {
+            Err(_) => Observed::Suppressed,
+            // A REFUSED position inside the excluded subtree means the comparison
+            // there could not be decided — "I could not tell" is not "the two
+            // sides agree", and reporting agreement would retire a gap on the
+            // strength of a measurement nobody took. Reached at ANY depth, so a
+            // field-scoped exclusion over a refused member is reported the same
+            // way a whole-column one over a refused cell is.
+            Ok(()) => match at.refusals.since(mark).first() {
+                Some(refused) => {
+                    Observed::Unresolved(format!("the CSV comparison there was refused: {refused}"))
+                }
+                None => Observed::Agreed,
+            },
         };
         at.skips.observe(&at.path, outcome);
         return Ok(());
@@ -690,6 +797,22 @@ fn compare_value_body(
     // A column that is absent/null on BOTH sides, whatever its declared shape.
     if matches!(golden, Value::Null) && matches!(cli, Value::Null) {
         return Ok(());
+    }
+    // CSV only: a position whose GOLDEN content the flat rendering cannot express
+    // unambiguously (`csv_container::node_refusal`). The refusal is recorded and
+    // what survives it is compared — the frame, which the decoder already required
+    // at this depth, and the member counts no confusable reading can produce.
+    //
+    // Asked HERE, at every node of the same recursion the comparison walks, which
+    // is the whole point of finding P2: the decision is made at the granularity of
+    // the comparison, so this node's siblings, its container's member count, its
+    // bracket kind and every enclosing level keep being compared. It cannot fire
+    // for JSON, which carries its own structure and needs no decoding.
+    if egress == Egress::Csv {
+        if let Some(why) = csv_container::node_refusal(golden, Some(ty)) {
+            at.refusals.record(&at.path, &why);
+            return csv_container::decidable_despite_node_refusal(golden, cli);
+        }
     }
     match ty {
         // set / list / frozen collection: same shape both sides, order-sensitive.
@@ -1258,169 +1381,18 @@ pub fn cli_csv_rows(text: &str) -> Result<Vec<Row>, String> {
 // ===========================================================================
 // Fixture staging
 // ===========================================================================
+//
+// Split into its own file under the campsite rule and RE-EXPORTED here, so
+// `compare::golden_path` and `compare::stage_single_table` keep naming the same
+// items: locating and staging a fixture is a filesystem question, not a
+// comparison one. (`fixture_dir_in`/`fixture_dirs_in` are reached as
+// `compare::staging::…`, which is where `golden_fixture_root` already names
+// them.)
 
-/// The `<table>-<uuid>` directory holding this table's SSTable under an ALREADY
-/// CHOSEN `sstables/` root, or an error naming that root.
-///
-/// Choosing the root is the caller's job — see `super::fixture_root`, where a
-/// git-committed case is pinned to the checkout copy and only a fetched-corpus case
-/// walks the candidate roots by evidence (#1491 finding J1, #3220).
-pub fn fixture_dir_in(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, String> {
-    let mut dirs = fixture_dirs_in(root, keyspace, table)?;
-    if dirs.is_empty() {
-        return Err(format!(
-            "no {table}-* directory with a *-Data.db under {}",
-            root.join(keyspace).display()
-        ));
-    }
-    Ok(dirs.remove(0))
-}
+#[path = "golden_fixture_staging.rs"]
+pub mod staging;
 
-/// EVERY `<table>-<uuid>` directory holding a `*-Data.db` under `root/keyspace`,
-/// in sorted order.
-///
-/// Returned as the whole set, not just the first, so a caller that compares one of
-/// them can COUNT the narrowing and declare it instead of picking silently (issue
-/// #1491 review finding L3).
-pub fn fixture_dirs_in(root: &Path, keyspace: &str, table: &str) -> Result<Vec<PathBuf>, String> {
-    let prefix = format!("{table}-");
-    let mut matches: Vec<PathBuf> = std::fs::read_dir(root.join(keyspace))
-        .map_err(|e| format!("cannot read {}: {e}", root.join(keyspace).display()))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&prefix))
-                    .unwrap_or(false)
-                && has_data_db(p)
-        })
-        .collect();
-    matches.sort();
-    Ok(matches)
-}
-
-fn has_data_db(dir: &Path) -> bool {
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(Result::ok).any(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|n| n.ends_with("-Data.db"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// The golden that describes the fixture's `*-Data.db`, PAIRED BY NAME:
-/// `<gen>-Data.db` is described by `<gen>-Data.db.jsonl` and by no other file.
-///
-/// Two selections used to be silent here, and both could compare a CLI reading of
-/// one SSTable against a dump of another (issue #1491 review finding L3):
-///
-///   * the lexicographically FIRST golden in the directory was taken, so a
-///     directory holding `nb-1-…jsonl` next to a `nb-2-big-Data.db` compared the
-///     wrong generation's dump — 26 committed fixture directories carry more than
-///     one golden, so the shape is real even though no covered case has it today;
-///   * a directory holding SEVERAL `*-Data.db` was accepted, and
-///     [`stage_single_table`] copies the whole directory, so the CLI reads all of
-///     them while one golden describes one. That is not narrowed coverage but an
-///     unsound comparison, so it FAILS naming the files rather than being counted.
-pub fn golden_path(fixture: &Path) -> Result<PathBuf, String> {
-    let mut data_dbs: Vec<PathBuf> = Vec::new();
-    let mut goldens: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(fixture)
-        .map_err(|e| format!("cannot read {}: {e}", fixture.display()))?
-        .filter_map(Result::ok)
-    {
-        let path = entry.path();
-        match path.file_name().and_then(|n| n.to_str()) {
-            Some(name) if name.ends_with("-Data.db.jsonl") => goldens.push(path),
-            Some(name) if name.ends_with("-Data.db") => data_dbs.push(path),
-            _ => {}
-        }
-    }
-    data_dbs.sort();
-    goldens.sort();
-    let names = |paths: &[PathBuf]| {
-        paths
-            .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let [data_db] = data_dbs.as_slice() else {
-        return Err(format!(
-            "{} holds {} *-Data.db files ({}) — the whole directory is staged as one \
-             table, so the CLI would read all of them while a golden describes one; \
-             this lane compares exactly one SSTable per case",
-            fixture.display(),
-            data_dbs.len(),
-            if data_dbs.is_empty() {
-                "none".to_string()
-            } else {
-                names(&data_dbs)
-            }
-        ));
-    };
-    let expected = PathBuf::from(format!("{}.jsonl", data_db.display()));
-    if !expected.is_file() {
-        return Err(format!(
-            "no golden {} beside the SSTable it must describe{}",
-            expected.display(),
-            if goldens.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " (the directory holds {}, which describe other generations)",
-                    names(&goldens)
-                )
-            }
-        ));
-    }
-    Ok(expected)
-}
-
-/// Stage a `--data-dir` holding EXACTLY this one table, by copying the fixture's
-/// component files into `<dest>/<keyspace>/<fixture-dir-name>/`.
-///
-/// One table per data dir keeps each case independent (a sibling table's
-/// unparseable component cannot perturb it) and keeps the whole lane fast: CLI
-/// ingestion walks one directory instead of the whole corpus, so ~50 CLI
-/// invocations stay in the low seconds. Copied rather than symlinked so the lane
-/// does not depend on `std::os::unix`.
-pub fn stage_single_table(dest: &Path, keyspace: &str, fixture: &Path) -> Result<(), String> {
-    let name = fixture
-        .file_name()
-        .ok_or_else(|| format!("{} has no final component", fixture.display()))?;
-    let target = dest.join(keyspace).join(name);
-    std::fs::create_dir_all(&target)
-        .map_err(|e| format!("cannot create {}: {e}", target.display()))?;
-    let entries = std::fs::read_dir(fixture)
-        .map_err(|e| format!("cannot read {}: {e}", fixture.display()))?;
-    let mut copied = 0usize;
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(file_name) = path.file_name() else {
-            continue;
-        };
-        std::fs::copy(&path, target.join(file_name))
-            .map_err(|e| format!("cannot copy {}: {e}", path.display()))?;
-        copied += 1;
-    }
-    if copied == 0 {
-        return Err(format!(
-            "no component files copied from {}",
-            fixture.display()
-        ));
-    }
-    Ok(())
-}
+pub use staging::{golden_path, stage_single_table};
 
 #[cfg(test)]
 #[path = "golden_value_compare_tests.rs"]

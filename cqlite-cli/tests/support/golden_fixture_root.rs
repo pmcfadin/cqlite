@@ -355,7 +355,7 @@ pub fn corpus_fixture_in(
 /// in sorted order — or [`CorpusMiss::Unusable`] when the filesystem could not
 /// answer.
 ///
-/// The lane's own scan rather than `compare::fixture_dirs_in`, because that one
+/// The lane's own scan rather than `compare::staging::fixture_dirs_in`, because that one
 /// answers "no `*-Data.db`" for a fixture directory it could not READ
 /// (`has_data_db` ends in `.unwrap_or(false)`), which is this finding's shape one
 /// level in: an unreadable directory would make the root verifiably absent and the
@@ -620,7 +620,7 @@ mod tests {
     /// The same three-valued rule ONE LEVEL IN: a fixture directory that cannot be
     /// listed is unusable, never "holds no `*-Data.db`".
     ///
-    /// `compare::fixture_dirs_in`'s `has_data_db` ends in `.unwrap_or(false)`, so
+    /// `compare::staging::fixture_dirs_in`'s `has_data_db` ends in `.unwrap_or(false)`, so
     /// reusing it would have made an unreadable fixture directory a verified
     /// absence and skipped the case — the finding's own shape, one level down.
     /// Classification is by `ErrorKind::NotFound` alone, so a permission failure

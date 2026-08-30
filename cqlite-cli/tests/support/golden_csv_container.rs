@@ -55,37 +55,86 @@
 //! `["alpha","beta"]`) exactly as the golden does, so in JSON there is no bracket
 //! to check.
 //!
-//! # Two ambiguities, declared rather than papered over
+//! # Refusals, declared rather than papered over — each attributed to the
+//! NARROWEST node it destroys
 //!
-//! 0. **An EMPTY container vs a container of one EMPTY member.** Members are
-//!    unquoted and unseparated at count 1, so a `set<text>` holding exactly the
-//!    empty string renders `{}` — byte for byte what an EMPTY set renders as. The
-//!    two are different values, so neither reading is trustworthy and such a cell
-//!    is REFUSED. The rule is bounded by the DECLARED element type: a `list<int>`
-//!    member always carries a digit, so `[]` there can only mean zero members and
-//!    IS compared. It is the mirror of ambiguity 3 below, which refuses the case
-//!    where the GOLDEN carries the empty member; without it the golden-side scan
-//!    saw nothing to refuse in an empty golden container while the CLI could
-//!    perfectly well have held one empty member.
-//! 1. **`null` vs the text `"null"`.** A container has no empty-field mechanism,
-//!    so `ValueFormatter` spells a null member `null` — the same text a `text`
-//!    member holding `"null"` produces (issue #1499's ambiguity, one level in).
-//!    The token is resolved from the GOLDEN's own type: null there decodes to
-//!    null here, anything else stays text. That keeps the distinction wherever
-//!    the oracle knows it, and loses it only where CSV genuinely cannot express
-//!    it. A CLI that emits the wrong member still fails — only the exact
-//!    null/`"null"` swap is invisible.
-//! 3. **Separator collisions.** Members are unquoted, so a scalar whose text
-//!    contains `, ` (or, for a map/UDT KEY, `: `) or a bracket makes the
-//!    rendering genuinely unparseable. Such a cell is REFUSED, never guessed —
-//!    and the refusal is decided from the GOLDEN alone, so it can never be
-//!    caused by the very defect under test. Refusals are counted and named in
-//!    the run census.
+//! Some golden content cannot be recovered from the flat rendering at all. Such a
+//! position is REFUSED: never guessed, always counted and named in the run census.
 //!
-//! A refusal is not a blind spot the size of the cell: what the ambiguity cannot
-//! reach is still compared — see [`decidable_despite_ambiguity`], which holds the
-//! CLI cell to the declared bracket frame and to the two member counts the
-//! ambiguities cannot hide (finding N3).
+//! What matters as much as the refusal is its BLAST RADIUS, because the
+//! comparison walk is per MEMBER, per DEPTH. A refusal decided at any coarser
+//! granularity suppresses positions that are perfectly decidable — the same
+//! defect three times over in this lane's review history: first per LANE (CSV
+//! skipped every container), then per CELL (an ambiguous golden refused the whole
+//! cell, so `null` or unrelated text passed for it), then per OUTER CONTAINER (an
+//! ambiguous NESTED member suppressed its unambiguous siblings and the outer
+//! structure, so a golden `[[]]` of `list<frozen<list<text>>>` accepted a CLI `[]`
+//! — the unambiguous outer member silently dropped, review finding P2).
+//!
+//! So each cause is attributed to the narrowest node whose decode it destroys,
+//! and the refusal RIDES THE SAME RECURSION as the comparison: [`node_refusal`] is
+//! asked at every node, by the decoder ([`decode`]) and by the comparator alike,
+//! on the same golden value and the same declared type — so what one leaves the
+//! other expects, and the two cannot drift. Everything above and beside a refused
+//! node keeps being compared: every enclosing bracket frame, every enclosing
+//! member count, and every unambiguous sibling.
+//!
+//! The BRACKET DEPTH is what makes that attribution sound rather than convenient:
+//! [`scan`] splits a body only at DEPTH ZERO, so a `, ` (or a `: `) inside a
+//! member can corrupt the split of the container that DIRECTLY holds it and of no
+//! other level — every enclosing level sees that member's own brackets and never
+//! looks inside them. Exactly one cause breaks that argument, and it is therefore
+//! the one whole-CELL refusal.
+//!
+//! ## Node-local causes ([`node_refusal`]) — this node's member split, nothing else
+//!
+//! * **EMPTY-CONTAINER: an EMPTY container vs a container of one EMPTY member.**
+//!   Members are unquoted and unseparated at count 1, so a `set<text>` holding
+//!   exactly the empty string renders `{}` — byte for byte what an EMPTY set
+//!   renders as. The two are different values, so neither reading is trustworthy
+//!   and the node is REFUSED. The rule is bounded by the DECLARED element type: a
+//!   `list<int>` member always carries a digit, so `[]` there can only mean zero
+//!   members and IS compared. It is the mirror of EMPTY-MEMBER below, which
+//!   refuses the case where the GOLDEN carries the empty member; without it the
+//!   golden-side scan saw nothing to refuse in an empty golden container while the
+//!   CLI could perfectly well have held one empty member.
+//! * **EMPTY-MEMBER: a scalar member that renders as the empty string.** One empty
+//!   member and zero members produce the same empty body, so THIS node's member
+//!   count is unrecoverable.
+//! * **SEPARATOR: a `, ` inside a direct scalar member.** The body splits at every
+//!   depth-zero `, `, so this node's member count and contents are unrecoverable.
+//! * **KEY-SEPARATOR: a `: ` or a `, ` inside a map/UDT KEY.** Entries split at
+//!   their FIRST top-level `: `, so a `: ` in a KEY moves the key/value cut (a
+//!   colon inside a VALUE is already correct and is NOT refused), and a `, ` in a
+//!   key splits one entry into two. Both destroy THIS object's entries.
+//!
+//! ## The whole-cell cause ([`cell_refusal`]) — a STRUCTURAL character
+//!
+//! A `[`, `]`, `{`, `}`, `(` or `)` inside a member's text unbalances the depth
+//! counter for every enclosing level at once, so no level of the rendering can be
+//! split reliably and the CELL is refused before the decode is attempted. Scanned
+//! recursively for that reason: a structural character at any depth is a
+//! whole-cell property.
+//!
+//! ## Not a refusal: NULL-TOKEN, `null` vs the text `"null"`
+//!
+//! A container has no empty-field mechanism, so `ValueFormatter` spells a null
+//! member `null` — the same text a `text` member holding `"null"` produces (issue
+//! #1499's ambiguity, one level in). The token is resolved from the GOLDEN's own
+//! type: null there decodes to null here, anything else stays text. That keeps the
+//! distinction wherever the oracle knows it, and loses it only where CSV genuinely
+//! cannot express it. A CLI that emits the wrong member still fails — only the
+//! exact null/`"null"` swap is invisible.
+//!
+//! ## What survives a refusal
+//!
+//! A refusal is never a blind spot the size of the node, let alone of the cell.
+//! At a refused node the FRAME is still required to be the declared type's
+//! bracket pair, and the member counts no confusable reading can explain are
+//! still compared — see [`decidable_despite_node_refusal`] and
+//! [`decidable_despite_cell_refusal`] (finding N3). Every refusal is decided from
+//! the GOLDEN and the committed DDL alone, so it can never be caused by the very
+//! defect under test.
 
 use super::schema::CqlType;
 use serde_json::{Map, Value};
@@ -110,29 +159,58 @@ fn brackets(ty: &CqlType) -> Option<(char, char)> {
     }
 }
 
-/// Is this golden container unambiguously recoverable from the flat CSV
-/// rendering? `Some(reason)` means it is not, and the cell must be refused.
+/// Does the golden's own content make the WHOLE cell's rendering unsplittable?
+/// `Some(reason)` means it does, and the cell is refused before the decode is
+/// attempted.
 ///
-/// Decided from the GOLDEN and the committed DDL — never from the CLI's output —
-/// so a refusal can never be produced by the defect the lane is looking for.
+/// The one cause with that blast radius is a STRUCTURAL character in a member's
+/// (or a key's) text: [`scan`] tracks bracket depth, so a stray bracket anywhere
+/// in the rendering corrupts every enclosing level's split at once — and would
+/// otherwise surface as an "unbalanced bracket" DIVERGENCE caused by the golden
+/// rather than by the CLI. Scanned recursively for exactly that reason.
 ///
-/// The DDL is consulted for ONE question only: whether a member of the declared
-/// element type can render as the empty string, which is what decides ambiguity 0.
-/// Everything else is read from the golden's own content.
-pub fn ambiguity(golden: &Value, ty: &CqlType) -> Option<String> {
-    ambiguity_at(golden, Some(ty))
+/// Decided from the GOLDEN — never from the CLI's output — so a refusal can never
+/// be produced by the defect the lane is looking for. The declared type is
+/// deliberately NOT a parameter: a bracket is structural whatever the DDL says,
+/// so there is no type-dependent narrowing to state here.
+pub fn cell_refusal(golden: &Value) -> Option<String> {
+    match golden {
+        Value::Array(items) => items.iter().find_map(cell_refusal),
+        Value::Object(fields) => fields.iter().find_map(|(key, value)| {
+            structural_char(key)
+                .map(|why| format!("map/UDT key: {why}"))
+                .or_else(|| cell_refusal(value))
+        }),
+        scalar => structural_char(&scalar_text(scalar)),
+    }
 }
 
-/// [`ambiguity`], carrying the declared type of THIS position. `None` means the
-/// declared type does not describe this shape (the comparison reports that), and
-/// no type-dependent rule may then fire — refusing there would suppress a real
-/// divergence rather than declare a format limit.
-fn ambiguity_at(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
+/// Is the golden AT THIS NODE unrecoverable from the flat rendering, for a reason
+/// whose blast radius is THIS node's member split? `Some(reason)` means the node's
+/// contents and count are refused — and nothing else is (review finding P2).
+///
+/// NON-RECURSIVE by construction: every cause it reports is a property of this
+/// node's own body, so a nested position's refusal is reported when the walk
+/// reaches THAT node and cannot suppress this one's siblings, count or frame. Both
+/// the decoder ([`decode`]) and the comparator ask this at every node, which is
+/// what keeps "what the decoder left" and "what the comparator expects" the same
+/// question.
+///
+/// `ty` is the declared type of THIS position; `None` means the declared type does
+/// not describe this shape (the comparison reports that), and no type-dependent
+/// rule may then fire — refusing there would suppress a real divergence rather
+/// than declare a format limit.
+///
+/// The DDL is consulted for ONE question only: whether a member of the declared
+/// element type can render as the empty string, which is what decides
+/// EMPTY-CONTAINER. Everything else is read from the golden's own content.
+pub fn node_refusal(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
     match golden {
         Value::Array(items) => {
-            // Ambiguity 0: zero members and one EMPTY member render identically.
-            // Keyed on the AFFIRMATIVE answer — this element type really can
-            // render empty — so an unknown or non-collection type does not refuse.
+            // EMPTY-CONTAINER: zero members and one EMPTY member render
+            // identically. Keyed on the AFFIRMATIVE answer — this element type
+            // really can render empty — so an unknown or non-collection type does
+            // not refuse.
             if items.is_empty() && empty_container_is_ambiguous(ty) {
                 return Some(
                     "an empty container is indistinguishable from a container of one empty \
@@ -140,63 +218,67 @@ fn ambiguity_at(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
                         .into(),
                 );
             }
-            for (i, item) in items.iter().enumerate() {
-                // A member rendering to the empty string makes the member count
-                // unrecoverable: one empty member and zero members both render
-                // as an empty body.
-                if is_scalar(item) && scalar_text(item).is_empty() {
-                    return Some(
-                        "an empty scalar member is indistinguishable from no member".into(),
-                    );
-                }
-                if let Some(why) = ambiguity_at(item, member_type(ty, i)) {
-                    return Some(why);
-                }
-            }
-            None
+            items
+                .iter()
+                .filter(|item| is_scalar(item))
+                .find_map(|item| {
+                    let text = scalar_text(item);
+                    // EMPTY-MEMBER: a member rendering to the empty string makes the
+                    // member count unrecoverable — one empty member and zero members
+                    // both render as an empty body.
+                    if text.is_empty() {
+                        return Some(
+                            "an empty scalar member is indistinguishable from no member".into(),
+                        );
+                    }
+                    // SEPARATOR: this node's body splits at every depth-zero `, `.
+                    separator_in_member(&text)
+                })
         }
-        Value::Object(fields) => {
-            for (key, value) in fields {
-                // Only a KEY is harmed by `: `: entries are split at their FIRST
-                // top-level `: `, so a colon inside a VALUE is already correct.
-                if key.contains(": ") {
-                    return Some(format!(
-                        "map/UDT key {} contains the `: ` separator",
-                        brief(key)
-                    ));
-                }
-                if let Some(why) = scalar_ambiguity_of(&Value::String(key.clone())) {
-                    return Some(format!("map/UDT key: {why}"));
-                }
-                if let Some(why) = ambiguity_at(value, field_type(ty, key)) {
-                    return Some(why);
-                }
+        Value::Object(fields) => fields.keys().find_map(|key| {
+            // KEY-SEPARATOR. Only a KEY is harmed by `: `: entries are split at
+            // their FIRST top-level `: `, so a colon inside a VALUE is already
+            // correct.
+            if key.contains(": ") {
+                return Some(format!(
+                    "map/UDT key {} contains the `: ` separator",
+                    brief(key)
+                ));
             }
-            None
-        }
-        scalar => scalar_ambiguity_of(scalar),
+            separator_in_member(key).map(|why| format!("map/UDT key: {why}"))
+        }),
+        // A scalar is never refused for itself: the causes above are all about the
+        // BODY that holds it, so the container one level up is the node that
+        // reports them.
+        _ => None,
     }
 }
 
-fn scalar_ambiguity_of(scalar: &Value) -> Option<String> {
-    let text = scalar_text(scalar);
+/// SEPARATOR, for one member's text.
+fn separator_in_member(text: &str) -> Option<String> {
     if text.contains(", ") {
         return Some(format!(
             "member {} contains the `, ` separator",
-            brief(&text)
-        ));
-    }
-    if let Some(found) = STRUCTURAL.iter().find(|c| text.contains(**c)) {
-        return Some(format!(
-            "member {} contains the structural character `{found}`",
-            brief(&text)
+            brief(text)
         ));
     }
     None
 }
 
+/// STRUCTURAL, for one member's text.
+fn structural_char(text: &str) -> Option<String> {
+    STRUCTURAL.iter().find(|c| text.contains(**c)).map(|found| {
+        format!(
+            "member {} contains the structural character `{found}`",
+            brief(text)
+        )
+    })
+}
+
 /// The text `ValueFormatter` renders a scalar as, for the ambiguity scan only.
-/// `Value::Null` is excluded: its `null` spelling is handled by ambiguity 2.
+/// `Value::Null` renders as the `null` token (NULL-TOKEN in the module doc), which
+/// is a text a `text` member can also produce — resolved by [`decode_shape`] from
+/// the golden's own type, and deliberately not a refusal.
 fn scalar_text(scalar: &Value) -> String {
     match scalar {
         Value::Null => "null".to_string(),
@@ -275,67 +357,102 @@ fn field_type<'t>(ty: Option<&'t CqlType>, key: &str) -> Option<&'t CqlType> {
     }
 }
 
-/// What is STILL decidable about a CLI cell whose golden counterpart was refused
-/// as ambiguous — so a refusal suppresses only the genuinely indistinguishable
-/// readings and not the whole cell (issue #1491 review finding N3).
+/// What is STILL decidable at a position whose golden was refused — so a refusal
+/// suppresses only the genuinely indistinguishable readings and not the whole
+/// position (issue #1491 review finding N3).
 ///
-/// The refusals above are all about the CONTENT of the rendering: which members
-/// it holds, and how many. None of them is about its FRAME. So three properties
-/// survive every refusal cause, each decided from the GOLDEN and the committed
-/// DDL exactly as the refusal itself is:
+/// Every refusal cause is about the CONTENT of a body: which members it holds, and
+/// how many. None is about its FRAME. So three properties survive every cause,
+/// each decided from the GOLDEN and the committed DDL exactly as the refusal
+/// itself is:
 ///
-///   1. the cell carries a rendering AT ALL. The golden is a container, and the
-///      shortest rendering of any container is its bracket PAIR, so an empty CSV
-///      field (which [`super::compare::cli_csv_rows`] reads as `null`) or a
+///   1. the position carries a rendering AT ALL. The golden is a container, and
+///      the shortest rendering of any container is its bracket PAIR, so an empty
+///      CSV field (which [`super::compare::cli_csv_rows`] reads as `null`) or a
 ///      non-text cell is a divergence, not an ambiguity;
 ///   2. it is framed with the bracket pair the DECLARED type requires — the same
 ///      rule [`strip`] applies on the decodable path, where a `set` rendered
 ///      `[a, b]` is a failure (review finding R2);
-///   3. the member COUNT, in the two directions the ambiguities cannot reach. A
+///   3. the member COUNT, in the two directions no confusable reading can reach. A
 ///      golden container with NO members can only render as the empty bracket
-///      pair: both readings ambiguity 0 confuses — zero members, and one member
-///      that renders empty — are `{}` byte for byte, so ANY other body is a third
-///      thing and diverges. Symmetrically a golden with TWO OR MORE members
+///      pair: both readings EMPTY-CONTAINER confuses — zero members, and one
+///      member that renders empty — are `{}` byte for byte, so ANY other body is a
+///      third thing and diverges. Symmetrically a golden with TWO OR MORE members
 ///      cannot render as an empty body, because even all-empty members are
 ///      separated by `, `. (At exactly ONE member the empty body IS a legal
 ///      rendering — of a single empty member — so nothing is asserted there.)
 ///
 /// What stays suppressed is exactly the indistinguishable set: WHICH members the
-/// body holds, and how many when the count is 1. Before this the whole cell was
-/// discarded before the CLI value was looked at, so `null`, an unrelated word or
-/// a list rendering all passed for an ambiguous empty `set<text>` — a blind spot
-/// wearing a declared-gap label.
-pub fn decidable_despite_ambiguity(
+/// body holds, and how many when the count is 1.
+///
+/// # Two entry points, one rule
+///
+/// [`decidable_despite_cell_refusal`] is the CELL-level one: the cell was refused
+/// before any decode, so it holds the raw rendering and strips the frame itself.
+/// [`decidable_despite_node_refusal`] is the per-NODE one used inside the walk,
+/// where the decoder has already required and stripped this node's frame (that IS
+/// property 2, applied at every depth) and left the un-split BODY. Both then apply
+/// the identical count bounds, stated once in [`count_bounds`].
+pub fn decidable_despite_cell_refusal(
     golden: &Value,
     cli: &Value,
     ty: &CqlType,
 ) -> Result<(), String> {
-    let members = match golden {
-        Value::Array(items) => items.len(),
-        Value::Object(fields) => fields.len(),
-        // Not a container, so nothing was refused for it; `ambiguity` only
+    let Some(members) = member_count(golden) else {
+        // Not a container, so nothing was refused for it; `cell_refusal` only
         // refuses a cell whose golden is one.
-        _ => return Ok(()),
+        return Ok(());
     };
-    let Value::String(text) = cli else {
-        return Err(format!(
+    let text = cli_text(cli)?;
+    count_bounds(members, strip(text, ty)?, text)
+}
+
+/// [`decidable_despite_cell_refusal`] for a node the DECODER refused: `cli` is the
+/// body it left after requiring and stripping this node's declared bracket pair,
+/// so only the count bounds remain to be applied.
+pub fn decidable_despite_node_refusal(golden: &Value, cli: &Value) -> Result<(), String> {
+    let Some(members) = member_count(golden) else {
+        return Ok(());
+    };
+    let body = cli_text(cli)?;
+    count_bounds(members, body, body)
+}
+
+/// The member count of a golden container, or `None` for a scalar.
+fn member_count(golden: &Value) -> Option<usize> {
+    match golden {
+        Value::Array(items) => Some(items.len()),
+        Value::Object(fields) => Some(fields.len()),
+        _ => None,
+    }
+}
+
+/// The CLI side of a refused position must be TEXT: property 1 above.
+fn cli_text(cli: &Value) -> Result<&str, String> {
+    match cli {
+        Value::String(text) => Ok(text),
+        other => Err(format!(
             "the golden carries a container the CSV rendering cannot express \
              unambiguously, but the csv egress cell is {} — a container always \
              renders as at least its bracket pair, so an empty or non-text field \
              is a divergence the ambiguity does not cover",
-            match cli {
+            match other {
                 Value::Null => "absent/empty".to_string(),
                 other => brief(&other.to_string()),
             }
-        ));
-    };
-    let body = strip(text, ty)?;
+        )),
+    }
+}
+
+/// Property 3: the two member counts no confusable reading can produce.
+/// `rendering` is what the diagnostic quotes (the whole cell, or the body).
+fn count_bounds(members: usize, body: &str, rendering: &str) -> Result<(), String> {
     if members == 0 && !body.is_empty() {
         return Err(format!(
             "the golden container is EMPTY, so the only renderings the CSV \
              ambiguity confuses are the empty bracket pair — but the csv egress \
              cell {} carries a body",
-            brief(text)
+            brief(rendering)
         ));
     }
     if members >= 2 && body.is_empty() {
@@ -343,7 +460,7 @@ pub fn decidable_despite_ambiguity(
             "the golden container holds {members} members, which cannot render as \
              an empty body (members are `, `-separated even when each is empty), \
              but the csv egress cell is {}",
-            brief(text)
+            brief(rendering)
         ));
     }
     Ok(())
@@ -408,6 +525,20 @@ fn decode_shape(
     path: &str,
     excluded: &Excluded<'_>,
 ) -> Result<Value, String> {
+    // A node the GOLDEN's own content makes unsplittable is not split: its FRAME
+    // is still required (that is `strip`, i.e. property 2 of
+    // `decidable_despite_node_refusal`, applied at every depth) and its un-split
+    // BODY is handed on for the count bounds. Interpreting the body here is what
+    // would produce a member count no reading of the rendering supports — and
+    // deciding the refusal for the whole CELL instead is what let an ambiguous
+    // NESTED member suppress its unambiguous siblings and the outer structure
+    // (review finding P2).
+    //
+    // The comparator asks `node_refusal` at the same node, on the same golden and
+    // the same declared type, so it expects exactly what is left here.
+    if node_refusal(golden, Some(ty)).is_some() {
+        return Ok(Value::String(strip(text, ty)?.to_string()));
+    }
     // The declared TYPE decides the structure — including which bracket is
     // required — and the golden decides the member shapes underneath it. When the
     // two disagree the child is decoded against `null`, and the comparison is what
@@ -435,7 +566,7 @@ fn decode_shape(
             path,
             excluded,
         ),
-        // Ambiguity 1: the golden's own type resolves the `null` token.
+        // NULL-TOKEN: the golden's own type resolves the `null` token.
         _ => match golden {
             Value::Null if text == "null" => Ok(Value::Null),
             _ => Ok(Value::String(text.to_string())),
@@ -658,32 +789,67 @@ mod tests {
         }
     }
 
-    // --- the refusal valve -------------------------------------------------
+    // --- the refusal valve, per NODE and per CELL --------------------------
+    //
+    // Each case pins BOTH which function refuses and which does NOT, because the
+    // whole content of finding P2 is the BLAST RADIUS: a node-local cause that
+    // reported a whole-cell refusal would suppress positions that are decidable,
+    // and a whole-cell cause reported per node would let an unbalanced rendering
+    // be split anyway.
 
-    #[test]
-    fn member_containing_the_element_separator_is_refused() {
-        // `{"a, b"}` and `{"a", "b"}` render identically, so no reading of the
-        // CLI's text is trustworthy.
-        let why = ambiguity(&json!(["a, b"]), &ty_of("set<text>"))
-            .expect("a `, `-bearing member must be refused");
-        assert!(why.contains("`, ` separator"), "unexpected reason: {why}");
+    /// The element type's own bracket pair, for a node-local refusal query on a
+    /// nested position (`node_refusal` takes the declared type OF THAT NODE).
+    fn element_of(decl: &str) -> CqlType {
+        match ty_of(decl) {
+            CqlType::List(element) | CqlType::Set(element) => (*element).clone(),
+            other => panic!("{decl} is not a list/set: {}", other.describe()),
+        }
     }
 
     #[test]
-    fn member_containing_a_bracket_is_refused() {
-        let why = ambiguity(&json!(["x}y"]), &ty_of("set<text>"))
-            .expect("a bracket-bearing member must be refused");
-        assert!(
-            why.contains("structural character"),
-            "unexpected reason: {why}"
+    fn member_containing_the_element_separator_is_refused_at_its_container() {
+        // `{"a, b"}` and `{"a", "b"}` render identically, so no reading of THIS
+        // body is trustworthy…
+        let ty = ty_of("set<text>");
+        let why = node_refusal(&json!(["a, b"]), Some(&ty))
+            .expect("a `, `-bearing member must refuse its container");
+        assert!(why.contains("`, ` separator"), "unexpected reason: {why}");
+        // …and the rendering is still splittable at every OTHER depth, so the cell
+        // is not refused: a `, ` inside a member sits at bracket depth ≥ 1 for
+        // every enclosing level.
+        assert_eq!(
+            cell_refusal(&json!(["a, b"])),
+            None,
+            "a `, ` corrupts one body's split, not the whole cell's"
         );
     }
 
     #[test]
-    fn map_key_containing_the_pair_separator_is_refused() {
-        let why = ambiguity(&json!({"a: b": 1}), &ty_of("map<text, int>"))
-            .expect("a `: `-bearing KEY must be refused");
+    fn member_containing_a_bracket_refuses_the_whole_cell() {
+        // A stray bracket unbalances the depth counter every level is split on, so
+        // no level can be split reliably.
+        let why = cell_refusal(&json!(["x}y"])).expect("a bracket-bearing member must be refused");
+        assert!(
+            why.contains("structural character"),
+            "unexpected reason: {why}"
+        );
+        // At depth, too: the cause is a property of the whole rendering.
+        assert!(cell_refusal(&json!([["x}y"]])).is_some());
+        assert!(cell_refusal(&json!({"k": "x}y"})).is_some());
+        assert!(cell_refusal(&json!({"x}y": 1})).is_some());
+    }
+
+    #[test]
+    fn map_key_containing_a_separator_is_refused_at_its_object() {
+        let ty = ty_of("map<text, int>");
+        let why = node_refusal(&json!({"a: b": 1}), Some(&ty))
+            .expect("a `: `-bearing KEY must refuse its object");
         assert!(why.contains("key"), "unexpected reason: {why}");
+        // A `, ` in a key splits one entry into two, which is the same loss.
+        let why = node_refusal(&json!({"a, b": 1}), Some(&ty))
+            .expect("a `, `-bearing KEY must refuse its object");
+        assert!(why.contains("key"), "unexpected reason: {why}");
+        assert_eq!(cell_refusal(&json!({"a: b": 1})), None);
     }
 
     #[test]
@@ -691,34 +857,28 @@ mod tests {
         // Entries split at their FIRST top-level `: `, which is the real
         // separator, so a colon inside the VALUE is already decoded correctly.
         // Refusing it would narrow the lane for no reason.
-        assert_eq!(
-            ambiguity(&json!({"k": "a: b"}), &ty_of("map<text, text>")),
-            None
-        );
-        let decoded = decode(
-            &json!({"k": "a: b"}),
-            "{k: a: b}",
-            &ty_of("map<text, text>"),
-        )
-        .expect("decodes");
+        let ty = ty_of("map<text, text>");
+        assert_eq!(node_refusal(&json!({"k": "a: b"}), Some(&ty)), None);
+        assert_eq!(cell_refusal(&json!({"k": "a: b"})), None);
+        let decoded = decode(&json!({"k": "a: b"}), "{k: a: b}", &ty).expect("decodes");
         assert_eq!(decoded, json!([{"key": "k", "value": "a: b"}]));
     }
 
     #[test]
     fn an_empty_member_of_a_non_empty_collection_is_refused() {
         // `{}` is both "no members" and "one empty member".
-        let why =
-            ambiguity(&json!([""]), &ty_of("set<text>")).expect("an empty member must be refused");
+        let ty = ty_of("set<text>");
+        let why = node_refusal(&json!([""]), Some(&ty)).expect("an empty member must be refused");
         assert!(
             why.contains("empty scalar member"),
             "unexpected reason: {why}"
         );
     }
 
-    /// Ambiguity 0, the MIRROR of the case above: the golden container is EMPTY
-    /// and the CLI could perfectly well have held one member that renders empty.
-    /// The golden-side scan saw nothing to refuse there, so `{}` accepted both
-    /// readings — and the two are different values.
+    /// EMPTY-CONTAINER, the MIRROR of the case above: the golden container is
+    /// EMPTY and the CLI could perfectly well have held one member that renders
+    /// empty. The golden-side scan saw nothing to refuse there, so `{}` accepted
+    /// both readings — and the two are different values.
     ///
     /// Bounded by the DECLARED element type, which is what makes this a
     /// measurement and not blanket strictness: a `set<text>` member can BE the
@@ -728,7 +888,8 @@ mod tests {
     #[test]
     fn an_empty_container_is_refused_only_where_its_element_can_render_empty() {
         for decl in ["set<text>", "list<ascii>", "set<blob>", "list<timestamp>"] {
-            let why = ambiguity(&json!([]), &ty_of(decl))
+            let ty = ty_of(decl);
+            let why = node_refusal(&json!([]), Some(&ty))
                 .unwrap_or_else(|| panic!("{decl}: an empty container must be refused"));
             assert!(
                 why.contains("empty container is indistinguishable"),
@@ -742,23 +903,70 @@ mod tests {
             "list<frozen<set<int>>>",
         ] {
             assert_eq!(
-                ambiguity(&json!([]), &ty_of(decl)),
+                node_refusal(&json!([]), Some(&ty_of(decl))),
                 None,
                 "{decl}: no member of this element type can render empty, so `[]` can \
                  only mean zero members and must stay compared"
             );
         }
         // A tuple's arity is the DDL's, so `()` cannot hide a member.
-        assert_eq!(ambiguity(&json!([]), &ty_of("tuple<text, text>")), None);
+        assert_eq!(
+            node_refusal(&json!([]), Some(&ty_of("tuple<text, text>"))),
+            None
+        );
         // An empty map/UDT body is unambiguous too: every entry carries a `: `, so
         // a one-entry rendering can never be `{}`.
-        assert_eq!(ambiguity(&json!({}), &ty_of("map<text, text>")), None);
-        // And the rule reaches a NESTED empty container, under its own element type.
-        let why = ambiguity(&json!([[]]), &ty_of("list<frozen<list<text>>>"))
-            .expect("a nested empty list<text> must be refused");
+        assert_eq!(
+            node_refusal(&json!({}), Some(&ty_of("map<text, text>"))),
+            None
+        );
+        // And an UNDECLARED type refuses nothing: the comparison reports the shape.
+        assert_eq!(node_refusal(&json!([]), None), None);
+    }
+
+    /// Finding P2: an ambiguous NESTED member is refused AT ITSELF, so the outer
+    /// container stays decidable. Deciding it one level up made a golden `[[]]`
+    /// accept a CLI `[]`, the unambiguous outer member silently dropped.
+    ///
+    /// The end-to-end half of this (the comparator reporting that dropped member)
+    /// is `compare::tests::an_ambiguous_nested_member_does_not_suppress_its_container`.
+    #[test]
+    fn an_ambiguous_nested_member_is_refused_at_itself_and_not_at_its_container() {
+        let outer = ty_of("list<frozen<list<text>>>");
+        let inner = element_of("list<frozen<list<text>>>");
+        // The inner empty `list<text>` is the indistinguishable position…
+        let why = node_refusal(&json!([]), Some(&inner))
+            .expect("the inner empty list<text> is the ambiguous position");
         assert!(
             why.contains("empty container is indistinguishable"),
             "{why}"
+        );
+        // …and the OUTER container, which holds exactly one member, is decidable:
+        // its bracket kind and its member count are recoverable whatever the
+        // member's own body turns out to mean.
+        assert_eq!(
+            node_refusal(&json!([[]]), Some(&outer)),
+            None,
+            "the outer container's own body is splittable, so it is not refused"
+        );
+        assert_eq!(cell_refusal(&json!([[]])), None);
+        // The decode reflects that: the outer level is SPLIT (one member), and only
+        // the refused member's body is left un-split for the count bounds.
+        assert_eq!(
+            decode(&json!([[]]), "[[]]", &outer).expect("decodes"),
+            json!([""]),
+            "one outer member, whose refused body is empty"
+        );
+        // A dropped outer member decodes to zero members, which is what lets the
+        // comparator report it.
+        assert_eq!(
+            decode(&json!([[]]), "[]", &outer).expect("decodes"),
+            json!([])
+        );
+        // And the refused member's own FRAME is still required at its depth.
+        assert!(
+            decode(&json!([[]]), "[{}]", &outer).is_err(),
+            "the inner list's `[…]` frame is required even though its body is refused"
         );
     }
 
@@ -776,7 +984,7 @@ mod tests {
         let empty = json!([]);
         // The one reading pair the format genuinely cannot tell apart.
         assert_eq!(
-            decidable_despite_ambiguity(&empty, &json!("{}"), &ty),
+            decidable_despite_cell_refusal(&empty, &json!("{}"), &ty),
             Ok(()),
             "the empty bracket pair is exactly the indistinguishable case"
         );
@@ -787,7 +995,7 @@ mod tests {
             (json!("[]"), "opening"),
             (json!("{a}"), "carries a body"),
         ] {
-            let why = decidable_despite_ambiguity(&empty, &cli, &ty)
+            let why = decidable_despite_cell_refusal(&empty, &cli, &ty)
                 .expect_err(&format!("{cli} must diverge from an empty golden set"));
             assert!(why.contains(expect), "unexpected reason for {cli}: {why}");
         }
@@ -796,24 +1004,57 @@ mod tests {
         // whatever the refusal cause — here a `, `-bearing member.
         let two = json!(["a, b", "c"]);
         assert!(
-            ambiguity(&two, &ty).is_some(),
-            "the `, ` in a member is what refuses this cell"
+            node_refusal(&two, Some(&ty)).is_some(),
+            "the `, ` in a member is what refuses this node"
         );
-        let why = decidable_despite_ambiguity(&two, &json!("{}"), &ty)
+        let why = decidable_despite_cell_refusal(&two, &json!("{}"), &ty)
             .expect_err("two members cannot render as an empty body");
         assert!(why.contains("cannot render as an empty body"), "{why}");
         // …and WHICH members the body holds stays suppressed, because that is
         // what the ambiguity destroys.
         assert_eq!(
-            decidable_despite_ambiguity(&two, &json!("{something, else}"), &ty),
+            decidable_despite_cell_refusal(&two, &json!("{something, else}"), &ty),
             Ok(())
         );
         // At exactly ONE member the empty body is a legal rendering (of one empty
         // member), so nothing is asserted about the count there.
         assert_eq!(
-            decidable_despite_ambiguity(&json!([""]), &json!("{}"), &ty),
+            decidable_despite_cell_refusal(&json!([""]), &json!("{}"), &ty),
             Ok(())
         );
+    }
+
+    /// The per-NODE half of the same rule, on the BODY the decoder leaves: the
+    /// same two counts, and the same suppression of which members the body holds.
+    /// The frame is not re-checked here because the decoder already required it at
+    /// that depth — which is what makes it checked at EVERY depth rather than only
+    /// at the cell's outer level.
+    #[test]
+    fn a_refused_node_still_has_its_member_count_compared() {
+        for (golden, body, expect) in [
+            (json!([]), "", None),
+            (json!([]), "a", Some("carries a body")),
+            (json!([""]), "", None),
+            (json!([""]), "anything", None),
+            (
+                json!(["a, b", "c"]),
+                "",
+                Some("cannot render as an empty body"),
+            ),
+            (json!(["a, b", "c"]), "something, else", None),
+        ] {
+            let outcome = decidable_despite_node_refusal(&golden, &Value::String(body.into()));
+            match expect {
+                None => assert_eq!(outcome, Ok(()), "golden {golden} vs body `{body}`"),
+                Some(needle) => {
+                    let why = outcome.expect_err(&format!("golden {golden} vs body `{body}`"));
+                    assert!(why.contains(needle), "unexpected reason: {why}");
+                }
+            }
+        }
+        // A refused node whose CLI side is not text at all: the decoder always
+        // leaves a body, so this is a divergence rather than an ambiguity.
+        assert!(decidable_despite_node_refusal(&json!([]), &Value::Null).is_err());
     }
 
     #[test]
@@ -821,20 +1062,26 @@ mod tests {
         // Spaces, hyphens, `0x` hex, exact decimals and nesting are all fine —
         // only the separators and brackets are structural. (`1 Navy Way` is real
         // content from test_compactionparityudt.udt_collections.)
+        let map_ty = ty_of("map<text, frozen<address>>");
+        let nested = json!({"home": {"street": "1 Navy Way", "zip": "22201"}});
+        assert_eq!(cell_refusal(&nested), None);
+        assert_eq!(node_refusal(&nested, Some(&map_ty)), None);
+        // The nested UDT node too, under its own declared type.
+        let address = match &map_ty {
+            CqlType::Map(_, value) => (**value).clone(),
+            other => panic!("not a map: {}", other.describe()),
+        };
         assert_eq!(
-            ambiguity(
-                &json!({"home": {"street": "1 Navy Way", "zip": "22201"}}),
-                &ty_of("map<text, frozen<address>>")
+            node_refusal(
+                &json!({"street": "1 Navy Way", "zip": "22201"}),
+                Some(&address)
             ),
             None
         );
-        assert_eq!(
-            ambiguity(
-                &json!(["0xdeadbeef", "-1.5", "neg-five", null]),
-                &ty_of("list<text>")
-            ),
-            None
-        );
+        let list_ty = ty_of("list<text>");
+        let scalars = json!(["0xdeadbeef", "-1.5", "neg-five", null]);
+        assert_eq!(cell_refusal(&scalars), None);
+        assert_eq!(node_refusal(&scalars, Some(&list_ty)), None);
     }
 
     // --- strictness: the decoder must not repair a malformed rendering ------
