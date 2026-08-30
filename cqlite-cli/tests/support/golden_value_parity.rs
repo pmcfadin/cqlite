@@ -535,6 +535,44 @@ pub fn normalize_decimal(s: &str) -> Option<String> {
 // Golden (sstabledump JSONL) → rows
 // ===========================================================================
 
+/// A golden document's ARRAY field, read strictly.
+///
+/// Absent means the empty array — `sstabledump` legitimately omits `rows` for a
+/// partition with none, and `cells`/`clustering` for a row with none. PRESENT BUT
+/// NOT AN ARRAY is an ERROR, never the empty array: `and_then(Value::as_array)
+/// .unwrap_or(&[])` read "I could not tell what this is" as "there is nothing
+/// here", so a `rows`/`cells` field of any other JSON shape silently contributed
+/// ZERO rows or ZERO cells — dropping part of the oracle while every surviving
+/// sibling kept the comparison non-empty and green.
+pub fn array_field<'v>(
+    owner: &'v Value,
+    name: &str,
+    at: &dyn Fn() -> String,
+) -> Result<&'v [Value], String> {
+    match owner.get(name) {
+        None => Ok(&[]),
+        Some(Value::Array(items)) => Ok(items.as_slice()),
+        Some(other) => Err(format!(
+            "{}: `{name}` is {}, not an array — a shape this reader cannot enumerate must \
+             be reported, never read as an empty one",
+            at(),
+            shape_of(other)
+        )),
+    }
+}
+
+/// The JSON shape name of a value, for the diagnostic above.
+fn shape_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// Parse a `*-Data.db.jsonl` golden into comparable rows.
 ///
 /// `Err` means the golden is NOT comparable to a reconciled CLI result set (a
@@ -581,9 +619,7 @@ pub fn golden_rows(
                 pk.len()
             ));
         }
-        let empty = Vec::new();
-        let dump_rows = doc.get("rows").and_then(Value::as_array).unwrap_or(&empty);
-        for row in dump_rows {
+        for row in array_field(&doc, "rows", &at)? {
             rows.push(golden_row(row, keys, pk, ck, multicell, &at)?);
         }
     }
@@ -628,11 +664,7 @@ fn golden_row(
         .and_then(|li| li.get("tstamp"))
         .and_then(Value::as_str);
 
-    let clustering = row
-        .get("clustering")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let clustering = array_field(row, "clustering", at)?;
     if clustering.len() != ck.len() {
         return Err(format!(
             "{}: golden clustering arity {} but {} clustering column(s) declared ({ck:?})",
@@ -654,8 +686,7 @@ fn golden_row(
         multicell.iter().find(|(n, _)| *n == name).map(|(_, k)| *k)
     };
     let mut multi: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
-    let empty = Vec::new();
-    for cell in row.get("cells").and_then(Value::as_array).unwrap_or(&empty) {
+    for cell in array_field(row, "cells", at)? {
         let name = cell
             .get("name")
             .and_then(Value::as_str)
@@ -759,9 +790,24 @@ fn golden_row(
             Multicell::Map => {
                 let mut obj = Map::new();
                 for c in &cells {
+                    // `sstabledump` writes a cell PATH with
+                    // `writeString(ct.nameComparator().getString(...))` (see
+                    // `Kinding`), so a multicell map's key is ALWAYS a JSON string
+                    // in the golden. A non-string here means the golden is not the
+                    // document this reader understands; projecting it with
+                    // `Value::to_string()` instead invented a key — `true`, `1`,
+                    // `null` — that a genuine `text` key of that spelling would
+                    // then compare EQUAL to.
                     let key = match path_head(c, at)? {
                         Value::String(s) => s,
-                        other => other.to_string(),
+                        other => {
+                            return Err(format!(
+                                "{}: map cell `{name}` has the non-string path head {other} \
+                                 — sstabledump writes every cell path as a JSON string, so \
+                                 this golden is not one this reader can key a map by",
+                                at()
+                            ))
+                        }
                     };
                     let value = c
                         .get("value")
@@ -925,6 +971,91 @@ mod tests {
             Some(2),
             "both map cells must survive into the expected row"
         );
+    }
+
+    /// The permissive-default sweep (Shape B), golden side: a `rows`/`cells`
+    /// field the reader cannot enumerate is REPORTED, never read as the empty
+    /// array. `and_then(Value::as_array).unwrap_or(&[])` collapsed "I could not
+    /// tell what this is" onto "there is nothing here", so such a partition
+    /// contributed ZERO rows (and such a row ZERO cells) while every surviving
+    /// sibling kept the comparison non-empty and green.
+    #[test]
+    fn a_non_array_rows_or_cells_field_is_reported_not_read_as_empty() {
+        let live = concat!(
+            r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"#,
+            r#""liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":["#,
+            r#"{"name":"v","value":"x"}]}]}"#
+        );
+        assert_eq!(
+            golden_rows(live, &["id"], &[], &[])
+                .expect("the baseline golden is comparable")
+                .len(),
+            1
+        );
+
+        // Each of these is well-formed JSON carrying the field as an OBJECT, so
+        // the failure is attributable to the shape and not to a parse error.
+        let broken_rows = r#"{"partition":{"key":["1"],"position":0},"rows":{"0":"x"}}"#;
+        let broken_cells = concat!(
+            r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"#,
+            r#""liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":{"v":"x"}}]}"#
+        );
+        for (what, broken) in [("rows", broken_rows), ("cells", broken_cells)] {
+            let why = golden_rows(broken, &["id"], &[], &[])
+                .expect_err(&format!("a non-array `{what}` must be reported"));
+            assert!(
+                why.contains(&format!("`{what}` is an object, not an array")),
+                "the refusal must name the field and its shape: {why}"
+            );
+        }
+
+        // ABSENT is different from present-but-wrong, and stays legal: a partition
+        // `sstabledump` wrote with no rows contributes none rather than failing.
+        let no_rows = r#"{"partition":{"key":["1"],"position":0}}"#;
+        assert!(golden_rows(no_rows, &["id"], &[], &[])
+            .expect("an absent `rows` is the empty array")
+            .is_empty());
+    }
+
+    /// The same sweep, one level down: a multicell MAP's key came from
+    /// `path_head` through `Value::to_string()` for any non-string, which INVENTED
+    /// a key (`true`, `1`, `null`) that a genuine `text` key of that spelling
+    /// would then compare EQUAL to. `sstabledump` writes every cell path with
+    /// `writeString(...)` (see [`Kinding`]), so a non-string path head means the
+    /// golden is not the document this reader understands.
+    #[test]
+    fn a_non_string_map_path_head_is_refused_rather_than_stringified() {
+        let with_path = |path: &str| {
+            format!(
+                concat!(
+                    r#"{{"partition":{{"key":["1"],"position":0}},"rows":[{{"type":"row","#,
+                    r#""position":1,"liveness_info":{{"tstamp":"1970-01-01T00:00:00.001Z"}},"#,
+                    r#""cells":[{{"name":"m","path":[{path}],"value":"1"}}]}}]}}"#
+                ),
+                path = path
+            )
+        };
+        let map = &[("m", Multicell::Map)];
+        // The ordinary shape: a STRING path head keys the map.
+        let rows = golden_rows(&with_path(r#""true""#), &["id"], &[], map)
+            .expect("a string path head is the ordinary shape");
+        assert_eq!(
+            rows.first()
+                .and_then(|r| r.get("m"))
+                .and_then(Value::as_object)
+                .map(|o| o.contains_key("true")),
+            Some(true)
+        );
+        // A boolean, a number and null each used to be projected onto exactly the
+        // text a `text` key could hold.
+        for head in ["true", "1", "null"] {
+            let why = golden_rows(&with_path(head), &["id"], &[], map)
+                .expect_err("a non-string path head must be refused");
+            assert!(
+                why.contains("non-string path head") && why.contains("`m`"),
+                "the refusal must name the collection: {why}"
+            );
+        }
     }
 
     fn canon_at(v: &Value, ty: &CqlType, kinding: Kinding) -> Canon {

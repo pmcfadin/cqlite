@@ -722,20 +722,18 @@ fn unsupported_shapes(jsonl: &str) -> Result<BTreeSet<Unsupported>, String> {
         // The same strict parse `golden_rows` uses, so "this golden carries shape
         // X" and "this golden is comparable" are decided from one reading of the
         // bytes (finding K2).
-        let doc: serde_json::Value =
-            golden::strict_json::parse(line, &format!("golden line {}", lineno + 1))?;
+        let at = || format!("golden line {}", lineno + 1);
+        let doc: serde_json::Value = golden::strict_json::parse(line, &at())?;
         let partition = doc
             .get("partition")
-            .ok_or_else(|| format!("golden line {}: no `partition`", lineno + 1))?;
+            .ok_or_else(|| format!("{}: no `partition`", at()))?;
         if partition.get("deletion_info").is_some() {
             found.insert(Unsupported::PartitionDeletion);
         }
-        let empty = Vec::new();
-        let rows = doc
-            .get("rows")
-            .and_then(serde_json::Value::as_array)
-            .unwrap_or(&empty);
-        for row in rows {
+        // The same strict array read `golden_rows` uses: a `rows`/`cells` field of
+        // any other JSON shape is an error, never silently zero elements — "I
+        // could not tell" must not read as "no unsupported shape here".
+        for row in golden::array_field(&doc, "rows", &at)? {
             match row.get("type").and_then(serde_json::Value::as_str) {
                 Some("range_tombstone_bound") | Some("range_tombstone_boundary") => {
                     found.insert(Unsupported::RangeTombstone);
@@ -746,9 +744,9 @@ fn unsupported_shapes(jsonl: &str) -> Result<BTreeSet<Unsupported>, String> {
                 Some("row") => {}
                 other => {
                     return Err(format!(
-                        "golden line {}: unknown dump element type {other:?} — an \
-                         unrecognised shape must be classified, not ignored",
-                        lineno + 1
+                        "{}: unknown dump element type {other:?} — an unrecognised shape \
+                         must be classified, not ignored",
+                        at()
                     ))
                 }
             }
@@ -760,11 +758,7 @@ fn unsupported_shapes(jsonl: &str) -> Result<BTreeSet<Unsupported>, String> {
                     found.insert(Unsupported::Ttl);
                 }
             }
-            for cell in row
-                .get("cells")
-                .and_then(serde_json::Value::as_array)
-                .unwrap_or(&empty)
-            {
+            for cell in golden::array_field(row, "cells", &at)? {
                 if ttl_keys.iter().any(|k| cell.get(k).is_some()) {
                     found.insert(Unsupported::Ttl);
                 }
