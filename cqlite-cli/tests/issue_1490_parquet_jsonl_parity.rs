@@ -4,6 +4,157 @@
 //! See `tests/support/parquet_parity/mod.rs` for the harness contract. One
 //! `#[test]` per corpus table, so a case that cannot run is visible on its own
 //! line instead of hiding behind a sibling that did (#3220).
+//!
+//! # Corpus coverage: 8 tables compared, and every exclusion NAMED
+//!
+//! A blanket sentence ("the remaining tables are not yet covered") is how a gap
+//! becomes invisible; an enumerated list is a work item someone can pick up. So
+//! the corpus considered by this lane is enumerated below, per table, with the
+//! reason each excluded table is excluded.
+//!
+//! Corpus measured: **21 keyspaces / 172 table directories / 155 `*-Data.db`
+//! generations** (16 test keyspaces + 5 Cassandra-internal `system*` ones).
+//! **8 tables compare today**, over **40,829 cells**.
+//!
+//! Reason codes, and what each one MEANS for whoever picks the table up:
+//!
+//! * `INCLUDED` — compared on every run.
+//! * `#1742` — the committed dump is not physical-dump-eligible (a TTL, a row or
+//!   partition deletion, a range tombstone bound, or a static row): the dump
+//!   keeps what a reconciled read drops, so a comparison would report a
+//!   difference between the two ORACLES, not a defect. Needs the
+//!   query-semantics oracle, not this one. **Not fixable here.**
+//! * `refused` — the harness declines the representation (`unsupported.rs`): a
+//!   UDT's Arrow Struct field types are undeclarable, or a declared CQL tuple's
+//!   golden and export land in different canonical representations. Fixable by
+//!   TEACHING the harness the representation.
+//! * `counter` — counter columns; the export side is unverified and a counter's
+//!   dump rendering needs its own decision before a case can be declared.
+//! * `redundant` — its type surface is a subset of an INCLUDED table's; adding
+//!   it buys little (still cheap, so listed rather than dismissed).
+//! * `undeclared` — **nothing blocks it.** It needs a hand-written `ParityCase`
+//!   (columns copied from the committed schema). This is the expansion work.
+//!
+//! ## `test_basic` (8 tables, `basic-types.cql`)
+//!
+//! * `simple_table` — INCLUDED (the full scalar zoo; carries the #3563 timeuuid type gap).
+//! * `composite_key_table` — INCLUDED (two-component clustering key).
+//! * `multi_partition_table` — undeclared: composite (2-component) partition key + timeuuid
+//!   clustering. High value; expect the #3563 timeuuid type gap on `item_id`.
+//! * `compression_test_table` — redundant: text/blob only, a subset of `simple_table`'s scalars.
+//! * `uncompressed_table` — redundant: text/int/timestamp subset; the uncompressed read path is
+//!   covered by `test_comp.uncompressed_table`.
+//! * `ttl_test_table` — #1742: `default_time_to_live = 86400`, so every row carries a TTL.
+//! * `static_columns_table` — #1742: the dump emits `static_block` entries, which are not rows;
+//!   the harness refuses a non-`row` entry rather than guessing how one projects.
+//! * `counters` — counter: four COUNTER columns.
+//!
+//! ## `test_collections` (8 tables, `collections.cql`)
+//!
+//! * `collection_table` — INCLUDED (six non-frozen collections).
+//! * `frozen_collections_table` — undeclared: frozen set/list/map beside a non-frozen set — the
+//!   single-cell-vs-multicell distinction in one table. HIGH value, cheap.
+//! * `typed_collections_table` — undeclared: `set<uuid>`, `set<decimal>`, `list<blob>`,
+//!   `map<text,inet>`. High value (exercises the exact-decimal path inside a collection).
+//! * `nested_collections_table` — undeclared: `map<text, frozen<set<text>>>` and friends —
+//!   nested frozen collection VALUES, a representation with no coverage at all today.
+//! * `empty_collections_table` — undeclared: empty-vs-null collections (the #1485 silent-NULL
+//!   family). High value.
+//! * `large_collections_table` — undeclared: large collections + a clustering key.
+//! * `collection_clustering_table` — undeclared, and needs work first: its CLUSTERING KEY is
+//!   `frozen<list<text>>`, which the harness's key coercion does not handle.
+//! * `collections_with_udts` — refused: `list<frozen<address_type>>` etc.; a UDT's Struct field
+//!   types are undeclarable, so the type claim is unmeasurable.
+//!
+//! ## `test_timeseries` (9 tables, `time-series.cql`)
+//!
+//! * `sensor_data` — INCLUDED (2000 clustering rows, float/double/tinyint).
+//! * `stock_prices` — undeclared: five DECIMAL columns + composite partition key. HIGH value —
+//!   the exact-decimal comparison landed in this lane and has one table behind it.
+//! * `tick_data` — undeclared: decimals + a 3-component partition key + timeuuid clustering.
+//! * `app_metrics` — undeclared: composite partition key + `map<text,text>`.
+//! * `user_activity` — undeclared: `(uuid, date)` partition key + map.
+//! * `user_sessions` — undeclared: inet + map + boolean, no clustering.
+//! * `log_entries` — undeclared: 3-component partition key, timeuuid clustering.
+//! * `event_store` — undeclared: bigint clustering + map + timeuuid.
+//! * `time_bucketed_counters` — counter: three COUNTER columns.
+//!
+//! ## `test_wide_rows` (8 tables, `wide-rows.cql`)
+//!
+//! * `wide_partition_table` — undeclared: FIVE clustering components (mixed ASC/DESC).
+//!   HIGH value; nothing else covers a clustering key that wide.
+//! * `many_columns_table` — undeclared: 100 columns spanning every scalar plus five
+//!   collections. Highest single-table value in the corpus; expect the #3563 timeuuid gap.
+//! * `product_catalog` — undeclared: `map<text,float>`, `map<text,double>`,
+//!   `map<text,frozen<set<text>>>`, decimal.
+//! * `chat_messages` — undeclared: `map<text,frozen<set<uuid>>>` + timeuuid clustering.
+//! * `multi_metric_timeseries` — undeclared: 30 numeric columns + map + set + blob.
+//! * `document_versions` — undeclared: int clustering DESC + set + map.
+//! * `sparse_data_table` — undeclared: sparse/NULL-heavy rows across text/double/bool/blob and
+//!   three collections. High value for the absent-vs-null family.
+//! * `large_blob_table` — undeclared: large blobs + int clustering.
+//!
+//! ## `test_da` (4 tables, BTI `da`, binaries COMMITTED)
+//!
+//! * `simple_table` — INCLUDED. * `collection_table` — INCLUDED.
+//! * `ttl_table` — #1742 (and used here as a NEGATIVE control that the refusal fires).
+//! * `wide_table` — undeclared (schema `wide-table-bti.cql`): BTI wide partition.
+//!
+//! ## `test_signed_coll` (4 tables, `signed-collection-parity.cql`, COMMITTED)
+//!
+//! * `signed_int_collections` — INCLUDED.
+//! * `frozen_int_collections` — undeclared: the FROZEN counterparts of the included table.
+//!   Cheap and high value.
+//! * `signed_width_collections` — undeclared: `set<bigint|smallint|tinyint>` — element WIDTH
+//!   surface, which is exactly what the Arrow type check exists for.
+//! * `signed_special_collections` — undeclared: `set<decimal>`, `set<double>`.
+//!
+//! ## `test_comp` (7 tables, `compression-parity.cql`, COMMITTED)
+//!
+//! * `lz4_table` — INCLUDED.
+//! * `snappy_table`, `deflate_table`, `zstd_table`, `uncompressed_table`, `short_final_chunk` —
+//!   redundant: byte-identical 3-column type surface (`pk int, ck int, body text`); only the
+//!   codec/chunk length differs. Cheap to add, and each is a distinct decompression path.
+//! * `incompressible_uncompressed_chunk` — redundant/undeclared: same shape with a `blob`
+//!   payload and an uncompressed chunk.
+//!
+//! ## `test_compactionparityudt` (4 tables, `compaction-parity-udt.cql`, COMMITTED)
+//!
+//! * `udt_frozen_person` — INCLUDED, behind the #3556 whole-case gap (the export aborts).
+//! * `udt_collections` — INCLUDED, with the #3556 per-column type gaps on `lp`/`ma`.
+//! * `udt_nested` — refused + #3556: `frozen<employee>` nests `frozen<address>`, so the Struct
+//!   field types are doubly undeclarable.
+//! * `udt_null_inner` — refused + #3556: the same `lp`/`ma` columns as `udt_collections`,
+//!   with NULL inner fields.
+//!
+//! ## `test_compaction_tombstone_ttl` (3 tables, COMMITTED)
+//!
+//! * `shadow_row_delete` — #1742 (row tombstone); used here as a NEGATIVE control.
+//! * `ttl_expired_live` — #1742 (TTL).
+//! * `rt_cross_gen` — #1742 (range tombstone bounds/boundaries).
+//!
+//! ## Remaining keyspaces — grouped, with counts, NOT per-table
+//!
+//! These are counted so nothing is invisible, but not enumerated per table: no case was
+//! considered for any of them, and a per-table enumeration is part of the expansion issue's
+//! own survey rather than a claim this lane can make.
+//!
+//! * `test_types` (20 dirs / 28 generations, `cql-type-parity.cql`) — the richest remaining
+//!   type surface, and the **highest-value expansion target**: its `cx_*` tables are
+//!   deliberately about tuple field order, UDT field order/NULLs, multicell UDT collection
+//!   paths and nested frozen collections — i.e. several of them are exactly the
+//!   representations this harness now REFUSES, so they gate on teaching it those.
+//! * `test_oa` (6) — BIG `oa` fixtures. The harness covers `da` and `nb` today, so `oa` is a
+//!   FORMAT gap, not a type gap. High value, low effort.
+//! * `test_tomb` (9 dirs / 14 generations) — tombstone/GC surface: `#1742` by construction.
+//! * `test_deltas` (27 dirs, 9 with binaries) — delta/CDC fixtures, multi-generation by design;
+//!   the harness refuses a multi-generation table (a per-generation dump is not a reconciled
+//!   read).
+//! * `test_compactionparity` (2), `test_writeparity` (3), `test_big` (1) — compaction/write
+//!   parity and one large table; undeclared.
+//! * `system`, `system_auth`, `system_distributed`, `system_schema`, `system_traces`
+//!   (49 dirs total) — Cassandra's own internal keyspaces: not user data, no committed CQL
+//!   schema fixture, and several carry multiple generations. Out of scope for value parity.
 
 #![cfg(feature = "state_machine")]
 
