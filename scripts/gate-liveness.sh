@@ -348,6 +348,30 @@ if [ -n "$WANT_RUN_ID" ] && [ -f "$HB" ] && [ -r "$HB" ] && _ensure_snap_dir; th
     fi
   fi
 fi
+
+# ONE DECISION POINT FOR EVERY SUMMARY-SIDE REFUSAL (roborev job 209). Each refusal below is about
+# the SUMMARY — unreadable, NUL-bearing, not a single block, no run-id, no opener, mismatched
+# dialect, out-of-order. NONE of them says anything about the run the CALLER NAMED. So when that run
+# has a valid, matching, FRESH beat, answering UNKNOWN discards evidence we already hold.
+#
+# The harm was concrete and not hypothetical: `gate-detached.sh` STOPS the unit when liveness cannot
+# answer within 20s, so a previous run's malformed leftover summary made the launcher KILL A HEALTHY
+# GATE whose tree capture outran the window.
+#
+# A valid TERMINAL summary for the requested run still wins, and that is why this is a deferral at
+# the refusal sites rather than a short-circuit before parsing: we must attempt the parse to find a
+# terminal verdict, and only fall back when the parse cannot yield one.
+#
+# It is ONE helper rather than a guard per site because the first attempt at this fix guarded FOUR
+# refusals and left FOUR others, and the behavioural probe still killed the gate through
+# `summary-no-run-id-at-all`. A single funnel closes the class, and the test suite asserts no
+# summary refusal bypasses it — so a refusal added later cannot silently reopen this.
+_summary_refusal() {  # <what-is-wrong-with-the-summary> <full-cause-for-UNKNOWN>
+  if [ "$_startup_beat" = yes ]; then
+    verdict RUNNING 2 "run '$WANT_RUN_ID' is beating ($_sb_note); $1, which says nothing about this run — it may be a previous run's leftover or a write in progress"
+  fi
+  verdict UNKNOWN 4 "$2"
+}
 if [ ! -f "$SUMMARY" ]; then
   if [ "$_startup_beat" = yes ]; then
     verdict RUNNING 2 "run '$WANT_RUN_ID' is beating ($_sb_note) but has not written its summary yet — normal during startup, because the gate publishes liveness BEFORE its tree-identity capture and sentinel. summary: not yet at $SUMMARY"
@@ -355,15 +379,15 @@ if [ ! -f "$SUMMARY" ]; then
   verdict UNKNOWN 4 "no-summary-artifact; $SUMMARY is not readable as a regular file (never written, or its location is not reachable from here)"
 fi
 if [ ! -r "$SUMMARY" ]; then
-  verdict UNKNOWN 4 "summary-unreadable; $SUMMARY exists but cannot be read"
+  _summary_refusal "the summary at this path cannot be read" "summary-unreadable; $SUMMARY exists but cannot be read"
 fi
 _ensure_snap_dir || verdict UNKNOWN 4 "no-snapshot-dir; could not create a private temp directory under ${TMPDIR:-/tmp} to read the artifacts consistently"
 _SUM_SNAP=$(_snap_of "$SUMMARY" summary) || _SUM_SNAP=""
 if [ -z "$_SUM_SNAP" ]; then
-  verdict UNKNOWN 4 "summary-unsnapshotable; could not take a private copy of $SUMMARY to read it consistently (no writable temp dir, or the file vanished)"
+  _summary_refusal "the summary at this path could not be snapshotted" "summary-unsnapshotable; could not take a private copy of $SUMMARY to read it consistently (no writable temp dir, or the file vanished)"
 fi
 if _has_nul "$_SUM_SNAP"; then
-  verdict UNKNOWN 4 "summary-contains-nul; $SUMMARY holds NUL bytes, the signature of two writers interleaving on one path (#2874 requires concurrent gates to use distinct summary paths) — its fields cannot be attributed to a single run"
+  _summary_refusal "the summary at this path contains NUL bytes" "summary-contains-nul; $SUMMARY holds NUL bytes, the signature of two writers interleaving on one path (#2874 requires concurrent gates to use distinct summary paths) — its fields cannot be attributed to a single run"
 fi
 SUM_TEXT=$(_slurp "$_SUM_SNAP")
 # Settle-retry: incomplete framing may mean we caught a write in progress. Re-SNAPSHOT once and
@@ -390,7 +414,7 @@ _n_end=$(printf '%s\n' "$SUM_TEXT" | grep -cE '^==== END AGENT-GATE( LITE| DELTA
 _n_res=$(printf '%s\n' "$SUM_TEXT" | grep -c '^RESULT: ')
 _n_rid=$(printf '%s\n' "$SUM_TEXT" | grep -c '^run-id: ')
 if [ "$_n_start" -gt 1 ] || [ "$_n_end" -gt 1 ] || [ "$_n_res" -gt 1 ] || [ "$_n_rid" -gt 1 ]; then
-  verdict UNKNOWN 4 "summary-not-a-single-block; found $_n_start openers / $_n_rid run-id / $_n_res RESULT / $_n_end closers — more than one of any means the file holds fragments of more than one write, so no field can be attributed to a single run"
+  _summary_refusal "the summary at this path is not one single block" "summary-not-a-single-block; found $_n_start openers / $_n_rid run-id / $_n_res RESULT / $_n_end closers — more than one of any means the file holds fragments of more than one write, so no field can be attributed to a single run"
 fi
 # EXACTLY ONE run-id, whether or not the caller named a run (roborev job 199, Medium). Duplicates
 # were already fatal; ZERO was not, so an unbound reader accepted a terminal verdict from a block
@@ -399,7 +423,7 @@ fi
 # cannot be assigned to anything. (My own audit of what backs COMPLETE said "run-id bound", which
 # was only true when --run-id was supplied; this makes the claim unconditional.)
 if [ "$_n_rid" -eq 0 ]; then
-  verdict UNKNOWN 4 "summary-no-run-id-at-all; $SUMMARY carries no 'run-id:' line, so nothing in it can be attributed to a run — every summary the gate writes has one"
+  _summary_refusal "the summary at this path carries no run-id" "summary-no-run-id-at-all; $SUMMARY carries no 'run-id:' line, so nothing in it can be attributed to a run — every summary the gate writes has one"
 fi
 # The closer must MATCH THE OPENER'S DIALECT, and the elements must be IN ORDER (roborev job
 # 172, Medium). Counting "some opener" and "some closer" independently accepted a LITE opener
@@ -459,13 +483,13 @@ if [ -z "$_order_bad" ] && [ -n "$_rid_ln" ] && [ -n "$_res_ln" ] && [ "$_rid_ln
 fi
 
 if [ -z "$_open_ln" ]; then
-  verdict UNKNOWN 4 "summary-no-opener; $SUMMARY has no '==== AGENT-GATE … SUMMARY ====' opener, so it is not a gate summary block and none of its fields can be attributed to a run"
+  _summary_refusal "the summary at this path is not a readable gate block" "summary-no-opener; $SUMMARY has no '==== AGENT-GATE … SUMMARY ====' opener, so it is not a gate summary block and none of its fields can be attributed to a run"
 fi
 if [ "$_n_end" -gt 0 ] && [ -z "$_close_ln" ]; then
-  verdict UNKNOWN 4 "summary-marker-dialect-mismatch; the block opens with '$_open_txt' but its closer is a DIFFERENT mode (no matching '$_want_close') — an opener and closer from different modes are fragments of two writes, not one block"
+  _summary_refusal "the summary at this path splices markers from two modes" "summary-marker-dialect-mismatch; the block opens with '$_open_txt' but its closer is a DIFFERENT mode (no matching '$_want_close') — an opener and closer from different modes are fragments of two writes, not one block"
 fi
 if [ -n "$_order_bad" ]; then
-  verdict UNKNOWN 4 "summary-out-of-order; $_order_bad — these are not one ordered block, so no field can be attributed to a single write"
+  _summary_refusal "the summary at this path has out-of-order fields" "summary-out-of-order; $_order_bad — these are not one ordered block, so no field can be attributed to a single write"
 fi
 
 SUM_RUN_ID=$(_field "$SUM_TEXT" run-id)
@@ -489,10 +513,10 @@ if [ -n "$WANT_RUN_ID" ] && [ "$_startup_beat" = yes ] && [ -n "$SUM_RUN_ID" ] \
 fi
 if [ -n "$WANT_RUN_ID" ]; then
   if [ -z "$SUM_RUN_ID" ]; then
-    verdict UNKNOWN 4 "summary-no-run-id; $SUMMARY carries no 'run-id:' line, so it cannot be attributed to run '$WANT_RUN_ID'"
+    _summary_refusal "the summary at this path carries no run-id" "summary-no-run-id; $SUMMARY carries no 'run-id:' line, so it cannot be attributed to run '$WANT_RUN_ID'"
   fi
   if [ "$SUM_RUN_ID" != "$WANT_RUN_ID" ]; then
-    verdict UNKNOWN 4 "summary-run-id-mismatch; $SUMMARY carries run-id '$SUM_RUN_ID', not '$WANT_RUN_ID' — a live peer owns that path"
+    _summary_refusal "the summary at this path belongs to a different run" "summary-run-id-mismatch; $SUMMARY carries run-id '$SUM_RUN_ID', not '$WANT_RUN_ID' — a live peer owns that path"
   fi
 fi
 RESULT_LINE=$(printf '%s\n' "$SUM_TEXT" | grep -m1 '^RESULT: ' || true)
@@ -573,14 +597,14 @@ case "$RESULT_TOKEN" in
           # that HAS an answer. Job 206's real defect — the overclaiming diagnostic — is fixed by
           # saying what is actually known and nothing more. An ordering field could rescue the
           # permissive branch, but that is a new artifact contract, not a bug fix.
-          verdict UNKNOWN 4 "summary-foreign-run; the summary carries a terminal verdict for run '$SUM_RUN_ID' while the heartbeat beside it names run '$_hb_rid_peek'. These two files describe DIFFERENT runs, and nothing in either says which is current: a heartbeat outlives the run that wrote it, so the foreign beat may be a newer run that has not replaced the summary yet OR an older leftover, and its age cannot tell those apart. Refusing to report one run's verdict as another's. Pass --run-id to name the run you mean."
+          _summary_refusal "the summary and the heartbeat name different runs" "summary-foreign-run; the summary carries a terminal verdict for run '$SUM_RUN_ID' while the heartbeat beside it names run '$_hb_rid_peek'. These two files describe DIFFERENT runs, and nothing in either says which is current: a heartbeat outlives the run that wrote it, so the foreign beat may be a newer run that has not replaced the summary yet OR an older leftover, and its age cannot tell those apart. Refusing to report one run's verdict as another's. Pass --run-id to name the run you mean."
         fi
       fi
     fi
     # Distinguish the two shapes rather than blaming the wrong one: NO closer at all is a
     # truncated write; a closer of a DIFFERENT dialect is two fragments spliced together.
     if [ "$_n_end" -eq 0 ]; then
-      verdict UNKNOWN 4 "summary-truncated; '$RESULT_LINE' is present but the closing '==== END AGENT-GATE … SUMMARY ====' marker is not — the write was cut short (kill or ENOSPC) and will never complete, so this verdict was never published"
+      _summary_refusal "the summary at this path was cut short mid-write" "summary-truncated; '$RESULT_LINE' is present but the closing '==== END AGENT-GATE … SUMMARY ====' marker is not — the write was cut short (kill or ENOSPC) and will never complete, so this verdict was never published"
     fi
     # (a mismatched dialect and out-of-order fields were already refused above, for every
     # path; only truncation is specific to believing a terminal verdict.)

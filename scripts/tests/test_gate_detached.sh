@@ -1319,6 +1319,60 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# --- roborev job 209: .gitignore is a SECOND channel for subtree blindness ----------------------
+# `_tree_excluded` was narrowed twice (jobs 203, 204) so the gate's carve-out excuses exact artifacts
+# rather than whole subtrees. But tree-integrity enumerates untracked files with
+# `git ls-files --others --exclude-standard`, which honours .gitignore — and a gitignore pattern
+# matches a file OR A DIRECTORY of that name, and git does not descend into an ignored directory. So
+# source under `.agent-gate-summary.txt.launch-lock/` was invisible anyway: the same false-clean
+# behaviour through a channel the earlier fixes never touched.
+#
+# Asserted as the END-TO-END PROPERTY — "is planted source visible to the enumeration tree-integrity
+# actually uses" — because that is what covers BOTH channels at once. Run in a throwaway git repo, so
+# it never plants files in the real worktree (which would risk voiding a concurrent gate's
+# tree-integrity), and the subject paths are DERIVED from the committed .gitignore, so a new artifact
+# entry is covered without editing this test.
+_gi="$REPO_ROOT/.gitignore"
+if [ -r "$_gi" ] && command -v git >/dev/null 2>&1; then
+  _gw=$(mktemp -d "$TMP/gitignore-probe.XXXXXX")
+  ( cd "$_gw" && git init -q . && printf 'x\n' > seed && git add seed \
+      && git -c user.email=t@t -c user.name=t commit -qm seed ) >/dev/null 2>&1
+  cp "$_gi" "$_gw/.gitignore"
+  # Derive the artifact entries: anchored gate-summary siblings, ignoring the negations themselves.
+  _subjects=$(grep -E '^/\.agent-gate-(summary|lite-summary|delta-summary)\.txt\.' "$_gi" \
+              | grep -v '^!' | sed 's|^/||' | sed 's/\*$/aB3xyZ/' | sort -u)
+  _gi_n=0; _gi_blind=0
+  for _sub in $_subjects; do
+    _gi_n=$((_gi_n+1))
+    mkdir -p "$_gw/$_sub" 2>/dev/null || continue
+    echo 'fn evil() {}' > "$_gw/$_sub/evil.rs" 2>/dev/null || continue
+    if ! ( cd "$_gw" && git ls-files --others --exclude-standard ) 2>/dev/null | grep -q "^$_sub/evil.rs$"; then
+      _gi_blind=$((_gi_blind+1)); echo "     INVISIBLE to tree-integrity: $_sub/evil.rs"
+    fi
+  done
+  if [ "$_gi_n" -lt 6 ]; then
+    bad "4b.119 source under an artifact-named DIRECTORY is visible to tree-integrity" \
+        "only $_gi_n subjects derived from .gitignore — the derivation failed, so this proves nothing"
+  elif [ "$_gi_blind" = 0 ]; then
+    ok "4b.119 source under any of $_gi_n artifact-named directories is VISIBLE to tree-integrity"
+  else
+    bad "4b.119 source under an artifact-named directory is visible to tree-integrity" \
+        "$_gi_blind of $_gi_n still hide a subtree"
+  fi
+  # ...while the real artifact FILES must still be ignored, or the negations have merely traded
+  # blindness for a dirty checkout and a heartbeat that counts against its own gate.
+  _gi_noisy=0
+  for _sub in $_subjects; do
+    rm -rf "$_gw/$_sub" 2>/dev/null || true
+    printf 'x' > "$_gw/$_sub" 2>/dev/null || continue
+    ( cd "$_gw" && git check-ignore -q "$_sub" ) 2>/dev/null || { _gi_noisy=$((_gi_noisy+1)); echo "     no longer ignored: $_sub"; }
+  done
+  [ "$_gi_noisy" = 0 ] && ok "4b.120 the artifact FILES are still ignored (negations added no noise)" \
+                       || bad "4b.120 the artifact files are still ignored" "$_gi_noisy leaked"
+else
+  skip=$((skip+2)); echo "SKIP 4b.119/4b.120 (no .gitignore or no git)"
+fi
+
 # --- #3473-R6 owner ruling: the lock's failure mode is INVERTED -----------------------------------
 # Reclamation may follow only an AFFIRMATIVE reading of the owner's death. Every "I could not tell"
 # refuses, so a defect in this component can produce a loud false refusal but NEVER two gates writing

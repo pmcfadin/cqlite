@@ -642,6 +642,37 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### Two channels hid the same subtree, and only a PROPERTY test found the third set of paths
+
+`_tree_excluded` was narrowed twice — jobs 203 and 204 — so the gate's carve-out excuses exact
+artifacts instead of whole subtrees, because a `case` glob matches `/`. Both fixes were correct and
+neither was sufficient, because **`.gitignore` was excluding the same paths**, and tree-integrity
+enumerates untracked files with `git ls-files --others --exclude-standard`, which honours it. A
+gitignore pattern matches a file OR a directory of that name, and git does not descend into an
+ignored directory. Measured: source under `.agent-gate-summary.txt.launch-lock/` was visible to
+**zero** of the enumerations that matter. The blindness the narrowings existed to remove was intact
+the whole time, through a channel neither narrowing touched.
+
+The negation form is counterintuitive and the obvious spelling fails silently:
+
+| pattern added after the ignore rule | descendants visible |
+|---|---|
+| `!<path>/**` | **0** — git never descends into an ignored directory, so `**` is never consulted |
+| `!<path>/` | **1** — the trailing slash matches the DIRECTORY, re-including it |
+
+Glob entries take the same `!<glob>/` form. Both rows were measured in a throwaway repo, not reasoned
+about.
+
+**The durable lesson is about what the test asserts.** Two mechanism-level fixes left the property
+broken. The test that closed it (`4b.119`) asserts the PROPERTY — *is planted source visible to the
+enumeration tree-integrity actually uses* — so it covers any channel that could hide a subtree,
+including ones nobody has thought of yet. It also DERIVES its subject paths from the committed
+`.gitignore`, and that is what caught the rest: it found **15** subjects where the fix had addressed
+12, and the three it flagged were the pre-existing `.integrity-fail.*` rules from #2874 that no
+hand-written list of "artifacts this change adds" would ever have included. Twice in this change a
+hand-enumerated inventory of artifact paths was wrong — the launcher's probe shapes (2 assumed, 5
+real) and these (12 assumed, 15 real). Derive the set; do not list it.
+
 ### The reservation lock: five consecutive rounds, and why it was kept anyway
 
 Recorded because the next person to touch this should start with the history rather than rediscover

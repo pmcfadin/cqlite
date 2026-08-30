@@ -547,7 +547,31 @@ expect_reader "11b.13c control: ...and bound to its own id" COMPLETE 0 "" -- "$T
 noid2="$TMP/noid2.txt"
 { echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: INCOMPLETE (gate did not finish)"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$noid2"
 mk_beat "$noid2.heartbeat" my-run 5
-expect_reader "11b.14 --run-id given + id-less INCOMPLETE summary => UNKNOWN, not RUNNING" \
+# REFINED, not corrected (job 209) — and the distinction matters, because two other cases in this
+# suite turned out to be vouching for defects and this one is NOT that. The rule 11b.14 encoded is
+# right: nothing from an id-less summary may be attributed to the requested run. What changed is
+# where the verdict comes from. A VALID, run-id-MATCHING, FRESH beat on this host affirmatively says
+# `my-run` is alive, so the answer is sourced from the HEARTBEAT — an artifact that does name the run
+# — and the id-less summary is not consulted for it.
+#
+# The safety property is intact because this deferral can only ever produce RUNNING, never COMPLETE.
+# RUNNING is not a certification; COMPLETE is, and COMPLETE still demands an id-bearing, framed,
+# matching summary (11b.13c). What forced the refinement: `gate-detached.sh` STOPS the unit when
+# liveness cannot answer within 20s, so refusing here killed healthy gates whose tree capture outran
+# the window.
+expect_reader "11b.14 --run-id + id-less INCOMPLETE summary + FRESH matching beat => RUNNING (from the beat)" \
+  RUNNING 2 "is beating" -- "$noid2" --run-id my-run
+# ...and the ORIGINAL guarantee still holds wherever there is no affirmative evidence: with a STALE
+# beat, or none, an id-less summary cannot be attributed to the requested run.
+mk_beat "$noid2.heartbeat" my-run 4000
+expect_reader "11b.14b id-less summary + STALE beat => UNKNOWN (no affirmative evidence)" \
+  UNKNOWN 4 "summary-no-run-id" -- "$noid2" --run-id my-run
+rm -f "$noid2.heartbeat"
+expect_reader "11b.14c id-less summary + NO beat => UNKNOWN" \
+  UNKNOWN 4 "summary-no-run-id" -- "$noid2" --run-id my-run
+# A beat for a DIFFERENT run is not evidence about this one either.
+mk_beat "$noid2.heartbeat" other-run 5
+expect_reader "11b.14d id-less summary + fresh beat for ANOTHER run => UNKNOWN" \
   UNKNOWN 4 "summary-no-run-id" -- "$noid2" --run-id my-run
 
 # (c) Medium — fields were read by RE-OPENING the path once per field. These are SHARED
