@@ -7113,6 +7113,9 @@ TEST_LIMIT=1500
 # thrown away. Nothing printed here may go to only one of the two sinks.
 _fs_emit() { # _fs_emit <logfile> <line> [<line>…]  — one output line per argument
   local _fs_log="$1"; shift
+  # Zero args must emit NOTHING: `printf '%s\n'` with no operands still prints the format
+  # once, i.e. a spurious blank line to BOTH sinks (#3401 review N2).
+  [ "$#" -gt 0 ] || return 0
   printf '%s\n' "$@"
   printf '%s\n' "$@" >>"$_fs_log"
 }
@@ -7123,8 +7126,16 @@ run_file_size() {
   fi
   local log="$LOG_DIR/$name.log"
   local start end status=PASS
+  # PERSISTENCE (#3401 blocker B): this component now PROMISES a log — the SUMMARY's
+  # `logs:` line is the only route an agent has to the ratchet arithmetic. An unverified
+  # promise is the original defect one level up (reader follows the pointer, finds
+  # nothing, hand-computes line counts again), so both the truncate and the end state are
+  # CHECKED and a persistence failure is a FAIL, never a silent PASS.
+  local log_persist_err=""
   start=$(date +%s)
-  : >"$log"
+  if ! : >"$log" 2>/dev/null; then
+    log_persist_err="could not create or truncate it (unwritable path, or not a regular file)"
+  fi
 
   # Base ref: an explicit override (issue #1892 --delta uses the anchor commit),
   # else merge-base with the default branch. If none resolves, we can still do the
@@ -7207,10 +7218,35 @@ run_file_size() {
   fi
 
   end=$(date +%s)
+
+  # A created-but-EMPTY log is the mid-run ENOSPC shape, which the truncate check above
+  # cannot see — so verify the end state too. The diagnostic must be unmistakably NOT a
+  # ratchet violation: a bare `file-size: FAIL` meaning "my log dir is unwritable" would
+  # send the reader hunting for a grown source file that does not exist, so the ratchet's
+  # own verdict is stated in the same breath.
+  if [ -z "$log_persist_err" ] && [ ! -s "$log" ]; then
+    log_persist_err="the file is absent or empty after writing (filesystem full?)"
+  fi
+  if [ -n "$log_persist_err" ]; then
+    local ratchet_verdict="$status"
+    status=FAIL
+    echo "--- [$name] LOG PERSISTENCE FAILURE — this is NOT a campsite-rule / size-ratchet violation."
+    echo "    The size ratchet itself computed: $ratchet_verdict. What failed is PERSISTING the"
+    echo "    diagnostic log the SUMMARY's 'logs:' line points at: $log"
+    echo "    Cause: $log_persist_err"
+    echo "    Fix the log directory (writable? full?) and re-run; no source file needs splitting."
+  fi
+
+  # Terminal verdict, written in TWO halves ON PURPOSE (#3401 blockers B/C) — do NOT tidy
+  # these back into one _fs_emit call, either merge direction re-opens one of the two:
+  #   * to the LOG *before* record_result, because record_result can TERMINATE the run
+  #     (tree-integrity / summary-integrity guards) and the log must still carry the
+  #     terminal verdict it promises;
+  #   * to STDOUT *after* record_result, because every other component prints in that
+  #     order and a gratuitous divergence is its own bug magnet.
+  printf '%s\n' ">>> [$name] $status ($((end - start))s)" >>"$log" 2>/dev/null
   record_result "$name" "$status" "$((end - start))"
-  # Terminal verdict goes to the log too, so a reader opening file-size.log alone sees
-  # what the component concluded and never has to correlate with the SUMMARY.
-  _fs_emit "$log" ">>> [$name] $status ($((end - start))s)"
+  printf '%s\n' ">>> [$name] $status ($((end - start))s)"
 }
 
 # scoped-tests (issue #1821, --lite only): the blast-radius-scoped test component.
