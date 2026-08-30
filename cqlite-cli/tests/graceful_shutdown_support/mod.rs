@@ -202,6 +202,19 @@ struct FinalDrain {
     disconnected: bool,
 }
 
+/// What a non-blocking [`ChildIo::drain_new`] found. Two facts, kept separate
+/// for the same reason [`FinalDrain`] keeps them separate: "nothing more is
+/// queued right now" and "nothing more can ever arrive" are different
+/// measurements, and a progress count that collapses them reports the first
+/// about a child in the second state.
+struct DrainNew {
+    /// How many lines were newly consumed — the "a new line arrived" signal.
+    lines: usize,
+    /// The queue was drained to the end and every sender was gone: both reader
+    /// threads have ended, so the child's pipes are at EOF.
+    disconnected: bool,
+}
+
 impl ChildIo {
     /// Attach readers to a spawned child's stdout + stderr.
     fn attach(child: &mut std::process::Child) -> Self {
@@ -394,14 +407,35 @@ impl ChildIo {
         window.into_iter().find(|l| pred(l))
     }
 
-    /// Non-blocking: consume whatever the readers have queued. Returns how many
-    /// lines were newly observed — the "a new line arrived" progress signal.
-    fn drain_new(&self) -> usize {
-        let mut n = 0;
-        while self.rx.try_recv().is_ok() {
-            n += 1;
+    /// Non-blocking: consume whatever the readers have queued.
+    ///
+    /// `EMPTY AND DISCONNECTED ARE NEVER COLLAPSED` (roborev job 236 finding 3
+    /// and job 243 finding 3, the same class at two more sites). The old
+    /// `while try_recv().is_ok()` stopped identically on either, so a poll could
+    /// report "0 new output lines" about a child whose pipes had BOTH reached EOF
+    /// — a materially different diagnosis, silently discarded. The queue is
+    /// checked to the end before the disconnect is reported, which `try_recv`
+    /// guarantees: it yields `Disconnected` only once the queue is empty AND every
+    /// sender is gone.
+    fn drain_new(&self) -> DrainNew {
+        let mut lines = 0;
+        loop {
+            match self.rx.try_recv() {
+                Ok(_) => lines += 1,
+                Err(mpsc::TryRecvError::Empty) => {
+                    return DrainNew {
+                        lines,
+                        disconnected: false,
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return DrainNew {
+                        lines,
+                        disconnected: true,
+                    }
+                }
+            }
         }
-        n
     }
 
     /// Everything the child has said so far, indented for a panic message.
@@ -455,6 +489,12 @@ pub struct PollFail {
     /// report it without taking another directory scan after the verdict
     /// (roborev job 236, finding 2).
     artifacts_now: usize,
+    /// Both reader threads had ended when the verdict was taken, so the child's
+    /// stdout AND stderr were at EOF. A separate FACT from the progress counts
+    /// (roborev job 243, finding 3): a poll that gave up with the pipes closed is
+    /// a different diagnosis from one that gave up with output still possible, and
+    /// the old drain discarded the distinction.
+    pipes_closed: bool,
     data_dir: PathBuf,
 }
 
@@ -484,10 +524,18 @@ impl PollFail {
                 self.new_lines, self.new_artifacts, self.since_progress
             )
         };
+        let pipes = if self.pipes_closed {
+            "\nthe child's stdout AND stderr had BOTH reached EOF when the verdict was taken, so \
+             no further output could arrive: the child had exited, crashed, or closed its pipes \
+             (this measurement does not say which)"
+        } else {
+            "\nthe child's pipes were still open when the verdict was taken, so more output was \
+             still possible"
+        };
         format!(
             "gave up after {:.2?}, when the test's ONE deadline passed while this stage was \
              pending — which is what attributes the failure to this stage and to nothing else.\n\
-             {}\n{counts}\n\
+             {}\n{counts}{pipes}\n\
              durable `-Data.db` artifacts under {} when the verdict was taken: {} (the ONE sample \
              this iteration took, which is also the sample the final status check was given — \
              this path takes no further scan)",
@@ -580,11 +628,16 @@ pub fn poll_with_progress<T>(
             prev_artifacts = artifacts;
             last_progress = Instant::now();
         }
-        let lines = io.drain_new();
-        if lines > 0 {
-            new_lines += lines;
+        let drained = io.drain_new();
+        if drained.lines > 0 {
+            new_lines += drained.lines;
             last_progress = Instant::now();
         }
+        // EOF on both pipes is a FACT the failure reports, never a reason to stop
+        // polling: the child may still be exiting, and `step` is what observes
+        // that (roborev job 243, finding 3). It is read from THIS iteration's
+        // drain — the one whose counts the verdict reports — so it is scoped to
+        // the iteration rather than carried across them.
 
         let remaining = stage.remaining();
         if remaining.is_zero() {
@@ -612,6 +665,7 @@ pub fn poll_with_progress<T>(
                 new_lines,
                 new_artifacts,
                 artifacts_now: artifacts,
+                pipes_closed: drained.disconnected,
                 data_dir: data_dir.to_path_buf(),
             });
         }
@@ -709,20 +763,39 @@ fn collect_both_streams(rx: &Receiver<(Stream, Vec<u8>)>, stage: &Stage) -> Coll
         if left.is_zero() {
             // Consume what already arrived; this waits for nothing, so it cannot
             // extend the deadline.
+            //
+            // EMPTY AND DISCONNECTED ARE NEVER COLLAPSED (roborev job 243,
+            // finding 3 — the same class job 236 finding 3 fixed in
+            // `ChildIo::final_drain`, still live here). The old `let Ok(..) else
+            // break` stopped identically on either, so reader threads that had
+            // ENDED without delivering both buffers were reported as
+            // `DeadlineReached` — a timeout blamed on the deadline, about a
+            // harness defect the `Disconnected` variant already exists to name.
+            // The disconnect is recorded and the loop still terminates through
+            // the same exit, so ALL QUEUED ITEMS have been checked before any
+            // verdict is returned (`try_recv` yields `Disconnected` only once the
+            // queue is empty AND every sender is gone).
+            let mut disconnected = false;
             while collected < 2 {
-                let Ok((stream, buf)) = rx.try_recv() else {
-                    break;
-                };
-                store(
-                    stream,
-                    buf,
-                    &mut stdout_buf,
-                    &mut stderr_buf,
-                    &mut collected,
-                );
+                match rx.try_recv() {
+                    Ok((stream, buf)) => store(
+                        stream,
+                        buf,
+                        &mut stdout_buf,
+                        &mut stderr_buf,
+                        &mut collected,
+                    ),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
             }
             return if collected >= 2 {
                 CollectEnd::Both(stdout_buf, stderr_buf)
+            } else if disconnected {
+                CollectEnd::Disconnected { collected }
             } else {
                 CollectEnd::DeadlineReached { collected }
             };

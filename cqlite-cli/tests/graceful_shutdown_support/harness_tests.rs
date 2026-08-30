@@ -85,11 +85,29 @@ fn observed_progress_never_extends_the_deadline() {
         let _ = done_tx.send(report);
     });
 
-    let observed = done_rx.recv_timeout(Duration::from_secs(30)).expect(
-        "the progress-observing poll did not terminate within 30s despite a 300ms deadline: \
+    // TIMEOUT AND DISCONNECTED ARE NEVER COLLAPSED (roborev job 243, finding 3 —
+    // the class, applied to this test's own plumbing). A bare `.expect` here would
+    // report "the poll did not terminate" for a worker that PANICKED, which is the
+    // opposite diagnosis: the worker is gone, so nothing is still running. On a
+    // disconnect the join re-raises the worker's panic, which is the real cause.
+    let observed = match done_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(observed) => observed,
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+            "the progress-observing poll did not terminate within 30s despite a 300ms deadline: \
              observed progress is extending the bound, which is exactly what the round-8 descope \
-             removed",
-    );
+             removed"
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // Re-raise the worker's own panic rather than reporting a non-existent
+            // hang; `join` on a panicked thread resumes that panic.
+            let _ = worker.join();
+            panic!(
+                "the poll worker ended without reporting: its sender was dropped, so the poll \
+                 PANICKED rather than failing to terminate (the join above should have re-raised \
+                 it)"
+            );
+        }
+    };
     worker.join().expect("poll worker thread");
 
     assert!(
@@ -390,4 +408,88 @@ fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
         ),
         Ok((line, _)) => panic!("nothing matching was ever queued, yet {line:?} matched"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// CLASS C: `Empty` AND `Disconnected` ARE NEVER COLLAPSED — AT EVERY SITE
+// (roborev job 243, finding 3: job 236 finding 3's defect, at two more sites)
+// ---------------------------------------------------------------------------
+
+/// `collect_both_streams`: reader threads that END without delivering both
+/// buffers must be reported as `Disconnected`, not as a deadline.
+///
+/// The expiry drain used `let Ok(..) = rx.try_recv() else { break }`, which stops
+/// identically on an empty queue and on a dead sender — so a harness defect the
+/// `Disconnected` variant exists to name was reported as a timeout against the
+/// deadline instead. The variant carries `collected`, so the message can still
+/// say how far the collection got.
+#[test]
+fn read_side_readers_that_end_without_delivering_report_a_disconnect() {
+    let (tx, rx) = mpsc::channel();
+    // ONE buffer delivered, then both senders gone: `try_recv` must therefore
+    // yield the queued buffer FIRST and only then report the disconnect, which is
+    // what "return the right variant AFTER all queued items have been checked"
+    // means here.
+    tx.send((Stream::Stdout, b"[]".to_vec()))
+        .expect("queue stdout");
+    drop(tx);
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("expiry-races-reader-death");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    match collect_both_streams(&rx, &stage) {
+        CollectEnd::Disconnected { collected } => assert_eq!(
+            collected, 1,
+            "the drain must consume the queued buffer before reporting the disconnect, so the \
+             count in the message is how far the collection actually got"
+        ),
+        CollectEnd::DeadlineReached { collected } => panic!(
+            "both reader threads had ENDED without delivering ({collected}/2 collected) and the \
+             collection reported a deadline — blaming the test's bound for a harness defect the \
+             `Disconnected` variant already exists to name"
+        ),
+        CollectEnd::Both(..) => panic!("only one buffer was ever sent, yet both were collected"),
+    }
+}
+
+/// `poll_with_progress`: a poll that gives up with BOTH pipes at EOF must say so.
+///
+/// `drain_new` was `while try_recv().is_ok()`, so it stopped identically on an
+/// empty queue and on a dead sender and the poll could report "0 new output
+/// lines" — implying more output was still possible — about a child whose stdout
+/// and stderr had both closed.
+#[test]
+fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let (io, lines) = ChildIo::synthetic();
+    // A queued line, so the drain must CHECK the queue before it can observe the
+    // disconnect — and the reported count must still include that line.
+    lines
+        .send((Stream::Stderr, "some output".to_string()))
+        .expect("queue a line");
+    drop(lines);
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("poll-with-closed-pipes");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    let outcome = poll_with_progress(&io, dir.path(), &stage, |_slice, _artifacts| None::<()>);
+    let observed = match outcome {
+        Ok(_) => unreachable!("the step never completes"),
+        Err(fail) => fail.observed(),
+    };
+    assert!(
+        observed.contains("BOTH reached EOF"),
+        "the poll gave up with both reader threads gone and did not report it, so the message \
+         implies more output was still possible: {observed}"
+    );
 }
