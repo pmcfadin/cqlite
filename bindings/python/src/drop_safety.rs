@@ -262,7 +262,9 @@ impl Drop for Database {
         //     in a child about to `_exit`, LEAKING the inherited engine is
         //     strictly better than unlocking the parent's write dir.
         // The inherited multi-threaded runtime cannot be driven either — its
-        // worker threads did not survive the fork.
+        // worker threads did not survive the fork; measured, not assumed:
+        // disabling this guard makes the forked child's drop HANG FOREVER, which
+        // in turn hangs the parent's `waitpid`.
         //
         // Accepted cost, stated: a child that opens its OWN `Database` also
         // skips its drop cleanup, because the PID anchor belongs to the
@@ -270,13 +272,19 @@ impl Drop for Database {
         // broken for a larger reason — every `block_on` in it drives a
         // worker-less runtime — so the skip forfeits nothing that worked.
         if !runtime_belongs_to_this_process() {
-            tracing::debug!(
-                "cqlite: Database dropped in a forked child (runtime belongs to \
-                 another process); skipping teardown and leaking the inherited \
-                 write engine to avoid acting on the parent's descriptors"
-            );
-            // Deliberate leak, scoped to a forked child: stops
-            // `WriteEngine::drop` releasing the PARENT's advisory lock (above).
+            // FORGET FIRST, BEFORE ANYTHING FALLIBLE (roborev job 174). The leak
+            // is the protection, so nothing may run ahead of it: a
+            // `tracing::debug!` here could (a) DEADLOCK, because a subscriber's
+            // internal locks can be inherited already held by threads that did
+            // not survive the fork, or (b) PANIC, and unwinding out of this
+            // branch would drop `write_engine` — releasing the parent's advisory
+            // lock — before the `forget` ever ran. So the ordering is the fix,
+            // and this branch deliberately emits NO log at all: in a forked
+            // child there is no logging call that is knowably safe, and a silent
+            // skip is the correct trade against corrupting the parent.
+            //
+            // The leak itself is scoped to a child that is about to `_exit`, and
+            // it stops `WriteEngine::drop` releasing the PARENT's advisory lock.
             // `self.inner` needs no such treatment — neither
             // `cqlite_core::Database` nor `StorageEngine` implements `Drop`, and
             // closing read-only descriptors here mutates no shared lock state.
