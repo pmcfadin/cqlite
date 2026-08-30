@@ -24,7 +24,10 @@
 # INSERT cannot produce a UDT value.
 #
 # Schema: test-data/schemas/issue-3504-udt-collision.cql (committed alongside;
-# read it for the type/column rationale). Rows are described at insert_rows().
+# read it for the type/column rationale). Rows are described at insert_rows()
+# and, for the second table, insert_shape_rows() — that table pins the
+# hashable-projection TOTALITY BOUNDARY (which #3500 shapes making `cqlite.Udt`
+# hashable incidentally resolved, and which it did not).
 #
 # ============================================================================
 # OUTPUT LOCATION IS LOAD-BEARING
@@ -73,6 +76,10 @@ CONTAINER_NAME="cqlite-issue3504-udtcollision"
 CASSANDRA_IMAGE="cassandra:5.0.2"
 KEYSPACE="test_udt_collision"
 TABLE="udt_collide"
+# Second table: the hashable-projection totality boundary (roborev R1-2 on
+# #3504). Separate from $TABLE because the property is a different one — see
+# insert_shape_rows() and the schema's comment block.
+TABLE2="udt_hashable_shapes"
 SCHEMA_FILE="$ROOT/schemas/issue-3504-udt-collision.cql"
 
 # Every INSERT carries an explicit writetime so the committed sstabledump golden
@@ -237,6 +244,44 @@ insert_rows() {
        ) USING TIMESTAMP $T_FIXED"
 }
 
+# ----------------------------------------------------------------------------
+# $TABLE2 rows — the hashable-projection totality boundary (roborev R1-2).
+#
+# Python's `value_to_hashable_key` has no `Tuple`/`Set` arm, so a UDT reached
+# through one takes the `value_to_py` fallback. Before #3504 that produced an
+# unhashable `dict` and the read raised `TypeError` (#3500); a hashable
+# `cqlite.Udt` resolved exactly the shapes whose FIELD VALUES are also hashable.
+#
+# THE FAILING SHAPES ARE IN THEIR OWN ROWS. The `TypeError` is raised while
+# CONVERTING the row, so a row carrying both a succeeding and a failing column
+# would make the succeeding one unobservable.
+#
+#   id 1 — stu + mtu: the two shapes that NOW SUCCEED (set element, map key).
+#   id 2 — ssu: still fails — the INNER set has a UDT element, so it renders as a
+#          Python `list` for CLI parity (#804) and a list is unhashable in the
+#          outer set. Nothing to do with #3504.
+#   id 3 — stn: still fails — `Udt.__hash__` hashes its field values and this
+#          UDT has a `map` field, i.e. a `dict`.
+# ----------------------------------------------------------------------------
+insert_shape_rows() {
+  log "=== $TABLE2: inserting rows (USING TIMESTAMP $T_FIXED) ==="
+  local collide_lit
+  collide_lit="{\"_type\": 'tuple-type-marker', \"_keyspace\": 'tuple-keyspace-marker', \"__proto__\": 'tuple-proto-marker', real_field: 300}"
+  cql "INSERT INTO $TABLE2 (id, stu, mtu) VALUES (
+         1,
+         {($collide_lit, 10)},
+         {($collide_lit, 20): 5}
+       ) USING TIMESTAMP $T_FIXED"
+  cql "INSERT INTO $TABLE2 (id, ssu) VALUES (
+         2,
+         {{$collide_lit}}
+       ) USING TIMESTAMP $T_FIXED"
+  cql "INSERT INTO $TABLE2 (id, stn) VALUES (
+         3,
+         {({label: 'unhashable', m: {'a': 1}}, 30)}
+       ) USING TIMESTAMP $T_FIXED"
+}
+
 generate_sstabledump_jsonl() {
   local sstables_dir="$1"
   log "Generating sstabledump JSONL golden files..."
@@ -308,6 +353,7 @@ fi
 
 apply_schema "$SCHEMA_FILE"
 insert_rows
+insert_shape_rows
 flush_ks
 
 log "=== Exporting $KEYSPACE SSTables from container ==="
@@ -337,19 +383,21 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     fail "tar export from container failed."
   fi
 
-  # ONE flush of ONE table => exactly one Data.db. More than one means the
+  # ONE flush per table => exactly one Data.db each. More than one means the
   # inserts did not land in a single memtable flush and the fixture is not the
   # single-SSTable subject the tests assume.
-  tdirs=( "$OUT_DIR/$KEYSPACE/$TABLE"* )
-  if [[ ! -d "${tdirs[0]}" ]]; then
-    fail "$TABLE: no table directory matched under $OUT_DIR/$KEYSPACE/ \
-(glob '$OUT_DIR/$KEYSPACE/$TABLE*' did not expand); export failed"
-  fi
-  cnt=$(find "${tdirs[@]}" -name "*-Data.db" -not -name "._*" 2>/dev/null | wc -l | tr -d ' ')
-  if [[ "$cnt" -ne 1 ]]; then
-    fail "$TABLE: expected exactly ONE Data.db, found $cnt."
-  fi
-  log "  $TABLE: exactly one Data.db (OK)"
+  for table in "$TABLE" "$TABLE2"; do
+    tdirs=( "$OUT_DIR/$KEYSPACE/$table"* )
+    if [[ ! -d "${tdirs[0]}" ]]; then
+      fail "$table: no table directory matched under $OUT_DIR/$KEYSPACE/ \
+(glob '$OUT_DIR/$KEYSPACE/$table*' did not expand); export failed"
+    fi
+    cnt=$(find "${tdirs[@]}" -name "*-Data.db" -not -name "._*" 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$cnt" -ne 1 ]]; then
+      fail "$table: expected exactly ONE Data.db, found $cnt."
+    fi
+    log "  $table: exactly one Data.db (OK)"
+  done
 
   generate_sstabledump_jsonl "$OUT_DIR"
 
@@ -374,7 +422,11 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 
   # The colliding field name must actually be present in the sstabledump golden;
   # otherwise the fixture does not carry the subject of issue #3504.
-  golden=$(find "$OUT_DIR/$KEYSPACE" -name "*-Data.db.jsonl" | head -1)
+  # $TABLE's OWN golden, named rather than `head -1`: there are two tables now,
+  # and a check that silently read the other one would assert nothing about the
+  # colliding fields.
+  golden=$(find "$OUT_DIR/$KEYSPACE/$TABLE"* -name "*-Data.db.jsonl" | head -1)
+  [[ -n "$golden" ]] || fail "no $TABLE golden found under $OUT_DIR/$KEYSPACE/$TABLE*"
   for collide_field in '"_type"' '"__proto__"'; do
     if ! grep -q -- "$collide_field" "$golden"; then
       fail "sstabledump golden $golden does not mention the $collide_field \

@@ -37,6 +37,10 @@
 --                    namespace (the hashable-projection property, site 4).
 --   * plain        — no colliding field name: the contrast case, where reading
 --                    `_type` out of the field namespace must FAIL.
+--   * unhashable_fields
+--                  — a UDT with a `map` field, i.e. whose Python rendering is
+--                    NOT hashable: the subject for the still-failing half of the
+--                    projection-totality boundary (second table below).
 --
 -- Table `udt_collide` columns:
 --   * c  frozen<collide>            — site 3 (the rendered UDT value).
@@ -125,6 +129,15 @@ CREATE TYPE IF NOT EXISTS plain (
     real_field int
 );
 
+-- unhashable_fields: a UDT whose field values are NOT hashable in Python (a
+-- `map` renders to a `dict`). It exists for the SECOND table below: making
+-- `cqlite.Udt` hashable resolved some previously-`TypeError`ing nested shapes,
+-- and this type is the subject that pins which ones it did NOT (roborev R1-2).
+CREATE TYPE IF NOT EXISTS unhashable_fields (
+    label text,
+    m     frozen<map<text, int>>
+);
+
 -- ── Table ───────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS udt_collide (
@@ -136,5 +149,44 @@ CREATE TABLE IF NOT EXISTS udt_collide (
     fcm frozen<map<frozen<collide>, int>>,
     ftm frozen<map<frozen<collide_twin>, int>>,
     fs  frozen<set<frozen<collide>>>
+) WITH compression = {'enabled': 'false'}
+  AND compaction = {'class': 'SizeTieredCompactionStrategy'};
+
+-- ── Second table: hashable-projection totality (roborev R1-2) ───────────────
+--
+-- Python's `value_to_hashable_key` has arms for `List`, `Map`, `Frozen` and
+-- `Udt`; `Tuple` and `Set` have NONE and fall through to `value_to_py`. Before
+-- #3504 a UDT reached through that fallback became an unhashable `dict`, so a
+-- tuple containing a UDT could not be a `dict` key or a `frozenset` member and
+-- the read raised `TypeError` (issue #3500). Making a UDT a HASHABLE
+-- `cqlite.Udt` incidentally resolved exactly the sub-family whose field values
+-- are themselves hashable — and left the rest failing. This table carries one
+-- column per side of that boundary, so the claim is measured rather than argued:
+--
+--   * stu frozen<set<frozen<tuple<frozen<collide>, int>>>>
+--                    — NOW SUCCEEDS. The set has no UDT element at top level
+--                      (`contains_udt` does not look inside a tuple), so it takes
+--                      the `frozenset` branch, and hashing the tuple hashes the
+--                      `Udt`, whose fields are all text/int.
+--   * mtu frozen<map<frozen<tuple<frozen<collide>, int>>, int>>
+--                    — NOW SUCCEEDS, same projection reached as a MAP KEY.
+--   * ssu frozen<set<frozen<set<frozen<collide>>>>>
+--                    — STILL FAILS, and NOT for the old reason: the INNER set
+--                      has a UDT element, so `set_to_py` returns a Python `list`
+--                      for CLI parity (#804), and a list is unhashable in the
+--                      outer set. Unchanged by #3504.
+--   * stn frozen<set<frozen<tuple<frozen<unhashable_fields>, int>>>>
+--                    — STILL FAILS: `Udt.__hash__` hashes its field values, and
+--                      this UDT has a `map` field, which renders to a `dict`.
+--
+-- The failing shapes live in SEPARATE ROWS from the succeeding ones: the
+-- `TypeError` is raised while converting the row, so a row carrying both would
+-- make the succeeding columns unobservable.
+CREATE TABLE IF NOT EXISTS udt_hashable_shapes (
+    id  INT PRIMARY KEY,
+    stu frozen<set<frozen<tuple<frozen<collide>, int>>>>,
+    mtu frozen<map<frozen<tuple<frozen<collide>, int>>, int>>,
+    ssu frozen<set<frozen<set<frozen<collide>>>>>,
+    stn frozen<set<frozen<tuple<frozen<unhashable_fields>, int>>>>
 ) WITH compression = {'enabled': 'false'}
   AND compaction = {'class': 'SizeTieredCompactionStrategy'};
