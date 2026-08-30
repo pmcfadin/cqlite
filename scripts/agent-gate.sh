@@ -7111,21 +7111,25 @@ TEST_LIMIT=1500
 # told never to read; the SUMMARY's `file-size: FAIL` therefore named neither the file nor
 # the numbers, and every reader re-derived by hand the arithmetic the component had just
 # thrown away. Nothing printed here may go to only one of the two sinks.
-# Count of _fs_emit appends that FAILED. Tracked rather than ignored because the
-# `[ -s "$log" ]` end-state check cannot see a PARTIAL log: a filesystem that accepts the
-# first line and rejects the rest leaves a non-empty file missing the growth entries —
-# #3401's own defect with extra steps, reported as PASS (#3401 review blocker A).
-_FS_WRITE_FAILURES=0
+# _fs_emit counts appends that FAILED, in `_FS_WRITE_FAILURES` — declared `local` by
+# run_file_size and reached here through bash's DYNAMIC SCOPING (deliberately not a global:
+# a global could carry a value in from anywhere, #3401 review L3). Tracked rather than
+# ignored because the `[ -s "$log" ]` end-state check cannot see a PARTIAL log: a
+# filesystem that accepts the first line and rejects the rest leaves a non-empty file
+# missing the growth entries — #3401's own defect with extra steps, reported as PASS.
 _fs_emit() { # _fs_emit <logfile> <line> [<line>…]  — one output line per argument
   local _fs_log="$1"; shift
   # Zero args must emit NOTHING: `printf '%s\n'` with no operands still prints the format
   # once, i.e. a spurious blank line to BOTH sinks (#3401 review N2).
   [ "$#" -gt 0 ] || return 0
   printf '%s\n' "$@"
-  # The append's STATUS is kept, its MESSAGE suppressed (#3401 review N1): an unwritable
-  # log makes the shell print one error per line, ~5 lines of noise interleaved into the
-  # very diagnostic block that has to be unmistakable.
-  printf '%s\n' "$@" >>"$_fs_log" 2>/dev/null ||
+  # The append's STATUS is kept, its MESSAGE suppressed: an unwritable log makes the shell
+  # print one error per line, ~5 lines of noise burying the diagnostic that has to be
+  # unmistakable. ORDER MATTERS and the obvious spelling is WRONG (#3401 review blocker 2):
+  # redirections apply LEFT TO RIGHT, so `>>"$log" 2>/dev/null` attempts the open FIRST and
+  # bash reports the failure on the still-unredirected stderr. `2>/dev/null` must come
+  # first. Verified empirically against a log path that is a directory, not by reasoning.
+  printf '%s\n' "$@" 2>/dev/null >>"$_fs_log" ||
     _FS_WRITE_FAILURES=$((_FS_WRITE_FAILURES + 1))
 }
 run_file_size() {
@@ -7141,9 +7145,10 @@ run_file_size() {
   # nothing, hand-computes line counts again), so both the truncate and the end state are
   # CHECKED and a persistence failure is a FAIL, never a silent PASS.
   local log_persist_err=""
-  _FS_WRITE_FAILURES=0
+  # Declared HERE so _fs_emit sees it by dynamic scoping and it cannot outlive the call.
+  local _FS_WRITE_FAILURES=0
   start=$(date +%s)
-  if ! : >"$log" 2>/dev/null; then
+  if ! : 2>/dev/null >"$log"; then
     log_persist_err="could not create or truncate it (unwritable path, or not a regular file)"
   fi
 
@@ -7246,6 +7251,7 @@ run_file_size() {
   fi
   if [ -n "$log_persist_err" ]; then
     local ratchet_verdict="$status" sib="$LOG_DIR/$name.persistence-error.log" _m _g
+    local sib_ok=1
     local -a msg=()
     status=FAIL
     # The diagnostic MUST NOT live on stdout alone: stdout is gate.log, the one file agents
@@ -7253,7 +7259,7 @@ run_file_size() {
     # at is missing". So it also goes to a NON-CLOBBERING SIBLING in LOG_DIR (the #2874
     # pattern), which is reachable from the SUMMARY's `logs:` line, and the stdout block
     # names that sibling so both routes lead to it (#3401 review blocker B).
-    : >"$sib" 2>/dev/null
+    : 2>/dev/null >"$sib" || sib_ok=0
     if [ "$ratchet_verdict" = FAIL ]; then
       # BOTH failed. Saying "this is NOT a ratchet violation" here would steer the reader
       # away from a REAL growth violation (#3401 review blocker C), so report both and keep
@@ -7270,15 +7276,29 @@ run_file_size() {
       msg+=("        Fix the log directory (writable? full?) — that half needs no source split.")
     else
       msg+=("--- [$name] LOG PERSISTENCE FAILURE — this is NOT a campsite-rule / size-ratchet violation.")
-      msg+=("    The size ratchet itself computed: $ratchet_verdict. What failed is PERSISTING the")
-      msg+=("    diagnostic log the SUMMARY's 'logs:' line points at: $log")
+      if [ -z "$base" ]; then
+        # No base ref means the ratchet never RAN (advisory-only run), so claiming it
+        # "computed PASS" would assert a computation that did not happen (#3401 review L1).
+        msg+=("    The size ratchet was SKIPPED (base ref unavailable), so no growth comparison was")
+        msg+=("    made at all. What failed is PERSISTING the diagnostic log the SUMMARY's 'logs:'")
+        msg+=("    line points at: $log")
+      else
+        msg+=("    The size ratchet itself computed: $ratchet_verdict. What failed is PERSISTING the")
+        msg+=("    diagnostic log the SUMMARY's 'logs:' line points at: $log")
+      fi
       msg+=("    Cause: $log_persist_err")
       msg+=("    Fix the log directory (writable? full?) and re-run; no source file needs splitting.")
     fi
-    msg+=("    This block is also written to: $sib")
+    # Claim the sibling only if it could actually be created (#3401 review L2): an
+    # unconditional "also written to" is the unverified-promise shape this issue is about.
+    if [ "$sib_ok" = 1 ]; then
+      msg+=("    This block is also written to: $sib")
+    else
+      msg+=("    (It could NOT also be written to $sib — this stdout copy is the only one.)")
+    fi
     for _m in ${msg[@]+"${msg[@]}"}; do
       printf '%s\n' "$_m"
-      printf '%s\n' "$_m" >>"$sib" 2>/dev/null
+      printf '%s\n' "$_m" 2>/dev/null >>"$sib"
     done
   fi
 
@@ -7294,7 +7314,7 @@ run_file_size() {
   # further along. What IS verified is everything #3401 exists for — the thresholds, the
   # base ref and the growth entries, all written and checked above; a failure here costs
   # only the terminal verdict LINE, which the SUMMARY carries anyway (#3401 review A2).
-  printf '%s\n' ">>> [$name] $status ($((end - start))s)" >>"$log" 2>/dev/null
+  printf '%s\n' ">>> [$name] $status ($((end - start))s)" 2>/dev/null >>"$log"
   record_result "$name" "$status" "$((end - start))"
   printf '%s\n' ">>> [$name] $status ($((end - start))s)"
 }
