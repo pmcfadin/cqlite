@@ -33,7 +33,15 @@
 //!
 //! **Adding the `as_u64()` arm is the whole fix**, because it means the
 //! `as_f64()` arm is only ever reached for the `Float` variant — where
-//! `as_f64()` is an `f64 → f64` identity and therefore EXACT. Move `as_f64()`
+//! `as_f64()` is an `f64 → f64` identity and therefore EXACT **with respect to
+//! the parsed `Number`**, which is NOT the same as exact with respect to the
+//! JSON text: if the text held an integer literal outside
+//! `[i64::MIN, u64::MAX]`, `serde_json`'s parser already rounded it into the
+//! `Float` variant before any CQLite code ran, and the digits are gone one
+//! crate away from here (see *`Beyond` is CORRECT but currently UNREACHABLE*
+//! below, which measures exactly that). The claim in this paragraph is about
+//! the accessor never *adding* loss, never about the text being recoverable.
+//! Move `as_f64()`
 //! above `as_u64()` and the `u64`-range integers silently start rounding again,
 //! with no compiler complaint and no failing type check. That is why this is
 //! written down here rather than left to be re-derived.
@@ -133,15 +141,23 @@ pub enum JsonNumberClass {
     I64(i64),
     /// Above `i64::MAX`, within `u64`. **This is the class #3505 was losing.**
     U64(u64),
-    /// A JSON float literal. The `f64` is its exact parsed value — this is an
-    /// `f64 → f64` identity, never a narrowing conversion.
+    /// A JSON float literal — or, in a default build, an integer literal the
+    /// **parser** already rounded (see the module docs). The `f64` is the exact
+    /// parsed value: an `f64 → f64` identity, never a narrowing conversion.
+    /// "Exact" is scoped to the parsed `Number`, NOT to the JSON text.
     F64(f64),
     /// Outside all of the above, carrying the raw text. Unreachable without
     /// `arbitrary_precision`; see the module docs.
     Beyond(String),
 }
 
-/// Classify a JSON number into the host type that can represent it EXACTLY.
+/// Classify a JSON number into the host type that can represent the parsed
+/// [`serde_json::Number`] EXACTLY.
+///
+/// "Exactly" is scoped to the `Number` handed in, not to the JSON text it came
+/// from: an integer literal outside `[i64::MIN, u64::MAX]` was already rounded
+/// to an `f64` by the parser, before this function is reachable. See the module
+/// docs.
 ///
 /// The arm order (`i64` → `u64` → `f64` → text) is load-bearing; the module
 /// docs explain why, and reordering it silently reintroduces #3505.
