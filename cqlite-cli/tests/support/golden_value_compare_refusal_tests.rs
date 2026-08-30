@@ -449,34 +449,45 @@ fn the_json_lane_refuses_nothing() {
 /// the inner ambiguity cannot reach it.
 #[test]
 fn every_refusal_cause_suppresses_only_its_own_node() {
-    // (cause, declared column type, golden member, the CORRECT rendering of it)
-    let causes = [
+    // (shape, declared column type, golden member, the CORRECT rendering of it)
+    //
+    // Named for the golden SHAPE rather than for a cause label: since review round
+    // 11 there is one derived cause — the decoder does not give this node's members
+    // back — plus EMPTY-CONTAINER, which is not a recovery question. Enumerating
+    // the shapes is what keeps the per-NODE property pinned for each of them.
+    let shapes = [
         (
-            "EMPTY-CONTAINER",
+            "an empty inner container",
             "list<frozen<list<text>>>",
             json!([]),
             "[[]]",
         ),
         (
-            "EMPTY-MEMBER",
+            "a SOLE empty inner member",
             "list<frozen<list<text>>>",
             json!([""]),
             "[[]]",
         ),
         (
-            "SEPARATOR",
+            "a `, ` in an inner member",
             "list<frozen<list<text>>>",
             json!(["a, b"]),
             "[[a, b]]",
         ),
         (
-            "KEY-SEPARATOR",
+            "a `: ` in an inner map KEY",
             "list<frozen<map<text, text>>>",
             json!({"a: b": "v"}),
             "[{a: b: v}]",
         ),
+        (
+            "a `, ` in an inner map VALUE",
+            "list<frozen<map<text, text>>>",
+            json!({"k": "a, b"}),
+            "[{k: a, b}]",
+        ),
     ];
-    for (cause, decl, member, rendering) in causes {
+    for (cause, decl, member, rendering) in shapes {
         let schema = schema_of(
             &format!("CREATE TABLE t (id int PRIMARY KEY, nl {decl});"),
             "t",
@@ -511,4 +522,102 @@ fn every_refusal_cause_suppresses_only_its_own_node() {
             report.diffs
         );
     }
+}
+
+// =======================================================================
+// Round 11: OVER-refusal is a BLIND SPOT, not conservatism
+// =======================================================================
+//
+// A refused node keeps only its frame and its body's emptiness, so refusing a
+// position the decoder CAN read back does not make the lane stricter — it makes
+// that position uncheckable. Both cases below therefore assert the same two
+// halves: the correct rendering is COMPARED (not refused), and an incorrect one
+// FAILS where it previously passed the emptiness bound.
+
+/// Finding R1: a BALANCED bracket pair inside a scalar member.
+///
+/// The earlier whole-cell rule refused any member containing `[`, `]`, `{`, `}`,
+/// `(` or `)`. A balanced pair leaves the depth counter where it found it, so the
+/// depth-zero split is undisturbed and the member decodes back byte for byte —
+/// the refusal cost the cell its comparison and let `[wrong]` through.
+#[test]
+fn a_balanced_bracket_in_a_member_is_compared_and_a_wrong_member_fails() {
+    let schema = schema_of("CREATE TABLE t (id int PRIMARY KEY, l list<text>);", "t");
+    let golden = vec![row(&[("id", json!(1)), ("l", json!(["[ok]"]))])];
+
+    let report = csv_report(&schema, &golden, "[[ok]]");
+    assert!(
+        report.diffs.is_empty(),
+        "the correct rendering must compare clean: {:?}",
+        report.diffs
+    );
+    assert_eq!(
+        report.ambiguous_container_cells, 0,
+        "a balanced bracket is recoverable, so nothing is refused"
+    );
+    assert_eq!(report.container_cells, 1, "the cell is fully compared");
+
+    // THE REGRESSION R1 IS ABOUT: with the cell refused, only emptiness was
+    // checked, so any non-empty body passed.
+    let report = csv_report(&schema, &golden, "[[wrong]]");
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a wrong member must fail: {:?}",
+        report.diffs
+    );
+    assert!(report.diffs[0].contains(".l"), "{:?}", report.diffs);
+}
+
+/// Finding R2: an empty scalar member WITH SIBLINGS.
+///
+/// The earlier rule refused the whole sequence node for ANY empty member, so the
+/// unambiguous siblings and the member COUNT went unchecked. `["", "x"]` renders
+/// `[, x]`, whose depth-zero `, ` is the separator, and the split gives both
+/// members back — so only a body that could equally be zero members or one empty
+/// member is genuinely indistinguishable.
+#[test]
+fn an_empty_member_with_siblings_is_compared_and_a_dropped_member_fails() {
+    let schema = schema_of("CREATE TABLE t (id int PRIMARY KEY, l list<text>);", "t");
+    for (golden_members, rendering) in [
+        (json!(["", "x"]), "[, x]"),
+        (json!(["x", ""]), "[x, ]"),
+        (json!(["", ""]), "[, ]"),
+    ] {
+        let golden = vec![row(&[("id", json!(1)), ("l", golden_members.clone())])];
+        let report = csv_report(&schema, &golden, rendering);
+        assert!(
+            report.diffs.is_empty(),
+            "{golden_members} vs `{rendering}`: correct output must compare clean: {:?}",
+            report.diffs
+        );
+        assert_eq!(
+            report.ambiguous_container_cells, 0,
+            "{golden_members}: the members are recovered, so nothing is refused"
+        );
+        assert_eq!(report.container_cells, 1, "{golden_members}");
+    }
+
+    // THE REGRESSION R2 IS ABOUT: a dropped member. With the node refused this
+    // body was non-empty and therefore accepted.
+    let golden = vec![row(&[("id", json!(1)), ("l", json!(["", "x"]))])];
+    let report = csv_report(&schema, &golden, "[x]");
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a dropped member must fail: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("collection length"),
+        "{:?}",
+        report.diffs
+    );
+
+    // The SOLE empty member stays refused, because `[]` there is also how zero
+    // members render — that reading really is indistinguishable.
+    let sole = vec![row(&[("id", json!(1)), ("l", json!([""]))])];
+    let report = csv_report(&schema, &sole, "[]");
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(report.ambiguous_container_cells, 1);
 }
