@@ -86,7 +86,7 @@
 //! reason (an accepted-but-silently-ignored parameter would be a correctness
 //! trap).
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::AtomicI64;
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
@@ -96,10 +96,11 @@ use crate::storage::producer_fault::MergeProducerFault;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::SSTableReader;
 
+use super::egress_batch::EgressBatcher;
 use super::producer_iter::RunState;
 use super::producer_msg::{panicked_producer_error, MergeMsg, MergeProducerError};
 use super::{
-    egress_budget, producer_gauge, KWayMerger, RunReader, SSTableRowIterator,
+    egress_batch, egress_budget, producer_gauge, KWayMerger, RunReader, SSTableRowIterator,
     SSTableRowIteratorAdapter,
 };
 
@@ -122,11 +123,34 @@ pub(super) async fn drive_compaction_stream(
     local_sent: &AtomicI64,
     fault: &mut MergeProducerFault,
 ) -> Result<()> {
-    reader
+    let mut batcher = EgressBatcher::new(sender, local_sent);
+    let walk = reader
         .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |compaction_row| {
-            forward_row(run_index, compaction_row, schema, sender, local_sent, fault)
+            forward_row(run_index, compaction_row, schema, &mut batcher, fault)
         })
-        .await
+        .await;
+    finish_batched_walk(walk, &mut batcher)
+}
+
+/// Flush the pending tail of a batched walk on EVERY exit path, then report the
+/// walk's own outcome (issue #2820).
+///
+/// LOAD-BEARING, and the one thing batching can silently get wrong: the caller
+/// (a producer thread body) sends its single terminator immediately after this
+/// returns, so a row still sitting in the accumulator when `Done` goes out is a
+/// row the merge never sees — issue #3120's silent-short-read / short-rewritten-
+/// SSTable class, reintroduced through the back door and invisible to any test
+/// that only counts rows on a fixture whose size happens to be a batch multiple.
+///
+/// The tail is flushed on the ERROR path too, not just the clean one: the
+/// terminator is queued BEHIND every data message, so the consumer still sees
+/// those rows before the failure, and flushing can only ever deliver MORE of what
+/// the producer already read. The walk's `Err` always wins — a flush that finds
+/// the consumer gone (`Break`) is not an error, there is simply nobody left to
+/// hand rows to.
+fn finish_batched_walk(walk: Result<()>, batcher: &mut EgressBatcher<'_>) -> Result<()> {
+    let _ = batcher.flush();
+    walk
 }
 
 /// Warm query-serve sibling of [`drive_compaction_stream`] (issue #2412 §C /
@@ -150,17 +174,24 @@ pub(super) async fn drive_query_stream(
     local_sent: &AtomicI64,
     fault: &mut MergeProducerFault,
 ) -> Result<()> {
-    reader
+    let mut batcher = EgressBatcher::new(sender, local_sent);
+    let walk = reader
         .stream_all_partitions_for_query(Some(schema), scan_cancel, token_bound, |compaction_row| {
-            forward_row(run_index, compaction_row, schema, sender, local_sent, fault)
+            forward_row(run_index, compaction_row, schema, &mut batcher, fault)
         })
-        .await
+        .await;
+    finish_batched_walk(walk, &mut batcher)
 }
 
-/// Convert one streamed row into a [`MergeEntry`] and push it into `sender`,
-/// signalling `Break` when the consumer has dropped the channel. Shared by BOTH
-/// [`drive_compaction_stream`] and [`drive_query_stream`] so their emit
-/// contract is defined in exactly one place.
+/// Convert one streamed row into a [`MergeEntry`] and accumulate it into
+/// `batcher`, signalling `Break` when the consumer has dropped the channel.
+/// Shared by BOTH [`drive_compaction_stream`] and [`drive_query_stream`] so their
+/// emit contract is defined in exactly one place.
+///
+/// Issue #2820: this used to `send` ONE channel message per ROW — measured at
+/// 49.9% of single-stream CPU, ~94% of it kernel park/wake. It now hands the
+/// entry to [`EgressBatcher`], which sends one message per BATCH; the caller
+/// flushes the tail before its terminator (see [`finish_batched_walk`]).
 ///
 /// A row-conversion failure is RETURNED as `Err` (issue #3120), never sent as a
 /// channel message: only the thread body may put a terminator on the channel, and
@@ -170,16 +201,15 @@ pub(super) async fn drive_query_stream(
 /// clean end-of-input. The outcome seen by the merge is unchanged: `RunReader::
 /// refill_buffer` already propagated that `Err` to its caller immediately.
 ///
-/// `local_sent` is THIS adapter's own sent-count (issue #2419 roborev job
-/// 1733), incremented alongside the shared `channel_depth::sent()` gauge — it
-/// is what lets `Drop` compute an exact post-join reconcile residual instead of
-/// racing a pre-drop drain against a concurrently-sending producer.
+/// The egress-depth (issue #2419) and `local_sent` (roborev job 1733)
+/// accounting lives in [`EgressBatcher::flush`], per successful batch send and in
+/// ENTRIES — see `channel_depth`'s module doc for why the unit must stay entries
+/// on both sides.
 fn forward_row(
     run_index: usize,
     compaction_row: crate::storage::sstable::reader::CompactionRow,
     schema: &TableSchema,
-    sender: &SyncSender<MergeMsg>,
-    local_sent: &AtomicI64,
+    batcher: &mut EgressBatcher<'_>,
     fault: &mut MergeProducerFault,
 ) -> Result<std::ops::ControlFlow<()>> {
     // TEST-ONLY (issue #3120): an empty function in a production build. This is
@@ -188,25 +218,7 @@ fn forward_row(
     // for a particular on-disk format.
     fault.before_row_forward();
     let entry = SSTableRowIteratorAdapter::build_merge_entry(run_index, compaction_row, schema)?;
-    let msg = MergeMsg::Item(entry);
-    // Issue #2419 (WS2): only DATA entries are tracked on the egress-depth gauge
-    // (a TERMINATOR is untracked on both send and receive, so it can never
-    // unbalance the level). ONE predicate, shared with the consumer's recv site —
-    // see `MergeMsg::is_tracked_data`. Captured BEFORE `send` moves `msg`.
-    let is_data = msg.is_tracked_data();
-    match sender.send(msg) {
-        Ok(()) => {
-            if is_data {
-                // A DATA entry now occupies a channel slot; balanced by exactly
-                // one `channel_depth::received()` at the consumer's recv site (or
-                // by the post-join reconcile in `Drop`) — see `channel_depth`.
-                super::channel_depth::sent();
-                local_sent.fetch_add(1, Ordering::SeqCst);
-            }
-            Ok(std::ops::ControlFlow::Continue(()))
-        }
-        Err(_) => Ok(std::ops::ControlFlow::Break(())),
-    }
+    Ok(batcher.push(entry))
 }
 
 impl SSTableRowIteratorAdapter {
@@ -235,7 +247,13 @@ impl SSTableRowIteratorAdapter {
         let schema = schema.clone();
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
         let adapter_cancel = scan_cancel.clone();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(channel_capacity);
+        // Issue #2820: `channel_capacity` is a ROW budget (`egress_budget`'s whole
+        // vocabulary is rows); the channel carries BATCHES, so it is converted to a
+        // MESSAGE capacity here. Passing the row budget straight through would
+        // budget 256 BATCHES = 65_536 entries per source — a 256x resident-row
+        // blow-up. See `egress_batch::message_capacity_for_rows`.
+        let message_capacity = egress_batch::message_capacity_for_rows(channel_capacity);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(message_capacity);
         // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
         // with the producer thread — see `SSTableRowIteratorAdapter`'s field doc.
         let sent_count = Arc::new(AtomicI64::new(0));
@@ -300,11 +318,14 @@ impl SSTableRowIteratorAdapter {
             scan_cancel: adapter_cancel,
             sent_count,
             received_count: 0,
+            held: Vec::new().into_iter(),
             // Issue #3120: no terminator observed yet. `None` (end of input) is
             // reachable ONLY from a `Done`-proven `RunState::Finished`.
             state: RunState::Streaming,
             #[cfg(test)]
-            egress_channel_capacity: channel_capacity,
+            egress_channel_capacity: message_capacity,
+            #[cfg(test)]
+            egress_rows_capacity: channel_capacity,
         })
     }
 

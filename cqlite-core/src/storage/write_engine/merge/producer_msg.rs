@@ -122,26 +122,31 @@ impl MergeProducerError {
 /// implementation — `VecRun`, `SinglePartitionFilterRun`, the synthetic
 /// streaming iterators — has to know this protocol exists. Only the two
 /// producer-thread shapes and the one adapter that consumes their channels do.
-// `Item` is ~288 bytes and the terminators are small, but boxing is the WRONG
-// trade here: `Item` is the per-ROW hot path (one channel message per merged row),
-// so boxing it would add a heap allocation per row — precisely the per-entry cost
-// issue #1664 removed. And boxing a terminator cannot shrink the enum, since the
-// enum's size is set by `Item` either way. This is also EXACTLY the layout of the
-// pre-#3120 channel item (`Result<MergeEntry, MergeProducerError>`), so the
-// protocol change costs zero additional bytes per message.
-#[allow(clippy::large_enum_variant)]
+// Issue #2820: the DATA variant carries a `Vec` BATCH of entries, not one entry
+// (~288 bytes) — so every variant of this enum is now small and no
+// `large_enum_variant` allowance is needed. The batch's ONE heap allocation is
+// amortised over up to `BATCH_EMIT_ROWS_MERGE` rows, unlike the per-entry
+// allocation issue #1664 removed; what it buys is one cross-thread park/wake per
+// BATCH instead of per ROW (measured at 49.9% of single-stream CPU before this
+// change). See `egress_batch` for the batching contract.
 #[derive(Debug)]
 pub(super) enum MergeMsg {
-    /// One decoded merge entry. Carries a DATA row and NOTHING else BY
-    /// CONSTRUCTION (issue #3120): a failure is [`MergeMsg::Failed`], so "this
-    /// message ends the run" is a structural property of the variant rather than
-    /// an unenforced invariant about where an `Err` was built.
+    /// One BATCH of decoded merge entries, in scan order (issue #2820). Carries
+    /// DATA rows and NOTHING else BY CONSTRUCTION (issue #3120): a failure is
+    /// [`MergeMsg::Failed`], so "this message ends the run" is a structural
+    /// property of the variant rather than an unenforced invariant about where an
+    /// `Err` was built.
+    ///
+    /// NON-EMPTY by construction (`EgressBatcher::flush` returns early on an
+    /// empty accumulator); the consumer treats an empty batch as "nothing to hand
+    /// out" and polls again rather than trusting that, so an empty one could never
+    /// be mistaken for end-of-input.
     ///
     /// This is why `forward_row` no longer sends a conversion failure as a
     /// mid-walk channel message: a non-terminal error in the DATA slot, after
     /// which the walk KEEPS GOING, is exactly the shape that would let a later
     /// genuine dead-producer disconnect revert to a clean end-of-input.
-    Item(MergeEntry),
+    Batch(Vec<MergeEntry>),
     /// The run failed. TERMINAL: the producer sends exactly one of this or
     /// [`MergeMsg::Done`], as its last act, on every exit path.
     Failed(MergeProducerError),
@@ -152,25 +157,28 @@ pub(super) enum MergeMsg {
 }
 
 impl MergeMsg {
-    /// Whether this message occupies a TRACKED data slot on the egress-depth
-    /// gauge ([`channel_depth`](super::channel_depth)).
+    /// How many entries of this message occupy TRACKED data slots on the
+    /// egress-depth gauge ([`channel_depth`](super::channel_depth)) — the gauge's
+    /// unit is ENTRIES (rows), and issue #2820 did not change that: a batch of
+    /// `n` rows counts `n`, exactly as `n` per-row messages used to.
     ///
-    /// Called at the SEND site (`from_readers::forward_row`). It is worth being
-    /// precise about what this does and does not buy, because overclaiming here is
-    /// how the next reader stops looking (rust-reviewer, issue #3120):
+    /// Called at the SEND site (`egress_batch::EgressBatcher::flush`). It is worth
+    /// being precise about what this does and does not buy, because overclaiming
+    /// here is how the next reader stops looking (rust-reviewer, issue #3120):
     ///
-    /// * At that call site it is a **TAUTOLOGY** — `forward_row` builds
-    ///   `MergeMsg::Item(entry)` unconditionally, so the answer can only be `true`.
-    ///   It is not a runtime filter; it is a **compile-time tripwire**. Because the
-    ///   body below is an EXHAUSTIVE match with no wildcard, adding a 4th
-    ///   `MergeMsg` variant forces an explicit tracked/untracked decision here
-    ///   instead of a silent default.
+    /// * At that call site it is a **TAUTOLOGY** — the batcher builds
+    ///   `MergeMsg::Batch(batch)` unconditionally, so the answer can only be the
+    ///   batch length. It is not a runtime filter; it is a **compile-time
+    ///   tripwire**. Because the body below is an EXHAUSTIVE match with no
+    ///   wildcard, adding a 4th `MergeMsg` variant forces an explicit
+    ///   tracked/untracked decision here instead of a silent default.
     /// * The RECEIVE site (`producer_iter`'s `next`) does NOT call this. It is a
-    ///   hand-written `MergeMsg::Item(entry)` match arm, held correct by its own
+    ///   hand-written `MergeMsg::Batch(entries)` match arm, held correct by its own
     ///   two properties: that `match` is exhaustive with no wildcard, and
-    ///   `channel_depth::received` / `received_count` /
-    ///   `add_merge_run_entry_decoded` each appear at exactly ONE site in the
-    ///   crate, all three inside that arm.
+    ///   `channel_depth::received_n` / `received_count` each appear at exactly ONE
+    ///   site in the crate, both inside that arm (issue #2820 moved
+    ///   `add_merge_run_entry_decoded` to the per-ENTRY hand-out below it, since
+    ///   its unit is entries decoded, not messages received).
     ///
     /// Why it matters at all: before issue #3120 the two sides were two DIFFERENT
     /// expressions of one rule — `msg.is_ok()` on send versus an `Ok(Ok(_))`
@@ -178,12 +186,12 @@ impl MergeMsg {
     /// reconcile residual NEGATIVE, which
     /// `channel_depth::reconcile_residual`'s `> 0` guard skips and `record`'s
     /// `max(0)` floor then hides from every observer, permanently.
-    pub(super) fn is_tracked_data(&self) -> bool {
+    pub(super) fn tracked_entries(&self) -> usize {
         match self {
-            MergeMsg::Item(_) => true,
+            MergeMsg::Batch(entries) => entries.len(),
             // TERMINATORS are untracked on BOTH sides, so they can never
             // unbalance the level.
-            MergeMsg::Failed(_) | MergeMsg::Done => false,
+            MergeMsg::Failed(_) | MergeMsg::Done => 0,
         }
     }
 }
@@ -225,36 +233,47 @@ mod tests {
     use crate::storage::write_engine::mutation::DecoratedKey;
     use crate::types::Value;
 
-    fn item() -> MergeMsg {
-        MergeMsg::Item(MergeEntry::new(
+    fn entry(n: i64) -> MergeEntry {
+        MergeEntry::new(
             0,
-            DecoratedKey::new(7, vec![0, 0, 0, 7]),
+            DecoratedKey::new(n, n.to_be_bytes().to_vec()),
             None,
             100,
             RowData::Live {
                 cells: vec![CellData::new("name".to_string(), Value::text("v"), 100)],
             },
-        ))
+        )
     }
 
-    /// The gauge predicate is true for a DATA item and false for EVERY
-    /// terminator (issue #3120). Asserted on the real values both the send site
-    /// and the receive site key on, so an asymmetry between them cannot hide
-    /// here.
+    fn batch(rows: usize) -> MergeMsg {
+        MergeMsg::Batch((0..rows as i64).map(entry).collect())
+    }
+
+    /// The gauge unit is ENTRIES: a DATA batch of `n` rows counts `n` tracked
+    /// slots (issue #2820 — batching changed the MESSAGE count, never the gauge
+    /// unit), and EVERY terminator counts zero (issue #3120). Asserted on the real
+    /// values both the send site and the receive site key on, so an asymmetry
+    /// between them cannot hide here.
     #[test]
-    fn only_a_data_item_is_tracked_on_the_egress_gauge() {
-        assert!(
-            item().is_tracked_data(),
-            "a DATA entry occupies a tracked channel slot"
-        );
+    fn a_data_batch_tracks_one_slot_per_entry_and_a_terminator_tracks_none() {
+        for rows in [1usize, 2, 7, 256] {
+            assert_eq!(
+                batch(rows).tracked_entries(),
+                rows,
+                "a batch of {rows} DATA entries occupies {rows} tracked channel \
+                 slots — counting it as ONE would make the #2419 gauge read \
+                 messages while its unit says entries"
+            );
+        }
         for terminator in [
             MergeMsg::Done,
             MergeMsg::Failed(MergeProducerError::Cancelled),
             MergeMsg::Failed(MergeProducerError::Other("io".to_string())),
             MergeMsg::Failed(MergeProducerError::Panicked("boom".to_string())),
         ] {
-            assert!(
-                !terminator.is_tracked_data(),
+            assert_eq!(
+                terminator.tracked_entries(),
+                0,
                 "a terminator must be UNTRACKED on both send and receive, else the \
                  reconcile residual goes negative and is hidden by the `> 0` guard \
                  + `max(0)` floor forever (issue #3120): {terminator:?}"
