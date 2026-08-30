@@ -8524,6 +8524,20 @@ run_pub_surface() {
 # its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
+# Also runs scripts/tests/test_gate_liveness.sh (#3473), the non-vacuity proof for the
+# gate liveness mechanism: 66 cases over scripts/lib/gate-heartbeat.sh and
+# scripts/gate-liveness.sh, pinning that a reaped gate reads REAPED, a queued/running one
+# reads RUNNING, a MISSING beat reads UNKNOWN (never REAPED — absence is not death), and a
+# peer's artifacts are never answered as ours. Includes the /proc starttime parser tested
+# differentially against awk over every live pid. Hermetic; one bounded nested
+# `--only file-size` for wiring evidence (cannot select tooling-tests, so no recursion).
+# Also runs scripts/tests/test_gate_detached.sh (#3473), which pins BOTH the cgroup
+# mechanism (a `KillMode=control-group` teardown kills work that used setsid+nohup, while
+# the same work in its own cgroup survives — demonstrated on a cgroup the test creates and
+# destroys) and scripts/flow/gate-detached.sh's contract (the gate lands outside the
+# caller's cgroup, the caller's environment ARRIVES, and a host without a working user
+# systemd manager gets a NAMED refusal rather than a silent session-scoped launch).
+# SKIP-aware, loudly, where `systemd-run --user` does not work.
 # Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
 # the pub-surface component: 42 cases driving scripts/ci/check-pub-surface.sh through
 # 10 greens, 30 reds, the usage case and the kill-safety case, substituting the artifact
@@ -9784,6 +9798,34 @@ run_tooling_tests() {
   # module-file oracle, each with a green control so a refuse-everything guard cannot
   # satisfy them. A failure FAILs the component.
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
+  # gate liveness mechanism (#3473): the heartbeat beater + the three-valued reader.
+  # No cargo, no datasets, no network; one bounded nested `--only file-size`.
+  echo ">>> [$name] bash scripts/tests/test_gate_liveness.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (gate liveness mechanism #3473); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # detached-gate launcher + the cgroup mechanism it rests on (#3473). Internally
+  # SKIP-aware for hosts with no working `systemd-run --user`.
+  echo ">>> [$name] bash scripts/tests/test_gate_detached.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_detached.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (detached-gate launcher #3473); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
