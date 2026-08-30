@@ -1881,6 +1881,7 @@ for _u in "https://github.com/pmcfadin/cqlite.git" \
           "ssh://git@github.com:22/pmcfadin/cqlite" \
           "git+ssh://git@github.com/pmcfadin/cqlite.git" \
           "ssh+git://git@github.com/pmcfadin/cqlite.git" \
+          "ssh+git://git@github.com/pmcfadin/cqlite.git" \
           "https://x-access-token:ghp_example@github.com/pmcfadin/cqlite.git" \
           "HTTPS://WWW.GitHub.com/PMcFadin/CQLite.git/"; do
   [ "$(identity "$_u")" = canonical ] || id_bad="${id_bad:+$id_bad }REJECTED:$_u"
@@ -1892,6 +1893,13 @@ done
 # path, an unknown scheme, and a non-numeric "port" that must not be guessed away. Under-
 # rejecting any of these is the defect, and it compounds: the pre-flight EXECUTES the
 # baseline's copy of the gate.
+#
+# The last four are the WHITESPACE class (roborev job 230), and they are the reason the
+# normaliser refuses whitespace rather than stripping it: git resolves a remote whose scheme is
+# not at byte ZERO as a LOCAL PATH, so a single leading space makes git read a local path while
+# a stripping normaliser reads canonical HTTPS. They must be rejected for that reason and not
+# merely be absent from the accept list — an "unparseable" verdict would pass this loop while
+# still letting a later caller act on a stripped value.
 for _u in "https://github.com/contributor/cqlite.git" \
           "git@github.com:pmcfadin/other-repo.git" \
           "https://gitlab.com/someone/cqlite-fork" \
@@ -1907,7 +1915,11 @@ for _u in "https://github.com/contributor/cqlite.git" \
           "git://github.com/pmcfadin/cqlite.git" \
           "ssh://git@github.com:2222/pmcfadin/cqlite" \
           "https://github.com:8443/pmcfadin/cqlite" \
-          "/tmp/scratch/my-clone.git"; do
+          "/tmp/scratch/my-clone.git" \
+          " https://github.com/pmcfadin/cqlite.git" \
+          "	https://github.com/pmcfadin/cqlite.git" \
+          "https://github.com/pmcfadin/cqlite.git " \
+          "https://github.com/pmcfa din/cqlite.git"; do
   [ "$(identity "$_u")" = not-canonical ] || id_bad="${id_bad:+$id_bad }ACCEPTED:$_u"
 done
 if [ -z "$id_bad" ]; then

@@ -2794,11 +2794,37 @@ _CS_CANONICAL_REMOTE="github.com/pmcfadin/cqlite"
 #
 # Lowercased whole: scheme and host are case-insensitive by RFC, and GitHub treats owner/repo
 # case-insensitively too, so this direction only ever ACCEPTS a legitimate spelling.
-# `tr -d '[:space:]'`: a git URL has no legitimate whitespace, and removing it can only make a
-# pathological value fail a later comparison — never turn a fork into upstream.
+# WHITESPACE IS NOT STRIPPED, AND THIS COMMENT IS THE REASON WHY NOT — it used to read "a git
+# URL has no legitimate whitespace, and removing it can only make a pathological value fail a
+# later comparison — never turn a fork into upstream." That was FALSE, and roborev job 230
+# falsified it: git resolves a remote whose scheme is not at byte ZERO as a LOCAL PATH, so
+# stripping a single leading space turns " https://github.com/pmcfadin/cqlite.git" — a local
+# path as far as git is concerned — into a canonical HTTPS verdict. It did not turn a fork into
+# upstream; it turned an ATTACKER-CONTROLLED LOCAL REPOSITORY into upstream, and this pre-flight
+# EXECUTES the baseline. A whitespace-bearing value is now refused outright, before normalising.
+# The wrong version is quoted here on purpose: it is exactly the plausible argument that would
+# otherwise get the strip restored.
 _component_set_normalise_remote() {
   local u scheme="" host path hport
-  u=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
+  # WHITESPACE IS REJECTED, NEVER STRIPPED (roborev job 230). Stripping it CHANGES GIT'S
+  # READING of the value: git resolves a remote whose scheme is not at byte ZERO as a LOCAL
+  # PATH, so " https://github.com/pmcfadin/cqlite.git" is a local path to git while a
+  # whitespace-stripping normaliser sees a canonical HTTPS URL — a canonical verdict on an
+  # attacker-controlled local repository, which this pre-flight then EXECUTES.
+  #
+  # The general rule, and the reason this is a REFUSAL rather than one more accepted shape:
+  # VALIDATE THE BYTES GIT WILL CONSUME. Any value whose interpretation a transformation could
+  # change is refused outright, before normalising — otherwise the check certifies a string
+  # that git will never use. (Lowercasing below is safe under that rule for a reason worth
+  # stating: git does not re-resolve a remote by case, so it cannot move a value between the
+  # scheme and local-path readings.)
+  #
+  # The marker carries NO PART of the value: it reaches `_CS_DETAIL`, which reaches the SUMMARY
+  # block agents paste into PR comments, and the value may carry userinfo credentials.
+  case "$1" in
+    *[[:space:]]*) printf 'whitespace-bearing'; return 0 ;;
+  esac
+  u=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
   case "$u" in
     https://*)   scheme=https; u="${u#https://}" ;;
     ssh://*)     scheme=ssh;   u="${u#ssh://}" ;;
@@ -2807,6 +2833,10 @@ _component_set_normalise_remote() {
     # which is the false-FAIL class — worth fixing at Low precisely because that is the class
     # agents learn to waive a lane over.
     git+ssh://*) scheme=ssh;   u="${u#git+ssh://}" ;;
+    # Both historical spellings of the same authenticated transport. Accepting one and
+    # rejecting the other reds a valid canonical checkout (roborev job 230), which is the
+    # guard agents learn to waive.
+    ssh+git://*) scheme=ssh;   u="${u#ssh+git://}" ;;
     ssh+git://*) scheme=ssh;   u="${u#ssh+git://}" ;;
     # UNAUTHENTICATED TRANSPORTS, named individually so nobody "restores" one as a spelling:
     # with no server authentication, an on-path attacker IS the baseline, and the baseline is
