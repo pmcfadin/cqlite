@@ -336,12 +336,25 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
-  And `origin` must **NAME the canonical upstream** (`pmcfadin/cqlite`, compared on OWNER/REPO and
-  deliberately host-agnostic so an ssh alias, a port or a local mirror is accepted, since
-  over-rejecting reds a correct tree): `origin` merely EXISTING made `git remote set-url origin
-  <anything>` a git-config-shaped opt-out, and it fires BY ACCIDENT in the fork workflow, where a
-  contributor's fork `main` is a stale baseline stamped `PASS`. A fork/re-pointed/URL-less
-  `origin` is a NAMED non-PASS. Or `FAIL-CLOSED … baseline NOT measured (<kind>)` for a
+  And `origin` must **NAME the canonical upstream**, HOST INCLUDED
+  (`github.com/pmcfadin/cqlite`, one hard-coded literal, EXACT equality after normalising the
+  spellings git accepts — scheme forms, scp-like, userinfo, an ssh port, `www.`, `.git`, case):
+  `origin` merely EXISTING made `git remote set-url origin <anything>` a git-config-shaped
+  opt-out, and it fires BY ACCIDENT in the fork workflow, where a contributor's fork `main` is a
+  stale baseline stamped `PASS`. **An OWNER/REPO-only match is NOT enough, and "err toward
+  accepting an ambiguous host" was WRONG here** — it accepted `evil.example/pmcfadin/cqlite` and,
+  needing no hostile host at all, ANY LOCAL PATH ending in those two segments, which **compounds
+  with the execution surface**: the pre-flight EXTRACTS AND RUNS the baseline's copy of the gate,
+  so a loose identity admits arbitrary code, not merely a wrong baseline. Identity and execution
+  are one concern, not two. Anything unverifiable from the string (an ssh alias, a mirror, a local
+  path, `file://`, a look-alike host) is a NAMED non-PASS, as is a URL-less `origin`. **Corollary
+  for tests**: hermetic fixtures use local origins, so they SUBSTITUTE THE ARTIFACT — one shared
+  helper rewrites the canonical literal in the fixture's own scratch copy of the gate and verifies
+  the pin took (`scripts/tests/lib/agent-gate-canonical-pin.sh`) — never a settable seam. The
+  first design let local paths through so the fixtures would work, i.e. **the test hook and the
+  vulnerability were the same fact**; and the check REGRESSED three suites whose local origins it
+  rejected (`test_agent_gate_delta.sh`'s two real `--delta` fixtures stopped at the pre-flight
+  instead of reaching their REFUSED paths — a `tooling-tests` FAIL invisible to `--lite`). Or `FAIL-CLOSED … baseline NOT measured (<kind>)` for a
   failed fetch/absent `origin`/erroring-empty-garbage baseline `--list`/an unreadable `HEAD` gate
   script/**a host on which the probe cannot be BOUNDED** (in which case the fetch is not run at all — an unbounded fetch
   could hang `--lite` on a stall or an auth prompt, and a missing capability must not inherit

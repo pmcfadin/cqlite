@@ -442,13 +442,27 @@ one adding it) and is recorded as `[branch-only, NOT skew: …]` inside a PASS.
 `origin` made `git remote set-url origin <anything>` a git-config-shaped opt-out — and it fires
 **by accident** in the fork workflow, where `origin` legitimately names a contributor's fork whose
 `main` may be months stale, so the guard compares against the wrong baseline and stamps a `PASS`.
-`origin` must therefore name the canonical upstream (`pmcfadin/cqlite`), compared on **owner/repo**
-and deliberately **host-agnostic**: an ssh config alias, an explicit port and a local mirror path
-are accepted, because their host cannot be resolved without the network and over-rejecting reds a
-correct tree. A fork, a different repo, or an `origin` with no URL at all is a **named non-PASS**
-(`remote-not-canonical` / `remote-unreadable`) carrying its own remedy — never a silent pass and
-never a SKIP. The expected identity is a hard-coded literal: a configurable one would be the same
-hole one level out.
+`origin` must therefore name the canonical upstream **host included** —
+`github.com/pmcfadin/cqlite`, one hard-coded literal, matched by **exact equality** after
+normalising the spellings git accepts for that one repository (`https://`, `http://`, `git://`,
+`ssh://`, scp-like `git@host:owner/repo`, optional userinfo, an `ssh://` port, an optional `www.`,
+an optional `.git`, any case).
+
+**Owner/repo alone is not enough, and "err toward accepting an ambiguous host" was wrong here.**
+It accepted `https://evil.example/pmcfadin/cqlite` and — needing no hostile host at all — **any
+local path** ending in those two segments. That compounds with the execution surface: the
+pre-flight *extracts and runs* the baseline's copy of the gate, so a loose identity admits
+arbitrary code, not merely a wrong baseline. Anything unverifiable from the string (an ssh config
+alias, a mirror, a bare local path, `file://`, a look-alike host such as `github.com.evil.tld`) is
+a **named non-PASS** (`remote-not-canonical`), as is an `origin` with no URL
+(`remote-unreadable`) — each with its own remedy, never a silent pass and never a SKIP.
+
+Hermetic self-tests use **local** origins, which are deliberately not canonical, so they
+**substitute the artifact**: one shared helper
+(`scripts/tests/lib/agent-gate-canonical-pin.sh`) rewrites the canonical literal in the fixture's
+own scratch copy of the gate and then verifies the pin took. Never a settable seam — the first
+design accepted local paths *so that the fixtures would work*, which made the test hook and the
+vulnerability the same fact.
 
 Fail-closed in the **certifying** modes only — the full gate and `--delta`, the two whose blocks
 are recorded in a PR. `--lite` and `--only` stamp the same line with an `ADVISORY-*` token and
