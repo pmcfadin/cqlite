@@ -246,7 +246,12 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
   else `ps -o lstart=` — which exists on macOS, is stable, and is empty for a dead pid; its
   one-second granularity is immaterial for detecting pid *reuse*, which requires cycling the whole
   pid space. The beat declares which tier it used (`starttime` / `lstart` / `kill0`), and a
-  `kill0`-only beat — no identity at all — cannot earn an epoch-based `RUNNING`. The *comparison*
+  `kill0`-only beat — no identity at all — cannot earn **any** `RUNNING` verdict, not merely the
+  epoch-based one: counter progression would prove the *beater* is alive, not its *gate*, so after
+  a pid recycle it could be beating happily for a stranger. There is no evidence in the artifact
+  that rescues a `RUNNING` claim there, so the honest verdict is `UNKNOWN`. With the tiered
+  identity in place `kill0` needs a host with neither `/proc` nor a working `ps -o lstart=`, so
+  this costs almost nothing. The *comparison*
   covers every tier that has an identity: an earlier revision added the `lstart` tier, labelled it
   in the beat, and then never compared it — it fell through to a bare `kill -0`, so a recycled pid
   satisfied it while the beat still advertised `parent-check: lstart` and a reader trusted it.
@@ -322,6 +327,13 @@ present, run-id-matching, and respectively fresh or stale. A **missing** heartbe
 never `STALLED`: a gate predating this mechanism, or one whose summary path is unwritable,
 produces the same absence, and reporting those as a stall would be the fail-open shape one
 level down.
+
+The beat is validated like the summary: exactly one ordered opener and closer, no duplicated
+`run-id`/`beat-seq`/`beat-epoch`, and a `parent-check` from a **closed** set — an unrecognised value
+is `UNKNOWN`, never assumed benign. And a beat declaring an `interval` above 60 s is `UNKNOWN`
+rather than `STALLED`: the confirmation window is capped at 65 s to bound a hostile artifact, so
+such a beat might legitimately not advance inside it, and guessing `STALLED` would send a lane to
+re-run a healthy gate.
 
 ### What the reader does NOT guarantee
 
@@ -443,7 +455,7 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (147 cases) and
+Self-tests: `scripts/tests/test_gate_liveness.sh` (157 cases) and
 `scripts/tests/test_gate_detached.sh` (95 cases), both in the full gate's
 `tooling-tests` component.
 

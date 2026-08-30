@@ -131,6 +131,7 @@ bump_beats() {
       n=$((n + 1))
       { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: $rid"; echo "gate-pid: 4242"
         [ -n "$host" ] && echo "host: $host"
+        echo "parent-check: starttime"
         echo "interval: 1"; echo "beat-seq: $n"; echo "beat-epoch: $(( $(date +%s) - 99999 ))"
         echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$f.bump" 2>/dev/null
       mv -f "$f.bump" "$f" 2>/dev/null
@@ -831,7 +832,8 @@ bump_beats_future() {
     while [ "$(date +%s)" -lt "$end" ]; do
       n=$((n + 1))
       { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-F2"; echo "gate-pid: 4242"
-        echo "host: someotherbox"; echo "interval: 1"; echo "beat-seq: $n"
+        echo "host: someotherbox"; echo "parent-check: starttime"
+        echo "interval: 1"; echo "beat-seq: $n"
         echo "beat-epoch: $(( $(date +%s) + 600 ))"; echo "==== END AGENT-GATE HEARTBEAT ===="
       } > "$TMP/fut.txt.heartbeat.b" 2>/dev/null
       mv -f "$TMP/fut.txt.heartbeat.b" "$TMP/fut.txt.heartbeat" 2>/dev/null
@@ -893,6 +895,55 @@ expect_reader "11h.4 RESULT after the closer => UNKNOWN (out of order)" \
   echo "==== END AGENT-GATE SUMMARY ===="; } > "$TMP/ord3.txt"
 expect_reader "11h.5 run-id outside the block => UNKNOWN (out of order)" \
   UNKNOWN 4 "summary-out-of-order" -- "$TMP/ord3.txt"
+
+echo "=== section 11i: the beat's own framing and identity grammar (job 189) ==="
+# The summary side had framing validation; the beat — the artifact that actually CARRIES the
+# liveness claim — did not. Missing markers, duplicated fields, or an unknown `parent-check` could
+# still produce a confident RUNNING.
+mk_summary "$TMP/hbv.txt" run-V "INCOMPLETE (gate did not finish)"
+hbv="$TMP/hbv.txt.heartbeat"
+_mkbeat_pc() { # _mkbeat_pc <parent-check> <interval>
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-V"; echo "gate-pid: 4242"
+    echo "host: $(uname -n 2>/dev/null || echo unknown)"; echo "parent-check: $1"
+    echo "interval: $2"; echo "beat-seq: 5"; echo "beat-epoch: $(date +%s)"
+    echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$hbv"
+}
+# `kill0` means the beater could NOT identify its gate, so after a pid recycle it may be beating
+# for a stranger. Counter progression would only prove the BEATER is alive — no RUNNING claim is
+# supportable, so the honest verdict is UNKNOWN, not a weaker RUNNING.
+_mkbeat_pc kill0 20
+expect_reader "11i.1 parent-check kill0 => UNKNOWN (no gate identity can support RUNNING)" \
+  UNKNOWN 4 "heartbeat-no-gate-identity" -- "$TMP/hbv.txt"
+_mkbeat_pc bogus 20
+expect_reader "11i.2 an UNKNOWN parent-check value => UNKNOWN (closed grammar)" \
+  UNKNOWN 4 "heartbeat-unknown-parent-check" -- "$TMP/hbv.txt"
+_mkbeat_pc starttime 20 && grep -v '^parent-check: ' "$hbv" > "$hbv.t" && mv "$hbv.t" "$hbv"
+expect_reader "11i.3 a beat with NO parent-check => UNKNOWN" \
+  UNKNOWN 4 "heartbeat-no-parent-check" -- "$TMP/hbv.txt"
+# CONTROLS: both identity-bearing tiers must still be accepted.
+for tier in starttime lstart; do
+  _mkbeat_pc "$tier" 20
+  expect_reader "11i.4 control: parent-check $tier is accepted" RUNNING 2 "" -- "$TMP/hbv.txt"
+done
+# An interval the confirmation window cannot span must be UNKNOWN, not a false STALLED: the window
+# is capped at 65s to bound a hostile artifact, so a live beat at interval>60 might not advance.
+_mkbeat_pc starttime 120
+expect_reader "11i.5 interval above the observable window => UNKNOWN, not STALLED" \
+  UNKNOWN 4 "heartbeat-interval-too-long" -- "$TMP/hbv.txt"
+_mkbeat_pc starttime 60
+expect_reader "11i.6 control: interval exactly at the boundary (60s) is still read" RUNNING 2 "" -- "$TMP/hbv.txt"
+# Framing: two concatenated beats, and a duplicated field.
+_mkbeat_pc starttime 20; cat "$hbv" "$hbv" > "$hbv.t" && mv "$hbv.t" "$hbv"
+expect_reader "11i.7 two concatenated beats => UNKNOWN (not a single block)" \
+  UNKNOWN 4 "heartbeat-not-a-single-block" -- "$TMP/hbv.txt"
+_mkbeat_pc starttime 20
+{ head -n -1 "$hbv"; echo "beat-seq: 99"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$hbv.t" && mv "$hbv.t" "$hbv"
+expect_reader "11i.8 a duplicated beat-seq => UNKNOWN (no field attributable to one beat)" \
+  UNKNOWN 4 "heartbeat-duplicate-fields" -- "$TMP/hbv.txt"
+# A beat with no closing marker at all.
+_mkbeat_pc starttime 20; grep -v '^==== END AGENT-GATE HEARTBEAT ====$' "$hbv" > "$hbv.t" && mv "$hbv.t" "$hbv"
+expect_reader "11i.9 a beat with no closer => UNKNOWN" \
+  UNKNOWN 4 "heartbeat-not-a-single-block" -- "$TMP/hbv.txt"
 
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
 # The same shape appeared THREE times in this change: the default /tmp artifact names, the

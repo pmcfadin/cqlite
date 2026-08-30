@@ -393,6 +393,26 @@ if _has_nul "$_HB_SNAP"; then
   verdict UNKNOWN 4 "heartbeat-contains-nul; $HB holds NUL bytes, so it is not a single coherent beat"
 fi
 HB_TEXT=$(_slurp "$_HB_SNAP")
+# FRAMING AND FIELD VALIDATION for the beat, symmetric with the summary's (roborev job 189, Low).
+# Without it, a beat with missing markers, duplicated fields, or an unknown `parent-check` could
+# still produce a confident RUNNING — the same class of defect the summary side already closed,
+# left open on the artifact that actually carries the liveness claim.
+_hb_n_start=$(printf '%s\n' "$HB_TEXT" | grep -cxF '==== AGENT-GATE HEARTBEAT ====')
+_hb_n_end=$(printf '%s\n' "$HB_TEXT" | grep -cxF '==== END AGENT-GATE HEARTBEAT ====')
+_hb_n_rid=$(printf '%s\n' "$HB_TEXT" | grep -c '^run-id: ')
+_hb_n_seq=$(printf '%s\n' "$HB_TEXT" | grep -c '^beat-seq: ')
+_hb_n_ep=$(printf '%s\n' "$HB_TEXT" | grep -c '^beat-epoch: ')
+if [ "$_hb_n_start" -ne 1 ] || [ "$_hb_n_end" -ne 1 ]; then
+  verdict UNKNOWN 4 "heartbeat-not-a-single-block; found $_hb_n_start opener(s) and $_hb_n_end closer(s) — a beat is published by atomic rename, so anything other than exactly one of each means this file is not one coherent beat"
+fi
+if [ "$_hb_n_rid" -gt 1 ] || [ "$_hb_n_seq" -gt 1 ] || [ "$_hb_n_ep" -gt 1 ]; then
+  verdict UNKNOWN 4 "heartbeat-duplicate-fields; found $_hb_n_rid run-id / $_hb_n_seq beat-seq / $_hb_n_ep beat-epoch — no field can be attributed to a single beat"
+fi
+_hb_open_ln=$(printf '%s\n' "$HB_TEXT" | grep -nxF '==== AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
+_hb_close_ln=$(printf '%s\n' "$HB_TEXT" | grep -nxF '==== END AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
+if [ -n "$_hb_open_ln" ] && [ -n "$_hb_close_ln" ] && [ "$_hb_open_ln" -ge "$_hb_close_ln" ]; then
+  verdict UNKNOWN 4 "heartbeat-out-of-order; the closer (line $_hb_close_ln) does not follow the opener (line $_hb_open_ln)"
+fi
 HB_RUN_ID=$(_field "$HB_TEXT" run-id)
 if [ -z "$HB_RUN_ID" ]; then
   verdict UNKNOWN 4 "heartbeat-no-run-id; $HB carries no 'run-id:' line, so it cannot be attributed to any run"
@@ -416,6 +436,15 @@ case "$HB_INTERVAL" in
   ''|*[!0-9]*) verdict UNKNOWN 4 "heartbeat-unparseable-interval; 'interval: $HB_INTERVAL' is not an integer" ;;
 esac
 [ "$HB_INTERVAL" -ge 1 ] || verdict UNKNOWN 4 "heartbeat-bad-interval; 'interval: $HB_INTERVAL' must be >= 1"
+# An interval the confirmation window cannot span would be reported STALLED for a perfectly LIVE
+# gate (roborev job 189, Medium): the window is capped at 65s to stop a hostile or misconfigured
+# artifact stretching the wait, so a beat declaring an interval above 60s may legitimately not
+# advance within it. Refusing to answer is correct; guessing STALLED would send a lane to re-run a
+# healthy gate. The gate's own interval is a fixed 20s, so this can only be a foreign or
+# hand-made beat.
+if [ "$HB_INTERVAL" -gt 60 ]; then
+  verdict UNKNOWN 4 "heartbeat-interval-too-long; 'interval: ${HB_INTERVAL}s' exceeds the 60s this reader can observe (its confirmation window is capped at 65s to bound a hostile artifact), so a live beat might not advance inside it and STALLED would be a false death"
+fi
 
 # The staleness window is derived from the beat's OWN declared interval, so this
 # reader holds no duplicate of the gate's beat period and cannot drift from it. Three
@@ -485,10 +514,26 @@ fi
 # that the gate is. Counter progression below is the same evidence and no weaker, so such a beat
 # simply takes that path. With the portable `lstart` fallback in place this is now rare — it
 # needs a host with neither /proc nor a working `ps -o lstart=`.
-if [ "$HB_CHECK" = kill0 ]; then
-  _shared_clock=no
-  _where="$_where, beater-identity NONE (parent-check kill0) so the timestamp is not trusted"
-fi
+# CLOSED grammar for parent-check, and `kill0` cannot earn RUNNING at all (job 189, Medium+Low).
+#
+# The previous version merely pushed a `kill0` beat onto the counter-progression path. That was
+# not enough: progression proves the BEATER is alive, not that its GATE is — and `kill0` means the
+# beater could not identify its gate, so after a pid recycle it may be beating happily for a
+# stranger while the original gate is long gone. There is no evidence in the artifact that can
+# rescue a RUNNING claim there, so the honest verdict is UNKNOWN.
+#
+# This costs almost nothing now: `kill0` requires a host with neither /proc NOR a working
+# `ps -o lstart=`, which the tiered identity makes vanishingly rare. An unrecognised value is
+# likewise UNKNOWN rather than assumed benign.
+case "$HB_CHECK" in
+  starttime|lstart) : ;;
+  kill0)
+    verdict UNKNOWN 4 "heartbeat-no-gate-identity; the beater reports 'parent-check: kill0', meaning it could NOT establish any identity for its gate — so a recycled pid would keep it publishing for an unrelated process. Counter progression would only prove the BEATER is alive, not the gate, so no RUNNING claim is supportable from this beat. $_where" ;;
+  '')
+    verdict UNKNOWN 4 "heartbeat-no-parent-check; the beat declares no 'parent-check:' field, so it is unknown whether the beater can identify its gate at all" ;;
+  *)
+    verdict UNKNOWN 4 "heartbeat-unknown-parent-check; 'parent-check: $HB_CHECK' is not a value this reader knows (expected starttime, lstart or kill0)" ;;
+esac
 if [ "$_shared_clock" = yes ] && [ "$AGE" -le "$STALE_AFTER" ]; then
   verdict RUNNING 2 "this run beat ${AGE}s ago on this host — it is alive and has not reached a verdict yet; $_where"
 fi
