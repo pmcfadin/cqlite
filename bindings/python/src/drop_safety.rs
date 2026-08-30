@@ -81,6 +81,18 @@
 //! coverage, and a second cleanup entry point is one more thing that has to
 //! stay consistent with the `AtomicBool`.
 //!
+//! ## Alignment with cqlite-core's own durability contract
+//!
+//! `cqlite_core::Database::close` documents that "`Drop` is NOT a flush — Tokio
+//! has no async drop, so dropping a handle cannot await a flush and any
+//! un-flushed writer state is left to recovery (WAL replay)"
+//! (`cqlite-core/src/lib.rs`, issue #1693). This module does not contradict
+//! that: a *synchronous* binding may block, so on the normal path it drives the
+//! flush to completion via `block_on` rather than leaving it to recovery. And
+//! where it CANNOT block safely (the re-entrancy branch), it falls back to
+//! exactly the outcome core specifies — un-flushed state left in the WAL for
+//! replay. The two documents agree; only the mechanism differs.
+//!
 //! ## LIMITATION — a FAILED `close()` disables this safety net
 //!
 //! `closed` records that cleanup *started*, not that it *completed*:
