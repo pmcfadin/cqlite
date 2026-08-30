@@ -9952,7 +9952,6 @@ run_tooling_tests() {
   # two derivations cannot express as a disagreement; and every REFUSAL path of the
   # module-file oracle, each with a green control so a refuse-everything guard cannot
   # satisfy them. A failure FAILs the component.
-  echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   # gate liveness mechanism (#3473): the heartbeat beater + the three-valued reader.
   # No cargo, no datasets, no network; one bounded nested `--only file-size`.
   echo ">>> [$name] bash scripts/tests/test_gate_liveness.sh"
@@ -9981,6 +9980,12 @@ run_tooling_tests() {
     return 0
   fi
 
+  echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
+  # BANNER IMMEDIATELY BEFORE ITS OWN INVOCATION (roborev job 238). It used to sit ~30 lines earlier,
+  # and the #3473 liveness and detached suites were inserted between — so the log announced pub-surface,
+  # then showed a DIFFERENT suite's output, and a failure in mine read as a pub-surface failure. Worse,
+  # a run that died in between left a log asserting pub-surface had run when it never did. A banner is a
+  # claim about what happened next; it has to be adjacent to the thing it claims.
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"

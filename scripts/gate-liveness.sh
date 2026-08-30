@@ -56,6 +56,13 @@ SUMMARY=""; WANT_RUN_ID=""; HB=""
 # the ENTIRE summary grammar instead of a second, narrower copy of it.
 GL_ORIG_ARGS=("$@")
 NO_WAIT=""
+# INITIALISED HERE, before any summary handling (roborev job 238). Several summary-side paths — a
+# missing summary, an unsnapshotable one — now DEFER to the heartbeat side and break out of the summary
+# section before line 474 assigns this. The post-wait re-decision then expanded it, and under `set -u`
+# even `[ -n "$_SUM_SNAP" ]` ABORTS on an unset variable: a gate that completed during the wait produced
+# NO verdict at all, which the launcher reads as unmonitorable. Reproduced: "line 908: _SUM_SNAP:
+# unbound variable", exit 1.
+_SUM_SNAP=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --run-id)    WANT_RUN_ID="${2:?--run-id needs a value}"; shift 2 ;;
@@ -905,7 +912,14 @@ sleep "$_confirm_wait"
 # `--no-wait` guarantees termination by forbidding a second sleep.
 if [ -z "$NO_WAIT" ]; then
   _post_snap=$(_snap_of "$SUMMARY" postwait 2>/dev/null) || _post_snap=""
-  if [ -n "$_post_snap" ] && [ -n "$_SUM_SNAP" ] && ! cmp -s "$_post_snap" "$_SUM_SNAP" 2>/dev/null; then
+  # A summary that did not exist before and exists NOW is the most important change of all — it is the
+  # gate finishing — and the first version could not see it, because it required the INITIAL snapshot to
+  # be non-empty before comparing. Absent-then-present must count.
+  if [ -n "$_post_snap" ] && { [ -z "$_SUM_SNAP" ] || ! cmp -s "$_post_snap" "$_SUM_SNAP" 2>/dev/null; }; then
+    # `exec` REPLACES this process, so the EXIT trap never runs and the private snapshot directory
+    # leaks (roborev job 238). This is a regression of a known class here: an earlier revision leaked
+    # 868 of them by assigning SNAP_DIR inside a subshell. Clean up explicitly before handing over.
+    [ -n "${SNAP_DIR:-}" ] && rm -rf "$SNAP_DIR" 2>/dev/null
     exec bash "$0" "${GL_ORIG_ARGS[@]}" --no-wait
   fi
 fi

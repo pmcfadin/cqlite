@@ -642,6 +642,42 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### Two of my own fixes, each correct alone, jointly broken — the audit question none of the others ask
+
+Job 238 found an ABORT, not a wrong verdict, and it was produced by two earlier fixes interacting:
+
+- **Job 218** routed the missing-summary and unsnapshotable paths through the deferral funnel, so they
+  now `break` out of the summary section **before** the initial snapshot is taken.
+- **Job 231** added a post-wait comparison that expanded `_SUM_SNAP`, assuming the summary section had
+  run to completion.
+
+Neither is wrong in isolation. Together, under `set -u`, expanding the unset variable aborts:
+`line 908: _SUM_SNAP: unbound variable`, exit 1. **A gate that completed during the confirmation wait
+produced NO verdict at all** — worse than a wrong one, because the launcher treats any non-0/2 exit as
+unmonitorable and stops a healthy gate.
+
+The sibling audit asks *where else does this rule apply?* The time audit asks *what changes while this
+code sleeps?* **Neither asks the question that would have caught this: which of my EARLIER fixes changed
+a precondition this new code relies on?** Job 218 quietly removed a guarantee — that the summary section
+always runs to completion — and job 231 then depended on it. Nothing recorded that the guarantee had
+been weakened, so nothing could flag the dependency.
+
+Two narrower lessons from the same finding, both worth keeping:
+
+- **A comparison between two existing states cannot see CREATION.** The condition required the initial
+  snapshot to be non-empty before comparing, so it was structurally blind to **absent-then-present** —
+  which is the single most important transition here, because that is the gate finishing. `11x.1` pins
+  it; `11x.3` is the control proving an absent summary with no completion still yields a verdict rather
+  than a crash exit.
+- **`exec` replaces the process, so an EXIT trap never runs.** The re-decision leaked its private
+  snapshot directory on every fire — a regression of the class that leaked 868 of them earlier in this
+  change. `11y.2` measures the directory count across a real re-decision rather than trusting the code.
+
+And a log-integrity one: the `pub-surface` banner sat ~30 lines from its own invocation because these
+suites were inserted between them, so the log announced pub-surface and then showed a different suite's
+output — and a run dying in the gap left a log asserting a suite had run when it never did. **A banner is
+a claim about what happens next; it must be adjacent to what it claims.**
+
 ### A justification for a shortcut is the signal to stop and apply the discipline
 
 Two consecutive rounds (228, 231) found defects in the PREVIOUS round's fixes, and both times the cause

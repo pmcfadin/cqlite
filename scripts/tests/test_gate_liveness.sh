@@ -1662,6 +1662,62 @@ else
   bad "11w.1 every case passes the flags its name claims" "mismatch(es): $_flagmismatch"
 fi
 
+echo "=== section 11x: the post-wait re-decision must survive an ABSENT initial summary (job 238) ==="
+# Job 231 compared the post-wait snapshot against the initial one. But several summary-side paths — a
+# missing summary, an unsnapshotable one — DEFER to the heartbeat side and break out before the initial
+# snapshot is even taken. Under `set -u`, expanding the unset variable ABORTED the script: a gate that
+# completed during the wait produced NO verdict at all, which the launcher reads as unmonitorable.
+# Reproduced before the fix as "line 908: _SUM_SNAP: unbound variable", exit 1.
+#
+# And absent-then-present is the MOST important change to detect — it is the gate finishing — yet the
+# first version could not see it, because it required the initial snapshot to be non-empty to compare.
+_x="$TMP/absent.txt"
+rm -f "$_x"
+mk_beat "$_x.heartbeat" run-X 200 20
+( sleep 3; printf '==== AGENT-GATE SUMMARY ====\nrun-id: run-X\nRESULT: PASS\n==== END AGENT-GATE SUMMARY ====\n' > "$_x" ) &
+_xw=$!
+remember_pid "$_xw"
+expect_reader "11x.1 NO initial summary + one appears during the wait => COMPLETE (no crash)" \
+  COMPLETE 0 "terminal verdict" -- "$_x" --run-id run-X
+wait "$_xw" 2>/dev/null || true
+# The crash shape specifically: an unbound variable must never reach a verdict path.
+_xcode=$(grep -c '^_SUM_SNAP=""' "$READER" || true)
+[ "$_xcode" -ge 1 ] && ok "11x.2 _SUM_SNAP is initialised before any summary handling" \
+                    || bad "11x.2 _SUM_SNAP is initialised before any summary handling" "an unset expansion can still abort under set -u"
+# CONTROL: still no summary and no completion => the heartbeat side answers, not a crash.
+rm -f "$_x"
+mk_beat "$_x.heartbeat" run-X 200 20
+run_reader "$_x" --run-id run-X
+case "$RC" in
+  2|3|4) ok "11x.3 control: absent summary with no completion still yields a verdict (rc=$RC)" ;;
+  *)     bad "11x.3 control: absent summary with no completion yields a verdict" "rc=$RC — a crash exit is not a verdict" ;;
+esac
+
+echo "=== section 11y: exec must not leak the snapshot directory (job 238) ==="
+# `exec` REPLACES the process, so the EXIT trap never runs. The post-wait re-decision leaked its private
+# snapshot directory every time it fired. This is a regression of a known class here: an earlier revision
+# leaked 868 of them by assigning SNAP_DIR inside a subshell, and 11b.17d exists because of it.
+if grep -q 'rm -rf "$SNAP_DIR" 2>/dev/null' "$READER" && grep -q 'exec bash "$0"' "$READER"; then
+  ok "11y.1 the snapshot directory is removed before exec hands the process over"
+else
+  bad "11y.1 the snapshot directory is removed before exec" "exec bypasses the EXIT trap, so this leaks"
+fi
+_y="$TMP/leak.txt"
+_snap_before=$(ls -d "${TMPDIR:-/tmp}"/gate-liveness-snap.* 2>/dev/null | wc -l | tr -d ' ')
+mk_summary "$_y" run-Y "INCOMPLETE (gate did not finish)"
+mk_beat "$_y.heartbeat" run-Y 200 20
+( sleep 3; printf '==== AGENT-GATE SUMMARY ====\nrun-id: run-Y\nRESULT: PASS\n==== END AGENT-GATE SUMMARY ====\n' > "$_y" ) &
+_yw=$!
+remember_pid "$_yw"
+run_reader "$_y" --run-id run-Y
+wait "$_yw" 2>/dev/null || true
+_snap_after=$(ls -d "${TMPDIR:-/tmp}"/gate-liveness-snap.* 2>/dev/null | wc -l | tr -d ' ')
+if [ "$_snap_after" -le "$_snap_before" ]; then
+  ok "11y.2 a re-decision that EXECs leaves no snapshot directory behind ($_snap_before -> $_snap_after)"
+else
+  bad "11y.2 a re-decision that EXECs leaves no snapshot directory behind" "$_snap_before -> $_snap_after"
+fi
+
 echo "=== section 11u: ONE grammar for the post-wait re-decision (job 231) ==="
 # Job 228 re-parsed the fresh summary after the confirmation wait with a deliberately narrow check, and I
 # argued that being "promote-only" made the overlap with the main grammar safe. THAT ARGUMENT WAS WRONG:
