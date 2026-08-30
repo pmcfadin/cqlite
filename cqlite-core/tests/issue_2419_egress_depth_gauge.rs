@@ -35,12 +35,24 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. MUST exceed the merge's per-channel capacity (up to
-/// `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent merges
-/// — #2765; private to `merge/mod.rs`) so every producer fills its own channel
-/// and blocks on `send`, staying backed up (none received) until the merge is
-/// stepped — mirroring `issue_2316_producer_gauge.rs`'s identical rationale.
-const ROWS_PER_INPUT: i32 = 400;
+/// Rows per input SSTable, DERIVED from the shipped batching constants (issue
+/// #2820) rather than a literal: everything a full egress channel holds from a
+/// cold start (`rows_in_full_channel` — the ramp means the first batches are not
+/// full ones), plus the full batch the producer then blocks trying to hand over,
+/// plus one row it cannot even accumulate. That is the smallest fixture for which
+/// every producer is GUARANTEED to be parked in `send` with nothing received.
+///
+/// A literal would silently rot: pre-#2820 "> 256" meant "past a 256-ENTRY
+/// channel", and the channel is now bounded in MESSAGES. The historical 400-row
+/// floor is kept so the fixture also stays a genuinely multi-partition scan.
+fn rows_per_input() -> i32 {
+    let probe = cqlite_core::storage::write_engine::merge::merge_egress_batch_probe();
+    let rows_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
+        cqlite_core::storage::write_engine::merge::active_merge_count() + 1,
+    );
+    let needed = probe.rows_in_full_channel(rows_cap) + probe.batch_emit_rows + 1;
+    needed.max(400) as i32
+}
 const NUM_INPUTS: usize = 4;
 
 fn make_schema() -> TableSchema {
@@ -116,7 +128,7 @@ fn collect_inputs(dir: &std::path::Path, out: &mut Vec<(u64, PathBuf)>, depth: u
     }
 }
 
-/// Build `NUM_INPUTS` REAL nb SSTables (each `ROWS_PER_INPUT` live rows over a
+/// Build `NUM_INPUTS` REAL nb SSTables (each `rows_per_input()` live rows over a
 /// disjoint partition range). Never empty.
 fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -131,8 +143,8 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
     let mut engine = WriteEngine::new(config).expect("engine");
     for input in 0..NUM_INPUTS {
-        let base = input as i32 * ROWS_PER_INPUT;
-        for r in 0..ROWS_PER_INPUT {
+        let base = input as i32 * rows_per_input();
+        for r in 0..rows_per_input() {
             engine
                 .write(write_row(
                     base + r,
@@ -209,10 +221,25 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
     // `before+2` while this derives `before+1` → an over-estimate. That cannot
     // happen here — one test per binary — so the derivation is exact.)
     let before = cqlite_core::storage::write_engine::merge::active_merge_count();
+    // Issue #2820: the fan-in probe baseline, read before any producer starts.
+    let probe_before = cqlite_core::storage::write_engine::merge::merge_egress_batch_probe();
     let merger = KWayMerger::new(inputs, &schema).expect("KWayMerger::new");
     let after = cqlite_core::storage::write_engine::merge::active_merge_count();
     let per_channel_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
         (before + 1).max(after),
+    );
+    // Issue #2820: the channel carries BATCHES, and the batch-size ramp starts at
+    // ONE row — so a producer whose consumer never steps parks in `send` holding
+    // `rows_in_full_channel(per_channel_cap)` rows, NOT `per_channel_cap` rows.
+    // Deriving the threshold from the ROW capacity (as this did pre-#2820) would
+    // wait for rows the producer structurally cannot send from a cold start, and
+    // deadline out. The gauge's UNIT is unchanged (entries) — only how many
+    // entries a full channel holds changed.
+    let rows_when_backed_up = cqlite_core::storage::write_engine::merge::merge_egress_batch_probe()
+        .rows_in_full_channel(per_channel_cap);
+    assert!(
+        rows_when_backed_up > 0,
+        "a full channel must hold at least one row, else this test is vacuous"
     );
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a
@@ -222,7 +249,17 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
     // fail explicitly. Half the adaptive ceiling (`NUM_INPUTS * cap`) requires
     // more than one full channel's worth (for NUM_INPUTS >= 2), so it still
     // proves CONCURRENT multi-channel backpressure, adaptively.
-    let backpressure_threshold = (NUM_INPUTS as f64) * (per_channel_cap as f64) * 0.5;
+    // The FULL steady state, not half of it (issue #2820): nothing is received
+    // until the merge is stepped, so every one of the `NUM_INPUTS` producers parks
+    // in `send` holding exactly `rows_when_backed_up` rows — a deterministic level,
+    // not a probabilistic peak. Requiring the whole figure is what makes this poll
+    // DISCRIMINATE the gauge's UNIT: if either accounting site ever counted
+    // MESSAGES instead of ENTRIES the gauge would top out at
+    // `NUM_INPUTS * message_capacity` (8 at the shipped defaults, vs 12 entries),
+    // this loop would exhaust its deadline, and the assertion below would name the
+    // unit as the cause.
+    let backed_up_entries = NUM_INPUTS * rows_when_backed_up;
+    let backpressure_threshold = backed_up_entries as f64;
     let mid_deadline = Instant::now() + Duration::from_secs(10);
     let mut mid_reached = false;
     let mut mid_last_seen: Option<f64> = None;
@@ -251,13 +288,44 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
         mid_reached,
         "gauge should POSITIVELY record a backed-up reading >= {backpressure_threshold} \
          while {NUM_INPUTS} producers are blocked on a full channel (never inferred \
-         from an absent/stale window); last observed value: {:?}",
+         from an absent/stale window); last observed value: {:?}. Since issue #2820 \
+         the channel carries BATCHES: a reading stuck near \
+         NUM_INPUTS * message_capacity instead means an accounting site is counting \
+         MESSAGES, while this gauge's unit is ENTRIES (see channel_depth's module \
+         doc — an asymmetry there drives the reconcile residual negative, where the \
+         `> 0` guard and `max(0)` floor hide it forever)",
         mid_last_seen
     );
     assert_eq!(
         mid_unit.as_deref(),
         Some(catalog::unit::ENTRIES),
         "gauge must carry the {{entry}} unit"
+    );
+
+    // Issue #2820, the other half of that unit claim: the gauge's DECLARED unit is
+    // `{entry}`, so its VALUE must track entries. Read the fan-in probe at the same
+    // backed-up steady state and pin both figures explicitly, so the two can never
+    // be quietly swapped: the producers sent `backed_up_entries` ENTRIES in
+    // `NUM_INPUTS * message_capacity` MESSAGES, and the reading above matched the
+    // former.
+    let batched = cqlite_core::storage::write_engine::merge::merge_egress_batch_probe();
+    let entries_sent = batched.entries_sent - probe_before.entries_sent;
+    let messages_sent = batched.messages_sent - probe_before.messages_sent;
+    assert_eq!(
+        entries_sent, backed_up_entries as u64,
+        "each of the {NUM_INPUTS} parked producers must have sent exactly \
+         {rows_when_backed_up} entries (a full channel from a cold start)"
+    );
+    assert_eq!(
+        messages_sent,
+        (NUM_INPUTS * batched.message_capacity_for_rows(per_channel_cap)) as u64,
+        "…in exactly one message per BATCH — which is strictly fewer than the \
+         entries above, and is why the gauge value must not be derived from it"
+    );
+    assert!(
+        messages_sent < entries_sent,
+        "the fixture must produce multi-row batches, or 'the gauge counts entries, \
+         not messages' is vacuous (entries={entries_sent}, messages={messages_sent})"
     );
 
     // Reset HERE — BEFORE the drain — so the fresh delta window opens strictly
@@ -280,7 +348,7 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
         .expect("finish runtime");
     finish_rt.block_on(writer.finish()).expect("writer finish");
     assert!(
-        stats.output_rows >= (NUM_INPUTS as u64 * ROWS_PER_INPUT as u64),
+        stats.output_rows >= (NUM_INPUTS as u64 * rows_per_input() as u64),
         "merge should emit all input rows; got {}",
         stats.output_rows
     );

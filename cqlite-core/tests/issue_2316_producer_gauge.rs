@@ -26,11 +26,24 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. MUST exceed the merge's channel capacity (up to 256,
-/// adaptively reduced under concurrent merges — #2765) so
-/// every producer blocks on `send` and stays alive (uncollapsed live count) until
-/// the merge drains it — giving a deterministic window where the gauge reads `M`.
-const ROWS_PER_INPUT: i32 = 400;
+/// Rows per input SSTable, DERIVED from the shipped batching constants (issue
+/// #2820) rather than a literal: everything a full egress channel holds from a
+/// cold start (`rows_in_full_channel` — the ramp means the first batches are not
+/// full ones), plus the full batch the producer then blocks trying to hand over,
+/// plus one row it cannot even accumulate. That is the smallest fixture for which
+/// every producer is GUARANTEED to be parked in `send` with nothing received.
+///
+/// A literal would silently rot: pre-#2820 "> 256" meant "past a 256-ENTRY
+/// channel", and the channel is now bounded in MESSAGES. The historical 400-row
+/// floor is kept so the fixture also stays a genuinely multi-partition scan.
+fn rows_per_input() -> i32 {
+    let probe = cqlite_core::storage::write_engine::merge::merge_egress_batch_probe();
+    let rows_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
+        cqlite_core::storage::write_engine::merge::active_merge_count() + 1,
+    );
+    let needed = probe.rows_in_full_channel(rows_cap) + probe.batch_emit_rows + 1;
+    needed.max(400) as i32
+}
 const NUM_INPUTS: usize = 4;
 
 fn make_schema() -> TableSchema {
@@ -106,7 +119,7 @@ fn collect_inputs(dir: &std::path::Path, out: &mut Vec<(u64, PathBuf)>, depth: u
     }
 }
 
-/// Build `NUM_INPUTS` REAL nb SSTables (each `ROWS_PER_INPUT` live rows over a
+/// Build `NUM_INPUTS` REAL nb SSTables (each `rows_per_input()` live rows over a
 /// disjoint partition range). Never empty.
 fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -121,8 +134,8 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
     let mut engine = WriteEngine::new(config).expect("engine");
     for input in 0..NUM_INPUTS {
-        let base = input as i32 * ROWS_PER_INPUT;
-        for r in 0..ROWS_PER_INPUT {
+        let base = input as i32 * rows_per_input();
+        for r in 0..rows_per_input() {
             engine
                 .write(write_row(
                     base + r,
@@ -160,7 +173,7 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
     let out = TempDir::new().expect("out tempdir");
     let (baseline_ts, baseline_ldt, baseline_ttl) = compute_baseline_min(&inputs);
 
-    // Construct the merger: all M producers spawn and — with ROWS_PER_INPUT > the
+    // Construct the merger: all M producers spawn and — with `rows_per_input()` past the
     // channel capacity (up to 256, adaptively reduced under concurrent merges —
     // #2765) — block on `send`, so none decrements before the
     // snapshot below. The gauge was incremented once per producer at spawn.
@@ -236,7 +249,7 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
         .expect("finish runtime");
     finish_rt.block_on(writer.finish()).expect("writer finish");
     assert!(
-        stats.output_rows >= (NUM_INPUTS as u64 * ROWS_PER_INPUT as u64),
+        stats.output_rows >= (NUM_INPUTS as u64 * rows_per_input() as u64),
         "merge should emit all input rows; got {}",
         stats.output_rows
     );

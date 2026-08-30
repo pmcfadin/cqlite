@@ -69,11 +69,24 @@ use os_thread_budget::{
     poll_until_stable, reap_confirm_timeout, ReapOutcome, REAP_QUIESCENCE_SPAN,
 };
 
-/// Rows per input SSTable. Must EXCEED the merge's per-channel capacity (up to
-/// `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent merges
-/// — #2765) so every producer fills its bounded channel and blocks on `send`, so all
-/// producers of all mergers are alive at once at the sampling point.
-const ROWS_PER_INPUT: i32 = 400;
+/// Rows per input SSTable, DERIVED from the shipped batching constants (issue
+/// #2820) rather than a literal: everything a full egress channel holds from a
+/// cold start (`rows_in_full_channel` — the ramp means the first batches are not
+/// full ones), plus the full batch the producer then blocks trying to hand over,
+/// plus one row it cannot even accumulate. That is the smallest fixture for which
+/// every producer is GUARANTEED to be parked in `send` with nothing received.
+///
+/// A literal would silently rot: pre-#2820 "> 256" meant "past a 256-ENTRY
+/// channel", and the channel is now bounded in MESSAGES. The historical 400-row
+/// floor is kept so the fixture also stays a genuinely multi-partition scan.
+fn rows_per_input() -> i32 {
+    let probe = cqlite_core::storage::write_engine::merge::merge_egress_batch_probe();
+    let rows_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
+        cqlite_core::storage::write_engine::merge::active_merge_count() + 1,
+    );
+    let needed = probe.rows_in_full_channel(rows_cap) + probe.batch_emit_rows + 1;
+    needed.max(400) as i32
+}
 
 /// Number of input SSTables (`M`) merged per merger.
 const NUM_INPUTS: usize = 3;
@@ -201,8 +214,8 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
     let mut engine = WriteEngine::new(config).expect("engine");
 
     for input in 0..NUM_INPUTS {
-        let base = input as i32 * ROWS_PER_INPUT;
-        for r in 0..ROWS_PER_INPUT {
+        let base = input as i32 * rows_per_input();
+        for r in 0..rows_per_input() {
             let id = base + r;
             engine
                 .write(write_row(id, &format!("v-{input}-{r}"), 100 + input as i64))
@@ -249,7 +262,7 @@ fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
     // the defect this binding exists to remove.
     //
     // ONE quantity deliberately still uses the constant, and it is not on that path:
-    // the row-count sanity assert after the drain (`NUM_INPUTS * ROWS_PER_INPUT`) is
+    // the row-count sanity assert after the drain (`NUM_INPUTS * rows_per_input()`) is
     // a FLOOR on rows actually merged, guarding against an empty dataset. Since
     // `m >= NUM_INPUTS`, the constant makes it conservative — a larger `m` can only
     // exceed it — so it stays correct while `m` varies, and it decides nothing about
@@ -403,7 +416,7 @@ fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
         let stats = merger.merge(&mut writer).expect("merge into writer");
         finish_rt.block_on(writer.finish()).expect("writer finish");
         assert!(
-            stats.output_rows >= (NUM_INPUTS as u64 * ROWS_PER_INPUT as u64),
+            stats.output_rows >= (NUM_INPUTS as u64 * rows_per_input() as u64),
             "merger {i} should emit all input rows; got {}",
             stats.output_rows
         );
