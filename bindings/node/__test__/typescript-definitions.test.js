@@ -480,3 +480,228 @@ describe('TypeScript Definitions (Issue #312)', () => {
     });
   });
 });
+
+/**
+ * Runtime-surface drift alarm (issue #1456).
+ *
+ * The regex assertions above check that individual members are DECLARED, which
+ * can only ever catch the members somebody thought to write a test for. This
+ * block compares the two surfaces as SETS, so both drift directions fail:
+ *
+ *   - a `Database` prototype/static method missing from `index.d.ts`
+ *     (invisible to every TypeScript caller), and
+ *   - a member declared in `index.d.ts` with no runtime counterpart
+ *     (a phantom declaration that type-checks and then throws).
+ *
+ * The declared side is read with the TypeScript compiler API rather than by
+ * regex: `ts.createSourceFile` gives the real class-member list, so a member
+ * inside a JSDoc block, a string literal or a commented-out line cannot be
+ * mistaken for a declaration (and vice versa).
+ */
+
+const ts = require('typescript');
+
+// Members every JS function object carries; they are not part of any declared
+// class surface, so they are excluded from the static-side comparison.
+const FUNCTION_INTRINSICS = new Set(['length', 'name', 'prototype']);
+
+/**
+ * Collect the members a `.d.ts` class declaration declares, split by staticness.
+ *
+ * Methods, properties and get/set accessors all count: each is an attribute a
+ * caller can reach, which is exactly what the runtime comparison sees.
+ *
+ * @param {string} dtsSource - Full `.d.ts` source text
+ * @param {string} className - e.g. 'Database'
+ * @returns {{instance: string[], static: string[]}} Sorted member names
+ */
+function declaredClassMembers(dtsSource, className) {
+  const sourceFile = ts.createSourceFile(
+    'index.d.ts',
+    dtsSource,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true
+  );
+
+  let declaration = null;
+  const visit = (node) => {
+    if (ts.isClassDeclaration(node) && node.name && node.name.text === className) {
+      declaration = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+
+  if (declaration === null) {
+    throw new Error(`class ${className} not found in index.d.ts`);
+  }
+
+  const instance = new Set();
+  const statics = new Set();
+  for (const member of declaration.members) {
+    const isMember =
+      ts.isMethodDeclaration(member) ||
+      ts.isMethodSignature(member) ||
+      ts.isPropertyDeclaration(member) ||
+      ts.isPropertySignature(member) ||
+      ts.isGetAccessorDeclaration(member) ||
+      ts.isSetAccessorDeclaration(member);
+    if (!isMember) {
+      // Constructor signatures and index signatures are not named attributes.
+      continue;
+    }
+    if (!member.name || !ts.isIdentifier(member.name)) {
+      // Computed / string-literal member names have no runtime counterpart to
+      // compare by name; there are none today, and skipping them silently would
+      // be the permissive branch, so fail loudly instead.
+      throw new Error(
+        `class ${className} declares a member with a non-identifier name in index.d.ts`
+      );
+    }
+    const isStatic = (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) !== 0;
+    (isStatic ? statics : instance).add(member.name.text);
+  }
+
+  return {
+    instance: [...instance].sort(),
+    static: [...statics].sort(),
+  };
+}
+
+/**
+ * The members a runtime class actually exposes, split by staticness.
+ *
+ * @param {Function} cls - The runtime class (constructor function)
+ * @returns {{instance: string[], static: string[]}} Sorted member names
+ */
+function runtimeClassMembers(cls) {
+  const instance = Object.getOwnPropertyNames(cls.prototype)
+    .filter((name) => name !== 'constructor')
+    .sort();
+  const statics = Object.getOwnPropertyNames(cls)
+    .filter((name) => !FUNCTION_INTRINSICS.has(name))
+    .sort();
+  return { instance, static: statics };
+}
+
+/**
+ * Compare the declared and runtime member sets, returning human-readable drift.
+ *
+ * @param {string} className - For the message
+ * @param {{instance: string[], static: string[]}} declared
+ * @param {{instance: string[], static: string[]}} runtime
+ * @returns {string[]} One entry per drift direction found; empty when faithful
+ */
+function memberDrift(className, declared, runtime) {
+  const drift = [];
+  for (const kind of ['instance', 'static']) {
+    const declaredSet = new Set(declared[kind]);
+    const runtimeSet = new Set(runtime[kind]);
+    const phantom = declared[kind].filter((name) => !runtimeSet.has(name));
+    const undeclared = runtime[kind].filter((name) => !declaredSet.has(name));
+    if (phantom.length > 0) {
+      drift.push(
+        `${className} ${kind}: declared in index.d.ts but absent at runtime ` +
+          `(phantom declaration): ${phantom.join(', ')}`
+      );
+    }
+    if (undeclared.length > 0) {
+      drift.push(
+        `${className} ${kind}: present at runtime but NOT declared in index.d.ts ` +
+          `(invisible to TypeScript callers): ${undeclared.join(', ')}`
+      );
+    }
+  }
+  return drift;
+}
+
+describe('Runtime surface vs index.d.ts', () => {
+  let dtsContent;
+  let runtimeExports;
+
+  beforeAll(() => {
+    dtsContent = fs.readFileSync(LIB_DTS_PATH, 'utf8');
+    // The published entry point (package.json `main`), i.e. the surface the
+    // `.d.ts` describes -- NOT the raw napi binding, which `lib/index.js` wraps.
+    runtimeExports = require('../lib/index.js');
+  });
+
+  test('Database declared members equal the runtime members', () => {
+    const { Database } = runtimeExports;
+    expect(typeof Database).toBe('function');
+
+    const declared = declaredClassMembers(dtsContent, 'Database');
+    const runtime = runtimeClassMembers(Database);
+
+    // Sanity: an empty side would make the comparison vacuous in the dangerous
+    // direction (an empty declared set "matches" nothing missing).
+    expect(declared.instance.length).toBeGreaterThan(0);
+    expect(declared.static).toContain('open');
+    expect(runtime.instance.length).toBeGreaterThan(0);
+    expect(runtime.static).toContain('open');
+
+    expect(memberDrift('Database', declared, runtime)).toEqual([]);
+  });
+
+  test('PreparedStatement declared members equal the runtime members', () => {
+    const { PreparedStatement } = runtimeExports;
+    expect(typeof PreparedStatement).toBe('function');
+
+    const declared = declaredClassMembers(dtsContent, 'PreparedStatement');
+    const runtime = runtimeClassMembers(PreparedStatement);
+
+    expect(declared.instance.length).toBeGreaterThan(0);
+    expect(runtime.instance.length).toBeGreaterThan(0);
+
+    expect(memberDrift('PreparedStatement', declared, runtime)).toEqual([]);
+  });
+
+  test('every declared class resolves to a runtime export', () => {
+    // Phantom-class direction: `export declare class Foo` with nothing exported
+    // under that name type-checks and then fails at `new Foo()`.
+    const sourceFile = ts.createSourceFile(
+      'index.d.ts',
+      dtsContent,
+      ts.ScriptTarget.Latest,
+      true
+    );
+    const declaredClasses = [];
+    const visit = (node) => {
+      if (ts.isClassDeclaration(node) && node.name) {
+        declaredClasses.push(node.name.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+
+    expect(declaredClasses.length).toBeGreaterThan(0);
+    const phantoms = declaredClasses.filter(
+      (name) => typeof runtimeExports[name] !== 'function'
+    );
+    expect(phantoms).toEqual([]);
+  });
+
+  test('every declared function resolves to a runtime export', () => {
+    const sourceFile = ts.createSourceFile(
+      'index.d.ts',
+      dtsContent,
+      ts.ScriptTarget.Latest,
+      true
+    );
+    const declaredFunctions = [];
+    const visit = (node) => {
+      if (ts.isFunctionDeclaration(node) && node.name) {
+        declaredFunctions.push(node.name.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+
+    expect(declaredFunctions.length).toBeGreaterThan(0);
+    const phantoms = declaredFunctions.filter(
+      (name) => typeof runtimeExports[name] !== 'function'
+    );
+    expect(phantoms).toEqual([]);
+  });
+});
