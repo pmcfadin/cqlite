@@ -117,6 +117,11 @@ const MEASURE_PASSES = 9;
 //   * retain a 64-byte Buffer per iteration:            50-80 KB  -> TRIPS (1.5x)
 // Those are the realistic shapes of a JS-side or native-buffer leak on these
 // paths; the 64-byte case is the smallest leak this test is claimed to catch.
+// RED CONTROL (2026-08-30): planting the 256-byte retention INTO THESE EXACT
+// TEST BODIES failed the committed assertions on both paths -- error path
+// min 119,792 bytes (399.3/iteration), stream path min 133,272 bytes
+// (444.2/iteration), i.e. 3.7x and 4.1x over budget -- so the guard is known to
+// bite the code it ships with, not just a lookalike in a scratch harness.
 // ---------------------------------------------------------------------------
 const BUDGET_BYTES = 32 * 1024;
 

@@ -86,21 +86,22 @@ STREAM_ROWS = 5
 # The cold first sample is what a real pytest run measures (one process, one
 # sample per test), so the budget must clear IT, not the warm floor.
 #
-# Budgets, and what each one BITES (measured with synthetic per-iteration leaks
-# injected into the same loop bodies -- a retained bytearray, plus the real
-# leak shape of retaining the abandoned iterator itself):
+# Budgets, and what each one BITES -- verified by planting a synthetic
+# per-iteration retention INTO THESE EXACT TEST BODIES and observing the
+# committed assertions fail (RED control, 2026-08-30):
 #   ERROR_BUDGET_BYTES  =  64 KiB (131 bytes/iteration) -- 15x the observed cold
-#       max. A synthetic 64-byte-per-iteration retention measured 114 KB total
-#       and TRIPS it; the real leak shape (retaining the abandoned iterator,
-#       5,132 bytes/iteration) measured 2.57 MB and trips it by 40x.
-#   STREAM_BUDGET_BYTES = 256 KiB (524 bytes/iteration) -- 4.7x the observed
-#       cold max. Looser than the error budget because the stream path's noise
-#       is genuinely an order of magnitude larger (a per-iteration stream setup
-#       over a ~101-column table). Measured discrimination on this path: a
-#       512-byte-per-iteration retention (334 KB total) TRIPS it, a 256-byte one
-#       (205 KB) does NOT -- stated honestly rather than overclaimed. Every leak
-#       shape that retains stream/row state (>= ~1 row of a wide table) trips it
-#       by a wide margin.
+#       max. Planting a retained 256-byte bytearray per iteration measured
+#       164,872 bytes (329.7/iteration) and TRIPS it by 2.5x. The real leak shape
+#       (retaining the abandoned iterator itself, 5,132 bytes/iteration) measured
+#       2.57 MB and trips it by 39x.
+#   STREAM_BUDGET_BYTES = 256 KiB (524 bytes/iteration) -- 4.7x the observed cold
+#       max. Looser than the error budget because this path's noise is genuinely
+#       an order of magnitude larger (a per-iteration stream setup over a
+#       ~101-column table). Planting a retained 1 KiB bytearray per iteration
+#       measured 635,079 bytes (1,270.2/iteration) and TRIPS it by 2.4x; a
+#       planted 256-byte retention (205 KB) does NOT -- stated honestly rather
+#       than overclaimed. Every leak shape that retains stream/row state (>= one
+#       row of a wide table) trips it by a wide margin.
 # ---------------------------------------------------------------------------
 ERROR_BUDGET_BYTES = 64 * 1024
 STREAM_BUDGET_BYTES = 256 * 1024
