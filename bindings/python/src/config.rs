@@ -134,10 +134,22 @@ pub fn memory_optimized(py: Python<'_>) -> PyResult<Py<PyDict>> {
 
 /// Returns a performance-optimized configuration preset as a Python dict.
 ///
-/// This preset maximizes performance at the cost of higher memory usage:
-/// - max_memory: 4 GB
-/// - Fast compression (LZ4)
-/// - Larger caches and more I/O threads
+/// This preset trades memory for throughput. What it actually sets:
+/// - `storage.memtable_size_threshold`: 128 MB — LIVE, drives flush through the
+///   `WriteEngineConfig` bridge (#1697)
+/// - `memory.block_cache.max_size`: 1 GB — LIVE, the decompressed-chunk cache
+///   budget (#1568)
+/// - `memory.max_memory`: 4 GB
+/// - `storage.compression`: LZ4, enabled
+///
+/// Two honesty notes, because a preset that advertises effects it does not have is
+/// the defect #1696 exists to remove:
+/// - This no longer mentions I/O threads: `storage.io_threads` had zero production
+///   readers and was deleted by #1696, along with this preset's assignment to it.
+/// - `storage.compression.*` still has no production reader — read-path compression
+///   comes from `CompressionInfo.db` and the write path is uncompressed-only (#1406)
+///   — so setting it here changes no behaviour today. It is recorded as a disclosed
+///   residual rather than silently implying a speedup.
 ///
 /// # Example
 ///
