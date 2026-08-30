@@ -40,7 +40,9 @@
 //!   the deadline bounds how long the test WAITS FOR EVIDENCE, not the acceptance
 //!   of evidence already observed — `poll_with_progress` in `mod.rs` deliberately
 //!   accepts a success it notices as the deadline lapses, and states the bound on
-//!   how late that can be.
+//!   how late that can be. Symmetrically (job 233 finding 1), every expiry site
+//!   takes a FINAL NON-BLOCKING look at what already arrived before declaring a
+//!   timeout, so an unconsumed-but-delivered signal is never reported as absent.
 //!
 //! The accepted cost, stated plainly: a genuine defect now surfaces at the
 //! deadline rather than at a tight per-stage cap. It is paid only on a real
@@ -175,7 +177,9 @@ pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(60);
 /// success OBSERVED while it lapses is still accepted, deliberately, because
 /// failing a stage that saw its signal would be a false failure on a working
 /// product. `poll_with_progress` in `mod.rs` owns that decision and quantifies
-/// how late an accepted success can be.
+/// how late an accepted success can be. The failure path is the same rule read
+/// the other way (job 233 finding 1): no expiry is declared until a final
+/// non-blocking drain confirms the evidence really is absent.
 ///
 /// It is LIVE from construction: build it as the first statement of the test, so
 /// every stage including the first is charged.
@@ -600,7 +604,9 @@ fn the_deadline_describes_its_own_derivation() {
 /// observed its success returns that success even if the deadline lapsed while it
 /// was looking, which is deliberate (`poll_with_progress` in `mod.rs` states why,
 /// and bounds how late it can be). The deadline bounds waiting for evidence, not
-/// the acceptance of evidence in hand.
+/// the acceptance of evidence in hand — including evidence that arrived in time
+/// and had not been consumed when the deadline passed, which every expiry site
+/// drains for before declaring a timeout (job 233 finding 1).
 ///
 /// Under the pre-descope `derived: Duration` this was false at five sites (rounds
 /// 2, 4, 6 and roborev job 224 findings 2 and 3): each wait received a stage's

@@ -175,6 +175,23 @@ host, SHALL be stated where the claim is made.
 returning success. It was OVERRULED — the behaviour is correct and the CLAIM was overstated. See
 `tasks.md` round 9.)*
 
+**AND THE SAME RULE APPLIES SYMMETRICALLY ON THE FAILURE PATH (round 10, roborev job 233 finding 1).**
+Before declaring that a deadline expired, the harness SHALL perform a FINAL NON-BLOCKING check for
+evidence that has already arrived — draining the queued child output through the awaited predicate,
+re-invoking the poll step with a zero timeout, and draining delivered read-side buffers — and SHALL
+declare a timeout only if the evidence is still absent afterwards. Evidence that arrived within the
+deadline and was merely not yet CONSUMED (this thread can be descheduled between a reader thread's
+send and the next receive) is evidence in hand, and rejecting it is the same false failure as
+rejecting a late-observed success. That check SHALL wait for nothing, so it cannot extend the
+deadline. A timeout reported while the awaited marker sits in the transcript the same message prints
+is a diagnostic contradicted by its own evidence — the most damaging failure available to a change
+whose purpose is that no message asserts what its measurement cannot establish.
+
+#### Scenario: the awaited evidence arrived before the deadline but was consumed after it
+- **WHEN** the marker, the process exit, or a read-side buffer is delivered before the deadline and
+  the harness is next scheduled only after the deadline has lapsed
+- **THEN** the stage SHALL succeed, and a unit test per site SHALL assert it does
+
 *(Round-8 withdrawal, recorded rather than deleted: progress previously RESET a calibrated stall window
 and extended the stage past its nominal budget. That is precisely what made a declared cap not the
 actual maximum — the defect family four review rounds could not close — so the crediting is withdrawn

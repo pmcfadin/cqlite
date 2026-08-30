@@ -93,8 +93,9 @@ was still landing when the deadline passed". Exit ends the wait successfully; th
 otherwise, and is checked BEFORE each step is invoked, so no step is ever STARTED past it and none is
 granted more than what is left.
 
-**Scope of that claim, corrected in round 9 (roborev job 232 finding 1).** The deadline bounds how
-long the test WAITS FOR EVIDENCE; it does not bound the acceptance of evidence already in hand. If a
+**Scope of that claim, corrected in round 9 (roborev job 232 finding 1), and completed in round 10
+(job 233 finding 1).** The deadline bounds how long the test WAITS FOR EVIDENCE; it does not bound the
+acceptance of evidence already in hand. If a
 step reports the child exited, or the artifact appeared, while the deadline lapses, the poll returns
 `Ok` — it does not recheck. That is deliberate and the review's proposed recheck was OVERRULED:
 failing a stage that OBSERVED its signal, merely because the loop noticed a few hundred milliseconds
@@ -102,6 +103,19 @@ late, is a false failure on a working product — the exact flake class this cha
 and it would make the verdict depend on how long a directory scan took. The lag is bounded by one
 `SLICE.min(remaining)` (<= 100ms) plus one `count_data_db` walk, which on a loaded host is not
 necessarily quick; the same lag applies to the failure path, which is declared at the next loop top.
+
+**The failure path is the same rule read the other way, and round 9 applied it in only one direction.**
+Evidence can ARRIVE inside the deadline and be CONSUMED after it: the test thread is descheduled
+between a reader thread's `send` and the next `recv`, or between the slice in which the child exited
+and the loop's next look. Declaring a timeout without looking is therefore a false failure on a
+working product AND a message contradicted by its own transcript — the failure quotes the transcript,
+which contains the very marker it says was never observed. So each of the three expiry sites now takes
+a FINAL NON-BLOCKING look before declaring expiry: `wait_for` drains the queued lines through the
+predicate, `poll_with_progress` re-invokes `step(ZERO)` (a `try_wait`, or a directory count — it waits
+for nothing) and folds any unobserved progress into the message, and the read-side collection drains
+delivered buffers. None of them waits, so none can extend the deadline; a timeout is declared only if
+the evidence is still absent afterwards. Asserted per site by three unit tests that queue the evidence,
+let the deadline lapse, and require the stage to succeed.
 
 This is what AC1's "unbounded-but-progress-checked loop" reduces to once the liveness question is
 answered where it actually can be — by stage (c)'s handler-entry marker, not by a bound that progress

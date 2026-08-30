@@ -290,7 +290,9 @@ impl ChildIo {
 // test's one deadline is the only bound — no wait is granted more time than it
 // leaves, and none is started past it. It bounds WAITING FOR evidence, not the
 // acceptance of evidence already observed; see `poll_with_progress` for the
-// success path that is deliberately accepted late, and for the bound on the lag.
+// success path that is deliberately accepted late, for the bound on the lag, and
+// for the final non-blocking check that keeps the FAILURE path from declaring a
+// timeout against evidence that had already arrived.
 //
 // What is kept is the value: a failure that says `progress observed: NONE - 0 new
 // output lines and 0 new durable artifacts` is a materially different diagnosis
@@ -355,7 +357,11 @@ impl PollFail {
 ///
 /// WHAT THE DEADLINE BOUNDS, EXACTLY: it bounds how long the test WAITS FOR
 /// EVIDENCE. It does NOT bound the acceptance of evidence already in hand
-/// (roborev job 232 finding 1, and the OVERRULE recorded in tasks.md round 9).
+/// (roborev job 232 finding 1, and the OVERRULE recorded in tasks.md round 9) —
+/// and that holds in BOTH directions (job 233 finding 1): an expiry is declared
+/// only after a FINAL NON-BLOCKING `step(ZERO)` confirms the evidence is still
+/// absent, because evidence that arrived in time and was merely not consumed yet
+/// is evidence in hand.
 ///
 /// The deadline is checked BEFORE `step` is invoked and `step` is handed
 /// `min(SLICE, remaining)` (roborev job 229, finding 3), so no wait here is ever
@@ -914,9 +920,11 @@ fn a_line_queued_before_the_deadline_is_matched_after_it_lapses() {
         Ok((line, _)) => assert!(line.contains(MARKER_HANDLER_ENTERED), "{line}"),
         Err(end) => panic!(
             "the marker had ALREADY ARRIVED when the deadline lapsed, and the wait reported \
-             {end:?} instead of matching it. That is a false timeout on a working product, and \
-             its message would be contradicted by the transcript it prints:\n{}",
-            io.transcript_text()
+             {end:?} instead of matching it. That is a false timeout on a working product; on \
+             the real path it is also a self-contradicting diagnostic, because the transcript \
+             the failure prints contains the very marker the message says was never observed. \
+             (This synthetic `ChildIo` has no reader thread, so its transcript is empty by \
+             construction and is deliberately not quoted here.)"
         ),
     }
 }
