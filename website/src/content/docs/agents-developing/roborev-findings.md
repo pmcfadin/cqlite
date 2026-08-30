@@ -594,6 +594,45 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    another which paths to skip; a path the reviewer really did not receive FAILs. (And it never prints a
    `0/0` PASS: a key with no subject has no verdict to give.)
 
+   **AND `findings:` GATES THE VERDICT ON ITS OWN — the affirmation backstop's six keys were never the
+   whole story (#3564).** `findings:` is not one of the six (its affirmative value is `NONE`, not `PASS`, so
+   it cannot satisfy that loop's uniform test), and it was described as merely *corroborating* — which read
+   as "guarded elsewhere" when it was guarded **nowhere**. `PRESENT` is in the closed grammar's
+   **non-failing** set, so the only thing failing a findings-bearing run was the NEIGHBOURING key
+   `roborev-exit: FINDINGS (exit 1)`. That coupling held for a fresh review and broke exactly where it
+   mattered most: on `--recheck-job` **no reviewer process runs**, so `roborev-exit` is legitimately `SKIP`,
+   and with the failing signal gone the run emitted
+
+   ```
+   findings:     PRESENT (3)
+   roborev-exit: SKIP (recheck: no reviewer ran in this invocation; job 160 re-decided from its record)
+   RESULT:       PASS
+   ```
+
+   — a **false PASS in a merge gate**, measured on #3473's round-3 recovery. And it landed on the one path
+   an authorized waiver must travel (a re-run enqueues a different job and stales the waiver), so a waiver
+   scoped to `prompt-content` **absence only** could carry a findings failure nobody excused.
+
+   Now: on any would-be `RESULT: PASS`, `findings:` must reduce (token-exact) to `NONE`, **in every mode
+   including recheck**, and the requirement is **not waivable**. The fix is in the verdict scan and
+   deliberately **not** in `roborev-exit`, because `SKIP` is the TRUE statement about a recheck — making that
+   key claim a failure it never observed would trade one false statement for another. Its second half is
+   easy to miss and is the part that keeps the break-glass alive: a recheck of a record with **no structured
+   `verdict` field** used to fall through to a branch keyed on the reviewer's exit code and read `UNKNOWN`,
+   so the gate alone would have false-FAILed **every clean recheck**; a recheck now re-asserts findings from
+   the record's own review text (the transcript in that mode), scoped to the findings block, and reports
+   `UNKNOWN` when that block could not be measured at all.
+
+   **Two transferable lessons.** (1) *Delegating a key's failure to its neighbour is a latent false PASS* —
+   the coupling is invisible while both keys are populated by the same event and evaporates in the first mode
+   where they are not. Ask of every key: **what fails the run if this key alone goes bad?** (2) *A
+   fail-closed argument for a default is only valid for the consumers that existed when it was written.* The
+   `block_marker_count` `:-0` default was audited as fail-closed because `NONE` was the STRICT direction for
+   `vacuity-tier1:`. Adding a consumer for which `NONE` is the PERMISSIVE direction silently inverted it, and
+   no choice of default can fix that — `0` and *unmeasurable* are the same value — so the direction is bought
+   from a **separate** `block_measured` signal instead. Re-derive such an argument whenever you add a
+   consumer.
+
    **It was never one bug — it is ONE SHAPE, found repeatedly on #3229, so it is now a rule:
    *a positive verdict requires an AFFIRMATIVE MEASUREMENT.*** The shape is *a multi-state signal where
    only the BAD states are tested, so every unknown or unmeasured state inherits the PERMISSIVE branch*:
