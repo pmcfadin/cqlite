@@ -144,20 +144,57 @@ fn is_scalar(v: &Value) -> bool {
     !matches!(v, Value::Array(_) | Value::Object(_))
 }
 
+/// A predicate over a value path: `true` means the comparison excludes that path,
+/// so the decoder must not require the CLI's text there to invert the grammar.
+///
+/// Kept as a bare closure type rather than a dependency on the comparator's
+/// `SkipPaths`, so this module stays independent of it.
+pub type Excluded<'a> = dyn Fn(&str) -> bool + 'a;
+
 /// Decode `text` (one CSV field, or one member of one) into the shape `golden`
 /// declares. A map/UDT decodes to the `[{"key":…,"value":…}, …]` spelling the
 /// JSON egress uses, so the existing map comparison applies unchanged.
 pub fn decode(golden: &Value, text: &str) -> Result<Value, String> {
+    decode_at(golden, text, "", &|_| false)
+}
+
+/// [`decode`], but aware of the paths the comparison excludes.
+///
+/// `path` is the fully-qualified position of `text` in the row, spelled the same
+/// way the comparator spells it (`col.field` for a named field, `col[i]` for a
+/// positional member). A member at an EXCLUDED path is returned as its raw,
+/// UNDECODED text: the comparison will not look at it, and requiring the grammar
+/// to invert there would fail the whole cell for a member nobody compares — which
+/// is what forced the `udt_nested` exclusion to be whole-column (issue #1491
+/// review finding F5).
+///
+/// The ambiguity scan is deliberately NOT exclusion-aware: it is decided from the
+/// golden alone and refusing a whole cell is a conservative, counted, NAMED
+/// outcome in the census, never a silent pass.
+pub fn decode_at(
+    golden: &Value,
+    text: &str,
+    path: &str,
+    excluded: &Excluded<'_>,
+) -> Result<Value, String> {
+    if excluded(path) {
+        return Ok(Value::String(text.to_string()));
+    }
     match golden {
-        Value::Array(items) => decode_array(items, text),
-        Value::Object(fields) => decode_object(fields, text),
+        Value::Array(items) => decode_array(items, text, path, excluded),
+        Value::Object(fields) => decode_object(fields, text, path, excluded),
         // Ambiguity 2: the golden's own type resolves the `null` token.
         Value::Null if text == "null" => Ok(Value::Null),
         _ => Ok(Value::String(text.to_string())),
     }
 }
 
-fn decode_array(golden: &[Value], text: &str) -> Result<Value, String> {
+fn decode_array(
+    golden: &[Value],
+    text: &str,
+    path: &str,
+    excluded: &Excluded<'_>,
+) -> Result<Value, String> {
     let inner = strip(text, &ARRAY_OPENERS)?;
     let parts = if inner.is_empty() {
         Vec::new()
@@ -168,12 +205,22 @@ fn decode_array(golden: &[Value], text: &str) -> Result<Value, String> {
     for (i, part) in parts.iter().enumerate() {
         // A member the golden does not have is decoded against `null`; the
         // length mismatch is what the comparison then reports.
-        out.push(decode(golden.get(i).unwrap_or(&Value::Null), part)?);
+        out.push(decode_at(
+            golden.get(i).unwrap_or(&Value::Null),
+            part,
+            &format!("{path}[{i}]"),
+            excluded,
+        )?);
     }
     Ok(Value::Array(out))
 }
 
-fn decode_object(golden: &Map<String, Value>, text: &str) -> Result<Value, String> {
+fn decode_object(
+    golden: &Map<String, Value>,
+    text: &str,
+    path: &str,
+    excluded: &Excluded<'_>,
+) -> Result<Value, String> {
     let inner = strip(text, &[('{', '}')])?;
     let parts = if inner.is_empty() {
         Vec::new()
@@ -191,9 +238,23 @@ fn decode_object(golden: &Map<String, Value>, text: &str) -> Result<Value, Strin
         let (key, value) = (&part[..cut], &part[cut + 2..]);
         let mut entry = Map::new();
         entry.insert("key".to_string(), Value::String(key.to_string()));
+        // A UDT field step, spelled `parent.field` as the comparator spells it. A
+        // MAP key reaches the same branch (CSV cannot tell the two apart), but a
+        // dotted skip path through a map is rejected when the case is validated
+        // against the DDL, so no exclusion can ever name one.
+        let child = if path.is_empty() {
+            key.to_string()
+        } else {
+            format!("{path}.{key}")
+        };
         entry.insert(
             "value".to_string(),
-            decode(golden.get(key).unwrap_or(&Value::Null), value)?,
+            decode_at(
+                golden.get(key).unwrap_or(&Value::Null),
+                value,
+                &child,
+                excluded,
+            )?,
         );
         out.push(Value::Object(entry));
     }

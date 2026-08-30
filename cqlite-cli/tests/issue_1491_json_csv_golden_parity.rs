@@ -234,10 +234,14 @@ const CASES: &[Case] = &[
         // `frozen<address>` nested inside a `frozen<employee>`. The golden decodes
         // it (`{"street": "1 Navy Way", …}`); both CLI egress formats emit the
         // inner UDT's RAW BYTES as blob hex
-        // (`0x0000000a31204e617679205761790000000941726c696e67746f6e…`). The other
-        // two fields of the same UDT ARE compared, so the case is not a no-op.
+        // (`0x0000000a31204e617679205761790000000941726c696e67746f6e…`).
+        //
+        // The exclusion is FIELD-scoped (`e.home`, not `e`) so the sibling fields
+        // `e.name` and `e.level` are still value-compared. Excluding the whole
+        // column left this case comparing nothing but its primary key while the
+        // comment claimed otherwise (review finding F5).
         skip_columns: &[(
-            "e",
+            "e.home",
             "nested frozen UDT renders as blob hex, not a decoded object",
         )],
     },
@@ -590,15 +594,61 @@ fn schema_agrees_with_case(case: &Case, table: &TableSchema) -> Vec<String> {
             ));
         }
     }
-    for (name, _) in case.skip_columns {
-        if table.column(name).is_none() {
+    for (path, _) in case.skip_columns {
+        let (column, rest) = match path.split_once('.') {
+            Some((column, rest)) => (column, Some(rest)),
+            None => (*path, None),
+        };
+        let Some(declared) = table.column(column) else {
             out.push(format!(
-                "the case declares skip_columns entry `{name}`, which the committed CREATE \
-                 TABLE does not declare — the declared gap is stale"
+                "the case declares skip_columns entry `{path}`, whose column `{column}` the \
+                 committed CREATE TABLE does not declare — the declared gap is stale"
             ));
+            continue;
+        };
+        if let Some(rest) = rest {
+            if let Err(why) = resolve_field_path(&declared.ty, rest) {
+                out.push(format!(
+                    "the case declares skip_columns entry `{path}`, which the committed DDL \
+                     does not resolve: {why} — the declared gap is stale"
+                ));
+            }
         }
     }
     out
+}
+
+/// Resolve a dotted `field.subfield` tail of a skip path against the committed
+/// DDL, so a field-scoped exclusion naming a field that does not exist FAILS
+/// instead of silently matching nothing.
+///
+/// Only UDT field steps are resolvable: a case table can name
+/// `column.field.subfield`, and nothing else. A collection element or map entry
+/// has no stable name to write down, so the walk's positional path segments
+/// (`col[0]`, `col[key]`) are deliberately NOT expressible here — an exclusion
+/// that cannot be checked against the DDL is not one this lane accepts.
+fn resolve_field_path(ty: &CqlType, rest: &str) -> Result<(), String> {
+    let (step, tail) = match rest.split_once('.') {
+        Some((step, tail)) => (step, Some(tail)),
+        None => (rest, None),
+    };
+    let CqlType::Udt(udt) = ty else {
+        return Err(format!(
+            "`{step}` is a field step, but the declared type here is `{}`, which has no \
+             named fields",
+            ty.describe()
+        ));
+    };
+    let field_ty = udt
+        .fields
+        .iter()
+        .find(|(name, _)| name == step)
+        .map(|(_, t)| t)
+        .ok_or_else(|| format!("the UDT `{}` declares no field `{step}`", udt.name))?;
+    match tail {
+        Some(tail) => resolve_field_path(field_ty, tail),
+        None => Ok(()),
+    }
 }
 
 /// Run `export` for one table into `out`, returning its contents.
@@ -775,6 +825,16 @@ fn run_lane(egress: Egress) {
         }
         containers_compared += report.container_cells;
         containers_refused += report.ambiguous_container_cells;
+        // A declared gap that matched NOTHING is a stale exclusion: it no longer
+        // describes the output, so leaving it silently narrows nothing and hides
+        // the fact that the gap has closed (or was mis-stated).
+        for stale in &report.skips_never_applied {
+            failures.push(format!(
+                "{qualified}: skip_columns entry `{stale}` matched no value in the \
+                 {format} comparison — a declared gap that no longer applies must be \
+                 removed, not left standing"
+            ));
+        }
         if report.diffs.is_empty() {
             census.push(format!(
                 "  {qualified}: {} rows, {} cells compared ({} of them containers){}{}",

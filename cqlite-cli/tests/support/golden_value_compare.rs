@@ -37,8 +37,9 @@
 //! a `text` value is compared as an exact string.
 
 use super::schema::{CqlType, TableSchema, UdtType};
-use super::{canon_scalar, canon_typed, csv_container, Egress, Row};
+use super::{canon_scalar, canon_typed, csv_container, Depth, Egress, Row};
 use serde_json::{Map, Value};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +62,68 @@ pub struct Report {
     pub ambiguous_container_cells: usize,
     /// One deduplicated `column (reason)` entry per refusal cause.
     pub ambiguity_reasons: Vec<String>,
+    /// Declared skip paths that matched NOTHING in this table's walk. An
+    /// exclusion that no longer applies is a silent widening of coverage, so the
+    /// caller must treat a non-empty list as a failure.
+    pub skips_never_applied: Vec<String>,
+}
+
+/// Value paths excluded from the comparison, with a hit tally.
+///
+/// A path is fully qualified from the row: `sf` excludes a whole column, `e.home`
+/// excludes ONE field of the `frozen<employee>` in column `e` while `e.name` and
+/// `e.level` keep being compared. Whole-column granularity alone was too coarse
+/// and cost real coverage — skipping `e` for its one divergent inner field left
+/// `udt_nested` comparing nothing but its primary key (issue #1491 review finding
+/// F5).
+///
+/// Every match is recorded, so [`Self::never_applied`] turns a stale exclusion
+/// into a failure instead of a quiet gap.
+pub struct SkipPaths<'a> {
+    paths: &'a [&'a str],
+    hit: RefCell<BTreeSet<String>>,
+}
+
+impl<'a> SkipPaths<'a> {
+    pub fn new(paths: &'a [&'a str]) -> Self {
+        Self {
+            paths,
+            hit: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    /// Is this exact path excluded? Records the hit.
+    fn excludes(&self, path: &str) -> bool {
+        if self.paths.contains(&path) {
+            self.hit.borrow_mut().insert(path.to_string());
+            return true;
+        }
+        false
+    }
+
+    fn never_applied(&self) -> Vec<String> {
+        let hit = self.hit.borrow();
+        self.paths
+            .iter()
+            .filter(|p| !hit.contains(**p))
+            .map(|p| (*p).to_string())
+            .collect()
+    }
+}
+
+/// `parent` extended by a named step (a UDT field).
+fn field_path(parent: &str, step: &str) -> String {
+    if parent.is_empty() {
+        step.to_string()
+    } else {
+        format!("{parent}.{step}")
+    }
+}
+
+/// `parent` extended by a positional/keyed step (a collection member, a tuple
+/// slot, a map value).
+fn index_path(parent: &str, index: &str) -> String {
+    format!("{parent}[{index}]")
 }
 
 /// Pair rows by primary key and compare every column the committed DDL declares.
@@ -77,6 +140,7 @@ pub fn compare_rows(
     egress: Egress,
 ) -> Report {
     let mut report = Report::default();
+    let skips = SkipPaths::new(skip_columns);
     if golden.len() != cli.len() {
         report.diffs.push(format!(
             "row count: golden {} vs {egress:?} egress {}",
@@ -111,7 +175,10 @@ pub fn compare_rows(
 
         for column in &schema.columns {
             let name = column.name.as_str();
-            if skip_columns.contains(&name) {
+            // A WHOLE-column exclusion. A dotted `col.field` entry does not match
+            // here; it is applied inside the walk, so the column's other fields
+            // keep being compared.
+            if skips.excludes(name) {
                 continue;
             }
             // The CLI must render EVERY declared column. An omitted one is a
@@ -134,7 +201,7 @@ pub fn compare_rows(
             let gv = g.get(name).unwrap_or(&Value::Null);
             // CSV has no types, so a container arrives as one flat text field and
             // has to be decoded back into the golden's shape before comparison.
-            let decoded = match csv_decoded(gv, cv, egress) {
+            let decoded = match csv_decoded(gv, cv, egress, name, &skips) {
                 Ok(decoded) => decoded,
                 Err(Refusal::Ambiguous(why)) => {
                     report.ambiguous_container_cells += 1;
@@ -158,11 +225,14 @@ pub fn compare_rows(
             if matches!(gv, Value::Array(_) | Value::Object(_)) {
                 report.container_cells += 1;
             }
-            if let Err(why) = compare_value(gv, cv, egress, &column.ty) {
+            if let Err(why) =
+                compare_value_at(gv, cv, egress, &column.ty, Depth::TopLevel, name, &skips)
+            {
                 report.diffs.push(format!("row[{key}].{name}: {why}"));
             }
         }
     }
+    report.skips_never_applied = skips.never_applied();
     report
 }
 
@@ -217,7 +287,13 @@ enum Refusal {
 /// no decoding applies — the JSON lane, a scalar column, or a CSV cell that is
 /// not text (an empty field decodes to `null`, and `compare_value` is what
 /// should name that shape mismatch).
-fn csv_decoded(gv: &Value, cv: &Value, egress: Egress) -> Result<Option<Value>, Refusal> {
+fn csv_decoded(
+    gv: &Value,
+    cv: &Value,
+    egress: Egress,
+    path: &str,
+    skips: &SkipPaths<'_>,
+) -> Result<Option<Value>, Refusal> {
     if egress != Egress::Csv || !matches!(gv, Value::Array(_) | Value::Object(_)) {
         return Ok(None);
     }
@@ -227,7 +303,11 @@ fn csv_decoded(gv: &Value, cv: &Value, egress: Egress) -> Result<Option<Value>, 
     let Value::String(text) = cv else {
         return Ok(None);
     };
-    csv_container::decode(gv, text)
+    // The decoder is given the exclusion set so an EXCLUDED member is left as raw
+    // text instead of being required to invert the grammar. Without it a single
+    // excluded inner field fails the whole cell, which is what forced
+    // `udt_nested`'s exclusion to be whole-column (review finding F5).
+    csv_container::decode_at(gv, text, path, &|p: &str| skips.excludes(p))
         .map(Some)
         .map_err(Refusal::Unparseable)
 }
@@ -302,18 +382,46 @@ fn describe(value: &Value, egress: Egress) -> String {
 }
 
 /// Compare one golden value against one CLI value, under the column's DECLARED
-/// CQL type.
-///
-/// The type drives the whole walk: it says which shape each side must have and,
-/// at the leaves, which canonicalization applies. Types are threaded through
-/// nesting so a `text` map value or UDT field is compared exactly even when its
-/// content looks numeric.
+/// CQL type, with no exclusions — the entry point unit tests use.
 pub fn compare_value(
     golden: &Value,
     cli: &Value,
     egress: Egress,
     ty: &CqlType,
 ) -> Result<(), String> {
+    compare_value_at(
+        golden,
+        cli,
+        egress,
+        ty,
+        Depth::TopLevel,
+        "",
+        &SkipPaths::new(&[]),
+    )
+}
+
+/// The recursive worker.
+///
+/// The type drives the whole walk: it says which shape each side must have and,
+/// at the leaves, which canonicalization applies. Types are threaded through
+/// nesting so a `text` map value or UDT field is compared exactly even when its
+/// content looks numeric.
+///
+/// `depth` is what CSV's empty-field rule keys on (see [`super::Depth`]), and
+/// `path` is the fully-qualified position of this value in the row, which is how
+/// a `SkipPaths` entry can name one UDT field rather than a whole column.
+fn compare_value_at(
+    golden: &Value,
+    cli: &Value,
+    egress: Egress,
+    ty: &CqlType,
+    depth: Depth,
+    path: &str,
+    skips: &SkipPaths<'_>,
+) -> Result<(), String> {
+    if skips.excludes(path) {
+        return Ok(());
+    }
     // A column that is absent/null on BOTH sides, whatever its declared shape.
     if matches!(golden, Value::Null) && matches!(cli, Value::Null) {
         return Ok(());
@@ -334,7 +442,16 @@ pub fn compare_value(
                 ));
             }
             for (i, (gi, ci)) in g.iter().zip(c.iter()).enumerate() {
-                compare_value(gi, ci, egress, element).map_err(|why| format!("[{i}] {why}"))?;
+                compare_value_at(
+                    gi,
+                    ci,
+                    egress,
+                    element,
+                    Depth::Inside,
+                    &index_path(path, &i.to_string()),
+                    skips,
+                )
+                .map_err(|why| format!("[{i}] {why}"))?;
             }
             Ok(())
         }
@@ -349,25 +466,36 @@ pub fn compare_value(
                 ));
             }
             for (i, ((gi, ci), ity)) in g.iter().zip(c.iter()).zip(items.iter()).enumerate() {
-                compare_value(gi, ci, egress, ity).map_err(|why| format!("[{i}] {why}"))?;
+                compare_value_at(
+                    gi,
+                    ci,
+                    egress,
+                    ity,
+                    Depth::Inside,
+                    &index_path(path, &i.to_string()),
+                    skips,
+                )
+                .map_err(|why| format!("[{i}] {why}"))?;
             }
             Ok(())
         }
         // map: object in the dump, array of {"key","value"} pairs in the CLI (and
         // the CSV decoder produces that same pair spelling).
         CqlType::Map(key_ty, value_ty) => match (golden, cli) {
-            (Value::Object(g), Value::Array(c)) => compare_map(g, c, egress, key_ty, value_ty),
+            (Value::Object(g), Value::Array(c)) => {
+                compare_map(g, c, egress, key_ty, value_ty, path, skips)
+            }
             _ => Err(shape_error("map", golden, cli, egress)),
         },
         CqlType::Udt(udt) => match golden {
-            Value::Object(g) => compare_udt(g, cli, egress, udt),
+            Value::Object(g) => compare_udt(g, cli, egress, udt, path, skips),
             _ => Err(shape_error(&udt.name, golden, cli, egress)),
         },
         // A scalar type: both sides canonicalized UNDER THAT TYPE, so the numeric
         // rule applies only where the DDL declares a number.
         _ => {
-            let g = canon_typed(golden, egress, ty)?;
-            let c = canon_typed(cli, egress, ty)?;
+            let g = canon_typed(golden, egress, ty, depth)?;
+            let c = canon_typed(cli, egress, ty, depth)?;
             if g == c {
                 Ok(())
             } else {
@@ -403,39 +531,67 @@ fn shape_error(expected: &str, golden: &Value, cli: &Value, egress: Egress) -> S
     )
 }
 
-/// A UDT: an object in the dump; an object with an added `_type` discriminator in
-/// the JSON egress, and the `{key,value}` pair spelling once decoded from CSV.
+/// How each egress format spells a UDT, for the diagnostic.
+fn udt_spelling(egress: Egress) -> &'static str {
+    match egress {
+        Egress::Json => "a field→value JSON object",
+        Egress::Csv => "a `{key,value}` list decoded from the flat `{k: v, …}` field",
+    }
+}
+
+/// A UDT: always a field→value object in the dump. On the CLI side the accepted
+/// representation is FORMAT-SCOPED, because each format has exactly one:
 ///
-/// Field NAMES must agree between the two sides (that check is unchanged), and
-/// each name must be one the `CREATE TYPE` declares — an undeclared field name has
-/// no declared type, and a value with no declared type is never compared
-/// permissively.
+///   * **JSON** — a field→value object, plus a `_type` discriminator the CLI adds
+///     and the golden does not carry (dropped from the CLI side only). A
+///     `{key,value}` pair array is the CLI's *map* spelling, so accepting one here
+///     would let a UDT that regressed to the map representation pass; it is
+///     therefore rejected (issue #1491 review finding F3).
+///   * **CSV** — a `{key,value}` list, and only that. CSV delivers the whole cell
+///     as one flat `{k: v, …}` text carrying nothing that could distinguish a map
+///     from a UDT, so [`super::csv_container`] decodes EVERY brace-delimited body
+///     into the pair spelling. An object on this side would mean the decoder was
+///     bypassed.
+///
+/// Field NAMES must agree between the two sides, and each name must be one the
+/// `CREATE TYPE` declares — an undeclared field name has no declared type, and a
+/// value with no declared type is never compared permissively.
 fn compare_udt(
     golden: &Map<String, Value>,
     cli: &Value,
     egress: Egress,
     udt: &UdtType,
+    path: &str,
+    skips: &SkipPaths<'_>,
 ) -> Result<(), String> {
-    let c: Map<String, Value> = match cli {
-        Value::Object(fields) => fields
+    let c: Map<String, Value> = match (egress, cli) {
+        (Egress::Json, Value::Object(fields)) => fields
             .iter()
             .filter(|(k, _)| k.as_str() != "_type")
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
-        Value::Array(entries) => {
+        (Egress::Csv, Value::Array(entries)) => {
             let mut out = Map::new();
             for entry in entries {
                 let (key, value) = pair(entry, egress)?;
-                out.insert(key, value.clone());
+                let Value::String(name) = key else {
+                    return Err(format!(
+                        "udt `{}`: decoded field name {} is not a string",
+                        udt.name,
+                        brief(&describe(key, egress))
+                    ));
+                };
+                out.insert(name.clone(), value.clone());
             }
             out
         }
-        other => {
+        (_, other) => {
             return Err(format!(
-                "the schema declares the UDT `{}`, but the cli value {} is neither an \
-                 object nor a {{key,value}} list",
+                "the schema declares the UDT `{}`, but the {egress:?} egress value {} is not \
+                 {}",
                 udt.name,
-                brief(&describe(other, egress))
+                brief(&describe(other, egress)),
+                udt_spelling(egress)
             ))
         }
     };
@@ -463,13 +619,29 @@ fn compare_udt(
                 )
             })?;
         let cv = c.get(field).unwrap_or(&Value::Null);
-        compare_value(gv, cv, egress, field_ty).map_err(|why| format!(".{field} {why}"))?;
+        compare_value_at(
+            gv,
+            cv,
+            egress,
+            field_ty,
+            Depth::Inside,
+            &field_path(path, field),
+            skips,
+        )
+        .map_err(|why| format!(".{field} {why}"))?;
     }
     Ok(())
 }
 
-/// One `{"key":…,"value":…}` entry of the CLI's map/UDT spelling.
-fn pair(entry: &Value, egress: Egress) -> Result<(String, &Value), String> {
+/// One `{"key":…,"value":…}` entry of the CLI's map/UDT spelling, with the key
+/// left as the RAW value.
+///
+/// Deliberately does NOT stringify the key: doing so applied a text projection
+/// before the declared key type could be applied, so a `map<text,…>` golden key
+/// `"0"` compared equal to an incorrectly emitted JSON numeric key `0` — defeating
+/// the typed comparison in the one place a map most needs it (issue #1491 review
+/// finding F2).
+fn pair<'v>(entry: &'v Value, egress: Egress) -> Result<(&'v Value, &'v Value), String> {
     let object = entry.as_object().ok_or_else(|| {
         format!(
             "cli map entry is not an object: {}",
@@ -484,38 +656,58 @@ fn pair(entry: &Value, egress: Egress) -> Result<(String, &Value), String> {
     }
     let key = object.get("key").unwrap_or(&Value::Null);
     let value = object.get("value").unwrap_or(&Value::Null);
-    let key = match key {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
     Ok((key, value))
+}
+
+/// Is this a type whose values are single scalars? Map keys are paired by their
+/// canonical scalar form, so a container key has no pairing rule here.
+fn is_scalar_type(ty: &CqlType) -> bool {
+    !matches!(
+        ty,
+        CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_) | CqlType::Udt(_)
+    )
 }
 
 /// Compare a map: golden object vs the CLI's `{key,value}` pair list, paired by a
 /// key canonicalized UNDER THE DECLARED KEY TYPE — so a `map<int,…>` pairs the
 /// golden's `"-5"` with the CLI's `-5`, while a `map<text,…>` compares its keys
-/// exactly.
+/// exactly AND by JSON kind, so a numeric key `0` does not satisfy the golden's
+/// `"0"`.
+///
+/// The golden's keys are JSON object keys, hence always strings; the CLI's keep
+/// whatever kind the egress gave them. Both go through the same
+/// `canon_typed(…, key_ty, …)`, which is what makes the kind comparison possible.
 fn compare_map(
     golden: &Map<String, Value>,
     cli: &[Value],
     egress: Egress,
     key_ty: &CqlType,
     value_ty: &CqlType,
+    path: &str,
+    skips: &SkipPaths<'_>,
 ) -> Result<(), String> {
-    let canon_key = |v: &Value| -> String {
-        match canon_typed(v, egress, key_ty) {
-            Ok(canon) => canon.describe(),
-            Err(why) => format!("<{why}>"),
-        }
+    if !is_scalar_type(key_ty) {
+        return Err(format!(
+            "the schema declares the map key type `{}`, which is not a scalar — this lane \
+             pairs map keys by their canonical scalar form and has no rule for a container \
+             key",
+            key_ty.describe()
+        ));
+    }
+    // A key canonicalization FAILURE is propagated, never folded into the sort
+    // key: a `<reason>` string would still pair with an identical `<reason>` on
+    // the other side and compare equal.
+    let canon_key = |v: &Value| -> Result<String, String> {
+        canon_typed(v, egress, key_ty, Depth::Inside).map(|canon| canon.describe())
     };
-    let mut g: Vec<(String, &Value)> = golden
-        .iter()
-        .map(|(k, v)| (canon_key(&Value::String(k.clone())), v))
-        .collect();
-    let mut c: Vec<(String, &Value)> = Vec::new();
+    let mut g: Vec<(String, &Value)> = Vec::with_capacity(golden.len());
+    for (k, v) in golden {
+        g.push((canon_key(&Value::String(k.clone()))?, v));
+    }
+    let mut c: Vec<(String, &Value)> = Vec::with_capacity(cli.len());
     for entry in cli {
         let (key, value) = pair(entry, egress)?;
-        c.push((canon_key(&Value::String(key)), value));
+        c.push((canon_key(key)?, value));
     }
     if g.len() != c.len() {
         return Err(format!("map size golden {} vs cli {}", g.len(), c.len()));
@@ -526,7 +718,16 @@ fn compare_map(
         if gk != ck {
             return Err(format!("map key golden {gk} vs cli {ck}"));
         }
-        compare_value(gv, cv, egress, value_ty).map_err(|why| format!("[{gk}] {why}"))?;
+        compare_value_at(
+            gv,
+            cv,
+            egress,
+            value_ty,
+            Depth::Inside,
+            &index_path(path, gk),
+            skips,
+        )
+        .map_err(|why| format!("[{gk}] {why}"))?;
     }
     Ok(())
 }

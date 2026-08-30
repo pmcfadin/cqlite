@@ -137,6 +137,23 @@ pub enum Egress {
     Csv,
 }
 
+/// Where a value sits inside its column's value tree.
+///
+/// Needed because CSV's empty-field ambiguity is a property of the FIELD, not of
+/// the value. At the top level the writer has exactly one spelling — an empty
+/// field — for both an absent value and an empty `text`, so the two are genuinely
+/// indistinguishable. One level in that is no longer true: `ValueFormatter` spells
+/// a null member `null`, so `{last_name: }` and `{last_name: null}` are DIFFERENT
+/// renderings, and collapsing empty onto null there would accept a member the
+/// format can perfectly well tell apart (issue #1491 review finding F1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Depth {
+    /// The whole CSV field / the whole JSON column value.
+    TopLevel,
+    /// A collection member, a map key or value, a UDT field, a tuple slot.
+    Inside,
+}
+
 /// A canonical scalar: the unit of value equality.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Canon {
@@ -152,16 +169,20 @@ impl Canon {
     /// The CSV projection: CSV carries no JSON kinds, so a boolean is compared as
     /// its text spelling and numbers stay numeric (`1` == `"1"`).
     ///
-    /// An EMPTY string collapses onto `null`, because CSV cannot distinguish them:
-    /// the CLI writes an absent value as an empty field and an empty `text` value
-    /// as the same empty field. Cassandra's own CSV egress (`cqlsh COPY TO`) has
-    /// exactly this ambiguity, so it is a property of the format, not of CQLite —
-    /// and the JSON lane keeps the distinction strict (`null` vs `""`), so it is
-    /// still asserted somewhere.
-    fn for_csv(self) -> Canon {
+    /// At [`Depth::TopLevel`] an EMPTY string collapses onto `null`, because the
+    /// format cannot distinguish them: the CLI writes an absent value as an empty
+    /// field and an empty `text` value as the same empty field. Cassandra's own
+    /// CSV egress (`cqlsh COPY TO`) has exactly this ambiguity, so it is a
+    /// property of the format, not of CQLite — and the JSON lane keeps the
+    /// distinction strict (`null` vs `""`), so it is still asserted somewhere.
+    ///
+    /// At [`Depth::Inside`] the collapse is NOT applied: a container member has a
+    /// distinct `null` spelling, so an empty member and a null member are
+    /// different values and must compare as such (review finding F1).
+    fn for_csv(self, depth: Depth) -> Canon {
         match self {
             Canon::Bool(b) => Canon::Text(b.to_string()),
-            Canon::Text(t) if t.is_empty() => Canon::Null,
+            Canon::Text(t) if t.is_empty() && depth == Depth::TopLevel => Canon::Null,
             other => other,
         }
     }
@@ -207,7 +228,10 @@ pub fn canon_scalar(v: &Value, egress: Egress) -> Result<Canon, String> {
     };
     Ok(match egress {
         Egress::Json => canon,
-        Egress::Csv => canon.for_csv(),
+        // The permissive TopLevel projection: this is the ORDERING/diagnostic
+        // path, where collapsing empty onto null can only affect a sort position
+        // or a message, never a verdict.
+        Egress::Csv => canon.for_csv(Depth::TopLevel),
     })
 }
 
@@ -219,7 +243,7 @@ pub fn canon_scalar(v: &Value, egress: Egress) -> Result<Canon, String> {
 /// exact string it is. A JSON number arriving in a text-typed column is
 /// canonicalized as a number precisely so that it compares UNEQUAL to the golden's
 /// string and the failure message names both kinds.
-pub fn canon_typed(v: &Value, egress: Egress, ty: &CqlType) -> Result<Canon, String> {
+pub fn canon_typed(v: &Value, egress: Egress, ty: &CqlType, depth: Depth) -> Result<Canon, String> {
     let canon = match v {
         Value::Null => Canon::Null,
         Value::Bool(b) => Canon::Bool(*b),
@@ -254,7 +278,7 @@ pub fn canon_typed(v: &Value, egress: Egress, ty: &CqlType) -> Result<Canon, Str
     };
     Ok(match egress {
         Egress::Json => canon,
-        Egress::Csv => canon.for_csv(),
+        Egress::Csv => canon.for_csv(depth),
     })
 }
 
@@ -757,7 +781,7 @@ mod tests {
     }
 
     fn canon(v: &Value, ty: &CqlType) -> Canon {
-        match canon_typed(v, Egress::Json, ty) {
+        match canon_typed(v, Egress::Json, ty, Depth::TopLevel) {
             Ok(canon) => canon,
             Err(why) => panic!("{why}"),
         }
@@ -861,8 +885,42 @@ mod tests {
     /// coerced.
     #[test]
     fn a_container_in_a_scalar_position_is_an_error() {
-        let why = canon_typed(&json!([1, 2]), Egress::Json, &int())
+        let why = canon_typed(&json!([1, 2]), Egress::Json, &int(), Depth::TopLevel)
             .expect_err("a container where the DDL says int must not canonicalize");
         assert!(why.contains("int"), "{why}");
+    }
+
+    /// Review finding F1, pinned from both sides.
+    ///
+    /// A TOP-LEVEL CSV field genuinely cannot distinguish an absent value from an
+    /// empty `text` — the writer emits an empty field for both — so the two
+    /// canonicalize alike. INSIDE a container the format spells a null member
+    /// `null`, so an empty member and a null member are different renderings and
+    /// must NOT canonicalize alike; collapsing them there made a null UDT field
+    /// pass even if the CLI rendered it as empty text.
+    #[test]
+    fn the_csv_empty_field_rule_stops_at_the_top_level() {
+        let empty = json!("");
+        let null = json!(null);
+        assert_eq!(
+            canon_typed(&empty, Egress::Csv, &text(), Depth::TopLevel).expect("empty text"),
+            canon_typed(&null, Egress::Csv, &text(), Depth::TopLevel).expect("null"),
+            "a top-level CSV field has one spelling for both, so they must compare alike"
+        );
+        assert_ne!(
+            canon_typed(&empty, Egress::Csv, &text(), Depth::Inside).expect("empty member"),
+            canon_typed(&null, Egress::Csv, &text(), Depth::Inside).expect("null member"),
+            "inside a container `{{f: }}` and `{{f: null}}` are distinguishable, so an \
+             empty member must not canonicalize onto null"
+        );
+        // JSON keeps the distinction at every depth, which is what makes the CSV
+        // top-level collapse a format property rather than a lost assertion.
+        for depth in [Depth::TopLevel, Depth::Inside] {
+            assert_ne!(
+                canon_typed(&empty, Egress::Json, &text(), depth).expect("empty text"),
+                canon_typed(&null, Egress::Json, &text(), depth).expect("null"),
+                "JSON distinguishes `\"\"` from `null` at {depth:?}"
+            );
+        }
     }
 }
