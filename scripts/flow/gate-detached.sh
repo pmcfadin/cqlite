@@ -873,8 +873,23 @@ while [ "$_i" -lt 40 ]; do
       0|2) _hb_seen=1; break ;;   # COMPLETE or RUNNING — the reader can answer about this run
     esac
   fi
-  # If the unit already died, stop waiting — the log will say why.
-  systemctl --user is-active --quiet "$UNIT" 2>/dev/null || break
+  # If the unit already died, stop waiting — but take ONE SETTLED SNAPSHOT first (roborev job 213).
+  # A fast gate (a preflight refusal, a tiny `--only`) can publish its terminal summary and exit in
+  # the window between the artifact reads above and this check. `_new_rid` was then still empty, the
+  # post-loop terminal check is guarded on it, and a launch that had actually produced a verdict was
+  # REFUSED — and its unit stopped — on the grounds that no heartbeat appeared. Once the unit is
+  # inactive the artifacts can no longer change, so re-deriving here races nothing.
+  if ! systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+    if [ -z "$_new_rid" ]; then
+      for _src in "$_hbdest" "$SUMMARY"; do
+        if grep -qxF "launch-nonce: $LAUNCH_NONCE" "$_src" 2>/dev/null; then
+          _cur=$(grep -m1 '^run-id: ' "$_src" 2>/dev/null || true)
+          [ -n "$_cur" ] && { _new_rid="${_cur#run-id: }"; break; }
+        fi
+      done
+    fi
+    break
+  fi
   sleep 0.5
   _i=$((_i + 1))
 done

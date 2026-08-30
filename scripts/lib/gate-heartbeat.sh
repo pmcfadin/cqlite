@@ -169,6 +169,17 @@ _beat() {
   # beat — once every 20s, for the whole run — truncate an arbitrary file writable by the
   # gate user. `mktemp` creates with O_EXCL|O_CREAT and mode 0600, so it cannot follow a
   # planted symlink and cannot collide.
+  # `mv -f "$tmp" "$FILE"` treats a DIRECTORY — or a symlink to one — as a destination DIRECTORY, so
+  # it would SUCCEED while depositing a new random temp file inside it every interval (roborev job
+  # 213). Liveness stays unreadable, every poll answers UNKNOWN, and the accumulating files can fail
+  # the gate's own tree-integrity check. Checked before EVERY publish, not once at startup, because a
+  # directory can appear at that path mid-run.
+  if [ -d "$FILE" ]; then
+    echo "gate-heartbeat: the heartbeat destination '$FILE' is a directory (or a symlink to one)," >&2
+    echo "                so publishing by rename would drop a temp file INSIDE it every beat and" >&2
+    echo "                liveness would never be readable. Refusing to publish (#3473)." >&2
+    return 1
+  fi
   tmp=$(mktemp "$FILE.tmp.XXXXXX" 2>/dev/null) || return 1
   TMP_PATH="$tmp"
   {

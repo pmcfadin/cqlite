@@ -1472,6 +1472,52 @@ mk_beat "$TMP/sup2.txt.heartbeat" run-SAME 4000 20
 expect_reader "11n.7 control: matching run-id + stale beat => COMPLETE" \
   COMPLETE 0 "terminal verdict" -- "$TMP/sup2.txt"
 
+echo "=== section 11o: the beater refuses a DIRECTORY destination (job 213) ==="
+# `mv -f "$tmp" "$FILE"` treats a directory — or a symlink to one — as a destination DIRECTORY, so it
+# SUCCEEDS while dropping a new random temp file inside it every interval. Liveness is never readable,
+# every poll answers UNKNOWN, and the accumulating files can fail the gate's own tree-integrity check.
+# Measured before the fix: 6 files deposited in 6 seconds at interval 1.
+#
+# NO `timeout` here: 11c.13 forbids it (stock macOS has no timeout(1)) and caught the first version of
+# this section. The beater deliberately does NOT exit on a bad destination — it re-checks before every
+# publish so it RECOVERS if the directory is removed — so the run has to be bounded by the suite, with
+# the background+poll+kill pattern used elsewhere in this file.
+_beat_bounded() {  # <dest> <run-id> <errfile> <watch-path>: run the beater briefly, then stop it
+  bash "$BEATER" --file "$1" --run-id "$2" --gate-pid $$ --interval 1 </dev/null >/dev/null 2>"$3" &
+  _bb_pid=$!
+  remember_pid "$_bb_pid"
+  # Bounded: break as soon as there is something to judge, so a broken beater fails a case instead
+  # of hanging the suite.
+  for _bb_i in {1..20}; do
+    [ -s "$3" ] && break
+    [ -n "$4" ] && [ -e "$4" ] && break
+    sleep 0.5
+  done
+  kill "$_bb_pid" 2>/dev/null || true
+  wait "$_bb_pid" 2>/dev/null || true
+}
+_dd="$TMP/dirdest.txt"; mkdir -p "$_dd.heartbeat"
+_beat_bounded "$_dd.heartbeat" dirprobe "$TMP/dirdest.err" ""
+_deposited=$(ls -1 "$_dd.heartbeat" 2>/dev/null | wc -l | tr -d ' ')
+[ "$_deposited" = 0 ] && ok "11o.1 a directory destination receives NO deposited temp files" \
+                      || bad "11o.1 a directory destination receives no deposited files" "$_deposited file(s) inside"
+grep -q 'is a directory' "$TMP/dirdest.err" 2>/dev/null \
+  && ok "11o.2 ...and the refusal says why" \
+  || bad "11o.2 the refusal says why" "$(head -1 "$TMP/dirdest.err" 2>/dev/null)"
+# A SYMLINK to a directory is the same trap in a different shape.
+_ds="$TMP/dirsym.txt"; mkdir -p "$TMP/realdir"; ln -s "$TMP/realdir" "$_ds.heartbeat"
+_beat_bounded "$_ds.heartbeat" symprobe "$TMP/dirsym.err" ""
+_dep2=$(ls -1 "$TMP/realdir" 2>/dev/null | wc -l | tr -d ' ')
+[ "$_dep2" = 0 ] && ok "11o.3 a SYMLINK to a directory is refused too" \
+                 || bad "11o.3 a symlink to a directory is refused too" "$_dep2 file(s) inside"
+# CONTROL: an ordinary file destination must still be published, or every case above would be
+# satisfied by a beater that refuses everything.
+_dok="$TMP/dirok.txt"
+_beat_bounded "$_dok.heartbeat" okprobe "$TMP/dirok.err" "$_dok.heartbeat"
+grep -q '^run-id: okprobe$' "$_dok.heartbeat" 2>/dev/null \
+  && ok "11o.4 control: an ordinary file destination IS still published" \
+  || bad "11o.4 control: an ordinary file destination is still published" "no beat at $_dok.heartbeat"
+
 echo
 echo "==== test_gate_liveness.sh: passed=$pass failed=$fail ===="
 [ "$fail" -eq 0 ] || exit 1

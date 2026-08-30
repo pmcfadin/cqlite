@@ -1319,6 +1319,40 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# --- roborev job 213: a gate that finishes FAST must not be refused ------------------------------
+# The verification loop broke the moment the unit went inactive. A fast gate (a preflight refusal, a
+# tiny `--only`) can publish its terminal summary and exit in the window between the artifact reads
+# and that check, leaving `_new_rid` empty — and the post-loop terminal check is guarded on it, so a
+# launch that HAD produced a verdict was refused and its unit stopped. Once the unit is inactive the
+# artifacts cannot change, so one settled re-derivation races nothing.
+if grep -q 'SETTLED SNAPSHOT' "$LAUNCHER" \
+   && sed -n '/if ! systemctl --user is-active --quiet "\$UNIT"/,/^  fi$/p' "$LAUNCHER" | grep -q '_new_rid='; then
+  ok "4b.124 the inactive-unit branch re-derives the run-id from a settled snapshot"
+else
+  bad "4b.124 the inactive-unit branch re-derives from a settled snapshot" "a fast gate can still be refused"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  # `--only fmt` is the fastest component available, i.e. the shape most likely to finish before any
+  # beat is published. It must be ACCEPTED, and must reach a terminal verdict.
+  _ft="$TMP/fast.txt"
+  _fo=$(bash "$LAUNCHER" --summary "$_ft" --log "$TMP/fast.log" -- --only fmt 2>&1); _fr=$?
+  _fu=$(printf '%s' "$_fo" | sed -n 's/^unit:  *//p'); [ -n "$_fu" ] && echo "$_fu" >> "$UNITS_FILE"
+  if [ "$_fr" = 0 ]; then
+    ok "4b.125 a very fast gate is ACCEPTED, not refused as unmonitorable"
+  else
+    bad "4b.125 a very fast gate is accepted" "exit $_fr: $_fo"
+  fi
+  for _i in {1..40}; do grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null && break; sleep 1; done
+  if grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$_ft" 2>/dev/null; then
+    ok "4b.126 ...and it reached a terminal verdict ($(sed -n 's/^RESULT: //p' "$_ft" | head -1))"
+  else
+    bad "4b.126 a very fast gate reached a terminal verdict" "no RESULT in $_ft"
+  fi
+  [ -n "$_fu" ] && systemctl --user stop "$_fu" >/dev/null 2>&1
+else
+  skip=$((skip+2)); echo "SKIP 4b.125/4b.126 (no user systemd manager on this host)"
+fi
+
 # --- roborev job 211 (High): the USER MANAGER's environment is a third channel ------------------
 # A `--user` transient unit inherits the user manager's environment block, so anything
 # `systemctl --user set-environment` holds reaches the gate. The caller-side deny-list cannot see
@@ -1349,7 +1383,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   _lu=$(printf '%s' "$_lo" | sed -n 's/^unit:  *//p'); [ -n "$_lu" ] && echo "$_lu" >> "$UNITS_FILE"
   _cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/app.slice/$_lu.service/cgroup.procs"
   _gp=""
-  for _i in $(seq 1 60); do
+  for _i in {1..60}; do
     _gp=$(head -1 "$_cg" 2>/dev/null)
     [ -n "$_gp" ] && [ -r "/proc/$_gp/environ" ] && break
     _gp=""
