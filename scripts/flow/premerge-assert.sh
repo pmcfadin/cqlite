@@ -17,14 +17,29 @@
 # is the real guard.
 #
 # #3465 adds the OTHER half. Verifying that the PR head equals a *claimed*
-# certified sha never verified that a certified sha EXISTS. PR #3408 merged with
-# NO full gate of record at all — 22 `--lite` PASSes and not one
-# `scripts/agent-gate.sh` run — because nothing in the merge path ever asked for
-# the full `==== AGENT-GATE SUMMARY ====` block. The gate-of-record convention
-# was honour-system doctrine; this script is the one point every merge passes
-# through, so the convention becomes a mechanism here: a summary file carrying a
-# FULL-gate block with `RESULT: PASS`, `tree-integrity: PASS`, and provenance
-# (`commit:` + `tree-start:`) matching the certified sha is now REQUIRED.
+# certified sha never verified that a certified sha EXISTS. The gate-of-record
+# convention was honour-system doctrine; this script is the one point every merge
+# passes through, so the convention becomes a mechanism here: a summary file
+# carrying a FULL-gate block with `RESULT: PASS`, `tree-integrity: PASS`, and
+# provenance (`commit:` + `tree-start:`) matching the certified sha is REQUIRED.
+#
+# TWO DISTINCT ESCAPES, ONE MECHANISM
+#   * #3408 — NO GATE AT ALL. That PR merged on 22 `--lite` PASSes and not one
+#     `scripts/agent-gate.sh` run, because nothing in the merge path ever asked
+#     for the full `==== AGENT-GATE SUMMARY ====` block. Refused here by the
+#     block/marker/RESULT checks: lite and delta emit DISTINCT headers.
+#   * #3616 — A REAL GATE, SOMEONE ELSE'S. A closer located its gate run dir by
+#     RECENCY (`ls -t /tmp/agent-gate.*`), read a PEER LANE's run dir, saw 33 of
+#     37 components PASS, and was about to merge #3616 on PR #3580's verdict. The
+#     count was real, the dir was real, the timestamps were plausible; only the
+#     `run-id:` line exposed it, and only because a human read it. With
+#     14000-27000 stale run dirs per box and up to 4 concurrent gates, recency
+#     picks a peer ROUTINELY. This is what the `commit:` + `tree-start:` binding
+#     below refuses: a peer's summary for a different PR carries THAT PR's branch
+#     head, so requiring both abbreviations to match the certified sha turns a
+#     cross-lane verdict from "a human might notice the run-id line" into a
+#     mechanical refusal at the merge point. The sha comparison is therefore not
+#     bookkeeping — it is the guard for the #3616 class.
 #
 # The gate-summary argument is deliberately REQUIRED, not optional: an optional
 # argument would leave the honour system exactly where it is. Omitting it is a
@@ -41,7 +56,10 @@
 #  1. `run-id:` CANNOT be verified here. The #2874 reader contract says a reader
 #     must confirm the summary's `run-id:` matches the run IT launched — this
 #     script did not launch the gate, so it has nothing to compare against. It
-#     therefore does not look at `run-id:` at all rather than pretend to.
+#     therefore does not look at `run-id:` at all rather than pretend to. That is
+#     precisely why the `commit:`/`tree-start:` binding carries the weight for the
+#     #3616 cross-lane class above: it is the only property of a peer's summary
+#     this script CAN falsify without having launched the run.
 #  2. This assert proves a summary EXISTS claiming a full-gate PASS at this sha
 #     with an intact tree. It cannot prove that summary was produced by a
 #     genuine gate run rather than hand-written. A HOSTILE INVOKER IS OUT OF THE
@@ -308,7 +326,9 @@ fi
 # equality against the 40-hex certified sha. Compare each value at ITS OWN exact
 # width, using the value's own length — never a glob, never `case $x in $y*)`,
 # never a fixed assumed width. BOTH must match: two independent widths off one
-# verified capture is materially stronger than one 7-hex compare. A non-hex value
+# verified capture is materially stronger than one 7-hex compare — and this pair
+# is what refuses the #3616 cross-lane class (a peer lane's perfectly valid
+# summary, recovered by recency, naming a DIFFERENT PR's head). A non-hex value
 # ("(not captured)", "(capture unavailable — no git worktree)", "selftest",
 # "unverified") REFUSES — it is never skipped.
 assert_sha_prefix() {

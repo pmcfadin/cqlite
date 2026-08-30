@@ -985,8 +985,17 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   to merge unless the PR head still equals the certified SHA **AND** a gate of record exists for it —
   and re-reads comments for a fresh `HOLD:` order. **The third argument is REQUIRED, and that is the
   #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
-  certified sha EXISTS, so PR #3408 merged on 22 `--lite` PASSes and not one full
-  `scripts/agent-gate.sh` run. The script now requires the summary file to hold exactly ONE
+  certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
+  22 `--lite` PASSes and not one full `scripts/agent-gate.sh` run, because nothing in the merge path
+  ever asked for the block). #3616 = **a real gate, someone else's** — a closer located its run dir by
+  RECENCY (`ls -t /tmp/agent-gate.*`), read a PEER LANE's dir, saw 33 of 37 components PASS and was
+  about to merge #3616 on PR #3580's verdict; the count, the dir and the timestamps were all real, and
+  only the `run-id:` line exposed it, read by a human. With 14000-27000 stale run dirs per box and up
+  to 4 concurrent gates, recency picks a peer ROUTINELY. **That second class is what the
+  `commit:`+`tree-start:` binding refuses**: a peer's summary carries the OTHER PR's branch head, so
+  requiring both abbreviations to match the certified sha converts "a human might notice the `run-id:`
+  line" into a mechanical refusal at the merge point — the sha compare is the guard, not bookkeeping.
+  The script now requires the summary file to hold exactly ONE
   `==== AGENT-GATE SUMMARY ====` block (whole-line-anchored; `--lite`/`--delta` headers are distinct
   and refused by name, as is a second or unterminated block) with `RESULT: PASS` and
   `tree-integrity: PASS` compared **token-exactly** (`INCOMPLETE` is the launch sentinel, not a

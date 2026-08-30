@@ -88,7 +88,14 @@ carry).
   `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`, `tree-integrity: PASS`, and
   `commit:`/`tree-start:` matching the certified sha. A `--lite` or `--delta` summary is refused by
   name (their headers are distinct by construction), which is exactly the PR #3408 escape: 22 lite
-  PASSes and no full gate.
+  PASSes and no full gate. **The sha half of the same check closes a second, different escape (PR
+  #3616): a real gate, someone else's.** A closer located its gate run dir by recency
+  (`ls -t /tmp/agent-gate.*`), read a PEER LANE's dir, saw 33 of 37 components PASS and was about to
+  merge #3616 on PR #3580's verdict — everything about it was real, and only the `run-id:` line
+  exposed it, read by a human. `premerge-assert.sh` cannot verify `run-id:` (it did not launch the
+  gate, and #2874's reader contract belongs to whoever did), so requiring BOTH `commit:` (7 hex) and
+  `tree-start:` (12 hex) to match the certified sha is what turns a cross-lane verdict into a
+  mechanical refusal: a peer's summary names the OTHER PR's head.
 - **Break-glass is per-tier, and it actually works.** `ci:waive:<tier-id>` (an owner action) excuses a
   tier that is **absent** or **pending at the deadline**; it can **never** excuse a failed or cancelled
   one, and there is no blanket waiver. The label takes effect without a re-run: `required` re-reads the

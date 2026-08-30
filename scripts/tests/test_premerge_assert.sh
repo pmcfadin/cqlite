@@ -310,8 +310,24 @@ refused "no RESULT: line -> refuse" "$T/no-result.txt" "no 'RESULT:' line"
 full_summary "$T/no-ti.txt" "$C7" "$C12" "-" PASS
 refused "no tree-integrity: line -> refuse" "$T/no-ti.txt" "no 'tree-integrity:' line"
 
-# --- Case 18: commit: / tree-start: mismatch -> refuse ----------------------
-# Each is compared at ITS OWN width (7 and 12), against a DIFFERENT sha here.
+# --- Case 18: commit: / tree-start: mismatch -> refuse (the #3616 class) -----
+# This is the OTHER motivating escape, distinct from #3408's "no gate at all":
+# #3616 = "a real gate, someone else's". A closer located its run dir by RECENCY
+# (`ls -t /tmp/agent-gate.*`), read a PEER LANE's dir, saw 33/37 components PASS
+# and was about to merge #3616 on PR #3580's verdict — the count, the dir and the
+# timestamps were all real, and only the `run-id:` line (read by a human) exposed
+# it. premerge-assert cannot verify `run-id:` (it did not launch the gate), so the
+# sha binding is what makes a cross-lane verdict a mechanical refusal.
+# Each abbreviation is compared at ITS OWN width (7 and 12), against a DIFFERENT
+# sha here.
+#
+# First the composite #3616 shape: a fully well-formed FULL block, RESULT: PASS,
+# tree-integrity: PASS, everything a genuine gate of record has — except that its
+# provenance names a peer PR's head throughout.
+full_summary "$T/peer-lane.txt" "ca8eb01" "ca8eb016def1" PASS PASS
+refused "#3616: a valid full-gate PASS naming a PEER LANE's sha -> refuse" \
+  "$T/peer-lane.txt" "does not match the certified sha"
+# ...and the single-field variants, which is where the two independent widths pay.
 full_summary "$T/commit-mismatch.txt" "ca8eb01" "$C12" PASS PASS
 refused "commit: mismatch (7 hex of a different sha) -> refuse" \
   "$T/commit-mismatch.txt" "'commit:' value 'ca8eb01' does not match"

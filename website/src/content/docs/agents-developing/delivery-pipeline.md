@@ -129,10 +129,17 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary-file>` — which asserts the PR is
   OPEN and its `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a
   loud refusal) on a moved head, a closed/merged PR, or a gh failure.
-  **The third argument is REQUIRED (#3465).** Verifying the head against a *claimed* certified sha
-  never verified that a certified sha EXISTS — PR #3408 merged on 22 `--lite` PASSes and no full
-  `scripts/agent-gate.sh` run at all, because nothing in the merge path ever asked for the gate of
-  record. It is now asked for here, at the one point every merge passes through: the summary file must
+  **The third argument is REQUIRED (#3465), and it closes TWO distinct escapes with one mechanism.**
+  Verifying the head against a *claimed* certified sha never verified that a certified sha EXISTS.
+  **#3408 = no gate at all**: it merged on 22 `--lite` PASSes and no full `scripts/agent-gate.sh` run,
+  because nothing in the merge path ever asked for the gate of record. **PR #3616 = a real gate,
+  someone else's**: a closer located its run dir by RECENCY (`ls -t /tmp/agent-gate.*`), read a PEER
+  LANE's dir, saw 33 of 37 components PASS, and was about to merge #3616 on PR #3580's verdict — the
+  count, the dir and the timestamps were all real, and only the `run-id:` line exposed it, read by a
+  human. With 14000-27000 stale run dirs per box and up to 4 concurrent gates, recency picks a peer
+  routinely. This script **cannot** verify `run-id:` (see below), so the `commit:`+`tree-start:`
+  binding is what makes that class a mechanical refusal: a peer's summary carries the OTHER PR's
+  branch head. It is now asked for here, at the one point every merge passes through: the summary file must
   hold exactly ONE whole-line-anchored `==== AGENT-GATE SUMMARY ====` block (`--lite`/`--delta` emit
   distinct headers and are refused by name; a second or unterminated block is ambiguous and also
   refused) with `RESULT: PASS` and `tree-integrity: PASS` compared **token-exactly** — `INCOMPLETE` is
