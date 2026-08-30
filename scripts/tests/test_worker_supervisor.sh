@@ -5001,39 +5001,48 @@ legacy_lock_drive_errexit_override() {
     bash -c "$SV_DRIVE_BODY_ERREXIT_OVERRIDE" _ "$SUPERVISOR" "$override" 2>&1
 }
 
-# legacy_state_drive_errexit <legacy-path> [override-file] — call the classifier from a shell with
+# legacy_presence_drive_errexit <legacy-path> [override-file] — call the PROBE from a shell with
 # `set -e` AND `inherit_errexit`, through a BARE assignment with no `||` after it. That caller shape is
-# the one that EXPOSES an abort: bash suppresses errexit for a command that is part of an `&&`/`||` list,
-# and that suppression is inherited by the substitution — so the guard's own fail-closed
-# `… || state=…` fallback makes the classifier's internals unobservable from the guard. Reading the
-# classifier directly is therefore the only place the `|| true` fixes can be measured.
-# It also reports the caller's `dotglob`/`nullglob` AFTER the call, which is the other half of the
-# finding: an abort between `shopt -s` and the restore leaves the caller's globbing changed.
-legacy_state_drive_errexit() {
+# the one that EXPOSES an abort: bash suppresses errexit for a command that is part of an `&&`/`||`
+# list, and that suppression is inherited by the substitution — so the guard's own fail-closed
+# `… || state=…` fallback makes the probe's internals unobservable from the guard. Reading the probe
+# directly is therefore the only place a non-aborting internal can be measured.
+# It also reports the caller's `dotglob`/`nullglob` AFTER the call: the DELETED classifier pinned and
+# restored them, and the probe must not touch them at all.
+legacy_presence_drive_errexit() {
   local legacy="$1" override="${2:-}"
   bash -c '
     source "$1"
     [[ -z "$3" ]] || source "$3"
     set -e
     shopt -s inherit_errexit 2>/dev/null || { printf "ERREXIT_UNAVAILABLE\n"; exit 97; }
-    st="$(supervisor_legacy_lock_state "$2")"
+    st="$(supervisor_legacy_lock_presence "$2")"
     printf "STATE=[%s]\n" "$st"
     printf "OPTS=[%s|%s]\n" "$(shopt -p dotglob || true)" "$(shopt -p nullglob || true)"
   ' _ "$SUPERVISOR" "$legacy" "$override" 2>&1
 }
 
-test_legacy_global_lock_refuses_live_holder() {
-  local d tmp lane legacy live out rc control crc derived
+# ---------------------------------------------------------------------------
+# (#3549, lead ruling) PRESENCE REFUSES, AND THE REFUSAL DOES NOT DEPEND ON WHAT IS THERE.
+#
+# The classifier that used to read the lock is DELETED, so the property under test changed shape: it is
+# no longer "each state gets its own cause and its own remedy" but "EVERY object at that path produces
+# the SAME refusal". That is the assertion the deletion is worth: a wording that varied with the lock's
+# contents was the only consumer of the parsing, and any variation reappearing here means the parsing
+# came back. So the shape list below is no longer a cause-token table — it is a UNIFORMITY table.
+# ---------------------------------------------------------------------------
+test_legacy_global_lock_refuses_a_present_lock() {
+  local d tmp lane legacy live out rc control crc derived shape dead first_detail detail
   d="$(new_case_dir)"
   common_env "$d"
-  tmp="$d/tmp"; lane="lane3549live$$"
+  tmp="$d/tmp"; lane="lane3549present$$"
   mkdir -p "$tmp"
   legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
 
   # NON-VACUITY 1: the collision this guard prevents is REAL — the derived per-lane path and the
   # legacy global path genuinely DIFFER for this LANE_ID, so a refusal cannot be coming from the
   # per-lane lock. (This is the whole reason the old lock is invisible to the new one.)
-  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
   if [[ "$derived" != "$legacy" ]]; then
     pass "legacy-lock NON-VACUITY: the derived per-lane path differs from the legacy global path (the collision is real, and no refusal below can come from the per-lane lock)"
   else
@@ -5051,7 +5060,7 @@ test_legacy_global_lock_refuses_live_holder() {
   fi
   rm -rf "$derived"
 
-  # AC1, with a REAL live pid.
+  # AC1, with a REAL live holder pid — the strongest form of "something is there".
   fixture_bg sleep 300
   live=$FIXTURE_LAST_PID
   mkdir -p "$legacy"
@@ -5059,92 +5068,172 @@ test_legacy_global_lock_refuses_live_holder() {
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
   fixture_kill "$live"
 
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"$live"* ]]; then
-    pass "legacy-lock AC1: a LIVE pre-#3467 holder (real pid $live) refuses the start, loudly, naming the legacy lock and the holder — and NOT with the per-lane message"
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"EXISTS there"* ]]; then
+    pass "legacy-lock AC1: a legacy lock left by a pre-#3467 supervisor (real live pid $live) refuses the start, loudly, naming the legacy lock — and NOT with the per-lane message"
   else
-    fail "legacy-lock-live: rc=$rc (expected non-zero) out=[$out] — expected the LEGACY GLOBAL refusal naming pid $live"
+    fail "legacy-lock-present: rc=$rc (expected non-zero) out=[$out] — expected the LEGACY GLOBAL refusal saying a path EXISTS there"
   fi
+
+  # THE REFUSAL CLAIMS NOTHING ABOUT THE HOLDER (lead ruling). Every one of these tokens was in the
+  # DELETED classifier's vocabulary, and each was a claim this guard can no longer support: it does not
+  # read the lock, so it cannot know a pid, its liveness, or whether the object is a lock at all.
+  # Asserted as ABSENCES because that is what the ruling changed; the presence half is above.
+  if [[ "$out" != *"$live"* ]] \
+     && [[ "$out" != *"is ACTIVE"* ]] && [[ "$out" != *"recorded pid"* ]] \
+     && [[ "$out" != *"stale"* ]] && [[ "$out" != *"LEFT BEHIND"* ]] \
+     && [[ "$out" != *"affirmatively dead"* ]] && [[ "$out" != *"PID NUMBERS ARE REUSED"* ]]; then
+    pass "legacy-lock AC1 (ruling): the refusal makes NO claim about the holder — it never names the recorded pid $live, never calls the lock live or stale, and never asserts a process's fate"
+  else
+    fail "legacy-lock-present-claims-staleness: out=[$out] — the refusal asserted something about the holder that this guard does not measure"
+  fi
+
+  # ...AND IT RECOMMENDS NO DELETION, in any state. While the classifier existed, an enumerated
+  # exactly-`{pid}` shape LICENSED printing `rm -f … && rmdir …`; with no inspection there is no licence,
+  # and the deletion line is measurably destructive on a shape we no longer look at (see the symlink
+  # case, which reproduces it). So no refusal may carry a deletion command at all.
+  if [[ "$out" != *"rm -f"* && "$out" != *"rm -rf"* && "$out" != *"rmdir --"* && "$out" != *"rmdir '"* ]]; then
+    pass "legacy-lock AC1 (ruling): the refusal carries NO deletion command — the guard did not inspect the object, so it prints nothing that would destroy it"
+  else
+    fail "legacy-lock-present-deletion: out=[$out] — a guard that does not inspect the lock must not print a deletion for it"
+  fi
+
   # A REFUSED START ACQUIRES NOTHING. Asserted on the RUN'S OUTPUT as well as the filesystem, because
   # the filesystem half alone is vacuous: a successful acquisition removes the per-lane lock again on
   # exit (the EXIT trap), so `! -e` is true either way — it passed under the guard-removed mutant.
   if [[ "$out" != *"ACQUIRED="* && ! -e "$derived" ]]; then
     pass "legacy-lock AC1: the refusal acquired NOTHING — no ACQUIRED line and no per-lane lock (a refused start leaves nothing behind)"
   else
-    fail "legacy-lock-live-sideeffect: out=[$out] derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) — a refusal must not acquire the per-lane lock"
+    fail "legacy-lock-present-sideeffect: out=[$out] derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) — a refusal must not acquire the per-lane lock"
   fi
+  first_detail="$(printf '%s\n' "$out" | grep -F 'refusing to start' | head -1 | sed "s#$legacy##g")"
+  rm -rf "$legacy" "$derived"
 
-  # PID REUSE, AND WHAT WE ARE ALLOWED TO TELL AN OPERATOR (#3549, roborev jobs 182 F2 + 198 F1). The
-  # holder above was a `sleep`, i.e. a live pid that is not a supervisor at all — the pid-reuse shape:
-  # the recorded supervisor exited and something unrelated inherited the number. The refusal is
-  # unchanged (it refused, asserted above), but the ADVICE must never be "stop pid N": that is an
-  # instruction to kill the wrong process. It must say the pid is active, that pid numbers are reused,
-  # and that the operator must verify first.
-  if [[ "$out" == *"PID NUMBERS ARE REUSED"* ]] \
-     && [[ "$out" == *"VERIFY what pid $live actually is"* ]] \
-     && [[ "$out" != *"stop pid $live first"* ]] \
-     && [[ "$out" != *"CORROBORATED"* ]]; then
-    pass "legacy-lock AC1 (F2): a LIVE recorded pid refuses with verify-first wording — the pid is active, pid numbers are reused, verify before stopping anything; it never instructs the operator to stop pid $live"
+  # ---- THE UNIFORMITY TABLE. Each of these shapes made the DELETED classifier take a DIFFERENT branch
+  # and print a DIFFERENT cause and remedy: a live pid, a confirmed-dead pid, a non-numeric pid, a padded
+  # one, a NUL-bearing one, a multi-line one, an out-of-range one, a missing pid file, an extra entry, a
+  # plain file instead of a directory. Every one of them is now simply PRESENT, so every one must produce
+  # the SAME first diagnostic line (the path aside) — and that is asserted against the LIVE case's own
+  # wording above, not against a copy of the expected string, so a reworded refusal cannot pass here
+  # while the uniformity property silently breaks.
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  for shape in dead-pid non-numeric-pid padded-pid nul-pid oversized-pid second-line \
+               no-pid-file extra-entry hidden-extra-entry plain-file empty-dir; do
+    rm -rf "$legacy" "$derived"
+    case "$shape" in
+      dead-pid)          mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid" ;;
+      non-numeric-pid)   mkdir -p "$legacy"; printf 'pid-1234\n' >"$legacy/pid" ;;
+      padded-pid)        mkdir -p "$legacy"; printf ' %s \n' "$dead" >"$legacy/pid" ;;
+      nul-pid)           mkdir -p "$legacy"; printf '%s\0\n' "$dead" >"$legacy/pid" ;;
+      oversized-pid)     mkdir -p "$legacy"; printf '99999999999999999999\n' >"$legacy/pid" ;;
+      second-line)       mkdir -p "$legacy"; printf '%s\nfoo\n' "$dead" >"$legacy/pid" ;;
+      no-pid-file)       mkdir -p "$legacy" ;;
+      extra-entry)       mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid"; printf 'x\n' >"$legacy/notes.txt" ;;
+      hidden-extra-entry) mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid"; printf 'x\n' >"$legacy/.hidden" ;;
+      plain-file)        printf 'not a lock dir\n' >"$legacy" ;;
+      empty-dir)         mkdir -p "$legacy" ;;
+    esac
+    out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+    detail="$(printf '%s\n' "$out" | grep -F 'refusing to start' | head -1 | sed "s#$legacy##g")"
+    if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ ! -e "$derived" ]] \
+       && [[ -n "$detail" && "$detail" == "$first_detail" ]]; then
+      pass "legacy-lock AC1 uniformity ($shape): refuses with the IDENTICAL diagnostic the live holder got — the guard does not parse the lock, so its contents cannot change the wording"
+    else
+      fail "legacy-lock-uniformity($shape): rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) detail=[$detail] expected=[$first_detail] out=[$out]"
+    fi
+    # NOTHING WAS MUTATED, for every shape: no deletion command in the output, and the object still
+    # there. The guard never writes to the legacy path, which is the whole basis of the ruling.
+    if [[ "$out" != *"rm -f"* && "$out" != *"rm -rf"* && "$out" != *"rmdir --"* ]] && [[ -e "$legacy" || -L "$legacy" ]]; then
+      pass "legacy-lock AC1 uniformity ($shape): no deletion command printed and the object is STILL THERE after the refusal"
+    else
+      fail "legacy-lock-uniformity-mutated($shape): legacy-exists=$([[ -e "$legacy" ]] && echo yes || echo GONE) out=[$out]"
+    fi
+  done
+
+  # NO RENAMED-ASIDE / STALE RESIDUE ANYWHERE under the case TMPDIR — that absence IS the property
+  # "this guard never touches an object it does not own".
+  local residue
+  residue="$(find "$tmp" \( -name '*.aside.*' -o -name '*.stale.*' \) 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "$residue" == "0" ]]; then
+    pass "legacy-lock AC1 (ruling): no aside/stale scratch path exists anywhere under the case TMPDIR after $((11)) refusals"
   else
-    fail "legacy-lock-live-verify-first: out=[$out] — expected verify-first pid-reuse wording for a live pid, not a 'stop pid $live first' instruction"
+    fail "legacy-lock-residue: $residue aside/stale paths under $tmp — the guard mutated something it does not own"
   fi
 
-  # ...AND A SAME-NAMED, NON-HOLDER PROCESS GETS THE IDENTICAL WORDING (#3549, roborev job 198 F1). This
-  # is the case the deleted identity probe got WRONG: a live process actually RUNNING a script called
-  # `worker-supervisor.sh` — which on this fleet is most likely A SIBLING LANE'S SUPERVISOR, since up to
-  # four lanes run on one box with the same basename — used to be reported "CORROBORATED … stop pid N
-  # first". It is NOT the holder of this lock (this fixture never touched it; the test wrote the pid into
-  # the lock itself), and nothing available here could tell the difference: the legacy lock records a
-  # bare pid, so no incarnation can be bound to it. So the requirement is that the wording does NOT
-  # change: one live wording, verify-first, for every live pid.
-  local fake fakepid
-  fake="$d/worker-supervisor.sh"
-  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
-  chmod +x "$fake"
-  fixture_bg bash "$fake"
-  fakepid=$FIXTURE_LAST_PID
-  sleep 0.3
+  # ---- MUTANT (a): A GUARD THAT PROCEEDS ON PRESENCE MUST RED. The mutation is the smallest one that
+  # expresses the defect: the `present` branch returns instead of refusing. Derived from the shipped
+  # function, so it cannot drift into a re-implementation.
+  local ovr mout mrc=0
   rm -rf "$legacy" "$derived"
   mkdir -p "$legacy"
-  printf '%s\n' "$fakepid" >"$legacy/pid"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  fixture_kill "$fakepid"
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
-     && [[ "$out" == *"PID NUMBERS ARE REUSED"* ]] \
-     && [[ "$out" == *"VERIFY what pid $fakepid actually is"* ]] \
-     && [[ "$out" == *"SEVERAL LANES run a supervisor with the SAME script name"* ]] \
-     && [[ "$out" != *"stop pid $fakepid first"* ]] \
-     && [[ "$out" != *"CORROBORATED"* ]]; then
-    pass "legacy-lock AC1 (198 F1): a live process genuinely RUNNING a worker-supervisor.sh that does NOT hold this lock gets the SAME verify-first wording — never 'stop pid $fakepid first', which would name a sibling lane's supervisor"
-  else
-    fail "legacy-lock-live-samename-corroborated: rc=$rc out=[$out] — a same-named non-holder process must not be corroborated, and the wording must name the shared-basename hazard"
-  fi
-
-  # AND THE LIVE BRANCH NEVER LICENSES A START. Stated as its own assertion because the failure mode it
-  # guards is a future "identity unknown, so probably fine, proceed" — an unverifiable holder must never
-  # become a reason to start a second supervisor in this worktree.
-  if [[ "$out" != *"ACQUIRED="* && ! -e "$derived" ]]; then
-    pass "legacy-lock AC1 (F2): a live recorded pid refuses and acquires nothing, whatever that process turns out to be"
-  else
-    fail "legacy-lock-live-proceeded: out=[$out] — a live recorded pid must refuse unconditionally"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  ovr="$d/m-proceed.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_guard \
+       '    present)' '    present)
+      return 0
+      ;;
+    never-taken-present)'; then
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || mrc=$?
+    if [[ "$mrc" -eq 0 && "$mout" == *"ACQUIRED=$derived"* && "$mout" != *"LEGACY GLOBAL supervisor lock"* ]]; then
+      pass "legacy-lock MUTANT (a): a guard whose \`present\` branch PROCEEDS starts anyway with the legacy lock in place (ACQUIRED, no refusal) — so the refusal above is the shipped branch doing the work, not the harness"
+    else
+      fail "legacy-lock-mutant-proceed: rc=$mrc out=[$mout] — the proceeding mutant must start, or the presence refusal measures nothing"
+    fi
   fi
   rm -rf "$legacy" "$derived"
+
+  # ---- STRUCTURAL: THE DELETED MACHINERY MUST NOT CREEP BACK. A behavioural case cannot see a
+  # reintroduced code path that nothing currently reaches, and every one of these names belonged to a
+  # capability the two rulings removed: reclaim/restore/aside, and the classifier with its pid parsing,
+  # liveness measurement and glob-state neutralisation.
+  if ! grep -qE 'supervisor_legacy_lock_(reclaim_stale|restore_and_refuse)|SUPERVISOR_LEGACY_ASIDE_CHILD' "$SUPERVISOR"; then
+    pass "legacy-lock (ruling 1): the reclaim/restore/aside machinery is GONE from the supervisor (not merely unreached)"
+  else
+    fail "legacy-lock-reclaim-resurrected: the supervisor still defines reclaim/restore/aside machinery the ruling deleted"
+  fi
+  local revived
+  # The names are the DELETED symbols and the two inherited-state variables the deleted enumeration
+  # depended on. `kill -0` is deliberately NOT in the list: the per-lane lock and the worker-liveness
+  # loop both use it legitimately, and a pattern that reds on correct code is the pattern people learn
+  # to waive.
+  revived="$(grep -nE 'supervisor_legacy_lock_state|supervisor_pid_liveness|GLOBIGNORE|pid_max' "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  if [[ -z "$revived" ]]; then
+    pass "legacy-lock (ruling 2): the classifier, the pid-liveness probe, the pid_max bound and the glob-state neutralisation are GONE from the supervisor's code"
+  else
+    fail "legacy-lock-classifier-resurrected: [$revived] — machinery whose output cannot change the decision is back on the decision path"
+  fi
+  # ...AND THE PROBE STILL EXECUTES NO EXTERNAL COMMAND, so none of its verdicts depends on `PATH`.
+  # Comment lines are stripped first (the prose legitimately NAMES tools it does not use, and a check
+  # that reds on correct text is the check people learn to waive); what remains is code.
+  local body code ext
+  body="$(sed -n '/^supervisor_legacy_lock_presence()/,/^}/p' "$SUPERVISOR")"
+  code="$(printf '%s\n' "$body" | grep -vE '^[[:space:]]*#' || true)"
+  ext="$(printf '%s\n' "$code" | grep -nEw 'od|wc|cmp|tr|dd|cat|sed|awk|grep|expr|stat|ls|find|ps|env|xargs|head|tail|cut|python3|perl' || true)"
+  if [[ -n "$code" && "$code" == *"supervisor_legacy_lock_presence() {"* && -z "$ext" ]]; then
+    pass "legacy-lock: the presence probe's code names no external tool — its verdicts cannot be changed by the caller's PATH"
+  else
+    fail "legacy-lock-probe-external-command: [$ext] — an external command in the probe puts its verdicts at the mercy of PATH; use a builtin"
+  fi
 }
 
 
 
-# THE SYMLINK SHAPES (#3549, roborev job 180 Medium). `-d`, `-f`, `-r`, `-x` and `-e` all FOLLOW
-# symlinks, so a link is not merely another malformed shape — it is the one shape whose predicates
-# answer as a VALID lock would. The classifier must therefore reject `-L` BEFORE any of them, and the
-# case that matters is the one a link to a real, well-formed lock directory produces: without the `-L`
-# test it classifies as a LOCK (`stale`/`live`) and the guard then reports, and tells an operator to
-# `rm -rf`, an object that is not a legacy lock at all — its target may be any directory that happens
-# to hold a `pid` file. When this guard still reclaimed, the same misclassification MOVED AND DELETED
-# that object itself; the reclaim is gone (lead ruling) but the misdiagnosis is not, and it now points
-# a destructive manual remedy at the wrong path. Every case below asserts BOTH halves — the refusal
-# carries the SYMLINK cause, and NOTHING was moved or deleted (the link, its target, the target's
-# `pid`, and no renamed-aside residue anywhere).
+# ---------------------------------------------------------------------------
+# THE SYMLINK SHAPES (#3549, roborev job 180 Medium, carried forward through the lead's second ruling).
+#
+# `-e` FOLLOWS the link, so `-e` ALONE reports a DANGLING symlink at the legacy path as ABSENCE — the
+# permissive collapse, and the reason the existence test is `-e || -L`. Something IS at that name: a
+# pre-#3467 supervisor's `mkdir` of it fails, so it is not free, and reading it as absence lets this run
+# proceed as if no legacy supervisor could exist.
+#
+# AND THE SYMLINK IS WHY NO DELETION IS PRINTED ANY MORE. While the classifier existed it followed the
+# link, saw a textbook lock behind it, and handed the operator `rm -f -- <legacy>/pid && rmdir --
+# <legacy>` — which MEASURABLY deletes a foreign directory's `pid` file. That measurement is reproduced
+# below against the pre-ruling command rather than argued from the source.
+# ---------------------------------------------------------------------------
 test_legacy_global_lock_symlink_shapes_refuse() {
-  local d tmp lane legacy derived out rc dead target link_before aside_count
+  local d tmp lane legacy derived out rc dead target link_before residue ovr mout mrc
   d="$(new_case_dir)"
   common_env "$d"
   tmp="$d/tmp"; lane="lane3549sym$$"
@@ -5152,17 +5241,11 @@ test_legacy_global_lock_symlink_shapes_refuse() {
   legacy="$tmp/cqlite-worker-supervisor.lock"
   derived="$tmp/cqlite-worker-supervisor-$lane.lock"
 
-  # A REAL dead pid: started and REAPED, so the kernel has genuinely released it — the same standard
-  # as the reclaim case (AC5). A made-up large number would only ever exercise "not found".
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
   fixture_wait "$dead"
 
-  # ---- (a) THE DANGEROUS ONE: a symlink to a VALID lock directory with a CONFIRMED-DEAD pid. -------
-  # This is the case that is NOT caught by any other predicate: follow the link and it is a textbook
-  # lock with a dead holder. `$target` is deliberately NOT a lock — it is any directory that happens to
-  # hold a well-formed `pid`, which is exactly the object the guard must neither destroy nor name in a
-  # `rm -rf` remedy.
+  # ---- (a) a symlink to a directory that is NOT a lock but happens to hold a well-formed `pid`. ----
   rm -rf "$legacy" "$derived"
   target="$tmp/not-a-lock-at-all"
   mkdir -p "$target"
@@ -5170,29 +5253,40 @@ test_legacy_global_lock_symlink_shapes_refuse() {
   ln -s "$target" "$legacy"
   link_before="$(readlink "$legacy")"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"path-is-a-symlink"* ]] && [[ ! -e "$derived" ]]; then
-    pass "legacy-lock symlink(a): a symlink to a VALID dead-pid lock directory REFUSES with the symlink cause (not 'not-a-directory') and creates no per-lane lock"
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"EXISTS there"* ]] && [[ ! -e "$derived" ]]; then
+    pass "legacy-lock symlink(a): a symlink at the legacy path is PRESENT — it refuses the start and creates no per-lane lock"
   else
-    fail "legacy-lock-symlink-a: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — expected a refusal naming path-is-a-symlink"
+    fail "legacy-lock-symlink-a: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — expected a presence refusal"
   fi
-  # NOTHING MOVED, NOTHING DELETED — the whole harm of the finding.
-  aside_count="$(find "$tmp" -maxdepth 1 -name '*.aside.*' 2>/dev/null | wc -l | tr -d ' ')"
+  # NOTHING MOVED, NOTHING DELETED, AND NOTHING PRINTED THAT WOULD DO EITHER.
+  residue="$(find "$tmp" -maxdepth 1 -name '*.aside.*' 2>/dev/null | wc -l | tr -d ' ')"
   if [[ -L "$legacy" && "$(readlink "$legacy")" == "$link_before" ]] \
      && [[ -d "$target" && -f "$target/pid" && "$(cat "$target/pid")" == "$dead" ]] \
-     && [[ "$aside_count" == "0" ]]; then
-    pass "legacy-lock symlink(a): the link, its TARGET directory and the target's pid file are all untouched, and no renamed-aside residue was created"
+     && [[ "$residue" == "0" ]] && [[ "$out" != *"rm -f"* && "$out" != *"rmdir --"* ]]; then
+    pass "legacy-lock symlink(a): the link, its TARGET directory and the target's pid file are all untouched, no aside residue was created, and the refusal printed no command that would touch them"
   else
-    fail "legacy-lock-symlink-a-destroyed: link=$([[ -L "$legacy" ]] && readlink "$legacy" || echo GONE) target-dir=$([[ -d "$target" ]] && echo yes || echo GONE) target-pid=[$(cat "$target/pid" 2>/dev/null || echo GONE)] aside-residue=$aside_count"
+    fail "legacy-lock-symlink-a-destroyed: link=$([[ -L "$legacy" ]] && readlink "$legacy" || echo GONE) target-dir=$([[ -d "$target" ]] && echo yes || echo GONE) target-pid=[$(cat "$target/pid" 2>/dev/null || echo GONE)] aside-residue=$residue out=[$out]"
   fi
 
-  # ---- (b) a DANGLING symlink at the legacy path -------------------------------------------------
-  # `-e` is false and `-L` is true, so this must NOT be read as verified absence (which would let the
-  # start proceed as if no legacy supervisor existed) and must NOT be read as `not-a-directory` either.
+  # ---- (a2) THE HARM OF THE PRE-RULING REMEDY, MEASURED ON THIS EXACT SHAPE. The deleted branch's
+  # command, run against this staged symlink, follows the link and DELETES the foreign directory's `pid`
+  # (rc=0) and then fails at the `rmdir` — so the operator destroys a file the guard never examined and
+  # the legacy lock is still there. This is why the printed line is now read-only, and it is measured
+  # here rather than asserted from the source comment.
+  local del_rc=0
+  eval "rm -f -- '$legacy/pid' && rmdir -- '$legacy'" >/dev/null 2>&1 || del_rc=$?
+  if [[ "$del_rc" -ne 0 && ! -e "$target/pid" && -L "$legacy" ]]; then
+    pass "legacy-lock symlink(a2): the PRE-RULING deletion remedy, run against this symlink, destroyed the FOREIGN directory's pid file and then failed (rc=$del_rc) leaving the lock in place — the measurement that makes a read-only remedy the only honest one"
+  else
+    fail "legacy-lock-symlink-a2: rc=$del_rc foreign-pid=$([[ -e "$target/pid" ]] && echo intact || echo deleted) link=$([[ -L "$legacy" ]] && echo yes || echo GONE) — the harm of the deleted remedy is not established, so the justification for dropping it is unmeasured"
+  fi
+
+  # ---- (b) a DANGLING symlink: `-e` is FALSE and `-L` is TRUE. -----------------------------------
   rm -rf "$legacy" "$derived"
   ln -s "$tmp/nothing-is-here" "$legacy"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"path-is-a-symlink"* ]] && [[ ! -e "$derived" ]]; then
-    pass "legacy-lock symlink(b): a DANGLING symlink is neither verified absence nor a malformed lock — it refuses with the symlink cause"
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ ! -e "$derived" ]]; then
+    pass "legacy-lock symlink(b): a DANGLING symlink is NOT verified absence — it refuses the start"
   else
     fail "legacy-lock-symlink-b: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out]"
   fi
@@ -5202,60 +5296,20 @@ test_legacy_global_lock_symlink_shapes_refuse() {
     fail "legacy-lock-symlink-b-destroyed: the dangling link at $legacy is gone"
   fi
 
-  # ---- (c) a symlink AT `$legacy/pid` pointing to a VALID dead pid file -------------------------
-  # The lock directory is genuine; only the `pid` path is a link. `-f`/`-r` follow it, so the pid reads
-  # as a well-formed dead pid and the directory is reported as a stale lock on the strength of a pid
-  # file that lives somewhere else entirely.
-  rm -rf "$legacy" "$derived"
-  mkdir -p "$legacy" "$tmp/pidsource"
-  printf '%s\n' "$dead" >"$tmp/pidsource/pid"
-  ln -s "$tmp/pidsource/pid" "$legacy/pid"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"pid-path-is-a-symlink"* ]] && [[ ! -e "$derived" ]]; then
-    pass "legacy-lock symlink(c): a symlink AT the pid path with a valid dead pid behind it REFUSES with its OWN cause token (distinct from pid-file-not-a-readable-file)"
-  else
-    fail "legacy-lock-symlink-c: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — expected a refusal naming pid-path-is-a-symlink"
-  fi
-  aside_count="$(find "$tmp" -maxdepth 1 -name '*.aside.*' 2>/dev/null | wc -l | tr -d ' ')"
-  if [[ -d "$legacy" && -L "$legacy/pid" ]] \
-     && [[ -f "$tmp/pidsource/pid" && "$(cat "$tmp/pidsource/pid")" == "$dead" ]] \
-     && [[ "$aside_count" == "0" ]]; then
-    pass "legacy-lock symlink(c): the lock directory, the pid LINK and the linked-to pid file all survive, with no renamed-aside residue"
-  else
-    fail "legacy-lock-symlink-c-destroyed: dir=$([[ -d "$legacy" ]] && echo yes || echo GONE) pid-link=$([[ -L "$legacy/pid" ]] && echo yes || echo GONE) source-pid=[$(cat "$tmp/pidsource/pid" 2>/dev/null || echo GONE)] aside-residue=$aside_count"
-  fi
-
-  # ---- (d) a DANGLING symlink at `$legacy/pid` --------------------------------------------------
-  # `-e "$legacy/pid"` is false here, so the pid check must be reached BEFORE it: otherwise this is
-  # reported as `pid-file-missing`, a wrong cause for a shape we refuse to follow.
-  rm -rf "$legacy" "$derived"
-  mkdir -p "$legacy"
-  ln -s "$tmp/no-such-pid" "$legacy/pid"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"pid-path-is-a-symlink"* ]] && [[ "$out" != *"pid-file-missing"* ]] && [[ ! -e "$derived" ]]; then
-    pass "legacy-lock symlink(d): a DANGLING pid symlink is reported as the symlink shape, not as pid-file-missing"
-  else
-    fail "legacy-lock-symlink-d: rc=$rc out=[$out] — expected pid-path-is-a-symlink and not pid-file-missing"
-  fi
-  if [[ -L "$legacy/pid" && -d "$legacy" ]]; then
-    pass "legacy-lock symlink(d): the dangling pid link and its directory were not removed"
-  else
-    fail "legacy-lock-symlink-d-destroyed: dir=$([[ -d "$legacy" ]] && echo yes || echo GONE) pid-link=$([[ -L "$legacy/pid" ]] && echo yes || echo GONE)"
-  fi
-
-  # ORDERING PROOF, structural: both `-L` tests must appear BEFORE the predicates that follow the link,
-  # because a passing behavioural case cannot distinguish "tested first" from "tested at all" once the
-  # branch exists. A future reorder that moves either below its `-d`/`-f` would still pass every case
-  # above only if the reorder were harmless — it is not, so pin the order in source.
-  local body
-  body="$(sed -n '/^supervisor_legacy_lock_state()/,/^}/p' "$SUPERVISOR")"
-  if [[ "$(printf '%s\n' "$body" | grep -n '\-L "\$legacy"' | tail -1 | cut -d: -f1)" \
-        -lt "$(printf '%s\n' "$body" | grep -n '\-d "\$legacy"' | head -1 | cut -d: -f1)" ]] \
-     && [[ "$(printf '%s\n' "$body" | grep -n '\-L "\$legacy/pid"' | head -1 | cut -d: -f1)" \
-        -lt "$(printf '%s\n' "$body" | grep -n '\-e "\$legacy/pid"' | head -1 | cut -d: -f1)" ]]; then
-    pass "legacy-lock symlink: both -L rejections precede the link-following predicates in source (-d for the lock, -e/-f for the pid)"
-  else
-    fail "legacy-lock-symlink-order: a -L test does not precede the predicate that follows the link in supervisor_legacy_lock_state"
+  # ---- MUTANT (a'): `-e || -L` reduced to `-e` alone. The dangling link then reads as VERIFIED
+  # ABSENCE and the start PROCEEDS — the two-valued collapse, measured on the shipped probe with one
+  # substitution.
+  ovr="$d/m-eonly.sh"; : >"$ovr"
+  mrc=0
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_presence \
+       'if [[ -e "$legacy" || -L "$legacy" ]]; then' 'if [[ -e "$legacy" ]]; then'; then
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || mrc=$?
+    if [[ "$mrc" -eq 0 && "$mout" == *"ACQUIRED=$derived"* && "$mout" != *"LEGACY GLOBAL supervisor lock"* ]]; then
+      pass "legacy-lock symlink MUTANT (a'): with the \`-L\` half removed, the SAME dangling link is read as verified absence and the supervisor STARTS — so the \`|| -L\` is load-bearing, not decoration"
+    else
+      fail "legacy-lock-symlink-mutant: rc=$mrc out=[$mout] — the -e-only probe must proceed on a dangling link, or the assert above measures nothing"
+    fi
+    rm -rf "$derived"
   fi
 
   rm -rf "$legacy" "$derived"
@@ -5332,17 +5386,19 @@ test_legacy_global_lock_removal_condition_recorded() {
 }
 
 # ---------------------------------------------------------------------------
-# (#3549, roborev job 182 F3): STATTING A KNOWN CHILD NEEDS **SEARCH** ON THE CONTAINER, NOT READ.
+# THE CONTAINER GATE (#3549, roborev job 182 F3 + the lead's second ruling) — BOTH DIRECTIONS.
 #
-# The classifier decides the legacy path's existence with `[[ -e ]]` on a KNOWN NAME; it never
-# enumerates the container. `stat(2)` on a name needs the execute/search bit and nothing else, so
-# requiring `-r` on `${TMPDIR}` was a FALSE STOP: a legitimate write-and-search-only TMPDIR (mode 0311
-# — owner `-wx`) refused every start even though the legacy path is definitively absent AND our own
-# per-lane lock can be created there. `-r` IS still required on the lock DIRECTORY itself, which is
-# enumerated for the exactly-`{pid}` shape check; the two gates are different and must stay different.
+# The probe decides the legacy path's existence with `[[ -e ]]`/`[[ -L ]]` on a KNOWN NAME and never
+# enumerates the container, so `lstat(2)` needs the execute/search bit and nothing else:
+#   * REQUIRING `-r` on `${TMPDIR}` is a FALSE STOP — a legitimate write-and-search-only TMPDIR
+#     (mode 0311) refused every start even though the legacy path is definitively absent AND our own
+#     per-lane lock can be created there.
+#   * NOT REQUIRING `-x` is the PERMISSIVE COLLAPSE — on an unsearchable container `[[ -e ]]` answers
+#     "not there" for a lock that IS there, and the start proceeds as if no legacy supervisor existed.
+# Both are measured here, each against a one-substitution mutant of the shipped probe.
 # ---------------------------------------------------------------------------
 test_legacy_lock_container_needs_search_not_read() {
-  local d tmp lane legacy derived out rc body ans
+  local d tmp lane legacy derived out rc body ans ovr mout mrc
   d="$(new_case_dir)"
   common_env "$d"
   tmp="$d/searchonly-tmp"; lane="lane3549srch$$"
@@ -5350,68 +5406,133 @@ test_legacy_lock_container_needs_search_not_read() {
   legacy="$tmp/cqlite-worker-supervisor.lock"
   derived="$tmp/cqlite-worker-supervisor-$lane.lock"
 
+  # ---- DIRECTION 1 (root-independent): a container that DOES NOT EXIST is not an absence — it is an
+  # UNDECIDABLE existence question, so it refuses, and the cause must say THE PROBE FAILED rather than
+  # that a lock is there. This half needs no permission bits, so it runs as any user.
+  local missing="$d/no-such-container"
+  out="$(legacy_lock_drive "$missing" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
+     && [[ "$out" == *"EXISTENCE PROBE FAILED"* ]] && [[ "$out" == *"container-not-searchable:"* ]] \
+     && [[ "$out" != *"EXISTS there"* ]]; then
+    pass "legacy-lock container: a NON-EXISTENT container refuses with a cause that says the PROBE FAILED — never that a legacy lock exists (the two are different facts with different remedies)"
+  else
+    fail "legacy-lock-container-missing: rc=$rc out=[$out] — expected an 'EXISTENCE PROBE FAILED' refusal naming container-not-searchable"
+  fi
+  # ...and it prints NO runnable line: there is nothing to inspect, so there is no command to give.
+  remedy_lines_structural "could-not-tell-container" "$out" 0
+
   if [[ "$(id -u)" == "0" ]]; then
-    # Under root every permission bit is advisory: `-r` is true on a 0311 directory, so the old code and
-    # the new code are indistinguishable here and a green result would mean nothing. SKIPped explicitly
-    # rather than passed vacuously.
-    skip "legacy-lock F3: running as root, where -r is true on a search-only directory — the false-STOP this fixes is unreachable and cannot be measured"
+    # Under root every permission bit is advisory: `-r` is true on a 0311 directory and a 0600 one is
+    # still searchable, so neither remaining direction is stageable and a green result would mean
+    # nothing. SKIPped explicitly rather than passed vacuously.
+    skip "legacy-lock container: running as root, where permission bits are advisory — neither the false-STOP (-r) nor the permissive-collapse (-x) direction can be measured"
     return 0
   fi
 
-  # WRITE + SEARCH, NO READ (0311). The per-lane lock must still be creatable (it is a `mkdir` in this
-  # directory), which is what makes the false STOP a real cost rather than a theoretical one.
+  # ---- DIRECTION 2: WRITE + SEARCH, NO READ (0311), legacy path ABSENT. The per-lane lock must still
+  # be creatable (it is a `mkdir` in this directory), which is what makes the false STOP a real cost.
   chmod 0311 "$tmp"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
   chmod 0711 "$tmp"
   if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$derived"* && "$out" != *"LEGACY GLOBAL supervisor lock"* ]]; then
-    pass "legacy-lock F3: a write-and-search-only TMPDIR (0311) with the legacy path ABSENT PROCEEDS — verified absence needs search, not read"
+    pass "legacy-lock container: a write-and-search-only TMPDIR (0311) with the legacy path ABSENT PROCEEDS — verified absence needs search, not read"
   else
     fail "legacy-lock-container-search: rc=$rc out=[$out] — a search-only container with no legacy lock must not refuse"
   fi
   rm -rf "$derived"
 
-  # TWO-DIRECTION CONTROL, against the SHIPPED classifier in a scratch copy: restore the `-r` gate and
-  # the very same directory refuses. Without this, the pass above could be true of any classifier —
-  # including one that ignores the container entirely.
-  body="$T_LOCKFN/containerfn.sh"
-  mkdir -p "$T_LOCKFN"
-  {
-    sv_scratch_head
-    sed -n '/^supervisor_legacy_lock_state()/,/^}/p' "$SUPERVISOR" \
-      | sed 's/! -d "\$dir" || ! -x "\$dir"/! -d "$dir" || ! -r "$dir" || ! -x "$dir"/'
-    printf '%s\n' 'supervisor_legacy_lock_state "$1"'
-  } >"$body"
-  if ! grep -q '! -r "\$dir"' "$body"; then
-    fail "legacy-lock-container-control: the scratch copy does not carry the restored -r gate; the control below would measure nothing"
-    return 0
-  fi
-  chmod 0311 "$tmp"
-  ans="$(bash "$body" "$legacy" 2>&1)"
-  chmod 0711 "$tmp"
-  if [[ "$ans" == unknown\ container-not-* ]]; then
-    pass "legacy-lock F3 CONTROL: the same classifier WITH the -r gate restored refuses the identical search-only container (answered [$ans]) — the false STOP is measured, not argued"
-  else
-    fail "legacy-lock-container-control: the -r-restored classifier answered [$ans]; expected an 'unknown container-*' refusal, so the fix's effect is not established"
+  # MUTANT (false STOP): restore the `-r` gate and the very same directory refuses. Without this, the
+  # pass above could be true of any probe — including one that ignores the container entirely.
+  ovr="$d/m-rgate.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_presence \
+       'if [[ ! -d "$dir" || ! -x "$dir" ]]; then' 'if [[ ! -d "$dir" || ! -r "$dir" || ! -x "$dir" ]]; then'; then
+    chmod 0311 "$tmp"
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+    chmod 0711 "$tmp"
+    if [[ "$mout" == *"container-not-searchable:"* ]]; then
+      pass "legacy-lock container MUTANT (false STOP): the same probe WITH the -r gate restored refuses the identical search-only container — the false STOP is measured, not argued"
+    else
+      fail "legacy-lock-container-rgate-mutant: out=[$mout] — the -r-restored probe must refuse, so the fix's effect is not established"
+    fi
+    rm -rf "$derived"
   fi
 
-  # ...and the SHIPPED classifier answers `absent` for that same directory. Read out of the supervisor
-  # at run time with NO substitution at all, so this half is the shipped code verbatim.
+  # ---- DIRECTION 3: THE PERMISSIVE COLLAPSE. An UNSEARCHABLE container (0600 — readable, NOT
+  # searchable) holding a REAL legacy lock. The shipped probe cannot see the lock, so it must say so;
+  # a probe without the `-x` gate reports VERIFIED ABSENCE for a lock that is right there.
+  mkdir -p "$legacy"
+  printf '1\n' >"$legacy/pid"
+  chmod 0600 "$tmp"
+  if [[ -d "$tmp" && ! -x "$tmp" ]]; then
+    pass "legacy-lock container PREMISE: an UNSEARCHABLE container holding a real legacy lock was staged, so direction 3 measures the real shape"
+  else
+    fail "legacy-lock-container-premise: searchable=$([[ -x "$tmp" ]] && echo yes || echo no) — the unsearchable state could not be staged"
+  fi
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  chmod 0711 "$tmp"
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"EXISTENCE PROBE FAILED"* ]]; then
+    pass "legacy-lock container: an UNSEARCHABLE container holding a REAL legacy lock refuses — 'cannot tell' never collapses onto the permissive answer"
+  else
+    fail "legacy-lock-container-unsearchable: rc=$rc out=[$out] — expected a probe-failed refusal"
+  fi
+
+  # MUTANT (b): THE PERMISSIVE COLLAPSE ITSELF — the container gate deleted. `[[ -e ]]` then answers
+  # false for the lock it cannot stat, the probe reports `verified-absent`, and the supervisor STARTS
+  # alongside a pre-#3467 holder. This is the mutant the three-valued design exists for.
+  ovr="$d/m-nogate.sh"; : >"$ovr"
+  mrc=0
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_presence \
+       'if [[ ! -d "$dir" || ! -x "$dir" ]]; then' 'if false; then'; then
+    # The per-lane lock lives in the same container, so give the mutant a searchable place to acquire in
+    # by pointing the probe at the unsearchable one through TMPDIR only — impossible; instead assert on
+    # the probe's own answer, which is the state the guard branches on, read from the SHIPPED text.
+    body="$T_LOCKFN/presencefn.sh"
+    mkdir -p "$T_LOCKFN"
+    {
+      sv_scratch_head
+      printf '%s\n' 'source "$2"'
+      printf '%s\n' 'supervisor_legacy_lock_presence "$1"'
+    } >"$body"
+    chmod 0600 "$tmp"
+    ans="$(bash "$body" "$legacy" "$ovr" 2>&1 || true)"
+    chmod 0711 "$tmp"
+    if [[ "$ans" == verified-absent ]]; then
+      pass "legacy-lock container MUTANT (b): with the container gate removed, the probe answers 'verified-absent' for a legacy lock that IS PRESENT behind an unsearchable container — the permissive collapse, measured"
+    else
+      fail "legacy-lock-container-nogate-mutant: the gate-less probe answered [$ans]; expected verified-absent, or the value of the -x gate is not established"
+    fi
+    # ...and the SHIPPED probe, same driver, same directory, answers could-not-tell.
+    {
+      sv_scratch_head
+      printf '%s\n' 'supervisor_legacy_lock_presence "$1"'
+    } >"$body"
+    chmod 0600 "$tmp"
+    ans="$(bash "$body" "$legacy" 2>&1 || true)"
+    chmod 0711 "$tmp"
+    if [[ "$ans" == could-not-tell\ container-not-searchable:* ]]; then
+      pass "legacy-lock container: the SHIPPED probe answers [$ans] for that same directory — read out of the supervisor at run time with no substitution at all"
+    else
+      fail "legacy-lock-container-shipped: the shipped probe answered [$ans]; expected 'could-not-tell container-not-searchable:…'"
+    fi
+  fi
+
+  # ...and the shipped probe answers `verified-absent` for the SEARCH-ONLY container the -r gate rejected.
+  rm -rf "$legacy"
   {
     sv_scratch_head
-    sed -n '/^supervisor_legacy_lock_state()/,/^}/p' "$SUPERVISOR"
-    printf '%s\n' 'supervisor_legacy_lock_state "$1"'
-  } >"$T_LOCKFN/shipped-state.sh"
+    printf '%s\n' 'supervisor_legacy_lock_presence "$1"'
+  } >"$T_LOCKFN/shipped-presence.sh"
   chmod 0311 "$tmp"
-  ans="$(bash "$T_LOCKFN/shipped-state.sh" "$legacy" 2>&1 || true)"
+  ans="$(bash "$T_LOCKFN/shipped-presence.sh" "$legacy" 2>&1 || true)"
   chmod 0711 "$tmp"
-  if [[ "$ans" == absent ]]; then
-    pass "legacy-lock F3: the shipped classifier answers 'absent' (a VERIFIED absence) for the search-only container the -r gate rejected"
+  if [[ "$ans" == verified-absent ]]; then
+    pass "legacy-lock container: the shipped probe answers 'verified-absent' (a VERIFIED absence) for the search-only container the -r gate rejected"
   else
-    fail "legacy-lock-container-shipped: the shipped classifier answered [$ans] for a search-only container with the legacy path absent; expected 'absent'"
+    fail "legacy-lock-container-searchonly-shipped: the shipped probe answered [$ans] for a search-only container with the legacy path absent; expected verified-absent"
   fi
 }
 
-t test_legacy_global_lock_refuses_live_holder
+t test_legacy_global_lock_refuses_a_present_lock
 t test_legacy_global_lock_symlink_shapes_refuse
 t test_legacy_global_lock_override_skips_check
 t test_legacy_global_lock_removal_condition_recorded
@@ -5422,23 +5543,26 @@ t test_legacy_lock_container_needs_search_not_read
 
 
 # ---------------------------------------------------------------------------
-# Test 44-lock (#3549, roborev job 185 F2): EVERY OPERATOR-FACING REMEDY LINE IS EXECUTABLE AS PRINTED,
-# and no diagnostic line mixes a runnable command with prose.
+# Test 44-lock (#3549, roborev job 185 F2, carried through the lead's second ruling): THE ONE
+# OPERATOR-FACING LINE IS EXECUTABLE AS PRINTED, and no diagnostic line mixes a runnable command with
+# prose.
 #
-# The defect: `rm -f <dir>/pid && rmdir <dir> — the shape was verified ...` was printed as ONE line.
-# Pasted, the em dash and the clause after it become extra `rmdir` arguments; `rm -f` SUCCEEDS and
-# `rmdir` FAILS, leaving a PID-LESS lock directory — precisely the shape a pre-#3467 supervisor reads
-# as stale and reclaims. So the remedy would have manufactured the hazard this guard exists to prevent,
-# which is why the property under test is executability of the RAW LINE and not the presence of a
-# command somewhere in the text.
+# The original defect: `rm -f <dir>/pid && rmdir <dir> — the shape was verified ...` was printed as ONE
+# line. Pasted, the em dash and the clause after it become extra operands, so `rm -f` SUCCEEDS and
+# `rmdir` FAILS, leaving a PID-LESS lock directory — precisely the shape a pre-#3467 supervisor reads as
+# stale and reclaims. The remedy would have manufactured the hazard the guard exists to prevent, which
+# is why the property is executability of the RAW LINE and not the presence of a command somewhere in
+# the text.
 #
-# TWO ASSERTS PER STATE, and the structural one is the sweep the finding asked for:
+# WHAT THE RULING CHANGED HERE: the line is now a READ-ONLY INSPECTION
+# (`ls -ldn -- <p> && ls -lna -- <p>`), not a deletion, because the guard no longer inspects the object
+# and so cannot license destroying it. The emission-layer properties are UNCHANGED and still the subject:
 #   (a) no `worker-supervisor:`-prefixed line contains a command token — a command inside prose is by
 #       construction not pasteable, wherever it appears;
-#   (b) a command, when there is one, is the WHOLE of exactly one bare line, and running that line
-#       verbatim does what the prose says.
-# States with no command at all (an undeterminable shape) must print NO bare line — asserted too, so
-# "zero bare lines" cannot be confused with "the command went missing".
+#   (b) the command is the WHOLE of exactly one bare line, and running that line verbatim does what the
+#       prose says — here: reports what is at the path, and changes nothing.
+# The state with no command at all (the probe could not answer) must print NO bare line — asserted too,
+# so "zero bare lines" cannot be confused with "the command went missing".
 # ---------------------------------------------------------------------------
 
 # remedy_lines_structural <label> <out> <expected-bare-lines> — the (a) half plus the bare-line count.
@@ -5469,7 +5593,7 @@ remedy_lines_structural() {
 }
 
 test_legacy_lock_remedy_lines_are_executable_as_printed() {
-  local d tmp lane legacy derived out rc bare live fake fakepid dead
+  local d tmp lane legacy derived out rc bare dead
   d="$(new_case_dir)"
   common_env "$d"
   tmp="$d/tmp"; lane="lane3549remedy$$"
@@ -5477,190 +5601,108 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
   legacy="$tmp/cqlite-worker-supervisor.lock"
   derived="$tmp/cqlite-worker-supervisor-$lane.lock"
 
-  # ---- (1) LIVE: the remedy carries a read-only `ps` verification command, which is what verify-first
-  # wording has to hand the operator.
-  fixture_bg sleep 300
-  live=$FIXTURE_LAST_PID
-  mkdir -p "$legacy"
-  printf '%s\n' "$live" >"$legacy/pid"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  remedy_lines_structural "live" "$out" 1
-  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
-  # EXECUTED AS PRINTED, while the subject is still alive: the whole line, nothing stripped. `ps -p N
-  # -o args=` exits non-zero for a pid that is gone, so this is a real two-sided check of the line.
-  if [[ -n "$bare" ]] && eval "$bare" >/dev/null 2>&1; then
-    pass "remedy-lines (live): the bare line runs VERBATIM against the live pid and succeeds (line=[$bare])"
-  else
-    fail "remedy-lines-live-not-runnable: line=[$bare] rc=$? — the printed verification command is not executable as printed"
-  fi
-  if [[ "$bare" == "ps -p $live -o args=" ]]; then
-    pass "remedy-lines (live): the bare line is EXACTLY the command, with no trailing prose or punctuation appended"
-  else
-    fail "remedy-lines-live-not-exact: line=[$bare], expected exactly [ps -p $live -o args=]"
-  fi
-  fixture_kill "$live"
-  rm -rf "$legacy" "$derived"
-
-  # ---- (2) LIVE, and the process is genuinely RUNNING a `worker-supervisor.sh` (#3549, roborev job 198
-  # F1). There is exactly ONE live wording, so this state prints the SAME single bare line as (1): the
-  # read-only verification command, for the same pid, with nothing about stopping anything. Asserted
-  # here — not only in the AC1 case — because the shape of the OPERATOR-FACING output is this test's
-  # subject: the deleted identity probe made this state print NO command and a "stop pid N first"
-  # instruction instead, which for a same-named sibling lane is an instruction to kill the wrong process.
-  fake="$d/worker-supervisor.sh"
-  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
-  chmod +x "$fake"
-  fixture_bg bash "$fake"
-  fakepid=$FIXTURE_LAST_PID
-  sleep 0.3
-  mkdir -p "$legacy"
-  printf '%s\n' "$fakepid" >"$legacy/pid"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  remedy_lines_structural "live-samename" "$out" 1
-  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
-  if [[ "$bare" == "ps -p $fakepid -o args=" ]]; then
-    pass "remedy-lines (live-samename): a live process actually running a worker-supervisor.sh prints the IDENTICAL single bare line — [$bare] — and no 'stop pid' instruction"
-  else
-    fail "remedy-lines-live-samename: line=[$bare], expected exactly [ps -p $fakepid -o args=]"
-  fi
-  fixture_kill "$fakepid"
-  rm -rf "$legacy" "$derived"
-
-  # ---- (3) STALE: the deletion. Structure here; the verbatim execution is asserted in the stale case
-  # itself (which also checks the lock is gone afterwards).
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
   fixture_wait "$dead"
+
+  # ---- (1) PRESENT: exactly ONE bare line, and it is the whole command.
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  remedy_lines_structural "stale" "$out" 1
+  remedy_lines_structural "present" "$out" 1
   bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
-  # THE PRECONDITION IS FIRST (#3549, roborev job 185 F1): the prose must tell an operator to stop or
-  # upgrade the legacy launcher BEFORE the deletion, because deleting first frees the legacy name for a
-  # pre-#3467 supervisor to take at once. And it must NOT claim the command is safe on current
-  # contents — that observation was made when the guard ran, not when the operator acts.
-  if [[ "$out" == *"PRECONDITION FIRST"* ]] \
-     && [[ "$out" == *"WHEN THIS RAN, not when you run it"* ]] \
-     && [[ "$out" != *"fails loudly if anything unexpected is present"* ]]; then
-    pass "remedy-lines (stale, F1): the precondition is stated FIRST and the run makes no safety claim about the state at deletion time"
+  local qp
+  printf -v qp '%q' "$legacy"
+  if [[ "$bare" == "ls -ldn -- $qp && ls -lna -- $qp" ]]; then
+    pass "remedy-lines (present): the bare line is EXACTLY the read-only inspection command, with no trailing prose or punctuation appended"
   else
-    fail "remedy-lines-stale-precondition: out=[$out] — expected the precondition first and no 'fails loudly if anything unexpected' claim"
+    fail "remedy-lines-present-not-exact: line=[$bare], expected exactly [ls -ldn -- $qp && ls -lna -- $qp]"
   fi
-  # An em dash on the command line is the exact byte that broke the paste, so it is asserted by name.
-  if [[ "$bare" != *"—"* && "$bare" != *"#"* && "$bare" == "rm -f "* ]]; then
-    pass "remedy-lines (stale): the bare line begins with the command and carries no em dash and no comment marker"
-  else
-    fail "remedy-lines-stale-line-shape: line=[$bare]"
-  fi
-  # STRONG FORM, in a SCRATCH copy of the described shape rather than the real one: run the line
-  # verbatim and require BOTH that it succeeds AND that it leaves nothing behind. A command that
-  # half-succeeds (the defect: `rm -f` yes, `rmdir` no) leaves a pid-less directory, so "nothing behind"
-  # is the assertion that distinguishes a working remedy from the broken one.
+  # EXECUTED AS PRINTED — the whole line, nothing stripped — AND IT MUTATES NOTHING. Both halves matter:
+  # a read-only remedy that fails is useless, and one that changes state is the thing the ruling forbids.
   local vrc=0
   eval "$bare" >/dev/null 2>&1 || vrc=$?
-  if [[ "$vrc" -eq 0 && ! -e "$legacy" ]]; then
-    pass "remedy-lines (stale): the bare line, run VERBATIM, succeeds and leaves the legacy path GONE (no pid-less directory)"
+  if [[ "$vrc" -eq 0 && -d "$legacy" && -f "$legacy/pid" && "$(cat "$legacy/pid")" == "$dead" ]]; then
+    pass "remedy-lines (present): the bare line runs VERBATIM (rc=0) and the legacy lock is byte-identical afterwards — the printed remedy only READS"
   else
-    fail "remedy-lines-stale-verbatim: rc=$vrc leftover=$([[ -e "$legacy" ]] && echo "$(ls -A "$legacy" 2>/dev/null | tr '\n' ' ')" || echo none) — the printed line is not executable as printed"
+    fail "remedy-lines-present-not-runnable: rc=$vrc dir=$([[ -d "$legacy" ]] && echo yes || echo GONE) pid=[$(cat "$legacy/pid" 2>/dev/null || echo GONE)] line=[$bare]"
   fi
-  # NON-VACUITY, AND THE FINDING REPRODUCED — MEASURED, in both of its outcomes. The pre-fix form
-  # appended prose to this same command, and pasting it makes the prose extra `rmdir` OPERANDS. That
-  # ALWAYS fails; what survives depends on the prose, so both shapes are run rather than argued:
-  #   (i)  with the shipped em dash, `rmdir` removes the directory AND THEN errors once per prose word,
-  #        so the operator gets a non-zero exit plus alarming messages and cannot tell whether the lock
-  #        was cleared;
-  #   (ii) with an option-shaped token in the prose, the outcome depends on the shipped line and BOTH
-  #        forms are measured below, because the answer CHANGED when `--` was added for job 192 F2:
-  #        WITHOUT `--` (the pre-F2 line) `rmdir` reads `-x` as an OPTION and rejects the whole
-  #        invocation before removing anything — leaving a PID-LESS lock directory, the shape a
-  #        pre-#3467 supervisor reads as stale and reclaims, i.e. the remedy manufacturing the hazard
-  #        the guard refuses; WITH `--` the same token is an OPERAND, so `rmdir` clears the directory
-  #        and then errors on the leftovers, i.e. outcome (i) again. Both are failures of the pasted
-  #        line, which is the property; the mechanism is pinned in both spellings so neither this text
-  #        nor the assert can drift away from the shipped command.
-  # Without this contrast the verbatim assert above could pass for a line that merely happens to work.
-  mkdir -p "$legacy"
-  printf '%s\n' "$dead" >"$legacy/pid"
+  # ...AND IT IS NOT A DELETION. Asserted by name, because a deletion is what used to be here and what
+  # the symlink case measures as destructive on an uninspected object.
+  if [[ "$bare" != *"rm "* && "$bare" != *"rmdir"* && "$bare" != *"mv "* && "$bare" != *">"* ]]; then
+    pass "remedy-lines (present): the printed line carries no rm, rmdir, mv or redirection — a mis-paste can only ever be uninformative"
+  else
+    fail "remedy-lines-present-destructive: line=[$bare] — the printed line can change state"
+  fi
+  # An em dash on the command line is the exact byte that broke the paste, so it is asserted by name.
+  if [[ "$bare" != *"—"* && "$bare" != *"#"* && "$bare" == "ls -ldn -- "* ]]; then
+    pass "remedy-lines (present): the bare line begins with the command and carries no em dash and no comment marker"
+  else
+    fail "remedy-lines-present-line-shape: line=[$bare]"
+  fi
+  # THE PRECONDITION IS FIRST (#3549, roborev job 185 F1) and the run makes NO safety claim.
+  if [[ "$out" == *"PRECONDITION FIRST"* ]] \
+     && [[ "$out" == *"has established no such thing"* ]] \
+     && [[ "$out" != *"fails loudly if anything unexpected is present"* ]]; then
+    pass "remedy-lines (present, F1): the precondition is stated FIRST and the guard states it has established nothing about the object"
+  else
+    fail "remedy-lines-present-precondition: out=[$out] — expected the precondition first and an explicit no-claim statement"
+  fi
+
+  # NON-VACUITY, AND THE INLINED-PROSE FINDING REPRODUCED — MEASURED. The pre-fix form appended prose to
+  # this same line; pasted, the prose becomes extra `ls` OPERANDS and the command FAILS naming them, so
+  # the operator cannot tell what was reported about what. Read-only either way, which is the point: the
+  # failure mode is now MISINFORMATION rather than destruction, and it is still a failure.
   local emdash_rc=0 emdash_err=""
   emdash_err="$(eval "$bare — the shape was verified to be exactly that one file" 2>&1 >/dev/null)" || emdash_rc=$?
   if [[ "$emdash_rc" -ne 0 && "$emdash_err" == *"shape"* ]]; then
-    pass "remedy-lines NON-VACUITY (stale, em dash): the pre-fix INLINED form, pasted, FAILS (rc=$emdash_rc) and errors on the prose words — the operator cannot tell whether the lock was cleared"
+    pass "remedy-lines NON-VACUITY (present, em dash): the pre-fix INLINED form, pasted, FAILS (rc=$emdash_rc) naming the prose words — so the whole-line contract is load-bearing"
   else
     fail "remedy-lines-oldform-emdash: rc=$emdash_rc err=[$emdash_err] — the pre-fix form must be shown to break, or the assert above measures nothing"
   fi
-  rm -rf "$legacy"
-  mkdir -p "$legacy"
-  printf '%s\n' "$dead" >"$legacy/pid"
-  local optish_rc=0 optish_err=""
-  optish_err="$(eval "$bare -x explanatory prose" 2>&1 >/dev/null)" || optish_rc=$?
-  if [[ "$optish_rc" -ne 0 && "$optish_err" == *"explanatory"* && ! -e "$legacy" ]]; then
-    pass "remedy-lines NON-VACUITY (stale, option-shaped prose): the pre-fix INLINED form fails (rc=$optish_rc) and errors on the prose — with the shipped \`--\`, an option-shaped token is an OPERAND, so the failure is outcome (i) and not the pid-less directory"
-  else
-    fail "remedy-lines-oldform-optish: rc=$optish_rc err=[$optish_err] leftover=$([[ -e "$legacy" ]] && echo yes || echo no) — expected the pasted prose to fail the line as an operand"
-  fi
-  # ...and the SAME prose against the PRE-F2 line (the shipped command with `--` stripped) reproduces
-  # the pid-less-directory outcome, which is why `--` is in the shipped line at all: the token is read
-  # as an OPTION, `rmdir` rejects the invocation, and the lock survives WITHOUT its pid. Measured, not
-  # asserted from memory, so the sentence above cannot outlive the behaviour it describes.
-  rm -rf "$legacy"
-  mkdir -p "$legacy"
-  printf '%s\n' "$dead" >"$legacy/pid"
-  local nodashdash="${bare//-- /}" nodash_rc=0
-  eval "$nodashdash -x explanatory prose" >/dev/null 2>&1 || nodash_rc=$?
-  if [[ "$nodash_rc" -ne 0 && -d "$legacy" && ! -e "$legacy/pid" ]]; then
-    pass "remedy-lines NON-VACUITY (stale, option-shaped prose, PRE-F2 line): with \`--\` stripped the same paste fails (rc=$nodash_rc) having removed only the pid file — the PID-LESS lock directory the guard refuses, manufactured by its own remedy"
-  else
-    fail "remedy-lines-oldform-optish-nodashdash: rc=$nodash_rc dir=$([[ -d "$legacy" ]] && echo yes || echo no) pid=$([[ -e "$legacy/pid" ]] && echo yes || echo no) — expected rmdir to reject the invocation and leave the pid-less directory"
-  fi
   rm -rf "$legacy" "$derived"
 
-  # ---- (4) OPTION-SHAPED, RELATIVE `TMPDIR` (#3549, roborev job 192 F2). QUOTING IS NOT
-  # OPTION-SAFETY: `supervisor_shell_quote` stops word-splitting, globbing and metacharacters, and does
-  # nothing about option parsing, because `rm` reads a leading `-` in an operand as flags whatever
-  # quoting produced it. `TMPDIR=-scratch` is a legitimate (if exotic) configuration, and the guard
-  # itself handles it — every internal operand it builds from `TMPDIR` reaches `[[ ]]`, a glob or a
-  # redirection, none of which parse options — so the ONLY thing that broke was the line the operator
-  # was told to run. Both halves are asserted: the refusal still happens, and the printed line is
-  # executable AS PRINTED from that working directory.
+  # ---- (2) OPTION-SHAPED, RELATIVE `TMPDIR` (#3549, roborev job 192 F2). QUOTING IS NOT OPTION-SAFETY:
+  # `supervisor_shell_quote` stops word-splitting, globbing and metacharacters, and does nothing about
+  # option parsing, because `ls` reads a leading `-` in an operand as flags whatever quoting produced it.
+  # `TMPDIR=-scratch` is a legitimate (if exotic) configuration and the guard itself handles it — every
+  # internal operand it builds reaches `[[ ]]`, which does not parse options — so the only thing that
+  # breaks is the line the operator was told to run.
   local optdir="$d/optshaped" opttmp="-scratch" optlegacy
   mkdir -p "$optdir/$opttmp"
   optlegacy="$optdir/$opttmp/cqlite-worker-supervisor.lock"
   mkdir -p "$optlegacy"
   printf '%s\n' "$dead" >"$optlegacy/pid"
   out="$(legacy_lock_drive_in "$optdir" "$opttmp" "$lane")"; rc=$?
-  remedy_lines_structural "stale-option-shaped-tmpdir" "$out" 1
+  remedy_lines_structural "present-option-shaped-tmpdir" "$out" 1
   bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
   if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out"; then
-    pass "remedy-lines (option-shaped TMPDIR): the guard still classifies and REFUSES with a relative, option-shaped TMPDIR — its own internal operands are option-safe"
+    pass "remedy-lines (option-shaped TMPDIR): the guard still detects and REFUSES with a relative, option-shaped TMPDIR — its own internal operands are option-safe"
   else
     fail "remedy-lines-optshaped-no-refusal: rc=$rc out=[$out] — the guard must work for a relative option-shaped TMPDIR, not only its printed remedy"
   fi
-  local opt_rc=0
-  ( cd "$optdir" && eval "$bare" ) >/dev/null 2>&1 || opt_rc=$?
-  if [[ "$opt_rc" -eq 0 && ! -e "$optlegacy" ]]; then
-    pass "remedy-lines (option-shaped TMPDIR): the bare line runs VERBATIM from that directory and leaves the lock GONE (line=[$bare])"
+  local opt_rc=0 opt_out=""
+  opt_out="$( cd "$optdir" && eval "$bare" 2>/dev/null )" || opt_rc=$?
+  if [[ "$opt_rc" -eq 0 && "$opt_out" == *"cqlite-worker-supervisor.lock"* ]]; then
+    pass "remedy-lines (option-shaped TMPDIR): the bare line runs VERBATIM from that directory and reports the path (line=[$bare])"
   else
-    fail "remedy-lines-optshaped-not-runnable: rc=$opt_rc leftover=$([[ -e "$optlegacy" ]] && echo yes || echo no) line=[$bare] — the printed remedy is not executable as printed for an option-shaped TMPDIR"
+    fail "remedy-lines-optshaped-not-runnable: rc=$opt_rc out=[$opt_out] line=[$bare] — the printed remedy is not executable as printed for an option-shaped TMPDIR"
   fi
   # NON-VACUITY: the SAME line with `--` stripped — the pre-F2 emission — must FAIL on this very case,
   # or the assert above would pass for a path shape that never exercised option parsing.
-  mkdir -p "$optlegacy"
-  printf '%s\n' "$dead" >"$optlegacy/pid"
   local optbare_nodash="${bare//-- /}" optnodash_rc=0 optnodash_err=""
   optnodash_err="$( cd "$optdir" && eval "$optbare_nodash" 2>&1 >/dev/null )" || optnodash_rc=$?
-  if [[ "$optnodash_rc" -ne 0 && -e "$optlegacy/pid" && "$optnodash_err" == *option* ]]; then
-    pass "remedy-lines NON-VACUITY (option-shaped TMPDIR): with \`--\` stripped the identical line FAILS on an invalid option (err=[$optnodash_err]) and removes NOTHING — so the \`--\` in the shipped line is load-bearing, not decoration"
+  if [[ "$optnodash_rc" -ne 0 && "$optnodash_err" == *option* ]]; then
+    pass "remedy-lines NON-VACUITY (option-shaped TMPDIR): with \`--\` stripped the identical line FAILS on an invalid option (err=[$optnodash_err]) — so the \`--\` in the shipped line is load-bearing, not decoration"
   else
-    fail "remedy-lines-optshaped-nodashdash: rc=$optnodash_rc err=[$optnodash_err] pid=$([[ -e "$optlegacy/pid" ]] && echo yes || echo no) — the pre-F2 form must be shown to break here, or the assert above measures nothing"
+    fail "remedy-lines-optshaped-nodashdash: rc=$optnodash_rc err=[$optnodash_err] — the pre-F2 form must be shown to break here, or the assert above measures nothing"
   fi
   rm -rf "$optdir"
 
-  # ---- (4b) NEWLINE-CONTAINING `TMPDIR` (#3549, roborev job 198 F4). A newline survives SINGLE QUOTING
+  # ---- (3) NEWLINE-CONTAINING `TMPDIR` (#3549, roborev job 198 F4). A newline survives SINGLE QUOTING
   # LITERALLY, so the pre-fix rendering split the printed command across two physical lines — and split
   # the DIAGNOSTIC lines too, leaving prose fragments with no `worker-supervisor:` prefix that are
-  # indistinguishable from the one bare line an operator is told to select and paste. The property is
-  # therefore structural AND behavioural: exactly ONE bare line, and that line runs verbatim.
+  # indistinguishable from the one bare line an operator is told to select and paste.
   local nltmp="$d/nl${SV_LF}dir" nllegacy
   mkdir -p "$nltmp"
   nllegacy="$nltmp/cqlite-worker-supervisor.lock"
@@ -5674,19 +5716,19 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
     return 0
   fi
   out="$(legacy_lock_drive "$nltmp" "$lane")"; rc=$?
-  remedy_lines_structural "stale-newline-tmpdir" "$out" 1
+  remedy_lines_structural "present-newline-tmpdir" "$out" 1
   bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
   if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out"; then
-    pass "remedy-lines (newline TMPDIR): the guard still classifies and REFUSES with a newline in TMPDIR"
+    pass "remedy-lines (newline TMPDIR): the guard still detects and REFUSES with a newline in TMPDIR"
   else
     fail "remedy-lines-newline-no-refusal: rc=$rc out=[$out]"
   fi
-  local nl_rc=0
-  eval "$bare" >/dev/null 2>&1 || nl_rc=$?
-  if [[ "$nl_rc" -eq 0 && ! -e "$nllegacy" ]]; then
-    pass "remedy-lines (newline TMPDIR): the ONE bare line runs VERBATIM and leaves the lock GONE (line=[$bare])"
+  local nl_rc=0 nl_out=""
+  nl_out="$(eval "$bare" 2>/dev/null)" || nl_rc=$?
+  if [[ "$nl_rc" -eq 0 && "$nl_out" == *"cqlite-worker-supervisor.lock"* ]]; then
+    pass "remedy-lines (newline TMPDIR): the ONE bare line runs VERBATIM and reports the path (line=[$bare])"
   else
-    fail "remedy-lines-newline-not-runnable: rc=$nl_rc leftover=$([[ -e "$nllegacy" ]] && echo yes || echo no) line=[$bare]"
+    fail "remedy-lines-newline-not-runnable: rc=$nl_rc out=[$nl_out] line=[$bare]"
   fi
   # MUTANT CONTRAST: the SAME drive with `supervisor_shell_quote` restored to the pre-fix
   # single-quote-only form — one function replaced, everything else shipped. The newline then survives
@@ -5705,24 +5747,26 @@ OVERRIDE
   else
     fail "remedy-lines-newline-mutant-drive: the override drive body was not derived from the shipped one ([$SV_DRIVE_BODY_OVERRIDE])"
   fi
-  mkdir -p "$nllegacy"
-  printf '%s\n' "$dead" >"$nllegacy/pid"
   mout="$(legacy_lock_drive_override "$ovr" "$nltmp" "$lane")" || true
   mbare_count="$(printf '%s\n' "$mout" | grep -cvE "$SV_DIAG_RE" || true)"
   mbare="$(printf '%s\n' "$mout" | grep -vE "$SV_DIAG_RE" | head -1)"
   eval "$mbare" >/dev/null 2>&1 || mrc=$?
-  if [[ "$mbare_count" =~ ^[0-9]+$ ]] && [[ "$mbare_count" -gt 1 ]] && [[ "$mrc" -ne 0 || -e "$nllegacy" ]]; then
-    pass "remedy-lines MUTANT CONTRAST (newline TMPDIR): the single-quote-only rendering emits $mbare_count bare lines instead of 1 — the newline split the command AND the diagnostic paths — and the line an operator would select fails or leaves the lock behind (line=[$mbare])"
+  if [[ "$mbare_count" =~ ^[0-9]+$ ]] && [[ "$mbare_count" -gt 1 ]] && [[ "$mrc" -ne 0 ]]; then
+    pass "remedy-lines MUTANT CONTRAST (newline TMPDIR): the single-quote-only rendering emits $mbare_count bare lines instead of 1 — the newline split the command AND the diagnostic paths — and the line an operator would select FAILS (rc=$mrc, line=[$mbare])"
   else
-    fail "remedy-lines-newline-mutant: bare=$mbare_count rc=$mrc leftover=$([[ -e "$nllegacy" ]] && echo yes || echo no) line=[$mbare] out=[$mout] — the pre-fix form must be shown to break, or the assert above measures nothing"
+    fail "remedy-lines-newline-mutant: bare=$mbare_count rc=$mrc line=[$mbare] out=[$mout] — the pre-fix form must be shown to break, or the assert above measures nothing"
   fi
   rm -rf "$nltmp"
 
-  # ---- (5) UNDETERMINABLE shape: no deletion instruction at all, so no bare line either.
-  printf 'not a lock\n' >"$legacy"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  remedy_lines_structural "unknown-not-a-directory" "$out" 0
-  rm -f "$legacy"
+  # ---- (4) THE PROBE COULD NOT ANSWER: no inspection command, so no bare line either. Staged with a
+  # container that does not exist, which needs no permission bits and therefore works as any user.
+  out="$(legacy_lock_drive "$d/no-such-container" "$lane")"; rc=$?
+  remedy_lines_structural "could-not-tell" "$out" 0
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"EXISTENCE PROBE FAILED"* ]]; then
+    pass "remedy-lines (could-not-tell): the probe-failed refusal prints NO bare line — there is nothing to inspect, so no command is offered"
+  else
+    fail "remedy-lines-couldnottell: rc=$rc out=[$out]"
+  fi
   rm -rf "$derived"
 }
 
@@ -5742,10 +5786,12 @@ OVERRIDE
 # line (job 185 F2), then at the diagnostic PATHS (job 198 F4), and re-appeared inside a STATE
 # DESCRIPTION, which reaches the emitter as `$detail`.
 #
-# WHAT WAS ALSO UNCOVERED, AND IS THE REASON THIS IS A SWEEP: the job-198 newline case staged the STALE
-# branch only. The other refusal branches had never been driven with a control character at all — and
-# two of them (`container-not-searchable`, `lock-directory-not-readable`) had never been driven by NAME
-# by any case. Both are staged here.
+# THE SUBJECT SET SHRANK WITH THE CLASSIFIER (#3549, lead ruling), AND ONE MEMBER IS LEFT. The pid
+# file's bytes and an unexpected entry's NAME used to reach emitted text too, and each had its own
+# rendered channel and its own case here; the guard no longer READS the lock, so neither value exists
+# any more and both cases went with the parsing. What remains is the value that is still
+# operator-controlled and still interpolated: the `TMPDIR`-derived PATH, staged below with a newline AND
+# an ESC in it, on the one branch that reports a container (`container-not-searchable`).
 #
 # THE MUTANTS ARE THREE, NOT ONE, because there are now TWO layers and a single mutant cannot tell a
 # redundant layer from a load-bearing one: the pre-fix WORLD (both reverted) must break, and each layer
@@ -5753,12 +5799,15 @@ OVERRIDE
 # can break the contract — and asserting it costs two extra drives.
 # ---------------------------------------------------------------------------
 test_legacy_lock_emitted_dynamic_values_are_rendered() {
-  local d lane legacy out rc dead esc nltmp ovr n
+  local d lane out rc dead esc nltmp ovr n
   d="$(new_case_dir)"
   common_env "$d"
   lane="lane3549rend$$"
   esc=$'\033'
 
+  # A REAL reaped pid: the staged lock is the ordinary shape, so nothing below refuses for an unrelated
+  # reason. Its VALUE no longer reaches any diagnostic (the guard does not read the lock), which is why
+  # the only remaining dynamic value in emitted text is the `TMPDIR`-derived path.
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
   fixture_wait "$dead"
@@ -5779,7 +5828,7 @@ test_legacy_lock_emitted_dynamic_values_are_rendered() {
       fail "legacy-lock-render-premise-a: dir=$([[ -d "$nltmp" ]] && echo yes || echo no) searchable=$([[ -x "$nltmp" ]] && echo yes || echo no) — the container state cannot be staged, so nothing below is attributable"
     fi
     out="$(legacy_lock_drive "$nltmp" "$lane")"; rc=$?
-    remedy_lines_structural "unknown-container-not-searchable" "$out" 0
+    remedy_lines_structural "could-not-tell-container-not-searchable" "$out" 0
     if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"container-not-searchable:"* ]]; then
       pass "legacy-lock render (a): an unsearchable container REFUSES and names the cause (container-not-searchable), with a newline and an ESC in the path"
     else
@@ -5798,7 +5847,7 @@ test_legacy_lock_emitted_dynamic_values_are_rendered() {
     # ---- M1: THE PRE-FIX WORLD — the state string interpolates the container path RAW **and** the
     # emitter does not render its prose. Both, in one override, because either layer alone holds.
     ovr="$d/m-prefix-world.sh"; : >"$ovr"
-    if sv_mutant_override "$ovr" supervisor_legacy_lock_state '$(supervisor_shell_quote "$dir")' '$dir' \
+    if sv_mutant_override "$ovr" supervisor_legacy_lock_presence '$(supervisor_shell_quote "$dir")' '$dir' \
        && sv_mutant_override "$ovr" supervisor_legacy_lock_refuse 'detail="$(supervisor_one_line "$detail")" || true' 'detail="$detail"'; then
       chmod 000 "$nltmp"
       out="$(legacy_lock_drive_override "$ovr" "$nltmp" "$lane")" || true
@@ -5814,7 +5863,7 @@ test_legacy_lock_emitted_dynamic_values_are_rendered() {
     # ---- M2: the STATE VALUE raw, emitter rendering INTACT. The contract must still hold — this is the
     # structural claim: a caller that interpolates raw text cannot break the emitted output.
     ovr="$d/m-state-only.sh"; : >"$ovr"
-    if sv_mutant_override "$ovr" supervisor_legacy_lock_state '$(supervisor_shell_quote "$dir")' '$dir'; then
+    if sv_mutant_override "$ovr" supervisor_legacy_lock_presence '$(supervisor_shell_quote "$dir")' '$dir'; then
       chmod 000 "$nltmp"
       out="$(legacy_lock_drive_override "$ovr" "$nltmp" "$lane")" || true
       chmod 0755 "$nltmp"
@@ -5842,104 +5891,27 @@ test_legacy_lock_emitted_dynamic_values_are_rendered() {
     fi
     rm -rf "$nltmp"
   fi
-
-  # ---- (b) A CARRIAGE RETURN INSIDE THE PID FILE. Line 1 cannot hold an LF, so the pid value's hazard
-  # is CR: `12<CR>34` is one line whose second half overwrites the prefix on a terminal. Staged as bytes
-  # on disk, so this is the real value the classifier read.
-  legacy="$d/tmpcr/cqlite-worker-supervisor.lock"
-  mkdir -p "$legacy"
-  printf '12\r34\n' >"$legacy/pid"
-  out="$(legacy_lock_drive "$d/tmpcr" "$lane")"; rc=$?
-  remedy_lines_structural "unknown-pid-cr" "$out" 0
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"pid-not-well-formed"* ]] \
-     && [[ "$out" != *"$SV_CR"* ]]; then
-    pass "legacy-lock render (b): a CR inside the pid file refuses as pid-not-well-formed and NO raw CR reaches the output — the recorded bytes cannot move an operator's cursor"
-  else
-    fail "legacy-lock-render-b: rc=$rc raw_cr=$([[ "$out" == *"$SV_CR"* ]] && echo yes || echo no) out=[$out]"
-  fi
-  ovr="$d/m-pid-world.sh"; : >"$ovr"
-  # The expected count is 3 as of #3549 job 208 F2, which added a THIRD value-channel interpolation of
-  # the recorded pid (the out-of-range cause). Every one of them goes through the renderer, which is why
-  # the count is the thing that moves here and never the rule.
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '$(supervisor_shell_quote "$pid")' '$pid' 3 \
-     && sv_mutant_override "$ovr" supervisor_legacy_lock_refuse 'detail="$(supervisor_one_line "$detail")" || true' 'detail="$detail"'; then
-    out="$(legacy_lock_drive_override "$ovr" "$d/tmpcr" "$lane")" || true
-    if [[ "$out" == *"$SV_CR"* ]]; then
-      pass "legacy-lock render MUTANT CONTRAST (b, PRE-FIX WORLD): the raw pid value puts a live CR into the emitted refusal, which overwrites the worker-supervisor: prefix on a terminal"
-    else
-      fail "legacy-lock-render-mutant-b: no raw CR in the pre-fix output — the contrast measures nothing. out=[$out]"
-    fi
-  fi
-  rm -rf "$d/tmpcr"
-
-  # ---- (c) A NEWLINE IN AN UNEXPECTED ENTRY NAME (`lock-directory-not-exactly-one-pid-file`). This
-  # state was already rendered with a bare `printf '%q'`, which is one-line-safe on THIS bash and not on
-  # the 3.2 the file supports — the assumption `supervisor_shell_quote` exists to repair. The mutant here
-  # is therefore the fully RAW name: it proves the rendering is load-bearing, and the bash-3.2 `%q`
-  # difference is not observable on this host, which is why the fix is a call to the verifying renderer
-  # rather than a version check.
-  legacy="$d/tmpent/cqlite-worker-supervisor.lock"
-  mkdir -p "$legacy"
-  printf '%s\n' "$dead" >"$legacy/pid"
-  : >"$legacy/oops${SV_LF}two"
-  out="$(legacy_lock_drive "$d/tmpent" "$lane")"; rc=$?
-  remedy_lines_structural "unknown-entries-newline" "$out" 0
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"lock-directory-not-exactly-one-pid-file"* ]]; then
-    pass "legacy-lock render (c): an unexpected entry whose NAME contains a newline refuses, names the cause, and emits no unprefixed line"
-  else
-    fail "legacy-lock-render-c: rc=$rc out=[$out]"
-  fi
-  ovr="$d/m-entry-world.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '$(supervisor_shell_quote "${_e##*/}")' '${_e##*/}' \
-     && sv_mutant_override "$ovr" supervisor_legacy_lock_refuse 'detail="$(supervisor_one_line "$detail")" || true' 'detail="$detail"'; then
-    out="$(legacy_lock_drive_override "$ovr" "$d/tmpent" "$lane")" || true
-    n="$(printf '%s\n' "$out" | grep -cvE "$SV_DIAG_RE" || true)"
-    if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -gt 0 ]]; then
-      pass "legacy-lock render MUTANT CONTRAST (c, PRE-FIX WORLD): a raw entry name emits $n unprefixed line(s)"
-    else
-      fail "legacy-lock-render-mutant-c: $n bare lines out=[$out]"
-    fi
-  fi
-  rm -rf "$d/tmpent"
-
-  # ---- (d) `lock-directory-not-readable`: the second branch no case had ever driven by name. No control
-  # character is involved — this closes the coverage half of the sweep, not the rendering half.
-  if [[ "$(id -u)" == "0" ]]; then
-    skip "legacy-lock render (d): running as root, where an unreadable directory is still readable — the state cannot be staged"
-  else
-    legacy="$d/tmpnr/cqlite-worker-supervisor.lock"
-    mkdir -p "$legacy"
-    printf '%s\n' "$dead" >"$legacy/pid"
-    chmod 000 "$legacy"
-    out="$(legacy_lock_drive "$d/tmpnr" "$lane")"; rc=$?
-    chmod 0755 "$legacy"
-    remedy_lines_structural "unknown-lock-dir-not-readable" "$out" 0
-    if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"lock-directory-not-readable"* ]]; then
-      pass "legacy-lock render (d): an UNREADABLE lock directory refuses by name (lock-directory-not-readable) — a branch no case had driven"
-    else
-      fail "legacy-lock-render-d: rc=$rc out=[$out] — expected a refusal naming lock-directory-not-readable"
-    fi
-    rm -rf "$d/tmpnr"
-  fi
-
 }
 
 
 # ---------------------------------------------------------------------------
-# Test 50-lock (#3549, roborev job 201 F3): THE CLASSIFIER SURVIVES A CALLER THAT PROPAGATES ERREXIT.
+# Test 50-lock (#3549, roborev job 201 F3): THE PROBE SURVIVES A CALLER THAT PROPAGATES ERREXIT, AND THE
+# GUARD'S FAIL-CLOSED FALLBACK IS LOAD-BEARING.
 #
-# `shopt -p <opt>` EXITS NON-ZERO PRECISELY WHEN THE OPTION IS DISABLED, and `dotglob`/`nullglob` are
-# normally off — so the failure is not an edge case, it is EVERY RUN. It was invisible only because bash
-# does not propagate errexit into a `$( )` unless the caller sets `inherit_errexit`. With it set, the
-# save-and-restore aborted BETWEEN `shopt -s` and the restore: the caller's globbing was left CHANGED,
-# and no refusal was printed at all — a supervisor that neither started nor said why.
+# `inherit_errexit` is what makes a caller's `set -e` reach INSIDE the `$( )` the guard wraps the probe
+# in. The original defect was a `shopt -p` capture (non-zero whenever an option is disabled, i.e. every
+# run) aborting BETWEEN the mutation and the restore: the caller's globbing was left CHANGED and no
+# refusal was printed at all — a supervisor that neither started nor said why. The `shopt` block is
+# DELETED with the classifier, so the probe now has no abort site by construction. That is a weaker
+# claim than "the abort is fixed", and only it is true — so what is measured here is the property that
+# still has teeth: whatever goes wrong inside the probe, the guard REFUSES rather than dying silently.
 #
-# TWO LEVELS ARE MEASURED, because they answer different questions:
-#   - THE GUARD: under such a caller the refusal still happens, unchanged. That is the user-visible
-#     property, and it holds even with a broken classifier, because the guard treats a classifier that
-#     could not answer as a refusal (fail-closed).
-#   - THE CLASSIFIER, called directly through a BARE assignment: that is where the `|| true` fixes are
-#     observable at all, since a `… || fallback` caller SUPPRESSES errexit inside the substitution.
+# TWO LEVELS, because they answer different questions:
+#   - THE PROBE, called directly through a BARE assignment under `set -e` + `inherit_errexit`: it
+#     ANSWERS, and it leaves the caller's shell as it found it.
+#   - THE GUARD: a probe forced to exit non-zero produces the `could-not-tell` REFUSAL, and with the
+#     fallback removed the same mutant kills the supervisor silently. That contrast is the fallback's
+#     entire value.
 # ---------------------------------------------------------------------------
 test_legacy_lock_classifier_survives_inherit_errexit() {
   local d lane legacy out rc dead ovr got
@@ -5967,59 +5939,52 @@ test_legacy_lock_classifier_survives_inherit_errexit() {
     return 0
   fi
 
-  # ---- THE GUARD, under errexit: the stale refusal is byte-for-byte the ordinary one.
-  remedy_lines_structural "errexit-stale" "$out" 1
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"LEFT BEHIND"* ]]; then
-    pass "legacy-lock errexit: with the caller propagating errexit into the classifier's substitution, the guard still classifies and prints the full stale refusal with its ONE deletion line"
+  # ---- THE GUARD, under errexit: the presence refusal is the ordinary one, command line and all.
+  remedy_lines_structural "errexit-present" "$out" 1
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"EXISTS there"* ]]; then
+    pass "legacy-lock errexit: with the caller propagating errexit into the probe's substitution, the guard still detects and prints the full presence refusal with its ONE inspection line"
   else
     fail "legacy-lock-errexit-guard: rc=$rc out=[$out] — an errexit-propagating caller must get the same refusal"
   fi
 
-  # ---- THE CLASSIFIER, directly, bare assignment: it answers, and it leaves the caller's globbing as it
-  # found it. Both halves of the finding in one drive.
-  got="$(legacy_state_drive_errexit "$legacy")"
-  if [[ "$got" == *"STATE=[stale $dead]"* ]] \
+  # ---- THE PROBE, directly, bare assignment: it answers, and it leaves the caller's shell as it found
+  # it. `dotglob`/`nullglob` are reported because the DELETED classifier changed them; the probe must
+  # not, and reporting them keeps that regression visible if anything ever pins an option here again.
+  got="$(legacy_presence_drive_errexit "$legacy")"
+  if [[ "$got" == *"STATE=[present]"* ]] \
      && [[ "$got" == *"OPTS=[shopt -u dotglob|shopt -u nullglob]"* ]]; then
-    pass "legacy-lock errexit: called directly from a shell with set -e AND inherit_errexit, the classifier ANSWERS (stale $dead) and restores dotglob/nullglob to the caller's values"
+    pass "legacy-lock errexit: called directly from a shell with set -e AND inherit_errexit, the probe ANSWERS (present) and leaves dotglob/nullglob at the caller's values"
   else
-    fail "legacy-lock-errexit-direct: got=[$got] — expected STATE=[stale $dead] and both options restored to unset"
+    fail "legacy-lock-errexit-direct: got=[$got] — expected STATE=[present] and both options unchanged"
   fi
 
-  # ---- MUTANT CONTRAST: `shopt -p dotglob` with its `|| true` removed. Under the same caller the
-  # classifier DIES at that assignment: no STATE line is printed at all, which is precisely "aborts
-  # before it can restore options or print the intended refusal".
-  ovr="$d/m-shopt.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true' 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null'; then
-    got="$(legacy_state_drive_errexit "$legacy" "$ovr")"
-    if [[ "$got" != *"STATE="* ]]; then
-      pass "legacy-lock errexit MUTANT CONTRAST: without the \`|| true\`, the same caller kills the classifier at the shopt capture — no state is ever printed (output=[$got])"
-    else
-      fail "legacy-lock-errexit-mutant: the pre-fix form still answered ([$got]) — the contrast measures nothing"
-    fi
-
-    # ...and at the GUARD level the same mutant is INVISIBLE, because the guard's fail-closed fallback
-    # suppresses errexit for the substitution: the refusal is unchanged. That is defence in depth, and it
-    # is asserted so nobody reads the mutant above as a user-visible regression.
-    out="$(legacy_lock_drive_errexit_override "$ovr" "$d/tmp" "$lane")" || true
-    if legacy_refusal_ok "$out" && [[ "$out" == *"LEFT BEHIND"* ]]; then
-      pass "legacy-lock errexit: the SAME mutant is invisible through the guard — its fail-closed caller shape suppresses errexit inside the substitution, so the operator still gets the correct stale refusal"
-    else
-      fail "legacy-lock-errexit-guard-mutant: out=[$out] — the guard must still refuse correctly even with the classifier's shopt capture unguarded"
-    fi
-  fi
-
-  # ---- AND THE FALLBACK IS LOAD-BEARING: with BOTH the shopt guard and the guard's fallback removed,
-  # the supervisor exits with NO refusal at all — the silent death the fallback converts into a refusal.
-  ovr="$d/m-shopt-nofallback.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true' 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null' \
-     && sv_mutant_override "$ovr" supervisor_legacy_lock_guard \
-          'state="$(supervisor_legacy_lock_state "$legacy")" || state="unknown state-classifier-exited-nonzero"' \
-          'state="$(supervisor_legacy_lock_state "$legacy")"'; then
+  # ---- THE FALLBACK, BOTH DIRECTIONS. A probe forced to exit non-zero is the shape the fallback exists
+  # for; nothing in the shipped probe can do that today, so it is INJECTED, and the injection is stated
+  # rather than disguised as a natural failure.
+  ovr="$d/m-probe-fails.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_presence \
+       "  printf 'present\\n'" "  printf 'present\\n'; return 1"; then
     out="$(legacy_lock_drive_errexit_override "$ovr" "$d/tmp" "$lane")"; rc=$?
-    if [[ "$rc" -ne 0 ]] && [[ "$out" != *"LEGACY GLOBAL supervisor lock"* ]] && [[ "$out" != *ACQUIRED=* ]]; then
-      pass "legacy-lock errexit MUTANT CONTRAST (fallback): with the classifier's guard AND the guard's fallback removed, the supervisor exits rc=$rc having printed no refusal — the silent death both layers exist to prevent (output=[$out])"
+    if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"presence-probe-exited-nonzero"* ]]; then
+      pass "legacy-lock errexit (fail-closed): a probe that exits non-zero produces the could-not-tell REFUSAL naming presence-probe-exited-nonzero — never a silent non-start and never a start"
     else
-      fail "legacy-lock-errexit-nofallback: rc=$rc out=[$out] — expected a silent non-start, or the fallback's value is not established"
+      fail "legacy-lock-errexit-fallback: rc=$rc out=[$out] — expected the fail-closed refusal"
+    fi
+
+    # ...AND WITH THE FALLBACK REMOVED the same mutant kills the supervisor with no message at all —
+    # the silent death the fallback converts into a refusal.
+    ovr="$d/m-probe-fails-nofallback.sh"; : >"$ovr"
+    if sv_mutant_override "$ovr" supervisor_legacy_lock_presence \
+         "  printf 'present\\n'" "  printf 'present\\n'; return 1" \
+       && sv_mutant_override "$ovr" supervisor_legacy_lock_guard \
+            'state="$(supervisor_legacy_lock_presence "$legacy")" || state="could-not-tell presence-probe-exited-nonzero"' \
+            'state="$(supervisor_legacy_lock_presence "$legacy")"'; then
+      out="$(legacy_lock_drive_errexit_override "$ovr" "$d/tmp" "$lane")"; rc=$?
+      if [[ "$rc" -ne 0 ]] && [[ "$out" != *"LEGACY GLOBAL supervisor lock"* ]] && [[ "$out" != *ACQUIRED=* ]]; then
+        pass "legacy-lock errexit MUTANT CONTRAST (fallback): with the guard's fallback removed, the same failing probe ends the supervisor rc=$rc having printed no refusal — the silent death the fallback prevents"
+      else
+        fail "legacy-lock-errexit-nofallback: rc=$rc out=[$out] — expected a silent non-start, or the fallback's value is not established"
+      fi
     fi
   fi
 
@@ -6214,14 +6179,14 @@ test_legacy_lock_diagnostics_survive_xpg_echo() {
   else
     fail "xpg_echo-no-refusal: rc=$rc out=[$out]"
   fi
-  remedy_lines_structural "xpg_echo-stale" "$out" 1
+  remedy_lines_structural "xpg_echo-present" "$out" 1
   bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
-  local nl_rc=0
-  eval "$bare" >/dev/null 2>&1 || nl_rc=$?
-  if [[ "$nl_rc" -eq 0 && ! -e "$legacy" ]]; then
-    pass "xpg_echo: the ONE bare line still runs VERBATIM under an inherited xpg_echo and leaves the lock GONE (line=[$bare])"
+  local nl_rc=0 nl_out=""
+  nl_out="$(eval "$bare" 2>/dev/null)" || nl_rc=$?
+  if [[ "$nl_rc" -eq 0 && "$nl_out" == *"cqlite-worker-supervisor.lock"* ]]; then
+    pass "xpg_echo: the ONE bare line still runs VERBATIM under an inherited xpg_echo and reports the path (line=[$bare])"
   else
-    fail "xpg_echo-not-runnable: rc=$nl_rc leftover=$([[ -e "$legacy" ]] && echo yes || echo no) line=[$bare]"
+    fail "xpg_echo-not-runnable: rc=$nl_rc out=[$nl_out] line=[$bare]"
   fi
 
   # MUTANT CONTRAST: the shipped refusal with all five `printf '%s\n'` emissions restored to `echo` —
@@ -6231,23 +6196,19 @@ test_legacy_lock_diagnostics_survive_xpg_echo() {
   ovr="$d/m-xpg-echo.sh"; : >"$ovr"
   if sv_mutant_override "$ovr" supervisor_legacy_lock_refuse \
        "printf '%s\\n' \"worker-supervisor" 'echo "worker-supervisor' 5; then
-    mkdir -p "$legacy"
-    printf '%s\n' "$dead" >"$legacy/pid"
     mout="$(legacy_lock_drive_env_override "$ovr" "$nltmp" "$lane" BASHOPTS=xpg_echo)" || true
     mbare_count="$(printf '%s\n' "$mout" | grep -cvE "$SV_DIAG_RE" || true)"
     mbare="$(printf '%s\n' "$mout" | grep -vE "$SV_DIAG_RE" | head -1)"
     eval "$mbare" >/dev/null 2>&1 || mrc=$?
-    if [[ "$mbare_count" =~ ^[0-9]+$ ]] && [[ "$mbare_count" -gt 1 ]] && [[ "$mrc" -ne 0 || -e "$legacy" ]]; then
-      pass "xpg_echo MUTANT CONTRAST: with \`echo\` restored, the identical drive emits $mbare_count bare lines instead of 1 — the emitter interpreted the renderers' escapes back into newlines — and the line an operator would select fails or leaves the lock behind (line=[$mbare])"
+    if [[ "$mbare_count" =~ ^[0-9]+$ ]] && [[ "$mbare_count" -gt 1 ]] && [[ "$mrc" -ne 0 ]]; then
+      pass "xpg_echo MUTANT CONTRAST: with \`echo\` restored, the identical drive emits $mbare_count bare lines instead of 1 — the emitter interpreted the renderers' escapes back into newlines — and the line an operator would select FAILS (rc=$mrc, line=[$mbare])"
     else
-      fail "xpg_echo-mutant: bare=$mbare_count rc=$mrc leftover=$([[ -e "$legacy" ]] && echo yes || echo no) line=[$mbare] out=[$mout] — the pre-fix emitter must be shown to break, or the assert above measures nothing"
+      fail "xpg_echo-mutant: bare=$mbare_count rc=$mrc line=[$mbare] out=[$mout] — the pre-fix emitter must be shown to break, or the assert above measures nothing"
     fi
   fi
   # ...and the same mutant is INVISIBLE without the inherited option, which is what makes this an
   # inherited-state defect rather than a rendering one: `echo` and `printf '%s\n'` agree when xpg_echo
   # is off, so no ordinary run could ever have exposed it.
-  mkdir -p "$legacy"
-  printf '%s\n' "$dead" >"$legacy/pid"
   mout="$(legacy_lock_drive_override "$ovr" "$nltmp" "$lane")" || true
   mbare_count="$(printf '%s\n' "$mout" | grep -cvE "$SV_DIAG_RE" || true)"
   if [[ "$mbare_count" == 1 ]]; then
@@ -6258,26 +6219,6 @@ test_legacy_lock_diagnostics_survive_xpg_echo() {
 
   rm -rf "$nltmp"
 }
-
-# ---------------------------------------------------------------------------
-# Test 47h (#3549, roborev job 205 class sweep): THE PID DIGIT TEST DOES NOT INHERIT THE CALLER'S
-# COLLATION.
-#
-# A bracket RANGE is resolved through the locale's collation order, so `[!0-9]` does not mean "not an
-# ASCII digit" outside the C locale. MEASURED under `LC_ALL=en_US.utf8`: ARABIC-INDIC DIGIT THREE
-# (U+0663) is NOT matched by `[!0-9]` and therefore PASSES the well-formedness test — after which
-# `kill -0` fails, procfs has no such entry, the verdict is `dead`, and the operator is handed a
-# DELETION remedy for a `pid` file no supervisor ever wrote. The same string is rejected by an explicit
-# character LIST under the identical locale, which is why the fix REMOVES the dependency rather than
-# neutralising it: no save, no restore, nothing that can abort.
-#
-# `LC_ALL` in the environment IS effective (bash calls setlocale at startup — unlike `GLOBIGNORE`), so
-# the state is set with plain `env` in the driver.
-# ---------------------------------------------------------------------------
-
-# U+0663 as UTF-8 BYTES, so this file's own encoding cannot change what is tested.
-SV_NONASCII_DIGIT=$'\xd9\xa3'
-
 
 t test_legacy_lock_diagnostics_survive_xpg_echo
 
@@ -6667,43 +6608,44 @@ sv_refusal_has_no_override_advice() {
 }
 
 test_legacy_lock_refusals_never_advertise_the_override() {
-  local d tmp lane legacy out rc live dead ovr mout code probe fn body
+  local d tmp lane legacy out rc live ovr mout code probe fn body
   d="$(new_case_dir)"
   common_env "$d"
   tmp="$d/tmp"; lane="lane3549adv$$"
   mkdir -p "$tmp"
   legacy="$tmp/cqlite-worker-supervisor.lock"
 
-  # ---- (1) LIVE — the state where the advice was actively harmful.
+  # ---- (1) PRESENT — the state where the advice was actively harmful: an operator refused BECAUSE
+  # another supervisor may be running, told how to skip the check.
   fixture_bg sleep 300
   live=$FIXTURE_LAST_PID
   mkdir -p "$legacy"
   printf '%s\n' "$live" >"$legacy/pid"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"is ACTIVE"* ]]; then
-    pass "no-override-advice PREMISE (live): the drive refused over a LIVE holder, so the text below is the live refusal"
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"EXISTS there"* ]]; then
+    pass "no-override-advice PREMISE (present): the drive refused over a present legacy lock, so the text below is the presence refusal"
   else
-    fail "no-override-advice-premise-live: rc=$rc out=[$out] — the live refusal was not reached and the assert below has no subject"
+    fail "no-override-advice-premise-present: rc=$rc out=[$out] — the presence refusal was not reached and the assert below has no subject"
   fi
-  sv_refusal_has_no_override_advice live "$out"
+  sv_refusal_has_no_override_advice present "$out"
   # ...and the two remedies that DO belong there are present, so the removal did not leave the operator
   # with no guidance at all.
   if [[ "$out" == *"stop the pre-#3467 supervisor on this box, or upgrade that checkout to #3467+"* ]]; then
-    pass "no-override-advice (live): the generic remedy still names both legitimate actions — stop the legacy supervisor, or upgrade that checkout past #3467"
+    pass "no-override-advice (present): the generic remedy still names both legitimate actions — stop the legacy supervisor, or upgrade that checkout past #3467"
   else
-    fail "no-override-advice-live-remedy-lost: out=[$out] — removing the override clause must not remove the remedy"
+    fail "no-override-advice-present-remedy-lost: out=[$out] — removing the override clause must not remove the remedy"
   fi
 
-  # ---- (2) MUTANT CONTRAST: the pre-fix line, restored in the emitter, on the SAME live state. The
-  # assert above must be shown to have teeth — a green over text that never contained the string would
-  # measure nothing.
+  # ---- (2) MUTANT CONTRAST: the pre-fix line, restored in the emitter, on the SAME state. The assert
+  # above must be shown to have teeth — a green over text that never contained the string would measure
+  # nothing.
   ovr="$d/m-advice.sh"; : >"$ovr"
   if sv_mutant_override "$ovr" supervisor_legacy_lock_refuse \
        'stop the pre-#3467 supervisor on this box, or upgrade that checkout to #3467+.' \
        'stop the pre-#3467 supervisor, or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check.'; then
     mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
-    if [[ "$mout" == *"is ACTIVE"* ]] && [[ "$mout" == *"set SUPERVISOR_LOCK explicitly to opt out"* ]]; then
-      pass "no-override-advice MUTANT CONTRAST: with the pre-fix line restored, the LIVE refusal hands the operator the one instruction that puts a second supervisor in this worktree — the assert above reds on exactly this text"
+    if [[ "$mout" == *"EXISTS there"* ]] && [[ "$mout" == *"set SUPERVISOR_LOCK explicitly to opt out"* ]]; then
+      pass "no-override-advice MUTANT CONTRAST: with the pre-fix line restored, the refusal hands the operator the one instruction that puts a second supervisor in this worktree — the assert above reds on exactly this text"
     else
       fail "no-override-advice-mutant: out=[$mout] — the pre-fix form must be shown to break, or the assert measures nothing"
     fi
@@ -6711,42 +6653,17 @@ test_legacy_lock_refusals_never_advertise_the_override() {
   fixture_kill "$live"
   rm -rf "$legacy"
 
-  # ---- (3) STALE and (4) the two UNKNOWN shapes. Same property, all states.
-  fixture_bg sleep 0.1
-  dead=$FIXTURE_LAST_PID
-  fixture_wait "$dead"
-  mkdir -p "$legacy"
-  printf '%s\n' "$dead" >"$legacy/pid"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"LEFT BEHIND"* ]]; then
-    pass "no-override-advice PREMISE (stale): the drive reached the stale refusal"
+  # ---- (3) THE OTHER REFUSING STATE: the probe could not answer. Both states, since each builds its own
+  # detail and remedy text. Staged with a container that does not exist, so it needs no permission bits.
+  out="$(legacy_lock_drive "$d/no-such-container" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"EXISTENCE PROBE FAILED"* ]]; then
+    pass "no-override-advice PREMISE (could-not-tell): the drive reached the probe-failed refusal"
   else
-    fail "no-override-advice-premise-stale: rc=$rc out=[$out]"
+    fail "no-override-advice-premise-couldnottell: rc=$rc out=[$out]"
   fi
-  sv_refusal_has_no_override_advice stale "$out"
-  rm -rf "$legacy"
+  sv_refusal_has_no_override_advice could-not-tell "$out"
 
-  mkdir -p "$legacy"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"pid-file-missing"* ]]; then
-    pass "no-override-advice PREMISE (unknown/pid-file-missing): the drive reached an undeterminable refusal"
-  else
-    fail "no-override-advice-premise-unknown: rc=$rc out=[$out]"
-  fi
-  sv_refusal_has_no_override_advice unknown-pid-file-missing "$out"
-  rm -rf "$legacy"
-
-  printf 'not a lock dir\n' >"$legacy"
-  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"not-a-directory"* ]]; then
-    pass "no-override-advice PREMISE (unknown/not-a-directory): the drive reached the second undeterminable refusal"
-  else
-    fail "no-override-advice-premise-notdir: rc=$rc out=[$out]"
-  fi
-  sv_refusal_has_no_override_advice unknown-not-a-directory "$out"
-  rm -f "$legacy"
-
-  # ---- (5) STRUCTURAL, over the two functions that BUILD refusal text: the emitter and the guard that
+  # ---- (4) STRUCTURAL, over the two functions that BUILD refusal text: the emitter and the guard that
   # passes it the per-state detail and remedy. Full-line comments are stripped first — this file's own
   # prose necessarily NAMES the variable to explain why it is absent — and what remains is code, where a
   # BARE `SUPERVISOR_LOCK` (not a `$SUPERVISOR_LOCK` expansion) can only be prose about the override.
