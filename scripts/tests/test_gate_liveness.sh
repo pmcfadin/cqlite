@@ -508,6 +508,27 @@ fi
 grep -q 'mktemp -d "${TMPDIR:-/tmp}/gate-liveness-snap' "$READER" && grep -q 'trap _cleanup_snaps EXIT' "$READER" \
   && ok "11b.17c snapshots live in a private mkdtemp removed by an EXIT trap" \
   || bad "11b.17c snapshots live in a private mkdtemp removed by an EXIT trap" "not found"
+# BEHAVIOURAL, because the structural check above passed while the reader leaked 868 directories.
+# The dir was created INSIDE a function invoked as `$(…)` — a subshell — so `SNAP_DIR=` never
+# reached the parent: the trap saw nothing to clean and every call made a new dir. A trap that is
+# present is not a trap that fires, and only counting the artifacts could tell the difference.
+snapdir_count() { ls -d "${TMPDIR:-/tmp}"/gate-liveness-snap.* 2>/dev/null | wc -l | tr -d ' '; }
+_snap_before=$(snapdir_count)
+mk_summary "$TMP/leak.txt" run-LK "PASS"
+for _ in 1 2 3 4 5 6 7 8 9 10; do bash "$READER" "$TMP/leak.txt" >/dev/null 2>&1; done
+mk_summary "$TMP/leak2.txt" run-LK2 "INCOMPLETE (gate did not finish)"
+mk_beat "$TMP/leak2.txt.heartbeat" run-LK2 5
+for _ in 1 2 3 4 5; do bash "$READER" "$TMP/leak2.txt" >/dev/null 2>&1; done
+_snap_after=$(snapdir_count)
+if [ "$_snap_after" -le "$_snap_before" ]; then
+  ok "11b.17d 15 reader invocations leak NO snapshot directories ($_snap_before -> $_snap_after)"
+else
+  bad "11b.17d reader invocations leak snapshot directories" "$_snap_before -> $_snap_after"
+fi
+# The split that makes it work must stay: the directory is created in the CALLING shell.
+grep -q '^_ensure_snap_dir || verdict UNKNOWN' "$READER" \
+  && ok "11b.17e the snapshot dir is created in the calling shell, not inside \$( )" \
+  || bad "11b.17e the snapshot dir is created in the calling shell" "not found"
 
 echo "=== section 11c: the four roborev job-157 findings, each with a control ==="
 # (a) Medium — a TERMINAL result in a TRUNCATED block was reported COMPLETE. emit_summary

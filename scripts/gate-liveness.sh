@@ -146,11 +146,24 @@ SNAP_DIR=""
 # shellcheck disable=SC2317  # runs via the EXIT trap
 _cleanup_snaps() { [ -n "$SNAP_DIR" ] && rm -rf "$SNAP_DIR" 2>/dev/null; return 0; }
 trap _cleanup_snaps EXIT
+# _ensure_snap_dir — create the private snapshot directory, IN THE CALLING SHELL.
+#
+# This is deliberately separate from _snap_of, and the reason is a bug this split fixes: the
+# first version created the directory inside _snap_of, which is invoked as `$(_snap_of …)` — a
+# COMMAND SUBSTITUTION, i.e. a subshell. So `SNAP_DIR=` was assigned in the subshell and never
+# reached the parent, which meant (a) the EXIT trap saw an empty SNAP_DIR and cleaned nothing,
+# and (b) every call created ANOTHER directory. Measured: 868 leaked `gate-liveness-snap.*`
+# directories after the suites had run. Assignments do not escape `$( )`.
+_ensure_snap_dir() {
+  [ -n "$SNAP_DIR" ] && return 0
+  SNAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-liveness-snap.XXXXXX" 2>/dev/null) || return 1
+  return 0
+}
+
 # _snap_of <file> <tag> -> path to an immutable copy on stdout; non-zero on failure.
+# Requires _ensure_snap_dir to have run in the calling shell first.
 _snap_of() {
-  if [ -z "$SNAP_DIR" ]; then
-    SNAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-liveness-snap.XXXXXX" 2>/dev/null) || return 1
-  fi
+  [ -n "$SNAP_DIR" ] || return 1
   local dst="$SNAP_DIR/$2"
   cp -- "$1" "$dst" 2>/dev/null || return 1
   printf '%s' "$dst"
@@ -196,6 +209,7 @@ fi
 if [ ! -r "$SUMMARY" ]; then
   verdict UNKNOWN 4 "summary-unreadable; $SUMMARY exists but cannot be read"
 fi
+_ensure_snap_dir || verdict UNKNOWN 4 "no-snapshot-dir; could not create a private temp directory under ${TMPDIR:-/tmp} to read the artifacts consistently"
 _SUM_SNAP=$(_snap_of "$SUMMARY" summary) || _SUM_SNAP=""
 if [ -z "$_SUM_SNAP" ]; then
   verdict UNKNOWN 4 "summary-unsnapshotable; could not take a private copy of $SUMMARY to read it consistently (no writable temp dir, or the file vanished)"
