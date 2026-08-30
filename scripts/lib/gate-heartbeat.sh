@@ -117,7 +117,33 @@ HOST_NAME=$(uname -n 2>/dev/null || echo unknown)
 #
 # Only `kill0` — no identity available at all — may fall back to bare existence, and the reader
 # already refuses to grant an epoch-based RUNNING from such a beat.
+# A ZOMBIE gate is GONE. Its pid entry — and therefore its /proc start time — survive until its
+# parent reaps it, so identity comparison alone says "still ours" about a process that has already
+# exited. After a SIGKILL under a stopped or non-reaping parent the beater would publish forever and
+# the reader would report a dead gate as RUNNING: a false liveness claim, which is the one direction
+# this whole mechanism must never fail in (roborev job 203).
+#
+# AFFIRMATIVE reading only: 0 solely on a confirmed zombie. Unmeasurable => 1 (not a zombie), so an
+# unreadable state never fabricates a death.
+_proc_is_zombie() {  # <pid> -> 0 = provably a zombie, 1 = not, or unmeasurable
+  local pid=$1 _st _state
+  if _st=$(cat "/proc/$pid/stat" 2>/dev/null) && [ -n "$_st" ]; then
+    # `comm` is parenthesised and may contain ')' and spaces: read state after the LAST ')'.
+    _state=${_st##*)}
+    set -- $_state
+    [ "${1:-}" = "Z" ] && return 0
+    return 1
+  fi
+  if _state=$(ps -o state= -p "$pid" 2>/dev/null) && [ -n "$_state" ]; then
+    case "$_state" in Z*) return 0 ;; *) return 1 ;; esac
+  fi
+  return 1
+}
+
 _gate_alive() {
+  # Checked on EVERY tier, before identity: a zombie's identity still matches, so identity alone
+  # cannot see this. The kill0 tier needs it most — `kill -0` succeeds on a zombie outright.
+  _proc_is_zombie "$GATE_PID" && return 1
   case "$PARENT_CHECK" in
     starttime|lstart)
       local now

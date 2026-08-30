@@ -324,6 +324,8 @@ _alias_of=""
 [ "$_c_log" = "$_c_sum" ] && _alias_of="the summary"
 [ -z "$_alias_of" ] && [ "$_c_log" = "$_c_hb" ] && _alias_of="the heartbeat"
 [ -z "$_alias_of" ] && [ "$_c_log" = "$_c_lock" ] && _alias_of="the launch reservation"
+_c_mutex=$(_canon "$SUMMARY.launch-lock.mutex")
+[ -z "$_alias_of" ] && [ "$_c_log" = "$_c_mutex" ] && _alias_of="the reclamation mutex"
 if [ -z "$_alias_of" ] && [ -e "$LOGFILE" ]; then
   [ -e "$SUMMARY" ] && [ "$LOGFILE" -ef "$SUMMARY" ] && _alias_of="the summary (same inode)"
   [ -z "$_alias_of" ] && [ -e "$SUMMARY.heartbeat" ] && [ "$LOGFILE" -ef "$SUMMARY.heartbeat" ] \
@@ -574,61 +576,97 @@ _proc_identity() {
 # is no window to interpret and no age heuristic to get wrong. Reclamation then needs no timer at
 # all — only affirmative proof that the recorded owner is gone.
 _res_ident=$(_proc_identity $$)
-if ! ln -s "unit=$UNIT|pid=$$|start=$_res_ident" "$_reserve" 2>/dev/null; then
-  _own=$(readlink "$_reserve" 2>/dev/null || true)
-  _own_unit=${_own#*unit=}; _own_unit=${_own_unit%%|*}
-  _own_pid=${_own#*pid=};   _own_pid=${_own_pid%%|*}
-  _own_start=${_own#*start=}
-  _live=no
-  # The LAUNCHER first: it is alive throughout its own acquisition, which is what the previous
-  # designs' window problem reduced to. Its pid is pinned by a start identity so a recycled pid
-  # cannot make a finished run look live.
-  case "$_own_pid" in
-    ''|*[!0-9]*) ;;
-    *) if kill -0 "$_own_pid" 2>/dev/null && ! _proc_is_zombie "$_own_pid"; then
-         if [ -n "$_own_start" ]; then
-           [ "$(_proc_identity "$_own_pid")" = "$_own_start" ] && _live=yes
-         else
-           _live=yes
-         fi
-       fi ;;
-  esac
-  # ...then the unit, which is what keeps the lock meaningful after the launcher exits.
-  if [ "$_live" = no ] && [ -n "$_own_unit" ] \
-     && systemctl --user is-active --quiet "$_own_unit" 2>/dev/null; then
-    _live=yes
-  fi
-  # An UNREADABLE or unparseable link is not proof of death either — refuse rather than guess.
-  if [ -z "$_own" ] || [ -z "$_own_pid" ]; then
-    echo "gate-detached: the reservation at '$_reserve' exists but its owner cannot be read." >&2
-    echo "               Refusing rather than reclaiming a lock that may be live (#3473)." >&2
+_res_target="unit=$UNIT|pid=$$|start=$_res_ident"
+_mutex="$_reserve.mutex"
+if ! ln -s "$_res_target" "$_reserve" 2>/dev/null; then
+  # CONTENDED. Classification and replacement must happen as ONE indivisible step, and an earlier
+  # version of this block got that wrong in a way worth recording, because the wrong claim was
+  # stated confidently in code, tests and docs: it reclaimed by renaming the stale link into an
+  # mktemp scratch dir and called that a compare-and-swap. `mv` is NOT a compare-and-swap — it moves
+  # whatever occupies the path and compares nothing with an expected value, and `rename()` offers no
+  # such semantics. So two launchers that BOTH classified the old owner as dead could both succeed:
+  # the first replaced the link and launched, and the second's delayed `mv` then moved the FIRST's
+  # LIVE reservation away and installed its own. Both gates ran on one summary path — precisely the
+  # outcome this lock exists to prevent. Demonstrated, not theorised (roborev job 203).
+  #
+  # `flock` is the fix rather than a mkdir mutex because the kernel releases it when the fd closes,
+  # so a reclaimer that dies mid-sequence leaves NOTHING to time out — the stale-lock problem this
+  # design already refused to reintroduce once.
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "gate-detached: the summary path '$SUMMARY' is contended and 'flock' is unavailable, so" >&2
+    echo "               reclamation cannot be serialised. Refusing rather than racing another" >&2
+    echo "               launcher onto one summary path (#3473). Give this run its own path." >&2
     exit 1
   fi
-  if [ "$_live" = yes ]; then
-    echo "gate-detached: the summary path '$SUMMARY' is already owned by a LIVE run" >&2
-    echo "               (unit=${_own_unit:-?} launcher-pid=${_own_pid:-?}). Two gates on one path" >&2
-    echo "               overwrite each other's summary and heartbeat, so neither could be polled" >&2
-    echo "               reliably (#2874/#3473). Give this run a summary path of its own." >&2
+  # Probe writability in a SUBSHELL, then exec. `exec` with no command applies its redirections to
+  # the CURRENT shell permanently — so the obvious `exec 9>"$_mutex" 2>/dev/null` silenced stderr for
+  # the whole rest of the script, and every later refusal printed NOTHING while still exiting
+  # non-zero (caught by 4b.76, which asserts the refusal text and not merely the exit code). Append
+  # rather than truncate: another launcher may hold a flock on this inode.
+  if ! ( : >> "$_mutex" ) 2>/dev/null; then
+    echo "gate-detached: cannot open the reclamation mutex '$_mutex'. Refusing (#3473)." >&2
     exit 1
   fi
-  # PROVABLY dead. Claim the reclamation by renaming the link away — atomic, so only one process
-  # proceeds and a loser refuses rather than racing.
-  _stale=$(mktemp -d "$_reserve.stale.XXXXXX" 2>/dev/null) || {
-    echo "gate-detached: cannot create a scratch name to reclaim the stale reservation." >&2
-    exit 1
-  }
-  if ! mv "$_reserve" "$_stale/" 2>/dev/null; then
-    rm -rf "$_stale" 2>/dev/null || true
-    echo "gate-detached: another launcher is reclaiming the stale reservation at '$_reserve'." >&2
+  exec 9>>"$_mutex"
+  if ! flock -w 30 9; then
+    echo "gate-detached: another launcher holds the reclamation mutex for '$SUMMARY'." >&2
     echo "               Refusing rather than racing it (#3473). Retry, or use a distinct path." >&2
     exit 1
   fi
-  rm -rf "$_stale" 2>/dev/null || true
-  ln -s "unit=$UNIT|pid=$$|start=$_res_ident" "$_reserve" 2>/dev/null || {
-    echo "gate-detached: cannot create the reservation at '$_reserve'." >&2
-    echo "               Refusing rather than racing another launcher (#3473)." >&2
-    exit 1
-  }
+  # RE-READ under the mutex. Anything learned before acquiring it describes a tree that may already
+  # have changed — the same point-of-use rule the log symlink recheck exists for.
+  if ln -s "$_res_target" "$_reserve" 2>/dev/null; then
+    :   # the path became free while we waited; we own it now
+  else
+    _own=$(readlink "$_reserve" 2>/dev/null || true)
+    _own_unit=${_own#*unit=}; _own_unit=${_own_unit%%|*}
+    _own_pid=${_own#*pid=};   _own_pid=${_own_pid%%|*}
+    _own_start=${_own#*start=}
+    _live=no
+    # The LAUNCHER first: it is alive throughout its own acquisition. Its pid is pinned by a start
+    # identity so a recycled pid cannot make a finished run look live, and a ZOMBIE is GONE — its
+    # pid entry outlives its exit, so `kill -0` alone would call a launcher that can never start a
+    # unit "live" and its reservation could never self-heal.
+    case "$_own_pid" in
+      ''|*[!0-9]*) ;;
+      *) if kill -0 "$_own_pid" 2>/dev/null && ! _proc_is_zombie "$_own_pid"; then
+           if [ -n "$_own_start" ]; then
+             [ "$(_proc_identity "$_own_pid")" = "$_own_start" ] && _live=yes
+           else
+             _live=yes
+           fi
+         fi ;;
+    esac
+    # ...then the unit, which is what keeps the lock meaningful after the launcher exits.
+    if [ "$_live" = no ] && [ -n "$_own_unit" ] \
+       && systemctl --user is-active --quiet "$_own_unit" 2>/dev/null; then
+      _live=yes
+    fi
+    # An UNREADABLE or unparseable link is not proof of death either — refuse rather than guess.
+    if [ -z "$_own" ] || [ -z "$_own_pid" ]; then
+      echo "gate-detached: the reservation at '$_reserve' exists but its owner cannot be read." >&2
+      echo "               Refusing rather than reclaiming a lock that may be live (#3473)." >&2
+      exit 1
+    fi
+    if [ "$_live" = yes ]; then
+      echo "gate-detached: the summary path '$SUMMARY' is already owned by a LIVE run" >&2
+      echo "               (unit=${_own_unit:-?} launcher-pid=${_own_pid:-?}). Two gates on one path" >&2
+      echo "               overwrite each other's summary and heartbeat, so neither could be polled" >&2
+      echo "               reliably (#2874/#3473). Give this run a summary path of its own." >&2
+      exit 1
+    fi
+    # PROVABLY dead, and no other RECLAIMER can be here — the mutex guarantees that. A brand-new
+    # launcher's first `ln -s` can still win the gap below; then ours fails and we refuse, which is
+    # correct: exactly one process ever holds a successful `ln -s`.
+    rm -f "$_reserve" 2>/dev/null || true
+    if ! ln -s "$_res_target" "$_reserve" 2>/dev/null; then
+      echo "gate-detached: another launcher took the reservation at '$_reserve' while it was being" >&2
+      echo "               reclaimed. Refusing rather than racing it (#3473)." >&2
+      exit 1
+    fi
+  fi
+  flock -u 9 2>/dev/null || true
+  exec 9>&-
 fi
 
 # NOW truncate the log: every refusal path is behind us, so this cannot destroy a previous log for

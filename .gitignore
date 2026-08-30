@@ -261,11 +261,11 @@ docs/sstable-guide-audit/
 /.agent-gate-lite-summary.txt.heartbeat
 /.agent-gate-delta-summary.txt.heartbeat
 /.agent-gate-summary.txt.launch-lock
-/.agent-gate-summary.txt.launch-lock.stale.*
-/.agent-gate-lite-summary.txt.launch-lock.stale.*
-/.agent-gate-delta-summary.txt.launch-lock.stale.*
+/.agent-gate-summary.txt.launch-lock.mutex
 /.agent-gate-lite-summary.txt.launch-lock
+/.agent-gate-lite-summary.txt.launch-lock.mutex
 /.agent-gate-delta-summary.txt.launch-lock
+/.agent-gate-delta-summary.txt.launch-lock.mutex
 /.agent-gate-summary.txt.heartbeat.tmp.*
 /.agent-gate-lite-summary.txt.heartbeat.tmp.*
 /.agent-gate-delta-summary.txt.heartbeat.tmp.*

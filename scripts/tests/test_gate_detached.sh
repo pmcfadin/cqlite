@@ -899,18 +899,45 @@ bash "$LAUNCHER" --summary /nonexistent-dir-3473/s.txt --log "$pn" -- --only fil
 # The reservation is a SYMLINK whose TARGET encodes the owner (job 199). `ln -s` fails if the path
 # exists — mutual exclusion — and its target is arbitrary text, so ownership is published by the very
 # act of acquiring. That is what removed the acquisition WINDOW the directory design had.
-if grep -qF 'ln -s "unit=$UNIT|pid=$$|start=$_res_ident" "$_reserve"' "$LAUNCHER"; then
+if grep -qF '_res_target="unit=$UNIT|pid=$$|start=$_res_ident"' "$LAUNCHER" \
+   && grep -qF 'ln -s "$_res_target" "$_reserve"' "$LAUNCHER"; then
   ok "4b.80 the reservation is an atomic, SELF-IDENTIFYING symlink"
 else
   bad "4b.80 the reservation is an atomic, self-identifying symlink" "not found"
 fi
-# The rename target is mktemp-created (11f.1 caught the predictable `$$` form), so the move is
-# `mv "$_reserve" "$_stale/"` — into the scratch directory. The compare-and-swap property is
-# unchanged: only one process can move `$_reserve` away, and the loser's mv fails.
-if grep -q 'mv "$_reserve" "$_stale/"' "$LAUNCHER" && grep -q 'mktemp -d "$_reserve.stale' "$LAUNCHER"; then
-  ok "4b.81 reclamation is claimed by an atomic RENAME into an mktemp scratch dir"
+# 4b.81 REPLACED, and the old assertion was WORSE than stale — it pinned a claim that was FALSE.
+# It read "reclamation is claimed by an atomic RENAME into an mktemp scratch dir", asserting that
+# only one of two concurrent reclaimers could succeed. `mv` is not a compare-and-swap: it moves
+# whatever occupies the path and compares nothing against an expected value. Demonstrated
+# interleaving (roborev job 203): A reclaims and launches, then B's delayed `mv` moves A's LIVE
+# reservation away and installs its own — both gates on one summary path. A test whose NAME asserts
+# a false property is worse than no test, because it is cited as evidence.
+#
+# Reclamation is now serialised by `flock`, with the classification RE-READ inside the mutex.
+if grep -q 'flock -w 30 9' "$LAUNCHER" && grep -q 'RE-READ under the mutex' "$LAUNCHER"; then
+  ok "4b.81 reclamation is serialised by flock, and re-reads the owner INSIDE the mutex"
 else
-  bad "4b.81 reclamation is claimed by an atomic rename into an mktemp scratch dir" "not found"
+  bad "4b.81 reclamation is serialised by flock and re-reads inside the mutex" "not found"
+fi
+# flock, not a mkdir mutex: the kernel drops it when the fd closes, so a reclaimer dying mid-sequence
+# leaves nothing to time out — the stale-lock window this design already refused to reintroduce.
+if grep -q 'command -v flock' "$LAUNCHER"; then
+  ok "4b.81b an unavailable flock REFUSES rather than racing unserialised"
+else
+  bad "4b.81b an unavailable flock refuses rather than racing" "no fail-closed check"
+fi
+# `exec` with no command applies redirections to the current shell, so a `2>/dev/null` there is
+# permanent and silences every later refusal. Pinned because the symptom is a SILENT non-zero exit.
+# CODE ONLY. This assertion first read the whole file and failed, because the COMMENT above the fix
+# quotes the defective form verbatim to explain it — prose defeating the guard that reads it, the
+# same channel-sharing shape CLAUDE.md anchors the roborev census matcher at column zero for. The
+# separation is the fix, not a reworded comment: strip comment lines, then judge the code.
+_launcher_code=$(grep -vE '^[[:space:]]*#' "$LAUNCHER")
+if printf '%s' "$_launcher_code" | grep -qF 'exec 9>>"$_mutex"' \
+   && ! printf '%s' "$_launcher_code" | grep -qF 'exec 9>"$_mutex" 2>/dev/null'; then
+  ok "4b.81c the mutex fd is opened without a permanent stderr redirection"
+else
+  bad "4b.81c the mutex fd is opened without a permanent stderr redirection" "stderr may be silenced"
 fi
 if grep -qF 'pid=$$' "$LAUNCHER" && grep -qF 'kill -0 "$_own_pid"' "$LAUNCHER"; then
   ok "4b.82 liveness counts the LAUNCHER PID too, closing the unit-startup window"
@@ -1053,7 +1080,17 @@ fi
 kill "$_zwatch" 2>/dev/null || true; wait "$_zwatch" 2>/dev/null || true
 # No false positive on a LIVE process, and an UNMEASURABLE state must read as NOT-a-zombie so the
 # caller keeps refusing: "I could not tell" may never license reclaiming a lock that may be live.
-_proc_is_zombie $ && bad "4b.98 a live process is not called a zombie" "false positive on self"                     || ok "4b.98 a live process is not called a zombie"
+# A genuinely LIVE process, whose pid is captured from `$!` so there is no doubt what was passed.
+# This case previously read `_proc_is_zombie $` — a LITERAL dollar, an unmeasurable "pid" — so it
+# passed by taking the unmeasurable branch and was a duplicate of 4b.99, testing nothing about a
+# live process. It passed for the wrong reason, which is the only kind of green worth distrusting.
+sleep 30 & _livepid=$!
+if _proc_is_zombie "$_livepid"; then
+  bad "4b.98 a LIVE process is not called a zombie" "false positive on live pid $_livepid"
+else
+  ok "4b.98 a LIVE process is not called a zombie (pid $_livepid)"
+fi
+kill "$_livepid" 2>/dev/null || true; wait "$_livepid" 2>/dev/null || true
 _proc_is_zombie 999999999 && bad "4b.99 an unmeasurable state reads as NOT-a-zombie (conservative)"                                  "an unreadable pid was called a zombie — that licenses lock theft"                              || ok "4b.99 an unmeasurable state reads as NOT-a-zombie (conservative)"
 
 # Control: a writable existing summary is FINE — the check must not reject the normal case.

@@ -2886,8 +2886,13 @@ _tree_excluded() {
       # #3473: gate-detached.sh's summary-path reservation, a fourth artifact written beside the
       # summary by contract. Self-healing rather than released (the gate outlives its launcher), so
       # it can legitimately be present for the whole run.
-      "$TREE_EXCLUDE_REL".launch-lock|"$TREE_EXCLUDE_REL".launch-lock/*) return 0 ;;
-      "$TREE_EXCLUDE_REL".launch-lock.stale.*) return 0 ;;
+      # EXACT artifacts only (roborev job 203). This was `.launch-lock|.launch-lock/*`, a whole
+      # SUBTREE — but the reservation is a SYMLINK and never has children, so the wildcard excused
+      # nothing real and instead blinded tree-integrity to any file placed under that path,
+      # letting a direct gate emit a false clean result. The `.stale.*` arm is gone with the
+      # rename-based reclamation it covered; the mutex is a plain file `flock` needs.
+      "$TREE_EXCLUDE_REL".launch-lock) return 0 ;;
+      "$TREE_EXCLUDE_REL".launch-lock.mutex) return 0 ;;
     esac
   fi
   if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL" ]; then return 0; fi

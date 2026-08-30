@@ -484,7 +484,7 @@ rename permission from the **directory**, not the file. Both are pinned as tests
 artifacts the launcher *reads*; it does nothing to stop two launchers pointing at one summary path,
 where each would prove ownership of its own artifacts while their heartbeat renames and summary
 rewrites destroyed each other. A **symlink** beside the summary reserves the path, and a second
-launcher is refused while its owner is alive. It is deliberately **self-healing rather than released**:
+launcher is refused while its owner is alive; contended reclamation is serialised by `flock`. It is deliberately **self-healing rather than released**:
 the gate outlives its launcher, so no process could reliably remove the lock, and a lock nobody can
 release is worse than no lock.
 
@@ -494,9 +494,30 @@ exists** — that is the mutual exclusion — and its target is **arbitrary text
 acquires it. Liveness counts the **launcher pid**, not just the unit, which closes the window between
 reserving the path and the unit becoming active — during it the launcher is by definition alive. That
 pid is **pinned by a start identity**, because a short-lived pid can be reused and would otherwise
-make a finished gate's reservation look live forever. Reclamation of a provably-dead owner is claimed
-by an atomic **rename** into an `mktemp` scratch directory, so two reclaimers cannot delete each
-other's replacement locks: only one `mv` can succeed and the loser refuses rather than racing.
+make a finished gate's reservation look live forever. Reclamation of a provably-dead owner is serialised by
+**`flock`**, with the owner re-read INSIDE the mutex.
+
+**THE PREVIOUS SENTENCE HERE WAS FALSE, AND IT IS WORTH RECORDING WHY IT SURVIVED SO LONG.** It read:
+*"reclamation is claimed by an atomic rename into an mktemp scratch directory, so two reclaimers
+cannot delete each other's replacement locks: only one `mv` can succeed and the loser refuses rather
+than racing."* **`mv` is not a compare-and-swap.** It moves whatever occupies the path and compares
+nothing against an expected value; `rename()` offers no such semantics. Two launchers that both
+classified the old owner as dead could therefore both succeed — the first replaced the link and
+launched, and the second's *delayed* `mv` moved the first's **LIVE** reservation away and installed
+its own, putting two gates on one summary path. That is the exact outcome this lock exists to
+prevent, and the claim to the contrary was asserted in a code comment, a commit message, a test's
+NAME, and this document. The interleaving is now demonstrated rather than argued (roborev job 203),
+which is what should have happened when the claim was first made: **"atomic" describes the operation,
+not the transaction**, and a sequence of individually-atomic steps is not itself atomic.
+
+`flock` is used rather than a `mkdir` mutex because the kernel releases it when the fd closes, so a
+reclaimer that dies mid-sequence leaves **nothing to time out** — reintroducing a stale-lock window
+here would have undone the very simplification above. The classification is re-read inside the mutex,
+because anything learned before acquiring it describes a tree that may already have changed. Two
+smaller traps found in the same place: `exec` with no command applies its redirections to the
+**current shell permanently**, so an `exec 9>… 2>/dev/null` silences every later refusal (the
+launcher then exits non-zero in total silence — a test asserting only the exit code cannot see it);
+and the mutex fd is opened for **append**, since another launcher may hold a lock on that inode.
 
 **A two-operation lock, and its deadline, were both tried and removed — this is the substantive
 finding of the round.** `mkdir` is also atomic, but a directory cannot carry its owner atomically, so
