@@ -11,16 +11,49 @@
 //!
 //! `cqlite-core` already unit-tests both against `rows_to_record_batch`
 //! (`cqlite-core/src/export/arrow_convert_tests.rs`). Those tests pin the
-//! CONVERTER. They cannot tell you whether the error still surfaces at the
-//! surface an operator actually touches: `cqlite export --format parquet` goes
-//! through `cqlite_cli::output::parquet::create_streaming_parquet_writer` →
+//! CONVERTER. This file covers the two layers ABOVE it, and says which is which
+//! — an earlier revision called itself a "CLI surface" test while every case
+//! stopped one layer short of the command (roborev, round 8).
+//!
+//! ## Layer 1 — the WRITER boundary (`writer_boundary` cases below)
+//!
+//! `cqlite export --format parquet` goes through
+//! `cqlite_cli::output::parquet::create_streaming_parquet_writer` →
 //! `StreamingWriter::write_chunk`, which is a different code path (streaming,
 //! chunked, schema built once at construction) from the batch converter and
 //! maps core errors into `OutputError`. A mapping that swallowed the error, or a
-//! streaming path that skipped the check, would leave both core unit tests green
-//! while the CLI wrote a lossy Parquet file. These tests close that gap: they
-//! drive the EXACT constructor `commands/export.rs` calls (see
-//! `cqlite-cli/src/commands/export.rs`, `create_streaming_parquet_writer`).
+//! streaming path that skipped the check, would leave the core unit tests green.
+//! These cases drive the EXACT constructor `commands/export.rs` calls, for BOTH
+//! contracts and BOTH stages (`write_chunk` and `finalize`).
+//!
+//! ## Layer 2 — the COMMAND surface (`command_surface` cases below)
+//!
+//! Layer 1 still cannot see the command layer: `commands/export.rs` maps each
+//! writer `Result` with `.map_err(...)?`, and turning one of those into
+//! `let _ = …` would swallow the refusal, leave a half-written file on disk and
+//! exit 0 with every Layer-1 test green. So the AC3 case is ALSO driven through
+//! the real binary (`env!("CARGO_BIN_EXE_cqlite")`, spawned as a process — the
+//! test FAILS, never skips, if the binary is not there), asserting the process
+//! exits non-zero, that the diagnostic carries the command layer's OWN wrapper
+//! text (`"Failed to finalize Parquet"` is stamped by the CLI command modules
+//! and by nothing in `cqlite-core` or the output writers), and that no readable
+//! Parquet file is left behind.
+//!
+//! ### Why only AC3 is driven end-to-end
+//!
+//! AC1's precondition is not reachable from the CLI's INPUT surface. The read
+//! path builds every `Value` FROM the declared type, so a schema that disagrees
+//! with the data yields a NULL or a value of the declared type — never a
+//! mistyped one. Measured while writing these tests: eight deliberate
+//! schema/data type disagreements over `test_basic.simple_table` and
+//! `test_collections.collection_table` (text→int, text→boolean, text→uuid,
+//! boolean→text, uuid→int, bigint→int, `set<text>`→int, `list<int>`→text) all
+//! exported SUCCESSFULLY; none produced an AC1 refusal. AC1 is therefore a
+//! defence-in-depth invariant against an internal decoder bug, and it travels
+//! the SAME two `.map_err(…)?` statements in `commands/export.rs` that the AC3
+//! case proves end-to-end. Inducing it at the command surface would require a
+//! deliberately corrupt fixture, which is a bigger fixture question than this
+//! issue — recorded here rather than left as an unstated gap.
 //!
 //! Every case pairs the negative with a POSITIVE CONTROL built the same way, so
 //! a writer that rejected everything (or a helper that never wrote anything)
@@ -359,4 +392,232 @@ fn int32_col0(bytes: &[u8]) -> Vec<Option<i32>> {
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Layer 2 — the COMMAND surface: `cqlite export --format parquet`, real binary
+// ---------------------------------------------------------------------------
+
+/// TABLE-granular corpus resolution (#3220): walk EVERY candidate root for the
+/// table this lane needs, rather than committing to a root by keyspace.
+#[path = "../../cqlite-core/tests/support/datasets_root.rs"]
+mod datasets_root;
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The committed CQL type declaration these cases rewrite, and the rewrite.
+///
+/// Bound to the committed schema on purpose: the substitution count is asserted,
+/// so if `basic-types.cql` ever stops declaring this column exactly this way the
+/// case REDS instead of silently exporting an unmodified schema and passing for
+/// the wrong reason.
+const DECLARED_LINE: &str = "    varchar_field VARCHAR,";
+const REDECLARED_LINE: &str = "    varchar_field DECIMAL,";
+
+/// The `cqlite` binary under test.
+///
+/// `CARGO_BIN_EXE_<name>` is set by cargo for every integration test of the
+/// package that declares the bin, so the binary is BUILT by the same
+/// `cargo test` invocation that runs this file. The existence check exists so
+/// that an unavailable binary is a NAMED failure rather than an opaque spawn
+/// error — and never a skip, which is the vacuous pass this file exists to
+/// prevent.
+fn cqlite_binary() -> PathBuf {
+    let path = PathBuf::from(env!("CARGO_BIN_EXE_cqlite"));
+    assert!(
+        path.is_file(),
+        "the cqlite binary must exist at {} — cargo builds it for this test target, so its \
+         absence is a build problem, not a reason to skip the command-surface assertions",
+        path.display()
+    );
+    path
+}
+
+/// The corpus root carrying `test_basic.simple_table`.
+///
+/// Fail-closed (#3220): the fixture is committed, so an absent one is a red, not
+/// a skip. `describe_search` names every root that was searched.
+fn simple_table_data_dir() -> PathBuf {
+    datasets_root::sstables_root_for_table("test_basic", "simple_table").unwrap_or_else(|| {
+        panic!(
+            "test_basic.simple_table is a committed fixture and MUST be present for the \
+             command-surface cases: {}",
+            datasets_root::describe_search("test_basic", "simple_table")
+        )
+    })
+}
+
+/// The committed `test-data/schemas/basic-types.cql`, read as a string.
+fn committed_basic_types_schema() -> String {
+    let path = datasets_root::schema_path("basic-types.cql")
+        .unwrap_or_else(|| panic!("committed schema test-data/schemas/basic-types.cql not found"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// Run `cqlite --schema … --data-dir … export <out> --format parquet --table …`
+/// as a child process and return `(succeeded, stderr)`.
+fn run_export_command(schema: &Path, data_dir: &Path, out: &Path) -> (bool, String) {
+    let output = Command::new(cqlite_binary())
+        .args([
+            "--schema",
+            schema.to_str().expect("schema path is UTF-8"),
+            "--data-dir",
+            data_dir.to_str().expect("data dir path is UTF-8"),
+            "export",
+            out.to_str().expect("output path is UTF-8"),
+            "--format",
+            "parquet",
+            "--table",
+            "test_basic.simple_table",
+        ])
+        .output()
+        .expect("the cqlite binary must be spawnable");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Assert that `path` does NOT hold a valid Parquet file.
+///
+/// A refused export may legitimately leave the opened file behind (the writer
+/// stamps the `PAR1` preamble before the first row group), but it must never
+/// leave one a reader would accept: the footer is what makes a Parquet file
+/// readable, so a *valid* file here would mean the command finished a lossy
+/// export and reported failure — or reported success on a truncated one.
+fn assert_no_valid_parquet_left(path: &Path) {
+    if !path.exists() {
+        return; // nothing written at all — the strongest form of the property
+    }
+    let bytes = std::fs::read(path).expect("read the leftover export output");
+    assert!(
+        bytes.len() < 8 || &bytes[bytes.len() - 4..] != b"PAR1",
+        "a refused export must not leave a footer-complete Parquet file at {} ({} bytes)",
+        path.display(),
+        bytes.len()
+    );
+    let readable = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
+        .and_then(|b| b.build())
+        .is_ok();
+    assert!(
+        !readable,
+        "a refused export must not leave a READABLE Parquet file at {}",
+        path.display()
+    );
+}
+
+/// AC3 (#1487) at the command surface: `cqlite export --format parquet` must
+/// FAIL, name the refusal, and leave no readable Parquet behind.
+///
+/// # How the offending value is produced, and why it is legitimate
+///
+/// CQL `decimal` is arbitrary-scale, so a scale above the fixed export scale is
+/// ordinary Cassandra data — but no committed fixture carries one (the corpus
+/// decimals top out at scale 3) and CQLite's own writer cannot mint one, so the
+/// value has to come from the schema side. This case exports the committed
+/// `test_basic.simple_table` corpus under the committed `basic-types.cql` with
+/// ONE type declaration rewritten to `decimal`. The cell bytes then decode to a
+/// genuine `Value::Decimal` whose scale exceeds `DECIMAL_FIXED_SCALE` — at the
+/// converter boundary indistinguishable from one decoded out of a
+/// Cassandra-written high-scale decimal, which is the condition AC3 governs.
+/// (`rescale_decimal`'s own doc records the same condition arising from a
+/// corrupt on-disk scale, issue #1755.)
+///
+/// The assertion on `"Failed to finalize Parquet"` is the WIRING evidence. That
+/// wrapper text belongs to the CLI command layer — `commands/export.rs:470` for
+/// the `export` subcommand this case invokes, and `commands/export_sstable.rs`
+/// for its `export-sstable` sibling — and appears nowhere in `cqlite-core` or in
+/// the output writers. Seeing it therefore proves the refusal travelled
+/// `commands/export.rs`'s `.map_err(…)?` rather than being produced (and
+/// possibly swallowed) below it.
+#[test]
+fn command_surface_ac3_export_fails_and_leaves_no_valid_parquet() {
+    let data_dir = simple_table_data_dir();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+
+    let committed = committed_basic_types_schema();
+    assert_eq!(
+        committed.matches(DECLARED_LINE).count(),
+        1,
+        "basic-types.cql must declare `{DECLARED_LINE}` exactly once — this case rewrites that \
+         declaration, so a schema change must RED here rather than export an unmodified schema"
+    );
+    let schema_path = tmp.path().join("basic-types-decimal.cql");
+    std::fs::write(
+        &schema_path,
+        committed.replace(DECLARED_LINE, REDECLARED_LINE),
+    )
+    .expect("write the rewritten schema");
+
+    let out = tmp.path().join("refused.parquet");
+    let (ok, stderr) = run_export_command(&schema_path, &data_dir, &out);
+
+    assert!(
+        !ok,
+        "the export command must FAIL on a decimal the fixed export scale cannot hold; \
+         stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains("Failed to finalize Parquet"),
+        "the diagnostic must carry the COMMAND layer's own wrapper text, which is what proves \
+         the refusal propagated through commands/export.rs: {stderr}"
+    );
+    assert!(
+        stderr.contains("varchar_field")
+            && stderr.contains("exceeds the fixed export scale 9")
+            && stderr.contains("refusing to truncate"),
+        "the diagnostic must name the column and the AC3 refusal: {stderr}"
+    );
+    assert_no_valid_parquet_left(&out);
+}
+
+/// POSITIVE CONTROL for the case above: the SAME command, the SAME table and the
+/// SAME corpus under the COMMITTED schema must succeed and write a readable
+/// Parquet file with rows in it.
+///
+/// Without it, any unrelated breakage — a bad `--data-dir`, an unparsable
+/// schema, a binary that fails on every invocation — would satisfy the negative.
+#[test]
+fn command_surface_control_export_succeeds_under_the_committed_schema() {
+    let data_dir = simple_table_data_dir();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+
+    let schema_path = tmp.path().join("basic-types.cql");
+    std::fs::write(&schema_path, committed_basic_types_schema()).expect("write the schema");
+
+    let out = tmp.path().join("control.parquet");
+    let (ok, stderr) = run_export_command(&schema_path, &data_dir, &out);
+
+    assert!(ok, "the control export must SUCCEED: {stderr}");
+    let bytes = std::fs::read(&out).expect("the control export must write its output file");
+    assert_eq!(
+        &bytes[bytes.len() - 4..],
+        b"PAR1",
+        "the control output must be footer-complete"
+    );
+    let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
+        .expect("the control output must be a readable Parquet file")
+        .build()
+        .expect("the control output must build a record batch reader");
+    let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().expect("decode");
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        rows > 0,
+        "the control export must contain rows — a 0-row export would make the negative vacuous"
+    );
+
+    // The rewritten column must carry live values under its committed type: if
+    // it were absent or all-NULL, the negative above could not be about it.
+    let live = batches
+        .iter()
+        .filter_map(|b| {
+            b.column_by_name("varchar_field")
+                .map(|c| c.len() - c.null_count())
+        })
+        .sum::<usize>();
+    assert!(
+        live > 0,
+        "`varchar_field` must export live values under its committed VARCHAR declaration"
+    );
 }
