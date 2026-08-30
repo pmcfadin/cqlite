@@ -218,7 +218,9 @@
 //! * the decoder never has to split a text a CORRECT CLI would render
 //!   unbalanced, because such a node was refused before the split: at a
 //!   NON-refused node the golden's rendering both scanned and gave the node's
-//!   members back, and a correct CLI renders exactly that text. That is what makes
+//!   members back, and a correct CLI's text carries the same brackets and
+//!   separators — the scalar-SPELLING residual [`golden_rendering`] declares can
+//!   move neither, no CQL scalar spelling carrying a bracket. That is what makes
 //!   an imbalance a REFUSAL (a declared gap) rather than an "unbalanced bracket"
 //!   DIVERGENCE blamed on a CLI that did nothing wrong.
 //!
@@ -246,8 +248,9 @@
 //!      EMPTY golden container must render as an empty body, and a golden of TWO
 //!      OR MORE members must render as a non-empty one.
 //!
-//! See [`decidable_despite_node_refusal`] (finding N3), which applies the two
-//! together, and [`body_emptiness_bound`] for the second.
+//! The FRAME is required by the DECODER, at each node's own depth ([`strip`]),
+//! including the cell's root node; the emptiness bound is
+//! [`decidable_despite_node_refusal`] + [`body_emptiness_bound`] (finding N3).
 //!
 //! THE RESIDUAL, which is real and is therefore declared rather than implied
 //! away: WHICH members the body holds is NOT compared at a refused node. So a
@@ -638,9 +641,11 @@ fn field_type<'t>(ty: Option<&'t CqlType>, key: &str) -> Option<&'t CqlType> {
 ///      the shortest rendering of any container is its bracket PAIR, so an empty
 ///      CSV field (which [`super::compare::cli_csv_rows`] reads as `null`) or a
 ///      non-text cell is a divergence, not an ambiguity;
-///   2. it is framed with the bracket pair the DECLARED type requires — the same
-///      rule [`strip`] applies on the decodable path, where a `set` rendered
-///      `[a, b]` is a failure (review finding R2);
+///   2. it is framed with the bracket pair the DECLARED type requires. That one is
+///      the DECODER'S, applied by [`strip`] at this node's own depth whether the
+///      node was refused or not — the same rule as on the decodable path, where a
+///      `set` rendered `[a, b]` is a failure (review finding R2) — so a frame
+///      divergence is reported as an unparseable rendering rather than here;
 ///   3. BODY EMPTINESS, i.e. the member count in the only two directions no
 ///      confusable reading can reach — never WHICH members the body holds. A
 ///      golden container with NO members can only render as the empty bracket
