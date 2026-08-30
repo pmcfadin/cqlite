@@ -758,7 +758,7 @@ for ctlword_case in if-grep time-grep; do
     || { ctlword_ok=0; ctlword_detail="$ctlword_detail $ctlword_case(false-red)"; }
 done
 if [ "$ctlword_rc" -eq 0 ] && [ "$ctlword_ok" -eq 1 ]; then
-  pass "census CONTROL fired (control words): a leading if/time/! is STEPPED OVER so the real command word is judged — the indirect forms are findings while `if grep -c` and `time grep -c` stay clean, which is why the words are skipped and not refused"
+  pass "census CONTROL fired (control words): a leading if/time/! is STEPPED OVER so the real command word is judged — the indirect forms are findings while the same constructs leading a literal grep stay clean, which is why the words are skipped and not refused"
 else
   fail "census CONTROL did not fire (control words): fixture-rc=$ctlword_rc problems:$ctlword_detail"
 fi
