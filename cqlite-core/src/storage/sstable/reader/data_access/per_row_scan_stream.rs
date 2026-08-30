@@ -106,6 +106,12 @@ impl SSTableReader {
             )),
             ScanAdmission::Exempt => None,
         };
+        // Read-PHASE accumulator (issue #1707): the meter owns it; the producer task
+        // and everything it spawns need it EXPLICITLY, because thread-locals are not
+        // inherited across a spawn and the phases run on threads that never see the
+        // meter. `None` for an `Exempt` sub-scan (its merge is the measured
+        // operation) and when metrics are not being collected.
+        let phase_sink = meter.as_ref().and_then(|m| m.phase_sink());
         // Issue #3124 (site 2): the task's `JoinHandle` is RETAINED, not discarded.
         // This task is the per-generation producer a fan-out k-way merge primes a
         // head from; before this, a task that UNWOUND (a decode panic, an abort)
@@ -115,7 +121,15 @@ impl SSTableReader {
         // producer is an `Err`, never a clean end of stream.
         let task = tokio::spawn(async move {
             if let Err(e) = self
-                .run_scan_stream(table_id, start_key, end_key, schema, tx.clone(), admission)
+                .run_scan_stream(
+                    table_id,
+                    start_key,
+                    end_key,
+                    schema,
+                    tx.clone(),
+                    admission,
+                    phase_sink,
+                )
                 .await
             {
                 // Surface the error to the consumer as a terminal stream item.
@@ -136,6 +150,8 @@ impl SSTableReader {
         schema: Option<crate::schema::TableSchema>,
         tx: mpsc::Sender<Result<(RowKey, ScanRow)>>,
         admission: ScanAdmission,
+        // This scan operation's read-phase accumulator (issue #1707), or `None`.
+        phase_sink: Option<std::sync::Arc<crate::observability::ReadPhaseTimings>>,
     ) -> Result<()> {
         // Admission control (issue #1594, F4): a top-level scan operation acquires
         // ONE blocking-pool permit here, at the top, BEFORE opening the cursor or
@@ -218,6 +234,7 @@ impl SSTableReader {
                 &cursor,
                 None,
                 WindowedOut::PerRow(tx.clone()),
+                phase_sink,
             )
             .await
         } else {

@@ -56,6 +56,7 @@
 //! Kept in a sibling file (campsite rule, epic #1116); included via
 //! `#[path = "scan_stream_windowed_read.rs"] impl`-carrying module in the parent.
 
+use crate::observability::read_phase::ReadPhase;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -158,12 +159,20 @@ impl SSTableReader {
         scratch: &mut Vec<u8>,
         direct_scratch: &mut DirectScratch,
     ) -> Result<Option<Vec<u8>>> {
+        // NO-READ EXITS COME FIRST, BEFORE THE io TIMER EXISTS (issue #1707,
+        // roborev job 133). Every exit below — no `CompressionInfo`, past the last
+        // chunk (EOF), the degenerate empty trailing chunk (#2225) — performs NO
+        // read at all. Timing them would charge function-call and EOF-check time to
+        // `read.phase.io` and emit an io SAMPLE for a scan that read nothing. The
+        // emitter treats a recorded phase as EVIDENCE THAT THE PHASE RAN (entry is
+        // tracked separately from duration, #1707), so constructing a timer here
+        // would state that this scan performed `Data.db` reads when it performed
+        // none — an absent io series is how a caller learns the opposite.
         let comp_info = match self.compression_info.as_ref() {
             Some(ci) => ci,
             // Callers gate on `compression_info.is_some()`; a None here is a bug.
             None => return Ok(None),
         };
-        let file_size = self.scan_positional_source.len();
 
         if chunk_index >= comp_info.chunk_offsets.len() {
             return Ok(None); // EOF
@@ -182,6 +191,15 @@ impl SSTableReader {
             }
         }
 
+        // GEOMETRY AND BUFFER PREPARATION RUN UNTIMED (issue #1707, roborev job
+        // 145). Everything from here to the timer below is arithmetic over already-
+        // resident `CompressionInfo` metadata plus a `Vec` reserve — no byte of
+        // `Data.db` is touched. Timing it charged invalid-offset errors, undersized-
+        // chunk errors, bounds failures and ordinary allocation to `read.phase.io`,
+        // whose catalogued meaning is time spent in STORAGE. An allocator stall
+        // reported as storage latency sends the operator to the disk; a geometry
+        // error reported as io emits an io SAMPLE for a call that read nothing.
+        let file_size = self.scan_positional_source.len();
         let chunk_offset = comp_info
             .compressed_chunk_offset(chunk_index)
             .ok_or_else(|| Error::InvalidFormat(format!("No offset for chunk {chunk_index}")))?;
@@ -248,6 +266,24 @@ impl SSTableReader {
         if buf.capacity() > cap_before {
             rwc::record_chunk_path_alloc();
         }
+        // io PHASE (issue #1707): the timer opens IMMEDIATELY BEFORE the positional
+        // read and spans the rest of the function — the read itself, its one-shot
+        // transient retry, and the trailing CRC verify, which is part of SERVICING
+        // the read (the payload is not deliverable until it is verified) and is
+        // catalogued inside the phase ("CRC verify included"). A FAILED read stays
+        // charged: it issued a real `pread` and waited for the kernel to answer, so
+        // a slow failing read is io time and must not vanish from the phase exactly
+        // when the disk is sick. Only work that touches no device — geometry above,
+        // buffer allocation above — was moved out. Zero `Instant::now()` when the
+        // scan is unmetered.
+        //
+        // The injected test delay is armed HERE and nowhere earlier, and must MOVE
+        // WITH this timer if it is ever relocated: it stands in for real read
+        // latency, so a call that performs no read must not sleep it, and it must
+        // stay inside the timed region so an armed delay is charged to io exactly as
+        // real latency is.
+        let _io_phase = crate::observability::read_phase::scoped(ReadPhase::Io);
+        crate::observability::read_phase::io_delay::sleep_if_armed();
         if let Err(e) =
             self.positional_read_exact_retry_once(chunk_offset, &mut buf, direct_scratch)
         {
@@ -298,13 +334,27 @@ impl SSTableReader {
         pos: u64,
         direct_scratch: &mut DirectScratch,
     ) -> Result<Option<(Vec<u8>, u64)>> {
+        // The EOF exit comes FIRST, before the io timer exists (issue #1707, roborev
+        // job 133) — same rule as the compressed sibling above: a call that reads
+        // nothing must construct no timer, sleep no injected delay, and contribute
+        // no io sample.
         let file_size = self.scan_positional_source.len();
         let remaining = file_size.saturating_sub(pos);
         if remaining == 0 {
             return Ok(None); // EOF
         }
+        // Piece geometry and the destination buffer are prepared UNTIMED (issue
+        // #1707, roborev job 145) — same rule as the compressed sibling above: a
+        // `min` and a `vec![0u8; n]` touch no device, so charging them to
+        // `read.phase.io` would report allocator time as storage latency.
         let to_read = remaining.min(UNCOMPRESSED_READ_PIECE_BYTES as u64) as usize;
         let mut buf = vec![0u8; to_read];
+        // io PHASE (issue #1707): opens immediately before the positional piece read
+        // and spans every covering-chunk CRC verify (including the positional reads a
+        // straddling chunk needs). Failed reads stay charged, for the reason given at
+        // the compressed sibling. Injected delay inside, as there.
+        let _io_phase = crate::observability::read_phase::scoped(ReadPhase::Io);
+        crate::observability::read_phase::io_delay::sleep_if_armed();
         // Same one-shot transient-retry + kind-preserving wrap as the compressed
         // path (issue #1940 BLOCKER-2): a transient fault is re-read once, and the
         // source io kind is preserved (never collapsed to `Error::other`).

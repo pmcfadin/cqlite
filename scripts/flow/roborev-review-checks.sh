@@ -270,6 +270,16 @@ roborev_check_findings() {
   # `findings:` read NONE rather than PRESENT, and NONE is what makes `vacuity-tier1` treat the
   # "no code changes" phrase as a VACUITY CLAIM and HARD FAIL. PRESENT is the permissive value
   # (it downgrades tier 1 to an advisory NOTICE), and an unmeasurable block can never produce it.
+  #
+  # RE-DERIVED FOR #3564, because that issue made `findings:` gate the terminal verdict — where
+  # `NONE` is the PERMISSIVE value, the opposite polarity to tier 1. The argument SURVIVES, but
+  # only because of how the fallback below is built: `NONE` is reachable ONLY from an affirmative
+  # STRUCTURED verdict, never from a marker count, so no consumer derives `NONE` from this `0`.
+  # An intermediate version of #3564 DID derive `NONE` from the count on the recheck path, which
+  # invalidated this paragraph outright (a failed measurement would have read as "no findings" for
+  # a merge-gating key) — recorded because the invalidation was silent and the argument still LOOKED
+  # sound. THE STANDING RULE: a fail-closed argument for a default is valid only for the consumers
+  # that existed when it was written. Re-derive it whenever you add one.
   block_marker_count=${block_marker_count:-0}
 
   verdict_findings="unknown"
@@ -318,9 +328,62 @@ roborev_check_findings() {
       fi
       ;;
     *)
-      # No structured verdict: fall back to the exit code, still refusing to trust prose
-      # over the whole transcript.
-      if [ "$ROBOREV_EXIT" = "PASS" ]; then
+      # No structured verdict. THE RECHECK CASE FIRST, because the fallback below is keyed on the
+      # REVIEWER'S EXIT CODE and a recheck HAS NO REVIEWER — `roborev-exit` is legitimately
+      # `SKIP`, which matched neither arm and left `findings: UNKNOWN` on every recheck of a record
+      # without a structured `verdict` field. That was invisible while nothing depended on
+      # `findings` alone; #3564 made it load-bearing, and left unfixed it would false-FAIL every
+      # clean recheck — i.e. break the ONLY path the #3312 absence waiver can travel. A guard that
+      # reds on correct input is the guard agents learn to waive.
+      #
+      # So a recheck re-asserts the findings state from the RECORD'S OWN REVIEW TEXT, which IS the
+      # transcript in this mode — the same source `review-completed` and both vacuity tiers are
+      # re-asserted from. Scoped to the FINDINGS BLOCK, never the whole transcript: a whole-text
+      # scan reads a QUOTED severity word as a finding, and here that would be a false FAIL.
+      # `review-completed` has already required a terminal verdict marker, so this is a real review
+      # text and not a truncated one.
+      #
+      # AND NO COUNT OF ZERO REACHES NONE HERE: the marker scan below is POSITIVE-DETECTION ONLY.
+      # A marker inside the findings block establishes PRESENT; its ABSENCE establishes nothing, so
+      # an unmeasurable or marker-free block is UNKNOWN (which fails) and never NONE. `NONE` is
+      # reachable from the `none)` arm above ALONE — i.e. from the record's STRUCTURED verdict
+      # letter. A positive verdict requires an affirmative measurement, and prose is not one.
+      if [ -n "${RECHECK_JOB:-}" ]; then
+        # ===== PROSE CAN EVIDENCE FINDINGS. IT CANNOT EVIDENCE CLEANLINESS. =====
+        # (#3564, after two review rounds each finding a review SHAPE the previous recogniser
+        # missed.) A recheck has no reviewer, so `roborev-exit` is `SKIP` and the arms below —
+        # which are keyed on the reviewer's EXIT CODE — cannot answer. The record's review text is
+        # the only other evidence, and the asymmetry between the two directions is total:
+        #
+        #   a severity marker INSIDE a findings block  =>  POSITIVE evidence of findings. Sayable.
+        #   NO marker found                            =>  NOT evidence of cleanliness. Never NONE.
+        #
+        # WHY THE SECOND DIRECTION IS UNPROVABLE FROM PROSE, which is why this is not a third
+        # recogniser: `review-completed` accepts a `## Summary` heading ALONE as a completed
+        # review. So a findings review whose findings are prose, under no `Findings` heading and
+        # with no severity marker, is INDISTINGUISHABLE from a clean one — measured, not supposed:
+        # a real clean review's text is `No issues found.\n\nSummary: ...` (job 154), carrying no
+        # `Findings` heading either. Every candidate recogniser (a heading, a marker anywhere, a
+        # non-empty block) admits some findings-bearing shape, so the list never closes. That is
+        # this repository's #3312 lesson applied here: REMOVE THE CHANNEL, do not pick a rarer
+        # delimiter. The wrapper's own facts tool says the same thing — the structured field
+        # "must win wherever it exists", and a transcript regex is "a prose heuristic".
+        #
+        # SO `NONE` IS REACHABLE ONLY FROM THE STRUCTURED `verdict` (the branches above), AND THAT
+        # COSTS NOTHING, measured: `roborev show --json` SYNTHESISES a verdict letter from the
+        # `reviews.verdict_bool` column for EVERY record — `P` for a clean review (job 154,
+        # verdict_bool=1) and `F` for a findings-bearing one (job 162, verdict_bool=0); the
+        # `review_jobs` table has no verdict column at all. So a real recheck of a clean job takes
+        # the structured path and still PASSes (the #3312 break-glass is intact), and THIS branch
+        # is a DEFENSIVE path for a payload shape no observed record produces. Making a defensive
+        # path fail closed is free; making it guess is how a merge gate passes over live findings.
+        if [ "$block_marker_count" -gt 0 ]; then
+          FINDINGS="PRESENT ($block_marker_count)"
+        else
+          FINDINGS="UNKNOWN"
+          DETAILS+=("ERROR: findings: this is a --recheck-job of a record carrying NO structured 'verdict' field, and no severity marker was found in a findings block of its review text. That is UNKNOWN, NOT 'no findings': review-completed accepts a bare '## Summary' heading as a completed review, so a findings review whose findings are prose is indistinguishable from a clean one, and prose can therefore never establish CLEANLINESS. It cannot certify a PASS. This is also an UNEXPECTED payload shape — 'roborev show --json' synthesises a verdict letter ('P'/'F') from reviews.verdict_bool for every observed record — so suspect a roborev version or payload change first. Remedy: re-review rather than recheck, so the verdict rests on a reviewer's own exit status. Transcript: $LOG")
+        fi
+      elif [ "$ROBOREV_EXIT" = "PASS" ]; then
         if [ "$block_marker_count" -gt 0 ]; then
           FINDINGS="INCONSISTENT (exit 0, $block_marker_count findings marker(s))"
           DETAILS+=("ERROR: findings: 'roborev review' exited 0 (which means no findings) while the findings block carries $block_marker_count severity marker(s), and the job record has no structured verdict to arbitrate. INCONSISTENT — failed closed, and it cannot exempt the tier-1 vacuity check.")

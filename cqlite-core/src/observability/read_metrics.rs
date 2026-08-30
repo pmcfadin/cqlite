@@ -62,8 +62,9 @@
 //! that branch and the emission helpers compile to no-ops.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use super::read_phase::{ReadPhase, ReadPhaseTimings};
 use super::{catalog, AttrValue};
 use crate::observability as obs;
 use crate::storage::sstable::compression::CompressionAlgorithm;
@@ -163,6 +164,13 @@ struct Accounting {
     ///
     /// Retained as an `Arc` clone (a refcount bump, no key copy).
     last_partition: Option<Arc<[u8]>>,
+    /// This operation's read-PHASE accumulator (issue #1707), shared with the
+    /// pipeline threads that do the io/decompress/decode/merge work. Owned here so
+    /// the four `cqlite.read.phase.*` histograms inherit the whole `ReadOpMeter`
+    /// lifecycle — idempotent [`finish`](ReadOpMeter::finish), `Drop`-safe, and
+    /// absent entirely on an [`inert`](ReadOpMeter::inert) sub-scan, so a fan-out
+    /// merge's per-generation scans can never double-count.
+    phases: Arc<ReadPhaseTimings>,
     emitted: bool,
 }
 
@@ -182,6 +190,7 @@ impl ReadOpMeter {
             rows: 0,
             partitions: 0,
             last_partition: None,
+            phases: Arc::new(ReadPhaseTimings::default()),
             emitted: false,
         }))
     }
@@ -194,6 +203,18 @@ impl ReadOpMeter {
     /// Measuring those would count the same rows two or three times.
     pub(crate) fn inert() -> Self {
         Self(None)
+    }
+
+    /// This operation's read-phase accumulator, for propagation to the threads that
+    /// actually perform the work (issue #1707), or `None` for an inert meter.
+    ///
+    /// Handed to each `spawn_blocking` / producer-thread closure at its SPAWN SITE
+    /// and re-installed there: thread-locals are not inherited across a spawn, and
+    /// the io/decompress/decode/merge phases all run on threads that never see this
+    /// meter. `None` (an inert meter, or metrics not being collected) propagates as
+    /// "no sink", which makes every seam a single thread-local peek.
+    pub(crate) fn phase_sink(&self) -> Option<Arc<ReadPhaseTimings>> {
+        self.0.as_ref().map(|acc| Arc::clone(&acc.phases))
     }
 
     /// Account one delivered row, and a partition boundary when its key differs
@@ -343,6 +364,76 @@ impl ReadOpMeter {
             acc.started.elapsed().as_secs_f64(),
             attrs,
         );
+
+        // The four read PHASES (issue #1707): ONE sample per phase per completed
+        // operation, from the counters the pipeline threads accumulated into.
+        //
+        // A phase is emitted iff it RAN — `phases.entered(phase)` — and NOT iff it
+        // accumulated nanos (issue #1707, roborev job 145). The two are different
+        // questions, and gating on the duration answered the wrong one: it reported
+        // "ran but measured zero" as "did not run".
+        //
+        // Absence carries load-bearing meaning here that it does not carry for
+        // `read.duration` above: no `decompress` series means the SSTable is
+        // UNCOMPRESSED, no `merge` series means a SINGLE GENERATION. Under the old
+        // `nanos > 0` gate a phase that genuinely ran and measured zero was
+        // indistinguishable from one that never ran, so the metric asserted the
+        // opposite of the truth.
+        //
+        // That is not hypothetical for MERGE. `timed_merge_excluding_recv_wait`
+        // saturates to 0 when the recv-wait it subtracts exceeds the step's wall
+        // time — documented, tested, and the honest thing to do — so a real
+        // multi-generation merge whose producer starved records 0 nanos and was
+        // skipped, telling the operator "single generation". The honesty mechanism
+        // manufactured the false statement.
+        //
+        // So `0.0` now MEANS something precise: the phase ran and measured zero
+        // (too fast for the clock, or a merge whose whole wall time was recv-wait).
+        // It is no longer "a measurement that was never taken", because entry is
+        // tracked separately from duration. Absence means exactly what the docs
+        // say — the phase DID NOT RUN — and a zero-valued sample is a real
+        // observation, not a fabrication.
+        //
+        // ATTRIBUTE-FREE, deliberately, and NOT `attrs`: this family is declared
+        // "**Attributes**: none" by `catalog_read_phase` and carries an empty
+        // `attributes` in every `operator_docs_annotations_read_phase` row, so
+        // emitting `cqlite.sstable.format` here would make the emission and the
+        // declaration disagree — two statements of one fact, one of them wrong.
+        // The declaration is the one to keep: the merge phase is format-agnostic
+        // (it spans generations), so a per-format phase dimension could not be
+        // honestly populated across the family anyway. `read.duration` above keeps
+        // `attrs` — its format attribute IS declared.
+        //
+        // PARTIAL-SNAPSHOT CAVEAT (issue #1707): the surrounding prose says "ONE
+        // sample per phase per COMPLETED scan", and completion here means THIS
+        // METER completed — `finish()` runs when the stream is dropped. The
+        // detached feed/parse tasks hold their own `Arc<ReadPhaseTimings>` clone
+        // and keep accumulating into it after that, so an ABANDONED scan (a `LIMIT`
+        // the consumer stopped reading, a dropped stream) emits a PARTIAL snapshot
+        // of an operation still in flight, not a final total. That is the same
+        // shape `read.duration` already has (it measures until the drop, not until
+        // the pipeline quiesces) and is why the emission is here rather than behind
+        // a join: waiting for the detached tasks would make an abandoned scan's
+        // metric arrive late, or never.
+        let phase_attrs: &[(&'static str, AttrValue)] = &[];
+        for (phase, name) in [
+            (ReadPhase::Io, catalog::READ_PHASE_IO),
+            (ReadPhase::Decompress, catalog::READ_PHASE_DECOMPRESS),
+            (ReadPhase::Decode, catalog::READ_PHASE_DECODE),
+            (ReadPhase::Merge, catalog::READ_PHASE_MERGE),
+        ] {
+            // ONE synchronized read of the (entry bit, counter) pair — never an
+            // `entered()` then a separate `nanos()`. This runs CONCURRENTLY with
+            // the still-accumulating detached threads described just above, and
+            // reading the bit before the counter without the acquire/release
+            // pairing inside `snapshot` would let a fresh entry bit be paired with
+            // a stale zero counter, publishing a fabricated `0.0` (roborev job
+            // 149). See `ReadPhaseTimings::snapshot` for which atomic carries
+            // which ordering.
+            if let Some(nanos) = acc.phases.snapshot(phase) {
+                obs::record_histogram(name, Duration::from_nanos(nanos).as_secs_f64(), phase_attrs);
+            }
+        }
     }
 }
 

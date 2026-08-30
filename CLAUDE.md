@@ -91,7 +91,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
@@ -106,7 +106,37 @@ execute NOWHERE** — not locally, not in CI — because their module-level
 `#![cfg(feature = "observability-testing")]` is off in every lane that runs them (#3375), a gap #2910's tier
 aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
 ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
-however green the gate looks. `experimental` is the remaining known instance (#3373).
+however green the gate looks. `experimental` is **one** remaining instance (#3373) and NOT the only
+one: in `cqlite-core` the crate-level-gated integration targets for `delta-scan` (13) and
+`observability-testing` (14) are named by no `--test` in the gate and execute ZERO tests at
+`core-tests`' feature set, as do 3 of the 5 `dhat-heap` ones; the `delta_scan` module's own 39 lib
+tests run in no gate component either (`feature-iso-delta-scan` is `--lib --no-run`), only in the
+`required`-exempt `ci.yml` (#3522 audit).
+**AND THE SAME REASONING RUNS AT PACKAGE GRANULARITY, WHICH IS WHERE IT WAS COSTLIEST (#3522).**
+`cargo clippy --workspace --all-targets` compiles EVERY workspace member on every full gate, so a
+whole CRATE can be built by every run and execute nothing — and it reads as covered precisely
+because the workspace builds clean. Measured: `cqlite-ffi-common` appeared **zero times** in
+`scripts/**` and `.github/workflows/**` (37 unit tests + `tests/dependency_boundary.rs` +
+`tests/error_contract_table.rs`, executed by nothing anywhere), and `cqlite-node`'s 53 Rust unit
+tests were in the same hole because `node-bindings` runs jest against the BUILT ARTIFACT and never
+`cargo test`. Both now run in `binding-rust-tests`. Two design rules came out of it. **A
+never-SKIPping lane must not be folded into a SKIP-aware one**: `node-bindings` correctly SKIPs
+without node/npm, and putting cqlite-node's *Rust* tests behind that SKIP would be a coverage hole
+wearing a SKIP's clothes — so the Rust lane depends on nothing beyond cargo and never SKIPs. **And
+enrolling a lane in `DATASET_COMPONENTS` is not enough to stop a corpus-dependent suite skipping**:
+the widened `node-bindings` also exports `CQLITE_REQUIRE_FIXTURES=1` on the full gate, which buys ONE
+named setup failure instead of 14 separate `beforeAll` throws and closes `parity.test.js`'s `test.skip`
+placeholder — the one corpus-conditional path in that suite that would pass silently. (An earlier draft
+of this paragraph said those suites `describe.skip`; **measured, none does** — the repo's Node
+convention THROWS. A false rationale in a gate log is worse than none, because it is what stops the
+next person looking.) The durable question is the same one shape up: for each workspace member, **which component
+EXECUTES it** — recorded, member by member, in `scripts/tests/workspace-test-disposition.txt`
+(`EXECUTED`/`PARTIAL`/`NOT-EXECUTED`, a closed label set enforced under `tooling-tests`), so a new
+crate cannot join the unexecuted set unannounced. Each record also carries a CLASS — `silent` (no
+committed doctrine claims it is covered) vs `contradicts-doctrine` (doctrine says it is and it is not)
+— coupled to the label (`EXECUTED` ⇔ `no-gap`), because a gap our own doctrine denies is a false
+certification and not a backlog item. That census records completeness and labeling, **not
+truth** — deliberately, on #1716's precedent.
 Two corollaries the lanes are built on. **Derive, never curate**: both executing lanes compute their subject
 set from committed source at run time — `legacy-heuristics` its `--test` targets (from cargo metadata plus a
 module closure, so a manifest-gated or directory-style target is not missed) and its allowed-zero set, and
@@ -128,7 +158,10 @@ incomplete source set is permissive everywhere, an unevaluated one is merely una
 proves nothing. `scripts/tests/test_agent_gate_feature_matrix_lanes.sh` (opt-in) plants each lane's
 incident-class break in a throwaway `git worktree` and requires the lane to red **and** to NAME the planted
 symbol — a bare red is not evidence either, since an unrelated breakage produces an identical exit code and
-SUMMARY line.
+SUMMARY line. `scripts/tests/test_agent_gate_binding_rust_lanes.sh` does the same for the #3522 binding
+lanes, and adds the case the failing-assertion plants cannot reach: one that cfg's a unit suite OUT, so it
+compiles, runs **zero** tests and exits 0 — the only plant that exercises the non-zero-count half of
+`check_unittest_targets_ran`.
 
 **Required invocation — summary-file redirect, never raw stdout (issues #1175/#2079), full AND lite:**
 
@@ -186,6 +219,33 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   the process EXIT CODE as primary and MUST verify the `run-id:` line matches the run it launched
   before trusting a pinned-path block — a mismatched/foreign `run-id` block (even `RESULT: PASS`) is a
   peer's, not yours; on a mismatch, read the `.integrity-fail.<run-id>` sibling / `logs:` bundle instead.
+- **A gate parser must be colour-immune AT THE PARSE SITE (#3400).** 18 workflows set
+  `CARGO_TERM_COLOR: always` (incl. the nightly `gate.yml`) plus `scripts/local/pre-merge.sh`, and
+  **colour SURVIVES redirection to a file** (measured: 25 ESC bytes vs 0) — the gate's own mandated
+  `> gate.log 2>&1` capture is coloured too, so this is not a tty-only artifact. Cargo colours the
+  STATUS WORD and emits the reset immediately after it (`Running<ESC>[0m tests/foo.rs`), so a
+  pattern anchored on the status word alone survives while one spanning `<status> <payload>` — the
+  literal `Running tests/`, or `warning:` — matches NOTHING. **It breaks BOTH ways, and neither is
+  safe**: the cli-tests zero-tests guard reported OK having judged no target at all (a vacuous PASS,
+  live on `main` for months, fixed by #1699); the declared-vs-observed reconciliation reported EVERY
+  declared target unobserved on a healthy run (a false RED, fixed by #3400). Conversely
+  `test result:` / `running N tests` are libtest's, and cargo does not pass `--color` through to the
+  harness, so they carry no escapes — safe for a reason that is NOT in the code, which is why this
+  is a lint and not a comment. Route every cargo-output parse
+  through `_ansi_stripped_log` and read by **redirection, never a pipe** (a piped `while read` runs
+  in a subshell and its verdict is discarded — a second, independent silent pass). **This rule is
+  DOCTRINE and is NOT mechanically enforced.** A structural lint over the parse sites was built on
+  #3400 and **descoped**: its own false-PASS count rose across review rounds (2, 2, 3) and two of
+  the last round's three defects were inside the two preceding fix rounds — the same shape, and the
+  same ruling, as #3229's removed `census-exclusion:` key, because a guard with known documented
+  false-PASSes is worse than no guard, since it invites reliance it cannot support. Mechanization is
+  deferred to **#3499**; until it lands, this is a review-time rule, and the standing coverage is
+  behavioural (`scripts/tests/test_cargo_output_parsers.sh`, in `tooling-tests`), which pins the
+  defect against real code rather than predicting it from source shape — it EXTRACTS each guard from
+  the shipped `agent-gate.sh` and runs it, so unrouting one reds the suite instead of greening it.
+  `CARGO_TERM_COLOR=never` at the invocation is belt, not the fix; `gate.yml` KEEPS
+  `always` — colour is a presentation property of a log for humans, and moving correctness into a
+  workflow file 18 files from the parse is a worse coupling than the one being removed.
 - clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the source-built
   DuckDB amalgamation (cqlite-cli `duckdb-tests`) + OTel stack (`observability`/
   `observability-testing`); parquet/arrow stay linted. `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`)
@@ -245,7 +305,15 @@ bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
 test-data/       # Real Cassandra 5.0 SSTables for testing
 tools/           # 7 crates, each with a RECORDED disposition in one of THREE
                  #   categories, pinned by the gate guard
-                 #   scripts/tests/test_tools_crate_disposition.sh (#1716):
+                 #   scripts/tests/test_tools_crate_disposition.sh (#1716).
+                 #   These labels say whether something INVOKES the crate —
+                 #   usually its BINARY — and NOT whether its TESTS execute
+                 #   (#3522). Of the WIRED four only ws0-corpus-gen's tests run
+                 #   in the gate (tooling-tests); cassandra-parity (25+9),
+                 #   sstabledump-validator (17+2) and flight-loadgen (21) have
+                 #   tests that execute NOWHERE, as does MIXED format-validator
+                 #   (8). Per-member record, with the label AND the class:
+                 #   scripts/tests/workspace-test-disposition.txt.
                  #   WIRED   — cassandra-parity, flight-loadgen,
                  #             sstabledump-validator, ws0-corpus-gen.
                  #   UNWIRED — nothing runs them AND nothing depends on them:
@@ -281,10 +349,13 @@ compiled by every workspace build" was false). The `tools/` crates are compiled 
 `-D warnings` no matter their disposition.
 
 **Their unit tests, though, run ONLY when your diff touches their package (#1716).** No CI job and
-no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests never execute —
-but `--lite`'s blast-radius maps a touched path to its package and runs that package's `--lib`
-tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
-made `--lite` run that crate's tests **for the first time**, and one failed —
+no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests execute only
+where something names its package explicitly — `ws0-corpus-gen` under the gate's `tooling-tests`, and
+`cassandra-parity` in the path-filtered, `required`-exempt `cassandra-parity.yml`; for every other
+`tools/` crate they never execute (#3522). But `--lite`'s blast-radius maps a touched path to its
+package and runs that package's `--lib` tests. Consequence, found the hard way on #1716: editing
+only `tools/format-validator/README.md` made `--lite` run that crate's tests **for the first time**,
+and one failed —
 `test_hex_dump_formatting` asserted an unseparated `"48656c6c6f"` against a `hexdump -C`-style
 formatter that emits `48 65 6c 6c 6f`, an expectation that could never hold for any input. **Expect
 latent failures the first time you touch a long-unwired crate**; they are pre-existing, not yours,
@@ -787,7 +858,48 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   configured", then never required it to have *answered*); a `${end:-$start}` default degraded a failed
   `awk` bound to a 1-line scan. Those instances lived in a subsystem since deleted; **the shape is the
   lesson, and it was never theirs** — it was in the wrapper's own terminal verdict scan, which predates
-  them all. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  them all. **AND `findings:` WAS THE SAME SHAPE, ONE KEY OVER (#3564).** `findings:` is not one of the
+  six affirmation keys — its affirmative value is `NONE`, not `PASS` — and it was documented as merely
+  CORROBORATING, which read as "guarded elsewhere" when it was guarded NOWHERE: `PRESENT` is in the
+  closed grammar's NON-FAILING set, so the only thing failing a findings-bearing run was the
+  NEIGHBOURING key `roborev-exit: FINDINGS (exit 1)`. On `--recheck-job` **no reviewer runs**, so
+  `roborev-exit` is legitimately `SKIP` — and the run emitted `findings: PRESENT (3)` beside
+  `RESULT: PASS`, a **false PASS in a merge gate** (measured on #3473 round 3), on the ONE path an
+  authorized waiver must travel, letting a waiver scoped to `prompt-content` ABSENCE excuse findings
+  nobody excused. Now a would-be PASS requires `findings:` to reduce token-exactly to `NONE` **in every
+  mode including recheck**, and that requirement is **NOT waivable**. Fixed in the verdict scan and
+  deliberately NOT in `roborev-exit`: `SKIP` is the TRUE statement about a recheck, and making a key
+  claim a failure it never observed trades one false statement for another. Second half, the part that
+  keeps the break-glass alive: a recheck of a record with no structured `verdict` field used to read
+  `UNKNOWN` (its branch was keyed on the reviewer's exit code, and there is no reviewer), which would
+  have false-FAILed EVERY clean recheck — so a recheck now re-asserts findings from the record's own
+  review text — but ONLY in the direction prose can actually evidence. **PROSE CAN EVIDENCE FINDINGS;
+  IT CANNOT EVIDENCE CLEANLINESS**, so a marker in a findings block yields `PRESENT` while its ABSENCE
+  yields `UNKNOWN`, never `NONE`. `NONE` is reachable only from the record's STRUCTURED `verdict`
+  letter. **Two review rounds each found a review SHAPE the previous recogniser missed** — a HEADERLESS
+  findings review (no `Findings` heading, which `review-completed` deliberately accepts), then a
+  findings BLOCK with no recognised severity marker — and the class provably does not close, because
+  `review-completed` accepts a bare `## Summary` heading as a completed review: a findings review whose
+  findings are prose is then INDISTINGUISHABLE from a clean one, whose real text is
+  `No issues found.\n\nSummary: …` with no `Findings` heading either. That is #3312's lesson applied
+  one directory over: **REMOVE THE CHANNEL, do not pick a rarer delimiter** — a recogniser over
+  author-controlled prose never closes. **And it costs nothing, measured rather than assumed**:
+  `roborev show --json` SYNTHESISES the verdict letter from the `reviews.verdict_bool` column for every
+  observed record (`P` clean / `F` findings; `review_jobs` has no verdict column), so a real clean
+  recheck takes the structured path and the break-glass is intact, and the verdict-less branch is
+  defensive for a payload shape nothing observed emits. **The generalisation to carry elsewhere: DELEGATING A KEY'S FAILURE TO ITS NEIGHBOUR IS A
+  LATENT FALSE PASS** — the coupling is invisible while one event populates both keys and evaporates in
+  the first mode where it does not, so ask of every key *what fails the run if THIS key alone goes bad*.
+  **And a fail-closed argument for a `${VAR:-default}` is only valid for the consumers that existed when
+  it was written**: the `block_marker_count` `:-0` was audited as strict because `NONE` was the STRICT
+  direction for `vacuity-tier1:`, and a new consumer for which `NONE` is PERMISSIVE inverted it silently
+  — no default can fix that (`0` and *unmeasurable* are one value). **The resolution is not a better
+  default or a second signal but a REMOVED CONSUMER**: `NONE` is unreachable from a marker count at all
+  (only the structured verdict yields it), so nothing derives a permissive verdict from that `0` and the
+  original argument holds unchanged. An intermediate version of this fix DID add a separate
+  `block_measured` flag; it went away with the prose reconstruction it guarded, and this sentence
+  described it for one round after it was deleted — caught by the C audit. **A doctrine line naming a
+  mechanism is a claim about code, and it decays exactly like a comment: re-grep the symbol.** So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
   for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
   unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
   signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict
@@ -901,6 +1013,10 @@ loop, not a review round. The rest stay hand-checked (no low-false-positive stat
 - **Wall-clock races in tests** — capture the time window to cover ALL sampled operations.
   MECHANIZED (`roborev-lints`/`tooling-tests`, #2642): a wall-clock threshold assert in the
   correctness test path FAILs; mark a deliberate `#[ignore]`d perf assert `perf-gate-allow`.
+- **Cargo-output parses keyed on literal status text** — route through `_ansi_stripped_log`,
+  read by redirection not a pipe (#3400). NOT mechanized: the lint written for this was
+  descoped for an increasing false-PASS count (see the gate section above); mechanization is
+  deferred to #3499, so this one is hand-checked.
 - **No-heuristics violations** — never infer type/behavior from byte patterns.
 - **Gitignored reference binaries** — `git add -f` tiny parity references; verify against a fresh
   `git worktree add --detach HEAD`, not the dirty tree.

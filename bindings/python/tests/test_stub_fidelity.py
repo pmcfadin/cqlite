@@ -46,9 +46,10 @@ recorded is reviewable while one that is merely absent is a trap:
   code, and that needs real thought rather than a hurried assert.
 
 Both boundaries are stated here rather than rediscovered one review round at a
-time. Review of this file produced seven rounds of findings, and the ones that
-mattered were always a check that had silently stopped measuring -- never a
-missing dimension.
+time. Review of this file ran to many rounds, and the findings that mattered were
+always a check that had silently stopped measuring -- never a missing dimension.
+Four such cases were found and fixed here, three of them introduced while fixing
+an earlier one, which is why every comparison below carries a non-vacuity assert.
 
 ``from __future__ import annotations`` is REQUIRED here, not stylistic:
 ``pyproject.toml`` declares ``requires-python = ">=3.9"`` and this module
@@ -77,13 +78,22 @@ PYI_PATH = Path(__file__).resolve().parent.parent / "python" / "cqlite" / "__ini
 # drift where a real export is deleted and only the alias-shaped declaration
 # survives. Every entry is re-verified below (still declared in the stub, still
 # absent at runtime), so a stale entry cannot silently excuse a future phantom.
-TYPE_ONLY_STUB_NAMES = {
-    "Config": (
-        "`Config = dict[str, Any] | str` is a type alias naming the accepted "
-        "shape of the `config=` parameter of `open()`/`validate_config()`. It is "
-        "not re-exported by `cqlite/__init__.py` and is not in `__all__`, so "
-        "`from cqlite import Config` is a type-checking-only import."
-    ),
+TYPE_ONLY_STUB_NAMES: dict[str, str] = {
+    # EMPTY, and empty is the STRONGEST state: every module-level declaration in the
+    # stub is phantom-checked with no exemptions.
+    #
+    # It held one entry during development -- `Config = dict[str, Any] | str`, declared
+    # in the stub and absent at runtime, so `from cqlite import Config` type-checked and
+    # then raised ImportError. That was real drift the alarm found on its first firing.
+    # Per the owner ruling on #1456 (REQ-1456-01) the STUB was corrected rather than the
+    # allowlist kept: a `.pyi` is a description, not a wish, and advertising a name the
+    # package does not export is a false statement in the direction that hurts most.
+    # The union is now inlined at its two annotation sites, so no type information was
+    # lost and no public name is advertised that does not exist.
+    #
+    # Adding an entry here is a deliberate, reviewable act: it must name the symbol and
+    # give a reason, and it is re-validated below (still declared in the stub AND still
+    # absent at runtime) so a stale entry cannot silently excuse a future real phantom.
 }
 
 
@@ -367,7 +377,6 @@ def test_pyi_matches_runtime():
     #     The allowlist is validated first so a stale entry cannot excuse a real
     #     phantom: each entry must still be declared in the stub, must still be
     #     absent at runtime, and must carry a reason.
-    assert TYPE_ONLY_STUB_NAMES, "the type-only allowlist must name its entries"
     for name, reason in sorted(TYPE_ONLY_STUB_NAMES.items()):
         assert reason.strip(), f"allowlisted stub name {name!r} carries no reason"
         assert name in stub.module_names, (

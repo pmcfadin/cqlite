@@ -27,9 +27,21 @@ Several of these delivery costs now FAIL in the fast `scripts/agent-gate.sh --li
 | Executable harness files under `docs/` being classified as prose (the PR #3222 class) | `scripts/tests/test_roborev_review_guard.sh` (#3229) — the `(cx*)` cases drive the census classification and the `prompt-content:` match. **NOT mechanized: whether the configuration would swallow them.** No guard predicts roborev's exclusion set; that is deferred to #3283 | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
 
 The other classes below (integer/decimal overflow, float ordering, no-heuristics,
-process-global counters, gitignored references) are **not mechanized**: they are semantic
-or structural, with no low-false-positive static signal (a gitignored-references lint would
-false-positive on the intentionally-fetched dataset corpus). Walk them by hand.
+process-global counters, gitignored references, colour-blind cargo-output parses) are
+**not mechanized**: they are semantic or structural, with no low-false-positive static
+signal (a gitignored-references lint would false-positive on the intentionally-fetched
+dataset corpus). Walk them by hand.
+
+One of them was mechanized and then **deliberately un-mechanized**: a structural lint over
+the cargo-output parse sites was built on #3400 and **descoped** because its own false-PASS
+count rose across review rounds (2, 2, 3) and two of the last round's three defects were
+inside the two preceding fix rounds. That is the same ruling as #3229's removed
+`census-exclusion:` key — **a guard with known documented false-PASSes is worse than no
+guard, because it invites reliance it cannot support.** Mechanization is deferred to #3499.
+The standing coverage is behavioural, not structural:
+`scripts/tests/test_cargo_output_parsers.sh` (in `tooling-tests`) EXTRACTS each parser from
+the shipped `scripts/agent-gate.sh` and runs it against real coloured cargo bytes, so it
+pins the defect against real code rather than predicting it from source shape.
 
 **Escape hatches** (deliberate, reviewer-visible, one-line rationale required): the injection
 lint honours `injection-lint-allow` on the offending `run:` line or the line above it; the
@@ -102,6 +114,35 @@ untagged sibling still contaminates the delta. Local per-process runners (nextes
 scope guard (the `StreamWalkScope` pattern, #2428; `index_probes` follow-up #2451) that reads only
 its own thread's increments, contamination-proof by construction. Production builds keep the plain
 atomic. Serial tags on the counter then become redundant.
+
+### Cargo-output parses keyed on literal status text
+A guard that greps a `cargo test` log for a literal like `Running tests/` or `warning:` is
+**inert under colour**. 18 workflows set `CARGO_TERM_COLOR: always` — including the nightly
+FULL `gate.yml` — as does `scripts/local/pre-merge.sh`, and **colour survives redirection to
+a file**, so the gate's own mandated `> gate.log 2>&1` capture is coloured too. This is not a
+tty-only artifact.
+
+Cargo colours the **status word** and emits the reset immediately after it
+(`Running<ESC>[0m tests/foo.rs`), so a pattern anchored on the status word alone survives
+while one spanning `<status> <payload>` matches **nothing**. It breaks both ways and neither
+is safe: the cli-tests zero-tests guard reported OK having judged no target at all (a vacuous
+PASS, live on `main` for months, fixed by #1699), and the declared-vs-observed reconciliation
+reported every declared target unobserved on a perfectly healthy run (a false RED, fixed by
+#3400).
+
+`test result:` and `running N tests` are libtest's own output and carry no escapes — cargo
+does not pass `--color` through to the harness — so parses keyed on those are safe **for a
+reason that is not visible at the parse site**. That inherited-correctness coupling is exactly
+what left the zero-tests guard inert, which is why the rule is applied uniformly rather than
+only where it is load-bearing.
+
+**Fix:** route every cargo-output parse through `_ansi_stripped_log` and read the result by
+**redirection, never a pipe** — a piped `while read` runs in a subshell, so its accumulated
+verdict is discarded on exit and the guard passes silently for a second, independent reason.
+`CARGO_TERM_COLOR=never` at the invocation is **belt, not the fix**; `gate.yml` keeps `always`
+on purpose, because colour is a presentation property of a log read by humans and moving
+correctness into a workflow file 18 files away from the parse is a worse coupling than the one
+being removed.
 
 ### No-heuristics violations
 Inferring a type or behaviour from byte patterns instead of authoritative metadata.
@@ -552,6 +593,78 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    **`prompt-content:` expects EVERY census code path and subtracts nothing.** No key is licensed to tell
    another which paths to skip; a path the reviewer really did not receive FAILs. (And it never prints a
    `0/0` PASS: a key with no subject has no verdict to give.)
+
+   **AND `findings:` GATES THE VERDICT ON ITS OWN — the affirmation backstop's six keys were never the
+   whole story (#3564).** `findings:` is not one of the six (its affirmative value is `NONE`, not `PASS`, so
+   it cannot satisfy that loop's uniform test), and it was described as merely *corroborating* — which read
+   as "guarded elsewhere" when it was guarded **nowhere**. `PRESENT` is in the closed grammar's
+   **non-failing** set, so the only thing failing a findings-bearing run was the NEIGHBOURING key
+   `roborev-exit: FINDINGS (exit 1)`. That coupling held for a fresh review and broke exactly where it
+   mattered most: on `--recheck-job` **no reviewer process runs**, so `roborev-exit` is legitimately `SKIP`,
+   and with the failing signal gone the run emitted
+
+   ```
+   findings:     PRESENT (3)
+   roborev-exit: SKIP (recheck: no reviewer ran in this invocation; job 160 re-decided from its record)
+   RESULT:       PASS
+   ```
+
+   — a **false PASS in a merge gate**, measured on #3473's round-3 recovery. And it landed on the one path
+   an authorized waiver must travel (a re-run enqueues a different job and stales the waiver), so a waiver
+   scoped to `prompt-content` **absence only** could carry a findings failure nobody excused.
+
+   Now: on any would-be `RESULT: PASS`, `findings:` must reduce (token-exact) to `NONE`, **in every mode
+   including recheck**, and the requirement is **not waivable**. The fix is in the verdict scan and
+   deliberately **not** in `roborev-exit`, because `SKIP` is the TRUE statement about a recheck — making that
+   key claim a failure it never observed would trade one false statement for another. Its second half is
+   easy to miss and is the part that keeps the break-glass alive: a recheck of a record with **no structured
+   `verdict` field** used to fall through to a branch keyed on the reviewer's exit code and read `UNKNOWN`,
+   so the gate alone would have false-FAILed **every clean recheck**; a recheck now re-asserts findings from
+   the record's own review text (the transcript in that mode), scoped to the findings block, and reports
+   `UNKNOWN` — never `NONE` — whenever that reconstruction cannot support a positive claim.
+
+   **And that reconstruction was itself unsound — two review rounds proved it, and the fix was to
+   DELETE it rather than patch it a third time.** Round 1: `review-completed` deliberately ACCEPTS a
+   **headerless** findings review (a bare `**Severity**:` line, `[High]`, `Medium:`), for which the
+   findings-block extraction finds nothing — so "0 markers in the block" meant *"no block was found"*,
+   not *"no findings"*, and read as an affirmative `NONE`. Round 2: a `## Findings` block whose findings
+   carry **no recognised severity marker** leaves the block non-empty and the count at zero, defeating
+   the round-1 fix too.
+
+   **The class provably does not close.** `review-completed` accepts a bare `## Summary` heading as a
+   completed review, so a findings review whose findings are prose — no `Findings` heading, no severity
+   marker — is a *valid* completed review reporting findings, and it is textually indistinguishable from
+   a clean one, whose real text is `No issues found.\n\nSummary: …` with no `Findings` heading either.
+   Any recogniser over that prose admits some findings-bearing shape. This is **#3312's umbrella lesson
+   applied one directory over: remove the channel, do not pick a rarer delimiter** — and the wrapper's
+   own facts tool already said it, that the structured field "must win wherever it exists" and a
+   transcript regex is "a prose heuristic".
+
+   So the direction is **asymmetric and permanent**: a severity marker inside a findings block is
+   positive evidence **of findings** (`PRESENT`); its absence is **not** evidence of cleanliness
+   (`UNKNOWN`). **`NONE` is reachable only from the structured `verdict` letter.** And that costs
+   nothing, **measured rather than assumed**: `roborev show --json` synthesises that letter from the
+   `reviews.verdict_bool` column for **every** observed record — `P` for a clean review (job 154,
+   `verdict_bool=1`), `F` for a findings-bearing one (job 162, `verdict_bool=0`) — while the
+   `review_jobs` table has no verdict column at all. A real recheck of a clean job therefore takes the
+   structured path and still PASSes, so the #3312 break-glass is intact, and the verdict-less branch is
+   **defensive**, for a payload shape no observed record produces. Making a defensive path fail closed
+   is free; making it guess is how a merge gate passes over live findings.
+
+   **Two transferable lessons.** (1) *Delegating a key's failure to its neighbour is a latent false PASS* —
+   the coupling is invisible while both keys are populated by the same event and evaporates in the first mode
+   where they are not. Ask of every key: **what fails the run if this key alone goes bad?** (2) *A
+   fail-closed argument for a default is only valid for the consumers that existed when it was written.* The
+   `block_marker_count` `:-0` default was audited as fail-closed because `NONE` was the STRICT direction for
+   `vacuity-tier1:`. Adding a consumer for which `NONE` is the PERMISSIVE direction silently inverted it, and
+   no choice of default can fix that — `0` and *unmeasurable* are the same value. **The resolution is not a
+   better default or a second signal but a REMOVED CONSUMER**: `NONE` is unreachable from a marker count at
+   all (only the structured verdict letter yields it), so nothing derives a permissive verdict from that `0`
+   and the original fail-closed argument holds unchanged. Re-derive such an argument whenever you add a
+   consumer — and note that an intermediate version of this very fix added a separate `block_measured` flag,
+   which went away with the prose reconstruction it guarded while this paragraph went on citing it for a
+   round (caught by the C intent audit). **A doctrine line naming a mechanism is a claim about code and
+   decays exactly like a comment: re-grep the symbol.**
 
    **It was never one bug — it is ONE SHAPE, found repeatedly on #3229, so it is now a rule:
    *a positive verdict requires an AFFIRMATIVE MEASUREMENT.*** The shape is *a multi-state signal where

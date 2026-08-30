@@ -319,7 +319,12 @@ pub fn scoped_captured(
 /// EXCLUDE it from `stream_merge` (issue #2819 B2). Zero `Instant::now` when
 /// inert, so the non-flight compaction merge pays nothing.
 pub fn time_recv<T>(f: impl FnOnce() -> T) -> T {
-    if sink_active() {
+    // Also armed by an installed READ-phase sink (issue #1707): `read.phase.merge`
+    // subtracts this SAME per-thread accumulator's delta from each merge step, so
+    // producer starvation is not charged to merge CPU. ONE accumulator and ONE call
+    // site serve both accountings — duplicating a second thread-local and a second
+    // recv-site call is the "two statements of one fact can disagree" shape.
+    if sink_active() || super::read_phase::sink_active() {
         let start = Instant::now();
         let out = f();
         add_pull_wait_nanos(elapsed_nanos(start));

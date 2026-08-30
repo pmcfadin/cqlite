@@ -134,19 +134,65 @@
 #                      The full pytest run includes the #1231 Python write→read
 #                      content proof (test_write_readback_content.py), so a core
 #                      write-format regression reds a binding content test.
-#   node-bindings      napi build + TWO named jest subsets in bindings/node: the
-#                      #1231 Node write→read content proof (jest
-#                      write-readback-content) and the #1456 stub-fidelity drift
-#                      alarm (jest typescript-definitions, index.d.ts vs the real
-#                      runtime surface). SKIPs (never silently PASSes) if node/npm
-#                      is unavailable. Scoped to named subsets (not full
-#                      `npm test`) so it stays fast and corpus-free while still
-#                      failing closed on a Node write-path regression (#1255) and
-#                      on declared-vs-runtime surface drift (#1456). NOTE: this is
-#                      the ONLY lane that executes the #1456 alarm — `--lite` has
-#                      no node tier, and node-ci.yml is `exempt` in
-#                      .github/ci-gating-tiers.yml, so do not narrow this back to
-#                      one subset without moving that coverage somewhere that runs.
+#   node-bindings      napi build + the WHOLE jest suite (`npm test`) in
+#                      bindings/node; SKIPs (never silently PASSes) if node/npm is
+#                      unavailable. WIDENED from 1 of 27 jest files to all of them
+#                      (#3522, superseding the #1255 narrowing): node-ci.yml is
+#                      `required`-EXEMPT on the stated grounds that this component is
+#                      the merge-gating half, which was true of one file. Measured
+#                      before widening: the slow half (npm ci + the release-unwind
+#                      napi build) is already paid here, and the full suite adds
+#                      ~15-35s — 504 tests / 27 suites, green on two consecutive runs.
+#                      Now IN DATASET_COMPONENTS: 14 of the suite files gate on dataset
+#                      availability (measured), and the FULL gate exports
+#                      CQLITE_REQUIRE_FIXTURES=1 — which buys ONE clean, named setup
+#                      failure in setup.js instead of 14 separate beforeAll THROWS, and
+#                      closes parity.test.js's `test.skip` placeholder, the one
+#                      corpus-conditional path that WOULD pass silently. It is NOT
+#                      protection against `describe.skip`: no *.test.js uses it (the
+#                      repo's Node convention is skipIfNoDatasets(), which THROWS).
+#                      --only/--lite stay lenient and the #2078 opt-out is honoured,
+#                      with the mode PRINTED. check_jest_suites_ran is
+#                      the affirmative guard: the reported suite total must equal the
+#                      RECONCILED set of TWO INDEPENDENT oracles — a recursive `find` over
+#                      __test__/ and `./node_modules/.bin/jest --listTests` — whose
+#                      symmetric difference must be EMPTY, FAILing with the specific paths
+#                      and two distinct remedies otherwise (#3522 D1: jest's list alone was
+#                      SELF-REFERENTIAL, since a config exclusion shrinks the expectation and
+#                      the run together). No suite may be failed or skipped, and the
+#                      passed-test count must be non-zero (a suite whose every TEST is
+#                      `test.skip`ped is reported as a PASSED suite — the suite-level
+#                      `skipped` count only catches a whole file being skipped, which is
+#                      why the two are separate directions). cqlite-node's
+#                      RUST unit tests are binding-rust-tests' subject, deliberately
+#                      NOT behind this component's SKIP.
+#   binding-rust-tests EXECUTES the RUST test suites of the two binding-side crates no
+#                      other component runs (#3522): `cargo test -p cqlite-ffi-common`
+#                      (ALL targets — lib + tests/dependency_boundary.rs +
+#                      tests/error_contract_table.rs) and `cargo test -p cqlite-node
+#                      --features write-support --lib`. Before it, BOTH executed
+#                      NOWHERE — not locally, not in CI: clippy --all-targets COMPILED
+#                      them and nothing RAN them, so an inverted assertion in either
+#                      could merge with every check green. Compiling is not covering
+#                      (#1699), and that holds at PACKAGE granularity too.
+#                      DELIBERATELY NOT folded into node-bindings: that component SKIPs
+#                      when node/npm is absent, and putting cqlite-node's RUST tests
+#                      behind that SKIP would be a coverage hole wearing a SKIP's
+#                      clothes. This one needs nothing beyond cargo and NEVER SKIPs.
+#                      Every subject set (integration targets + their runner ids,
+#                      unittest targets, enabled/declared features) is DERIVED from
+#                      cargo at run time, so a new tests/*.rs is covered with no gate
+#                      edit; a failed derivation FAILs naming the derivation. Guards are
+#                      affirmative, not exit-code-shaped: check_unittest_targets_ran
+#                      per package, check_test_targets_observed over the derived
+#                      integration set, and check_no_unexpected_zero_tests with an EMPTY
+#                      allowed-zero list. Prints a COVERAGE CENSUS on stdout and at the
+#                      head of its log naming what it does NOT run (cqlite-py's Rust
+#                      tests — structurally unlinkable; the jest suite — node-bindings'
+#                      subject; cqlite-node's derived integration-target count; the
+#                      features left off). Needs NO fixtures (verified: neither crate's
+#                      sources reference CQLITE_DATASETS_ROOT), so NOT in
+#                      DATASET_COMPONENTS.
 #   parity-report      cassandra-parity report --check: FAILs (naming
 #                      docs/reports/cassandra-test-parity.md) when the committed
 #                      derived report drifts from a fresh render of
@@ -217,6 +263,11 @@
 #                      datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
+#                      scripts/tests/test_workspace_test_disposition.sh (+ its
+#                      self-test): the PACKAGE-granular #3522 census — every cargo
+#                      workspace member carries a recorded EXECUTED/PARTIAL/
+#                      NOT-EXECUTED disposition, so a crate that is compiled by every
+#                      gate run and executes nothing cannot arrive unnoticed;
 #                      scripts/tests/test_tools_crate_disposition.sh (+ its
 #                      selftest) — #1716/AK5: every crate under tools/ must be
 #                      EXPLICITLY classified WIRED / UNWIRED / MIXED, and every
@@ -475,6 +526,22 @@
 #                      through `ws0_driver_run` leaves the recording file EMPTY and the
 #                      priors UNCHANGED. Hermetic everywhere; a check-count floor closes
 #                      the suite-level 0/0.
+#                      Also runs scripts/tests/test_ws0_embedded_steps_execute.sh (#3451)
+#                      — the EXECUTE direction of the driver's own embedded python. Every
+#                      suite above stops at `--validate-args-only`, and the accept cases
+#                      deliberately execute NOTHING, so the two multi-line `python3 -c`
+#                      steps BELOW that boundary (the session-corpus-pin and the CPU-pin
+#                      verification, both fatal-on-failure) had no coverage that RAN them:
+#                      they shipped for months with an f-string spelling no CPython parses,
+#                      invisible because the python is not a `.py` file and `bash -n` sees
+#                      one opaque single-quoted string. This EXTRACTS each block from the
+#                      shipped driver (never a copy — a copy stays green while the step is
+#                      broken) and RUNS it over a few-KB fixture corpus, asserting the
+#                      artifact, the pin lines and the SHIPPED reader accepting them, plus
+#                      the total property that EVERY embedded block compiles. Each accept
+#                      is paired with a control OBSERVED to fire on a scratch copy carrying
+#                      the injected defect. Hermetic: python3 + $TMPDIR; the driver is
+#                      READ, never invoked.
 #                      Also runs `cargo test -p ws0-corpus-gen` (#3272 items 8-9) — a
 #                      tools/* package NO other component and no CI lane compiles, so
 #                      without this hook the corpus determinism oracle would be a test
@@ -2279,7 +2346,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -2294,6 +2361,11 @@ COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-o
 _component_lane() {
   case "$1" in
     python-bindings|node-bindings) printf side ;;
+    # binding-rust-tests builds cqlite-ffi-common (a cqlite-core dependent with
+    # default-features = false) and cqlite-node (cqlite-core + parquet + cli-helpers +
+    # write-support) — class (a) of the SIDE rationale: a feature set that DIVERGES from
+    # MAIN's, so sharing MAIN's target dir would thrash it (#2657/#3522).
+    binding-rust-tests) printf side ;;
     parity-report|delivery-telemetry|binding-unwind-profile|smoke|memory-budget) printf side ;;
     # #1699 feature-matrix lanes. All four build cqlite-core at a feature set that
     # DIVERGES from MAIN's (cqlite-flight's arrow flavour; default+legacy-heuristics;
@@ -5280,6 +5352,300 @@ check_unittest_targets_ran() {
 }
 export -f check_unittest_targets_ran
 
+# check_jest_suites_ran <label> <logfile> <expected-suite-count>
+#
+# The jest ANALOGUE of check_unittest_targets_ran (issue #3522). A green `npm test` exit
+# is not evidence that anything ran: a suite whose every TEST is `test.skip`ped is
+# reported as a PASSED suite, so `Test Suites: 27 passed, 27 total` is reachable over
+# zero real assertions — the vacuous green this whole issue exists to remove, arriving
+# through the widened lane's own plumbing. (Jest's suite-level `skipped` count is a
+# DIFFERENT and weaker signal: it catches a whole FILE being skipped, not a file whose
+# every test was. That is why the two are separate directions below rather than one.)
+#
+# AFFIRMATIVE, in three directions, all parsed from jest's OWN summary:
+#   * the reported TOTAL suite count must equal <expected-suite-count>, which the
+#     caller DERIVES from the `__test__/*.test.js` files on disk — so a suite file that
+#     jest never picked up (a testPathIgnorePatterns edit, a rename, a filter left on
+#     the command line) FAILs instead of shrinking the lane silently;
+#   * no suite may be reported failed or skipped; and
+#   * the PASSED test count must be NON-ZERO.
+# A positive verdict PRINTS the counts, so a pasted log shows the check RAN and on what.
+#
+# Fail-closed on an unreadable/unparseable log for the same reason as its siblings: a
+# guard that consumed nothing has measured nothing and must never report OK. In
+# particular an ABSENT `Test Suites:` line is a FAIL, never "no problems found" — that
+# is the shape where the absence of a bad signal is read as a positive verdict.
+check_jest_suites_ran() {
+  local label="$1" logfile="$2" expected="$3"
+  case "$expected" in
+    ''|*[!0-9]*)
+      echo "$label: FAIL-CLOSED — check_jest_suites_ran was called with a non-numeric expected suite count ('$expected'); a guard whose subject size is unknown has no subject (issue #3522)" >&2
+      return 1 ;;
+  esac
+  if [ "$expected" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — check_jest_suites_ran was called expecting ZERO suites; a guard with an empty subject set would report OK having measured nothing (issue #3522)" >&2
+    return 1
+  fi
+  local _parse_src
+  _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+  if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing (resolved to '${_parse_src:-<empty>}'), so this guard parsed NOTHING (issue #3522)" >&2
+    return 1
+  fi
+  # The LAST summary block, so a nested/retried run cannot leave an older line in play.
+  local suites tests
+  suites=$(grep -E '^Test Suites:' "$_parse_src" | tail -1)
+  tests=$(grep -E '^Tests:' "$_parse_src" | tail -1)
+  if [ -z "$suites" ] || [ -z "$tests" ]; then
+    echo "$label: FAIL-CLOSED — no parseable jest summary in '$logfile' (Test Suites: '${suites:-<absent>}', Tests: '${tests:-<absent>}'). jest ran to a successful exit, so a summary must exist: a truncated log, a changed jest output format, or a run that never started. A guard that judged nothing must never report OK (issue #3522)" >&2
+    return 1
+  fi
+  # `<n> total` / `<n> passed` / `<n> failed` / `<n> skipped`, read by name rather than
+  # by position — jest omits a category entirely when its count is zero, so a
+  # positional parse would silently misread every line whose shape it did not expect.
+  # THE `:=0` DEFAULTS ARE THE PERMISSIVE BRANCH, so they get a CROSS-CHECK (roborev round 4,
+  # E1 class sweep). jest OMITS a category entirely when its count is zero, so "no match" and
+  # "the parse broke" produce the SAME empty string — and `sed -n` exits 0 either way, so no
+  # status check can separate them. Defaulting to 0 therefore silently converts a broken parse
+  # into "nothing failed, nothing was skipped", which is the vacuous direction in the two
+  # fields whose whole job is to report trouble.
+  #
+  # Two guards instead, both affirmative:
+  #   (a) CLOSED GRAMMAR — every `<N> <word>` pair on the line must name a category this parser
+  #       knows. An unrecognised one FAILs naming it, rather than being silently dropped from
+  #       the reconciliation below (a new jest category would otherwise make the sum wrong and
+  #       be reported as a parse break, i.e. the right red with the wrong cause).
+  #   (b) SUM RECONCILIATION — the recognised parts must add up to the reported total. A sed
+  #       that half-worked cannot satisfy this, so a broken parse can no longer look like zeros.
+  # (a) is checked FIRST, so (b) can never red on a category the parser simply does not know.
+  local s_total s_failed s_skipped s_passed s_pending s_todo t_passed
+  local _unknown _pair _n _w _sum
+  _unknown=$(printf '%s' "$suites" | sed -E 's/^Test Suites:[[:space:]]*//' | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
+    | awk '{ if ($1 ~ /^[0-9]+$/ && $2 != "passed" && $2 != "failed" && $2 != "skipped" && $2 != "total" && $2 != "pending" && $2 != "todo") print $2 }' \
+    | sort -u | tr '\n' ' ') || _unknown="__PARSE_FAILED__"
+  if [ "$_unknown" = "__PARSE_FAILED__" ]; then
+    echo "$label: FAIL-CLOSED — could not tokenise jest's suite summary line ('$suites') to validate its categories. An unmeasurable parse is never a pass (issue #3522, roborev E1)" >&2
+    return 1
+  fi
+  _unknown=$(printf '%s' "$_unknown" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  if [ -n "$_unknown" ]; then
+    echo "$label: FAIL-CLOSED — jest's suite summary line names category/categories this guard does not recognise: $_unknown ('$suites'). The closed grammar is deliberate: an unrecognised category would be dropped from the sum reconciliation below and reported as a broken parse, i.e. the right red with the wrong cause. Teach this guard the category, then re-run (issue #3522, roborev E1)" >&2
+    return 1
+  fi
+  s_total=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) total.*/\1/p')
+  s_failed=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) failed.*/\1/p')
+  s_skipped=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) skipped.*/\1/p')
+  s_passed=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) passed.*/\1/p')
+  s_pending=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) pending.*/\1/p')
+  s_todo=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) todo.*/\1/p')
+  t_passed=$(printf '%s' "$tests" | sed -nE 's/.*[^0-9]([0-9]+) passed.*/\1/p')
+  : "${s_failed:=0}" "${s_skipped:=0}" "${s_passed:=0}" "${s_pending:=0}" "${s_todo:=0}" "${t_passed:=0}"
+  case "$s_total" in
+    ''|*[!0-9]*)
+      echo "$label: FAIL-CLOSED — could not read a suite TOTAL out of jest's summary line ('$suites'). The parse is broken, which is never a pass (issue #3522)" >&2
+      return 1 ;;
+  esac
+  for _n in "$s_failed" "$s_skipped" "$s_passed" "$s_pending" "$s_todo" "$t_passed"; do
+    case "$_n" in
+      ''|*[!0-9]*)
+        echo "$label: FAIL-CLOSED — a suite/test count parsed out of jest's summary is not a number ('$_n'; suites='$suites', tests='$tests'). The parse is broken, which is never a pass (issue #3522, roborev E1)" >&2
+        return 1 ;;
+    esac
+  done
+  _sum=$((s_passed + s_failed + s_skipped + s_pending + s_todo))
+  if [ "$_sum" -ne "$s_total" ]; then
+    echo "$label: FAIL-CLOSED — jest's suite categories do not add up: passed=$s_passed failed=$s_failed skipped=$s_skipped pending=$s_pending todo=$s_todo sums to $_sum but the line reports $s_total total ('$suites'). The parse is broken; the categories above default to 0 when absent, so without this reconciliation a half-working parse would read as 'nothing failed, nothing skipped' (issue #3522, roborev E1)" >&2
+    return 1
+  fi
+  local bad=""
+  [ "$s_total" -eq "$expected" ] || bad="$bad jest ran $s_total suite(s) but $expected '*.test.js' file(s) exist on disk — a suite file was not picked up (a filter, a rename, or testPathIgnorePatterns);"
+  [ "$s_failed" -eq 0 ] || bad="$bad $s_failed suite(s) FAILED;"
+  [ "$s_skipped" -eq 0 ] || bad="$bad $s_skipped suite(s) were SKIPPED — a skipped suite is reported by jest as neither passed nor failed and would otherwise pass unnoticed;"
+  [ "$t_passed" -gt 0 ] || bad="$bad ZERO tests PASSED — a suite whose every test is test.skip'd is still reported as a PASSED suite, so a green exit over no assertions is exactly the vacuous result this guard exists to catch (and the suite-level skipped count above cannot see it);"
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED —$bad (issue #3522; jest summary was: '$suites' / '$tests')" >&2
+    return 1
+  fi
+  echo "$label: jest suites OK — $s_total/$expected suite(s) ran (0 failed, 0 skipped) and $t_passed test(s) PASSED (affirmative measurement, parsed from jest's own summary)" >&2
+  return 0
+}
+export -f check_jest_suites_ran
+
+# NB_TEST_ANCHOR — the ONE path anchor every node-suite normalisation uses (issue #3522,
+# roborev round 6 G1). Referenced by _jest_json_suite_counts's two implementations AND by the
+# two `sed` normalisations in run_node_bindings, so the four cannot drift.
+#
+# WHY IT IS THREE COMPONENTS AND NOT `/__test__/`. The short anchor was AMBIGUOUS, and the two
+# implementations resolved the ambiguity DIFFERENTLY: jq's `sub("^.*/__test__/"; "")` is greedy
+# (strips at the LAST occurrence) and so is `sed 's#.*/__test__/##'`, while python's
+# `n.find("/__test__/")` took the FIRST. On a python3-only host whose CHECKOUT PATH itself
+# contains a `__test__` directory, every suite is then reported missing and extra at once — a
+# FALSE RED on a correct tree, which is the direction that teaches agents to waive a lane. It is
+# latent wherever jq exists, so no run on a jq-equipped box can see it.
+#
+# Fixed by removing the ambiguity rather than picking a side: the anchor now names three path
+# components, which cannot plausibly recur inside a checkout prefix, AND every implementation
+# uses LAST-occurrence semantics on it. Same rule, same anchor, four places.
+NB_TEST_ANCHOR='/bindings/node/__test__/'
+
+# _jest_json_suite_counts <json-file> — print `<suite-path-relative-to-__test__>\t<passed-count>`
+# per suite from a jest `--json` report.
+#
+# SPLIT INTO TWO NAMED IMPLEMENTATIONS ON PURPOSE. CLAUDE.md records the rule this defect broke:
+# "a port is a second implementation, and a second implementation's correctness is only knowable
+# by differential testing against the original" (#3283 — a bash port of Go's exclusion logic
+# whose NBSP divergence was unfindable by care, because it was tested against a MODEL of the
+# original rather than the original). A jq branch and a python3 branch are exactly that, and
+# they had diverged. Naming them separately is what lets a self-test drive BOTH over one fixture
+# set and assert byte-identical output — differential testing against the original, not against
+# a model of it. It is NOT a test seam (#3312): the dispatcher's behaviour is unchanged and
+# nothing selects an implementation by variable.
+_jest_json_suite_counts_jq() { # <json-file>
+  jq -r --arg a "$NB_TEST_ANCHOR" '
+    .testResults[]?
+    | [ (.name | if index($a) then sub("^.*" + $a; "") else . end),
+        ([ .assertionResults[]? | select(.status == "passed") ] | length) ]
+    | @tsv' "$1"
+}
+_jest_json_suite_counts_py() { # <json-file>
+  python3 -c '
+import json, sys
+path, anchor = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    d = json.load(fh)
+for r in d.get("testResults") or []:
+    n = r.get("name") or ""
+    # rfind: LAST occurrence, matching jq'"'"'s greedy `^.*` and sed'"'"'s greedy `.*` (G1).
+    i = n.rfind(anchor)
+    rel = n[i + len(anchor):] if i >= 0 else n
+    p = sum(1 for a in (r.get("assertionResults") or []) if a.get("status") == "passed")
+    print("%s\t%d" % (rel, p))
+' "$1" "$NB_TEST_ANCHOR"
+}
+_jest_json_suite_counts() { # <json-file>
+  if command -v jq >/dev/null 2>&1; then
+    _jest_json_suite_counts_jq "$1"
+  elif command -v python3 >/dev/null 2>&1; then
+    _jest_json_suite_counts_py "$1"
+  else
+    printf '__PARSE_NO_TOOL__'
+    return 0
+  fi
+}
+
+# check_jest_per_suite_passed <label> <json-file> <reconciled-set-file>
+#
+# THE PER-SUITE half of the jest affirmative measurement (issue #3522, roborev round 5 F1).
+#
+# WHY THE AGGREGATE CHECK IS NOT ENOUGH, and this is #3522's own defect at suite granularity.
+# check_jest_suites_ran requires `Tests: N passed` with N > 0 — ONE passed test across the
+# WHOLE run. Jest reports a file whose every test is individually skipped as a PASSED suite,
+# so one suite can execute ZERO assertions while its 26 siblings satisfy the aggregate and the
+# component still goes green. The original bug this issue exists for was a whole CRATE's tests
+# not executing behind a green gate; that is the same thing one level down.
+#
+# It is the COMPLEMENT of the two-oracle reconciliation, not a replacement: the reconciliation
+# proves the right FILES are present and were run, this proves each of them did WORK. Neither
+# implies the other, and a suite can pass both file-level checks while asserting nothing.
+#
+# The subject set is the RECONCILED set (the file the reconciliation validated), never the
+# JSON's own suite list — that would be self-referential in exactly the way D1 fixed. The JSON
+# list is cross-checked AGAINST it in both directions instead.
+#
+# NO EXEMPTION LIST, and that is a MEASURED result rather than an assumption (F1's design
+# trap). The two RUN_SLOW_TESTS opt-in tests are per-TEST skips inside suites that retain
+# other passing tests — measured at RUN_SLOW_TESTS=0: publish.test.js 31 passed / 1 skipped,
+# streaming.test.js 22 passed / 1 skipped, and ZERO suites with no passed test. So the
+# per-suite requirement holds on a correct tree with no excusals at all. If a suite ever
+# becomes legitimately all-skipped this guard REDS, and the remedy is to declare it BY NAME
+# WITH ITS REASON in the census — never to add a silent entry to an exemption list, which is
+# the curation this component exists not to have.
+check_jest_per_suite_passed() {
+  local label="$1" json="$2" expected_file="$3"
+  if [ ! -r "$json" ]; then
+    echo "$label: FAIL-CLOSED — jest's --json report is missing or unreadable at '$json', so no PER-SUITE measurement could be taken. The aggregate 'Tests: N passed' check alone cannot see an all-skipped suite (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ ! -r "$expected_file" ]; then
+    echo "$label: FAIL-CLOSED — the reconciled suite set '$expected_file' is missing or unreadable, so this guard has no SUBJECT. A guard with an empty subject set reports OK having measured nothing (issue #3522)" >&2
+    return 1
+  fi
+  # The parse is DELEGATED to _jest_json_suite_counts, whose two implementations are
+  # differentially tested against each other over a shared fixture set
+  # (scripts/tests/test_agent_gate_parser_parity.sh). See its header for why that matters.
+  local counts=""
+  counts=$(_jest_json_suite_counts "$json") || counts="__PARSE_FAILED__"
+  if [ "$counts" = "__PARSE_NO_TOOL__" ]; then
+    echo "$label: FAIL-CLOSED — neither jq nor python3 is available to read jest's --json report, so the PER-SUITE measurement cannot be taken. An unparseable oracle is not a pass (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ "$counts" = "__PARSE_FAILED__" ]; then
+    echo "$label: FAIL-CLOSED — could not parse jest's --json report at '$json'. The PARSE failed, not the tests; an unmeasurable per-suite result is never a pass (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ -z "$counts" ]; then
+    echo "$label: FAIL-CLOSED — jest's --json report at '$json' yielded NO per-suite records. A guard that judged zero suites has measured nothing (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+
+  # No `declare -A`: this gate supports stock macOS /bin/bash 3.2, where associative arrays do
+  # not exist (the same constraint check_unittest_targets_ran records). A TAB-delimited list
+  # plus an exact-field awk lookup is 3.2-safe, and jest's suite paths contain no tabs.
+  local bad="" missing="" extra="" seen_n=0 min_n="" min_name="" suite passed
+  while IFS= read -r suite; do
+    [ -n "$suite" ] || continue
+    passed=$(printf '%s\n' "$counts" | awk -F'\t' -v s="$suite" '$1 == s { print $2; exit }')
+    if [ -z "$passed" ]; then
+      missing="$missing $suite"
+      continue
+    fi
+    case "$passed" in
+      ''|*[!0-9]*)
+        echo "$label: FAIL-CLOSED — non-numeric passed-count '$passed' for suite '$suite' in jest's --json report. The parse is broken, which is never a pass (issue #3522, roborev F1)" >&2
+        return 1 ;;
+    esac
+    seen_n=$((seen_n + 1))
+    if [ "$passed" -eq 0 ]; then
+      bad="$bad $suite"
+    fi
+    if [ -z "$min_n" ] || [ "$passed" -lt "$min_n" ]; then
+      min_n="$passed"; min_name="$suite"
+    fi
+  done < "$expected_file"
+
+  # The reverse direction: a suite jest reported that the reconciled set does not contain. The
+  # reconciliation should already have caught this, so reaching it here means the two
+  # measurements disagree — reported separately because its remedy is different.
+  local jsuite
+  while IFS=$'\t' read -r jsuite passed; do
+    [ -n "$jsuite" ] || continue
+    grep -qxF -- "$jsuite" "$expected_file" || extra="$extra $jsuite"
+  done <<EOF
+$counts
+EOF
+
+  if [ -n "$missing" ]; then
+    echo "$label: FAIL-CLOSED — reconciled suite(s)$missing appear in NO per-suite record of jest's --json report, so whether they executed anything is UNKNOWN. The reconciliation proved the files are present and listed; this guard is what proves they did work, and it could not judge these (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ -n "$extra" ]; then
+    echo "$label: FAIL-CLOSED — jest's --json report names suite(s)$extra that are NOT in the reconciled set, so the run and the reconciliation disagree about what the suite IS. Distinct from the case above: check the reconciliation's own two oracles rather than the per-suite results (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED — suite(s)$bad executed ZERO passing tests. Jest reports a file whose every test is individually skipped as a PASSED suite, and the aggregate 'Tests: N passed' check is satisfied by the OTHER suites — so this coverage would have vacated silently. If a suite is LEGITIMATELY all-skipped it must be DECLARED BY NAME WITH ITS REASON in this component's census, never excused silently (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ "$seen_n" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — judged ZERO suites against the reconciled set; a guard that measured nothing must never report OK (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  echo "$label: per-suite results OK — all $seen_n reconciled suite(s) executed >=1 passing test (leanest: $min_name with $min_n). Affirmative and PER-SUITE: the aggregate 'Tests: N passed' check cannot see one all-skipped suite among its passing siblings (issue #3522, roborev F1)" >&2
+  return 0
+}
+export -f check_jest_per_suite_passed
+
 # _package_test_targets <package>: print one TAB-separated line per declared
 # INTEGRATION (`test`) target of that workspace package — `<name>\t<required-features
 # comma-joined, empty when none>` (issue #1699, roborev round-2 finding 2).
@@ -5333,6 +5699,106 @@ for p in d["packages"]:
   fi
   [ -n "$out" ] || return 1
   printf '%s\n' "$out"
+}
+
+# _package_integration_target_ids <package>: print one TAB-separated line per declared
+# INTEGRATION (`test`) target — `<name>\t<runner-id>\t<required-features comma-joined>`
+# — and, UNLIKE _package_test_targets, treat "this package declares none" as a REAL
+# ANSWER rather than a failed derivation (issue #3522).
+#
+# Two reasons it is not just another caller of _package_test_targets.
+#
+#  1. ZERO IS A FACT HERE. _package_test_targets fails closed on an empty result
+#     because every one of its callers' packages declares integration targets, so
+#     emptiness there can only be a broken derivation. cqlite-node declares NONE, and
+#     the binding-rust-tests census must state that as a DERIVED fact ("this package
+#     has no integration targets") rather than as an assumption or a FAIL. Emptiness
+#     and failure are therefore distinguished by an explicit PRESENCE check on the
+#     package itself: a package cargo does not know about is a FAILED derivation
+#     (return 1); a package it knows about that declares no test target prints nothing
+#     and returns 0.
+#
+#  2. THE RUNNER ID. cargo's `Running tests/<path>.rs` banner — the string every
+#     observation guard here keys on — carries the target's path RELATIVE TO tests/,
+#     which equals the target NAME for a file-style target (`tests/foo.rs` -> `foo`)
+#     but NOT for a directory-style one (`tests/foo/main.rs` -> `foo/main`, name
+#     `foo`). Deriving the id from cargo's own `src_path` makes the guard's expectation
+#     agree with cargo's output BY CONSTRUCTION, so adding a directory-style target
+#     cannot turn a healthy lane red. A target mapped outside tests/ by an explicit
+#     `[[test]] path = "..."` yields its package-relative path, which is the second
+#     spelling check_no_unexpected_zero_tests already recognises.
+#
+# Same parser chain and same direction as its neighbours: jq, else python3, else a
+# FAILED derivation. Never a fallback to a partial or empty census.
+# SPLIT INTO NAMED IMPLEMENTATIONS (issue #3522, roborev round 6 G1 sweep) for the reason on
+# _jest_json_suite_counts: a jq branch and a python3 branch are two implementations of one
+# transformation, and "correctness only knowable by differential testing against the original"
+# applies to every such pair, not only to the one that was found divergent. Naming them is what
+# lets scripts/tests/test_agent_gate_parser_parity.sh drive BOTH over one fixture set and assert
+# byte-identical output. Each takes the metadata JSON as an ARGUMENT rather than calling cargo,
+# which is what makes a fixture possible at all.
+_package_integration_target_ids_jq() { # <meta-json> <pkg>
+  local meta="$1" pkg="$2" present
+  # PRESENCE first: without it, an unknown/renamed package would print nothing and be
+  # reported as "declares no integration targets" — a false all-clear about a package the
+  # lane cannot see at all.
+  present=$(printf '%s' "$meta" | jq -r --arg n "$pkg" '[.packages[] | select(.name == $n)] | length') || return 1
+  [ "$present" = 1 ] || return 1
+  printf '%s' "$meta" | jq -r --arg n "$pkg" \
+    '.packages[] | select(.name == $n)
+     | ((.manifest_path // "") | split("/") | .[0:-1] | join("/")) as $root
+     | (.targets // [])[]
+     | select((.kind // []) | index("test"))
+     | ((.src_path // "")) as $sp
+     | (if ($root != "" and ($sp | startswith($root + "/")))
+        then ($sp | ltrimstr($root + "/")) else $sp end) as $rel
+     | (if ($rel | startswith("tests/")) then ($rel | ltrimstr("tests/")) else $rel end) as $rel2
+     | (if ($rel2 | endswith(".rs")) then ($rel2 | .[0:-3]) else $rel2 end) as $id
+     | [.name, $id, (((."required-features" // [])) | join(","))] | @tsv'
+}
+_package_integration_target_ids_py() { # <meta-json> <pkg>
+  printf '%s' "$1" | python3 -c '
+import json, sys
+pkg = sys.argv[1]
+d = json.load(sys.stdin)
+pkgs = [p for p in d.get("packages", []) if p.get("name") == pkg]
+if len(pkgs) != 1:
+    sys.exit(1)
+p = pkgs[0]
+mp = p.get("manifest_path", "") or ""
+# `/`-split dirname, matching jq exactly. os.path.dirname was the previous form and is
+# platform-dependent; cargo metadata paths are always `/`-separated, and using os.sep here
+# would be a second rule the jq branch does not share (G1 sweep).
+root = mp.rsplit("/", 1)[0] if "/" in mp else ""
+for t in p.get("targets", []) or []:
+    if "test" not in (t.get("kind") or []):
+        continue
+    sp = t.get("src_path") or ""
+    rel = sp[len(root) + 1:] if root and sp.startswith(root + "/") else sp
+    if rel.startswith("tests/"):
+        rel = rel[len("tests/"):]
+    if rel.endswith(".rs"):
+        rel = rel[:-3]
+    print("%s\t%s\t%s" % (t.get("name") or "", rel, ",".join(t.get("required-features") or [])))
+' "$2"
+}
+_package_integration_target_ids() {
+  local pkg="$1"
+  local meta out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    out=$(_package_integration_target_ids_jq "$meta" "$pkg") || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(_package_integration_target_ids_py "$meta" "$pkg") || return 1
+  else
+    return 1
+  fi
+  # NO `[ -n "$out" ] || return 1` HERE, DELIBERATELY — that is the one line that
+  # distinguishes this helper from _package_test_targets. See reason 1 above.
+  printf '%s' "$out"
+  [ -n "$out" ] && printf '\n'
+  return 0
 }
 
 # THE FLAKE-QUARANTINE PLUMBING IS RETIRED, DELIBERATELY (issues #3383/#3384).
@@ -5424,7 +5890,30 @@ check_declared_test_targets_observed() {
     return 1
   fi
   local observed declared=0 seen=0
-  observed=" $(grep -oE 'Running tests/[^[:space:]]+\.rs' "$logfile" \
+  # Parse an ANSI-STRIPPED copy, never the raw log (issue #3400). This site was the one
+  # `Running tests/` parse in this file that #1699 left reading the raw log, and it is the
+  # FALSE-RED direction of the same defect: under `CARGO_TERM_COLOR=always` — set by 18
+  # workflows including the nightly FULL `gate.yml`, and by scripts/local/pre-merge.sh —
+  # cargo emits the reset BETWEEN the status word and the payload (`Running<ESC>[0m
+  # tests/foo.rs`), the literal `Running tests/` never appears, `observed` comes back EMPTY,
+  # and every declared target is then reported unobserved-and-unexplained. That reds a
+  # perfectly healthy run. Colour survives redirection to a file, so a component log is
+  # coloured too; this is not a tty-only artifact.
+  #
+  # Currently UNCALLED (the widened lane that calls it returns with #3384), which is exactly
+  # why it is fixed now rather than when it is revived: a defect in dormant code is invisible
+  # until the day someone re-enables it and reads the red as their own.
+  local _parse_src
+  _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+  if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing (resolved to '${_parse_src:-<empty>}'), so NO target could be observed and every declared target would be reported unobserved. A reconciliation that read nothing has measured nothing (issue #3400)." >&2
+    return 1
+  fi
+  if [ -s "$logfile" ] && [ ! -s "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' is non-empty but its prepared copy '$_parse_src' is empty, so this reconciliation would observe nothing (issue #3400)." >&2
+    return 1
+  fi
+  observed=" $(grep -oE 'Running tests/[^[:space:]]+\.rs' "$_parse_src" \
     | sed -E 's#^Running tests/(.*)\.rs$#\1#' | sort -u | tr '\n' ' ') "
   local bad="" excused="" flaky="" tname rf rfl off sk skissue
   while IFS=$'\t' read -r tname rf; do
@@ -5572,20 +6061,111 @@ run_python_bindings() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
-# node-bindings: build the napi-rs native module and run the #1231 Node
-# write→read CONTENT proof. Symmetric to run_python_bindings and SKIP-aware:
-# if there is no node/npm on PATH the component records SKIP (loudly, never
-# silently PASS) so a missing toolchain can't mask a real Node write-path
-# regression. Anything else (install/build/test failure) is a hard FAIL.
+# _node_bindings_corpus_present: does CQLITE_DATASETS_ROOT hold a corpus the node jest
+# suite will consider USABLE? (issue #3522, roborev round 2 C2.)
 #
-# Scope (#1255): we run the content proof specifically (npx jest
-# write-readback-content) rather than the full `npm test`. The full Node suite
-# pulls in corpus-dependent parity/smoke tests and a slow `--release` napi
-# build; scoping to the content proof keeps the gate fast and reliable while
-# guaranteeing the load-bearing #1231 test executes fail-closed. The content
-# test self-generates its SSTables, so it needs no fixture corpus (hence
-# node-bindings is NOT in DATASET_COMPONENTS); CQLITE_DATASETS_ROOT is still
-# exported defensively for any test that reads it.
+# A DELIBERATE, BOUNDED MIRROR of ONE line of the consumer:
+# `bindings/node/__test__/setup.js`'s
+#   DATASETS_AVAILABLE = fs.existsSync(SSTABLES_DIR) && hasDataDbFile(TEST_BASIC_DIR)
+# Named here with that file:line so the pair stays findable, because it IS a second
+# implementation and this repo's rule is to say so rather than let it drift silently. It is
+# used for ONE decision only — whether to SKIP under the #2078 opt-out — never to decide
+# what the suite runs, so a divergence costs at most an unnecessary SKIP in a mode that
+# already declares fixtures missing. That is the lenient direction on purpose.
+#
+# `[ -f "$f" ]` per candidate rather than `find -type f`, matching setup.js's
+# `statSync().isFile()`: it FOLLOWS a symlink and tests that the TARGET is a regular file. A
+# bare `-type f` would miss a symlinked Data.db, and `-xtype f` is unavailable on macOS's
+# BSD find, which this gate treats as a first-class host.
+_node_bindings_corpus_present() {
+  local root="${CQLITE_DATASETS_ROOT:-}" f
+  [ -n "$root" ] || return 1
+  [ -d "$root/sstables" ] || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] && return 0
+  done <<EOF
+$(find -H "$root/sstables/test_basic" -name '*-Data.db' -print 2>/dev/null)
+EOF
+  return 1
+}
+
+# node-bindings: build the napi-rs native module and run the WHOLE jest suite
+# against it. Symmetric to run_python_bindings and SKIP-aware: if there is no
+# node/npm on PATH the component records SKIP (loudly, never silently PASS) so a
+# missing toolchain can't mask a real Node regression. Anything else
+# (install/build/test failure) is a hard FAIL.
+#
+# SCOPE — WIDENED FROM ONE FILE TO THE WHOLE SUITE (issue #3522; supersedes the
+# #1255 narrowing). This component used to run `npx jest write-readback-content`,
+# i.e. ONE of the 27 jest suites, guaranteeing only the #1231 write→read content
+# proof. The other 26 executed nowhere that gates a merge: node-ci.yml's PR lane is
+# path-filtered to bindings/node/** (a cqlite-core-only diff does not trigger it) and
+# is `required`-EXEMPT, and the full `npm test` there is label/schedule gated — while
+# .github/ci-gating-tiers.yml justifies that exemption with "the merge-gating half is
+# the local gate's node-bindings component". That claim was true of 1 file in 27.
+# Among the 26 were shared-vectors.test.js (the cross-binding SHA-256 EXACT oracles,
+# whose whole value is that Python, Node and Rust agree byte-for-byte) and
+# prepared.test.js (export-surface named-set assertions).
+#
+# The #1255 rationale for narrowing was cost + corpus dependence, and it was
+# re-MEASURED rather than re-argued: the slow half (`npm ci` + the
+# `--profile release-unwind` napi build) is paid by this component ALREADY, and the
+# full suite adds ~15–35s on top of it — 504 passing tests across 27/27 suites, green
+# on two consecutive runs. That is not a cost worth 26 suites of blindness.
+#
+# THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED — AND THE REASON IS NOT THE ONE THIS
+# COMMENT FIRST GAVE (roborev/rust-reviewer round 1, B4). 14 of the suite's files gate on
+# dataset availability, so node-bindings IS now in DATASET_COMPONENTS (it was NOT before,
+# and that comment was correct then and would be a stale rationale now).
+#
+# The FULL gate additionally exports CQLITE_REQUIRE_FIXTURES=1. What that buys, MEASURED:
+#   * ONE clean, named setup failure (setup.js's `No SSTable fixtures found: …` throw)
+#     instead of 14 separate `beforeAll` THROWS from `skipIfNoDatasets()`; and
+#   * it closes `parity.test.js:70`'s `test.skip` placeholder — the ONE
+#     corpus-conditional path in the whole suite that would otherwise pass SILENTLY.
+#
+# WHAT IT IS **NOT**, stated because the first version of this comment claimed it and the
+# claim was false in three ways. There is no `describe.skip` anywhere in
+# `bindings/node/__test__/*.test.js` — the only occurrence of that string is inside a
+# COMMENT in dataset-guard.test.js. The repo's Node convention is the OPPOSITE of
+# skipping: `helpers.js`'s `skipIfNoDatasets()` THROWS, and `result.test.js` says so
+# outright ("per the repo's Node test convention it THROWS (never skips) … so a
+# misconfigured CI run fails loudly rather than passing silently"). The earlier text also
+# said "7 suites"; the measured number is 14.
+#
+# Why the correction matters more than the wording: a maintainer reading the old
+# rationale would conclude that CQLITE_REQUIRE_FIXTURES=1 is the only thing standing
+# between this gate and a silent all-skip, and could then delete the
+# AGENT_GATE_ALLOW_MISSING_FIXTURES split — or check_jest_suites_ran's `s_skipped`
+# branch — as redundant, reasoning from a mechanism the suite never had. A FALSE
+# rationale in a gate log is worse than none, because it is what stops the next person
+# looking. Same class as the stale #1255 comment this change already fixed.
+#
+# AFFIRMATIVE MEASUREMENT, not a green exit code (the same rule as the Rust lanes).
+# jest reports a suite whose every describe was skipped as PASSED, so `npm test`
+# exiting 0 does not establish that anything ran. check_jest_suites_ran requires the
+# reported total to equal the RECONCILED suite set of TWO INDEPENDENT oracles — a recursive
+# `find` over `__test__/` and `./node_modules/.bin/jest --listTests` — requires no suite to
+# have failed or been skipped, and requires a non-zero count of PASSED tests.
+#
+# TWO oracles, because either alone is blind in a different way (#3522 D1). jest's list is
+# the only thing that knows what will ACTUALLY run (its `testMatch` is recursive and it
+# applies ignore patterns a `find` cannot reproduce), but using it as the EXPECTATION too is
+# self-referential: a config narrowing shrinks the expectation and the run TOGETHER and the
+# guard passes while "every committed suite ran" is false. The independent inventory supplies
+# the expectation; jest supplies what runs; a non-empty symmetric difference is a FAIL naming
+# the paths, in two distinct directions with two distinct remedies (a silent config
+# exclusion, vs jest running something outside `__test__/`).
+#
+# RUN_SLOW_TESTS is forwarded exactly as python-bindings forwards it (default 0). Two
+# tests opt into it (publish.test.js's `npm pack --dry-run`, streaming.test.js's
+# `memory stays bounded for large result sets`); the census names them.
+#
+# `npm test`, NOT `npx jest`: the package's own test script is the derived answer to
+# "what is this suite", it runs the `pretest` loader generation, and it passes
+# `--expose-gc`, which the memory tests need. A retyped jest invocation here would
+# drift from the package the moment either changes.
 run_node_bindings() {
   local name=node-bindings
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -5600,31 +6180,853 @@ run_node_bindings() {
     record_result "$name" "$status" 0
     return 0
   fi
-  # Two NAMED jest subsets, not the whole suite — each is here for a stated reason:
+  # #2078 OPT-OUT REGRESSION, FIXED BY SKIPPING (roborev round 2, C2). Widening this
+  # component to the whole jest suite made `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` + no corpus
+  # FAIL where it used to PASS: the old scope was `write-readback-content` alone, which
+  # self-generates its SSTables. `env -u`'ing the strict variables (correct for B2, and kept)
+  # does NOT help here, because the suites do not gate on them — `helpers.js`'s
+  # `skipIfNoDatasets()` throws on `!global.DATASETS_AVAILABLE` and never consults
+  # `REQUIRE_FIXTURES` at all. So 14 suites throw whenever the corpus is absent, opt-out or
+  # not.
   #
-  #   write-readback-content   the #1231 Node write->read content proof.
-  #   typescript-definitions   the #1456 stub-fidelity drift alarm: index.d.ts vs
-  #                            the real runtime surface, both directions.
+  # That is precisely what the flight-tests header warns about in its own words: "an opt-out
+  # that the SUMMARY reports as taken did not, in fact, let the gate finish". The block would
+  # print `missing-fixtures: OPT-OUT` and the gate would die anyway; an opt-out's value is
+  # that it is BOTH visible AND effective.
   #
-  # #1456's alarm is wired HERE because this is the only lane that executes it.
-  # Measured when it was added: `--lite` has no node tier at all, and BOTH
-  # `node-ci.yml` and `python-ci.yml` sit in `.github/ci-gating-tiers.yml`'s
-  # `exempt` section, so neither gates `required`. Without this line the drift
-  # alarm ran in NO lane — the #1699/#3375 trap, where a test that exists
-  # everywhere and executes nowhere reads as coverage it does not provide. The
-  # marginal cost is ~0.5s: this component already paid for `npm ci` + the napi
-  # build, which is the expensive part.
-  echo ">>> [$name] npm ci + npm run build + jest write-readback-content (#1231) + typescript-definitions (#1456)"
-  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
+  # A SKIP, not a corpus-free subset. Running "just the suites that need no corpus" would
+  # reintroduce exactly the curation D2 removed, and nothing DERIVES which suites need a
+  # corpus without running them. A declared SKIP matches this component's existing
+  # SKIP-aware shape for a missing toolchain, and it names the coverage it is giving up.
+  #
+  # Checked BEFORE `npm ci` so the opt-out costs nothing. `--only`/`--lite` are unaffected:
+  # this branch keys on the opt-out alone, and under `--only` without it the component still
+  # runs (a probe, never a verdict).
+  if [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && ! _node_bindings_corpus_present; then
+    status=SKIP
+    echo ">>> [$name] SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and no usable corpus at CQLITE_DATASETS_ROOT='${CQLITE_DATASETS_ROOT:-<unset>}')"
+    echo ">>> [$name]   NOT VALIDATED by this run: the 14 dataset-gated jest suites. helpers.js's"
+    echo ">>> [$name]   skipIfNoDatasets() THROWS on an absent corpus and never consults the strict-mode"
+    echo ">>> [$name]   env vars, so they cannot be run leniently — the honest options are SKIP or FAIL,"
+    echo ">>> [$name]   and FAIL would make the documented #2078 opt-out ineffective (roborev C2)."
+    echo ">>> [$name]   The corpus-free half (incl. the #1231 write-readback content proof) is ALSO"
+    echo ">>> [$name]   skipped: nothing derives which suites need a corpus without running them, and"
+    echo ">>> [$name]   curating that list is what D2 removed."
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  # `npx` is DELIBERATELY NOT in that predicate, and the suite-derivation below
+  # deliberately does not use it (roborev round 1, B7). An earlier cut ran
+  # `npx jest --listTests`, so on a host with node+npm but no `npx` shim a MISSING
+  # TOOLCHAIN became a hard FAIL — contradicting this component's own "SKIPs, never
+  # silently PASSes" contract. The fix is not to widen the predicate but to stop needing
+  # the shim: `./node_modules/.bin/jest` is what `npm ci` has just installed, it is the
+  # same binary, and it removes a network-capable `npx` package resolution from the gate
+  # path entirely.
+  # Strict-fixture mode on the FULL gate only, honouring the documented #2078 opt-out.
+  # See the scope note above for why enrollment in DATASET_COMPONENTS is not enough.
+  # ENFORCED WITH `env -u`, NOT MERELY BY OMITTING THE ASSIGNMENT (roborev round 1, B2;
+  # the same lesson is already recorded on the bti-multiclustering lane, which cites it
+  # as "plain `env` INHERITS an exported value, and exporting CQLITE_REQUIRE_FIXTURES=1
+  # is routine"). Both variables are strict-mode triggers for this suite —
+  # `bindings/node/__test__/setup.js` ORs them (`CQLITE_REQUIRE_FIXTURES` ||
+  # `CQLITE_PARITY_REQUIRE_DATASETS`), and `abort-safety.test.js` reads both to turn a
+  # skip into a hard failure. So an inherited export would make `--only` or the
+  # documented #2078 opt-out FAIL while the census line printed below claims fixtures are
+  # optional: an opt-out that the SUMMARY reports as TAKEN but that does not let the gate
+  # finish, which is exactly what #2078's own per-lane-veto note forbids.
+  #
+  # The mode is decided by THIS SCRIPT's own state (`$ONLY`/`$LITE`/the opt-out) and the
+  # inherited variables are then unset — never the reverse. Deriving the mode FROM the
+  # inherited variables would let the ambient environment redefine what the gate
+  # certifies.
+  local require_fixtures=0 fixture_note
+  local -a fixture_env=()
+  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
+    require_fixtures=1
+    fixture_note="CQLITE_REQUIRE_FIXTURES=1 — an absent corpus fails ONCE, by name, in setup.js instead of as 14 separate beforeAll throws, and parity.test.js's test.skip placeholder (the one corpus-conditional path that would pass silently) cannot fire"
+  elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ]; then
+    fixture_note="CQLITE_REQUIRE_FIXTURES unset (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — with a corpus absent the 14 dataset-gated suites would THROW individually and parity.test.js would test.skip, so this run does NOT validate that half"
+  else
+    fixture_note="CQLITE_REQUIRE_FIXTURES unset (--only/--lite probe run) — with a corpus absent the 14 dataset-gated suites would THROW individually and parity.test.js would test.skip"
+  fi
+  if [ "$require_fixtures" = 1 ]; then
+    fixture_env=(CQLITE_REQUIRE_FIXTURES=1)
+  else
+    fixture_env=(-u CQLITE_REQUIRE_FIXTURES -u CQLITE_PARITY_REQUIRE_DATASETS)
+  fi
+
+  local -a census=()
+  census+=("npm ci + npm run build + npm test — the WHOLE jest suite, #3522")
+  census+=("  supersedes the #1255 narrowing to 1 of 27 files; node-ci.yml is required-EXEMPT on the")
+  census+=("  grounds that THIS component is the merge-gating half, which was true of 1 file in 27.")
+  census+=("  fixtures: $fixture_note")
+  census+=("  RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0} — 2 tests opt in (publish.test.js 'npm pack --dry-run';")
+  census+=("       streaming.test.js 'memory stays bounded for large result sets'). At 0 they skip;")
+  census+=("       that is the suite's OWN gate, identical to python-bindings' convention.")
+  census+=("  NOT RUN HERE: cqlite-node's RUST unit tests — that is binding-rust-tests' subject,")
+  census+=("       deliberately a separate component because THIS one SKIPs without node/npm and a")
+  census+=("       Rust suite behind that SKIP would be a coverage hole wearing a SKIP's clothes.")
+  local cl
+  for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
+  {
+    echo "==== [$name] COVERAGE CENSUS (issue #3522) ===="
+    for cl in "${census[@]}"; do echo "$cl"; done
+    echo "==== end census ===="
+  } > "$log"
+
+  # STEP 1 — install, build, and DERIVE the suite set FROM TWO INDEPENDENT ORACLES.
+  #
+  # WHY TWO, AND WHY ONE WAS NOT ENOUGH (roborev round 3, D1). `jest --listTests` is the
+  # right oracle for the ACTUAL set — it applies this package's `testMatch`
+  # (`**/__test__/**/*.test.js`, RECURSIVE) and jest's ignore patterns, which a
+  # `find -maxdepth 1` cannot reproduce (it agrees at 27 today and would silently
+  # UNDERCOUNT the day a subdirectory appears, false-redding healthy code). That argument
+  # stands and is why the find below is RECURSIVE and is NOT used to select what runs.
+  #
+  # But using it as the EXPECTED count too made the guard SELF-REFERENTIAL: the expectation
+  # and the run both flow from jest's configuration, so a `testMatch` narrowing or an added
+  # ignore pattern shrinks BOTH TOGETHER and the guard passes while its stated contract
+  # ("every committed suite ran") is violated. That is #3522's own defect class one level
+  # up — the same shape as a CQLite-written/CQLite-read round-trip being invariant to a
+  # uniform framing error, and the same shape as `clippy --all-targets` "covering" a crate
+  # it only compiles. A measurement whose subject and whose oracle share a source cannot
+  # detect a change that moves both.
+  #
+  # So: an INDEPENDENT recursive filesystem inventory is taken, RECONCILED against jest's
+  # list, and any disagreement FAILs naming the specific paths — in two DISTINCT
+  # directions, because they have different remedies:
+  #   * on disk but NOT listed by jest  -> a silent CONFIG EXCLUSION (the defect found);
+  #   * listed by jest but NOT on disk  -> jest is running something outside __test__, or
+  #                                        this inventory is wrong.
+  # Only the RECONCILED set becomes the expectation the run summary is checked against.
+  #
+  # `find`, NOT `git ls-files`, deliberately: jest enumerates the DISK, so a
+  # committed-files inventory would red on a new-but-uncommitted test file — a false red on
+  # correct work, which is the verdict agents learn to waive. Both oracles must answer the
+  # same question ("what is on disk"); only one of them may consult jest's config.
+  local list_file="$LOG_DIR/$name.listtests.txt" suite_n=""
+  # Both strict-mode variables are unset here UNCONDITIONALLY, in every mode: listing
+  # tests needs no corpus, so an inherited strict flag could only turn a healthy
+  # enumeration into a failure. STEP 2 below is where the mode actually applies.
+  if ! env -u CQLITE_REQUIRE_FIXTURES -u CQLITE_PARITY_REQUIRE_DATASETS \
+       CQLITE_LIST_FILE="$list_file" bash -c '
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
       if [ -f package-lock.json ]; then npm ci; else npm install; fi
       npm run build
-      npx jest write-readback-content
-      npx jest typescript-definitions' >"$log" 2>&1; then
-    status=PASS
+      ./node_modules/.bin/jest --listTests > "$CQLITE_LIST_FILE"' >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (npm ci / npm run build / jest --listTests); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  if [ ! -r "$list_file" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: './node_modules/.bin/jest --listTests' left no readable list at $list_file,"
+      echo "        so the expected suite count could not be DERIVED and the affirmative guard"
+      echo "        would have no subject (issue #3522)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  # ORACLE A — jest's own list, normalised. Both sides are reduced to their path RELATIVE
+  # TO `__test__/`, so the comparison cannot be broken by a symlinked or differently-spelled
+  # absolute prefix (jest resolves rootDir from its config; this script uses $REPO_ROOT).
+  local jest_set="$LOG_DIR/$name.suites-jest.txt"
+  local disk_set="$LOG_DIR/$name.suites-disk.txt"
+  # Jest's machine-readable PER-SUITE report (roborev round 5, F1). Written under $LOG_DIR, so
+  # it is unique per run and a stale report from a previous run can never be read as this
+  # run's. Removed first anyway, so a jest that fails to write it is caught by the guard's
+  # unreadable-input branch rather than by silently reusing whatever was there.
+  local suite_json="$LOG_DIR/$name.jest-report.json"
+  rm -f "$suite_json"
+  local only_disk only_jest
+  # STATUS CHECKED, and the reason is CAUSE ATTRIBUTION, not just hygiene (roborev round 4, E1
+  # class sweep). A truncated `jest_set` makes the reconciliation below report "ON DISK but NOT
+  # LISTED BY JEST — a silent config exclusion" and send the reader to jest.config.js, when in
+  # fact the normalisation pipeline failed. That is the "verdict is right, remedy is useless"
+  # defect the flight lane's fixture preflight records; a distinct named cause is the fix.
+  # Same anchor and same LAST-occurrence rule as _jest_json_suite_counts (G1): four
+  # normalisations, one definition, so they cannot resolve an ambiguity differently again.
+  if ! sed -n "s#.*${NB_TEST_ANCHOR}##p" "$list_file" | grep '\.test\.js$' | sort -u > "$jest_set"; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not normalise jest's --listTests output into a comparable"
+      echo "        suite set (the sed/grep/sort pipeline failed on $list_file). This is a PARSE"
+      echo "        failure, NOT a config exclusion — do not go looking at jest.config.js"
+      echo "        (issue #3522, roborev E1)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ORACLE B — an INDEPENDENT recursive filesystem inventory. `find`, not a glob: a glob's
+  # meaning depends on ambient shell options this script never sets and cannot control
+  # (`nullglob` empties an unmatched pattern, `failglob` makes it an error), both reachable
+  # through BASHOPTS — the round-34 lesson. `node_modules` is pruned to match jest's default
+  # ignore, which is the ONE piece of jest behaviour this inventory deliberately mirrors:
+  # without it the two oracles would disagree on vendored fixtures forever and the
+  # reconciliation would be a permanent red.
+  local _nb_test_dir="$REPO_ROOT/bindings/node/__test__"
+  if [ ! -d "$_nb_test_dir" ] || [ ! -r "$_nb_test_dir" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: $_nb_test_dir is missing or unreadable, so the INDEPENDENT"
+      echo "        inventory half of the suite reconciliation cannot be taken. With only jest's"
+      echo "        own list the guard would be self-referential (issue #3522, roborev D1)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  # `-print0` and a NUL-vs-line count assert: a filename containing a newline would be
+  # silently split into two entries by the line-based sort/comm below, inflating the
+  # inventory and producing a nonsense reconciliation. Refuse rather than mis-measure.
+  local _nb_nuls _nb_lines
+  # Same treatment, same reason, opposite direction: a truncated `disk_set` would be reported
+  # as "LISTED BY JEST but NOT FOUND ON DISK" and send the reader to testMatch, when the
+  # inventory pipeline is what failed.
+  if ! find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null \
+    | tr '\0' '\n' | sed -n "s#.*${NB_TEST_ANCHOR}##p" | sort -u > "$disk_set"; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the independent suite inventory pipeline failed (find/tr/sed/sort"
+      echo "        over $_nb_test_dir). This is an INVENTORY failure, NOT jest running something"
+      echo "        outside __test__/ — do not go looking at testMatch (issue #3522, roborev E1)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  _nb_nuls=$(find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null | tr -dc '\0' | wc -c | tr -d ' ')
+  _nb_lines=$(grep -c . "$disk_set" || true)
+  case "$_nb_nuls$_nb_lines" in
+    ''|*[!0-9]*) _nb_nuls=-1 ;;
+  esac
+  if [ "$_nb_nuls" != "$_nb_lines" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the independent suite inventory counted $_nb_nuls NUL-delimited"
+      echo "        entries but $_nb_lines line(s) after conversion — a test filename contains a"
+      echo "        newline (or the count itself failed), so the line-based reconciliation below"
+      echo "        would mis-measure. Refusing rather than comparing garbage (issue #3522)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # RECONCILE. `comm`'s exit status is CHECKED: an unchecked `$(comm …)` yields the EMPTY
+  # STRING when comm FAILS, and "empty symmetric difference" is exactly this check's PASS
+  # condition — so a comm failure would silently certify the two oracles as agreeing. Never
+  # let a permissive verdict rest on the absence of output that a failure also produces.
+  only_disk=$(comm -23 "$disk_set" "$jest_set"); [ $? -eq 0 ] || only_disk="__COMM_FAILED__"
+  only_jest=$(comm -13 "$disk_set" "$jest_set"); [ $? -eq 0 ] || only_jest="__COMM_FAILED__"
+  if [ "$only_disk" = "__COMM_FAILED__" ] || [ "$only_jest" = "__COMM_FAILED__" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not compare the two suite oracles (comm failed). An"
+      echo "        unmeasurable reconciliation is not a pass (issue #3522, roborev D1)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  if [ -n "$only_disk" ] || [ -n "$only_jest" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the two suite oracles DISAGREE (issue #3522, roborev D1)."
+      if [ -n "$only_disk" ]; then
+        echo "        ON DISK but NOT LISTED BY JEST — a SILENT CONFIG EXCLUSION. These committed"
+        echo "        suites would never run, and using jest's own list as the expectation would"
+        echo "        have hidden it (expectation and run shrink together):"
+        printf '%s\n' "$only_disk" | sed 's#^#          __test__/#'
+        echo "        REMEDY: check jest.config.js's testMatch / testPathIgnorePatterns, or any"
+        echo "        filter on the jest command line. If the exclusion is INTENDED, it must be"
+        echo "        declared here deliberately, not inferred from a shrinking count."
+      fi
+      if [ -n "$only_jest" ]; then
+        echo "        LISTED BY JEST but NOT FOUND ON DISK under __test__/ — jest is running"
+        echo "        something this inventory does not see (a testMatch reaching outside"
+        echo "        __test__/, a roots/rootDir change), or this inventory is wrong:"
+        printf '%s\n' "$only_jest" | sed 's#^#          #'
+        echo "        REMEDY: a DIFFERENT one from the case above — widen the inventory to match"
+        echo "        what the suite actually is, or narrow testMatch back."
+      fi
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Only the RECONCILED set becomes the expectation. Counted from the INVENTORY, not from
+  # jest's list — they are now proven identical, and taking it from the independent side
+  # keeps the guard's subject anchored to the filesystem rather than to jest's config.
+  suite_n=$(grep -c . "$disk_set" || true)
+  case "$suite_n" in
+    ''|*[!0-9]*) suite_n=0 ;;
+  esac
+  if [ "$suite_n" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the reconciled suite set is EMPTY — no *.test.js found on disk"
+      echo "        under bindings/node/__test__ AND none listed by jest. The DERIVATION failed"
+      echo "        (or the suite vanished), and a guard expecting zero suites would report OK"
+      echo "        having measured nothing (issue #3522)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  echo ">>> [$name] suite set RECONCILED: $suite_n *.test.js file(s) — two INDEPENDENT oracles agree (recursive find over __test__/ vs ./node_modules/.bin/jest --listTests); neither alone could detect a config exclusion (#3522 D1)"
+  echo "suite set RECONCILED: $suite_n *.test.js file(s) — independent recursive find over __test__/ AGREES with ./node_modules/.bin/jest --listTests (symmetric difference empty)" >> "$log"
+
+  # STEP 2 — run them.
+  # `env "${fixture_env[@]}"` FIRST, because `env`'s -u options must precede any
+  # NAME=VALUE assignments. In strict mode that array IS the assignment; otherwise it is
+  # the pair of -u unsets, so the in-script conditional export this replaced (which could
+  # only ADD the variable, never remove an inherited one) is gone.
+  # `npm test -- --json --outputFile=…` rather than a retyped jest command: `npm test` stays the
+  # derived answer to "what is this suite" (it runs `pretest` and passes `--expose-gc`), and the
+  # extra args after `--` reach jest. MEASURED: the human `Test Suites:`/`Tests:` summary the
+  # aggregate guard parses is STILL emitted alongside the JSON file, so both guards keep their
+  # inputs.
+  if env "${fixture_env[@]}" \
+     CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+     CQLITE_JEST_JSON="$suite_json" \
+     RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
+      set -euo pipefail
+      cd "'"$REPO_ROOT"'/bindings/node"
+      npm test -- --json --outputFile="$CQLITE_JEST_JSON"' >>"$log" 2>&1; then
+    # A green `npm test` is NOT sufficient: jest reports a suite whose every describe
+    # was skipped as PASSED, so the exit code alone cannot distinguish 27 suites of
+    # assertions from 27 suites of nothing.
+    # BOTH halves are required and neither implies the other (roborev round 5, F1):
+    # check_jest_suites_ran judges the FILE SET and the aggregate counts;
+    # check_jest_per_suite_passed judges whether EACH reconciled suite did any work. A suite
+    # whose every test is individually skipped is reported by jest as a PASSED suite and
+    # satisfies the aggregate via its siblings, so only the per-suite guard can see it.
+    # ANDed without short-circuiting, so one run reports BOTH verdicts rather than revealing
+    # them serially across re-runs.
+    local _agg_ok=0 _per_ok=0
+    check_jest_suites_ran "$name" "$log" "$suite_n" 2>>"$log" && _agg_ok=1
+    check_jest_per_suite_passed "$name" "$suite_json" "$disk_set" 2>>"$log" && _per_ok=1
+    if [ "$_agg_ok" -eq 1 ] && [ "$_per_ok" -eq 1 ]; then
+      status=PASS
+    else
+      status=FAIL
+    fi
   else
     status=FAIL
+  fi
+  if [ "$status" = FAIL ]; then
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# Partition a package's DERIVED integration targets into the ones cargo can actually
+# run at this lane's feature set and the ones it will SILENTLY skip for an unmet
+# `required-features` (cargo prints no banner at all for those, so demanding an
+# observation would red a healthy lane — they are excluded and DECLARED, never dropped
+# quietly). Prints ONE tab-separated line: <runner-ids> TAB <target-names> TAB
+# <skip-reasons>.
+#
+# SHARED by both packages deliberately. The cqlite-ffi-common half and the cqlite-node
+# half are the SAME logic, and a near-copy is how one of them silently stops matching
+# cargo's behaviour — the drift this whole component exists to prevent.
+_brt_partition_targets() { # <target-meta> <enabled-set>
+  local meta="$1" enabled="$2"
+  local ids="" names="" skip="" tn tid trf troff trfl
+  while IFS=$'\t' read -r tn tid trf; do
+    [ -n "$tn" ] || continue
+    troff=""
+    for trfl in ${trf//,/ }; do
+      case "$enabled" in *" $trfl "*) ;; *) troff="$trfl"; break ;; esac
+    done
+    if [ -n "$troff" ]; then
+      skip="$skip $tid(required-features[$trf]:off[$troff])"
+    else
+      ids="$ids $tid"; names="$names $tn"
+    fi
+  done <<< "$meta"
+  # \037 = ASCII US. See this function's header: TAB here silently dropped an empty
+  # LEADING field, which is the C3 defect.
+  printf '%s\037%s\037%s\n' "${ids# }" "${names# }" "${skip# }"
+}
+
+# _package_declared_features <package>: print every feature NAME the package's own
+# manifest declares, one per line (possibly none), from cargo metadata. Exit 1 = the
+# derivation failed (no jq/python3, a metadata failure, or no such package) — never a
+# silent empty list, which would let a lane report "nothing is turned off" about a
+# package it could not read (issue #3522).
+#
+# Its consumer is the binding-rust-tests census: subtracting the RESOLVED enabled set
+# (_resolved_package_features) from this DECLARED set is how the lane states, as a
+# derived fact rather than a curated sentence, which of a binding crate's features it
+# leaves off — and therefore which `#[cfg(feature = ...)]` test bodies it does not run.
+_package_declared_features_jq() { # <meta-json> <pkg>
+  local meta="$1" pkg="$2" present
+  present=$(printf '%s' "$meta" | jq -r --arg n "$pkg" '[.packages[] | select(.name == $n)] | length') || return 1
+  [ "$present" = 1 ] || return 1
+  printf '%s' "$meta" | jq -r --arg n "$pkg" \
+    '.packages[] | select(.name == $n) | (.features // {}) | keys[]'
+}
+_package_declared_features_py() { # <meta-json> <pkg>
+  printf '%s' "$1" | python3 -c '
+import json, sys
+pkg = sys.argv[1]
+d = json.load(sys.stdin)
+pkgs = [p for p in d.get("packages", []) if p.get("name") == pkg]
+if len(pkgs) != 1:
+    sys.exit(1)
+# jq'"'"'s `keys` sorts by unicode codepoint; python'"'"'s sorted() on str does the same, so the two
+# orderings agree. Asserted by differential test rather than assumed (G1 sweep).
+for f in sorted((pkgs[0].get("features") or {}).keys()):
+    print(f)
+' "$2"
+}
+_package_declared_features() {
+  local pkg="$1"
+  local meta out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    out=$(_package_declared_features_jq "$meta" "$pkg") || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(_package_declared_features_py "$meta" "$pkg") || return 1
+  else
+    return 1
+  fi
+  # Emptiness is a legitimate answer here (cqlite-ffi-common declares no features at
+  # all), for the same reason and with the same presence check as
+  # _package_integration_target_ids.
+  printf '%s' "$out"
+  [ -n "$out" ] && printf '\n'
+  return 0
+}
+
+# binding-rust-tests: EXECUTE the RUST test suites of the two binding-side crates that
+# no other gate component runs — cqlite-ffi-common (whole package) and cqlite-node
+# (--lib) (issue #3522).
+#
+# THE DEFECT IT EXISTS FOR. Compiling is not covering, and #1699 established that at
+# FEATURE granularity. The same reasoning holds at PACKAGE granularity, and two crates
+# were sitting in exactly that hole: `cqlite-ffi-common` appeared ZERO times in
+# scripts/** and .github/workflows/**, so its 37 unit tests and its two integration
+# targets (tests/dependency_boundary.rs, tests/error_contract_table.rs) were reached
+# only by clippy's `--all-targets` compile and executed NOWHERE — not locally, not in
+# CI. `cqlite-node`'s 53 Rust unit tests were in the same position: node-bindings runs
+# jest against the BUILT ARTIFACT and never `cargo test`. An inverted assertion in
+# either could be committed, merged and released with every check green.
+#
+# WHY THIS IS A SEPARATE COMPONENT AND NOT PART OF node-bindings. node-bindings SKIPs
+# when node/npm is absent — correctly, since without them it can build nothing. Putting
+# cqlite-node's RUST tests behind that SKIP would mean a box with no npm silently stops
+# executing them: a coverage hole wearing a SKIP's clothes, which is this issue's own
+# defect class re-created by the fix. This component therefore depends on NOTHING beyond
+# cargo and NEVER SKIPs. The same argument keeps cqlite-ffi-common out of
+# python-bindings.
+#
+# FEATURE SETS, chosen and stated rather than defaulted into:
+#   * cqlite-ffi-common — none. The crate declares NO `[features]` table (derived and
+#     printed on every run), so there is no other set to choose.
+#   * cqlite-node — `--features write-support`, because that is what the SHIPPED
+#     artifact is built with (`npm run build` = `napi build … --features write-support`),
+#     so this lane runs the Rust half at the feature set the product actually ships. It
+#     costs nothing: cqlite-node's cqlite-core dependency already takes default features,
+#     which include write-support, so the flag adds no compilation. `observability` is
+#     deliberately NOT enabled — building the OTel stack is a cost this gate declines on
+#     purpose (#1844 excludes that stack from clippy for the same reason) — and the
+#     census DECLARES that, with the un-enabled feature set DERIVED, not listed by hand.
+#
+# AFFIRMATIVE MEASUREMENT, not a green exit code. A suite whose modules are cfg'd out
+# compiles, runs 0 tests and exits 0. Three guards, all over cargo's own output:
+#   * check_unittest_targets_ran   — per package, each selected `--lib` target must be
+#                                    OBSERVED and must have run a NON-ZERO count.
+#   * check_test_targets_observed  — every DERIVED cqlite-ffi-common integration target
+#                                    must have produced a `Running` banner (this is the
+#                                    guard that makes `dependency_boundary.rs` running in
+#                                    the gate of record a checkable fact, not a hope).
+#   * check_no_unexpected_zero_tests — with an EMPTY allowed-zero list, so any
+#                                    integration target that runs zero tests FAILs.
+# The two packages write to SEPARATE log files, deliberately: both print
+# `Running unittests src/lib.rs`, and check_unittest_targets_ran keys on that path, so a
+# single shared log would let one package's unit run satisfy the guard for the other.
+#
+# DERIVE, NEVER CURATE. Every subject set — integration targets, their runner ids,
+# unittest targets, enabled features, declared features — comes from `cargo metadata` /
+# `cargo tree` at run time, so a new `tests/*.rs` in either crate is covered with no gate
+# edit. A FAILED derivation is a FAIL NAMING THE DERIVATION, never a fallback to "nothing
+# to run": a silently empty subject set is the vacuous green this component was created
+# to remove.
+#
+# NOT IN DATASET_COMPONENTS, verified rather than assumed: neither `cqlite-ffi-common/`
+# nor `bindings/node/src/` contains any reference to `CQLITE_DATASETS_ROOT` or `test-data`
+# (measured; the jest suite does read the corpus, but that is node-bindings' subject, not
+# this lane's). The root is still exported defensively.
+run_binding_rust_tests() {
+  local name=binding-rust-tests
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local ffi_log="$LOG_DIR/$name.cqlite-ffi-common.log"
+  local node_log="$LOG_DIR/$name.cqlite-node.log"
+  # A THIRD file, for the guards' own verdicts — they must NOT be appended to the cargo
+  # log a LATER guard parses. check_unittest_targets_ran's success line contains the
+  # literal `Running unittests`, and check_no_unexpected_zero_tests keys on exactly that
+  # token: writing one guard's verdict into the other's input makes the two guards'
+  # ORDER load-bearing, which is the kind of coupling that decays into a vacuous pass.
+  # Concatenated LAST into the component log, so the FAIL branch's `tail -40` shows the
+  # verdicts (the informative half of a guard failure) rather than trailing cargo output.
+  local verdict_log="$LOG_DIR/$name.guards.log"
+  local start end status
+  start=$(date +%s)
+
+  # Declared ONCE and consumed by BOTH the cargo invocation and the enabled-set
+  # derivation, so the two can never describe different builds.
+  local -a ffi_feature_args=()
+  local -a node_feature_args=(--features write-support)
+
+  # --- one place to report a failed DERIVATION -------------------------------
+  # Every derivation below is fatal in the same way and for the same reason, so they
+  # report through one helper rather than five near-copies that could drift apart. It is
+  # defined here (so it reads `$name`/`$log`/`$_derivation_failed` by bash's dynamic
+  # scoping and takes no plumbing arguments) and therefore lands in the GLOBAL function
+  # namespace; the `_brt_` prefix is what keeps that from colliding with anything else.
+  local _derivation_failed=0
+  _brt_derivation_fail() { # <what> <why...>
+    local what="$1"; shift
+    {
+      echo "[$name] FAIL-CLOSED: could not derive $what."
+      echo "        $*"
+      echo "        The DERIVATION failed, not the tests. This component's subject sets are"
+      echo "        derived from cargo at run time so a new test target is covered with no gate"
+      echo "        edit; an underived (or silently empty) subject set is the vacuous green"
+      echo "        issue #3522 exists to remove, so it FAILs naming the derivation."
+    } >> "$log"
+    _derivation_failed=1
+  }
+
+  : > "$log"
+  : > "$verdict_log"
+
+  # NOTE the empty-but-successful case: cqlite-ffi-common declares no features at all, so
+  # this legitimately returns the EMPTY SET. That is a measurement, and treating it as a
+  # failure is exactly the false red #3522 corrected in _resolved_package_features.
+  local ffi_enabled="" node_enabled=""
+  if ! ffi_enabled=$(_resolved_package_features cqlite-ffi-common ${ffi_feature_args[@]+"${ffi_feature_args[@]}"}); then
+    _brt_derivation_fail "cqlite-ffi-common's enabled feature set" \
+      "'cargo tree -p cqlite-ffi-common' failed, produced no output, emitted no line for the package (a cargo failure or an offline registry), or its feature-extraction/normalisation pipeline failed. Enumerated rather than asserting ONE cause: the E1 fix gave that helper two further failure modes, and a message naming only the package-line case would send the reader to the wrong remedy (roborev F2's class)."
+  fi
+  if ! node_enabled=$(_resolved_package_features cqlite-node ${node_feature_args[@]+"${node_feature_args[@]}"}); then
+    _brt_derivation_fail "cqlite-node's enabled feature set" \
+      "'cargo tree -p cqlite-node --features write-support' failed, produced no output, emitted no line for the package, or its feature-extraction/normalisation pipeline failed (see the cqlite-ffi-common note above: three failure modes, none asserted)."
+  fi
+
+  # cqlite-ffi-common's integration targets. This package HAS them, so an empty result
+  # is a broken derivation and is reported as one.
+  local ffi_targets=""
+  if ! ffi_targets=$(_package_integration_target_ids cqlite-ffi-common); then
+    _brt_derivation_fail "cqlite-ffi-common's integration (test) targets" \
+      "cargo metadata, its parser, or the package lookup failed."
+  elif [ -z "$ffi_targets" ]; then
+    _brt_derivation_fail "cqlite-ffi-common's integration (test) targets" \
+      "the census counted ZERO, but this package declares tests/dependency_boundary.rs and tests/error_contract_table.rs. A zero here is a broken count, and 'no targets to observe' would silently retire the guard that proves dependency_boundary.rs runs."
+  fi
+
+  # cqlite-node's integration targets. Zero is the EXPECTED, DERIVED answer here (the
+  # crate is a cdylib with no tests/ directory) — which is why this uses the
+  # zero-tolerant helper. The census states the number it measured; it does not assume
+  # it.
+  local node_targets="" node_targets_n=0
+  if ! node_targets=$(_package_integration_target_ids cqlite-node); then
+    _brt_derivation_fail "cqlite-node's integration (test) target census" \
+      "cargo metadata, its parser, or the package lookup failed — so this lane cannot state whether it is leaving any integration target un-run."
+  else
+    # `|| true` swallows grep's legitimate 1-on-zero-matches, so the STATUS cannot be the
+    # guard — the VALUE must be (roborev round 4, E1 class sweep). Without the numeric check a
+    # failed grep yields the empty string, and `[ "" -eq 0 ]` later is a bash error rather than
+    # a named cause. Same shape as py_test_n's check below.
+    node_targets_n=$(printf '%s' "$node_targets" | grep -c . || true)
+    case "$node_targets_n" in
+      ''|*[!0-9]*) _brt_derivation_fail "the count of cqlite-node's integration (test) targets" \
+                     "the count came back non-numeric ('$node_targets_n'), so the census cannot state whether this lane leaves any target un-run." ;;
+    esac
+  fi
+
+  # The declared-minus-enabled feature sets: what this lane leaves OFF, derived.
+  local ffi_declared node_declared ffi_off="" node_off="" _f
+  if ! ffi_declared=$(_package_declared_features cqlite-ffi-common); then
+    _brt_derivation_fail "cqlite-ffi-common's declared feature list" "cargo metadata or its parser failed."
+  fi
+  if ! node_declared=$(_package_declared_features cqlite-node); then
+    _brt_derivation_fail "cqlite-node's declared feature list" "cargo metadata or its parser failed."
+  fi
+  for _f in $ffi_declared; do
+    case "$ffi_enabled" in *" $_f "*) ;; *) ffi_off="$ffi_off $_f" ;; esac
+  done
+  for _f in $node_declared; do
+    case "$node_enabled" in *" $_f "*) ;; *) node_off="$node_off $_f" ;; esac
+  done
+
+  # The unittest subject sets.
+  #
+  # cqlite-ffi-common: `lib,bin`, NOT `lib` (roborev round 3, D2). The invocation is an
+  # UNFILTERED `cargo test -p cqlite-ffi-common`, and cargo's default selection includes
+  # package BINARY unit targets — so deriving only `lib` made the affirmative guard's subject
+  # set NARROWER THAN WHAT ACTUALLY RUNS: a bin added later could execute zero tests and
+  # never be checked. That is the same property the rest of this lane is built on (an
+  # affirmative measurement must cover the whole subject), failing in miniature. The package
+  # has no bin today, so this is a no-op now and correct the moment that changes — which is
+  # the entire point of deriving rather than listing. Deliberately NOT fixed by naming the
+  # derived targets on the cargo command line: that would make the invocation a curated list
+  # again, which is the thing this component exists not to be.
+  #
+  # cqlite-node: `lib,cdylib,bin` rather than `lib,bin`:
+  # library target has kind `cdylib` (it is a napi module), and a `lib,bin` filter
+  # returns NOTHING for it — which _package_unittest_srcs correctly reports as a failed
+  # derivation, and which a lane that shrugged at would turn into a guard with no
+  # subject.
+  local -a ffi_unit_srcs=() node_unit_srcs=()
+  local _us
+  while IFS= read -r _us; do [ -n "$_us" ] && ffi_unit_srcs+=("$_us"); done <<EOF
+$(_package_unittest_srcs cqlite-ffi-common lib,bin "$ffi_enabled")
+EOF
+  while IFS= read -r _us; do [ -n "$_us" ] && node_unit_srcs+=("$_us"); done <<EOF
+$(_package_unittest_srcs cqlite-node lib,cdylib,bin "$node_enabled")
+EOF
+  [ "${#ffi_unit_srcs[@]}" -gt 0 ] || _brt_derivation_fail "cqlite-ffi-common's lib unittest target(s)" \
+    "cargo metadata returned none, so the zero-test guard would have no subject."
+  [ "${#node_unit_srcs[@]}" -gt 0 ] || _brt_derivation_fail "cqlite-node's lib unittest target(s)" \
+    "cargo metadata returned none (note its library target's kind is 'cdylib', not 'lib'), so the zero-test guard would have no subject."
+
+  # The count of Rust #[test] fns in bindings/python/src, for the census's cqlite-py
+  # clause. GREP-COUNTED, and the census says so: this counts `#[test]` ATTRIBUTES in
+  # committed source, which is a proxy for "test functions" and not a cargo-derived
+  # figure — cargo cannot give one, because the target cannot be built (that is the
+  # whole point of the clause). Fail-closed on an unreadable subject or a non-numeric
+  # result: a census that quietly reports "0 unrun tests" is a false all-clear.
+  local py_src="$REPO_ROOT/bindings/python/src" py_test_n=""
+  if [ ! -d "$py_src" ] || [ ! -r "$py_src" ]; then
+    _brt_derivation_fail "the count of Rust #[test] fns under bindings/python/src" \
+      "the directory is missing or unreadable, so the census cannot state the size of the gap it reports."
+  else
+    py_test_n=$(grep -rhoE --include='*.rs' '^[[:space:]]*#\[test\]' "$py_src" 2>/dev/null | grep -c . || true)
+    case "$py_test_n" in
+      ''|*[!0-9]*) _brt_derivation_fail "the count of Rust #[test] fns under bindings/python/src" \
+                     "the count came back non-numeric ('$py_test_n')." ;;
+    esac
+  fi
+
+  if [ "$_derivation_failed" -ne 0 ]; then
+    status=FAIL
+    cat "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ---- THE CENSUS -----------------------------------------------------------
+  # Built ONCE and emitted TWICE — as `>>>` lines on the gate's stdout and at the HEAD
+  # of the component log — because a lane that omits coverage silently is
+  # indistinguishable from one that covers it, and "the log a reviewer actually reads"
+  # is both of those. Not a comment: a comment is not read on a run.
+  local ffi_ids="" ffi_names="" ffi_skip="" ffi_expect_n=0
+  local node_ids="" node_names="" node_skip="" node_expect_n=0
+  local -a ffi_expect=() node_expect=() node_test_args=()
+  local _t
+  # IFS=US, matching the helper's delimiter. NOT tab — see the helper's own header for the
+  # leading-empty-field collapse that cost this a round.
+  IFS=$'\037' read -r ffi_ids ffi_names ffi_skip <<< "$(_brt_partition_targets "$ffi_targets" "$ffi_enabled")"
+  IFS=$'\037' read -r node_ids node_names node_skip <<< "$(_brt_partition_targets "$node_targets" "$node_enabled")"
+  for _t in $ffi_ids; do ffi_expect+=("$_t"); done
+  ffi_expect_n=${#ffi_expect[@]}
+  for _t in $node_ids; do node_expect+=("$_t"); done
+  node_expect_n=${#node_expect[@]}
+  # THE EXECUTION HALF, and the reason it exists (roborev round 1, B1). An earlier cut of
+  # this lane COUNTED cqlite-node's integration targets, PRINTED them in the census and
+  # ran `--lib` only — so the day someone added `bindings/node/tests/foo.rs` the lane
+  # would have counted it, announced it, and left it UNEXECUTED while both this
+  # component and the disposition census stayed green. That is issue #3522's own defect
+  # reproduced inside the fix for #3522, which makes it the most serious shape this
+  # component could have carried.
+  #
+  # Fixed by EXECUTING them, not by failing closed on a non-zero count: refusing would
+  # red the gate on the CORRECT act of adding a test, and a lane that reds on correct
+  # input is the lane agents learn to waive (CLAUDE.md). `--lib` alone does not select
+  # integration targets, so each runnable one is named explicitly. cqlite-node declares
+  # ZERO today, so this expands to nothing and the command is byte-identical to before —
+  # and it becomes correct the moment that stops being true, which is the entire point of
+  # deriving the set instead of listing it.
+  for _t in $node_names; do node_test_args+=(--test "$_t"); done
+
+  local -a census=()
+  census+=("cargo test --no-fail-fast -p cqlite-ffi-common            (ALL targets: lib + every integration target)")
+  census+=("cargo test --no-fail-fast -p cqlite-node --features write-support --lib")
+  census+=("WHY THIS LANE EXISTS: before it, BOTH crates' Rust tests executed NOWHERE — not in")
+  census+=("     this gate, not in CI. clippy --all-targets COMPILED them and nothing RAN them.")
+  census+=("     Compiling is not covering (#1699), and that holds at PACKAGE granularity too.")
+  census+=("SUBJECTS (all DERIVED from cargo at run time, never hard-coded):")
+  census+=("  cqlite-ffi-common: unittest target(s) [${ffi_unit_srcs[*]}]; $ffi_expect_n integration target(s) [${ffi_ids# }]")
+  census+=("  cqlite-node:       unittest target(s) [${node_unit_srcs[*]}]; $node_targets_n integration target(s)")
+  census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT RUN:")
+  census+=("  1. cqlite-py's Rust #[test] fns ($py_test_n occurrences of '#[test]' under")
+  census+=("     bindings/python/src, grep-counted from committed source — cargo cannot count them,")
+  census+=("     because the target cannot be built). 'cargo test -p cqlite-py' is STRUCTURALLY")
+  census+=("     IMPOSSIBLE, not merely unwired: a pyo3 cdylib's test harness cannot link libpython.")
+  census+=("     Already documented in this script (search: 'cannot link libpython'). The pytest")
+  census+=("     half IS fully covered, by the python-bindings component.")
+  census+=("  2. cqlite-node's JavaScript suite. Owned by the node-bindings component, which builds")
+  census+=("     the napi artifact and runs jest against it. This lane never builds that artifact.")
+  # BRANCHED ON THE DERIVED NUMBER (roborev round 1, B5). This clause used to be emitted
+  # unconditionally and read "it declares $node_targets_n — at $node_targets_n there is nothing to
+  # omit; if that number ever rises without this lane running them, this line is the
+  # alarm". At a non-zero value that is a SELF-CONTRADICTING sentence in the one output
+  # whose entire job is to declare omissions, with the alarm sounding the all-clear. A
+  # census sentence must be true at EVERY value of the number it quotes.
+  if [ "$node_targets_n" -eq 0 ]; then
+    census+=("  3. cqlite-node declares 0 integration (test) targets — DERIVED from cargo metadata,")
+    census+=("     not assumed. Nothing to run and nothing to omit. Should it ever declare one, the")
+    census+=("     derived --test list below EXECUTES it with no gate edit.")
+  elif [ "$node_expect_n" -eq "$node_targets_n" ]; then
+    census+=("  3. NOTHING on the cqlite-node integration half: all $node_targets_n declared target(s) are")
+    census+=("     EXECUTED, each passed to cargo as an explicit --test (DERIVED, never listed).")
+  else
+    census+=("  3. NOT RUN: $((node_targets_n - node_expect_n)) of cqlite-node's $node_targets_n declared integration target(s) —")
+    census+=("     cargo cannot enable their required-features at this lane's feature set, so it would")
+    census+=("     skip them SILENTLY (no banner at all). Each is named under 6. below. The other")
+    census+=("     $node_expect_n are EXECUTED as explicit --test targets.")
+  fi
+  census+=("  4. Feature-gated bodies at features this lane leaves OFF (declared-minus-enabled,")
+  census+=("     derived): cqlite-ffi-common ->${ffi_off:- <none: this crate declares no features>};")
+  census+=("     cqlite-node ->${node_off:- <none>}. 'observability' is off ON PURPOSE — building the")
+  census+=("     OTel stack is a cost this gate declines (#1844 excludes it from clippy likewise).")
+  [ -n "$ffi_skip" ]  && census+=("  5. cqlite-ffi-common targets cargo cannot run at this feature set:$ffi_skip")
+  [ -n "$node_skip" ] && census+=("  6. cqlite-node targets cargo cannot run at this feature set:$node_skip")
+  census+=("SCOPE OF THE #3522 AUDIT, recorded so it is not re-litigated: this component closes TWO")
+  census+=("     of the ten gaps that audit found. The other eight are RECORDED, not silently fixed,")
+  census+=("     in scripts/tests/workspace-test-disposition.txt (enforced by")
+  census+=("     scripts/tests/test_workspace_test_disposition.sh under the tooling-tests component).")
+  local cl
+  for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
+  echo ">>> [$name] enabled features (cargo tree -p, package-scoped): cqlite-ffi-common [$ffi_enabled] cqlite-node [$node_enabled]"
+  {
+    echo "==== [$name] COVERAGE CENSUS (issue #3522) ===="
+    for cl in "${census[@]}"; do echo "$cl"; done
+    echo "enabled features (cargo tree -p, package-scoped): cqlite-ffi-common [$ffi_enabled] cqlite-node [$node_enabled]"
+    echo "per-package cargo logs: $ffi_log , $node_log ; guard verdicts: $verdict_log"
+    echo "==== end census ===="
+  } > "$log"
+
+  # --no-fail-fast for the reason flight-tests and legacy-heuristics carry it: cargo
+  # test stops after the first failing test BINARY, and a lane whose purpose is to
+  # surface never-executed rot must surface ALL of it in one run rather than as a serial
+  # reveal.
+  status=PASS
+
+  # ---- cqlite-ffi-common: whole package -------------------------------------
+  if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      cargo test --no-fail-fast -p cqlite-ffi-common \
+      ${ffi_feature_args[@]+"${ffi_feature_args[@]}"} > "$ffi_log" 2>&1; then
+    # Three affirmative guards, ANDed. Order matters only for readability; each writes
+    # its own verdict to the log, so a pasted log shows which ones RAN and on what.
+    if ! check_unittest_targets_ran "$name/cqlite-ffi-common" "$ffi_log" "${ffi_unit_srcs[@]}" 2>>"$verdict_log"; then
+      status=FAIL
+    fi
+    if [ "$ffi_expect_n" -gt 0 ]; then
+      if ! check_test_targets_observed "$name/cqlite-ffi-common" "$ffi_log" "${ffi_expect[@]}" 2>>"$verdict_log"; then
+        status=FAIL
+      else
+        echo "$name/cqlite-ffi-common: integration targets OK — all $ffi_expect_n derived target(s) produced a 'Running' banner:${ffi_ids}" >> "$verdict_log"
+      fi
+    else
+      # Unreachable while this package declares runnable targets (the derivation above
+      # FAILs on zero), but stated rather than left implicit: an expectation set that
+      # emptied itself would be a guard with no subject.
+      echo "$name/cqlite-ffi-common: FAIL-CLOSED — every declared integration target was excused by an unmet required-feature, leaving the observation guard with NO subject (issue #3522)." >> "$verdict_log"
+      status=FAIL
+    fi
+    # EMPTY allowed-zero list, deliberately: no cqlite-ffi-common integration target is
+    # permitted to run zero tests, so a cfg change that empties one FAILs here.
+    if ! check_no_unexpected_zero_tests "$name/cqlite-ffi-common" "$ffi_log" 2>>"$verdict_log"; then
+      status=FAIL
+    fi
+  else
+    status=FAIL
+  fi
+
+  # ---- cqlite-node: --lib ---------------------------------------------------
+  # Yes, a `crate-type = ["cdylib"]` package: `cargo test --lib` compiles the library as
+  # a TEST harness binary, which links fine (measured: 53 tests). This is NOT the
+  # cqlite-py situation — that one fails because a pyo3 extension's harness needs
+  # libpython at link time, which is a property of pyo3, not of cdylib.
+  if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      cargo test --no-fail-fast -p cqlite-node \
+      ${node_feature_args[@]+"${node_feature_args[@]}"} --lib \
+      ${node_test_args[@]+"${node_test_args[@]}"} > "$node_log" 2>&1; then
+    if ! check_unittest_targets_ran "$name/cqlite-node" "$node_log" "${node_unit_srcs[@]}" 2>>"$verdict_log"; then
+      status=FAIL
+    fi
+    # The SAME two guards the cqlite-ffi-common half gets, on the same terms — so the
+    # integration targets this lane now EXECUTES are also observed to have run and to
+    # have run a non-zero number of tests.
+    if [ "$node_expect_n" -gt 0 ]; then
+      if ! check_test_targets_observed "$name/cqlite-node" "$node_log" "${node_expect[@]}" 2>>"$verdict_log"; then
+        status=FAIL
+      else
+        echo "$name/cqlite-node: integration targets OK — all $node_expect_n derived target(s) produced a 'Running' banner: $node_ids" >> "$verdict_log"
+      fi
+      if ! check_no_unexpected_zero_tests "$name/cqlite-node" "$node_log" 2>>"$verdict_log"; then
+        status=FAIL
+      fi
+    elif [ "$node_targets_n" -eq 0 ]; then
+      # NOT a skipped check: zero DECLARED is the derived, correct answer for a cdylib with no
+      # tests/ directory. Stated affirmatively in the verdict log so a reader can tell "there
+      # was nothing to observe" from "the observation did not happen" — and
+      # check_no_unexpected_zero_tests is deliberately NOT called, because with `--lib` only it
+      # would have an EMPTY subject set and report OK having measured nothing.
+      echo "$name/cqlite-node: 0 integration targets declared (DERIVED from cargo metadata) — nothing for the observation guard to judge, which is the correct answer for this package today, not a check that was skipped. The moment it declares one, the derived --test list executes it and both guards apply." >> "$verdict_log"
+    else
+      # DECLARED BUT NONE RUNNABLE — a DIFFERENT cause with a DIFFERENT remedy, and it used to
+      # be reported as the branch above (roborev round 5, F2). This is the WRONG-CAUSE variant
+      # my own round-4 sweep named and did not act on: the branch keyed on `node_expect_n == 0`
+      # while its message asserted `node_targets_n == 0`, so with targets declared but all
+      # excluded by unmet required-features the verdict log CONTRADICTED the census printed
+      # moments earlier and falsely promised that a future target would execute.
+      #
+      # RULE, now applied rather than merely observed: a branch whose message asserts a CAUSE
+      # must be reachable ONLY from that cause. Two conditions, two branches, two messages.
+      echo "$name/cqlite-node: $node_targets_n integration target(s) DECLARED but NONE runnable at this lane's feature set, so there is nothing for the observation guard to judge — and, unlike the zero-declared case, this means DECLARED COVERAGE IS NOT BEING EXECUTED HERE. cargo skips such a target SILENTLY (no banner at all), so no guard can see it; the census above declares the same gap. Skipped:$node_skip" >> "$verdict_log"
+    fi
+  else
+    status=FAIL
+  fi
+
+  cat "$ffi_log" "$node_log" "$verdict_log" >> "$log" 2>/dev/null
+  if [ "$status" = FAIL ]; then
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
@@ -6011,9 +7413,23 @@ run_flight_query_semantics_oracle() {
 # contract, and here it described the exact defect the code was changed to remove. The measured
 # reason for the change is in the body comment below.
 #
-# Emptiness is impossible for a real package (`default` is always in the set), so an empty result
-# is a failed derivation, and the caller must treat it as one rather than as "no features
-# enabled".
+# THE PRESENCE ORACLE IS THE PACKAGE LINE, NOT A NON-EMPTY FEATURE LIST (issue #3522, and this
+# header used to say the opposite). It read: "Emptiness is impossible for a real package
+# (`default` is always in the set), so an empty result is a failed derivation." That is FALSE,
+# and it was falsified by measurement on the first package that has no `[features]` table at
+# all: `cargo tree -p cqlite-ffi-common … -f '{p}|{f}'` prints
+# `cqlite-ffi-common v0.16.1 (…)|` — the package line is THERE, the feature field is EMPTY,
+# because cargo's `{f}` prints the ENABLED features and an implicit `default = []` enables
+# none. Under the old rule that healthy resolve returned FAILURE, so any lane covering such a
+# package would have failed closed forever on a correct tree — the false-red shape that teaches
+# agents to waive a lane.
+#
+# The fix keeps the fail-closed DIRECTION and makes the signal PRECISE: the derivation has
+# failed IFF cargo emitted no line for the package (a cargo failure, an offline registry, a
+# renamed package). A package that IS in the resolve with no features enabled returns the EMPTY
+# SET with success — which is a measurement, not an absence of one. Callers whose packages do
+# have features are unaffected (cqlite-flight resolves to `default test-util`, cqlite-core to
+# nine), and their failure branch now fires on the condition it always meant to name.
 _resolved_package_features() {
   # PACKAGE-SCOPED resolve, via `cargo tree -p` — NOT `cargo metadata` (roborev round-6
   # finding, Medium). `cargo metadata` resolves the ENTIRE workspace and unions features
@@ -6046,12 +7462,37 @@ _resolved_package_features() {
   # A failed resolve returns non-zero and the caller FAILs the lane naming the census, so
   # "could not measure" never becomes "nothing to report".
   local pkg="$1"; shift
-  local feats
-  feats=$(cargo tree -p "$pkg" "$@" -e features,normal,build,dev --prefix none -f '{p}|{f}' 2>/dev/null \
+  local raw feats
+  # The resolve is captured ONCE and interrogated twice, so the presence check and the feature
+  # extraction can never describe two different cargo runs.
+  raw=$(cargo tree -p "$pkg" "$@" -e features,normal,build,dev --prefix none -f '{p}|{f}' 2>/dev/null) || return 1
+  [ -n "$raw" ] || return 1
+  # PRESENCE: at least one line for this package. This — not the feature count — is what
+  # distinguishes "cargo could not resolve it" from "it enables nothing" (see the header). The
+  # awk EXIT STATUS carries the answer, so an empty feature field cannot be read as an absent
+  # package.
+  printf '%s\n' "$raw" | awk -F'|' -v pat="^$pkg v" '$1 ~ pat { found = 1 } END { exit found ? 0 : 1 }' || return 1
+  # `|| return 1` ON THE EXTRACTION PIPELINE (roborev round 4, E1 — the THIRD defect in this
+  # helper and the SECOND of this exact shape). This script runs `set -uo pipefail` WITHOUT
+  # `errexit`, so a failed awk/tr/sed/sort does NOT abort: it yields a partial or empty
+  # `feats` and the function returns SUCCESS. Callers then treat an empty enabled set as a
+  # measurement, and every `required-features` target silently becomes "excused" — the
+  # permissive direction, in the one value whose job is to say what is enabled.
+  #
+  # The `|| return 1` that used to be here caught this by accident: it was attached to the old
+  # single pipeline whose result was then rejected by `[ -n "$feats" ]`. #3522 correctly moved
+  # the presence oracle to the PACKAGE LINE (a featureless package is a real answer), and in
+  # doing so removed the only status check on the extraction. The old code caught it for the
+  # wrong reason; the new code did not catch it at all.
+  feats=$(printf '%s\n' "$raw" \
     | awk -F'|' -v pat="^$pkg v" '$1 ~ pat {print $2}' \
     | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | sort -u) || return 1
-  [ -n "$feats" ] || return 1
-  printf ' %s ' "$(printf '%s' "$feats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  # The NORMALIZATION pipeline needs the same treatment, and it cannot be checked inline
+  # inside the `printf` argument — a command substitution's failure there is discarded
+  # entirely. Captured into a variable first, status checked, then emitted.
+  local norm
+  norm=$(printf '%s' "$feats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//') || return 1
+  printf ' %s ' "$norm"
 }
 
 # flight-tests: EXECUTE cqlite-flight's UNIT test suite locally (issue #1699).
@@ -8411,6 +9852,25 @@ run_pub_surface() {
 # descope — no cargo doc, no cargo at all, seconds not minutes; never invokes the gate
 # except in case 26 (`--only pub-surface`, which self-exempts from the #1825 slot), so
 # it cannot recurse.
+# Also runs scripts/tests/test_cargo_output_parsers.sh (#3400), the ONLY behavioural
+# coverage of the ANSI-stripping mechanism this file relies on. #1699 shipped
+# `_ansi_stripped_log` and routed three guards through it with no test of its own, so
+# nothing pinned the property against real code: a RED-first case runs the PRE-#1699 shape of
+# the cli-tests zero-tests guard against one zero-test cargo log twice — coloured and plain —
+# and characterises the defect (exit 0 on the coloured one, 1 on the same log plain), then the
+# CURRENT guards EXTRACTED FROM this shipped file must exit the same way on both. Positive
+# controls prove they recovered the target NAME from coloured text rather than merely erroring,
+# and fail-closed controls cover an unreadable log and one holding no recognisable output at
+# all. Also pins the redirection-not-pipe property BOTH ways (structurally, and behaviourally:
+# over the same log a pipe-fed while-read loop silently exits 0 while the redirect-fed one exits
+# 1) and drives run_arrow_parity_guard_cmd against a stub `cargo` emitting coloured output.
+# Fixtures carry REAL ESC bytes injected via printf, transcribed from a `cat -v` capture of
+# cargo under CARGO_TERM_COLOR=always REDIRECTED TO A FILE — colour survives redirection, which
+# is why the gate's own `> gate.log` capture is affected. A structural LINT over these parse
+# sites was built and DESCOPED (#3400: its own false-PASS count rose across review rounds and
+# two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
+# so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
+# is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -9266,6 +10726,67 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 EMBEDDED-STEP EXECUTE DIRECTION (#3451). The complement of every suite above in a
+  # different axis from the accept/reject one: those suites all stop at `--validate-args-only`,
+  # and #3272 round 2 finding 14 deliberately made the accept cases execute NOTHING (running the
+  # real driver invoked `sudo sysctl` and three cargo builds inside this component). Correct, and
+  # it left the driver's TWO multi-line embedded python blocks — the session-corpus-pin step and
+  # the CPU-pin-verification step, both BELOW that boundary and both `|| exit 2` — with no
+  # coverage that EXECUTES them. They shipped for months carrying SEVEN instances of a backslash
+  # inside an f-string EXPRESSION, which no CPython parses, so the whole WS0 measurement path was
+  # unrunnable end to end on main. Nothing saw it: the python is not a `.py` file so no linter or
+  # import reads it, and `bash -n` parses the driver as SHELL, where the body is one opaque
+  # single-quoted string. What this asserts: both steps RUN on a few-KB fixture corpus with the
+  # argv and environment the driver gives them — exit 0, the artifact written, every pin line
+  # printed, and the SHIPPED reader (`verify_session_corpus_pin`/`verify_pinning_record`)
+  # accepting what the step wrote; the `WS0_CFG_*` names are DERIVED from the shipped
+  # `MANIFEST_CONFIG_FIELDS` and asserted equal to it, three ways — the names the DRIVER EXPORTS
+  # (from its bash source), the shipped field list (by import) and this suite's environment must
+  # all agree, because executing the blocks alone cannot see a RENAMED EXPORT: the python is
+  # untouched, everything stays green, and the real rig hits the step's own `FATAL: … was not
+  # exported` and exits 2 — #3451's exact symptom again; EVERY embedded block in the driver COMPILES,
+  # so instance #8 anywhere in that file is caught and not only the two repaired steps. That compile
+  # check speaks for THE INTERPRETER RUNNING IT and claims nothing about cross-interpreter
+  # portability; the suite's NOT-REACHED list records the one regression that therefore escapes it
+  # and names a real 3.9/3.11 CI compile as the only honest oracle. A tokenizer model of that
+  # regression lived here for two review rounds and was REMOVED (#3451 round 4) after being wrong
+  # twice, the second time flagging legal code — a second implementation of CPython's tokenizer is
+  # correct only insofar as it is differentially tested against an original this box does not have.
+  # What survives is the oracle that is real: no CPython accepts the backslash form, so the defect
+  # this issue is about is caught on 3.9 through 3.12 alike.
+  # The block text is EXTRACTED from the shipped driver on every run (`ws0_embedded_python.py`,
+  # which discovers candidates on TWO anchors — any word whose basename is python/python3, and the
+  # `-c` FLAG itself so an indirectly-spelled command word like `$PYTHON -c` is still found — both
+  # discovered AND classified over the LOGICAL-LINE reconstruction (bodies excepted, since inside
+  # single quotes a backslash is literal), so a continuation neither hides an anchor nor turns an
+  # ordinary invocation into a refusal — and
+  # then ALLOWLISTS exactly the shapes this driver uses, making everything else a FINDING) rather
+  # than copied,
+  # because a copy stays green while the shipped step is broken — the exact state #3451 found. The
+  # delimiter is bash's own quoting rule, not a line pattern, and is asserted in BOTH directions:
+  # a column-0-closer-only rule was MEASURED finding 31 blocks tree-wide where the correct rule
+  # finds 59 (a loose delimiter under-COUNTS subjects, the vacuous-green shape) while a
+  # next-quote rule manufactures a false SyntaxError on `lib-ws0-fixtures.sh`, which uses the
+  # literal-apostrophe idiom — and a key that reds on correct input is the key agents learn to
+  # waive. Both are controls in the suite.
+  # Every accept is paired with a positive control OBSERVED to fire against a scratch copy of the
+  # driver under $TMPDIR carrying the injected defect, which is this issue's own lesson: a `grep -c`
+  # for the bad spelling returned 0 against a file holding all seven instances, and a check that
+  # cannot fire looks identical to one that fired and found nothing. Hermetic: python3 and a few KB
+  # under $TMPDIR; the driver is READ, never invoked — no sudo, cargo, perf, taskset, corpus,
+  # network or root.
+  echo ">>> [$name] bash scripts/tests/test_ws0_embedded_steps_execute.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_embedded_steps_execute.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 embedded-step EXECUTE-direction coverage); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 BINARY/BUILD PROVENANCE (#3272 review round 11, campsite split). Split out of
   # `test_ws0_provenance_guards.sh` (which reached 1652 lines against the ~1500 test target — the
   # `file-size` ratchet is `.rs`-ONLY, so a shell file crosses it silently) along a responsibility
@@ -9764,6 +11285,97 @@ run_tooling_tests() {
     return 0
   fi
 
+  # jq/python3 PARSER PARITY differential test (#3522, roborev G1): drives BOTH branches of
+  # every parser pair this lane added over ONE fixture set and requires byte-identical output
+  # AND identical exit status. The defect it exists for: _jest_json_suite_counts's jq branch
+  # stripped at the LAST `/__test__/` and its python3 branch at the FIRST, so on a python3-only
+  # host whose checkout path contains a `__test__` directory every suite was reported missing
+  # and extra at once — a FALSE RED on a correct tree, latent on every box that has jq. Per
+  # CLAUDE.md's #3283 rule, a port's correctness is only knowable by differential testing
+  # against the ORIGINAL, which is what this does rather than re-deriving expected output.
+  # It EXITS 2 (reported, not silently passed) when only one of jq/python3 is present, since a
+  # parity claim over a comparison that never ran is a vacuous green — so the component treats
+  # a non-zero exit as FAIL and an UNMEASURED run is visible rather than green.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_parser_parity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parser_parity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (jq/python3 parser parity #3522); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # node-bindings jest guard self-test (#3522, roborev E1 + F1): hermetic, no node/npm/cargo/
+  # network/datasets — synthetic jest summaries and synthetic --json reports, with both guards
+  # sourced OUT OF THE REAL GATE SCRIPT rather than copied. Its load-bearing case is the one
+  # that cannot be produced by running the real suite: ONE passing suite plus ONE all-skipped
+  # suite. Jest reports the all-skipped file as a PASSED suite and the aggregate
+  # `Tests: N passed` is satisfied by its sibling, so the file-set guard ACCEPTS it (asserted
+  # here, so the case provably still discriminates) and only the per-suite guard rejects it.
+  # A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_jest_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_jest_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (node-bindings jest guard self-test #3522); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # binding-rust-tests target-partition self-test (#3522, roborev C3): hermetic, no cargo /
+  # network / datasets. Drives _brt_partition_targets — sourced OUT OF THE REAL GATE SCRIPT,
+  # never a copy — over synthetic metadata, including the case that cost a review round: when
+  # EVERY declared integration target requires a disabled feature, the runnable fields are
+  # empty and the empty LEADING field must survive the caller's `read`. A TAB delimiter
+  # silently dropped it, so the skip text was misread as the runnable ids and the census would
+  # have announced unrunnable targets as EXECUTED. That case is unreachable by running the
+  # lane (cqlite-node declares zero integration targets today), which is precisely why it
+  # needs a test. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_binding_partition.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_binding_partition.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (binding-rust-tests target-partition self-test #3522); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Workspace test-execution disposition census (#3522). The PACKAGE-granular sibling
+  # of the tools/ census above: every cargo workspace member must be recorded in
+  # scripts/tests/workspace-test-disposition.txt as EXECUTED / PARTIAL / NOT-EXECUTED
+  # (a CLOSED label set) with a detail naming the gate component, or what is omitted
+  # and why. The defect it exists for: `cargo clippy --workspace --all-targets`
+  # compiles every member on every full gate, so a crate can be BUILT by every run and
+  # EXECUTE NOTHING — which is how cqlite-ffi-common (52 tests) and cqlite-node's 53
+  # Rust unit tests sat unexecuted for months while reading as covered. `members`
+  # globs `tools/*` and `bindings/*`, so a new crate otherwise joins with no statement
+  # of whether anything runs its tests. Like the tools/ census it is DELIBERATELY
+  # SMALL: it checks a disposition was RECORDED and LABELED, never that the record is
+  # TRUE (see its header for why #1716 removed the truth-verifying variant). It needs
+  # `cargo metadata` — a failed derivation is a FAIL naming the derivation, never a
+  # skip that greens. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_workspace_test_disposition.sh; bash scripts/tests/test_workspace_test_disposition_selftest.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_workspace_test_disposition.sh" >>"$log" 2>&1 ||
+     ! bash "$REPO_ROOT/scripts/tests/test_workspace_test_disposition_selftest.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (workspace test-execution disposition census #3522); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # file-size component-log guard (#3401): hermetic (throwaway git repos under one
   # mktemp, each holding only a copy of the gate script, driven through the real
   # `--only file-size` path — no cargo/python3/datasets/network/Docker, ~2s). The
@@ -9794,7 +11406,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -9809,7 +11421,8 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1; then
+     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -11177,16 +12790,48 @@ run_file_size
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings smoke flight-tests legacy-heuristics"
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings node-bindings smoke flight-tests legacy-heuristics"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
 # only when the selection intersects DATASET_COMPONENTS — so e.g. `--only
 # tooling-tests` or `--only fmt` skips the (dataset-requiring) preflight entirely.
+# _component_will_skip_for_toolchain <component> — true when a SKIP-AWARE component is going to
+# SKIP anyway because its toolchain is absent (issue #3522, roborev round 7 H2).
+#
+# THE DEFECT IT EXISTS FOR. Enrolling node-bindings in DATASET_COMPONENTS (correct — 14 of its
+# jest suites read the corpus) meant `--only node-bindings` on a fixture-less host exited during
+# the GLOBAL DATASET PREFLIGHT, before the component could perform its documented
+# node/npm-missing SKIP. A widening that made the component stricter thereby made a documented
+# escape hatch UNREACHABLE — the same family as C2, where the same widening had made the #2078
+# opt-out ineffective.
+#
+# The ORDERING is the fix, not an exclusion list: a component that is going to SKIP for a
+# missing toolchain should never have been subject to a FIXTURE requirement in the first place.
+# Fixtures are an input to work that will not happen.
+#
+# Deliberately NARROW. It answers only "is this component's TOOLCHAIN absent", never "should
+# this component run" — the corpus question stays with the preflight, and a component whose
+# toolchain IS present is still fully subject to it. Each entry mirrors that component's OWN
+# SKIP predicate, and the two must be changed together; there is no way to derive one from the
+# other in shell, so this is a recorded pairing, like the census guards elsewhere in this file.
+_component_will_skip_for_toolchain() {
+  case "$1" in
+    node-bindings)   ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 ;;
+    python-bindings) ! command -v python3 >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
 selected_needs_datasets() {
   [ -z "$ONLY" ] && return 0
   local sel comp
   for sel in ${ONLY//,/ }; do
+    # A component that will SKIP for a missing toolchain contributes NO dataset requirement:
+    # it is not going to read a fixture, so demanding one would fail the run before its
+    # documented SKIP could be reported (H2). Checked per SELECTED component, so a selection
+    # mixing a skipping component with a real dataset consumer still requires the corpus.
+    _component_will_skip_for_toolchain "$sel" && continue
     for comp in $DATASET_COMPONENTS; do
       [ "$sel" = "$comp" ] && return 0
     done
@@ -11316,13 +12961,46 @@ run_scan_offload_guard_cmd() {
 # QueryRows, so it needs no datasets.
 run_arrow_parity_guard_cmd() {
   local out
-  out=$(cargo test --package cqlite-core --features arrow \
+  # CARGO_TERM_COLOR=never is BELT, not the fix (issue #3400). The parse below is
+  # colour-immune on its own via _ansi_stripped_log, and it stays that way if this prefix is
+  # ever dropped or overridden by an outer env. Applied to the invocation THIS component owns.
+  #
+  # A BARE assignment prefix, deliberately NOT `env CARGO_TERM_COLOR=never …`: the #3400
+  # self-test drives this function with `cargo` replaced by a shell FUNCTION emitting a
+  # coloured fixture log, which is how it proves the STRIP (not the belt) carries the
+  # correctness. `env` execs an external binary, so it would bypass that stub and run the
+  # real cargo. Do not "tidy" this into `env` without rewriting that test.
+  out=$(CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow \
     --test issue_1495_arrow_accessor_parity 2>&1) || { echo "$out"; return 1; }
   echo "$out"
   # Require at least one test to have actually run (guard against a vacuous
   # required-features skip that cargo reports as success with 0 tests).
-  local passed
-  passed=$(echo "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' | tail -1)
+  #
+  # Parse through _ansi_stripped_log, never the raw capture (issue #3400). `test result:` is
+  # libtest text and carries NO escapes today — cargo does not pass --color through to the
+  # test harness, MEASURED byte-identical under CARGO_TERM_COLOR=always and =never — so this
+  # site is colour-safe for a reason that is invisible at the parse. Normalising anyway makes
+  # the property LOCAL to the parse instead of inherited from cargo's plumbing, which is the
+  # exact coupling that left the cli-tests zero-tests guard inert for months. The failure
+  # direction here is a FALSE RED (empty `passed` -> explicit FAIL), so this is belt, not a
+  # bug fix — and it is the last cargo-output parse in this file reading an unnormalised
+  # source.
+  #
+  # A PRIVATE dir, not a bare mktemp file: _ansi_stripped_log writes a PREDICTABLE
+  # `<file>.ansi-stripped` sibling, which another local user could pre-create as a symlink for
+  # the sed to follow. Same reasoning the cli-tests caller already applies to its two logs.
+  local passed tmpd raw stripped
+  tmpd=$(mktemp -d) || { echo "arrow-parity-guard: FAIL-CLOSED — could not create a private temp dir to normalise cargo output (#3400)" >&2; return 1; }
+  raw="$tmpd/cargo.log"
+  printf '%s\n' "$out" > "$raw" || { rm -rf "$tmpd"; echo "arrow-parity-guard: FAIL-CLOSED — could not write cargo output for parsing (#3400)" >&2; return 1; }
+  stripped=$(_ansi_stripped_log "$raw" 2>/dev/null) || stripped=""
+  if [ -z "$stripped" ] || [ ! -r "$stripped" ]; then
+    rm -rf "$tmpd"
+    echo "arrow-parity-guard: FAIL-CLOSED — could not prepare cargo output for parsing, so this guard parsed NOTHING (#3400)" >&2
+    return 1
+  fi
+  passed=$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$stripped" | tail -1)
+  rm -rf "$tmpd"
   if [ -z "$passed" ] || [ "$passed" -lt 1 ]; then
     echo "arrow-parity-guard: FAIL — 0 tests ran (target skipped/absent, not a real PASS)" >&2
     return 1
@@ -11599,6 +13277,7 @@ dispatch_component() {
     feature-iso-delta-scan) run_component feature-iso-delta-scan run_feature_iso delta-scan ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
+    binding-rust-tests) run_binding_rust_tests ;;
     delivery-telemetry) run_delivery_telemetry ;;
     oom-audit) run_oom_audit ;;
     parity-report) run_parity_report ;;

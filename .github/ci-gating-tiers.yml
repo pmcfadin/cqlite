@@ -122,7 +122,7 @@ exempt:
     reason: Feature-matrix build lane; the merge-gating minimal-features build runs in the local gate.
     issue: "#2910"
   - workflow: ci.yml
-    reason: Broad opt-in lane (ci:broad); its merge-gating content is covered by the local agent gate.
+    reason: "Broad opt-in lane; exempt because it is ci:broad-label-gated and does not run on an unlabelled PR at all — NOT because the local agent gate is a superset of it. It is not: ci.yml executes `cargo test -p cqlite-core --features delta-scan --lib`, and the local gate only COMPILES those tests (feature-iso-delta-scan is `--lib --no-run`). Audited in #3522."
     issue: "#2910"
   - workflow: compaction-parity.yml
     reason: Byte-parity lane whose merge-gating half is the local gate's compaction-byte-parity component.
@@ -149,7 +149,7 @@ exempt:
     reason: Docker-backed live-cell parity lane; not merge-gating today.
     issue: "#2910"
   - workflow: node-ci.yml
-    reason: Node binding lane; the merge-gating half is the local gate's node-bindings component.
+    reason: "Node binding lane; the merge-gating half is the local gate's node-bindings component, which since #3522 runs the WHOLE jest suite (it ran 1 of 27 files before), plus binding-rust-tests for cqlite-node's Rust unit tests, which ran nowhere. The multi-platform build matrix is release coverage, not merge-gating."
     issue: "#2910"
   - workflow: observability-gate.yml
     reason: Observability correctness plus label-gated overhead bench; overhead is advisory.

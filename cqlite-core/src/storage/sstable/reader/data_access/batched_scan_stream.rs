@@ -134,6 +134,10 @@ impl SSTableReader {
             ScanAdmission::Exempt => None,
         };
 
+        // Read-PHASE accumulator (issue #1707) — see the per-row sibling for why it
+        // is propagated explicitly rather than through a thread-local.
+        let phase_sink = meter.as_ref().and_then(|m| m.phase_sink());
+
         // CAUSAL completion signal for THIS detached task (issue #3384, roborev).
         // `BatchedScanStream` is dropped without joining its task, so a consumer that
         // stopped reading cannot otherwise tell "the scan finished" from "the scan is
@@ -161,6 +165,7 @@ impl SSTableReader {
                     tx.clone(),
                     admission,
                     now_secs,
+                    phase_sink,
                 )
                 .await
             {
@@ -183,6 +188,8 @@ impl SSTableReader {
         admission: ScanAdmission,
         // Issue #3058: caller-pinned read-time TTL clock (`None` = ambient).
         now_secs: Option<i64>,
+        // This scan operation's read-phase accumulator (issue #1707), or `None`.
+        phase_sink: Option<std::sync::Arc<crate::observability::ReadPhaseTimings>>,
     ) -> Result<()> {
         // Admission control (issue #1594, F4): identical discipline to the per-row
         // `run_scan_stream` — one permit per top-level scan operation, held via RAII.
@@ -253,6 +260,7 @@ impl SSTableReader {
                 &cursor,
                 now_secs,
                 WindowedOut::Batched(tx.clone()),
+                phase_sink,
             )
             .await
         } else {

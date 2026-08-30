@@ -331,8 +331,16 @@ case "$cmd" in
     if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
       # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
       # `id` (equal to the job id) that NESTS the job row under a "job" key.
-      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"%s":"%s","prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
+      # `verdict_bool` is the SOURCE COLUMN the `verdict` letter is synthesised FROM, so the two
+      # must AGREE or the fixture is a record roborev cannot emit: `P` <=> 1, `F` <=> 0 (measured —
+      # job 154 clean/verdict_bool=1, job 162 findings-bearing/verdict_bool=0). Hard-coding 0 while
+      # a case set STUB_VERDICT_FIELD=P made the CLEAN-recheck positive control an impossible
+      # payload, i.e. weakened the one control that proves a clean recheck still PASSes. Derived,
+      # never hard-coded, so a case cannot silently desynchronise the pair again.
+      stub_verdict_bool=0
+      [ "${STUB_VERDICT_FIELD:-}" != P ] || stub_verdict_bool=1
+      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":%s,"%s":"%s","prompt":"%s","job":' \
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$stub_verdict_bool" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
@@ -3948,6 +3956,14 @@ assert_verdict 'case (wv18) step 1: the absence FAILs' FAIL 1
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+# STUB_VERDICT_FIELD='P' because a REAL record always carries a synthesised verdict letter
+# (#3564, measured: `roborev show --json` derives it from `reviews.verdict_bool` for every record —
+# `P` for a clean review, job 154, `F` for a findings-bearing one, job 162; the `review_jobs` table
+# has no verdict column). This case's SUBJECT is the waiver loop, not the findings state, so it is
+# fixtured with the payload shape roborev actually emits. Since #3564 a recheck can reach `NONE`
+# ONLY from that structured letter — prose cannot establish cleanliness (see fd2) — so without it
+# this case would fail on `findings: UNKNOWN` for a reason unrelated to what it tests.
+STUB_VERDICT_FIELD='P'
 STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\n"
 run_wrapper "$w_work" --recheck-job 4656
@@ -4096,6 +4112,7 @@ STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITH_PATHS"
 STUB_PROMPT='### Combined Diff\n\ndiff --git a/alpha.rs b/alpha.rs\n@@ x @@\ndiff --git a/beta.rs b/beta.rs\n@@ y @@'
 STUB_RECORD_OUTPUT_FIELD=verdict_text
+STUB_VERDICT_FIELD='P'   # real records always carry the synthesised letter (#3564) — see wv18
 STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
 run_wrapper "$w_work" --recheck-job 4656
 assert_verdict 'case (wv28) verdict_text on the job row' PASS 0
@@ -4106,6 +4123,7 @@ STUB_PROMPT="$PROMPT_WITH_PATHS"
 STUB_SHOW_JSON=nested
 STUB_PROMPT='### Combined Diff\n\ndiff --git a/alpha.rs b/alpha.rs\n@@ x @@\ndiff --git a/beta.rs b/beta.rs\n@@ y @@'
 STUB_RECORD_OUTPUT_FIELD=verdict_text
+STUB_VERDICT_FIELD='P'   # real records always carry the synthesised letter (#3564) — see wv18
 STUB_RECORD_OUTPUT='## Summary\\nNo issues found.'
 run_wrapper "$w_work" --recheck-job 4656
 assert_verdict 'case (wv28b) verdict_text on the review row' PASS 0
@@ -4282,6 +4300,260 @@ assert_verdict 'case (wv33c)' FAIL 1
 assert_says 'case (wv33c) neither preformatted context is an authorization' \
   '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
 assert_lacks 'case (wv33c) and neither grants' '^prompt-content: WAIVED'
+reset_stub
+
+printf '== #3564: `findings:` MUST FAIL THE VERDICT ON ITS OWN, IN EVERY MODE ==\n'
+# THE DEFECT (#3564, measured on #3473's round-3 recovery, job 160): `--recheck-job` emitted
+#     findings:     PRESENT (3)
+#     roborev-exit: SKIP (recheck: no reviewer ran ...)
+#     RESULT:       PASS
+# a FALSE PASS IN A MERGE GATE. `PRESENT` is in the verdict grammar's non-failing set, so the only
+# thing failing a findings-bearing run was the NEIGHBOURING key `roborev-exit: FINDINGS (exit 1)`.
+# On a recheck no reviewer process runs, `roborev-exit` is legitimately `SKIP`, and removing the
+# failing signal removed the only thing failing the run.
+#
+# BOTH DIRECTIONS ARE PINNED, and that is a requirement of the fix rather than thoroughness: a
+# one-direction test cannot distinguish a corrected verdict scan from one that fails EVERYTHING,
+# and `--recheck-job` is the ONLY path the #3312 absence waiver can travel, so a verdict scan that
+# over-fails would break the break-glass instead of the false PASS.
+FINDINGS_TEXT='## Findings\n- **Severity**: High\nProblem: the first one.\n- **Severity**: Medium\nProblem: the second one.\n## Summary\n2 findings.'
+CLEAN_TEXT='## Summary\nNo issues found.'
+# A prompt carrying THIS fixture's OWN census paths (`two-code-commits` = alpha.rs + beta.rs), so
+# `prompt-content:` can PASS. The shared PROMPT_WITH_PATHS names main.rs/README.md/NOTES.md — the
+# `mixed` fixture's paths — which is why the waiver cases above either waive the absence or assert
+# only individual keys. A positive control needs a prompt that genuinely matches its census, not a
+# waiver: a PASS bought with a waiver could not show that findings NONE is what permitted it.
+PROMPT_WITH_W_PATHS='Review the following change.\ndiff --git a/alpha.rs b/alpha.rs\n@@ fn alpha() {} @@\ndiff --git a/beta.rs b/beta.rs\n@@ fn beta() {} @@'
+
+printf '== (fd1) #3564: a recheck of a job whose record CARRIES FINDINGS FAILs ==\n'
+# The exact measured signature, asserted as a signature: PRESENT beside SKIP must not be a PASS.
+# EVERY OTHER KEY IS MADE TO PASS (hence the census-matching prompt), so the findings are the SOLE
+# cause of the FAIL. That is what makes this a test of the defect rather than of the suite: with any
+# other key failing, the run FAILs for a reason that was never in question and the case would go on
+# passing if the fix were reverted.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_VERDICT_FIELD='F'
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd1)' FAIL 1
+assert_says 'case (fd1) the findings state is re-asserted from the record' '^findings: PRESENT \(2\)$'
+assert_says 'case (fd1) roborev-exit stays truthful about a process that never ran' \
+  '^roborev-exit: SKIP \(recheck: no reviewer ran in this invocation; job 4656 re-decided from its record\)$'
+# THE ISOLATION CLAIM, PINNED RATHER THAN ASSERTED IN PROSE (C audit, low). Reaching the terminal gate
+# proves only that no key failed the GRAMMAR scan; it does not prove the other keys affirmatively PASSed,
+# which is what makes findings the SOLE cause. So the two keys a findings-bearing fixture is most likely
+# to disturb are asserted positively — without this, the case would keep passing for the wrong reason if
+# a future fixture change broke one of them.
+assert_says 'case (fd1) the reviewer-diff delivery key affirmatively PASSed (findings are the SOLE cause)' \
+  '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_says 'case (fd1) and completion was re-asserted from the record' '^review-completed: PASS$'
+assert_says 'case (fd1) and findings fails the verdict on its OWN terms, naming what it read' \
+  "ERROR: findings: this run would have PASSED while 'findings:' reads 'PRESENT \(2\)'"
+assert_lacks 'case (fd1) THE #3473 SIGNATURE IS UNREACHABLE: no PASS beside PRESENT' '^RESULT: PASS$'
+reset_stub
+
+printf '== (fd2) #3564: prose CANNOT establish cleanliness — no structured verdict is UNKNOWN ==\n'
+# ROUND 2 OF REVIEW KILLED THE RECONSTRUCTION THIS CASE USED TO ASSERT. It originally required a
+# clean-LOOKING record with NO structured verdict to PASS, i.e. it treated "no severity marker found"
+# as affirmative cleanliness. Two rounds each found a review SHAPE that defeats that: a HEADERLESS
+# findings review (fd9), and a findings BLOCK with no recognised marker (fd10). The class does not
+# close, and cannot: `review-completed` accepts a bare `## Summary` heading as a completed review, so
+# a findings review whose findings are prose is INDISTINGUISHABLE from a clean one (fd11) — and a real
+# clean review's text is `No issues found.\n\nSummary: ...` with no `Findings` heading either.
+#
+# So the direction is asymmetric and permanent: a marker in a findings block is positive evidence OF
+# findings, while its absence is NOT evidence of cleanliness. `NONE` is reachable only from the
+# structured `verdict` letter (fd4). THE BREAK-GLASS IS UNHARMED, and that is measured rather than
+# argued: `roborev show --json` synthesises that letter from `reviews.verdict_bool` for EVERY observed
+# record, so a real recheck of a clean job takes the structured path — see fd4.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT="$CLEAN_TEXT"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd2) a clean-LOOKING record with no structured verdict does NOT pass' FAIL 1
+assert_says 'case (fd2) the state is UNKNOWN — prose cannot establish cleanliness' '^findings: UNKNOWN$'
+assert_says 'case (fd2) and the cause says so, and flags the payload shape as unexpected' \
+  'prose can therefore never establish CLEANLINESS'
+assert_lacks 'case (fd2) NONE is never derived from an absent marker' '^findings: NONE$'
+reset_stub
+
+printf '== (fd3) #3564: a recheck with NO structured verdict reads findings FROM THE RECORD TEXT ==\n'
+# THE SECOND HALF OF THE FIX, and it is not cosmetic. `findings:` used to fall through to a branch
+# keyed on the REVIEWER'S EXIT CODE when the record carried no `verdict` field — and a recheck has
+# no reviewer, so `roborev-exit: SKIP` matched neither arm and the key read UNKNOWN. Harmless while
+# nothing depended on `findings` alone; once it gates the verdict, UNKNOWN on every such recheck
+# would have false-FAILed the clean ones (fd2's shape) and, in this shape, still not named the
+# findings. The record's review text IS the transcript in this mode, so it is the right oracle.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd3)' FAIL 1
+assert_says 'case (fd3) findings come from the record text, not from the absent exit code' \
+  '^findings: PRESENT \(2\)$'
+assert_lacks 'case (fd3) and never degrades to UNKNOWN' '^findings: UNKNOWN'
+reset_stub
+
+printf '== (fd4) #3564: a recheck of a job whose record verdict is affirmatively CLEAN PASSes ==\n'
+# THE POSITIVE CONTROL, and after round 2 the ONLY one: `NONE` is reachable only from the structured
+# verdict letter. Without this case the suite could not distinguish the fix from a scan that fails
+# every recheck — which would take the only route an authorized absence waiver has (#3312 job 24).
+#
+# AND IT IS THE REALISTIC SHAPE, measured rather than assumed: `roborev show --json` SYNTHESISES this
+# letter from the `reviews.verdict_bool` column for every observed record — `P` for a clean review
+# (job 154, verdict_bool=1) and `F` for a findings-bearing one (job 162, verdict_bool=0), while the
+# `review_jobs` table has no verdict column at all. So THIS is the path a real clean recheck takes,
+# and fd2's verdict-less payload is the defensive one.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_VERDICT_FIELD='P'
+STUB_RECORD_OUTPUT="$CLEAN_TEXT"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd4)' PASS 0
+assert_says 'case (fd4) the structured clean verdict reads NONE' '^findings: NONE$'
+reset_stub
+
+printf '== (fd5) #3564: AN AUTHORIZED ABSENCE WAIVER DOES NOT EXCUSE FINDINGS ==\n'
+# THE SHARPEST CASE IN THIS GROUP. `--recheck-job` is the only path a waiver travels, so before the
+# fix the one code path an authorized waiver must use was the path that silently dropped a findings
+# failure — letting a waiver scoped to `prompt-content` ABSENCE (#3312) excuse findings NO HUMAN
+# AUTHORIZED. The waiver must still do its own job (prompt-content: WAIVED) and the run must still
+# FAIL on the findings.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_VERDICT_FIELD='F'
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd5)' FAIL 1
+assert_says 'case (fd5) the waiver still excuses exactly what it was authorized for' \
+  '^prompt-content: WAIVED \(2/2 code census paths absent'
+assert_says 'case (fd5) but the findings are NOT waived' '^findings: PRESENT \(2\)$'
+assert_says 'case (fd5) and the diagnostic says the requirement is unwaivable' \
+  'NOT waivable in any mode: the absence waiver excuses prompt-content absence only'
+assert_lacks 'case (fd5) a waiver can never carry a findings-bearing recheck to a PASS' '^RESULT: PASS$'
+reset_stub
+
+printf '== (fd6) #3564: the FRESH-review path is unchanged (regression control) ==\n'
+# Rounds 1 and 2 on #3473 produced the CORRECT verdict, so the fix must not have been bought by
+# altering the path that already worked: a fresh review reporting findings still fails, and still
+# fails under `roborev-exit: FINDINGS (exit 1)` — the honest statement about a reviewer that DID run.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_VERDICT=$'## Findings\n- **Severity**: High\nProblem: the first one.\n## Summary\n1 finding.'
+STUB_REVIEW_RC=1
+run_wrapper "$w_work"
+assert_verdict 'case (fd6)' FAIL 1
+assert_says 'case (fd6) a reviewer that RAN reports its exit honestly' '^roborev-exit: FINDINGS \(exit 1\)$'
+assert_says 'case (fd6) and findings are reported present' '^findings: PRESENT'
+reset_stub
+
+printf '== (fd8) #3564: a recheck of a record with NO review text cannot report NONE ==\n'
+# An EMPTY transcript measured nothing, so "no severity markers found" is true and meaningless — and
+# NONE is now the PERMISSIVE value. `review-completed` already FAILs an empty transcript, so this is
+# defence in depth; it is asserted because a guard that holds only because a NEIGHBOURING check fails
+# first is the exact coupling this issue removed one key over.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT=''
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd8)' FAIL 1
+assert_says 'case (fd8) an absent measurement is UNKNOWN, never NONE' '^findings: UNKNOWN$'
+assert_says 'case (fd8) and the recheck says the record carried no review text' \
+  'NOTICE: recheck: the job record for .4656. carries no review text'
+reset_stub
+
+printf '== (fd9) #3564 roborev r1 High: a HEADERLESS findings recheck cannot read NONE ==\n'
+# THE FIX'S OWN DEFECT CLASS, ONE LAYER DOWN. `review-completed`'s allow-list deliberately ACCEPTS a
+# findings review with NO `Findings` heading (a bare `**Severity**:` line, `[High]`, `Medium:`) —
+# it was widened to stop false-FAILing genuine reviews from agents that emit that shape. But the
+# findings-BLOCK extraction needs a heading, so for such a transcript the block is EMPTY, and the
+# recheck fallback read 0 markers as an AFFIRMATIVE `NONE` and PASSED a findings-bearing recheck.
+# THE SHIPPED RULE IS STRONGER THAN THIS CASE'S FIRST FIX: an intermediate version made `NONE` require
+# zero markers across the WHOLE transcript, and round 2 defeated that too (fd10/fd11), so prose can now
+# never say `NONE` at all — only the structured verdict letter can.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT='- **Severity**: High\n- Problem: a headerless finding, with no Findings heading anywhere.\n## Summary\n1 finding.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd9) a headerless findings recheck does NOT pass' FAIL 1
+assert_says 'case (fd9) the state is UNKNOWN, not NONE' '^findings: UNKNOWN$'
+assert_says 'case (fd9) and the cause names the ambiguity rather than claiming cleanliness' \
+  'prose can therefore never establish CLEANLINESS'
+assert_lacks 'case (fd9) NONE is never reported for a marker-bearing transcript' '^findings: NONE$'
+reset_stub
+
+printf '== (fd9b) #3564: the bracket and `Medium:` headerless shapes are covered too ==\n'
+# The allow-list names three headerless shapes; a fix that only recognised `**Severity**:` would leave
+# the other two reaching NONE. Asserted per shape rather than trusting one to stand for the family.
+for _fd9_shape in '[High] a bracketed headerless finding.' 'Medium: a labelled headerless finding.'; do
+  reset_stub
+  STUB_ANNOUNCE_SHA="$w_head"
+  STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+  STUB_RECORD_OUTPUT="$_fd9_shape\n## Summary\n1 finding."
+  run_wrapper "$w_work" --recheck-job 4656
+  assert_verdict "case (fd9b) '$_fd9_shape' does NOT pass" FAIL 1
+  assert_says "case (fd9b) '$_fd9_shape' is UNKNOWN, not NONE" '^findings: UNKNOWN$'
+  reset_stub
+done
+
+printf '== (fd10) #3564 roborev r2 High: a MARKERLESS findings BLOCK cannot read NONE ==\n'
+# ROUND 2'S FINDING. A `## Findings` block whose findings carry NO recognised severity marker leaves
+# the block NON-EMPTY but the marker count at zero — so the intermediate fix (which required only
+# "zero markers anywhere") still read it as affirmative NONE and passed a findings-bearing recheck.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT='## Findings\n- The reconstruction is wrong, stated without any severity label.\n## Summary\n1 finding.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd10) a markerless findings block does NOT pass' FAIL 1
+assert_says 'case (fd10) the state is UNKNOWN, not NONE' '^findings: UNKNOWN$'
+assert_lacks 'case (fd10) NONE is never reported for a findings-bearing record' '^findings: NONE$'
+reset_stub
+
+printf '== (fd11) #3564: prose findings under a Summary heading ALONE — the unclosable shape ==\n'
+# THE CASE THAT JUSTIFIES REMOVING THE RECONSTRUCTION RATHER THAN PATCHING IT A THIRD TIME.
+# `review-completed` accepts a `## Summary` heading ALONE as a completed review. So this transcript —
+# prose findings, no `Findings` heading, no severity marker — is a VALID completed review that reports
+# findings, and it is textually indistinguishable from a clean review (whose real text is
+# `No issues found.\n\nSummary: ...`, also with no Findings heading). No recogniser over prose can
+# separate them, which is why `NONE` now requires the structured verdict letter instead.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT='## Summary\nThe reconstruction is wrong and should be removed. One issue.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd11) a Summary-only findings review does NOT pass' FAIL 1
+assert_says 'case (fd11) the state is UNKNOWN, not NONE' '^findings: UNKNOWN$'
+assert_says 'case (fd11) review-completed still accepts it AS a completed review' '^review-completed: PASS$'
+reset_stub
+
+printf '== (fd7) #3564 structural: the findings gate is TOKEN-EXACT and not keyed on a neighbour ==\n'
+# Behavioural cases only cover the shapes someone already thought of. Two properties of the FIX are
+# asserted against the shipped wrapper, because both are exactly what a later "simplification" would
+# undo: the value is reduced to its VERDICT TOKEN and compared to `NONE` EXACTLY (a `NONE*` prefix
+# glob would accept a `NONE-BUT-UNMEASURED` state, which is the closure checking a spelling rather
+# than a state — the #3229 lesson), and the comparison is on `FINDINGS` itself rather than on
+# `ROBOREV_EXIT`, which is the delegation #3564 removed.
+if grep -qF '[ "${FINDINGS%% *}" != NONE ]' "$WRAPPER_REAL"; then
+  ok 'structural: the terminal gate reduces findings to its verdict token and requires NONE exactly'
+else
+  bad 'structural: the terminal findings gate is not a token-exact `!= NONE` test on FINDINGS — a prefix glob or a neighbour-keyed test reopens #3564'
+fi
+if grep -qF 'This requirement is NOT waivable in any mode' "$WRAPPER_REAL"; then
+  ok 'structural: the gate records IN CODE that it is unwaivable (the #3312 waiver is absence-only)'
+else
+  bad 'structural: the findings gate no longer states that it is unwaivable — the next reader will re-add a WAIVED branch'
+fi
 reset_stub
 
 printf '== case (mb9): the ENQUEUED range is IMMUTABLE against a mid-review base-ref move ==\n'

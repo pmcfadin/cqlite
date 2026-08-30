@@ -8,7 +8,31 @@ use std::sync::{Mutex, OnceLock};
 use tokio::runtime::Runtime;
 
 /// Global tokio runtime instance.
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static RUNTIME: OnceLock<OwnedRuntime> = OnceLock::new();
+
+/// The shared runtime together with the PID of the process that BUILT it.
+///
+/// One cell, two facts, published atomically — deliberately (roborev job 174).
+/// They were two `OnceLock`s and that could not be made correct: setting the PID
+/// after the runtime left a fork window where the PID read `None` (the
+/// permissive answer, so a child would drive the parent's descriptors), and
+/// setting it before the build left it populated even when the BUILD FAILED — so
+/// a later fork produced a child that builds its own perfectly good runtime and
+/// then mistakes it for the parent's, skipping cleanup for its OWN database and
+/// leaking its own engine and lock. Storing both in one value makes a failed
+/// build leave neither, and a successful one publish both.
+struct OwnedRuntime {
+    runtime: Runtime,
+    /// PID of the process that built `runtime` — the fork-safety anchor (#1461).
+    ///
+    /// `fork()` copies this memory and the cell with it, but NOT the runtime's
+    /// worker threads: only the forking thread exists in the child. So a child
+    /// inheriting a built runtime holds a handle it cannot drive, while ALSO
+    /// inheriting the parent's open descriptors. Comparing this against
+    /// `std::process::id()` is how a teardown path tells "my runtime" from "a
+    /// runtime I inherited".
+    owner_pid: u32,
+}
 
 /// Serializes the fallible slow-path build so at most one runtime is ever
 /// constructed, even under concurrent first use.
@@ -27,14 +51,63 @@ static INIT_LOCK: Mutex<()> = Mutex::new(());
 /// panicking initializer, a failed build does **not** poison the cell: a later
 /// call can retry once resources are available, and the error is surfaced to the
 /// caller (mapped to a catchable Python exception at the binding boundary) rather
-/// than aborting the host process under `panic = "abort"`.
+/// than panicking. (The wheel ships `--profile release-unwind`, so an escaping
+/// panic would be caught by pyo3's FFI firewall and reported through
+/// `sys.unraisablehook` rather than aborting — silent, which is why the fallible
+/// form is preferred here regardless.)
 pub fn try_get_runtime() -> Result<&'static Runtime, std::io::Error> {
-    get_or_try_init(&RUNTIME, &INIT_LOCK, || {
+    let owned = get_or_try_init(&RUNTIME, &INIT_LOCK, || {
+        // Build first, then pair the runtime with the PID of the process that
+        // built it, and publish the pair as ONE value. Both facts become visible
+        // together or not at all — see `OwnedRuntime` for the two windows the
+        // previous two-cell arrangement could not close simultaneously.
+        //
+        // `std::process::id()` is read AFTER a successful build, so it names the
+        // process that actually owns the worker threads.
         tokio::runtime::Builder::new_multi_thread()
             .thread_name("cqlite-py-worker")
             .enable_all()
             .build()
-    })
+            .map(|runtime| OwnedRuntime {
+                runtime,
+                owner_pid: std::process::id(),
+            })
+    })?;
+    Ok(&owned.runtime)
+}
+
+/// Whether the shared runtime (if any) was built by THIS process.
+///
+/// `false` means the runtime — and any `Database` reachable from this code — was
+/// inherited across a `fork()`. Nothing in that state is safe to drive: the
+/// runtime's worker threads did not survive the fork, and every open file
+/// descriptor is shared with the parent, so acting on them corrupts the
+/// PARENT's state (issue #1461, roborev job 168).
+///
+/// `true` when no runtime has been built at all — there is then nothing
+/// inherited to get wrong, and the caller's own `existing_runtime()` check is
+/// what handles that case.
+pub fn runtime_belongs_to_this_process() -> bool {
+    match RUNTIME.get() {
+        Some(owned) => owned.owner_pid == std::process::id(),
+        None => true,
+    }
+}
+
+/// Returns the global tokio runtime **only if it has already been built**.
+///
+/// The non-building counterpart of [`try_get_runtime`]: a plain `OnceLock::get`,
+/// so it never constructs a runtime, never spawns a thread, and never allocates.
+///
+/// This exists for teardown paths — see `crate::drop_safety` (issue #1461).
+/// `Drop` for a `#[pyclass]` can run during interpreter finalization, and
+/// building a multi-threaded tokio runtime at that point is exactly the hazard
+/// issue #1461 step 3 forbids (threads spawned while CPython is tearing down,
+/// with no caller left to surface an error to). A teardown path therefore asks
+/// this question instead: if the answer is `None` no async cleanup was ever
+/// possible on this process anyway, and the caller skips it silently.
+pub fn existing_runtime() -> Option<&'static Runtime> {
+    RUNTIME.get().map(|owned| &owned.runtime)
 }
 
 /// Serialized get-or-build for a process-global [`OnceLock`].

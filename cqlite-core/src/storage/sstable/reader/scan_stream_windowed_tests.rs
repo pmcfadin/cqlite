@@ -844,3 +844,232 @@ mod fixture_drain {
         );
     }
 }
+
+/// Issue #1707 (roborev job 133) — a windowed-feed read helper that reads NOTHING
+/// must record NO io time and must not sleep the injected test delay.
+///
+/// # Why this is a distinct property, and why absence is the assertion
+///
+/// The read-phase design's whole contract is that a phase which never ran emits NO
+/// sample: `read_metrics` skips a zero-nanos phase deliberately, because a `0.0`
+/// asserts a measurement that was never taken, and `observability::read_phase`'s
+/// coverage boundary tells operators that an absent `read.phase.*` series means NOT
+/// MEASURED — never "fast". The io seam is the one place that rule can be broken in
+/// the OTHER direction: both feed helpers are called once more than they read (the
+/// terminal call that returns `Ok(None)` at EOF), and one that starts its timer
+/// before its no-data checks charges function-call and EOF-check time to
+/// `read.phase.io` — a FABRICATED measurement for a read that never happened, and
+/// on a scan that reads nothing at all, an io SAMPLE with no read behind it.
+///
+/// So the assertion is `nanos(Io) == 0`, not "small": zero is a fact about a call
+/// that did no work, and any timer at all makes it non-zero. It is deliberately NOT
+/// a wall-clock threshold (#2642) — nothing here compares an elapsed time against a
+/// budget, so no host timing can change the verdict.
+///
+/// The injected `io_delay` is ARMED across the no-read calls on purpose: it is armed
+/// immediately inside the timed region at both seams, so if it is ever hoisted back
+/// ahead of the EOF checks alongside the timer, this test fails LOUDLY (milliseconds
+/// charged to io for a call that read nothing) instead of marginally. The positive
+/// controls in the same test are what stop the whole case passing vacuously — they
+/// prove the sink really is installed and really does receive a REAL read's io time.
+///
+/// Fixtures are COMMITTED to git, so absence is a resolution defect, never a
+/// legitimate skip (#3220): both cases fail closed.
+mod io_phase_no_read_absence {
+    use super::*;
+    use crate::observability::read_phase::{self, io_delay, ReadPhase, ReadPhaseTimings};
+    use crate::storage::sstable::reader::read_at::DirectScratch;
+    use crate::storage::sstable::SSTableReader;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    /// A COMMITTED compressed BIG (`nb`) fixture — it has a `CompressionInfo.db`, so
+    /// `read_compressed_chunk_sync` is the helper under test.
+    const COMPRESSED: (&str, &str) = ("test_big", "wide_partition");
+
+    /// A COMMITTED **uncompressed** BIG (`nb`) fixture — no `CompressionInfo.db`, so
+    /// the feed drives `read_uncompressed_piece_sync`.
+    const UNCOMPRESSED: (&str, &str) = ("test_comp", "uncompressed_table");
+
+    /// Every candidate corpus root, in the order they are probed. Neither root is a
+    /// superset of the other (#3220), so resolution walks BOTH and picks by
+    /// EVIDENCE — the root that actually holds this table's `*-Data.db`.
+    fn candidate_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Ok(env_root) = std::env::var("CQLITE_DATASETS_ROOT") {
+            roots.push(PathBuf::from(env_root));
+        }
+        // Checkout-relative: `cqlite-core/..` is the workspace root.
+        roots.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("test-data")
+                .join("datasets"),
+        );
+        roots
+    }
+
+    /// Resolve a COMMITTED fixture's `Data.db`, FAIL-CLOSED (#3220).
+    fn committed_data_db((keyspace, table): (&str, &str)) -> PathBuf {
+        for root in candidate_roots() {
+            let ks_dir = root.join("sstables").join(keyspace);
+            let Ok(entries) = std::fs::read_dir(&ks_dir) else {
+                continue;
+            };
+            let prefix = format!("{table}-");
+            for gen_dir in entries.flatten().map(|e| e.path()) {
+                if !gen_dir.is_dir()
+                    || !gen_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&prefix))
+                {
+                    continue;
+                }
+                let Ok(files) = std::fs::read_dir(&gen_dir) else {
+                    continue;
+                };
+                if let Some(data) = files
+                    .flatten()
+                    .map(|f| f.path())
+                    .find(|p| p.to_string_lossy().ends_with("-Data.db"))
+                {
+                    return data;
+                }
+            }
+        }
+        panic!(
+            "{keyspace}.{table} is COMMITTED to git and must resolve in every checkout, \
+             unconditionally (#3220) — searched {:?}",
+            candidate_roots()
+        )
+    }
+
+    async fn open_reader(fixture: (&str, &str)) -> Arc<SSTableReader> {
+        let data_db = committed_data_db(fixture);
+        let cfg = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&cfg)
+                .await
+                .expect("platform"),
+        );
+        Arc::new(
+            SSTableReader::open(&data_db, &cfg, platform)
+                .await
+                .expect("open the committed fixture"),
+        )
+    }
+
+    /// The COMPRESSED feed's terminal call — `chunk_index` past the last chunk —
+    /// reads nothing, so it must contribute no io time at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(read_phase_io_delay)]
+    async fn a_past_eof_compressed_chunk_read_records_no_io_time() {
+        let reader = open_reader(COMPRESSED).await;
+        let past_eof = reader
+            .compression_info
+            .as_ref()
+            .expect("the committed fixture is compressed")
+            .chunk_offsets
+            .len();
+
+        // Armed across BOTH calls: milliseconds land in io only if a timed region is
+        // entered, so a resurrected pre-check timer/delay fails this loudly.
+        let _armed = io_delay::arm(Duration::from_millis(5));
+
+        let eof_sink = Arc::new(ReadPhaseTimings::default());
+        let mut scratch: Vec<u8> = Vec::new();
+        let mut direct = DirectScratch::new();
+        {
+            let _installed = read_phase::install(Some(Arc::clone(&eof_sink)));
+            let out = reader
+                .read_compressed_chunk_sync(past_eof, &mut scratch, &mut direct)
+                .expect("a past-EOF chunk index is clean EOF, not an error");
+            assert!(
+                out.is_none(),
+                "chunk {past_eof} is past the last chunk, so the helper must report EOF"
+            );
+        }
+        assert_eq!(
+            eof_sink.nanos(ReadPhase::Io),
+            0,
+            "issue #1707: a past-EOF chunk read performs NO read, so it must charge \
+             NOTHING to read.phase.io — an io sample behind a call that read nothing \
+             is a fabricated measurement, exactly what the absent-phase rule exists \
+             to prevent (with a 5ms delay armed, a non-zero value here also means the \
+             injected delay slept on a path that never reads)"
+        );
+
+        // Positive control — without it the case could pass because the sink was
+        // never installed, or because the seam records nothing at all.
+        let read_sink = Arc::new(ReadPhaseTimings::default());
+        {
+            let _installed = read_phase::install(Some(Arc::clone(&read_sink)));
+            let out = reader
+                .read_compressed_chunk_sync(0, &mut scratch, &mut direct)
+                .expect("chunk 0 of a committed fixture reads")
+                .expect("chunk 0 is real data, not EOF");
+            assert!(!out.is_empty(), "chunk 0 carries compressed bytes");
+        }
+        assert!(
+            read_sink.nanos(ReadPhase::Io) > 0,
+            "positive control: a REAL chunk read must charge io time (else the \
+             absence assertion above proves nothing about the seam)"
+        );
+    }
+
+    /// The UNCOMPRESSED feed's terminal call — `pos` at the end of the file — reads
+    /// nothing, so it must contribute no io time at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(read_phase_io_delay)]
+    async fn an_at_eof_uncompressed_piece_read_records_no_io_time() {
+        let reader = open_reader(UNCOMPRESSED).await;
+        assert!(
+            reader.compression_info.is_none(),
+            "the committed fixture must be UNCOMPRESSED so the feed drives the \
+             uncompressed piece helper"
+        );
+        let file_size = reader.scan_positional_source.len();
+        assert!(file_size > 0, "the committed fixture has a data section");
+
+        let _armed = io_delay::arm(Duration::from_millis(5));
+
+        let eof_sink = Arc::new(ReadPhaseTimings::default());
+        let mut direct = DirectScratch::new();
+        {
+            let _installed = read_phase::install(Some(Arc::clone(&eof_sink)));
+            let out = reader
+                .read_uncompressed_piece_sync(file_size, &mut direct)
+                .expect("a position at end-of-file is clean EOF, not an error");
+            assert!(
+                out.is_none(),
+                "there is nothing left to read at offset {file_size} (= file length)"
+            );
+        }
+        assert_eq!(
+            eof_sink.nanos(ReadPhase::Io),
+            0,
+            "issue #1707: an at-EOF piece read performs NO read, so it must charge \
+             NOTHING to read.phase.io (same fabricated-measurement rule as the \
+             compressed sibling)"
+        );
+
+        // Positive control, as above: the FIRST piece of the data section is a real
+        // read and must be charged.
+        let read_sink = Arc::new(ReadPhaseTimings::default());
+        let header = reader.calculate_header_size() as u64;
+        {
+            let _installed = read_phase::install(Some(Arc::clone(&read_sink)));
+            let (piece, next) = reader
+                .read_uncompressed_piece_sync(header, &mut direct)
+                .expect("the first data-section piece reads")
+                .expect("the first piece is real data, not EOF");
+            assert!(!piece.is_empty(), "the first piece carries bytes");
+            assert!(next > header, "the read advanced the cursor");
+        }
+        assert!(
+            read_sink.nanos(ReadPhase::Io) > 0,
+            "positive control: a REAL piece read must charge io time"
+        );
+    }
+}

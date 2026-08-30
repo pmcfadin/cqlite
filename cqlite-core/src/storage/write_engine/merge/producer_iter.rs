@@ -244,6 +244,18 @@ impl SSTableRowIteratorAdapter {
         // imply current parity coverage. (This file is far over the #1116 campsite
         // target; the +2 lines are the minimal propagation.)
         let subphase_sink = crate::observability::stream_subphase::current();
+        // Issue #1707: the read-PHASE sink, propagated the SAME way and for the same
+        // reason — and on THIS path it is exercised in production, unlike the
+        // sub-phase sink above: `generation_merge::stream_generations_for_read`
+        // reaches `KWayMerger::new` → `MergeInput::Paths` → here, so the chunk decode
+        // of every cross-generation read runs on this thread. Installing the sink on
+        // the merge/consumer thread alone left that route recording `merge` and
+        // nothing else. It reaches the shared chunk-decode plane
+        // (`reader::chunk_source`), so DECOMPRESS is measured through it; the io seam
+        // lives only in the windowed scan's read helpers and is therefore still NOT
+        // reached from here — see `observability::read_phase`'s coverage boundary.
+        // `None` (no-op) for an unmetered caller.
+        let read_phase_sink = crate::observability::read_phase::current();
 
         // Issue #3120: whatever fault a test armed FOR THIS INPUT is captured HERE
         // (never re-read mid-walk) and owned by the producer thread. Always empty —
@@ -261,6 +273,7 @@ impl SSTableRowIteratorAdapter {
         // worker threads beyond itself (Issue #2316).
         let producer = match std::thread::Builder::new().spawn(move || {
             let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
+            let _read_phase_guard = crate::observability::read_phase::install(read_phase_sink);
             Self::producer_thread(
                 path_buf,
                 run_index,

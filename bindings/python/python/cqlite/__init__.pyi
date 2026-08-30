@@ -8,7 +8,6 @@ from typing import Iterator, Any
 from types import TracebackType
 
 # Type alias for configuration (dict or JSON string)
-Config = dict[str, Any] | str
 
 # Version information
 __version__: str
@@ -90,7 +89,7 @@ def performance_optimized() -> dict[str, Any]:
     """
     ...
 
-def validate_config(config: Config) -> bool:
+def validate_config(config: dict[str, Any] | str) -> bool:
     """Validate a configuration dict or JSON string.
 
     Args:
@@ -392,7 +391,7 @@ def open(
     path: str | Path,
     *,
     schema: str | Path | None = None,
-    config: Config | None = None,
+    config: dict[str, Any] | str | None = None,
     writable: bool = False,
     write_dir: str | Path | None = None,
     flush_threshold: int | None = None,

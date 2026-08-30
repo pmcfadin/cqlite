@@ -682,6 +682,13 @@ pub(super) async fn stream_generations_for_read(
     // issue follows. Format-agnostic: rows reconcile across possibly mixed BIG/BTI
     // inputs, so no single `sstable.format` label is honest.
     let mut meter = crate::observability::read_metrics::ReadOpMeter::start(None);
+    // Read-PHASE accumulator (issue #1707): moved into the merge producer thread
+    // below and installed there, because that thread is where the k-way merge step —
+    // and, through the per-generation producers it drives, the io + decompress —
+    // physically happen. `read.phase.merge` is recorded ONLY on this
+    // cross-generation route: a single-generation scan performs no k-way merge, so
+    // it records no sample rather than a fabricated 0.
+    let phase_sink = meter.phase_sink();
     let start_key = start_key.cloned();
     let end_key = end_key.cloned();
     let paths = ordered_generation_paths(reader_list);
@@ -699,6 +706,10 @@ pub(super) async fn stream_generations_for_read(
     let (out_tx, out_rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(buffer_size.max(1));
 
     let task = tokio::task::spawn_blocking(move || {
+        // Issue #1707: install this read's phase sink for the whole producer thread,
+        // so both the merge step below and the reads its inputs perform on THIS
+        // thread accumulate into the operation's own counters.
+        let _phases = crate::observability::read_phase::install(phase_sink);
         // Inside the construction window, i.e. BEFORE either readiness arm runs, so
         // an armed fault reproduces exactly "the producer died without signalling".
         fault_scope.checkpoint(crate::storage::producer_fault::ScanTaskSite::CrossGenerationMerge);
@@ -735,13 +746,20 @@ pub(super) async fn stream_generations_for_read(
             if out_tx.is_closed() {
                 return;
             }
-            let step = match merger.step() {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = out_tx.blocking_send(Err(e));
-                    return;
-                }
-            };
+            // merge PHASE (issue #1707): the k-way merge + reconcile step, MINUS the
+            // blocking merge-input recv-wait accrued inside it (producer starvation,
+            // i.e. io on another thread — charging it here would make every
+            // disk-bound read look merge-bound).
+            let step =
+                match crate::observability::read_phase::timed_merge_excluding_recv_wait(|| {
+                    merger.step()
+                }) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = out_tx.blocking_send(Err(e));
+                        return;
+                    }
+                };
             let (key, rows) = match step {
                 MergeStep::Partition { key, rows } => (key, rows),
                 MergeStep::Complete => return,

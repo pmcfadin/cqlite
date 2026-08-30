@@ -8,6 +8,22 @@
 use super::catalog::{self, attr};
 use super::operator_docs::{MetricDoc, MetricKind};
 
+// Read-PHASE timings + reader/WAL resource gauges (issue #1707): a SECOND
+// annotation table in its own file, because this one was already at the campsite
+// source target (#1116) and the table is append-only data.
+#[path = "operator_docs_annotations_read_phase.rs"]
+mod read_phase;
+
+/// Every operator annotation table, in declaration order. The renderer walks the
+/// UNION (and sorts by name), so a family lives in whichever file it was declared
+/// in — `operator_docs::operator_metric_docs` never reads one table directly.
+pub(super) const ANNOTATION_TABLES: &[&[MetricDoc]] = &[ANNOTATIONS, read_phase::ANNOTATIONS];
+
+/// Every operator annotation across [`ANNOTATION_TABLES`].
+pub(super) fn all_annotations() -> impl Iterator<Item = &'static MetricDoc> {
+    ANNOTATION_TABLES.iter().copied().flatten()
+}
+
 /// The operator annotation table (catalog declaration order; renderer sorts by name).
 pub(super) const ANNOTATIONS: &[MetricDoc] = &[
     MetricDoc {

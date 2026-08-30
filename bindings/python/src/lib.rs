@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 
 mod config;
 mod database;
+mod drop_safety;
 mod error;
 mod observability;
 mod prepared;

@@ -73,6 +73,36 @@ db = cqlite.open(data_dir, schema=schema_path)
 db.close()
 ```
 
+#### Cleanup on garbage collection (safety net, not the recommended path)
+
+A handle that is garbage-collected without `close()` still cleans up
+best-effort: the write engine is closed (flushing any remaining memtable to an
+SSTable), the read engine's shutdown hook is called (today a no-op), and
+buffered telemetry is flushed. Some things are worth knowing about relying on it:
+
+- **It runs with the GIL held**, because CPython frees the object from its
+  deallocator. The flush and fsync therefore block other Python threads for
+  their duration, where `close()` releases the GIL around the same work. Prefer
+  `with` or an explicit `close()` in threaded code.
+- **It is best-effort by design.** If the handle is dropped from inside a
+  running **Tokio runtime context** — CQLite driven from a Rust async host — the
+  cleanup is skipped rather than risk an unsafe teardown, so unflushed rows stay
+  in the write-ahead log (replayable) instead of being flushed. `close()` is the
+  only path with a guarantee.
+- **A Python `asyncio` event loop is NOT such a context.** These bindings have no
+  asyncio integration, so an asyncio thread has no Tokio runtime and nothing is
+  skipped: a handle collected there runs the full flush + fsync with the GIL
+  held, **blocking the event loop** (and up to ~5s more if OpenTelemetry export
+  is enabled and the collector is unreachable). In asyncio code, close handles
+  explicitly — ideally off the loop thread.
+
+A `StreamingIterator` that outlives its `Database` is **unaffected** by the
+handle being collected, for both read-only and writable handles: it keeps
+yielding its remaining rows. Its rows come from a background task holding its own
+reference to the storage engine, so dropping the handle cannot stop the stream,
+and this cleanup deliberately does not invalidate it. (An explicit `close()`
+still does — that is a user stating intent, and is unchanged; see issue #1462.)
+
 ### Executing Queries
 
 ```python
