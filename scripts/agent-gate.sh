@@ -3129,8 +3129,11 @@ _component_set_probe_inner() {
   # name cannot carry a baseline that is about to be EXECUTED. `--refmap=` is retained so the
   # opportunistic `refs/remotes/origin/*` update stays suppressed.
   local csref; csref="$(_component_set_fetch_ref_name)"
-  err=$(_component_set_bounded 120 git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags \
-          origin "refs/heads/main:$csref" 2>&1); rc=$?
+  # ONE LINE, deliberately: the structural audit in test_agent_gate_component_set.sh reads a
+  # `git` invocation's BOUND from the line the invocation is on, so splitting this across a
+  # `\` continuation makes the audit report the continuation's first word as an unclassified
+  # external program (measured: it reported `origin`). Keep every git call here on one line.
+  err=$(_component_set_bounded 120 git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags origin "refs/heads/main:$csref" 2>&1); rc=$?
   [ "$rc" -eq 0 ] && _CS_FETCH_REF="$csref"
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
