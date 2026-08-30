@@ -63,8 +63,12 @@ export CQLITE_GATE_DISABLE_CAP=1
 
 PASS=0
 FAIL=0
-ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
-bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+SKIP=0
+ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# A skip is VISIBLE and CENSUSED (it counts toward the exact total below), never silent —
+# a case that quietly disappears on some host is a vacuous green by another route.
+skip() { printf 'SKIP - %s\n' "$1"; SKIP=$((SKIP + 1)); }
 
 if [ ! -r "$GATE" ]; then
   printf 'FAIL - agent-gate.sh not readable at %s — nothing to test\n' "$GATE"
@@ -375,47 +379,67 @@ has "case5: no-base log carries the terminal verdict" \
     "$log5" ">>> [file-size] PASS"
 
 # ---------------------------------------------------------------------------
-# Case 7 — LOG PERSISTENCE (#3401 review blocker B). The component now PROMISES a log, so
-# an unverified promise is the original defect one level up: an agent follows the SUMMARY's
-# `logs:` pointer, finds nothing, and is back to hand-computing line counts. If the log
-# cannot be persisted the component must FAIL, must name the PERSISTENCE cause, and must
-# NOT read as a campsite-rule violation (a bare FAIL meaning "my log dir is unwritable"
-# would send the reader hunting for a grown source file that does not exist).
+# Cases 7/8/9 — LOG PERSISTENCE (#3401 review blockers A/B/C). The component now PROMISES
+# a log, so an unverified promise is the original defect one level up: an agent follows the
+# SUMMARY's `logs:` pointer, finds nothing, and is back to hand-computing line counts.
 #
-# The sabotage is surgical and uid-independent: a PATH-shim `mktemp` lets the gate create
-# its LOG_DIR normally and then pre-creates `file-size.log` as a DIRECTORY inside it, so
-# `: >"$log"` cannot succeed while every other LOG_DIR write (tree-identity capture,
-# .result, summary) still works. `chmod 500 $LOG_DIR` was rejected: it is a NO-OP FOR ROOT
-# (the case would silently self-skip in containers — the very "invisible skip" this suite
-# is meant not to have) and it would also break the gate's own tree-identity capture, i.e.
-# fail the run for a reason other than the property under test. `: > <dir>` fails for
-# every uid, so this case needs no skip path at all.
+# Sabotage is surgical, via a PATH-shim `mktemp` that lets the gate create its LOG_DIR
+# normally and then plants something unwritable at `file-size.log` inside it, so every
+# OTHER LOG_DIR write (tree-identity capture, `.result`, the summary, and — the point of
+# blocker B — the persistence-error sibling) still works. Two shapes, selected by
+# FS_SABOTAGE:
+#   dir      — a DIRECTORY: `: >"$log"` fails, so the TRUNCATE check fires. Uid-independent
+#              (`: > <dir>` fails for root too), unlike `chmod 500 $LOG_DIR`, which is a
+#              no-op for root — the case would silently self-skip in containers — and which
+#              would also break the gate's own tree-identity capture, failing the run for a
+#              reason other than the property under test.
+#   devfull  — a SYMLINK TO /dev/full: the truncate SUCCEEDS and every append is rejected
+#              with ENOSPC, so the APPEND-FAILURE COUNTER fires and names its own count.
+#              Also uid-independent.
 #
-# The fixture is a CLEAN tree, so the ratchet's own verdict is PASS and the component's
-# FAIL can only have come from persistence.
+# NOT reproducible hermetically, stated rather than quietly omitted: the pure mid-sequence
+# partial write (first append accepted, later ones rejected, leaving a NON-EMPTY but
+# truncated log). On a real filesystem that needs a quota/ENOSPC boundary hit mid-write or
+# an LD_PRELOAD/FUSE fault injector — neither available to a hermetic shell self-test, and
+# a test-only seam in the gate would be one more thing a real invoker can set. `devfull`
+# covers the counter's trigger (an append the filesystem rejected) and the counter is by
+# construction indifferent to WHICH append failed, so the untested residual is only "some
+# appends succeeded first".
 # ---------------------------------------------------------------------------
 STUBBIN="$tmp/stubbin"
 mkdir -p "$STUBBIN"
 REAL_MKTEMP=$(command -v mktemp 2>/dev/null)
 if [ -z "$REAL_MKTEMP" ]; then
-  bad "case7: no mktemp on PATH — the persistence path CANNOT be exercised (not a skip: this suite needs it)"
+  bad "case7/8/9: no mktemp on PATH — the persistence paths CANNOT be exercised (not a skip: this suite needs it)"
 else
   cat >"$STUBBIN/mktemp" <<STUB
 #!/usr/bin/env bash
 d=\$("$REAL_MKTEMP" "\$@") || exit 1
 case "\$d" in
-  */agent-gate.*) [ -d "\$d" ] && mkdir -p "\$d/file-size.log" ;;
+  */agent-gate.*)
+    if [ -d "\$d" ]; then
+      case "\${FS_SABOTAGE:-}" in
+        dir)     mkdir -p "\$d/file-size.log" ;;
+        devfull) ln -s /dev/full "\$d/file-size.log" ;;
+      esac
+    fi
+    ;;
 esac
 printf '%s\n' "\$d"
 STUB
   chmod +x "$STUBBIN/mktemp"
 
+  # -------------------------------------------------------------------------
+  # Case 7 — unwritable log, CLEAN tree. Ratchet verdict is PASS, so the component's FAIL
+  # can only have come from persistence.
+  # -------------------------------------------------------------------------
   mkrepo persist cqlite-core/src/small.rs 20 0 main; r7="$REPO"
   out7="$tmp/persist.out"
-  run_only_file_size "$r7" "$out7" PATH="$STUBBIN:$PATH"
+  run_only_file_size "$r7" "$out7" PATH="$STUBBIN:$PATH" FS_SABOTAGE=dir
   d7=$(logdir_of "$out7") || bad "case7: the run published no usable 'logs:' dir"
+  sib7="$d7/file-size.persistence-error.log"
 
-  # POSITIVE CONTROL — without this, a FAIL below could have come from anywhere.
+  # POSITIVE CONTROL — without it a FAIL below could have come from anywhere.
   if [ -d "$d7/file-size.log" ]; then
     ok "case7: sabotage in place (file-size.log is a directory, so the component cannot write it)"
   else
@@ -424,10 +448,21 @@ STUB
   assert_verdict "case7: an unpersistable log makes the component FAIL (never a silent PASS)" "$d7" FAIL
   has "case7: stdout names the failure as PERSISTENCE, not a ratchet violation" \
       "$out7" "LOG PERSISTENCE FAILURE"
-  has "case7: stdout names the path that could not be written" \
-      "$out7" "$d7/file-size.log"
+  # The needle is bound to the DIAGNOSTIC'S OWN WORDING (#3401 review blocker D). A bare
+  # "$d7/file-size.log" was satisfiable by bash's own `…: Is a directory` stderr, which
+  # `2>&1` folds into $out7 — measured: the assert survived deleting the line that prints
+  # it. "points at: " exists in no shell error message.
+  has "case7: stdout names the unwritable path IN the diagnostic (not in a shell error)" \
+      "$out7" "points at: $d7/file-size.log"
   has "case7: stdout states the ratchet's OWN verdict in the same breath" \
       "$out7" "The size ratchet itself computed: PASS"
+  # Blocker B: the diagnostic must be reachable from `logs:`, not only from gate.log.
+  assert_log_present "case7: the persistence diagnostic is ALSO written to a LOG_DIR sibling" "$sib7"
+  has "case7: the sibling carries the diagnostic itself" "$sib7" "LOG PERSISTENCE FAILURE"
+  has "case7: the sibling names the log that could not be written" \
+      "$sib7" "points at: $d7/file-size.log"
+  has "case7: stdout names the sibling, so both routes lead to it" \
+      "$out7" "also written to: $sib7"
   if [ ! -s "$out7" ]; then
     bad "case7: no gate stdout captured — the wording check could not run"
   elif grep -Fq -- "change makes over-threshold file(s) larger" "$out7"; then
@@ -435,19 +470,97 @@ STUB
   else
     ok "case7: the persistence FAIL carries no campsite-rule/ratchet wording"
   fi
+
+  # -------------------------------------------------------------------------
+  # Case 8 — the APPEND-FAILURE COUNTER (blocker A1). /dev/full accepts the truncate and
+  # rejects every write, so the truncate check CANNOT fire and the counter must. The
+  # discriminator is the CAUSE TEXT: with only the `[ -s ]` end-state check the message
+  # would read "absent or empty after writing"; the exact rejected-write COUNT can only
+  # come from the counter having incremented per failed append.
+  # -------------------------------------------------------------------------
+  if [ ! -c /dev/full ]; then
+    skip "case8: no /dev/full on this host (macOS/BSD) — the append-rejection shape is unreachable here"
+  else
+    mkrepo appendfail cqlite-core/src/small.rs 20 0 main; r8="$REPO"
+    out8="$tmp/appendfail.out"
+    run_only_file_size "$r8" "$out8" PATH="$STUBBIN:$PATH" FS_SABOTAGE=devfull
+    d8=$(logdir_of "$out8") || bad "case8: the run published no usable 'logs:' dir"
+    sib8="$d8/file-size.persistence-error.log"
+
+    # POSITIVE CONTROL, in two halves: the sabotage is in place AND it has the semantics
+    # the case depends on (truncate succeeds, append rejected). Without the second half a
+    # FAIL could be the truncate check firing, which is case 7's property, not this one.
+    if [ -L "$d8/file-size.log" ] && [ "$(readlink "$d8/file-size.log")" = /dev/full ]; then
+      ok "case8: sabotage in place (file-size.log -> /dev/full)"
+    else
+      bad "case8: sabotage did NOT take effect at '$d8/file-size.log' — the append-failure path was never exercised"
+    fi
+    if ( : >"$d8/file-size.log" ) 2>/dev/null && ! ( printf 'x\n' >>"$d8/file-size.log" ) 2>/dev/null; then
+      ok "case8: control — the truncate SUCCEEDS and the append is REJECTED (so only the counter can fire)"
+    else
+      bad "case8: /dev/full did not behave as required (truncate-ok + append-rejected) — the case proves nothing"
+    fi
+    assert_verdict "case8: rejected appends make the component FAIL" "$d8" FAIL
+    # 3 emitted lines on a clean tree: thresholds, base ref, "no changed .rs files over
+    # threshold". The EXACT count is the oracle — a fabricated or hardcoded flag cannot
+    # produce it, and the `[ -s ]` check cannot produce a count at all.
+    has "case8: the cause names the EXACT number of rejected writes (the counter, not the -s check)" \
+        "$out8" "3 write(s) to it were rejected"
+    assert_log_present "case8: the persistence diagnostic sibling is written here too" "$sib8"
+    has "case8: the sibling carries the rejected-write cause" \
+        "$sib8" "write(s) to it were rejected"
+  fi
+
+  # -------------------------------------------------------------------------
+  # Case 9 — BOTH failures at once (blocker C). A real ratchet violation PLUS an
+  # unwritable log. The old unconditional wording claimed "this is NOT a campsite-rule
+  # violation" while the ratchet had genuinely failed, steering the reader away from a
+  # real growth violation — and the grown-file list died with the unwritable log.
+  # -------------------------------------------------------------------------
+  mkrepo bothfail cqlite-core/src/big.rs 900 950 main; r9="$REPO"
+  out9="$tmp/bothfail.out"
+  run_only_file_size "$r9" "$out9" PATH="$STUBBIN:$PATH" FS_SABOTAGE=dir
+  d9=$(logdir_of "$out9") || bad "case9: the run published no usable 'logs:' dir"
+  sib9="$d9/file-size.persistence-error.log"
+
+  if [ -d "$d9/file-size.log" ]; then
+    ok "case9: sabotage in place alongside a genuine growth violation"
+  else
+    bad "case9: sabotage did NOT take effect at '$d9/file-size.log' — the combined path was never exercised"
+  fi
+  assert_verdict "case9: growth + unpersistable log is a FAIL" "$d9" FAIL
+  has "case9: the diagnostic reports BOTH failures" "$out9" "TWO failures"
+  # The remediation data would otherwise be lost with the log — it must survive in the
+  # sibling, with the REAL numbers.
+  has "case9: the sibling preserves the exact grown-file entry" \
+      "$sib9" "cqlite-core/src/big.rs: 900 -> 950 (limit 800)"
+  has "case9: the sibling preserves the acknowledgement remedy" \
+      "$sib9" "CQLITE_ALLOW_FILE_GROWTH=1"
+  # The lie: a real ratchet violation must never be disclaimed.
+  if [ ! -s "$out9" ]; then
+    bad "case9: no gate stdout captured — the disclaimer check could not run"
+  elif grep -Fq -- "this is NOT a campsite-rule" "$out9"; then
+    bad "case9: a REAL ratchet violation was disclaimed as 'NOT a campsite-rule violation'"
+  else
+    ok "case9: the combined failure does NOT disclaim the real ratchet violation"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
 printf '\n%s\n' "----------------------------------------"
-printf 'file-size component log guard (#3401): %d passed, %d failed\n' "$PASS" "$FAIL"
-# Census, not a floor (#3401 review N4): the assertion count is control-flow-invariant
-# here — every case runs unconditionally — so `PASS + FAIL` must equal it EXACTLY. A floor
-# with slack tolerates silently deleted assertions, which is the vacuous-green shape this
-# suite exists to refuse.
-EXPECTED_CHECKS=42
-if [ "$((PASS + FAIL))" -ne "$EXPECTED_CHECKS" ]; then
-  printf 'FAIL - assertion census mismatch: %d checks ran, expected exactly %d (one was added, deleted or skipped)\n' \
-    "$((PASS + FAIL))" "$EXPECTED_CHECKS"
+printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
+# Census, not a floor (#3401 review N4/N2): every assertion reports exactly one of
+# ok/FAIL/SKIP, so `PASS + FAIL + SKIP` is fixed for a run that reaches the end. A floor
+# with slack tolerates silently deleted assertions — the vacuous-green shape this suite
+# exists to refuse. A mismatch is NOT necessarily a deleted assertion: a fixture or
+# precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
+# remaining asserts and lands here too, so the message names both causes rather than
+# misattributing one as the other.
+EXPECTED_CHECKS=58
+if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
+  printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
+    "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
+  printf '       Either an assertion was added/deleted, or a fixture/precondition failure short-circuited a case.\n'
   exit 1
 fi
 [ "$FAIL" -eq 0 ] || exit 1
