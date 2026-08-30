@@ -116,7 +116,7 @@ fi
 # absence is git-not-a-work-tree, which is a legitimate environment (Jest's own fallback)
 # and is now tested for EXPLICITLY rather than inferred from an empty result -- an empty
 # result is exactly what a failure also produces.
-for _tool in find grep sort awk sed basename cmp git tr; do
+for _tool in find grep sort awk sed basename cmp git tr iconv; do
   command -v "$_tool" >/dev/null 2>&1 || {
     echo "❌ dataset manifest check: required tool '$_tool' not found; cannot judge the corpus" >&2
     exit 2
@@ -315,6 +315,14 @@ _reader_accepts_descriptor() {
   # GREEDY `.*` mirrors the parser's RIGHT-TO-LEFT scan for the format segment, so a
   # pathological `nb-x-big-y-big-Data.db` resolves its id and format identically on both
   # sides. Version and format remain gated below -- widening the ID does not widen those.
+  # VALID UTF-8, because the reader requires it (roborev, post-rebase round 6). Both
+  # discovery sites (`manager_open.rs`) and `SsTableDescriptor::parse` go through
+  # `file_name().and_then(|n| n.to_str())`, which returns None for invalid UTF-8 — the file
+  # is skipped or rejected. `.*` below matches arbitrary BYTES, so without this a
+  # `nb-<0xff>-big-Data.db` was accepted here and unreadable there: a false-PRESENT, and a
+  # table whose only generation had such a name would pass the manifest while giving the
+  # Node suite nothing. Verified in both directions.
+  printf '%s' "$_b" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
   _re_match '^[a-z][a-z]-.*-(big|bti)-Data\.db$' "$_b" || return 1
   _ver=${_b%%-*}
   case "$_fmt" in

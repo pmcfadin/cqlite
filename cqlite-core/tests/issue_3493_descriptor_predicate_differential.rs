@@ -44,6 +44,8 @@
 
 #![cfg(unix)]
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -56,35 +58,40 @@ use cqlite_core::storage::sstable::version_gate::{
 /// Deliberately includes shapes no writer emits (`nb--big`, `nb-x-big-y-big`): "no writer emits
 /// that" is precisely the reasoning that produced the round-56 defect, so the port is held to the
 /// parser's ACTUAL behaviour rather than to the subset someone expects to see on disk.
-const NAMES: &[&str] = &[
+const NAMES: &[&[u8]] = &[
     // ordinary, and the two ID forms real Cassandra 5.0 writes
-    "nb-1-big-Data.db",
-    "nb-6aa08200a25111f0a3fef1a551383fb9-big-Data.db",
-    "nb-6aa08200-a251-11f0-a3fe-f1a551383fb9-big-Data.db",
-    "oa-1-big-Data.db",
-    "da-2-bti-Data.db",
+    b"nb-1-big-Data.db",
+    b"nb-6aa08200a25111f0a3fef1a551383fb9-big-Data.db",
+    b"nb-6aa08200-a251-11f0-a3fe-f1a551383fb9-big-Data.db",
+    b"oa-1-big-Data.db",
+    b"da-2-bti-Data.db",
     // arbitrary ID: parses, and the version gate lets it through (round 56)
-    "nb-foo-big-Data.db",
-    "nb--big-Data.db",
-    "nb-x-big-y-big-Data.db",
+    b"nb-foo-big-Data.db",
+    b"nb--big-Data.db",
+    b"nb-x-big-y-big-Data.db",
     // version/format pairings the gates reject
-    "nb-1-bti-Data.db", // BTI accepts only `da`
-    "nc-1-big-Data.db", // above the #1249 floor, outside the #1297 allowlist
-    "ma-1-big-Data.db", // pre-`na`, out of scope
-    "zz-9-big-Data.db",
+    b"nb-1-bti-Data.db", // BTI accepts only `da`
+    b"nc-1-big-Data.db", // above the #1249 floor, outside the #1297 allowlist
+    b"ma-1-big-Data.db", // pre-`na`, out of scope
+    b"zz-9-big-Data.db",
     // HYPHENATED COMPONENT (round 57): parses, passes the version gate, and its component is
     // "Foo-Data.db" -- a component that merely ENDS IN `-Data.db`, not the Data component. The
     // manifest globs `*-Data.db`, so these names reach the predicate and must be rejected.
-    "nb-1-big-Foo-Data.db",
-    "oa-1-big-Foo-Data.db",
-    "da-2-bti-Foo-Data.db",
+    b"nb-1-big-Foo-Data.db",
+    b"oa-1-big-Foo-Data.db",
+    b"da-2-bti-Foo-Data.db",
     // ... and the same shape for a real non-Data component, which must also not count as a
     // generation even though the file is a legitimate part of one.
-    "nb-1-big-CompressionInfo.db",
-    "nb-1-big-Statistics.db",
+    b"nb-1-big-CompressionInfo.db",
+    b"nb-1-big-Statistics.db",
     // not descriptors at all
-    "junk-Data.db",
-    "Data.db",
+    b"junk-Data.db",
+    b"Data.db",
+    // INVALID UTF-8 (round 6). Both discovery sites and the parser go through
+    // `file_name().and_then(|n| n.to_str())`, which returns None here, so the reader skips
+    // the file — while the shell's `.*` matches arbitrary BYTES. Expressible only as bytes,
+    // which is why the vector set is `&[u8]` rather than `&str`.
+    b"nb-\xff-big-Data.db",
 ];
 
 /// What the READER does for the question the MANIFEST is asking: would it open this file as
@@ -104,8 +111,11 @@ const NAMES: &[&str] = &[
 /// have made the manifest treat a non-Data component as a generation. What was genuinely
 /// wrong was this oracle: it would have called that name "reader-accepted" and reported a
 /// drift that does not exist.
-fn reader_accepts(name: &str) -> bool {
-    match SsTableDescriptor::parse_filename(name) {
+fn reader_accepts(name: &[u8]) -> bool {
+    // Through a PATH, as production does: `parse` calls `file_name().and_then(to_str)`, so an
+    // invalid-UTF-8 basename is rejected there rather than by any charset rule.
+    let p = PathBuf::from(OsStr::from_bytes(name));
+    match SsTableDescriptor::parse(&p) {
         Err(_) => false,
         Ok(d) => {
             let gated = match d.format {
@@ -125,7 +135,7 @@ fn manifest_script() -> PathBuf {
 
 /// What the SHELL PORT does. Sources the two functions out of the committed script rather than
 /// re-implementing them here -- a copy would drift, which is the defect class this test exists for.
-fn shell_accepts(name: &str) -> bool {
+fn shell_accepts(name: &[u8]) -> bool {
     let script = manifest_script();
     // A plain literal, not `format!`: nothing is interpolated, and clippy's `useless_format`
     // is right to say so.
@@ -136,10 +146,25 @@ fn shell_accepts(name: &str) -> bool {
         .arg(program)
         .arg("bash")
         .arg(&script)
-        .arg(name)
+        .arg(OsStr::from_bytes(name))
         .output()
         .expect("failed to run bash");
-    out.status.success()
+    // TRI-STATE, not `status.success()` (roborev, post-rebase round 6). Collapsing every
+    // nonzero status onto "reject" hides an OPERATIONAL failure — exit 2 (the script's own
+    // malfunction code) or 127 (bash could not run) — whenever the reader happens to reject
+    // the same name, which is most of the negative vectors. That is the very
+    // status-collapse family this differential exists to police, in the differential itself.
+    match out.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        other => panic!(
+            "shell predicate exited {other:?} for {:?} — that is a MALFUNCTION (2 = the \
+             script's own tooling-failure code, 127 = bash/sed missing), not a verdict. \
+             stderr: {}",
+            String::from_utf8_lossy(name),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    }
 }
 
 #[test]
@@ -157,7 +182,8 @@ fn shell_predicate_matches_the_reader() {
         let (r, s) = (reader_accepts(name), shell_accepts(name));
         if r != s {
             disagreements.push(format!(
-                "{name}: reader={} shell={} ({})",
+                "{}: reader={} shell={} ({})",
+                String::from_utf8_lossy(name),
                 if r { "ACCEPT" } else { "REJECT" },
                 if s { "ACCEPT" } else { "REJECT" },
                 if s {
