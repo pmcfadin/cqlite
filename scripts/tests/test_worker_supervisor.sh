@@ -4881,6 +4881,47 @@ legacy_lock_drive_provenance() {
     bash -c "$SV_DRIVE_BODY_PROVENANCE" _ "$SUPERVISOR" "$mid" 2>&1
 }
 
+# THE RE-SOURCING DRIVES (#3549, roborev job 214) — the THIRD route to the same bypass. This file is
+# SOURCEABLE (its `main` runs only when executed directly), so a second `source` re-runs every top-level
+# assignment: a bare `SUPERVISOR_LOCK_DERIVED=unknown` therefore RESET the record while leaving the
+# already-derived, now-nonempty `SUPERVISOR_LOCK` in place, and the next resolution called that path
+# caller-provided and skipped the legacy-lock guard. Sticky-per-call (job 209) and sticky-per-shell
+# (round 16) were each correct about the route in front of them; this is the general form.
+#
+# Derived from the same `SV_DRIVE_BODY` by INSERTING one resolution and one re-source, so a case that
+# varies only the re-sourcing cannot drift into a different startup path than the ordinary case exercises.
+SV_DRIVE_BODY_RESOURCE="${SV_DRIVE_BODY/'acquire_lock; '/'supervisor_lock_path; source "$1"; acquire_lock; '}"
+
+# The provenance probe read ACROSS a re-source: resolve, re-source, read, resolve again, read again.
+SV_DRIVE_BODY_RESOURCE_PROVENANCE='source "$1"; p0="$SUPERVISOR_LOCK_DERIVED"; supervisor_lock_path; p1="$SUPERVISOR_LOCK_DERIVED"; l1="$SUPERVISOR_LOCK"; source "$1"; p2="$SUPERVISOR_LOCK_DERIVED"; l2="$SUPERVISOR_LOCK"; supervisor_lock_path; p3="$SUPERVISOR_LOCK_DERIVED"; printf "P0=%s P1=%s P2=%s P3=%s L1=%s L2=%s\n" "$p0" "$p1" "$p2" "$p3" "$l1" "$l2"; exit 0'
+
+# The TOKEN probe: what the record holds immediately after a single source, with whatever value the
+# environment supplied. Only the validation is under test here, so nothing else runs.
+SV_DRIVE_BODY_TOKEN='source "$1"; printf "P=%s\n" "$SUPERVISOR_LOCK_DERIVED"; exit 0'
+
+# legacy_lock_drive_body_script <body> <script> <tmp> <lane> [explicit] — `legacy_lock_drive_body` against
+# a CHOSEN script path, which is what makes a whole-script mutant drivable.
+legacy_lock_drive_body_script() {
+  local body="$1" script="$2" tmp="$3" lane="$4" explicit="${5:-}"
+  if [[ -n "$explicit" ]]; then
+    env TMPDIR="$tmp" SUPERVISOR_LOCK="$explicit" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$body" _ "$script" 2>&1
+  else
+    env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$body" _ "$script" 2>&1
+  fi
+}
+
+# legacy_lock_drive_body_env <body> <tmp> <lane> [VAR=VALUE ...] — a chosen body with EXTRA INHERITED
+# ENVIRONMENT. The environment is the only channel through which a value for `SUPERVISOR_LOCK_DERIVED`
+# can reach the script without editing it (bash imports environment variables as shell variables), so it
+# is how the token validation is observable at all — set in the DRIVER, never as a knob in the script.
+legacy_lock_drive_body_env() {
+  local body="$1" tmp="$2" lane="$3"; shift 3
+  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" "$@" \
+    bash -c "$body" _ "$SUPERVISOR" 2>&1
+}
+
 # legacy_lock_drive_in <cwd> <tmp> <lane> — the same drive from a chosen working directory, which is
 # what makes a RELATIVE (and therefore possibly OPTION-SHAPED) `TMPDIR` testable at all.
 legacy_lock_drive_in() {
@@ -4974,6 +5015,39 @@ sv_mutant_override() {
   printf '%s\n' "$mutated" >>"$out"
   if ! bash -n "$out" 2>/dev/null; then
     fail "mutant-premise ($fn): the mutant override does not parse"
+    return 1
+  fi
+  return 0
+}
+
+# sv_mutant_script <outfile> <from> <to> [expected-hits] — a WHOLE-SCRIPT mutant COPY of the shipped
+# supervisor with one exact literal replaced everywhere it occurs.
+#
+# WHY A SECOND MUTANT MECHANISM (#3549, roborev job 214). `sv_mutant_override` redefines a FUNCTION
+# after sourcing; it cannot express a contrast whose subject is a TOP-LEVEL ASSIGNMENT, because there is
+# nothing to redefine — the statement has already run, and re-running it is precisely the behaviour under
+# test. So this copies the script. Same premise discipline as the override helper: the shipped literal
+# must occur exactly the expected number of times (a source that moved must FAIL, never silently produce
+# a mutant identical to the shipped file), the substitution must actually have applied, no occurrence of
+# the shipped form may survive, and the result must parse. Pure bash — no external rewriter — so it works
+# under the same stripped PATHs the rest of this file exercises.
+sv_mutant_script() {
+  local out="$1" from="$2" to="$3" want="${4:-1}" hits line
+  hits="$(grep -cF -- "$from" "$SUPERVISOR" || true)"
+  if [[ ! "$hits" =~ ^[0-9]+$ ]] || [[ "$hits" != "$want" ]]; then
+    fail "mutant-premise (script): [$from] occurs [$hits] time(s) in $SUPERVISOR, expected $want — the source moved and the mutant below would not be the pre-fix form"
+    return 1
+  fi
+  : >"$out"
+  while IFS= read -r line; do
+    printf '%s\n' "${line//"$from"/"$to"}" >>"$out"
+  done <"$SUPERVISOR"
+  if grep -qF -- "$from" "$out"; then
+    fail "mutant-premise (script): the shipped form [$from] survives in the mutant copy — the substitution did not apply"
+    return 1
+  fi
+  if ! bash -n "$out" 2>/dev/null; then
+    fail "mutant-premise (script): the mutant copy does not parse"
     return 1
   fi
   return 0
@@ -6045,11 +6119,11 @@ test_lock_provenance_is_recorded_once() {
   # flag that started at `no` too, since nothing reads it before `acquire_lock` resolves), so the
   # write-once SHAPE is pinned in source.
   local init_line fnbody
-  init_line="$(grep -c '^SUPERVISOR_LOCK_DERIVED=unknown$' "$SUPERVISOR")"
+  init_line="$(grep -cxF 'SUPERVISOR_LOCK_DERIVED="${SUPERVISOR_LOCK_DERIVED:-unknown}"' "$SUPERVISOR")"
   fnbody="$(sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR")"
   if [[ "$init_line" == "1" ]] && [[ "$fnbody" == *'case "$SUPERVISOR_LOCK_DERIVED" in'* ]] \
      && [[ "$fnbody" == *'yes | no) return 0 ;;'* ]]; then
-    pass "lock-provenance STRUCTURAL: the record initialises to \`unknown\` and \`supervisor_lock_path\` returns without writing once it is either decided value — a write-once record, not an early one"
+    pass "lock-provenance STRUCTURAL: the record initialises to \`unknown\` (non-clobberingly, #3549 job 214) and \`supervisor_lock_path\` returns without writing once it is either decided value — a write-once record, not an early one"
   else
     fail "lock-provenance-structural: init-lines=[$init_line] and the resolver does not bail out on an already-decided provenance — the record is recomputable again"
   fi
@@ -6121,6 +6195,162 @@ test_lock_provenance_is_recorded_once() {
 }
 
 t test_lock_provenance_is_recorded_once
+
+
+# ---------------------------------------------------------------------------
+# Test 47n (#3549, roborev job 214): THE DERIVATION RECORD SURVIVES **RE-SOURCING**.
+#
+# THE DEFECT. This file is sourceable — `main` runs only when it is executed directly — and a second
+# `source` re-runs every top-level assignment. `SUPERVISOR_LOCK_DERIVED=unknown` therefore RESET the
+# provenance to `unknown` while `SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-}"` PRESERVED the path the first
+# resolution had derived. The next resolution then saw a non-empty lock, recorded it as caller-provided,
+# and `supervisor_legacy_lock_guard` skipped: the same concurrency bypass as job 209 F1, reached by a
+# THIRD route.
+#
+# THE ROUTES, IN ORDER, BECAUSE THE SHAPE IS THE LESSON: (1) provenance recomputed from
+# `[[ -n "$SUPERVISOR_LOCK" ]]` at every call; (2) made sticky WITHIN a shell; (3) still reset BY
+# RE-SOURCING. Each fix was right about the route in front of it, so this one is general — a decision,
+# once taken, is taken, whatever re-runs the initialisation.
+#
+# AND THE TOKEN IS VALIDATED, FAIL-CLOSED. Only `yes`/`no`/`unknown` are meaningful; anything else
+# collapses to `unknown`, and `unknown` is the SAFE collapse because the guard skips only on an
+# affirmative `no` — an unrecognised provenance makes the guard RUN. An environment-supplied value is
+# INVOKER-CLASS and out of model (whoever can export a variable can export `SUPERVISOR_LOCK` or edit the
+# script); the environment is used here only because it is the one channel that makes the validation
+# observable at all.
+# ---------------------------------------------------------------------------
+test_lock_provenance_survives_resourcing() {
+  local d tmp lane legacy derived explicit out rc got mut mout mgot init_line initblk tok
+
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549res$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+  explicit="$d/explicit.lock"
+
+  # ---- PREMISE: the re-sourcing drive really is the ordinary drive plus one resolution and one
+  # re-source. A `${var/…}` substitution that matched nothing yields the ORIGINAL string SILENTLY, and
+  # every case below would then measure the ordinary startup path while claiming to measure a re-source.
+  if [[ "$SV_DRIVE_BODY_RESOURCE" != "$SV_DRIVE_BODY" ]] \
+     && [[ "$SV_DRIVE_BODY_RESOURCE" == *'supervisor_lock_path; source "$1"; acquire_lock'* ]] \
+     && [[ "$(grep -cF 'source "$1"' <<<"$SV_DRIVE_BODY_RESOURCE_PROVENANCE")" == "1" ]] \
+     && [[ "$(grep -oF 'source "$1"' <<<"$SV_DRIVE_BODY_RESOURCE_PROVENANCE" | grep -cF 'source')" == "2" ]]; then
+    pass "resource PREMISE: the re-sourcing drive is DERIVED from the ordinary drive and sources the script twice, so the cases below differ from the ordinary path in exactly that"
+  else
+    fail "resource-premise: the re-sourcing drives did not derive as intended (drive-differs=$([[ "$SV_DRIVE_BODY_RESOURCE" != "$SV_DRIVE_BODY" ]] && echo yes || echo no)); the cases below measure the ordinary path"
+  fi
+
+  # ---- (0) STRUCTURAL: the initialisation is NON-CLOBBERING and the token is validated against a
+  # closed set. Behaviourally invisible in the fixed code for the accepted values, so the SHAPE is
+  # pinned in source: a future edit back to a bare assignment reds here as well as behaviourally.
+  init_line="$(grep -cxF 'SUPERVISOR_LOCK_DERIVED="${SUPERVISOR_LOCK_DERIVED:-unknown}"' "$SUPERVISOR")"
+  initblk="$(sed -n '/^SUPERVISOR_LOCK_DERIVED="${SUPERVISOR_LOCK_DERIVED:-unknown}"$/,/^esac$/p' "$SUPERVISOR")"
+  if [[ "$init_line" == "1" ]] \
+     && [[ "$initblk" == *'yes | no | unknown) ;;'* ]] \
+     && [[ "$initblk" == *'*) SUPERVISOR_LOCK_DERIVED=unknown ;;'* ]] \
+     && [[ "$(grep -cxF 'SUPERVISOR_LOCK_DERIVED=unknown' "$SUPERVISOR")" == "0" ]]; then
+    pass "resource STRUCTURAL: the record initialises non-clobberingly (\`\${VAR:-unknown}\`), validates against exactly yes|no|unknown, collapses anything else to \`unknown\`, and no bare clobbering assignment remains at top level"
+  else
+    fail "resource-structural: init-lines=[$init_line] bare-lines=[$(grep -cxF 'SUPERVISOR_LOCK_DERIVED=unknown' "$SUPERVISOR")] block=[$initblk] — the initialisation can still reset an already-decided provenance"
+  fi
+
+  # ---- (1) THE RECORD ITSELF, read ACROSS a re-source. P2 is the whole finding: the value the record
+  # holds after the file has been sourced a second time.
+  got="$(legacy_lock_drive_body_env "$SV_DRIVE_BODY_RESOURCE_PROVENANCE" "$tmp" "$lane")"
+  if [[ "$got" == *"P0=unknown"* ]] && [[ "$got" == *"P1=yes"* ]] && [[ "$got" == *"P2=yes"* ]] \
+     && [[ "$got" == *"P3=yes"* ]] && [[ "$got" == *"L1=$derived"* ]] && [[ "$got" == *"L2=$derived"* ]]; then
+    pass "resource RECORD: unknown -> derived at the first resolution -> STILL \`yes\` after the script is sourced AGAIN, with the derived path preserved [$got]"
+  else
+    fail "resource-record: got=[$got] — expected P0=unknown P1=yes P2=yes P3=yes with the derived path stable at $derived; a re-source reset the provenance"
+  fi
+
+  # ---- (2) END TO END, exactly what the finding asks: derive the path, SOURCE THE SCRIPT AGAIN, and a
+  # present legacy lock must STILL refuse acquisition.
+  mkdir -p "$legacy"
+  rm -rf "$derived"
+  out="$(legacy_lock_drive_body "$SV_DRIVE_BODY_RESOURCE" "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" != *ACQUIRED=* ]] && [[ ! -e "$derived" ]]; then
+    pass "resource REFUSAL: with the path derived and the script then sourced a SECOND time, a present legacy lock still refuses acquisition (no lock acquired)"
+  else
+    fail "resource-refusal: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — re-sourcing must not disable the legacy-lock guard"
+  fi
+
+  # ---- (3) AC4 MUST NOT REGRESS ACROSS A RE-SOURCE: an explicitly-placed lock still skips the check.
+  # The fix must not have bought the guard back by taking the operator's override away.
+  rm -rf "$explicit"
+  out="$(legacy_lock_drive_body "$SV_DRIVE_BODY_RESOURCE" "$tmp" "$lane" "$explicit")"; rc=$?
+  if [[ "$rc" -eq 0 ]] && [[ "$out" == *"ACQUIRED=$explicit"* ]] && [[ "$out" != *"LEGACY GLOBAL supervisor lock"* ]]; then
+    pass "resource AC4: an explicit SUPERVISOR_LOCK still skips the legacy check across a re-source"
+  else
+    fail "resource-ac4: rc=$rc out=[$out] — an explicit lock must still be honoured and the check skipped"
+  fi
+  rm -rf "$explicit"
+
+  # ---- (4) TOKEN VALIDATION. The ACCEPTED tokens pass through unchanged — which is the documented,
+  # UNDEFENDED invoker-class inheritance, recorded rather than resisted — and everything else, empty
+  # included, becomes `unknown`.
+  for tok in yes no unknown; do
+    got="$(legacy_lock_drive_body_env "$SV_DRIVE_BODY_TOKEN" "$tmp" "$lane" "SUPERVISOR_LOCK_DERIVED=$tok")"
+    if [[ "$got" == *"P=$tok"* ]]; then
+      pass "resource TOKEN accepted: an inherited \`$tok\` is preserved (invoker-class, out of model, deliberately not defended) [$got]"
+    else
+      fail "resource-token-accepted($tok): got=[$got] — a meaningful token must survive the validation"
+    fi
+  done
+  for tok in bogus '' Yes NO 'no ' 'no
+yes'; do
+    got="$(legacy_lock_drive_body_env "$SV_DRIVE_BODY_TOKEN" "$tmp" "$lane" "SUPERVISOR_LOCK_DERIVED=$tok")"
+    if [[ "$got" == *"P=unknown"* ]]; then
+      pass "resource TOKEN validated: an unrecognised inherited value [${tok@Q}] collapses to \`unknown\` [$got]"
+    else
+      fail "resource-token-validated(${tok@Q}): got=[$got] — an unrecognised provenance must become \`unknown\`"
+    fi
+  done
+
+  # ---- (4b) AND `unknown` IS FAIL-CLOSED, BEHAVIOURALLY: a garbage inherited provenance leaves the
+  # guard RUNNING, so a present legacy lock still refuses. The collapse direction is the safe one.
+  rm -rf "$derived"
+  out="$(legacy_lock_drive_body_env "$SV_DRIVE_BODY" "$tmp" "$lane" 'SUPERVISOR_LOCK_DERIVED=bogus')"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" != *ACQUIRED=* ]] && [[ ! -e "$derived" ]]; then
+    pass "resource TOKEN fail-closed: an unrecognised provenance makes the guard RUN — the legacy lock still refuses the start (\`unknown\` skips nothing)"
+  else
+    fail "resource-token-failclosed: rc=$rc out=[$out] — an unrecognised provenance must not inherit the permissive branch"
+  fi
+
+  # ---- (5) MUTANT CONTRAST, BOTH DIRECTIONS. Restore the bare clobbering assignment and nothing else.
+  # The re-source case must then show the guard SKIPPED and the supervisor ACQUIRING alongside the legacy
+  # lock (the bypass, measured), while the ORDINARY drive on the SAME mutant still refuses — so the
+  # contrast isolates re-sourcing rather than breaking the guard wholesale.
+  mut="$d/m-resource-supervisor.sh"
+  if sv_mutant_script "$mut" \
+       'SUPERVISOR_LOCK_DERIVED="${SUPERVISOR_LOCK_DERIVED:-unknown}"' \
+       'SUPERVISOR_LOCK_DERIVED=unknown'; then
+    rm -rf "$derived"
+    mout="$(legacy_lock_drive_body_script "$SV_DRIVE_BODY_RESOURCE" "$mut" "$tmp" "$lane")" || true
+    mgot="$(env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$SV_DRIVE_BODY_RESOURCE_PROVENANCE" _ "$mut" 2>&1)"
+    if [[ "$mout" == *ACQUIRED=* ]] && [[ "$mout" != *"LEGACY GLOBAL supervisor lock"* ]] && [[ "$mgot" == *"P2=unknown"* ]] && [[ "$mgot" == *"P3=no"* ]]; then
+      pass "resource MUTANT CONTRAST: with the bare clobbering assignment restored, the re-source RESETS the record (P2=unknown) and the next resolution calls the derived path caller-provided (P3=no), so the guard is SKIPPED and the supervisor acquires alongside the legacy lock — the bypass this fix closes, measured (out=[$mout] probe=[$mgot])"
+    else
+      fail "resource-mutant: out=[$mout] probe=[$mgot] — the pre-fix form must be shown to bypass the guard, or the cases above measure nothing"
+    fi
+    # The OTHER direction: the mutant is not globally broken. Without a re-source the same mutant still
+    # refuses, so case (2)'s red under the mutant is attributable to re-sourcing alone.
+    rm -rf "$derived"
+    mout="$(legacy_lock_drive_body_script "$SV_DRIVE_BODY" "$mut" "$tmp" "$lane")" || true
+    if legacy_refusal_ok "$mout" && [[ "$mout" != *ACQUIRED=* ]]; then
+      pass "resource MUTANT CONTRAST (other direction): the SAME mutant still refuses on the ordinary single-source drive, so the bypass above is attributable to RE-SOURCING and not to a wholesale broken guard"
+    else
+      fail "resource-mutant-control: out=[$mout] — the mutant must still refuse without a re-source, or the contrast does not isolate re-sourcing"
+    fi
+  fi
+
+  rm -rf "$legacy" "$derived" "$mut" "$tmp"
+}
+
+t test_lock_provenance_survives_resourcing
 
 
 

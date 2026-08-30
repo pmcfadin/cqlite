@@ -244,7 +244,36 @@ SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-}"
 # and any retry of the resolution inside one shell. A two-valued flag cannot express "nobody has
 # resolved yet", which is precisely the state the once-only write needs to test for — hence the third
 # value, and hence `supervisor_lock_path` writing this variable ONLY while it holds `unknown`.
-SUPERVISOR_LOCK_DERIVED=unknown
+#
+# AND IT SURVIVES RE-SOURCING (#3549, roborev job 214). Sticky WITHIN a shell was still not enough:
+# this file is sourceable, and a second `source` re-runs this very assignment — so a bare
+# `SUPERVISOR_LOCK_DERIVED=unknown` reset the record to `unknown` while leaving the already-derived,
+# now-nonempty `SUPERVISOR_LOCK` in place. The next resolution then read that path, recorded it as
+# caller-provided, and skipped the legacy-lock guard: the SAME concurrency bypass as job 209 F1 by a
+# THIRD route (recomputed per call -> sticky per shell -> reset per source). `${VAR:-unknown}` makes the
+# initialisation NON-CLOBBERING, so a provenance already DECIDED is preserved however often this file is
+# sourced; a decision, once taken, is taken.
+#
+# THE TOKEN IS VALIDATED, AND `unknown` IS THE FAIL-CLOSED DIRECTION. Only `yes`, `no` and `unknown` are
+# meaningful; anything else (including an empty string, which `:-` already folds in) collapses to
+# `unknown`. That is the SAFE collapse, not merely the tidy one: `supervisor_legacy_lock_guard` skips
+# its check ONLY on an affirmative `no`, so an unrecognised provenance makes the guard RUN. A garbage
+# value can therefore cost an unnecessary refusal, never a silent bypass.
+#
+# A VALUE INHERITED FROM THE ENVIRONMENT IS INVOKER-CLASS AND OUT OF MODEL. This script never exports
+# the variable, so the preserved value is normally one THIS shell decided; but a caller can put
+# `SUPERVISOR_LOCK_DERIVED=no` in the environment and bash will import it. That is not defended here,
+# and deliberately so: anyone who can export a variable into this process can equally export
+# `SUPERVISOR_LOCK` (the documented, supported way to take the placement decision) or edit this file —
+# the documented triage rule puts the invoker outside the threat model. Nor is there a coherence
+# cross-check against `SUPERVISOR_LOCK`: by the time anything could look, that variable is non-empty on
+# both paths, so whether it was empty at the first resolution is UNRECONSTRUCTABLE — a check that
+# guessed would be exactly the re-detection this record replaces.
+SUPERVISOR_LOCK_DERIVED="${SUPERVISOR_LOCK_DERIVED:-unknown}"
+case "$SUPERVISOR_LOCK_DERIVED" in
+  yes | no | unknown) ;;
+  *) SUPERVISOR_LOCK_DERIVED=unknown ;;
+esac
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
