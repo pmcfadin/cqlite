@@ -652,7 +652,10 @@ function memberDrift(className, declared, runtime) {
  * check must consider all of them -- not just classes and functions.
  *
  * @param {string} dtsSource - Full `.d.ts` source text
- * @returns {Set<string>} Declared top-level names
+ * @returns {Map<string, 'callable'|'object'|'value'>} Declared top-level name ->
+ *   the runtime shape that declaration promises: 'callable' for a class or
+ *   function, 'object' for an enum or namespace, 'value' for an exported const
+ *   (any type, so existence is all that can be required).
  */
 function declaredTopLevelNames(dtsSource) {
   const sourceFile = ts.createSourceFile(
@@ -677,7 +680,16 @@ function declaredTopLevelNames(dtsSource) {
   // This is the permissive-branch shape CLAUDE.md warns about: the test asked
   // "does this name appear anywhere in the .d.ts" when the property it needs is
   // "is this name an exported value declaration".
-  const names = new Set();
+  // The map records each name's KIND, because existence alone is not the property
+  // callers depend on. `lib/index.js` re-exports via `const { version } =
+  // nativeBinding`, so if the native export disappears the destructure yields
+  // `undefined` and `module.exports.version` REMAINS AN OWN PROPERTY -- an
+  // ownership test passes while the declared `version()` crashes. An earlier
+  // version of this check required `typeof === 'function'`, which was relaxed to
+  // ownership so an exported `const` would not red; that fixed the const case and
+  // silently dropped callability for classes and functions. Kind is what lets both
+  // be right at once.
+  const names = new Map();
   const isExported = (node) =>
     Boolean(
       node.modifiers &&
@@ -688,23 +700,26 @@ function declaredTopLevelNames(dtsSource) {
     if (!isExported(node)) {
       continue;
     }
-    // Classes, functions, enums and namespaces all emit a runtime value.
-    if (
-      (ts.isClassDeclaration(node) ||
-        ts.isFunctionDeclaration(node) ||
-        ts.isEnumDeclaration(node) ||
-        ts.isModuleDeclaration(node)) &&
-      node.name &&
-      ts.isIdentifier(node.name)
-    ) {
-      names.add(node.name.text);
-      continue;
+    // Classes, functions, enums and namespaces all emit a runtime value, but they
+    // do not all emit the SAME KIND of value, which is what the runtime check
+    // needs to know.
+    if (node.name && ts.isIdentifier(node.name)) {
+      if (ts.isClassDeclaration(node) || ts.isFunctionDeclaration(node)) {
+        // Both are `typeof === 'function'` at runtime.
+        names.set(node.name.text, 'callable');
+        continue;
+      }
+      if (ts.isEnumDeclaration(node) || ts.isModuleDeclaration(node)) {
+        names.set(node.name.text, 'object');
+        continue;
+      }
     }
-    // `export declare const x: T` also emits a value.
+    // `export declare const x: T` also emits a value -- of ANY type, so its only
+    // requirement is that it exists.
     if (ts.isVariableStatement(node)) {
       for (const declaration of node.declarationList.declarations) {
         if (ts.isIdentifier(declaration.name)) {
-          names.add(declaration.name.text);
+          names.set(declaration.name.text, 'value');
         }
       }
     }
@@ -773,16 +788,35 @@ describe('Runtime surface vs index.d.ts', () => {
     // single change.
     const declared = declaredTopLevelNames(dtsContent);
 
-    // Non-vacuity: an empty declared set would satisfy the assert below trivially.
+    // Non-vacuity: an empty declared map would satisfy the assert below trivially.
     expect(declared.size).toBeGreaterThan(0);
-    expect(declared.has('Database')).toBe(true);
+    expect(declared.get('Database')).toBe('callable');
 
-    // `hasOwnProperty`, NOT `typeof === 'function'`: an exported `const` or
-    // namespace object is a legitimate value that is not a function, and
-    // demanding callability here would red on correct code.
-    const phantoms = [...declared]
-      .filter((name) => !Object.prototype.hasOwnProperty.call(runtimeExports, name))
-      .sort();
+    // KIND-AWARE, because ownership alone is not the property callers rely on.
+    // `module.exports.version = undefined` (what a lost native export produces via
+    // the `const { version } = nativeBinding` re-export) is an OWN property, so an
+    // ownership-only test passes while `version()` crashes. Conversely an exported
+    // `const` may legitimately hold a non-callable, so demanding callability
+    // everywhere would red on correct code. Each kind gets the check it warrants.
+    const phantoms = [];
+    for (const [name, kind] of [...declared].sort()) {
+      if (!Object.prototype.hasOwnProperty.call(runtimeExports, name)) {
+        phantoms.push(`${name}: declared (${kind}) but absent from the runtime exports`);
+        continue;
+      }
+      const value = runtimeExports[name];
+      if (kind === 'callable' && typeof value !== 'function') {
+        phantoms.push(
+          `${name}: declared as a class/function but ${
+            value === undefined ? 'undefined' : typeof value
+          } at runtime (calling it would throw)`
+        );
+      } else if (kind === 'object' && (value === null || typeof value !== 'object')) {
+        phantoms.push(
+          `${name}: declared as an enum/namespace but ${typeof value} at runtime`
+        );
+      }
+    }
     expect(phantoms).toEqual([]);
   });
 
