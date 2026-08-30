@@ -395,6 +395,44 @@ const SAMPLE_QUORUM = Math.floor(MEASURE_PASSES / 2) + 1;
 const MAX_MEASURE_ATTEMPTS = 3;
 
 /**
+ * Collect a pass set, RE-COLLECTING up to `maxAttempts` times while it cannot reach the
+ * quorum. Returns `{ samples, attempts }` — the LAST set collected and how many
+ * collections happened, so callers can scale per-iteration accounting by `attempts`.
+ *
+ * This does NOT weaken the verdict: assertUnderBudget still refuses a below-quorum set,
+ * and a real leak makes passes POSITIVE, so a retry can only ever help a set that had
+ * too FEW valid samples — it can never mask a leak.
+ *
+ * MEASURED NEED, post-rebase, 10 runs per path: GC deferral leaves 2-5 of 9 error-path
+ * passes NEGATIVE and 1 run in 10 below the quorum of 5 (the stream path: 0 in 10, 8-9
+ * valid). Erroring on the first attempt would therefore red correct code one run in ten,
+ * and a lane that reds on correct input is the lane people learn to waive. Three attempts
+ * put that at ~1 in 1000 while an instrument that is genuinely broken still ends in the
+ * named hard error rather than a pass. Cost is bounded and paid only when needed (~0.5s
+ * per extra attempt on the path that needs it).
+ *
+ * Extracted and directly tested (round 10): it was the one piece of new load-bearing
+ * logic with no assertion of its own, and in this issue every such piece has turned out
+ * wrong at least once.
+ */
+async function collectWithQuorum(collect, maxAttempts = MAX_MEASURE_ATTEMPTS) {
+  // `attempts` MUST advance every iteration: a variant that failed to increment it was
+  // tried as a RED control and did not produce a wrong verdict — it produced a
+  // NON-TERMINATING loop (the run hung until killed). So the counter is pinned by the
+  // two passing cases asserting `attempts === calls`, not by a red variant.
+  let samples = await collect();
+  let attempts = 1;
+  while (
+    samples.filter((sample) => sample >= 0).length < SAMPLE_QUORUM &&
+    attempts < maxAttempts
+  ) {
+    samples = await collect();
+    attempts += 1;
+  }
+  return { samples, attempts };
+}
+
+/**
  * PURE. Reduce per-pass samples to the statistics the budgets are asserted on,
  * or THROW a named error when the sample set cannot support a verdict at all.
  *
@@ -549,30 +587,7 @@ async function measureGrowth(body, counters) {
     return collected;
   };
 
-  // RE-MEASURE, up to MAX_MEASURE_ATTEMPTS times, when a set cannot reach the quorum
-  // (round 9). This does NOT weaken the verdict: assertUnderBudget still refuses a
-  // below-quorum set, and a real leak makes passes POSITIVE, so a retry can only ever
-  // help a set that had too FEW valid samples — it can never mask a leak.
-  //
-  // MEASURED NEED, post-rebase, 10 runs per path: GC deferral leaves 2-5 of 9
-  // error-path passes NEGATIVE and 1 run in 10 below the quorum of 5 (the stream path:
-  // 0 in 10, 8-9 valid). Erroring on the first attempt would therefore red correct code
-  // one run in ten, and a lane that reds on correct input is the lane people learn to
-  // waive. Three attempts put that at ~1 in 1000 while an instrument that is genuinely
-  // broken still ends in the named hard error rather than a pass. Cost is bounded and
-  // paid only when needed: ~0.5s per extra attempt on the path that needs it.
-  //
-  // The counters keep accumulating across attempts, so the non-vacuity assertions below
-  // multiply by `attempts` rather than assuming one pass set.
-  let samples = await collectPasses();
-  let attempts = 1;
-  while (
-    samples.filter((sample) => sample >= 0).length < SAMPLE_QUORUM &&
-    attempts < MAX_MEASURE_ATTEMPTS
-  ) {
-    samples = await collectPasses();
-    attempts += 1;
-  }
+  const { samples, attempts } = await collectWithQuorum(collectPasses);
   return { samples, attempts, rssGrowth: process.memoryUsage().rss - rssBefore };
 }
 
@@ -661,6 +676,48 @@ describe('leak-budget statistic (pure, issue #1465)', () => {
     }
     expect(STREAM_MEDIAN_CEILING_BYTES).toBeGreaterThan(BUDGET_BYTES);
     expect(ERROR_MEDIAN_GROSS_CEILING_BYTES).toBeGreaterThan(BUDGET_BYTES);
+  });
+
+  test('collectWithQuorum RETRIES a below-quorum set and reports the attempt count', async () => {
+    const sets = [
+      [...neg(6), 1, 2, 3], // 3 valid — below quorum
+      [...neg(4), 1, 2, 3, 4, 5], // 5 valid — at quorum
+    ];
+    let calls = 0;
+    const { samples, attempts } = await collectWithQuorum(async () => sets[calls++]);
+    expect(calls).toBe(2);
+    expect(attempts).toBe(calls); // attempts EQUALS the collection count
+    expect(samples).toBe(sets[1]);
+    expect(() =>
+      assertUnderBudget(BUDGET_SUBJECTS.abandonedStream, samples)
+    ).not.toThrow();
+  });
+
+  test('collectWithQuorum does NOT retry a set that already meets quorum', async () => {
+    let calls = 0;
+    const good = [...neg(4), 8, 16, 24, 32, 40];
+    const { samples, attempts } = await collectWithQuorum(async () => {
+      calls += 1;
+      return good;
+    });
+    expect(calls).toBe(1);
+    expect(attempts).toBe(1);
+    expect(samples).toBe(good);
+  });
+
+  test('three below-quorum sets STOP at maxAttempts and still have no verdict', async () => {
+    let calls = 0;
+    const { samples, attempts } = await collectWithQuorum(async () => {
+      calls += 1;
+      return [...neg(7), 10, 20]; // 2 valid every time
+    });
+    expect(calls).toBe(MAX_MEASURE_ATTEMPTS);
+    expect(attempts).toBe(MAX_MEASURE_ATTEMPTS);
+    // The retained set is STILL refused — retrying never converts "too few samples"
+    // into a pass.
+    expect(() => assertUnderBudget(BUDGET_SUBJECTS.abandonedStream, samples)).toThrow(
+      /below the quorum/
+    );
   });
 
   test('each budget subject carries its OWN ceiling, stream STRICTER than error', () => {
