@@ -564,8 +564,13 @@ expect_reader "11b.14 --run-id + id-less INCOMPLETE summary + FRESH matching bea
 # ...and the ORIGINAL guarantee still holds wherever there is no affirmative evidence: with a STALE
 # beat, or none, an id-less summary cannot be attributed to the requested run.
 mk_beat "$noid2.heartbeat" my-run 4000
-expect_reader "11b.14b id-less summary + STALE beat => UNKNOWN (no affirmative evidence)" \
-  UNKNOWN 4 "summary-no-run-id" -- "$noid2" --run-id my-run
+# Updated by job 216. A stale beat that is well-formed and NAMES this run is not "no evidence" — it
+# is evidence that the run published liveness and stopped, which is exactly what STALLED says. The
+# case's intent (never claim the gate is alive without affirmative evidence) is intact: STALLED is
+# non-certifying, and job 216's prescription reserves UNKNOWN for beats that are absent, malformed or
+# mismatched. The next three cases cover those.
+expect_reader "11b.14b id-less summary + STALE matching beat => STALLED (liveness stopped)" \
+  STALLED 3 "" -- "$noid2" --run-id my-run
 rm -f "$noid2.heartbeat"
 expect_reader "11b.14c id-less summary + NO beat => UNKNOWN" \
   UNKNOWN 4 "summary-no-run-id" -- "$noid2" --run-id my-run
@@ -1202,8 +1207,11 @@ _mk_stale_startup_beat "$TMP/st2.txt.heartbeat" myrun 5000
 expect_reader "11l.7 STALE startup beat + no summary => UNKNOWN, never a false RUNNING" \
   UNKNOWN 4 "no-summary-artifact" -- "$TMP/st2.txt" --run-id myrun
 mk_summary "$TMP/st2.txt" oldrun "PASS"
-expect_reader "11l.8 STALE startup beat + previous summary => UNKNOWN, never a false RUNNING" \
-  UNKNOWN 4 "summary-run-id-mismatch" -- "$TMP/st2.txt" --run-id myrun
+# Updated by job 216: the verdict moved from UNKNOWN to STALLED because the beat now reaches the
+# heartbeat side's confirmation instead of being pre-empted by a summary complaint. This case's
+# PROPERTY — never a false RUNNING — is unchanged and still asserted; STALLED is not RUNNING.
+expect_reader "11l.8 STALE startup beat + previous summary => STALLED, never a false RUNNING" \
+  STALLED 3 "beat-seq did NOT advance" -- "$TMP/st2.txt" --run-id myrun
 # CONTROL: the same beat, fresh, still takes the shortcut.
 _mk_stale_startup_beat "$TMP/st2.txt.heartbeat" myrun 5
 expect_reader "11l.9 control: a FRESH startup beat still shortcuts => RUNNING" \
@@ -1211,8 +1219,13 @@ expect_reader "11l.9 control: a FRESH startup beat still shortcuts => RUNNING" \
 # CONTROL: a fresh beat from ANOTHER host cannot shortcut (no proven shared clock).
 _mk_stale_startup_beat "$TMP/st2.txt.heartbeat" myrun 5
 sed 's/^host: .*/host: someotherbox/' "$TMP/st2.txt.heartbeat" > "$TMP/st2.tmp" && mv "$TMP/st2.tmp" "$TMP/st2.txt.heartbeat"
-expect_reader "11l.10 control: a foreign-host startup beat does not shortcut" \
-  UNKNOWN 4 "summary-run-id-mismatch" -- "$TMP/st2.txt" --run-id myrun
+# Updated by job 216, and consistent with what this suite ALREADY pins: 11g.7 requires a fresh epoch
+# from an unproven clock domain with a static counter to be STALLED, not RUNNING. That is the
+# heartbeat side's considered answer for this exact shape; the old UNKNOWN here came only from the
+# summary refusal pre-empting it. The control's point — a foreign-host beat must not take the RUNNING
+# shortcut — holds.
+expect_reader "11l.10 control: a foreign-host startup beat does not shortcut (STALLED, not RUNNING)" \
+  STALLED 3 "beat-seq did NOT advance" -- "$TMP/st2.txt" --run-id myrun
 
 # A beat that is INVALID must not rescue anything either.
 _mk_startup_beat "$TMP/su.txt.heartbeat" myrun
@@ -1517,6 +1530,39 @@ _beat_bounded "$_dok.heartbeat" okprobe "$TMP/dirok.err" "$_dok.heartbeat"
 grep -q '^run-id: okprobe$' "$_dok.heartbeat" 2>/dev/null \
   && ok "11o.4 control: an ordinary file destination IS still published" \
   || bad "11o.4 control: an ordinary file destination is still published" "no beat at $_dok.heartbeat"
+
+echo "=== section 11p: an unusable summary must not pre-empt the heartbeat (job 216) ==="
+# The MIRROR of job 209. That round made summary refusals defer to a FRESH matching beat (RUNNING).
+# A valid matching beat that had gone STALE still hit UNKNOWN first, so STALLED was UNREACHABLE for a
+# gate reaped during the pre-sentinel tree capture — precisely the startup interval that moving the
+# beater BEFORE the tree capture exists to cover. Fixing one direction and leaving the other is the
+# same half-fix this change has made before, so all four combinations are pinned here together.
+_up="$TMP/unusable.txt"
+printf 'not a gate summary at all\n' > "$_up"
+
+mk_beat "$_up.heartbeat" run-R 4000 20
+expect_reader "11p.1 unusable summary + STALE matching beat => STALLED (reaches the confirmation)" \
+  STALLED 3 "" -- "$_up" --run-id run-R
+mk_beat "$_up.heartbeat" run-R 5 20
+expect_reader "11p.2 unusable summary + FRESH matching beat => RUNNING" \
+  RUNNING 2 "is beating" -- "$_up" --run-id run-R
+rm -f "$_up.heartbeat"
+expect_reader "11p.3 unusable summary + NO beat => UNKNOWN (nothing to be authoritative)" \
+  UNKNOWN 4 "" -- "$_up" --run-id run-R
+mk_beat "$_up.heartbeat" run-OTHER 4000 20
+expect_reader "11p.4 unusable summary + beat for ANOTHER run => UNKNOWN (not our authority)" \
+  UNKNOWN 4 "" -- "$_up" --run-id run-R
+# A MALFORMED beat is not an authority either, however matching its run-id looks.
+{ echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-R"; echo "garbage"
+  echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$_up.heartbeat"
+expect_reader "11p.5 unusable summary + MALFORMED matching beat => UNKNOWN" \
+  UNKNOWN 4 "" -- "$_up" --run-id run-R
+# CONTROL: a VALID TERMINAL summary still wins over a fresh beat, or the deferral has quietly become
+# "the heartbeat always decides" and COMPLETE would be unreachable.
+mk_summary "$TMP/usable.txt" run-R "PASS"
+mk_beat "$TMP/usable.txt.heartbeat" run-R 5 20
+expect_reader "11p.6 control: a valid TERMINAL summary still wins over a fresh beat" \
+  COMPLETE 0 "terminal verdict" -- "$TMP/usable.txt" --run-id run-R
 
 echo
 echo "==== test_gate_liveness.sh: passed=$pass failed=$fail ===="

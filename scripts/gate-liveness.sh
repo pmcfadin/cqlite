@@ -316,6 +316,7 @@ verdict() { # verdict <STATUS> <exit> <detail>
 # that run-id is affirmative evidence it is alive. Without --run-id there is nothing to match
 # against, so the summary remains the only anchor and its absence is still UNKNOWN.
 _startup_beat=no
+_beat_matches=no
 # The snapshot directory must exist before _snap_of can work; it is normally created just before the
 # summary is read, which is AFTER this probe. Creating it here made the difference between this
 # check working and silently never firing.
@@ -333,6 +334,14 @@ if [ -n "$WANT_RUN_ID" ] && [ -f "$HB" ] && [ -r "$HB" ] && _ensure_snap_dir; th
     # answers (UNKNOWN, naming the missing or superseded summary) — the pre-shortcut behaviour, which
     # was safe. That keeps the whole progression apparatus in one place instead of duplicating it.
     if _beat_valid "$_sb_text" && [ "$(_field "$_sb_text" run-id)" = "$WANT_RUN_ID" ]; then
+      # SEPARATE FROM FRESHNESS, and deliberately set BEFORE the host and age checks (roborev job
+      # 216): the beat is structurally valid and names the run the caller asked about. That alone
+      # makes the HEARTBEAT SIDE the right authority whenever the summary is unusable, because a
+      # STALE matching beat must reach the two-sample confirmation and be answered STALLED rather
+      # than pre-empted by a complaint about the summary. Without it, a gate reaped during the
+      # pre-sentinel tree capture could NEVER be reported STALLED — exactly the startup interval that
+      # moving the beater before the tree capture exists to cover.
+      _beat_matches=yes
       _sb_host=$(_field "$_sb_text" host)
       _sb_myhost=$(uname -n 2>/dev/null || echo unknown)
       if [ -n "$_sb_host" ] && [ "$_sb_host" = "$_sb_myhost" ]; then
@@ -370,6 +379,12 @@ _summary_refusal() {  # <what-is-wrong-with-the-summary> <full-cause-for-UNKNOWN
   if [ "$_startup_beat" = yes ]; then
     verdict RUNNING 2 "run '$WANT_RUN_ID' is beating ($_sb_note); $1, which says nothing about this run — it may be a previous run's leftover or a write in progress"
   fi
+  # A VALID beat naming the requested run, but not fresh: the heartbeat side is the authority, and it
+  # owns the two-sample confirmation that distinguishes STALLED from an unmeasurable stall. Returning
+  # 1 defers to it (the caller `|| break`s out of the summary section) rather than duplicating that
+  # logic here — this change has already removed two duplicated grammars (jobs 172, 198) and a third
+  # would be the same mistake.
+  [ "$_beat_matches" = yes ] && return 1
   verdict UNKNOWN 4 "$2"
 }
 if [ ! -f "$SUMMARY" ]; then
@@ -382,12 +397,19 @@ if [ ! -r "$SUMMARY" ]; then
   _summary_refusal "the summary at this path cannot be read" "summary-unreadable; $SUMMARY exists but cannot be read"
 fi
 _ensure_snap_dir || verdict UNKNOWN 4 "no-snapshot-dir; could not create a private temp directory under ${TMPDIR:-/tmp} to read the artifacts consistently"
+# The summary section sits in a `while :; do ... break; done` so a refusal can FALL THROUGH to the
+# heartbeat side below instead of ending the script (roborev job 216). A `while` loop is not a
+# subshell, so every variable this section sets is still visible afterwards; bash has no forward goto
+# and this is the idiomatic substitute. `_summary_refusal_or_defer` breaks out when the beat is the
+# better authority, and otherwise never returns at all.
+_summary_refusal_or_defer() { _summary_refusal "$@"; }
+while :; do
 _SUM_SNAP=$(_snap_of "$SUMMARY" summary) || _SUM_SNAP=""
 if [ -z "$_SUM_SNAP" ]; then
-  _summary_refusal "the summary at this path could not be snapshotted" "summary-unsnapshotable; could not take a private copy of $SUMMARY to read it consistently (no writable temp dir, or the file vanished)"
+  _summary_refusal_or_defer "the summary at this path could not be snapshotted" "summary-unsnapshotable; could not take a private copy of $SUMMARY to read it consistently (no writable temp dir, or the file vanished)" || break
 fi
 if _has_nul "$_SUM_SNAP"; then
-  _summary_refusal "the summary at this path contains NUL bytes" "summary-contains-nul; $SUMMARY holds NUL bytes, the signature of two writers interleaving on one path (#2874 requires concurrent gates to use distinct summary paths) — its fields cannot be attributed to a single run"
+  _summary_refusal_or_defer "the summary at this path contains NUL bytes" "summary-contains-nul; $SUMMARY holds NUL bytes, the signature of two writers interleaving on one path (#2874 requires concurrent gates to use distinct summary paths) — its fields cannot be attributed to a single run" || break
 fi
 SUM_TEXT=$(_slurp "$_SUM_SNAP")
 # Settle-retry: incomplete framing may mean we caught a write in progress. Re-SNAPSHOT once and
@@ -414,7 +436,7 @@ _n_end=$(printf '%s\n' "$SUM_TEXT" | grep -cE '^==== END AGENT-GATE( LITE| DELTA
 _n_res=$(printf '%s\n' "$SUM_TEXT" | grep -c '^RESULT: ')
 _n_rid=$(printf '%s\n' "$SUM_TEXT" | grep -c '^run-id: ')
 if [ "$_n_start" -gt 1 ] || [ "$_n_end" -gt 1 ] || [ "$_n_res" -gt 1 ] || [ "$_n_rid" -gt 1 ]; then
-  _summary_refusal "the summary at this path is not one single block" "summary-not-a-single-block; found $_n_start openers / $_n_rid run-id / $_n_res RESULT / $_n_end closers — more than one of any means the file holds fragments of more than one write, so no field can be attributed to a single run"
+  _summary_refusal_or_defer "the summary at this path is not one single block" "summary-not-a-single-block; found $_n_start openers / $_n_rid run-id / $_n_res RESULT / $_n_end closers — more than one of any means the file holds fragments of more than one write, so no field can be attributed to a single run" || break
 fi
 # EXACTLY ONE run-id, whether or not the caller named a run (roborev job 199, Medium). Duplicates
 # were already fatal; ZERO was not, so an unbound reader accepted a terminal verdict from a block
@@ -423,7 +445,7 @@ fi
 # cannot be assigned to anything. (My own audit of what backs COMPLETE said "run-id bound", which
 # was only true when --run-id was supplied; this makes the claim unconditional.)
 if [ "$_n_rid" -eq 0 ]; then
-  _summary_refusal "the summary at this path carries no run-id" "summary-no-run-id-at-all; $SUMMARY carries no 'run-id:' line, so nothing in it can be attributed to a run — every summary the gate writes has one"
+  _summary_refusal_or_defer "the summary at this path carries no run-id" "summary-no-run-id-at-all; $SUMMARY carries no 'run-id:' line, so nothing in it can be attributed to a run — every summary the gate writes has one" || break
 fi
 # The closer must MATCH THE OPENER'S DIALECT, and the elements must be IN ORDER (roborev job
 # 172, Medium). Counting "some opener" and "some closer" independently accepted a LITE opener
@@ -483,13 +505,13 @@ if [ -z "$_order_bad" ] && [ -n "$_rid_ln" ] && [ -n "$_res_ln" ] && [ "$_rid_ln
 fi
 
 if [ -z "$_open_ln" ]; then
-  _summary_refusal "the summary at this path is not a readable gate block" "summary-no-opener; $SUMMARY has no '==== AGENT-GATE … SUMMARY ====' opener, so it is not a gate summary block and none of its fields can be attributed to a run"
+  _summary_refusal_or_defer "the summary at this path is not a readable gate block" "summary-no-opener; $SUMMARY has no '==== AGENT-GATE … SUMMARY ====' opener, so it is not a gate summary block and none of its fields can be attributed to a run" || break
 fi
 if [ "$_n_end" -gt 0 ] && [ -z "$_close_ln" ]; then
-  _summary_refusal "the summary at this path splices markers from two modes" "summary-marker-dialect-mismatch; the block opens with '$_open_txt' but its closer is a DIFFERENT mode (no matching '$_want_close') — an opener and closer from different modes are fragments of two writes, not one block"
+  _summary_refusal_or_defer "the summary at this path splices markers from two modes" "summary-marker-dialect-mismatch; the block opens with '$_open_txt' but its closer is a DIFFERENT mode (no matching '$_want_close') — an opener and closer from different modes are fragments of two writes, not one block" || break
 fi
 if [ -n "$_order_bad" ]; then
-  _summary_refusal "the summary at this path has out-of-order fields" "summary-out-of-order; $_order_bad — these are not one ordered block, so no field can be attributed to a single write"
+  _summary_refusal_or_defer "the summary at this path has out-of-order fields" "summary-out-of-order; $_order_bad — these are not one ordered block, so no field can be attributed to a single write" || break
 fi
 
 SUM_RUN_ID=$(_field "$SUM_TEXT" run-id)
@@ -513,10 +535,10 @@ if [ -n "$WANT_RUN_ID" ] && [ "$_startup_beat" = yes ] && [ -n "$SUM_RUN_ID" ] \
 fi
 if [ -n "$WANT_RUN_ID" ]; then
   if [ -z "$SUM_RUN_ID" ]; then
-    _summary_refusal "the summary at this path carries no run-id" "summary-no-run-id; $SUMMARY carries no 'run-id:' line, so it cannot be attributed to run '$WANT_RUN_ID'"
+    _summary_refusal_or_defer "the summary at this path carries no run-id" "summary-no-run-id; $SUMMARY carries no 'run-id:' line, so it cannot be attributed to run '$WANT_RUN_ID'" || break
   fi
   if [ "$SUM_RUN_ID" != "$WANT_RUN_ID" ]; then
-    _summary_refusal "the summary at this path belongs to a different run" "summary-run-id-mismatch; $SUMMARY carries run-id '$SUM_RUN_ID', not '$WANT_RUN_ID' — a live peer owns that path"
+    _summary_refusal_or_defer "the summary at this path belongs to a different run" "summary-run-id-mismatch; $SUMMARY carries run-id '$SUM_RUN_ID', not '$WANT_RUN_ID' — a live peer owns that path" || break
   fi
 fi
 RESULT_LINE=$(printf '%s\n' "$SUM_TEXT" | grep -m1 '^RESULT: ' || true)
@@ -597,14 +619,14 @@ case "$RESULT_TOKEN" in
           # that HAS an answer. Job 206's real defect — the overclaiming diagnostic — is fixed by
           # saying what is actually known and nothing more. An ordering field could rescue the
           # permissive branch, but that is a new artifact contract, not a bug fix.
-          _summary_refusal "the summary and the heartbeat name different runs" "summary-foreign-run; the summary carries a terminal verdict for run '$SUM_RUN_ID' while the heartbeat beside it names run '$_hb_rid_peek'. These two files describe DIFFERENT runs, and nothing in either says which is current: a heartbeat outlives the run that wrote it, so the foreign beat may be a newer run that has not replaced the summary yet OR an older leftover, and its age cannot tell those apart. Refusing to report one run's verdict as another's. Pass --run-id to name the run you mean."
+          _summary_refusal_or_defer "the summary and the heartbeat name different runs" "summary-foreign-run; the summary carries a terminal verdict for run '$SUM_RUN_ID' while the heartbeat beside it names run '$_hb_rid_peek'. These two files describe DIFFERENT runs, and nothing in either says which is current: a heartbeat outlives the run that wrote it, so the foreign beat may be a newer run that has not replaced the summary yet OR an older leftover, and its age cannot tell those apart. Refusing to report one run's verdict as another's. Pass --run-id to name the run you mean." || break
         fi
       fi
     fi
     # Distinguish the two shapes rather than blaming the wrong one: NO closer at all is a
     # truncated write; a closer of a DIFFERENT dialect is two fragments spliced together.
     if [ "$_n_end" -eq 0 ]; then
-      _summary_refusal "the summary at this path was cut short mid-write" "summary-truncated; '$RESULT_LINE' is present but the closing '==== END AGENT-GATE … SUMMARY ====' marker is not — the write was cut short (kill or ENOSPC) and will never complete, so this verdict was never published"
+      _summary_refusal_or_defer "the summary at this path was cut short mid-write" "summary-truncated; '$RESULT_LINE' is present but the closing '==== END AGENT-GATE … SUMMARY ====' marker is not — the write was cut short (kill or ENOSPC) and will never complete, so this verdict was never published" || break
     fi
     # (a mismatched dialect and out-of-order fields were already refused above, for every
     # path; only truncation is specific to believing a terminal verdict.)
@@ -614,6 +636,9 @@ case "$RESULT_TOKEN" in
   *)
     verdict UNKNOWN 4 "unrecognised-result; verdict token '$RESULT_TOKEN' (from '$RESULT_LINE') is not a value this reader knows" ;;
 esac
+
+  break
+done
 
 # ---- the heartbeat side: affirmative liveness, or an affirmative death ----------
 if [ ! -f "$HB" ]; then

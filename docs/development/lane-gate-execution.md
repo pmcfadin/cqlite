@@ -642,6 +642,37 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### Fixing one direction and leaving its mirror — twice
+
+Job 209 made a summary refusal defer to a **fresh** matching beat, so an unreadable summary could no
+longer make the launcher kill a healthy gate. Job 216 found the other half of the same door: a valid
+matching beat that had gone **stale** still hit `UNKNOWN` before reaching the two-sample confirmation,
+so `STALLED` was **unreachable** for a gate reaped during the pre-sentinel tree capture — the very
+interval that moving the beater *before* the tree capture exists to cover. The ordering change and the
+verdict it was meant to enable had been decoupled without anyone noticing.
+
+That is the second instance of this shape here. The first was the age branch: job 206's fix treated a
+provably stale beat as an older leftover, and job 208 showed staleness establishes no ordering. Both
+times the reviewer named one direction, the fix addressed exactly that direction, and the symmetric
+case stayed broken.
+
+**The habit that follows is specific, not a resolution to be careful:** when a change makes condition
+X defer to evidence Y, ask immediately what happens when Y is *present but degraded* — stale, foreign,
+malformed, unmeasurable — and pin every one of those in the same commit. Section 11p does this with
+five beat shapes plus a control that a valid terminal summary still wins; without that control the
+deferral could quietly become "the heartbeat always decides" and `COMPLETE` would be unreachable.
+
+Two things about the implementation are worth keeping. The refusal **defers** to the existing
+heartbeat section via a `while :; do … break; done` forward jump (not a subshell, so every variable
+the summary section sets stays visible) rather than duplicating the confirmation logic into the
+refusal helper — jobs 172 and 198 both existed to *remove* duplicated grammars from this codebase, and
+a third would have been the same mistake with a new number. And three existing cases legitimately
+changed verdict from `UNKNOWN` to `STALLED`; what settled that was not the new code's own reasoning
+but **`11g.7`, which already pinned** a fresh epoch from an unproven clock domain with a static counter
+as `STALLED`. The heartbeat side's answer was this suite's considered position all along; the old
+`UNKNOWN` was purely the pre-emption. When your change makes existing tests fail, look for a test that
+independently corroborates the new behaviour before concluding the old ones were wrong.
+
 ### One shape, three times: a value I controlled on one path arrived by another
 
 Worth stating as a family rather than three anecdotes, because each fix looked complete on its own
