@@ -9,6 +9,13 @@
 # silently overwrote the marker. NO fixture in the corpus declares such a field,
 # so the defect had no test subject. This script generates one.
 #
+# The `collide`/`collide_twin` types ALSO declare a field named `"__proto__"`:
+# the same class one layer down, in JavaScript's object model. Assigning a
+# property named `__proto__` on a plain object reaches `Object.prototype`'s
+# inherited ACCESSOR — a string value is discarded, a null value replaces the
+# prototype — so the Node binding builds its `fields` object with a NULL
+# PROTOTYPE and this field is the subject that proves it (roborev R1-1 on #3504).
+#
 # CASSANDRA-WRITTEN, NOT CQLITE-WRITTEN. Deliberate, for two reasons beyond the
 # usual round-trip warning: (1) a Cassandra-written fixture additionally proves
 # the DECODER can produce such a UDT at all, which a hand-constructed in-memory
@@ -174,8 +181,8 @@ flush_ks() {
 # All INSERTs use an explicit USING TIMESTAMP 1000 (see T_FIXED above).
 #
 #   id 1 — the collision subject, everything populated:
-#           c   = collide with BOTH colliding fields + real_field (the rendered
-#                 UDT value — site 3)
+#           c   = collide with BOTH colliding fields, the `"__proto__"` field and
+#                 real_field (the rendered UDT value — site 3)
 #           p   = plain (NO colliding field) — the contrast value
 #           cm  = map<frozen<collide>, int>, NON-FROZEN. MEASURED: CQLite decodes
 #                 a multicell map's cell-path key as `Value::Blob`, never
@@ -199,21 +206,26 @@ flush_ks() {
 #   id 2 — contrast row: `p` only. Every other column is absent, so a consumer sees
 #           a row where a UDT is NULL and the plain UDT has no `_type` field at
 #           all (reading `_type` out of the field namespace must fail here).
-#   id 3 — null-field row: `c` with a NULL `"_type"` field but a populated
-#           `"_keyspace"` field, pinning that the absent-field encoding of a
-#           frozen UDT is orthogonal to the collision.
+#   id 3 — null-field row: `c` with a NULL `"_type"` field and a NULL
+#           `"__proto__"` field but a populated `"_keyspace"` field, pinning that
+#           the absent-field encoding of a frozen UDT is orthogonal to the
+#           collision. The null `"__proto__"` is the SECOND, harsher half of the
+#           JavaScript prototype hazard: an ordinary assignment of a STRING to
+#           `__proto__` is a silent no-op, but assigning NULL REPLACES the
+#           object's prototype — so this row is what distinguishes "the field
+#           vanished" from "the object was mutated" (roborev R1-1 on #3504).
 # ----------------------------------------------------------------------------
 insert_rows() {
   log "=== $TABLE: inserting rows (USING TIMESTAMP $T_FIXED) ==="
   cql "INSERT INTO $TABLE (id, c, p, cm, tm, fcm, ftm, fs) VALUES (
          1,
-         {\"_type\": 'user-supplied-type', \"_keyspace\": 'user-supplied-keyspace', real_field: 42},
+         {\"_type\": 'user-supplied-type', \"_keyspace\": 'user-supplied-keyspace', \"__proto__\": 'user-supplied-proto', real_field: 42},
          {label: 'no-colliding-field', real_field: 7},
-         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 1},
-         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 2},
-         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 3},
-         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 4},
-         {{\"_type\": 'set-member-type', \"_keyspace\": 'set-member-keyspace', real_field: 200}}
+         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', \"__proto__\": 'key-proto-marker', real_field: 100}: 1},
+         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', \"__proto__\": 'key-proto-marker', real_field: 100}: 2},
+         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', \"__proto__\": 'key-proto-marker', real_field: 100}: 3},
+         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', \"__proto__\": 'key-proto-marker', real_field: 100}: 4},
+         {{\"_type\": 'set-member-type', \"_keyspace\": 'set-member-keyspace', \"__proto__\": 'set-member-proto', real_field: 200}}
        ) USING TIMESTAMP $T_FIXED"
   cql "INSERT INTO $TABLE (id, p) VALUES (
          2,
@@ -221,7 +233,7 @@ insert_rows() {
        ) USING TIMESTAMP $T_FIXED"
   cql "INSERT INTO $TABLE (id, c) VALUES (
          3,
-         {\"_type\": null, \"_keyspace\": 'keyspace-field-only', real_field: 0}
+         {\"_type\": null, \"_keyspace\": 'keyspace-field-only', \"__proto__\": null, real_field: 0}
        ) USING TIMESTAMP $T_FIXED"
 }
 
@@ -363,11 +375,13 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # The colliding field name must actually be present in the sstabledump golden;
   # otherwise the fixture does not carry the subject of issue #3504.
   golden=$(find "$OUT_DIR/$KEYSPACE" -name "*-Data.db.jsonl" | head -1)
-  if ! grep -q '"_type"' "$golden"; then
-    fail "sstabledump golden $golden does not mention a \"_type\" column/field; \
-the colliding UDT field did not survive into the fixture."
-  fi
-  log "  golden mentions the colliding \"_type\" field (OK)"
+  for collide_field in '"_type"' '"__proto__"'; do
+    if ! grep -q -- "$collide_field" "$golden"; then
+      fail "sstabledump golden $golden does not mention the $collide_field \
+column/field; that colliding UDT field did not survive into the fixture."
+    fi
+    log "  golden mentions the colliding $collide_field field (OK)"
+  done
 
   log "=== $KEYSPACE generation COMPLETE ==="
   log "Fixture root (an sstables root): $OUT_DIR"

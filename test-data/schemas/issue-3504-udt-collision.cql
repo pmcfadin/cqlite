@@ -10,10 +10,10 @@
 -- field, so the defect had no test subject at all.
 --
 -- This schema declares one. The field names REQUIRE quoting: an unquoted CQL
--- identifier must start with a letter, so `"_type"` / `"_keyspace"` are only
--- expressible as quoted identifiers (CQLite's `parse_create_type` accepts
--- them — `identifier` in cqlite-core/src/schema/cql_parser.rs handles the
--- quoted form).
+-- identifier must start with a letter, so `"_type"` / `"_keyspace"` /
+-- `"__proto__"` are only expressible as quoted identifiers (CQLite's
+-- `parse_create_type` accepts them — `identifier` in
+-- cqlite-core/src/schema/cql_parser.rs handles the quoted form).
 --
 -- WRITTEN BY CASSANDRA, NOT BY CQLITE. The fixture is produced by
 -- test-data/scripts/generate-issue-3504-udt-collision.sh (cqlsh INSERT +
@@ -29,8 +29,9 @@
 -- hidden by an env var.
 --
 -- Types:
---   * collide      — declares BOTH colliding field names plus a normal field.
---   * collide_twin — the SAME three field names as `collide` under a DIFFERENT
+--   * collide      — declares the two colliding field names, the JavaScript
+--                    prototype-accessor name `"__proto__"`, and a normal field.
+--   * collide_twin — the SAME four field names as `collide` under a DIFFERENT
 --                    type name, so two values with IDENTICAL fields must stay
 --                    DISTINCT once type identity moves out of the field
 --                    namespace (the hashable-projection property, site 4).
@@ -86,19 +87,35 @@ USE test_udt_collision;
 
 -- ── User-Defined Types ──────────────────────────────────────────────────────
 
--- collide: the subject. Both field names collide with the metadata keys the
--- bindings used to inject into the same namespace as the fields.
+-- collide: the subject. `"_type"`/`"_keyspace"` collide with the metadata keys
+-- the bindings used to inject into the same namespace as the fields.
+--
+-- `"__proto__"` is the SAME CLASS one layer down, in JavaScript's own object
+-- model rather than in ours: an ordinary property assignment on a plain object
+-- invokes `Object.prototype`'s inherited `__proto__` ACCESSOR instead of
+-- creating a field, so a string value is silently discarded and a null value
+-- REPLACES the object's prototype. A field named `__proto__` is legal CQL via a
+-- quoted identifier exactly as `"_type"` is, so a fix that gave the fields their
+-- own namespace while still building it by assignment would have closed the
+-- reported instance and left the class open. `fields` is therefore built with a
+-- NULL PROTOTYPE, and this field is what proves it (roborev R1-1 on #3504).
 CREATE TYPE IF NOT EXISTS collide (
     "_type"     text,
     "_keyspace" text,
+    "__proto__" text,
     real_field  int
 );
 
 -- collide_twin: identical FIELD SHAPE, different TYPE NAME. Two values with the
--- same field values must not compare or hash equal.
+-- same field values must not compare or hash equal. The field list MUST stay
+-- identical to `collide`'s — including `"__proto__"` — because the
+-- same-fields/different-type distinctness test asserts equal field mappings as
+-- its own precondition, so dropping a field here would silently weaken what
+-- that test proves rather than fail it.
 CREATE TYPE IF NOT EXISTS collide_twin (
     "_type"     text,
     "_keyspace" text,
+    "__proto__" text,
     real_field  int
 );
 
