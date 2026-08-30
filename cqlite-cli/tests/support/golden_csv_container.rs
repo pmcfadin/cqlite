@@ -13,6 +13,36 @@
 //! distinction the golden's JSON array cannot express. Nothing here is derived
 //! from CQLite's own output.
 //!
+//! # Why this is not redundant with the JSON lane — MEASURED, not argued
+//!
+//! The standing objection to this module is that the JSON lane already compares
+//! container VALUES at full strictness, so all CSV adds is a rendering no oracle
+//! governs (see the grammar section below) — on which reading the whole decoder
+//! could become a declared gap and this file could be deleted. The objection is
+//! sound in outline and FALSE in fact, so the measurement is recorded here rather
+//! than left to be retaken:
+//!
+//! `test_signed_coll.signed_special_collections` declares `sd SET<DECIMAL>` and
+//! `sf SET<DOUBLE>`, and BOTH are format-scoped declared gaps of the JSON lane —
+//! `sf` because JSON has no literal for `Infinity`/`NaN`, `sd` because the egress
+//! renders a `decimal` as a JSON string where `cassandra-5.0.8`
+//! `DecimalType.toJSONString` emits an unquoted number. The table has no other
+//! non-key column, so in JSON that case compares its `id` and nothing else. The
+//! CSV lane is therefore the ONLY place any oracle checks how CQLite renders a
+//! `set<double>` carrying `-Infinity`/`NaN` or a `set<decimal>` carrying exact
+//! 30-digit unscaled text — against the `sstabledump` golden, member by member.
+//!
+//! Measured across the whole corpus when this was written: 46 container cells
+//! value-compared under CSV against 45 under JSON, and the two lanes' sets are
+//! NOT nested either way — CSV compares those 2 cells JSON declares away, JSON
+//! compares 1 (`nb_empty_collections`'s `fs`) that CSV refuses. So neither lane
+//! subsumes the other, and deleting this one would drop two container columns to
+//! zero coverage in any lane.
+//!
+//! The counts will drift as the corpus grows; the STRUCTURAL fact is the durable
+//! one — a format-scoped gap on a container column moves that column's only
+//! coverage into the other format's lane.
+//!
 //! # The grammar, and what pinning it is (and is not) worth
 //!
 //! `cqlite_core::util::value_fmt::ValueFormatter` renders a container as
