@@ -478,17 +478,64 @@ chmod +x "$ticker"
 wd_outer=""
 wd_timeout_bin=$(command -v timeout 2>/dev/null || true)
 [ -n "$wd_timeout_bin" ] && wd_outer="$wd_timeout_bin 30"
+# DECIDE THE SKIP BEFORE INVOKING (roborev job 210, finding 3b). The first cut ran the
+# bounded probe and only then checked whether an outer bound existed — so on precisely the
+# hosts with no `timeout`, a broken watchdog HUNG THE SUITE instead of skipping the case.
+# The safeguard has to be in place before the thing it guards runs.
+if [ -z "$wd_outer" ]; then
+  echo "skip - 3544-bound-enforced: no host 'timeout' to bound this case from the OUTSIDE; letting the mechanism under test bound its own test would be circular"
+  echo "skip - 3544-bound-grandchild: same precondition (no outer host bound available)"
+else
 wd_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
                 --component-set-bounded-run 1 "$ticker" 2>/dev/null | sed -n 's/^RC: //p' )
 ticks_at_return=$(wc -l <"$tick" | tr -d ' ')
 sleep 3
 ticks_later=$(wc -l <"$tick" | tr -d ' ')
-if [ -z "$wd_outer" ]; then
-  echo "skip - 3544-bound-enforced: no host 'timeout' to bound this case from the OUTSIDE; letting the mechanism under test bound its own test would be circular"
-elif [ "$wd_rc_line" = 124 ] && [ "$ticks_later" = "$ticks_at_return" ]; then
+if [ "$wd_rc_line" = 124 ] && [ "$ticks_later" = "$ticks_at_return" ]; then
   ok "3544-bound-enforced: the bash watchdog bounds a hanging command (rc 124) and leaves no live child"
 else
   bad "3544-bound-enforced: expected rc 124 and a dead child (rc='$wd_rc_line' ticks $ticks_at_return -> $ticks_later)"
+fi
+
+# THE GRANDCHILD CASE (roborev job 210, finding 2). A bound that signals only its direct
+# child is not a bound: the grandchild survives, keeps the command-substitution pipe open,
+# and the "bounded" call never returns. Measured before the fix: direct-child TERM left the
+# grandchild ticking 2 -> 5; the process-group signal froze it at 2 -> 2. The parent here
+# spawns a ticker and `wait`s, which is the shape of a git transport helper.
+gtick="$tmp/grandchild-tick.txt"
+gparent="$tmp/grandchild-parent.sh"
+{ printf '#!/bin/sh\n'
+  printf 'sh -c '"'"'while : ; do echo tick >> "%s"; sleep 1; done'"'"' &\n' "$gtick"
+  printf 'wait\n'
+} >"$gparent"
+chmod +x "$gparent"
+: >"$gtick"
+g_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+               --component-set-bounded-run 1 "$gparent" 2>/dev/null | sed -n 's/^RC: //p' )
+g_at_return=$(wc -l <"$gtick" | tr -d ' ')
+sleep 3
+g_later=$(wc -l <"$gtick" | tr -d ' ')
+if [ "$g_rc_line" = 124 ] && [ "$g_later" = "$g_at_return" ]; then
+  ok "3544-bound-grandchild: a GRANDCHILD does not outlive the bound (process-group signal), and the call returns"
+else
+  bad "3544-bound-grandchild: expected rc 124 and a dead grandchild (rc='$g_rc_line' ticks $g_at_return -> $g_later)"
+fi
+
+# A HANGING `git` is bounded too — the composition that covers the partial-clone `git show`
+# without a 120-second test: this proves the RUNNER bounds a hanging `git`, and the
+# structural enumeration assert (case 9b) proves `git show` goes THROUGH that runner. Each
+# half is cheap; together they are the property. Asserting it end-to-end would mean waiting
+# out the real 120s bound, and a test nobody will run is not coverage.
+ghang="$tmp/hanging-git.sh"
+{ printf '#!/bin/sh\n'; printf 'exec sleep 300\n'; } >"$ghang"
+chmod +x "$ghang"
+gh_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+                --component-set-bounded-run 1 "$ghang" 2>/dev/null | sed -n 's/^RC: //p' )
+if [ "$gh_rc_line" = 124 ]; then
+  ok "3544-bound-hanging-git: a hanging git-shaped command is bounded (rc 124), not waited on forever"
+else
+  bad "3544-bound-hanging-git: expected rc 124 (got '$gh_rc_line')"
+fi
 fi
 
 # …and with NO mechanism at all the command must NOT RUN. This is the load-bearing half:
@@ -956,7 +1003,13 @@ fi
 # this, a scan that silently stopped matching would report "all sites accounted for" — a
 # clean census of nothing, which is the vacuous pass this whole issue is about.
 ctl_gate="$tmp/census-control-gate.sh"
-sed '0,/^      "\$(_component_set_meta)" \\$/{/^      "\$(_component_set_meta)" \\$/d;}' "$GATE" >"$ctl_gate"
+# Portable FIRST-MATCH deletion. This was `sed '0,/re/{...}'`, whose `0,` address is a GNU
+# EXTENSION that BSD/macOS sed rejects outright (roborev job 210, finding 3) — so this
+# tooling test would have failed on the very macOS hosts the `gtimeout` branch exists to
+# serve. awk with an EXACT string compare is both portable and more precise than the range.
+awk 'BEGIN { done = 0 }
+     { if (!done && $0 == "      \"$(_component_set_meta)\" \\") { done = 1; next }
+       print }' "$GATE" >"$ctl_gate"
 if ! cmp -s "$GATE" "$ctl_gate"; then
   ctl_gaps=$(emit_census "$ctl_gate" | grep -c '^GAP	')
   if [ "$ctl_gaps" -ge 1 ]; then
