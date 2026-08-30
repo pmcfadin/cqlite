@@ -107,6 +107,14 @@
 //!   their FIRST top-level `: `, so a `: ` in a KEY moves the key/value cut (a
 //!   colon inside a VALUE is already correct and is NOT refused), and a `, ` in a
 //!   key splits one entry into two. Both destroy THIS object's entries.
+//! * **VALUE-SEPARATOR: a `, ` inside a map/UDT scalar VALUE.** Entries split at
+//!   every top-level `, ` before the key/value cut is made, so one in a VALUE
+//!   splits one entry into two just as one in a key does — THIS object's entries
+//!   again. Scanning only the KEYS is what made CORRECT output for a golden
+//!   `{"k": "a, b"}` — the rendering `{k: a, b}` — be reported `unparseable`
+//!   rather than refused (review round 10, finding Q2). A lane that reds on
+//!   correct input is the lane agents learn to waive (CLAUDE.md), so this
+//!   direction matters more than the permissive one.
 //!
 //! ## The whole-cell cause ([`cell_refusal`]) — a STRUCTURAL character
 //!
@@ -235,7 +243,7 @@ pub fn node_refusal(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
                     separator_in_member(&text)
                 })
         }
-        Value::Object(fields) => fields.keys().find_map(|key| {
+        Value::Object(fields) => fields.iter().find_map(|(key, value)| {
             // KEY-SEPARATOR. Only a KEY is harmed by `: `: entries are split at
             // their FIRST top-level `: `, so a colon inside a VALUE is already
             // correct.
@@ -245,7 +253,19 @@ pub fn node_refusal(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
                     brief(key)
                 ));
             }
-            separator_in_member(key).map(|why| format!("map/UDT key: {why}"))
+            if let Some(why) = separator_in_member(key) {
+                return Some(format!("map/UDT key: {why}"));
+            }
+            // VALUE-SEPARATOR: a `, ` in a SCALAR value splits one entry into two,
+            // destroying this object's entries exactly as one in a key does. Only
+            // a scalar's, because a nested container's members are split inside
+            // its own brackets and reported at ITS node.
+            if is_scalar(value) {
+                if let Some(why) = separator_in_member(&scalar_text(value)) {
+                    return Some(format!("map/UDT value at key {}: {why}", brief(key)));
+                }
+            }
+            None
         }),
         // A scalar is never refused for itself: the causes above are all about the
         // BODY that holds it, so the container one level up is the node that

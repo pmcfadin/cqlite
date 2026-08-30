@@ -293,6 +293,71 @@ fn an_ambiguous_map_value_does_not_suppress_the_map() {
     assert!(report.diffs[0].contains('y'), "{:?}", report.diffs);
 }
 
+/// A `, ` inside a SCALAR map VALUE, and inside a UDT FIELD: the entry split is
+/// destroyed exactly as it is by a `, ` in a KEY, so the node must be REFUSED —
+/// not reported as a divergence of the CLI.
+///
+/// This is the direction the object scan missed (review round 10, finding Q2): it
+/// asked `, `/`: ` of the KEYS only, so CORRECT output for a golden
+/// `{"k": "a, b"}` — the rendering `{k: a, b}`, which is what `ValueFormatter`
+/// emits — was split into a second entry carrying no `: ` and reported
+/// `unparseable CSV container`. A lane that reds on correct input is the lane
+/// agents learn to waive (CLAUDE.md), so this is the worse half of the two
+/// failure modes.
+///
+/// A `: ` inside a VALUE stays NOT refused and IS compared: entries split at their
+/// FIRST top-level `: `, so a colon in the value is already read correctly.
+#[test]
+fn a_separator_inside_a_scalar_object_value_is_refused_not_called_unparseable() {
+    // The refused NODE is the OBJECT itself, not the entry: what the `, `
+    // destroys is THIS object's entry SPLIT, so the object is the narrowest node
+    // whose decode it ruins (contrast the nested-container case above, where the
+    // cause lives one level down and is named there).
+    for (ddl, column, key, path) in [
+        (
+            "CREATE TABLE t (id int PRIMARY KEY, m map<text, text>);",
+            "m",
+            "k",
+            "m (",
+        ),
+        (
+            "CREATE TYPE holder (f text); \
+             CREATE TABLE t (id int PRIMARY KEY, u frozen<holder>);",
+            "u",
+            "f",
+            "u (",
+        ),
+    ] {
+        let schema = schema_of(ddl, "t");
+        let golden = vec![row(&[("id", json!(1)), (column, json!({key: "a, b"}))])];
+
+        // Exactly the rendering the documented grammar produces for that golden.
+        let report = csv_report(&schema, &golden, &format!("{{{key}: a, b}}"));
+        assert!(
+            report.diffs.is_empty(),
+            "correct output must not be reported as a divergence: {:?}",
+            report.diffs
+        );
+        assert_eq!(report.ambiguous_container_cells, 1);
+        assert!(
+            report.ambiguity_reasons[0].starts_with(path),
+            "the refusal must name the refused node: {:?}",
+            report.ambiguity_reasons
+        );
+
+        // A `: ` in the VALUE is a different matter: the split is unaffected, so
+        // nothing is refused and the value is compared.
+        let golden = vec![row(&[("id", json!(1)), (column, json!({key: "a: b"}))])];
+        let report = csv_report(&schema, &golden, &format!("{{{key}: a: b}}"));
+        assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+        assert_eq!(
+            report.ambiguous_container_cells, 0,
+            "a colon inside a value is decidable, so nothing is refused"
+        );
+        assert_eq!(report.container_cells, 1, "the cell is fully compared");
+    }
+}
+
 /// The JSON lane carries its own structure, so nothing there is ever refused —
 /// the same golden that refuses a member in CSV is fully compared in JSON.
 #[test]
