@@ -159,6 +159,14 @@ exempt:
       the CORPUS is complete rather than that the suite ran — the parity cases derive
       their table set from disk, so a partial extraction is green by omission. The
       multi-platform build matrix is release coverage, not merge-gating.
+      ONE STATE IS EXCLUDED AND NAMED HERE RATHER THAN LEFT TO BE DISCOVERED: under the
+      documented #2078 opt-out (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 with no usable
+      corpus, or an incomplete one), node-bindings SKIPs BEFORE npm ci, so neither the
+      jest suite nor typecheck runs. That is a DECLARED skip — recorded in the gate
+      SUMMARY by name, never a silent pass — but it does mean this exemption's coverage
+      claim holds only for a run with a corpus. Saying so is the whole point of #3493:
+      an exemption is only as true as what the named component actually does, in every
+      state it can be in.
       KEEP THIS ENTRY AND run_node_bindings IN STEP: an exemption that defers to a
       local component is only as true as that component's scope, and #1255's narrowing
       to 1 file in 27 is what made this entry false for ~2 days of a deterministic

@@ -1896,6 +1896,53 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     || bad "normalised-TOC temp files were left in ${TMPDIR:-/tmp}"
 fi
 
+# ---------------------------------------------------------------------------
+# Case 86 (post-rebase round 8, Low): INT/TERM must RE-RAISE, not swallow.
+#
+# A handler that cleans up and RETURNS lets a CANCELLED run carry on — past temp files it
+# has just deleted — and emit a corpus or tooling verdict for work that was interrupted. The
+# handler resets the trap and re-raises, so the script dies with the conventional 130/143.
+#
+# Driven on the trap functions in isolation: the real script finishes in about a second on a
+# warm corpus, so a signal aimed at a full run lands after it has already exited — an earlier
+# attempt "passed" that way while testing nothing.
+#
+# TERM, NOT INT. A NON-INTERACTIVE shell sets SIGINT to IGNORE for its background children,
+# and POSIX says a signal ignored on entry CANNOT be trapped — so the probe could never catch
+# an INT sent from this suite, and the case reported the handler had "swallowed" it. It had
+# not: standalone, INT gives 130 correctly. TERM is not ignored for background jobs, so it
+# tests the same handler through a path this harness can actually drive.
+# ---------------------------------------------------------------------------
+sig_script="$WORK/sig-probe.sh"
+cat >"$sig_script" <<SIGPROBE
+eval "\$(sed -n '/^_TMP_FILES=()/,/^trap ._cleanup_tmp_signal TERM. TERM/p' "$MANIFEST_SRC")"
+f=\$(mktemp "\${TMPDIR:-/tmp}/cqlite-toc-sigcase.XXXXXX"); _register_tmp "\$f"
+printf '%s' "\$f" > "$WORK/sig-path"
+# A LOOP OF SHORT SLEEPS, not one long one: bash defers a trap until the foreground command
+# returns, so a single `sleep 30` outlives the test's `wait` and the handler appears to have
+# swallowed the signal when it has merely not run yet. That is how the first version of this
+# case reported a false failure.
+i=0
+while [ "\$i" -lt 150 ]; do sleep 0.2; i=\$((i + 1)); done
+printf 'REACHED-AFTER-SIGNAL' >> "$WORK/sig-path"
+SIGPROBE
+bash "$sig_script" & sig_pid=$!
+sleep 2
+kill -TERM "$sig_pid" 2>/dev/null
+wait "$sig_pid" 2>/dev/null; sig_rc=$?
+sig_file=$(cat "$WORK/sig-path" 2>/dev/null)
+case "$sig_file" in
+  *REACHED-AFTER-SIGNAL) bad "the TERM handler SWALLOWED the signal; a cancelled run would carry on and emit a verdict" ;;
+  "")                    bad "the signal probe did not run; case 86 proves nothing" ;;
+  *)
+    [ "$sig_rc" = 143 ] \
+      && ok "SIGTERM is re-raised (exit 143), not swallowed" \
+      || bad "SIGTERM gave exit $sig_rc; expected 143 (re-raised)"
+    [ -f "$sig_file" ] \
+      && bad "the registered temp file survived the signal; cleanup did not run" \
+      || ok "the registered temp file is cleaned up before the signal is re-raised" ;;
+esac
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

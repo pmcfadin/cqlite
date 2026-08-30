@@ -28,10 +28,27 @@ SSTABLES="${ROOT}/sstables"
 #
 # A trap is the only cleanup that survives an exit, so registration is the single rule:
 # anything mktemp'd here gets registered on the line it is created.
-_TMP_FILES=""
-_register_tmp() { _TMP_FILES="$_TMP_FILES $1"; }
-_cleanup_tmp() { [ -n "$_TMP_FILES" ] && rm -f $_TMP_FILES; return 0; }
-trap _cleanup_tmp EXIT INT TERM
+# An ARRAY, not a space-separated string: `rm -f $VAR` word-splits, so a TMPDIR containing
+# a space would split one path into fragments -- the real file never removed, and `rm -f`
+# invoked on paths nobody intended. Quoted array expansion has neither problem.
+_TMP_FILES=()
+_register_tmp() { _TMP_FILES+=("$1"); }
+_cleanup_tmp() {
+  [ "${#_TMP_FILES[@]}" -gt 0 ] && rm -f "${_TMP_FILES[@]}"
+  return 0
+}
+# EXIT cleans up. INT/TERM clean up and then RE-RAISE, rather than returning: a handler that
+# swallows the signal lets a CANCELLED run carry on -- past freshly-deleted temp files -- and
+# emit a corpus or tooling verdict for work that was interrupted. The trap is reset to
+# default first so the re-raise actually terminates.
+_cleanup_tmp_signal() {
+  _cleanup_tmp
+  trap - "$1"
+  kill -s "$1" $$
+}
+trap _cleanup_tmp EXIT
+trap '_cleanup_tmp_signal INT' INT
+trap '_cleanup_tmp_signal TERM' TERM
 
 # Expected user-keyspace tables (39 total: 33 nb + 6 test_oa).
 #
