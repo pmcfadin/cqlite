@@ -37,6 +37,22 @@ pub fn try_get_runtime() -> Result<&'static Runtime, std::io::Error> {
     })
 }
 
+/// Returns the global tokio runtime **only if it has already been built**.
+///
+/// The non-building counterpart of [`try_get_runtime`]: a plain `OnceLock::get`,
+/// so it never constructs a runtime, never spawns a thread, and never allocates.
+///
+/// This exists for teardown paths — see `crate::drop_safety` (issue #1461).
+/// `Drop` for a `#[pyclass]` can run during interpreter finalization, and
+/// building a multi-threaded tokio runtime at that point is exactly the hazard
+/// issue #1461 step 3 forbids (threads spawned while CPython is tearing down,
+/// with no caller left to surface an error to). A teardown path therefore asks
+/// this question instead: if the answer is `None` no async cleanup was ever
+/// possible on this process anyway, and the caller skips it silently.
+pub fn existing_runtime() -> Option<&'static Runtime> {
+    RUNTIME.get()
+}
+
 /// Serialized get-or-build for a process-global [`OnceLock`].
 ///
 /// Preserves `OnceLock::get_or_init`'s single-initializer guarantee while
