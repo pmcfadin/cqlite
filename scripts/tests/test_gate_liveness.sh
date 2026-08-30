@@ -486,9 +486,18 @@ noid="$TMP/noid.txt"
 { echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: PASS"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$noid"
 expect_reader "11b.12 --run-id given + summary has NO run-id => UNKNOWN, not COMPLETE" \
   UNKNOWN 4 "summary-no-run-id" -- "$noid" --run-id my-run
-# Control: with no --run-id there is nothing to bind to, so an id-less summary still answers.
-expect_reader "11b.13 control: no --run-id + id-less summary => COMPLETE" \
-  COMPLETE 0 "" -- "$noid"
+# THIS CASE ASSERTED THE BUG. Written in round 10 as a "control" pinning that an id-less summary
+# still answers when no --run-id is given — but job 199 showed that is unsound: every summary the
+# gate writes carries a run-id, so its absence means the block is not whole, and a verdict read from
+# it is attributable to NO run. The requirement is now unconditional and this case pins the honest
+# answer. (Second instance of a test vouching for a defect in this change; the other was 11j.5. The
+# tell in both: new code and an old test disagreed, and the new code's reasoning was the better one.)
+expect_reader "11b.13 no --run-id + id-less summary => UNKNOWN (attributable to no run)" \
+  UNKNOWN 4 "summary-no-run-id-at-all" -- "$noid"
+# ...and the ordinary id-BEARING summary still answers, bound or unbound.
+mk_summary "$TMP/hasid.txt" some-run "PASS"
+expect_reader "11b.13b control: an id-bearing summary answers unbound" COMPLETE 0 "" -- "$TMP/hasid.txt"
+expect_reader "11b.13c control: ...and bound to its own id" COMPLETE 0 "" -- "$TMP/hasid.txt" --run-id some-run
 # And the same demand holds for a non-terminal summary reaching the heartbeat.
 noid2="$TMP/noid2.txt"
 { echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: INCOMPLETE (gate did not finish)"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$noid2"

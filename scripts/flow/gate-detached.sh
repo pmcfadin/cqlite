@@ -503,16 +503,6 @@ _reserve="$SUMMARY.launch-lock"
 # _proc_identity <pid> -> a tiered process-identity token, or empty. Same tiering as the gate and
 # the beater use: /proc start ticks where available, else `ps -o lstart=` (portable, second
 # granularity, empty for a dead pid).
-# _path_age_secs <path> -> age in whole seconds, or empty when it cannot be determined. `stat`'s
-# flags differ between GNU and BSD, and this repo supports both, so both spellings are tried and an
-# unmeasurable age yields EMPTY — which the caller treats as "cannot tell", never as "old".
-_path_age_secs() {
-  local mt now
-  mt=$(stat -c %Y "$1" 2>/dev/null) || mt=$(stat -f %m "$1" 2>/dev/null) || return 0
-  case "$mt" in ''|*[!0-9]*) return 0 ;; esac
-  now=$(date +%s)
-  printf '%s' "$(( now - mt ))"
-}
 
 _proc_identity() {
   local raw rest ls
@@ -528,56 +518,49 @@ _proc_identity() {
   return 0
 }
 
-_res_owner="$_reserve/owner"
-if ! mkdir "$_reserve" 2>/dev/null; then
-  _own_unit=$(sed -n 's/^unit=//p' "$_res_owner" 2>/dev/null | head -1)
-  _own_pid=$(sed -n 's/^launcher-pid=//p' "$_res_owner" 2>/dev/null | head -1)
-  _own_start=$(sed -n 's/^launcher-start=//p' "$_res_owner" 2>/dev/null | head -1)
-  # AN INCOMPLETE OWNER RECORD MEANS "ACQUISITION IN PROGRESS", NOT "STALE" (roborev job 196).
-  # `mkdir` and writing `owner` are two operations, so a concurrent launcher can see the directory
-  # in between — and treating that as stale let it reclaim a lock someone had just taken, putting
-  # two gates on one summary path. The safe reading of a half-built lock is that its owner is still
-  # arriving, so we refuse; the loser can retry, whereas a wrong reclamation is unrecoverable.
-  if [ -z "$_own_unit" ] || [ -z "$_own_pid" ]; then
-    # An incomplete record means an acquisition is in progress — BUT THAT STATE NEEDS A DEADLINE
-    # (roborev job 197, Medium). Refusing unconditionally traded one failure for another: a launcher
-    # killed between `mkdir` and finishing the owner record would leave a lock that can never
-    # self-heal, permanently refusing every later launch on that summary path.
-    #
-    # A real acquisition takes milliseconds. So an incomplete record older than the grace period is
-    # ABANDONED, and is reclaimed through the same atomic-rename compare-and-swap as any other stale
-    # lock — which is what keeps concurrent reclaimers safe.
-    _res_age=$(_path_age_secs "$_reserve")
-    if [ -z "$_res_age" ] || [ "$_res_age" -lt 30 ]; then
-      echo "gate-detached: the reservation at '$_reserve' is being acquired right now (its owner" >&2
-      echo "               record is not complete yet${_res_age:+, age ${_res_age}s}). Refusing rather than" >&2
-      echo "               reclaiming a lock another launcher has just taken (#3473). Retry shortly." >&2
-      exit 1
-    fi
-    echo "gate-detached: reclaiming an ABANDONED reservation at '$_reserve' (incomplete owner" >&2
-    echo "               record, ${_res_age}s old — an acquisition takes milliseconds) (#3473)." >&2
-    _own_unit=""; _own_pid=""; _own_start=""   # fall through to the stale-reclamation path below
-  fi
+# A SYMLINK, because acquisition must be atomic AND self-identifying in ONE step (roborev job 199).
+#
+# Three earlier designs each failed on the same seam. A lock FILE created with `set -C` could not
+# carry its owner atomically. A lock DIRECTORY plus a separate `owner` file left a window where the
+# lock existed but its owner was unknown — and every way of interpreting that window was wrong:
+# refusing forever meant a launcher killed mid-acquisition blocked the path permanently, while
+# reclaiming after an age deadline meant a launcher merely PAUSED (SIGSTOP, heavy contention) could
+# have its LIVE lock stolen, after which both gates launch on one summary path.
+#
+# `ln -s` resolves it: creating a symlink is a single atomic operation that FAILS if the path exists,
+# and its target is arbitrary text. So the owner is published by the very act of acquiring, and there
+# is no window to interpret and no age heuristic to get wrong. Reclamation then needs no timer at
+# all — only affirmative proof that the recorded owner is gone.
+_res_ident=$(_proc_identity $$)
+if ! ln -s "unit=$UNIT|pid=$$|start=$_res_ident" "$_reserve" 2>/dev/null; then
+  _own=$(readlink "$_reserve" 2>/dev/null || true)
+  _own_unit=${_own#*unit=}; _own_unit=${_own_unit%%|*}
+  _own_pid=${_own#*pid=};   _own_pid=${_own_pid%%|*}
+  _own_start=${_own#*start=}
   _live=no
-  # (an abandoned incomplete record arrives here with the owner fields cleared, so it is not live
-  #  and proceeds straight to reclamation)
-  # The launcher pid is SHORT-LIVED, so a bare `kill -0` on it can be satisfied by an unrelated
-  # process after pid reuse — making a finished gate's reservation look live forever and blocking
-  # the path (roborev job 196, Low). The recorded start identity is what distinguishes them; a
-  # pid whose identity no longer matches is not our launcher.
+  # The LAUNCHER first: it is alive throughout its own acquisition, which is what the previous
+  # designs' window problem reduced to. Its pid is pinned by a start identity so a recycled pid
+  # cannot make a finished run look live.
   case "$_own_pid" in
     ''|*[!0-9]*) ;;
     *) if kill -0 "$_own_pid" 2>/dev/null; then
          if [ -n "$_own_start" ]; then
            [ "$(_proc_identity "$_own_pid")" = "$_own_start" ] && _live=yes
          else
-           _live=yes   # no recorded identity (an older lock): fall back to existence
+           _live=yes
          fi
        fi ;;
   esac
+  # ...then the unit, which is what keeps the lock meaningful after the launcher exits.
   if [ "$_live" = no ] && [ -n "$_own_unit" ] \
      && systemctl --user is-active --quiet "$_own_unit" 2>/dev/null; then
     _live=yes
+  fi
+  # An UNREADABLE or unparseable link is not proof of death either — refuse rather than guess.
+  if [ -z "$_own" ] || [ -z "$_own_pid" ]; then
+    echo "gate-detached: the reservation at '$_reserve' exists but its owner cannot be read." >&2
+    echo "               Refusing rather than reclaiming a lock that may be live (#3473)." >&2
+    exit 1
   fi
   if [ "$_live" = yes ]; then
     echo "gate-detached: the summary path '$SUMMARY' is already owned by a LIVE run" >&2
@@ -586,16 +569,10 @@ if ! mkdir "$_reserve" 2>/dev/null; then
     echo "               reliably (#2874/#3473). Give this run a summary path of its own." >&2
     exit 1
   fi
-  # Stale. Claim the RECLAMATION by renaming the directory away — whoever wins that rename is the
-  # only process that proceeds. A loser refuses rather than racing, which is the fail-safe side.
-  # The rename target is created by mktemp, NOT built from $$ — flagged by this change's own
-  # no-predictable-temp rule (11f.1), and correctly: a predictable target an attacker can
-  # pre-create as a DIRECTORY changes `mv`'s semantics, moving the lock INTO it rather than onto
-  # it. The compare-and-swap property is unaffected, because only one process can move
-  # `$_reserve` away — the loser's `mv` fails with the source already gone.
+  # PROVABLY dead. Claim the reclamation by renaming the link away — atomic, so only one process
+  # proceeds and a loser refuses rather than racing.
   _stale=$(mktemp -d "$_reserve.stale.XXXXXX" 2>/dev/null) || {
     echo "gate-detached: cannot create a scratch name to reclaim the stale reservation." >&2
-    echo "               Refusing rather than racing another launcher (#3473)." >&2
     exit 1
   }
   if ! mv "$_reserve" "$_stale/" 2>/dev/null; then
@@ -605,22 +582,11 @@ if ! mkdir "$_reserve" 2>/dev/null; then
     exit 1
   fi
   rm -rf "$_stale" 2>/dev/null || true
-  mkdir "$_reserve" 2>/dev/null || {
-    echo "gate-detached: cannot create the reservation directory '$_reserve'." >&2
+  ln -s "unit=$UNIT|pid=$$|start=$_res_ident" "$_reserve" 2>/dev/null || {
+    echo "gate-detached: cannot create the reservation at '$_reserve'." >&2
     echo "               Refusing rather than racing another launcher (#3473)." >&2
     exit 1
   }
-fi
-# Record who owns it. The launcher pid is what makes the startup window safe; the unit is what keeps
-# the lock meaningful after this process exits.
-# FAIL CLOSED if the owner record cannot be written (job 196): an unwritable owner file leaves the
-# lock permanently indistinguishable from an in-progress acquisition, which would block the path
-# for everyone. Better to refuse now, releasing the directory we just made.
-if ! { echo "unit=$UNIT"; echo "launcher-pid=$$"; echo "launcher-start=$(_proc_identity $$)"; } > "$_res_owner" 2>/dev/null; then
-  rm -rf "$_reserve" 2>/dev/null || true
-  echo "gate-detached: cannot write the reservation owner record at '$_res_owner'." >&2
-  echo "               Refusing rather than leaving a lock nobody can interpret (#3473)." >&2
-  exit 1
 fi
 
 # NOW truncate the log: every refusal path is behind us, so this cannot destroy a previous log for

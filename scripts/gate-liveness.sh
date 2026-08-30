@@ -392,6 +392,15 @@ _n_rid=$(printf '%s\n' "$SUM_TEXT" | grep -c '^run-id: ')
 if [ "$_n_start" -gt 1 ] || [ "$_n_end" -gt 1 ] || [ "$_n_res" -gt 1 ] || [ "$_n_rid" -gt 1 ]; then
   verdict UNKNOWN 4 "summary-not-a-single-block; found $_n_start openers / $_n_rid run-id / $_n_res RESULT / $_n_end closers — more than one of any means the file holds fragments of more than one write, so no field can be attributed to a single run"
 fi
+# EXACTLY ONE run-id, whether or not the caller named a run (roborev job 199, Medium). Duplicates
+# were already fatal; ZERO was not, so an unbound reader accepted a terminal verdict from a block
+# attributable to NO run. Every legitimate summary carries a run-id — the gate writes it immediately
+# after the opener — so its absence means this is not a whole block, and a verdict read from it
+# cannot be assigned to anything. (My own audit of what backs COMPLETE said "run-id bound", which
+# was only true when --run-id was supplied; this makes the claim unconditional.)
+if [ "$_n_rid" -eq 0 ]; then
+  verdict UNKNOWN 4 "summary-no-run-id-at-all; $SUMMARY carries no 'run-id:' line, so nothing in it can be attributed to a run — every summary the gate writes has one"
+fi
 # The closer must MATCH THE OPENER'S DIALECT, and the elements must be IN ORDER (roborev job
 # 172, Medium). Counting "some opener" and "some closer" independently accepted a LITE opener
 # closed by a DELTA marker, and imposed no ordering — so a `RESULT:` line sitting BEFORE the

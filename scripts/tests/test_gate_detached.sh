@@ -896,10 +896,13 @@ bash "$LAUNCHER" --summary /nonexistent-dir-3473/s.txt --log "$pn" -- --only fil
 # two ways — a second launcher could read a freshly acquired lock BEFORE its owner's unit became
 # active and judge it stale, and two reclaimers could delete each other's replacement locks. Both
 # ended with two gates writing one summary path.
-if grep -q 'mkdir "$_reserve"' "$LAUNCHER"; then
-  ok "4b.80 the reservation is a DIRECTORY (mkdir is atomic)"
+# The reservation is a SYMLINK whose TARGET encodes the owner (job 199). `ln -s` fails if the path
+# exists — mutual exclusion — and its target is arbitrary text, so ownership is published by the very
+# act of acquiring. That is what removed the acquisition WINDOW the directory design had.
+if grep -qF 'ln -s "unit=$UNIT|pid=$$|start=$_res_ident" "$_reserve"' "$LAUNCHER"; then
+  ok "4b.80 the reservation is an atomic, SELF-IDENTIFYING symlink"
 else
-  bad "4b.80 the reservation is a directory" "still a file-based lock"
+  bad "4b.80 the reservation is an atomic, self-identifying symlink" "not found"
 fi
 # The rename target is mktemp-created (11f.1 caught the predictable `$$` form), so the move is
 # `mv "$_reserve" "$_stale/"` — into the scratch directory. The compare-and-swap property is
@@ -909,7 +912,7 @@ if grep -q 'mv "$_reserve" "$_stale/"' "$LAUNCHER" && grep -q 'mktemp -d "$_rese
 else
   bad "4b.81 reclamation is claimed by an atomic rename into an mktemp scratch dir" "not found"
 fi
-if grep -q 'launcher-pid=' "$LAUNCHER" && grep -q 'kill -0 "$_own_pid"' "$LAUNCHER"; then
+if grep -qF 'pid=$$' "$LAUNCHER" && grep -qF 'kill -0 "$_own_pid"' "$LAUNCHER"; then
   ok "4b.82 liveness counts the LAUNCHER PID too, closing the unit-startup window"
 else
   bad "4b.82 liveness counts the launcher pid" "startup window still open"
@@ -918,11 +921,13 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   dl="$TMP/dirlock.txt"
   o1=$(bash "$LAUNCHER" --summary "$dl" --log "$TMP/dl1.log" -- --only roborev-lints 2>&1); r1=$?
   du1=$(printf '%s' "$o1" | sed -n 's/^unit:  *//p'); [ -n "$du1" ] && echo "$du1" >> "$UNITS_FILE"
-  [ -d "$dl.launch-lock" ] && ok "4b.83 a launch creates the reservation directory" \
-                           || bad "4b.83 a launch creates the reservation directory" "absent"
-  grep -q '^unit=' "$dl.launch-lock/owner" 2>/dev/null && grep -q '^launcher-pid=' "$dl.launch-lock/owner" 2>/dev/null \
-    && ok "4b.84 the owner record names both the unit and the launcher pid" \
-    || bad "4b.84 the owner record names both the unit and the launcher pid" "$(cat "$dl.launch-lock/owner" 2>/dev/null)"
+  [ -L "$dl.launch-lock" ] && ok "4b.83 a launch creates the reservation symlink" \
+                           || bad "4b.83 a launch creates the reservation symlink" "absent"
+  _lt=$(readlink "$dl.launch-lock" 2>/dev/null)
+  case "$_lt" in
+    *unit=*\|pid=*\|start=*) ok "4b.84 the link target names the unit, the launcher pid AND its start identity" ;;
+    *) bad "4b.84 the link target names unit, pid and start identity" "target='$_lt'" ;;
+  esac
   o2=$(bash "$LAUNCHER" --summary "$dl" --log "$TMP/dl2.log" -- --only file-size 2>&1); r2=$?
   du2=$(printf '%s' "$o2" | sed -n 's/^unit:  *//p'); [ -n "$du2" ] && echo "$du2" >> "$UNITS_FILE"
   [ "$r1" = 0 ] && [ "$r2" != 0 ] \
@@ -943,104 +948,31 @@ else
   skipc "4b.83-4b.87 directory reservation" "no working systemd-run --user"
 fi
 
-# roborev job 196: `mkdir` and writing `owner` are two operations, so a concurrent launcher can see
-# the lock directory in between. Treating that as STALE let it reclaim a lock someone had just
-# taken — two gates on one summary path, which is what the lock exists to prevent.
-if grep -q 'is being acquired right now' "$LAUNCHER"; then
-  ok "4b.88 an INCOMPLETE owner record reads as acquisition-in-progress, not stale"
+# THE "INCOMPLETE OWNER" FAMILY IS GONE, AND ITS TESTS WITH IT (job 199).
+#
+# Seven cases used to live here — an incomplete record reading as acquisition-in-progress, an
+# unwritable record failing closed, an age deadline, both stat spellings, an unmeasurable age
+# counting as fresh, and the aged-vs-fresh reclamation pair. Every one of them tested a state that
+# only existed because acquisition took TWO operations (`mkdir`, then write `owner`), leaving a
+# window in which the lock existed but its owner was unknown. Both readings of that window were
+# wrong: refusing forever let a launcher killed mid-acquisition block the path permanently, and
+# reclaiming after an age deadline let a launcher merely PAUSED have its live lock stolen.
+#
+# A symlink publishes ownership in the SAME atomic operation that acquires the lock, so there is no
+# window, no incomplete state, and no timer to tune. These cases are deleted rather than re-pointed
+# because the states they covered cannot occur — keeping them would mean asserting behaviour about
+# a situation the design no longer admits.
+if grep -q '_path_age_secs\|_res_age' "$LAUNCHER"; then
+  bad "4b.88 no age heuristic remains in the reservation logic" \
+      "an age-based reclamation can steal a PAUSED launcher's live lock"
 else
-  bad "4b.88 an incomplete owner record reads as acquisition-in-progress" "not found"
+  ok "4b.88 no age heuristic remains — ownership is atomic, so there is no window to time"
 fi
-if grep -q 'cannot write the reservation owner record' "$LAUNCHER"; then
-  ok "4b.89 an unwritable owner record FAILS CLOSED (and releases the directory)"
+# Reclamation must therefore rest on PROOF that the owner is gone, never on elapsed time.
+if grep -q 'Refusing rather than reclaiming a lock that may be live' "$LAUNCHER"; then
+  ok "4b.89 an unreadable owner is refused, not treated as proof of death"
 else
-  bad "4b.89 an unwritable owner record fails closed" "not found"
-fi
-if grep -q 'launcher-start=' "$LAUNCHER" && grep -q '_proc_identity' "$LAUNCHER"; then
-  ok "4b.90 the launcher pid is PINNED by a start identity (pid reuse cannot fake liveness)"
-else
-  bad "4b.90 the launcher pid is pinned by a start identity" "not found"
-fi
-if [ "$HAVE_SYSTEMD" = yes ]; then
-  ip="$TMP/inprogress.txt"
-  o1=$(bash "$LAUNCHER" --summary "$ip" --log "$TMP/ip1.log" -- --only roborev-lints 2>&1); r1=$?
-  iu=$(printf '%s' "$o1" | sed -n 's/^unit:  *//p'); [ -n "$iu" ] && echo "$iu" >> "$UNITS_FILE"
-  grep -q '^launcher-start=' "$ip.launch-lock/owner" 2>/dev/null \
-    && ok "4b.91 the owner record carries the launcher's start identity" \
-    || bad "4b.91 the owner record carries a start identity" "$(cat "$ip.launch-lock/owner" 2>/dev/null | tr '\n' ' ')"
-  # Simulate the mid-acquisition window by removing the owner record from a LIVE lock.
-  rm -f "$ip.launch-lock/owner"
-  o2=$(bash "$LAUNCHER" --summary "$ip" --log "$TMP/ip2.log" -- --only file-size 2>&1); r2=$?
-  iu2=$(printf '%s' "$o2" | sed -n 's/^unit:  *//p'); [ -n "$iu2" ] && echo "$iu2" >> "$UNITS_FILE"
-  [ "$r2" != 0 ] && ok "4b.92 a half-built lock is REFUSED, not reclaimed (exit $r2)" \
-                 || bad "4b.92 a half-built lock is refused, not reclaimed" "exit 0 — it reclaimed a live lock"
-  printf '%s' "$o2" | grep -q 'being acquired right now' \
-    && ok "4b.93 ...and the refusal explains why" || bad "4b.93 the refusal explains why" "$o2"
-  systemctl --user stop "$iu" >/dev/null 2>&1 || true
-else
-  skipc "4b.91-4b.93 acquisition window" "no working systemd-run --user"
-fi
-
-# roborev job 197: "acquisition in progress" needed a DEADLINE. Refusing an incomplete reservation
-# unconditionally traded one failure for another — a launcher killed between `mkdir` and finishing
-# the owner record left a lock that could never self-heal, permanently refusing every later launch
-# on that summary path.
-if grep -q '_path_age_secs' "$LAUNCHER" && grep -q 'reclaiming an ABANDONED reservation' "$LAUNCHER"; then
-  ok "4b.94 an ABANDONED incomplete reservation is reclaimed (the in-progress state has a deadline)"
-else
-  bad "4b.94 an abandoned incomplete reservation is reclaimed" "no deadline on the in-progress state"
-fi
-# The age probe must be portable and must treat "cannot tell" as NOT old.
-if grep -q 'stat -c %Y' "$LAUNCHER" && grep -q 'stat -f %m' "$LAUNCHER"; then
-  ok "4b.95 the age probe tries both GNU and BSD stat spellings"
-else
-  bad "4b.95 the age probe tries both stat spellings" "one is missing"
-fi
-if grep -q '\[ -z "$_res_age" \] || \[ "$_res_age" -lt 30 \]' "$LAUNCHER"; then
-  ok "4b.96 an UNMEASURABLE age counts as fresh (refuse), never as abandoned"
-else
-  bad "4b.96 an unmeasurable age counts as fresh" "cannot-tell may be read as old"
-fi
-# BEHAVIOURAL: aged incomplete => reclaimed; fresh incomplete => refused.
-ab="$TMP/abandoned.txt"
-mkdir -p "$ab.launch-lock"
-touch -d '2 hours ago' "$ab.launch-lock" 2>/dev/null || touch -A -020000 "$ab.launch-lock" 2>/dev/null
-if [ "$HAVE_SYSTEMD" = yes ]; then
-  o=$(bash "$LAUNCHER" --summary "$ab" --log "$TMP/ab.log" -- --only file-size 2>&1); r=$?
-  au=$(printf '%s' "$o" | sed -n 's/^unit:  *//p'); [ -n "$au" ] && echo "$au" >> "$UNITS_FILE"
-  [ "$r" = 0 ] && ok "4b.97 an AGED incomplete lock does not block the path forever (exit $r)" \
-               || bad "4b.97 an aged incomplete lock does not block the path" "exit $r: $o"
-  ab2="$TMP/inflight.txt"; mkdir -p "$ab2.launch-lock"
-  o2=$(bash "$LAUNCHER" --summary "$ab2" --log "$TMP/ab2.log" -- --only file-size 2>&1); r2=$?
-  [ "$r2" != 0 ] && ok "4b.98 a FRESH incomplete lock is still refused (exit $r2)" \
-                 || bad "4b.98 a fresh incomplete lock is still refused" "exit 0 — it reclaimed a live acquisition"
-else
-  skipc "4b.97-4b.98 abandoned-lock reclamation" "no working systemd-run --user"
-fi
-
-# roborev job 198: job 172 removed the launcher's duplicate verdict grammar from the TERMINAL path;
-# the same duplication survived on the HEARTBEAT path. Grepping only the nonce, run-id and the
-# presence of `beat-epoch` accepted beats the READER rejects (a `parent-check: kill0` beat, or one
-# with invalid framing/interval/epoch) — so the launcher returned success while every advertised
-# poll answered UNKNOWN.
-lbody=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
-if printf '%s\n' "$lbody" | grep -qE 'beat-epoch|parent-check'; then
-  bad "4b.99 the launcher no longer parses beat fields itself" \
-      "$(printf '%s\n' "$lbody" | grep -nE 'beat-epoch|parent-check' | head -2)"
-else
-  ok "4b.99 the launcher no longer parses beat fields itself"
-fi
-# It must accept ONLY the reader's monitorable verdicts.
-if grep -q '0|2) _hb_seen=1; break' "$LAUNCHER"; then
-  ok "4b.100 monitorability is decided by the reader's exit code (COMPLETE or RUNNING only)"
-else
-  bad "4b.100 monitorability is decided by the reader's exit code" "not found"
-fi
-# The nonce check stays the launcher's own business — the reader knows nothing about it.
-if grep -q 'launch-nonce: $LAUNCH_NONCE" "$_hbdest"' "$LAUNCHER"; then
-  ok "4b.101 the nonce is still checked by the launcher (the reader has no notion of it)"
-else
-  bad "4b.101 the nonce is still checked by the launcher" "not found"
+  bad "4b.89 an unreadable owner is refused" "not found"
 fi
 
 # Control: a writable existing summary is FINE — the check must not reject the normal case.

@@ -398,7 +398,13 @@ the closer must **match the opener's dialect** (a LITE opener closed by a DELTA 
 fragments, and the three dialects are kept distinct precisely so no block can pass as another);
 and the elements must be **ordered** — opener, then `run-id:` and `RESULT:`, then closer.
 
-A valid opener, a matching dialect and correct ordering are required on **every** path. Only the
+A valid opener, a matching dialect, correct ordering **and exactly one `run-id:`** are required on
+**every** path. The run-id requirement is unconditional, and getting there corrected an
+overstatement in this document's own audit: `COMPLETE` was described as "run-id bound", which was
+true only when the caller passed `--run-id`. Without it, a block carrying **no** `run-id:` at all
+was accepted and its verdict reported — a verdict attributable to no run, from a file every real
+gate stamps with one. Absence was reading as "nothing to disagree with" instead of as missing
+evidence, which is the permissive-branch shape the rest of this file is built to refuse. Only the
 **closer** is specific to believing a terminal verdict — and that is the precise shape of the
 legitimate exception, because a mid-write read is missing its *tail*. So a truncated
 `INCOMPLETE` block still falls through to the heartbeat (the conservative direction, and the
@@ -477,29 +483,40 @@ rename permission from the **directory**, not the file. Both are pinned as tests
 **The summary path is reserved for the gate's lifetime.** The nonce proves ownership of the
 artifacts the launcher *reads*; it does nothing to stop two launchers pointing at one summary path,
 where each would prove ownership of its own artifacts while their heartbeat renames and summary
-rewrites destroyed each other. A **lock directory** beside the summary records the owning unit *and* the launcher pid, and a second
-launcher is refused while either is alive. It is deliberately **self-healing rather than released**:
+rewrites destroyed each other. A **symlink** beside the summary reserves the path, and a second
+launcher is refused while its owner is alive. It is deliberately **self-healing rather than released**:
 the gate outlives its launcher, so no process could reliably remove the lock, and a lock nobody can
 release is worse than no lock.
 
-Both halves of that are load-bearing, and a file-based first attempt got both wrong. `mkdir` is
-atomic, and *renaming a directory away* is the compare-and-swap that decides who owns a reclamation —
-so two reclaimers cannot delete each other's replacement locks, because only one `mv` can succeed and
-the loser refuses rather than racing. And liveness counts the **launcher pid**, not just the unit,
-which is what closes the window between acquiring the lock and the unit becoming active — during it
-the launcher is by definition alive. That pid is **pinned by a start identity**, because a
-short-lived pid can be reused and would otherwise make a finished gate's reservation look live
-forever. And because `mkdir` and writing the owner record are two operations, a lock whose owner
-record is **missing or incomplete** reads as *acquisition in progress* — refuse — rather than stale;
-an unwritable owner record fails closed and releases the directory, since a lock nobody can
-interpret would block the path for everyone.
+The mechanism is `ln -s`, and the choice is the whole design. Creating a symlink **fails if the path
+exists** — that is the mutual exclusion — and its target is **arbitrary text**, so the owner record
+*is* the lock: `unit=<unit>|pid=<launcher>|start=<identity>` is published by the very syscall that
+acquires it. Liveness counts the **launcher pid**, not just the unit, which closes the window between
+reserving the path and the unit becoming active — during it the launcher is by definition alive. That
+pid is **pinned by a start identity**, because a short-lived pid can be reused and would otherwise
+make a finished gate's reservation look live forever. Reclamation of a provably-dead owner is claimed
+by an atomic **rename** into an `mktemp` scratch directory, so two reclaimers cannot delete each
+other's replacement locks: only one `mv` can succeed and the loser refuses rather than racing.
 
-That in-progress state has a **deadline**, because refusing it unconditionally traded one failure for
-another: a launcher killed between `mkdir` and finishing the owner record would leave a lock that
-could never self-heal, permanently refusing every later launch on that path. A real acquisition takes
-milliseconds, so an incomplete record older than the grace period is *abandoned* and is reclaimed
-through the same atomic-rename compare-and-swap. An age that cannot be measured counts as **fresh**
-(refuse), never as abandoned — `stat`'s flags differ between GNU and BSD and both are tried. (#2874 already forbids two gates on one path; the launcher now
+**A two-operation lock, and its deadline, were both tried and removed — this is the substantive
+finding of the round.** `mkdir` is also atomic, but a directory cannot carry its owner atomically, so
+acquisition was `mkdir` *then* write an `owner` file, leaving a window in which the lock existed and
+its owner was unknown. Both readings of that window were wrong, in opposite directions. Refusing it
+unconditionally meant a launcher killed mid-acquisition left a lock that could **never** self-heal,
+permanently refusing every later launch on that path. Adding a grace period to fix that introduced a
+worse failure: a launcher merely **paused** — SIGSTOP, or just descheduled under the heavy contention
+these boxes run — could have its **live** lock reclaimed, after which two gates launch on one summary
+path, which is the exact outcome the lock exists to prevent. No value of the deadline is safe, because
+the deadline is trying to distinguish *slow* from *dead* using elapsed time, and elapsed time cannot
+tell them apart.
+
+So the deadline was not tuned; the window it policed was **eliminated**. With ownership published
+atomically there is no incomplete state, no age probe (and no GNU-vs-BSD `stat` spelling to try), and
+no timer anywhere in the reservation path. Reclamation rests on **affirmative proof** the owner is
+gone — a dead pid whose start identity matches, or an inactive unit — and an owner that cannot be
+read or parsed is **refused**, since unreadability is not evidence of death. Seven test cases were
+deleted along with the states they covered, which is the honest measure of the simplification.
+(#2874 already forbids two gates on one path; the launcher now
 detects it rather than walking into it.)
 
 Every probe is **non-destructive**, because under #2874 these paths may hold a live peer's
