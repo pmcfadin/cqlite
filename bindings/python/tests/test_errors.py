@@ -142,7 +142,7 @@ class TestExceptionInAllExports:
 class TestSharedErrorContract:
     """The shared FFI error contract (issue #1451).
 
-    ``cqlite_core::ffi_error_contract`` is the ONE authoritative
+    ``cqlite_ffi_common::error_contract`` is the ONE authoritative
     variant -> (python class, node code, category, recoverable, prefix) table.
     Before it, Python mapped by ``Error`` variant while Node derived its code
     from ``category()``, so the same core error had a different identity in each

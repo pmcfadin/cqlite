@@ -173,14 +173,20 @@ The pipeline measures itself so improvement is data-driven, not anecdotal:
 The `delivery-telemetry` agent-gate component (SKIP-aware on `python3`) covers the tool: schema
 round-trip, lint-rejects-malformed, fixture-ledger → expected top failure, and dedupe.
 
-## Concurrency: one worker per machine (#1930, owner decision 2026-07-04)
+## Concurrency: MULTIPLE LANES PER MACHINE (#3393 owner ruling 2026-08-28, retracting #1930)
 
-- **Exactly one flow-lead worker per machine.** That worker OWNS the machine's Ready-queue throughput and
-  is the SOLE authority on machine load. It fans out *implementation* to many subagents (cheap: edits +
-  `--lite` gates) and lets read-only reviews (rust-reviewer/spec-auditor) overlap, but it **serializes the
-  full `agent-gate.sh` (concurrency = 1)** and caps heavy fan-out. This is the doctrine DEFAULT
-  ("one lead → subagents, zero dup by construction"); N bare independent leads on one box is the
-  discouraged path.
+- **~~Exactly one flow-lead worker per machine~~ — RETRACTED.** #1930 (owner decision 2026-07-04) made
+  one-worker-per-machine the doctrine default; **#3393 retracted it** because the fleet had not followed it
+  all day (up to 4 lanes per box on standing instruction) and *leaving it written is what caused the defect
+  it was meant to prevent*: the per-machine claim ref was designed one-ref-per-machine **because of this
+  text**, so several lanes on one box overwrote each other's claim and a monitor could see at most one —
+  which is why two of #3393's three silent lane deaths, both on one host, were structurally invisible.
+  **Design for N lanes per box.** Each lane is claim-protocol-gated (`refs/claims/issue-<N>` per issue,
+  `refs/lane-claims/<machine>/<lane-id>` for liveness); N *bare* sessions with no claim protocol remains
+  the discouraged path.
+- **What DOES still hold — one full gate at a time per machine.** That is a RESOURCE bound, not a
+  worker-count invariant, and it is enforced mechanically (`CQLITE_GATE_MAX_CONCURRENCY=1`, #2640) rather
+  than by counting workers. See the next bullet.
 - **Full-gate concurrency = 1, always.** Never run 2+ full gates at once, regardless of the #1825 cap.
   The cap prevents SIGKILL under load but NOT timing flakes: two concurrent full gates flaked
   `mixed_p99_bounded_by_k_times_baseline` (`cqlite-core/tests/tail_latency_harness.rs`) under CPU

@@ -7,6 +7,13 @@ name = "cqlite-py"
 version = "0.16.1"
 description = "Python bindings for CQLite - read Cassandra 5.0 SSTables locally without a cluster"
 readme = "README.md"
+# Issue #1459: this floor is now TESTED, not merely advertised — the
+# `smoke-floors` job in .github/workflows/python-ci.yml installs the cp39-abi3
+# wheel on 3.9 (the floor), 3.13 (an additional compatibility leg) and 3.14
+# (the current top of the advertised range) and runs an import plus one real
+# query on each. Raising or lowering this line means changing that matrix in the
+# same commit. Note this range is UNBOUNDED above, so its top is the newest
+# released CPython, not the newest classifier below.
 requires-python = ">=3.9"
 license = {text = "MIT OR Apache-2.0"}
 keywords = ["cassandra", "sstable", "database", "nosql", "cql"]
@@ -19,6 +26,13 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    # 3.13 and 3.14 are claimed only because the floor matrix actually
+    # exercises them (issue #1459); 3.10/3.11 are covered transitively by abi3
+    # plus the tested boundaries. `requires-python` is unbounded, so the newest
+    # released CPython is part of the advertised range whether or not it is
+    # listed here — which is why it is TESTED, not merely claimed.
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 

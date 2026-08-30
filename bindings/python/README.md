@@ -40,7 +40,20 @@ with cqlite.open('path/to/sstables', schema='schema.cql') as db:
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.9+ — the boundaries are CI-tested, not merely advertised. CI installs the
+  `abi3` wheel on **3.9** (the floor), **3.14** (the current top of the range) and
+  **3.13** (an additional compatibility leg), running an import plus one real query
+  against the canonical corpus on each (`Floor smoke` in
+  `.github/workflows/python-ci.yml`, issue #1459).
+
+  That check is a binding matrix tier, so per repo CI-cost policy it runs on **every
+  push to `main`**, on the **nightly schedule**, and on PRs labeled
+  `ci:bindings-full` — not on a routine unlabeled PR. `main` is therefore
+  continuously floor-tested and releases are cut from it, but a floor break is caught
+  just after merge rather than before it.
+
+  The range is unbounded above, so its top is the newest released CPython — when 3.15
+  ships it belongs in that matrix.
 - Cassandra 5.0 SSTable files
 
 ## API Reference
@@ -263,6 +276,29 @@ CQL types are automatically converted to Python native types:
 | `tuple<...>` | `tuple` |
 | `frozen<T>` | Unwrapped inner type |
 | UDT | `dict` with `_type` and `_keyspace` keys |
+
+### CQL `decimal` rendering policy
+
+A CQL `decimal` is `unscaled x 10^(-scale)` where `unscaled` is an
+arbitrary-precision two's-complement integer. Both CQLite language bindings share
+**one** implementation and **one** policy (issue #1452), so a value can never
+render in one binding and be refused by the other:
+
+| Condition | Outcome |
+|---|---|
+| Unscaled magnitude **> 32 KiB** | Refused as corrupt: a typed error naming the scale, the unscaled length and the ceiling |
+| Magnitude **> 1024 bytes**, or `abs(scale) > 1_000_000` | Precision-preserving **exponent form**, `<digits>e<-scale>` — every digit exact |
+| `scale` **< 0** — a legal and common Cassandra encoding | **Exponent form** at *any* magnitude, independent of the thresholds above: e.g. `unscaled = 123, scale = -2` renders `123e2` |
+| Otherwise (`scale >= 0`) | **Positional** form, e.g. `1.23`, `0.00123`, `-0.123` |
+
+A negative `scale` multiplies by a power of ten, so there is no positional form
+for it and none of the size thresholds apply. A consumer that parses these
+strings must therefore accept exponent form at any magnitude:
+`^-?[0-9]+(\.[0-9]+)?$` alone is **not** sufficient.
+
+Below the 32 KiB ceiling the render is **infallible**: a well-formed value always
+renders, whatever its scale. Above it the refusal is a typed, catchable error — a
+corrupt SSTable never aborts the host process.
 
 ## Write Operations
 

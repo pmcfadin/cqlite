@@ -256,24 +256,49 @@ fi
 #     file. Extract check_no_unexpected_zero_tests() VERBATIM from the gate (source
 #     of truth, no re-typed copy to drift) and drive it against synthetic cargo-style
 #     "Running tests/<name>.rs" / "test result:" log text.
-#     The extraction must carry _ansi_stripped_log TOO (issue #3400): the guard now parses an
-#     ANSI-STRIPPED COPY of the log, so without the helper every case below fail-closes with
-#     "resolved to <empty>" — measured PASS=20 FAIL=3 — and because this test runs in
-#     `tooling-tests`, a FULL-gate-only component, no `--lite` run can see it. In the real gate
-#     the helper reaches this `bash -c` body via `export -f`; here it has to be extracted.
-#     The `2` after each logfile is the EXPECTED TARGET COUNT (#3400 roborev E1): the guard now
-#     requires its parsed banner count to EQUAL the number of requested --test targets, because
-#     `>= 1` was partial credit that a log truncated after the first banner satisfies. Every zg
-#     fixture below carries exactly two `Running tests/` banners.
-HELPER_SRC=$(awk '/^_ansi_stripped_log\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
-FUNC_SRC=$(awk '/^  check_no_unexpected_zero_tests\(\) \{/{f=1} f{print} f&&/^  \}$/{exit}' "$GATE")
-if [ -z "$HELPER_SRC" ]; then
-  bad "could not extract _ansi_stripped_log() from $GATE — the guard calls it, and without it every case below fail-closes on an empty parse source"
-elif [ -z "$FUNC_SRC" ]; then
+# INDENTATION-AGNOSTIC extraction (issue #1699). This used to hard-code a two-space
+# indent, which broke the moment check_no_unexpected_zero_tests() was promoted from a
+# nested definition to a top-level one — a silent-coverage-loss shape: the extraction
+# yields empty and the behavioural cases below never run. Capture the definition's OWN
+# leading whitespace and terminate on the closing brace at that SAME indentation, so
+# the self-test follows the function instead of pinning its position.
+# DEPENDENCIES TRAVEL WITH THE FUNCTION (issue #1699, roborev round-16). The guard calls
+# _ansi_stripped_log, so extracting the guard alone left the helper undefined — and the
+# consequence was not a loud error: the redirection source resolved to the empty string, the
+# read loop consumed nothing, and the guard reported OK having parsed no lines. That is the
+# vacuous pass this whole file exists to prevent, produced by the harness itself. The guard now
+# also FAILS CLOSED on an unpreparable log, so this extraction being wrong reds instead of
+# greening — but both layers stay, because either alone has a silent failure mode.
+DEP_SRC=$(awk '
+  !f && /^[[:space:]]*_ansi_stripped_log\(\) \{/ {
+    f = 1
+    indent = $0; sub(/[^[:space:]].*$/, "", indent)
+    close_re = "^" indent "\\}$"
+    print
+    next
+  }
+  f { print; if ($0 ~ close_re) exit }
+' "$GATE")
+if [ -z "$DEP_SRC" ]; then
+  bad "could not extract _ansi_stripped_log() from $GATE — the guard calls it, and without it the guard parses NOTHING and reports OK"
+else
+  ok "extracted _ansi_stripped_log() (the guard's dependency) from the gate"
+  eval "$DEP_SRC"
+fi
+FUNC_SRC=$(awk '
+  !f && /^[[:space:]]*check_no_unexpected_zero_tests\(\) \{/ {
+    f = 1
+    indent = $0; sub(/[^[:space:]].*$/, "", indent)
+    close_re = "^" indent "\\}$"
+    print
+    next
+  }
+  f { print; if ($0 ~ close_re) exit }
+' "$GATE")
+if [ -z "$FUNC_SRC" ]; then
   bad "could not extract check_no_unexpected_zero_tests() from $GATE"
 else
-  ok "extracted check_no_unexpected_zero_tests() + _ansi_stripped_log() from the gate for behavioral testing"
-  eval "$HELPER_SRC"
+  ok "extracted check_no_unexpected_zero_tests() from the gate for behavioral testing"
   eval "$FUNC_SRC"
 
   mkdir -p "$tmp/zg"
@@ -289,7 +314,7 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 LOG
-  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_ok.log" 2 write_readback_content_tests graceful_shutdown_tests; then
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_ok.log" write_readback_content_tests graceful_shutdown_tests; then
     ok "zero-tests guard: known-0 ground-truth target does NOT false-positive in Pass 1"
   else
     bad "zero-tests guard: false-positived on the known-0 Pass-1 ground-truth target"
@@ -307,7 +332,7 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 LOG
-  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_bad.log" 2 write_readback_content_tests graceful_shutdown_tests; then
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_bad.log" write_readback_content_tests graceful_shutdown_tests; then
     bad "zero-tests guard: did NOT catch a THIRD write-support-#[cfg]-gated target running 0 tests"
   else
     ok "zero-tests guard: catches a THIRD unexpected 0-test target (the exact gap roborev found)"
@@ -325,7 +350,7 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 LOG
-  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_bad.log" 2; then
+  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_bad.log"; then
     bad "zero-tests guard: Pass 2 did NOT fail on a 0-test target (nothing is allowed 0 there)"
   else
     ok "zero-tests guard: Pass 2 fails on ANY 0-test target (no allowed-zero exceptions there)"
@@ -342,7 +367,7 @@ test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 running 2 tests
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s
 LOG
-  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_ok.log" 2; then
+  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_ok.log"; then
     ok "zero-tests guard: an all-green Pass 2 passes cleanly (no false-positive)"
   else
     bad "zero-tests guard: false-positived on an all-green Pass 2"
@@ -363,7 +388,7 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 3 tests
 test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
 LOG
-  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_all_ignored.log" 2 write_readback_content_tests graceful_shutdown_tests; then
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_all_ignored.log" write_readback_content_tests graceful_shutdown_tests; then
     ok "zero-tests guard: an all-#[ignore]d target does NOT trip the guard (distinguished from a truly-empty run)"
   else
     bad "zero-tests guard: false-positived on an all-#[ignore]d target (roborev regression)"

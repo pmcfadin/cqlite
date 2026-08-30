@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "cqlite-core",
+    "cqlite-ffi-common",
     "cqlite-cli",
     "cqlite-flight",
     "bindings/python",
@@ -18,6 +19,17 @@ members = [
 exclude = [
     "fuzz",
 ]
+
+# NOTE (issue #1716, epic #1688 finding AK5): do NOT add `default-members` here
+# expecting it to make a bare root build cheaper — it would do the OPPOSITE.
+# This workspace has a ROOT PACKAGE (`cqlite`, below), and cargo's default for
+# `default-members` in that case is THE ROOT PACKAGE ALONE (it is "all members"
+# only for a VIRTUAL workspace). Verified on this manifest: `cargo tree
+# --depth 0` at the root resolves to `cqlite` and nothing else. So a bare
+# `cargo build` already compiles the narrowest possible set, and spelling out a
+# `default-members` list would EXPAND it from 1 package to 14.
+# The unwired `tools/` crates (see each one's README) are compiled only by an
+# explicit `--workspace` or `-p`, never by a bare build.
 resolver = "2"
 
 [package]
@@ -184,6 +196,45 @@ strip = true
 [profile.release-unwind]
 inherits = "release"
 panic = "unwind"
+
+# Profiling profile for the WS0 per-function attribution work (issue #3248).
+#
+# WHY THIS EXISTS: `[profile.release]` sets `strip = true`, so a stock release binary
+# carries no symbols and per-function `perf` attribution against it is IMPOSSIBLE — the
+# profiler reports raw addresses and the region under study stays exactly as unattributed
+# as it was before you profiled. That is a silent failure: `perf record` exits 0 and
+# `perf report` prints a confident table of `[.] 0x00000000000224eb`.
+#
+# WHY NOT `--profile bench`: bench also inherits release and unstrips, but cargo writes it
+# to `target/release/`, which would clobber the release binaries the WS0 rig digests for
+# provenance (`scripts/perf/ws0_binary_snapshot.py`). A named profile gets its own
+# `target/perfprof/` and cannot collide.
+#
+# CODEGEN FIDELITY IS THE WHOLE POINT and it is MEASURED, not assumed: this profile changes
+# only debuginfo emission and symbol retention, never an optimization input (opt-level, lto,
+# codegen-units and panic are all inherited from release untouched). Deliberately NO
+# `-C force-frame-pointers` here — that WOULD alter codegen. Call-graph runs that need
+# unwinding use `perf record --call-graph dwarf` and are reported as STRUCTURAL evidence
+# only, never as the source of a headline per-function number.
+# Symbols-only profiling profile (issue #3248). See [profile.perfprof] below for why a
+# profiling profile is needed at all. This one exists because the two things a profiler
+# wants have DIFFERENT codegen costs, and only one of them is needed for the headline
+# numbers:
+#   * the SYMBOL TABLE  -> what flat per-function attribution needs. `strip = "none"`.
+#   * DEBUGINFO         -> only needed for `perf annotate` source interleaving and for
+#                          `--call-graph dwarf`. `debug = 1`, and it MOVES `.text`.
+# Measured on cqlite-flight: debug = 1 grows `.text` by 12,992 bytes (+0.156%) over
+# release, so `perfprof` is NOT codegen-identical. This profile drops debuginfo and keeps
+# only the symbol table, which is the codegen-faithful vehicle for AC1's headline figures.
+[profile.perfsym]
+inherits = "release"
+debug = 0
+strip = "none"
+
+[profile.perfprof]
+inherits = "release"
+debug = 1
+strip = "none"
 
 [profile.bench]
 debug = true

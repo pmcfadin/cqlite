@@ -15,6 +15,7 @@ mod result;
 mod runtime;
 mod stats;
 mod value;
+mod vectors;
 mod write;
 
 pub use config::{config_from_py, StreamingConfig};
@@ -88,6 +89,18 @@ fn _inet_from_bytes(py: Python<'_>, bytes: Vec<u8>) -> PyResult<PyObject> {
     value::inet_to_py(py, &bytes)
 }
 
+/// Test-support: decode a CQL VARINT from its raw big-endian two's-complement
+/// bytes through the exact production conversion (`value::varint_to_pyint`).
+///
+/// The twin of `_inet_from_bytes`/`_decimal_from_parts`, added so the committed
+/// cross-binding VARINT vectors (issue #1452) can be driven through the
+/// production path without an on-disk fixture per shape. Not part of the stable
+/// public API; the leading underscore marks it internal test support.
+#[pyfunction]
+fn _varint_from_bytes(py: Python<'_>, bytes: Vec<u8>) -> PyResult<PyObject> {
+    value::varint_to_pyint(py, &bytes)
+}
+
 /// Test-support: raise the Python exception the shared FFI error contract maps a
 /// named core `Error` variant to (issue #1451).
 ///
@@ -105,7 +118,7 @@ fn _inet_from_bytes(py: Python<'_>, bytes: Vec<u8>) -> PyResult<PyObject> {
 /// test support.
 #[pyfunction]
 fn _raise_mapped_core_error(variant: &str) -> PyResult<()> {
-    match cqlite_core::ffi_error_contract::FfiErrorVariant::from_name(variant)
+    match cqlite_ffi_common::error_contract::FfiErrorVariant::from_name(variant)
         .and_then(|v| v.sample_error())
     {
         Some(err) => Err(to_py_err(err)),
@@ -134,9 +147,17 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // test (issue #1453). See the fn doc comment.
     m.add_function(wrap_pyfunction!(_inet_from_bytes, m)?)?;
 
+    // Test-support: direct VARINT decoding path for the shared vector table
+    // (issue #1452). See the fn doc comment.
+    m.add_function(wrap_pyfunction!(_varint_from_bytes, m)?)?;
+
     // Test-support: shared FFI error-contract conformance probe (issue #1451).
     // See the fn doc comment.
     m.add_function(wrap_pyfunction!(_raise_mapped_core_error, m)?)?;
+
+    // Test-support: render every committed cross-binding vector through this
+    // binding's production paths (issue #1452). See `vectors.rs`.
+    m.add_function(wrap_pyfunction!(vectors::_ffi_common_render_vectors, m)?)?;
 
     // Register exception types
     error::register_exceptions(m)?;

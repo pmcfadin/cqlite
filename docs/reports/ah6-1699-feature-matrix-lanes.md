@@ -1,0 +1,594 @@
+# AH6 — feature-matrix gate lanes: observed to fire (issue #1699)
+
+Issue #1699 added four gate components — `flight-tests`, `legacy-heuristics`,
+`feature-iso-parquet`, `feature-iso-delta-scan`. This report is the issue's **AC2**
+deliverable: affirmative evidence that each lane **fires on a planted break** and
+**stays silent on a clean tree**.
+
+## Why a green lane is not evidence
+
+Presence in `scripts/agent-gate.sh --list` proves a lane is *registered*. A green
+SUMMARY line proves it *ran and found nothing*. Neither proves it **can fail**.
+`feature-iso-parquet` reports `PASS (0s)` on a warm tree, and from the SUMMARY block
+alone that is indistinguishable from a lane that compiles nothing and always exits 0.
+Design decision **D5** therefore requires each lane to be *observed* in both
+directions, and the delta spec states it as a binding requirement: *"Every new lane is
+observed to fire on a planted break and not to fire on a clean tree."*
+
+A planted-break harness that only ever plants breaks is the vacuous-guard shape of
+#3229 — it passes just as happily against a lane that fails unconditionally. So the
+harness asserts **both** directions per lane, and reports a lane that is red in both
+as a **HARNESS FAILURE**, never as a successful observation.
+
+## The harness
+
+`scripts/tests/test_agent_gate_feature_matrix_lanes.sh` — committed, re-runnable,
+and **opt-in**: it is deliberately absent from `COMPONENTS`, `LITE_COMPONENTS` and
+`DELTA_COMPONENTS`, because it performs real compiles and taxing every full gate to
+re-prove a static property is disproportionate (D5). Nightly `gate.yml` enrollment is
+out of scope — a workflow change needs #2910 registry enrollment.
+
+```bash
+export CQLITE_DATASETS_ROOT=/data/datasets   # the absolute root fetch-datasets.sh prints
+bash scripts/tests/test_agent_gate_feature_matrix_lanes.sh              # all four lanes
+bash scripts/tests/test_agent_gate_feature_matrix_lanes.sh flight-tests # one lane (exits 3: PARTIAL)
+```
+
+Properties that make the observation mean something:
+
+- **It runs the real component**, `bash scripts/agent-gate.sh --only <lane>`, never a
+  retyped cargo command. A retyped command would prove that a cargo invocation works;
+  the subject here is the gate component.
+- **`--only` exit codes are load-bearing and are not the usual 0/1.** A PARTIAL run
+  that found nothing exits **3** (the gate refuses to let a partial run be scripted
+  into a green claim); a PARTIAL run with a failed component exits **1**. The harness
+  additionally parses the component's own SUMMARY line and requires exit code and
+  status to agree, so a gate that mis-reported one of them could not be mistaken for
+  an observation.
+- **All mutation happens in a throwaway `git worktree add --detach` copy.** #2926
+  makes a mid-run tree mutation a gate FAIL, so a harness that edited the tree its own
+  gate was running in would be the very defect it exists to catch. Plants are applied
+  and reverted **between** runs, never during one; the copy is removed on an `EXIT`
+  trap including on failure.
+- The copy gets its **own `CARGO_TARGET_DIR`** (outside the copy, so the revert cannot
+  sweep it), so a lane's clean and planted runs share compilation.
+- Reverts are uniform (`git checkout -- . && git clean -fd`) and **verified** —
+  a tree that will not revert is reported as a harness error rather than silently
+  contaminating the next lane.
+
+## Observed results
+
+Run at **`2bc66a103923ae5d31ce5a37785d21b2a11b25c1`** — on the worker box,
+`CQLITE_DATASETS_ROOT=/data/datasets`. Harness elapsed **504 s** (8 runs: one clean and one planted
+per lane). **All four lanes fired**, each red NAMING its planted symbol, and the harness verified its
+own invariant: `observed-commit: 2bc66a103923ae5d31ce5a37785d21b2a11b25c1 (captured at start; the
+throwaway copy was made from THIS sha)` and `live-tree: UNCHANGED`.
+
+> **RE-TAKEN, and why it had to be.** The previous record said *"Run at `37385a734` — the head this
+> PR ships"*. That sentence became **false** as the branch advanced: by the time it was noticed there
+> had been **64 commits to `scripts/agent-gate.sh`** since that observation, including changes to the
+> census wording, the closure-report split and the `required-features` scope — i.e. to the very lanes
+> the record describes. **A measurement is only about the tree it was taken on**, so a record that
+> names a stale sha *and* asserts it is the shipped head is worse than one that names no sha at all:
+> the first invites reliance, the second invites a question. Found by self-review of this file rather
+> than by a reviewer.
+>
+> The re-take also answers the question the staleness raised: after those 64 commits **all four lanes
+> still detect their incident class**, and each red still names its plant, so the change did not erode
+> the property the harness exists to demonstrate. The isolation pairings confirm the mutual property
+> directly — `feature-iso-parquet` is broken by planting a **delta-scan** reference
+> (`ah6_planted_delta_scan_marker`) and `feature-iso-delta-scan` by planting a **parquet** one
+> (`ah6_planted_parquet_marker`); `legacy-heuristics` by `ah6_planted_legacy_heuristics_break` and
+> `flight-tests` by `ah6_planted_flight_break`.
+
+| lane | planted break | clean tree | planted tree | attributed to |
+|------|---------------|-----------|--------------|---------------|
+| `feature-iso-parquet` | a `#[cfg(all(test, feature = "parquet"))]` fn at the root of `cqlite-core/src/lib.rs` calling a `#[cfg(all(test, feature = "delta-scan"))]` fn — compiles with both features on (clippy's ~30-feature cqlite-core arm), unresolved with parquet alone, and **invisible to `cargo check --lib`** because it is `cfg(test)`. #1978's class exactly. | **PASS** (exit 3, 77 s) | **FAIL** (exit 1, 20 s) | `ah6_planted_delta_scan_marker` |
+| `feature-iso-delta-scan` | the mirror: a `#[cfg(all(test, feature = "delta-scan"))]` fn calling a `#[cfg(all(test, feature = "parquet"))]` fn. | **PASS** (exit 3, 76 s) | **FAIL** (exit 1, 15 s) | `ah6_planted_parquet_marker` |
+| `legacy-heuristics` | a **new** `cqlite-core/tests/ah6_planted_legacy.rs` holding a `#[cfg(feature = "legacy-heuristics")] #[test]` with an inverted assertion. | **PASS** (exit 3, 138 s) | **FAIL** (exit 1, 8 s) | `ah6_planted_legacy_heuristics_break` |
+| `flight-tests` | a **new** `#[cfg(test)]` unit-test module in `cqlite-flight/src/`, wired into `src/lib.rs`. | **PASS** (exit 3, 68 s) | **FAIL** (exit 1, 28 s) | `ah6_planted_flight_break` |
+
+**This record has been RE-TAKEN TWICE, and both re-takes were forced by a finding rather than by a
+refresh.** The first record, taken at `94833d510`, was found by the C intent audit to be
+**unreproducible with the committed harness**: the `flight-tests` plant had since moved from a new
+`cqlite-flight/tests/*.rs` integration target to a `#[cfg(test)]` module under `src/`, because the lane's
+descope to `--lib --bins` means an integration-target plant can no longer fire. That table was evidence
+for a harness that no longer existed — on this issue of all issues, a defect rather than a clerical slip.
+The second record (`3fbe5d2dd`, 815 s) was superseded when roborev round 19 and the C re-audit
+independently found that the two isolation plants **did not discriminate the instrument** (above), so the
+plants changed and the record had to be taken again. The table above is the run at the shipped head.
+
+The harness prints `observed-commit:` from the SHA it captured at start, so a record cannot silently
+describe a different tree than the one it examined — which is the mechanism that makes a stale record
+*visible* rather than merely forbidden. The pattern across three records is worth naming: **a changed
+plant invalidates the observation as surely as changed code does**, because the plant is half the
+experiment.
+
+### The isolation plants were NOT DISCRIMINATING until round 19, and now they are (MEASURED)
+
+roborev round 19 and the C re-audit found the same gap independently, and it is the sharpest instance of
+this report's own thesis turned on the report: **both isolation plants were ordinary library items, so a
+bare `cargo check --lib` would have caught them too.** The observation was therefore TRUE and RED and
+still did not establish the claim it was cited for — that the shipped instrument
+(`cargo test --lib --no-run`) catches a class `cargo check` cannot see. It measured a claim nobody
+doubted while standing in for the one that matters. A red that does not discriminate is the mirror image
+of a green that measured nothing.
+
+Both plants are now gated on `test` as well as the feature (`#[cfg(all(test, feature = "parquet"))]`),
+which is #1978's shape exactly rather than its neighbourhood: `cfg(test)` code is compiled only under
+`--test`, so the plant is INVISIBLE to `cargo check --lib`. Measured on the planted tree, at the lane's
+own invocation and feature set:
+
+| instrument | result | names the planted symbol? |
+|------------|--------|---------------------------|
+| `cargo check -p cqlite-core --no-default-features --features all-compression,parquet --lib` (the instrument spec R4 FORBIDS) | **rc=0 — the plant is invisible** | no (0 occurrences) |
+| `cargo test -p cqlite-core --no-default-features --features all-compression,parquet --lib --no-run` (the SHIPPED instrument) | **rc=101** | yes — `error[E0425]: cannot find function ah6_planted_delta_scan_marker in the crate root`, 3 occurrences |
+
+Both runs under `RUSTFLAGS="-D warnings"`, in a throwaway `git worktree`, cold cache. The first attempt at
+this measurement is recorded too, because it failed in the direction that matters: omitting
+`--package cqlite-core` made cargo resolve the features against the workspace root package, and BOTH
+instruments returned rc=101 — `error: the package 'cqlite' does not contain these features`. Read
+carelessly that is "not discriminating"; read properly it is a broken measurement, and the tell was that
+the planted symbol appeared **0 times** in the failing output. An oracle whose failure looks like its
+subject failing is exactly what this issue is about, so the check that saved it — requiring the output to
+NAME the planted symbol rather than merely be non-zero — is the same rule the harness applies to the lanes.
+
+Two of the plants do extra duty beyond "the lane can fail":
+
+- The `legacy-heuristics` plant is a **new file**, so the lane's red also proves its
+  `--test` target set is genuinely **derived** from the committed source (it picked up
+  a sixth gated file with no gate edit; a hard-coded list would have ignored it and
+  stayed green) and that the lane **executes** rather than merely compiles — a
+  compile-only lane stays green on a failing assertion, which is exactly D3's premise.
+- The `flight-tests` plant is a target the gate names **nowhere**, so its red proves
+  the lane reaches past the three cqlite-flight targets already covered
+  (`query_semantics_flight_parity`, `issue_3095_flight_static_columns`, and
+  `memory-budget`'s dhat target).
+
+**Attribution.** A bare red is not evidence: a lane that broke for an unrelated reason
+produces the same exit code and the same SUMMARY line. The harness therefore requires
+each planted run's output to **name the planted symbol** (the right-hand column above);
+a red that does not is reported as `FIRED-UNATTRIBUTED` and fails the harness.
+
+**Exit codes.** `--only` on a component that found nothing exits **3** (`PARTIAL` — the
+gate refuses to let a partial run be scripted into a green claim); with a failed
+component it exits **1**. The harness checks the exit code and the SUMMARY status line
+and requires them to agree.
+
+The durations in the table are the harness's own `--only` runs from a fresh throwaway
+worktree against a shared, partly-warm `CARGO_TARGET_DIR`. They are neither the cold
+figures nor the gate's warm figures below; they are recorded for reproducibility, not
+as the lanes' cost.
+
+
+## `flight-tests`: a whole-package invocation was NON-DETERMINISTIC (#3383)
+
+The lane shipped as `cargo test --no-fail-fast -p cqlite-flight` — the whole package.
+That form turned out to red **2 out of 3 runs**, for a reason that has nothing to do
+with any defect the lane exists to find.
+
+`cqlite-flight`'s `fast_arm_stream_stops_when_the_client_drops_it` (in
+`issue_3058_bypass_path_taken`) asserts a **race outcome**: the client's stream drop
+must beat the producer. Run alone it wins reliably; run alongside 39 other integration
+binaries competing for the same 16 cores it does not.
+
+| how the target was run | host load | result |
+|---|---|---|
+| alone, `cargo test -p cqlite-flight --test issue_3058_bypass_path_taken` (×3) | 74 | **3 / 3 PASS** |
+| inside the whole-package `flight-tests` lane (×3) | — | **2 of 3 runs FAILED** |
+
+**A merge-gate lane that reds 2-in-3 carries no information**, and it is worse than
+uninformative: it teaches every worker that a red from this lane means "re-run it",
+which is precisely the habit that lets a real red through. Since `cargo test -p` cannot
+exclude one target, the invocation became an explicit list:
+
+```
+cargo test --no-fail-fast -p cqlite-flight --lib --bins --test <T1> --test <T2> …
+```
+
+The list is **derived from `cargo metadata` at run time**, so the #2039 "a hand-picked
+list is a second registry that drifts silently" lesson still holds — adding
+`cqlite-flight/tests/foo.rs` puts `--test foo` on the command line with no gate edit,
+and the harness above still proves it by planting a brand-new target the gate names
+nowhere. Measured after the change, on the same box:
+
+| lane invocation | declared | run | skipped (`required-features`) | skipped (flaky) | secs |
+|---|---|---|---|---|---|
+| whole package `-p` | 42 | 41 | 1 (silently) | — | 128 (cold) / 27 (warm) |
+| derived `--test` list | 42 | **40** | 1 (named) | 1 (named, `#3383`) | 60 |
+
+Two properties are worth separating, because only one of them is curated:
+
+- the `required-features` subtraction is **derived** — `cargo test --test X` is a *hard
+  error* on a target whose features are unmet, where `-p` skipped it silently;
+- the flake subtraction is **curated, and labelled as such in code**. Flakiness is not
+  mechanically decidable from source: nothing in a file says "this assertion races". So
+  instead of a derivation that pretends to measure it, both halves of every entry are
+  enforced — a numeric issue number (so the list cannot grow without a filed issue
+  obliging its removal) and a target the package actually declares (so a rename or
+  deletion reds rather than quietly excusing nothing).
+
+`--bins` is explicit and load-bearing. An explicit selector suppresses every target kind
+not named, so omitting it would have silently stopped executing `main.rs`'s 2 unit tests
+— the change would itself have opened the never-executed hole this lane exists to close.
+
+## An INTERRUPTED observation used to exit 0 (roborev round-29) — measured, with a caveat
+
+The harness's `cleanup` was wired as `trap cleanup EXIT INT TERM` and inherits `$?`. On a signal
+delivered between commands — or delivered to the harness while its child had just exited 0 — `$?` is
+**zero**, so a killed observation exited **successfully**: an incomplete run reporting the verdict of
+a complete one, which is the defect class this whole issue exists to eliminate, in the harness that
+produces its evidence.
+
+Fixed by signal-specific traps carrying an explicit status. Measured on the committed fix:
+
+```
+$ nohup bash scripts/tests/test_agent_gate_feature_matrix_lanes.sh feature-iso-parquet & HPID=$!
+$ sleep 18; kill -TERM "$HPID"
+FATAL: observation ABORTED by SIGTERM — this run is NOT evidence (rc=143)
+harness exit status = 143      live checkout: clean      leftover throwaway worktrees: 0
+```
+
+**The caveat, because it changes what "abort" means here: the trap fired 73 s after the signal**, not
+immediately — bash defers a trap until the running foreground command returns, and the harness was
+inside a `cargo` invocation. So the run does not stop promptly; it stops at the next command
+boundary and *then* reports a correct non-zero verdict. The property that matters (a killed run is
+never mistaken for a passing one) holds; the property one might assume from the word "abort" (it
+stops now) does not.
+
+**And the first two attempts to verify this measured nothing, which is worth more than the fix.**
+Attempt one passed `--lanes feature-iso-parquet`, but the harness takes lane names positionally, so
+it exited immediately on `unknown lane`. Attempt two killed the pid `pgrep` returned first — an
+already-exited `setsid` wrapper — while the real harness (a different pid) ran to completion and
+printed `RESULT: PARTIAL`. Both attempts would have been reported as "verified" by anyone reading
+only the exit status of the *test harness around the test*. The third captured the pid from `$!` and
+signalled that. **A verification whose own subject was never signalled is indistinguishable from a
+successful verification** — the same shape as the guards this report is about, one level out.
+
+## A COUNTEREXAMPLE TO THIS REPORT'S OWN PREMISE: the unit half is not fully deterministic either (#3420)
+
+Recorded here rather than left for someone to discover, because it weakens a claim this report makes.
+
+The descope below rests on a premise: the **integration** half of cqlite-flight is non-deterministic, so
+the lane runs the **unit** half, which is deterministic enough to gate on. The first premise is measured
+(2 distinct victims in 4 runs). The second now has a counterexample.
+
+`saturation::tests::proc_thread_gauge_rises_with_load_and_settles` failed inside the lane with
+`the thread count must rise while 8 extra threads are parked (base=59, loaded=50)`. The numbers are the
+diagnosis: the count **fell by 9** while the test parked 8 threads, because it asserts on a
+**process-wide** thread count inside a 386-test parallel harness where unrelated tests spawn and join
+threads throughout. It cannot distinguish "my threads did not start" from "other threads exited between
+my samples", so its **pass is not evidence either** — the same shape as the wall-clock-race class, with a
+thread count in place of a clock. Filed as **#3420**, with the fix left to its own PR off `origin/main`
+per the #3380 precedent rather than folded in here.
+
+| condition | result |
+|---|---|
+| inside the `flight-tests` lane (SIDE lane, box under load) | **FAIL** — `base=59, loaded=50` |
+| standalone `cargo test -p cqlite-flight --features test-util --lib`, 6 runs, quiet box | **6 PASS / 0 FAIL** |
+
+**What this does and does not change.** It does not overturn the descope: one unsound test with an
+identified mechanism is fixable, whereas the integration suite presented an unbounded victim list, which
+is what the owner ruling turned on. But the accurate statement is **"the unit half has one known unsound
+test, filed"**, not "the unit half is deterministic" — and until #3420 lands, this lane can intermittently
+red any lane's gate of record. That cost is real, it is imposed by this change, and it is stated here
+rather than discovered by the next worker.
+
+It is also, in the narrow sense, the lane working: the test had **never been executed by any lane or CI
+job** before this one, which is the entire thesis of #1699.
+
+## `flight-tests`: the descope to `--lib` (#3384) — the non-determinism was the SUITE, not one test
+
+The amendment above (an explicit derived list minus one flaky victim) was **withdrawn on
+further measurement**. Four consecutive whole-package runs of the lane were recorded, and
+the pattern is not "one racing assertion":
+
+| run | lane result | victim |
+|---|---|---|
+| 1 | **PASS** | — |
+| 2 | **FAIL** | `issue_3058_bypass_path_taken::fast_arm_stream_stops_when_the_client_drops_it` |
+| 3 | **PASS** | — |
+| 4 | **FAIL** | `issue_2370_gauge_readback_test` |
+
+**~50% non-deterministic, with TWO DISTINCT VICTIMS in four runs.** Four hypotheses were
+ruled out by measurement rather than by argument:
+
+| hypothesis | how it was tested | verdict |
+|---|---|---|
+| whole-box load (other lanes' gates) | the victim target alone at host load 74, ×3 | **RULED OUT** — 3/3 PASS |
+| the gate's `nice`/`taskpolicy` wrapper | lane re-run without it, ×2 | **RULED OUT** — 2/2 PASS |
+| intra-package test parallelism, fixable by throttling | lane at `--test-threads=2`, ×2 | **RULED OUT** as a *discriminator* — 2/2 PASS, i.e. it did not distinguish |
+| concurrent MAIN-lane compilation | failures reproduced under `--only flight-tests`, where MAIN runs nothing | **RULED OUT** |
+
+**Quarantining victims one at a time was rejected** (owner ruling). Two distinct victims in
+four runs is not a converging series — nothing suggests a widened lane would not find a
+third — so the list would grow once per red with no visible end, turning the quarantine into
+the dumping ground its own design rule forbids. A curated excusal list is legitimate only
+while it is small, closed, and every entry is on a path out; none of those held. The general
+suite-hygiene defect is filed as **#3384**, with **#3383** as its first individual victim.
+
+**The lane therefore runs `cargo test --no-fail-fast -p cqlite-flight --lib --bins`** — 387
+`--lib` unit tests plus `main.rs`'s 2, observed deterministic in every run of this session,
+and re-verified **PASS 3/3** through the real component after the change (6s / 7s / 8s warm).
+
+**The deliverable of the descope is the DECLARATION, not the narrowing.** This whole issue
+exists because a lane that omits coverage looks identical to a lane that covers it, so a
+narrowed lane that stayed quiet would reintroduce the defect one level down. On every run,
+pass or fail, the lane prints a coverage census to **both** the gate's stdout (as `>>>`
+lines) and its component log. Verbatim from `flight-tests.log`:
+
+```
+==== [flight-tests] COVERAGE CENSUS (issue #1699 / #3384) ====
+cargo test --no-fail-fast -p cqlite-flight --lib --bins (UNIT tests only, #1699/#3384)
+COVERAGE CENSUS — WHAT THIS LANE DOES NOT RUN:
+  cqlite-flight declares 42 integration (test) targets. THIS LANE EXECUTES NONE OF THEM.
+  (1 of the 42 could not run here in any case: unmet required-features.)
+  WHY: the integration half of this package is ~50% NON-DETERMINISTIC under
+       intra-package parallelism — 4 whole-package runs went PASS/FAIL/PASS/FAIL
+       with 2 different victims (issue_3058_bypass_path_taken,
+       issue_2370_gauge_readback_test). Ruled out by measurement: box load,
+       nice, --test-threads=2, concurrent MAIN-lane compilation.
+       Issues: #3384 (the general suite-hygiene defect), #3383 (first victim).
+  WHO DOES RUN THEM: CI's Flight tier — .github/workflows/flight-ci.yml line 229,
+       'cargo test --package cqlite-flight', mandated on cqlite-flight/** AND
+       cqlite-core/**, with the 'required' check failing closed on it (#2910).
+       Locally, flight-query-semantics-oracle runs 2 of these targets and
+       memory-budget runs 1 (--test issue_1494_producer_mem_budget).
+  This omission is DECLARED, not silent: widening the lane back is a small
+       change once #3384 is fixed (the derivation machinery is retained).
+declared targets with unmet required-features: issue_1494_producer_mem_budget(required-features[dhat-heap]:off[dhat-heap])
+enabled features (cargo tree -p, package-scoped): default test-util test-util (*) 
+==== end census ====
+```
+
+The `42` is **counted from `cargo metadata` at run time**, never hard-coded, so the stated
+gap cannot drift into a false claim; a failed count is a FAIL naming the derivation, because
+an understated gap is exactly the silent omission this issue exists to eliminate.
+
+**Consequences in code, both of them about not leaving a vacuous guard behind:**
+
+- The flake-quarantine plumbing (`FLIGHT_FLAKE_SKIPS` + its validator) is **retired, not
+  kept inert**. It existed only to paper over #3384; with no lane executing those targets it
+  has no subject, and an empty curated list plus a caller-less validator is a guard
+  reporting OK having measured nothing.
+- `check_no_unexpected_zero_tests` keys on `Running tests/<name>.rs` and **explicitly
+  disclaims `--lib`**, so calling it on a `--lib --bins` selection would be that same
+  empty-subject guard. Its `--lib` analogue `check_unittest_targets_ran` is called instead:
+  each selected unittest target must be OBSERVED *and* must have run a NON-ZERO count, and
+  the pass prints them — `src/lib.rs(387 tests) src/main.rs(2 tests) executed`.
+- `_package_test_targets` stays **called** (it feeds the census);
+  `check_declared_test_targets_observed` is retained **uncalled**, saying so at the top,
+  because it is what the widened lane calls again once #3384 is fixed.
+- The observation harness's `flight-tests` plant moved from a new
+  `cqlite-flight/tests/*.rs` integration target to a new `cqlite-flight/src/` unit-test
+  module wired into `src/lib.rs`. The old plant could no longer fire, and **a plant that
+  cannot fire turns the harness into the vacuous green it exists to prevent**.
+
+**Cost of the descope, stated plainly.** Local pre-push execution of ~38 `cqlite-flight`
+integration targets is lost. Three still run locally in other components
+(`flight-query-semantics-oracle` ×2, `memory-budget` ×1); all of them still run on CI's
+Flight tier before merge, mandated on `cqlite-flight/**` and `cqlite-core/**`, and
+`required` cannot go green without it (#2910).
+
+## Cost
+
+Two different numbers, and the second **cannot be derived from the first**.
+
+### Per-component durations
+
+| lane | measurement | secs | note |
+|------|-------------|------|------|
+| `feature-iso-parquet` | `cargo check --no-default-features --features all-compression,parquet` | 18 | **cold**; lib-only `cargo check` — the *superseded* shape (D2 replaced it with `cargo test --lib --no-run`) |
+| `feature-iso-delta-scan` | `cargo check --no-default-features --features all-compression,delta-scan` | 10 | **cold**; same superseded shape |
+| `legacy-heuristics` (build half) | `cargo build -p cqlite-core --features legacy-heuristics` | 26 | **cold** |
+| `flight-tests` | `cargo test -p cqlite-flight` (whole package) | 128 | **cold**; the *superseded* shape (#3383 replaced it with a derived `--test` list) |
+| `legacy-heuristics` (component) | first green run of the component as shipped | 37 | first green run |
+| `flight-tests` (component) | SUMMARY line | 27 | **warm cache**; superseded whole-package shape |
+| `flight-tests` (component, derived `--test` list) | SUMMARY line | 60 | **warm cache**, 40 of 42 targets — the shipped shape (#3383) |
+| `legacy-heuristics` (component) | SUMMARY line | 7 | **warm cache** |
+| `feature-iso-parquet` (component) | SUMMARY line | 0 | **warm cache** — *not* the lane's cost |
+| `feature-iso-delta-scan` (component) | SUMMARY line | 1 | **warm cache** — *not* the lane's cost |
+
+The warm numbers are labelled as warm on purpose. A warm `0s` is the cost of cargo
+deciding there is nothing to rebuild; it is not what the lane costs on a tree that
+actually changed. The cold `cargo check` figures for the two isolation lanes measure
+the **superseded** instrument (lib-only `cargo check`); the shipped lanes run
+`cargo test --lib --no-run`, which additionally compiles the lib's `#[cfg(test)]`
+modules — the #1978 incident class a bare `cargo check` is blind to.
+
+### Added full-gate wall time
+
+**METHOD CHANGED, AND WHY — a baseline-vs-after subtraction is not measurable on this
+fleet, so the question is answered a better way.**
+
+The plan was a baseline full gate at `origin/main` versus the gate of record on this
+branch, run sequentially. It was attempted and **abandoned mid-run, deliberately**: this
+worker box hosts five lane worktrees, and while the baseline ran the 16-core box sustained
+a load average of **52–86** from co-scheduled gates in lanes 1697/1701/1705. A four-component
+delta cannot be recovered from two totals taken under load that varies by more than the
+delta itself, and the "after" run would sit under different load again. Publishing the
+subtraction would have been a number with no measurement behind it. (The same load is the
+prime suspect in #3380, an intermittent guard failure observed during this work.)
+
+**The load-independent answer, which is also the one that matters: is the SIDE lane the
+critical path?** All four lanes are dispatched to the concurrent SIDE lane by
+`_component_lane`, each in its own `CARGO_TARGET_DIR`, because each builds cqlite-core at a
+feature set diverging from MAIN's and would otherwise thrash MAIN's shared target dir
+(#2657). Concurrent work adds wall time **only insofar as it outlasts MAIN**. So the added
+wall time is read off a SINGLE run by comparing the SIDE lane's total against MAIN's:
+
+- if MAIN still finishes last, the four lanes cost **zero** added wall time — they hid
+  entirely inside MAIN's long pole;
+- if SIDE now finishes last, the added wall time is `SIDE_total - MAIN_total`, and only
+  that excess.
+
+This needs no baseline, is immune to whole-box load (both lanes are inside the same run,
+under the same load), and is computed from the gate of record's own per-component
+durations. The figure is reported in the PR from that SUMMARY block.
+
+**These are different numbers, and summing the per-component durations does not yield
+the second.** The lanes run in the concurrent **SIDE** lane, each in its own
+`CARGO_TARGET_DIR` — `_component_lane` (`scripts/agent-gate.sh:2217`) dispatches all
+four there, because each builds cqlite-core at a feature set that diverges from MAIN's
+and would otherwise thrash MAIN's shared target dir (#2657). Concurrent work adds wall
+time only to the extent it outlasts MAIN, so the naive sum of component seconds
+overstates the added wall time, possibly to ≈0. Both numbers are reported; neither is
+presented as the other.
+
+## References
+
+- Design: `openspec/changes/feature-matrix-gate-lanes/design.md` (D2, D3, D4 + its #3383 amendment and #3384 second correction, D5, D6)
+- Integration-suite non-determinism (the descope's subject): #3384; first individual victim: #3383
+- Harness: `scripts/tests/test_agent_gate_feature_matrix_lanes.sh`
+- Registration pin: `scripts/tests/test_agent_gate_summary.sh` (runs in the **FULL** gate via
+  `tooling-tests`, `agent-gate.sh:8443` — NOT in `--lite`: `tooling-tests` is not in `LITE_COMPONENTS`,
+  `agent-gate.sh:2234`. The `--lite` claim was measured and withdrawn.)
+
+## Does this change make #3380 more likely? (disclosure)
+
+#3380 is an intermittent failure of `test_roborev_review_guard.sh`'s #3312 structural assert, reproduced on
+clean `origin/main` and correlated with box load. Since this change adds four SIDE-lane components, the
+question is fair and is answered from the gate's own concurrency model rather than guessed:
+
+**Peak concurrency: UNCHANGED.** `AGENT_GATE_JOBS` defaults to `min(4, ncpu/2)`; MAIN takes one slot and the
+SIDE lane runs at most `AGENT_GATE_JOBS - 1` of its members **at once**. So SIDE peak stays 3 heavy processes
+whether SIDE has 7 members or 11. This change adds no simultaneous load.
+
+**Exposure WINDOW: modestly longer.** The four lanes add total SIDE work, so the SIDE lane runs longer, and
+`tooling-tests` / `roborev-lints` — both deliberately pinned to the strictly-serial MAIN lane *because* their
+embedded shell self-tests "starved under co-scheduled SIDE-lane load" (#2657) — now have a longer interval in
+which they can overlap SIDE work.
+
+**So: this change does not create #3380 and does not raise its peak trigger condition, but it plausibly
+widens the window in which the trigger can occur.** "#1699 didn't cause it" is true and is not the whole
+answer; the whole answer is the one worth recording.
+
+Not mitigated here, deliberately. The available mitigations are moving the lanes to the MAIN lane — which
+reintroduces exactly the shared-target thrash (#2657) the SIDE placement exists to avoid — or lowering
+`AGENT_GATE_JOBS`, a fleet-wide performance decision. Both are worse than the flake and both are the owner's
+call. The right fix is #3380 itself, whose assert appears to be a false positive on heredoc prose
+independently of load.
+
+## The round-3 `-D warnings` fix was itself INERT until round 5 (recorded, not quietly repaired)
+
+Round 3 correctly identified that `RUSTFLAGS="-D warnings" cargo build && cargo test` guarded only the
+build. The fix put `env RUSTFLAGS="-D warnings"` on both invocations — and **that form is silently
+ignored whenever `CARGO_ENCODED_RUSTFLAGS` is set in the environment**, because cargo reads the encoded
+variable first and disregards `RUSTFLAGS` entirely when it is present. Round 5 found it (Medium).
+
+So for two rounds this lane advertised a warnings-as-errors guard that, in such an environment, enforced
+nothing — while its SUMMARY line stayed green and the report above recorded a 255 s cost increase as the
+"price of the lane actually enforcing what it claims". The cost was real; the enforcement was
+conditional on an environment variable nobody had checked.
+
+**Measured in both directions**, because the whole point of this issue is that a guard's own claim is not
+evidence. A crate containing an unused variable, with `CARGO_ENCODED_RUSTFLAGS` set to the **empty
+string**:
+
+| form | result |
+|---|---|
+| `env RUSTFLAGS="-D warnings" cargo build` (the round-3 fix) | **rc=0** — a warning, nothing more |
+| `_deny_warnings cargo build` (the round-5 fix) | **rc=101** — hard error |
+| `_deny_warnings` with a non-empty operator value (`--cfg=operator_flag`) | **rc=101**, operator flag preserved |
+
+An **empty-but-set** value is enough to suppress it, which is the quietest available route to a vacuous
+guard, so the plain branch **unsets** the encoded variable rather than assuming it is absent. Where the
+operator did set flags they are **appended to** (cargo's `\x1f` element separator) rather than replaced —
+discarding them would trade one silent behaviour change for another — and the append is announced on
+stderr, which every caller redirects into its component log.
+
+This is worth recording beyond the fix itself: **the lane's own doctrine caught the lane**. Two
+consecutive review rounds accepted `RUSTFLAGS=` as self-evidently sufficient because it *reads* as the
+CI-equivalent invocation. What surfaced it was asking the question this issue is built on — not "is the
+flag set?" but "is it in effect?" — which is the same distinction as "which lane compiles this feature?"
+versus "which lane executes it?".
+
+## The co-required-feature census miscounted its own gap (round 5, Low)
+
+The round-4 census grepped a single-line, fixed-**order** cfg pattern and counted matching
+**attributes** as "test bodies". Both error directions were live:
+
+- **over-report** — the gated `use cqlite_core::Value` import in `database_interface_tests.rs` was
+  counted as an omitted test body, so the lane announced **three** where **two** exist;
+- **under-report** (the permissive direction) — a reordered or multi-line cfg matched nothing at all.
+
+For a change whose entire deliverable is an accurate declaration of what a lane does not run, a census
+that miscounts its own gap is not a cosmetic defect. The replacement parses the attribute cluster:
+multi-line attributes accumulate until their parens balance, `feature = "…"` tokens are read in any
+order, the attached item is classified from its own first code line, and test-ness comes from an
+attribute **path ending in `test`** — a path test rather than a substring search, so a feature named
+`test-util` cannot pose as `#[test]`. Non-test gated items are reported separately and never folded into
+the body count: support code compiling out alongside its callers is not omitted coverage.
+
+A cfg carrying `not(feature = "X")` is deliberately **not classified**. It means the body compiles when X
+is **off** — the opposite of a gap — and guessing either way would be a silent miscount, so such sites
+are counted and **reported as unclassified**. That is the same principle as the `flight-tests` census:
+the omission a reader cannot see is the one that does damage.
+
+## The census's feature oracle was workspace-scoped, and my "verification" of it could not fail (round 6, Medium)
+
+The co-required census asks "which features are enabled at this lane's feature set?" and answered it with
+`cargo metadata --features legacy-heuristics`. **`cargo metadata` resolves the entire workspace and unions
+features across every member**, so it reported cqlite-core as having five features enabled that
+`cargo test -p cqlite-core --features legacy-heuristics` does not enable:
+
+| oracle | features reported |
+|---|---|
+| `cargo metadata` (workspace-wide) | **14** — incl. `arrow`, `arrow-shape-corpus`, `cli-helpers`, `parquet`, `producer-fault-injection` |
+| `cargo tree -p cqlite-core` (package-scoped, dev edges included) | **9** |
+
+The five extras are enabled by **other workspace members** — `cqlite-flight` (`arrow`,
+`arrow-shape-corpus`, `producer-fault-injection`), `cqlite-py` and `cqlite-node` (`cli-helpers`,
+`parquet`), `ws0-corpus-gen` (`cli-helpers`) — checked per dependency edge including `kind=dev`. **None is
+a dev-dependency of cqlite-core**, so none is in the lane's build graph.
+
+**The direction is what makes this a defect rather than a curiosity.** The census reports *gaps*: "this
+body needs feature X, which is not enabled here". An over-broad enabled set makes a real gap look
+reachable and **drops it from the census** — a silent under-report, in the one output whose entire purpose
+is to state omissions. Nothing is lost today (`experimental` is absent from both sets, so the census as
+shipped is correct either way), but a test gated on `all(legacy-heuristics, parquet)` would have compiled
+out of the lane and been reported as covered.
+
+### The part worth keeping: my control could not fail
+
+The previous version of this report and the code comment beside it both claimed the breadth was
+**dev-dependency unification** and that it had been **verified not to be over-broad**, on the evidence
+that `cargo metadata --manifest-path cqlite-core/Cargo.toml` returned the identical set.
+
+**That was not a control.** For a workspace *member*, cargo locates the enclosing workspace and resolves
+the whole thing regardless of which member's manifest you point at — so the two commands were the same
+query twice, and agreement was guaranteed before it was run. The claim was stated with the confidence of
+a measurement while being a tautology.
+
+The generalisable lesson, which is the same one this whole issue is about one level up: **a check that
+cannot come out the other way is not evidence.** "Compiling a feature is not covering it" and "a control
+that cannot fail is not a control" are the same sentence about different subjects. Both got past two
+review rounds because the *form* looked rigorous — a second command, a matching answer — and nobody asked
+what result would have falsified it.
+
+Now `_resolved_package_features` uses `cargo tree -p <pkg> -e features,normal,build,dev`, which is scoped
+to the package actually being built while still counting genuine dev-dependency unification (measured to
+make no difference here — requested anyway, because omitting it would bias the set the other way and
+over-report gaps). A failed resolve returns non-zero and the lane FAILs naming the census, so "could not
+measure" never becomes "nothing to report". Pinned by `1699-featoracle-*` in
+`test_agent_gate_summary.sh`, including the behavioural regression that a dependent-only feature stays
+absent **and** its complement — that the genuinely-enabled features are present — so the assert cannot
+pass on an empty or garbage set.
+
+## Cost change from the roborev round-3 `-D warnings` fix (recorded, not absorbed)
+
+Round 3 found that `RUSTFLAGS="-D warnings" cargo build && cargo test` applied the flag to the **build only**,
+leaving the `cargo test` recompile of `cfg(test)` code unguarded — the exact #1981 dead-code shape the lane
+exists to catch. Fixing it (`env RUSTFLAGS=` on both invocations) means the test compile no longer shares the
+build's artifacts, so the lane pays a full recompile at this feature set:
+
+| `legacy-heuristics` component | measured |
+|---|---|
+| before the fix (test compile unguarded) | **37 s** |
+| after the fix (both halves under `-D warnings`) | **292 s** |
+
+That is a ~255 s increase on a cold cache for this lane, and it is the price of the lane actually enforcing
+what it claims. It is recorded here rather than left for someone to discover as an unexplained slowdown. The
+lane remains in the concurrent SIDE lane, so per the wall-time method above the added *gate* wall time is
+still `max(0, SIDE_total - MAIN_total)` — this increase only matters if it makes SIDE the critical path, which
+the gate of record's own component durations will show.

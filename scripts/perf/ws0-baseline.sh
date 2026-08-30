@@ -150,7 +150,52 @@ DO_BUILD=1
 # corpus must still run, and this issue has already broken three documented commands by forbidding
 # an input instead of labelling it. The two words come from `ws0_canonical_corpus.MODE_*`.
 BASELINE_MODE="baseline"
+# The counted events. CONFIGURABLE since #3248, whose AC4 clock basis needs
+# msr/aperf,msr/mperf,msr/tsc,ref-cycles, which this two-event default cannot supply. The
+# DEFAULT IS UNCHANGED so an AC0 reproduction run is configured byte-identically to the
+# #3096 session it reproduces. Validated by ws0_validate.perf_event_list (non-empty,
+# charset-allowlisted, DUPLICATE-FREE) and recorded in the session manifest, because
+# cycles/row and IPC are claims about specific counters.
+#
+# GROWING THIS SET PROVOKES PMU MULTIPLEXING, which perf handles by time-sharing counters and
+# SCALING the counts — an estimate reported as an ordinary integer. read_perf_counters refuses
+# a scaled count (it now reads perf's enabled-percentage, which nothing read before #3248), so
+# an over-large set fails closed rather than reporting quietly wrong numbers.
 EVENTS="cycles,instructions"
+# Where the measured binaries come from. Default unchanged; #3248 needs target/perfsym because
+# [profile.release] sets strip = true, so a release binary carries NO symbols and cannot be
+# attributed per-function at all. Implies --no-build (the build writes only to target/release).
+BIN_DIR=""
+# AC1 sampling profile (#3248). Empty = no profiling, which is the default: AC0 must run on an
+# UNPERTURBED instrument, and a sampling session costs measurable observer overhead (measured on
+# this box: ~5% on cycles with a concurrent record). When set, every timed counting window is
+# ALSO covered by a CPU-wide `perf record` on the same pinned CPUs.
+#
+# The two sessions do NOT multiplex — MEASURED, not assumed: `cycles` and `instructions` both
+# reported 100.00% enabled with a concurrent `perf record -e cycles -C` on the same CPUs, and the
+# sampling session collected samples with zero lost. Had they multiplexed, perf would have SCALED
+# the counts and `read_perf_counters` would now refuse them (#3248's multiplex guard).
+#
+# A profiled run is DISTINGUISHABLE FROM A BASELINE IN THE ARTIFACT without a new manifest field,
+# because a profile needs symbols and `[profile.release]` strips: such a run is necessarily
+# `--bin-dir target/perfsym`, which the manifest records. So `results.json` already says which
+# binaries produced any given figure.
+PROFILE_OUT=""
+# A PRIME sample frequency, deliberately. A round number risks lock-step with a periodic activity
+# in the workload (a batch boundary, a flush interval), which aliases the profile toward or away
+# from whatever shares its period.
+PROFILE_FREQ=499
+# THE ACTIVE SAMPLER PID, AT FILE SCOPE SO `on_exit` CAN SEE IT.
+#
+# `perf_stat_c` cleans up its own sampler on the NORMAL path, but a TERM/HUP delivered to the
+# DRIVER mid-measurement runs `on_exit` and exits without ever returning into `perf_stat_c` --
+# so the sampler and its `sleep 86400` were orphaned for 24 hours. A `local` in the function
+# is invisible to the trap handler, which is why this is a global.
+_ACTIVE_PROFILER_PID=""
+# The external box-load timeseries to judge this session's quiescence against (#3248).
+# OPT-IN, and its ABSENCE IS RECORDED rather than silent -- see the wiring below the
+# measurement loop for why it is not mandatory.
+QUIESCENCE_TIMESERIES=""
 # `--validate-args-only`: run every ARGUMENT check, print a stamp, and exit 0 having
 # touched NOTHING outside this process (issue #3272 review R1). See the exit point below
 # for why the alternative — asserting acceptance by running the real driver until it
@@ -183,6 +228,38 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
   --out DIR            Results dir (default \$REPO/target/perf-ws0-3096/<ts>-<pid>, created
                        atomically). REFUSED if it exists and is non-empty: measuring into a
                        used dir mixes artifacts from different sessions into one report.
+  --events LIST        Comma-separated hardware events to count (default $EVENTS).
+                       Validated non-empty, charset-allowlisted and DUPLICATE-FREE:
+                       read_perf_counters SUMS lines by event name, so a repeated event would
+                       report DOUBLE its true count as an ordinary integer. Recorded in the
+                       session manifest. NOTE a larger set can provoke PMU multiplexing, which
+                       SCALES the counts; a scaled count is refused at report time, never
+                       published.
+  --bin-dir DIR        Take the measured binaries from DIR instead of target/release, and
+                       IMPLY --no-build (the build writes only to target/release, so building
+                       would populate a directory nobody measures). Exists because
+                       [profile.release] sets strip = true: a release binary carries no symbols,
+                       so per-function attribution against it is impossible (#3248). The reps
+                       run FROZEN COPIES either way, so the digests still describe the bytes
+                       that ran — this field records WHICH BUILD they came from, which those
+                       digests cannot say.
+  --profile-out DIR    ALSO take a CPU-wide sampling profile over every timed counting window,
+                       written to DIR as profile-<tag>.data (#3248 AC1). Off by default: a
+                       sampling session costs observer overhead, so a baseline must not carry
+                       one. Needs symbol-bearing binaries, so pair it with --bin-dir; a
+                       stripped binary yields a profile of raw addresses and says nothing.
+  --profile-freq N     Sampling frequency for --profile-out (default $PROFILE_FREQ, a prime:
+                       a round number risks lock-step with a periodic activity in the
+                       workload, which aliases the profile).
+  --quiescence-timeseries FILE
+                       Judge this session against an EXTERNAL box-load timeseries (the
+                       sampler in scripts/perf/, one JSON line per 10s with a competing-
+                       process census). Boundary samples are taken around the measurement
+                       loop and ws0_quiescence.py REFUSES the run if any in-window sample
+                       shows a competing process. Opt-in, because the timeseries is produced
+                       outside the rig and demanding one would fail every box without it --
+                       but its ABSENCE IS RECORDED in the manifest as
+                       `quiescence: NOT VERIFIED`, so a run can never silently look verified.
   --no-build           Skip the release build; use the binaries already in target/release.
   --non-baseline       Measure a corpus that is NOT the canonical measurement corpus. By
                        DEFAULT the corpus is checked against the canonical pin in
@@ -230,6 +307,11 @@ while [[ $# -gt 0 ]]; do
     --out) OUT_DIR="$2"; shift 2 ;;
     --no-build) DO_BUILD=0; shift ;;
     --non-baseline) BASELINE_MODE="non-baseline"; shift ;;
+    --events) EVENTS="$2"; shift 2 ;;
+    --bin-dir) BIN_DIR="$2"; DO_BUILD=0; shift 2 ;;
+    --profile-out) PROFILE_OUT="$2"; shift 2 ;;
+    --quiescence-timeseries) QUIESCENCE_TIMESERIES="$2"; shift 2 ;;
+    --profile-freq) PROFILE_FREQ="$2"; shift 2 ;;
     --validate-args-only) VALIDATE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     # Every unrecognized argument is an ERROR, never ignored: a typo'd flag that
@@ -399,13 +481,188 @@ fi
 # dir is refused at all, and why it is refused rather than auto-suffixed: scripts/perf/lib-outdir.sh.
 require_unused_out_dir "${OUT_DIR:-}"
 
+# --events and --bin-dir are validated HERE, ABOVE the --validate-args-only boundary, because
+# "refusing a value after acting on it is not refusing it" (#3272 round 1, finding 10: `--reps
+# 200000` passed the driver's own check and was refused only by the REPORT, after 200,000
+# full-corpus reps). The first version of these two flags had exactly that defect: the event list
+# was checked by the manifest writer and the bin dir at BIN assignment, both BELOW this line, so a
+# duplicated event or a missing directory would have been caught only after a cargo build, a cache
+# drop and a server start.
+#
+# The event list goes through THE SAME validator the manifest reader applies
+# (ws0_validate.perf_event_list) rather than a bash re-implementation, because a second
+# implementation of a rule is a second thing to drift: the driver would accept what the reporter
+# refuses, or worse the reverse. Pure computation — no build, no sysctl, no perf, no measurement.
+if ! _events_err="$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import Invalid, perf_event_list
+from ws0_collect import REQUIRED_EVENTS
+try:
+    chosen = perf_event_list("--events", sys.argv[2])
+except Invalid as exc:
+    print(exc, file=sys.stderr)
+    raise SystemExit(1)
+# THE COLLECTORS REQUIRE THESE UNCONDITIONALLY, so an event list without them completes the
+# WHOLE measurement and only then fails at report time -- "refusing a value after acting on
+# it is not refusing it", the rule this rig states for itself (#3272 round 1 finding 10). The
+# documented clock-only set for the AC4 characterisation is exactly such a list, so this is a
+# live footgun rather than a hypothetical one. Read from ws0_collect.REQUIRED_EVENTS rather
+# than re-listed here: two copies of one requirement is the drift this rig keeps finding.
+# NO APOSTROPHES IN THIS COMMENT -- it sits inside a shell single-quoted python program, so
+# one apostrophe terminates the string. The first version of this comment did exactly that.
+missing = [e for e in REQUIRED_EVENTS if e not in chosen]
+if missing:
+    print("--events omits " + ", ".join(repr(m) for m in missing)
+          + ", which every collector requires. cycles/row and IPC are derived from them, so a"
+          " list without them measures for minutes and then fails at REPORT time. Add them:"
+          " they cost nothing alongside any other events.", file=sys.stderr)
+    raise SystemExit(1)
+' "$HERE" "$EVENTS" 2>&1)"; then
+  echo "FATAL: --events is not a usable event list." >&2
+  echo "       $_events_err" >&2
+  exit 2
+fi
+
+if [[ -n "$PROFILE_OUT" ]]; then
+  # NON-MUTATING above the boundary. `--validate-args-only` promises in words that "nothing
+  # was executed ... no state", and the first version of this check ran `mkdir -p` HERE, so a
+  # validation-only invocation CREATED a directory. Creation moved below the boundary; what is
+  # checked here is only that the path could be created -- its parent exists and is writable.
+  _prof_parent="$(dirname -- "$PROFILE_OUT")"
+  if [[ -e "$PROFILE_OUT" && ! -d "$PROFILE_OUT" ]]; then
+    echo "FATAL: --profile-out '$PROFILE_OUT' exists and is not a directory." >&2
+    exit 2
+  fi
+  if [[ ! -d "$PROFILE_OUT" && ( ! -d "$_prof_parent" || ! -w "$_prof_parent" ) ]]; then
+    echo "FATAL: --profile-out '$PROFILE_OUT' does not exist and its parent" >&2
+    echo "       '$_prof_parent' is not a writable directory, so it cannot be created." >&2
+    exit 2
+  fi
+  if ! [[ "$PROFILE_FREQ" =~ ^[1-9][0-9]{0,4}$ ]]; then
+    echo "FATAL: --profile-freq '$PROFILE_FREQ' is not a positive integer below 100000." >&2
+    echo "       A frequency of 0 samples nothing and reads exactly like a quiet profile." >&2
+    exit 2
+  fi
+fi
+
+# --profile-out WITHOUT --bin-dir CAN NEVER SUCCEED, so it is refused HERE rather than after a
+# build (#3248, roborev job 69 finding 3).
+#
+# `[profile.release]` sets `strip = true`, so the default build ALWAYS produces symbol-free
+# binaries and the post-build frozen-binary check must ALWAYS fail. The previous shape passed
+# argument validation, CLAIMED both output directories, ran a full release build, and only then
+# refused -- leaving claimed directories behind for a configuration that had no reachable
+# success. Refusing an impossible configuration after acting on it is the same defect as
+# refusing a bad VALUE after acting on it.
+if [[ -n "$PROFILE_OUT" && -z "$BIN_DIR" ]]; then
+  echo "FATAL: --profile-out requires --bin-dir, and this is not a preference." >&2
+  echo "       [profile.release] sets strip = true, so the default build produces binaries with" >&2
+  echo "       NO symbols and a sampling profile of them attributes nothing. This combination" >&2
+  echo "       has no reachable success, so it is refused now rather than after a build." >&2
+  echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+  echo "         ... --bin-dir \$PWD/target/perfsym --profile-out <dir>" >&2
+  exit 2
+fi
+
+# A PROFILE OF A STRIPPED BINARY IS THE SILENT FAILURE THIS FEATURE EXISTS TO AVOID.
+# `[profile.release]` sets `strip = true`, so the default binaries carry ZERO symbols and
+# `perf record` against them exits 0 and yields a confident table of raw addresses. Accepting
+# `--profile-out` with them would produce exactly the #3217-class artifact this issue was
+# funded to stop producing. Checked here rather than trusted: the symbol table is READ.
+if [[ -n "$PROFILE_OUT" ]]; then
+  _prof_bin="${BIN_DIR:-$REPO_ROOT/target/release}"
+  for _b in ws0-scan-bench cqlite-flight flight-loadgen; do
+    # `grep -c`, NOT `grep -q`, AND THE STATUS IS NOT READ FROM THE PIPELINE.
+    #
+    # This driver runs under `set -o pipefail`, and `grep -q` EXITS AS SOON AS IT MATCHES,
+    # which closes the pipe and gives `nm` a SIGPIPE -- so the pipeline reports FAILURE on the
+    # SUCCESS case. The first version of this guard therefore refused every CORRECT input: a
+    # perfsym binary with 2,997 Rust symbols was reported as carrying none, which would have
+    # blocked every legitimate profiling run. A guard that fails closed on correct input is
+    # still a defect, and it is the same family as the rest of this issue -- the observer
+    # (grep exiting early) changed the thing being measured (the producer exit status).
+    # A MISSING BINARY IS FATAL HERE, NOT SKIPPED (roborev job 73 finding 1). The `-e` guard
+    # below used to mean an ABSENT binary passed this loop silently: combined with a --bin-dir
+    # check that verified only that the DIRECTORY existed, an empty or partial --bin-dir passed
+    # `--validate-args-only` outright, and a real run then relaxed host sysctls and claimed
+    # output directories before `build_release_binaries` rejected it. `--profile-out` requires
+    # `--bin-dir` (above) and `--bin-dir` implies `--no-build`, so nothing will ever create it --
+    # the configuration has NO reachable success and belongs in argument validation. This is the
+    # preflight half of a fail-open I already fixed on the post-build side in round 1; the same
+    # `[[ -e ]]` skip was still here.
+    if [[ ! -f "$_prof_bin/$_b" ]]; then
+      echo "FATAL: --profile-out was given with --bin-dir '$_prof_bin', but '$_b' is not a file" >&2
+      echo "       there. --bin-dir implies --no-build, so nothing will create it and this run" >&2
+      echo "       cannot succeed. Build the profile first, e.g." >&2
+      echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+      exit 2
+    fi
+    _syms=$(nm "$_prof_bin/$_b" 2>/dev/null | grep -c '_RN' || true)
+    if [[ "${_syms:-0}" -eq 0 ]]; then
+      echo "FATAL: --profile-out was given, but $_prof_bin/$_b carries NO Rust symbols." >&2
+      echo "       A sampling profile of a stripped binary reports raw addresses and attributes" >&2
+      echo "       nothing -- the profiler exits 0 and the failure is silent, which is the" >&2
+      echo "       exact class this issue was funded to stop producing." >&2
+      echo "       Build a symbol-bearing profile and point --bin-dir at it:" >&2
+      echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+      echo "         ... --bin-dir \$PWD/target/perfsym --profile-out <dir>" >&2
+      exit 2
+    fi
+  done
+fi
+
+# `-f` AS WELL AS `-r`, BECAUSE THE MESSAGE ALREADY CLAIMED "file" (roborev job 71 finding 3).
+# `! -r` alone passes a readable DIRECTORY and a FIFO: a directory then fails much later inside
+# ws0_quiescence.py, and a FIFO can BLOCK the reader indefinitely -- in both cases AFTER the full
+# measurement has run, which is exactly what an up-front argument check exists to prevent. `-f`
+# follows symlinks, so a symlink to a real record still passes.
+if [[ -n "$QUIESCENCE_TIMESERIES" ]] && { [[ ! -f "$QUIESCENCE_TIMESERIES" ]] || [[ ! -r "$QUIESCENCE_TIMESERIES" ]]; }; then
+  echo "FATAL: --quiescence-timeseries '$QUIESCENCE_TIMESERIES' is not a readable regular file." >&2
+  echo "       It is the external box-load record this session is judged against; an" >&2
+  echo "       unreadable one cannot establish anything, so it is refused up front rather" >&2
+  echo "       than after the measurement. A directory or FIFO is refused HERE for the same" >&2
+  echo "       reason: a FIFO would block the reader after the whole measurement had run." >&2
+  exit 2
+fi
+
+if [[ -n "$BIN_DIR" && ! -d "$BIN_DIR" ]]; then
+  echo "FATAL: --bin-dir '$BIN_DIR' is not a directory." >&2
+  echo "       --bin-dir implies --no-build (the cargo build writes only to target/release), so" >&2
+  echo "       nothing will create it. Build it first, e.g." >&2
+  echo "         cargo build --profile perfsym -p cqlite-flight -p flight-loadgen" >&2
+  exit 2
+fi
+
+# ...AND THE DIRECTORY IS NOT THE BINARIES (roborev job 73 finding 1). An EMPTY but existing
+# --bin-dir satisfied the check above, so `--validate-args-only` reported ARGUMENTS OK for a run
+# that could not possibly execute: --bin-dir implies --no-build, so a missing measured binary is
+# never created. Checked here, before any side effect, for the same reason as every other
+# argument check -- refusing an impossible configuration AFTER acting on it is the defect.
+if [[ -n "$BIN_DIR" ]]; then
+  for _rb in ws0-scan-bench cqlite-flight flight-loadgen; do
+    if [[ ! -f "$BIN_DIR/$_rb" ]]; then
+      echo "FATAL: --bin-dir '$BIN_DIR' does not hold '$_rb'." >&2
+      echo "       --bin-dir implies --no-build, so nothing will create it and this run cannot" >&2
+      echo "       succeed. Build all three into that directory first, e.g." >&2
+      echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+      exit 2
+    fi
+    if [[ ! -x "$BIN_DIR/$_rb" ]]; then
+      echo "FATAL: --bin-dir '$BIN_DIR/$_rb' exists but is not executable." >&2
+      echo "       The reps execute it directly, so this run cannot succeed." >&2
+      exit 2
+    fi
+  done
+fi
+
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
   # `baseline-mode` is in the stamp so the hermetic self-tests can observe WHICH claim the run
   # makes without executing anything. The canonical-corpus COMPARISON itself is necessarily below
   # this boundary (it reads the corpus's recorded identity off disk), like the schema check.
   echo "ARGUMENTS OK (--validate-args-only): reps=$REPS temps=[$TEMPS] arms=[$ARMS]" \
        "port=$PORT scan-passes=$SCAN_PASSES step=$STEP_DURATION cold-step=$COLD_STEP_DURATION" \
-       "baseline-mode=$BASELINE_MODE"
+       "baseline-mode=$BASELINE_MODE events=[$EVENTS] bin-dir=[${BIN_DIR:-<default target/release>}]"
   echo "  nothing was executed: no sysctl write, no build, no cache drop, no perf, no measurement."
   exit 0
 fi
@@ -469,6 +726,18 @@ verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
 on_exit() {
   local rc=$?
   trap - EXIT INT TERM HUP
+  # THE SAMPLER FIRST. A TERM/HUP during a measurement never returns into `perf_stat_c`, so
+  # its own cleanup does not run and `perf record` -- which waits on `sleep 86400` -- would be
+  # orphaned for 24 hours, still sampling, on a box a later lane will try to measure on.
+  # SIGINT rather than SIGKILL so perf finalises its output; `|| true` throughout because a
+  # cleanup handler may not fail the run, and `wait` is bounded because the process is a
+  # direct child.
+  if [[ -n "${_ACTIVE_PROFILER_PID:-}" ]]; then
+    echo "cleanup: stopping the active sampling profile (pid $_ACTIVE_PROFILER_PID)" >&2
+    kill -INT "$_ACTIVE_PROFILER_PID" 2>/dev/null || true
+    wait "$_ACTIVE_PROFILER_PID" 2>/dev/null || true
+    _ACTIVE_PROFILER_PID=""
+  fi
   stop_server
   restore_sysctls
   exit "$rc"
@@ -501,7 +770,72 @@ relax_perf_sysctls
 # SITES stay here so what this driver actually does to the filesystem remains visible at its top
 # level, and so the ARGUMENT/CREATION boundary is legible in one file: the refusal is called far
 # above, `--validate-args-only` exits between them, and creation happens only here.
-BIN="$REPO_ROOT/target/release"
+BIN="${BIN_DIR:-$REPO_ROOT/target/release}"
+# THE SOURCE DIRECTORY, captured HERE and recorded in the session manifest (#3248).
+#
+# It must be captured at this line and not later, because `record_measured_binaries` REASSIGNS
+# `BIN` to `$OUT_DIR/measured-bin/` (lib-binaries.sh:177) once it has frozen copies of the three
+# executables. That freeze is what makes the digests describe the bytes that actually ran — but
+# it also means that after it, `$BIN` no longer says which BUILD they came from, and a perfsym
+# run and a release run become indistinguishable in results.json. This variable is the only
+# record of that distinction, so it is taken before the reassignment can occur.
+# The profile directory is CREATED here, below the --validate-args-only boundary, so a
+# validation-only run leaves no state behind (its path was already checked above).
+# --profile-out IS CLAIMED, NOT JUST CREATED (#3248, roborev job 66 finding 2).
+#
+# Profile filenames are DETERMINISTIC (`profile-<tag>.data`), so two sessions pointed at one
+# directory silently overwrite each other, and a session can validate or attribute another
+# session's capture. The rig already refuses a reused `--out` for exactly this reason
+# (`require_unused_out_dir`); `--profile-out` had no equivalent, which made the weaker
+# half of the pair the one an operator would reach for.
+#
+# `mkdir` (not `mkdir -p`) on a marker directory is the claim: it is atomic, so of two
+# concurrent sessions exactly one wins.
+if [[ -n "$PROFILE_OUT" ]]; then
+  if ! mkdir -p "$PROFILE_OUT"; then
+    echo "FATAL: could not create --profile-out '$PROFILE_OUT'." >&2
+    exit 2
+  fi
+  if ! mkdir "$PROFILE_OUT/.ws0-profile-claim" 2>/dev/null; then
+    echo "FATAL: --profile-out '$PROFILE_OUT' is ALREADY CLAIMED by another measurement" >&2
+    echo "       session (its .ws0-profile-claim marker exists). Profile filenames are" >&2
+    echo "       deterministic, so sharing the directory would overwrite one session's" >&2
+    echo "       captures with another's — and a profile attributed to the wrong session is" >&2
+    echo "       worse than a missing one. Name an unused directory." >&2
+    exit 2
+  fi
+  if ! find "$PROFILE_OUT" -maxdepth 1 -name 'profile-*.data' -print -quit | grep -q .; then
+    :
+  else
+    echo "FATAL: --profile-out '$PROFILE_OUT' already holds profile-*.data from an earlier" >&2
+    echo "       run. Measuring into it would mix two sessions' captures under one name." >&2
+    exit 2
+  fi
+fi
+BIN_DIR_RECORDED="$BIN"
+# WHETHER A SAMPLING PROFILE WAS ATTACHED, and at what frequency (#3248, roborev job 60
+# finding 1). Recorded because `bin_dir` CANNOT establish it: the same symbol-bearing build
+# runs with and without `--profile-out`, so a committed artifact claiming bin_dir
+# distinguishes a profiled run was WRONG. It matters because a profiled run pays measurable
+# observer overhead (measured: 1.6-4.3% on rows/s), so its throughput figures must never be
+# read as a baseline -- and results.json is where a reader looks to find that out.
+if [[ -n "$PROFILE_OUT" ]]; then
+  PROFILE_RECORDED="on freq=$PROFILE_FREQ"
+else
+  PROFILE_RECORDED="off"
+fi
+# WHETHER THIS SESSION IS JUDGED FOR QUIESCENCE AT ALL. Recorded either way: a run with no
+# timeseries is not "quiet", it is UNVERIFIED, and the difference has to survive into
+# results.json or a reader cannot tell a checked run from an unchecked one.
+if [[ -n "$QUIESCENCE_TIMESERIES" ]]; then
+  QUIESCENCE_RECORDED="judged against $QUIESCENCE_TIMESERIES"
+else
+  QUIESCENCE_RECORDED="NOT VERIFIED (no timeseries supplied)"
+fi
+# Existence was already refused above the --validate-args-only boundary; this only reports it.
+if [[ -n "$BIN_DIR" ]]; then
+  echo "measured bin source: $BIN_DIR (--bin-dir; implies --no-build)"
+fi
 # The status is checked EXPLICITLY rather than left to `set -e`. `create_out_dir` runs in a
 # COMMAND SUBSTITUTION (it must echo the default name it chose), so its `exit 2` terminates only
 # that subshell; the driver survives on `set -e` alone. That works — and a fail-closed refusal
@@ -525,6 +859,35 @@ OUT_DIR="$(create_out_dir "${OUT_DIR:-}" "$REPO_ROOT/target/perf-ws0-3096")" || 
 # terminates the run (a refusal resting on `set -e` alone is one `set +e` from decorative).
 build_release_binaries || exit 2
 record_measured_binaries || exit 2
+
+# THE SYMBOL CHECK, AGAIN, ON THE BINARIES THAT WILL ACTUALLY RUN (#3248, roborev job 64
+# finding 1 — High).
+#
+# The pre-boundary check above is necessary but NOT SUFFICIENT, and its insufficiency is the
+# exact failure it was written to prevent. It skips a binary that does not exist yet
+# (`[[ -e ... ]]`), so on a CLEAN CHECKOUT with `--profile-out` and no `--bin-dir`:
+# validation passed (nothing to check), `build_release_binaries` then produced STRIPPED
+# binaries because `[profile.release]` sets `strip = true`, and profiling recorded a file
+# full of raw addresses — silently, with perf exiting 0. A guard that only fires when the
+# subject already exists cannot protect the path that creates the subject.
+#
+# Checked here on `$BIN`, which `record_measured_binaries` has just repointed at the FROZEN
+# copies under measured-bin/ — the bytes this session actually executes, not the ones that
+# happened to be in target/ when the arguments were parsed.
+if [[ -n "$PROFILE_OUT" ]]; then
+  for _b in "${WS0_MEASURED_BINARIES[@]}"; do
+    _fsyms=$(nm "$BIN/$_b" 2>/dev/null | grep -c '_RN' || true)
+    if [[ "${_fsyms:-0}" -eq 0 ]]; then
+      echo "FATAL: --profile-out was given, but the FROZEN binary $BIN/$_b carries no Rust" >&2
+      echo "       symbols, so a sampling profile of it would attribute nothing." >&2
+      echo "       [profile.release] sets strip = true, so the default build cannot be" >&2
+      echo "       profiled. Build a symbol-bearing profile and pass --bin-dir:" >&2
+      echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+      exit 2
+    fi
+  done
+  echo "profile symbols: verified on all ${#WS0_MEASURED_BINARIES[@]} frozen binaries"
+fi
 
 # --- THE SCHEMA, THEN THE REQUEST DERIVED FROM IT (#3272 round 6 R2 + round 10 M1) ----
 # Both live in scripts/perf/lib-inputs.sh, which carries the full argument for each: the DDL is a
@@ -596,6 +959,10 @@ WS0_CFG_CLIENT_CPUS="$CLIENT_CPUS" \
 WS0_CFG_STEP_DURATION="$STEP_DURATION/$COLD_STEP_DURATION" \
 WS0_CFG_FLIGHT_ENDPOINT="$FLIGHT_ENDPOINT" \
 WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
+WS0_CFG_EVENTS="$EVENTS" \
+WS0_CFG_BIN_DIR="$BIN_DIR_RECORDED" \
+WS0_CFG_PROFILE="$PROFILE_RECORDED" \
+WS0_CFG_QUIESCENCE="$QUIESCENCE_RECORDED" \
 python3 -c '
 import os, pathlib, sys
 sys.path.insert(0, sys.argv[1])
@@ -631,12 +998,30 @@ try:
 except Invalid as exc:
     print(f"FATAL: {exc}", file=sys.stderr)
     raise SystemExit(1)
-print(f"corpus pin:   {pin[\"data_db_sha256\"]} ({pin[\"rows\"]} rows / {pin[\"data_db_bytes\"]} B,"
-      f" {len(pin[\"components\"])} components)"
+# NO BACKSLASH-ESCAPED QUOTES INSIDE AN f-STRING EXPRESSION, and no nested same-type quotes
+# either. Both are traps here, for different reasons, and the first one was a LIVE BUG that
+# made this whole step raise SyntaxError before it could pin anything (#3248):
+#   * `f"{pin[\"k\"]}"` — a backslash inside the expression part is a SyntaxError on EVERY
+#     CPython to date, including 3.12: the tokenizer reads the backslash as a line
+#     continuation ("unexpected character after line continuation character").
+#   * `f"{pin["k"]}"` — nested same-type quotes are legal only from 3.12 (PEP 701), so using
+#     them would silently move the failure onto older interpreters instead of removing it.
+# Binding the values to locals first sidesteps both and works on any version. This step is
+# FATAL when it fails, so a syntax error here blocked the entire measurement path.
+_sha = pin["data_db_sha256"]
+_rows = pin["rows"]
+_bytes = pin["data_db_bytes"]
+_ncomp = len(pin["components"])
+_reps = config["reps"]
+_temps = config["temps"]
+_arms = config["arms"]
+_passes = config["scan_passes"]
+_canon = canonical["label"]
+print(f"corpus pin:   {_sha} ({_rows} rows / {_bytes} B, {_ncomp} components)"
       " recorded in session-corpus-pin.json BEFORE the first rep")
-print(f"config pin:   reps={config[\"reps\"]} temps=[{config[\"temps\"]}] arms=[{config[\"arms\"]}]"
-      f" scan-passes={config[\"scan_passes\"]} — the reporter READS these, never its own argv")
-print(f"canonical pin: {canonical[\"label\"]} — recorded in session-corpus-pin.json"
+print(f"config pin:   reps={_reps} temps=[{_temps}] arms=[{_arms}]"
+      f" scan-passes={_passes} — the reporter READS these, never its own argv")
+print(f"canonical pin: {_canon} — recorded in session-corpus-pin.json"
       " (canonical_corpus), which the reporter REQUIRES and re-derives the verdict from")
 ' "$HERE" "$CORPUS" "$OUT_DIR" "$REPO_ROOT" \
   || { echo "FATAL: could not pin this session's corpus identity — the report REQUIRES it," >&2
@@ -696,8 +1081,13 @@ if absent:
     raise SystemExit(1)
 p = pinning_record_path(pathlib.Path(sys.argv[2]))
 p.write_text(json.dumps(rec, indent=1) + "\n")
-print(f"pinning pin:  {rec[\"server_cpus\"]} verified against"
-      f" {rec[\"topology_root\"]} on {rec[\"host\"]} — recorded in {p.name} so the report cites an"
+# Locals first — same trap as the corpus-pin print above: a backslash inside an f-string
+# expression is a SyntaxError on every CPython, and this step is fatal when it fails.
+_scpus = rec["server_cpus"]
+_troot = rec["topology_root"]
+_host = rec["host"]
+print(f"pinning pin:  {_scpus} verified against"
+      f" {_troot} on {_host} — recorded in {p.name} so the report cites an"
       " OBSERVATION, not lib-cpu.sh by name")
 ' "$HERE" "$OUT_DIR" \
   || { echo "FATAL: could not record this session's CPU-pin verification — the report REQUIRES" >&2
@@ -748,6 +1138,49 @@ drop_caches_if_cold() {
 # from — never defined here, because this function is EXTRACTED and driven directly by
 # scripts/tests/test_ws0_cpu_pinning_guards.sh, and a constant it could only get from the
 # driver would make the extracted copy die on an unbound variable instead of diagnosing.
+# perf_record_c <outfile> — THE SECOND SANCTIONED perf INVOCATION (#3248 AC1).
+#
+# It lives in THIS file, beside `perf_stat_c`, for the reason lib-measure.sh records about the
+# counting wrapper: `perf_invocation_lint_tree` discovers wrapper ownership by grepping this
+# file, lints exactly the owner in `owner` mode and every other `scripts/perf/*.sh` in
+# `library` mode — where DEFINING a wrapper is itself a finding. A record wrapper in a library
+# would invert layer 1 of the guard.
+#
+# CPU-WIDE ONLY, on the same verified sibling pair the counting window uses. `-C` is supplied
+# here and is separately ASSERTED by the lint's END checks: a sampling profile pinned to
+# nothing samples whichever CPUs the scheduler happened to use, which is not the measured arm.
+# No caller-supplied options are accepted, exactly as in `perf_stat_c`.
+#
+# It samples until SIGINT, which `perf_stat_c` sends when the counting window closes, so the
+# profile covers EXACTLY the counted window rather than a guessed duration. perf finalises the
+# file on SIGINT; a guessed `sleep` would either truncate the profile or run past the window
+# and sample the teardown.
+perf_record_c() {
+  local outfile="$1"
+  # `exec`, NOT a plain call, AND THIS IS THE WHOLE CORRECTNESS OF THE HOOK.
+  #
+  # The caller runs this function BACKGROUNDED, so `$!` is the PID of the SUBSHELL bash forked
+  # for it — not of perf. Signalling that subshell kills the subshell and orphans perf, which
+  # then never finalises its output: the first version of this hook produced a 31 MB file whose
+  # `data size` header field was ZERO, and `perf report` refused it with "Was the 'perf record'
+  # command properly terminated?". Every profile of that run was unusable, and nothing in the
+  # measurement said so — the rig exited fine and the files existed at a plausible size.
+  # `exec` REPLACES the subshell with perf, so `$!` IS perf and the caller's SIGINT reaches it.
+  #
+  # NO `-g`. Call-graph collection is deliberately absent, because this rig's profiling profile
+  # is `perfsym` — symbols WITHOUT frame pointers, chosen so codegen matches `release`. Frame
+  # pointers are the ONLY call-graph mechanism that works on this host (dwarf unwinding hangs
+  # past 120s on a binary this size; LBR is unavailable on this KVM guest, measured), so asking
+  # for stacks from a build that has no frame pointers yields unreliable ones. AC1's headline
+  # figures are FLAT SELF-TIME, which needs the sample IP and nothing else. Call-graph evidence
+  # comes from a separate, explicitly PERTURBED frame-pointer build and is reported as structural
+  # only. See docs/reports/ws0-3248-artifacts/raw/callgraph-capability-census.md.
+  #
+  # Defaults on the driver globals, same standalone-extraction rule as perf_stat_c below: two
+  # suites text-extract these functions and run them under `set -u`.
+  exec perf record -e cycles -F "${PROFILE_FREQ:-499}" -C "$SERVER_CPUS" -o "$outfile" -- sleep 86400
+}
+
 perf_stat_c() {
   local outfile="$1"; shift
   local a name opt in_prefix=1
@@ -786,7 +1219,197 @@ perf_stat_c() {
       exit 2
     done
   done
-  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@"
+  # THE SAMPLING SESSION BRACKETS EXACTLY THIS WINDOW (#3248 AC1). Started here rather than in
+  # the measurement legs because this function already IS the timed window: any other insertion
+  # point would need to guess the window's duration, and a guess either truncates the profile or
+  # samples the teardown.
+  #
+  # The setup-only leg is deliberately NOT profiled: its cycles are SUBTRACTED from the reported
+  # figure, so including it in the profile would attribute corpus-open and schema-ingest work to
+  # the per-row region the profile exists to describe.
+  # `${PROFILE_OUT:-}`, NOT `$PROFILE_OUT`, and this is not defensive style — it is required.
+  # `scripts/tests/test_ws0_cpu_pinning_guards.sh` and the invocation-lint self-test EXTRACT this
+  # function by text (`awk '/^perf_stat_c\(\)/,/^}/'`) and run it standalone under `set -u`, so a
+  # bare reference to a DRIVER global dies with an unbound-variable error instead of producing the
+  # function's diagnostic. That is the exact cross-file coupling this rig already documents for
+  # `$COLD_STEP_MAX_MS` in lib-args.sh — and the first version of this profiling hook
+  # reintroduced it, breaking two argv-guard cases that had nothing to do with profiling.
+  local _prof_pid=""
+  if [[ -n "${PROFILE_OUT:-}" && "$outfile" != *-setup.csv ]]; then
+    local _ptag
+    _ptag="$(basename "$outfile" .csv)"
+    perf_record_c "$PROFILE_OUT/profile-$_ptag.data" >"$PROFILE_OUT/profile-$_ptag.stderr" 2>&1 &
+    _prof_pid=$!
+    # Published at file scope BEFORE the window opens, so a signal arriving at any point
+    # during the measurement finds a PID to clean up.
+    _ACTIVE_PROFILER_PID="$_prof_pid"
+    # DEFERRED DEFECT, MEASURED: THE PROFILE WINDOW AND THE cyc/row DENOMINATOR COVER DIFFERENT
+  # REGIONS. (#3248 roborev job 84 F1 + job 86 F1; follow-up
+  # https://github.com/pmcfadin/cqlite/issues/3469 family 3.)
+  #
+  # The profiler attaches to the FULL counted window -- the guard below skips only `*-setup.csv`
+  # -- and it opens 300 ms BEFORE the window (the arming delay documented immediately below).
+  # The reported cycles/row is setup-subtracted scan (`cycles_scan = cycles_total - cycles_setup`,
+  # ws0_collect.py). So profile SHARES are fractions of a window that includes 300 ms of
+  # pre-window capture plus the setup leg, and they are multiplied by a setup-EXCLUSIVE total.
+  # Buckets are therefore UNDERSTATED by the contaminated fraction of their own arm.
+  #
+  # BOTH TERMS, MEASURED. An earlier version of this comment carried only the setup term and
+  # therefore understated the defect by ~150x -- the arming delay is the dominant term and it is
+  # ASYMMETRIC between the two arms being differenced:
+  #
+  #                          bare_scan          flight_bypass
+  #   setup leg             0.0164-0.0171%      n/a (no setup subtraction on this arm)
+  #   300 ms arming         2.47-2.52%          0.48-0.51%
+  #   combined              ~2.49%              ~0.49%      => ~2.0 pp differential bias
+  #
+  # WHICH PUBLISHED FIGURES THIS CAN MOVE -- checked per result, not asserted (#3469 family 3
+  # carries the arithmetic). Every conclusion survives; ONE figure moves in its second digit:
+  #   * the +21.5% shared-bucket excess -> ~+19.0% (-2.4 pp). Direction and rough size hold.
+  #   * everything counter-derived is IMMUNE: the +6,707 gap, the 5.19x L2 bytes-touched result
+  #     (l2_lines_in x 64B / rows, different events, different run), and all of AC0, which was
+  #     run with NO profiler attached.
+  #   * the HashMap-lever result is robust because its denominators come from the UNPROFILED
+  #     control: gains shift <0.2 pp and the ratio INVERSION -- which is the actual conclusion --
+  #     holds either way (1.4107x -> 1.4430x published, -> 1.4439x corrected).
+  #   * the lever ceiling shifts by 0.0009x against a claim with ~0.2x of slack.
+  #
+  # A fix converts shares against `cycles_total` and subtracts setup from the buckets, or brackets
+  # the profile to the counted window exactly -- but the arming delay makes exact bracketing
+  # impossible in one direction or the other, which is why the delay is documented below rather
+  # than eliminated.
+  #
+  # ARMING DELAY, AND THE COST IS STATED RATHER THAN CLAIMED AWAY (#3248, roborev job 69
+    # finding 1). The sampler needs a moment to arm, so without this the first fraction of the
+    # window is UNSAMPLED and the profile under-represents whatever runs first. With it, the
+    # profile instead includes ~300 ms of samples from BEFORE the counting window opens.
+    #
+    # So the earlier claim that the profile "brackets EXACTLY the counted window" was WRONG in
+    # one direction or the other, and there is no setting that makes it true: one side of the
+    # boundary is always slightly off. 300 ms against this rig's 5-45 s windows is 0.7-6% of the
+    # capture, and it lands on server startup/steady-state rather than on the encode region.
+    # The direction chosen is the one that cannot silently DROP the region under study.
+    sleep 0.3
+  fi
+  # `|| _rc=$?`, NOT a bare call followed by `$?`, AND THIS IS A RESOURCE-LEAK FIX.
+  #
+  # This driver runs `set -euo pipefail`, and every `perf_stat_c` call site in
+  # lib-measure.sh (:150, :156, :250) is BARE -- not in a condition, not followed by `||`.
+  # So `set -e` is live inside this function, and before the profiling hook existed that was
+  # harmless: `perf stat` was the LAST command, so its status simply became the function
+  # status. Adding cleanup after it changed that: a failing `perf stat` now exits the shell
+  # AT THAT LINE, so the SIGINT below never runs and `perf record` is ORPHANED -- still
+  # sampling, against `sleep 86400`, for 24 hours. VERIFIED by execution: with a bare call
+  # under `set -e` the cleanup line does not run at all.
+  #
+  # Testing the status with `||` suppresses `set -e` for this command only, so the cleanup
+  # always runs and the measured status is still propagated by `return $_rc` below.
+  local _rc=0
+  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@" || _rc=$?
+  if [[ -n "$_prof_pid" ]]; then
+    # SIGINT, not SIGKILL: perf finalises perf.data on INT and leaves an unreadable stub on KILL.
+    # THE PROFILER MUST STILL HAVE BEEN RUNNING, AND ITS EXIT STATUS IS READ (#3248, roborev
+    # job 68 finding 3).
+    #
+    # The previous version signalled and waited with `|| true` on both, so a `perf record`
+    # that DIED EARLY was indistinguishable from one that covered the whole window: it had
+    # written some valid data, so `data.size` was nonzero and the header check passed, and a
+    # TRUNCATED profile was accepted as complete. `data.size != 0` establishes that perf
+    # finalised SOMETHING, not that it sampled the window it was asked to.
+    #
+    # `kill -0` first: if the process is already gone, the signal would have been a no-op and
+    # the "we stopped it cleanly" story is false.
+    local _prof_was_alive=1
+    kill -0 "$_prof_pid" 2>/dev/null || _prof_was_alive=0
+    kill -INT "$_prof_pid" 2>/dev/null || true
+    local _prof_status=0
+    wait "$_prof_pid" || _prof_status=$?
+    _ACTIVE_PROFILER_PID=""
+    if [[ "$_prof_was_alive" -eq 0 ]]; then
+      echo "FATAL: the sampling profiler had ALREADY EXITED before the counting window closed," >&2
+      echo "       so its profile covers only part of the window it was asked to sample -- and" >&2
+      echo "       a partial profile is indistinguishable from a complete one by file size or" >&2
+      echo "       by the perf.data header alone. Its stderr:" >&2
+      sed 's/^/         /' "$PROFILE_OUT/profile-$_ptag.stderr" >&2 2>/dev/null || true
+      return 2
+    fi
+    # THE GATE IS perf's OWN SUCCESS LINE, NOT AN ENUMERATION OF EXIT STATUSES.
+    #
+    # The first version of this check accepted {0, 130} as the affirmative set, reasoning that
+    # SIGINT termination reports 128+2. THAT REASONING WAS WRONG AND IT FAILED A CORRECT RUN:
+    # perf actually exits **143** here (128+SIGTERM), because on SIGINT it stops the session,
+    # writes its data, then terminates its own child (`sleep`) with SIGTERM. Measured directly:
+    # status 143 alongside `Captured and wrote 2.278 MB ... (11704 samples)` — a complete,
+    # successful capture. I derived an "affirmative set" by reasoning instead of measuring it,
+    # which is the error this issue exists to catch, committed inside a check written to catch it.
+    #
+    # So the gate is now the AFFIRMATIVE EVIDENCE perf itself prints on success, and the exit
+    # status is RECORDED rather than adjudicated — because I have just demonstrated that I
+    # cannot reliably enumerate its values, and a check keyed on an enumeration I get wrong
+    # fails correct runs. `Captured and wrote` appears only after perf has flushed its data.
+    if ! grep -q 'Captured and wrote' "$PROFILE_OUT/profile-$_ptag.stderr" 2>/dev/null; then
+      echo "FATAL: the sampling profiler never reported a completed capture (its stderr has no" >&2
+      echo "       'Captured and wrote' line), so nothing establishes that it flushed the data" >&2
+      echo "       it collected. Exit status was $_prof_status. Its stderr:" >&2
+      sed 's/^/         /' "$PROFILE_OUT/profile-$_ptag.stderr" >&2 2>/dev/null || true
+      return 2
+    fi
+    # `>&2`, LIKE EVERY OTHER DIAGNOSTIC IN THIS FUNCTION. `perf_stat_c`'s STDOUT IS THE
+    # MEASURED COMMAND'S OUTPUT CHANNEL -- the rep's payload JSON is written through it -- so
+    # an informational line on stdout is APPENDED TO THE DATA. The first version of this echo
+    # did exactly that and corrupted scan-warm-1.json into two JSON documents, which surfaced
+    # as `JSONDecodeError: Extra data` in the reporter, three layers away from the cause.
+    # A diagnostic and a data stream must not share a channel.
+    echo "profile: $_ptag captured (profiler exit status $_prof_status, capture confirmed)" >&2
+    # AND VERIFY IT FINALISED. An unterminated `perf record` leaves a file of plausible SIZE
+    # whose `data size` header is 0, which `perf report` refuses — so the failure is invisible
+    # at the filesystem level and only appears when someone tries to read the profile, possibly
+    # days later. Checked here, where the run can still be repeated.
+    # VERIFY IT FINALISED, by reading the perf.data header's `data.size` field directly.
+    #
+    # TWO THINGS HERE WERE ESTABLISHED BY POSITIVE CONTROL, not by reasoning, and the first
+    # version of this check would have failed both ways:
+    #
+    #  1. `perf report --header-only` ACCEPTS AN UNFINALISED FILE. Measured against a
+    #     deliberately SIGKILLed capture: it exits 0 on a file whose data is unreadable, so a
+    #     readback through perf would have passed the exact case it was written to catch.
+    #  2. `data.size` at byte offset 48 of the header IS the discriminating field: SIGKILLed
+    #     capture -> 0; the same capture ended with SIGINT -> 114,600. That is the field perf's
+    #     own warning names ("the file's data size field is 0 which is unexpected").
+    #
+    # So the check is a direct header read, and no third perf subcommand is introduced — which
+    # also keeps the invocation allowlist to the two subcommands this rig actually needs.
+    local _pf="$PROFILE_OUT/profile-$_ptag.data"
+    if ! python3 -c '
+import struct, sys
+path = sys.argv[1]
+try:
+    with open(path, "rb") as fh:
+        head = fh.read(56)
+except OSError as exc:
+    print(f"cannot read {path}: {exc}", file=sys.stderr); raise SystemExit(1)
+if len(head) < 56 or head[:8] != b"PERFILE2":
+    print(f"{path} is not a perf.data file", file=sys.stderr); raise SystemExit(1)
+if struct.unpack_from("<Q", head, 48)[0] == 0:
+    print(f"{path} data.size == 0", file=sys.stderr); raise SystemExit(1)
+' "$_pf" 2>/dev/null; then
+      echo "FATAL: the sampling profile $_pf did not finalise — its perf.data header records" >&2
+      echo "       data.size == 0, so perf was terminated before it could write the data it" >&2
+      echo "       had collected. The file exists at a plausible SIZE, which is why this is" >&2
+      echo "       checked rather than assumed: the failure is invisible on the filesystem" >&2
+      echo "       and surfaces only when someone tries to read the profile." >&2
+      echo "       This is a profiling-hook defect, not a measurement result." >&2
+      # If the MEASUREMENT also failed, propagate THAT status rather than masking it with
+      # this one: the measurement failure is the more actionable of the two, and returning a
+      # fixed 2 would hide it.
+      if [[ "$_rc" -ne 0 ]]; then
+        echo "       (the measured command ALSO failed, status $_rc — reporting that)" >&2
+        return "$_rc"
+      fi
+      return 2
+    fi
+  fi
+  return $_rc
 }
 
 # ---------------------------------------------------------------------------
@@ -913,6 +1536,23 @@ record_round() {
     "$2" "$3" "$4" "$now" > "$OUT_DIR/$1.round"
 }
 
+# THE QUIESCENCE BOUNDARY, OPENING SIDE (#3248). Taken here rather than at startup so it
+# brackets the MEASUREMENT rather than the build: a cargo build before rep 1 is this session's
+# own load and would read as contamination of its own window.
+#
+# DELIBERATELY ABOVE `_ARM_LIST=`, not between it and the loop. `test_ws0_round_metadata.sh`
+# extracts the rotation loop by TEXT -- `awk '/^_ARM_LIST=/,/^done$/'` -- and evals it in a
+# harness where this driver-scoped state does not exist, so code placed inside that range
+# breaks four rotation checks with an empty `order:`. That is the same text-extraction coupling
+# this rig records for `perf_stat_c` and `$COLD_STEP_MAX_MS`, and the first version of this
+# block hit it.
+_QUIESCENCE_WINDOW_START=""
+if [[ -n "$QUIESCENCE_TIMESERIES" ]]; then
+  _QUIESCENCE_WINDOW_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  python3 "$HERE/ws0_quiescence.py" sample --out "$OUT_DIR/quiescence-before.json" \
+    || { echo "FATAL: could not take the opening quiescence sample." >&2; exit 2; }
+fi
+
 # The rotated arm list: the bare scan and every selected Flight arm, as PEERS.
 # shellcheck disable=SC2206  # word-splitting $ARMS into an array is intended
 _ARM_LIST=(scan $ARMS)
@@ -937,6 +1577,37 @@ for temp in $TEMPS; do
     done
   done
 done
+
+# THE QUIESCENCE BOUNDARY, CLOSING SIDE, AND THE JUDGEMENT (#3248).
+#
+# WIRED HERE because a gate nothing calls is not a gate: roborev job 62 finding 2 caught that
+# ws0_quiescence.py shipped with no caller, so ordinary runs could still publish results from a
+# contaminated window while the tool sat in the tree looking like protection. It runs BEFORE
+# the report, so a contaminated session produces no report at all rather than a report with a
+# caveat -- the numbers from a contaminated window are not worth publishing with a footnote.
+if [[ -n "$QUIESCENCE_TIMESERIES" ]]; then
+  _quiescence_window_end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  python3 "$HERE/ws0_quiescence.py" sample --out "$OUT_DIR/quiescence-after.json" \
+    || { echo "FATAL: could not take the closing quiescence sample." >&2; exit 2; }
+  if ! python3 "$HERE/ws0_quiescence.py" judge \
+        --before "$OUT_DIR/quiescence-before.json" \
+        --after "$OUT_DIR/quiescence-after.json" \
+        --timeseries "$QUIESCENCE_TIMESERIES" \
+        --window-start "$_QUIESCENCE_WINDOW_START" \
+        --window-end "$_quiescence_window_end" \
+        --out "$OUT_DIR/quiescence-verdict.json"; then
+    echo "FATAL: this session is NOT certified quiescent, so no report is produced." >&2
+    echo "       The measured windows overlapped competing load, which moves frequency by up" >&2
+    echo "       to 25% (measured, #3299) — the figures would be plausible and wrong." >&2
+    echo "       Re-run on a quiet box; the verdict cause above says what was seen." >&2
+    exit 2
+  fi
+  echo "quiescence:   CERTIFIED — see $OUT_DIR/quiescence-verdict.json"
+else
+  echo "quiescence:   NOT VERIFIED — no --quiescence-timeseries was supplied, so nothing"
+  echo "              establishes this session did not overlap competing load. Recorded as"
+  echo "              such in the session manifest; it is not a claim of quietness."
+fi
 
 # The reporter takes ONLY the two paths: everything else is read from the session manifest
 # stamped above (#3272 F1). Passing `--reps`/`--temps`/`--arms`/`--scan-passes`/the CPU pins

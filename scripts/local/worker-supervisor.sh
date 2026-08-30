@@ -212,7 +212,25 @@ PENDING_AUTOMERGE_MAX="${PENDING_AUTOMERGE_MAX:-3}"
 # CI time). Default 20 min.
 PENDING_AUTOMERGE_MIN_SECS="${PENDING_AUTOMERGE_MIN_SECS:-1200}"
 
-SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"
+# ONE SUPERVISOR PER LANE, NOT PER MACHINE (roborev round 19, Medium). The default lock was
+# machine-global, so a SECOND lane started with the documented default invocation exited during lock
+# acquisition — which makes the per-lane claim refs this change adds unreachable in production with
+# defaults, and N-lanes-per-box is the standing model (#3393 retracted #1930's one-worker-per-machine
+# reading). This is that retracted invariant surviving in a SECOND mechanism: fixing the ref namespace
+# left the flock still enforcing the assumption the namespace change exists to remove.
+#
+# Scoped by the LANE's checkout root, which is what "one instance" should have meant all along — the
+# lock still prevents two supervisors in the SAME worktree, which is the failure it was built for. The
+# basename is kept readable so an operator can tell which lane owns which lock, and a cksum of the
+# full path disambiguates two lanes whose directories share a basename.
+# Resolved LAZILY and with BUILTINS ONLY, never at source time (#3464 family 2, reintroduced and
+# caught here). The first cut computed the lane discriminator with `tr` and `cksum` on the line
+# below, at SOURCE time — which is exactly the mechanism that broke the placeholder token earlier in
+# this change: several tests SOURCE this file with a deliberately stripped PATH to prove the no-jq /
+# no-python3 paths, and an external tool in a source-time assignment fails there and silently yields
+# an empty value. Two suite cases went red on it immediately. So: empty by default, filled in by
+# `supervisor_lock_path` at acquisition, using only bash substitution and arithmetic.
+SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-}"
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
@@ -220,14 +238,17 @@ LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
 # ---------------------------------------------------------------------------
 # Supervisor-authored git-ref claim (issue #2655 / #2499 design).
 #
-# The supervisor — a long-lived, machine-scoped process — stamps a
-# refs/machine-claims/<machine> liveness ref (issue+PID+ts) at every worker spawn and
-# clears it when it exits cleanly, so claim liveness is MECHANISM-driven and no
+# The supervisor — a long-lived, LANE-scoped process — stamps a
+# refs/lane-claims/<machine>/<lane-id> liveness ref (issue+PID+ts) at every worker spawn
+# and clears it when it exits cleanly, so claim liveness is MECHANISM-driven and no
 # longer depends on the worker LLM remembering to `beat`. The PID recorded is
-# the SUPERVISOR's own ($$): it is the stable per-machine anchor that outlives
+# the SUPERVISOR's own ($$): it is the stable per-LANE anchor that outlives
 # each recycled worker, so a same-machine reaper's process-liveness check tracks
-# "is this machine's supervisor still running" rather than a transient worker
-# subprocess. When the supervisor dies, nothing refreshes the ref and it goes
+# "is this lane's supervisor still running" rather than a transient worker
+# subprocess. PER LANE, not per machine, since #3393: a box runs several lanes at once, and
+# a single per-machine ref was force-updated by each of them, so siblings overwrote one
+# another and at most one was observable. `refs/machine-claims/<machine>` is legacy and
+# read-only — still drained, never written. When the supervisor dies, nothing refreshes the ref and it goes
 # stale within the reap threshold.
 #
 # CLAIM_CMD is the claim-heartbeat.sh entrypoint; overridable so the tests can
@@ -244,6 +265,16 @@ LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
 # CLAIM_CMD="" but hit the real network path anyway). The colonless form preserves
 # an explicitly-empty override so disabling truly disables.
 CLAIM_CMD="${CLAIM_CMD-bash $REPO_ROOT/scripts/flow/claim-heartbeat.sh}"
+
+# LOCK_CMD is the `claim.sh` entrypoint — the PER-ISSUE LOCK, a different script and a different
+# namespace from `CLAIM_CMD`'s per-lane liveness ref. The supervisor had no claim.sh seam at all, which
+# is why round 34's finding 1 needed one. Colonless default like `CLAIM_CMD`, so `LOCK_CMD=""` genuinely
+# DISABLES it (a `:-` form would silently re-enable the real network path — the #3464 trap that seam
+# already fell into once).
+LOCK_CMD="${LOCK_CMD-bash $REPO_ROOT/scripts/flow/claim.sh}"
+
+# The actor every pre-upgrade claim was stamped with: `claim.sh`'s own fallback when nothing sets one.
+LEGACY_CLAIM_ACTOR="flow"
 # The machine identity the claim ref is scoped to — must match what the reaper
 # clears. Defaults to claim-heartbeat.sh's own default (`hostname -s`), honoring
 # HEARTBEAT_MACHINE when the fleet overrides it.
@@ -253,6 +284,94 @@ CLAIM_MACHINE="${HEARTBEAT_MACHINE:-$(hostname -s 2>/dev/null || echo unknown)}"
 # reused as the next spawn's stamp. "0" is stamped when still unknown — the
 # reaper treats a non-issue as "no open-PR guard applicable" and governs on age.
 CLAIM_ISSUE="${CLAIM_ISSUE:-}"
+# The issue this supervisor LAST STAMPED a lane claim for (#3393). Distinct from CLAIM_ISSUE, which
+# is the next spawn's issue and is cleared on `finalized`; this one must survive that so clean exit
+# can delete the ref it actually created. "0" is a legitimate value — a stamp with an unknown issue
+# still creates a real ref that must be cleared.
+CLAIM_STAMPED_ISSUE=""
+# The SHA this supervisor last stamped for CLAIM_STAMPED_ISSUE, used as the `reap` LEASE so a delete
+# can never remove a ref another supervisor has since refreshed (roborev round 19, Medium). Empty
+# means "not known" — a lease is then not passed, and that is logged rather than silently skipped.
+CLAIM_STAMPED_SHA=""
+# Whether the work this supervisor last claimed has CONCLUDED — finalized, or released to someone else
+# (an owner park). 1 also covers "nothing has been claimed yet", so a supervisor that exits before its
+# first iteration deletes nothing it did not create (roborev round 23, Medium).
+CLAIM_WORK_CONCLUDED=1
+# A per-INVOCATION token for the placeholder lane id (#3393, roborev round 3). `p$$` alone is unique
+# only among CURRENTLY RUNNING processes: after a crash or reboot, pid reuse lets a new supervisor
+# write the SAME placeholder ref as a dead lane's, overwriting it with a fresh timestamp and a live
+# pid — masking the dead lane, which is the exact failure per-lane refs exist to prevent.
+#
+# BUILT FROM BUILTINS, AND LAZILY. The first cut computed it at SOURCE time with `tr`/`cut`, and the
+# suite caught why that is wrong: `test_parser_absent_is_unverified` SOURCES this file under a
+# minimal PATH (bash mktemp cat rm grep dirname date) to unit-test one function, so an external
+# command at source time aborted the source and the test read an empty verdict. Sourcing this file
+# must cost nothing and require nothing. `$RANDOM`, `$EPOCHSECONDS` and `printf` are all bash
+# builtins, and the value is computed on first use rather than at load.
+# SETS the variable rather than echoing it, and the difference is load-bearing. Called as
+# `$(claim_lane_token)` the cache assignment happens in a SUBSHELL and is lost, so every stamp got a
+# FRESH token — which made each iteration look like a lane transition, reaped the previous ref, and
+# defeated the per-invocation uniqueness this exists for. Caught by the assertion that a
+# supervisor's stamps all name the SAME placeholder.
+# Lane refs whose cleanup has not yet succeeded (#3393, roborev round 5). Retried on every stamp and
+# on clean exit; a placeholder that stays here is a permanent stale claim, because automated reaping
+# refuses placeholders by design.
+CLAIM_PENDING_CLEANUP=""
+CLAIM_LANE_TOKEN=""
+# claim_drain_pending_cleanup: retry every lane ref whose deletion has not yet succeeded. Keeps the
+# ones that still fail, so a transient push error is retried rather than lost.
+# claim_drain_pending_cleanup [protect_id]: retry every lane ref whose deletion has not yet
+# succeeded, NEVER touching <protect_id> — the lane currently stamped.
+#
+# THE PROTECTION IS THE WHOLE POINT (roborev round 6, Medium). Without it the queue can delete the
+# ref it just stamped: if cleaning placeholder P fails during P -> issue, P stays queued; after
+# finalization the next issue -> P transition REFRESHES P and then drains the queue, deleting that
+# fresh CURRENT ref and leaving the running lane unobservable. That is the failure this whole change
+# exists to prevent, produced by the retry logic added to fix a leak.
+claim_drain_pending_cleanup() {
+  [[ -n "$CLAIM_CMD" ]] || return 0
+  [[ -n "${CLAIM_PENDING_CLEANUP// /}" ]] || return 0
+  local protect="${1:-}" still="" entry id lease rc
+  for entry in $CLAIM_PENDING_CLEANUP; do
+    [[ -n "$entry" ]] || continue
+    # `<lane-id>:<sha>`; a bare id (no colon) means no lease is known, which stays supported so an
+    # entry queued by an older process is still drained rather than silently dropped.
+    id="${entry%%:*}"
+    lease="${entry#*:}"
+    [[ "$lease" == "$entry" ]] && lease=""
+    [[ -n "$id" ]] || continue
+    if [[ -n "$protect" && "$id" == "$protect" ]]; then
+      log "pending cleanup of ${id} dropped: it is the lane currently stamped, not a stale ref"
+      continue
+    fi
+    # NO LEASE => NO DELETE (roborev round 32). Also covers a bare `<id>` entry queued by an older
+    # process, where no lease was ever recorded: the entry is dropped from the queue rather than retried
+    # forever, because retrying cannot acquire a lease that was never captured.
+    if [[ -z "$lease" ]]; then
+      log "pending cleanup of ${id} DROPPED: no lease was recorded for it, and an unleased delete could remove a successor's live claim — the CI reaper collects it with its own lease"
+      continue
+    fi
+    rc=0
+    HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$id" "$lease" >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" == 0 ]]; then
+      log "stale lane ref ${id} cleared${lease:+ (lease held at ${lease})}"
+    elif [[ "$rc" == 4 ]]; then
+      # LEASE NOT HELD => OWNERSHIP TRANSFERRED, so DROP rather than retry (roborev round 19). The
+      # ref moved after we stamped it, which means another supervisor now owns this lane id. Retrying
+      # could only ever delete THAT supervisor's live claim, and the whole point of the lease is to
+      # refuse. Retaining it would retry forever against a ref that is no longer ours.
+      log "pending cleanup of ${id} dropped: the lease at ${lease:-<none>} is no longer held, so another supervisor owns this lane now"
+    else
+      still="${still} ${id}:${lease}"
+      log "WARN: lane ref ${id} still not cleared (rc=${rc}: open PR, unreadable message or push error) — retained for retry"
+    fi
+  done
+  CLAIM_PENDING_CLEANUP="$still"
+}
+
+claim_lane_token() {
+  [[ -n "$CLAIM_LANE_TOKEN" ]] || CLAIM_LANE_TOKEN="$(printf '%04x%04x%x' "$RANDOM" "$RANDOM" "${EPOCHSECONDS:-0}")"
+}
 
 detect_ncpu() {
   if command -v nproc >/dev/null 2>&1; then nproc
@@ -351,8 +470,39 @@ PROC_MATCH_WORKER='[c]laude.* (-p|--print)( |$).*--agent flow-lead'
 # not the probe subshell's. RESIDUAL LIMIT: the match is still an argv substring test,
 # so a `claude --agent worker` process ELSEWHERE in the ancestry, or an unrelated
 # process carrying the literal substring, could still be counted.
+# LANE ATTRIBUTION (roborev round 35, High) — THE WORKER FAMILY IS PER-LANE, NOT PER-MACHINE.
+#
+# This probe counted EVERY matching worker on the box. That was right while one worker per machine was
+# the model; it is wrong now, and it is wrong in the direction that defeats this whole change: with
+# several lanes running, each supervisor sees its SIBLINGS' healthy workers, counts them as leftover
+# debris, holds, and after LEFTOVER_HOLD_MAX polls STOPS. So per-lane claim refs would have shipped
+# while multi-lane operation stayed serialized by a DIFFERENT machine-global mechanism — the FOURTH
+# carrier of the retracted #1930 invariant found in this PR (after the supervisor lock, `worker.md`'s
+# hard rule, and the shared claim actor).
+#
+# A pid is attributed to THIS lane by its working directory being REPO_ROOT or below. That catches the
+# case a recorded pid cannot — an orphan from a PRIOR RUN of this lane, whose pid this process never
+# knew — which is exactly what the probe exists for.
+#
+# AFFIRMATIVE ATTRIBUTION: a pid is counted only when its cwd is READ and matches. An unreadable cwd
+# (the process exited mid-probe, a permission boundary, or a platform without /proc) is NOT counted.
+# That is deliberate in both directions: the positive verdict here is "there IS leftover debris in my
+# lane", so it needs a positive measurement, and the failure mode of guessing YES is the false STOP
+# this finding is about. The cost is stated rather than hidden: on a platform without /proc, this
+# probe stops detecting cross-run orphans instead of falsely stopping healthy lanes. Override
+# PROC_PROBE_WORKER_CMD to restore machine-wide counting on such a host.
+#
+# The BUILD family is deliberately NOT lane-scoped: one gate at a time per MACHINE is a resource bound
+# that survived #1930's retraction, so a sibling's cargo/nextest is genuinely this lane's business.
+LANE_PID_FILTER="while read -r p; do c=\$(readlink \"/proc/\$p/cwd\" 2>/dev/null) || continue; case \"\$c\" in '$REPO_ROOT' | '$REPO_ROOT'/*) printf '%s\\n' \"\$p\" ;; esac; done"
+# CAPTURED BEFORE THE DEFAULT IS APPLIED: `supervisor_resolve_lane_id` needs to know whether the
+# OPERATOR chose this probe, and after the `:-` below every value looks chosen. An operator who
+# supplied their own probe has taken responsibility for its attribution, so the
+# lane-attribution-impossible refusal yields to them; the DEFAULT probe cannot make that claim.
+PROC_PROBE_WORKER_CMD_OVERRIDDEN=""
+[[ -n "${PROC_PROBE_WORKER_CMD:-}" ]] && PROC_PROBE_WORKER_CMD_OVERRIDDEN=yes
 if [[ -z "${PROC_PROBE_WORKER_CMD:-}" ]]; then
-  PROC_PROBE_WORKER_CMD="pgrep -f '$PROC_MATCH_WORKER' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
+  PROC_PROBE_WORKER_CMD="pgrep -f '$PROC_MATCH_WORKER' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | $LANE_PID_FILTER | wc -l | tr -d ' '"
 fi
 if [[ -z "${PROC_PROBE_BUILD_CMD:-}" ]]; then
   PROC_PROBE_BUILD_CMD="pgrep -f '$PROC_MATCH_BUILD' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
@@ -363,7 +513,11 @@ fi
 # count-set so they can't drift, with the same $$/$PPID self-exclusion. Best-effort — an
 # empty result yields "<unavailable>" in the page.
 if [[ -z "${PROC_LIST_WORKER_CMD:-}" ]]; then
-  PROC_LIST_WORKER_CMD="pgrep -lf '$PROC_MATCH_WORKER' 2>/dev/null | grep -vE '^($$|$PPID) '"
+  # LIST-FROM-COUNT-SET still holds (roborev 1839/1821): the same pgrep, the same self-exclusion and the
+  # same $LANE_PID_FILTER, so the set named in a page cannot drift from the set that triggered it. Only
+  # the rendering differs — pids are mapped to command lines at the end rather than up front, because the
+  # attribution filter needs bare pids.
+  PROC_LIST_WORKER_CMD="pgrep -f '$PROC_MATCH_WORKER' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | $LANE_PID_FILTER | { ids=\$(tr '\\n' ' '); [ -n \"\$ids\" ] && ps -o pid=,args= -p \$(printf '%s' \"\$ids\" | tr ' ' ',' | sed 's/,\$//') 2>/dev/null; }"
 fi
 if [[ -z "${PROC_LIST_BUILD_CMD:-}" ]]; then
   PROC_LIST_BUILD_CMD="pgrep -lf '$PROC_MATCH_BUILD' 2>/dev/null | grep -vE '^($$|$PPID) '"
@@ -430,7 +584,8 @@ notify() {
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }
 is_lt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)<(b+0)) exit 0; exit 1 }'; }
 
-# stamp_claim <issue>: refresh refs/machine-claims/<machine> with issue+PID+ts (issue
+# stamp_claim <issue>: refresh this lane's claim ref (refs/lane-claims/<machine>/<issue> since
+# #3393) with issue+PID+ts (issue
 # #2655). PID stamped is the SUPERVISOR's ($$) — the stable per-machine anchor,
 # not a transient worker subprocess. A non-numeric/empty issue is stamped as "0"
 # (unknown): the reaper then governs purely on age + open-PR (a "0" issue can
@@ -440,24 +595,248 @@ is_lt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)<(b+0)) exit 0; exit 1 }'; }
 stamp_claim() {
   local issue="$1"
   [[ -n "$CLAIM_CMD" ]] || return 0
-  case "$issue" in '' | *[!0-9]*) issue=0 ;; esac
-  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$issue" "$$" >/dev/null 2>&1; then
-    log "claim stamped: machine=$CLAIM_MACHINE issue=$issue pid=$$"
+  # AN UNKNOWN ISSUE GETS A UNIQUE PER-SUPERVISOR LANE ID, NOT A SHARED PLACEHOLDER (roborev
+  # round 1, High). The old behaviour normalised it to "0", which under per-lane refs means every
+  # supervisor with a not-yet-known issue writes the SAME ref `refs/lane-claims/<machine>/0` — so
+  # concurrent first iterations overwrite each other and a live sibling can mask an OOM-killed lane.
+  # That is exactly the false clean ruling A removes, reintroduced through the placeholder.
+  #
+  # I first tried simply NOT stamping when the issue is unknown, and the suite caught why that is
+  # wrong: `CLAIM_ISSUE` is CLEARED on `finalized`, so a supervisor finalising issue after issue
+  # never knows its issue at spawn time and would stamp nothing at all — trading a collision for
+  # zero liveness coverage. Measured as stamps=0 where 2 were expected.
+  #
+  # So the lane id is `p<pid>-<per-invocation token>`, prefixed `p` to keep it out of the numeric
+  # issue space: unique per supervisor INVOCATION (the token defeats pid reuse across a crash or
+  # reboot — roborev round 3), and unmistakable for an issue by any consumer that requires digits.
+  # Automated reaping declines it outright, because an id that names no issue cannot be checked
+  # against an open PR.
+  local lane_id
+  case "$issue" in
+    '' | *[!0-9]* | 0) claim_lane_token; lane_id="p$$-${CLAIM_LANE_TOKEN}" ;;
+    *)                 lane_id="$issue" ;;
+  esac
+  # A lane TRANSITION must not leak the previous ref (roborev round 1, Medium), and the ORDER
+  # matters (roborev round 2, Medium). Deleting the old ref first leaves the lane with NO claim if
+  # the replacement stamp then fails — invisible to dead-lanes and the reaper for the whole
+  # iteration, which is a liveness GAP introduced by the leak fix. So: stamp the new ref, record it,
+  # and only then best-effort delete the old one. Both refs existing briefly is harmless — the old
+  # one names this same live supervisor pid, so it reads ALIVE — and is strictly better than a gap.
+  local prev_lane_id="$CLAIM_STAMPED_ISSUE" prev_sha="$CLAIM_STAMPED_SHA" stamp_sha=""
+  # `stamp` prints the sha it wrote on STDOUT (one line, a field). Captured rather than parsed out of
+  # the log note: a sha read from a sentence is #3464 family 5 in the subsystem where a misread
+  # message deletes someone's lease.
+  if stamp_sha="$(HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$lane_id" "$$" 2>/dev/null)"; then
+    stamp_sha="${stamp_sha%%$'\n'*}"
+    case "$stamp_sha" in *[!0-9a-f]* | '') stamp_sha="" ;; esac
+    # What was ACTUALLY stamped, which is not `CLAIM_ISSUE` (#3393). `CLAIM_ISSUE` is the NEXT
+    # spawn's issue and is deliberately cleared on `finalized`, so by clean-exit time it is empty
+    # and cannot name the ref this supervisor wrote. Recording it here is the only place that knows.
+    CLAIM_STAMPED_ISSUE="$lane_id"
+    CLAIM_STAMPED_SHA="$stamp_sha"
+    # NO SHA MEANS NO AUTOMATED DELETE, NOT A DELETE WITHOUT A LEASE (roborev round 32, Medium). The
+    # round-19 lease work logged a WARN here and then carried on, so an empty lease reached `reap` and
+    # `delete_ref_guarded` performed an UNCONDITIONAL delete — the lease protection silently degrading to
+    # none, in exactly the case it exists for. The reachable path is not exotic: `CLAIM_CMD` names a
+    # script, so during ANY rollout where the invoked `claim-heartbeat.sh` predates the sha-on-stdout
+    # contract this change introduces, EVERY stamp yields an empty lease and EVERY reap is unleased.
+    #
+    # Fail closed on the safe side: without a lease this supervisor does not delete that lane at all.
+    # A retained ref is collectable — the CI reaper supplies its own lease from the listing — whereas a
+    # successor's live claim deleted by an unleased push is not recoverable.
+    [[ -n "$stamp_sha" ]] || log "WARN: stamp reported no sha for lane $lane_id — automated deletion of that lane is DISABLED for this supervisor (an unleased delete could remove a successor's live claim); the CI reaper will collect it with its own lease"
+    # The replacement exists, so the old ref can go. Best-effort by design: a failure here leaves a
+    # stale ref that dead-lanes will report and the reaper will collect, which is far better than the
+    # gap that deleting first could open.
+    # A FAILED CLEANUP IS RETAINED AND RETRIED, not forgotten (roborev round 5, Medium). Best-effort
+    # was right about ordering — never delete before the replacement lands — but forgetting the ref
+    # on failure is not recoverable for a PLACEHOLDER: automated reaping deliberately REFUSES a `p…`
+    # lane (it names no issue, so an open PR cannot be ruled out), so a transient push failure would
+    # leave a permanent stale claim that dead-lanes then reports as a dead lane forever. Carried in a
+    # pending list and retried on every later stamp and on clean exit.
+    # QUEUED WITH ITS LEASE, as `<lane-id>:<sha>` (roborev round 19). Without the sha, a retry that
+    # lands after another supervisor has taken over this lane id deletes THAT supervisor's live claim.
+    #
+    # A NUMERIC PREDECESSOR WHOSE WORK HAS NOT CONCLUDED IS NOT QUEUED (roborev round 31, Medium). The
+    # round-29 fix stopped the SHUTDOWN path from clearing such a ref, and left the TRANSITION path — the
+    # same guard, a second route. A technical block on issue 88 followed by a `no-work` leaves the work
+    # unconcluded but releases `CLAIM_ISSUE`, so the next iteration stamps a placeholder and this line
+    # queued 88 for immediate reaping: the unresolved issue's liveness signal deleted, and its board item
+    # potentially pinned with nothing left to reap. A `finalized` marker that fails its F5/verify checks
+    # reaches the same transition, which is why the guard is here at the QUEUEING SITE and keyed on the
+    # property — it covers every transition, including ones nobody has enumerated.
+    #
+    # `CLAIM_WORK_CONCLUDED` still holds the PREVIOUS iteration's verdict at this point (run_iteration
+    # resets it to 0 immediately AFTER this stamp), which is exactly the value needed to judge whether the
+    # PREVIOUS ref may be collected.
+    #
+    # A PLACEHOLDER predecessor is always queued, concluded or not: it names no issue, so deleting it
+    # destroys no issue-linked signal, and NOT queueing it is the permanent leak round 5 fixed.
+    if [[ -n "$prev_lane_id" && "$prev_lane_id" != "$lane_id" ]]; then
+      if [[ "$prev_lane_id" == p* || "$CLAIM_WORK_CONCLUDED" == 1 ]]; then
+        CLAIM_PENDING_CLEANUP="${CLAIM_PENDING_CLEANUP} ${prev_lane_id}:${prev_sha}"
+      else
+        log "claim cleanup of lane $prev_lane_id SKIPPED: its work has not concluded, so the issue-linked liveness signal stays (#2499)"
+      fi
+    fi
+    claim_drain_pending_cleanup "$lane_id"
+    log "claim stamped: machine=$CLAIM_MACHINE issue=$lane_id pid=$$"
   else
-    log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$issue) — ref not refreshed this iteration (non-fatal)"
+    log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$lane_id) — ref not refreshed this iteration (non-fatal)"
   fi
 }
 
-# clear_claim: delete refs/machine-claims/<machine> on a CLEAN supervisor exit (issue
-# #2655). `reap` refuses to delete a ref whose issue still has an open PR, so a
-# supervisor that stops with an unfinished endgame leaves the claim in place for
-# adoption rather than orphaning it. Non-fatal on failure.
+# clear_claim: delete this LANE's claim ref on a CLEAN supervisor exit (issue #2655; per-lane
+# since #3393). `reap` refuses to delete a ref whose issue still has an open PR, so a supervisor
+# that stops with an unfinished endgame leaves the claim in place for adoption rather than
+# orphaning it. Non-fatal on failure.
+#
+# THE ISSUE MUST BE PASSED, and getting this wrong is silent (#3393). `reap <machine>` with no
+# issue now targets the LEGACY per-machine ref, so omitting it would leave this lane's real ref
+# behind while cheerfully reporting a clean clear — and a claim ref nothing deletes pins its board
+# item at In Progress indefinitely. When the issue is still unknown, `CLAIM_ISSUE` is empty and
+# nothing was stamped, so there is no ref to clear.
+# clear_claim [clean] — release this lane's claim ref. `clean` is 1 only when the supervisor is
+# stopping deliberately (finalize_exit code 0).
+#
+# A PLACEHOLDER IS NOT CLEARED ON AN ABNORMAL EXIT (roborev round 18, Medium). `finalize_exit` runs
+# this on EVERY exit — `breaker`, `leftover-worker`, `leftover-build`, `automerge-stuck`,
+# `verify-unavailable` included — while its own comment said "on a clean stop", and the whole
+# safeguard rests on `reap` refusing when the issue has an open PR. For a NUMERIC lane id that guard
+# runs and the clear is safe on any exit. For a `p<pid>-…` PLACEHOLDER there is no issue to consult,
+# so `reap` deletes unconditionally (by design: the owner knows it finished, a reaper cannot) — and
+# on an abnormal exit the owner does NOT know that. A worker can have claimed an issue and opened a
+# PR before the supervisor ever received the marker, so clearing there destroys the only liveness
+# signal of a lane with an unfinished endgame: the exact #2499 case, reached from the other side.
+#
+# THE EXIT CODE WAS THE WRONG DISCRIMINATOR, AND SO WAS THE LANE ID'S SHAPE (roborev round 23, Medium).
+# The previous rule preserved only a PLACEHOLDER on an abnormal exit, reasoning that a numeric lane id
+# is safe because `reap`'s open-PR guard runs. It is not: **an absence of an open PR is a correct answer
+# to the wrong question.** Pre-PR work — an issue claimed, implementation under way, no PR opened yet —
+# has no open PR, so the guard passes and the ref is deleted. A breaker or a `head-blocked` stop then
+# erases the ONLY liveness signal for unfinished work: `dead-lanes` cannot report it (no ref), and the
+# CI reaper cannot flip its board item back to Ready (nothing to reap), so the item is pinned at In
+# Progress indefinitely. That is the same shape as round 21's `issue_has_open_pr` finding, in a
+# different caller — which is why the discriminator is now the PROPERTY rather than any proxy for it.
+#
+# The property: has the work this supervisor claimed CONCLUDED? Only `finalized` and an owner park
+# answer yes. A clean stop mid-issue (stop-file, budget) answers NO and deliberately leaves the ref —
+# that is the #2499 intent, an unfinished lane stays owned for adoption, and the CI reaper collects it
+# on age + no-open-PR + dead-pid once it is genuinely stale.
+# conclusion_matches_stamped_lane <marker-issue> — true when a terminal marker may conclude THIS lane.
+#
+# A CONCLUSION IS ABOUT AN ISSUE, AND THE FLAG IS ABOUT A LANE (roborev round 33, High). Both accept
+# points set `CLAIM_WORK_CONCLUDED=1` from the MARKER, without checking that the marker's issue is the
+# one this supervisor actually stamped. `CLAIM_ISSUE` is carried forward across iterations, so a
+# supervisor holding lane 88 whose worker finalises or parks issue 99 concluded 88 — and the shutdown
+# then deleted 88's liveness ref while its work was unresolved.
+#
+# A PLACEHOLDER or unstamped lane has no issue-linked ref to protect, so any conclusion is fine there.
+# A NUMERIC lane requires an exact match; a mismatch leaves the work unconcluded and the ref in place.
+conclusion_matches_stamped_lane() {
+  local marker_issue="${1:-}"
+  case "${CLAIM_STAMPED_ISSUE:-}" in
+    '' | p*) return 0 ;;
+    *) [[ "$marker_issue" == "$CLAIM_STAMPED_ISSUE" ]] ;;
+  esac
+}
+
 clear_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
-  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" >/dev/null 2>&1; then
-    log "claim cleared on clean exit: machine=$CLAIM_MACHINE"
+  local concluded="${1:-}"
+  # Retry anything a transition could not clean up, before clearing this lane's own ref. Nothing is
+  # protected here: on a clean exit this lane's own ref is being removed too.
+  claim_drain_pending_cleanup
+  local issue="$CLAIM_STAMPED_ISSUE"
+  # May be a `p<pid>` placeholder as well as an issue number; both are real refs to clear.
+  case "$issue" in '' | p) issue="" ;; esac
+  # AN ENDGAME IN FLIGHT KEEPS THE REF, AND A PENDING AUTO-MERGE PR IS ONE (roborev round 28, Medium;
+  # owner ruling (b) on #2499 semantics). `concluded` reflects only the LATEST iteration, so after a
+  # pending-automerge finalize a subsequent `no-work`, merged finalize or owner park could set it to 1
+  # and the shutdown would delete this lane's ref while an EARLIER auto-merge PR is still open. Ruling
+  # (b) says exactly that state must keep its ref — so "concluded" is necessary and not sufficient:
+  # there must also be nothing pending.
+  if [[ -n "$issue" && -n "${PENDING_PR_LIST// /}" ]]; then
+    # A PLACEHOLDER CANNOT CARRY THIS PROTECTION PAST OUR OWN EXIT (roborev round 36, Medium).
+    #
+    # Keeping the ref is right — ruling (b) on #2499 says an endgame in flight stays owned. But when
+    # the stamped lane is a `p<pid>` PLACEHOLDER, keeping it is a TRAP of my own making: `should-reap`
+    # permanently refuses placeholders (round 3, because an id naming no issue cannot be checked
+    # against an open PR), so once this supervisor exits NOTHING can ever clear that ref — not the CI
+    # reaper, not a later merge of the very PR it is protecting. The result is a stale ref and a
+    # permanent false dead-lane report needing manual cleanup.
+    #
+    # So TRANSFER the protection to ISSUE-numbered refs, which the reaper CAN evaluate: an issue lane
+    # has an open PR (KEEP) until the PR merges, and is then collectable on the next sweep. The
+    # per-lane namespace makes this natural — an issue IS a lane id.
+    #
+    # ALL-OR-NOTHING, and the direction is deliberate: the placeholder is cleared ONLY if every
+    # pending issue was stamped. A partial transfer would drop protection for the unstamped ones,
+    # which is worse than the stale ref this fixes. A pending PR with no recorded issue is
+    # untransferable, so it keeps the placeholder — a stale ref beats an unprotected endgame.
+    if [[ "$issue" == p* ]]; then
+      # FIELDS ARE CUT, NOT `read`-SPLIT, AND THAT IS NOT STYLE. TAB IS AN IFS *WHITESPACE*
+      # CHARACTER, so `IFS=$'\t' read -r pr iss rest` COLLAPSES an empty field: an entry whose
+      # issue is empty — exactly the untransferable case this branch exists to refuse — parsed as
+      # pr=3467 iss=1 (the COUNT), so it would have stamped a BOGUS lane 1 and cleared the
+      # placeholder. That is worse than the stale ref being fixed, and my own "untransferable" case
+      # is what caught it. Parameter expansion does not collapse, so an empty field stays empty.
+      local pr_e iss_e rest_e entry transferred=0 untransferable=0
+      while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        pr_e="${entry%%$'\t'*}"
+        rest_e="${entry#*$'\t'}"
+        iss_e="${rest_e%%$'\t'*}"
+        # A line with no tab at all yields pr_e == entry and iss_e == entry; neither is a usable
+        # pairing, so it must not be read as an issue.
+        [[ "$entry" == *$'\t'* ]] || { untransferable=$((untransferable + 1)); continue; }
+        [[ -n "$pr_e" ]] || continue
+        case "$iss_e" in
+          '' | *[!0-9]* | 0) untransferable=$((untransferable + 1)); continue ;;
+        esac
+        if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$iss_e" "$$" >/dev/null 2>&1; then
+          transferred=$((transferred + 1))
+          log "endgame protection transferred off the placeholder: lane $iss_e stamped for pending PR $pr_e, so the reaper can collect it once that PR lands"
+        else
+          untransferable=$((untransferable + 1))
+          log "WARN: could not stamp lane $iss_e for pending PR $pr_e; the placeholder is kept instead"
+        fi
+      done <<<"$PENDING_PR_LIST"
+      if [[ "$untransferable" -eq 0 && "$transferred" -gt 0 ]]; then
+        log "placeholder lane $issue is now clearable: all $transferred pending endgame(s) are protected by issue-numbered refs"
+      else
+        log "claim clear DECLINED: placeholder lane $issue kept — $untransferable pending endgame(s) could not be transferred to an issue-numbered ref (a stale ref beats an unprotected endgame)"
+        return 0
+      fi
+    else
+      log "claim clear DECLINED: lane $issue kept because an auto-merge PR is still pending — an endgame in flight stays owned for adoption (#2499)"
+      return 0
+    fi
+  fi
+  if [[ -n "$issue" && "$concluded" != 1 ]]; then
+    log "claim clear DECLINED: the work on lane $issue has not concluded (no finalize, no owner park), so this ref is the only signal that the lane held it — left for dead-lanes to report and the reaper to collect (#2499)"
+    return 0
+  fi
+  if [[ -z "$issue" ]]; then
+    log "claim clear skipped: this supervisor never stamped a lane claim, so there is no ref to clear"
+    return 0
+  fi
+  # UNDER THE LEASE THIS SUPERVISOR STAMPED (roborev round 19). A late exit — the breaker firing while
+  # a successor has already taken this lane id — would otherwise delete the successor's LIVE claim on
+  # its way out, making that lane unobservable. rc=4 means exactly that case and is reported as a
+  # transfer, not a failure.
+  if [[ -z "$CLAIM_STAMPED_SHA" ]]; then
+    log "claim clear DECLINED for lane $issue: no lease was recorded, and an unleased delete could remove a successor's live claim — left for the CI reaper, which supplies its own lease (roborev round 32)"
+    return 0
+  fi
+  local rc=0
+  HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$issue" "$CLAIM_STAMPED_SHA" >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    log "claim cleared (work concluded): machine=$CLAIM_MACHINE issue=$issue${CLAIM_STAMPED_SHA:+ (lease held at $CLAIM_STAMPED_SHA)}"
+  elif [[ "$rc" == 4 ]]; then
+    log "claim clear declined for machine=$CLAIM_MACHINE issue=$issue: the lease at ${CLAIM_STAMPED_SHA:-<none>} is no longer held, so another supervisor owns this lane — its live claim is left alone"
   else
-    log "WARN: claim clear declined/failed for machine=$CLAIM_MACHINE (open PR or push error) — left for adoption (non-fatal)"
+    log "WARN: claim clear declined/failed for machine=$CLAIM_MACHINE issue=$issue (rc=$rc: open PR, unreadable message or push error) — left for adoption (non-fatal)"
   fi
 }
 
@@ -724,9 +1103,277 @@ journal_line() {
 
 # ---------------------------------------------------------------------------
 # Single-instance lock. macOS ships no flock(1); an atomic mkdir + pid-liveness
-# check gives the same "only one supervisor per machine" guarantee portably.
+# check gives the same "only one supervisor per LANE" guarantee portably.
+#
+# PER LANE, NOT PER MACHINE (roborev round 19, Medium). The default was machine-global, so a second
+# lane started with the documented default invocation exited during lock acquisition — making the
+# per-lane claim refs this change adds unreachable in production with defaults, while N lanes per box
+# is the standing model (#3393 retracted #1930). That is the retracted invariant surviving in a
+# SECOND mechanism: fixing the ref namespace left the lock still enforcing the assumption the
+# namespace change exists to remove. Scoped by the lane's own checkout root, which is what "one
+# instance" should always have meant — it still refuses two supervisors in the SAME worktree, the
+# failure it was built for.
 # ---------------------------------------------------------------------------
+# supervisor_lock_path: set SUPERVISOR_LOCK if the caller did not. Builtins only — no `tr`, `cksum`,
+# `awk` or `sed` — because this must also work under the stripped PATH the parser tests source with.
+# The basename stays readable so an operator can tell which lane owns which lock; the arithmetic hash
+# of the FULL path disambiguates two lanes whose directories share a basename.
+# supervisor_lane_id — echo a stable, lane-unique token derived from this lane's checkout root, using
+# BUILTINS ONLY (no `tr`/`cksum`/`awk`: several suite cases source this file under a stripped PATH, and a
+# source-time external tool broke them twice — #3464 family 2).
+# THE HASH COMES FIRST AND THE SLUG IS BOUNDED (roborev round 34, Medium). The first cut appended the
+# hash AFTER an unbounded directory basename, and `claim.sh`'s `sanitize_field` caps a field at 120
+# characters — so a lane directory with a long basename truncated the HASH AWAY and two distinct lanes
+# collapsed onto one actor. That is the very aliasing this identifier exists to prevent, reintroduced by
+# the shape of the identifier itself. Hash first makes truncation cost only READABILITY; bounding the
+# slug means the whole token is ~40 chars, so it also cannot approach a filesystem NAME_MAX in the lock
+# filename. Ordering is doing real work here, not cosmetics.
+supervisor_lane_id() {
+  local slug="${REPO_ROOT##*/}" full="$REPO_ROOT" i h=0 c
+  slug="${slug//[^A-Za-z0-9._-]/_}"
+  [[ -n "$slug" ]] || slug=lane
+  for ((i = 0; i < ${#full}; i++)); do
+    printf -v c '%d' "'${full:i:1}"
+    h=$(((h * 31 + c) & 0x7fffffff))
+  done
+  printf '%s-%s\n' "$h" "${slug:0:24}"
+}
+
+# LANE IDENTITY IS GIVEN, NOT DEDUCED (roborev round 36; lead ruling B + C, 2026-08-30).
+#
+# Every per-lane mechanism here — the single-instance lock, the claim actor, the legacy-claim
+# migration, the worker-orphan attribution — needs to know WHICH LANE THIS IS. It used to answer that
+# from `REPO_ROOT`, which is `$(dirname "${BASH_SOURCE[0]}")/../..`: **"where is my script" standing in
+# for "which lane am I".** On this fleet that happens to land on the lane, because every lane worktree
+# carries a full `scripts/` tree — so the mechanisms worked BY COINCIDENCE.
+#
+# THE RULING REJECTED RATIFYING THAT COINCIDENCE, and the reason is the defect class this whole change
+# has been removing: a cheap observable substituted for the property, invisible to the code that
+# depends on it. Launched from the root checkout instead, all four mechanisms silently degrade — the
+# "per-lane" lock becomes machine-global, the actor is shared, the migration finds no issue branch, and
+# the orphan probe attributes ZERO, which is a probe that returns the good answer unconditionally. That
+# last one was MY round-35 fail-open: I fixed a false-STOP and replaced it with a never-STOP.
+#
+# So: `LANE_ID` is the identity, and it is a value the program is GIVEN.
+#
+# `LANE_ID` unset is still supported, because nothing on the fleet sets it yet — but the fallback must
+# PROVE it landed in a lane, and REFUSE LOUDLY otherwise. That refusal is what converts "an old
+# launcher silently gets today's behaviour" into a startup error naming the remedy, which was the whole
+# objection to B. A fallback that silently degrades is the same defect one level down.
+#
+# The proof is STRUCTURAL — git answers it, and no lane-directory naming convention is assumed
+# anywhere. A linked worktree has `--git-dir` != `--git-common-dir`; the main worktree has them equal.
+# Assuming a layout is exactly what made this issue's AC3 unimplementable, so the check for it must not
+# reintroduce that assumption.
+LANE_ID="${LANE_ID:-}"
+
+# lane_worktree_ok — rc 0 iff REPO_ROOT is a LINKED worktree (i.e. a lane, not the root checkout).
+# Echoes nothing; callers phrase their own refusal.
+lane_worktree_ok() {
+  local gd cd_
+  gd="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  cd_="$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$cd_" in
+    /*) : ;;
+    *) cd_="$(cd "$REPO_ROOT/$cd_" 2>/dev/null && pwd)" || return 1 ;;
+  esac
+  [[ "$gd" != "$cd_" ]]
+}
+
+# supervisor_resolve_lane_id — establish the lane identity, or refuse to start.
+#
+# TWO NAMED REFUSALS, each with its remedy, because they are different failures:
+#   * lane-identity-unprovable — `LANE_ID` unset AND `REPO_ROOT` is not a lane worktree, so there is
+#     nothing to derive an identity FROM.
+#   * lane-attribution-impossible — the worker-orphan probe attributes by working directory under
+#     `REPO_ROOT`; if that is the main worktree, the lane's workers live in OTHER worktrees and the
+#     probe can only ever attribute zero. Setting `LANE_ID` does NOT fix this, because an identity
+#     token is not a directory — which is why this check is independent of the first.
+#     An operator who has overridden `PROC_PROBE_WORKER_CMD` has taken that responsibility explicitly,
+#     so the refusal yields to them.
+supervisor_resolve_lane_id() {
+  if [[ -z "$LANE_ID" ]]; then
+    if lane_worktree_ok; then
+      LANE_ID="$(supervisor_lane_id)"
+      log "LANE_ID unset; derived '$LANE_ID' from this lane's worktree ($REPO_ROOT). Set LANE_ID explicitly to make the lane identity a given rather than an inference (#3393)."
+    else
+      log "FATAL: lane-identity-unprovable — LANE_ID is unset and REPO_ROOT ($REPO_ROOT) is NOT a lane worktree, so no per-lane identity can be derived. Every per-lane mechanism (single-instance lock, claim actor, legacy-claim migration, worker-orphan attribution) would silently share one identity across all lanes on this machine. Remedy: export LANE_ID=<stable per-lane token>, or launch inside the lane's own worktree."
+      notify "high" "worker-supervisor: lane identity unprovable" "LANE_ID unset and REPO_ROOT is not a lane worktree; refusing to start (#3393). Set LANE_ID."
+      exit 2
+    fi
+  else
+    LANE_ID="$(printf '%s' "$LANE_ID" | tr -c 'A-Za-z0-9._-' '_')"
+    LANE_ID="${LANE_ID:0:40}"
+    if [[ "${#LANE_ID}" -lt 3 ]]; then
+      log "FATAL: lane-identity-unusable — LANE_ID sanitises to '$LANE_ID', fewer than 3 recordable characters. claim.sh refuses such an actor, so the claim lock would fail closed on every call. Remedy: give LANE_ID at least 3 characters from [A-Za-z0-9._-]."
+      notify "high" "worker-supervisor: bad LANE_ID" "LANE_ID='$LANE_ID' is too short after sanitisation; refusing to start (#3393)."
+      exit 2
+    fi
+    log "lane identity given explicitly: LANE_ID='$LANE_ID'"
+  fi
+  export LANE_ID
+  # INDEPENDENT of the above: an identity token is not a directory.
+  if ! lane_worktree_ok && [[ -z "${PROC_PROBE_WORKER_CMD_OVERRIDDEN:-}" ]]; then
+    log "FATAL: lane-attribution-impossible — REPO_ROOT ($REPO_ROOT) is the MAIN worktree, so the worker-orphan probe attributes by a working directory that this lane's workers never occupy: it can only ever count ZERO, reporting 'no leftover debris' unconditionally. LANE_ID does not fix this — an identity token is not a directory. Remedy: launch inside the lane's own worktree, or set PROC_PROBE_WORKER_CMD to a probe appropriate to this layout."
+    notify "high" "worker-supervisor: lane attribution impossible" "REPO_ROOT is the main worktree; the worker-orphan probe would always count zero. Refusing to start (#3393)."
+    exit 2
+  fi
+}
+
+# supervisor_claim_actor: EXPORT a lane-unique `CLAIM_ACTOR` unless the operator set one.
+#
+# THE CLAIM LOCK'S HOLDER IDENTITY IS machine+actor, AND THE DEFAULT ACTOR IS SHARED (roborev round 33,
+# High). `claim.sh` documents the hazard for the machine half — "two machines share one identity and each
+# treats the other's claim as its own (false re-entrancy / cross-release)" — and the actor exists precisely
+# so distinct roles on ONE box do not alias. Nothing set it: every lane defaulted to `flow`.
+#
+# That was harmless while a machine-global lock made a second lane impossible to start. THIS CHANGE made
+# the lock per-LANE, so two default lanes can now run — and with one holder identity between them,
+# `verify` can report that lane A holds lane B's claim and `release` can delete it. **Removing a coarse
+# guard exposed a finer defect the guard had been masking**, which is this change's own doing and so its
+# own responsibility.
+#
+# EXPORTED, not just set: `claim.sh` is invoked by the WORKER this supervisor spawns, which inherits the
+# environment. Setting it locally would leave the worker on the shared default.
+#
+# `claim.sh` sanitises the actor to one token and REFUSES fewer than 3 recordable characters, so the value
+# is prefixed `flow-` and carries the lane id — recognisable in a claim message and never degenerate.
+supervisor_claim_actor() {
+  [[ -n "${CLAIM_ACTOR:-}" ]] && return 0
+  # FROM THE GIVEN IDENTITY, not from a second inference of it (lead ruling B). Two derivations of
+  # "which lane am I" is two things to keep in step, and the one that drifts is found in production.
+  CLAIM_ACTOR="flow-${LANE_ID}"
+  export CLAIM_ACTOR
+  log "claim actor defaulted to lane-unique '$CLAIM_ACTOR' (the claim lock's holder identity is machine+actor; a shared default would alias two lanes on one box)"
+}
+
+# ONE construction, reused (roborev round 34, Medium). This duplicated `supervisor_lane_id`'s body
+# verbatim, so the bound added there would have silently not applied here — two spellings of one identity
+# is the drift shape #3464 records. A shell function call is not an external tool, so the builtins-only
+# constraint still holds.
+# supervisor_migrate_legacy_claim — CAS-adopt THIS LANE'S OWN pre-upgrade claim to the lane actor.
+#
+# WHY THIS EXISTS (roborev round 34, finding 1). The claim lock's holder identity is machine+actor. Every
+# claim stamped before the lane-actor change carries `actor=flow`, so once a lane resolves a lane-unique
+# actor its OWN claim reads as FOREIGN: measured against a live claim, `claim.sh verify` answers
+# VERIFY-FAIL with `holder-machine` and `wanted-machine` IDENTICAL and only the actor differing. Left
+# alone, every lane in flight at the moment that change lands is stranded — it can neither verify nor
+# non-forcibly release its own lock. That is this change's own doing, so it is this change's to migrate.
+#
+# WHAT IDENTIFIES "MY" CLAIM, and why it is not the ref. On a four-lane box all four legacy claims read
+# `machine+flow` — IDENTICAL — so the ref carries nothing that distinguishes them. Only the LANE'S OWN
+# BRANCH does. So the issue is taken from this worktree's branch and nothing else: a lane can never
+# reach a sibling's claim, which would be the aliasing bug with extra steps.
+#
+# AFFIRMATIVE MEASUREMENT, not absence of a bad signal (#3229's rule). The adopt runs ONLY when the
+# status read AFFIRMATIVELY shows this machine AND exactly the legacy actor. An unreadable status, a
+# missing ref, a different machine, or any other actor => DO NOTHING. The cost of doing nothing is a
+# DIAGNOSED refusal on the worker's next `verify` (the documented `adopt` procedure then applies), which
+# is strictly better than a guess that could take a claim that is not ours.
+#
+# CAS, never a bare write: `--expect <sha>` means a live peer that moved the ref wins (ADOPT-LOST), and
+# the adopt commit records who took it and why.
+# NEVER PERMANENTLY FOREIGN FOR THE RUN (roborev round 35, Medium). The first cut read the claim once
+# and returned silently on failure — so a transient outage at startup left the lane running under an
+# actor its own claim does not recognise for the WHOLE run: precisely the stranding this migration
+# exists to prevent, merely rarer and harder to see.
+#
+# Retried on two timescales: a bounded burst here for a blip, and again at the top of EVERY iteration
+# until it settles, so a longer outage self-heals the moment the remote comes back.
+#
+# DELIBERATE DEVIATION from the review's suggested fix, stated rather than glossed. The reviewer asked
+# for a preflight FAILURE until migration succeeds. That trades a transient failure for a permanent
+# one — a supervisor that refuses to start whenever the remote is unreachable. Re-attempting every
+# iteration removes "permanently foreign" at no availability cost, and a lane cannot do useful work
+# without the remote anyway. The WARN names the state on every attempt, so a persistent outage is loud.
+CLAIM_MIGRATION_SETTLED=0
+CLAIM_MIGRATION_RETRIES="${CLAIM_MIGRATION_RETRIES:-3}"
+supervisor_migrate_legacy_claim() {
+  # SETTLED = migrated, or affirmatively nothing to migrate. A cheap no-op on every later call.
+  [[ "$CLAIM_MIGRATION_SETTLED" == 1 ]] && return 0
+  [[ -n "$LOCK_CMD" ]] || { CLAIM_MIGRATION_SETTLED=1; return 0; }
+  # An operator-pinned actor is not ours to migrate away from — SETTLED, not merely skipped.
+  [[ "${CLAIM_ACTOR:-}" == "$LEGACY_CLAIM_ACTOR" || -z "${CLAIM_ACTOR:-}" ]] && { CLAIM_MIGRATION_SETTLED=1; return 0; }
+  local branch n st sha holder_machine holder_actor attempt
+  # `symbolic-ref --short`, not `rev-parse --abbrev-ref`: it asks the question actually being asked —
+  # "which BRANCH is this worktree on" — and answers it without resolving a commit, so it also works on
+  # an unborn HEAD. `rev-parse --abbrev-ref HEAD` fails outright there ("ambiguous argument 'HEAD'"),
+  # which is how the positive control for this function first came back with no call at all. A DETACHED
+  # worktree makes `symbolic-ref` exit non-zero, which is the right answer: it names no issue.
+  branch="$(git -C "$REPO_ROOT" symbolic-ref --short HEAD 2>/dev/null)" || { CLAIM_MIGRATION_SETTLED=1; return 0; }
+  case "$branch" in
+    issue-[0-9]*) n="${branch#issue-}"; n="${n%%-*}" ;;
+    *) CLAIM_MIGRATION_SETTLED=1; return 0 ;;
+  esac
+  case "$n" in
+    '' | *[!0-9]* | 0*) CLAIM_MIGRATION_SETTLED=1; return 0 ;;
+  esac
+  # A BOUNDED BURST for a blip. Deliberately NOT settled when every attempt fails: the loop re-enters.
+  st=""
+  for ((attempt = 1; attempt <= CLAIM_MIGRATION_RETRIES; attempt++)); do
+    if st="$($LOCK_CMD status "$n" 2>/dev/null)"; then break; fi
+    st=""
+    [[ "$attempt" -lt "$CLAIM_MIGRATION_RETRIES" ]] && sleep 2
+  done
+  if [[ -z "$st" ]]; then
+    log "WARN: could not read issue $n's claim after $CLAIM_MIGRATION_RETRIES attempts; this lane runs as '$CLAIM_ACTOR' while a pre-upgrade claim is held by '$LEGACY_CLAIM_ACTOR', so its own lock may read as FOREIGN until this settles. Retrying next iteration."
+    return 0
+  fi
+  sha="$(supervisor_msg_token "$st" sha)"
+  holder_machine="$(supervisor_msg_token "$st" machine)"
+  holder_actor="$(supervisor_msg_token "$st" actor)"
+  # EVERY field must be affirmatively right. A missing token is not a match.
+  # 40 OR 64 lowercase hex (roborev round 35, Low): a SHA-256 repository's object ids are 64 chars, and
+  # `claim.sh` imposes NO length check of its own — it hands `--expect` straight to git — so a hard 40
+  # here was STRICTER THAN THE THING IT FEEDS and would silently skip every valid claim on such a repo.
+  # Today's reachability is zero (this repo is SHA-1), so this is consistency rather than a live bug;
+  # the asymmetry is what deserved removing, because a needlessly narrow guard reads as intentional.
+  [[ -n "$sha" && "$sha" != *[!0-9a-f]* ]] || return 0
+  case "${#sha}" in
+    40 | 64) : ;;
+    *) return 0 ;;
+  esac
+  [[ "$holder_machine" == "$CLAIM_MACHINE" ]] || return 0
+  [[ "$holder_actor" == "$LEGACY_CLAIM_ACTOR" ]] || return 0
+  log "migrating issue $n's pre-upgrade claim (actor=$LEGACY_CLAIM_ACTOR) to this lane's actor '$CLAIM_ACTOR' via compare-and-swap on $sha"
+  if $LOCK_CMD adopt "$n" --expect "$sha" \
+    --reason "upgrade-lane-actor:pre-upgrade-claim-held-by-${LEGACY_CLAIM_ACTOR}-on-this-machine-adopted-by-lane-actor" \
+    >/dev/null 2>&1; then
+    log "claim for issue $n adopted under '$CLAIM_ACTOR'"
+    CLAIM_MIGRATION_SETTLED=1
+  else
+    # NOT fatal, and deliberately not retried: a peer may have moved the ref (ADOPT-LOST is the CAS
+    # working), or the remote may be unreachable. Either way the claim is untouched and the worker's
+    # next verify gives the documented refusal.
+    log "WARN: could not adopt issue $n's pre-upgrade claim (a peer moved the ref, or the remote is unreachable); the claim is untouched and the next verify will diagnose it"
+  fi
+}
+
+# supervisor_msg_token <msg> <field> — the WHOLE token for an EXACT key, never a substring (#3464
+# family 6: `notissue=42` must not answer `issue`). Builtins only.
+supervisor_msg_token() {
+  local msg="$1" field="$2" tok
+  for tok in $msg; do
+    case "$tok" in
+      "$field"=?*) printf '%s\n' "${tok#*=}"; return 0 ;;
+    esac
+  done
+  return 0
+}
+
+supervisor_lock_path() {
+  [[ -n "$SUPERVISOR_LOCK" ]] && return 0
+  # FROM THE GIVEN IDENTITY (lead ruling B). `LANE_ID` is resolved before this is called.
+  SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-${LANE_ID}.lock"
+}
+
 acquire_lock() {
+  # IDENTITY FIRST: both the lock path and the claim actor are derived FROM it, so resolving it after
+  # them would leave them on a stale inference.
+  supervisor_resolve_lane_id
+  supervisor_lock_path
+  supervisor_claim_actor
+  supervisor_migrate_legacy_claim
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
     echo $$ >"$SUPERVISOR_LOCK/pid"
     trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT
@@ -938,10 +1585,15 @@ finalize_exit() {
   export GATE_NOTIFY_PAYLOAD_TIMEOUT="$NOTIFY_EXIT_PAYLOAD_TIMEOUT"
   export GATE_NOTIFY_CURL_TIMEOUT="$NOTIFY_EXIT_CURL_TIMEOUT"
   export GATE_NOTIFY_ADJUNCT_TIMEOUT="$NOTIFY_EXIT_ADJUNCT_TIMEOUT"
-  # Release this machine's claim ref on a clean stop (issue #2655). `reap`
-  # refuses when the claim's issue still has an open PR, so an unfinished endgame
-  # is preserved for adoption rather than orphaned.
-  clear_claim
+  # Release this lane's claim ref (issue #2655). `reap` refuses when the claim's issue still has an
+  # open PR, so an unfinished endgame is preserved for adoption rather than orphaned. THIS RUNS ON
+  # EVERY EXIT, not only a clean one — the comment here used to say "on a clean stop" and was simply
+  # false (roborev round 18) — so the clean/abnormal distinction is passed down instead of assumed:
+  # a placeholder lane id has no issue for that guard to consult and is kept on an abnormal exit.
+  # Keyed on whether the CLAIMED WORK concluded, not on this exit's code (roborev round 23): a clean
+  # stop mid-issue must keep the ref exactly as a breaker must, because in both cases the work is
+  # unfinished and the ref is the only signal that this lane held it.
+  clear_claim "$CLAIM_WORK_CONCLUDED"
   local elapsed=$(($(date +%s) - START_TS))
   mkdir -p "$LOG_DIR"
   report_pending_at_exit
@@ -1067,6 +1719,17 @@ run_iteration() {
   # longer look alive for the whole threshold window. Uses the best-known issue
   # from the previous iteration's marker (empty/unknown -> "0").
   stamp_claim "$CLAIM_ISSUE"
+  # UNCONCLUDED FROM THE MOMENT THE REF EXISTS (roborev round 24, High). The round-23 fix tracked
+  # whether the claimed work had concluded but never RESET the flag, so it kept its initial `1` — or
+  # inherited `1` from a previous finalize — and every path that returns before the outcome case
+  # (a crash, the stuck watchdog, an early `finalize_exit`) left it saying "concluded". A breaker after
+  # abnormal iterations then called `clear_claim 1` and deleted the current lane's only liveness ref:
+  # THE EXACT FAILURE THE ROUND-23 FIX EXISTS TO PREVENT, REINTRODUCED BY THAT FIX.
+  #
+  # Set here, immediately after the stamp, so "in progress" is the state from the instant the ref
+  # exists and every early exit inherits the SAFE value. Concluded is now something an outcome must
+  # EARN, at the point its own validation accepts it — never a default and never a leftover.
+  CLAIM_WORK_CONCLUDED=0
   local logfile="$LOG_DIR/iter-${ITER}.log"
   local stuck_flag="$LOG_DIR/.iter-${ITER}.stuck"
   rm -f "$stuck_flag"
@@ -1172,15 +1835,42 @@ run_iteration() {
   reason="$(marker_field reason)"
   question="$(marker_field question)"
 
-  # Learn the issue this iteration worked so the NEXT spawn's claim stamp names
-  # it (issue #2655). A recycled worker that resumes the same machine's claim
-  # branch stays on the same issue, so carrying it forward keeps the claim ref's
-  # open-PR reap guard accurate. A finalized issue is released (its endgame is
-  # done); anything else keeps the issue for the next stamp.
+  # Learn the issue this iteration worked so the NEXT spawn's claim stamp names it (issue #2655). A
+  # recycled worker that resumes the same issue keeps the claim ref's open-PR reap guard accurate.
+  #
+  # CARRYING IT FORWARD IS THE UNSAFE DIRECTION, SO IT IS THE ONE THAT MUST BE EARNED (roborev round
+  # 20, High). Only `finalized` used to release the issue, but a `blocked` park on
+  # `seam1-approval`/`needs-decision` ALSO releases it: the worker posts its question, the issue is
+  # excluded from the next pickup until the owner answers, and this supervisor moves on. Carrying that
+  # issue forward stamped the NEXT worker under the RELEASED issue's ref — so another lane legitimately
+  # resuming that issue overwrote the ref, and a dead supervisor behind it became invisible. That is
+  # precisely the ref collision per-lane claims exist to remove, reached through the commonest park path.
+  #
+  # Keyed on the AFFIRMATIVE case, not on a list of releasing reasons (#3464 family 6: an enumeration
+  # of reasons is a subject set that drifts the moment someone adds an exit). The issue is carried
+  # forward ONLY when this iteration demonstrably continues working it — a `blocked` outcome that is NOT
+  # an owner park. Every other outcome, including any park reason added later and any outcome nobody has
+  # thought of yet, falls through to the SAFE branch: `CLAIM_ISSUE` is cleared and the next spawn stamps
+  # its own unique `p<pid>-<token>` lane, which cannot collide with anything.
+  local retains_issue=no
   case "$outcome" in
-    finalized) CLAIM_ISSUE="" ;;
-    *) [[ -n "$issue" ]] && CLAIM_ISSUE="$issue" ;;
+    blocked)
+      case "$reason" in
+        seam1-approval | needs-decision) : ;;   # owner park => the issue is RELEASED
+        *) retains_issue=yes ;;                 # a technical block => this lane keeps working it
+      esac
+      ;;
   esac
+  if [[ "$retains_issue" == yes && -n "$issue" ]]; then
+    CLAIM_ISSUE="$issue"
+  else
+    CLAIM_ISSUE=""
+  fi
+
+  # NOTE: `CLAIM_WORK_CONCLUDED` is NOT classified here. It was, in round 23, and that read the
+  # outcome string BEFORE the validation below judged it — so an untrusted `finalized` marker missing
+  # its issue/pr, or one whose PR is not actually merged, marked the work concluded and got the lane's
+  # ref deleted on exit (roborev round 24, High). It is set only where an outcome is ACCEPTED.
 
   case "$outcome" in
     finalized)
@@ -1201,6 +1891,15 @@ run_iteration() {
         verify="$(verify_finalized_pr "$pr")"
         case "$verify" in
           merged)
+            # EARNED HERE, and only here, for a finalize: the marker was well-formed AND the PR is
+            # verified merged on GitHub. Anything less leaves the work unconcluded, so the lane keeps
+            # its claim ref (roborev round 24). AND the marker's issue must be the lane this supervisor
+            # stamped (roborev round 33) — concluding a DIFFERENT issue's work must not release this one.
+            if conclusion_matches_stamped_lane "$issue"; then
+              CLAIM_WORK_CONCLUDED=1
+            else
+              log "WARN: marker finalises issue $issue but this lane stamped ${CLAIM_STAMPED_ISSUE:-<none>} — NOT concluding; lane ${CLAIM_STAMPED_ISSUE} keeps its ref"
+            fi
             CONSECUTIVE_ABNORMAL=0
             CONSECUTIVE_UNVERIFIED=0
             forget_pending_pr "$pr"
@@ -1277,6 +1976,27 @@ run_iteration() {
       ;;
     no-work)
       CONSECUTIVE_ABNORMAL=0
+      # NOTHING WAS CLAIMED, SO NOTHING IS IN PROGRESS (roborev round 25, Medium — a REGRESSION from
+      # round 24). Round 24 correctly reset the flag to 0 at the stamp so early exits inherit the safe
+      # value, but that made `no-work` permanently unconcluded: the Ready queue was empty, a placeholder
+      # was stamped, and a later stop or wall-clock exit then PRESERVED that placeholder. Placeholders are
+      # never automatically reaped, so every NORMAL IDLE SHUTDOWN leaked a stale ref that `dead-lanes`
+      # then reported as a dead lane — turning the monitor this change ships into one an operator learns
+      # to ignore.
+      #
+      # GUARDED ON THE STAMPED LANE, NOT ON THE MARKER'S ISSUE FIELD (roborev round 29, Medium — a
+      # REGRESSION from round 25's own guard). Round 25 keyed on `[ -z "$issue" ]`, the marker's issue,
+      # which is empty for every `no-work`. But the STAMPED ref can be a NUMERIC issue carried forward
+      # from a prior technical block — so an empty no-work concluded work on an issue that is still
+      # unresolved, and the shutdown then cleared that issue's only liveness signal.
+      #
+      # The question is not "did this iteration name an issue" but "does the ref this lane currently
+      # holds name one". A placeholder (or nothing stamped) means nothing is in progress; a numeric lane
+      # means an issue is still held and must keep its ref.
+      case "${CLAIM_STAMPED_ISSUE:-}" in
+        '' | p*) [[ -z "$issue" ]] && CLAIM_WORK_CONCLUDED=1 ;;
+        *) : ;;   # a numeric lane is still held — no-work says nothing about that issue
+      esac
       journal_line "$ITER" "no-work" "$issue" "$pr" "$duration" "$rc"
       log "no work available; backing off ${BACKOFF_NOWORK_SECS}s"
       sleep "$BACKOFF_NOWORK_SECS"
@@ -1294,6 +2014,15 @@ run_iteration() {
           # label clears, so the loop moves straight to the next Ready issue. Fire
           # ONE high-priority page whose title carries the issue # and the first
           # line of the question (the marker's optional "question" field).
+          # EARNED HERE for a park: the issue is RELEASED — excluded from the next pickup until the
+          # owner answers — so this lane no longer holds it and its ref should go on a clean exit.
+          # Same lane check as the finalize path (roborev round 33): a park of a DIFFERENT issue says
+          # nothing about the issue this lane stamped.
+          if conclusion_matches_stamped_lane "$issue"; then
+            CLAIM_WORK_CONCLUDED=1
+          else
+            log "WARN: marker parks issue $issue but this lane stamped ${CLAIM_STAMPED_ISSUE:-<none>} — NOT concluding; lane ${CLAIM_STAMPED_ISSUE} keeps its ref"
+          fi
           journal_line "$ITER" "parked-on-owner" "$issue" "$pr" "$duration" "$rc" "$reason"
           if [[ -n "$issue" && "$issue" == "$LAST_PARKED_ISSUE" ]]; then
             # Head-block-on-decision guard (mirrors the F2 blocked-path guard,
@@ -1380,6 +2109,18 @@ validate_numeric_knobs() {
     val="${!name}"
     [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a non-negative integer"
   done
+  # STRICTLY POSITIVE integer knobs — a group of its own because for these, ZERO is not a lax bound
+  # but a SILENT SKIP. `CLAIM_MIGRATION_RETRIES=0` makes the retry loop body never execute, so the
+  # legacy-claim status is never read, the migration never happens, and the lane runs foreign to its
+  # own lock with no error anywhere: exactly the fail-open shape this function's own docstring
+  # describes ("evaluate to 0 and SILENTLY disable"). Found because a test harness left the knob
+  # unset and the migration quietly did nothing — the same failure a plist typo would produce in
+  # production, where nothing would have been watching.
+  for name in CLAIM_MIGRATION_RETRIES; do
+    val="${!name}"
+    [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
+    [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (0 would silently skip the migration entirely)"
+  done
   # SIGNED integer knobs — the two with a documented `<=0 disables` contract.
   for name in BUILD_HOLD_MAX MISMATCH_GRACE_CAP_SECS; do
     val="${!name}"
@@ -1411,6 +2152,11 @@ main() {
     # stuck — done before the ceiling check so a retroactive credit can satisfy it.
     credit_merged_pending_prs
     [[ "$ISSUES_DONE" -ge "$MAX_ISSUES" ]] && finalize_exit "budget-issues" 0
+
+    # Re-attempt an UNSETTLED legacy-claim migration (roborev round 35, Medium): a transient outage at
+    # startup must not leave this lane foreign to its own lock for the rest of the run. Once settled
+    # this returns immediately, so it costs nothing.
+    supervisor_migrate_legacy_claim
 
     preflight_wait
 

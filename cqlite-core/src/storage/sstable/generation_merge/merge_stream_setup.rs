@@ -206,6 +206,32 @@ impl MergeStreamSetupError {
             Self::MergerIneligible(e) | Self::ConstructionFailed(e) | Self::ProducerDied(e) => e,
         }
     }
+
+    /// [`into_error`](Self::into_error) for the caller that is PROPAGATING, counting
+    /// the failure once into `cqlite.errors.total{category, subsystem="reader"}`
+    /// (issue #1704).
+    ///
+    /// A propagating setup failure returns from `SSTableManager::scan_stream` BEFORE
+    /// any `JoinedStream` exists, so the streaming error-counting seam
+    /// (`JoinedStream::recv`) can never see it: without this the scan failed, the
+    /// caller got the error, and the error metric stayed flat. Nothing can
+    /// double-count it either — the caller RETURNS here, so no stream is constructed
+    /// to count it a second time.
+    ///
+    /// Deliberately NOT folded into [`into_error`](Self::into_error): that one is also
+    /// used to REPORT a `fallback_eligible` failure into a `tracing::warn!` on the arm
+    /// that then serves the concat successfully. A degraded read is not a failed scan,
+    /// and counting it would inflate the error rate on a query that returned rows. The
+    /// split keeps "which outcome is a failure" a decision of the CALL SITE that knows
+    /// it, rather than a property of the conversion.
+    ///
+    /// The category comes from the classifier (`Error::obs_category`) and the error is
+    /// returned unchanged; counting is a pure side effect.
+    pub(in crate::storage::sstable) fn into_counted_error(self) -> Error {
+        let e = self.into_error();
+        crate::observability::record_error(&e, "reader");
+        e
+    }
 }
 
 /// The fail-closed error for a merge producer that died before signalling readiness.

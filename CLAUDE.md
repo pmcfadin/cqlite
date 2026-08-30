@@ -91,9 +91,44 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
+
+**Compiling a feature is not covering it (#1699).** The scoped clippy matrix enables ~30 cqlite-core features
+at once under `--all-targets`, so a feature can be *test-compiled* on every full gate and have **executed
+nothing** — and a combined feature set is exactly what MASKS cross-feature coupling (an item gated on feature
+A referencing feature B's items compiles fine while both are on). Measured, not argued: turning EXECUTION on
+for `legacy-heuristics` surfaced 4 tests that had never run once, two of which assert behaviour CQLite
+deliberately does not support (#3372 five `not yet implemented` stubs behind the flag; #3374 filler-byte mock
+`Statistics.db` plus pre-`na` `mc-` names); and `flight-tests` surfaced **14 cqlite-flight targets that
+execute NOWHERE** — not locally, not in CI — because their module-level
+`#![cfg(feature = "observability-testing")]` is off in every lane that runs them (#3375), a gap #2910's tier
+aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
+ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
+however green the gate looks. `experimental` is the remaining known instance (#3373).
+Two corollaries the lanes are built on. **Derive, never curate**: both executing lanes compute their subject
+set from committed source at run time — `legacy-heuristics` its `--test` targets (from cargo metadata plus a
+module closure, so a manifest-gated or directory-style target is not missed) and its allowed-zero set, and
+`flight-tests` its unit-target set from cargo metadata — so a new gated file is picked up and a feature joining
+`default` shrinks the excusal set with no gate edit. A failed derivation is a FAIL naming the derivation, never
+a fallback to "nothing enabled", which would silently excuse every gated target. **And a narrowed lane
+DECLARES the narrowing at run time**: `flight-tests` prints what it does not execute on every run, because a
+lane that omits coverage silently is indistinguishable from one that covers it — the same reason this whole
+component set exists. `legacy-heuristics` declares a second, subtler narrowing the same way: a test target can
+reach a child module through a cfg the derivation does not evaluate (`#[cfg(all(feature = …))] #[path = …] mod
+support;` on a shared helper — 3 such targets in `cqlite-core` today), and the closure used to follow that child
+while DISCARDING the attribute gating it, so a gated test inside counted as executable while an ungated sibling
+kept the target non-zero and the co-required census reported **no gap**. Such a subtree is now reported as a
+`DECLARED GAP` with a `cfg-gated-subtree gaps: N RECOGNISED` census line that states its own non-exhaustiveness and is affirmative at `0` — **`0 RECOGNISED`, never a bare `0`**, because a bare zero in a gate log reads as a verified all-clear from a scan that is documented as incomplete. Deliberately **declared, not
+fatal**: failing the lane on it was tried and reverted, because those helpers are correct code and **a lane that
+reds on correct input is the lane agents learn to waive**. The `UNRESOLVED` half stays fail-closed — an
+incomplete source set is permissive everywhere, an unevaluated one is merely unattributable. And
+**a lane in `--list` is not a lane that works**: `feature-iso-parquet` reports `PASS (0s)` warm, so presence
+proves nothing. `scripts/tests/test_agent_gate_feature_matrix_lanes.sh` (opt-in) plants each lane's
+incident-class break in a throwaway `git worktree` and requires the lane to red **and** to NAME the planted
+symbol — a bare red is not evidence either, since an unrelated breakage produces an identical exit code and
+SUMMARY line.
 
 **Required invocation — summary-file redirect, never raw stdout (issues #1175/#2079), full AND lite:**
 
@@ -232,9 +267,52 @@ cqlite-cli/      # Command-line interface
 bindings/python/ # Python bindings (PyO3) — M4 complete
 bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
 test-data/       # Real Cassandra 5.0 SSTables for testing
-tools/           # sstabledump-validator, format-validator
+tools/           # 7 crates, each with a RECORDED disposition in one of THREE
+                 #   categories, pinned by the gate guard
+                 #   scripts/tests/test_tools_crate_disposition.sh (#1716):
+                 #   WIRED   — cassandra-parity, flight-loadgen,
+                 #             sstabledump-validator, ws0-corpus-gen.
+                 #   UNWIRED — nothing runs them AND nothing depends on them:
+                 #             cqlite-validator, memory-safety-runner. Each needs
+                 #             a README saying it is NOT CI-wired.
+                 #   MIXED   — format-validator: its 4 BINS are orphaned but its
+                 #             LIB is WIRED (tests/format-compatibility = the
+                 #             gate's `format-compat` component). Its README must
+                 #             name BOTH halves, and the crate must stay a
+                 #             workspace member — never `exclude` it.
+                 #   A NEW tools/ crate must be classified there or the gate FAILs.
+                 #   That guard is deliberately SMALL: it checks a disposition
+                 #   was RECORDED and LABELED, not that the record is TRUE, and it
+                 #   is per-CRATE (an orphaned bin added to a WIRED crate passes
+                 #   unchanged). It needs no cargo/python3/network. A
+                 #   cargo-derived cross-check that verified truth was built and
+                 #   REMOVED (#1716) — 11 review findings landed in it and none in
+                 #   the list/README part, and its scratch workspaces sat outside
+                 #   the repo so they did not inherit rust-toolchain.toml, making a
+                 #   MANDATORY gate component host-toolchain-dependent. Doing it
+                 #   properly is its own issue under epic #1688.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
+
+**A bare `cargo build` here already builds only the ROOT package — do not "optimize" it with
+`default-members` (#1716).** This workspace has a root package (`cqlite`), and cargo's default for
+`default-members` in that case is **that package alone** ("all members" is the default only for a
+VIRTUAL workspace). Verified: `cargo tree --depth 0` at the root resolves to `cqlite` and nothing
+else. So adding an explicit `default-members` list would **expand** the bare build from 1 package to
+14 — the opposite of the intent, and the trap #1716 was originally written around ("these crates are
+compiled by every workspace build" was false). The `tools/` crates are compiled only by an explicit
+`--workspace`/`--all-targets` (the gate's clippy) or `-p`. So those crates stay fully linted under
+`-D warnings` no matter their disposition.
+
+**Their unit tests, though, run ONLY when your diff touches their package (#1716).** No CI job and
+no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests never execute —
+but `--lite`'s blast-radius maps a touched path to its package and runs that package's `--lib`
+tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
+made `--lite` run that crate's tests **for the first time**, and one failed —
+`test_hex_dump_formatting` asserted an unseparated `"48656c6c6f"` against a `hexdump -C`-style
+formatter that emits `48 65 6c 6c 6f`, an expectation that could never hold for any input. **Expect
+latent failures the first time you touch a long-unwired crate**; they are pre-existing, not yours,
+but they are yours to fix because your diff is what runs them.
 
 **Planned (M6)**: `bindings/wasm/`. Full source map (parsers, writers, query engine, bindings
 layout, binding structure trees):
@@ -961,11 +1039,20 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   warning into exit 1, which is what `.agent-ami/profile.yaml`'s `verify.run` uses. The three
   worker-environment deltas and the messages that identify them: `docs/development/fleet-runbook.md`.
 - **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
-  not prose. `worker-supervisor.sh` stamps `refs/machine-claims/<machine>` (issue+supervisor-PID+ts)
+  not prose. `worker-supervisor.sh` stamps `refs/lane-claims/<machine>/<issue>` (issue+supervisor-PID+ts)
   via `claim-heartbeat.sh stamp` at every spawn, refreshes it each iteration, and clears it on a
   clean exit (`reap`, which REFUSES when the issue still has an open PR — an unfinished endgame stays
-  owned for adoption, never orphaned). This namespace is distinct from `claim.sh`'s per-issue lock
-  `refs/claims/issue-<N>`. `claim-heartbeat.sh should-reap <machine> [secs]` is the single, fail-safe
+  owned for adoption, never orphaned). **The ref is PER LANE — `refs/lane-claims/<machine>/<issue>`
+  — since #3393's ruling**; the old per-machine `refs/machine-claims/<machine>` is legacy and is
+  still *read* by `list-claims`, `dead-lanes` and the CI reaper purely so a pre-ruling ref gets
+  drained (an un-enumerated claim ref pins its board item at In Progress indefinitely). `reap` takes
+  `<machine> [lane-id] [expected_sha]`. **`should-reap` has TWO forms and a two-argument call is
+  ALWAYS the legacy one** — `should-reap <machine> [threshold_secs]` acts on the legacy ref, and a
+  lane needs all three, `should-reap <machine> <issue> <threshold_secs>`. The grammar is deliberately
+  unambiguous rather than positional-guessing, so `should-reap <box> <issue>` reads the issue number
+  as a THRESHOLD and answers about the legacy ref (#3393 round 21: this doc previously advertised
+  `<machine> [issue]`, which is that trap written down). This namespace is distinct from `claim.sh`'s per-issue lock
+  `refs/claims/issue-<N>`. `claim-heartbeat.sh should-reap` (both forms above) is the single, fail-safe
   reap predicate (exit 0 = reap, 1 = keep, 2 = no ref): reap ONLY on age > threshold (4h) AND no open
   PR AND (pid-dead, when the claim is local — a foreign machine's PID is unknowable). It KEEPS on a
   fresh ref, an open PR, a live local PID, or an unparseable age; a `gh`/network hiccup in the
@@ -973,13 +1060,32 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   **`should-reap` is a REAP GATE, not a liveness monitor, and the difference cost three lanes
   (#3393)**: it consults the PID only AFTER age > 4h, so a worker the kernel OOM-killed a minute ago
   is indistinguishable from a healthy one for four hours — and even then the answer is an exit code
-  nobody watches. Nothing reported three silent lane deaths, each of which left a clean worktree, a
-  held claim and an open PR. **There is no committed tool for this yet** (#3393 AC3 is open, blocked
-  on a claim-ref layout decision: `refs/machine-claims/<machine>` is per-MACHINE, so on a multi-lane
-  box a surviving lane's stamp overwrites a dead sibling's PID and the dead lane becomes
-  unobservable). Until it lands, a suspected dead lane is diagnosed BY HAND, and the order matters —
-  `docs/development/fleet-runbook.md` records it, starting with `dmesg` for an OOM kill *before*
-  concluding a box is broken, because reading that symptom as a broken instance already cost one
+  nobody watches, and nothing reported three silent lane deaths — each leaving a clean worktree, a
+  held claim and an open PR. `claim-heartbeat.sh dead-lanes` answers the other question, "is anything
+  dead RIGHT NOW", and inverts BOTH of the reaper's conservative guards on purpose: **no age gate** (a
+  fresh claim with a dead PID *is* the shape of an OOM kill) and **an open PR does not suppress the
+  report** (for the reaper an open PR means KEEP; for a report it is the most urgent row on the page
+  — a dead process holding an in-flight endgame, annotated `open-pr=yes`, still never reaped).
+  It is a REPORT: it deletes no ref and moves no board item. **`claim-heartbeat.sh dead-lanes --help`
+  is the authoritative contract** — it is in the same file as the code and cannot drift from it, so
+  read it rather than this summary when the exact verdict set matters (this paragraph drifted once
+  already). In outline: verdicts are MULTI-valued because a PID is only checkable on the machine that
+  owns the claim — two `DEAD-*` verdicts (`DEAD-NO-PROCESS`, which covers a zombie, and
+  `DEAD-PID-REUSED`) and a family of `UNKNOWN-*` ones (`FOREIGN`, `NO-PID`, `STATE`, `IDENTITY`,
+  `PROBE`, `UNREADABLE`). Exit `3` = a dead lane was reported (both `DEAD-*` verdicts); exit `1` = none was
+  reported — which also covers zero claim refs, an all-foreign run and a failed listing.
+  **This slice is POSITIVE-DETECTION ONLY and never exits 0** (#3393 split ruling, 2026-08-29): act
+  on `3`, and never read `1` as a clean bill of health. A sound clean verdict IS possible on per-lane
+  refs — the masking that made exit 0 a lie is gone, since a surviving sibling now stamps a different
+  ref — but it was split out rather than shipped, because the fail-open defect family (five
+  instances: a failed probe read as a negative answer) clustered in that exit-0 path and it is the
+  value a cron reads. Restoring it is tracked separately, carrying the family census forward.
+  **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
+  unimplementable in committed tooling because the lane-directory layout and tmux session naming
+  exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named
+  machine, a vacuous green in a watchdog's clothes. **Diagnostic order for a box that stops answering
+  is in `docs/development/fleet-runbook.md`** and starts with `dmesg` for an OOM kill *before*
+  concluding the instance is broken, because reading that symptom as a broken box already cost one
   healthy machine.
   The `project-board-sync` 30-min cron runs a `reap-claims`
   job that applies this predicate server-side and flips a freed board item back to Ready with a
@@ -987,14 +1093,27 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   persistent red run is the alert, replacing the old silent green `::notice::` no-op. The scheduled
   board sweep only backlogs a null-status issue once it is past a 10-min auto-add grace window, so it
   no longer races the built-in Auto-add's default-status write.
-- **One worker per machine (#1930)**: one lead/worker session owns a box; it fans out subagents but
-  keeps to **one full gate at a time** — enforced mechanically (#2640): `bootstrap-agent-machine.sh`
+- **~~One worker per machine (#1930)~~ RETRACTED — MULTIPLE LANES PER MACHINE IS THE STANDING MODEL
+  (#3393, owner ruling 2026-08-28).** The invariant was false in practice all day (the fleet runs up
+  to 4 lanes per box on standing instruction) and leaving it written is what caused the defect it
+  was supposed to prevent: `refs/machine-claims/<machine>` was designed one-ref-per-machine *because*
+  of this text, so several lanes on one box overwrote each other's claim and `dead-lanes` could report
+  at most one — which is why two of #3393's three silent lane deaths, both on one host, were
+  structurally invisible. Claims are now **per LANE**:
+  `refs/lane-claims/<machine>/<issue>` (a new namespace, because git forbids a ref being both a file
+  and a directory, and `<machine>-<issue>` is ambiguous when machine names contain dashes). Read
+  "one worker per machine" nowhere as a design constraint; design for N lanes per box.
+  **What DOES still hold — one full gate at a time per machine**, which is a resource
+  bound and not a worker-count invariant — enforced mechanically (#2640): `bootstrap-agent-machine.sh`
   pins `CQLITE_GATE_MAX_CONCURRENCY=1` (the #1825 cap admits one gate; the per-gate core budget then
   gives it full cores), and every gate derives `CARGO_BUILD_JOBS` + nextest `--test-threads` from its
   slot count and runs under `taskpolicy -c utility`/`nice`, so no manual `pgrep`-serialization is
   needed. It pre-claims by checking the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
-  `issue-<N>-*` branch. Multiple independent sessions → separate
-  machines, each claim-protocol-gated; NEVER N bare leads without the protocol. Unattended runs:
+  `issue-<N>-*` branch. Multiple sessions on ONE machine are now expected, each
+  claim-protocol-gated; NEVER N bare sessions without the protocol — and note the claim ref is a
+  hard control only *cross-machine* (git arbitrates the push). Locally it is advisory: a session
+  that never consults it can still walk into an occupied lane directory, which happened
+  (#3436). Unattended runs:
   `scripts/local/worker-supervisor.sh` (#2090) recycles ONE worker process per issue (hard context
   bound = process exit; the worker writes `.worker-last-iteration.json` then EXITs — never a second
   issue per session), with flock single-instance + preflight + crash-loop breaker + budgets + ntfy

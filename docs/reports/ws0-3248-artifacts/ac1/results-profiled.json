@@ -1,0 +1,771 @@
+{
+  "issue": "#3096 (rig hardened by #3272)",
+  "corpus": "/data/ws0-3096",
+  "corpus_identity": {
+    "seed": 30960001,
+    "rows": 4000000,
+    "partitions": 40000,
+    "cells_per_row": 12,
+    "data_db_bytes": 2774760422,
+    "data_db_sha256": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+    "bytes_per_row": 693.6901055
+  },
+  "corpus_identity_verification": {
+    "data_db": "/data/ws0-3096/ws0/events/nb-1-big-Data.db",
+    "data_db_bytes_measured": 2774760422,
+    "size_verified": true,
+    "data_db_sha256_recorded": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+    "data_db_sha256_measured": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+    "sha256_verified": true,
+    "note": "the recorded size and sha256 were both re-derived from nb-1-big-Data.db at report time; the identity describes the bytes that were measured"
+  },
+  "corpus_component_verification": {
+    "components_recorded": 8,
+    "components_verified_size": 8,
+    "components_verified_sha256": 8,
+    "components": {
+      "nb-1-big-CRC.db": {
+        "bytes_recorded": 169364,
+        "bytes_measured": 169364,
+        "size_verified": true,
+        "sha256_recorded": "b38c33aeb85a9267e6d10ed6fd9728743c73840abb789b3e196b9a2de0ae64de",
+        "sha256_measured": "b38c33aeb85a9267e6d10ed6fd9728743c73840abb789b3e196b9a2de0ae64de",
+        "sha256_verified": true
+      },
+      "nb-1-big-Data.db": {
+        "bytes_recorded": 2774760422,
+        "bytes_measured": 2774760422,
+        "size_verified": true,
+        "sha256_recorded": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+        "sha256_measured": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+        "sha256_verified": true
+      },
+      "nb-1-big-Digest.crc32": {
+        "bytes_recorded": 10,
+        "bytes_measured": 10,
+        "size_verified": true,
+        "sha256_recorded": "81530bedf46a526b94ec956149c08544337789db9e47bd0759a6b04fd066d8eb",
+        "sha256_measured": "81530bedf46a526b94ec956149c08544337789db9e47bd0759a6b04fd066d8eb",
+        "sha256_verified": true
+      },
+      "nb-1-big-Filter.db": {
+        "bytes_recorded": 47936,
+        "bytes_measured": 47936,
+        "size_verified": true,
+        "sha256_recorded": "bb1c7b82ed2b256c44a0838a5227a2f0ca707a93d2c05996495d2f6303473fde",
+        "sha256_measured": "bb1c7b82ed2b256c44a0838a5227a2f0ca707a93d2c05996495d2f6303473fde",
+        "sha256_verified": true
+      },
+      "nb-1-big-Index.db": {
+        "bytes_recorded": 4196097,
+        "bytes_measured": 4196097,
+        "size_verified": true,
+        "sha256_recorded": "94c1aa0e28d2738794f737c172c901ed23305319c525e6185078ae43205a04ff",
+        "sha256_measured": "94c1aa0e28d2738794f737c172c901ed23305319c525e6185078ae43205a04ff",
+        "sha256_verified": true
+      },
+      "nb-1-big-Statistics.db": {
+        "bytes_recorded": 5252,
+        "bytes_measured": 5252,
+        "size_verified": true,
+        "sha256_recorded": "aff85755f8946fceec870e9fd88dde159edb99cc61af67b8362da39fc96f8417",
+        "sha256_measured": "aff85755f8946fceec870e9fd88dde159edb99cc61af67b8362da39fc96f8417",
+        "sha256_verified": true
+      },
+      "nb-1-big-Summary.db": {
+        "bytes_recorded": 6308,
+        "bytes_measured": 6308,
+        "size_verified": true,
+        "sha256_recorded": "77126573c848b5a404e7d94f56640751858792c540dab9f52d30b42c2780b29b",
+        "sha256_measured": "77126573c848b5a404e7d94f56640751858792c540dab9f52d30b42c2780b29b",
+        "sha256_verified": true
+      },
+      "nb-1-big-TOC.txt": {
+        "bytes_recorded": 80,
+        "bytes_measured": 80,
+        "size_verified": true,
+        "sha256_recorded": "ae4483b226c871452de0cde875010d1619e378751c9fc0fef14697c06c2095c9",
+        "sha256_measured": "ae4483b226c871452de0cde875010d1619e378751c9fc0fef14697c06c2095c9",
+        "sha256_verified": true
+      }
+    },
+    "note": "all 8 recorded component(s) were re-stat'ed and 8 of 8 re-hashed at report time"
+  },
+  "schema_input_verification": {
+    "schema": "/data/ws0-3096/ws0-events.cql",
+    "schema_bytes": 292,
+    "schema_sha256_recorded": "6bdd1d06ad7eb597b3103ace250930b28b19a76aa128bbf2e4170c90406baed0",
+    "schema_sha256_measured": "6bdd1d06ad7eb597b3103ace250930b28b19a76aa128bbf2e4170c90406baed0",
+    "sha256_verified": true,
+    "note": "ws0-events.cql is a MEASUREMENT INPUT read by both arms (the bare scan ingests it per invocation; the Flight ticket is generated from it once), so its digest is re-derived from disk on every report \u2014 always, with no skip flag: the file is a few hundred bytes, so an opt-out could only buy a vacuous green"
+  },
+  "configuration_source": {
+    "manifest": "/data/ws0-3248/ac1b-20260828T164706Z/rig/session-corpus-pin.json",
+    "note": "reps, temperatures, arms, scan_passes, the CPU pins, the counted EVENTS and the binary SOURCE DIRECTORY were READ FROM the session manifest stamped before the first rep; they are not arguments to ws0_report.py, so a re-report cannot substitute a different configuration and claim it was verified (#3272 F1, #3248)"
+  },
+  "session_corpus_pin": {
+    "pinned_before_measurement": true,
+    "pinned_corpus_path": "/data/ws0-3096",
+    "pinned_data_db_sha256": "4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269",
+    "pinned_data_db_bytes": 2774760422,
+    "pinned_rows": 4000000,
+    "corpus_path_unchanged": true,
+    "pinned_components_source": "measured-v1",
+    "pinned_components": 8,
+    "pinned_components_verified_size": 8,
+    "pinned_components_verified_sha256": 8,
+    "pinned_components_note": "all 8 component(s) pinned BEFORE the first rep were re-compared against the report-time identity AND the bytes on disk; 8 of 8 digests were re-derived from disk",
+    "pinned_schema_sha256": "6bdd1d06ad7eb597b3103ace250930b28b19a76aa128bbf2e4170c90406baed0",
+    "pinned_schema_note": "the schema digest was captured in the session dir BEFORE the first rep and re-compared here against both the report-time identity and the bytes on disk",
+    "pinned_ticket_sha256": "f4efb7b7724986f655c37d99ceb668b99b08fd73d5de9cead4a1b672a778a858",
+    "pinned_ticket_bytes": 534,
+    "pinned_ticket_note": "the Flight ticket (the REQUEST: keyspace/table/DDL/token range/projection/predicates/aggregation/limit) was created BEFORE the corpus pin, its digest recorded in the pin, and re-derived here from the bytes on disk \u2014 always, with no skip flag. Compared against the pin and the disk only: the driver writes this file at session setup, so no recorded corpus identity carries it and none can. What that establishes is that the request this session STARTED against is the request still on disk; a modification reverted before reporting is not covered, the same residual the per-invocation DDL carries. It lives in this SESSION's exclusively-claimed output directory, not in the shared corpus (#3272 F2), so a concurrent session measuring the same corpus cannot write it \u2014 and the corpus itself needs no write permission",
+    "note": "the corpus identity was captured in the session dir BEFORE the first rep and re-compared here on rows + data_db_bytes + sha256, PLUS the complete pinned component set (8 component(s)) against both the report-time identity and the bytes on disk, PLUS the SCHEMA and the FLIGHT TICKET (the request every Flight rep re-read); the path is reported, not enforced (a corpus may be moved)"
+  },
+  "boundary_observation_completeness": {
+    "source": "/data/ws0-3248/ac1b-20260828T164706Z/rig/corpus-boundary-observations.jsonl",
+    "boundaries_expected": 6,
+    "boundaries_verified": 6,
+    "expected_boundaries": [
+      "warm-1-after-scan",
+      "warm-1-after-bypass",
+      "warm-2-after-scan",
+      "warm-2-after-bypass",
+      "warm-3-after-scan",
+      "warm-3-after-bypass"
+    ],
+    "observed_boundaries": [
+      "warm-1-after-bypass",
+      "warm-1-after-scan",
+      "warm-2-after-bypass",
+      "warm-2-after-scan",
+      "warm-3-after-bypass",
+      "warm-3-after-scan"
+    ],
+    "expected_set_derivation": "temperatures [warm] x 3 rep(s) x arms [scan bypass] (the bare scan is a PEER of the flight arms in the driver's rep loop), read from the pre-measurement session manifest",
+    "min_components_verified": 8,
+    "verified_against": "session-corpus-pin.json",
+    "note": "every one of the 6 boundaries this session's configuration owed carries EXACTLY ONE well-formed observation in corpus-boundary-observations.jsonl, re-hashed FROM DISK against session-corpus-pin.json at the boundary. MISSING, DUPLICATE and UNEXPECTED observations each REFUSE the report: a refused boundary records nothing, so an absent observation is the signature of a mutation that was restored before reporting \u2014 the one state every END-STATE check agrees with (#3272 round 22)"
+  },
+  "canonical_corpus": {
+    "is_canonical": true,
+    "compared_fields": [
+      "bytes_per_row",
+      "cells_per_row",
+      "components",
+      "compression_info_present",
+      "data_db_bytes",
+      "data_db_sha256",
+      "partitions",
+      "rows",
+      "rows_per_partition",
+      "schema_sha256",
+      "seed",
+      "table",
+      "total_component_bytes"
+    ],
+    "canonical_pin_source": "tools/ws0-corpus-gen/src/measurement_corpus.rs",
+    "canonical_component_source": "docs/reports/ws0-3096-artifacts/corpus-identity.json",
+    "canonical_components": 8,
+    "divergences": [],
+    "scope": "every one of the 13 identity field(s) the canonical corpus is defined by was compared, including the COMPLETE component map (8 component(s), name/size/digest, both directions) against docs/reports/ws0-3096-artifacts/corpus-identity.json, and the INPUT ANCHORS (seed, table) against the generator/schema constants that determine them. Pre-#3272-round-14 the component set was covered only in AGGREGATE by total_component_bytes \u2014 a sum, not a set \u2014 and seed/table/compression_info_present were not compared at all; the fields the canonical artifact carries that assert no identity (differs_from_prior_corpus, issue, not_a_correctness_oracle) are recorded as such rather than silently uncompared",
+    "mode": "baseline",
+    "is_baseline": true,
+    "label": "the canonical measurement corpus, measured as a WS0 BASELINE",
+    "source": "/data/ws0-3248/ac1b-20260828T164706Z/rig/session-corpus-pin.json"
+  },
+  "binary_provenance": {
+    "source_revision": "UNKNOWN-reused-binaries-not-built-by-this-session",
+    "source_revision_short": "UNKNOWN-reus",
+    "source_revision_observed": false,
+    "checkout_revision_at_measurement": "1ec95d230da72b743b259683b3229b70064a5601",
+    "source_dirty": true,
+    "source_dirty_paths": 2,
+    "build_mode": "reused",
+    "binaries": {
+      "ws0-scan-bench": {
+        "path": "measured-bin/ws0-scan-bench",
+        "source_path": "/data/lanes/lane-3248/target/perfsym/ws0-scan-bench",
+        "sha256": "f2800525e38492809dc3853acb27658158dd8541543ed9c70d1229247d45454a",
+        "bytes": 8705304,
+        "mtime_epoch": 1787935335
+      },
+      "cqlite-flight": {
+        "path": "measured-bin/cqlite-flight",
+        "source_path": "/data/lanes/lane-3248/target/perfsym/cqlite-flight",
+        "sha256": "3123e80680da2730b2287161b565a2d4af4c51ec92ffec46219d5b9415ca3d0e",
+        "bytes": 14787368,
+        "mtime_epoch": 1787935360
+      },
+      "flight-loadgen": {
+        "path": "measured-bin/flight-loadgen",
+        "source_path": "/data/lanes/lane-3248/target/perfsym/flight-loadgen",
+        "sha256": "d216d2785075993e37d9289e215986dbc03f65019b34f7c91648ad35fa3ce530",
+        "bytes": 14004848,
+        "mtime_epoch": 1787935364
+      }
+    },
+    "binary_spec_verification": {
+      "per_binary": {
+        "ws0-scan-bench": {
+          "path": "measured-bin/ws0-scan-bench",
+          "resolved": "/data/ws0-3248/ac1b-20260828T164706Z/rig/measured-bin/ws0-scan-bench",
+          "frozen_copy_present": true,
+          "frozen_copy_verified": true,
+          "source_path": "/data/lanes/lane-3248/target/perfsym/ws0-scan-bench",
+          "mtime_epoch": 1787935335,
+          "executable": "executable"
+        },
+        "cqlite-flight": {
+          "path": "measured-bin/cqlite-flight",
+          "resolved": "/data/ws0-3248/ac1b-20260828T164706Z/rig/measured-bin/cqlite-flight",
+          "frozen_copy_present": true,
+          "frozen_copy_verified": true,
+          "source_path": "/data/lanes/lane-3248/target/perfsym/cqlite-flight",
+          "mtime_epoch": 1787935360,
+          "executable": "executable"
+        },
+        "flight-loadgen": {
+          "path": "measured-bin/flight-loadgen",
+          "resolved": "/data/ws0-3248/ac1b-20260828T164706Z/rig/measured-bin/flight-loadgen",
+          "frozen_copy_present": true,
+          "frozen_copy_verified": true,
+          "source_path": "/data/lanes/lane-3248/target/perfsym/flight-loadgen",
+          "mtime_epoch": 1787935364,
+          "executable": "executable"
+        }
+      },
+      "frozen_copies_verified": 3,
+      "frozen_copies_expected": 3,
+      "note": "all 3 frozen copies were RE-DERIVED from this session dir and match the recorded size and sha256 exactly, so the digests describe the bytes present here",
+      "fields_checked": [
+        "bytes",
+        "mtime_epoch",
+        "path",
+        "sha256",
+        "source_path"
+      ]
+    },
+    "provenance": "written BY THE DRIVER, which observed each binary immediately before running it, so it establishes what THAT driver measured on the measuring host \u2014 not an independent truth about the repository. Report time REQUIRES this record but deliberately does NOT re-derive the digests: a results dir is routinely reviewed on another host or after a rebuild, where target/release describes the REVIEWING checkout's build and a re-derivation would both compare against an unrelated artifact and make a legitimate re-report fail (the same argument that keeps the CPU-sibling verification out of the reporter, #3272 F6). in `reused` (--no-build) mode, every measured binary was written AFTER the HEAD commit (epoch 1787935324), so none can be an artifact of an earlier revision. One-directional: this cannot see a binary NEWER than HEAD that was nevertheless built from other sources, which is why the digests above are recorded. and the SNAPSHOT was verified to be ONE BUILD (#3272 F5): each of the 3 source artifacts was identified by sha256, size, inode and mtime_ns BEFORE the first copy, every frozen copy's digest was required to EQUAL its captured SOURCE digest, and every source was RE-READ after the last copy and found unchanged. Without that, a rebuild landing BETWEEN two of the sequential copies yields a session holding binaries from two different builds while every destination digest still validates, because a destination-only digest verifies the write against itself. THE SOURCE REVISION IS UNKNOWN AND IS RECORDED AS SUCH (#3272 F1): `--no-build` accepted these binaries off the disk, and they may be artifacts of another branch, another worktree, or a tree since changed. The mtime check establishes only that they were WRITTEN after HEAD \u2014 never which revision produced them \u2014 so recording HEAD here would be a value nobody observed. `checkout_revision_at_measurement` records where this checkout stood, which is a different fact and is named for the one it can support",
+    "note": "the 3 measured binaries were identified by digest BEFORE the first rep AND FROZEN into the session's own measured-bin/ directory (so a concurrent rebuild of target/release could not change what the reps ran, #3272 F2), and at report time all 3 frozen copies were RE-DERIVED from this session dir and match the recorded size and sha256 exactly, so the digests describe the bytes present here (#3272 F3), at an UNKNOWN source revision \u2014 `--no-build` accepted these binaries off the disk, so which revision BUILT them is NOT established and is recorded as unknown rather than as this checkout's HEAD, which would be a value nobody observed (#3272 F1); the checkout stood at 1ec95d230da7 during the measurement, with a DIRTY working tree (2 changed path(s)), so the revision does not fully describe what was built; build mode reused"
+  },
+  "pinning": {
+    "server_cpus": "2,10",
+    "client_cpus": "4,12,5,13,6,14,7,15",
+    "counter_mode": "perf stat -C 2,10 (CPU-WIDE; never -p)",
+    "verification": {
+      "server_cpus": "2,10",
+      "client_cpus": "4,12,5,13,6,14,7,15",
+      "server_siblings_expanded": "server CPUs: 2,10 -> verified siblings of one physical core (2 10)",
+      "topology_root": "/sys/devices/system/cpu",
+      "host": "ip-172-31-7-163",
+      "verified_by": "scripts/perf/lib-cpu.sh verify_sibling_pair + verify_disjoint, fail-closed, against the real thread_siblings_list BEFORE the first rep",
+      "provenance": "written BY THE DRIVER that performed the verification, so it establishes what that driver observed on the measuring host \u2014 not an independent truth about the host. What it closes is the SUBSTITUTION: a manifest CPU list the driver never verified can no longer be printed as verified.",
+      "source": "/data/ws0-3248/ac1b-20260828T164706Z/rig/pinning-verification.json",
+      "note": "the CPU lists this report prints are the lists the DRIVER verified against the host's real thread_siblings_list before measuring (recorded in pinning-verification.json); the reporter asserted the manifest's lists EQUAL the verified ones. The sibling verification itself was performed on the measuring host and is NOT re-derived here \u2014 a results dir reviewed on another host would read that host's topology, which never ran the measurement (#3272 F6)."
+    }
+  },
+  "selection": {
+    "temperatures": [
+      "warm"
+    ],
+    "arms": [
+      "bypass"
+    ],
+    "temperatures_available": [
+      "warm",
+      "cold"
+    ],
+    "arms_available": [
+      "bypass",
+      "merge"
+    ],
+    "full_matrix": false,
+    "note": "completeness is asserted for the SELECTED combinations only; an unselected temperature or arm was NOT MEASURED in this session and this report says nothing about it"
+  },
+  "reps": 3,
+  "step_duration": "45s/1s",
+  "scan_passes": 1,
+  "events": [
+    "cycles",
+    "instructions"
+  ],
+  "bin_dir": "/data/lanes/lane-3248/target/perfsym",
+  "measurements": [
+    {
+      "arm": "bare_scan",
+      "surface": "cqlite_core::Database::execute_streaming",
+      "temperature": "warm",
+      "rows_per_sec": {
+        "median": 335109.32060540456,
+        "min": 329244.7968798401,
+        "max": 336515.8311885657,
+        "spread_abs": 7271.034308725619,
+        "spread_pct_of_median": 2.1697499477453666,
+        "n": 3
+      },
+      "cycles_per_row": {
+        "median": 19265.97491675,
+        "min": 19093.012481,
+        "max": 19381.33663775,
+        "spread_abs": 288.3241567499972,
+        "spread_pct_of_median": 1.4965458950085404,
+        "n": 3
+      },
+      "ipc": {
+        "median": 1.4521283237304976,
+        "min": 1.4490990308581975,
+        "max": 1.4566633931849922,
+        "spread_abs": 0.0075643623267946936,
+        "spread_pct_of_median": 0.5209155556832575,
+        "n": 3
+      },
+      "row_denominator_total": 12000000,
+      "cell_total": 144000000,
+      "cells_per_row_pinned": 12,
+      "round_metadata": {
+        "1": {
+          "round": 1,
+          "position": 1,
+          "arms_in_round": 2,
+          "monotonic_ns": 79987627103905
+        },
+        "2": {
+          "round": 2,
+          "position": 2,
+          "arms_in_round": 2,
+          "monotonic_ns": 80227048444172
+        },
+        "3": {
+          "round": 3,
+          "position": 1,
+          "arms_in_round": 2,
+          "monotonic_ns": 80253988024777
+        }
+      },
+      "setup_cycles_subtracted_total": 38425451,
+      "prewarm": [
+        {
+          "rep": 1,
+          "status": "ok"
+        },
+        {
+          "rep": 2,
+          "status": "ok"
+        },
+        {
+          "rep": 3,
+          "status": "ok"
+        }
+      ],
+      "prewarm_all_ok": true,
+      "prewarm_required_status": "warm",
+      "reps": [
+        {
+          "rep": 1,
+          "round": 1,
+          "position_in_round": 1,
+          "arms_in_round": 2,
+          "rows": 4000000,
+          "cells": 48000000,
+          "cells_required_per_pass": 48000000,
+          "cells_per_row_pinned": 12,
+          "secs": 12.149015073,
+          "rows_per_sec": 329244.7968798401,
+          "cycles_total": 76384568260,
+          "cycles_setup": 12518336,
+          "cycles_scan": 76372049924,
+          "cycles_per_row": 19093.012481,
+          "setup_secs": 0.001425913,
+          "passes": [
+            {
+              "pass": 0,
+              "rows": 4000000,
+              "cells": 48000000,
+              "secs": 12.149015073
+            }
+          ],
+          "passes_observed": 1,
+          "passes_expected": 1,
+          "verified_scan_fixed_inputs": {
+            "arm": "bare_scan",
+            "surface": "cqlite_core::Database::execute_streaming",
+            "query": "SELECT * FROM ws0.events",
+            "fold": false
+          },
+          "verified_scan_session_bound_inputs": {
+            "corpus": "/data/ws0-3096",
+            "schema": "/data/ws0-3096/ws0-events.cql",
+            "table_dirs_ingested": [
+              "/data/ws0-3096/ws0/events"
+            ]
+          },
+          "rows_source": "DERIVED as the sum of the per-pass rows, each of which was required to equal the corpus row count; the payload's recorded rows_denominator and timed_scan_secs were cross-checked against the derived sums",
+          "cells_source": "DERIVED as the sum of the per-pass cells, each of which was required to equal the corpus row count x the corpus identity's pinned cells_per_row \u2014 so a pass returning every row with MISSING COLUMNS is refused rather than published, which the row count alone could not see (#3272 round 17)",
+          "prewarm": "ok"
+        },
+        {
+          "rep": 2,
+          "round": 2,
+          "position_in_round": 2,
+          "arms_in_round": 2,
+          "rows": 4000000,
+          "cells": 48000000,
+          "cells_required_per_pass": 48000000,
+          "cells_per_row_pinned": 12,
+          "secs": 11.936403299,
+          "rows_per_sec": 335109.32060540456,
+          "cycles_total": 77076574913,
+          "cycles_setup": 12675246,
+          "cycles_scan": 77063899667,
+          "cycles_per_row": 19265.97491675,
+          "setup_secs": 0.001437944,
+          "passes": [
+            {
+              "pass": 0,
+              "rows": 4000000,
+              "cells": 48000000,
+              "secs": 11.936403299
+            }
+          ],
+          "passes_observed": 1,
+          "passes_expected": 1,
+          "verified_scan_fixed_inputs": {
+            "arm": "bare_scan",
+            "surface": "cqlite_core::Database::execute_streaming",
+            "query": "SELECT * FROM ws0.events",
+            "fold": false
+          },
+          "verified_scan_session_bound_inputs": {
+            "corpus": "/data/ws0-3096",
+            "schema": "/data/ws0-3096/ws0-events.cql",
+            "table_dirs_ingested": [
+              "/data/ws0-3096/ws0/events"
+            ]
+          },
+          "rows_source": "DERIVED as the sum of the per-pass rows, each of which was required to equal the corpus row count; the payload's recorded rows_denominator and timed_scan_secs were cross-checked against the derived sums",
+          "cells_source": "DERIVED as the sum of the per-pass cells, each of which was required to equal the corpus row count x the corpus identity's pinned cells_per_row \u2014 so a pass returning every row with MISSING COLUMNS is refused rather than published, which the row count alone could not see (#3272 round 17)",
+          "prewarm": "ok"
+        },
+        {
+          "rep": 3,
+          "round": 3,
+          "position_in_round": 1,
+          "arms_in_round": 2,
+          "rows": 4000000,
+          "cells": 48000000,
+          "cells_required_per_pass": 48000000,
+          "cells_per_row_pinned": 12,
+          "secs": 11.886513588,
+          "rows_per_sec": 336515.8311885657,
+          "cycles_total": 77538578420,
+          "cycles_setup": 13231869,
+          "cycles_scan": 77525346551,
+          "cycles_per_row": 19381.33663775,
+          "setup_secs": 0.001350089,
+          "passes": [
+            {
+              "pass": 0,
+              "rows": 4000000,
+              "cells": 48000000,
+              "secs": 11.886513588
+            }
+          ],
+          "passes_observed": 1,
+          "passes_expected": 1,
+          "verified_scan_fixed_inputs": {
+            "arm": "bare_scan",
+            "surface": "cqlite_core::Database::execute_streaming",
+            "query": "SELECT * FROM ws0.events",
+            "fold": false
+          },
+          "verified_scan_session_bound_inputs": {
+            "corpus": "/data/ws0-3096",
+            "schema": "/data/ws0-3096/ws0-events.cql",
+            "table_dirs_ingested": [
+              "/data/ws0-3096/ws0/events"
+            ]
+          },
+          "rows_source": "DERIVED as the sum of the per-pass rows, each of which was required to equal the corpus row count; the payload's recorded rows_denominator and timed_scan_secs were cross-checked against the derived sums",
+          "cells_source": "DERIVED as the sum of the per-pass cells, each of which was required to equal the corpus row count x the corpus identity's pinned cells_per_row \u2014 so a pass returning every row with MISSING COLUMNS is refused rather than published, which the row count alone could not see (#3272 round 17)",
+          "prewarm": "ok"
+        }
+      ]
+    },
+    {
+      "arm": "flight_do_get_bypass",
+      "surface": "arrow_flight FlightService::do_get (loopback gRPC)",
+      "temperature": "warm",
+      "requested_merge_path": "bypass",
+      "executed_merge_path": "NOT OBSERVED",
+      "merge_path_observability": "`requested_merge_path` is the value this rig set for CQLITE_FLIGHT_MERGE_PATH in the measured server's environment \u2014 a REQUEST, not an observation. `bypass` only PREFERS the single-source fast path: cqlite-flight/src/bypass.rs never lets it override a correctness precondition, so a rep can execute the K-WAY MERGER under a requested `bypass` either because `bypass_reason` declined (MultipleSources/DroppedColumns/StaticColumns/MulticellArmDivergence/ReaderUnsupported) or because ScanRowSource::open returned None and producer_warm.rs fell through to KWayMerger::new_from_readers. THE SERVER DOES NOT REPORT THE ARM IT TOOK: the computed reason is consumed only by an `if` and is never logged, metered or returned, and read_path_probe is an IN-PROCESS atomic with no export, which this rig \u2014 measuring a separate process over loopback gRPC \u2014 cannot read. Emitting it would require changing production cqlite-flight, outside this issue's scope. So the executed arm is recorded as NOT OBSERVED rather than asserted, and every per-arm figure and ratio below is conditional on a request the server was free to decline. Successor work: emit the selected BypassReason per request and REFUSE any rep whose executed arm differs from the requested one.",
+      "rows_per_sec": {
+        "median": 193596.27293192007,
+        "min": 193367.73703728613,
+        "max": 202660.34147420013,
+        "spread_abs": 9292.604436914,
+        "spread_pct_of_median": 4.799991392490201,
+        "n": 3
+      },
+      "cycles_per_row": {
+        "median": 26854.100989,
+        "min": 26339.0888975,
+        "max": 27322.549659166667,
+        "spread_abs": 983.4607616666653,
+        "spread_pct_of_median": 3.66223677370362,
+        "n": 3
+      },
+      "ipc": {
+        "median": 1.3401627802891307,
+        "min": 1.3316525806475452,
+        "max": 1.3509703514413296,
+        "spread_abs": 0.019317770793784383,
+        "spread_pct_of_median": 1.4414495819393456,
+        "n": 3
+      },
+      "row_denominator_total": 36000000,
+      "requests_expected_per_rep": ">=1, each one a full corpus scan",
+      "round_metadata": {
+        "1": {
+          "round": 1,
+          "position": 2,
+          "arms_in_round": 2,
+          "monotonic_ns": 80093760889213
+        },
+        "2": {
+          "round": 2,
+          "position": 1,
+          "arms_in_round": 2,
+          "monotonic_ns": 80200220360757
+        },
+        "3": {
+          "round": 3,
+          "position": 2,
+          "arms_in_round": 2,
+          "monotonic_ns": 80356876666463
+        }
+      },
+      "full_corpus_per_request_verified": true,
+      "corpus_rows_used_for_verification": 4000000,
+      "setup_cycles_subtracted_total": 0,
+      "setup_note": "server start + (warm only) prewarm happen BEFORE the perf window opens, so setup is outside the window by construction rather than subtracted",
+      "prewarm": [
+        {
+          "rep": 1,
+          "status": "ok"
+        },
+        {
+          "rep": 2,
+          "status": "ok"
+        },
+        {
+          "rep": 3,
+          "status": "ok"
+        }
+      ],
+      "prewarm_all_ok": true,
+      "prewarm_required_status": "warm",
+      "reps": [
+        {
+          "rep": 1,
+          "round": 1,
+          "position_in_round": 2,
+          "arms_in_round": 2,
+          "rows": 12000000,
+          "requests_ok": 3,
+          "requests_expected": ">=1, each one a full corpus scan",
+          "rows_per_scan_observed": 4000000.0,
+          "rows_per_scan_expected": 4000000,
+          "duration_s": 61.984664365,
+          "rows_per_sec": 193596.27293192007,
+          "rows_per_sec_recorded": 193596.27293192007,
+          "rows_per_sec_source": "DERIVED as rows_total/duration_s; the artifact's recorded rows_per_s was cross-checked against it and agreed within 1e-6 relative",
+          "cycles": 322249211868,
+          "cycles_per_row": 26854.100989,
+          "verified_fixed_inputs": {
+            "target_concurrency": 1,
+            "shape": "full",
+            "step": 0,
+            "schema": "flight-loadgen.step/v1"
+          },
+          "verified_session_bound_inputs": {
+            "round": "flight-bypass-warm-1",
+            "endpoint": "http://127.0.0.1:18815"
+          },
+          "error_codes": {},
+          "error_codes_sum": 0,
+          "requests_error": 0,
+          "error_codes_source": "CROSS-CHECKED: sum(error_codes.values()) == requests_error, the invariant the load generator maintains at StepAgg::record_outcome. This field used to be classified IGNORED on the ASSUMED invariant that the map is empty whenever requests_error is 0, which nothing enforced \u2014 so a record carrying requests_error 0 beside error_codes {'Internal': 1} was reported as a clean, failure-free scan (#3272 round 20)",
+          "content_volume_self_consistency": {
+            "bytes_total": 151941683808,
+            "bytes_total_verified_against_independent_oracle": false,
+            "bytes_per_scan_observed": 50647227936.0,
+            "bytes_per_scan_self_consistent_with": 50647227936.0,
+            "bytes_per_scan_reference_source": "this rep's own UNTIMED PREFLIGHT (`<tag>.prewarm.jsonl`), through the SAME ticket, server and response path \u2014 a SELF-CONSISTENCY reference, NOT an independent oracle (#3272 round 18), scaled to this rep's requests_ok",
+            "scope": "ESTABLISHES: the timed response's Arrow payload volume AGREES with the untimed preflight's, per scan and exactly \u2014 so a shortfall affecting ONLY the timed requests (a mid-session server change, one rep served differently, a truncated stream) is still refused. DOES NOT ESTABLISH: that either is COMPLETE. The preflight goes through the SAME ticket, the SAME server process and the SAME response path as the timed requests, so a uniform omission \u2014 a dropped column, a narrowed buffer \u2014 is present in both in equal measure, the byte counts AGREE, and this comparison passes on a payload that is short. It is a SELF-CONSISTENCY check, not an oracle: the expectation is not independent of the subject (#3042; the same shape as round 14's F4). It also cannot see a SCHEMA substitution, since it compares an extent rather than a per-column fold. The independent oracle would be the pinned ARROW_BUFFER_DIGEST, which is UNREACHABLE for this corpus: the #3096 digest oracle refuses a corpus observing zero null cells and ws0-corpus-gen emits none."
+          },
+          "prewarm": "ok"
+        },
+        {
+          "rep": 2,
+          "round": 2,
+          "position_in_round": 1,
+          "arms_in_round": 2,
+          "rows": 12000000,
+          "requests_ok": 3,
+          "requests_expected": ">=1, each one a full corpus scan",
+          "rows_per_scan_observed": 4000000.0,
+          "rows_per_scan_expected": 4000000,
+          "duration_s": 62.057922298,
+          "rows_per_sec": 193367.73703728613,
+          "rows_per_sec_recorded": 193367.73703728613,
+          "rows_per_sec_source": "DERIVED as rows_total/duration_s; the artifact's recorded rows_per_s was cross-checked against it and agreed within 1e-6 relative",
+          "cycles": 327870595910,
+          "cycles_per_row": 27322.549659166667,
+          "verified_fixed_inputs": {
+            "target_concurrency": 1,
+            "shape": "full",
+            "step": 0,
+            "schema": "flight-loadgen.step/v1"
+          },
+          "verified_session_bound_inputs": {
+            "round": "flight-bypass-warm-2",
+            "endpoint": "http://127.0.0.1:18815"
+          },
+          "error_codes": {},
+          "error_codes_sum": 0,
+          "requests_error": 0,
+          "error_codes_source": "CROSS-CHECKED: sum(error_codes.values()) == requests_error, the invariant the load generator maintains at StepAgg::record_outcome. This field used to be classified IGNORED on the ASSUMED invariant that the map is empty whenever requests_error is 0, which nothing enforced \u2014 so a record carrying requests_error 0 beside error_codes {'Internal': 1} was reported as a clean, failure-free scan (#3272 round 20)",
+          "content_volume_self_consistency": {
+            "bytes_total": 151941683808,
+            "bytes_total_verified_against_independent_oracle": false,
+            "bytes_per_scan_observed": 50647227936.0,
+            "bytes_per_scan_self_consistent_with": 50647227936.0,
+            "bytes_per_scan_reference_source": "this rep's own UNTIMED PREFLIGHT (`<tag>.prewarm.jsonl`), through the SAME ticket, server and response path \u2014 a SELF-CONSISTENCY reference, NOT an independent oracle (#3272 round 18), scaled to this rep's requests_ok",
+            "scope": "ESTABLISHES: the timed response's Arrow payload volume AGREES with the untimed preflight's, per scan and exactly \u2014 so a shortfall affecting ONLY the timed requests (a mid-session server change, one rep served differently, a truncated stream) is still refused. DOES NOT ESTABLISH: that either is COMPLETE. The preflight goes through the SAME ticket, the SAME server process and the SAME response path as the timed requests, so a uniform omission \u2014 a dropped column, a narrowed buffer \u2014 is present in both in equal measure, the byte counts AGREE, and this comparison passes on a payload that is short. It is a SELF-CONSISTENCY check, not an oracle: the expectation is not independent of the subject (#3042; the same shape as round 14's F4). It also cannot see a SCHEMA substitution, since it compares an extent rather than a per-column fold. The independent oracle would be the pinned ARROW_BUFFER_DIGEST, which is UNREACHABLE for this corpus: the #3096 digest oracle refuses a corpus observing zero null cells and ws0-corpus-gen emits none."
+          },
+          "prewarm": "ok"
+        },
+        {
+          "rep": 3,
+          "round": 3,
+          "position_in_round": 2,
+          "arms_in_round": 2,
+          "rows": 12000000,
+          "requests_ok": 3,
+          "requests_expected": ">=1, each one a full corpus scan",
+          "rows_per_scan_observed": 4000000.0,
+          "rows_per_scan_expected": 4000000,
+          "duration_s": 59.212374324,
+          "rows_per_sec": 202660.34147420013,
+          "rows_per_sec_recorded": 202660.34147420013,
+          "rows_per_sec_source": "DERIVED as rows_total/duration_s; the artifact's recorded rows_per_s was cross-checked against it and agreed within 1e-6 relative",
+          "cycles": 316069066770,
+          "cycles_per_row": 26339.0888975,
+          "verified_fixed_inputs": {
+            "target_concurrency": 1,
+            "shape": "full",
+            "step": 0,
+            "schema": "flight-loadgen.step/v1"
+          },
+          "verified_session_bound_inputs": {
+            "round": "flight-bypass-warm-3",
+            "endpoint": "http://127.0.0.1:18815"
+          },
+          "error_codes": {},
+          "error_codes_sum": 0,
+          "requests_error": 0,
+          "error_codes_source": "CROSS-CHECKED: sum(error_codes.values()) == requests_error, the invariant the load generator maintains at StepAgg::record_outcome. This field used to be classified IGNORED on the ASSUMED invariant that the map is empty whenever requests_error is 0, which nothing enforced \u2014 so a record carrying requests_error 0 beside error_codes {'Internal': 1} was reported as a clean, failure-free scan (#3272 round 20)",
+          "content_volume_self_consistency": {
+            "bytes_total": 151941683808,
+            "bytes_total_verified_against_independent_oracle": false,
+            "bytes_per_scan_observed": 50647227936.0,
+            "bytes_per_scan_self_consistent_with": 50647227936.0,
+            "bytes_per_scan_reference_source": "this rep's own UNTIMED PREFLIGHT (`<tag>.prewarm.jsonl`), through the SAME ticket, server and response path \u2014 a SELF-CONSISTENCY reference, NOT an independent oracle (#3272 round 18), scaled to this rep's requests_ok",
+            "scope": "ESTABLISHES: the timed response's Arrow payload volume AGREES with the untimed preflight's, per scan and exactly \u2014 so a shortfall affecting ONLY the timed requests (a mid-session server change, one rep served differently, a truncated stream) is still refused. DOES NOT ESTABLISH: that either is COMPLETE. The preflight goes through the SAME ticket, the SAME server process and the SAME response path as the timed requests, so a uniform omission \u2014 a dropped column, a narrowed buffer \u2014 is present in both in equal measure, the byte counts AGREE, and this comparison passes on a payload that is short. It is a SELF-CONSISTENCY check, not an oracle: the expectation is not independent of the subject (#3042; the same shape as round 14's F4). It also cannot see a SCHEMA substitution, since it compares an extent rather than a per-column fold. The independent oracle would be the pinned ARROW_BUFFER_DIGEST, which is UNREACHABLE for this corpus: the #3096 digest oracle refuses a corpus observing zero null cells and ws0-corpus-gen emits none."
+          },
+          "prewarm": "ok"
+        }
+      ],
+      "per_round_paired": [
+        {
+          "round": 1,
+          "bare_position_in_round": 1,
+          "flight_position_in_round": 2,
+          "bare_rows_per_sec": 329244.7968798401,
+          "flight_rows_per_sec": 193596.27293192007,
+          "ratio_bare_over_flight": 1.7006773523766239,
+          "cycles_per_row_delta": 7761.088507999997,
+          "flight_meets_target": false
+        },
+        {
+          "round": 2,
+          "bare_position_in_round": 2,
+          "flight_position_in_round": 1,
+          "bare_rows_per_sec": 335109.32060540456,
+          "flight_rows_per_sec": 193367.73703728613,
+          "ratio_bare_over_flight": 1.7330156816221474,
+          "cycles_per_row_delta": 8056.574742416666,
+          "flight_meets_target": false
+        },
+        {
+          "round": 3,
+          "bare_position_in_round": 1,
+          "flight_position_in_round": 2,
+          "bare_rows_per_sec": 336515.8311885657,
+          "flight_rows_per_sec": 202660.34147420013,
+          "ratio_bare_over_flight": 1.6604917801907788,
+          "cycles_per_row_delta": 6957.752259750003,
+          "flight_meets_target": false
+        }
+      ]
+    }
+  ],
+  "recorded_round_metadata": {
+    "warm": {
+      "source": "per-rep <tag>.round artifacts in the session dir (provenance UNVERIFIED \u2014 the reporter reads a directory and cannot establish which program wrote it)",
+      "claims_made": "NONE",
+      "claim_note": "this block is RECORDED DATA, not a verdict. The rig makes no interleaving, round-major-ordering or rotation claim: the earlier claim was DELETED because it reported a positive verdict at one round having compared nothing (#3272 round 4). Re-adding an OBSERVED drift control is tracked by #3287/#3299.",
+      "rounds_recorded": [
+        1,
+        2,
+        3
+      ],
+      "arms_per_round_recorded": 2,
+      "positions_by_round_recorded": {
+        "1": {
+          "bare_scan": 1,
+          "flight_do_get_bypass": 2
+        },
+        "2": {
+          "bare_scan": 2,
+          "flight_do_get_bypass": 1
+        },
+        "3": {
+          "bare_scan": 1,
+          "flight_do_get_bypass": 2
+        }
+      },
+      "instants_by_round_recorded": {
+        "1": {
+          "bare_scan": 79987627103905,
+          "flight_do_get_bypass": 80093760889213
+        },
+        "2": {
+          "bare_scan": 80227048444172,
+          "flight_do_get_bypass": 80200220360757
+        },
+        "3": {
+          "bare_scan": 80253988024777,
+          "flight_do_get_bypass": 80356876666463
+        }
+      },
+      "integrity_checks": {
+        "duplicate_instant_check": "applied to every recorded rep",
+        "reps_examined": 6,
+        "round_pairs_compared": 2,
+        "scope_note": "2 consecutive round pair(s) were available to compare. This count is NOT a verdict: at fewer than two recorded rounds it is 0 and nothing about ordering was \u2014 or could be \u2014 established. No ordering claim is derived from it anywhere (#3272 round 4)."
+      }
+    }
+  }
+}

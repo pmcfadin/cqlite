@@ -20,6 +20,37 @@ Key Differences Handled:
     - Python `IPv4Address`/`IPv6Address` → CLI `"ip-string"`
     - Python `frozenset` → CLI JSON array
     - Python `dict` (for maps) → CLI array of `{"key": k, "value": v}`
+    - Python `tuple` → CLI JSON array (same canonical shape as a `list`)
+
+Collection Identity Asymmetries (issue #1454):
+    The Python and Node bindings use different host containers for CQL
+    collections, so the canonical form below is deliberately *lossier* than
+    either binding. The authoritative table is
+    `docs/development/M4_spec.md` §5.3 "Collection Identity Semantics"; the
+    3-way golden parity harness (#1455, Y1) takes its canonicalization rules
+    from that table, and `TestCollectionIdentityContract` in this file asserts
+    that this normalizer implements every row of it. The three asymmetries the
+    canonical form has to erase:
+
+    - `set<frozen<udt>>` → Python `list`, **not** `frozenset` (`set_to_py`
+      falls back to a list because UDTs become unhashable `dict`s), while Node
+      returns a JS `Set` of objects. Canonical form: a JSON array either way —
+      but **NOT a sorted one**, because the Python value is indistinguishable
+      from a genuine `list<T>` here, so this row's canonical form is
+      order-SENSITIVE (a documented limitation, see M4_spec §5.3).
+    - `map<k,v>` → Python `dict`, whose keys **collapse** by hash/`__eq__`
+      (structurally equal non-scalar keys merge, last value wins), while a Node
+      `Map` compares object keys by *reference* so equal keys stay distinct.
+      Canonical form: a sorted array of `{"key": k, "value": v}`. Python map
+      keys additionally arrive as the hashable projection produced by
+      `value_to_hashable_key` (`list`→`tuple`, `set`→`frozenset`,
+      `udt`→`frozenset` of `(name, value)` pairs), so a UDT used as a map *key*
+      does not have the same host shape as the same UDT used as a *value* — and
+      because Node and the CLI render such a key as a UDT *object*, a UDT map
+      key is **UNSUPPORTED** under this contract rather than canonicalized.
+    - `tuple<...>` → Python `tuple` but a Node `Array`, i.e. Node cannot
+      distinguish `tuple<...>` from `list<T>`. Canonical form: a JSON array, so
+      tuple and list normalize identically.
 """
 
 import json
@@ -130,34 +161,74 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
         return str(value)
 
     if isinstance(value, frozenset):
-        # CLI outputs sets as JSON arrays (sorted for determinism)
+        # CLI outputs sets as JSON arrays (sorted for determinism).
+        #
+        # Issue #1454 / M4_spec §5.3: a `frozenset` reaches this branch from two
+        # distinct places. (a) `set<scalar>` (and `set<frozen<list|set|map>>`,
+        # whose elements stay hashable via `value_to_hashable_key`). (b) a UDT
+        # used as a MAP KEY, which `value_to_hashable_key` projects to a
+        # `frozenset` of `(field_name, value)` pairs including `_type` and
+        # `_keyspace` — so such a key canonicalizes to a sorted array of
+        # `[name, value]` pairs, NOT to the `{"_type": ..., field: ...}` object
+        # the CLI renders for a UDT. That divergence is documented rather than
+        # papered over: reconstructing a UDT object from an anonymous frozenset
+        # of 2-tuples would be a shape guess, and no corpus table currently has
+        # a UDT map key. Changing it is a behavior change, out of scope for
+        # #1454.
         return sorted([normalize_python_value(v, is_row_level=False) for v in value], key=_sort_key)
 
     if isinstance(value, list):
+        # `list<T>` and — per #1454 — `set<frozen<udt>>`, which `set_to_py`
+        # returns as a Python `list` (UDT dicts are unhashable, so no
+        # `frozenset` is possible). Both canonicalize to a JSON array;
+        # `frozen<T>` is already unwrapped by the binding, so it needs no branch.
         return [normalize_python_value(v, is_row_level=False) for v in value]
 
     if isinstance(value, tuple):
+        # `tuple<...>` → JSON array, the same canonical shape as `list<T>`,
+        # because Node returns an `Array` for both and cannot tell them apart
+        # (#1454; `Value::Tuple` delegates to `list_to_array`).
         return [normalize_python_value(v, is_row_level=False) for v in value]
 
     if isinstance(value, dict):
-        # Check if this is a UDT (has _type key)
-        if "_type" in value:
-            # UDT: CLI outputs as {"_type": name, field1: v1, ...}
-            # Filter out _keyspace as CLI doesn't include it
-            filtered = {k: v for k, v in value.items() if k != "_keyspace"}
-            return {k: normalize_python_value(v, is_row_level=False) for k, v in filtered.items()}
-
+        # THE CALLER'S EXPLICIT SIGNAL BEATS SNIFFING THE CONTENT (#1454).
+        # `is_row_level=True` is passed only by a caller that KNOWS it holds a
+        # row (every such call site normalizes `row.to_dict()`), and a UDT is
+        # always a CELL, so it can only ever arrive with `is_row_level=False`.
+        # Checking the signal first therefore leaves the UDT branch untouched
+        # while removing a real misclassification: `"_type"` and `"_keyspace"`
+        # are legal (quoted) COLUMN names, and sniffing `"_type"` first made such
+        # a row normalize as a UDT — silently DROPPING its `"_keyspace"` column.
+        # At cell level no such signal exists (a `map<text,X>` and a UDT are both
+        # a `dict`), which is why the ambiguity is fixed here but remains a
+        # documented limitation there: M4_spec §5.3 instance b-2, tracked by #3497.
         if is_row_level:
             # This is a row dict - keep as dict, recurse into cell values
             return {str(k): normalize_python_value(v, is_row_level=False) for k, v in value.items()}
-        else:
-            # This is a CQL map inside a cell - CLI outputs ALL maps as array of {"key": k, "value": v}
-            # Sort by key for determinism (like sets) - Issue #336
-            return sorted(
-                [{"key": normalize_python_value(k, is_row_level=False), "value": normalize_python_value(v, is_row_level=False)}
-                 for k, v in value.items()],
-                key=lambda x: _sort_key(x["key"])
-            )
+
+        # Cell level from here on.
+        if "_type" in value:
+            # UDT: CLI outputs as {"_type": name, field1: v1, ...}
+            # Filter out _keyspace as CLI doesn't include it.
+            # LIMITATION b-2: a `map<text,X>` that happens to carry a literal
+            # `"_type"` key is indistinguishable from a UDT here and lands in this
+            # branch. Requiring `_keyspace` too would only pick a rarer delimiter
+            # on an ambiguous channel; the real fix is the declared CQL type (#3497).
+            filtered = {k: v for k, v in value.items() if k != "_keyspace"}
+            return {k: normalize_python_value(v, is_row_level=False) for k, v in filtered.items()}
+
+        # This is a CQL map inside a cell - CLI outputs ALL maps as array of {"key": k, "value": v}
+        # Sort by key for determinism (like sets) - Issue #336.
+        # #1454: the `dict` has already collapsed structurally-equal keys
+        # (last value wins); a Node `Map` would have kept equal OBJECT keys
+        # distinct. Well-formed Cassandra data has no duplicate map keys, so
+        # the canonical form is identical in practice — but it is why the
+        # canonical form is a sorted array rather than a host map (instance b-3).
+        return sorted(
+            [{"key": normalize_python_value(k, is_row_level=False), "value": normalize_python_value(v, is_row_level=False)}
+             for k, v in value.items()],
+            key=lambda x: _sort_key(x["key"])
+        )
 
     if isinstance(value, str):
         return value
@@ -760,3 +831,538 @@ class TestRowCountParity:
             f"Row count mismatch for {keyspace}.{table}: "
             f"Python={py_count}, CLI={cli_count}"
         )
+
+
+# =============================================================================
+# Collection Identity Contract (Issue #1454)
+# =============================================================================
+
+
+# A UDT as the Python binding renders it (`udt_to_py`): a dict carrying the
+# `_type` / `_keyspace` metadata keys plus the named fields.
+def _udt(type_name: str, **fields: Any) -> dict:
+    return {"_type": type_name, "_keyspace": "test_collections", **fields}
+
+
+class TestCollectionIdentityContract:
+    """The collection-identity table of `docs/development/M4_spec.md` §5.3, executable.
+
+    Issue #1454. Each test asserts that `normalize_python_value` produces the
+    canonical shape documented for one row of that table, so the contract the
+    3-way golden parity harness (#1455, Y1) consumes is verified rather than
+    aspirational.
+
+    The tests named `LIMITATION <id>` pin the cases §5.3 records as NOT
+    canonicalizable — including one (b-4) that lives in the COMPARISON layer
+    (`values_equal`) rather than the normalizer — family (a), lossy projection through
+    `value_to_hashable_key`, which discards the CQL type; and family (b), two CQL
+    types arriving as the same Python host shape. The two FAMILIES are closed;
+    the list of INSTANCES is **not** — the families are generative, and nesting
+    multiplies them, so these tests are a floor and not a ceiling. They record
+    each divergent shape as a GAP, never as a desirable canonical form. Closing
+    any of them requires the declared CQL type threaded into normalization, i.e.
+    schema-aware normalization: a behavior change, out of scope for #1454,
+    tracked as #3497.
+
+    Not pinned here: the nested shapes that RAISE instead of diverging
+    (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`).
+    `contains_udt` and `value_to_hashable_key` are not total over `Value`, so
+    those fail with `TypeError: unhashable type` **inside the binding**, before
+    any normalizer runs — a production `value.rs` defect tracked as #3500, which
+    #1454 cannot touch and which no normalizer-level test can observe.
+
+    These tests are intentionally pure: they feed the normalizer the host values
+    the Python binding is documented to produce (`bindings/python/src/value.rs`:
+    `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`,
+    `value_to_hashable_key`) and need no dataset and no query, so a failure here
+    is unambiguously a contract violation and never a fixture problem.
+    """
+
+    def test_list_of_scalars_is_an_array(self):
+        """`list<T>` → Python `list` → JSON array, order preserved."""
+        assert normalize_python_value(["b", "a", "c"], is_row_level=False) == ["b", "a", "c"]
+
+    def test_set_of_scalars_is_a_sorted_array(self):
+        """`set<scalar>` → Python `frozenset` → **sorted** JSON array.
+
+        Sorting is required: `frozenset` iteration is hash-ordered while a JS
+        `Set` is insertion-ordered, so neither side's order may be asserted.
+        """
+        assert normalize_python_value(frozenset({3, 1, 2}), is_row_level=False) == [1, 2, 3]
+        assert normalize_python_value(frozenset({"b", "a"}), is_row_level=False) == ["a", "b"]
+
+    def test_set_of_hashable_collections_stays_a_frozenset(self):
+        """`set<frozen<list<int>>>` → `frozenset` of tuples → sorted array of arrays.
+
+        The `list` fallback in `set_to_py` triggers on UDTs only
+        (`contains_udt`), so nested *collections* still arrive as a frozenset.
+        """
+        normalized = normalize_python_value(frozenset({(1, 2), (3,)}), is_row_level=False)
+        assert sorted(normalized, key=_sort_key) == normalized
+        assert sorted(normalized, key=len) == [[3], [1, 2]]
+
+    def test_set_of_frozen_udt_is_a_list_not_a_frozenset(self):
+        """`set<frozen<udt>>` → Python **`list`** (asymmetry row 1).
+
+        `set_to_py` cannot use a `frozenset` because UDTs become unhashable
+        `dict`s, so it falls back to a `list`; Node keeps a JS `Set` of objects.
+        Canonical form on both sides is an array of UDT objects, with
+        `_keyspace` dropped (the CLI omits it) and `_type` retained.
+        """
+        value = [_udt("address", street="1 Main St"), _udt("address", street="2 Oak Ave")]
+        assert normalize_python_value(value, is_row_level=False) == [
+            {"_type": "address", "street": "1 Main St"},
+            {"_type": "address", "street": "2 Oak Ave"},
+        ]
+
+    def test_set_of_frozen_udt_canonical_form_is_order_sensitive(self):
+        """LIMITATION b-1 (host-shape collision): `set<frozen<udt>>` is NOT sorted.
+
+        Two structurally-equal UDT sets whose elements arrive in different orders
+        normalize to DIFFERENT arrays and compare unequal. This is a documented
+        gap (#1454, M4_spec §5.3 "EXCEPTION"), not a bug to fix here: the value
+        reaches the normalizer as a plain Python `list` — the same host shape as
+        a genuine `list<T>`, whose order is semantically meaningful — so sorting
+        it would corrupt every `list<T>`. Distinguishing the two needs the
+        declared CQL type, i.e. schema-aware normalization, which is a behavior
+        change and out of scope for #1454 (tracked as #3497).
+
+        #1455 must handle this row explicitly (compare it order-insensitively
+        itself, or declare it unsupported); it may not assume the canonical form
+        has erased set ordering.
+        """
+        a = [_udt("address", street="1 Main St"), _udt("address", street="2 Oak Ave")]
+        b = list(reversed(a))
+        na = normalize_python_value(a, is_row_level=False)
+        nb = normalize_python_value(b, is_row_level=False)
+        assert na != nb, (
+            "order-sensitivity is the documented limitation; if this now passes "
+            "order-insensitively the canonicalization rules in M4_spec §5.3 must be updated"
+        )
+        # ...and the ONLY difference is element order: the sets are equal as sets.
+        assert sorted(na, key=_sort_key) == sorted(nb, key=_sort_key)
+
+    def test_set_of_scalars_order_insensitivity_is_the_contrast_case(self):
+        """`set<scalar>` DOES canonicalize order-insensitively — it is a `frozenset`.
+
+        The contrast with the test above is the whole point: sorting is available
+        exactly when the host shape (`frozenset`) proves the value is a set.
+        """
+        assert normalize_python_value(frozenset({"b", "a"}), is_row_level=False) == normalize_python_value(
+            frozenset({"a", "b"}), is_row_level=False
+        )
+
+    def test_map_nested_in_a_set_element_is_an_unsupported_projected_shape(self):
+        """LIMITATION a-2 (lossy projection): a `map` inside a set element does not canonicalize.
+
+        A `set<frozen<map<text,int>>>` element is routed through
+        `value_to_hashable_key`, whose `Value::Map` arm projects the map to a
+        **tuple of pairs** — so it normalizes to `[["a", 1]]`, while Node and the
+        CLI render that nested map as `[{"key": "a", "value": 1}]`. Different in
+        kind, not in ordering.
+
+        The contrast case below shows the same nested map in *value* position
+        canonicalizing correctly (it goes through `value_to_py` -> `dict`), which
+        is what makes this a projection defect rather than a map-rendering one.
+        Pinned as a recorded gap for #1455 (must treat it as UNSUPPORTED), not as
+        a desirable shape; the fix needs the declared type (#3497).
+        """
+        element = (("a", 1),)  # what value_to_hashable_key makes of {"a": 1}
+        assert normalize_python_value(frozenset({element}), is_row_level=False) == [[["a", 1]]]
+
+        # Contrast: the same nested map as a map VALUE canonicalizes correctly.
+        assert normalize_python_value({"k": {"a": 1}}, is_row_level=False) == [
+            {"key": "k", "value": [{"key": "a", "value": 1}]},
+        ]
+
+        # The enclosing set still SORTS (it is a frozenset); only the element shape diverges.
+        two = normalize_python_value(frozenset({(("a", 1),), (("b", 2),)}), is_row_level=False)
+        assert two == sorted(two, key=_sort_key)
+
+    def test_udt_nested_deeper_in_a_projection_position_is_unsupported(self):
+        """LIMITATION a-3 (lossy projection): nesting generates more instances.
+
+        `set<frozen<list<frozen<udt>>>>`: `value_to_hashable_key`'s `List` arm
+        recurses, so the inner UDT is projected to a `frozenset` of
+        `(field_name, value)` pairs and the set element normalizes to an array of
+        `[name, value]` pairs — while Node and the CLI produce an array holding a
+        UDT **object** (`[[{"_type": ..., "street": ...}]]`).
+
+        This is a-1's projection reached one level deeper, i.e. the demonstration
+        that the two failure families are GENERATIVE: the instance list in
+        M4_spec §5.3 is a floor, not a ceiling, and a newly-encountered nested
+        shape must be checked against the principle rather than assumed absent.
+
+        The sibling nested shapes that RAISE rather than diverge
+        (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`)
+        are NOT pinned here: `contains_udt`/`value_to_hashable_key` are not total
+        over `Value`, so those fail with `TypeError` inside the binding before the
+        normalizer is reached. That is #3500 (a `value.rs` defect), out of scope
+        for #1454 and unobservable at this level.
+        """
+        # What the binding actually hands over: a tuple (the projected inner list)
+        # holding the UDT's frozenset projection.
+        projected_udt = frozenset(
+            {("_type", "address"), ("_keyspace", "test_collections"), ("street", "1 Main St")}
+        )
+        element = (projected_udt,)
+        assert normalize_python_value(frozenset({element}), is_row_level=False) == [
+            [
+                [
+                    ["_keyspace", "test_collections"],
+                    ["_type", "address"],
+                    ["street", "1 Main St"],
+                ]
+            ]
+        ]
+
+        # For contrast, the shape Node/CLI produce for the same CQL value is an
+        # array holding a UDT OBJECT — which is what a UDT in a non-projection
+        # position normalizes to here, and is different in kind from the above.
+        assert normalize_python_value([[_udt("address", street="1 Main St")]], is_row_level=False) == [
+            [{"_type": "address", "street": "1 Main St"}]
+        ]
+
+    def test_udt_field_named_keyspace_is_dropped(self):
+        """LIMITATION b-2, SITE "UDT fields": a field named `_keyspace` is LOST (#3504).
+
+        `_type`/`_keyspace` are control markers the bindings inject into the same
+        namespace that carries user-controlled names — and `_keyspace` is a legal
+        quoted UDT FIELD name. Both bindings inject the markers and *then* set the
+        fields (`udt_to_py`: `set_item("_type")`, `set_item("_keyspace")`, then
+        `set_item(field.name)`; `udt_to_object` does the identical thing), so a
+        field with that name **overwrites the metadata** — symmetrically, in Python
+        and Node. The canonical rule then drops `_keyspace` because the CLI omits it
+        for UDTs, so the FIELD is lost, while the CLI — which never injects
+        `_keyspace` — keeps it as a field.
+
+        Two properties worth keeping in view. (1) The class is **symmetric**, and
+        the two markers need DIFFERENT oracles: for `_keyspace` the CLI is a valid
+        oracle (it injects nothing of that name), but for `_type` it is NOT — the
+        CLI's JSON writer (`cqlite-cli/src/output/json.rs`, `Value::Udt` arm)
+        inserts `"_type"` and then the fields, so it is overwritten exactly like
+        the bindings. All three implementations agree and all three are wrong, so
+        only `sstabledump`/the raw bytes can detect the `_type` half (correction
+        recorded on #3504). (2) The fix is NOT to require
+        `_type` and `_keyspace` together, nor to pick a rarer marker: that just
+        chooses a rarer delimiter on a channel the data controls. UDT identity has
+        to be carried out of band (#3504; the canonicalization half is #3497).
+
+        This pins the current, defective behavior as a recorded gap.
+        """
+        # A UDT whose field is genuinely named "_keyspace" — after the binding's
+        # overwrite this is exactly the dict the normalizer receives.
+        udt_with_colliding_field = {"_type": "address", "_keyspace": "user-supplied-value"}
+        assert normalize_python_value(udt_with_colliding_field, is_row_level=False) == {
+            "_type": "address",
+        }, "the `_keyspace` FIELD is dropped by the canonical UDT rule (#3504)"
+
+        # Contrast: an ordinary field survives, so the loss is specific to the marker name.
+        assert normalize_python_value(
+            {"_type": "address", "street": "1 Main St"}, is_row_level=False
+        ) == {"_type": "address", "street": "1 Main St"}
+
+    def test_json_object_cell_normalizes_as_a_cql_map(self):
+        """LIMITATION b-5 (host-shape collision): a JSON cell is not distinguishable.
+
+        `Value::Json` reaches Python through `json_to_py`, which maps a JSON
+        **object** to a `PyDict` and a JSON **array** to a `PyList`. So the `dict`
+        row of the host-shape lattice (M4_spec §5.3) has THREE cell-level
+        sources — `map<k,v>`, `udt`, JSON object — and the normalizer, seeing only
+        the host value, canonicalizes a JSON object as a **CQL map**: a sorted
+        array of `{"key": ..., "value": ...}`, where the CLI keeps an object. A
+        JSON object carrying a literal `"_type"` key is additionally read as a UDT.
+
+        Reachability, stated honestly: the reader does produce `Value::Json` for a
+        `"json"` comparator (`custom_scalar.rs`,
+        `comparator_value_parsing.rs`), but no current fixture uses one, so this is
+        unreachable from today's corpus while being a real hole in the type
+        lattice. #1455 must exclude columns whose comparator is `"json"`; the fix
+        is the declared type (#3497).
+
+        Characterization only — this pins current behavior as a known gap.
+        """
+        json_object_cell = {"a": 1, "b": "two"}
+        assert normalize_python_value(json_object_cell, is_row_level=False) == [
+            {"key": "a", "value": 1},
+            {"key": "b", "value": "two"},
+        ], "a JSON object is canonicalized as a CQL map, not kept as an object (b-5)"
+
+        # A JSON object carrying "_type" takes the UDT branch instead — the third
+        # source colliding with the marker class (b-2).
+        assert normalize_python_value({"_type": "x", "a": 1}, is_row_level=False) == {
+            "_type": "x",
+            "a": 1,
+        }
+
+        # A JSON array is indistinguishable from `list<T>`: both become an array.
+        assert normalize_python_value([1, "two"], is_row_level=False) == [1, "two"]
+
+    def test_map_with_literal_type_key_is_misclassified_as_a_udt(self):
+        """LIMITATION b-2, SITE "cell-level map": a `map<text,X>` holding `"_type"` reads as a UDT.
+
+        `"_type"` and `"_keyspace"` are legal `text` map keys, and a CQL `map`
+        and a `udt` are both a Python `dict`, so the normalizer's
+        `if "_type" in value:` branch cannot tell them apart: such a map
+        normalizes to an **object** instead of the documented sorted array of
+        `{"key": ..., "value": ...}`, and a `"_keyspace"` entry is silently
+        **dropped** (the UDT branch filters it, since the CLI omits it for UDTs).
+
+        This is scoped to CELL level. The row-level twin of this defect is FIXED,
+        not documented: `normalize_python_value` now checks the caller's
+        `is_row_level` signal BEFORE the `"_type"` sniff, so a row with a
+        `"_type"` column is no longer read as a UDT — see
+        `test_row_with_type_and_keyspace_columns_normalizes_as_a_row`. No such
+        signal exists at cell level, which is why this half remains a limitation.
+
+        Pinned as a recorded gap, not a desirable shape. It is deliberately NOT
+        "fixed" by also requiring `_keyspace`: a legal map can carry both keys,
+        so that would only pick a rarer delimiter on an already-ambiguous channel
+        (the control/data lesson in CLAUDE.md). The real fix is the declared CQL
+        type (#3497); until then #1455 must treat such a map as UNSUPPORTED.
+        """
+        # A genuine map that happens to use "_type" as a key.
+        assert normalize_python_value({"_type": "not_a_udt", "a": 1}, is_row_level=False) == {
+            "_type": "not_a_udt",
+            "a": 1,
+        }
+        # ...and with a literal "_keyspace" entry, that entry is dropped outright.
+        assert normalize_python_value(
+            {"_type": "not_a_udt", "_keyspace": "ks", "a": 1}, is_row_level=False
+        ) == {"_type": "not_a_udt", "a": 1}
+
+        # Contrast: a map without "_type" canonicalizes as documented.
+        assert normalize_python_value({"a": 1}, is_row_level=False) == [{"key": "a", "value": 1}]
+
+    def test_map_is_a_sorted_array_of_key_value_objects(self):
+        """`map<k,v>` → Python `dict` → sorted array of `{"key": k, "value": v}` (asymmetry row 2)."""
+        assert normalize_python_value({"b": 2, "a": 1}, is_row_level=False) == [
+            {"key": "a", "value": 1},
+            {"key": "b", "value": 2},
+        ]
+
+    def test_benign_projection_list_and_set_keys_canonicalize_unchanged(self):
+        """BENIGN (family a, non-instance): a `list`/`set`/`tuple` key projection does NOT diverge.
+
+        `value_to_hashable_key` discards the host TYPE — a `map<frozen<list<int>>, text>` key
+        arrives as a `tuple` — but the *canonical form* is unchanged, because a
+        `list`, a `tuple` and a `frozenset` all canonicalize to a JSON array and
+        Node/the CLI render those same keys as arrays too. So the criterion for
+        family (a) is narrower than "a non-scalar in a projection position":
+
+            a lossy projection diverges iff the projected type's canonical form
+            is not a plain JSON array
+
+        which is why only `map` (a-2) and `udt` (a-1, a-3) generate instances.
+        This test exists so those benign cases are demonstrated rather than left
+        as an unremarked pass — #1455 must NOT special-case them
+        (M4_spec §5.3, family (a) table).
+        """
+        # list key → projected to a tuple → array. Node/CLI: array. Identical.
+        assert normalize_python_value({(1, 2): "x"}, is_row_level=False) == [
+            {"key": [1, 2], "value": "x"},
+        ]
+        # set key → frozenset → SORTED array. Node/CLI: sorted array. Identical.
+        assert normalize_python_value({frozenset({2, 1}): "x"}, is_row_level=False) == [
+            {"key": [1, 2], "value": "x"},
+        ]
+        # A projected `list` key and a projected `set` key with the same elements
+        # canonicalize to the SAME array: the lost host-type distinction costs
+        # nothing at the canonical level, which is the whole point of "benign".
+        assert normalize_python_value({(1, 2): "x"}, is_row_level=False) == normalize_python_value(
+            {frozenset({1, 2}): "x"}, is_row_level=False
+        )
+
+    def test_duplicate_non_scalar_map_keys_are_unsupported(self):
+        """LIMITATION b-3 (host-shape collision, key identity): duplicate non-scalar keys.
+
+        A Python `dict` cannot hold two structurally-equal non-scalar keys at
+        all — they collapse by hash/`__eq__`, last value wins — while a Node
+        `Map` compares object keys by reference and keeps **both**, so the two
+        canonical forms differ in LENGTH and no sorting reconciles them.
+
+        The collapse itself happens in `map_to_py`, before any normalizer runs,
+        so what is observable here is the consequence: one entry where Node would
+        have two. Well-formed Cassandra data never produces duplicate map keys,
+        so this is out of contract rather than a live read-path bug; closing it
+        (dedup or rejection) is a behavior change tracked by #3497.
+        """
+        collapsed = {(1, 2): "first"}
+        collapsed[(1, 2)] = "second"  # a structurally-equal key: collapses, last wins
+        assert normalize_python_value(collapsed, is_row_level=False) == [
+            {"key": [1, 2], "value": "second"},
+        ], "Python collapses equal non-scalar keys; a Node Map would keep both entries"
+
+    def test_map_with_udt_key_is_an_unsupported_divergent_shape(self):
+        """LIMITATION a-1 (lossy projection): a UDT map key is NOT canonicalizable.
+
+        `map_to_py` routes keys through `value_to_hashable_key`, which projects
+        a UDT to a `frozenset` of `(field_name, value)` pairs, so the Python key
+        normalizes to a sorted array of `[name, value]` pairs — while Node and
+        the CLI render the same key as a UDT **object**. The two shapes differ
+        in kind and nothing here reconciles them; doing so needs schema-aware
+        normalization, which is a behavior change and out of scope for #1454
+        (tracked as #3497).
+
+        This test therefore pins the *divergent* shape as a recorded gap, NOT as
+        a canonical form: #1455 must treat a UDT map key as UNSUPPORTED rather
+        than assume this projection is comparable across bindings
+        (M4_spec §5.3, "Known LIMITATION").
+        """
+        key = frozenset({("_type", "address"), ("_keyspace", "test_collections"), ("street", "1 Main St")})
+        normalized = normalize_python_value({key: 7}, is_row_level=False)
+        assert normalized == [
+            {
+                "key": [
+                    ["_keyspace", "test_collections"],
+                    ["_type", "address"],
+                    ["street", "1 Main St"],
+                ],
+                "value": 7,
+            }
+        ]
+
+    def test_tuple_is_an_array(self):
+        """`tuple<...>` → JSON array (asymmetry row 3)."""
+        assert normalize_python_value(("x", 1, None), is_row_level=False) == ["x", 1, None]
+
+    def test_tuple_and_list_canonicalize_identically(self):
+        """Node returns an `Array` for both `tuple<...>` and `list<T>`.
+
+        So the canonical form must erase the distinction Python preserves,
+        otherwise a Node↔Python comparison can never agree (#1454, #1455).
+        """
+        assert normalize_python_value(("a", 1), is_row_level=False) == normalize_python_value(
+            ["a", 1], is_row_level=False
+        )
+
+    def test_values_equal_accepts_a_reordered_scalar_list_or_tuple(self):
+        """LIMITATION b-4 (host-shape collision at COMPARISON time): list AND tuple order is not verified.
+
+        `values_equal` tries an ordered comparison and then falls back to an
+        UNORDERED (sorted) one, so a reordered `list<int>` compares EQUAL — even
+        though §5.3's `list<T>` row says "positional; order preserved on both
+        sides".
+
+        SCOPE, from the guard's semantics rather than by example: the guard is
+        `not any(isinstance(v, dict) for v in py_val)`, which inspects only that
+        level's IMMEDIATE elements, and the ordered path RECURSES. So the
+        fallback applies independently at EVERY array level whose immediate
+        elements hold no dict, at ANY nesting depth. A level that does hold
+        dicts (a map-repr array) is ordered-only at that level — but its nested
+        arrays are still swallowed.
+
+        This pins the CURRENT behavior as a recorded gap, NOT as a desirable
+        property. The fallback is a deliberate accommodation whose reason is
+        recorded at the branch: a CQL `SET` is sorted by `_sort_key` on the
+        Python side and emitted in Cassandra's internal byte-order by the CLI, so
+        removing the fallback would red genuine set comparisons in the existing
+        #319 suite — trading a false pass for a false failure. The canonical form
+        merges sets and lists into arrays by design, so the comparison layer
+        cannot tell them apart either; separating them needs the declared CQL
+        type (#3497).
+
+        This applies to `tuple<...>` too, and that is easy to miss: a tuple
+        canonicalizes to the SAME array as a list (the deliberate benign merge,
+        since Node cannot tell them apart), so the unordered fallback swallows a
+        reordered tuple exactly as it does a reordered list. §5.3 calls BOTH rows
+        positional, so scoping this limitation to lists alone would leave the
+        contract self-contradicting for tuples.
+
+        Consequence for #1455: a genuine `list<T>` OR `tuple<...>` ORDERING
+        regression would not be caught by this comparison. A harness that must
+        verify order has to compare those columns ordered-only, which requires
+        schema information.
+        """
+        # A reordered scalar list compares EQUAL — the documented gap.
+        assert values_equal([1, 2, 3], [3, 1, 2]) is True
+
+        # A reordered TUPLE does too: it normalizes to the same array as a list,
+        # so it reaches the same unordered fallback. Same gap, second CQL type.
+        py_tuple = normalize_python_value((1, 2, 3), is_row_level=False)
+        assert py_tuple == [1, 2, 3]
+        assert values_equal(py_tuple, [3, 1, 2]) is True
+
+        # ...and the normalized tuple is indistinguishable from the normalized
+        # list, which is WHY one fallback covers both.
+        assert py_tuple == normalize_python_value([1, 2, 3], is_row_level=False)
+
+        # NESTED arrays are swallowed too — the guard inspects only immediate
+        # elements and the ordered path recurses, so the INNER level applies the
+        # fallback even though the outer element is a list, not a primitive.
+        assert values_equal([[1, 2]], [[2, 1]]) is True
+
+        # Contrast, pinning the guard's actual boundary: a level holding dicts
+        # (a map-repr array) is ordered-only AT THAT LEVEL, so reordering it is
+        # correctly caught. This is why maps are sorted by key during
+        # normalization rather than left to the comparison layer.
+        map_repr = [{"key": "a", "value": 1}, {"key": "b", "value": 2}]
+        assert values_equal(map_repr, list(reversed(map_repr))) is False
+
+        # The accommodation this exists for: a set, normalized/sorted differently
+        # by the two sides, still compares equal.
+        py_set = normalize_python_value(frozenset({3, 1, 2}), is_row_level=False)
+        cli_set_order = [3, 1, 2]  # CLI follows Cassandra byte-order, not _sort_key
+        assert values_equal(py_set, cli_set_order) is True
+
+        # Guardrails on the fallback's scope, so a future widening is visible here:
+        # differing LENGTH still fails, differing CONTENT still fails, and arrays of
+        # map-repr dicts are compared without the unordered fallback.
+        assert values_equal([1, 2, 3], [1, 2]) is False
+        assert values_equal([1, 2, 3], [1, 2, 4]) is False
+        assert values_equal([{"key": "a", "value": 1}], [{"key": "b", "value": 1}]) is False
+
+    def test_row_with_type_and_keyspace_columns_normalizes_as_a_row(self):
+        """REGRESSION (#1454): a row whose COLUMNS are named `_type`/`_keyspace` is a ROW.
+
+        `"_type"` and `"_keyspace"` are legal column names (quoted identifiers).
+        Before the fix, the `"_type"` content sniff ran ahead of the caller's
+        `is_row_level` signal, so such a row normalized as a UDT and its
+        `"_keyspace"` column was silently DROPPED.
+
+        The caller's explicit signal beats sniffing the content: `is_row_level=True`
+        comes from a caller that knows it holds a row, and a UDT is always a cell
+        (so it always arrives with `is_row_level=False`). Both columns must survive,
+        and cell values inside the row must still normalize normally.
+        """
+        row = {"_type": "user", "_keyspace": "ks", "pk": 1, "m": {"b": 2, "a": 1}}
+        assert normalize_python_value(row, is_row_level=True) == {
+            "_type": "user",
+            "_keyspace": "ks",  # NOT dropped: this is a column, not UDT metadata
+            "pk": 1,
+            "m": [{"key": "a", "value": 1}, {"key": "b", "value": 2}],
+        }
+
+        # A row named only `_type` (no `_keyspace`) is likewise still a row.
+        assert normalize_python_value({"_type": "user", "pk": 1}, is_row_level=True) == {
+            "_type": "user",
+            "pk": 1,
+        }
+
+        # ...while the SAME dict at CELL level is still read as a UDT, so there
+        # `_keyspace` IS dropped — the observable contrast between the two levels,
+        # and the reason b-2 remains a cell-level limitation.
+        cell = {"_type": "user", "_keyspace": "ks", "pk": 1}
+        assert normalize_python_value(cell, is_row_level=False) == {"_type": "user", "pk": 1}
+        assert normalize_python_value(cell, is_row_level=True) == {
+            "_type": "user",
+            "_keyspace": "ks",
+            "pk": 1,
+        }
+
+    def test_row_level_dict_stays_a_dict(self):
+        """A row is a `dict` too — only *cell*-level dicts are CQL maps."""
+        row = {"pk": 1, "m": {"b": 2, "a": 1}}
+        assert normalize_python_value(row, is_row_level=True) == {
+            "pk": 1,
+            "m": [{"key": "a", "value": 1}, {"key": "b", "value": 2}],
+        }
+
+    def test_nested_collection_shapes(self):
+        """`map<text, frozen<set<text>>>` and `list<frozen<udt>>` recurse correctly."""
+        assert normalize_python_value({"k": frozenset({"z", "y"})}, is_row_level=False) == [
+            {"key": "k", "value": ["y", "z"]},
+        ]
+        assert normalize_python_value([_udt("point", x=1)], is_row_level=False) == [
+            {"_type": "point", "x": 1},
+        ]

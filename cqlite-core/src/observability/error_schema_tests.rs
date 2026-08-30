@@ -13,7 +13,7 @@
 //!
 //! Both sides are derived PROGRAMMATICALLY, so there is no second hand-maintained
 //! list to drift. This taxonomy is TELEMETRY-ONLY: the language bindings read
-//! `ffi_error_contract` (issue #1451), which mirrors the distinct
+//! `cqlite_ffi_common::error_contract` (issue #1451), which mirrors the distinct
 //! `Error::category()` enum, not `classify()`.
 //!
 //! # Where the code side's authority comes from (roborev B1 on this issue)
@@ -300,7 +300,7 @@ fn declared_error_variants() -> BTreeMap<String, bool> {
 }
 
 /// Parse a `classify()`-shaped match body into `Error` variant →
-/// (`ErrorCategory` variant, is-`wasm32`-gated).
+/// (`ObsErrorCategory` variant, is-`wasm32`-gated).
 ///
 /// Takes the body as an argument so [`the_classify_arm_parser_rejects_a_catch_all`]
 /// can feed it synthetic bodies — the parser under test is THIS one, not a copy of
@@ -313,7 +313,7 @@ fn declared_error_variants() -> BTreeMap<String, bool> {
 /// wildcard (`_ =>`), a named binding (`other =>`), or `Error::X | _ =>` all return
 /// `Err` here instead of quietly absorbing future variants.
 fn parse_classify_arms(body: &str) -> Result<BTreeMap<String, (String, bool)>, String> {
-    const ARM: &str = "=> ErrorCategory::";
+    const ARM: &str = "=> ObsErrorCategory::";
     const CFG_WASM: &str = "#[cfg(target_arch = \"wasm32\")]";
     let mut out: BTreeMap<String, (String, bool)> = BTreeMap::new();
     // Start after the `match … {` opener: the function signature ahead of it is not
@@ -334,7 +334,7 @@ fn parse_classify_arms(body: &str) -> Result<BTreeMap<String, (String, bool)>, S
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
         if category.is_empty() {
-            return Err("an arm must name an ErrorCategory variant".to_string());
+            return Err("an arm must name an ObsErrorCategory variant".to_string());
         }
         prev_end = idx + ARM.len() + category.len();
 
@@ -543,17 +543,17 @@ fn documented_map() -> BTreeMap<String, String> {
 #[test]
 fn as_str_is_lowercase_and_unique() {
     let mut seen = std::collections::HashSet::new();
-    for c in ErrorCategory::ALL {
+    for c in ObsErrorCategory::ALL {
         let s = c.as_str();
         assert_eq!(s, s.to_ascii_lowercase());
         assert!(seen.insert(s), "duplicate category label {s}");
     }
-    assert_eq!(seen.len(), ErrorCategory::ALL.len());
+    assert_eq!(seen.len(), ObsErrorCategory::ALL.len());
 }
 
 #[test]
 fn display_matches_as_str() {
-    for c in ErrorCategory::ALL {
+    for c in ObsErrorCategory::ALL {
         assert_eq!(c.to_string(), c.as_str());
     }
 }
@@ -561,20 +561,20 @@ fn display_matches_as_str() {
 #[test]
 fn documented_categories_equal_the_error_category_enum() {
     // Issue #1705: category-level code↔doc set equality. The table's column 1
-    // must be exactly `ErrorCategory::ALL`, in the same order, with column 2
+    // must be exactly `ObsErrorCategory::ALL`, in the same order, with column 2
     // matching `as_str()` — so a new telemetry category cannot ship undocumented
     // and a retired one cannot linger in the operator-facing table.
     let documented: Vec<(String, String)> = documented_taxonomy()
         .into_iter()
         .map(|(v, l, _)| (v, l))
         .collect();
-    let actual: Vec<(String, String)> = ErrorCategory::ALL
+    let actual: Vec<(String, String)> = ObsErrorCategory::ALL
         .iter()
         .map(|c| (format!("{c:?}"), c.as_str().to_string()))
         .collect();
     assert_eq!(
         documented, actual,
-        "the error_schema taxonomy table's categories must equal ErrorCategory::ALL \
+        "the error_schema taxonomy table's categories must equal ObsErrorCategory::ALL \
          (variant + as_str label, same order)"
     );
 }
@@ -584,7 +584,7 @@ fn classify_has_no_catch_all_arm() {
     // Issue #1705 (roborev B1) — the LOAD-BEARING pin. `classify()` matches on
     // `&Error` with every arm alternative an explicit `Error::<Variant>` pattern,
     // so Rust's exhaustiveness check refuses to compile until a newly-added variant
-    // is categorised BY HAND. Re-adding `_ => ErrorCategory::Other` (or a named
+    // is categorised BY HAND. Re-adding `_ => ObsErrorCategory::Other` (or a named
     // binding arm) would restore exactly the hole this issue closes: a new variant
     // silently absorbed into `Other`, absent from the doc table, and invisible to
     // every parsed comparison below. So the absence of a catch-all is asserted
@@ -603,10 +603,10 @@ fn the_classify_arm_parser_rejects_a_catch_all() {
     // The pin above is only worth as much as the parser behind it, so prove the
     // rejection on synthetic bodies — asserting THIS parser, the one
     // `classify_has_no_catch_all_arm` calls, not a copy of it.
-    let mut ok = String::from("fn classify(err: &Error) -> ErrorCategory {\n    match err {\n");
+    let mut ok = String::from("fn classify(err: &Error) -> ObsErrorCategory {\n    match err {\n");
     for n in 0..21 {
         ok.push_str(&format!(
-            "        Error::V{n}(_) => ErrorCategory::Other,\n"
+            "        Error::V{n}(_) => ObsErrorCategory::Other,\n"
         ));
     }
     let parsed = parse_classify_arms(&ok).expect("an all-explicit body must parse");
@@ -615,11 +615,11 @@ fn the_classify_arm_parser_rejects_a_catch_all() {
 
     for bad in [
         // a bare wildcard
-        format!("{ok}        _ => ErrorCategory::Other,\n"),
+        format!("{ok}        _ => ObsErrorCategory::Other,\n"),
         // a wildcard folded into an otherwise explicit arm
-        format!("{ok}        Error::VX(_) | _ => ErrorCategory::Other,\n"),
+        format!("{ok}        Error::VX(_) | _ => ObsErrorCategory::Other,\n"),
         // a NAMED binding, which is a catch-all that contains no `_` at all
-        format!("{ok}        other => ErrorCategory::Other,\n"),
+        format!("{ok}        other => ObsErrorCategory::Other,\n"),
     ] {
         let err = parse_classify_arms(&bad)
             .expect_err("a catch-all arm must be rejected, not silently parsed");
@@ -727,7 +727,7 @@ fn the_maps_from_parser_rejects_prose_that_smuggles_a_behavioural_claim() {
 #[test]
 fn every_error_variant_classify_routes_is_documented_in_the_taxonomy_table() {
     // Issue #1705 (AI5) — the RED test. `classify()`'s module-doc table is what
-    // operators read for telemetry (the bindings read `ffi_error_contract`
+    // operators read for telemetry (the bindings read `cqlite_ffi_common::error_contract`
     // instead — see the module doc). Assert
     // variant→category set equality in BOTH directions:
     //
@@ -788,8 +788,8 @@ fn every_error_variant_classify_routes_is_documented_in_the_taxonomy_table() {
 /// instead of scraping the test's text. That is what stops this oracle silently
 /// lagging behind the enum again — the F10 defect was exactly that: the six variants
 /// this issue documents were absent here while every consistency guard stayed green.
-fn independent_expectations() -> Vec<(Error, ErrorCategory)> {
-    use ErrorCategory::*;
+fn independent_expectations() -> Vec<(Error, ObsErrorCategory)> {
+    use ObsErrorCategory::*;
     let mut out = vec![
         (Error::from(std::io::Error::other("x")), Io),
         (Error::invalid_path("p"), Io),
@@ -912,10 +912,10 @@ fn independent_expectations() -> Vec<(Error, ErrorCategory)> {
 /// on every target we compile this list is empty and only its non-`wasm32` half is
 /// exercised. It is written now so that the day a `wasm32` build exists, `Wasm` has
 /// the same independent second opinion as every other variant instead of a hole.
-fn wasm_expectations() -> Vec<(Error, ErrorCategory)> {
+fn wasm_expectations() -> Vec<(Error, ObsErrorCategory)> {
     #[cfg(target_arch = "wasm32")]
     {
-        vec![(Error::Wasm("w".into()), ErrorCategory::Other)]
+        vec![(Error::Wasm("w".into()), ObsErrorCategory::Other)]
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

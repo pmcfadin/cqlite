@@ -115,12 +115,23 @@ ws0_scan_session_bound() { # ws0_scan_session_bound <corpus-path>
 
 # perf_csv <path> <cycles> <instructions> — a `perf stat -x,` CSV with both required events.
 #
-# The two-field-then-event layout matches what `perf stat -x, -e cycles,instructions`
-# writes: `<value>,,<event>,,,,`. `read_perf_counters` parses field 0 as the value and
-# field 2 as the event name, so a fixture that got the column order wrong would be refused
-# for the wrong reason.
+# The layout matches what `perf stat -x, -e cycles,instructions` really writes:
+#   `<value>,<unit>,<event>,<enabled_ns>,<enabled_pct>,<derived>,<derived_unit>`
+# `read_perf_counters` parses field 0 as the value, field 2 as the event name and field 4
+# as the enabled-percentage, so a fixture with the column order wrong would be refused for
+# the wrong reason.
+#
+# FIELD 4 CARRIES A REAL `100.00` (#3248), and that is load-bearing rather than cosmetic.
+# This helper used to emit `<value>,,<event>,,,,` with fields 3-6 EMPTY, which was fine
+# while nothing read them — and it is precisely how the multiplexing gap survived: the
+# parser never read field 4, the fixtures never supplied it, so there was no way for
+# either side to notice the column was unused. `read_perf_counters` now refuses a count
+# whose enabled-percentage is absent or unparseable (an unverifiable count is not a usable
+# one), so a fixture omitting it is refused — correctly. Supplying a realistic value keeps
+# the fixtures a model of real perf output instead of a model of what the parser happened
+# to read.
 perf_csv() {
-  printf '%s,,cycles,,,,\n%s,,instructions,,,,\n' "$2" "$3" > "$1"
+  printf '%s,,cycles,1000000000,100.00,1.000,GHz\n%s,,instructions,1000000000,100.00,2.000,insn per cycle\n' "$2" "$3" > "$1"
 }
 
 # ws0_make_corpus <dir> [rows] [data_db_bytes] [bytes_per_row] — a COMPLETE, internally
@@ -285,9 +296,19 @@ from ws0_canonical_corpus import require_canonical_or_declared
 # writing this line (a possessive in the word module), and it presented as a bash syntax error on an
 # unrelated python line.
 repo_root = pathlib.Path(sys.argv[1]).resolve().parent.parent
+# `events` and `bin_dir` are declared manifest fields since #3248, and the reader refuses an
+# INCOMPLETE config, so a fixture omitting them fails every downstream case with a
+# manifest-incompleteness error rather than the condition under test. Measured while adding
+# them: 211 checks across five suites went red at once, all with the same wrong diagnosis.
+# They are NOT parameterised here because no case varies them; a case that needs to can edit
+# the pin it just wrote, which is how the other single-value fields are exercised too.
 config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           "scan_passes": sys.argv[7], "server_cpus": "2,10", "client_cpus": "4,12",
           "step_duration": "45s/1s", "flight_endpoint": sys.argv[9],
+          "events": "cycles,instructions",
+          "bin_dir": "/fixture/target/release",
+          "profile": "off",
+          "quiescence": "NOT VERIFIED (no timeseries supplied)",
           "baseline_mode": sys.argv[8]}
 session, corpus = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2])
 # NOTHING IS STAMPED FOR A SESSION DIR THAT DOES NOT EXIST — the same load-bearing rule

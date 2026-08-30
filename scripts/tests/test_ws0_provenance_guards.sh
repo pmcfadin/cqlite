@@ -564,9 +564,23 @@ fi
 # inline schema/ticket heredocs became `verify_corpus_schema_input`/`write_ticket_template_for_session`
 # in scripts/perf/lib-inputs.sh. Anchored on the first of those CALL SITES, which is what the driver
 # still owns (the ORDER), so the range covers setup-through-loop exactly as before.
+# THE awk OUTPUT IS CAPTURED FIRST, NOT PIPED INTO `grep -q`.
+#
+# This file runs `set -uo pipefail`, and `grep -q` EXITS AS SOON AS IT MATCHES. When the match
+# is EARLY in a long producer output, awk still has lines to write, gets SIGPIPE, and the
+# PIPELINE reports failure — so the check FAILED on a perfectly correct tree, intermittently.
+# Measured: 0/20 failures against the driver as it stands on origin/main (a 170-line extracted
+# region), 9/20 against this branch's driver (197 lines). So the race is latent in this test and
+# a longer driver is what makes it fire — which means any diff that grows the driver turns a
+# dormant defect into a ~45% flake in a gate component, for everyone.
+#
+# Capturing the output removes the pipeline entirely, so there is no producer status to poison.
+# (The same defect class, `nm | grep -q` under pipefail, was fixed in ws0-baseline.sh in this
+# same change — there it made a guard refuse every CORRECT input.)
+_pin_region="$(awk '/^verify_corpus_schema_input/,/^drop_caches_if_cold/' \
+  "$REPO_ROOT/scripts/perf/ws0-baseline.sh")"
 if grep -q 'write_session_corpus_pin' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
-  && awk '/^verify_corpus_schema_input/,/^drop_caches_if_cold/' "$REPO_ROOT/scripts/perf/ws0-baseline.sh" \
-     | grep -q 'session-corpus-pin.json'; then
+  && grep -q 'session-corpus-pin.json' <<<"$_pin_region"; then
   pass "the DRIVER writes the session corpus pin (the reporter's requirement is WIRED, not fixture-only)"
 else
   fail "ws0-baseline.sh must stamp session-corpus-pin.json before the measurement loop"

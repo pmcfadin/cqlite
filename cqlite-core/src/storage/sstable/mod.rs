@@ -2131,7 +2131,7 @@ impl SSTableManager {
                             setup.into_error()
                         );
                     }
-                    Err(setup) => return Err(setup.into_error()),
+                    Err(setup) => return Err(setup.into_counted_error()),
                 }
             }
         }
@@ -2231,7 +2231,7 @@ impl SSTableManager {
                 }
             }
         });
-        Ok(reader::RowScanStream::new(rx, task))
+        Ok(reader::RowScanStream::new_over_counted_source(rx, task))
     }
 
     /// Batched streaming scan under the `tombstones` feature (issue #1592).
@@ -2883,7 +2883,7 @@ mod tests {
         // end of stream is then a proven-clean one, exactly as a healthy scan's is,
         // and the assertions below are about the flush-before-error ordering only.
         let mut out = scan_stream_fanout::rechunk_into_batches(
-            reader::RowScanStream::new(in_rx, tokio::spawn(async {})),
+            reader::RowScanStream::new_nested(in_rx, tokio::spawn(async {})),
             64,
         );
 

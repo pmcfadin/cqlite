@@ -29,7 +29,7 @@
 #![cfg(feature = "observability-testing")]
 
 use cqlite_core::error::Error;
-use cqlite_core::observability::{self as obs, catalog, testing, ErrorCategory};
+use cqlite_core::observability::{self as obs, catalog, testing, ObsErrorCategory};
 
 /// Install (idempotently) the process-global in-memory meter provider.
 ///
@@ -336,7 +336,7 @@ fn catalog_metrics_have_expected_names_units_and_error_labels() {
     // The induced category must be one of the bounded taxonomy values, never a
     // raw message.
     assert!(
-        ErrorCategory::ALL
+        ObsErrorCategory::ALL
             .iter()
             .any(|c| c.as_str() == expected_category),
         "induced error category {expected_category} must be a bounded taxonomy value"
