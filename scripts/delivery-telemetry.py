@@ -1070,15 +1070,25 @@ def build_record(args, gh_fields: dict, notes: list = None) -> dict:
             # was ever stamped is not recordable until the issue is closed again on its own
             # terms. Telling the operator to pass --slice instead would mislabel it
             # permanently, which is the one outcome worse than an unstamped delivery.
+            # DO NOT advise waiting for a reclose. A later close belongs to a LATER
+            # delivery cycle, and the completed path reads the issue's CURRENT closedAt —
+            # so stamping after a reclose attributes that other cycle's closure and cycle
+            # time to THIS pr (roborev round 4). The mis-attribution itself is older than
+            # this change (on main, closed_at is `issue_json["closedAt"]` with no notion of
+            # which close ended which cycle) and is tracked separately; what this change
+            # must not do is TELL an operator to produce it.
             raise SystemExit(
                 f"error: issue #{args.issue} was CLOSED when PR #{args.pr} merged"
                 f"{_close_event_clause(gh_fields)}, so this delivery COMPLETED it — but the "
-                f"issue has been REOPENED since, so its current closed_at is null and a "
-                f"completed record has no terminal timestamp to record. Stamp this cycle "
-                f"once the issue's closed_at again reflects that completion. Do NOT pass "
-                f"--slice (it would permanently mislabel a completed delivery), do NOT close "
-                f"the issue to satisfy this tool, and do NOT hand-append the record past the "
-                f"validator (issues #3550/#3559).")
+                f"issue has been REOPENED since, so its current closed_at is null and this "
+                f"cycle's own closure is no longer the issue's closed_at. This record cannot "
+                f"be stamped as-is, and WAITING FOR THE ISSUE TO CLOSE AGAIN DOES NOT FIX IT: "
+                f"a later close belongs to a later delivery cycle, and stamping then would "
+                f"attribute that cycle's closure and cycle_time_s to PR #{args.pr}. Raise it "
+                f"with the lead rather than working around it. Do NOT pass --slice (it would "
+                f"permanently mislabel a completed delivery), do NOT close the issue to "
+                f"satisfy this tool, and do NOT hand-append the record past the validator "
+                f"(issues #3550/#3559).")
 
     # THE BASIS NOTE (issue #3559, REQ-3559-02 option C). Both surviving classifications
     # CAN rest on the operator rather than on evidence, and only one of them was ever

@@ -1239,7 +1239,7 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   **also** literally open at `mergedAt` and only `closingIssuesReferences` tells the two apart (a
   slice PR closes NOTHING). So `--slice` is now ACCEPTED for an issue that has since been closed or
   reopened — the three owed #3393 records (#3407/#3429/#3467) were what this unblocked — and REFUSED
-  when the timeline places a `closed` event STRICTLY BEFORE `mergedAt` (that delivery COMPLETED the
+  when the LAST `closed`/`reopened` event STRICTLY BEFORE `mergedAt` is a `closed` (the last one decides — a close then reopen before the merge is ACCEPTED; that delivery COMPLETED the
   issue; a later reopen does not change it) or when the PR declares the close. **`--slice` is an
   operator ASSERTION and the tool refuses it wherever it can be DISPROVED**; where it cannot be, the
   assertion stands — a completed delivery whose PR omits `Closes #N` and whose issue is closed by

@@ -170,7 +170,7 @@ The pipeline measures itself so improvement is data-driven, not anecdotal:
   only the PR's own `closingIssuesReferences` separates "open because it is never closing" from "open
   because the close lands five seconds later" (a slice PR closes NOTHING). A slice is therefore stampable
   after its issue has been closed or reopened (this is what unblocked the three owed #3393 records
-  #3407/#3429/#3467), and is REFUSED when the timeline places a `closed` event STRICTLY BEFORE `mergedAt` (an
+  #3407/#3429/#3467), and is REFUSED when the LAST `closed`/`reopened` event STRICTLY BEFORE `mergedAt` is a `closed` — the last one decides, so a close FOLLOWED by a reopen before the merge is ACCEPTED (an
   event in the SAME SECOND as the merge is unmeasurable at one-second resolution and is refused as that) —
   that delivery COMPLETED the issue, and a later reopen does not change it. `--slice` is an operator
   ASSERTION: the tool refuses it wherever it can be DISPROVED, and where it cannot be, the assertion

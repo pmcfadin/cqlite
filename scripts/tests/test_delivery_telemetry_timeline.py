@@ -655,6 +655,13 @@ class SliceFromTimelineTests(unittest.TestCase):
                 dt.main(self._argv(ledger, gh))
             msg = str(cm.exception)
             self.assertIn("2026-06-10T02:30:00Z", msg)
+            # It must NOT advise waiting for a reclose (roborev round 4): the completed path
+            # reads the issue's CURRENT closedAt, so a later close -- which belongs to a
+            # LATER delivery cycle -- would be attributed to THIS pr. An earlier version of
+            # this refusal told the operator to do exactly that.
+            self.assertNotIn("again reflects that completion", msg)
+            self.assertIn("DOES NOT FIX IT", msg)
+            self.assertIn("later delivery cycle", msg)
             self.assertNotIn("Pass --slice", msg)
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
