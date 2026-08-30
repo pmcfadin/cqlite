@@ -108,6 +108,10 @@
 #
 #     What survives is the oracle that is real: no CPython accepts the BACKSLASH form, so the
 #     compile check catches the defect this issue is actually about on 3.9 through 3.12 alike.
+#   * A `-c` FLAG SPELLED THROUGH A VARIABLE (`$FLAG` where `FLAG=-c`). Every quoting spelling
+#     bash glues into `-c` IS discovered — `-"c"`, `-'c'`, `"-c"`, `'-c'`, `\-c` — but a flag
+#     whose text never appears cannot be, and resolving it needs the shell. Stated rather than
+#     chased.
 #   * COMPLETE DISCOVERY OF EMBEDDED PYTHON, which is NOT STATICALLY ACHIEVABLE and is therefore a
 #     stated decision rather than an oversight. A shell command word can be spelled arbitrarily —
 #     a variable, a concatenation, `$(which python3)`, an alias, `eval` — so enumerating the
@@ -168,6 +172,13 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 # under $TMPDIR" was FALSE — gitignored, so nothing reached git, but the claim was still wrong,
 # and an overclaiming header is the class we just deleted an eval-safety paragraph for.
 export PYTHONDONTWRITEBYTECODE=1
+# `assert` IS REMOVED BY -O (#3451 post-rebase round 9, F1). Measured:
+# `PYTHONOPTIMIZE=1 python3 -c 'assert False, "fires"'` prints nothing and exits 0. Ten checks in
+# this suite were `assert`s, so an inherited variable would have switched all ten off at once —
+# a valid-but-swapped field passing silently. They are explicit conditionals now, which is THE
+# fix; unsetting the variable is only a second line of defence, because an env precaution is
+# itself something a new call site can miss.
+unset PYTHONOPTIMIZE
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/ws0-embedded-steps.XXXXXX")" || TMP=""
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
@@ -952,6 +963,39 @@ else
   fail "census CONTROL did not fire (mid-line comment): fixture-rc=$midc_rc problems:$midc_detail"
 fi
 
+# --- CONTROL 1m: the `-c` flag, in every quoting spelling bash glues together ------------------
+# Bash concatenates the fragments of `-"c"` and `-'c'` into `-c`, and an anchor matching only the
+# bare spelling missed both — measured at findings=0, silent absences.
+#
+# ALL SIX SPELLINGS ARE ASSERTED, not just the two that were broken, and that matters: the fully
+# quoted `"-c"` and `'-c'` already failed closed by a DIFFERENT path, so a control testing only
+# those would have reported this fixed while the concatenated forms stayed blind. Testing the
+# space rather than the named example is what separated them.
+python3 - "$TMP" <<'INJECT'
+import pathlib, sys
+q, dq, bs = chr(39), chr(34), chr(92)
+tmp = pathlib.Path(sys.argv[1])
+bad = q + "import os," + q
+for name, flag in (
+    ("bare", "-c"), ("quoted-dq", dq + "-c" + dq), ("quoted-sq", q + "-c" + q),
+    ("concat-dq", "-" + dq + "c" + dq), ("concat-sq", "-" + q + "c" + q),
+    ("escaped", bs + "-c"),
+):
+    (tmp / f"flag-{name}.sh").write_text("$PY " + flag + " " + bad + "\n")
+INJECT
+flag_rc=$?
+flag_ok=1
+flag_detail=""
+for flag_case in bare quoted-dq quoted-sq concat-dq concat-sq escaped; do
+  [ -n "$(findings_of "$(census "$TMP/flag-$flag_case.sh")")" ] \
+    || { flag_ok=0; flag_detail="$flag_detail $flag_case(missed)"; }
+done
+if [ "$flag_rc" -eq 0 ] && [ "$flag_ok" -eq 1 ]; then
+  pass "census CONTROL fired (flag spellings): all six quoting spellings of -c that bash glues into the same flag are FINDINGS — including the two concatenated forms that were silent while the fully-quoted ones already fired, which is why the whole space is asserted rather than the named example"
+else
+  fail "census CONTROL did not fire (flag spellings): fixture-rc=$flag_rc problems:$flag_detail"
+fi
+
 # --- CONTROL 1l: the assignment prefix is PARSED, and refuses what an eval would have run -------
 # Round 2 authorised evaluating the driver's prefix on the argument that the contiguity check
 # bounded the input to `NAME=` words with no separator. MEASURED, that check ADMITS
@@ -1370,7 +1414,10 @@ cfg = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
 # validator accepts is invisible to the validator and visible only here.
 # argv: 1=perf dir, 2=session, 3=corpus, 4.. = the expected `field=value` pairs.
 expected = dict(pair.split("=", 1) for pair in sys.argv[4:])
-assert expected, "no expected fields were passed; this check would assert nothing"
+if not expected:
+    print("no expected fields were passed; this check would assert nothing",
+          file=sys.stderr)
+    raise SystemExit(1)
 # The reader NORMALISES the selection fields into lists (`temps` -> ['warm'], `events` ->
 # ['cycles','instructions']), so the comparison joins a list back to the comma form the driver
 # was handed. That is a comparison SHAPE, not a weakening: a swapped right-hand side still
@@ -1383,15 +1430,23 @@ def _norm(value):
 mismatched = {
     k: (cfg.get(k), v) for k, v in expected.items() if _norm(cfg.get(k)) != v
 }
-assert not mismatched, f"manifest fields differ from the controlled inputs: {mismatched}"
+if mismatched:
+    print(f"manifest fields differ from the controlled inputs: {mismatched}",
+          file=sys.stderr)
+    raise SystemExit(1)
 # The reader's own report, asserted field by field so this case cannot pass on a verifier that
 # returned an empty dict: the pin was taken BEFORE measurement, and it carries the digests of the
 # corpus, the schema and the Flight ticket the step measured from disk.
-assert report.get("pinned_before_measurement") is True, report
-assert len(report.get("pinned_data_db_sha256", "")) == 64, report
-assert len(report.get("pinned_schema_sha256", "")) == 64, report
-assert len(report.get("pinned_ticket_sha256", "")) == 64, report
-assert report.get("pinned_components", 0) >= 5, report
+for _label, _ok in (
+    ("pinned_before_measurement is True", report.get("pinned_before_measurement") is True),
+    ("pinned_data_db_sha256 is a digest", len(report.get("pinned_data_db_sha256", "")) == 64),
+    ("pinned_schema_sha256 is a digest", len(report.get("pinned_schema_sha256", "")) == 64),
+    ("pinned_ticket_sha256 is a digest", len(report.get("pinned_ticket_sha256", "")) == 64),
+    ("pinned_components >= 5", report.get("pinned_components", 0) >= 5),
+):
+    if not _ok:
+        print(f"pin report failed: {_label} — {report}", file=sys.stderr)
+        raise SystemExit(1)
 PY
 then
   pass "EXECUTE session-corpus-pin: the SHIPPED READERS accept what the shipped STEP wrote — verify_session_corpus_pin for the corpus identity AND session_manifest_config (what ws0_report.py itself calls) for the configuration, so the round trip is against the production reader rather than a weaker one"
@@ -1622,18 +1677,26 @@ session = pathlib.Path(sys.argv[2])
 config = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
 rec = verify_pinning_record(session, config["server_cpus"], config["client_cpus"])
 missing = [f for f in PINNING_RECORD_FIELDS if not rec.get(f)]
-assert not missing, missing
+if missing:
+    print(f"pinning record is missing required fields: {missing}", file=sys.stderr)
+    raise SystemExit(1)
 # ...AND EACH RECORDED FIELD AGAINST ITS CONTROLLED INPUT (#3451 post-rebase round 5, F2).
 # `server_siblings_expanded` and `topology_root` are both just non-empty strings to the shipped
 # validator, so swapping their right-hand sides in the driver passes every check above. Only
 # comparing each field to the value it was GIVEN can tell them apart.
 written = json.loads(pinning_record_path(session).read_text())
 expected = dict(pair.split("=", 1) for pair in sys.argv[3:])
-assert expected, "no expected pin fields were passed; this check would assert nothing"
+if not expected:
+    print("no expected pin fields were passed; this check would assert nothing",
+          file=sys.stderr)
+    raise SystemExit(1)
 mismatched = {
     k: (written.get(k), v) for k, v in expected.items() if str(written.get(k)) != v
 }
-assert not mismatched, f"pinning-record fields differ from the controlled inputs: {mismatched}"
+if mismatched:
+    print(f"pinning-record fields differ from the controlled inputs: {mismatched}",
+          file=sys.stderr)
+    raise SystemExit(1)
 PY
 then
   pass "EXECUTE cpu-pin-verification: the SHIPPED READER accepts the record the shipped STEP wrote; its pins are checked against the CPU lists THE SESSION MANIFEST records (the two steps cross-checked against each other, not each against the same constants), and every recorded field against the distinct value it was given"
@@ -1764,7 +1827,7 @@ fi
 # which the new coverage can be deleted again and the stale floor still passes. It sat 18 below
 # actual for exactly that reason. Equality means a change in either direction is a decision
 # someone makes here, in one line, with the failure text saying which direction and why.
-MIN_CHECKS=50
+MIN_CHECKS=51
 echo
 if [ "$checks" -ne "$MIN_CHECKS" ]; then
   echo "FAIL - $checks check(s) ran; this suite has EXACTLY $MIN_CHECKS."

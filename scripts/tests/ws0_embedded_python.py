@@ -313,7 +313,15 @@ def _is_plain_literal(word: str) -> bool:
 # The false-red direction was checked BEFORE widening, not assumed: `tar -cf out.tar` and
 # `sort -cu file` now match this anchor and must resolve to the literal commands `tar`/`sort`
 # and be SKIPPED. They are controls.
-_DASH_C_ANCHOR = re.compile(r"(?<![\w-])-c[ \t]*\S")
+# QUOTE CHARACTERS MAY SIT INSIDE THE FLAG (#3451 post-rebase round 9, F2). Bash glues the
+# fragments of `-"c"` and `-'c'` into `-c`, so an anchor matching the bare spelling missed them —
+# MEASURED at findings=0, a silent absence. Note the fully-quoted forms `"-c"` and `'-c'` already
+# failed closed by another path, so testing only those would have concluded this was fixed.
+#
+# `['\"]*` between the `-` and the `c` normalises every concatenated spelling in one closed rule,
+# rather than a tokenizer. RESIDUAL, stated in the caller's NOT REACHED: a flag spelled through a
+# VARIABLE (`$FLAG` where `FLAG=-c`) is not discovered and cannot be without evaluating the shell.
+_DASH_C_ANCHOR = re.compile(r"(?<![\w-])-['\"]*c['\"]*[ \t]*\S")
 
 # Characters that cannot appear inside one shell word, used to find where a candidate's word
 # STARTS so a path prefix is captured with it.
