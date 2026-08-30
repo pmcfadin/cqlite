@@ -391,7 +391,19 @@ an accumulated log, and the beater publishes by rename, which would unlink the l
 so the advertised log ends up holding heartbeat data. Aliasing is checked by name *and* by
 device+inode (`-ef`), because two different spellings can be the same file. These catch obvious misconfiguration before anything starts.
 
-**The real guarantee is post-launch, and it is BOUND TO THE NEW RUN:** the gate starts its
+**The beater starts before anything expensive.** It used to start after the tree-identity capture
+and the sentinel, which meant the first seconds of every gate published no liveness at all — the
+blind spot the heartbeat exists to close, open at the moment a reader is most likely to look. It
+also made the launcher's monitorability check racy: a slow capture (~150 ms on a 6114-file checkout,
+but unbounded in principle) could have made the launcher stop a *healthy* gate. The sentinel stays
+after the capture, because it carries `tree-start:` and cannot precede what computes it.
+
+**The real guarantee is post-launch, and it is bound to a LAUNCHER NONCE:** the launcher generates
+an opaque token, forwards it to the gate, and requires it in *both* artifacts before trusting them.
+Binding to "the first run-id that differs from the pre-launch value" was not enough — a concurrent
+gate on the same summary path can publish first, and the launcher would then report success and
+print a poll command bound to the **peer's** run. A run-id it cannot predict is no basis for the
+claim; a token it generates is. Additionally: the gate starts its
 beater *before* it queues for the #1825 slot, so a first beat lands within a second or two even
 when the gate will then sit in the queue for 20 minutes. The launcher snapshots the run-ids
 already present, then requires the summary to publish a *different* run-id **and** the heartbeat
@@ -456,7 +468,7 @@ Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
 Self-tests: `scripts/tests/test_gate_liveness.sh` (157 cases) and
-`scripts/tests/test_gate_detached.sh` (95 cases), both in the full gate's
+`scripts/tests/test_gate_detached.sh` (100 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

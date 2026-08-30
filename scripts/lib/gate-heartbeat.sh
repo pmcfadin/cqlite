@@ -48,7 +48,7 @@
 #                     [--mode <full|lite|delta>] [--interval <secs>] [--logs <dir>]
 set -uo pipefail
 
-FILE=""; RUN_ID=""; GATE_PID=""; MODE=""; INTERVAL=20; LOGS=""
+FILE=""; RUN_ID=""; GATE_PID=""; MODE=""; INTERVAL=20; LOGS=""; LAUNCH_NONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --file)     FILE="${2:?--file needs a path}"; shift 2 ;;
@@ -57,6 +57,9 @@ while [ $# -gt 0 ]; do
     --mode)     MODE="${2:?--mode needs a value}"; shift 2 ;;
     --interval) INTERVAL="${2:?--interval needs seconds}"; shift 2 ;;
     --logs)     LOGS="${2:?--logs needs a dir}"; shift 2 ;;
+    # An opaque token from a LAUNCHER, echoed into every beat so that launcher can prove this
+    # beat is its run's and not a concurrent peer's on the same path (#3473). Never interpreted.
+    --launch-nonce) LAUNCH_NONCE="${2:?--launch-nonce needs a value}"; shift 2 ;;
     *) echo "gate-heartbeat: unknown argument '$1'" >&2; exit 64 ;;
   esac
 done
@@ -152,6 +155,7 @@ _beat() {
     # DEATH from them; that inference is descoped (see gate-liveness.sh), so they are no
     # longer published — an unused field is surface that invites the inference back.
     echo "host: $HOST_NAME"
+    [ -n "$LAUNCH_NONCE" ] && echo "launch-nonce: $LAUNCH_NONCE"
     echo "beater-pid: $$"
     echo "parent-check: $PARENT_CHECK"
     echo "interval: $INTERVAL"

@@ -393,26 +393,70 @@ if _has_nul "$_HB_SNAP"; then
   verdict UNKNOWN 4 "heartbeat-contains-nul; $HB holds NUL bytes, so it is not a single coherent beat"
 fi
 HB_TEXT=$(_slurp "$_HB_SNAP")
-# FRAMING AND FIELD VALIDATION for the beat, symmetric with the summary's (roborev job 189, Low).
-# Without it, a beat with missing markers, duplicated fields, or an unknown `parent-check` could
-# still produce a confident RUNNING — the same class of defect the summary side already closed,
-# left open on the artifact that actually carries the liveness claim.
-_hb_n_start=$(printf '%s\n' "$HB_TEXT" | grep -cxF '==== AGENT-GATE HEARTBEAT ====')
-_hb_n_end=$(printf '%s\n' "$HB_TEXT" | grep -cxF '==== END AGENT-GATE HEARTBEAT ====')
-_hb_n_rid=$(printf '%s\n' "$HB_TEXT" | grep -c '^run-id: ')
-_hb_n_seq=$(printf '%s\n' "$HB_TEXT" | grep -c '^beat-seq: ')
-_hb_n_ep=$(printf '%s\n' "$HB_TEXT" | grep -c '^beat-epoch: ')
-if [ "$_hb_n_start" -ne 1 ] || [ "$_hb_n_end" -ne 1 ]; then
-  verdict UNKNOWN 4 "heartbeat-not-a-single-block; found $_hb_n_start opener(s) and $_hb_n_end closer(s) — a beat is published by atomic rename, so anything other than exactly one of each means this file is not one coherent beat"
-fi
-if [ "$_hb_n_rid" -gt 1 ] || [ "$_hb_n_seq" -gt 1 ] || [ "$_hb_n_ep" -gt 1 ]; then
-  verdict UNKNOWN 4 "heartbeat-duplicate-fields; found $_hb_n_rid run-id / $_hb_n_seq beat-seq / $_hb_n_ep beat-epoch — no field can be attributed to a single beat"
-fi
-_hb_open_ln=$(printf '%s\n' "$HB_TEXT" | grep -nxF '==== AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
-_hb_close_ln=$(printf '%s\n' "$HB_TEXT" | grep -nxF '==== END AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
-if [ -n "$_hb_open_ln" ] && [ -n "$_hb_close_ln" ] && [ "$_hb_open_ln" -ge "$_hb_close_ln" ]; then
-  verdict UNKNOWN 4 "heartbeat-out-of-order; the closer (line $_hb_close_ln) does not follow the opener (line $_hb_open_ln)"
-fi
+# ONE validator for a beat, applied to EVERY snapshot of it (roborev job 190, Medium). The first
+# version validated only the FIRST read: the confirmation re-read was accepted on a matching
+# run-id plus a merely "different, non-empty" beat-seq, so a malformed or truncated SECOND
+# snapshot could still carry a RUNNING verdict. Two reads of one artifact must clear the same bar,
+# and the only way to guarantee that is for a single piece of code to state it.
+#
+# Returns 0 when <text> is a single, coherent, identity-bearing beat; otherwise non-zero with a
+# named reason in BEAT_ERR. It decides only whether the fields may be TRUSTED; the caller reads
+# values with _field.
+BEAT_ERR=""
+_beat_valid() {
+  local t="$1" n_start n_end n_rid n_seq n_ep open_ln close_ln pc iv ep sq l ln
+  n_start=$(printf '%s\n' "$t" | grep -cxF '==== AGENT-GATE HEARTBEAT ====')
+  n_end=$(printf '%s\n' "$t" | grep -cxF '==== END AGENT-GATE HEARTBEAT ====')
+  if [ "$n_start" -ne 1 ] || [ "$n_end" -ne 1 ]; then
+    BEAT_ERR="heartbeat-not-a-single-block; found $n_start opener(s) and $n_end closer(s) — a beat is published by atomic rename, so anything but exactly one of each means this is not one coherent beat"
+    return 1
+  fi
+  open_ln=$(printf '%s\n' "$t" | grep -nxF '==== AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
+  close_ln=$(printf '%s\n' "$t" | grep -nxF '==== END AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
+  if [ "$open_ln" -ge "$close_ln" ]; then
+    BEAT_ERR="heartbeat-out-of-order; the closer (line $close_ln) does not follow the opener (line $open_ln)"
+    return 1
+  fi
+  n_rid=$(printf '%s\n' "$t" | grep -c '^run-id: ')
+  n_seq=$(printf '%s\n' "$t" | grep -c '^beat-seq: ')
+  n_ep=$(printf '%s\n' "$t" | grep -c '^beat-epoch: ')
+  # EXACTLY one of each decision field, not "at most one": a beat missing beat-seq or beat-epoch
+  # cannot support any verdict, and a duplicate means no value is attributable to one write.
+  if [ "$n_rid" -ne 1 ] || [ "$n_seq" -ne 1 ] || [ "$n_ep" -ne 1 ]; then
+    BEAT_ERR="heartbeat-field-count; found $n_rid run-id / $n_seq beat-seq / $n_ep beat-epoch (each must appear exactly once)"
+    return 1
+  fi
+  # ...and each must lie INSIDE the framing, or it belongs to some other fragment.
+  for l in run-id beat-seq beat-epoch; do
+    ln=$(printf '%s\n' "$t" | grep -n "^$l: " | head -1 | cut -d: -f1)
+    if [ "$ln" -lt "$open_ln" ] || [ "$ln" -gt "$close_ln" ]; then
+      BEAT_ERR="heartbeat-field-outside-block; '$l' (line $ln) lies outside the block (lines $open_ln..$close_ln)"
+      return 1
+    fi
+  done
+  ep=$(printf '%s\n' "$t" | grep -m1 '^beat-epoch: '); ep="${ep#beat-epoch: }"
+  case "$ep" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-epoch; 'beat-epoch: $ep' is not an integer"; return 1 ;; esac
+  sq=$(printf '%s\n' "$t" | grep -m1 '^beat-seq: '); sq="${sq#beat-seq: }"
+  case "$sq" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-seq; 'beat-seq: $sq' is not an integer"; return 1 ;; esac
+  iv=$(printf '%s\n' "$t" | grep -m1 '^interval: '); iv="${iv#interval: }"
+  case "$iv" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-interval; 'interval: $iv' is not an integer"; return 1 ;; esac
+  [ "$iv" -ge 1 ] || { BEAT_ERR="heartbeat-bad-interval; 'interval: $iv' must be >= 1"; return 1; }
+  if [ "$iv" -gt 60 ]; then
+    BEAT_ERR="heartbeat-interval-too-long; 'interval: ${iv}s' exceeds the 60s this reader can observe (its confirmation window is capped at 65s to bound a hostile artifact), so a live beat might not advance inside it and STALLED would be a false death"
+    return 1
+  fi
+  pc=$(printf '%s\n' "$t" | grep -m1 '^parent-check: '); pc="${pc#parent-check: }"
+  case "$pc" in
+    starttime|lstart) : ;;
+    kill0) BEAT_ERR="heartbeat-no-gate-identity; the beater reports 'parent-check: kill0', meaning it could NOT establish any identity for its gate — so a recycled pid would keep it publishing for an unrelated process. Counter progression would only prove the BEATER is alive, not the gate, so no RUNNING claim is supportable from this beat"; return 1 ;;
+    '')    BEAT_ERR="heartbeat-no-parent-check; the beat declares no 'parent-check:' field, so it is unknown whether the beater can identify its gate at all"; return 1 ;;
+    *)     BEAT_ERR="heartbeat-unknown-parent-check; 'parent-check: $pc' is not a value this reader knows (expected starttime, lstart or kill0)"; return 1 ;;
+  esac
+  return 0
+}
+
+_beat_valid "$HB_TEXT" || verdict UNKNOWN 4 "$BEAT_ERR"
+
 HB_RUN_ID=$(_field "$HB_TEXT" run-id)
 if [ -z "$HB_RUN_ID" ]; then
   verdict UNKNOWN 4 "heartbeat-no-run-id; $HB carries no 'run-id:' line, so it cannot be attributed to any run"
@@ -563,9 +607,19 @@ sleep "$_confirm_wait"
 _hb2_snap=$(_snap_of "$HB" heartbeat2) || _hb2_snap=""
 _hb2=""
 [ -n "$_hb2_snap" ] && ! _has_nul "$_hb2_snap" && _hb2=$(_slurp "$_hb2_snap")
-_seq2=$(_field "$_hb2" beat-seq)
-_rid2=$(_field "$_hb2" run-id)
-if [ "$_rid2" = "$HB_RUN_ID" ] && [ -n "$_seq2" ] && [ -n "$HB_SEQ" ] && [ "$_seq2" != "$HB_SEQ" ]; then
+# The SECOND snapshot clears the SAME bar as the first (roborev job 190). Accepting it on a
+# matching run-id plus a "different" beat-seq let a malformed or truncated re-read carry a RUNNING
+# verdict — and "different" is itself too weak: a peer's smaller counter differs too. Progress
+# means STRICTLY GREATER.
+_advanced=no
+if [ -n "$_hb2" ] && _beat_valid "$_hb2"; then
+  _seq2=$(_field "$_hb2" beat-seq)
+  _rid2=$(_field "$_hb2" run-id)
+  if [ "$_rid2" = "$HB_RUN_ID" ] && [ "$_seq2" -gt "$HB_SEQ" ] 2>/dev/null; then
+    _advanced=yes
+  fi
+fi
+if [ "$_advanced" = yes ]; then
   verdict RUNNING 2 "beat-seq advanced $HB_SEQ->$_seq2 over a ${_confirm_wait}s window timed on THIS host — the writer is alive. Decided by counter progression, comparing no clocks (the epoch read ${AGE}s old here, which is not trusted for this run). $_where"
 fi
 

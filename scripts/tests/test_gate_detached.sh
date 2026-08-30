@@ -769,6 +769,61 @@ _s2=$(sed -n 's/^beat-seq: //p' "$_hbf" 2>/dev/null)
   || bad "4b.66 the beater stops advancing once its gate dies" "beat-seq $_s1 -> $_s2"
 kill -9 "$_b" 2>/dev/null || true
 
+# roborev job 190: verification must be bound to a token WE generate, not to "the first run-id
+# that differs from the pre-launch value" — a concurrent gate on the same summary path can publish
+# first, and the launcher would then report success and print a poll command bound to the PEER's
+# run. A run-id we cannot predict is no basis for the claim.
+if grep -q 'LAUNCH_NONCE=' "$LAUNCHER" && grep -q 'AGENT_GATE_LAUNCH_NONCE' "$LAUNCHER"; then
+  ok "4b.67 the launcher generates a nonce and forwards it to the gate"
+else
+  bad "4b.67 the launcher generates a nonce and forwards it" "not found"
+fi
+_nb=$(grep -c 'launch-nonce: $LAUNCH_NONCE' "$LAUNCHER")
+[ "$_nb" -ge 2 ] && ok "4b.68 BOTH artifacts must carry that nonce ($_nb sites)" \
+                 || bad "4b.68 both artifacts must carry that nonce" "only $_nb site(s)"
+# BEHAVIOURAL: the nonce must actually reach both artifacts of a real launch.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  ns="$TMP/nonce-s.txt"
+  out=$(bash "$LAUNCHER" --summary "$ns" --log "$TMP/nonce.log" -- --only file-size 2>&1)
+  nu=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$nu" ] && echo "$nu" >> "$UNITS_FILE"
+  for _ in $(seq 1 60); do grep -q '^launch-nonce: ' "$ns" 2>/dev/null && break; sleep 0.5; done
+  sn=$(sed -n 's/^launch-nonce: //p' "$ns" 2>/dev/null | head -1)
+  hn=$(sed -n 's/^launch-nonce: //p' "$ns.heartbeat" 2>/dev/null | head -1)
+  if [ -n "$sn" ] && [ "$sn" = "$hn" ]; then
+    ok "4b.69 the same nonce reaches the summary AND the heartbeat"
+  else
+    bad "4b.69 the same nonce reaches both artifacts" "summary='$sn' heartbeat='$hn'"
+  fi
+  # ...and a PEER's artifacts bearing a DIFFERENT nonce must not satisfy verification. Modelled by
+  # an unwritable directory already holding a fresh-looking peer beat: before the nonce, the
+  # pre-existing pair could stand in for a real launch.
+  if [ "$(id -u)" != 0 ]; then
+    pd=$(mktemp -d)
+    printf '==== AGENT-GATE SUMMARY ====\nrun-id: peers-run\nlaunch-nonce: not-ours\nRESULT: INCOMPLETE (x)\n==== END AGENT-GATE SUMMARY ====\n' > "$pd/s.txt"
+    printf '==== AGENT-GATE HEARTBEAT ====\nrun-id: peers-run\nlaunch-nonce: not-ours\ngate-pid: 1\nparent-check: starttime\ninterval: 20\nbeat-seq: 9\nbeat-epoch: %s\n==== END AGENT-GATE HEARTBEAT ====\n' "$(date +%s)" > "$pd/s.txt.heartbeat"
+    chmod 500 "$pd"
+    out=$(bash "$LAUNCHER" --summary "$pd/s.txt" --log "$TMP/peer2.log" -- --only file-size 2>&1); rc=$?
+    [ "$rc" != 0 ] && ok "4b.70 a PEER's artifacts (different nonce) do not satisfy verification (exit $rc)" \
+                   || bad "4b.70 a PEER's artifacts do not satisfy verification" "exit 0: $out"
+    chmod 700 "$pd"; rm -rf "$pd"
+  else
+    skipc "4b.70 peer-artifact rejection" "running as root"
+  fi
+else
+  skipc "4b.69-4b.70 launch nonce" "no working systemd-run --user"
+fi
+
+# roborev job 190: the beater must start BEFORE the tree-identity capture, or a slow capture makes
+# a healthy gate look unmonitorable — and the first seconds of every gate publish no liveness.
+GATE_SH2="$REPO_ROOT/scripts/agent-gate.sh"
+hb_ln=$(grep -n '^  _hb_start$' "$GATE_SH2" | tail -1 | cut -d: -f1)
+cap_ln=$(grep -n '^  _tree_capture_start$' "$GATE_SH2" | tail -1 | cut -d: -f1)
+if [ -n "$hb_ln" ] && [ -n "$cap_ln" ] && [ "$hb_ln" -lt "$cap_ln" ]; then
+  ok "4b.71 the beater starts BEFORE the tree-identity capture (line $hb_ln < $cap_ln)"
+else
+  bad "4b.71 the beater starts before the tree-identity capture" "_hb_start at ${hb_ln:-?}, capture at ${cap_ln:-?}"
+fi
+
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")

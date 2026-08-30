@@ -3556,8 +3556,12 @@ _hb_start() {
     HEARTBEAT_STATE="unavailable(script-missing)"
     return 0
   fi
+  # AGENT_GATE_LAUNCH_NONCE (#3473, roborev job 190): an opaque token a LAUNCHER may set so it can
+  # prove the artifacts it later reads are ITS run's and not a concurrent peer's on the same path.
+  # The gate does not interpret it — it only echoes it into the summary and hands it to the beater.
   bash "$beater" --file "$HEARTBEAT_FILE" --run-id "$RUN_ID" --gate-pid "$$" \
     --mode "$HEARTBEAT_MODE" --interval "$HEARTBEAT_INTERVAL" --logs "$LOG_DIR" \
+    ${AGENT_GATE_LAUNCH_NONCE:+--launch-nonce "$AGENT_GATE_LAUNCH_NONCE"} \
     </dev/null >/dev/null 2>&1 &
   HEARTBEAT_PID=$!
   # Pin the beater's IDENTITY, not just its pid (#3473, roborev job 183). `kill -0` alone answers
@@ -3693,6 +3697,7 @@ if {
   # finish)` — the #2908 liveness placeholder is unchanged.
   echo "$TREE_START_LINE"
   echo "heartbeat: $HEARTBEAT_FILE (interval ${HEARTBEAT_INTERVAL}s) — read it with: $(printf 'bash %q %q --run-id %q' "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY_FILE" "$RUN_ID") (#3473)"
+  [ -n "${AGENT_GATE_LAUNCH_NONCE:-}" ] && echo "launch-nonce: $AGENT_GATE_LAUNCH_NONCE"
   echo "RESULT: INCOMPLETE (gate did not finish)"
   echo "$SUMMARY_END_MARKER"
 } > "$SUMMARY_FILE" 2>/dev/null; then
@@ -3751,6 +3756,7 @@ emit_summary() {
       # positive `schemas:` line — a mechanism that leaves no trace in the artifact is
       # indistinguishable from one that was never wired.
       echo "heartbeat: ${HEARTBEAT_STATE:-off} file: ${HEARTBEAT_FILE:-<unresolved>} interval: ${HEARTBEAT_INTERVAL:-0}s"
+      [ -n "${AGENT_GATE_LAUNCH_NONCE:-}" ] && echo "launch-nonce: $AGENT_GATE_LAUNCH_NONCE"
       echo "RESULT: $result"
       echo "$SUMMARY_END_MARKER"
     } > "$SUMMARY_FILE" 2>&1

@@ -241,7 +241,9 @@ mk_beat_field() {
 }
 _now=$(date +%s)
 mk_beat_field "$hb" "" "beat-epoch: $(( _now - 5 ))" "interval: 20"
-expect_reader "7.1 beat with no run-id => UNKNOWN" UNKNOWN 4 "heartbeat-no-run-id" -- "$TMP/m.txt"
+# (the cause is now the unified `heartbeat-field-count`, which reports the actual counts —
+#  one validator, one cause name, and it says WHICH field was wrong)
+expect_reader "7.1 beat with no run-id => UNKNOWN" UNKNOWN 4 "heartbeat-field-count" -- "$TMP/m.txt"
 mk_beat_field "$hb" "run-id: run-m" "beat-epoch: soon" "interval: 20"
 expect_reader "7.2 non-numeric beat-epoch => UNKNOWN" UNKNOWN 4 "unparseable-epoch" -- "$TMP/m.txt"
 mk_beat_field "$hb" "run-id: run-m" "beat-epoch: $(( _now - 5 ))" "interval: often"
@@ -939,7 +941,7 @@ expect_reader "11i.7 two concatenated beats => UNKNOWN (not a single block)" \
 _mkbeat_pc starttime 20
 { head -n -1 "$hbv"; echo "beat-seq: 99"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$hbv.t" && mv "$hbv.t" "$hbv"
 expect_reader "11i.8 a duplicated beat-seq => UNKNOWN (no field attributable to one beat)" \
-  UNKNOWN 4 "heartbeat-duplicate-fields" -- "$TMP/hbv.txt"
+  UNKNOWN 4 "heartbeat-field-count" -- "$TMP/hbv.txt"
 # A beat with no closing marker at all.
 _mkbeat_pc starttime 20; grep -v '^==== END AGENT-GATE HEARTBEAT ====$' "$hbv" > "$hbv.t" && mv "$hbv.t" "$hbv"
 expect_reader "11i.9 a beat with no closer => UNKNOWN" \

@@ -264,6 +264,13 @@ while IFS= read -r -d '' kv; do
   printf 'export %s=%q\n' "$name" "$value" >> "$ENV_SCRIPT"
   FORWARDED=$((FORWARDED + 1))
 done < <(env -0)
+# A LAUNCH NONCE (roborev job 190, Medium). Verification used to accept "the first summary run-id
+# that differs from the pre-launch value" as ours — but a CONCURRENT gate on the same summary path
+# can publish first, and then this launcher would report success and print a poll command bound to
+# the PEER's run. A run-id we cannot predict is no basis for the claim; a token we generate is.
+# The gate echoes it into the summary and hands it to the beater, and both artifacts must carry it.
+LAUNCH_NONCE="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM$RANDOM"
+printf 'export AGENT_GATE_LAUNCH_NONCE=%q\n' "$LAUNCH_NONCE" >> "$ENV_SCRIPT"
 printf 'export AGENT_GATE_SUMMARY_FILE=%q\n' "$SUMMARY" >> "$ENV_SCRIPT"
 # SELF-UNLINK before exec (roborev job 178, Medium). The launcher's EXIT trap cannot run if the
 # launcher is SIGKILLed, or its session torn down, after the unit has started — and then this
@@ -485,12 +492,12 @@ _hb_seen=0
 _new_rid=""
 _i=0
 while [ "$_i" -lt 40 ]; do
-  # (a) the gate must publish a summary whose run-id is NOT the one that was already there.
-  if [ -z "$_new_rid" ]; then
+  # (a) the summary must carry OUR NONCE — not merely a run-id that differs from the pre-launch
+  #     value, which a concurrent peer publishing first would also satisfy. Only once the nonce
+  #     proves the block is ours do we read its run-id.
+  if [ -z "$_new_rid" ] && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$SUMMARY" 2>/dev/null; then
     _cur=$(grep -m1 '^run-id: ' "$SUMMARY" 2>/dev/null || true)
-    if [ -n "$_cur" ] && [ "$_cur" != "$_pre_sum_rid" ]; then
-      _new_rid="${_cur#run-id: }"
-    fi
+    [ -n "$_cur" ] && _new_rid="${_cur#run-id: }"
   fi
   # (b) ...and the heartbeat must carry THAT run-id. A pre-existing beat cannot satisfy this,
   #     whatever it contains, so an unreplaceable file no longer masks an unmonitorable launch.
@@ -498,6 +505,7 @@ while [ "$_i" -lt 40 ]; do
   #     it into a regex broke on a TMPDIR containing `[` or `.`, so a REAL heartbeat would not
   #     match and the launcher would stop a healthy gate (job 178, Low).
   if [ -n "$_new_rid" ] && [ -s "$_hbdest" ] \
+     && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$_hbdest" 2>/dev/null \
      && grep -qxF "run-id: $_new_rid" "$_hbdest" 2>/dev/null \
      && grep -q '^beat-epoch: ' "$_hbdest" 2>/dev/null; then
     _hb_seen=1; break
