@@ -100,7 +100,14 @@ pub fn compare_rows(
 
     for (g, c) in golden.iter().zip(cli.iter()) {
         let key = row_message_key(g, pk, ck, egress);
-        report.diffs.extend(undeclared_columns(g, c, schema, &key, egress, &mut shape_seen));
+        report.diffs.extend(undeclared_columns(
+            g,
+            c,
+            schema,
+            &key,
+            egress,
+            &mut shape_seen,
+        ));
 
         for column in &schema.columns {
             let name = column.name.as_str();
@@ -140,9 +147,9 @@ pub fn compare_rows(
                 Err(Refusal::Unparseable(why)) => {
                     report.compared_cells += 1;
                     report.container_cells += 1;
-                    report
-                        .diffs
-                        .push(format!("row[{key}].{name}: unparseable CSV container: {why}"));
+                    report.diffs.push(format!(
+                        "row[{key}].{name}: unparseable CSV container: {why}"
+                    ));
                     continue;
                 }
             };
@@ -824,13 +831,24 @@ mod tests {
             ("anchor", json!("anchor_absent")),
             ("reg", Value::Null),
         ])];
-        let report = compare_rows(&golden, &rendered, &schema, &["pk"], &["ck"], &[], Egress::Json);
+        let report = compare_rows(
+            &golden,
+            &rendered,
+            &schema,
+            &["pk"],
+            &["ck"],
+            &[],
+            Egress::Json,
+        );
         assert!(
             report.diffs.is_empty(),
             "an absent golden cell rendered as null is the expected outcome: {:?}",
             report.diffs
         );
-        assert_eq!(report.compared_cells, 4, "every declared column is compared");
+        assert_eq!(
+            report.compared_cells, 4,
+            "every declared column is compared"
+        );
 
         // The regression: the egress drops the column entirely.
         let omitted = vec![row(&[
@@ -838,7 +856,15 @@ mod tests {
             ("ck", json!(1)),
             ("anchor", json!("anchor_absent")),
         ])];
-        let report = compare_rows(&golden, &omitted, &schema, &["pk"], &["ck"], &[], Egress::Json);
+        let report = compare_rows(
+            &golden,
+            &omitted,
+            &schema,
+            &["pk"],
+            &["ck"],
+            &[],
+            Egress::Json,
+        );
         assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
         assert!(
             report.diffs[0].contains("reg") && report.diffs[0].contains("absent from the"),
@@ -860,7 +886,15 @@ mod tests {
             ("reg", Value::Null),
             ("ghost", Value::Null),
         ])];
-        let report = compare_rows(&golden, &extra, &schema, &["pk"], &["ck"], &[], Egress::Json);
+        let report = compare_rows(
+            &golden,
+            &extra,
+            &schema,
+            &["pk"],
+            &["ck"],
+            &[],
+            Egress::Json,
+        );
         assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
         assert!(
             report.diffs[0].contains("ghost") && report.diffs[0].contains("does not declare"),
@@ -942,13 +976,7 @@ mod tests {
             })
             .collect();
         let cli: Vec<Row> = (1..=5)
-            .map(|i| {
-                row(&[
-                    ("pk", json!(1)),
-                    ("ck", json!(i)),
-                    ("anchor", json!("a")),
-                ])
-            })
+            .map(|i| row(&[("pk", json!(1)), ("ck", json!(i)), ("anchor", json!("a"))]))
             .collect();
         let report = compare_rows(&golden, &cli, &schema, &["pk"], &["ck"], &[], Egress::Json);
         assert_eq!(

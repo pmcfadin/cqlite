@@ -585,9 +585,7 @@ fn parse_bare_type(text: &str, udts: &BTreeMap<String, UdtType>) -> Result<CqlTy
 
 /// The content between the first `<` and its match.
 fn angle_body(s: &str) -> Result<String, String> {
-    let open = s
-        .find('<')
-        .ok_or_else(|| format!("no `<` in type `{s}`"))?;
+    let open = s.find('<').ok_or_else(|| format!("no `<` in type `{s}`"))?;
     let mut depth = 0i32;
     for (i, ch) in s[open..].char_indices() {
         match ch {
@@ -668,7 +666,10 @@ CREATE TABLE IF NOT EXISTS inline (
         );
         assert_eq!(s.column("body").map(|c| c.kind), Some(ColumnKind::Regular));
         assert_eq!(s.column("pk").map(|c| c.kind), Some(ColumnKind::Partition));
-        assert_eq!(s.column("seq").map(|c| c.kind), Some(ColumnKind::Clustering));
+        assert_eq!(
+            s.column("seq").map(|c| c.kind),
+            Some(ColumnKind::Clustering)
+        );
 
         let inline = schema("inline");
         assert_eq!(inline.partition_key, vec!["id"]);
