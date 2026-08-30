@@ -295,9 +295,18 @@ const fn aggregate_floor(census: &[WaitCensus]) -> Duration {
 /// This is what stops [`WaitCensus`] being one more hand-label (roborev job 253,
 /// finding 3). The per-stage `waits` counts cannot be derived — nothing in Rust
 /// counts the bounded waits inside a function body — but the STAGE SET can be, and
-/// it is: the deadline records every stage that `finish`ed, and a stage added,
+/// it is: the deadline records every stage that was OPENED, and a stage added,
 /// removed or renamed without touching the census fails here, in the very test
 /// that runs it.
+///
+/// **IT IS THE OPENED SET, NOT THE COMPLETED ONE (roborev job 255, finding 1).**
+/// This check used to read the stages that had `finish`ed, which left it defeatable
+/// by the very thing it is named for: a stage that draws deadline-backed waits and
+/// is then dropped without finishing counted as though it had never existed, so the
+/// aggregate floor could again be asserted against an undercounted base — the fifth
+/// instance in this change of a guard that does not cover the case it is named for.
+/// A stage is now recorded where it COMES INTO EXISTENCE, which no later omission
+/// can undo.
 ///
 /// ORDER IS PART OF IT: the census reads as a walk through the test, and an entry
 /// whose position no longer matches the run is a census a reader can no longer
@@ -308,21 +317,31 @@ const fn aggregate_floor(census: &[WaitCensus]) -> Duration {
 /// cannot see it. The stage set is verified; the per-stage counts are declared.
 pub fn assert_census_matches_run(test: &str, census: &[WaitCensus], deadline: &TestDeadline) {
     let declared: Vec<&str> = census.iter().map(|e| e.stage).collect();
-    let ran = deadline.completed_stages();
+    let ran = deadline.opened_stages();
+    let unfinished = deadline.unfinished_stages();
+    let unfinished = if unfinished.is_empty() {
+        "(every stage this run opened also finished)".to_string()
+    } else {
+        format!("{unfinished:?} — opened and never finished")
+    };
     assert_eq!(
         ran,
         declared,
-        "{test}: the stages this run COMPLETED are not the stages its wait census declares.\n\
+        "{test}: the stages this run OPENED are not the stages its wait census declares.\n\
          declared: {declared:?}\n\
-         ran:      {ran:?}\n\
+         opened:   {ran:?}\n\
+         of those: {unfinished}\n\
          the census, as declared (each entry's `note` says why it reads the way it does):\n{}\n\
          The census is what the aggregate floor is computed from \
          (`no_stage_in_isolation_is_tighter_than_the_bound_it_replaced`), so a stage that draws \
          on the one deadline without appearing there means the floor was asserted against an \
          UNDERCOUNTED base — roborev job 253, finding 3. Add or remove the entry, and move the \
          base with it: the floor assert requires the base to EQUAL the derived aggregate.\n\
-         (A stage missing from `ran` can also mean the test returned before finishing it, which \
-         is a defect in the test, not in the census.)",
+         (A stage is counted from the moment it is OPENED, so one that was opened and never \
+         finished appears above and is named on the `of those:` line — that is a defect in the \
+         test rather than in the census, but it can no longer hide the stage from this check \
+         (job 255, finding 1). A stage missing from `opened` altogether means the test returned \
+         before reaching it.)",
         describe_census(census)
     );
 }
@@ -484,7 +503,19 @@ pub struct TestDeadline {
     /// Every measurement folded in, with the scale it yielded, so a failure can
     /// report how the one bound was arrived at.
     observations: Vec<(&'static str, Duration, f64)>,
-    /// Completed stages, for the attribution report. `RefCell` because a live
+    /// EVERY STAGE OPENED, in the order [`TestDeadline::stage`] created it.
+    ///
+    /// **RECORDED WHERE A STAGE COMES INTO EXISTENCE, NOT WHERE IT REPORTS**
+    /// (roborev job 255, finding 1). This record is what the wait census is
+    /// verified against, and it used to be written by `finish()` — so a stage that
+    /// was opened, granted deadline-backed waits and then dropped WITHOUT
+    /// finishing was invisible to it, and the undercount the census check exists
+    /// to catch could be reintroduced by a stage that simply never finishes. A
+    /// stage cannot draw on the deadline without being opened, so opening is the
+    /// only point at which the record is complete by construction.
+    opened: RefCell<Vec<&'static str>>,
+    /// Completion TIMINGS, kept SEPARATELY from the record above because a
+    /// duration only exists once a stage has ended. `RefCell` because a live
     /// [`Stage`] borrows the deadline immutably and records itself on `finish`.
     stages: RefCell<Vec<(&'static str, Duration)>>,
 }
@@ -511,6 +542,7 @@ impl TestDeadline {
             cap,
             scale: 1.0,
             observations: Vec::new(),
+            opened: RefCell::new(Vec::new()),
             stages: RefCell::new(Vec::new()),
         }
     }
@@ -540,7 +572,12 @@ impl TestDeadline {
 
     /// Open an attribution stage. A [`Stage`] carries a name and a start instant
     /// and NO BOUND: its `remaining()` is this deadline's.
+    ///
+    /// THE STAGE IS RECORDED HERE, at the point it comes into existence (roborev
+    /// job 255, finding 1) — see [`TestDeadline::opened`]. `finish()` adds only the
+    /// timing.
     pub fn stage(&self, name: &'static str) -> Stage<'_> {
+        self.opened.borrow_mut().push(name);
         Stage {
             deadline: self,
             name,
@@ -593,13 +630,37 @@ impl TestDeadline {
         )
     }
 
-    /// The stages that FINISHED, in the order they finished — the run's own record
-    /// of which stages drew on this deadline.
+    /// The stages that were OPENED, in the order they were opened — the run's own
+    /// record of which stages drew on this deadline.
     ///
     /// Exists so the wait census can be checked against reality rather than
-    /// trusted (see [`assert_census_matches_run`]).
-    pub fn completed_stages(&self) -> Vec<&'static str> {
-        self.stages.borrow().iter().map(|(name, _)| *name).collect()
+    /// trusted (see [`assert_census_matches_run`]), and keyed on OPENING rather
+    /// than completion so that a stage which never finishes still appears (roborev
+    /// job 255, finding 1).
+    pub fn opened_stages(&self) -> Vec<&'static str> {
+        self.opened.borrow().clone()
+    }
+
+    /// Stages that were opened and never finished, for the census failure message:
+    /// such a stage IS counted by [`TestDeadline::opened_stages`], and naming it
+    /// separates "the census is wrong" from "the test returned mid-stage".
+    ///
+    /// Positional, not set-based: the Nth opening of a name is matched against the
+    /// Nth completion of it, so a stage opened twice and finished once is reported
+    /// as one unfinished occurrence rather than as none.
+    pub fn unfinished_stages(&self) -> Vec<&'static str> {
+        let mut finished: Vec<&'static str> =
+            self.stages.borrow().iter().map(|(n, _)| *n).collect();
+        let mut unfinished = Vec::new();
+        for name in self.opened.borrow().iter() {
+            match finished.iter().position(|f| f == name) {
+                Some(i) => {
+                    finished.remove(i);
+                }
+                None => unfinished.push(*name),
+            }
+        }
+        unfinished
     }
 
     /// Per-stage timings + deadline state, for both diagnostics and the
@@ -940,6 +1001,46 @@ fn the_stage_census_check_rejects_a_run_that_does_not_match_it() {
     assert!(
         missing.contains(T1_WAIT_CENSUS[0].stage),
         "the failure must NAME the declared stage the run did not open: {missing}"
+    );
+}
+
+/// **AN EXTRA STAGE THAT IS NEVER `finish`ED IS STILL CAUGHT** (roborev job 255,
+/// finding 1) — the case the completion-keyed record could not see.
+///
+/// A stage opened without being finished has already been able to consume
+/// deadline-backed waits, so it belongs in the census exactly as a finished one
+/// does. Keyed on completion, this run read as a perfect match and the aggregate
+/// floor stayed green on a base that did not account for the stage: the guard did
+/// not cover the case it is named for. Keyed on OPENING, it fails, names the extra
+/// stage, and says it never finished.
+#[test]
+fn the_stage_census_check_rejects_an_extra_stage_that_never_finished() {
+    let panicked = std::panic::catch_unwind(|| {
+        let deadline = TestDeadline::start(Duration::from_secs(60), Duration::from_secs(60));
+        for entry in T1_WAIT_CENSUS {
+            deadline.stage(entry.stage).finish();
+        }
+        // Opened, therefore able to draw on the one deadline; dropped without
+        // `finish()`, therefore absent from every completion record.
+        drop(deadline.stage("f.opened-never-finished"));
+        assert!(
+            deadline
+                .unfinished_stages()
+                .contains(&"f.opened-never-finished"),
+            "an opened-and-dropped stage must be recorded as unfinished"
+        );
+        assert_census_matches_run("a synthetic T1 run", T1_WAIT_CENSUS, &deadline);
+    })
+    .expect_err("a stage that was opened and never finished must fail the check");
+    let panicked = panic_text(panicked.as_ref());
+    assert!(
+        panicked.contains("f.opened-never-finished"),
+        "the failure must NAME the extra stage: {panicked}"
+    );
+    assert!(
+        panicked.contains("opened and never finished"),
+        "the failure must say the extra stage never finished, so the reader is not left \
+         looking for it in the timings: {panicked}"
     );
 }
 
