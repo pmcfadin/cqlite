@@ -37,16 +37,26 @@ FAIL=0
 # compared against PASS + SKIPPED_TOOLING, which keeps it a real floor on hosts that
 # have everything while never punishing one that does not.
 #
-# ACCOUNTING MUST BE 1:1, AND TWO PRE-EXISTING SITES WERE NOT (round 13, X2 — the earlier
-# wording of this paragraph claimed they were "covered", which was FALSE):
-#   * 1699-r18-diff-* emits ONE verdict per PARSER_DIFF_SPEC_ROWS row (2 today);
-#   * 1699-r32-preflight-behaviour[*] emits ONE per R32_WANT_CASES entry (9 today);
-# and each had a single-line skip, so a jq/cargo-less host under-accounted by 1 and a
-# python3-less host by 9. With the floor at the measured count that is a FALSE RED, not
-# slack — the old 389 was exactly 400 minus those 9 plus 1. Both skip paths now loop the
-# SAME declared list they would otherwise have iterated, so displacement is 1:1 by
-# construction. Measured, all four host shapes: everything present 400+0; jq/cargo-less
-# 398+2; python3-less 389+11; node-less 399+1 — accounted == 400 in every case.
+# ACCOUNTING MUST BE 1:1, AND FOUR PRE-EXISTING SITES WERE NOT (rounds 13-14, X2/Y1/Y2).
+# This paragraph has now been wrong twice — it once claimed the sites were "covered", and
+# then that there were two of them — so the numbers below are the MEASURED ones and every
+# claim is checkable from a single run:
+#   * 1699-r18-diff-*                  2 verdicts (one per PARSER_DIFF_SPEC_ROWS row), 1 skip
+#   * 1699-r32-preflight-behaviour[*]  9 verdicts (one per R32_WANT_CASES entry),       1 skip
+#   * perf-host                        2 verdicts (token + accelerators line),          1 skip
+#   * 1699-featoracle-{behaviour,       2 verdicts inside the cargo-guarded branch,  0 — a
+#     complement}                      bare `echo "SKIP …"` that incremented nothing at
+#                                      all. (The `1699-featoracle-*` PREFIX covers six
+#                                      verdicts; the other four — dev, extract, nometa,
+#                                      scoped — are outside that branch and unaffected.)
+# All four now loop the SAME declared list their run branch iterates (r18/r32 are 1:1 BY
+# CONSTRUCTION for that reason), so displacement is 1:1 rather than hand-kept.
+#
+# MEASURED, EIGHT HOST SHAPES, each forced SEPARATELY (conflating two capabilities in one
+# run is what hid the featoracle site):
+#   everything present 401+0 | jq-less 399+2 | cargo-less 397+4 | python3-less 390+11
+#   node-less 400+1 | Darwin 399+2 | masked /proc 399+2 | offline registry 399+2
+# accounted == 401 in every one of the eight.
 SKIPPED_TOOLING=0
 ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
@@ -4652,7 +4662,7 @@ else
     || { nll_v1_ok=0; echo "  the lane no longer READS CQLITE_JEST_JSON — its gate-of-record strictness assertion cannot fire"; }
 fi
 if [ "$nll_v1_ok" -eq 1 ]; then
-  ok "1465-gate-strict: node-bindings unsets CQLITE_LEAK_BUDGET_RELAX for all $nll_env_launches node launches, every -u PRECEDES every assignment in all $nll_order_seen of them (the X1 full-gate hazard), and the lane decides relaxation by a named opt-in rather than an ambient CI marker"
+  ok "1465-gate-strict: node-bindings unsets CQLITE_LEAK_BUDGET_RELAX for all $nll_env_launches node launches, every -u PRECEDES every assignment in all $nll_order_seen of them (the X1 full-gate hazard), the CQLITE_JEST_JSON marker is exported by the component AND read by the lane (so the in-lane strictness control cannot be renamed into a no-op), and the lane decides relaxation by a named opt-in rather than an ambient CI marker"
 else
   bad "1465-gate-strict: the gate path could be relaxed by an inherited environment (see above)"
 fi
@@ -4800,24 +4810,46 @@ fi
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
 # coordination lead authorised, taken on the evidence below).
 #
-# The measured `accounted` on a fully-equipped host is 401, and the accounting is now 1:1
-# across SEVEN separately-simulated host shapes (everything-present, jq-less, cargo-less,
-# python3-less, node-less, Darwin, masked /proc, offline registry — each measured
-# individually at 401). An EXACT floor of 401 would nonetheless be a hair-trigger: it reds
-# on any skip site that displaces more than one verdict, and three rounds of enumeration
-# found FOUR such sites (1699-r18-diff, 1699-r32-preflight-behaviour, perf-host,
-# 1699-featoracle) — two of them only after two prior enumerations had declared the set
-# complete. The scans that back a completeness claim are heuristics (bounded lookahead,
-# regex shapes), the skip-routing guard above checks the ROUTE and explicitly not the
-# COUNT, and no static check can see a count that lives in the branch not taken.
+# The measured `accounted` on a fully-equipped host is 401, and the accounting is 1:1
+# across EIGHT separately-forced host shapes (everything-present, jq-less, cargo-less,
+# python3-less, node-less, Darwin, masked /proc, offline cargo registry — each measured
+# individually at 401; the per-shape numbers are in the invariant header above). An EXACT
+# floor of 401 would nonetheless be a hair-trigger: it reds on any skip site that displaces
+# more than one verdict, and three rounds of enumeration found FOUR such sites
+# (1699-r18-diff, 1699-r32-preflight-behaviour, perf-host,
+# 1699-featoracle-{behaviour,complement}) — two of them
+# only after two prior enumerations had declared the set complete. The scans that back a
+# completeness claim are heuristics (bounded lookahead, regex shapes), the skip-routing
+# guard above checks the ROUTE and explicitly not the COUNT, and no static check can see a
+# count that lives in the branch not taken.
 #
 # So the floor is `measured - largest single displacement` = 401 - 9 (the r32 section's
-# nine want_ cases): it still catches a whole section dying silently, which is what the
-# floor exists for, while a single undiscovered non-1:1 site cannot false-RED a legitimate
-# host. Tightening it to the exact count is tracked separately in issue #3611, with the
-# enumeration, the four defects and the eight host shapes as its
-# acceptance criteria (issue #3611); the durable contribution here is the SKIPPED_TOOLING
-# accounting and the four 1:1 fixes, not the number.
+# nine want_ cases).
+#
+# WHAT 392 ACTUALLY DETECTS — the BOUND, measured, not the aspiration (round 15, F2; an
+# earlier version of this paragraph claimed it "still catches a whole section dying
+# silently", and that was FALSE): a real run emits 401 verdicts across 269 distinct
+# labelled sections, and the LARGEST section is exactly 9 (1699-r32-preflight-behaviour;
+# next are py-route 8, then several at 6). The slack IS 9, so **no single section is
+# covered — not even the largest**. 392 detects only a loss of >= 10 verdicts, i.e. a
+# MULTI-SECTION disappearance. Single-section detection is deferred to issue #3611.
+#
+# WHY THE TRADE IS STILL RIGHT, given that bound:
+#   * a mid-file abort (the `set -u`/extraction-failure shape this floor was written for)
+#     exits NON-ZERO and reds through the exit status, before the floor block is reached —
+#     the floor was never the only guard against it;
+#   * nearly every section carries its OWN fail-closed guard for the same failure
+#     (`bad "…-scope: could not extract …"`), which reds with a named cause rather than as
+#     an arithmetic shortfall;
+#   * the base rate of undiscovered non-1:1 sites is demonstrably non-zero (four found,
+#     two of them post-"complete"), so an exact floor buys <=9-verdict detection at the
+#     price of a FALSE RED on a legitimately-configured host — which this repo's doctrine
+#     calls the worse failure ("a lane that reds on correct input is the lane people learn
+#     to waive").
+# The durable contribution here is the SKIPPED_TOOLING accounting and the four 1:1 fixes,
+# not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
+# and a better derivation than an exact count (a floor on the number of distinct verdict
+# LABELS observed, which is structurally immune to the displacement problem).
 ASSERT_FLOOR=392
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
