@@ -6315,7 +6315,20 @@ run_binding_rust_tests() {
     case "$node_enabled" in *" $_f "*) ;; *) node_off="$node_off $_f" ;; esac
   done
 
-  # The unittest subject sets. `lib,cdylib,bin` rather than `lib,bin`: cqlite-node's
+  # The unittest subject sets.
+  #
+  # cqlite-ffi-common: `lib,bin`, NOT `lib` (roborev round 3, D2). The invocation is an
+  # UNFILTERED `cargo test -p cqlite-ffi-common`, and cargo's default selection includes
+  # package BINARY unit targets — so deriving only `lib` made the affirmative guard's subject
+  # set NARROWER THAN WHAT ACTUALLY RUNS: a bin added later could execute zero tests and
+  # never be checked. That is the same property the rest of this lane is built on (an
+  # affirmative measurement must cover the whole subject), failing in miniature. The package
+  # has no bin today, so this is a no-op now and correct the moment that changes — which is
+  # the entire point of deriving rather than listing. Deliberately NOT fixed by naming the
+  # derived targets on the cargo command line: that would make the invocation a curated list
+  # again, which is the thing this component exists not to be.
+  #
+  # cqlite-node: `lib,cdylib,bin` rather than `lib,bin`:
   # library target has kind `cdylib` (it is a napi module), and a `lib,bin` filter
   # returns NOTHING for it — which _package_unittest_srcs correctly reports as a failed
   # derivation, and which a lane that shrugged at would turn into a guard with no
@@ -6323,7 +6336,7 @@ run_binding_rust_tests() {
   local -a ffi_unit_srcs=() node_unit_srcs=()
   local _us
   while IFS= read -r _us; do [ -n "$_us" ] && ffi_unit_srcs+=("$_us"); done <<EOF
-$(_package_unittest_srcs cqlite-ffi-common lib "$ffi_enabled")
+$(_package_unittest_srcs cqlite-ffi-common lib,bin "$ffi_enabled")
 EOF
   while IFS= read -r _us; do [ -n "$_us" ] && node_unit_srcs+=("$_us"); done <<EOF
 $(_package_unittest_srcs cqlite-node lib,cdylib,bin "$node_enabled")
