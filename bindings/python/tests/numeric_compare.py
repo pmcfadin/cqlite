@@ -15,6 +15,8 @@ Two copies of a rule drift, and fixing one instance leaves the class open, so th
 rule lives here once and both harnesses import it.
 """
 
+import math
+from decimal import Decimal
 from typing import Any
 
 # The EXACT boundary, not a tolerance.
@@ -49,14 +51,29 @@ def is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+# The numeric types a `bool` can be silently confused with. `Decimal` belongs
+# here for exactly the same reason `int` and `float` do: `Decimal(1) == True` is
+# `True` in Python, so a `bool` reaching a caller's `Decimal` branch (or its
+# default `==` fallthrough) compares EQUAL to a decimal one (issue #3505).
+#
+# The first pass at this excluded `bool` from the `int`/`float` path only and
+# left the `Decimal` path open -- an incomplete sweep of the very class this
+# predicate exists to close.
+BOOL_CONFUSABLE_NUMERIC_TYPES = (bool, int, float, Decimal)
+
+
 def is_bool_number_mismatch(a: Any, b: Any) -> bool:
     """True when exactly one side is a `bool` and the other is a number.
+
+    "Number" covers `int`, `float` AND `Decimal` (issue #3505).
 
     Both-bool is not a mismatch; bool-vs-non-numeric is somebody else's branch.
     """
     if isinstance(a, bool) == isinstance(b, bool):
         return False
-    return isinstance(a, (bool, int, float)) and isinstance(b, (bool, int, float))
+    return isinstance(a, BOOL_CONFUSABLE_NUMERIC_TYPES) and isinstance(
+        b, BOOL_CONFUSABLE_NUMERIC_TYPES
+    )
 
 
 def float_equal(
@@ -74,6 +91,19 @@ def float_equal(
         # Explicit rather than relying on NaN propagating through the arithmetic
         # below (it does, but implicitly). This branch is verbatim from the
         # `test_cli_parity._float_equal` this module replaced.
+        return False
+    if math.isinf(a) or math.isinf(b):
+        # The tolerance formula below DEGENERATES on an infinite operand
+        # (issue #3505): `abs(a - b)` is `inf` and so is
+        # `rel_tol * max(|a|, |b|)`, leaving `inf <= inf` -- which is `True`.
+        # So every finite value compared equal to infinity, and `+inf` compared
+        # equal to `-inf`. CQL `float`/`double` columns can legitimately hold
+        # `Infinity`, so that masked a real mismatch.
+        #
+        # This MUST sit after the `a == b` branch above: two genuine equal
+        # infinities ARE equal (`+inf == +inf` in IEEE-754) and that case is
+        # already answered there. By here the operands differ, and a differing
+        # pair with an infinite member can never be within any finite tolerance.
         return False
     return abs(a - b) <= max(rel_tol * max(abs(a), abs(b)), abs_tol)
 

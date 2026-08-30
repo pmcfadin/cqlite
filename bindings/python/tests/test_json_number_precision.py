@@ -25,6 +25,7 @@ longer equals the exact integer.
 """
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -174,3 +175,142 @@ def test_numbers_equal_never_coerces_above_the_bound():
     assert numeric_compare.numbers_equal(float(bound + 1), bound + 1) is False
     # float/float keeps the tolerance at any magnitude.
     assert numeric_compare.numbers_equal(1e19, 1e19 * (1 + 1e-9)) is True
+
+
+# =============================================================================
+# Non-finite floats: the tolerance formula degenerates (issue #3505, round 2)
+# =============================================================================
+
+
+INF = float("inf")
+NAN = float("nan")
+
+
+@pytest.mark.parametrize("values_equal", IMPLS)
+def test_infinity_never_equals_a_finite_value(values_equal):
+    """`inf` vs anything finite must be a MISMATCH.
+
+    The tolerance formula `abs(a-b) <= max(rel_tol*max(|a|,|b|), abs_tol)`
+    degenerates the moment either operand is infinite: both sides become `inf`
+    and `inf <= inf` is `True`, so EVERY finite value compared equal to
+    infinity. CQL `float`/`double` columns can legitimately hold `Infinity`, so
+    that masked a real mismatch — the same defect family as the bool/number
+    mask above.
+    """
+    for finite in (1.0, 0.0, -1.0, 1e308, -1e308):
+        assert values_equal(INF, finite) is False
+        assert values_equal(finite, INF) is False
+        assert values_equal(-INF, finite) is False
+        assert values_equal(finite, -INF) is False
+
+
+@pytest.mark.parametrize("values_equal", IMPLS)
+def test_opposite_infinities_are_a_mismatch(values_equal):
+    """`+inf` vs `-inf`: `abs(inf - -inf)` is `inf`, so the formula said equal."""
+    assert values_equal(INF, -INF) is False
+    assert values_equal(-INF, INF) is False
+
+
+@pytest.mark.parametrize("values_equal", IMPLS)
+def test_same_signed_infinities_still_match(values_equal):
+    """The case the guard must NOT break: two genuine equal infinities.
+
+    `+inf == +inf` is `True` in IEEE-754 and a golden holding `Infinity` on both
+    sides IS a match, so the non-finite rejection has to sit AFTER the exact
+    equality branch, never before it.
+    """
+    assert values_equal(INF, INF) is True
+    assert values_equal(-INF, -INF) is True
+
+
+@pytest.mark.parametrize("values_equal", IMPLS)
+def test_nan_behaviour_is_unchanged_by_the_nonfinite_guard(values_equal):
+    """NaN == NaN stays equal; NaN vs anything else stays a mismatch.
+
+    Re-asserted here (not only above) because the non-finite guard is inserted
+    next to the NaN branches, so a mis-ordered edit would regress this.
+    """
+    assert values_equal(NAN, NAN) is True
+    assert values_equal(NAN, 1.0) is False
+    assert values_equal(1.0, NAN) is False
+    assert values_equal(NAN, INF) is False
+    assert values_equal(INF, NAN) is False
+
+
+def test_float_equal_rejects_nonfinite_pairs_directly():
+    """The shared rule itself, not only through its two consumers."""
+    assert numeric_compare.float_equal(INF, 1.0) is False
+    assert numeric_compare.float_equal(1.0, INF) is False
+    assert numeric_compare.float_equal(INF, -INF) is False
+    assert numeric_compare.float_equal(-INF, INF) is False
+    assert numeric_compare.float_equal(1e308, INF) is False
+    assert numeric_compare.float_equal(INF, 1e308) is False
+    # Equal infinities survive the exact-equality branch that precedes it.
+    assert numeric_compare.float_equal(INF, INF) is True
+    assert numeric_compare.float_equal(-INF, -INF) is True
+    # NaN semantics unchanged.
+    assert numeric_compare.float_equal(NAN, NAN) is True
+    assert numeric_compare.float_equal(NAN, 1.0) is False
+    assert numeric_compare.float_equal(NAN, INF) is False
+
+
+def test_numbers_equal_rejects_int_against_infinity():
+    """An int/float pair routes through `float_equal`; infinity must not match."""
+    assert numeric_compare.numbers_equal(1, INF) is False
+    assert numeric_compare.numbers_equal(INF, 1) is False
+    assert numeric_compare.numbers_equal(2**53, INF) is False
+
+
+# =============================================================================
+# The bool guard must cover `Decimal` too (issue #3505, round 2)
+# =============================================================================
+
+
+@pytest.mark.parametrize("values_equal", IMPLS)
+def test_bool_vs_decimal_is_not_a_numeric_match(values_equal):
+    """`Decimal(1) == True` is `True` in Python, so the bool guard must catch it.
+
+    The first pass excluded `bool` from the `int`/`float` path and left the
+    `Decimal` path open — an incomplete sweep of the class. `test_parity` hit it
+    in both argument orders (its `Decimal` branch one way, the default `==`
+    fallthrough the other).
+    """
+    assert Decimal(1) == True, "premise: Python's own == says these are equal"  # noqa: E712
+    assert values_equal(True, Decimal(1)) is False
+    assert values_equal(Decimal(1), True) is False
+    assert values_equal(False, Decimal(0)) is False
+    assert values_equal(Decimal(0), False) is False
+
+
+def test_is_bool_number_mismatch_covers_decimal():
+    assert numeric_compare.is_bool_number_mismatch(True, Decimal(1)) is True
+    assert numeric_compare.is_bool_number_mismatch(Decimal(1), True) is True
+    assert numeric_compare.is_bool_number_mismatch(False, Decimal(0)) is True
+    # Existing semantics intact: both-bool is not a mismatch, and
+    # bool-vs-non-numeric remains somebody else's branch.
+    assert numeric_compare.is_bool_number_mismatch(True, False) is False
+    assert numeric_compare.is_bool_number_mismatch(Decimal(1), Decimal(2)) is False
+    assert numeric_compare.is_bool_number_mismatch(True, "1") is False
+    assert numeric_compare.is_bool_number_mismatch(True, None) is False
+
+
+def test_genuine_decimal_number_comparison_is_unchanged():
+    """The bool sweep must not touch `Decimal` vs a real number.
+
+    The two harnesses answer this DIFFERENTLY and both answers are pre-existing,
+    so they are pinned per implementation rather than parametrized:
+
+    - `test_parity` has an explicit `Decimal` branch and compares across types.
+    - `test_cli_parity` gates on `type(a) != type(b)` first and only admits
+      `int`/`float` pairs, so a `Decimal` against an `int` is already a
+      reported mismatch there.
+    """
+    assert jsonl_values_equal(Decimal(1), 1) is True
+    assert jsonl_values_equal(1, Decimal(1)) is True
+    assert jsonl_values_equal(Decimal("1.5"), 1.5) is True
+    assert jsonl_values_equal(Decimal(1), 2) is False
+
+    assert cli_values_equal(Decimal(1), 1) is False
+    assert cli_values_equal(1, Decimal(1)) is False
+    assert cli_values_equal(Decimal("1.5"), 1.5) is False
+    assert cli_values_equal(Decimal(1), Decimal(1)) is True

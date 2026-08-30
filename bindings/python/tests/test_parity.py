@@ -488,6 +488,12 @@ def values_equal(actual: Any, expected: Any) -> bool:
     # `1.0` used to reach the tolerant path below (and `True` vs `1` the exact
     # fallthrough) and compare EQUAL.  A CQL `boolean` renders as JSON
     # `true`/`false`, never as a number.
+    #
+    # This MUST stay above BOTH the numeric path and the `Decimal` branch below.
+    # "Number" here includes `Decimal`, because `Decimal(1) == True` is also
+    # `True` in Python: with the guard placed after the `Decimal` branch,
+    # `(Decimal(1), True)` matched there and `(True, Decimal(1))` matched via
+    # the default `==` fallthrough at the end.
     if is_bool_number_mismatch(actual, expected):
         return False
 
