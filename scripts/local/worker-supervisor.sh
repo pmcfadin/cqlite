@@ -1423,10 +1423,20 @@ supervisor_pid_liveness() {
   case "$pid" in
     '' | *[!0-9]* | 0*) printf 'unknown\n'; return 0 ;;
   esac
-  if kill -0 "$pid" 2>/dev/null; then
+  local err=""
+  if err="$(LC_ALL=C kill -0 "$pid" 2>&1)"; then
     printf 'live\n'
     return 0
   fi
+  # EPERM, READ FROM THE ERRNO ITSELF: alive, owned by another user. This is the one oracle that
+  # survives a `hidepid` procfs, where /proc/<pid> AND `ps` are BOTH blind to another user's LIVE
+  # process and would jointly answer "dead" — reclaiming a live holder's lock, the outcome this whole
+  # probe exists to prevent. Used ONLY to say `live`, never to say `dead`, so the corroboration below
+  # remains the sole decider for a reclaim and an unrecognised message (odd locale, other shell) costs
+  # nothing but a fall-through.
+  case "$err" in
+    *'not permitted'*) printf 'live\n'; return 0 ;;
+  esac
   # Corroborate the absence. procfs first (it distinguishes EPERM: the entry exists for a live process
   # owned by anyone), else `ps`. `command -v` is a builtin, so an absent `ps` yields `unknown`, not a
   # crash under the stripped PATH some suite cases source this file with.
