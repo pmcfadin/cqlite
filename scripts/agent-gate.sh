@@ -12379,8 +12379,18 @@ run_delta_node_tests() {
       cd "'"$REPO_ROOT"'/bindings/node"
       # Regenerate the JS loader from the ALREADY-BUILT .node (no cargo build).
       node scripts/generate-loader.mjs >/dev/null 2>&1 || true
+      # jest runs through `node --expose-gc` (issue #1465): bindings/node has test
+      # files whose measurement REQUIRES global.gc and which THROW without it
+      # (leak-paths.test.js, conversion-budget.test.js), so a bare `npx jest` fails
+      # them regardless of correctness — a delta whose diff touched the leak lane
+      # would have reported a leak regression that was really a missing flag. Same
+      # invocation shape as package.json test / test:leaks. Filters unchanged.
       # shellcheck disable=SC2086  # intentional word-split: multiple jest path filters
-      if [ -n "${JEST_FILTER:-}" ]; then npx jest $JEST_FILTER; else npx jest; fi' >"$log" 2>&1; then
+      if [ -n "${JEST_FILTER:-}" ]; then
+        node --expose-gc ./node_modules/jest/bin/jest.js $JEST_FILTER
+      else
+        node --expose-gc ./node_modules/jest/bin/jest.js
+      fi' >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL; OVERALL=FAIL
