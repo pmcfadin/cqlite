@@ -5328,6 +5328,88 @@ for p in d["packages"]:
   printf '%s\n' "$out"
 }
 
+# _package_integration_target_ids <package>: print one TAB-separated line per declared
+# INTEGRATION (`test`) target — `<name>\t<runner-id>\t<required-features comma-joined>`
+# — and, UNLIKE _package_test_targets, treat "this package declares none" as a REAL
+# ANSWER rather than a failed derivation (issue #3522).
+#
+# Two reasons it is not just another caller of _package_test_targets.
+#
+#  1. ZERO IS A FACT HERE. _package_test_targets fails closed on an empty result
+#     because every one of its callers' packages declares integration targets, so
+#     emptiness there can only be a broken derivation. cqlite-node declares NONE, and
+#     the binding-rust-tests census must state that as a DERIVED fact ("this package
+#     has no integration targets") rather than as an assumption or a FAIL. Emptiness
+#     and failure are therefore distinguished by an explicit PRESENCE check on the
+#     package itself: a package cargo does not know about is a FAILED derivation
+#     (return 1); a package it knows about that declares no test target prints nothing
+#     and returns 0.
+#
+#  2. THE RUNNER ID. cargo's `Running tests/<path>.rs` banner — the string every
+#     observation guard here keys on — carries the target's path RELATIVE TO tests/,
+#     which equals the target NAME for a file-style target (`tests/foo.rs` -> `foo`)
+#     but NOT for a directory-style one (`tests/foo/main.rs` -> `foo/main`, name
+#     `foo`). Deriving the id from cargo's own `src_path` makes the guard's expectation
+#     agree with cargo's output BY CONSTRUCTION, so adding a directory-style target
+#     cannot turn a healthy lane red. A target mapped outside tests/ by an explicit
+#     `[[test]] path = "..."` yields its package-relative path, which is the second
+#     spelling check_no_unexpected_zero_tests already recognises.
+#
+# Same parser chain and same direction as its neighbours: jq, else python3, else a
+# FAILED derivation. Never a fallback to a partial or empty census.
+_package_integration_target_ids() {
+  local pkg="$1"
+  local meta present out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    # PRESENCE first: without it, an unknown/renamed package would print nothing and
+    # be reported as "declares no integration targets" — a false all-clear about a
+    # package the lane cannot see at all.
+    present=$(printf '%s' "$meta" | jq -r --arg n "$pkg" '[.packages[] | select(.name == $n)] | length') || return 1
+    [ "$present" = 1 ] || return 1
+    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" \
+      '.packages[] | select(.name == $n)
+       | ((.manifest_path // "") | split("/") | .[0:-1] | join("/")) as $root
+       | .targets[]
+       | select(.kind | index("test"))
+       | ((.src_path // "")) as $sp
+       | (if ($root != "" and ($sp | startswith($root + "/")))
+          then ($sp | ltrimstr($root + "/")) else $sp end) as $rel
+       | (if ($rel | startswith("tests/")) then ($rel | ltrimstr("tests/")) else $rel end) as $rel2
+       | (if ($rel2 | endswith(".rs")) then ($rel2 | .[0:-3]) else $rel2 end) as $id
+       | [.name, $id, ((."required-features" // []) | join(","))] | @tsv') || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | python3 -c '
+import json, os, sys
+pkg = sys.argv[1]
+d = json.load(sys.stdin)
+pkgs = [p for p in d.get("packages", []) if p.get("name") == pkg]
+if len(pkgs) != 1:
+    sys.exit(1)
+p = pkgs[0]
+root = os.path.dirname(p.get("manifest_path", ""))
+for t in p.get("targets", []):
+    if "test" not in (t.get("kind") or []):
+        continue
+    sp = t.get("src_path") or ""
+    rel = sp[len(root) + 1:] if root and sp.startswith(root + os.sep) else sp
+    if rel.startswith("tests/"):
+        rel = rel[len("tests/"):]
+    if rel.endswith(".rs"):
+        rel = rel[:-3]
+    print("%s\t%s\t%s" % (t["name"], rel, ",".join(t.get("required-features") or [])))
+' "$pkg") || return 1
+  else
+    return 1
+  fi
+  # NO `[ -n "$out" ] || return 1` HERE, DELIBERATELY — that is the one line that
+  # distinguishes this helper from _package_test_targets. See reason 1 above.
+  printf '%s' "$out"
+  [ -n "$out" ] && printf '\n'
+  return 0
+}
+
 # THE FLAKE-QUARANTINE PLUMBING IS RETIRED, DELIBERATELY (issues #3383/#3384).
 #
 # It used to live here: `FLIGHT_FLAKE_SKIPS`, a curated `<target>:<issue>` list that
@@ -5989,9 +6071,23 @@ run_flight_query_semantics_oracle() {
 # contract, and here it described the exact defect the code was changed to remove. The measured
 # reason for the change is in the body comment below.
 #
-# Emptiness is impossible for a real package (`default` is always in the set), so an empty result
-# is a failed derivation, and the caller must treat it as one rather than as "no features
-# enabled".
+# THE PRESENCE ORACLE IS THE PACKAGE LINE, NOT A NON-EMPTY FEATURE LIST (issue #3522, and this
+# header used to say the opposite). It read: "Emptiness is impossible for a real package
+# (`default` is always in the set), so an empty result is a failed derivation." That is FALSE,
+# and it was falsified by measurement on the first package that has no `[features]` table at
+# all: `cargo tree -p cqlite-ffi-common … -f '{p}|{f}'` prints
+# `cqlite-ffi-common v0.16.1 (…)|` — the package line is THERE, the feature field is EMPTY,
+# because cargo's `{f}` prints the ENABLED features and an implicit `default = []` enables
+# none. Under the old rule that healthy resolve returned FAILURE, so any lane covering such a
+# package would have failed closed forever on a correct tree — the false-red shape that teaches
+# agents to waive a lane.
+#
+# The fix keeps the fail-closed DIRECTION and makes the signal PRECISE: the derivation has
+# failed IFF cargo emitted no line for the package (a cargo failure, an offline registry, a
+# renamed package). A package that IS in the resolve with no features enabled returns the EMPTY
+# SET with success — which is a measurement, not an absence of one. Callers whose packages do
+# have features are unaffected (cqlite-flight resolves to `default test-util`, cqlite-core to
+# nine), and their failure branch now fires on the condition it always meant to name.
 _resolved_package_features() {
   # PACKAGE-SCOPED resolve, via `cargo tree -p` — NOT `cargo metadata` (roborev round-6
   # finding, Medium). `cargo metadata` resolves the ENTIRE workspace and unions features
@@ -6024,11 +6120,19 @@ _resolved_package_features() {
   # A failed resolve returns non-zero and the caller FAILs the lane naming the census, so
   # "could not measure" never becomes "nothing to report".
   local pkg="$1"; shift
-  local feats
-  feats=$(cargo tree -p "$pkg" "$@" -e features,normal,build,dev --prefix none -f '{p}|{f}' 2>/dev/null \
+  local raw feats
+  # The resolve is captured ONCE and interrogated twice, so the presence check and the feature
+  # extraction can never describe two different cargo runs.
+  raw=$(cargo tree -p "$pkg" "$@" -e features,normal,build,dev --prefix none -f '{p}|{f}' 2>/dev/null) || return 1
+  [ -n "$raw" ] || return 1
+  # PRESENCE: at least one line for this package. This — not the feature count — is what
+  # distinguishes "cargo could not resolve it" from "it enables nothing" (see the header). The
+  # awk EXIT STATUS carries the answer, so an empty feature field cannot be read as an absent
+  # package.
+  printf '%s\n' "$raw" | awk -F'|' -v pat="^$pkg v" '$1 ~ pat { found = 1 } END { exit found ? 0 : 1 }' || return 1
+  feats=$(printf '%s\n' "$raw" \
     | awk -F'|' -v pat="^$pkg v" '$1 ~ pat {print $2}' \
-    | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | sort -u) || return 1
-  [ -n "$feats" ] || return 1
+    | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | sort -u)
   printf ' %s ' "$(printf '%s' "$feats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
 }
 
