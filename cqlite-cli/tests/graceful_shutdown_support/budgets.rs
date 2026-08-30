@@ -46,7 +46,10 @@
 //!   and that look DECIDES FROM THE STORE THE FAILURE REPORTS FROM (job 236
 //!   finding 1), because a reader records into the transcript before it publishes
 //!   to the queue, so a queue-only check leaves the message able to print
-//!   evidence the decision never saw.
+//!   evidence the decision never saw. Refined again in round 12 (job 243
+//!   finding 1): the same store is not the same SNAPSHOT — one read is taken at
+//!   the decision and CARRIED into the failure value, and the window opens BEFORE
+//!   the operation whose response is awaited, not when the wait starts.
 //!
 //! The accepted cost, stated plainly: a genuine defect now surfaces at the
 //! deadline rather than at a tight per-stage cap. It is paid only on a real
@@ -210,8 +213,9 @@ pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(44);
 /// product. `poll_with_progress` in `mod.rs` owns that decision and quantifies
 /// how late an accepted success can be. The failure path is the same rule read
 /// the other way (job 233 finding 1): no expiry is declared until a final
-/// non-blocking check confirms the evidence really is absent — taken from the
-/// transcript the failure message renders, not merely from the queue (job 236
+/// non-blocking check confirms the evidence really is absent — taken from the ONE
+/// transcript snapshot the failure message renders, not merely from the queue
+/// (job 236 finding 1) and not from a second read of the same store (job 243
 /// finding 1).
 ///
 /// It is LIVE from construction: build it as the first statement of the test, so

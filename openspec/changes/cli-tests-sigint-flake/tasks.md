@@ -1467,6 +1467,12 @@ Run under `RUSTFLAGS="-D warnings"`, zero warnings. Without this control a red s
   to. It is enforced by structure: `step` cannot scan for itself because it is *given* the count, and
   one `count_data_db` call is left in the poll. The existing
   `a_step_completed_before_the_deadline_is_observed_after_it_lapses` covers the reused sample at expiry.
+  **OVERTURNED IN ROUND 12 (job 243 finding 2), and this bullet is why the defect survived.** "One
+  `count_data_db` call is left in the poll" was FALSE — the baseline was a second one — and the
+  paragraph reads as an argument for not looking. The scan-counting seam it dismissed as
+  test-only scaffolding is what round 12 built (`poll_with_progress_sampled`); it needs no wall clock
+  and no threshold, so the #2642 objection never applied to it. **A structural argument for a bound is
+  not a measurement of it.**
 * `grep -rn` sweep over what round 11 rescoped (`try_match`, "at `send` time", the overrun bound, the
   three `budgets.rs` cross-references to the expiry drain): four live stale claims found and fixed —
   round 10's own "the transcript is written by the reader threads at `send` time", which is the
@@ -1474,3 +1480,110 @@ Run under `RUSTFLAGS="-D warnings"`, zero warnings. Without this control a red s
   `try_match` bullet in round 10's fix list (marked superseded); and `budgets.rs`'s three
   cross-references, which described a drain that no longer decides anything. Historical transcripts
   are left verbatim under this file's staleness banner.
+
+## Round 12 — roborev job 243 (3 findings, all fixed AS CLASSES)
+
+**All three are round 11's three shapes at DIFFERENT SITES.** Round 11 fixed each shape at the one
+site the review named, and the identical defect stayed live elsewhere. That has now happened four
+times in this change, so this round's unit of work is the CLASS: for each finding, `grep` the whole
+harness for every instance of the shape, fix them all, and record the census — including the sites
+deliberately left, with the reason. A finding names a site; a review round should cost a class.
+
+| # | finding | class fix |
+|---|---|---|
+| 1 | the expiry decision re-READS the transcript to render, so an append between the two reads can still contradict the message; and the mark opens the window AFTER the operation that produces the awaited line, so a recorded-but-unpublished response is excluded from both halves of the check. | ONE `TranscriptSnapshot` per verdict, carried into `WaitEnd`/`PollFail` and rendered there; `Mark` taken by the CALLER before the operation. `7eccb36f0`. |
+| 2 | `poll_with_progress` takes a baseline scan and then scans again before its first deadline check, so a poll near expiry overruns by TWO recursive walks against a documented bound of one. | baseline IS iteration 0's sample; later samples at the loop bottom; the bound is now MEASURED through a sampler seam. `e9f67e5db`. |
+| 3 | the expiry drain in the stream collection collapses `TryRecvError::Empty` with `::Disconnected`, so readers that end without delivering report `DeadlineReached` instead of the existing `Disconnected`. | every `try_recv`/`recv_timeout` in the harness handles `Disconnected` distinctly. `1430be184`. |
+
+### CLASS A census — every site that scans or renders the transcript
+
+```
+mod.rs spawn_reader push                    writer, not a scan          unchanged
+mod.rs wait_for mark                        FIXED -> caller-owned Mark, taken
+                                            before the writeln!/kill/spawn
+mod.rs wait_for expiry scan + `examined`    FIXED -> TWO reads collapsed into
+                                            snapshot(mark)
+mod.rs wait_for Disconnected branch         FIXED -> snapshots too (it renders)
+mod.rs transcript_match                     REMOVED -> snapshot()/window_on()
+mod.rs drain_new line count                 REMOVED -> the poll counts new lines
+                                            from the snapshot it renders
+mod.rs poll_with_progress                   FIXED -> own mark; ONE snapshot at the
+                                            verdict feeds new_lines AND the render
+start_writable_session failure              FIXED -> end.transcript()
+await_write_ack failure                     FIXED -> end.transcript()
+tests stage (c) wait failure                FIXED -> end.transcript()
+tests stages (c)/(d) poll failures (3)      FIXED -> fail.transcript()
+tests status.success asserts (2)            LEFT: the claim is about an exit status
+tests missing-row asserts (2)               LEFT: the claim is about the rows
+```
+The four LEFT sites keep `io.transcript_text()` on purpose, and the reason is now written at that
+function: a wait/poll failure asserts that a line is ABSENT, so a later append can contradict it,
+while an exit status or a missing row is evidence of its own and the transcript is context. Fixed
+sites: 11 (+2 removals). Tests: `a_line_recorded_before_the_wait_started_is_matched_at_expiry` (the
+mark end) and `a_line_appended_after_the_decision_cannot_contradict_the_failure` (the render end).
+
+`ChildIo::attach` now RETURNS the first mark, taken before either reader thread exists — the earliest
+point at which a mark can be taken at all, so stage (a)'s instance of this race is not expressible
+rather than merely avoided by convention.
+
+### CLASS B census — every artifact-sampling call site
+
+```
+mod.rs:648  poll baseline scan              FIXED -> IS iteration 0's sample
+mod.rs:711  next iteration's sample         FIXED -> loop BOTTOM, after the
+                                            deadline check that proves it live
+mod.rs      count_data_db definition        not a call site
+tests       (none)                          both integration steps and the unit
+                                            steps consume the sample they are
+                                            HANDED (round 11), so none scans
+```
+Sites fixed: 2. The claim was weakened once (round 9) and found false twice more; this round changed
+the CODE to meet it, and made it measurable: `poll_with_progress_sampled` takes the sampler as a seam,
+`an_already_expired_poll_takes_exactly_one_artifact_scan` asserts exactly 1 walk (was 2), and
+`every_poll_iteration_takes_exactly_one_artifact_scan` asserts samples == step invocations. Neither
+asserts a duration and neither depends on how many slices fit in a deadline, so neither is #2642 shaped.
+
+### CLASS C census — every `try_recv` / `recv_timeout` in the harness
+
+```
+mod.rs wait_for recv_timeout                distinct already (job 236)  unchanged
+mod.rs final_drain try_recv                 distinct already (job 236)  unchanged
+mod.rs drain_new try_recv                   FIXED -> DrainEnd::{Empty,Disconnected};
+                                            the poll reports closed pipes as a FACT
+mod.rs collect_both_streams expiry drain    FIXED -> CollectEnd::Disconnected
+mod.rs collect_both_streams recv_timeout    distinct already            unchanged
+harness_tests done_rx.recv_timeout          FIXED -> a PANICKED worker is not a
+                                            hang; the join re-raises its panic
+```
+Sites fixed: 3. Each reports the disconnect only after every queued item has been checked, which mpsc
+guarantees (`Disconnected` arrives only once the queue is empty AND every sender is gone). Tests:
+`read_side_readers_that_end_without_delivering_report_a_disconnect`,
+`a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes`.
+
+### Verification
+
+* `cargo test -p cqlite-cli --test graceful_shutdown_tests --features write-support`: **21 passed, 0
+  failed** (was 15). Six tests added, all in `harness_tests.rs`.
+* clippy `-D warnings` was RED at `d9cfdd98c` (`type_complexity` on
+  `synthetic_with_transcript`) — fixed with a named `SyntheticChildIo` alias, not an `#[allow]`.
+  Control: restoring the tuple signature reproduces the error. Two further lints surfaced and were
+  fixed properly rather than allowed: `doc_lazy_continuation`, and `result_large_err` once `PollFail`
+  carried a snapshot (`PollOutcome<T>` boxes the failure, which is allocated only on the panic path).
+  **`cargo test` passed with the `type_complexity` error present, so a green test run is not evidence
+  of a lint-clean tree** — both are checked every round now.
+* **Four RED plants, each COMMITTED in a throwaway `git worktree add --detach` and never on the lane
+  branch** (round 10's incident: a plant committed on the lane branch is a shippable defect):
+  * A1 — take the mark inside `wait_for` again ⇒ `a_line_recorded_before_the_wait_started_...` FAILS,
+    20 passed / 1 failed. Only that test reds, so the plant is precisely attributed.
+  * A2 — keep a LIVE handle in the snapshot and render from a second read ⇒
+    `a_line_appended_after_the_decision_...` FAILS, 20 passed / 1 failed.
+  * B — sample at the loop TOP again ⇒ both CLASS B tests FAIL, 17 passed / 2 failed.
+  * C — re-collapse `Empty` with `Disconnected` at both fixed sites ⇒ both CLASS C tests FAIL,
+    15 passed / 2 failed.
+  Each plant was re-read with `git show HEAD:<file>` after committing, `git status --porcelain` was
+  empty at the RED run (the plant is in the commit, not in a dirty tree), and the worktree was removed.
+* File sizes after the split (`harness_tests.rs`, campsite rule #1135): `mod.rs` 1263, `budgets.rs`
+  849, `harness_tests.rs` 762, `graceful_shutdown_tests.rs` 375 — all under the 1500-line test
+  threshold. The target name `graceful_shutdown_tests` is unchanged (`agent-gate.sh` hardcodes it).
+* This file is now past 1500 lines. The `file-size` ratchet is `.rs`-only, so it is not gated; the
+  content above is the census this round exists to record and is not compressed away.

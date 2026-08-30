@@ -188,6 +188,14 @@ poll step SHALL NOT take its own artifact scan, and no scan SHALL be taken after
 decided. Where the guarantee and the code disagree, the CODE SHALL be corrected; the claim SHALL NOT be
 weakened a third time.
 
+**AND "ONCE PER ITERATION" SHALL INCLUDE THE FIRST ITERATION** (round 12, roborev job 243 finding 2 —
+the third time this claim was found false). The poll's BASELINE sample SHALL BE iteration 0's sample,
+and every later sample SHALL be taken only after that iteration has established that the deadline had
+not passed. A poll entered when the deadline has ALREADY lapsed SHALL therefore take exactly ONE
+artifact scan, not two. **And the bound SHALL be MEASURED, not argued from reading the loop**: the poll
+SHALL expose the sampler as a seam so a test can COUNT the walks, because this claim has now been
+believed and false three times, each time on the strength of a reading.
+
 *(Round-9 ruling, roborev job 232 finding 1: the review proposed rechecking the deadline before
 returning success. It was OVERRULED — the behaviour is correct and the CLAIM was overstated. See
 `tasks.md` round 9.)*
@@ -216,9 +224,32 @@ self-contradicting diagnostic unrepresentable rather than unlikely. The window S
 because the transcript is cumulative and a line already consumed by an earlier stage SHALL NOT satisfy
 a later one — a false PASS is worse than a confusing diagnostic.
 
+**AND THE SAME STORE IS NOT THE SAME SNAPSHOT** (round 12, roborev job 243 finding 1). Deciding from
+the transcript and then RE-READING it to render the message is two acquisitions of one lock, so a line
+appended in between still appears in a message that has just called it absent. The harness SHALL take
+ONE snapshot of the transcript at the expiry decision, SHALL take the verdict from that snapshot, and
+SHALL CARRY THAT SNAPSHOT into the failure value so the rendered transcript and the reported count are
+literally the bytes the decision examined. Any count the message reports about transcript content SHALL
+be derived from the same snapshot, never from a second store such as the queue.
+
+**AND THE WINDOW SHALL OPEN BEFORE THE OPERATION WHOSE RESPONSE IS AWAITED** (round 12, job 243
+finding 1). A mark taken when the wait STARTS opens the window after the `writeln!`, the signal or the
+spawn, so a reader that RECORDED a fast response and was then descheduled before publishing it leaves
+that line outside the window AND outside the queue — excluded from both halves of the final check. The
+mark SHALL therefore be taken by the CALLER, before that operation, and for the first wait on a child
+it SHALL be taken before either reader thread exists. Moving the mark earlier SHALL NOT widen the
+window backwards over a line an earlier stage already consumed.
+
 **A cause SHALL NOT be named that the final check contradicts.** Where the final drain establishes that
 every reader has ended, the failure SHALL report closed pipes and SHALL NOT report that the deadline
 passed "with the pipes still open".
+
+**AND THAT SHALL HOLD AT EVERY DRAIN SITE, NOT THE ONE A REVIEW NAMED** (round 12, roborev job 243
+finding 3, which is round 11's finding recurring at two further sites). No drain in the harness SHALL
+collapse "the queue is empty" with "every sender is gone": each SHALL check every queued item first and
+then report the disconnect DISTINCTLY, through the variant that names it. Where a finding identifies a
+defect SHAPE, the whole harness SHALL be swept for that shape and the census recorded, because fixing
+the named site alone has now left the identical defect live four times in this change.
 
 #### Scenario: the awaited evidence arrived before the deadline but was consumed after it
 - **WHEN** the marker, the process exit, or a read-side buffer is delivered before the deadline and

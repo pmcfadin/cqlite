@@ -131,6 +131,15 @@ iteration and hands the artifact count to `step`, so a step reads the sample ins
 expiry check reuses it, and `PollFail` carries it to the call site — which is why the stage-(d) failure
 messages no longer scan for their artifact line either.
 
+**Round 12 found it false a THIRD time (roborev job 243 finding 2), one iteration in.** The baseline
+scan was taken and the loop then immediately scanned AGAIN before its first deadline check, so a poll
+entered at or past expiry still walked the directory twice. The baseline IS iteration 0's sample now,
+and later samples are taken at the BOTTOM of the loop, after that iteration has proved the deadline had
+not passed. The durable lesson is not about this loop: **a bound that has been believed and false three
+times must be MEASURED, not read.** `poll_with_progress_sampled` exposes the sampler as a seam, and two
+unit tests count the walks — one asserting exactly one scan for an already-expired poll, one asserting
+samples == step invocations — so the next redundant walk reds the fast loop instead of a review round.
+
 **The failure path is the same rule read the other way, and round 9 applied it in only one direction.**
 Evidence can ARRIVE inside the deadline and be CONSUMED after it: the test thread is descheduled
 between a reader thread's `send` and the next `recv`, or between the slice in which the child exited
@@ -160,6 +169,27 @@ worth stating: the check is per-wait windowed, because the transcript is cumulat
 diagnostic); and the predicate is applied to a COPY of the window, because running caller code under
 the transcript lock deadlocks any predicate that touches the transcript — which the first version of
 the RED plant did, wedging the test binary for nine minutes.
+
+**AND THE SAME STORE TURNED OUT NOT TO BE THE SAME SNAPSHOT (round 12, roborev job 243 finding 1).**
+Round 11 implemented "decide from the store you report from" as: scan the transcript, then re-read the
+transcript to render. Two reads under separate locks is not one snapshot, so an append in between could
+still put the awaited marker into a message that had just called it absent — the same self-contradiction,
+one lock acquisition later. And the WINDOW had the mirror-image hole at the other end of the wait: the
+mark was taken when the wait STARTED, i.e. after the `writeln!`/`kill` that produces the awaited line,
+so a reader that recorded a fast response and was descheduled before publishing it fell outside the
+window AND outside the queue — invisible to both halves of the final check. Both are structural now:
+the mark is a `Mark` newtype taken by the CALLER before the operation (and returned by `ChildIo::attach`
+for the first wait, taken before either reader exists, which is the earliest point one can be taken),
+and ONE `TranscriptSnapshot` taken at the decision is carried into `WaitEnd`/`PollFail` and rendered
+there. The poll's "new output lines" count moved to that snapshot too, so it can no longer disagree with
+the transcript printed beside it.
+
+**The class-level lesson of rounds 11 and 12, which is why round 12 fixed CLASSES rather than sites.**
+Job 243's three findings were job 236's three shapes at DIFFERENT sites: a decide/render identity gap, a
+redundant directory walk, and a collapsed `Empty`/`Disconnected`. Round 11 had fixed each shape at the
+one site the review named. So round 12 grepped the whole harness for every instance of each shape and
+recorded the census in `tasks.md` — including the sites deliberately left, with the reason. A finding
+names a site; a review round should cost a class.
 
 This is what AC1's "unbounded-but-progress-checked loop" reduces to once the liveness question is
 answered where it actually can be — by stage (c)'s handler-entry marker, not by a bound that progress
