@@ -30,6 +30,44 @@
 
 use super::arrow_expect::TypeMismatch;
 
+/// The stages one case runs, each with an INDEPENDENTLY determined outcome.
+///
+/// Named as data so a stage that COULD NOT RUN is recordable
+/// ([`Failure::Unrunnable`]) rather than silently missing from the failure set.
+/// Round-3 roborev finding: the pipeline bailed at the first failing stage, so
+/// an expected export abort suppressed the golden's own validation and a type
+/// mismatch on one column suppressed every OTHER column's values — the "exact
+/// failure set" a [`KnownGap`] is compared against was therefore not the exact
+/// set of what went wrong, and a gap could hide both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Load and project the committed sstabledump golden, including its
+    /// physical-dump ELIGIBILITY (#1742). Depends on NOTHING the export does.
+    Golden,
+    /// Run the real `cqlite export --format parquet`.
+    Export,
+    /// Read the exported Parquet back and check its column SET.
+    ParquetRead,
+    /// Validate every field's Arrow TYPE against the declared CQL type.
+    ArrowTypes,
+    /// Sort both sides by primary key and compare per cell.
+    ValueComparison,
+}
+
+impl Stage {
+    /// The stage's stable identifier — part of an [`Failure::Unrunnable`]
+    /// signature, so it is a TOKEN and not prose.
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Golden => "golden-projection",
+            Stage::Export => "export",
+            Stage::ParquetRead => "parquet-read",
+            Stage::ArrowTypes => "arrow-types",
+            Stage::ValueComparison => "value-comparison",
+        }
+    }
+}
+
 /// ONE structured thing that went wrong in a case.
 ///
 /// Every variant carries its identifying facts as FIELDS, so
@@ -65,6 +103,24 @@ pub enum Failure {
     /// divergence therefore always fails a known-gap case as an unrecorded
     /// extra — which is the fail-closed answer.
     Value(String),
+    /// A stage that COULD NOT RUN, because a stage it depends on failed.
+    ///
+    /// Recorded rather than omitted: a stage that PASSED and a stage that never
+    /// ran must never be indistinguishable. Omitting it is what let an expected
+    /// export abort hide an ineligible golden, and a recorded type mismatch on
+    /// one column hide a VALUE regression on the others — in both cases the
+    /// "exact failure set" silently shrank to the part the gap already knew
+    /// about. Being a [`Failure`], an unrunnable stage now has to be RECORDED by
+    /// any [`KnownGap`] that wants to defer the case, so the deferral states
+    /// exactly how much it defers.
+    Unrunnable {
+        stage: Stage,
+        /// The single column it could not run FOR, when the block is per column
+        /// (a wrong Arrow type on one column blocks only that column's values).
+        column: Option<String>,
+        /// The stage whose failure blocked it.
+        blocked_by: Stage,
+    },
     /// The harness REFUSES to answer: an unparsable declaration, a fixture that
     /// is not eligible for physical-dump parity, an unreadable file, a
     /// mis-recorded gap. Never recordable as a known gap either.
@@ -86,6 +142,11 @@ impl Failure {
                 mismatch.column, mismatch.expected, mismatch.actual
             ),
             Failure::Value(diff) => format!("value-difference[{diff}]"),
+            Failure::Unrunnable {
+                stage,
+                column,
+                blocked_by,
+            } => unrunnable_signature(*stage, column.as_deref(), *blocked_by),
             Failure::Refusal(reason) => format!("refusal[{reason}]"),
         }
     }
@@ -101,8 +162,42 @@ impl Failure {
                 None => mismatch.to_string(),
             },
             Failure::Value(diff) => diff.clone(),
+            Failure::Unrunnable {
+                stage,
+                column,
+                blocked_by,
+            } => {
+                let subject = match column {
+                    Some(column) => format!(" for column '{column}'"),
+                    None => String::new(),
+                };
+                format!(
+                    "the {} stage COULD NOT RUN{subject} because the {} stage failed — recorded \
+                     rather than omitted, so a stage that never ran is never mistaken for one \
+                     that passed",
+                    stage.name(),
+                    blocked_by.name()
+                )
+            }
             Failure::Refusal(reason) => reason.clone(),
         }
+    }
+}
+
+/// The shared signature of an unrunnable stage — derived once, so the observed
+/// [`Failure`] and the recorded [`ExpectedFailure`] can never drift apart.
+fn unrunnable_signature(stage: Stage, column: Option<&str>, blocked_by: Stage) -> String {
+    match column {
+        Some(column) => format!(
+            "unrunnable[{}:column '{column}'] blocked-by={}",
+            stage.name(),
+            blocked_by.name()
+        ),
+        None => format!(
+            "unrunnable[{}] blocked-by={}",
+            stage.name(),
+            blocked_by.name()
+        ),
     }
 }
 
@@ -147,6 +242,12 @@ impl Failures {
 
     pub fn items(&self) -> &[Failure] {
         &self.items
+    }
+
+    /// Consume the list, so one stage's failures can be folded into the case's
+    /// AGGREGATE instead of ending it.
+    pub fn into_items(self) -> Vec<Failure> {
+        self.items
     }
 }
 
@@ -212,6 +313,18 @@ pub enum ExpectedFailure {
         expected: &'static str,
         actual: &'static str,
     },
+    /// A stage of the pipeline COULD NOT RUN because `blocked_by` failed.
+    ///
+    /// A gap that defers a case has to say how MUCH it defers: recording an
+    /// export abort no longer implicitly excuses the parquet read, the type
+    /// check and the value comparison — each of those has to be recorded as
+    /// unrunnable, by name.
+    Unrunnable {
+        stage: Stage,
+        /// The one column it could not run for, or `None` for the whole stage.
+        column: Option<&'static str>,
+        blocked_by: Stage,
+    },
 }
 
 impl ExpectedFailure {
@@ -223,6 +336,11 @@ impl ExpectedFailure {
                 expected,
                 actual,
             } => format!("arrow-type[{column}] expected={expected} actual={actual}"),
+            ExpectedFailure::Unrunnable {
+                stage,
+                column,
+                blocked_by,
+            } => unrunnable_signature(*stage, *column, *blocked_by),
         }
     }
 }

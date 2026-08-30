@@ -67,7 +67,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use canonical_jsonl::{CanonicalValue, KeySpec};
 use cql_type::ColumnType;
-use failure::{Failure, Failures};
+use failure::{Failure, Failures, Stage};
 use golden_rows::GoldenRow;
 
 // `ExpectedFailure` is used only by the test binaries that DECLARE a
@@ -359,6 +359,34 @@ impl Row {
     }
 }
 
+/// What the Arrow TYPE stage determined — reported as data, so the stages after
+/// it can decide what they can still do rather than being cancelled wholesale.
+#[derive(Default)]
+struct TypeCheck {
+    /// Every type failure, plus any bookkeeping refusal.
+    failures: Vec<Failure>,
+    /// Columns whose exported Arrow type DIVERGED. Their VALUES cannot be
+    /// meaningfully compared (a wrong type renders a different value), so the
+    /// value comparison is recorded UNRUNNABLE for exactly these columns and
+    /// RUNS for every other one.
+    blocked_columns: Vec<String>,
+    /// A harness bookkeeping refusal (a gap naming an undeclared column, an
+    /// unclassifiable Arrow type): the type stage did not answer at all, so the
+    /// value comparison cannot be scoped and is blocked whole.
+    blocks_all_values: bool,
+}
+
+impl TypeCheck {
+    /// Record an `ArrowType` failure AND the column it blocks, in one place, so
+    /// the two can never drift apart.
+    fn blocked_column(&mut self, failure: Failure) {
+        if let Failure::ArrowType { mismatch, .. } = &failure {
+            self.blocked_columns.push(mismatch.column.clone());
+        }
+        self.failures.push(failure);
+    }
+}
+
 /// The TYPE half of the schema check: every field's Arrow type against the
 /// case's independently declared CQL type.
 ///
@@ -373,26 +401,30 @@ fn validate_arrow_types(
     case: &ParityCase,
     columns: &[ColumnType],
     schema: &arrow::datatypes::Schema,
-) -> Result<(), Failures> {
+) -> TypeCheck {
+    let mut check = TypeCheck::default();
     for gap in case.known_type_gaps {
         if !columns.iter().any(|c| c.name == gap.column) {
-            return Err(Failures::refusal(format!(
+            check.failures.push(Failure::Refusal(format!(
                 "a KnownTypeGap is recorded for column '{}', which the case does not \
                  declare — a gap must name a real column or it can never retire",
                 gap.column
             )));
+            check.blocks_all_values = true;
+            return check;
         }
     }
 
-    let mut errors: Vec<Failure> = Vec::new();
     let mut excused: Vec<&'static str> = Vec::new();
     for field in schema.fields() {
         let Some(col) = columns.iter().find(|c| c.name == *field.name()) else {
             // Unreachable: the column-set equality above already ran.
-            return Err(Failures::refusal(format!(
+            check.failures.push(Failure::Refusal(format!(
                 "Parquet column '{}' has no declared CQL type",
                 field.name()
             )));
+            check.blocks_all_values = true;
+            return check;
         };
         let gap = case
             .known_type_gaps
@@ -401,7 +433,7 @@ fn validate_arrow_types(
         match arrow_expect::validate_field(col, field.data_type()) {
             Ok(()) => {
                 if let Some(gap) = gap {
-                    errors.push(Failure::Refusal(format!(
+                    check.failures.push(Failure::Refusal(format!(
                         "column '{}' records the KNOWN type gap {} ({}) but its exported Arrow \
                          type is now CORRECT — delete the KnownTypeGap so the column is covered \
                          for real, and close {}",
@@ -417,7 +449,7 @@ fn validate_arrow_types(
                 // part of the failure's signature: the DEFECT is the mismatch,
                 // and a whole-case `known_gap` must be able to record it whether
                 // or not a per-column gap also names the column.
-                Some(gap) => errors.push(Failure::ArrowType {
+                Some(gap) => check.blocked_column(Failure::ArrowType {
                     note: Some(format!(
                         "the recorded type gap {} expected the export to produce {:?}, so this \
                          is a DIFFERENT type defect, which the gap must never hide",
@@ -425,18 +457,18 @@ fn validate_arrow_types(
                     )),
                     mismatch,
                 }),
-                None => errors.push(Failure::ArrowType {
+                None => check.blocked_column(Failure::ArrowType {
                     mismatch,
                     note: None,
                 }),
             },
-            Err(Err(refusal)) => errors.push(Failure::Refusal(refusal)),
+            Err(Err(refusal)) => {
+                check.failures.push(Failure::Refusal(refusal));
+                check.blocks_all_values = true;
+            }
         }
     }
 
-    if !errors.is_empty() {
-        return Err(Failures::many(errors));
-    }
     for issue in excused {
         eprintln!(
             "[{}] KNOWN TYPE GAP {issue} still present — that column's TYPE is deferred, its \
@@ -444,16 +476,16 @@ fn validate_arrow_types(
             case.id()
         );
     }
-    Ok(())
+    check
 }
 
-/// Project the exported Parquet file into canonical rows, asserting its column
-/// set is exactly the declared one.
-fn project_parquet(
-    case: &ParityCase,
-    columns: &[ColumnType],
-    path: &Path,
-) -> Result<Vec<Row>, Failures> {
+/// Read the exported Parquet file back: its record batches, after asserting its
+/// column SET is exactly the declared one.
+///
+/// The TYPE check and the row projection are SEPARATE stages on purpose — see
+/// [`run_stages`]: a wrong Arrow type on one column must not cancel the other
+/// columns' value comparison.
+fn read_parquet(case: &ParityCase, path: &Path) -> Result<Vec<RecordBatch>, Failures> {
     let bytes = std::fs::read(path)
         .map_err(|e| Failures::refusal(format!("read {}: {e}", path.display())))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
@@ -490,8 +522,11 @@ fn project_parquet(
         )));
     }
 
-    validate_arrow_types(case, columns, &first_schema)?;
+    Ok(batches)
+}
 
+/// Project already-read record batches into canonical rows.
+fn project_rows(case: &ParityCase, batches: &[RecordBatch]) -> Result<Vec<Row>, Failures> {
     let key_columns: Vec<&str> = case
         .partition_key
         .iter()
@@ -500,7 +535,7 @@ fn project_parquet(
         .collect();
 
     let mut rows = Vec::new();
-    for batch in &batches {
+    for batch in batches {
         let schema = batch.schema();
         for r in 0..batch.num_rows() {
             let mut cells = BTreeMap::new();
@@ -559,6 +594,51 @@ pub fn render_value(v: &CanonicalValue) -> String {
     }
 }
 
+/// The INDEPENDENTLY determined outcome of every stage of one case.
+///
+/// # Why an aggregate, and not a `?`-chain
+///
+/// Round-3 roborev finding: the pipeline stopped at the first failing stage, so
+/// the "exact failure set" a [`KnownGap`] is compared against was not the exact
+/// set of what went wrong — it was the set of what went wrong BEFORE the first
+/// abort. Two concrete holes:
+///
+///   * an expected export abort ran before the golden was ever loaded, so a
+///     MALFORMED or physical-dump-INELIGIBLE golden (#1742) was never noticed;
+///   * one column's Arrow type mismatch cancelled the whole value comparison, so
+///     a VALUE regression on any OTHER column rode along invisibly — while the
+///     per-column [`KnownTypeGap`] doc promised the opposite.
+///
+/// So each stage's inputs are established as independently as they really are:
+/// the golden stage depends on NOTHING the export does and always runs, and a
+/// type mismatch blocks the value comparison for ITS column only.
+///
+/// A stage that genuinely cannot proceed is recorded as
+/// [`Failure::Unrunnable`], never omitted: a stage that passed and a stage that
+/// never ran must not be indistinguishable, and a gap that wants to defer one
+/// has to say so by name.
+///
+/// Public, with [`stage_case`] and [`finish_case`], only so the aggregate's own
+/// exclusivity can be tested on REAL export output: a self-test stages a case
+/// whose type gap defers one column, PERTURBS a cell of an UNAFFECTED column,
+/// and requires the aggregate to report it. Nothing in the harness mutates a
+/// staged case.
+pub struct Stages {
+    columns: Vec<ColumnType>,
+    /// `None` when the golden stage failed (its failure is in `failures`).
+    golden: Option<Vec<GoldenRow>>,
+    /// `None` when the export or the parquet read failed.
+    parquet: Option<Vec<Row>>,
+    /// The stage that blocked `golden`/`parquet`, for the `Unrunnable` record.
+    blocked_by: Option<Stage>,
+    /// Columns whose values cannot be compared because their TYPE diverged.
+    type_blocked_columns: Vec<String>,
+    /// A type-stage refusal blocks the value comparison whole.
+    type_blocks_all_values: bool,
+    /// Everything that went wrong, across ALL stages.
+    failures: Vec<Failure>,
+}
+
 /// Everything one case needs to compare, before comparing it.
 ///
 /// Exposed as its own step so the harness's OWN sensitivity can be tested: a
@@ -572,49 +652,221 @@ pub struct Prepared {
     pub parquet: Vec<Row>,
 }
 
-/// Export, read back and project both sides. `Ok(None)` only when no candidate
-/// root carries the table.
-pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, Failures> {
-    prepare_inner(case).map_err(|f| f.for_case(&case.id()))
-}
-
-fn prepare_inner(case: &ParityCase) -> Result<Option<Prepared>, Failures> {
+/// Run every stage UP TO the value comparison, aggregating their failures.
+///
+/// `Ok(None)` only when no candidate root carries the table. `Err` is reserved
+/// for the SETUP refusals that make every later stage meaningless (an unparsable
+/// column declaration, an unusable fixture directory, no temp dir): with no
+/// declared types and no fixture there is nothing to aggregate.
+fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
     let columns = case.column_types().map_err(Failures::refusal)?;
     let Some(fixture) = resolve_fixture(case).map_err(Failures::refusal)? else {
         return Ok(None);
     };
-
     let tmp = tempfile::TempDir::new().map_err(|e| Failures::refusal(format!("tempdir: {e}")))?;
     let data_dir = isolated_data_dir(case, &fixture, tmp.path()).map_err(Failures::refusal)?;
-    let parquet_path = export_parquet(case, &data_dir, tmp.path())?;
 
+    let mut stages = Stages {
+        columns,
+        golden: None,
+        parquet: None,
+        blocked_by: None,
+        type_blocked_columns: Vec::new(),
+        type_blocks_all_values: false,
+        failures: Vec::new(),
+    };
+
+    // Stage GOLDEN — FIRST and unconditionally, because it depends on nothing
+    // the export does. Running it before the export is what makes it impossible
+    // for a recorded export abort to suppress it.
+    match load_golden(case, &fixture, &stages.columns) {
+        Ok(golden) => stages.golden = Some(golden),
+        Err(f) => {
+            stages.failures.extend(f.into_items());
+            stages.blocked_by = Some(Stage::Golden);
+        }
+    }
+
+    // Stage EXPORT → Stage PARQUET-READ → Stage ARROW-TYPES, each recording an
+    // `Unrunnable` for what it prevented.
+    match export_parquet(case, &data_dir, tmp.path()) {
+        Err(f) => {
+            stages.failures.extend(f.into_items());
+            stages.unrunnable(Stage::ParquetRead, Stage::Export);
+            stages.unrunnable(Stage::ArrowTypes, Stage::Export);
+            stages.blocked_by = Some(Stage::Export);
+        }
+        Ok(parquet_path) => match read_parquet(case, &parquet_path) {
+            Err(f) => {
+                stages.failures.extend(f.into_items());
+                stages.unrunnable(Stage::ArrowTypes, Stage::ParquetRead);
+                stages.blocked_by = Some(Stage::ParquetRead);
+            }
+            Ok(batches) => {
+                // The batches are read, so the TYPE stage and the ROW
+                // PROJECTION are both runnable and both run — neither cancels
+                // the other.
+                let schema = batches
+                    .first()
+                    .map(|b| b.schema())
+                    .expect("read_parquet refuses an empty batch list");
+                let check = validate_arrow_types(case, &stages.columns, &schema);
+                stages.failures.extend(check.failures);
+                stages.type_blocked_columns = check.blocked_columns;
+                stages.type_blocks_all_values = check.blocks_all_values;
+
+                match project_rows(case, &batches) {
+                    Ok(rows) => stages.parquet = Some(rows),
+                    Err(f) => {
+                        stages.failures.extend(f.into_items());
+                        stages.blocked_by = Some(Stage::ParquetRead);
+                    }
+                }
+            }
+        },
+    }
+    Ok(Some(stages))
+}
+
+impl Stages {
+    /// TEST-SUPPORT ONLY: overwrite one cell of the exported side, so a
+    /// self-test can prove the AGGREGATE notices a value regression in a column
+    /// that a recorded type gap does not cover. It cannot weaken a real run:
+    /// nothing in the harness calls it, and the rows are rebuilt from the
+    /// Parquet file on every case.
+    pub fn overwrite_parquet_cell(&mut self, row: usize, column: &str, value: CanonicalValue) {
+        let rows = self
+            .parquet
+            .as_mut()
+            .expect("overwrite_parquet_cell needs a case whose export was read back");
+        rows[row].overwrite_cell(column, value);
+    }
+
+    /// Record that `stage` could not run because `blocked_by` failed.
+    fn unrunnable(&mut self, stage: Stage, blocked_by: Stage) {
+        self.failures.push(Failure::Unrunnable {
+            stage,
+            column: None,
+            blocked_by,
+        });
+    }
+
+    /// The columns the value comparison can still cover, and the `Unrunnable`
+    /// records for the ones it cannot.
+    fn comparable_columns(&mut self) -> Vec<ColumnType> {
+        if self.type_blocks_all_values {
+            self.unrunnable(Stage::ValueComparison, Stage::ArrowTypes);
+            return Vec::new();
+        }
+        let blocked = std::mem::take(&mut self.type_blocked_columns);
+        for column in &blocked {
+            self.failures.push(Failure::Unrunnable {
+                stage: Stage::ValueComparison,
+                column: Some(column.clone()),
+                blocked_by: Stage::ArrowTypes,
+            });
+        }
+        self.columns
+            .iter()
+            .filter(|c| !blocked.contains(&c.name))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Stage GOLDEN: load the committed sstabledump dump and project it, including
+/// its physical-dump ELIGIBILITY refusals (#1742).
+fn load_golden(
+    case: &ParityCase,
+    fixture: &Fixture,
+    columns: &[ColumnType],
+) -> Result<Vec<GoldenRow>, Failures> {
     let golden_doc =
         canonical_jsonl::load_golden_document_with_keys(&fixture.golden, true, &case.key_spec())
             .map_err(|e| {
                 Failures::refusal(format!("loading the sstabledump golden failed: {e}"))
             })?;
-    let golden =
-        golden_rows::project_golden(&golden_doc, &columns, case.partition_key, case.clustering)
-            .map_err(Failures::refusal)?;
+    golden_rows::project_golden(&golden_doc, columns, case.partition_key, case.clustering)
+        .map_err(Failures::refusal)
+}
 
-    let parquet = project_parquet(case, &columns, &parquet_path)?;
+/// Export, read back and project both sides. `Ok(None)` only when no candidate
+/// root carries the table.
+///
+/// Reports the AGGREGATE of every stage before the value comparison, so an
+/// export abort never suppresses the golden's own validation.
+pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, Failures> {
+    let Some(stages) = run_stages(case).map_err(|f| f.for_case(&case.id()))? else {
+        return Ok(None);
+    };
+    if !stages.failures.is_empty() {
+        return Err(Failures::many(stages.failures).for_case(&case.id()));
+    }
+    let (Some(golden), Some(parquet)) = (stages.golden, stages.parquet) else {
+        // Unreachable: a missing side always records a failure above.
+        return Err(
+            Failures::refusal("a stage produced neither rows nor a failure").for_case(&case.id()),
+        );
+    };
     Ok(Some(Prepared {
-        columns,
+        columns: stages.columns,
         golden,
         parquet,
     }))
 }
 
-/// Run one case end-to-end. `Err` is a parity failure or a fail-closed refusal;
-/// `Ok(Skipped)` only when no candidate root carries the table.
+/// Run one case end-to-end. `Err` carries EVERY failure the case produced, from
+/// every stage that could be determined independently; `Ok(Skipped)` only when
+/// no candidate root carries the table.
 pub fn run_case(case: &ParityCase) -> Result<CaseOutcome, Failures> {
-    let Some(prepared) = prepare(case)? else {
+    let Some(stages) = stage_case(case)? else {
         return Ok(CaseOutcome::Skipped(datasets_root::describe_search(
             case.keyspace,
             case.table,
         )));
     };
-    compare(case, &prepared.columns, prepared.golden, prepared.parquet)
+    finish_case(case, stages)
+}
+
+/// Every stage BEFORE the value comparison, as an aggregate. `Ok(None)` only
+/// when no candidate root carries the table.
+///
+/// Public for the aggregate's self-tests (see [`Stages`]).
+pub fn stage_case(case: &ParityCase) -> Result<Option<Stages>, Failures> {
+    run_stages(case).map_err(|f| f.for_case(&case.id()))
+}
+
+/// Stage VALUE-COMPARISON, then the aggregate verdict over EVERY stage.
+///
+/// Public for the aggregate's self-tests (see [`Stages`]).
+pub fn finish_case(case: &ParityCase, mut stages: Stages) -> Result<CaseOutcome, Failures> {
+    // Stage VALUE-COMPARISON — over the columns whose type did not diverge, and
+    // only if both sides exist. Anything it cannot cover is recorded, by name.
+    let comparable = stages.comparable_columns();
+    let mut outcome = None;
+    match (stages.golden.take(), stages.parquet.take()) {
+        (Some(golden), Some(parquet)) if !comparable.is_empty() => {
+            match compare(case, &comparable, golden, parquet) {
+                Ok(o) => outcome = Some(o),
+                Err(f) => stages.failures.extend(f.into_items()),
+            }
+        }
+        (Some(_), Some(_)) => {
+            // Every column's type diverged: already recorded per column.
+        }
+        _ => {
+            let blocked_by = stages.blocked_by.unwrap_or(Stage::Golden);
+            stages.unrunnable(Stage::ValueComparison, blocked_by);
+        }
+    }
+
+    if !stages.failures.is_empty() {
+        return Err(Failures::many(stages.failures).for_case(&case.id()));
+    }
+    outcome.ok_or_else(|| {
+        // Unreachable: a comparison that did not happen always records why.
+        Failures::refusal("the value comparison neither ran nor recorded why").for_case(&case.id())
+    })
 }
 
 /// Sort both sides by primary key and assert full per-cell equality.

@@ -11,6 +11,7 @@
 mod parquet_parity;
 
 use parquet_parity::canonical_jsonl::CanonicalValue;
+use parquet_parity::failure::Stage;
 use parquet_parity::{assert_case, ExpectedFailure, KnownGap, KnownTypeGap, ParityCase};
 
 // ---------------------------------------------------------------------------
@@ -134,9 +135,33 @@ const UDT_FROZEN_PERSON: ParityCase = ParityCase {
         // EQUALITY, so a parity difference, an unreadable Parquet file or an
         // Arrow type mismatch appearing ALONGSIDE it is an unrecorded extra and
         // fails the case.
-        expect: &[ExpectedFailure::ExportAborted {
-            detail: "expected Blob value, got Udt",
-        }],
+        //
+        // The three UNRUNNABLE stages are recorded too, by name: the abort is
+        // what PREVENTS them, and a deferral that does not say how much it
+        // defers is exactly what let an earlier failure shrink the "exact set"
+        // (round-3 roborev finding). The golden stage is NOT in this list
+        // because it runs INDEPENDENTLY of the export and PASSES — an ineligible
+        // golden here would be an unrecorded extra and would fail the case.
+        expect: &[
+            ExpectedFailure::ExportAborted {
+                detail: "expected Blob value, got Udt",
+            },
+            ExpectedFailure::Unrunnable {
+                stage: Stage::ParquetRead,
+                column: None,
+                blocked_by: Stage::Export,
+            },
+            ExpectedFailure::Unrunnable {
+                stage: Stage::ArrowTypes,
+                column: None,
+                blocked_by: Stage::Export,
+            },
+            ExpectedFailure::Unrunnable {
+                stage: Stage::ValueComparison,
+                column: None,
+                blocked_by: Stage::Export,
+            },
+        ],
         what: "a frozen UDT column reaches the Arrow converter with no CqlType, so the \
                export aborts instead of writing a Struct",
     }),
@@ -186,6 +211,22 @@ const UDT_COLLECTIONS: ParityCase = ParityCase {
                 column: "ma",
                 expected: "map<utf8 | large_utf8,struct(udt 'address')>",
                 actual: "map<utf8,utf8>",
+            },
+            // The wrong TYPE on these two columns blocks THEIR values and
+            // nothing else: `id`, `fl` and `fm` are still compared per cell on
+            // every run, and a regression in any of them is an unrecorded extra
+            // that fails this case. Before the aggregate, the first type
+            // mismatch cancelled the whole comparison and those three columns
+            // were silently uncovered.
+            ExpectedFailure::Unrunnable {
+                stage: Stage::ValueComparison,
+                column: Some("lp"),
+                blocked_by: Stage::ArrowTypes,
+            },
+            ExpectedFailure::Unrunnable {
+                stage: Stage::ValueComparison,
+                column: Some("ma"),
+                blocked_by: Stage::ArrowTypes,
             },
         ],
         what: "a UDT nested inside a frozen collection (list element 'lp', map value \
@@ -732,6 +773,17 @@ const NAME_GAP: ExpectedFailure = ExpectedFailure::ArrowType {
     actual: "utf8",
 };
 
+/// A wrong Arrow type on a column also makes the VALUE comparison unrunnable for
+/// THAT column — an explicit part of the failure set, so a gap has to state how
+/// much it defers.
+const fn values_deferred(column: &'static str) -> ExpectedFailure {
+    ExpectedFailure::Unrunnable {
+        stage: Stage::ValueComparison,
+        column: Some(column),
+        blocked_by: Stage::ArrowTypes,
+    }
+}
+
 /// A SECOND, UNRECORDED failure occurring alongside a recorded gap must FAIL the
 /// case — the exact shape of the round-2 defect.
 ///
@@ -776,8 +828,13 @@ fn a_known_gap_cannot_hide_a_second_unrecorded_failure() {
 fn a_known_gap_recording_the_exact_failure_set_is_excused() {
     const GAP: KnownGap = KnownGap {
         issue: "#0000",
-        expect: &[AGE_GAP, NAME_GAP],
-        what: "NEGATIVE CONTROL: records BOTH mismatches present",
+        expect: &[
+            AGE_GAP,
+            NAME_GAP,
+            values_deferred("age"),
+            values_deferred("name"),
+        ],
+        what: "NEGATIVE CONTROL: records BOTH mismatches and BOTH deferrals present",
     };
     const CASE: ParityCase = da_simple_gap_variant(TWO_WRONG_TYPES, Some(GAP));
 
@@ -801,6 +858,8 @@ fn a_known_gap_recording_a_failure_that_no_longer_happens_fails() {
         expect: &[
             AGE_GAP,
             NAME_GAP,
+            values_deferred("age"),
+            values_deferred("name"),
             ExpectedFailure::ArrowType {
                 column: "salary",
                 expected: "int64",
@@ -874,6 +933,135 @@ fn a_known_gap_recording_no_failures_is_refused() {
         .mismatch(&CASE.id(), failures.items())
         .expect("an empty recorded set MUST be refused");
     assert!(problem.contains("NO expected failures"), "{problem}");
+}
+
+// ---------------------------------------------------------------------------
+// The AGGREGATE is EXCLUSIVE too, on real export output
+//
+// Round-3 roborev finding: the pipeline stopped at the first failing stage, so
+// the "exact failure set" a gap is compared against was only the set of what
+// went wrong BEFORE the first abort. Two things could therefore hide behind a
+// recorded gap — a malformed/ineligible GOLDEN (never loaded, because the
+// expected export abort came first) and a VALUE regression in a column the
+// deferred TYPE does not cover (never compared, because the first type mismatch
+// cancelled the whole comparison). These two controls pin both.
+// ---------------------------------------------------------------------------
+
+/// (a) A gap recording an aborting export — and every stage that abort prevents
+/// — must NOT hide the GOLDEN's own validation.
+///
+/// The golden stage depends on nothing the export does, so it runs FIRST and
+/// unconditionally. Built on `test_da.ttl_table`, whose committed dump carries a
+/// TTL and is therefore INELIGIBLE for physical-dump parity (#1742), with the
+/// case naming a committed schema that does not declare the table so the REAL
+/// export aborts. Before the aggregate this case would have been fully excused:
+/// the abort happened first and the golden was never even opened.
+#[test]
+fn a_known_gap_cannot_hide_an_ineligible_golden_behind_an_aborting_export() {
+    const GAP: KnownGap = KnownGap {
+        issue: "#0000",
+        expect: &[
+            ExpectedFailure::ExportAborted {
+                detail: "Could not determine column names for export",
+            },
+            ExpectedFailure::Unrunnable {
+                stage: Stage::ParquetRead,
+                column: None,
+                blocked_by: Stage::Export,
+            },
+            ExpectedFailure::Unrunnable {
+                stage: Stage::ArrowTypes,
+                column: None,
+                blocked_by: Stage::Export,
+            },
+            ExpectedFailure::Unrunnable {
+                stage: Stage::ValueComparison,
+                column: None,
+                blocked_by: Stage::Export,
+            },
+        ],
+        what: "NEGATIVE CONTROL: records the export abort and every stage it blocks, and \
+               NOTHING about the golden",
+    };
+    const CASE: ParityCase = ParityCase {
+        keyspace: "test_da",
+        table: "ttl_table",
+        // Deliberately a schema that does not declare `test_da.ttl_table`, so the
+        // real `cqlite export` aborts.
+        schema: "basic-types.cql",
+        udts: &[],
+        columns: &[("id", "uuid"), ("data", "text"), ("expiring_value", "int")],
+        partition_key: &["id"],
+        clustering: &[],
+        must_run: true,
+        covers: "NEGATIVE CONTROL: an ineligible golden alongside an aborting export",
+        known_gap: Some(GAP),
+        known_type_gaps: &[],
+    };
+
+    let failures = parquet_parity::run_case(&CASE)
+        .err()
+        .expect("the export must abort");
+    let rendered = failures.to_string();
+    // The whole export-side set the gap records IS present — so a mechanism that
+    // only ever saw the first failing stage would have excused this case.
+    assert!(
+        rendered.contains("cqlite export failed") && rendered.contains("COULD NOT RUN"),
+        "{rendered}"
+    );
+    let problem = GAP.mismatch(&CASE.id(), failures.items()).expect(
+        "an INELIGIBLE golden must NOT be excused by a gap that records only the export abort",
+    );
+    assert!(
+        problem.contains("OBSERVED BUT NOT RECORDED") && problem.contains("TTL"),
+        "the refusal must name the golden defect the gap would have hidden: {problem}"
+    );
+}
+
+/// (b) A gap deferring the TYPE of two columns must NOT defer any OTHER column's
+/// VALUES.
+///
+/// The perturbation is applied to REAL export output through the staging seam,
+/// on `salary` — a column with no type failure — and the aggregate must report
+/// it as an unrecorded extra. Before the aggregate, the first type mismatch
+/// cancelled the value comparison outright and every other column of the table
+/// was silently uncovered while the gap read as "still present".
+#[test]
+fn a_known_gap_cannot_hide_a_value_regression_in_an_unaffected_column() {
+    const GAP: KnownGap = KnownGap {
+        issue: "#0000",
+        expect: &[
+            AGE_GAP,
+            NAME_GAP,
+            values_deferred("age"),
+            values_deferred("name"),
+        ],
+        what: "NEGATIVE CONTROL: records the two type mismatches and the two deferrals, \
+               EXACTLY — and nothing about any other column's values",
+    };
+    const CASE: ParityCase = da_simple_gap_variant(TWO_WRONG_TYPES, Some(GAP));
+
+    let mut stages = parquet_parity::stage_case(&CASE)
+        .expect("staging must not refuse a resolvable fixture")
+        .expect("test_da.simple_table's binaries are committed");
+    stages.overwrite_parquet_cell(0, "salary", CanonicalValue::Int(-4_242_424_242));
+
+    let failures = parquet_parity::finish_case(&CASE, stages)
+        .err()
+        .expect("a perturbed cell in a column the gap does not defer MUST be reported");
+    let problem = GAP
+        .mismatch(&CASE.id(), failures.items())
+        .expect("a value regression outside the deferred columns must NOT be excused");
+    assert!(
+        problem.contains("OBSERVED BUT NOT RECORDED") && problem.contains("column 'salary'"),
+        "the refusal must NAME the value regression the gap would have hidden: {problem}"
+    );
+    // …and only that: the two type mismatches and the two per-column deferrals
+    // all still reproduce, so the extra is the regression and nothing else.
+    assert!(
+        !problem.contains("RECORDED BUT NOT OBSERVED"),
+        "every recorded failure must still reproduce: {problem}"
+    );
 }
 
 /// A gap naming a column the case does not declare could never retire, so it is
