@@ -24,16 +24,23 @@ The markers are strictly stronger evidence than any external probe, because obse
 delivered, the handler **exists and was entered**, and the child **was scheduled**. That is precisely
 the conjunction the current message guesses at.
 
-## D2. How the ceilings are set — calibration from in-band measurement
+## D2. How the ceiling is set — calibration from in-band measurement
+
+**SUPERSEDED IN PART BY D6a (round 8).** This section is retained because its *reasoning about the
+baseline* is what survives and is load-bearing. What does NOT survive is the per-stage form: there is
+now ONE ceiling per test, not one per stage, and `quiet_baseline` is ONE constant rather than a
+per-observation anchor with a derived multiple and a NOTICE. Read every "a stage's ceiling" below as
+"the test's one deadline", and read the anchor/multiple paragraph as withdrawn — see D6a.
 
 Two measurements are taken before any shutdown ceiling is needed:
 
 * `t_boot` = spawn → readiness banner (process spawn + dynamic link + engine init)
 * `t_ack` = INSERT written → `OK` observed (a full read→execute→print round-trip through the child)
 
-A stage's ceiling is `clamp(base × scale, base, cap)` where
-`scale = max(1, observed / quiet_baseline)`. On the issue's measured 175× host, `t_ack` inflates by
-the same factor the shutdown does, so the ceiling follows.
+The test's one deadline is `clamp(base × scale, base, cap)` where
+`scale = max(1, observed / quiet_baseline)`, taken over the LARGEST scale either measurement yields.
+On the issue's measured 175× host, `t_ack` inflates by the same factor the shutdown does, so the
+ceiling follows.
 
 **Where `quiet_baseline` sits — CORRECTED, and the first draft of this section was wrong (round 3).**
 This document originally required `quiet_baseline` to be set *generously*, "seconds, not
@@ -49,35 +56,53 @@ The error was failing to draw the conclusion from an asymmetry stated two paragr
 large `scale` cannot fail a test — it can only delay one — and there is **no quiet-side risk to
 protect against**. Over-eager engagement is harmless; under-eager engagement is the only real hazard.
 
-Therefore `quiet_baseline` SHALL sit just above the **recorded measured** quiet value for its
-observation (single-digit multiples), not orders of magnitude above it. Because the constant is then
-load-bearing, it is anchored to committed measurements and asserted against them by a unit test — and
-that anchor must be the value that BINDS (the smallest relevant quiet measurement), since the anchor
-is used as the basis of an UPPER bound on the baseline, where "slowest observed" is the permissive
-direction.
+Therefore `quiet_baseline` must sit close to the **recorded measured** quiet values, not orders of
+magnitude above them.
+
+**How that requirement is met after D6a, and why the anchor factoring was withdrawn.** Rounds 5-7
+expressed it as a per-observation ANCHOR (the smallest recorded quiet value) with a derived MULTIPLE
+bounded at 10x, plus a run-time NOTICE when a host measured below its anchor. That factoring made the
+multiple undriftable and the anchor *unverifiable* in exchange: planting a permissive anchor scaled the
+baseline with it, the ratio held, and every assert still passed. With ONE baseline for one deadline the
+property can be asserted directly and in BOTH directions, from two recorded measurements that bracket
+it: above the SLOWEST recorded quiet observation (43ms), so an unloaded host yields `scale == 1`
+exactly; and below the FASTEST observation recorded under real contention (81ms), so contention
+demonstrably engages it. That is what "not inert" actually means, and it needs no anchor, no multiple
+and no NOTICE.
 
 **Why calibration and not just a bigger constant.** A constant has to be chosen for the worst host
 anyone will ever run on, which makes a genuine hang cost that constant on every host. A calibrated
 ceiling is tight on a quiet box (fast failure on a real defect) and loose on a saturated one (no
 false alarm) — the property a constant cannot have in both directions at once.
 
-## D3. The progress-checked exit wait
+## D3. The progress-OBSERVING exit wait
 
-Stage (d) is not one `wait_timeout(D)`. It polls in short slices and treats any of these as
-**progress**, resetting its stall window:
+**CORRECTED BY D6a (round 8): progress is observed and reported, and CREDITS NOTHING.** As first
+built, each progress event RESET a calibrated stall window and pushed the stage past its nominal
+budget. That is exactly what made a declared per-stage cap not the actual maximum — the defect family
+four review rounds could not close — so the crediting is gone.
+
+Stage (d) is still not one `wait_timeout(D)`. It polls in short slices and OBSERVES:
 
 * a new stderr line from the child,
 * an increase in the durable-artifact count (`count_data_db`), i.e. the flush is landing.
 
-Exit ends the wait successfully. This is AC1's "unbounded-but-progress-checked loop" implemented
-inside a bounded envelope, for the reason in D6.
+Those observations are reported as EVIDENCE in any failure message — including an explicit
+`progress observed: NONE` with zero counts, which is a materially different diagnosis from "the flush
+was still landing when the deadline passed". Exit ends the wait successfully; the deadline ends it
+otherwise, and is checked BEFORE each step is invoked so no step can complete past it.
+
+This is what AC1's "unbounded-but-progress-checked loop" reduces to once the liveness question is
+answered where it actually can be — by stage (c)'s handler-entry marker, not by a bound that progress
+could move.
 
 ## D4. Cause-honest failure messages (AC2)
 
 Every stage failure reports, and reports *only*, what it measured:
 
 * what was awaited, and for how long;
-* **how the bound was derived** (`base × scale`, naming the observed measurement it came from);
+* **how the one bound was derived** (`clamp(base × scale, base, cap)`, naming every observed
+  measurement the scale was taken over);
 * what *was* observed — the stderr/stdout transcript, the artifact count, the per-stage timings;
 * an explicit statement of what is **not** established.
 
@@ -113,13 +138,17 @@ its total, which in turn produced the "declared exception" that consumed three r
 roborev blocker (a later stage could be starved into a FALSE failure while the product worked — the
 exact flake class this change exists to remove).
 
-**What survives the correction, and why the budget is still bounded.** Because no harness timeout
-applies, the test's own total budget is now the ONLY thing that stops a genuinely wedged run from
-hanging a gate component indefinitely. So the test still owns a total budget and still emits its own
-attributed failure — but that budget is sized so that **every stage's promised allowance fits inside
-it**, rather than being compressed under a fictional ceiling. The self-imposed bound is load-bearing
-for a different reason than originally stated: not to beat a harness to the punch, but to be the only
-bound there is.
+**What survives the correction, and why the bound still exists.** Because no harness timeout applies,
+the test's own deadline is now the ONLY thing that stops a genuinely wedged run from hanging a gate
+component indefinitely. So the test still owns that bound and still emits its own attributed failure.
+The self-imposed bound is load-bearing for a different reason than originally stated: not to beat a
+harness to the punch, but to be the only bound there is — which is also why it is bounded above
+(`MAX_TEST_DEADLINE`, anchored on the full gate's own 15-20 minute wall clock).
+
+*(This paragraph originally continued "…sized so that every stage's promised allowance fits inside
+it". D6a withdrew that: there are no stage allowances to fit. The bound's SIZE is now argued directly
+against the aggregate of the bounds it replaced, and asserted by
+`the_deadline_is_never_tighter_than_the_bounds_it_replaced`.)*
 
 Raising nextest's slow-timeout was considered and rejected in the original draft as a way to buy
 headroom. That rejection is now moot rather than right: there was no ceiling to raise.
@@ -174,11 +203,13 @@ non-matching line, so a failure today can report nothing about what the child ac
 
 ## The residual, stated at the seam
 
-**One bound remains uncalibrated and cannot be otherwise: stage (a).** Calibrating it would need a
-measurement taken before it, whose own bound would need a measurement before *that* — the regress
-terminates only by accepting one bare wall-clock deadline. What the design buys is that this one bound
-covers the **cheapest** operation in the test (spawn + init, not a flush), and that its message says
-exactly what its expiry means and nothing more.
+**The deadline's `base` is uncalibrated, and cannot be otherwise.** Calibrating it would need a
+measurement taken before the test began, whose own bound would need a measurement before *that* — the
+regress terminates only by accepting one bare wall-clock value. After D6a this is one fact in one
+place rather than a per-stage exemption: stage (a) runs under the uncalibrated base (no measurement
+exists yet), and the deadline loosens as soon as `t_boot` lands. What the design buys is that the base
+is generous — above the whole nominal aggregate of the bounds it replaced — and that every failure
+message says whether the bound that ended it was still uncalibrated.
 
 Consequently the change is **not** a claim that #3515's class is eliminated for this file. It is a
 claim that (i) the stage that actually flaked is now calibrated and progress-checked, (ii) no failure
