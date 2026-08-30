@@ -371,24 +371,38 @@ the colliding UDT field did not survive into the fixture."
   log "=== $KEYSPACE generation COMPLETE ==="
   log "Fixture root (an sstables root): $OUT_DIR"
 
-  REL_OUT="${OUT_DIR#"$REPO_ROOT"/}"
   echo ""
   echo "=============================================================="
   echo "  NEXT: commit the generated fixture"
   echo "=============================================================="
   echo ""
+  # THE PRINTED PATHS ARE ABSOLUTE, AND BOTH HALVES OF THAT MATTER.
+  #
+  # (1) The GLOBS are expanded by the pasting user's SHELL, not by git, so a
+  #     `$REPO_ROOT`-relative glob silently matches nothing unless their cwd
+  #     happens to be the repo root — which `git -C` otherwise makes
+  #     unnecessary. Absolute globs work from any cwd.
+  # (2) The SIDECAR NAMES: Cassandra names these `<generation>-<format>-TOC.txt`
+  #     and `<...>-Digest.crc32` (e.g. `nb-1-big-TOC.txt`), so a bare `TOC.txt` /
+  #     `Digest.crc32` pathspec matches NOTHING — and `git add` aborts on an
+  #     unmatched pathspec, staging NONE of the other sidecars on the same
+  #     command line. The previous text printed exactly that: pasting the block
+  #     force-added the `.db` binaries (a separate, working command) and then
+  #     staged no JSONL golden, no `Statistics.db.txt`, no schema and no script.
+  #     Measured before the fix: 6 binaries staged, sidecar command exit 128, 0
+  #     sidecars. Leading-`*` globs, so an unprefixed name would still match.
   echo "  # Force-add the .db binaries (gitignored — MUST use -f):"
   echo "  git -C '$REPO_ROOT' add -f \\"
-  echo "    $REL_OUT/$KEYSPACE/*/*.db"
+  echo "    '$OUT_DIR'/$KEYSPACE/*/*.db"
   echo ""
   echo "  # Add the sidecars normally (not gitignored):"
   echo "  git -C '$REPO_ROOT' add \\"
-  echo "    $REL_OUT/$KEYSPACE/*/*.jsonl \\"
-  echo "    $REL_OUT/$KEYSPACE/*/TOC.txt \\"
-  echo "    $REL_OUT/$KEYSPACE/*/Digest.crc32 \\"
-  echo "    $REL_OUT/$KEYSPACE/*/*.db.txt \\"
-  echo "    test-data/schemas/issue-3504-udt-collision.cql \\"
-  echo "    test-data/scripts/generate-issue-3504-udt-collision.sh"
+  echo "    '$OUT_DIR'/$KEYSPACE/*/*.jsonl \\"
+  echo "    '$OUT_DIR'/$KEYSPACE/*/*TOC.txt \\"
+  echo "    '$OUT_DIR'/$KEYSPACE/*/*.crc32 \\"
+  echo "    '$OUT_DIR'/$KEYSPACE/*/*.db.txt \\"
+  echo "    '$REPO_ROOT'/test-data/schemas/issue-3504-udt-collision.cql \\"
+  echo "    '$REPO_ROOT'/test-data/scripts/generate-issue-3504-udt-collision.sh"
   echo ""
   echo "  # Commit:"
   echo "  git -C '$REPO_ROOT' commit -m 'fixtures(#3504): Cassandra-written colliding-UDT-field fixture'"
