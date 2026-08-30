@@ -396,15 +396,34 @@ unplant() {
 # harness either BLOCKS INDEFINITELY or -- at EOF -- silently reports FIRED-UNATTRIBUTED. A
 # failure that depends on an ambient shell option this harness never sets and cannot control
 # is the same class agent-gate.sh's own round-34 "`find`, not a glob" comment records.
-# `[ -f ]` per candidate means an unmatched pattern is skipped explicitly instead of being
-# handed to grep as a filename or as nothing at all.
+# THE FIRST FIX OF THIS WAS INCOMPLETE, AND THAT IS THE POINT (roborev round 4, E2). B6
+# replaced the INLINE unquoted glob at the call site with this function — and left the SAME
+# glob inside the function. `[ -f "$f" ]` per candidate handles `nullglob` (the pattern
+# expands to nothing, the body is skipped) but CANNOT handle `failglob`: with that option the
+# shell ABORTS AT THE `for` LINE, before any guard in the body can run, so an unattributed
+# Node failure would terminate the harness instead of producing its diagnostic summary.
+# "Fixed one site, missed its sibling" is the pattern agent-gate.sh's own round 35->38 comment
+# records as its fifth instance; this is ours.
+#
+# A bounded `find` instead, which is what the round-34 comment prescribes: its meaning does
+# not depend on ambient shell options this harness never sets and cannot control
+# (`nullglob`/`failglob`, both reachable through BASHOPTS). `-maxdepth 1` because the subject
+# is SIBLING files in one directory, not a tree. The find's status is deliberately not fatal:
+# no sibling logs is a legitimate state (node-bindings writes only one log), and the caller
+# already treats "marker not found" as UNATTRIBUTED, which is the fail-closed direction.
 _marker_in_sibling_logs() {
-  local marker="$1" complog="${2:-}" f
+  local marker="$1" complog="${2:-}" dir base f
   [ -n "$complog" ] || return 1
-  for f in "${complog%.log}".*.log; do
+  dir=$(dirname -- "$complog") || return 1
+  base=$(basename -- "${complog%.log}") || return 1
+  [ -d "$dir" ] || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
     [ -f "$f" ] || continue
-    grep -qF -- "$marker" "$f" && return 0
-  done
+    if grep -qF -- "$marker" "$f"; then return 0; fi
+  done <<EOF
+$(find -H "$dir" -maxdepth 1 -type f -name "$base.*.log" -print 2>/dev/null)
+EOF
   return 1
 }
 
