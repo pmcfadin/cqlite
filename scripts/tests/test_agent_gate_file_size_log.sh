@@ -15,20 +15,36 @@
 # case therefore asserts the REAL numbers (`900 -> 950 (limit 800)`), the REAL base sha,
 # the thresholds and the terminal verdict.
 #
-# Six paths through run_file_size, because the log must exist on ALL of them (AC3):
-#   1. grown + over threshold          -> FAIL
-#   2. over threshold but SHRUNK       -> PASS (advisory list, empty ratchet)
-#   3. no changed .rs files at all     -> PASS ("nothing over threshold" still logged)
+# Seven paths through run_file_size, because the log must exist on ALL of them (AC3):
+#   1. grown + over threshold             -> FAIL
+#   2. over threshold but SHRUNK          -> PASS (advisory list, empty ratchet)
+#   3. no changed .rs files at all        -> PASS ("nothing over threshold" still logged)
+#   3b. changed .rs files, none over the threshold -> PASS (same log line, DIFFERENT input:
+#       case 3's tree is clean, so on its own it never proves a CHANGED-but-small file is
+#       handled — only that the component ran with an empty file list)
 #   4. grown + CQLITE_ALLOW_FILE_GROWTH=1 -> PASS (the opt-out is RECORDED)
-#   5. base ref unresolvable           -> PASS (advisory only, ratchet skipped)
+#   5. base ref unresolvable              -> PASS (advisory only, ratchet skipped)
 #   6. AC2: the FAIL stdout NAMES $LOG_DIR/file-size.log, so it is reachable from the
 #      SUMMARY's existing `logs:` line without the reader guessing a filename.
+#
+# EVERY HELPER HERE FAILS CLOSED (repo doctrine: a positive verdict requires an affirmative
+# measurement). A helper whose measurement did not happen must never let an assertion print
+# `ok` — so `verdict_of` returns a sentinel no assert accepts rather than leaking the
+# PREVIOUS case's verdict through non-`local` state, `has` refuses an EMPTY needle (an empty
+# `grep -F` pattern matches every line), `logdir_of` refuses a missing/relative/nonexistent
+# `logs:` dir (an empty one would make the AC2 needle the SUFFIX `/file-size.log`, which is
+# a substring of the real path and would MATCH having measured nothing), and `mkrepo`
+# CHECKS its git setup and re-measures the line counts it just wrote instead of discarding
+# stderr.
 #
 # Hermetic and fast: throwaway git repos under one mktemp, each holding ONLY a copy of the
 # gate script (so the gate's `cd "$(dirname "$0")/.."` resolves REPO_ROOT into the temp
 # tree) plus a synthetic .rs file. Driven through the REAL `--only file-size` path, which
 # skips the dataset preflight and compiles nothing. No cargo, no network, no datasets, no
-# Docker. TMPDIR is redirected so every gate LOG_DIR also lands inside this run's namespace.
+# Docker. TMPDIR is redirected so every gate LOG_DIR also lands inside this run's namespace,
+# and the fixture repos are cut off from the invoker's git config (a global
+# `commit.gpgsign=true` / `core.hooksPath` would otherwise break every fixture commit and
+# red the gate of record for a reason unrelated to the property under test).
 #
 # Run standalone:   bash scripts/tests/test_agent_gate_file_size_log.sh
 # Or via the gate:  scripts/agent-gate.sh runs it inside the `tooling-tests` component.
@@ -50,13 +66,27 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
+if [ ! -r "$GATE" ]; then
+  printf 'FAIL - agent-gate.sh not readable at %s — nothing to test\n' "$GATE"
+  exit 1
+fi
+
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-file-size.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 # Contain each gate run's LOG_DIR (mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX") inside
 # this run's namespace so the trap above reclaims them too.
 export TMPDIR="$tmp"
 
-GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
+# Fixture git must be isolated from the INVOKER's environment, not merely given an
+# identity: `git init`/`git commit` also read global `commit.gpgsign`, `core.hooksPath`
+# and `init.templateDir`, any one of which turns a fixture commit into a hard failure on
+# someone's box. GIT_CONFIG_GLOBAL/SYSTEM=/dev/null kills all three vectors at once (the
+# convention scripts/tests/lib/perf-capability-test-lib.sh already uses); the explicit
+# `-c` flags below are the belt-and-braces half, and also pin the branch name.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+GIT_CFG=(-c user.email=gate@example.invalid -c user.name=gate-selftest
+         -c init.defaultBranch=main -c commit.gpgsign=false)
 
 # lines <n> <path> — write exactly <n> newline-terminated lines (so `wc -l` == n).
 lines() { awk -v n="$1" 'BEGIN { for (i = 1; i <= n; i++) print "// filler line " i }' >"$2"; }
@@ -64,41 +94,95 @@ lines() { awk -v n="$1" 'BEGIN { for (i = 1; i <= n; i++) print "// filler line 
 # mkrepo <name> <rs-relpath> <committed-lines> <worktree-lines> <branch>
 #   Commits a .rs file of <committed-lines>, then rewrites the WORKTREE copy to
 #   <worktree-lines>. A <worktree-lines> of 0 means "leave the commit untouched".
+#   Publishes the repo path in the GLOBAL `REPO` (never via command substitution: a
+#   `$(mkrepo …)` would run every `bad` inside a subshell and silently DISCARD the
+#   failure count). Returns non-zero — loudly, with git's stderr — if setup failed, and
+#   RE-MEASURES the line counts it just wrote, because a fixture that is not what the
+#   case claims makes the case's verdict meaningless.
+REPO=""
 mkrepo() {
   local name="$1" rel="$2" nbase="$3" nhead="$4" branch="$5"
-  local root="$tmp/$name"
-  mkdir -p "$root/scripts" "$root/$(dirname "$rel")"
-  cp "$GATE" "$root/scripts/agent-gate.sh"
+  local root="$tmp/$name" err="$tmp/$name.setup.err" n
+  REPO=""
+  if ! mkdir -p "$root/scripts" "$root/$(dirname "$rel")" 2>"$err"; then
+    bad "fixture $name: mkdir failed — $(tr '\n' ' ' <"$err")"; return 1
+  fi
+  if ! cp "$GATE" "$root/scripts/agent-gate.sh" 2>"$err"; then
+    bad "fixture $name: could not stage the gate script — $(tr '\n' ' ' <"$err")"; return 1
+  fi
   printf 'target/\n*.log\n.agent-gate-summary.txt\n' >"$root/.gitignore"
   lines "$nbase" "$root/$rel"
-  ( cd "$root" && git init -q -b "$branch" . && git add -A &&
-      git "${GIT_ID[@]}" commit -qm init ) >/dev/null 2>&1
-  [ "$nhead" -gt 0 ] && lines "$nhead" "$root/$rel"
-  printf '%s\n' "$root"
+  if ! ( cd "$root" && git "${GIT_CFG[@]}" init -q -b "$branch" . &&
+         git "${GIT_CFG[@]}" add -A &&
+         git "${GIT_CFG[@]}" commit -qm init ) >"$err" 2>&1; then
+    bad "fixture $name: git setup FAILED — $(tr '\n' ' ' <"$err")"; return 1
+  fi
+  n=$( cd "$root" && git show "HEAD:$rel" 2>/dev/null | wc -l | tr -d ' ' )
+  if [ "${n:-x}" != "$nbase" ]; then
+    bad "fixture $name: committed $rel has ${n:-<unreadable>} lines, expected $nbase"; return 1
+  fi
+  if [ "$nhead" -gt 0 ]; then
+    lines "$nhead" "$root/$rel"
+    n=$(wc -l <"$root/$rel" 2>/dev/null | tr -d ' ')
+    if [ "${n:-x}" != "$nhead" ]; then
+      bad "fixture $name: worktree $rel has ${n:-<unreadable>} lines, expected $nhead"; return 1
+    fi
+  fi
+  REPO="$root"
 }
 
 # run_only_file_size <repo> <outfile> [KEY=VAL …] -> exit status of the gate run
 run_only_file_size() {
   local repo="$1" out="$2"; shift 2
+  : >"$out"
+  [ -n "$repo" ] || return 127
   ( cd "$repo" && env ${1+"$@"} AGENT_GATE_SUMMARY_FILE="$repo/.sum" \
       bash "$repo/scripts/agent-gate.sh" --only file-size >"$out" 2>&1 )
 }
 
-# The component log is reachable ONLY via the SUMMARY's `logs:` line — read it from there
-# rather than from an env var, so the test proves that route works (AC2's premise).
-logdir_of() { sed -n 's/^logs:[[:space:]]*//p' "$1" | head -1; }
+# logdir_of <gate-stdout-file> — the LOG_DIR the run published on its SUMMARY `logs:` line.
+# Read from THERE rather than from an env var, so the test proves the route an agent
+# actually has (AC2's premise). Anything other than an existing ABSOLUTE directory is a
+# MEASUREMENT FAILURE, not a path: an empty value would leave the AC2 needle as the bare
+# suffix `/file-size.log`, a substring of the real path, so the assert would MATCH having
+# measured nothing. Emits an obviously-bogus absolute sentinel so every downstream assert
+# fails closed with a readable diagnostic.
+logdir_of() {
+  local d
+  d=$(sed -n 's/^logs:[[:space:]]*//p' "$1" 2>/dev/null | head -1)
+  case "$d" in
+    /*) if [ -d "$d" ]; then printf '%s\n' "$d"; return 0; fi ;;
+  esac
+  printf '%s\n' "$tmp/NO-LOGDIR-PUBLISHED"
+  return 1
+}
 
 # verdict_of <logdir> — the component's own verdict, read from the UNCHANGED
 # `file-size.result` (`STATUS SECONDS`). Deliberately NOT the gate's exit status: a
 # passing `--only` run exits 3 (RESULT: PARTIAL) and a failing one exits 1, so an
 # exit-code assert would conflate "the component failed" with "this was a partial run".
-verdict_of() { read -r _st _secs <"$1/file-size.result" 2>/dev/null; printf '%s\n' "${_st:-<no-result-file>}"; }
+# Every variable is `local` and every non-measurement returns a SENTINEL: as globals,
+# a failed `read` (missing dir/file — the redirect fails and `2>/dev/null` hides it, so
+# `read` never runs) left the PREVIOUS case's verdict in place, and this is the sole
+# per-case oracle, so a run that produced no result at all would have read as that
+# earlier case's PASS.
+verdict_of() {
+  local st="" secs="" f="$1/file-size.result"
+  [ -s "$f" ] || { printf '%s\n' '<no-result-file>'; return 1; }
+  read -r st secs <"$f" || { printf '%s\n' '<unreadable-result-file>'; return 1; }
+  printf '%s\n' "${st:-<empty-result-file>}"
+}
 
-# has <label> <file> <literal> — the workhorse content assert.
+# has <label> <file> <literal> — the workhorse content assert. An EMPTY needle is a
+# refusal, never a match: `grep -Fq -- ""` matches every line, so an expected value that
+# was never captured (an unchecked `$(git rev-parse …)`) would otherwise "pass".
 has() {
-  if [ -f "$2" ] && grep -Fq -- "$3" "$2"; then ok "$1"; else
-    bad "$1 (missing: '$3')"
+  if [ -z "${3:-}" ]; then
+    bad "$1 (EMPTY needle — the expected value was never captured)"; return
   fi
+  if [ ! -f "$2" ]; then bad "$1 (no such file: $2)"; return; fi
+  if [ ! -s "$2" ]; then bad "$1 (file is ZERO BYTES: $2)"; return; fi
+  if grep -Fq -- "$3" "$2"; then ok "$1"; else bad "$1 (missing: '$3')"; fi
 }
 
 # assert_log_present <label> <logfile> — existence AND non-emptiness, per AC3.
@@ -112,21 +196,28 @@ assert_log_present() {
   fi
 }
 
+# assert_verdict <label> <logdir> <expected> — the per-case oracle, with the sentinel
+# printed verbatim on failure so "no result file" never reads as a wrong verdict.
+assert_verdict() {
+  local got; got=$(verdict_of "$2")
+  if [ "$got" = "$3" ]; then ok "$1"; else bad "$1 (component verdict was '$got', expected '$3')"; fi
+}
+
 # ---------------------------------------------------------------------------
 # Case 1 — FAIL: an over-threshold source file GROWN by the diff (800-line src limit).
 # ---------------------------------------------------------------------------
-r1=$(mkrepo grew cqlite-core/src/big.rs 900 950 main)
+mkrepo grew cqlite-core/src/big.rs 900 950 main; r1="$REPO"
 out1="$tmp/grew.out"
 run_only_file_size "$r1" "$out1"
-d1=$(logdir_of "$out1")
+d1=$(logdir_of "$out1") ||
+  bad "case1: the run published no usable 'logs:' dir — the component log cannot be located"
 log1="$d1/file-size.log"
-base1=$( cd "$r1" && git rev-parse HEAD )
+base1=$( cd "$r1" 2>/dev/null && git rev-parse HEAD 2>/dev/null )
+[ -n "$base1" ] ||
+  bad "case1: could not capture the fixture's base sha — the base-ref assert cannot measure anything"
 
-if [ "$(verdict_of "$d1")" = FAIL ]; then
-  ok "case1: --only file-size FAILs on a grown over-threshold file (the case being diagnosed)"
-else
-  bad "case1: --only file-size did NOT fail on a grown over-threshold file — fixture is wrong"
-fi
+assert_verdict "case1: --only file-size FAILs on a grown over-threshold file (the case being diagnosed)" \
+    "$d1" FAIL
 assert_log_present "case1: file-size.log written on the FAIL path" "$log1"
 # The REAL numbers, not merely digits: 900 committed -> 950 in the worktree, src limit 800.
 has "case1: log carries the exact growth entry (path + before -> after + limit)" \
@@ -154,24 +245,21 @@ has "case6/AC2: FAIL stdout names the component log path explicitly" "$out1" "$l
 # Case 2 — PASS: over threshold but SHRUNK by the diff. The advisory list must still be
 # logged, the ratchet must be empty, and the log must SAY it passed.
 # ---------------------------------------------------------------------------
-r2=$(mkrepo shrank cqlite-core/src/big.rs 950 900 main)
+mkrepo shrank cqlite-core/src/big.rs 950 900 main; r2="$REPO"
 out2="$tmp/shrank.out"
 run_only_file_size "$r2" "$out2"
-d2=$(logdir_of "$out2")
+d2=$(logdir_of "$out2") || bad "case2: the run published no usable 'logs:' dir"
 log2="$d2/file-size.log"
 
-if [ "$(verdict_of "$d2")" = PASS ]; then
-  ok "case2: a shrunk over-threshold file PASSes the ratchet (fixture is a real PASS run)"
-else
-  bad "case2: a shrunk over-threshold file did NOT pass — fixture is wrong"
-fi
+assert_verdict "case2: a shrunk over-threshold file PASSes the ratchet (fixture is a real PASS run)" \
+    "$d2" PASS
 assert_log_present "case2: file-size.log written on a PASS run too (AC3)" "$log2"
 has "case2: PASS log still carries the over-threshold advisory entry" \
     "$log2" "900/800"
 has "case2: PASS log carries the terminal PASS verdict" \
     "$log2" ">>> [file-size] PASS"
-if [ ! -f "$log2" ]; then
-  bad "case2: cannot check the ratchet emptiness — no log to read"
+if [ ! -s "$log2" ]; then
+  bad "case2: cannot check the ratchet emptiness — no readable log (absent or zero bytes)"
 elif grep -Fq -- '-> ' "$log2"; then
   bad "case2: PASS log lists a growth entry for a file that SHRANK"
 else
@@ -182,17 +270,13 @@ fi
 # Case 3 — PASS with NO changed .rs files at all: an empty-ish run still gets a log that
 # SAYS SO (never an absent file, never a zero-byte one).
 # ---------------------------------------------------------------------------
-r3=$(mkrepo clean cqlite-core/src/small.rs 20 0 main)
+mkrepo clean cqlite-core/src/small.rs 20 0 main; r3="$REPO"
 out3="$tmp/clean.out"
 run_only_file_size "$r3" "$out3"
-d3=$(logdir_of "$out3")
+d3=$(logdir_of "$out3") || bad "case3: the run published no usable 'logs:' dir"
 log3="$d3/file-size.log"
 
-if [ "$(verdict_of "$d3")" = PASS ]; then
-  ok "case3: a clean tree PASSes file-size"
-else
-  bad "case3: a clean tree did NOT pass file-size — fixture is wrong"
-fi
+assert_verdict "case3: a clean tree PASSes file-size" "$d3" PASS
 assert_log_present "case3: file-size.log written even with nothing to report (AC3)" "$log3"
 has "case3: empty-ish log states that nothing is over threshold" \
     "$log3" "no changed .rs files over threshold"
@@ -202,20 +286,35 @@ has "case3: empty-ish log still carries the terminal verdict" \
     "$log3" ">>> [file-size] PASS"
 
 # ---------------------------------------------------------------------------
+# Case 3b — the OTHER half of AC3's empty-ish path: .rs files ARE changed, none is over
+# threshold. Same log line as case 3, materially different input (case 3's file list is
+# empty; here it is non-empty and every entry is filtered by the limit).
+# ---------------------------------------------------------------------------
+mkrepo smallchange cqlite-core/src/small.rs 20 40 main; r3b="$REPO"
+out3b="$tmp/smallchange.out"
+run_only_file_size "$r3b" "$out3b"
+d3b=$(logdir_of "$out3b") || bad "case3b: the run published no usable 'logs:' dir"
+log3b="$d3b/file-size.log"
+
+assert_verdict "case3b: a changed-but-small .rs file PASSes file-size" "$d3b" PASS
+assert_log_present "case3b: file-size.log written when the diff has only sub-threshold .rs files (AC3)" \
+    "$log3b"
+has "case3b: log states that nothing is over threshold (non-empty file list, all filtered)" \
+    "$log3b" "no changed .rs files over threshold"
+has "case3b: log names the base ref it compared against" "$log3b" "base ref:"
+has "case3b: log carries the terminal verdict" "$log3b" ">>> [file-size] PASS"
+
+# ---------------------------------------------------------------------------
 # Case 4 — the CQLITE_ALLOW_FILE_GROWTH=1 opt-out. The growth is ALLOWED, and the log must
 # RECORD what was allowed (the numbers are the whole point of the acknowledgement).
 # ---------------------------------------------------------------------------
-r4=$(mkrepo optout cqlite-core/src/big.rs 900 950 main)
+mkrepo optout cqlite-core/src/big.rs 900 950 main; r4="$REPO"
 out4="$tmp/optout.out"
 run_only_file_size "$r4" "$out4" CQLITE_ALLOW_FILE_GROWTH=1
-d4=$(logdir_of "$out4")
+d4=$(logdir_of "$out4") || bad "case4: the run published no usable 'logs:' dir"
 log4="$d4/file-size.log"
 
-if [ "$(verdict_of "$d4")" = PASS ]; then
-  ok "case4: CQLITE_ALLOW_FILE_GROWTH=1 turns the same growth into a PASS"
-else
-  bad "case4: CQLITE_ALLOW_FILE_GROWTH=1 did not allow the growth — fixture is wrong"
-fi
+assert_verdict "case4: CQLITE_ALLOW_FILE_GROWTH=1 turns the same growth into a PASS" "$d4" PASS
 assert_log_present "case4: file-size.log written on the opt-out path (AC3)" "$log4"
 has "case4: opt-out log records the acknowledgement" \
     "$log4" "ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1"
@@ -228,17 +327,21 @@ has "case4: opt-out log carries the terminal PASS verdict" \
 # Case 5 — base ref UNRESOLVABLE (no main/master, no origin/*): the ratchet is skipped and
 # the log must say so EXPLICITLY, while the advisory list still works off `git diff HEAD`.
 # ---------------------------------------------------------------------------
-r5=$(mkrepo nobase cqlite-core/src/big.rs 900 950 work)
+mkrepo nobase cqlite-core/src/big.rs 900 950 work; r5="$REPO"
+# Affirmative precondition: the fixture must really have no ref the gate can resolve.
+# Without this the case could pass on a repo that DOES have a base, having proved nothing.
+if [ -n "$r5" ] && ! ( cd "$r5" && for ref in origin/main main origin/master master; do
+       git rev-parse --verify -q "$ref" >/dev/null 2>&1 && exit 0; done; exit 1 ); then
+  ok "case5: fixture genuinely resolves none of origin/main|main|origin/master|master"
+else
+  bad "case5: fixture DOES resolve a base ref (or is missing) — the no-base path is not being exercised"
+fi
 out5="$tmp/nobase.out"
 run_only_file_size "$r5" "$out5"
-d5=$(logdir_of "$out5")
+d5=$(logdir_of "$out5") || bad "case5: the run published no usable 'logs:' dir"
 log5="$d5/file-size.log"
 
-if [ "$(verdict_of "$d5")" = PASS ]; then
-  ok "case5: with no resolvable base ref the component is advisory-only and PASSes"
-else
-  bad "case5: no-base run did not PASS — the ratchet ran without a base ref"
-fi
+assert_verdict "case5: with no resolvable base ref the component is advisory-only and PASSes" "$d5" PASS
 assert_log_present "case5: file-size.log written on the no-base path (AC3)" "$log5"
 has "case5: no-base log states the ratchet was skipped, in those words" \
     "$log5" "base ref unavailable — growth ratchet skipped (advisory only)"
@@ -251,5 +354,7 @@ has "case5: no-base log carries the terminal verdict" \
 printf '\n%s\n' "----------------------------------------"
 printf 'file-size component log guard (#3401): %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
-[ "$PASS" -ge 25 ] || { printf 'FAIL - vacuous run: only %d checks executed\n' "$PASS"; exit 1; }
+# Floor against a vacuous green: a harness that silently skipped its cases would otherwise
+# report `0 passed, 0 failed` and exit 0.
+[ "$PASS" -ge 34 ] || { printf 'FAIL - vacuous run: only %d checks executed\n' "$PASS"; exit 1; }
 exit 0
