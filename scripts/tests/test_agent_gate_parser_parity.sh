@@ -102,11 +102,99 @@ echo
 # very thing differential testing exists to avoid. These are the checks that give a SINGLE-TOOL
 # host real coverage.
 # ---------------------------------------------------------------------------
-# prop_jest <impl-fn> <label> <json>
+# FIXTURE VALIDITY — the fix for I1, and the reason it was needed.
+#
+# The first cut of these property checks ACCEPTED FAILURE AS SUCCESS. prop_ids and prop_feats
+# called ok() on ANY nonzero exit ("implementation refused, as expected for this input") for
+# EVERY fixture, valid ones included; and prop_jest's per-line loop simply does not execute on
+# empty output, so an implementation emitting NOTHING satisfied every property. Two consequences,
+# the second worse than the first:
+#
+#   1. On a SINGLE-TOOL host — where H1 established the property half as the SOLE carrier of the
+#      divergence class — a parser that rejected valid metadata, or returned nothing at all,
+#      PASSED. The half carrying the weight failed open.
+#   2. TWO EQUALLY BROKEN IMPLEMENTATIONS PASSED THE DIFFERENTIAL COMPARISON. This is not a new
+#      idea; it is documented doctrine: "two defects that cancel are undetectable by a symmetric
+#      test by construction" (CLAUDE.md, on round-trip oracles). A differential test compares A
+#      against B and reports agreement when both fail identically. The property checks exist
+#      precisely to break that symmetry, and they could not, because they accepted empty output
+#      and nonzero exits.
+#
+# So this was the vacuous-pass family at its deepest point in the diff: the guard built to verify
+# the guards had the shape it was built to detect.
+#
+# Every fixture now DECLARES what a correct implementation does with it, and each category
+# ASSERTS rather than tolerates:
+#   nonempty   exit 0 AND non-empty output, then the invariants are judged.
+#   empty      exit 0 AND EMPTY output — asserted, not merely permitted, because "zero targets"
+#              and "zero suites" are real answers whose absence would also be a defect.
+#   reject     NONZERO exit REQUIRED. An implementation that ACCEPTS garbage now reds; the old
+#              code could not distinguish accepting it from refusing it.
+#   accept-any exit 0 required, emptiness not asserted — used ONLY for the real-`cargo metadata`
+#              control, where emptiness is data-dependent and a per-package golden would go
+#              stale and false-red the day a package gains a target. Non-vacuity for that set is
+#              enforced in AGGREGATE instead (see AGG_* below): at least one package must yield
+#              non-empty output per kind, so an implementation returning empty for everything
+#              still fails. That is an affirmative measurement without a curated expectation.
+VALID_N=0; INVALID_N=0; ANY_N=0
+AGG_jest=0; AGG_ids=0; AGG_feats=0
+
+# _prop_gate <label> <validity> <exit-status> <output> — the shared validity assertion. Returns
+# 0 when the caller should go on to judge invariants, 1 when the verdict is already decided.
+_prop_gate() {
+  local lbl="$1" validity="$2" rc="$3" out="$4"
+  case "$validity" in
+    reject)
+      INVALID_N=$((INVALID_N + 1))
+      if [ "$rc" -eq 0 ]; then
+        bad "$lbl — this fixture is INVALID and the implementation ACCEPTED it (exit 0, output [$out]). Accepting garbage is a defect, and the old harness could not tell it from a refusal."
+      else
+        ok "$lbl (correctly REFUSED an invalid fixture, exit=$rc)"
+      fi
+      return 1 ;;
+    empty)
+      VALID_N=$((VALID_N + 1))
+      if [ "$rc" -ne 0 ]; then
+        bad "$lbl — VALID fixture but the implementation exited $rc. A valid input must be accepted."
+        return 1
+      fi
+      if [ -n "$out" ]; then
+        bad "$lbl — this fixture must yield EMPTY output, got [$out]. Emptiness is the correct answer here and is ASSERTED, not merely permitted."
+        return 1
+      fi
+      ok "$lbl (correctly empty for a valid fixture whose answer is 'none')"
+      return 1 ;;
+    nonempty)
+      VALID_N=$((VALID_N + 1))
+      if [ "$rc" -ne 0 ]; then
+        bad "$lbl — VALID fixture but the implementation exited $rc. A valid input must be accepted, and on a single-tool host this check is the only thing that would notice."
+        return 1
+      fi
+      if [ -z "$out" ]; then
+        bad "$lbl — VALID fixture produced NO OUTPUT. An empty result satisfies every per-line invariant vacuously, which is exactly how two equally broken implementations used to agree."
+        return 1
+      fi
+      return 0 ;;
+    accept-any)
+      ANY_N=$((ANY_N + 1))
+      if [ "$rc" -ne 0 ]; then
+        bad "$lbl — real metadata is VALID input but the implementation exited $rc."
+        return 1
+      fi
+      return 0 ;;
+    *)
+      bad "$lbl — HARNESS ERROR: unknown fixture validity '$validity' (want nonempty|empty|reject|accept-any). An unrecognised value is a FAIL, never a pass."
+      return 1 ;;
+  esac
+}
+
+# prop_jest <impl-fn> <label> <validity> <json>
 prop_jest() {
-  local fn="$1" lbl="$2" j="$3" out line nf errs=""
-  out=$("$fn" "$j" 2>/dev/null) || { bad "$lbl — implementation exited non-zero"; return; }
+  local fn="$1" lbl="$2" validity="$3" j="$4" out line nf errs="" rc
+  out=$("$fn" "$j" 2>/dev/null); rc=$?
   PROP_N=$((PROP_N + 1))
+  _prop_gate "$lbl" "$validity" "$rc" "$out" || return
+  [ -n "$out" ] && AGG_jest=1
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
@@ -121,8 +209,7 @@ prop_jest() {
     # (the `NO anchor in the path` fixture below pins that identical fallback), so the check
     # red on correct output the first time it ran. Removed rather than special-cased: an
     # invariant that needs an exception per fixture is not an invariant, and the anchor-free
-    # check above is the one that actually catches G1 — the divergent python3 output was
-    # `proj/bindings/node/__test__/value.test.js`, which CONTAINS the anchor.
+    # check above is the one that actually catches G1.
     case "${line##*	}" in
       ''|*[!0-9]*) errs="$errs [$line] passed-count is not a number;" ;;
     esac
@@ -131,11 +218,13 @@ $out
 EOF
   if [ -z "$errs" ]; then ok "$lbl"; else bad "$lbl —$errs"; fi
 }
-# prop_ids <impl-fn> <label> <meta> <pkg>
+# prop_ids <impl-fn> <label> <validity> <meta> <pkg>
 prop_ids() {
-  local fn="$1" lbl="$2" meta="$3" pkg="$4" out line nf errs=""
-  out=$("$fn" "$meta" "$pkg" 2>/dev/null) || { ok "$lbl (implementation refused, as expected for this input)"; PROP_N=$((PROP_N + 1)); return; }
+  local fn="$1" lbl="$2" validity="$3" meta="$4" pkg="$5" out line nf errs="" rc
+  out=$("$fn" "$meta" "$pkg" 2>/dev/null); rc=$?
   PROP_N=$((PROP_N + 1))
+  _prop_gate "$lbl" "$validity" "$rc" "$out" || return
+  [ -n "$out" ] && AGG_ids=1
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
@@ -148,20 +237,24 @@ $out
 EOF
   if [ -z "$errs" ]; then ok "$lbl"; else bad "$lbl —$errs"; fi
 }
-# prop_feats <impl-fn> <label> <meta> <pkg> — output must be SORTED and UNIQUE, since the
-# consumer subtracts it from a resolved set and relies on a stable order.
+# prop_feats <impl-fn> <label> <validity> <meta> <pkg> — output must be SORTED and UNIQUE, since
+# the consumer subtracts it from a resolved set and relies on a stable order.
 prop_feats() {
-  local fn="$1" lbl="$2" meta="$3" pkg="$4" out
-  out=$("$fn" "$meta" "$pkg" 2>/dev/null) || { ok "$lbl (implementation refused, as expected for this input)"; PROP_N=$((PROP_N + 1)); return; }
+  local fn="$1" lbl="$2" validity="$3" meta="$4" pkg="$5" out rc
+  out=$("$fn" "$meta" "$pkg" 2>/dev/null); rc=$?
   PROP_N=$((PROP_N + 1))
+  _prop_gate "$lbl" "$validity" "$rc" "$out" || return
+  [ -n "$out" ] && AGG_feats=1
   if [ "$out" = "$(printf '%s' "$out" | sort -u)" ]; then ok "$lbl"; else bad "$lbl — output is not sorted/unique: [$out]"; fi
 }
 
-# cmp_pair <name> <jq-fn> <py-fn> <args...> — run both, require byte-identical stdout AND the
-# same exit status. Status matters as much as output: one branch failing while the other
-# succeeds is a divergence even when the successful one's output looks right.
+# cmp_pair <name> <validity> <jq-fn> <py-fn> <args...> — validity-aware property checks on every
+# available implementation, then (with both tools) a byte-identical comparison.
+#
+# Status matters as much as output: one branch failing while the other succeeds is a divergence
+# even when the successful one's output looks right.
 cmp_pair() {
-  local nm="$1" fjq="$2" fpy="$3"; shift 3
+  local nm="$1" validity="$2" fjq="$3" fpy="$4"; shift 4
   local o1 o2 r1 r2 kind
 
   # The property KIND is inferred from the implementation's own name, so adding a fixture needs
@@ -175,8 +268,8 @@ cmp_pair() {
 
   # PROPERTIES FIRST, on every AVAILABLE implementation. These run on a single-tool host, and
   # they are what makes such a host covered rather than skipped.
-  [ "$have_jq" -eq 1 ] && "prop_$kind" "$fjq" "$nm [prop: jq]" "$@"
-  [ "$have_py" -eq 1 ] && "prop_$kind" "$fpy" "$nm [prop: python3]" "$@"
+  [ "$have_jq" -eq 1 ] && "prop_$kind" "$fjq" "$nm [prop: jq]" "$validity" "$@"
+  [ "$have_py" -eq 1 ] && "prop_$kind" "$fpy" "$nm [prop: python3]" "$validity" "$@"
 
   if [ "$DIFFERENTIAL" -ne 1 ]; then
     # DECLARED, never silent, and counted separately from the comparisons that RAN — see the
@@ -200,6 +293,28 @@ $o1
 $o2"
     return
   fi
+  # AGREEMENT IS NOT ENOUGH FOR A VALID FIXTURE (I1's second clause, stated where the comparison
+  # happens rather than left to the property checks alone). Two implementations that both return
+  # NOTHING, or both refuse, agree perfectly — the symmetric-oracle blindness this file exists to
+  # break. So a `nonempty` fixture must have produced output, and no valid fixture may have been
+  # refused, before agreement counts as evidence.
+  case "$validity" in
+    nonempty)
+      if [ "$r1" -ne 0 ] || [ -z "$o1" ]; then
+        bad "$nm — both implementations AGREE but the fixture is VALID and the shared result is $([ "$r1" -ne 0 ] && echo "a REFUSAL (exit $r1)" || echo "EMPTY"). Two equally broken implementations agree by construction; agreement over a wrong shared answer is not evidence."
+        return
+      fi ;;
+    empty|accept-any)
+      if [ "$r1" -ne 0 ]; then
+        bad "$nm — both implementations AGREE but they both REFUSED a VALID fixture (exit $r1). Agreement over a shared failure is not evidence."
+        return
+      fi ;;
+    reject)
+      if [ "$r1" -eq 0 ]; then
+        bad "$nm — both implementations AGREE but they both ACCEPTED an INVALID fixture (exit 0). Agreement over a shared defect is not evidence."
+        return
+      fi ;;
+  esac
   ok "$nm (both branches identical; exit=$r1)"
 }
 
@@ -216,7 +331,7 @@ cat > "$WORK/prefix.json" <<'JSON'
  {"name":"/repo/bindings/node/__test__/a.test.js","assertionResults":[]}
 ]}
 JSON
-cmp_pair "jest counts: __test__ INSIDE the checkout prefix (the G1 case)" \
+cmp_pair "jest counts: __test__ INSIDE the checkout prefix (the G1 case)" nonempty \
   _jest_json_suite_counts_jq _jest_json_suite_counts_py "$WORK/prefix.json"
 
 # The anchor appearing TWICE in its full three-component form — the residual ambiguity the
@@ -227,14 +342,14 @@ cat > "$WORK/twice.json" <<'JSON'
  {"name":"/x/bindings/node/__test__/y/bindings/node/__test__/z.test.js","assertionResults":[{"status":"passed"}]}
 ]}
 JSON
-cmp_pair "jest counts: the full anchor occurring TWICE" \
+cmp_pair "jest counts: the full anchor occurring TWICE" nonempty \
   _jest_json_suite_counts_jq _jest_json_suite_counts_py "$WORK/twice.json"
 
 # No anchor at all — both must fall back identically rather than one emitting a bare basename.
 cat > "$WORK/noanchor.json" <<'JSON'
 {"testResults":[{"name":"/somewhere/else/odd.test.js","assertionResults":[{"status":"passed"}]}]}
 JSON
-cmp_pair "jest counts: NO anchor in the path (identical fallback)" \
+cmp_pair "jest counts: NO anchor in the path (identical fallback)" nonempty \
   _jest_json_suite_counts_jq _jest_json_suite_counts_py "$WORK/noanchor.json"
 
 # Every assertion status jest emits, so the passed-count filter is compared over the whole
@@ -244,18 +359,18 @@ cat > "$WORK/statuses.json" <<'JSON'
  {"status":"passed"},{"status":"failed"},{"status":"pending"},{"status":"skipped"},
  {"status":"todo"},{"status":"disabled"},{"status":"focused"}]}]}
 JSON
-cmp_pair "jest counts: all assertion statuses" \
+cmp_pair "jest counts: all assertion statuses" nonempty \
   _jest_json_suite_counts_jq _jest_json_suite_counts_py "$WORK/statuses.json"
 
 # Structural edge cases: absent assertionResults, absent testResults, empty testResults.
 printf '{"testResults":[{"name":"/r/bindings/node/__test__/n.test.js"}]}' > "$WORK/noassert.json"
-cmp_pair "jest counts: assertionResults ABSENT" \
+cmp_pair "jest counts: assertionResults ABSENT" nonempty \
   _jest_json_suite_counts_jq _jest_json_suite_counts_py "$WORK/noassert.json"
 printf '{"testResults":[]}' > "$WORK/empty.json"
-cmp_pair "jest counts: testResults EMPTY" \
+cmp_pair "jest counts: testResults EMPTY" empty \
   _jest_json_suite_counts_jq _jest_json_suite_counts_py "$WORK/empty.json"
 printf '{}' > "$WORK/bare.json"
-cmp_pair "jest counts: testResults ABSENT" \
+cmp_pair "jest counts: testResults ABSENT" empty \
   _jest_json_suite_counts_jq _jest_json_suite_counts_py "$WORK/bare.json"
 
 # A path with a SPACE, which this repo tracks under docs/ and which a tab-delimited format
@@ -263,7 +378,7 @@ cmp_pair "jest counts: testResults ABSENT" \
 cat > "$WORK/space.json" <<'JSON'
 {"testResults":[{"name":"/r/bindings/node/__test__/has space.test.js","assertionResults":[{"status":"passed"}]}]}
 JSON
-cmp_pair "jest counts: a suite path containing a SPACE" \
+cmp_pair "jest counts: a suite path containing a SPACE" nonempty \
   _jest_json_suite_counts_jq _jest_json_suite_counts_py "$WORK/space.json"
 
 # ---------------------------------------------------------------------------
@@ -276,30 +391,30 @@ META_BASIC='{"packages":[{"name":"p","manifest_path":"/w/p/Cargo.toml","features
  {"name":"outside_t","kind":["test"],"src_path":"/w/p/other/outside_t.rs"},
  {"name":"abs_t","kind":["test"],"src_path":"/elsewhere/abs_t.rs"}
 ]}]}'
-cmp_pair "target ids: file/dir/outside/absolute src_path shapes" \
+cmp_pair "target ids: file/dir/outside/absolute src_path shapes" nonempty \
   _package_integration_target_ids_jq _package_integration_target_ids_py "$META_BASIC" p
 
-cmp_pair "target ids: package NOT PRESENT (both must fail identically)" \
+cmp_pair "target ids: package NOT PRESENT (both must fail identically)" reject \
   _package_integration_target_ids_jq _package_integration_target_ids_py "$META_BASIC" nosuch
 
 META_DUP='{"packages":[{"name":"p","manifest_path":"/w/p/Cargo.toml","targets":[]},{"name":"p","manifest_path":"/w/q/Cargo.toml","targets":[]}]}'
-cmp_pair "target ids: package name appearing TWICE (ambiguous — both must refuse)" \
+cmp_pair "target ids: package name appearing TWICE (ambiguous — both must refuse)" reject \
   _package_integration_target_ids_jq _package_integration_target_ids_py "$META_DUP" p
 
 META_NOTARGETS='{"packages":[{"name":"p","manifest_path":"/w/p/Cargo.toml","targets":[{"name":"l","kind":["cdylib"],"src_path":"/w/p/src/lib.rs"}]}]}'
-cmp_pair "target ids: NO test targets (zero is a real answer, not a failure)" \
+cmp_pair "target ids: NO test targets (zero is a real answer, not a failure)" empty \
   _package_integration_target_ids_jq _package_integration_target_ids_py "$META_NOTARGETS" p
 
 META_MISSINGFIELDS='{"packages":[{"name":"p","manifest_path":"/w/p/Cargo.toml","targets":[{"name":"t","kind":["test"]}]}]}'
-cmp_pair "target ids: src_path ABSENT" \
+cmp_pair "target ids: src_path ABSENT" nonempty \
   _package_integration_target_ids_jq _package_integration_target_ids_py "$META_MISSINGFIELDS" p
 
 META_NOMANIFEST='{"packages":[{"name":"p","targets":[{"name":"t","kind":["test"],"src_path":"/w/p/tests/t.rs"}]}]}'
-cmp_pair "target ids: manifest_path ABSENT (empty root)" \
+cmp_pair "target ids: manifest_path ABSENT (empty root)" nonempty \
   _package_integration_target_ids_jq _package_integration_target_ids_py "$META_NOMANIFEST" p
 
 META_MULTIKIND='{"packages":[{"name":"p","manifest_path":"/w/p/Cargo.toml","targets":[{"name":"t","kind":["test","bench"],"src_path":"/w/p/tests/t.rs"}]}]}'
-cmp_pair "target ids: multi-kind target including test" \
+cmp_pair "target ids: multi-kind target including test" nonempty \
   _package_integration_target_ids_jq _package_integration_target_ids_py "$META_MULTIKIND" p
 
 # ---------------------------------------------------------------------------
@@ -308,12 +423,12 @@ cmp_pair "target ids: multi-kind target including test" \
 # assumed, and the fixture is deliberately out of order and mixed-case.
 # ---------------------------------------------------------------------------
 META_FEATS='{"packages":[{"name":"p","manifest_path":"/w/p/Cargo.toml","features":{"zeta":[],"Alpha":[],"beta":[],"_under":[],"a-dash":[],"10num":[]},"targets":[]}]}'
-cmp_pair "declared features: ORDERING over mixed case/punctuation/digits" \
+cmp_pair "declared features: ORDERING over mixed case/punctuation/digits" nonempty \
   _package_declared_features_jq _package_declared_features_py "$META_FEATS" p
-cmp_pair "declared features: package NOT PRESENT (both must fail identically)" \
+cmp_pair "declared features: package NOT PRESENT (both must fail identically)" reject \
   _package_declared_features_jq _package_declared_features_py "$META_FEATS" nosuch
 META_NOFEATS='{"packages":[{"name":"p","manifest_path":"/w/p/Cargo.toml","targets":[]}]}'
-cmp_pair "declared features: features table ABSENT (empty is a real answer)" \
+cmp_pair "declared features: features table ABSENT (empty is a real answer)" empty \
   _package_declared_features_jq _package_declared_features_py "$META_NOFEATS" p
 
 # ---------------------------------------------------------------------------
@@ -323,9 +438,9 @@ if command -v cargo >/dev/null 2>&1; then
   REAL_META=$(cargo metadata --format-version 1 --no-deps --manifest-path "$SCRIPT_DIR/../../Cargo.toml" 2>/dev/null)
   if [ -n "$REAL_META" ]; then
     for pkg in cqlite-ffi-common cqlite-node cqlite-core cqlite-cli cqlite-flight; do
-      cmp_pair "REAL metadata: target ids for $pkg" \
+      cmp_pair "REAL metadata: target ids for $pkg" accept-any \
         _package_integration_target_ids_jq _package_integration_target_ids_py "$REAL_META" "$pkg"
-      cmp_pair "REAL metadata: declared features for $pkg" \
+      cmp_pair "REAL metadata: declared features for $pkg" accept-any \
         _package_declared_features_jq _package_declared_features_py "$REAL_META" "$pkg"
     done
   else
@@ -339,6 +454,32 @@ echo
 # AFFIRMATIVE ACCOUNTING. "0 divergences found" must never be reachable from "0 comparisons
 # performed", so the two are reported as separate numbers and the skipped count is named
 # explicitly. A reader can tell, from this line alone, whether the differential half ran.
+# FIXTURE ACCOUNTING (I1). A reader must be able to tell "checked N valid fixtures" from
+# "checked nothing", and the valid/invalid split is what says whether the reject cases ran at all.
+echo "fixtures: valid=$VALID_N invalid=$INVALID_N accept-any(real-metadata)=$ANY_N"
+# AGGREGATE NON-VACUITY for the accept-any set, whose emptiness is data-dependent and therefore
+# not per-fixture assertable without a golden that would go stale. If a parser returned EMPTY for
+# every real package, every per-line invariant would hold vacuously — so at least one must have
+# produced output, per kind that was exercised.
+for _k in jest ids feats; do
+  eval "_agg=\$AGG_$_k"
+  case "$_k" in
+    jest)  _exercised=$([ "$VALID_N" -gt 0 ] && echo 1 || echo 0) ;;
+    *)     _exercised=1 ;;
+  esac
+  if [ "$_exercised" -eq 1 ] && [ "$_agg" -ne 1 ]; then
+    echo "FAIL - every fixture for kind '$_k' produced EMPTY output, so its per-line invariants held vacuously; at least one must yield output or the checks measured nothing" >&2
+    FAIL=$((FAIL + 1))
+  fi
+done
+if [ "$VALID_N" -eq 0 ]; then
+  echo "FAIL - ZERO valid fixtures were judged; a harness that only ever exercised refusals has not tested the parsers" >&2
+  FAIL=$((FAIL + 1))
+fi
+if [ "$INVALID_N" -eq 0 ]; then
+  echo "FAIL - ZERO invalid fixtures were judged, so nothing verified that a parser REFUSES bad input" >&2
+  FAIL=$((FAIL + 1))
+fi
 echo "differential comparisons PERFORMED: $DIFF_N"
 echo "property checks PERFORMED:          $PROP_N"
 echo "differential comparisons SKIPPED:   $SKIPPED_N$([ "$SKIPPED_N" -gt 0 ] && echo "  (jq=$have_jq python3=$have_py — only one implementation runnable on this host)")"
