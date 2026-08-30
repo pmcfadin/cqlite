@@ -515,53 +515,91 @@ def test_binding_facts_match_the_committed_cross_binding_reference(rows):
 # =============================================================================
 # R1-2 — the hashable-projection TOTALITY boundary
 #
-# `value_to_hashable_key` has arms for `List`, `Map`, `Frozen` and `Udt`;
-# `Tuple` and `Set` have NONE and still fall through to `value_to_py` (issue
-# #3500, deliberately not fixed here). Making a UDT a HASHABLE `cqlite.Udt`
-# nevertheless MOVED the boundary, because what used to make those fallthrough
-# shapes unprojectable was the UDT being an unhashable `dict`.
+# THIS SECTION HAS BEEN RE-DERIVED TWICE, BY THE TWO CHANGES THAT MOVED THE
+# BOUNDARY, AND THE HISTORY IS THE POINT.
 #
-# MEASURED, both sides, on the committed `udt_hashable_shapes` table (a point
-# read per row; `origin/main`'s binding built into the same venv for the "before"
-# column):
+# When #3504 landed, `value_to_hashable_key` had arms for `List`, `Map`, `Frozen`
+# and `Udt` only; `Tuple` and `Set` had NONE and fell through to `value_to_py`.
+# Making a UDT a HASHABLE `cqlite.Udt` moved the boundary WITHOUT adding an arm,
+# because what had made those fallthrough shapes unprojectable was the UDT being
+# an unhashable `dict`. #3500 then made both functions TOTAL — every `Value`
+# variant named, no `_ =>`, pinned by
+# `#[deny(clippy::wildcard_enum_match_arm)]` — and made `contains_udt` a full
+# subtree traversal, which moved it again and in a different way.
 #
-#   column | shape                                            | before   | after
-#   -------+--------------------------------------------------+----------+-------
-#   stu    | set<frozen<tuple<frozen<collide>, int>>>          | TypeError| OK
-#          |   "unhashable type: 'dict'"                       |          |
-#   mtu    | map<frozen<tuple<frozen<collide>, int>>, int>     | TypeError| OK
-#          |   "unhashable type: 'dict'"                       |          |
-#   stn    | set<frozen<tuple<frozen<unhashable_fields>,int>>> | TypeError| OK
-#          |   "unhashable type: 'dict'"                       |          |
-#   ssu    | set<frozen<set<frozen<collide>>>>                | TypeError| TypeError
-#          |   "unhashable type: 'list'" — IDENTICAL both sides           |
+# MEASURED at each stage on the committed `udt_hashable_shapes` table (a point
+# read per row; the "before #3504" column was taken with that commit's parent
+# binding built into the same venv):
 #
-# So the boundary is: a UDT reached through the `Tuple` fallback in a HASHED
-# position now projects; a UDT-bearing SET in a hashed position still does not,
-# for an unrelated reason (`set_to_py` renders it as a Python `list` for CLI
-# parity, #804). `stn` is the case that contradicts the obvious prediction and is
-# pinned separately below.
+#   col | shape                                            | pre-3504 | 3504  | +3500
+#   ----+--------------------------------------------------+----------+-------+------
+#   stu | set<frozen<tuple<frozen<collide>, int>>>          | TypeError| frozen| list
+#       |   "unhashable type: 'dict'"                       |          | set   |
+#   mtu | map<frozen<tuple<frozen<collide>, int>>, int>     | TypeError| dict  | dict
+#       |   "unhashable type: 'dict'"                       |          |       |
+#   stn | set<frozen<tuple<frozen<unhashable_fields>,int>>> | TypeError| frozen| list
+#       |   "unhashable type: 'dict'"                       |          | set   |
+#   ssu | set<frozen<set<frozen<collide>>>>                | TypeError| Type- | list
+#       |   "unhashable type: 'list'"                       |          | Error |
+#
+# WHY EACH COLUMN MOVED, because the two changes are not interchangeable:
+#
+#   * #3504 fixed `stu`/`mtu`/`stn` INCIDENTALLY — no arm was added; the
+#     fall-through to `value_to_py` merely began yielding a hashable `tuple` of
+#     `cqlite.Udt` instead of a `tuple` holding a `dict`. `ssu` was untouched,
+#     because ITS cause was never the UDT: `set_to_py` renders a UDT-bearing set
+#     as a Python `list` for CLI parity (#804), and a `list` is unhashable. The
+#     error text — `'list'`, not `'dict'` — is what identifies the two causes
+#     apart, and is why that row is measured rather than assumed.
+#
+#   * #3500 then changed the CONTAINER of the three set columns, deliberately
+#     (its AC1 over AC5). `contains_udt` now traverses the whole subtree, so
+#     `set_to_py` sees the UDT under the tuple / under the inner set and takes
+#     its #804 `list` branch for the whole column. `ssu` stops raising for the
+#     same reason. `mtu` is unchanged: a map KEY has no #804 branch to take —
+#     `map_to_py` must project, so it still goes through
+#     `value_to_hashable_key`, now via its real `Tuple` ARM rather than a
+#     fall-through.
+#
+# So the boundary today is: NOTHING in this table raises. What distinguishes the
+# columns is the CONTAINER — a UDT-bearing set is a `list` (#804), a map key is
+# projected — and no shape depends on `value_to_py`'s output happening to be
+# hashable.
 # =============================================================================
 
 
-def test_a_udt_inside_a_tuple_now_projects_as_a_set_element():
-    """`set<frozen<tuple<frozen<udt>, int>>>` projects; it used to raise.
+def test_a_udt_inside_a_tuple_reads_as_the_804_list_of_tuples():
+    """`set<frozen<tuple<frozen<udt>, int>>>` reads; the CONTAINER changed twice.
 
-    Measured on `origin/main`: `TypeError: unhashable type: 'dict'`, because the
-    tuple's UDT element was rendered by `value_to_py` as a `dict`.
+    Pre-#3504: `TypeError: unhashable type: 'dict'` — the tuple's UDT element was
+    rendered by `value_to_py` as a `dict`. #3504 made it read, incidentally, as a
+    `frozenset`, because `set_to_py`'s `contains_udt` did not look inside a tuple
+    so the set took the hashing branch and the now-hashable `cqlite.Udt` fitted.
 
-    The route matters and is asserted through its OBSERVABLE consequence (a
-    `frozenset`, not a `list`): `set_to_py`'s `contains_udt` does NOT look inside
-    a tuple, so this set takes the `frozenset` branch rather than the #804
-    list-for-CLI-parity branch, and every element must therefore be hashable.
+    #3500 then made `contains_udt` a full subtree traversal, so it DOES see the
+    UDT under the tuple and `set_to_py` takes its #804 list-for-CLI-parity branch
+    — a `list` of `(cqlite.Udt, int)` tuples. That is a DELIBERATE shape change
+    (#3500 AC1 over AC5): it removes the nesting-dependent asymmetry whereby the
+    same UDT-bearing set was a `list` at depth 1 and a `frozenset` at depth 2.
+
+    Every CONTENT assertion below is unchanged by that move and is kept: the
+    element is still an ordered pair of a `cqlite.Udt` and its position, still
+    equal to an independently constructed value, and still hashable — a `list`
+    container does not make its elements unhashable, so the equality-and-hash
+    contract is asserted exactly as before.
     """
     stu = _shapes_row(1)["stu"]
-    assert isinstance(stu, frozenset), (
-        f"expected the hashing branch (frozenset), got {type(stu).__name__}"
+    assert isinstance(stu, list), (
+        f"expected #804's list branch (contains_udt sees the UDT under the "
+        f"tuple since #3500), got {type(stu).__name__}"
+    )
+    assert not isinstance(stu, frozenset), (
+        "a frozenset here means contains_udt stopped traversing the tuple — the "
+        "#3500 revert signature"
     )
     assert len(stu) == 1
 
-    element = next(iter(stu))
+    element = stu[0]
     assert isinstance(element, tuple) and len(element) == 2
     udt, position = element
     assert position == 10
@@ -570,12 +608,15 @@ def test_a_udt_inside_a_tuple_now_projects_as_a_set_element():
     assert udt.keyspace == "test_udt_collision"
     assert dict(udt.fields) == TUPLE_UDT_FIELDS
 
-    # CONTENT, not merely "no exception": the projected element is retrievable by
-    # an INDEPENDENTLY CONSTRUCTED equal value, which asserts the equality and
-    # hash contract the projection now depends on. A test that only checked
-    # `len(stu) == 1` would pass on a wrong-but-hashable projection.
+    # CONTENT, not merely "no exception": the element is recovered by an
+    # INDEPENDENTLY CONSTRUCTED equal value. A test that only checked
+    # `len(stu) == 1` would pass on a wrong-but-well-shaped projection.
     rebuilt = (cqlite.Udt("collide", "test_udt_collision", dict(TUPLE_UDT_FIELDS)), 10)
     assert rebuilt in stu
+    # The hash contract is asserted even though the container no longer needs it:
+    # the element remains usable in a hashed position, which is what
+    # `map_to_py`'s KEY path (the `mtu` column below) actually depends on. Losing
+    # it would break that path silently while this column stayed green.
     assert hash(rebuilt) == hash(element)
 
 
@@ -611,34 +652,62 @@ def test_a_udt_inside_a_tuple_now_projects_as_a_map_key():
     assert twin not in mtu
 
 
-def test_a_udt_bearing_set_in_a_hashed_position_still_raises():
-    """`set<frozen<set<frozen<udt>>>>` still raises — UNCHANGED by #3504.
+def test_a_udt_bearing_set_in_a_hashed_position_now_reads():
+    """`set<frozen<set<frozen<udt>>>>` NO LONGER RAISES — fixed by #3500.
 
-    This is the OTHER side of the boundary, and its cause is not the one #3504
-    touched: the INNER set has a UDT element, so `set_to_py` returns a Python
-    `list` for CLI parity (#804), and a `list` is unhashable in the outer set.
-    Measured identically on `origin/main` and here: `TypeError: unhashable type:
-    'list'` — the error text is the evidence that it is the LIST, not the UDT.
+    This was the OTHER side of the boundary and the one #3504 could not move,
+    because its cause was never the UDT: the INNER set has a UDT element, so
+    `set_to_py` returned a Python `list` for CLI parity (#804), and a `list` was
+    unhashable in the OUTER set's `frozenset` branch. Measured identically before
+    and after #3504: `TypeError: unhashable type: 'list'` — the error text naming
+    `'list'` rather than `'dict'` is the evidence of which cause it was.
 
-    Asserted rather than left implicit so the spec's totality claim is pinned in
-    BOTH directions: `#3500` is not fixed, and the shapes that now work are named
-    above rather than implied.
+    #3500 removes it at the outer level: `contains_udt` now traverses the whole
+    subtree, so the OUTER set also takes its #804 `list` branch and never asks
+    for a hash. The column reads as a `list` of `list`s of `cqlite.Udt`s.
+
+    This is #3504's OWN fixture reaching #3500's fix, i.e. an independent second
+    fixture for that property (the first is
+    `bindings/python/tests/test_nested_udt_hashable.py`'s `s_set_udt`). Kept as a
+    test rather than deleted, because a revert of `contains_udt`'s `Set` arm would
+    put the `TypeError` straight back and nothing else in THIS file would notice.
     """
-    with pytest.raises(TypeError, match=r"unhashable type: 'list'"):
-        _shapes_row(2)
+    ssu = _shapes_row(2)["ssu"]
+    assert isinstance(ssu, list), (
+        f"expected #804's list branch at BOTH levels, got {type(ssu).__name__}"
+    )
+    assert len(ssu) == 1
+    inner = ssu[0]
+    assert isinstance(inner, list), (
+        f"the INNER set is #804's list too, got {type(inner).__name__}"
+    )
+    assert len(inner) == 1
+
+    # CONTENT: the UDT survived the container change intact, identity out of band.
+    udt = inner[0]
+    assert isinstance(udt, cqlite.Udt)
+    assert udt.type_name == "collide"
+    assert udt.keyspace == "test_udt_collision"
+    assert dict(udt.fields) == TUPLE_UDT_FIELDS
+    assert udt == cqlite.Udt("collide", "test_udt_collision", dict(TUPLE_UDT_FIELDS))
 
 
-def test_a_full_scan_of_the_shapes_table_still_raises_on_that_row():
-    """The still-failing shape fails a WHOLE-TABLE read, not just its own row.
+def test_a_full_scan_of_the_shapes_table_reads_every_row():
+    """No shape in the table aborts a WHOLE-TABLE read any more.
 
-    Stated as its own case because it is the shape a caller actually writes: the
-    `TypeError` is raised while CONVERTING a row, so one unprojectable cell
-    aborts the scan. It is also why every other test in this section reads by
-    primary key.
+    This case exists because a `TypeError` was raised while CONVERTING a row, so
+    ONE unprojectable cell aborted the whole scan — which is the shape a caller
+    actually writes, and which is why the other tests in this section read by
+    primary key. #3500 made every column of this table projectable, so the scan
+    completes; asserting the ROW COUNT rather than merely "no exception" keeps it
+    from passing on an empty result.
     """
     with cqlite.open(FIXTURE_ROOT, schema=SCHEMA) as db:
-        with pytest.raises(TypeError, match=r"unhashable type: 'list'"):
-            db.execute(f"SELECT * FROM {SHAPES_TABLE}")
+        rows = list(db.execute(f"SELECT * FROM {SHAPES_TABLE}"))
+    assert len(rows) == 3, f"expected the fixture's three rows, got {len(rows)}"
+    # Non-vacuity: the row that used to abort the scan is present WITH its value.
+    by_id = {row["id"]: row for row in rows}
+    assert isinstance(by_id[2]["ssu"], list) and len(by_id[2]["ssu"]) == 1
 
 
 def test_a_udt_with_a_collection_field_projects_because_that_field_is_bytes():
@@ -659,8 +728,11 @@ def test_a_udt_with_a_collection_field_projects_because_that_field_is_bytes():
     field value genuinely is unhashable still propagates `TypeError`.
     """
     stn = _shapes_row(3)["stn"]
-    assert isinstance(stn, frozenset) and len(stn) == 1
-    udt, position = next(iter(stn))
+    # `list`, not `frozenset`: the same #3500 container change as the `stu`
+    # column above (contains_udt traverses the tuple). The GAP this test pins is
+    # the FIELD's decode, which the container change does not touch.
+    assert isinstance(stn, list) and len(stn) == 1
+    udt, position = stn[0]
     assert position == 30
     assert udt.type_name == "unhashable_fields"
     assert udt.fields["label"] == "unhashable"
