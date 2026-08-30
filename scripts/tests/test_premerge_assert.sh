@@ -507,6 +507,359 @@ if run 2 "no gate of record + gh DOWN -> NO-GATE-OF-RECORD (offline check first)
 fi
 export MOCK_GH_FAIL=0
 
+# =============================================================================
+# #3465 review — the ANCHORED DELTA PAIR (optional 4th argument)
+# =============================================================================
+# CLAUDE.md's #1892 rule MANDATES that a test/docs-only diff on top of a full
+# PASS at anchor X re-certifies with `--delta X` and "never a repeat full gate",
+# and that the PR record BOTH blocks. So the merged head legitimately differs
+# from the gate of record's sha, and a 3-arg-only guard red on correct,
+# doctrine-mandated input.
+ANCHOR="ab12cd34ef560000000000000000000000000000"   # the full gate's sha (X)
+A7="ab12cd3"
+A12="ab12cd34ef56"
+if [ "${#ANCHOR}" -eq 40 ] && [ "${ANCHOR:0:7}" = "$A7" ] && [ "${ANCHOR:0:12}" = "$A12" ]; then
+  ok "anchor fixture: ANCHOR is 40 hex and A7/A12 are its own 7/12-char prefixes"
+else
+  bad "anchor fixture: ANCHOR/A7/A12 are inconsistent"
+fi
+
+DELTA_MODE="MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $ANCHOR)"
+
+# delta_block [anchor] [commit] [tree-start] [tree-integrity] [result] [mode] \
+#             [anchor-parenthetical] -> STDOUT.  "-" omits a line entirely.
+# Line SHAPES are copied from scripts/agent-gate.sh's delta emit site
+# (anchor_meta + SUMMARY_MODE_LINE), trailing fields included.
+delta_block() {
+  local anchor="${1:-$ANCHOR}" commit="${2:-$C7}" tstart="${3:-$C12}" \
+        ti="${4:-PASS}" result="${5:-PASS}" mode="${6:-$DELTA_MODE}" \
+        paren="${7:-(full-gate PASS commit)}"
+  printf '%s\n' "$DELTA_S"
+  printf 'run-id: /tmp/agent-gate.dLt4Qx\n'
+  [ "$mode" = "-" ] || printf '%s\n' "$mode"
+  [ "$commit" = "-" ] || printf 'commit: %s branch: issue-3465-require-gate-of-record dirty: no\n' "$commit"
+  [ "$anchor" = "-" ] || printf 'delta-anchor: %s %s\n' "$anchor" "$paren"
+  printf 'delta-anchor-run-id: /tmp/agent-gate.9cIQgX\n'
+  printf 'gate-of-record: full agent-gate.sh run at %s (this DELTA re-certifies a test/docs-only diff; it is NOT a substitute for the full gate)\n' "$anchor"
+  printf 'delta-executors: cargo test -p cqlite-core --test issue_3465 (3), docs (2)\n'
+  [ "$tstart" = "-" ] || printf 'tree-start: %s dirty: no digest: 671a6275687c\n' "$tstart"
+  printf 'tree-end: %s dirty: no digest: 671a6275687c\n' "$tstart"
+  [ "$ti" = "-" ] || printf 'tree-integrity: %s\n' "$ti"
+  printf 'logs: /tmp/agent-gate.dLt4Qx\n'
+  [ "$result" = "-" ] || printf 'RESULT: %s\n' "$result"
+  printf '%s\n' "$DELTA_E"
+}
+delta_summary() { local f="$1"; shift; delta_block "$@" >"$f"; }
+
+# refused_pair <desc> <full-file> <delta-file> [needle] — a 4-arg refusal.
+refused_pair() {
+  local desc="$1" f="$2" d="$3" needle="${4:-}"
+  if run 2 "$desc" 2421 "$CERTIFIED" "$f" "$d"; then
+    case "$OUT" in
+      *"PREMERGE: NO-GATE-OF-RECORD"*) ;;
+      *) bad "$desc: missing NO-GATE-OF-RECORD verdict (got: $OUT)"; return 1 ;;
+    esac
+    if [ -n "$needle" ] && [ "${OUT#*"$needle"}" = "$OUT" ]; then
+      bad "$desc: refusal does not name the cause '$needle' (got: $OUT)"
+      return 1
+    fi
+    ok "$desc"
+  fi
+}
+
+ANCHORFULL="$T/anchor-full.txt"
+full_summary "$ANCHORFULL" "$A7" "$A12" PASS PASS
+GOODDELTA="$T/good-delta.txt"
+delta_summary "$GOODDELTA"
+
+# --- Case 28(a): 3-arg call with an ANCHOR-only summary still refuses ---------
+# The red half of the blocker: without the fourth argument the anchor's full
+# PASS names a different tree than the head being merged, and that is exactly
+# the #3616 shape — indistinguishable from a peer lane's summary.
+refused "anchor-only full summary at a MOVED head (3 args) -> refuse" \
+  "$ANCHORFULL" "does not match the certified sha"
+
+# --- Case 28(b): the anchored delta PAIR at that same moved head -> accept ---
+if run 0 "anchored delta pair (full PASS at X + delta at Y) -> exit 0" \
+  2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA"; then
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "delta pair: prints PREMERGE: OK <sha>" ;;
+    *) bad "delta pair: missing PREMERGE: OK (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: GATE-OF-RECORD commit: $A7 tree-start: $A12"*)
+      ok "delta pair: the GATE-OF-RECORD line names the ANCHOR's provenance" ;;
+    *) bad "delta pair: GATE-OF-RECORD line must name the anchor (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: DELTA-RECERT anchor: $ANCHOR commit: $C7 tree-start: $C12"*)
+      ok "delta pair: a DISTINCT DELTA-RECERT line names the anchor + the merged tree" ;;
+    *) bad "delta pair: missing the DELTA-RECERT evidence line (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"summary: $GOODDELTA"*) ok "delta pair: the DELTA-RECERT line names the delta summary file" ;;
+    *) bad "delta pair: DELTA-RECERT must name the delta summary file (got: $OUT)" ;;
+  esac
+fi
+
+# --- Case 28(c): delta-anchor: naming a DIFFERENT sha -> refuse --------------
+# This is the property that makes the pair a CHAIN rather than two unrelated
+# blocks: without it, ANY full PASS could anchor ANY delta run.
+delta_summary "$T/delta-wrong-anchor.txt" "$STALE"
+refused_pair "delta-anchor: names a DIFFERENT sha than the full block -> refuse" \
+  "$ANCHORFULL" "$T/delta-wrong-anchor.txt" \
+  "in the full-gate block does not match the delta block's anchor sha"
+
+# --- Case 28(d): the delta run's OWN provenance must cover the merged tree ---
+delta_summary "$T/delta-wrong-commit.txt" "$ANCHOR" "ca8eb01" "$C12"
+refused_pair "delta commit: does not match the certified sha -> refuse" \
+  "$ANCHORFULL" "$T/delta-wrong-commit.txt" \
+  "'commit:' value 'ca8eb01' in the delta block does not match the certified sha"
+delta_summary "$T/delta-wrong-tstart.txt" "$ANCHOR" "$C7" "ca8eb016def1"
+refused_pair "delta tree-start: does not match the certified sha -> refuse" \
+  "$ANCHORFULL" "$T/delta-wrong-tstart.txt" \
+  "'tree-start:' value 'ca8eb016def1' in the delta block does not match the certified sha"
+
+# --- Case 28(e): delta-anchor: (UNRESOLVED) -> refuse ------------------------
+# scripts/agent-gate.sh emits this on its ERROR path when the --delta anchor does
+# not resolve to a commit. Tested at RESULT: PASS so the needle pins the ANCHOR
+# check rather than the RESULT check...
+delta_summary "$T/delta-unresolved.txt" "$ANCHOR" "$C7" "$C12" PASS PASS "$DELTA_MODE" "(UNRESOLVED)"
+refused_pair "delta-anchor: (UNRESOLVED) -> refuse" \
+  "$ANCHORFULL" "$T/delta-unresolved.txt" "(UNRESOLVED)"
+# ...and once in the shape the gate really emits it (RESULT: ERROR, a ref name
+# rather than a resolved sha), which must also refuse.
+delta_summary "$T/delta-unresolved-real.txt" "HEAD~3" "$C7" "$C12" PASS ERROR \
+  "$DELTA_MODE" "(UNRESOLVED)"
+refused_pair "delta-anchor: (UNRESOLVED) in its real RESULT: ERROR shape -> refuse" \
+  "$ANCHORFULL" "$T/delta-unresolved-real.txt"
+
+# --- Case 29: the delta-anchor value's own shape -----------------------------
+delta_summary "$T/delta-no-anchor.txt" "-"
+refused_pair "delta block with NO delta-anchor: line -> refuse" \
+  "$ANCHORFULL" "$T/delta-no-anchor.txt" "has no 'delta-anchor:' line"
+delta_summary "$T/delta-anchor-short.txt" "$A12"
+refused_pair "delta-anchor: abbreviated (12 hex, not the resolved 40) -> refuse" \
+  "$ANCHORFULL" "$T/delta-anchor-short.txt" "is 12 hex chars,"
+delta_summary "$T/delta-anchor-nonhex.txt" "unverified"
+refused_pair "delta-anchor: non-hex -> refuse" \
+  "$ANCHORFULL" "$T/delta-anchor-nonhex.txt" "is not lowercase hex"
+
+# --- Case 30: the fourth argument must BE a delta block ----------------------
+refused_pair "a FULL summary passed as the fourth argument -> refuse" \
+  "$ANCHORFULL" "$GOOD" "holds ZERO delta blocks"
+if [ "${OUT#*"found 1 full"}" != "$OUT" ]; then
+  ok "fourth-arg: refusal NAMES the full block it found instead of a delta one"
+else
+  bad "fourth-arg: refusal should name what it found (got: $OUT)"
+fi
+refused_pair "a LITE summary passed as the fourth argument -> refuse" \
+  "$ANCHORFULL" "$T/lite-only.txt" "holds ZERO delta blocks"
+{ delta_block; delta_block; } >"$T/two-deltas.txt"
+if [ "$(grep -c -x -F "$DELTA_S" "$T/two-deltas.txt")" -eq 2 ]; then
+  ok "two-deltas fixture: the file really does hold TWO delta start markers"
+else
+  bad "two-deltas fixture: expected 2 delta start markers"
+fi
+refused_pair "TWO delta blocks in the fourth argument -> refuse as AMBIGUOUS" \
+  "$ANCHORFULL" "$T/two-deltas.txt" "holds 2 delta blocks"
+refused_pair "fourth-argument file absent -> refuse" \
+  "$ANCHORFULL" "$T/no-such-delta.txt" "delta summary file does not exist"
+: >"$T/empty-delta.txt"
+refused_pair "fourth-argument file EMPTY -> refuse" \
+  "$ANCHORFULL" "$T/empty-delta.txt" "delta summary file is EMPTY"
+if run 3 "EMPTY fourth argument -> exit 3 (usage, never a silent 3-arg downgrade)" \
+  2421 "$CERTIFIED" "$ANCHORFULL" ""; then
+  ok "usage: an empty fourth argument is a usage failure, not '3-arg mode'"
+fi
+if run 3 "five arguments -> exit 3 (usage)" 2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA" extra; then
+  ok "usage: a fifth argument fails closed rather than being ignored"
+fi
+
+# --- Case 31: MODE: delta is REQUIRED in the delta block (the INVERSE belt) --
+# In the FULL block a MODE: line is a refusal; in the DELTA block its ABSENCE
+# is, and the token is asserted AFFIRMATIVELY rather than merely tolerated.
+delta_summary "$T/delta-no-mode.txt" "$ANCHOR" "$C7" "$C12" PASS PASS "-"
+refused_pair "delta block with NO MODE: line -> refuse (presence is REQUIRED here)" \
+  "$ANCHORFULL" "$T/delta-no-mode.txt" "has no 'MODE:' line"
+delta_summary "$T/delta-mode-lite.txt" "$ANCHOR" "$C7" "$C12" PASS PASS \
+  "MODE: lite (FAST ITERATION — NOT the gate of record)"
+refused_pair "delta header + MODE: lite -> refuse (token asserted, not presence)" \
+  "$ANCHORFULL" "$T/delta-mode-lite.txt" "MODE token is 'lite', not 'delta'"
+
+# --- Case 32: the delta block's own verdicts ---------------------------------
+delta_summary "$T/delta-result-fail.txt" "$ANCHOR" "$C7" "$C12" PASS FAIL
+refused_pair "delta RESULT: FAIL -> refuse" \
+  "$ANCHORFULL" "$T/delta-result-fail.txt" "RESULT verdict token in the delta block is 'FAIL'"
+delta_summary "$T/delta-ti-fail.txt" "$ANCHOR" "$C7" "$C12" \
+  "FAIL (tree-mutated-midrun; head da9a7cb->ca8eb01; changed: docs/x.md)" PASS
+refused_pair "delta tree-integrity: FAIL -> refuse" \
+  "$ANCHORFULL" "$T/delta-ti-fail.txt" "tree-integrity verdict token in the delta block is 'FAIL'"
+delta_block >"$T/delta-unterminated.txt.full"
+grep -v -x -F "$DELTA_E" "$T/delta-unterminated.txt.full" >"$T/delta-unterminated.txt"
+refused_pair "UNTERMINATED delta block -> refuse" \
+  "$ANCHORFULL" "$T/delta-unterminated.txt" "UNTERMINATED"
+
+# --- Case 33: the ANCHOR block is still held to the full-gate contract -------
+# Case B relaxes ONLY the anchor's sha binding. Everything else it must satisfy
+# in Case A it must still satisfy here.
+{ full_block "$A7" "$A12" PASS FAIL; } >"$T/anchor-fail.txt"
+refused_pair "anchor block RESULT: FAIL -> refuse even with a valid delta" \
+  "$T/anchor-fail.txt" "$GOODDELTA" "RESULT verdict token in the full-gate block is 'FAIL'"
+refused_pair "a LITE-only file as the ANCHOR -> refuse (the #3408 case, 4-arg form)" \
+  "$T/lite-only.txt" "$GOODDELTA" "ZERO full-gate blocks"
+full_summary "$T/anchor-nonhex.txt" "unverified" "$A12" PASS PASS
+refused_pair "anchor commit: non-hex -> refuse (a real sha is still required)" \
+  "$T/anchor-nonhex.txt" "$GOODDELTA" "is not lowercase hex"
+
+# =============================================================================
+# #3465 review — the remaining refusal branches
+# =============================================================================
+
+# --- Case 34: DUPLICATE keys inside one block -> refuse ----------------------
+# "Last one wins" would let a doctored line override the real verdict. Without
+# these fixtures the >1 branch of assert_single_key was dead code.
+{
+  printf '%s\n' "$FULL_S"
+  printf 'commit: %s branch: main dirty: no\n' "$C7"
+  printf 'tree-start: %s dirty: no digest: 671a6275687c\n' "$C12"
+  printf 'tree-integrity: PASS\n'
+  printf 'RESULT: FAIL\n'
+  printf 'RESULT: PASS\n'
+  printf '%s\n' "$FULL_E"
+} >"$T/dup-result.txt"
+refused "TWO RESULT: lines in one block -> refuse as AMBIGUOUS" \
+  "$T/dup-result.txt" "has 2 'RESULT:' lines"
+{
+  printf '%s\n' "$FULL_S"
+  printf 'commit: ca8eb01 branch: main dirty: no\n'
+  printf 'commit: %s branch: main dirty: no\n' "$C7"
+  printf 'tree-start: %s dirty: no digest: 671a6275687c\n' "$C12"
+  printf 'tree-integrity: PASS\n'
+  printf 'RESULT: PASS\n'
+  printf '%s\n' "$FULL_E"
+} >"$T/dup-commit.txt"
+refused "TWO commit: lines in one block -> refuse as AMBIGUOUS" \
+  "$T/dup-commit.txt" "has 2 'commit:' lines"
+
+# --- Case 35: an UNREADABLE summary file -> refuse ---------------------------
+# Distinct from absent and from empty. Skipped when running as root, which
+# ignores the mode bit.
+if [ "$(id -u)" = "0" ]; then
+  ok "unreadable summary: SKIPPED (running as root ignores the mode bit)"
+else
+  cp "$GOOD" "$T/unreadable.txt"
+  chmod 000 "$T/unreadable.txt"
+  refused "summary file present but UNREADABLE -> refuse" \
+    "$T/unreadable.txt" "is not readable"
+  chmod 644 "$T/unreadable.txt"
+fi
+
+# --- Case 36: the PARSER TOOL failing is exit 3, not exit 2 ------------------
+# A missing/ENOMEM-ing awk is a broken BOX, not a verdict about the gate of
+# record — telling that caller to re-run a 45-minute gate would be the wrong
+# remedy, so this one path exits 3 and NAMES the tool.
+BADBIN="$T/badbin"
+mkdir -p "$BADBIN"
+printf '#!/bin/sh\necho "awk: cannot allocate" >&2\nexit 1\n' >"$BADBIN/awk"
+chmod +x "$BADBIN/awk"
+OUT=$(PATH="$BADBIN:$BIN:$PATH" bash "$ASSERT" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+RC=$?
+if [ "$RC" -eq 3 ]; then
+  case "$OUT" in
+    *"TOOL-FAILURE"*awk*) ok "tool failure: a failing awk is exit 3 and NAMES the tool" ;;
+    *) bad "tool failure: exit 3 but the message must name the tool (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"NO-GATE-OF-RECORD"*) bad "tool failure: must NOT be reported as NO-GATE-OF-RECORD (got: $OUT)" ;;
+    *) ok "tool failure: not misreported as a missing gate of record" ;;
+  esac
+else
+  bad "tool failure: wanted exit 3, got $RC (output: $OUT)"
+fi
+
+# --- Case 37: the REAL --only shape -> refused by RESULT, not by the belt ----
+# scripts/agent-gate.sh emits, for --only, the FULL markers, RESULT: PARTIAL and
+# a LOWERCASE `mode: PARTIAL (--only …)` line. The MODE: belt is case-sensitive
+# ($1 == "MODE:") and deliberately does NOT catch it: the property that matters
+# is the RESULT compare. This is the most plausible real mis-invocation.
+{
+  printf '%s\n' "$FULL_S"
+  printf 'run-id: /tmp/agent-gate.9cIQgX\n'
+  printf 'commit: %s branch: issue-3465-require-gate-of-record dirty: no\n' "$C7"
+  printf 'tree-start: %s dirty: no digest: 671a6275687c\n' "$C12"
+  printf 'tree-end: %s dirty: no digest: 671a6275687c\n' "$C12"
+  printf 'tree-integrity: PASS\n'
+  printf 'mode: PARTIAL (--only file-size) - does NOT count as the gate\n'
+  printf 'file-size:         PASS (0s)\n'
+  printf 'RESULT: PARTIAL\n'
+  printf '%s\n' "$FULL_E"
+} >"$T/only-partial.txt"
+if grep -q -x -F 'mode: PARTIAL (--only file-size) - does NOT count as the gate' "$T/only-partial.txt"; then
+  ok "--only fixture: carries the LOWERCASE mode: PARTIAL line the gate really emits"
+else
+  bad "--only fixture: expected the verbatim lowercase mode: PARTIAL line"
+fi
+refused "a real --only summary (RESULT: PARTIAL) -> refuse" \
+  "$T/only-partial.txt" "RESULT verdict token in the full-gate block is 'PARTIAL'"
+case "$OUT" in
+  *"carries a MODE: line"*)
+    bad "--only: refused by the case-sensitive MODE: belt, not by RESULT (got: $OUT)" ;;
+  *) ok "--only: the case-sensitive MODE: belt is deliberately NOT what catches it" ;;
+esac
+
+# --- Case 38: a NESTED sub-gate block -> refuse ------------------------------
+# #2874: a gate spawned by an enclosing gate stamps `nested-under: <parent>` and
+# emits the FULL markers at the SAME tree, so the sha binding provably cannot
+# distinguish it. One affirmative line closes the only wrong-file class the sha
+# compare cannot see.
+{
+  printf '%s\n' "$FULL_S"
+  printf 'run-id: /tmp/agent-gate.nested1\n'
+  printf 'nested-under: /tmp/agent-gate.9cIQgX\n'
+  printf 'commit: %s branch: main dirty: no\n' "$C7"
+  printf 'tree-start: %s dirty: no digest: 671a6275687c\n' "$C12"
+  printf 'tree-integrity: PASS\n'
+  printf 'RESULT: PASS\n'
+  printf '%s\n' "$FULL_E"
+} >"$T/nested.txt"
+refused "nested sub-gate (nested-under:) at the RIGHT sha -> refuse" \
+  "$T/nested.txt" "nested-under"
+delta_summary "$T/delta-plain.txt"
+{ grep -v -x -F "$DELTA_E" "$T/delta-plain.txt"
+  printf 'nested-under: /tmp/agent-gate.9cIQgX\n'
+  printf '%s\n' "$DELTA_E"
+} >"$T/delta-nested.txt"
+refused_pair "nested sub-gate in the DELTA block -> refuse" \
+  "$ANCHORFULL" "$T/delta-nested.txt" "nested-under"
+
+# --- Case 39: the success path DISCLAIMS what it did not prove (#3650) ------
+# A squash-merge composes this diff with main's CURRENT tip, so the tree
+# certified here and the tree that lands are different objects for any PR whose
+# base is behind main. `PREMERGE: GATE-OF-RECORD` must not be readable as full
+# certification.
+if run 0 "success path prints the SCOPE disclaimer" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: SCOPE"*) ok "scope: the success path prints a PREMERGE: SCOPE clause" ;;
+    *) bad "scope: missing the PREMERGE: SCOPE clause (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"#3650"*) ok "scope: the clause names the follow-up issue (#3650)" ;;
+    *) bad "scope: the clause must name #3650 (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"does NOT prove"*) ok "scope: the clause states what was NOT proven" ;;
+    *) bad "scope: the clause must state what was NOT proven (got: $OUT)" ;;
+  esac
+fi
+if run 0 "success path prints SCOPE in the anchored-delta case too" \
+  2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA"; then
+  case "$OUT" in
+    *"PREMERGE: SCOPE"*) ok "scope: the delta pair carries the same disclaimer" ;;
+    *) bad "scope: the delta pair must carry the SCOPE clause too (got: $OUT)" ;;
+  esac
+fi
+
 # --- summary -----------------------------------------------------------------
 printf '\n=== premerge-assert: %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
