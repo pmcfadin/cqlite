@@ -297,6 +297,9 @@ fn read_side_buffers_delivered_before_the_deadline_are_collected_after_it_lapses
         CollectEnd::CollectorsEnded { collected } => panic!(
             "unexpected end-of-collectors with {collected}/2 collected: both handles are alive"
         ),
+        CollectEnd::ReadFailed { failures, .. } => {
+            panic!("no collector reported a read failure, yet one was reported: {failures}")
+        }
         CollectEnd::Unavailable => panic!("the store's lock was poisoned unexpectedly"),
     }
     drop(handles);
@@ -570,8 +573,72 @@ fn read_side_collectors_that_end_without_delivering_report_collectors_ended() {
         CollectEnd::Both(..) => {
             panic!("only one buffer was ever delivered, yet both were returned")
         }
+        CollectEnd::ReadFailed { failures, .. } => {
+            panic!("no collector reported a read failure, yet one was reported: {failures}")
+        }
         CollectEnd::Unavailable => panic!("the store's lock was poisoned unexpectedly"),
     }
+}
+
+/// **A COLLECTOR THAT COULD NOT READ ITS PIPE TO THE END IS PROPAGATED, NOT
+/// PRESENTED AS A COMPLETE STREAM** (roborev job 255, finding 2).
+///
+/// `collect_to_end` did `let _ = reader.read_to_end(&mut buf)` and then DELIVERED
+/// `buf`, so a read that failed mid-stream handed the truncated bytes over as the
+/// whole of the child's output — and stage (e) would have parsed its rows out of
+/// them. HONEST SCOPE: a truncated JSON buffer would most likely fail loudly at the
+/// parse, so what this closes is a WRONG-CAUSE diagnostic (a read failure reported
+/// as malformed rows, or as a deadline) rather than a false pass. It is fixed as
+/// one: the failure is recorded instead of delivered, and it is checked BEFORE the
+/// "both buffers are here" branch so it can never be reported as success.
+#[test]
+fn a_read_side_collector_that_fails_mid_stream_is_reported_as_a_read_failure() {
+    let (bufs, handles) = synthetic_bufs(2);
+    // stderr delivered whole; stdout's collector failed after a partial read, so it
+    // has nothing whole to deliver and delivers nothing.
+    handles[1].deliver(Stream::Stderr, Vec::new());
+    handles[0].read_failed(
+        Stream::Stdout,
+        std::io::Error::other("simulated pipe failure"),
+        7,
+    );
+
+    // A LIVE deadline: the collection must not need to run out of time, and must not
+    // blame one, to report a read failure.
+    let deadline = TestDeadline::start(Duration::from_secs(30), Duration::from_secs(30));
+    let stage = deadline.stage("collector-read-failure");
+
+    match collect_both_streams(&bufs, &stage) {
+        CollectEnd::ReadFailed {
+            failures,
+            collected,
+        } => {
+            assert!(
+                failures.contains("simulated pipe failure") && failures.contains("Stdout"),
+                "the verdict must name the failing stream and carry its own error: {failures}"
+            );
+            assert!(
+                failures.contains('7'),
+                "the verdict must say how much had been read, so the reader knows the buffer was                  partial: {failures}"
+            );
+            assert_eq!(
+                collected, 1,
+                "the count must be how many streams were collected WHOLE"
+            );
+        }
+        CollectEnd::Both(out, _) => panic!(
+            "a collector's read FAILED and the collection returned both buffers — the {}              partial byte(s) it managed to read would have been used as the whole of the              child's output (job 255, finding 2)",
+            out.len()
+        ),
+        CollectEnd::DeadlineReached { collected } => panic!(
+            "the deadline was live ({collected}/2 collected): a read failure must not be              reported as a timeout"
+        ),
+        CollectEnd::CollectorsEnded { collected } => panic!(
+            "both handles are alive ({collected}/2 collected): a read failure must not be              reported as end-of-collectors"
+        ),
+        CollectEnd::Unavailable => panic!("the store's lock was poisoned unexpectedly"),
+    }
+    drop(handles);
 }
 
 /// `poll_with_progress`: a poll that gives up with BOTH pipes at EOF must say so.

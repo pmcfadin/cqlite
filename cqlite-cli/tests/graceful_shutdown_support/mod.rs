@@ -444,6 +444,13 @@ struct StreamBufs {
     /// Collector threads still attached; `0` means every one has ended, whether by
     /// delivering or by unwinding.
     collectors_open: usize,
+    /// **COLLECTORS WHOSE `read_to_end` RETURNED `Err`, with how much they had read**
+    /// (roborev job 255, finding 2). The result used to be discarded — `let _ =
+    /// reader.read_to_end(..)` — and the partial buffer was then DELIVERED as
+    /// though it were the whole stream, so a truncated read was presented as a
+    /// complete one. A collector that fails now records the failure instead of
+    /// delivering, and the collection propagates it.
+    read_failures: Vec<(Stream, String)>,
 }
 
 impl StreamBufs {
@@ -463,6 +470,19 @@ struct BufHandle {
 }
 
 impl BufHandle {
+    /// **THIS COLLECTOR COULD NOT READ ITS PIPE TO THE END** (roborev job 255,
+    /// finding 2), so it has nothing whole to deliver and delivers NOTHING: a
+    /// partial buffer presented as complete is a false statement about the child's
+    /// output, where a recorded failure is a true one about this harness.
+    fn read_failed(&self, stream: Stream, error: impl std::fmt::Display, read_so_far: usize) {
+        if let Ok(mut b) = self.bufs.lock() {
+            b.read_failures.push((
+                stream,
+                format!("{error} (after {read_so_far} byte(s) had been read)"),
+            ));
+        }
+    }
+
     fn deliver(&self, stream: Stream, buf: Vec<u8>) {
         if let Ok(mut b) = self.bufs.lock() {
             match stream {
@@ -491,8 +511,13 @@ fn collect_to_end<R: std::io::Read + Send + 'static>(
     thread::spawn(move || {
         let handle = handle;
         let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf);
-        handle.deliver(stream, buf);
+        // THE TERMINAL RESULT DECIDES WHETHER THERE IS ANYTHING TO DELIVER (roborev
+        // job 255, finding 2). Discarding it delivered whatever had been read as
+        // the WHOLE stream.
+        match reader.read_to_end(&mut buf) {
+            Ok(_) => handle.deliver(stream, buf),
+            Err(error) => handle.read_failed(stream, error, buf.len()),
+        }
     });
 }
 
@@ -508,6 +533,12 @@ enum CollectEnd {
     /// buffer can arrive. A collector that reached EOF always delivers, so this can
     /// only be a panic inside the harness.
     CollectorsEnded { collected: usize },
+    /// A collector's `read_to_end` returned `Err`, so its stream was never read to
+    /// the end (roborev job 255, finding 2). DISTINCT from every variant above: the
+    /// deadline was not reached, no collector merely ended, and the lock was
+    /// readable — this harness could not read the pipe, and the partial buffer is
+    /// deliberately NOT presented as the stream's output.
+    ReadFailed { failures: String, collected: usize },
     /// The store's lock was poisoned — a collector panicked while holding it. A
     /// harness defect, and a DIFFERENT one from `CollectorsEnded`, so it is not
     /// folded into it.
@@ -523,12 +554,32 @@ enum Look {
         collected: usize,
         collectors_open: usize,
     },
+    ReadFailed {
+        failures: String,
+        collected: usize,
+    },
     Unavailable,
 }
 
 fn look(bufs: &Mutex<StreamBufs>) -> Look {
     match bufs.lock() {
         Ok(mut b) => {
+            // CHECKED FIRST, under the same lock as everything else (job 255,
+            // finding 2): a stream that could not be read to its end must never be
+            // reported through a variant that says the collection succeeded, nor
+            // blamed on the deadline or on a collector merely ending.
+            if !b.read_failures.is_empty() {
+                let failures = b
+                    .read_failures
+                    .iter()
+                    .map(|(stream, error)| format!("{stream:?} collector: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Look::ReadFailed {
+                    failures,
+                    collected: b.collected(),
+                };
+            }
             if b.collected() == 2 {
                 let out = b.stdout.take().unwrap_or_default();
                 let err = b.stderr.take().unwrap_or_default();
@@ -559,6 +610,13 @@ fn collect_both_streams(bufs: &Arc<Mutex<StreamBufs>>, stage: &Stage) -> Collect
         if left.is_zero() {
             return match look(bufs) {
                 Look::Both(out, err) => CollectEnd::Both(out, err),
+                Look::ReadFailed {
+                    failures,
+                    collected,
+                } => CollectEnd::ReadFailed {
+                    failures,
+                    collected,
+                },
                 Look::Unavailable => CollectEnd::Unavailable,
                 // The cause comes from the SAME read as the count, so a collection
                 // that ran out of COLLECTORS is never reported as one that ran out
@@ -572,6 +630,15 @@ fn collect_both_streams(bufs: &Arc<Mutex<StreamBufs>>, stage: &Stage) -> Collect
         }
         match look(bufs) {
             Look::Both(out, err) => return CollectEnd::Both(out, err),
+            Look::ReadFailed {
+                failures,
+                collected,
+            } => {
+                return CollectEnd::ReadFailed {
+                    failures,
+                    collected,
+                }
+            }
             Look::Unavailable => return CollectEnd::Unavailable,
             Look::Partial {
                 collected,
@@ -711,6 +778,22 @@ pub fn select_rows(
              {collected}/2 streams delivered — a collector ended without delivering its \
              buffer. This is a defect in this test harness, not a statement about \
              durability.\n{}",
+            stage.report()
+        ),
+        // Not a timeout and not a whole stream: a collector could not read its pipe
+        // to the end, so the rows below would have been parsed out of a TRUNCATED
+        // buffer had the partial output been delivered as complete (job 255,
+        // finding 2).
+        CollectEnd::ReadFailed {
+            failures,
+            collected,
+        } => panic!(
+            "stage (e) durability-read: a read-side collector could not read its stream to the \
+             end ({collected}/2 streams collected whole): {failures}.\n\
+             The partial buffer is deliberately NOT used: rows parsed out of a truncated stream \
+             would be a statement about this harness's read, not about what the child emitted.\n\
+             WHAT THIS ESTABLISHES: only that this harness failed to read a pipe. It says nothing \
+             about durability, and nothing about the child, which exited ({status:?}).\n{}",
             stage.report()
         ),
         CollectEnd::Unavailable => panic!(

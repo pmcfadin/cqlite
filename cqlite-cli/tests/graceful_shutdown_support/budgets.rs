@@ -1020,9 +1020,11 @@ fn the_stage_census_check_rejects_an_extra_stage_that_never_finished() {
         for entry in T1_WAIT_CENSUS {
             deadline.stage(entry.stage).finish();
         }
-        // Opened, therefore able to draw on the one deadline; dropped without
-        // `finish()`, therefore absent from every completion record.
-        drop(deadline.stage("f.opened-never-finished"));
+        // Opened, therefore able to draw on the one deadline; never `finish()`ed,
+        // therefore absent from every completion record. `Stage` has no `Drop`, so
+        // it is simply left to go out of scope — the record of its OPENING is
+        // already in the deadline.
+        let _never_finished = deadline.stage("f.opened-never-finished");
         assert!(
             deadline
                 .unfinished_stages()
