@@ -25,18 +25,22 @@
 //! | a. session up      | readiness banner (stderr)         | the banner was not observed in time |
 //! | b. write ack       | `OK` (stdout), timed -> `t_ack`    | no write was acknowledged in time |
 //! | c. handler entered | Ctrl-C handler-entry marker (stderr) | signal undelivered / handler not entered / marker text drifted |
-//! | d. clean exit      | process exit, progress-checked     | the shutdown flush did not complete in time |
+//! | d. clean exit      | process exit, progress-observed    | the shutdown flush did not complete in time |
 //!
 //! Observing (c) proves three things at once — the signal was delivered, a
 //! shutdown handler exists and was entered, and the child was scheduled — which
 //! is exactly the conjunction the old message guessed at. So (d) may never claim
 //! anything about the *existence* of a handler.
 //!
-//! Every budget that follows a completed measurement is calibrated from that
-//! measurement, taken on this host in this run: `clamp(base * scale, base, cap)`
-//! with `scale = max(1, observed / quiet_baseline)`. The baselines are generous
-//! (seconds), so a quiet host always yields `scale == 1`: calibration can only
-//! loosen a budget, never tighten one.
+//! # ONE deadline (round-8 descope, design.md D6a)
+//!
+//! The stages above are **attribution**, not budgets. The whole test is bounded
+//! by a SINGLE deadline, calibrated once from the largest scale of its in-band
+//! measurements (`t_boot`, `t_ack`) as `clamp(base x scale, base, cap)` with
+//! `scale = max(1, observed / quiet_baseline)`. Any single stage may consume the
+//! whole deadline, so no wait here can fire sooner than the 60s bound it
+//! replaced; and observed progress is reported as evidence but never extends
+//! anything, so the declared bound is the actual maximum.
 //!
 //! Unix-only: it sends a real `SIGINT` via `libc::kill`.
 
@@ -55,23 +59,29 @@ use wait_timeout::ChildExt;
 /// AC (issue #1693): an interactive `--writable` session that receives SIGINT
 /// after a write exits cleanly AND has flushed the row to a durable SSTable.
 ///
-/// Oracle (issue #3515): four staged waits, each reporting only what it measures.
+/// Oracle (issue #3515): five attribution stages under one deadline, each
+/// reporting only what it measures.
 #[test]
 fn sigint_in_writable_session_flushes_before_exit() {
     let tmp = TempDir::new().unwrap();
     let schema = write_schema(tmp.path());
     let wd = tmp.path().join("wd");
     let data_dir = wd.join("data");
-    let mut clock = StageClock::new(T1_TOTAL_BUDGET);
+    // THE ONE BOUND. Live from here, so every stage including the first is
+    // charged; still uncalibrated, because no measurement exists yet.
+    let mut deadline = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
 
-    // Stage (a): session up (bare deadline — the irreducible bound).
-    let (mut child, io, t_boot) = start_writable_session(&wd, &schema, &[], &mut clock);
+    // Stage (a): session up.
+    let (mut child, io, t_boot) = start_writable_session(&wd, &schema, &[], &deadline);
+    // First in-band measurement: fold it into the one deadline. Calibration is
+    // monotone, so this can only ever move the deadline later.
+    deadline.calibrate("t_boot", t_boot);
 
     // Keep the stdin handle alive for the whole test so the child exits via
     // SIGINT, NOT via stdin EOF (an EOF would also flush and mask the bug).
     let mut stdin = child.stdin.take().expect("child stdin");
 
-    // Stage (b): write ack, timed -> `t_ack`. Budget calibrated from `t_boot`.
+    // Stage (b): write ack, timed -> `t_ack`.
     writeln!(
         stdin,
         "INSERT INTO test_write.users (id, name, age, active) VALUES (7, 'Grace', 30, true);"
@@ -79,26 +89,10 @@ fn sigint_in_writable_session_flushes_before_exit() {
     .expect("write INSERT to child stdin");
     stdin.flush().expect("flush child stdin");
 
-    let ack_budget = clock.clip(calibrated(T1_ACK, t_boot, "t_boot", BOOT_QUIET_BASELINE));
-    let t_ack = await_write_ack(
-        &io,
-        "stage (b) write-ack",
-        "the INSERT (id=7)",
-        &ack_budget,
-        &clock,
-    );
-    clock.record("b.write-ack", t_ack);
-
-    // Report (never fail) if this host is faster than the recorded anchors, which
-    // would mean the anchors are permissive; see `notice_if_anchor_is_permissive`.
-    let (boot_anchor, ack_anchor) = quiet_anchors();
-    notice_if_anchor_is_permissive("t_boot", t_boot, boot_anchor);
-    notice_if_anchor_is_permissive("t_ack", t_ack, ack_anchor);
-
-    // The stall window for the progress-checked exit wait is calibrated from the
-    // same `t_ack`: on a host where a full write round-trip takes seconds, a
-    // few seconds of silence is not evidence of a stall.
-    let stall_window = calibrated(STALL_WINDOW, t_ack, "t_ack", ACK_QUIET_BASELINE);
+    let stage = deadline.stage("b.write-ack");
+    let t_ack = await_write_ack(&io, "the INSERT (id=7)", &stage);
+    stage.finish();
+    deadline.calibrate("t_ack", t_ack);
 
     // Send a real SIGINT to the child.
     let pid = child.id() as libc::pid_t;
@@ -109,11 +103,11 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // that the signal was delivered, that a shutdown handler exists and was
     // entered, and that the child was scheduled — so stage (d) below may never
     // claim anything about a handler's existence.
-    let handler_budget = clock.clip(calibrated(T1_HANDLER, t_ack, "t_ack", ACK_QUIET_BASELINE));
+    let stage = deadline.stage("c.handler-entry");
     let entered = io.wait_for(
         Stream::Stderr,
         |l| l.contains(MARKER_HANDLER_ENTERED),
-        &handler_budget,
+        &stage,
     );
     let t_handler = match entered {
         Ok((_, took)) => took,
@@ -131,36 +125,28 @@ fn sigint_in_writable_session_flushes_before_exit() {
              \x20 3. the product's marker text drifted, so this test awaited a string the child \
              no longer prints — compare the awaited substring against the transcript below.\n\
              child transcript:\n{}\n{}",
-            handler_budget.describe(),
+            stage.describe(),
             end.describe(),
             io.transcript_text(),
-            clock.report()
+            stage.report()
         );
         }
     };
-    clock.record("c.handler-entry", t_handler);
+    stage.finish();
 
-    // Stage (d): clean exit, PROGRESS-CHECKED. A new child output line or a new
-    // durable `-Data.db` artifact resets the stall window, so a flush that is
-    // landing slowly is never mistaken for a stall.
-    // `progress_checked` DECLARES the extension the poll may take beyond its
-    // nominal budget, so it is part of stage (d)'s declared maximum rather than an
-    // unaccounted addition on top of `T1_EXIT.cap` (roborev job 224, finding 3),
-    // and `clip_poll` bounds the extension by the total budget too.
-    let exit_budget = clock.clip_poll(
-        calibrated(T1_EXIT, t_ack, "t_ack", ACK_QUIET_BASELINE).progress_checked(&stall_window),
-    );
-    let exited = poll_with_progress(&io, &data_dir, &exit_budget, |slice| {
+    // Stage (d): clean exit, with progress OBSERVED. A new child output line or a
+    // new durable `-Data.db` artifact is reported as evidence in any failure
+    // message — it does not, and may not, extend the deadline (design.md D6a).
+    let stage = deadline.stage("d.clean-exit");
+    let exited = poll_with_progress(&io, &data_dir, &stage, |slice| {
         child.wait_timeout(slice).expect("wait_timeout on child")
     });
-    let (status, t_exit): (ExitStatus, Duration) = match exited {
+    let (status, _t_exit): (ExitStatus, Duration) = match exited {
         Ok(v) => v,
         Err(fail) => {
             let _ = child.kill();
             panic!(
-                "stage (d) clean-exit: the shutdown flush did not complete within the budget.\n\
-                 {}\n\
-                 stall window {}\n\
+                "stage (d) clean-exit: the shutdown flush did not complete before the deadline.\n\
                  {}\n\
                  WHAT THIS ESTABLISHES: the handler-entry marker {MARKER_HANDLER_ENTERED:?} WAS \
                  observed {:.3?} after SIGINT, so the shutdown handler exists, was entered, and \
@@ -168,18 +154,16 @@ fn sigint_in_writable_session_flushes_before_exit() {
                  did not complete in time; it says nothing about whether a handler is present.\n\
                  durable -Data.db artifacts under {}: {}\n\
                  child transcript:\n{}\n{}",
-                exit_budget.describe(),
-                stall_window.describe(),
                 fail.observed(),
                 t_handler,
                 data_dir.display(),
                 count_data_db(&data_dir),
                 io.transcript_text(),
-                clock.report()
+                stage.report()
             );
         }
     };
-    clock.record("d.clean-exit", t_exit);
+    stage.finish();
     // Release stdin only after the process has exited.
     drop(stdin);
     assert!(
@@ -190,17 +174,9 @@ fn sigint_in_writable_session_flushes_before_exit() {
 
     // Stage (e): durability. The SIGINT handler must have flushed the memtable to
     // a real SSTable — the row is present on an independent read-only reopen.
-    // A fresh CLI process doing a read is the same shape of work as the session
-    // boot, so this budget is calibrated from `t_boot`.
-    let read_budget = clock.clip(calibrated(T1_READ, t_boot, "t_boot", BOOT_QUIET_BASELINE));
-    let (rows, t_read) = select_rows(
-        &data_dir,
-        &schema,
-        "SELECT * FROM test_write.users",
-        &read_budget,
-        &clock,
-    );
-    clock.record("e.durability-read", t_read);
+    let stage = deadline.stage("e.durability-read");
+    let (rows, _t_read) = select_rows(&data_dir, &schema, "SELECT * FROM test_write.users", &stage);
+    stage.finish();
     let grace = rows
         .iter()
         .find(|r| r.get("id").and_then(|v| v.as_i64()) == Some(7))
@@ -216,17 +192,13 @@ fn sigint_in_writable_session_flushes_before_exit() {
         "durable row has wrong name: {grace}"
     );
 
-    // Visible with `--nocapture`: the per-stage timings and the budgets they
-    // derived, which is what makes a loaded-host run auditable (#3515 AC1).
+    // Visible with `--nocapture`: the per-stage timings and the one deadline they
+    // ran under, which is what makes a loaded-host run auditable (#3515 AC1).
     eprintln!(
-        "[#3515] sigint_in_writable_session_flushes_before_exit\n{}",
-        clock.report()
+        "[#3515] sigint_in_writable_session_flushes_before_exit\n{}\n[#3515]   {}",
+        deadline.report(),
+        deadline.describe()
     );
-    eprintln!("[#3515]   b.write-ack       {}", ack_budget.describe());
-    eprintln!("[#3515]   c.handler-entry   {}", handler_budget.describe());
-    eprintln!("[#3515]   d.clean-exit      {}", exit_budget.describe());
-    eprintln!("[#3515]   e.durability-read {}", read_budget.describe());
-    eprintln!("[#3515]   stall window      {}", stall_window.describe());
 }
 
 /// Issue #1693 (roborev): the interactive writable loop must use the async,
@@ -244,7 +216,8 @@ fn sigint_in_writable_session_flushes_before_exit() {
 /// places (per-write ack, mid-session artifact wait, EOF exit), each a bare 60s
 /// deadline whose expiry blamed a dead-ended session, or an interactive loop
 /// that had bypassed the threshold-flushing path. A timeout establishes neither.
-/// All three are now staged, calibrated and (where they poll) progress-checked.
+/// All three are now attribution stages under this test's ONE deadline, and the
+/// two that poll observe (never credit) progress.
 #[test]
 fn writable_session_auto_flushes_mid_session_across_threshold() {
     const WRITES: i64 = 5;
@@ -252,33 +225,32 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     let schema = write_schema(tmp.path());
     let wd = tmp.path().join("wd");
     let data_dir = wd.join("data");
-    let mut clock = StageClock::new(T2_TOTAL_BUDGET);
+    let mut deadline = TestDeadline::start(T2_DEADLINE_BASE, T2_DEADLINE_CAP);
 
-    // Stage (a): session up (bare deadline — the irreducible bound). The tiny
-    // threshold makes a handful of small rows cross it, forcing a mid-session
-    // flush without writing 64MB over stdin.
+    // Stage (a): session up. The tiny threshold makes a handful of small rows
+    // cross it, forcing a mid-session flush without writing 64MB over stdin.
     let (mut child, io, t_boot) = start_writable_session(
         &wd,
         &schema,
         &[("CQLITE_MEMTABLE_FLUSH_THRESHOLD", "1")],
-        &mut clock,
+        &deadline,
     );
+    deadline.calibrate("t_boot", t_boot);
     let mut stdin = child.stdin.take().expect("child stdin");
 
-    // Stage (b): every write is acknowledged. The first ack is calibrated from
-    // `t_boot`; each later one from the slowest ack seen so far, so a session
-    // that is merely slow keeps loosening its own budget.
-    // `t_ack` is the SLOWEST SINGLE ack, which is the right CALIBRATION input (a
-    // later stage's budget should scale with how slow one round-trip is, not with
-    // how many were done). It is NOT the stage's duration: recording it as such
-    // under-reported a five-write stage by up to 5x, and the per-stage timing table
-    // is a deliverable of this change (roborev job 222, finding 3). So the stage's
-    // elapsed time is measured separately, over the whole loop.
+    // Stage (b): every write is acknowledged. Each of the five writes replaced an
+    // INDEPENDENT 60s wait, and each may consume the whole deadline — which is why
+    // the floor invariant needs no per-operation arithmetic here (roborev job 219,
+    // finding 1: an aggregate argument is irrelevant per operation).
+    //
+    // `t_ack` is the SLOWEST SINGLE ack, which is the right CALIBRATION input (the
+    // deadline should scale with how slow one round-trip is, not with how many were
+    // done). It is NOT the stage's duration: recording it as such under-reported a
+    // five-write stage by up to 5x, and the per-stage timing table is a deliverable
+    // of this change (roborev job 222, finding 3). So the stage's own elapsed time
+    // is what `Stage::finish` records, over the whole loop.
+    let acks = deadline.stage("b.write-acks");
     let mut t_ack = Duration::ZERO;
-    let acks_started = Instant::now();
-    // Writes id=1..4 replaced four INDEPENDENT 60s waits, so each carries the full
-    // old bound as its base; `clock.clip` IS the group deadline and bounds their
-    // aggregate (roborev job 219, finding 1).
     for id in 0..WRITES {
         writeln!(
             stdin,
@@ -287,44 +259,16 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         .expect("write INSERT to child stdin");
         stdin.flush().expect("flush child stdin");
 
-        // The FIRST write's ack shares the old 60s bound with stage (a) (that
-        // deadline covered boot as well), so it carries a larger base than the
-        // later ones; see the floor invariant above.
-        let (stage_spec, observed, name, baseline) = if id == 0 {
-            (T2_ACK_FIRST, t_boot, "t_boot", BOOT_QUIET_BASELINE)
-        } else {
-            (
-                T2_ACK_LATER,
-                t_ack,
-                "t_ack(slowest so far)",
-                ACK_QUIET_BASELINE,
-            )
-        };
-        let budget = clock.clip(calibrated(stage_spec, observed, name, baseline));
-        let took = await_write_ack(
-            &io,
-            "stage (b) write-ack",
-            &format!("write id={id}"),
-            &budget,
-            &clock,
-        );
-        t_ack = t_ack.max(took);
+        let before = Instant::now();
+        await_write_ack(&io, &format!("write id={id}"), &acks);
+        t_ack = t_ack.max(before.elapsed());
     }
-    let t_acks_total = acks_started.elapsed();
-    clock.record("b.write-acks", t_acks_total);
-
-    let (boot_anchor, ack_anchor) = quiet_anchors();
-    notice_if_anchor_is_permissive("t_boot", t_boot, boot_anchor);
-    notice_if_anchor_is_permissive("t_ack", t_ack, ack_anchor);
-
-    let stall_window = calibrated(STALL_WINDOW, t_ack, "t_ack", ACK_QUIET_BASELINE);
+    let t_acks_total = acks.finish();
+    deadline.calibrate("t_ack(slowest of 5)", t_ack);
 
     // Stage (c): a durable SSTable must exist BEFORE we close the session.
-    // Progress-checked, and calibrated from `t_ack`.
-    let sstable_budget = clock.clip_poll(
-        calibrated(T2_SSTABLE, t_ack, "t_ack", ACK_QUIET_BASELINE).progress_checked(&stall_window),
-    );
-    let flushed = poll_with_progress(&io, &data_dir, &sstable_budget, |slice| {
+    let stage = deadline.stage("c.mid-session-flush");
+    let flushed = poll_with_progress(&io, &data_dir, &stage, |slice| {
         if count_data_db(&data_dir) >= 1 {
             Some(())
         } else {
@@ -332,68 +276,55 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
             None
         }
     });
-    let t_sstable = match flushed {
-        Ok((_, took)) => took,
-        Err(fail) => {
-            let _ = child.kill();
-            panic!(
-                "stage (c) mid-session-flush: no durable `-Data.db` artifact appeared under {} \
-                 while the session was still open, after {WRITES} acknowledged writes with \
-                 CQLITE_MEMTABLE_FLUSH_THRESHOLD=1.\n\
-                 {}\n\
-                 stall window {}\n\
-                 {}\n\
-                 WHAT THIS ESTABLISHES: only that no artifact was observed within that budget. It \
-                 does NOT establish that the interactive loop skipped the threshold-flushing path \
-                 — a flush still in progress, or a child that was descheduled, produces the same \
-                 reading. The writes WERE acknowledged (stage (b) passed), so the session was \
-                 accepting statements.\n\
-                 child transcript:\n{}\n{}",
-                data_dir.display(),
-                sstable_budget.describe(),
-                stall_window.describe(),
-                fail.observed(),
-                io.transcript_text(),
-                clock.report()
-            );
-        }
-    };
-    clock.record("c.mid-session-flush", t_sstable);
+    if let Err(fail) = flushed {
+        let _ = child.kill();
+        panic!(
+            "stage (c) mid-session-flush: no durable `-Data.db` artifact appeared under {} \
+             while the session was still open, after {WRITES} acknowledged writes with \
+             CQLITE_MEMTABLE_FLUSH_THRESHOLD=1.\n\
+             {}\n\
+             WHAT THIS ESTABLISHES: only that no artifact was observed before the deadline. It \
+             does NOT establish that the interactive loop skipped the threshold-flushing path \
+             — a flush still in progress, or a child that was descheduled, produces the same \
+             reading. The writes WERE acknowledged (stage (b) passed), so the session was \
+             accepting statements.\n\
+             child transcript:\n{}\n{}",
+            data_dir.display(),
+            fail.observed(),
+            io.transcript_text(),
+            stage.report()
+        );
+    }
+    stage.finish();
 
-    // Stage (d): cleanly end via EOF; progress-checked exit wait.
+    // Stage (d): cleanly end via EOF; progress-observed exit wait.
     drop(stdin);
-    let exit_budget = clock.clip_poll(
-        calibrated(T2_EOF_EXIT, t_ack, "t_ack", ACK_QUIET_BASELINE).progress_checked(&stall_window),
-    );
-    let exited = poll_with_progress(&io, &data_dir, &exit_budget, |slice| {
+    let stage = deadline.stage("d.eof-exit");
+    let exited = poll_with_progress(&io, &data_dir, &stage, |slice| {
         child.wait_timeout(slice).expect("wait_timeout on child")
     });
-    let (status, t_exit): (ExitStatus, Duration) = match exited {
+    let (status, _t_exit): (ExitStatus, Duration) = match exited {
         Ok(v) => v,
         Err(fail) => {
             let _ = child.kill();
             panic!(
                 "stage (d) eof-exit: the child had not exited after its stdin reached EOF.\n\
                  {}\n\
-                 stall window {}\n\
-                 {}\n\
-                 WHAT THIS ESTABLISHES: only that no exit was observed within that budget. The \
+                 WHAT THIS ESTABLISHES: only that no exit was observed before the deadline. The \
                  EOF path flushes and finalizes the engine before returning, so a slow flush and \
-                 a wedged one read the same here; the progress check above reports whether \
+                 a wedged one read the same here; the progress observation above reports whether \
                  anything was still happening.\n\
                  durable -Data.db artifacts under {}: {}\n\
                  child transcript:\n{}\n{}",
-                exit_budget.describe(),
-                stall_window.describe(),
                 fail.observed(),
                 data_dir.display(),
                 count_data_db(&data_dir),
                 io.transcript_text(),
-                clock.report()
+                stage.report()
             );
         }
     };
-    clock.record("d.eof-exit", t_exit);
+    stage.finish();
     assert!(
         status.success(),
         "child exited uncleanly on EOF: {status:?}\nchild transcript:\n{}",
@@ -401,15 +332,9 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     );
 
     // Stage (e): all rows are durable on an independent read-only reopen.
-    let read_budget = clock.clip(calibrated(T2_READ, t_boot, "t_boot", BOOT_QUIET_BASELINE));
-    let (rows, t_read) = select_rows(
-        &data_dir,
-        &schema,
-        "SELECT * FROM test_write.users",
-        &read_budget,
-        &clock,
-    );
-    clock.record("e.durability-read", t_read);
+    let stage = deadline.stage("e.durability-read");
+    let (rows, _t_read) = select_rows(&data_dir, &schema, "SELECT * FROM test_write.users", &stage);
+    stage.finish();
     for id in 0..WRITES {
         assert!(
             rows.iter()
@@ -421,18 +346,12 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     }
 
     eprintln!(
-        "[#3515] writable_session_auto_flushes_mid_session_across_threshold\n{}",
-        clock.report()
+        "[#3515] writable_session_auto_flushes_mid_session_across_threshold\n{}\n[#3515]   {}",
+        deadline.report(),
+        deadline.describe()
     );
     eprintln!(
-        "[#3515]   b.write-acks        {WRITES} writes in {t_acks_total:.3?} (slowest single ack \
+        "[#3515]   b.write-acks {WRITES} writes in {t_acks_total:.3?} (slowest single ack \
          {t_ack:.3?}, which is the calibration input)"
     );
-    eprintln!(
-        "[#3515]   c.mid-session-flush {}",
-        sstable_budget.describe()
-    );
-    eprintln!("[#3515]   d.eof-exit          {}", exit_budget.describe());
-    eprintln!("[#3515]   e.durability-read   {}", read_budget.describe());
-    eprintln!("[#3515]   stall window        {}", stall_window.describe());
 }
