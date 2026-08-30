@@ -150,19 +150,32 @@ class _Stub:
         # ``from cqlite import <name>`` for and have a type checker accept.
         self.module_names: set[str] = set()
 
+        # Module-level KIND per name, not just the name. Without it a stub could
+        # redeclare `def version(...)` as `version: str` and pass -- and, far
+        # worse, redeclaring a stub CLASS as a same-named function drops it from
+        # `self.classes`, which SILENTLY SKIPS that class's entire member
+        # comparison while every remaining check still passes (measured: 17
+        # classes compared; dropping one produced a green run with no member
+        # check for it). Kind is what makes that bypass detectable.
+        self.module_kinds: dict[str, str] = {}
+
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 self.classes[node.name] = _class_members(node)
                 self.module_names.add(node.name)
+                self.module_kinds[node.name] = "class"
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.functions[node.name] = node
                 self.module_names.add(node.name)
+                self.module_kinds[node.name] = "callable"
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 self.module_names.add(node.target.id)
+                self.module_kinds[node.target.id] = "attribute"
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         self.module_names.add(target.id)
+                        self.module_kinds[target.id] = "attribute"
 
 
 def _stub() -> _Stub:
@@ -331,6 +344,41 @@ def test_pyi_matches_runtime():
         f"(phantom declarations): {phantoms}"
     )
 
+    # (3b) module-level SHAPE, and the ANTI-BYPASS guard.
+    #
+    # Comparing module-level names only was a silent bypass, not merely a missing
+    # dimension: a stub CLASS redeclared as a same-named function leaves
+    # `stub.classes`, so the per-class member loop below never visits it and every
+    # other check still passes. Measured before this guard existed: 17 classes
+    # compared, and dropping one produced a GREEN run with no member check for it.
+    #
+    # So the runtime kind is authoritative here. Every public runtime CLASS must be
+    # declared as a `class` in the stub -- which is what keeps it inside
+    # `stub.classes` and therefore inside the member comparison.
+    kind_drift: list[str] = []
+    for name in sorted(runtime_public):
+        if name in TYPE_ONLY_STUB_NAMES:
+            continue
+        declared_kind = stub.module_kinds.get(name)
+        if declared_kind is None:
+            continue  # already reported by the (2) undeclared check
+        value = getattr(cqlite, name)
+        runtime_kind = (
+            "class" if isinstance(value, type) else ("callable" if callable(value) else "attribute")
+        )
+        if declared_kind != runtime_kind:
+            kind_drift.append(
+                f"{name}: declared as {declared_kind} in {stub.path.name} but "
+                f"{runtime_kind} at runtime"
+                + (
+                    " -- a runtime class declared as a non-class ALSO skips that "
+                    "class's whole member comparison"
+                    if runtime_kind == "class"
+                    else ""
+                )
+            )
+    assert not kind_drift, "stub/runtime module-level kind drift:\n  " + "\n  ".join(kind_drift)
+
     # (4)/(5) per-class comparison.
     drift: list[str] = []
     dunder_classes_seen: dict[str, int] = {}
@@ -412,6 +460,23 @@ def test_pyi_matches_runtime():
                     f"but {runtime_shape} at runtime (the call site differs)"
                 )
         dunder_classes_seen[class_name] = len(declared_dunders)
+
+    # Non-vacuity for the CLASS LOOP: every public runtime class must actually have
+    # been member-compared. The loop iterates `stub.classes`, so anything that
+    # drops a class from that dict shrinks it SILENTLY. (3b) guards the CAUSE (a
+    # kind mismatch); this guards the OUTCOME, because a guard on the cause and a
+    # guard on the effect fail independently.
+    runtime_classes = {
+        name
+        for name in runtime_public
+        if name not in TYPE_ONLY_STUB_NAMES and isinstance(getattr(cqlite, name), type)
+    }
+    uncompared = sorted(runtime_classes - set(stub.classes))
+    assert not uncompared, (
+        "public runtime classes that were NEVER member-compared (the comparison "
+        f"was skipped entirely for these): {uncompared}"
+    )
+    assert stub.classes, f"parsed no classes from {stub.path}"
 
     # Non-vacuity for the dunder direction as a whole: the stub demonstrably
     # declares protocol dunders (`Row.__getitem__`, `QueryResult.__len__`, the
