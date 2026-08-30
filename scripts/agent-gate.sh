@@ -2035,6 +2035,7 @@ apply_fixture_preflight() {
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
         "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "hint: bash test-data/scripts/fetch-datasets.sh  (opt-out: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores SKIP + stamps this block)"
       exit 1 ;;
@@ -2081,6 +2082,18 @@ SCHEMAS_LINE=""
 # pre-flight has run (a boundary block emitted earlier omits the line rather than
 # inventing it, exactly as SCHEMAS_LINE does).
 COMPONENT_SET_LINE=""
+
+# _component_set_meta: the `component-set:` line for an emit_summary POSITIONAL slot,
+# where an empty value would print a BLANK line into the block. Every emit reached AFTER
+# the mode dispatch has the line stamped; the fallback names the one state that could
+# otherwise be mistaken for a check that ran and passed.
+_component_set_meta() {
+  if [ -n "${COMPONENT_SET_LINE:-}" ]; then
+    printf '%s' "$COMPONENT_SET_LINE"
+  else
+    printf '%s' 'component-set: NOT EVALUATED (this block was emitted before the #3544 pre-flight) — it asserts NOTHING about the component set'
+  fi
+}
 
 # _gate_checkout_test_data_dir: the enclosing checkout's `test-data`, anchored on the
 # WORKSPACE-ROOT `Cargo.toml` (nearest ancestor manifest declaring `[workspace]`) exactly
@@ -2455,6 +2468,7 @@ apply_schemas_preflight() {
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
       "$marker" \
+      "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
       "hint: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
     exit 1
@@ -2482,6 +2496,7 @@ apply_schemas_preflight() {
       emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
         "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "hint: expected $root/${missing%% *} — unset CQLITE_SCHEMAS_ROOT, or: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas"
       exit 1 ;;
@@ -14771,6 +14786,7 @@ if selected_needs_datasets; then
     _tree_meta_array   # #2926
     emit_summary FAIL \
       "preflight: FAIL (no Data.db files under $CQLITE_DATASETS_ROOT/sstables)" \
+      "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
       "hint: bash test-data/scripts/fetch-datasets.sh"
     exit 1
