@@ -260,10 +260,53 @@ WS0_EXPECTED_CFG=(
   "events=cycles,instructions" "bin_dir=target/release" "profile=off"
   "quiescence=NOT VERIFIED (no timeseries supplied)"
 )
+# ...and the PIN side: the FIELD SET is derived from the driver, the VALUES are stated here
+# (#3451 post-rebase round 6, F3).
+#
+# The hand-written list omitted `topology_root` while the verification claimed every
+# driver-mapped pin field was compared. Adding the missing line fixes the symptom; the DEFECT is
+# that a list can be incomplete and nothing notices, so the NEXT field added to the driver would
+# be silently uncovered too.
+#
+# DERIVING THE VALUE AS WELL WAS THE OBVIOUS FIX AND IT IS CIRCULAR — I built it and measured it
+# failing. Pairing each field with the value of the variable THE DRIVER maps it to means a
+# swapped mapping supplies its own expectation: with
+# `WS0_PIN_TOPOLOGY_ROOT="$WS0_SERVER_SIBLINGS"` injected into the real driver, expected and
+# actual agreed and the suite passed. That is the artifact acting as its own oracle.
+#
+# So the two halves come from two sources, which is the shape that has held up everywhere in this
+# suite: the FIELD SET is read out of the driver (nothing can be uncovered) and the EXPECTED
+# VALUE is stated below (a wrong mapping is detectable), and the two sets are asserted EQUAL — so
+# a field added to the driver fails loudly for want of a stated expectation rather than passing
+# unchecked.
 WS0_EXPECTED_PIN=(
   "server_cpus=2,10" "client_cpus=4,12"
   "server_siblings_expanded=server cpu 2 siblings 2,10"
+  "topology_root=$TMP/fake-topology"
 )
+
+# driver_pin_fields <driver> — the record fields the CPU block sources from the ENVIRONMENT, read
+# out of the block itself (`"<field>": os.environ["WS0_PIN_<VAR>"]`). The completeness half.
+driver_pin_fields() {
+  python3 - "$REPO_ROOT/scripts/tests" "$1" <<'PY'
+import pathlib, re, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_embedded_python import census
+
+records, _findings = census(pathlib.Path(sys.argv[2]))
+owners = [r for r in records if r["kind"] == "BLOCK" and "pinning_record_path" in r["body"]]
+if len(owners) != 1:
+    print(f"AMBIGUOUS: {len(owners)} block(s) write the pinning record", file=sys.stderr)
+    raise SystemExit(2)
+fields = re.findall(r'"([a-z_]+)":\s*os\.environ\["WS0_PIN_[A-Z_]+"\]', owners[0]["body"])
+if not fields:
+    print("NO MAPPING: the CPU-pin block no longer sources any record field from the"
+          " environment, so nothing can be derived — check the driver before relaxing this.",
+          file=sys.stderr)
+    raise SystemExit(3)
+print(" ".join(sorted(set(fields))))
+PY
+}
 
 # local_binding_of <driver> <block-needle> — the first `NAME = MAPPING["KEY"]` line in the block
 # that calls <block-needle>, printed as `NAME MAPPING KEY`.
@@ -787,6 +830,51 @@ if [ "$ctlword_rc" -eq 0 ] && [ "$ctlword_ok" -eq 1 ]; then
   pass "census CONTROL fired (control words): a leading if/time/! is STEPPED OVER so the real command word is judged — the indirect forms are findings while the same constructs leading a literal grep stay clean, which is why the words are skipped and not refused"
 else
   fail "census CONTROL did not fire (control words): fixture-rc=$ctlword_rc problems:$ctlword_detail"
+fi
+
+# --- STRUCTURAL: no consumer classifies from PHYSICAL text -------------------------------------
+# THE ONLY CHECK HERE THAT CAN STOP INSTANCE SIX. The joined-vs-physical inconsistency has
+# produced FIVE findings across five rounds — discovery vs classification, the flag anchor's
+# command word, the export prefix's question, a comment swallowing a live command, and the
+# `for … in` probe reading the wrong line. Each was fixed behaviourally, and behavioural cases
+# only ever cover the shapes someone already thought of, which is precisely why there were five.
+#
+# The rule is one sentence: the JOINED text is the representation for classification, comparison
+# and command-word extraction; the physical text may be used ONLY for diagnostics and line
+# numbers. Enforced by requiring every use of the physical-line variable inside `census` to carry
+# a `physical-ok:` marker naming why — so adding a classification that reads physical text fails
+# HERE, at the shape nobody thought of, rather than in a review round.
+#
+# Deliberately grep-shaped: the property is "which variable is read where", which is visible in
+# the source and needs no parse. A marker someone must write is also a decision someone must make.
+struct_out="$(python3 - "$REPO_ROOT/scripts/tests/ws0_embedded_python.py" <<'PY'
+import pathlib, re, sys
+src = pathlib.Path(sys.argv[1]).read_text().split("\n")
+try:
+    start = next(i for i, l in enumerate(src) if l.startswith("def census("))
+except StopIteration:
+    print("NO-SUBJECT: census() not found, so this assert has nothing to enforce")
+    raise SystemExit(0)
+end = next((i for i in range(start + 1, len(src)) if src[i].startswith("def ")), len(src))
+unmarked = [
+    f"{i + 1}: {src[i].strip()[:70]}"
+    for i in range(start, end)
+    if re.search(r"\bphysical_line\b", src[i]) and "physical-ok:" not in src[i]
+]
+# NON-VACUITY: the variable must EXIST, or an empty result would mean "renamed" rather than
+# "clean" — the guard would then pass by having no subject.
+present = sum(1 for i in range(start, end) if re.search(r"\bphysical_line\b", src[i]))
+print(f"present={present}")
+for u in unmarked:
+    print(f"UNMARKED {u}")
+PY
+)"
+struct_present="$(sed -n 's/^present=//p' <<<"$struct_out")"
+if [ "${struct_present:-0}" -ge 1 ] && ! grep -q '^UNMARKED' <<<"$struct_out" \
+   && ! grep -q '^NO-SUBJECT' <<<"$struct_out"; then
+  pass "STRUCTURAL (joined-vs-physical): all $struct_present use(s) of the physical line inside census() carry a physical-ok: marker — a classification added against physical text fails here rather than in a sixth review round"
+else
+  fail "STRUCTURAL (joined-vs-physical): $(grep -c '^UNMARKED' <<<"$struct_out") unmarked physical-text use(s) in census(), present=${struct_present:-0} — classification must read the JOINED line; mark a diagnostic-only use with physical-ok: $(grep '^UNMARKED' <<<"$struct_out" | head -2 | tr '\n' ' ')$(grep '^NO-SUBJECT' <<<"$struct_out")"
 fi
 
 # ============================================================================
@@ -1404,7 +1492,16 @@ fi
 # instead, a swap in ONE prefix was invisible; and because the manifest and the record were
 # validated INDEPENDENTLY, a MATCHING swap in both was invisible too. Reading one side from the
 # other is what makes a consistent swap detectable.
-if python3 - "$PERF_DIR" "$OUT" "${WS0_EXPECTED_PIN[@]}" <<'PY'
+# THE TWO SETS MUST AGREE before the values are compared: everything the driver maps must have a
+# stated expectation, and nothing stated may be absent from the driver.
+pin_derived="$(driver_pin_fields "$DRIVER")"
+pin_stated="$(printf '%s\n' "${WS0_EXPECTED_PIN[@]}" | sed 's/=.*//' | sort | tr '\n' ' ' | sed 's/ $//')"
+if [ -n "$pin_derived" ] && [ "$pin_derived" = "$pin_stated" ]; then
+  pass "cpu-pin field coverage: the fields the driver sources from the environment [$pin_derived] are EXACTLY those with a stated expected value — a field added to the driver cannot be silently uncovered, and the values stay independent of the driver's own mapping"
+else
+  fail "cpu-pin field coverage: the driver maps [$pin_derived] but expectations are stated for [$pin_stated]. A driver-mapped field with no stated value is UNCHECKED; a stated value for a field the driver no longer maps is a stale claim"
+fi
+if python3 - "$PERF_DIR" "$OUT" ${WS0_EXPECTED_PIN[@]+"${WS0_EXPECTED_PIN[@]}"} <<'PY'
 import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_pinning import PINNING_RECORD_FIELDS, pinning_record_path, verify_pinning_record
@@ -1545,21 +1642,30 @@ fi
 # `set -uo pipefail` (no `-e`) means a block that silently never executes lowers the count and
 # registers NO failure, while the gate reads only the exit code.
 #
-# A RATCHET AT THE ACTUAL COUNT, not a comfortable floor below it (#3451 post-rebase round 4,
-# F2). This sat at 26 while the suite ran 44, so an entire section — the CPU execution coverage,
-# say — could vanish and the floor would not notice. That is precisely the failure this guard
-# exists to catch, so a floor 18 below actual was a guard against nothing.
+# AN EXACT COUNT, FAILING IN BOTH DIRECTIONS (#3451 post-rebase round 6, F4).
 #
-# BUMP IT WHEN YOU ADD COVERAGE. It is a ratchet: a lower count means a case stopped running and
-# is a real failure, a higher one means you added a case and this constant is the one line to
-# update. Deliberate, and cheap, and it is the only thing standing between a deleted section and
-# a green suite.
-MIN_CHECKS=45
+# STILL NAMED `MIN_CHECKS`, and that is a cross-suite contract rather than a leftover:
+# `test_ws0_hermeticity.sh`'s `floor-present` check requires that identifier in every ws0 suite,
+# and renaming it here broke that sibling — measured. The comparison below is EQUALITY, which is
+# strictly stronger than the floor the lint is looking for, so the contract is met and the guard
+# is better than the name suggests.
+#
+# `-lt` made this a FLOOR, and a floor is satisfied by adding coverage without bumping it — after
+# which the new coverage can be deleted again and the stale floor still passes. It sat 18 below
+# actual for exactly that reason. Equality means a change in either direction is a decision
+# someone makes here, in one line, with the failure text saying which direction and why.
+MIN_CHECKS=47
 echo
-if [ "$checks" -lt "$MIN_CHECKS" ]; then
-  echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
-  echo "       A block that silently never executed would otherwise lower the count with no"
-  echo "       failure registered, and the gate reads only the exit code (#3451)."
+if [ "$checks" -ne "$MIN_CHECKS" ]; then
+  echo "FAIL - $checks check(s) ran; this suite has EXACTLY $MIN_CHECKS."
+  if [ "$checks" -lt "$MIN_CHECKS" ]; then
+    echo "       FEWER: a block silently never executed. It would otherwise lower the count with"
+    echo "       no failure registered, and the gate reads only the exit code (#3451)."
+  else
+    echo "       MORE: you added coverage. Bump MIN_CHECKS to $checks — deliberately, so the"
+    echo "       ratchet keeps holding. A floor would have accepted this silently, and the new"
+    echo "       coverage could then be deleted later while still meeting the stale floor."
+  fi
   exit 1
 fi
 if [ "$fails" -eq 0 ]; then
