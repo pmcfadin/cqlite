@@ -55,6 +55,11 @@
 //!   keyspace: a root holding the keyspace but not the table would otherwise win
 //!   the selection and the case would skip while the fixture sat in the checkout
 //!   (#3220).
+//! * The golden is DERIVED from the selected `*-Data.db`, never resolved beside
+//!   it: a `nb-1-big-Data.db.jsonl` left next to a regenerated
+//!   `nb-2-big-Data.db` would compare one generation's data against another
+//!   generation's dump — a false failure or a false PASS, reported as neither.
+//!   A non-corresponding pair is a named refusal ([`fixture_in_table_dir`]).
 //! * A case whose SSTable binaries are COMMITTED to git is `must_run`: an
 //!   absence is a hard failure, unconditionally. Authority for the flag is
 //!   `git ls-files 'test-data/datasets/sstables/**-Data.db'`, never presence on
@@ -198,16 +203,19 @@ fn require_fixtures() -> bool {
         .unwrap_or(false)
 }
 
-/// The resolved on-disk fixture: the single-generation table directory.
-struct Fixture {
-    table_dir: PathBuf,
-    golden: PathBuf,
+/// The resolved on-disk fixture: the single-generation table directory, and the
+/// golden that BELONGS to that generation (see [`fixture_in_table_dir`]).
+#[derive(Debug)]
+pub struct Fixture {
+    pub table_dir: PathBuf,
+    pub golden: PathBuf,
 }
 
 /// Resolve `<root>/<keyspace>/<table>-*/` per TABLE across every candidate root.
 ///
 /// Returns `Ok(None)` only when no candidate root carries the table at all; a
-/// root that carries it in an unusable shape (several generations, no golden) is
+/// root that carries it in an unusable shape (several generations, no golden, a
+/// golden belonging to a DIFFERENT generation — see [`fixture_in_table_dir`]) is
 /// an ERROR, never a skip.
 fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
     let Some(root) = datasets_root::sstables_root_for_table(case.keyspace, case.table) else {
@@ -238,6 +246,29 @@ fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
     }
     let table_dir = dirs.remove(0);
 
+    Ok(Some(fixture_in_table_dir(&case.id(), table_dir)?))
+}
+
+/// Select the one Data generation in `table_dir` AND the golden that belongs to
+/// it — the golden is DERIVED from the selected Data file's name, never chosen
+/// independently.
+///
+/// # Why the correspondence has to be checked (issue #1490 round 5)
+///
+/// `sstabledump` names its dump after the file it dumped, so the golden for
+/// `nb-1-big-Data.db` is `nb-1-big-Data.db.jsonl` — and nothing else. Accepting
+/// "one `*-Data.db`" and "one `*-Data.db.jsonl`" INDEPENDENTLY means a partially
+/// regenerated fixture (a new `nb-2-big-Data.db` beside a stale
+/// `nb-1-big-Data.db.jsonl`) compares one generation's DATA against another
+/// generation's DUMP. That is not a near-miss: depending on which way the two
+/// generations differ it produces either a FALSE FAILURE or a FALSE PASS, and
+/// the harness would report neither as suspicious — the oracle would simply be
+/// the wrong oracle. So a non-corresponding pair is a NAMED refusal, never a
+/// fallback to "any `.jsonl` in the directory".
+///
+/// Public so the refusal can be proven against a scratch directory holding a
+/// deliberately mismatched pair, without touching the committed corpus.
+pub fn fixture_in_table_dir(case_id: &str, table_dir: PathBuf) -> Result<Fixture, String> {
     let entries: Vec<String> = std::fs::read_dir(&table_dir)
         .map_err(|e| format!("cannot read {}: {e}", table_dir.display()))?
         .filter_map(|e| e.ok())
@@ -253,25 +284,38 @@ fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
     // comparing one generation against a merged read.
     if datas.len() != 1 {
         return Err(format!(
-            "{}: expected exactly one *-Data.db generation in {}, found {}: the harness \
+            "{case_id}: expected exactly one *-Data.db generation in {}, found {}: the harness \
              compares a single-generation dump against a reconciled export",
-            case.id(),
             table_dir.display(),
             datas.len()
         ));
     }
     if goldens.len() != 1 {
         return Err(format!(
-            "{}: expected exactly one *-Data.db.jsonl golden in {}, found {}",
-            case.id(),
+            "{case_id}: expected exactly one *-Data.db.jsonl golden in {}, found {}",
             table_dir.display(),
             goldens.len()
         ));
     }
-    Ok(Some(Fixture {
-        golden: table_dir.join(goldens[0]),
+    // The BINDING: the golden's name is derived from the Data file the harness
+    // is actually going to export, and must match exactly.
+    let data = datas[0];
+    let expected = format!("{data}.jsonl");
+    if *goldens[0] != expected {
+        return Err(format!(
+            "{case_id}: {} holds the Data generation '{data}' but its only sstabledump golden \
+             is '{}', which belongs to a DIFFERENT generation (the golden for '{data}' is \
+             '{expected}'). Comparing one generation's data against another generation's dump \
+             can produce either a false failure or a false pass, so the harness refuses: \
+             regenerate the dump for this generation, or restore the matching pair.",
+            table_dir.display(),
+            goldens[0],
+        ));
+    }
+    Ok(Fixture {
+        golden: table_dir.join(expected),
         table_dir,
-    }))
+    })
 }
 
 /// Copy the fixture's SSTable components into an isolated `<keyspace>/<table-…>`

@@ -1282,3 +1282,88 @@ fn declared_type_string_typing_does_not_erase_a_real_difference() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The golden is BOUND to the Data generation it dumps (#1490 round 5)
+//
+// Resolving "one *-Data.db" and "one *-Data.db.jsonl" independently lets a
+// partially regenerated fixture compare generation A's data against generation
+// B's dump — which yields either a false failure or a false PASS, and the
+// harness would flag neither. These controls exercise the real resolver against
+// SCRATCH directories (nothing under `test-data/` is touched): a mismatched pair
+// must be a NAMED refusal, and a matching pair must still resolve, so the
+// refusal cannot pass by rejecting everything.
+// ---------------------------------------------------------------------------
+
+/// Build a scratch table directory holding the named files (contents are
+/// irrelevant: the resolver decides on NAMES).
+fn scratch_table_dir(names: &[&str]) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    for name in names {
+        std::fs::write(tmp.path().join(name), b"").expect("write scratch fixture file");
+    }
+    tmp
+}
+
+/// A golden belonging to a DIFFERENT generation than the Data file must FAIL
+/// CLOSED, with a message naming both files — never be compared.
+#[test]
+fn a_golden_from_another_generation_is_refused_not_compared() {
+    let tmp = scratch_table_dir(&[
+        "nb-2-big-Data.db",
+        "nb-2-big-Statistics.db",
+        // Left behind by a partial regeneration: the dump of generation 1.
+        "nb-1-big-Data.db.jsonl",
+    ]);
+    let err = parquet_parity::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
+        .expect_err("a golden from another generation must be refused");
+    assert!(
+        err.contains("nb-2-big-Data.db") && err.contains("nb-1-big-Data.db.jsonl"),
+        "the refusal must name BOTH files so the stale one can be found: {err}"
+    );
+    assert!(
+        err.contains("nb-2-big-Data.db.jsonl"),
+        "…and name the golden that WOULD belong to this generation: {err}"
+    );
+}
+
+/// The positive control: a CORRESPONDING pair still resolves, and the resolved
+/// golden is the one derived from the Data file — so the refusal above is not a
+/// resolver that rejects everything.
+#[test]
+fn a_corresponding_data_and_golden_pair_resolves() {
+    let tmp = scratch_table_dir(&[
+        "nb-2-big-Data.db",
+        "nb-2-big-Data.db.jsonl",
+        "nb-2-big-Statistics.db",
+        // A `.txt` sidecar and an unrelated component must not confuse it.
+        "nb-2-big-Statistics.db.txt",
+    ]);
+    let fixture = parquet_parity::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
+        .expect("a corresponding pair must resolve");
+    assert_eq!(
+        fixture.golden,
+        tmp.path().join("nb-2-big-Data.db.jsonl"),
+        "the golden must be the one DERIVED from the selected Data file"
+    );
+}
+
+/// The two absence/ambiguity refusals this resolver already owed, asserted here
+/// so the binding above cannot be the only thing keeping them: no golden at all,
+/// and two Data generations in one directory.
+#[test]
+fn a_missing_golden_or_a_second_generation_is_refused() {
+    let no_golden = scratch_table_dir(&["nb-1-big-Data.db"]);
+    let err = parquet_parity::fixture_in_table_dir("ks.t", no_golden.path().to_path_buf())
+        .expect_err("a fixture with no golden has no oracle");
+    assert!(err.contains("golden"), "{err}");
+
+    let two_gens = scratch_table_dir(&[
+        "nb-1-big-Data.db",
+        "nb-2-big-Data.db",
+        "nb-2-big-Data.db.jsonl",
+    ]);
+    let err = parquet_parity::fixture_in_table_dir("ks.t", two_gens.path().to_path_buf())
+        .expect_err("a multi-generation table is not a single-generation dump");
+    assert!(err.contains("*-Data.db generation"), "{err}");
+}
