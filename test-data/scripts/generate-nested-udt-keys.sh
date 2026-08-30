@@ -53,7 +53,9 @@
 # tree — without a 5-minute Cassandra run.
 #
 # Prerequisites: Docker (or podman) in PATH; ~4 GB RAM for the container.
-# (`--verify-only` and `--dry-run` need neither.)
+# (`--dry-run` needs neither. `--verify-only` needs neither either, but DOES need
+# `python3`, which verifies the JSONL golden's CONTENT; its absence is a FAILURE,
+# not a skip — an unverified golden is not a verified one.)
 #
 # ============================================================================
 # MANDATORY: committing the fixture
@@ -94,11 +96,44 @@ CASSANDRA_IMAGE="cassandra:5.0.2"
 KEYSPACE="test_nested_udt_keys"
 TABLES=(nested_udt_keys)
 
-# Every artifact a COMPLETE generation must leave beside the Data.db, as a suffix
-# appended to whatever SSTable prefix is actually found (never a hard-coded
-# `nb-1-big`). Consumed by verify_generated_artifacts and by the references.yml
-# rewrite, so the post-condition and the manifest cannot disagree about the set.
-REQUIRED_SIDECAR_SUFFIXES=(-Data.db.jsonl -Statistics.db.txt -TOC.txt -Digest.crc32)
+SCHEMA_FILE="$ROOT/schemas/nested-udt-keys.cql"
+
+# ----------------------------------------------------------------------------
+# THE REQUIRED ARTIFACT SET HAS TWO SOURCES, AND THEY MUST NOT BE CONFUSED
+# (roborev job 257).
+#
+#  1. CASSANDRA'S OWN COMPONENTS ARE NOT LISTED HERE. They are DERIVED at
+#     verification time from the fixture's `*-TOC.txt` — Cassandra's own manifest
+#     of the components its writer emitted (see toc_components). A curated list
+#     here is wrong in BOTH directions, and was: it MISSED components this
+#     Cassandra wrote (`Index.db`, `Statistics.db`, `Summary.db`, `Filter.db`,
+#     `CRC.db` were all unchecked, so `--verify-only` passed with them deleted),
+#     and it would DEMAND one a legitimate configuration does not write
+#     (`CompressionInfo.db`: these tables are deliberately uncompressed, so it is
+#     absent from TOC.txt and must NOT be required). Deriving makes the
+#     requirement a fact declared by the WRITER rather than a list we maintain.
+#     TOC.txt names itself, which is why `-TOC.txt` is not special-cased.
+#
+#  2. OUR OWN DERIVED GOLDENS, which Cassandra's writer knows nothing about and
+#     which therefore appear in no TOC.txt. They are enumerated here because
+#     nothing else declares them — this script is what produces them.
+DERIVED_ARTIFACT_SUFFIXES=(-Data.db.jsonl -Statistics.db.txt)
+
+# What references.yml advertises to fixture CONSUMERS. Every entry must be part
+# of the required set above (a derived-artifact suffix, or `-<TOC component>`);
+# verify_generated_artifacts asserts exactly that, so the manifest cannot come to
+# advertise an artifact the post-condition does not require.
+REFERENCED_SIDECAR_SUFFIXES=(-Data.db.jsonl -Statistics.db.txt -TOC.txt -Digest.crc32)
+
+# The partitions the four insert_* functions below write, and the columns each
+# carries: `ALL` = every non-PK column declared in $SCHEMA_FILE; otherwise a
+# space-free comma list. verify_jsonl_content asserts this against the JSONL
+# golden's CONTENT — a golden that parses, and is the right SIZE, but holds a
+# PARTIAL or WRONG dataset is the other half of the round-8 finding, and
+# non-emptiness cannot see it. `4:s_tuple_udt` IS insert_partial's deliberate
+# absent-column row, so this declaration is also what stops that row's nine
+# missing columns reading as a defect.
+EXPECTED_PARTITIONS=(1:ALL 2:ALL 3:ALL 4:s_tuple_udt)
 
 REFERENCES_YML="$ROOT/datasets/references.yml"
 
@@ -642,6 +677,265 @@ Refusing to report a complete generation with no golden."
 }
 
 # ----------------------------------------------------------------------------
+# Populate the global TOC_COMPONENTS with the component names CASSANDRA'S OWN
+# WRITER recorded in $1 (a `*-TOC.txt`), one per line, CR and surrounding
+# whitespace stripped.
+#
+# THIS IS THE AUTHORITY for "which components must be present". TOC.txt is the
+# writer's own declaration of what it emitted, so the required set is a FACT
+# DECLARED BY CASSANDRA rather than a list this script maintains — the same
+# derive-never-curate move the gate's executing feature lanes make. A component
+# a legitimate configuration does not write (`CompressionInfo.db` here) is
+# absent from TOC.txt and is therefore not demanded, with no exception list.
+#
+# A GLOBAL rather than an echoed value, for the reason documented on
+# list_table_dirs. Returns 1 with a diagnostic on stderr rather than calling
+# `fail`, so the caller can collect it alongside the other problems.
+TOC_COMPONENTS=()
+toc_components() {
+  local toc="$1" line
+  TOC_COMPONENTS=()
+  if [[ ! -s "$toc" ]]; then
+    echo "[nuk][ERROR]   - TOC.txt '$toc' is missing or EMPTY, so the required component set cannot be derived." >&2
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    if [[ -n "$line" ]]; then
+      TOC_COMPONENTS+=("$line")
+    fi
+  done < "$toc"
+  # Fail CLOSED on a TOC this does not recognise AS one. An empty or unrecognised
+  # derivation would EXCUSE every component — a vacuous pass, which is the exact
+  # shape being fixed — so it is an error, never a permissive fallback.
+  if [[ "${#TOC_COMPONENTS[@]}" -eq 0 ]]; then
+    echo "[nuk][ERROR]   - TOC.txt '$toc' named ZERO components." >&2
+    return 1
+  fi
+  local c found=0
+  for c in "${TOC_COMPONENTS[@]}"; do
+    if [[ "$c" == "Data.db" ]]; then
+      found=1
+    fi
+  done
+  if [[ "$found" -ne 1 ]]; then
+    echo "[nuk][ERROR]   - TOC.txt '$toc' does not name 'Data.db' (components: ${TOC_COMPONENTS[*]}); refusing to derive a component set from it." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Assert the CONTENT of the JSONL golden $1 for table $2: exactly the partitions
+# $EXPECTED_PARTITIONS declares, each carrying exactly the columns it declares,
+# with the column NAMES derived from $SCHEMA_FILE's own CREATE TABLE.
+#
+# WHY, and why it is not just a size check: `[[ -s ]]` cannot tell this fixture's
+# four-partition, nine-column golden from a three-partition one, from one missing
+# a column across every row, or from a golden dumped from a DIFFERENT table
+# (roborev job 257). All three are valid JSON of a plausible size.
+#
+# Returns 1 and lists EVERY problem on stderr; the caller collects the verdict.
+verify_jsonl_content() {
+  local jsonl="$1" table="$2"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[nuk][ERROR]   - python3 is required to verify the JSONL golden's CONTENT and was not found. \
+The content of the golden is UNVERIFIED, which is not a pass." >&2
+    return 1
+  fi
+  NUK_JSONL="$jsonl" \
+  NUK_SCHEMA="$SCHEMA_FILE" \
+  NUK_TABLE="$table" \
+  NUK_EXPECTED_PARTITIONS="${EXPECTED_PARTITIONS[*]}" \
+  python3 - <<'PY'
+import json
+import os
+import re
+import sys
+
+jsonl = os.environ["NUK_JSONL"]
+schema = os.environ["NUK_SCHEMA"]
+table = os.environ["NUK_TABLE"]
+spec_raw = os.environ["NUK_EXPECTED_PARTITIONS"].split()
+
+problems = []
+
+
+def die(msg):
+    sys.exit("[nuk][ERROR]   - " + msg)
+
+
+# ---- EXPECTED COLUMNS: derived from the committed CQL schema ----------------
+# Derived, not hard-coded: the schema file is the declaration of what this table
+# HAS, so adding a column there cannot leave the golden silently unchecked.
+#
+# Parsing it is sound for a reason stated IN that file's own header: "NO `--`
+# COMMENT MAY APPEAR BETWEEN `CREATE TABLE (` AND ITS CLOSING `)`" (CQLite's nom
+# schema parser cannot strip them, and a comment there takes the whole read path
+# down), so the column list holds column declarations and nothing else. Every
+# failure to parse is a HARD ERROR — never a silently empty expectation, which
+# would make the checks below vacuous.
+try:
+    with open(schema, encoding="utf-8") as fh:
+        src = fh.read()
+except OSError as exc:
+    die("cannot read the schema file %s: %s" % (schema, exc))
+
+m = re.search(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?%s\s*\(" % re.escape(table),
+    src,
+    re.IGNORECASE,
+)
+if not m:
+    die("schema %s declares no CREATE TABLE for '%s'" % (schema, table))
+
+depth, i = 1, m.end()
+while i < len(src) and depth:
+    if src[i] == "(":
+        depth += 1
+    elif src[i] == ")":
+        depth -= 1
+    i += 1
+if depth:
+    die("unbalanced parentheses in the CREATE TABLE for '%s' in %s" % (table, schema))
+
+entries, buf, depth = [], "", 0
+for ch in src[m.end():i - 1]:
+    if ch == "(":
+        depth += 1
+    elif ch == ")":
+        depth -= 1
+    if ch == "," and depth == 0:
+        entries.append(buf)
+        buf = ""
+    else:
+        buf += ch
+entries.append(buf)
+
+schema_columns = []
+for entry in entries:
+    entry = entry.strip()
+    # Skips `id int PRIMARY KEY` and any standalone `PRIMARY KEY (...)` clause:
+    # the expectation is over the NON-key columns, since the partition key is
+    # asserted separately as the partition id.
+    if not entry or "PRIMARY KEY" in entry.upper():
+        continue
+    schema_columns.append(entry.split()[0])
+
+if len(schema_columns) < 2:
+    die(
+        "derived only %d non-PK column(s) %s from the CREATE TABLE for '%s' in %s; refusing to "
+        "check the golden against an empty or near-empty expectation"
+        % (len(schema_columns), schema_columns, table, schema)
+    )
+all_columns = set(schema_columns)
+
+# ---- EXPECTED PARTITIONS: the generator's own insert_* declaration ----------
+expected = {}
+for item in spec_raw:
+    if ":" not in item:
+        die("malformed EXPECTED_PARTITIONS entry %r (want '<id>:ALL' or '<id>:<col>,<col>')" % item)
+    pid, cols = item.split(":", 1)
+    if cols == "ALL":
+        expected[pid] = set(all_columns)
+    else:
+        want = set(c for c in cols.split(",") if c)
+        unknown = sorted(want - all_columns)
+        if unknown:
+            die(
+                "EXPECTED_PARTITIONS entry %r names column(s) the schema does not declare: %s"
+                % (item, unknown)
+            )
+        expected[pid] = want
+if not expected:
+    die("EXPECTED_PARTITIONS is empty, so nothing would be asserted about the golden")
+
+# ---- OBSERVED --------------------------------------------------------------
+observed = {}
+lines_read = 0
+try:
+    fh = open(jsonl, encoding="utf-8")
+except OSError as exc:
+    die("cannot read the JSONL golden %s: %s" % (jsonl, exc))
+with fh:
+    for raw in fh:
+        lines_read += 1
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            partition = json.loads(raw)
+        except ValueError as exc:
+            problems.append("%s line %d is not valid JSON: %s" % (jsonl, lines_read, exc))
+            continue
+        if not isinstance(partition, dict) or not isinstance(partition.get("partition"), dict):
+            problems.append(
+                "%s line %d is not an sstabledump partition object" % (jsonl, lines_read)
+            )
+            continue
+        key = partition["partition"].get("key")
+        if not isinstance(key, list) or not key:
+            problems.append("%s line %d carries no partition key" % (jsonl, lines_read))
+            continue
+        cells = observed.setdefault(str(key[0]), set())
+        for row in partition.get("rows", []):
+            for cell in row.get("cells", []):
+                name = cell.get("name")
+                if name:
+                    cells.add(name)
+
+if not observed:
+    problems.append("%s holds ZERO partitions (%d line(s) read)" % (jsonl, lines_read))
+
+missing_ids = sorted(set(expected) - set(observed))
+extra_ids = sorted(set(observed) - set(expected))
+if missing_ids:
+    problems.append(
+        "%s is MISSING partition id(s) %s (expected exactly %s, found %s) — the golden holds a "
+        "PARTIAL or WRONG dataset" % (jsonl, missing_ids, sorted(expected), sorted(observed))
+    )
+if extra_ids:
+    problems.append(
+        "%s holds UNEXPECTED partition id(s) %s (expected exactly %s) — the golden is not this "
+        "fixture's dataset" % (jsonl, extra_ids, sorted(expected))
+    )
+for pid in sorted(set(expected) & set(observed)):
+    absent = sorted(expected[pid] - observed[pid])
+    unexpected = sorted(observed[pid] - expected[pid])
+    if absent:
+        problems.append(
+            "%s partition id=%s is MISSING column(s) %s" % (jsonl, pid, absent)
+        )
+    if unexpected:
+        problems.append(
+            "%s partition id=%s carries UNEXPECTED column(s) %s (not declared by %s)"
+            % (jsonl, pid, unexpected, schema)
+        )
+
+covered = set()
+for names in observed.values():
+    covered |= names
+uncovered = sorted(all_columns - covered)
+if uncovered:
+    problems.append(
+        "%s covers %d of %d schema column(s); NO partition carries %s"
+        % (jsonl, len(covered & all_columns), len(all_columns), uncovered)
+    )
+
+if problems:
+    for problem in problems:
+        sys.stderr.write("[nuk][ERROR]   - %s\n" % problem)
+    sys.exit(1)
+
+print(
+    "[nuk]   JSONL content OK: partitions %s; all %d schema column(s) covered"
+    % (sorted(observed), len(all_columns))
+)
+PY
+}
+
+# ----------------------------------------------------------------------------
 # OUTCOME-BASED POST-CONDITION — the PRIMARY correctness contract of this script
 # (roborev job 254)
 #
@@ -667,6 +961,30 @@ Refusing to report a complete generation with no golden."
 # The expected set is DERIVED from $TABLES and from the Data.db actually present
 # (never hard-coded to a prefix or a directory id); every artifact must exist AND
 # be non-empty; and EVERY problem found is reported, not just the first.
+#
+# WHERE THIS BOTTOMS OUT, AND WHY IT IS HERE (roborev job 257)
+#
+# This is the THIRD iteration of one question — "may this run report COMPLETE?" —
+# and each answer was too weak in the same way, so it is worth saying where the
+# regress stops rather than leaving a fourth layer to be invented or this one to
+# be removed as arbitrary:
+#   * per-step status        — a step can fail by a mechanism nobody enumerated
+#   * a non-zero COUNT       — "3 of 3" and "3 of 10, then failed" are one number
+#   * a NON-EMPTY artifact   — non-emptiness is not completeness: the check
+#                              passed with `Index.db`/`Statistics.db`/`Summary.db`
+#                              deleted and with a partial golden
+#   * COMPLETENESS AGAINST AN AUTHORITATIVE MANIFEST  <- here
+#
+# It bottoms out here because both halves now compare against a declaration made
+# OUTSIDE this check:
+#   * the component set comes from `*-TOC.txt`, which is CASSANDRA'S WRITER
+#     declaring what it wrote (toc_components);
+#   * the golden's content is compared against the fixture's known shape — the
+#     schema file's own column list and this script's own insert_* partitions —
+#     which is the SAME shape the pytest suite asserts (verify_jsonl_content).
+# There is no further oracle to appeal to. The next level up would be
+# re-deriving Cassandra's output FROM Cassandra, and that is precisely what the
+# committed fixture IS. So a fourth layer would have nothing new to consult.
 #
 # Exercisable on its own with `--verify-only`, which is how it is RED-verified.
 # ----------------------------------------------------------------------------
@@ -715,9 +1033,25 @@ $ks_dir, found ${#TABLE_DIRS[@]} ($found_desc)")
     local prefix
     prefix="$(basename -- "$data_file")"
     prefix="${prefix%-Data.db}"
+    local problems_before="${#problems[@]}"
+
+    # --- CASSANDRA'S components: DERIVED from its own TOC.txt manifest -------
+    local -a required_suffixes=()
+    local component
+    if toc_components "$tdir/$prefix-TOC.txt"; then
+      for component in "${TOC_COMPONENTS[@]}"; do
+        required_suffixes+=("-$component")
+      done
+    else
+      problems+=("$table: could not derive the required component set from \
+$tdir/$prefix-TOC.txt (see above). Refusing to fall back to a curated list, which is what let \
+missing components pass.")
+    fi
+    # --- OUR OWN derived goldens: in no TOC.txt, so declared by this script --
+    required_suffixes+=("${DERIVED_ARTIFACT_SUFFIXES[@]}")
 
     local suffix artifact
-    for suffix in "${REQUIRED_SIDECAR_SUFFIXES[@]}"; do
+    for suffix in "${required_suffixes[@]}"; do
       artifact="$tdir/$prefix$suffix"
       if [[ ! -f "$artifact" ]]; then
         problems+=("$table: MISSING artifact $artifact")
@@ -725,6 +1059,36 @@ $ks_dir, found ${#TABLE_DIRS[@]} ($found_desc)")
         problems+=("$table: EMPTY artifact $artifact")
       fi
     done
+
+    # references.yml may not advertise an artifact this post-condition does not
+    # REQUIRE, or the manifest and the contract disagree about the set. Checked
+    # here rather than in update_references_yml because this is where the
+    # TOC-derived half of the required set is known.
+    local ref_suffix ref_ok
+    for ref_suffix in "${REFERENCED_SIDECAR_SUFFIXES[@]}"; do
+      ref_ok=0
+      for suffix in "${required_suffixes[@]}"; do
+        if [[ "$ref_suffix" == "$suffix" ]]; then
+          ref_ok=1
+        fi
+      done
+      if [[ "$ref_ok" -ne 1 ]]; then
+        problems+=("$table: references.yml advertises '$prefix$ref_suffix', which is neither a \
+TOC.txt component nor one of this script's derived goldens (${DERIVED_ARTIFACT_SUFFIXES[*]}) — the \
+manifest and this post-condition disagree about the artifact set")
+      fi
+    done
+
+    # --- CONTENT of the JSONL golden, not just its size ---------------------
+    # Skipped only when the golden is absent or empty, which the artifact loop
+    # above has already recorded as a problem — never silently.
+    local jsonl="$tdir/$prefix-Data.db.jsonl"
+    if [[ -s "$jsonl" ]]; then
+      if ! verify_jsonl_content "$jsonl" "$table"; then
+        problems+=("$table: the JSONL golden $jsonl does not hold this fixture's dataset \
+(itemized above) — it parses and is non-empty, which is exactly what a size check cannot see")
+      fi
+    fi
 
     # Junk the staging command would otherwise force-add into the fixture.
     local junk_list="$WORK_TMP/postcond-junk-$table.list"
@@ -738,7 +1102,14 @@ would commit: ${junk[*]}")
     fi
 
     tables_checked=$((tables_checked + 1))
-    log "  $table: $tdir (prefix $prefix) — Data.db + ${#REQUIRED_SIDECAR_SUFFIXES[@]} required sidecar(s) present and non-empty"
+    if [[ "${#problems[@]}" -eq "$problems_before" ]]; then
+      log "  $table: $tdir (prefix $prefix) — ${#required_suffixes[@]} required artifact(s) \
+(${#TOC_COMPONENTS[@]} declared by TOC.txt + ${#DERIVED_ARTIFACT_SUFFIXES[@]} derived by this script) \
+present and non-empty; JSONL content matches"
+    else
+      log "  $table: $tdir (prefix $prefix) — $(( ${#problems[@]} - problems_before )) problem(s) \
+found (itemized below)"
+    fi
   done
 
   # The post-condition must have had a SUBJECT. An empty $TABLES, or every table
@@ -758,7 +1129,8 @@ COMPLETE generation produces." >&2
     fail "${#problems[@]} artifact problem(s) listed above. Commit NOTHING from this run."
   fi
 
-  log "POST-CONDITION OK: $tables_checked table(s) verified; full artifact set present and non-empty."
+  log "POST-CONDITION OK: $tables_checked table(s) verified; every component TOC.txt declares is \
+present and non-empty, and the JSONL golden holds this fixture's dataset."
 }
 
 # ----------------------------------------------------------------------------
@@ -802,7 +1174,7 @@ generation with an un-updated manifest."
        NUK_TABLE="${TABLES[0]}" \
        NUK_DIRNAME="$dirname" \
        NUK_PREFIX="$prefix" \
-       NUK_SIDECARS="${REQUIRED_SIDECAR_SUFFIXES[*]}" \
+       NUK_SIDECARS="${REFERENCED_SIDECAR_SUFFIXES[*]}" \
        python3 - <<'PY'
 import datetime
 import os
@@ -819,9 +1191,11 @@ rel = f"test-data/datasets/sstables/{ks}/{dirname}"
 ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # The manifest field name for each artifact suffix. Every suffix in
-# REQUIRED_SIDECAR_SUFFIXES must appear here, so adding one to the post-condition
-# without teaching the manifest about it is an ERROR rather than a silent
-# omission.
+# REFERENCED_SIDECAR_SUFFIXES must appear here, so advertising one without
+# teaching the manifest a field name for it is an ERROR rather than a silent
+# omission. (The reverse coupling — that everything the manifest advertises is
+# also REQUIRED by the post-condition — is asserted in
+# verify_generated_artifacts, which is where the derived TOC set is known.)
 FIELD_FOR_SUFFIX = {
     "-Data.db.jsonl": "data_jsonl",
     "-Statistics.db.txt": "statistics_txt",
@@ -1014,7 +1388,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   wait_cassandra
 fi
 
-apply_schema "$ROOT/schemas/nested-udt-keys.cql"
+apply_schema "$SCHEMA_FILE"
 
 insert_full
 insert_null_fields
