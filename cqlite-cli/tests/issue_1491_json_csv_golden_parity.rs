@@ -1293,6 +1293,56 @@ fn every_declared_gap_names_at_least_one_egress_format() {
     assert!(bad.is_empty(), "issue #1491 (K1):\n  {}", bad.join("\n  "));
 }
 
+/// Y1: the case's KEYSPACE is a checked declaration, and an UNVERIFIABLE one is
+/// not agreement.
+///
+/// The demonstration this pins: with the check absent, mistyping a
+/// `Presence::Corpus` case's keyspace made `resolve_fixture` find no fixture for
+/// `<typo>.<table>`, which is the LEGAL fetched-corpus skip — so the run stayed
+/// green with the case's whole comparison silently gone. Measured on
+/// `test_types.nb_absent_vs_null_regular` before the fix: census `NOT PRESENT`, 0
+/// failures.
+#[test]
+fn a_case_keyspace_the_committed_ddl_contradicts_is_a_failure() {
+    let case = |keyspace| Case {
+        presence: Presence::Corpus,
+        keyspace,
+        table: "t",
+        schema: "cql-type-parity",
+        pk: &["pk"],
+        ck: &["ck"],
+        multicell: &[],
+        skips: &[],
+    };
+    let declared = golden::schema::from_ddl(
+        "USE right_ks; CREATE TABLE t (pk int, ck int, PRIMARY KEY (pk, ck));",
+        "t",
+    )
+    .expect("the DDL parses");
+    assert_eq!(
+        schema_agrees_with_case(&case("right_ks"), &declared),
+        Vec::<String>::new(),
+        "the ordinary shape — an agreeing keyspace — must report nothing"
+    );
+    let why = schema_agrees_with_case(&case("wrong_ks"), &declared).join("; ");
+    assert!(
+        why.contains("wrong_ks") && why.contains("right_ks"),
+        "the failure must name BOTH keyspaces: {why}"
+    );
+    // A schema stating no keyspace at all measures nothing about the declaration,
+    // which is a failure and not agreement.
+    let silent = golden::schema::from_ddl(
+        "CREATE TABLE t (pk int, ck int, PRIMARY KEY (pk, ck));",
+        "t",
+    )
+    .expect("the DDL parses");
+    let why = schema_agrees_with_case(&case("right_ks"), &silent).join("; ");
+    assert!(
+        why.contains("states no keyspace"),
+        "an unverifiable keyspace must fail, naming what is missing: {why}"
+    );
+}
+
 /// M3: the corpus-miss mapping itself. An `Unusable` corpus must fail the case and
 /// only a true `Absent` may skip it.
 #[test]

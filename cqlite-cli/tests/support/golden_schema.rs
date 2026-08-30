@@ -472,10 +472,7 @@ fn split_items(body: &str) -> Result<Vec<String>, String> {
 }
 
 /// `CREATE TYPE` fields: `name type` pairs only.
-fn parse_fields(
-    body: &str,
-    scope: &TypeScope<'_>,
-) -> Result<Vec<(String, CqlType)>, String> {
+fn parse_fields(body: &str, scope: &TypeScope<'_>) -> Result<Vec<(String, CqlType)>, String> {
     let mut fields = Vec::new();
     for item in split_items(body)? {
         let (name, ty_text) = item
