@@ -814,7 +814,48 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   configured", then never required it to have *answered*); a `${end:-$start}` default degraded a failed
   `awk` bound to a 1-line scan. Those instances lived in a subsystem since deleted; **the shape is the
   lesson, and it was never theirs** — it was in the wrapper's own terminal verdict scan, which predates
-  them all. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  them all. **AND `findings:` WAS THE SAME SHAPE, ONE KEY OVER (#3564).** `findings:` is not one of the
+  six affirmation keys — its affirmative value is `NONE`, not `PASS` — and it was documented as merely
+  CORROBORATING, which read as "guarded elsewhere" when it was guarded NOWHERE: `PRESENT` is in the
+  closed grammar's NON-FAILING set, so the only thing failing a findings-bearing run was the
+  NEIGHBOURING key `roborev-exit: FINDINGS (exit 1)`. On `--recheck-job` **no reviewer runs**, so
+  `roborev-exit` is legitimately `SKIP` — and the run emitted `findings: PRESENT (3)` beside
+  `RESULT: PASS`, a **false PASS in a merge gate** (measured on #3473 round 3), on the ONE path an
+  authorized waiver must travel, letting a waiver scoped to `prompt-content` ABSENCE excuse findings
+  nobody excused. Now a would-be PASS requires `findings:` to reduce token-exactly to `NONE` **in every
+  mode including recheck**, and that requirement is **NOT waivable**. Fixed in the verdict scan and
+  deliberately NOT in `roborev-exit`: `SKIP` is the TRUE statement about a recheck, and making a key
+  claim a failure it never observed trades one false statement for another. Second half, the part that
+  keeps the break-glass alive: a recheck of a record with no structured `verdict` field used to read
+  `UNKNOWN` (its branch was keyed on the reviewer's exit code, and there is no reviewer), which would
+  have false-FAILed EVERY clean recheck — so a recheck now re-asserts findings from the record's own
+  review text — but ONLY in the direction prose can actually evidence. **PROSE CAN EVIDENCE FINDINGS;
+  IT CANNOT EVIDENCE CLEANLINESS**, so a marker in a findings block yields `PRESENT` while its ABSENCE
+  yields `UNKNOWN`, never `NONE`. `NONE` is reachable only from the record's STRUCTURED `verdict`
+  letter. **Two review rounds each found a review SHAPE the previous recogniser missed** — a HEADERLESS
+  findings review (no `Findings` heading, which `review-completed` deliberately accepts), then a
+  findings BLOCK with no recognised severity marker — and the class provably does not close, because
+  `review-completed` accepts a bare `## Summary` heading as a completed review: a findings review whose
+  findings are prose is then INDISTINGUISHABLE from a clean one, whose real text is
+  `No issues found.\n\nSummary: …` with no `Findings` heading either. That is #3312's lesson applied
+  one directory over: **REMOVE THE CHANNEL, do not pick a rarer delimiter** — a recogniser over
+  author-controlled prose never closes. **And it costs nothing, measured rather than assumed**:
+  `roborev show --json` SYNTHESISES the verdict letter from the `reviews.verdict_bool` column for every
+  observed record (`P` clean / `F` findings; `review_jobs` has no verdict column), so a real clean
+  recheck takes the structured path and the break-glass is intact, and the verdict-less branch is
+  defensive for a payload shape nothing observed emits. **The generalisation to carry elsewhere: DELEGATING A KEY'S FAILURE TO ITS NEIGHBOUR IS A
+  LATENT FALSE PASS** — the coupling is invisible while one event populates both keys and evaporates in
+  the first mode where it does not, so ask of every key *what fails the run if THIS key alone goes bad*.
+  **And a fail-closed argument for a `${VAR:-default}` is only valid for the consumers that existed when
+  it was written**: the `block_marker_count` `:-0` was audited as strict because `NONE` was the STRICT
+  direction for `vacuity-tier1:`, and a new consumer for which `NONE` is PERMISSIVE inverted it silently
+  — no default can fix that (`0` and *unmeasurable* are one value). **The resolution is not a better
+  default or a second signal but a REMOVED CONSUMER**: `NONE` is unreachable from a marker count at all
+  (only the structured verdict yields it), so nothing derives a permissive verdict from that `0` and the
+  original argument holds unchanged. An intermediate version of this fix DID add a separate
+  `block_measured` flag; it went away with the prose reconstruction it guarded, and this sentence
+  described it for one round after it was deleted — caught by the C audit. **A doctrine line naming a
+  mechanism is a claim about code, and it decays exactly like a comment: re-grep the symbol.** So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
   for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
   unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
   signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict

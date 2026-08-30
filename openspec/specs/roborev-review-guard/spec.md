@@ -799,9 +799,19 @@ which occurred SHALL be the job record's structured `status`, falling back to th
 whole transcript. Tier 1 is GATED on this answer, so a regex over the entire output was a real weakness:
 an incidental or QUOTED severity token such as `[Low]` anywhere in the output set `findings: PRESENT`,
 which then EXEMPTED a genuinely vacuous "no code changes" verdict from tier 1's hard failure. Where no
-structured verdict exists the wrapper SHALL fall back to the reviewer's EXIT CODE, and prose SHALL be
-consulted only inside the FINDINGS BLOCK (from a `Findings` heading/label to a LINE-INITIAL `Summary`
-heading/label). The `<n>` COUNT SHALL remain BEST-EFFORT prose parsing of severity markers within that
+structured verdict exists **on a FRESH review** the wrapper SHALL fall back to the reviewer's EXIT CODE,
+and prose SHALL be consulted only inside the FINDINGS BLOCK (from a `Findings` heading/label to a
+LINE-INITIAL `Summary` heading/label).
+
+**ON A `--recheck-job` THE EXIT-CODE FALLBACK DOES NOT EXIST, AND PROSE SHALL NOT ESTABLISH CLEANLINESS
+(#3564).** A recheck runs no reviewer, so `roborev-exit:` is legitimately `SKIP` and cannot arbitrate
+anything. `NONE` SHALL therefore be reachable from the record's STRUCTURED `verdict` letter ALONE. Where a
+recheck's record carries no such letter, the findings block MAY establish `PRESENT` (a severity marker is
+positive evidence) but its ABSENCE SHALL be `UNKNOWN`, never `NONE` — the two directions are asymmetric
+because `review-completed:` accepts a bare `## Summary` heading as a completed review, so a findings review
+whose findings are prose is INDISTINGUISHABLE from a clean one. `UNKNOWN` fails closed. This is a DEFENSIVE
+path: every observed record carries the synthesised letter, so a real recheck of a clean job takes the
+structured path and still PASSes, leaving the #3312 absence waiver's only route intact. The `<n>` COUNT SHALL remain BEST-EFFORT prose parsing of severity markers within that
 block and SHALL be reported for a human, never used as an authority; the PRESENT/NONE/INCONSISTENT
 distinction is the load-bearing part.
 
@@ -908,8 +918,12 @@ deterministic keys — `push-assert:`, `census-check:`, `code-free:`, `sha-asser
 any key** and no exemption mechanism. (One existed briefly, for a key allowed a `NOTICE` because a
 remedy-less swallow was a measurement with a stated residual; that key and its exemption are both gone —
 #3283/#3278 — leaving the backstop UNIFORM, which is stricter, never weaker.) `vacuity-tier1:`,
-`vacuity-tier2:` and `findings:` are deliberately EXCLUDED, being corroborators with documented non-`PASS`
-values. This closes the case NEIGHBOURING the grammar check: a value that is IN the grammar and
+`vacuity-tier2:` are deliberately EXCLUDED, being corroborators with documented non-`PASS`
+values. **`findings:` IS NOT EXCLUDED (#3564):** it carries its OWN affirmative gate — a passing run's
+`findings:` SHALL reduce token-exactly to `NONE`, in EVERY mode, and that requirement SHALL NOT be
+waivable (the absence waiver excuses `prompt-content:` absence only). It is listed separately from the six
+because it is not merely required to be non-failing: `PRESENT`, `INCONSISTENT`, `UNKNOWN` and `SKIP` each
+fail, so a run can never PASS beside open or unestablished findings. This closes the case NEIGHBOURING the grammar check: a value that is IN the grammar and
 non-failing but is not a MEASUREMENT — `SKIP` above all, which means the check NEVER RAN. Validating that
 the sourced checks file DEFINES its five functions proves they exist, NOT that each reached its
 assignment; a check that returns early leaves its key at the initial `SKIP`, and the run then passed with a
