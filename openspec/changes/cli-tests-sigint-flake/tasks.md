@@ -1689,3 +1689,51 @@ property that does NOT hold gets its own test, `an_exhausted_deadline_leaves_a_l
 asserted from a zero-base deadline — arithmetic, no sleep, no threshold — so the stronger claim cannot
 return as a comment. The starvation path needs an early stage to burn ~180s while the product works,
 at which point the run is failing anyway; that is recorded as a MITIGATION, not as the claim.
+
+### Round-13 product RED plants (AC3) — LEAD-RUN, both re-run because the evidence path changed wholesale
+
+The channel descope replaced the entire evidence path, so every earlier plant result is stale **by
+construction**. Both plants were therefore re-run. Each was applied to a **committed** tree in its own
+throwaway `git worktree add --detach` with its own `CARGO_TARGET_DIR`, the applied plant re-read from
+that worktree's `git show HEAD:<file>`, `git status --porcelain` confirmed empty, and the worktree
+removed afterwards. The lane's `cqlite-cli/src/main.rs` was verified at **0 bytes changed against
+`origin/main` throughout**.
+
+**Plant A — the `ctrl_c` select branch removed from `run_writable_interactive`** (anchor matched 1
+replacement; the `Received Ctrl-C` marker count in the planted HEAD drops to 0). **RED at stage (c)
+handler-entry in 0.02s**, naming the awaited substring `"Received Ctrl-C"` and listing the candidate
+causes without selecting between them. `test result: FAILED. 0 passed; 1 failed; 21 filtered out`.
+
+**Plant B — `engine.close()` behind `std::future::pending()`.** **RED at stage (d) clean-exit after
+280.20s.** `test result: FAILED. 0 passed; 1 failed; 21 filtered out; finished in 280.28s`.
+
+**AND THIS RUN IS THE CALIBRATION FIRING ON A GENUINELY CONTENDED HOST — the AC1 property, end to
+end, unprompted:**
+
+```text
+ONE per-test deadline 280.3s = clamp(base 180.0s x scale 1.557, base, cap 360.0s), where scale is the
+LARGEST of [t_boot 68.512ms => scale 1.557, t_ack 4.094ms => scale 1.000] over quiet baseline 44ms.
+```
+
+The box was carrying two from-scratch plant builds plus other lanes, `t_boot` measured **68.512ms**
+against the 44ms baseline, and the deadline **grew from 180s to 280.3s on its own**. Two rounds ago the
+standing criticism of this mechanism was that `scale` had never left **exactly 1.000** in any run
+including load average 116 — it was inert, and the anchor rebase (60ms → 44ms, derived from the
+recorded table) is what made this possible. It is now observed live, on the failure path, in a plant
+nobody staged for that purpose.
+
+The failure text is still the whole issue answered:
+
+```text
+WHAT THIS ESTABLISHES: the handler-entry marker "Received Ctrl-C" WAS observed 2.069ms after SIGINT,
+so the shutdown handler exists, was entered, and the child was scheduled. This failure therefore
+establishes ONLY that the flush did not complete in time; it says nothing about whether a handler is
+present.
+progress observed while polling: NONE — 0 new output lines and 0 new durable artifacts in 280.20s
+```
+
+**A process note, recorded because it is part of what this change delivers.** The round-13 record was
+first committed with **no product plant evidence at all** while plant worktrees sat on disk. The lead
+caught the omission, pruned them and ran both plants directly. Mandatory evidence that is merely
+*planned* is absent evidence; and after a near-miss in which a plant was committed onto this very
+branch, product-source plants are now run by the lead in verified isolation rather than delegated.
