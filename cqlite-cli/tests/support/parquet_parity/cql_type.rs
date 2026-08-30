@@ -40,7 +40,10 @@ pub enum CqlTypeSpec {
     /// A scalar type, e.g. `int`, `text`, `float`, `decimal`.
     Scalar(String),
     /// `set<E>` / `list<E>` — `frozen` recorded separately by [`ColumnType`].
-    Seq { kind: SeqKind, elem: Box<CqlTypeSpec> },
+    Seq {
+        kind: SeqKind,
+        elem: Box<CqlTypeSpec>,
+    },
     /// `map<K,V>`.
     Map {
         key: Box<CqlTypeSpec>,
@@ -78,11 +81,7 @@ impl ColumnType {
     /// True when sstabledump emits this column as one cell PER ELEMENT (a
     /// non-frozen collection), rather than a single cell carrying one value.
     pub fn is_multicell_collection(&self) -> bool {
-        !self.frozen
-            && matches!(
-                self.spec,
-                CqlTypeSpec::Seq { .. } | CqlTypeSpec::Map { .. }
-            )
+        !self.frozen && matches!(self.spec, CqlTypeSpec::Seq { .. } | CqlTypeSpec::Map { .. })
     }
 }
 
@@ -91,11 +90,7 @@ impl ColumnType {
 /// `udts` names the user-defined types declared by the case's schema file, so a
 /// bare identifier that is NOT a known scalar and NOT a declared UDT is an error
 /// rather than being waved through as a UDT.
-pub fn parse_column(
-    name: &str,
-    declared: &str,
-    udts: &[&str],
-) -> Result<ColumnType, String> {
+pub fn parse_column(name: &str, declared: &str, udts: &[&str]) -> Result<ColumnType, String> {
     let trimmed = declared.trim();
     let (frozen, inner) = match strip_wrapper(trimmed, "frozen") {
         Some(inner) => (true, inner),

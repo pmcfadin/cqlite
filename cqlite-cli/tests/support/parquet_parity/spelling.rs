@@ -159,9 +159,9 @@ fn tokenize(s: &str, ctx: &str) -> Result<Vec<(i128, String)>, String> {
                 "{ctx}: duration '{s}' is not a sequence of <int><unit> components"
             ));
         }
-        let count: i128 = num
-            .parse()
-            .map_err(|e| format!("{ctx}: duration '{s}' component '{num}' is not an integer: {e}"))?;
+        let count: i128 = num.parse().map_err(|e| {
+            format!("{ctx}: duration '{s}' component '{num}' is not an integer: {e}")
+        })?;
         out.push((count, unit.to_ascii_lowercase()));
     }
     Ok(out)

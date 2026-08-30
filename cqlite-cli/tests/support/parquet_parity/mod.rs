@@ -250,8 +250,7 @@ fn isolated_data_dir(case: &ParityCase, fixture: &Fixture, tmp: &Path) -> Result
         if !entry.path().is_file() {
             continue;
         }
-        std::fs::copy(entry.path(), dest.join(&name))
-            .map_err(|e| format!("copy {name}: {e}"))?;
+        std::fs::copy(entry.path(), dest.join(&name)).map_err(|e| format!("copy {name}: {e}"))?;
     }
     Ok(data_dir)
 }
@@ -285,7 +284,10 @@ fn export_parquet(case: &ParityCase, data_dir: &Path, tmp: &Path) -> Result<Path
         ));
     }
     if !out.is_file() {
-        return Err(format!("cqlite export produced no file at {}", out.display()));
+        return Err(format!(
+            "cqlite export produced no file at {}",
+            out.display()
+        ));
     }
     Ok(out)
 }
@@ -315,7 +317,11 @@ impl Row {
     }
 
     fn sort_key(&self) -> String {
-        self.keys.iter().map(render_value).collect::<Vec<_>>().join("\u{1f}")
+        self.keys
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
     }
 }
 
@@ -368,8 +374,7 @@ fn project_parquet(case: &ParityCase, path: &Path) -> Result<Vec<Row>, String> {
             let mut cells = BTreeMap::new();
             for (ci, field) in schema.fields().iter().enumerate() {
                 let ctx = format!("{}.{}[row {r}]", case.id(), field.name());
-                let value =
-                    arrow_rows::canonical_from_arrow(batch.column(ci).as_ref(), r, &ctx)?;
+                let value = arrow_rows::canonical_from_arrow(batch.column(ci).as_ref(), r, &ctx)?;
                 cells.insert(field.name().clone(), value);
             }
             let keys = key_columns
@@ -446,19 +451,12 @@ pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, String> {
     let data_dir = isolated_data_dir(case, &fixture, tmp.path())?;
     let parquet_path = export_parquet(case, &data_dir, tmp.path())?;
 
-    let golden_doc = canonical_jsonl::load_golden_document_with_keys(
-        &fixture.golden,
-        true,
-        &case.key_spec(),
-    )
-    .map_err(|e| format!("{}: loading the sstabledump golden failed: {e}", case.id()))?;
-    let golden = golden_rows::project_golden(
-        &golden_doc,
-        &columns,
-        case.partition_key,
-        case.clustering,
-    )
-    .map_err(|e| format!("{}: {e}", case.id()))?;
+    let golden_doc =
+        canonical_jsonl::load_golden_document_with_keys(&fixture.golden, true, &case.key_spec())
+            .map_err(|e| format!("{}: loading the sstabledump golden failed: {e}", case.id()))?;
+    let golden =
+        golden_rows::project_golden(&golden_doc, &columns, case.partition_key, case.clustering)
+            .map_err(|e| format!("{}: {e}", case.id()))?;
 
     let parquet = project_parquet(case, &parquet_path)?;
     Ok(Some(Prepared {
@@ -477,12 +475,7 @@ pub fn run_case(case: &ParityCase) -> Result<CaseOutcome, String> {
             case.table,
         )));
     };
-    compare(
-        case,
-        &prepared.columns,
-        prepared.golden,
-        prepared.parquet,
-    )
+    compare(case, &prepared.columns, prepared.golden, prepared.parquet)
 }
 
 /// Sort both sides by primary key and assert full per-cell equality.
@@ -540,12 +533,18 @@ pub fn compare(
             // function, so it can only erase a difference in HOW a value is
             // written, never a difference in the value (see spelling.rs).
             let ev = spelling::normalize_spelling(
-                e.cells.get(&col.name).cloned().unwrap_or(CanonicalValue::Absent),
+                e.cells
+                    .get(&col.name)
+                    .cloned()
+                    .unwrap_or(CanonicalValue::Absent),
                 &col.spec,
                 &ctx,
             )?;
             let av = spelling::normalize_spelling(
-                a.cells.get(&col.name).cloned().unwrap_or(CanonicalValue::Absent),
+                a.cells
+                    .get(&col.name)
+                    .cloned()
+                    .unwrap_or(CanonicalValue::Absent),
                 &col.spec,
                 &ctx,
             )?;
@@ -619,7 +618,10 @@ pub fn assert_case(case: &ParityCase) {
             ),
             Ok(CaseOutcome::Skipped(reason)) => {
                 if case.must_run || require_fixtures() {
-                    panic!("{}: this case MUST run but no fixture was found: {reason}", case.id());
+                    panic!(
+                        "{}: this case MUST run but no fixture was found: {reason}",
+                        case.id()
+                    );
                 }
                 eprintln!("[{}] SKIPPED — {reason}", case.id());
             }

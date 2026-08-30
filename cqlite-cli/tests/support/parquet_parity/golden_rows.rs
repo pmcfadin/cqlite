@@ -86,7 +86,10 @@ pub fn project_golden(
         for (ri, row) in part.rows.iter().enumerate() {
             let where_ = format!("partition {pi} row {ri}");
             if row.row_type != "row" {
-                return Err(ineligible_at(&where_, &format!("a '{}' entry", row.row_type)));
+                return Err(ineligible_at(
+                    &where_,
+                    &format!("a '{}' entry", row.row_type),
+                ));
             }
             if row.deletion.is_some() {
                 return Err(ineligible_at(&where_, "a row-level deletion"));
@@ -103,7 +106,8 @@ pub fn project_golden(
                 ));
             }
 
-            let mut keys: Vec<CanonicalValue> = Vec::with_capacity(part.key.len() + row.clustering.len());
+            let mut keys: Vec<CanonicalValue> =
+                Vec::with_capacity(part.key.len() + row.clustering.len());
             keys.extend(part.key.iter().cloned().map(fold_null));
             keys.extend(row.clustering.iter().cloned().map(fold_null));
 
@@ -360,9 +364,9 @@ pub fn fold_null(v: CanonicalValue) -> CanonicalValue {
                 .map(|(k, v)| (fold_null(k), fold_null(v)))
                 .collect(),
         ),
-        CanonicalValue::Tuple(fs) => CanonicalValue::Tuple(
-            fs.into_iter().map(|(k, v)| (k, fold_null(v))).collect(),
-        ),
+        CanonicalValue::Tuple(fs) => {
+            CanonicalValue::Tuple(fs.into_iter().map(|(k, v)| (k, fold_null(v))).collect())
+        }
         other => other,
     }
 }

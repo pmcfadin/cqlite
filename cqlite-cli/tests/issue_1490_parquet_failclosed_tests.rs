@@ -184,7 +184,11 @@ fn ac1_control_well_typed_value_still_exports() {
         .expect("a well-typed int must export via the streaming writer");
     assert_eq!(readback_col0(&bytes), (1, 0), "streamed value must be live");
     let arr = int32_col0(&bytes);
-    assert_eq!(arr, vec![Some(41)], "streamed value must round-trip exactly");
+    assert_eq!(
+        arr,
+        vec![Some(41)],
+        "streamed value must round-trip exactly"
+    );
 
     let bytes = batch_rows(cols(), vec![row("age", Value::Integer(41))])
         .expect("a well-typed int must export via the batch writer");
@@ -200,8 +204,8 @@ fn ac1_control_well_typed_value_still_exports() {
 fn ac1_control_null_is_not_a_type_mismatch() {
     let cols = || vec![column("age", DataType::Integer, CqlType::Int)];
 
-    let bytes = stream_rows(cols(), &[row("age", Value::Null)])
-        .expect("an explicit NULL must export");
+    let bytes =
+        stream_rows(cols(), &[row("age", Value::Null)]).expect("an explicit NULL must export");
     assert_eq!(readback_col0(&bytes), (1, 1), "explicit NULL stays NULL");
 
     let absent = QueryRow {
@@ -314,7 +318,8 @@ fn ac3_control_decimal_at_or_below_fixed_scale_still_exports() {
             .downcast_ref::<Decimal128Array>()
             .expect("Decimal128Array");
         assert_eq!(
-            arr.value(0), expect,
+            arr.value(0),
+            expect,
             "scale-{scale} decimal must rescale exactly to the fixed export scale"
         );
     }
