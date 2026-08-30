@@ -224,24 +224,21 @@ findings_of() {
 # bypass/merge), so `WS0_CFG_TEMPS="$ARMS"` yields `temps=bypass`, which `session_manifest_config`
 # refuses. The detector is production code, not a fixture expectation.
 driver_step_env() {
-  local prefix
-  prefix="$(python3 "$REPO_ROOT/scripts/tests/ws0_export_prefix.py" "$1" WS0_ "$2" --emit-prefix)" \
-    || return 1
-  (
-    # EVERY CONTROLLED VALUE IS DISTINCT (#3451 post-rebase round 5, F2). `REPS` and
-    # `SCAN_PASSES` were BOTH 1, so swapping their right-hand sides in the driver produced an
-    # identical environment and was undetectable — a VALUE COLLISION defeating the
-    # "execute on the driver's own values" mechanism while the mechanism itself was correct.
-    # 2 and 3 are both valid counts and cannot be confused for one another.
-    REPS=2; TEMPS=warm; ARMS=bypass; SCAN_PASSES=3
-    SERVER_CPUS=2,10; CLIENT_CPUS=4,12
-    STEP_DURATION=45s; COLD_STEP_DURATION=1s
-    FLIGHT_ENDPOINT="$WS0_FIXTURE_ENDPOINT"; BASELINE_MODE=non-baseline
-    EVENTS=cycles,instructions; BIN_DIR_RECORDED=target/release; PROFILE_RECORDED=off
-    QUIESCENCE_RECORDED="NOT VERIFIED (no timeseries supplied)"
-    WS0_SERVER_SIBLINGS="server cpu 2 siblings 2,10"; CPU_TOPOLOGY_ROOT="$TMP/fake-topology"
-    eval "$prefix env"
-  ) | grep -E '^WS0_(CFG|PIN)_'
+  # PARSED AND SUBSTITUTED, NEVER EVALUATED (#3451 post-rebase round 7, F3). The round-2 version
+  # ran `eval "$prefix env"` on the argument that the contiguity check bounded the input to
+  # `NAME=` words with no separator. MEASURED, that check ADMITS `WS0_CFG_X=$(helper)`,
+  # backticks and `${OTHER}` — all assignment-shaped, none containing a separator — so a driver
+  # line of that shape would have executed repository-derived shell inside a test documented as
+  # hermetic, in a mandatory gate component. `--resolve` parses a restricted grammar instead and
+  # refuses, by name, every construct it does not explicitly support.
+  python3 "$REPO_ROOT/scripts/tests/ws0_export_prefix.py" "$1" WS0_ "$2" --resolve \
+    REPS=2 TEMPS=warm ARMS=bypass SCAN_PASSES=3 \
+    SERVER_CPUS=2,10 CLIENT_CPUS=4,12 \
+    STEP_DURATION=45s COLD_STEP_DURATION=1s \
+    FLIGHT_ENDPOINT="$WS0_FIXTURE_ENDPOINT" BASELINE_MODE=non-baseline \
+    EVENTS=cycles,instructions BIN_DIR_RECORDED=target/release PROFILE_RECORDED=off \
+    "QUIESCENCE_RECORDED=NOT VERIFIED (no timeseries supplied)" \
+    "WS0_SERVER_SIBLINGS=server cpu 2 siblings 2,10" "CPU_TOPOLOGY_ROOT=$TMP/fake-topology"
 }
 
 # WHAT EACH RECORDED FIELD MUST BE, given the controlled inputs above (#3451 post-rebase round 5,
@@ -875,6 +872,79 @@ if [ "${struct_present:-0}" -ge 1 ] && ! grep -q '^UNMARKED' <<<"$struct_out" \
   pass "STRUCTURAL (joined-vs-physical): all $struct_present use(s) of the physical line inside census() carry a physical-ok: marker — a classification added against physical text fails here rather than in a sixth review round"
 else
   fail "STRUCTURAL (joined-vs-physical): $(grep -c '^UNMARKED' <<<"$struct_out") unmarked physical-text use(s) in census(), present=${struct_present:-0} — classification must read the JOINED line; mark a diagnostic-only use with physical-ok: $(grep '^UNMARKED' <<<"$struct_out" | head -2 | tr '\n' ' ')$(grep '^NO-SUBJECT' <<<"$struct_out")"
+fi
+
+# --- CONTROL 1k: the SKIP PATH IS AN ALLOWLIST, so an unanticipated word cannot slip through ---
+# Every silent absence this issue produced came through one door: "the command word is a literal
+# not containing python, therefore skip", which decides safety by what a word is NOT. That let
+# `if`, `-I`, `#`, `env` and `command` through — five spellings, five separate rounds. Skipping
+# now requires MEMBERSHIP of `_NON_PYTHON_DASH_C_COMMANDS`.
+#
+# BOTH DIRECTIONS, because an allowlist has the widest false-red surface of anything here: the
+# three previously-invisible forms must be findings, and every allowlisted command must still be
+# clean — including the driver's own `grep -c`, which is the one this suite would break first.
+python3 - "$TMP" <<'INJECT'
+import pathlib, sys
+q = chr(39)
+tmp = pathlib.Path(sys.argv[1])
+bad = q + "import os," + q
+(tmp / "skip-env.sh").write_text('env "$PY" -c ' + bad + "\n")
+(tmp / "skip-command.sh").write_text('command "$PY" -c ' + bad + "\n")
+(tmp / "skip-midcomment.sh").write_text("x=1 # comment " + chr(92) + "\n$PY -c " + bad + "\n")
+(tmp / "skip-grep.sh").write_text("grep -c " + q + "foo" + q + " file\n")
+(tmp / "skip-sort.sh").write_text("sort -cu file\n")
+(tmp / "skip-tar.sh").write_text("tar -cf out.tar dir\n")
+INJECT
+skip_rc=$?
+skip_ok=1
+skip_detail=""
+for skip_case in env command midcomment; do
+  [ -n "$(findings_of "$(census "$TMP/skip-$skip_case.sh")")" ] \
+    || { skip_ok=0; skip_detail="$skip_detail $skip_case(missed)"; }
+done
+for skip_case in grep sort tar; do
+  [ -z "$(findings_of "$(census "$TMP/skip-$skip_case.sh")")" ] \
+    || { skip_ok=0; skip_detail="$skip_detail $skip_case(false-red)"; }
+done
+if [ "$skip_rc" -eq 0 ] && [ "$skip_ok" -eq 1 ]; then
+  pass "census CONTROL fired (allowlisted skip): env, command and a mid-line comment are FINDINGS while every allowlisted command stays clean — skipping by membership, so the next unanticipated spelling cannot grant itself a skip by lacking a signal"
+else
+  fail "census CONTROL did not fire (allowlisted skip): fixture-rc=$skip_rc problems:$skip_detail"
+fi
+
+# --- CONTROL 1l: the assignment prefix is PARSED, and refuses what an eval would have run -------
+# Round 2 authorised evaluating the driver's prefix on the argument that the contiguity check
+# bounded the input to `NAME=` words with no separator. MEASURED, that check ADMITS
+# `WS0_CFG_X=$(helper)`, backticks and `${OTHER}` — all assignment-shaped, none containing a
+# separator — so repository-derived shell would have run inside a test documented as hermetic,
+# in a mandatory gate component. There is no eval now; a restricted grammar refuses each form BY
+# NAME, and this control is what keeps that true.
+grammar_ok=1
+grammar_detail=""
+for grammar_case in 'subst=$(helper)' 'backtick=`helper`' 'unknown=${OTHER}'; do
+  grammar_label="${grammar_case%%=*}"
+  grammar_value="${grammar_case#*=}"
+  GRAMMAR_DRV="$TMP/grammar-$grammar_label-driver.sh"
+  python3 - "$DRIVER" "$GRAMMAR_DRV" "$grammar_value" <<'INJECT'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+needle = 'WS0_CFG_REPS="$REPS"'
+if text.count(needle) != 1:
+    print(f"INJECTION IMPOSSIBLE: {needle} occurs {text.count(needle)} time(s)", file=sys.stderr)
+    raise SystemExit(1)
+pathlib.Path(sys.argv[2]).write_text(text.replace(needle, "WS0_CFG_REPS=" + sys.argv[3]))
+INJECT
+  if [ $? -ne 0 ]; then
+    grammar_ok=0; grammar_detail="$grammar_detail $grammar_label(not-injected)"; continue
+  fi
+  if driver_step_env "$GRAMMAR_DRV" write_session_corpus_pin >/dev/null 2>&1; then
+    grammar_ok=0; grammar_detail="$grammar_detail $grammar_label(ADMITTED)"
+  fi
+done
+if [ "$grammar_ok" -eq 1 ]; then
+  pass "grammar CONTROL fired: command substitution, backticks and an unknown parameter reference are each REFUSED by the prefix parser — the constructs the round-2 eval would have executed, and which its stated safety bound did not exclude"
+else
+  fail "grammar CONTROL did not fire:$grammar_detail — an unsupported assignment form was accepted, which is the hermeticity breach this replaced"
 fi
 
 # ============================================================================
@@ -1654,7 +1724,7 @@ fi
 # which the new coverage can be deleted again and the stale floor still passes. It sat 18 below
 # actual for exactly that reason. Equality means a change in either direction is a decision
 # someone makes here, in one line, with the failure text saying which direction and why.
-MIN_CHECKS=47
+MIN_CHECKS=49
 echo
 if [ "$checks" -ne "$MIN_CHECKS" ]; then
   echo "FAIL - $checks check(s) ran; this suite has EXACTLY $MIN_CHECKS."

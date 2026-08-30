@@ -107,6 +107,90 @@ if contiguous:
     present = [n for n in names if any(w.startswith(n + "=") for w in prefix_words)]
 else:
     present = []
+if "--resolve" in sys.argv[4:]:
+    # THE PREFIX IS PARSED AND SUBSTITUTED, NEVER EVALUATED (#3451 post-rebase round 7, F3).
+    #
+    # Round 2 authorised an `eval` on the argument that the contiguity check bounded its input:
+    # "only NAME= words with no command separator". MEASURED, that check admits
+    # `WS0_CFG_X=$(helper)`, `WS0_CFG_X=`helper`` and `WS0_CFG_X=${OTHER}` — all
+    # assignment-shaped, none containing a separator. Command substitution walked straight
+    # through the stated bound, so a driver line of that shape would have executed
+    # repository-derived shell inside a test documented as hermetic and read-only, in a mandatory
+    # gate component. The precondition did not exclude the dangerous case.
+    #
+    # So: a RESTRICTED GRAMMAR, allowlisted at every level. A value is a sequence of literal
+    # characters drawn from an explicit set, plus `$VAR` / `${VAR}` references resolved from the
+    # caller's controlled table. Command substitution, backticks, arithmetic, parameter-expansion
+    # operators, redirections, globs and any form not named here are REFUSED BY NAME — a failure,
+    # never a skip. Nothing is executed, so the header's "hermetic" is a fact rather than a hope.
+    if not contiguous:
+        print(f"NOT-A-PREFIX: the first non-assignment token is {following!r}, not the consuming"
+              " `python3` command", file=sys.stderr)
+        raise SystemExit(4)
+    table = {}
+    for pair in sys.argv[4:]:
+        if pair == "--resolve":
+            continue
+        name, _, value = pair.partition("=")
+        table[name] = value
+    LITERAL = set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        "/.:,-_+@% "
+    )
+    VARNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+    def resolve(word):
+        name, _, raw = word.partition("=")
+        if raw[:1] == '"':
+            if not raw.endswith('"') or len(raw) < 2:
+                raise ValueError(f"{name}: unbalanced double quote in {raw!r}")
+            raw = raw[1:-1]
+        elif raw[:1] == "'":
+            raise ValueError(f"{name}: single-quoted values are not in the supported grammar")
+        out, i = [], 0
+        while i < len(raw):
+            ch = raw[i]
+            if ch == "$":
+                rest = raw[i + 1 :]
+                if rest[:1] == "{":
+                    m2 = VARNAME.match(rest, 1)
+                    if not m2 or rest[m2.end() : m2.end() + 1] != "}":
+                        raise ValueError(
+                            f"{name}: only a plain ${{VAR}} reference is supported, not"
+                            f" {raw[i:i + 12]!r} (parameter-expansion operators are refused)"
+                        )
+                    var, i = m2.group(0), i + 1 + m2.end() + 1
+                elif rest[:1] == "(":
+                    raise ValueError(
+                        f"{name}: command substitution/arithmetic is REFUSED — this is the"
+                        " construct the round-2 safety argument wrongly assumed was excluded"
+                    )
+                else:
+                    m2 = VARNAME.match(rest)
+                    if not m2:
+                        raise ValueError(f"{name}: a bare $ is not a supported reference")
+                    var, i = m2.group(0), i + 1 + m2.end()
+                if var not in table:
+                    raise ValueError(f"{name}: ${var} is not in the controlled table")
+                out.append(table[var])
+                continue
+            if ch not in LITERAL:
+                raise ValueError(
+                    f"{name}: {ch!r} is not a supported literal character (backticks,"
+                    " redirections, globs and quoting forms are refused)"
+                )
+            out.append(ch)
+            i += 1
+        return name, "".join(out)
+
+    try:
+        resolved = [resolve(w) for w in prefix_words]
+    except ValueError as exc:
+        print(f"UNSUPPORTED-ASSIGNMENT: {exc}", file=sys.stderr)
+        raise SystemExit(5)
+    for name, value in resolved:
+        print(f"{name}={value}")
+    raise SystemExit(0)
 if "--emit-prefix" in sys.argv[4:]:
     # THE VALIDATED PREFIX TEXT, printed ONLY when the run above is intact. The caller evaluates
     # it (see `driver_step_env`), and this conditionality is the whole safety argument: the text

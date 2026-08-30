@@ -179,24 +179,24 @@ _PY_WORD = re.compile(r"python[0-9]*(?:\.[0-9]+)*(?![\w.])")
 # own inline block at line 941 uses.
 _CONCATENATION_BEFORE_WORD = frozenset("\"'`)}" + chr(92))
 
-# IS A COMMAND WORD A PLAIN LITERAL? (#3451 review round 12.)
+# WHICH COMMAND WORDS MAY BE SKIPPED — AN ALLOWLIST (#3451 post-rebase round 7, F1+F2).
 #
-# The flag anchor used to report EVERY `-c '…'` whose command word was not literally `python3`,
-# which false-red on `grep -c '_RN'` the moment #3455 added one to the driver. `-c` is a common
-# flag — `grep -c` counts, `sort -c` checks, `tar -c` creates — so "not python3" was the wrong
-# question. The right one is decidable in three states:
+# The skip path used to read "a literal not containing `python`, therefore skip", which decides
+# safety by what a word is NOT. Every silent absence this issue produced came through that one
+# door: `if` (round 4), `-I` (round 3), `#` (round 6), `env` and `command` (round 7) — each found
+# separately, each fixed separately, because a blocklist cannot close over an open set.
 #
-#   a literal CONTAINING `python`      the allowlisted shape; the word anchor handles it
-#   a literal NOT containing `python`  SKIP. `grep` is definitively not python, so there is no
-#                                      python program here and nothing to compile. Deciding this
-#                                      needs no list of known commands — only that the word is
-#                                      literal, and that literals can be compared.
-#   NOT a plain literal                FINDING. `$PYTHON`, `"prefix"python3`, `$(which python3)`
-#                                      cannot be resolved without executing the shell, so they
-#                                      may carry code and fail closed.
+# Skipping now requires MEMBERSHIP of this set. A spelling nobody anticipated no longer grants
+# itself a skip by lacking a signal — the same inversion that closed the classification series,
+# applied one level down.
 #
-# A word is a PLAIN LITERAL when it contains no expansion or quoting character. That is the same
-# closed metacharacter set used elsewhere in this file, applied to a different question.
+# THE COST IS NOISE IN THE ACTIONABLE DIRECTION: a driver that grows a `-c` user outside this set
+# reds the gate and someone adds it here deliberately. Measured before adopting — the only
+# command words reaching the flag anchor in `ws0-baseline.sh` are `grep` and `python3`.
+_NON_PYTHON_DASH_C_COMMANDS = frozenset({"grep", "sort", "tar", "sed", "awk", "bash", "sh"})
+
+# A word is a PLAIN LITERAL when it contains no expansion or quoting character — still needed, so
+# an indirect word is never compared against the allowlist as though it were a name.
 _NON_LITERAL_IN_WORD = frozenset("$`\"'*?[]{}" + chr(92))
 
 
@@ -590,23 +590,23 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             if (
                 cmd_word is not None
                 and _is_plain_literal(cmd_word)
-                and "python" not in cmd_word.rsplit("/", 1)[-1]
+                and cmd_word.rsplit("/", 1)[-1] in _NON_PYTHON_DASH_C_COMMANDS
             ):
-                # A LITERAL non-python command: `grep -c '_RN'`, `sort -c`, `tar -c`. Its text is
-                # its value, so this is decidably not a python invocation and there is no program
-                # to compile. Skipped rather than reported — reporting it is the false-red
-                # direction, and a guard that reds on correct code is the guard people waive.
+                # An ALLOWLISTED non-python command. Its text is its value AND it is a named
+                # member of the set, so there is no python program here. Skipping by MEMBERSHIP
+                # rather than by "does not look like python" is what stops the next spelling.
                 continue
             findings.append({
                 "line": idx + 1,
                 "reason": "a `-c '<program>'` invocation whose command word"
                           f" ({cmd_word if cmd_word else '(unresolvable)'!r}) is NOT A"
-                          " PLAIN LITERAL, so what it runs"
+                          " ALLOWLISTED non-python command, so what it runs"
                           " cannot be decided without executing the shell — it may be python"
                           " carrying a program this check would never see. Anchored on the FLAG"
                           " rather than the command word, because an indirectly-spelled word was"
                           " INVISIBLE before #3451 round 7. A LITERAL non-python command"
-                          " (`grep -c`, `sort -c`) is skipped, not reported.",
+                          " on `_NON_PYTHON_DASH_C_COMMANDS` is skipped; add one there"
+                          " deliberately if it genuinely never runs python.",
             })
             continue
         # Walk left to the start of the shell WORD — in JOINED space, so a path prefix or a
