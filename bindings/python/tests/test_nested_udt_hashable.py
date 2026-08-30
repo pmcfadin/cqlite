@@ -699,13 +699,41 @@ class TestTupleBorneUdtAsMapKey:
     any fixture in this repository. ``value_to_hashable_key``'s new ``Tuple``
     arm is covered only through the set-element path above.
 
+    AC SHAPE 3 IS DISCHARGED BY THIS PINNED GAP TEST PLUS #3612 — BY LEAD
+    RULING, not by a worker descope. Issue #3500's acceptance criteria expect
+    shape 3 to raise ``TypeError``; it cannot, because the key never becomes a
+    ``dict`` in the first place (see above). The lead amended the AC accordingly
+    (#3500 thread, 2026-08-30) and raised #3612 to P1. A later spec audit should
+    read shape 3 as AMENDED-AND-SATISFIED, not unmet.
+
     The expected bytes below are built from Cassandra's composite framing
     (int32 BE length per component, ``-1`` for null) and cross-check against the
-    golden's ``path`` values. The day ``parse_cell_path_key`` learns composites
-    (#3612), these assertions FAIL — which is the point: the failure is the
-    reminder to re-pin this column against the structured shape the frozen-map
-    columns already produce.
+    golden's ``path`` values.
+
+    EVERY ASSERTION IN THIS CLASS CARRIES THE SAME MESSAGE, AND THAT IS
+    DELIBERATE: the day ``parse_cell_path_key`` learns composites — i.e. when
+    **#3612** is fixed — these assertions FAIL, and a bare dict diff would say
+    nothing about why. A gap assertion that cannot explain its own failure is a
+    comment with a test harness around it. Each message therefore names #3612 as
+    the trigger, says the failure is the EXPECTED signal that #3612 landed, and
+    says what to do: re-pin the expectation to the structured ``(dict, int)``
+    tuple key that the frozen-map columns already produce, and finish the
+    map-key half of the hashable projection (``bindings/python/src/value.rs``,
+    where #3500 put it). #3500 is cited only as WHERE the projection lives — it
+    is this PR and will be closed, and a gap marker pointing at a closed issue
+    is how a gap becomes permanent.
     """
+
+    #: Attached to every assertion in this class. See the class docstring.
+    _GAP = (
+        "m_tuple_udt: DOCUMENTED GAP #3612 (multicell map keys decode as opaque "
+        "Value::Blob via the scalar-only parse_cell_path_key). A FAILURE HERE IS "
+        "THE EXPECTED SIGNAL THAT #3612 HAS BEEN FIXED, not a regression of this "
+        "test: re-pin the expectation to the structured (dict, int) tuple key the "
+        "frozen-map columns already produce, and finish the map-key half of the "
+        "hashable projection in bindings/python/src/value.rs (added by #3500, "
+        "which is closed — #3612 is the live issue)."
+    )
 
     def test_map_key_is_currently_opaque_bytes(self, db):
         """id=1: two composite keys, each an opaque ``bytes`` blob."""
@@ -713,12 +741,8 @@ class TestTupleBorneUdtAsMapKey:
         assert value == {
             tuple_udt_int_serialized("charlie", 3, 8): 80,
             tuple_udt_int_serialized("delta", 4, 9): 90,
-        }
-        assert all(type(k) is bytes for k in value), (
-            "a structured key here means cqlite-core's parse_cell_path_key now "
-            "decodes composites — finish the map-key hashable projection (#3500) "
-            "and re-pin this test"
-        )
+        }, self._GAP
+        assert all(type(k) is bytes for k in value), self._GAP
 
     def test_map_key_with_null_and_empty_udt_fields(self, db):
         """id=2: null-both-fields and empty-string-label keys stay distinct."""
@@ -726,16 +750,21 @@ class TestTupleBorneUdtAsMapKey:
         assert value == {
             tuple_udt_int_serialized(None, None, 0): 1,
             tuple_udt_int_serialized("", 0, 0): 2,
-        }
+        }, self._GAP
 
     def test_single_key_partition(self, db):
         """id=3: one composite key."""
         value = _rows_by_id(db, "m_tuple_udt")[3].get("m_tuple_udt")
-        assert value == {tuple_udt_int_serialized("solo", 99, 42): 7}
+        assert value == {tuple_udt_int_serialized("solo", 99, 42): 7}, self._GAP
 
     def test_absent_in_sparse_row(self, db):
-        """id=4 never wrote this column."""
-        assert _rows_by_id(db, "m_tuple_udt")[4].get("m_tuple_udt") is None
+        """id=4 never wrote this column.
+
+        Carries the gap message too: #3612 does not change this expectation (an
+        absent column is ``None`` either way), so if THIS one ever reds, #3612 is
+        not the explanation and the message says which parts to re-pin.
+        """
+        assert _rows_by_id(db, "m_tuple_udt")[4].get("m_tuple_udt") is None, self._GAP
 
 
 class TestFrozenMapWithTupleBorneUdtKey:
