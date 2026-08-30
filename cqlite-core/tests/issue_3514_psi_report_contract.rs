@@ -30,7 +30,10 @@
 #[path = "support/os_thread_budget.rs"]
 mod os_thread_budget;
 
-use os_thread_budget::{describe_stall, min_cpus_for_amplification, reap_confirm_timeout};
+use os_thread_budget::{
+    describe_stall, min_cpus_for_amplification, os_thread_count, poll_until_reaped,
+    reap_confirm_timeout, ReapOutcome,
+};
 use std::time::Duration;
 
 /// A backwards counter must report UNMEASURED, naming the cause — never `0.0%`.
@@ -229,4 +232,143 @@ fn reap_confirm_budget_scales_with_producers() {
     // Floor: a drain can only be OBSERVED in at least one keep-alive plus one
     // full quiescence span, so even a degenerate count gets that much.
     assert!(reap_confirm_timeout(0) >= Duration::from_secs(22));
+}
+
+// ── poll_until_reaped: the AFFIRMATIVE-ACCEPTANCE property ───────────────────
+//
+// This is the property the entire #3514 de-flake rests on, and it had NO test:
+// only a deliberate source flip could detect a regression in it. It has ALREADY
+// regressed once — roborev job 61 found `poll_until_reaped` returning the LATEST
+// reading on timeout, so a count that merely DIPPED within budget as the deadline
+// passed, without ever HOLDING there, was indistinguishable from a genuine drain
+// and satisfied the pin. `ReapOutcome` exists because of that finding; these tests
+// exist so the finding cannot land a second time.
+//
+// They need no starvation and no thread manipulation: `min_span` and `timeout` are
+// parameters, so the interesting regimes are reachable by choosing them. Nothing
+// here spawns or joins a thread, deliberately — sibling tests in this binary share
+// one process under plain `cargo test`, and a test that perturbed the process
+// thread count would perturb its own oracle and its neighbours'.
+
+/// Skip helper: `poll_until_reaped` reads the OS thread count directly and panics
+/// if the platform exposes no API for it, exactly as the two pins' guard 2
+/// documents. Mirror that guard rather than assert something unmeasurable.
+fn thread_count_observable() -> bool {
+    if os_thread_count().is_none() {
+        eprintln!("[skip] no direct OS thread-count API on this platform");
+        return false;
+    }
+    true
+}
+
+/// A reading that is within budget AND holds there must be accepted as `Drained`,
+/// reporting the held count.
+///
+/// This is the positive control, and it is load-bearing for the two negative tests
+/// below: without it, an implementation that returned `Unconfirmed` unconditionally
+/// would satisfy them both while breaking the mechanism entirely.
+#[test]
+fn holding_within_budget_yields_drained() {
+    if !thread_count_observable() {
+        return;
+    }
+    let observed = os_thread_count().expect("just checked");
+    // Threshold far above the real count, so "within budget" is never the binding
+    // constraint — what is under test is that a HELD reading is accepted at all.
+    // Short span, generous timeout: the process thread count is stable in a unit
+    // test, so the span completes long before the budget expires.
+    match poll_until_reaped(
+        observed + 50,
+        Duration::from_millis(100),
+        Duration::from_secs(10),
+    ) {
+        ReapOutcome::Drained { settled, peak } => {
+            assert!(
+                settled <= observed + 50 && peak >= settled,
+                "Drained must report the held count within budget and a peak at \
+                 least as high; got settled={settled} peak={peak}"
+            );
+        }
+        ReapOutcome::Unconfirmed { peak, last } => panic!(
+            "a stable, within-budget count held for 100ms must be affirmatively \
+             Drained, not Unconfirmed (peak={peak}, last={last}) — otherwise the \
+             confirmation can never absorb reap jitter and every over-bound run fails"
+        ),
+    }
+}
+
+/// **Job 61's exact shape.** A count that is within budget for the WHOLE window but
+/// never demonstrably HELD there for `min_span` must yield `Unconfirmed`, never
+/// `Drained`.
+///
+/// Constructed with `min_span > timeout`, which makes the property hold with ZERO
+/// timing assumptions: no hold of that length can fit inside the budget however the
+/// host schedules this thread, while the count is trivially within the (very high)
+/// threshold at every poll. So the ONLY thing that can produce `Drained` here is an
+/// implementation that accepts on the instantaneous reading instead of a held one —
+/// which is precisely the defect.
+///
+/// This deliberately generalizes the "dip arriving as the deadline expires" case
+/// rather than staging that dip literally with real threads. A literal dip has to be
+/// timed against the poll's own deadline, and a main-thread deschedule between the
+/// two clocks moves the answer to `Drained` — i.e. it would be a FALSE FAILURE under
+/// exactly the load this issue is about. The generalized form ("an acceptable value
+/// that never held is never accepted") covers the dip as a special case and cannot
+/// flake in either direction.
+#[test]
+fn within_budget_but_never_held_yields_unconfirmed() {
+    if !thread_count_observable() {
+        return;
+    }
+    let observed = os_thread_count().expect("just checked");
+    match poll_until_reaped(
+        observed + 50,              // within budget at every poll
+        Duration::from_secs(30),    // a span that CANNOT fit in the budget
+        Duration::from_millis(300), // ...which expires first, by construction
+    ) {
+        ReapOutcome::Unconfirmed { peak, last } => {
+            assert!(
+                peak > 0 && last > 0,
+                "Unconfirmed must carry the peak and last readings so a failure \
+                 stays diagnosable; got peak={peak} last={last}"
+            );
+            assert!(
+                peak >= last,
+                "the peak must be at least the last reading; got peak={peak} last={last}"
+            );
+        }
+        ReapOutcome::Drained { peak, settled } => panic!(
+            "ACCEPTANCE WAS NOT AFFIRMATIVE (roborev job 61 regression): a count \
+             within budget that never HELD for min_span was accepted as Drained \
+             (peak={peak}, settled={settled}). min_span was longer than the whole \
+             timeout, so no hold could have been observed — this can only be an \
+             implementation accepting the instantaneous reading, which is what let a \
+             deadline-time dip pass the pin before ReapOutcome existed"
+        ),
+    }
+}
+
+/// A count that never comes within budget must yield `Unconfirmed`, and must carry
+/// readings that reflect the real (over-threshold) count so the panic message the
+/// pins build is diagnosable.
+#[test]
+fn never_within_budget_yields_unconfirmed_with_real_readings() {
+    if !thread_count_observable() {
+        return;
+    }
+    let observed = os_thread_count().expect("just checked");
+    // Threshold 0 is unreachable: a live process always has at least this thread.
+    match poll_until_reaped(0, Duration::from_millis(50), Duration::from_millis(300)) {
+        ReapOutcome::Unconfirmed { peak, last } => {
+            assert!(
+                last >= 1 && peak >= last,
+                "the readings must be the real thread count, not a placeholder; \
+                 got peak={peak} last={last} (observed {observed})"
+            );
+        }
+        ReapOutcome::Drained { peak, settled } => panic!(
+            "an unreachable threshold of 0 must never be satisfied; got \
+             Drained(peak={peak}, settled={settled})"
+        ),
+    }
 }
