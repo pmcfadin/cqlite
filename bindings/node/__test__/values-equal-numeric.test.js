@@ -64,3 +64,44 @@ describe('valuesEqual numeric comparison (issue #3505)', () => {
     expect(valuesEqual(1.0, 2.0)).toBe(false);
   });
 });
+
+describe('valuesEqual non-finite doubles (issue #3505)', () => {
+  // The tolerance formula `Math.abs(a-b) <= Math.max(relTol*Math.max(|a|,|b|),
+  // absTol)` degenerates the moment either operand is infinite: both sides
+  // become `Infinity` and `Infinity <= Infinity` is `true`, so every finite
+  // value compared equal to infinity and `+Infinity` compared equal to
+  // `-Infinity`. CQL `float`/`double` columns can legitimately hold
+  // `Infinity`, so that masked a real mismatch.
+
+  test('Infinity never equals a finite number', () => {
+    for (const finite of [1.0, 0.0, -1.0, 1e308, -1e308]) {
+      expect(valuesEqual(Infinity, finite)).toBe(false);
+      expect(valuesEqual(finite, Infinity)).toBe(false);
+      expect(valuesEqual(-Infinity, finite)).toBe(false);
+      expect(valuesEqual(finite, -Infinity)).toBe(false);
+    }
+  });
+
+  test('opposite infinities are a mismatch', () => {
+    expect(valuesEqual(Infinity, -Infinity)).toBe(false);
+    expect(valuesEqual(-Infinity, Infinity)).toBe(false);
+  });
+
+  test('same-signed infinities still match (must NOT break)', () => {
+    // `+Infinity === +Infinity`, and a golden holding `Infinity` on both sides
+    // IS a match, so the non-finite rejection has to sit AFTER the strict
+    // equality branch.
+    expect(valuesEqual(Infinity, Infinity)).toBe(true);
+    expect(valuesEqual(-Infinity, -Infinity)).toBe(true);
+  });
+
+  test('NaN behaviour is unchanged by the non-finite guard', () => {
+    // Re-asserted because the guard is inserted next to the NaN branch, so a
+    // mis-ordered edit would regress this.
+    expect(valuesEqual(NaN, NaN)).toBe(true);
+    expect(valuesEqual(NaN, 1.0)).toBe(false);
+    expect(valuesEqual(1.0, NaN)).toBe(false);
+    expect(valuesEqual(NaN, Infinity)).toBe(false);
+    expect(valuesEqual(Infinity, NaN)).toBe(false);
+  });
+});

@@ -612,6 +612,21 @@ function valuesEqual(actual, expected) {
   if (typeof actual === 'number' && typeof expected === 'number') {
     if (actual === expected) return true;
     if (Number.isNaN(actual) && Number.isNaN(expected)) return true;
+    // The tolerance formula below DEGENERATES on an infinite operand (issue
+    // #3505): `Math.abs(actual - expected)` is `Infinity` and so is
+    // `relTol * Math.max(|actual|, |expected|)`, leaving
+    // `Infinity <= Infinity` -- which is `true`.  So every finite value
+    // compared equal to infinity, and `+Infinity` compared equal to
+    // `-Infinity`.  CQL `float`/`double` columns can legitimately hold
+    // `Infinity`, so that masked a real mismatch.
+    //
+    // This MUST sit after the `actual === expected` branch above: two genuine
+    // equal infinities ARE equal in IEEE-754 and that case is already answered
+    // there.  By here the operands differ, and a differing pair with an
+    // infinite member can never be within any finite tolerance.  (A NaN
+    // operand is also non-finite; NaN-vs-NaN is answered above and
+    // NaN-vs-anything-else correctly falls to `false` either way.)
+    if (!Number.isFinite(actual) || !Number.isFinite(expected)) return false;
 
     const relTol = 1e-6;
     const absTol = 1e-9;
