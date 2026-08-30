@@ -1200,6 +1200,175 @@ fn a_skip_that_matches_nothing_is_reported() {
     );
 }
 
+// =======================================================================
+// A boolean/blob PARTITION KEY: the comparator's own view of finding T1
+// =======================================================================
+
+/// The end-to-end shape of finding T1, at the position `column_kinding` decides:
+/// a boolean PARTITION KEY. `serializePartitionKey` writes
+/// `writeString(keyValidator.getString(v))`, so the golden carries `"true"`, while
+/// the CLI renders the column at its declared type's JSON kind, i.e. `true`. Both
+/// sides are CORRECT, so the comparator must report no diff — before finding T1 it
+/// reported one, which is a lane that reds on correct input.
+///
+/// The golden spelling here is derived from `cassandra-5.0.8`
+/// (`BooleanSerializer.toString` = `value.toString()`), not from any CQLite output.
+#[test]
+fn a_correct_boolean_partition_key_is_not_a_divergence() {
+    let schema = schema_of("CREATE TABLE t (flag boolean PRIMARY KEY, v text);", "t");
+    let golden = vec![row(&[("flag", json!("true")), ("v", json!("x"))])];
+    let cli = vec![row(&[("flag", json!(true)), ("v", json!("x"))])];
+    let report = compare_rows(&golden, &cli, &schema, &["flag"], &[], &[], Egress::Json);
+    assert!(
+        report.diffs.is_empty(),
+        "`sstabledump` stringifies a partition key and the CLI does not: {:?}",
+        report.diffs
+    );
+    assert_eq!(
+        report.compared_cells, 2,
+        "both declared columns are compared"
+    );
+}
+
+/// Pinned from the other side, so the relaxation above cannot drift into accepting
+/// anything: the WRONG boolean still diverges, and so does a CLI that spells the
+/// column as a string instead of a boolean.
+///
+/// A wrong PARTITION KEY value also moves the emitted key sequence, so the
+/// row-ORDER check reports its own line beside the value diff. Both are true and
+/// both are asserted by NAME rather than by count, so neither can be satisfied by
+/// the other.
+#[test]
+fn a_wrong_boolean_partition_key_still_diverges() {
+    let schema = schema_of("CREATE TABLE t (flag boolean PRIMARY KEY, v text);", "t");
+    let golden = vec![row(&[("flag", json!("true")), ("v", json!("x"))])];
+
+    // Same column, opposite value.
+    let flipped = vec![row(&[("flag", json!(false)), ("v", json!("x"))])];
+    let report = compare_rows(
+        &golden,
+        &flipped,
+        &schema,
+        &["flag"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    let value_diffs: Vec<&String> = report
+        .diffs
+        .iter()
+        .filter(|d| d.contains(".flag: golden"))
+        .collect();
+    assert_eq!(
+        value_diffs.len(),
+        1,
+        "the opposite boolean must be reported as a VALUE diff: {:?}",
+        report.diffs
+    );
+    assert!(
+        value_diffs[0].contains("bool:true") && value_diffs[0].contains("bool:false"),
+        "the message must name both values: {value_diffs:?}"
+    );
+
+    // The ASYMMETRY: the CLI may not spell a boolean column as a JSON string, even
+    // at a position where the golden is stringified. The row key is unchanged here
+    // (the untyped pairing projection reads both spellings as the same boolean), so
+    // this one stands alone.
+    let stringy = vec![row(&[("flag", json!("true")), ("v", json!("x"))])];
+    let report = compare_rows(
+        &golden,
+        &stringy,
+        &schema,
+        &["flag"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a CLI boolean rendered as a string must still fail: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("golden bool:true vs cli text:true"),
+        "the message must name both KINDS: {:?}",
+        report.diffs
+    );
+}
+
+/// The other stringified position `column_kinding` derives from the DDL: a
+/// NON-FROZEN `set<boolean>`, whose golden elements are the cells' `path`
+/// (`writeString(nameComparator().getString(...))`). The row key here is an `int`,
+/// so a wrong element is reported alone and the value rule is pinned with no
+/// row-order companion.
+#[test]
+fn a_multicell_set_of_booleans_compares_across_the_stringification() {
+    let schema = schema_of("CREATE TABLE t (id int PRIMARY KEY, s set<boolean>);", "t");
+    let golden = vec![row(&[("id", json!("1")), ("s", json!(["false", "true"]))])];
+
+    let cli = vec![row(&[("id", json!(1)), ("s", json!([false, true]))])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(
+        report.diffs.is_empty(),
+        "a multicell set's elements ARE its cell paths, which the dump stringifies: {:?}",
+        report.diffs
+    );
+    assert_eq!(report.container_cells, 1, "the set is a container cell");
+
+    // A wrong element still diverges.
+    let wrong = vec![row(&[("id", json!(1)), ("s", json!([true, true]))])];
+    let report = compare_rows(&golden, &wrong, &schema, &["id"], &[], &[], Egress::Json);
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a flipped set element must be reported: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("bool:false") && report.diffs[0].contains("bool:true"),
+        "the message must name both values: {:?}",
+        report.diffs
+    );
+}
+
+/// The blob half of the same finding: `BytesSerializer.toString` is the bare hex,
+/// so a blob partition key's golden has no `0x` while every other position (and the
+/// CLI) carries one. Pinned from both sides.
+#[test]
+fn a_blob_partition_key_compares_across_the_0x_prefix_only() {
+    let schema = schema_of("CREATE TABLE t (k blob PRIMARY KEY, v text);", "t");
+    let golden = vec![row(&[("k", json!("deadbeef")), ("v", json!("x"))])];
+
+    let cli = vec![row(&[("k", json!("0xdeadbeef")), ("v", json!("x"))])];
+    let report = compare_rows(&golden, &cli, &schema, &["k"], &[], &[], Egress::Json);
+    assert!(
+        report.diffs.is_empty(),
+        "`getString` drops the prefix `toJSONString` adds: {:?}",
+        report.diffs
+    );
+
+    // Different bytes still diverge. As above, a changed PARTITION KEY also moves
+    // the emitted key sequence, so the value diff is asserted by name.
+    let wrong = vec![row(&[("k", json!("0xdeadbeee")), ("v", json!("x"))])];
+    let report = compare_rows(&golden, &wrong, &schema, &["k"], &[], &[], Egress::Json);
+    let value_diffs: Vec<&String> = report
+        .diffs
+        .iter()
+        .filter(|d| d.contains(".k: golden"))
+        .collect();
+    assert_eq!(
+        value_diffs.len(),
+        1,
+        "different bytes must still diverge: {:?}",
+        report.diffs
+    );
+    assert!(
+        value_diffs[0].contains("0xdeadbeef") && value_diffs[0].contains("0xdeadbeee"),
+        "the message must name both spellings: {value_diffs:?}"
+    );
+}
+
 #[path = "golden_value_compare_order_tests.rs"]
 mod order;
 

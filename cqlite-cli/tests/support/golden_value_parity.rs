@@ -241,6 +241,37 @@ pub enum Depth {
 /// So cross-kind numeric normalization is CORRECT at the first set of positions
 /// and WRONG everywhere else: applying it everywhere let an ordinary `int` cell
 /// rendered as `"1"` pass as `1` (issue #1491 review finding R1).
+///
+/// # Which TYPES the two writers spell differently
+///
+/// Numbers are not the only ones, so the whole native type set was walked against
+/// `cassandra-5.0.8` (finding T1). `getString` is `serializer.toString(deserialize(v))`
+/// (`AbstractType`), and the default `toJSONString` is
+/// `'"' + Objects.toString(deserialize(v)) + '"'`:
+///
+///   * **DIVERGE IN KIND** — `int`/`bigint`/`smallint`/`tinyint`/`varint`/`float`/
+///     `double`/`decimal` (`"1"` vs `1`) and **`boolean`** (`"true"` vs `true`,
+///     `BooleanType.toJSONString` = `deserialize(buffer).toString()` written raw).
+///     Both are relaxed in [`canon_typed`], golden-side only;
+///   * **DIVERGE IN SPELLING, same kind** — **`blob`** (`BytesSerializer.toString`
+///     is the bare hex, `BytesType.toJSONString` is `"0x" + hex`) and `timestamp`
+///     (`FORMATTER_UTC`'s `yyyy-MM-dd'T'HH:mm:ss.SSSX` vs `FORMATTER_TO_JSON`'s
+///     `yyyy-MM-dd HH:mm:ss.SSSX` — the two spellings [`canon_timestamp`] already
+///     accepts, which is why this position needed no separate relaxation);
+///   * **IDENTICAL** — `text`/`varchar`/`ascii` (`getString` is the raw string and
+///     `writeString` escapes it; `UTF8Type`/`AsciiType.toJSONString` quote it with
+///     `JsonUtils.quoteAsJsonString`), `uuid`/`timeuuid`/`duration` (the default
+///     `toJSONString`, whose `Object.toString()` is what those serializers return),
+///     and `date`/`time` (both override `toJSONString` to call `serializer.toString`,
+///     the very function `getString` uses). `counter` cannot occupy a stringified
+///     position at all.
+///
+/// Not covered, and named rather than implied: a FROZEN collection/tuple/UDT as a
+/// partition-key component. `getString` spells the whole frozen value as one string,
+/// which is nothing like the CLI's container, so the two sides mismatch by SHAPE and
+/// `compare::compare_value_at` fails loudly — a false divergence, but one that needs
+/// a spelling oracle of its own rather than a kinding relaxation, and no committed
+/// fixture has one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kinding {
     /// The golden keeps its natural JSON kind here, so both sides must agree on
@@ -377,6 +408,15 @@ pub fn canon_typed(
         // JSON: only where the golden itself is a string by construction.
         Egress::Json => kinding == Kinding::Stringified,
     };
+    // Is this the side, and the position, `sstabledump` wrote with
+    // `writeString(type.getString(v))`? NARROWER than `cross_kind`, which also
+    // absorbs CSV's kind-blindness. Only the GOLDEN is ever given
+    // [`Kinding::Stringified`] (`compare::compare_value_at` and
+    // `compare::compare_map` hold the CLI to [`Kinding::Natural`] everywhere), so
+    // the two relaxations keyed on it below cannot license a CLI spelling — in
+    // either egress. Using `cross_kind` for them would have handed the blob
+    // relaxation to the CLI's own CSV cells, where it would mask a missing `0x`.
+    let golden_stringified = kinding == Kinding::Stringified;
     let canon = match v {
         Value::Null => Canon::Null,
         Value::Bool(b) => Canon::Bool(*b),
@@ -398,12 +438,50 @@ pub fn canon_typed(
                 // it fails loudly rather than being coerced.
                 None => Canon::Text(s.clone()),
             },
+            // A BOOLEAN has the numeric case's shape: `BooleanSerializer.toString`
+            // (`cassandra-5.0.8`) returns `value.toString()`, i.e. the TEXT
+            // `true`/`false`, so `writeString(getString(v))` spells a stringified
+            // boolean `"true"`; `BooleanType.toJSONString` returns the same
+            // `Boolean.toString()` written with `writeRawValue`, so at every other
+            // position the golden carries the raw JSON boolean `true`. Without this,
+            // a boolean partition key / multicell-set element / map key made a
+            // CORRECT CLI diverge — the false-divergence class this lane treats as a
+            // defect in its own right (issue #1491 review finding T1).
+            //
+            // Asymmetric like the numeric relaxation, and by the same mechanism:
+            // `golden_stringified` is only ever true for the golden side, so a CLI
+            // that spelled a boolean column `"true"` is still held to its declared
+            // type's JSON kind and fails.
+            CqlType::Boolean if golden_stringified => match s.as_str() {
+                "true" => Canon::Bool(true),
+                "false" => Canon::Bool(false),
+                // Not a spelling `BooleanSerializer.toString` can produce, so it
+                // stays opaque and fails loudly rather than being coerced.
+                _ => Canon::Text(s.clone()),
+            },
+            // A BLOB is the same family one step over: the divergence is in the
+            // SPELLING rather than the kind. `BytesSerializer.toString` returns the
+            // bare lowercase hex (`Hex.bytesToHex`, whose `byteToChar` table is
+            // `Integer.toHexString`), so a stringified blob golden reads `"deadbeef"`
+            // — and the empty blob reads `""` — while `BytesType.toJSONString`
+            // returns `"0x" + <the same hex>`, which is what every other position
+            // and the CLI carry. So the golden's bare hex is read as the `0x` form it
+            // denotes.
+            //
+            // Guarded on the shape rather than applied blindly: an already-prefixed
+            // or non-hex string is NOT what `getString` emits, so it stays exact and
+            // a regression that dropped the prefix on the CLI side still fails.
+            CqlType::Blob if golden_stringified && is_bare_lowercase_hex(s) => {
+                Canon::Text(format!("0x{s}"))
+            }
             CqlType::Timestamp => match canon_timestamp(s) {
                 Some(text) => Canon::Text(text),
                 None => Canon::Text(s.clone()),
             },
-            // text / varchar / ascii / blob / uuid / boolean / date / time /
-            // duration / inet: EXACT.
+            // text / varchar / ascii / uuid / date / time / duration / inet: EXACT
+            // — for each of those, `cassandra-5.0.8` spells `getString` and
+            // `toJSONString` the same way, so no relaxation applies (the census is in
+            // the [`Kinding`] doc comment).
             _ => Canon::Text(s.clone()),
         },
         Value::Array(_) | Value::Object(_) => {
@@ -419,11 +497,55 @@ pub fn canon_typed(
     })
 }
 
-/// Canonicalize a textual scalar: a timestamp spelling first, then a numeric
-/// spelling, else opaque text.
+/// Is `s` exactly what `Hex.bytesToHex` emits — an even-length run of lowercase
+/// hex digits, the empty string included (the empty blob's `getString`)?
+///
+/// Deliberately not "looks hexish": an odd length, an uppercase digit or a `0x`
+/// prefix is not a spelling `BytesSerializer.toString` can produce, so it must not
+/// be normalized into one.
+fn is_bare_lowercase_hex(s: &str) -> bool {
+    s.len() % 2 == 0
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Canonicalize a textual scalar: a timestamp spelling first, then a boolean, a
+/// blob and a numeric spelling, else opaque text.
+///
+/// The UNTYPED projection, so every rule here is deliberately permissive — it
+/// serves only the pairing key, the row-ORDER key and diagnostics (see
+/// [`canon_scalar`]). Each one exists because `sstabledump`'s two writers spell the
+/// SAME value differently at a stringified position, and a key that cannot see
+/// through that difference does not merely mis-pair: `compare::row_order_divergence`
+/// reads the same key, so it reported a FALSE row-order divergence for a correct
+/// egress (issue #1491 review finding T1, the pairing-key half). The three
+/// relaxations therefore mirror the golden-side ones in [`canon_typed`]:
+///
+///   * a numeric spelling → a number (`"1"` pairs with `1`);
+///   * `true`/`false` → a boolean (a stringified boolean partition key `"true"`
+///     pairs with the CLI's `true`);
+///   * a `0x`-prefixed bare-hex spelling → the bare hex `BytesSerializer.toString`
+///     emits (`"0xdeadbeef"` pairs with `"deadbeef"`, and `"0x"` with `""`).
+///     Normalized toward the BARE form because untyped there is no way to tell a
+///     blob from a `text` value that happens to be hex, so the reverse direction
+///     would rewrite ordinary text.
+///
+/// None of this touches value EQUALITY, which is [`canon_typed`]'s and is driven by
+/// the declared type: a `text` column holding `"true"` or `"0xdeadbeef"` still
+/// compares as the exact string it is.
 pub fn canon_text(s: &str) -> Canon {
     if let Some(ts) = canon_timestamp(s) {
         return Canon::Text(ts);
+    }
+    match s {
+        "true" => return Canon::Bool(true),
+        "false" => return Canon::Bool(false),
+        _ => {}
+    }
+    if let Some(hex) = s.strip_prefix("0x") {
+        if is_bare_lowercase_hex(hex) {
+            return Canon::Text(hex.to_string());
+        }
     }
     match normalize_decimal(s) {
         Some(text) => Canon::Num(text),
@@ -1155,288 +1277,5 @@ pub fn parse_iso_micros(s: &str) -> Option<i64> {
 mod golden_reader_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn text() -> CqlType {
-        CqlType::Text("text".to_string())
-    }
-
-    fn int() -> CqlType {
-        CqlType::Numeric("int".to_string())
-    }
-
-    /// Canonicalize at a position `sstabledump` STRINGIFIES (a partition key, a
-    /// multicell cell path, a map key) — the only JSON positions where a numeric
-    /// string may be read as a number.
-    fn canon(v: &Value, ty: &CqlType) -> Canon {
-        canon_at(v, ty, Kinding::Stringified)
-    }
-
-    /// Canonicalize at an ordinary position, where the golden keeps its natural
-    /// JSON kind and the two sides must therefore agree on kind.
-    fn canon_natural(v: &Value, ty: &CqlType) -> Canon {
-        canon_at(v, ty, Kinding::Natural)
-    }
-
-    fn canon_at(v: &Value, ty: &CqlType, kinding: Kinding) -> Canon {
-        match canon_typed(v, Egress::Json, ty, Depth::TopLevel, kinding) {
-            Ok(canon) => canon,
-            Err(why) => panic!("{why}"),
-        }
-    }
-
-    fn untyped(v: &Value) -> Canon {
-        match canon_scalar(v, Egress::Json) {
-            Ok(canon) => canon,
-            Err(why) => panic!("{why}"),
-        }
-    }
-
-    /// The review finding, pinned from BOTH sides so neither half can drift: the
-    /// untyped rule — still used, but only as an ORDERING key — reads `"22201"`
-    /// and `22201` as the same value, which is exactly why value equality had to
-    /// move onto the declared type.
-    #[test]
-    fn the_untyped_rule_is_permissive_and_the_typed_one_is_not() {
-        assert_eq!(
-            untyped(&json!("22201")),
-            untyped(&json!(22201)),
-            "the ordering key is deliberately permissive"
-        );
-        assert_ne!(
-            canon(&json!("22201"), &text()),
-            canon(&json!(22201), &text()),
-            "a `text` value must never equal a number"
-        );
-        assert_eq!(
-            canon(&json!("22201"), &int()),
-            canon(&json!(22201), &int()),
-            "a numeric column must still pair the dump's string spelling with the \
-             CLI's number"
-        );
-    }
-
-    /// Review finding R1, pinned from both sides. The cross-kind numeric reading
-    /// is scoped to the positions `sstabledump` stringifies
-    /// (`writeString(type.getString(v))`), so an ORDINARY numeric cell — which the
-    /// dump writes with `writeRawValue(type.toJSONString(v))`, i.e. as a JSON
-    /// number — must compare by KIND as well as by value.
-    #[test]
-    fn a_numeric_cell_outside_a_stringified_position_compares_by_kind_too() {
-        assert_ne!(
-            canon_natural(&json!(1), &int()),
-            canon_natural(&json!("1"), &int()),
-            "an ordinary int cell rendered `\"1\"` is a divergence from the dump's `1`"
-        );
-        assert_eq!(
-            canon(&json!(1), &int()),
-            canon(&json!("1"), &int()),
-            "a partition key / cell path IS stringified by the dump, so there the \
-             two spellings denote the same value"
-        );
-        // CSV carries no JSON kinds at all, so the value comparison stands
-        // whatever the kinding says.
-        for kinding in [Kinding::Natural, Kinding::Stringified] {
-            assert_eq!(
-                canon_typed(&json!(1), Egress::Csv, &int(), Depth::TopLevel, kinding)
-                    .expect("number"),
-                canon_typed(&json!("1"), Egress::Csv, &int(), Depth::TopLevel, kinding)
-                    .expect("text"),
-                "every CSV cell arrives as text, so `1` and `\"1\"` are one value"
-            );
-        }
-    }
-
-    /// Review finding K1, pinned on the reason text of the one format-scoped gap
-    /// in the lane.
-    ///
-    /// The `set<double>` gap is a property of JSON's VALUE VOCABULARY, not of the
-    /// value: JSON has no literal for `Infinity`/`-Infinity`/`NaN`, so the JSON
-    /// egress renders them `null` (measured on
-    /// `test_signed_coll.signed_special_collections`) and the value is lost. CSV
-    /// renders every cell as text and carries the same three tokens the golden
-    /// names, so nothing is lost there and the column must stay compared.
-    ///
-    /// Expectations are the GOLDEN's own tokens (`sstabledump` writes a
-    /// non-frozen `set<double>`'s elements as the cell `path`, i.e.
-    /// `writeString(DoubleType.getString(v))` → `"Infinity"`, `"NaN"`, `"-0.0"`)
-    /// and the CSV egress's measured field text; nothing here is derived from
-    /// CQLite's JSON output being correct.
-    #[test]
-    fn the_float_special_value_gap_is_a_json_vocabulary_gap_not_a_value_gap() {
-        let double = CqlType::Numeric("double".to_string());
-        let canon_in = |v: &Value, egress: Egress| {
-            canon_typed(v, egress, &double, Depth::Inside, Kinding::Stringified)
-                .expect("a set<double> element canonicalizes")
-        };
-        for token in ["Infinity", "-Infinity", "NaN"] {
-            // `null` is a DIFFERENT value from the token the golden names, in
-            // EITHER format — which is why the JSON gap is a real gap and why a
-            // CSV egress that ever regressed to `null` would be caught.
-            for egress in [Egress::Json, Egress::Csv] {
-                assert_ne!(
-                    canon_in(&json!(token), egress),
-                    canon_in(&Value::Null, egress),
-                    "{egress:?}: `null` must never satisfy the golden's `{token}`"
-                );
-            }
-            // The token itself survives the CSV text projection unchanged, so the
-            // CSV lane can compare it: it is not read as a number and not coerced.
-            assert_eq!(
-                canon_in(&json!(token), Egress::Csv),
-                Canon::Text(token.to_string()),
-                "CSV must carry `{token}` as the opaque token it is"
-            );
-        }
-        // The measured CSV spellings of the signed zeros beside them: `-0e0`/`0e0`
-        // against the golden's `-0.0`/`0.0`. Same value, and the sign is NOT
-        // collapsed.
-        assert_eq!(
-            canon_in(&json!("-0.0"), Egress::Csv),
-            canon_in(&json!("-0e0"), Egress::Csv),
-            "`-0e0` is the same double as the golden's `-0.0`"
-        );
-        assert_ne!(
-            canon_in(&json!("0.0"), Egress::Csv),
-            canon_in(&json!("-0e0"), Egress::Csv),
-            "Cassandra distinguishes -0.0 from 0.0, so the canonicalization must too"
-        );
-    }
-
-    #[test]
-    fn zero_padding_survives_in_text_and_not_in_a_number() {
-        assert_ne!(canon(&json!("00000"), &text()), canon(&json!("0"), &text()));
-        assert_eq!(canon(&json!("00000"), &int()), canon(&json!("0"), &int()));
-    }
-
-    /// The timestamp normalization is bound to the timestamp TYPE: a `text` column
-    /// holding a timestamp spelling is still compared exactly.
-    #[test]
-    fn a_timestamp_is_canonicalized_only_for_a_timestamp_column() {
-        let dump = json!("2025-01-15 10:00:00.000Z");
-        let cli = json!("2025-01-15 10:00:00.000+0000");
-        assert_eq!(
-            canon(&dump, &CqlType::Timestamp),
-            canon(&cli, &CqlType::Timestamp)
-        );
-        assert_ne!(
-            canon(&dump, &text()),
-            canon(&cli, &text()),
-            "two spellings of an instant are NOT the same `text` value"
-        );
-        // A non-zero offset stays opaque rather than being silently shifted.
-        assert_ne!(
-            canon(&dump, &CqlType::Timestamp),
-            canon(&json!("2025-01-15 10:00:00.000+0100"), &CqlType::Timestamp)
-        );
-    }
-
-    /// Exact decimal text, with no `f64` round-trip: the `set<decimal>` fixture
-    /// carries 30-digit values.
-    #[test]
-    fn a_long_decimal_keeps_every_digit() {
-        let long = "123456789012345678901234567890.000000000000000000000000000001";
-        assert_eq!(
-            normalize_decimal(long).as_deref(),
-            Some(long),
-            "a 30-digit decimal must survive canonicalization"
-        );
-        assert_eq!(normalize_decimal("-0.0").as_deref(), Some("-0"));
-        assert_eq!(normalize_decimal("1e3").as_deref(), Some("1000"));
-        assert_eq!(
-            normalize_decimal("1e999999999"),
-            None,
-            "an unbounded exponent is refused, not padded"
-        );
-        assert_eq!(normalize_decimal("0x1f"), None);
-        assert_eq!(normalize_decimal("NaN"), None);
-    }
-
-    /// A blob/uuid value is opaque text on both sides — no numeric reading, ever.
-    #[test]
-    fn a_blob_is_compared_exactly() {
-        assert_eq!(
-            canon(&json!("0x00ff"), &CqlType::Blob),
-            Canon::Text("0x00ff".to_string())
-        );
-        assert_ne!(
-            canon(&json!("0x00ff"), &CqlType::Blob),
-            canon(&json!("0x00FF"), &CqlType::Blob),
-            "blob hex casing is a divergence, not a normalization"
-        );
-    }
-
-    /// A container arriving where the schema declares a scalar is REPORTED, never
-    /// coerced.
-    #[test]
-    fn a_container_in_a_scalar_position_is_an_error() {
-        let why = canon_typed(
-            &json!([1, 2]),
-            Egress::Json,
-            &int(),
-            Depth::TopLevel,
-            Kinding::Natural,
-        )
-        .expect_err("a container where the DDL says int must not canonicalize");
-        assert!(why.contains("int"), "{why}");
-    }
-
-    /// Review finding F1, pinned from both sides.
-    ///
-    /// A TOP-LEVEL CSV field genuinely cannot distinguish an absent value from an
-    /// empty `text` — the writer emits an empty field for both — so the two
-    /// canonicalize alike. INSIDE a container the format spells a null member
-    /// `null`, so an empty member and a null member are different renderings and
-    /// must NOT canonicalize alike; collapsing them there made a null UDT field
-    /// pass even if the CLI rendered it as empty text.
-    #[test]
-    fn the_csv_empty_field_rule_stops_at_the_top_level() {
-        let empty = json!("");
-        let null = json!(null);
-        assert_eq!(
-            canon_typed(
-                &empty,
-                Egress::Csv,
-                &text(),
-                Depth::TopLevel,
-                Kinding::Natural
-            )
-            .expect("empty text"),
-            canon_typed(
-                &null,
-                Egress::Csv,
-                &text(),
-                Depth::TopLevel,
-                Kinding::Natural
-            )
-            .expect("null"),
-            "a top-level CSV field has one spelling for both, so they must compare alike"
-        );
-        assert_ne!(
-            canon_typed(
-                &empty,
-                Egress::Csv,
-                &text(),
-                Depth::Inside,
-                Kinding::Natural
-            )
-            .expect("empty member"),
-            canon_typed(&null, Egress::Csv, &text(), Depth::Inside, Kinding::Natural)
-                .expect("null member"),
-            "inside a container `{{f: }}` and `{{f: null}}` are distinguishable, so an \
-             empty member must not canonicalize onto null"
-        );
-        // JSON keeps the distinction at every depth, which is what makes the CSV
-        // top-level collapse a format property rather than a lost assertion.
-        for depth in [Depth::TopLevel, Depth::Inside] {
-            assert_ne!(
-                canon_typed(&empty, Egress::Json, &text(), depth, Kinding::Natural)
-                    .expect("empty text"),
-                canon_typed(&null, Egress::Json, &text(), depth, Kinding::Natural).expect("null"),
-                "JSON distinguishes `\"\"` from `null` at {depth:?}"
-            );
-        }
-    }
-}
+#[path = "golden_value_canon_tests.rs"]
+mod tests;
