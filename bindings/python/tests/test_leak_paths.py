@@ -17,9 +17,14 @@ because the earlier version of this docstring overclaimed):
     tracemalloc while process memory climbs. So the primary budget below bounds
     the PYTHON-VISIBLE half of these paths, which is a real and previously
     unguarded half -- not the whole leak surface.
-  * ``resource.getrusage().ru_maxrss`` DOES see native allocations, because it is
-    the OS's peak resident-set figure for the whole process. It is coarse
-    (page-granular, monotone, and perturbed by the allocator), so the secondary
+  * PROCESS RSS *does* see native allocations, because it is the OS's
+    resident-set figure for the whole process. It is read live from
+    ``/proc/self/statm`` where that exists (every merge-gating lane) and falls
+    back to the monotone peak ``ru_maxrss`` elsewhere, with the failure message
+    naming which instrument spoke -- the peak can UNDER-report growth that stays
+    below a peak the session already reached, which was measured at small scale
+    (see ``_rss_instrument()``), so it is the fallback and not the default. RSS is
+    coarse either way (page-granular, allocator-perturbed), so the secondary
     budget on it is deliberately LOOSE: it catches GROSS native retention only.
 
   Consequence, recorded honestly: a SMALL per-iteration native leak (below the
@@ -142,18 +147,33 @@ STREAM_ROWS = 5
 #       a planted 256-byte retention (205 KB) does NOT -- stated honestly rather
 #       than overclaimed.
 #
-# SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): peak RSS growth
-# (``ru_maxrss``) across the same loop. Measured growth on this machine: 0 bytes
-# (error path, both 500 and 1500 iterations) and 0..131,072 bytes (stream path).
-# Budget = 32 MiB, i.e. ~250x the largest observed value, so allocator/page
+# SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): process RSS growth
+# across the same loop, read LIVE from /proc/self/statm (peak ``ru_maxrss`` only as
+# a named fallback -- see ``_rss_instrument()``). Measured growth of the LIVE
+# instrument inside the measured window, 1500 iterations:
+#   file alone:            0 bytes (error path), 835,584 bytes (stream path)
+#   whole -m 'not slow' suite (the gate's tier, this file running 570 tests in):
+#                          0 bytes (error path),  28,672 bytes (stream path)
+# Budget = 32 MiB, i.e. ~38x the largest observed value, so allocator/page
 # behaviour on a slower or smaller CI runner cannot red it.
-#   WHAT IT CATCHES: gross native retention -- at 1500 iterations it trips on
-#       roughly >= 22 KiB/iteration held on the native heap (e.g. an un-dropped
-#       per-stream row buffer over a ~101-column table).
-#   WHAT IT DOES NOT CATCH: anything smaller than that, and -- because
-#       ``ru_maxrss`` is a monotone PEAK -- growth that stays below a peak the
-#       process already reached earlier in the pytest session. It can never
-#       report a decrease. It is a backstop for the gross case, not an oracle.
+#   WHAT IT CATCHES, and this control is the one that validates the RIGHT
+#       allocator (issue #1465 round 2): planting a retained ``libc.malloc`` +
+#       ``memset`` buffer per iteration -- a genuine NATIVE-heap allocation that
+#       tracemalloc cannot see at all -- reds ONLY this assertion, exactly as the
+#       docstring's blind-spot claim predicts:
+#         * 64 KiB/iteration -> live RSS grew 98,750,464 B (error path) /
+#           99,332,096 B (stream path): TRIPS, ~3x over budget, while BOTH
+#           tracemalloc budgets stayed green.
+#         * 24 KiB/iteration -> 37,314,560 B: TRIPS (the floor, measured).
+#         * 16 KiB/iteration -> PASSES.
+#       So the detection floor is between 16 and 24 KiB/iteration at 1500
+#       iterations, bracketing the ~22 KiB the budget arithmetic predicts.
+#   WHAT IT DOES NOT CATCH: any native retention below that floor -- e.g.
+#       512 B/iteration, which is 2.8 MB per 5,000 error responses in a real
+#       service. It is a backstop for the gross case, not an oracle; the oracle is
+#       issue #3585. On the degraded PEAK fallback (no /proc) it can additionally
+#       under-report growth that stays below an earlier session peak, and it can
+#       never report a decrease.
 # ---------------------------------------------------------------------------
 ERROR_BUDGET_BYTES = 64 * 1024
 STREAM_BUDGET_BYTES = 256 * 1024
@@ -171,22 +191,71 @@ _NOISE_FILTERS = (
 
 
 def _maxrss_bytes() -> int:
-    """Peak resident-set size of this process, in BYTES.
+    """PEAK resident-set size of this process, in BYTES.
 
     ``ru_maxrss`` is KILOBYTES on Linux and BYTES on macOS/BSD -- normalising
     here rather than at each call site keeps the budget one number on every
-    platform. This is the only instrument in this file that can see a NATIVE
-    (Rust-allocator) allocation at all; see the module docstring for its limits.
+    platform.
+
+    This is a MONOTONE HIGH-WATER MARK, which is why it is only the FALLBACK
+    instrument: growth that stays below a peak the process already reached
+    earlier in the pytest session is invisible to it. That masking is measured,
+    not hypothetical -- see ``_rss_instrument()``.
     """
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak if sys.platform == "darwin" else peak * 1024
 
 
-def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS):
-    """Measure ``iterations`` of ``body`` and return ``(tracked, peak_rss)`` growth.
+def _live_rss_bytes():
+    """CURRENT resident-set size in BYTES, or ``None`` where unavailable.
 
-    ``tracked`` is Python-allocator growth (tracemalloc), ``peak_rss`` is growth
-    of the process's peak RSS in bytes -- the loose, native-visible backstop.
+    Reads field 2 (resident pages) of ``/proc/self/statm``. Unlike ``ru_maxrss``
+    this is a live figure, so a delta across the measured loop cannot be masked
+    by an earlier session peak. Returns ``None`` off Linux (no ``/proc``), which
+    is what puts this file on the documented fallback path there.
+    """
+    try:
+        with open("/proc/self/statm", "rb") as handle:
+            resident_pages = int(handle.read().split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+    return resident_pages * resource.getpagesize()
+
+
+def _rss_instrument():
+    """Return ``(reader, kind)`` for the native-visible backstop.
+
+    ``kind`` is ``"live"`` (a true RSS delta -- preferred, and what the
+    merge-gating Linux lanes use) or ``"peak"`` (``ru_maxrss``, the degraded
+    fallback where ``/proc`` is absent).
+
+    WHY THIS MATTERS, measured on this branch (2026-08-30, probing the real
+    pytest process at the moment these tests run):
+      * file alone:        peak == live to within 1 MiB, so the peak instrument
+                           was live, not masked.
+      * whole `-m 'not slow'` suite (the gate's tier, 570 tests before these):
+                           peak was ~1.5 MiB ABOVE live, and the stream loop's
+                           28,672-byte live growth registered as a peak delta of
+                           ZERO -- small-scale masking, demonstrated.
+    So the peak instrument is not inert in today's ordering (a 32 MiB leak would
+    still push a new peak), but the headroom it depends on is a property of TEST
+    ORDERING that nobody controls: one memory-hungry test placed before this file
+    could open a multi-hundred-MiB gap and silently neuter the backstop. The live
+    reader removes that dependency entirely, so it is preferred wherever it
+    exists and the fallback names itself in the failure message.
+    """
+    if _live_rss_bytes() is not None:
+        return _live_rss_bytes, "live"
+    return _maxrss_bytes, "peak"
+
+
+def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS):
+    """Measure ``iterations`` of ``body``; return ``(tracked, rss_growth, rss_kind)``.
+
+    ``tracked`` is Python-allocator growth (tracemalloc). ``rss_growth`` is
+    process RSS growth in bytes -- the loose, native-visible backstop -- measured
+    with the best instrument this platform offers, named by ``rss_kind``
+    (``"live"`` or the degraded ``"peak"``; see ``_rss_instrument()``).
 
     ``body`` is a zero-argument callable executed ``warmup`` times before the
     first snapshot, then ``iterations`` times inside the measurement window. It
@@ -196,7 +265,8 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
         body()
 
     gc.collect()
-    rss_before = _maxrss_bytes()
+    rss_reader, rss_kind = _rss_instrument()
+    rss_before = rss_reader()
     tracemalloc.start()
     try:
         first = tracemalloc.take_snapshot().filter_traces(_NOISE_FILTERS)
@@ -206,22 +276,28 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
         second = tracemalloc.take_snapshot().filter_traces(_NOISE_FILTERS)
     finally:
         tracemalloc.stop()
-    rss_growth = _maxrss_bytes() - rss_before
+    rss_growth = rss_reader() - rss_before
 
     # Net delta across every (file, line) group: sums retained growth and
     # subtracts anything freed, which is the quantity a leak accumulates in.
     tracked = sum(stat.size_diff for stat in second.compare_to(first, "lineno"))
-    return tracked, rss_growth
+    return tracked, rss_growth, rss_kind
 
 
-def _assert_rss_under_budget(label: str, rss_growth: int) -> None:
-    """Loose, native-visible backstop: peak-RSS growth over the measured loop."""
+def _assert_rss_under_budget(label: str, rss_growth: int, rss_kind: str) -> None:
+    """Loose, native-visible backstop: RSS growth over the measured loop."""
+    degraded = (
+        ""
+        if rss_kind == "live"
+        else " NOTE: measured with the degraded PEAK instrument (no /proc on this "
+        "platform), which can under-report -- never over-report -- growth"
+    )
     assert rss_growth < RSS_BUDGET_BYTES, (
-        f"{label}: peak RSS grew {rss_growth} bytes over {ITERATIONS} iterations "
-        f"({rss_growth / ITERATIONS:.1f} bytes/iteration), exceeding the loose "
-        f"{RSS_BUDGET_BYTES}-byte native-visible budget. Unlike the tracemalloc "
-        "budget this one SEES Rust-side allocations, so a trip here points at "
-        "gross native retention on this path (issue #1465)"
+        f"{label}: {rss_kind} RSS grew {rss_growth} bytes over {ITERATIONS} "
+        f"iterations ({rss_growth / ITERATIONS:.1f} bytes/iteration), exceeding "
+        f"the loose {RSS_BUDGET_BYTES}-byte native-visible budget. Unlike the "
+        "tracemalloc budget this one SEES Rust-side allocations, so a trip here "
+        f"points at gross native retention on this path (issue #1465).{degraded}"
     )
 
 
@@ -248,7 +324,7 @@ def test_error_path_no_leak(leak_db):
         except cqlite.QueryError:
             raised += 1
 
-    growth, rss_growth = _measure_growth_bytes(body)
+    growth, rss_growth, rss_kind = _measure_growth_bytes(body)
 
     # NON-VACUITY: every single iteration (warm-up included) must have raised.
     # If BAD_CQL ever stops raising, this loop degenerates into a no-op and the
@@ -266,7 +342,7 @@ def test_error_path_no_leak(leak_db):
         f"{ERROR_BUDGET_BYTES}-byte budget — the exception path is likely retaining "
         "allocations per failure (issue #1465)"
     )
-    _assert_rss_under_budget("error path", rss_growth)
+    _assert_rss_under_budget("error path", rss_growth, rss_kind)
 
 
 def test_abandoned_stream_is_really_abandoned(leak_db):
@@ -300,7 +376,7 @@ def test_abandoned_stream_no_leak(leak_db):
         rows_pulled += pulled
         del iterator
 
-    growth, rss_growth = _measure_growth_bytes(body)
+    growth, rss_growth, rss_kind = _measure_growth_bytes(body)
 
     # NON-VACUITY: a 0-row (or short) stream would make the abandonment a no-op.
     # This is also the FAIL-LOUDLY check for a present-but-unreadable corpus —
@@ -320,4 +396,4 @@ def test_abandoned_stream_no_leak(leak_db):
         f"exceeding the {STREAM_BUDGET_BYTES}-byte budget — an abandoned stream "
         "is likely retaining its buffer/channel state (issue #1465)"
     )
-    _assert_rss_under_budget("abandoned stream", rss_growth)
+    _assert_rss_under_budget("abandoned stream", rss_growth, rss_kind)
