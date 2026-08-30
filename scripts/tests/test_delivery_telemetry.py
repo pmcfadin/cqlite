@@ -998,7 +998,9 @@ class SliceDeliveryTests(unittest.TestCase):
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
                 dt._github_fields(1, 2)
-        self.assertIn("url", str(cm.exception))
+        # tight discriminator: bare "url" also matches the issue_url refusal and the
+        # closingIssuesReferences entry-without-url refusal
+        self.assertIn("no url field", str(cm.exception))
 
     def test_record_refuses_a_malformed_falsy_state_reason(self):
         """`(state_reason or "")` would fold False/0/[] onto the never-closed answer — the
