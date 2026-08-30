@@ -243,7 +243,18 @@ const SESSION_UP_DEADLINE: Duration = Duration::from_secs(40);
 // taken literally it makes the calibration inert on the very host #3515
 // measured. Reported with the change.)
 
-/// Quiet-host reference for `t_boot`: ~4x the measured quiet value.
+/// The SLOWEST quiet `t_boot` observed while developing this change (29ms; the
+/// range was 22-29ms). The baselines are asserted against these measurements —
+/// see `the_baselines_sit_just_above_the_measured_quiet_noise_floor`. If a
+/// future host is genuinely slower, UPDATE THESE with the new measurement
+/// rather than inflating the baselines away from them.
+const MEASURED_QUIET_T_BOOT: Duration = Duration::from_millis(29);
+
+/// The SLOWEST quiet `t_ack` observed (43ms — the sibling's slowest of 5 writes;
+/// the SIGINT test's was 3ms).
+const MEASURED_QUIET_T_ACK: Duration = Duration::from_millis(43);
+
+/// Quiet-host reference for `t_boot`: ~3.4x the measured quiet value.
 const BOOT_QUIET_BASELINE: Duration = Duration::from_millis(100);
 
 /// Quiet-host reference for `t_ack`: just above the slowest measured quiet value
@@ -1461,11 +1472,68 @@ fn the_nominal_cap_sums_stay_under_the_total_budget() {
     }
 }
 
-/// THE CALIBRATION ACTUALLY ENGAGES. Before this test the mechanism had ZERO
-/// observed firings: `scale` stayed at exactly 1.000 in every real run taken,
-/// including load average 116, because the baselines were 20-65x above the quiet
-/// noise floor. An unfired mechanism is indistinguishable from a broken one, so
-/// the firing is asserted directly with a synthetic observation.
+/// THE BASELINES MUST SIT JUST ABOVE THE MEASURED QUIET NOISE FLOOR, asserted
+/// against the MEASUREMENTS rather than against themselves.
+///
+/// This test exists because the first version of
+/// `calibration_engages_on_a_contended_observation` derived its synthetic
+/// observation FROM the baseline (`ACK_QUIET_BASELINE * 8`), which makes it
+/// invariant to the baseline's value: inflating `ACK_QUIET_BASELINE` 1000x — the
+/// exact defect that left the calibration inert through every real run — left it
+/// GREEN. A test whose input is scaled by the constant under examination cannot
+/// detect a wrong value for that constant.
+#[test]
+fn the_baselines_sit_just_above_the_measured_quiet_noise_floor() {
+    // At or above the measurement, so a quiet host still yields `scale == 1`
+    // (the spec's quiet-host scenario).
+    assert!(
+        BOOT_QUIET_BASELINE >= MEASURED_QUIET_T_BOOT,
+        "BOOT_QUIET_BASELINE {BOOT_QUIET_BASELINE:?} is below the slowest measured quiet \
+         t_boot {MEASURED_QUIET_T_BOOT:?}, so a quiet host would scale"
+    );
+    assert!(
+        ACK_QUIET_BASELINE >= MEASURED_QUIET_T_ACK,
+        "ACK_QUIET_BASELINE {ACK_QUIET_BASELINE:?} is below the slowest measured quiet \
+         t_ack {MEASURED_QUIET_T_ACK:?}, so a quiet host would scale"
+    );
+    // ...and not far above it, or the mechanism is INERT: `scale` is
+    // `observed / quiet_baseline`, so a baseline 20-65x the noise floor never
+    // moves under real contention (measured: scale stayed at exactly 1.000 at
+    // load average 116). Calibration can only LOOSEN, so there is no quiet-side
+    // risk to trade against this.
+    const MAX_MULTIPLE: u32 = 10;
+    assert!(
+        BOOT_QUIET_BASELINE <= MEASURED_QUIET_T_BOOT * MAX_MULTIPLE,
+        "BOOT_QUIET_BASELINE {BOOT_QUIET_BASELINE:?} is more than {MAX_MULTIPLE}x the \
+         measured quiet t_boot {MEASURED_QUIET_T_BOOT:?}: the calibration would be inert"
+    );
+    assert!(
+        ACK_QUIET_BASELINE <= MEASURED_QUIET_T_ACK * MAX_MULTIPLE,
+        "ACK_QUIET_BASELINE {ACK_QUIET_BASELINE:?} is more than {MAX_MULTIPLE}x the \
+         measured quiet t_ack {MEASURED_QUIET_T_ACK:?}: the calibration would be inert"
+    );
+
+    // The consequence, asserted directly from the MEASUREMENT: a host 10x slower
+    // than the quiet floor must actually move the budget. This is the assertion
+    // the self-referential version could not make.
+    let realistic = calibrated(
+        T1_EXIT,
+        MEASURED_QUIET_T_ACK * 10,
+        "t_ack",
+        ACK_QUIET_BASELINE,
+    );
+    assert!(
+        realistic.scale > 1.0 && realistic.derived > T1_EXIT.base,
+        "a host 10x slower than the measured quiet floor must loosen stage (d): {realistic:?}"
+    );
+}
+
+/// THE CALIBRATION FORMULA ENGAGES: growth, proportionality, cap saturation.
+///
+/// NOTE the division of labour — this test uses baseline-relative inputs, so it
+/// covers the FORMULA and is deliberately blind to the baseline's VALUE. The
+/// value is covered by
+/// `the_baselines_sit_just_above_the_measured_quiet_noise_floor` above.
 #[test]
 fn calibration_engages_on_a_contended_observation() {
     // 8x the baseline: the budget must GROW, proportionally, from the real
