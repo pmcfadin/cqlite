@@ -742,3 +742,127 @@ pub fn parse_iso_micros(s: &str) -> Option<i64> {
         .checked_add(hour * 3600 + minute * 60 + second)?;
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn text() -> CqlType {
+        CqlType::Text("text".to_string())
+    }
+
+    fn int() -> CqlType {
+        CqlType::Numeric("int".to_string())
+    }
+
+    fn canon(v: &Value, ty: &CqlType) -> Canon {
+        match canon_typed(v, Egress::Json, ty) {
+            Ok(canon) => canon,
+            Err(why) => panic!("{why}"),
+        }
+    }
+
+    fn untyped(v: &Value) -> Canon {
+        match canon_scalar(v, Egress::Json) {
+            Ok(canon) => canon,
+            Err(why) => panic!("{why}"),
+        }
+    }
+
+    /// The review finding, pinned from BOTH sides so neither half can drift: the
+    /// untyped rule — still used, but only as an ORDERING key — reads `"22201"`
+    /// and `22201` as the same value, which is exactly why value equality had to
+    /// move onto the declared type.
+    #[test]
+    fn the_untyped_rule_is_permissive_and_the_typed_one_is_not() {
+        assert_eq!(
+            untyped(&json!("22201")),
+            untyped(&json!(22201)),
+            "the ordering key is deliberately permissive"
+        );
+        assert_ne!(
+            canon(&json!("22201"), &text()),
+            canon(&json!(22201), &text()),
+            "a `text` value must never equal a number"
+        );
+        assert_eq!(
+            canon(&json!("22201"), &int()),
+            canon(&json!(22201), &int()),
+            "a numeric column must still pair the dump's string spelling with the \
+             CLI's number"
+        );
+    }
+
+    #[test]
+    fn zero_padding_survives_in_text_and_not_in_a_number() {
+        assert_ne!(canon(&json!("00000"), &text()), canon(&json!("0"), &text()));
+        assert_eq!(canon(&json!("00000"), &int()), canon(&json!("0"), &int()));
+    }
+
+    /// The timestamp normalization is bound to the timestamp TYPE: a `text` column
+    /// holding a timestamp spelling is still compared exactly.
+    #[test]
+    fn a_timestamp_is_canonicalized_only_for_a_timestamp_column() {
+        let dump = json!("2025-01-15 10:00:00.000Z");
+        let cli = json!("2025-01-15 10:00:00.000+0000");
+        assert_eq!(
+            canon(&dump, &CqlType::Timestamp),
+            canon(&cli, &CqlType::Timestamp)
+        );
+        assert_ne!(
+            canon(&dump, &text()),
+            canon(&cli, &text()),
+            "two spellings of an instant are NOT the same `text` value"
+        );
+        // A non-zero offset stays opaque rather than being silently shifted.
+        assert_ne!(
+            canon(&dump, &CqlType::Timestamp),
+            canon(&json!("2025-01-15 10:00:00.000+0100"), &CqlType::Timestamp)
+        );
+    }
+
+    /// Exact decimal text, with no `f64` round-trip: the `set<decimal>` fixture
+    /// carries 30-digit values.
+    #[test]
+    fn a_long_decimal_keeps_every_digit() {
+        let long = "123456789012345678901234567890.000000000000000000000000000001";
+        assert_eq!(
+            normalize_decimal(long).as_deref(),
+            Some(long),
+            "a 30-digit decimal must survive canonicalization"
+        );
+        assert_eq!(normalize_decimal("-0.0").as_deref(), Some("-0"));
+        assert_eq!(normalize_decimal("1e3").as_deref(), Some("1000"));
+        assert_eq!(
+            normalize_decimal("1e999999999"),
+            None,
+            "an unbounded exponent is refused, not padded"
+        );
+        assert_eq!(normalize_decimal("0x1f"), None);
+        assert_eq!(normalize_decimal("NaN"), None);
+    }
+
+    /// A blob/uuid value is opaque text on both sides — no numeric reading, ever.
+    #[test]
+    fn a_blob_is_compared_exactly() {
+        assert_eq!(
+            canon(&json!("0x00ff"), &CqlType::Blob),
+            Canon::Text("0x00ff".to_string())
+        );
+        assert_ne!(
+            canon(&json!("0x00ff"), &CqlType::Blob),
+            canon(&json!("0x00FF"), &CqlType::Blob),
+            "blob hex casing is a divergence, not a normalization"
+        );
+    }
+
+    /// A container arriving where the schema declares a scalar is REPORTED, never
+    /// coerced.
+    #[test]
+    fn a_container_in_a_scalar_position_is_an_error() {
+        let why = canon_typed(&json!([1, 2]), Egress::Json, &int())
+            .expect_err("a container where the DDL says int must not canonicalize");
+        assert!(why.contains("int"), "{why}");
+    }
+}
