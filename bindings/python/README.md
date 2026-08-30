@@ -90,9 +90,12 @@ things are worth knowing about relying on it:
   (replayable) instead of being flushed. `close()` is the only path with a
   guarantee.
 
-A `StreamingIterator` that outlives its `Database` raises
-`RuntimeError: Database is closed` from `next()` once the handle is collected,
-the same as it does after an explicit `close()`.
+A `StreamingIterator` that outlives a **writable** `Database` raises
+`RuntimeError: Database is closed` from `next()` once that handle is collected,
+the same as it does after an explicit `close()` — its write engine really was
+closed. An iterator from a **read-only** handle is unaffected and keeps yielding
+rows, because a read-only drop tears nothing down and so has no reason to
+invalidate it.
 
 ### Executing Queries
 

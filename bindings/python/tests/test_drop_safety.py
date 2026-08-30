@@ -26,6 +26,7 @@ asserted by its *effect*, never by how long it took.
 from __future__ import annotations
 
 import gc
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -180,6 +181,15 @@ db = cqlite.open(
     data_dir, schema=schema, writable=True, write_dir=write_dir
 )
 db.execute("INSERT INTO drop_test.items (id, name, value) VALUES (3, 'teardown', 9)")
+
+# Report the pre-exit generation count so the parent can prove the Data.db it
+# checks for came from the teardown drop and not from an auto-flush that had
+# already crossed its threshold (the same precondition test 1 asserts).
+from pathlib import Path as _Path
+
+_data = _Path(write_dir) / "data"
+_pre = len(list(_data.rglob("*-Data.db"))) if _data.exists() else 0
+print(f"PREFLUSH={_pre}", flush=True)
 print("CONSTRUCTED", flush=True)
 # No close(), no del: fall off the end of the script so the handle is dropped by
 # interpreter finalization.
@@ -217,10 +227,21 @@ def test_drop_does_not_raise_at_teardown(tmp_path, schema_file):
     assert "CONSTRUCTED" in proc.stdout, (
         f"child never reached the drop point, so this test proved nothing:\n{ctx}"
     )
+    assert "PREFLUSH=0" in proc.stdout, (
+        "precondition failed: the child had already flushed before exiting, so a "
+        f"Data.db here could not be attributed to the teardown drop:\n{ctx}"
+    )
     assert proc.returncode == 0, f"child did not exit cleanly:\n{ctx}"
 
+    # SIGABRT is detected by the returncode assert above (-6), NOT by stderr:
+    # `subprocess.run` is given an argv list, so no shell runs, and the
+    # "Aborted (core dumped)" text is a SHELL message the child never writes
+    # itself. An "abort" needle here would therefore detect nothing it names
+    # while red-flagging any future log line containing "aborting".
+    assert proc.returncode != -signal.SIGABRT, f"child died on SIGABRT:\n{ctx}"
+
     lowered = proc.stderr.lower()
-    for needle in ("panicked at", "abort", "fatal python error", "segmentation fault"):
+    for needle in ("panicked at", "fatal python error", "segmentation fault"):
         assert needle not in lowered, (
             f"child stderr reports a {needle!r} during teardown:\n{ctx}"
         )
@@ -245,10 +266,14 @@ def test_streaming_iterator_after_drop_raises(tmp_path, schema_file):
     (undefined behavior / a possible FFI panic).  Adding Drop extends that
     cleanup to the *implicit* path, so this pins the same contract there.
 
-    This IS a user-visible behavior change and is deliberate: on ``main`` the
-    pattern below kept yielding rows purely because nothing ever cleaned up.
-    Now the engine really is shut down, so continuing to iterate would be the
-    exact hazard #1462 exists to prevent — failing loudly is the safe direction.
+    Scope note, corrected after review: this holds for a WRITABLE handle, where
+    the drop really does close the write engine, so the flag flip accompanies
+    real teardown.  It deliberately does NOT hold for a read-only handle — see
+    ``test_readonly_iterator_survives_drop`` — because there the drop tears down
+    nothing (``StorageEngine::shutdown()`` is a documented no-op) and flipping
+    the flag would break a working read pattern in exchange for nothing.  An
+    earlier version of this docstring claimed the engine "really is shut down"
+    for every handle; that was false, and the asymmetry below is the fix.
 
     Hermetic on purpose (no dataset corpus): ``__next__`` loads the shared
     ``parent_closed`` flag BEFORE it locks the inner iterator or blocks on a
@@ -265,4 +290,38 @@ def test_streaming_iterator_after_drop_raises(tmp_path, schema_file):
     gc.collect()
 
     with pytest.raises(RuntimeError, match="Database is closed"):
+        next(iterator)
+
+
+def test_readonly_iterator_survives_drop(tmp_path):
+    """A READ-ONLY handle's iterator keeps working after the handle is dropped.
+
+    The counterpart to the test above, and the regression guard for review
+    finding B1.  A read-only ``Database`` has no write engine, and
+    ``StorageEngine::shutdown()`` is a documented no-op ("Nothing to shutdown -
+    read-only storage layer"), so a drop tears down NOTHING.  If it claimed the
+    shared ``closed`` flag anyway it would invalidate every outstanding
+    iterator — silently breaking this pattern, which works today, in exchange
+    for no cleanup at all:
+
+        def rows(path):
+            db = cqlite.open(path)
+            return db.execute_streaming("SELECT ...")   # db drops at return
+
+    So the drop must READ that flag without claiming it.  Hermetic: an empty
+    data dir gives an empty stream, and the property under test is which
+    exception ends it — ``StopIteration`` (iterator still valid, exhausted) and
+    NOT ``RuntimeError: Database is closed``.
+    """
+    data_dir = tmp_path / "ro-data"
+    data_dir.mkdir()
+
+    db = cqlite.open(str(data_dir))
+    iterator = db.execute_streaming("SELECT * FROM drop_test.items")
+
+    del db
+    gc.collect()
+
+    # Must NOT raise RuntimeError. Exhaustion (StopIteration) is the pass.
+    with pytest.raises(StopIteration):
         next(iterator)
