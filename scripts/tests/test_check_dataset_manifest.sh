@@ -1689,9 +1689,12 @@ if command -v git >/dev/null 2>&1; then
   ) >/dev/null 2>&1
 
   tw_probe() {   # -> "match" | "mismatch"
+    # Sources BOTH helpers and sets _SCRIPT_REPO_IS_GIT: existence moved out of
+    # `_toc_matches_head` into `_toc_twin_at_head` (round 11), and a probe that sourced only
+    # the former silently lost the HEAD lookup — these two cases caught that immediately.
     _SCRIPT_REPO="$tw_repo" bash -c '
-      _SCRIPT_REPO=$1
-      eval "$(sed -n "/^_toc_matches_head() {/,/^}/p" "$2")"
+      _SCRIPT_REPO=$1; _SCRIPT_REPO_IS_GIT=1
+      eval "$(sed -n "/^_toc_twin_at_head() {/,/^}/p;/^_toc_matches_head() {/,/^}/p" "$2")"
       _toc_matches_head "$3" "$4" && printf match || printf mismatch' \
       _ "$tw_repo" "$MANIFEST_SRC" "$tw_repo/$tw_rel" "$tw_rel"
   }
@@ -1734,8 +1737,8 @@ GITFAIL
     chmod +x "$tw_gbin/git"
     tw_grc=0
     PATH="$tw_gbin:$PATH" bash -c '
-      _SCRIPT_REPO=$1
-      eval "$(sed -n "/^_toc_matches_head() {/,/^}/p" "$2")"
+      _SCRIPT_REPO=$1; _SCRIPT_REPO_IS_GIT=1
+      eval "$(sed -n "/^_toc_twin_at_head() {/,/^}/p;/^_toc_matches_head() {/,/^}/p" "$2")"
       _toc_matches_head "$3" "$4"' _ "$tw_repo" "$MANIFEST_SRC" "$tw_repo/$tw_rel" "$tw_rel" \
       >/dev/null 2>&1 || tw_grc=$?
     [ "$tw_grc" = 2 ] \
@@ -1797,12 +1800,19 @@ if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstable
     # not the first "/sstables/"), so the probe has to establish it exactly as the script
     # does. This assertion caught that coupling the moment it was introduced.
     SSTABLES="$3/sstables"
-    eval "$(sed -n "/^_committed_toc_relpath() {/,/^}/p" "$2")"
+    # BOTH helpers. `_committed_toc_relpath` became a PURE MAPPING in round 11 (existence
+    # moved to `_toc_twin_at_head`, against HEAD rather than the index), so asking it alone
+    # would now answer "twin resolved" for ANY path and the census would be vacuous.
+    eval "$(sed -n "/^_committed_toc_relpath() {/,/^}/p;/^_toc_twin_at_head() {/,/^}/p" "$2")"
     have=0; none=0
     while IFS= read -r f; do
       toc="${f%Data.db}TOC.txt"; [ -f "$toc" ] || continue
       _committed_toc_relpath "$toc"
-      if [ -n "$_C_TOC_REL" ]; then have=$((have+1)); else none=$((none+1)); fi
+      if [ -n "$_C_TOC_REL" ] && _toc_twin_at_head "$_C_TOC_REL"; then
+        have=$((have+1))
+      else
+        none=$((none+1))
+      fi
     done < <(find "$3/sstables" -mindepth 3 -maxdepth 3 -name "*-Data.db" 2>/dev/null)
     printf "%s %s" "$have" "$none"' _ "$tr_repo" "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT")
   tr_have=${tr_counts%% *}; tr_none=${tr_counts##* }
@@ -2004,6 +2014,51 @@ if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstable
   fi
 else
   echo "info - no real corpus, a tool is missing ($gf_missing), or git leaked into the farm; skipping the no-git case"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 88 (post-rebase round 11, Medium): a TOC STAGED FOR DELETION still has a twin at HEAD.
+#
+# Existence used to be answered by `git ls-files --error-unmatch`, which is INDEX-based. A
+# tracked TOC staged for deletion reads as UNTRACKED there, so the twin comparison was
+# skipped — while HEAD still holds the inventory. A coherently truncated corpus could then
+# pass on the derived checks alone, which is precisely the gap the trusted inventory exists
+# to close.
+#
+# `ls-tree HEAD` is now the single authority, so the index cannot make HEAD invisible.
+# ---------------------------------------------------------------------------
+if command -v git >/dev/null 2>&1; then
+  sd_repo="$WORK/staged-del-repo"
+  sd_rel="test-data/datasets/sstables/test_basic/simple_table-$UUID/nb-1-big-TOC.txt"
+  mkdir -p "$sd_repo/$(dirname "$sd_rel")"
+  printf 'Data.db\nStatistics.db\nTOC.txt\n' > "$sd_repo/$sd_rel"
+  (
+    cd "$sd_repo" || exit 1
+    git init -q . && git config user.email t@t && git config user.name t \
+      && git add "$sd_rel" && git commit -qm "committed inventory" \
+      && git rm --cached -q "$sd_rel"          # STAGED FOR DELETION; HEAD still has it
+  ) >/dev/null 2>&1
+
+  if [ -d "$sd_repo/.git" ]; then
+    sd_seen=$(_SCRIPT_REPO="$sd_repo" bash -c '
+      _SCRIPT_REPO=$1; _SCRIPT_REPO_IS_GIT=1
+      eval "$(sed -n "/^_toc_twin_at_head() {/,/^}/p" "$2")"
+      _toc_twin_at_head "$3" && printf present || printf absent' \
+      _ "$sd_repo" "$MANIFEST_SRC" "$sd_rel")
+    # Control: `ls-files` (the index) genuinely disagrees, which is what made this a defect.
+    sd_index=$(cd "$sd_repo" && git ls-files --error-unmatch "$sd_rel" >/dev/null 2>&1 \
+                 && printf tracked || printf untracked)
+    [ "$sd_index" = untracked ] \
+      && ok "the index reports a staged-for-deletion TOC as untracked (the control)" \
+      || bad "the staged deletion did not take effect; case 88 proves nothing"
+    [ "$sd_seen" = present ] \
+      && ok "a TOC staged for deletion still resolves its twin AT HEAD (the index cannot hide it)" \
+      || bad "a staged-for-deletion TOC read as having no twin; the trusted comparison would be skipped"
+  else
+    echo "info - could not create the staged-deletion repo; skipping"
+  fi
+else
+  echo "info - git unavailable; skipping the staged-deletion case"
 fi
 
 echo "----"

@@ -565,38 +565,42 @@ _toc_companions_usable() {
   return 0
 }
 
-# _committed_toc_relpath <corpus-toc-path> -- set _C_TOC_REL to the REPO-RELATIVE path of
-# this TOC's git-tracked twin, or to the empty string when there is none.
+# _committed_toc_relpath <corpus-toc-path> -- set _C_TOC_REL to the REPO-RELATIVE path this
+# TOC would have in the checkout, or "" when the mapping does not apply.
 #
-# SETS A GLOBAL RATHER THAN ECHOING, deliberately. Called as `$(...)` it would run in a
-# SUBSHELL, so the `exit 2` below would kill only that subshell; the caller's `|| return 1`
-# would then turn a MALFUNCTION into "TOC mismatch" and walk it out to the reserved exit 9 --
-# the very collapse this discipline exists to prevent, reintroduced by the call syntax.
+# A PURE MAPPING. It used to also ask `git ls-files --error-unmatch` whether the path was
+# tracked, and that is INDEX-based (roborev, post-rebase round 11): a TOC staged for DELETION
+# reads as untracked, so the twin comparison was skipped even though HEAD still holds the
+# inventory — a coherently truncated corpus could then pass on the derived checks alone.
+# Existence is now decided in ONE place, against HEAD, by `_toc_twin_at_head`.
 #
-# git distinguishes the two cases and so must this: `ls-files --error-unmatch` exits 1 for
-# UNTRACKED (a legitimate "no twin") and 128 for a broken invocation / not-a-repo. Measured.
-# Collapsing 128 onto "no twin" would silently disable the trusted-inventory check.
+# SETS A GLOBAL rather than echoing: called as `$(...)` it would run in a subshell and any
+# `exit` inside would die there, turning a malfunction into an ordinary verdict.
 _committed_toc_relpath() {
   _C_TOC_REL=""
-  # Strip the EXACT configured root, not the FIRST "/sstables/" (roborev, post-rebase round
-  # 5). `${1#*/sstables/}` is non-greedy from the left, so a root like
-  # `/data/sstables/current/sstables` yields `current/sstables/<ks>/...` -- a repo path that
-  # matches nothing, no twin is found, and the TOC validation silently weakens. `$SSTABLES`
-  # is the root this run was actually given, so it is the only correct thing to remove.
   _c_tail=${1#"$SSTABLES/"}
   [ "$_c_tail" = "$1" ] && return 0
-  # Not a work tree => no inventory exists to compare against. Declared, not a malfunction.
   [ "$_SCRIPT_REPO_IS_GIT" = 1 ] || return 0
-  _c_rel="test-data/datasets/sstables/$_c_tail"
-  _c_rc=0
-  git -C "$_SCRIPT_REPO" ls-files --error-unmatch "$_c_rel" >/dev/null 2>&1 || _c_rc=$?
-  case "$_c_rc" in
-    0) _C_TOC_REL="$_c_rel" ;;
-    1) : ;;                                  # untracked: no twin, fall back to the derived checks
-    *) echo "❌ dataset manifest check: 'git ls-files' failed (status $_c_rc) resolving the committed twin of $1; cannot judge the corpus" >&2
-       exit 2 ;;
-  esac
+  _C_TOC_REL="test-data/datasets/sstables/$_c_tail"
   return 0
+}
+
+# _toc_twin_at_head <repo-relative-path> -- rc 0 the twin EXISTS at HEAD, rc 1 it does not,
+# exit 2 on a git malfunction.
+#
+# `ls-tree`, NOT `cat-file -e`: `cat-file -e` answers by EXIT STATUS alone, so repository
+# corruption is indistinguishable from "absent" — and absent falls back to the derived checks,
+# silently disabling the trusted comparison. `ls-tree` separates them: status 0 with EMPTY
+# output is genuinely absent, status 0 with output is present, non-zero is a malfunction.
+_toc_twin_at_head() {
+  [ "$_SCRIPT_REPO_IS_GIT" = 1 ] || return 1
+  _th_rc=0
+  _th_out=$(git -C "$_SCRIPT_REPO" ls-tree --name-only HEAD -- "$1" 2>/dev/null) || _th_rc=$?
+  if [ "$_th_rc" -ne 0 ]; then
+    echo "❌ dataset manifest check: 'git ls-tree HEAD -- $1' failed (status $_th_rc); cannot judge the corpus" >&2
+    exit 2
+  fi
+  [ -n "$_th_out" ]
 }
 
 # _toc_matches_head <corpus-toc-path> <repo-relative-path> -- rc 0 iff the corpus TOC matches
@@ -628,23 +632,11 @@ _toc_matches_head() {
   # (roborev, post-rebase round 4) would let git corruption or a permission error read as
   # "no inventory" and silently disable this check. `cat-file -e` answers EXISTENCE on its
   # own, so a `show` that fails afterwards is a genuine malfunction.
-  # `ls-tree`, NOT `cat-file -e` (roborev, post-rebase round 5). `cat-file -e` answers by
-  # EXIT STATUS alone, so repository corruption or an unreadable object is indistinguishable
-  # from "absent at HEAD" -- and absent falls back to the derived checks, silently disabling
-  # the trusted comparison. `ls-tree` separates the two: status 0 with EMPTY output means
-  # genuinely absent, status 0 with output means present, and a NON-ZERO status is a
-  # malfunction that must not be read as either.
-  _tm_ls_rc=0
-  _tm_ls=$(git -C "$_SCRIPT_REPO" ls-tree --name-only HEAD -- "$2" 2>/dev/null) || _tm_ls_rc=$?
-  if [ "$_tm_ls_rc" -ne 0 ]; then
+  # Existence is decided by _toc_twin_at_head (ls-tree against HEAD), the single authority.
+  if ! _toc_twin_at_head "$2"; then
     rm -f "$_tm_tmp"
-    echo "❌ dataset manifest check: 'git ls-tree HEAD -- $2' failed (status $_tm_ls_rc); cannot judge the corpus" >&2
-    exit 2
-  fi
-  if [ -z "$_tm_ls" ]; then
-    rm -f "$_tm_tmp"
-    # Tracked but absent at HEAD (added, not yet committed): the inventory does not exist
-    # yet, so fall back to the derived checks rather than invent one.
+    # Absent at HEAD (e.g. added but not yet committed): no inventory exists, so fall back to
+    # the derived checks rather than invent one.
     return 0
   fi
   if ! git -C "$_SCRIPT_REPO" show "HEAD:$2" >"$_tm_tmp" 2>/dev/null; then
