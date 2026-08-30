@@ -814,7 +814,30 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   configured", then never required it to have *answered*); a `${end:-$start}` default degraded a failed
   `awk` bound to a 1-line scan. Those instances lived in a subsystem since deleted; **the shape is the
   lesson, and it was never theirs** — it was in the wrapper's own terminal verdict scan, which predates
-  them all. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  them all. **AND `findings:` WAS THE SAME SHAPE, ONE KEY OVER (#3564).** `findings:` is not one of the
+  six affirmation keys — its affirmative value is `NONE`, not `PASS` — and it was documented as merely
+  CORROBORATING, which read as "guarded elsewhere" when it was guarded NOWHERE: `PRESENT` is in the
+  closed grammar's NON-FAILING set, so the only thing failing a findings-bearing run was the
+  NEIGHBOURING key `roborev-exit: FINDINGS (exit 1)`. On `--recheck-job` **no reviewer runs**, so
+  `roborev-exit` is legitimately `SKIP` — and the run emitted `findings: PRESENT (3)` beside
+  `RESULT: PASS`, a **false PASS in a merge gate** (measured on #3473 round 3), on the ONE path an
+  authorized waiver must travel, letting a waiver scoped to `prompt-content` ABSENCE excuse findings
+  nobody excused. Now a would-be PASS requires `findings:` to reduce token-exactly to `NONE` **in every
+  mode including recheck**, and that requirement is **NOT waivable**. Fixed in the verdict scan and
+  deliberately NOT in `roborev-exit`: `SKIP` is the TRUE statement about a recheck, and making a key
+  claim a failure it never observed trades one false statement for another. Second half, the part that
+  keeps the break-glass alive: a recheck of a record with no structured `verdict` field used to read
+  `UNKNOWN` (its branch was keyed on the reviewer's exit code, and there is no reviewer), which would
+  have false-FAILed EVERY clean recheck — so a recheck now re-asserts findings from the record's own
+  review text, scoped to the findings block, and says `UNKNOWN` only when that block could not be
+  measured. **The generalisation to carry elsewhere: DELEGATING A KEY'S FAILURE TO ITS NEIGHBOUR IS A
+  LATENT FALSE PASS** — the coupling is invisible while one event populates both keys and evaporates in
+  the first mode where it does not, so ask of every key *what fails the run if THIS key alone goes bad*.
+  **And a fail-closed argument for a `${VAR:-default}` is only valid for the consumers that existed when
+  it was written**: the `block_marker_count` `:-0` was audited as strict because `NONE` was the STRICT
+  direction for `vacuity-tier1:`, and a new consumer for which `NONE` is PERMISSIVE inverted it silently
+  — no default can fix that (`0` and *unmeasurable* are one value), so the direction now comes from a
+  separate `block_measured` signal. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
   for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
   unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
   signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict
