@@ -707,13 +707,21 @@ pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<St
             }
             emit(&fields, at)
         }
-        // A UDT's FIELD types are not declared to the harness (the `UdtField`
-        // position carries an explicitly NAMED absence — see
-        // `canonicalize_golden`'s matching arm), so NO position inside one can be
-        // known to be a `decimal`/`varint` and the descent would be the identity
-        // on every field. Returned as the identity outright, so a UDT's text is
-        // provably untouched rather than untouched by arithmetic — and so a field
-        // spelled like a decimal column cannot be reached at all.
+        // EVERYTHING ELSE is the identity — the value's retained text, byte for
+        // byte. Three things land here, and each one must:
+        //
+        //  * a UDT. Its FIELD types are not declared to the harness (the
+        //    `UdtField` position carries an explicitly NAMED absence — see
+        //    `canonicalize_golden`'s matching arm), so NO position inside one can
+        //    be known to be a `decimal`/`varint`. Returning the identity
+        //    OUTRIGHT, rather than descending and quoting nothing, is what makes
+        //    a UDT field spelled like a decimal column unreachable by
+        //    construction rather than unreachable by arithmetic.
+        //  * a declared SCALAR that is not `decimal`/`varint` — a `double`
+        //    literal, which MUST reach serde_json's exact parser untouched.
+        //  * a JSON form that disagrees with the declared type (an array under a
+        //    declared map, a tuple whose arity differs). That is a difference for
+        //    the value comparison to REPORT, never something to guess past here.
         _ => Ok(value.get().to_string()),
     }
 }
@@ -727,8 +735,9 @@ pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<St
 fn quote_number_lexeme(value: &RawValue, at: &Declared<'_>) -> Result<String, String> {
     let text = value.get().trim();
     if !matches!(text.as_bytes().first(), Some(b'-') | Some(b'0'..=b'9')) {
-        // Not a JSON number: a `null`, or the quoted text a STRINGIFIED position
-        // already carries. Nothing to preserve, and nothing to change.
+        // Not a JSON number, so there is no lexeme the parse could destroy: a
+        // `null` (folded to `Absent` downstream), or a value sstabledump already
+        // wrote as a JSON string. Returned unchanged.
         return Ok(value.get().to_string());
     }
     // A JSON number lexeme contains only `-+.eE0123456789`, none of which JSON

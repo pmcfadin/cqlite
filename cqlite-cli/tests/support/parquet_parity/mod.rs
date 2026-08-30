@@ -1167,13 +1167,13 @@ fn load_golden(
     // `canonical_jsonl::load_golden_document_with_keys` so that a declared
     // `decimal`'s LITERAL survives the parse: the shared comparator turns a bare
     // JSON number into an `f64`, and an `f64` cannot identify the decimal it was
-    // parsed from (`0.100000000000000001` and `0.1` are the same double). See
-    // `golden_text.rs` — and note the two refusals that keep this fail-closed:
-    // the rewrite errors on any JSON it cannot read, and `declared.rs` REFUSES a
-    // declared-`decimal`/`varint` position that still arrives as a double. The
-    // rewrite is POSITION-precise: it takes the whole declared column list and
-    // quotes only the positions declared `decimal`/`varint`, so a
-    // `map<decimal,int>`'s `int` values are untouched (round 11).
+    // parsed from (`0.100000000000000001` and `0.1` are the same double).
+    // `golden_text.rs` keeps every value's ORIGINAL TEXT through the
+    // deserialization itself, quotes only the DECLARED `decimal`/`varint`
+    // positions (round 11) and reaches a cell only at `rows[].cells[]` (round
+    // 12). Two refusals keep it fail-closed: it errors on any line whose
+    // sstabledump structure does not hold, and `declared.rs` REFUSES a declared
+    // `decimal`/`varint` position that still arrives as a double.
     let raw = std::fs::read_to_string(&fixture.golden).map_err(|e| {
         Failures::refusal(format!(
             "reading the sstabledump golden {} failed: {e}",
