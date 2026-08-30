@@ -33,19 +33,56 @@
 ## 4. Verification
 - [x] 4.1 Green standalone:
       `cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests`.
-- [ ] 4.2 **Green under real contention** — re-run while the box is loaded, and record the
+- [x] 4.2 **Green under real contention** — re-run while the box is loaded, and record the
       per-stage timings + derived budgets. This is the AC1 reproduction; an isolated pass is not one.
-- [ ] 4.3 **RED-verify (AC3), for real, both defects**, each in a throwaway `git worktree` so the
+- [x] 4.3 **RED-verify (AC3), for real, both defects**, each in a throwaway `git worktree` so the
       lane's tree is never left mutated:
       - remove the `ctrl_c` branch of `run_writable_interactive` → must red at **stage (c)**;
       - make the shutdown flush hang → must red at **stage (d)** with the flush-did-not-complete
         message (NOT a handler claim).
       Record both outcomes verbatim in the PR body.
 - [x] 4.4 Grep the file to confirm no unestablishable-cause string survives.
-- [ ] 4.5 `scripts/agent-gate.sh --lite` green each fix round (summary-file redirect).
+- [x] 4.5 `scripts/agent-gate.sh --lite` green each fix round (summary-file redirect).
 
 ## 5. Doctrine
-- [ ] 5.1 This is a test-oracle change with no user-facing or workflow surface, so CLAUDE.md needs no
+- [x] 5.1 This is a test-oracle change with no user-facing or workflow surface, so CLAUDE.md needs no
       edit. Confirm that judgement explicitly rather than skipping the check — and if the
       scheduling-sensitive-oracle class is worth a doctrine line, propose it as a follow-up
       (`coord:follow-up-proposed`) rather than widening this diff.
+
+### Verification record (issue #3515)
+
+Quiet host (16 cores, load ~5, warm build, `--test-threads=1`) — 6/6 pass in 0.30s:
+
+| stage | test 1 measured | derived budget | test 2 measured | derived budget |
+|---|---|---|---|---|
+| a. session-up (bare) | 24.1ms | 40s (bare) | 21.4ms | 40s (bare) |
+| b. write ack | 3.0ms | 15s (scale 1.000 from t_boot) | 43.1ms (slowest of 5) | 8s (scale 1.000) |
+| c. handler-entry / mid-session flush | 82.7us | 15s (scale 1.000 from t_ack) | 205us | 20s (scale 1.000) |
+| d. clean-exit / eof-exit | 35.6ms | 25s (scale 1.000 from t_ack) | 1.6ms | 20s (scale 1.000) |
+| stall window | — | 5s (scale 1.000) | — | 5s (scale 1.000) |
+
+Loaded host, self-generated contention (40 spinners + 4 dd/sync loops, load avg 28-31 on 16
+cores) — 6/6 pass in 0.70s: t_boot 66.2ms, t_ack 12.8ms, d.clean-exit 54.0ms; sibling t_boot
+44.7ms, t_ack 96.9ms, eof-exit 27.7ms. All budgets still at `base` (scale 1.000).
+
+Heavier: 220 spinners, load avg 96-116 (~7x oversubscription) — 6/6 pass in 1.28s: t_boot
+80.8ms, t_ack 76.0ms, d.clean-exit 115.6ms; sibling t_boot 131.9ms, t_ack 133.1ms. Budgets
+still at `base`: at 7x oversubscription the slowest stage consumes 0.5% of its budget.
+
+RED verification (AC3), each in a throwaway `git worktree add --detach` (both removed after;
+the lane tree was never mutated):
+
+* **handler removed** (the `ctrl_c` branch of `run_writable_interactive` deleted) — FAILED at
+  **stage (c) handler-entry** in 0.03s, naming the awaited substring `"Received Ctrl-C"`, the
+  budget derivation, the pipes-at-EOF observation, the three candidate causes without selecting
+  one, and the transcript.
+* **flush hung** (600s sleep before `engine.close()` inside `shutdown_flush_and_exit`) — FAILED
+  at **stage (d) clean-exit** after 25.0s with "the shutdown flush did not complete within the
+  budget", stating that the handler-entry marker WAS observed 73us after SIGINT and that the
+  failure says nothing about whether a handler is present.
+
+5.1: judgement confirmed — this change alters one test file's oracle. It adds no user-facing
+surface, no workflow, no gate component and no doctrine-visible behaviour, so CLAUDE.md and the
+`agents-developing/` site need no edit. The scheduling-sensitive-oracle class (#3127, #3438,
+#3515) may be worth a doctrine line; proposed as a follow-up rather than widening this diff.
