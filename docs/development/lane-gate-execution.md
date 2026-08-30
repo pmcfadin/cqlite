@@ -269,12 +269,25 @@ level down.
 ### What the reader does NOT guarantee
 
 The summary is **not** published atomically: `agent-gate.sh` writes it in place with `>`, so a
-reader can observe a **prefix** of a block being written. It cannot observe a blend of two
-versions (`O_TRUNC` resets the length and content is written forward), and that is what makes
-this tractable — a partial block is missing its tail, so the mandatory end-marker check rejects
-it and a torn read degrades to `UNKNOWN`, never to a wrong `COMPLETE`. The reader re-reads
-**once** when the framing is incomplete, which resolves the common "caught mid-write" case; a
-permanently truncated artifact still reports `UNKNOWN`.
+reader can observe a **prefix** of a block being written — and, contrary to what an earlier
+revision of this document claimed, a **blend of two writes** as well. Two writers hold
+independent file offsets, so if B truncates while A is mid-block the file becomes B's opener, a
+sparse hole, then A's tail; a reader could pair one run's `run-id:` with another run's `RESULT:`
+and end marker. That is a false `COMPLETE`, the worst verdict this script can give. It was
+verified by performing the interleaving, not reasoned about.
+
+Three things keep it out: the mandatory **end-marker** check rejects a truncated prefix; a
+**NUL byte** anywhere is rejected, which is the fingerprint of the sparse hole a blend leaves;
+and **more than one** opener / `run-id:` / `RESULT:` / closer is rejected before any field is
+read. The reader also re-reads **once** when framing is incomplete, resolving the common
+"caught mid-write" case; a permanently truncated artifact still reports `UNKNOWN`.
+
+**Residual, stated rather than papered over:** a blend that lands on no hole *and* produces a
+structurally well-formed single block is indistinguishable from a genuine one by any reader of
+the file alone. Nothing here closes that. What closes it is the single-writer discipline #2874
+already mandates — concurrent gates in one checkout MUST use distinct summary paths, and the
+gate de-exports its summary path so no child can inherit it — plus making the write atomic at
+the source.
 
 Making that write atomic (sibling temp + rename) is the root fix and was deliberately left out
 of #3473: `emit_summary` is load-bearing for #1175's write-failure detection and #2874's
@@ -298,8 +311,8 @@ test writability would cause exactly the data loss that contract exists to preve
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (107 cases) and
-`scripts/tests/test_gate_detached.sh` (39 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (118 cases) and
+`scripts/tests/test_gate_detached.sh` (45 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

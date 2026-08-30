@@ -194,19 +194,24 @@ fi
 # see it. Directory capability is what both publishers actually need, and it is testable
 # without writing to any path the caller owns.
 #
-# Both probe names sit under the `.heartbeat.tmp.` prefix so they fall inside the gate's
-# existing tree-integrity carve-out, in case a concurrent gate captures the tree between
-# their creation and removal.
-_hbprobe="$SUMMARY.heartbeat.tmp.launchprobe.$$"
-_hbprobe2="$SUMMARY.heartbeat.tmp.launchprobe-renamed.$$"
-if ! : > "$_hbprobe" 2>/dev/null; then
-  rm -f "$_hbprobe" 2>/dev/null || true
+# Created with mktemp, NOT a predictable `$$` name opened with `>` (roborev job 164, Medium).
+# A guessable path in a caller-chosen shared directory can be pre-created as a symlink by
+# another local user, and `>` follows symlinks — so the probe itself would truncate an
+# arbitrary file writable by the gate user. This is the THIRD place in this change where that
+# same shape appeared (the default /tmp artifact names, the beater's sibling temp, and here),
+# so it is now also enforced as a RULE by a structural assert in the test suite rather than
+# fixed one site at a time.
+#
+# Both names keep the `.heartbeat.tmp.` prefix so they fall inside the gate's existing
+# tree-integrity carve-out, in case a concurrent gate captures the tree mid-probe.
+_hbprobe=$(mktemp "$SUMMARY.heartbeat.tmp.probeXXXXXX" 2>/dev/null) || {
   echo "gate-detached: cannot create a file in '$_sumdir', so neither the gate's summary nor" >&2
   echo "               the liveness heartbeat could be published there — every poll of this" >&2
   echo "               gate would answer UNKNOWN. Refusing to launch an unmonitorable gate," >&2
   echo "               rather than burn 30-50 minutes certifying nothing (#3473)." >&2
   exit 1
-fi
+}
+_hbprobe2="$_hbprobe.renamed"
 if ! mv -f "$_hbprobe" "$_hbprobe2" 2>/dev/null; then
   rm -f "$_hbprobe" "$_hbprobe2" 2>/dev/null || true
   echo "gate-detached: cannot RENAME within '$_sumdir', which the heartbeat's atomic publish" >&2
@@ -214,6 +219,43 @@ if ! mv -f "$_hbprobe" "$_hbprobe2" 2>/dev/null; then
   exit 1
 fi
 rm -f "$_hbprobe" "$_hbprobe2" 2>/dev/null || true
+
+# ...and validate the ACTUAL heartbeat destination, not just rename-between-two-new-names
+# (roborev job 164, Medium). A rename to a fresh sibling proves the directory allows renames;
+# it does not prove the beater can REPLACE `$SUMMARY.heartbeat`. If that path is a directory,
+# or a file in a sticky directory that this user may not replace, publication fails forever
+# while the probe passes.
+_hbdest="$SUMMARY.heartbeat"
+if [ -e "$_hbdest" ] || [ -L "$_hbdest" ]; then
+  if [ -L "$_hbdest" ] || [ ! -f "$_hbdest" ]; then
+    echo "gate-detached: '$_hbdest' exists but is not a regular file (symlink, directory, fifo" >&2
+    echo "               or device) — the liveness heartbeat could never be published there," >&2
+    echo "               so this gate would be unmonitorable. Refusing (#3473)." >&2
+    exit 1
+  fi
+  # It exists as a regular file. Do NOT test-replace it: under #2874 it may be a live peer's
+  # beat, and our own beater will replace it seconds after launch anyway, so clobbering it
+  # HERE — and possibly then refusing to launch — would destroy data for no benefit. A
+  # zero-byte append proves writability without altering it.
+  if ! : >> "$_hbdest" 2>/dev/null; then
+    echo "gate-detached: '$_hbdest' exists and is NOT writable, so the liveness heartbeat" >&2
+    echo "               could not be published — every poll would answer UNKNOWN. Refusing (#3473)." >&2
+    exit 1
+  fi
+else
+  # It does not exist: we can prove the real replacement semantics end to end, non-destructively.
+  _hbreal=$(mktemp "$SUMMARY.heartbeat.tmp.destXXXXXX" 2>/dev/null) || {
+    echo "gate-detached: cannot create a heartbeat temp in '$_sumdir'. Refusing (#3473)." >&2
+    exit 1
+  }
+  if ! mv -f "$_hbreal" "$_hbdest" 2>/dev/null; then
+    rm -f "$_hbreal" 2>/dev/null || true
+    echo "gate-detached: cannot publish to '$_hbdest' (rename into place failed), so liveness" >&2
+    echo "               could never be read for this gate. Refusing (#3473)." >&2
+    exit 1
+  fi
+  rm -f "$_hbdest" 2>/dev/null || true
+fi
 
 # --collect reaps the unit record on exit; the SUMMARY FILE is the verdict artifact, so
 # nothing of record is lost with the unit. --same-dir keeps the gate in this worktree

@@ -568,6 +568,90 @@ else
   bad "11d.9 the comment states the summary is NOT atomically published" "the over-claim may have returned"
 fi
 
+echo "=== section 11e: the interleaved-write blend (roborev job 164) ==="
+# The previous revision of gate-liveness.sh asserted a blend was IMPOSSIBLE "because O_TRUNC
+# resets the length and content is written forward". That was false: two writers hold
+# INDEPENDENT file offsets, so if B truncates while A is mid-block, A's next write lands at
+# ITS old offset and the file becomes B's opener + a sparse hole + A's tail. A reader could
+# then pair one run's run-id with another run's RESULT and end marker — a FALSE COMPLETE, the
+# worst verdict this script can produce.
+#
+# Built here by performing the ACTUAL interleaving with two file descriptors, not by
+# hand-writing a file that merely resembles one — the point is to reproduce the mechanism.
+blend="$TMP/blend.txt"
+{
+  exec 3> "$blend"
+  printf '==== AGENT-GATE SUMMARY ====\nrun-id: run-AAAA\n' >&3
+  printf 'padding %.0s' $(seq 1 40) >&3
+  exec 4> "$blend"                     # writer B truncates; A keeps its offset
+  printf '==== AGENT-GATE SUMMARY ====\nrun-id: run-BBBB\n' >&4
+  exec 4>&-
+  printf '\nRESULT: PASS\n==== END AGENT-GATE SUMMARY ====\n' >&3   # A's tail, past the hole
+  exec 3>&-
+}
+if LC_ALL=C tr -d '\000' < "$blend" | cmp -s - "$blend"; then
+  bad "11e.0 the fixture really is a blended file (contains a sparse hole)" "no NUL bytes — the interleaving did not reproduce, so 11e.1 would be vacuous"
+else
+  ok "11e.0 the fixture really is a blended file (contains a sparse hole)"
+  # It carries B's run-id AND A's terminal RESULT AND a valid end marker — i.e. it would have
+  # satisfied every framing check the previous revision applied.
+  expect_reader "11e.1 a genuinely blended summary => UNKNOWN, never COMPLETE" \
+    UNKNOWN 4 "summary-contains-nul" -- "$blend"
+  expect_reader "11e.2 ...and still UNKNOWN when a run-id is demanded" \
+    UNKNOWN 4 "summary-contains-nul" -- "$blend" --run-id run-BBBB
+fi
+# The structural half, independent of NULs: more than one of any framing element means the
+# file holds fragments of more than one write.
+dup="$TMP/dup.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-A"
+  echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-B"
+  echo "RESULT: PASS"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$dup"
+expect_reader "11e.3 two openers / two run-ids => UNKNOWN (not a single block)" \
+  UNKNOWN 4 "summary-not-a-single-block" -- "$dup"
+dup2="$TMP/dup2.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-A"; echo "RESULT: INCOMPLETE (x)"
+  echo "RESULT: PASS"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$dup2"
+expect_reader "11e.4 two RESULT lines => UNKNOWN (not a single block)" \
+  UNKNOWN 4 "summary-not-a-single-block" -- "$dup2"
+# A NUL in the HEARTBEAT is rejected the same way.
+mk_summary "$TMP/hbn.txt" run-N "INCOMPLETE (gate did not finish)"
+mk_beat "$TMP/hbn.txt.heartbeat" run-N 5
+printf '\000' >> "$TMP/hbn.txt.heartbeat"
+expect_reader "11e.5 a NUL-bearing heartbeat => UNKNOWN" UNKNOWN 4 "heartbeat-contains-nul" -- "$TMP/hbn.txt"
+# CONTROLS: ordinary artifacts must be unaffected by both checks.
+mk_summary "$TMP/ctl.txt" run-C "PASS"
+expect_reader "11e.6 control: an ordinary complete block is still COMPLETE" COMPLETE 0 "" -- "$TMP/ctl.txt"
+mk_summary "$TMP/ctl2.txt" run-C "INCOMPLETE (gate did not finish)"
+mk_beat "$TMP/ctl2.txt.heartbeat" run-C 5
+expect_reader "11e.7 control: an ordinary fresh beat is still RUNNING" RUNNING 2 "" -- "$TMP/ctl2.txt"
+# And the over-claim must not come back in the comment.
+if grep -q 'It cannot observe a blend' "$READER"; then
+  bad "11e.8 the 'cannot blend' over-claim is gone from the comment" "it has returned"
+else
+  ok "11e.8 the 'cannot blend' over-claim is gone from the comment"
+fi
+
+echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
+# The same shape appeared THREE times in this change: the default /tmp artifact names, the
+# beater's sibling temp, and the launcher's probe. Each was a predictable path opened with
+# `>`, which follows symlinks — so a pre-created symlink gets truncated. Fixing instances
+# one at a time is what let it recur, so the rule is pinned at the shared definition:
+# no script in this change may build a temp path from $$ .
+tf_bad=0
+for f in "$REPO_ROOT/scripts/gate-liveness.sh" "$REPO_ROOT/scripts/lib/gate-heartbeat.sh" \
+         "$REPO_ROOT/scripts/flow/gate-detached.sh"; do
+  body=$(sed 's/[[:space:]]*#.*$//' "$f")
+  if printf '%s\n' "$body" | grep -qE '\.\$\$'; then
+    bad "11f.1 no temp path is built from \$\$ in $(basename "$f")" \
+        "$(printf '%s\n' "$body" | grep -nE '\.\$\$' | head -2)"; tf_bad=1
+  fi
+done
+[ "$tf_bad" -eq 0 ] && ok "11f.1 no temp path is built from \$\$ in any of the three scripts"
+# ...and every temp that IS created goes through mktemp.
+mk=$(grep -c 'mktemp' "$REPO_ROOT/scripts/lib/gate-heartbeat.sh" "$REPO_ROOT/scripts/flow/gate-detached.sh" | awk -F: '{t+=$2} END{print t}')
+[ "$mk" -ge 3 ] && ok "11f.2 temp creation goes through mktemp ($mk call sites)" \
+                || bad "11f.2 temp creation goes through mktemp" "only $mk mktemp references"
+
 echo "=== section 12b: an early-exiting gate emits no undefined-function noise ==="
 # The EXIT trap is armed thousands of lines above where _gate_release_slot is DEFINED,
 # and bash defines functions as it reads the file. So every early-exit path — including

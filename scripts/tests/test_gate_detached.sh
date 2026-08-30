@@ -310,6 +310,49 @@ if mkfifo "$fifo" 2>/dev/null; then
 else
   skipc "4b.9 non-regular summary path" "mkfifo unavailable"
 fi
+# The heartbeat DESTINATION must be validated, not just rename-between-two-new-siblings
+# (roborev job 164): a rename to a fresh name proves the directory allows renames, not that
+# the beater can REPLACE $SUMMARY.heartbeat.
+hbdir="$TMP/hbdest.txt"
+mkdir -p "$hbdir.heartbeat"          # the destination is a DIRECTORY
+out=$(bash "$LAUNCHER" --summary "$hbdir" --log "$TMP/hbd.log" -- --only file-size 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "4b.11 a DIRECTORY at the heartbeat destination is refused (exit $rc)" \
+               || bad "4b.11 a DIRECTORY at the heartbeat destination is refused" "exit 0: $out"
+printf '%s' "$out" | grep -q 'not a regular file' \
+  && ok "4b.12 the refusal names the destination's file type" || bad "4b.12 the refusal names the file type" "$out"
+rmdir "$hbdir.heartbeat" 2>/dev/null || true
+if [ "$(id -u)" != 0 ]; then
+  hbro="$TMP/hbro.txt"; : > "$hbro.heartbeat"; chmod 400 "$hbro.heartbeat"
+  out=$(bash "$LAUNCHER" --summary "$hbro" --log "$TMP/hbro.log" -- --only file-size 2>&1); rc=$?
+  [ "$rc" != 0 ] && ok "4b.13 an UNWRITABLE existing heartbeat destination is refused (exit $rc)" \
+                 || bad "4b.13 an UNWRITABLE existing heartbeat destination is refused" "exit 0: $out"
+  chmod 600 "$hbro.heartbeat"
+else
+  skipc "4b.13 unwritable heartbeat destination" "running as root"
+fi
+# The destination probe must be NON-DESTRUCTIVE too: under #2874 an existing heartbeat may be
+# a live peer's beat, and our beater replaces it seconds after launch anyway — so clobbering
+# it during a check that might then REFUSE would destroy data for no benefit.
+peerhb="$TMP/peerhb.txt"
+printf '==== AGENT-GATE HEARTBEAT ====\nrun-id: peer\nbeat-epoch: 1\n==== END AGENT-GATE HEARTBEAT ====\n' > "$peerhb.heartbeat"
+hbbefore=$(cat "$peerhb.heartbeat")
+bash "$LAUNCHER" --summary "$peerhb" --log /nonexistent-dir-3473/x.log -- --only file-size >/dev/null 2>&1
+hbafter=$(cat "$peerhb.heartbeat" 2>/dev/null)
+[ "$hbbefore" = "$hbafter" ] \
+  && ok "4b.14 a refused launch leaves an existing heartbeat UNTOUCHED" \
+  || bad "4b.14 a refused launch leaves an existing heartbeat UNTOUCHED" "the probe clobbered it"
+# And when the destination does NOT exist, the probe proves real replacement and cleans up.
+fresh="$TMP/fresh.txt"
+out=$(bash "$LAUNCHER" --summary "$fresh" --log "$TMP/fresh.log" -- --only file-size 2>&1); rc=$?
+unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
+[ "$rc" = 0 ] && ok "4b.15 a fresh destination launches (real replacement proven)" \
+             || bad "4b.15 a fresh destination launches" "rc=$rc: $out"
+if ls "$TMP"/fresh.txt.heartbeat.tmp.* >/dev/null 2>&1; then
+  bad "4b.16 the destination probe leaves no temp litter" "$(ls "$TMP"/fresh.txt.heartbeat.tmp.* 2>/dev/null)"
+else
+  ok "4b.16 the destination probe leaves no temp litter"
+fi
+
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")

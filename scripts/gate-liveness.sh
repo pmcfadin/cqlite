@@ -84,19 +84,40 @@ fi
 # the cross-run confusion the #2874 reader contract exists to prevent, reintroduced by the
 # I/O pattern rather than by the logic.
 #
-# HOW STRONG THIS ACTUALLY IS, stated precisely, because the first version over-claimed
-# (roborev job 160, Medium). A single `cat` is a single `open()`, so it reads one inode
-# start to finish. That gives a genuinely atomic snapshot ONLY for a writer that publishes
-# by RENAME — which the heartbeat does (sibling temp + `mv`), so a rename landing mid-read
-# swaps the NAME, not our open file.
+# HOW STRONG THIS ACTUALLY IS. Two earlier revisions over-claimed here and both were wrong
+# (roborev jobs 160 and 164), so the guarantee is now stated with its residual attached.
+#
+# A single `cat` is a single `open()`, so it reads one inode start to finish. That is a
+# genuinely atomic snapshot ONLY for a writer that publishes by RENAME — which the heartbeat
+# does (sibling temp + `mv`), so a rename landing mid-read swaps the NAME, not our open file.
 #
 # The SUMMARY is NOT published that way: agent-gate.sh writes it in place with `>`, i.e.
-# O_TRUNC followed by sequential writes. So a reader can legitimately observe a PREFIX of a
-# block being written. It cannot observe a blend of two versions (O_TRUNC resets the length
-# and the new content is written forward), and that is the property that makes this
-# tractable: a partial block is missing its tail, so the mandatory end-marker check on the
-# COMPLETE path (below) rejects it. A torn read therefore degrades to UNKNOWN, never to a
-# wrong COMPLETE.
+# O_TRUNC then sequential writes. Two consequences, and the second was denied by the previous
+# revision of this comment:
+#
+#   1. a reader can observe a PREFIX of a block being written. That is handled: a partial
+#      block is missing its tail, so the mandatory end-marker check rejects it.
+#
+#   2. a reader CAN observe a BLEND of two writes. The previous comment asserted this was
+#      impossible "because O_TRUNC resets the length and content is written forward". FALSE:
+#      two writers hold INDEPENDENT file offsets, so if writer B truncates while writer A is
+#      mid-block, A's next write lands at ITS old offset and the file becomes B's opener, a
+#      sparse hole, then A's tail. Verified directly, not reasoned about. A reader could then
+#      pair one run's `run-id:` with another run's `RESULT:` and end marker — a FALSE
+#      COMPLETE, the most dangerous verdict this script can give.
+#
+# The blend has a detectable signature: the sparse hole reads back as NUL bytes, which a
+# legitimate summary never contains. `_has_nul` rejects it. Combined with the single-block
+# structure check (exactly one opener, run-id, RESULT and end marker, in that order), the
+# realistic interleavings are caught.
+#
+# RESIDUAL, stated rather than papered over: a blend that happens to land on NO hole AND to
+# produce a structurally well-formed single block is indistinguishable from a genuine one by
+# any reader of the file alone. Nothing here closes that; what closes it is the
+# single-writer discipline #2874 already mandates (concurrent gates in one checkout MUST use
+# distinct summary paths, and the gate de-exports its summary path so no child inherits it),
+# plus making the write atomic at the source — which is a change to how the GATE OF RECORD
+# publishes its verdict and belongs in its own issue, not as a ride-along here.
 #
 # `_slurp_settled` then converts the COMMON case of a torn read — we caught a write in
 # progress — into a correct answer, by re-reading once when the framing is incomplete.
@@ -110,6 +131,15 @@ fi
 #
 # _slurp <file> — the file's contents, or empty when unreadable.
 _slurp() { cat -- "$1" 2>/dev/null; }
+
+# _has_nul <file> — true when the file contains a NUL byte. Checked on the FILE, never on a
+# slurped string: `$( )` silently strips NULs, so the evidence is gone by the time the text
+# reaches a variable. A NUL is the fingerprint of the sparse hole an interleaved O_TRUNC
+# write leaves behind (see the note above); no legitimate gate artifact contains one.
+_has_nul() {
+  LC_ALL=C tr -d '\000' < "$1" 2>/dev/null | cmp -s - "$1" 2>/dev/null && return 1
+  return 0
+}
 
 # _slurp_settled <file> — like _slurp, but if the text does not look like a COMPLETE
 # summary block, read it once more and prefer the completed version. Bounded to exactly one
@@ -158,7 +188,27 @@ fi
 if [ ! -r "$SUMMARY" ]; then
   verdict UNKNOWN 4 "summary-unreadable; $SUMMARY exists but cannot be read"
 fi
+if _has_nul "$SUMMARY"; then
+  verdict UNKNOWN 4 "summary-contains-nul; $SUMMARY holds NUL bytes, the signature of two writers interleaving on one path (#2874 requires concurrent gates to use distinct summary paths) — its fields cannot be attributed to a single run"
+fi
 SUM_TEXT=$(_slurp_settled "$SUMMARY")
+# EXACTLY ONE of each framing element. Checked HERE — before any field is read — not on the
+# COMPLETE path only, which is where it first lived: a file whose first RESULT happens to be
+# `INCOMPLETE` would then have skipped the check entirely and been dispatched on a field it
+# had no right to trust. More than one of any element means the file holds fragments of more
+# than one write, and then NOTHING in it can be attributed to a single run — including the
+# run-id used moments later to decide whether this artifact is even ours.
+_n_start=$(printf '%s
+' "$SUM_TEXT" | grep -cE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
+_n_end=$(printf '%s
+' "$SUM_TEXT" | grep -cE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
+_n_res=$(printf '%s
+' "$SUM_TEXT" | grep -c '^RESULT: ')
+_n_rid=$(printf '%s
+' "$SUM_TEXT" | grep -c '^run-id: ')
+if [ "$_n_start" -gt 1 ] || [ "$_n_end" -gt 1 ] || [ "$_n_res" -gt 1 ] || [ "$_n_rid" -gt 1 ]; then
+  verdict UNKNOWN 4 "summary-not-a-single-block; found $_n_start openers / $_n_rid run-id / $_n_res RESULT / $_n_end closers — more than one of any means the file holds fragments of more than one write, so no field can be attributed to a single run"
+fi
 SUM_RUN_ID=$(_field "$SUM_TEXT" run-id)
 # #2874 reader contract: a block bearing a FOREIGN run-id is a peer's, and that holds
 # for a PASS just as much as for an INCOMPLETE. Refuse to answer about someone else's
@@ -239,6 +289,9 @@ if [ ! -f "$HB" ]; then
 fi
 if [ ! -r "$HB" ]; then
   verdict UNKNOWN 4 "heartbeat-unreadable; $HB exists but cannot be read"
+fi
+if _has_nul "$HB"; then
+  verdict UNKNOWN 4 "heartbeat-contains-nul; $HB holds NUL bytes, so it is not a single coherent beat"
 fi
 HB_TEXT=$(_slurp "$HB")
 HB_RUN_ID=$(_field "$HB_TEXT" run-id)
