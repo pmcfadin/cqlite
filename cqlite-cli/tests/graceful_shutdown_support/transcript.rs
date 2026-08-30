@@ -820,15 +820,35 @@ mod pipe_status_tests {
     /// Poison the one store's lock the way a reader thread panicking inside
     /// `record` would, so the `Unavailable` state is reached through the real
     /// mechanism rather than by constructing a snapshot by hand.
+    ///
+    /// **THE PROCESS-GLOBAL PANIC HOOK IS NOT TOUCHED — OPTION 1 OF THE TWO OFFERED
+    /// (round 17, roborev job 262).** An earlier version of this helper silenced
+    /// the panic below by installing an empty `std::panic::set_hook` and restoring
+    /// the previous hook afterwards. That hook is PROCESS-GLOBAL and the two tests
+    /// in this module run concurrently in one test binary, so their swaps could
+    /// interleave — and a panic between the two calls skips the restore outright —
+    /// leaving the SILENT hook installed for every test that ran afterwards. A
+    /// later failure in this binary would then print NOTHING. `main`'s version of
+    /// this file never touches the hook, so that was a hazard this change
+    /// INTRODUCED: a self-inflicted loss of diagnosability inside a change whose
+    /// entire subject is diagnosability.
+    ///
+    /// The suppression bought QUIET and nothing else — no assertion here reads the
+    /// panic message; what these tests examine is the poisoned lock's observable
+    /// consequence, `PipeStatus::Unavailable`. So the global mutation is DELETED
+    /// rather than serialised behind a mutex (which would have left the mutation in
+    /// place and merely ordered it), and the price is paid where it is harmless:
+    /// the panic below prints, and its payload says that it is expected.
     fn poison(io: &ChildIo) {
         let log = Arc::clone(&io.log);
-        let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = log.lock().expect("the store's lock before it is poisoned");
-            panic!("a reader thread panicked while holding the store's lock");
+            panic!(
+                "DELIBERATE TEST FIXTURE, NOT A FAILURE: poisoning the store's lock the way a \
+                 reader thread panicking inside `record` would. This panic is caught by the \
+                 helper that raised it, and this message is expected output of a PASSING test."
+            );
         }));
-        std::panic::set_hook(hook);
         assert!(
             poisoned.is_err(),
             "this helper's whole purpose is the panic it did not take"
