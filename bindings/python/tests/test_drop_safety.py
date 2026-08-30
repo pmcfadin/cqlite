@@ -226,3 +226,35 @@ def test_drop_does_not_raise_at_teardown(tmp_path, schema_file):
         "child exited cleanly but the teardown drop ran no cleanup: expected a "
         f"flushed *-Data.db under {write_dir / 'data'}\n{ctx}"
     )
+
+
+def test_streaming_iterator_after_drop_raises(tmp_path, schema_file):
+    """An iterator outliving its ``Database`` fails cleanly after the drop.
+
+    Issue #1462 established the contract for an explicit ``close()``: a
+    ``StreamingIterator`` that outlives cleanup must raise a clean
+    ``RuntimeError`` from ``__next__`` rather than drive a torn-down engine
+    (undefined behavior / a possible FFI panic).  Adding Drop extends that
+    cleanup to the *implicit* path, so this pins the same contract there.
+
+    This IS a user-visible behavior change and is deliberate: on ``main`` the
+    pattern below kept yielding rows purely because nothing ever cleaned up.
+    Now the engine really is shut down, so continuing to iterate would be the
+    exact hazard #1462 exists to prevent — failing loudly is the safe direction.
+
+    Hermetic on purpose (no dataset corpus): ``__next__`` loads the shared
+    ``parent_closed`` flag BEFORE it locks the inner iterator or blocks on a
+    refill, so the contract is observable even when the result set is empty.
+    That ordering is the property under test, and an empty stream isolates it
+    from anything to do with rows.
+    """
+    db, _write_dir = _open_writable(tmp_path, schema_file, "iterdrop")
+
+    iterator = db.execute_streaming("SELECT * FROM drop_test.items")
+
+    # Drop the parent WITHOUT close(); the iterator keeps the Python reference.
+    del db
+    gc.collect()
+
+    with pytest.raises(RuntimeError, match="Database is closed"):
+        next(iterator)
