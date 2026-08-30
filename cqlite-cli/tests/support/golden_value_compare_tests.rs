@@ -666,6 +666,113 @@ fn a_map_key_relaxation_is_the_goldens_and_the_cli_keeps_its_declared_kind() {
     );
 }
 
+/// A UDT's fields are emitted in DECLARATION order, on both sides.
+///
+/// `cassandra-5.0.8 UserType.toJSONString` iterates `stringFieldNames` in order,
+/// so the golden's object is in declaration order and a reader of the same value
+/// has no licence to permute it. Expectation from the committed `CREATE TYPE`,
+/// never from either side's current output.
+#[test]
+fn a_udt_renders_its_fields_in_the_declared_order() {
+    let schema = schema_of(PERSON_DDL, "t");
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        ("p", json!({"first_name": "A", "last_name": "B", "age": 30})),
+    ])];
+    let ordered = vec![row(&[
+        ("id", json!(1)),
+        (
+            "p",
+            json!({"_type": "person", "first_name": "A", "last_name": "B", "age": 30}),
+        ),
+    ])];
+    let report = compare_rows(&golden, &ordered, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+
+    let permuted = vec![row(&[
+        ("id", json!(1)),
+        (
+            "p",
+            json!({"_type": "person", "age": 30, "first_name": "A", "last_name": "B"}),
+        ),
+    ])];
+    let report = compare_rows(&golden, &permuted, &schema, &["id"], &[], &[], Egress::Json);
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a permuted UDT must fail: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("declaration order"),
+        "{:?}",
+        report.diffs
+    );
+
+    // The CSV lane decodes the flat `{k: v, …}` text in its emitted order, so the
+    // same permutation is caught there too.
+    let csv_golden = vec![row(&[
+        ("id", json!("1")),
+        ("p", json!({"first_name": "A", "last_name": "B", "age": 30})),
+    ])];
+    let csv_ok = vec![row(&[
+        ("id", json!("1")),
+        ("p", json!("{first_name: A, last_name: B, age: 30}")),
+    ])];
+    let report = compare_rows(
+        &csv_golden,
+        &csv_ok,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Csv,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+
+    let csv_permuted = vec![row(&[
+        ("id", json!("1")),
+        ("p", json!("{age: 30, first_name: A, last_name: B}")),
+    ])];
+    let report = compare_rows(
+        &csv_golden,
+        &csv_permuted,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Csv,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a permuted CSV UDT must fail: {:?}",
+        report.diffs
+    );
+
+    // And the GOLDEN is held to the same rule: a transcription that permutes the
+    // dump's own order is not the document this reader understands.
+    let permuted_golden = vec![row(&[
+        ("id", json!(1)),
+        ("p", json!({"age": 30, "first_name": "A", "last_name": "B"})),
+    ])];
+    let report = compare_rows(
+        &permuted_golden,
+        &ordered,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("golden field order"),
+        "{:?}",
+        report.diffs
+    );
+}
+
 /// Finding N2: a map's entries are compared IN EMITTED ORDER, so a reordering is
 /// a divergence.
 ///

@@ -833,6 +833,30 @@ fn compare_udt(
             udt.name
         ));
     }
+    // FIELD ORDER, from the committed `CREATE TYPE`. `cassandra-5.0.8`
+    // `UserType.toJSONString` writes `for (int i = 0; i < types.size(); i++)` over
+    // `stringFieldNames`, so a UDT's fields are emitted in DECLARATION order (and
+    // every declared field is emitted, `null` when absent). Both sides render the
+    // same value, so both must be in that order — the same rule `compare_map`
+    // applies to a map's entries (finding N2), stated here against the DDL rather
+    // than against either side.
+    let declared: Vec<&str> = udt.fields.iter().map(|(name, _)| name.as_str()).collect();
+    for (side, fields) in [("golden", golden), ("cli", &c)] {
+        let emitted: Vec<&str> = fields.keys().map(String::as_str).collect();
+        let expected: Vec<&str> = declared
+            .iter()
+            .copied()
+            .filter(|name| fields.contains_key(*name))
+            .collect();
+        if emitted != expected {
+            return Err(format!(
+                "udt `{}`: the {side} field order is {emitted:?}, but the committed \
+                 CREATE TYPE declares {expected:?} — cassandra-5.0.8 \
+                 UserType.toJSONString emits a UDT's fields in declaration order",
+                udt.name
+            ));
+        }
+    }
     for (field, gv) in golden {
         let field_ty = udt
             .fields
