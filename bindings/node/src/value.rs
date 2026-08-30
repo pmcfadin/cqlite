@@ -26,7 +26,7 @@
 //! | Set | `Set` |
 //! | Map | `Map` |
 //! | Tuple | `Array` |
-//! | Udt | `object` with `_type`, `_keyspace`, and field properties |
+//! | Udt | `object` with `typeName`, `keyspace` and a nested `fields` object |
 
 use crate::error::to_napi_error;
 use cqlite_core::types::Value;
@@ -414,28 +414,41 @@ fn map_to_js_map(ctx: &ConvCtx, pairs: &[(Value, Value)]) -> Result<JsUnknown> {
     Ok(map_instance.into_unknown())
 }
 
-/// Convert UDT to JavaScript object.
+/// Convert a UDT to a JavaScript object whose type identity is carried OUT OF
+/// BAND (issue #3504).
 ///
-/// Creates an object with:
-/// - `_type`: The UDT type name
-/// - `_keyspace`: The keyspace containing the UDT
-/// - All field names as properties
+/// Creates `{ typeName, keyspace, fields }`, where `fields` is a nested object
+/// holding the declared fields and NOTHING else.
+///
+/// This used to set `_type` and `_keyspace` on the object and then set every
+/// field name on the SAME object, so a UDT field named `_type` or `_keyspace` —
+/// legal CQL via a quoted identifier — overwrote the marker and the type name
+/// became unrecoverable. Giving the fields a namespace of their own removes the
+/// slot they competed for; `result._type` is now `undefined` and the type name is
+/// `result.typeName`.
+///
+/// Fields are deliberately NOT also mirrored at the top level: that would
+/// re-flatten them beside `typeName`/`keyspace` and reintroduce the exact defect.
+/// The Python binding keeps mapping access via a dedicated `cqlite.Udt` type, so
+/// the two bindings differ in ergonomics and agree on semantics.
 fn udt_to_object(ctx: &ConvCtx, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
     let env = ctx.env();
     let mut obj = env.create_object()?;
 
-    // Add type metadata
-    obj.set_named_property("_type", env.create_string(&udt.type_name)?)?;
-    obj.set_named_property("_keyspace", env.create_string(&udt.keyspace)?)?;
+    // Type identity, in a namespace no field name can reach.
+    obj.set_named_property("typeName", env.create_string(&udt.type_name)?)?;
+    obj.set_named_property("keyspace", env.create_string(&udt.keyspace)?)?;
 
-    // Add fields
+    // Declared fields, in their own namespace.
+    let mut fields = env.create_object()?;
     for field in &udt.fields {
         let value = match &field.value {
             Some(v) => value_to_napi(ctx, v)?,
             None => env.get_null()?.into_unknown(),
         };
-        obj.set_named_property(&field.name, value)?;
+        fields.set_named_property(&field.name, value)?;
     }
+    obj.set_named_property("fields", fields)?;
 
     Ok(obj.into_unknown())
 }
