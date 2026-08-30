@@ -432,7 +432,9 @@ SUMMARY block carries a `component-set:` line:
   failed, `origin` is missing, **`origin` does not NAME the canonical upstream**, `git` is
   absent, neither the baseline's manifest nor its gate script could be read, the manifest was
   empty or ungrammatical, the gate script's `COMPONENTS=(…)` declaration could not be read as
-  text, `HEAD`'s own set is unmeasurable, or the probe could not be BOUNDED. **Never a
+  text, **whether the baseline carries a manifest could not be determined at all**
+  (`baseline-probe-unmeasured`), `HEAD`'s own set is unmeasurable, or the probe could not be
+  BOUNDED. **Never a
   SKIP and never a fallback to an empty baseline**: an empty baseline excuses every branch,
   which is the vacuous pass inverted. The bound is itself a named capability
   (`timeout`/`gtimeout`/a pure-bash watchdog/`none`) and an **unboundable host does not run
@@ -477,16 +479,37 @@ compare against a too-small baseline and silently excuse real skew. Regenerate w
   > /tmp/agent-gate.components && mv /tmp/agent-gate.components scripts/agent-gate.components
 ```
 
-**One transitional fallback, also data-only.** When the manifest is *absent* at the baseline rev,
-the gate script's single-line top-level `COMPONENTS=(…)` declaration is extracted **as text** —
-never executed — and the reader **refuses loudly** on any other shape (a multi-line or computed
-array, more than one declaration, a character outside the name grammar). It exists because
-`origin/main` carried no manifest until the change that introduced it merged, so a manifest-only
-read would have left that PR unable to certify itself. It is self-limiting (unreachable for any
-baseline at or after that merge) and format-brittle in a **shared** direction: a reflow on `main`
-refuses for every branch at once, which is fail-closed rather than a false green — the other
-reason the manifest is primary. A PASS line naming `via the baseline's COMPONENTS declaration read
-as TEXT` is that path.
+**One transitional fallback, also data-only — and it is unreachable by *assertion*, not by
+reasoning.** The baseline's tree is **probed first**, as its own step, with **three** outcomes:
+
+| probe result | behaviour |
+|---|---|
+| `present` | the manifest and **nothing else**. Every failure of that read — unreadable, bound exceeded, ungrammatical, empty — is an **error**; the textual path is a **hard refusal** here. |
+| `verified-absent` | the transitional text extraction, and the `component-set:` line **names it**. |
+| `could-not-tell` | **REFUSE** (`baseline-probe-unmeasured`). Not the fallback. |
+
+"The fallback is self-limiting — unreachable once the manifest is on `main`" was true and **not
+enough**: that is a property somebody *reasoned about* and nothing measured, so a refactor, a
+baseline pointed at an older commit, or an accidentally deleted manifest would silently re-enable
+the brittle path — a pass derived from the **absence** of a bad signal. And **`git show` cannot
+answer the question**: its non-zero exit conflates "no such path" with "bad object" with "the
+repository could not be read", which is the two-valued-predicate error (a predicate that must
+collapse "cannot tell" onto one of its answers always picks the permissive one). `git ls-tree
+<rev> -- <path>` separates them affirmatively — rc 0 with an entry, rc 0 with **no** entry, rc ≠ 0
+— and an entry that is not a `blob` is its own refusal. The payoff is **mechanical expiry instead
+of trust**: once the manifest is on `main`, every later baseline measures `present`, so path 2 is
+dead code that any attempt to enter *errors*, at the cost of one extra bounded probe.
+
+When it does run, the extractor reads the gate script's single-line top-level `COMPONENTS=(…)`
+declaration **as text** — never executed — and **refuses loudly on any shape it does not
+recognise, naming it** ("is not a SINGLE-LINE literal"; a multi-line or computed array, more than
+one declaration, a character outside the name grammar). That refusal branch is itself tested with
+a reflowed array, because an untested refusal on the exact axis known to be brittle is not
+coverage. It is format-brittle in a **shared** direction — a reflow on `main` refuses for every
+branch at once, which is fail-closed rather than a false green, and the named diagnostic turns a
+fleet-wide stop into a five-minute fix. Every baseline-bearing verdict line ends by naming its
+baseline source (`— baseline read via the committed manifest` / `— baseline read via the TEXTUAL
+FALLBACK: … VERIFIED ABSENT at that sha`), so use of the fallback is visible rather than inferred.
 
 **The baseline's identity is validated before the fetch.** Trusting a remote merely *named*
 `origin` made `git remote set-url origin <anything>` a git-config-shaped opt-out — and it fires

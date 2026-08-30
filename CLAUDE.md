@@ -360,14 +360,24 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   leave `main`'s manifest SHORT, so every later branch would compare against a too-small baseline
   and silently excuse real skew. Regenerate with `{ sed -n -e '/^[^#]/q' -e p
   scripts/agent-gate.components; scripts/agent-gate.sh --list; }` and commit it.
-  **One TRANSITIONAL fallback, also data-only:** when the manifest is ABSENT at the baseline rev,
-  the gate script's **single-line top-level `COMPONENTS=(…)` declaration is extracted AS TEXT**
-  (never executed) and refuses loudly on any other shape — a multi-line/computed array, more than
-  one declaration, or a character outside the name grammar. It exists because `origin/main` carries
-  no manifest until this change merges, so a manifest-only read would leave that PR unable to
-  certify itself; it is self-limiting (unreachable for any baseline at or after that merge) and
-  format-brittle in a SHARED direction (a reflow on `main` refuses for every branch at once, which
-  is fail-closed, not a false green) — which is the other reason the manifest is primary.
+  **One TRANSITIONAL fallback, also data-only, and it is UNREACHABLE BY ASSERTION rather than by
+  reasoning:** the baseline's tree is **probed first**, as its own step, with **three** outcomes —
+  `present` ⇒ the manifest and NOTHING ELSE (every failure of that read is an ERROR; the textual
+  path is a **hard refusal** here), `verified-absent` ⇒ the gate script's **single-line top-level
+  `COMPONENTS=(…)` declaration extracted AS TEXT** (never executed), `could-not-tell` ⇒ **REFUSE**
+  (`baseline-probe-unmeasured`). "The fallback is self-limiting" was true and **not enough**: that
+  is a property someone reasoned about and nothing measured, so a refactor or a deleted manifest
+  would silently re-enable the brittle path — a pass derived from the ABSENCE of a bad signal.
+  **`git show` cannot answer the question**: its non-zero exit conflates "no such path" with "bad
+  object" with "unreadable repository", so absence is never inferred from it; `git ls-tree <rev> --
+  <path>` separates them affirmatively (rc 0 + an entry / rc 0 + NO entry / rc ≠ 0), and a non-blob
+  entry is its own refusal. The payoff is **mechanical expiry instead of trust**: once the manifest
+  is on `main` every baseline measures `present`, so path 2 is dead code that any attempt to enter
+  ERRORS. The extractor refuses loudly on any shape it does not recognise and **NAMES it** ("is not
+  a SINGLE-LINE literal"), so a future reflow on `main` — which would refuse for **every branch at
+  once**, fail-closed rather than a false green — surfaces as that sentence and not as a mystery.
+  Every baseline-bearing verdict line ends by naming its baseline source, so use of the fallback is
+  visible rather than inferred.
   And `origin` must **NAME the canonical upstream**, HOST INCLUDED
   (`github.com/pmcfadin/cqlite`, one hard-coded literal, EXACT equality after normalising the
   spellings git accepts — scheme forms, scp-like, userinfo, an ssh port, `www.`, `.git`, case):
