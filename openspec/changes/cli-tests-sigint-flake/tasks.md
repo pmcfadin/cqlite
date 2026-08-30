@@ -86,3 +86,23 @@ the lane tree was never mutated):
 surface, no workflow, no gate component and no doctrine-visible behaviour, so CLAUDE.md and the
 `agents-developing/` site need no edit. The scheduling-sensitive-oracle class (#3127, #3438,
 #3515) may be worth a doctrine line; proposed as a follow-up rather than widening this diff.
+
+### Round 2 (lead review of the first pass)
+
+* `select_rows` was the one remaining unbounded wait on a child process
+  (`Command::output()` has no timeout) and sat OUTSIDE the total budget, where an
+  overrun lands on nextest's hard kill. It is now **stage (e) durability-read**:
+  bounded, calibrated from `t_boot`, pipes drained on threads, with its own
+  attributed message. Nominal cap sums re-budgeted to **175s <= 180s** for each
+  test (test 1: 40+25+25+50+35; test 2: 40+5x10+25+25+35).
+* The handler marker's leading `\n` does split the output but benignly — an empty
+  line, then a line CONTAINING the substring — verified from a RED run's `cat -A`
+  transcript and recorded in code at the constant, together with why no earlier
+  stage can consume the marker line.
+* Quiet re-run after both changes: 6/6 in 0.31s. Test 1 a 29.3ms / b 3.3ms /
+  c 478.7us / d 40.2ms / **e 7.0ms**; test 2 a 23.8ms / b 40.4ms / c 217.8us /
+  d 1.5ms / **e 11.5ms**. All budgets at `base` (scale 1.000).
+* Both RED plants re-verified against the FINAL file (the caps had changed, so the
+  round-1 evidence was not automatically valid): plant A -> stage (c) in 0.03s;
+  plant B -> stage (d) after 25.09s, still reporting the handler-entry marker was
+  observed 191us after SIGINT. Worktrees removed; lane tree never mutated.
