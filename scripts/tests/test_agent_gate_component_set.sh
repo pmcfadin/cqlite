@@ -357,6 +357,40 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 5b. THE BASELINE IS FETCHED, NOT READ FROM THE CACHE — the #3544 amendment's core
+#     requirement, and the one whose violation is SILENT: comparing against a stale
+#     `origin/main` returns "no skew" against a superseded baseline. Measured on the #3393
+#     lane, its remote-tracking ref was 23 minutes stale at the moment it acted on it.
+#
+#     Driven by ADVANCING the bare origin AFTER the fixture cloned it, so the cached
+#     `refs/remotes/origin/main` and the real tip DIFFER: the reported sha must be the NEW
+#     tip. The same case pins the complement — `refs/remotes/origin/main` must NOT MOVE,
+#     because a lane is a `git worktree` of a shared `.git` where that ref is shared with
+#     its siblings, so writing it both contends on a lock (a concurrent FAIL-CLOSED) and
+#     side-effects a peer's baseline mid-run.
+# ---------------------------------------------------------------------------
+# Its OWN baseline, never a shared one: this case ADVANCES origin/main, and a fixture
+# mutated by one case is a fixture the next case is no longer measuring what it thinks it
+# is (case 7 reuses `$same` and its recorded sha — it broke exactly that way, first run).
+base_fresh=$(mkbaseline base-fresh - )
+fresh=$(mkbranch fresh "$base_fresh" - --from-origin)
+fresh_cached_before=$(git -C "$fresh" rev-parse refs/remotes/origin/main 2>/dev/null)
+( cd "$tmp/base-fresh-src" && printf 'advanced after the clone\n' >>README.md \
+  && git "${GIT_ID[@]}" commit -qam advance \
+  && git push -q "$base_fresh" HEAD:refs/heads/main ) >/dev/null 2>&1
+fresh_tip=$(git -C "$base_fresh" rev-parse refs/heads/main)
+fr_out=$(hook "$fresh")
+fresh_cached_after=$(git -C "$fresh" rev-parse refs/remotes/origin/main 2>/dev/null)
+if [ "$(field SHA "$fr_out")" = "$fresh_tip" ] \
+   && [ "$fresh_tip" != "$fresh_cached_before" ] \
+   && [ "$fresh_cached_after" = "$fresh_cached_before" ]; then
+  ok "3544-fresh-baseline: the comparison uses the FETCHED tip, and leaves the shared cached ref alone"
+else
+  bad "3544-fresh-baseline: expected the new tip $fresh_tip (got '$(field SHA "$fr_out")'), cached ref unmoved (before='$fresh_cached_before' after='$fresh_cached_after')"
+  printf '%s\n' "$fr_out"
+fi
+
+# ---------------------------------------------------------------------------
 # 6. LENIENCY: --lite and --only stamp the SAME line ADVISORY. --lite runs every fix
 #    round and must not require the network to function, so a real skew (and a dead
 #    origin) must be VISIBLE there without failing the run.

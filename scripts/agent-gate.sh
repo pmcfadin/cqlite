@@ -2588,7 +2588,21 @@ _component_set_probe() {
   # THE FETCH. `origin` and `main` are LITERALS, not variables: a configurable remote or
   # branch would be an env-settable way to point the comparison at a baseline of the
   # invoker's choosing, i.e. the opt-out this guard must not have.
-  err=$(_component_set_timeout 120 git -C "$REPO_ROOT" fetch --quiet origin main 2>&1); rc=$?
+  #
+  # `--refmap=` (EMPTY) suppresses the opportunistic `refs/remotes/origin/*` update and
+  # writes ONLY the per-worktree FETCH_HEAD. Two reasons, both about this fleet's layout —
+  # lanes are `git worktree`s of ONE shared `.git`, so `refs/remotes/origin/main` is
+  # SHARED between them:
+  #   1. NO SHARED REF LOCK. Two sibling lanes fetching at once would contend on that
+  #      ref's lock, and the loser's `git fetch` exits non-zero — which this guard reports
+  #      (correctly) as an unmeasurable baseline, i.e. a FAIL CLOSED for a purely
+  #      concurrent cause. Removing the write removes the contention class outright rather
+  #      than papering over it with a retry (a retry would also double the stall on a
+  #      genuine outage, in the mode that runs every fix round).
+  #   2. NO SIDE EFFECT ON A PEER. A pre-flight must not move a ref another lane's run may
+  #      be reading mid-flight; the check exists to distrust that cached ref, not to
+  #      rewrite it.
+  err=$(_component_set_timeout 120 git -C "$REPO_ROOT" fetch --quiet --refmap= origin main 2>&1); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
     _CS_DETAIL="git fetch origin main exited $rc: $(_component_set_flatten "$err")"
