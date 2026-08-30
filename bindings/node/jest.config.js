@@ -4,21 +4,38 @@
  * Issue #306: Jest Test Infrastructure Setup
  * Epic #318: M4 Node.js Bindings
  *
- * Issue #1465: leak detection is SCOPED, not global. The suite is split into two
- * `projects` that share one base config:
+ * Issue #1465: the leak lane is a SEPARATE PROJECT, and its leak DETECTORS are
+ * passed on a dedicated invocation — not declared here. The suite is split into
+ * two `projects` that share one base config:
  *   * `default` — every test file EXCEPT the leak lane, with exactly the
- *     behaviour it had before (same environment, setup file and 30s timeout), so
- *     the existing suite is unaffected.
- *   * `leaks`   — `__test__/leak-paths.test.js` only, with
- *     `detectOpenHandles: true` (an abandoned iterator whose `return()`/`close()`
- *     never ran leaves a handle behind, which is exactly the signal that lane
- *     wants) and a longer timeout for its multi-pass measurement.
- * `detectLeaks: true` is enabled for that project as well — measured GREEN and
- * stable against this native module — but NO correctness weight is placed on it
- * (it watches jest's TestEnvironment instance, which test code cannot reach, so
- * its liveness here is undemonstrable; see the header of
- * `__test__/leak-paths.test.js`). The load-bearing guard is the measured
- * heap+external budget asserted in that file.
+ *     behaviour it had before (same environment, setup file, and the root
+ *     `testTimeout` below).
+ *   * `leaks`   — `__test__/leak-paths.test.js` only, so it can be selected on
+ *     its own (`--selectProjects leaks`, used by `npm run test:leaks`) and so a
+ *     future lane-only option has somewhere to live.
+ *
+ * WHY NO `detectOpenHandles`/`detectLeaks` KEY IN THE `leaks` ENTRY (measured on
+ * jest 29.7.0, not assumed):
+ *   * `detectOpenHandles` is read from the GLOBAL config only
+ *     (`@jest/core/build/runJest.js:322` for handle collection,
+ *     `testSchedulerHelper.js:29` for the runInBand implication). Declaring it in
+ *     a `projects[]` entry resolves to `projectConfig.detectOpenHandles = true`
+ *     and `globalConfig.detectOpenHandles = false`, i.e. it does NOTHING.
+ *     Verified by introspecting `readConfigs()` on this very file. It is
+ *     therefore passed as a CLI flag by the `test:leaks` script instead, which is
+ *     the only invocation where it is live — a bare `npm test` does NOT enable
+ *     it.
+ *   * `detectLeaks` is deliberately absent. (It IS honoured per-project —
+ *     `jest-runner/build/runTest.js:261` reads `projectConfig.detectLeaks` and
+ *     `@jest/core/build/TestScheduler.js:138` surfaces the verdict — so it did
+ *     run here; it is removed because of what it MEASURES, not because it was
+ *     dead.) jest-leak-detector watches the jest `TestEnvironment` INSTANCE, so
+ *     it answers "was the whole environment collected after this FILE finished",
+ *     never "does each iteration of this loop retain memory" — the property this
+ *     issue is about. Being both blind to that property and able to red for
+ *     unrelated environment retention on any jest/Node bump, it is a guard that
+ *     could only ever fail wrongly. Issue #1465 step 3 authorises the documented
+ *     budget fallback, which is what `__test__/leak-paths.test.js` asserts.
  *
  * @type {import('jest').Config}
  */
@@ -46,9 +63,8 @@ module.exports = {
       ...baseProject,
       displayName: 'leaks',
       testMatch: [LEAK_TEST],
-      // Abandoned iterators are exactly the shape that leaves a handle behind.
-      detectOpenHandles: true,
-      detectLeaks: true,
+      // No leak-detector keys here — they are globalConfig-only (see header) and
+      // are passed by `npm run test:leaks` instead.
     },
   ],
 

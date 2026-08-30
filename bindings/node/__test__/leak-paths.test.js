@@ -9,28 +9,25 @@
  * exactly those paths, mirroring the Python tracemalloc budgets in
  * bindings/python/tests/test_leak_paths.py.
  *
- * WHY THE LOAD-BEARING GUARD IS A MEASURED HEAP BUDGET, NOT jest `--detectLeaks`
- * (issue #1465 explicitly allows this fallback and requires the reason to be
- * documented here). `detectLeaks` IS enabled for this file — scoped to it by the
- * `leaks` project in jest.config.js, never globally — and it passes. But it
- * cannot carry the guarantee this issue asks for, for two measured reasons:
- *   1. It answers a DIFFERENT question. jest-leak-detector registers a
- *      FinalizationRegistry on the jest `TestEnvironment` INSTANCE
- *      (jest-runner/build/runTest.js: `new LeakDetector(environment)`), i.e. it
- *      asks "was the whole test environment collected after this FILE finished",
- *      not "does each iteration of this loop retain memory" — which is the
- *      property a leaking error path exhibits.
- *   2. Its liveness here is UNDEMONSTRABLE from test code. The watched value is
- *      the environment instance, which a test cannot reach, so no planted-leak
- *      control can prove the detector would fire. Measured 2026-08-30 (jest
- *      29.7.0, Node v20.20.2): two planted retentions — a required module graph
- *      and the test-environment `global` itself, both pinned on `process` so they
- *      outlive the file — were BOTH reported clean. So a green `detectLeaks` is
- *      not evidence of anything, and this file does not treat it as such; it is
- *      left enabled only because it is stable and costs nothing.
- * `detectOpenHandles: true` is also enabled for this file: an abandoned iterator
- * whose `return()`/`close()` never ran would leave a handle behind, which is a
- * signal that DOES apply to the path under test.
+ * WHY THE GUARD IS A MEASURED BUDGET, NOT jest `--detectLeaks` (issue #1465
+ * step 3 authorises this fallback and requires the reason to be documented here):
+ * jest-leak-detector watches the jest `TestEnvironment` INSTANCE
+ * (`jest-runner/build/runTest.js:261`, `new LeakDetector(environment)`), so it
+ * answers "was the whole environment collected after this FILE finished", never
+ * "does each iteration of this loop retain memory". It is blind to the property
+ * under test and can red for unrelated environment retention, so it is NOT
+ * enabled anywhere for this file — see the jest.config.js header for the full
+ * ruling.
+ *
+ * WHERE `--detectOpenHandles` IS LIVE, AND WHERE IT IS NOT (measured, jest
+ * 29.7.0): it is a GLOBAL-config option, so it can only be enabled at the
+ * invocation. `npm run test:leaks` passes it (with `--selectProjects leaks`);
+ * a bare `npm test` / `npx jest leak-paths` does NOT, and reports no handles.
+ * It is worth having on the dedicated invocation because an abandoned iterator
+ * whose `return()`/`close()` never ran can leave a libuv handle behind. Note what
+ * it is: a REPORT printed after the run ("Jest has detected the following N open
+ * handles"), not an assertion — it does not fail the lane, so it is a diagnostic
+ * for a human, and the budgets below are what actually gate.
  *
  * WHAT IS ASSERTED (and what is deliberately NOT): the growth of
  * `heapUsed + external` across N iterations must stay under a documented budget.
