@@ -241,7 +241,11 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
   than the one it was asked for — the #2874 reader contract, which holds for a `PASS`
   block just as much as for a beat. **Pass `--run-id` whenever you know it.**
 - The beater verifies the gate pid before **every** beat, pinning `/proc/<pid>/stat` field 22
-  (start time) where available so a recycled pid reads as dead. That check is **local by
+  (start time) where available so a recycled pid reads as dead — and the gate applies the same
+  pinning **in the other direction** to its view of the beater, so a recycled pid can never be
+  accepted as the beater and signalled at exit. Where identity cannot be established the gate
+  sends nothing: the consequences are asymmetric (a wrong "yes" signals an unrelated process,
+  while a wrong "no" just leaves a beater that self-terminates within one interval anyway). That check is **local by
   construction** — the beater always runs on the gate's own host — which is why it survived
   the descope below. A beater that kept beating after its gate died would report a dead gate
   as `RUNNING` forever: this issue's own defect, one level down.
@@ -356,8 +360,12 @@ minutes burned certifying nothing, with every poll answering `UNKNOWN` and no wa
 from a slow queue. `gate-detached.sh` prevents that in two layers.
 
 **Cheap pre-checks, for better messages:** the summary directory must exist and support creating
-and renaming a file, and neither the summary nor the heartbeat destination may be a symlink,
-directory, fifo or device. These catch obvious misconfiguration before anything starts.
+and renaming a file; neither the summary nor the heartbeat destination may be a symlink,
+directory, fifo or device; and the **log may not alias** the summary or the heartbeat. That last
+one has two silent failure modes — the gate rewrites its summary with `>`, which would truncate
+an accumulated log, and the beater publishes by rename, which would unlink the log's open inode
+so the advertised log ends up holding heartbeat data. Aliasing is checked by name *and* by
+device+inode (`-ef`), because two different spellings can be the same file. These catch obvious misconfiguration before anything starts.
 
 **The real guarantee is post-launch, and it is BOUND TO THE NEW RUN:** the gate starts its
 beater *before* it queues for the #1825 slot, so a first beat lands within a second or two even
@@ -423,8 +431,8 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (145 cases) and
-`scripts/tests/test_gate_detached.sh` (73 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (147 cases) and
+`scripts/tests/test_gate_detached.sh` (83 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

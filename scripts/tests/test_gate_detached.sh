@@ -604,6 +604,82 @@ else
   skipc "4b.38-4b.39 advertised poll command" "no working systemd-run --user"
 fi
 
+# roborev job 183: the log must not ALIAS the summary or the heartbeat. If log == summary, the
+# gate's `>` rewrite truncates the accumulated log and two writers contend; if log == heartbeat,
+# the beater's rename unlinks the log's open inode and the advertised log holds heartbeat data.
+al="$TMP/alias.txt"
+out=$(bash "$LAUNCHER" --summary "$al" --log "$al" -- --only file-size 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "4b.40 --log aliasing --summary is refused (exit $rc)" \
+               || bad "4b.40 --log aliasing --summary is refused" "exit 0: $out"
+printf '%s' "$out" | grep -q 'is the summary' \
+  && ok "4b.41 the refusal names which artifact it collides with" || bad "4b.41 the refusal names the collision" "$out"
+out=$(bash "$LAUNCHER" --summary "$al" --log "$al.heartbeat" -- --only file-size 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "4b.42 --log aliasing the heartbeat is refused (exit $rc)" \
+               || bad "4b.42 --log aliasing the heartbeat is refused" "exit 0: $out"
+# A DIFFERENT SPELLING of the same file must be caught too — string equality is not enough.
+hl="$TMP/hardlink.log"; : > "$hl"; ln -f "$hl" "$TMP/hardlink-alias.log" 2>/dev/null && {
+  out=$(bash "$LAUNCHER" --summary "$hl" --log "$TMP/hardlink-alias.log" -- --only file-size 2>&1); rc=$?
+  [ "$rc" != 0 ] && ok "4b.43 a HARD LINK to the summary is refused (same inode, different name)" \
+                 || bad "4b.43 a HARD LINK to the summary is refused" "exit 0: $out"
+} || skipc "4b.43 hard-link alias" "ln -f unavailable on this filesystem"
+# CONTROL: distinct paths must still launch, or the check is just a refusal.
+out=$(bash "$LAUNCHER" --summary "$TMP/ok-s.txt" --log "$TMP/ok-l.log" -- --only file-size 2>&1); rc=$?
+ou=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$ou" ] && echo "$ou" >> "$UNITS_FILE"
+[ "$rc" = 0 ] && ok "4b.44 control: distinct summary and log paths still launch" \
+             || bad "4b.44 control: distinct summary and log paths still launch" "rc=$rc: $out"
+
+# roborev job 183: the GATE must identify its beater by more than a pid, or a recycled pid could
+# be accepted as the beater and SIGTERMed at exit.
+GATE_SH="$REPO_ROOT/scripts/agent-gate.sh"
+if grep -q '^_hb_is_ours() {' "$GATE_SH"; then
+  ok "4b.45 the gate has an affirmative beater-identity check"
+else
+  bad "4b.45 the gate has an affirmative beater-identity check" "_hb_is_ours not found"
+fi
+gbody=$(sed 's/[[:space:]]*#.*$//' "$GATE_SH")
+# _hb_stop must not signal without proving ownership first.
+stopblk=$(sed -n '/^_hb_stop() {$/,/^}$/p' "$GATE_SH")
+if printf '%s\n' "$stopblk" | grep -q '_hb_is_ours'; then
+  ok "4b.46 _hb_stop proves ownership before signalling"
+else
+  bad "4b.46 _hb_stop proves ownership before signalling" "no ownership check before kill"
+fi
+ensblk=$(sed -n '/^_hb_ensure() {$/,/^}$/p' "$GATE_SH")
+if printf '%s\n' "$ensblk" | grep -q '_hb_is_ours'; then
+  ok "4b.47 _hb_ensure decides respawn from the identity check, not a bare kill -0"
+else
+  bad "4b.47 _hb_ensure decides respawn from the identity check" "still a bare kill -0"
+fi
+# The unverifiable case must refuse to signal rather than guess (asymmetric consequences).
+if printf '%s\n' "$stopblk" | grep -q 'return 0'; then
+  ok "4b.48 an unverifiable beater pid is left alone rather than signalled"
+else
+  bad "4b.48 an unverifiable beater pid is left alone rather than signalled" "no early return"
+fi
+# BEHAVIOURAL: a real gate must still start a beater and leave none behind.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  bs="$TMP/beater-life.txt"
+  AGENT_GATE_SUMMARY_FILE="$bs" bash "$GATE_SH" --only file-size >/dev/null 2>&1 </dev/null
+  sleep 1
+  # Counted by reading /proc in THIS shell, not via `ps | grep`: the grep process's own argv
+  # contains the needle, so it matches itself and the count is never zero. That self-match has
+  # now bitten this change three times (a portability guard, a --setenv scan, and here), so the
+  # rule is: never search a process table with a pattern that appears in the searching command.
+  left=0
+  for _c in /proc/[0-9]*/cmdline; do
+    [ -r "$_c" ] || continue
+    case "$(LC_ALL=C tr '\0' ' ' < "$_c" 2>/dev/null)" in
+      *"gate-heartbeat.sh --file $bs"*) left=$((left + 1)) ;;
+    esac
+  done
+  [ "$left" -eq 0 ] && ok "4b.49 a completed gate leaves no beater running" \
+                    || bad "4b.49 a completed gate leaves no beater running" "$left still alive"
+  grep -q '^heartbeat: on ' "$bs" && ok "4b.50 ...and it did publish a heartbeat while running" \
+                                  || bad "4b.50 the gate published a heartbeat" "$(grep '^heartbeat' "$bs")"
+else
+  skipc "4b.49-4b.50 beater lifecycle" "no working systemd-run --user"
+fi
+
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")

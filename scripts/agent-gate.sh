@@ -3455,6 +3455,7 @@ elif [ "$LITE" -eq 1 ]; then HEARTBEAT_MODE=lite
 elif [ "$DELTA" -eq 1 ]; then HEARTBEAT_MODE=delta
 else HEARTBEAT_MODE=full; fi
 HEARTBEAT_PID=""
+HEARTBEAT_STARTTIME=""
 HEARTBEAT_STATE="off"
 
 SENTINEL_WROTE=0
@@ -3514,6 +3515,38 @@ fi
 # a gate component. A missing beater must not make the gate un-runnable, and it cannot
 # manufacture a false green either — with no beat, the reader reports UNKNOWN (naming
 # the absence), which is exactly the pre-#3473 state of knowledge and never RUNNING.
+# _hb_proc_starttime <pid> -> field 22 of /proc/<pid>/stat (immutable for a process's life), or
+# empty where /proc is absent (macOS/BSD). Field 2 may contain spaces AND parens, so fields are
+# counted from after the LAST ')'.
+_hb_proc_starttime() {
+  local raw rest
+  raw=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+  rest="${raw##*) }"
+  # shellcheck disable=SC2086  # deliberate word-split into positional params
+  set -- $rest
+  [ $# -ge 20 ] || return 0
+  printf '%s' "${20}"
+}
+
+# _hb_is_ours: is HEARTBEAT_PID still the beater WE started? Affirmative answers only.
+#   starttime matches  -> yes (reuse-proof)
+#   pid absent         -> no
+#   starttime differs  -> no (pid recycled)
+#   cannot tell (no /proc, or no captured starttime) -> NO, deliberately. The consequences are
+#     asymmetric: a false "yes" makes this gate SIGNAL an unrelated process, while a false "no"
+#     merely means we neither respawn nor signal — and the beater self-terminates within one
+#     interval anyway, because it checks whether ITS gate is alive. Refusing to guess costs
+#     nothing and cannot hit a stranger.
+_hb_is_ours() {
+  [ -n "${HEARTBEAT_PID:-}" ] || return 1
+  kill -0 "$HEARTBEAT_PID" 2>/dev/null || return 1
+  [ -n "${HEARTBEAT_STARTTIME:-}" ] || return 1
+  local now
+  now=$(_hb_proc_starttime "$HEARTBEAT_PID")
+  [ -n "$now" ] || return 1
+  [ "$now" = "$HEARTBEAT_STARTTIME" ]
+}
+
 _hb_start() {
   [ -z "$HEARTBEAT_PID" ] || return 0
   local beater="$REPO_ROOT/scripts/lib/gate-heartbeat.sh"
@@ -3525,6 +3558,12 @@ _hb_start() {
     --mode "$HEARTBEAT_MODE" --interval "$HEARTBEAT_INTERVAL" --logs "$LOG_DIR" \
     </dev/null >/dev/null 2>&1 &
   HEARTBEAT_PID=$!
+  # Pin the beater's IDENTITY, not just its pid (#3473, roborev job 183). `kill -0` alone answers
+  # "some process holds this pid", which a RECYCLED pid also satisfies — so on a long gate the
+  # beater could die, its pid be reused, and this gate would then treat a stranger as its beater
+  # and SIGTERM it at exit. Same reuse-proofing the beater already applies to the GATE's pid, in
+  # the other direction.
+  HEARTBEAT_STARTTIME=$(_hb_proc_starttime "$HEARTBEAT_PID")
   HEARTBEAT_STATE="on"
   return 0
 }
@@ -3541,8 +3580,11 @@ _hb_ensure() {
   [ "${BASHPID:-$$}" = "$$" ] || return 0   # pool subshells: not their job (cf. #1737)
   [ "$HEARTBEAT_STATE" = "on" ] || return 0
   [ -n "$HEARTBEAT_PID" ] || return 0
-  kill -0 "$HEARTBEAT_PID" 2>/dev/null && return 0
+  _hb_is_ours && return 0
+  # Not ours (gone, recycled, or unverifiable): forget it and start a fresh beater. Never signal
+  # the old pid here — that is exactly the stranger-SIGTERM hazard _hb_is_ours exists to avoid.
   HEARTBEAT_PID=""
+  HEARTBEAT_STARTTIME=""
   _hb_start
   return 0
 }
@@ -3561,6 +3603,15 @@ _hb_ensure() {
 _hb_stop() {
   [ "${BASHPID:-$$}" = "$$" ] || return 0
   [ -n "${HEARTBEAT_PID:-}" ] || return 0
+  # Only ever signal a pid we can PROVE is our beater (roborev job 183). A recycled pid would
+  # otherwise receive this SIGTERM. If we cannot prove it, we send nothing: the beater checks its
+  # own gate every interval and exits on its own, so the worst case is a beater that lingers
+  # seconds longer — strictly better than terminating an unrelated process.
+  if ! _hb_is_ours; then
+    HEARTBEAT_PID=""
+    HEARTBEAT_STARTTIME=""
+    return 0
+  fi
   kill "$HEARTBEAT_PID" 2>/dev/null || true
   # BOUNDED reap. The beater handles SIGTERM promptly by design (it waits on a
   # backgrounded sleep precisely so its trap is not deferred), so this normally spins

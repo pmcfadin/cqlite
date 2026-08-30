@@ -247,6 +247,31 @@ printf 'exec bash %q "$@"\n' "$REPO_ROOT/scripts/agent-gate.sh" >> "$ENV_SCRIPT"
 # The window is microseconds and requires an attacker already able to write that directory; the
 # DEFAULT log path is unguessable and inside a 0700 mkdtemp, so this only applies to a
 # caller-supplied path in a shared directory.
+# The log must not ALIAS the summary or the heartbeat (roborev job 183, Medium). Two distinct
+# failures if it does, and both are silent:
+#   * log == summary  : the gate REWRITES the summary (sentinel, then verdict) with `>`, which
+#                       truncates the accumulated log, and two writers then contend for one file;
+#   * log == heartbeat: the beater publishes by RENAME, which unlinks the log's open inode — the
+#                       advertised log path then holds heartbeat data and the gate's output goes
+#                       to a file nobody can find.
+# Compared three ways because one is not enough: the literal strings may differ while pointing at
+# the same file (`./x` vs `x`, a symlinked directory, a hard link), so `-ef` (same device+inode)
+# is the authoritative test and is applied whenever both paths exist.
+_alias_of=""
+[ "$LOGFILE" = "$SUMMARY" ] && _alias_of="the summary"
+[ -z "$_alias_of" ] && [ "$LOGFILE" = "$SUMMARY.heartbeat" ] && _alias_of="the heartbeat"
+if [ -z "$_alias_of" ] && [ -e "$LOGFILE" ]; then
+  [ -e "$SUMMARY" ] && [ "$LOGFILE" -ef "$SUMMARY" ] && _alias_of="the summary (same inode)"
+  [ -z "$_alias_of" ] && [ -e "$SUMMARY.heartbeat" ] && [ "$LOGFILE" -ef "$SUMMARY.heartbeat" ] \
+    && _alias_of="the heartbeat (same inode)"
+fi
+if [ -n "$_alias_of" ]; then
+  echo "gate-detached: the log path '$LOGFILE' is $_alias_of. Refusing: the gate rewrites its" >&2
+  echo "               summary with '>' and the beater publishes by rename, so one of them would" >&2
+  echo "               destroy the other's file and the advertised log would hold the wrong data" >&2
+  echo "               (#3473). Give --log a path of its own." >&2
+  exit 1
+fi
 if [ -L "$LOGFILE" ] || { [ -e "$LOGFILE" ] && [ ! -f "$LOGFILE" ]; }; then
   echo "gate-detached: log path '$LOGFILE' is a symlink or not a regular file — refusing to" >&2
   echo "               truncate it (#3473)." >&2
