@@ -495,6 +495,12 @@ PROC_MATCH_WORKER='[c]laude.* (-p|--print)( |$).*--agent flow-lead'
 # The BUILD family is deliberately NOT lane-scoped: one gate at a time per MACHINE is a resource bound
 # that survived #1930's retraction, so a sibling's cargo/nextest is genuinely this lane's business.
 LANE_PID_FILTER="while read -r p; do c=\$(readlink \"/proc/\$p/cwd\" 2>/dev/null) || continue; case \"\$c\" in '$REPO_ROOT' | '$REPO_ROOT'/*) printf '%s\\n' \"\$p\" ;; esac; done"
+# CAPTURED BEFORE THE DEFAULT IS APPLIED: `supervisor_resolve_lane_id` needs to know whether the
+# OPERATOR chose this probe, and after the `:-` below every value looks chosen. An operator who
+# supplied their own probe has taken responsibility for its attribution, so the
+# lane-attribution-impossible refusal yields to them; the DEFAULT probe cannot make that claim.
+PROC_PROBE_WORKER_CMD_OVERRIDDEN=""
+[[ -n "${PROC_PROBE_WORKER_CMD:-}" ]] && PROC_PROBE_WORKER_CMD_OVERRIDDEN=yes
 if [[ -z "${PROC_PROBE_WORKER_CMD:-}" ]]; then
   PROC_PROBE_WORKER_CMD="pgrep -f '$PROC_MATCH_WORKER' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | $LANE_PID_FILTER | wc -l | tr -d ' '"
 fi
@@ -1133,36 +1139,84 @@ supervisor_lane_id() {
   printf '%s-%s\n' "$h" "${slug:0:24}"
 }
 
-# supervisor_lane_identity_check — SAY SO when this supervisor's lane identity cannot distinguish it
-# from its siblings (roborev round 36, part C).
+# LANE IDENTITY IS GIVEN, NOT DEDUCED (roborev round 36; lead ruling B + C, 2026-08-30).
 #
-# EVERY per-lane mechanism added by #3393 is derived from `REPO_ROOT`, and `REPO_ROOT` is derived from
-# THIS SCRIPT'S OWN LOCATION (line ~141). That is per-lane only when the supervisor runs inside a lane's
-# own worktree. Launched from the ROOT checkout instead, all lanes on the box resolve the SAME
-# `REPO_ROOT`, and then: the "per-lane" lock is machine-global again, the lane-unique `CLAIM_ACTOR` is
-# shared, the legacy-claim migration finds no issue (the root sits on `main`), and the worker orphan
-# probe attributes ZERO workers because they live in OTHER worktrees — a probe that cannot fire.
+# Every per-lane mechanism here — the single-instance lock, the claim actor, the legacy-claim
+# migration, the worker-orphan attribution — needs to know WHICH LANE THIS IS. It used to answer that
+# from `REPO_ROOT`, which is `$(dirname "${BASH_SOURCE[0]}")/../..`: **"where is my script" standing in
+# for "which lane am I".** On this fleet that happens to land on the lane, because every lane worktree
+# carries a full `scripts/` tree — so the mechanisms worked BY COINCIDENCE.
 #
-# Whether that layout is supported is a DESIGN question escalated on #3393 and not decided here. What is
-# decidable here is that silently degrading is the wrong behaviour either way: a mechanism that does
-# nothing must not look like one that works. So this reports, once, at startup.
+# THE RULING REJECTED RATIFYING THAT COINCIDENCE, and the reason is the defect class this whole change
+# has been removing: a cheap observable substituted for the property, invisible to the code that
+# depends on it. Launched from the root checkout instead, all four mechanisms silently degrade — the
+# "per-lane" lock becomes machine-global, the actor is shared, the migration finds no issue branch, and
+# the orphan probe attributes ZERO, which is a probe that returns the good answer unconditionally. That
+# last one was MY round-35 fail-open: I fixed a false-STOP and replaced it with a never-STOP.
 #
-# THE TEST IS STRUCTURAL, NOT A PATH HEURISTIC: git answers it. In a LINKED worktree `--git-dir` and
-# `--git-common-dir` differ; in the MAIN worktree they are the same. No lane-directory naming convention
-# is assumed anywhere — which is the trap that made #3393's AC3 unimplementable.
+# So: `LANE_ID` is the identity, and it is a value the program is GIVEN.
 #
-# A WARN rather than a refusal, deliberately: if this fleet does launch from the root, refusing to start
-# would take every lane down to fix a diagnostic. The escalation may upgrade it.
-supervisor_lane_identity_check() {
+# `LANE_ID` unset is still supported, because nothing on the fleet sets it yet — but the fallback must
+# PROVE it landed in a lane, and REFUSE LOUDLY otherwise. That refusal is what converts "an old
+# launcher silently gets today's behaviour" into a startup error naming the remedy, which was the whole
+# objection to B. A fallback that silently degrades is the same defect one level down.
+#
+# The proof is STRUCTURAL — git answers it, and no lane-directory naming convention is assumed
+# anywhere. A linked worktree has `--git-dir` != `--git-common-dir`; the main worktree has them equal.
+# Assuming a layout is exactly what made this issue's AC3 unimplementable, so the check for it must not
+# reintroduce that assumption.
+LANE_ID="${LANE_ID:-}"
+
+# lane_worktree_ok — rc 0 iff REPO_ROOT is a LINKED worktree (i.e. a lane, not the root checkout).
+# Echoes nothing; callers phrase their own refusal.
+lane_worktree_ok() {
   local gd cd_
-  gd="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
-  cd_="$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 0
+  gd="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  cd_="$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 1
   case "$cd_" in
     /*) : ;;
-    *) cd_="$(cd "$REPO_ROOT/$cd_" 2>/dev/null && pwd)" || return 0 ;;
+    *) cd_="$(cd "$REPO_ROOT/$cd_" 2>/dev/null && pwd)" || return 1 ;;
   esac
-  if [[ "$gd" == "$cd_" ]]; then
-    log "WARN: this supervisor's REPO_ROOT ($REPO_ROOT) is the MAIN worktree, not a lane worktree. Every per-lane identity here is derived from REPO_ROOT, so ALL lanes on this machine would resolve the SAME lock, the SAME CLAIM_ACTOR, no migratable issue branch, and a worker-orphan probe that attributes nothing. Per-lane liveness is NOT in effect for this invocation (#3393)."
+  [[ "$gd" != "$cd_" ]]
+}
+
+# supervisor_resolve_lane_id — establish the lane identity, or refuse to start.
+#
+# TWO NAMED REFUSALS, each with its remedy, because they are different failures:
+#   * lane-identity-unprovable — `LANE_ID` unset AND `REPO_ROOT` is not a lane worktree, so there is
+#     nothing to derive an identity FROM.
+#   * lane-attribution-impossible — the worker-orphan probe attributes by working directory under
+#     `REPO_ROOT`; if that is the main worktree, the lane's workers live in OTHER worktrees and the
+#     probe can only ever attribute zero. Setting `LANE_ID` does NOT fix this, because an identity
+#     token is not a directory — which is why this check is independent of the first.
+#     An operator who has overridden `PROC_PROBE_WORKER_CMD` has taken that responsibility explicitly,
+#     so the refusal yields to them.
+supervisor_resolve_lane_id() {
+  if [[ -z "$LANE_ID" ]]; then
+    if lane_worktree_ok; then
+      LANE_ID="$(supervisor_lane_id)"
+      log "LANE_ID unset; derived '$LANE_ID' from this lane's worktree ($REPO_ROOT). Set LANE_ID explicitly to make the lane identity a given rather than an inference (#3393)."
+    else
+      log "FATAL: lane-identity-unprovable — LANE_ID is unset and REPO_ROOT ($REPO_ROOT) is NOT a lane worktree, so no per-lane identity can be derived. Every per-lane mechanism (single-instance lock, claim actor, legacy-claim migration, worker-orphan attribution) would silently share one identity across all lanes on this machine. Remedy: export LANE_ID=<stable per-lane token>, or launch inside the lane's own worktree."
+      notify "high" "worker-supervisor: lane identity unprovable" "LANE_ID unset and REPO_ROOT is not a lane worktree; refusing to start (#3393). Set LANE_ID."
+      exit 2
+    fi
+  else
+    LANE_ID="$(printf '%s' "$LANE_ID" | tr -c 'A-Za-z0-9._-' '_')"
+    LANE_ID="${LANE_ID:0:40}"
+    if [[ "${#LANE_ID}" -lt 3 ]]; then
+      log "FATAL: lane-identity-unusable — LANE_ID sanitises to '$LANE_ID', fewer than 3 recordable characters. claim.sh refuses such an actor, so the claim lock would fail closed on every call. Remedy: give LANE_ID at least 3 characters from [A-Za-z0-9._-]."
+      notify "high" "worker-supervisor: bad LANE_ID" "LANE_ID='$LANE_ID' is too short after sanitisation; refusing to start (#3393)."
+      exit 2
+    fi
+    log "lane identity given explicitly: LANE_ID='$LANE_ID'"
+  fi
+  export LANE_ID
+  # INDEPENDENT of the above: an identity token is not a directory.
+  if ! lane_worktree_ok && [[ -z "${PROC_PROBE_WORKER_CMD_OVERRIDDEN:-}" ]]; then
+    log "FATAL: lane-attribution-impossible — REPO_ROOT ($REPO_ROOT) is the MAIN worktree, so the worker-orphan probe attributes by a working directory that this lane's workers never occupy: it can only ever count ZERO, reporting 'no leftover debris' unconditionally. LANE_ID does not fix this — an identity token is not a directory. Remedy: launch inside the lane's own worktree, or set PROC_PROBE_WORKER_CMD to a probe appropriate to this layout."
+    notify "high" "worker-supervisor: lane attribution impossible" "REPO_ROOT is the main worktree; the worker-orphan probe would always count zero. Refusing to start (#3393)."
+    exit 2
   fi
 }
 
@@ -1186,7 +1240,9 @@ supervisor_lane_identity_check() {
 # is prefixed `flow-` and carries the lane id — recognisable in a claim message and never degenerate.
 supervisor_claim_actor() {
   [[ -n "${CLAIM_ACTOR:-}" ]] && return 0
-  CLAIM_ACTOR="flow-$(supervisor_lane_id)"
+  # FROM THE GIVEN IDENTITY, not from a second inference of it (lead ruling B). Two derivations of
+  # "which lane am I" is two things to keep in step, and the one that drifts is found in production.
+  CLAIM_ACTOR="flow-${LANE_ID}"
   export CLAIM_ACTOR
   log "claim actor defaulted to lane-unique '$CLAIM_ACTOR' (the claim lock's holder identity is machine+actor; a shared default would alias two lanes on one box)"
 }
@@ -1307,12 +1363,15 @@ supervisor_msg_token() {
 
 supervisor_lock_path() {
   [[ -n "$SUPERVISOR_LOCK" ]] && return 0
-  SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-$(supervisor_lane_id).lock"
+  # FROM THE GIVEN IDENTITY (lead ruling B). `LANE_ID` is resolved before this is called.
+  SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-${LANE_ID}.lock"
 }
 
 acquire_lock() {
+  # IDENTITY FIRST: both the lock path and the claim actor are derived FROM it, so resolving it after
+  # them would leave them on a stale inference.
+  supervisor_resolve_lane_id
   supervisor_lock_path
-  supervisor_lane_identity_check
   supervisor_claim_actor
   supervisor_migrate_legacy_claim
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
