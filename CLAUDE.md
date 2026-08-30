@@ -336,6 +336,33 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **UNTRUSTED REPOSITORY STATE IS BIGGER THAN CONFIG (roborev job 264).** Closing git's *config*
+  sources and treating "untrusted repository state" as closed with them left three holes, and the
+  shape of the error is the recurring one — one axis closed, space declared done. **(1) Replacement
+  refs**: `refs/replace/<sha>` transparently substitutes another commit, so the pre-flight reported
+  the CANONICAL sha while reading a FORGED, smaller manifest, and PASSed — the worst pairing, since
+  the audit trail looks right. Now `GIT_NO_REPLACE_OBJECTS=1` in the allowlist plus
+  `--no-replace-objects` on every lane-local object read. **(2) The transfer hop could EXECUTE**:
+  `git fetch` in the LIVE repository reads its LOCAL config (only the *environment* is sanitisable
+  — a `.git/config` is a file), so a local `url.*.insteadOf` + `protocol.ext.allow=always` rewrote
+  the scratch path to an `ext::` helper and ran commands DURING the fetch, before the sha
+  comparison that was meant to make the hop "untrusted but safe". **A check after the fact cannot
+  defend against harm that happens during.** A protocol allowlist is not expressible either
+  (`-c protocol.allow=never` loses to a more specific local `protocol.<name>.allow=always`, and
+  the helper-name space is whatever `git-remote-*` is on PATH). So there is **no import at all**:
+  the scratch object store is made visible via `GIT_ALTERNATE_OBJECT_DIRECTORIES` — an object
+  SOURCE, not a transport — and NOTHING is written into the shared `.git` (no pack, no ref, no
+  `FETCH_HEAD`). Safe for the reason the transport was not: every read is BY A SHA whose provenance
+  is the isolated chain, and objects are **content-addressed**. `baseline-transfer-mismatch` and the
+  private-ref machinery are gone with it — the class is ELIMINATED, not detected. **(3) The scp-form
+  leak, third instance of one family** (raw → flattened-not-redacted → scheme-only redaction):
+  `TOKEN@github.com:owner/repo` was canonical because the normaliser dropped userinfo before
+  comparing, and an ssh error then echoed it into the SUMMARY. Fixed by **narrowing what is
+  accepted** (scp userinfo must be exactly `git`) rather than widening the scrubber again — though
+  the scrubber covers scp form too, since a REJECTED value is still rendered. **(4) Cleanup on
+  SIGNALS**, the second axis of round 9's "cleanup registration precedes resource creation": bash
+  runs no EXIT trap for a signal with its default disposition, so INT/TERM/HUP now have handlers,
+  installed before the resources exist, saving and restoring the caller's.
   **THE ISOLATED HOP'S ENVIRONMENT IS AN ALLOWLIST, AND THE OBJECTS ARE FETCHED ONLY WHEN
   ABSENT (roborev job 258).** Neutralising `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and stopping
   there left the "isolated" hop inheriting `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`,

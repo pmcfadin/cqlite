@@ -468,6 +468,25 @@ pinning, the isolated fetch (the validated URL written into a `0600` config by a
 it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
 handling and the redact-and-flatten detail path.
 
+**Untrusted repository state is bigger than config.** Closing git's *config* sources and treating
+"untrusted repository state" as closed with them left three holes. **Replacement refs**:
+`refs/replace/<sha>` transparently substitutes another commit, so the pre-flight reported the
+canonical sha while reading a forged, smaller manifest — and passed. `GIT_NO_REPLACE_OBJECTS=1`
+plus `--no-replace-objects` on every lane-local object read closes it. **The transfer hop could
+execute**: `git fetch` in the *live* repository reads its *local* config — only the environment is
+sanitisable, a `.git/config` is a file — so a local `url.*.insteadOf` with
+`protocol.ext.allow=always` rewrote the scratch path to an `ext::` remote helper and ran commands
+**during** the fetch, before the sha comparison that was supposed to make the hop "untrusted but
+safe". A check after the fact cannot defend against harm that happens during. There is therefore
+**no import**: the scratch object store is exposed through `GIT_ALTERNATE_OBJECT_DIRECTORIES` (an
+object *source*, not a transport), and nothing is written into the shared `.git` — no pack, no
+ref, no `FETCH_HEAD`. That is safe for the reason the transport was not: every read is by a **sha**
+whose provenance is the isolated chain, and git objects are content-addressed. **A leaked scp-form
+credential**, the third instance of one family, is fixed by *narrowing what is accepted* (scp
+userinfo must be exactly `git`) rather than widening the scrubber a third time. And **cleanup now
+runs on signals** (INT/TERM/HUP), because bash runs no EXIT trap for a signal that still has its
+default disposition — the second axis of "cleanup registration precedes resource creation".
+
 **The isolated hop's environment is an allowlist, and objects are fetched only when absent.**
 Neutralising `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and stopping there left the hop inheriting
 `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`, `GIT_CONFIG_PARAMETERS` and `GIT_TEMPLATE_DIR` — all three
