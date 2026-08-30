@@ -282,9 +282,10 @@ fn complex_marker(marked: &str) -> String {
 }
 
 /// M2, the shape the committed corpus actually carries: Cassandra writes a complex
-/// deletion one microsecond ahead of a full-collection INSERT, so the marker is
-/// older than every cell and shadows nothing. Measured over the whole corpus: all
-/// 11,072 complex markers in the fetched + committed goldens have this shape.
+/// deletion just ahead of a full-collection INSERT (the sampled goldens show one
+/// microsecond), so the marker is older than every cell and shadows nothing.
+/// Measured across the fetched + committed goldens: of 11,072 complex markers, NONE
+/// shadows a live cell of its column.
 #[test]
 fn a_complex_deletion_older_than_every_cell_is_ignorable() {
     let cells = format!(

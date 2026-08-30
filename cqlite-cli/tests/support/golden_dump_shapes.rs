@@ -23,6 +23,19 @@ use std::collections::BTreeSet;
 /// `every_declarable_shape_is_one_the_golden_reader_refuses`, so the enum cannot
 /// drift into listing something the reader would happily parse.
 ///
+/// The correspondence is ONE-WAY: every variant is a refusal, but not every refusal
+/// is a variant. The reader also refuses a **complex-column deletion that shadows a
+/// live cell of its column** (`super::golden_row`, Cassandra's
+/// `DeletionTime.deletes`), and that refusal is deliberately not declarable here for
+/// two reasons: no golden in the corpus carries the shape, so no table needs
+/// excluding for it (measured: 0 of 11,072 complex markers); and deciding it needs
+/// each cell's timestamp, so a [`Self::minimal_golden`] entry would have to be
+/// refused for its OWN reason under the census test's fixed single-column
+/// no-multicell invocation, and the schema-free shape scan would need a second copy
+/// of the timestamp arithmetic. If such a golden ever appears, the case FAILS with
+/// the reader's reason naming the column and both timestamps — loudly, which is the
+/// right failure mode — and adding a variant is then the deliberate next step.
+///
 /// Deliberately NOT a variant: a **cell tombstone**, in either of its two dump
 /// spellings. A scalar cell tombstone reconciles to `null`, which is a property
 /// this lane compares rather than excludes

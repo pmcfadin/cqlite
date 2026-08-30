@@ -799,9 +799,11 @@ fn golden_row(
             }
             // A complex-column tombstone: Cassandra writes one ahead of a
             // full-collection INSERT (`UnfilteredSerializer` writes the complex
-            // deletion before the collection's cells). It shadows only cells
-            // older than itself, so it is ignorable ONLY when every cell of this
-            // row is strictly newer — asserted, never assumed.
+            // deletion before the collection's cells). It shadows every cell of
+            // ITS OWN column that is not strictly newer than it, so it is
+            // ignorable only when every LIVE cell of that column is — checked
+            // after the loop, once they are all known (see the shadowing check
+            // below).
             if kind_of(name).is_none() {
                 // `serializeDeletion` (the complex-column path) writes
                 // `marked_deleted` alongside `local_delete_time`; `serializeCell`'s
