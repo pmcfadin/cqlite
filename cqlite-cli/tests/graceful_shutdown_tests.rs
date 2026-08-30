@@ -249,6 +249,17 @@ fn sigint_in_writable_session_flushes_before_exit() {
         deadline.report(),
         deadline.describe()
     );
+
+    // THE WAIT CENSUS IS CHECKED AGAINST THIS RUN (roborev job 253, finding 3).
+    // The census is what the aggregate floor in `budgets.rs` is computed from, so a
+    // stage that draws on the one deadline without appearing there means the floor
+    // was asserted against an undercounted base — which is exactly how
+    // `c.handler-entry` and `e.durability-read` came to be missing from it.
+    assert_census_matches_run(
+        "sigint_in_writable_session_flushes_before_exit",
+        T1_WAIT_CENSUS,
+        &deadline,
+    );
 }
 
 /// Issue #1693 (roborev): the interactive writable loop must use the async,
@@ -433,5 +444,14 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     eprintln!(
         "[#3515]   b.write-acks {WRITES} writes in {t_acks_total:.3?} (slowest single ack \
          {t_ack:.3?}, which is the calibration input)"
+    );
+
+    // The census check, as in the sibling test (job 253, finding 3). This test's
+    // census is where the FIVE waits inside one stage are declared, which is why
+    // the census unit is a wait and not a stage.
+    assert_census_matches_run(
+        "writable_session_auto_flushes_mid_session_across_threshold",
+        T2_WAIT_CENSUS,
+        &deadline,
     );
 }

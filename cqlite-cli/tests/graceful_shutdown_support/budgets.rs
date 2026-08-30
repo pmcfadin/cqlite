@@ -92,64 +92,287 @@ use std::time::{Duration, Instant};
 //    consume 420s+ before anything cut them off. A bounded total necessarily
 //    gives up per-wait freshness; that is the trade, deliberately taken.
 //
-// The starvation path requires an early stage to burn ~180s while the product
-// works, at which point the run is failing regardless — but that is a MITIGATION,
-// recorded as one, and not the claim.
+// The starvation path requires an early stage to burn the whole base (360s /
+// 600s) while the product works, at which point the run is failing regardless —
+// but that is a MITIGATION, recorded as one, and not the claim.
+//
+// WHAT COUNTS TOWARDS THE AGGREGATE IS DERIVED, NOT LABELLED (roborev job 253,
+// finding 3): see `WaitCensus`. The previous form of the aggregate term added ONE
+// hand-written stage to the old waits and was named for "every stage that draws on
+// the one deadline", while two more had joined it — so the invariant could stay
+// green on an undercounted base.
 
 /// The single wall-clock bound every wait in the pre-#3515 version of this file
 /// used: `Duration::from_secs(60)`, seven times over. The floor invariant is
 /// stated against this value.
-const OLD_BOUND: Duration = Duration::from_secs(60);
+const OLD_BOUND_SECS: u64 = 60;
 
-/// The old code's NOMINAL aggregate for `sigint_in_writable_session_flushes_before_exit`:
-/// two independent 60s waits (the post-spawn `OK` wait, which also covered boot
-/// and engine init; and the post-`SIGINT` `wait_timeout`). Its read-side
-/// `Command::output()` was UNBOUNDED, so it contributes nothing countable.
-const T1_OLD_WAITS: u32 = 2;
+/// [`OLD_BOUND_SECS`] as a `Duration`. Both spellings exist because the aggregate
+/// floor is computed in a `const fn`, where `Duration * u32` is not available.
+const OLD_BOUND: Duration = Duration::from_secs(OLD_BOUND_SECS);
 
-/// The same for `writable_session_auto_flushes_mid_session_across_threshold`:
-/// SEVEN independent 60s waits (five per-write `OK` waits, the mid-session
-/// artifact wait, the EOF exit wait), plus one unbounded read.
-const T2_OLD_WAITS: u32 = 7;
+/// What the PRE-#3515 code bounded a wait with — the history a census entry
+/// records, so the aggregate arithmetic never has to guess it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Replaced {
+    /// An INDEPENDENT `OLD_BOUND` wall-clock wait. These are the waits the floor
+    /// claim is literally about.
+    OldBound,
+    /// Nothing of its own: the old code did this work INSIDE another wait's
+    /// `OLD_BOUND` (boot was folded into the first `OK` wait), or did not await it
+    /// at all (there was no handler-entry wait).
+    Folded,
+    /// Nothing at all: the old code left this wait UNBOUNDED (`Command::output()`
+    /// has no timeout, and nothing runs this target under a harness that would cut
+    /// it short — design.md D6).
+    Unbounded,
+}
 
-/// THE STAGE THE OLD CODE DID NOT BOUND SEPARATELY: readiness, `a.session-up`
-/// (spawn -> readiness banner).
+/// **ONE STAGE'S DRAW ON THE ONE DEADLINE.** The census these entries form is what
+/// the aggregate floor is computed from, replacing the hand-labelled
+/// `T1_OLD_WAITS`/`T2_OLD_WAITS`/`NEW_READINESS_WAITS` triple.
 ///
-/// The old code never awaited the banner at all — boot was folded INSIDE the first
-/// 60s `OK` wait — so it contributes no entry to `T1_OLD_WAITS`/`T2_OLD_WAITS`. But
-/// both tests now open a readiness stage that draws on the SAME single deadline,
-/// and a stage may consume the whole of it. So the aggregate floor must reserve an
-/// `OLD_BOUND` for readiness on top of the old waits, or the arithmetic permits a
-/// base under which readiness eats 60s and every original wait is left below its
-/// former 60s allowance (roborev job 232, finding 2: the previous form of the
-/// assert summed only the old waits, so 120s/420s bases would have passed it).
+/// **WHY IT EXISTS (roborev job 253, finding 3).** The floor assert claimed to
+/// count "EVERY stage that draws on the one deadline" and added exactly one term
+/// to the old waits: readiness. It had been correct when written, and then two
+/// more stages joined the deadline without joining the sum — `c.handler-entry`
+/// (split out of the post-SIGINT wait, exactly as acknowledgement is separate from
+/// readiness) and `e.durability-read` (newly BOUNDED, and absent from both
+/// censuses). So the invariant could stay green on an undercounted base. That is
+/// the fourth instance of one class in this issue — an assert named for more than
+/// it tests, after three anchor instances and two floor ones — and the class is
+/// closed the way rounds 6-10 closed the anchors: DERIVE the number, do not label
+/// it.
 ///
-/// Deliberately a NAMED constant rather than a `+ 1` inline: it is a claim about
-/// which stages exist, and it has to be revisited when a stage is added.
-const NEW_READINESS_WAITS: u32 = 1;
+/// **THE UNIT IS A WAIT, NOT A STAGE**, because a wait is what can consume the
+/// whole deadline: `b.write-acks` is ONE stage containing FIVE waits, each of
+/// which replaced an independent 60s bound. A wait counted here is one that is
+/// GRANTED `stage.remaining()`; work merely CHARGED to a stage (the process spawn
+/// inside `select_rows`) is not a wait and is not counted — see the note on
+/// `select_rows` in `mod.rs`.
+///
+/// **WHAT IS DERIVED AND WHAT IS DECLARED — the boundary, stated because the
+/// census is only as good as it.** The per-stage `waits` counts are DECLARED here
+/// by hand: nothing in Rust can count the bounded waits inside a function body.
+/// What IS verified is the STAGE SET: [`assert_census_matches_run`] compares this
+/// census against the stages the test actually opened and finished, so a stage
+/// added, removed or renamed without touching the census fails the integration
+/// test that runs it. A wait added INSIDE an already-declared stage is the residual
+/// — it changes `waits` and nothing detects that it did.
+pub struct WaitCensus {
+    /// The attribution stage this entry accounts for. Exactly one entry per stage,
+    /// in the order the test opens them.
+    pub stage: &'static str,
+    /// How many waits inside that stage are GRANTED the one deadline.
+    pub waits: u32,
+    /// What the pre-#3515 code bounded those waits with.
+    pub replaced: Replaced,
+    /// Why this entry reads the way it does, for a reader auditing the arithmetic.
+    pub note: &'static str,
+}
+
+/// The waits `sigint_in_writable_session_flushes_before_exit` draws on its one
+/// deadline: SIX, of which TWO replaced an independent 60s bound.
+pub const T1_WAIT_CENSUS: &[WaitCensus] = &[
+    WaitCensus {
+        stage: "a.session-up",
+        waits: 1,
+        replaced: Replaced::Folded,
+        note: "the old code never awaited the banner: boot and engine init happened INSIDE the \
+               first 60s `OK` wait",
+    },
+    WaitCensus {
+        stage: "b.write-ack",
+        waits: 1,
+        replaced: Replaced::OldBound,
+        note: "the post-spawn `OK` wait",
+    },
+    WaitCensus {
+        stage: "c.handler-entry",
+        waits: 1,
+        replaced: Replaced::Folded,
+        note: "no handler-entry wait existed; the marker was never awaited. It is now a SEPARATE \
+               wait from clean exit, exactly as acknowledgement is separate from readiness — and \
+               it was the stage the previous form of this census omitted",
+    },
+    WaitCensus {
+        stage: "d.clean-exit",
+        waits: 1,
+        replaced: Replaced::OldBound,
+        note: "the post-SIGINT `wait_timeout`",
+    },
+    WaitCensus {
+        stage: "e.durability-read",
+        waits: 2,
+        replaced: Replaced::Unbounded,
+        note: "`wait_timeout` on the read-side child and the pipe collection, each GRANTED \
+               `stage.remaining()`; the spawn is charged but not granted a bound. The old \
+               `Command::output()` bounded none of it, so this stage is a new ceiling — and it \
+               was missing from both censuses",
+    },
+];
+
+/// The same for `writable_session_auto_flushes_mid_session_across_threshold`: TEN
+/// waits, of which SEVEN replaced an independent 60s bound.
+pub const T2_WAIT_CENSUS: &[WaitCensus] = &[
+    WaitCensus {
+        stage: "a.session-up",
+        waits: 1,
+        replaced: Replaced::Folded,
+        note: "as in the sibling test: boot was folded into the first 60s `OK` wait",
+    },
+    WaitCensus {
+        stage: "b.write-acks",
+        waits: 5,
+        replaced: Replaced::OldBound,
+        note: "FIVE waits in ONE stage — the five per-write `OK` waits, each of which replaced an \
+               independent 60s bound. This is why the census unit is a wait and not a stage",
+    },
+    WaitCensus {
+        stage: "c.mid-session-flush",
+        waits: 1,
+        replaced: Replaced::OldBound,
+        note: "the mid-session durable-artifact wait",
+    },
+    WaitCensus {
+        stage: "d.eof-exit",
+        waits: 1,
+        replaced: Replaced::OldBound,
+        note: "the post-EOF exit wait",
+    },
+    WaitCensus {
+        stage: "e.durability-read",
+        waits: 2,
+        replaced: Replaced::Unbounded,
+        note: "the same two bounded waits as in the sibling test, from the same shared helper",
+    },
+];
+
+/// EVERY wait drawing on the deadline, whatever the old code did about it.
+const fn waits_sharing(census: &[WaitCensus]) -> u32 {
+    let mut total = 0;
+    let mut i = 0;
+    while i < census.len() {
+        total += census[i].waits;
+        i += 1;
+    }
+    total
+}
+
+/// Only the waits that replaced an independent `OLD_BOUND`, for the message.
+const fn old_bounded_waits(census: &[WaitCensus]) -> u32 {
+    let mut total = 0;
+    let mut i = 0;
+    while i < census.len() {
+        if matches!(census[i].replaced, Replaced::OldBound) {
+            total += census[i].waits;
+        }
+        i += 1;
+    }
+    total
+}
+
+/// THE AGGREGATE FLOOR: an `OLD_BOUND` for EVERY wait that draws on the one
+/// deadline.
+///
+/// **THE RESERVE FOR A WAIT THE OLD CODE DID NOT BOUND IS A CHOICE, NOT A
+/// MEASUREMENT**, and it is recorded as one. For a `Replaced::OldBound` wait the
+/// term is the bound it literally replaced. For a `Folded` or `Unbounded` wait
+/// there is no old bound to preserve — the term is `OLD_BOUND` anyway, so that the
+/// base is large enough for EVERY wait sharing the deadline to take a full
+/// `OLD_BOUND` without the total being exceeded. That is the strongest form of the
+/// floor claim one absolute deadline can support, and it is precisely what roborev
+/// job 232's finding 2 asked for when it reported the readiness stage missing: a
+/// new consumer of the shared budget leaves the original waits short unless the
+/// base covers it too.
+const fn aggregate_floor(census: &[WaitCensus]) -> Duration {
+    Duration::from_secs(OLD_BOUND_SECS * waits_sharing(census) as u64)
+}
+
+/// **VERIFY A TEST'S WAIT CENSUS AGAINST THE STAGES IT ACTUALLY RAN.** Call it as
+/// the last statement of each integration test.
+///
+/// This is what stops [`WaitCensus`] being one more hand-label (roborev job 253,
+/// finding 3). The per-stage `waits` counts cannot be derived — nothing in Rust
+/// counts the bounded waits inside a function body — but the STAGE SET can be, and
+/// it is: the deadline records every stage that `finish`ed, and a stage added,
+/// removed or renamed without touching the census fails here, in the very test
+/// that runs it.
+///
+/// ORDER IS PART OF IT: the census reads as a walk through the test, and an entry
+/// whose position no longer matches the run is a census a reader can no longer
+/// audit against the code.
+///
+/// WHAT IT DOES NOT CATCH, so nobody reads more into a green run than is there: a
+/// wait ADDED INSIDE an already-declared stage. That changes `waits` and this check
+/// cannot see it. The stage set is verified; the per-stage counts are declared.
+pub fn assert_census_matches_run(test: &str, census: &[WaitCensus], deadline: &TestDeadline) {
+    let declared: Vec<&str> = census.iter().map(|e| e.stage).collect();
+    let ran = deadline.completed_stages();
+    assert_eq!(
+        ran,
+        declared,
+        "{test}: the stages this run COMPLETED are not the stages its wait census declares.\n\
+         declared: {declared:?}\n\
+         ran:      {ran:?}\n\
+         the census, as declared (each entry's `note` says why it reads the way it does):\n{}\n\
+         The census is what the aggregate floor is computed from \
+         (`no_stage_in_isolation_is_tighter_than_the_bound_it_replaced`), so a stage that draws \
+         on the one deadline without appearing there means the floor was asserted against an \
+         UNDERCOUNTED base — roborev job 253, finding 3. Add or remove the entry, and move the \
+         base with it: the floor assert requires the base to EQUAL the derived aggregate.\n\
+         (A stage missing from `ran` can also mean the test returned before finishing it, which \
+         is a defect in the test, not in the census.)",
+        describe_census(census)
+    );
+}
+
+/// The census as a table, for any failure that has to be audited against the code.
+///
+/// It is what READS each entry's `note`: the arithmetic needs only `waits` and
+/// `replaced`, so without a message that renders the reasons, the reasons would be
+/// a comment the compiler discards — and this file's own round-3 blocker was a
+/// comment that could not fail.
+fn describe_census(census: &[WaitCensus]) -> String {
+    census
+        .iter()
+        .map(|e| {
+            format!(
+                "  {} — {} wait(s), replaced: {:?}; {}",
+                e.stage, e.waits, e.replaced, e.note
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Base deadline for `sigint_in_writable_session_flushes_before_exit`.
 ///
-/// Generous by construction: at least the old code's whole nominal aggregate PLUS
-/// an `OLD_BOUND` for the readiness stage the old code did not bound separately
-/// (`(T1_OLD_WAITS + NEW_READINESS_WAITS) x OLD_BOUND` = 180s), so no wait in this
-/// test — and not the test as a whole either — is tighter than what it replaced,
-/// even if readiness consumes a full 60s first.
-pub const T1_DEADLINE_BASE: Duration = Duration::from_secs(180);
+/// `aggregate_floor(T1_WAIT_CENSUS)` = 6 waits x 60s = **360s**. Hand-written
+/// rather than computed from the census so the assert comparing the two has teeth
+/// in BOTH directions: derive the constant and the invariant becomes a tautology
+/// that no undercount can fail (see
+/// `no_stage_in_isolation_is_tighter_than_the_bound_it_replaced`).
+pub const T1_DEADLINE_BASE: Duration = Duration::from_secs(360);
 
-/// Calibration ceiling for that test. No measured contention may push the
-/// deadline past this.
-pub const T1_DEADLINE_CAP: Duration = Duration::from_secs(360);
+/// Calibration ceiling for that test: 2x the base, the ratio this change has used
+/// since round 8. No measured contention may push the deadline past it.
+pub const T1_DEADLINE_CAP: Duration = Duration::from_secs(720);
 
 /// Base deadline for `writable_session_auto_flushes_mid_session_across_threshold`.
 ///
-/// Larger because that test replaced SEVEN independent 60s waits (420s nominal),
-/// and this base covers their sum plus an `OLD_BOUND` for the readiness stage
-/// (`(T2_OLD_WAITS + NEW_READINESS_WAITS) x OLD_BOUND` = 480s).
-pub const T2_DEADLINE_BASE: Duration = Duration::from_secs(480);
+/// `aggregate_floor(T2_WAIT_CENSUS)` = 10 waits x 60s = **600s**. Larger than its
+/// sibling because five of those waits are the five per-write `OK` waits.
+pub const T2_DEADLINE_BASE: Duration = Duration::from_secs(600);
 
-/// Calibration ceiling for the sibling test.
-pub const T2_DEADLINE_CAP: Duration = Duration::from_secs(720);
+/// Calibration ceiling for the sibling test, and THE PLACE
+/// [`MAX_TEST_DEADLINE`] NOW BINDS: 1.5x the base rather than the 2x its sibling
+/// gets, because 2x would be 1200s and a test may not outlast the gate it runs in.
+/// It is deliberately left at exactly the limit rather than under it, so that the
+/// next wait added to `T2_WAIT_CENSUS` raises the floor past what the limit
+/// permits and FAILS the assert — a conflict between the floor claim and the
+/// test-length limit is a decision for a human, not something to absorb silently.
+pub const T2_DEADLINE_CAP: Duration = Duration::from_secs(900);
 
 /// The upper bound on any test's deadline, because that deadline is now the ONLY
 /// timeout these tests have (verified: `agent-gate.sh`'s `cli-tests` runs plain
@@ -370,6 +593,15 @@ impl TestDeadline {
         )
     }
 
+    /// The stages that FINISHED, in the order they finished — the run's own record
+    /// of which stages drew on this deadline.
+    ///
+    /// Exists so the wait census can be checked against reality rather than
+    /// trusted (see [`assert_census_matches_run`]).
+    pub fn completed_stages(&self) -> Vec<&'static str> {
+        self.stages.borrow().iter().map(|(name, _)| *name).collect()
+    }
+
     /// Per-stage timings + deadline state, for both diagnostics and the
     /// end-of-test record printed with `--nocapture`. This is the ATTRIBUTION the
     /// stages exist for.
@@ -533,7 +765,8 @@ impl Stage<'_> {
 // ---------------------------------------------------------------------------
 
 /// NO STAGE, IN ISOLATION, IS TIGHTER THAN THE BOUND IT REPLACED — and the base
-/// covers the aggregate of those bounds.
+/// is EXACTLY the census-derived aggregate of every wait that draws on the one
+/// deadline.
 ///
 /// **THE NAME IS THE CORRECTION (design.md D6c, roborev job 247 finding 1).** This
 /// test used to be called `the_deadline_is_never_tighter_than_the_bounds_it_replaced`,
@@ -547,37 +780,60 @@ impl Stage<'_> {
 /// * IN ISOLATION — a stage may consume the WHOLE deadline (asserted separately by
 ///   `any_single_stage_may_consume_the_whole_deadline`), so a stage that runs with
 ///   the deadline untouched has at least the 60s it replaced iff `base >= 60s`.
-/// * IN AGGREGATE — the base is at or above the old NOMINAL total, so the test as
-///   a whole is not tighter than the sum of the bounds it replaced.
+/// * IN AGGREGATE — the base EQUALS `aggregate_floor(census)`, an `OLD_BOUND` for
+///   every wait sharing the deadline, so the test as a whole is not tighter than
+///   the sum of the bounds it replaced and every one of those waits could take a
+///   full `OLD_BOUND`.
 ///
 /// What is NOT asserted here, because it is not true: that a later stage still has
 /// 60s after earlier stages have consumed the deadline. See
 /// `an_exhausted_deadline_leaves_a_later_stage_nothing`.
 ///
-/// Under one deadline both halves are arithmetic on a handful of constants rather
-/// than an argument about which group of stages replaced which old wait — and the
-/// per-stage form of that argument was wrong twice (round 3, and roborev job 229's
-/// finding that summing caps does not preserve a SHARED old deadline).
-///
-/// The aggregate term counts EVERY stage that draws on the one deadline, not only
-/// the old waits: a stage the old code did not bound separately still consumes
-/// from the shared budget, and omitting it was roborev job 232's finding 2.
+/// **THE AGGREGATE TERM IS DERIVED FROM THE WAIT CENSUS (roborev job 253, finding
+/// 3), AND EQUALITY IS WHAT GIVES IT TEETH.** The previous form added ONE
+/// hand-written term (readiness) to the old waits while claiming to count every
+/// stage sharing the deadline, and two stages had since joined it —
+/// `c.handler-entry` and the newly-bounded `e.durability-read` — so the invariant
+/// could pass on an undercounted base. Deriving the base from the census instead
+/// would make this assert a TAUTOLOGY that no undercount could fail; the base is
+/// therefore hand-written and required to EQUAL the derived floor, which fails in
+/// both directions: an undercounted census (a wait or stage dropped) and a base
+/// that carries margin the census does not explain.
 #[test]
 fn no_stage_in_isolation_is_tighter_than_the_bound_it_replaced() {
-    for (test, base, cap, old_waits) in [
+    for (test, base, cap, census) in [
         (
             "sigint_in_writable_session_flushes_before_exit",
             T1_DEADLINE_BASE,
             T1_DEADLINE_CAP,
-            T1_OLD_WAITS,
+            T1_WAIT_CENSUS,
         ),
         (
             "writable_session_auto_flushes_mid_session_across_threshold",
             T2_DEADLINE_BASE,
             T2_DEADLINE_CAP,
-            T2_OLD_WAITS,
+            T2_WAIT_CENSUS,
         ),
     ] {
+        // A census entry per stage, and no stage twice: the aggregate is a sum over
+        // entries, so a duplicated stage would double-count it and a missing one
+        // would be invisible here (the stage SET itself is verified against the
+        // real run by `assert_census_matches_run`).
+        for (i, entry) in census.iter().enumerate() {
+            assert!(
+                entry.waits > 0,
+                "{test}: census entry {i} ({}) declares ZERO waits — a stage that draws nothing \
+                 from the deadline does not exist",
+                entry.stage
+            );
+            assert!(
+                census.iter().filter(|e| e.stage == entry.stage).count() == 1,
+                "{test}: stage {} appears more than once in the census; the aggregate is a sum \
+                 over entries, so one entry per stage",
+                entry.stage
+            );
+        }
+
         // PER WAIT, IN ISOLATION: any single stage may consume the whole deadline
         // (there are no per-stage budgets — see
         // `any_single_stage_may_consume_the_whole_deadline`), so a wait that runs
@@ -590,41 +846,110 @@ fn no_stage_in_isolation_is_tighter_than_the_bound_it_replaced() {
              deadline untouched — fire SOONER than the {OLD_BOUND:?} bound it replaced"
         );
 
-        // IN AGGREGATE: the whole test's nominal old total, PLUS the readiness
-        // stage the old code did not bound separately. The old code had no total
-        // bound at all, so any total is a new ceiling; it must at least cover the
-        // sum of the nominal bounds it replaced AND every stage that now draws on
-        // the same deadline. This is the bound that was BOUGHT (D6c): it is what
+        // IN AGGREGATE: an `OLD_BOUND` for EVERY wait that draws on this deadline,
+        // counted from the census rather than hand-labelled. The old code had no
+        // total bound at all, so any total is a new ceiling; it must at least cover
+        // the sum of the nominal bounds it replaced AND every wait that now draws
+        // on the same deadline. This is the bound that was BOUGHT (D6c): it is what
         // the loss of per-wait freshness paid for.
-        //
-        // The readiness term is what roborev job 232 finding 2 reported missing:
-        // summing only the old waits admits a 120s/420s base under which
-        // `a.session-up` consumes 60s and leaves every ORIGINAL wait below its
-        // former 60s allowance — the floor invariant violated by a stage the sum
-        // did not mention.
-        let stages_sharing = old_waits + NEW_READINESS_WAITS;
-        let old_total = OLD_BOUND * stages_sharing;
-        assert!(
-            base >= old_total,
-            "{test}: a base of {base:?} is below the {old_total:?} aggregate of the {old_waits} \
-             independent {OLD_BOUND:?} waits it replaced plus {NEW_READINESS_WAITS} readiness \
-             stage ({stages_sharing} stages share this one deadline, and any one of them may \
-             consume it). NOTE what this does and does not say (D6c): the base covering the \
-             aggregate is what keeps the test as a whole from being tighter than the bounds it \
-             replaced; it does NOT give a later stage a fresh {OLD_BOUND:?} once earlier stages \
-             have consumed the deadline, and no single absolute deadline can"
+        let sharing = waits_sharing(census);
+        let replaced = old_bounded_waits(census);
+        let floor = aggregate_floor(census);
+        let stages = census.len();
+        assert_eq!(
+            base,
+            floor,
+            "{test}: the base {base:?} is not the {floor:?} aggregate its wait census derives \
+             ({sharing} waits across {stages} stages, of which {replaced} replaced an \
+             independent {OLD_BOUND:?} wait, at {OLD_BOUND:?} each).\n\
+             BELOW the floor: the test as a whole would be tighter than the bounds it replaced, \
+             and a wait sharing the deadline could be left under its former allowance — which is \
+             what roborev job 232 finding 2 reported and job 253 finding 3 found again, the census \
+             having gained `c.handler-entry` and `e.durability-read` without gaining the terms \
+             for them.\n\
+             ABOVE the floor: the base carries margin the census does not explain, so either the \
+             census is incomplete (add the wait) or the derivation has changed (change \
+             `aggregate_floor`). Do NOT adjust the base alone — equality is what stops an \
+             undercounted census passing this assert.\n\
+             NOTE what this does and does not say (D6c): the base covering the aggregate is what \
+             keeps the test as a whole from being tighter than the bounds it replaced; it does \
+             NOT give a later stage a fresh {OLD_BOUND:?} once earlier stages have consumed the \
+             deadline, and no single absolute deadline can.\n\
+             the census this floor was derived from:\n{}",
+            describe_census(census)
         );
 
         assert!(base <= cap, "{test}: base {base:?} exceeds cap {cap:?}");
 
         // The deadline is the ONLY timeout these tests have, so it must still
-        // self-terminate inside the run it protects.
+        // self-terminate inside the run it protects. This is where a census that
+        // GROWS surfaces as a conflict rather than as a silently longer test: the
+        // sibling's cap already sits at exactly `MAX_TEST_DEADLINE`.
         assert!(
             cap <= MAX_TEST_DEADLINE,
             "{test}: a {cap:?} cap exceeds the {MAX_TEST_DEADLINE:?} limit — it is the only \
-             timeout this test has, and one that outlasts the gate it runs in protects nothing"
+             timeout this test has, and one that outlasts the gate it runs in protects nothing. \
+             The census derives a {floor:?} base; if that is right, the conflict between the \
+             floor claim and the test-length limit is a decision for a human"
         );
     }
+}
+
+/// The census's STAGE SET is verified against the run, so a stage cannot join the
+/// deadline without joining the census (roborev job 253, finding 3).
+#[test]
+fn the_stage_census_check_accepts_a_run_that_matches_it() {
+    let deadline = TestDeadline::start(Duration::from_secs(60), Duration::from_secs(60));
+    for entry in T1_WAIT_CENSUS {
+        deadline.stage(entry.stage).finish();
+    }
+    assert_census_matches_run("a synthetic T1 run", T1_WAIT_CENSUS, &deadline);
+}
+
+/// ...and it REJECTS a run whose stages differ from the census — the property that
+/// makes the aggregate floor's base something other than a hand-label.
+///
+/// Both directions matter, so both are exercised: a stage the census does not
+/// declare, and a declared stage the run never opened.
+#[test]
+fn the_stage_census_check_rejects_a_run_that_does_not_match_it() {
+    let extra = std::panic::catch_unwind(|| {
+        let deadline = TestDeadline::start(Duration::from_secs(60), Duration::from_secs(60));
+        for entry in T1_WAIT_CENSUS {
+            deadline.stage(entry.stage).finish();
+        }
+        deadline.stage("f.undeclared").finish();
+        assert_census_matches_run("a synthetic T1 run", T1_WAIT_CENSUS, &deadline);
+    })
+    .expect_err("a stage the census does not declare must fail the check");
+    let extra = panic_text(extra.as_ref());
+    assert!(
+        extra.contains("f.undeclared"),
+        "the failure must NAME the stage the census does not declare: {extra}"
+    );
+
+    let missing = std::panic::catch_unwind(|| {
+        let deadline = TestDeadline::start(Duration::from_secs(60), Duration::from_secs(60));
+        for entry in T1_WAIT_CENSUS.iter().skip(1) {
+            deadline.stage(entry.stage).finish();
+        }
+        assert_census_matches_run("a synthetic T1 run", T1_WAIT_CENSUS, &deadline);
+    })
+    .expect_err("a declared stage the run never opened must fail the check");
+    let missing = panic_text(missing.as_ref());
+    assert!(
+        missing.contains(T1_WAIT_CENSUS[0].stage),
+        "the failure must NAME the declared stage the run did not open: {missing}"
+    );
+}
+
+/// A caught panic's message, for the two directions above.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "(a panic payload that is not a string)".to_string())
 }
 
 /// ANY SINGLE STAGE MAY CONSUME THE WHOLE DEADLINE — the property that makes the
