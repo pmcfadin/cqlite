@@ -457,6 +457,27 @@ alias, a mirror, a bare local path, `file://`, a look-alike host such as `github
 a **named non-PASS** (`remote-not-canonical`), as is an `origin` with no URL
 (`remote-unreadable`) — each with its own remedy, never a silent pass and never a SKIP.
 
+**The grammar is closed axis by axis** — transport, userinfo, host, port, path — each with one
+stated rule, because three successive rounds were "too permissive" in a *new* place (no host;
+host but no transport; `http://`/`git://` accepted). Only **authenticated** transports are
+accepted (`https://`, `ssh://`, `git+ssh://`, scp-form `git@host:path`): `http://` and `git://`
+authenticate nothing, and since the pre-flight *executes* the fetched repository's gate script,
+an on-path impersonator of the hostname would get **code execution**. A non-default port is a
+different endpoint and is rejected. **Userinfo is accepted** — GitHub Actions rewrites `origin`
+to `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red a legitimate CI
+checkout — and is therefore **redacted** from every rendering, because SUMMARY blocks are routinely
+pasted into PR comments.
+
+Two related properties of the same pre-flight. The baseline is fetched into a **private per-run
+`refs/worktree/…` ref**, never `FETCH_HEAD`: `--refmap=` removed the shared *tracking-ref* write
+and left `FETCH_HEAD` carrying the baseline, and `FETCH_HEAD` is itself a single shared mutable
+file that a concurrent fetch overwrites between the fetch and the read — the run would then
+compare against, and execute, a commit it never fetched. And `git merge-base --is-ancestor`'s
+**rc 1 is three-valued too**: in a shallow clone it also means "the connecting history is
+absent", so it is read as "not an ancestor" only in a repository *proven* complete (unmeasurable
+shallowness ⇒ `INDETERMINATE`); otherwise a legitimate committed removal in a shallow checkout
+reds as `BEHIND` — a false FAIL on correct input.
+
 Hermetic self-tests use **local** origins, which are deliberately not canonical, so they
 **substitute the artifact**: one shared helper
 (`scripts/tests/lib/agent-gate-canonical-pin.sh`) rewrites the canonical literal in the fixture's

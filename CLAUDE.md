@@ -347,7 +347,22 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   with the execution surface**: the pre-flight EXTRACTS AND RUNS the baseline's copy of the gate,
   so a loose identity admits arbitrary code, not merely a wrong baseline. Identity and execution
   are one concern, not two. Anything unverifiable from the string (an ssh alias, a mirror, a local
-  path, `file://`, a look-alike host) is a NAMED non-PASS, as is a URL-less `origin`. **Corollary
+  path, `file://`, a look-alike host) is a NAMED non-PASS, as is a URL-less `origin`. **And the URL grammar is CLOSED AXIS BY AXIS, because three rounds were "too permissive" in
+  a NEW place each time** (no host; host but no transport; then `http://`/`git://` accepted):
+  transport (`https`/`ssh`/`git+ssh`/scp-form ONLY — `http://` and `git://` authenticate
+  nothing and the baseline is EXECUTED, so an on-path impersonator gets CODE EXECUTION), host,
+  port (default only), path, and userinfo (ACCEPTED — GitHub Actions writes
+  `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red a legitimate CI
+  checkout — and therefore REDACTED everywhere it is rendered, since SUMMARY blocks get pasted
+  into PR comments). Each axis has one stated rule beside the check; a new variant would be a
+  change to git's URL syntax, not a gap. **The baseline is fetched into a PRIVATE per-run
+  `refs/worktree/…` ref, never `FETCH_HEAD`**: `--refmap=` removed the shared *tracking* write
+  and left `FETCH_HEAD`, which is itself one shared mutable file a concurrent fetch overwrites
+  between the fetch and the read — the run would then compare against, and EXECUTE, a commit
+  it never fetched. **And `--is-ancestor`'s rc 1 is itself three-valued**: in a SHALLOW clone it
+  also means "the connecting history is absent", so rc 1 is definitive only in a repo PROVEN
+  complete (`unknown` shallowness ⇒ INDETERMINATE) — otherwise a legitimate committed removal
+  in a shallow checkout reds as BEHIND. **Corollary
   for tests**: hermetic fixtures use local origins, so they SUBSTITUTE THE ARTIFACT — one shared
   helper rewrites the canonical literal in the fixture's own scratch copy of the gate and verifies
   the pin took (`scripts/tests/lib/agent-gate-canonical-pin.sh`) — never a settable seam. The
