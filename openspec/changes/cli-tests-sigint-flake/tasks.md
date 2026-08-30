@@ -1355,17 +1355,12 @@ found a defect in the fix** — the argument for planting rather than reasoning.
 
 ### 2. THE DOCUMENTED BOUND, WRONG A SECOND TIME
 
-Round 9 rescoped this claim; job 236 found the rescoped claim still false. Reachable post-deadline
-artifact scans, all recursive `read_dir` walks:
-
-1. the iteration's own progress scan;
-2. the artifact `step`'s scan (each call site scanned for itself);
-3. `step(Duration::ZERO)`'s scan at expiry;
-4. the failure path's `count_data_db(...).saturating_sub(artifacts)` fold-in;
-5. and at the call sites, `durable -Data.db artifacts under {}: {}` in the panic message.
-
-The comment promised **one**. So a slow directory walk could overrun the deadline several times over
-while the harness documented that it could not.
+Round 9 rescoped this claim; job 236 found the rescoped claim still false. Five post-deadline recursive
+`read_dir` walks were reachable — the iteration's progress scan, the artifact `step`'s own scan (each
+call site scanned for itself), `step(Duration::ZERO)`'s scan at expiry, the failure path's
+`count_data_db(...).saturating_sub(artifacts)` fold-in, and `durable -Data.db artifacts under {}: {}`
+in the call sites' panic messages. The comment promised **one**, so a slow directory walk could overrun
+the deadline several times over while the harness documented that it could not.
 
 **The claim is not weakened a third time.** Round 9 already rescoped it once, and rescoping a claim
 twice is how a guarantee becomes decoration. The code now meets it: the poll takes **one sample of each
@@ -1390,14 +1385,12 @@ the loop decides**, which is what the comment now says.
 ### 3. AN EXPIRY RACING PIPE CLOSURE NAMED THE WRONG CAUSE
 
 `try_match` collapsed "queue empty but senders alive" and "queue drained and every sender gone" into
-`None`, so a deadline lapsing exactly as both readers ended printed:
-
-> the test's one deadline passed with the child's pipes still open (more output was still possible)
-
-about a child whose output was over. AC2 exactly: the message names a cause the measurement
-contradicts, and it points the next reader at the wrong half of the system (scheduling, not a dead
-child). `try_recv` reports `Disconnected` **only** when the queue is empty AND every sender is gone, so
-the drain already knew — it was throwing the fact away. It now returns both facts (`FinalDrain
+`None`, so a deadline lapsing exactly as both readers ended printed *"the test's one deadline passed
+with the child's pipes still open (more output was still possible)"* about a child whose output was
+over. AC2 exactly: the message names a cause the measurement contradicts, and points the next reader at
+the wrong half of the system (scheduling, not a dead child). `try_recv` reports `Disconnected` **only**
+when the queue is empty AND every sender is gone, so the drain already knew — it was throwing the fact
+away. It now returns both facts (`FinalDrain
 { matched, disconnected }`) and, when there is no match, reports `PipesClosed` after every queued line
 has been checked. `disconnected` is deliberately never set alongside a match: the drain stops there and
 learns nothing about the senders.
@@ -1469,13 +1462,11 @@ Run under `RUSTFLAGS="-D warnings"`, zero warnings. Without this control a red s
   `a_line_recorded_before_the_wait_began_does_not_satisfy_it` (finding 1, the window — the false-PASS
   direction), `an_expiry_racing_pipe_closure_reports_closed_pipes` (finding 3).
 * Finding 2 carries **no new test**, deliberately: "how many directory scans happen after the
-  deadline" is a structural property, and the only tests that could assert it would either count scans
-  through a seam built for the test or assert a wall-clock overrun — a threshold assert in the
-  correctness path, which is the #2642 class this change is a member of. It is enforced by structure
-  instead: `step` cannot scan for itself because it is *given* the count, and there is one
-  `count_data_db` call left in the poll. The existing
-  `a_step_completed_before_the_deadline_is_observed_after_it_lapses` covers the behaviour of the
-  reused sample at expiry.
+  deadline" would have to be asserted either through a scan-counting seam built for the test or as a
+  wall-clock overrun — a threshold assert in the correctness path, the #2642 class this change belongs
+  to. It is enforced by structure: `step` cannot scan for itself because it is *given* the count, and
+  one `count_data_db` call is left in the poll. The existing
+  `a_step_completed_before_the_deadline_is_observed_after_it_lapses` covers the reused sample at expiry.
 * `grep -rn` sweep over what round 11 rescoped (`try_match`, "at `send` time", the overrun bound, the
   three `budgets.rs` cross-references to the expiry drain): four live stale claims found and fixed —
   round 10's own "the transcript is written by the reader threads at `send` time", which is the
