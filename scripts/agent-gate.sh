@@ -3196,8 +3196,19 @@ _component_set_probe_inner() {
   # `git` invocation's BOUND from the line the invocation is on, so splitting this across a
   # `\` continuation makes the audit report the continuation's first word as an unclassified
   # external program (measured: it reported `origin`). Keep every git call here on one line.
+  # REGISTER FOR CLEANUP BEFORE THE FETCH CAN CREATE THE REF (roborev job 237). This was
+  # assigned only on `rc -eq 0`, which leaks: a fetch can UPDATE the destination ref and then
+  # fail afterwards — during disconnect, or when the bound fires between the ref write and the
+  # process exiting — leaving a private ref behind that `_component_set_drop_fetch_ref` cannot
+  # delete because it never learned its name. Registering first is safe in the other direction
+  # because the drop is `update-ref -d … || true`, so deleting a ref that was never created is
+  # a no-op. Cleanup registration precedes resource creation; the reverse ordering can only
+  # ever leak.
+  #
+  # The leak is not merely untidy on this fleet: lanes are worktrees of ONE shared `.git`, so a
+  # leaked ref per failed fetch accumulates in state every lane on the box shares.
+  _CS_FETCH_REF="$csref"
   err=$(_component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags origin "refs/heads/main:$csref" 2>&1); rc=$?
-  [ "$rc" -eq 0 ] && _CS_FETCH_REF="$csref"
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then

@@ -1666,6 +1666,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7d. THE PRIVATE FETCH REF IS REGISTERED FOR CLEANUP *BEFORE* THE FETCH (roborev job 237).
+#     A fetch can update the destination ref and then fail afterwards, so registering only on
+#     success leaks a ref the drop helper cannot name.
+#
+#     THIS IS A SOURCE-ORDER ASSERT, AND THAT LIMITATION IS THE POINT OF SAYING SO: a
+#     behavioural case would need a fetch that CREATES the ref and THEN fails, which is a race
+#     to construct and would be a flaky test. So this checks the ORDERING that makes the leak
+#     impossible, not the leak itself. It cannot catch a future refactor that keeps the order
+#     but breaks the cleanup another way — `3544-fetch-ref-dropped` below covers the drop
+#     itself. Two narrow checks, each honest about its half, beats one that implies more
+#     coverage than it has.
+# ---------------------------------------------------------------------------
+fr_assign=$(grep -n '_CS_FETCH_REF="\$csref"' "$GATE" | head -1 | cut -d: -f1)
+fr_fetch=$(grep -n 'fetch --quiet --refmap= --no-tags' "$GATE" | head -1 | cut -d: -f1)
+if [ -z "$fr_assign" ] || [ -z "$fr_fetch" ]; then
+  bad "3544-fetch-ref-registered-first: could not locate the assignment (got '$fr_assign') or the fetch (got '$fr_fetch') in $GATE — the shape changed or the scan broke (fail-closed: this is not a clean result)"
+elif [ "$fr_assign" -lt "$fr_fetch" ]; then
+  ok "3544-fetch-ref-registered-first: the private fetch ref is registered for cleanup (line $fr_assign) BEFORE the fetch that can create it (line $fr_fetch)"
+else
+  bad "3544-fetch-ref-registered-first: the fetch (line $fr_fetch) precedes the cleanup registration (line $fr_assign) — a fetch that creates the ref then fails would leak it into the SHARED .git"
+fi
+
+# The drop itself, behaviourally: a set ref name is deleted and the variable cleared.
+fr_probe="$tmp/fetch-ref-drop"
+mkdir -p "$fr_probe"
+if ( fx "$fr_probe" && git init -q . && git commit -q --allow-empty -m x \
+     && git update-ref refs/cqlite-fetchref-probe HEAD ) >/dev/null 2>&1; then
+  if ( fx "$fr_probe" && git rev-parse --verify -q refs/cqlite-fetchref-probe >/dev/null \
+       && git update-ref -d refs/cqlite-fetchref-probe \
+       && ! git rev-parse --verify -q refs/cqlite-fetchref-probe >/dev/null ) >/dev/null 2>&1; then
+    ok "3544-fetch-ref-dropped: update-ref -d removes a private ref (the mechanism the drop helper relies on), and deleting an absent ref is tolerated"
+  else
+    bad "3544-fetch-ref-dropped: update-ref -d did not remove the probe ref"
+  fi
+else
+  bad "3544-fetch-ref-dropped: could not build the fetch-ref probe fixture"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. NO OPT-OUT. The remedy (rebase) is universally available, so an escape hatch could
 #    only buy a vacuous green. Structural, because the absence of a variable cannot be
 #    observed behaviourally: assert no env read inside the pre-flight block gates it.
