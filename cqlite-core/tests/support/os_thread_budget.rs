@@ -452,6 +452,14 @@ pub fn poll_until_reaped(
             }
         } else {
             last = Some(n);
+            // ORDERING SWEEP (#3514 r2), recorded so nobody "fixes" it the wrong
+            // way: this timestamp is taken AFTER the observation that reset the
+            // span, so `elapsed()` UNDER-reports the true unchanged span by the
+            // read latency. That skew makes acceptance HARDER (a bit more than
+            // `min_span` is required), which is the fail-closed direction — the
+            // opposite of the PSI window, where an analogous inversion would
+            // over-report. Moving this capture before the read would shorten the
+            // required hold under starvation, i.e. weaken the confirmation.
             unchanged_since = Instant::now();
         }
         std::thread::sleep(POLL_INTERVAL);

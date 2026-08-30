@@ -86,21 +86,97 @@ fn stall_is_normalised_by_wall_time() {
     );
 }
 
-/// A fully-stalled window saturates at 100%, never above it (#3514 nit 3): the
-/// closing counter is read BEFORE the wall denominator is taken, so the
-/// denominator's interval is a superset of the numerator's.
+/// A fully-stalled window is exactly 100%, which is legal and must NOT be
+/// rejected — the boundary between the accepted and the void.
 #[test]
-fn stall_percentage_never_exceeds_one_hundred() {
+fn fully_stalled_window_is_exactly_one_hundred_percent() {
     let out = describe_stall(0, 1_000_000, 1_000_000);
     assert!(
-        out.contains("100.0%"),
-        "a fully-stalled window is 100.0%; got: {out}"
+        out.contains("100.0%") && !out.contains("UNMEASURED"),
+        "stall equal to wall is the legal maximum, not an inverted window; got: {out}"
     );
-    for over in ["100.1%", "101.", "1000.", "200."] {
+}
+
+/// An INVERTED window — stall exceeding wall — is impossible under the nesting
+/// invariant, so it must be REJECTED as unmeasurable, never capped and never
+/// printed as a percentage (#3514 r2).
+///
+/// # Why this case exists, and what the previous one could not see
+///
+/// The round-1 test fed only intervals where numerator == denominator, so it
+/// pinned the ARITHMETIC (`x/x = 100%`) and not the ORDERING. It therefore PASSED
+/// while the opening-side ordering bug was live: `start` was read before the wall
+/// anchor was captured, so a scheduling delay let the stall interval begin outside
+/// the wall interval and the ratio exceed 100%. A test that cannot distinguish the
+/// fixed code from the broken code is not evidence.
+///
+/// Here the two intervals are injected INDEPENDENTLY, so the stall delta CAN
+/// exceed the denominator — which is what makes the contract falsifiable at all.
+/// The percentages are chosen to span the plausible skew (a hair over) and the
+/// gross (double), because a clamp would hide both identically.
+#[test]
+fn inverted_window_is_rejected_not_capped() {
+    for (started, ended, wall, label) in [
+        (
+            0u64,
+            1_000_001u64,
+            1_000_000u128,
+            "a hair over — the real skew shape",
+        ),
+        (0, 2_000_000, 1_000_000, "double — a gross inversion"),
+        (500_000, 1_600_000, 1_000_000, "non-zero start, over by 10%"),
+        (0, 1, 0u128 + 0, "1us of stall in a zero-width window"),
+    ] {
+        let out = describe_stall(started, ended, wall);
         assert!(
-            !out.contains(over),
-            "the percentage must not exceed 100% (found {over}); got: {out}"
+            out.contains("UNMEASURED"),
+            "an inverted window ({label}) must be rejected as UNMEASURED; got: {out}"
         );
+        // REJECT, not CAP: a clamped "100.0%" is a plausible-looking number standing
+        // in for an impossible measurement — the same mistake as blocker 1's 0.0%.
+        assert!(
+            !out.contains('%') || out.contains("not a value") || out.contains("not 0%"),
+            "the rejection must not report a stall percentage ({label}); got: {out}"
+        );
+        for capped in ["100.0%", "110.0%", "200.0%", "0.0%"] {
+            assert!(
+                !out.contains(capped),
+                "an inverted window must not be rendered as {capped} ({label}); got: {out}"
+            );
+        }
+    }
+}
+
+/// No legal input may produce a percentage above 100%: swept across the whole
+/// stall/wall lattice rather than at hand-picked points, so the ordering contract
+/// is checked by its consequence and not by one example.
+#[test]
+fn no_input_ever_yields_a_percentage_above_one_hundred() {
+    for wall in [1u128, 7, 1_000, 999_999, 1_000_000, 3_000_000] {
+        for stalled in [0u64, 1, 3, 999, 999_999, 1_000_000, 2_999_999, 4_000_000] {
+            let out = describe_stall(0, stalled, wall);
+            if u128::from(stalled) > wall {
+                assert!(
+                    out.contains("UNMEASURED"),
+                    "stalled={stalled} > wall={wall} must be UNMEASURED; got: {out}"
+                );
+                continue;
+            }
+            // Legal: parse the percentage back out and check the bound numerically,
+            // so this cannot be defeated by a formatting change the way a
+            // substring blacklist can.
+            let pct: f64 = out
+                .split("some-stall ")
+                .nth(1)
+                .and_then(|rest| rest.split('%').next())
+                .unwrap_or_else(|| panic!("no percentage in a legal report: {out}"))
+                .parse()
+                .unwrap_or_else(|e| panic!("unparseable percentage in {out}: {e}"));
+            assert!(
+                (0.0..=100.0).contains(&pct),
+                "stalled={stalled} over wall={wall} yielded {pct}%, outside 0..=100"
+            );
+        }
     }
 }
 
