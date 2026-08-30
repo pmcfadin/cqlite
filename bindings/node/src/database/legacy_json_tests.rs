@@ -1,7 +1,7 @@
 //! Unit tests for the DEPRECATED legacy `value_to_json` shaping used by
-//! `Database::execute()` (see `database.rs`).
+//! `Database::execute()` (see `database/json_value.rs`).
 //!
-//! In a sibling file because `database.rs` is over the campsite threshold
+//! In a sibling file because `database/json_value.rs` is over the campsite threshold
 //! (#1116) and the `inet` refusal coverage added for issue #1452 would have
 //! grown it.
 //!
