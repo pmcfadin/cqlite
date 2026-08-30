@@ -120,6 +120,8 @@ pub(super) fn spawn_fanout_merge(
                     schema.clone(),
                     buffer_size,
                     reader::scan_stream_windowed::scan_admission::ScanAdmission::Exempt,
+                    // Issue #1704: the merged stream below forwards and counts.
+                    reader::ScanErrorReporting::Nested,
                 )
             })
             .collect();
@@ -248,7 +250,7 @@ pub(super) fn rechunk_into_batches(
             let _ = tx.send(Ok(batch)).await;
         }
     });
-    reader::BatchedScanStream::new(rx, task)
+    reader::BatchedScanStream::new_over_counted_source(rx, task)
 }
 
 // Issue #3124 END-TO-END pins for sites 1-3 (the fan-out merge task, a per-generation

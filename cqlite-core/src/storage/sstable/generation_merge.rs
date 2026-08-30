@@ -704,14 +704,12 @@ pub(super) async fn stream_generations_for_read(
         fault_scope.checkpoint(crate::storage::producer_fault::ScanTaskSite::CrossGenerationMerge);
         // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
-        // Issue #3154: a test may make construction REPORT a chosen error variant, so
-        // the narrowed fallback classification below can be proven per class (I/O vs
-        // corruption vs merger-ineligible). `None` — and `KWayMerger::new` called
-        // exactly as before — in every production build, where
-        // `injected_construction_error` returns `None` without touching a registry.
+        // Issue #3154: a test may make construction REPORT a chosen error variant so
+        // the narrowed fallback classification below is provable per class; `None` in
+        // every production build. Issue #1704: the merger DEFERS open counting here.
         let constructed = match fault_scope.injected_construction_error() {
             Some(injected) => Err(injected),
-            None => KWayMerger::new(paths, &schema),
+            None => crate::storage::write_engine::merge::merger_deferring_opens(paths, &schema),
         };
         let mut merger = match constructed {
             Ok(m) => {

@@ -673,6 +673,10 @@ async fn drive_full_scan_rows(
         QUERY_ROWS_FULL_SCAN_BUFFER_ROWS,
         ScanAdmission::Exempt,
         Some(now_secs),
+        // Issue #1704: `Exempt` here is about the ADMISSION permit (the caller holds
+        // one for the whole operation), not about nesting — this stream is drained
+        // DIRECTLY below, so nothing else will ever see its failures.
+        crate::storage::sstable::reader::ScanErrorReporting::TopLevel,
     );
     while let Some(msg) = rx.recv().await {
         // Cooperative cancellation: the caller dropping the stream also drops our

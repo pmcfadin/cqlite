@@ -361,6 +361,10 @@ pub fn build_single_partition_merger_with_registry(
                     udt_registry.cloned(),
                     scan_cancel.clone(),
                     channel_capacity,
+                    // Issue #1704: no recording seam encloses this fail-safe scan, so
+                    // a failed input open must still report itself. See
+                    // `merge::constructors`' module doc for why the caller states it.
+                    crate::storage::sstable::reader::OpenErrorReporting::SelfReported,
                 )?;
                 runs.push(Box::new(SinglePartitionFilterRun {
                     inner: adapter,
