@@ -11,6 +11,17 @@ legitimately has one record per shipped PR (e.g. #2264 via PR #2282 then PR #230
 dup key is the (issue, pr) pair, not the issue alone. Retro aggregation by issue should
 treat such multi-cycle issues as multiple deliveries (they are), not fold them into one.
 
+The same holds for a SLICE delivery (issue #3550): an issue that ships one or more PRs while
+DELIBERATELY remaining OPEN (the shape the lead ruled correct on #3393). Such a record is
+stamped with `--slice`, carries `closed_at: null` (the marker), and bounds its cycle time on
+the PR's mergedAt. `--slice` asserts a fact about DELIVERY time, which the issue's CURRENT
+state cannot decide, so it is refused in THREE states: the issue is closed now; it is open
+only because it was REOPENED; or GitHub has not yet recorded this PR's auto-close (the PR
+declares it closes the issue, so it is a completed delivery, not a slice). The first two need
+the issue timeline replayed to mergedAt (issue #3559); the third clears itself in seconds. Closing the issue to satisfy this tool, or hand-appending a line past the
+validator, are both FORBIDDEN — a tool's data model must never decide whether a problem is
+recorded as solved, and `retro` reports slice records as their own class.
+
 Authoritative-data-only mandate (CLAUDE.md / issue #28): every field is an observed
 event — a GitHub timestamp/label or a run counter supplied by the stamping step — or
 arithmetic over authoritative timestamps. Nothing is inferred, estimated, or guessed.
@@ -73,7 +84,14 @@ GATE_NOT_RUN = "not-run"
 # alone). The schema file remains the source of truth; this enforces the keywords the
 # record schema actually uses: type, required, properties, const, enum, minimum, pattern.
 
-def _type_ok(value, t: str) -> bool:
+def _type_ok(value, t) -> bool:
+    """True when `value` matches JSON-Schema type `t`.
+
+    `t` is a type NAME or a LIST of names (a JSON Schema type union, e.g. the nullable
+    `closed_at` of issue #3550): a union holds when ANY member matches.
+    """
+    if isinstance(t, list):
+        return any(_type_ok(value, member) for member in t)
     if t == "object":
         return isinstance(value, dict)
     if t == "array":
@@ -90,6 +108,16 @@ def _type_ok(value, t: str) -> bool:
     if t == "null":
         return value is None
     return True
+
+
+def _has_type(schema: dict, name: str) -> bool:
+    """True when `schema`'s `type` is `name` or a union containing it.
+
+    Used by the structural (array items / object properties) branches so a union type such
+    as ["object", "null"] still gets its members walked rather than silently skipped.
+    """
+    declared = schema.get("type")
+    return declared == name or (isinstance(declared, list) and name in declared)
 
 
 def _validate(value, schema: dict, path: str, errors: list) -> None:
@@ -114,21 +142,17 @@ def _validate(value, schema: dict, path: str, errors: list) -> None:
         if not re.fullmatch(schema["pattern"], value):
             errors.append(f"{path}: {value!r} does not match /{schema['pattern']}/")
     if schema.get("format") == "date-time" and isinstance(value, str):
-        try:
-            parsed = _parse_ts(value)
-        except ValueError:
-            errors.append(f"{path}: {value!r} is not a valid RFC-3339 date-time")
-        else:
-            # fromisoformat accepts date-only / tz-naive strings on 3.11+; require a full
-            # date + time + offset so a value like "2026-06-01" is rejected.
-            if "T" not in value or parsed.tzinfo is None:
-                errors.append(f"{path}: {value!r} is not a full date-time with offset")
-    if schema.get("type") == "array" and isinstance(value, list):
+        # ONE recogniser, shared with the CLI's _require_full_timestamp, so the tool cannot
+        # accept at input what its own schema forbids at output (issue #3550).
+        if not _is_rfc3339(value):
+            errors.append(f"{path}: {value!r} is not a strict RFC-3339 UTC date-time "
+                          f"(YYYY-MM-DDThh:mm:ss[.frac](Z|+hh:mm))")
+    if _has_type(schema, "array") and isinstance(value, list):
         item_schema = schema.get("items")
         if item_schema:
             for idx, item in enumerate(value):
                 _validate(item, item_schema, f"{path}[{idx}]", errors)
-    if schema.get("type") == "object" and isinstance(value, dict):
+    if _has_type(schema, "object") and isinstance(value, dict):
         props = schema.get("properties", {})
         for req in schema.get("required", []):
             if req not in value:
@@ -202,6 +226,50 @@ def _validate_gate_coupling(record: dict, errors: list) -> None:
                       f"outcome), got {gate!r}")
 
 
+def _validate_cycle_time_basis(record: dict, errors: list) -> None:
+    """Cross-field check for cycle_time_s's BASIS (issue #3550).
+
+    `closed_at` is the record's kind (total and derivable, so a definition rather than an
+    inference), and the kind selects the terminal timestamp cycle_time_s is measured to:
+
+        closed_at non-null (COMPLETED issue) -> cycle_time_s == closed_at - created_at
+        closed_at null      (SLICE delivery) -> cycle_time_s == merged_at - created_at
+
+    A slice's terminal timestamp is the PR's mergedAt: the issue deliberately stays open, so
+    its closedAt is not the cycle boundary at all. Arithmetic is outside the minimal
+    JSON-Schema subset above (and outside standard JSON Schema), so it lives here beside
+    _validate_severity_pair / _validate_gate_coupling. Routing it through validate_record
+    means `lint` and `retro` enforce it over the WHOLE ledger, not just freshly-recorded
+    lines — so a record whose kind and arithmetic tell two different stories is caught.
+
+    Guarded with isinstance checks and a try/except around parsing so a wrong-typed or
+    malformed timestamp (already flagged by the generic walk) doesn't also raise a confusing
+    traceback here.
+    """
+    created = record.get("created_at")
+    closed = record.get("closed_at")
+    merged = record.get("merged_at")
+    cycle = record.get("cycle_time_s")
+    if not isinstance(created, str) or not isinstance(cycle, int) or isinstance(cycle, bool):
+        return  # type/required errors already reported by the generic walk
+    if closed is None:
+        basis_name, basis = "merged_at (SLICE delivery: closed_at is null)", merged
+    else:
+        basis_name, basis = "closed_at (completed-issue delivery)", closed
+    if not isinstance(basis, str):
+        return  # the basis timestamp itself is missing/wrong-typed; already reported
+    try:
+        expected = _seconds_between(created, basis)
+    except (ValueError, TypeError):
+        # malformed timestamp already reported by the format check above. TypeError too:
+        # `fromisoformat` happily parses a date-only / tz-naive string, and subtracting a
+        # naive from an aware datetime raises TypeError rather than ValueError.
+        return
+    if cycle != expected:
+        errors.append(f": cycle_time_s {cycle} != {expected} = {basis_name} - created_at "
+                      f"(issue #3550: the basis is selected by closed_at)")
+
+
 def validate_record(record: dict, schema: dict) -> list:
     """Return a list of human-readable validation errors (empty == valid)."""
     errors: list = []
@@ -209,6 +277,7 @@ def validate_record(record: dict, schema: dict) -> list:
     if isinstance(record, dict):
         _validate_severity_pair(record, errors)
         _validate_gate_coupling(record, errors)
+        _validate_cycle_time_basis(record, errors)
     return errors
 
 
@@ -217,6 +286,66 @@ def load_schema(schema_path: Path) -> dict:
 
 
 # ============================================================ timestamp helpers
+
+# THE canonical timestamp pattern — ONE string, shared with the published schema (issue
+# #3550). `docs/reports/delivery-telemetry.schema.json` carries this EXACT text as the
+# `pattern` of every timestamp field, and a test asserts the two are byte-identical, so they
+# cannot drift: rounds 10-12 of this issue's review were three successive complaints about
+# the tool and the schema disagreeing (tool looser, then tool tighter, then schema looser),
+# and the only stable answer is for there to be one rule rather than two approximations.
+#
+# Details that are load-bearing rather than stylistic:
+#   * `[0-5]\d` seconds — RFC-3339 permits a LEAP SECOND (23:59:60) but
+#     `datetime.fromisoformat` cannot parse one, so a pattern admitting it would let a
+#     standard Draft 2020-12 validator accept a record `lint` rejects.
+#   * `(?![\s\S])` rather than `$` — in Python's `re` (which the `jsonschema` library uses
+#     for `pattern`) `$` also matches immediately BEFORE a trailing newline, so
+#     "...00:00:00Z\n" satisfied `^...$` while the tool refused it. This negative lookahead
+#     is a true end-of-input assertion and is valid in BOTH Python and ECMA-262, which the
+#     JSON Schema dialect specifies; `\Z` would work only in Python.
+#   * uppercase T/Z only — `gh` always emits the canonical form (see `_parse_ts`).
+# Every FIELD RANGE a regex can express is expressed: month 01-12, day 01-31, hour 00-23,
+# minute/second 00-59, offset hour 00-23 and offset minute 00-59. What remains is stated
+# rather than chased (see _is_rfc3339): CALENDAR validity — 31 February, 29 February in a
+# non-leap year — is NOT a regular-language property, so the pattern cannot judge it and the
+# tool is legitimately stricter there. That asymmetry is IRREDUCIBLE, not a gap to close;
+# claiming full equivalence (as an earlier revision of this issue did) is what produced four
+# successive review rounds on this one subject.
+# [0-9] EVERYWHERE, never \d: in Python's `re` — which the jsonschema library uses for
+# `pattern` — `\d` matches any UNICODE decimal digit, so "٢٠٢٦-06-10T00:00:00Z" (Arabic-Indic
+# digits) satisfied the published pattern while `datetime.fromisoformat` rejected it. That is
+# a SYNTAX divergence, and unlike the calendar one below it IS expressible, so it is closed
+# rather than documented. [0-9] is exact ASCII; there is no further generalisation.
+_TIMESTAMP_PATTERN = (
+    r"^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+    r"T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?"
+    r"(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])(?![\s\S])")
+_RFC3339_RE = re.compile(_TIMESTAMP_PATTERN)
+
+
+def _is_rfc3339(value) -> bool:
+    """True when `value` is a strict RFC-3339 UTC-canonical date-time.
+
+    Two checks, and BOTH are required for a reason worth stating: `_RFC3339_RE` judges
+    SYNTAX (and now every field RANGE a regex can express), `_parse_ts` judges CALENDAR
+    validity. Syntax alone accepts 2026-02-31; parsing alone accepts non-RFC-3339 spellings
+    like basic format.
+
+    The residual asymmetry is DELIBERATE and IRREDUCIBLE: a published JSON Schema `pattern`
+    cannot express "31 February is not a date" or leap-year rules, so a standard validator
+    reading the schema is necessarily more permissive than this function on exactly those
+    values — and only those. The schema says so in its own description rather than implying
+    an equivalence it cannot have. Do not try to close that gap in the regex; four review
+    rounds on this issue were spent discovering that it does not close.
+    """
+    if not isinstance(value, str) or not _RFC3339_RE.match(value):
+        return False
+    try:
+        _parse_ts(value)
+    except (ValueError, TypeError):
+        return False
+    return True
+
 
 def _parse_ts(value: str) -> datetime:
     """Parse an RFC-3339 / ISO-8601 UTC timestamp (accepts a trailing 'Z').
@@ -234,6 +363,108 @@ def _parse_ts(value: str) -> datetime:
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value)
+
+
+def _require_full_timestamp(value: str, field: str) -> None:
+    """Raise SystemExit unless `value` is a FULL, tz-aware RFC-3339 date-time (issue #3550).
+
+    `_parse_ts` deliberately accepts what `datetime.fromisoformat` accepts, which includes a
+    date-only ("2026-06-01") and a tz-NAIVE ("2026-06-01T00:00:00") string. Both parse fine
+    and then blow up later: subtracting a naive datetime from an aware one raises TypeError
+    out of `_seconds_between`, i.e. a bare traceback from arithmetic instead of a named bad
+    invocation. Parseability is therefore NOT the property worth asserting — being a full
+    instant is. Mirrors the `format: date-time` check in `_validate`, so the CLI refuses at
+    input what the schema would reject at output.
+    """
+    # The TYPE first: _parse_ts calls .endswith() on its argument, so a truthy non-string
+    # (a number, a list, a dict from the --from-json seam) raises AttributeError — which is
+    # neither of the exceptions below and would escape as a traceback, the exact outcome this
+    # helper exists to prevent. A falsy non-string is already refused by the caller's
+    # presence check; this closes the truthy half.
+    if not isinstance(value, str):
+        raise SystemExit(f"error: authoritative field '{field}' must be an RFC-3339 timestamp "
+                         f"string, got {value!r} ({type(value).__name__})")
+    if not _is_rfc3339(value):
+        raise SystemExit(
+            f"error: authoritative field '{field}' is not a strict RFC-3339 UTC date-time: "
+            f"{value!r} — required form YYYY-MM-DDThh:mm:ss[.frac](Z|+hh:mm). A date-only, "
+            f"timezone-naive, basic-format or sub-minute-offset value may parse but is not "
+            f"what this ledger's schema accepts, and a naive value cannot be differenced "
+            f"against one carrying an offset")
+
+
+# \Z, not $: Python's `$` also matches immediately BEFORE a trailing newline, so a value
+# ending "\n" would be accepted here and then compared raw — the lenient-reader/strict-
+# consumer split that fails OPEN. \Z is the true end of string.
+_ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/\s]+)/([^/\s]+)/issues/([0-9]+)\Z")
+
+
+def _issue_identity(value):
+    """Return a canonical ``(owner, repo, number)`` identity, or None if unrecognised.
+
+    Deliberately does NOT strip: a value with surrounding whitespace is UNRECOGNISED, not
+    normalised. Normalising here is the defect that recurred throughout issue #3550 — a
+    lenient reader accepts a value, a strict consumer then fails to match it, and a
+    non-match is indistinguishable from a correct non-match, so the guard fails OPEN.
+
+    Identity is the full triple, never the number alone: issue numbers are repository-scoped,
+    so `other/repo#3393` and `pmcfadin/cqlite#3393` are different issues that share a number.
+    """
+    if not isinstance(value, str):
+        return None
+    m = _ISSUE_URL_RE.match(value)
+    return (m.group(1), m.group(2), int(m.group(3))) if m else None
+
+
+def _assert_never_closed(gh_fields: dict, issue: int) -> None:
+    """Raise SystemExit unless the issue has provably NEVER been closed (issue #3550).
+
+    A null `closed_at` proves the issue is open NOW; only a never-closed issue proves it was
+    open WHEN THE PR MERGED, which is what a slice record asserts. A REOPENED issue also has
+    `closed_at: null`, so without this an ordinary COMPLETED delivery stamped after a reopen
+    would be recorded as a slice — the one direction of this classification that produces a
+    WRONG record rather than a refusal. GitHub's `stateReason` separates the two
+    affirmatively: empty (gh) / null (REST) when never closed, "REOPENED" when reopened.
+
+    Every non-affirmative state is a refusal, never a shrug: an ABSENT key is UNMEASURED (not
+    "never closed"), a non-string value is malformed, and an unrecognised value is
+    unattributable. #3559's timeline replay is the general answer for all of them, and each
+    message names it. Called for ANY open issue, before the --slice coupling below, so a
+    reopened issue is routed straight here rather than told to pass a flag that would then be
+    refused.
+    """
+    if "state_reason" not in gh_fields:
+        raise SystemExit(
+            "error: the issue's stateReason is required to tell a never-closed issue from a "
+            "REOPENED one (both have closed_at null) and it was not supplied — an unmeasured "
+            "signal is never read as 'never closed' (issue #3550)")
+    raw = gh_fields["state_reason"]
+    # Only None or a str is a measurement. `(raw or "")` would fold False/0/[] onto the
+    # never-closed answer — the truthiness shape this issue keeps re-finding.
+    if raw is not None and not isinstance(raw, str):
+        raise SystemExit(
+            f"error: the issue's stateReason must be null or a string, got {raw!r} — a falsy "
+            f"non-string is malformed input, never an affirmative 'never closed' "
+            f"(issue #3550)")
+    # Matched EXACTLY against the measured values, with no normalisation of the never-closed
+    # answer. `.strip()` folded a whitespace-only string onto "" — i.e. a malformed value took
+    # the AFFIRMATIVE branch, the fifth instance of this file's recurring shape. gh emits ""
+    # and REST emits null for never-closed; neither ever emits whitespace, so a blank-but-
+    # non-empty string is unmeasured input and takes the same refusal as any other.
+    if raw is None or raw == "":
+        return  # affirmatively never closed
+    state_reason = raw.strip().upper()
+    if state_reason == "REOPENED":
+        raise SystemExit(
+            f"error: issue #{issue} is open only because it was REOPENED, so its null "
+            f"closed_at does not show it was open when the PR merged — recording this as a "
+            f"slice would mislabel an ordinary completed delivery. Deciding it needs the "
+            f"issue timeline replayed to mergedAt: issue #3559 — do NOT hand-append the "
+            f"record (issue #3550).")
+    raise SystemExit(
+        f"error: cannot classify issue #{issue}: its stateReason is {raw!r}, which is neither "
+        f"the empty value of a never-closed issue nor 'REOPENED' — refusing rather than "
+        f"guessing (issue #3559 replays the timeline for the cases this cannot decide).")
 
 
 def _seconds_between(start: str, end: str) -> int:
@@ -264,9 +495,50 @@ def _gh(argv: list) -> str:
 def _github_fields(issue: int, pr: int) -> dict:
     """Pull authoritative timestamps/labels live from `gh` (only when not injected)."""
     issue_json = json.loads(_gh(
-        ["gh", "issue", "view", str(issue), "--json", "createdAt,closedAt,labels"]))
+        ["gh", "issue", "view", str(issue), "--json",
+         "createdAt,closedAt,labels,stateReason,url"]))
     pr_json = json.loads(_gh(
-        ["gh", "pr", "view", str(pr), "--json", "createdAt,mergedAt"]))
+        ["gh", "pr", "view", str(pr), "--json", "createdAt,mergedAt,closingIssuesReferences"]))
+    if "closingIssuesReferences" not in pr_json:
+        raise SystemExit(
+            f"error: `gh pr view {pr}` returned no closingIssuesReferences field — refusing "
+            f"rather than treating an unmeasured field as 'closes nothing' (issue #3550)")
+    # The SHAPE too, not just presence. A null/dict value would fold onto "closes nothing"
+    # (or traceback), and a malformed ELEMENT silently FILTERED out reads the same way — a
+    # partially-unreadable reply must refuse, not quietly shrink to the permissive answer.
+    refs = pr_json["closingIssuesReferences"]
+    if not isinstance(refs, list):
+        raise SystemExit(
+            f"error: `gh pr view {pr}` returned closingIssuesReferences of type "
+            f"{type(refs).__name__}, expected a list — refusing rather than reading an "
+            f"unparseable reply as 'closes nothing' (issue #3550)")
+    closing_identities = []
+    for ref in refs:
+        # Identity by (owner, repo, number), never by number: issue numbers are
+        # repository-scoped, so a PR closing other-repo#N must not read as closing this
+        # repo's #N. Refuse an unparseable entry rather than discard it — discarding shrinks
+        # the set toward "closes nothing", the permissive answer.
+        identity = _issue_identity(ref.get("url")) if isinstance(ref, dict) else None
+        if identity is None:
+            raise SystemExit(
+                f"error: `gh pr view {pr}` returned a closingIssuesReferences entry whose "
+                f"'url' is not a canonical GitHub issue URL: {ref!r} — refusing rather than "
+                f"discarding it, which would read as 'closes nothing' (issue #3550)")
+        closing_identities.append(identity)
+    # Every field we asked for must have come back. `stateReason` in particular is the sole
+    # never-closed-vs-REOPENED signal, so its absence must be a named refusal here rather
+    # than a None that reads downstream as "never closed" (issue #3550).
+    missing = [f for f in ("createdAt", "closedAt", "labels", "stateReason", "url")
+               if f not in issue_json]
+    if missing:
+        raise SystemExit(
+            f"error: `gh issue view {issue}` returned no {', '.join(missing)} field(s) — "
+            f"refusing rather than treating an unmeasured field as a value (issue #3550)")
+    if _issue_identity(issue_json["url"]) is None:
+        raise SystemExit(
+            f"error: `gh issue view {issue}` returned a 'url' that is not a canonical GitHub "
+            f"issue URL: {issue_json['url']!r} — refusing rather than comparing an "
+            f"unrecognised identity, which could never match (issue #3550)")
     labels = [l.get("name") for l in issue_json.get("labels", []) if l.get("name")]
     prio_labels = [l for l in labels if re.fullmatch(r"P[0-3]", l)]
     # one-priority invariant: a multi-priority issue is a labeling error — surface it
@@ -284,10 +556,47 @@ def _github_fields(issue: int, pr: int) -> dict:
                          f"labels (exactly one expected)")
     routing = "oracle" if has_oracle else ("design" if has_design else None)
     return {
+        # The DELIVERY CYCLE this payload was built for — the same (issue, pr) pair that is
+        # the ledger's own identity for a record. build_record refuses if either half
+        # disagrees with the CLI, so a stale or copied --from-json file cannot be applied to a
+        # different delivery (issue #3550). Binding the issue ALONE was insufficient: this
+        # payload also carries PR-specific data (pr_opened_at, merged_at,
+        # pr_closes_this_issue), so a payload reused across two PRs of the SAME issue — the
+        # #3393 shape exactly, three PRs on one open issue — passed and recorded the new pr
+        # with the old pr's timestamps and classification.
+        #
+        # Each half is checked against a CLI FLAG, never against another injected field: two
+        # injected values that must agree with EACH OTHER is the shape that regenerated this
+        # defect six times, because a non-match and a correct non-match are the same
+        # observation. A file-vs-CLI check has no such symmetry.
+        "issue": issue,
+        "pr": pr,
         "created_at": issue_json["createdAt"],
         "closed_at": issue_json["closedAt"],
+        # GitHub's own reason the issue is in its current state. For an OPEN issue this is
+        # empty when it has NEVER been closed and "REOPENED" when it has — the one cheap
+        # affirmative signal distinguishing the two, and `closed_at: null` alone cannot
+        # (see build_record's --slice guard, issue #3550). Indexed, NOT `.get`: a `.get`
+        # would map an ABSENT field (a gh/API change, an older gh) to None, which
+        # _assert_never_closed reads as affirmative proof the issue was never closed — an
+        # unmeasured signal silently inheriting the permissive answer, which is the whole
+        # defect that guard exists to prevent. The presence check above makes it a clean
+        # refusal instead.
+        "state_reason": issue_json["stateReason"],
         "pr_opened_at": pr_json["createdAt"],
         "merged_at": pr_json["mergedAt"],
+        # The issues THIS PR declares it closes ("Closes #N"). A SLICE pr by definition
+        # closes nothing — the issue deliberately stays open — so this discriminates a real
+        # slice from an ordinary completed delivery whose auto-close has not yet PROPAGATED
+        # (issue #3550). Measured, not timed: during that window closed_at is null AND
+        # stateReason is empty, so both of the other signals look exactly like a never-closed
+        # issue and only this one tells the truth.
+        # ONE BOOLEAN, not two operands. Both sides are derived here from the SAME two
+        # authoritative queries, so they cannot disagree. Passing the URLs through the
+        # --from-json seam instead put two values that MUST AGREE in an operator's hands,
+        # and every mismatch failed OPEN (a non-match silently disables the guard rather
+        # than failing it) — six successive defects on that seam before this collapse.
+        "pr_closes_this_issue": _issue_identity(issue_json["url"]) in closing_identities,
         "priority": priority,
         "routing": routing,
     }
@@ -337,19 +646,165 @@ def build_record(args, gh_fields: dict) -> dict:
             f"({args.roborev_nits}) = {args.roborev_blockers + args.roborev_nits}, but must "
             f"equal --roborev-findings ({args.roborev_findings})")
 
-    # Authoritative timestamps must all be present — a finalize runs only on a merged,
-    # closed issue. A null here (e.g. an unmerged PR) is an error, not silent arithmetic
-    # on None (which would otherwise raise an opaque AttributeError).
-    for key in ("created_at", "pr_opened_at", "merged_at", "closed_at"):
+    # Authoritative timestamps must be present — a finalize runs only on a MERGED pr. A
+    # null here (e.g. an unmerged PR) is an error, not silent arithmetic on None (which
+    # would otherwise raise an opaque AttributeError). `--slice` relaxes NOTHING here: only
+    # the issue's closed_at may be null, and only under the explicit opt-in below.
+    slice_delivery = bool(args.slice_delivery)
+    for key in ("created_at", "pr_opened_at", "merged_at"):
         if not gh_fields.get(key):
             raise SystemExit(
                 f"error: authoritative timestamp '{key}' is missing/null "
-                f"(finalize records only a merged, closed issue)")
+                f"(a record needs the issue's createdAt and the PR's createdAt/mergedAt — "
+                f"finalize records only a MERGED pr)")
+
+    # THE PAYLOAD IS BOUND TO (--issue, --pr) before any field is USED (issue #3550). The
+    # --from-json seam is how a caller injects GitHub-derived fields, and a STALE or COPIED
+    # file built for a different issue would otherwise be applied wholesale: a wrong
+    # closed_at/created_at corrupts the kind and the cycle time, and a wrong
+    # pr_closes_this_issue disables the auto-close-window guard. One scalar checked against
+    # one flag protects every field at once — and deliberately NOT by re-introducing two
+    # injected operands that must agree with each other, which is the shape that produced
+    # six consecutive defects here.
+    for field, flag, expected in (("issue", "--issue", args.issue), ("pr", "--pr", args.pr)):
+        if field not in gh_fields:
+            raise SystemExit(
+                f"error: the injected payload has no '{field}' field naming the delivery it "
+                f"was built for, so it cannot be bound to {flag} — an unbound payload could "
+                f"be a stale or copied file for a different delivery (issue #3550)")
+        got = gh_fields[field]
+        if not isinstance(got, int) or isinstance(got, bool):
+            raise SystemExit(
+                f"error: the injected payload's '{field}' must be an integer, got {got!r} "
+                f"({type(got).__name__}) (issue #3550)")
+        if got != expected:
+            raise SystemExit(
+                f"error: the injected payload was built for {field} #{got} but {flag} is "
+                f"{expected} — refusing to apply one delivery's authoritative data to "
+                f"another. The payload carries BOTH issue-specific and PR-specific fields "
+                f"(timestamps, pr_closes_this_issue), so reusing it across PRs of the same "
+                f"issue records the new pr with the old pr's data. Re-derive the payload for "
+                f"({args.issue}, {args.pr}) (issue #3550)")
+
+    # `closed_at` is read AFFIRMATIVELY, never by truthiness (issue #3550). The `--from-json`
+    # seam can inject anything, and a falsy-but-not-null value ("" / 0 / false) or an ABSENT
+    # key would otherwise be silently normalized to the slice marker — a permissive branch
+    # keyed on the absence of a bad signal, which is the exact shape CLAUDE.md forbids. So:
+    # the key MUST be present, and its value MUST be either None or a timestamp string.
+    if "closed_at" not in gh_fields:
+        raise SystemExit(
+            "error: authoritative field 'closed_at' is absent (the key is required: its "
+            "VALUE — null or a timestamp — carries the record's kind, so an absent key is "
+            "unmeasured, never a slice; issue #3550)")
+    closed_at = gh_fields["closed_at"]
+    if closed_at is not None and not isinstance(closed_at, str):
+        raise SystemExit(
+            f"error: authoritative field 'closed_at' must be null or an RFC-3339 timestamp "
+            f"string, got {closed_at!r} (issue #3550)")
+    if isinstance(closed_at, str) and not closed_at.strip():
+        raise SystemExit(
+            "error: authoritative field 'closed_at' is an empty string — null is the only "
+            "spelling of 'this issue is not closed' (issue #3550)")
+    # Every timestamp that reaches the arithmetic must be a FULL instant, checked here rather
+    # than only for closed_at: a date-only or tz-naive value from the --from-json seam parses
+    # and then raises TypeError out of _seconds_between, whichever field carried it.
+    for key in ("created_at", "pr_opened_at", "merged_at"):
+        _require_full_timestamp(gh_fields[key], key)
+    if isinstance(closed_at, str):
+        _require_full_timestamp(closed_at, "closed_at")
+
+    # closed_at <-> --slice, coupled in BOTH directions (issue #3550), refused here as a bad
+    # invocation so the CLI names the offending flag rather than reporting an opaque
+    # built-record schema/basis error. Mirrors the gate coupling above.
+    #
+    # `--slice` asserts a fact about DELIVERY time — "when this PR merged, the issue was
+    # deliberately open" — and CURRENT state cannot decide it, so this refuses rather than
+    # guesses. A TIMESTAMP COMPARISON WAS TRIED AND IS WRONG (issue #3559): an auto-closing
+    # PR merges BEFORE GitHub records the closure, so `closedAt > mergedAt` is the NORMAL
+    # ordering of an ordinary COMPLETED delivery, not the signature of a late-stamped slice —
+    # a `closedAt <= mergedAt` guard would therefore permit --slice on essentially every
+    # ordinary delivery while looking like a check. Per CLAUDE.md's #3229 lesson (a guard
+    # with known false-PASSes is worse than no guard, because it invites reliance it cannot
+    # support) it was REMOVED rather than weakened further. Deciding this properly needs the
+    # issue TIMELINE replayed to mergedAt, which is issue #3559.
+    #
+    # Cost, stated rather than hidden: a genuine slice cannot be stamped once its issue is
+    # ever closed. That is fail-closed — an unrecorded delivery is recoverable, a ledger that
+    # silently reclassifies a completed delivery as a slice is not.
+    if closed_at is None:
+        # FIRST: is the issue open, or merely not-yet-recorded-as-closed? GitHub records an
+        # auto-close AFTER the merge, and inside that propagation window an ordinary COMPLETED
+        # delivery presents EXACTLY as a never-closed issue — closed_at null AND stateReason
+        # empty — so both other signals lie and the operator would be told to pass --slice,
+        # recording a false slice. This PR's own closing declaration is the one signal that
+        # does not lie: a slice pr closes NOTHING, because its issue deliberately stays open.
+        # Checked regardless of --slice, and it is NOT a timing heuristic — no clock, no
+        # threshold, just an authoritative field already on the PR query.
+        # ONE MEASUREMENT, affirmatively required. Everything this guard needs is "did this
+        # PR declare it closes this issue" — a single fact both sides of which are derived in
+        # _github_fields from the same two authoritative queries. It was previously TWO
+        # operands (issue_url + closes_issues) carried across the --from-json seam, where an
+        # operator could make them disagree; every mismatch failed OPEN, because a non-match
+        # and a correct non-match are the same observation. Six consecutive defects on that
+        # seam (closed_at truthiness, stateReason x3, closes_issues value, issue_url binding)
+        # were all that one shape, so the operands were removed rather than validated a
+        # seventh time. A bool cannot half-agree with itself.
+        if "pr_closes_this_issue" not in gh_fields:
+            raise SystemExit(
+                "error: 'pr_closes_this_issue' is required to tell a slice from a completed "
+                "delivery whose auto-close has not propagated yet (both show a null "
+                "closed_at) — an unmeasured signal is never read as 'closes nothing' "
+                "(issue #3550)")
+        closes_this = gh_fields["pr_closes_this_issue"]
+        if not isinstance(closes_this, bool):
+            raise SystemExit(
+                f"error: 'pr_closes_this_issue' must be a boolean, got {closes_this!r} "
+                f"({type(closes_this).__name__}) — a truthy/falsy stand-in is unmeasured "
+                f"input, never an affirmative answer (issue #3550)")
+        if closes_this:
+            raise SystemExit(
+                f"error: PR #{args.pr} declares it CLOSES issue #{args.issue}, so this is a "
+                f"completed delivery, not a slice — its closed_at is null only because "
+                f"GitHub has not recorded the auto-close yet (it lands after the merge). "
+                f"Re-run once the close is recorded and stamp it WITHOUT --slice; passing "
+                f"--slice here would file a false slice record (issue #3550).")
+        # The issue is genuinely open. Whether it was open AT DELIVERY is a property of the
+        # issue, not of the flag, so it is decided BEFORE the coupling below — otherwise a
+        # reopened issue is told to pass --slice and the next invocation refuses it, bouncing
+        # the operator between two refusals.
+        _assert_never_closed(gh_fields, args.issue)
+        if not slice_delivery:
+            raise SystemExit(
+                f"error: issue #{args.issue} is still OPEN (its closed_at is null), so this "
+                f"is a SLICE delivery: a merged PR shipping part of an issue that "
+                f"deliberately stays open. Pass --slice to record it — the PR's mergedAt then "
+                f"bounds cycle_time_s and closed_at is recorded as null (issue #3550).\n"
+                f"       Do NOT route around this refusal. Both available workarounds are "
+                f"FORBIDDEN: (1) closing the issue to satisfy this tool — a tool's data model "
+                f"must never decide whether a problem is recorded as solved; (2) "
+                f"hand-appending a record to the JSONL past the validator — the tool is the "
+                f"gate on the ledger's shape.")
+    elif slice_delivery:
+        raise SystemExit(
+            f"error: --slice records a delivery of an issue that was deliberately OPEN when "
+            f"the PR merged, but issue #{args.issue} is CLOSED now (closed_at {closed_at}) "
+            f"and current state cannot tell a late-stamped slice from an ordinary completed "
+            f"delivery — GitHub records an auto-close AFTER the merge, so the timestamps look "
+            f"alike. If this WAS a completed delivery, drop --slice. If it was genuinely a "
+            f"slice stamped after the issue closed, that needs the issue timeline replayed to "
+            f"mergedAt: issue #3559 — do NOT hand-append the record (issue #3550).")
 
     created = gh_fields["created_at"]
     pr_opened = gh_fields["pr_opened_at"]
     merged = gh_fields["merged_at"]
-    closed = gh_fields["closed_at"]
+    # null IS the slice marker. `closed_at` was affirmatively validated above (present, and
+    # either None or a non-blank string), so this is a kind selection, not a normalization of
+    # something falsy: a slice records null even when the issue has since closed, because the
+    # record states what was true at delivery time.
+    closed = None if slice_delivery else closed_at
+    # cycle_time_s's basis is selected by the record's kind — see _validate_cycle_time_basis,
+    # which cross-checks this arithmetic over the whole ledger.
+    cycle_basis = merged if slice_delivery else closed
     priority = args.priority or gh_fields.get("priority")
     routing = args.routing or gh_fields.get("routing")
     if priority is None:
@@ -369,7 +824,7 @@ def build_record(args, gh_fields: dict) -> dict:
         "pr_opened_at": pr_opened,
         "merged_at": merged,
         "closed_at": closed,
-        "cycle_time_s": _seconds_between(created, closed),
+        "cycle_time_s": _seconds_between(created, cycle_basis),
         "phase_s": {
             "to_pr_s": _seconds_between(created, pr_opened),
             "review_s": _seconds_between(pr_opened, merged),
@@ -520,6 +975,15 @@ def aggregate(records: list) -> dict:
     `roborev_nits_total` / `roborev_severity_records`) rather than folded into the weighted
     score, keeping `rank()`'s RETRO_WEIGHTS-keyed categories unchanged and deterministic.
 
+    Slice deliveries (issue #3550): a record with `closed_at: null` is a SLICE — a merged PR
+    shipping part of an issue that DELIBERATELY stays open. It is a real, separate delivery
+    (so it is tallied like any other), but it is NOT a completed issue, so it is also counted
+    in the informational `slice_records` extra and reported as its own class by `cmd_retro` —
+    otherwise an issue shipping three slices would read as three completed deliveries (the
+    #2314 multi-cycle problem in a new form). The count requires the key to be PRESENT and
+    null (an affirmative measurement): an ABSENT closed_at is a schema violation the
+    validated-records precondition rules out, never silently read as a slice.
+
     Ungated deliveries (issue #3448): a `gate: "not-run"` record contributes 0 failed rounds
     (zero rounds were observed) but is NOT silently indistinguishable from a clean one-run
     pass — it is counted in the informational `gate_not_run_records` extra and reported as
@@ -530,7 +994,10 @@ def aggregate(records: list) -> dict:
     nit_total = 0
     severity_records = 0
     not_run_records = 0
+    slice_records = 0
     for r in records:
+        if "closed_at" in r and r["closed_at"] is None:
+            slice_records += 1
         tally["claim_collisions"] += r["claim_collisions"]
         tally["rebase_events"] += r["rebase_events"]
         tally["rework"] += r["rework"]
@@ -558,6 +1025,7 @@ def aggregate(records: list) -> dict:
     tally["roborev_nits_total"] = nit_total
     tally["roborev_severity_records"] = severity_records
     tally["gate_not_run_records"] = not_run_records
+    tally["slice_records"] = slice_records
     return tally
 
 
@@ -633,6 +1101,16 @@ def cmd_retro(args) -> int:
         print(f"  ({tally['gate_not_run_records']} of {len(records)} record(s): no full gate "
               f"of record ran — gate 'not-run', excluded from gate_failures above; these are "
               f"UNGATED deliveries, not gated passes — see issue #3448)")
+
+    # slice deliveries (issue #3550): reported as their own class so a slice of a
+    # deliberately-open issue is never read as a completed issue. Not a weighted category —
+    # a slice is a successful delivery, not a failure; the fact worth surfacing is what the
+    # record COUNTS AS.
+    if tally["slice_records"]:
+        print(f"  ({tally['slice_records']} of {len(records)} record(s): SLICE deliveries — a "
+              f"merged PR shipping part of an issue that intentionally stays OPEN "
+              f"(closed_at null), cycle time bounded by the PR's mergedAt; counted as "
+              f"separate deliveries, NOT as completed issues — see issue #3550)")
 
     top_cat, top_cnt, _, top_score = ranked[0]
     if top_score == 0:
@@ -721,8 +1199,17 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--orphan-minutes", dest="orphan_minutes", type=int, default=None,
                      help="total minutes background work sat completed-but-unowned this cycle "
                           "(issue #2667); OPTIONAL — omit when unobserved, never default to 0")
+    rec.add_argument("--slice", dest="slice_delivery", action="store_true",
+                     help="record a delivery of an issue that intentionally stays OPEN "
+                          "(issue #3550): writes closed_at: null and bounds cycle_time_s on "
+                          "the PR's mergedAt. Refused if the issue is closed now, if it is "
+                          "open only because it was REOPENED, or if this PR declares it "
+                          "closes the issue (a slice PR closes nothing)")
     rec.add_argument("--from-json", dest="from_json", default=None,
-                     help="inject GitHub-derived fields from a JSON file (else pull via gh)")
+                     help="inject GitHub-derived fields from a JSON file (else pull via gh). "
+                          "The file must name the delivery it was built for with integer "
+                          "'issue' and 'pr' keys matching --issue/--pr (issue #3550): a stale "
+                          "or copied payload would otherwise be applied to another delivery")
     rec.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
                      help="append even if this (issue, pr) cycle already has a record "
                           "(default: refuse; a reopened issue's NEW pr never needs this)")

@@ -157,7 +157,20 @@ The pipeline measures itself so improvement is data-driven, not anecdotal:
   append-only ledger `docs/reports/delivery-telemetry.jsonl` (schema:
   `docs/reports/delivery-telemetry.schema.json`) via `scripts/delivery-telemetry.py record`. A
   reopened issue that ships more than once legitimately gets one record per shipped PR (issue #2314)
-  — retro aggregation by issue treats such multi-cycle issues as multiple deliveries, not one. Records
+  — retro aggregation by issue treats such multi-cycle issues as multiple deliveries, not one. So does
+  an issue that ships one or more **slices** while DELIBERATELY remaining open (issue #3550): stamp each
+  with `--slice`, which records `closed_at: null` (the marker) and bounds `cycle_time_s` on the PR's
+  `mergedAt` — the authoritative terminal timestamp of a slice — and `retro` reports those records as
+  their own SLICE class, never as completed issues. `--slice` states what was true at DELIVERY time,
+  which the issue's CURRENT state cannot decide (GitHub records an auto-close AFTER the merge, so an
+  ordinary completed delivery and a late-stamped slice look alike), so it is refused fail-closed for a
+  currently-CLOSED issue, for one open only because it was REOPENED, and inside GitHub's post-merge
+  auto-close propagation window — there a completed delivery presents identically to a never-closed issue
+  (closed_at null AND stateReason empty) and only the PR's own `closingIssuesReferences` tells them apart,
+  since a slice PR closes NOTHING. Stamp a slice before its issue is ever closed, until #3559 lands
+  timeline-based classification. Closing the issue to satisfy the tool (a tool's data
+  model must never decide whether a problem is recorded as solved) and hand-appending a line past the
+  validator are both FORBIDDEN. Records
   hold authoritative data only — GitHub-derived timestamps (cycle time + coarse phase durations) plus
   run-observed counters (claim collisions, rebase events, agent-gate pass/fail + run count, roborev
   findings, rework). A counter that was not observed is an error, never a fabricated `0`. A delivery
