@@ -626,10 +626,37 @@ STUB
   # CQLITE_ALLOW_FILE_GROWTH=1 ever stopped reaching the run, this case would silently
   # degrade into a second copy of case 9 and pass without ever entering the allowed-growth
   # state it exists to cover. This needle is emitted ONLY when the allowance is what let a
-  # populated grown list pass, and the FAIL branch emits the "none (… unset)" variant
+  # populated grown list pass, and every other state emits a "NOT enabled — …" variant
   # instead, so it cannot be satisfied from any other state.
   has "case11: CONTROL — the sibling records the allowance as the reason the ratchet passed" \
       "$sib11" "growth allowance: ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1"
+
+  # -------------------------------------------------------------------------
+  # Case 13 — CQLITE_ALLOW_FILE_GROWTH set to a NON-1 value (#3401 review item 3). The
+  # branch distinguishing "set to something that is not 1" from "never set" was otherwise
+  # unexercised, so it could regress while the suite stayed green. Saying "unset" to
+  # someone who DID set the variable hides the one fact that fixes their invocation.
+  # The needle is the SUPPLIED VALUE itself (`set to 'true'`): no other branch can emit it
+  # — the =1 branch prints the ALLOWED line and the genuinely-unset branch prints "is not
+  # set" — so the assert cannot pass unless this run really read that value back out.
+  # -------------------------------------------------------------------------
+  mkrepo badallow cqlite-core/src/big.rs 900 950 main; r13="$REPO"
+  out13="$tmp/badallow.out"
+  run_only_file_size "$r13" "$out13" PATH="$STUBBIN:$PATH" FS_SABOTAGE=dir \
+      CQLITE_ALLOW_FILE_GROWTH=true
+  d13=$(logdir_of "$out13") || bad "case13: the run published no usable 'logs:' dir"
+  sib13="$d13/file-size.persistence-error.log"
+
+  assert_verdict "case13: a non-1 allowance value does NOT allow the growth (still FAIL)" "$d13" FAIL
+  has "case13: the sibling reports the SUPPLIED value, so the reader can see why it did not take" \
+      "$sib13" "CQLITE_ALLOW_FILE_GROWTH is set to 'true', expected exactly 1"
+  if [ ! -s "$sib13" ]; then
+    bad "case13: no sibling written — the unset-vs-wrong-value distinction could not be checked"
+  elif grep -Fq -- "CQLITE_ALLOW_FILE_GROWTH is not set" "$sib13"; then
+    bad "case13: claims the variable is NOT SET on a run that supplied a value"
+  else
+    ok "case13: never claims the variable is unset when a value was supplied"
+  fi
 
   # -------------------------------------------------------------------------
   # Case 12 — the "also written to" claim must be VERIFIED, not assumed (#3401 review
@@ -680,7 +707,7 @@ printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\
 # precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
 # remaining asserts and lands here too, so the message names both causes rather than
 # misattributing one as the other.
-EXPECTED_CHECKS=72
+EXPECTED_CHECKS=75
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"

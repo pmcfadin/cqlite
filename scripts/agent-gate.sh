@@ -7380,10 +7380,13 @@ run_file_size() {
   #     terminal verdict it promises;
   #   * to STDOUT *after* record_result, because every other component prints in that
   #     order and a gratuitous divergence is its own bug magnet.
-  # This LAST log write is deliberately UNVERIFIED. The gap is IRREDUCIBLE and the obvious
-  # fix — "attempt and check the terminal append before the final persistence decision" —
-  # is NOT IMPLEMENTABLE, so it is named here and rejected rather than re-derived each
-  # review round (#3401 review A2, re-raised as job 138 F1):
+  # This LAST log write is deliberately UNVERIFIED — an ACCEPTED RESIDUAL under a lead
+  # ruling (Option A, https://github.com/pmcfadin/cqlite/issues/3401#issuecomment-5466376424),
+  # not an open question and not a resolved defect: the code here is unchanged, so nothing
+  # about the substance was answered. The obvious fix — "attempt and check the terminal
+  # append before the final persistence decision" — is not implementable, and the argument
+  # is set out here so it can be weighed on its merits instead of re-derived each review
+  # round (#3401 review A2, re-raised as job 138 F1):
   #   * CIRCULARITY: this line's CONTENT IS THE VERDICT, and the verdict depends on the
   #     persistence decision. It cannot be written before the decision it reports.
   #   * A POST-WRITE RE-CHECK BUYS NOTHING: a read-back can VERIFY the append without
@@ -7395,6 +7398,15 @@ run_file_size() {
   #   * THE LOSS IS BOUNDED: everything #3401 exists for (thresholds, base ref, over/grown
   #     entries) is written AND checked above; a failure here costs only the terminal
   #     verdict LINE, which the SUMMARY carries independently.
+  # WHAT WOULD FALSIFY ALL OF THAT — check it before relying on the argument above. The
+  # rejection holds ONLY WHILE BOTH of these remain true of this call site:
+  #   (a) this line's content IS the component verdict, and
+  #   (b) that verdict depends on the persistence decision computed above.
+  # Break either — record the verdict earlier, write a provisional marker here and amend
+  # it, move the persistence decision after this write — and the circularity is gone, the
+  # check becomes implementable, and THIS REJECTION IS VOID: re-examine the finding on its
+  # merits rather than citing this comment, which would then be arguing for a constraint
+  # that no longer exists.
   printf '%s\n' ">>> [$name] $status ($((end - start))s)" 2>/dev/null >>"$log"
   record_result "$name" "$status" "$((end - start))"
   printf '%s\n' ">>> [$name] $status ($((end - start))s)"
