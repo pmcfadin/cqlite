@@ -68,10 +68,11 @@
 use arrow::array::Array;
 
 use super::canonical_jsonl::{CanonicalValue, NormalizedFloat};
-use super::cql_type::CqlTypeSpec;
+use super::cql_type::{ColumnType, CqlTypeSpec, SeqKind};
 use super::decimal::{
     exact_from_decimal128, exact_from_text, is_canonical_text, ExactDecimal, EXPORT_DECIMAL_SCALE,
 };
+use super::golden_lexeme::Lex;
 use super::golden_rows::fold_null;
 
 /// WHERE a value sits. Two things depend on it: the diagnostic text, and
@@ -242,6 +243,31 @@ impl<'a> Declared<'a> {
             Some(CqlTypeSpec::Scalar(name)) => Some(name.as_str()),
             _ => None,
         }
+    }
+
+    /// Does a value at THIS position have to keep its literal TEXT, because
+    /// `serde_json`'s parse would destroy it?
+    ///
+    /// True for exactly two declared scalars, and the decision is taken HERE —
+    /// at a position, from that position's declared type — rather than per
+    /// COLUMN, so a `map<decimal,int>` preserves its declared-`decimal`
+    /// positions and leaves its `int` values alone (round 11).
+    ///
+    /// * `decimal` — `sstabledump` writes a decimal CELL as a bare JSON number,
+    ///   which the shared parser turns into an `f64`, and an `f64` cannot
+    ///   identify the decimal it came from (`0.100000000000000001` and `0.1`
+    ///   are ONE double).
+    /// * `varint` — a `varint` above `u64::MAX` also becomes an `f64`
+    ///   (`Number::as_i64` and `as_u64` both fail), while the exported side
+    ///   reads that column back as an exact `Decimal128(38, 0)` `Int`. So the
+    ///   comparison was `Float` vs `Int` — a false mismatch — and the digits
+    ///   that would have shown a real corruption were already gone.
+    ///
+    /// Nothing else, deliberately: a `float`/`double` literal MUST reach
+    /// `serde_json`'s (exact, `float_roundtrip`) number parser unchanged, which
+    /// is what keeps the exact-bit float comparison exact.
+    fn preserves_exact_lexeme(&self) -> bool {
+        matches!(self.scalar(), Some("decimal") | Some("varint"))
     }
 
     /// A refusal naming the position, the declared type (or its absence) and the
@@ -488,8 +514,12 @@ fn type_stringified_scalar(v: CanonicalValue, at: &Declared<'_>) -> Result<Canon
 ///   REFUSED, because a double cannot identify the decimal it was parsed from —
 ///   `0.100000000000000001` and `0.1` are the same double, so the recovery this
 ///   replaced (round 4→10) canonicalized the first as the second and would have
-///   passed a lossy export. A `varint` is deliberately NOT converted — it is an
-///   integer domain on both sides.
+///   passed a lossy export.
+/// * A `varint` stays an INTEGER domain on both sides — but a `varint` above
+///   `u64::MAX` cannot survive `serde_json`'s number parse either, so its
+///   literal is preserved by the same mechanism and read back here with an
+///   exact `i128` parse. A `varint` that arrives as a DOUBLE is REFUSED for the
+///   same reason a decimal is: the digits are already gone.
 fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalValue, String> {
     let Some(name) = at.scalar() else {
         // No declared SCALAR here: either a container value under a container
@@ -540,8 +570,145 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
             }
         }
         (CanonicalValue::Int(i), "decimal") => ExactDecimal::from_i128(i).canonical(),
+        // A `varint`'s PRESERVED LITERAL. The exported side reads a
+        // `Decimal128(38, 0)` back as an `Int`, so the golden lands on the same
+        // exact `i128` — no `f64` in either path. A literal too large for an
+        // `i128` is REFUSED: `Decimal128` could not have carried it either, so
+        // there is nothing to compare it against.
+        (CanonicalValue::Text(s), "varint") => match s.parse::<i128>() {
+            Ok(i) => CanonicalValue::Int(i),
+            Err(_) => {
+                return Err(at.refuse(&format!(
+                    "the golden varint literal '{s}' does not fit an i128, which is the                      unscaled range of the Decimal128(38, 0) the export writes a `varint`                      to; the harness refuses to compare rather than truncate"
+                )))
+            }
+        },
+        (CanonicalValue::Float(NormalizedFloat(f)), "varint") => {
+            return Err(at.refuse(&format!(
+                "the golden varint arrived as the double {f:?}, i.e. its LITERAL TEXT was                  lost before the harness saw it — a `varint` above u64::MAX is parsed by                  serde_json as an f64, while the export writes it as an exact                  Decimal128(38, 0). The literal is preserved by                  golden_lexeme::preserve_exact_lexemes, which every golden goes through;                  reaching here means this value bypassed it"
+            )));
+        }
         (other, _) => other,
     })
+}
+
+// ---------------------------------------------------------------------------
+// LEXEME PRESERVATION — the SAME descent, one stage earlier
+// ---------------------------------------------------------------------------
+//
+// # Why this lives here and not in `golden_lexeme.rs`
+//
+// `golden_lexeme.rs` owns the LEXICAL machinery (a JSON reader that retains
+// every scalar's original text, and an emitter that puts it back verbatim). It
+// does NOT own the question "must this number keep its literal?", because that
+// question is answered by a POSITION's declared type — and this module is the
+// single place that maps positions to declared types.
+//
+// The first version of the lexeme pass got this wrong in exactly the way rounds
+// 5–7 got the canonicalization wrong: it asked "does this COLUMN mention a
+// decimal anywhere?" and then quoted every number in the column's value. That
+// is coarse where the declared type is precise, and it produced a real false
+// failure — a `map<decimal,int>` had its `int` VALUES turned into strings. One
+// declared-type recursion, one set of positions, one answer; a second walker
+// beside it is the defect, not a detail of it.
+
+/// Preserve the literal text of every number sitting at a position whose
+/// declared type is `decimal` or `varint` — and NO other number.
+///
+/// Recurses in lockstep with [`canonicalize_golden`], over the same declared
+/// type, deriving each child position with the same private [`Declared::child`]:
+/// a sequence's `Element`, a frozen map's `MapValue`, a tuple's `TupleField`,
+/// and a UDT field's explicitly NAMED absence. So the two descents cannot
+/// disagree about which position carries which declared type.
+pub(super) fn preserve_lexemes(value: &mut Lex, at: &Declared<'_>) {
+    if at.preserves_exact_lexeme() {
+        // A declared SCALAR: this position IS the value, and a scalar has no
+        // children to descend into.
+        value.quote_number_lexeme();
+        return;
+    }
+    match (value, at.spec()) {
+        // A frozen list/set arrives as a JSON ARRAY of typed values.
+        (Lex::Arr(items), Some(CqlTypeSpec::Seq { elem, .. })) => {
+            for (i, item) in items.iter_mut().enumerate() {
+                let child = at.child(Some(elem), Position::Element, format!("{}[{i}]", at.ctx));
+                preserve_lexemes(item, &child);
+            }
+        }
+        // A CQL tuple arrives as a POSITIONAL JSON array; a length disagreement
+        // is a difference for the value comparison to report, never something to
+        // guess past here.
+        (Lex::Arr(items), Some(CqlTypeSpec::Tuple(specs))) if items.len() == specs.len() => {
+            for (i, (item, spec)) in items.iter_mut().zip(specs.iter()).enumerate() {
+                let child = at.child(
+                    Some(spec),
+                    Position::TupleField(i),
+                    format!("{}.{i}", at.ctx),
+                );
+                preserve_lexemes(item, &child);
+            }
+        }
+        // A frozen map arrives as a JSON OBJECT. Its KEYS are strings by JSON's
+        // own rules — a `map<decimal,int>` key's literal is therefore ALREADY
+        // preserved, and read exactly at the `FrozenMapObjectKey` position — so
+        // only the VALUES can be bare numbers here. A non-frozen map's key is
+        // preserved the same way, as Cassandra's stringified `path` component.
+        (Lex::Obj(fields), Some(CqlTypeSpec::Map { value, .. })) => {
+            for (_, key, field) in fields.iter_mut() {
+                let child = at.child(Some(value), Position::MapValue, format!("{}.{key}", at.ctx));
+                preserve_lexemes(field, &child);
+            }
+        }
+        // A UDT's FIELD types are not declared to the harness, so no position
+        // inside one can be known to be a `decimal`/`varint`. Descended anyway,
+        // with the same NAMED absence `canonicalize_golden` uses, so the two
+        // recursions stay structurally identical — nothing is quoted, and the
+        // matching absence in `canonicalize_golden` means nothing needs to be.
+        (Lex::Obj(fields), Some(CqlTypeSpec::Udt(_))) => {
+            for (_, name, field) in fields.iter_mut() {
+                let child = Declared::unavailable(
+                    "a UDT's FIELD types are not declared to the harness — a frozen UDT \
+                     arrives as one JSON object whose values sstabledump has already typed",
+                    Position::UdtField(name.clone()),
+                    format!("{}.{name}", at.ctx),
+                );
+                preserve_lexemes(field, &child);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The declared POSITION of the `value` field of ONE `sstabledump` cell of
+/// `col` — or `None` when that cell's `value` carries nothing typed.
+///
+/// This is the same split `golden_rows::project_column` makes when it assembles
+/// a column, kept here because it is a statement about declared types: a
+/// non-frozen collection is dumped as one cell PER ELEMENT, so such a cell's
+/// `value` is an ELEMENT or a MAP VALUE, not the whole column. Getting it from
+/// the column's own spec (as the first version of the lexeme pass did) would
+/// quote a `list<decimal>` element's literal only by accident and a
+/// `map<decimal,int>` value's wrongly.
+///
+/// `None` for a non-frozen SET, whose elements live entirely in the stringified
+/// `path` (the cell's `value` is the empty string), and for a multicell column
+/// whose parsed type is not a collection at all — a disagreement
+/// `project_column` reports as the error it is.
+pub(super) fn cell_value_declared<'a>(col: &'a ColumnType, ctx: String) -> Option<Declared<'a>> {
+    if !col.is_multicell_collection() {
+        return Some(Declared::cell(&col.spec, ctx));
+    }
+    match &col.spec {
+        CqlTypeSpec::Seq {
+            kind: SeqKind::Set, ..
+        } => None,
+        CqlTypeSpec::Seq {
+            kind: SeqKind::List,
+            elem,
+        } => Some(Declared::element(elem, ctx)),
+        CqlTypeSpec::Map { value, .. } => Some(Declared::map_value(value, ctx)),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

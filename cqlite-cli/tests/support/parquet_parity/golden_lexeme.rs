@@ -1,6 +1,7 @@
-//! LEXEME-PRESERVING golden text for declared-`decimal` columns (#1490 round 10).
+//! LEXEME-PRESERVING golden text for declared-`decimal`/`varint` positions
+//! (#1490 rounds 10–11).
 //!
-//! # The defect this closes: an `f64` cannot identify the decimal it came from
+//! # The defect this closes: an `f64` cannot identify the value it came from
 //!
 //! `sstabledump` writes a `decimal` CELL as a bare JSON number, and the shared
 //! comparator (`canonical_jsonl::CanonicalValue::from_json`) parses a bare JSON
@@ -17,25 +18,51 @@
 //! fixes it: by the time the value is an `f64` the distinguishing digits are
 //! already gone.
 //!
+//! `varint` has the same disease one exponent further out: a valid `varint`
+//! above `u64::MAX` fails both `Number::as_i64` and `as_u64` and lands on an
+//! `f64` too, while the exported side reads that column back as an exact
+//! `Decimal128(38, 0)` integer — so the comparison was `Float` vs `Int`, a
+//! false mismatch, with the digits that would have shown a real corruption
+//! already lost.
+//!
 //! So the literal TEXT has to survive the parse. This module preserves it, and
-//! `declared.rs` REFUSES a declared-`decimal` position that arrives as a
-//! double — so a lexeme this module fails to preserve produces a loud refusal,
-//! never a comparison.
+//! `declared.rs` REFUSES a declared-`decimal`/`varint` position that arrives as
+//! a double — so a lexeme this module fails to preserve produces a loud
+//! refusal, never a comparison.
 //!
-//! # How: quote the decimal lexemes before the shared parser sees them
+//! # How: quote those lexemes BEFORE the shared parser sees them
 //!
-//! For every `sstabledump` cell naming a column whose DECLARED type carries a
-//! `decimal`, the number lexemes inside that cell's `value` are QUOTED — turned
-//! into JSON strings, verbatim, digit for digit. The shared parser then hands
-//! the harness the literal itself, and the declared-type door routes it through
-//! [`super::decimal::exact_from_text`]: the same exact, `f64`-free parse a
-//! `decimal` PRIMARY-KEY component already used (Cassandra stringifies those, so
-//! their text was never lost).
+//! The number lexemes at declared-`decimal`/`varint` POSITIONS are QUOTED —
+//! turned into JSON strings, verbatim, digit for digit. The shared parser then
+//! hands the harness the literal itself, and the declared-type door routes it
+//! through [`super::decimal::exact_from_text`] (a `decimal`) or an exact `i128`
+//! parse (a `varint`): the same exact, `f64`-free reads a `decimal` PRIMARY-KEY
+//! component already used (Cassandra stringifies those, so their text was never
+//! lost).
 //!
 //! Everything else is re-emitted verbatim — every string keeps its original
 //! escaping, every other number keeps its original digits — so a `double`
 //! column's literal still reaches `serde_json`'s (`float_roundtrip`, exact)
 //! parser unchanged and the exact-bit `float`/`double` comparison is untouched.
+//!
+//! # The split with `declared.rs`, and why it is where it is
+//!
+//! This module owns the LEXICAL half only: a JSON reader that retains every
+//! scalar's original text, an emitter that puts it back verbatim, and the walk
+//! that finds the `sstabledump` CELLS in a line. The decision **"must this
+//! number keep its literal?"** is NOT here — it is taken per POSITION, from
+//! that position's declared type, by `declared::preserve_lexemes`, which
+//! recurses in lockstep with `declared::canonicalize_golden` over the same
+//! `CqlTypeSpec` and derives its child positions with the same private
+//! `Declared::child`.
+//!
+//! That split is the round-11 fix and it is deliberate. The first version of
+//! this module asked "does this COLUMN mention a `decimal` anywhere?" and then
+//! quoted every number in the column's value — reproducing, beside the
+//! declared-type door, exactly the coarse-instead-of-positional defect that
+//! door was built to end (rounds 5–7). It turned a `map<decimal,int>`'s `int`
+//! VALUES into strings: a false parity failure. Two recursive walkers over one
+//! value, disagreeing about positions, IS the defect.
 //!
 //! # Why this option and not the other two
 //!
@@ -64,9 +91,8 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
-
-use super::cql_type::{ColumnType, CqlTypeSpec};
+use super::cql_type::ColumnType;
+use super::declared;
 
 /// Placeholder markers a golden must never contain.
 ///
@@ -92,42 +118,12 @@ pub fn placeholder_marker(content: &str) -> Option<&'static str> {
         .find(|m| content.contains(m))
 }
 
-/// The names of the columns whose DECLARED type carries a `decimal` anywhere —
-/// a `decimal` cell, a `set<decimal>` element, a `map<text,decimal>` value, a
-/// `tuple<int,decimal>` member.
-///
-/// A UDT is named but not structurally known to the harness, so a `decimal`
-/// FIELD of a UDT is not reachable here. That is a declared absence, not an
-/// oversight: such a field arrives at a position whose declared type is
-/// explicitly `Unavailable`, where nothing converts it to a decimal on either
-/// side (see `declared.rs`), so it cannot reach the decimal comparison at all.
-pub fn decimal_columns(columns: &[ColumnType]) -> BTreeSet<String> {
-    columns
-        .iter()
-        .filter(|c| spec_carries_decimal(&c.spec))
-        .map(|c| c.name.clone())
-        .collect()
-}
-
-fn spec_carries_decimal(spec: &CqlTypeSpec) -> bool {
-    match spec {
-        CqlTypeSpec::Scalar(name) => name == "decimal",
-        CqlTypeSpec::Seq { elem, .. } => spec_carries_decimal(elem),
-        CqlTypeSpec::Map { key, value } => spec_carries_decimal(key) || spec_carries_decimal(value),
-        CqlTypeSpec::Tuple(specs) => specs.iter().any(spec_carries_decimal),
-        CqlTypeSpec::Udt(_) => false,
-    }
-}
-
-/// Rewrite a whole JSONL document, quoting the number lexemes of every
-/// declared-`decimal` column's cell value.
+/// Rewrite a whole JSONL document, quoting the number lexemes that sit at a
+/// declared-`decimal`/`varint` POSITION — and no others.
 ///
 /// Blank lines are preserved as-is; every other line is parsed, transformed and
 /// re-emitted. A line the scanner cannot read is an `Err` naming the line.
-pub fn preserve_decimal_lexemes(
-    content: &str,
-    decimals: &BTreeSet<String>,
-) -> Result<String, String> {
+pub fn preserve_exact_lexemes(content: &str, columns: &[ColumnType]) -> Result<String, String> {
     let mut out = String::with_capacity(content.len());
     for (idx, line) in content.lines().enumerate() {
         if line.trim().is_empty() {
@@ -136,11 +132,55 @@ pub fn preserve_decimal_lexemes(
             continue;
         }
         let mut value = parse_line(line.trim()).map_err(|e| format!("line {}: {e}", idx + 1))?;
-        quote_decimal_cells(&mut value, decimals);
+        visit_cells(&mut value, columns);
         value.emit(&mut out);
         out.push('\n');
     }
     Ok(out)
+}
+
+/// Find every `sstabledump` CELL in the line and hand its `value` to the
+/// declared-type descent at the position that cell's `value` occupies.
+///
+/// The whole document is walked (a cell sits under `partition`/`rows`, and a
+/// nested structure could hold one too), and the column is identified from the
+/// cell's OWN `name` field — never from the value's shape, which would be the
+/// type-guessing issue #28 forbids. A cell naming a column the case does not
+/// declare is left untouched here; `golden_rows::reject_undeclared_cells`
+/// FAILS the case on it, which is a louder answer than anything this pass could
+/// give.
+fn visit_cells(value: &mut Lex, columns: &[ColumnType]) {
+    let named = match value.field("name") {
+        Some(Lex::Str { decoded, .. }) => Some(decoded.clone()),
+        _ => None,
+    };
+    if let Some(name) = named {
+        if let Some(col) = columns.iter().find(|c| c.name == name) {
+            // WHICH position the cell's `value` sits at is a declared-type
+            // question, so it is answered by the declared-type door, not here.
+            if let Some(at) = declared::cell_value_declared(
+                col,
+                format!("cell '{}' ({})", col.name, col.declared),
+            ) {
+                if let Some(cell_value) = value.field_mut("value") {
+                    declared::preserve_lexemes(cell_value, &at);
+                }
+            }
+        }
+    }
+    match value {
+        Lex::Arr(items) => {
+            for item in items {
+                visit_cells(item, columns);
+            }
+        }
+        Lex::Obj(fields) => {
+            for (_, _, v) in fields {
+                visit_cells(v, columns);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// A JSON value with every scalar's ORIGINAL TEXT retained.
@@ -193,6 +233,25 @@ impl Lex {
         }
     }
 
+    /// Turn a NUMBER into the JSON STRING of its own lexeme; anything else is
+    /// left exactly as it is.
+    ///
+    /// The primitive `declared::preserve_lexemes` calls once it has decided,
+    /// FROM THE DECLARED TYPE AT THIS POSITION, that the literal must survive.
+    /// It is deliberately not recursive and not type-aware: recursion belongs to
+    /// the one declared-type descent.
+    pub(super) fn quote_number_lexeme(&mut self) {
+        if let Lex::Num(raw) = self {
+            // A JSON number lexeme contains only `-+.eE0123456789`, none of
+            // which JSON escapes, so quoting it is exact.
+            let quoted = format!("\"{raw}\"");
+            *self = Lex::Str {
+                raw: quoted,
+                decoded: std::mem::take(raw),
+            };
+        }
+    }
+
     pub fn to_json_text(&self) -> String {
         let mut out = String::new();
         self.emit(&mut out);
@@ -214,59 +273,6 @@ impl Lex {
                 .map(|(_, _, v)| v),
             _ => None,
         }
-    }
-}
-
-/// Quote every number lexeme inside the `value` of every cell naming a
-/// declared-`decimal` column.
-///
-/// The whole document is walked (a cell sits under `partition`/`rows`, and a
-/// static block or a nested structure could hold one too), and the decision is
-/// made from the cell's OWN `name` field — never from the value's shape, which
-/// would be the type-guessing issue #28 forbids.
-fn quote_decimal_cells(value: &mut Lex, decimals: &BTreeSet<String>) {
-    let names_a_decimal_column = match value.field("name") {
-        Some(Lex::Str { decoded, .. }) => decimals.contains(decoded),
-        _ => false,
-    };
-    if names_a_decimal_column {
-        if let Some(cell_value) = value.field_mut("value") {
-            quote_numbers(cell_value);
-        }
-    }
-    match value {
-        Lex::Arr(items) => {
-            for item in items {
-                quote_decimal_cells(item, decimals);
-            }
-        }
-        Lex::Obj(fields) => {
-            for (_, _, v) in fields {
-                quote_decimal_cells(v, decimals);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Turn every number in this subtree into the JSON STRING of its own lexeme.
-///
-/// Recursive so a collection of decimals (`frozen<set<decimal>>` arrives as a
-/// JSON array, `frozen<map<text,decimal>>` as a JSON object) is covered too.
-fn quote_numbers(value: &mut Lex) {
-    match value {
-        Lex::Num(raw) => {
-            // A JSON number lexeme contains only `-+.eE0123456789`, none of
-            // which JSON escapes, so quoting it is exact.
-            let quoted = format!("\"{raw}\"");
-            *value = Lex::Str {
-                raw: quoted,
-                decoded: std::mem::take(raw),
-            };
-        }
-        Lex::Arr(items) => items.iter_mut().for_each(quote_numbers),
-        Lex::Obj(fields) => fields.iter_mut().for_each(|(_, _, v)| quote_numbers(v)),
-        _ => {}
     }
 }
 

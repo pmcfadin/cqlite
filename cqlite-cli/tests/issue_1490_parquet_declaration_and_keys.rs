@@ -860,12 +860,11 @@ fn project_golden_types_multicell_collection_paths() {
         col("s", "set<float>"),
         col("m", "map<boolean, decimal>"),
     ];
-    // Through `preserve_decimal_lexemes` first, exactly as `mod.rs::load_golden`
+    // Through `preserve_exact_lexemes` first, exactly as `mod.rs::load_golden`
     // does: the `map<boolean,decimal>` entry VALUE is a bare JSON number, and
     // the harness reads a decimal from its LITERAL — a decimal that reaches the
     // comparison as a double is refused (round 10, section 5).
-    let golden = preserve_decimal_lexemes(GOLDEN, &decimal_columns(&columns))
-        .expect("the rewrite must succeed");
+    let golden = preserve_exact_lexemes(GOLDEN, &columns).expect("the rewrite must succeed");
     let doc = parse_document_str_with_keys(
         &golden,
         Path::new("<synthetic>"),
@@ -997,7 +996,7 @@ fn a_decimal_cell_without_a_declared_scalar_is_refused() {
 // back.
 //
 // So the literal's TEXT is preserved before the shared parser sees it
-// (`golden_lexeme::preserve_decimal_lexemes`, called by `mod.rs::load_golden`),
+// (`golden_lexeme::preserve_exact_lexemes`, called by `mod.rs::load_golden`),
 // every golden decimal is read by `decimal::exact_from_text`, and a declared
 // `decimal` that still arrives as a double is REFUSED. The two halves are
 // coupled deliberately: `an_unrewritten_decimal_cell_is_refused_end_to_end`
@@ -1006,9 +1005,7 @@ fn a_decimal_cell_without_a_declared_scalar_is_refused() {
 // (section 3) goes through the same rewrite, for the same reason.
 // ===========================================================================
 
-use parquet_parity::golden_lexeme::{
-    decimal_columns, parse_line, placeholder_marker, preserve_decimal_lexemes,
-};
+use parquet_parity::golden_lexeme::{parse_line, placeholder_marker, preserve_exact_lexemes};
 
 /// A golden decimal CELL, through THE declared-type door at the `Cell` position.
 fn decimal_cell_golden(raw: CanonicalValue) -> Result<CanonicalValue, String> {
@@ -1123,35 +1120,36 @@ fn a_golden_decimal_that_lost_its_literal_is_refused() {
     );
 }
 
-/// The rewrite quotes ONLY declared-decimal cells, and only their numbers.
+/// The rewrite quotes ONLY the positions declared `decimal`/`varint`, and only
+/// their numbers.
 #[test]
-fn the_rewrite_preserves_decimal_lexemes_and_nothing_else() {
+fn the_rewrite_preserves_exact_lexemes_and_nothing_else() {
     let columns = vec![
         col("balance", "decimal"),
+        col("big", "varint"),
         col("rate", "double"),
         col("tags", "frozen<set<decimal>>"),
         col("note", "text"),
     ];
-    let decimals = decimal_columns(&columns);
-    assert_eq!(
-        decimals.iter().cloned().collect::<Vec<_>>(),
-        vec!["balance".to_string(), "tags".to_string()],
-        "a decimal ANYWHERE in the declared type carries the column into the rewrite"
-    );
 
     let line = concat!(
         r#"{"partition":{"key":["k"]},"rows":[{"type":"row","clustering":[],"cells":["#,
         r#"{"name":"balance","value":0.100000000000000001},"#,
+        r#"{"name":"big","value":123456789012345678901234567890},"#,
         r#"{"name":"rate","value":1014.5449131979983},"#,
         r#"{"name":"tags","value":[1.5,2.25]},"#,
         r#"{"name":"note","value":"0.1"}]}]}"#,
         "\n"
     );
-    let rewritten = preserve_decimal_lexemes(line, &decimals).expect("the rewrite must succeed");
+    let rewritten = preserve_exact_lexemes(line, &columns).expect("the rewrite must succeed");
 
     assert!(
         rewritten.contains(r#"{"name":"balance","value":"0.100000000000000001"}"#),
         "the decimal literal must survive verbatim, quoted: {rewritten}"
+    );
+    assert!(
+        rewritten.contains(r#"{"name":"big","value":"123456789012345678901234567890"}"#),
+        "a varint literal beyond u64::MAX must survive verbatim too: {rewritten}"
     );
     assert!(
         rewritten.contains(r#"{"name":"tags","value":["1.5","2.25"]}"#),
@@ -1167,14 +1165,205 @@ fn the_rewrite_preserves_decimal_lexemes_and_nothing_else() {
         "a text cell is untouched: {rewritten}"
     );
 
-    // With NO decimal column the document is JSON-equivalent to the original —
+    // With NO declared column the document is JSON-equivalent to the original —
     // the rewrite cannot change anything else about a golden.
-    let untouched = preserve_decimal_lexemes(line, &decimal_columns(&[])).expect("no-op rewrite");
+    let untouched = preserve_exact_lexemes(line, &[]).expect("no-op rewrite");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(untouched.trim()).expect("valid JSON"),
         serde_json::from_str::<serde_json::Value>(line.trim()).expect("valid JSON"),
         "a golden with no declared decimal must survive the rewrite unchanged"
     );
+}
+
+/// ROUND-11 FINDING 1: the preservation is per POSITION, not per COLUMN.
+///
+/// A column whose declared type MENTIONS a `decimal` used to have every number
+/// in its value quoted, so a `map<decimal,int>` turned its `int` VALUES into
+/// strings — a false parity failure on ordinary correct data. The decision is
+/// now taken at each position from that position's declared type, by the same
+/// `declared.rs` recursion that canonicalizes the value.
+///
+/// Both map shapes are covered, because they reach the harness differently: a
+/// NON-frozen `map<decimal,int>` arrives as one cell per entry (key in the
+/// stringified `path`, value a bare JSON number), a FROZEN one as a single JSON
+/// object (keys already strings). And a `list<int>` sitting in the same
+/// decimal-bearing row must be untouched.
+#[test]
+fn the_rewrite_leaves_non_decimal_positions_of_a_decimal_bearing_column_alone() {
+    const GOLDEN: &str = concat!(
+        r#"{"partition":{"key":["k"]},"rows":[{"type":"row","clustering":[],"#,
+        r#""liveness_info":{"tstamp":"2021-01-01T00:00:00Z"},"cells":["#,
+        r#"{"name":"m","path":["1.5"],"value":3},"#,
+        r#"{"name":"fm","value":{"1.5":3}},"#,
+        r#"{"name":"l","value":[1,2]},"#,
+        r#"{"name":"t","value":[7,2.25]},"#,
+        r#"{"name":"d","value":2.25}"#,
+        r#"]}]}"#,
+        "\n"
+    );
+    let columns = vec![
+        col("id", "text"),
+        col("m", "map<decimal, int>"),
+        col("fm", "frozen<map<decimal, int>>"),
+        col("l", "frozen<list<int>>"),
+        col("t", "frozen<tuple<int, decimal>>"),
+        col("d", "decimal"),
+    ];
+
+    let rewritten = preserve_exact_lexemes(GOLDEN, &columns).expect("the rewrite must succeed");
+
+    // The exact defect: the map's declared-`int` VALUES stay JSON numbers.
+    assert!(
+        rewritten.contains(r#"{"name":"m","path":["1.5"],"value":3}"#),
+        "a map<decimal,int> entry VALUE is declared `int` and must NOT be quoted: {rewritten}"
+    );
+    assert!(
+        rewritten.contains(r#"{"name":"fm","value":{"1.5":3}}"#),
+        "a frozen map<decimal,int>'s value is declared `int` and its key is already a JSON \
+         string, so NOTHING here changes: {rewritten}"
+    );
+    assert!(
+        rewritten.contains(r#"{"name":"l","value":[1,2]}"#),
+        "a list<int> in a decimal-bearing table must be untouched: {rewritten}"
+    );
+    // A tuple is positional: member 0 is `int`, member 1 is `decimal`.
+    assert!(
+        rewritten.contains(r#"{"name":"t","value":[7,"2.25"]}"#),
+        "only the tuple member DECLARED decimal is quoted: {rewritten}"
+    );
+    assert!(
+        rewritten.contains(r#"{"name":"d","value":"2.25"}"#),
+        "the scalar decimal cell is quoted: {rewritten}"
+    );
+
+    // And end to end: the values compare as the declared types say they should.
+    let doc = parse_document_str_with_keys(
+        &rewritten,
+        Path::new("<synthetic>"),
+        true,
+        &KeySpec::from_cql_types(&["text"], &[]),
+    )
+    .expect("the rewritten golden must parse");
+    let rows = project_golden(&doc, &columns, &["id"], &[]).expect("the golden must project");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+
+    let d_1_5 = exact_from_text("1.5", EXPORT_DECIMAL_SCALE, "expected")
+        .expect("1.5 parses")
+        .canonical();
+    let d_2_25 = exact_from_text("2.25", EXPORT_DECIMAL_SCALE, "expected")
+        .expect("2.25 parses")
+        .canonical();
+
+    for name in ["m", "fm"] {
+        assert_eq!(
+            row.cells.get(name),
+            Some(&CanonicalValue::Map(vec![(
+                d_1_5.clone(),
+                CanonicalValue::Int(3)
+            )])),
+            "column '{name}': the decimal KEY is exact and the int VALUE stays an integer — \
+             quoting it would compare Text(\"3\") against the Arrow Int32 3"
+        );
+    }
+    assert_eq!(
+        row.cells.get("l"),
+        Some(&CanonicalValue::List(vec![
+            CanonicalValue::Int(1),
+            CanonicalValue::Int(2)
+        ]))
+    );
+    assert_eq!(
+        row.cells.get("t"),
+        Some(&CanonicalValue::List(vec![
+            CanonicalValue::Int(7),
+            d_2_25.clone()
+        ]))
+    );
+    assert_eq!(row.cells.get("d"), Some(&d_2_25));
+}
+
+/// ROUND-11 FINDING 2: a `varint` above `u64::MAX` survives EXACTLY.
+///
+/// `serde_json` parses such a literal as an `f64` (both `as_i64` and `as_u64`
+/// fail), while the export writes the column as an exact `Decimal128(38, 0)`
+/// that reads back as an `Int` — so the comparison was `Float` vs `Int`, a false
+/// mismatch, with the distinguishing digits already lost. The literal is now
+/// preserved by the same position-precise mechanism as a `decimal`.
+#[test]
+fn a_varint_above_u64_max_is_preserved_and_compares_exactly() {
+    // 30 digits: far above u64::MAX, and inside the 38-digit unscaled range of
+    // the Decimal128 the export writes a `varint` to.
+    const LITERAL: &str = "123456789012345678901234567890";
+    const VALUE: i128 = 123_456_789_012_345_678_901_234_567_890;
+
+    // Premise, ASSERTED so this control cannot silently stop being about the
+    // case it exists for: serde_json really does lose this literal to an f64.
+    let bare: serde_json::Value = serde_json::from_str(LITERAL).expect("valid JSON number");
+    let n = bare.as_number().expect("a number");
+    assert!(
+        n.as_i64().is_none() && n.as_u64().is_none() && n.as_f64().is_some(),
+        "premise: a varint above u64::MAX is parsed by serde_json as an f64"
+    );
+
+    let golden = format!(
+        concat!(
+            r#"{{"partition":{{"key":["k"]}},"rows":[{{"type":"row","clustering":[],"#,
+            r#""cells":[{{"name":"v","value":{}}}]}}]}}"#,
+            "\n"
+        ),
+        LITERAL
+    );
+    let columns = vec![col("id", "text"), col("v", "varint")];
+    let keys = KeySpec::from_cql_types(&["text"], &[]);
+
+    // WITH the rewrite: the literal is read exactly and equals the exported cell.
+    let rewritten = preserve_exact_lexemes(&golden, &columns).expect("the rewrite must succeed");
+    assert!(
+        rewritten.contains(&format!(r#""value":"{LITERAL}""#)),
+        "the varint literal must survive verbatim, quoted: {rewritten}"
+    );
+    let doc = parse_document_str_with_keys(&rewritten, Path::new("<synthetic>"), true, &keys)
+        .expect("the rewritten golden must parse");
+    let rows = project_golden(&doc, &columns, &["id"], &[]).expect("the golden must project");
+    assert_eq!(rows.len(), 1);
+
+    let varint = col("v", "varint");
+    let exported = canonicalize_arrow_decimal(
+        VALUE,
+        0,
+        &Declared::cell(&varint.spec, "exported varint cell"),
+    )
+    .expect("a varint exports as Decimal128 scale 0");
+    assert_eq!(exported, CanonicalValue::Int(VALUE));
+    assert_eq!(
+        rows[0].cells.get("v"),
+        Some(&exported),
+        "the preserved varint literal must compare exactly against the exported cell"
+    );
+
+    // WITHOUT it: the cell reaches the harness as a double and the projection
+    // REFUSES — the coupling that makes the preservation non-optional.
+    let doc = parse_document_str_with_keys(&golden, Path::new("<synthetic>"), true, &keys)
+        .expect("the raw golden must parse");
+    let err = project_golden(&doc, &columns, &["id"], &[])
+        .expect_err("a varint whose literal was lost must be refused");
+    assert!(
+        err.contains("LITERAL TEXT was lost"),
+        "the refusal must name the cause, got: {err}"
+    );
+
+    // A varint that fits an i64 is unaffected: same `Int`, before and after.
+    let small = format!(concat!(
+        r#"{{"partition":{{"key":["k"]}},"rows":[{{"type":"row","clustering":[],"#,
+        r#""cells":[{{"name":"v","value":-42}}]}}]}}"#,
+        "\n"
+    ),);
+    let rewritten = preserve_exact_lexemes(&small, &columns).expect("the rewrite must succeed");
+    let doc = parse_document_str_with_keys(&rewritten, Path::new("<synthetic>"), true, &keys)
+        .expect("parse");
+    let rows = project_golden(&doc, &columns, &["id"], &[]).expect("project");
+    assert_eq!(rows[0].cells.get("v"), Some(&CanonicalValue::Int(-42)));
 }
 
 /// The scanner REFUSES what it cannot read, and the placeholder refusal the
@@ -1232,8 +1421,7 @@ fn an_unrewritten_decimal_cell_is_refused_end_to_end() {
     let keys = KeySpec::from_cql_types(&["text"], &[]);
 
     // WITH the rewrite: the literal is read exactly and equals the exported cell.
-    let rewritten = preserve_decimal_lexemes(GOLDEN, &decimal_columns(&columns))
-        .expect("the rewrite must succeed");
+    let rewritten = preserve_exact_lexemes(GOLDEN, &columns).expect("the rewrite must succeed");
     let doc = parse_document_str_with_keys(&rewritten, Path::new("<synthetic>"), true, &keys)
         .expect("the rewritten golden must parse");
     let rows = project_golden(&doc, &columns, &["id"], &[]).expect("the golden must project");

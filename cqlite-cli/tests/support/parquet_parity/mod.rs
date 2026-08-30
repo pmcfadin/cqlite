@@ -1081,7 +1081,10 @@ fn load_golden(
     // parsed from (`0.100000000000000001` and `0.1` are the same double). See
     // `golden_lexeme.rs` — and note the two refusals that keep this fail-closed:
     // the rewrite errors on any JSON it cannot read, and `declared.rs` REFUSES a
-    // declared-`decimal` position that still arrives as a double.
+    // declared-`decimal`/`varint` position that still arrives as a double. The
+    // rewrite is POSITION-precise: it takes the whole declared column list and
+    // quotes only the positions declared `decimal`/`varint`, so a
+    // `map<decimal,int>`'s `int` values are untouched (round 11).
     let raw = std::fs::read_to_string(&fixture.golden).map_err(|e| {
         Failures::refusal(format!(
             "reading the sstabledump golden {} failed: {e}",
@@ -1095,10 +1098,9 @@ fn load_golden(
             fixture.golden.display()
         )));
     }
-    let decimals = golden_lexeme::decimal_columns(columns);
-    let content = golden_lexeme::preserve_decimal_lexemes(&raw, &decimals).map_err(|e| {
+    let content = golden_lexeme::preserve_exact_lexemes(&raw, columns).map_err(|e| {
         Failures::refusal(format!(
-            "preserving the decimal literals of the sstabledump golden {} failed: {e}",
+            "preserving the exact literals of the sstabledump golden {} failed: {e}",
             fixture.golden.display()
         ))
     })?;
