@@ -125,7 +125,7 @@ fn inverted_window_is_rejected_not_capped() {
         ),
         (0, 2_000_000, 1_000_000, "double — a gross inversion"),
         (500_000, 1_600_000, 1_000_000, "non-zero start, over by 10%"),
-        (0, 1, 0u128 + 0, "1us of stall in a zero-width window"),
+        (0, 1, 0, "1us of stall in a zero-width window"),
     ] {
         let out = describe_stall(started, ended, wall);
         assert!(
