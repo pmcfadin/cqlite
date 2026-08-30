@@ -564,12 +564,16 @@ class TestTupleBorneUdtInSetElement:
         rows = _rows_by_id(db, "s_tuple_udt")
         assert rows[4].get("s_tuple_udt") == [(kp("partial", 4), 4)]
 
-    def test_elements_are_plain_tuples_and_dicts(self, db):
-        """Exact Python types, not merely equal structures."""
+    def test_elements_are_plain_tuples_and_udts(self, db):
+        """Exact Python types, not merely equal structures.
+
+        The UDT element is a ``cqlite.Udt`` since #3504, not a ``dict``; the
+        surrounding ``list``/``tuple`` containers are #3500's and unchanged by it.
+        """
         value = _rows_by_id(db, "s_tuple_udt")[3].get("s_tuple_udt")
         assert type(value) is list
         assert type(value[0]) is tuple
-        assert type(value[0][0]) is dict
+        assert isinstance(value[0][0], cqlite.Udt)
         assert type(value[0][1]) is int
 
 
@@ -684,7 +688,7 @@ class TestNestedListBorneUdtInSetElement:
         value = _rows_by_id(db, "s_list_udt")[1].get("s_list_udt")
         assert type(value) is list, f"expected list, got {type(value).__name__}"
         assert type(value[0]) is list
-        assert type(value[0][0]) is dict
+        assert isinstance(value[0][0], cqlite.Udt)
 
     def test_intended_new_shape_null_fields(self, db):
         """id=2: an EMPTY-string label (``''``) stays distinct from ``None``."""
@@ -886,35 +890,59 @@ class TestFrozenMapWithTupleBorneUdtKey:
             (kp_hashable("mkey-b", 22), 2): 220,
         }
 
-    def test_key_is_a_tuple_of_a_frozenset(self, db):
+    def test_key_is_a_tuple_of_a_udt(self, db):
         """Exact container TYPES, not merely equal structures.
 
-        A ``dict`` key that is a ``tuple`` whose first element is a
-        ``frozenset`` is the observable signature of the ``Tuple`` arm having
-        recursed via ``value_to_hashable_key`` instead of ``value_to_py``: the
-        latter builds a ``tuple`` holding a ``dict``, which cannot be a key at
-        all.
+        WHAT THIS NO LONGER PROVES, stated because the earlier version of this
+        docstring claimed it and #3504 took it away. It used to read: a ``tuple``
+        key whose first element is a ``frozenset`` is the observable signature of
+        the ``Tuple`` arm having recursed via ``value_to_hashable_key`` rather
+        than falling through to ``value_to_py``, "the latter builds a ``tuple``
+        holding a ``dict``, which cannot be a key at all". Since #3504 that
+        fall-through builds a ``tuple`` holding a ``cqlite.Udt``, which IS
+        hashable and CAN be a key — and for a scalar-field UDT like ``key_part``
+        the two routes produce the same object, because ``build_udt`` differs
+        only in a per-field converter that is identical for ``text`` and ``int``.
+        So NO value assertion on this column can distinguish the two routes any
+        more. That is exactly the "succeeded INCIDENTALLY" measurement recorded
+        in ``docs/development/M4_spec.md`` §5.3.
+
+        What still pins the ``Tuple`` arm, therefore: (1) the compiler, via the
+        exhaustive match and its ``#[deny(clippy::wildcard_enum_match_arm)]``
+        (RED-verified — a planted ``_ =>`` errors); and (2) the ``Set``-arm
+        sibling, ``TestFrozenMapWithNestedSetUdtKey``'s
+        ``test_key_is_a_frozenset_of_udts``, where the fall-through answers with
+        an unhashable ``list`` and the discrimination survives outright.
+
+        This test is retained for what it does still assert: the exact host
+        shape of the projected key — a ``dict`` whose key is a ``tuple`` of
+        ``(cqlite.Udt, int)`` — which reds on a wrong CONTAINER at any of the
+        three levels.
         """
         value = _rows_by_id(db, "f_map_tuple_udt")[3].get("f_map_tuple_udt")
         assert type(value) is dict
         [key] = list(value)
         assert type(key) is tuple
-        assert type(key[0]) is frozenset
+        assert isinstance(key[0], cqlite.Udt)
         assert type(key[1]) is int
         assert value[key] == 7
 
     def test_null_udt_field_inside_a_hashable_key(self, db):
         """id=2: ``None`` field values INSIDE a dict key — the ``Udt`` ``None`` arm.
 
-        ONE OF THE TWO places in the repository that execute
-        ``value_to_hashable_key``'s ``Udt``-arm ``None => py.None()`` branch, and
-        the one that reaches it through the ``Tuple`` arm;
+        ONE OF THE TWO places in the repository that reach the ``None =>
+        py.None()`` field branch WITH ``convert = value_to_hashable_key``, and the
+        one that gets there through the ``Tuple`` arm;
         :class:`TestFrozenMapWithNestedSetUdtKey`'s
-        ``test_null_and_empty_udt_fields_stay_distinct`` reaches the same branch
-        through the ``Set`` arm. Both are frozen-map KEYS. The set columns cover
-        NEITHER: their null fields travel ``udt_to_py``'s own ``None`` branch — a
-        DIFFERENT function, reached via ``set_to_py``'s list fallback — so
-        ``test_null_udt_fields`` above is not coverage of this branch.
+        ``test_null_and_empty_udt_fields_stay_distinct`` reaches it through the
+        ``Set`` arm. Both are frozen-map KEYS.
+
+        SCOPE, corrected for #3504: that branch is no longer a line of the ``Udt``
+        arm — it is ``build_udt``'s, SHARED with ``udt_to_py``. So the set columns
+        DO execute the same branch (with ``convert = value_to_py``); what they do
+        not exercise is this ARM's route into it. The distinction is the arm, not
+        the branch, and the earlier wording — "a DIFFERENT function" — is false
+        after the two paths were unified. Scope a coverage claim to the ARM.
 
         Both directions are pinned: a null ``rank`` and a null ``label``, in two
         keys that must stay DISTINCT (a projection that collapsed ``None`` onto a
@@ -964,14 +992,26 @@ class TestFrozenMapWithNestedSetUdtKey:
             frozenset({kp_hashable("mset-c", 33)}): 330,
         }
 
-    def test_key_is_a_frozenset_of_frozensets(self, db):
-        """Exact container types: ``frozenset`` at BOTH levels, never a ``list``."""
+    def test_key_is_a_frozenset_of_udts(self, db):
+        """Exact container types: a ``frozenset`` KEY holding ``cqlite.Udt``s.
+
+        THE discriminating assertion of this class, and the one #3504 did not
+        weaken. ``value_to_hashable_key``'s ``Set`` arm recurses HERE; the
+        alternative — falling through to ``value_to_py`` → ``set_to_py`` — would
+        answer with a ``list`` for a UDT-bearing set (#804's CLI-parity shape),
+        and a ``list`` cannot be a ``dict`` key at all. So ``type(key) is
+        frozenset`` still distinguishes the two routes outright, unlike the
+        ``Tuple`` arm's (see ``TestFrozenMapWithTupleBorneUdtKey``).
+
+        The INNER level is a ``cqlite.Udt`` since #3504, not a ``frozenset`` of
+        ``(name, value)`` pairs.
+        """
         value = _rows_by_id(db, "f_map_set_udt")[3].get("f_map_set_udt")
         assert type(value) is dict
         [key] = list(value)
         assert type(key) is frozenset
         [inner] = list(key)
-        assert type(inner) is frozenset
+        assert isinstance(inner, cqlite.Udt)
         assert value[key] == 7
 
     def test_null_and_empty_udt_fields_stay_distinct(self, db):
@@ -1062,7 +1102,7 @@ class TestSetElementFrozenMapWithUdtKeyHalf:
         )
         assert type(value[0]) is dict
         [key] = list(value[1])
-        assert type(key) is frozenset
+        assert isinstance(key, cqlite.Udt)
         assert value[1][key] == 30
 
     def test_empty_string_field_in_the_map_key(self, db):
@@ -1131,7 +1171,7 @@ class TestSetElementFrozenMapWithUdtValueHalf:
         assert type(value[0]) is dict
         [(key, val)] = list(value[1].items())
         assert type(key) is int
-        assert type(val) is dict
+        assert isinstance(val, cqlite.Udt)
         assert val == kp("vc", 13)
 
     def test_null_udt_fields_in_the_map_value(self, db):
