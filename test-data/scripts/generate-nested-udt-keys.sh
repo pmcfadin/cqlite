@@ -99,9 +99,49 @@ fail() { echo "[nuk][ERROR] $*" >&2; exit 1; }
 #   * > "$jsonl_file" / > "$stats_base"  -> both are `find` results from WITHIN
 #     the already-validated $SSTABLES_DIR subtree, so they inherit its guarantee
 #   * $ENGINE rm -f "$CONTAINER_NAME"    -> a container, fixed literal name
-#     (2 call sites: `cleanup`, and `ensure_container`'s stopped-container replace)
+#     (2 call sites: `cleanup`, and `ensure_container`'s unconditional remove)
 #   * tar -C "$TMPDIR_EXPORT" -xf -      -> extraction into a validated dir
 # There is no `mv` in this script.
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Output-suppression audit (roborev job 245, F2)
+#
+# RULE: no step whose output becomes a COMMITTED ARTIFACT may have its failure
+# suppressed. A golden that is silently empty, or silently never written, is
+# worse than a failed run — the run reports COMPLETE, references.yml declares
+# the sidecar present, and the next reader of the fixture finds nothing.
+#
+# Every `2>/dev/null`, `>/dev/null` and `|| true` in this file, and what it is:
+#
+#  FIXED (each produced or gated a committed artifact):
+#   * sstablemetadata > *-Statistics.db.txt   was `2>/dev/null || true` +
+#     "WARNING: Empty statistics" and carried on. Now FAILS on a non-zero exit
+#     AND on an empty output file; stderr is no longer discarded.
+#   * find driving the JSONL loop             was `2>/dev/null || true`, so a
+#     failed/empty find wrote ZERO goldens silently. Suppression removed and
+#     the number of goldens written is asserted non-zero.
+#   * find driving the statistics loop        never suppressed, but had no
+#     count; the number written is now asserted non-zero too.
+#   * find for the exactly-one-Data.db check  `2>/dev/null` removed: `cnt=0`
+#     failed the check but the reason was discarded.
+#   * find -delete junk sweep                 was `2>/dev/null || true`; a
+#     silent failure leaves `._*` files inside the committed fixture directory.
+#
+#  KEPT, each a PROBE whose non-zero exit is an ANSWER rather than a fault, and
+#  none of which produces a committed artifact:
+#   * realpath / readlink / `cd -P` in resolve_physical — tried in order, each
+#     with an explicit fallback; the failure is handled, not ignored.
+#   * `command -v docker|podman` — engine detection.
+#   * `$ENGINE inspect` in container_exists — the whole point is the boolean.
+#   * the cqlsh readiness poll in wait_cassandra — "not ready yet" is expected;
+#     the LAST attempt is re-run UNSUPPRESSED before failing, so a timeout still
+#     reports a cause. (That diagnostic re-run's own `|| true` exists so the
+#     unconditional `fail` on the next line is what ends the run.)
+#   * `$ENGINE rm -f` in cleanup / ensure_container — stdout only (the container
+#     id); stderr flows. ensure_container's verdict comes from an affirmative
+#     re-probe, and cleanup's runs in the EXIT trap where failing would rewrite
+#     this run's exit status, so it WARNS loudly instead.
 # ----------------------------------------------------------------------------
 
 # Resolve a path to a canonical PHYSICAL path (symlinks in existing components
@@ -245,7 +285,14 @@ STARTED_CONTAINER=0
 cleanup() {
   if [[ "$DRY_RUN" -eq 0 && "$KEEP_CONTAINER" -eq 0 && "$STARTED_CONTAINER" -eq 1 ]]; then
     log "Cleaning up container..."
-    $ENGINE rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    # An EXIT-trap failure must not change this run's exit status, so the
+    # non-zero case WARNS rather than failing — but stderr is not discarded and
+    # the warning is loud, because a container left behind is what the next run
+    # has to remove. It cannot corrupt a later run's goldens (there is no reuse
+    # path), so it is genuinely a warning and not a fail-closed condition.
+    if ! $ENGINE rm -f "$CONTAINER_NAME" >/dev/null; then
+      echo "[nuk][WARNING] could not remove container '$CONTAINER_NAME'; remove it by hand: $ENGINE rm -f $CONTAINER_NAME" >&2
+    fi
   fi
 }
 trap cleanup EXIT
@@ -262,6 +309,12 @@ wait_cassandra() {
     fi
     sleep "$delay"
   done
+  # The per-attempt probe above suppresses output BY DESIGN — it is a readiness
+  # poll and "not ready yet" is its expected answer, not a fault. But the LAST
+  # answer is a fault, and discarding it leaves a timeout with no cause, so run
+  # the probe once more UNSUPPRESSED before failing.
+  echo "[nuk] final readiness probe (unsuppressed), for the diagnostic:" >&2
+  $ENGINE exec "$CONTAINER_NAME" cqlsh -e "SELECT cluster_name FROM system.local;" >&2 || true
   fail "Cassandra did not become ready in time."
 }
 
@@ -376,8 +429,18 @@ verify_select() {
   cql "SELECT * FROM nested_udt_keys"
 }
 
+# Write one `*-Data.db.jsonl` sstabledump golden beside every exported Data.db.
+#
+# The `find` that DRIVES this loop is not suppressed and the number of goldens
+# actually written is asserted to be non-zero (roborev job 245, F2). It used to
+# read `find ... -print0 2>/dev/null || true`, which meant a failed or
+# empty-result `find` produced NO goldens and NO error: the run reported
+# COMPLETE while references.yml declared a `data_jsonl` that was never written.
+# A golden that is silently absent (or silently empty) is worse than a failed
+# run, so every step whose output becomes a committed artifact fails closed here.
 generate_sstabledump_jsonl() {
   local sstables_dir="$1"
+  local goldens_written=0
   log "Generating sstabledump JSONL golden files for $KEYSPACE..."
   while IFS= read -r -d '' data_file; do
     local rel
@@ -407,8 +470,16 @@ for line in sys.stdin:
       lines=$(wc -l < "$jsonl_file" | tr -d ' ')
       log "  OK: $jsonl_file ($lines partitions)"
     fi
-  done < <(find "$sstables_dir/$KEYSPACE" -type f -name "*-Data.db" -not -name "._*" -print0 \
-            2>/dev/null || true)
+    goldens_written=$((goldens_written + 1))
+  done < <(find "$sstables_dir/$KEYSPACE" -type f -name "*-Data.db" -not -name "._*" -print0)
+
+  # Affirmative measurement: a `find` that failed, or a keyspace directory with
+  # no Data.db in it, is indistinguishable from a clean pass by the loop alone.
+  if [[ "$goldens_written" -eq 0 ]]; then
+    fail "no *-Data.db found under $sstables_dir/$KEYSPACE — ZERO JSONL goldens were written. \
+Refusing to report a complete generation with no golden."
+  fi
+  log "  $goldens_written JSONL golden(s) written"
 }
 
 # ----------------------------------------------------------------------------
@@ -429,42 +500,63 @@ log "Output directory: $OUT_DIR"
 
 SSTABLES_DIR="$OUT_DIR/sstables"
 
+# ----------------------------------------------------------------------------
+# Container lifecycle: ALWAYS RECREATE. There is deliberately NO reuse path.
+#
+# Rounds 3 and 4 of review each found a defect in a DIFFERENT branch of a
+# three-way "reuse / start / replace" preflight (a stopped container treated as
+# usable because `inspect` merely SUCCEEDS for it; then a RUNNING container
+# reused, which preserves the SSTables of the previous run so a second
+# generation either trips the exactly-one-Data.db check or exports STALE data).
+# Two findings in one small function is a SHAPE problem, not two coincidences:
+# the optional behaviour IS the bug surface. So the optional behaviour is gone
+# rather than hardened a third time.
+#
+# The reason round 3 already gave for the stopped case applies verbatim to the
+# running one — a fixture generator needs a clean slate, or a half-applied
+# schema / leftover generation silently changes the goldens — and a generator's
+# job is determinism, not convenience. Absent => create; EXISTS IN ANY STATE =>
+# remove and create.
+#
+# `--keep-container` survives with a strictly narrowed meaning: leave the
+# container in place at EXIT so it can be inspected. It can no longer influence
+# what the NEXT run does, because the next run removes whatever it finds. (It is
+# honoured on failure as well as on success: an inspectable container is most
+# useful precisely when the run failed, and since reuse is impossible either way
+# that costs nothing.)
+# ----------------------------------------------------------------------------
+
+# True iff a container named $CONTAINER_NAME EXISTS, in any state (created,
+# running, exited, dead). `inspect` succeeding is exactly this fact — the
+# question round 4 needs — and NOT "is it usable", which is what keying reuse on
+# it got wrong.
+container_exists() {
+  $ENGINE inspect --type container "$CONTAINER_NAME" >/dev/null 2>&1
+}
+
 ensure_container() {
-  # In dry-run nothing exists to inspect, so skip the probe entirely and print
-  # the start command (what the old inline preflight did for this case).
   if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] $ENGINE rm -f $CONTAINER_NAME   # unconditional: there is no reuse path"
     start_container
     return 0
   fi
 
-  # `inspect` SUCCEEDS for a container that merely EXISTS, including an EXITED
-  # or CREATED one (roborev job 244, F1) — so its exit status alone cannot
-  # decide reuse. Keying on it treated a stopped container as usable and then
-  # burned the full readiness budget (60x5s) before failing, with a log line
-  # claiming reuse. Ask for the STATE instead, and distinguish all three cases.
-  local state="" rc=0
-  state="$($ENGINE inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" || rc=$?
-
-  if [[ "$rc" -ne 0 ]]; then
-    log "No container named '$CONTAINER_NAME' (engine inspect rc=$rc); starting a fresh one."
-    start_container
-    return 0
+  if container_exists; then
+    log "Container '$CONTAINER_NAME' EXISTS; removing it (this generator never reuses a container)."
+    # stdout is only the container id; stderr is deliberately NOT suppressed so a
+    # real removal failure is diagnosable. The verdict comes from the affirmative
+    # re-probe below, not from this exit status.
+    if ! $ENGINE rm -f "$CONTAINER_NAME" >/dev/null; then
+      log "  '$ENGINE rm -f' exited non-zero; re-probing whether the container is gone."
+    fi
+    if container_exists; then
+      fail "Container '$CONTAINER_NAME' still exists after '$ENGINE rm -f'. Refusing to generate \
+against an unknown container state (its data directory may hold a previous run's SSTables). \
+Remove it by hand and re-run."
+    fi
+    log "  removed."
   fi
 
-  if [[ "$state" == "true" ]]; then
-    log "Reusing RUNNING container '$CONTAINER_NAME'."
-    return 0
-  fi
-
-  # Exists but not running: `.State.Running` is false, or a value this script
-  # cannot interpret. Both are handled the same way and for the same reason —
-  # "not verified running" must never take the reuse path, because that is the
-  # branch that hangs to timeout. Replace rather than `start`: this is a FIXTURE
-  # generator, and a container stopped part-way through a previous run may carry
-  # a half-applied schema or partial rows, which would silently change the
-  # goldens. A clean slate is the only state whose output is reproducible.
-  log "Container '$CONTAINER_NAME' exists but is NOT running (.State.Running='$state'); removing and recreating it."
-  $ENGINE rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   start_container
 }
 
@@ -528,7 +620,9 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
       fail "$table: no table directory matched under $SSTABLES_DIR/$KEYSPACE/ \
 (glob '$SSTABLES_DIR/$KEYSPACE/$table*' did not expand); export failed"
     fi
-    cnt=$(find "${tdirs[@]}" -name "*-Data.db" -not -name "._*" 2>/dev/null | wc -l | tr -d ' ')
+    # stderr NOT suppressed: a `find` failure here shows up as `cnt=0` and fails
+    # the check below, but only its stderr says WHY (roborev job 245, F2).
+    cnt=$(find "${tdirs[@]}" -name "*-Data.db" -not -name "._*" | wc -l | tr -d ' ')
     if [[ "$cnt" -ne 1 ]]; then
       fail "$table: expected exactly ONE flushed Data.db, found $cnt."
     fi
@@ -537,28 +631,49 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 
   generate_sstabledump_jsonl "$SSTABLES_DIR"
 
+  # `sstablemetadata`'s stdout IS a committed golden
+  # (`*-Statistics.db.txt`, declared `present: true` in
+  # test-data/datasets/references.yml). It used to run as
+  # `... > "$stats_base" 2>/dev/null || true`, which turned a tool failure into a
+  # log line reading "WARNING: Empty statistics" while the run went on to report
+  # COMPLETE — an empty or missing golden with a manifest that says it is there
+  # (roborev job 245, F2). Both halves now fail the generation: a non-zero exit,
+  # and an empty output file. stderr is no longer discarded.
   log "Generating Statistics.db.txt for $KEYSPACE tables..."
+  stats_written=0
   while IFS= read -r -d '' data_file; do
     rel="${data_file#"$SSTABLES_DIR"/}"
     stats_base="${data_file%Data.db}Statistics.db.txt"
     log "  sstablemetadata: $rel"
-    $ENGINE run --rm \
+    if ! $ENGINE run --rm \
       -v "$SSTABLES_DIR:/data" \
       "$CASSANDRA_IMAGE" \
       bash -lc "/opt/cassandra/tools/bin/sstablemetadata /data/${rel}" \
-      > "$stats_base" 2>/dev/null || true
-    if [[ -s "$stats_base" ]]; then
-      log "  OK: $stats_base"
-    else
-      log "  WARNING: Empty statistics for $rel"
+      > "$stats_base"; then
+      fail "sstablemetadata FAILED (non-zero exit) for $rel. The committed \
+$stats_base golden would be empty or partial while references.yml declares it present."
     fi
+    if [[ ! -s "$stats_base" ]]; then
+      fail "sstablemetadata produced an EMPTY golden: $stats_base (for $rel)."
+    fi
+    log "  OK: $stats_base"
+    stats_written=$((stats_written + 1))
   done < <(find "$SSTABLES_DIR/$KEYSPACE" -name "*-Data.db" -not -name "._*" -print0)
+  if [[ "$stats_written" -eq 0 ]]; then
+    fail "ZERO Statistics.db.txt goldens were written for $KEYSPACE. \
+Refusing to report a complete generation with no statistics golden."
+  fi
+  log "  $stats_written statistics golden(s) written"
+
 
   # `find -delete` is destructive: re-validate the root it walks first.
   _cleanup_root="$(validate_destructive_target "find -delete root" "$SSTABLES_DIR/$KEYSPACE")" \
     || exit 1
   [[ -n "$_cleanup_root" ]] || fail "find -delete root resolved to an empty path. Refusing."
-  find "$_cleanup_root" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+  # Not suppressed either: this sweep removes macOS junk that would otherwise be
+  # picked up by the commit globs the script prints, so a silent failure here
+  # ends up in the committed fixture directory (roborev job 245, F2).
+  find "$_cleanup_root" \( -name '._*' -o -name '.DS_Store' \) -delete
 
   log "=== $KEYSPACE generation COMPLETE ==="
   log "SSTables: $SSTABLES_DIR/$KEYSPACE"
