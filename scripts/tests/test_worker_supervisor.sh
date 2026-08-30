@@ -4543,10 +4543,13 @@ test_legacy_global_lock_refuses_live_holder() {
   else
     fail "legacy-lock-live: rc=$rc (expected non-zero) out=[$out] — expected the LEGACY GLOBAL refusal naming pid $live"
   fi
-  if [[ ! -e "$derived" ]]; then
-    pass "legacy-lock AC1: the refusal created NO per-lane lock (a refused start leaves nothing behind)"
+  # A REFUSED START ACQUIRES NOTHING. Asserted on the RUN'S OUTPUT as well as the filesystem, because
+  # the filesystem half alone is vacuous: a successful acquisition removes the per-lane lock again on
+  # exit (the EXIT trap), so `! -e` is true either way — it passed under the guard-removed mutant.
+  if [[ "$out" != *"ACQUIRED="* && ! -e "$derived" ]]; then
+    pass "legacy-lock AC1: the refusal acquired NOTHING — no ACQUIRED line and no per-lane lock (a refused start leaves nothing behind)"
   else
-    fail "legacy-lock-live-sideeffect: the per-lane lock $derived exists after a refusal"
+    fail "legacy-lock-live-sideeffect: out=[$out] derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) — a refusal must not acquire the per-lane lock"
   fi
   rm -rf "$legacy"
 }

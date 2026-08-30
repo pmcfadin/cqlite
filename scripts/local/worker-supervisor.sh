@@ -1440,7 +1440,10 @@ supervisor_pid_liveness() {
   # Corroborate the absence. procfs first (it distinguishes EPERM: the entry exists for a live process
   # owned by anyone), else `ps`. `command -v` is a builtin, so an absent `ps` yields `unknown`, not a
   # crash under the stripped PATH some suite cases source this file with.
-  if [[ -d /proc/1 ]]; then
+  # `/proc/self`, not `/proc/1`: this asks "is procfs mounted", and it is the one entry no `hidepid`
+  # setting can hide from us. `/proc/1` can be invisible to a non-root user in a hardened container,
+  # which would silently route a Linux box onto the `ps` fallback.
+  if [[ -d /proc/self ]]; then
     if [[ -d "/proc/$pid" ]]; then printf 'live\n'; else printf 'dead\n'; fi
     return 0
   fi
@@ -1461,7 +1464,10 @@ supervisor_pid_liveness() {
 supervisor_legacy_lock_state() {
   local legacy="$1" dir pid=""
   dir="${legacy%/*}"
+  # No slash at all => the current directory; a single LEADING slash (a TMPDIR of `/`) strips to the
+  # empty string, which is not a path and would misreport an undeterminable container.
   [[ "$dir" == "$legacy" ]] && dir="."
+  [[ -z "$dir" ]] && dir="/"
   # Existence is only DECIDABLE when the container can be read and searched. An unsearchable TMPDIR
   # makes `[[ -e ]]` answer "absent" for a lock that is really there.
   if [[ ! -d "$dir" || ! -r "$dir" || ! -x "$dir" ]]; then
