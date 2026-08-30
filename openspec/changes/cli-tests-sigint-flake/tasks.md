@@ -1,5 +1,26 @@
 # Tasks — cli-tests-sigint-flake (issue #3515)
 
+> ## READ THIS BEFORE THE ROUNDS BELOW — ROUNDS 4-7 ARE SUPERSEDED (round 8)
+>
+> Round 8 **DESCOPED the per-stage calibrated budget layer** to ONE per-test deadline (`design.md`
+> D6a). Every symbol the round 4-7 records name — `StageSpec`, `T1_*`/`T2_*` stage specs,
+> `STALL_WINDOW`, `SESSION_UP_DEADLINE`, `Budget`, `calibrated`, `bare`, `PollBudget`,
+> `progress_checked`, `StageClock`, `clip`, `clip_poll`, `clipped_to_total`, `starved`,
+> `declared_max`, `T1_TOTAL_BUDGET`/`T2_TOTAL_BUDGET`, `NON_STAGE_HEADROOM`,
+> `MEASURED_QUIET_T_*`, `*_BASELINE_MULTIPLE`, `notice_if_anchor_is_permissive`, `quiet_anchors`,
+> `PollGaveUp` and its three variants — **no longer exists**, and so do the unit tests named there
+> (`no_wait_is_tighter_than_the_bound_it_replaced`,
+> `every_stages_declared_maximum_fits_its_test_total_budget`,
+> `the_nominal_cap_sums_stay_under_the_total_budget`,
+> `the_baselines_sit_just_above_the_measured_quiet_noise_floor`, the three `calibration_*` tests,
+> `a_bare_budget_names_itself_as_uncalibrated`, `the_stage_clock_clips_*`,
+> `a_progress_checked_stages_extension_is_inside_its_declared_maximum`).
+>
+> They are kept verbatim as a record of **what was tried and what it cost** — that census is the
+> justification for the descope — not as a description of the code. Read "Round 8" first; the tasks
+> in sections 1-5 below are marked done against the round-7 design, and section 6 records how each
+> was re-satisfied.
+
 ## 1. Test harness scaffolding (`cqlite-cli/tests/graceful_shutdown_tests.rs`)
 - [x] 1.1 Drain `stderr`: take the handle and spawn a reader alongside the existing stdout reader.
 - [x] 1.2 Give the readers a shared, lockable **transcript** so a failure can print what the child
@@ -652,3 +673,176 @@ call sites is the descoped class (`CLAUDE.md`, #3499), not something to add here
 headroom; a round 8 of comparable size would need another split by responsibility (the natural seam
 is the calibration anchors/baselines and their four guards, ~250 lines, versus the clock + deadline
 layer).
+
+## Round 8 — the DESCOPE: one per-test deadline (`design.md` D6a)
+
+### The finding census that decided it
+
+roborev reviewed this change four times (jobs 219, 222, 224, 229). **12 findings. All 12 in the
+per-stage calibrated budget layer.** Count per round: **3, 3, 3, 3 — flat.** Over the same four
+rounds the *oracle* (the staged waits, `MARKER_SESSION_READY`/`MARKER_HANDLER_ENTERED`, the stderr
+draining + transcript, the honest failure messages) produced **zero** findings after round 3.
+
+| round / job | findings, all in the budget layer |
+|---|---|
+| 219 | group-deadline vs per-operation cap; a hardcoded `recv_timeout(5s)`; `TotalBudgetExhausted` asserting an unestablishable cause |
+| 222 | pipe collection given a fresh full budget; the hand-written baseline multiple that had drifted to ~18x; `t_ack` recorded as the stage duration |
+| 224 | the cap sums exceeded the totals (starvation); the read-side spawn uncharged; the progress extension outside the declared maximum |
+| 229 | summing per-stage caps does not preserve a SHARED old deadline; `clip` rewriting `nominal` mis-reports a starved stage; the poll's step running before the deadline check |
+
+The repository's own precedent is to descope a mechanism whose defect count does not fall rather than
+patch it a fifth time (the removed `census-exclusion:` key; the descoped ANSI parse lint → #3499;
+#3384's withdrawn integration targets). **The load-bearing point is that the ACs never asked for the
+calibration**: AC1 wants liveness confirmation instead of a bare deadline, and that is supplied by
+stage (c)'s handler-entry marker — which proves signal delivery, handler entry and scheduling at once
+— not by budget arithmetic.
+
+Two of the round-4 findings **dissolve** rather than get fixed: 229/1 (a handler entering at 31s and
+exiting at 32s passed the old flat 60s but failed a 30s `T1_HANDLER` cap) is exactly what one shared
+deadline restores, and 229/2 (`clip` rewriting `nominal`) has no `clip` and no `starved` to be wrong
+about. **229/3 was real and is fixed**: `poll_with_progress` now checks the deadline BEFORE invoking
+`step` and passes `min(SLICE, remaining)`, so a stage can no longer succeed ~100ms past its bound.
+Measured in the plant below: stage (d) gave up at `179.99s spent, remaining 0.00ns` against a 180.0s
+deadline.
+
+### What replaced it
+
+`TestDeadline` — ONE deadline per test:
+
+* `clamp(base × scale, base, cap)` with `scale = max(1, observed / QUIET_OBSERVATION_BASELINE)`,
+  folded in via `calibrate(name, observed)` as each in-band measurement lands (`t_boot` after stage
+  (a), `t_ack` after stage (b)). It keeps the **LARGEST** scale, so calibration is **monotone** — it
+  can only ever move the deadline later, asserted by
+  `calibration_takes_the_largest_scale_and_only_ever_loosens`.
+* `T1_DEADLINE_BASE` **180s** / cap 360s; `T2_DEADLINE_BASE` **480s** / cap 720s; both caps under
+  `MAX_TEST_DEADLINE` 900s (the full gate's own 15-20 min wall clock).
+* **ONE** baseline constant, `QUIET_OBSERVATION_BASELINE = 60ms`, for both observations — they measure
+  the same shape of work. It is **bracketed by two recorded measurements**: above the slowest recorded
+  QUIET value (43ms, the sibling's slowest ack) so an unloaded host yields `scale == 1` exactly, and
+  below the fastest value recorded under real contention (81ms, `t_boot` at load average 116) so
+  contention demonstrably engages it. Both directions are asserted from those literals by
+  `the_baseline_is_quiet_inert_and_contention_active` — which is what "not inert" actually means, and
+  needs no anchor, no derived multiple and no NOTICE.
+
+`Stage` — attribution and nothing else: a name, a start instant, and a borrow of the deadline.
+`Stage::remaining()` returns the **test's** remaining time, so there is no allowance to hand out, none
+to double-spend and none for a call site to subtract. `Stage::finish()` records the stage's own
+duration for the report.
+
+### The properties that survive, and how
+
+| property | how it holds now |
+|---|---|
+| no wait tighter than the 60s it replaced | `base >= OLD_BOUND`, asserted; any single stage may consume the whole deadline |
+| the test not tighter in aggregate | `base >= OLD_BOUND × old_waits` (2 for T1, 7 for T2), asserted |
+| no stage starved by an earlier one | **by construction**: no stage has an allowance to consume |
+| a declared cap is the actual maximum | **by construction**: one bound; nothing extends it; the deadline is checked before each step |
+| the deadline cannot outlast its gate component | `cap <= MAX_TEST_DEADLINE`, asserted |
+| calibration only loosens | `scale` floored at 1, span clamped at `base`, largest scale retained; asserted |
+| progress is evidence | `PollFail::observed()` reports `progress observed: NONE` / counts and says the counts do NOT extend the bound; `observed_progress_never_extends_the_deadline` asserts the poll TERMINATES under progress on every slice |
+
+### What was deleted
+
+`StageSpec` + `spec()` + all nine stage specs + `STALL_WINDOW`; `SESSION_UP_DEADLINE`; `Budget`,
+`calibrated`, `bare`, `Budget::nominal/span/clipped_to_total/starved/progress_checked`; `PollBudget`;
+`StageClock`, `clip`, `clip_poll`; `declared_max`, `t1_stages`, `t2_stages`; `T1_TOTAL_BUDGET`,
+`T2_TOTAL_BUDGET`, `NON_STAGE_HEADROOM`, `MAX_TEST_TOTAL_BUDGET`; `MEASURED_QUIET_T_BOOT/ACK`,
+`BOOT/ACK_BASELINE_MULTIPLE`, `MAX_BASELINE_MULTIPLE`, `BOOT/ACK_QUIET_BASELINE`,
+`notice_if_anchor_is_permissive`, `quiet_anchors`; the three-variant `PollGaveUp`.
+Unit tests removed: `no_wait_is_tighter_than_the_bound_it_replaced`,
+`every_stages_declared_maximum_fits_its_test_total_budget`,
+`the_baselines_sit_just_above_the_measured_quiet_noise_floor`,
+`calibration_engages_on_a_contended_observation`,
+`calibration_is_the_identity_on_a_quiet_observation`,
+`calibration_only_ever_loosens_and_never_exceeds_the_cap`,
+`a_bare_budget_names_itself_as_uncalibrated`,
+`the_stage_clock_clips_a_budget_to_the_remaining_total`,
+`a_progress_checked_stages_extension_is_inside_its_declared_maximum`,
+`the_clock_clips_a_progress_checked_stages_extension_too`.
+`a_stages_waits_share_one_deadline_so_none_can_double_spend` **survives**, renamed
+`a_stages_waits_share_the_one_deadline_so_none_can_double_spend`.
+
+### Untouched, deliberately — this is the change's actual value
+
+The four/five staged waits and their order; `MARKER_SESSION_READY`/`MARKER_HANDLER_ENTERED`; the
+stderr draining and shared transcript; every honest failure message, especially stage (c)'s
+three-candidate-causes text and stage (d) never claiming anything about handler existence; the deleted
+string `no graceful shutdown handler` stays deleted; the sibling test's equivalent treatment (AC4).
+
+### Test count
+
+**13 → 9.** 2 integration + 6 deadline unit tests in `budgets.rs` + 1 new harness unit test in
+`mod.rs`. Ten unit tests were removed (listed above) because their subject no longer exists; three are
+new (`the_deadline_is_never_tighter_than_the_bounds_it_replaced`,
+`any_single_stage_may_consume_the_whole_deadline`,
+`observed_progress_never_extends_the_deadline`) and two consolidate the surviving properties of five
+old ones. `cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests`:
+**9 passed, 0 failed, 0.30s.**
+
+### Product RED plants (AC3), re-run on the descoped oracle
+
+Both applied to a **COMMITTED** tree in a throwaway `git worktree add --detach`, each printing whether
+its anchor matched before the run (round 5 recorded a false green from `git checkout --` reverting an
+uncommitted plant).
+
+**Plant A — the `ctrl_c` select branch removed from `run_writable_interactive`** (`PLANT A APPLIED:
+ctrl_c select branch removed`, commit `cbdbfbf2a`, 1 file / 4 deletions). RED at **stage (c)** in
+0.03s:
+
+```
+stage (c) handler-entry: the shutdown handler's entry marker was not observed on the child's stderr
+after SIGINT was delivered to pid 129912.
+awaited substring on stderr: "Received Ctrl-C"
+stage c.handler-entry has been running 283.67µs. ONE per-test deadline 180.0s = clamp(base 180.0s x
+scale 1.000, base, cap 360.0s), where scale is the LARGEST of [t_boot 23.500ms => scale 1.000, t_ack
+1.477ms => scale 1.000] over quiet baseline 60ms. ...
+how the wait ended: the child's stdout AND stderr both reached EOF after 280.156µs, so no further line
+could arrive: the child had exited, crashed, or closed its pipes (this measurement does not say which)
+CANDIDATE CAUSES (this measurement does NOT select between them): ...
+```
+
+**Plant B — `engine.close()` wrapped behind `std::future::pending()`** (`PLANT B APPLIED`, commit
+`c4c054051`, 1 file / +2-1). RED at **stage (d)**, at the deadline:
+
+```
+stage (d) clean-exit: the shutdown flush did not complete before the deadline.
+gave up after 179.99s, when the test's ONE deadline passed while this stage was pending — which is
+what attributes the failure to this stage and to nothing else.
+stage d.clean-exit has been running 179.99s. ... Spent 180.00s, remaining 0.00ns
+progress observed while polling: NONE — 0 new output lines and 0 new durable artifacts in 179.99s
+WHAT THIS ESTABLISHES: the handler-entry marker "Received Ctrl-C" WAS observed 68.300µs after SIGINT,
+so the shutdown handler exists, was entered, and the child was scheduled. This failure therefore
+establishes ONLY that the flush did not complete in time; it says nothing about whether a handler is
+present.
+durable -Data.db artifacts under /tmp/.tmpbJ7EPb/wd/data: 0
+```
+
+`test result: FAILED ... finished in 180.00s` — i.e. **exactly the deadline**, with `remaining 0.00ns`
+and no slice-sized overshoot (the 229/3 fix, demonstrated rather than argued).
+
+### The accepted cost, stated
+
+Plant B previously red at **60s** (stage (d)'s nominal per-stage budget). It now reds at **180s**, the
+test's whole deadline. **That is the entire price of the descope**, it is paid only on a real failure,
+and it buys the elimination of a defect family four review rounds could not close. It is recorded as a
+requirement in `spec.md` ("flush hung" scenario) so a future reader cannot mistake it for a
+regression. The calibration's only benefit was a tighter bound on a quiet host; it was never what made
+the oracle honest.
+
+### File sizes after round 8
+
+`graceful_shutdown_tests.rs` **367** (was 438), `graceful_shutdown_support/mod.rs` **728** (was 719),
+`graceful_shutdown_support/budgets.rs` **591** (was 1355). All three well under the 1500-line test
+threshold; the round-7 note about needing another split by responsibility is moot — the descope removed
+~760 lines. The harness stays in the `graceful_shutdown_support/` subdirectory and the target name
+`graceful_shutdown_tests` is unchanged (hardcoded in `agent-gate.sh`).
+
+### Stale-reference sweep
+
+`grep -rn` across code, `tasks.md`, `design.md` and `spec.md` for every deleted symbol. Results:
+`spec.md` rewritten (three requirements merged into *The test is bounded by ONE deadline…*, each
+withdrawn obligation NAMED where it stood); `design.md` D2/D3/D4/D6 and "The residual" corrected or
+explicitly marked superseded by D6a; `tasks.md` rounds 4-7 kept verbatim as a record of what was
+tried, under a banner at the head of this file naming every symbol they mention that no longer exists.
+A record describing a deleted symbol is a claim about code and decays like a comment, so the banner
+states that explicitly rather than leaving the reader to discover it.
