@@ -110,6 +110,12 @@ _beat() {
     echo "run-id: $RUN_ID"
     [ -n "$MODE" ] && echo "mode: $MODE"
     echo "gate-pid: $GATE_PID"
+    # #3473 (roborev job 157): published so a READER can corroborate the gate's death
+    # rather than infer it from a stale beat alone. Without this a reader can only ask
+    # "does pid N exist", which a RECYCLED pid also answers yes to; with it, a stale beat
+    # plus a mismatched start time is affirmative evidence the gate is gone. Empty on a
+    # host where it could not be read, which the reader reports rather than assumes.
+    echo "gate-starttime: $GATE_STARTTIME"
     echo "beater-pid: $$"
     echo "parent-check: $PARENT_CHECK"
     echo "interval: $INTERVAL"

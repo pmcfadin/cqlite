@@ -245,6 +245,57 @@ else
   fi
 fi
 
+echo "=== section 5: DEFAULT artifact paths are private, not predictable /tmp names ==="
+# roborev job 157, Medium. The defaults used to be derived from the timestamp and pid, so
+# they were guessable — and this script TRUNCATES the log with `>`, so on a multi-user box
+# another local user could pre-create a symlink at the predicted path and have the launcher
+# clobber any file the gate user can write. `mktemp -d` gives an unguessable 0700
+# directory, which closes both the prediction and the symlink step.
+if [ "$HAVE_SYSTEMD" != yes ]; then
+  skipc "5.x default artifact paths" "no working 'systemd-run --user' on this host"
+else
+  out=$(bash "$LAUNCHER" -- --only file-size 2>&1); rc=$?
+  unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p')
+  [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
+  dsum=$(printf '%s' "$out" | sed -n 's/^summary:  *//p')
+  dlog=$(printf '%s' "$out" | sed -n 's/^log:  *//p')
+  if [ "$rc" != 0 ] || [ -z "$dsum" ] || [ -z "$dlog" ]; then
+    bad "5.1 a launch with no --summary/--log still reports both paths" "rc=$rc out=$out"
+  else
+    ok "5.1 a launch with no --summary/--log still reports both paths"
+    # Both defaults must live in ONE private directory...
+    ddir=$(dirname "$dsum")
+    [ "$(dirname "$dlog")" = "$ddir" ] \
+      && ok "5.2 both default artifacts share one directory" \
+      || bad "5.2 both default artifacts share one directory" "$dsum vs $dlog"
+    # ...whose mode is owner-only. This is the property that defeats the symlink step.
+    mode=$(ls -ld "$ddir" 2>/dev/null | cut -c1-10)
+    case "$mode" in
+      drwx------) ok "5.3 the private directory is owner-only ($mode)" ;;
+      *)          bad "5.3 the private directory is owner-only" "mode is '$mode', want drwx------" ;;
+    esac
+    # ...and the name must NOT be the old predictable timestamp-pid shape, which is what
+    # made pre-creation possible. A control on the FIX, not just on the mode.
+    case "$(basename "$dsum")" in
+      gate-summary-*Z-*) bad "5.4 the default summary name is not the predictable timestamp-pid form" "$(basename "$dsum")" ;;
+      *)                 ok "5.4 the default summary name is not the predictable timestamp-pid form" ;;
+    esac
+    case "$ddir" in
+      */cqlite-gate-*) ok "5.5 the default directory is an mkdtemp under TMPDIR" ;;
+      *)               bad "5.5 the default directory is an mkdtemp under TMPDIR" "$ddir" ;;
+    esac
+    # And the gate must still actually work through the default path.
+    for _ in $(seq 1 60); do
+      grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$dsum" 2>/dev/null && break
+      sleep 2
+    done
+    grep -qE '^RESULT: ' "$dsum" 2>/dev/null \
+      && ok "5.6 the default-path gate reaches a verdict" \
+      || bad "5.6 the default-path gate reaches a verdict" "no RESULT in $dsum"
+    rm -rf "$ddir" 2>/dev/null || true
+  fi
+fi
+
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
 [ "$fail" -eq 0 ] || exit 1

@@ -76,8 +76,23 @@ fi
 
 RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 UNIT="cqlite-gate-$RUN_TAG"
-[ -n "$SUMMARY" ] || SUMMARY="${TMPDIR:-/tmp}/gate-summary-$RUN_TAG.txt"
-[ -n "$LOGFILE" ] || LOGFILE="${TMPDIR:-/tmp}/gate-$RUN_TAG.log"
+# DEFAULT artifact paths go in a PRIVATE mkdtemp directory, never a predictable name in
+# shared /tmp (roborev job 157, Medium). A name derived from the timestamp and pid is
+# guessable, and this script TRUNCATES the log with `>` — so on a multi-user box another
+# local user could pre-create a symlink at the predicted path and have us clobber any file
+# the gate user can write. `mktemp -d` yields an unguessable directory created with 0700 by
+# the C library, which closes both the prediction and the symlink step.
+#
+# A caller-SUPPLIED path is used as given: that is their explicit choice of location, and
+# silently relocating it would break the contract that they know the path in advance.
+if [ -z "$SUMMARY" ] || [ -z "$LOGFILE" ]; then
+  PRIVDIR=$(mktemp -d "${TMPDIR:-/tmp}/cqlite-gate-XXXXXX") || {
+    echo "gate-detached: cannot create a private directory for the default artifacts" >&2
+    exit 1
+  }
+  [ -n "$SUMMARY" ] || SUMMARY="$PRIVDIR/summary.txt"
+  [ -n "$LOGFILE" ] || LOGFILE="$PRIVDIR/gate.log"
+fi
 case "$SUMMARY" in /*) ;; *) SUMMARY="$PWD/$SUMMARY" ;; esac
 case "$LOGFILE" in /*) ;; *) LOGFILE="$PWD/$LOGFILE" ;; esac
 

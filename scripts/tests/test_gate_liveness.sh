@@ -70,6 +70,33 @@ expect_reader() {
   ok "$label"
 }
 
+# PORTABILITY (roborev job 157, Medium). macOS/BSD is a first-class gate host in this
+# repo, and this suite is wired into the full gate's `tooling-tests` — so a GNU-only
+# construct here does not fail "a test", it fails the GATE on every macOS host.
+#
+#   * `sed -i` needs a suffix argument on BSD (`sed -i '' -e …`) and rejects the GNU form,
+#     so in-place editing is done by rewriting through a temp file instead. That is
+#     portable everywhere and needs no per-platform branch at all.
+#   * `timeout` is GNU coreutils and is absent from a stock macOS; coreutils installs it
+#     as `gtimeout`. Resolved once, with an explicit no-timeout fallback rather than an
+#     unconditional invocation that would be a "command not found".
+#
+# edit_lines <file> <sed-expression> — apply <sed-expression> to <file> in place, portably.
+edit_lines() {
+  local f="$1" expr="$2" tmpf
+  tmpf="$f.edit.$$"
+  sed "$expr" "$f" > "$tmpf" 2>/dev/null && mv -f "$tmpf" "$f"
+  rm -f "$tmpf" 2>/dev/null || true
+}
+
+# TIMEOUT_CMD: the resolved timeout runner, or empty when this host has none. Callers use
+# it unquoted-and-empty-safe via $TIMEOUT_CMD, so a host without it simply runs the
+# command directly rather than failing.
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_CMD="gtimeout"
+fi
+
 # mk_summary <path> <run-id> <result-line-or-empty>
 mk_summary() {
   { echo "==== AGENT-GATE SUMMARY ===="
@@ -78,18 +105,38 @@ mk_summary() {
     echo "==== END AGENT-GATE SUMMARY ===="
   } > "$1"
 }
-# mk_beat <path> <run-id> <age-secs> [interval]
+# A pid that is CERTAIN to be dead, so the REAPED cases are deterministic. Hard-coding a
+# number (4242) would be a coin flip: if that pid happens to exist on the host, a beat
+# naming it reads as "gate still alive" and the case silently flips to UNKNOWN.
+DEAD_PID=$( { bash -c 'exit 0' & echo $!; } ); wait "$DEAD_PID" 2>/dev/null || true
+
+# mk_beat <path> <run-id> <age-secs> [interval] [gate-pid] [gate-starttime]
+# With no gate-starttime the beat exercises the reader's no-/proc-pin FALLBACK path;
+# pass one to exercise the reuse-proof path.
 mk_beat() {
-  local iv="${4:-20}"
+  local iv="${4:-20}" pid="${5:-$DEAD_PID}" st="${6:-}"
   { echo "==== AGENT-GATE HEARTBEAT ===="
     echo "run-id: $2"
-    echo "gate-pid: 4242"
+    echo "gate-pid: $pid"
+    [ -n "$st" ] && echo "gate-starttime: $st"
     echo "parent-check: starttime"
     echo "interval: $iv"
     echo "beat-seq: 7"
     echo "beat-epoch: $(( $(date +%s) - $3 ))"
     echo "==== END AGENT-GATE HEARTBEAT ===="
   } > "$1"
+}
+
+# live_starttime <pid> — field 22 of /proc/<pid>/stat, or empty (used to build a beat that
+# genuinely matches a living process).
+live_starttime() {
+  local raw rest
+  raw=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  rest="${raw##*) }"
+  # shellcheck disable=SC2086
+  set -- $rest
+  [ $# -ge 20 ] || return 1
+  printf '%s' "${20}"
 }
 
 echo "=== section 1: usage (a reader that guesses its subject is worse than one that refuses) ==="
@@ -168,13 +215,13 @@ expect_reader "6.4 control: matching run-ids => RUNNING" RUNNING 2 "" -- "$TMP/q
 echo "=== section 7: malformed beats are UNKNOWN, never silently fresh ==="
 mk_summary "$TMP/m.txt" run-m "INCOMPLETE (gate did not finish)"
 hb="$TMP/m.txt.heartbeat"
-mk_beat "$hb" run-m 5; sed -i 's/^run-id: .*//' "$hb"
+mk_beat "$hb" run-m 5; edit_lines "$hb" 's/^run-id: .*//'
 expect_reader "7.1 beat with no run-id => UNKNOWN" UNKNOWN 4 "heartbeat-no-run-id" -- "$TMP/m.txt"
-mk_beat "$hb" run-m 5; sed -i 's/^beat-epoch: .*/beat-epoch: soon/' "$hb"
+mk_beat "$hb" run-m 5; edit_lines "$hb" 's/^beat-epoch: .*/beat-epoch: soon/'
 expect_reader "7.2 non-numeric beat-epoch => UNKNOWN" UNKNOWN 4 "unparseable-epoch" -- "$TMP/m.txt"
-mk_beat "$hb" run-m 5; sed -i 's/^interval: .*/interval: often/' "$hb"
+mk_beat "$hb" run-m 5; edit_lines "$hb" 's/^interval: .*/interval: often/'
 expect_reader "7.3 non-numeric interval => UNKNOWN" UNKNOWN 4 "unparseable-interval" -- "$TMP/m.txt"
-mk_beat "$hb" run-m 5; sed -i 's/^interval: .*/interval: 0/' "$hb"
+mk_beat "$hb" run-m 5; edit_lines "$hb" 's/^interval: .*/interval: 0/'
 expect_reader "7.4 interval 0 => UNKNOWN" UNKNOWN 4 "bad-interval" -- "$TMP/m.txt"
 # A future-dated beat would otherwise be fresh FOREVER — a clock step or a hand-edited
 # artifact must not buy an unlimited RUNNING.
@@ -384,7 +431,7 @@ expect_reader "11b.11 control: INCOMPLETE with trailing detail still consults th
 #     A permissive branch keyed on the ABSENCE of the bad signal — the shape CLAUDE.md
 #     forbids. The binding is only a guarantee if it is unconditional.
 noid="$TMP/noid.txt"
-{ echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: PASS"; echo "==== END ===="; } > "$noid"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: PASS"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$noid"
 expect_reader "11b.12 --run-id given + summary has NO run-id => UNKNOWN, not COMPLETE" \
   UNKNOWN 4 "summary-no-run-id" -- "$noid" --run-id my-run
 # Control: with no --run-id there is nothing to bind to, so an id-less summary still answers.
@@ -392,7 +439,7 @@ expect_reader "11b.13 control: no --run-id + id-less summary => COMPLETE" \
   COMPLETE 0 "" -- "$noid"
 # And the same demand holds for a non-terminal summary reaching the heartbeat.
 noid2="$TMP/noid2.txt"
-{ echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: INCOMPLETE (gate did not finish)"; echo "==== END ===="; } > "$noid2"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: INCOMPLETE (gate did not finish)"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$noid2"
 mk_beat "$noid2.heartbeat" my-run 5
 expect_reader "11b.14 --run-id given + id-less INCOMPLETE summary => UNKNOWN, not RUNNING" \
   UNKNOWN 4 "summary-no-run-id" -- "$noid2" --run-id my-run
@@ -425,6 +472,122 @@ sl=$(grep -cE '^[A-Z_]+_TEXT=\$\(_slurp "\$(SUMMARY|HB)"\)$' "$READER")
 [ "$sl" -eq 2 ] && ok "11b.17 each artifact is snapshotted exactly once (found $sl)" \
                 || bad "11b.17 each artifact is snapshotted exactly once" "found $sl _slurp assignments, want 2"
 
+echo "=== section 11c: the four roborev job-157 findings, each with a control ==="
+# (a) Medium — a TERMINAL result in a TRUNCATED block was reported COMPLETE. emit_summary
+#     verifies its own end marker precisely because the single-`>` write can be cut short
+#     (ENOSPC, or a kill between the RESULT line and the closing marker), and such an
+#     artifact is PERMANENTLY unfinished — so accepting it reports a verdict the gate never
+#     published.
+trunc="$TMP/trunc.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-x"; echo "RESULT: PASS"; } > "$trunc"
+expect_reader "11c.1 terminal RESULT with no end marker => UNKNOWN, not COMPLETE" \
+  UNKNOWN 4 "summary-truncated" -- "$trunc"
+nostart="$TMP/nostart.txt"
+{ echo "run-id: run-x"; echo "RESULT: PASS"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$nostart"
+expect_reader "11c.2 terminal RESULT with no start marker => UNKNOWN" \
+  UNKNOWN 4 "summary-no-start-marker" -- "$nostart"
+# Controls: all three real marker dialects must still be accepted.
+for m in "AGENT-GATE SUMMARY" "AGENT-GATE LITE SUMMARY" "AGENT-GATE DELTA SUMMARY"; do
+  f="$TMP/mk-$(echo "$m" | tr ' ' '_').txt"
+  { echo "==== $m ===="; echo "run-id: run-x"; echo "RESULT: PASS"; echo "==== END $m ===="; } > "$f"
+  expect_reader "11c.3 control: '$m' framing is accepted" COMPLETE 0 "" -- "$f"
+done
+# A truncated INCOMPLETE block is NOT rejected on these grounds — it falls through to the
+# heartbeat, which is the conservative direction and must stay reachable.
+tinc="$TMP/trunc-inc.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-y"; echo "RESULT: INCOMPLETE (gate did not finish)"; } > "$tinc"
+mk_beat "$tinc.heartbeat" run-y 5
+expect_reader "11c.4 truncated INCOMPLETE still consults the beat (asymmetry is deliberate)" \
+  RUNNING 2 "" -- "$tinc"
+
+# (b) Medium — a STALE beat alone was reported REAPED. The beater is supervised only at
+#     COMPONENT boundaries and components run for minutes, so a beater that dies mid-
+#     component leaves a stale beat under a PERFECTLY LIVE gate. Reporting death there
+#     sends the caller to re-run a gate that was about to PASS. REAPED must now be an
+#     AFFIRMATIVE measurement, like RUNNING.
+mk_summary "$TMP/live.txt" run-L "INCOMPLETE (gate did not finish)"
+if [ -d /proc/1 ]; then
+  # A real, living process stands in for the gate; the beat is stale but pins its identity.
+  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
+  livepid=$!
+  echo "$livepid" >> "$TMP/pids"
+  livest=$(live_starttime "$livepid" || true)
+  if [ -z "$livest" ]; then
+    bad "11c.5 read a live process's start time" "empty — cannot build the case"
+  else
+    mk_beat "$TMP/live.txt.heartbeat" run-L 4000 20 "$livepid" "$livest"
+    expect_reader "11c.5 stale beat + gate pid ALIVE => UNKNOWN (beater died, not the gate)" \
+      UNKNOWN 4 "beater-died-gate-alive" -- "$TMP/live.txt"
+    # ...and the same pid with a MISMATCHED start time is a recycled pid: the gate IS gone.
+    mk_beat "$TMP/live.txt.heartbeat" run-L 4000 20 "$livepid" "$(( livest + 1 ))"
+    expect_reader "11c.6 stale beat + pid RECYCLED (start time differs) => REAPED" \
+      REAPED 3 "RECYCLED" -- "$TMP/live.txt"
+    # Control: a FRESH beat naming a live gate is still plain RUNNING.
+    mk_beat "$TMP/live.txt.heartbeat" run-L 5 20 "$livepid" "$livest"
+    expect_reader "11c.7 control: fresh beat + live gate => RUNNING" RUNNING 2 "" -- "$TMP/live.txt"
+  fi
+  # A stale beat whose pid is genuinely gone is affirmative death.
+  mk_beat "$TMP/live.txt.heartbeat" run-L 4000 20 "$DEAD_PID" "$(live_starttime 1)"
+  expect_reader "11c.8 stale beat + pid GONE => REAPED" REAPED 3 "no longer exists" -- "$TMP/live.txt"
+else
+  echo "skip 11c.5-11c.8 (no /proc on this host)"
+fi
+# Fallback path: no gate-starttime in the beat. A live pid cannot be pinned, so the answer
+# is UNKNOWN rather than a guess in either direction.
+mk_summary "$TMP/fb.txt" run-F "INCOMPLETE (gate did not finish)"
+bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
+fbpid=$!; echo "$fbpid" >> "$TMP/pids"
+mk_beat "$TMP/fb.txt.heartbeat" run-F 4000 20 "$fbpid"
+expect_reader "11c.9 stale beat, no gate-starttime, pid alive => UNKNOWN (cannot rule out reuse)" \
+  UNKNOWN 4 "beater-died-gate-maybe-alive" -- "$TMP/fb.txt"
+kill -9 "$fbpid" 2>/dev/null; wait "$fbpid" 2>/dev/null || true
+# A beat naming no usable pid cannot confirm death either.
+mk_beat "$TMP/fb.txt.heartbeat" run-F 4000 20 "notapid"
+expect_reader "11c.10 stale beat with an unusable gate-pid => UNKNOWN" \
+  UNKNOWN 4 "heartbeat-no-gate-pid" -- "$TMP/fb.txt"
+
+# (c) Medium — the beater must PUBLISH the start time the reader pins, or (b) degrades to
+#     the fallback everywhere.
+if [ -d /proc/1 ]; then
+  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
+  gpid=$!; echo "$gpid" >> "$TMP/pids"
+  pubf="$TMP/pub.hb"
+  bash "$BEATER" --file "$pubf" --run-id pub-run --gate-pid "$gpid" --interval 1 \
+    </dev/null >/dev/null 2>&1 &
+  echo "$!" >> "$TMP/beater-pids"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$pubf" ] && break; sleep 0.3; done
+  want=$(live_starttime "$gpid" || true)
+  if grep -q "^gate-starttime: ${want}$" "$pubf" 2>/dev/null; then
+    ok "11c.11 the beater publishes the gate's start time, matching /proc"
+  else
+    bad "11c.11 the beater publishes the gate's start time, matching /proc" \
+        "want '$want', got '$(grep '^gate-starttime: ' "$pubf" 2>/dev/null)'"
+  fi
+  kill -9 "$gpid" 2>/dev/null; wait "$gpid" 2>/dev/null || true
+else
+  echo "skip 11c.11 (no /proc)"
+fi
+
+# (d) Medium — PORTABILITY. This suite is wired into the full gate's tooling-tests, and
+#     macOS/BSD is a first-class gate host, so a GNU-only construct here fails the GATE on
+#     every macOS box rather than merely failing a test. Asserted structurally over BOTH
+#     suites: behavioural coverage cannot see a platform this run is not on.
+port_bad=0
+for f in "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" "$REPO_ROOT/scripts/tests/test_gate_detached.sh"; do
+  # strip comments before scanning, so the explanatory prose above is not a false hit
+  body=$(sed 's/[[:space:]]*#.*$//' "$f")
+  # The needle is SPLIT so this guard cannot match its own source line — the first
+  # version did exactly that and reported a violation against itself.
+  _sed_needle="sed"' -i'
+  if printf '%s\n' "$body" | grep -qE "(^|[^a-zA-Z_])$_sed_needle"; then
+    bad "11c.12 no GNU-only in-place sed in $(basename "$f")" "found one (BSD sed needs a suffix argument)"; port_bad=1
+  fi
+  if printf '%s\n' "$body" | grep -qE '(^|[^A-Z_$])timeout [0-9]'; then
+    bad "11c.13 no unconditional 'timeout N' in $(basename "$f")" "stock macOS has no timeout(1)"; port_bad=1
+  fi
+done
+[ "$port_bad" -eq 0 ] && ok "11c.12/13 both suites are free of GNU-only in-place sed and bare timeout"
+
 echo "=== section 12b: an early-exiting gate emits no undefined-function noise ==="
 # The EXIT trap is armed thousands of lines above where _gate_release_slot is DEFINED,
 # and bash defines functions as it reads the file. So every early-exit path — including
@@ -454,7 +617,7 @@ echo "=== section 13: end-to-end through the real gate (wiring evidence) ==="
 # A mechanism is only done when its PUBLIC surface exercises it. --only file-size is
 # ~2s, self-exempt from the #1825 slot, and cannot select tooling-tests (no recursion).
 e2e="$TMP/e2e-summary.txt"
-if AGENT_GATE_SUMMARY_FILE="$e2e" timeout 600 bash "$GATE" --only file-size >"$TMP/e2e.log" 2>&1 </dev/null; then :; fi
+if AGENT_GATE_SUMMARY_FILE="$e2e" $TIMEOUT_CMD ${TIMEOUT_CMD:+600} bash "$GATE" --only file-size >"$TMP/e2e.log" 2>&1 </dev/null; then :; fi
 if [ ! -f "$e2e" ]; then
   bad "13.1 real gate writes its summary" "no $e2e (last 20 lines: $(tail -20 "$TMP/e2e.log"))"
 else

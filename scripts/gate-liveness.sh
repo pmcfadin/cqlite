@@ -157,8 +157,28 @@ if [ -z "$RESULT_LINE" ]; then
 fi
 RESULT_VALUE="${RESULT_LINE#RESULT: }"
 RESULT_TOKEN="${RESULT_VALUE%% *}"
+# A TERMINAL verdict is only believable if the block that carries it is COMPLETE
+# (roborev job 157, Medium). emit_summary writes the block with a single `>` redirection
+# and then verifies its own end marker precisely because that write can be cut short — by
+# ENOSPC, or by the gate being killed between the `RESULT:` line and the closing marker.
+# A truncated artifact is PERMANENT: nothing will ever finish it, so a reader that
+# accepted it would report a verdict the gate never actually published.
+#
+# Asymmetric on purpose: this is required only on the COMPLETE path. An INCOMPLETE
+# summary already falls through to the heartbeat, which is the conservative direction, and
+# a block truncated before its `RESULT:` line has no result to misread — it lands on
+# `no-result-line` above.
+_has_line() { printf '%s\n' "$SUM_TEXT" | grep -qE "$1"; }
+_START_RE='^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
+_END_RE='^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
 case "$RESULT_TOKEN" in
   PASS|FAIL|PARTIAL|ERROR|REFUSED)
+    if ! _has_line "$_START_RE"; then
+      verdict UNKNOWN 4 "summary-no-start-marker; '$RESULT_LINE' is present but the block has no '==== AGENT-GATE … SUMMARY ====' opener — this is not a complete gate summary"
+    fi
+    if ! _has_line "$_END_RE"; then
+      verdict UNKNOWN 4 "summary-truncated; '$RESULT_LINE' is present but the closing '==== END AGENT-GATE … SUMMARY ====' marker is not — the write was cut short (kill or ENOSPC) and will never complete, so this verdict was never published"
+    fi
     verdict COMPLETE 0 "the summary carries a terminal verdict — $RESULT_VALUE" ;;
   INCOMPLETE)
     : ;;  # the interesting case: fall through to the heartbeat
@@ -228,4 +248,49 @@ _where="run-id $HB_RUN_ID, gate-pid ${HB_PID:-unknown}, beat ${HB_SEQ:-?}, age $
 if [ "$AGE" -le "$STALE_AFTER" ]; then
   verdict RUNNING 2 "the gate beat ${AGE}s ago — it is alive and has not reached a verdict yet; $_where"
 fi
-verdict REAPED 3 "the gate stopped beating ${AGE}s ago (window ${STALE_AFTER}s) — it was killed and will never write a verdict; re-run it. $_where"
+
+# ---- a STALE beat is not by itself evidence of death (roborev job 157, Medium) ------
+# The beater is supervised only at COMPONENT BOUNDARIES, and components run for minutes
+# (tooling-tests: 687-849s). If the beater alone dies mid-component — a stray signal, an
+# OOM reap of the smallest process — the beat goes stale under a PERFECTLY LIVE gate, and
+# reporting REAPED there is a FALSE DEATH: the caller re-runs a gate that was about to
+# PASS, which is the expensive direction and precisely what this script exists to prevent.
+#
+# So REAPED, like RUNNING, must be an AFFIRMATIVE measurement: the gate process itself has
+# to be shown gone. The beat names `gate-pid`, and `gate-starttime` pins that pid's
+# identity so a RECYCLED pid cannot pose as the living gate.
+#
+# This corroboration is only possible on the gate's OWN host. Where it cannot be done the
+# answer is UNKNOWN with the reason named — never REAPED on a guess, and never RUNNING
+# either.
+HB_STARTTIME=$(_field "$HB_TEXT" gate-starttime)
+_proc_starttime() {
+  local pid="$1" raw rest
+  raw=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  rest="${raw##*) }"
+  # shellcheck disable=SC2086
+  set -- $rest
+  [ $# -ge 20 ] || return 1
+  printf '%s' "${20}"
+}
+case "$HB_PID" in
+  ''|*[!0-9]*)
+    verdict UNKNOWN 4 "heartbeat-no-gate-pid; the beat is ${AGE}s stale but names no usable 'gate-pid:', so the gate's death cannot be confirmed. $_where" ;;
+esac
+if [ -d /proc/1 ] && [ -n "$HB_STARTTIME" ]; then
+  _now_st=$(_proc_starttime "$HB_PID" || true)
+  if [ -z "$_now_st" ]; then
+    verdict REAPED 3 "the gate stopped beating ${AGE}s ago AND pid $HB_PID no longer exists — it was killed and will never write a verdict; re-run it. $_where"
+  fi
+  if [ "$_now_st" != "$HB_STARTTIME" ]; then
+    verdict REAPED 3 "the gate stopped beating ${AGE}s ago AND pid $HB_PID has been RECYCLED by a different process (start time $_now_st != $HB_STARTTIME) — the gate is gone; re-run it. $_where"
+  fi
+  verdict UNKNOWN 4 "beater-died-gate-alive; the beat is ${AGE}s stale (window ${STALE_AFTER}s) but gate pid $HB_PID IS STILL ALIVE and is the same process — the LIVENESS SIGNAL died, not the gate. Do NOT re-run: wait, and re-read at the next component boundary, where the gate relaunches its beater. $_where"
+fi
+# No /proc, or a beat with no start time (an older gate): `kill -0` still distinguishes
+# "pid gone" from "pid present", it just cannot rule out reuse. Absence is affirmative
+# enough for REAPED; presence is not affirmative enough for anything.
+if kill -0 "$HB_PID" 2>/dev/null; then
+  verdict UNKNOWN 4 "beater-died-gate-maybe-alive; the beat is ${AGE}s stale but pid $HB_PID still exists and this host cannot pin its identity (no /proc, or the beat carries no 'gate-starttime:'), so it may be the gate or a recycled pid. Not re-running on a guess. $_where"
+fi
+verdict REAPED 3 "the gate stopped beating ${AGE}s ago AND pid $HB_PID no longer exists — it was killed and will never write a verdict; re-run it. $_where"
