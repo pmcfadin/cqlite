@@ -5099,6 +5099,9 @@ fi
 # STALE prior-run block / unwritable file — NOT a live foreign clobber — so the
 # integrity guard names that cause accurately instead of blaming a "foreign run-id".
 SENTINEL_WROTE=0
+# component-set-exempt: #3544 — the startup INCOMPLETE sentinel is written BEFORE the
+# component-set pre-flight runs (it is the #2908 liveness placeholder, not a verdict), so
+# there is no measured verdict to stamp; emit_summary replaces it with a stamped block.
 if {
   echo "$SUMMARY_START_MARKER"
   echo "run-id: $RUN_ID"
@@ -5302,14 +5305,24 @@ _integrity_fail_block() {
   # mutated-AND-clobbered run would emit a block missing them. Incoming `tree-*` meta
   # lines are dropped and re-emitted from the live globals below, so exactly ONE
   # authoritative set appears no matter which caller supplied the meta.
+  #
+  # #3544: the same argument applies to the `component-set:` line — this block is
+  # hand-rolled, so it must thread that verdict itself or the "every SUMMARY carries
+  # component-set:" contract has a hole exactly where a run is already in trouble. It is
+  # re-emitted from the LIVE global (_component_set_meta) and any incoming `component-set:`
+  # meta line is dropped, so exactly ONE authoritative line appears no matter which caller
+  # supplied the meta (the --lite/--delta terminals push it into SUMMARY_META; the MAIN
+  # foreground lane passes none).
   local line
   for line in ${@+"$@"}; do
     case "$line" in
       tree-start:*|tree-end:*|tree-integrity:*|tree-hash-cap:*) continue ;;
+      component-set:*) continue ;;
     esac
     echo "$line"
   done
   _tree_meta_lines
+  printf '%s\n' "$(_component_set_meta)"
   echo "logs: $LOG_DIR"
   echo "summary-file: $SUMMARY_FILE (NOT rewritten — live peer owns it)"
   echo "integrity-fail-sibling: $sibling"
@@ -6209,6 +6222,8 @@ fi
 # (fail-closed guard for these hooks ran earlier, before the startup sentinel — #2874)
 case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
   1)
+    # component-set-exempt: a synthetic FOREIGN PEER's block seeded by the #2874
+    # self-test — it models another run's artifact, not this run's verdict block
     {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: /tmp/agent-gate.FOREIGN-$$"
@@ -6219,6 +6234,8 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     echo "integrity-selftest: BUG — guard did NOT fire on a foreign run-id" >&2
     exit 0 ;;
   side)
+    # component-set-exempt: a synthetic FOREIGN PEER's block seeded by the #2874
+    # self-test — it models another run's artifact, not this run's verdict block
     {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: /tmp/agent-gate.FOREIGN-$$"
@@ -6241,6 +6258,8 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     # publish FAIL to the private log + non-clobbering sibling WITHOUT rewriting the contended path
     # (ratified job-2106 no-clobber contract). SENTINEL_WROTE=1 here (writable throwaway took our
     # startup sentinel before we seeded the foreign block).
+    # component-set-exempt: a synthetic FOREIGN PEER's block seeded by the #2874
+    # self-test — it models another run's artifact, not this run's verdict block
     {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: /tmp/agent-gate.FOREIGN-$$"
@@ -6268,6 +6287,8 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     # SIDE-lane marker exists. The terminal path must STILL detect the foreign run-id on the
     # observable condition alone, refuse to clobber the peer, publish to the sibling, and force a
     # non-zero result — even though OVERALL started PASS (all components passed).
+    # component-set-exempt: a synthetic FOREIGN PEER's block seeded by the #2874
+    # self-test — it models another run's artifact, not this run's verdict block
     {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: /tmp/agent-gate.FOREIGN-$$"

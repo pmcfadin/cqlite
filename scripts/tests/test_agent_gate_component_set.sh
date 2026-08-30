@@ -1175,6 +1175,133 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7d. THE OTHER KIND OF EMITTER: a MANUAL SUMMARY RENDERER (roborev job 215, blocker 1).
+#     The census above keys on `emit_summary` / `_emit_terminal_summary` CALL SITES, so a
+#     block assembled by hand — `echo "$SUMMARY_START_MARKER"` … `RESULT:` … end marker —
+#     is INVISIBLE to it. That is not hypothetical: `_integrity_fail_block` is exactly such
+#     a renderer (it is the #2874 no-clobber publish path, deliberately independent of
+#     emit_summary), and it emitted a complete `RESULT: FAIL` block carrying NO
+#     `component-set:` line. A guard whose subject set excludes a live emitter is the same
+#     false assurance as #3544 itself, one level in.
+#
+#     So the derivation below covers the OTHER half, from the same source, with the same
+#     rules: every `echo "$SUMMARY_START_MARKER"` in the gate is classified as
+#       CANONICAL     it is INSIDE emit_summary / _emit_terminal_summary — the canonical
+#                     renderer, whose call sites the census above already covers;
+#       STAMPED       the block's own extent (or the 8 lines above it, where a stamp may be
+#                     set up) mentions COMPONENT_SET_LINE / _component_set_meta;
+#       EXEMPT        it carries `component-set-exempt: <reason>` (the startup INCOMPLETE
+#                     sentinel, which predates the pre-flight, and the synthetic FOREIGN
+#                     peer blocks the #2874 self-test seeds);
+#       GAP           none of the above ⇒ FAIL naming the line.
+#     A NEW hand-rolled block therefore lands in GAP with no edit to this file — which is
+#     the property that stops this class recurring.
+#
+#     FAIL-CLOSED on its own derivation, twice over: zero renderer sites at all, or zero
+#     CANONICAL/zero STAMPED among them, means the marker-echo shape changed and the scan is
+#     no longer attributing anything — a clean census of nothing, never a pass. An
+#     unterminated block (no end marker within a bounded window) is reported, not skipped.
+# ---------------------------------------------------------------------------
+MANUAL_AWK="$tmp/manual-census.awk"
+cat >"$MANUAL_AWK" <<'MANUAL_PROG'
+{ line[NR] = $0 }
+END {
+  for (i = 1; i <= NR; i++) {
+    l = line[i]
+    if (l ~ /^[ \t]*#/) continue
+    if (l !~ /echo[ \t]+"\$SUMMARY_START_MARKER"/) continue
+    # Enclosing function, BOUNDED by a top-level `}`. Without that bound a TOP-LEVEL
+    # renderer (the startup sentinel) is attributed to whatever function happens to sit
+    # above it — the same false-attribution defect the emit census hit at `nm=(`.
+    fn = ""
+    for (k = i - 1; k > 0; k--) {
+      if (line[k] ~ /^\}/) break
+      if (line[k] ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/) { fn = line[k]; sub(/\(\).*/, "", fn); break }
+    }
+    if (fn == "emit_summary" || fn == "_emit_terminal_summary") {
+      printf "CANONICAL\t%d\t%s\n", i, fn; continue
+    }
+    # The block's extent: forward to its end marker, within a BOUNDED window (an
+    # unterminated block is a reported defect, never a silently skipped site).
+    end = 0
+    for (j = i; j <= NR && j <= i + 120; j++) if (line[j] ~ /SUMMARY_END_MARKER/) { end = j; break }
+    if (end == 0) { printf "UNTERMINATED\t%d\t%s\n", i, substr(l, 1, 60); continue }
+    # A stamp counts only on a CODE line: a full-line COMMENT that merely NAMES
+    # `_component_set_meta` is prose, and counting it made this very control report 0 GAPs
+    # after the stamp was deleted (the comment above the renderer still mentioned it) — a
+    # census satisfied by a sentence about the check rather than the check. The exempt
+    # annotation is the opposite: it IS a comment, so it is read from comment lines.
+    stamped = 0; exempt = 0
+    for (j = i - 8; j <= end; j++) {
+      if (j < 1) continue
+      if (line[j] !~ /^[ \t]*#/ && line[j] ~ /COMPONENT_SET_LINE|_component_set_meta/) stamped = 1
+      if (line[j] ~ /component-set-exempt:[ \t]*[^ \t]/) exempt = 1
+    }
+    if (stamped)      printf "STAMPED\t%d\t%s\n", i, fn
+    else if (exempt)  printf "EXEMPT\t%d\t%s\n", i, fn
+    else              printf "GAP\t%d\t%s\n", i, substr(l, 1, 60)
+  }
+}
+MANUAL_PROG
+
+manual_census() { awk -f "$MANUAL_AWK" "${1:-$GATE}"; }
+man_out=$(manual_census)
+man_sites=$(printf '%s\n' "$man_out" | grep -c '	')
+man_gaps=$(printf '%s\n' "$man_out" | grep -c '^GAP	')
+man_unterm=$(printf '%s\n' "$man_out" | grep -c '^UNTERMINATED	')
+man_canon=$(printf '%s\n' "$man_out" | grep -c '^CANONICAL	')
+man_stamped=$(printf '%s\n' "$man_out" | grep -c '^STAMPED	')
+if [ "$man_sites" -eq 0 ] || [ "$man_canon" -eq 0 ] || [ "$man_stamped" -eq 0 ]; then
+  bad "3544-manual-emitter: the renderer derivation found sites=$man_sites canonical=$man_canon stamped=$man_stamped in $GATE — the marker-echo shape changed or the scan broke (fail-closed: this is not a clean census)"
+elif [ "$man_gaps" -eq 0 ] && [ "$man_unterm" -eq 0 ]; then
+  ok "3544-manual-emitter: all $man_sites SUMMARY-block renderers account for the component-set line ($man_canon canonical, $man_stamped hand-rolled+stamped, rest exempt with a reason)"
+else
+  bad "3544-manual-emitter: $man_gaps hand-rolled SUMMARY block(s) neither stamp the component-set line nor carry 'component-set-exempt: <reason>' ($man_unterm unterminated):"
+  printf '%s\n' "$man_out" | grep -E '^(GAP|UNTERMINATED)	' | while IFS='	' read -r _v _ln _src; do
+    echo "   $_v line $_ln: $_src"
+  done
+fi
+
+# POSITIVE CONTROL: strip the stamp out of the ONE hand-rolled renderer that carries it and
+# require the derivation to report exactly that site as a GAP. Portable FIRST-MATCH deletion
+# (awk with an exact string compare — `sed '0,/re/'` is a GNU extension BSD sed rejects).
+man_ctl="$tmp/manual-control-gate.sh"
+awk 'BEGIN { done = 0 }
+     { if (!done && $0 == "  printf '"'"'%s\\n'"'"' \"$(_component_set_meta)\"") { done = 1; next }
+       print }' "$GATE" >"$man_ctl"
+if ! cmp -s "$GATE" "$man_ctl"; then
+  man_ctl_gaps=$(manual_census "$man_ctl" | grep -c '^GAP	')
+  if [ "$man_ctl_gaps" -eq 1 ]; then
+    ok "3544-manual-emitter-control: removing the hand-rolled renderer's stamp reports exactly 1 GAP — the derivation is live, not inert"
+  else
+    bad "3544-manual-emitter-control: expected exactly 1 GAP with the stamp removed (got $man_ctl_gaps) — the derivation is not discriminating"
+  fi
+else
+  bad "3544-manual-emitter-control: could not build the control (the stamp line did not match) — the derivation cannot be shown to discriminate"
+fi
+
+# …and BEHAVIOURALLY, because a source census cannot prove the line reaches the block. The
+# #2874 `marker` hook drives the real no-clobber publish path (a foreign peer owns the
+# contended path, a SIDE lane recorded a clobber) and prints the complete hand-rolled block
+# on stdout. It runs pre-dispatch, so the honest value there is the NOT EVALUATED form —
+# what matters is that the block carries the line EXACTLY ONCE and is never silent about it.
+man_home="$tmp/manual-emit"
+mkdir -p "$man_home/scripts"
+cp "$GATE" "$man_home/scripts/agent-gate.sh"
+man_block=$( cd "$man_home" && AGENT_GATE_SUMMARY_FILE="$man_home/sum.txt" \
+               AGENT_GATE_INTEGRITY_SELFTEST=marker CQLITE_GATE_NO_NICE=1 \
+               bash scripts/agent-gate.sh 2>/dev/null )
+man_lines=$(printf '%s\n' "$man_block" | grep -c '^component-set: ')
+if [ "$man_lines" -eq 1 ] \
+   && grep -q '^summary-integrity: FAIL' <<<"$man_block" \
+   && grep -q '^RESULT: FAIL' <<<"$man_block"; then
+  ok "3544-manual-emitter-emit: the hand-rolled summary-integrity FAIL block carries the component-set line exactly once"
+else
+  bad "3544-manual-emitter-emit: expected exactly 1 'component-set:' line in the emitted integrity block (got $man_lines)"
+  printf '%s\n' "$man_block" | sed -n '1,25p'
+fi
+
+# ---------------------------------------------------------------------------
 # 8. NO OPT-OUT. The remedy (rebase) is universally available, so an escape hatch could
 #    only buy a vacuous green. Structural, because the absence of a variable cannot be
 #    observed behaviourally: assert no env read inside the pre-flight block gates it.
