@@ -186,6 +186,7 @@ The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,
 | `legacy-heuristics` | `cargo build -p cqlite-core --features legacy-heuristics`, then `cargo test --no-fail-fast … --lib` + `--test` targets DERIVED from **cargo metadata** — membership by a cfg site anywhere in the target's module closure, or by `required-features` (#1699) |
 | `feature-iso-parquet` | `cargo test -p cqlite-core --no-default-features --features all-compression,parquet --lib --no-run` — **without** `delta-scan` (#1699) |
 | `feature-iso-delta-scan` | the mirror — **without** `parquet` (#1699) |
+| `all-features-check` | `cargo check` **and** `cargo clippy … -- -D warnings`, both at `-p cqlite-core --all-features --all-targets` (issue #3453). The **only** component that enables the OpenTelemetry stack: `clippy` above excludes `observability`/`observability-testing`/`metrics` by #1844 design, `core-tests` runs `--features cli-helpers`, `minimal-build` runs `--no-default-features` — so before this lane no cargo invocation in the gate ever passed `observability`. Package-scoped, **not** `--workspace` (the `duckdb` bundled-source amalgamation belongs to `cqlite-cli` alone, so this stays minutes, not the #916 cost). Declares its DERIVED feature set on every run and FAILs closed if `--all-features` no longer enables its subject. Compiles and lints only — it executes no test, so the runtime half of the class stays `pr-gate-core`'s (see below). Never SKIPs |
 | `smoke` | `bash test-data/scripts/smoke-test-all-tables.sh` (against a freshly built debug binary) |
 
 All components run even after a failure so one run reports everything.
@@ -707,6 +708,37 @@ SUMMARY block through the real emission code without running the 5–8 minute ga
 The gate runs this test automatically as the `tooling-tests` component, so the
 capture guarantee is enforced on every gate run.
 
+## A green gate does not subsume `pr-gate-core` (#3453)
+
+The gate and the `required` CI check **overlap; neither contains the other**. This is
+structural, and worth stating because a green SUMMARY reads like a prediction that CI
+will pass.
+
+- **The gate runs lanes CI cannot.** `arrow-parity-guard` names a
+  `#![cfg(feature = "arrow")]` integration target that pr-gate's `cargo test -p
+  cqlite-core --lib --all-features` compiles no path to (a `--lib` run reaches no
+  `tests/` target); the feature-matrix, binding and parity lanes are local-only in the
+  same way.
+- **CI runs a lane the gate does not.** That same `--lib --all-features` invocation
+  **executes** cqlite-core's unit suite with the OTLP stack ON, at a feature set no gate
+  component executes.
+
+Measured cost of leaving this implicit: PR #3382 earned a **31/31 gate PASS without ever
+executing the test that pinned its own fix**, because no cargo invocation in the gate had
+passed `observability`.
+
+`all-features-check` closes the **compile/lint half** of that gap — a type error, or a
+`-D warnings` lint, inside a `#[cfg(feature = "observability")]` item now reds the gate of
+record. It **deliberately does not close the runtime half**: it executes nothing, so an
+order-dependent defect of #3382's shape — a process-wide `OnceLock<Instruments>` poisoned
+by whichever test binds the global meter to the no-op provider first, invisible to
+`#[serial_test::serial]` grouping — still fails **only** in CI. (Those tests are gated on
+`observability-testing`, not `observability`.) A full all-features *test* lane was
+rejected on cost: tens of minutes on every endgame to duplicate a required check.
+
+So: a red CI check on a green-gate PR is an ordinary event, not evidence the gate
+malfunctioned.
+
 ## Machine-checkable summary block
 
 The gate emits a block between `==== AGENT-GATE SUMMARY ====` markers. The last
@@ -731,6 +763,7 @@ integration-tests: PASS|FAIL (<Ns>)
 write-tests:       PASS|FAIL (<Ns>)
 cli-tests:         PASS|FAIL (<Ns>)
 minimal-build:     PASS|FAIL (<Ns>)
+all-features-check: PASS|FAIL (<Ns>)
 smoke:             PASS|FAIL (<Ns>)
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
