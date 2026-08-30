@@ -502,12 +502,21 @@ def _github_fields(issue: int, pr: int) -> dict:
                          f"labels (exactly one expected)")
     routing = "oracle" if has_oracle else ("design" if has_design else None)
     return {
-        # The issue this payload was BUILT FOR. build_record refuses if it disagrees with
-        # --issue, so a stale or copied --from-json file cannot be silently applied to a
-        # different delivery (issue #3550). Bound to ONE flag, not to another injected field:
-        # two injected values that must agree with EACH OTHER is the shape that produced six
-        # consecutive defects on this seam.
+        # The DELIVERY CYCLE this payload was built for — the same (issue, pr) pair that is
+        # the ledger's own identity for a record. build_record refuses if either half
+        # disagrees with the CLI, so a stale or copied --from-json file cannot be applied to a
+        # different delivery (issue #3550). Binding the issue ALONE was insufficient: this
+        # payload also carries PR-specific data (pr_opened_at, merged_at,
+        # pr_closes_this_issue), so a payload reused across two PRs of the SAME issue — the
+        # #3393 shape exactly, three PRs on one open issue — passed and recorded the new pr
+        # with the old pr's timestamps and classification.
+        #
+        # Each half is checked against a CLI FLAG, never against another injected field: two
+        # injected values that must agree with EACH OTHER is the shape that regenerated this
+        # defect six times, because a non-match and a correct non-match are the same
+        # observation. A file-vs-CLI check has no such symmetry.
         "issue": issue,
+        "pr": pr,
         "created_at": issue_json["createdAt"],
         "closed_at": issue_json["closedAt"],
         # GitHub's own reason the issue is in its current state. For an OPEN issue this is
@@ -603,21 +612,25 @@ def build_record(args, gh_fields: dict) -> dict:
     # one flag protects every field at once — and deliberately NOT by re-introducing two
     # injected operands that must agree with each other, which is the shape that produced
     # six consecutive defects here.
-    if "issue" not in gh_fields:
-        raise SystemExit(
-            "error: the injected payload has no 'issue' field naming the issue it was built "
-            "for, so it cannot be bound to --issue — an unbound payload could be a stale or "
-            "copied file for a different delivery (issue #3550)")
-    payload_issue = gh_fields["issue"]
-    if not isinstance(payload_issue, int) or isinstance(payload_issue, bool):
-        raise SystemExit(
-            f"error: the injected payload's 'issue' must be an integer, got "
-            f"{payload_issue!r} ({type(payload_issue).__name__}) (issue #3550)")
-    if payload_issue != args.issue:
-        raise SystemExit(
-            f"error: the injected payload was built for issue #{payload_issue} but --issue is "
-            f"{args.issue} — refusing to apply one delivery's authoritative data to another. "
-            f"Re-derive the payload for #{args.issue} (issue #3550)")
+    for field, flag, expected in (("issue", "--issue", args.issue), ("pr", "--pr", args.pr)):
+        if field not in gh_fields:
+            raise SystemExit(
+                f"error: the injected payload has no '{field}' field naming the delivery it "
+                f"was built for, so it cannot be bound to {flag} — an unbound payload could "
+                f"be a stale or copied file for a different delivery (issue #3550)")
+        got = gh_fields[field]
+        if not isinstance(got, int) or isinstance(got, bool):
+            raise SystemExit(
+                f"error: the injected payload's '{field}' must be an integer, got {got!r} "
+                f"({type(got).__name__}) (issue #3550)")
+        if got != expected:
+            raise SystemExit(
+                f"error: the injected payload was built for {field} #{got} but {flag} is "
+                f"{expected} — refusing to apply one delivery's authoritative data to "
+                f"another. The payload carries BOTH issue-specific and PR-specific fields "
+                f"(timestamps, pr_closes_this_issue), so reusing it across PRs of the same "
+                f"issue records the new pr with the old pr's data. Re-derive the payload for "
+                f"({args.issue}, {args.pr}) (issue #3550)")
 
     # `closed_at` is read AFFIRMATIVELY, never by truthiness (issue #3550). The `--from-json`
     # seam can inject anything, and a falsy-but-not-null value ("" / 0 / false) or an ABSENT
