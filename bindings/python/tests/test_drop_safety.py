@@ -127,11 +127,19 @@ def test_drop_without_close_runs_cleanup(tmp_path, schema_file):
 
 
 def test_double_cleanup_is_safe(tmp_path, schema_file):
-    """``close()`` then drop is a single cleanup, not two.
+    """``close()`` then drop must not error and must not flush twice.
 
-    The ``AtomicBool`` swap is the single source of "already cleaned up", so the
-    drop after an explicit ``close()`` must be a silent no-op: no error, and —
-    observably — no SECOND flush producing an extra generation file.
+    WHAT THIS TEST CAN AND CANNOT SEE — stated because the name promises more
+    than any Python-visible assertion can deliver.  It pins: no exception, and
+    no second generation file.  It does NOT prove the Rust ``AtomicBool`` guard
+    is what prevented the second cleanup, because
+    ``WriteEngine::close`` is ALSO internally idempotent (its own ``closed``
+    swap in ``cqlite-core/src/storage/write_engine/mod.rs``), so a second call
+    would return ``Ok`` without flushing even if the binding-level guard were
+    removed entirely.  The guard's effect is therefore not observable from
+    Python, and this is a no-crash / no-extra-flush regression guard rather than
+    proof of the guard.  Treating it as proof is the mistake this docstring
+    exists to prevent.
     """
     db, write_dir = _open_writable(tmp_path, schema_file, "double")
 
