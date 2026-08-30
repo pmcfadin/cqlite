@@ -128,7 +128,7 @@ CAGE
     bad "3.0 start the cage cgroup" "systemd-run failed"
   else
     ok "3.0 start the cage cgroup"
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    for _ in $(seq 1 60); do
       [ -s "$TMP/in.log" ] && [ -s "$TMP/out.log" ] && break
       sleep 1
     done
@@ -155,7 +155,7 @@ CAGE
 
       systemctl --user stop "$cage_unit" >/dev/null 2>&1
       # Bounded wait for the kill to land, then assert the split.
-      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      for _ in $(seq 1 60); do
         kill -0 "$in_pid" 2>/dev/null || break
         sleep 1
       done

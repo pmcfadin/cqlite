@@ -296,7 +296,9 @@ beater_pid=$!
 echo "$beater_pid" >> "$TMP/beater-pids"
 # Wait for the first beat rather than assuming a timing (bounded, so a broken beater
 # fails the case instead of hanging the suite).
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$hbf" ] && break; sleep 0.3; done
+# 60 x 0.5s = 30s ceiling; breaks the moment the beater publishes. A 3s ceiling
+# was load-sensitive on a host running several lanes and produced intermittent reds.
+for _ in $(seq 1 60); do [ -f "$hbf" ] && break; sleep 0.5; done
 if [ -f "$hbf" ]; then
   ok "9.1 beater writes a beat for a live gate"
   grep -q "^run-id: live-run$"      "$hbf" && ok "9.2 beat carries the run-id"       || bad "9.2 beat carries the run-id" "$(cat "$hbf")"
@@ -313,7 +315,7 @@ expect_reader "9.6 live beater => reader says RUNNING" RUNNING 2 "" -- "$TMP/liv
 # Now kill the "gate". The beater must notice and EXIT, leaving the last beat to age.
 kill -9 "$sleep_pid" 2>/dev/null; wait "$sleep_pid" 2>/dev/null
 beater_gone=no
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+for _ in $(seq 1 60); do
   kill -0 "$beater_pid" 2>/dev/null || { beater_gone=yes; break; }
   sleep 0.4
 done
