@@ -100,8 +100,8 @@
 //!
 //! # This accept-list MUST NOT be broader than `arrow_rows`'s decoder
 //!
-//! Every Arrow type accepted here has to be one `arrow_rows::canonical_from_arrow`
-//! can DECODE. An accept-list that is broader declares a schema valid and then
+//! Every Arrow type accepted here has to be one the declared-type-guided Arrow
+//! decode (`declared::canonicalize_arrow`, structurally `arrow_rows`) can DECODE. An accept-list that is broader declares a schema valid and then
 //! dies during value projection — a confusing late failure instead of a clear
 //! early one, and a promise the harness cannot keep. Add or remove a
 //! representation in BOTH files, in one edit.

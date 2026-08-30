@@ -112,7 +112,11 @@
 //!   Cheap and high value.
 //! * `signed_width_collections` — undeclared: `set<bigint|smallint|tinyint>` — element WIDTH
 //!   surface, which is exactly what the Arrow type check exists for.
-//! * `signed_special_collections` — undeclared: `set<decimal>`, `set<double>`.
+//! * `signed_special_collections` — undeclared: `set<decimal>`, `set<double>`. Adding it is now
+//!   a CASE DECLARATION rather than a harness change: a multicell collection PATH component is
+//!   typed from its declared element type (issue #1490 round 7, `declared.rs`), so a
+//!   `set<decimal>`/`set<double>` element no longer compares Cassandra's stringified text
+//!   against the Arrow side's typed value.
 //!
 //! ## `test_comp` (7 tables, `compression-parity.cql`, COMMITTED)
 //!

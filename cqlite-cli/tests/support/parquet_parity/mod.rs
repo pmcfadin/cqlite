@@ -442,6 +442,11 @@ impl Row {
     /// comparison notices. It cannot weaken a real run: nothing in the harness
     /// calls it, and a `Row` is rebuilt from the Parquet file on every case.
     pub fn overwrite_cell(&mut self, column: &str, value: CanonicalValue) {
+        // Placing a value makes the column decoded BY DEFINITION, so the
+        // `undecoded` record has to go with it — otherwise a self-test that
+        // perturbs a blocked column would hit the bookkeeping refusal instead of
+        // the value difference it means to demonstrate.
+        self.undecoded.remove(column);
         self.cells.insert(column.to_string(), value);
     }
 
