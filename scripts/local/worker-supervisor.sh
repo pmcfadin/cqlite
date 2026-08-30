@@ -1514,204 +1514,58 @@ supervisor_legacy_lock_state() {
 # per-lane "another instance is already running" refusal, so an operator (and a test) can tell which
 # of the two locks stopped the start.
 supervisor_legacy_lock_refuse() {
-  local legacy="$1" detail="$2"
+  local legacy="$1" detail="$2" remedy="${3:-}"
   echo "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy: $detail" >&2
   echo "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($SUPERVISOR_LOCK), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
+  # A CASE-SPECIFIC remedy, when there is one. The states differ in what an operator should DO — a LIVE
+  # holder means "something is running, stop it"; a STALE one means "an old supervisor left this behind,
+  # delete it" — so the generic line below is not sufficient on its own, and a run that told an operator
+  # to stop a process that is already dead would be actively misleading.
+  [[ -z "$remedy" ]] || echo "worker-supervisor: remedy for THIS state — $remedy" >&2
   echo "worker-supervisor: remedy — stop the pre-#3467 supervisor (or upgrade that checkout to #3467+), or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check." >&2
   exit 1
 }
 
-# THE ASIDE LAYOUT (#3549, roborev job 179 Medium). A renamed-aside legacy lock lives at
-# `<asidedir>/lock`, where `<asidedir>` is a PRIVATE directory `mktemp -d` freshly created beside the
-# legacy lock. Both halves matter and neither is cosmetic:
-#   * `<asidedir>` is created by mktemp, so its name is UNIQUE per run rather than derived from `$$`.
-#     A `$$`-derived name is NOT unique over time: the refuse-and-preserve paths below deliberately
-#     LEAVE an aside behind, so ordinary OS pid reuse would hand a later run a destination that
-#     already exists.
-#   * `<asidedir>/lock` is therefore PROVABLY ABSENT — mktemp -d creates the directory empty and 0700.
-#     That is the property the rename needs: `mv <dir> <existing dir>` MOVES THE SOURCE INSIDE THE
-#     TARGET (and `mv -T` is GNU-only), so a destination that already exists silently NESTS the legacy
-#     lock one level down, and every downstream decision — the pid re-identification, the restore —
-#     then inspects the WRONG OBJECT (a previously preserved lock's pid) and can move that nested
-#     object back onto the legacy name.
-# Every `mv` destination on this path is consequently either freshly created (this one) or explicitly
-# validated before use (the restore below).
-SUPERVISOR_LEGACY_ASIDE_CHILD="lock"
-
-# supervisor_legacy_lock_restore_and_refuse <legacy> <asidedir> <detail> — put a renamed-aside legacy
-# lock BACK and refuse. Never returns (every path ends in `supervisor_legacy_lock_refuse`, which exits).
+# THIS GUARD DETECTS AND REFUSES. IT NEVER MUTATES THE FOREIGN LOCK (#3549, lead ruling).
 #
-# THE ARBITER HERE IS AN EXCLUSIVE `mkdir`, NOT A PRE-CHECK. `mkdir` fails if ANYTHING already occupies
-# the name, so a party that took the freed name while we held the aside makes THIS run observe an ERROR
-# FROM A PRIMITIVE — it cannot succeed against the wrong object. The predecessor was
-# `[[ -e "$legacy" ]] && refuse` followed by `mv "$aside" "$legacy"`, which is check-then-act: a party
-# taking the name AFTER the check turned the restore into `mv <dir> <existing dir>`, and that NESTS the
-# source inside the racer's live lock rather than failing (see THE ASIDE LAYOUT above). Nothing is
-# ever deleted here.
+# Nothing on this path touches an object this run does not own — no rename-aside, no delete, no
+# adoption, no re-creation. A legacy lock in ANY state that is not verified absence stops the start and
+# prints what was found. That is a deliberate REDUCTION in capability, and the reason is recorded here
+# because the deleted version was written three times and produced the same harm each time.
 #
-# THE CONTENTS ARE RESTORED, NOT THE DIRECTORY. There is no exclusive-create rename in POSIX (`mv -T` /
-# `mv -n` are GNU-only, and `-n` is not atomic), so the only way to have the target arbitrated by a
-# primitive is to create it and move the contents in. That is faithful: to every reader the lock's
-# identity is its `pid` FILE, and a pre-#3467 supervisor both reads (`$LOCK/pid`) and releases
-# (`rm -rf "$LOCK"`) BY PATH — it holds no descriptor, so the directory's inode is not part of its
-# contract.
-supervisor_legacy_lock_restore_and_refuse() {
-  local legacy="$1" asidedir="$2" detail="$3"
-  local aside="$asidedir/$SUPERVISOR_LEGACY_ASIDE_CHILD"
-  if [[ ! -e "$aside/pid" && ! -L "$aside/pid" ]]; then
-    # Nothing to put back: the object we hold has no `pid` file, so re-creating a lock at that name
-    # would be FORGING one this run cannot describe. Leave the name as we found it — free — and
-    # preserve the object.
-    rmdir "$legacy" 2>/dev/null || true
-    supervisor_legacy_lock_refuse "$legacy" "$detail; it could NOT be put back because the object renamed aside carries no 'pid' file, and re-creating a lock this run cannot describe would be forging one. The name was left FREE and the object is PRESERVED at $aside. Nothing was deleted"
-  fi
-  if ! mkdir "$legacy" 2>/dev/null; then
-    supervisor_legacy_lock_refuse "$legacy" "$detail; it could NOT be put back because the exclusive create of $legacy FAILED — another object already occupies that name, and clobbering it could destroy a live holder's lock. The renamed-aside lock is PRESERVED at $aside — an operator must decide which of the two is real (by hand: rmdir '$legacy' 2>/dev/null; mv '$aside' '$legacy'). Nothing was deleted"
-  fi
-  # $legacy is now EXCLUSIVELY OURS and EMPTY, so the destination below is PROVABLY ABSENT.
-  if ! mv "$aside/pid" "$legacy/pid" 2>/dev/null; then
-    # Put the NAME back the way we found it (free) rather than leaving a pid-less directory behind: a
-    # pre-#3467 supervisor reads a pid-less lock as stale and reclaims it, which would strand the live
-    # holder without a lock — the harm this whole path exists to avoid.
-    rmdir "$legacy" 2>/dev/null || true
-    supervisor_legacy_lock_refuse "$legacy" "$detail; the RESTORE FAILED, so the lock could not be put back. The name was left FREE and the object is PRESERVED at $aside — restore it by hand (mv '$aside/pid' '$legacy/pid' after mkdir '$legacy'). Nothing was deleted"
-  fi
-  # The aside SHOULD now be empty (the legacy lock's documented shape is a directory holding only
-  # `pid`). If it is not, the extra content is a foreign object's and is PRESERVED, never deleted.
-  if ! rmdir "$aside" 2>/dev/null; then
-    log "WARNING: the renamed-aside legacy lock $aside holds content beyond its 'pid' file; the 'pid' file was RESTORED to $legacy and the remaining content is PRESERVED at $aside — inspect it by hand (#3549)"
-  else
-    # The private aside directory is now EMPTY, so removing it deletes nothing anyone could want. Its
-    # failure is housekeeping, not a decision about state — see the cleanup note in
-    # `supervisor_legacy_lock_reclaim_stale`.
-    rmdir "$asidedir" 2>/dev/null || log "WARNING: the (now empty) private aside directory $asidedir could not be removed — remove it by hand (rmdir '$asidedir'); the legacy lock itself was restored (#3549)"
-  fi
-  supervisor_legacy_lock_refuse "$legacy" "$detail; its 'pid' file has been RESTORED to $legacy and nothing was deleted"
-}
-
-# supervisor_legacy_lock_reclaim_stale <legacy> <pid-judged-dead> — reclaim a lock ALREADY classified
-# `stale <pid>` by `supervisor_legacy_lock_state`. Returns 0 only when the reclaim is COMPLETE; every
-# other outcome refuses (exits 1).
+# WHY RECLAIMING WAS REMOVED. Reclaiming a stale lock means renaming it aside, and every abort path
+# after that rename must put it BACK — so a reclaim cannot be safer than its restore. Restoring a
+# DIRECTORY-WITH-CONTENTS is not expressible atomically with the primitives available here: the
+# formulation that was shipped, `mkdir "$legacy"` followed by `mv "$aside/pid" "$legacy/pid"`, is TWO
+# steps, and between them the lock is observable WITHOUT its pid file. A pre-#3467 supervisor that
+# looks in that window reads a pid-less directory as STALE, reclaims it, and our `mv` then writes into
+# ITS lock — corrupting a live holder's lock and leaving the real holder effectively lockless. That is
+# strictly worse than the check-then-act it replaced, which at least failed toward refusal. Three
+# successive fixes each produced that same harm, which is the signal that the shape, not the code, was
+# wrong.
 #
-# THE PROPERTY THAT MUST HOLD, stated because the filesystem primitives cannot give more than this: we
-# never delete a directory we did not affirmatively RE-IDENTIFY as the dead one we judged, and we never
-# proceed when identification failed. A residual window remains inside the restore below (an object can
-# appear at the freed name while we hold the aside), which is why the restore refuses rather than
-# clobbers.
+# THE ATOMIC FORMULATION THAT WOULD WORK, recorded so nobody rediscovers it as novel: build the lock
+# COMPLETE in a private staging directory (`mkdir "$staging"`; write `"$staging/pid"`) and move it into
+# place with ONE `rename(2)`. The directory is then never observable without its pid, and the rename
+# FAILS against an existing non-empty target instead of nesting inside it. It needs true no-replace
+# rename semantics — `mv -T` / `RENAME_NOREPLACE` — which are GNU-ONLY, and this file deliberately
+# supports macOS (its own header records that macOS ships no `flock(1)`). So the atomic form was
+# AVAILABLE AND DECLINED: that portability cost, plus the lead's ruling that refusal is the default,
+# is why this guard refuses instead.
 #
-# ATOMICITY — WHAT IS ARBITRATED BY A PRIMITIVE, WHAT IS NOT, AND WHY THE REST CANNOT BE (#3549, lead
-# ruling: "make the reclaim atomic, not carefully ordered"; a narrower window is still a window).
-#
-# ARBITRATED (a loser observes an ERROR from a primitive, never success against the wrong object):
-#   A. WHICH RECLAIMER WINS — `rename(2)` is atomic with respect to the NAME. Exactly one party's `mv`
-#      of `$legacy` can succeed; every other party's fails. After ours succeeds the object is
-#      EXCLUSIVELY OURS: no one can reach it by name any more, so it is FROZEN. That is why the
-#      re-identification below is NOT a check-then-act — nothing can change between that check and the
-#      `rm` that follows it. It is a proof about the exact object being destroyed.
-#   B. WHETHER A RESTORE MAY PROCEED — an exclusive `mkdir` on the target name, in
-#      `supervisor_legacy_lock_restore_and_refuse`. A party that took the freed name makes our restore
-#      FAIL rather than nest inside its lock.
-#
-# NOT ARBITRATED, AND NOT ARBITRABLE WITH THESE PRIMITIVES: which OBJECT sits at `$legacy` when our
-# rename fires. `rename(2)` binds a NAME, not an inode; POSIX has no rename-if-unchanged, shell has no
-# directory descriptor to bind identity to, and no `flock` on a directory we must not hold (holding the
-# legacy lock for our lifetime is machine-global exclusion, which #3393's owner ruling forbids). An
-# inode comparison across the rename was considered and REJECTED: it is a narrower check-then-act, not
-# an arbiter, and the pid+liveness pair below is already exact for the property that matters.
-#
-# THE INTERLEAVING, TRACED. A pre-#3467 supervisor's own reclaim is: `mkdir` fails -> read pid -> if
-# dead `mv` aside -> `rm -rf` -> `mkdir` -> write its own pid.
-#   * IT ACTS FIRST (between our classification and our rename): it has already replaced the dead lock
-#     with a NEW one recording its own LIVE pid. Our rename succeeds and we are holding a LIVE HOLDER'S
-#     LOCK. Detected below — the object must record the SAME pid we judged AND that pid must still be
-#     affirmatively `dead` by `supervisor_pid_liveness` (the one liveness path, never a second
-#     implementation) — and we then put it back. WE NEVER DESTROY IT. This is the residual: the harm is
-#     not only "delete a live lock" but that the live holder is momentarily LOCKLESS, and if the restore
-#     cannot be performed that becomes permanent (a later pre-#3467 supervisor then co-runs with it).
-#     The restore is therefore arbitrated (B) and NEVER destructive, and every failing path PRESERVES
-#     the object, names it, and leaves the legacy name exactly as it found it — free.
-#   * WE ACT FIRST: its `mv` fails (the name is gone) but the name is now FREE, so its `mkdir` SUCCEEDS
-#     and it holds a legitimate new lock. Our re-identification passes (the object we hold IS the dead
-#     lock we judged), we delete it, and the post-reclaim recheck below then sees a LIVE lock at the
-#     name and REFUSES rather than co-running.
-#   * IT NEVER ACTS: the ordinary case. We hold the dead lock, identify it, delete it, and the recheck
-#     finds the name absent.
-# The only construction that removes the residual entirely is not to mutate a foreign lock at all
-# (leaving the stale directory for the next pre-#3467 supervisor to reclaim itself) — which AC2 of
-# #3549 requires us to do instead. Recorded here rather than left to be rediscovered.
-supervisor_legacy_lock_reclaim_stale() {
-  local legacy="$1" pid="$2"
-  local asidedir="" aside="" aside_pid="" liveness="" after
-  # A PROVABLY-ABSENT DESTINATION, freshly created (see THE ASIDE LAYOUT above). `mktemp` is external,
-  # which is fine here: this runs at lock ACQUISITION, not at source time (this path already calls
-  # `mkdir`/`ps`), and the builtins-only rule covers definition-time only. `-d` is created 0700 and the
-  # template keeps it in `$legacy`'s OWN directory, so the rename below stays a same-filesystem,
-  # atomic `rename(2)` rather than a copy.
-  # A FAILED mktemp is a REFUSAL, never a fallback to a guessed name: a guessed name is exactly the
-  # destination this run cannot prove is absent.
-  if ! asidedir="$(mktemp -d "$legacy.aside.XXXXXX" 2>/dev/null)" || [[ -z "$asidedir" || ! -d "$asidedir" ]]; then
-    supervisor_legacy_lock_refuse "$legacy" "stale reclaim REFUSED (recorded pid $pid was dead, but a private aside directory could not be created beside the lock, so this run has no rename destination it can prove is absent — and guessing one could nest the lock inside a previously preserved aside). Nothing was touched"
-  fi
-  aside="$asidedir/$SUPERVISOR_LEGACY_ASIDE_CHILD"
-  # Rename-then-remove, the same shape as the per-lane reclaim below and for the same reason: two
-  # racers taking an rm-then-mkdir path could both believe they won, whereas only ONE racer's `mv` can
-  # succeed against a given name. A FAILED `mv` means someone else moved it and we can no longer say
-  # what state it is in — that is `unknown`, so refuse rather than proceed.
-  if ! mv "$legacy" "$aside" 2>/dev/null; then
-    supervisor_legacy_lock_refuse "$legacy" "stale reclaim FAILED (recorded pid $pid was dead, but the lock could not be renamed aside — a racer may hold it now, so its state is no longer knowable)"
-  fi
-  # RE-IDENTIFY the object we are actually holding, not the one we classified.
-  if [[ -f "$aside/pid" && -r "$aside/pid" ]]; then
-    read -r aside_pid <"$aside/pid" 2>/dev/null || true
-  fi
-  liveness="$(supervisor_pid_liveness "$aside_pid")"
-  if [[ -z "$aside_pid" || "$aside_pid" != "$pid" ]]; then
-    supervisor_legacy_lock_restore_and_refuse "$legacy" "$asidedir" "stale reclaim ABORTED — the lock renamed aside records pid [$aside_pid], NOT the pid $pid this run judged dead, so a racer re-created the lock between the check and the rename and the object is NOT ours to delete"
-  fi
-  if [[ "$liveness" != dead ]]; then
-    supervisor_legacy_lock_restore_and_refuse "$legacy" "$asidedir" "stale reclaim ABORTED — the lock renamed aside records pid $pid, which is no longer affirmatively dead (liveness now: $liveness), so it is NOT ours to delete"
-  fi
-  # HOUSEKEEPING, NOT A DECISION ABOUT STATE — deliberately PERMISSIVE, and the reason is recorded
-  # here because CLAUDE.md requires a permissive branch to say why in code (roborev job 179, Low: the
-  # reviewer proposed REFUSING startup on a failed cleanup; that remedy was CONSIDERED AND REJECTED by
-  # the owner as a false-STOP, and this comment is the record of it).
-  #
-  # The fail-closed rule governs decisions about STATE, and by this point there is no such decision
-  # left: the object was affirmatively RE-IDENTIFIED as the pid this run judged dead, and it has
-  # already been renamed OFF the legacy name. So the reclaim's correctness rests on the COMPLETED
-  # RENAME, not on the delete — the name is free and mutual exclusion is satisfied whether or not the
-  # bytes go away. A failed `rm` of a proven-dead holder's leftovers is a DISK LEAK, and since the
-  # aside directory now carries a freshly-created UNIQUE name it can never collide with a future run
-  # either. Wedging a lane over an undeletable temp directory would red a CORRECT reclaim, and a check
-  # that reds on correct input is the check agents learn to waive.
-  # So: LOG IT LOUDLY, NAME THE PATH, and continue.
-  if ! rm -rf "$asidedir" 2>/dev/null || [[ -e "$asidedir" || -L "$asidedir" ]]; then
-    log "WARNING: the STALE legacy global supervisor lock (pid $pid) was reclaimed, but its renamed-aside copy could NOT be removed and is LEAKED at $asidedir — remove it by hand (rm -rf '$asidedir'). The reclaim itself is COMPLETE: the legacy name is free (#3549)"
-    notify "info" "worker-supervisor: leaked legacy-lock aside copy" "reclaimed the stale legacy global supervisor lock, but could not delete its renamed-aside copy at $asidedir (leak only — the reclaim is complete). Remove it by hand."
-  fi
-  # RECHECK THE NAME after the reclaim. This NARROWS — it does not close — the later-start window
-  # recorded in RESIDUAL below: a pre-#3467 supervisor that took the freed name between our removal and
-  # this read is caught here instead of co-running with us.
-  after="$(supervisor_legacy_lock_state "$legacy")"
-  case "$after" in
-    absent) return 0 ;;
-    'live '*)
-      supervisor_legacy_lock_refuse "$legacy" "the STALE lock (pid $pid) was reclaimed, but the name was immediately RETAKEN by a LIVE pre-#3467 supervisor (recorded pid ${after#live }) — refusing rather than co-running"
-      ;;
-    *)
-      supervisor_legacy_lock_refuse "$legacy" "the STALE lock (pid $pid) was reclaimed, but the name is OCCUPIED AGAIN and this run cannot account for it (now: $after) — refusing rather than co-running"
-      ;;
-  esac
-}
+# AC2 OF #3549 ("reclaimed rather than blocking forever") IS SATISFIED BY THE REFUSAL, per the lead's
+# ruling: a LOUD refusal that names the legacy path, the recorded pid, the classified state and the
+# exact `rm -rf` remedy is not "blocking forever" — an operator (or an upgrade past #3467) clears it in
+# one command, and the alternative is a supervisor that silently mutates another supervisor's lock.
 
 # RESIDUAL (#3549, roborev job 178) — THIS GUARD REDUCES THE COLLISION WINDOW; IT DOES NOT ELIMINATE
 # IT. Read plainly: it is a STARTUP CHECK, not machine-wide mutual exclusion.
 #
 # 1. THE UNCLOSED WINDOW. A pre-#3467 supervisor that starts AFTER this check completes is not stopped
 #    by anything here. It consults ONLY the legacy global path and knows nothing of our per-lane lock,
-#    so once we have passed the check (or reclaimed a confirmed-dead lock) it can take the legacy name
-#    and run alongside us in the same worktree. The re-identification and the post-reclaim recheck
-#    above shrink this window to "after our last read"; they cannot remove it.
+#    so once we have passed the check — or once an operator has cleared a stale lock we refused over —
+#    it can take the legacy name and run alongside us in the same worktree. The check is a single read:
+#    the window is "after that read", and nothing here can shrink it further.
 # 2. WHY IT IS NOT CLOSED HERE. The only construction that closes it is for THIS supervisor to acquire
 #    and HOLD the legacy global lock for its whole lifetime — which reimposes MACHINE-GLOBAL exclusion
 #    and would make the second post-#3467 lane on a box refuse to start. That is precisely what #3467
@@ -1724,8 +1578,9 @@ supervisor_legacy_lock_reclaim_stale() {
 #    PERMANENTLY once every checkout a launcher can reach is at or past #3467 — the same condition as
 #    this guard's own REMOVAL CONDITION above.
 # 4. SO: do not read the guard as complete mutual exclusion. It refuses a start under a lock that is
-#    ALREADY held (the case #3467 regressed) and never destroys a live holder's lock; a supervisor that
-#    starts later from an old checkout remains a documented, bounded risk. Per #3549's own doctrine: a
+#    ALREADY PRESENT in any state (the case #3467 regressed) and MUTATES NOTHING — it cannot destroy or
+#    corrupt any holder's lock, live or dead, because it never writes to the legacy path at all; a
+#    supervisor that starts later from an old checkout remains a documented, bounded risk. Per #3549's own doctrine: a
 #    deferred defect whose activation condition is unwritten is a landmine; one whose condition is
 #    written is a documented risk.
 supervisor_legacy_lock_guard() {
@@ -1740,13 +1595,16 @@ supervisor_legacy_lock_guard() {
       ;;
     'live '*)
       pid="${state#live }"
-      supervisor_legacy_lock_refuse "$legacy" "held by a LIVE pre-#3467 supervisor (recorded pid $pid)"
+      supervisor_legacy_lock_refuse "$legacy" "held by a LIVE pre-#3467 supervisor (recorded pid $pid)" \
+        "that supervisor is STILL RUNNING — do NOT delete its lock; stop pid $pid first"
       ;;
     'stale '*)
+      # STALE = a pre-#3467 supervisor that is GONE left its lock behind. This run REFUSES and removes
+      # NOTHING: see "THIS GUARD DETECTS AND REFUSES" above for why the reclaim was deleted. The
+      # diagnostic is deliberately distinct from the `live` one — both refuse, but the remedies differ.
       pid="${state#stale }"
-      log "reclaiming STALE legacy global supervisor lock $legacy (recorded pid $pid confirmed dead) — pre-#3467 compatibility (#3549)"
-      supervisor_legacy_lock_reclaim_stale "$legacy" "$pid"
-      return 0
+      supervisor_legacy_lock_refuse "$legacy" "state $state — LEFT BEHIND by a pre-#3467 supervisor that is GONE (recorded pid $pid is affirmatively dead). This guard never mutates a lock it does not own, so it is NOT removed automatically" \
+        "remove the leftover lock by hand: rm -rf '$legacy'"
       ;;
     *)
       supervisor_legacy_lock_refuse "$legacy" "state could not be determined (${state#unknown }) — 'cannot tell' is a refusal here, never a green light"
