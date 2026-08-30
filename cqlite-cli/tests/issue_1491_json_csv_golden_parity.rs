@@ -719,8 +719,11 @@ fn unsupported_shapes(jsonl: &str) -> Result<BTreeSet<Unsupported>, String> {
         if line.is_empty() {
             continue;
         }
-        let doc: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| format!("golden line {}: invalid JSON: {e}", lineno + 1))?;
+        // The same strict parse `golden_rows` uses, so "this golden carries shape
+        // X" and "this golden is comparable" are decided from one reading of the
+        // bytes (finding K2).
+        let doc: serde_json::Value =
+            golden::strict_json::parse(line, &format!("golden line {}", lineno + 1))?;
         let partition = doc
             .get("partition")
             .ok_or_else(|| format!("golden line {}: no `partition`", lineno + 1))?;

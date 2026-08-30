@@ -849,8 +849,15 @@ fn compare_map(
 // ===========================================================================
 
 /// Parse `export --format json` output: a JSON array of row objects.
+///
+/// Parsed STRICTLY — see [`super::strict_json`]. `serde_json::Value`'s own parse
+/// last-wins on a duplicate object key, so malformed egress repeating a column (or
+/// a UDT field, or the `_type` discriminator) compared EQUAL to the golden
+/// whenever the LAST occurrence happened to match, and the spurious one vanished
+/// from the shape check and the cell count alike — the JSON half of finding J2,
+/// reported as K2.
 pub fn cli_json_rows(text: &str) -> Result<Vec<Row>, String> {
-    let parsed: Value = serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    let parsed: Value = super::strict_json::parse(text, "egress")?;
     let array = parsed
         .as_array()
         .ok_or_else(|| "JSON egress is not an array".to_string())?;

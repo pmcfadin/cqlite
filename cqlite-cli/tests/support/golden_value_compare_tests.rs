@@ -743,6 +743,41 @@ fn a_duplicate_csv_header_is_a_named_failure() {
     assert_eq!(rows[0].len(), 3, "every column must survive into the row");
 }
 
+/// K2 — the JSON half of the same defect, at the reader that has to catch it, and
+/// written in the order that makes last-wins pass: the SECOND `v` is the golden's
+/// value, so under `serde_json::Value`'s own parse this document compared EQUAL to
+/// a correct row.
+#[test]
+fn a_duplicate_json_egress_column_is_a_named_failure_even_when_the_last_one_matches() {
+    let why = cli_json_rows(r#"[{"id":1,"v":"SPURIOUS","v":"x"}]"#)
+        .expect_err("a duplicate JSON object key is malformed egress");
+    assert!(
+        why.contains("duplicate object key `v`") && why.contains("egress[0]"),
+        "the failure must name the row and the duplicated key: {why}"
+    );
+    // The distinct-key form is the ordinary one, so the rule is about the
+    // DUPLICATE and not about the reader.
+    let rows = cli_json_rows(r#"[{"id":1,"v":"x","w":"y"}]"#).expect("distinct keys are readable");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 3, "every column must survive into the row");
+}
+
+/// K2, one level in: a duplicated UDT FIELD in the JSON egress. The comparison
+/// never sees it — the parse refuses first — which is the point: with last-wins,
+/// `compare_udt`'s own duplicate rule (the CSV path) had no JSON counterpart
+/// because the duplicate was gone before it ran.
+#[test]
+fn a_duplicate_json_udt_field_is_refused_before_the_comparison_sees_it() {
+    let why = cli_json_rows(
+        r#"[{"id":1,"p":{"_type":"person","first_name":"SPURIOUS","first_name":"A"}}]"#,
+    )
+    .expect_err("a duplicate UDT field is malformed egress");
+    assert!(
+        why.contains("duplicate object key `first_name`") && why.contains("egress[0].p"),
+        "the failure must name the field path and the duplicated field: {why}"
+    );
+}
+
 /// J2, UDT side: a repeated CSV field name used to overwrite, so egress carrying an
 /// EXTRA spurious field passed whenever the last occurrence happened to match the
 /// golden. The duplicate below is written in exactly that order — the second

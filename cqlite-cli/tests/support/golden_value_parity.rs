@@ -113,6 +113,11 @@ pub mod csv_container;
 #[path = "golden_schema.rs"]
 pub mod schema;
 
+/// A JSON parse that refuses a duplicate object key, used for BOTH the CLI's own
+/// JSON egress and each golden JSONL line (issue #1491 review finding K2).
+#[path = "golden_strict_json.rs"]
+pub mod strict_json;
+
 /// WHICH root supplies a case's fixture: a git-committed case is pinned to the
 /// checkout copy, a fetched-corpus case walks the candidate roots by evidence
 /// (issue #1491 review finding J1).
@@ -550,8 +555,10 @@ pub fn golden_rows(
             continue;
         }
         let at = || format!("golden line {}", lineno + 1);
-        let doc: Value =
-            serde_json::from_str(line).map_err(|e| format!("{}: invalid JSON: {e}", at()))?;
+        // Strict: a duplicate object key in the GOLDEN would silently discard part
+        // of the oracle — the same shape as two multicell map cells for one key,
+        // which this reader already refuses rather than collapses (finding K2).
+        let doc: Value = strict_json::parse(line, &at()).map_err(|why| format!("{why}"))?;
         let partition = doc
             .get("partition")
             .ok_or_else(|| format!("{}: no `partition`", at()))?;
