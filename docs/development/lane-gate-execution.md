@@ -642,6 +642,40 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### Scope narrower than the thing it protects — and a bound that made a verdict unreachable
+
+Job 251's two findings share a shape distinct from the earlier ones: each control was correct *locally*
+and too narrow *globally*.
+
+**A per-call bound made an entire verdict unreachable, and it took two of my own fixes to do it.** Job
+221 made an unverifiable hostname ABSENT, so the clock domain reads unproven. Job 231 put `--no-wait` on
+every launcher call, so the reader cannot take a second sample. But with an unproven clock the reader
+*cannot* judge freshness from the epoch — it needs PROGRESSION, which needs two samples — so every
+stateless call returned `UNKNOWN`, the launcher's loop accepts only `0|2`, and after 20s it **stopped a
+healthy, monitorable gate**. On any host where `uname -n` fails, that is every detached launch. Three
+components each correct by their own contract; the defect lived only in the composition.
+
+The fix is asymmetric rather than uniform: the FAST loop stays bounded and non-blocking, and the SINGLE
+post-loop fallback is allowed its confirmation wait. The alternative — tracking beat-seq progression
+inside the launcher — would have been a second implementation of the reader's progression grammar, which
+jobs 172 and 198 exist to prevent. **And the resulting test pair is STRICTER than the blanket it
+replaced**: `4b.141` forbids zero blocking calls (job 251's bug) *and* more than one (unbounded), where a
+count of `--no-wait` occurrences permitted either.
+
+**A reservation named after one path cannot protect an artifact SET.** With `--summary x` and
+`--summary x.heartbeat`, launch A locks `x.launch-lock` and B locks `x.heartbeat.launch-lock` — both
+acquire — and A's BEATER then overwrites B's SUMMARY every interval, destroying its terminal verdict.
+Neither launch can see the other. Measured before the fix: both returned 0. The launcher now asks one
+question of every path it will write — *is this already another live run's reserved summary?* — reusing
+the same liveness primitives rather than a second copy of the classification. `4b.145` is the control
+that stops "refuse everything" from passing as a fix.
+
+**Housekeeping worth keeping.** `flock` decouples launch time from run time, so a run can acquire the
+lock after edits that landed while it waited — three times this session I attributed a result to the
+wrong file version. Each suite run now prints the md5 of every subject file at ACQUISITION, so its output
+says what it tested. Same principle as the heartbeat carrying its own `run-id`: **make the artifact
+self-describing rather than inferring from context.**
+
 ### A safety argument can be TRUE and INCOMPLETE — and the suite's own cost went unmeasured for 20 rounds
 
 Two lessons from one episode, and the second is about noticing a cost I had been adding to all evening.

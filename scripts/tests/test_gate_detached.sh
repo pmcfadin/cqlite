@@ -427,7 +427,12 @@ fi
 # model permissions. Appending zero bytes proves write access to a FILE, not permission to
 # REPLACE it — in a sticky directory a file owned by another user is appendable but not
 # renameable-over, so the old probe passed while the beater would fail forever.
-if grep -q 'published NO heartbeat' "$LAUNCHER"; then
+# Re-pointed (job 251): the message now reads "published no readable liveness ... within 20s, plus one
+# confirmation of up to 65s where the clock domain is unproven", because the single fallback is allowed to
+# block. Asserting the refusal's EXISTENCE plus the stop ACTION, rather than one phrasing, so a future
+# rewording does not read as a missing check (the 11b.17e lesson).
+if grep -q 'published no readable liveness' "$LAUNCHER" \
+   && grep -q 'systemctl --user stop "$UNIT"' "$LAUNCHER"; then
   ok "4b.17 the launcher verifies a first heartbeat after launching"
 else
   bad "4b.17 the launcher verifies a first heartbeat after launching" "not found"
@@ -1319,6 +1324,69 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# --- roborev job 251: an UNPROVEN clock domain must not get a healthy gate killed ------------------
+# Two earlier fixes interacted. Job 221 made an unverifiable hostname ABSENT, so the clock domain reads
+# unproven. Job 231 put `--no-wait` on every launcher call, so the reader cannot take a second sample.
+# With an unproven clock the reader cannot judge freshness from the epoch and needs PROGRESSION — two
+# samples — so every stateless call returned UNKNOWN, the loop accepts only 0|2, and after 20s the
+# launcher STOPPED A HEALTHY GATE. On any host where `uname -n` fails, that is every detached launch.
+#
+# The fast loop stays bounded and non-blocking; the SINGLE post-loop fallback is allowed its confirmation
+# wait. Tracking beat-seq progression inside the launcher would have been a second implementation of the
+# reader's progression grammar, which jobs 172 and 198 exist to prevent.
+_lcode2=$(grep -vE '^[[:space:]]*#' "$LAUNCHER")
+_loop_nw=$(printf '%s' "$_lcode2" | grep -c 'bash "\$REPO_ROOT/scripts/gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" --no-wait' || true)
+_fallback=$(printf '%s' "$_lcode2" | grep -c 'if bash "\$REPO_ROOT/scripts/gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" >' || true)
+if [ "$_loop_nw" -ge 1 ] && [ "$_fallback" = 1 ]; then
+  ok "4b.141 the loop call is non-blocking and exactly ONE fallback may block"
+else
+  bad "4b.141 the loop is non-blocking and exactly one fallback may block" "loop --no-wait=$_loop_nw fallback-blocking=$_fallback"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  # Behavioural: stub `uname` to FAIL, so the beater omits host and the clock domain is unproven. This is
+  # the configuration that killed every launch.
+  _ud2=$(mktemp -d "$TMP/unamefail.XXXXXX")
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$_ud2/uname"; chmod +x "$_ud2/uname"
+  _uo=$(PATH="$_ud2:$PATH" bash "$LAUNCHER" --summary "$TMP/unproven.txt" --log "$TMP/unproven.log" -- --only fmt 2>&1); _ur=$?
+  _uu=$(printf '%s' "$_uo" | sed -n 's/^unit:  *//p'); [ -n "$_uu" ] && echo "$_uu" >> "$UNITS_FILE"
+  [ "$_ur" = 0 ] && ok "4b.142 a healthy gate launches even when the clock domain is UNPROVEN" \
+                 || bad "4b.142 a healthy gate launches with an unproven clock domain" "exit $_ur: $_uo"
+  [ -n "$_uu" ] && systemctl --user stop "$_uu" >/dev/null 2>&1
+else
+  skip=$((skip+1)); echo "SKIP 4b.142 (no user systemd manager on this host)"
+fi
+
+# --- roborev job 251: the reservation must cover the ARTIFACT SET, not one path --------------------
+# The lock is NAMED AFTER the summary, so two launches whose summary paths differ can both acquire and
+# still collide: with `--summary x` and `--summary x.heartbeat`, A locks x.launch-lock and B locks
+# x.heartbeat.launch-lock — both succeed — and A's BEATER then overwrites B's SUMMARY every interval,
+# destroying its terminal verdict. Measured before the fix: both launches returned 0.
+if grep -q '_foreign_reservation()' "$LAUNCHER" && grep -q 'artifact-set collision' "$LAUNCHER"; then
+  ok "4b.143 the launcher checks whether its artifacts are another run's reserved summary"
+else
+  bad "4b.143 the launcher checks its artifact set" "only the literal summary path is protected"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  _ax="$TMP/alias-x"
+  _ao=$(bash "$LAUNCHER" --summary "$_ax" --log "$TMP/alias-a.log" -- --only roborev-lints 2>&1); _ar=$?
+  _au=$(printf '%s' "$_ao" | sed -n 's/^unit:  *//p'); [ -n "$_au" ] && echo "$_au" >> "$UNITS_FILE"
+  _bo=$(bash "$LAUNCHER" --summary "$_ax.heartbeat" --log "$TMP/alias-b.log" -- --only fmt 2>&1); _br=$?
+  _bu=$(printf '%s' "$_bo" | sed -n 's/^unit:  *//p'); [ -n "$_bu" ] && echo "$_bu" >> "$UNITS_FILE"
+  if [ "$_ar" = 0 ] && [ "$_br" != 0 ] && printf '%s' "$_bo" | grep -q 'artifact-set collision'; then
+    ok "4b.144 a launch whose SUMMARY is a live run's beat destination is refused (A=$_ar B=$_br)"
+  else
+    bad "4b.144 an aliasing launch is refused" "A=$_ar B=$_br: $_bo"
+  fi
+  # CONTROL: disjoint launches must still both work, or "refuse everything" would pass 4b.144.
+  _co=$(bash "$LAUNCHER" --summary "$TMP/alias-disjoint" --log "$TMP/alias-c.log" -- --only fmt 2>&1); _cr=$?
+  _cu=$(printf '%s' "$_co" | sed -n 's/^unit:  *//p'); [ -n "$_cu" ] && echo "$_cu" >> "$UNITS_FILE"
+  [ "$_cr" = 0 ] && ok "4b.145 control: a DISJOINT launch still succeeds" \
+                 || bad "4b.145 control: a disjoint launch still succeeds" "exit $_cr: $_co"
+  for _u in $_au $_bu $_cu; do systemctl --user stop "$_u" >/dev/null 2>&1; done
+else
+  skip=$((skip+2)); echo "SKIP 4b.144/4b.145 (no user systemd manager on this host)"
+fi
+
 # --- roborev job 241: the state grammar must be closed on the TERMINAL side ----------------------
 # Job 205 fixed this function's EXIT-CODE form: `is-active --quiet` answers 0 only for "active", so every
 # other outcome fell into "dead, reclaim it". The replacement then listed the LIVE states and made
@@ -1363,12 +1431,18 @@ _uil_check failed GONE
 # string construction while 4b.138 demanded its absence there. Two of my own tests contradicting each
 # other, caught by this one failing "2 of 3 bounded". An invocation is preceded by `bash `; in the
 # printf the script path is an ARGUMENT to printf, so the distinction is exact.
-_lc=$(grep -vE '^[[:space:]]*#' "$LAUNCHER" | grep -c 'bash "\$REPO_ROOT/scripts/gate-liveness\.sh"' || true)
+# NARROWED BY JOB 251, and this case is why the change was caught. "EVERY call is non-blocking" was right
+# about the LOOP and wrong as a blanket: it made an UNPROVEN clock domain unanswerable, because the reader
+# needs a second sample to judge progression, `--no-wait` denies it, and the launcher then killed healthy
+# gates. The asymmetric requirement now lives in 4b.141 (loop non-blocking AND exactly one fallback may
+# block), which is STRICTER than the old blanket — it forbids zero blocking calls (the job-251 bug) and
+# more than one (unbounded), where a count of `--no-wait` occurrences permitted either. This case keeps
+# only the loop half, since that is the part the deadline depends on.
 _lcnw=$(grep -vE '^[[:space:]]*#' "$LAUNCHER" | grep -c 'bash "\$REPO_ROOT/scripts/gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" --no-wait' || true)
-if [ "$_lc" -ge 1 ] && [ "$_lc" = "$_lcnw" ]; then
-  ok "4b.137 every reader call the launcher MAKES is non-blocking ($_lcnw/$_lc)"
+if [ "$_lcnw" -ge 1 ]; then
+  ok "4b.137 the LOOP's reader call is non-blocking (the deadline depends on it)"
 else
-  bad "4b.137 every reader call the launcher makes is non-blocking" "$_lcnw of $_lc bounded — an unbounded call defeats the deadline"
+  bad "4b.137 the loop's reader call is non-blocking" "an unbounded call inside the loop defeats the deadline"
 fi
 # ...and the OPPOSITE requirement on the command it ADVERTISES: a human polling wants the stall
 # confirmation, so the printed command must NOT carry --no-wait. Two requirements, one script; asserting

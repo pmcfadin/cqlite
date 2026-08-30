@@ -677,6 +677,68 @@ _proc_identity() {
 # is no window to interpret and no age heuristic to get wrong. Reclamation then needs no timer at
 # all — only affirmative proof that the recorded owner is gone.
 _res_ident=$(_proc_identity $$)
+# THE RESERVATION MUST COVER THE ARTIFACT SET, NOT ONE PATH (roborev job 251). The lock is named after
+# the summary, so two launches whose paths differ can both acquire and still collide: with
+# `--summary x` and `--summary x.heartbeat`, A locks `x.launch-lock`, B locks `x.heartbeat.launch-lock`,
+# both succeed — and A's BEATER then overwrites B's SUMMARY every interval, destroying its terminal
+# verdict. Neither launch can see the other. Demonstrated: both launches returned 0.
+#
+# The rule that covers it: for every path THIS launch will write, refuse if a LIVE reservation already
+# names that path as ITS summary. That is one question asked of several paths, using the SAME liveness
+# primitives as the main path (`_pid_state`, `_proc_is_zombie`, `_proc_identity`, `_unit_is_live`) rather
+# than a second copy of the classification.
+_foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another launch's reserved summary?)
+  local lk="$1.launch-lock" own own_unit own_pid own_start now_id
+  [ -L "$lk" ] || [ -e "$lk" ] || { printf 'free'; return 0; }
+  own=$(readlink "$lk" 2>/dev/null || true)
+  [ -n "$own" ] || { printf 'unknown'; return 0; }
+  own_unit=${own#*unit=}; own_unit=${own_unit%%|*}
+  own_pid=${own#*pid=};   own_pid=${own_pid%%|*}
+  own_start=${own#*start=}
+  [ -n "$own_pid" ] || { printf 'unknown'; return 0; }
+  case "$(_pid_state "$own_pid")" in
+    exists)
+      if _proc_is_zombie "$own_pid"; then :                      # a zombie cannot beat
+      elif [ -z "$own_start" ]; then printf 'live'; return 0
+      else
+        now_id=$(_proc_identity "$own_pid" 2>/dev/null || true)
+        if [ -z "$now_id" ]; then printf 'unknown'; return 0
+        elif [ "$now_id" = "$own_start" ]; then printf 'live'; return 0
+        fi
+      fi ;;
+    gone) : ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  if [ -n "$own_unit" ] && _unit_is_live "$own_unit"; then printf 'live'; return 0; fi
+  printf 'free'
+}
+# Our artifact set: the beat destination, the log, and — if our own summary looks like another launch's
+# beat destination — the path it would have been derived from.
+_collide=""
+for _cand in "$SUMMARY.heartbeat" "$LOGFILE"; do
+  case "$(_foreign_reservation "$_cand")" in
+    live)    _collide="$_cand is reserved by a LIVE run as ITS summary" ;;
+    unknown) _collide="$_cand may be reserved by another run, and its owner could not be established" ;;
+  esac
+  [ -n "$_collide" ] && break
+done
+if [ -z "$_collide" ]; then
+  case "$SUMMARY" in
+    *.heartbeat)
+      case "$(_foreign_reservation "${SUMMARY%.heartbeat}")" in
+        live)    _collide="our summary '$SUMMARY' is the BEAT DESTINATION of a live run holding ${SUMMARY%.heartbeat}" ;;
+        unknown) _collide="our summary '$SUMMARY' may be the beat destination of another run, whose owner could not be established" ;;
+      esac ;;
+  esac
+fi
+if [ -n "$_collide" ]; then
+  echo "gate-detached: artifact-set collision — $_collide." >&2
+  echo "               The reservation is named after the summary, so two launches can hold DIFFERENT" >&2
+  echo "               locks and still destroy each other's files: one gate's heartbeat would overwrite" >&2
+  echo "               the other's summary every interval, taking its terminal verdict with it (#3473)." >&2
+  echo "               Give this run a summary path whose artifacts do not overlap another's." >&2
+  exit 1
+fi
 _res_target="unit=$UNIT|pid=$$|start=$_res_ident"
 _mutex="$_reserve.mutex"
 if ! ln -s "$_res_target" "$_reserve" 2>/dev/null; then
@@ -951,14 +1013,26 @@ done
 # defect round 1 found in the reader, reproduced here as a SECOND implementation of the same
 # grammar. One implementation, one grammar; the `--run-id` binding comes along for free.
 if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ]; then
-  # --no-wait here too: this asks only whether a TERMINAL verdict exists, which needs no second sample.
-  if bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" --no-wait >/dev/null 2>&1; then
+  # THIS ONE CALL IS ALLOWED TO BLOCK, and that is the fix for a gate we were killing (roborev job 251).
+  # Two earlier fixes interacted: job 221 made an unverifiable hostname ABSENT (so the clock domain reads
+  # unproven), and job 231 put `--no-wait` on every launcher call (so the reader cannot take a second
+  # sample). With an unproven clock the reader cannot judge freshness from the epoch and needs
+  # PROGRESSION — two samples — so every stateless call returns UNKNOWN, the loop accepts only 0|2, and
+  # after 20s the launcher STOPPED A HEALTHY, MONITORABLE GATE. On any host where `uname -n` fails, that
+  # is every detached launch. Neither fix is wrong alone.
+  #
+  # The alternative was to track beat-seq progression across loop iterations inside the launcher — a
+  # second implementation of the reader's progression grammar, which jobs 172 and 198 exist to prevent.
+  # Instead the FAST loop stays bounded and non-blocking, and this single fallback, which runs at most
+  # once, is permitted its confirmation wait: `interval + 5`, capped at 65s by the reader itself.
+  if bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1; then
     _hb_seen=1   # exit 0 == COMPLETE, and only for THIS run
   fi
 fi
 if [ "$_hb_seen" -ne 1 ]; then
   systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
-  echo "gate-detached: the gate started but published NO heartbeat to '$_hbdest' within 20s," >&2
+  echo "gate-detached: the gate started but published no readable liveness to '$_hbdest' within 20s," >&2
+  echo "               plus one confirmation of up to 65s where the clock domain is unproven," >&2
   echo "               so its liveness would be unreadable and every poll would answer UNKNOWN." >&2
   echo "               The unit has been STOPPED rather than left to burn 30-50 minutes" >&2
   echo "               certifying nothing. See $LOGFILE for what the gate itself reported." >&2

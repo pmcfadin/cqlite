@@ -197,6 +197,27 @@ mk_beat() {
   } > "$1"
 }
 
+# EVERY WAY THE BEAT'S `interval` FIELD AFFECTS THIS READER — derived from the source, not recalled,
+# because recalling it is what went wrong. A fixture's interval is NOT decoration: lowering it shortens
+# the reader's confirmation sleep (which is why most fixtures here use 1 and the suite runs in 429s
+# rather than 696s), but it also moves two verdict-bearing thresholds.
+#
+#   1. staleness WINDOW      max(3*interval, 90s)     -> section 5 is ABOUT this; do not touch its
+#                                                        fixtures. Note any interval <= 30 gives the
+#                                                        same 90s floor, so 1 and 20 are equivalent here.
+#   2. startup-probe window  same formula             -> equivalent for the same reason
+#   3. interval > 60         rejected outright        -> 1 and 20 both pass
+#   4. confirmation SLEEP    interval + 5 (cap 65)    -> runtime only, no verdict
+#   5. future TOLERANCE      reject iff age < -interval -> ONLY affects fixtures with a NEGATIVE age,
+#                                                        and it is the one I missed. Case 7.6 ("a beat
+#                                                        up to one INTERVAL ahead is tolerated") flips
+#                                                        from RUNNING to heartbeat-in-the-future when
+#                                                        the interval drops below the lead time.
+#
+# So: changing a fixture's interval is verdict-neutral UNLESS its age is NEGATIVE or it lives in
+# section 5. The four negative-age fixtures are deliberately left at the default for that reason. If you
+# lower `mk_beat`'s DEFAULT, you silently change every defaulted call — including the future-beat ones,
+# which is exactly how 7.6 broke.
 # bump_beats <path> <run-id> <host> <seconds> — keep advancing beat-seq for <seconds>.
 #
 # A SINGLE-SHOT background writer racing the reader's confirmation window is a timing test: if
