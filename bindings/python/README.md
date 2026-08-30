@@ -315,7 +315,7 @@ A CQL user-defined type decodes to a `cqlite.Udt`:
 udt = row["address"]
 udt.type_name          # 'address_type'  — the declared UDT type
 udt.keyspace           # 'test_collections'
-udt.fields             # {'street': '1 Main St', 'city': 'SF'} — declared fields ONLY
+udt.fields             # mappingproxy({'street': '1 Main St', 'city': 'SF'}) — declared fields ONLY
 udt["street"]          # mapping access, delegating to .fields
 "city" in udt, len(udt), sorted(udt.keys())
 ```
@@ -334,7 +334,9 @@ became unrecoverable. Migration:
 
 `udt["_type"]` now reaches a FIELD of that name, raising `KeyError` when the UDT declares none.
 `Udt` is frozen, and equality/hashing are over `(keyspace, type_name, fields)`, so it can be used as
-a `dict` key whenever its field values are hashable.
+a `dict` key whenever its field values are hashable. `udt.fields` is therefore a **read-only**
+`types.MappingProxyType` view: `udt.fields["z"] = 1` raises `TypeError` rather than moving a `Udt`
+already used as a key out of its hash bucket. Take `dict(udt.fields)` for a mutable copy.
 
 ### CQL `decimal` rendering policy
 

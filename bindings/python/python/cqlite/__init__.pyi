@@ -4,7 +4,7 @@ CQLite provides read-only access to Cassandra 5.0 SSTables without a cluster.
 """
 
 from pathlib import Path
-from typing import Iterator, Any
+from typing import Iterator, Any, Mapping
 from types import TracebackType
 
 # Version information
@@ -721,8 +721,8 @@ class Udt:
     Attributes:
         type_name: The declared UDT type name.
         keyspace: The keyspace the UDT type is declared in.
-        fields: The declared fields, name -> value. Fields ONLY: no injected
-            metadata entry ever appears here.
+        fields: The declared fields, name -> value, as a read-only mapping.
+            Fields ONLY: no injected metadata entry ever appears here.
     """
 
     def __init__(self, type_name: str, keyspace: str, fields: dict[str, Any]) -> None: ...
@@ -737,8 +737,15 @@ class Udt:
         ...
 
     @property
-    def fields(self) -> dict[str, Any]:
-        """The declared fields, name -> value (fields only, no metadata)."""
+    def fields(self) -> Mapping[str, Any]:
+        """The declared fields, name -> value (fields only, no metadata).
+
+        A read-only ``types.MappingProxyType`` view of the internal mapping that
+        ``__hash__``/``__eq__`` read: handing out the mutable ``dict`` would let
+        ``udt.fields[k] = v`` move a ``Udt`` already used as a ``dict`` key out
+        of its hash bucket. Assignment raises ``TypeError``; take
+        ``dict(udt.fields)`` for a mutable copy.
+        """
         ...
 
     def keys(self) -> list[str]:

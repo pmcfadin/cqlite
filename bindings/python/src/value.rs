@@ -244,7 +244,7 @@ impl Duration {
 /// namespace of their own, so there is no slot to compete for.
 ///
 /// Mapping access is retained (`udt["street"]`, `"city" in udt`, `len(udt)`,
-/// `iter(udt)`, `keys`/`values`/`items`) and delegates to [`Self::fields`], so
+/// `iter(udt)`, `keys`/`values`/`items`) and delegates to [`method@Self::fields`], so
 /// ordinary field access is unchanged. `udt["_type"]` now reaches the FIELD of
 /// that name, raising `KeyError` when no such field is declared — that is the
 /// removed shared channel, observable.
@@ -266,7 +266,9 @@ pub struct Udt {
     /// The UDT's declared fields, name → value. This mapping holds ONLY fields:
     /// no injected metadata entry can appear here, and no field can displace the
     /// type identity above.
-    #[pyo3(get)]
+    ///
+    /// NOT exposed with a derived `#[pyo3(get)]` — see the [`method@Self::fields`]
+    /// getter for why that would break the hash invariant.
     pub fields: Py<PyDict>,
 }
 
@@ -283,6 +285,35 @@ impl Udt {
             keyspace,
             fields: fields.copy()?.unbind(),
         })
+    }
+
+    /// The declared fields, name → value, as a READ-ONLY mapping.
+    ///
+    /// A derived `#[pyo3(get)]` would hand out a new reference to the very
+    /// `dict` that [`Self::__hash__`] and [`Self::__eq__`] read, so
+    /// `udt.fields["z"] = 1` would move a `Udt` already used as a `dict` key out
+    /// of its hash bucket and make it unretrievable — the class is declared
+    /// `frozen` and documented as usable as a `dict` key, so that hole
+    /// contradicts its own contract. `__new__` copies the caller's `dict`, which
+    /// protects the value from the CONSTRUCTOR's argument but not from this
+    /// accessor.
+    ///
+    /// `types.MappingProxyType` is chosen over returning a fresh `dict` copy
+    /// because a copy would ACCEPT the write and silently discard it — a
+    /// permissive no-op that reads as success — whereas the proxy REFUSES it
+    /// with `TypeError`, making the immutability the class advertises
+    /// observable. It is also O(1) rather than O(fields) per access, and every
+    /// read shape callers use (`udt.fields[k]`, `dict(udt.fields)`,
+    /// `.items()`/`.keys()`/`.values()`, `in`, `len`, iteration, `==` against a
+    /// plain `dict`) works identically on a `mappingproxy`. Callers that need a
+    /// mutable mapping take `dict(udt.fields)` explicitly.
+    #[getter]
+    fn fields(&self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(py
+            .import("types")?
+            .getattr("MappingProxyType")?
+            .call1((self.fields.bind(py),))?
+            .unbind())
     }
 
     /// The value of the field named `key`, raising `KeyError` when the UDT
@@ -336,15 +367,20 @@ impl Udt {
     /// different declared types are UNEQUAL — the property the previous
     /// `frozenset` projection got from its injected metadata pairs, retained here
     /// without putting metadata in the field namespace.
-    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+    /// A non-`Udt` operand yields `NotImplemented`, NOT `False`, so Python falls
+    /// back to the other operand's reflected `__eq__` — a future cooperating type
+    /// (a UDT-shaped record from another library, a test double) can then
+    /// participate in the comparison. Returning `False` here would decide the
+    /// comparison unilaterally and silently.
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyObject> {
         let Ok(other) = other.downcast::<Udt>() else {
-            return Ok(false);
+            return Ok(py.NotImplemented());
         };
         let other = other.get();
-        if self.type_name != other.type_name || self.keyspace != other.keyspace {
-            return Ok(false);
-        }
-        self.fields.bind(py).as_any().eq(other.fields.bind(py))
+        let equal = self.type_name == other.type_name
+            && self.keyspace == other.keyspace
+            && self.fields.bind(py).as_any().eq(other.fields.bind(py))?;
+        Ok(equal.into_pyobject(py)?.to_owned().into_any().unbind())
     }
 
     /// Hash over `(keyspace, type_name, fields)`, consistent with `__eq__`.
@@ -353,6 +389,12 @@ impl Udt {
     /// independent of field order while still distinguishing different field
     /// values. A field value that is itself unhashable propagates `TypeError`
     /// from here rather than being silently dropped.
+    ///
+    /// Cost note: the `frozenset` is rebuilt on EVERY call, so hashing is
+    /// O(fields) with an allocation, not O(1) — nothing is cached because a
+    /// cached hash would have to be invalidated, and the fields `dict` is
+    /// internal but reachable by C-API callers. A hot UDT-keyed-map path should
+    /// start here (memoise into a `OnceCell<isize>` on the frozen instance).
     fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
         let fields = PyFrozenSet::new(py, self.fields.bind(py).items().iter())?;
         let identity = PyTuple::new(

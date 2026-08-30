@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -306,6 +307,126 @@ def test_non_frozen_map_udt_key_never_reaches_the_projection(rows):
             f"got {type(key).__name__} — if this now decodes to a UDT the "
             "recorded gap has closed and this test should become a positive assertion"
         )
+
+
+# =============================================================================
+# The `fields` view is READ-ONLY — the hash invariant `Udt` advertises
+# =============================================================================
+
+
+def test_fields_view_cannot_be_mutated_out_of_its_hash_bucket(rows):
+    """SCENARIO: `udt.fields[...] = x` must not unseat a `Udt` used as a dict key.
+
+    `Udt` is declared `frozen`, hashes over `(keyspace, type_name, fields)`, and
+    is documented as usable as a `dict` key. A derived `#[pyo3(get)]` on the
+    internal `Py<PyDict>` would hand back a new reference to the SAME dict that
+    `__hash__` reads, so one item assignment through the getter would move an
+    already-inserted key out of its bucket and `d[key]` would raise `KeyError` —
+    the constructor's copy protects the CALLER's dict, not the value. Measured on
+    the pre-fix build: the mutation was accepted and the lookup raised.
+
+    The subject is a projected map key from the Cassandra-written fixture, i.e.
+    the production `value_to_hashable_key` path where a `Udt` really is used as a
+    dict key, not a constructed instance.
+    """
+    key = next(iter(rows[1]["fcm"]))
+    assert isinstance(key, cqlite.Udt)
+    before = dict(key.fields)
+    hash_before = hash(key)
+
+    holder = {key: "v"}
+    assert holder[key] == "v"
+
+    view = key.fields
+    assert isinstance(view, MappingProxyType), (
+        "the getter must not hand out the internal mutable dict; "
+        f"got {type(view).__name__}"
+    )
+    # REFUSED, not silently discarded: a `dict` copy would accept these writes
+    # and drop them, which reads as success.
+    with pytest.raises(TypeError):
+        view["z"] = 1
+    with pytest.raises(TypeError):
+        del view["_type"]
+    # `mappingproxy` exposes no mutating methods at all, so the usual escape
+    # hatches are AttributeError rather than a silent no-op.
+    for method in ("update", "clear", "pop", "setdefault"):
+        assert not hasattr(view, method), f"mappingproxy grew a mutator: {method}"
+
+    assert dict(key.fields) == before
+    assert hash(key) == hash_before
+    assert holder[key] == "v", "the key escaped its hash bucket"
+
+
+def test_fields_view_supports_every_read_shape_callers_use(rows):
+    """The read-only view is a drop-in for the `dict` it replaced.
+
+    Enumerated rather than asserted in passing, because choosing a proxy over a
+    `dict` copy is only safe if every consuming shape survives it: this is the
+    claim, measured.
+    """
+    udt = rows[1]["c"]
+    view = udt.fields
+
+    assert dict(view) == dict(udt.items())
+    assert view["_type"] == "user-supplied-type"
+    assert sorted(view.items()) == sorted(udt.items())
+    assert list(view.keys()) == list(udt.keys())
+    assert list(view.values()) == list(udt.values())
+    assert "_keyspace" in view and "nope" not in view
+    assert len(view) == len(udt)
+    assert list(iter(view)) == list(iter(udt))
+    # Equality against a plain `dict` holds in both directions, so an existing
+    # `assert udt.fields == {...}` assertion keeps its meaning.
+    assert view == dict(view) and dict(view) == view
+    # ...and `.copy()` yields a genuinely mutable `dict`, the documented escape.
+    mutable = view.copy()
+    mutable["z"] = 1
+    assert "z" not in udt.fields
+
+
+def test_constructed_udt_fields_view_is_read_only_too():
+    """The same property on the public constructor, without the fixture.
+
+    `cqlite.Udt(...)` is public API (it is what `value_to_hashable_key` returns
+    and what a caller can build for comparison), so the guarantee cannot depend
+    on the value having come from a decode.
+    """
+    udt = cqlite.Udt("address", "ks", {"street": "1 Main St"})
+    holder = {udt: "v"}
+    with pytest.raises(TypeError):
+        udt.fields["street"] = "moved"
+    assert holder[udt] == "v"
+    assert udt.fields["street"] == "1 Main St"
+
+    # The constructor's own copy still holds: mutating the CALLER's dict is inert.
+    source = {"street": "1 Main St"}
+    other = cqlite.Udt("address", "ks", source)
+    source["street"] = "moved"
+    assert other.fields["street"] == "1 Main St"
+    assert other == udt
+
+
+def test_eq_against_a_foreign_type_defers_rather_than_deciding():
+    """`__eq__` returns `NotImplemented` for a non-`Udt` (nit N8).
+
+    Observable consequence: a cooperating type's reflected `__eq__` is consulted.
+    A hard `False` from `Udt.__eq__` would decide the comparison unilaterally, so
+    this asserts the DEFERRAL, not just the `!=` a `False` would also produce.
+    """
+
+    class Anything:
+        def __eq__(self, other):  # noqa: D105 - reflected side under test
+            return True
+
+        __hash__ = None
+
+    udt = cqlite.Udt("address", "ks", {"street": "1 Main St"})
+    assert udt == Anything(), "Udt.__eq__ must defer to the reflected __eq__"
+    assert Anything() == udt
+    # A type that does NOT cooperate still compares unequal.
+    assert udt != {"street": "1 Main St"}
+    assert udt != "address"
 
 
 # =============================================================================
