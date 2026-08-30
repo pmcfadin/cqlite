@@ -101,15 +101,26 @@ if [ -n "$WANT_RUN_ID" ] && [ -n "$SUM_RUN_ID" ] && [ "$SUM_RUN_ID" != "$WANT_RU
   verdict UNKNOWN 4 "summary-run-id-mismatch; $SUMMARY carries run-id '$SUM_RUN_ID', not '$WANT_RUN_ID' — a live peer owns that path"
 fi
 RESULT_LINE=$(grep -m1 '^RESULT: ' "$SUMMARY" 2>/dev/null || true)
+# The TERMINAL verdict set, enumerated from agent-gate.sh rather than assumed to be
+# two values. `PARTIAL` (an --only run), `ERROR` and `REFUSED` (a --delta entry
+# refusal) are every bit as terminal as PASS/FAIL: the gate reached a decision and
+# stopped, so no amount of waiting will change the artifact. This reader answers "is
+# there a verdict", NOT "is it green" — a caller that needs green reads the summary.
+#
+# INCOMPLETE is the ONLY non-terminal value, and it is the entire reason this script
+# exists. It also has a `(foreign)` variant (#2874), which is likewise not a verdict.
+#
+# Closed grammar (#3229): an unrecognised value is UNKNOWN, never assumed benign and
+# never assumed terminal. If a future gate adds a sixth verdict, a lane reads UNKNOWN
+# and asks a human — the safe direction — instead of this reader guessing.
 case "$RESULT_LINE" in
-  'RESULT: PASS'*|'RESULT: FAIL'*)
-    verdict COMPLETE 0 "the summary carries a real verdict — ${RESULT_LINE#RESULT: }" ;;
+  'RESULT: PASS'*|'RESULT: FAIL'*|'RESULT: PARTIAL'*|'RESULT: ERROR'*|'RESULT: REFUSED'*)
+    verdict COMPLETE 0 "the summary carries a terminal verdict — ${RESULT_LINE#RESULT: }" ;;
   'RESULT: INCOMPLETE'*)
     : ;;  # the interesting case: fall through to the heartbeat
   '')
     verdict UNKNOWN 4 "no-result-line; $SUMMARY has no 'RESULT:' line (truncated or not a gate summary)" ;;
   *)
-    # Closed grammar (#3229): an unrecognised RESULT value is never assumed benign.
     verdict UNKNOWN 4 "unrecognised-result; '$RESULT_LINE' is not a value this reader knows" ;;
 esac
 

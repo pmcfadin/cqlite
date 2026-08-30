@@ -3426,6 +3426,25 @@ fi
 # landed. If it did NOT (unwritable path), a later summary that lacks our run-id is a
 # STALE prior-run block / unwritable file — NOT a live foreign clobber — so the
 # integrity guard names that cause accurately instead of blaming a "foreign run-id".
+# #3473: resolve the heartbeat path/mode BEFORE the sentinel, so the sentinel — the
+# artifact a lane finds when its gate was reaped — can NAME the file that answers
+# "reaped or running". A placeholder that cannot point at its own liveness signal
+# leaves the reader exactly where #3473 found them.
+HEARTBEAT_INTERVAL=20
+HEARTBEAT_FILE="$SUMMARY_FILE.heartbeat"
+# The mode token mirrors the three DISTINCT summary markers, so a reader that finds a
+# beat can see which kind of run left it (a lite beat is not evidence about a full
+# gate). Derived from the same LITE/DELTA flags the markers are, not re-decided.
+# --only is checked FIRST: an --only run is a PARTIAL that "does NOT count as the
+# gate", and stamping its beat `full` would let a lane's beat imply a gate of record
+# that never ran.
+if [ -n "$ONLY" ]; then HEARTBEAT_MODE=only
+elif [ "$LITE" -eq 1 ]; then HEARTBEAT_MODE=lite
+elif [ "$DELTA" -eq 1 ]; then HEARTBEAT_MODE=delta
+else HEARTBEAT_MODE=full; fi
+HEARTBEAT_PID=""
+HEARTBEAT_STATE="off"
+
 SENTINEL_WROTE=0
 if {
   echo "$SUMMARY_START_MARKER"
@@ -3437,10 +3456,119 @@ if {
   # it BEGAN on. Its terminal line stays exactly `RESULT: INCOMPLETE (gate did not
   # finish)` — the #2908 liveness placeholder is unchanged.
   echo "$TREE_START_LINE"
+  echo "heartbeat: $HEARTBEAT_FILE (interval ${HEARTBEAT_INTERVAL}s) — read it with: bash scripts/gate-liveness.sh $SUMMARY_FILE --run-id $RUN_ID (#3473)"
   echo "RESULT: INCOMPLETE (gate did not finish)"
   echo "$SUMMARY_END_MARKER"
 } > "$SUMMARY_FILE" 2>/dev/null; then
   SENTINEL_WROTE=1
+fi
+
+# ===========================================================================
+# LIVENESS HEARTBEAT (#3473): a lane MUST be able to tell "my gate was reaped"
+# from "my gate is still going" without a human reading `ps` on the box.
+#
+# The sentinel just written above is a ONE-SHOT placeholder, so it is the artifact
+# of three different states at once — queued, running, killed (#3041/#2908). Nothing
+# about it decays, which is precisely why it cannot express liveness: #3473 measured
+# lane-launched background work being terminated at a hard ceiling, and the reaped
+# gate's summary file was textually IDENTICAL to a healthy 40-minute run's.
+#
+# So the gate also publishes a signal that DOES decay. scripts/lib/gate-heartbeat.sh
+# rewrites $HEARTBEAT_FILE every $HEARTBEAT_INTERVAL seconds for as long as THIS
+# process lives, verifying our pid (and, on /proc hosts, our start time, so a recycled
+# pid reads as dead) before every beat. scripts/gate-liveness.sh reads the summary and
+# the beat together and reports COMPLETE / RUNNING / REAPED / UNKNOWN.
+#
+# Started HERE, immediately after the sentinel and BEFORE acquire_gate_slot, because a
+# QUEUED gate must read as RUNNING — it is alive and legitimately verdict-less, and a
+# lane that read a queued gate as reaped would re-run it and deepen the queue (#1825).
+#
+# Path: $SUMMARY_FILE.heartbeat — a fixed suffix on the path the caller chose IN
+# ADVANCE, so the heartbeat is as discoverable as the summary itself (#1175), and it
+# inherits the same #2874 no-clobber discipline: the beat carries `run-id:`, and the
+# reader refuses to answer about a run-id that is not the one it asked for.
+#
+# Interval is fixed in code, not configurable. The reader derives its staleness window
+# from the `interval:` line in the beat itself, so the two can never drift, and there
+# is no env var with which a caller could widen the window until a dead gate reads
+# alive.
+
+# _hb_start: launch the beater, fds detached to /dev/null. The detach is mandatory,
+# not tidiness: a long-lived background child holding a copy of the gate's stdout pipe
+# truncates a streamed SUMMARY under an until-EOF reader (#1175) — the same reason
+# gate_slot_daemon.py is launched this way.
+#
+# Fail-OPEN, and deliberately so: the heartbeat is a DIAGNOSTIC about the gate, never
+# a gate component. A missing beater must not make the gate un-runnable, and it cannot
+# manufacture a false green either — with no beat, the reader reports UNKNOWN (naming
+# the absence), which is exactly the pre-#3473 state of knowledge and never RUNNING.
+_hb_start() {
+  [ -z "$HEARTBEAT_PID" ] || return 0
+  local beater="$REPO_ROOT/scripts/lib/gate-heartbeat.sh"
+  if [ ! -f "$beater" ]; then
+    HEARTBEAT_STATE="unavailable(script-missing)"
+    return 0
+  fi
+  bash "$beater" --file "$HEARTBEAT_FILE" --run-id "$RUN_ID" --gate-pid "$$" \
+    --mode "$HEARTBEAT_MODE" --interval "$HEARTBEAT_INTERVAL" --logs "$LOG_DIR" \
+    </dev/null >/dev/null 2>&1 &
+  HEARTBEAT_PID=$!
+  HEARTBEAT_STATE="on"
+  return 0
+}
+
+# _hb_ensure: re-launch the beater if it died while the gate lives. Called at every
+# component boundary. WHY: if the beater alone is killed (a pgid-directed signal that
+# misses us, an OOM reap of the smallest process) the beat goes stale under a LIVE
+# gate, and the reader would report REAPED about a gate that is still working — a false
+# death is expensive, it sends a lane off to re-run a gate that was about to PASS.
+# Component boundaries are the only cheap place to notice, and they are frequent
+# enough: the longest single component (tooling-tests, 687-849s) is bounded by one
+# boundary at each end, and a beater that survives a boundary keeps beating through it.
+_hb_ensure() {
+  [ "${BASHPID:-$$}" = "$$" ] || return 0   # pool subshells: not their job (cf. #1737)
+  [ "$HEARTBEAT_STATE" = "on" ] || return 0
+  [ -n "$HEARTBEAT_PID" ] || return 0
+  kill -0 "$HEARTBEAT_PID" 2>/dev/null && return 0
+  HEARTBEAT_PID=""
+  _hb_start
+  return 0
+}
+
+# _hb_stop: tear the beater down on gate exit. The BASHPID guard is load-bearing and
+# copied from _gate_release_slot for the same reason: a backgrounded `( … ) &` pool
+# subshell runs the inherited EXIT trap on ITS own exit, and must not kill the parent's
+# beater — that would freeze the beat mid-run and make a live gate read as REAPED.
+#
+# Stopping the beat at exit is correct, not a gap: by then emit_summary has replaced
+# the sentinel with a real verdict, so the reader answers COMPLETE from the summary and
+# never consults the beat. A gate that dies WITHOUT reaching this trap (SIGKILL, cgroup
+# teardown — the #3473 failure) leaves the last beat to go stale, which is the whole
+# point.
+# shellcheck disable=SC2329  # invoked indirectly via the EXIT trap
+_hb_stop() {
+  [ "${BASHPID:-$$}" = "$$" ] || return 0
+  [ -n "${HEARTBEAT_PID:-}" ] || return 0
+  kill "$HEARTBEAT_PID" 2>/dev/null || true
+  HEARTBEAT_PID=""
+}
+
+# Single EXIT trap for the whole gate. bash traps do not compose — a later
+# `trap ... EXIT` REPLACES an earlier one — so every at-exit duty is funnelled through
+# this one function. acquire_gate_slot re-arms the SAME function rather than its own,
+# so arming the slot can never silently drop the heartbeat teardown.
+# shellcheck disable=SC2329  # invoked indirectly via `trap '_gate_atexit' EXIT`
+_gate_atexit() {
+  _hb_stop
+  _gate_release_slot
+}
+
+# Synthetic-identity modes run against a stubbed rundir and never certify a real tree;
+# they get no beater (nothing would ever read it, and a stray background process in a
+# hermetic self-test is noise).
+if [ -z "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
+  trap '_gate_atexit' EXIT
+  _hb_start
 fi
 
 # emit_summary <result> [meta-line ...]
@@ -3488,6 +3616,11 @@ emit_summary() {
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE"
+      # #3473: declare the liveness mechanism's state in the block itself. A pasted
+      # SUMMARY therefore SHOWS whether the beater ran, the same reason #3148 stamps a
+      # positive `schemas:` line — a mechanism that leaves no trace in the artifact is
+      # indistinguishable from one that was never wired.
+      echo "heartbeat: ${HEARTBEAT_STATE:-off} file: ${HEARTBEAT_FILE:-<unresolved>} interval: ${HEARTBEAT_INTERVAL:-0}s"
       echo "RESULT: $result"
       echo "$SUMMARY_END_MARKER"
     } > "$SUMMARY_FILE" 2>&1
@@ -4608,6 +4741,9 @@ esac
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
   printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+  # #3473: re-launch the liveness beater if it died under a live gate. Cheap
+  # (`kill -0`), and this is the only chokepoint every component passes through.
+  _hb_ensure
   # #2874: every component records its verdict through here, so this is the natural
   # component-boundary chokepoint for the mid-run summary-integrity guard.
   _assert_summary_integrity "$1"
@@ -11016,7 +11152,10 @@ acquire_gate_slot() {
   python3 "$daemon" --slots-dir "$dir" --slots "$n" --gate-pid "$$" \
     --ready-file "$ready" --poll-secs "$poll" </dev/null >/dev/null 2>&1 &
   GATE_SLOT_DAEMON_PID=$!
-  trap '_gate_release_slot' EXIT
+  # Re-arm the COMPOSED at-exit handler, never _gate_release_slot alone: a bare
+  # `trap '_gate_release_slot' EXIT` here would REPLACE the trap armed at the
+  # heartbeat block and silently orphan the beater on every full gate (#3473).
+  trap '_gate_atexit' EXIT
   # Block until the daemon signals acquisition, printing the queued notice ONCE
   # after a short grace (so an immediately-free slot stays quiet). If the daemon
   # dies before acquiring, fail open rather than hang the gate forever.
