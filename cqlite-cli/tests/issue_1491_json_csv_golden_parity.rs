@@ -98,6 +98,7 @@ mod golden;
 #[path = "support/issue_1491_coverage_census.rs"]
 mod coverage_census;
 
+use golden::committed_set::{require_tracked_oracle, CommittedSet};
 use golden::compare::gap::Divergence;
 use golden::compare::{cli_csv_rows, cli_json_rows, compare_rows, golden_path, stage_single_table};
 use golden::fixture_root;
@@ -902,10 +903,12 @@ enum FixtureError {
 /// `a_committed_case_can_never_resolve_to_a_skip`.
 fn resolve_fixture(
     case: &Case,
-    committed: &fixture_root::CommittedFixtures,
+    committed: &CommittedSet,
     checkout: &Path,
 ) -> Result<fixture_root::Fixture, FixtureError> {
-    let tracked = committed.get(&(case.keyspace.to_string(), case.table.to_string()));
+    let tracked = committed
+        .tables
+        .get(&(case.keyspace.to_string(), case.table.to_string()));
     match (case.presence, tracked) {
         (Presence::Committed, tracked) => {
             fixture_root::committed_fixture_dir(tracked, case.keyspace, case.table, checkout)
@@ -980,7 +983,7 @@ fn run_lane(egress: Egress) {
     // declaration. An unusable listing fails the lane rather than being worked
     // around, since without it no case's tier is known.
     let committed = match fixture_root::committed_listing()
-        .and_then(|listing| fixture_root::committed_fixtures(&listing))
+        .and_then(|listing| golden::committed_set::committed_set(&listing))
     {
         Ok(committed) => committed,
         Err(why) => panic!("AD2 {format}: cannot read the committed fixture set: {why}"),
@@ -1075,6 +1078,29 @@ fn run_lane(egress: Egress) {
                 continue;
             }
         };
+        // A COMMITTED case's ORACLE is committed too (review finding BB1). The line
+        // above asked the FILESYSTEM which golden describes the staged SSTable, and
+        // that question cannot tell a git-tracked golden from an untracked file of
+        // the same name — one a fetched corpus, a stray local copy or a previous run
+        // left in the tracked directory. So the golden the case was compared against
+        // is required to BE the one `git ls-files` pairs with the tracked
+        // `*-Data.db`; it is the same fix as pinning the FIXTURE to the checkout copy
+        // (finding J1), one file over, and it keeps `golden_path`'s own refusals (a
+        // directory holding two `*-Data.db`, a golden describing another generation)
+        // rather than replacing them. Keyed on the ESTABLISHED provenance, not on the
+        // declaration — the two were just cross-checked above.
+        if root_source == fixture_root::RootSource::GitTracked {
+            if let Err(why) = require_tracked_oracle(
+                &committed,
+                case.keyspace,
+                case.table,
+                &checkout,
+                &golden_file,
+            ) {
+                failures.push(format!("{qualified}: {why}"));
+                continue;
+            }
+        }
         let jsonl = match std::fs::read_to_string(&golden_file) {
             Ok(text) => text,
             Err(e) => {
@@ -1384,7 +1410,8 @@ fn a_committed_case_can_never_resolve_to_a_skip() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     // An EMPTY committed set and an empty checkout: every resolution path a
     // committed case has is broken at once.
-    let committed = fixture_root::CommittedFixtures::new();
+    let committed = golden::committed_set::committed_set(&[])
+        .expect("an empty listing classifies, as the set of nothing committed");
     let case = Case {
         presence: Presence::Committed,
         keyspace: "no_such_ks",

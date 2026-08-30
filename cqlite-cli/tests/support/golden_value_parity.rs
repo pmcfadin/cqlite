@@ -165,6 +165,13 @@ pub mod strict_json;
 #[path = "golden_fs_probe.rs"]
 pub mod fs_probe;
 
+/// The git-committed fixture SET and each committed fixture's ORACLE, both answered
+/// from `git ls-files`: a committed case is certified by the COMMITTED golden paired
+/// with the committed `*-Data.db`, never by an untracked file that happens to sit
+/// beside it (issue #1491 review finding BB1).
+#[path = "golden_committed_set.rs"]
+pub mod committed_set;
+
 /// WHICH root supplies a case's fixture: a git-committed case is pinned to the
 /// checkout copy, a fetched-corpus case walks the candidate roots by evidence
 /// (issue #1491 review finding J1).
