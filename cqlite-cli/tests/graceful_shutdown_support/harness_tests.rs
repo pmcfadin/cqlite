@@ -736,7 +736,8 @@ fn a_read_side_collector_that_fails_mid_stream_is_reported_as_a_read_failure() {
             );
             assert!(
                 failures.contains('7'),
-                "the verdict must say how much had been read, so the reader knows the buffer was                  partial: {failures}"
+                "the verdict must say how much had been read, so the reader knows the buffer was \
+                 partial: {failures}"
             );
             assert_eq!(
                 collected, 1,
@@ -744,14 +745,18 @@ fn a_read_side_collector_that_fails_mid_stream_is_reported_as_a_read_failure() {
             );
         }
         CollectEnd::Both(out, _) => panic!(
-            "a collector's read FAILED and the collection returned both buffers — the {}              partial byte(s) it managed to read would have been used as the whole of the              child's output (job 255, finding 2)",
+            "a collector's read FAILED and the collection returned both buffers — the {} \
+             partial byte(s) it managed to read would have been used as the whole of the \
+             child's output (job 255, finding 2)",
             out.len()
         ),
         CollectEnd::DeadlineReached { collected } => panic!(
-            "the deadline was live ({collected}/2 collected): a read failure must not be              reported as a timeout"
+            "the deadline was live ({collected}/2 collected): a read failure must not be \
+             reported as a timeout"
         ),
         CollectEnd::CollectorsEnded { collected } => panic!(
-            "both handles are alive ({collected}/2 collected): a read failure must not be              reported as end-of-collectors"
+            "both handles are alive ({collected}/2 collected): a read failure must not be \
+             reported as end-of-collectors"
         ),
         CollectEnd::Unavailable => panic!("the store's lock was poisoned unexpectedly"),
     }
@@ -799,6 +804,111 @@ fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
         "the poll gave up with every reader gone and did not report it, so the message implies \
          more output was still possible: {observed}"
     );
+}
+
+/// **A POLL THAT GIVES UP AFTER A FAILED READ MUST NOT REPORT EOF** (roborev job
+/// 259, finding 1) — the poll-side twin of
+/// `a_reader_that_ends_in_an_io_error_is_not_reported_as_eof`.
+///
+/// THIS IS THE TEST THAT WAS MISSING, and its absence is the whole shape of the
+/// finding. Round 15 recorded each reader's terminal result, taught `WaitEnd` to
+/// choose its variant from it, and covered THAT site — while `PollFail` went on
+/// inferring pipe state from `readers_open` alone, so the identical wrong-cause
+/// claim ("the child's stdout AND stderr had BOTH reached EOF") survived one
+/// function over with every test green.
+#[test]
+fn a_poll_that_gives_up_after_a_failed_read_does_not_report_eof() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let (io, out, err) = ChildIo::synthetic();
+    err.record(Stream::Stderr, "some output");
+    // The same path a real reader thread takes when `BufRead::lines` yields `Err`.
+    err.read_failed(
+        Stream::Stderr,
+        std::io::Error::other("simulated pipe failure"),
+    );
+    drop((out, err));
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("poll-after-failed-read");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    let fail = match poll_with_progress(&io, dir.path(), &stage, |_slice, _artifacts| None::<()>) {
+        Ok(_) => unreachable!("the step never completes"),
+        Err(fail) => fail,
+    };
+    assert!(
+        matches!(fail.pipes(), PipeStatus::ReaderFailed { .. }),
+        "a reader ended in an I/O ERROR, so the verdict may not carry an EOF state: {:?}",
+        fail.pipes()
+    );
+    let observed = fail.observed();
+    assert!(
+        observed.contains("simulated pipe failure"),
+        "the poll must carry the reader's own terminal error: {observed}"
+    );
+    assert!(
+        !observed.contains("ended AT EOF"),
+        "a failed read must not be reported as EOF — the cause this measurement never \
+         established (job 259, finding 1): {observed}"
+    );
+}
+
+/// **ONE PIPE ENDED IS NOT \"THE PIPES WERE STILL OPEN\"** (roborev job 259,
+/// finding 1): the second claim `readers_open` as a bool had to collapse.
+///
+/// With one of two readers gone, `readers_open == 1` left the old bool `false` and
+/// the poll reported that "the child's pipes were still open ... so more output was
+/// still possible" — true of the surviving pipe and false of the ended one. Here
+/// the ended reader is the one whose stream the awaited evidence would come from,
+/// which is exactly the case where reading that sentence sends a reader looking in
+/// the wrong place.
+#[test]
+fn a_poll_with_one_reader_still_attached_reports_partial_closure() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let (io, out, err) = ChildIo::synthetic();
+    err.record(Stream::Stderr, "some output");
+    // stderr's reader ends AT EOF; stdout's stays attached.
+    drop(err);
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("poll-partial-closure");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    let fail = match poll_with_progress(&io, dir.path(), &stage, |_slice, _artifacts| None::<()>) {
+        Ok(_) => unreachable!("the step never completes"),
+        Err(fail) => fail,
+    };
+    assert!(
+        matches!(
+            fail.pipes(),
+            PipeStatus::PartiallyClosed {
+                open: 1,
+                ended: 1,
+                failure_note: None,
+            }
+        ),
+        "one reader had ended at EOF and one was still attached: {:?}",
+        fail.pipes()
+    );
+    let observed = fail.observed();
+    assert!(
+        observed.contains("still attached") && observed.contains("ONLY on the surviving"),
+        "the poll must say WHICH pipes could still produce output: {observed}"
+    );
+    assert!(
+        !observed.contains("were still attached when the verdict was taken"),
+        "one of the two readers had ENDED, so the message may not report that all of them were \
+         still attached (job 259, finding 1): {observed}"
+    );
+    drop(out);
 }
 
 // ---------------------------------------------------------------------------

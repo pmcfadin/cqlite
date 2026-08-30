@@ -280,27 +280,42 @@ impl PipeStatus {
     /// and treating it as terminal would abandon a wait on the strength of a
     /// measurement that failed.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, PipeStatus::AllEof { .. } | PipeStatus::ReaderFailed { .. })
+        matches!(
+            self,
+            PipeStatus::AllEof { .. } | PipeStatus::ReaderFailed { .. }
+        )
     }
 
     /// This state as a sentence for a failure message. Each one states what was
     /// measured and stops there.
     pub fn describe(&self) -> String {
         match self {
-            PipeStatus::Unavailable => "the transcript store's lock was POISONED when the verdict                  was taken — a reader thread panicked while holding it — so NOTHING was                  established about the child's pipes: not that they were open, and not that they                  were closed. This is a defect in this test harness, and it is not a statement                  about the child"
+            PipeStatus::Unavailable => "the transcript store's lock was POISONED when the \
+                 verdict was taken — a reader thread panicked while holding it — so NOTHING was \
+                 established about the child's pipes: not that they were open, and not that they \
+                 were closed. This is a defect in this test harness, and it is not a statement \
+                 about the child"
                 .to_string(),
             PipeStatus::AllEof { readers } => format!(
-                "all {readers} of the child's pipe readers had ended AT EOF when the verdict was                  taken, so no further output could arrive: the child had exited, crashed, or                  closed its pipes (this measurement does not say which)"
+                "all {readers} of the child's pipe readers had ended AT EOF when the verdict was \
+                 taken, so no further output could arrive: the child had exited, crashed, or \
+                 closed its pipes (this measurement does not say which)"
             ),
             PipeStatus::ReaderFailed { note } => format!(
-                "every reader had ended when the verdict was taken, so no further output could                  arrive — but at least one ended in an I/O ERROR rather than at EOF, so this is                  NOT the \"both pipes reached EOF\" measurement: {note}. WHAT THAT ESTABLISHES:                  only that this harness could not read the child's output to its end. It is a                  statement about the pipe, NOT about the child"
+                "every reader had ended when the verdict was taken, so no further output could \
+                 arrive — but at least one ended in an I/O ERROR rather than at EOF, so this is \
+                 NOT the \"both pipes reached EOF\" measurement: {note}. WHAT THAT ESTABLISHES: \
+                 only that this harness could not read the child's output to its end. It is a \
+                 statement about the pipe, NOT about the child"
             ),
             PipeStatus::PartiallyClosed {
                 open,
                 ended,
                 failure_note,
             } => format!(
-                "{ended} of the child's pipe readers had already ENDED and {open} was/were still                  attached, so further output was possible ONLY on the surviving pipe(s) — NOT on                  the ended one(s){}",
+                "{ended} of the child's pipe readers had already ENDED and {open} was/were still \
+                 attached, so further output was possible ONLY on the surviving pipe(s) — NOT on \
+                 the ended one(s){}",
                 failure_note
                     .as_ref()
                     .map(|note| format!(
@@ -309,7 +324,8 @@ impl PipeStatus {
                     .unwrap_or_default()
             ),
             PipeStatus::AllOpen { open } => format!(
-                "all {open} of the child's pipe readers were still attached when the verdict was                  taken, so more output was still possible on either pipe"
+                "all {open} of the child's pipe readers were still attached when the verdict was \
+                 taken, so more output was still possible on either pipe"
             ),
         }
     }
@@ -559,18 +575,15 @@ impl WaitEnd {
 /// output is over — a live pipe, a PARTIAL closure, or an unreadable store. A
 /// caller therefore cannot ask the question through one derivation and build its
 /// verdict from another, and no arm of this match is unreachable.
-fn ended(
-    after: Duration,
-    snapshot: TranscriptSnapshot,
-) -> Result<WaitEnd, TranscriptSnapshot> {
+fn ended(after: Duration, snapshot: TranscriptSnapshot) -> Result<WaitEnd, TranscriptSnapshot> {
     match snapshot.pipe_status() {
         PipeStatus::ReaderFailed { .. } => Ok(WaitEnd::ReaderFailed { after, snapshot }),
         PipeStatus::AllEof { .. } => Ok(WaitEnd::PipesClosed { after, snapshot }),
         // NOT established: output may still arrive (or the store could not be
         // read), so no "no further line could arrive" variant may be built.
-        PipeStatus::PartiallyClosed { .. } | PipeStatus::AllOpen { .. } | PipeStatus::Unavailable => {
-            Err(snapshot)
-        }
+        PipeStatus::PartiallyClosed { .. }
+        | PipeStatus::AllOpen { .. }
+        | PipeStatus::Unavailable => Err(snapshot),
     }
 }
 
