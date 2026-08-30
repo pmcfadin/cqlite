@@ -140,6 +140,33 @@
 #                      to the content proof (not full `npm test`) so it stays
 #                      fast and corpus-free while still failing closed on a Node
 #                      write-path regression (#1255).
+#   binding-rust-tests EXECUTES the RUST test suites of the two binding-side crates no
+#                      other component runs (#3522): `cargo test -p cqlite-ffi-common`
+#                      (ALL targets — lib + tests/dependency_boundary.rs +
+#                      tests/error_contract_table.rs) and `cargo test -p cqlite-node
+#                      --features write-support --lib`. Before it, BOTH executed
+#                      NOWHERE — not locally, not in CI: clippy --all-targets COMPILED
+#                      them and nothing RAN them, so an inverted assertion in either
+#                      could merge with every check green. Compiling is not covering
+#                      (#1699), and that holds at PACKAGE granularity too.
+#                      DELIBERATELY NOT folded into node-bindings: that component SKIPs
+#                      when node/npm is absent, and putting cqlite-node's RUST tests
+#                      behind that SKIP would be a coverage hole wearing a SKIP's
+#                      clothes. This one needs nothing beyond cargo and NEVER SKIPs.
+#                      Every subject set (integration targets + their runner ids,
+#                      unittest targets, enabled/declared features) is DERIVED from
+#                      cargo at run time, so a new tests/*.rs is covered with no gate
+#                      edit; a failed derivation FAILs naming the derivation. Guards are
+#                      affirmative, not exit-code-shaped: check_unittest_targets_ran
+#                      per package, check_test_targets_observed over the derived
+#                      integration set, and check_no_unexpected_zero_tests with an EMPTY
+#                      allowed-zero list. Prints a COVERAGE CENSUS on stdout and at the
+#                      head of its log naming what it does NOT run (cqlite-py's Rust
+#                      tests — structurally unlinkable; the jest suite — node-bindings'
+#                      subject; cqlite-node's derived integration-target count; the
+#                      features left off). Needs NO fixtures (verified: neither crate's
+#                      sources reference CQLITE_DATASETS_ROOT), so NOT in
+#                      DATASET_COMPONENTS.
 #   parity-report      cassandra-parity report --check: FAILs (naming
 #                      docs/reports/cassandra-test-parity.md) when the committed
 #                      derived report drifts from a fresh render of
@@ -2272,7 +2299,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -2287,6 +2314,11 @@ COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-o
 _component_lane() {
   case "$1" in
     python-bindings|node-bindings) printf side ;;
+    # binding-rust-tests builds cqlite-ffi-common (a cqlite-core dependent with
+    # default-features = false) and cqlite-node (cqlite-core + parquet + cli-helpers +
+    # write-support) — class (a) of the SIDE rationale: a feature set that DIVERGES from
+    # MAIN's, so sharing MAIN's target dir would thrash it (#2657/#3522).
+    binding-rust-tests) printf side ;;
     parity-report|delivery-telemetry|binding-unwind-profile|smoke|memory-budget) printf side ;;
     # #1699 feature-matrix lanes. All four build cqlite-core at a feature set that
     # DIVERGES from MAIN's (cqlite-flight's arrow flavour; default+legacy-heuristics;
@@ -5685,6 +5717,367 @@ run_node_bindings() {
     status=PASS
   else
     status=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# _package_declared_features <package>: print every feature NAME the package's own
+# manifest declares, one per line (possibly none), from cargo metadata. Exit 1 = the
+# derivation failed (no jq/python3, a metadata failure, or no such package) — never a
+# silent empty list, which would let a lane report "nothing is turned off" about a
+# package it could not read (issue #3522).
+#
+# Its consumer is the binding-rust-tests census: subtracting the RESOLVED enabled set
+# (_resolved_package_features) from this DECLARED set is how the lane states, as a
+# derived fact rather than a curated sentence, which of a binding crate's features it
+# leaves off — and therefore which `#[cfg(feature = ...)]` test bodies it does not run.
+_package_declared_features() {
+  local pkg="$1"
+  local meta present out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    present=$(printf '%s' "$meta" | jq -r --arg n "$pkg" '[.packages[] | select(.name == $n)] | length') || return 1
+    [ "$present" = 1 ] || return 1
+    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" \
+      '.packages[] | select(.name == $n) | (.features // {}) | keys[]') || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | python3 -c '
+import json, sys
+pkg = sys.argv[1]
+d = json.load(sys.stdin)
+pkgs = [p for p in d.get("packages", []) if p.get("name") == pkg]
+if len(pkgs) != 1:
+    sys.exit(1)
+for f in sorted((pkgs[0].get("features") or {}).keys()):
+    print(f)
+' "$pkg") || return 1
+  else
+    return 1
+  fi
+  # Emptiness is a legitimate answer here (cqlite-ffi-common declares no features at
+  # all), for the same reason and with the same presence check as
+  # _package_integration_target_ids.
+  printf '%s' "$out"
+  [ -n "$out" ] && printf '\n'
+  return 0
+}
+
+# binding-rust-tests: EXECUTE the RUST test suites of the two binding-side crates that
+# no other gate component runs — cqlite-ffi-common (whole package) and cqlite-node
+# (--lib) (issue #3522).
+#
+# THE DEFECT IT EXISTS FOR. Compiling is not covering, and #1699 established that at
+# FEATURE granularity. The same reasoning holds at PACKAGE granularity, and two crates
+# were sitting in exactly that hole: `cqlite-ffi-common` appeared ZERO times in
+# scripts/** and .github/workflows/**, so its 37 unit tests and its two integration
+# targets (tests/dependency_boundary.rs, tests/error_contract_table.rs) were reached
+# only by clippy's `--all-targets` compile and executed NOWHERE — not locally, not in
+# CI. `cqlite-node`'s 53 Rust unit tests were in the same position: node-bindings runs
+# jest against the BUILT ARTIFACT and never `cargo test`. An inverted assertion in
+# either could be committed, merged and released with every check green.
+#
+# WHY THIS IS A SEPARATE COMPONENT AND NOT PART OF node-bindings. node-bindings SKIPs
+# when node/npm is absent — correctly, since without them it can build nothing. Putting
+# cqlite-node's RUST tests behind that SKIP would mean a box with no npm silently stops
+# executing them: a coverage hole wearing a SKIP's clothes, which is this issue's own
+# defect class re-created by the fix. This component therefore depends on NOTHING beyond
+# cargo and NEVER SKIPs. The same argument keeps cqlite-ffi-common out of
+# python-bindings.
+#
+# FEATURE SETS, chosen and stated rather than defaulted into:
+#   * cqlite-ffi-common — none. The crate declares NO `[features]` table (derived and
+#     printed on every run), so there is no other set to choose.
+#   * cqlite-node — `--features write-support`, because that is what the SHIPPED
+#     artifact is built with (`npm run build` = `napi build … --features write-support`),
+#     so this lane runs the Rust half at the feature set the product actually ships. It
+#     costs nothing: cqlite-node's cqlite-core dependency already takes default features,
+#     which include write-support, so the flag adds no compilation. `observability` is
+#     deliberately NOT enabled — building the OTel stack is a cost this gate declines on
+#     purpose (#1844 excludes that stack from clippy for the same reason) — and the
+#     census DECLARES that, with the un-enabled feature set DERIVED, not listed by hand.
+#
+# AFFIRMATIVE MEASUREMENT, not a green exit code. A suite whose modules are cfg'd out
+# compiles, runs 0 tests and exits 0. Three guards, all over cargo's own output:
+#   * check_unittest_targets_ran   — per package, each selected `--lib` target must be
+#                                    OBSERVED and must have run a NON-ZERO count.
+#   * check_test_targets_observed  — every DERIVED cqlite-ffi-common integration target
+#                                    must have produced a `Running` banner (this is the
+#                                    guard that makes `dependency_boundary.rs` running in
+#                                    the gate of record a checkable fact, not a hope).
+#   * check_no_unexpected_zero_tests — with an EMPTY allowed-zero list, so any
+#                                    integration target that runs zero tests FAILs.
+# The two packages write to SEPARATE log files, deliberately: both print
+# `Running unittests src/lib.rs`, and check_unittest_targets_ran keys on that path, so a
+# single shared log would let one package's unit run satisfy the guard for the other.
+#
+# DERIVE, NEVER CURATE. Every subject set — integration targets, their runner ids,
+# unittest targets, enabled features, declared features — comes from `cargo metadata` /
+# `cargo tree` at run time, so a new `tests/*.rs` in either crate is covered with no gate
+# edit. A FAILED derivation is a FAIL NAMING THE DERIVATION, never a fallback to "nothing
+# to run": a silently empty subject set is the vacuous green this component was created
+# to remove.
+#
+# NOT IN DATASET_COMPONENTS, verified rather than assumed: neither `cqlite-ffi-common/`
+# nor `bindings/node/src/` contains any reference to `CQLITE_DATASETS_ROOT` or `test-data`
+# (measured; the jest suite does read the corpus, but that is node-bindings' subject, not
+# this lane's). The root is still exported defensively.
+run_binding_rust_tests() {
+  local name=binding-rust-tests
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local ffi_log="$LOG_DIR/$name.cqlite-ffi-common.log"
+  local node_log="$LOG_DIR/$name.cqlite-node.log"
+  local start end status
+  start=$(date +%s)
+
+  # Declared ONCE and consumed by BOTH the cargo invocation and the enabled-set
+  # derivation, so the two can never describe different builds.
+  local -a ffi_feature_args=()
+  local -a node_feature_args=(--features write-support)
+
+  # --- one place to report a failed DERIVATION -------------------------------
+  # Every derivation below is fatal in the same way and for the same reason, so they
+  # report through one helper rather than five near-copies that could drift apart.
+  local _derivation_failed=0
+  _brt_derivation_fail() { # <what> <why...>
+    local what="$1"; shift
+    {
+      echo "[$name] FAIL-CLOSED: could not derive $what."
+      echo "        $*"
+      echo "        The DERIVATION failed, not the tests. This component's subject sets are"
+      echo "        derived from cargo at run time so a new test target is covered with no gate"
+      echo "        edit; an underived (or silently empty) subject set is the vacuous green"
+      echo "        issue #3522 exists to remove, so it FAILs naming the derivation."
+    } >> "$log"
+    _derivation_failed=1
+  }
+
+  : > "$log"
+
+  # NOTE the empty-but-successful case: cqlite-ffi-common declares no features at all, so
+  # this legitimately returns the EMPTY SET. That is a measurement, and treating it as a
+  # failure is exactly the false red #3522 corrected in _resolved_package_features.
+  local ffi_enabled="" node_enabled=""
+  if ! ffi_enabled=$(_resolved_package_features cqlite-ffi-common ${ffi_feature_args[@]+"${ffi_feature_args[@]}"}); then
+    _brt_derivation_fail "cqlite-ffi-common's enabled feature set" \
+      "'cargo tree -p cqlite-ffi-common' emitted no line for the package (a cargo failure or an offline registry)."
+  fi
+  if ! node_enabled=$(_resolved_package_features cqlite-node ${node_feature_args[@]+"${node_feature_args[@]}"}); then
+    _brt_derivation_fail "cqlite-node's enabled feature set" \
+      "'cargo tree -p cqlite-node --features write-support' emitted no line for the package."
+  fi
+
+  # cqlite-ffi-common's integration targets. This package HAS them, so an empty result
+  # is a broken derivation and is reported as one.
+  local ffi_targets=""
+  if ! ffi_targets=$(_package_integration_target_ids cqlite-ffi-common); then
+    _brt_derivation_fail "cqlite-ffi-common's integration (test) targets" \
+      "cargo metadata, its parser, or the package lookup failed."
+  elif [ -z "$ffi_targets" ]; then
+    _brt_derivation_fail "cqlite-ffi-common's integration (test) targets" \
+      "the census counted ZERO, but this package declares tests/dependency_boundary.rs and tests/error_contract_table.rs. A zero here is a broken count, and 'no targets to observe' would silently retire the guard that proves dependency_boundary.rs runs."
+  fi
+
+  # cqlite-node's integration targets. Zero is the EXPECTED, DERIVED answer here (the
+  # crate is a cdylib with no tests/ directory) — which is why this uses the
+  # zero-tolerant helper. The census states the number it measured; it does not assume
+  # it.
+  local node_targets="" node_targets_n=0
+  if ! node_targets=$(_package_integration_target_ids cqlite-node); then
+    _brt_derivation_fail "cqlite-node's integration (test) target census" \
+      "cargo metadata, its parser, or the package lookup failed — so this lane cannot state whether it is leaving any integration target un-run."
+  else
+    node_targets_n=$(printf '%s' "$node_targets" | grep -c . || true)
+  fi
+
+  # The declared-minus-enabled feature sets: what this lane leaves OFF, derived.
+  local ffi_declared node_declared ffi_off="" node_off="" _f
+  if ! ffi_declared=$(_package_declared_features cqlite-ffi-common); then
+    _brt_derivation_fail "cqlite-ffi-common's declared feature list" "cargo metadata or its parser failed."
+  fi
+  if ! node_declared=$(_package_declared_features cqlite-node); then
+    _brt_derivation_fail "cqlite-node's declared feature list" "cargo metadata or its parser failed."
+  fi
+  for _f in $ffi_declared; do
+    case "$ffi_enabled" in *" $_f "*) ;; *) ffi_off="$ffi_off $_f" ;; esac
+  done
+  for _f in $node_declared; do
+    case "$node_enabled" in *" $_f "*) ;; *) node_off="$node_off $_f" ;; esac
+  done
+
+  # The unittest subject sets. `lib,cdylib,bin` rather than `lib,bin`: cqlite-node's
+  # library target has kind `cdylib` (it is a napi module), and a `lib,bin` filter
+  # returns NOTHING for it — which _package_unittest_srcs correctly reports as a failed
+  # derivation, and which a lane that shrugged at would turn into a guard with no
+  # subject.
+  local -a ffi_unit_srcs=() node_unit_srcs=()
+  local _us
+  while IFS= read -r _us; do [ -n "$_us" ] && ffi_unit_srcs+=("$_us"); done <<EOF
+$(_package_unittest_srcs cqlite-ffi-common lib "$ffi_enabled")
+EOF
+  while IFS= read -r _us; do [ -n "$_us" ] && node_unit_srcs+=("$_us"); done <<EOF
+$(_package_unittest_srcs cqlite-node lib,cdylib,bin "$node_enabled")
+EOF
+  [ "${#ffi_unit_srcs[@]}" -gt 0 ] || _brt_derivation_fail "cqlite-ffi-common's lib unittest target(s)" \
+    "cargo metadata returned none, so the zero-test guard would have no subject."
+  [ "${#node_unit_srcs[@]}" -gt 0 ] || _brt_derivation_fail "cqlite-node's lib unittest target(s)" \
+    "cargo metadata returned none (note its library target's kind is 'cdylib', not 'lib'), so the zero-test guard would have no subject."
+
+  # The count of Rust #[test] fns in bindings/python/src, for the census's cqlite-py
+  # clause. GREP-COUNTED, and the census says so: this counts `#[test]` ATTRIBUTES in
+  # committed source, which is a proxy for "test functions" and not a cargo-derived
+  # figure — cargo cannot give one, because the target cannot be built (that is the
+  # whole point of the clause). Fail-closed on an unreadable subject or a non-numeric
+  # result: a census that quietly reports "0 unrun tests" is a false all-clear.
+  local py_src="$REPO_ROOT/bindings/python/src" py_test_n=""
+  if [ ! -d "$py_src" ] || [ ! -r "$py_src" ]; then
+    _brt_derivation_fail "the count of Rust #[test] fns under bindings/python/src" \
+      "the directory is missing or unreadable, so the census cannot state the size of the gap it reports."
+  else
+    py_test_n=$(grep -rhoE --include='*.rs' '^[[:space:]]*#\[test\]' "$py_src" 2>/dev/null | grep -c . || true)
+    case "$py_test_n" in
+      ''|*[!0-9]*) _brt_derivation_fail "the count of Rust #[test] fns under bindings/python/src" \
+                     "the count came back non-numeric ('$py_test_n')." ;;
+    esac
+  fi
+
+  if [ "$_derivation_failed" -ne 0 ]; then
+    status=FAIL
+    cat "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ---- THE CENSUS -----------------------------------------------------------
+  # Built ONCE and emitted TWICE — as `>>>` lines on the gate's stdout and at the HEAD
+  # of the component log — because a lane that omits coverage silently is
+  # indistinguishable from one that covers it, and "the log a reviewer actually reads"
+  # is both of those. Not a comment: a comment is not read on a run.
+  local ffi_ids="" ffi_expect_n=0 ffi_skip="" _tn _tid _trf _troff _trfl
+  local -a ffi_expect=()
+  while IFS=$'\t' read -r _tn _tid _trf; do
+    [ -n "$_tn" ] || continue
+    ffi_ids="$ffi_ids $_tid"
+    _troff=""
+    for _trfl in ${_trf//,/ }; do
+      case "$ffi_enabled" in *" $_trfl "*) ;; *) _troff="$_trfl"; break ;; esac
+    done
+    if [ -n "$_troff" ]; then
+      # cargo SILENTLY skips a required-features target it cannot enable, printing no
+      # banner at all — so demanding an observation for it would red a healthy lane.
+      # Excluded from the expectation and DECLARED, never dropped quietly.
+      ffi_skip="$ffi_skip $_tid(required-features[$_trf]:off[$_troff])"
+    else
+      ffi_expect+=("$_tid")
+      ffi_expect_n=$((ffi_expect_n + 1))
+    fi
+  done <<< "$ffi_targets"
+
+  local -a census=()
+  census+=("cargo test --no-fail-fast -p cqlite-ffi-common            (ALL targets: lib + every integration target)")
+  census+=("cargo test --no-fail-fast -p cqlite-node --features write-support --lib")
+  census+=("WHY THIS LANE EXISTS: before it, BOTH crates' Rust tests executed NOWHERE — not in")
+  census+=("     this gate, not in CI. clippy --all-targets COMPILED them and nothing RAN them.")
+  census+=("     Compiling is not covering (#1699), and that holds at PACKAGE granularity too.")
+  census+=("SUBJECTS (all DERIVED from cargo at run time, never hard-coded):")
+  census+=("  cqlite-ffi-common: unittest target(s) [${ffi_unit_srcs[*]}]; $ffi_expect_n integration target(s) [${ffi_ids# }]")
+  census+=("  cqlite-node:       unittest target(s) [${node_unit_srcs[*]}]; $node_targets_n integration target(s)")
+  census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT RUN:")
+  census+=("  1. cqlite-py's Rust #[test] fns ($py_test_n occurrences of '#[test]' under")
+  census+=("     bindings/python/src, grep-counted from committed source — cargo cannot count them,")
+  census+=("     because the target cannot be built). 'cargo test -p cqlite-py' is STRUCTURALLY")
+  census+=("     IMPOSSIBLE, not merely unwired: a pyo3 cdylib's test harness cannot link libpython.")
+  census+=("     Already documented in this script (search: 'cannot link libpython'). The pytest")
+  census+=("     half IS fully covered, by the python-bindings component.")
+  census+=("  2. cqlite-node's JavaScript suite. Owned by the node-bindings component, which builds")
+  census+=("     the napi artifact and runs jest against it. This lane never builds that artifact.")
+  census+=("  3. cqlite-node integration (test) targets: it declares $node_targets_n — a DERIVED count")
+  census+=("     from cargo metadata, not an assumption. At $node_targets_n there is nothing to omit; if")
+  census+=("     that number ever rises without this lane running them, this line is the alarm.")
+  census+=("  4. Feature-gated bodies at features this lane leaves OFF (declared-minus-enabled,")
+  census+=("     derived): cqlite-ffi-common ->${ffi_off:- <none: this crate declares no features>};")
+  census+=("     cqlite-node ->${node_off:- <none>}. 'observability' is off ON PURPOSE — building the")
+  census+=("     OTel stack is a cost this gate declines (#1844 excludes it from clippy likewise).")
+  [ -n "$ffi_skip" ] && census+=("  5. cqlite-ffi-common targets cargo cannot run at this feature set:$ffi_skip")
+  census+=("SCOPE OF THE #3522 AUDIT, recorded so it is not re-litigated: this component closes TWO")
+  census+=("     of the ten gaps that audit found. The other eight are RECORDED, not silently fixed,")
+  census+=("     in scripts/tests/workspace-test-disposition.txt (enforced by")
+  census+=("     scripts/tests/test_workspace_test_disposition.sh under the tooling-tests component).")
+  local cl
+  for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
+  echo ">>> [$name] enabled features (cargo tree -p, package-scoped): cqlite-ffi-common [$ffi_enabled] cqlite-node [$node_enabled]"
+  {
+    echo "==== [$name] COVERAGE CENSUS (issue #3522) ===="
+    for cl in "${census[@]}"; do echo "$cl"; done
+    echo "enabled features (cargo tree -p, package-scoped): cqlite-ffi-common [$ffi_enabled] cqlite-node [$node_enabled]"
+    echo "per-package cargo logs: $ffi_log , $node_log"
+    echo "==== end census ===="
+  } > "$log"
+
+  # --no-fail-fast for the reason flight-tests and legacy-heuristics carry it: cargo
+  # test stops after the first failing test BINARY, and a lane whose purpose is to
+  # surface never-executed rot must surface ALL of it in one run rather than as a serial
+  # reveal.
+  status=PASS
+
+  # ---- cqlite-ffi-common: whole package -------------------------------------
+  if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      cargo test --no-fail-fast -p cqlite-ffi-common \
+      ${ffi_feature_args[@]+"${ffi_feature_args[@]}"} > "$ffi_log" 2>&1; then
+    # Three affirmative guards, ANDed. Order matters only for readability; each writes
+    # its own verdict to the log, so a pasted log shows which ones RAN and on what.
+    if ! check_unittest_targets_ran "$name/cqlite-ffi-common" "$ffi_log" "${ffi_unit_srcs[@]}" 2>>"$ffi_log"; then
+      status=FAIL
+    fi
+    if [ "$ffi_expect_n" -gt 0 ]; then
+      if ! check_test_targets_observed "$name/cqlite-ffi-common" "$ffi_log" "${ffi_expect[@]}" 2>>"$ffi_log"; then
+        status=FAIL
+      else
+        echo "$name/cqlite-ffi-common: integration targets OK — all $ffi_expect_n derived target(s) produced a 'Running' banner:${ffi_ids}" >> "$ffi_log"
+      fi
+    else
+      # Unreachable while this package declares runnable targets (the derivation above
+      # FAILs on zero), but stated rather than left implicit: an expectation set that
+      # emptied itself would be a guard with no subject.
+      echo "$name/cqlite-ffi-common: FAIL-CLOSED — every declared integration target was excused by an unmet required-feature, leaving the observation guard with NO subject (issue #3522)." >> "$ffi_log"
+      status=FAIL
+    fi
+    # EMPTY allowed-zero list, deliberately: no cqlite-ffi-common integration target is
+    # permitted to run zero tests, so a cfg change that empties one FAILs here.
+    if ! check_no_unexpected_zero_tests "$name/cqlite-ffi-common" "$ffi_log" 2>>"$ffi_log"; then
+      status=FAIL
+    fi
+  else
+    status=FAIL
+  fi
+
+  # ---- cqlite-node: --lib ---------------------------------------------------
+  # Yes, a `crate-type = ["cdylib"]` package: `cargo test --lib` compiles the library as
+  # a TEST harness binary, which links fine (measured: 53 tests). This is NOT the
+  # cqlite-py situation — that one fails because a pyo3 extension's harness needs
+  # libpython at link time, which is a property of pyo3, not of cdylib.
+  if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      cargo test --no-fail-fast -p cqlite-node \
+      ${node_feature_args[@]+"${node_feature_args[@]}"} --lib > "$node_log" 2>&1; then
+    if ! check_unittest_targets_ran "$name/cqlite-node" "$node_log" "${node_unit_srcs[@]}" 2>>"$node_log"; then
+      status=FAIL
+    fi
+  else
+    status=FAIL
+  fi
+
+  cat "$ffi_log" "$node_log" >> "$log" 2>/dev/null
+  if [ "$status" = FAIL ]; then
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
@@ -11681,6 +12074,7 @@ dispatch_component() {
     feature-iso-delta-scan) run_component feature-iso-delta-scan run_feature_iso delta-scan ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
+    binding-rust-tests) run_binding_rust_tests ;;
     delivery-telemetry) run_delivery_telemetry ;;
     oom-audit) run_oom_audit ;;
     parity-report) run_parity_report ;;
