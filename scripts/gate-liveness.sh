@@ -169,6 +169,106 @@ _snap_of() {
   printf '%s' "$dst"
 }
 
+# (defined HERE, with the other artifact helpers, because the STARTUP probe below calls it before
+#  the heartbeat section is reached — bash defines functions as it reads the file.)
+# ONE validator for a beat, applied to EVERY snapshot of it (roborev job 190, Medium). The first
+# version validated only the FIRST read: the confirmation re-read was accepted on a matching
+# run-id plus a merely "different, non-empty" beat-seq, so a malformed or truncated SECOND
+# snapshot could still carry a RUNNING verdict. Two reads of one artifact must clear the same bar,
+# and the only way to guarantee that is for a single piece of code to state it.
+#
+# Returns 0 when <text> is a single, coherent, identity-bearing beat; otherwise non-zero with a
+# named reason in BEAT_ERR. It decides only whether the fields may be TRUSTED; the caller reads
+# values with _field.
+BEAT_ERR=""
+_beat_valid() {
+  local t="$1" n_start n_end n_rid n_seq n_ep open_ln close_ln pc iv ep sq l ln
+  n_start=$(printf '%s\n' "$t" | grep -cxF '==== AGENT-GATE HEARTBEAT ====')
+  n_end=$(printf '%s\n' "$t" | grep -cxF '==== END AGENT-GATE HEARTBEAT ====')
+  if [ "$n_start" -ne 1 ] || [ "$n_end" -ne 1 ]; then
+    BEAT_ERR="heartbeat-not-a-single-block; found $n_start opener(s) and $n_end closer(s) — a beat is published by atomic rename, so anything but exactly one of each means this is not one coherent beat"
+    return 1
+  fi
+  open_ln=$(printf '%s\n' "$t" | grep -nxF '==== AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
+  close_ln=$(printf '%s\n' "$t" | grep -nxF '==== END AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
+  if [ "$open_ln" -ge "$close_ln" ]; then
+    BEAT_ERR="heartbeat-out-of-order; the closer (line $close_ln) does not follow the opener (line $open_ln)"
+    return 1
+  fi
+  # EVERY field that decides a verdict must appear EXACTLY ONCE and INSIDE the framing (roborev
+  # job 193, Medium). The first version checked only run-id/beat-seq/beat-epoch — but
+  # `parent-check` decides whether any RUNNING is supportable, `interval` sets the staleness window
+  # and the confirmation wait, `host` decides whether the clock may be trusted, and `beater-pid`
+  # decides whether a restart counts as progress. A duplicate or out-of-block copy of any of them
+  # would be read as the first occurrence, letting an ambiguous beat produce RUNNING.
+  #
+  # "Exactly once", not "at most once": a beat missing any of these cannot support a verdict.
+  # `beater-pid` is the one exception — it is absent from beats written by an older gate, and its
+  # absence only forfeits restart detection rather than enabling a wrong answer, so it is checked
+  # for uniqueness/placement ONLY IF present.
+  # REQUIRED vs OPTIONAL-BUT-UNIQUE, and the line between them is whether ABSENCE would make a
+  # verdict unsound or merely narrower:
+  #   required  — run-id, beat-seq, beat-epoch, interval, parent-check. Without any of these a
+  #               verdict cannot be computed at all (or, for parent-check, cannot be trusted).
+  #   optional  — host, beater-pid. Their absence DEGRADES SAFELY and is already handled: no host
+  #               means the clock domain is unproven, so progression decides; no beater-pid means
+  #               restart detection is forfeited. Requiring them would reject beats that the reader
+  #               can answer about perfectly well — which it briefly did, until 11g.9 caught it.
+  # Either way a DUPLICATE is fatal for both groups, because the first occurrence would be trusted.
+  local f cnt
+  for f in run-id beat-seq beat-epoch interval parent-check; do
+    cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
+    if [ "$cnt" -ne 1 ]; then
+      BEAT_ERR="heartbeat-field-count; '$f' appears $cnt time(s) and must appear exactly once — no value is attributable to a single beat otherwise"
+      return 1
+    fi
+  done
+  for f in host beater-pid; do
+    cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
+    if [ "$cnt" -gt 1 ]; then
+      BEAT_ERR="heartbeat-field-count; '$f' appears $cnt times and must appear at most once — the first occurrence would be trusted"
+      return 1
+    fi
+  done
+  for f in run-id beat-seq beat-epoch interval parent-check host beater-pid; do
+    printf '%s\n' "$t" | grep -q "^$f: " || continue
+    ln=$(printf '%s\n' "$t" | grep -n "^$f: " | head -1 | cut -d: -f1)
+    if [ "$ln" -lt "$open_ln" ] || [ "$ln" -gt "$close_ln" ]; then
+      BEAT_ERR="heartbeat-field-outside-block; '$f' (line $ln) lies outside the block (lines $open_ln..$close_ln)"
+      return 1
+    fi
+  done
+  # A DIGIT STRING IS NOT YET A NUMBER (roborev job 192, Low). Bash arithmetic reads a leading zero
+  # as OCTAL, so `interval: 08` is a syntax error that ABORTS the shell — the reader would die
+  # instead of returning its documented UNKNOWN — and an unbounded digit string can overflow a
+  # comparison. So each field is length-bounded (rejecting absurd values outright) and every later
+  # use goes through base-10 arithmetic.
+  ep=$(printf '%s\n' "$t" | grep -m1 '^beat-epoch: '); ep="${ep#beat-epoch: }"
+  case "$ep" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-epoch; 'beat-epoch: $ep' is not an integer"; return 1 ;; esac
+  [ "${#ep}" -le 12 ] || { BEAT_ERR="heartbeat-epoch-out-of-range; 'beat-epoch: $ep' has ${#ep} digits, which is not a plausible unix time"; return 1; }
+  sq=$(printf '%s\n' "$t" | grep -m1 '^beat-seq: '); sq="${sq#beat-seq: }"
+  case "$sq" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-seq; 'beat-seq: $sq' is not an integer"; return 1 ;; esac
+  [ "${#sq}" -le 12 ] || { BEAT_ERR="heartbeat-seq-out-of-range; 'beat-seq: $sq' has ${#sq} digits"; return 1; }
+  iv=$(printf '%s\n' "$t" | grep -m1 '^interval: '); iv="${iv#interval: }"
+  case "$iv" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-interval; 'interval: $iv' is not an integer"; return 1 ;; esac
+  [ "${#iv}" -le 6 ] || { BEAT_ERR="heartbeat-interval-out-of-range; 'interval: $iv' has ${#iv} digits"; return 1; }
+  # Normalise to base 10 NOW, so no later comparison can trip over an octal reading.
+  ep=$((10#$ep)); sq=$((10#$sq)); iv=$((10#$iv))
+  [ "$iv" -ge 1 ] || { BEAT_ERR="heartbeat-bad-interval; 'interval: $iv' must be >= 1"; return 1; }
+  if [ "$iv" -gt 60 ]; then
+    BEAT_ERR="heartbeat-interval-too-long; 'interval: ${iv}s' exceeds the 60s this reader can observe (its confirmation window is capped at 65s to bound a hostile artifact), so a live beat might not advance inside it and STALLED would be a false death"
+    return 1
+  fi
+  pc=$(printf '%s\n' "$t" | grep -m1 '^parent-check: '); pc="${pc#parent-check: }"
+  case "$pc" in
+    starttime|lstart) : ;;
+    kill0) BEAT_ERR="heartbeat-no-gate-identity; the beater reports 'parent-check: kill0', meaning it could NOT establish any identity for its gate — so a recycled pid would keep it publishing for an unrelated process. Counter progression would only prove the BEATER is alive, not the gate, so no RUNNING claim is supportable from this beat"; return 1 ;;
+    '')    BEAT_ERR="heartbeat-no-parent-check; the beat declares no 'parent-check:' field, so it is unknown whether the beater can identify its gate at all"; return 1 ;;
+    *)     BEAT_ERR="heartbeat-unknown-parent-check; 'parent-check: $pc' is not a value this reader knows (expected starttime, lstart or kill0)"; return 1 ;;
+  esac
+  return 0
+}
+
 
 # _has_nul <file> — true when the file contains a NUL byte. Checked on the FILE, never on a
 # slurped string: `$( )` silently strips NULs, so the evidence is gone by the time the text
@@ -203,7 +303,35 @@ verdict() { # verdict <STATUS> <exit> <detail>
 # collapsing onto the PERMISSIVE answer; this is the other direction, deliberately.
 # The cause text is worded to match: "not readable as a file" states what was observed,
 # not "nothing has been written", which would assert a fact the predicate cannot establish.
+# STARTUP: a NAMED run with a MATCHING BEAT is alive, even before its summary exists.
+#
+# This is the launcher's own workflow (roborev job 196, Medium). The beater deliberately starts
+# before the tree-identity capture, and gate-detached.sh accepts a gate on the strength of that
+# beat — then prints a run-bound poll command. But this reader used to reject a missing summary
+# outright, so the advertised command answered UNKNOWN for a healthy, accepted, actively-beating
+# gate for the whole duration of the capture. The launcher and the reader disagreed about what
+# "accepted" means, which is worse than either being wrong alone.
+#
+# Only for a CALLER-NAMED run: the caller has told us which run they mean, and a fresh beat bearing
+# that run-id is affirmative evidence it is alive. Without --run-id there is nothing to match
+# against, so the summary remains the only anchor and its absence is still UNKNOWN.
+_startup_beat=no
+# The snapshot directory must exist before _snap_of can work; it is normally created just before the
+# summary is read, which is AFTER this probe. Creating it here made the difference between this
+# check working and silently never firing.
+if [ -n "$WANT_RUN_ID" ] && [ -f "$HB" ] && [ -r "$HB" ] && _ensure_snap_dir; then
+  _sb_snap=$(_snap_of "$HB" startupbeat 2>/dev/null) || _sb_snap=""
+  if [ -n "$_sb_snap" ] && ! _has_nul "$_sb_snap"; then
+    _sb_text=$(_slurp "$_sb_snap")
+    if _beat_valid "$_sb_text" && [ "$(_field "$_sb_text" run-id)" = "$WANT_RUN_ID" ]; then
+      _startup_beat=yes
+    fi
+  fi
+fi
 if [ ! -f "$SUMMARY" ]; then
+  if [ "$_startup_beat" = yes ]; then
+    verdict RUNNING 2 "run '$WANT_RUN_ID' is beating but has not written its summary yet — this is normal during startup, because the gate publishes liveness BEFORE its tree-identity capture and sentinel. summary: not yet at $SUMMARY"
+  fi
   verdict UNKNOWN 4 "no-summary-artifact; $SUMMARY is not readable as a regular file (never written, or its location is not reachable from here)"
 fi
 if [ ! -r "$SUMMARY" ]; then
@@ -323,6 +451,13 @@ SUM_RUN_ID=$(_field "$SUM_TEXT" run-id)
 # signal, which is the exact shape CLAUDE.md forbids (#3229). The binding is only a
 # guarantee if it is unconditional: caller named a run ⇒ the artifact must AFFIRMATIVELY
 # say it is that run.
+if [ -n "$WANT_RUN_ID" ] && [ "$_startup_beat" = yes ] && [ -n "$SUM_RUN_ID" ] \
+   && [ "$SUM_RUN_ID" != "$WANT_RUN_ID" ]; then
+  # The summary at this path still belongs to a PREVIOUS run while ours is starting up — the same
+  # startup window as above, one step later (job 196). The caller named a run and its beat is
+  # valid and matching, so answer about THAT run instead of refusing.
+  verdict RUNNING 2 "run '$WANT_RUN_ID' is beating; the summary at this path still belongs to run '$SUM_RUN_ID' and has not been replaced yet — normal during startup, because liveness is published before the sentinel"
+fi
 if [ -n "$WANT_RUN_ID" ]; then
   if [ -z "$SUM_RUN_ID" ]; then
     verdict UNKNOWN 4 "summary-no-run-id; $SUMMARY carries no 'run-id:' line, so it cannot be attributed to run '$WANT_RUN_ID'"
@@ -383,6 +518,8 @@ case "$RESULT_TOKEN" in
       if [ -n "$_hb_peek" ] && ! _has_nul "$_hb_peek"; then
         _hb_rid_peek=$(_field "$(_slurp "$_hb_peek")" run-id)
         if [ -n "$_hb_rid_peek" ] && [ "$_hb_rid_peek" != "$SUM_RUN_ID" ]; then
+          # (this arm only runs when the caller did NOT name a run; a named run with a matching
+          #  beat is answered from the beat above, before the summary is consulted at all)
           verdict UNKNOWN 4 "summary-superseded; the summary carries a terminal verdict for run '$SUM_RUN_ID' but a live heartbeat names run '$_hb_rid_peek' — a NEWER run is starting on this path and publishes its beat before replacing the summary, so this verdict is the PREVIOUS run's. Pass --run-id to say which run you mean."
         fi
       fi
@@ -416,103 +553,6 @@ if _has_nul "$_HB_SNAP"; then
   verdict UNKNOWN 4 "heartbeat-contains-nul; $HB holds NUL bytes, so it is not a single coherent beat"
 fi
 HB_TEXT=$(_slurp "$_HB_SNAP")
-# ONE validator for a beat, applied to EVERY snapshot of it (roborev job 190, Medium). The first
-# version validated only the FIRST read: the confirmation re-read was accepted on a matching
-# run-id plus a merely "different, non-empty" beat-seq, so a malformed or truncated SECOND
-# snapshot could still carry a RUNNING verdict. Two reads of one artifact must clear the same bar,
-# and the only way to guarantee that is for a single piece of code to state it.
-#
-# Returns 0 when <text> is a single, coherent, identity-bearing beat; otherwise non-zero with a
-# named reason in BEAT_ERR. It decides only whether the fields may be TRUSTED; the caller reads
-# values with _field.
-BEAT_ERR=""
-_beat_valid() {
-  local t="$1" n_start n_end n_rid n_seq n_ep open_ln close_ln pc iv ep sq l ln
-  n_start=$(printf '%s\n' "$t" | grep -cxF '==== AGENT-GATE HEARTBEAT ====')
-  n_end=$(printf '%s\n' "$t" | grep -cxF '==== END AGENT-GATE HEARTBEAT ====')
-  if [ "$n_start" -ne 1 ] || [ "$n_end" -ne 1 ]; then
-    BEAT_ERR="heartbeat-not-a-single-block; found $n_start opener(s) and $n_end closer(s) — a beat is published by atomic rename, so anything but exactly one of each means this is not one coherent beat"
-    return 1
-  fi
-  open_ln=$(printf '%s\n' "$t" | grep -nxF '==== AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
-  close_ln=$(printf '%s\n' "$t" | grep -nxF '==== END AGENT-GATE HEARTBEAT ====' | head -1 | cut -d: -f1)
-  if [ "$open_ln" -ge "$close_ln" ]; then
-    BEAT_ERR="heartbeat-out-of-order; the closer (line $close_ln) does not follow the opener (line $open_ln)"
-    return 1
-  fi
-  # EVERY field that decides a verdict must appear EXACTLY ONCE and INSIDE the framing (roborev
-  # job 193, Medium). The first version checked only run-id/beat-seq/beat-epoch — but
-  # `parent-check` decides whether any RUNNING is supportable, `interval` sets the staleness window
-  # and the confirmation wait, `host` decides whether the clock may be trusted, and `beater-pid`
-  # decides whether a restart counts as progress. A duplicate or out-of-block copy of any of them
-  # would be read as the first occurrence, letting an ambiguous beat produce RUNNING.
-  #
-  # "Exactly once", not "at most once": a beat missing any of these cannot support a verdict.
-  # `beater-pid` is the one exception — it is absent from beats written by an older gate, and its
-  # absence only forfeits restart detection rather than enabling a wrong answer, so it is checked
-  # for uniqueness/placement ONLY IF present.
-  # REQUIRED vs OPTIONAL-BUT-UNIQUE, and the line between them is whether ABSENCE would make a
-  # verdict unsound or merely narrower:
-  #   required  — run-id, beat-seq, beat-epoch, interval, parent-check. Without any of these a
-  #               verdict cannot be computed at all (or, for parent-check, cannot be trusted).
-  #   optional  — host, beater-pid. Their absence DEGRADES SAFELY and is already handled: no host
-  #               means the clock domain is unproven, so progression decides; no beater-pid means
-  #               restart detection is forfeited. Requiring them would reject beats that the reader
-  #               can answer about perfectly well — which it briefly did, until 11g.9 caught it.
-  # Either way a DUPLICATE is fatal for both groups, because the first occurrence would be trusted.
-  local f cnt
-  for f in run-id beat-seq beat-epoch interval parent-check; do
-    cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
-    if [ "$cnt" -ne 1 ]; then
-      BEAT_ERR="heartbeat-field-count; '$f' appears $cnt time(s) and must appear exactly once — no value is attributable to a single beat otherwise"
-      return 1
-    fi
-  done
-  for f in host beater-pid; do
-    cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
-    if [ "$cnt" -gt 1 ]; then
-      BEAT_ERR="heartbeat-field-count; '$f' appears $cnt times and must appear at most once — the first occurrence would be trusted"
-      return 1
-    fi
-  done
-  for f in run-id beat-seq beat-epoch interval parent-check host beater-pid; do
-    printf '%s\n' "$t" | grep -q "^$f: " || continue
-    ln=$(printf '%s\n' "$t" | grep -n "^$f: " | head -1 | cut -d: -f1)
-    if [ "$ln" -lt "$open_ln" ] || [ "$ln" -gt "$close_ln" ]; then
-      BEAT_ERR="heartbeat-field-outside-block; '$f' (line $ln) lies outside the block (lines $open_ln..$close_ln)"
-      return 1
-    fi
-  done
-  # A DIGIT STRING IS NOT YET A NUMBER (roborev job 192, Low). Bash arithmetic reads a leading zero
-  # as OCTAL, so `interval: 08` is a syntax error that ABORTS the shell — the reader would die
-  # instead of returning its documented UNKNOWN — and an unbounded digit string can overflow a
-  # comparison. So each field is length-bounded (rejecting absurd values outright) and every later
-  # use goes through base-10 arithmetic.
-  ep=$(printf '%s\n' "$t" | grep -m1 '^beat-epoch: '); ep="${ep#beat-epoch: }"
-  case "$ep" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-epoch; 'beat-epoch: $ep' is not an integer"; return 1 ;; esac
-  [ "${#ep}" -le 12 ] || { BEAT_ERR="heartbeat-epoch-out-of-range; 'beat-epoch: $ep' has ${#ep} digits, which is not a plausible unix time"; return 1; }
-  sq=$(printf '%s\n' "$t" | grep -m1 '^beat-seq: '); sq="${sq#beat-seq: }"
-  case "$sq" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-seq; 'beat-seq: $sq' is not an integer"; return 1 ;; esac
-  [ "${#sq}" -le 12 ] || { BEAT_ERR="heartbeat-seq-out-of-range; 'beat-seq: $sq' has ${#sq} digits"; return 1; }
-  iv=$(printf '%s\n' "$t" | grep -m1 '^interval: '); iv="${iv#interval: }"
-  case "$iv" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-interval; 'interval: $iv' is not an integer"; return 1 ;; esac
-  [ "${#iv}" -le 6 ] || { BEAT_ERR="heartbeat-interval-out-of-range; 'interval: $iv' has ${#iv} digits"; return 1; }
-  # Normalise to base 10 NOW, so no later comparison can trip over an octal reading.
-  ep=$((10#$ep)); sq=$((10#$sq)); iv=$((10#$iv))
-  [ "$iv" -ge 1 ] || { BEAT_ERR="heartbeat-bad-interval; 'interval: $iv' must be >= 1"; return 1; }
-  if [ "$iv" -gt 60 ]; then
-    BEAT_ERR="heartbeat-interval-too-long; 'interval: ${iv}s' exceeds the 60s this reader can observe (its confirmation window is capped at 65s to bound a hostile artifact), so a live beat might not advance inside it and STALLED would be a false death"
-    return 1
-  fi
-  pc=$(printf '%s\n' "$t" | grep -m1 '^parent-check: '); pc="${pc#parent-check: }"
-  case "$pc" in
-    starttime|lstart) : ;;
-    kill0) BEAT_ERR="heartbeat-no-gate-identity; the beater reports 'parent-check: kill0', meaning it could NOT establish any identity for its gate — so a recycled pid would keep it publishing for an unrelated process. Counter progression would only prove the BEATER is alive, not the gate, so no RUNNING claim is supportable from this beat"; return 1 ;;
-    '')    BEAT_ERR="heartbeat-no-parent-check; the beat declares no 'parent-check:' field, so it is unknown whether the beater can identify its gate at all"; return 1 ;;
-    *)     BEAT_ERR="heartbeat-unknown-parent-check; 'parent-check: $pc' is not a value this reader knows (expected starttime, lstart or kill0)"; return 1 ;;
-  esac
-  return 0
-}
 
 _beat_valid "$HB_TEXT" || verdict UNKNOWN 4 "$BEAT_ERR"
 

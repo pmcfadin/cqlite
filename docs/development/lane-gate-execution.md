@@ -346,6 +346,16 @@ rather than `STALLED`: the confirmation window is capped at 65 s to bound a host
 such a beat might legitimately not advance inside it, and guessing `STALLED` would send a lane to
 re-run a healthy gate.
 
+**The launcher and the reader agree about startup.** `gate-detached.sh` accepts a gate on the
+strength of its *beat* — the beater starts before the tree capture — and then prints a run-bound poll
+command. So when `--run-id` names a run and a valid matching beat exists, the reader answers
+`RUNNING` even if the summary is **absent** or still belongs to the **previous** run. Without that,
+the launcher's own advertised command reported `UNKNOWN` for a healthy, accepted, actively-beating
+gate for the whole duration of the capture — the two halves disagreeing about what "accepted" means,
+which is worse than either being wrong alone. The rescue applies only to a *named* run with a *valid*
+matching beat: unnamed callers have nothing to match against, so for them the summary remains the
+only anchor.
+
 A **terminal** verdict is reconciled with the beat before it is believed. During startup a new run
 publishes its beat *before* replacing the previous run's summary — a window the early beater start
 deliberately widened — so an unbound reader could otherwise report the **previous** run's `PASS` as
@@ -462,7 +472,12 @@ atomic, and *renaming a directory away* is the compare-and-swap that decides who
 so two reclaimers cannot delete each other's replacement locks, because only one `mv` can succeed and
 the loser refuses rather than racing. And liveness counts the **launcher pid**, not just the unit,
 which is what closes the window between acquiring the lock and the unit becoming active — during it
-the launcher is by definition alive. (#2874 already forbids two gates on one path; the launcher now
+the launcher is by definition alive. That pid is **pinned by a start identity**, because a
+short-lived pid can be reused and would otherwise make a finished gate's reservation look live
+forever. And because `mkdir` and writing the owner record are two operations, a lock whose owner
+record is **missing or incomplete** reads as *acquisition in progress* — refuse — rather than stale;
+an unwritable owner record fails closed and releases the directory, since a lock nobody can
+interpret would block the path for everyone. (#2874 already forbids two gates on one path; the launcher now
 detects it rather than walking into it.)
 
 Every probe is **non-destructive**, because under #2874 these paths may hold a live peer's
@@ -512,8 +527,8 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (174 cases) and
-`scripts/tests/test_gate_detached.sh` (116 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (180 cases) and
+`scripts/tests/test_gate_detached.sh` (122 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

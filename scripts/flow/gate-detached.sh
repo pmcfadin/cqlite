@@ -500,12 +500,54 @@ _reserve="$SUMMARY.launch-lock"
 #
 # Liveness is also fixed: the owner is live if its LAUNCHER PROCESS is still running OR its unit is
 # active. That closes the startup window, because during it the launcher is by definition alive.
+# _proc_identity <pid> -> a tiered process-identity token, or empty. Same tiering as the gate and
+# the beater use: /proc start ticks where available, else `ps -o lstart=` (portable, second
+# granularity, empty for a dead pid).
+_proc_identity() {
+  local raw rest ls
+  raw=$(cat "/proc/$1/stat" 2>/dev/null)
+  if [ -n "$raw" ]; then
+    rest="${raw##*) }"
+    # shellcheck disable=SC2086
+    set -- $rest
+    if [ $# -ge 20 ]; then printf 'proc:%s' "${20}"; return 0; fi
+  fi
+  ls=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ')
+  [ -n "$ls" ] && printf 'ps:%s' "$ls"
+  return 0
+}
+
 _res_owner="$_reserve/owner"
 if ! mkdir "$_reserve" 2>/dev/null; then
   _own_unit=$(sed -n 's/^unit=//p' "$_res_owner" 2>/dev/null | head -1)
   _own_pid=$(sed -n 's/^launcher-pid=//p' "$_res_owner" 2>/dev/null | head -1)
+  _own_start=$(sed -n 's/^launcher-start=//p' "$_res_owner" 2>/dev/null | head -1)
+  # AN INCOMPLETE OWNER RECORD MEANS "ACQUISITION IN PROGRESS", NOT "STALE" (roborev job 196).
+  # `mkdir` and writing `owner` are two operations, so a concurrent launcher can see the directory
+  # in between — and treating that as stale let it reclaim a lock someone had just taken, putting
+  # two gates on one summary path. The safe reading of a half-built lock is that its owner is still
+  # arriving, so we refuse; the loser can retry, whereas a wrong reclamation is unrecoverable.
+  if [ -z "$_own_unit" ] || [ -z "$_own_pid" ]; then
+    echo "gate-detached: the reservation at '$_reserve' is being acquired right now (its owner" >&2
+    echo "               record is not complete yet). Refusing rather than reclaiming a lock" >&2
+    echo "               another launcher has just taken (#3473). Retry, or use a distinct path." >&2
+    exit 1
+  fi
   _live=no
-  case "$_own_pid" in ''|*[!0-9]*) ;; *) kill -0 "$_own_pid" 2>/dev/null && _live=yes ;; esac
+  # The launcher pid is SHORT-LIVED, so a bare `kill -0` on it can be satisfied by an unrelated
+  # process after pid reuse — making a finished gate's reservation look live forever and blocking
+  # the path (roborev job 196, Low). The recorded start identity is what distinguishes them; a
+  # pid whose identity no longer matches is not our launcher.
+  case "$_own_pid" in
+    ''|*[!0-9]*) ;;
+    *) if kill -0 "$_own_pid" 2>/dev/null; then
+         if [ -n "$_own_start" ]; then
+           [ "$(_proc_identity "$_own_pid")" = "$_own_start" ] && _live=yes
+         else
+           _live=yes   # no recorded identity (an older lock): fall back to existence
+         fi
+       fi ;;
+  esac
   if [ "$_live" = no ] && [ -n "$_own_unit" ] \
      && systemctl --user is-active --quiet "$_own_unit" 2>/dev/null; then
     _live=yes
@@ -544,7 +586,15 @@ if ! mkdir "$_reserve" 2>/dev/null; then
 fi
 # Record who owns it. The launcher pid is what makes the startup window safe; the unit is what keeps
 # the lock meaningful after this process exits.
-{ echo "unit=$UNIT"; echo "launcher-pid=$$"; } > "$_res_owner" 2>/dev/null || true
+# FAIL CLOSED if the owner record cannot be written (job 196): an unwritable owner file leaves the
+# lock permanently indistinguishable from an in-progress acquisition, which would block the path
+# for everyone. Better to refuse now, releasing the directory we just made.
+if ! { echo "unit=$UNIT"; echo "launcher-pid=$$"; echo "launcher-start=$(_proc_identity $$)"; } > "$_res_owner" 2>/dev/null; then
+  rm -rf "$_reserve" 2>/dev/null || true
+  echo "gate-detached: cannot write the reservation owner record at '$_res_owner'." >&2
+  echo "               Refusing rather than leaving a lock nobody can interpret (#3473)." >&2
+  exit 1
+fi
 
 # NOW truncate the log: every refusal path is behind us, so this cannot destroy a previous log for
 # a launch that never happens.

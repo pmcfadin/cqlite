@@ -1073,6 +1073,42 @@ expect_reader "11k.7 control: --run-id disambiguates instead of refusing" \
 mk_summary "$TMP/sup3.txt" lone-run "PASS"
 expect_reader "11k.8 control: terminal summary with no beat => COMPLETE" COMPLETE 0 "" -- "$TMP/sup3.txt"
 
+echo "=== section 11l: the launcher's own startup window (job 196) ==="
+# gate-detached.sh accepts a gate on the strength of its BEAT — the beater starts before the tree
+# capture — and then prints a run-bound poll command. This reader used to reject a missing or
+# superseded summary outright, so the advertised command answered UNKNOWN for a healthy, accepted,
+# actively-beating gate for the whole capture. The launcher and the reader disagreed about what
+# "accepted" means, which is worse than either being wrong alone.
+_mk_startup_beat() { # _mk_startup_beat <path> <run-id>
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: $2"; echo "gate-pid: 42"
+    echo "beater-pid: 43"; echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "parent-check: starttime"; echo "interval: 20"; echo "beat-seq: 1"
+    echo "beat-epoch: $(date +%s)"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$1"
+}
+rm -f "$TMP/su.txt"
+_mk_startup_beat "$TMP/su.txt.heartbeat" myrun
+expect_reader "11l.1 named run, beat present, summary NOT YET written => RUNNING" \
+  RUNNING 2 "has not written its summary yet" -- "$TMP/su.txt" --run-id myrun
+# Without --run-id there is nothing to match against, so the summary stays the only anchor.
+expect_reader "11l.2 UNNAMED run with no summary => UNKNOWN (nothing to match the beat against)" \
+  UNKNOWN 4 "no-summary-artifact" -- "$TMP/su.txt"
+# One step later in startup: the summary at the path still belongs to the PREVIOUS run.
+mk_summary "$TMP/su.txt" oldrun "PASS"
+expect_reader "11l.3 named run, beat present, summary still the PREVIOUS run's => RUNNING" \
+  RUNNING 2 "has not been replaced yet" -- "$TMP/su.txt" --run-id myrun
+# CONTROLS: the previous run can still be asked about by name, and a named run with NO beat is
+# not rescued by this path.
+expect_reader "11l.4 control: the previous run answered by its own id => COMPLETE" \
+  COMPLETE 0 "" -- "$TMP/su.txt" --run-id oldrun
+rm -f "$TMP/su.txt.heartbeat"
+expect_reader "11l.5 control: named run with NO beat is not rescued => UNKNOWN" \
+  UNKNOWN 4 "summary-run-id-mismatch" -- "$TMP/su.txt" --run-id myrun
+# A beat that is INVALID must not rescue anything either.
+_mk_startup_beat "$TMP/su.txt.heartbeat" myrun
+grep -v '^parent-check: ' "$TMP/su.txt.heartbeat" > "$TMP/su.tmp" && mv "$TMP/su.tmp" "$TMP/su.txt.heartbeat"
+expect_reader "11l.6 control: an INVALID beat does not rescue a superseded summary" \
+  UNKNOWN 4 "" -- "$TMP/su.txt" --run-id myrun
+
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
 # The same shape appeared THREE times in this change: the default /tmp artifact names, the
 # beater's sibling temp, and the launcher's probe. Each was a predictable path opened with

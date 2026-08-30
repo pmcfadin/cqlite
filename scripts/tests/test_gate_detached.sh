@@ -939,6 +939,44 @@ else
   skipc "4b.83-4b.87 directory reservation" "no working systemd-run --user"
 fi
 
+# roborev job 196: `mkdir` and writing `owner` are two operations, so a concurrent launcher can see
+# the lock directory in between. Treating that as STALE let it reclaim a lock someone had just
+# taken — two gates on one summary path, which is what the lock exists to prevent.
+if grep -q 'is being acquired right now' "$LAUNCHER"; then
+  ok "4b.88 an INCOMPLETE owner record reads as acquisition-in-progress, not stale"
+else
+  bad "4b.88 an incomplete owner record reads as acquisition-in-progress" "not found"
+fi
+if grep -q 'cannot write the reservation owner record' "$LAUNCHER"; then
+  ok "4b.89 an unwritable owner record FAILS CLOSED (and releases the directory)"
+else
+  bad "4b.89 an unwritable owner record fails closed" "not found"
+fi
+if grep -q 'launcher-start=' "$LAUNCHER" && grep -q '_proc_identity' "$LAUNCHER"; then
+  ok "4b.90 the launcher pid is PINNED by a start identity (pid reuse cannot fake liveness)"
+else
+  bad "4b.90 the launcher pid is pinned by a start identity" "not found"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  ip="$TMP/inprogress.txt"
+  o1=$(bash "$LAUNCHER" --summary "$ip" --log "$TMP/ip1.log" -- --only roborev-lints 2>&1); r1=$?
+  iu=$(printf '%s' "$o1" | sed -n 's/^unit:  *//p'); [ -n "$iu" ] && echo "$iu" >> "$UNITS_FILE"
+  grep -q '^launcher-start=' "$ip.launch-lock/owner" 2>/dev/null \
+    && ok "4b.91 the owner record carries the launcher's start identity" \
+    || bad "4b.91 the owner record carries a start identity" "$(cat "$ip.launch-lock/owner" 2>/dev/null | tr '\n' ' ')"
+  # Simulate the mid-acquisition window by removing the owner record from a LIVE lock.
+  rm -f "$ip.launch-lock/owner"
+  o2=$(bash "$LAUNCHER" --summary "$ip" --log "$TMP/ip2.log" -- --only file-size 2>&1); r2=$?
+  iu2=$(printf '%s' "$o2" | sed -n 's/^unit:  *//p'); [ -n "$iu2" ] && echo "$iu2" >> "$UNITS_FILE"
+  [ "$r2" != 0 ] && ok "4b.92 a half-built lock is REFUSED, not reclaimed (exit $r2)" \
+                 || bad "4b.92 a half-built lock is refused, not reclaimed" "exit 0 — it reclaimed a live lock"
+  printf '%s' "$o2" | grep -q 'being acquired right now' \
+    && ok "4b.93 ...and the refusal explains why" || bad "4b.93 the refusal explains why" "$o2"
+  systemctl --user stop "$iu" >/dev/null 2>&1 || true
+else
+  skipc "4b.91-4b.93 acquisition window" "no working systemd-run --user"
+fi
+
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")
