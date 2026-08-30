@@ -6602,8 +6602,19 @@ run_node_bindings() {
       # npm run typecheck (#3493). node-ci.yml runs it as an ALWAYS-RUN PR smoke job, and
       # this component is the declared merge-gating half of that workflow -- so leaving it
       # out left the same kind of hole #3522 closed for the jest suite, one job over. It
-      # also exercises the SHIPPED index.d.ts declarations, which no jest test does: a
-      # binding can pass every runtime test while its published types are wrong.
+      # also COMPILES against the SHIPPED index.d.ts (it is tsc --noEmit over the examples
+      # project), so a binding cannot pass every runtime test while its published types
+      # fail to typecheck.
+      #
+      # NOT the same as the #3581 typescript-definitions test, which landed on main while
+      # this branch was in review: that one reads the declarations as TEXT and asserts the
+      # runtime surface is declared. Neither subsumes the other -- a declaration can be
+      # present and still not compile, and a file can compile with an export missing. An
+      # earlier version of this comment claimed typecheck was the ONLY thing exercising
+      # index.d.ts; #3581 made that false, so it now says what typecheck uniquely does.
+      #
+      # (And note the no-apostrophe rule above applies to these lines too -- one
+      # apostrophe here ends the single-quoted string and the script stops parsing.)
       #
       # In STEP 1, beside build, because it needs no corpus: it must run (and fail closed)
       # even on a host where the dataset half cannot.

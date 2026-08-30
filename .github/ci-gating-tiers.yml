@@ -154,8 +154,10 @@ exempt:
       component, which since #3522 runs the WHOLE jest suite (it ran 1 of 27 files
       before), plus binding-rust-tests for cqlite-node's Rust unit tests, which ran
       nowhere. Since #3493 it also runs `npm run typecheck` (this workflow's
-      always-run PR smoke job, and the only thing that exercises the shipped
-      index.d.ts) and pairs `npm test` with check-dataset-manifest.sh, which checks
+      always-run PR smoke job; it is `tsc --noEmit` over the examples project, so it
+      COMPILES against the shipped index.d.ts, which #3581's typescript-definitions
+      test does not — that one reads the declarations as TEXT and asserts the runtime
+      surface is declared. Different properties, both wanted) and pairs `npm test` with check-dataset-manifest.sh, which checks
       the CORPUS is complete rather than that the suite ran — the parity cases derive
       their table set from disk, so a partial extraction is green by omission. The
       multi-platform build matrix is release coverage, not merge-gating.
