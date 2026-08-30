@@ -846,3 +846,128 @@ explicitly marked superseded by D6a; `tasks.md` rounds 4-7 kept verbatim as a re
 tried, under a banner at the head of this file naming every symbol they mention that no longer exists.
 A record describing a deleted symbol is a claim about code and decays like a comment, so the banner
 states that explicitly rather than leaving the reader to discover it.
+
+## Round 9 — roborev job 232 (3 findings): one OVERRULE, one fix, one written-down limit
+
+A deliberately small round on the descoped oracle. No product behaviour changed, and no harness
+behaviour changed either: one finding was overruled and answered by scoping a claim, one strengthened
+an assert, one was recorded as a known limit rather than fixed.
+
+### 1. `mod.rs` `poll_with_progress` — OVERRULED. The claim was wrong, the behaviour is right.
+
+**What roborev observed (accurate):** the poll returns `Ok` as soon as `step(SLICE.min(remaining))`
+yields `Some`, without rechecking whether the deadline expired *during* `step` — so a stage can
+succeed slightly past the deadline. **What it proposed:** recheck the deadline before returning `Ok`
+and return `PollFail` when it has expired.
+
+**That fix is rejected (lead ruling), and must not be implemented later either.** On the success path
+the property has been OBSERVED — the child exited, or the durable artifact appeared. The deadline
+exists to bound how long the test WAITS FOR EVIDENCE, not to reject evidence already in hand. Failing
+a stage that observed its signal, because the loop noticed a few hundred milliseconds late, is a
+**false failure on a working product** — precisely the flake class #3515 exists to remove. It would
+also make the test's verdict depend on how long a `read_dir` walk happened to take, which is the
+scheduling sensitivity this whole change eliminates. Two defects would be introduced to satisfy one
+claim.
+
+**What WAS wrong is the claim.** The harness stated, at seven sites, a property stronger than it has
+("nothing may exceed the one deadline", "no step can complete past it", "the declared bound is the
+actual maximum", "the instant no wait may outlive"). What it can support is:
+
+> The one deadline bounds how long the test WAITS FOR EVIDENCE. No wait is GRANTED more than what the
+> deadline leaves, and no wait is STARTED past it. A success OBSERVED while the deadline lapses is
+> still a success, and accepting it is DELIBERATE — rejecting it would be a false failure on a working
+> product.
+
+**The overrun is quantified, so it is bounded rather than mysterious:** at most one
+`SLICE.min(remaining)` (≤ 100ms) plus one `count_data_db` scan. That scan is a recursive `read_dir`
+walk of the data directory and is **not necessarily quick on a loaded host** — the bound is real but
+not tiny, and that is said where the claim is made. The same lag applies to the FAILURE path (declared
+at the next loop top, not the instant the deadline passes); `PollFail` reports the stage's real spend,
+so no message understates it.
+
+Rescoped at every site the `grep -rn` sweep found: `poll_with_progress`'s doc comment (which owns the
+decision and the quantification), the progress-observation block comment in `mod.rs`, `TestDeadline`'s
+type doc and its `deadline` field comment, the `a_stages_waits_share_the_one_deadline_so_none_can_double_spend`
+doc **and** its second assert message (reworded to "may never be GRANTED more than …", which is what
+it actually asserts — `remaining()` arithmetic, never wall clock at the moment of a verdict), the
+`graceful_shutdown_tests.rs` module header, `design.md` D3 and D6a, and the surviving-properties table
+in this file (whose row is renamed from "a declared cap is the actual maximum").
+
+### 2. `budgets.rs` floor invariant — FIXED. The aggregate omitted the readiness stage.
+
+The aggregate assert summed only the **old** waits (`OLD_BOUND × old_waits` = 120s for T1, 420s for
+T2). But `a.session-up` (spawn → readiness banner) is a stage the old code never bounded separately —
+boot was folded INSIDE the first 60s `OK` wait — and it now draws on the same one deadline, which any
+single stage may consume entirely. So a 120s/420s base passed the guard while permitting readiness to
+eat 60s and leave every ORIGINAL wait below its former 60s allowance: the floor invariant violated by
+a stage the sum did not mention.
+
+Fixed by a named `NEW_READINESS_WAITS: u32 = 1` (named, not an inline `+ 1`, because it is a claim
+about which stages exist and must be revisited when a stage is added) and
+`base >= OLD_BOUND × (old_waits + NEW_READINESS_WAITS)` — 180s for T1, 480s for T2, which the shipped
+bases meet **exactly**. The `T1_DEADLINE_BASE`/`T2_DEADLINE_BASE` doc comments, which stated the old
+weaker arithmetic, were corrected with them.
+
+#### RED verification (committed plants — round 5's false green came from `git checkout --` reverting an *uncommitted* plant)
+
+Every plant was **committed** and the applied plant was re-read **from `git show HEAD:<file>`** with
+`git status --porcelain` confirmed empty, so the running binary provably came from the planted source.
+
+```text
+(a) both bases planted, fixed assert   HEAD c389f49cb, worktree clean, HEAD grep shows 120s/420s
+    RESULT: FAILED (1 failed)
+    sigint_in_writable_session_flushes_before_exit: a base of 120s is below the 180s aggregate of
+    the 2 independent 60s waits it replaced plus 1 readiness stage (3 stages share this one
+    deadline, and any one of them may consume it)
+
+(b) T2 base only, fixed assert         HEAD 4d134c752, worktree clean, HEAD grep shows 180s/420s
+    RESULT: FAILED (1 failed)
+    writable_session_auto_flushes_mid_session_across_threshold: a base of 420s is below the 480s
+    aggregate of the 7 independent 60s waits it replaced plus 1 readiness stage (8 stages share
+    this one deadline, and any one of them may consume it)
+
+(c) THE FINDING'S PREMISE — pre-fix assert (budgets.rs restored from 32211006b, NEW_READINESS_WAITS
+    absent) + the same 120s/420s bases     HEAD 52c4b6c83, worktree clean
+    RESULT: ok (1 passed)   <-- the old guard ADMITTED the reduced bases, which is the finding
+```
+
+(b) exists because (a) panics at T1 and would have hidden a T2 term that never fired. (c) is the
+control: without it, a red in (a) shows only that *something* fails, not that the previous form was
+permissive. All three plant commits were dropped (`git reset --hard`) and the tree restored to
+`f548b70e8`.
+
+### 3. `mod.rs` `observed_progress_never_extends_the_deadline` — a KNOWN, WRITTEN-DOWN LIMIT, not fixed
+
+**The weakness, stated precisely.** The assert gives a 300ms deadline and requires the poll to
+terminate within 30s (a 100× margin). It therefore proves **TERMINATION under continuous progress —
+that observed progress cannot make the poll run forever — and NOTHING about the tolerance to which the
+deadline is respected.** A regression that let observed progress extend a 300ms deadline by, say, four
+seconds — i.e. a partial return of the pre-descope crediting the round-8 descope removed — would still
+pass this assert. The assert's own doc comment already says no timing threshold is asserted, so no
+claim in the file is stale; what was missing was anyone writing down that this is a *gap*, not a
+choice with no cost.
+
+**Deliberately not fixed in this round (lead ruling).** Asserting a tolerance means asserting that
+something completed FAST, which is the #2642 wall-clock flake class — the correct fix is an
+**injectable clock** so the property can be asserted without measuring wall time, and that is genuine
+design work disproportionate to a claim-scoping round. Recording it here makes it a known limit rather
+than an assumed guarantee; the lead files it as a linked follow-up.
+
+### Round-9 verification
+
+* `cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests` — **9 passed, 0
+  failed** (2 product tests + 7 harness unit tests), on the restored tree.
+* The three committed RED plants above.
+* **The product RED plants (AC3) were NOT re-run, deliberately.** This round changed no product code
+  and no harness behaviour — only claim text and one assert's arithmetic — so round 8's plant evidence
+  stands unchanged. Re-running a 180s plant to re-observe a result nothing could have moved is cost
+  without information.
+* `grep -rn` sweep for the rescoped phrases (`nothing may exceed`, `nothing can exceed`,
+  `no step can complete past`, `may never exceed`, `actual maximum`, `may outlive`) across
+  `cqlite-cli/tests/`, `design.md`, `spec.md`, `tasks.md`: every surviving occurrence is either
+  scoped in place or is a historical round-4-7 record already under this file's staleness banner.
+
+### File sizes after round 9
+
+`graceful_shutdown_tests.rs` **363**, `graceful_shutdown_support/mod.rs` **754**,
+`graceful_shutdown_support/budgets.rs` **646**. All three under the 1500-line test threshold.
