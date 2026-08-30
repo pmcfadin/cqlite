@@ -228,21 +228,22 @@ const MEASURE_PASSES = 9;
 // release-unwind .node, CQLITE_DATASETS_ROOT=/data/datasets, 300 iterations x 9
 // passes; the numbers below are the MINIMUM pass (the asserted statistic), over
 // several consecutive runs (2026-08-30):
-//   error path:  -133,504 .. +2,496 bytes (a negative minimum means a later pass
-//                collected an earlier pass's deferred garbage)
-//   stream path:      +40 .. +56 bytes over 4 consecutive runs, RE-MEASURED after
-//                the round-4 switch to `bufferSize: 2` (it was +424 .. +1,864 with
-//                the default buffer, i.e. the stricter configuration is also the
-//                QUIETER one: each iteration now buffers 2 rows on the JS side
-//                instead of 50)
+//   error path:   +16 .. +544 bytes over 10 runs (RE-MEASURED in round 9 after the
+//                rebase onto #3522/#1464/#1461 and a fresh napi build; a negative
+//                pass would mean a later pass collected an earlier pass's deferred
+//                garbage, and such passes are EXCLUDED before the statistic)
+//   stream path:  +16 .. +56 bytes over 10 runs
 // Budget = 32 KiB (109 bytes/iteration at 300 iterations) -- UNCHANGED by the
 // re-measure, so this is not a loosening: it is ~13x the largest clean minimum on
 // the error path and ~585x on the stream path, and GC/platform drift cannot red it.
 // Measured discrimination, with synthetic leaks injected into these same loop bodies
 // at `bufferSize: 2` (again as the minimum non-negative pass):
-//   * retain ONE wide row per iteration:      182,400 B (608.0/iter) -> TRIPS (5.6x)
-//   * retain a 256-byte Buffer per iteration: 132,184 B (440.6/iter) -> TRIPS (4.0x)
-//   * retain a 64-byte Buffer per iteration:   79,256 B (264.2/iter) -> TRIPS (2.4x)
+//   * retain a 256-byte Buffer per iteration: minimum 50,312 B (167.7/iter) TRIPS the
+//     minimum ceiling (1.5x), and the stream median ceiling at 133,728 B (445.8/iter,
+//     2.0x) -- RE-MEASURED post-rebase; round 7 measured 132,184 B (440.6/iter).
+//   * retain a 64-byte Buffer per iteration: stream upper median 84,784 B (282.6/iter)
+//     -> TRIPS (1.3x). Still the smallest shape this file CLAIMS to catch.
+//   * retain ONE wide row per iteration: 182,400 B (608.0/iter) -> TRIPS (5.6x).
 // Those are the realistic shapes of a JS-side or native-buffer leak on these
 // paths; the 64-byte case is the smallest leak this test is claimed to catch.
 // RED CONTROL, re-run again in round 7 against the QUORUM + UPPER-MEDIAN statistic
@@ -297,8 +298,12 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 // 300 iterations at `bufferSize: 2`, upper median of the non-negative passes:
 //   stream path: 56 (x7), 224 (x1)                       -> max 224
 //   error path:  16 (x4), 544 (x1), 9,856 (x2), 137,416 (x1) -> max 137,416
-// (valid non-negative passes per run: stream 8-9 of 9, error 6-7 of 9 -- all
-// comfortably above the quorum of 5, so the quorum itself does not red a clean run.)
+// RE-MEASURED in round 9 post-rebase (10 runs, two-turn settle): stream upper median
+// <= 1,168, error <= 17,784 -- both far inside their ceilings, and the error path's
+// 137,416 outlier did not recur. The VALID-PASS COUNTS did move: stream 8-9 of 9,
+// error 4-7 of 9, i.e. one run in ten falls below the quorum of 5 on the error path,
+// which is why measureGrowth re-collects a below-quorum set up to
+// MAX_MEASURE_ATTEMPTS times instead of erroring on the first attempt.
 //
 // STREAM: 64 KiB -- 293x the largest clean upper median, and it still TRIPS the
 // planted RED control (median 134,736 bytes, 2.1x over). Discriminating AND
@@ -355,8 +360,8 @@ const BUDGET_TEST_TIMEOUT_MS = 120_000;
  * because its clean values never sit at or below zero. Same rule, different
  * measured baseline.
  */
-function assertRssUnderBudget(label, rssGrowth) {
-  const total = MEASURE_PASSES * ITERATIONS;
+function assertRssUnderBudget(label, rssGrowth, attempts = 1) {
+  const total = attempts * MEASURE_PASSES * ITERATIONS;
   if (rssGrowth >= RSS_BUDGET_BYTES) {
     throw new Error(
       `${label}: RSS grew ${rssGrowth} bytes over ${total} iterations ` +
@@ -384,6 +389,10 @@ function assertRssUnderBudget(label, rssGrowth) {
 // If that margin ever tightens, the below-quorum error names the count so the
 // reader can see it rather than infer it.
 const SAMPLE_QUORUM = Math.floor(MEASURE_PASSES / 2) + 1;
+
+// How many times a pass set may be re-collected when it cannot reach the quorum. See
+// measureGrowth for the measured single-attempt rate that sets this at 3.
+const MAX_MEASURE_ATTEMPTS = 3;
 
 /**
  * PURE. Reduce per-pass samples to the statistics the budgets are asserted on,
@@ -489,12 +498,23 @@ function trackedBytes() {
   return usage.heapUsed + usage.external;
 }
 
-/** Drive GC to a quiet point: two collections, a macrotask turn, one more. */
+/**
+ * Drive GC to a quiet point: collect, let the macrotask queue drain, collect again.
+ *
+ * TWO macrotask turns, not one (round 9): a pass whose delta comes back NEGATIVE is a
+ * pass that freed memory allocated by an EARLIER pass, i.e. deferred collection, and
+ * every such pass is one fewer valid sample for the quorum. Post-rebase measurement on
+ * the error path put the negative rate at 2-5 of 9 passes with one turn — one run in
+ * eight fell below the quorum of 5. Letting the queue drain twice around the
+ * collections reduces the deferral rather than weakening the predicate.
+ */
 async function settle() {
   global.gc();
   global.gc();
   // Let pending microtasks/`setImmediate` callbacks (streaming completions) run
   // so nothing they hold is still reachable when the sample is taken.
+  await new Promise((resolve) => setImmediate(resolve));
+  global.gc();
   await new Promise((resolve) => setImmediate(resolve));
   global.gc();
 }
@@ -515,17 +535,45 @@ async function measureGrowth(body, counters) {
   await settle();
   const rssBefore = process.memoryUsage().rss;
 
-  const samples = [];
-  for (let pass = 0; pass < MEASURE_PASSES; pass += 1) {
-    await settle();
-    const before = trackedBytes();
-    for (let i = 0; i < ITERATIONS; i += 1) {
-      await body(counters);
+  const collectPasses = async () => {
+    const collected = [];
+    for (let pass = 0; pass < MEASURE_PASSES; pass += 1) {
+      await settle();
+      const before = trackedBytes();
+      for (let i = 0; i < ITERATIONS; i += 1) {
+        await body(counters);
+      }
+      await settle();
+      collected.push(trackedBytes() - before);
     }
-    await settle();
-    samples.push(trackedBytes() - before);
+    return collected;
+  };
+
+  // RE-MEASURE, up to MAX_MEASURE_ATTEMPTS times, when a set cannot reach the quorum
+  // (round 9). This does NOT weaken the verdict: assertUnderBudget still refuses a
+  // below-quorum set, and a real leak makes passes POSITIVE, so a retry can only ever
+  // help a set that had too FEW valid samples — it can never mask a leak.
+  //
+  // MEASURED NEED, post-rebase, 10 runs per path: GC deferral leaves 2-5 of 9
+  // error-path passes NEGATIVE and 1 run in 10 below the quorum of 5 (the stream path:
+  // 0 in 10, 8-9 valid). Erroring on the first attempt would therefore red correct code
+  // one run in ten, and a lane that reds on correct input is the lane people learn to
+  // waive. Three attempts put that at ~1 in 1000 while an instrument that is genuinely
+  // broken still ends in the named hard error rather than a pass. Cost is bounded and
+  // paid only when needed: ~0.5s per extra attempt on the path that needs it.
+  //
+  // The counters keep accumulating across attempts, so the non-vacuity assertions below
+  // multiply by `attempts` rather than assuming one pass set.
+  let samples = await collectPasses();
+  let attempts = 1;
+  while (
+    samples.filter((sample) => sample >= 0).length < SAMPLE_QUORUM &&
+    attempts < MAX_MEASURE_ATTEMPTS
+  ) {
+    samples = await collectPasses();
+    attempts += 1;
   }
-  return { samples, rssGrowth: process.memoryUsage().rss - rssBefore };
+  return { samples, attempts, rssGrowth: process.memoryUsage().rss - rssBefore };
 }
 
 // ---------------------------------------------------------------------------
@@ -773,7 +821,7 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     // identity (see __test__/error.test.js): an unsupported statement type is
     // category Query -> code 'QUERY'.
     const counters = { rejected: 0, resolved: 0, wrongType: [] };
-    const { samples, rssGrowth } = await measureGrowth(async (c) => {
+    const { samples, attempts, rssGrowth } = await measureGrowth(async (c) => {
       try {
         await db.executeNative(BAD_CQL);
         c.resolved += 1;
@@ -791,7 +839,7 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     // NON-VACUITY: every iteration must have rejected. If BAD_CQL ever stops
     // rejecting, this loop degenerates into a no-op and the budget would pass
     // while measuring nothing.
-    const expected = WARMUP + MEASURE_PASSES * ITERATIONS;
+    const expected = WARMUP + attempts * MEASURE_PASSES * ITERATIONS;
     expect(counters.resolved).toBe(0);
     // Every rejection must be the EXPECTED error, not just any throw.
     expect(counters.wrongType.slice(0, 5)).toEqual([]);
@@ -799,12 +847,12 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
 
     // BOUNDED, not zero (see file header).
     assertUnderBudget(BUDGET_SUBJECTS.errorPath, samples);
-    assertRssUnderBudget(BUDGET_SUBJECTS.errorPath.label, rssGrowth);
+    assertRssUnderBudget(BUDGET_SUBJECTS.errorPath.label, rssGrowth, attempts);
   }, BUDGET_TEST_TIMEOUT_MS);
 
   test('abandoned streaming iterators stay under the leak budget', async () => {
     const counters = { rows: 0, iterators: 0 };
-    const { samples, rssGrowth } = await measureGrowth(async (c) => {
+    const { samples, attempts, rssGrowth } = await measureGrowth(async (c) => {
       let pulled = 0;
       for await (const row of db.executeStreaming(STREAM_QUERY, STREAM_CONFIG)) {
         pulled += 1;
@@ -819,12 +867,12 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     // NON-VACUITY: a 0-row (or short) stream would make the abandonment a
     // no-op. This is also the FAIL-LOUDLY check for a present-but-unreadable
     // corpus — it fails, it never skips.
-    const expectedIterators = WARMUP + MEASURE_PASSES * ITERATIONS;
+    const expectedIterators = WARMUP + attempts * MEASURE_PASSES * ITERATIONS;
     expect(counters.iterators).toBe(expectedIterators);
     expect(counters.rows).toBe(STREAM_ROWS * expectedIterators);
 
     // BOUNDED, not zero (see file header).
     assertUnderBudget(BUDGET_SUBJECTS.abandonedStream, samples);
-    assertRssUnderBudget(BUDGET_SUBJECTS.abandonedStream.label, rssGrowth);
+    assertRssUnderBudget(BUDGET_SUBJECTS.abandonedStream.label, rssGrowth, attempts);
   }, BUDGET_TEST_TIMEOUT_MS);
 });
