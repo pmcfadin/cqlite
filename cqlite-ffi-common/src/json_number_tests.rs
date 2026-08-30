@@ -218,6 +218,50 @@ fn beyond_text_to_bigint_parses_exact_integers_and_refuses_everything_else() {
     assert!(beyond_text_to_bigint("not a number").is_none());
 }
 
+/// The napi word form must be a faithful PROJECTION of the `BigInt`, so the two
+/// bindings deliver the same value. Reassembled with `num-bigint` rather than
+/// re-derived, so the check is independent of the projection code.
+#[test]
+fn beyond_word_form_reassembles_to_the_same_bigint() {
+    for text in [
+        "0",
+        "1",
+        "-1",
+        "18446744073709551616",
+        "-18446744073709551616",
+        "123456789012345678901234567890",
+        "-123456789012345678901234567890",
+    ] {
+        let expected = beyond_text_to_bigint(text).expect("exact integer literal");
+        let (is_negative, words) =
+            beyond_text_to_sign_and_le_words(text).expect("same acceptance as the BigInt form");
+        assert_eq!(
+            is_negative,
+            expected.sign() == num_bigint::Sign::Minus,
+            "`{text}` sign"
+        );
+        let digits: Vec<u32> = words
+            .iter()
+            .flat_map(|w| [*w as u32, (*w >> 32) as u32])
+            .collect();
+        let sign = if words.iter().all(|w| *w == 0) {
+            num_bigint::Sign::NoSign
+        } else if is_negative {
+            num_bigint::Sign::Minus
+        } else {
+            num_bigint::Sign::Plus
+        };
+        assert_eq!(
+            num_bigint::BigInt::from_slice(sign, &digits),
+            expected,
+            "`{text}` must reassemble exactly"
+        );
+    }
+    // Refused inputs are refused identically by both shapes.
+    assert!(beyond_text_to_sign_and_le_words("1.5").is_none());
+    assert!(beyond_text_to_sign_and_le_words("1e400").is_none());
+}
+
 #[test]
 fn the_refusal_message_names_the_value_and_the_issue() {
     let msg = beyond_range_message("123456789012345678901234567890");

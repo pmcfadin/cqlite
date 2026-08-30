@@ -113,7 +113,7 @@
 //! feature on and `Beyond` starts carrying the exact digits, which
 //! [`beyond_text_to_bigint`] turns into an exact integer.
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 
 /// The host-representable class of a JSON number.
 ///
@@ -165,6 +165,21 @@ pub fn classify_json_number(n: &serde_json::Number) -> JsonNumberClass {
 /// then refuse the value rather than substitute a lossy one.
 pub fn beyond_text_to_bigint(text: &str) -> Option<BigInt> {
     text.parse::<BigInt>().ok()
+}
+
+/// The same value as [`beyond_text_to_bigint`], in napi's
+/// `create_bigint_from_words(sign_bit, words)` shape.
+///
+/// Two shapes, one value — the same split the [`super::varint`] module uses and
+/// for the same reason: the word form is a **projection** of the `BigInt`
+/// (`BigInt::to_u64_digits`), never computed independently, so the Python and
+/// Node arms cannot disagree. Zero is reported as `(false, vec![])`, the empty
+/// magnitude, which Node-API renders as `0n`.
+pub fn beyond_text_to_sign_and_le_words(text: &str) -> Option<(bool, Vec<u64>)> {
+    beyond_text_to_bigint(text).map(|big| {
+        let (sign, words) = big.to_u64_digits();
+        (sign == Sign::Minus, words)
+    })
 }
 
 /// The ONE spelling of the refusal message for a JSON number no host type can

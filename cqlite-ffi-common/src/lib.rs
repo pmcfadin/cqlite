@@ -74,7 +74,8 @@ pub use decimal::{
 };
 pub use inet::{inet_bytes_to_string, inet_kind, InetError, InetKind};
 pub use json_number::{
-    beyond_range_message, beyond_text_to_bigint, classify_json_number, JsonNumberClass,
+    beyond_range_message, beyond_text_to_bigint, beyond_text_to_sign_and_le_words,
+    classify_json_number, JsonNumberClass,
 };
 pub use otel_keys::KNOWN_OTEL_KEYS;
 pub use varint::{varint_to_bigint, varint_to_sign_and_le_words};
