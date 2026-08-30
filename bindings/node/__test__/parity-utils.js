@@ -576,14 +576,35 @@ function valuesEqual(actual, expected) {
     return actual.equals(Buffer.from(expected.slice(2), 'hex'));
   }
 
-  // BigInt comparison
+  // BigInt comparison (issue #3505).
+  //
+  // These arms are already EXACT and deliberately stay that way: unlike Python's
+  // `values_equal`, which coerced an int/float pair through `float()` and so
+  // rounded the exact side down to the lossy side (the #3505 mask), Node never
+  // coerces a bigint to a double here.  Do NOT "align" this with Python by
+  // adding a tolerance -- the alignment goes the other way.
+  //
+  // The hardening #3505 DID need: `BigInt(x)` THROWS `RangeError` for a
+  // non-integer / NaN / Infinity `number`, which crashed the harness instead of
+  // reporting a mismatch.  A number that is not an integer can never equal a
+  // bigint, so that case is `false`.
+  //
+  // The Node CEILING here is the ORACLE, not the binding, and it is documented
+  // rather than coerced away: `JSON.parse` reads a golden's
+  // `18446744073709551615` into an f64 (`18446744073709552000`) and the digits
+  // are gone before `valuesEqual` is ever called.  JS has no lossless integer
+  // JSON parse without a custom reviver, so a Node-side parity comparison above
+  // 2**53 is limited by the harness's own JSON reader -- not by this function
+  // and not by the binding, which returns an exact `BigInt`.
   if (typeof actual === 'bigint' && typeof expected === 'bigint') {
     return actual === expected;
   }
   if (typeof actual === 'bigint' && typeof expected === 'number') {
+    if (!Number.isInteger(expected)) return false;
     return actual === BigInt(expected);
   }
   if (typeof actual === 'number' && typeof expected === 'bigint') {
+    if (!Number.isInteger(actual)) return false;
     return BigInt(actual) === expected;
   }
 
