@@ -6,9 +6,12 @@
 //! compare cells to the golden", and it carves out no container exception. CSV
 //! carries no types at all, so decoding ANY cell needs an external statement of
 //! its shape — that is a property of the format, not a weakness of this lane.
-//! Here the shape comes from the GOLDEN (`sstabledump` renders a list/set/frozen
-//! collection as a JSON array and a map/UDT as a JSON object), i.e. from the
-//! oracle. Nothing here is derived from CQLite's own output.
+//! Here the shape comes from TWO committed authorities: the GOLDEN
+//! (`sstabledump` renders a list/set/frozen collection as a JSON array and a
+//! map/UDT as a JSON object), and the committed `CREATE TABLE`/`CREATE TYPE` DDL,
+//! which is what distinguishes `list<>` from `set<>` from `tuple<>` — a
+//! distinction the golden's JSON array cannot express. Nothing here is derived
+//! from CQLite's own output.
 //!
 //! # The grammar, and what pinning it is (and is not) worth
 //!
@@ -32,15 +35,29 @@
 //! nothing is trimmed: a separator change, a bracket change, a dropped member or
 //! a re-ordered one all surface as a failure rather than being normalized away.
 //!
-//! # Three ambiguities, declared rather than papered over
+//! # The bracket is required, per DECLARED type
 //!
-//! 1. **list vs set.** `sstabledump` renders BOTH as a JSON array, so the golden
-//!    cannot say which one it is, and `[a, b]` and `{a, b}` are therefore both
-//!    accepted for a golden array. This is NOT a CSV-specific loss: CQLite's
-//!    JSON egress also renders a set as an array (measured on
-//!    `test_da.collection_table`: `tags SET<TEXT>` → `["alpha","beta"]`), so the
-//!    JSON lane has the identical blind spot.
-//! 2. **`null` vs the text `"null"`.** A container has no empty-field mechanism,
+//! The expected bracket pair comes from the column's declared CQL type, so
+//! `list<>` requires `[…]`, `set<>` requires `{…}`, `tuple<>` requires `(…)` and
+//! `map<>`/UDT require `{…}` (the grammar above). A set or tuple rendered with
+//! list brackets is therefore a FAILURE, not an accepted spelling.
+//!
+//! This replaces an earlier concession that accepted `[`, `{` and `(`
+//! interchangeably for any golden ARRAY, on the grounds that `sstabledump`
+//! renders a list and a set alike so the golden cannot say which is which (issue
+//! #1491 review finding R2). The premise was true of the golden and false of the
+//! lane: the DDL is committed beside the fixtures and says exactly which kind the
+//! column is.
+//!
+//! It leaves the JSON lane strictly less discriminating here, which is a property
+//! of that format rather than a gap in this one: CQLite's JSON egress renders a
+//! set as an array (measured on `test_da.collection_table`: `tags SET<TEXT>` →
+//! `["alpha","beta"]`) exactly as the golden does, so in JSON there is no bracket
+//! to check.
+//!
+//! # Two ambiguities, declared rather than papered over
+//!
+//! 1. **`null` vs the text `"null"`.** A container has no empty-field mechanism,
 //!    so `ValueFormatter` spells a null member `null` — the same text a `text`
 //!    member holding `"null"` produces (issue #1499's ambiguity, one level in).
 //!    The token is resolved from the GOLDEN's own type: null there decodes to
@@ -48,22 +65,35 @@
 //!    the oracle knows it, and loses it only where CSV genuinely cannot express
 //!    it. A CLI that emits the wrong member still fails — only the exact
 //!    null/`"null"` swap is invisible.
-//! 3. **Separator collisions.** Members are unquoted, so a scalar whose text
+//! 2. **Separator collisions.** Members are unquoted, so a scalar whose text
 //!    contains `, ` (or, for a map/UDT KEY, `: `) or a bracket makes the
 //!    rendering genuinely unparseable. Such a cell is REFUSED, never guessed —
 //!    and the refusal is decided from the GOLDEN alone, so it can never be
 //!    caused by the very defect under test. Refusals are counted and named in
 //!    the run census.
 
+use super::schema::CqlType;
 use serde_json::{Map, Value};
 
 /// Characters that carry structure in the rendering and therefore cannot appear
 /// inside an unquoted member without making it unparseable.
 const STRUCTURAL: [char; 6] = ['[', ']', '{', '}', '(', ')'];
 
-/// Openers accepted for a golden ARRAY: `[` (list), `{` (set — see ambiguity 1)
-/// and `(` (tuple).
-const ARRAY_OPENERS: [(char, char); 3] = [('[', ']'), ('{', '}'), ('(', ')')];
+/// The ONE bracket pair a container of this declared type may be rendered with
+/// (the grammar in the module doc), or `None` for a scalar type.
+///
+/// Taken from the DDL, so each kind is required to use its own bracket: a `set`
+/// rendered `[a, b]` or a `tuple` rendered `[a, b]` is a failure (review finding
+/// R2), where the earlier golden-shape-only rule accepted any of the three.
+fn brackets(ty: &CqlType) -> Option<(char, char)> {
+    match ty {
+        CqlType::List(_) => Some(('[', ']')),
+        CqlType::Set(_) => Some(('{', '}')),
+        CqlType::Tuple(_) => Some(('(', ')')),
+        CqlType::Map(..) | CqlType::Udt(_) => Some(('{', '}')),
+        _ => None,
+    }
+}
 
 /// Is this golden container unambiguously recoverable from the flat CSV
 /// rendering? `Some(reason)` means it is not, and the cell must be refused.
@@ -152,10 +182,12 @@ fn is_scalar(v: &Value) -> bool {
 pub type Excluded<'a> = dyn Fn(&str) -> bool + 'a;
 
 /// Decode `text` (one CSV field, or one member of one) into the shape `golden`
-/// declares. A map/UDT decodes to the `[{"key":…,"value":…}, …]` spelling the
-/// JSON egress uses, so the existing map comparison applies unchanged.
-pub fn decode(golden: &Value, text: &str) -> Result<Value, String> {
-    decode_at(golden, text, "", &|_| false)
+/// declares, with `ty` — the column's DECLARED CQL type — supplying the bracket
+/// each container kind must be rendered with. A map/UDT decodes to the
+/// `[{"key":…,"value":…}, …]` spelling the JSON egress uses, so the existing map
+/// comparison applies unchanged.
+pub fn decode(golden: &Value, text: &str, ty: &CqlType) -> Result<Value, String> {
+    decode_at(golden, text, ty, "", &|_| false)
 }
 
 /// [`decode`], but aware of the paths the comparison excludes.
@@ -174,59 +206,91 @@ pub fn decode(golden: &Value, text: &str) -> Result<Value, String> {
 pub fn decode_at(
     golden: &Value,
     text: &str,
+    ty: &CqlType,
     path: &str,
     excluded: &Excluded<'_>,
 ) -> Result<Value, String> {
     if excluded(path) {
         return Ok(Value::String(text.to_string()));
     }
-    match golden {
-        Value::Array(items) => decode_array(items, text, path, excluded),
-        Value::Object(fields) => decode_object(fields, text, path, excluded),
-        // Ambiguity 2: the golden's own type resolves the `null` token.
-        Value::Null if text == "null" => Ok(Value::Null),
-        _ => Ok(Value::String(text.to_string())),
+    // The declared TYPE decides the structure — including which bracket is
+    // required — and the golden decides the member shapes underneath it. When the
+    // two disagree the child is decoded against `null`, and the comparison is what
+    // reports the shape divergence.
+    match ty {
+        CqlType::List(element) | CqlType::Set(element) => {
+            decode_sequence(golden, text, ty, &|_| Some(element), path, excluded)
+        }
+        CqlType::Tuple(items) => {
+            decode_sequence(golden, text, ty, &|i| items.get(i), path, excluded)
+        }
+        CqlType::Map(_, value_ty) => {
+            decode_object(golden, text, ty, &|_| Some(value_ty), path, excluded)
+        }
+        CqlType::Udt(udt) => decode_object(
+            golden,
+            text,
+            ty,
+            &|field| {
+                udt.fields
+                    .iter()
+                    .find(|(name, _)| name == field)
+                    .map(|(_, t)| t)
+            },
+            path,
+            excluded,
+        ),
+        // Ambiguity 1: the golden's own type resolves the `null` token.
+        _ => match golden {
+            Value::Null if text == "null" => Ok(Value::Null),
+            _ => Ok(Value::String(text.to_string())),
+        },
     }
 }
 
-fn decode_array(
-    golden: &[Value],
+/// A list / set / tuple: one bracket pair fixed by `ty`, `, `-separated members,
+/// each decoded under the element type `element_ty` gives for its position.
+///
+/// `element_ty` answers `None` only for a member BEYOND a tuple's declared arity,
+/// which has no declared type; such a member is kept as raw text so the
+/// comparator reports the arity divergence rather than the decoder swallowing it.
+fn decode_sequence<'t>(
+    golden: &Value,
     text: &str,
+    ty: &'t CqlType,
+    element_ty: &dyn Fn(usize) -> Option<&'t CqlType>,
     path: &str,
     excluded: &Excluded<'_>,
 ) -> Result<Value, String> {
-    let inner = strip(text, &ARRAY_OPENERS)?;
-    let parts = if inner.is_empty() {
-        Vec::new()
-    } else {
-        split_top_level(inner, ", ")?
-    };
+    let parts = members(text, ty)?;
+    let items = golden.as_array();
     let mut out = Vec::with_capacity(parts.len());
     for (i, part) in parts.iter().enumerate() {
         // A member the golden does not have is decoded against `null`; the
         // length mismatch is what the comparison then reports.
-        out.push(decode_at(
-            golden.get(i).unwrap_or(&Value::Null),
-            part,
-            &format!("{path}[{i}]"),
-            excluded,
-        )?);
+        let child_golden = items.and_then(|g| g.get(i)).unwrap_or(&Value::Null);
+        out.push(match element_ty(i) {
+            Some(et) => decode_at(child_golden, part, et, &format!("{path}[{i}]"), excluded)?,
+            None => Value::String((*part).to_string()),
+        });
     }
     Ok(Value::Array(out))
 }
 
-fn decode_object(
-    golden: &Map<String, Value>,
+/// A map or UDT: `{…}`, `, `-separated `key: value` entries. `value_ty` answers
+/// with the declared type of the value under a given key — `None` for a UDT field
+/// the `CREATE TYPE` does not declare, whose value is therefore left as raw text
+/// for the comparator to reject by name.
+fn decode_object<'t>(
+    golden: &Value,
     text: &str,
+    ty: &'t CqlType,
+    value_ty: &dyn Fn(&str) -> Option<&'t CqlType>,
     path: &str,
     excluded: &Excluded<'_>,
 ) -> Result<Value, String> {
-    let inner = strip(text, &[('{', '}')])?;
-    let parts = if inner.is_empty() {
-        Vec::new()
-    } else {
-        split_top_level(inner, ", ")?
-    };
+    let parts = members(text, ty)?;
+    let fields = golden.as_object();
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         let cut = *scan(part, ": ")?.first().ok_or_else(|| {
@@ -247,39 +311,54 @@ fn decode_object(
         } else {
             format!("{path}.{key}")
         };
-        entry.insert(
-            "value".to_string(),
-            decode_at(
-                golden.get(key).unwrap_or(&Value::Null),
-                value,
-                &child,
-                excluded,
-            )?,
-        );
+        let child_golden = fields.and_then(|g| g.get(key)).unwrap_or(&Value::Null);
+        let decoded = match value_ty(key) {
+            Some(vt) => decode_at(child_golden, value, vt, &child, excluded)?,
+            None => Value::String(value.to_string()),
+        };
+        entry.insert("value".to_string(), decoded);
         out.push(Value::Object(entry));
     }
     Ok(Value::Array(out))
 }
 
-/// Remove the exact opening/closing bracket pair. Strict: a body that does not
-/// open with an accepted bracket, or does not close with that bracket's mate, is
-/// an error rather than a best-effort parse.
-fn strip<'a>(text: &'a str, pairs: &[(char, char)]) -> Result<&'a str, String> {
-    for (open, close) in pairs {
-        if let Some(rest) = text.strip_prefix(*open) {
-            return rest.strip_suffix(*close).ok_or_else(|| {
-                format!(
-                    "{} opens with `{open}` but does not close with `{close}`",
-                    brief(text)
-                )
-            });
-        }
+/// Strip the bracket pair `ty` requires and split the body at every depth-zero
+/// `, `. An empty body is zero members.
+fn members<'a>(text: &'a str, ty: &CqlType) -> Result<Vec<&'a str>, String> {
+    let inner = strip(text, ty)?;
+    if inner.is_empty() {
+        return Ok(Vec::new());
     }
-    let accepted: String = pairs.iter().map(|(o, _)| *o).collect();
-    Err(format!(
-        "{} is not a container rendering (expected an opening `{accepted}`)",
-        brief(text)
-    ))
+    split_top_level(inner, ", ")
+}
+
+/// Remove the opening/closing bracket pair the DECLARED type requires. Strict in
+/// both directions: a body that does not open with THAT bracket, or does not close
+/// with its mate, is an error rather than a best-effort parse — so a `set`
+/// rendered `[a, b]` fails instead of being read as a list.
+fn strip<'a>(text: &'a str, ty: &CqlType) -> Result<&'a str, String> {
+    let (open, close) = brackets(ty).ok_or_else(|| {
+        format!(
+            "{} was decoded as a container but the schema declares the scalar type \
+             `{}`",
+            brief(text),
+            ty.describe()
+        )
+    })?;
+    let rest = text.strip_prefix(open).ok_or_else(|| {
+        format!(
+            "{} is not a `{}` rendering: the declared type requires an opening \
+             `{open}` (`{open}…{close}`)",
+            brief(text),
+            ty.describe()
+        )
+    })?;
+    rest.strip_suffix(close).ok_or_else(|| {
+        format!(
+            "{} opens with `{open}` but does not close with `{close}`",
+            brief(text)
+        )
+    })
 }
 
 /// Split `body` at every depth-zero `sep`.
@@ -361,6 +440,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The declared type of a column, parsed by the lane's OWN DDL parser from a
+    /// `CREATE TABLE` — so these cases exercise the real authority (the committed
+    /// schema) rather than a hand-built type tree.
+    fn ty_of(decl: &str) -> CqlType {
+        let ddl = format!(
+            "CREATE TYPE address (street text, city text, zip text); \
+             CREATE TYPE person (first_name text, last_name text, age int); \
+             CREATE TABLE t (id int PRIMARY KEY, c {decl});"
+        );
+        let schema = match super::super::schema::from_ddl(&ddl, "t") {
+            Ok(schema) => schema,
+            Err(why) => panic!("{decl}: {why}"),
+        };
+        match schema.column("c") {
+            Some(column) => column.ty.clone(),
+            None => panic!("{decl}: no column `c`"),
+        }
+    }
+
     // --- the refusal valve -------------------------------------------------
 
     #[test]
@@ -392,7 +490,12 @@ mod tests {
         // separator, so a colon inside the VALUE is already decoded correctly.
         // Refusing it would narrow the lane for no reason.
         assert_eq!(ambiguity(&json!({"k": "a: b"})), None);
-        let decoded = decode(&json!({"k": "a: b"}), "{k: a: b}").expect("decodes");
+        let decoded = decode(
+            &json!({"k": "a: b"}),
+            "{k: a: b}",
+            &ty_of("map<text, text>"),
+        )
+        .expect("decodes");
         assert_eq!(decoded, json!([{"key": "k", "value": "a: b"}]));
     }
 
@@ -427,50 +530,115 @@ mod tests {
     fn the_element_separator_must_be_exactly_comma_space() {
         // A writer that dropped the space must NOT decode as two members; that
         // tolerance is what would let a framing regression through.
-        let decoded = decode(&json!([1, 2]), "[1,2]").expect("decodes as one member");
+        let decoded =
+            decode(&json!([1, 2]), "[1,2]", &ty_of("frozen<list<int>>")).expect("one member");
         assert_eq!(decoded, json!(["1,2"]), "`,` was wrongly treated as `, `");
     }
 
     #[test]
     fn a_mismatched_or_unbalanced_bracket_is_an_error() {
+        let list = ty_of("frozen<list<int>>");
         assert!(
-            decode(&json!([1]), "[1}").is_err(),
+            decode(&json!([1]), "[1}", &list).is_err(),
             "mismatched bracket must fail"
         );
         assert!(
-            decode(&json!([1]), "[[1]").is_err(),
+            decode(&json!([1]), "[[1]", &list).is_err(),
             "unclosed bracket must fail"
         );
         assert!(
-            decode(&json!([1]), "1, 2").is_err(),
+            decode(&json!([1]), "1, 2", &list).is_err(),
             "a bare body must fail"
         );
         assert!(
-            decode(&json!({"k": 1}), "[k: 1]").is_err(),
+            decode(&json!({"k": 1}), "[k: 1]", &ty_of("map<text, int>")).is_err(),
             "a map needs braces"
         );
     }
 
     #[test]
     fn a_map_entry_without_the_pair_separator_is_an_error() {
-        assert!(decode(&json!({"k": 1}), "{k=1}").is_err());
+        assert!(decode(&json!({"k": 1}), "{k=1}", &ty_of("map<text, int>")).is_err());
+    }
+
+    // --- the bracket comes from the DECLARED type (review finding R2) -------
+
+    #[test]
+    fn each_collection_kind_requires_its_own_bracket() {
+        // The grammar `ValueFormatter` documents, one kind per bracket. The
+        // golden is a JSON array for all three, which is exactly why the DDL — not
+        // the golden — has to answer the question.
+        assert_eq!(
+            decode(&json!([1, 2]), "[1, 2]", &ty_of("frozen<list<int>>")).unwrap(),
+            json!(["1", "2"])
+        );
+        assert_eq!(
+            decode(&json!([1, 2]), "{1, 2}", &ty_of("set<int>")).unwrap(),
+            json!(["1", "2"])
+        );
+        assert_eq!(
+            decode(&json!([1, 2]), "(1, 2)", &ty_of("tuple<int, int>")).unwrap(),
+            json!(["1", "2"])
+        );
+    }
+
+    /// The other side of R2: a set or tuple rendered with LIST brackets is a
+    /// failure. The earlier rule accepted `[`, `{` and `(` for any golden array,
+    /// so this regression passed.
+    #[test]
+    fn a_collection_rendered_with_another_kinds_bracket_is_an_error() {
+        for (decl, wrong) in [
+            ("set<int>", "[1, 2]"),
+            ("set<int>", "(1, 2)"),
+            ("tuple<int, int>", "[1, 2]"),
+            ("tuple<int, int>", "{1, 2}"),
+            ("frozen<list<int>>", "{1, 2}"),
+            ("frozen<list<int>>", "(1, 2)"),
+        ] {
+            let ty = ty_of(decl);
+            let why = decode(&json!([1, 2]), wrong, &ty)
+                .expect_err("the declared kind's bracket is required: {decl} vs {wrong}");
+            assert!(
+                why.contains(&ty.describe()),
+                "the failure must name the declared type: {why}"
+            );
+        }
+        // A map/UDT rendered with list brackets likewise.
+        assert!(decode(&json!({"k": 1}), "(k: 1)", &ty_of("map<text, int>")).is_err());
+        assert!(decode(&json!({"zip": "1"}), "[zip: 1]", &ty_of("frozen<address>")).is_err());
+    }
+
+    /// A NESTED collection's bracket is required too — the type is threaded all
+    /// the way down, so an inner set rendered `[…]` fails at depth.
+    #[test]
+    fn a_nested_collections_bracket_is_required_at_depth() {
+        let ty = ty_of("frozen<map<text, frozen<set<int>>>>");
+        assert_eq!(
+            decode(&json!({"a": [1]}), "{a: {1}}", &ty).unwrap(),
+            json!([{"key": "a", "value": ["1"]}])
+        );
+        assert!(
+            decode(&json!({"a": [1]}), "{a: [1]}", &ty).is_err(),
+            "an inner set rendered with list brackets must fail"
+        );
     }
 
     // --- decoding ----------------------------------------------------------
 
     #[test]
-    fn a_golden_array_accepts_both_bracket_spellings() {
-        // Ambiguity 1: `sstabledump` renders a list AND a set as a JSON array,
-        // so the golden cannot say which bracket to expect.
-        assert_eq!(decode(&json!([1, 2]), "[1, 2]").unwrap(), json!(["1", "2"]));
-        assert_eq!(decode(&json!([1, 2]), "{1, 2}").unwrap(), json!(["1", "2"]));
-    }
-
-    #[test]
     fn an_empty_body_decodes_to_zero_members() {
-        assert_eq!(decode(&json!([]), "[]").unwrap(), json!([]));
-        assert_eq!(decode(&json!([]), "{}").unwrap(), json!([]));
-        assert_eq!(decode(&json!({}), "{}").unwrap(), json!([]));
+        assert_eq!(
+            decode(&json!([]), "[]", &ty_of("frozen<list<int>>")).unwrap(),
+            json!([])
+        );
+        assert_eq!(
+            decode(&json!([]), "{}", &ty_of("set<int>")).unwrap(),
+            json!([])
+        );
+        assert_eq!(
+            decode(&json!({}), "{}", &ty_of("map<text, int>")).unwrap(),
+            json!([])
+        );
     }
 
     #[test]
@@ -478,7 +646,12 @@ mod tests {
         // A map<text, frozen<udt>>, as in test_compactionparityudt.udt_collections:
         // the inner `, ` and `: ` must not be mistaken for outer separators.
         let golden = json!({"home": {"street": "1 Navy Way", "city": "Arlington"}});
-        let decoded = decode(&golden, "{home: {street: 1 Navy Way, city: Arlington}}").unwrap();
+        let decoded = decode(
+            &golden,
+            "{home: {street: 1 Navy Way, city: Arlington}}",
+            &ty_of("map<text, frozen<address>>"),
+        )
+        .unwrap();
         assert_eq!(
             decoded,
             json!([{
@@ -493,14 +666,15 @@ mod tests {
 
     #[test]
     fn the_null_token_is_resolved_from_the_goldens_type() {
-        // Ambiguity 2, in both directions: a null member decodes to null, and a
+        // Ambiguity 1, in both directions: a null member decodes to null, and a
         // `text` member holding "null" stays text.
+        let person = ty_of("frozen<person>");
         assert_eq!(
-            decode(&json!({"last_name": null}), "{last_name: null}").unwrap(),
+            decode(&json!({"last_name": null}), "{last_name: null}", &person).unwrap(),
             json!([{"key": "last_name", "value": null}])
         );
         assert_eq!(
-            decode(&json!({"last_name": "null"}), "{last_name: null}").unwrap(),
+            decode(&json!({"last_name": "null"}), "{last_name: null}", &person).unwrap(),
             json!([{"key": "last_name", "value": "null"}])
         );
     }
@@ -509,7 +683,16 @@ mod tests {
     fn a_surplus_member_is_kept_so_the_length_mismatch_is_reported() {
         // The decoder must not silently truncate to the golden's length — the
         // comparison is what reports the divergence.
-        let decoded = decode(&json!([1]), "[1, 2]").unwrap();
+        let decoded = decode(&json!([1]), "[1, 2]", &ty_of("frozen<list<int>>")).unwrap();
+        assert_eq!(decoded, json!(["1", "2"]));
+    }
+
+    /// A member beyond a TUPLE's declared arity has no declared type, so it is
+    /// kept as raw text rather than guessed at — the comparator's arity check is
+    /// what reports it.
+    #[test]
+    fn a_member_beyond_a_tuples_arity_is_kept_as_text() {
+        let decoded = decode(&json!([1]), "(1, 2)", &ty_of("tuple<int>")).unwrap();
         assert_eq!(decoded, json!(["1", "2"]));
     }
 }

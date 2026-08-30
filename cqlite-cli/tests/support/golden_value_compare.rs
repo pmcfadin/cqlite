@@ -201,7 +201,7 @@ pub fn compare_rows(
             let gv = g.get(name).unwrap_or(&Value::Null);
             // CSV has no types, so a container arrives as one flat text field and
             // has to be decoded back into the golden's shape before comparison.
-            let decoded = match csv_decoded(gv, cv, egress, name, &skips) {
+            let decoded = match csv_decoded(gv, cv, egress, &column.ty, name, &skips) {
                 Ok(decoded) => decoded,
                 Err(Refusal::Ambiguous(why)) => {
                     report.ambiguous_container_cells += 1;
@@ -330,6 +330,7 @@ fn csv_decoded(
     gv: &Value,
     cv: &Value,
     egress: Egress,
+    ty: &CqlType,
     path: &str,
     skips: &SkipPaths<'_>,
 ) -> Result<Option<Value>, Refusal> {
@@ -346,7 +347,7 @@ fn csv_decoded(
     // text instead of being required to invert the grammar. Without it a single
     // excluded inner field fails the whole cell, which is what forced
     // `udt_nested`'s exclusion to be whole-column (review finding F5).
-    csv_container::decode_at(gv, text, path, &|p: &str| skips.excludes(p))
+    csv_container::decode_at(gv, text, ty, path, &|p: &str| skips.excludes(p))
         .map(Some)
         .map_err(Refusal::Unparseable)
 }
