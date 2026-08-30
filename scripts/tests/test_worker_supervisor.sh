@@ -6661,7 +6661,10 @@ test_legacy_lock_emitted_dynamic_values_are_rendered() {
     fail "legacy-lock-render-b: rc=$rc raw_cr=$([[ "$out" == *"$SV_CR"* ]] && echo yes || echo no) out=[$out]"
   fi
   ovr="$d/m-pid-world.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '$(supervisor_shell_quote "$pid")' '$pid' 2 \
+  # The expected count is 3 as of #3549 job 208 F2, which added a THIRD value-channel interpolation of
+  # the recorded pid (the out-of-range cause). Every one of them goes through the renderer, which is why
+  # the count is the thing that moves here and never the rule.
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '$(supervisor_shell_quote "$pid")' '$pid' 3 \
      && sv_mutant_override "$ovr" supervisor_legacy_lock_refuse 'detail="$(supervisor_one_line "$detail")" || true' 'detail="$detail"'; then
     out="$(legacy_lock_drive_override "$ovr" "$d/tmpcr" "$lane")" || true
     if [[ "$out" == *"$SV_CR"* ]]; then
@@ -6790,7 +6793,12 @@ test_legacy_lock_padded_pid_file_is_unrecognised() {
   # spelling, one substitution, everything else shipped. The same ` 123 ` file is then trusted as `123`
   # and receives the DELETION remedy, which is the finding, measured.
   ovr="$d/m-read.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'IFS= read -r pid' 'read -r pid'; then
+  # THE ANCHOR CARRIES THE `|| true` DELIBERATELY (#3549, job 208 F2). `IFS= read -r pid` is a PREFIX of
+  # `IFS= read -r pid_max`, the platform-bound read added for F2, so the shorter anchor matched two lines
+  # and would have mutated both — a one-substitution contrast silently becoming a two-substitution one.
+  # The premise check caught it, which is what it is for; the anchor is now the whole statement, which no
+  # sibling variable name can be a prefix of.
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'IFS= read -r pid || true' 'read -r pid || true'; then
     mkdir -p "$legacy"
     printf ' %s \n' "$dead" >"$legacy/pid"
     out="$(legacy_lock_drive_override "$ovr" "$d/tmp" "$lane")" || true
@@ -7521,9 +7529,22 @@ test_legacy_lock_digit_test_is_collation_independent() {
   # MUTANT CONTRAST: both explicit lists restored to the pre-fix RANGE — the classifier's own test and
   # the liveness probe's, since the classifier's runs first and a single mutation would stop at
   # `liveness-unmeasurable`. Everything else is shipped, and the locale is the same.
+  #
+  # THE LIVENESS SIDE NOW NEEDS A SECOND MUTATION, AND THAT IS A COVERAGE FACT WORTH READING (#3549,
+  # roborev job 208 F2). The invalid-process-spec branch added there for F2 catches U+0663 too —
+  # MEASURED, `LC_ALL=C kill -0 ٣` reports "arguments must be process or job IDs", exactly as an
+  # oversized pid does — so it is a SECOND, INDEPENDENT line of defence against this same harm, and with
+  # it in place the range mutant alone answers `unknown` instead of `dead`. To reproduce the PRE-FIX
+  # behaviour the contrast must therefore remove both: the range fix and that branch. Its pattern text
+  # is what is mutated (the branch stops matching `kill`'s message), so the mutant still parses and
+  # still takes every other path the shipped function takes.
+  #
+  # The classifier's count is 3, not 2: F2 validates the platform bound it reads from
+  # `/proc/sys/kernel/pid_max` with the same explicit character list, for the same collation reason.
   ovr="$d/m-collation.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_pid_liveness '*[!0123456789]*' '*[!0-9]*' \
-     && sv_mutant_override "$ovr" supervisor_legacy_lock_state '*[!0123456789]*' '*[!0-9]*' 2; then
+  if sv_mutant_override_pairs "$ovr" supervisor_pid_liveness '*[!0123456789]*' '*[!0-9]*' \
+       "*'must be process or job'*)" "*'must NOT be matched by this mutant'*)" \
+     && sv_mutant_override "$ovr" supervisor_legacy_lock_state '*[!0123456789]*' '*[!0-9]*' 3; then
     printf '%s\n' "$SV_NONASCII_DIGIT" >"$legacy/pid"
     mout="$(legacy_lock_drive_env_override "$ovr" "$tmp" "$lane" LC_ALL="$loc")" || true
     if [[ "$mout" == *"LEFT BEHIND"* ]] && [[ "$mout" == *"rm -f -- "* ]]; then
@@ -8042,6 +8063,205 @@ test_legacy_lock_refusals_never_advertise_the_override() {
 }
 
 t test_legacy_lock_refusals_never_advertise_the_override
+
+# ---------------------------------------------------------------------------
+# Test 47k (#3549, roborev job 208 F2): AN OUT-OF-RANGE PID IS NOT A DEAD ONE.
+#
+# THE DEFECT. The classifier's shape test accepts ANY non-zero digit string. A 20-digit one then fails
+# every liveness probe FOR A REASON THAT IS NOT ABSENCE — bash's `kill -0` rejects it as not a process
+# specification (`pid_t` is an `int`) and procfs has no entry for a number that could never have one —
+# and the verdict was `dead`, which the classifier prints as `stale`. `stale` is the ONE state that hands
+# the operator a `rm -f … && rmdir …` line, so an unrecognisable value earned a DELETION instruction for
+# a `pid` file no supervisor could have written. Third door into the same harm as the collation and NUL
+# defects, and closed the same way: `unknown` with its own cause, which refuses with no deletion.
+#
+# THE BOUND IS THE PLATFORM'S OWN (`/proc/sys/kernel/pid_max`), so this case READS it rather than
+# hard-coding a number — a case carrying its own limit would be testing its own arithmetic. Four
+# behavioural points: a value far above any pid, the boundary itself, one just above it, and one just
+# BELOW it, which is the direction that proves the bound does not over-refuse a legitimate pid.
+#
+# AND BOTH LAYERS ARE MEASURED SEPARATELY, because they close the same harm at different levels and a
+# single contrast could not tell which one was doing the work: the platform bound in the classifier, and
+# `supervisor_pid_liveness`'s invalid-process-spec errno branch, which is what holds the `dead` direction
+# closed on a host where the bound cannot be read at all (a BSD/macOS box has no such file).
+# ---------------------------------------------------------------------------
+test_legacy_lock_oversized_pid_is_not_a_dead_one() {
+  local d tmp lane legacy out rc pid_max above below huge ovr mout label
+  local shipped_fn body mutant ans
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549range$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  huge="99999999999999999999"
+  mkdir -p "$legacy"
+
+  # ---- PREMISE: the platform bound is READABLE and DECIMAL on this host, read the same way the guard
+  # reads it. Without it the four points below would be tested against a number this case invented.
+  pid_max=""
+  IFS= read -r pid_max <"/proc/sys/kernel/pid_max" 2>/dev/null || true
+  case "$pid_max" in
+    '' | *[!0123456789]* | 0*) pid_max="" ;;
+  esac
+  if [[ -n "$pid_max" ]]; then
+    pass "pid-range PREMISE: this host publishes a decimal pid bound (/proc/sys/kernel/pid_max = $pid_max), so the boundary points below are the PLATFORM's and not this case's"
+  else
+    skip "pid-range: /proc/sys/kernel/pid_max is unreadable or not decimal on this host, so the boundary points cannot be derived from the platform (the liveness-fallback half below still runs)"
+  fi
+
+  if [[ -n "$pid_max" ]]; then
+    above=$((pid_max + 1))
+    below=$((pid_max - 1))
+
+    # ---- (1) THE THREE OUT-OF-RANGE POINTS. The boundary value ITSELF is out of range: `man 5 proc`
+    # documents pid_max as the value at which pids wrap, i.e. one GREATER than the maximum pid, so it is
+    # not allocatable. Each must refuse with the bound's own cause, must NOT be `stale`, and must carry
+    # no bare command line at all.
+    for label in huge boundary above; do
+      case "$label" in
+        huge)     printf '%s\n' "$huge" >"$legacy/pid" ;;
+        boundary) printf '%s\n' "$pid_max" >"$legacy/pid" ;;
+        above)    printf '%s\n' "$above" >"$legacy/pid" ;;
+      esac
+      out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+      if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
+         && [[ "$out" == *"pid-exceeds-platform-pid-max:$pid_max"* ]] \
+         && [[ "$out" != *"LEFT BEHIND"* ]] && [[ "$out" != *"rm -f"* ]]; then
+        pass "pid-range ($label): a value at or above the platform bound is UNKNOWN with its own cause (pid-exceeds-platform-pid-max:$pid_max) — never stale, and it carries no deletion instruction"
+      else
+        fail "pid-range-$label: rc=$rc out=[$out] — a value that cannot be a pid on this platform must not reach the stale verdict"
+      fi
+      remedy_lines_structural "pid-range-$label" "$out" 0
+    done
+    # The recorded value is REPORTED, so an operator can see what was in the file rather than only that
+    # it was rejected.
+    printf '%s\n' "$huge" >"$legacy/pid"
+    out="$(legacy_lock_drive "$tmp" "$lane")" || true
+    if [[ "$out" == *"recorded:$huge"* ]]; then
+      pass "pid-range (huge): the refusal reports the RECORDED value ($huge) alongside the bound, so the cause names what was actually in the file"
+    else
+      fail "pid-range-huge-value-not-reported: out=[$out]"
+    fi
+
+    # ---- (2) THE OTHER DIRECTION, which is what stops this being a bound that refuses everything: the
+    # value one BELOW the platform bound is IN range, so the check must not fire for it. The verdict
+    # itself is deliberately not asserted (that pid may be live or dead on any given box); the property
+    # is that the RANGE check abstained.
+    printf '%s\n' "$below" >"$legacy/pid"
+    out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" != *"pid-exceeds-platform-pid-max"* ]]; then
+      pass "pid-range (below): the highest ALLOCATABLE pid ($below) is in range — the bound does not fire, so a legitimate recorded pid is still classified on its liveness"
+    else
+      fail "pid-range-below: rc=$rc out=[$out] — the bound refused a value the platform can allocate"
+    fi
+
+    # ---- (3) MUTANT CONTRAST, THE PRE-FIX FORM: BOTH layers removed. The classifier's bound is
+    # disabled and liveness's invalid-process-spec branch stops matching `kill`'s message, which is
+    # exactly the code as it shipped before this fix — and the oversized value then classifies STALE and
+    # earns a deletion command for a file no supervisor wrote.
+    ovr="$d/m-range-both.sh"; : >"$ovr"
+    if sv_mutant_override "$ovr" supervisor_legacy_lock_state \
+         'if [[ "$pid_over" == yes ]]; then' 'if false; then' \
+       && sv_mutant_override "$ovr" supervisor_pid_liveness \
+         "*'must be process or job'*)" "*'must NOT be matched by this mutant'*)"; then
+      printf '%s\n' "$huge" >"$legacy/pid"
+      mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+      if [[ "$mout" == *"state stale $huge"* ]] && [[ "$mout" == *"rm -f -- "* ]]; then
+        pass "pid-range MUTANT CONTRAST (both layers): with the bound and the errno branch removed, $huge classifies as stale and the operator is handed a DELETION for a pid file no supervisor could have written — the finding, reproduced"
+      else
+        fail "pid-range-mutant-both: out=[$mout] — the pre-fix form must be shown to break, or the asserts above measure nothing"
+      fi
+    fi
+
+    # ---- (4) THE LAYERS ARE INDEPENDENT, measured. With ONLY the classifier's bound removed, the
+    # oversized value still refuses — liveness's errno branch answers `unknown` — so neither layer is
+    # load-bearing alone and (3) above cannot be read as one mutation doing all the work.
+    ovr="$d/m-range-bound-only.sh"; : >"$ovr"
+    if sv_mutant_override "$ovr" supervisor_legacy_lock_state \
+         'if [[ "$pid_over" == yes ]]; then' 'if false; then'; then
+      printf '%s\n' "$huge" >"$legacy/pid"
+      mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+      if [[ "$mout" != *"stale $huge"* ]] && [[ "$mout" != *"rm -f"* ]] \
+         && [[ "$mout" == *"liveness-unmeasurable-for-pid"* ]]; then
+        pass "pid-range DEFENCE IN DEPTH: with ONLY the classifier's bound removed, $huge still refuses (liveness-unmeasurable) and still carries no deletion — the errno branch holds the dead direction closed on its own"
+      else
+        fail "pid-range-bound-only: out=[$mout] — with the bound gone the errno branch is the only thing between an oversized value and a deletion remedy"
+      fi
+    fi
+
+    # ---- (5) AN UNMEASURABLE BOUND ABSTAINS — it must not refuse a legitimate pid. The classifier is
+    # driven with its pid_max path pointed at a file that does not exist, which is the shape of a
+    # BSD/macOS host (no such file) or a procfs with no sysctls: a real DEAD pid must still classify
+    # `stale`, and the oversized value must still refuse via the errno branch.
+    ovr="$d/m-range-nobound.sh"; : >"$ovr"
+    if sv_mutant_override "$ovr" supervisor_legacy_lock_state \
+         '</proc/sys/kernel/pid_max' '</nonexistent-pid-max-for-3549'; then
+      local realdead
+      fixture_bg sleep 0.1
+      realdead=$FIXTURE_LAST_PID
+      fixture_wait "$realdead"
+      printf '%s\n' "$realdead" >"$legacy/pid"
+      mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+      if [[ "$mout" == *"state stale $realdead"* ]]; then
+        pass "pid-range (unmeasurable bound): with no readable pid_max, a genuinely dead pid is STILL classified stale — an unreadable bound abstains rather than turning every recorded pid into a refusal"
+      else
+        fail "pid-range-nobound-overrefuses: out=[$mout] — an unmeasurable bound must not change the verdict for a legitimate pid"
+      fi
+      printf '%s\n' "$huge" >"$legacy/pid"
+      mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+      if [[ "$mout" != *"stale $huge"* ]] && [[ "$mout" != *"rm -f"* ]]; then
+        pass "pid-range (unmeasurable bound): and $huge still refuses with no deletion — on a host where the bound cannot be read, the errno branch is what keeps an unrecognisable value out of the stale verdict"
+      else
+        fail "pid-range-nobound-oversized: out=[$mout] — with no bound and no errno branch there is nothing between an oversized value and a deletion remedy"
+      fi
+    fi
+  fi
+
+  # ---- (6) THE ERRNO BRANCH, ISOLATED IN THE SHIPPED FUNCTION. Its subject is the verdict
+  # `supervisor_pid_liveness` returns for a value bash's own `kill` will not accept as a process
+  # specification: `unknown`, never `dead`. The mutant is the same scratch copy with the branch's
+  # PATTERN neutered, so it still parses and still takes every other path.
+  shipped_fn="$(sed -n '/^supervisor_pid_liveness()/,/^}/p' "$SUPERVISOR")"
+  if [[ -z "$shipped_fn" || "$shipped_fn" != *'supervisor_pid_liveness() {'* ]]; then
+    fail "pid-range-liveness-premise: the shipped supervisor_pid_liveness could not be extracted from $SUPERVISOR"
+    rm -rf "$tmp"
+    return 0
+  fi
+  body="$T_LOCKFN/liveness-range.sh"
+  mutant="$T_LOCKFN/liveness-range-mutant.sh"
+  mkdir -p "$T_LOCKFN"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    printf '%s\n' "$shipped_fn"
+    printf '%s\n' 'supervisor_pid_liveness "$1"'
+  } >"$body"
+  ans="$(bash "$body" "$huge")"
+  if [[ "$ans" == unknown ]]; then
+    pass "pid-range (liveness): the shipped probe answers 'unknown' for $huge — a value bash's kill refuses as a process spec is not an affirmative absence"
+  else
+    fail "pid-range-liveness: $huge answered [$ans]; only an affirmative absence may answer 'dead'"
+  fi
+  if [[ ! -d /proc/self ]]; then
+    skip "pid-range (liveness mutant): no procfs on this host, so the corroboration that produced the false 'dead' cannot be reached and the contrast would prove nothing"
+  else
+    sed 's/must be process or job/must NOT be matched by this mutant/g' "$body" >"$mutant"
+    if ! diff -q "$body" "$mutant" >/dev/null && bash -n "$mutant" 2>/dev/null; then
+      ans="$(bash "$mutant" "$huge")"
+      if [[ "$ans" == dead ]]; then
+        pass "pid-range MUTANT CONTRAST (liveness): with the errno branch neutered, procfs reports /proc/$huge absent and the probe answers 'dead' — an affirmative-looking absence for an entry that could never exist"
+      else
+        fail "pid-range-liveness-mutant: the neutered copy answered [$ans]; expected 'dead', or the branch above is not what holds the verdict"
+      fi
+    else
+      fail "pid-range-liveness-mutant-shape: the neutered copy is identical to the scratch copy or does not parse"
+    fi
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_legacy_lock_oversized_pid_is_not_a_dead_one
 
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
