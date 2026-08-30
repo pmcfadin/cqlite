@@ -208,6 +208,53 @@ fn a_skip_whose_cell_was_refused_is_reported_as_unevaluable() {
     );
 }
 
+/// P1: a declared exclusion suppresses a VALUE divergence, never the COLUMN's
+/// PRESENCE. A skip used to record an omitted column as `Suppressed`, so each of
+/// the five declared skips could hide a regression that dropped its column from
+/// the egress row altogether — the one shape the comparator's own contract (every
+/// DDL column is rendered) puts outside any gap's reach.
+///
+/// Asserted in BOTH lanes, because the omission is a property of the egress row
+/// and not of one format's spelling: neither the presence of a skip nor the format
+/// may excuse it.
+#[test]
+fn a_skip_cannot_hide_a_column_the_egress_omits() {
+    let schema = set_schema();
+    let golden = vec![row(&[("id", json!(1)), ("s", json!(["a", "b"]))])];
+    for (egress, id) in [(Egress::Json, json!(1)), (Egress::Csv, json!("1"))] {
+        // The egress row renders `id` and DROPS the declared `s` entirely.
+        let cli = vec![row(&[("id", id)])];
+        let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &["s"], egress);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{egress:?}: an omitted declared column must fail even under a whole-column \
+             skip: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].contains(".s:") && report.diffs[0].contains("absent from the"),
+            "{egress:?}: the diff must name the omitted column: {:?}",
+            report.diffs
+        );
+        // …and the skip itself is UNRESOLVED, not applied: with no value at that
+        // path there is nothing to read an answer from. The two failures agree —
+        // neither says the gap was measured.
+        assert_eq!(
+            report.stale_skips.len(),
+            1,
+            "{egress:?}: {:?}",
+            report.stale_skips
+        );
+        assert!(
+            report.stale_skips[0].contains("could not be evaluated")
+                && report.stale_skips[0].contains("no `s` column"),
+            "{egress:?}: the cause must be the unevaluable one: {:?}",
+            report.stale_skips
+        );
+    }
+}
+
 // =======================================================================
 // L3: the golden is PAIRED with the SSTable it describes
 // =======================================================================

@@ -339,20 +339,30 @@ fn a_column_shape_divergence_is_reported_once_per_column() {
     );
 }
 
-/// A declared skip path still suppresses its column, so the
-/// measured-divergence gaps keep working.
+/// A declared skip path suppresses the VALUE at its path, so the
+/// measured-divergence gaps keep working — and NOT the column's PRESENCE, which
+/// no gap may excuse (issue #1491 review finding P1; the omission half is pinned
+/// by `gaps::a_skip_cannot_hide_a_column_the_egress_omits`).
+///
+/// This case used to assert the opposite for an OMITTED column ("a declared skip
+/// must stay declared", no diff), which is what made the five declared skips able
+/// to hide a dropped column. The property it was really protecting is the one
+/// asserted here: the column is RENDERED and DIVERGES, and the gap absorbs that.
 #[test]
-fn a_declared_skip_column_is_not_required_to_be_rendered() {
+fn a_declared_skip_suppresses_its_columns_value_and_not_its_presence() {
     let schema = absent_schema();
     let golden = absent_golden();
-    let omitted = vec![row(&[
+    let diverging = vec![row(&[
         ("pk", json!(1)),
         ("ck", json!(1)),
         ("anchor", json!("anchor_absent")),
+        // The golden has no `reg` cell, so the expected rendering is `null`; this
+        // egress renders a value instead, which is a real divergence.
+        ("reg", json!("rendered-anyway")),
     ])];
     let report = compare_rows(
         &golden,
-        &omitted,
+        &diverging,
         &schema,
         &["pk"],
         &["ck"],
@@ -361,10 +371,18 @@ fn a_declared_skip_column_is_not_required_to_be_rendered() {
     );
     assert!(
         report.diffs.is_empty(),
-        "a declared skip must stay declared: {:?}",
+        "a declared skip must absorb the VALUE divergence at its path: {:?}",
         report.diffs
     );
-    assert_eq!(report.compared_cells, 3);
+    assert!(
+        report.stale_skips.is_empty(),
+        "the skip suppressed a real divergence, so it is not stale: {:?}",
+        report.stale_skips
+    );
+    assert_eq!(
+        report.compared_cells, 3,
+        "the excluded column is not counted as compared coverage"
+    );
 }
 
 // =======================================================================

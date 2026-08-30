@@ -103,6 +103,18 @@ enum Observed {
 /// `udt_nested` comparing nothing but its primary key (issue #1491 review finding
 /// F5).
 ///
+/// # An exclusion excludes a VALUE, never a column's PRESENCE
+///
+/// Every entry names a position whose rendered VALUE the two sides disagree
+/// about. None of them says the position may be absent: the comparator's contract
+/// is that the egress renders every column the committed `CREATE TABLE` declares,
+/// and an omitted column is a divergence of the egress SHAPE that no gap covers.
+/// So a whole-column entry still leaves "the column is rendered at all" asserted,
+/// and when the column IS missing the entry is `Unresolved` — there is no value at
+/// that path to read an answer from (issue #1491 review finding P1). Recording it
+/// as [`Observed::Suppressed`] instead is what let the declared skips hide a
+/// dropped column.
+///
 /// # An exclusion is applied only when it SUPPRESSES a divergence
 ///
 /// Being VISITED is not enough, and treating it as enough is a guard weaker than
@@ -298,25 +310,46 @@ pub fn compare_rows(
             // The CLI must render EVERY declared column. An omitted one is a
             // divergence, NOT an implicit null: reading it as null is what made
             // the absent-cell property untestable.
+            //
+            // A declared exclusion CANNOT suppress this. A `SkipPaths` entry
+            // excludes a VALUE at a path — it says "the two sides disagree about
+            // what is rendered there" — and it has no licence to excuse the
+            // column not being rendered AT ALL, which is a divergence of the
+            // egress SHAPE that every case asserts (the comparator's contract is
+            // that every DDL column is rendered). Recording the omission as
+            // `Suppressed` is what let the five declared skips hide a regression
+            // that dropped their column altogether, while `Observed::Unresolved`'s
+            // own documentation already named an absent egress column as the
+            // case it cannot measure (issue #1491 review finding P1).
             let Some(cv) = c.get(name) else {
-                if excluded_column {
-                    // An omitted column IS a divergence — the golden carries a
-                    // value where the egress row carries nothing — and the
-                    // exclusion is what keeps it out of `diffs`, so it suppressed
-                    // one. When the column starts being rendered the value
-                    // comparison below runs instead, and agreement there is what
-                    // retires the exclusion.
-                    skips.observe(name, Observed::Suppressed);
-                    continue;
-                }
                 if shape_seen.insert(format!("missing:{name}")) {
                     report.diffs.push(format!(
                         "row[{key}].{name}: absent from the {egress:?} egress row — the \
                          committed CREATE TABLE {} declares `{name}` ({}), so it must be \
-                         rendered (a null cell as `null`, an empty CSV field)",
+                         rendered (a null cell as `null`, an empty CSV field){}",
                         schema.table,
-                        column.ty.describe()
+                        column.ty.describe(),
+                        if excluded_column {
+                            " — the declared gap for this path excludes its VALUE, not \
+                             the column's PRESENCE"
+                        } else {
+                            ""
+                        }
                     ));
+                }
+                if excluded_column {
+                    // There is no value at that path to compare, so what the
+                    // exclusion suppresses cannot be read off this row: the gap is
+                    // UNRESOLVED, never applied. Reported as its own cause by
+                    // [`SkipPaths::stale`], which cannot contradict the diff above
+                    // — the two say the same thing (the column is missing, and the
+                    // gap could not be measured), and both are failures.
+                    skips.observe(
+                        name,
+                        Observed::Unresolved(format!(
+                            "the {egress:?} egress row carries no `{name}` column at all"
+                        )),
+                    );
                 }
                 continue;
             };
