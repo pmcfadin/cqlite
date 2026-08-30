@@ -1,0 +1,51 @@
+# Workspace test-execution disposition census (issue #3522).
+#
+# THE RECORD OF THE #3522 AUDIT. Every cargo workspace member is listed here with a
+# statement of whether the FULL agent gate EXECUTES its Rust tests. Enforced (for
+# COMPLETENESS and LABELING only, never for TRUTH) by
+# scripts/tests/test_workspace_test_disposition.sh, which runs under the gate's
+# `tooling-tests` component. Read that script's header before changing this file: it
+# explains what the guard does and, more importantly, what it deliberately does not do.
+#
+# WHY IT EXISTS. Compiling is not covering. `cargo clippy --workspace --all-targets`
+# compiles every member of this workspace on every full gate, so a crate can be built
+# by every run and execute NOTHING — and nothing said so. That is how
+# `cqlite-ffi-common` (52 tests) and `cqlite-node`'s 53 Rust unit tests sat unexecuted
+# by any gate component or CI job for months while reading as covered. This file makes
+# the omission a RECORDED, REVIEWED fact instead of a discovery.
+#
+# FORMAT — one record per line:
+#     <package-name> <TAB> <LABEL> <TAB> <detail>
+# Blank lines and `#` comments are ignored.
+#
+# LABELS — a CLOSED set. An unrecognised label is a FAIL, not a pass.
+#   EXECUTED      the full gate runs this member's tests. <detail> NAMES the gate
+#                 component(s) that do it.
+#   PARTIAL       the gate runs SOME of them. <detail> names the component(s), WHAT is
+#                 not run, and WHY.
+#   NOT-EXECUTED  no gate component runs them. <detail> says WHY, and cites the
+#                 tracking issue when one is filed.
+#
+# HOW TO CHANGE IT. Adding a workspace member without adding a record here FAILs the
+# gate. Wiring a member into a component means moving its record to EXECUTED and naming
+# the component. Do NOT "fix" a NOT-EXECUTED record by deleting it: the whole value of
+# this file is that the unexecuted set is visible.
+
+cqlite	NOT-EXECUTED	Workspace ROOT package. 24 integration targets under /tests, 15 of which are root-only (the other 9 are also targets of cqlite-integration-tests, and 6 of those run there). No `cargo test -p cqlite` / `--workspace` invocation exists in the gate or in CI. AUDIT GAP 3.
+cqlite-core	PARTIAL	core-tests (cargo nextest run -p cqlite-core --features cli-helpers) + write-tests + 13 targeted lanes. Of 369 integration targets, 303 execute >0 tests; 66 compile to ZERO tests at that feature set and 41 of those are named by no --test anywhere. AUDIT GAP 10 (families: delta-scan 12, observability-testing 13, dhat-heap 9).
+cqlite-cli	PARTIAL	cli-tests runs 35 of 45 integration targets in two passes. `--lib`/`--bins` is NEVER passed, so all 255 lib/bin unit `#[test]` fns are unexecuted; 8 targets are quarantined and 5 excluded. AUDIT GAP 2.
+cqlite-flight	PARTIAL	flight-tests runs `--lib --bins`; flight-query-semantics-oracle runs 2 integration targets and memory-budget 1. 39 of 42 integration targets are un-run LOCALLY — declared by that lane's own census. CI's Flight tier (the one blocking tier) runs the whole package. AUDIT GAP 7 / issues #3384, #3375.
+cqlite-ffi-common	EXECUTED	binding-rust-tests — `cargo test --no-fail-fast -p cqlite-ffi-common`, ALL targets (lib + tests/dependency_boundary.rs + tests/error_contract_table.rs). Closed AUDIT GAP 1; before #3522 this member executed NOWHERE.
+cqlite-node	PARTIAL	binding-rust-tests runs the RUST half (`--lib --features write-support`); node-bindings runs the WHOLE jest suite against the built napi artifact. Both closed by #3522 (AUDIT GAP 5). Not run: bodies gated on the `observability` feature — building the OTel stack is a cost the gate declines on purpose (#1844).
+cqlite-py	NOT-EXECUTED	Rust half only, and STRUCTURALLY so: a pyo3 cdylib's `cargo test` harness cannot link libpython, which is documented in scripts/agent-gate.sh (search: "cannot link libpython"). Its PYTHON half IS fully covered — python-bindings runs the entire pytest suite. AUDIT GAP 6.
+cqlite-integration-tests	PARTIAL	integration-tests COMPILES the whole package (`--no-run`) then runs 6 named `--test` targets. Unexecuted: the lib unit suite (206 `#[test]` fns), 13 bin targets, and 5 integration targets. AUDIT GAP 4.
+format-compatibility-tests	EXECUTED	format-compat — `cargo test -p format-compatibility-tests`, the whole package.
+cqlite-examples	NOT-EXECUTED	1 `#[test]` fn; compile-only via clippy. No component or workflow runs it. Note the `operator-metrics-doc` component runs a cqlite-core EXAMPLE, not this package.
+xtask	NOT-EXECUTED	20 inline `#[test]` fns + 1 integration target. The oom-audit component BUILDS and RUNS the binary but never `cargo test -p xtask`; no CI job does either. AUDIT GAP 9.
+cassandra-parity	NOT-EXECUTED	25 inline `#[test]` fns + 9 integration targets. The parity-report component runs the BINARY only. `cargo test -p cassandra-parity` exists solely in cassandra-parity.yml, which is path-filtered and `required`-EXEMPT. AUDIT GAP 8.
+ws0-corpus-gen	EXECUTED	tooling-tests — `cargo test -q -p ws0-corpus-gen`, the whole package. The only fully covered tools/ crate.
+sstabledump-validator	NOT-EXECUTED	17 inline `#[test]` fns + 2 integration targets. Zero references in scripts/** and .github/workflows/**. AUDIT GAP 8.
+flight-loadgen	NOT-EXECUTED	21 inline `#[test]` fns. Zero references in scripts/** and .github/workflows/**. AUDIT GAP 8.
+format-validator	NOT-EXECUTED	8 inline `#[test]` fns. Its LIBRARY is exercised INDIRECTLY, as a path dependency of format-compatibility-tests (the format-compat component), but the crate's own unit tests never run. AUDIT GAP 8. See also its tools/ disposition: MIXED.
+memory-safety-runner	NOT-EXECUTED	2 inline `#[test]` fns. Documented UNWIRED in its tools/ disposition; compile-only.
+cqlite-validator	NOT-EXECUTED	Binary only, 0 `#[test]` fns — nothing to execute. Documented UNWIRED in its tools/ disposition.

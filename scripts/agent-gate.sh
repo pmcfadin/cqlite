@@ -251,6 +251,11 @@
 #                      datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
+#                      scripts/tests/test_workspace_test_disposition.sh (+ its
+#                      self-test): the PACKAGE-granular #3522 census — every cargo
+#                      workspace member carries a recorded EXECUTED/PARTIAL/
+#                      NOT-EXECUTED disposition, so a crate that is compiled by every
+#                      gate run and executes nothing cannot arrive unnoticed;
 #                      scripts/tests/test_tools_crate_disposition.sh (+ its
 #                      selftest) — #1716/AK5: every crate under tools/ must be
 #                      EXPLICITLY classified WIRED / UNWIRED / MIXED, and every
@@ -10435,6 +10440,33 @@ run_tooling_tests() {
      ! bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition_selftest.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (tools/ crate disposition census #1716); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Workspace test-execution disposition census (#3522). The PACKAGE-granular sibling
+  # of the tools/ census above: every cargo workspace member must be recorded in
+  # scripts/tests/workspace-test-disposition.txt as EXECUTED / PARTIAL / NOT-EXECUTED
+  # (a CLOSED label set) with a detail naming the gate component, or what is omitted
+  # and why. The defect it exists for: `cargo clippy --workspace --all-targets`
+  # compiles every member on every full gate, so a crate can be BUILT by every run and
+  # EXECUTE NOTHING — which is how cqlite-ffi-common (52 tests) and cqlite-node's 53
+  # Rust unit tests sat unexecuted for months while reading as covered. `members`
+  # globs `tools/*` and `bindings/*`, so a new crate otherwise joins with no statement
+  # of whether anything runs its tests. Like the tools/ census it is DELIBERATELY
+  # SMALL: it checks a disposition was RECORDED and LABELED, never that the record is
+  # TRUE (see its header for why #1716 removed the truth-verifying variant). It needs
+  # `cargo metadata` — a failed derivation is a FAIL naming the derivation, never a
+  # skip that greens. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_workspace_test_disposition.sh; bash scripts/tests/test_workspace_test_disposition_selftest.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_workspace_test_disposition.sh" >>"$log" 2>&1 ||
+     ! bash "$REPO_ROOT/scripts/tests/test_workspace_test_disposition_selftest.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (workspace test-execution disposition census #3522); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
