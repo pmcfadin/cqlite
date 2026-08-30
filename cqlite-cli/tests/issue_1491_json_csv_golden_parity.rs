@@ -47,7 +47,7 @@
 //! decided at the granularity the comparison walks — per member, per depth — so an
 //! indistinguishable nested member suppresses only itself while its siblings, its
 //! container's member count and every enclosing frame stay compared (review
-//! finding P2); the one exception is a structural character, which unbalances the
+//! finding P2); the one exception is an UNBALANCED bracket, which breaks the
 //! bracket depth every level is split on and therefore refuses the whole cell.
 //! Refusals are counted and named, by path, in the census too. Neither kind of gap
 //! is ever silent.

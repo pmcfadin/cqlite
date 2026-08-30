@@ -426,10 +426,10 @@ pub fn compare_rows(
                     // The refusal suppresses the INDISTINGUISHABLE readings, not
                     // everything about the cell: its frame and the two decidable
                     // member counts are still compared (finding N3). This is the
-                    // one cause whose reach IS the whole cell — a structural
-                    // character unbalances the depth counter every level is split
-                    // on — so there is no narrower node to descend to, and the
-                    // walk below is not entered.
+                    // one cause whose reach IS the whole cell — an UNBALANCED
+                    // bracket breaks the depth counter every level is split on —
+                    // so there is no narrower node to descend to, and the walk
+                    // below is not entered.
                     match csv_container::decidable_despite_cell_refusal(gv, cv, &column.ty) {
                         Ok(()) => {
                             if excluded_column {
@@ -631,8 +631,9 @@ fn column_kinding(column: &Column) -> Kinding {
 /// Why a CSV container cell could not be decoded.
 enum Refusal {
     /// The GOLDEN's own content cannot survive the unquoted rendering AT ANY
-    /// LEVEL — a structural character unbalances the bracket depth the whole
-    /// rendering is split on — so no part of the cell can be read back into
+    /// LEVEL — an UNBALANCED bracket breaks the bracket depth the whole rendering
+    /// is split on (a BALANCED pair is recoverable and is not refused, review
+    /// round 11 finding R1) — so no part of the cell can be read back into
     /// members. Decided from the golden alone, so it can never be caused by the
     /// defect under test, and the caller still applies what survives —
     /// `csv_container::decidable_despite_cell_refusal`, i.e. the frame and the
@@ -640,7 +641,9 @@ enum Refusal {
     /// finding Q1).
     ///
     /// Every NARROWER cause is refused per NODE inside the walk instead
-    /// (`csv_container::node_refusal`, finding P2) and never reaches here.
+    /// (`csv_container::node_refusal`, finding P2) and never reaches here. Since
+    /// round 11 those are one DERIVED question — the decoder does not give that
+    /// node's members back — plus EMPTY-CONTAINER.
     Cell(String),
     /// The CLI's text is not the grammar at all (wrong bracket, unbalanced
     /// brackets, a map entry with no `: `). That IS a divergence, so it is
