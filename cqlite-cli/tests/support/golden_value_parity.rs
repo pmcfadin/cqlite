@@ -485,9 +485,12 @@ pub fn canon_typed(
             // Guarded on the shape rather than applied blindly: an already-prefixed
             // or non-hex string is NOT what `getString` emits, so it stays exact and
             // a regression that dropped the prefix on the CLI side still fails.
-            CqlType::Blob if golden_stringified && is_bare_lowercase_hex(s) => {
-                Canon::Text(format!("0x{s}"))
-            }
+            CqlType::Blob if golden_stringified => match stringified_blob_spelling(s) {
+                Some(csv) => Canon::Text(csv),
+                // Not a spelling `BytesSerializer.toString` can produce, so it
+                // stays exact and fails loudly rather than being coerced.
+                None => Canon::Text(s.clone()),
+            },
             CqlType::Timestamp => match canon_timestamp(s) {
                 Some(text) => Canon::Text(text),
                 None => Canon::Text(s.clone()),
@@ -509,6 +512,20 @@ pub fn canon_typed(
         Egress::Json => canon,
         Egress::Csv => canon.for_csv(depth),
     })
+}
+
+/// The `0x…` spelling a STRINGIFIED blob golden denotes, or `None` when `s` is not
+/// a spelling `BytesSerializer.toString` can produce.
+///
+/// The one place this repository states the blob half of `sstabledump`'s
+/// two-writer split, so the comparison ([`canon_typed`]) and the CSV lane's
+/// structural refusal question (`csv_container::golden_rendering`) cannot drift
+/// apart on it. Read from the PIN, `cassandra-5.0.8`:
+/// `BytesSerializer.toString` is `ByteBufferUtil.bytesToHex`, i.e. the bare
+/// lowercase hex (`""` for the empty blob), while every non-stringified position
+/// carries `BytesType.toJSONString`'s `"0x" + <the same hex>`.
+pub fn stringified_blob_spelling(s: &str) -> Option<String> {
+    is_bare_lowercase_hex(s).then(|| format!("0x{s}"))
 }
 
 /// Is `s` exactly what `Hex.bytesToHex` emits — an even-length run of lowercase
