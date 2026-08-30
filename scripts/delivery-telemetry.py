@@ -502,6 +502,12 @@ def _github_fields(issue: int, pr: int) -> dict:
                          f"labels (exactly one expected)")
     routing = "oracle" if has_oracle else ("design" if has_design else None)
     return {
+        # The issue this payload was BUILT FOR. build_record refuses if it disagrees with
+        # --issue, so a stale or copied --from-json file cannot be silently applied to a
+        # different delivery (issue #3550). Bound to ONE flag, not to another injected field:
+        # two injected values that must agree with EACH OTHER is the shape that produced six
+        # consecutive defects on this seam.
+        "issue": issue,
         "created_at": issue_json["createdAt"],
         "closed_at": issue_json["closedAt"],
         # GitHub's own reason the issue is in its current state. For an OPEN issue this is
@@ -588,6 +594,30 @@ def build_record(args, gh_fields: dict) -> dict:
                 f"error: authoritative timestamp '{key}' is missing/null "
                 f"(a record needs the issue's createdAt and the PR's createdAt/mergedAt — "
                 f"finalize records only a MERGED pr)")
+
+    # THE PAYLOAD IS BOUND TO --issue, before any field is read from it (issue #3550). The
+    # --from-json seam is how a caller injects GitHub-derived fields, and a STALE or COPIED
+    # file built for a different issue would otherwise be applied wholesale: a wrong
+    # closed_at/created_at corrupts the kind and the cycle time, and a wrong
+    # pr_closes_this_issue disables the auto-close-window guard. One scalar checked against
+    # one flag protects every field at once — and deliberately NOT by re-introducing two
+    # injected operands that must agree with each other, which is the shape that produced
+    # six consecutive defects here.
+    if "issue" not in gh_fields:
+        raise SystemExit(
+            "error: the injected payload has no 'issue' field naming the issue it was built "
+            "for, so it cannot be bound to --issue — an unbound payload could be a stale or "
+            "copied file for a different delivery (issue #3550)")
+    payload_issue = gh_fields["issue"]
+    if not isinstance(payload_issue, int) or isinstance(payload_issue, bool):
+        raise SystemExit(
+            f"error: the injected payload's 'issue' must be an integer, got "
+            f"{payload_issue!r} ({type(payload_issue).__name__}) (issue #3550)")
+    if payload_issue != args.issue:
+        raise SystemExit(
+            f"error: the injected payload was built for issue #{payload_issue} but --issue is "
+            f"{args.issue} — refusing to apply one delivery's authoritative data to another. "
+            f"Re-derive the payload for #{args.issue} (issue #3550)")
 
     # `closed_at` is read AFFIRMATIVELY, never by truthiness (issue #3550). The `--from-json`
     # seam can inject anything, and a falsy-but-not-null value ("" / 0 / false) or an ABSENT

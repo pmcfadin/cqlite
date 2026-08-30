@@ -30,10 +30,15 @@ _spec.loader.exec_module(dt)
 SCHEMA = dt.load_schema(dt.DEFAULT_SCHEMA)
 
 
-def _from_json_file(tmp: Path) -> str:
-    """Write a GitHub-derived fields file (the offline seam for `record`)."""
+def _from_json_file(tmp: Path, issue: int = 42) -> str:
+    """Write a GitHub-derived fields file (the offline seam for `record`).
+
+    Carries `issue` because build_record binds the payload to --issue (issue #3550): a stale
+    or copied file built for another delivery must not be applied wholesale.
+    """
     p = tmp / "ghfields.json"
     p.write_text(json.dumps({
+        "issue": issue,
         "created_at": "2026-06-10T00:00:00Z",
         "pr_opened_at": "2026-06-10T01:00:00Z",
         "merged_at": "2026-06-10T03:00:00Z",
@@ -55,7 +60,7 @@ class RecordTests(unittest.TestCase):
                 "--gate", "pass", "--gate-runs", "2",
                 "--claim-collisions", "0", "--rebase-events", "1",
                 "--roborev-findings", "0", "--rework", "0",
-                "--from-json", _from_json_file(tmp),
+                "--from-json", _from_json_file(tmp, 1161),
             ])
             self.assertEqual(rc, 0)
             lines = [l for l in ledger.read_text().splitlines() if l.strip()]
@@ -80,7 +85,7 @@ class RecordTests(unittest.TestCase):
                     "--gate", "pass", "--gate-runs", "1",
                     "--claim-collisions", "0", "--rebase-events", "0",
                     "--roborev-findings", "0",   # --rework deliberately omitted
-                    "--from-json", _from_json_file(tmp),
+                    "--from-json", _from_json_file(tmp, 1161),
                 ])
             self.assertFalse(ledger.exists() and ledger.read_text().strip(),
                              "no record should be written when a counter is missing")
@@ -92,6 +97,7 @@ class RecordTests(unittest.TestCase):
             # an unmerged PR -> merged_at is null; must be a clean SystemExit, not a crash
             ghfields = tmp / "ghfields.json"
             ghfields.write_text(json.dumps({
+                "issue": 3393,
                 "created_at": "2026-06-10T00:00:00Z",
                 "pr_opened_at": "2026-06-10T01:00:00Z",
                 "merged_at": None,
@@ -119,7 +125,7 @@ class RecordTests(unittest.TestCase):
                     "--gate", "pass", "--gate-runs", "1",
                     "--claim-collisions", "0", "--rebase-events", "0",
                     "--roborev-findings", "0", "--rework", "0",
-                    "--from-json", _from_json_file(tmp)]
+                    "--from-json", _from_json_file(tmp, 42)]
             self.assertEqual(dt.main(base), 0)
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
@@ -140,7 +146,7 @@ class RecordTests(unittest.TestCase):
                      "--gate", "pass", "--gate-runs", "1",
                      "--claim-collisions", "0", "--rebase-events", "0",
                      "--roborev-findings", "0", "--rework", "0",
-                     "--from-json", _from_json_file(tmp)]
+                     "--from-json", _from_json_file(tmp, 2264)]
             self.assertEqual(dt.main(first), 0)
             second = list(first)
             second[second.index("2282")] = "2301"     # same issue, second shipped PR
@@ -155,6 +161,7 @@ class RecordTests(unittest.TestCase):
             tmp = Path(d)
             ghfields = tmp / "ghfields.json"
             ghfields.write_text(json.dumps({
+                "issue": 3393,
                 "created_at": "2026-06-10T00:00:00Z",
                 "pr_opened_at": "2026-06-10T01:00:00Z",
                 "merged_at": "2026-06-10T03:00:00Z",
@@ -178,6 +185,7 @@ class RecordTests(unittest.TestCase):
             ledger = tmp / "ledger.jsonl"
             ghfields = tmp / "ghfields.json"
             ghfields.write_text(json.dumps({       # merged BEFORE pr opened -> review_s < 0
+                "issue": 1,
                 "created_at": "2026-06-10T00:00:00Z",
                 "pr_opened_at": "2026-06-10T02:00:00Z",
                 "merged_at": "2026-06-10T01:00:00Z",
@@ -207,7 +215,7 @@ class RecordTests(unittest.TestCase):
                 "--gate", "pass", "--gate-runs", "1",
                 "--claim-collisions", "0", "--rebase-events", "0",
                 "--roborev-findings", "0", "--rework", "0",
-                "--from-json", _from_json_file(tmp),
+                "--from-json", _from_json_file(tmp, 1),
             ])
             self.assertEqual(rc, 1)
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
@@ -227,7 +235,7 @@ class RoborevSeverityTests(unittest.TestCase):
                 "--claim-collisions", "0", "--rebase-events", "0",
                 "--roborev-findings", "5", "--roborev-blockers", "2", "--roborev-nits", "3",
                 "--rework", "0",
-                "--from-json", _from_json_file(tmp),
+                "--from-json", _from_json_file(tmp, 2088),
             ])
             self.assertEqual(rc, 0)
             rec = json.loads(ledger.read_text().splitlines()[0])
@@ -247,7 +255,7 @@ class RoborevSeverityTests(unittest.TestCase):
                     "--claim-collisions", "0", "--rebase-events", "0",
                     "--roborev-findings", "5", "--roborev-blockers", "2", "--roborev-nits", "2",
                     "--rework", "0",
-                    "--from-json", _from_json_file(tmp),
+                    "--from-json", _from_json_file(tmp, 1),
                 ])
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
@@ -263,7 +271,7 @@ class RoborevSeverityTests(unittest.TestCase):
                     "--claim-collisions", "0", "--rebase-events", "0",
                     "--roborev-findings", "5", "--roborev-blockers", "2",  # nits omitted
                     "--rework", "0",
-                    "--from-json", _from_json_file(tmp),
+                    "--from-json", _from_json_file(tmp, 1),
                 ])
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
@@ -279,7 +287,7 @@ class RoborevSeverityTests(unittest.TestCase):
                 "--gate", "pass", "--gate-runs", "1",
                 "--claim-collisions", "0", "--rebase-events", "0",
                 "--roborev-findings", "0", "--rework", "0",
-                "--from-json", _from_json_file(tmp),
+                "--from-json", _from_json_file(tmp, 1),
             ])
             self.assertEqual(rc, 0)
             rec = json.loads(ledger.read_text().splitlines()[0])
@@ -351,7 +359,7 @@ class StallObservabilityTests(unittest.TestCase):
                 "--claim-collisions", "0", "--rebase-events", "0",
                 "--roborev-findings", "0", "--rework", "0",
                 "--nudges", "2", "--orphan-minutes", "45",
-                "--from-json", _from_json_file(tmp),
+                "--from-json", _from_json_file(tmp, 2667),
             ])
             self.assertEqual(rc, 0)
             rec = json.loads(ledger.read_text().splitlines()[0])
@@ -370,7 +378,7 @@ class StallObservabilityTests(unittest.TestCase):
                 "--gate", "pass", "--gate-runs", "1",
                 "--claim-collisions", "0", "--rebase-events", "0",
                 "--roborev-findings", "0", "--rework", "0",
-                "--from-json", _from_json_file(tmp),
+                "--from-json", _from_json_file(tmp, 1),
             ])
             self.assertEqual(rc, 0)
             rec = json.loads(ledger.read_text().splitlines()[0])
@@ -390,7 +398,7 @@ class StallObservabilityTests(unittest.TestCase):
                 "--claim-collisions", "0", "--rebase-events", "0",
                 "--roborev-findings", "0", "--rework", "0",
                 "--nudges", "1",
-                "--from-json", _from_json_file(tmp),
+                "--from-json", _from_json_file(tmp, 3),
             ])
             self.assertEqual(rc, 0)
             rec = json.loads(ledger.read_text().splitlines()[0])
@@ -418,7 +426,7 @@ class GateNotRunTests(unittest.TestCase):
                 "--gate", gate, "--gate-runs", str(gate_runs),
                 "--claim-collisions", "0", "--rebase-events", "0",
                 "--roborev-findings", "0", "--rework", "0",
-                "--from-json", _from_json_file(tmp)]
+                "--from-json", _from_json_file(tmp, 3299)]
 
     # ---- AC1/AC2: the new value is accepted end-to-end -----------------------------
     def test_record_accepts_not_run_with_zero_runs(self):
@@ -494,7 +502,7 @@ class GateNotRunTests(unittest.TestCase):
                          "--gate-runs", "1",              # --gate deliberately omitted
                          "--claim-collisions", "0", "--rebase-events", "0",
                          "--roborev-findings", "0", "--rework", "0",
-                         "--from-json", _from_json_file(tmp)])
+                         "--from-json", _from_json_file(tmp, 1)])
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
     def test_record_still_refuses_each_omitted_required_counter(self):
@@ -509,7 +517,7 @@ class GateNotRunTests(unittest.TestCase):
                     ledger = tmp / "ledger.jsonl"
                     argv = ["record", "--ledger", str(ledger),
                             "--issue", "1", "--pr", "2", "--slug", "x", "--gate", "pass",
-                            "--from-json", _from_json_file(tmp)]
+                            "--from-json", _from_json_file(tmp, 1)]
                     for counter in dt.REQUIRED_COUNTERS:
                         if counter != omit:
                             argv += [f"--{counter.replace('_', '-')}", "1"]
@@ -528,7 +536,7 @@ class GateNotRunTests(unittest.TestCase):
                           "--gate", "not-run", "--gate-runs", "0",
                           "--claim-collisions", "0", "--rebase-events", "0",
                           "--roborev-findings", "0", "--rework", "0",
-                          "--from-json", _from_json_file(tmp)])
+                          "--from-json", _from_json_file(tmp, 1)])
             self.assertEqual(rc, 0)
             rec = json.loads(ledger.read_text().splitlines()[0])
             for counter in dt.REQUIRED_COUNTERS:
@@ -610,7 +618,7 @@ class SliceDeliveryTests(unittest.TestCase):
         self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
 
     def _ghfields(self, tmp, closed_at, merged_at="2026-06-10T03:00:00Z", name="ghfields.json",
-                  state_reason="", pr_closes_this_issue=False):
+                  state_reason="", pr_closes_this_issue=False, issue=3393):
         p = tmp / name
         fields = {
             "created_at": "2026-06-10T00:00:00Z",
@@ -624,6 +632,8 @@ class SliceDeliveryTests(unittest.TestCase):
             fields["state_reason"] = state_reason
         if pr_closes_this_issue is not _OMIT:
             fields["pr_closes_this_issue"] = pr_closes_this_issue
+        if issue is not _OMIT:
+            fields["issue"] = issue
         p.write_text(json.dumps(fields))
         return str(p)
 
@@ -647,6 +657,7 @@ class SliceDeliveryTests(unittest.TestCase):
         """
         rec = self._committed()
         rec.update({
+            "issue": 3393,
             "created_at": "2026-06-10T00:00:00Z",
             "pr_opened_at": "2026-06-10T01:00:00Z",
             "merged_at": "2026-06-10T03:00:00Z",
@@ -846,6 +857,34 @@ class SliceDeliveryTests(unittest.TestCase):
                 ledger, self._ghfields(tmp, None, pr_closes_this_issue=False), "--slice")))
             self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
 
+    def test_record_refuses_a_payload_built_for_another_issue(self):
+        """A stale or copied --from-json file is the realistic seam error, and it corrupts
+        MORE than one field: a wrong closed_at/created_at misstates the kind and the cycle
+        time, a wrong pr_closes_this_issue disables the window guard. One scalar bound to one
+        flag protects the whole payload — and does not reintroduce two injected operands that
+        must agree with each other."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, issue=9999), "--slice"))
+            msg = str(cm.exception)
+            self.assertIn("built for issue #9999", msg)
+            self.assertIn("--issue is 3393", msg)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_refuses_an_unbound_or_mistyped_payload_issue(self):
+        for bogus in (_OMIT, None, "3393", True, 3393.0, [], {}):
+            with self.subTest(issue=bogus), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(
+                        ledger, self._ghfields(tmp, None, issue=bogus), "--slice"))
+                self.assertIn("issue", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
     def test_record_refuses_an_unmeasured_pr_closes_this_issue(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
@@ -1041,11 +1080,13 @@ class SliceDeliveryTests(unittest.TestCase):
                 ledger = tmp / "ledger.jsonl"
                 gh = tmp / "gh.json"
                 fields = {
+                    "issue": 3393,
                     "created_at": "2026-06-10T00:00:00Z",
                     "pr_opened_at": "2026-06-10T01:00:00Z",
                     "merged_at": "2026-06-10T03:00:00Z",
                     "closed_at": "2026-06-10T04:00:00Z",
                     "priority": "P1", "routing": "oracle", "state_reason": "",
+                    "pr_closes_this_issue": False,
                 }
                 fields[field] = bogus
                 gh.write_text(json.dumps(fields))
@@ -1061,6 +1102,7 @@ class SliceDeliveryTests(unittest.TestCase):
             ledger = tmp / "ledger.jsonl"
             gh = tmp / "gh.json"
             gh.write_text(json.dumps({
+                "issue": 3393,
                 "created_at": "2026-06-10T00:00:00Z",
                 "pr_opened_at": "2026-06-10T01:00:00Z",
                 "merged_at": "2026-06-10T03:00:00Z",
