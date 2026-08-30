@@ -571,12 +571,24 @@ What it guarantees:
   (#3549)**, because the two paths are invisible to each other and a supervisor from an older checkout
   would otherwise co-run in the same worktree. A LIVE holder there refuses the start with a
   `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane "another instance is
-  already running") — remedy: stop that supervisor or upgrade its checkout past #3467. **A holder whose
+  already running") — remedy: stop that supervisor or upgrade its checkout past #3467. **But read the
+  wording: PID NUMBERS ARE REUSED, so the diagnostic only tells you to stop the pid when it CORROBORATED
+  the process as a worker-supervisor** (from `/proc/<pid>/cmdline`, else `ps -o args=`). If it says the
+  identity was not corroborated — or could not be checked at all — the pid is active but may be an
+  unrelated process that inherited the number: **verify what it is before stopping anything.** The
+  refusal itself is unconditional either way; the identity probe changes only what you are told to do,
+  never whether the supervisor starts. **A holder whose
   recorded pid is CONFIRMED DEAD also REFUSES; it is NOT reclaimed (lead ruling, #3549)** — the
-  diagnostic names the legacy path, the recorded pid, the classified state and the exact one-liner to
-  clear it (`rm -rf <legacy path>`), and the remedy is state-specific so a run never tells you to stop a
-  process that is already dead. Anything undeterminable (not a directory, a SYMLINK at either the lock
-  path or its `pid`, no/garbled `pid` file, unreadable) refuses the same way. **This guard DETECTS AND
+  diagnostic names the legacy path, the recorded pid, the classified state and an exact **non-recursive**
+  one-liner to clear it (`rm -f <legacy path>/pid && rmdir <legacy path>`, shell-quoted so it is
+  paste-safe), and the remedy is state-specific so a run never tells you to stop a
+  process that is already dead. That remedy is only printed for a shape the guard **VERIFIED**: the
+  directory must hold exactly one entry, `pid`, and that file exactly one line — so the command clears
+  precisely what was diagnosed and fails loudly if anything else is present, where an `rm -rf` would
+  silently delete contents no supervisor created. Anything undeterminable (not a directory, a SYMLINK at
+  either the lock path or its `pid`, no/garbled `pid` file, an extra entry beside `pid`, more than one
+  line in `pid`, unreadable) refuses the same way — **and carries no deletion instruction at all**, since
+  the shape was never established. **This guard DETECTS AND
   REFUSES: it never renames, deletes, adopts or re-creates the legacy lock, so it cannot corrupt any
   holder's lock, live or dead.** The reclaim it used to perform was removed because a reclaim must be
   able to RESTORE on its abort paths, and restoring a directory-with-contents is not atomic here —
