@@ -1432,7 +1432,7 @@ supervisor_shell_quote() {
 #
 # SCOPED TO THE LEGACY GUARD, deliberately, AND THE RESIDUAL IS WRITTEN RATHER THAN IMPLIED (#3549,
 # roborev job 182 class sweep). `acquire_lock`'s handling of its OWN per-lane lock, below, carries the
-# same three defect shapes this function and `supervisor_pid_identity` fix for the legacy one:
+# same three defect shapes this function fixes for the legacy one:
 #   1. the holder pid is read with `cat` and used UNPARSED — no digit check, no single-line check — so a
 #      garbled or partially-written `pid` makes `kill -0` fail and the lock be RECLAIMED;
 #   2. its liveness test is the plain TWO-VALUED `kill -0`, so an EPERM holder (another user's live
@@ -1497,181 +1497,6 @@ supervisor_pid_liveness() {
     return 0
   fi
   printf 'unknown\n'
-}
-
-# supervisor_identity_names_script <arg>... — 0 if this ARGUMENT VECTOR names `worker-supervisor.sh` as
-# the program it is RUNNING. ONE rule, used by BOTH the procfs and the `ps` probe.
-#
-# A SUBSTRING MATCH IS NOT AN IDENTITY (#3549, roborev job 192 F1). The probe used to corroborate on
-# `worker-supervisor` appearing ANYWHERE in the command line, which is a cheap observable substituted
-# for the property: `vim /x/worker-supervisor.sh`, `grep worker-supervisor …`, a `tail` of its log, or
-# this guard's own diagnostic quoted in a shell all MENTION the path without being the supervisor. The
-# consequence is not cosmetic — `supervisor` is the answer that prints "stop pid N first", so a false
-# corroboration tells an operator to KILL THE WRONG PROCESS.
-#
-# EXACTLY TWO SHAPES CORROBORATE, AND NOTHING IS SKIPPED (#3549, roborev job 194 Medium):
-#   1. argv[0]'s basename is `worker-supervisor.sh`                        — the direct exec;
-#   2. argv[0]'s basename is a known interpreter AND argv[1]'s basename is `worker-supervisor.sh`,
-#      with NOTHING between them — the `bash <script>` form, which is what a `#!/usr/bin/env bash`
-#      shebang leaves in the final exec's argv.
-# Anything else refuses: an option ANYWHERE before the script, a `NAME=VALUE` operand, `-c`, a match in
-# third position or later, an empty vector.
-#
-# WHY THE OPTION-SKIPPING WALK WAS DELETED RATHER THAN TAUGHT OPTION ARITY (#3549, roborev job 194).
-# The previous form skipped options once an interpreter had been seen. That is wrong because SOME
-# OPTIONS CONSUME THE FOLLOWING ARGUMENT: `bash --rcfile /x/worker-supervisor.sh -i` is an INTERACTIVE
-# SHELL whose rcfile happens to be our path, and the walk called it the supervisor — the finding's exact
-# case. The obvious repair is an arity table, and it is the wrong repair: `--rcfile`, `--init-file`,
-# `-O`, `--debugger`, `-c`, `--` and a DIFFERENT set per interpreter, tracked against upstream forever,
-# is a VARIANT LIST THAT DOES NOT CLOSE — the shape CLAUDE.md's standing ruling says to descope rather
-# than keep patching, and this issue has already paid rounds for one. So the rule already written for
-# the `ps` path (two canonical shapes, no skipping) is applied to BOTH paths and the walk is gone.
-#
-# ACCEPTED COST, the same one already accepted for `ps`: `bash -x /x/worker-supervisor.sh` and
-# `env FOO=1 bash /x/worker-supervisor.sh` — genuine supervisors — answer `unconfirmed`. The error
-# direction is the whole point: `unconfirmed` tells an operator to VERIFY (harmless), `supervisor` tells
-# them to STOP A PROCESS (not harmless when it is somebody else's).
-#
-# THIS RULE IS ASKED OF ONE PROBE ONLY, AND THE INPUT MUST BE A TRUE ARGUMENT VECTOR (#3549, roborev
-# job 196 F1). `/proc/<pid>/cmdline` is NUL-separated and therefore splits faithfully; that is the only
-# source this helper may be fed. A `ps -o args=` rendering is space-joined with no escaping, so
-# splitting it can FABRICATE argv positions as well as lose them — the reason `supervisor_pid_identity`
-# no longer has a `ps` fallback at all. The counter-example and the wrong argument it replaces are
-# recorded at that removal site; do not feed a split `ps` string in here.
-supervisor_identity_names_script() {
-  local base
-  if [[ "$#" -lt 1 ]]; then
-    return 1
-  fi
-  base="${1##*/}"
-  if [[ "$base" == "worker-supervisor.sh" ]]; then
-    return 0
-  fi
-  case "$base" in
-    bash | sh | dash | zsh | ksh | ksh93 | mksh | env) ;;
-    *) return 1 ;;
-  esac
-  if [[ "$#" -lt 2 ]]; then
-    return 1
-  fi
-  base="${2##*/}"
-  [[ "$base" == "worker-supervisor.sh" ]]
-}
-
-# supervisor_pid_identity <pid> — echo `supervisor`, `unconfirmed` or `unprobeable`. THREE-VALUED,
-# DIAGNOSTIC ONLY, and it NEVER decides whether to refuse (#3549, roborev job 182 Medium).
-#
-# PID NUMBERS ARE REUSED. A recorded pid that is ALIVE is not necessarily the supervisor that recorded
-# it: the original can have exited and the kernel handed the number to something unrelated. The REFUSAL
-# does not care and must not — a live recorded pid refuses whatever the process turns out to be,
-# because an unverifiable identity must never become a reason to PROCEED. What DOES depend on this is
-# the operator-facing WORDING: "stop pid N" aimed at an unrelated process is an instruction to kill the
-# wrong thing, so the advice is only given when the identity was actually corroborated.
-#
-# Corroboration = the process's own command line, PARSED INTO ARGUMENTS, naming `worker-supervisor.sh`
-# as the program it is running — see `supervisor_identity_names_script`, the single rule both probes
-# ask (two canonical argv shapes, no option skipping).
-# NEVER CLAIM CORROBORATION THAT WAS NOT OBTAINED, so the three answers are kept distinct:
-# `unconfirmed` means we READ a command line and it did not identify the program as ours (an
-# affirmative non-identification), `unprobeable` means we could not look at all — no readable procfs
-# entry, or a procfs read that FAILED OR CAME BACK EMPTY (a hidepid container, a process that exited
-# mid-probe, a kernel thread, or a host with no procfs at all, e.g. macOS). An unmeasured read is NEVER
-# reported as `unconfirmed`: that would claim a non-match nobody observed. IDENTITY IS PROCFS-ONLY —
-# there is no `ps` fallback, for the reason recorded at the fall-through at the end of this function.
-# Both get cautious wording; only `supervisor` gets the "stop it" advice.
-supervisor_pid_identity() {
-  local pid="${1:-}" part="" read_ok=no
-  local -a argv=()
-  case "$pid" in
-    '' | *[!0-9]* | 0*) printf 'unprobeable\n'; return 0 ;;
-  esac
-  # procfs first: `/proc/<pid>/cmdline` is NUL-separated and readable for ANY user's process on a
-  # default Linux, which is exactly the EPERM case the liveness probe cares about. THE NUL IS THE
-  # POINT: it is the only faithful argument boundary, and a path may legitimately contain spaces, so
-  # the fields are collected into an ARRAY here rather than joined into a string (joining is what made
-  # the old substring test possible in the first place). Read with `-d ''` in a loop rather than
-  # `tr`/`mapfile -d`: no external command is assumed present, and the loop form works on the bash 3.2
-  # this script still supports. The `|| [[ -n "$part" ]]` tail keeps a final field that is not
-  # NUL-terminated.
-  #
-  # THE READ'S SUCCESS IS TRACKED, BECAUSE `unconfirmed` IS AN AFFIRMATIVE CLAIM (#3549, roborev job
-  # 185 F3). `-r` was true a moment ago; the process can exit between that test and the open, and a
-  # suppressed open failure previously left `$args` empty and fell into `unconfirmed` — which asserts
-  # "we READ a command line and it did not match" about a read that never happened. That is the
-  # unmeasured state wearing the affirmative one's clothes, and it is exactly what the third value
-  # exists to prevent. So an open/read failure is NOT a verdict here: it falls through to the `ps`
-  # probe below, and if that cannot answer either the function returns `unprobeable`.
-  #
-  # `2>/dev/null` PRECEDES the input redirection deliberately: redirections are applied left to right,
-  # so with the input first bash prints its own "No such file or directory" to a stderr that is not yet
-  # discarded. Order-dependent and silent if reversed.
-  if [[ -r "/proc/$pid/cmdline" ]]; then
-    if { while IFS= read -r -d '' part || [[ -n "$part" ]]; do
-           argv+=("$part")
-           part=""
-         done; } 2>/dev/null <"/proc/$pid/cmdline"; then
-      read_ok=yes
-    fi
-    if [[ "$read_ok" == yes && "${#argv[@]}" -gt 0 ]]; then
-      if supervisor_identity_names_script "${argv[@]}"; then
-        printf 'supervisor\n'
-        return 0
-      fi
-      # We LOOKED, there WAS a command line, and the program it names is not ours. That is the
-      # affirmative non-identification.
-      printf 'unconfirmed\n'
-      return 0
-    fi
-    # NO VERDICT FROM PROCFS. Two states land here and they are deliberately treated alike:
-    #   - the open/read FAILED (tracked above);
-    #   - the read succeeded and produced NOTHING.
-    # An EMPTY result is AMBIGUOUS — a kernel thread and a process that rewrote its own argv both have
-    # an empty `cmdline`, and so does a read that errored mid-stream, which the `read` builtin cannot
-    # distinguish from EOF. Under the affirmative-measurement rule an ambiguous state must not take the
-    # affirmative branch, so an empty command line is NOT reported as a non-match: the verdict is
-    # `unprobeable`. (It used to fall through to a `ps` probe, whose `[kthreadd]`-style output looked
-    # like a real non-match; that probe is gone — see the fall-through at the end of this function.)
-    # Discard any partial fields on the way — a truncated command line is not evidence in either
-    # direction.
-    argv=()
-  fi
-  # THERE IS DELIBERATELY NO `ps` PROBE FOR IDENTITY, AND ONE MUST NOT BE ADDED BACK — IN EITHER
-  # DIRECTION (#3549, roborev job 196 F1). This is where the `ps -p <pid> -o args=` fallback used to be.
-  # That rendering JOINS the argument vector with spaces and escapes NOTHING, so splitting it back apart
-  # is BOUNDARY-DESTROYING BOTH WAYS:
-  #
-  #   FABRICATION (a false POSITIVE, the finding's example). One true argv element
-  #   `/tmp/worker-supervisor.sh extra` renders EXACTLY like the two-element vector
-  #   `/tmp/worker-supervisor.sh` + `extra`. Split, it puts in position 0 a token that was never argv[0]
-  #   and carves out a basename — `worker-supervisor.sh` — that NO argument ever had. The verdict is
-  #   `supervisor`, the one answer that prints "stop pid N first": an instruction to KILL AN UNRELATED
-  #   PROCESS.
-  #
-  #   ERASURE (a false NEGATIVE). A GENUINE supervisor under a path containing a space
-  #   (`/lanes/my lane/worker-supervisor.sh`) renders as `bash /lanes/my lane/worker-supervisor.sh`,
-  #   whose split holds `/lanes/my` in position 1 and `lane/worker-supervisor.sh` in position 2 —
-  #   neither canonical shape matches. The rendering also destroys a match that WAS there.
-  #
-  # THE ARGUMENT THIS REPLACES WAS WRONG, and it is recorded so nobody restores the probe on it. The
-  # deleted code claimed the split was "a REFINEMENT of the true vector — extra fields can only push the
-  # script out of position 1/2, so a refinement cannot manufacture a match". Splitting does not merely
-  # LOSE structure; it FABRICATES it, and the FABRICATION case above is the counter-example.
-  #
-  # SO `ps` CANNOT SUPPORT A NEGATIVE EITHER, which is why there is no `ps`-negative-only matcher here:
-  # by the ERASURE case a `ps`-derived non-match is exactly as unreliable as a `ps`-derived match, so the
-  # only verdict such a probe could honestly return is `unprobeable` — i.e. it would be a second rule to
-  # maintain that can never say anything this fall-through does not already say. `unconfirmed` would be
-  # the wrong answer: it ASSERTS a non-identification, and nothing here observed one.
-  #
-  # The cost is nil in behaviour: `unprobeable` and `unconfirmed` already produce the SAME cautious
-  # operator advice (verify before stopping anything, do not delete the lock) and differ only in
-  # wording. On a host with no usable procfs, identity is simply not determinable.
-  #
-  # `ps` REMAINS in use for two questions that do NOT depend on argument boundaries: LIVENESS
-  # (`supervisor_pid_liveness` — whether the pid exists at all), and the operator-facing verification
-  # line `ps -p N -o args=` printed by the uncorroborated refusal, where a HUMAN reads the rendering and
-  # can see for themselves where the boundaries fall. Machine parsing is the part that cannot.
-  printf 'unprobeable\n'
 }
 
 # supervisor_legacy_lock_state <path> — classify the legacy lock into EXACTLY one of
@@ -1777,8 +1602,12 @@ supervisor_legacy_lock_state() {
   # or lose its permissions before the open. Both the verdict and the CAUSE TOKEN would then have been
   # wrong in the same direction: an empty `$pid` fell into `pid-not-well-formed:[]`, which states we
   # PARSED the file and its contents were bad. The verdict stays a refusal either way (`unknown` refuses
-  # in every spelling), so this is the diagnostic being made true, not a behaviour change. `2>/dev/null`
-  # precedes the input redirection for the reason recorded at `supervisor_pid_identity`.
+  # in every spelling), so this is the diagnostic being made true, not a behaviour change.
+  #
+  # `2>/dev/null` PRECEDES the input redirection deliberately: redirections are applied left to right,
+  # so with the input first bash prints its own "No such file or directory" to a stderr that is not yet
+  # discarded. Order-dependent and silent if reversed. (This note used to live at
+  # `supervisor_pid_identity`, which was deleted for #3549 job 198 F1; this is now its only site.)
   #
   # The `|| true` on the FIRST read is correctly permissive and stays: `read` returns non-zero at EOF
   # while still ASSIGNING, so a single-line file with no trailing newline is a normal, well-formed lock
@@ -1911,32 +1740,41 @@ supervisor_legacy_lock_guard() {
       ;;
     'live '*)
       pid="${state#live }"
-      # THE REFUSAL IS UNCONDITIONAL; ONLY THE WORDING VARIES (#3549, roborev job 182 Medium). Every
-      # branch below refuses. The identity probe is DIAGNOSTIC ONLY and must never become a reason to
-      # PROCEED — an unverifiable identity is not a licence to start a second supervisor in this
-      # worktree. What it does change is what we TELL AN OPERATOR TO DO, because pid numbers are reused
-      # and "stop pid N" aimed at a process that merely inherited the number is an instruction to kill
-      # the wrong thing.
-      case "$(supervisor_pid_identity "$pid")" in
-        supervisor)
-          supervisor_legacy_lock_refuse "$legacy" "held by a LIVE pre-#3467 supervisor (recorded pid $pid, CORROBORATED: its command line names worker-supervisor)" \
-            "that supervisor is STILL RUNNING — do NOT delete its lock; stop pid $pid first"
-          ;;
-        unconfirmed)
-          # The `ps` invocation is the FOURTH argument, not a parenthetical inside the prose (#3549,
-          # roborev job 185 F2): a command wrapped in prose is not pasteable, and the class of defect
-          # is recorded at `supervisor_legacy_lock_refuse`. This one is read-only, so a mis-paste
-          # could only ever be uninformative — but the rule is about the shape, not this command's
-          # blast radius.
-          supervisor_legacy_lock_refuse "$legacy" "recorded pid $pid is ACTIVE, but its command line does NOT identify it as a worker-supervisor (identity NOT corroborated)" \
-            "pid $pid is running; PID NUMBERS ARE REUSED, so it may be an unrelated process that inherited the number. VERIFY what pid $pid actually is with the next line BEFORE stopping anything, and do NOT delete this lock while it may still be held" \
-            "ps -p $pid -o args="
-          ;;
-        *)
-          supervisor_legacy_lock_refuse "$legacy" "recorded pid $pid is ACTIVE, and its identity could NOT be determined on this host (identity is read from /proc/<pid>/cmdline ONLY, and here it is absent, unreadable or empty; a ps rendering cannot be parsed for identity — #3549)" \
-            "pid $pid is running; PID NUMBERS ARE REUSED and nothing here could confirm what it is. VERIFY what pid $pid actually is BEFORE stopping anything, and do NOT delete this lock while it may still be held"
-          ;;
-      esac
+      # THE REFUSAL IS UNCONDITIONAL, AND THERE IS NOW EXACTLY ONE LIVE WORDING (#3549, roborev job 198
+      # F1). Every live case refuses and every live case says VERIFY FIRST, because THIS GUARD CANNOT
+      # DETERMINE WHAT THE RECORDED PID IS — not "does not", cannot.
+      #
+      # WHAT WAS DELETED, AND WHY IT CANNOT COME BACK. There used to be a `supervisor_pid_identity`
+      # probe that read `/proc/<pid>/cmdline` and, when the argument vector named `worker-supervisor.sh`
+      # as the program being run, printed "CORROBORATED — stop pid N first". The three facts that make
+      # any such corroboration UNSOUND HERE are properties of the data, not of the implementation:
+      #   1. THE LOCK RECORDS ONLY A PID. The pre-#3467 lock directory holds a single `pid` file — no
+      #      start time, no boot id, no lane, no path. So there is NOTHING to bind a process INCARNATION
+      #      to this lock: a pid that is alive may be the recorder, or may be anything the kernel later
+      #      handed that number to.
+      #   2. THE BASENAME IS NOT UNIQUE ON THIS FLEET. Up to four lanes run on one box, each with its
+      #      own `worker-supervisor.sh`. So "this process is running worker-supervisor.sh" does not even
+      #      narrow it to one process, let alone to the holder of THIS lock — the most likely false
+      #      positive is A LIVE SIBLING LANE'S SUPERVISOR.
+      #   3. THE ONLY CONSUMER WAS WORDING. The refusal was identical in every branch, so the probe
+      #      never protected anything; it only chose which sentence to print. Its false positive,
+      #      however, printed "stop pid N first" — an instruction to KILL AN UNRELATED, POSSIBLY
+      #      PRODUCTION, PROCESS. All risk, no benefit.
+      # Together: positive corroboration is unachievable IN PRINCIPLE from what the legacy lock records,
+      # not merely unimplemented. FOUR CONSECUTIVE REVIEW ROUNDS landed inside the probe that tried
+      # (roborev jobs 182, 192, 194, 196, 198) — a substring match, an option-skipping walk, an argv
+      # arity rule, a `ps` rendering — each fixing the previous one's false corroboration and each
+      # introducing the next. That census is the reason this is a DELETION and not a fifth attempt: do
+      # not reintroduce an identity probe for this lock unless the lock itself starts recording
+      # something that binds an incarnation.
+      #
+      # The `ps` invocation is the FOURTH argument, not a parenthetical inside the prose (#3549, roborev
+      # job 185 F2): a command wrapped in prose is not pasteable, and the class of defect is recorded at
+      # `supervisor_legacy_lock_refuse`. This one is read-only, so a mis-paste could only ever be
+      # uninformative — but the rule is about the shape, not this command's blast radius.
+      supervisor_legacy_lock_refuse "$legacy" "recorded pid $pid is ACTIVE (this guard reads the recorded pid and its LIVENESS only; nothing here can determine WHAT that process is, because the legacy lock records a bare pid and nothing that binds a process incarnation to it — #3549)" \
+        "pid $pid is running; PID NUMBERS ARE REUSED, so it may be an unrelated process that inherited the number — and on this fleet SEVERAL LANES run a supervisor with the SAME script name, so even finding that pid $pid is a worker-supervisor.sh would NOT show it to be the one holding THIS lock. VERIFY what pid $pid actually is with the next line BEFORE stopping anything, and do NOT delete this lock while it may still be held" \
+        "ps -p $pid -o args="
       ;;
     'stale '*)
       # STALE = a pre-#3467 supervisor that is GONE left its lock behind. This run REFUSES and removes
