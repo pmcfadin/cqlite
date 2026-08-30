@@ -6,8 +6,10 @@
       actually said (today every non-matching line is discarded).
 - [x] 1.3 Add the calibration helper: `clamp(base × scale, base, cap)` with
       `scale = max(1, observed / quiet_baseline)`; unit-assert `scale == 1` on a quiet observation.
-- [x] 1.4 Add a stage/total budget tracker so the test fails with its own message before nextest's
-      240s hard kill.
+- [x] 1.4 Add a stage/total budget tracker so the test fails with its own message rather than
+      running unbounded. (Originally worded "before nextest's 240s hard kill"; **that premise was
+      verified FALSE in round 7** — nothing runs `cqlite-cli`'s tests under nextest, so the total
+      budget is the ONLY timeout this test has. See "Round 7".)
 - [x] 1.5 Rework `wait_for_line` to return the transcript-bearing outcome instead of a bare `Option`.
 
 ## 2. `sigint_in_writable_session_flushes_before_exit`
@@ -112,6 +114,12 @@ surface, no workflow, no gate component and no doctrine-visible behaviour, so CL
 The round-1/2 stage (d) was `base 25s` where the old code had a flat 60s, and the hung-flush RED
 run failed at exactly **25.0s** — proving the regression, because a silent flush produces no
 progress events, so the stall window is already satisfied and the effective bound IS `derived`.
+
+> **ROUND-7 CORRECTION, read before the table below.** Everything in rounds 3-6 that reasons about a
+> "240s hard kill" rests on a premise verified FALSE in round 7: nothing runs `cqlite-cli`'s tests
+> under nextest, so `.config/nextest.toml`'s slow-timeout never applied here. The DECLARED EXCEPTION
+> rows in the table, and the whole "the sibling's guarantee is weaker" line of argument, were
+> consequences of that fiction. They are retained as history; see "Round 7" for what replaced them.
 
 **Old bound -> new stages mapping (the floor invariant, BY COMPOSITION).** Each group's BASES must
 sum to at least the old bound. Asserted by
@@ -470,3 +478,177 @@ becomes a cargo target, and the test count is unchanged at 10.
 One plant reported `!! PLANT DID NOT APPLY` (a `sed` whose pattern no longer matched after `cargo fmt`
 reflowed the constant onto one line) and was retried. That is rule (b) of the probe method working as
 intended: without it, the run would have read as an assert that did not fire.
+
+## Round 7 — roborev job 224 (3 findings), and THE FALSE PREMISE UNDER ALL SIX EARLIER ROUNDS
+
+### 0. The premise, named first, because it dissolves most of finding 1
+
+**Every round of this change up to and including round 6 was designed around
+"`.config/nextest.toml` sets `slow-timeout = { period = "60s", terminate-after = 4 }`, so this test
+is hard-killed at 240s, and `TEST_TOTAL_BUDGET` must stay under it."** That premise is **FALSE for
+this test**. It originated in the lead's design note (`design.md` D6, now corrected there and in the
+spec's total-budget requirement) and was never checked against the runners.
+
+Verified, independently, before acting on it:
+
+| claim | verification |
+|---|---|
+| `cli-tests` does not use nextest | `scripts/agent-gate.sh` runs plain `cargo test --package cqlite-cli` twice (default features, then `--features write-support`) |
+| the gate's only nextest run is core | the single `cargo nextest run` in `agent-gate.sh` is `--package cqlite-core` |
+| CI does not either | `ci.yml`'s nextest usage is the "Core integration" archive + 3 partitions; its CLI steps are plain `cargo test` and do not run this target at all |
+| nothing wraps the run in a timeout | no `timeout`/`timeout-minutes` applies to `cli-tests`; libtest has no per-test timeout |
+
+**So `.config/nextest.toml` never applied to `graceful_shutdown_tests`, and the total budget was
+squeezed against a limit that does not exist.** That squeeze is what forced the sibling's nominal
+allowances (513s) past the total (230s) — roborev job 224 finding 1 — and it is what generated the
+"DECLARED EXCEPTION" and the "weaker sibling guarantee" that between them consumed three review
+rounds. **The round-3 mapping table above rests on this premise; it is retained as history, and its
+"240s hard kill" column is now known to be fictional.**
+
+Consequence in the other direction, and the reason the total budget is not simply deleted: **it is
+now the ONLY timeout this test has.** A wedged product must still be self-terminated with this
+file's own attributed message rather than hang the `cli-tests` component, so the total stays, sized
+to fit, and bounded above by `MAX_TEST_TOTAL_BUDGET` (900s, anchored on the full gate's own 15-20
+minute wall clock).
+
+### 1. THE STRUCTURAL FIX — a stage owns a DEADLINE
+
+Findings 2 and 3, plus both round-2 findings and round-6's finding 1, are **ONE defect at five
+sites**: `Budget` exposed a `derived: Duration`, every wait site received that same duration fresh,
+and each site was separately responsible for subtracting what the stage had already spent. The sites
+that forgot:
+
+| round | site | what went uncharged |
+|---|---|---|
+| 2 | `select_rows`' `Command::output()` | the whole wait (unbounded, outside the budget) |
+| 4 | the read-side pipe collection | a hardcoded 5s, then a hand-computed remainder |
+| 6 (job 222 f1) | the collection again | a FRESH full `derived` after the child wait |
+| 7 (job 224 f2) | `select_rows`' `wait_timeout` | the child SPAWN |
+| 7 (job 224 f3) | `poll_with_progress` | the progress extension, unaccounted |
+
+Patching the fifth would not have stopped a sixth. So **`derived` is deleted.** A `Budget` now
+carries a `deadline: Instant` fixed when the budget is derived, and **`Budget::remaining()` is the
+ONE place a per-wait timeout is computed**. Every wait — `ChildIo::wait_for`,
+`Child::wait_timeout`, `Receiver::recv_timeout`, the poll — takes its timeout from that method, so:
+
+* a stage cannot double-spend its allowance however many waits it performs;
+* work between deriving the budget and the wait is charged automatically (which is finding 2's fix,
+  and the same fix was applied to stage (a), where the process spawn was also uncharged);
+* `poll_with_progress` no longer takes an `envelope` parameter — that was a sixth separately
+  remembered subtraction at the call site (`let envelope = clock.remaining();`), now subsumed by
+  `StageClock::clip` pulling the deadline in;
+* the arithmetic has ONE well-defined quantity to sum (`Budget::span()`, the declared maximum).
+
+**The progress extension is DECLARED, not removed** (finding 3 notes the extension is correct AC1
+behaviour). `Budget::progress_checked(&stall_window)` returns a `PollBudget` — the only type
+`poll_with_progress` accepts — extending the deadline by exactly one stall window and recording it,
+so `declared_max` counts it. Forgetting it is a **compile** error, not an arithmetic discrepancy.
+The stall window comes from the `PollBudget` too, so the extension the deadline grants and the
+window a stall is judged against are one value and cannot disagree.
+
+**The nominal budget is unchanged by the extension**, which is what keeps the round-3 floor: a
+silent (progress-free) hang still fails at `nominal`, not at `nominal + stall`. Asserted in
+`a_progress_checked_stages_extension_is_inside_its_declared_maximum`, and **measured**: product
+plant B failed at **60.05s**, exactly `T1_EXIT.base`, with `progress observed while polling: NONE`.
+
+### 2. The new totals, and the arithmetic behind them
+
+`declared_max(spec, progress_checked) = spec.cap + if progress_checked { STALL_WINDOW.cap }`.
+Per-test totals replace the single `TEST_TOTAL_BUDGET`, so each test's envelope fits ITS stages:
+
+| test 1 stage | declared max | | test 2 stage | declared max |
+|---|---|---|---|---|
+| (a) session-up | 40s (bare) | | (a) session-up | 40s (bare) |
+| (b) write-ack | 30s | | (b0) write-ack id=0 | 28s |
+| (c) handler-entry | 30s | | (b1..4) write-ack x4 | 70s each = 280s |
+| (d) clean-exit | 85 + 20 = **105s** | | (c) mid-session flush | 70 + 20 = **90s** |
+| (e) durability-read | 35s | | (d) eof-exit | 70 + 20 = **90s** |
+| | | | (e) durability-read | 25s |
+| **sum** | **240s** | | **sum** | **553s** |
+| `T1_TOTAL_BUDGET` | **270s** (30s spare) | | `T2_TOTAL_BUDGET` | **600s** (47s spare) |
+
+`NON_STAGE_HEADROOM` = 20s (TempDir create + recursive teardown, schema write, `libc::kill`, JSON
+parse, row assertions — all sub-millisecond measured, so this is generous by >1000x). The asserts
+are `sum <= total`, `sum + headroom <= total`, and `total <= MAX_TEST_TOTAL_BUDGET`.
+
+**The totals are DECLARED, not derived from the sums.** A total computed as `sum + headroom` would
+make the fit assert tautological — the artifact-as-its-own-oracle shape this issue has now hit three
+times (the baseline-relative calibration test, the whole-file `sed` plant, the derived anchor).
+
+**600s is a maximum, not a runtime.** It is reachable only on a host that calibrates every stage to
+its cap AND then consumes it; measured runtime is 0.3s quiet and 1.3s at load average 116, and a
+genuinely hung flush still fails at 60s. Under the OLD code the sibling's seven 60s bounds were 420s
+nominal with no harness kill to cut them short, so 600s is the FIRST total bound that test has ever
+had, not a new ceiling.
+
+**Deleted, not reworded:** `the_nominal_cap_sums_stay_under_the_total_budget`'s inverted
+`sibling_nominal > TEST_TOTAL_BUDGET` assert, its three-part weaker fallback property, the
+`NEXTEST_HARD_KILL` assert, and the surrounding "the sibling's guarantee is genuinely WEAKER"
+prose. The inverted assert's own message told a future editor to promote the sibling if the
+arithmetic ever fit; that instruction has been obeyed. Both tests are now asserted identically by
+`every_stages_declared_maximum_fits_its_test_total_budget`. `StageClock::clip` and `Budget::starved`
+survive as a **backstop** (non-stage work is bounded only by the headroom) and are documented as
+such rather than as the primary bound.
+
+### 3. Four stale claims the correction left behind
+
+`grep -rn "240\|nextest\|hard kill"` across the change after the lead's `ec4b85eb0`:
+
+* `spec.md`'s delta table still named the requirement *"…below the harness hard-kill"* after the
+  requirement itself had been renamed;
+* the floor-invariant requirement conditioned the GROUP DEADLINE on a group's nominal sum being
+  "not simultaneously realizable against the harness hard-kill" — false in both halves now, so the
+  group deadline is restated as a backstop and the per-operation floor as unconditional (the
+  stronger of the two);
+* `proposal.md` cited `.config/nextest.toml`'s `retries = 0` as the mechanism for a non-goal that
+  nextest does not govern here (the non-goal holds a fortiori — there is no retry mechanism at all);
+* **`select_rows`' stage (e) panic told its reader the message appeared "instead of the harness's
+  240s hard kill".** A live failure message asserting a mechanism that does not exist is AC2's own
+  defect class, inside the change that removes it.
+
+### Round-7 verification
+
+10/10 → **13/13** green (3 new asserts), 0.50s quiet. `cargo fmt` clean;
+`RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --tests --features write-support` clean;
+`scripts/tests/check-no-wallclock-asserts.sh` OK (the deadline test's only comparison is in the
+overshoot-safe direction — a sleep can only make "time was charged" MORE true — and the accessor is
+named `spent()` rather than `elapsed()` so the guard's identifier is not shadowed by a legitimate
+comparison).
+
+**Product plants**, each applied to a COMMITTED tree in a throwaway `git worktree add --detach`,
+with the planted hunk printed before the run (probe rules (a)-(c) below); both worktrees removed,
+the lane tree never mutated:
+
+| plant | result |
+|---|---|
+| handler removed (the `ctrl_c` branch of `run_writable_interactive` deleted) | **RED at stage (c) handler-entry** in 0.01s, naming the awaited substring `"Received Ctrl-C"`, the budget derivation, the pipes-at-EOF observation and the three candidate causes without selecting one |
+| flush hung (600s sleep before `engine.close()`) | **RED at stage (d) clean-exit after 60.05s** — exactly `T1_EXIT.base`, i.e. the old bound, NOT extended by the stall window, with `progress observed while polling: NONE` and the statement that the handler-entry marker WAS observed 209.178µs after SIGINT |
+
+**Assert plants** (producer-only, committed tree, plant-application printed; every one names the
+line it fired at so the REASON is verified, not just the outcome):
+
+| plant | red test | assert |
+|---|---|---|
+| `remaining()` returns `span()` (ignores what the stage spent) | `a_stages_waits_share_one_deadline_so_none_can_double_spend` | `only 0ns of 2s was charged across a 200ms gap` |
+| `progress_checked` declares the extension but does not extend the deadline | `a_progress_checked_stages_extension_is_inside_its_declared_maximum` | `the declared maximum must be nominal + one stall window: 60s vs 65s` |
+| `declared_max` drops the extension | same, **and** `every_stages_declared_maximum_fits_its_test_total_budget` | `declared_max must ADD exactly one stall window` |
+| `T2_ACK_LATER` cap 70→120 (sum 753s) | `every_stages_declared_maximum_fits_…` | the `sum <= total` fit assert (line 915) |
+| `T2_TOTAL_BUDGET` back to **230s** (the finding-1 regression itself) | `every_stages_declared_maximum_fits_…` | the same fit assert |
+| `clip_poll` returns its input unclipped | `the_clock_clips_a_progress_checked_stages_extension_too` | `clipped_to_total: false` in the printed `Budget` |
+| `T1_EXIT` base 60→25 (the round-3 regression) | `no_wait_is_tighter_than_the_bound_it_replaced` | the (c)+(d) group floor (line 802) |
+| an independent literal `ACK_QUIET_BASELINE` (the round-6 regression) | `the_baselines_sit_just_above_the_measured_quiet_noise_floor` | `25ms is 17.86x its binding anchor … over the 10x limit` |
+
+**What the deadline refactor does NOT close, stated because it is the honest boundary.** The
+invariant is now true BY CONSTRUCTION rather than by assert: no field hands out the full span as a
+timeout, so a call site cannot receive one by accident. But `Budget::span()` is public (the poll's
+failure message reports the declared maximum), and a future edit that deliberately passed
+`budget.span()` to a wait would compile and no unit test would see it. That is strictly better than
+five sites each needing to remember a subtraction — the family has ONE remaining site and an assert
+covers it (plant 1 above) — but it is not the same as impossible, and a source-shape lint over the
+call sites is the descoped class (`CLAUDE.md`, #3499), not something to add here.
+
+**File sizes after round 7:** `graceful_shutdown_tests.rs` 438, `graceful_shutdown_support/mod.rs`
+719, `graceful_shutdown_support/budgets.rs` **1355** (limit 1500). The budget file has ~145 lines of
+headroom; a round 8 of comparable size would need another split by responsibility (the natural seam
+is the calibration anchors/baselines and their four guards, ~250 lines, versus the clock + deadline
+layer).
