@@ -2019,7 +2019,7 @@ apply_fixture_preflight() {
 # tail_latency_harness), which also cover dead_cache_delete_tests (basic-types.cql),
 # observability_correctness (basic-types.cql) and cqlite-cli's export_csv bench
 # (collections.cql).
-CANONICAL_SCHEMA_FILES="basic-types.cql da-test.cql time-series.cql wide-table-bti.cql collections.cql wide-rows.cql"
+CANONICAL_SCHEMA_FILES="basic-types.cql da-test.cql oa-test.cql write-test.cql time-series.cql wide-table-bti.cql collections.cql wide-rows.cql"
 # Stamped into the SUMMARY on a successful check so the pasted block shows POSITIVELY
 # that the schemas root was validated, not merely that nothing complained.
 SCHEMAS_LINE=""
@@ -2102,10 +2102,32 @@ _gate_checkout_test_data_dir() {
 # trimmed into `/abs`. The test is a pure-bash pattern, not `tr`, so it too is
 # substitution-free.
 _gate_schemas_override_present() {
-  case "${CQLITE_SCHEMAS_ROOT:-}" in
-    *[![:space:]]*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local _v="${CQLITE_SCHEMAS_ROOT:-}"
+  # Strip the UNICODE WHITE_SPACE set by explicit substitution. Two properties matter and
+  # neither is available from `[[:space:]]`:
+  #   * LOCALE-INDEPENDENT -- these are exact byte substitutions of each character's UTF-8
+  #     encoding, not a character class the C library reinterprets per locale;
+  #   * IT IS RUST'S SET -- `char::is_whitespace` (hence `str::trim()`, hence
+  #     `resolve_schemas_root`) is exactly the Unicode White_Space property. Listing it
+  #     here makes the shell, Node and Rust resolvers agree BY CONSTRUCTION rather than by
+  #     one mirroring a measurement of another.
+  # U+FEFF is deliberately absent: Unicode removed it from White_Space, so Rust keeps a
+  # BOM-only value as present and so do we.
+  #
+  # The escapes are RAW UTF-8 BYTES (`$'\xNN...'`), not `$'\uXXXX'`: bash's \u expansion
+  # is ITSELF locale-dependent and under LC_ALL=C produced something that matched nothing,
+  # so the first cut of this fix still diverged in the C locale. Byte escapes are exact
+  # everywhere, which is the whole point of the change.
+  _v=${_v//[$' \t\n\v\f\r']/}
+  for _wsc in \
+              $'\xc2\x85' $'\xc2\xa0' $'\xe1\x9a\x80' $'\xe2\x80\x80' $'\xe2\x80\x81' \
+              $'\xe2\x80\x82' $'\xe2\x80\x83' $'\xe2\x80\x84' $'\xe2\x80\x85' $'\xe2\x80\x86' \
+              $'\xe2\x80\x87' $'\xe2\x80\x88' $'\xe2\x80\x89' $'\xe2\x80\x8a' $'\xe2\x80\xa8' \
+              $'\xe2\x80\xa9' $'\xe2\x80\xaf' $'\xe2\x81\x9f' $'\xe3\x80\x80'
+    do
+    _v=${_v//"$_wsc"/}
+  done
+  [ -n "$_v" ]
 }
 
 # _gate_schemas_override_reject: echoes a non-empty REASON when an override is present but
@@ -2116,11 +2138,31 @@ _gate_schemas_override_present() {
 # CQLITE_SCHEMAS_ROOT rejected` for EVERY rejection — a FALSE message for a
 # control-character value, and untested because the round-3 coverage went through the pure
 # hook and never saw the real emit (spec-auditor, AC (b) partial).
+# _gate_has_control_char <value>: rc 0 iff <value> contains a Unicode Cc control --
+# C0 (U+0001..U+001F), DEL (U+007F) or C1 (U+0080..U+009F).
+#
+# LOCALE-INDEPENDENT, which `[[:cntrl:]]` is NOT (roborev #3493 round 48). Measured: under
+# `LC_ALL=C` the shell sees the UTF-8 bytes of a C1 control as two ordinary characters, so
+# `*[[:cntrl:]]*` MISSED U+0085 and U+009C -- while the node binding's `/\p{Cc}/u` rejects
+# them in every locale. The gate would certify a schemas root node then refuses, and the
+# component fails AFTER the preflight said it was fine. Same divergence class as the
+# whitespace predicate in round 46, and fixed the same way: raw UTF-8 BYTE escapes under a
+# pinned `LC_ALL=C`, never `\uXXXX'` (whose expansion is itself locale-dependent).
+#
+# Bracket ranges are BYTEWISE only in the C locale, so the locale is pinned for the test
+# rather than assumed. C1 is matched as its two-byte UTF-8 form 0xC2 0x80..0x9F.
+_gate_has_control_char() {
+  LC_ALL=C bash -c '
+    case "$1" in
+      *[$'"'"'\x01'"'"'-$'"'"'\x1f'"'"']*|*$'"'"'\x7f'"'"'*) exit 0 ;;
+      *$'"'"'\xc2'"'"'[$'"'"'\x80'"'"'-$'"'"'\x9f'"'"']*)    exit 0 ;;
+    esac
+    exit 1' _ "$1"
+}
+
 _gate_schemas_override_reject_kind() {
   _gate_schemas_override_present || return 0
-  case "${CQLITE_SCHEMAS_ROOT:-}" in
-    *[[:cntrl:]]*) printf '%s' 'control-chars'; return 0 ;;
-  esac
+  _gate_has_control_char "${CQLITE_SCHEMAS_ROOT:-}" && { printf '%s' 'control-chars'; return 0; }
   _gate_schemas_override_is_utf8 || { printf '%s' 'non-utf8'; return 0; }
   case "${CQLITE_SCHEMAS_ROOT:-}" in
     /*) return 0 ;;
@@ -2183,11 +2225,10 @@ _gate_schemas_override_reject() {
   # legitimate schemas root, and admitting it is what let `$( )`-stripping diverge the two
   # mirrors (finding 2 above). Rejecting outright keeps them aligned without relying on
   # every future consumer avoiding command substitution.
-  case "${CQLITE_SCHEMAS_ROOT:-}" in
-    *[[:cntrl:]]*)
-      printf '%s' "CQLITE_SCHEMAS_ROOT must not contain control characters (newline/CR/tab), got $(printf '%q' "${CQLITE_SCHEMAS_ROOT:-}")"
-      return 0 ;;
-  esac
+  if _gate_has_control_char "${CQLITE_SCHEMAS_ROOT:-}"; then
+    printf '%s' "CQLITE_SCHEMAS_ROOT must not contain control characters (C0/DEL/C1, e.g. newline/CR/tab/U+0085), got $(printf '%q' "${CQLITE_SCHEMAS_ROOT:-}")"
+    return 0
+  fi
   _gate_schemas_override_is_utf8 \
     || { printf '%s' "CQLITE_SCHEMAS_ROOT must be valid UTF-8, got $(printf '%q' "${CQLITE_SCHEMAS_ROOT:-}")"; return 0; }
   case "${CQLITE_SCHEMAS_ROOT:-}" in
@@ -6484,7 +6525,7 @@ run_node_bindings() {
   fi
 
   local -a census=()
-  census+=("npm ci + npm run build + npm test — the WHOLE jest suite, #3522")
+  census+=("npm ci + npm run build + npm run typecheck + check-dataset-manifest.sh + npm test — the WHOLE jest suite, #3522/#3493")
   census+=("  supersedes the #1255 narrowing to 1 of 27 files; node-ci.yml is required-EXEMPT on the")
   census+=("  grounds that THIS component is the merge-gating half, which was true of 1 file in 27.")
   census+=("  fixtures: $fixture_note")
@@ -6558,9 +6599,21 @@ run_node_bindings() {
       cd "'"$REPO_ROOT"'/bindings/node"
       if [ -f package-lock.json ]; then npm ci; else npm install; fi
       npm run build
+      # npm run typecheck (#3493). node-ci.yml runs it as an ALWAYS-RUN PR smoke job, and
+      # this component is the declared merge-gating half of that workflow -- so leaving it
+      # out left the same kind of hole #3522 closed for the jest suite, one job over. It
+      # also exercises the SHIPPED index.d.ts declarations, which no jest test does: a
+      # binding can pass every runtime test while its published types are wrong.
+      #
+      # In STEP 1, beside build, because it needs no corpus: it must run (and fail closed)
+      # even on a host where the dataset half cannot.
+      #
+      # NOTE: no apostrophes in this comment. It sits inside a single-quoted bash -c
+      # string, so one apostrophe ends the string and the script stops parsing.
+      npm run typecheck
       ./node_modules/.bin/jest --listTests > "$CQLITE_LIST_FILE"' >>"$log" 2>&1; then
     status=FAIL
-    echo "--- [$name] FAILED (npm ci / npm run build / jest --listTests); last 40 lines of $log ---"
+    echo "--- [$name] FAILED (npm ci / npm run build / npm run typecheck / jest --listTests); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -6739,6 +6792,51 @@ run_node_bindings() {
   fi
   echo ">>> [$name] suite set RECONCILED: $suite_n *.test.js file(s) — two INDEPENDENT oracles agree (recursive find over __test__/ vs ./node_modules/.bin/jest --listTests); neither alone could detect a config exclusion (#3522 D1)"
   echo "suite set RECONCILED: $suite_n *.test.js file(s) — independent recursive find over __test__/ AGREES with ./node_modules/.bin/jest --listTests (symmetric difference empty)" >> "$log"
+
+  # STEP 1b — CORPUS COMPLETENESS, before the suite runs (#3493).
+  #
+  # A DIFFERENT QUESTION from #3522's suite-execution census, and neither answers the
+  # other. That census asks "does every test FILE run"; this asks "is the CORPUS those
+  # files read actually complete". A partial extraction leaves a table half-fetched, every
+  # suite still runs, and the parity cases derive their table set FROM DISK -- so the
+  # missing tables simply are not enumerated and the suite is green over a corpus that is
+  # not there. #3522's per-suite guard cannot see it either: those suites DID do work.
+  #
+  # Measured against the real node binding, on an otherwise intact generation:
+  #   * a zero-length CompressionInfo.db or Statistics.db -> SELECT returns 0 ROWS,
+  #     silently. Not an error -- an empty result set, which is exactly the
+  #     "0-rows-when-present" failure this repo says must never pass.
+  #   * a second generation whose Data.db is well-formed garbage -> the reader THROWS.
+  #
+  # Runs only when the dataset half is going to run: under the #2078 opt-out the component
+  # has already SKIPped above, so this is never reached with a deliberately absent corpus.
+  # Exit 9 is the script RESERVED corpus verdict; anything else is a tooling failure and is
+  # reported as such rather than being read as a judged corpus.
+  local _dm_rc=0
+  bash "$REPO_ROOT/test-data/scripts/check-dataset-manifest.sh" \
+    "$CQLITE_DATASETS_ROOT" >>"$log" 2>&1 || _dm_rc=$?
+  if [ "$_dm_rc" -ne 0 ]; then
+    status=FAIL
+    if [ "$_dm_rc" -eq 9 ]; then
+      echo "--- [$name] FAILED: the corpus at $CQLITE_DATASETS_ROOT/sstables is INCOMPLETE."
+      echo "    Every jest suite would still RUN and could still be green: the parity cases derive"
+      echo "    their table set from disk, so a missing table is simply never enumerated. Remedy:"
+      echo "    bash test-data/scripts/fetch-datasets.sh, or AGENT_GATE_ALLOW_MISSING_FIXTURES=1 to"
+      echo "    opt out visibly (which SKIPs this component rather than passing it). Details in $log."
+    else
+      echo "--- [$name] FAILED: check-dataset-manifest.sh exited $_dm_rc — neither success nor its"
+      echo "    reserved incomplete-corpus code 9. That is a TOOLING failure, not a corpus verdict,"
+      echo "    and the #2078 opt-out deliberately does not excuse it: the opt-out excuses missing"
+      echo "    fixtures, not an unanswered question. Details in $log."
+    fi
+    tail -20 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  echo ">>> [$name] corpus complete: check-dataset-manifest.sh verified every expected table under $CQLITE_DATASETS_ROOT/sstables (#3493)"
 
   # STEP 2 — run them.
   # `env "${fixture_env[@]}"` FIRST, because `env`'s -u options must precede any
@@ -10180,6 +10278,21 @@ run_tooling_tests() {
   # needed, always runs. Mechanizes #1990 — asserts cqlite-flight/Dockerfile has
   # exactly one `FROM rust:` line matching rust-toolchain.toml's channel. A
   # failure FAILs the component, mirroring the keyspace-scoping guard.
+  # #3493: the dataset-corpus completeness checker. Dataset-free, network-free — it builds
+  # its own synthetic corpora and never touches CQLITE_DATASETS_ROOT except through cases
+  # that explicitly need a real one.
+  echo ">>> [$name] bash scripts/tests/test_check_dataset_manifest.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_dataset_manifest.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (test_check_dataset_manifest.sh); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   echo ">>> [$name] bash scripts/tests/test_check_dockerfile_rust_pin.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh" >>"$log" 2>&1; then
     status=FAIL

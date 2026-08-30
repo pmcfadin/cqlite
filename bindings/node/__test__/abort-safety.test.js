@@ -58,7 +58,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { MODES, sourceTableDir, makeCorruptFixture } = require('./corrupt-fixture.js');
+const { MODES, classifyTableDir, makeCorruptFixture } = require('./corrupt-fixture.js');
 
 const MODULE_PATH = path.resolve(__dirname, '..', 'lib', 'index.js');
 
@@ -149,16 +149,17 @@ function requireFixturesStrict() {
  * @returns {{status: 'ok'|'broken'|'absent', reason?: string}}
  */
 function classifySource() {
-  const sstables = global.testPaths.SSTABLES_DIR;
-  const src = sourceTableDir(sstables);
-  if (src === null) {
-    return { status: 'absent', reason: `No test_basic.simple_table SSTable under ${sstables} (issue #1437)` };
-  }
-  const data = path.join(src, 'nb-1-big-Data.db');
-  if (fs.statSync(data).size === 0) {
-    return { status: 'broken', reason: `Source ${data} present but empty (issue #1437)` };
-  }
-  return { status: 'ok' };
+  // DELEGATED to corrupt-fixture.js (roborev #3493 round 52). This used to ask
+  // `sourceTableDir` for a directory and then size-check the Data.db itself -- but round 48
+  // gave that function a nonempty-regular-file filter, so an unusable Data.db started
+  // returning `null` and the size check below could never be reached: a truncated fixture
+  // classified as `absent` and, in a non-strict run, SKIPPED instead of hard-failing.
+  //
+  // The three-valued `classifyTableDir` is the single place that distinction now lives, so
+  // the two cannot drift apart again. It also recognises damage this check never could --
+  // a Data.db that is a directory or a dangling symlink, not just a zero-length one.
+  const c = classifyTableDir(global.testPaths.SSTABLES_DIR);
+  return c.status === 'ok' ? { status: 'ok' } : { status: c.status, reason: c.reason };
 }
 
 /**

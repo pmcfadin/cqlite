@@ -149,7 +149,20 @@ exempt:
     reason: Docker-backed live-cell parity lane; not merge-gating today.
     issue: "#2910"
   - workflow: node-ci.yml
-    reason: "Node binding lane; the merge-gating half is the local gate's node-bindings component, which since #3522 runs the WHOLE jest suite (it ran 1 of 27 files before), plus binding-rust-tests for cqlite-node's Rust unit tests, which ran nowhere. The multi-platform build matrix is release coverage, not merge-gating."
+    reason: >-
+      Node binding lane; the merge-gating half is the local gate's node-bindings
+      component, which since #3522 runs the WHOLE jest suite (it ran 1 of 27 files
+      before), plus binding-rust-tests for cqlite-node's Rust unit tests, which ran
+      nowhere. Since #3493 it also runs `npm run typecheck` (this workflow's
+      always-run PR smoke job, and the only thing that exercises the shipped
+      index.d.ts) and pairs `npm test` with check-dataset-manifest.sh, which checks
+      the CORPUS is complete rather than that the suite ran — the parity cases derive
+      their table set from disk, so a partial extraction is green by omission. The
+      multi-platform build matrix is release coverage, not merge-gating.
+      KEEP THIS ENTRY AND run_node_bindings IN STEP: an exemption that defers to a
+      local component is only as true as that component's scope, and #1255's narrowing
+      to 1 file in 27 is what made this entry false for ~2 days of a deterministic
+      main-red without blocking a merge.
     issue: "#2910"
   - workflow: observability-gate.yml
     reason: Observability correctness plus label-gated overhead bench; overhead is advisory.
