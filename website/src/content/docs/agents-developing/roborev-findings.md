@@ -621,7 +621,21 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    `verdict` field** used to fall through to a branch keyed on the reviewer's exit code and read `UNKNOWN`,
    so the gate alone would have false-FAILed **every clean recheck**; a recheck now re-asserts findings from
    the record's own review text (the transcript in that mode), scoped to the findings block, and reports
-   `UNKNOWN` when that block could not be measured at all.
+   `UNKNOWN` — never `NONE` — whenever that reconstruction cannot support a positive claim.
+
+   **And that reconstruction had the same defect one layer down, caught in review.** `review-completed`
+   deliberately ACCEPTS a **headerless** findings review — a bare `**Severity**:` line, `[High]`,
+   `Medium:` — because its allow-list was widened to stop false-FAILing genuine reviews from agents that
+   emit that shape. The findings-block extraction needs a heading, so for such a transcript the block is
+   EMPTY: "0 markers in the block" meant *"no block was found"*, not *"no findings"*, and the fallback
+   read it as an affirmative `NONE` and passed a findings-bearing recheck. `NONE` is now sayable only
+   when the marker count is zero across the **whole transcript** as well. A marker sitting OUTSIDE any
+   findings block stays `UNKNOWN`, because a headerless finding and a clean review *quoting* a severity
+   token are indistinguishable — and a whole-transcript scan was rejected on #2964 round 5 for exactly
+   the false-`PRESENT` this refuses to guess at. **Ambiguity resolves to the failing value, never to
+   either verdict**, and the widened scan is scoped to this one branch: every other branch has an
+   independent affirmative signal (a structured verdict, or a reviewer's 0 exit) and uses the block
+   count only to detect a contradiction, so widening those would false-FAIL ordinary clean reviews.
 
    **Two transferable lessons.** (1) *Delegating a key's failure to its neighbour is a latent false PASS* —
    the coupling is invisible while both keys are populated by the same event and evaporates in the first mode

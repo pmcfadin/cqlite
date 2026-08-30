@@ -4424,6 +4424,39 @@ assert_says 'case (fd8) and the recheck says the record carried no review text' 
   'NOTICE: recheck: the job record for .4656. carries no review text'
 reset_stub
 
+printf '== (fd9) #3564 roborev r1 High: a HEADERLESS findings recheck cannot read NONE ==\n'
+# THE FIX'S OWN DEFECT CLASS, ONE LAYER DOWN. `review-completed`'s allow-list deliberately ACCEPTS a
+# findings review with NO `Findings` heading (a bare `**Severity**:` line, `[High]`, `Medium:`) —
+# it was widened to stop false-FAILing genuine reviews from agents that emit that shape. But the
+# findings-BLOCK extraction needs a heading, so for such a transcript the block is EMPTY, and the
+# recheck fallback read 0 markers as an AFFIRMATIVE `NONE` and PASSED a findings-bearing recheck.
+# `NONE` is now sayable only when the marker count is zero across the WHOLE transcript too.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT='- **Severity**: High\n- Problem: a headerless finding, with no Findings heading anywhere.\n## Summary\n1 finding.'
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd9) a headerless findings recheck does NOT pass' FAIL 1
+assert_says 'case (fd9) the state is UNKNOWN, not NONE' '^findings: UNKNOWN$'
+assert_says 'case (fd9) and the cause names the ambiguity rather than claiming cleanliness' \
+  'severity marker\(s\) that are OUTSIDE any findings block'
+assert_lacks 'case (fd9) NONE is never reported for a marker-bearing transcript' '^findings: NONE$'
+reset_stub
+
+printf '== (fd9b) #3564: the bracket and `Medium:` headerless shapes are covered too ==\n'
+# The allow-list names three headerless shapes; a fix that only recognised `**Severity**:` would leave
+# the other two reaching NONE. Asserted per shape rather than trusting one to stand for the family.
+for _fd9_shape in '[High] a bracketed headerless finding.' 'Medium: a labelled headerless finding.'; do
+  reset_stub
+  STUB_ANNOUNCE_SHA="$w_head"
+  STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+  STUB_RECORD_OUTPUT="$_fd9_shape\n## Summary\n1 finding."
+  run_wrapper "$w_work" --recheck-job 4656
+  assert_verdict "case (fd9b) '$_fd9_shape' does NOT pass" FAIL 1
+  assert_says "case (fd9b) '$_fd9_shape' is UNKNOWN, not NONE" '^findings: UNKNOWN$'
+  reset_stub
+done
+
 printf '== (fd7) #3564 structural: the findings gate is TOKEN-EXACT and not keyed on a neighbour ==\n'
 # Behavioural cases only cover the shapes someone already thought of. Two properties of the FIX are
 # asserted against the shipped wrapper, because both are exactly what a later "simplification" would

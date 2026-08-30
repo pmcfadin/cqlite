@@ -274,8 +274,9 @@ roborev_check_findings() {
   # NOT `grep | wc -l` IN ONE COMMAND SUBSTITUTION: the pipeline would run in a SUBSHELL, so its
   # `PIPESTATUS` is unreadable here and grep's failure would be indistinguishable from "no match".
   # grep runs on its own, its status is captured explicitly, and the count is taken from its output.
+  SEVERITY_MARKER_RE='\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): '
   grep_rc=0
-  block_markers_raw=$(grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null) || grep_rc=$?
+  block_markers_raw=$(grep -oiE "$SEVERITY_MARKER_RE" "$FINDINGS_BLOCK_FILE" 2>/dev/null) || grep_rc=$?
   if [ "$grep_rc" -ge 2 ]; then
     block_measured=0
   fi
@@ -283,6 +284,37 @@ roborev_check_findings() {
     block_marker_count=0
   else
     block_marker_count=$(printf '%s\n' "$block_markers_raw" | wc -l | tr -d '[:space:]')
+  fi
+  # ===== AND THE SAME SCAN OVER THE WHOLE TRANSCRIPT — FOR THE RECHECK FALLBACK ONLY =====
+  # (roborev round 1, High.) A HEADERLESS findings review has no `Findings` heading, so the block
+  # extraction above yields NOTHING for it — and `review-completed`'s allow-list deliberately ACCEPTS
+  # that shape (a bare `**Severity**:` line, `[High]`, `Medium:`), because it was widened to stop
+  # false-FAILing genuine reviews from agents that emit it. So "0 markers in the block" does NOT mean
+  # "no findings": for a headerless review it means "no block was found", and the recheck fallback
+  # would have read that as an AFFIRMATIVE `NONE` and PASSED a findings-bearing recheck. That is
+  # THIS ISSUE'S OWN DEFECT one layer down — a permissive branch reached by an unmeasured state.
+  #
+  # This count is used ONLY to decide whether `NONE` is SAYABLE, never to report PRESENT: a marker
+  # outside a findings block is ambiguous by construction — a headerless finding and a clean review
+  # QUOTING a severity token look identical, which is precisely why the block scan exists (a
+  # whole-transcript scan was rejected on #2964 round 5 for producing false PRESENT). So the
+  # ambiguity resolves to UNKNOWN, which FAILS, rather than to either verdict.
+  #
+  # SCOPED TO THE RECHECK BRANCH DELIBERATELY. Every other branch has an INDEPENDENT affirmative
+  # signal for cleanliness (the record's structured `verdict`, or a 0 exit from a reviewer that ran)
+  # and uses the block count only to detect a CONTRADICTION; widening those to the whole transcript
+  # would make a quoted severity word INCONSISTENT and false-FAIL ordinary clean reviews. The recheck
+  # fallback is the one branch with NO independent signal, so it is the one that must not guess.
+  transcript_measured=1
+  transcript_grep_rc=0
+  transcript_markers_raw=$(grep -oiE "$SEVERITY_MARKER_RE" "$LOG" 2>/dev/null) || transcript_grep_rc=$?
+  if [ "$transcript_grep_rc" -ge 2 ]; then
+    transcript_measured=0
+  fi
+  if [ -z "$transcript_markers_raw" ]; then
+    transcript_marker_count=0
+  else
+    transcript_marker_count=$(printf '%s\n' "$transcript_markers_raw" | wc -l | tr -d '[:space:]')
   fi
   # THE `:-0` DEFAULT, AND WHY IT IS NO LONGER SELF-JUSTIFYING (#3229 round 10, revised #3564).
   # The original argument was that the strict direction is guaranteed BY THE DEFAULT ITSELF: a
@@ -376,11 +408,20 @@ roborev_check_findings() {
         # check happens to fail first is the exact coupling #3564 removed one key over.
         if [ ! -s "$LOG" ]; then
           FINDINGS="UNKNOWN"
-        elif [ "$block_measured" -eq 0 ]; then
+        elif [ "$block_measured" -eq 0 ] || [ "$transcript_measured" -eq 0 ]; then
           FINDINGS="UNKNOWN"
-          DETAILS+=("ERROR: findings: this is a --recheck-job of a record with no structured 'verdict' field, so the findings state must be re-asserted from the record's own review text — and that text's findings block COULD NOT BE MEASURED (the extraction or the marker scan itself failed, which is distinct from finding no markers). UNKNOWN, which cannot certify a PASS: a pass may not rest on a measurement that did not happen. Transcript: $LOG")
+          DETAILS+=("ERROR: findings: this is a --recheck-job of a record with no structured 'verdict' field, so the findings state must be re-asserted from the record's own review text — and that text COULD NOT BE MEASURED (an extraction or marker scan itself failed, which is distinct from finding no markers). UNKNOWN, which cannot certify a PASS: a pass may not rest on a measurement that did not happen. Transcript: $LOG")
         elif [ "$block_marker_count" -gt 0 ]; then
           FINDINGS="PRESENT ($block_marker_count)"
+        elif [ "$transcript_marker_count" -gt 0 ]; then
+          # A SEVERITY MARKER OUTSIDE ANY FINDINGS BLOCK: either a HEADERLESS findings review (which
+          # `review-completed` accepts as a valid shape) or a clean review QUOTING a severity token.
+          # Indistinguishable here, so neither verdict is sayable — and `NONE` above all, which would
+          # PASS a findings-bearing recheck. UNKNOWN is also stricter than PRESENT for the
+          # `vacuity-tier1` gate, which treats UNKNOWN as claiming cleanliness and PRESENT as an
+          # exemption, so this choice is fail-closed in both consumers.
+          FINDINGS="UNKNOWN"
+          DETAILS+=("ERROR: findings: this is a --recheck-job of a record with no structured 'verdict' field, so the findings state rests entirely on the record's review text — and that text carries $transcript_marker_count severity marker(s) that are OUTSIDE any findings block. A HEADERLESS findings review (a bare '**Severity**:' line, '[High]', 'Medium:' — shapes review-completed accepts) and a CLEAN review that merely QUOTES a severity token are indistinguishable from here, so the findings state is UNKNOWN and cannot certify a PASS. Do NOT read this as 'no findings'. Remedy: read the review text yourself ($LOG) — if it is genuinely clean, re-review rather than recheck, so the run rests on a reviewer's own exit status instead of a reconstruction.")
         else
           FINDINGS="NONE"
         fi

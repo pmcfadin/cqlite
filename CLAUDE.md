@@ -829,8 +829,15 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   keeps the break-glass alive: a recheck of a record with no structured `verdict` field used to read
   `UNKNOWN` (its branch was keyed on the reviewer's exit code, and there is no reviewer), which would
   have false-FAILed EVERY clean recheck — so a recheck now re-asserts findings from the record's own
-  review text, scoped to the findings block, and says `UNKNOWN` only when that block could not be
-  measured. **The generalisation to carry elsewhere: DELEGATING A KEY'S FAILURE TO ITS NEIGHBOUR IS A
+  review text, scoped to the findings block, and says `UNKNOWN` — never `NONE` — whenever that
+  reconstruction cannot support a positive claim: an empty/unmeasurable transcript, **or a severity
+  marker sitting OUTSIDE any findings block**. That last case is the fix's own defect class one layer
+  down, caught in review: `review-completed` deliberately ACCEPTS a HEADERLESS findings review (a bare
+  `**Severity**:` line, `[High]`, `Medium:`), for which the block extraction finds nothing — so "0
+  markers in the block" meant "no block", not "no findings", and read as an affirmative `NONE`. `NONE`
+  is now sayable only when the count is zero across the WHOLE transcript; a marker outside a block is
+  ambiguous (headerless finding vs a clean review QUOTING a severity token) and ambiguity resolves to
+  the failing value, never to either verdict. **The generalisation to carry elsewhere: DELEGATING A KEY'S FAILURE TO ITS NEIGHBOUR IS A
   LATENT FALSE PASS** — the coupling is invisible while one event populates both keys and evaporates in
   the first mode where it does not, so ask of every key *what fails the run if THIS key alone goes bad*.
   **And a fail-closed argument for a `${VAR:-default}` is only valid for the consumers that existed when
