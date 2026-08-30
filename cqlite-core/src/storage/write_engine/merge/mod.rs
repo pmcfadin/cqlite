@@ -77,7 +77,10 @@ use crate::storage::write_engine::mutation::{
 };
 #[cfg(feature = "write-support")]
 use crate::storage::write_engine::reconcile_rules;
-#[cfg(feature = "write-support")]
+// `Value` is no longer used by this file's production code (#2820 moved the
+// per-value size walk to `entry_size`), but the in-file test modules reach it
+// through `use super::*`.
+#[cfg(all(test, feature = "write-support"))]
 use crate::types::Value;
 
 #[cfg(feature = "write-support")]
@@ -318,8 +321,12 @@ impl RunReader {
             let next = crate::observability::stream_subphase::time_recv(|| self.reader.next());
             match next {
                 Some(Ok(entry)) => {
-                    // Estimate entry size for buffer management
-                    bytes_buffered += Self::estimate_entry_size(&entry);
+                    // Estimate entry size for buffer management. `saturating_add`:
+                    // the estimator fails CLOSED at `usize::MAX` for a
+                    // pathologically deep/wide value (#2820), which must stop
+                    // read-ahead, never overflow this accumulator.
+                    bytes_buffered =
+                        bytes_buffered.saturating_add(Self::estimate_entry_size(&entry));
                     self.buffer.push_back(entry);
                 }
                 Some(Err(e)) => return Err(e),
@@ -335,69 +342,14 @@ impl RunReader {
 
     /// Estimate the memory size of an entry
     ///
-    /// This is approximate - just for buffer management.
+    /// Delegates to [`entry_size::estimate_entry_size`](super::entry_size), a
+    /// sibling module (#1116 campsite rule) that walks nested values with a
+    /// bounded iterative traversal and an EXHAUSTIVE `Value` match. The previous
+    /// inline version ended in `_ => 32` for every complex variant, which made
+    /// both byte budgets denominated in this figure — this read-ahead buffer and
+    /// the #2820 egress batch budget — bypassable by large nested payloads.
     fn estimate_entry_size(entry: &MergeEntry) -> usize {
-        let base_size = std::mem::size_of::<MergeEntry>();
-        let key_size = entry.key.key.len();
-        let clustering_size = entry
-            .clustering_key
-            .as_ref()
-            .map(|ck| {
-                ck.columns
-                    .iter()
-                    .map(|(name, value)| name.len() + Self::estimate_value_size(value))
-                    .sum()
-            })
-            .unwrap_or(0);
-
-        let data_size = match &entry.row_data {
-            RowData::Live { cells } => cells
-                .iter()
-                .map(|cell| {
-                    std::mem::size_of::<CellData>()
-                        + cell.column.len()
-                        + Self::estimate_value_size(&cell.value)
-                        // Epic #899: per-element cells carry cell-path bytes; count
-                        // them so the streaming buffer's memory accounting stays
-                        // accurate against the 128 MiB bound (#827).
-                        + cell.cell_path.as_ref().map_or(0, |p| p.len())
-                })
-                .sum(),
-            RowData::Tombstone { .. } => 16,
-        };
-
-        // Epic #899: complex-deletion markers carried on the entry also occupy
-        // memory; account for their column-name + fixed-size fields.
-        let complex_deletion_size: usize = entry
-            .complex_deletions
-            .iter()
-            .map(|cd| std::mem::size_of::<ComplexDeletion>() + cd.column.len())
-            .sum();
-
-        base_size + key_size + clustering_size + data_size + complex_deletion_size
-    }
-
-    /// Estimate the memory size of a Value
-    fn estimate_value_size(value: &Value) -> usize {
-        match value {
-            Value::Null => 0,
-            Value::Boolean(_) => 1,
-            Value::TinyInt(_) => 1,
-            Value::SmallInt(_) => 2,
-            Value::Integer(_) => 4,
-            Value::BigInt(_) | Value::Counter(_) | Value::Timestamp(_) | Value::Time(_) => 8,
-            Value::Float32(_) => 4,
-            Value::Float(_) => 8,
-            Value::Text(s) => s.len() + std::mem::size_of::<String>(),
-            Value::Blob(b) => b.len() + std::mem::size_of::<Vec<u8>>(),
-            Value::Uuid(_) => 16,
-            Value::Inet(b) => b.len() + std::mem::size_of::<Vec<u8>>(),
-            Value::Varint(b) => b.len() + std::mem::size_of::<Vec<u8>>(),
-            Value::Decimal { unscaled, .. } => unscaled.len() + 4 + std::mem::size_of::<Vec<u8>>(),
-            Value::Date(_) => 4,
-            Value::Duration { .. } => 20,
-            _ => 32, // Default estimate for complex types
-        }
+        entry_size::estimate_entry_size(entry)
     }
 }
 
@@ -514,6 +466,13 @@ mod channel_depth;
 mod egress_budget;
 #[cfg(feature = "write-support")]
 pub use egress_budget::{active_merge_count, egress_channel_capacity_for};
+
+// Per-entry heap-size estimation (issue #2820): the EXHAUSTIVE, bounded,
+// iterative `MergeEntry`/`Value` size walk that both byte budgets — this
+// reader's read-ahead buffer and the egress batcher's `BATCH_EMIT_BYTES_MERGE` —
+// are denominated in. Sibling module to bound this file (#1116).
+#[cfg(feature = "write-support")]
+mod entry_size;
 
 // Batched egress fan-in (issue #2820): the ROWS->MESSAGES capacity conversion for
 // the bounded channel, the resident-rows bound, and the producer-side batch
