@@ -2883,6 +2883,10 @@ _tree_excluded() {
       # The beater writes atomically via a sibling temp then renames, so the temp can be
       # observed mid-write by a concurrent capture. Same artifact, same carve-out.
       "$TREE_EXCLUDE_REL".heartbeat.tmp.*) return 0 ;;
+      # #3473: gate-detached.sh's summary-path reservation, a fourth artifact written beside the
+      # summary by contract. Self-healing rather than released (the gate outlives its launcher), so
+      # it can legitimately be present for the whole run.
+      "$TREE_EXCLUDE_REL".launch-lock) return 0 ;;
     esac
   fi
   if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL" ]; then return 0; fi

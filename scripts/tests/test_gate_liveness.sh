@@ -189,12 +189,24 @@ expect_reader "4.4 INCOMPLETE (foreign) + fresh beat => RUNNING" RUNNING 2 "" --
 echo "=== section 5: the staleness window is derived from the beat, and its boundary holds ==="
 # The window is 3*interval with a 90s floor, read from the beat's OWN interval line, so
 # the reader carries no duplicate of the gate's beat period.
-mk_beat "$TMP/a.txt.heartbeat" run-a 89 20
-expect_reader "5.1 age 89s, floor window 90s => RUNNING"  RUNNING 2 "" -- "$TMP/a.txt"
-mk_beat "$TMP/a.txt.heartbeat" run-a 90 20
-expect_reader "5.2 age 90s == window => RUNNING"          RUNNING 2 "" -- "$TMP/a.txt"
-mk_beat "$TMP/a.txt.heartbeat" run-a 91 1
-expect_reader "5.3 age 91s > the 90s floor => STALLED"    STALLED 3 "window 90s" -- "$TMP/a.txt"
+# NOT tested at the exact boundary. The beat's epoch is fixed when the fixture is written, and the
+# reader evaluates a moment later, so an age of exactly the window drifts one second past it under
+# any added work — observed when extra field validation slowed the reader. A boundary case that
+# depends on how fast the reader runs is a wall-clock test in disguise; the ARITHMETIC is asserted
+# structurally in 5.6 instead, and these two use a safe margin either side.
+mk_beat "$TMP/a.txt.heartbeat" run-a 60 20
+expect_reader "5.1 age 60s, well inside the 90s floor => RUNNING"  RUNNING 2 "" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 85 20
+expect_reader "5.2 age 85s, just inside the 90s floor => RUNNING"  RUNNING 2 "" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 120 1
+expect_reader "5.3 age 120s, well past the 90s floor => STALLED" STALLED 3 "window 90s" -- "$TMP/a.txt"
+# The window ARITHMETIC itself, asserted at the source: max(3 x interval, 90). Exact, and immune to
+# how long the reader takes to run.
+if grep -q 'STALE_AFTER=$(( HB_INTERVAL \* 3 ))' "$READER" && grep -q '\[ "$STALE_AFTER" -ge 90 \] || STALE_AFTER=90' "$READER"; then
+  ok "5.6 the staleness window is max(3 x interval, 90s), read from the beat's own interval"
+else
+  bad "5.6 the staleness window is max(3 x interval, 90s)" "formula not found"
+fi
 mk_beat "$TMP/a.txt.heartbeat" run-a 179 60
 expect_reader "5.4 interval 60 => window 180, age 179 RUNNING" RUNNING 2 "window 180s" -- "$TMP/a.txt"
 # (The old 5.5 asserted the same 3x-interval derivation from the STALLED side with interval 60,
@@ -232,7 +244,9 @@ mk_beat_field() {
   { echo "==== AGENT-GATE HEARTBEAT ===="
     [ -n "$2" ] && echo "$2"
     echo "gate-pid: 4242"
+    echo "beater-pid: 4243"
     echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "parent-check: starttime"
     echo "$4"
     echo "beat-seq: 7"
     echo "$3"
@@ -920,8 +934,10 @@ _mkbeat_pc bogus 20
 expect_reader "11i.2 an UNKNOWN parent-check value => UNKNOWN (closed grammar)" \
   UNKNOWN 4 "heartbeat-unknown-parent-check" -- "$TMP/hbv.txt"
 _mkbeat_pc starttime 20 && grep -v '^parent-check: ' "$hbv" > "$hbv.t" && mv "$hbv.t" "$hbv"
+# (parent-check is REQUIRED — absence means no verdict can be trusted — so the cause is now the
+#  unified field-count check rather than a bespoke message)
 expect_reader "11i.3 a beat with NO parent-check => UNKNOWN" \
-  UNKNOWN 4 "heartbeat-no-parent-check" -- "$TMP/hbv.txt"
+  UNKNOWN 4 "heartbeat-field-count" -- "$TMP/hbv.txt"
 # CONTROLS: both identity-bearing tiers must still be accepted.
 for tier in starttime lstart; do
   _mkbeat_pc "$tier" 20

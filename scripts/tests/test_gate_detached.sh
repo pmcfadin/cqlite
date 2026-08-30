@@ -413,10 +413,14 @@ fi
 # roborev job 169: the post-launch check must be BOUND TO THE NEW RUN. It used to accept any
 # heartbeat containing `beat-epoch:`, so a stale or foreign beat already at that path excused an
 # unmonitorable launch — precisely the sticky-directory case the check exists to catch.
-if grep -q '_pre_sum_rid' "$LAUNCHER" && grep -q '_new_rid' "$LAUNCHER"; then
-  ok "4b.23 the launcher snapshots pre-launch run-ids and binds the check to a NEW one"
+# SUPERSEDED FORM: this asserted a pre-launch run-id snapshot, which the launch NONCE replaced
+# (job 190) and which then lingered as dead code until job 193. The property is unchanged — the
+# check must be bound to the run WE launched — but the mechanism is now a token we generate rather
+# than a run-id we could not predict, which is strictly stronger. Asserted here in that form.
+if grep -q 'LAUNCH_NONCE=' "$LAUNCHER" && grep -q '_new_rid' "$LAUNCHER"; then
+  ok "4b.23 the launcher binds the post-launch check to a run it can PROVE is its own"
 else
-  bad "4b.23 the launcher binds the post-launch check to a NEW run-id" "no pre-launch snapshot"
+  bad "4b.23 the launcher binds the post-launch check to its own run" "no nonce binding"
 fi
 # Fixed-string whole-line match (job 178, Low): the run-id is a mktemp PATH, so interpolating it
 # into a regex broke on a TMPDIR containing `[` and could stop a HEALTHY gate.
@@ -823,6 +827,63 @@ if [ -n "$hb_ln" ] && [ -n "$cap_ln" ] && [ "$hb_ln" -lt "$cap_ln" ]; then
 else
   bad "4b.71 the beater starts before the tree-identity capture" "_hb_start at ${hb_ln:-?}, capture at ${cap_ln:-?}"
 fi
+
+# roborev job 193: the pre-launch run-id captures were DEAD CODE once the nonce replaced them —
+# code that reads like a check but checks nothing. And the nonce does not stop two launchers
+# pointing at ONE summary path: each proves ownership of its own artifacts while their heartbeat
+# renames and summary rewrites destroy each other.
+body=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
+if printf '%s\n' "$body" | grep -q '_pre_sum_rid\|_pre_hb_rid'; then
+  bad "4b.72 the dead pre-launch run-id captures are gone" "still present"
+else
+  ok "4b.72 the dead pre-launch run-id captures are gone"
+fi
+if grep -q 'set -C; echo "$UNIT" > "$_reserve"' "$LAUNCHER"; then
+  ok "4b.73 the summary path is reserved with an O_EXCL create recording the owning unit"
+else
+  bad "4b.73 the summary path is reserved with an O_EXCL create" "not found"
+fi
+if grep -q 'is-active --quiet "$_owner"' "$LAUNCHER"; then
+  ok "4b.74 a reservation is only honoured while its recorded unit is LIVE (self-healing)"
+else
+  bad "4b.74 a reservation is only honoured while its unit is live" "no staleness test"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  cp1="$TMP/concurrent.txt"
+  o1=$(bash "$LAUNCHER" --summary "$cp1" --log "$TMP/c1.log" -- --only roborev-lints 2>&1); r1=$?
+  u1=$(printf '%s' "$o1" | sed -n 's/^unit:  *//p'); [ -n "$u1" ] && echo "$u1" >> "$UNITS_FILE"
+  o2=$(bash "$LAUNCHER" --summary "$cp1" --log "$TMP/c2.log" -- --only file-size 2>&1); r2=$?
+  u2=$(printf '%s' "$o2" | sed -n 's/^unit:  *//p'); [ -n "$u2" ] && echo "$u2" >> "$UNITS_FILE"
+  if [ "$r1" = 0 ] && [ "$r2" != 0 ]; then
+    ok "4b.75 a SECOND launcher on the same summary path is refused (first=$r1, second=$r2)"
+  else
+    bad "4b.75 a second launcher on the same summary path is refused" "first=$r1 second=$r2"
+  fi
+  printf '%s' "$o2" | grep -q 'already owns the summary path' \
+    && ok "4b.76 the refusal names the live owner" || bad "4b.76 the refusal names the live owner" "$o2"
+  systemctl --user stop "$u1" >/dev/null 2>&1 || true
+  # ...and once that owner is gone, the reservation is reclaimed rather than blocking forever.
+  o3=$(bash "$LAUNCHER" --summary "$cp1" --log "$TMP/c3.log" -- --only file-size 2>&1); r3=$?
+  u3=$(printf '%s' "$o3" | sed -n 's/^unit:  *//p'); [ -n "$u3" ] && echo "$u3" >> "$UNITS_FILE"
+  [ "$r3" = 0 ] && ok "4b.77 a STALE reservation is reclaimed (a dead owner does not block forever)" \
+                || bad "4b.77 a stale reservation is reclaimed" "exit $r3: $o3"
+else
+  skipc "4b.75-4b.77 concurrent-launch detection" "no working systemd-run --user"
+fi
+
+# roborev job 193 (Low): the log was TRUNCATED before the summary/heartbeat were validated, so a
+# later refusal destroyed a previous log for a launch that never happened.
+pl="$TMP/preserve.log"
+printf 'previous log content\n' > "$pl"
+bash "$LAUNCHER" --summary /nonexistent-dir-3473/s.txt --log "$pl" -- --only file-size >/dev/null 2>&1
+[ "$(cat "$pl" 2>/dev/null)" = "previous log content" ] \
+  && ok "4b.78 a REFUSED launch preserves an existing log" \
+  || bad "4b.78 a refused launch preserves an existing log" "it was truncated"
+# ...and a launch that does NOT exist must not leave a probe file behind either.
+pn="$TMP/nonexistent-probe.log"
+bash "$LAUNCHER" --summary /nonexistent-dir-3473/s.txt --log "$pn" -- --only file-size >/dev/null 2>&1
+[ ! -e "$pn" ] && ok "4b.79 a refused launch leaves no log probe behind" \
+              || bad "4b.79 a refused launch leaves no log probe behind" "$pn exists"
 
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"

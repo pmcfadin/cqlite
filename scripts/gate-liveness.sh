@@ -440,20 +440,46 @@ _beat_valid() {
     BEAT_ERR="heartbeat-out-of-order; the closer (line $close_ln) does not follow the opener (line $open_ln)"
     return 1
   fi
-  n_rid=$(printf '%s\n' "$t" | grep -c '^run-id: ')
-  n_seq=$(printf '%s\n' "$t" | grep -c '^beat-seq: ')
-  n_ep=$(printf '%s\n' "$t" | grep -c '^beat-epoch: ')
-  # EXACTLY one of each decision field, not "at most one": a beat missing beat-seq or beat-epoch
-  # cannot support any verdict, and a duplicate means no value is attributable to one write.
-  if [ "$n_rid" -ne 1 ] || [ "$n_seq" -ne 1 ] || [ "$n_ep" -ne 1 ]; then
-    BEAT_ERR="heartbeat-field-count; found $n_rid run-id / $n_seq beat-seq / $n_ep beat-epoch (each must appear exactly once)"
-    return 1
-  fi
-  # ...and each must lie INSIDE the framing, or it belongs to some other fragment.
-  for l in run-id beat-seq beat-epoch; do
-    ln=$(printf '%s\n' "$t" | grep -n "^$l: " | head -1 | cut -d: -f1)
+  # EVERY field that decides a verdict must appear EXACTLY ONCE and INSIDE the framing (roborev
+  # job 193, Medium). The first version checked only run-id/beat-seq/beat-epoch — but
+  # `parent-check` decides whether any RUNNING is supportable, `interval` sets the staleness window
+  # and the confirmation wait, `host` decides whether the clock may be trusted, and `beater-pid`
+  # decides whether a restart counts as progress. A duplicate or out-of-block copy of any of them
+  # would be read as the first occurrence, letting an ambiguous beat produce RUNNING.
+  #
+  # "Exactly once", not "at most once": a beat missing any of these cannot support a verdict.
+  # `beater-pid` is the one exception — it is absent from beats written by an older gate, and its
+  # absence only forfeits restart detection rather than enabling a wrong answer, so it is checked
+  # for uniqueness/placement ONLY IF present.
+  # REQUIRED vs OPTIONAL-BUT-UNIQUE, and the line between them is whether ABSENCE would make a
+  # verdict unsound or merely narrower:
+  #   required  — run-id, beat-seq, beat-epoch, interval, parent-check. Without any of these a
+  #               verdict cannot be computed at all (or, for parent-check, cannot be trusted).
+  #   optional  — host, beater-pid. Their absence DEGRADES SAFELY and is already handled: no host
+  #               means the clock domain is unproven, so progression decides; no beater-pid means
+  #               restart detection is forfeited. Requiring them would reject beats that the reader
+  #               can answer about perfectly well — which it briefly did, until 11g.9 caught it.
+  # Either way a DUPLICATE is fatal for both groups, because the first occurrence would be trusted.
+  local f cnt
+  for f in run-id beat-seq beat-epoch interval parent-check; do
+    cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
+    if [ "$cnt" -ne 1 ]; then
+      BEAT_ERR="heartbeat-field-count; '$f' appears $cnt time(s) and must appear exactly once — no value is attributable to a single beat otherwise"
+      return 1
+    fi
+  done
+  for f in host beater-pid; do
+    cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
+    if [ "$cnt" -gt 1 ]; then
+      BEAT_ERR="heartbeat-field-count; '$f' appears $cnt times and must appear at most once — the first occurrence would be trusted"
+      return 1
+    fi
+  done
+  for f in run-id beat-seq beat-epoch interval parent-check host beater-pid; do
+    printf '%s\n' "$t" | grep -q "^$f: " || continue
+    ln=$(printf '%s\n' "$t" | grep -n "^$f: " | head -1 | cut -d: -f1)
     if [ "$ln" -lt "$open_ln" ] || [ "$ln" -gt "$close_ln" ]; then
-      BEAT_ERR="heartbeat-field-outside-block; '$l' (line $ln) lies outside the block (lines $open_ln..$close_ln)"
+      BEAT_ERR="heartbeat-field-outside-block; '$f' (line $ln) lies outside the block (lines $open_ln..$close_ln)"
       return 1
     fi
   done

@@ -333,8 +333,14 @@ never `STALLED`: a gate predating this mechanism, or one whose summary path is u
 produces the same absence, and reporting those as a stall would be the fail-open shape one
 level down.
 
-The beat is validated like the summary: exactly one ordered opener and closer, no duplicated
-`run-id`/`beat-seq`/`beat-epoch`, and a `parent-check` from a **closed** set — an unrecognised value
+The beat is validated like the summary: exactly one ordered opener and closer, and **every field
+that decides a verdict** present exactly once and inside the framing. The line between *required*
+and *optional-but-unique* is whether absence makes a verdict **unsound** or merely **narrower** —
+`run-id`, `beat-seq`, `beat-epoch`, `interval` and `parent-check` are required; `host` and
+`beater-pid` are optional, because their absence degrades safely (no host means the clock domain is
+unproven so progression decides; no beater-pid forfeits restart detection). A *duplicate* of any of
+them is fatal either way, since the first occurrence would be trusted. `parent-check` comes from a
+**closed** set — an unrecognised value
 is `UNKNOWN`, never assumed benign. And a beat declaring an `interval` above 60 s is `UNKNOWN`
 rather than `STALLED`: the confirmation window is capped at 65 s to bound a hostile artifact, so
 such a beat might legitimately not advance inside it, and guessing `STALLED` would send a lane to
@@ -443,8 +449,20 @@ passed a sticky directory whose heartbeat is owned by someone else (where the be
 forever) — and it *refused* a mode-400 heartbeat that works perfectly well, since POSIX takes
 rename permission from the **directory**, not the file. Both are pinned as tests.
 
+**The summary path is reserved for the gate's lifetime.** The nonce proves ownership of the
+artifacts the launcher *reads*; it does nothing to stop two launchers pointing at one summary path,
+where each would prove ownership of its own artifacts while their heartbeat renames and summary
+rewrites destroyed each other. An `O_EXCL` reservation beside the summary records the owning unit,
+and a second launcher is refused while that unit is live. It is deliberately **self-healing rather
+than released**: the gate outlives its launcher, so no process could reliably remove the lock, and a
+lock nobody can release is worse than no lock — so a reservation whose unit is no longer active is
+reclaimed. (#2874 already forbids two gates on one path; the launcher now detects it rather than
+walking into it.)
+
 Every probe is **non-destructive**, because under #2874 these paths may hold a live peer's
-artifacts: the directory is probed with `mktemp`-created siblings, and no existing summary or
+artifacts — including the **log**, which is probed with a zero-byte append (or created and removed
+if absent) and only truncated immediately before launch, so a refusal can never destroy a previous
+log for a launch that never happened: the directory is probed with `mktemp`-created siblings, and no existing summary or
 heartbeat is written, truncated or replaced by any check. A caller-supplied **log** path is
 refused if it is a symlink or non-regular file, since the log is truncated with `>` (residual: it
 is a check-then-create, so a symlink planted in the microsecond window is not caught — the
@@ -488,8 +506,8 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (173 cases) and
-`scripts/tests/test_gate_detached.sh` (100 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (174 cases) and
+`scripts/tests/test_gate_detached.sh` (108 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

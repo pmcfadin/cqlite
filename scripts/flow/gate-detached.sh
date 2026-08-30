@@ -334,15 +334,30 @@ if [ -L "$LOGFILE" ] || { [ -e "$LOGFILE" ] && [ ! -f "$LOGFILE" ]; }; then
   echo "               truncate it (#3473)." >&2
   exit 1
 fi
-# Pre-create the log so the caller can tail it immediately even before the unit starts.
-# The redirection is wrapped in a subshell so BASH's own "No such file or directory" for a bad
+# NON-DESTRUCTIVE writability probe (roborev job 193, Low). The log used to be TRUNCATED here,
+# before the summary and heartbeat destinations were validated — so a later refusal (a bad summary
+# directory, say) destroyed the caller's previous log even though no gate ever started. The real
+# truncation now happens immediately before `systemd-run`, once every refusal path is behind us.
+#
+# The redirection stays wrapped in a subshell so BASH's own "No such file or directory" for a bad
 # path is suppressed: a `2>/dev/null` on the command does not cover an error the shell itself
-# reports for the redirect, and the raw message landed beside our diagnostic.
-( : > "$LOGFILE" ) 2>/dev/null || {
-  echo "gate-detached: cannot create the log at '$LOGFILE' (missing directory, or not writable)." >&2
-  echo "               Refusing to launch a gate whose output would be unreadable (#3473)." >&2
-  exit 1
-}
+# reports for the redirect.
+if [ -e "$LOGFILE" ]; then
+  # A zero-byte APPEND cannot truncate and does not alter mtime.
+  ( : >> "$LOGFILE" ) 2>/dev/null || {
+    echo "gate-detached: the log at '$LOGFILE' exists but is not writable." >&2
+    echo "               Refusing to launch a gate whose output would be unreadable (#3473)." >&2
+    exit 1
+  }
+else
+  ( : > "$LOGFILE" ) 2>/dev/null || {
+    echo "gate-detached: cannot create the log at '$LOGFILE' (missing directory, or not writable)." >&2
+    echo "               Refusing to launch a gate whose output would be unreadable (#3473)." >&2
+    exit 1
+  }
+  # Remove the probe so a later refusal leaves the filesystem exactly as it was.
+  rm -f "$LOGFILE" 2>/dev/null || true
+fi
 # ...and NOW that it exists, repeat the inode comparison. Canonicalisation above handles the
 # spellings it can see; this catches whatever it cannot, and it is the check that would have
 # caught the two-nonexistent-paths case even without canonicalisation (job 185).
@@ -460,12 +475,46 @@ fi
 # So the check is BOUND to the new run: the summary must come to carry a run-id that is not the
 # one already there, and the heartbeat must carry THAT SAME run-id. Nothing pre-existing can
 # satisfy either half.
-_pre_sum_rid=$(grep -m1 '^run-id: ' "$SUMMARY" 2>/dev/null || true)
-_pre_hb_rid=$(grep -m1 '^run-id: ' "$_hbdest" 2>/dev/null || true)
+# The pre-launch run-ids used to be captured here and compared later. That comparison was REPLACED
+# by the launch nonce (a value we generate, rather than one we cannot predict) and these captures
+# were left behind unused — dead code that reads like a check (roborev job 193). Removed.
+#
+# What the nonce does NOT do is stop two launchers pointing at ONE summary path: each would prove
+# ownership of its own artifacts while their heartbeat renames and summary rewrites destroyed each
+# other, leaving both advertised poll commands unreliable. #2874 already forbids that
+# configuration; the launcher now DETECTS it rather than walking into it.
+#
+# The reservation is a create-with-O_EXCL (`set -C`) recording the owning unit. It is deliberately
+# SELF-HEALING rather than released by anyone: the gate outlives this launcher, so no process could
+# reliably remove it, and a lock nobody can release is worse than no lock. A reservation whose
+# recorded unit is no longer active is therefore stale, and is reclaimed once.
+_reserve="$SUMMARY.launch-lock"
+if ! ( set -C; echo "$UNIT" > "$_reserve" ) 2>/dev/null; then
+  _owner=$(cat "$_reserve" 2>/dev/null || true)
+  if [ -n "$_owner" ] && systemctl --user is-active --quiet "$_owner" 2>/dev/null; then
+    echo "gate-detached: another LIVE gate ($_owner) already owns the summary path" >&2
+    echo "               '$SUMMARY'. Two gates on one path overwrite each other's summary and" >&2
+    echo "               heartbeat, so neither could be polled reliably (#2874/#3473)." >&2
+    echo "               Give this run a summary path of its own." >&2
+    exit 1
+  fi
+  rm -f "$_reserve" 2>/dev/null || true
+  ( set -C; echo "$UNIT" > "$_reserve" ) 2>/dev/null || {
+    echo "gate-detached: cannot reserve the summary path '$SUMMARY' (lock at '$_reserve')." >&2
+    echo "               Refusing rather than racing another launcher (#3473)." >&2
+    exit 1
+  }
+fi
 
 # (the ControlGroup read happens immediately after this returns — see below — because
 # `--collect` reaps the unit record as soon as a short gate exits, and reading it after the
 # heartbeat wait reported `<unavailable>` for any gate that finished quickly.)
+# NOW truncate the log: every refusal path is behind us, so this cannot destroy a previous log for
+# a launch that never happens.
+( : > "$LOGFILE" ) 2>/dev/null || {
+  echo "gate-detached: cannot truncate the log at '$LOGFILE' just before launch." >&2
+  exit 1
+}
 if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
      --property=StandardInput=null \
      --property="StandardOutput=append:$LOGFILE" \
