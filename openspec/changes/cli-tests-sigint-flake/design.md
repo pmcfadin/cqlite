@@ -90,7 +90,18 @@ Stage (d) is still not one `wait_timeout(D)`. It polls in short slices and OBSER
 Those observations are reported as EVIDENCE in any failure message — including an explicit
 `progress observed: NONE` with zero counts, which is a materially different diagnosis from "the flush
 was still landing when the deadline passed". Exit ends the wait successfully; the deadline ends it
-otherwise, and is checked BEFORE each step is invoked so no step can complete past it.
+otherwise, and is checked BEFORE each step is invoked, so no step is ever STARTED past it and none is
+granted more than what is left.
+
+**Scope of that claim, corrected in round 9 (roborev job 232 finding 1).** The deadline bounds how
+long the test WAITS FOR EVIDENCE; it does not bound the acceptance of evidence already in hand. If a
+step reports the child exited, or the artifact appeared, while the deadline lapses, the poll returns
+`Ok` — it does not recheck. That is deliberate and the review's proposed recheck was OVERRULED:
+failing a stage that OBSERVED its signal, merely because the loop noticed a few hundred milliseconds
+late, is a false failure on a working product — the exact flake class this change exists to remove —
+and it would make the verdict depend on how long a directory scan took. The lag is bounded by one
+`SLICE.min(remaining)` (<= 100ms) plus one `count_data_db` walk, which on a loaded host is not
+necessarily quick; the same lag applies to the failure path, which is declared at the next loop top.
 
 This is what AC1's "unbounded-but-progress-checked loop" reduces to once the liveness question is
 answered where it actually can be — by stage (c)'s handler-entry marker, not by a bound that progress
@@ -181,8 +192,9 @@ per-stage caps does not preserve a SHARED old deadline, so a handler entering at
   names the failure — the property AC2 needs — and it no longer depends on any budget arithmetic.
 * **Progress observation remains, as EVIDENCE IN THE MESSAGE, not as an input to the bound.** It
   reports `progress observed: NONE` / counts; it no longer extends anything. That removes the
-  "declared cap is not the actual maximum" family at the root: there is one bound and nothing may
-  exceed it.
+  "declared cap is not the actual maximum" family at the root: there is one bound, no wait is granted
+  more time than it leaves, and none is started past it (scoped to the timeout arithmetic — see D3 on
+  the deliberately accepted late success).
 
 **What is deleted:** per-stage `StageSpec` base/cap pairs, the quiet-baseline anchors and their derived
 multiples, the permissive-anchor NOTICE, `clip`, `starved`, the floor-by-composition rule and its

@@ -35,7 +35,12 @@
 //! * **Progress observation remains as EVIDENCE IN THE MESSAGE ONLY** (see
 //!   `poll_with_progress` in `mod.rs`). It reports what it saw and extends
 //!   nothing. That removes the "declared cap is not the actual maximum" family at
-//!   the root: there is one bound, and nothing may exceed it.
+//!   the root: there is one bound, no wait is granted more time than it leaves,
+//!   and none is started past it. Scoped precisely (roborev job 232 finding 1):
+//!   the deadline bounds how long the test WAITS FOR EVIDENCE, not the acceptance
+//!   of evidence already observed — `poll_with_progress` in `mod.rs` deliberately
+//!   accepts a success it notices as the deadline lapses, and states the bound on
+//!   how late that can be.
 //!
 //! The accepted cost, stated plainly: a genuine defect now surfaces at the
 //! deadline rather than at a tight per-stage cap. It is paid only on a real
@@ -140,18 +145,26 @@ pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(60);
 /// stage.
 ///
 /// THE INVARIANT THIS TYPE EXISTS TO MAKE TRUE BY CONSTRUCTION: there is exactly
-/// one bound in the test, and nothing can exceed it. Every wait — `wait_for`,
-/// `wait_timeout`, `recv_timeout`, the progress-observing poll — takes its
-/// timeout from [`Stage::remaining`], which is this deadline and nothing else.
-/// No call site subtracts anything, so no call site can forget to; and no call
-/// site can be granted anything, so none can double-spend.
+/// one bound in the test, and no wait may be granted or started past it. Every
+/// wait — `wait_for`, `wait_timeout`, `recv_timeout`, the progress-observing poll
+/// — takes its timeout from [`Stage::remaining`], which is this deadline and
+/// nothing else. No call site subtracts anything, so no call site can forget to;
+/// and no call site can be granted anything, so none can double-spend.
+///
+/// THE CLAIM IS ABOUT THE TIMEOUT ARITHMETIC, NOT ABOUT WALL CLOCK (roborev job
+/// 232 finding 1). This deadline bounds how long the test WAITS FOR EVIDENCE; a
+/// success OBSERVED while it lapses is still accepted, deliberately, because
+/// failing a stage that saw its signal would be a false failure on a working
+/// product. `poll_with_progress` in `mod.rs` owns that decision and quantifies
+/// how late an accepted success can be.
 ///
 /// It is LIVE from construction: build it as the first statement of the test, so
 /// every stage including the first is charged.
 pub struct TestDeadline {
     started: Instant,
-    /// The instant no wait in this test may outlive. Moves LATER on calibration
-    /// and never earlier.
+    /// The instant past which no wait in this test may be STARTED (a wait already
+    /// in flight can return its observed success a bounded moment later — see
+    /// `poll_with_progress`). Moves LATER on calibration and never earlier.
     deadline: Instant,
     /// `clamp(base x scale, base, cap)`.
     span: Duration,
@@ -546,6 +559,15 @@ fn the_deadline_describes_its_own_derivation() {
 
 /// A stage's waits share the ONE deadline, so none of them can double-spend it.
 ///
+/// WHAT THIS ASSERTS, AND WHAT IT DOES NOT (roborev job 232 finding 1): it asserts
+/// the TIMEOUT ARITHMETIC — work done inside a stage is charged, and a later wait
+/// plus what is already spent is never GRANTED more than the span. It says nothing
+/// about wall clock at the moment a verdict is returned: a wait that has already
+/// observed its success returns that success even if the deadline lapsed while it
+/// was looking, which is deliberate (`poll_with_progress` in `mod.rs` states why,
+/// and bounds how late it can be). The deadline bounds waiting for evidence, not
+/// the acceptance of evidence in hand.
+///
 /// Under the pre-descope `derived: Duration` this was false at five sites (rounds
 /// 2, 4, 6 and roborev job 224 findings 2 and 3): each wait received a stage's
 /// full span fresh, and each call site was separately responsible for subtracting
@@ -576,8 +598,8 @@ fn a_stages_waits_share_the_one_deadline_so_none_can_double_spend() {
     );
     assert!(
         second + charged <= span,
-        "a second wait plus what has already been spent may never exceed the one deadline: \
-         {second:?} + {charged:?} against {span:?}"
+        "a later wait may never be GRANTED more than the one deadline less what has already \
+         been spent: {second:?} + {charged:?} against {span:?}"
     );
 
     // The span is fixed unless something CALIBRATES it, so it cannot move under

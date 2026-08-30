@@ -254,7 +254,10 @@ impl ChildIo {
 // EXTEND a stage's budget by a calibrated stall window, which is what made a
 // declared per-stage cap not the actual maximum — the defect family four review
 // rounds could not close. It now reports what it saw and extends NOTHING: the
-// test's one deadline is the only bound, and nothing may exceed it.
+// test's one deadline is the only bound — no wait is granted more time than it
+// leaves, and none is started past it. It bounds WAITING FOR evidence, not the
+// acceptance of evidence already observed; see `poll_with_progress` for the
+// success path that is deliberately accepted late, and for the bound on the lag.
 //
 // What is kept is the value: a failure that says `progress observed: NONE - 0 new
 // output lines and 0 new durable artifacts` is a materially different diagnosis
@@ -317,10 +320,36 @@ impl PollFail {
 /// handler-entry marker and from the progress counts reported here, not from a
 /// budget that progress could move.
 ///
-/// THE DEADLINE IS CHECKED BEFORE `step` IS INVOKED, and `step` is given
-/// `min(SLICE, remaining)` (roborev job 229, finding 3): checking afterwards let a
-/// stage succeed up to one whole slice past the deadline, so the declared bound
-/// was not the actual maximum — the same family in its last, smallest form.
+/// WHAT THE DEADLINE BOUNDS, EXACTLY: it bounds how long the test WAITS FOR
+/// EVIDENCE. It does NOT bound the acceptance of evidence already in hand
+/// (roborev job 232 finding 1, and the OVERRULE recorded in tasks.md round 9).
+///
+/// The deadline is checked BEFORE `step` is invoked and `step` is handed
+/// `min(SLICE, remaining)` (roborev job 229, finding 3), so no wait here is ever
+/// STARTED past the deadline and no single wait is granted more than what is
+/// left. It is deliberately NOT rechecked on the SUCCESS path: if `step` reports
+/// that the child exited — or that the artifact appeared — while the deadline
+/// lapses, that success is ACCEPTED.
+///
+/// THAT IS A DECISION, NOT AN OVERSIGHT. On the success path the property has been
+/// OBSERVED. Rejecting an observed success because the loop noticed it a few
+/// hundred milliseconds late would be a false failure on a working product —
+/// precisely the flake class #3515 exists to remove — and it would make the
+/// test's verdict depend on how long a directory scan happened to take, which is
+/// the scheduling sensitivity this change exists to eliminate.
+///
+/// THE OVERRUN IS BOUNDED BUT NOT TINY. The instant this loop decides can lag the
+/// deadline by at most one `SLICE.min(remaining)` (<= 100ms) plus one
+/// `count_data_db` scan — and that scan is a recursive `read_dir` walk of the
+/// data directory, which on a loaded host is not necessarily quick. The same lag
+/// applies to the FAILURE path, which is declared at the next loop top rather
+/// than the instant the deadline passes; `PollFail` reports the stage's real
+/// spend, so the message never understates it.
+///
+/// So read every "nothing may exceed the deadline" claim in this harness as a
+/// statement about the timeout ARITHMETIC — no wait is granted, or started, past
+/// the deadline — never as a wall-clock guarantee about the instant a verdict is
+/// returned.
 pub fn poll_with_progress<T>(
     io: &ChildIo,
     data_dir: &Path,

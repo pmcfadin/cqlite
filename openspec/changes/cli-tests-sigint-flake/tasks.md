@@ -734,9 +734,9 @@ duration for the report.
 | property | how it holds now |
 |---|---|
 | no wait tighter than the 60s it replaced | `base >= OLD_BOUND`, asserted; any single stage may consume the whole deadline |
-| the test not tighter in aggregate | `base >= OLD_BOUND × old_waits` (2 for T1, 7 for T2), asserted |
+| the test not tighter in aggregate | `base >= OLD_BOUND × (old_waits + 1)` — the `+1` is the readiness stage the old code did not bound separately (round 9, roborev job 232 finding 2); 3 for T1, 8 for T2, asserted |
 | no stage starved by an earlier one | **by construction**: no stage has an allowance to consume |
-| a declared cap is the actual maximum | **by construction**: one bound; nothing extends it; the deadline is checked before each step |
+| no wait is granted or started past the one bound | **by construction**: one bound; nothing extends it; the deadline is checked before each step. Scoped (round 9): it bounds WAITING FOR evidence, not the acceptance of evidence in hand — an observed success is accepted up to one slice + one artifact scan late, deliberately |
 | the deadline cannot outlast its gate component | `cap <= MAX_TEST_DEADLINE`, asserted |
 | calibration only loosens | `scale` floored at 1, span clamped at `base`, largest scale retained; asserted |
 | progress is evidence | `PollFail::observed()` reports `progress observed: NONE` / counts and says the counts do NOT extend the bound; `observed_progress_never_extends_the_deadline` asserts the poll TERMINATES under progress on every slice |

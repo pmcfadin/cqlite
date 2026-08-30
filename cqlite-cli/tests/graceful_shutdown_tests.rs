@@ -40,7 +40,13 @@
 //! `scale = max(1, observed / quiet_baseline)`. Any single stage may consume the
 //! whole deadline, so no wait here can fire sooner than the 60s bound it
 //! replaced; and observed progress is reported as evidence but never extends
-//! anything, so the declared bound is the actual maximum.
+//! anything, so no wait is granted or started past the declared bound.
+//!
+//! That bound is on WAITING FOR EVIDENCE, not on accepting evidence already in
+//! hand: a stage that observes its signal as the deadline lapses still passes,
+//! deliberately, because failing it would be a false failure on a working product.
+//! `poll_with_progress` in the support module owns that decision and bounds how
+//! late an accepted success can be.
 //!
 //! Unix-only: it sends a real `SIGINT` via `libc::kill`.
 
