@@ -50,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     identity participates in equality/hash, so two UDTs of different declared
     types with identical fields remain distinct `dict` keys. `Tuple`/`Set` arms
     are deliberately still absent (#3500).
+  - **Projection totality WIDENED as a side effect, measured rather than
+    assumed.** Because a `cqlite.Udt` is HASHABLE where the old `dict` was not, a
+    UDT reached through the arm-less `Tuple` fall-through in a hashed position now
+    reads successfully: `set<frozen<tuple<frozen<udt>, int>>>` and
+    `map<frozen<tuple<frozen<udt>, int>>, int>` both raised
+    `TypeError: unhashable type: 'dict'` before and now yield a `frozenset` /
+    `dict` keyed by `(Udt, …)`. `set<frozen<set<frozen<udt>>>>` still raises
+    `TypeError: unhashable type: 'list'`, unchanged, because a UDT-bearing set
+    renders as a Python `list` for CLI parity (#804) — a different cause. This is
+    NOT "#3500 is fixed": no arm was added. Boundary pinned by
+    `test_udt_collision.udt_hashable_shapes` in the fixture.
 
   **Migration.** Python: `udt["_type"]` → `udt.type_name`, `udt["_keyspace"]` →
   `udt.keyspace`, `isinstance(v, dict)` → `isinstance(v, cqlite.Udt)`; field
