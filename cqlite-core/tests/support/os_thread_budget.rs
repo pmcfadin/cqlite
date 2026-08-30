@@ -513,8 +513,45 @@ fn read_cpu_pressure_some_total() -> Result<u64, String> {
 /// evidence behind #3514 is `n = 1` on the failing side; a number embedded now
 /// would read as established when it is not. Report the percentage, let a human
 /// judge it.
+///
+/// ## THE NESTING INVARIANT — state it once, enforce it at BOTH ends (#3514 r2)
+///
+/// The reported percentage is `stall_delta / wall_delta`, i.e. a ratio of two
+/// intervals measured by two different clocks (the kernel's PSI counter and this
+/// process's `Instant`). It is meaningful only if:
+///
+/// ```text
+///   [ wall interval ]  ⊇  [ PSI interval ]        (strict superset, both ends)
+///
+///   Instant::now()  ──►  read PSI(start)   ...   read PSI(end)  ──►  elapsed()
+///   ^ wall opens FIRST      ^ numerator opens      ^ numerator closes   ^ wall closes LAST
+/// ```
+///
+/// Because PSI's `some total=` advances by at most one microsecond per
+/// microsecond of wall time, that nesting is exactly what makes the ratio
+/// **≤ 100%**. Violating it at EITHER end lets the numerator span an interval the
+/// denominator does not cover, and the excess is reported as a percentage above
+/// 100% — a number the module's own contract says is impossible.
+///
+/// **Both ends have now been wrong, one per review round, and that is the point
+/// of writing the invariant down here rather than a fix at each site.** Round 1
+/// fixed the CLOSING end (the closing PSI read happened AFTER `elapsed()`);
+/// round 2 found the OPENING end had the identical asymmetry (`start` was read
+/// before `opened` was captured) and had survived precisely because the previous
+/// fix was applied to the reported instance instead of to the invariant. Do not
+/// fix one end again: if you touch either read, re-check both against the diagram
+/// above.
+///
+/// Third layer, because two orderings in two functions are exactly the kind of
+/// thing a later refactor reorders: [`describe_stall`] REJECTS an inverted window
+/// at the point the ratio is FORMED. So an ordering regression at either end can
+/// only ever degrade to `UNMEASURED`, never print a false percentage — and that
+/// enforcement is unit-testable, whereas an ordering is not.
 pub struct CpuPressureWindow {
+    /// Opening PSI reading — the numerator's start. Read AFTER `opened` (see the
+    /// nesting invariant on this struct).
     start: Result<u64, String>,
+    /// Wall-clock anchor — the denominator's start. Captured BEFORE `start`.
     opened: Instant,
 }
 
@@ -522,10 +559,17 @@ pub struct CpuPressureWindow {
 /// point to describe the window from here to now; it may be called more than
 /// once (e.g. once after the peak sample and again after a reap confirmation).
 pub fn open_cpu_pressure_window() -> CpuPressureWindow {
-    CpuPressureWindow {
-        start: read_cpu_pressure_some_total(),
-        opened: Instant::now(),
-    }
+    // ORDER MATTERS, and this is the OPENING half of the nesting invariant stated
+    // on `CpuPressureWindow` (#3514 r2). Take the wall anchor FIRST, then read the
+    // PSI counter: any scheduling delay (or the /proc read itself blocking, which
+    // on a starved host is precisely when it does) then lands INSIDE the wall
+    // interval instead of outside it. Written as two statements rather than a
+    // struct literal because Rust evaluates field initialisers in written order,
+    // so the ordering would be silently reversible by a field reorder — which is
+    // how it was wrong.
+    let opened = Instant::now();
+    let start = read_cpu_pressure_some_total();
+    CpuPressureWindow { start, opened }
 }
 
 impl CpuPressureWindow {
@@ -597,6 +641,27 @@ pub fn describe_stall(started: u64, ended: u64, wall_micros: u128) -> String {
             .to_string();
     }
     let stalled_micros = u128::from(stalled);
+    // THIRD LAYER of the nesting invariant (see `CpuPressureWindow`): the ratio is
+    // formed HERE, so the impossibility is checked HERE (#3514 r2). Under a correct
+    // nesting `stalled <= wall`, so an excess means the two intervals were not
+    // nested — an ordering regression at either end, or two clocks that do not
+    // relate — and the measurement is therefore VOID.
+    //
+    // REJECT, do not CAP. Clamping to "100.0%" would put a plausible-looking number
+    // where an impossible measurement was, which is the SAME mistake as blocker 1's
+    // `0.0%` for a backwards counter: the next person reads a value and trusts it.
+    // Every other unmeasurable state in this module reports UNMEASURED with a cause,
+    // and so does this one.
+    if stalled_micros > wall_micros {
+        return format!(
+            "cpu-pressure: UNMEASURED (window INVERTED: {stalled_micros}us of stall over only \
+             {wall_micros}us of wall, which is impossible under the nesting invariant — the PSI \
+             interval must be contained in the wall interval at BOTH ends; suspect an ordering \
+             regression in `open_cpu_pressure_window` or `CpuPressureWindow::report`). Capping \
+             this to 100% would report a plausible number for an impossible measurement — an \
+             unmeasurable value is not a value"
+        );
+    }
     let pct = (stalled_micros as f64) * 100.0 / (wall_micros as f64);
     format!(
         "cpu-pressure: some-stall {pct:.1}% of wall ({stalled_micros}us stalled over \
