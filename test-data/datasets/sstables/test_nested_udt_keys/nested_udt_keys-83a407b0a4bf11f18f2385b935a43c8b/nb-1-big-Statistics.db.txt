@@ -1,10 +1,10 @@
-SSTable: /data/test_nested_udt_keys/nested_udt_keys-0d365130a4b711f1a22d5b6e3d784b38/nb-1-big
+SSTable: /data/test_nested_udt_keys/nested_udt_keys-83a407b0a4bf11f18f2385b935a43c8b/nb-1-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
-Minimum timestamp: 08/30/2026 21:09:14 (1788124154079016)
-Maximum timestamp: 08/30/2026 21:09:15 (1788124155613525)
+Minimum timestamp: 08/30/2026 22:09:48 (1788127788927392)
+Maximum timestamp: 08/30/2026 22:09:50 (1788127790499760)
 Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 1
-SSTable min local deletion time: 08/30/2026 21:09:14 (1788124154)
+SSTable min local deletion time: 08/30/2026 22:09:48 (1788127788)
 SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: -
 TTL min: 0
@@ -15,14 +15,14 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: 971b254f-565e-41c2-8fce-59db856e20aa
+Originating host id: 306ea932-5ea2-44ab-9986-dd038bf5c343
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1788124093431, position=62855)=CommitLogPosition(segmentId=1788124093431, position=66131)}
+Replay positions covered: {CommitLogPosition(segmentId=1788127723883, position=62854)=CommitLogPosition(segmentId=1788127723883, position=66130)}
 totalColumnsSet: 28
 totalRows: 4
 Estimated tombstone drop times: 
    Drop Time                        | Count  (%)  Histogram 
-   1788124200 (08/30/2026 21:10:00) |    19 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1788127800 (08/30/2026 22:10:00) |    19 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1996099046 (04/02/2033 23:57:26)
    75th      1996099046 (04/02/2033 23:57:26)
@@ -62,8 +62,8 @@ Column Count:
 Local token space coverage: NaN
 Estimated cardinality: 4
 EncodingStats minTTL: 0
-EncodingStats minLocalDeletionTime: 08/30/2026 21:09:14 (1788124154)
-EncodingStats minTimestamp: 08/30/2026 21:09:14 (1788124154079016)
+EncodingStats minLocalDeletionTime: 08/30/2026 22:09:48 (1788127788)
+EncodingStats minTimestamp: 08/30/2026 22:09:48 (1788127788927392)
 KeyType: org.apache.cassandra.db.marshal.Int32Type
 ClusteringTypes: []
 StaticColumns: 
