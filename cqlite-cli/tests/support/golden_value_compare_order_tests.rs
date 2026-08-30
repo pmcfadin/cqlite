@@ -361,6 +361,72 @@ fn a_udt_renders_its_fields_in_the_declared_order() {
     );
 }
 
+/// The DD1 rule one level down: a map's KEYS are compared as canonical VALUES, so
+/// two long distinct keys sharing a 120-character prefix are two keys.
+///
+/// A PIN rather than a regression test — the map key comparison never truncated —
+/// kept because the key is derived from `Canon`, whose `describe()` is the
+/// DIAGNOSTIC rendering: reintroducing `brief(&canon.describe())` here (the DD1
+/// defect's own shape) would make this reversal compare EQUAL, and the `keys_of`
+/// listing beside it does truncate on purpose.
+///
+/// `map<text, text>`, so no numeric normalization is in play: `cassandra-5.0.8`
+/// `MapSerializer.toJSONString` writes the key with `writeString`, hence the golden's
+/// stringified spelling, while the CLI's `{"key","value"}` pair keeps the declared
+/// type's natural kind — the asymmetry `compare_map` states.
+#[test]
+fn two_long_map_keys_sharing_a_120_char_prefix_are_compared_distinctly() {
+    const TEXT_MAP_DDL: &str = "CREATE TABLE t (id text PRIMARY KEY, m map<text, text>);";
+    let schema = schema_of(TEXT_MAP_DDL, "t");
+    let prefix = "k".repeat(120);
+    let long_a = format!("{prefix}a");
+    let long_b = format!("{prefix}b");
+    let golden = vec![row(&[
+        ("id", json!("1")),
+        ("m", json!({long_a.clone(): "a", long_b.clone(): "b"})),
+    ])];
+
+    let in_order = vec![row(&[
+        ("id", json!("1")),
+        (
+            "m",
+            json!([
+                {"key": long_a.clone(), "value": "a"},
+                {"key": long_b.clone(), "value": "b"},
+            ]),
+        ),
+    ])];
+    let report = compare_rows(&golden, &in_order, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(
+        report.diffs.is_empty(),
+        "the emitted order agrees: {:?}",
+        report.diffs
+    );
+
+    let reversed = vec![row(&[
+        ("id", json!("1")),
+        (
+            "m",
+            json!([
+                {"key": long_b.clone(), "value": "b"},
+                {"key": long_a.clone(), "value": "a"},
+            ]),
+        ),
+    ])];
+    let report = compare_rows(&golden, &reversed, &schema, &["id"], &[], &[], Egress::Json);
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "reordering two map keys that share a 120-char prefix must fail: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("EMITTED order") && report.diffs[0].contains("chars total)"),
+        "the diagnostic must say what was compared, and quote the keys truncated: {:?}",
+        report.diffs
+    );
+}
+
 /// Finding N2: a map's entries are compared IN EMITTED ORDER, so a reordering is
 /// a divergence.
 ///

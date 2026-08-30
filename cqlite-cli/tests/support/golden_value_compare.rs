@@ -1233,19 +1233,24 @@ fn compare_map(
     // i.e. to the kind its declared key type implies. Relaxing BOTH sides made a
     // regression from the `map<int,…>` key `-5` to the string `"-5"` compare equal
     // (issue #1491 review finding N1).
-    let canon_golden_key = |v: &Value| -> Result<String, String> {
+    //
+    // The key is the `Canon` VALUE, never `Canon::describe()`: `describe` is the
+    // DIAGNOSTIC rendering, and a rendering used as a comparison key can only be as
+    // faithful as its spelling happens to be — the same class as finding DD1, where
+    // the row-order key's `brief(&canon.describe())` made two long distinct keys
+    // equal. Here the pair is compared as the structured value and rendered only
+    // into the message below.
+    let canon_golden_key = |v: &Value| -> Result<Canon, String> {
         canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Stringified)
-            .map(|canon| canon.describe())
     };
-    let canon_cli_key = |v: &Value| -> Result<String, String> {
+    let canon_cli_key = |v: &Value| -> Result<Canon, String> {
         canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Natural)
-            .map(|canon| canon.describe())
     };
-    let mut g: Vec<(String, &Value)> = Vec::with_capacity(golden.len());
+    let mut g: Vec<(Canon, &Value)> = Vec::with_capacity(golden.len());
     for (k, v) in golden {
         g.push((canon_golden_key(&Value::String(k.clone()))?, v));
     }
-    let mut c: Vec<(String, &Value)> = Vec::with_capacity(cli.len());
+    let mut c: Vec<(Canon, &Value)> = Vec::with_capacity(cli.len());
     for entry in cli {
         let (key, value) = pair(entry, egress)?;
         c.push((canon_cli_key(key)?, value));
@@ -1256,19 +1261,27 @@ fn compare_map(
     for (i, ((gk, gv), (ck, cv))) in g.iter().zip(c.iter()).enumerate() {
         if gk != ck {
             return Err(format!(
-                "map key at emitted position {i}: golden {gk} vs cli {ck} — a map's \
+                "map key at emitted position {i}: golden {} vs cli {} — a map's \
                  entries are compared in EMITTED order, which is the key-comparator \
                  order both the dump and a reader of the same SSTable see (golden \
                  keys [{}], cli keys [{}])",
+                brief(&gk.describe()),
+                brief(&ck.describe()),
                 keys_of(&g),
                 keys_of(&c)
             ));
         }
         // A map VALUE is the cell value (`writeRawValue`), so it keeps its natural
         // JSON kind even when the key beside it was stringified.
-        let entry = at.index(gk, Kinding::Natural);
+        //
+        // The PATH takes the key UNTRUNCATED: a declared gap is matched against it by
+        // exact string (see [`gap::SkipPaths::declared`]), so truncating it here would
+        // silently merge the paths of two long keys — DD1 again, one level down. Only
+        // the message prefix is truncated.
+        let key_text = gk.describe();
+        let entry = at.index(&key_text, Kinding::Natural);
         compare_value_at(gv, cv, egress, value_ty, &entry)
-            .map_err(|why| format!("[{gk}] {why}"))?;
+            .map_err(|why| format!("[{}] {why}", brief(&key_text)))?;
     }
     Ok(())
 }
@@ -1276,10 +1289,14 @@ fn compare_map(
 /// The canonical keys of one side of a map, in emitted order, for the ordering
 /// diagnostic above — a bare "golden X vs cli Y" at position 3 does not say
 /// whether the entry is missing, extra or merely moved.
-fn keys_of(entries: &[(String, &Value)]) -> String {
+///
+/// Each key is rendered through [`brief`] because a map key may be a 4 KiB blob and
+/// this line lists EVERY key. That truncation is confined to this message: the keys
+/// themselves are compared as `Canon` values (see [`compare_map`] and finding DD1).
+fn keys_of(entries: &[(Canon, &Value)]) -> String {
     entries
         .iter()
-        .map(|(k, _)| k.as_str())
+        .map(|(k, _)| brief(&k.describe()))
         .collect::<Vec<_>>()
         .join(", ")
 }
