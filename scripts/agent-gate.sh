@@ -2543,7 +2543,8 @@ apply_schemas_preflight() {
 # is classified, which is what stops the next reviewer finding instance four.
 #
 #   BOUNDED (network-capable; every one goes through _component_set_bounded):
-#     git fetch --refmap= origin main    the baseline read; network by definition.
+#     git fetch --refmap= --no-tags …    the baseline read; network by definition. Both
+#                                        flags suppress SHARED-ref writes (branches, tags).
 #     git show <sha>:scripts/…           reads a BLOB, so in a PARTIAL clone
 #                                        (--filter=blob:none) it fetches LAZILY. This is the
 #                                        site that looked local and was not (finding 1).
@@ -2600,11 +2601,28 @@ _component_set_flatten() {
 # `bash-watchdog` needs only bash plus a `sleep`, so `none` requires a tree with no
 # `timeout`, no `gtimeout` AND no `sleep`. A busy-wait is deliberately NOT offered as a
 # fallback — burning a core for up to the whole bound is not a bound worth having.
+# A TERM-only `timeout` is NOT a bound (roborev job 214): measured here, `timeout 2 <script
+# with trap '' TERM>` blocked for the full 2 minutes of an outer bound and never returned.
+# So the external mechanisms are accepted only WITH `--kill-after`, and that support is
+# MEASURED rather than assumed (busybox and ancient coreutils lack the flag) — a probe that
+# runs the real flag against `true` and requires success. A host whose `timeout` cannot
+# escalate falls back to the bash watchdog, which performs the full ladder itself; it is
+# never used in a TERM-only mode, because "bounded" would then be false on exactly the input
+# that matters. Memoized: it is consulted on every bounded call and cannot change within one
+# process.
+_CS_BOUND_MECH=""
 _component_set_bound_mechanism() {
-  if command -v timeout >/dev/null 2>&1; then printf timeout
-  elif command -v gtimeout >/dev/null 2>&1; then printf gtimeout
-  elif command -v sleep >/dev/null 2>&1; then printf bash-watchdog
-  else printf none; fi
+  if [ -n "$_CS_BOUND_MECH" ]; then printf '%s' "$_CS_BOUND_MECH"; return 0; fi
+  if command -v timeout >/dev/null 2>&1 && timeout --kill-after=1 1 true >/dev/null 2>&1; then
+    _CS_BOUND_MECH=timeout
+  elif command -v gtimeout >/dev/null 2>&1 && gtimeout --kill-after=1 1 true >/dev/null 2>&1; then
+    _CS_BOUND_MECH=gtimeout
+  elif command -v sleep >/dev/null 2>&1; then
+    _CS_BOUND_MECH=bash-watchdog
+  else
+    _CS_BOUND_MECH=none
+  fi
+  printf '%s' "$_CS_BOUND_MECH"
 }
 
 # _component_set_bounded <secs> <cmd...>: run <cmd> under a bound, whatever this host has.
@@ -2623,9 +2641,25 @@ _CS_UNBOUNDABLE_RC=199
 _CS_BOUND_HINT=120
 _component_set_bounded() {
   local secs="$1"; shift
+  # THE LADDER IS TERM -> grace -> unconditional group KILL, AND IT IS COMPLETE. There is
+  # no fourth rung to add, because SIGKILL cannot be caught, blocked or ignored — a process
+  # that survives it does not exist. This is stated because the bound has now been the
+  # subject of three review rounds (an unbounded fallback, a direct-child-only signal, a
+  # TERM-only external tool), each one a missing rung; the ladder being complete is what
+  # ends that sequence.
+  #
+  # Both arms implement the SAME ladder: `--kill-after=1` gives the external tools the KILL
+  # rung (their status is then 137 rather than 124 — both mean "bound exceeded"), and the
+  # bash arm KILLs the process GROUP unconditionally after the grace period.
+  #
+  # SCOPE, stated so it is not mistaken for a gap: neither arm kills a descendant that
+  # outlives a SUCCESSFUL exit. Deliberate — the three commands bounded here (git fetch,
+  # git show, bash --list) detach nothing, and adding a post-success group kill to only one
+  # arm would make the two arms mean different things, which is the divergence these
+  # comments exist to prevent.
   case "$(_component_set_bound_mechanism)" in
-    timeout)  timeout "$secs" "$@" ;;
-    gtimeout) gtimeout "$secs" "$@" ;;
+    timeout)  timeout --kill-after=1 "$secs" "$@" ;;
+    gtimeout) gtimeout --kill-after=1 "$secs" "$@" ;;
     none)     return "$_CS_UNBOUNDABLE_RC" ;;
     *)
       # PROCESS GROUP, not just the child (roborev job 210, finding 2). Signalling only the
@@ -2655,11 +2689,15 @@ _component_set_bounded() {
         if [ "$waited" -ge "$secs" ]; then
           kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
           sleep 1
-          if kill -0 "$pid" 2>/dev/null; then
-            kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-          fi
+          # UNCONDITIONAL group KILL (roborev job 214). This was guarded by
+          # `if kill -0 "$pid"`, i.e. it escalated only while the DIRECT CHILD was alive —
+          # so a child that exits on TERM while a GRANDCHILD ignores TERM and holds the
+          # capture pipe left the substitution hanging forever, with the guard believing it
+          # had bounded the work. The child's liveness says nothing about the group's, so it
+          # must not gate the escalation.
+          kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null
-          return 124            # same status GNU timeout reports for a bound exceeded
+          return 124            # a status GNU timeout also uses for a bound exceeded
         fi
         sleep 1
         waited=$((waited + 1))
@@ -2706,7 +2744,14 @@ _component_set_probe() {
   # invoker's choosing, i.e. the opt-out this guard must not have.
   #
   # `--refmap=` (EMPTY) suppresses the opportunistic `refs/remotes/origin/*` update and
-  # writes ONLY the per-worktree FETCH_HEAD. Two reasons, both about this fleet's layout —
+  # `--no-tags` suppresses AUTOMATIC TAG FOLLOWING. BOTH are required, and `--refmap=`
+  # ALONE WAS NOT ENOUGH (roborev job 214): `git fetch` also auto-follows tags reachable
+  # from what it fetched and writes them to the SHARED `refs/tags/*`, which reintroduces
+  # exactly the shared-ref mutation `--refmap=` was added to remove — so a new upstream tag
+  # meant concurrent lanes contending on a tag ref, the loser's fetch exiting non-zero, and
+  # this fail-closed pre-flight rejecting a run for a purely CONCURRENT cause. That is the
+  # false-FAIL class the whole guard exists to avoid, which is why it outranks its severity
+  # label. Two reasons for suppressing shared writes at all, both about this fleet's layout —
   # lanes are `git worktree`s of ONE shared `.git`, so `refs/remotes/origin/main` is
   # SHARED between them:
   #   1. NO SHARED REF LOCK. Two sibling lanes fetching at once would contend on that
@@ -2718,10 +2763,14 @@ _component_set_probe() {
   #   2. NO SIDE EFFECT ON A PEER. A pre-flight must not move a ref another lane's run may
   #      be reading mid-flight; the check exists to distrust that cached ref, not to
   #      rewrite it.
-  err=$(_component_set_bounded 120 git -C "$REPO_ROOT" fetch --quiet --refmap= origin main 2>&1); rc=$?
+  err=$(_component_set_bounded 120 git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags origin main 2>&1); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
-    _CS_DETAIL="git fetch origin main exited $rc: $(_component_set_flatten "$err")"
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_DETAIL="git fetch origin main EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc — the bound fired; a stalled network or an auth prompt is the usual cause)"
+    else
+      _CS_DETAIL="git fetch origin main exited $rc: $(_component_set_flatten "$err")"
+    fi
     return 0
   fi
   # FETCH_HEAD, not refs/remotes/origin/main: FETCH_HEAD is what THIS fetch just
@@ -2758,8 +2807,11 @@ _component_set_probe() {
   rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=baseline-missing
-    if [ "$rc" -eq 124 ]; then
-      _CS_DETAIL="git show ${_CS_SHA}:$rel EXCEEDED its ${_CS_BOUND_HINT}s bound (a partial clone fetching the blob lazily is the usual cause)"
+    # 124 AND 137 both mean "bound exceeded": 137 is what an external `timeout` reports once
+    # `--kill-after` has had to escalate to SIGKILL. Reading only 124 would file a KILLed
+    # extraction under the generic failure text and hide the actual cause.
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_DETAIL="git show ${_CS_SHA}:$rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
     else
       _CS_DETAIL="git show ${_CS_SHA}:$rel failed (rc $rc): $(_component_set_flatten "$(cat "$tmpd/show.err" 2>/dev/null)")"
     fi
