@@ -7,11 +7,12 @@
 //! resolver [`super::datasets_root::sstables_root_for_table`], which walks the
 //! candidate roots in order — `CQLITE_DATASETS_ROOT` first, then the checkout — and
 //! returns the first that carries the table. That rule is right for a fetched-corpus
-//! fixture and WRONG for a committed one: on this fleet `/data/datasets/sstables`
-//! carries its own copy of most committed tables, so the lane compared an EXTERNAL
-//! copy — possibly stale, regenerated, or simply a different generation — while the
-//! census still reported the git-committed table as covered. A regression specific
-//! to the committed values would then pass unnoticed.
+//! fixture and WRONG for a committed one. Measured on a fleet box, the
+//! `CQLITE_DATASETS_ROOT=/data/datasets` corpus carried its own copy of 22 of this
+//! lane's 24 committed cases, so for all 22 the lane compared an EXTERNAL copy —
+//! possibly stale, regenerated, or simply a different generation — while the census
+//! still reported the git-committed table as covered. A regression specific to the
+//! committed values would then pass unnoticed.
 //!
 //! A committed fixture's whole purpose is pinning committed values, so for a
 //! committed case the checkout copy IS the oracle:
