@@ -601,7 +601,7 @@ pub fn golden_rows(
         // Strict: a duplicate object key in the GOLDEN would silently discard part
         // of the oracle — the same shape as two multicell map cells for one key,
         // which this reader already refuses rather than collapses (finding K2).
-        let doc: Value = strict_json::parse(line, &at()).map_err(|why| format!("{why}"))?;
+        let doc: Value = strict_json::parse(line, &at())?;
         let partition = doc
             .get("partition")
             .ok_or_else(|| format!("{}: no `partition`", at()))?;

@@ -3,9 +3,9 @@
 //!
 //! # What this lane asserts, and what it replaces
 //!
-//! For every committed fixture table in [`CASES`] it runs the real CLI —
+//! For every table in [`CASES`] it runs the real CLI —
 //! `cqlite --schema <cql> --data-dir <staged> export <out> --format json|csv
-//! --table <ks.tbl>` — reads the output back, pairs rows with the committed
+//! --table <ks.tbl>` — reads the output back, pairs rows with that table's
 //! `*-Data.db.jsonl` golden by primary key, and compares EVERY cell value.
 //!
 //! Until #1491 nothing did that. `one_shot_e2e_tests.rs::validate_json_structure`
@@ -32,6 +32,23 @@
 //! never by an env-first/checkout-first preference. The census names the root that
 //! supplied each golden. There is no suite-wide `assert!(ran > 0)`, which cannot see
 //! one case skipping behind its siblings.
+//!
+//! # Declared gaps, and their SCOPE
+//!
+//! A gap in the value comparison is a [`Skip`]: a path, the egress FORMAT(S) it
+//! applies to, and the measured divergence. The format scope is load-bearing —
+//! `Infinity`/`NaN` are lost by JSON's value vocabulary and carried verbatim by
+//! CSV, so a gap declared for both formats drops a column from the format that
+//! renders it correctly. Every applicable gap is named, WITH its scope, in the run
+//! census, and one that matched nothing in a lane's walk fails that lane.
+//!
+//! The CSV lane additionally REFUSES a container cell whose golden content cannot
+//! survive the unquoted rendering (see `golden::csv_container`); refusals are
+//! counted and named in the census too. Neither kind of gap is ever silent.
+//!
+//! Both egress readers and the golden reader parse JSON STRICTLY — a duplicate
+//! object key is malformed output on the CLI side and a discarded oracle on the
+//! golden side, never something to reconcile (see `golden::strict_json`).
 //!
 //! # Coverage census
 //!
