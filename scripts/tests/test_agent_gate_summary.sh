@@ -4797,7 +4797,28 @@ else
   fi
 fi
 
-ASSERT_FLOOR=400
+# TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
+# coordination lead authorised, taken on the evidence below).
+#
+# The measured `accounted` on a fully-equipped host is 401, and the accounting is now 1:1
+# across SEVEN separately-simulated host shapes (everything-present, jq-less, cargo-less,
+# python3-less, node-less, Darwin, masked /proc, offline registry — each measured
+# individually at 401). An EXACT floor of 401 would nonetheless be a hair-trigger: it reds
+# on any skip site that displaces more than one verdict, and three rounds of enumeration
+# found FOUR such sites (1699-r18-diff, 1699-r32-preflight-behaviour, perf-host,
+# 1699-featoracle) — two of them only after two prior enumerations had declared the set
+# complete. The scans that back a completeness claim are heuristics (bounded lookahead,
+# regex shapes), the skip-routing guard above checks the ROUTE and explicitly not the
+# COUNT, and no static check can see a count that lives in the branch not taken.
+#
+# So the floor is `measured - largest single displacement` = 401 - 9 (the r32 section's
+# nine want_ cases): it still catches a whole section dying silently, which is what the
+# floor exists for, while a single undiscovered non-1:1 site cannot false-RED a legitimate
+# host. Tightening it to the exact count is tracked separately (see the issue linked in the
+# report) with the enumeration, the four defects and the eight host shapes as its
+# acceptance criteria (issue #3611); the durable contribution here is the SKIPPED_TOOLING
+# accounting and the four 1:1 fixes, not the number.
+ASSERT_FLOOR=392
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
