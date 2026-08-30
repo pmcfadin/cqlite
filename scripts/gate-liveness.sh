@@ -387,16 +387,12 @@ _summary_refusal() {  # <what-is-wrong-with-the-summary> <full-cause-for-UNKNOWN
   [ "$_beat_matches" = yes ] && return 1
   verdict UNKNOWN 4 "$2"
 }
-if [ ! -f "$SUMMARY" ]; then
-  if [ "$_startup_beat" = yes ]; then
-    verdict RUNNING 2 "run '$WANT_RUN_ID' is beating ($_sb_note) but has not written its summary yet — normal during startup, because the gate publishes liveness BEFORE its tree-identity capture and sentinel. summary: not yet at $SUMMARY"
-  fi
-  verdict UNKNOWN 4 "no-summary-artifact; $SUMMARY is not readable as a regular file (never written, or its location is not reachable from here)"
-fi
-if [ ! -r "$SUMMARY" ]; then
-  _summary_refusal "the summary at this path cannot be read" "summary-unreadable; $SUMMARY exists but cannot be read"
-fi
-_ensure_snap_dir || verdict UNKNOWN 4 "no-snapshot-dir; could not create a private temp directory under ${TMPDIR:-/tmp} to read the artifacts consistently"
+# MOVED to enclose EVERY summary-side path (roborev job 218). Three paths previously sat ABOVE this
+# wrapper and emitted a bare `verdict UNKNOWN`: `no-summary-artifact`, `no-snapshot-dir` and
+# `no-result-line`. None of them starts with `summary-`, which is exactly why the structural guard
+# missed them — it checked a NAME PREFIX rather than the PROPERTY, the same mistake this file
+# documents elsewhere. One of those paths also called `_summary_refusal` with no `|| break`, so a
+# deferral there fell through into the next check instead of reaching the heartbeat side.
 # The summary section sits in a `while :; do ... break; done` so a refusal can FALL THROUGH to the
 # heartbeat side below instead of ending the script (roborev job 216). A `while` loop is not a
 # subshell, so every variable this section sets is still visible afterwards; bash has no forward goto
@@ -404,6 +400,16 @@ _ensure_snap_dir || verdict UNKNOWN 4 "no-snapshot-dir; could not create a priva
 # better authority, and otherwise never returns at all.
 _summary_refusal_or_defer() { _summary_refusal "$@"; }
 while :; do
+if [ ! -f "$SUMMARY" ]; then
+  if [ "$_startup_beat" = yes ]; then
+    verdict RUNNING 2 "run '$WANT_RUN_ID' is beating ($_sb_note) but has not written its summary yet — normal during startup, because the gate publishes liveness BEFORE its tree-identity capture and sentinel. summary: not yet at $SUMMARY"
+  fi
+  _summary_refusal_or_defer "the summary has not been written at this path" "no-summary-artifact; $SUMMARY is not readable as a regular file (never written, or its location is not reachable from here)" || break
+fi
+if [ ! -r "$SUMMARY" ]; then
+  _summary_refusal_or_defer "the summary at this path cannot be read" "summary-unreadable; $SUMMARY exists but cannot be read" || break
+fi
+_ensure_snap_dir || _summary_refusal_or_defer "the summary could not be snapshotted for a consistent read" "no-snapshot-dir; could not create a private temp directory under ${TMPDIR:-/tmp} to read the artifacts consistently" || break
 _SUM_SNAP=$(_snap_of "$SUMMARY" summary) || _SUM_SNAP=""
 if [ -z "$_SUM_SNAP" ]; then
   _summary_refusal_or_defer "the summary at this path could not be snapshotted" "summary-unsnapshotable; could not take a private copy of $SUMMARY to read it consistently (no writable temp dir, or the file vanished)" || break
@@ -562,7 +568,7 @@ RESULT_LINE=$(printf '%s\n' "$SUM_TEXT" | grep -m1 '^RESULT: ' || true)
 # records this same defect in the roborev wrapper's own verdict scan (`PASS*` accepting
 # `PASSthisNeverRan`); this was that mistake reproduced one layer down.
 if [ -z "$RESULT_LINE" ]; then
-  verdict UNKNOWN 4 "no-result-line; $SUMMARY has no 'RESULT:' line (truncated or not a gate summary)"
+  _summary_refusal_or_defer "the summary has no RESULT line" "no-result-line; $SUMMARY has no 'RESULT:' line (truncated or not a gate summary)" || break
 fi
 RESULT_VALUE="${RESULT_LINE#RESULT: }"
 RESULT_TOKEN="${RESULT_VALUE%% *}"
@@ -634,7 +640,7 @@ case "$RESULT_TOKEN" in
   INCOMPLETE)
     : ;;  # the interesting case: fall through to the heartbeat
   *)
-    verdict UNKNOWN 4 "unrecognised-result; verdict token '$RESULT_TOKEN' (from '$RESULT_LINE') is not a value this reader knows" ;;
+    _summary_refusal_or_defer "the summary's verdict token is not one this reader knows" "unrecognised-result; verdict token '$RESULT_TOKEN' (from '$RESULT_LINE') is not a value this reader knows" || break ;;
 esac
 
   break

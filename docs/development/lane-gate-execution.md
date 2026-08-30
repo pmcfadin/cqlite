@@ -642,6 +642,37 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### The guard that missed four paths because it checked a NAME, not a PROPERTY
+
+Job 209 built `_summary_refusal` as *"one decision point for every summary-side refusal"* and asserted
+it structurally — with a grep for `verdict UNKNOWN 4 "summary-` outside the funnel. **That checks a
+name prefix, not a property.** Four paths emitted a bare `UNKNOWN` and none of them is spelled
+`summary-*`: `no-summary-artifact`, `no-snapshot-dir`, `no-result-line`, `unrecognised-result`. They
+bypassed the funnel for three more rounds while the guard reported clean, so a stale matching beat
+never reached the two-sample confirmation and the pre-sentinel reap stayed unclassifiable. One of them
+also called the helper with **no `|| break`**, so even its deferral fell through into the next check
+instead of reaching the heartbeat side — it sat above the wrapper entirely.
+
+This is the mistake this document describes elsewhere, committed *in the guard written to prevent it*.
+Fluency with the lesson did not prevent it; only a check phrased as a property does. The replacement
+states the property positively — **between the summary section's opening and the heartbeat side, zero
+`verdict UNKNOWN` may appear** — and derives the region from the file's own structure at run time, so
+a path added later is covered without editing the test. A companion case requires every routed call to
+actually `break`.
+
+The same lesson arrived from the opposite direction in the same round. `11b.17e` protects a real,
+load-bearing invariant (`_ensure_snap_dir` must run in the CALLING shell; a subshell's `SNAP_DIR`
+assignment is discarded, which is what leaked 868 snapshot directories) — but it was written as a grep
+for `^_ensure_snap_dir || verdict UNKNOWN`, binding it to *the text that happened to follow*. Routing
+that path through the funnel broke the assertion while the invariant was untouched. So a name-shaped
+check produced a **false clean** in one place and a **false alarm** in the other. It now asserts a
+column-zero call and no occurrence inside `$( )`, RED-checked by planting `x=$(_ensure_snap_dir)` —
+because a guard that has never rejected anything is indistinguishable from one that cannot.
+
+Throughout, the BEHAVIOURAL test carried the load correctly: `11b.17d` (15 reader invocations, 0
+leaked directories) passed the whole time. **When a structural grep and a behavioural measurement
+disagree, the measurement is the one describing reality.**
+
 ### Fixing one direction and leaving its mirror — twice
 
 Job 209 made a summary refusal defer to a **fresh** matching beat, so an unreadable summary could no

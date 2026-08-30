@@ -635,9 +635,17 @@ else
   bad "11b.17d reader invocations leak snapshot directories" "$_snap_before -> $_snap_after"
 fi
 # The split that makes it work must stay: the directory is created in the CALLING shell.
-grep -q '^_ensure_snap_dir || verdict UNKNOWN' "$READER" \
-  && ok "11b.17e the snapshot dir is created in the calling shell, not inside \$( )" \
-  || bad "11b.17e the snapshot dir is created in the calling shell" "not found"
+# Asserted as the PROPERTY, not as the text that happens to follow (job 218). The previous form
+# grepped `^_ensure_snap_dir || verdict UNKNOWN`, so routing that path through the refusal funnel
+# broke the assertion while the invariant it protects was untouched. What matters is only this: the
+# call sits at column zero — the CALLING shell — and never inside a command substitution, because a
+# subshell's SNAP_DIR assignment is discarded and that is what leaked 868 directories.
+if grep -qE '^_ensure_snap_dir( \|\||;|$)' "$READER" && ! grep -q '\$(_ensure_snap_dir' "$READER"; then
+  ok "11b.17e the snapshot dir is created in the calling shell, not inside \$( )"
+else
+  bad "11b.17e the snapshot dir is created in the calling shell" \
+      "no column-zero call, or one appears inside \$( )"
+fi
 
 echo "=== section 11c: the four roborev job-157 findings, each with a control ==="
 # (a) Medium — a TERMINAL result in a TRUNCATED block was reported COMPLETE. emit_summary
@@ -1204,8 +1212,13 @@ _mk_stale_startup_beat() { # <path> <run-id> <age>
 }
 rm -f "$TMP/st2.txt"
 _mk_stale_startup_beat "$TMP/st2.txt.heartbeat" myrun 5000
-expect_reader "11l.7 STALE startup beat + no summary => UNKNOWN, never a false RUNNING" \
-  UNKNOWN 4 "no-summary-artifact" -- "$TMP/st2.txt" --run-id myrun
+# Updated by job 218, and this case VOUCHED FOR THE BUG: it required a stale matching beat with no
+# summary to answer UNKNOWN, which is precisely the pre-sentinel reap that should read STALLED. The
+# fourth instance in this change of a test pinning behaviour that was wrong — and the tell was the
+# same each time: new reasoning and an old expectation disagreed, and the reasoning was better.
+# The case's PROPERTY, never a false RUNNING, is unchanged: STALLED is not RUNNING.
+expect_reader "11l.7 STALE startup beat + no summary => STALLED, never a false RUNNING" \
+  STALLED 3 "beat-seq did NOT advance" -- "$TMP/st2.txt" --run-id myrun
 mk_summary "$TMP/st2.txt" oldrun "PASS"
 # Updated by job 216: the verdict moved from UNKNOWN to STALLED because the beat now reaches the
 # heartbeat side's confirmation instead of being pre-empted by a summary complaint. This case's
@@ -1530,6 +1543,61 @@ _beat_bounded "$_dok.heartbeat" okprobe "$TMP/dirok.err" "$_dok.heartbeat"
 grep -q '^run-id: okprobe$' "$_dok.heartbeat" 2>/dev/null \
   && ok "11o.4 control: an ordinary file destination IS still published" \
   || bad "11o.4 control: an ordinary file destination is still published" "no beat at $_dok.heartbeat"
+
+echo "=== section 11q: NO summary-side path may verdict UNKNOWN alone (job 218) ==="
+# THE GUARD THAT SHOULD HAVE EXISTED THREE ROUNDS AGO. Job 209 built `_summary_refusal` as "one
+# decision point for every summary-side refusal" and asserted it with a grep for
+# `verdict UNKNOWN 4 "summary-` outside the funnel. That checked a NAME PREFIX, not a PROPERTY — so
+# `no-summary-artifact`, `no-snapshot-dir`, `no-result-line` and `unrecognised-result` bypassed the
+# funnel for three more rounds while the guard reported clean. Checking a spelling instead of a state
+# is the exact mistake this file documents in the reader's own verdict scan.
+#
+# The property, stated positively: between the summary section's opening and the heartbeat side, EVERY
+# UNKNOWN must go through the funnel — because only the funnel consults the beat. Derived from the
+# file's own structure at run time, so a path added later is covered without editing this test.
+_gl="$READER"
+_reg=$(awk '/^while :; do$/{f=1} /the heartbeat side: affirmative liveness/{f=0} f' "$_gl")
+if [ -z "$_reg" ]; then
+  bad "11q.1 no summary-side path verdicts UNKNOWN outside the funnel" \
+      "could not delimit the summary region — the derivation failed, so this proves nothing"
+else
+  _bare=$(printf '%s\n' "$_reg" | grep -c 'verdict UNKNOWN' || true)
+  if [ "$_bare" = 0 ]; then
+    ok "11q.1 no summary-side path verdicts UNKNOWN outside the funnel ($(printf '%s\n' "$_reg" | grep -c '_summary_refusal_or_defer' ) routed)"
+  else
+    bad "11q.1 no summary-side path verdicts UNKNOWN outside the funnel" \
+        "$_bare bare UNKNOWN verdict(s) bypass the beat check"
+  fi
+fi
+# ...and every routed call must BREAK, or a deferral falls through into the next check instead of
+# reaching the heartbeat side. One site had exactly that defect (it sat above the wrapper entirely).
+_unbroken=$(printf '%s\n' "$_reg" | grep '_summary_refusal_or_defer "' | grep -vc '|| break' || true)
+[ "$_unbroken" = 0 ] && ok "11q.2 every routed refusal breaks out to the heartbeat side" \
+                     || bad "11q.2 every routed refusal breaks out to the heartbeat side" "$_unbroken site(s) do not"
+
+# Behavioural: the three paths that bypassed the funnel, each with a STALE matching beat.
+_q="$TMP/q"
+mk_beat "$_q-miss.txt.heartbeat" run-Q 4000 20
+expect_reader "11q.3 MISSING summary + stale matching beat => STALLED" \
+  STALLED 3 "" -- "$_q-miss.txt" --run-id run-Q
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-Q"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$_q-nores.txt"
+mk_beat "$_q-nores.txt.heartbeat" run-Q 4000 20
+expect_reader "11q.4 summary with NO RESULT line + stale matching beat => STALLED" \
+  STALLED 3 "" -- "$_q-nores.txt" --run-id run-Q
+mk_summary "$_q-weird.txt" run-Q "WEIRDVALUE"
+mk_beat "$_q-weird.txt.heartbeat" run-Q 4000 20
+expect_reader "11q.5 UNRECOGNISED verdict token + stale matching beat => STALLED" \
+  STALLED 3 "" -- "$_q-weird.txt" --run-id run-Q
+# CONTROLS: with no beat, each path must still report its own specific cause.
+rm -f "$_q-miss.txt.heartbeat"
+expect_reader "11q.6 control: missing summary + NO beat => UNKNOWN (no-summary-artifact)" \
+  UNKNOWN 4 "no-summary-artifact" -- "$_q-miss.txt" --run-id run-Q
+rm -f "$_q-nores.txt.heartbeat"
+expect_reader "11q.7 control: no RESULT line + NO beat => UNKNOWN (no-result-line)" \
+  UNKNOWN 4 "no-result-line" -- "$_q-nores.txt" --run-id run-Q
+rm -f "$_q-weird.txt.heartbeat"
+expect_reader "11q.8 control: unrecognised token + NO beat => UNKNOWN (unrecognised-result)" \
+  UNKNOWN 4 "unrecognised-result" -- "$_q-weird.txt" --run-id run-Q
 
 echo "=== section 11p: an unusable summary must not pre-empt the heartbeat (job 216) ==="
 # The MIRROR of job 209. That round made summary refusals defer to a FRESH matching beat (RUNNING).
