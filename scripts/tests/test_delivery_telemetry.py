@@ -1134,6 +1134,11 @@ class SliceDeliveryTests(unittest.TestCase):
                 for f in ("created_at", "pr_opened_at", "merged_at", "closed_at",
                           "stamped_at")}
         self.assertEqual(len(set(pats.values())), 1, f"timestamp patterns diverged: {pats}")
+        # ONE FACT, not two approximations: the schema's pattern must be the SAME STRING the
+        # tool compiles. Rounds 10-12 of this issue were three successive complaints about
+        # these two disagreeing (tool looser / tool tighter / schema looser), so identity is
+        # asserted mechanically rather than re-argued.
+        self.assertEqual(next(iter(pats.values())), dt._TIMESTAMP_PATTERN)
         pattern = _re.compile(next(iter(pats.values())))
         for v in ("2026-06-10T00:00:00Z", "2026-06-10T00:00:00+00:00",
                   "2026-06-10T00:00:00.123456Z", "2026-06-10T00:00:00-07:00",
@@ -1144,16 +1149,13 @@ class SliceDeliveryTests(unittest.TestCase):
                 # the pattern is a SYNTAX rule; _is_rfc3339 is syntax AND calendar. They must
                 # agree on every value whose calendar is valid, and the tool may only be
                 # stricter where the calendar is impossible.
-                by_pattern = bool(pattern.fullmatch(v))
-                by_tool = dt._is_rfc3339(v)
-                if by_pattern and not by_tool:
-                    # permitted ONLY for an impossible instant the regex cannot see
-                    self.assertIn(v, ("2026-06-10T23:59:60Z",),
-                                  f"{v!r} matches the published pattern but the tool refuses "
-                                  f"it — lint would reject a schema-valid record")
-                else:
-                    self.assertEqual(by_pattern, by_tool,
-                                     f"{v!r}: pattern={by_pattern} tool={by_tool}")
+                # NO licensed divergence any more. The pattern excludes leap seconds
+                # ([0-5]\d) and asserts true end-of-input ((?![\s\S]) rather than $, which
+                # in Python's re — used by the jsonschema library — also matches before a
+                # trailing newline), so the two agree on EVERY value, with no exception list.
+                self.assertEqual(bool(pattern.search(v)), dt._is_rfc3339(v),
+                                 f"{v!r}: pattern={bool(pattern.search(v))} "
+                                 f"tool={dt._is_rfc3339(v)}")
 
     def test_every_committed_timestamp_is_strict_rfc3339(self):
         """The tightening must not red the committed ledger — asserted, not assumed."""
@@ -1888,6 +1890,30 @@ class StandardValidatorSliceTests(unittest.TestCase):
         del rec["closed_at"]
         self.assertTrue(list(self.validator.iter_errors(rec)))
 
+    @unittest.skipUnless(_jsonschema is not None, "jsonschema not installed")
+    def test_standard_validator_and_lint_agree_on_timestamps(self):
+        """The gap that mattered was between a THIRD-PARTY reader and `lint`: Draft 2020-12
+        treats `format` as annotation-only, so before the pattern existed a standard
+        validator accepted records lint rejects. Measured through the real validator, not
+        inferred from the pattern string."""
+        schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+        base = json.loads(dt.DEFAULT_LEDGER.read_text().splitlines()[0])
+        for v in ("2026-06-10T00:00:00Z", "2026-06-10T00:00:00+00:00",
+                  "2026-06-10T00:00:00.123456Z",
+                  "2026-06-10T23:59:60Z",        # leap second: RFC-3339 legal, unparseable
+                  "2026-06-10T00:00:00Z\n",     # trailing newline: `$` would have matched
+                  "20260610T000000Z", "2026-06-10T00:00:00", "2026-06-10",
+                  "2026-06-10t00:00:00z", "2026-06-10T00:00:00+00:00:30"):
+            with self.subTest(value=v):
+                rec = dict(base)
+                rec["created_at"] = v
+                try:
+                    _Draft202012Validator(schema).validate(rec)
+                    std_ok = True
+                except _jsonschema.ValidationError:
+                    std_ok = False
+                self.assertEqual(std_ok, dt._is_rfc3339(v),
+                                 f"{v!r}: standard validator={std_ok}, lint={dt._is_rfc3339(v)}")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

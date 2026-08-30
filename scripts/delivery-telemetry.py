@@ -287,19 +287,26 @@ def load_schema(schema_path: Path) -> dict:
 
 # ============================================================ timestamp helpers
 
-# STRICT RFC-3339, in the uppercase canonical form `gh` emits (issue #3550). Anchored with
-# \Z, never $, because Python's $ also matches before a trailing newline.
+# THE canonical timestamp pattern — ONE string, shared with the published schema (issue
+# #3550). `docs/reports/delivery-telemetry.schema.json` carries this EXACT text as the
+# `pattern` of every timestamp field, and a test asserts the two are byte-identical, so they
+# cannot drift: rounds 10-12 of this issue's review were three successive complaints about
+# the tool and the schema disagreeing (tool looser, then tool tighter, then schema looser),
+# and the only stable answer is for there to be one rule rather than two approximations.
 #
-# `datetime.fromisoformat` is far MORE permissive than RFC-3339 — it accepts basic format
-# ("20260610T000000Z"), week dates ("2026-W24-1T00:00:00Z") and sub-minute offsets
-# ("+00:00:30") — so a "does it parse, does it have T and a tzinfo" check let values through
-# that this repo's own published schema (`format: date-time`) forbids. That leniency is
-# PRE-EXISTING (identical on origin/main's `_validate`) and no committed record uses such a
-# form, but a lenient writer plus a strict published contract is the same fail-open shape
-# this issue kept re-finding, so both the CLI check and the ledger validator now share ONE
-# recogniser rather than each approximating the format.
-_RFC3339_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z")
+# Details that are load-bearing rather than stylistic:
+#   * `[0-5]\d` seconds — RFC-3339 permits a LEAP SECOND (23:59:60) but
+#     `datetime.fromisoformat` cannot parse one, so a pattern admitting it would let a
+#     standard Draft 2020-12 validator accept a record `lint` rejects.
+#   * `(?![\s\S])` rather than `$` — in Python's `re` (which the `jsonschema` library uses
+#     for `pattern`) `$` also matches immediately BEFORE a trailing newline, so
+#     "...00:00:00Z\n" satisfied `^...$` while the tool refused it. This negative lookahead
+#     is a true end-of-input assertion and is valid in BOTH Python and ECMA-262, which the
+#     JSON Schema dialect specifies; `\Z` would work only in Python.
+#   * uppercase T/Z only — `gh` always emits the canonical form (see `_parse_ts`).
+_TIMESTAMP_PATTERN = (
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:[0-5]\d(\.\d+)?(Z|[+-]\d{2}:\d{2})(?![\s\S])")
+_RFC3339_RE = re.compile(_TIMESTAMP_PATTERN)
 
 
 def _is_rfc3339(value) -> bool:
