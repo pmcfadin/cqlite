@@ -2486,13 +2486,18 @@ else
   # 11f. AN EXISTING VALUE IS NEVER REWRITTEN. A box deliberately running >1
   #      concurrent gate overrides the pin, and clobbering that back to 1 on the next
   #      bootstrap would be a silent regression of a deliberate operator decision.
+  #      The run must also SAY it left the value alone: asserting only that the file is
+  #      unchanged is satisfied by a bootstrap that never writes at all, so the case
+  #      would pass against the very code this replaces.
   envf_f="$tmp/pin-env-f"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_f"
-  runpin "$pinroot" "$shims_none" "$envf_f" HOME="$pin_home_plain" --yes >/dev/null 2>&1
-  if [ "$(cat "$envf_f")" = "CQLITE_GATE_MAX_CONCURRENCY=4" ]; then
-    ok "gate-pin: an existing CQLITE_GATE_MAX_CONCURRENCY value is left EXACTLY as it is"
+  out_f=$(runpin "$pinroot" "$shims_none" "$envf_f" HOME="$pin_home_plain" --yes)
+  if [ "$(cat "$envf_f")" = "CQLITE_GATE_MAX_CONCURRENCY=4" ] \
+     && printf '%s' "$out_f" | grep -q 'already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is'; then
+    ok "gate-pin: an existing CQLITE_GATE_MAX_CONCURRENCY value is left EXACTLY as it is, and the run says so"
   else
-    bad "gate-pin: --yes rewrote a deliberate override"
+    bad "gate-pin: --yes rewrote a deliberate override (or never looked at the file)"
     cat "$envf_f"
+    printf '%s\n' "$out_f" | grep -i 'gate-pin\|already carries' | head -2
   fi
 
   # 11g. A file whose last byte is not a newline must not have the pin welded onto its

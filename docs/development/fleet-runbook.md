@@ -49,6 +49,30 @@ of `git-push: VERIFIED` / `FAILED` / `UNMEASURED`. Run the probe by hand only wh
 bash scripts/flow/claim.sh smoke               # same probe the bootstrap runs (see below)
 ```
 
+**The single-gate pin is provisioned and VERIFIED the same way (#3414).** Bootstrap persists
+`CQLITE_GATE_MAX_CONCURRENCY=1` into **`/etc/environment`** under `--yes` — read by PAM's
+`pam_env` at session creation, with no interactivity guard — and then reports one
+`gate-pin: VERIFIED / FAILED / UNMEASURED` line taken from an **affirmative probe**: it scrubs
+its own inherited value and reads the variable back out of a fresh, profile-free session. It is
+never a grep of the file it just wrote. Two facts to keep in mind when you touch this:
+
+* **A shell profile is the wrong place and a grep of it is the wrong check.** Stock Ubuntu
+  `~/.bashrc` opens with `case $- in *i*) ;; *) return;; esac`, so an export appended there is
+  never reached by the non-interactive shells that launch gates. All three fleet boxes carried
+  the export and **none** of them had it in effect; every gate resolved the #1825 cap from the
+  default formula (`--slots 3` on a 16-core box) while the pin looked installed. Bootstrap still
+  appends to the profile for interactive convenience, but that append can only ever print
+  `[info]`.
+* **An existing value is never rewritten.** A box deliberately running >1 concurrent gate
+  overrides the pin; bootstrap leaves the line exactly as it is and verifies effectiveness.
+
+```bash
+# how to ask the question yourself, the only way that answers it:
+sudo -u "$(id -un)" bash -c 'echo "${CQLITE_GATE_MAX_CONCURRENCY:-UNSET}"'
+# and what the gate then stamps on its own cpu-budget line:
+#   max-concurrency=1(pinned)   <- provisioned    max-concurrency=3(default) <- NOT provisioned
+```
+
 **Cost and residual of the automatic probe.** Every bootstrap run — laptop runs included — makes two
 extra network round trips and CREATES AND DELETES a transient `refs/claims/smoke-<commit-sha>` ref on the
 shared origin. A cleanup delete that exits nonzero now FAILS the probe
