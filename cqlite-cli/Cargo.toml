@@ -107,6 +107,8 @@ parquet = { workspace = true }
 # `double`) parses ONE ULP high, while `str::parse::<f64>` is exact. That made the
 # ORACLE wrong, reporting a divergence in correct export output. `float_roundtrip`
 # makes the parse exact. Enabled here (dev only) so the parity oracle is sound;
+# widening it to the WORKSPACE dependency (which every cqlite-core parity lane needs)
+# is issue #3557.
 # `tests/issue_1490_parquet_jsonl_parity.rs::golden_float_literals_parse_exactly`
 # fails if it is ever dropped.
 serde_json = { workspace = true, features = ["float_roundtrip"] }

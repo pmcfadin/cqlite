@@ -301,8 +301,9 @@ fn parquet_values_match_golden_test_timeseries_sensor_data() {
 /// letting every float-bearing case turn red for a reason nobody can see.
 ///
 /// (The same lossy parse affects `cqlite-core`'s shared `canonical_jsonl`
-/// comparator wherever it is compiled WITHOUT that feature — reported
-/// separately; this guard covers the lane it can speak for.)
+/// comparator wherever it is compiled WITHOUT that feature — filed as #3557,
+/// whose fix is to widen the WORKSPACE dependency; this guard covers the lane it
+/// can speak for.)
 #[test]
 fn golden_float_literals_parse_exactly() {
     for literal in [
