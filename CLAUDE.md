@@ -319,11 +319,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `.github/ci-gating-tiers.yml` exempts the CI feature-matrix lane *because the local gate owns
   it*, so each side's coverage is justified by the other's and the component is exercised by
   neither. At the mode dispatch — before the #1825 slot and any component — every mode compares
-  its component **SET** (from `--list` on both sides; never a line count or blob hash) against a
+  its component **SET** (never a line count or blob hash) against a
   baseline **fetched in that same invocation** (a remote-tracking ref is a *cached observable*;
   a stale one returns "no skew" against a superseded `main`), and stamps `component-set:` into
-  every SUMMARY: `PASS (35/35 vs origin/main <sha40>)` — affirmative, **naming its baseline
-  sha**; `FAIL-CLOSED (#3544) — this tree is BEHIND …; MISSING: <names>` (remedy: `git fetch
+  every SUMMARY: `PASS (36/36 vs origin/main <sha40> via the committed manifest)` — affirmative,
+  **naming its baseline sha AND how the baseline was read**; `FAIL-CLOSED (#3544) — this tree is BEHIND …; MISSING: <names>` (remedy: `git fetch
   origin && git rebase origin/main`); `DECLARED (#3544) — this branch REMOVES <names>` when
   `origin/main` IS an ancestor of `HEAD` **AND the components are absent at `HEAD` too** — **loud,
   not fatal**, because the author has nothing to rebase and a guard that reds on correct input
@@ -336,6 +336,38 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **THE BASELINE IS READ AS DATA; NOTHING FETCHED IS EVER EXECUTED (REQ-3544-01, lead ruling).**
+  The first design derived the baseline set by extracting `origin/main:scripts/agent-gate.sh` and
+  RUNNING it (`bash <fetched> --list`). **Six of that mechanism's seven High-severity findings
+  traced to that one decision**, and its three fixes each moved the hole one layer outward (a
+  symbolic remote name ⇒ the validated URL ⇒ the URL in `argv`) — the signature of a **shared
+  channel between data and control**, where the standing ruling (#3312) is to REMOVE the channel,
+  not to choose a rarer delimiter. So: the branch side is the **in-process `COMPONENTS` array**
+  (what this run will actually dispatch), and the baseline side is **`git show
+  <sha>:scripts/agent-gate.components`** — a committed DATA manifest, parsed under a CLOSED
+  grammar (one name per line; blank lines and `#` comments skipped; anything else, INCLUDING a
+  name with leading/trailing whitespace, is a NAMED refusal — a parser that trims is a parser
+  that guesses). **What this CONVERTS the six findings into, rather than eliminating:** a
+  redirected or hostile baseline now yields a **wrong component list, which the comparison itself
+  detects**, instead of arbitrary code execution with the developer's credentials. Everything
+  built for the old mechanism is **KEPT as defence in depth** — identity/transport/host/path
+  pinning, the isolated fetch (URL written into a 0600 config by a shell builtin so it never
+  enters `argv`), the verified transfer hop, the mode-dependent bound, shallow ancestry, the
+  redact+flatten detail path. **The local manifest is ASSERTED against the running array on every
+  run** (`manifest-missing`/`-garbage`/`-stale`, fail-closed, ORDER included), and that assert is
+  what makes a manifest baseline trustworthy at all: without it the file is an unverified claim,
+  and a branch that grew `COMPONENTS` without regenerating the manifest would — once merged —
+  leave `main`'s manifest SHORT, so every later branch would compare against a too-small baseline
+  and silently excuse real skew. Regenerate with `{ sed -n -e '/^[^#]/q' -e p
+  scripts/agent-gate.components; scripts/agent-gate.sh --list; }` and commit it.
+  **One TRANSITIONAL fallback, also data-only:** when the manifest is ABSENT at the baseline rev,
+  the gate script's **single-line top-level `COMPONENTS=(…)` declaration is extracted AS TEXT**
+  (never executed) and refuses loudly on any other shape — a multi-line/computed array, more than
+  one declaration, or a character outside the name grammar. It exists because `origin/main` carries
+  no manifest until this change merges, so a manifest-only read would leave that PR unable to
+  certify itself; it is self-limiting (unreachable for any baseline at or after that merge) and
+  format-brittle in a SHARED direction (a reflow on `main` refuses for every branch at once, which
+  is fail-closed, not a false green) — which is the other reason the manifest is primary.
   And `origin` must **NAME the canonical upstream**, HOST INCLUDED
   (`github.com/pmcfadin/cqlite`, one hard-coded literal, EXACT equality after normalising the
   spellings git accepts — scheme forms, scp-like, userinfo, an ssh port, `www.`, `.git`, case):
@@ -343,14 +375,17 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   opt-out, and it fires BY ACCIDENT in the fork workflow, where a contributor's fork `main` is a
   stale baseline stamped `PASS`. **An OWNER/REPO-only match is NOT enough, and "err toward
   accepting an ambiguous host" was WRONG here** — it accepted `evil.example/pmcfadin/cqlite` and,
-  needing no hostile host at all, ANY LOCAL PATH ending in those two segments, which **compounds
-  with the execution surface**: the pre-flight EXTRACTS AND RUNS the baseline's copy of the gate,
-  so a loose identity admits arbitrary code, not merely a wrong baseline. Identity and execution
-  are one concern, not two. Anything unverifiable from the string (an ssh alias, a mirror, a local
+  needing no hostile host at all, ANY LOCAL PATH ending in those two segments — which, while the
+  pre-flight still RAN the baseline's copy of the gate, admitted arbitrary code and not merely a
+  wrong baseline (identity and execution were one concern, not two). Under REQ-3544-01 what a
+  loose identity buys is a baseline of unknown PROVENANCE, from which no PASS may be derived, so
+  the check stays exactly as strict — as defence in depth rather than as the only thing standing
+  between a re-pointed remote and code execution. Anything unverifiable from the string (an ssh alias, a mirror, a local
   path, `file://`, a look-alike host) is a NAMED non-PASS, as is a URL-less `origin`. **And the URL grammar is CLOSED AXIS BY AXIS, because three rounds were "too permissive" in
   a NEW place each time** (no host; host but no transport; then `http://`/`git://` accepted):
   transport (`https`/`ssh`/`git+ssh`/scp-form ONLY — `http://` and `git://` authenticate
-  nothing and the baseline is EXECUTED, so an on-path impersonator gets CODE EXECUTION), host,
+  nothing, so an on-path impersonator supplies the objects this run certifies against; when the
+  rule was written those objects were EXECUTED, which is why it was a High), host,
   port (default only), path, and userinfo (ACCEPTED — GitHub Actions writes
   `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red a legitimate CI
   checkout — and therefore REDACTED everywhere it is rendered, since SUMMARY blocks get pasted
@@ -358,8 +393,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   change to git's URL syntax, not a gap. **The baseline is fetched into a PRIVATE per-run
   `refs/worktree/…` ref, never `FETCH_HEAD`**: `--refmap=` removed the shared *tracking* write
   and left `FETCH_HEAD`, which is itself one shared mutable file a concurrent fetch overwrites
-  between the fetch and the read — the run would then compare against, and EXECUTE, a commit
-  it never fetched. **And `--is-ancestor`'s rc 1 is itself three-valued**: in a SHALLOW clone it
+  between the fetch and the read — the run would then compare against a commit it never fetched. **And `--is-ancestor`'s rc 1 is itself three-valued**: in a SHALLOW clone it
   also means "the connecting history is absent", so rc 1 is definitive only in a repo PROVEN
   complete (`unknown` shallowness ⇒ INDETERMINATE) — otherwise a legitimate committed removal
   in a shallow checkout reds as BEHIND. **Corollary
@@ -370,8 +404,9 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   vulnerability were the same fact**; and the check REGRESSED three suites whose local origins it
   rejected (`test_agent_gate_delta.sh`'s two real `--delta` fixtures stopped at the pre-flight
   instead of reaching their REFUSED paths — a `tooling-tests` FAIL invisible to `--lite`). Or `FAIL-CLOSED … baseline NOT measured (<kind>)` for a
-  failed fetch/absent `origin`/erroring-empty-garbage baseline `--list`/an unreadable `HEAD` gate
-  script/**a host on which the probe cannot be BOUNDED** (in which case the fetch is not run at all — an unbounded fetch
+  failed fetch/absent `origin`/an empty or ungrammatical baseline manifest/a baseline declaration
+  that cannot be read as text/an unreadable baseline-or-`HEAD` set/**a host on which the probe
+  cannot be BOUNDED** (in which case the fetch is not run at all — an unbounded fetch
   could hang `--lite` on a stall or an auth prompt, and a missing capability must not inherit
   the permissive branch) — **never a SKIP and never a fallback to an empty baseline**, which
   would excuse every branch. A branch-only

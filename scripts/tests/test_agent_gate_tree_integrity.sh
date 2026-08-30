@@ -78,6 +78,13 @@ mkrepo() { # mkrepo <name> [extra `git init` args…] -> echoes the repo path
   # cases assert on. FATAL rather than silent: an unpinned fixture measures nothing.
   agent_gate_pin_canonical_remote "$root/scripts/agent-gate.sh" "$root.origin.git" \
     || { echo "FATAL: could not pin the canonical identity in fixture '$root'" >&2; exit 1; }
+  # …and the component MANIFEST beside the copy (#3544 REQ-3544-01), for the same reason and
+  # with the same timing: the pre-flight asserts the working tree's manifest matches the
+  # running COMPONENTS array before it fetches, so a gate copy without one stops at
+  # `manifest-missing` in the certifying modes; and writing it BEFORE the commit keeps the
+  # fixture CLEAN, which these cases assert on.
+  agent_gate_install_components_manifest "$root/scripts/agent-gate.sh" \
+    || { echo "FATAL: could not install the component manifest in fixture '$root'" >&2; exit 1; }
   # The DISPOSABLE-CHECKOUT MARKER (#2926 review B5): the gate's mutating self-test hooks
   # refuse to write into any checkout that does not carry it, so they can never append to
   # — or commit into — a live repo. Committed, so it is inside the digest yet clean.

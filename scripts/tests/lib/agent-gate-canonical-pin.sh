@@ -68,3 +68,42 @@ agent_gate_pin_canonical_remote() {
   fi
   return 0
 }
+
+# agent_gate_install_components_manifest <gate-copy-path> (#3544 REQ-3544-01)
+#   Write `<dir of the copy>/agent-gate.components` from THAT COPY'S OWN `--list`.
+#
+# WHY EVERY FIXTURE THAT COPIES THE GATE NEEDS THIS. The component-set pre-flight reads its
+# baseline as DATA (`git show <rev>:scripts/agent-gate.components`) and, before it fetches
+# anything, asserts that the WORKING TREE's manifest equals the running `COMPONENTS` array —
+# fail-closed as `manifest-missing`/`manifest-stale` in the certifying modes. A fixture that
+# copies the gate and no manifest therefore stops at that pre-flight instead of exercising
+# whatever it exists to test. This is the same shape as the canonical-identity pin above, and
+# it lives beside it so the three suites that copy the gate (component-set, delta,
+# tree-integrity) share ONE implementation rather than three that can drift.
+#
+# DERIVED FROM THE COPY, never from the repository's committed manifest: a fixture whose copy
+# was transformed (a sed'd COMPONENTS array) needs a manifest that matches THAT array, and
+# copying the real file would make every such fixture `manifest-stale`.
+#
+# FAIL-CLOSED (rc 1) on an empty or implausibly short list: a manifest that silently failed to
+# generate would make every case built on that fixture report `manifest-*`, i.e. a suite that
+# tests nothing while looking busy.
+agent_gate_install_components_manifest() {
+  local copy="${1:-}"
+  local dir out n
+  [ -n "$copy" ] && [ -f "$copy" ] \
+    || { echo "install-components-manifest: needs an existing gate copy (got '${1:-}')" >&2; return 1; }
+  dir=$(dirname "$copy")
+  out="$dir/agent-gate.components"
+  if ! bash "$copy" --list >"$out" 2>/dev/null; then
+    echo "install-components-manifest: '$copy --list' failed; cannot derive $out" >&2
+    return 1
+  fi
+  n=$(grep -c . "$out" 2>/dev/null || true)
+  case "${n:-0}" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -le 10 ]; then
+    echo "install-components-manifest: '$copy --list' produced $n component(s); refusing a manifest that cannot be the component set" >&2
+    return 1
+  fi
+  return 0
+}

@@ -108,9 +108,10 @@ add_local_origin() {
 #
 # The pre-flight validates that `origin` NAMES the canonical upstream
 # (`github.com/pmcfadin/cqlite`) before fetching a baseline — `origin` merely EXISTING made
-# `git remote set-url origin <anything>` a git-config-shaped opt-out, and the pre-flight
-# EXTRACTS AND RUNS the baseline's copy of the gate, so a loose identity admits code and not
-# just a wrong baseline. A LOCAL PATH is therefore deliberately not canonical, and without
+# `git remote set-url origin <anything>` a git-config-shaped opt-out, and a baseline of unknown
+# provenance is not a measurement (while the pre-flight still RAN the fetched gate, it admitted
+# code as well; #3544 REQ-3544-01 reads the baseline as DATA and the check remains, as defence
+# in depth). A LOCAL PATH is therefore deliberately not canonical, and without
 # this pin both --delta fixtures below stop at the pre-flight as `remote-not-canonical`
 # instead of reaching the REFUSED paths they exist to test. That was the job-225 regression:
 # it would have surfaced as a full-gate FAIL under `tooling-tests`, which neither `--lite` nor
@@ -129,6 +130,14 @@ copy_gate_with_pin() {
   cp "$GATE" "$repo/scripts/agent-gate.sh"
   agent_gate_pin_canonical_remote "$repo/scripts/agent-gate.sh" "$repo.origin.git" \
     || { echo "FATAL: could not pin the canonical identity in fixture '$repo'" >&2; exit 1; }
+  # …and the component MANIFEST beside it (#3544 REQ-3544-01): the pre-flight reads its
+  # baseline as DATA and first asserts the working tree's manifest matches the running
+  # COMPONENTS array, so a gate copy without one stops at `manifest-missing` — in `--delta`,
+  # a CERTIFYING mode, that is fail-closed and no case below would reach its REFUSED path.
+  # BEFORE the fixture's first commit, for the same reason the pin is: a post-commit write
+  # leaves the fixture DIRTY and gets swept into an anchor..HEAD diff.
+  agent_gate_install_components_manifest "$repo/scripts/agent-gate.sh" \
+    || { echo "FATAL: could not install the component manifest in fixture '$repo'" >&2; exit 1; }
 }
 
 # assert_verdict <label> <expected> <paths...>: pipe the paths through the hidden

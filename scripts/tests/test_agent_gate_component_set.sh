@@ -156,15 +156,16 @@ mkmanifest() {
   # an earlier one in the same statement, so `out="$root/…"` read an UNBOUND `root` — under
   # `set -u` that killed the fixture builder's subshell and every fixture came back EMPTY.
   local root="$1" mode="$2" text="${3:-}"
-  local out="$root/scripts/agent-gate.components" n
+  local out="$root/scripts/agent-gate.components"
   case "$mode" in
     none)    rm -f "$out"; return 0 ;;
     literal) printf '%s\n' "$text" >"$out"; return 0 ;;
     derive)
-      ( fx "$root" && bash scripts/agent-gate.sh --list 2>/dev/null ) >"$out" || return 1
-      n=$(grep -c . "$out" 2>/dev/null || true)
-      case "${n:-0}" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$n" -gt 10 ] || return 1
+      # ONE implementation, shared with the delta and tree-integrity suites (which copy the
+      # gate for their own reasons and hit the same pre-flight): see
+      # agent_gate_install_components_manifest in lib/agent-gate-canonical-pin.sh. Two copies
+      # of this rule is the drift this file keeps finding elsewhere.
+      agent_gate_install_components_manifest "$root/scripts/agent-gate.sh" || return 1
       return 0 ;;
   esac
   return 1
