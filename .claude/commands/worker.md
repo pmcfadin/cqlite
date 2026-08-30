@@ -158,9 +158,14 @@ onto its own branch). Rules, non-negotiable:
       never a re-verify round. When in doubt, blocker.
    3. Open the PR (`Closes #<N>`); refresh the heartbeat (`bash scripts/flow/claim-heartbeat.sh beat <N>`).
    4. **Spawn `flow-closer` (model: opus) for the endgame — you do NOT run the full gate yourself.** It runs
-      THE full `scripts/agent-gate.sh` **exactly once** (the ONLY gate of record) via `run_in_background`
-      with the summary-file pattern and **never idle-waits** (a subagent idle-waiting on a 12-25 min gate is
-      watchdog-killed and orphans the gate — the #1855 failure), spawns `spec-auditor` for **C** (design),
+      THE full `scripts/agent-gate.sh` **exactly once** (the ONLY gate of record) via
+      `scripts/flow/gate-detached.sh` — NOT `run_in_background`, which is not sufficient: a subagent
+      runs in its own `KillMode=control-group` pane scope, so everything it spawns (`nohup`/`setsid`
+      included) is signalled when its context ends, and the gate does **not** survive as an orphan —
+      it dies, silently, leaving only the launch sentinel (#3473). It also **never idle-waits** (a
+      subagent idle-waiting on a 12-25 min gate is watchdog-killed — the #1855 failure) and polls
+      with `scripts/gate-liveness.sh`, whose `REAPED` verdict means re-launch rather than keep
+      waiting. Then it spawns `spec-auditor` for **C** (design),
       runs the final roborev confirmation pass, then — after the pre-merge SHA assert + `HOLD` re-read —
       **arms auto-merge (`gh pr merge --auto --squash --delete-branch`) so GitHub owns the CI-green wait**
       (#2667; safe because #2433 configured a real `required` check + `enforce_admins` on `main`), then

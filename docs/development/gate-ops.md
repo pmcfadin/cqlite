@@ -406,13 +406,32 @@ running. Diagnosing that wrongly is expensive in both directions — killing and
 queued gate wastes 15–25 min, and waiting on a dead one wastes the whole session. Use these probes,
 in this order:
 
-- **The authoritative aliveness probe is the gate LOG FILE's mtime advancing.** A live gate writes
-  continuously; a dead one stops. Sample it twice, a minute or two apart:
+- **The authoritative aliveness probe is `scripts/gate-liveness.sh` (issue #3473).** The gate itself
+  now beats `<summary-file>.heartbeat` every 20s for as long as its process lives, and the startup
+  sentinel names that path. One command answers the question this whole section is about:
+  ```bash
+  bash scripts/gate-liveness.sh "$AGENT_GATE_SUMMARY_FILE" --run-id <run-id>
+  #   COMPLETE (0) | RUNNING (2) | REAPED (3) | UNKNOWN (4, with a named cause)
+  ```
+  `RUNNING` covers queued-and-alive, so it needs no separate queue check. `REAPED` is the state
+  nothing could previously express: the gate was killed and will never write a verdict — re-launch
+  rather than wait. Pass `--run-id` whenever you know it; a concurrent peer's beat on a shared
+  default path otherwise answers about the peer's gate (#2874). A **missing** beat is `UNKNOWN`,
+  never `REAPED` — absence is not evidence of death, and an older gate simply has no beat.
+- **Fallback, and only a fallback: the gate LOG FILE's mtime advancing.** Use this when
+  `gate-liveness.sh` reports `UNKNOWN` because there is no heartbeat.
   ```bash
   stat -f %m gate-<N>.log   # macOS; GNU: stat -c %Y
   ```
-  An advancing mtime means alive, full stop. (You are only reading the *timestamp* here — never read
-  `gate-<N>.log`'s contents into context; the SUMMARY file remains the only gate text you retain.)
+  An advancing mtime means alive. **The converse does NOT hold** — this probe is one-directional. A
+  queued gate writes nothing at all, and a live gate inside a long silent component can leave the
+  mtime flat for minutes, so a static mtime is not evidence of death. That asymmetry is why the
+  heartbeat exists. (You are only reading the *timestamp* here — never read `gate-<N>.log`'s contents
+  into context; the SUMMARY file remains the only gate text you retain.)
+- **A gate launched in-session dies with its session's cgroup (#3473).** If a gate keeps turning up
+  `REAPED`, the cause is probably that it was launched inside an agent session rather than with
+  `scripts/flow/gate-detached.sh`; `nohup`/`setsid` do not help. See
+  `docs/development/lane-gate-execution.md`.
 - **`ps` is unreliable for this** and should not be your primary signal. A gate spends long stretches
   inside child `cargo`/`nextest`/`rustc` processes under different names, and a **queued** gate is
   legitimately running no cargo at all — so "I don't see it in `ps`" is not evidence of death.
