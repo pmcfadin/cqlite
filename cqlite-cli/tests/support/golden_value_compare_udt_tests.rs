@@ -115,7 +115,7 @@ fn a_declared_field_missing_from_both_sides_is_a_failure() {
     );
     let why = &report.diffs[0];
     assert!(
-        why.contains("last_name") && why.contains("person") && why.contains('p'),
+        why.contains("last_name") && why.contains("person") && why.contains("at `p`"),
         "the failure must name the field, the UDT type and the column: {why}"
     );
 

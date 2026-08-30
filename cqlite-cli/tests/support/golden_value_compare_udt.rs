@@ -107,10 +107,10 @@ pub(super) fn compare_udt(
     // both `missing` and `extra`, the order check below filters by
     // `contains_key`, and the golden-field iteration never visits it — so the
     // whole comparison passed over a field nobody rendered (issue #1491 review
-    // finding W1). It is the same rule this file already applies one level up to a
-    // row's COLUMNS: an exclusion excludes a VALUE, never a position's PRESENCE
-    // (see [`SkipPaths`]), and a missing declared column is a failure whatever the
-    // golden happens to hold.
+    // finding W1). It is the same rule the parent module already applies one level
+    // up to a row's COLUMNS: an exclusion excludes a VALUE, never a position's
+    // PRESENCE (stated on `super::SkipPaths`), and a missing declared column is a
+    // failure whatever the golden happens to hold.
     //
     // NEITHER SIDE MAY DEFAULT HERE, and that is the one place this differs from
     // the row level. A row's golden legitimately omits a never-written CELL, so
@@ -139,7 +139,7 @@ pub(super) fn compare_udt(
             .collect();
         if !absent.is_empty() {
             return Err(format!(
-                "udt `{}` at `{}`: the {side} side emits none of the declared field(s) \
+                "udt `{}` at `{}`: the {side} side does not emit the declared field(s) \
                  {absent:?} — the committed CREATE TYPE declares {:?}, and \
                  cassandra-5.0.8 UserType.toJSONString emits every declared field \
                  (`null` when its value is absent), so a declared field that is \
