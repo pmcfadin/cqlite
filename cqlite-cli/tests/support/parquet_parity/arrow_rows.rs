@@ -25,6 +25,7 @@
 //! | `Timestamp(ms, UTC)`        | `Timestamp` (epoch µs)               | `"YYYY-MM-DD HH:MM:SS.mmmZ"` |
 //! | `Date32`                    | `Text("YYYY-MM-DD")`                 | `"YYYY-MM-DD"` |
 //! | `Time64(ns)`                | `Text("HH:MM:SS.nnnnnnnnn")`         | same shape |
+//! | `Interval(MonthDayNano)`    | `Tuple(months, days, nanos)`         | duration text, via `spelling.rs` |
 //! | `List`                      | `List`                               | assembled from per-element cells |
 //! | `Map`                       | `Map`                                | assembled from `path`+`value` cells |
 //! | `Struct`                    | `Tuple`                              | JSON object |
@@ -32,16 +33,25 @@
 //! An Arrow type NOT in that table is an ERROR. A permissive fallback (render it
 //! with `Debug`, say) would let an unexpected mapping compare equal to something
 //! and is exactly how a parity harness silently stops testing.
+//!
+//! # This table and `arrow_expect::ArrowShape::accepts` MUST stay in sync
+//!
+//! `accepts` decides which Arrow types the harness declares VALID for a declared
+//! CQL type; this module decides which it can actually DECODE. An accept-list
+//! broader than the decoder is a promise the harness cannot keep: the schema
+//! check passes and the run then dies during value projection, which is a
+//! confusing late failure instead of a clear early one. Add or remove a
+//! representation in BOTH places, in one edit.
 
 #![allow(dead_code)]
 
 use arrow::array::{
     Array, BooleanArray, Date32Array, Decimal128Array, FixedSizeBinaryArray, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, LargeBinaryArray,
-    LargeStringArray, ListArray, MapArray, StringArray, StructArray, Time64NanosecondArray,
-    TimestampMillisecondArray,
+    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, IntervalMonthDayNanoArray,
+    LargeBinaryArray, LargeStringArray, ListArray, MapArray, StringArray, StructArray,
+    Time64NanosecondArray, TimestampMillisecondArray,
 };
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
 
 use super::canonical_jsonl::{CanonicalValue, NormalizedFloat};
 
@@ -122,6 +132,27 @@ pub fn canonical_from_arrow(
         DataType::Time64(TimeUnit::Nanosecond) => {
             let nanos = downcast::<Time64NanosecondArray>(array, ctx)?.value(row);
             Ok(CanonicalValue::Text(format_time_nanos(nanos)?))
+        }
+        // The faithful Arrow type for CQL `duration` (see `arrow_expect`), and
+        // the ONE case where the canonical form is produced directly rather than
+        // as text: the two writers spell a duration differently, so
+        // `spelling::normalize_spelling` reconciles both sides onto a
+        // (months, days, nanos) triple — and an Arrow interval already IS that
+        // triple, so emitting it avoids inventing a text spelling only to parse
+        // it back (which would also have to re-guess Cassandra's global-sign
+        // convention). Emitted in EXACTLY the shape `normalize_spelling`
+        // produces for the golden's duration text, which then leaves it
+        // unchanged.
+        DataType::Interval(IntervalUnit::MonthDayNano) => {
+            let v = downcast::<IntervalMonthDayNanoArray>(array, ctx)?.value(row);
+            Ok(CanonicalValue::Tuple(vec![
+                ("months".to_string(), CanonicalValue::Int(v.months as i128)),
+                ("days".to_string(), CanonicalValue::Int(v.days as i128)),
+                (
+                    "nanos".to_string(),
+                    CanonicalValue::Int(v.nanoseconds as i128),
+                ),
+            ]))
         }
         DataType::Decimal128(_, scale) => {
             let unscaled = downcast::<Decimal128Array>(array, ctx)?.value(row);

@@ -70,6 +70,13 @@ use cql_type::ColumnType;
 use failure::{Failure, Failures};
 use golden_rows::GoldenRow;
 
+// `ExpectedFailure` is used only by the test binaries that DECLARE a
+// `known_gap`, and each test binary includes this module by `#[path]` — so in a
+// binary that declares none the re-export is genuinely unused. Allowed rather
+// than dropped: the type belongs to the case-declaration surface beside
+// `KnownGap`, and making callers reach into `failure::` for one half of the same
+// record would be worse.
+#[allow(unused_imports)]
 pub use failure::{ExpectedFailure, KnownGap, KnownTypeGap};
 
 /// One corpus table under value parity.

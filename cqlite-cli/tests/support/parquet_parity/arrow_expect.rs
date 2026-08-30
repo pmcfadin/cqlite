@@ -83,6 +83,14 @@
 //!   needs its field types — sstabledump types the field values for it), so the
 //!   expectation is "an Arrow `Struct`" and its fields are unconstrained. That is
 //!   still enough to catch #3556's `Utf8` flattening.
+//!
+//! # This accept-list MUST NOT be broader than `arrow_rows`'s decoder
+//!
+//! Every Arrow type accepted here has to be one `arrow_rows::canonical_from_arrow`
+//! can DECODE. An accept-list that is broader declares a schema valid and then
+//! dies during value projection — a confusing late failure instead of a clear
+//! early one, and a promise the harness cannot keep. Add or remove a
+//! representation in BOTH files, in one edit.
 
 #![allow(dead_code)]
 
@@ -99,7 +107,10 @@ pub enum ArrowShape {
     Decimal128 { scale: Option<i8> },
     /// `Timestamp(Millisecond, <a UTC zone>)`.
     UtcMillisTimestamp,
-    /// A list-like Arrow type whose element type matches.
+    /// An Arrow `List` whose element type matches.
+    ///
+    /// Deliberately `List` ONLY — not `LargeList`/`FixedSizeList`. See
+    /// [`ArrowShape::accepts`].
     List(Box<ArrowShape>),
     /// An Arrow `Map` whose key and value types match.
     Map(Box<ArrowShape>, Box<ArrowShape>),
@@ -150,7 +161,9 @@ fn scalar_shape(name: &str) -> Result<ArrowShape, String> {
         "varint" => ArrowShape::Decimal128 { scale: Some(0) },
         "inet" => one(DataType::Utf8),
         // See the module header: Interval(MonthDayNano) is the faithful Arrow
-        // type, Utf8 the accepted lossless substitute Parquet forces.
+        // type, Utf8 the accepted lossless substitute Parquet forces. BOTH are
+        // decoded by `arrow_rows` — the interval arm exists precisely so this
+        // accept-list is not broader than the decoder.
         "duration" => ArrowShape::OneOf(vec![
             DataType::Interval(IntervalUnit::MonthDayNano),
             DataType::Utf8,
@@ -191,10 +204,18 @@ impl ArrowShape {
                 }
                 _ => false,
             },
+            // `List` only. `LargeList`/`FixedSizeList` used to be accepted here
+            // and `arrow_rows` has no decoder for either, so a schema the type
+            // check declared VALID then died during value projection — an
+            // accept-list broader than the decoder is a promise the harness
+            // cannot keep, and it turns a clear early failure into a confusing
+            // late one. Narrowed rather than decoded because neither is more
+            // faithful than `List` (both are offset-width/layout choices, and a
+            // Parquet LIST-annotated column reads back as `List`), so an export
+            // switching to one is a deliberate decision that SHOULD red here.
+            // KEEP IN SYNC with the type table in `arrow_rows.rs`.
             ArrowShape::List(elem) => match actual {
-                DataType::List(f) | DataType::LargeList(f) | DataType::FixedSizeList(f, _) => {
-                    elem.accepts(f.data_type())
-                }
+                DataType::List(f) => elem.accepts(f.data_type()),
                 _ => false,
             },
             ArrowShape::Map(key, value) => match actual {
