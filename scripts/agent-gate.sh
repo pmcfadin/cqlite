@@ -2075,6 +2075,13 @@ CANONICAL_SCHEMA_FILES="basic-types.cql da-test.cql oa-test.cql write-test.cql t
 # that the schemas root was validated, not merely that nothing complained.
 SCHEMAS_LINE=""
 
+# ---- issue #3544: component-set skew ---------------------------------------
+# COMPONENT_SET_LINE: the `component-set:` line every SUMMARY block carries (full,
+# lite, delta). Stamped by apply_component_set_preflight below. Empty only before that
+# pre-flight has run (a boundary block emitted earlier omits the line rather than
+# inventing it, exactly as SCHEMAS_LINE does).
+COMPONENT_SET_LINE=""
+
 # _gate_checkout_test_data_dir: the enclosing checkout's `test-data`, anchored on the
 # WORKSPACE-ROOT `Cargo.toml` (nearest ancestor manifest declaring `[workspace]`) exactly
 # as workspace_root() does in test-data/support/fixture_roots.rs. Anchoring on a checkout
@@ -2481,6 +2488,341 @@ apply_schemas_preflight() {
   esac
 }
 
+# ---- issue #3544: component-set skew pre-flight -------------------------------
+# scripts/agent-gate.sh is READ FROM THE TREE UNDER TEST. So a branch whose copy of
+# this script predates a component-set expansion on `main` runs the OLD script, reports
+# `N/N nonpass=0`, and is SILENT about every component added since — a perfectly true
+# statement about a set that is no longer the coverage claim. Merge-cleanliness cannot
+# detect it (`git merge-tree --write-tree` returns CLEAN; the skew is SEMANTIC, not
+# textual), and CI cannot backstop it: `.github/ci-gating-tiers.yml` EXEMPTS the CI
+# feature-matrix lane on the ground that "the merge-gating minimal-features build runs in
+# the local gate", so a stale local gate does not run the component and `required` does
+# not poll the CI lane because it is deferring to the local gate — each side's coverage
+# justified by the other's, the component exercised by NEITHER. Measured instance: PR
+# #3467's gate would have certified 31 of 35 components (#3403 had landed +4 components
+# 39 minutes earlier).
+#
+# THE COMPARISON IS ON THE COMPONENT SET, derived at RUN TIME from `--list` on both
+# sides — never a line count, never a blob hash. #3403's expansion was a +2,819-line
+# diff, but a 2,819-line refactor that leaves the SET alone is not a coverage problem,
+# and a guard that reds on one is a guard agents learn to waive.
+#
+# THE BASELINE IS FETCHED IN THIS INVOCATION, IMMEDIATELY BEFORE THE COMPARISON (#3544
+# amendment). A remote-tracking ref is a CACHED observable: comparing against a stale
+# `origin/main` returns "no skew" against a superseded baseline — a green pre-flight
+# certifying nothing, i.e. the very vacuous pass this guard exists to close, arriving
+# silently and reassuringly. Measured on the #3393 lane: its `origin/main` was 23
+# minutes stale at the moment it acted on it. So the fetch happens here, its success is
+# ASSERTED, and the sha it produced is RECORDED in the emitted line — a verdict that
+# does not name its baseline cannot be audited.
+#
+# There is deliberately NO env-var opt-out and none may be added: a branch behind `main`
+# can always rebase, so the remedy is universally available and an escape hatch could
+# only ever buy a vacuous green.
+
+# Probe state, set by _component_set_probe and read by the pure verdict/line helpers.
+# Globals rather than a parsed multi-line stdout: the probe does real I/O (fetch, git
+# show, a baseline `--list`), and routing its result through `$( )` would add a
+# newline-stripping value path for no benefit (the #3148 lesson, one guard over).
+_CS_KIND=""        # ok | no-tool | no-git | no-remote | fetch-failed | baseline-*
+_CS_SHA="-"        # the origin/main sha40 the comparison actually used
+_CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
+_CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
+_CS_ANCESTOR=unknown   # is the baseline sha an ancestor of HEAD? yes | no | unknown
+_CS_BASE_N=0       # size of the baseline set
+_CS_DETAIL=""      # one-line cause text for the non-`ok` kinds
+
+# _component_set_flatten: collapse arbitrary command stderr into ONE bounded line, so a
+# multi-line git error cannot smuggle extra lines into a SUMMARY block (a reader — and
+# every `grep`-based consumer — treats one line as one fact).
+_component_set_flatten() {
+  printf '%s' "$1" | tr '\n\r\t' '   ' | cut -c1-200
+}
+
+# _component_set_timeout: prefix a command with a bounded timeout WHEN the platform has
+# one, so a hung fetch cannot stall the gate (a timeout is a FETCH FAILURE, which is
+# fail-closed in the certifying modes — never a permissive pass). macOS ships no
+# `timeout`; `gtimeout` arrives with coreutils. Absent both, the command runs unbounded
+# rather than not at all: a missing tool must not become a reason to skip the check.
+_component_set_timeout() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
+  else shift; "$@"; fi
+}
+
+# _component_set_probe: perform the fetch + the two set derivations + the ancestry
+# probe, recording everything in the _CS_* globals. NEVER exits, never emits; the
+# verdict mapping and the emit live in the two functions below.
+_component_set_probe() {
+  _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""
+  _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
+
+  local err rc
+  if ! command -v git >/dev/null 2>&1; then
+    _CS_KIND=no-tool; _CS_DETAIL="git is not on PATH"; return 0
+  fi
+  if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    _CS_KIND=no-git; _CS_DETAIL="$REPO_ROOT is not a git worktree"; return 0
+  fi
+  if ! git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1; then
+    _CS_KIND=no-remote
+    _CS_DETAIL="no 'origin' remote is configured in $REPO_ROOT, so the baseline is unobtainable"
+    return 0
+  fi
+
+  # THE FETCH. `origin` and `main` are LITERALS, not variables: a configurable remote or
+  # branch would be an env-settable way to point the comparison at a baseline of the
+  # invoker's choosing, i.e. the opt-out this guard must not have.
+  err=$(_component_set_timeout 120 git -C "$REPO_ROOT" fetch --quiet origin main 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_KIND=fetch-failed
+    _CS_DETAIL="git fetch origin main exited $rc: $(_component_set_flatten "$err")"
+    return 0
+  fi
+  # FETCH_HEAD, not refs/remotes/origin/main: FETCH_HEAD is what THIS fetch just
+  # observed, whereas the remote-tracking ref is updated only opportunistically and is
+  # the cached observable this check exists to distrust.
+  _CS_SHA=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "FETCH_HEAD^{commit}" 2>/dev/null || true)
+  if [ -z "$_CS_SHA" ]; then
+    _CS_KIND=fetch-failed; _CS_SHA="-"
+    _CS_DETAIL="git fetch origin main succeeded but FETCH_HEAD does not resolve to a commit"
+    return 0
+  fi
+
+  # The baseline's copy of THIS script, extracted at the fetched sha and run with its own
+  # `--list`. Deriving the set by EXECUTION rather than by parsing means a baseline that
+  # computes its components (or renames the array) is still measured correctly.
+  local rel base tmpd out
+  base=$(basename "$GATE_SELF"); rel="scripts/$base"
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs.XXXXXX") || tmpd=""
+  if [ -z "$tmpd" ] || [ ! -d "$tmpd" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="could not create a temp dir to extract $rel at ${_CS_SHA}"
+    return 0
+  fi
+  mkdir -p "$tmpd/scripts"
+  if ! git -C "$REPO_ROOT" show "$_CS_SHA:$rel" >"$tmpd/scripts/$base" 2>"$tmpd/show.err"; then
+    _CS_KIND=baseline-missing
+    _CS_DETAIL="git show ${_CS_SHA}:$rel failed: $(_component_set_flatten "$(cat "$tmpd/show.err" 2>/dev/null)")"
+    rm -rf "$tmpd"; return 0
+  fi
+  # Run it with EVERY artifact path redirected into $tmpd and CQLITE_GATE_NO_NICE=1
+  # (skip the re-exec wrapper). `--list` exits at the arg-parse `case`, before this
+  # script writes any summary/sentinel — but the baseline is by definition a DIFFERENT
+  # version of this file, and "an older version wrote its sentinel before dispatching"
+  # is not a property we can assert about code we did not read. Pinning the paths costs
+  # nothing and makes clobbering the caller's summary file impossible either way.
+  # The same property is why `--list` cannot recurse into THIS pre-flight: the
+  # pre-flight runs only after the mode dispatch, which `--list` exits at.
+  out=$(
+    AGENT_GATE_SUMMARY_FILE="$tmpd/baseline-summary.txt" \
+    AGENT_GATE_PARENT_RUN_ID="${RUN_ID:-component-set-preflight}" \
+    CQLITE_GATE_NO_NICE=1 \
+    _component_set_timeout 120 bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
+  ); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_KIND=baseline-list-failed
+    _CS_DETAIL="'bash <origin/main:$rel> --list' exited $rc: $(_component_set_flatten "$(cat "$tmpd/list.err" 2>/dev/null)")"
+    rm -rf "$tmpd"; return 0
+  fi
+  rm -rf "$tmpd"
+
+  # CLOSED GRAMMAR on the baseline's stdout: a line that is not a plausible component
+  # name is a FAILED DERIVATION, never a line to skip. Filtering unrecognised lines away
+  # would silently shrink the baseline, and a shrunken baseline excuses a branch — the
+  # vacuous pass inverted.
+  local line baseline=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *[!a-z0-9-]*|-*|"")
+        _CS_KIND=baseline-list-garbage
+        _CS_DETAIL="'bash <origin/main:$rel> --list' printed a line that is not a component name: '$(_component_set_flatten "$line")'"
+        return 0 ;;
+    esac
+    baseline="${baseline:+$baseline }$line"
+    _CS_BASE_N=$((_CS_BASE_N + 1))
+  done <<EOF_CS_LIST
+$out
+EOF_CS_LIST
+  if [ "$_CS_BASE_N" -eq 0 ]; then
+    _CS_KIND=baseline-list-empty
+    _CS_DETAIL="'bash <origin/main:$rel> --list' printed no components; an empty baseline would excuse EVERY branch"
+    return 0
+  fi
+
+  # This tree's set is the COMPONENTS array — the exact thing `--list` prints (see the
+  # `--list` case in the arg dispatch), read in-process so the running gate's own set
+  # needs no subprocess and cannot diverge from what it will actually dispatch.
+  local branch=" ${COMPONENTS[*]} " c
+  for c in $baseline; do
+    case "$branch" in
+      *" $c "*) : ;;
+      *) _CS_MISSING="${_CS_MISSING:+$_CS_MISSING }$c" ;;
+    esac
+  done
+  local base_padded=" $baseline "
+  for c in "${COMPONENTS[@]}"; do
+    case "$base_padded" in
+      *" $c "*) : ;;
+      *) _CS_EXTRA="${_CS_EXTRA:+$_CS_EXTRA }$c" ;;
+    esac
+  done
+
+  # Ancestry, probed only for what it decides: BEHIND vs a DELIBERATE REMOVAL. Read the
+  # rc explicitly — `--is-ancestor` answers 1 for "not an ancestor" and something else
+  # for an error, and collapsing those two would let a broken probe answer "not behind".
+  git -C "$REPO_ROOT" merge-base --is-ancestor "$_CS_SHA" HEAD >/dev/null 2>&1; rc=$?
+  case "$rc" in
+    0) _CS_ANCESTOR=yes ;;
+    1) _CS_ANCESTOR=no ;;
+    *) _CS_ANCESTOR=unknown
+       _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} HEAD exited $rc" ;;
+  esac
+  _CS_KIND=ok
+}
+
+# _component_set_verdict: PURE mapping of the probe state onto exactly one token.
+#   PASS          — every baseline component is present in this tree's set.
+#   DECLARED      — components are missing AND origin/main IS an ancestor of HEAD, so
+#                   this branch removed them in its OWN diff. Not skew.
+#   BEHIND        — components are missing AND origin/main is NOT an ancestor of HEAD.
+#   INDETERMINATE — components are missing and the ancestry probe could not tell which.
+#   UNMEASURED    — the baseline could not be measured at all.
+# Components present here but ABSENT from main are NOT skew and never a non-PASS: this
+# branch may legitimately be the one adding them.
+_component_set_verdict() {
+  [ "$_CS_KIND" = ok ] || { printf UNMEASURED; return 0; }
+  [ -n "$_CS_MISSING" ] || { printf PASS; return 0; }
+  case "$_CS_ANCESTOR" in
+    yes) printf DECLARED ;;
+    no)  printf BEHIND ;;
+    *)   printf INDETERMINATE ;;
+  esac
+}
+
+# _component_set_strict: rc 0 iff this mode may FAIL on the verdict — the FULL gate and
+# --delta, the two modes whose blocks are recorded in a PR as certification. `--lite`
+# and `--only` emit the SAME line ADVISORY, matching how the #2078 fixture and #3148
+# schemas pre-flights already split leniency: --lite runs every fix round and must not
+# require the network to function.
+_component_set_strict() {
+  [ -z "$ONLY" ] && [ "$LITE" -eq 0 ]
+}
+
+# _component_set_line: PURE text for the current probe state + mode. The strict wording
+# says `FAIL-CLOSED (#3544)` (the shape #2078/#3148 established); the lenient wording
+# carries an ADVISORY-* token so a lenient block can NEVER be misread as a certification
+# — and, per #3148's lesson, so a positive line is never stamped for a check that could
+# not fail. A PASS is AFFIRMATIVE and names its baseline: a pasted SUMMARY must show the
+# check RAN, and `0` on its own is not a measurement.
+_component_set_line() {
+  local verdict lenient="" mode="" n_missing=0 c
+  verdict="$(_component_set_verdict)"
+  if ! _component_set_strict; then
+    if [ -n "$ONLY" ]; then mode="--only $ONLY"; else mode="--lite"; fi
+    lenient=" — $mode is lenient (#3544); this run does NOT fail on component-set skew"
+  fi
+  for c in $_CS_MISSING; do n_missing=$((n_missing + 1)); done
+  local extra=""
+  [ -n "$_CS_EXTRA" ] && extra=" [branch-only, NOT skew: $_CS_EXTRA]"
+  case "$verdict" in
+    PASS)
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-PASS (%s/%s vs origin/main %s)%s%s' \
+          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra" "$lenient"
+      else
+        printf 'component-set: PASS (%s/%s vs origin/main %s)%s' \
+          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra"
+      fi ;;
+    DECLARED)
+      printf 'component-set: DECLARED (#3544) — this branch REMOVES %s of origin/main %s'"'"'s %s component(s): %s; origin/main IS an ancestor of HEAD, so the removal is in THIS branch'"'"'s own diff, NOT skew — recorded, not fatal%s%s' \
+        "$n_missing" "$_CS_SHA" "$_CS_BASE_N" "$_CS_MISSING" "$extra" "$lenient" ;;
+    BEHIND)
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-BEHIND (#3544) — this tree is BEHIND origin/main %s; %s component(s) MISSING from its gate script: %s%s%s' \
+          "$_CS_SHA" "$n_missing" "$_CS_MISSING" "$extra" "$lenient"
+      else
+        printf 'component-set: FAIL-CLOSED (#3544) — this tree is BEHIND origin/main %s; %s of its %s component(s) MISSING from this gate script: %s; a PASS here would certify a set that is no longer the coverage claim; overall verdict FAIL' \
+          "$_CS_SHA" "$n_missing" "$_CS_BASE_N" "$_CS_MISSING"
+      fi ;;
+    INDETERMINATE)
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-INDETERMINATE (#3544) — %s component(s) missing vs origin/main %s (%s) and the ancestry probe could not tell BEHIND from a deliberate removal (%s)%s' \
+          "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL" "$lenient"
+      else
+        printf 'component-set: FAIL-CLOSED (#3544) — %s component(s) missing vs origin/main %s (%s) and the ancestry probe could not tell BEHIND from a deliberate removal (%s); overall verdict FAIL' \
+          "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL"
+      fi ;;
+    *)
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-UNMEASURED (#3544) — baseline NOT measured (%s: %s)%s; this block asserts NOTHING about the component set' \
+          "$_CS_KIND" "$_CS_DETAIL" "$lenient"
+      else
+        printf 'component-set: FAIL-CLOSED (#3544) — baseline NOT measured (%s: %s); no PASS may be derived from an unmeasured baseline; overall verdict FAIL' \
+          "$_CS_KIND" "$_CS_DETAIL"
+      fi ;;
+  esac
+}
+
+# apply_component_set_preflight [report-only]: EFFECTFUL pre-flight. Probes, stamps
+# COMPONENT_SET_LINE, and in the CERTIFYING modes emits a FAIL SUMMARY + exits 1 on a
+# fatal verdict. `report-only` is a POSITIONAL ARGUMENT, never an env var — an
+# uninitialized env-readable flag was itself a way to defeat #3148's fail-closed guard,
+# and `$1` inside a function comes from the CALL, so no `export` can supply it.
+apply_component_set_preflight() {
+  local mode="${1:-}" verdict report_only=0
+  [ "$mode" = report-only ] && report_only=1
+
+  _component_set_probe
+  verdict="$(_component_set_verdict)"
+  COMPONENT_SET_LINE="$(_component_set_line)"
+
+  # DECLARED is deliberately NON-FATAL, and this is the whole reason the ancestry probe
+  # exists: when origin/main is an ancestor of HEAD, the missing components were removed
+  # BY THIS BRANCH'S OWN DIFF — the author is not behind and has nothing to rebase, so
+  # only the INFORMATION is actionable (CLAUDE.md: FAIL where the author can act; NOTICE
+  # where only the information is actionable; never silence). Failing here would red on
+  # correct input, and a guard that reds on correct input is the guard agents learn to
+  # waive. The fixpoint is sound: a branch that is BOTH behind AND removes a component is
+  # not an ancestor of origin/main's tip, so it FAILs as BEHIND first and can only reach
+  # this branch after rebasing.
+  case "$verdict" in
+    PASS|DECLARED) return 0 ;;
+  esac
+  if ! _component_set_strict; then
+    return 0
+  fi
+
+  echo "agent-gate: FAIL: component-set skew vs origin/main (#3544)" >&2
+  echo "agent-gate: $COMPONENT_SET_LINE" >&2
+  case "$verdict" in
+    BEHIND)
+      echo "agent-gate: this gate script is older than origin/main's, so the run would report a" >&2
+      echo "            true N/N verdict about a set that is no longer the coverage claim, and be" >&2
+      echo "            SILENT about every component added since (measured: PR #3467, 31 of 35)." >&2
+      echo "agent-gate: remedy: git fetch origin && git rebase origin/main   (then re-run the gate)" >&2 ;;
+    *)
+      echo "agent-gate: the baseline component set could NOT be measured, so this run cannot" >&2
+      echo "            certify its own coverage; a pass derived from an unmeasured baseline is" >&2
+      echo "            exactly the vacuous green #3544 exists to close." >&2
+      echo "agent-gate: remedy: restore access to origin/main (git fetch origin main) and re-run." >&2 ;;
+  esac
+  # REPORT-ONLY (the --component-set-line hook): return with the line stamped instead of
+  # emitting. The hook cannot emit — emit_summary/_tree_meta_array are defined AFTER the
+  # arg dispatch — and STUBBING them there would define a second `_tree_meta_array`,
+  # which breaks test_agent_gate_tree_portability.sh's derived-inventory uniqueness
+  # assert (the #3148 trap, recorded so it is not re-sprung).
+  [ "$report_only" -eq 1 ] && return 1
+  _tree_meta_array   # #2926: every emitted block carries the tree provenance
+  emit_summary FAIL \
+    "preflight: FAIL (component-set skew vs origin/main — see component-set: below)" \
+    "$COMPONENT_SET_LINE" \
+    "${TREE_META_LINES[@]}" \
+    "hint: git fetch origin && git rebase origin/main, then re-run scripts/agent-gate.sh"
+  exit 1
+}
+
 # ---- issue #2081: --delta executes node __test__/ + scripts/tests/*.sh ---------
 # --delta re-cert (issue #1892) fail-closed on node jest files + shell self-tests
 # purely because its components could not EXECUTE them. It now can: these helpers
@@ -2874,6 +3216,33 @@ case "${1:-}" in
     [ -n "${2:-}" ] && ONLY="$2"
     apply_schemas_preflight report-only || true
     echo "SCHEMAS_LINE: ${SCHEMAS_LINE:-<none>}"
+    exit 0 ;;
+  # Hidden self-test hook (issue #3544): run the REAL apply_component_set_preflight and
+  # print the VERDICT plus the COMPONENT_SET_LINE it stamped, so the self-test observes
+  # the ACTUAL summary text and the ACTUAL decision rather than a re-implementation of
+  # either. Optional $2 seeds the MODE (full | lite | delta | only:<components>) because
+  # the arg dispatch is a single `case "$1"` — `--lite --component-set-line` is not
+  # expressible — and because a real `--lite` run would spend minutes in cargo before
+  # printing anything. Drives the EFFECTFUL function on purpose (`report-only`, an
+  # ARGUMENT: see that function's header): the property under test is that a positive
+  # line is never stamped for a check that could not fail.
+  --component-set-line)
+    case "${2:-full}" in
+      full) : ;;
+      lite) LITE=1 ;;
+      delta) DELTA=1 ;;
+      only:*) ONLY="${2#only:}" ;;
+      *) echo "unknown --component-set-line mode: ${2:-}" >&2; exit 2 ;;
+    esac
+    apply_component_set_preflight report-only || true
+    echo "VERDICT: $(_component_set_verdict)"
+    echo "STRICT: $(_component_set_strict && echo yes || echo no)"
+    echo "KIND: ${_CS_KIND:-<none>}"
+    echo "SHA: ${_CS_SHA:--}"
+    echo "MISSING: ${_CS_MISSING:-}"
+    echo "EXTRA: ${_CS_EXTRA:-}"
+    echo "ANCESTOR: ${_CS_ANCESTOR:-unknown}"
+    echo "COMPONENT_SET_LINE: ${COMPONENT_SET_LINE:-<none>}"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and
   # the shell-selftest executor so scripts/tests assert the SAME logic run_delta uses.
@@ -5167,6 +5536,9 @@ _tree_boundary_meta_lines() {
   # #3148: the POSITIVE schemas-root assertion (empty until the full gate's preflight
   # has run, so a --lite/--delta boundary simply omits it rather than inventing it).
   [ -n "${SCHEMAS_LINE:-}" ] && printf '%s\n' "$SCHEMAS_LINE"
+  # #3544: the component-set verdict (empty until the mode-dispatch pre-flight has run,
+  # so an earlier boundary omits the line rather than inventing it).
+  [ -n "${COMPONENT_SET_LINE:-}" ] && printf '%s\n' "$COMPONENT_SET_LINE"
   [ -n "${PINS:-}" ] && printf 'ci-pins: %s\n' "$PINS"
   # Both printers deliberately emit NO trailing newline (their normal callers capture them
   # into a SUMMARY_META element), so each needs its own '%s\n' here or the whole block
@@ -13638,6 +14010,9 @@ run_lite() {
   _tree_commit_meta
   SUMMARY_META+=("$TREE_COMMIT_LINE")
   SUMMARY_META+=("lite-scope: file-size fmt clippy roborev-lints scoped-tests (full gate NOT run — run it once before merge)")
+  # #3544: the component-set verdict, ADVISORY in --lite (informative; it cannot fail the
+  # run — --lite executes every fix round and must not require the network to function).
+  [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
   # Python-tier verdict marker (roborev job 1450): when a python-binding diff was
   # in scope, the block carries the tier's verdict — a SKIPPED marker makes a
   # "green but validated nothing" block detectable from the block alone.
@@ -13905,6 +14280,7 @@ run_delta() {
     emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
+      "$COMPONENT_SET_LINE" \
       "$(accelerators_line)" \
       "${TREE_META_LINES[@]}" \
       "${file_meta[@]}" \
@@ -13931,6 +14307,7 @@ run_delta() {
     emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
+      "$COMPONENT_SET_LINE" \
       "$(accelerators_line)" \
       "${TREE_META_LINES[@]}" \
       "${file_meta[@]}" \
@@ -14006,6 +14383,7 @@ run_delta() {
     declare -a SUMMARY_META=()
     SUMMARY_META+=("${anchor_meta[@]}")
     SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (python tier REQUIRED but did NOT run — re-cert incomplete)")
+  [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")   # #3544
     SUMMARY_META+=("${PYTHON_TIER_NOTE:-python-tier: NOT RUN — python-binding tests NOT validated by this delta run}")
     SUMMARY_META+=("$(accelerators_line)")
     _tree_meta_array
@@ -14031,6 +14409,9 @@ run_delta() {
   declare -a SUMMARY_META=()
   SUMMARY_META+=("${anchor_meta[@]}")
   SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (test/docs-only re-cert; clippy/core/write/cli/bindings/parity/smoke NOT run — see gate-of-record)")
+  # #3544: --delta is a CERTIFYING mode, so this line is fail-closed (a fatal verdict
+  # exited at the mode dispatch); it names the origin/main sha the set was compared to.
+  [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
   # #2081: name the executors that actually RAN this re-cert (scoped-tests always; the
   # node/shell executors only when their file class changed).
   SUMMARY_META+=("delta-executors: ${DELTA_EXECUTORS:-scoped-tests(rust/python)} (executors that RAN this re-cert)")
@@ -14220,6 +14601,15 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || exit 1
   case "$OVERALL" in PASS) exit 0 ;; *) exit 1 ;; esac
 fi
+
+# COMPONENT-SET skew pre-flight (issue #3544). Placed HERE, at the mode dispatch, for
+# three reasons: it is AFTER arg parsing (so `--list` and every hidden hook exit before
+# it, and the baseline's own `--list` therefore cannot recurse into it), it covers ALL
+# modes from ONE call site (full, --lite, --delta, --only) so a mode cannot be forgotten,
+# and it is BEFORE acquire_gate_slot so a run that cannot certify never queues for a slot
+# (nor compiles anything). FAIL-CLOSED for the full gate and --delta; ADVISORY for --lite
+# and --only, which stamp the same line but cannot fail on it.
+apply_component_set_preflight
 
 # --lite (issue #1821): run the fast subset and EXIT before the full-gate flow.
 # Kept fully separate from the full-gate execution below so the no-flag path is
@@ -15069,6 +15459,10 @@ fi
 # the check RAN rather than merely that nothing complained. Empty when the preflight was
 # skipped (no dataset-dependent component selected) → no line.
 [ -n "$SCHEMAS_LINE" ] && SUMMARY_META+=("$SCHEMAS_LINE")
+# #3544: stamp the component-set verdict (which origin/main sha this run's component set
+# was compared against), so a pasted block shows the skew check RAN and names its
+# baseline. Always non-empty on this path — the pre-flight runs at the mode dispatch.
+[ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")
