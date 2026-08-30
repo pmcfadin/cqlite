@@ -634,13 +634,44 @@ fn schema_file(schema: &str) -> PathBuf {
 
 /// Cross-check the hand-transcribed case declaration against the committed DDL.
 ///
-/// The case table names the key columns and the multicell kinds; the DDL is the
-/// authority for both. A disagreement is reported (and fails the case) instead of
-/// being tolerated, because a wrong transcription weakens every comparison built
-/// on it — the wrong pk means rows pair wrongly, and a missed multicell column
-/// means the golden reader reconstructs the wrong container.
+/// The case table names the keyspace, the key columns and the multicell kinds; the
+/// DDL is the authority for all three. A disagreement is reported (and fails the
+/// case) instead of being tolerated, because a wrong transcription weakens every
+/// comparison built on it — the wrong pk means rows pair wrongly, a missed
+/// multicell column means the golden reader reconstructs the wrong container, and a
+/// wrong keyspace means no fixture is found at all, which a fetched-corpus case
+/// reports as a legal skip.
 fn schema_agrees_with_case(case: &Case, table: &TableSchema) -> Vec<String> {
     let mut out = Vec::new();
+    // The KEYSPACE, cross-checked like every other declaration this case makes
+    // (review round 19, finding Y1). It is the declaration whose typo is HARDEST to
+    // see: a mistyped keyspace does not fail anything by itself — it makes
+    // `resolve_fixture` look for `<typo>/<table>`, which no root holds, so a
+    // `Presence::Corpus` case resolves as `NOT PRESENT` (a LEGAL skip) and its whole
+    // coverage disappears behind a green run. Checked here, before any fixture is
+    // resolved, so the typo fails on every machine.
+    //
+    // CQL identifiers are case-insensitive unless quoted, and the reader lowercases
+    // what it parses, so the comparison lowercases the case's side too.
+    match table.keyspace.as_deref() {
+        Some(declared) if declared == case.keyspace.to_ascii_lowercase() => {}
+        Some(declared) => out.push(format!(
+            "the case declares keyspace `{}` but the committed schema declares this \
+             table in keyspace `{declared}`",
+            case.keyspace
+        )),
+        // UNVERIFIABLE is not agreement: a positive verdict needs an affirmative
+        // measurement (CLAUDE.md), and a schema that states no keyspace at all (no
+        // `USE`, no qualified name) measures nothing about this declaration. Every
+        // committed schema this lane reads does state one, so this arm is a broken
+        // fixture rather than a rule that reds on correct input.
+        None => out.push(format!(
+            "the case declares keyspace `{}`, and the committed schema states no \
+             keyspace for this table (no `USE` and no keyspace-qualified name) — the \
+             declaration cannot be checked against anything",
+            case.keyspace
+        )),
+    }
     let declared_pk: Vec<&str> = table.partition_key.iter().map(String::as_str).collect();
     let declared_ck: Vec<&str> = table.clustering.iter().map(String::as_str).collect();
     if declared_pk != case.pk {
