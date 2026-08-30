@@ -133,11 +133,35 @@ echo
 #   accept-any exit 0 required, emptiness not asserted — used ONLY for the real-`cargo metadata`
 #              control, where emptiness is data-dependent and a per-package golden would go
 #              stale and false-red the day a package gains a target. Non-vacuity for that set is
-#              enforced in AGGREGATE instead (see AGG_* below): at least one package must yield
-#              non-empty output per kind, so an implementation returning empty for everything
-#              still fails. That is an affirmative measurement without a curated expectation.
+#              enforced in AGGREGATE instead: at least one package must yield non-empty output
+#              per kind, so an implementation returning empty for everything still fails. That is
+#              an affirmative measurement without a curated expectation.
+#
+# TWO POPULATIONS, ACCOUNTED SEPARATELY (roborev round 9, J1). The first cut used ONE aggregate
+# flag per kind, set by ANY fixture — so the SYNTHETIC fixtures satisfied it and the real-metadata
+# floor could never fire: a real `accept-any` case returning empty was invisible behind healthy
+# synthetic siblings.
+#
+# THAT IS F1 AGAIN, ONE LAYER IN, and it is worth naming as such. F1 was `t_passed > 0` measured
+# across 27 jest suites, so one all-skipped suite hid behind 26 passing ones. Here an aggregate
+# flag was certified by a DIFFERENT POPULATION than the one it existed to certify. Same shape:
+# an aggregate satisfied by the wrong subjects. Reaching for aggregate non-vacuity was still the
+# right call — a per-package golden would go stale and false-red — the error was pooling two
+# populations that need separate books.
+#
+# So each kind carries FOUR counters, and the two floors are enforced independently, each only
+# when its own population actually ran:
+#   SYNNE_<kind>   synthetic `nonempty` fixtures judged      -> gates the synthetic floor
+#   AGG_<kind>     a SYNTHETIC fixture produced output
+#   REALN_<kind>   real-metadata `accept-any` cases judged   -> gates the real floor
+#   AGGREAL_<kind> a REAL-METADATA case produced output
+# The split is symmetric on purpose: pooling would also let the real cases satisfy the synthetic
+# floor, which is the same defect mirrored.
 VALID_N=0; INVALID_N=0; ANY_N=0
 AGG_jest=0; AGG_ids=0; AGG_feats=0
+AGGREAL_jest=0; AGGREAL_ids=0; AGGREAL_feats=0
+SYNNE_jest=0; SYNNE_ids=0; SYNNE_feats=0
+REALN_jest=0; REALN_ids=0; REALN_feats=0
 
 # _prop_gate <label> <validity> <exit-status> <output> — the shared validity assertion. Returns
 # 0 when the caller should go on to judge invariants, 1 when the verdict is already decided.
@@ -194,7 +218,12 @@ prop_jest() {
   out=$("$fn" "$j" 2>/dev/null); rc=$?
   PROP_N=$((PROP_N + 1))
   _prop_gate "$lbl" "$validity" "$rc" "$out" || return
-  [ -n "$out" ] && AGG_jest=1
+  # ATTRIBUTE THE OBSERVATION TO ITS POPULATION (J1). Only `nonempty` and `accept-any`
+  # reach here; `empty` and `reject` decide their verdict inside _prop_gate.
+  case "$validity" in
+    accept-any) REALN_jest=$((REALN_jest + 1)); [ -n "$out" ] && AGGREAL_jest=1 ;;
+    *)          SYNNE_jest=$((SYNNE_jest + 1)); [ -n "$out" ] && AGG_jest=1 ;;
+  esac
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
@@ -224,7 +253,12 @@ prop_ids() {
   out=$("$fn" "$meta" "$pkg" 2>/dev/null); rc=$?
   PROP_N=$((PROP_N + 1))
   _prop_gate "$lbl" "$validity" "$rc" "$out" || return
-  [ -n "$out" ] && AGG_ids=1
+  # ATTRIBUTE THE OBSERVATION TO ITS POPULATION (J1). Only `nonempty` and `accept-any`
+  # reach here; `empty` and `reject` decide their verdict inside _prop_gate.
+  case "$validity" in
+    accept-any) REALN_ids=$((REALN_ids + 1)); [ -n "$out" ] && AGGREAL_ids=1 ;;
+    *)          SYNNE_ids=$((SYNNE_ids + 1)); [ -n "$out" ] && AGG_ids=1 ;;
+  esac
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
@@ -244,7 +278,12 @@ prop_feats() {
   out=$("$fn" "$meta" "$pkg" 2>/dev/null); rc=$?
   PROP_N=$((PROP_N + 1))
   _prop_gate "$lbl" "$validity" "$rc" "$out" || return
-  [ -n "$out" ] && AGG_feats=1
+  # ATTRIBUTE THE OBSERVATION TO ITS POPULATION (J1). Only `nonempty` and `accept-any`
+  # reach here; `empty` and `reject` decide their verdict inside _prop_gate.
+  case "$validity" in
+    accept-any) REALN_feats=$((REALN_feats + 1)); [ -n "$out" ] && AGGREAL_feats=1 ;;
+    *)          SYNNE_feats=$((SYNNE_feats + 1)); [ -n "$out" ] && AGG_feats=1 ;;
+  esac
   if [ "$out" = "$(printf '%s' "$out" | sort -u)" ]; then ok "$lbl"; else bad "$lbl — output is not sorted/unique: [$out]"; fi
 }
 
@@ -457,18 +496,26 @@ echo
 # FIXTURE ACCOUNTING (I1). A reader must be able to tell "checked N valid fixtures" from
 # "checked nothing", and the valid/invalid split is what says whether the reject cases ran at all.
 echo "fixtures: valid=$VALID_N invalid=$INVALID_N accept-any(real-metadata)=$ANY_N"
-# AGGREGATE NON-VACUITY for the accept-any set, whose emptiness is data-dependent and therefore
-# not per-fixture assertable without a golden that would go stale. If a parser returned EMPTY for
-# every real package, every per-line invariant would hold vacuously — so at least one must have
-# produced output, per kind that was exercised.
+# BOTH POPULATIONS REPORTED SEPARATELY (J1), so "synthetic floor met" can never be read as
+# "real-metadata control verified". `real-nonempty` is the line that says the real control
+# actually produced data; a `-` means that population did not run for that kind.
+_syn_line=""; _real_line=""
 for _k in jest ids feats; do
-  eval "_agg=\$AGG_$_k"
-  case "$_k" in
-    jest)  _exercised=$([ "$VALID_N" -gt 0 ] && echo 1 || echo 0) ;;
-    *)     _exercised=1 ;;
-  esac
-  if [ "$_exercised" -eq 1 ] && [ "$_agg" -ne 1 ]; then
-    echo "FAIL - every fixture for kind '$_k' produced EMPTY output, so its per-line invariants held vacuously; at least one must yield output or the checks measured nothing" >&2
+  eval "_sn=\$SYNNE_$_k; _sa=\$AGG_$_k; _rn=\$REALN_$_k; _ra=\$AGGREAL_$_k"
+  _syn_line="$_syn_line $_k=$([ "$_sn" -gt 0 ] && echo "$_sn/nonempty=$_sa" || echo '-')"
+  _real_line="$_real_line $_k=$([ "$_rn" -gt 0 ] && echo "$_rn/nonempty=$_ra" || echo '-')"
+done
+echo "synthetic  fixtures judged (per kind):$_syn_line"
+echo "real-metadata cases judged (per kind):$_real_line"
+# TWO INDEPENDENT FLOORS, each gated on ITS OWN population having run. Pooling them is J1.
+for _k in jest ids feats; do
+  eval "_sn=\$SYNNE_$_k; _sa=\$AGG_$_k; _rn=\$REALN_$_k; _ra=\$AGGREAL_$_k"
+  if [ "$_sn" -gt 0 ] && [ "$_sa" -ne 1 ]; then
+    echo "FAIL - every SYNTHETIC 'nonempty' fixture for kind '$_k' produced EMPTY output, so its per-line invariants held vacuously; at least one must yield output or the checks measured nothing" >&2
+    FAIL=$((FAIL + 1))
+  fi
+  if [ "$_rn" -gt 0 ] && [ "$_ra" -ne 1 ]; then
+    echo "FAIL - every REAL-METADATA case for kind '$_k' produced EMPTY output ($_rn judged). The synthetic floor above cannot see this: it is satisfied by the synthetic fixtures, which is exactly why the two populations are counted apart (J1). A parser that returns nothing for every real workspace package satisfies every per-line invariant vacuously." >&2
     FAIL=$((FAIL + 1))
   fi
 done
