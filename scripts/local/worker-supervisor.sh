@@ -1833,10 +1833,13 @@ supervisor_legacy_lock_state() {
 #   - with the shipped em dash, `rm -f` succeeds and `rmdir` removes the directory AND THEN errors on
 #     each prose word ("failed to remove 'the'", …), so the operator gets a non-zero exit and three
 #     alarming messages with no way to tell whether the lock was actually cleared;
-#   - with any prose carrying an option-shaped token (`-x`), `rmdir` rejects the whole invocation before
-#     removing anything — leaving a PID-LESS lock directory, which is precisely the shape a pre-#3467
-#     supervisor reads as stale and reclaims, i.e. the remedy manufacturing the hazard this guard
-#     exists to prevent.
+#   - with any prose carrying an option-shaped token (`-x`), the outcome depends on whether the command
+#     terminates option parsing. The line now emits `--` (job 192 F2), so such a token is an OPERAND and
+#     the failure is the one above; on the PRE-F2 line `rmdir` read it as an OPTION and rejected the
+#     whole invocation before removing anything — leaving a PID-LESS lock directory, precisely the shape
+#     a pre-#3467 supervisor reads as stale and reclaims, i.e. the remedy manufacturing the hazard this
+#     guard exists to prevent. Both spellings are still MEASURED in the suite, so this note cannot
+#     outlive the behaviour it describes.
 # Do not re-inline it, and do not append punctuation: the command line must be the WHOLE line, and it is
 # printed BARE (no `worker-supervisor:` prefix) so that selecting the line is enough to paste it.
 supervisor_legacy_lock_refuse() {

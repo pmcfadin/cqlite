@@ -4479,16 +4479,27 @@ t test_worker_probe_two_direction_control
 # resolution, claim-actor derivation and `supervisor_migrate_legacy_claim`, the last of which can fire
 # a network `claim.sh status`. Empty disables both seams (the colonless `${VAR-default}` form in the
 # supervisor preserves an explicitly-empty override), so these cases stay hermetic.
+# ONE drive body, shared by both drivers below, so a case that varies the WORKING DIRECTORY cannot
+# drift into exercising a different startup path than the ordinary case does.
+SV_DRIVE_BODY='source "$1"; acquire_lock; printf "ACQUIRED=%s\n" "$SUPERVISOR_LOCK"; [[ -d "$SUPERVISOR_LOCK" ]] && printf "LOCKDIR=yes\n"; exit 0'
+
 legacy_lock_drive() {
   local tmp="$1" lane="$2" explicit="${3:-}"
-  local body='source "$1"; acquire_lock; printf "ACQUIRED=%s\n" "$SUPERVISOR_LOCK"; [[ -d "$SUPERVISOR_LOCK" ]] && printf "LOCKDIR=yes\n"; exit 0'
   if [[ -n "$explicit" ]]; then
     env TMPDIR="$tmp" SUPERVISOR_LOCK="$explicit" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
-      bash -c "$body" _ "$SUPERVISOR" 2>&1
+      bash -c "$SV_DRIVE_BODY" _ "$SUPERVISOR" 2>&1
   else
     env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
-      bash -c "$body" _ "$SUPERVISOR" 2>&1
+      bash -c "$SV_DRIVE_BODY" _ "$SUPERVISOR" 2>&1
   fi
+}
+
+# legacy_lock_drive_in <cwd> <tmp> <lane> — the same drive from a chosen working directory, which is
+# what makes a RELATIVE (and therefore possibly OPTION-SHAPED) `TMPDIR` testable at all.
+legacy_lock_drive_in() {
+  local cwd="$1" tmp="$2" lane="$3"
+  ( cd "$cwd" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$SV_DRIVE_BODY" _ "$SUPERVISOR" 2>&1 )
 }
 
 # THE SUPERVISOR HAS TWO OUTPUT CHANNELS AND BOTH LABEL THEMSELVES: `log()` writes
@@ -4500,7 +4511,7 @@ SV_DIAG_RE='^(\[worker-supervisor\]|worker-supervisor:) '
 # tools ("the rmdir is non-recursive"), and flagging that would make the sweep red on correct text — a
 # check that reds on correct input is the check people learn to waive. So the patterns require the
 # argument shape a paste would actually mangle.
-SV_CMD_RE="rm -f |rm -rf |rmdir ['\"/]|ps -p |kill -"
+SV_CMD_RE="rm -f |rm -rf |rmdir ['\"/]|rmdir -- |ps -p |kill -"
 
 
 # The refusal must be the LEGACY one, not the per-lane "another instance is already running" — an
@@ -4649,8 +4660,10 @@ test_legacy_global_lock_refuses_stale_holder() {
   # entry named `pid`, so the printed command clears precisely that and FAILS LOUDLY on anything else;
   # `rm -rf` on a directory this run does not own would silently delete whatever was in it, and the
   # remedy is OPERATOR-FACING text, so its accuracy is the property under test — not its presence.
+  # `--` IS PART OF THE EXPECTED TEXT (#3549, roborev job 192 F2): quoting stops word-splitting, not
+  # OPTION PARSING, so without it the printed line is not executable for an option-shaped `TMPDIR`.
   local remedy
-  remedy="rm -f '$legacy/pid' && rmdir '$legacy'"
+  remedy="rm -f -- '$legacy/pid' && rmdir -- '$legacy'"
   if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
      && [[ "$out" == *"$legacy"* && "$out" == *"$dead"* && "$out" == *"stale $dead"* ]] \
      && [[ "$out" == *"$remedy"* ]] \
@@ -5180,6 +5193,8 @@ test_legacy_lock_pid_identity_is_three_valued() {
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_identity_ps_names_script()/,/^}/p' "$SUPERVISOR"
     sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR" | sed "s#/proc#$blind#g"
     printf '%s\n' 'supervisor_pid_identity "$1"'
   } >"$body"
@@ -5257,7 +5272,185 @@ t test_legacy_global_lock_override_skips_check
 t test_legacy_global_lock_removal_condition_recorded
 t test_legacy_global_lock_residual_recorded
 t test_legacy_lock_container_needs_search_not_read
+# ---------------------------------------------------------------------------
+# Test 43b-lock (#3549, roborev job 192 F1): CORROBORATION IS THE PROGRAM THE PROCESS IS RUNNING, NOT A
+# SUBSTRING OF ITS COMMAND LINE.
+#
+# The defect: `case "$args" in *worker-supervisor*)` accepted the name ANYWHERE in the joined command
+# line. `tail -f …/worker-supervisor.sh`, `sh -c 'sleep …' …/worker-supervisor.sh`, any script invoked
+# WITH that path as an argument — all of them corroborated. And `supervisor` is the one answer that
+# prints "stop pid N first", so the consequence of a false corroboration is an instruction to KILL AN
+# UNRELATED PROCESS that merely inherited a reused pid number.
+#
+# The property under test is therefore ARGUMENT-POSITION, measured against REAL PROCESSES (this suite's
+# standing technique — a staged string would test the walk and not the probe), plus the walk itself over
+# vectors a real process cannot conveniently produce. The mutant contrast is the pre-fix substring rule
+# restored by REDEFINING the two walks after the shipped ones in a scratch copy: everything else in the
+# file is the shipped probe, so a difference in verdict is attributable to the rule and nothing else.
+#
+# The safety DIRECTION is asserted as its own property: the fixed rule may only ever REMOVE positives.
+# `unconfirmed` tells an operator to verify (harmless); `supervisor` tells them to stop a process.
+# ---------------------------------------------------------------------------
+test_legacy_lock_identity_requires_script_argument() {
+  local d body mutant walkdrv fake other ans mans pid_tail pid_shc pid_other pid_real
+  d="$(new_case_dir)"
+  body="$T_LOCKFN/identity-argv.sh"
+  mutant="$T_LOCKFN/identity-argv-mutant.sh"
+  walkdrv="$T_LOCKFN/identity-walk.sh"
+  mkdir -p "$T_LOCKFN"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_identity_ps_names_script()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_pid_identity "$1"'
+  } >"$body"
+  # THE MUTANT IS THE SAME FILE PLUS EXACTLY TWO LINES: the pre-fix substring rule, redefining both
+  # walks after the shipped definitions (a later definition wins). Asserted by construction — strip the
+  # two overrides and the mutant must be byte-identical to the copy under test, or the contrast below
+  # is attributing a verdict to something else.
+  {
+    sed '$d' "$body"
+    printf '%s\n' 'supervisor_identity_names_script() { case "$*" in *worker-supervisor*) return 0 ;; esac; return 1; }'
+    printf '%s\n' 'supervisor_identity_ps_names_script() { case "$*" in *worker-supervisor*) return 0 ;; esac; return 1; }'
+    printf '%s\n' 'supervisor_pid_identity "$1"'
+  } >"$mutant"
+  if diff -q <(grep -vF 'case "$*" in *worker-supervisor*' "$mutant") "$body" >/dev/null; then
+    pass "identity F1: the mutant is the shipped probe plus EXACTLY the two pre-fix substring overrides (nothing else differs)"
+  else
+    fail "identity-f1-mutant-drift: the mutant differs from the shipped probe by more than the two overrides"
+  fi
+
+  # ---- REAL PROCESSES. One genuine supervisor and three that only MENTION the path.
+  fake="$d/worker-supervisor.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
+  chmod +x "$fake"
+  other="$d/some-other-script.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$other"
+  chmod +x "$other"
+
+  bash "$fake" &
+  pid_real=$!
+  # Editor-like: a long-lived reader HOLDING the path as its operand.
+  tail -f "$fake" >/dev/null 2>&1 &
+  pid_tail=$!
+  # The path as PLAIN DATA after `-c`: what follows `-c` is a command STRING, and the trailing operand
+  # is only the sub-shell's `$0`. (`; :` keeps the shell from exec-ing away and rewriting its argv.)
+  sh -c 'sleep 300; :' "$fake" &
+  pid_shc=$!
+  # A DIFFERENT script, invoked with our path as an argument — the shape closest to a real accident.
+  bash "$other" "$fake" &
+  pid_other=$!
+  sleep 0.4
+
+  ans="$(bash "$body" "$pid_real")"
+  if [[ "$ans" == supervisor ]]; then
+    pass "identity F1: a process actually RUNNING worker-supervisor.sh (bash <path>) is 'supervisor' — the fix is not blanket-cautious"
+  else
+    fail "identity-f1-true-positive: answered [$ans] for a real bash <path>/worker-supervisor.sh; the corroborated wording would never be reachable"
+  fi
+
+  local subj name ok=yes
+  for subj in "tail:$pid_tail" "sh-c:$pid_shc" "other-script:$pid_other"; do
+    name="${subj%%:*}"
+    ans="$(bash "$body" "${subj##*:}")"
+    mans="$(bash "$mutant" "${subj##*:}")"
+    if [[ "$ans" == unconfirmed ]]; then
+      pass "identity F1: '$name' merely MENTIONS worker-supervisor.sh and is 'unconfirmed' — no 'stop pid N' advice for a process that is not ours"
+    else
+      ok="no"
+      fail "identity-f1-mention-$name: answered [$ans]; a process that only holds the path as an argument must not corroborate"
+    fi
+    # MUTANT CONTRAST, the other direction: the pre-fix substring rule calls the SAME REAL PROCESS the
+    # supervisor. Without this the assert above could pass for a probe that answers 'unconfirmed' for
+    # everything.
+    if [[ "$mans" == supervisor ]]; then
+      pass "identity F1 MUTANT CONTRAST ($name): the pre-fix substring rule answers 'supervisor' for that same live process — the false corroboration the finding named, reproduced"
+    else
+      fail "identity-f1-mutant-$name: the pre-fix form answered [$mans]; expected the false 'supervisor', or the contrast proves nothing"
+    fi
+  done
+  [[ "$ok" == yes ]] || true
+
+  kill "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" 2>/dev/null || true
+  wait "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" 2>/dev/null || true
+
+  # ---- THE WALK ITSELF, over vectors a real process cannot conveniently stage (a path containing a
+  # space; an interpreter with options; an `env` assignment prefix). Two properties per row: the fixed
+  # verdict, and that the fixed rule never ACCEPTS what the substring rule rejected.
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_identity_ps_names_script()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'fn="$1"; shift; "$fn" "$@"'
+  } >"$walkdrv"
+
+  local row want got sub
+  local -a argv=()
+  # want=0 accept, want=1 refuse; the vector follows the marker.
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    want="${row%% *}"
+    eval "argv=(${row#* })"
+    got=0; bash "$walkdrv" supervisor_identity_names_script "${argv[@]}" || got=$?
+    if [[ "$got" == "$want" ]]; then
+      pass "identity F1 walk: [${argv[*]}] -> $([[ "$want" == 0 ]] && echo names-our-script || echo does-not)"
+    else
+      fail "identity-f1-walk: [${argv[*]}] answered $got, expected $want"
+    fi
+    # DIRECTION OF ERROR: anything the fixed walk ACCEPTS, the old substring rule accepted too. The fix
+    # may only ever remove positives, never add one.
+    if [[ "$got" == 0 ]]; then
+      sub=0; printf '%s' "${argv[*]}" | grep -qF worker-supervisor || sub=1
+      if [[ "$sub" == 0 ]]; then
+        pass "identity F1 direction: [${argv[*]}] is accepted by BOTH rules — the fix removes positives, it never adds one"
+      else
+        fail "identity-f1-direction: [${argv[*]}] is accepted by the fixed walk but was REJECTED by the substring rule; the fix must never widen corroboration"
+      fi
+    fi
+  done <<'ROWS'
+0 bash /x/worker-supervisor.sh
+0 /x/worker-supervisor.sh --once
+0 bash -x /x/worker-supervisor.sh
+0 env FOO=1 bash /x/worker-supervisor.sh
+0 "/a b/worker-supervisor.sh"
+1 vim /x/worker-supervisor.sh
+1 sh -c "sleep 300" /x/worker-supervisor.sh
+1 grep worker-supervisor.sh /x/y
+1 /x/worker-supervisor.sh.bak
+1 bash /x/notworker-supervisor.sh
+1 -bash
+ROWS
+
+  # ---- `ps` IS THE AMBIGUOUS RENDERING, AND ITS RULE IS STRICTER BY DESIGN. Its fields are a
+  # REFINEMENT of the true vector (a space inside one argument becomes two fields), so only the two
+  # canonical shapes corroborate; `bash -x <path>` — accepted from procfs, where the NUL split is
+  # faithful — is 'does not' here. That asymmetry is the decision, so it is pinned rather than left to
+  # be re-argued.
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    want="${row%% *}"
+    eval "argv=(${row#* })"
+    got=0; bash "$walkdrv" supervisor_identity_ps_names_script "${argv[@]}" || got=$?
+    if [[ "$got" == "$want" ]]; then
+      pass "identity F1 ps-walk: [${argv[*]}] -> $([[ "$want" == 0 ]] && echo names-our-script || echo does-not)"
+    else
+      fail "identity-f1-ps-walk: [${argv[*]}] answered $got, expected $want"
+    fi
+  done <<'PSROWS'
+0 /x/worker-supervisor.sh
+0 bash /x/worker-supervisor.sh
+1 bash -x /x/worker-supervisor.sh
+1 vim /x/worker-supervisor.sh
+1 bash /x/other.sh /x/worker-supervisor.sh
+PSROWS
+}
+
 t test_legacy_lock_pid_identity_is_three_valued
+t test_legacy_lock_identity_requires_script_argument
 
 
 # ---------------------------------------------------------------------------
@@ -5593,9 +5786,15 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
   #   (i)  with the shipped em dash, `rmdir` removes the directory AND THEN errors once per prose word,
   #        so the operator gets a non-zero exit plus alarming messages and cannot tell whether the lock
   #        was cleared;
-  #   (ii) with an option-shaped token in the prose, `rmdir` rejects the whole invocation before
-  #        removing anything — leaving a PID-LESS lock directory, the shape a pre-#3467 supervisor reads
-  #        as stale and reclaims, i.e. the remedy manufacturing the hazard the guard refuses.
+  #   (ii) with an option-shaped token in the prose, the outcome depends on the shipped line and BOTH
+  #        forms are measured below, because the answer CHANGED when `--` was added for job 192 F2:
+  #        WITHOUT `--` (the pre-F2 line) `rmdir` reads `-x` as an OPTION and rejects the whole
+  #        invocation before removing anything — leaving a PID-LESS lock directory, the shape a
+  #        pre-#3467 supervisor reads as stale and reclaims, i.e. the remedy manufacturing the hazard
+  #        the guard refuses; WITH `--` the same token is an OPERAND, so `rmdir` clears the directory
+  #        and then errors on the leftovers, i.e. outcome (i) again. Both are failures of the pasted
+  #        line, which is the property; the mechanism is pinned in both spellings so neither this text
+  #        nor the assert can drift away from the shipped command.
   # Without this contrast the verbatim assert above could pass for a line that merely happens to work.
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
@@ -5609,16 +5808,71 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
   rm -rf "$legacy"
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
-  local optish_rc=0
-  eval "$bare -x explanatory prose" >/dev/null 2>&1 || optish_rc=$?
-  if [[ "$optish_rc" -ne 0 && -d "$legacy" && ! -e "$legacy/pid" ]]; then
-    pass "remedy-lines NON-VACUITY (stale, option-shaped prose): the pre-fix INLINED form fails (rc=$optish_rc) having removed NOTHING — a PID-LESS lock directory, the hazard the guard refuses, manufactured by its own remedy"
+  local optish_rc=0 optish_err=""
+  optish_err="$(eval "$bare -x explanatory prose" 2>&1 >/dev/null)" || optish_rc=$?
+  if [[ "$optish_rc" -ne 0 && "$optish_err" == *"explanatory"* && ! -e "$legacy" ]]; then
+    pass "remedy-lines NON-VACUITY (stale, option-shaped prose): the pre-fix INLINED form fails (rc=$optish_rc) and errors on the prose — with the shipped \`--\`, an option-shaped token is an OPERAND, so the failure is outcome (i) and not the pid-less directory"
   else
-    fail "remedy-lines-oldform-optish: rc=$optish_rc dir=$([[ -d "$legacy" ]] && echo yes || echo no) pid=$([[ -e "$legacy/pid" ]] && echo yes || echo no) — expected rmdir to reject the invocation and leave the pid-less directory"
+    fail "remedy-lines-oldform-optish: rc=$optish_rc err=[$optish_err] leftover=$([[ -e "$legacy" ]] && echo yes || echo no) — expected the pasted prose to fail the line as an operand"
+  fi
+  # ...and the SAME prose against the PRE-F2 line (the shipped command with `--` stripped) reproduces
+  # the pid-less-directory outcome, which is why `--` is in the shipped line at all: the token is read
+  # as an OPTION, `rmdir` rejects the invocation, and the lock survives WITHOUT its pid. Measured, not
+  # asserted from memory, so the sentence above cannot outlive the behaviour it describes.
+  rm -rf "$legacy"
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  local nodashdash="${bare//-- /}" nodash_rc=0
+  eval "$nodashdash -x explanatory prose" >/dev/null 2>&1 || nodash_rc=$?
+  if [[ "$nodash_rc" -ne 0 && -d "$legacy" && ! -e "$legacy/pid" ]]; then
+    pass "remedy-lines NON-VACUITY (stale, option-shaped prose, PRE-F2 line): with \`--\` stripped the same paste fails (rc=$nodash_rc) having removed only the pid file — the PID-LESS lock directory the guard refuses, manufactured by its own remedy"
+  else
+    fail "remedy-lines-oldform-optish-nodashdash: rc=$nodash_rc dir=$([[ -d "$legacy" ]] && echo yes || echo no) pid=$([[ -e "$legacy/pid" ]] && echo yes || echo no) — expected rmdir to reject the invocation and leave the pid-less directory"
   fi
   rm -rf "$legacy" "$derived"
 
-  # ---- (4) UNDETERMINABLE shape: no deletion instruction at all, so no bare line either.
+  # ---- (4) OPTION-SHAPED, RELATIVE `TMPDIR` (#3549, roborev job 192 F2). QUOTING IS NOT
+  # OPTION-SAFETY: `supervisor_shell_quote` stops word-splitting, globbing and metacharacters, and does
+  # nothing about option parsing, because `rm` reads a leading `-` in an operand as flags whatever
+  # quoting produced it. `TMPDIR=-scratch` is a legitimate (if exotic) configuration, and the guard
+  # itself handles it — every internal operand it builds from `TMPDIR` reaches `[[ ]]`, a glob or a
+  # redirection, none of which parse options — so the ONLY thing that broke was the line the operator
+  # was told to run. Both halves are asserted: the refusal still happens, and the printed line is
+  # executable AS PRINTED from that working directory.
+  local optdir="$d/optshaped" opttmp="-scratch" optlegacy
+  mkdir -p "$optdir/$opttmp"
+  optlegacy="$optdir/$opttmp/cqlite-worker-supervisor.lock"
+  mkdir -p "$optlegacy"
+  printf '%s\n' "$dead" >"$optlegacy/pid"
+  out="$(legacy_lock_drive_in "$optdir" "$opttmp" "$lane")"; rc=$?
+  remedy_lines_structural "stale-option-shaped-tmpdir" "$out" 1
+  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out"; then
+    pass "remedy-lines (option-shaped TMPDIR): the guard still classifies and REFUSES with a relative, option-shaped TMPDIR — its own internal operands are option-safe"
+  else
+    fail "remedy-lines-optshaped-no-refusal: rc=$rc out=[$out] — the guard must work for a relative option-shaped TMPDIR, not only its printed remedy"
+  fi
+  local opt_rc=0
+  ( cd "$optdir" && eval "$bare" ) >/dev/null 2>&1 || opt_rc=$?
+  if [[ "$opt_rc" -eq 0 && ! -e "$optlegacy" ]]; then
+    pass "remedy-lines (option-shaped TMPDIR): the bare line runs VERBATIM from that directory and leaves the lock GONE (line=[$bare])"
+  else
+    fail "remedy-lines-optshaped-not-runnable: rc=$opt_rc leftover=$([[ -e "$optlegacy" ]] && echo yes || echo no) line=[$bare] — the printed remedy is not executable as printed for an option-shaped TMPDIR"
+  fi
+  # NON-VACUITY: the SAME line with `--` stripped — the pre-F2 emission — must FAIL on this very case,
+  # or the assert above would pass for a path shape that never exercised option parsing.
+  mkdir -p "$optlegacy"
+  printf '%s\n' "$dead" >"$optlegacy/pid"
+  local optbare_nodash="${bare//-- /}" optnodash_rc=0 optnodash_err=""
+  optnodash_err="$( cd "$optdir" && eval "$optbare_nodash" 2>&1 >/dev/null )" || optnodash_rc=$?
+  if [[ "$optnodash_rc" -ne 0 && -e "$optlegacy/pid" && "$optnodash_err" == *option* ]]; then
+    pass "remedy-lines NON-VACUITY (option-shaped TMPDIR): with \`--\` stripped the identical line FAILS on an invalid option (err=[$optnodash_err]) and removes NOTHING — so the \`--\` in the shipped line is load-bearing, not decoration"
+  else
+    fail "remedy-lines-optshaped-nodashdash: rc=$optnodash_rc err=[$optnodash_err] pid=$([[ -e "$optlegacy/pid" ]] && echo yes || echo no) — the pre-F2 form must be shown to break here, or the assert above measures nothing"
+  fi
+  rm -rf "$optdir"
+
+  # ---- (5) UNDETERMINABLE shape: no deletion instruction at all, so no bare line either.
   printf 'not a lock\n' >"$legacy"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
   remedy_lines_structural "unknown-not-a-directory" "$out" 0
@@ -5658,6 +5912,8 @@ test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed() {
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_identity_ps_names_script()/,/^}/p' "$SUPERVISOR"
     sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR" | sed "s#/proc#$fakeproc#g"
     printf '%s\n' 'supervisor_pid_identity "$1"'
   } >"$body"
