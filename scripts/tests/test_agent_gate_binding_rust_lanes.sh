@@ -291,19 +291,57 @@ plant_desc_node_rust_unit='a failing #[test] appended to bindings/node/src/value
 # rather than deleting the files, so the plant is a realistic cfg accident rather than a
 # structural edit.
 plant_zero_tests() {
-  python3 - "$TREE/bindings/node/src/lib.rs" <<'PY'
-import re, sys
-p = sys.argv[1]
-s = open(p).read()
-# Neutralise every `#[cfg(test)]` in the crate root so the unit suite compiles out while
-# the crate itself still builds — the exact shape of a cfg accident.
-s2 = s.replace('#[cfg(test)]', '#[cfg(all(test, feature = "brl-3522-nonexistent-feature"))]')
-assert s2 != s, "no #[cfg(test)] found in bindings/node/src/lib.rs to neutralise"
-open(p, 'w').write(s2)
-PY
+  python3 - "$TREE/bindings/node/src" <<'ZEROPLANT'
+import os, re, sys
+
+src = sys.argv[1]
+
+# SWEEP THE CLASS, NOT THE INSTANCE (roborev round 1, B3). The first cut of this plant
+# edited `bindings/node/src/lib.rs`, which contains NO `#[cfg(test)]` at all -- the only
+# occurrence of that string there is PROSE inside a comment -- so the plant could never
+# apply and the case reported HARNESS-ERROR. The obvious repair (name the sibling files
+# that DO carry it) is the SAME staleness bug one level down, and it was already wrong on
+# arrival: two independent reviews produced two DIFFERENT file lists, one of them
+# incomplete. So the set is DERIVED here, at plant time, from the committed source.
+targets = []
+for name in sorted(os.listdir(src)):
+    if not name.endswith(".rs"):
+        continue
+    path = os.path.join(src, name)
+    with open(path) as fh:
+        text = fh.read()
+    # The ATTRIBUTE, at the start of a line (modulo indentation) -- not the bare string,
+    # which appears in prose. Every real `#[cfg(test)]` in this crate is on its own line.
+    if re.search(r'^[ \t]*#\[cfg\(test\)\]', text, re.M):
+        targets.append(path)
+
+# FAIL LOUDLY on an empty derivation -- never a silent no-op plant. An empty subject set
+# here means the crate stopped using `#[cfg(test)]` (or the pattern stopped matching), and
+# a plant that quietly applies to nothing turns this case into the vacuous green the whole
+# harness exists to detect. The harness treats a failed plant as HARNESS-ERROR, not as a
+# lane finding, which is the correct attribution.
+assert targets, "no file under bindings/node/src carries a line-initial #[cfg(test)] to neutralise"
+
+# `#[cfg(any())]`, NOT `#[cfg(feature = "does-not-exist")]`. An unknown feature name trips
+# rustc's `unexpected_cfgs` lint, and under `-D warnings` that reds the case via a COMPILE
+# FAILURE instead of via the zero-test guard -- the right colour by the wrong mechanism,
+# proving nothing about the guard this case exists to observe. `any()` is unconditionally
+# false and lint-clean.
+n = 0
+for path in targets:
+    with open(path) as fh:
+        text = fh.read()
+    new, k = re.subn(r'(?m)^([ \t]*)#\[cfg\(test\)\]', r'\1#[cfg(any())]', text)
+    assert k, path
+    with open(path, "w") as fh:
+        fh.write(new)
+    n += k
+print("zero-tests plant: neutralised %d #[cfg(test)] attribute(s) across %d file(s): %s"
+      % (n, len(targets), " ".join(os.path.basename(t) for t in targets)))
+ZEROPLANT
 }
 plant_marker_zero_tests='ran 0 tests'
-plant_desc_zero_tests='every #[cfg(test)] in bindings/node/src/lib.rs re-gated on a nonexistent feature — the crate COMPILES, the --lib harness RUNS, it executes ZERO tests and cargo exits 0. The vacuous green; only check_unittest_targets_ran'"'"'s non-zero-count half sees it, which no failing-assertion plant exercises'
+plant_desc_zero_tests='every line-initial #[cfg(test)] under bindings/node/src (file set DERIVED at plant time, never listed) rewritten to #[cfg(any())] — the crate COMPILES clean, the --lib harness RUNS, it executes ZERO tests and cargo exits 0. The vacuous green; only check_unittest_targets_ran'"'"'s non-zero-COUNT half sees it, which no failing-assertion plant exercises. #[cfg(any())] rather than an unknown feature name, so it cannot red via the unexpected_cfgs lint under -D warnings instead of via the guard'
 
 # (e) A failing assertion in a jest suite the OLD node-bindings scope did not run.
 # shared-vectors.test.js is chosen deliberately: it carries the cross-binding SHA-256
@@ -346,6 +384,30 @@ unplant() {
 # 3, not 0. The exit code alone is not trusted either — the component's own SUMMARY line
 # is parsed and both must agree.
 # ---------------------------------------------------------------------------
+# _marker_in_sibling_logs <marker> <component-log> — search the component's SIBLING logs
+# (binding-rust-tests writes each package's cargo output to `<component>.<pkg>.log` and its
+# guard verdicts to `<component>.guards.log`; they cannot share one file, because both
+# packages print `Running unittests src/lib.rs` and the unittest guard keys on that path).
+#
+# ITERATED, NOT PASSED AS AN UNQUOTED GLOB (roborev round 1, B6). This used to be
+# `grep -qF -- "$marker" "${log%.log}".*.log 2>/dev/null`, which relies on bash's DEFAULT
+# no-`nullglob` failure mode: bash honours `BASHOPTS` from the environment at startup, so
+# `BASHOPTS=nullglob bash ...` expands the pattern to NOTHING, grep then reads STDIN, and the
+# harness either BLOCKS INDEFINITELY or -- at EOF -- silently reports FIRED-UNATTRIBUTED. A
+# failure that depends on an ambient shell option this harness never sets and cannot control
+# is the same class agent-gate.sh's own round-34 "`find`, not a glob" comment records.
+# `[ -f ]` per candidate means an unmatched pattern is skipped explicitly instead of being
+# handed to grep as a filename or as nothing at all.
+_marker_in_sibling_logs() {
+  local marker="$1" complog="${2:-}" f
+  [ -n "$complog" ] || return 1
+  for f in "${complog%.log}".*.log; do
+    [ -f "$f" ] || continue
+    grep -qF -- "$marker" "$f" && return 0
+  done
+  return 1
+}
+
 RC=0
 STATUS=""
 COMPONENT_LOG=""
@@ -411,7 +473,7 @@ for cse in "${CASES[@]}"; do
     # `Running unittests src/lib.rs`, which the unittest guard keys on).
     if { [ -n "$planted_component_log" ] && grep -qF "$marker" "$planted_component_log"; } \
        || grep -qF "$marker" "$planted_log" \
-       || { [ -n "$planted_component_log" ] && grep -qF -- "$marker" "${planted_component_log%.log}".*.log 2>/dev/null; }; then
+       || _marker_in_sibling_logs "$marker" "$planted_component_log"; then
       attributed=1
     fi
   fi
