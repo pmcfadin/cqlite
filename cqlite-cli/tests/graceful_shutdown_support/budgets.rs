@@ -259,7 +259,13 @@ const fn waits_sharing(census: &[WaitCensus]) -> u32 {
     total
 }
 
-/// Only the waits that replaced an independent `OLD_BOUND`, for the message.
+/// Only the waits that replaced an independent `OLD_BOUND` — the waits the floor
+/// claim is literally about.
+///
+/// It reaches a failure message (the floor assert's text) AND an assert of its own
+/// (`each_census_matches_the_totals_its_documentation_states`), which is the point:
+/// until round 16 it was interpolated and nothing else, so it could drift with
+/// nothing failing (roborev job 259, finding 2).
 const fn old_bounded_waits(census: &[WaitCensus]) -> u32 {
     let mut total = 0;
     let mut i = 0;

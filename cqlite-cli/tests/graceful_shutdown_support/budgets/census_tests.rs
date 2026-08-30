@@ -191,6 +191,53 @@ fn the_stage_census_check_rejects_a_declared_stage_that_never_finished() {
     let _never_finished_stage = open_forever;
 }
 
+/// **THE TWO NUMBERS EACH CENSUS'S DOC COMMENT STATES ARE ASSERTED** — the second
+/// half of roborev job 259 finding 2, found by censusing this module for computed
+/// quantities that only ever reach a message.
+///
+/// `old_bounded_waits` was one: it is computed once and interpolated into the
+/// floor assert's failure text, so nothing could fail if it drifted. And what it
+/// counts is stated in prose above each census — "SIX, of which TWO replaced an
+/// independent 60s bound", "TEN waits, of which SEVEN" — which is a hand-written
+/// label over derived data, the exact class this file's round-3 blocker was (a
+/// comment that could not fail) and the class job 253 finding 3 was.
+///
+/// So the prose is encoded as DATA here and derived from the census. Adding a wait
+/// to a census without updating its doc comment now fails, in this test, naming
+/// both numbers.
+#[test]
+fn each_census_matches_the_totals_its_documentation_states() {
+    for (name, census, documented_waits, documented_old_bound) in [
+        ("T1_WAIT_CENSUS", T1_WAIT_CENSUS, 6, 2),
+        ("T2_WAIT_CENSUS", T2_WAIT_CENSUS, 10, 7),
+    ] {
+        assert_eq!(
+            waits_sharing(census),
+            documented_waits,
+            "{name}: its doc comment states {documented_waits} waits draw on the one deadline, \
+             and the census now derives {}. The base is `aggregate_floor` of this number \
+             (asserted by `no_stage_in_isolation_is_tighter_than_the_bound_it_replaced`), so \
+             update the doc comment and the base together.\n{}",
+            waits_sharing(census),
+            describe_census(census)
+        );
+        assert_eq!(
+            old_bounded_waits(census),
+            documented_old_bound,
+            "{name}: its doc comment states {documented_old_bound} of those waits replaced an \
+             INDEPENDENT {OLD_BOUND:?} bound, and the census now derives {}. That number is what \
+             the floor claim is literally about (design.md D6c), and it appeared only inside a \
+             failure message until this assert — so it could drift with nothing failing.\n{}",
+            old_bounded_waits(census),
+            describe_census(census)
+        );
+        assert!(
+            old_bounded_waits(census) <= waits_sharing(census),
+            "{name}: more waits replaced an old bound than draw on the deadline at all"
+        );
+    }
+}
+
 /// A caught panic's message, for the two directions above.
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload
