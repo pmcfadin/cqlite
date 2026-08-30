@@ -4943,6 +4943,25 @@ SV_LF='
 # text after it overwrites the `worker-supervisor:` prefix, forging the same unprefixed line by another
 # mechanism. It is therefore asserted as a BYTE.
 SV_CR=$'\r'
+
+# sv_q <string> — render a value for a DIAGNOSTIC so it stays on ONE PHYSICAL LINE, without `${var@Q}`
+# (#3549, roborev job 217 F2). `@Q` is BASH 4.4+, and this suite deliberately supports the bash 3.2 macOS
+# ships (the shipped script's `read -d ''` and `%q` notes say why). Worse than an unavailable feature: an
+# unsupported parameter transformation is a PARSE error, so it fails the WHOLE FILE at load time — every
+# case, including the file's own pre-4.4 `skip` handling, which never gets the chance to run. `printf -v`
+# and `%q` both exist in 3.2, so the rendering is done with those.
+#
+# %q's treatment of control characters HAS CHANGED ACROSS BASH VERSIONS, so this does not trust it: any
+# real newline or carriage return that survives is folded into a visible two-character escape. The
+# guarantee owed to a diagnostic is one physical line — a fragment on a line of its own is
+# indistinguishable from the harness's own output — not a byte-exact requoting.
+sv_q() {
+  local raw="$1" out=""
+  printf -v out '%q' "$raw" 2>/dev/null || out="$raw"
+  out="${out//"$SV_LF"/\\n}"
+  out="${out//"$SV_CR"/\\r}"
+  printf '%s' "$out"
+}
 # A COMMAND SIGNATURE IS A VERB PLUS AN OPERAND, not a bare mention. The prose legitimately NAMES the
 # tools ("the rmdir is non-recursive"), and flagging that would make the sweep red on correct text — a
 # check that reds on correct input is the check people learn to waive. So the patterns require the
@@ -6303,9 +6322,9 @@ test_lock_provenance_survives_resourcing() {
 yes'; do
     got="$(legacy_lock_drive_body_env "$SV_DRIVE_BODY_TOKEN" "$tmp" "$lane" "SUPERVISOR_LOCK_DERIVED=$tok")"
     if [[ "$got" == *"P=unknown"* ]]; then
-      pass "resource TOKEN validated: an unrecognised inherited value [${tok@Q}] collapses to \`unknown\` [$got]"
+      pass "resource TOKEN validated: an unrecognised inherited value [$(sv_q "$tok")] collapses to \`unknown\` [$got]"
     else
-      fail "resource-token-validated(${tok@Q}): got=[$got] — an unrecognised provenance must become \`unknown\`"
+      fail "resource-token-validated($(sv_q "$tok")): got=[$got] — an unrecognised provenance must become \`unknown\`"
     fi
   done
 

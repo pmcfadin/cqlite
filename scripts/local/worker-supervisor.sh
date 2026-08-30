@@ -274,6 +274,29 @@ case "$SUPERVISOR_LOCK_DERIVED" in
   yes | no | unknown) ;;
   *) SUPERVISOR_LOCK_DERIVED=unknown ;;
 esac
+# ...AND THE PATH THE FIRST RESOLUTION PRODUCED, BECAUSE THE PROVENANCE ALONE IS HALF A RECORD (#3549,
+# roborev job 217 F1). The three fixes above each secured the PROVENANCE and left its PARTNER — the
+# PATH — free, and the pair diverging is the SAME bypass by a FOURTH route: resolve an EXPLICIT path
+# (provenance `no`), then assign `SUPERVISOR_LOCK` the per-lane DERIVED default, and the resolver
+# returned unchanged — so the run acquired OUR derived default while the guard, reading a provenance
+# that said "the operator placed this", skipped. The provenance was truthful about the first
+# resolution and false about the path in use, which is the only thing the guard actually cares about.
+#
+# SO THE PAIR IS INSEPARABLE: a provenance is honoured only WITH the path it was decided about, and a
+# later change of `SUPERVISOR_LOCK` is RESTORED to that path (see `supervisor_lock_path` for the
+# restore-vs-refuse decision and its reasons).
+#
+# PRESERVED ACROSS RE-SOURCING BY THE SAME `${VAR:-}` FORM as the provenance and for the same reason
+# (job 214): a bare assignment here would blank the stored path on a second `source` while leaving the
+# provenance decided, and "decided provenance, no stored path" is precisely the incoherent state whose
+# permissive reading was the bypass. VALIDATION IS NON-EMPTINESS AND NOTHING MORE, deliberately: an
+# explicit caller path may legitimately be relative, option-shaped or non-existent (other cases in the
+# suite stage exactly those), so no stronger property is decidable here without rejecting valid input.
+# An EMPTY stored value is therefore the only "unusable" one, and it is NOT a licence to skip: the
+# resolver treats a decided provenance with no stored path as no decision at all and resolves afresh,
+# which on an empty `SUPERVISOR_LOCK` records `yes` and leaves the guard RUNNING. Inheriting a value
+# from the environment is invoker-class and out of model, exactly as for the provenance above.
+SUPERVISOR_LOCK_RESOLVED="${SUPERVISOR_LOCK_RESOLVED:-}"
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
@@ -1423,16 +1446,50 @@ supervisor_lock_path() {
   # placement is exactly the bypass above. So the provenance is immutable after the first resolution,
   # and a caller who wants to place the lock must set `SUPERVISOR_LOCK` BEFORE anything resolves it
   # (which is what the documented `env SUPERVISOR_LOCK=… worker-supervisor.sh` invocation does).
+  #
+  # AND THE RECORD IS THE **PAIR** — PROVENANCE *AND* PATH (#3549, roborev job 217 F1). Making the
+  # provenance sticky while leaving the path free is half a fix: the two then DISAGREE, and the
+  # disagreement is the bypass. Concretely — resolve an EXPLICIT path (provenance `no`), then assign
+  # `SUPERVISOR_LOCK` the per-lane DERIVED default; the sticky bail-out returned unchanged, the run
+  # acquired the DERIVED default, and the guard skipped on a provenance that had been decided about a
+  # DIFFERENT path. The guard's question is "is the path in use OUR default?", so a provenance detached
+  # from the path it was decided about answers a question nobody asked.
+  #
+  # RESTORE, NOT REFUSE — the decision and why. `SUPERVISOR_LOCK` changed after the first resolution is
+  # reset to the first-resolved path and the override is LOGGED. The alternative (abort the start) was
+  # considered and rejected on three grounds: (1) "first resolution wins" is ONE contract, and it is
+  # already applied SILENTLY to the provenance — making its other half loudly fatal would state two
+  # different contracts for one decision; (2) once the change is not honoured it is harmless, so a
+  # startup failure would be a refusal for something with no consequence, and this file's refusals are
+  # operator-facing texts with remedies, which "you assigned a variable" has none of beyond "do not";
+  # (3) a wrapper that reassigns the variable after resolution (to re-export it, to normalise it) keeps
+  # working, and the log line is what tells its author the assignment did nothing. It is not silent:
+  # the ignored override is reported every time it happens.
   case "$SUPERVISOR_LOCK_DERIVED" in
-    yes | no) return 0 ;;
+    yes | no)
+      if [[ -n "$SUPERVISOR_LOCK_RESOLVED" ]]; then
+        if [[ "$SUPERVISOR_LOCK" != "$SUPERVISOR_LOCK_RESOLVED" ]]; then
+          log "WARN: SUPERVISOR_LOCK was changed after the lock path had already been resolved; the change is IGNORED and the first-resolved path is restored. First resolution wins: the recorded provenance ($SUPERVISOR_LOCK_DERIVED) and the legacy-lock compatibility check were both settled against that path, so honouring a later one would leave them describing a path this run is not using. To place the lock, set SUPERVISOR_LOCK before anything resolves it."
+          SUPERVISOR_LOCK="$SUPERVISOR_LOCK_RESOLVED"
+        fi
+        return 0
+      fi
+      # A DECIDED PROVENANCE WITH NO PATH BESIDE IT IS NOT A DECISION, AND IS NOT HONOURED. Only an
+      # environment-inherited provenance can reach here (every write below stores both halves in the
+      # same breath), and "we recorded an answer but not what it was about" must not be the state that
+      # PERMITS a start. Falling through re-decides both halves together, which is fail-closed: with
+      # `SUPERVISOR_LOCK` empty this records `yes` and the guard RUNS.
+      ;;
   esac
   if [[ -n "$SUPERVISOR_LOCK" ]]; then
     SUPERVISOR_LOCK_DERIVED=no
+    SUPERVISOR_LOCK_RESOLVED="$SUPERVISOR_LOCK"
     return 0
   fi
   SUPERVISOR_LOCK_DERIVED=yes
   # FROM THE GIVEN IDENTITY (lead ruling B). `LANE_ID` is resolved before this is called.
   SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-${LANE_ID}.lock"
+  SUPERVISOR_LOCK_RESOLVED="$SUPERVISOR_LOCK"
 }
 
 # ---------------------------------------------------------------------------
