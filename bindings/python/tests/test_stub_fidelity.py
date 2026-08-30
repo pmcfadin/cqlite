@@ -29,14 +29,26 @@ names) or a justified allowlist (:data:`TYPE_ONLY_STUB_NAMES`). Deriving from th
 complete set and subtracting is what makes the check fail closed on a drift class
 nobody enumerated.
 
-NOT compared: TYPES. A declared ``-> str`` whose runtime returns ``int``, a
-changed parameter ANNOTATION, or a changed default VALUE all pass here. That is
-not an oversight to be closed by widening this file: verifying types means
-type-checking the stub against real call sites, which is ``mypy``/``pyright``'s
-job (and ``tsc`` on the Node side), a different tool with a different failure
-mode. Widening name/shape comparison toward types would produce a checker that is
-neither -- so the boundary is stated here rather than rediscovered one review
-round at a time.
+NOT compared, and each omission is written down because an omission that is
+recorded is reviewable while one that is merely absent is a trap:
+
+* TYPES. A declared ``-> str`` whose runtime returns ``int``, a changed parameter
+  ANNOTATION, or a changed default VALUE all pass here. This is not an oversight
+  to be closed by widening this file: verifying types means type-checking the stub
+  against real call sites, which is ``mypy``/``pyright``'s job (and ``tsc`` on the
+  Node side) -- a different tool with a different failure mode. Widening
+  name/shape comparison toward types would produce a checker that is neither.
+* BASE CLASSES / MRO. If runtime ``CancelledError`` stopped inheriting from
+  ``CqliteError``, every ``except CqliteError:`` caller would break and this file
+  would stay green. Raised as REQ-1456-02 on issue #1456 and deferred to its own
+  issue deliberately: PyO3 exception types need not expose the base list a stub
+  declares for readability, so a naive MRO equality check would red on correct
+  code, and that needs real thought rather than a hurried assert.
+
+Both boundaries are stated here rather than rediscovered one review round at a
+time. Review of this file produced seven rounds of findings, and the ones that
+mattered were always a check that had silently stopped measuring -- never a
+missing dimension.
 
 ``from __future__ import annotations`` is REQUIRED here, not stylistic:
 ``pyproject.toml`` declares ``requires-python = ">=3.9"`` and this module

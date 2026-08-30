@@ -523,19 +523,38 @@ function declaredClassMembers(dtsSource, className) {
     /* setParentNodes */ true
   );
 
-  let declaration = null;
-  const visit = (node) => {
-    if (ts.isClassDeclaration(node) && node.name && node.name.text === className) {
-      declaration = node;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+  // Select from TOP-LEVEL EXPORTED statements only, and fail on ambiguity.
+  //
+  // This used to recurse with `forEachChild` and accept any same-named class
+  // anywhere -- nested inside a namespace, or not exported at all. A shadow
+  // `Database` declaration would then be compared instead of the exported one,
+  // hiding real drift in the declaration callers actually see. Same defect as the
+  // module-level walk had; that one was fixed and this one was not, which is the
+  // argument for one derivation rather than two.
+  const matches = sourceFile.statements.filter(
+    (node) =>
+      ts.isClassDeclaration(node) &&
+      node.name &&
+      node.name.text === className &&
+      (node.modifiers || []).some(
+        (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+      )
+  );
 
-  if (declaration === null) {
-    throw new Error(`class ${className} not found in index.d.ts`);
+  if (matches.length === 0) {
+    throw new Error(
+      `class ${className} not found as a top-level exported declaration in index.d.ts`
+    );
   }
+  if (matches.length > 1) {
+    // Ambiguity is not something to resolve by picking one: whichever we picked,
+    // the other would go uncompared.
+    throw new Error(
+      `class ${className} has ${matches.length} top-level exported declarations in ` +
+        'index.d.ts; cannot decide which one the runtime class corresponds to'
+    );
+  }
+  const declaration = matches[0];
 
   const instance = new Set();
   const statics = new Set();
@@ -704,9 +723,18 @@ function declaredTopLevelNames(dtsSource) {
     // do not all emit the SAME KIND of value, which is what the runtime check
     // needs to know.
     if (node.name && ts.isIdentifier(node.name)) {
-      if (ts.isClassDeclaration(node) || ts.isFunctionDeclaration(node)) {
-        // Both are `typeof === 'function'` at runtime.
-        names.set(node.name.text, 'callable');
+      // A class and a function are BOTH `typeof === 'function'`, so collapsing
+      // them (an earlier version of this file did) means `version()` could become
+      // an ES class and pass while every caller breaks: measured, `Database()`
+      // without `new` throws "Class constructor Database cannot be invoked
+      // without 'new'". The declared side already knows which it is; throwing
+      // that away was the defect.
+      if (ts.isClassDeclaration(node)) {
+        names.set(node.name.text, 'class');
+        continue;
+      }
+      if (ts.isFunctionDeclaration(node)) {
+        names.set(node.name.text, 'function');
         continue;
       }
       if (ts.isEnumDeclaration(node) || ts.isModuleDeclaration(node)) {
@@ -790,7 +818,11 @@ describe('Runtime surface vs index.d.ts', () => {
 
     // Non-vacuity: an empty declared map would satisfy the assert below trivially.
     expect(declared.size).toBeGreaterThan(0);
-    expect(declared.get('Database')).toBe('callable');
+    // Pins the KIND, not just presence: if the derivation ever collapses class and
+    // function again, this assert names the reason rather than letting a
+    // class-vs-function swap pass unnoticed.
+    expect(declared.get('Database')).toBe('class');
+    expect(declared.get('version')).toBe('function');
 
     // KIND-AWARE, because ownership alone is not the property callers rely on.
     // `module.exports.version = undefined` (what a lost native export produces via
@@ -805,12 +837,39 @@ describe('Runtime surface vs index.d.ts', () => {
         continue;
       }
       const value = runtimeExports[name];
-      if (kind === 'callable' && typeof value !== 'function') {
-        phantoms.push(
-          `${name}: declared as a class/function but ${
-            value === undefined ? 'undefined' : typeof value
-          } at runtime (calling it would throw)`
-        );
+      // An ES class is `typeof === 'function'` but throws when called without
+      // `new`, so "is it callable" cannot separate a declared function from a
+      // declared class. `Function.prototype.toString` can: napi emits real
+      // `class Database {...}` text for classes and `function version() { [native
+      // code] }` for functions (both verified against the built module).
+      const isEsClass =
+        typeof value === 'function' &&
+        /^\s*class\s/.test(Function.prototype.toString.call(value));
+      if (kind === 'class') {
+        if (typeof value !== 'function') {
+          phantoms.push(
+            `${name}: declared as a class but ${
+              value === undefined ? 'undefined' : typeof value
+            } at runtime (\`new ${name}()\` would throw)`
+          );
+        } else if (!isEsClass) {
+          phantoms.push(
+            `${name}: declared as a class but is a plain function at runtime`
+          );
+        }
+      } else if (kind === 'function') {
+        if (typeof value !== 'function') {
+          phantoms.push(
+            `${name}: declared as a function but ${
+              value === undefined ? 'undefined' : typeof value
+            } at runtime (calling it would throw)`
+          );
+        } else if (isEsClass) {
+          phantoms.push(
+            `${name}: declared as a function but is a CLASS at runtime ` +
+              `(\`${name}()\` throws without \`new\`)`
+          );
+        }
       } else if (kind === 'object' && (value === null || typeof value !== 'object')) {
         phantoms.push(
           `${name}: declared as an enum/namespace but ${typeof value} at runtime`
