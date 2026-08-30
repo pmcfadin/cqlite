@@ -170,6 +170,54 @@ mkbin() {
   printf '%s\n' "$dir"
 }
 
+# mk_ticker <script> <tickfile> <pidfile> <ignore-term> <nested> : write a fixture that
+# ticks once a second until killed. Every property here is a defect I caused and found:
+#
+#  * BOUNDED ITERATIONS. A leaked fixture whose PATH lacked `sleep` span at full speed and
+#    wrote 179 MB into $TMPDIR before I noticed (37M ticks). The loop now stops after
+#    MAX_TICKS, so a fixture the gate FAILS to kill still cannot fill a disk or hold a core.
+#  * `sleep` VERIFIED, not assumed: these cases deliberately run under curated PATHs, and a
+#    missing `sleep` is what turned the loop into a spin. Absent it, the fixture exits
+#    immediately rather than busy-waiting — a case that then fails is honest (the fixture
+#    could not model a long-lived process) where a spin is silent damage.
+#  * A PID FILE, so a case cleans up by PID. Pattern-matching cleanup (`pkill -f`) hit my
+#    OWN shell three times in this session, because the pattern text is in the command line
+#    of the very command doing the matching.
+mk_ticker() {
+  local script="$1" tickfile="$2" pidfile="$3" ignore_term="$4" nested="$5"
+  # `:` (a no-op), never the empty string: as an empty value this became a LEADING `;` in
+  # the nested `sh -c` below, i.e. a syntax error, so the grandchild died instantly and the
+  # case reported rc 0 with 0 ticks — a fixture that models nothing while looking fine.
+  local body_ignore=":"
+  [ "$ignore_term" = 1 ] && body_ignore='trap "" TERM'
+  {
+    printf '#!/bin/sh\n'
+    printf 'command -v sleep >/dev/null 2>&1 || exit 3   # never busy-spin\n'
+    if [ "$nested" = 1 ]; then
+      # the PARENT takes TERM's default disposition and dies; the GRANDCHILD is the ticker
+      printf 'sh -c '"'"'%s; echo $$ > "%s"; n=0; while [ "$n" -lt 600 ]; do echo tick >> "%s"; n=$((n+1)); sleep 1; done'"'"' &\n' \
+             "$body_ignore" "$pidfile" "$tickfile"
+      printf 'wait\n'
+    else
+      printf '%s\n' "$body_ignore"
+      printf 'echo $$ > "%s"\n' "$pidfile"
+      printf 'n=0; while [ "$n" -lt 600 ]; do echo tick >> "%s"; n=$((n+1)); sleep 1; done\n' "$tickfile"
+    fi
+  } >"$script"
+  chmod +x "$script"
+}
+
+# reap_ticker <pidfile>: kill the fixture's own recorded PID, if it is still alive. BY PID,
+# never by pattern (see mk_ticker). Silent when the gate already killed it, which is the
+# expected case — this only stops a FAILING assertion from leaking a live process.
+reap_ticker() {
+  local pf="$1" pid
+  [ -f "$pf" ] || return 0
+  pid=$(cat "$pf" 2>/dev/null)
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  kill -9 "$pid" 2>/dev/null || true
+}
+
 # The transformation that makes a gate script's component set DIFFER: append a sentinel
 # component to the COMPONENTS array. The name is deliberately distinctive so an assertion
 # can require the check to NAME it (a bare red proves nothing).
@@ -463,8 +511,8 @@ fi
 # not by elapsed time: a `sleep` here only SEQUENCES the two observations.
 tick="$tmp/watchdog-tick.txt"
 ticker="$tmp/watchdog-ticker.sh"
-{ printf '#!/bin/sh\n'; printf 'while : ; do echo tick >> "%s"; sleep 1; done\n' "$tick"; } >"$ticker"
-chmod +x "$ticker"
+tickpid="$tmp/watchdog-ticker.pid"
+mk_ticker "$ticker" "$tick" "$tickpid" 0 0
 : >"$tick"
 # The invocation carries an OUTER host bound. Without it, a gate that fails to bound would
 # HANG this suite instead of failing it — the assert would be right and useless, since a
@@ -496,6 +544,7 @@ if [ "$wd_rc_line" = 124 ] && [ "$ticks_later" = "$ticks_at_return" ]; then
 else
   bad "3544-bound-enforced: expected rc 124 and a dead child (rc='$wd_rc_line' ticks $ticks_at_return -> $ticks_later)"
 fi
+reap_ticker "$tickpid"
 
 # THE GRANDCHILD CASE (roborev job 210, finding 2). A bound that signals only its direct
 # child is not a bound: the grandchild survives, keeps the command-substitution pipe open,
@@ -504,11 +553,8 @@ fi
 # spawns a ticker and `wait`s, which is the shape of a git transport helper.
 gtick="$tmp/grandchild-tick.txt"
 gparent="$tmp/grandchild-parent.sh"
-{ printf '#!/bin/sh\n'
-  printf 'sh -c '"'"'while : ; do echo tick >> "%s"; sleep 1; done'"'"' &\n' "$gtick"
-  printf 'wait\n'
-} >"$gparent"
-chmod +x "$gparent"
+gpid="$tmp/grandchild.pid"
+mk_ticker "$gparent" "$gtick" "$gpid" 0 1
 : >"$gtick"
 g_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
                --component-set-bounded-run 1 "$gparent" 2>/dev/null | sed -n 's/^RC: //p' )
@@ -520,6 +566,7 @@ if [ "$g_rc_line" = 124 ] && [ "$g_later" = "$g_at_return" ]; then
 else
   bad "3544-bound-grandchild: expected rc 124 and a dead grandchild (rc='$g_rc_line' ticks $g_at_return -> $g_later)"
 fi
+reap_ticker "$gpid"
 
 # A TERM-IGNORING DESCENDANT is bounded on BOTH mechanisms (roborev job 214). This is the
 # case that showed a TERM-only bound is not a bound at all: measured before the fix,
@@ -532,11 +579,8 @@ fi
 # the descendant is still writing, never by elapsed time.
 tignore="$tmp/term-ignoring.sh"
 titick="$tmp/term-ignoring-tick.txt"
-{ printf '#!/bin/sh\n'
-  printf "trap '' TERM\n"
-  printf 'while : ; do echo tick >> "%s"; sleep 1; done\n' "$titick"
-} >"$tignore"
-chmod +x "$tignore"
+tipid="$tmp/term-ignoring.pid"
+mk_ticker "$tignore" "$titick" "$tipid" 1 0
 # mech_label <PATH> is only for the failure message; the assertion is on behaviour.
 for _mech_path in "$PATH" "$bin_no_timeout"; do
   _mech=$(bound_of "$_mech_path")
@@ -555,6 +599,37 @@ for _mech_path in "$PATH" "$bin_no_timeout"; do
   else
     bad "3544-bound-term-ignoring[$_mech]: expected rc 124|137 and a dead descendant (rc='$_ti_rc' ticks $_ti_at -> $_ti_later)"
   fi
+  reap_ticker "$tipid"
+done
+
+# THE SHAPE THE CONDITIONAL KILL MISSED: the DIRECT CHILD dies on TERM while a GRANDCHILD
+# ignores it and keeps the capture pipe open. The previous escalation was guarded by
+# `if kill -0 "$pid"` — the child's liveness — so it skipped the KILL exactly here and the
+# "bounded" call hung forever. A fixture whose direct child ignores TERM (above) CANNOT
+# discriminate this: `kill -0` is true there, so the conditional fires and the case passes
+# with the defect present (measured — reverting the fix left that case green).
+gtterm="$tmp/grandchild-term-ignoring.sh"
+gttick="$tmp/grandchild-term-tick.txt"
+gtpid="$tmp/grandchild-term.pid"
+mk_ticker "$gtterm" "$gttick" "$gtpid" 1 1
+for _mech_path in "$PATH" "$bin_no_timeout"; do
+  _mech=$(bound_of "$_mech_path")
+  : >"$gttick"
+  _gt_rc=$( cd "$behind" && PATH="$_mech_path" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+              --component-set-bounded-run 1 "$gtterm" 2>/dev/null | sed -n 's/^RC: //p' )
+  _gt_at=$(wc -l <"$gttick" | tr -d ' ')
+  sleep 3
+  _gt_later=$(wc -l <"$gttick" | tr -d ' ')
+  case "$_gt_rc" in
+    124|137) _gt_rc_ok=1 ;;
+    *)       _gt_rc_ok=0 ;;
+  esac
+  if [ "$_gt_rc_ok" -eq 1 ] && [ "$_gt_later" = "$_gt_at" ]; then
+    ok "3544-bound-term-ignoring-grandchild[$_mech]: child dies on TERM, TERM-IGNORING grandchild still KILLed (rc $_gt_rc)"
+  else
+    bad "3544-bound-term-ignoring-grandchild[$_mech]: expected rc 124|137 and a dead grandchild (rc='$_gt_rc' ticks $_gt_at -> $_gt_later)"
+  fi
+  reap_ticker "$gtpid"
 done
 
 # A HANGING `git` is bounded too — the composition that covers the partial-clone `git show`
@@ -812,6 +887,15 @@ fi
 # ---------------------------------------------------------------------------
 base_tag=$(mkbaseline base-tag - )
 tagged=$(mkbranch tagged "$base_tag" - --from-origin)
+# MEASURED, not assumed: with `--refmap=` and an explicit `main` refspec, a DEFAULT-config
+# git writes NO tag — so a fixture left at defaults cannot tell `--no-tags` from its absence
+# (verified: the tag ref set was empty both with and without the flag, and a first cut of
+# this case therefore passed even with `--no-tags` REMOVED). Tag auto-following here is
+# CONFIGURATION-dependent, and `remote.<name>.tagOpt = --tags` is the configuration that
+# turns it on — under it the same fetch writes `refs/tags/*` into the SHARED ref store.
+# So the fixture sets it explicitly: the case must exercise the shape the flag exists for,
+# not the shape where nothing happens either way.
+git -C "$tagged" config remote.origin.tagOpt --tags
 # A NEW tag on the baseline, created AFTER the fixture cloned it — so an auto-following
 # fetch would have something to write.
 ( cd "$tmp/base-tag-src" && git "${GIT_ID[@]}" tag -a v99.99.99-selftest -m 'tag the baseline' \
@@ -824,7 +908,7 @@ if [ "$upstream_tag" -ge 1 ] \
    && [ "$(field KIND "$tg_out")" = ok ] \
    && [ "$tags_after" = "$tags_before" ] \
    && ! printf '%s\n' "$tags_after" | grep -q 'v99.99.99-selftest'; then
-  ok "3544-no-tag-writes: the baseline fetch leaves shared refs/tags/* UNCHANGED even when upstream gained a tag"
+  ok "3544-no-tag-writes: the baseline fetch leaves shared refs/tags/* UNCHANGED even with tagOpt=--tags and a new upstream tag"
 else
   bad "3544-no-tag-writes: expected an unchanged tag ref set (upstream_tag=$upstream_tag kind=$(field KIND "$tg_out"))"
   echo "   before: [$tags_before]"
