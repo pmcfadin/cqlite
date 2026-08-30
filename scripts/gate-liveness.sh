@@ -221,27 +221,47 @@ _dialect="${_open_txt#'==== AGENT-GATE'}"
 _dialect="${_dialect%' SUMMARY ===='}"
 _want_close="==== END AGENT-GATE${_dialect} SUMMARY ===="
 _close_ln=$(printf '%s\n' "$SUM_TEXT" | grep -nxF "$_want_close" | head -1 | cut -d: -f1)
-# NOT a verdict here: these facts are ENFORCED on the terminal-verdict path below. An
-# INCOMPLETE block deliberately falls through to the heartbeat even when truncated — that is
-# the conservative direction and the common "caught mid-write" case, and turning it into
-# UNKNOWN would make a perfectly live gate unreadable. Only a TERMINAL verdict, which we would
-# otherwise believe outright, requires the framing to be whole and ordered.
+# ENFORCED HERE, for every path (roborev job 176, Medium): a valid OPENER must exist and the
+# fields must be ORDERED, whatever the RESULT says. The previous split enforced neither on the
+# INCOMPLETE path, and that is not merely untidy — when the caller omits `--run-id` this reader
+# takes the run-id FROM THE SUMMARY and uses it to decide whether the heartbeat is ours. An
+# interleaved summary can therefore hand over a FOREIGN fragment's run-id, and the reader would
+# then validate a peer's beat and report RUNNING about somebody else's gate.
+#
+# Only the CLOSER stays COMPLETE-path-only, which is the precise shape of the legitimate
+# exception: a mid-write read is missing its TAIL. A missing closer is truncation and still
+# falls through to the heartbeat; a MISMATCHED closer or out-of-order fields are not truncation,
+# they are two writes spliced, and those are refused everywhere.
 _res_ln=$(printf '%s\n' "$SUM_TEXT" | grep -n '^RESULT: ' | head -1 | cut -d: -f1)
 _rid_ln=$(printf '%s\n' "$SUM_TEXT" | grep -n '^run-id: ' | head -1 | cut -d: -f1)
 # Ordering: opener first, closer last, RESULT and (when present) run-id between them. A missing
 # run-id is tolerated here and judged on its own terms further down.
+# The closer may legitimately be ABSENT (a truncated mid-write read), so every comparison
+# against it is guarded. Everything else is checked unconditionally.
 _order_bad=""
-if [ -n "$_res_ln" ]; then
+if [ -n "$_open_ln" ] && [ -n "$_res_ln" ]; then
   if [ "$_res_ln" -lt "$_open_ln" ]; then
     _order_bad="RESULT (line $_res_ln) precedes the opener (line $_open_ln)"
-  elif [ "$_res_ln" -gt "$_close_ln" ]; then
+  elif [ -n "$_close_ln" ] && [ "$_res_ln" -gt "$_close_ln" ]; then
     _order_bad="RESULT (line $_res_ln) follows the closer (line $_close_ln)"
   fi
 fi
-if [ -z "$_order_bad" ] && [ -n "$_rid_ln" ]; then
-  if [ "$_rid_ln" -lt "$_open_ln" ] || [ "$_rid_ln" -gt "$_close_ln" ]; then
-    _order_bad="run-id (line $_rid_ln) lies outside the block (lines $_open_ln..$_close_ln)"
+if [ -z "$_order_bad" ] && [ -n "$_open_ln" ] && [ -n "$_rid_ln" ]; then
+  if [ "$_rid_ln" -lt "$_open_ln" ]; then
+    _order_bad="run-id (line $_rid_ln) precedes the opener (line $_open_ln)"
+  elif [ -n "$_close_ln" ] && [ "$_rid_ln" -gt "$_close_ln" ]; then
+    _order_bad="run-id (line $_rid_ln) follows the closer (line $_close_ln)"
   fi
+fi
+
+if [ -z "$_open_ln" ]; then
+  verdict UNKNOWN 4 "summary-no-opener; $SUMMARY has no '==== AGENT-GATE … SUMMARY ====' opener, so it is not a gate summary block and none of its fields can be attributed to a run"
+fi
+if [ "$_n_end" -gt 0 ] && [ -z "$_close_ln" ]; then
+  verdict UNKNOWN 4 "summary-marker-dialect-mismatch; the block opens with '$_open_txt' but its closer is a DIFFERENT mode (no matching '$_want_close') — an opener and closer from different modes are fragments of two writes, not one block"
+fi
+if [ -n "$_order_bad" ]; then
+  verdict UNKNOWN 4 "summary-out-of-order; $_order_bad — these are not one ordered block, so no field can be attributed to a single write"
 fi
 
 SUM_RUN_ID=$(_field "$SUM_TEXT" run-id)
@@ -305,20 +325,13 @@ _START_RE='^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
 _END_RE='^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
 case "$RESULT_TOKEN" in
   PASS|FAIL|PARTIAL|ERROR|REFUSED)
-    if ! _has_line "$_START_RE"; then
-      verdict UNKNOWN 4 "summary-no-start-marker; '$RESULT_LINE' is present but the block has no '==== AGENT-GATE … SUMMARY ====' opener — this is not a complete gate summary"
-    fi
     # Distinguish the two shapes rather than blaming the wrong one: NO closer at all is a
     # truncated write; a closer of a DIFFERENT dialect is two fragments spliced together.
     if [ "$_n_end" -eq 0 ]; then
       verdict UNKNOWN 4 "summary-truncated; '$RESULT_LINE' is present but the closing '==== END AGENT-GATE … SUMMARY ====' marker is not — the write was cut short (kill or ENOSPC) and will never complete, so this verdict was never published"
     fi
-    if [ -z "$_close_ln" ]; then
-      verdict UNKNOWN 4 "summary-marker-dialect-mismatch; the block opens with '$_open_txt' but its closer is a DIFFERENT mode (no matching '$_want_close') — an opener and closer from different modes are fragments of two writes, not one block"
-    fi
-    if [ -n "$_order_bad" ]; then
-      verdict UNKNOWN 4 "summary-out-of-order; $_order_bad — these are not one ordered block, so this verdict cannot be attributed to a single write"
-    fi
+    # (a mismatched dialect and out-of-order fields were already refused above, for every
+    # path; only truncation is specific to believing a terminal verdict.)
     verdict COMPLETE 0 "the summary carries a terminal verdict — $RESULT_VALUE" ;;
   INCOMPLETE)
     : ;;  # the interesting case: fall through to the heartbeat

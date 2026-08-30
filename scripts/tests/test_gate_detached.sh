@@ -517,18 +517,39 @@ else
   bad "4b.35 the env script is removed by an EXIT trap" "no unconditional cleanup"
 fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
-  before=$(ls -d "${TMPDIR:-/tmp}"/cqlite-gate-*/ 2>/dev/null | wc -l)
+  # Scoped to a PRIVATE TMPDIR (roborev job 176, Medium). The first version counted every
+  # ${TMPDIR}/cqlite-gate-*/gate-env.sh on the HOST and required the global total to be zero, so
+  # a CONCURRENT lane's launch — or any artifact predating the test — failed the gate even though
+  # this invocation cleaned up perfectly. On a box that runs several lanes that is not a
+  # hypothetical. It also captured a `before` count and never used it, which is the
+  # "declared but not actually done" shape.
+  #
+  # The launcher derives its private directory from TMPDIR, so pointing TMPDIR at our own
+  # scratch makes the assertion about THIS launch and nothing else.
+  envtmp="$TMP/envscope"; mkdir -p "$envtmp"
   cs="$TMP/clean-summary.txt"
-  out=$(bash "$LAUNCHER" --summary "$cs" --log "$TMP/clean.log" -- --only file-size 2>&1)
+  out=$(TMPDIR="$envtmp" bash "$LAUNCHER" --summary "$cs" --log "$TMP/clean.log" -- --only file-size 2>&1)
   cu=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$cu" ] && echo "$cu" >> "$UNITS_FILE"
-  leftover=$(ls "${TMPDIR:-/tmp}"/cqlite-gate-*/gate-env.sh 2>/dev/null | wc -l)
-  [ "$leftover" -eq 0 ] && ok "4b.36 a successful launch leaves NO env script behind" \
-                        || bad "4b.36 a successful launch leaves NO env script behind" "$leftover found"
+  leftover=$(find "$envtmp" -name 'gate-env.sh' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$leftover" -eq 0 ] && ok "4b.36 a successful launch leaves NO env script behind (scoped TMPDIR)" \
+                        || bad "4b.36 a successful launch leaves NO env script behind" "$leftover found under $envtmp"
   # ...and a REFUSED launch must not leave one either.
-  bash "$LAUNCHER" --summary /nonexistent-dir-3473/x.txt --log "$TMP/ref.log" -- --only file-size >/dev/null 2>&1
-  leftover2=$(ls "${TMPDIR:-/tmp}"/cqlite-gate-*/gate-env.sh 2>/dev/null | wc -l)
-  [ "$leftover2" -eq 0 ] && ok "4b.37 a REFUSED launch leaves NO env script behind" \
-                         || bad "4b.37 a REFUSED launch leaves NO env script behind" "$leftover2 found"
+  envtmp2="$TMP/envscope2"; mkdir -p "$envtmp2"
+  TMPDIR="$envtmp2" bash "$LAUNCHER" --summary /nonexistent-dir-3473/x.txt --log "$TMP/ref.log" -- --only file-size >/dev/null 2>&1
+  leftover2=$(find "$envtmp2" -name 'gate-env.sh' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$leftover2" -eq 0 ] && ok "4b.37 a REFUSED launch leaves NO env script behind (scoped TMPDIR)" \
+                         || bad "4b.37 a REFUSED launch leaves NO env script behind" "$leftover2 found under $envtmp2"
+  # NON-VACUITY: the scoped directory must be where the launcher actually works, or the two
+  # assertions above are satisfied by an empty directory nobody wrote to. A launch that KEEPS
+  # its private dir (default paths) must leave it there, proving TMPDIR is honoured.
+  envtmp3="$TMP/envscope3"; mkdir -p "$envtmp3"
+  out3=$(TMPDIR="$envtmp3" bash "$LAUNCHER" -- --only file-size 2>&1)
+  u3=$(printf '%s' "$out3" | sed -n 's/^unit:  *//p'); [ -n "$u3" ] && echo "$u3" >> "$UNITS_FILE"
+  if [ "$(find "$envtmp3" -maxdepth 1 -name 'cqlite-gate-*' 2>/dev/null | wc -l | tr -d ' ')" -ge 1 ]; then
+    ok "4b.36b the launcher honours TMPDIR (so 4b.36/4b.37 are not vacuous)"
+  else
+    bad "4b.36b the launcher honours TMPDIR" "no private dir appeared under $envtmp3"
+  fi
 else
   skipc "4b.36-4b.37 env script cleanup" "no working systemd-run --user"
 fi

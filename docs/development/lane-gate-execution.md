@@ -324,10 +324,17 @@ the closer must **match the opener's dialect** (a LITE opener closed by a DELTA 
 fragments, and the three dialects are kept distinct precisely so no block can pass as another);
 and the elements must be **ordered** — opener, then `run-id:` and `RESULT:`, then closer.
 
-Those last two are enforced only where a **terminal verdict** would otherwise be believed
-outright. An `INCOMPLETE` block deliberately falls through to the heartbeat even when truncated:
-that is the conservative direction and the common "caught mid-write" case, and rejecting it
-would make a perfectly live gate unreadable. The reader also re-reads **once** when framing is incomplete, resolving the common
+A valid opener, a matching dialect and correct ordering are required on **every** path. Only the
+**closer** is specific to believing a terminal verdict — and that is the precise shape of the
+legitimate exception, because a mid-write read is missing its *tail*. So a truncated
+`INCOMPLETE` block still falls through to the heartbeat (the conservative direction, and the
+common case), while a mismatched dialect or an out-of-order field is refused everywhere.
+
+That distinction is not cosmetic. When the caller omits `--run-id`, the reader takes the run-id
+**from the summary** and uses it to decide whether the heartbeat is ours — so an interleaved
+summary could hand over a *foreign fragment's* run-id and the reader would validate a peer's
+beat and report `RUNNING` about somebody else's gate. Enforcing the framing before any field is
+trusted is what closes that. The reader also re-reads **once** when framing is incomplete, resolving the common
 "caught mid-write" case; a permanently truncated artifact still reports `UNKNOWN`.
 
 **Residual, stated rather than papered over:** a blend that lands on no hole *and* produces a
@@ -413,8 +420,8 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (138 cases) and
-`scripts/tests/test_gate_detached.sh` (68 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (141 cases) and
+`scripts/tests/test_gate_detached.sh` (69 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

@@ -509,7 +509,30 @@ expect_reader "11c.1 terminal RESULT with no end marker => UNKNOWN, not COMPLETE
 nostart="$TMP/nostart.txt"
 { echo "run-id: run-x"; echo "RESULT: PASS"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$nostart"
 expect_reader "11c.2 terminal RESULT with no start marker => UNKNOWN" \
-  UNKNOWN 4 "summary-no-start-marker" -- "$nostart"
+  UNKNOWN 4 "summary-no-opener" -- "$nostart"
+# ...and the opener requirement now applies to an INCOMPLETE block too (job 176): without it,
+# an interleaved summary could hand the reader a FOREIGN fragment's run-id, which it would then
+# use to decide whether the heartbeat is ours — reporting RUNNING about a peer's gate.
+noopen_inc="$TMP/noopen-inc.txt"
+{ echo "run-id: r1"; echo "RESULT: INCOMPLETE (gate did not finish)"; } > "$noopen_inc"
+mk_beat "$noopen_inc.heartbeat" r1 5
+expect_reader "11c.2b INCOMPLETE with no opener => UNKNOWN, never RUNNING off a beat" \
+  UNKNOWN 4 "summary-no-opener" -- "$noopen_inc"
+# An INCOMPLETE block whose run-id sits OUTSIDE the block is likewise refused before that
+# run-id can be used to validate a beat.
+outside_inc="$TMP/outside-inc.txt"
+{ echo "run-id: peer-fragment"; echo "==== AGENT-GATE SUMMARY ===="
+  echo "RESULT: INCOMPLETE (gate did not finish)"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$outside_inc"
+mk_beat "$outside_inc.heartbeat" peer-fragment 5
+expect_reader "11c.2c INCOMPLETE with run-id outside the block => UNKNOWN (out of order)" \
+  UNKNOWN 4 "summary-out-of-order" -- "$outside_inc"
+# CONTROL: a truncated INCOMPLETE (valid opener, ordered fields, missing CLOSER) must STILL
+# consult the beat — that is the legitimate mid-write case and the whole point of the asymmetry.
+trunc_inc="$TMP/trunc-inc2.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: r1"
+  echo "RESULT: INCOMPLETE (gate did not finish)"; } > "$trunc_inc"
+mk_beat "$trunc_inc.heartbeat" r1 5
+expect_reader "11c.2d control: truncated INCOMPLETE still consults the beat" RUNNING 2 "" -- "$trunc_inc"
 # Controls: all three real marker dialects must still be accepted.
 for m in "AGENT-GATE SUMMARY" "AGENT-GATE LITE SUMMARY" "AGENT-GATE DELTA SUMMARY"; do
   f="$TMP/mk-$(echo "$m" | tr ' ' '_').txt"
