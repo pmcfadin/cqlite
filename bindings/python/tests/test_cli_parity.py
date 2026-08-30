@@ -913,10 +913,6 @@ class TestCollectionIdentityContract:
     schema-aware normalization: a behavior change, out of scope for #1454,
     tracked as #3497.
 
-<<<<<<< HEAD
-    Pinned ELSEWHERE, and no longer a crash: the nested shapes that used to raise
-    `TypeError: unhashable type` inside the binding
-=======
     Two instances have since been CLOSED, and by a different route than the one
     predicted above. #3504 made `value_to_hashable_key` project a UDT to a
     `cqlite.Udt` instead of flattening it into a `frozenset` of pairs, so the
@@ -927,8 +923,8 @@ class TestCollectionIdentityContract:
     the family's live instance. The site-"UDT fields" half of **b-2** is closed the
     same way: the markers are no longer injected into the field namespace at all.
 
-    Not pinned here: the nested shapes that RAISE instead of diverging
->>>>>>> origin/main
+    Pinned ELSEWHERE, and no longer a crash: the nested shapes that used to raise
+    `TypeError: unhashable type` inside the binding
     (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`).
     `contains_udt` and `value_to_hashable_key` are now TOTAL and exhaustive over
     `Value` (#3500), so those columns read successfully; they are pinned
@@ -1057,28 +1053,20 @@ class TestCollectionIdentityContract:
         two = normalize_python_value(frozenset({(("a", 1),), (("b", 2),)}), is_row_level=False)
         assert two == sorted(two, key=_sort_key)
 
-<<<<<<< HEAD
-    def test_udt_nested_deeper_in_a_projection_position_is_unsupported(self):
-        """LIMITATION a-3 (lossy projection): nesting generates more instances — in MAP KEYS.
-
-        A `map<frozen<list<frozen<udt>>>, int>` KEY is routed through
-        `value_to_hashable_key` **unconditionally** — `map_to_py` has no
-        `contains_udt` gate, because a Python `dict` key must be hashable
-        whatever it holds. Its `List` arm recurses, so the inner UDT is projected
-        to a `frozenset` of `(field_name, value)` pairs and the key normalizes to
-        an array of `[name, value]` pair-arrays, while Node and the CLI render a
-        UDT **object** there. Different in kind, not in ordering.
-=======
     def test_udt_nested_deeper_in_a_projection_position_now_canonicalizes(self):
         """a-3 (was LIMITATION): a UDT inside a projected value canonicalizes again.
 
-        `set<frozen<list<frozen<udt>>>>`: `value_to_hashable_key`'s `List` arm
-        recurses into the inner UDT. That inner projection used to FLATTEN the UDT
-        into a `frozenset` of `(field_name, value)` pairs — so the element
-        canonicalized to `[[["_keyspace", …], ["_type", …], ["street", …]]]`, an
-        array of `[name, value]` pairs, while Node and the CLI produce
+        The position that still forces a hashable projection is a MAP KEY:
+        `map<frozen<list<frozen<udt>>>, int>` routes its key through
+        `value_to_hashable_key` **unconditionally** — `map_to_py` has no
+        `contains_udt` gate, because a Python `dict` key must be hashable whatever
+        it holds — and its `List` arm recurses into the inner UDT. That inner
+        projection used to FLATTEN the UDT into a `frozenset` of
+        `(field_name, value)` pairs, so the key canonicalized to
+        `[[["_keyspace", …], ["_type", …], ["street", …]]]`, an array of
+        `[name, value]` pairs, while Node and the CLI produce
         `[[{"_type": …, "street": …}]]`, an array holding a UDT **object**.
->>>>>>> origin/main
+        Different in kind, not in ordering.
 
         Issue #3504 replaced that projection with a `cqlite.Udt` instance, so the
         projected value keeps its type and the two shapes agree. The a-1 instance
@@ -1106,95 +1094,34 @@ class TestCollectionIdentityContract:
 
         The sibling shapes that used to RAISE
         (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`)
-<<<<<<< HEAD
         now read successfully and are pinned end-to-end in
         `bindings/python/tests/test_nested_udt_hashable.py`; the residual gap is
         core-side multicell map keys (#3612).
         """
-        # STILL LIVE: what the binding hands over for a map KEY of that type — a
-        # tuple (the projected inner list) holding the UDT's frozenset projection.
-        projected_udt = frozenset(
-            {("_type", "address"), ("_keyspace", "test_collections"), ("street", "1 Main St")}
-        )
-        key = (projected_udt,)
-        assert normalize_python_value({key: 7}, is_row_level=False) == [
-            {
-                "key": [
-                    [
-                        ["_keyspace", "test_collections"],
-                        ["_type", "address"],
-                        ["street", "1 Main St"],
-                    ]
-                ],
-                "value": 7,
-            }
-        ]
-
-        # CLOSED for the set-element position (#3500): `set<frozen<list<frozen<udt>>>>`
-        # now arrives as a `list` of `list`s of UDT `dict`s, because `contains_udt`
-        # sees the UDT under the inner list and `set_to_py` takes its `list` branch.
-        assert normalize_python_value([[_udt("address", street="1 Main St")]], is_row_level=False) == [
-            [{"_type": "address", "street": "1 Main St"}]
-        ]
-
-        # ...and that IS the shape Node and the CLI produce for the same CQL
-        # value, so this row no longer diverges: an array holding a UDT OBJECT.
-        # (Contrast the projected key above, which still differs in kind.)
-
-    def test_udt_field_named_keyspace_is_dropped(self):
-        """LIMITATION b-2, SITE "UDT fields": a field named `_keyspace` is LOST (#3504).
-
-        `_type`/`_keyspace` are control markers the bindings inject into the same
-        namespace that carries user-controlled names — and `_keyspace` is a legal
-        quoted UDT FIELD name. Both bindings inject the markers and *then* set the
-        fields (`udt_to_py`: `set_item("_type")`, `set_item("_keyspace")`, then
-        `set_item(field.name)`; `udt_to_object` does the identical thing), so a
-        field with that name **overwrites the metadata** — symmetrically, in Python
-        and Node. The canonical rule then drops `_keyspace` because the CLI omits it
-        for UDTs, so the FIELD is lost, while the CLI — which never injects
-        `_keyspace` — keeps it as a field.
-
-        Two properties worth keeping in view. (1) The class is **symmetric**, and
-        the two markers need DIFFERENT oracles: for `_keyspace` the CLI is a valid
-        oracle (it injects nothing of that name), but for `_type` it is NOT — the
-        CLI's JSON writer (`cqlite-cli/src/output/json.rs`, `Value::Udt` arm)
-        inserts `"_type"` and then the fields, so it is overwritten exactly like
-        the bindings. All three implementations agree and all three are wrong, so
-        only `sstabledump`/the raw bytes can detect the `_type` half (correction
-        recorded on #3504). (2) The fix is NOT to require
-        `_type` and `_keyspace` together, nor to pick a rarer marker: that just
-        chooses a rarer delimiter on a channel the data controls. UDT identity has
-        to be carried out of band (#3504; the canonicalization half is #3497).
-
-        This pins the current, defective behavior as a recorded gap.
-        """
-        # A UDT whose field is genuinely named "_keyspace" — after the binding's
-        # overwrite this is exactly the dict the normalizer receives.
-        udt_with_colliding_field = {"_type": "address", "_keyspace": "user-supplied-value"}
-        assert normalize_python_value(udt_with_colliding_field, is_row_level=False) == {
-            "_type": "address",
-        }, "the `_keyspace` FIELD is dropped by the canonical UDT rule (#3504)"
-
-        # Contrast: an ordinary field survives, so the loss is specific to the marker name.
-=======
-        are still NOT pinned here: `contains_udt`/`value_to_hashable_key` are not
-        total over `Value`, so those fail with `TypeError` inside the binding before
-        the normalizer is reached. That is #3500, untouched by #3504.
-        """
-        # What the binding hands over: a tuple (the projected inner list) holding
-        # the projected inner UDT, which is now a `cqlite.Udt` whose field values
-        # have themselves been projected.
+        # What the binding hands over for a map KEY of `map<frozen<list<frozen<udt>>>, int>`:
+        # a tuple (the projected inner list) holding the projected inner UDT, which
+        # is now a `cqlite.Udt` whose field values have themselves been projected.
         projected_udt = cqlite.Udt("address", "test_collections", {"street": "1 Main St"})
         element = (projected_udt,)
-        assert normalize_python_value(frozenset({element}), is_row_level=False) == [
-            [{"_type": "address", "street": "1 Main St"}]
+        assert normalize_python_value({element: 7}, is_row_level=False) == [
+            {"key": [{"_type": "address", "street": "1 Main St"}], "value": 7}
         ]
 
-        # ...which is EXACTLY the shape Node/the CLI produce for the same CQL
-        # value, i.e. what a UDT in a non-projection position normalizes to. The
-        # two used to differ in kind; that is the fix, asserted as an equality
-        # rather than as a shape somebody wrote down twice.
->>>>>>> origin/main
+        # CLOSED for the set-element position too, by the other half of the merge
+        # (#3500): `set<frozen<list<frozen<udt>>>>` no longer reaches a `frozenset`
+        # at all, because `contains_udt` sees the UDT under the inner list and
+        # `set_to_py` takes its `list` branch. That column arrives as a `list` of
+        # `list`s of UDTs.
+        assert normalize_python_value(
+            [[_udt("address", street="1 Main St")]], is_row_level=False
+        ) == [[{"_type": "address", "street": "1 Main St"}]]
+
+        # A `frozenset` of projected elements is still REACHABLE — one level deeper,
+        # as a `map<frozen<set<frozen<list<frozen<udt>>>>>, int>` key, where
+        # `value_to_hashable_key`'s `Set` arm builds it — and it canonicalizes to the
+        # same shape as the non-projection route. Asserted as an EQUALITY rather than
+        # as a shape somebody wrote down twice; the two used to differ in kind, and
+        # that is the fix.
         assert normalize_python_value(
             frozenset({element}), is_row_level=False
         ) == normalize_python_value([[_udt("address", street="1 Main St")]], is_row_level=False)
