@@ -164,6 +164,21 @@ import sys
 # about identifiers, not about shell.
 _PY_WORD = re.compile(r"python[0-9]*(?:\.[0-9]+)*(?![\w.])")
 
+# WHAT MAY NOT PRECEDE A COMMAND WORD (#3451 review round 10, finding 2).
+#
+# The MIRROR of `_WORD_BOUNDARY_AFTER_CLOSE`. Bash concatenates adjacent fragments on the LEFT of
+# a word exactly as it does on the right, so `"prefix"python3 -c '…'` runs `prefixpython3` — a
+# different command entirely. The scanner saw the suffix as a bare word, ACCEPTED the block and
+# advanced past the `-c` anchor: measured `blocks=1 findings=0`, a false pass that defeated the
+# whole point of classifying the command word.
+#
+# A CONSERVATIVE REJECT, not a shell-aware tokenizer: a candidate whose immediately preceding
+# character CLOSES a fragment — a quote, a backtick, the `)`/`}` of `$(…)`/`${…}`, or a backslash
+# escape — is refused. `(` is deliberately NOT in the set: it OPENS a subshell or command
+# substitution, so `$(python3 …)` is an ordinary command position and is the shape the driver's
+# own inline block at line 941 uses.
+_CONCATENATION_BEFORE_WORD = frozenset("\"'`)}" + chr(92))
+
 # THE SECOND DISCOVERY ANCHOR: the FLAG, not the command word (#3451 review round 7, finding 1).
 #
 # The allowlist closed CLASSIFICATION — anything not allowlisted is a finding — but not
@@ -446,6 +461,16 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         raw_rest = scan[m.end() : scan_line_end]
         rest = _strip_comment(raw_rest).strip()
         try:
+            preceding = text[word_start - 1 : word_start] if word_start > line_start else ""
+            if preceding and preceding in _CONCATENATION_BEFORE_WORD:
+                raise Unclassifiable(
+                    idx + 1,
+                    f"this candidate is immediately preceded by {preceding!r}, which CLOSES a"
+                    " shell fragment — bash concatenates the two into a DIFFERENT command word"
+                    f" (`\"prefix\"python3` runs `prefixpython3`). Refused conservatively rather"
+                    " than resolved, because resolving it needs the quoting state this file does"
+                    " not track. Separate the words if a python invocation is intended.",
+                )
             if word != "python3":
                 raise Unclassifiable(
                     idx + 1,

@@ -228,6 +228,40 @@ pathlib.Path(dest).write_text(text.replace(needle, bad))
 PY
 }
 
+# export_prefix_membership <driver> <VAR-PREFIX> — "<in-same-logical-line> <total-in-file>".
+#
+# An exported variable only reaches the step if its assignment is part of the CONTIGUOUS
+# environment-assignment prefix of the `python3 -c` command — a run of `NAME=value \` lines
+# immediately above it. Remove ONE continuation backslash and the assignment becomes a standalone
+# shell assignment that is never exported, the driver dies on the missing variable, and every
+# check in this suite still passes: the name-set comparisons see it (it is still in the file) and
+# the extracted-block executions see it (this suite builds their environment itself). Same
+# symptom as #3451 itself.
+#
+# Decidable, and it reuses the joiner rather than parsing a command prefix: after logical-line
+# joining, the assignments and the invocation ARE ONE LINE. Membership in that line is the whole
+# assertion. The joiner is IMPORTED from the shipped module — a second copy here would drift, and
+# then this check would certify the copy.
+export_prefix_membership() {
+  python3 - "$REPO_ROOT/scripts/tests" "$1" "$2" <<'PY'
+import pathlib, re, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_embedded_python import _join_continuations
+text = pathlib.Path(sys.argv[2]).read_text()
+prefix = sys.argv[3]
+joined, _unused = _join_continuations(text)
+names = sorted(set(re.findall(prefix + r"[A-Z_]+(?==)", text)))
+inline = set()
+for logical in joined.split("\n"):
+    if "python3 -c " + chr(39) not in logical:
+        continue
+    for name in names:
+        if name + "=" in logical:
+            inline.add(name)
+print(f"{len(inline)} {len(names)}")
+PY
+}
+
 # ============================================================================
 # PART 1 — THE EXTRACTOR READS THE SHIPPED DRIVER, AND FAILS CLOSED
 # ============================================================================
@@ -783,6 +817,58 @@ elif [ "$renamed_keys" != "$shipped_keys" ] && [ -z "$(findings_of "$renamed_com
   pass "config-exports CONTROL fired: a single renamed export is caught by the set comparison — and the compile check is SILENT about it (the python is untouched), which is why this check exists separately"
 else
   fail "config-exports CONTROL did not fire: renamed=[$renamed_keys] shipped=[$shipped_keys], compile said '$(findings_of "$renamed_compile" | head -1)'"
+fi
+
+# ...and the assignments must be part of the step's ENVIRONMENT-ASSIGNMENT PREFIX, not merely
+# present somewhere in the file (#3451 review round 10, finding 1). The set comparisons above
+# collect names GLOBALLY, so a single removed continuation backslash turns an export into a
+# standalone assignment python never sees — the driver dies, and every check here still passes.
+for export_prefix in WS0_CFG_ WS0_PIN_; do
+  read -r in_line total_in_file <<<"$(export_prefix_membership "$DRIVER" "$export_prefix")"
+  if [ "$total_in_file" -gt 0 ] && [ "$in_line" -eq "$total_in_file" ]; then
+    pass "export-prefix ($export_prefix): all $total_in_file assignment(s) share a JOINED LOGICAL LINE with the python3 -c invocation that reads them — so each is genuinely exported, not merely present in the file"
+  else
+    fail "export-prefix ($export_prefix): only $in_line of $total_in_file assignment(s) are in the same logical line as the invocation. One outside the contiguous prefix is never exported: the step refuses at run time on the missing variable and its caller exits 2"
+  fi
+done
+
+# --- CONTROL: a removed continuation, and a relocated assignment, both FIRE --------------------
+python3 - "$DRIVER" "$TMP" <<'INJECT'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+tmp = pathlib.Path(sys.argv[2])
+bs = chr(92)
+# (a) drop ONE continuation backslash, so that assignment leaves the prefix.
+needle = 'WS0_CFG_TEMPS="$TEMPS" ' + bs + "\n"
+if text.count(needle) != 1:
+    print(f"INJECTION IMPOSSIBLE: continuation needle occurs {text.count(needle)} time(s)",
+          file=sys.stderr)
+    raise SystemExit(1)
+(tmp / "export-nobackslash.sh").write_text(
+    text.replace(needle, 'WS0_CFG_TEMPS="$TEMPS"\n'))
+# (b) MOVE an assignment out of the prefix entirely, keeping it in the file.
+(tmp / "export-relocated.sh").write_text(
+    text.replace(needle, "").replace(
+        "#!/usr/bin/env bash", '#!/usr/bin/env bash\nWS0_CFG_TEMPS="$TEMPS"', 1))
+INJECT
+export_inject_rc=$?
+if [ "$export_inject_rc" -ne 0 ]; then
+  fail "export-prefix CONTROL: the injections could not be made, so the controls could not fire"
+else
+  export_ctl_ok=1
+  export_ctl_detail=""
+  for export_case in nobackslash relocated; do
+    read -r c_in c_total <<<"$(export_prefix_membership "$TMP/export-$export_case.sh" WS0_CFG_)"
+    if [ "$c_in" -eq "$c_total" ]; then
+      export_ctl_ok=0
+      export_ctl_detail="$export_ctl_detail $export_case($c_in/$c_total)"
+    fi
+  done
+  if [ "$export_ctl_ok" -eq 1 ]; then
+    pass "export-prefix CONTROL fired: BOTH a removed continuation backslash and an assignment relocated out of the prefix drop it from the invocation's logical line — the two ways an export silently stops being one"
+  else
+    fail "export-prefix CONTROL did not fire:$export_ctl_detail — the membership check cannot see an assignment leaving the prefix"
+  fi
 fi
 
 # ...and the SAME class for the CPU-pin step, whose four inputs have no shipped field list. Here
