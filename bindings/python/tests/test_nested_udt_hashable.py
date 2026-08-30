@@ -508,6 +508,52 @@ def tuple_udt_int_serialized(label, rank, trailing) -> bytes:
 # =============================================================================
 
 
+def test_the_two_udt_projections_agree_for_a_scalar_field_udt(db):
+    """:func:`kp` and :func:`kp_hashable` must AGREE, asserted from real rows.
+
+    The two helpers return the same object, which is a CLAIM about production and
+    not a fact about the test file — so it is checked against values the binding
+    actually produced, on both sides of the seam at once: ``s_tuple_udt``'s
+    element reaches its UDT through ``udt_to_py`` (``set_to_py``'s list fallback
+    converts with ``value_to_py``), while ``f_map_tuple_udt``'s KEY reaches its
+    UDT through ``value_to_hashable_key``. Same declared UDT, same field values,
+    different code path.
+
+    This is the property #3504 delivers — one ``build_udt``, differing only in the
+    per-field converter — and it holds for ``key_part`` because ``text`` and
+    ``int`` convert identically on both paths. It would NOT hold for a UDT with a
+    collection field, and that is not a shape this fixture can reach (a
+    collection field inside a frozen UDT decodes to ``Value::Blob``).
+
+    Where the two projections still differ OBSERVABLY is the CONTAINER around
+    them, which every other test in this module pins.
+    """
+    ordinary = _rows_by_id(db, "s_tuple_udt")[3].get("s_tuple_udt")[0][0]
+    projected = list(_rows_by_id(db, "f_map_tuple_udt")[3].get("f_map_tuple_udt"))[0][0]
+
+    for udt in (ordinary, projected):
+        assert isinstance(udt, cqlite.Udt)
+        assert udt.type_name == "key_part"
+        assert udt.keyspace == KEYSPACE
+        # The identity is OUT OF BAND: no injected entry sits in the namespace
+        # that carries user-controlled field names (#3504).
+        assert sorted(udt.fields) == ["label", "rank"]
+        with pytest.raises(KeyError):
+            _ = udt["_type"]
+
+    # Same declared type and same field values => equal AND equally hashable, so
+    # one may stand in for the other in a set/dict position. The field values are
+    # read from the sstabledump golden, not chosen: id=3 carries
+    # `{"label": "solo", "rank": 99}` in BOTH columns
+    # (`nb-1-big-Data.db.jsonl`: `s_tuple_udt` path `solo\:99:42`,
+    # `f_map_tuple_udt` key `[{"label": "solo", "rank": 99}, 42]`), which is what
+    # makes this a genuine CROSS-PATH equality rather than two separate checks.
+    same = cqlite.Udt("key_part", KEYSPACE, {"label": "solo", "rank": 99})
+    assert ordinary == same and projected == same
+    assert hash(ordinary) == hash(projected) == hash(same)
+    assert len({ordinary, projected, same}) == 1
+
+
 class TestTupleBorneUdtInSetElement:
     """``s_tuple_udt`` — ``set<frozen<tuple<frozen<key_part>, int>>>``.
 
