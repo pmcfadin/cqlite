@@ -36,9 +36,18 @@
 //! therefore has to be classified rather than silently uncovered — derived at run
 //! time from committed source, not from a hand-kept count.
 //!
-//! Every declared reason in [`NOT_COMPARABLE`] is also ENFORCED rather than
-//! trusted: the golden reader refuses a golden carrying the shape the reason
-//! names, so a mis-stated exclusion cannot quietly hide a comparable table.
+//! Every entry in [`NOT_COMPARABLE`] names its unsupported shapes as an
+//! [`Unsupported`] SET rather than as prose, and the census VERIFIES that set
+//! against the committed golden: the shapes it declares must be exactly the ones
+//! [`unsupported_shapes`] finds in that table's `*-Data.db.jsonl`. A stale or
+//! mis-stated exclusion therefore FAILS instead of quietly hiding a table that is
+//! in fact comparable.
+//!
+//! The two halves are tied together by
+//! [`every_declarable_shape_is_one_the_golden_reader_refuses`], which builds a
+//! minimal golden carrying each shape and requires `golden_rows` to reject it. So
+//! "this shape is why the table is excluded" is a checked claim on both sides: the
+//! shape is in the golden, and the reader refuses that shape.
 
 #![cfg(feature = "state_machine")]
 
@@ -50,6 +59,7 @@ use golden::compare::{
 };
 use golden::schema::{ColumnKind, CqlType, TableSchema};
 use golden::{golden_rows, Egress, Multicell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -461,56 +471,232 @@ const CASES: &[Case] = &[
     },
 ];
 
+/// A dump shape that makes a golden non-comparable against the CLI's reconciled
+/// result set — and therefore a legitimate reason to exclude a table.
+///
+/// Every variant is a shape [`golden::golden_rows`] REFUSES; that correspondence
+/// is itself asserted by
+/// [`every_declarable_shape_is_one_the_golden_reader_refuses`], so the enum cannot
+/// drift into listing something the reader would happily parse.
+///
+/// Deliberately NOT a variant: a **cell tombstone**. It reconciles to `null`,
+/// which is a property this lane compares rather than excludes
+/// (`test_types.nb_absent_vs_null_regular`), so it can never justify an exclusion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Unsupported {
+    /// `partition.deletion_info`.
+    PartitionDeletion,
+    /// A `range_tombstone_bound` / `range_tombstone_boundary` dump element.
+    RangeTombstone,
+    /// A row element carrying `deletion_info`.
+    RowDeletion,
+    /// A `static_block` dump element.
+    StaticBlock,
+    /// `ttl` / `expires_at` / `expired` on a row's liveness or on a cell.
+    Ttl,
+}
+
+impl Unsupported {
+    /// Every variant, so the shape scan and its cross-check are both exhaustive
+    /// by construction rather than by a hand-kept list.
+    const ALL: &'static [Unsupported] = &[
+        Unsupported::PartitionDeletion,
+        Unsupported::RangeTombstone,
+        Unsupported::RowDeletion,
+        Unsupported::StaticBlock,
+        Unsupported::Ttl,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Unsupported::PartitionDeletion => "partition deletion",
+            Unsupported::RangeTombstone => "range tombstone bound/boundary",
+            Unsupported::RowDeletion => "row deletion marker",
+            Unsupported::StaticBlock => "static block",
+            Unsupported::Ttl => "TTL",
+        }
+    }
+
+    /// A minimal `sstabledump` JSONL line carrying EXACTLY this shape, used to
+    /// assert that the golden reader refuses it. Transcribed from the shapes the
+    /// committed goldens actually contain, not from CQLite's behaviour.
+    fn minimal_golden(self) -> &'static str {
+        match self {
+            Unsupported::PartitionDeletion => {
+                r#"{"partition":{"key":["1"],"position":0,"deletion_info":{"marked_deleted":"1970-01-01T00:00:00.001Z","local_delete_time":"1970-01-01T00:00:00Z"}},"rows":[]}"#
+            }
+            Unsupported::RangeTombstone => {
+                r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"range_tombstone_bound","start":{"type":"inclusive","clustering":["1"]}}]}"#
+            }
+            Unsupported::RowDeletion => {
+                r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"deletion_info":{"marked_deleted":"1970-01-01T00:00:00.001Z","local_delete_time":"1970-01-01T00:00:00Z"},"cells":[]}]}"#
+            }
+            Unsupported::StaticBlock => {
+                r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"static_block","position":1,"cells":[{"name":"s","value":"x"}]}]}"#
+            }
+            Unsupported::Ttl => {
+                r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z","ttl":60,"expires_at":"1970-01-01T00:01:00Z","expired":true},"cells":[]}]}"#
+            }
+        }
+    }
+}
+
+/// A committed fixture that CANNOT be compared this way, with the shapes that
+/// make it so.
+struct Excluded {
+    keyspace: &'static str,
+    table: &'static str,
+    /// The shapes this table's golden carries. VERIFIED against the golden by
+    /// [`committed_fixture_coverage_census`] — declaring the wrong set, or a set
+    /// that has gone stale, fails.
+    shapes: &'static [Unsupported],
+    /// Human context for the census line. Never load-bearing: the `shapes` set is
+    /// what is checked.
+    note: &'static str,
+}
+
 /// Committed fixtures that CANNOT be compared this way, and why.
 ///
 /// Each reason is a *read-time reconciliation* property: the physical dump
 /// enumerates on-disk cells including shadowed/expired ones, so the CLI's
 /// reconciled `SELECT` result set is legitimately a different set of rows.
 /// Weakening the value comparison to absorb that would defeat the point of the
-/// lane, so those tables are excluded by name instead — and the golden reader
-/// independently REFUSES each of these shapes, so a wrong reason here surfaces as
-/// a failure rather than as silent coverage loss.
-const NOT_COMPARABLE: &[(&str, &str, &str)] = &[
-    (
-        "test_big",
-        "wide_partition",
-        "range tombstone bounds in the dump",
-    ),
-    (
-        "test_compaction_tombstone_ttl",
-        "rt_cross_gen",
-        "range tombstone bounds/boundaries",
-    ),
-    (
-        "test_compaction_tombstone_ttl",
-        "shadow_row_delete",
-        "row deletion marker",
-    ),
-    (
-        "test_compaction_tombstone_ttl",
-        "ttl_expired_live",
-        "TTL expiry + cell deletion",
-    ),
-    ("test_da", "ttl_table", "row TTL"),
-    (
-        "test_deltas",
-        "static_with_rows",
-        "static block: static-column projection is reconciliation",
-    ),
-    (
-        "test_tomb",
-        "static_with_tombstones",
-        "static block + row/cell deletions",
-    ),
-    (
-        "test_writeparity",
-        "static_clustering_shape",
-        "static block",
-    ),
+/// lane, so those tables are excluded by name instead.
+///
+/// The `shapes` set is CHECKED, not trusted: the census requires it to equal the
+/// set [`unsupported_shapes`] finds in the table's committed golden. Equality, not
+/// containment — a golden that grows a shape the entry does not name is a
+/// declaration that has stopped describing its subject, which is the same defect
+/// as one that names a shape the golden never had (issue #1491 review finding F4).
+const NOT_COMPARABLE: &[Excluded] = &[
+    Excluded {
+        keyspace: "test_big",
+        table: "wide_partition",
+        shapes: &[Unsupported::RangeTombstone],
+        note: "range tombstone bounds in the dump",
+    },
+    Excluded {
+        keyspace: "test_compaction_tombstone_ttl",
+        table: "rt_cross_gen",
+        shapes: &[Unsupported::RangeTombstone],
+        note: "range tombstone bounds and boundaries across two generations",
+    },
+    Excluded {
+        keyspace: "test_compaction_tombstone_ttl",
+        table: "shadow_row_delete",
+        shapes: &[Unsupported::RowDeletion],
+        note: "a row deletion marker the dump keeps and a SELECT drops",
+    },
+    Excluded {
+        keyspace: "test_compaction_tombstone_ttl",
+        table: "ttl_expired_live",
+        shapes: &[Unsupported::Ttl],
+        // The golden also carries cell deletions, which are NOT listed: a cell
+        // tombstone reconciles to null and this lane compares it (see
+        // `test_types.nb_absent_vs_null_regular`), so it is not a reason to
+        // exclude anything. Only shapes the golden reader REFUSES may be listed.
+        note: "TTL expiry: expired cells the dump keeps and a SELECT drops",
+    },
+    Excluded {
+        keyspace: "test_da",
+        table: "ttl_table",
+        shapes: &[Unsupported::Ttl],
+        note: "row TTL",
+    },
+    Excluded {
+        keyspace: "test_deltas",
+        table: "static_with_rows",
+        shapes: &[Unsupported::StaticBlock],
+        note: "static block: static-column projection is reconciliation",
+    },
+    Excluded {
+        keyspace: "test_tomb",
+        table: "static_with_tombstones",
+        shapes: &[
+            Unsupported::RangeTombstone,
+            Unsupported::RowDeletion,
+            Unsupported::StaticBlock,
+        ],
+        note: "static block, row deletions and range tombstone bounds together",
+    },
+    Excluded {
+        keyspace: "test_writeparity",
+        table: "static_clustering_shape",
+        shapes: &[Unsupported::StaticBlock],
+        note: "static block",
+    },
 ];
 
 fn repo_root() -> PathBuf {
     golden::datasets_root::repo_root()
+}
+
+/// The [`Unsupported`] shapes a golden JSONL actually contains.
+///
+/// Read from the dump's own vocabulary — the element `type`, `deletion_info`, and
+/// the `ttl`/`expires_at`/`expired` liveness keys — so the answer comes from the
+/// oracle rather than from anything CQLite does with the file. An unparseable line
+/// is an error, never an empty answer: "I could not tell" must not read as "no
+/// unsupported shape here", which is the permissive-default shape CLAUDE.md warns
+/// about.
+fn unsupported_shapes(jsonl: &str) -> Result<BTreeSet<Unsupported>, String> {
+    let mut found = BTreeSet::new();
+    let ttl_keys = ["ttl", "expires_at", "expired"];
+    for (lineno, line) in jsonl.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let doc: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("golden line {}: invalid JSON: {e}", lineno + 1))?;
+        let partition = doc
+            .get("partition")
+            .ok_or_else(|| format!("golden line {}: no `partition`", lineno + 1))?;
+        if partition.get("deletion_info").is_some() {
+            found.insert(Unsupported::PartitionDeletion);
+        }
+        let empty = Vec::new();
+        let rows = doc
+            .get("rows")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or(&empty);
+        for row in rows {
+            match row.get("type").and_then(serde_json::Value::as_str) {
+                Some("range_tombstone_bound") | Some("range_tombstone_boundary") => {
+                    found.insert(Unsupported::RangeTombstone);
+                }
+                Some("static_block") => {
+                    found.insert(Unsupported::StaticBlock);
+                }
+                Some("row") => {}
+                other => {
+                    return Err(format!(
+                        "golden line {}: unknown dump element type {other:?} — an \
+                         unrecognised shape must be classified, not ignored",
+                        lineno + 1
+                    ))
+                }
+            }
+            if row.get("deletion_info").is_some() {
+                found.insert(Unsupported::RowDeletion);
+            }
+            if let Some(liveness) = row.get("liveness_info") {
+                if ttl_keys.iter().any(|k| liveness.get(k).is_some()) {
+                    found.insert(Unsupported::Ttl);
+                }
+            }
+            for cell in row
+                .get("cells")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or(&empty)
+            {
+                if ttl_keys.iter().any(|k| cell.get(k).is_some()) {
+                    found.insert(Unsupported::Ttl);
+                }
+            }
+        }
+    }
+    Ok(found)
 }
 
 fn schema_file(schema: &str) -> PathBuf {
@@ -924,12 +1110,16 @@ fn committed_fixture_coverage_census() {
     let listing = String::from_utf8_lossy(&output.stdout);
 
     let mut committed: Vec<(String, String)> = Vec::new();
+    // Every committed golden, per table: a table may have several SSTables and the
+    // exclusion is a property of the SET, so the shape scan unions all of them.
+    let mut goldens: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     for line in listing.lines() {
-        if !line.ends_with("-Data.db") {
+        let jsonl = line.ends_with("-Data.db.jsonl");
+        if !line.ends_with("-Data.db") && !jsonl {
             continue;
         }
         let parts: Vec<&str> = line.split('/').collect();
-        // test-data/datasets/sstables/<keyspace>/<table>-<uuid>/<gen>-Data.db
+        // test-data/datasets/sstables/<keyspace>/<table>-<uuid>/<gen>-Data.db[.jsonl]
         let (Some(keyspace), Some(dir)) = (parts.get(3), parts.get(4)) else {
             panic!("unexpected committed fixture path shape: {line}");
         };
@@ -937,7 +1127,12 @@ fn committed_fixture_coverage_census() {
             .rsplit_once('-')
             .map(|(table, _uuid)| table.to_string())
             .unwrap_or_else(|| panic!("fixture dir has no -<uuid> suffix: {dir}"));
-        committed.push(((*keyspace).to_string(), table));
+        let key = ((*keyspace).to_string(), table);
+        if jsonl {
+            goldens.entry(key).or_default().push(line.to_string());
+        } else {
+            committed.push(key);
+        }
     }
     committed.sort();
     committed.dedup();
@@ -954,7 +1149,7 @@ fn committed_fixture_coverage_census() {
             .any(|c| c.keyspace == keyspace && c.table == table);
         let is_excluded = NOT_COMPARABLE
             .iter()
-            .any(|(ks, tbl, _)| ks == keyspace && tbl == table);
+            .any(|e| e.keyspace == keyspace && e.table == table);
         if is_case && is_excluded {
             unclassified.push(format!(
                 "{keyspace}.{table} is BOTH a comparable case and a declared exclusion"
@@ -983,14 +1178,115 @@ fn committed_fixture_coverage_census() {
         unclassified.join("\n  ")
     );
 
-    // A declared exclusion must name a fixture that exists, or the reason is stale.
-    for (keyspace, table, reason) in NOT_COMPARABLE {
+    // A declared exclusion must name a fixture that exists AND its declared shapes
+    // must be the ones that fixture's golden actually carries. Naming an existing
+    // fixture was all this used to check, so a stale or wrong reason could hide a
+    // table that is in fact comparable (issue #1491 review finding F4).
+    let mut stale: Vec<String> = Vec::new();
+    for entry in NOT_COMPARABLE {
+        let qualified = format!("{}.{}", entry.keyspace, entry.table);
+        if !committed
+            .iter()
+            .any(|(ks, tbl)| *ks == entry.keyspace && *tbl == entry.table)
+        {
+            stale.push(format!(
+                "{qualified} ({}) names no committed fixture",
+                entry.note
+            ));
+            continue;
+        }
+        let declared: BTreeSet<Unsupported> = entry.shapes.iter().copied().collect();
         assert!(
-            committed
-                .iter()
-                .any(|(ks, tbl)| ks == keyspace && tbl == table),
-            "NOT_COMPARABLE names {keyspace}.{table} ({reason}) but no such committed \
-             fixture exists"
+            !declared.is_empty(),
+            "{qualified}: an exclusion with no declared shape states no reason at all"
         );
+        let files = goldens
+            .get(&(entry.keyspace.to_string(), entry.table.to_string()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        // No golden at all is a FAILURE, not a pass: an exclusion no golden can
+        // corroborate is exactly the unverifiable claim this check exists for.
+        if files.is_empty() {
+            stale.push(format!(
+                "{qualified}: no committed *-Data.db.jsonl golden, so the declared shapes \
+                 {declared:?} cannot be verified"
+            ));
+            continue;
+        }
+        let mut present: BTreeSet<Unsupported> = BTreeSet::new();
+        for file in files {
+            let text = match std::fs::read_to_string(root.join(file)) {
+                Ok(text) => text,
+                Err(e) => {
+                    stale.push(format!("{qualified}: cannot read {file}: {e}"));
+                    continue;
+                }
+            };
+            match unsupported_shapes(&text) {
+                Ok(shapes) => present.extend(shapes),
+                Err(why) => stale.push(format!("{qualified}: {file}: {why}")),
+            }
+        }
+        if present != declared {
+            let names = |set: &BTreeSet<Unsupported>| {
+                set.iter().map(|s| s.label()).collect::<Vec<_>>().join(", ")
+            };
+            stale.push(format!(
+                "{qualified}: declares [{}] but its committed golden carries [{}] — the \
+                 exclusion no longer describes the fixture",
+                names(&declared),
+                names(&present)
+            ));
+            continue;
+        }
+        eprintln!(
+            "AD2 census: {qualified} EXCLUDED, verified in {} golden file(s): {} ({})",
+            files.len(),
+            declared
+                .iter()
+                .map(|s| s.label())
+                .collect::<Vec<_>>()
+                .join(", "),
+            entry.note
+        );
+    }
+    assert!(
+        stale.is_empty(),
+        "every NOT_COMPARABLE entry must name shapes its committed golden really \
+         carries — issue #1491:\n  {}",
+        stale.join("\n  ")
+    );
+}
+
+/// The other half of the exclusion contract: every shape an entry may declare is
+/// one the golden reader REFUSES.
+///
+/// Without this the two halves could drift — the census would verify that a shape
+/// is in the golden while the reader happily parsed it, so the table was
+/// comparable after all and the exclusion was pure coverage loss. Each minimal
+/// golden carries exactly one shape and is otherwise a well-formed, comparable
+/// single-column row.
+#[test]
+fn every_declarable_shape_is_one_the_golden_reader_refuses() {
+    // A baseline the reader ACCEPTS, so a refusal below is attributable to the
+    // shape under test rather than to the scaffolding.
+    let live = r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[{"name":"v","value":"x"}]}]}"#;
+    let rows = golden_rows(live, &["id"], &[], &[]).expect("the baseline golden is comparable");
+    assert_eq!(rows.len(), 1, "the baseline must yield its one row");
+
+    for shape in Unsupported::ALL {
+        let jsonl = shape.minimal_golden();
+        assert_eq!(
+            unsupported_shapes(jsonl).map(|s| s.into_iter().collect::<Vec<_>>()),
+            Ok(vec![*shape]),
+            "the shape scan must find exactly `{}` in its own minimal golden",
+            shape.label()
+        );
+        let why = golden_rows(jsonl, &["id"], &[], &[]).expect_err(&format!(
+            "a golden carrying `{}` must be REFUSED — otherwise excluding a table for \
+             it is pure coverage loss",
+            shape.label()
+        ));
+        assert!(!why.is_empty(), "a refusal must state a reason");
     }
 }
