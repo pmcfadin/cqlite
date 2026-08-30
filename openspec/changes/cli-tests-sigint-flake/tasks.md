@@ -1011,8 +1011,12 @@ contention this whole change exists for, the evidence lands *inside* the deadlin
 one moment the harness is least able to afford one.
 
 **And the diagnostic would have contradicted itself.** Every failure here prints the child
-transcript. The transcript is written by the reader threads at `send` time, so it contains the line
-regardless of whether the waiting thread consumed it. A timeout message saying the marker "was not
+transcript. The transcript is written by the reader threads *just before* `send`, so it contains the
+line regardless of whether the waiting thread consumed it. (**Round 11 correction:** this paragraph
+originally said "at `send` time". It is not — `spawn_reader` pushes and *then* sends, two separate
+operations a preemption can land between, which is exactly the residual round 10 left open and round
+11 closes below. The sentence is corrected rather than deleted because the mistake in it is the
+finding.) A timeout message saying the marker "was not
 observed" while the transcript printed *beneath it* holds that very marker is the most damaging
 failure available to a change whose entire thesis is *no message may assert what its measurement
 cannot establish*. It would have sent the next reader looking for a product bug that is not there.
@@ -1020,6 +1024,8 @@ cannot establish*. It would have sent the next reader looking for a product bug 
 **The fix, per site — each waits for NOTHING, so none can extend the deadline:**
 
 * `wait_for` → `try_match`: drains the queued lines through the awaited predicate (`try_recv` only).
+  **Superseded in round 11** (job 236 finding 1): a queue-only check narrows the window instead of
+  closing it, so the ABSENCE verdict now comes from the transcript. `try_match` is gone.
 * `poll_with_progress` → `step(Duration::ZERO)`: `wait_timeout(ZERO)` is a `try_wait`, and the
   artifact predicate is a directory count. If the step is still not done, the *unobserved* progress
   is folded into the message, so it describes the moment expiry is declared rather than one slice
@@ -1279,3 +1285,201 @@ ship, so the file list is the check that catches it.
 `graceful_shutdown_tests.rs` **363**, `graceful_shutdown_support/mod.rs` **1002**,
 `graceful_shutdown_support/budgets.rs` **842**. All three under the 1500-line test threshold; the
 change's largest file is at 67% of it.
+
+## Round 11 — roborev job 236 (3 findings, all fixed)
+
+Two of the three are round-10 findings **at finer grain**: the previous fix narrowed a window instead
+of closing it. That is the signal this file has learned to read — when the same shape returns one level
+down, the fix was aimed at the symptom.
+
+| # | finding | fix |
+|---|---|---|
+| 1 | BLOCKER, `mod.rs:164`: the expiry diagnostic decides from a DIFFERENT store than it prints from. the reader pushes into the transcript and *then* sends, while the expiry check consumed only the channel — so a reader preempted between the two leaves the failure printing a transcript that CONTAINS the awaited marker the decision never saw. | Decide from the store you report from: the absence verdict comes from the transcript, per-wait windowed. `5aef3bef7`. |
+| 2 | BLOCKER, `mod.rs:415`: the documented overrun bound is false — four post-deadline artifact scans were reachable (five with the call sites). | ONE sample per iteration, handed to `step`, reused by the expiry check and carried in `PollFail`. `20d28c51a`. |
+| 3 | FIX, `mod.rs:217`: an expiry racing pipe closure reports `DeadlineReached` with "pipes still open" when both readers have ended — AC2, a message naming a cause its own measurement contradicts. | The final drain preserves `TryRecvError::Disconnected` and reports `PipesClosed` after every queued line has been checked. `5aef3bef7`. |
+
+### 1. DECIDE FROM THE STORE YOU REPORT FROM
+
+Round 10 closed the arrival-vs-consumption gap between the CHANNEL and the waiting thread. It left the
+gap one step upstream, between the TRANSCRIPT and the CHANNEL:
+
+```rust
+for line in buf.lines() {
+    transcript.lock().push(...);   // RECORDED  — what the failure message renders
+    tx.send((stream, line));       // PUBLISHED — what the decision consumed
+}
+```
+
+Two operations, not one. A reader preempted between them — the ordinary case on the loaded host this
+whole issue is about — leaves the channel without a line the transcript already holds. So at expiry the
+round-10 code could decide "absent" from the channel and then print a transcript containing the very
+marker it called absent. **The exact defect round 10 named as the most damaging failure available to
+this change, surviving round 10's fix, in the window round 10's fix created.**
+
+**The rejected fix, and why.** roborev proposed making recording and publication atomic and
+synchronising the final drain. That attacks the DIVERGENCE: it needs a lock spanning both operations
+(or timestamps, or an ordering discipline), must be maintained by everyone who touches `spawn_reader`,
+leaves the two-store structure that produced the defect in place for the next edit to reintroduce, and
+makes a reader's RECORDING block on a decision being taken — a new coupling in the direction of the
+contention this harness exists to survive.
+
+**What was done instead makes the divergence IRRELEVANT.** The expiry check reads the store the message
+renders:
+
+* the channel is still drained — it carries the progress counts and the ordering the blocking path
+  depends on — and a queued match still counts, because every queued line is in the transcript too, so
+  that direction cannot contradict the message;
+* the verdict of **absence** is taken from the transcript itself.
+
+A message that prints evidence the decision did not see is then **unrepresentable**: they read the same
+bytes. No atomicity, no timestamps, no lock ordering, and nothing for a future edit to keep in step.
+The principle is stated at the site, because it is the durable part.
+
+**Two things the fix needed that the principle does not state.**
+
+*The window.* The transcript is CUMULATIVE across the whole test, so an unwindowed scan would let a
+line an earlier stage already consumed satisfy a later wait — `await_write_ack` awaits five separate
+`OK`s in test 2, so the first would silently satisfy all five and a wedged session would read GREEN. A
+false PASS is strictly worse than a confusing diagnostic. Each wait captures a transcript mark at entry
+and scans only from there, and the failure reports how many lines that covered
+(`DeadlineReached { examined }`), so the message states the size of its own evidence base. Pinned by
+`a_line_recorded_before_the_wait_began_does_not_satisfy_it`.
+
+*The lock.* The first version applied the caller's predicate while holding the transcript lock, and a
+`std::sync::Mutex` is not reentrant — the test binary wedged for **nine minutes** in `futex_do_wait`,
+diagnosed from `/proc/<pid>/task/*/wchan`. A real hazard in the harness, not just in the plant: any
+predicate that reads the transcript would deadlock the suite. The window is now copied out of the lock
+before `pred` runs, which also keeps the hold time proportional to the window rather than to whatever
+the predicate does, so a reader is never blocked from RECORDING while a decision is taken. **The plant
+found a defect in the fix** — the argument for planting rather than reasoning.
+
+### 2. THE DOCUMENTED BOUND, WRONG A SECOND TIME
+
+Round 9 rescoped this claim; job 236 found the rescoped claim still false. Reachable post-deadline
+artifact scans, all recursive `read_dir` walks:
+
+1. the iteration's own progress scan;
+2. the artifact `step`'s scan (each call site scanned for itself);
+3. `step(Duration::ZERO)`'s scan at expiry;
+4. the failure path's `count_data_db(...).saturating_sub(artifacts)` fold-in;
+5. and at the call sites, `durable -Data.db artifacts under {}: {}` in the panic message.
+
+The comment promised **one**. So a slow directory walk could overrun the deadline several times over
+while the harness documented that it could not.
+
+**The claim is not weakened a third time.** Round 9 already rescoped it once, and rescoping a claim
+twice is how a guarantee becomes decoration. The code now meets it: the poll takes **one sample of each
+signal at the top of each iteration** and everything downstream reads that sample —
+
+* `step` receives it as a second argument, so an artifact predicate reads the count instead of scanning
+  (both artifact steps updated);
+* the expiry status check reuses the same sample;
+* `PollFail` carries it, so the call-site panic messages report the artifact count without scanning
+  after the verdict — which is why the two stage-(d) messages lost their `durable -Data.db artifacts`
+  line and `PollFail::observed()` gained it, naming it as *the ONE sample this iteration took*.
+
+The progress accounting moved to the top of the iteration with the sample, which also deleted the
+separate post-expiry fold-in while KEEPING the round-9 property it existed for: the counts still
+describe the moment the verdict is taken, because the sample and the drain now happen after the
+deadline lapsed and before the decision.
+
+Residual, stated because it is real: a failure message still renders the transcript and the deadline
+report after the verdict — diagnostic work on an already-failed path. The bound is a claim about **when
+the loop decides**, which is what the comment now says.
+
+### 3. AN EXPIRY RACING PIPE CLOSURE NAMED THE WRONG CAUSE
+
+`try_match` collapsed "queue empty but senders alive" and "queue drained and every sender gone" into
+`None`, so a deadline lapsing exactly as both readers ended printed:
+
+> the test's one deadline passed with the child's pipes still open (more output was still possible)
+
+about a child whose output was over. AC2 exactly: the message names a cause the measurement
+contradicts, and it points the next reader at the wrong half of the system (scheduling, not a dead
+child). `try_recv` reports `Disconnected` **only** when the queue is empty AND every sender is gone, so
+the drain already knew — it was throwing the fact away. It now returns both facts (`FinalDrain
+{ matched, disconnected }`) and, when there is no match, reports `PipesClosed` after every queued line
+has been checked. `disconnected` is deliberately never set alongside a match: the drain stops there and
+learns nothing about the senders.
+
+### Round-11 RED verification (committed **and isolated** plants)
+
+#### Plant F1 — the round-10 code: expiry decides from the CHANNEL only
+
+Throwaway `git worktree add --detach /tmp/plant-236-f1`, plant committed **there**
+(`7285e0448 PLANT (throwaway, never pushed): revert finding 1 — expiry decides from the channel only`),
+worktree removed afterwards. The plant is a one-line deletion of the transcript consultation:
+
+```diff
+-                if let Some(line) = self.transcript_match(want, &pred, mark) {
+-                    return Ok((line, stage.spent()));
+-                }
++                // PLANT (round 11, roborev job 236 finding 1): the round-10 code,
++                // which decided from the CHANNEL only.
+```
+
+```text
+warning: method `transcript_match` is never used     <- the plant reached the path it was aimed at
+running 1 test
+test graceful_shutdown_support::a_line_recorded_but_not_yet_published_is_matched_at_expiry ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.30s
+
+---- a_line_recorded_but_not_yet_published_is_matched_at_expiry ----
+the awaited marker was IN THE TRANSCRIPT when the deadline lapsed and the wait reported
+DeadlineReached { examined: 2 } anyway. The decision read a different store from the one the failure
+message renders, so this failure would print the very marker it claims was never observed:
+how the wait ended: the test's one deadline passed with the child's pipes still open (more output was
+still possible). The final check then re-read the 2 transcript line(s) recorded since this wait began —
+the same store the transcript below is printed from — and none of them matched, so this message cannot
+be contradicted by the transcript it prints
+transcript the message would print:
+  [stderr] 
+  [stderr] cqlite: Received Ctrl-C — flushing memtable before exit...
+```
+
+**The plant's own output is the exhibit.** The message asserts "none of them matched" and then prints
+the marker two lines later — the self-contradicting diagnostic, reproduced verbatim, from the shipped
+round-10 mechanism rather than argued from it.
+
+**THE INTERLEAVING IS FORCED, NOT RACED.** The plant does not sleep to arrange the ordering, because a
+sleep-arranged precondition can only be *probably* true and the probability moves with load — the flake
+class this change removes. The predicate is the synchronisation point: a decoy line (the empty line the
+product really does print immediately before the handler marker) is queued on the channel, and when
+`wait_for` receives it the predicate records BOTH lines into the transcript and returns false. So at
+expiry the transcript provably holds the marker and the channel provably does not, on every host and at
+every load. The `Sender` is deliberately kept alive, so the failure is `DeadlineReached` and not
+`PipesClosed` — the plant tests finding 1, not finding 3.
+
+#### The CONTROL — the unplanted tree, same command
+
+```text
+running 15 tests
+test graceful_shutdown_support::a_line_recorded_but_not_yet_published_is_matched_at_expiry ... ok
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+```
+
+Run under `RUSTFLAGS="-D warnings"`, zero warnings. Without this control a red shows only that
+*something* fails, not that the round-10 form was permissive and the round-11 form is not.
+
+### Round-11 verification
+
+* `cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests` — **15 passed, 0
+  failed** (was 12). Three tests added, all in `mod.rs`:
+  `a_line_recorded_but_not_yet_published_is_matched_at_expiry` (finding 1, the store),
+  `a_line_recorded_before_the_wait_began_does_not_satisfy_it` (finding 1, the window — the false-PASS
+  direction), `an_expiry_racing_pipe_closure_reports_closed_pipes` (finding 3).
+* Finding 2 carries **no new test**, deliberately: "how many directory scans happen after the
+  deadline" is a structural property, and the only tests that could assert it would either count scans
+  through a seam built for the test or assert a wall-clock overrun — a threshold assert in the
+  correctness path, which is the #2642 class this change is a member of. It is enforced by structure
+  instead: `step` cannot scan for itself because it is *given* the count, and there is one
+  `count_data_db` call left in the poll. The existing
+  `a_step_completed_before_the_deadline_is_observed_after_it_lapses` covers the behaviour of the
+  reused sample at expiry.
+* `grep -rn` sweep over what round 11 rescoped (`try_match`, "at `send` time", the overrun bound, the
+  three `budgets.rs` cross-references to the expiry drain): four live stale claims found and fixed —
+  round 10's own "the transcript is written by the reader threads at `send` time", which is the
+  sentence finding 1 falsifies (corrected in place, because the mistake in it *is* the finding); the
+  `try_match` bullet in round 10's fix list (marked superseded); and `budgets.rs`'s three
+  cross-references, which described a drain that no longer decides anything. Historical transcripts
+  are left verbatim under this file's staleness banner.
