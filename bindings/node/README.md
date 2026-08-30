@@ -60,7 +60,25 @@ await db.close();
 
 ## Requirements
 
-- Node.js 18+
+- Node.js `^18.17.0 || >= 20.3.0` — the boundaries are CI-tested, not merely
+  advertised. CI loads the prebuilt native module on exactly 18.17.0, exactly 20.3.0,
+  and the current maintained major (24), running one real query against the canonical
+  corpus on each (`Floor smoke (Node …)` in `.github/workflows/node-ci.yml`,
+  issue #1459).
+
+  That check is a binding matrix tier, so per repo CI-cost policy it runs on **every
+  push to `main`**, on the **nightly schedule**, and on PRs labeled
+  `ci:bindings-full` — not on a routine unlabeled PR. `main` is therefore
+  continuously floor-tested and releases are cut from it, but a floor break is caught
+  just after merge rather than before it.
+
+  The range is unbounded above 20.3.0, and Node-API ABI stability does not cover
+  regressions in the JS loader — hence the current-major leg.
+
+  The range is discontinuous because the module is built against Node-API 9
+  (`napi9`), which ships in Node 18.17.0+ and 20.3.0+ but **never in 19.x or
+  20.0–20.2** — those releases satisfy a naive `>= 18` or `>= 18.17.0` constraint
+  yet cannot load the module at all.
 - Cassandra 5.0 SSTable files
 
 ## API Reference
