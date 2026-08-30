@@ -33,8 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cqlite-ffi-common/src/json_number.rs`.
   - Reachability, stated honestly: `Value::Json` requires a `"json"` comparator
     and no fixture in `test-data/` has one, so this path is unreachable from
-    today's corpus. Coverage is therefore direct unit tests on the shared
-    classifier.
+    today's corpus.
+  - **Wiring evidence** (`JSON_NUMBER_VECTORS`, the #1452 mechanism): unit tests
+    on the shared classifier do NOT prove either binding CALLS it — the mutation
+    "make the `U64` arm `u as f64`" originally reddened nothing in the
+    repository. A committed cross-binding table of JSON number literals is now
+    driven through each binding's PRODUCTION dispatch
+    (`value_to_py`/`value_to_napi` → `json_to_*` → `json_number_to_*`) by
+    `cqlite._json_number_from_text` / `_jsonNumberFromText`, and both suites
+    assert the rendered text AND the host type. In JS the type half is the
+    load-bearing one: `String(9223372036854775808)` is identical for a lossy
+    double and an exact `BigInt`.
 
 - **Python parity harnesses: `values_equal` no longer masks int/float precision
   loss (#3505).** Both copies coerced a mixed `int`/`float` pair through
@@ -49,9 +58,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `True` and `1.0` compared equal). The rule was duplicated in
   `test_cli_parity.py` and `test_parity.py` and now lives once in
   `bindings/python/tests/numeric_compare.py`.
-  Node's `parity-utils.js` did NOT have this mask — its `bigint`↔`number` arms
-  were already exact — but `BigInt(x)` threw `RangeError` on a non-integer
-  `number`, crashing the harness instead of reporting a mismatch; hardened.
+  `bool` vs `Decimal` is rejected too, not only `bool` vs `int`/`float`:
+  `Decimal(1) == True` is `True` in Python, so the first pass left the `Decimal`
+  dispatch open.
+  A second degeneracy in the same formula is closed in both languages: with an
+  infinite operand `abs(a-b) <= max(rel_tol*max(|a|,|b|), abs_tol)` reduces to
+  `inf <= inf`, so EVERY finite value compared equal to `Infinity` and `+inf`
+  compared equal to `-inf` — real values for a CQL `float`/`double` column. Two
+  genuine equal infinities still match.
+  Node's `parity-utils.js` did NOT have the int/float mask — its
+  `bigint`↔`number` arms were already exact — but `BigInt(x)` threw `RangeError`
+  on a non-integer `number`, crashing the harness instead of reporting a
+  mismatch; hardened.
+  `test_parity`'s tolerant branch keeps its pre-#3505 ASYMMETRY (entered only
+  when the binding side is a float), so an `int` binding value against a `float`
+  golden stays an exact comparison — a change that removes a mask must not widen
+  a golden-file oracle as a side effect.
 
 ### Changed
 
