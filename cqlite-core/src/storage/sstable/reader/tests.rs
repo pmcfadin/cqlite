@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_mmap_env_parsing() {
-        use super::super::parse_truthy_env;
+        use super::super::backend_resolve::parse_truthy_env;
         for truthy in ["1", "true", "TRUE", "Yes", " on ", "On"] {
             assert!(parse_truthy_env(truthy), "{truthy:?} should enable mmap");
         }
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_disk_access_mode_parsing() {
-        use super::super::parse_disk_access_mode;
+        use super::super::backend_resolve::parse_disk_access_mode;
         use crate::config::DiskAccessMode;
         assert_eq!(parse_disk_access_mode("auto"), Some(DiskAccessMode::Auto));
         assert_eq!(
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_prefetch_mode_parsing() {
-        use super::super::parse_prefetch_mode;
+        use super::super::backend_resolve::parse_prefetch_mode;
         use crate::config::PrefetchMode;
         assert_eq!(parse_prefetch_mode("off"), Some(PrefetchMode::Off));
         assert_eq!(
@@ -624,7 +624,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_mmap_advice_for_auto_is_no_madvise() {
-        use super::super::mmap_advice_for;
+        use super::super::backend_resolve::mmap_advice_for;
         use crate::config::PrefetchMode;
 
         // The fix under guard: Auto must NOT emit Sequential (drop-behind).
@@ -650,7 +650,7 @@ mod tests {
     /// RAM → direct (when memory is known and direct I/O is compiled in).
     #[test]
     fn test_resolve_disk_access_mode_auto() {
-        use super::super::resolve_disk_access_mode;
+        use super::super::backend_resolve::resolve_disk_access_mode;
         use crate::config::DiskAccessMode;
 
         let gib: u64 = 1024 * 1024 * 1024;
@@ -709,7 +709,7 @@ mod tests {
     /// Explicit modes are returned unchanged (subject to the empty-file guard).
     #[test]
     fn test_resolve_disk_access_mode_explicit() {
-        use super::super::resolve_disk_access_mode;
+        use super::super::backend_resolve::resolve_disk_access_mode;
         use crate::config::DiskAccessMode;
         let gib: u64 = 1024 * 1024 * 1024;
         for mode in [

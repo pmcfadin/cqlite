@@ -324,8 +324,9 @@ fn test_nested_config_structures() {
     let temp_dir = TempDir::new().unwrap();
     std::env::set_current_dir(&temp_dir).unwrap();
 
-    // Create config with nested structures
-    // Note: Nested structs need all fields when specified in TOML
+    // Create config with nested structures. Deliberately still names the keys
+    // #1696 REMOVED (`[connection]`, `output.timestamp_format`) so this case
+    // also pins that such a file loads rather than failing closed.
     let toml_content = r#"
         [connection]
         timeout_ms = 60000
@@ -353,13 +354,13 @@ fn test_nested_config_structures() {
     let cli = Cli::parse_from(["cqlite"]);
     let config = Config::load(None, &cli).unwrap();
 
-    assert_eq!(config.connection.timeout_ms, 60000);
-    assert_eq!(config.connection.retry_attempts, 5);
-    assert_eq!(config.connection.pool_size, 20);
-
+    // `[connection]` and `output.timestamp_format` were DELETED as decoration in
+    // issue #1696. A file that still names them must PARSE AND LOAD (the CLI
+    // posture is parse-and-ignore plus a named deprecation warning, never
+    // `deny_unknown_fields` — our own shipped example named these keys), while
+    // every SURVIVING nested key below still takes effect.
     assert_eq!(config.output.max_rows, Some(500));
     assert!(!config.output.colors);
-    assert_eq!(config.output.timestamp_format, "%Y-%m-%d");
 
     assert_eq!(config.repl.page_size, 100);
     assert!(config.repl.show_timing);

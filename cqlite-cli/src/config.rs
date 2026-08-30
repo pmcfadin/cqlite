@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "config_removed_keys.rs"]
+pub mod removed_keys;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_database: Option<PathBuf>,
-    #[serde(default)]
-    pub connection: ConnectionConfig,
     #[serde(default)]
     pub output: OutputSettings,
     #[serde(default)]
@@ -67,37 +68,16 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionConfig {
-    pub timeout_ms: u64,
-    pub retry_attempts: u32,
-    pub pool_size: u32,
-}
-
-impl Default for ConnectionConfig {
-    fn default() -> Self {
-        Self {
-            timeout_ms: 30000,
-            retry_attempts: 3,
-            pool_size: 10,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSettings {
     pub max_rows: Option<usize>,
-    pub pager: Option<String>,
     pub colors: bool,
-    pub timestamp_format: String,
 }
 
 impl Default for OutputSettings {
     fn default() -> Self {
         Self {
             max_rows: Some(1000),
-            pager: None,
             colors: true,
-            timestamp_format: "%Y-%m-%d %H:%M:%S".to_string(),
         }
     }
 }
@@ -235,7 +215,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_database: None,
-            connection: ConnectionConfig::default(),
             output: OutputSettings::default(),
             performance: PerformanceConfig::default(),
             logging: LoggingConfig::default(),
@@ -353,20 +332,44 @@ impl Config {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
+        let (config, warning) = Self::parse_with_removed_key_report(path, &content)?;
+        if let Some(warning) = warning {
+            eprintln!("{warning}");
+        }
+        Ok(config)
+    }
+
+    /// Deserialize `content` as `path`'s format, returning the loaded config and
+    /// the deprecation warning naming every REMOVED key it still sets (#1696).
+    ///
+    /// Deserialize first, scan only on success, so a warning never accompanies a
+    /// document that is not a `Config`. The text asserts NOTHING about whether the
+    /// load succeeds — later stages (`to_core_config`) still reject files; see
+    /// `removed_keys` (#1696 r5 F1). `pub` so a test asserts this on the real path.
+    pub fn parse_with_removed_key_report(
+        path: &Path,
+        content: &str,
+    ) -> Result<(Self, Option<String>)> {
         let config: Config = match path.extension().and_then(|ext| ext.to_str()) {
             Some("toml") => {
-                toml::from_str(&content).with_context(|| "Failed to parse TOML config")?
+                toml::from_str(content).with_context(|| "Failed to parse TOML config")?
             }
             Some("yaml") | Some("yml") => {
-                serde_yaml::from_str(&content).with_context(|| "Failed to parse YAML config")?
+                serde_yaml::from_str(content).with_context(|| "Failed to parse YAML config")?
             }
             Some("json") => {
-                serde_json::from_str(&content).with_context(|| "Failed to parse JSON config")?
+                serde_json::from_str(content).with_context(|| "Failed to parse JSON config")?
             }
             _ => return Err(anyhow::anyhow!("Unsupported config file format")),
         };
 
-        Ok(config)
+        // Only now that the load has succeeded: serde discarded the removed keys
+        // silently, so the retained raw document is the only place they can still
+        // be seen. The posture is parse-and-ignore PLUS a named warning, never
+        // `deny_unknown_fields` — our own shipped example named these keys. See
+        // the `removed_keys` submodule for the full rationale.
+        let warning = removed_keys::warning_for_file(path, content);
+        Ok((config, warning))
     }
 
     #[allow(dead_code)]
@@ -612,12 +615,9 @@ fn merge_partial_config(base: Config, overlay: Config) -> Config {
         query_limit: overlay.query_limit.or(base.query_limit),
 
         // Nested structs - merge carefully
-        connection: overlay.connection,
         output: OutputSettings {
             max_rows: overlay.output.max_rows.or(base.output.max_rows),
-            pager: overlay.output.pager.or(base.output.pager),
             colors: final_output_colors,
-            timestamp_format: overlay.output.timestamp_format,
         },
         repl: ReplConfig {
             enable_history: overlay.repl.enable_history,
