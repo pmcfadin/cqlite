@@ -3658,8 +3658,44 @@ _component_set_drop_scratch_dir() {
   _CS_SCRATCH_DIR=""
 }
 
-# _component_set_probe: the EFFECTFUL probe, wrapped so the private fetch ref is dropped on
-# every path out — including the early returns that report an unmeasurable baseline.
+# _component_set_cleanup_resources: EVERY resource this probe can create, dropped in ONE call —
+# the private fetch ref, the isolated scratch repository (whose config holds the origin URL and
+# so possibly a credential) and the bounded runner's capture files. One entry point because the
+# normal path and the signal path must not be able to drop different sets.
+_component_set_cleanup_resources() {
+  _component_set_drop_fetch_ref
+  _component_set_drop_scratch_dir
+  _component_set_drop_capture_files
+  return 0
+}
+
+# _component_set_probe: the EFFECTFUL probe, wrapped so every resource is dropped on every path
+# out — the early returns that report an unmeasurable baseline, AND a signal (roborev job 264).
+#
+# SIGNALS ARE A SECOND AXIS OF "CLEANUP REGISTRATION PRECEDES RESOURCE CREATION" (round 9 closed
+# the RETURN-path axis). Cleanup used to run only after `_component_set_probe_inner` RETURNED, so
+# a SIGINT or SIGTERM during a network operation — a Ctrl-C, a `kill` from a supervisor, an SSH
+# hangup on this fleet — left the scratch repository behind WITH ITS CREDENTIAL-BEARING CONFIG,
+# plus the capture files and any private ref. Bash does not run an EXIT trap for a signal that
+# still has its default disposition, so nothing covered it.
+#
+# The handlers are installed BEFORE the resources exist and REMOVED afterwards, and the caller's
+# handlers are SAVED AND RESTORED (`trap -p` prints a re-evaluable command): the gate installs its
+# own EXIT/INT handling elsewhere, and a pre-flight that silently replaced it would be a far worse
+# bug than the leak. Each handler cleans up, restores the DEFAULT disposition for its own signal
+# and re-raises it, so the process still dies of what it was sent — never converted into a normal
+# exit, which would let an interrupted run look like a completed one.
+#
+# HUP is included alongside INT/TERM because on this fleet it is the LIKELIEST of the three: lanes
+# run under ssh and tmux, and a dropped connection is a HUP.
+#
+# ONE RESIDUAL, stated because it is a bash property rather than a gap here: bash defers a trap
+# handler until the current FOREGROUND command completes, so a signal delivered to THIS PROCESS
+# ALONE while a bounded network operation is in flight runs the cleanup only when that operation
+# returns — bounded by the probe's own deadline, never unbounded. Every real interruption signals
+# the process GROUP (a terminal Ctrl-C, an ssh/tmux hangup, a supervisor killing a lane), which
+# takes the in-flight child down too and makes the handler run immediately; that is the shape
+# `3544-signal-cleanup` drives. SIGKILL is uncatchable and therefore out of scope by definition.
 _component_set_probe() {
   # Resolve the bound for THIS mode before anything network-capable runs. Safe here:
   # `_component_set_strict` reads $ONLY/$LITE, both settled during arg parsing.
@@ -3669,10 +3705,18 @@ _component_set_probe() {
     _CS_BOUND_SECS="$_CS_BOUND_LENIENT_SECS"
   fi
   _CS_BOUND_HINT="$_CS_BOUND_SECS"
+  local _cs_prev_int _cs_prev_term _cs_prev_hup
+  _cs_prev_int=$(trap -p INT); _cs_prev_term=$(trap -p TERM); _cs_prev_hup=$(trap -p HUP)
+  trap '_component_set_cleanup_resources; trap - INT;  kill -INT  $$' INT
+  trap '_component_set_cleanup_resources; trap - TERM; kill -TERM $$' TERM
+  trap '_component_set_cleanup_resources; trap - HUP;  kill -HUP  $$' HUP
   _component_set_probe_inner
-  _component_set_drop_fetch_ref
-  _component_set_drop_scratch_dir
-  _component_set_drop_capture_files
+  _component_set_cleanup_resources
+  # RESTORE, never merely clear: an empty `trap -p` means the caller had no handler, and the two
+  # cases are not the same thing.
+  if [ -n "$_cs_prev_int" ];  then eval "$_cs_prev_int";  else trap - INT;  fi
+  if [ -n "$_cs_prev_term" ]; then eval "$_cs_prev_term"; else trap - TERM; fi
+  if [ -n "$_cs_prev_hup" ];  then eval "$_cs_prev_hup";  else trap - HUP;  fi
   return 0
 }
 

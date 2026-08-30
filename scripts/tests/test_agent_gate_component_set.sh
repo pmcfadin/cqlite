@@ -2994,6 +2994,81 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7l. A SIGNAL DURING THE PROBE MUST NOT LEAVE THE SCRATCH REPOSITORY BEHIND (job 264, Medium).
+#     Cleanup used to run only after the probe RETURNED, and bash runs no EXIT trap for a signal
+#     that still has its default disposition — so a Ctrl-C, a supervisor's `kill`, or an ssh
+#     hangup during a network operation left the isolated scratch repository on disk WITH ITS
+#     CREDENTIAL-BEARING CONFIG, plus the bounded runner's capture files. Round 9 closed the
+#     RETURN-path axis of "cleanup registration precedes resource creation"; this is the signal
+#     axis of the same rule.
+#
+#     DRIVEN DETERMINISTICALLY, not on a timer: a `git` shim SLEEPS on the ref-oracle call, so the
+#     probe is parked inside a bounded operation with its resources already created. The case
+#     POLLS FOR THE SCRATCH DIRECTORY TO EXIST — the condition, not a delay — then signals, then
+#     polls for the process to be gone. Its own precondition is asserted: if the directory never
+#     appeared there is nothing to clean up and the case says so rather than passing.
+#
+#     HERMETIC BY TMPDIR: the invocation gets a private TMPDIR, so "no scratch directory remains"
+#     is a statement about THIS run and can never read a sibling lane's probe (four lanes share
+#     one box here) or be tricked by one.
+# ---------------------------------------------------------------------------
+base_sig=$(mkbaseline base-signal - )
+sig_fx=$(mkbranch signalled "$base_sig" - )
+sig_tmp="$tmp/signal-tmpdir"
+mkdir -p "$sig_tmp"
+sig_bin="$tmp/signal-bin"
+mkdir -p "$sig_bin"
+sig_real_git=$(command -v git 2>/dev/null)
+{ printf '#!/bin/sh\n'
+  printf 'REAL=%s\n' "$sig_real_git"
+  # Park on the ref oracle: the scratch repository and its config already exist by then.
+  printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then sleep 60; exit 0; fi; done\n'
+  printf 'exec "$REAL" "$@"\n'
+} >"$sig_bin/git"
+chmod +x "$sig_bin/git"
+if [ -z "$sig_real_git" ]; then
+  echo "skip - 3544-signal-cleanup: no resolvable git to build the parking shim"
+else
+  # `exec`, so `$!` IS THE GATE'S OWN PID and not a wrapper subshell's — signalling the wrapper
+  # left the gate running with its resources (measured: the first cut of this case reported a leak
+  # that was really an unsignalled process).
+  #
+  # AND THE SIGNAL GOES TO THE PROCESS GROUP, which is what a terminal Ctrl-C does. Bash defers a
+  # trap handler until the current FOREGROUND command completes, so a signal delivered only to the
+  # gate while it is blocked in a bounded network operation cannot run the cleanup until that
+  # operation finishes — bounded by the probe's own deadline, but not immediate. Signalling the
+  # group kills the in-flight child too, which is the shape of every real interruption here
+  # (Ctrl-C, a tmux/ssh hangup, a supervisor killing a lane).
+  set -m
+  ( fx "$sig_fx" && exec env TMPDIR="$sig_tmp" PATH="$sig_bin:$PATH" \
+      bash "$sig_fx/scripts/agent-gate.sh" --component-set-line full >/dev/null 2>&1 ) &
+  sig_pid=$!
+  set +m
+  sig_seen=0
+  sig_i=0
+  while [ "$sig_i" -lt 100 ]; do
+    if ls -d "$sig_tmp"/cs-baseline.* >/dev/null 2>&1; then sig_seen=1; break; fi
+    kill -0 "$sig_pid" 2>/dev/null || break
+    sleep 0.2
+    sig_i=$((sig_i + 1))
+  done
+  kill -TERM "-$sig_pid" 2>/dev/null || kill -TERM "$sig_pid" 2>/dev/null || true
+  wait "$sig_pid" 2>/dev/null
+  sig_j=0
+  while kill -0 "$sig_pid" 2>/dev/null && [ "$sig_j" -lt 50 ]; do sleep 0.2; sig_j=$((sig_j + 1)); done
+  sig_left=$(ls -d "$sig_tmp"/cs-baseline.* 2>/dev/null | grep -c . || true)
+  sig_caps=$(ls "$sig_tmp"/agent-gate-bcap.* 2>/dev/null | grep -c . || true)
+  if [ "$sig_seen" -ne 1 ]; then
+    bad "3544-signal-cleanup: the scratch repository never appeared under the private TMPDIR, so there was nothing to leak — the case cannot discriminate (the parking shim or the probe shape changed)"
+  elif [ "${sig_left:-0}" -eq 0 ] && [ "${sig_caps:-0}" -eq 0 ]; then
+    ok "3544-signal-cleanup: SIGTERM during the probe removes the isolated scratch repository (its config holds the origin URL) and the capture files — the handler is installed before the resources exist"
+  else
+    bad "3544-signal-cleanup: a signalled probe LEAKED (scratch dirs left=$sig_left, capture files left=$sig_caps) — a credential-bearing config survived the run"
+    ls -la "$sig_tmp" 2>/dev/null | head -5
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 7i. THE URL NEVER ENTERS ANY ARGV (job 242). An accepted canonical URL may carry a token, and
 #     a URL in a `git` argument is readable via `ps` / /proc/<pid>/cmdline. SOURCE-SHAPE assert,
 #     said plainly: proving absence from argv behaviourally would mean sampling /proc against a
