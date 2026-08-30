@@ -343,9 +343,11 @@ roborev_check_findings() {
       # `review-completed` has already required a terminal verdict marker, so this is a real review
       # text and not a truncated one.
       #
-      # AND IT REQUIRES THE MEASUREMENT TO HAVE HAPPENED: this is the one consumer that derives
-      # NONE from a COUNT OF ZERO, so an UNMEASURABLE block must be UNKNOWN (which now fails) and
-      # never NONE. A positive verdict requires an affirmative measurement.
+      # AND NO COUNT OF ZERO REACHES NONE HERE: the marker scan below is POSITIVE-DETECTION ONLY.
+      # A marker inside the findings block establishes PRESENT; its ABSENCE establishes nothing, so
+      # an unmeasurable or marker-free block is UNKNOWN (which fails) and never NONE. `NONE` is
+      # reachable from the `none)` arm above ALONE — i.e. from the record's STRUCTURED verdict
+      # letter. A positive verdict requires an affirmative measurement, and prose is not one.
       if [ -n "${RECHECK_JOB:-}" ]; then
         # ===== PROSE CAN EVIDENCE FINDINGS. IT CANNOT EVIDENCE CLEANLINESS. =====
         # (#3564, after two review rounds each finding a review SHAPE the previous recogniser
