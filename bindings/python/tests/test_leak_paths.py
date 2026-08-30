@@ -187,6 +187,19 @@ STREAM_BUFFER_SIZE = 2
 # ~800x, and a 9-pass statistic would cost ~50s in a lane that currently costs 6s.
 # If this file ever needs passes, the runtime is why it does not have them today.
 #
+# NO MIN/MEDIAN PAIR either, and for a structural reason rather than an oversight
+# (issue #1465 round 5 class sweep): the Node lane asserts BOTH the minimum and the
+# median of 9 passes because a single most-favourable sample could otherwise carry
+# the verdict. This lane takes ONE sample and it is the PESSIMISTIC one (the cold
+# first window of a fresh process), so there is no favourable sample to hide behind
+# and nothing for a median to add.
+#
+# NO THREE-STATE INSTRUMENT GUARD ON THE NODE SIDE, symmetrically: this file's RSS
+# reader can be absent (Windows) or degrade (no /proc), which is why it is
+# three-valued and why a mid-window failure raises a NAMED error; Node's
+# `process.memoryUsage().rss` is always present and cannot fail, so its lane needs
+# neither. Same property, different exposure.
+#
 # NO CI BUDGET MULTIPLIER either, unlike the Node lane: the tracemalloc budgets do
 # not depend on GC timing at all, and the one platform-sensitive number (the RSS
 # backstop) already carries ~34x headroom and degrades to a NAMED weaker instrument

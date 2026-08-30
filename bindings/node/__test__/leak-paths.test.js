@@ -5,8 +5,11 @@
  * iterator is abandoned partway through, buffers / channel state / JS objects may
  * never get freed -- and no test noticed steady growth across repeated failures.
  * A long-running Node server hitting errors in a loop would slowly bloat. This
- * file puts budgets on exactly those paths, mirroring the Python budgets in
- * bindings/python/tests/test_leak_paths.py.
+ * file puts budgets on exactly those paths. It is the SIBLING of
+ * bindings/python/tests/test_leak_paths.py and shares its SHAPE -- warm up, bound
+ * the growth, never assert zero, count every iteration, abandon with work still
+ * outstanding -- but NOT its instruments or its constants, and the two files list
+ * their deliberate asymmetries rather than claiming parity they do not have.
  *
  * WHAT EACH INSTRUMENT CAN AND CANNOT SEE (issue #1465 review, stated up front
  * because the earlier version of this header overclaimed):
