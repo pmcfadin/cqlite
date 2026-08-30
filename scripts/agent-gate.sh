@@ -1809,7 +1809,14 @@ _NODE_LEAK_BUDGET_TITLE_SUFFIX="stay under the leak budget"
 # suites), so a title namespace that was private to one file became shared. Without
 # this scope a same-titled `passed` test in ANY other suite would satisfy the
 # affirmation for a leak test that was skipped or failed.
-_NODE_LEAK_SUITE_FILE="__test__/leak-paths.test.js"
+#
+# REPO-RELATIVE and matched with a LEADING SLASH (round 11, T1): a bare
+# `__test__/leak-paths.test.js` tail was satisfied by a file of that name in ANOTHER
+# package (`/x/other/pkg/__test__/leak-paths.test.js`) and, unanchored, even by
+# `zz__test__/leak-paths.test.js`. Unreachable under today jest config -- and fixed
+# anyway, because the whole value of this affirmation is that it does not depend on
+# an external invariant (jest testMatch/ignore patterns) continuing to hold.
+_NODE_LEAK_SUITE_FILE="bindings/node/__test__/leak-paths.test.js"
 
 # The note TEXT for a given state, single-sourced so the component, the SUMMARY and the
 # hidden self-test hook can never quote three different sentences. Any unrecognised state
@@ -1900,11 +1907,20 @@ _node_leak_lane_affirm() { # <note-file> <json-file>
         // SUITE-SCOPED (roborev R2): only assertions from the leak suite count. The
         // report covers all 28 suites, so an unscoped title match would let another
         // suite satisfy this check.
+        const anchored = `/${suiteFile}`;
         const suites = (report.testResults || []).filter((s) =>
-          typeof s.name === "string" && s.name.endsWith(suiteFile)
+          typeof s.name === "string" && s.name.endsWith(anchored)
         );
         if (suites.length === 0) {
-          console.error(`leak-affirm: FAIL — the jest report contains no suite whose path ends with ${JSON.stringify(suiteFile)}; the budget tests cannot have run`);
+          console.error(`leak-affirm: FAIL — the jest report contains no suite whose path ends with ${JSON.stringify(anchored)}; the budget tests cannot have run`);
+          process.exit(1);
+        }
+        // EXACTLY ONE (round 11, T1): two suites at that path means the report is
+        // ambiguous about which file the budget tests came from, and a SECOND suite can
+        // supply passing entries for a real leak suite that ran nothing. Refuse rather
+        // than pick one.
+        if (suites.length !== 1) {
+          console.error(`leak-affirm: FAIL — ${suites.length} suites in the jest report end with ${JSON.stringify(anchored)} (${suites.map((s) => JSON.stringify(s.name)).join(", ")}); exactly 1 is required, because a second copy can supply passing entries for a leak suite that ran nothing`);
           process.exit(1);
         }
         // EVERY matching assertion is RETAINED, not last-write-wins: a duplicate title

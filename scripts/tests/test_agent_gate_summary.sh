@@ -28,12 +28,21 @@ STAGE_LINE="fmt:" # representative stage line from the selftest block
 
 PASS=0
 FAIL=0
+# Assertions that could not run because the HOST lacks a tool (not because anything is
+# wrong). Counted, because ASSERT_FLOOR is a hand-maintained lower bound on how many
+# assertions ran: a declared tooling skip shrinks the runnable set, so comparing the
+# floor against PASS ALONE reds a legitimately-configured box for taking the skip path
+# the check itself offers (issue #1465 round 11, roborev U1 — the gate deliberately
+# supports a node-less host, where node-bindings SKIPs loudly). The floor is therefore
+# compared against PASS + SKIPPED_TOOLING, which keeps it a real floor on hosts that
+# have everything while never punishing one that does not.
+SKIPPED_TOOLING=0
 ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # A case whose PROPERTY IS UNOBSERVABLE on this box (a Linux-only kernel control on
 # Darwin, an unreadable /proc entry) is reported as a SKIP — counted in neither total,
 # so it can never be mistaken for a passing assertion (issue #3249 AC3).
-skipped() { printf 'skip - %s\n' "$1"; }
+skipped() { printf 'skip - %s\n' "$1"; SKIPPED_TOOLING=$((SKIPPED_TOOLING + 1)); }
 
 # assert_complete <label> <file>: file must contain start marker, end marker,
 # RESULT line, and a representative stage line.
@@ -4468,8 +4477,12 @@ else
   mkdir -p "$nll_syn_dir"
   nll_b1="repeated query rejections stay under the leak budget"
   nll_b2="abandoned streaming iterators stay under the leak budget"
-  nll_leak='/x/bindings/node/__test__/leak-paths.test.js'
-  nll_other='/x/bindings/node/__test__/impostor.test.js'
+  # Repo-relative paths, because the affirmation anchors on
+  # `/bindings/node/__test__/leak-paths.test.js` (round 11, T1).
+  nll_leak='/x/repo/bindings/node/__test__/leak-paths.test.js'
+  nll_other='/x/repo/bindings/node/__test__/impostor.test.js'
+  nll_otherpkg='/x/other/pkg/bindings/node/__test__/leak-paths.test.js'
+  nll_unanchored='/x/repo/zzbindings/node/__test__/leak-paths.test.js'
   # <case> <json>
   nll_mk() { printf '%s' "$2" > "$nll_syn_dir/$1.json"; }
   nll_mk happy "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
@@ -4477,6 +4490,13 @@ else
   nll_mk duplicate "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"pending\"},{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
   nll_mk suite_absent "{\"testResults\":[{\"name\":\"$nll_other\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
   nll_mk extra "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"},{\"title\":\"a third thing stay under the leak budget\",\"status\":\"skipped\"}]}]}"
+  # T1 shapes: a SECOND suite at the anchored path supplying passes for a real leak
+  # suite that ran nothing (J_split); a SOLE copy in another package; and an
+  # unanchored tail. All three were AFFIRMED before the fix.
+  nll_mk split "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[]},{\"name\":\"$nll_otherpkg\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk impostor_pkg "{\"testResults\":[{\"name\":\"/x/other/pkg/__test__/leak-paths.test.js\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk unanchored "{\"testResults\":[{\"name\":\"$nll_unanchored\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk dup_suite "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"pending\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]},{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"}]}]}"
   : > "$nll_syn_dir/broken.json"
   printf '%s' 'not json {{{' > "$nll_syn_dir/broken.json"
 
@@ -4499,7 +4519,7 @@ else
   nll_syn_ok=1
   # The happy path must be the ONLY one that affirms.
   [ "$(nll_affirm_rc "$nll_syn_dir/happy.json")" = 0 ] || { nll_syn_ok=0; echo "  happy report did NOT affirm"; }
-  for _c in other_suite duplicate suite_absent extra broken missing; do
+  for _c in other_suite duplicate suite_absent extra broken missing split impostor_pkg unanchored dup_suite; do
     _f="$nll_syn_dir/$_c.json"
     [ "$_c" = missing ] && _f="$nll_syn_dir/does-not-exist.json"
     if [ "$(nll_affirm_rc "$_f")" = 0 ]; then
@@ -4507,7 +4527,7 @@ else
     fi
   done
   if [ "$nll_syn_ok" -eq 1 ]; then
-    ok "1465-affirm-synthetic: the affirmation accepts ONLY the happy report — a same-titled test in another suite, a duplicate title, an absent leak suite, an unexpected extra, malformed JSON and a missing file all FAIL closed"
+    ok "1465-affirm-synthetic: the affirmation accepts ONLY the happy report — a same-titled test in another suite, a duplicate title, an absent leak suite, an unexpected extra, malformed JSON, a missing file, a SPLIT report (real suite empty + another package supplying passes), a sole same-named suite in another package, an unanchored path tail and a duplicated leak suite all FAIL closed"
   else
     bad "1465-affirm-synthetic: the affirmation is not fail-closed on every adversarial synthetic report (see above)"
   fi
@@ -4631,10 +4651,14 @@ else
 fi
 
 ASSERT_FLOOR=389
-if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
-  echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
+# PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
+# rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
+# silently still reds, because a dead section increments neither counter.
+ASSERT_ACCOUNTED=$((PASS + SKIPPED_TOOLING))
+if [ "$ASSERT_ACCOUNTED" -lt "$ASSERT_FLOOR" ]; then
+  echo "FAIL - assert-floor: only $ASSERT_ACCOUNTED accounted assertions ($PASS passed + $SKIPPED_TOOLING declared tooling skips), floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
 fi
 echo "----"
-echo "passed: $PASS  failed: $FAIL"
+echo "passed: $PASS  failed: $FAIL  skipped(tooling): $SKIPPED_TOOLING  accounted: $ASSERT_ACCOUNTED (floor $ASSERT_FLOOR)"
 [ "$FAIL" -eq 0 ]
