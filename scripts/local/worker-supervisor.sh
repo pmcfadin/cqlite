@@ -231,72 +231,21 @@ PENDING_AUTOMERGE_MIN_SECS="${PENDING_AUTOMERGE_MIN_SECS:-1200}"
 # an empty value. Two suite cases went red on it immediately. So: empty by default, filled in by
 # `supervisor_lock_path` at acquisition, using only bash substitution and arithmetic.
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-}"
-# Did WE derive the lock path, or did the caller give one? RECORDED at the FIRST resolution and never
-# recomputed afterwards (#3549). By the time anything downstream looks, `SUPERVISOR_LOCK` is non-empty
-# either way, so a later `[[ -n "$SUPERVISOR_LOCK" ]]` reads as "explicit" unconditionally — the exact
-# re-detection shape this repo keeps finding.
+# `SUPERVISOR_LOCK` NAMES WHERE *OUR* LOCK LIVES, AND THAT IS ALL IT HAS EVER LEGITIMATELY DONE
+# (#3549, lead ruling 2026-08-30 — AC4 REMOVED AS UNSOUND).
 #
-# THREE-VALUED, AND IT STARTS AT `unknown` (#3549, roborev job 209 F1). The first cut of this fix
-# recorded the answer instead of re-detecting it at the consumer — but it RECOMPUTED THE RECORD FROM
-# THE SAME RE-DETECTABLE OBSERVABLE ON EVERY CALL, so a SECOND call to `supervisor_lock_path` saw the
-# path the FIRST call had derived, called it explicit, and disabled the guard. That is reachable from
-# two ordinary callers the fleet has: a wrapper that resolves the path before calling `acquire_lock`,
-# and any retry of the resolution inside one shell. A two-valued flag cannot express "nobody has
-# resolved yet", which is precisely the state the once-only write needs to test for — hence the third
-# value, and hence `supervisor_lock_path` writing this variable ONLY while it holds `unknown`.
+# #3549's AC4 said "an explicit `SUPERVISOR_LOCK` override skips the legacy check entirely". It is
+# REMOVED, not descoped, and the proof is one sentence: an explicit `SUPERVISOR_LOCK` renames OUR lock,
+# while a pre-#3467 supervisor uses the machine-global path REGARDLESS — it has never heard of this
+# variable — so the skip disabled the check in a case where the collision is still LIVE. It conflated a
+# naming choice with an isolation guarantee.
 #
-# AND IT SURVIVES RE-SOURCING (#3549, roborev job 214). Sticky WITHIN a shell was still not enough:
-# this file is sourceable, and a second `source` re-runs this very assignment — so a bare
-# `SUPERVISOR_LOCK_DERIVED=unknown` reset the record to `unknown` while leaving the already-derived,
-# now-nonempty `SUPERVISOR_LOCK` in place. The next resolution then read that path, recorded it as
-# caller-provided, and skipped the legacy-lock guard: the SAME concurrency bypass as job 209 F1 by a
-# THIRD route (recomputed per call -> sticky per shell -> reset per source). `${VAR:-unknown}` makes the
-# initialisation NON-CLOBBERING, so a provenance already DECIDED is preserved however often this file is
-# sourced; a decision, once taken, is taken.
-#
-# THE TOKEN IS VALIDATED, AND `unknown` IS THE FAIL-CLOSED DIRECTION. Only `yes`, `no` and `unknown` are
-# meaningful; anything else (including an empty string, which `:-` already folds in) collapses to
-# `unknown`. That is the SAFE collapse, not merely the tidy one: `supervisor_legacy_lock_guard` skips
-# its check ONLY on an affirmative `no`, so an unrecognised provenance makes the guard RUN. A garbage
-# value can therefore cost an unnecessary refusal, never a silent bypass.
-#
-# A VALUE INHERITED FROM THE ENVIRONMENT IS INVOKER-CLASS AND OUT OF MODEL. This script never exports
-# the variable, so the preserved value is normally one THIS shell decided; but a caller can put
-# `SUPERVISOR_LOCK_DERIVED=no` in the environment and bash will import it. That is not defended here,
-# and deliberately so: anyone who can export a variable into this process can equally export
-# `SUPERVISOR_LOCK` (the documented, supported way to take the placement decision) or edit this file —
-# the documented triage rule puts the invoker outside the threat model. Nor is there a coherence
-# cross-check against `SUPERVISOR_LOCK`: by the time anything could look, that variable is non-empty on
-# both paths, so whether it was empty at the first resolution is UNRECONSTRUCTABLE — a check that
-# guessed would be exactly the re-detection this record replaces.
-SUPERVISOR_LOCK_DERIVED="${SUPERVISOR_LOCK_DERIVED:-unknown}"
-case "$SUPERVISOR_LOCK_DERIVED" in
-  yes | no | unknown) ;;
-  *) SUPERVISOR_LOCK_DERIVED=unknown ;;
-esac
-# ...AND THE PATH THE FIRST RESOLUTION PRODUCED, BECAUSE THE PROVENANCE ALONE IS HALF A RECORD (#3549,
-# roborev job 217 F1). The three fixes above each secured the PROVENANCE and left its PARTNER — the
-# PATH — free, and the pair diverging is the SAME bypass by a FOURTH route: resolve an EXPLICIT path
-# (provenance `no`), then assign `SUPERVISOR_LOCK` the per-lane DERIVED default, and the resolver
-# returned unchanged — so the run acquired OUR derived default while the guard, reading a provenance
-# that said "the operator placed this", skipped. The provenance was truthful about the first
-# resolution and false about the path in use, which is the only thing the guard actually cares about.
-#
-# SO THE PAIR IS INSEPARABLE: a provenance is honoured only WITH the path it was decided about, and a
-# later change of `SUPERVISOR_LOCK` is RESTORED to that path (see `supervisor_lock_path` for the
-# restore-vs-refuse decision and its reasons).
-#
-# PRESERVED ACROSS RE-SOURCING BY THE SAME `${VAR:-}` FORM as the provenance and for the same reason
-# (job 214): a bare assignment here would blank the stored path on a second `source` while leaving the
-# provenance decided, and "decided provenance, no stored path" is precisely the incoherent state whose
-# permissive reading was the bypass. VALIDATION IS NON-EMPTINESS AND NOTHING MORE, deliberately: an
-# explicit caller path may legitimately be relative, option-shaped or non-existent (other cases in the
-# suite stage exactly those), so no stronger property is decidable here without rejecting valid input.
-# An EMPTY stored value is therefore the only "unusable" one, and it is NOT a licence to skip: the
-# resolver treats a decided provenance with no stored path as no decision at all and resolves afresh,
-# which on an empty `SUPERVISOR_LOCK` records `yes` and leaves the guard RUNNING. Inheriting a value
-# from the environment is invoker-class and out of model, exactly as for the provenance above.
-SUPERVISOR_LOCK_RESOLVED="${SUPERVISOR_LOCK_RESOLVED:-}"
+# CONSEQUENCE, RECORDED SO NOBODY REINTRODUCES A SKIP AS A CONVENIENCE: `supervisor_legacy_lock_guard`
+# runs UNCONDITIONALLY. There is no opt-out, no provenance record and nothing for a caller to set to
+# make the check not happen. The tri-state provenance (`SUPERVISOR_LOCK_DERIVED`), the pinned path
+# beside it (`SUPERVISOR_LOCK_RESOLVED`) and every early return they fed were deleted with the skip:
+# four review rounds (jobs 209 F1, 214, 217 F1, 218) were each a new route to bypassing the check
+# through that record, and with no record there is no route. Do not add one back.
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
@@ -1428,68 +1377,16 @@ supervisor_msg_token() {
 }
 
 supervisor_lock_path() {
-  # RECORD the derivation, do not re-detect it later (#3549). "Explicit" is only knowable BEFORE this
-  # function has run once, because afterwards `SUPERVISOR_LOCK` is non-empty on both paths.
-  #
-  # FIRST RESOLUTION WINS, AND IT IS THE ONLY ONE THAT DECIDES ANYTHING (#3549, roborev job 209 F1).
-  # The record is STICKY, not merely early: while the provenance is still `unknown` this function
-  # writes it exactly once, and every later call returns having changed nothing. Without this bail-out
-  # the record was recomputed from `SUPERVISOR_LOCK`'s emptiness on EVERY call, so a second call
-  # observed the first call's own output and flipped the answer to "explicit" — bypassing the
-  # legacy-global-lock guard for a wrapper that pre-resolves the path, or for any retry in one shell.
-  #
-  # A `SUPERVISOR_LOCK` CHANGED BY THE CALLER BETWEEN TWO CALLS IS NOT HONOURED, DELIBERATELY. Nothing
-  # in bash can stop a caller assigning that variable, so this decides the one thing it can: the
-  # PROVENANCE recorded at first resolution governs the guard for the rest of the run. A mid-run change
-  # of lock identity is not a state this program can make coherent — the claim actor and the guard's
-  # comparison were both settled against the first answer — and treating it as a fresh "explicit"
-  # placement is exactly the bypass above. So the provenance is immutable after the first resolution,
-  # and a caller who wants to place the lock must set `SUPERVISOR_LOCK` BEFORE anything resolves it
-  # (which is what the documented `env SUPERVISOR_LOCK=… worker-supervisor.sh` invocation does).
-  #
-  # AND THE RECORD IS THE **PAIR** — PROVENANCE *AND* PATH (#3549, roborev job 217 F1). Making the
-  # provenance sticky while leaving the path free is half a fix: the two then DISAGREE, and the
-  # disagreement is the bypass. Concretely — resolve an EXPLICIT path (provenance `no`), then assign
-  # `SUPERVISOR_LOCK` the per-lane DERIVED default; the sticky bail-out returned unchanged, the run
-  # acquired the DERIVED default, and the guard skipped on a provenance that had been decided about a
-  # DIFFERENT path. The guard's question is "is the path in use OUR default?", so a provenance detached
-  # from the path it was decided about answers a question nobody asked.
-  #
-  # RESTORE, NOT REFUSE — the decision and why. `SUPERVISOR_LOCK` changed after the first resolution is
-  # reset to the first-resolved path and the override is LOGGED. The alternative (abort the start) was
-  # considered and rejected on three grounds: (1) "first resolution wins" is ONE contract, and it is
-  # already applied SILENTLY to the provenance — making its other half loudly fatal would state two
-  # different contracts for one decision; (2) once the change is not honoured it is harmless, so a
-  # startup failure would be a refusal for something with no consequence, and this file's refusals are
-  # operator-facing texts with remedies, which "you assigned a variable" has none of beyond "do not";
-  # (3) a wrapper that reassigns the variable after resolution (to re-export it, to normalise it) keeps
-  # working, and the log line is what tells its author the assignment did nothing. It is not silent:
-  # the ignored override is reported every time it happens.
-  case "$SUPERVISOR_LOCK_DERIVED" in
-    yes | no)
-      if [[ -n "$SUPERVISOR_LOCK_RESOLVED" ]]; then
-        if [[ "$SUPERVISOR_LOCK" != "$SUPERVISOR_LOCK_RESOLVED" ]]; then
-          log "WARN: SUPERVISOR_LOCK was changed after the lock path had already been resolved; the change is IGNORED and the first-resolved path is restored. First resolution wins: the recorded provenance ($SUPERVISOR_LOCK_DERIVED) and the legacy-lock compatibility check were both settled against that path, so honouring a later one would leave them describing a path this run is not using. To place the lock, set SUPERVISOR_LOCK before anything resolves it."
-          SUPERVISOR_LOCK="$SUPERVISOR_LOCK_RESOLVED"
-        fi
-        return 0
-      fi
-      # A DECIDED PROVENANCE WITH NO PATH BESIDE IT IS NOT A DECISION, AND IS NOT HONOURED. Only an
-      # environment-inherited provenance can reach here (every write below stores both halves in the
-      # same breath), and "we recorded an answer but not what it was about" must not be the state that
-      # PERMITS a start. Falling through re-decides both halves together, which is fail-closed: with
-      # `SUPERVISOR_LOCK` empty this records `yes` and the guard RUNS.
-      ;;
-  esac
+  # If the caller named a path, that is where OUR lock goes; otherwise derive the per-lane default.
+  # NOTHING ELSE IS RECORDED HERE, AND NOTHING DOWNSTREAM ASKS WHICH BRANCH RAN (#3549, lead ruling —
+  # AC4 removed as unsound; see the note beside `SUPERVISOR_LOCK`'s initialisation). The legacy-lock
+  # guard runs either way, so the provenance this function used to keep has no consumer left: it
+  # existed ONLY to switch that check off, and switching it off was the defect.
   if [[ -n "$SUPERVISOR_LOCK" ]]; then
-    SUPERVISOR_LOCK_DERIVED=no
-    SUPERVISOR_LOCK_RESOLVED="$SUPERVISOR_LOCK"
     return 0
   fi
-  SUPERVISOR_LOCK_DERIVED=yes
   # FROM THE GIVEN IDENTITY (lead ruling B). `LANE_ID` is resolved before this is called.
   SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-${LANE_ID}.lock"
-  SUPERVISOR_LOCK_RESOLVED="$SUPERVISOR_LOCK"
 }
 
 # ---------------------------------------------------------------------------
@@ -1793,18 +1690,16 @@ supervisor_legacy_lock_refuse() {
   [[ -z "$remedy_cmd" ]] || printf '%s\n' "$remedy_cmd" >&2
   # NO REFUSAL MENTIONS `SUPERVISOR_LOCK`, AND THE ABSENCE IS DELIBERATE (#3549, roborev job 208 F1).
   # This line used to end with "…, or set SUPERVISOR_LOCK explicitly to opt out of this compatibility
-  # check", and it was printed by EVERY refusal — including the LIVE one. Read as an operator reads it,
-  # that is an instruction that CAUSES the harm this guard exists to prevent: naming the lock skips the
-  # check (AC4, `SUPERVISOR_LOCK_DERIVED`), so a run refused BECAUSE ANOTHER SUPERVISOR IS ALIVE starts
-  # anyway and the two supervisors then share one worktree, invisible to each other. It survived
-  # fourteen review rounds of the surrounding code because it reads as helpful.
+  # check", and it was printed by EVERY refusal. Read as an operator reads it, that was an instruction
+  # that CAUSED the harm this guard exists to prevent: naming the lock skipped the check, so a refused
+  # run started anyway and the two supervisors shared one worktree, invisible to each other. It
+  # survived fourteen review rounds of the surrounding code because it reads as helpful.
   #
-  # It is removed from the OTHER states too, per the lead's ruling: the escape hatch stays SUPPORTED and
-  # is documented in `docs/development/fleet-runbook.md`, which is where an operator deciding to place
-  # the lock themselves belongs. A refusal message is the worst possible place to advertise it, because
-  # its reader is BY DEFINITION in the situation where overriding is most dangerous. Do not re-add it to
-  # any refusal path as a helpful touch — the remedies here are: stop the legacy supervisor, or upgrade
-  # that checkout past #3467.
+  # THERE IS NOW NO SUCH ESCAPE HATCH AT ALL (lead ruling 2026-08-30, AC4 removed as unsound): setting
+  # `SUPERVISOR_LOCK` chooses where OUR lock lives and does not affect this check. So nothing may be
+  # printed here that even IMPLIES a way past the refusal — there is none, and inventing one in prose
+  # would send an operator looking for a knob that does not exist. The remedies are the two real ones:
+  # stop the pre-#3467 supervisor, or upgrade that checkout past #3467.
   printf '%s\n' "worker-supervisor: remedy — stop the pre-#3467 supervisor on this box, or upgrade that checkout to #3467+." >&2
   exit 1
 }
@@ -1878,18 +1773,25 @@ supervisor_legacy_lock_refuse() {
 #    deferred defect whose activation condition is unwritten is a landmine; one whose condition is
 #    written is a documented risk.
 supervisor_legacy_lock_guard() {
-  # DERIVED-DEFAULT ONLY (AC4). An operator who names the lock has taken the placement decision
-  # explicitly; the compatibility check is about OUR default colliding with the OLD default.
+  # THIS GUARD ALWAYS RUNS. THERE IS NO SKIP AND NO OPT-OUT (#3549, lead ruling 2026-08-30 — AC4
+  # REMOVED AS UNSOUND).
   #
-  # KEYED ON THE AFFIRMATIVE EXPLICIT VALUE, so the third state cannot inherit the permissive branch
-  # (#3549, job 209 F1). Only `no` — a provenance actually recorded as caller-given — skips the check.
-  # `unknown` means nothing has resolved the lock path yet, which is unreachable from `acquire_lock`
-  # (it resolves first, by construction), and if it ever became reachable "we do not know whose path
-  # this is" must not be the answer that PERMITS a start. `case` rather than `[[ … ]] && return`: a
-  # failing AND-list is an errexit abort site, and this file runs under `set -e`.
-  case "$SUPERVISOR_LOCK_DERIVED" in
-    no) return 0 ;;
-  esac
+  # AC4 used to exempt a run whose `SUPERVISOR_LOCK` was named by the caller, on the reasoning that
+  # such an operator had taken the placement decision. The reasoning does not hold: an explicit
+  # `SUPERVISOR_LOCK` renames OUR lock, and a pre-#3467 supervisor uses the machine-global path
+  # REGARDLESS — it has never heard of the variable — so the exemption skipped the check in exactly the
+  # case where the collision is still LIVE. A naming choice is not an isolation guarantee. Deleted with
+  # it: the tri-state provenance, its pinned path partner, and every early return here that read them.
+  #
+  # AND THE SUBJECT IS READ HERE, AT GUARD TIME, IN THE SAME BREATH AS THE DECISION IT FEEDS (#3549,
+  # roborev job 218 — unexpressible rather than patched). That finding was that the per-lane lock path
+  # was PINNED at first resolution while the legacy path was recomputed from the CURRENT `TMPDIR`, so a
+  # wrapper that changed `TMPDIR` between the two moments made the recorded provenance describe one
+  # path while the check looked at another. There is no longer a record, a pinned partner, or a second
+  # moment: this line is the only place a legacy path is computed, and its value cannot disagree with a
+  # decision taken elsewhere because no decision is taken elsewhere. `TMPDIR` at guard time is also the
+  # RIGHT reading on its own terms — a pre-#3467 supervisor derives the machine-global name from the
+  # environment it starts in, which our own resolution moment says nothing about.
   local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state
   # A PROBE THAT COULD NOT ANSWER IS A REFUSAL, NEVER A SILENT EXIT (#3549, roborev job 201 F3).
   # The probe returns 0 on every path it takes, but under a caller with `inherit_errexit` any
@@ -1950,11 +1852,11 @@ acquire_lock() {
   # them would leave them on a stale inference.
   supervisor_resolve_lane_id
   supervisor_lock_path
-  # BEFORE any side effect, and after the derivation flag is set (#3549). A refusal must leave nothing
-  # behind it: `supervisor_claim_actor` EXPORTS an actor into the environment and
-  # `supervisor_migrate_legacy_claim` performs a CAS ADOPT that pushes a ref to origin — neither is
-  # something a supervisor that is about to refuse to start should have done. It must also run after
-  # `supervisor_lock_path`, which is what records whether the path is ours to compare.
+  # BEFORE any side effect (#3549). A refusal must leave nothing behind it: `supervisor_claim_actor`
+  # EXPORTS an actor into the environment and `supervisor_migrate_legacy_claim` performs a CAS ADOPT
+  # that pushes a ref to origin — neither is something a supervisor that is about to refuse to start
+  # should have done. It runs after `supervisor_lock_path` only so the refusal can NAME our own lock
+  # path in its diagnostic; the guard's VERDICT depends on nothing that call produces.
   supervisor_legacy_lock_guard
   supervisor_claim_actor
   supervisor_migrate_legacy_claim
