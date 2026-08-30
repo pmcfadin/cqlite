@@ -466,12 +466,26 @@ ticker="$tmp/watchdog-ticker.sh"
 { printf '#!/bin/sh\n'; printf 'while : ; do echo tick >> "%s"; sleep 1; done\n' "$tick"; } >"$ticker"
 chmod +x "$ticker"
 : >"$tick"
-wd_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" bash "$behind/scripts/agent-gate.sh" \
+# The invocation carries an OUTER host bound. Without it, a gate that fails to bound would
+# HANG this suite instead of failing it — the assert would be right and useless, since a
+# hung run reports nothing (RED-verified: a mutation that never fires the deadline hung the
+# whole file). The outer bound is a HARNESS guard, not an assertion: nothing below compares
+# elapsed time, and if the host has no `timeout` the sub-assert says so rather than relying
+# on the mechanism under test to bound its own test.
+# ABSOLUTE path, resolved from the host PATH BEFORE the override: the curated PATH used
+# below deliberately omits `timeout`, so a bare `timeout 30` prefix would not be found and
+# the case would fail with an empty rc — which it did, first run.
+wd_outer=""
+wd_timeout_bin=$(command -v timeout 2>/dev/null || true)
+[ -n "$wd_timeout_bin" ] && wd_outer="$wd_timeout_bin 30"
+wd_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
                 --component-set-bounded-run 1 "$ticker" 2>/dev/null | sed -n 's/^RC: //p' )
 ticks_at_return=$(wc -l <"$tick" | tr -d ' ')
 sleep 3
 ticks_later=$(wc -l <"$tick" | tr -d ' ')
-if [ "$wd_rc_line" = 124 ] && [ "$ticks_later" = "$ticks_at_return" ]; then
+if [ -z "$wd_outer" ]; then
+  echo "skip - 3544-bound-enforced: no host 'timeout' to bound this case from the OUTSIDE; letting the mechanism under test bound its own test would be circular"
+elif [ "$wd_rc_line" = 124 ] && [ "$ticks_later" = "$ticks_at_return" ]; then
   ok "3544-bound-enforced: the bash watchdog bounds a hanging command (rc 124) and leaves no live child"
 else
   bad "3544-bound-enforced: expected rc 124 and a dead child (rc='$wd_rc_line' ticks $ticks_at_return -> $ticks_later)"
