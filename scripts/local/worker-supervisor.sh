@@ -1558,6 +1558,32 @@ supervisor_pid_liveness() {
   case "$err" in
     *'not permitted'*) printf 'live\n'; return 0 ;;
   esac
+  # AN INVALID PROCESS SPEC IS NOT AN ABSENCE, AND IT MUST BE READ BEFORE PROCFS IS ASKED (#3549,
+  # roborev job 208 F2). `kill -0` fails for a THIRD reason besides ESRCH and EPERM: the value is not a
+  # process specification at all. `pid_t` is an `int`, so bash's own `kill` builtin refuses anything
+  # above `INT_MAX` outright. MEASURED under `LC_ALL=C` on this box:
+  #   kill -0 99999999999999999999 -> "kill: 99999999999999999999: arguments must be process or job IDs"
+  #   kill -0 2147483648           -> the same message (2^31, the first value out of range)
+  #   kill -0 4194305              -> "kill: (4194305) - No such process"   [ESRCH, in `int` range]
+  # So the errno text distinguishes "not a pid" from "no such pid" — but only ABOVE `INT_MAX`, which is
+  # why the platform bound in `supervisor_legacy_lock_state` is the PRIMARY rule and this is the
+  # fallback for a host where that bound cannot be read (a BSD/macOS box has no
+  # `/proc/sys/kernel/pid_max`).
+  #
+  # WITHOUT THIS BRANCH the value falls through to the procfs corroboration below, which reports
+  # `/proc/99999999999999999999` ABSENT — an affirmative-looking absence for an entry that could never
+  # exist — and the answer becomes `dead`. `dead` is what the classifier turns into `stale`, and `stale`
+  # is the ONE verdict that earns the operator a `rm -f … && rmdir …` line: a deletion instruction for a
+  # pid file no supervisor could have written. Hence the ordering: this case must precede the procfs
+  # branch, not follow it.
+  #
+  # `LC_ALL=C` is already set at the `kill` above, which is what licenses reading the message CONTENT;
+  # an unrecognised message (a bash built without its message catalogue, some other shell) costs only a
+  # fall-through, and the platform bound remains the primary rule. Like the EPERM branch, this one is
+  # used for exactly ONE verdict — here `unknown` — and never to say `live` or `dead`.
+  case "$err" in
+    *'must be process or job'*) printf 'unknown\n'; return 0 ;;
+  esac
   # Corroborate the absence. PROCFS IS THE ONLY CORROBORATING ORACLE — there is deliberately no `ps`
   # fallback (see below). procfs distinguishes EPERM: the entry exists for a live process owned by
   # anyone.
@@ -1908,6 +1934,64 @@ supervisor_legacy_lock_state() {
   case "$pid" in
     '' | *[!0123456789]* | 0*) printf 'unknown pid-not-well-formed:[%s]\n' "$(supervisor_shell_quote "$pid")"; return 0 ;;
   esac
+  # AN OUT-OF-RANGE VALUE IS NOT A DEAD PID (#3549, roborev job 208 F2). The shape test above accepts
+  # ANY non-zero digit string, and a 20-digit one then fails every liveness probe FOR A REASON THAT IS
+  # NOT "the process is gone": `kill -0` rejects it as not a process specification and procfs has no
+  # entry for a number that could never have one. The verdict was `dead`, which this classifier prints
+  # as `stale`, and `stale` is the ONE state that hands the operator a `rm -f … && rmdir …` line — a
+  # deletion instruction for a `pid` file no supervisor could have written. Same harm as the collation
+  # and NUL defects above, reached through a third door, so it is closed the same way: an unrecognisable
+  # value is `unknown` WITH ITS OWN CAUSE, and `unknown` refuses without a deletion.
+  #
+  # THE BOUND IS READ FROM THE PLATFORM, NEVER INVENTED. `/proc/sys/kernel/pid_max` is the kernel's own
+  # answer, and it is a PLAIN FILE READ through the `read` builtin — so this classifier still executes NO
+  # external command and none of its verdicts can be changed by the caller's `PATH`, a property the
+  # inherited-state sweep relies on and the suite asserts structurally.
+  #
+  # `>=`, NOT `>`: `man 5 proc` documents pid_max as "the value at which PIDs wrap around (i.e., the
+  # value in this file is one greater than the maximum PID)", so the boundary value itself is not
+  # allocatable. If that reading were ever wrong the cost is a REFUSAL for exactly one value, never a
+  # deletion — the safe direction, which is why the boundary is taken this way rather than left open.
+  #
+  # THE LENGTH TEST IS AN OVERFLOW GUARD, NOT A DIGIT-COUNT HEURISTIC. Both operands are validated
+  # decimal strings with no leading zero, so ordering by LENGTH *is* decimal ordering — exact, not
+  # approximate. It comes first because bash arithmetic on a huge digit string does NOT error: MEASURED,
+  # `[[ 999999999999999999999999999999 -gt 5 ]]` succeeds by SATURATING at `INTMAX_MAX`, so a verdict
+  # taken from it would be a verdict about a number nobody computed. Arithmetic is therefore used ONLY
+  # when the two lengths are equal AND the bound is at most 18 digits, where it cannot overflow; a
+  # longer bound leaves this check abstaining rather than guessing (unreachable for a kernel value,
+  # which is 7 digits here).
+  #
+  # AN UNMEASURABLE BOUND ABSTAINS — it never refuses and never invents a limit. A missing, unreadable,
+  # multi-line or non-decimal `pid_max` (a BSD/macOS host has no such file at all) must not turn a
+  # LEGITIMATE pid into a refusal, so this check simply does not fire. The `dead` direction is held
+  # closed one level down instead: `supervisor_pid_liveness` reads the invalid-process-spec errno for
+  # anything above `INT_MAX`, and on a host with no procfs it has no corroborating oracle and answers
+  # `unknown` for every non-live pid anyway.
+  local pid_max="" _pm_extra="" _pm_more=no
+  if { IFS= read -r pid_max || true; if IFS= read -r _pm_extra; then _pm_more=yes; fi; } 2>/dev/null </proc/sys/kernel/pid_max; then
+    if [[ "$_pm_more" == yes || -n "$_pm_extra" ]]; then
+      pid_max=""
+    else
+      case "$pid_max" in
+        '' | *[!0123456789]* | 0*) pid_max="" ;;
+      esac
+    fi
+  else
+    pid_max=""
+  fi
+  local pid_over=no
+  if [[ -n "$pid_max" ]]; then
+    if (( ${#pid} > ${#pid_max} )); then
+      pid_over=yes
+    elif (( ${#pid} == ${#pid_max} && ${#pid_max} <= 18 )) && (( pid >= pid_max )); then
+      pid_over=yes
+    fi
+  fi
+  if [[ "$pid_over" == yes ]]; then
+    printf 'unknown pid-exceeds-platform-pid-max:%s:recorded:%s\n' "$pid_max" "$(supervisor_shell_quote "$pid")"
+    return 0
+  fi
   case "$(supervisor_pid_liveness "$pid")" in
     live) printf 'live %s\n' "$pid" ;;
     dead) printf 'stale %s\n' "$pid" ;;
