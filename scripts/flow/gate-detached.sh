@@ -228,6 +228,14 @@ while IFS= read -r -d '' kv; do
   FORWARDED=$((FORWARDED + 1))
 done < <(env -0)
 printf 'export AGENT_GATE_SUMMARY_FILE=%q\n' "$SUMMARY" >> "$ENV_SCRIPT"
+# SELF-UNLINK before exec (roborev job 178, Medium). The launcher's EXIT trap cannot run if the
+# launcher is SIGKILLed, or its session torn down, after the unit has started — and then this
+# 0600 file, holding every forwarded secret, survives indefinitely. Deleting it from INSIDE the
+# wrapper ties its lifetime to the process that actually consumed it. Safe as the last statement
+# before `exec`: bash has read the whole script by then, and `exec` replaces the process so
+# nothing reads the file again. The launcher trap stays as the fallback for paths where the
+# wrapper never runs at all (a refused launch).
+printf 'rm -f -- %q\n' "$ENV_SCRIPT" >> "$ENV_SCRIPT"
 printf 'exec bash %q "$@"\n' "$REPO_ROOT/scripts/agent-gate.sh" >> "$ENV_SCRIPT"
 
 # The log is TRUNCATED with `>`, which follows symlinks (roborev job 169, Medium): in a shared
