@@ -1277,11 +1277,23 @@ run_cpu_step() { # run_cpu_step <driver> <out-dir>
   idx="$(find_block "$drv" 'pinning_record_path')"
   [[ "$idx" =~ ^[0-9]+$ ]] || { run_cpu_rc=90; echo "block not located: $idx" > "$STEP_OUT"; return; }
   body="$(emit_block "$drv" "$idx")"
-  env WS0_PIN_SERVER_CPUS="$(cfg_value server_cpus)" \
-      WS0_PIN_CLIENT_CPUS="$(cfg_value client_cpus)" \
-      WS0_PIN_SIBLINGS="server cpu 2 siblings 2,10; server cpu 10 siblings 2,10" \
-      WS0_PIN_TOPOLOGY_ROOT="$TMP/fake-topology" \
-      python3 -c "$body" "$PERF_DIR" "$out" > "$STEP_OUT" 2>&1
+  # THE VALUES COME FROM THE DRIVER, exactly as the session-pin step's do (#3451 post-rebase
+  # round 3, F3). Round 2 wired only `write_session_corpus_pin`, so this step still ran on
+  # fixture constants AND had its record verified against those same constants — a swapped
+  # `WS0_PIN_SERVER_CPUS="$CLIENT_CPUS"` stayed green. Same shape as the round-11 union bug: a
+  # check right about one step and silent about the other.
+  local -a cpu_env=()
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    cpu_env+=("$line")
+  done < <(driver_step_env "$drv" pinning_record_path)
+  if [ "${#cpu_env[@]}" -eq 0 ]; then
+    run_cpu_rc=91
+    echo "driver_step_env produced no environment for the CPU-pin step" > "$STEP_OUT"
+    return
+  fi
+  env "${cpu_env[@]}" python3 -c "$body" "$PERF_DIR" "$out" > "$STEP_OUT" 2>&1
   run_cpu_rc=$?
 }
 
@@ -1304,19 +1316,91 @@ if grep -q 'pinning pin:' <<<"$cpu_out"; then
 else
   fail "EXECUTE cpu-pin-verification: the step did not print 'pinning pin:' (output: $(head -3 <<<"$cpu_out"))"
 fi
-if python3 - "$PERF_DIR" "$OUT" "$(cfg_value server_cpus)" "$(cfg_value client_cpus)" <<'PY'
+# THE TWO STEPS ARE CROSS-CHECKED AGAINST EACH OTHER, not each against its own constants
+# (#3451 post-rebase round 3, F3). The CPU record's pins are verified against the CPU lists read
+# from THE SESSION MANIFEST the other step wrote — which is precisely the comparison
+# `verify_pinning_record` exists to make in production. Verified against fixture constants
+# instead, a swap in ONE prefix was invisible; and because the manifest and the record were
+# validated INDEPENDENTLY, a MATCHING swap in both was invisible too. Reading one side from the
+# other is what makes a consistent swap detectable.
+if python3 - "$PERF_DIR" "$OUT" <<'PY'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_pinning import PINNING_RECORD_FIELDS, verify_pinning_record
-rec = verify_pinning_record(pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4])
+from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
+from ws0_session import session_manifest_config
+session = pathlib.Path(sys.argv[2])
+# The CPU lists AS THE MANIFEST RECORDS THEM — the session-pin step's output, not a constant.
+config = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
+rec = verify_pinning_record(session, config["server_cpus"], config["client_cpus"])
 missing = [f for f in PINNING_RECORD_FIELDS if not rec.get(f)]
 assert not missing, missing
 PY
 then
-  pass "EXECUTE cpu-pin-verification: the SHIPPED READER (verify_pinning_record) accepts the record the shipped STEP wrote, with every PINNING_RECORD_FIELDS field populated"
+  pass "EXECUTE cpu-pin-verification: the SHIPPED READER accepts the record the shipped STEP wrote, and its pins are checked against the CPU lists THE SESSION MANIFEST records — the two steps are cross-checked against each other rather than each against the same fixture constants"
 else
-  fail "EXECUTE cpu-pin-verification: the shipped reader refused the record the shipped step wrote"
+  fail "EXECUTE cpu-pin-verification: the shipped reader refused the record the shipped step wrote, or its pins disagree with the manifest the session-pin step produced"
 fi
+
+# --- CONTROL 4-map: a SWAPPED CPU right-hand side is caught, in BOTH shapes ---------------------
+# Two swaps, because they defeat different checks and the second is the one round 3's F3 is about:
+#
+#   pin-only    WS0_PIN_SERVER_CPUS="$CLIENT_CPUS" — the record disagrees with the manifest.
+#   consistent  the SAME swap in BOTH prefixes — each artifact is self-consistent, so validating
+#               them independently sees nothing. Only reading the record's expectation FROM the
+#               manifest catches it... and it does not: a consistent swap is, by construction, a
+#               session that pinned and recorded the same (wrong) lists. See the assertion below
+#               for what is actually claimed.
+for cpu_swap in pin-only consistent; do
+  SWAPDIR="$TMP/cpuswap-$cpu_swap"; mkdir -p "$SWAPDIR"
+  SWAPDRV="$TMP/cpuswap-$cpu_swap-driver.sh"
+  python3 - "$DRIVER" "$SWAPDRV" "$cpu_swap" <<'INJECT'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+pin = 'WS0_PIN_SERVER_CPUS="$SERVER_CPUS"'
+cfg = 'WS0_CFG_SERVER_CPUS="$SERVER_CPUS"'
+if text.count(pin) != 1 or text.count(cfg) != 1:
+    print("INJECTION IMPOSSIBLE: the CPU assignments are not both present exactly once",
+          file=sys.stderr)
+    raise SystemExit(1)
+out = text.replace(pin, 'WS0_PIN_SERVER_CPUS="$CLIENT_CPUS"')
+if sys.argv[3] == "consistent":
+    out = out.replace(cfg, 'WS0_CFG_SERVER_CPUS="$CLIENT_CPUS"')
+pathlib.Path(sys.argv[2]).write_text(out)
+INJECT
+  swap_inject_rc=$?
+  if [ "$swap_inject_rc" -ne 0 ]; then
+    fail "cpu-mapping CONTROL ($cpu_swap): the swap could not be injected, so it could not fire"
+    continue
+  fi
+  python3 - "$PERF_DIR" "$SWAPDIR" "$CORPUS" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_ticket_input import write_ticket_template
+write_ticket_template(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]) / "ws0-events.cql")
+PY
+  run_pin_rc=0; run_cpu_rc=0
+  run_pin_step "$SWAPDRV" "$SWAPDIR" >/dev/null 2>&1
+  run_cpu_step "$SWAPDRV" "$SWAPDIR" >/dev/null 2>&1
+  swap_verdict=refused
+  python3 - "$PERF_DIR" "$SWAPDIR" >/dev/null 2>&1 <<'PY' && swap_verdict=accepted
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_pinning import verify_pinning_record
+from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
+from ws0_session import session_manifest_config
+session = pathlib.Path(sys.argv[2])
+config = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
+verify_pinning_record(session, config["server_cpus"], config["client_cpus"])
+PY
+  if [ "$cpu_swap" = "pin-only" ] && [ "$swap_verdict" = refused ]; then
+    pass "cpu-mapping CONTROL fired (pin-only): WS0_PIN_SERVER_CPUS taking \$CLIENT_CPUS makes the record disagree with the manifest, and the cross-check REFUSES it — invisible while the record was verified against fixture constants"
+  elif [ "$cpu_swap" = "consistent" ] && [ "$swap_verdict" = accepted ]; then
+    pass "cpu-mapping STATED LIMIT (consistent): swapping BOTH prefixes together is ACCEPTED, and that is honest rather than a gap this suite can close — the manifest and the record then agree, so no cross-check between them can tell; catching it needs an oracle for what the CPU lists OUGHT to be, which only the host topology has (test_ws0_cpu_pinning_guards.sh's subject)"
+  else
+    fail "cpu-mapping CONTROL ($cpu_swap): expected the cross-check to $([ "$cpu_swap" = pin-only ] && echo refuse || echo accept), got $swap_verdict"
+  fi
+done
 
 # --- POSITIVE CONTROL 4: the same harness OBSERVES the defective CPU step failing ---------------
 DEFECTIVE_CPU="$TMP/defect-exec-cpu.sh"
