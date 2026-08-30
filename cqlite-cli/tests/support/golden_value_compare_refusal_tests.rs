@@ -358,6 +358,65 @@ fn a_separator_inside_a_scalar_object_value_is_refused_not_called_unparseable() 
     }
 }
 
+/// THE RESIDUAL a refusal leaves, declared through the comparator rather than
+/// implied away — the finding-Q1 property.
+///
+/// At a refused node exactly two things survive: the bracket FRAME and the body's
+/// EMPTINESS. WHICH members the body holds does NOT, so a golden of one
+/// `, `-bearing member accepts an unrelated body of the right frame. That is the
+/// documented size of the gap, and this case is what makes it a DECLARED one:
+/// strengthening the bound later must come and change this assertion instead of
+/// silently widening a claim the census already prints.
+///
+/// The two directions that ARE decidable are asserted beside it, so the case
+/// cannot be read as "a refused node compares nothing".
+#[test]
+fn a_refused_node_compares_its_frame_and_body_emptiness_and_no_more() {
+    let schema = set_schema();
+    // One member carrying the `, ` separator: its count is 1, so not even
+    // emptiness is decidable there.
+    let golden = vec![row(&[("id", json!(1)), ("s", json!(["a, b"]))])];
+
+    for body in ["{a, b}", "{completely wrong}", "{}"] {
+        let report = csv_report(&schema, &golden, body);
+        assert!(
+            report.diffs.is_empty(),
+            "the residual is that `{body}` is ACCEPTED at a refused one-member              node — if this now diverges, the bound has been strengthened and the              declared gap must be re-stated: {:?}",
+            report.diffs
+        );
+        assert_eq!(report.ambiguous_container_cells, 1, "body `{body}`");
+        assert_eq!(
+            report.container_cells, 0,
+            "a refused cell is never counted as compared container coverage"
+        );
+    }
+
+    // The FRAME still is compared: a `set` must be rendered with its own brackets.
+    let report = csv_report(&schema, &golden, "[a, b]");
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+
+    // And so is EMPTINESS, in the two directions a confusable reading cannot
+    // reach: two or more members cannot render as an empty body…
+    let two = vec![row(&[("id", json!(1)), ("s", json!(["a, b", "c"]))])];
+    let report = csv_report(&schema, &two, "{}");
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("cannot render as an empty body"),
+        "{:?}",
+        report.diffs
+    );
+
+    // …and an EMPTY golden container can only render as the bracket pair.
+    let empty = vec![row(&[("id", json!(1)), ("s", json!([]))])];
+    let report = csv_report(&schema, &empty, "{a}");
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(
+        report.diffs[0].contains("carries a body"),
+        "{:?}",
+        report.diffs
+    );
+}
+
 /// The JSON lane carries its own structure, so nothing there is ever refused —
 /// the same golden that refuses a member in CSV is fully compared in JSON.
 #[test]

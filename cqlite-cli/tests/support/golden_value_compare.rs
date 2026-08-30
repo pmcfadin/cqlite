@@ -60,12 +60,15 @@ pub struct Report {
     /// and named in [`Self::ambiguity_reasons`], so the narrowing is declared at
     /// run time rather than inferred from a silent gap.
     ///
-    /// A refusal is NOT a blind spot the size of the cell, nor even of the node:
-    /// what it cannot reach — the bracket frame at every depth, the decidable
-    /// member counts, and every unambiguous sibling and enclosing level — is still
-    /// compared, and a divergence there is an ordinary diff (finding N3, at member
-    /// granularity since finding P2). The CELL is not counted as compared
-    /// coverage, because only part of its value was decided.
+    /// A refusal is decided at the NARROWEST node it destroys, so its reach is
+    /// that node and not the cell: every unambiguous sibling and every enclosing
+    /// level keeps being compared, and a divergence there is an ordinary diff
+    /// (finding N3, at member granularity since finding P2). AT the refused node
+    /// itself, exactly two things survive — the bracket frame and the body's
+    /// EMPTINESS — and WHICH members the body holds does not; `csv_container`'s
+    /// module doc states that residual exactly, having previously implied more
+    /// (finding Q1). The CELL is not counted as compared coverage, because only
+    /// part of its value was decided.
     pub ambiguous_container_cells: usize,
     /// One deduplicated `path (reason)` entry per refused POSITION — `s (…)` for a
     /// whole cell, `sl[0] (…)` for one indistinguishable member of it.
@@ -631,9 +634,10 @@ enum Refusal {
     /// LEVEL — a structural character unbalances the bracket depth the whole
     /// rendering is split on — so no part of the cell can be read back into
     /// members. Decided from the golden alone, so it can never be caused by the
-    /// defect under test, and it still suppresses only the indistinguishable
-    /// readings: the caller applies
-    /// `csv_container::decidable_despite_cell_refusal` (finding N3).
+    /// defect under test, and the caller still applies what survives —
+    /// `csv_container::decidable_despite_cell_refusal`, i.e. the frame and the
+    /// body's emptiness and nothing more (finding N3, residual stated under
+    /// finding Q1).
     ///
     /// Every NARROWER cause is refused per NODE inside the walk instead
     /// (`csv_container::node_refusal`, finding P2) and never reaches here.
@@ -810,7 +814,9 @@ fn compare_value_body(
     // CSV only: a position whose GOLDEN content the flat rendering cannot express
     // unambiguously (`csv_container::node_refusal`). The refusal is recorded and
     // what survives it is compared — the frame, which the decoder already required
-    // at this depth, and the member counts no confusable reading can produce.
+    // at this depth, and the body's EMPTINESS. WHICH members the body holds is
+    // NOT compared at this node; that residual is stated exactly in
+    // `csv_container`'s module doc (finding Q1).
     //
     // Asked HERE, at every node of the same recursion the comparison walks, which
     // is the whole point of finding P2: the decision is made at the granularity of

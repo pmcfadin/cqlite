@@ -134,14 +134,37 @@
 //! cannot express it. A CLI that emits the wrong member still fails — only the
 //! exact null/`"null"` swap is invisible.
 //!
-//! ## What survives a refusal
+//! ## What survives a refusal, stated exactly — and the residual it leaves
 //!
-//! A refusal is never a blind spot the size of the node, let alone of the cell.
-//! At a refused node the FRAME is still required to be the declared type's
-//! bracket pair, and the member counts no confusable reading can explain are
-//! still compared — see [`decidable_despite_node_refusal`] and
-//! [`decidable_despite_cell_refusal`] (finding N3). Every refusal is decided from
-//! the GOLDEN and the committed DDL alone, so it can never be caused by the very
+//! EXACTLY TWO things are still required at a refused position, and it is worth
+//! saying so precisely, because an earlier wording here ("never a blind spot the
+//! size of the node"; "the member counts no confusable reading can explain are
+//! still compared") implied a stronger guarantee than the code has ever had —
+//! review round 10, finding Q1:
+//!
+//!   1. the FRAME: the position carries a text rendering, framed with the bracket
+//!      pair the DECLARED type requires;
+//!   2. BODY EMPTINESS, in the two directions no confusable reading can reach: an
+//!      EMPTY golden container must render as an empty body, and a golden of TWO
+//!      OR MORE members must render as a non-empty one.
+//!
+//! See [`decidable_despite_node_refusal`] and [`decidable_despite_cell_refusal`]
+//! (finding N3), which apply the two together, and [`body_emptiness_bound`] for
+//! the second.
+//!
+//! THE RESIDUAL, which is real and is therefore declared rather than implied
+//! away: WHICH members the body holds is NOT compared at a refused node. So a
+//! golden of two or more members accepts ANY non-empty body there, and a golden
+//! of EXACTLY ONE member accepts ANY body at all (an empty body is the legal
+//! rendering of one empty member, so not even emptiness is decidable there). At
+//! such a node the blind spot IS the size of the node's CONTENT — bounded by the
+//! frame and by emptiness, and by nothing else. The unit cases below assert that
+//! residual directly, so a future strengthening has to come and change them.
+//!
+//! What keeps it from being a SILENT gap is the census: every refused position is
+//! counted and NAMED by path and cause, and a refused cell is deliberately not
+//! counted as compared container coverage. Every refusal is decided from the
+//! GOLDEN and the committed DDL alone, so it can never be caused by the very
 //! defect under test.
 
 use super::schema::CqlType;
@@ -384,7 +407,8 @@ fn field_type<'t>(ty: Option<&'t CqlType>, key: &str) -> Option<&'t CqlType> {
 /// Every refusal cause is about the CONTENT of a body: which members it holds, and
 /// how many. None is about its FRAME. So three properties survive every cause,
 /// each decided from the GOLDEN and the committed DDL exactly as the refusal
-/// itself is:
+/// itself is — and these three are ALL that survive, which the module doc states
+/// together with the residual they leave (finding Q1):
 ///
 ///   1. the position carries a rendering AT ALL. The golden is a container, and
 ///      the shortest rendering of any container is its bracket PAIR, so an empty
@@ -393,7 +417,8 @@ fn field_type<'t>(ty: Option<&'t CqlType>, key: &str) -> Option<&'t CqlType> {
 ///   2. it is framed with the bracket pair the DECLARED type requires — the same
 ///      rule [`strip`] applies on the decodable path, where a `set` rendered
 ///      `[a, b]` is a failure (review finding R2);
-///   3. the member COUNT, in the two directions no confusable reading can reach. A
+///   3. BODY EMPTINESS, i.e. the member count in the only two directions no
+///      confusable reading can reach — never WHICH members the body holds. A
 ///      golden container with NO members can only render as the empty bracket
 ///      pair: both readings EMPTY-CONTAINER confuses — zero members, and one
 ///      member that renders empty — are `{}` byte for byte, so ANY other body is a
@@ -412,7 +437,7 @@ fn field_type<'t>(ty: Option<&'t CqlType>, key: &str) -> Option<&'t CqlType> {
 /// [`decidable_despite_node_refusal`] is the per-NODE one used inside the walk,
 /// where the decoder has already required and stripped this node's frame (that IS
 /// property 2, applied at every depth) and left the un-split BODY. Both then apply
-/// the identical count bounds, stated once in [`count_bounds`].
+/// the identical emptiness bound, stated once in [`body_emptiness_bound`].
 pub fn decidable_despite_cell_refusal(
     golden: &Value,
     cli: &Value,
@@ -424,7 +449,7 @@ pub fn decidable_despite_cell_refusal(
         return Ok(());
     };
     let text = cli_text(cli)?;
-    count_bounds(members, strip(text, ty)?, text)
+    body_emptiness_bound(members, strip(text, ty)?, text)
 }
 
 /// [`decidable_despite_cell_refusal`] for a node the DECODER refused: `cli` is the
@@ -435,7 +460,7 @@ pub fn decidable_despite_node_refusal(golden: &Value, cli: &Value) -> Result<(),
         return Ok(());
     };
     let body = cli_text(cli)?;
-    count_bounds(members, body, body)
+    body_emptiness_bound(members, body, body)
 }
 
 /// The member count of a golden container, or `None` for a scalar.
@@ -464,9 +489,17 @@ fn cli_text(cli: &Value) -> Result<&str, String> {
     }
 }
 
-/// Property 3: the two member counts no confusable reading can produce.
+/// Property 3, and NOTHING more: is the body's EMPTINESS consistent with the
+/// golden's member count, in the only two directions no confusable reading can
+/// reach?
+///
+/// Named for what it checks, because it is NOT a bound on the count itself: at
+/// exactly ONE member it accepts any body, and at two or more it accepts any
+/// NON-EMPTY body, so WHICH members the body holds is never compared here (the
+/// module doc's residual, finding Q1).
+///
 /// `rendering` is what the diagnostic quotes (the whole cell, or the body).
-fn count_bounds(members: usize, body: &str, rendering: &str) -> Result<(), String> {
+fn body_emptiness_bound(members: usize, body: &str, rendering: &str) -> Result<(), String> {
     if members == 0 && !body.is_empty() {
         return Err(format!(
             "the golden container is EMPTY, so the only renderings the CSV \
@@ -999,7 +1032,7 @@ mod tests {
     /// divergence. Before this the whole cell was discarded before the CLI value
     /// was looked at, so all four passed.
     #[test]
-    fn a_refused_cell_still_has_its_frame_and_member_count_compared() {
+    fn a_refused_cell_still_has_its_frame_and_body_emptiness_compared() {
         let ty = ty_of("frozen<set<text>>");
         let empty = json!([]);
         // The one reading pair the format genuinely cannot tell apart.
@@ -1045,12 +1078,13 @@ mod tests {
     }
 
     /// The per-NODE half of the same rule, on the BODY the decoder leaves: the
-    /// same two counts, and the same suppression of which members the body holds.
+    /// same emptiness bound, and the same suppression of which members the body
+    /// holds.
     /// The frame is not re-checked here because the decoder already required it at
     /// that depth — which is what makes it checked at EVERY depth rather than only
     /// at the cell's outer level.
     #[test]
-    fn a_refused_node_still_has_its_member_count_compared() {
+    fn a_refused_node_still_has_its_body_emptiness_compared() {
         for (golden, body, expect) in [
             (json!([]), "", None),
             (json!([]), "a", Some("carries a body")),

@@ -109,10 +109,11 @@
 //!   deliberately strict (each collection kind must use its own bracket, taken
 //!   from the DDL), and the two ambiguities CSV genuinely cannot express. A cell
 //!   whose GOLDEN content cannot survive an unquoted rendering is REFUSED, never
-//!   guessed, and the refusal is counted and named in the run census — and the
-//!   refusal suppresses only the INDISTINGUISHABLE readings: the bracket frame
-//!   and the two decidable member counts are still compared, so `null` or
-//!   unrelated text in a refused cell is still a divergence (finding N3).
+//!   guessed, and the refusal is counted and named in the run census. What
+//!   survives it is the bracket frame and the body's EMPTINESS — so `null` or an
+//!   unrelated non-container spelling is still a divergence (finding N3) — while
+//!   WHICH members a refused body holds is NOT compared; `csv_container`'s module
+//!   doc states that residual exactly (finding Q1).
 //!
 //! Everything else is compared byte-exactly, including blob `0x…` hex, decimal
 //! text, booleans, UUID text and `null`.
