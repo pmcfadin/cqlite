@@ -1015,25 +1015,28 @@ fn the_stage_census_check_rejects_a_run_that_does_not_match_it() {
 /// stage, and says it never finished.
 #[test]
 fn the_stage_census_check_rejects_an_extra_stage_that_never_finished() {
-    let panicked = std::panic::catch_unwind(|| {
-        let deadline = TestDeadline::start(Duration::from_secs(60), Duration::from_secs(60));
-        for entry in T1_WAIT_CENSUS {
-            deadline.stage(entry.stage).finish();
-        }
-        // Opened, therefore able to draw on the one deadline; never `finish()`ed,
-        // therefore absent from every completion record. `Stage` has no `Drop`, so
-        // it is simply left to go out of scope — the record of its OPENING is
-        // already in the deadline.
-        let _never_finished = deadline.stage("f.opened-never-finished");
-        assert!(
-            deadline
-                .unfinished_stages()
-                .contains(&"f.opened-never-finished"),
-            "an opened-and-dropped stage must be recorded as unfinished"
-        );
+    let deadline = TestDeadline::start(Duration::from_secs(60), Duration::from_secs(60));
+    for entry in T1_WAIT_CENSUS {
+        deadline.stage(entry.stage).finish();
+    }
+    // Opened, therefore able to draw on the one deadline; never `finish()`ed,
+    // therefore absent from every completion record. `Stage` has no `Drop`, so it
+    // is simply left to go out of scope — the record of its OPENING is already in
+    // the deadline.
+    let _never_finished = deadline.stage("f.opened-never-finished");
+
+    // THE PROPERTY, asserted FIRST so that a regression reds on the guard hole
+    // itself rather than on a precondition supporting it: the check REJECTS this
+    // run. Keyed on completion, it accepted it, and the aggregate floor stayed
+    // green on a base that did not account for the stage.
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert_census_matches_run("a synthetic T1 run", T1_WAIT_CENSUS, &deadline);
-    })
-    .expect_err("a stage that was opened and never finished must fail the check");
+    }))
+    .expect_err(
+        "the census check ACCEPTED a run carrying a stage the census does not declare, because \
+         that stage was never `finish`ed — the guard not covering the case it is named for \
+         (job 255, finding 1)",
+    );
     let panicked = panic_text(panicked.as_ref());
     assert!(
         panicked.contains("f.opened-never-finished"),
@@ -1043,6 +1046,23 @@ fn the_stage_census_check_rejects_an_extra_stage_that_never_finished() {
         panicked.contains("opened and never finished"),
         "the failure must say the extra stage never finished, so the reader is not left \
          looking for it in the timings: {panicked}"
+    );
+
+    // ...and the mechanism that makes it hold: the stage is recorded from its
+    // OPENING, and is reported as unfinished rather than silently absent.
+    assert!(
+        deadline
+            .opened_stages()
+            .contains(&"f.opened-never-finished"),
+        "a stage must be recorded from the point it is OPENED: {:?}",
+        deadline.opened_stages()
+    );
+    assert!(
+        deadline
+            .unfinished_stages()
+            .contains(&"f.opened-never-finished"),
+        "an opened-and-dropped stage must be reported as unfinished: {:?}",
+        deadline.unfinished_stages()
     );
 }
 
