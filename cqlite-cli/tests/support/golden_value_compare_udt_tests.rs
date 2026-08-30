@@ -223,7 +223,15 @@ fn an_exclusion_cannot_excuse_an_absent_field() {
                      "level": 9}),
         ),
     ])];
-    let report = compare_rows(&golden, &diverging, &schema, &["id"], &[], &skip, Egress::Json);
+    let report = compare_rows(
+        &golden,
+        &diverging,
+        &schema,
+        &["id"],
+        &[],
+        &skip,
+        Egress::Json,
+    );
     assert!(
         report.diffs.is_empty() && report.stale_skips.is_empty(),
         "an excluded VALUE divergence is suppressed: {:?} / {:?}",

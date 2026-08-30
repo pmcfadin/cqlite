@@ -1101,10 +1101,8 @@ fn run_lane(egress: Egress) {
         // The comparator is handed the DIVERGENCE alongside the path: a gap
         // suppresses the divergence it names and nothing else, so the declaration
         // has to travel with the exclusion (review round 17).
-        let skip: Vec<(&str, Divergence)> = applicable
-            .iter()
-            .map(|s| (s.path, s.divergence))
-            .collect();
+        let skip: Vec<(&str, Divergence)> =
+            applicable.iter().map(|s| (s.path, s.divergence)).collect();
         let report = compare_rows(&expected, &actual, &table, case.pk, case.ck, &skip, egress);
         if report.diffs.is_empty() && report.compared_cells == 0 {
             failures.push(format!(

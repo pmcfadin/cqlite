@@ -1,5 +1,11 @@
-//! What a DECLARED GAP says the divergence IS, in a form the walk can CHECK
-//! (issue #1491 review finding, round 17).
+//! DECLARED GAPS: what each one says the divergence IS, in a form the walk can
+//! CHECK, and what the walk observed it to do (issue #1491, review round 17).
+//!
+//! Two halves of one responsibility, which is why they share a file: the
+//! [`Divergence`] a gap declares, and the bookkeeping ([`SkipPaths`],
+//! [`Observed`], [`Suppressions`]) that decides from the walk's own outcome
+//! whether the gap is APPLIED or STALE. The comparator asks; nothing here decides
+//! how to compare.
 //!
 //! A declared gap is this lane's honest exception: the whole argument for shipping
 //! one is that it names a specific, MEASURED divergence. That argument only holds
@@ -35,6 +41,8 @@
 use super::super::schema::CqlType;
 use super::{canon_typed, csv_container, Depth, Egress, Kinding};
 use serde_json::Value;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 /// The measured divergence ONE declared gap stands for.
 ///
@@ -251,4 +259,199 @@ fn is_float_type(ty: &CqlType) -> bool {
 
 fn is_decimal_type(ty: &CqlType) -> bool {
     matches!(ty, CqlType::Numeric(name) if name == "decimal")
+}
+
+// ===========================================================================
+// The declared-gap BOOKKEEPING: the set, and what each was observed to do
+// ===========================================================================
+//
+// Split from the comparator under the campsite rule (CLAUDE.md, epic #1135), which
+// the comparator had outgrown. What belongs here is the whole of ONE
+// responsibility: a declared gap — what it declares, what the walk observed it to
+// do, and whether that makes it applied or stale. The comparator asks; it does not
+// decide.
+
+/// What a declared exclusion was OBSERVED to do, over a whole table's walk.
+///
+/// Ordered by strength: an exclusion that suppressed a real divergence anywhere is
+/// applied, whatever happened on the other rows.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Observed {
+    /// The path was reached and the comparison there COULD NOT BE DECIDED (the
+    /// column was absent from the egress row, or the CSV cell was refused). "I
+    /// could not tell" is not "the gap is still real", so it is reported.
+    Unresolved(String),
+    /// The path was reached and the two sides AGREE — the divergence the exclusion
+    /// was declared for is gone, so the exclusion is stale.
+    Agreed,
+    /// The path was reached and the two sides DIVERGED, but NOT in the way the
+    /// exclusion declares. The exclusion did not suppress that divergence — it is
+    /// reported as an ordinary diff — so the exclusion suppressed nothing, and the
+    /// unexplained divergence is named here too.
+    ///
+    /// Stronger than [`Self::Agreed`] because it is the more actionable answer: a
+    /// table where one row agrees and another diverges in an undeclared way should
+    /// say so rather than report the gap as merely retired.
+    Undeclared(String),
+    /// The path was reached and the two sides diverged EXACTLY as the exclusion
+    /// declares (see [`Divergence`]): the exclusion suppressed the divergence
+    /// it names, which is the only thing that makes it applied.
+    Suppressed,
+}
+
+/// Value paths excluded from the comparison, with what each was observed to do.
+///
+/// A path is fully qualified from the row: `sf` excludes a whole column, `e.home`
+/// excludes ONE field of the `frozen<employee>` in column `e` while `e.name` and
+/// `e.level` keep being compared. Whole-column granularity alone was too coarse
+/// and cost real coverage — skipping `e` for its one divergent inner field left
+/// `udt_nested` comparing nothing but its primary key (issue #1491 review finding
+/// F5).
+///
+/// # An exclusion excludes a VALUE, never a column's PRESENCE
+///
+/// Every entry names a position whose rendered VALUE the two sides disagree
+/// about. None of them says the position may be absent: the comparator's contract
+/// is that the egress renders every column the committed `CREATE TABLE` declares,
+/// and an omitted column is a divergence of the egress SHAPE that no gap covers.
+/// So a whole-column entry still leaves "the column is rendered at all" asserted,
+/// and when the column IS missing the entry is `Unresolved` — there is no value at
+/// that path to read an answer from (issue #1491 review finding P1). Recording it
+/// as [`Observed::Suppressed`] instead is what let the declared skips hide a
+/// dropped column.
+///
+/// # An exclusion is applied only when it SUPPRESSES ITS DECLARED divergence
+///
+/// Being VISITED is not enough, and treating it as enough is a guard weaker than
+/// the property it guards (issue #1491 review finding L1): once CQLite renders the
+/// path correctly, a visit-keyed tally still registers a hit, so the column stays
+/// excluded forever and the stale-gap check reports the dead exclusion as live —
+/// silently preventing the coverage from coming back. So the comparison at an
+/// excluded path is still RUN; its result is recorded here and only then
+/// discarded. [`Self::stale`] then fails on an exclusion that agreed, was never
+/// reached, or could not be evaluated — three distinct causes, each named, and no
+/// two of them can be reported for the same path.
+pub struct SkipPaths<'a> {
+    gaps: &'a [Gap<'a>],
+    observed: RefCell<BTreeMap<String, Observed>>,
+}
+
+/// One declared gap as the comparator receives it: the path, and the divergence
+/// the caller declares is there.
+///
+/// A path alone was the whole declaration until review round 17, and that is what
+/// made every gap a permanent blind spot for its column: with nothing to check the
+/// mismatch AGAINST, any mismatch at the path counted as the declared one. See
+/// [`Divergence`].
+pub type Gap<'a> = (&'a str, Divergence);
+
+impl<'a> SkipPaths<'a> {
+    pub fn new(gaps: &'a [Gap<'a>]) -> Self {
+        Self {
+            gaps,
+            observed: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// The divergence declared at this EXACT path, or `None`. Records NOTHING —
+    /// what the exclusion did is recorded by [`Self::observe`], from the
+    /// comparison's own outcome.
+    pub(super) fn declared(&self, path: &str) -> Option<Divergence> {
+        self.gaps
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, divergence)| *divergence)
+    }
+
+    /// Is this exact path excluded? A thin reading of [`Self::declared`], kept
+    /// because the CSV decoder is handed a path predicate (see `super::csv_decoded`).
+    pub(super) fn excludes(&self, path: &str) -> bool {
+        self.declared(path).is_some()
+    }
+
+    /// Record what the exclusion at `path` was observed to do. The strongest
+    /// observation over the table's rows wins, so one divergent row is enough to
+    /// keep the exclusion applied and no later agreeing row can retire it.
+    pub(super) fn observe(&self, path: &str, what: Observed) {
+        let mut observed = self.observed.borrow_mut();
+        match observed.get(path) {
+            Some(prev) if *prev >= what => {}
+            _ => {
+                observed.insert(path.to_string(), what);
+            }
+        }
+    }
+
+    /// Every declared exclusion that did not suppress a divergence, with the cause.
+    pub(super) fn stale(&self) -> Vec<String> {
+        let observed = self.observed.borrow();
+        self.gaps
+            .iter()
+            .map(|(p, _)| p)
+            .filter_map(|p| match observed.get(*p) {
+                Some(Observed::Suppressed) => None,
+                Some(Observed::Agreed) => Some(format!(
+                    "`{p}` (the two sides AGREE at that path now, so the exclusion \
+                     suppresses nothing and is holding back recovered coverage)"
+                )),
+                Some(Observed::Undeclared(what)) => Some(format!(
+                    "`{p}` (a divergence was seen there, but NOT the one this gap declares, \
+                     so the gap suppressed nothing and the divergence is reported as an \
+                     ordinary diff: {what})"
+                )),
+                Some(Observed::Unresolved(why)) => Some(format!(
+                    "`{p}` (the comparison there could not be evaluated: {why} — an \
+                     exclusion whose subject cannot be measured is not a measured gap)"
+                )),
+                None => Some(format!("`{p}` (matched no value in the walk at all)")),
+            })
+            .collect()
+    }
+}
+
+/// Every position where a DECLARED GAP actually suppressed its declared
+/// divergence, recorded as the gap ROOT it belongs to.
+///
+/// Two readers, and both need the root rather than a bare count:
+///
+///   * a gap's root asks whether the divergence was found DEEPER in its own
+///     subtree, because then the suppression is already recorded and this node has
+///     nothing to add (a `set<double>`'s three non-finite members are suppressed
+///     at `sf[i]`, not at `sf`);
+///   * `super::count_cell` asks whether a gap fired anywhere inside THIS cell,
+///     because a cell part of whose value was discarded is not compared coverage —
+///     the same rule a `super::Refusals` entry already imposes.
+///
+/// A separate channel from the value tree for the same reason `super::Refusals` is:
+/// it is CONTROL information about a position, and a sentinel inside the decoded
+/// `Value` would be indistinguishable from data the egress could produce.
+#[derive(Default)]
+pub struct Suppressions {
+    recorded: RefCell<Vec<String>>,
+}
+
+impl Suppressions {
+    /// How many suppressions have been recorded so far, taken as a MARK before a
+    /// subtree and compared after it (see `super::Refusals::mark`).
+    pub(super) fn mark(&self) -> usize {
+        self.recorded.borrow().len()
+    }
+
+    pub(super) fn record(&self, root: &str) {
+        self.recorded.borrow_mut().push(root.to_string());
+    }
+
+    /// Did any gap suppress a divergence since `mark`?
+    pub(super) fn any_since(&self, mark: usize) -> bool {
+        self.recorded.borrow().len() > mark
+    }
+
+    /// Did the gap rooted at `root` suppress a divergence since `mark`?
+    pub(super) fn root_since(&self, mark: usize, root: &str) -> bool {
+        self.recorded
+            .borrow()
+            .iter()
+            .skip(mark)
+            .any(|recorded| recorded == root)
+    }
 }

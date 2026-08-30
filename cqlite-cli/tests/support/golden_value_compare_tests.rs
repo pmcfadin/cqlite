@@ -1225,10 +1225,7 @@ fn a_skip_that_matches_nothing_is_reported() {
         &schema,
         &["id"],
         &[],
-        &[(
-            "p.middle_name",
-            Divergence::NestedFrozenUdtRendersAsBlobHex,
-        )],
+        &[("p.middle_name", Divergence::NestedFrozenUdtRendersAsBlobHex)],
         Egress::Json,
     );
     assert_eq!(
