@@ -12,9 +12,9 @@
 //!
 //! # What reaches this module, which is WIDER than the obvious two columns
 //!
-//! Every `map` KEY goes through [`value_to_hashable_key`], because [`map_to_py`]
+//! Every `map` KEY goes through [`value_to_hashable_key`], because `value::map_to_py`
 //! has no gate — a Python `dict` key must be hashable whatever it holds. Every
-//! non-UDT `set` element goes through it too, from [`set_to_py`]'s `frozenset`
+//! non-UDT `set` element goes through it too, from `value::set_to_py`'s `frozenset`
 //! branch. Those are the direct callers, but the REACH is deeper than the
 //! columns that name them: a `set` whose elements contain a UDT takes
 //! `set_to_py`'s `list` branch and converts each element with `value_to_py` —
@@ -47,14 +47,14 @@ use cqlite_core::Value;
 /// UNCONDITIONALLY (`list_to_py`), a `Set` becomes a `list` when it contains a
 /// UDT anywhere inside (`set_to_py`), and a UDT's FIELD VALUES are projected by
 /// [`value_to_py`] (`udt_to_py`), so a UDT with a collection field is
-/// unhashable even though the [`Udt`] class itself implements `__hash__`
+/// unhashable even though the [`crate::value::Udt`] class itself implements `__hash__`
 /// (issue #3504).
 /// This function is the TOTAL hashable projection over `cqlite_core::Value`:
 ///
 /// - `List`, `Tuple` → `tuple` (elements recursively projected)
 /// - `Set` → `frozenset` (elements recursively projected)
 /// - `Map` → `tuple` of `(key, value)` tuples (both sides recursively projected)
-/// - `Udt` → a [`Udt`] instance carrying the type identity OUT OF BAND, with
+/// - `Udt` → a [`crate::value::Udt`] instance carrying the type identity OUT OF BAND, with
 ///   every field value recursively projected (issue #3504)
 /// - `Frozen` → unwrap and recurse
 /// - `Json` → `tuple` (array) / `frozenset` of pairs (object), recursively
@@ -73,9 +73,9 @@ use cqlite_core::Value;
 /// narrowed one of them without closing it:
 ///
 /// - the `Set` route fails UNCONDITIONALLY when a UDT is anywhere inside, because
-///   [`set_to_py`] answers with a `list` there on purpose (#804);
-/// - the `Tuple` route reaches [`tuple_to_py`], which projects its elements with
-///   [`value_to_py`]. Since #3504 a UDT element is a hashable [`Udt`], so a
+///   `value::set_to_py` answers with a `list` there on purpose (#804);
+/// - the `Tuple` route reaches `value::tuple_to_py`, which projects its elements with
+///   [`value_to_py`]. Since #3504 a UDT element is a hashable [`crate::value::Udt`], so a
 ///   `tuple<frozen<udt>>` of SCALAR-field UDTs happens to survive; a `list`/`map`
 ///   element, or a UDT carrying a collection FIELD, still does not.
 ///
@@ -93,7 +93,7 @@ use cqlite_core::Value;
 /// error; presence of a lint attribute is not enforcement.
 ///
 /// Recursion goes through THIS function, never through [`value_to_py`] or
-/// [`set_to_py`]: `set_to_py`'s UDT branch returns an unhashable `list` **on
+/// `value::set_to_py`: `set_to_py`'s UDT branch returns an unhashable `list` **on
 /// purpose** (issue #804) because that is the right answer for a top-level
 /// column, and the wrong one inside a hashable position.
 #[deny(clippy::wildcard_enum_match_arm)]
@@ -250,7 +250,7 @@ pub(crate) fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<P
         //
         // A THIRD member — a UDT field literally named `_type`/`_keyspace`
         // shadowing the metadata pair this arm used to inject — is GONE, fixed by
-        // issue #3504: the identity now rides on the [`Udt`] instance and the
+        // issue #3504: the identity now rides on the [`crate::value::Udt`] instance and the
         // field namespace holds declared fields only, so there is no metadata
         // pair left to shadow.
         Value::Json(json) => json_to_hashable_key(py, json),
@@ -263,7 +263,7 @@ pub(crate) fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<P
         // immutable Python built-ins; `Timestamp`/`Date` to `datetime`/`date`;
         // `Uuid` to `uuid.UUID`; `Decimal` to `decimal.Decimal`; `Inet` to
         // `ipaddress.IPv4Address`/`IPv6Address`; `Duration` to the
-        // `#[pyclass(frozen, eq, hash)]` [`Duration`] class; and `Null` /
+        // `#[pyclass(frozen, eq, hash)]` [`crate::value::Duration`] class; and `Null` /
         // `Tombstone` to `None`.
         Value::Null
         | Value::Boolean(_)
@@ -335,7 +335,7 @@ fn json_to_hashable_key(py: Python<'_>, json: &serde_json::Value) -> PyResult<Py
 }
 /// Return `true` if `value` is or CONTAINS a UDT value, at any nesting depth.
 ///
-/// Used by [`set_to_py`] to decide whether a `SET` is returned as a `frozenset`
+/// Used by `value::set_to_py` to decide whether a `SET` is returned as a `frozenset`
 /// (no UDT anywhere inside) or as a `list` (a UDT is in there, so #804's
 /// CLI-parity shape applies). Since issue #3504 that is a SHAPE decision and not
 /// a hashability one — see the note at the exhaustive arm below.
