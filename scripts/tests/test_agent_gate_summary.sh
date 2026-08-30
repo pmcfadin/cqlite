@@ -4535,8 +4535,12 @@ for _st in $nll_states; do
     "node-bindings-leak-lane: "*) : ;;
     *) nll_vocab_ok=0; echo "  state '$_st' rendered: '$_line'" ;;
   esac
+  # The FALLBACK's own signature, not the bare word: a legitimate note may say
+  # "UNKNOWN" about something it does not know (ENTERED-FAILED says execution is
+  # UNKNOWN, round 10 S3), and matching the word alone turned that into a false
+  # failure of this case.
   case "$_line" in
-    *UNKNOWN*) nll_vocab_ok=0; echo "  state '$_st' fell through to the UNKNOWN arm" ;;
+    *"UNKNOWN state '"*) nll_vocab_ok=0; echo "  state '$_st' fell through to the UNKNOWN arm" ;;
   esac
 done
 # DISTINCTNESS (roborev J4): as many unique lines as states.
@@ -4558,19 +4562,31 @@ else
 fi
 
 # 1465e. The two failure states must SAY what they mean and CLAIM NO MORE than they
-#        know, so a pasted block cannot be misread. ENTERED-FAILED replaced a
-#        NOT-REACHED that blamed npm ci for a real budget failure, so it must
-#        distinguish itself from an earlier step — but it is inferred from an EXIT CODE,
-#        so it must NOT claim the budget tests executed (round 7, N-f): a missing or
-#        renamed test:leaks script lands in the same arm. NO-BUDGET-AFFIRMATION must
-#        name the affirmation rather than a test count.
+#        know. ENTERED-FAILED replaced a NOT-REACHED that blamed npm ci for a real
+#        budget failure, so it must distinguish itself from an earlier step — but it is
+#        inferred from an EXIT CODE, so it must NOT claim the budget tests executed:
+#        a jest harness/config/setup/loader error that ran nothing lands in the same arm
+#        (round 10, S3). NO-BUDGET-AFFIRMATION must name the affirmation rather than a
+#        test count.
+#
+#        Asserted POSITIVELY (it must state the uncertainty) and NEGATIVELY (no phrase
+#        that asserts execution), because grepping for the absence of one exact phrase
+#        would pass for any rewording that overclaims differently.
 nll_entered=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note ENTERED-FAILED' _ "$GATE" 2>/dev/null)
 nll_noaffirm=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note NO-BUDGET-AFFIRMATION' _ "$GATE" 2>/dev/null)
-if printf '%s' "$nll_entered" | grep -q "REACHED" \
-   && printf '%s' "$nll_entered" | grep -q "NOT an earlier" \
-   && ! printf '%s' "$nll_entered" | grep -q "DID execute" \
-   && printf '%s' "$nll_noaffirm" | grep -qE "named (#1465 )?budget test"; then
-  ok "1465-failure-states: ENTERED-FAILED distinguishes itself from an earlier step WITHOUT claiming the budgets executed; NO-BUDGET-AFFIRMATION names the budget tests"
+nll_e_ok=1
+printf '%s' "$nll_entered" | grep -q "REACHED" || { nll_e_ok=0; echo "  ENTERED-FAILED does not say the invocation was reached"; }
+printf '%s' "$nll_entered" | grep -q "NOT an earlier" || { nll_e_ok=0; echo "  ENTERED-FAILED does not distinguish itself from an earlier step"; }
+printf '%s' "$nll_entered" | grep -qE "UNKNOWN|unknown" || { nll_e_ok=0; echo "  ENTERED-FAILED does not state that execution is UNKNOWN"; }
+# No phrase may assert that the budgets ran. Each of these would be an overclaim.
+for _bad in "DID execute" "so the leak budgets ran" "the budgets ran" "budgets executed"; do
+  if printf '%s' "$nll_entered" | grep -qF "$_bad"; then
+    nll_e_ok=0; echo "  ENTERED-FAILED overclaims execution via: '$_bad'"
+  fi
+done
+printf '%s' "$nll_noaffirm" | grep -qE "named (#1465 )?budget test" || { nll_e_ok=0; echo "  NO-BUDGET-AFFIRMATION does not name the budget tests"; }
+if [ "$nll_e_ok" -eq 1 ]; then
+  ok "1465-failure-states: ENTERED-FAILED says REACHED + execution UNKNOWN + not-an-earlier-step and asserts no execution; NO-BUDGET-AFFIRMATION names the budget tests"
 else
   bad "1465-failure-states: the failure notes do not state their own meaning (or overclaim)"
   echo "  ENTERED-FAILED: $nll_entered"
