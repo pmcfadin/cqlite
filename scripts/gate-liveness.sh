@@ -105,8 +105,15 @@ verdict() { # verdict <STATUS> <exit> <detail>
 }
 
 # ---- the summary side: is there a verdict at all? -------------------------------
+# NOTE on the file predicates below (CLAUDE.md's predicate-family rule): every `[ -f ]` /
+# `[ -r ]` is TWO-valued, so it must collapse "cannot tell" (an unsearchable parent
+# directory, a transient FS error) onto one of its two answers. Every one here collapses
+# onto **UNKNOWN**, the conservative side — never onto a verdict. The rule warns against
+# collapsing onto the PERMISSIVE answer; this is the other direction, deliberately.
+# The cause text is worded to match: "not readable as a file" states what was observed,
+# not "nothing has been written", which would assert a fact the predicate cannot establish.
 if [ ! -f "$SUMMARY" ]; then
-  verdict UNKNOWN 4 "no-summary-artifact; nothing has been written to $SUMMARY"
+  verdict UNKNOWN 4 "no-summary-artifact; $SUMMARY is not readable as a regular file (never written, or its location is not reachable from here)"
 fi
 if [ ! -r "$SUMMARY" ]; then
   verdict UNKNOWN 4 "summary-unreadable; $SUMMARY exists but cannot be read"

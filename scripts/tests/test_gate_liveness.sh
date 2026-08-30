@@ -108,7 +108,24 @@ mk_summary() {
 # A pid that is CERTAIN to be dead, so the REAPED cases are deterministic. Hard-coding a
 # number (4242) would be a coin flip: if that pid happens to exist on the host, a beat
 # naming it reads as "gate still alive" and the case silently flips to UNKNOWN.
-DEAD_PID=$( { bash -c 'exit 0' & echo $!; } ); wait "$DEAD_PID" 2>/dev/null || true
+#
+# Spawned and reaped in THIS shell, deliberately. The first version built it inside a
+# command substitution — `$( { bash -c 'exit 0' & echo $!; } )` — where the process is a
+# child of the SUBSHELL, so the parent's `wait` cannot reap it and the pid could still be
+# live when the first REAPED case ran: a flaky test, of exactly the kind this repo's
+# roborev-lints exist to keep out. Here `wait` reaps a genuine child, and the result is
+# then VERIFIED rather than assumed.
+bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
+DEAD_PID=$!
+kill -9 "$DEAD_PID" 2>/dev/null || true
+wait "$DEAD_PID" 2>/dev/null || true
+# A failed derivation is a FAIL that NAMES the derivation, never a silent fallback: if this
+# pid were still live, every REAPED case below would quietly become UNKNOWN and the suite
+# would go green having asserted nothing about death.
+if kill -0 "$DEAD_PID" 2>/dev/null; then
+  printf 'FAIL %s\n' "0.1 derive a known-dead pid (pid $DEAD_PID is still alive; REAPED cases would be vacuous)"
+  exit 1
+fi
 
 # mk_beat <path> <run-id> <age-secs> [interval] [gate-pid] [gate-starttime]
 # With no gate-starttime the beat exercises the reader's no-/proc-pin FALLBACK path;
