@@ -354,6 +354,31 @@ else
   ok "12.4 no heartbeat opt-out env var"
 fi
 
+echo "=== section 12b: an early-exiting gate emits no undefined-function noise ==="
+# The EXIT trap is armed thousands of lines above where _gate_release_slot is DEFINED,
+# and bash defines functions as it reads the file. So every early-exit path — including
+# every --emit-summary-selftest run — would print `_gate_release_slot: command not found`
+# onto the gate's own stderr. That is not cosmetic: scripts/tests/test_agent_gate_summary.sh
+# reads any `command not found` on the gate's stderr as a MISSING TOOL under its minimal
+# PATH, so the noise fails an unrelated case with a misleading cause (measured, on this
+# change). Pinned here at the source rather than only there, where it looks like a
+# toolchain problem.
+selftest_err="$TMP/selftest.err"
+bash "$GATE" --emit-summary-selftest >/dev/null 2>"$selftest_err"
+if grep -q 'command not found' "$selftest_err"; then
+  bad "12.5 an early-exiting gate emits no 'command not found'" "$(grep -m3 'command not found' "$selftest_err")"
+else
+  ok "12.5 an early-exiting gate emits no 'command not found'"
+fi
+# Non-vacuity: the probe must be reading a stream that CAN carry the message. If the
+# selftest produced nothing at all on stderr the case above is trivially satisfiable, so
+# assert the invocation actually ran by checking it emitted a summary block on stdout.
+sel_out="$TMP/selftest.out"
+bash "$GATE" --emit-summary-selftest >"$sel_out" 2>/dev/null
+grep -q 'AGENT-GATE' "$sel_out" \
+  && ok "12.6 the selftest invocation really ran (case 12.5 is non-vacuous)" \
+  || bad "12.6 the selftest invocation really ran" "no AGENT-GATE block on stdout"
+
 echo "=== section 13: end-to-end through the real gate (wiring evidence) ==="
 # A mechanism is only done when its PUBLIC surface exercises it. --only file-size is
 # ~2s, self-exempt from the #1825 slot, and cannot select tooling-tests (no recursion).

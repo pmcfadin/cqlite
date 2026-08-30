@@ -3570,7 +3570,18 @@ _hb_stop() {
 # shellcheck disable=SC2329  # invoked indirectly via `trap '_gate_atexit' EXIT`
 _gate_atexit() {
   _hb_stop
-  _gate_release_slot
+  # `_gate_release_slot` is DEFINED thousands of lines below this trap (beside
+  # acquire_gate_slot). bash defines functions as it reads the file, so a run that exits
+  # before that point — every early-exit path, and every `--emit-summary-selftest`
+  # invocation — would call an undefined function and print `_gate_release_slot: command
+  # not found` onto the gate's own stderr. Caught by the minimal-PATH case in
+  # scripts/tests/test_agent_gate_summary.sh, which reads any `command not found` on
+  # stderr as a missing tool. The guard is sound rather than merely quieting: a slot can
+  # only ever need releasing after acquire_gate_slot ran, which is necessarily after the
+  # definition was read, so "not yet defined" and "nothing to release" are the same state.
+  if declare -F _gate_release_slot >/dev/null 2>&1; then
+    _gate_release_slot
+  fi
 }
 
 # Synthetic-identity modes run against a stubbed rundir and never certify a real tree;

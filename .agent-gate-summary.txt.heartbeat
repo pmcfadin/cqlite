@@ -1,0 +1,12 @@
+==== AGENT-GATE HEARTBEAT ====
+run-id: /tmp/agent-gate.ivQcZ1
+mode: full
+gate-pid: 3724695
+beater-pid: 3724809
+parent-check: starttime
+interval: 20
+beat-seq: 1
+beat-epoch: 1788071814
+beat-utc: 2026-08-30T06:36:54Z
+logs: /tmp/agent-gate.ivQcZ1
+==== END AGENT-GATE HEARTBEAT ====
