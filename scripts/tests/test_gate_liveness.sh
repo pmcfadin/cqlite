@@ -354,6 +354,77 @@ else
   ok "12.4 no heartbeat opt-out env var"
 fi
 
+echo "=== section 11b: the three roborev job-155 findings, each with a RED control ==="
+# All three were shapes this repo already documents, reproduced here one layer down, so
+# each gets a case that would have FAILED before the fix.
+#
+# (a) Low — the verdict was matched by PREFIX GLOB (`'RESULT: PASS'*`), which accepts
+#     `RESULT: PASSENGER`: a SPELLING test wearing a closed grammar's clothes. CLAUDE.md
+#     records the identical defect in the roborev wrapper's own verdict scan (`PASS*`
+#     accepting `PASSthisNeverRan`). The value is now reduced to its verdict TOKEN and
+#     matched EXACTLY.
+i=0
+for bogus in PASSENGER FAILURE PARTIALLY ERRORS REFUSEDLY INCOMPLETEISH PASS_ FAILs; do
+  i=$((i+1)); f="$TMP/tok-$bogus.txt"; mk_summary "$f" run-t "$bogus"
+  expect_reader "11b.$i RESULT: $bogus => UNKNOWN (token matched exactly, not by prefix)" \
+    UNKNOWN 4 "unrecognised-result" -- "$f"
+done
+# Controls: the real tokens must still be recognised, bare AND with trailing detail.
+mk_summary "$TMP/tok-ok1.txt" run-t "PASS"
+expect_reader "11b.9 control: bare PASS still COMPLETE" COMPLETE 0 "" -- "$TMP/tok-ok1.txt"
+mk_summary "$TMP/tok-ok2.txt" run-t "FAIL (3 components)"
+expect_reader "11b.10 control: FAIL with trailing detail still COMPLETE" COMPLETE 0 "" -- "$TMP/tok-ok2.txt"
+mk_summary "$TMP/tok-ok3.txt" run-t "INCOMPLETE (gate did not finish)"
+mk_beat "$TMP/tok-ok3.txt.heartbeat" run-t 5
+expect_reader "11b.11 control: INCOMPLETE with trailing detail still consults the beat" \
+  RUNNING 2 "" -- "$TMP/tok-ok3.txt"
+
+# (b) Medium — with --run-id supplied but NO `run-id:` line in the summary, validation
+#     was skipped entirely and the terminal verdict was attributed to the requested run.
+#     A permissive branch keyed on the ABSENCE of the bad signal — the shape CLAUDE.md
+#     forbids. The binding is only a guarantee if it is unconditional.
+noid="$TMP/noid.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: PASS"; echo "==== END ===="; } > "$noid"
+expect_reader "11b.12 --run-id given + summary has NO run-id => UNKNOWN, not COMPLETE" \
+  UNKNOWN 4 "summary-no-run-id" -- "$noid" --run-id my-run
+# Control: with no --run-id there is nothing to bind to, so an id-less summary still answers.
+expect_reader "11b.13 control: no --run-id + id-less summary => COMPLETE" \
+  COMPLETE 0 "" -- "$noid"
+# And the same demand holds for a non-terminal summary reaching the heartbeat.
+noid2="$TMP/noid2.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: INCOMPLETE (gate did not finish)"; echo "==== END ===="; } > "$noid2"
+mk_beat "$noid2.heartbeat" my-run 5
+expect_reader "11b.14 --run-id given + id-less INCOMPLETE summary => UNKNOWN, not RUNNING" \
+  UNKNOWN 4 "summary-no-run-id" -- "$noid2" --run-id my-run
+
+# (c) Medium — fields were read by RE-OPENING the path once per field. These are SHARED
+#     paths that peers replace ATOMICALLY, so each field could come from a DIFFERENT
+#     version of the file: one run's run-id combined with another's RESULT or a fresher
+#     beat-epoch, yielding a confident verdict about a state no run was ever in.
+#
+#     Asserted STRUCTURALLY. A true interleaving cannot be scheduled deterministically
+#     from shell, and a probabilistic loop would be a flaky wall-clock-ish test of the
+#     kind this repo's roborev-lints reject; the invariant "one open per artifact" is
+#     exactly checkable at the source, and it is the property that makes the race
+#     impossible rather than merely unlikely.
+if grep -nE '_field "\$(SUMMARY|HB)"' "$READER" >/dev/null 2>&1; then
+  bad "11b.15 no field is read by re-opening the artifact path" \
+      "$(grep -nE '_field "\$(SUMMARY|HB)"' "$READER" | head -3)"
+else
+  ok "11b.15 no field is read by re-opening the artifact path"
+fi
+if grep -nE 'grep [^|]*"\$(SUMMARY|HB)"' "$READER" >/dev/null 2>&1; then
+  bad "11b.16 no grep reads the artifact path directly" \
+      "$(grep -nE 'grep [^|]*"\$(SUMMARY|HB)"' "$READER" | head -3)"
+else
+  ok "11b.16 no grep reads the artifact path directly"
+fi
+# Exactly one snapshot per artifact — and the derivation must find them, or this is
+# vacuous: a renamed helper would silently satisfy the two negative checks above.
+sl=$(grep -cE '^[A-Z_]+_TEXT=\$\(_slurp "\$(SUMMARY|HB)"\)$' "$READER")
+[ "$sl" -eq 2 ] && ok "11b.17 each artifact is snapshotted exactly once (found $sl)" \
+                || bad "11b.17 each artifact is snapshotted exactly once" "found $sl _slurp assignments, want 2"
+
 echo "=== section 12b: an early-exiting gate emits no undefined-function noise ==="
 # The EXIT trap is armed thousands of lines above where _gate_release_slot is DEFINED,
 # and bash defines functions as it reads the file. So every early-exit path — including

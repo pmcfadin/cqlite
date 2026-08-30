@@ -70,11 +70,29 @@ fi
 # contract that makes the summary file recoverable (#1175).
 [ -n "$HB" ] || HB="$SUMMARY.heartbeat"
 
-# _field <file> <key> — first "key: value" line's value, or empty. Never fails the
-# script; an unreadable file simply yields empty and the caller names the cause.
+# BOTH artifacts are read ONCE, into a snapshot, and every field is parsed from that
+# snapshot — never by re-opening the file per field (roborev job 155, Medium).
+#
+# WHY: these are SHARED paths that peers replace ATOMICALLY (the beater writes a sibling
+# temp and renames; emit_summary rewrites the summary). A per-field re-open therefore
+# samples a possibly DIFFERENT version of the file for each field, so one run's `run-id:`
+# could be combined with another run's `RESULT:` or a fresher `beat-epoch:` — producing a
+# confident COMPLETE or RUNNING about a run that never had that state. That is precisely
+# the cross-run confusion the #2874 reader contract exists to prevent, reintroduced by the
+# I/O pattern rather than by the logic.
+#
+# A single `cat` is a single `open()`, so it reads one inode's contents start to finish; a
+# rename landing mid-read swaps the NAME, not the open file, so the snapshot is internally
+# consistent by construction. A rename that lands BEFORE our open just means we read the
+# newer version — also consistent, and the run-id check then decides whether it is ours.
+#
+# _slurp <file> — the file's contents, or empty when unreadable.
+_slurp() { cat -- "$1" 2>/dev/null; }
+
+# _field <text> <key> — first "key: value" line's value in <text>, or empty.
 _field() {
-  local f="$1" k="$2" line
-  line=$(grep -m1 "^$k: " "$f" 2>/dev/null) || return 0
+  local text="$1" k="$2" line
+  line=$(printf '%s\n' "$text" | grep -m1 "^$k: ") || return 0
   printf '%s' "${line#"$k": }"
 }
 
@@ -93,14 +111,28 @@ fi
 if [ ! -r "$SUMMARY" ]; then
   verdict UNKNOWN 4 "summary-unreadable; $SUMMARY exists but cannot be read"
 fi
-SUM_RUN_ID=$(_field "$SUMMARY" run-id)
+SUM_TEXT=$(_slurp "$SUMMARY")
+SUM_RUN_ID=$(_field "$SUM_TEXT" run-id)
 # #2874 reader contract: a block bearing a FOREIGN run-id is a peer's, and that holds
 # for a PASS just as much as for an INCOMPLETE. Refuse to answer about someone else's
 # gate rather than report their state as ours.
-if [ -n "$WANT_RUN_ID" ] && [ -n "$SUM_RUN_ID" ] && [ "$SUM_RUN_ID" != "$WANT_RUN_ID" ]; then
-  verdict UNKNOWN 4 "summary-run-id-mismatch; $SUMMARY carries run-id '$SUM_RUN_ID', not '$WANT_RUN_ID' — a live peer owns that path"
+#
+# When the caller NAMED a run, a MISSING `run-id:` is a refusal, not a pass (roborev job
+# 155, Medium). The earlier form also required `-n "$SUM_RUN_ID"` before comparing, so a
+# summary with no run-id line skipped validation entirely and its terminal verdict was
+# attributed to the requested run — a permissive branch keyed on the ABSENCE of the bad
+# signal, which is the exact shape CLAUDE.md forbids (#3229). The binding is only a
+# guarantee if it is unconditional: caller named a run ⇒ the artifact must AFFIRMATIVELY
+# say it is that run.
+if [ -n "$WANT_RUN_ID" ]; then
+  if [ -z "$SUM_RUN_ID" ]; then
+    verdict UNKNOWN 4 "summary-no-run-id; $SUMMARY carries no 'run-id:' line, so it cannot be attributed to run '$WANT_RUN_ID'"
+  fi
+  if [ "$SUM_RUN_ID" != "$WANT_RUN_ID" ]; then
+    verdict UNKNOWN 4 "summary-run-id-mismatch; $SUMMARY carries run-id '$SUM_RUN_ID', not '$WANT_RUN_ID' — a live peer owns that path"
+  fi
 fi
-RESULT_LINE=$(grep -m1 '^RESULT: ' "$SUMMARY" 2>/dev/null || true)
+RESULT_LINE=$(printf '%s\n' "$SUM_TEXT" | grep -m1 '^RESULT: ' || true)
 # The TERMINAL verdict set, enumerated from agent-gate.sh rather than assumed to be
 # two values. `PARTIAL` (an --only run), `ERROR` and `REFUSED` (a --delta entry
 # refusal) are every bit as terminal as PASS/FAIL: the gate reached a decision and
@@ -113,15 +145,25 @@ RESULT_LINE=$(grep -m1 '^RESULT: ' "$SUMMARY" 2>/dev/null || true)
 # Closed grammar (#3229): an unrecognised value is UNKNOWN, never assumed benign and
 # never assumed terminal. If a future gate adds a sixth verdict, a lane reads UNKNOWN
 # and asks a human — the safe direction — instead of this reader guessing.
-case "$RESULT_LINE" in
-  'RESULT: PASS'*|'RESULT: FAIL'*|'RESULT: PARTIAL'*|'RESULT: ERROR'*|'RESULT: REFUSED'*)
-    verdict COMPLETE 0 "the summary carries a terminal verdict — ${RESULT_LINE#RESULT: }" ;;
-  'RESULT: INCOMPLETE'*)
+#
+# The value is reduced to its VERDICT TOKEN (up to the first space) and matched EXACTLY
+# (roborev job 155, Low). A prefix glob — `'RESULT: PASS'*` — accepts `RESULT: PASSENGER`
+# and `RESULT: FAILURE`, i.e. it checks a SPELLING rather than a STATE, so the "closed
+# grammar" would have been open at exactly the place it claimed to be shut. CLAUDE.md
+# records this same defect in the roborev wrapper's own verdict scan (`PASS*` accepting
+# `PASSthisNeverRan`); this was that mistake reproduced one layer down.
+if [ -z "$RESULT_LINE" ]; then
+  verdict UNKNOWN 4 "no-result-line; $SUMMARY has no 'RESULT:' line (truncated or not a gate summary)"
+fi
+RESULT_VALUE="${RESULT_LINE#RESULT: }"
+RESULT_TOKEN="${RESULT_VALUE%% *}"
+case "$RESULT_TOKEN" in
+  PASS|FAIL|PARTIAL|ERROR|REFUSED)
+    verdict COMPLETE 0 "the summary carries a terminal verdict — $RESULT_VALUE" ;;
+  INCOMPLETE)
     : ;;  # the interesting case: fall through to the heartbeat
-  '')
-    verdict UNKNOWN 4 "no-result-line; $SUMMARY has no 'RESULT:' line (truncated or not a gate summary)" ;;
   *)
-    verdict UNKNOWN 4 "unrecognised-result; '$RESULT_LINE' is not a value this reader knows" ;;
+    verdict UNKNOWN 4 "unrecognised-result; verdict token '$RESULT_TOKEN' (from '$RESULT_LINE') is not a value this reader knows" ;;
 esac
 
 # ---- the heartbeat side: affirmative liveness, or an affirmative death ----------
@@ -131,7 +173,8 @@ fi
 if [ ! -r "$HB" ]; then
   verdict UNKNOWN 4 "heartbeat-unreadable; $HB exists but cannot be read"
 fi
-HB_RUN_ID=$(_field "$HB" run-id)
+HB_TEXT=$(_slurp "$HB")
+HB_RUN_ID=$(_field "$HB_TEXT" run-id)
 if [ -z "$HB_RUN_ID" ]; then
   verdict UNKNOWN 4 "heartbeat-no-run-id; $HB carries no 'run-id:' line, so it cannot be attributed to any run"
 fi
@@ -145,11 +188,11 @@ elif [ -n "$SUM_RUN_ID" ] && [ "$HB_RUN_ID" != "$SUM_RUN_ID" ]; then
   verdict UNKNOWN 4 "heartbeat-summary-run-id-disagree; summary is run '$SUM_RUN_ID' but the beat is run '$HB_RUN_ID'"
 fi
 
-HB_EPOCH=$(_field "$HB" beat-epoch)
+HB_EPOCH=$(_field "$HB_TEXT" beat-epoch)
 case "$HB_EPOCH" in
   ''|*[!0-9]*) verdict UNKNOWN 4 "heartbeat-unparseable-epoch; 'beat-epoch: $HB_EPOCH' is not an integer" ;;
 esac
-HB_INTERVAL=$(_field "$HB" interval)
+HB_INTERVAL=$(_field "$HB_TEXT" interval)
 case "$HB_INTERVAL" in
   ''|*[!0-9]*) verdict UNKNOWN 4 "heartbeat-unparseable-interval; 'interval: $HB_INTERVAL' is not an integer" ;;
 esac
@@ -174,9 +217,9 @@ if [ "$AGE" -lt $(( -HB_INTERVAL )) ]; then
 fi
 [ "$AGE" -ge 0 ] || AGE=0
 
-HB_PID=$(_field "$HB" gate-pid)
-HB_SEQ=$(_field "$HB" beat-seq)
-HB_CHECK=$(_field "$HB" parent-check)
+HB_PID=$(_field "$HB_TEXT" gate-pid)
+HB_SEQ=$(_field "$HB_TEXT" beat-seq)
+HB_CHECK=$(_field "$HB_TEXT" parent-check)
 _where="run-id $HB_RUN_ID, gate-pid ${HB_PID:-unknown}, beat ${HB_SEQ:-?}, age ${AGE}s, window ${STALE_AFTER}s"
 # parent-check declares HOW the beater verified its gate: 'starttime' is reuse-proof,
 # 'kill0' is not. Surfaced so a reader is told which guarantee it is getting (#3229).
