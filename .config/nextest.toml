@@ -35,7 +35,10 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 # max-threads = 1 co-schedules each group's tests one at a time (across ALL
 # nextest worker threads), so members never contend with each other for CPU.
 # This is the load-control lever that makes the timing ratios stable; it is
-# independent of the gate's global --test-threads ceiling (#2640).
+# independent of the gate's global --test-threads ceiling (#2640). The `timing`
+# group is the general LOAD-SENSITIVE serialization group: since #3514 it also
+# carries two whole-process thread-count correctness pins, which need the
+# co-scheduling but explicitly NOT the retries (see their own override below).
 timing = { max-threads = 1 }
 docker = { max-threads = 1 }
 
@@ -50,6 +53,33 @@ docker = { max-threads = 1 }
 filter = 'binary(tail_latency_harness) | binary(sstable_performance_regression_tests)'
 test-group = 'timing'
 retries = { backoff = "exponential", count = 2, delay = "2s" }
+
+# --- THREAD-BUDGET pins: SERIALIZE, but deliberately NO retries (#3514) --------
+# issue_2316_merge_thread_budget            — one k-way merge, O(M) producer threads.
+# issue_2370_concurrent_merge_thread_budget — C concurrent merges, O(C·M).
+#
+# These are CORRECTNESS pins, not timing tests, and they join the `timing` group
+# purely for its `max-threads = 1` co-scheduling: both observe a WHOLE-PROCESS OS
+# thread count, and their failure mode under CPU starvation is delayed thread
+# REAPING (#3514) — the very field red this enrolment reduces. Serializing them
+# against each other AND against the two heaviest CPU consumers in the suite
+# (tail_latency_harness, sstable_performance_regression_tests) removes the worst
+# co-scheduling rather than only budgeting around it.
+#
+# Stated honestly: `max-threads = 1` bounds contention WITHIN the group only — the
+# remaining non-group tests still run concurrently — so this REDUCES the starvation
+# source, it does not remove it. The reap-confirm budget's own headroom arithmetic
+# against nextest's 240s hung-test kill is therefore still load-bearing and is
+# quantified on `os_thread_budget::reap_confirm_timeout`.
+#
+# NO retries, and NOT by omission: retries are the profile default (0) and must stay
+# there. A genuine #2316/#2370 amplification must fail deterministically — retrying
+# it would burn ~3×95s and could only ever turn a real regression into flap. The
+# starvation half is already handled INSIDE the test by the affirmative reap
+# confirmation, which is a mechanism, not a re-roll.
+[[profile.default.overrides]]
+filter = 'binary(issue_2316_merge_thread_budget) | binary(issue_2370_concurrent_merge_thread_budget)'
+test-group = 'timing'
 
 # --- DOCKER group: serialize live-Docker parity tests + hard hung-test kill ----
 # docker_probe_timeout           — exercises the bounded-probe timeout machinery.

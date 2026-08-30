@@ -332,13 +332,41 @@ pub const REAP_QUIESCENCE_SPAN: Duration = Duration::from_secs(12);
 /// the path that is about to fail the pin anyway — so the common (passing) case
 /// pays zero extra latency.
 ///
-/// ## Harness-budget coupling, stated because it is a real constraint
+/// ## Harness-budget coupling, QUANTIFIED (#3514 nit 4)
 ///
 /// `.config/nextest.toml` hard-kills a test at `slow-timeout` 60 s × 4 = **240 s**.
-/// At #2370's 6 producers the fixed costs are the baseline poll (≤ 10 s), the peak
-/// poll (≤ 20 s), input build and two drains — so a 90 s confirm leaves > 100 s of
-/// margin. A future caller with many more producers must re-check that headroom
-/// rather than assume it.
+/// If a caller ever breaches that, a genuine FAIL presents as a hung-test kill and
+/// NONE of the assert diagnostics above are printed — the worst possible failure
+/// mode for this pin, so the margin is measured rather than asserted. Two of the
+/// three costs are HARD-CAPPED by construction (they are `poll_until_stable`
+/// fail-loud bounds, not elapsed work), and the third is measured:
+///
+/// ```text
+/// #2370 (C·M = 6 producers), worst case:
+///   baseline poll   ≤  10 s   (hard cap)
+///   peak poll       ≤  20 s   (hard cap)
+///   confirm         =  90 s   (hard cap, this function)
+///   build + 2 drains ≈  4.9 s (MEASURED, see below)
+///   ────────────────────────
+///   total          ≈ 124.9 s  against 240 s  →  115.1 s margin
+/// ```
+///
+/// The `build + drains` figure is measured, not estimated: a full RED run (producers
+/// restored to a multi-threaded runtime, so the 90 s confirm is spent in full) took
+/// **93.9 s** wall on a 16-core host and **94.9 s** on the same host restricted to 4
+/// cores with `taskset` — i.e. 3.9 s and 4.9 s respectively outside the confirm, and
+/// a **4× core cut cost only ~24%**. For the non-capped work to consume the 115 s of
+/// remaining margin it would have to inflate **~24×**, against that measured 1.24×
+/// at a 4× core cut. Capacity, not comfort. #2316 (M = 4, 60 s confirm) is measured
+/// at 65.4 s total, i.e. ~175 s of margin, and both binaries are additionally
+/// enrolled in nextest's `max-threads = 1` `timing` group (#3514) so they never
+/// co-schedule with each other or with the suite's two heaviest CPU consumers.
+///
+/// A future caller with many more producers MUST redo this arithmetic: the confirm
+/// term grows linearly in the producer count, so at ~14 producers (210 s) the budget
+/// alone exceeds the harness kill. At that point raise nextest's `terminate-after`
+/// for that binary — do not silently shrink the confirm, which would reintroduce the
+/// premature condemnation this whole mechanism exists to prevent.
 pub fn reap_confirm_timeout(producers: usize) -> Duration {
     /// Per-producer budget: one blocking-pool keep-alive (10 s) plus 5 s of
     /// late-finish slack. See the derivation above.
