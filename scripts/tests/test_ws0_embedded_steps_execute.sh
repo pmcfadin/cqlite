@@ -62,9 +62,11 @@
 #     is caught and not only the two steps this issue repaired. DISCOVERED is the operative word
 #     and its scope is stated exactly: every `-c`-form invocation REGARDLESS of how its command
 #     word is spelled (the census anchors on the flag), plus every invocation whose command word
-#     contains a literal `python` — both searched over the LOGICAL-LINE reconstruction, so a
-#     backslash-newline continuation cannot hide either anchor. What that does not reach is in
-#     NOT REACHED below;
+#     contains a literal `python` — both DISCOVERED and CLASSIFIED over the LOGICAL-LINE
+#     reconstruction, so a backslash-newline continuation neither hides an anchor nor turns an
+#     ordinary invocation into a refusal. Block BODIES are still read from the original text,
+#     because inside single quotes a backslash is literal and bash continues nothing. What this
+#     does not reach is in NOT REACHED below;
 #   * the extractor's delimiter in BOTH directions: it reports a defect, AND it does not
 #     manufacture one on good input. A block is delimited by bash's quoting rules rather than by a
 #     line pattern, so all three closer shapes this repository actually uses are handled — the
@@ -527,21 +529,22 @@ else
   fail "census CONTROL did not fire (heredoc removed): a heredoc must be a finding, got: $(head -2 <<<"$hd_any")"
 fi
 
-# --- CONTROL 1h: AN INDIRECTLY-SPELLED COMMAND WORD IS DISCOVERED, WRAPPED OR NOT --------------
-# The allowlist closed CLASSIFICATION but not DISCOVERY: a candidate must be FOUND before it can
-# be classified. Three cases, and the third needed BOTH ingredients before it was invisible —
-# `$PYTHON` defeats the word matcher, and a backslash-newline puts the quote on the next line
-# where the `-c` anchor cannot see it. Measured before the fix: A and C were findings, B was
-# `findings=0 occurrences=0` with the block count unchanged, i.e. an invalid program passing the
-# "every embedded block compiles" guard.
+# --- CONTROL 1h: LOGICAL-LINE RECONSTRUCTION — three cases, each with its own right answer ------
+# A candidate must be FOUND before it can be classified, and BOTH steps read the logical line bash
+# builds by deleting backslash-newline. The three cases pin the whole behaviour, and they do NOT
+# share an expected outcome — which is the point, because an earlier version got case A wrong in a
+# way a uniform "everything is a finding" assertion would have hidden:
 #
-#   A  literal python3, continuation   already caught (unrecognised shape)
-#   B  $PYTHON,         continuation   INVISIBLE -> now caught, via logical-line joining
-#   C  $PYTHON,         same line      caught by the `-c` flag anchor (round 7)
-#
-# All three are asserted together, because the fix for B (joining backslash-newline before
-# discovery) is a transformation that could plausibly disturb A or C.
-indirect_ok=1
+#   A  literal python3, continuation   a BLOCK. After joining this IS `python3 -c 'prog'`, so it
+#                                      classifies normally and the COMPILE check reports its
+#                                      defect. A driver block reformatted across a continuation
+#                                      must keep working rather than become a refusal — that is
+#                                      what makes the joining worth having.
+#   B  $PYTHON,        continuation    exactly ONE finding. This is the case that was INVISIBLE
+#                                      (`findings=0 occurrences=0`) before joining: the indirect
+#                                      word defeats the token matcher and the continuation hides
+#                                      the quote from the `-c` anchor.
+#   C  $PYTHON,        same line       exactly ONE finding, via the `-c` flag anchor.
 python3 - "$TMP" <<'INJECT'
 import pathlib, sys
 q, bs = chr(39), chr(92)
@@ -552,14 +555,40 @@ prog = q + "import os," + q
 (tmp / "indirect-C.sh").write_text("$PYTHON -c " + prog + "\n")
 INJECT
 indirect_rc=$?
-for indirect_case in A B C; do
-  [ -s "$TMP/indirect-$indirect_case.sh" ] || indirect_ok=0
-  [ -n "$(findings_of "$(census "$TMP/indirect-$indirect_case.sh")")" ] || indirect_ok=0
-done
-if [ "$indirect_rc" -eq 0 ] && [ "$indirect_ok" -eq 1 ]; then
-  pass "census CONTROL fired (indirect command word, all 3 cases): a \$PYTHON -c invocation is DISCOVERED whether the quote is on the same line or past a backslash-newline continuation — discovery runs over the logical-line reconstruction bash itself builds"
+a_census="$(census "$TMP/indirect-A.sh")"
+a_compile="$(compile_blocks "$TMP/indirect-A.sh")"
+b_findings="$(findings_of "$(census "$TMP/indirect-B.sh")" | wc -l | tr -d ' ')"
+c_findings="$(findings_of "$(census "$TMP/indirect-C.sh")" | wc -l | tr -d ' ')"
+if [ "$indirect_rc" -ne 0 ]; then
+  fail "census CONTROL: the logical-line fixtures could not be written (rc=$indirect_rc), so the control could not fire"
+elif [ "$(grep -c '^BLOCK	' <<<"$a_census")" -eq 1 ] && [ -z "$(findings_of "$a_census")" ] \
+     && grep -q 'DOES NOT COMPILE' <<<"$a_compile" \
+     && [ "$b_findings" -eq 1 ] && [ "$c_findings" -eq 1 ]; then
+  pass "census CONTROL fired (logical-line reconstruction): a LITERAL python3 split across a continuation is a BLOCK whose defect the compile check reports, while an INDIRECT command word is exactly ONE finding whether the quote is on the same line or past the continuation"
 else
-  fail "census CONTROL did not fire (indirect command word): fixture-rc=$indirect_rc all-three-found=$indirect_ok — case B (indirect word + continuation) is the one that was invisible"
+  fail "census CONTROL did not fire: A-blocks=$(grep -c '^BLOCK	' <<<"$a_census") A-findings='$(findings_of "$a_census" | head -1)' A-compile='$(findings_of "$a_compile" | head -1)' B-findings=$b_findings C-findings=$c_findings"
+fi
+
+# --- CONTROL 1h-bis: ONE INVOCATION YIELDS AT MOST ONE FINDING ---------------------------------
+# Both anchors can see the same command — `python3 -m foo -c 'x'` has a python word AND a `-c`
+# flag — and each used to report it, after which a finding COUNT means nothing. The word anchor
+# claims its command's segment (up to the next separator, a closed set in bash's grammar), so the
+# flag inside it defers. The other direction is asserted too: two genuinely separate invocations
+# on one line must still produce two findings, or the suppression would be hiding real ones.
+python3 - "$TMP" <<'INJECT'
+import pathlib, sys
+q = chr(39)
+tmp = pathlib.Path(sys.argv[1])
+(tmp / "one-invocation.sh").write_text("python3 -m foo -c " + q + "x" + q + "\n")
+(tmp / "two-invocations.sh").write_text(
+    "python3 --version; $PY -c " + q + "x" + q + "\n")
+INJECT
+one_n="$(findings_of "$(census "$TMP/one-invocation.sh")" | wc -l | tr -d ' ')"
+two_n="$(findings_of "$(census "$TMP/two-invocations.sh")" | wc -l | tr -d ' ')"
+if [ "$one_n" -eq 1 ] && [ "$two_n" -eq 2 ]; then
+  pass "census CONTROL fired (one finding per invocation): a single command seen by BOTH anchors yields 1 finding, while two separate invocations on one line still yield 2 — the suppression is scoped to a command segment, not to a line"
+else
+  fail "census CONTROL did not fire: one-invocation gave $one_n finding(s) (expected 1), two-invocations gave $two_n (expected 2)"
 fi
 
 # --- CONTROL 1i: A MISSING SUBJECT EXITS NONZERO ------------------------------------------------

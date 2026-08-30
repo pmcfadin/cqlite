@@ -239,12 +239,22 @@ def _join_continuations(text: str) -> tuple[str, list[int]]:
     IS literally `$PYTHON -c 'prog'`, which the `-c` anchor already catches) rather than adding a
     special case to an enumeration.
 
-    USED FOR DISCOVERY ONLY, and that restriction is load-bearing: inside SINGLE QUOTES a
-    backslash is LITERAL and no continuation happens, so joining a block's BODY would hand the
-    compiler source that differs from what python receives. Anchors are located in the joined
-    text; every subsequent read — the rest of the line, the quote scan, the body, the reported
-    line numbers — is done against the ORIGINAL. The returned map exists for exactly that
-    hand-back, so a finding never names a line that only exists in the joined view.
+    USED FOR DISCOVERY **AND CLASSIFICATION**, BUT NEVER FOR A BODY, and that boundary is the
+    load-bearing part. Joining decides WHERE THE TOKENS ARE; it must never decide WHAT A STRING
+    CONTAINS, because inside SINGLE QUOTES a backslash is LITERAL and bash performs no
+    continuation there — a body read from joined text could differ from the source python
+    actually receives. So the anchors AND the rest-of-line the allowlist matches against come
+    from the joined text, while the quote scan, the body and the reported LINE NUMBERS come from
+    the original; the returned map is what hands positions back across that boundary.
+
+    The first version of this joiner did discovery only and left classification on the physical
+    line, which is incoherent rather than merely incomplete: `python3 -c \\` + `'prog'` was
+    FOUND and then classified against the remainder `-c \\`, matching no shape, so an ordinary
+    invocation became a refusal — plus a second, self-contradictory one from the flag anchor
+    reporting that the command word `python3` was "not the literal python3". After joining that
+    input IS `python3 -c 'prog'` and classifies as the inline block it is, which is also what
+    makes the joining worth having: a driver block reformatted across a continuation keeps
+    working instead of becoming a finding.
     """
     out: list[str] = []
     omap: list[int] = []
@@ -347,6 +357,12 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
     records: list[dict] = []
     findings: list[dict] = []
     pos = 0
+    # ONE INVOCATION, AT MOST ONE FINDING. When the WORD anchor has already claimed a candidate,
+    # a `-c` flag belonging to the SAME command must not be reported again — `python3 -m foo -c
+    # 'x'` is one invocation and produced two findings, after which a finding count means nothing.
+    # The extent is the command's segment: from the word up to the next SEPARATOR, and bash's
+    # separators are a closed set, so this is a lookup rather than a parse.
+    suppress_flag_until = -1
     while True:
         # TWO anchors, earliest wins. A `python3 -c '…'` matches the WORD first (lower offset) and
         # its branch consumes through the closing quote, so the `-c` inside it is never reached —
@@ -370,18 +386,22 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         if anchored_on_flag:
             if line.lstrip().startswith("#"):
                 continue  # a whole-line shell comment carries no code
-            # The word before the flag, for the diagnostic only — enough to name what was found
-            # without pretending to resolve it.
+            if m.start() < suppress_flag_until:
+                continue  # the word anchor already claimed this invocation
+            # The nearest preceding word, NAMED rather than judged. The old text asserted the word
+            # was "not the literal `python3`" — something this branch never checked — and on a
+            # continuation it printed `is 'python3', not the literal python3`, a diagnostic that
+            # contradicted itself and told its reader nothing actionable.
             before = text[line_start:match_start].rstrip()
             cmd_word = before[max((before.rfind(c) for c in _WORD_BREAK), default=-1) + 1 :]
             findings.append({
                 "line": idx + 1,
-                "reason": "a `-c '<program>'` invocation whose command word is"
-                          f" {cmd_word or '(unresolvable)'!r}, not the literal `python3` the"
-                          " allowlist recognises. Anchored on the FLAG rather than the command"
-                          " word, because an indirectly-spelled word (a variable, a"
-                          " concatenation) carries code exactly as a literal one does and was"
-                          " INVISIBLE before #3451 round 7. Teach the allowlist if intended.",
+                "reason": "a `-c '<program>'` invocation for which NO literal `python3` command"
+                          f" word was found (nearest preceding word: {cmd_word or '(none)'!r})."
+                          " Anchored on the FLAG rather than the command word, because an"
+                          " indirectly-spelled word — a variable, a concatenation — carries code"
+                          " exactly as a literal one does and was INVISIBLE before #3451 round 7."
+                          " Teach the allowlist if the spelling is intended.",
             })
             continue
         # Walk left to the start of the shell WORD, so a path prefix travels with the candidate.
@@ -398,9 +418,27 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             # basename and is examined. This is the one lexical exclusion, and it is a statement
             # about names rather than about shell.
             continue
+        # CLASSIFICATION READS THE JOINED LOGICAL LINE, not the physical one (#3451 round 8
+        # follow-up). Round 8 joined continuations for DISCOVERY and left classification reading
+        # unjoined text, so `python3 -c \\` + `'prog'` was found and then classified against the
+        # physical remainder `-c \\` — which matches no shape. It landed as a refusal, and a
+        # second one from the flag anchor. After joining it IS an ordinary inline invocation
+        # (bash sees `python3 -c 'prog'`), so that is what it must classify as; a driver block
+        # reformatted across a continuation keeps working instead of becoming a refusal, which is
+        # what makes the joining worth having.
+        scan_line_end = scan.find("\n", m.end())
+        if scan_line_end < 0:
+            scan_line_end = len(scan)
         line_end = line_start + len(line)
-        raw_rest = text[match_end:line_end]
+        raw_rest = scan[m.end() : scan_line_end]
         rest = _strip_comment(raw_rest).strip()
+        # This candidate's command segment, in SCAN space: a `-c` flag inside it belongs to THIS
+        # invocation and must not be reported a second time.
+        suppress_flag_until = scan_line_end
+        for _sep in ";&|":
+            _at = scan.find(_sep, m.end(), scan_line_end)
+            if _at >= 0:
+                suppress_flag_until = min(suppress_flag_until, _at)
         try:
             if word != "python3":
                 raise Unclassifiable(
@@ -418,7 +456,12 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             dash_c = _OPEN_DASH_C.match(raw_rest)
             if dash_c:
                 # ALLOWLIST 1.
-                open_quote = match_end + dash_c.end() - 1
+                # The opening quote is located in the JOINED text and then handed back to the
+                # ORIGINAL before the body is read. Joining decides WHERE the tokens are; it must
+                # never decide WHAT a string contains, because inside single quotes a backslash is
+                # LITERAL and bash performs no continuation there — a body scanned from joined
+                # text could differ from the source python actually receives.
+                open_quote = omap[m.end() + dash_c.end() - 1]
                 body, close = _scan_single_quoted(text, open_quote)
                 after = text[close + 1 : close + 2]
                 if after and after not in _WORD_BOUNDARY_AFTER_CLOSE:
