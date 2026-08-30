@@ -782,19 +782,24 @@ fn export(case: &Case, data_dir: &Path, out: &Path, format: &str) -> String {
         Err(why) => panic!("committed schema: {why} (see #3148)"),
     }
     let qualified = format!("{}.{}", case.keyspace, case.table);
+    // Every PATH argument is handed to the CLI as an `OsStr`, never through
+    // `to_string_lossy()`: that substitutes U+FFFD for each byte that is not valid
+    // UTF-8, so a staged directory or an output file under a path that is not valid
+    // UTF-8 would be handed to the CLI as a DIFFERENT path than the one this test
+    // reads back — the same defect as the golden pairing in
+    // `golden_fixture_staging` (issue #1491 review finding W2). A lossy conversion
+    // is fine in a diagnostic message and never in a path something opens.
     let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
-        .args([
-            "--schema",
-            &schema.to_string_lossy(),
-            "--data-dir",
-            &data_dir.to_string_lossy(),
-            "export",
-            &out.to_string_lossy(),
-            "--format",
-            format,
-            "--table",
-            &qualified,
-        ])
+        .arg("--schema")
+        .arg(&schema)
+        .arg("--data-dir")
+        .arg(data_dir)
+        .arg("export")
+        .arg(out)
+        .arg("--format")
+        .arg(format)
+        .arg("--table")
+        .arg(&qualified)
         .output()
         .unwrap_or_else(|e| panic!("{qualified}: cannot run the CLI: {e}"));
     assert!(

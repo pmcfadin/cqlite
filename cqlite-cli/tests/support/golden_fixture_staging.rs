@@ -129,7 +129,19 @@ pub fn golden_path(fixture: &Path) -> Result<PathBuf, String> {
             }
         ));
     };
-    let expected = PathBuf::from(format!("{}.jsonl", data_db.display()));
+    // Built by APPENDING to the path's own `OsString`, never through
+    // `display()`/`to_string_lossy()`: those substitute U+FFFD for every byte that
+    // is not valid UTF-8, so the paired golden of a `*-Data.db` whose name is not
+    // valid UTF-8 was looked for at a path that does not exist — a golden that IS
+    // there could not be found. That defeated this module's own byte-wise name
+    // handling (`fs_probe::name_starts_with`/`name_ends_with`, added for exactly
+    // this case) two statements above: the scan counted such a file correctly and
+    // then the pairing could not open it (issue #1491 review finding W2).
+    // `OsString::push` is lossless and needs no `std::os::unix`, so it also keeps
+    // this module portable.
+    let mut expected = data_db.clone().into_os_string();
+    expected.push(".jsonl");
+    let expected = PathBuf::from(expected);
     // Three-valued: `is_file()` answers `false` for a golden it could not describe,
     // so an UNREADABLE golden was reported as one that is not there — the same
     // verdict (both fail) reached through a false statement.
@@ -337,6 +349,50 @@ mod tests {
             why.contains("nb-2-big-Data.db") && why.contains("cannot be described"),
             "{why}"
         );
+    }
+
+    /// The paired golden is found for a `*-Data.db` whose name is NOT valid UTF-8.
+    ///
+    /// The pairing used to be built with `format!("{}.jsonl", data_db.display())`,
+    /// and `display()` substitutes U+FFFD for every byte that is not valid UTF-8 —
+    /// so a golden that IS on disk beside its SSTable was looked for at a path that
+    /// does not exist, and the case failed as "no golden beside the SSTable it must
+    /// describe". That contradicted this module's own byte-wise name matching, added
+    /// one round earlier for exactly this case: the scan classified the file
+    /// correctly and only the pairing could not open it (issue #1491 review finding
+    /// W2).
+    ///
+    /// `#[cfg(unix)]` because a name that is not valid UTF-8 cannot be built
+    /// portably in safe code.
+    #[cfg(unix)]
+    #[test]
+    fn the_paired_golden_of_a_non_utf8_sstable_name_is_found() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let fixture = tmp.path().join("t-abc");
+        let data_db = std::ffi::OsStr::from_bytes(b"nb-1-\xff-big-Data.db");
+        let golden = std::ffi::OsStr::from_bytes(b"nb-1-\xff-big-Data.db.jsonl");
+        assert!(
+            data_db.to_str().is_none() && golden.to_str().is_none(),
+            "both staged names are not valid UTF-8, which is the whole subject"
+        );
+        touch(&fixture.join(data_db), b"x");
+        touch(&fixture.join(golden), b"{}");
+        assert_eq!(
+            golden_path(&fixture).expect("the golden is right there beside its SSTable"),
+            fixture.join(golden),
+            "the pairing must be built from the name's BYTES, not from a lossy string"
+        );
+
+        // And the pairing is still by NAME, not "any golden in the directory": a
+        // differently-named golden does not satisfy this SSTable.
+        let other = tmp.path().join("t-def");
+        touch(&other.join(data_db), b"x");
+        touch(
+            &other.join(std::ffi::OsStr::from_bytes(b"nb-2-\xff-big-Data.db.jsonl")),
+            b"{}",
+        );
+        golden_path(&other).expect_err("a golden for another generation does not pair");
     }
 
     /// Every candidate directory is returned, sorted, so a caller comparing one of

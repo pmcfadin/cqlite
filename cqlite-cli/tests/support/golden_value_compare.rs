@@ -36,7 +36,7 @@
 //! numeric normalization applies only where the DDL says the value is a number and
 //! a `text` value is compared as an exact string.
 
-use super::schema::{Column, ColumnKind, CqlType, TableSchema, UdtType};
+use super::schema::{Column, ColumnKind, CqlType, TableSchema};
 use super::{canon_scalar, canon_typed, csv_container, Depth, Egress, Kinding, Row};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
@@ -951,7 +951,7 @@ fn compare_value_body(
             _ => Err(shape_error("map", golden, cli, egress)),
         },
         CqlType::Udt(udt) => match golden {
-            Value::Object(g) => compare_udt(g, cli, egress, udt, at),
+            Value::Object(g) => udt::compare_udt(g, cli, egress, udt, at),
             _ => Err(shape_error(&udt.name, golden, cli, egress)),
         },
         // A scalar type: both sides canonicalized UNDER THAT TYPE, so the numeric
@@ -1036,198 +1036,6 @@ fn shape_error(expected: &str, golden: &Value, cli: &Value, egress: Egress) -> S
         brief(&describe(golden, egress)),
         brief(&describe(cli, egress))
     )
-}
-
-/// How each egress format spells a UDT, for the diagnostic.
-fn udt_spelling(egress: Egress) -> &'static str {
-    match egress {
-        Egress::Json => "a field→value JSON object",
-        Egress::Csv => "a `{key,value}` list decoded from the flat `{k: v, …}` field",
-    }
-}
-
-/// A UDT: always a field→value object in the dump. On the CLI side the accepted
-/// representation is FORMAT-SCOPED, because each format has exactly one:
-///
-///   * **JSON** — a field→value object, plus a `_type` discriminator the CLI adds
-///     and the golden does not carry. It is REQUIRED to be present, to be a
-///     string, and to name the type the committed `CREATE TYPE` declares (folded
-///     for case, because an unquoted CQL identifier is case-insensitive); only
-///     then is it dropped from the field set, and only from the CLI side. It used
-///     to be stripped unconditionally, so a missing or wrongly-named
-///     discriminator passed even though the DDL knows the answer (issue #1491
-///     review finding R3). A `{key,value}` pair array is the CLI's *map*
-///     spelling, so accepting one here would let a UDT that regressed to the map
-///     representation pass; it is therefore rejected (review finding F3).
-///   * **CSV** — a `{key,value}` list, and only that. CSV delivers the whole cell
-///     as one flat `{k: v, …}` text carrying nothing that could distinguish a map
-///     from a UDT, so [`super::csv_container`] decodes EVERY brace-delimited body
-///     into the pair spelling. An object on this side would mean the decoder was
-///     bypassed.
-///
-/// Field NAMES must agree between the two sides, and each name must be one the
-/// `CREATE TYPE` declares — an undeclared field name has no declared type, and a
-/// value with no declared type is never compared permissively.
-fn compare_udt(
-    golden: &Map<String, Value>,
-    cli: &Value,
-    egress: Egress,
-    udt: &UdtType,
-    at: &At<'_, '_>,
-) -> Result<(), String> {
-    let c: Map<String, Value> = match (egress, cli) {
-        (Egress::Json, Value::Object(fields)) => {
-            check_udt_discriminator(fields, udt)?;
-            fields
-                .iter()
-                .filter(|(k, _)| k.as_str() != DISCRIMINATOR)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        }
-        (Egress::Csv, Value::Array(entries)) => {
-            let mut out = Map::new();
-            for entry in entries {
-                let (key, value) = pair(entry, egress)?;
-                let Value::String(name) = key else {
-                    return Err(format!(
-                        "udt `{}`: decoded field name {} is not a string",
-                        udt.name,
-                        brief(&describe(key, egress))
-                    ));
-                };
-                // A repeated field name USED to overwrite, so an egress carrying an
-                // extra spurious field compared equal to the golden whenever the
-                // LAST occurrence happened to match (issue #1491 review finding J2).
-                // Duplicate egress is malformed, not something to reconcile.
-                if let Some(previous) = out.insert(name.clone(), value.clone()) {
-                    return Err(format!(
-                        "udt `{}`: the {egress:?} egress repeats the field `{name}` ({} then \
-                         {}) — a duplicate field is malformed output, and comparing only the \
-                         last occurrence would hide the earlier one",
-                        udt.name,
-                        brief(&describe(&previous, egress)),
-                        brief(&describe(value, egress))
-                    ));
-                }
-            }
-            out
-        }
-        (_, other) => {
-            return Err(format!(
-                "the schema declares the UDT `{}`, but the {egress:?} egress value {} is not \
-                 {}",
-                udt.name,
-                brief(&describe(other, egress)),
-                udt_spelling(egress)
-            ))
-        }
-    };
-    let mut missing: Vec<&String> = golden.keys().filter(|k| !c.contains_key(*k)).collect();
-    let mut extra: Vec<&String> = c.keys().filter(|k| !golden.contains_key(*k)).collect();
-    missing.sort();
-    extra.sort();
-    if !missing.is_empty() || !extra.is_empty() {
-        return Err(format!(
-            "udt `{}` fields differ: absent from cli {missing:?}, absent from golden {extra:?}",
-            udt.name
-        ));
-    }
-    // FIELD ORDER, from the committed `CREATE TYPE`. `cassandra-5.0.8`
-    // `UserType.toJSONString` writes `for (int i = 0; i < types.size(); i++)` over
-    // `stringFieldNames`, so a UDT's fields are emitted in DECLARATION order (and
-    // every declared field is emitted, `null` when absent). Both sides render the
-    // same value, so both must be in that order — the same rule `compare_map`
-    // applies to a map's entries (finding N2), stated here against the DDL rather
-    // than against either side.
-    let declared: Vec<&str> = udt.fields.iter().map(|(name, _)| name.as_str()).collect();
-    for (side, fields) in [("golden", golden), ("cli", &c)] {
-        let emitted: Vec<&str> = fields.keys().map(String::as_str).collect();
-        let expected: Vec<&str> = declared
-            .iter()
-            .copied()
-            .filter(|name| fields.contains_key(*name))
-            .collect();
-        if emitted != expected {
-            return Err(format!(
-                "udt `{}`: the {side} field order is {emitted:?}, but the committed \
-                 CREATE TYPE declares {expected:?} — cassandra-5.0.8 \
-                 UserType.toJSONString emits a UDT's fields in declaration order",
-                udt.name
-            ));
-        }
-    }
-    for (field, gv) in golden {
-        let field_ty = udt
-            .fields
-            .iter()
-            .find(|(name, _)| name == field)
-            .map(|(_, t)| t)
-            .ok_or_else(|| {
-                format!(
-                    "udt `{}` has no declared field `{field}` — the committed CREATE TYPE \
-                     is the authority for its field types",
-                    udt.name
-                )
-            })?;
-        // The missing/extra field sets above already agree, so this cannot be
-        // absent. Stated as an error rather than defaulted to `Null`: a default
-        // here would silently compare an absent field as a null one if that
-        // agreement check ever moved.
-        let cv = c.get(field).ok_or_else(|| {
-            format!(
-                "udt `{}`: field `{field}` vanished between the field-set check and the \
-                 comparison",
-                udt.name
-            )
-        })?;
-        // A UDT field is a cell VALUE (a frozen UDT's fields live inside one value
-        // cell; a non-frozen UDT's field IS the cell value), so the golden keeps
-        // its natural JSON kind.
-        let member = at.field(field, Kinding::Natural);
-        compare_value_at(gv, cv, egress, field_ty, &member)
-            .map_err(|why| format!(".{field} {why}"))?;
-    }
-    Ok(())
-}
-
-/// The field name the JSON egress adds to a UDT object to name its type.
-const DISCRIMINATOR: &str = "_type";
-
-/// The JSON egress's UDT `_type` field must be PRESENT, a STRING, and the type
-/// name the committed `CREATE TYPE` declares.
-///
-/// Stripping it unconditionally (the first cut of this file) made the
-/// discriminator untestable in the one lane that renders it: a UDT object with no
-/// `_type` at all, or one naming the wrong type — which is what a UDT resolved
-/// against the wrong `CREATE TYPE` would produce — compared equal (issue #1491
-/// review finding R3). The expected name comes from the DDL, so this is an
-/// assertion against the committed schema and not against CQLite's own output.
-///
-/// The comparison folds ASCII case because an UNQUOTED CQL identifier is
-/// case-insensitive — Cassandra stores `Person` and `person` as the same type
-/// name — so requiring exact case would assert something CQL does not mean. Every
-/// `CREATE TYPE` in `test-data/schemas/` is unquoted.
-fn check_udt_discriminator(fields: &Map<String, Value>, udt: &UdtType) -> Result<(), String> {
-    match fields.get(DISCRIMINATOR) {
-        Some(Value::String(name)) if name.eq_ignore_ascii_case(&udt.name) => Ok(()),
-        Some(Value::String(name)) => Err(format!(
-            "udt `{}`: the JSON egress names the type `{name}` in its `{DISCRIMINATOR}` \
-             discriminator, but the committed CREATE TYPE declares `{}`",
-            udt.name, udt.name
-        )),
-        Some(other) => Err(format!(
-            "udt `{}`: the JSON egress's `{DISCRIMINATOR}` discriminator is {}, not a \
-             string naming the type",
-            udt.name,
-            brief(&describe(other, Egress::Json))
-        )),
-        None => Err(format!(
-            "udt `{}`: the JSON egress object carries no `{DISCRIMINATOR}` discriminator \
-             — the committed CREATE TYPE declares this value as `{}`, and the JSON \
-             egress names a UDT's type in that field",
-            udt.name, udt.name
-        )),
-    }
 }
 
 /// One `{"key":…,"value":…}` entry of the CLI's map/UDT spelling, with the key
@@ -1459,6 +1267,18 @@ pub fn cli_csv_rows(text: &str) -> Result<Vec<Row>, String> {
     }
     Ok(rows)
 }
+
+// ===========================================================================
+// The UDT comparison
+// ===========================================================================
+//
+// Split into its own file under the campsite rule and reached as `udt::…` from
+// `compare_value_at`. A UDT is the one value shape whose member set is fixed by a
+// SECOND committed DDL statement (`CREATE TYPE`), which is a different question
+// from the structural walk here.
+
+#[path = "golden_value_compare_udt.rs"]
+mod udt;
 
 // ===========================================================================
 // Fixture staging
