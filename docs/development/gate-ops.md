@@ -453,7 +453,11 @@ ratchet computation the verdict summarises: the thresholds applied, the resolved
 the ref it came from, or an explicit "base ref unavailable — growth ratchet skipped"), the full
 list of changed `.rs` files currently over threshold, and one `path: before -> after (limit N)`
 line per over-threshold file the change grew. It is written on **every** run, PASS included, so a
-`file-size: FAIL` never again requires re-deriving line counts across the diff by hand.
+`file-size: FAIL` never again requires re-deriving line counts across the diff by hand. If the
+component cannot write that log at all (unwritable path, filesystem full, rejected appends) it FAILs
+rather than passing silently, and puts the diagnostic — including the grown-file list, which would
+otherwise die with the log — in the sibling `file-size.persistence-error.log` under the same `logs:`
+directory, so the failure of the log has a log of its own.
 
 ## Nested / concurrent-gate isolation (issue #2874)
 
