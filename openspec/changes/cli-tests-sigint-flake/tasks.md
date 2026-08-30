@@ -386,10 +386,20 @@ describe the same quantity. The failure message names how much of the budget the
 **Finding 2 (BLOCKER) — the anchor contradicted the measurement recorded above it.**
 `MEASURED_QUIET_T_ACK` was 3ms against a recorded BINDING value of 1.4ms, so the `<= 10x` guard
 permitted 30ms where 10x the binding value is 14ms, and `ACK_QUIET_BASELINE = 25ms` was ~18x while
-its own comment claimed "~8.3x". Third instance of the same asymmetry error, so the CLASS is closed
-rather than the instance:
+its own comment claimed "~8.3x". **Name the asymmetry precisely, because it is the third instance in this issue and the pattern is the
+finding:** `MEASURED_QUIET_T_BOOT` was `11ms` against a recorded `11.4ms` — rounded **DOWN**, the
+STRICT direction, which is correct. `MEASURED_QUIET_T_ACK` was `3ms` against a recorded binding
+`1.4ms` — rounded **UP**, the PERMISSIVE direction. Both anchors form an UPPER bound on their
+baseline, so rounding up loosens the guard. That is the same error as the earlier "slowest observed"
+anchor (round 4) and as the original "generous quiet_baseline" (round 3): each time, a value that
+bounds something from above was chosen as though it bounded from below. So the CLASS is closed rather
+than the instance:
 
-* anchors are `from_micros`, rounded DOWN (the strict direction): `8_700us` / `1_400us`;
+* anchors are `from_micros`, rounded DOWN (the strict direction): `8_700us` / `1_400us`. **NOTE the
+  `t_boot` anchor is 8.7ms, not the 11.4ms first committed:** the permissive-anchor NOTICE (below)
+  fired on its first run and showed 11.4ms was itself permissive on this host, so it was lowered to
+  the smallest value actually recorded. `BOOT_QUIET_BASELINE` is therefore 60.9ms, not the 79.8ms that
+  11.4ms x 7 would give;
 * **both baselines are DERIVED** as `anchor * multiple`, so a constant cannot disagree with the data
   above it — there is no second number to drift. `BOOT_QUIET_BASELINE = 8.7ms x 7 = 60.9ms`,
   `ACK_QUIET_BASELINE = 1.4ms x 8 = 11.2ms`;
@@ -397,6 +407,21 @@ rather than the instance:
   literal reds) and bounds it by `MAX_BASELINE_MULTIPLE`;
 * hand-written multiples are gone from the doc comments. That prose was the reason nobody noticed:
   hand-written arithmetic decays exactly like a stale comment, and this finding WAS that decay.
+
+**Effect on engagement, which is the point of the fix.** Calibration now engages above 11.2ms of
+`t_ack` instead of 25ms:
+
+| host | `t_ack` | scale before (25ms baseline) | scale now (11.2ms baseline) |
+|---|---|---|---|
+| load avg 116 | 103.7ms | 2.07 (first observed firing) | **~9.2** |
+| load avg 30 | 96.9ms | 1.94 | ~8.7 |
+| sibling, IDLE | ~43ms | 1.00 | **~3.8** (measured 3.972) |
+
+The last row is the consequence recorded honestly since round 4: the sibling's quiet `t_ack` sits
+above the baseline, so that test loosens its own budgets ~3.8x on an idle host. Harmless by the
+asymmetry the whole mechanism rests on — calibration can only ever LOOSEN, so an over-eager `scale`
+delays a failure and can never cause one — and strictly preferable to a baseline so high that the
+mechanism never engages on the host #3515 actually measured.
 
 **Finding 3 (roborev Low; must fix) — the ack stage recorded the wrong quantity.**
 `clock.record("b.write-acks", t_ack)` recorded the slowest SINGLE ack as the stage duration.
