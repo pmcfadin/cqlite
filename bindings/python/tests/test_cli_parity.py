@@ -1111,12 +1111,13 @@ class TestCollectionIdentityContract:
         array of `{"key": ..., "value": ...}`, where the CLI keeps an object. A
         JSON object carrying a literal `"_type"` key is additionally read as a UDT.
 
-        Reachability, stated honestly: the reader does produce `Value::Json` for a
-        `"json"` comparator (`custom_scalar.rs`,
-        `comparator_value_parsing.rs`), but no current fixture uses one, so this is
-        unreachable from today's corpus while being a real hole in the type
-        lattice. #1455 must exclude columns whose comparator is `"json"`; the fix
-        is the declared type (#3497).
+        Reachability is stated in exactly ONE place — the `Value::Json` arm of
+        `value_to_hashable_key` in `bindings/python/src/value.rs` — and this
+        docstring asserts nothing about it (earlier wording here blamed fixture
+        absence, which is not the blocker). What this test pins is the SHAPE
+        divergence, which holds for any `dict`-shaped cell however it arrives:
+        #1455 must exclude columns whose comparator is `"json"`; the fix is the
+        declared type (#3497).
 
         Characterization only — this pins current behavior as a known gap.
         """

@@ -87,8 +87,8 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
 /// - `Map` → `tuple` of `(key, value)` tuples (both sides recursively projected)
 /// - `Udt` → `frozenset` of `(field_name, value)` tuples
 /// - `Frozen` → unwrap and recurse
-/// - `Json` → `tuple` (array) / `frozenset` of pairs (object), recursively — a
-///   reachable case, not a defensive one (see that arm)
+/// - `Json` → `tuple` (array) / `frozenset` of pairs (object), recursively
+///   (reachability: the one statement of it is at the `Value::Json` arm)
 /// - every other variant → its ordinary [`value_to_py`] projection, which is
 ///   already hashable
 ///
@@ -251,9 +251,18 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
         // column reads real cells into this arm" (that schema is refused at
         // open). The arm is unreachable from any supported ingestion path and is
         // kept because this `match` is exhaustive by design (see above), so a
-        // future inbound path must revisit it. Adjacent oddity, recorded for a
-        // future reader and not claimed as a bug: cqlite-core carries decode
-        // support for a `json` custom scalar that no schema can reach.
+        // future inbound path must revisit it. Adjacent oddity, not a bug:
+        // cqlite-core carries decode support for a `json` custom scalar that no
+        // schema can reach.
+        //
+        // THIS BLOCK IS THE ONE SITE THAT STATES `Value::Json` REACHABILITY, and
+        // the blocker is STRUCTURAL (schema validation refuses the type), NOT
+        // fixture absence — writing a fixture cannot reach this arm. It was
+        // restated in five places and drifted in four, so every other mention
+        // (the doc list above, [`json_to_hashable_key`], `M4_spec.md` rows b-5 /
+        // "JSON object", `test_cli_parity.py`'s
+        // `test_json_object_cell_normalizes_as_a_cql_map`) POINTS here and
+        // asserts nothing. If this changes, it changes here, once.
         //
         // IF that path became reachable, one limitation would apply: the
         // projection below inherits `json_to_py`'s number handling, so JSON `1`
@@ -311,9 +320,9 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
 
 /// Hashable projection of a JSON value (companion to [`json_to_py`]).
 ///
-/// REACHABLE from real data — see the `Value::Json` arm of
-/// [`value_to_hashable_key`] for the two decode paths that produce this variant
-/// from a schema-declared `json` column. Arrays become `tuple`s and objects
+/// Whether anything can deliver a `Value::Json` here is recorded in exactly ONE
+/// place — the `Value::Json` arm of [`value_to_hashable_key`] — and this doc
+/// asserts nothing about it. Arrays become `tuple`s and objects
 /// become `frozenset`s of `(key, value)` pairs so that a JSON value in a
 /// hashable position can never be the unhashable `list`/`dict` that
 /// [`json_to_py`] would build.
