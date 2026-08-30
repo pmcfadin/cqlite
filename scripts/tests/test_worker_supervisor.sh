@@ -5637,8 +5637,213 @@ WALKMUT
 ROWS
 }
 
+# ---------------------------------------------------------------------------
+# Test 43c-lock (#3549, roborev job 196 F1): A `ps -o args=` RENDERING MAY DECIDE IDENTITY IN NEITHER
+# DIRECTION, so `supervisor_pid_identity` has no `ps` probe at all.
+#
+# `ps -p <pid> -o args=` JOINS the argument vector with spaces and escapes NOTHING. Splitting that
+# string back apart is boundary-destroying BOTH WAYS, and this case measures both against real
+# processes:
+#
+#   FABRICATION (false POSITIVE, the finding's own example). ONE argv element
+#   `<dir>/worker-supervisor.sh extra` renders EXACTLY like the two-element vector
+#   `<dir>/worker-supervisor.sh` + `extra`. Split, position 0 holds a token that was never argv[0], and
+#   its basename — `worker-supervisor.sh` — belonged to no argument at all. Under the deleted probe that
+#   is the `supervisor` verdict, i.e. the one that prints "stop pid N first": advice to KILL AN
+#   UNRELATED PROCESS.
+#
+#   ERASURE (false NEGATIVE). A GENUINE supervisor under a path containing a space renders as
+#   `bash <dir>/my lane/worker-supervisor.sh`, whose split holds `<dir>/my` in position 1 — no canonical
+#   shape matches, so the rendering destroys a match that WAS there.
+#
+# THE SECOND HALF IS WHY THERE IS NO `ps`-NEGATIVE-ONLY MATCHER EITHER. A `ps`-derived non-match is
+# exactly as unreliable as a `ps`-derived match, so the only verdict such a probe could honestly return
+# is `unprobeable` — the answer the fall-through already gives. `unconfirmed` would be wrong: it ASSERTS
+# a non-identification, and nothing was determined. The two verdicts already produce the same cautious
+# operator advice, so collapsing them costs nothing in behaviour.
+#
+# It also records a WRONG ARGUMENT so it is not made again: the previous round justified feeding the
+# split rendering to the shared rule with "extra fields can only push the script out of position 1/2, so
+# a refinement cannot manufacture a match". Splitting does not only LOSE structure — it FABRICATES it,
+# and case (a) below is the counter-example, as a live process.
+#
+# TWO SCRATCH COPIES, each differing from the shipped function in exactly ONE recorded way:
+#   `psbody` — the shipped function with the procfs literal blinded: what SHIPS on a host with no
+#              usable procfs (the inverse substitution must be byte-identical).
+#   `psmut`  — `psbody` PLUS the deleted `ps` probe, restored verbatim between `# MUTANT196` markers at
+#              the exact site it was deleted from (strip the markers and it must be byte-identical to
+#              `psbody`). Its two verdicts are opposite, so neither is a constant.
+# ---------------------------------------------------------------------------
+test_legacy_lock_identity_ps_rendering_is_boundary_destroying() {
+  local d fn body psbody psmut blk blind ans mans total tailline
+  local hold name pid_fab spdir spfake pid_gen psout waited fields
+  d="$(new_case_dir)"
+  blind="/nonexistent-procfs-for-3549"
+  fn="$T_LOCKFN/ps196-fn.txt"
+  body="$T_LOCKFN/ps196-body.sh"
+  psbody="$T_LOCKFN/ps196-psbody.sh"
+  psmut="$T_LOCKFN/ps196-psmutant.sh"
+  blk="$T_LOCKFN/ps196-block.txt"
+  mkdir -p "$T_LOCKFN"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_pid_identity "$1"'
+  } >"$body"
+  sed "s#/proc#$blind#g" "$body" >"$psbody"
+  if diff -q <(sed "s#$blind#/proc#g" "$psbody") "$body" >/dev/null; then
+    pass "identity 196: the procfs-blind copy differs from the shipped probe ONLY in the procfs literal"
+  else
+    fail "identity-196-psbody-drift: the procfs-blind copy is not the shipped probe with only the procfs substitution applied"
+    return 0
+  fi
+
+  # THE INSERTION POINT IS VERIFIED, NOT ASSUMED: the restored probe goes immediately before the
+  # function's final `printf 'unprobeable\n'`, which is the fall-through the deletion left behind. If
+  # the shipped function no longer ends that way, the case says so rather than building a fiction.
+  sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR" >"$fn"
+  total=$(wc -l <"$fn" | tr -d ' ')
+  tailline="$(sed -n "$((total - 1))p" "$fn")"
+  if [[ "$tailline" == "  printf 'unprobeable\\n'" && "$(sed -n "${total}p" "$fn")" == "}" ]]; then
+    pass "identity 196: the shipped probe still ends in the 'unprobeable' fall-through, so the mutant is placed exactly where the ps probe was deleted from"
+  else
+    fail "identity-196-shape: the shipped probe's last two lines are [$tailline] + [$(sed -n "${total}p" "$fn")]; the mutant cannot be placed at the deleted probe's site"
+    return 0
+  fi
+  cat >"$blk" <<'PSMUT'
+  if command -v ps >/dev/null 2>&1; then # MUTANT196
+    local psargs="" # MUTANT196
+    psargs="$(ps -p "$pid" -o args= 2>/dev/null || true)" # MUTANT196
+    if [[ -n "$psargs" ]]; then # MUTANT196
+      local -a fields=() # MUTANT196
+      read -r -a fields <<<"$psargs" # MUTANT196
+      if [[ "${#fields[@]}" -gt 0 ]] && supervisor_identity_names_script "${fields[@]}"; then # MUTANT196
+        printf 'supervisor\n' # MUTANT196
+      else # MUTANT196
+        printf 'unconfirmed\n' # MUTANT196
+      fi # MUTANT196
+      return 0 # MUTANT196
+    fi # MUTANT196
+  fi # MUTANT196
+PSMUT
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
+    awk -v ins="$((total - 1))" -v blk="$blk" \
+      'FNR == ins { while ((getline line < blk) > 0) print line } { print }' "$fn"
+    printf '%s\n' 'supervisor_pid_identity "$1"'
+  } | sed "s#/proc#$blind#g" >"$psmut"
+  if diff -q <(grep -vF '# MUTANT196' "$psmut") "$psbody" >/dev/null && bash -n "$psmut" 2>/dev/null; then
+    pass "identity 196: the mutant is the procfs-blind probe plus EXACTLY the restored ps probe, and it parses (nothing else differs)"
+  else
+    fail "identity-196-mutant-drift: the mutant differs from the procfs-blind probe by more than the restored ps probe, or does not parse"
+    return 0
+  fi
+
+  # ---- (a) FABRICATION. A REAL process whose argv is a SINGLE element containing a space, the text
+  # before the space ending in `/worker-supervisor.sh`. `exec -a` is what stages a one-element vector:
+  # `cat` with no operand takes its input from fd 0, so no argument is needed to keep it alive. fd 0 is
+  # a FIFO with a live writer (also a fixture, so its own `sleep` is reaped with it) — a fifo `open` for
+  # read blocks until a writer appears, and the block happens in the FORKED CHILD, never in this shell,
+  # so the suite cannot deadlock on it.
+  hold="$d/hold.fifo"
+  mkfifo "$hold"
+  name="$d/worker-supervisor.sh extra"
+  fixture_bg bash -c 'exec 9>"$1"; exec sleep 300' _ "$hold" >/dev/null 2>&1
+  fixture_bg bash -c 'exec -a "$1" cat' _ "$name" <"$hold" >/dev/null 2>&1
+  pid_fab=$FIXTURE_LAST_PID
+
+  # ---- (b) ERASURE. A GENUINE supervisor whose PATH contains a space.
+  spdir="$d/my lane"
+  mkdir -p "$spdir"
+  spfake="$spdir/worker-supervisor.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$spfake"
+  chmod +x "$spfake"
+  fixture_bg bash "$spfake"
+  pid_gen=$FIXTURE_LAST_PID
+
+  # The `exec` in (a) lands only once the fifo rendezvous completes, so WAIT FOR THE STAGED VECTOR
+  # rather than for a duration. If it never lands (a host with no procfs to read, no fifo support) the
+  # case is an environmental non-result and says so — it never asserts against an unstaged premise.
+  waited=0
+  fields=0
+  while [[ "$waited" -lt 50 ]]; do
+    fields="$(tr '\0' '\n' <"/proc/$pid_fab/cmdline" 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "$fields" == 1 && "$(tr '\0' '\n' <"/proc/$pid_fab/cmdline" 2>/dev/null)" == "$name" ]] && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [[ "$fields" != 1 ]] || [[ "$(tr '\0' '\n' <"/proc/$pid_fab/cmdline" 2>/dev/null)" != "$name" ]]; then
+    skip "identity 196: the single-argv-element fixture did not stage on this host (fields=$fields) — premise unstageable"
+    fixture_kill "$pid_fab" "$pid_gen"
+    return 0
+  fi
+  pass "identity 196 PREMISE (a): the subject's TRUE vector is ONE argument, [$name] — the shape a ps rendering cannot represent"
+
+  # The rendering of that one-element vector is INDISTINGUISHABLE from a two-element one. Measured, not
+  # asserted: `ps` output equals the single argument verbatim, so a split of it yields two fields.
+  psout="$(ps -p "$pid_fab" -o args= 2>/dev/null || true)"
+  if [[ "$psout" == "$name" ]]; then
+    pass "identity 196 PREMISE (a): ps renders that one argument as [$psout] — the same bytes a two-element vector would render, so its split carves out a basename no argument ever had"
+  else
+    fail "identity-196-ps-render: ps rendered [$psout] for a single argument [$name]; the fabrication below would not be attributable to the rendering"
+  fi
+
+  # THE FAITHFUL VECTOR gets it right: the basename of the one argument is `worker-supervisor.sh extra`,
+  # which is not our script, so the procfs probe answers an affirmative non-match.
+  ans="$(bash "$body" "$pid_fab")"
+  if [[ "$ans" == unconfirmed ]]; then
+    pass "identity 196 (a): read from a NUL-separated vector, the fabricated shape is 'unconfirmed' — the boundary is intact, so the answer is right"
+  else
+    fail "identity-196-fab-procfs: answered [$ans] for a single-argument vector [$name]; expected unconfirmed"
+  fi
+  # SHIPPED, procfs blinded: no verdict is available and none is invented.
+  ans="$(bash "$psbody" "$pid_fab")"
+  if [[ "$ans" == unprobeable ]]; then
+    pass "identity 196 (a): with no procfs the SHIPPED probe answers 'unprobeable' — it does not fall back to a rendering that cannot be parsed"
+  else
+    fail "identity-196-fab-shipped: answered [$ans] with procfs blinded; expected unprobeable — a ps rendering may never yield a verdict"
+  fi
+  # MUTANT CONTRAST: restore ps positive corroboration and the SAME live process is `supervisor` — the
+  # false corroboration the finding named, reproduced as a process rather than argued from a string.
+  mans="$(bash "$psmut" "$pid_fab")"
+  if [[ "$mans" == supervisor ]]; then
+    pass "identity 196 (a) MUTANT CONTRAST: with the ps probe restored, that same live process answers 'supervisor' — a basename FABRICATED by the split, and the 'stop pid N' advice with it"
+  else
+    fail "identity-196-fab-mutant: the restored ps probe answered [$mans]; expected the false 'supervisor', or the contrast proves nothing"
+  fi
+
+  # ---- (b) THE OTHER DIRECTION: a ps-derived NEGATIVE is unreliable too, which is why `unprobeable`
+  # (and not `unconfirmed`) is the honest answer and why no negative-only matcher was kept.
+  ans="$(bash "$body" "$pid_gen")"
+  if [[ "$ans" == supervisor ]]; then
+    pass "identity 196 (b): a GENUINE supervisor under a path containing a space is 'supervisor' from the faithful vector"
+  else
+    fail "identity-196-gen-procfs: answered [$ans] for a real bash '<dir>/my lane/worker-supervisor.sh'; the erasure below would not be attributable"
+  fi
+  ans="$(bash "$psbody" "$pid_gen")"
+  if [[ "$ans" == unprobeable ]]; then
+    pass "identity 196 (b): with no procfs the SHIPPED probe answers 'unprobeable' for that same genuine supervisor — cautious, and not a claim either way"
+  else
+    fail "identity-196-gen-shipped: answered [$ans] with procfs blinded; expected unprobeable"
+  fi
+  mans="$(bash "$psmut" "$pid_gen")"
+  if [[ "$mans" == unconfirmed ]]; then
+    pass "identity 196 (b) MUTANT CONTRAST: the restored ps probe DENIES a genuine supervisor ('unconfirmed') — so a ps-derived NEGATIVE is unreliable too, and the two mutant verdicts are opposite (neither is a constant)"
+  else
+    fail "identity-196-gen-mutant: the restored ps probe answered [$mans] for a genuine supervisor whose path contains a space; expected the false 'unconfirmed', or the negative direction is unmeasured"
+  fi
+
+  fixture_kill "$pid_fab" "$pid_gen"
+}
+
 t test_legacy_lock_pid_identity_is_three_valued
 t test_legacy_lock_identity_requires_script_argument
+t test_legacy_lock_identity_ps_rendering_is_boundary_destroying
 
 
 # ---------------------------------------------------------------------------
