@@ -7902,6 +7902,148 @@ t test_fixture_reap_never_signals_a_disowned_group
 t test_fixture_wait_surrenders_ownership
 
 # ---------------------------------------------------------------------------
+# Test 47j (#3549, roborev job 208 F1): NO REFUSAL ADVERTISES THE ESCAPE HATCH.
+#
+# THE DEFECT. The generic remedy line printed by EVERY refusal used to end "…, or set SUPERVISOR_LOCK
+# explicitly to opt out of this compatibility check". Naming the lock is exactly what makes
+# `SUPERVISOR_LOCK_DERIVED` false, i.e. it SKIPS this guard — so on the LIVE branch that sentence tells
+# an operator whose start was refused BECAUSE ANOTHER SUPERVISOR IS ALIVE how to start anyway, and the
+# two supervisors then share one worktree with no lock in common. The advice CAUSED the harm the guard
+# exists to prevent, and it survived fourteen review rounds of the surrounding code because it reads as
+# helpful.
+#
+# THE PROPERTY, in the lead's ruling: NO refusal state mentions it — not just `live`. The override stays
+# supported (AC4) and is documented, with its caveat, in `docs/development/fleet-runbook.md`; a refusal
+# message is the worst place for it, because its reader is by definition in the situation where
+# overriding is most dangerous.
+#
+# TWO HALVES, because either alone can pass for the wrong reason. BEHAVIOURAL over all four refusal
+# shapes (live, stale, and two `unknown` causes) — the emitted bytes are what an operator reads.
+# STRUCTURAL over the two functions that build that text, counting a BARE `SUPERVISOR_LOCK` and NOT a
+# `$SUPERVISOR_LOCK` expansion: the refusal legitimately prints the per-lane lock's PATH (that is the
+# fact that explains why the two locks are invisible to each other), and a check that reds on correct
+# text is the check people learn to waive.
+# ---------------------------------------------------------------------------
+sv_refusal_has_no_override_advice() {
+  local label="$1" out="$2"
+  if [[ "$out" != *"SUPERVISOR_LOCK"* ]]; then
+    pass "no-override-advice ($label): the refusal names no way to opt out of the check — its remedies are stop the legacy supervisor, or upgrade that checkout"
+  else
+    fail "no-override-advice-$label: the refusal text mentions SUPERVISOR_LOCK; out=[$out] — advertising the override to a refused operator is advice to run two supervisors in one worktree (#3549 job 208 F1)"
+  fi
+}
+
+test_legacy_lock_refusals_never_advertise_the_override() {
+  local d tmp lane legacy out rc live dead ovr mout code probe fn body
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549adv$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+
+  # ---- (1) LIVE — the state where the advice was actively harmful.
+  fixture_bg sleep 300
+  live=$FIXTURE_LAST_PID
+  mkdir -p "$legacy"
+  printf '%s\n' "$live" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"is ACTIVE"* ]]; then
+    pass "no-override-advice PREMISE (live): the drive refused over a LIVE holder, so the text below is the live refusal"
+  else
+    fail "no-override-advice-premise-live: rc=$rc out=[$out] — the live refusal was not reached and the assert below has no subject"
+  fi
+  sv_refusal_has_no_override_advice live "$out"
+  # ...and the two remedies that DO belong there are present, so the removal did not leave the operator
+  # with no guidance at all.
+  if [[ "$out" == *"stop the pre-#3467 supervisor on this box, or upgrade that checkout to #3467+"* ]]; then
+    pass "no-override-advice (live): the generic remedy still names both legitimate actions — stop the legacy supervisor, or upgrade that checkout past #3467"
+  else
+    fail "no-override-advice-live-remedy-lost: out=[$out] — removing the override clause must not remove the remedy"
+  fi
+
+  # ---- (2) MUTANT CONTRAST: the pre-fix line, restored in the emitter, on the SAME live state. The
+  # assert above must be shown to have teeth — a green over text that never contained the string would
+  # measure nothing.
+  ovr="$d/m-advice.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_refuse \
+       'stop the pre-#3467 supervisor on this box, or upgrade that checkout to #3467+.' \
+       'stop the pre-#3467 supervisor, or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check.'; then
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"is ACTIVE"* ]] && [[ "$mout" == *"set SUPERVISOR_LOCK explicitly to opt out"* ]]; then
+      pass "no-override-advice MUTANT CONTRAST: with the pre-fix line restored, the LIVE refusal hands the operator the one instruction that puts a second supervisor in this worktree — the assert above reds on exactly this text"
+    else
+      fail "no-override-advice-mutant: out=[$mout] — the pre-fix form must be shown to break, or the assert measures nothing"
+    fi
+  fi
+  fixture_kill "$live"
+  rm -rf "$legacy"
+
+  # ---- (3) STALE and (4) the two UNKNOWN shapes. Same property, all states.
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"LEFT BEHIND"* ]]; then
+    pass "no-override-advice PREMISE (stale): the drive reached the stale refusal"
+  else
+    fail "no-override-advice-premise-stale: rc=$rc out=[$out]"
+  fi
+  sv_refusal_has_no_override_advice stale "$out"
+  rm -rf "$legacy"
+
+  mkdir -p "$legacy"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"pid-file-missing"* ]]; then
+    pass "no-override-advice PREMISE (unknown/pid-file-missing): the drive reached an undeterminable refusal"
+  else
+    fail "no-override-advice-premise-unknown: rc=$rc out=[$out]"
+  fi
+  sv_refusal_has_no_override_advice unknown-pid-file-missing "$out"
+  rm -rf "$legacy"
+
+  printf 'not a lock dir\n' >"$legacy"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"not-a-directory"* ]]; then
+    pass "no-override-advice PREMISE (unknown/not-a-directory): the drive reached the second undeterminable refusal"
+  else
+    fail "no-override-advice-premise-notdir: rc=$rc out=[$out]"
+  fi
+  sv_refusal_has_no_override_advice unknown-not-a-directory "$out"
+  rm -f "$legacy"
+
+  # ---- (5) STRUCTURAL, over the two functions that BUILD refusal text: the emitter and the guard that
+  # passes it the per-state detail and remedy. Full-line comments are stripped first — this file's own
+  # prose necessarily NAMES the variable to explain why it is absent — and what remains is code, where a
+  # BARE `SUPERVISOR_LOCK` (not a `$SUPERVISOR_LOCK` expansion) can only be prose about the override.
+  # This half holds for states no behavioural case stages.
+  probe=""
+  for fn in supervisor_legacy_lock_refuse supervisor_legacy_lock_guard; do
+    body="$(sed -n "/^$fn()/,/^}/p" "$SUPERVISOR")"
+    if [[ -z "$body" || "$body" != *"$fn() {"* ]]; then
+      fail "no-override-advice-structural-premise: could not extract $fn from $SUPERVISOR"
+      return 0
+    fi
+    code="$(printf '%s\n' "$body" | grep -vE '^[[:space:]]*#' || true)"
+    if [[ -z "$code" ]]; then
+      fail "no-override-advice-structural-premise: $fn has no non-comment line; the scan has no subject"
+      return 0
+    fi
+    probe+="$(printf '%s\n' "$code" | grep -n 'SUPERVISOR_LOCK' | grep -v '[$]SUPERVISOR_LOCK' || true)"
+  done
+  if [[ -z "$probe" ]]; then
+    pass "no-override-advice STRUCTURAL: neither the refusal emitter nor the guard carries a bare SUPERVISOR_LOCK in code — the only occurrences are the \$SUPERVISOR_LOCK path expansion, so no state can print the escape hatch"
+  else
+    fail "no-override-advice-structural: [$probe] — a refusal path names SUPERVISOR_LOCK as prose; the override is documented in docs/development/fleet-runbook.md, not in a refusal (#3549 job 208 F1)"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_legacy_lock_refusals_never_advertise_the_override
+
+# ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
 #
 # This is the assert the leak had no equivalent of: the fixtures were reaped per case, by pid, and

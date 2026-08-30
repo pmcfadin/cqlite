@@ -631,7 +631,19 @@ What it guarantees:
   supervisor reads it as stale, reclaims it, and our restore then corrupts ITS lock. The atomic form
   (build the lock complete in a private staging dir, move it in ONE `rename(2)`) needs GNU-only
   `RENAME_NOREPLACE`/`mv -T` and this script supports macOS, so it was available and declined; the
-  rationale is recorded in full at the guard. An explicit `SUPERVISOR_LOCK` skips the check.
+  rationale is recorded in full at the guard. **An explicit `SUPERVISOR_LOCK` skips the check — and it
+  is documented HERE, not in the refusal (#3549).** Naming the lock yourself takes the placement
+  decision explicitly, which is why the guard only ever runs on the DERIVED default; the corollary is
+  that setting it is also a way to BYPASS the guard, so it is not something a refusal message may
+  suggest. No refusal path mentions it (it once did, in a generic remedy line printed by every state
+  including the LIVE one, which told an operator whose start had been refused *because another
+  supervisor is alive* to start anyway — the exact collision the guard exists to prevent). Before you
+  set it to get past a refusal: a refusal over a LIVE holder is not something to override at all —
+  stop that supervisor or upgrade its checkout — and overriding any other state is only safe if you
+  have independently established that the two supervisors cannot share a worktree, e.g. you are
+  deliberately placing this lane's lock somewhere no other launcher on the box can reach. The refusals
+  offer exactly two remedies, and neither is this one: stop the pre-#3467 supervisor, or upgrade that
+  checkout to #3467+ (plus, for a confirmed-dead holder, the non-recursive deletion one-liner above).
   **It is a STARTUP check, not machine-global exclusion: it REDUCES the collision window, it does not
   eliminate it** — a pre-#3467 supervisor that starts *after* the check cannot be stopped without
   reimposing machine-global exclusion, which #3393 forbids (N lanes per box). The RESIDUAL block at the

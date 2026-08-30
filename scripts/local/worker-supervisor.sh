@@ -1997,7 +1997,21 @@ supervisor_legacy_lock_refuse() {
   [[ -z "$remedy" ]] || printf '%s\n' "worker-supervisor: remedy for THIS state — $remedy" >&2
   [[ -z "$cmd_broken" ]] || printf '%s\n' "worker-supervisor: a remedy command for this state was built with an embedded control character, so it is NOT printed as a runnable line (it could not be one); rendered for reading only: $cmd_broken" >&2
   [[ -z "$remedy_cmd" ]] || printf '%s\n' "$remedy_cmd" >&2
-  printf '%s\n' "worker-supervisor: remedy — stop the pre-#3467 supervisor (or upgrade that checkout to #3467+), or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check." >&2
+  # NO REFUSAL MENTIONS `SUPERVISOR_LOCK`, AND THE ABSENCE IS DELIBERATE (#3549, roborev job 208 F1).
+  # This line used to end with "…, or set SUPERVISOR_LOCK explicitly to opt out of this compatibility
+  # check", and it was printed by EVERY refusal — including the LIVE one. Read as an operator reads it,
+  # that is an instruction that CAUSES the harm this guard exists to prevent: naming the lock skips the
+  # check (AC4, `SUPERVISOR_LOCK_DERIVED`), so a run refused BECAUSE ANOTHER SUPERVISOR IS ALIVE starts
+  # anyway and the two supervisors then share one worktree, invisible to each other. It survived
+  # fourteen review rounds of the surrounding code because it reads as helpful.
+  #
+  # It is removed from the OTHER states too, per the lead's ruling: the escape hatch stays SUPPORTED and
+  # is documented in `docs/development/fleet-runbook.md`, which is where an operator deciding to place
+  # the lock themselves belongs. A refusal message is the worst possible place to advertise it, because
+  # its reader is BY DEFINITION in the situation where overriding is most dangerous. Do not re-add it to
+  # any refusal path as a helpful touch — the remedies here are: stop the legacy supervisor, or upgrade
+  # that checkout past #3467.
+  printf '%s\n' "worker-supervisor: remedy — stop the pre-#3467 supervisor on this box, or upgrade that checkout to #3467+." >&2
   exit 1
 }
 
