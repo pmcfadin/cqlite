@@ -47,7 +47,8 @@ use parquet_parity::canonical_jsonl::{
 };
 use parquet_parity::cql_type::{parse_column, ColumnType};
 use parquet_parity::decimal::{exact_from_decimal128, exact_from_text, EXPORT_DECIMAL_SCALE};
-use parquet_parity::golden_rows::{canonicalize_key_component, project_golden};
+use parquet_parity::declared::{canonicalize_arrow_decimal, canonicalize_golden, Declared};
+use parquet_parity::golden_rows::project_golden;
 use parquet_parity::schema_fixture;
 use parquet_parity::{ParityCase, SchemaCheck};
 
@@ -458,11 +459,37 @@ fn col(name: &str, declared: &str) -> ColumnType {
     parse_column(name, declared, &[]).expect("declared type must parse")
 }
 
+/// ONE primary-key component, through THE declared-type-guided entry point
+/// (`declared.rs`) at the `PrimaryKey` position — the same call
+/// `golden_rows::project_golden` makes, so these tests cannot pass against a
+/// path the harness does not use.
+fn key_component(raw: &CanonicalValue, col: &ColumnType) -> Result<CanonicalValue, String> {
+    canonicalize_golden(
+        raw.clone(),
+        &Declared::primary_key(&col.spec, format!("key column '{}'", col.name)),
+    )
+}
+
+/// ONE multicell collection PATH component (a set element, or a map entry's
+/// key), at the `CollectionPath` position — stringified by Cassandra exactly as
+/// a key component is, and therefore converted by the same declared-scalar
+/// rules (issue #1490 round 7).
+/// The raw value is built the way the loader builds it — `CanonicalValue::from_json`
+/// over the JSON STRING sstabledump writes in `path` — so these tests exercise
+/// the same input the harness sees, including the shared parser's one
+/// value-level guess (a `Z`-suffixed spelling becomes a `Timestamp`).
+fn path_component(raw: &str, elem: &ColumnType) -> Result<CanonicalValue, String> {
+    canonicalize_golden(
+        CanonicalValue::from_json(&serde_json::Value::String(raw.to_string())),
+        &Declared::collection_path(&elem.spec, format!("collection '{}' path", elem.name)),
+    )
+}
+
 /// A declared `boolean` key is `Bool`, not the string sstabledump wrote.
 #[test]
 fn a_boolean_key_component_becomes_a_bool() {
     for (raw, expected) in [("true", true), ("false", false)] {
-        let got = canonicalize_key_component(
+        let got = key_component(
             &CanonicalValue::Text(raw.to_string()),
             &col("flag", "boolean"),
         )
@@ -480,7 +507,7 @@ fn a_boolean_key_component_becomes_a_bool() {
 /// decodes to — the narrowing rule a `float` CELL already went through.
 #[test]
 fn a_float_key_component_narrows_to_32_bits() {
-    let got = canonicalize_key_component(
+    let got = key_component(
         &CanonicalValue::Text("1.84".to_string()),
         &col("px", "float"),
     )
@@ -498,7 +525,7 @@ fn a_float_key_component_narrows_to_32_bits() {
 /// A declared `double` key keeps full 64-bit precision (no narrowing).
 #[test]
 fn a_double_key_component_keeps_64_bits() {
-    let got = canonicalize_key_component(
+    let got = key_component(
         &CanonicalValue::Text("1014.5449131979983".to_string()),
         &col("v", "double"),
     )
@@ -513,7 +540,7 @@ fn a_double_key_component_keeps_64_bits() {
 /// canonical form the exported `Decimal128(38, 9)` cell lands on.
 #[test]
 fn a_decimal_key_component_becomes_the_exact_arrow_side_decimal() {
-    let got = canonicalize_key_component(
+    let got = key_component(
         &CanonicalValue::Text("10576.6".to_string()),
         &col("amount", "decimal"),
     )
@@ -541,8 +568,7 @@ fn an_integral_key_component_is_an_int_either_way() {
         CanonicalValue::Text("-42".to_string()),
         CanonicalValue::Int(-42),
     ] {
-        let got = canonicalize_key_component(&raw, &col("pk", "int"))
-            .expect("an integral key must convert");
+        let got = key_component(&raw, &col("pk", "int")).expect("an integral key must convert");
         assert_eq!(got, CanonicalValue::Int(-42));
     }
 }
@@ -553,7 +579,7 @@ fn an_integral_key_component_is_an_int_either_way() {
 #[test]
 fn a_text_key_component_that_spells_a_timestamp_stays_text() {
     let raw = "2025-10-06 01:12:07.265Z";
-    let got = canonicalize_key_component(
+    let got = key_component(
         &CanonicalValue::Timestamp {
             micros: 1_759_713_127_265_000,
             raw: raw.to_string(),
@@ -575,10 +601,9 @@ fn a_key_component_that_contradicts_its_declared_type_is_refused() {
         ("int", "12x", "an integer"),
         ("decimal", "1e9", "not a plain decimal literal"),
     ] {
-        let err =
-            canonicalize_key_component(&CanonicalValue::Text(raw.to_string()), &col("k", declared))
-                .err()
-                .unwrap_or_else(|| panic!("a {declared} key rendered {raw:?} must be REFUSED"));
+        let err = key_component(&CanonicalValue::Text(raw.to_string()), &col("k", declared))
+            .err()
+            .unwrap_or_else(|| panic!("a {declared} key rendered {raw:?} must be REFUSED"));
         assert!(
             err.contains(needle) && err.contains(raw),
             "the refusal must name the value and what it is not: {err}"
@@ -688,6 +713,265 @@ fn project_golden_refuses_a_key_component_that_contradicts_its_type() {
         .expect_err("a boolean key rendered \"maybe\" MUST fail the projection");
     assert!(
         err.contains("key column 'flag'") && err.contains("'true' or 'false'"),
+        "{err}"
+    );
+}
+
+// ===========================================================================
+// 3. A multicell collection PATH component is typed the same way (round 7)
+//
+// sstabledump emits one cell PER ELEMENT of a non-frozen collection, and the
+// element (a set) or the entry KEY (a map) arrives in the cell's `path` as a
+// STRINGIFIED value — Cassandra's `AbstractType.getString`, exactly as for a
+// primary-key component. Only the INTEGRAL family was ever converted back, so a
+// declared `set<float>`, `set<double>`, `set<decimal>` or boolean-keyed map
+// compared Cassandra's stringified text against the Arrow side's typed value: a
+// FALSE parity failure on documented expansion targets (`signed_special_collections`,
+// #3578). Both positions now route through the ONE declared-type-guided entry
+// point (`declared.rs`), so they cannot diverge again.
+//
+// The expectations are Cassandra's documented renderings or the ARROW side's own
+// constructor, never CQLite's output (#3041/#3042).
+// ===========================================================================
+
+/// A declared `boolean` collection element/key is `Bool`, not `Text`.
+#[test]
+fn a_boolean_path_component_becomes_a_bool() {
+    for (raw, expected) in [("true", true), ("false", false)] {
+        assert_eq!(
+            path_component(raw, &col("flag", "boolean")).expect("a legal boolean must convert"),
+            CanonicalValue::Bool(expected),
+            "a boolean-keyed collection's path is written through Boolean.toString, and the \
+             Arrow side holds Bool"
+        );
+    }
+}
+
+/// A declared `float` element narrows to 32 bits — the SAME rule a `float` cell
+/// and a `float` key component go through, so all three land on one value.
+#[test]
+fn a_float_path_component_narrows_to_32_bits() {
+    let got = path_component("1.84", &col("px", "float")).expect("a float element must convert");
+    // The right-hand side is the ARROW side's own value: `Float32` widened.
+    assert_eq!(got, CanonicalValue::Float(NormalizedFloat(1.84f32 as f64)));
+    assert_ne!(
+        got,
+        CanonicalValue::Float(NormalizedFloat(1.84f64)),
+        "the un-narrowed double is a DIFFERENT value"
+    );
+    // `double` keeps full precision.
+    assert_eq!(
+        path_component("1014.5449131979983", &col("v", "double")).expect("a double element"),
+        CanonicalValue::Float(NormalizedFloat(1014.5449131979983f64))
+    );
+}
+
+/// A declared `decimal` element becomes the EXACT decimal the exported
+/// `Decimal128(38, 9)` cell lands on.
+#[test]
+fn a_decimal_path_component_becomes_the_exact_arrow_side_decimal() {
+    let got =
+        path_component("10576.6", &col("amount", "decimal")).expect("a decimal element converts");
+    let arrow_side = exact_from_decimal128(10_576_600_000_000, 9, "arrow decimal")
+        .expect("the export's own scale must be representable")
+        .canonical();
+    assert_eq!(
+        got, arrow_side,
+        "the golden element and the exported cell must land on ONE canonical decimal"
+    );
+    assert_ne!(
+        got,
+        CanonicalValue::Text("10576.6".to_string()),
+        "an untyped decimal element stays a bare string and can never equal the exported value"
+    );
+}
+
+/// The integral conversion that ALREADY worked must keep working, and a declared
+/// `text` element must NOT be coerced — a `set<text>` holding `"5"` can never
+/// compare equal to a `set<int>` holding `5`.
+#[test]
+fn an_integral_path_component_converts_and_a_text_one_does_not() {
+    assert_eq!(
+        path_component("-2", &col("e", "int")).expect("integral element"),
+        CanonicalValue::Int(-2)
+    );
+    assert_eq!(
+        path_component("5", &col("e", "text")).expect("text element"),
+        CanonicalValue::Text("5".to_string()),
+        "coercing a text element would let a set<text> compare equal to a set<int>"
+    );
+}
+
+/// A declared `text` element that SPELLS a timestamp stays `Text` — the round-5
+/// no-heuristics rule, now reaching the PATH position too (it did not before:
+/// a non-integral path was returned exactly as the shared parser had guessed it).
+#[test]
+fn a_text_path_component_that_spells_a_timestamp_stays_text() {
+    let raw = "2025-10-06 01:12:07.265Z";
+    assert_eq!(
+        path_component(raw, &col("e", "text")).expect("text element"),
+        CanonicalValue::Text(raw.to_string())
+    );
+    // …and a declared `timestamp` element still compares as an INSTANT.
+    let got = path_component(raw, &col("e", "timestamp")).expect("timestamp element");
+    assert!(
+        matches!(got, CanonicalValue::Timestamp { micros, .. } if micros == 1_759_713_127_265_000),
+        "a declared timestamp element must compare as an instant, got {got:?}"
+    );
+}
+
+/// A path component that does not DENOTE its declared element type is a
+/// REFUSAL, never a silent fallback to text — the same rule as for a key
+/// component, because it is now the same code.
+#[test]
+fn a_path_component_that_contradicts_its_declared_type_is_refused() {
+    for (declared, raw, needle) in [
+        ("boolean", "maybe", "'true' or 'false'"),
+        ("float", "not-a-number", "a finite decimal number"),
+        ("int", "12x", "an integer"),
+        ("decimal", "1e9", "not a plain decimal literal"),
+    ] {
+        let err = path_component(raw, &col("e", declared))
+            .err()
+            .unwrap_or_else(|| panic!("a {declared} element rendered {raw:?} must be REFUSED"));
+        assert!(
+            err.contains(needle) && err.contains(raw),
+            "the refusal must name the value and what it is not: {err}"
+        );
+    }
+}
+
+/// END TO END: a golden carrying a non-frozen `set<float>` and a
+/// `map<boolean,decimal>` projects TYPED elements and TYPED entry keys.
+#[test]
+fn project_golden_types_multicell_collection_paths() {
+    // sstabledump's multicell shape: one cell per element, the element (or the
+    // map entry's key) in `path`, stringified.
+    const GOLDEN: &str = concat!(
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","clustering":[],"#,
+        r#""liveness_info":{"tstamp":"2021-01-01T00:00:00Z"},"cells":["#,
+        r#"{"name":"s","path":["1.84"],"value":""},"#,
+        r#"{"name":"m","path":["true"],"value":10576.6}"#,
+        r#"]}]}"#
+    );
+
+    let columns = vec![
+        col("id", "int"),
+        col("s", "set<float>"),
+        col("m", "map<boolean, decimal>"),
+    ];
+    let doc = parse_document_str_with_keys(
+        GOLDEN,
+        Path::new("<synthetic>"),
+        true,
+        &KeySpec::from_cql_types(&["int"], &[]),
+    )
+    .expect("the synthetic golden must parse");
+
+    let rows = project_golden(&doc, &columns, &["id"], &[]).expect("the golden must project");
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+
+    assert_eq!(
+        row.cells.get("s"),
+        Some(&CanonicalValue::List(vec![CanonicalValue::Float(
+            NormalizedFloat(1.84f32 as f64)
+        )])),
+        "a set<float> element arrives as the stringified path '1.84' and must land on the \
+         SAME double the Arrow Float32 column decodes to"
+    );
+    let expected_decimal = exact_from_decimal128(10_576_600_000_000, 9, "arrow decimal")
+        .expect("scale 9 is the export's own")
+        .canonical();
+    assert_eq!(
+        row.cells.get("m"),
+        Some(&CanonicalValue::Map(vec![(
+            CanonicalValue::Bool(true),
+            expected_decimal
+        )])),
+        "a map<boolean,decimal> entry's KEY arrives as the stringified path 'true' and its \
+         VALUE as a typed JSON number"
+    );
+}
+
+// ===========================================================================
+// 4. A `Decimal128` cell is decoded from its DECLARED type (round 7)
+//
+// Every scale-zero `Decimal128` used to canonicalize as an `Int`, on the grounds
+// that scale 0 is `varint`'s mapping. But `arrow_expect` accepts
+// `Decimal128(p, s)` for ANY `s >= 0` for a declared `decimal` — deliberately,
+// since Arrow carries ONE scale per COLUMN — so a valid `decimal` column
+// exported at scale 0 passed the TYPE check and then compared `Int(n)` against
+// the golden's exact `decimal(n)`: a false VALUE failure on correct data.
+// ===========================================================================
+
+/// A scale-ZERO `Decimal128` cell of a declared `decimal` column canonicalizes
+/// as an exact DECIMAL, and equals the golden's whole-valued literal.
+#[test]
+fn a_scale_zero_decimal_cell_compares_as_a_decimal() {
+    let decimal = col("d", "decimal");
+    for whole in [0i128, 1, -1, 42, -31_595, 1i128 << 60] {
+        let exported = canonicalize_arrow_decimal(
+            whole,
+            0,
+            &Declared::cell(&decimal.spec, "scale-zero decimal cell"),
+        )
+        .expect("a scale-zero decimal must canonicalize");
+        // The GOLDEN side: sstabledump writes a whole decimal as a JSON integer.
+        let golden = canonicalize_golden(
+            CanonicalValue::Int(whole),
+            &Declared::cell(&decimal.spec, "golden decimal cell"),
+        )
+        .expect("a whole golden decimal is exact");
+        assert_eq!(
+            exported, golden,
+            "a decimal exported at scale 0 must compare EQUAL to the golden's whole literal \
+             {whole}, not as Int({whole}) against decimal({whole})"
+        );
+        assert_eq!(exported, CanonicalValue::Text(format!("decimal({whole})")));
+        // And it is NOT the integer form — the mapping the old rule produced.
+        assert_ne!(exported, CanonicalValue::Int(whole));
+    }
+}
+
+/// A declared `varint` stays an INTEGER domain on both sides at scale 0 — the
+/// distinction the declared type exists to make.
+#[test]
+fn a_scale_zero_varint_cell_stays_an_integer() {
+    let varint = col("v", "varint");
+    let exported = canonicalize_arrow_decimal(7, 0, &Declared::cell(&varint.spec, "varint cell"))
+        .expect("varint");
+    assert_eq!(exported, CanonicalValue::Int(7));
+    assert_eq!(
+        exported,
+        canonicalize_golden(
+            CanonicalValue::Int(7),
+            &Declared::cell(&varint.spec, "golden varint cell")
+        )
+        .expect("a varint golden literal is already exact"),
+        "a varint must NOT be converted to a decimal on either side"
+    );
+    // A `varint` is pinned to scale 0 by `arrow_expect`; a scaled one is a
+    // refusal rather than a rescale.
+    let err = canonicalize_arrow_decimal(7, 2, &Declared::cell(&varint.spec, "varint cell"))
+        .expect_err("a scaled varint must be refused");
+    assert!(err.contains("INTEGER domain"), "{err}");
+}
+
+/// Without a declared SCALAR the `Decimal128` decode REFUSES: scale zero is both
+/// a `varint` and a whole-valued `decimal`, so there is nothing to decide it by
+/// and guessing is what round 7 found.
+#[test]
+fn a_decimal_cell_without_a_declared_scalar_is_refused() {
+    let collection = col("s", "set<int>");
+    let err = canonicalize_arrow_decimal(
+        7,
+        0,
+        &Declared::cell(&collection.spec, "decimal under a collection declaration"),
+    )
+    .expect_err("an ambiguous Decimal128 must be refused, never guessed");
+    assert!(
+        err.contains("ambiguous without the declared type") && err.contains("refuses"),
         "{err}"
     );
 }

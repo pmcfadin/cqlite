@@ -1,5 +1,16 @@
 //! Arrow → canonical value decoding for the Parquet↔JSONL parity harness (#1490).
 //!
+//! # This decode is DECLARED-TYPE-GUIDED, and it is not the entry point
+//!
+//! Nothing here is public. Every Arrow cell is decoded through
+//! `declared::canonicalize_arrow`, which requires the `CqlTypeSpec` declared for
+//! that position, and this module's [`decode_declared`] is the structural half
+//! of that one door. The decode is mostly structural — an `Int32Array` can only
+//! be an integer — but `Decimal128` is genuinely AMBIGUOUS (scale zero is both a
+//! `varint` and a whole-valued `decimal`), so it consults the declared type and
+//! REFUSES when none is available. See `declared.rs` for the invariant and for
+//! the three review rounds that produced it.
+//!
 //! Reads a Parquet file back through the `arrow`/`parquet` crates and projects
 //! every cell into the SAME [`CanonicalValue`] space the sstabledump golden is
 //! parsed into (`canonical_jsonl`), so the comparison is per-cell and typed
@@ -17,8 +28,8 @@
 //! | `Int8/16/32/64`             | `Int`                                | JSON number |
 //! | `Float32`                   | `Float` (f32 widened)                | JSON number, narrowed to f32 by the golden side |
 //! | `Float64`                   | `Float`                              | JSON number |
-//! | `Decimal128(38, s>0)`       | EXACT decimal text (`decimal.rs`)    | JSON number, recovered to the same exact decimal (`golden_rows::normalize_declared_numbers`) |
-//! | `Decimal128(38, 0)`         | `Int` (varint)                       | JSON number |
+//! | `Decimal128(38, s)` decimal | EXACT decimal text (`decimal.rs`)    | JSON number, recovered to the same exact decimal (`declared::canonicalize_golden`) |
+//! | `Decimal128(38, 0)` varint  | `Int`                                | JSON number |
 //! | `Utf8`                      | `Text`                               | JSON string |
 //! | `Binary`                    | `Text("0x" + lower hex)`             | `"0x…"` string |
 //! | `FixedSizeBinary(16)`       | `Text` hyphenated UUID               | UUID string |
@@ -60,14 +71,21 @@ use arrow::array::{
 use arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
 
 use super::canonical_jsonl::{CanonicalValue, NormalizedFloat};
-use super::decimal::exact_from_decimal128;
+use super::declared::{
+    arrow_child, canonicalize_arrow_decimal, map_kv, seq_elem, struct_field, Declared, Position,
+};
 
-/// Project cell `(array, row)` into the canonical space.
-pub fn canonical_from_arrow(
+/// Project cell `(array, row)` into the canonical space, at a DECLARED position.
+///
+/// `pub(super)` on purpose: the only public door is
+/// `declared::canonicalize_arrow`, so no call site can decode an Arrow cell
+/// without naming the declared type that governs it.
+pub(super) fn decode_declared(
     array: &dyn Array,
     row: usize,
-    ctx: &str,
+    at: &Declared<'_>,
 ) -> Result<CanonicalValue, String> {
+    let ctx = at.ctx();
     if array.is_null(row) {
         return Ok(CanonicalValue::Absent);
     }
@@ -90,7 +108,7 @@ pub fn canonical_from_arrow(
         )),
         // A CQL `float` is 32-bit; sstabledump prints Java's `Float.toString`,
         // which the golden side re-narrows to f32 before widening, so both sides
-        // hold the SAME double. See `golden_rows::normalize_declared_numbers`.
+        // hold the SAME double. See `declared::canonicalize_golden`.
         DataType::Float32 => Ok(CanonicalValue::Float(NormalizedFloat(
             downcast::<Float32Array>(array, ctx)?.value(row) as f64,
         ))),
@@ -154,20 +172,25 @@ pub fn canonical_from_arrow(
                 ),
             ]))
         }
+        // The ONE genuinely ambiguous representation: scale zero is both a
+        // `varint` and a whole-valued `decimal`. Settled by the DECLARED type,
+        // and refused when none is available (issue #1490 round 7).
         DataType::Decimal128(_, scale) => {
             let unscaled = downcast::<Decimal128Array>(array, ctx)?.value(row);
-            decimal_to_canonical(unscaled, *scale, ctx)
+            canonicalize_arrow_decimal(unscaled, *scale, at)
         }
+        // Every container member descends at ITS OWN declared position, built
+        // from the parent's declared type — the same derivation the golden side
+        // uses, so an element/key/value can never be canonicalized by one side
+        // with a declared type and by the other without one.
         DataType::List(_) => {
             let list = downcast::<ListArray>(array, ctx)?;
             let values = list.value(row);
+            let elem = seq_elem(at);
             let mut out = Vec::with_capacity(values.len());
             for i in 0..values.len() {
-                out.push(canonical_from_arrow(
-                    values.as_ref(),
-                    i,
-                    &format!("{ctx}[{i}]"),
-                )?);
+                let child = arrow_child(at, elem, Position::Element, format!("{ctx}[{i}]"));
+                out.push(decode_declared(values.as_ref(), i, &child)?);
             }
             Ok(CanonicalValue::List(out))
         }
@@ -176,11 +199,19 @@ pub fn canonical_from_arrow(
             let entries = map.value(row);
             let keys = entries.column(0);
             let vals = entries.column(1);
+            let (key_spec, value_spec) = map_kv(at);
             let mut out = Vec::with_capacity(entries.len());
             for i in 0..entries.len() {
+                let kc = arrow_child(at, key_spec, Position::MapKey, format!("{ctx}.key[{i}]"));
+                let vc = arrow_child(
+                    at,
+                    value_spec,
+                    Position::MapValue,
+                    format!("{ctx}.value[{i}]"),
+                );
                 out.push((
-                    canonical_from_arrow(keys.as_ref(), i, &format!("{ctx}.key[{i}]"))?,
-                    canonical_from_arrow(vals.as_ref(), i, &format!("{ctx}.value[{i}]"))?,
+                    decode_declared(keys.as_ref(), i, &kc)?,
+                    decode_declared(vals.as_ref(), i, &vc)?,
                 ));
             }
             Ok(CanonicalValue::Map(out))
@@ -189,13 +220,10 @@ pub fn canonical_from_arrow(
             let s = downcast::<StructArray>(array, ctx)?;
             let mut out = Vec::with_capacity(fields.len());
             for (i, f) in fields.iter().enumerate() {
+                let child = struct_field(at, i, f.name(), fields.len());
                 out.push((
                     f.name().clone(),
-                    canonical_from_arrow(
-                        s.column(i).as_ref(),
-                        row,
-                        &format!("{ctx}.{}", f.name()),
-                    )?,
+                    decode_declared(s.column(i).as_ref(), row, &child)?,
                 ));
             }
             Ok(CanonicalValue::Tuple(out))
@@ -216,29 +244,6 @@ fn downcast<'a, T: 'static>(array: &'a dyn Array, ctx: &str) -> Result<&'a T, St
 
 fn type_name<T>() -> &'static str {
     std::any::type_name::<T>()
-}
-
-/// `decimal` (scale > 0) → an EXACT decimal; `varint` (scale 0) → `Int`.
-///
-/// NO `f64` anywhere: the unscaled value and scale go straight into
-/// [`super::decimal::ExactDecimal`], which the golden side lands on too. The
-/// previous rendering divided `unscaled as f64` by `10^scale` under a
-/// `|unscaled| < 2^53` guard; that guard bounded only the INTEGER conversion —
-/// the division still mapped one-unit-apart decimals onto ONE double, so a
-/// corrupted `Decimal128` cell compared EQUAL (see `decimal.rs`).
-///
-/// Scale 0 stays an `Int`: that is the `varint` mapping (an integer domain on
-/// both sides), and turning it into a decimal would be the type confusion the
-/// canonical space exists to prevent.
-pub fn decimal_to_canonical(
-    unscaled: i128,
-    scale: i8,
-    ctx: &str,
-) -> Result<CanonicalValue, String> {
-    if scale == 0 {
-        return Ok(CanonicalValue::Int(unscaled));
-    }
-    Ok(exact_from_decimal128(unscaled, scale, ctx)?.canonical())
 }
 
 /// sstabledump renders a blob as `0x` + lowercase hex.

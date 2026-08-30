@@ -98,13 +98,14 @@ pub mod arrow_rows;
 pub mod cases;
 pub mod cql_type;
 pub mod decimal;
+pub mod declared;
 pub mod failure;
 pub mod golden_rows;
 pub mod schema_fixture;
 pub mod spelling;
 pub mod unsupported;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -428,6 +429,12 @@ fn export_parquet(case: &ParityCase, data_dir: &Path, tmp: &Path) -> Result<Path
 pub struct Row {
     keys: Vec<CanonicalValue>,
     cells: BTreeMap<String, CanonicalValue>,
+    /// Columns this row deliberately did NOT decode, because the Arrow TYPE
+    /// stage had already blocked them (issue #1490 round 7, finding 1). Recorded
+    /// rather than left implicit: a skipped column that somehow reached the
+    /// value comparison must be a loud refusal, never an `Absent` that could
+    /// compare EQUAL to a golden absence.
+    undecoded: BTreeSet<String>,
 }
 
 impl Row {
@@ -642,8 +649,41 @@ fn read_parquet(case: &ParityCase, path: &Path) -> Result<Vec<RecordBatch>, Fail
     Ok(batches)
 }
 
+/// Which columns the value comparison cannot cover, as the row projection needs
+/// to know it: a column whose Arrow TYPE diverged is not going to be compared,
+/// so decoding it can only manufacture a failure.
+struct ValueBlocks<'a> {
+    /// Columns whose exported Arrow type DIVERGED (`TypeCheck::blocked_columns`).
+    columns: &'a [String],
+    /// The type stage did not answer at all, so NO column's values are compared.
+    all: bool,
+}
+
 /// Project already-read record batches into canonical rows.
-fn project_rows(case: &ParityCase, batches: &[RecordBatch]) -> Result<Vec<Row>, Failures> {
+///
+/// # Per-column isolation, and where it used to leak (issue #1490 round 7)
+///
+/// A column whose Arrow type diverged is removed from the compared set
+/// ([`Stages::comparable_columns`]) — that is the harness's promise that a
+/// deferred column's SIBLINGS still compare. This function used to decode EVERY
+/// column anyway, and `arrow_rows` deliberately has no decoder for a type it
+/// never declared valid (`UInt32`, `LargeList`, …), so a divergence INTO such a
+/// type failed the projection WHOLESALE and took every unaffected column's value
+/// comparison down with it — defeating exactly the isolation the type stage went
+/// to the trouble of computing.
+///
+/// So a blocked NON-KEY column is not decoded at all; it is recorded in the
+/// row's `undecoded` set and its per-column deferral is reported (once, by
+/// `comparable_columns`). A blocked KEY column IS still decoded, because the
+/// primary key is what ALIGNS the two sides' rows: without it no column can be
+/// compared, and that — and only that — blocks the comparison whole, with a
+/// message saying so.
+fn project_rows(
+    case: &ParityCase,
+    batches: &[RecordBatch],
+    columns: &[ColumnType],
+    blocks: &ValueBlocks<'_>,
+) -> Result<Vec<Row>, Failures> {
     let key_columns: Vec<&str> = case
         .partition_key
         .iter()
@@ -656,11 +696,42 @@ fn project_rows(case: &ParityCase, batches: &[RecordBatch]) -> Result<Vec<Row>, 
         let schema = batch.schema();
         for r in 0..batch.num_rows() {
             let mut cells = BTreeMap::new();
+            let mut undecoded = BTreeSet::new();
             for (ci, field) in schema.fields().iter().enumerate() {
-                let ctx = format!("{}.{}[row {r}]", case.id(), field.name());
-                let value = arrow_rows::canonical_from_arrow(batch.column(ci).as_ref(), r, &ctx)
-                    .map_err(Failures::refusal)?;
-                cells.insert(field.name().clone(), value);
+                let name = field.name();
+                let is_key = key_columns.contains(&name.as_str());
+                if !is_key && (blocks.all || blocks.columns.iter().any(|c| c == name)) {
+                    undecoded.insert(name.clone());
+                    continue;
+                }
+                // Every Arrow cell is canonicalized through the ONE
+                // declared-type-guided entry point, carrying the column's
+                // declared CQL type (`declared.rs`).
+                let Some(col) = columns.iter().find(|c| c.name == *name) else {
+                    // Unreachable: `read_parquet` asserted column-set equality.
+                    return Err(Failures::refusal(format!(
+                        "Parquet column '{name}' has no declared CQL type, so it cannot be \
+                         canonicalized from its declared type"
+                    )));
+                };
+                let ctx = format!("{}.{name}[row {r}]", case.id());
+                let value = declared::canonicalize_arrow(
+                    batch.column(ci).as_ref(),
+                    r,
+                    &declared::Declared::cell(&col.spec, ctx),
+                )
+                .map_err(|e| {
+                    if is_key {
+                        Failures::refusal(format!(
+                            "{e}\n  — this is a PRIMARY-KEY column, so the two sides' rows \
+                             cannot be aligned and NO column's values can be compared; every \
+                             other column's deferral is recorded separately"
+                        ))
+                    } else {
+                        Failures::refusal(e)
+                    }
+                })?;
+                cells.insert(name.clone(), value);
             }
             let keys = key_columns
                 .iter()
@@ -670,7 +741,11 @@ fn project_rows(case: &ParityCase, batches: &[RecordBatch]) -> Result<Vec<Row>, 
                     })
                 })
                 .collect::<Result<Vec<_>, Failures>>()?;
-            rows.push(Row { keys, cells });
+            rows.push(Row {
+                keys,
+                cells,
+                undecoded,
+            });
         }
     }
     Ok(rows)
@@ -848,7 +923,15 @@ fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
                 stages.type_blocked_columns = check.blocked_columns;
                 stages.type_blocks_all_values = check.blocks_all_values;
 
-                match project_rows(case, &batches) {
+                // The row projection is told what the TYPE stage blocked, so a
+                // blocked column's UNDECODABLE Arrow type cannot cancel its
+                // siblings' value comparison (issue #1490 round 7, finding 1).
+                let blocked_names = stages.type_blocked_columns.clone();
+                let blocks = ValueBlocks {
+                    columns: &blocked_names,
+                    all: stages.type_blocks_all_values,
+                };
+                match project_rows(case, &batches, &stages.columns, &blocks) {
                     Ok(rows) => stages.parquet = Some(rows),
                     Err(f) => {
                         stages.failures.extend(f.into_items());
@@ -1059,6 +1142,9 @@ fn compare_inner(
         .map(|g| Row {
             keys: g.keys,
             cells: g.cells,
+            // The golden side decodes every declared column; a blocked column is
+            // dropped from the COMPARED set, not from this projection.
+            undecoded: BTreeSet::new(),
         })
         .collect();
     let mut actual = parquet;
@@ -1096,6 +1182,18 @@ fn compare_inner(
         }
         for col in columns {
             let ctx = format!("{} row {i} column '{}'", case.id(), col.name);
+            // A column the projection deliberately did not decode must never be
+            // compared: its cell would be `Absent`, which could compare EQUAL to
+            // a golden absence and report coverage that never happened. If the
+            // compared set and the blocked set ever disagree, that is a harness
+            // bookkeeping defect and it says so.
+            if a.undecoded.contains(&col.name) {
+                return Err(Failures::refusal(format!(
+                    "{ctx}: the value comparison was asked to cover a column the row \
+                     projection did not decode (its Arrow type was blocked) — the compared \
+                     set and the blocked set disagree"
+                )));
+            }
             // Spelling normalization applies to BOTH sides through the same
             // function, so it can only erase a difference in HOW a value is
             // written, never a difference in the VALUE (see spelling.rs).

@@ -20,6 +20,48 @@
 mod parquet_parity;
 
 // ---------------------------------------------------------------------------
+// The ONE entry point these unit tests go through
+//
+// `declared.rs` is the single declared-type-guided canonicalization door (three
+// review rounds each found a different position that canonicalized WITHOUT the
+// declared type, so the per-pass helpers this used to call are now private to
+// it). These wrappers name the POSITION each unit test is about, so a test
+// exercises exactly the path the harness does.
+// ---------------------------------------------------------------------------
+
+use parquet_parity::canonical_jsonl::CanonicalValue as CV;
+use parquet_parity::cql_type::CqlTypeSpec;
+use parquet_parity::declared::{
+    canonicalize_arrow, canonicalize_arrow_decimal, canonicalize_golden, Declared,
+};
+
+/// A raw golden value at the top-level CELL position.
+fn golden_cell(v: CV, spec: &CqlTypeSpec) -> Result<CV, String> {
+    canonicalize_golden(v, &Declared::cell(spec, "unit test"))
+}
+
+/// The same, for the cases whose value cannot be refused.
+fn golden_cell_ok(v: CV, spec: &CqlTypeSpec) -> CV {
+    golden_cell(v, spec).expect("this value must canonicalize")
+}
+
+/// An exported Arrow cell at the CELL position.
+fn arrow_cell(
+    array: &dyn arrow::array::Array,
+    row: usize,
+    spec: &CqlTypeSpec,
+) -> Result<CV, String> {
+    canonicalize_arrow(array, row, &Declared::cell(spec, "unit test"))
+}
+
+/// An exported `Decimal128` cell — the declared type is what decides `varint`
+/// (integer domain) from `decimal` (exact unscaled/scale pair), including at
+/// scale zero (issue #1490 round 7).
+fn arrow_decimal(unscaled: i128, scale: i8, spec: &CqlTypeSpec) -> Result<CV, String> {
+    canonicalize_arrow_decimal(unscaled, scale, &Declared::cell(spec, "unit test"))
+}
+
+// ---------------------------------------------------------------------------
 // Unit coverage for the two normalization pieces
 //
 // These run in EVERY checkout, including one with no fetched corpus, where the
@@ -299,7 +341,8 @@ fn expected_arrow_type_recurses_into_nested_types() {
 // The accept-list must not be broader than the decoder
 //
 // `ArrowShape::accepts` decides which Arrow types the harness declares VALID;
-// `arrow_rows::canonical_from_arrow` decides which it can DECODE. An accept-list
+// the declared-type-guided Arrow decode (`declared::canonicalize_arrow`) decides
+// which it can DECODE. An accept-list
 // that is broader declares a schema valid and then dies during value projection
 // — a promise the harness cannot keep, and a confusing late failure instead of a
 // clear early one. These two tests pin both halves of that agreement.
@@ -318,7 +361,6 @@ fn every_accepted_arrow_type_is_decodable() {
     use arrow::datatypes::DataType;
     use arrow::datatypes::IntervalMonthDayNano;
     use parquet_parity::arrow_expect::{expected_shape, ShapeVerdict};
-    use parquet_parity::arrow_rows::canonical_from_arrow;
     use parquet_parity::cql_type::parse_column;
     use std::sync::Arc;
 
@@ -398,7 +440,7 @@ fn every_accepted_arrow_type_is_decodable() {
             ShapeVerdict::Valid,
             "'{declared}' must accept {dt:?} for this test to be about the decoder"
         );
-        canonical_from_arrow(array.as_ref(), 0, "test").unwrap_or_else(|e| {
+        arrow_cell(array.as_ref(), 0, &col.spec).unwrap_or_else(|e| {
             panic!(
                 "'{declared}' ACCEPTS {dt:?} but the decoder cannot project it ({e}) — an \
                  accept-list broader than the decoder is a promise the harness cannot keep"
@@ -452,7 +494,6 @@ fn list_accept_list_is_narrowed_to_what_the_decoder_handles() {
 fn interval_duration_canonicalizes_to_the_golden_spelling() {
     use arrow::array::IntervalMonthDayNanoArray;
     use arrow::datatypes::IntervalMonthDayNano;
-    use parquet_parity::arrow_rows::canonical_from_arrow;
     use parquet_parity::canonical_jsonl::CanonicalValue;
     use parquet_parity::cql_type::parse_column;
     use parquet_parity::spelling::normalize_spelling;
@@ -462,7 +503,7 @@ fn interval_duration_canonicalizes_to_the_golden_spelling() {
     // "50m33s", CQLite's ValueFormatter "3033000000000ns".
     let nanos = 3_033_000_000_000i64;
     let array = IntervalMonthDayNanoArray::from(vec![IntervalMonthDayNano::new(1, 2, nanos)]);
-    let exported = canonical_from_arrow(&array, 0, "test").expect("interval must decode");
+    let exported = arrow_cell(&array, 0, &duration.spec).expect("interval must decode");
     // An already-canonical triple must survive normalization unchanged.
     let exported = normalize_spelling(exported, &duration.spec, "test").expect("normalizes");
 
@@ -481,7 +522,7 @@ fn interval_duration_canonicalizes_to_the_golden_spelling() {
     // And a genuinely DIFFERENT duration must still differ — no tolerance.
     let other = IntervalMonthDayNanoArray::from(vec![IntervalMonthDayNano::new(1, 2, nanos + 1)]);
     assert_ne!(
-        canonical_from_arrow(&other, 0, "test").expect("interval must decode"),
+        arrow_cell(&other, 0, &duration.spec).expect("interval must decode"),
         exported
     );
 }
@@ -507,20 +548,18 @@ fn interval_duration_canonicalizes_to_the_golden_spelling() {
 /// the SAME canonical value as the exported `Decimal128(38, 9)` cell.
 #[test]
 fn whole_valued_decimal_canonicalizes_on_both_sides() {
-    use parquet_parity::arrow_rows::decimal_to_canonical;
     use parquet_parity::canonical_jsonl::CanonicalValue;
     use parquet_parity::cql_type::parse_column;
-    use parquet_parity::golden_rows::normalize_declared_numbers;
 
     let decimal = parse_column("d", "decimal", &[]).expect("decimal parses");
     let varint = parse_column("v", "varint", &[]).expect("varint parses");
 
     for whole in [0i128, 1, -1, 42, -31_595] {
         // Golden side: sstabledump writes a whole decimal as a JSON integer.
-        let golden = normalize_declared_numbers(CanonicalValue::Int(whole), &decimal.spec)
+        let golden = golden_cell(CanonicalValue::Int(whole), &decimal.spec)
             .expect("a whole golden decimal is exact");
         // Export side: Decimal128(38, 9) holds whole * 10^9.
-        let exported = decimal_to_canonical(whole * 1_000_000_000, 9, "test")
+        let exported = arrow_decimal(whole * 1_000_000_000, 9, &decimal.spec)
             .expect("scale-9 decimal must canonicalize");
         assert_eq!(
             golden, exported,
@@ -535,19 +574,19 @@ fn whole_valued_decimal_canonicalizes_on_both_sides() {
 
     // A fractional decimal is untouched by the rule, and still compares exactly.
     assert_eq!(
-        normalize_declared_numbers(golden_decimal(31_595.67), &decimal.spec)
+        golden_cell(golden_decimal(31_595.67), &decimal.spec)
             .expect("a recoverable golden decimal"),
-        decimal_to_canonical(31_595_670_000_000, 9, "test").expect("fractional decimal")
+        arrow_decimal(31_595_670_000_000, 9, &decimal.spec).expect("fractional decimal")
     );
 
     // varint is an integer domain on BOTH sides: it must stay an `Int`, or the
     // rule would turn a type confusion into a silent pass.
     assert_eq!(
-        normalize_declared_numbers(CanonicalValue::Int(7), &varint.spec).expect("varint is exact"),
+        golden_cell(CanonicalValue::Int(7), &varint.spec).expect("varint is exact"),
         CanonicalValue::Int(7)
     );
     assert_eq!(
-        decimal_to_canonical(7, 0, "test").expect("varint"),
+        arrow_decimal(7, 0, &varint.spec).expect("varint"),
         CanonicalValue::Int(7)
     );
 
@@ -556,9 +595,9 @@ fn whole_valued_decimal_canonicalizes_on_both_sides() {
     // compares exactly on both sides.
     let huge = 1i128 << 60;
     assert_eq!(
-        normalize_declared_numbers(CanonicalValue::Int(huge), &decimal.spec)
+        golden_cell(CanonicalValue::Int(huge), &decimal.spec)
             .expect("a whole golden decimal of any magnitude is exact"),
-        decimal_to_canonical(huge * 1_000_000_000, 9, "test").expect("scale-9 decimal"),
+        arrow_decimal(huge * 1_000_000_000, 9, &decimal.spec).expect("scale-9 decimal"),
         "a whole decimal beyond 2^53 must still compare equal to its exported form"
     );
 }
@@ -567,9 +606,7 @@ fn whole_valued_decimal_canonicalizes_on_both_sides() {
 /// to EXACTLY the decimal they spell, and to the exported cell for that value.
 #[test]
 fn golden_decimal_literals_recover_exactly() {
-    use parquet_parity::arrow_rows::decimal_to_canonical;
     use parquet_parity::cql_type::parse_column;
-    use parquet_parity::golden_rows::normalize_declared_numbers;
 
     let decimal = parse_column("d", "decimal", &[]).expect("decimal parses");
     // Literals copied verbatim from the committed sstabledump golden, with the
@@ -586,7 +623,7 @@ fn golden_decimal_literals_recover_exactly() {
             .expect("literal must be valid JSON")
             .as_f64()
             .expect("literal must be a JSON number");
-        let golden = normalize_declared_numbers(golden_decimal(via_serde), &decimal.spec)
+        let golden = golden_cell(golden_decimal(via_serde), &decimal.spec)
             .expect("a corpus decimal literal must recover exactly");
         assert_eq!(
             golden,
@@ -595,7 +632,7 @@ fn golden_decimal_literals_recover_exactly() {
         );
         assert_eq!(
             golden,
-            decimal_to_canonical(unscaled_at_scale_9, 9, "test").expect("scale-9 decimal"),
+            arrow_decimal(unscaled_at_scale_9, 9, &decimal.spec).expect("scale-9 decimal"),
             "the recovered literal {literal} must equal the exported cell"
         );
     }
@@ -604,9 +641,8 @@ fn golden_decimal_literals_recover_exactly() {
     // zero, so `-0.0` and `0.0` both recover to the decimal 0.
     for zero in [0.0f64, -0.0] {
         assert_eq!(
-            normalize_declared_numbers(golden_decimal(zero), &decimal.spec)
-                .expect("zero must recover"),
-            decimal_to_canonical(0, 9, "test").expect("scale-9 zero")
+            golden_cell(golden_decimal(zero), &decimal.spec).expect("zero must recover"),
+            arrow_decimal(0, 9, &decimal.spec).expect("scale-9 zero")
         );
     }
 }
@@ -620,9 +656,10 @@ fn golden_decimal_literals_recover_exactly() {
 /// `2^53`, and `unscaled as f64 / 10^9` maps them onto the SAME double.
 #[test]
 fn a_one_unit_decimal_perturbation_the_old_f64_path_collapsed_is_detected() {
-    use parquet_parity::arrow_rows::decimal_to_canonical;
     use parquet_parity::canonical_jsonl::CanonicalValue;
 
+    use parquet_parity::cql_type::parse_column;
+    let decimal = parse_column("d", "decimal", &[]).expect("decimal parses");
     let unscaled = 9_007_199_254_740_001i128;
     let perturbed = unscaled + 1;
 
@@ -638,8 +675,8 @@ fn a_one_unit_decimal_perturbation_the_old_f64_path_collapsed_is_detected() {
     );
 
     // The exact representation distinguishes them, and names both values.
-    let exported = decimal_to_canonical(unscaled, 9, "test").expect("scale-9 decimal");
-    let corrupted = decimal_to_canonical(perturbed, 9, "test").expect("scale-9 decimal");
+    let exported = arrow_decimal(unscaled, 9, &decimal.spec).expect("scale-9 decimal");
+    let corrupted = arrow_decimal(perturbed, 9, &decimal.spec).expect("scale-9 decimal");
     assert_ne!(
         exported, corrupted,
         "a one-unit Decimal128 corruption must be reported, not absorbed"
@@ -657,10 +694,7 @@ fn a_one_unit_decimal_perturbation_the_old_f64_path_collapsed_is_detected() {
     // distinct scale-9 decimals share it, so no recovery is exact. A refusal is
     // a loud non-answer; comparing would be the false PASS this control exists
     // to prevent.
-    use parquet_parity::cql_type::parse_column;
-    use parquet_parity::golden_rows::normalize_declared_numbers;
-    let decimal = parse_column("d", "decimal", &[]).expect("decimal parses");
-    let err = normalize_declared_numbers(golden_decimal(unscaled as f64 / 1e9), &decimal.spec)
+    let err = golden_cell(golden_decimal(unscaled as f64 / 1e9), &decimal.spec)
         .expect_err("an ambiguous golden double must be refused");
     assert!(
         err.contains("9007199.254740001") && err.contains("9007199.254740002"),
@@ -701,15 +735,17 @@ fn decimal_scale_normalization_is_exact() {
 /// fractional digits than the export can carry.
 #[test]
 fn decimal_comparison_refuses_what_it_cannot_compare_exactly() {
-    use parquet_parity::arrow_rows::decimal_to_canonical;
+    use parquet_parity::cql_type::parse_column;
     use parquet_parity::decimal::{exact_from_golden_double, EXPORT_DECIMAL_SCALE};
+
+    let decimal = parse_column("d", "decimal", &[]).expect("decimal parses");
 
     // A scale beyond the one the golden side can recover a literal at: the
     // harness refuses rather than let two distinct decimals recover to one.
-    let err = decimal_to_canonical(1, 12, "test").expect_err("scale 12 must be refused");
+    let err = arrow_decimal(1, 12, &decimal.spec).expect_err("scale 12 must be refused");
     assert!(err.contains("exceeds"), "got: {err}");
     assert!(
-        decimal_to_canonical(1, -1, "test").is_err(),
+        arrow_decimal(1, -1, &decimal.spec).is_err(),
         "negative scale"
     );
 
@@ -750,7 +786,6 @@ fn golden_decimal(f: f64) -> parquet_parity::canonical_jsonl::CanonicalValue {
 fn frozen_map_golden_object_canonicalizes_to_a_map() {
     use parquet_parity::canonical_jsonl::CanonicalValue;
     use parquet_parity::cql_type::parse_column;
-    use parquet_parity::golden_rows::coerce_declared_shape;
 
     let text = |s: &str| CanonicalValue::Text(s.to_string());
 
@@ -760,12 +795,12 @@ fn frozen_map_golden_object_canonicalizes_to_a_map() {
         ("a".to_string(), CanonicalValue::Int(1)),
         ("b".to_string(), CanonicalValue::Int(2)),
     ]);
-    // What `arrow_rows::canonical_from_arrow` builds from an Arrow Map.
+    // What the declared-type-guided Arrow decode builds from an Arrow Map.
     let exported = CanonicalValue::Map(vec![
         (text("a"), CanonicalValue::Int(1)),
         (text("b"), CanonicalValue::Int(2)),
     ]);
-    assert_eq!(coerce_declared_shape(golden, &fm.spec), exported);
+    assert_eq!(golden_cell_ok(golden, &fm.spec), exported);
 
     // `frozen<map<text, frozen<address>>>` — the shape of `udt_collections.ma`:
     // the VALUE stays a Tuple (a UDT really is a struct), the OUTER object
@@ -780,7 +815,7 @@ fn frozen_map_golden_object_canonicalizes_to_a_map() {
         ]),
     )]);
     assert_eq!(
-        parquet_parity::golden_rows::fold_null(coerce_declared_shape(golden, &ma.spec)),
+        golden_cell_ok(golden, &ma.spec),
         CanonicalValue::Map(vec![(
             text("home"),
             CanonicalValue::Tuple(vec![
@@ -794,7 +829,7 @@ fn frozen_map_golden_object_canonicalizes_to_a_map() {
     // key type is what coerces it back, matching the Arrow Int32 key.
     let mi = parse_column("mi", "frozen<map<int,text>>", &[]).expect("parses");
     assert_eq!(
-        coerce_declared_shape(
+        golden_cell_ok(
             CanonicalValue::Tuple(vec![("-2".to_string(), text("x"))]),
             &mi.spec
         ),
@@ -804,7 +839,7 @@ fn frozen_map_golden_object_canonicalizes_to_a_map() {
     // …and a TEXT key that merely LOOKS numeric must stay Text, or a
     // `map<text,int>` holding "5" would false-match a `map<int,int>` holding 5.
     assert_eq!(
-        coerce_declared_shape(
+        golden_cell_ok(
             CanonicalValue::Tuple(vec![("5".to_string(), CanonicalValue::Int(9))]),
             &fm.spec
         ),
@@ -815,20 +850,17 @@ fn frozen_map_golden_object_canonicalizes_to_a_map() {
     // and a frozen list of UDTs must be untouched by the reshape.
     let person = parse_column("p", "frozen<person>", &["person"]).expect("parses");
     let as_tuple = CanonicalValue::Tuple(vec![("nm".to_string(), text("A"))]);
-    assert_eq!(
-        coerce_declared_shape(as_tuple.clone(), &person.spec),
-        as_tuple
-    );
+    assert_eq!(golden_cell_ok(as_tuple.clone(), &person.spec), as_tuple);
     let lp = parse_column("lp", "frozen<list<frozen<person>>>", &["person"]).expect("parses");
     assert_eq!(
-        coerce_declared_shape(CanonicalValue::List(vec![as_tuple.clone()]), &lp.spec),
+        golden_cell_ok(CanonicalValue::List(vec![as_tuple.clone()]), &lp.spec),
         CanonicalValue::List(vec![as_tuple])
     );
 
     // A frozen map NESTED inside a frozen list is reached too.
     let lm = parse_column("lm", "frozen<list<frozen<map<text,int>>>>", &[]).expect("parses");
     assert_eq!(
-        coerce_declared_shape(
+        golden_cell_ok(
             CanonicalValue::List(vec![CanonicalValue::Tuple(vec![(
                 "k".to_string(),
                 CanonicalValue::Int(3)
@@ -1252,7 +1284,6 @@ fn declared_text_keeps_a_timestamp_spelling_as_text_in_a_key_column() {
 fn declared_type_string_typing_does_not_erase_a_real_difference() {
     use parquet_parity::canonical_jsonl::CanonicalValue;
     use parquet_parity::cql_type::parse_column;
-    use parquet_parity::golden_rows::normalize_declared_strings;
 
     let as_parsed = |s: &str| CanonicalValue::from_json(&serde_json::Value::String(s.to_string()));
     let text = parse_column("c", "text", &[]).expect("parses");
@@ -1260,13 +1291,13 @@ fn declared_type_string_typing_does_not_erase_a_real_difference() {
     let other = "2025-10-06 01:12:07.266Z";
 
     assert_ne!(
-        normalize_declared_strings(as_parsed(TS_SPELLING), &text.spec),
-        normalize_declared_strings(as_parsed(other), &text.spec),
+        golden_cell_ok(as_parsed(TS_SPELLING), &text.spec),
+        golden_cell_ok(as_parsed(other), &text.spec),
         "two different timestamp-shaped TEXT values must still differ"
     );
     assert_ne!(
-        normalize_declared_strings(as_parsed(TS_SPELLING), &ts.spec),
-        normalize_declared_strings(as_parsed(other), &ts.spec),
+        golden_cell_ok(as_parsed(TS_SPELLING), &ts.spec),
+        golden_cell_ok(as_parsed(other), &ts.spec),
         "two different INSTANTS must still differ"
     );
     // Every other string-rendered scalar the Arrow side holds as `Text` is
@@ -1275,7 +1306,7 @@ fn declared_type_string_typing_does_not_erase_a_real_difference() {
     for declared in ["varchar", "ascii", "blob", "uuid", "date", "time", "inet"] {
         let col = parse_column("c", declared, &[]).expect("parses");
         assert_eq!(
-            normalize_declared_strings(as_parsed(TS_SPELLING), &col.spec),
+            golden_cell_ok(as_parsed(TS_SPELLING), &col.spec),
             exported_text(TS_SPELLING),
             "'{declared}' is rendered as Text by the Arrow side, so the golden must \
              not hold a Timestamp for it"
