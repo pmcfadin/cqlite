@@ -13,9 +13,15 @@
  *     `testPathIgnorePatterns` entry that hands the leak file to the other
  *     project (jest's own default for that option is `['/node_modules/']`, which
  *     is preserved).
- *   * `leaks`   — `__test__/leak-paths.test.js` only, so it can be selected on
- *     its own (`--selectProjects leaks`, used by `npm run test:leaks`) and so a
- *     future lane-only option has somewhere to live.
+ *   * `leaks`   — `__test__/leak-paths.test.js` only, so it can be selected on its
+ *     own (`--selectProjects leaks`, used by `npm run test:leaks`) and so a future
+ *     lane-only option has somewhere to live. NOTE (round 9): a bare `npm test` runs
+ *     BOTH projects, so the gate's whole-suite run already executes the leak file
+ *     exactly once — measured via `jest --listTests`: 28 files, no duplicates. The
+ *     gate therefore does NOT invoke `test:leaks`; it affirms the budget tests by
+ *     name from the whole-suite `--json` report. Keep that in mind before adding a
+ *     second lane that selects this project: two executions where only one is
+ *     affirmed is what the recomposition removed.
  *
  * WHY NO `detectOpenHandles`/`detectLeaks` ANYWHERE (measured on jest 29.7.0, not
  * assumed):

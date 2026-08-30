@@ -1755,29 +1755,32 @@ _fixture_status() {
   echo FAIL
 }
 
-# _node_leak_lane_status: PURE decision for the #1465 leak lane inside node-bindings.
-# Echoes exactly one token: RUN, or SKIP-OPTOUT.
+# #1465 LEAK-LANE COMPOSITION AFTER #3522 (read this before changing either side).
 #
-# It defers to _fixture_status (the SAME decision #2078's preflight consumes) instead of
-# testing AGENT_GATE_ALLOW_MISSING_FIXTURES directly, and that difference IS the point:
-# the env var alone is not evidence that the corpus is absent (a stale export, an
-# inherited environment or a shell profile sets it just as easily), so keying on it
-# dropped this issue's only merge-gating lane on runs whose corpus was fully present —
-# a vacuous green whose SUMMARY said nothing. Only OPTOUT means "the corpus is genuinely
-# absent AND the operator asked the gate to continue anyway".
+# #3522 widened node-bindings from one jest file to the WHOLE suite via `npm test`,
+# and #1465 had wired its exception-path/abandoned-iterator LEAK BUDGETS in as a
+# SECOND jest invocation (`npm run test:leaks`). Composed naively that runs the leak
+# budgets TWICE per component. MEASURED with `./node_modules/.bin/jest --listTests`
+# under the two-project jest config #1465 introduced: the all-projects list is 28
+# files with NO duplicates and it INCLUDES leak-paths.test.js, so #3522's whole-suite
+# run already executes the leak budgets exactly once. The second invocation was pure
+# duplication.
 #
-# Every other status answers RUN, deliberately: OK is the normal case, and FAIL means
-# apply_fixture_preflight has already failed the run closed before any component started,
-# so the strict answer is never wrong and can never silently drop the lane.
+# So there is ONE executor -- #3522's `npm test` -- and #1465 keeps the thing that
+# made its lane merge-gating rather than decorative: the NAMED-BUDGET AFFIRMATION,
+# which now reads the SAME `--json` report #3522's per-suite guard already writes.
+# One execution, affirmed, is worth more than two where only one is checked. The
+# `npm run test:leaks` script stays in package.json as the human/debug entry point
+# (and `test:leaks:handles` for a handle report); no gate lane invokes them.
 #
-# Under --only/--lite, _fixture_status is lenient (echoes OK), so the lane always RUNs
-# there — consistent with those modes being probes rather than verdicts. If you have no
-# corpus, do not --only a dataset-dependent lane.
-_node_leak_lane_status() {
-  [ "$(_fixture_status)" = OPTOUT ] && { echo SKIP-OPTOUT; return 0; }
-  echo RUN
-}
-
+# WHY THE AFFIRMATION IS NOT REDUNDANT WITH #3522'S GUARDS, which is the whole
+# argument for keeping it: `check_jest_suites_ran` judges the FILE SET and aggregate
+# counts, and `check_jest_per_suite_passed` judges that each suite did SOME work.
+# Neither knows which tests a suite must contain, so a leak-paths.test.js whose two
+# BUDGET tests were skipped or renamed -- with its contract tests still passing --
+# satisfies both and reports full coverage. Measured on the previous shape: a run with
+# both budget tests filtered out reported `Tests: 3 skipped, 1 passed` and exited 0.
+# The affirmation is the only check that asks for those two tests BY NAME.
 # _node_leak_lane_note_file / _node_leak_lane_note: the lane's execution fact, carried to
 # the SUMMARY. node-bindings runs in a SIDE-lane SUBSHELL that cannot write the parent's
 # SUMMARY_META array (the same constraint that makes every component record its verdict to
@@ -1805,13 +1808,22 @@ _NODE_LEAK_BUDGET_TITLE_SUFFIX="stay under the leak budget"
 # hidden self-test hook can never quote three different sentences. Any unrecognised state
 # is itself reported rather than silently omitted.
 _node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE|NOT-REACHED|ENTERED-FAILED|
-                         #  NO-BUDGET-AFFIRMATION|DECISION-RUN>
-                         # SKIP-OPTOUT is a token _node_leak_lane_status echoes; the
-                         # rest are execution outcomes only the component can know
-                         # (DECISION-RUN is the pure hook's "would run", which is not
-                         # a verification of anything). One vocabulary, so a state can
-                         # never fall through to the UNKNOWN arm by spelling — one
-                         # already did.
+                         #  NO-BUDGET-AFFIRMATION>
+                         # All five are execution outcomes only the component can know.
+                         # One vocabulary, so a state can never fall through to the
+                         # UNKNOWN arm by spelling — one already did.
+                         #
+                         # WHICH GATE DECIDES THE DATASET QUESTION, explicitly (#1465
+                         # round 9, composition question 3): #3522's COMPONENT-level
+                         # `AGENT_GATE_ALLOW_MISSING_FIXTURES=1 && !
+                         # _node_bindings_corpus_present` branch governs, ALONE. It is
+                         # strictly earlier (before `npm ci`) and strictly coarser (it
+                         # skips all 28 suites), so a second, lane-level dataset gate
+                         # could only ever be unreachable code that looks like a
+                         # control. #1465's own `_node_leak_lane_status` predicate was
+                         # therefore DELETED, not kept as a decoration; what remains is
+                         # this note, which that branch writes as SKIP-OPTOUT so the
+                         # SUMMARY still declares the leak budgets did not run.
                          #
                          # RUN IS A MEASUREMENT, NOT A PLAN (issue #1465 rounds 5-6),
                          # and the states below are the four ways it can fail to be
@@ -1826,43 +1838,39 @@ _node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE|NOT-REACHED|ENTERED-FAILED|
                          # would report full budget coverage for a run whose budget
                          # tests were skipped.
   case "$1" in
-    RUN) printf '%s' "node-bindings-leak-lane: RAN (#1465 exception-path/abandoned-iterator leak budgets executed via npm run test:leaks; AFFIRMED from jest's JSON report — every named budget test present and passed)" ;;
-    NOT-REACHED) printf '%s' "node-bindings-leak-lane: NOT-REACHED — an earlier step of node-bindings (npm ci / npm run build / write-readback-content) failed, so the #1465 leak budgets never executed; this block does NOT validate them" ;;
-    ENTERED-FAILED) printf '%s' "node-bindings-leak-lane: ENTERED-FAILED — the leak lane was REACHED and npm run test:leaks exited non-zero. The exit code alone does not say how far it got: a failing budget assertion, a failing contract assertion, a jest harness error, and a missing or renamed test:leaks script all land here — read the node-bindings component log for which. It is NOT an earlier node-bindings step (that reads NOT-REACHED); the component FAILs closed and this block does NOT validate the budgets" ;;
-    NO-BUDGET-AFFIRMATION) printf '%s' "node-bindings-leak-lane: NO-BUDGET-AFFIRMATION — npm run test:leaks exited 0 but jest's JSON report did not show every named budget test passing (skipped, renamed, missing, or an unexpected extra budget test); the #1465 budgets are NOT validated and the component FAILs closed" ;;
-    SKIP-OPTOUT) printf '%s' "node-bindings-leak-lane: SKIPPED (canonical corpus absent + AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the #1465 exception-path/abandoned-iterator leak budgets did NOT run; this block does NOT validate them (#1465/#2078)" ;;
+    RUN) printf '%s' "node-bindings-leak-lane: RAN (#1465 exception-path/abandoned-iterator leak budgets executed inside #3522's whole-suite npm test; AFFIRMED from that run's own jest JSON report — every named budget test present and passed)" ;;
+    NOT-REACHED) printf '%s' "node-bindings-leak-lane: NOT-REACHED — node-bindings failed before the affirmation could read a jest report (npm ci / npm run build / jest --listTests / the suite reconciliation), so the #1465 leak budgets never executed; this block does NOT validate them" ;;
+    ENTERED-FAILED) printf '%s' "node-bindings-leak-lane: ENTERED-FAILED — the whole-suite npm test was REACHED and exited non-zero, so the leak budgets ran inside a failing suite. The exit code alone does not say which suite failed: a failing #1465 budget assertion, any other suite's failure, or a jest harness error all land here — read the node-bindings component log for which. It is NOT an earlier node-bindings step (that reads NOT-REACHED); the component FAILs closed and this block does NOT validate the budgets" ;;
+    NO-BUDGET-AFFIRMATION) printf '%s' "node-bindings-leak-lane: NO-BUDGET-AFFIRMATION — the jest suite exited 0 and #3522's suite guards passed, but its JSON report did not show every named #1465 budget test passing (skipped, renamed, missing, or an unexpected extra budget test); the budgets are NOT validated and the component FAILs closed" ;;
+    SKIP-OPTOUT) printf '%s' "node-bindings-leak-lane: SKIPPED (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and no usable corpus) — node-bindings SKIPped as a whole, so the #1465 exception-path/abandoned-iterator leak budgets did NOT run; this block does NOT validate them (#1465/#2078/#3522)" ;;
     NO-NODE) printf '%s' "node-bindings-leak-lane: NOT-RUN (no node/npm on PATH — the whole node-bindings component SKIPped, #1465)" ;;
-    DECISION-RUN) printf '%s' "node-bindings-leak-lane: WOULD-RUN (the pure decision says this run must execute the #1465 leak budgets; it verifies NOTHING about whether they then passed — only the component's post-run affirmation writes RAN)" ;;
     *) printf '%s' "node-bindings-leak-lane: UNKNOWN state '$1' (#1465) — treat this block as NOT validating the leak budgets" ;;
   esac
 }
 
-# _node_leak_lane_run: RUN the leak lane and AFFIRM it, then write the note. Returns
-# non-zero on any non-affirmation, so the component's `set -e` subshell fails closed.
+# _node_leak_lane_affirm: AFFIRM the NAMED #1465 budget tests from a jest JSON report
+# and write the note. Returns non-zero on any non-affirmation, so the component FAILs
+# closed. It runs NO tests: #3522's whole-suite `npm test` is the single executor and
+# this reads the report that run already produced (see the composition note above).
 #
-# Three properties this shape exists for (issue #1465 round 6):
-#   1. The pessimistic ENTERED-FAILED note is written BEFORE the invocation, so an
-#      abort AT the jest command cannot leave the earlier-step NOT-REACHED text in
-#      place — that misreported the cause of the exact failure this issue exists to
-#      catch, and denied that the budgets had run.
-#   2. The invocation's status is captured EXPLICITLY (no pipeline, so no interaction
-#      with `pipefail`, and no `tee` swallowing the status).
-#   3. The affirmation reads jest's `--json` report FROM A FILE (never a pipe, never
-#      stdout scraping): JSON carries no ANSI, so the parse is colour-immune by
-#      construction rather than by remembering to strip (CLAUDE.md #3400), and it
-#      carries test NAMES and STATUSES rather than a count.
-_node_leak_lane_run() { # <note-file> <json-file>
-  local note_file="$1" json_file="$2" rc=0
-  _node_leak_lane_note ENTERED-FAILED > "$note_file"
-  rm -f "$json_file"
-  # No pipe: the status is this command's own.
-  npm run test:leaks -- --json --outputFile="$json_file" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "node-bindings: FAIL — npm run test:leaks exited $rc; the #1465 leak lane executed and did not pass (#1465)"
+# Two properties this shape keeps from #1465 round 6:
+#   * the report is read FROM A FILE, never a pipe or scraped stdout: JSON carries no
+#     ANSI, so the parse is colour-immune by construction rather than by remembering to
+#     strip (CLAUDE.md #3400), and it carries test NAMES and STATUSES, not a count. A
+#     count is insufficient and was measured to be: the leaks project also holds 2
+#     contract tests, so ">=1 passed" reported full budget coverage for a run whose
+#     budget tests were skipped.
+#   * the expected set is asserted EXACTLY -- a missing name, a non-passed status, or an
+#     UNEXPECTED EXTRA budget test all FAIL. The extra-test arm matters as much as the
+#     others: a newly added budget test that nobody enrolled would otherwise be silently
+#     unaffirmed, which is this issue's own recurring defect.
+_node_leak_lane_affirm() { # <note-file> <json-file>
+  local note_file="$1" json_file="$2"
+  if [ ! -r "$json_file" ]; then
+    echo "node-bindings: FAIL — the #1465 budget affirmation has no jest JSON report to read at $json_file (#1465)"
+    _node_leak_lane_note NO-BUDGET-AFFIRMATION > "$note_file"
     return 1
   fi
-  # Affirm the NAMED budget tests from the JSON report. node is guaranteed present in
-  # this component (it just ran npm), so the parse needs no python3.
   if ! EXPECTED_TESTS="$_NODE_LEAK_BUDGET_TESTS" \
        BUDGET_SUFFIX="$_NODE_LEAK_BUDGET_TITLE_SUFFIX" \
        JSON_FILE="$json_file" node -e '
@@ -1904,7 +1912,7 @@ _node_leak_lane_run() { # <note-file> <json-file>
         if (!ok) process.exit(1);
         console.log(`leak-affirm: OK — ${expected.length} named budget test(s) present and passed: ${expected.map((n) => JSON.stringify(n)).join(", ")}`);
       '; then
-    echo "node-bindings: FAIL — npm run test:leaks exited 0 but the named #1465 budget tests were not affirmed (see leak-affirm lines above)"
+    echo "node-bindings: FAIL — the named #1465 budget tests were not affirmed in the jest report (see leak-affirm lines above)"
     _node_leak_lane_note NO-BUDGET-AFFIRMATION > "$note_file"
     return 1
   fi
@@ -2645,21 +2653,6 @@ case "${1:-}" in
   --preflight-fixtures)
     _pf_st=$(_fixture_status); echo "STATUS: $_pf_st"
     [ "$_pf_st" = OPTOUT ] && echo "$(_missing_fixtures_marker)"
-    exit 0 ;;
-  # Hidden self-test hook (issue #1465): print the leak-lane decision (RUN|SKIP-OPTOUT)
-  # from _node_leak_lane_status, plus the SUMMARY note that decision produces. This is the
-  # SAME pure decision run_node_bindings consumes, so a self-test can assert that a set
-  # AGENT_GATE_ALLOW_MISSING_FIXTURES with the corpus PRESENT still RUNs the lane, without
-  # spending 15 minutes in a real full gate.
-  --node-leak-lane)
-    _nll_st=$(_node_leak_lane_status); echo "STATUS: $_nll_st"
-    # RUN from the PURE decision is a "would run", not an affirmation: it is rendered
-    # as DECISION-RUN so this hook can never print the RAN text, which claims a
-    # post-run verification the decision has not made (issue #1465 round 6).
-    case "$_nll_st" in
-      RUN) echo "NOTE: $(_node_leak_lane_note DECISION-RUN)" ;;
-      *) echo "NOTE: $(_node_leak_lane_note "$_nll_st")" ;;
-    esac
     exit 0 ;;
   # Hidden self-test hook (issue #3148): print the FULL-gate COMMITTED-SCHEMAS decision
   # (OK|FAIL) from _schemas_status, plus the resolved ROOT, its SOURCE and (on FAIL) the
@@ -6385,6 +6378,12 @@ run_node_bindings() {
     echo ">>> [$name]   The corpus-free half (incl. the #1231 write-readback content proof) is ALSO"
     echo ">>> [$name]   skipped: nothing derives which suites need a corpus without running them, and"
     echo ">>> [$name]   curating that list is what D2 removed."
+    # #1465: this branch is the SOLE dataset gate for the leak budgets too (see the
+    # composition note by _node_leak_lane_note), so it is what declares their state in
+    # the SUMMARY. Without this line a skipped component would leave no
+    # `node-bindings-leak-lane:` line at all, and "no line" would mean both "it ran"
+    # and "this gate predates the line" — the ambiguity that let an earlier skip hide.
+    _node_leak_lane_note SKIP-OPTOUT > "$(_node_leak_lane_note_file)"
     record_result "$name" "$status" 0
     return 0
   fi
@@ -6437,6 +6436,12 @@ run_node_bindings() {
   census+=("  RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0} — 2 tests opt in (publish.test.js 'npm pack --dry-run';")
   census+=("       streaming.test.js 'memory stays bounded for large result sets'). At 0 they skip;")
   census+=("       that is the suite's OWN gate, identical to python-bindings' convention.")
+  census+=("  AFFIRMED BY NAME (#1465): the 2 exception-path/abandoned-iterator LEAK BUDGET tests")
+  census+=("       inside leak-paths.test.js, checked from this run's own jest --json report. The")
+  census+=("       suite guards judge the file set and per-suite work; only this one knows WHICH")
+  census+=("       tests must have passed. ONE executor: the npm test above (measured — the")
+  census+=("       all-projects jest --listTests is 28 files with no duplicates and includes the")
+  census+=("       leak file), so npm run test:leaks is a human/debug entry point, not a lane.")
   census+=("  NOT RUN HERE: cqlite-node's RUST unit tests — that is binding-rust-tests' subject,")
   census+=("       deliberately a separate component because THIS one SKIPs without node/npm and a")
   census+=("       Rust suite behind that SKIP would be a coverage hole wearing a SKIP's clothes.")
@@ -6447,6 +6452,12 @@ run_node_bindings() {
     for cl in "${census[@]}"; do echo "$cl"; done
     echo "==== end census ===="
   } > "$log"
+
+  # #1465: the PESSIMISTIC leak-lane state, written BEFORE anything runs. Every early
+  # return between here and the affirmation leaves this text in place, so a component
+  # that died in `npm ci`, the build, `--listTests` or the reconciliation cannot leave a
+  # SUMMARY claiming the leak budgets ran. Only the affirmation upgrades it.
+  _node_leak_lane_note NOT-REACHED > "$(_node_leak_lane_note_file)"
 
   # STEP 1 — install, build, and DERIVE the suite set FROM TWO INDEPENDENT ORACLES.
   #
@@ -6697,16 +6708,26 @@ run_node_bindings() {
     # satisfies the aggregate via its siblings, so only the per-suite guard can see it.
     # ANDed without short-circuiting, so one run reports BOTH verdicts rather than revealing
     # them serially across re-runs.
-    local _agg_ok=0 _per_ok=0
+    # #1465 adds a THIRD, orthogonal guard on the SAME report: the two above judge the
+    # suite SET and that each suite did some work; neither knows which TESTS a suite must
+    # contain, so a leak-paths.test.js whose two BUDGET tests were skipped or renamed —
+    # contract tests still passing — satisfies both. The affirmation asks for those two
+    # by NAME. ANDed without short-circuiting, like its siblings, so one run reports all
+    # three verdicts rather than revealing them serially across re-runs.
+    local _agg_ok=0 _per_ok=0 _leak_ok=0
     check_jest_suites_ran "$name" "$log" "$suite_n" 2>>"$log" && _agg_ok=1
     check_jest_per_suite_passed "$name" "$suite_json" "$disk_set" 2>>"$log" && _per_ok=1
-    if [ "$_agg_ok" -eq 1 ] && [ "$_per_ok" -eq 1 ]; then
+    _node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json" >>"$log" 2>&1 && _leak_ok=1
+    if [ "$_agg_ok" -eq 1 ] && [ "$_per_ok" -eq 1 ] && [ "$_leak_ok" -eq 1 ]; then
       status=PASS
     else
       status=FAIL
     fi
   else
     status=FAIL
+    # The suite RAN and failed: the leak budgets executed inside a failing suite, which
+    # is a different fact from "an earlier step died" (#1465).
+    _node_leak_lane_note ENTERED-FAILED > "$(_node_leak_lane_note_file)"
   fi
   if [ "$status" = FAIL ]; then
     echo "--- [$name] FAILED; last 40 lines of $log ---"

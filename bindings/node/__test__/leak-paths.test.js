@@ -98,18 +98,23 @@
  * A bare `npx jest leak-paths` has no `--expose-gc` and FAILS LOUDLY in
  * `beforeAll` rather than silently measuring GC-deferred garbage.
  *
+ * WHO EXECUTES THIS FILE (recomposed onto #3522, round 9): the gate's `node-bindings`
+ * component runs the WHOLE jest suite via `npm test` — which includes this file, once,
+ * measured — and then AFFIRMS the two budget tests BY NAME from that same run's
+ * `--json` report. There is exactly ONE executor; `npm run test:leaks` (and
+ * `test:leaks:handles`) remain the human/debug entry points that no lane invokes.
+ *
  * ADDING A BUDGET TEST? TWO THINGS ARE REQUIRED, and neither is optional (issue
- * #1465 round 7). The gate's `node-bindings` component affirms this lane by NAME
- * from jest's JSON report, so a budget test must:
+ * #1465 round 7). That affirmation is by NAME, so a budget test must:
  *   1. carry the title suffix `stay under the leak budget` — that suffix is how the
  *      gate ENUMERATES budget tests, so a differently-titled one is invisible to
  *      both the runtime unexpected-extra arm and the self-test's count check; and
  *   2. be enrolled in `_NODE_LEAK_BUDGET_TESTS` in scripts/agent-gate.sh.
  * Do (1) without (2) and the gate FAILs loudly ("UNEXPECTED budget test … must be
  * enrolled"), which is the intended outcome. Do (2) without (1) and it FAILs too
- * (the name will never be found as passed). Do NEITHER and the new budget test is
- * silently unaffirmed — the one outcome nothing catches, and the reason this
- * paragraph exists.
+ * (the name will never be found as passed). Do NEITHER and the new budget test still
+ * EXECUTES (the whole suite runs it) but is not AFFIRMED — nothing then notices if a
+ * later change skips or renames it, which is the reason this paragraph exists.
  *
  * There is deliberately NO wall-clock/elapsed-time assertion in this file: these
  * are MEMORY budgets. A timing threshold in a correctness test is a known flake

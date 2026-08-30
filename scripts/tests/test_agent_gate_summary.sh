@@ -4401,57 +4401,54 @@ else
 fi
 
 # ============================================================================
-# ISSUE #1465: node-bindings' LEAK LANE is skippable under the #2078 opt-out, so its
-# three-state decision + the SUMMARY note it produces need regression coverage. The
-# hook (`--node-leak-lane`) is pure: it echoes the decision and the note text, no
-# cargo, no npm, no network. Reuses the #2078 dummy roots above.
+# ISSUE #1465 (recomposed onto #3522): node-bindings runs the WHOLE jest suite, and the
+# leak budgets are AFFIRMED BY NAME from that run's own --json report. There is no
+# lane-level dataset decision any more — #3522's component-level opt-out SKIP is the
+# sole gate — so what needs covering here is the NOTE VOCABULARY (the SUMMARY's only
+# statement about whether the budgets ran) and the gate's expected-budget-test list.
 #
-# Why the NOTE TEXT and not just the exit code: all three states exit 0, so a
-# pass/fail assertion cannot tell them apart — which is the same "a bare red is not
-# evidence" rule the rest of this suite is built on.
+# Why the note TEXT and not an exit code: every state exits 0 or 1 for reasons that do
+# not distinguish them, so a pass/fail assertion cannot tell them apart — the same "a
+# bare red is not evidence" rule the rest of this suite is built on.
 # ============================================================================
 
-# 1465a. The defect this guard was rewritten for: AGENT_GATE_ALLOW_MISSING_FIXTURES=1
-#        with the corpus PRESENT must still RUN the lane. Keying the skip on the env
-#        var alone dropped the issue's only merge-gating execution on any run with a
-#        stale export, and the SUMMARY said nothing.
-nll_present=$(CQLITE_DATASETS_ROOT="$ds_corpus" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
-  bash "$GATE" --node-leak-lane 2>/dev/null)
-# The PURE decision must render WOULD-RUN, never RAN: RAN asserts a post-run
-# affirmation the decision has not made (issue #1465 round 6, K5). Asserting the
-# absence of RAN here is what keeps the two apart.
-if [ "$(printf '%s\n' "$nll_present" | grep '^STATUS:' | sed 's/^STATUS: //')" = RUN ] \
-   && printf '%s\n' "$nll_present" | grep -q '^NOTE: node-bindings-leak-lane: WOULD-RUN' \
-   && ! printf '%s\n' "$nll_present" | grep -q 'leak-lane: RAN'; then
-  ok "1465-optout-with-corpus: opt-out var set but corpus PRESENT → RUN + a WOULD-RUN note (never RAN)"
+# 1465a. The affirmation helper must be WIRED to the component, and it must read the
+#        report #3522 already writes rather than running jest a second time. Both are
+#        source facts, asserted structurally: a second executor is exactly what the
+#        recomposition removed, and a future edit that reintroduces one should red here.
+nll_fn=$(sed -n '/^_node_leak_lane_affirm() {/,/^}$/p' "$GATE")
+nll_component=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
+if [ -n "$nll_fn" ] \
+   && ! printf '%s' "$nll_fn" | grep -qE 'npm (run )?test' \
+   && printf '%s' "$nll_component" | grep -q '_node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json"' \
+   && [ "$(printf '%s' "$nll_component" | grep -cE '^[[:space:]]*npm (run )?test( |$)')" -eq 1 ]; then
+  ok "1465-one-executor: the affirmation is wired to the component, runs no jest itself, and node-bindings invokes npm test exactly once"
 else
-  bad "1465-optout-with-corpus: expected STATUS RUN + a WOULD-RUN note with no RAN claim"
-  echo "------- captured -------"; printf '%s\n' "$nll_present"; echo "------------------------"
+  bad "1465-one-executor: affirmation missing/unwired, or it runs its own jest, or npm test is invoked more than once"
+  printf '%s' "$nll_component" | grep -n 'npm test\|_node_leak_lane_affirm' | sed 's/^/    /'
 fi
 
-# 1465b. The legitimate opt-out: corpus ABSENT + the var → skip the lane, and SAY SO
-#        in the block (the note must state that the budgets did NOT run).
-nll_optout=$(CQLITE_DATASETS_ROOT="$ds_nocorpus" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
-  bash "$GATE" --node-leak-lane 2>/dev/null)
-if [ "$(printf '%s\n' "$nll_optout" | grep '^STATUS:' | sed 's/^STATUS: //')" = SKIP-OPTOUT ] \
-   && printf '%s\n' "$nll_optout" | grep -q '^NOTE: node-bindings-leak-lane: SKIPPED' \
-   && printf '%s\n' "$nll_optout" | grep -q 'did NOT run'; then
-  ok "1465-optout: corpus absent + opt-out → SKIP-OPTOUT + a note saying the budgets did NOT run"
+# 1465b. Every early return between the pessimistic pre-write and the affirmation must
+#        leave a note that does NOT claim the budgets ran. Asserted on the component's
+#        source: the pre-write precedes STEP 1, and the only state that says RAN is
+#        written by the affirmation.
+nll_prewrite=$(printf '%s\n' "$nll_component" | grep -n '_node_leak_lane_note NOT-REACHED' | cut -d: -f1 | head -1)
+nll_step1=$(printf '%s\n' "$nll_component" | grep -n 'STEP 1 — install' | cut -d: -f1 | head -1)
+nll_ran_writers=$(printf '%s\n' "$nll_component" | grep -c '_node_leak_lane_note RUN' || true)
+if [ -n "$nll_prewrite" ] && [ -n "$nll_step1" ] && [ "$nll_prewrite" -lt "$nll_step1" ] \
+   && [ "$nll_ran_writers" -eq 0 ]; then
+  ok "1465-pessimistic-first: NOT-REACHED is written before STEP 1 and nothing in the component writes RAN except the affirmation"
 else
-  bad "1465-optout: expected STATUS SKIP-OPTOUT + a SKIPPED note naming the gap"
-  echo "------- captured -------"; printf '%s\n' "$nll_optout"; echo "------------------------"
+  bad "1465-pessimistic-first: prewrite=$nll_prewrite step1=$nll_step1 in-component RAN writers=$nll_ran_writers"
 fi
 
-# 1465c. Corpus absent WITHOUT the opt-out: the strict answer is RUN — #2078's
-#        preflight has already failed the run closed, so the lane decision must never
-#        be the thing that silently drops coverage.
-nll_absent=$(CQLITE_DATASETS_ROOT="$ds_nocorpus" bash "$GATE" --node-leak-lane 2>/dev/null)
-if [ "$(printf '%s\n' "$nll_absent" | grep '^STATUS:' | sed 's/^STATUS: //')" = RUN ] \
-   && printf '%s\n' "$nll_absent" | grep -q '^NOTE: node-bindings-leak-lane: WOULD-RUN'; then
-  ok "1465-absent-no-optout: corpus absent, no opt-out → RUN (the fail-closed answer)"
+# 1465c. The component-level dataset SKIP must declare the leak-lane state, or a skipped
+#        component leaves NO `node-bindings-leak-lane:` line and "no line" becomes
+#        ambiguous between "it ran" and "this gate predates the line".
+if printf '%s' "$nll_component" | grep -q '_node_leak_lane_note SKIP-OPTOUT'; then
+  ok "1465-skip-declares: the #3522 opt-out SKIP branch writes the SKIP-OPTOUT note"
 else
-  bad "1465-absent-no-optout: expected STATUS RUN (the strict answer)"
-  echo "------- captured -------"; printf '%s\n' "$nll_absent"; echo "------------------------"
+  bad "1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state"
 fi
 
 # 1465d. The note vocabulary is CLOSED, single-sourced, and DISTINCT. Every state the
@@ -4459,11 +4456,11 @@ fi
 #        was not enough (roborev J4) — two states rendering the SAME text would have
 #        passed, which is the uniform-output blind spot this diff has hit before. So the
 #        rendered lines are collected and counted for UNIQUENESS.
-#        ENTERED-FAILED / NO-BUDGET-AFFIRMATION / NOT-REACHED are execution outcomes and
-#        NO-NODE needs a node-less PATH, so none is reachable through the pure decision
-#        hook; they are asserted here at the text level, which is what stops a future
-#        state from silently falling through the UNKNOWN arm (one already did).
-nll_states="RUN SKIP-OPTOUT NO-NODE NOT-REACHED ENTERED-FAILED NO-BUDGET-AFFIRMATION DECISION-RUN"
+#        All six are execution outcomes of the component, so none is reachable from a
+#        pure decision (the hook that used to offer one was deleted with the lane-level
+#        dataset gate); they are asserted here at the TEXT level, which is what stops a
+#        future state from silently falling through the UNKNOWN arm (one already did).
+nll_states="RUN SKIP-OPTOUT NO-NODE NOT-REACHED ENTERED-FAILED NO-BUDGET-AFFIRMATION"
 nll_vocab_ok=1
 nll_rendered="$tmp/1465-notes.txt"
 : >"$nll_rendered"
@@ -4510,7 +4507,7 @@ nll_noaffirm=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/
 if printf '%s' "$nll_entered" | grep -q "REACHED" \
    && printf '%s' "$nll_entered" | grep -q "NOT an earlier" \
    && ! printf '%s' "$nll_entered" | grep -q "DID execute" \
-   && printf '%s' "$nll_noaffirm" | grep -q "named budget test"; then
+   && printf '%s' "$nll_noaffirm" | grep -qE "named (#1465 )?budget test"; then
   ok "1465-failure-states: ENTERED-FAILED distinguishes itself from an earlier step WITHOUT claiming the budgets executed; NO-BUDGET-AFFIRMATION names the budget tests"
 else
   bad "1465-failure-states: the failure notes do not state their own meaning (or overclaim)"
