@@ -891,3 +891,170 @@ fn frozen_wrapper_decides_multicell() {
         .expect("int")
         .is_multicell_collection());
 }
+
+// ---------------------------------------------------------------------------
+// The THIRD outcome, at unit level: `unsupported-representation`
+//
+// The type check's job is to catch a wrong CQL→Arrow mapping that the
+// width-blind value comparison cannot see. For a UDT it could not do that job —
+// it accepted ANY Arrow `Struct`, so a UDT whose CQL `int` field was exported as
+// `Int64` passed BOTH halves of the harness. These cases pin the replacement: a
+// non-Struct is still an affirmative MISMATCH, a Struct is UNMEASURABLE, and
+// `Unmeasurable` is never a pass.
+// ---------------------------------------------------------------------------
+
+/// A UDT exported AS an Arrow `Struct` is UNMEASURABLE, not valid.
+#[test]
+fn a_udt_struct_type_claim_is_refused_not_validated() {
+    use arrow::datatypes::{DataType, Field, Fields};
+    use parquet_parity::arrow_expect::{validate_field, FieldVerdict, ShapeVerdict};
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::unsupported::UDT_STRUCT_FIELD_TYPES;
+    use std::sync::Arc;
+
+    let list_of = |t: DataType| DataType::List(Arc::new(Field::new("item", t, true)));
+    let map_of = |k: DataType, v: DataType| {
+        DataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("key", k, false),
+                    Field::new("value", v, true),
+                ])),
+                false,
+            )),
+            false,
+        )
+    };
+    let col = |declared: &str| {
+        parse_column("c", declared, &["person"]).expect("declared type must parse")
+    };
+    // A Struct whose `age` field is a WIDENED CQL `int` — the exact defect the
+    // old "any Struct" expectation waved through, and one the value comparison
+    // cannot see either (both widths canonicalize to one `Int`).
+    let widened_person = DataType::Struct(Fields::from(vec![
+        Field::new("nm", DataType::Utf8, true),
+        Field::new("age", DataType::Int64, true),
+    ]));
+
+    assert_eq!(
+        validate_field(&col("frozen<person>"), &widened_person),
+        FieldVerdict::Unmeasurable(UDT_STRUCT_FIELD_TYPES),
+        "a UDT Struct's field types are undeclarable, so the harness must REFUSE to claim it \
+         validated — accepting it is a pass nothing measured"
+    );
+    // Not a pass, and not a mismatch either: both would be verdicts the harness
+    // did not measure, in opposite directions.
+    assert_ne!(
+        validate_field(&col("frozen<person>"), &widened_person),
+        FieldVerdict::Valid
+    );
+
+    // The refusal propagates out of a nested position — that is where #3556's
+    // family lives.
+    assert_eq!(
+        validate_field(
+            &col("frozen<list<frozen<person>>>"),
+            &list_of(widened_person.clone())
+        ),
+        FieldVerdict::Unmeasurable(UDT_STRUCT_FIELD_TYPES)
+    );
+    assert_eq!(
+        validate_field(
+            &col("frozen<map<text, frozen<person>>>"),
+            &map_of(DataType::Utf8, widened_person.clone())
+        ),
+        FieldVerdict::Unmeasurable(UDT_STRUCT_FIELD_TYPES)
+    );
+
+    // A NON-Struct is still an affirmative MISMATCH: #3556's `Utf8` flattening
+    // must stay detected, which is why the refusal is not applied to the whole
+    // UDT expectation.
+    match validate_field(&col("frozen<person>"), &DataType::Utf8) {
+        FieldVerdict::Mismatch(m) => assert_eq!(m.actual, "utf8"),
+        other => panic!("a Utf8-flattened UDT must be a MISMATCH, got {other:?}"),
+    }
+
+    // …and an affirmatively WRONG sibling DOMINATES an unmeasurable one: a
+    // reportable type defect is strictly more useful than a report that
+    // something next to it could not be measured.
+    match validate_field(
+        &col("frozen<map<text, frozen<person>>>"),
+        &map_of(DataType::Int32, widened_person),
+    ) {
+        FieldVerdict::Mismatch(m) => assert!(
+            m.actual.starts_with("map<int32,"),
+            "the mismatch must name the wrong KEY type: {}",
+            m.actual
+        ),
+        other => {
+            panic!("a wrong map key beside an unmeasurable value must be a MISMATCH: {other:?}")
+        }
+    }
+
+    // The shape-level verdict is the same three-valued answer, so a caller
+    // reaching for `check` directly cannot collapse it either.
+    use parquet_parity::arrow_expect::expected_shape;
+    assert_eq!(
+        expected_shape(&col("frozen<person>").spec)
+            .expect("a UDT has a declared expectation")
+            .check(&DataType::Struct(Fields::from(vec![Field::new(
+                "nm",
+                DataType::Utf8,
+                true
+            )]))),
+        ShapeVerdict::Unmeasurable(UDT_STRUCT_FIELD_TYPES)
+    );
+}
+
+/// Which DECLARED types have refused VALUE representations — and, just as
+/// important, which do not.
+#[test]
+fn refused_value_representations_are_keyed_on_the_declared_type() {
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::unsupported::{refused_value_representation, CQL_TUPLE_VALUES};
+
+    let refused = |declared: &str| {
+        let col = parse_column("c", declared, &["person"]).expect("declared type must parse");
+        refused_value_representation(&col.spec)
+    };
+
+    // A CQL tuple, at the top level and in every nested position a corpus type
+    // can put one — the golden holds it positionally, the export names it.
+    for declared in [
+        "tuple<int, text>",
+        "frozen<tuple<int, text>>",
+        "list<frozen<tuple<int, text>>>",
+        "set<frozen<tuple<int, text>>>",
+        "map<text, frozen<tuple<int, text>>>",
+        "frozen<map<frozen<tuple<int, text>>, text>>",
+    ] {
+        assert_eq!(
+            refused(declared),
+            Some(CQL_TUPLE_VALUES),
+            "'{declared}' carries a CQL tuple, so its VALUES must be refused"
+        );
+    }
+
+    // And nothing else is refused. `duration` is the case that matters: an Arrow
+    // `Interval` duration also decodes to a canonical `Tuple`, but its DECLARED
+    // type is a scalar and `spelling.rs` reconciles both sides onto the same
+    // (months, days, nanos) triple — that IS a measured comparison, so refusing
+    // it would be a false gap.
+    for declared in [
+        "duration",
+        "int",
+        "text",
+        "frozen<person>",
+        "list<frozen<person>>",
+        "map<text, frozen<person>>",
+        "map<int, text>",
+        "frozen<list<int>>",
+    ] {
+        assert_eq!(
+            refused(declared),
+            None,
+            "'{declared}' is comparable, so refusing it would be a false gap"
+        );
+    }
+}

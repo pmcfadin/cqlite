@@ -1087,3 +1087,168 @@ fn a_known_type_gap_must_name_a_declared_column() {
         "{err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The THIRD outcome: `unsupported-representation`, on real export output
+//
+// A positive verdict requires an AFFIRMATIVE MEASUREMENT, so a stage that could
+// not measure must be distinguishable from one that passed. These controls pin
+// that the refusal (a) happens, (b) names the column and the representation,
+// (c) FAILS the case, and (d) cannot be recorded into a `known_gap`.
+//
+// Built on `test_da.simple_table` (committed binaries, so they always run) by
+// DECLARING a column as a CQL `tuple` — the same observable situation as a case
+// that genuinely covers a tuple column.
+// ---------------------------------------------------------------------------
+
+/// `test_da.simple_table` with `name` declared as a CQL `tuple` — a
+/// representation the harness refuses to compare.
+const NAME_AS_TUPLE: &[(&str, &str)] = &[
+    ("id", "uuid"),
+    ("name", "tuple<text, text>"),
+    ("age", "int"),
+    ("salary", "bigint"),
+    ("active", "boolean"),
+    ("created", "timestamp"),
+];
+
+/// A declared CQL tuple is REFUSED by name, not compared across two
+/// representations — and the refusal fails the case.
+#[test]
+fn a_declared_cql_tuple_column_is_refused_not_compared() {
+    const CASE: ParityCase = da_simple_variant(NAME_AS_TUPLE, &[]);
+
+    let failures = parquet_parity::run_case(&CASE)
+        .err()
+        .expect("a column the harness cannot compare MUST fail the case, never pass it");
+    let rendered = failures.to_string();
+    assert!(
+        rendered.contains("UNSUPPORTED REPRESENTATION")
+            && rendered.contains("column 'name'")
+            && rendered.contains("cql-tuple-values"),
+        "the refusal must name the stage, the column and the representation: {rendered}"
+    );
+    // And it is a REFUSAL, not a value difference: nothing was compared, so
+    // nothing may be reported as unequal for that column.
+    assert!(
+        !rendered.contains("golden text:"),
+        "a refused column must not also be reported as a value divergence: {rendered}"
+    );
+}
+
+/// A refusal can NOT be recorded into a `known_gap`.
+///
+/// A known gap says "a recorded PRODUCT defect still reproduces"; a refusal says
+/// "this HARNESS cannot represent this shape". There is deliberately no
+/// `ExpectedFailure::UnsupportedRepresentation`, so the refusal is always an
+/// unrecorded extra — this control pins that a gap recording everything ELSE the
+/// case exhibits still fails, naming the refusal it would have hidden.
+#[test]
+fn a_refusal_cannot_be_recorded_as_a_known_gap() {
+    const GAP: KnownGap = KnownGap {
+        issue: "#0000",
+        // Everything the case exhibits EXCEPT the refusal. Note there is no
+        // `values_deferred("name")` entry: a REFUSED column carries the refusal
+        // record INSTEAD of an `Unrunnable` one — the two are exclusive, because
+        // reporting a column's values as twice-uncovered would break the very
+        // multiset equality this control is about.
+        expect: &[ExpectedFailure::ArrowType {
+            column: "name",
+            expected: "struct<utf8 | large_utf8,utf8 | large_utf8>",
+            actual: "utf8",
+        }],
+        what: "NEGATIVE CONTROL: records every failure EXCEPT the representation refusal, \
+               which has no ExpectedFailure counterpart by design",
+    };
+    const CASE: ParityCase = ParityCase {
+        keyspace: "test_da",
+        table: "simple_table",
+        schema: "da-test.cql",
+        udts: &[],
+        columns: NAME_AS_TUPLE,
+        partition_key: &["id"],
+        clustering: &[],
+        must_run: true,
+        covers: "NEGATIVE CONTROL: a refusal is not a known gap",
+        known_gap: Some(GAP),
+        known_type_gaps: &[],
+    };
+
+    let failures = parquet_parity::run_case(&CASE)
+        .err()
+        .expect("the case must fail");
+    let problem = GAP
+        .mismatch(&CASE.id(), failures.items())
+        .expect("a HARNESS refusal must never be excused by a PRODUCT-defect record");
+    assert!(
+        problem.contains("OBSERVED BUT NOT RECORDED")
+            && problem.contains("unsupported-representation[value-comparison:column 'name']")
+            && problem.contains("representation=cql-tuple-values"),
+        "the refusal must be named as the unrecorded extra: {problem}"
+    );
+    // …and the refusal is the ONLY thing the gap failed to account for: every
+    // other failure it records still reproduces, so this control is about the
+    // refusal and not about a stale record.
+    assert!(
+        !problem.contains("RECORDED BUT NOT OBSERVED"),
+        "every OTHER recorded failure must still reproduce: {problem}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fail closed on a table that SHOULD have been covered (#3220)
+// ---------------------------------------------------------------------------
+
+/// A `must_run` case whose fixture is ABSENT must RED, not quietly reduce the
+/// compared-table count.
+///
+/// The rule it pins: `must_run` is set from `git ls-files`, so a committed
+/// fixture that goes missing (a bad merge, a SIGKILLed fetch that left tracked
+/// files deleted, a wrong `CQLITE_DATASETS_ROOT`) makes THAT case panic on its
+/// own line. Without this control the rule was only ever exercised in the
+/// direction where the fixture is present — i.e. never exercised at all.
+///
+/// Driven through `assert_case`, the entry point every parity case uses, and
+/// through a table name no root can carry, so the assertion is about the
+/// fail-closed rule and not about this machine's corpus.
+#[test]
+fn a_missing_committed_fixture_reds_the_suite() {
+    const ABSENT: ParityCase = ParityCase {
+        keyspace: "test_da",
+        // A table no corpus root carries — the observable shape of a committed
+        // fixture that went missing.
+        table: "no_such_table_control",
+        schema: "da-test.cql",
+        udts: &[],
+        columns: &[("id", "uuid")],
+        partition_key: &["id"],
+        clustering: &[],
+        must_run: true,
+        covers: "NEGATIVE CONTROL: a must_run case whose fixture is absent",
+        known_gap: None,
+        known_type_gaps: &[],
+    };
+
+    // The panic is the expected outcome, so the default hook's backtrace noise
+    // is suppressed for the duration and restored immediately after.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parquet_parity::assert_case(&ABSENT)
+    }));
+    std::panic::set_hook(hook);
+
+    let payload = result.expect_err(
+        "a must_run case whose fixture is ABSENT must PANIC — a silent skip would shrink the \
+         compared-table count with nothing red (#3220)",
+    );
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_default();
+    assert!(
+        message.contains("test_da.no_such_table_control") && message.contains("MUST run"),
+        "the failure must name the table and the rule: {message}"
+    );
+}
