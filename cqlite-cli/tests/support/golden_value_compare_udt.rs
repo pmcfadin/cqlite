@@ -279,3 +279,7 @@ fn check_udt_discriminator(fields: &Map<String, Value>, udt: &UdtType) -> Result
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "golden_value_compare_udt_tests.rs"]
+mod tests;
