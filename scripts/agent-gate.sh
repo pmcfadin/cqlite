@@ -7251,7 +7251,7 @@ run_file_size() {
   fi
   if [ -n "$log_persist_err" ]; then
     local ratchet_verdict="$status" sib="$LOG_DIR/$name.persistence-error.log" _m _g
-    local sib_ok=1
+    local sib_ok=1 _sib_lines=0
     local -a msg=()
     status=FAIL
     # The diagnostic MUST NOT live on stdout alone: stdout is gate.log, the one file agents
@@ -7260,17 +7260,15 @@ run_file_size() {
     # pattern), which is reachable from the SUMMARY's `logs:` line, and the stdout block
     # names that sibling so both routes lead to it (#3401 review blocker B).
     : 2>/dev/null >"$sib" || sib_ok=0
+    # WORDING is the ONLY thing that varies by ratchet state; the CONTENT below is
+    # unconditional (#3401 review FIX 1).
     if [ "$ratchet_verdict" = FAIL ]; then
       # BOTH failed. Saying "this is NOT a ratchet violation" here would steer the reader
-      # away from a REAL growth violation (#3401 review blocker C), so report both and keep
-      # the remediation data — which would otherwise be lost with the unwritable log.
+      # away from a REAL growth violation (#3401 review blocker C), so report both.
       msg+=("--- [$name] TWO failures: a REAL size-ratchet violation AND a log-persistence failure.")
       msg+=("    (1) RATCHET (a genuine violation — act on this): the change makes over-threshold")
       msg+=("        file(s) larger. Split per the campsite rule (epic #1116 source / #1135 tests),")
-      msg+=("        or re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge. Grown files:")
-      for _g in ${grew[@]+"${grew[@]}"}; do
-        msg+=("          $_g")
-      done
+      msg+=("        or re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge.")
       msg+=("    (2) PERSISTENCE: the diagnostic log could not be written: $log")
       msg+=("        Cause: $log_persist_err")
       msg+=("        Fix the log directory (writable? full?) — that half needs no source split.")
@@ -7289,16 +7287,58 @@ run_file_size() {
       msg+=("    Cause: $log_persist_err")
       msg+=("    Fix the log directory (writable? full?) and re-run; no source file needs splitting.")
     fi
-    # Claim the sibling only if it could actually be created (#3401 review L2): an
-    # unconditional "also written to" is the unverified-promise shape this issue is about.
+    # CONTENT — IDENTICAL IN EVERY RATCHET STATE (#3401 review FIX 1). Deriving the
+    # sibling's content from the ratchet verdict has now been wrong three times (the FAIL
+    # state, then the no-base state, then the PASS / CQLITE_ALLOW_FILE_GROWTH state, where
+    # the file names and counts were lost from every reachable artifact — stdout only
+    # reaches gate.log). So the arithmetic is restated unconditionally and only the wording
+    # above varies.
+    msg+=("    --- computed ratchet detail (what the unwritable log would have held) ---")
+    msg+=("    thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)")
+    if [ -n "$base" ]; then
+      msg+=("    base ref: $base (via $base_src)")
+    else
+      msg+=("    base ref: unavailable — growth ratchet skipped (advisory only)")
+    fi
+    if [ "${#over[@]}" -eq 0 ]; then
+      msg+=("    over threshold: none")
+    else
+      msg+=("    over threshold (current/limit  path):")
+      for _g in ${over[@]+"${over[@]}"}; do
+        msg+=("      $_g")
+      done
+    fi
+    if [ "${#grew[@]}" -eq 0 ]; then
+      msg+=("    grown: none")
+    else
+      msg+=("    grown:")
+      for _g in ${grew[@]+"${grew[@]}"}; do
+        msg+=("      $_g")
+      done
+    fi
+
+    # Write the sibling FIRST and VERIFY WHAT LANDED, then make the claim (#3401 review
+    # FIX 2). `sib_ok` from the truncate alone only proved the file could be OPENED: a
+    # quota/ENOSPC boundary accepts the open and rejects the writes, leaving an empty or
+    # short sibling while stdout asserts the complete block is there. A false pointer is
+    # worse than none — it sends the reader to a file that lacks what they were promised.
+    if [ "$sib_ok" = 1 ]; then
+      for _m in ${msg[@]+"${msg[@]}"}; do
+        printf '%s\n' "$_m" 2>/dev/null >>"$sib" || { sib_ok=0; break; }
+      done
+    fi
+    if [ "$sib_ok" = 1 ]; then
+      _sib_lines=$(wc -l <"$sib" 2>/dev/null | tr -d ' ')
+      [ "${_sib_lines:-0}" = "${#msg[@]}" ] || sib_ok=0
+    fi
     if [ "$sib_ok" = 1 ]; then
       msg+=("    This block is also written to: $sib")
+      printf '%s\n' "    This block is also written to: $sib" 2>/dev/null >>"$sib"
     else
-      msg+=("    (It could NOT also be written to $sib — this stdout copy is the only one.)")
+      msg+=("    (It could NOT be written to $sib — this stdout copy is the only one.)")
     fi
     for _m in ${msg[@]+"${msg[@]}"}; do
       printf '%s\n' "$_m"
-      printf '%s\n' "$_m" 2>/dev/null >>"$sib"
     done
   fi
 
@@ -7309,11 +7349,17 @@ run_file_size() {
   #     terminal verdict it promises;
   #   * to STDOUT *after* record_result, because every other component prints in that
   #     order and a gratuitous divergence is its own bug magnet.
-  # This LAST log write is deliberately UNVERIFIED, and that gap is irreducible: verifying
-  # a write requires a later write, so any re-check only moves the same one-write window
-  # further along. What IS verified is everything #3401 exists for — the thresholds, the
-  # base ref and the growth entries, all written and checked above; a failure here costs
-  # only the terminal verdict LINE, which the SUMMARY carries anyway (#3401 review A2).
+  # This LAST log write is deliberately UNVERIFIED. The gap is IRREDUCIBLE and the obvious
+  # fix — "attempt and check the terminal append before the final persistence decision" —
+  # is NOT IMPLEMENTABLE, so it is named here and rejected rather than re-derived each
+  # review round (#3401 review A2, re-raised as job 138 F1):
+  #   * CIRCULARITY: this line's CONTENT IS THE VERDICT, and the verdict depends on the
+  #     persistence decision. It cannot be written before the decision it reports.
+  #   * A POST-WRITE RE-CHECK BUYS NOTHING: verifying a write requires a later write, whose
+  #     own success is then unverified — the same one-write window, moved along.
+  #   * THE LOSS IS BOUNDED: everything #3401 exists for (thresholds, base ref, over/grown
+  #     entries) is written AND checked above; a failure here costs only the terminal
+  #     verdict LINE, which the SUMMARY carries independently.
   printf '%s\n' ">>> [$name] $status ($((end - start))s)" 2>/dev/null >>"$log"
   record_result "$name" "$status" "$((end - start))"
   printf '%s\n' ">>> [$name] $status ($((end - start))s)"
