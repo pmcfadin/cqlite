@@ -1501,6 +1501,77 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Cases 77-78 (post-rebase review): prefix collision, and a TRUNCATED TOC.
+#
+# 77. Production discovery is a bare `filename.ends_with("-Data.db")`, and
+#     `SSTableComponent::from_filename` maps ANY such name to the Data component -- so a
+#     file sharing a REAL generation's prefix is read as that generation's Data component.
+#     Measured with garbage bytes beside a healthy nb-1:
+#       nb-1-big-Foo-Data.db -> the query THROWS   (shares the prefix)
+#       junk-Data.db         -> 100 rows           (discovered, open fails, SKIPPED)
+#       nb-9-big-Data.db     -> 100 rows           (valid descriptor, other generation)
+#       xx-1-big / nb-foo-big -> 100 rows
+#     So the fatal shape is NARROW. Rejecting every odd `*-Data.db` would red on input the
+#     reader demonstrably tolerates, which is why the accept controls are here.
+#
+# 78. TOC validation used the TOC as the required set, trusting it as a COMPLETE inventory.
+#     A truncated-but-nonempty TOC listing only `Data.db` then passed, and the components
+#     this check exists to catch went missing unopposed.
+# ---------------------------------------------------------------------------
+if [ -n "$MANIFEST_NOGIT" ]; then
+  pc_case() {   # <shape> -> accept | reject
+    local shape=$1 root t
+    root="$WORK/manifest-pc-$shape"; rm -rf "$root"
+    t="$root/sstables/test_basic/counters-$UUID"; mkdir -p "$t"
+    printf 'x\n'   > "$t/nb-1-big-Data.db"
+    printf 'row\n' > "$t/nb-1-big-Data.db.jsonl"
+    printf 'Data.db\nStatistics.db\nFilter.db\nDigest.crc32\nTOC.txt\n' > "$t/nb-1-big-TOC.txt"
+    for _m in Statistics.db Filter.db Digest.crc32; do printf 'x\n' > "$t/nb-1-big-$_m"; done
+    case "$shape" in
+      clean)            : ;;
+      junk-sibling)     printf 'x\n' > "$t/junk-Data.db" ;;
+      other-generation) printf 'x\n' > "$t/nb-9-big-Data.db"
+                        printf 'Data.db\nStatistics.db\nFilter.db\nDigest.crc32\nTOC.txt\n' > "$t/nb-9-big-TOC.txt"
+                        for _m in Statistics.db Filter.db Digest.crc32; do printf 'x\n' > "$t/nb-9-big-$_m"; done ;;
+      prefix-collision) printf 'x\n' > "$t/nb-1-big-Foo-Data.db" ;;
+      truncated-toc)    printf 'Data.db\n' > "$t/nb-1-big-TOC.txt" ;;
+      toc-omits-stats)  printf 'Data.db\nTOC.txt\n' > "$t/nb-1-big-TOC.txt"
+                        rm -f "$t/nb-1-big-Statistics.db" ;;
+    esac
+    local _o; _o=$(NO_AUTO_TOC=1 mrun "$root" 2>&1 || true)
+    if printf '%s' "$_o" | grep -q 'test_basic/counters'; then echo reject; else echo accept; fi
+  }
+
+  # ACCEPT controls first: without them a manifest that rejected everything would pass the
+  # reject cases and look correct, and these three are shapes the reader TOLERATES.
+  for shape in clean junk-sibling other-generation; do
+    [ "$(pc_case "$shape")" = accept ] \
+      && ok "generation shape '$shape' is accepted (the reader tolerates it)" \
+      || bad "generation shape '$shape' was rejected, but the reader tolerates it"
+  done
+  # NOTE ON WHAT THIS PAIR PROVES. The reject verdict alone is NOT discriminating: the
+  # bidirectional TOC check independently disqualifies a colliding file (it shares the
+  # prefix and is not TOC-listed), so deleting the dedicated collision branch leaves this
+  # assertion GREEN. Verified by planting exactly that. The DIAGNOSTIC assert below is the
+  # one that discriminates, and it is why the branch is kept -- without it the operator is
+  # told "no Data.db the reader would open" about a directory whose Data.db is fine.
+  [ "$(pc_case prefix-collision)" = reject ] \
+    && ok "a *-Data.db sharing a real generation's prefix disqualifies the table" \
+    || bad "a prefix-colliding *-Data.db was accepted; the reader maps it to that generation and FAILS"
+  # The collision must be NAMED, not reported as some other cause.
+  pc_out=$(NO_AUTO_TOC=1 mrun "$WORK/manifest-pc-prefix-collision" 2>&1 || true)
+  printf '%s' "$pc_out" | grep -q "SHARES a real generation's prefix" \
+    && ok "the prefix-collision diagnostic names its own cause" \
+    || bad "the prefix collision was reported as something else: $(printf '%s' "$pc_out" | grep 'test_basic/counters' | head -1)"
+
+  for shape in truncated-toc toc-omits-stats; do
+    [ "$(pc_case "$shape")" = reject ] \
+      && ok "TOC shape '$shape' disqualifies the table (the TOC is not a trusted inventory)" \
+      || bad "TOC shape '$shape' was accepted; a truncated TOC shrank the required set"
+  done
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

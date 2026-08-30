@@ -392,6 +392,12 @@ _usable_file() { [ -f "$1" ] && [ -s "$1" ] && [ -r "$1" ]; }
 #
 # The Data.db's own nonzero requirement is enforced separately by its caller.
 _TOC_MAY_BE_EMPTY='Rows.db'
+
+# _TOC_SIDECAR_GLOBS -- files sharing a generation prefix that are NOT Cassandra components
+# and are therefore legitimately absent from the TOC. Measured across all 144 generations in
+# both corpus roots: exactly two shapes, both human-readable dumps this TEST corpus ships
+# (142 `Statistics.db.txt`, 6 `CompressionInfo.db.txt`) plus the `.jsonl` goldens.
+_TOC_SIDECAR_GLOBS='*.jsonl *.db.txt'
 _toc_companions_usable() {
   _t_prefix=${1%Data.db}
   _t_toc="${_t_prefix}TOC.txt"
@@ -409,6 +415,28 @@ _toc_companions_usable() {
       *) [ -s "$_t_p" ] || return 1 ;;
     esac
   done < "$_t_toc"
+  # BIDIRECTIONAL (roborev #3493, post-rebase round). The loop above proves every LISTED
+  # component exists; on its own that trusts the TOC as a COMPLETE inventory, so a
+  # TRUNCATED-but-nonempty TOC listing only `Data.db` shrinks the required set to nothing
+  # and the partial extraction this check exists to catch walks through.
+  #
+  # So the other direction too: every file sharing this generation's prefix must BE LISTED.
+  # A truncation that drops `CompressionInfo.db` from the TOC is then caught by the file
+  # still being on disk -- which is the shape a half-written TOC actually leaves.
+  #
+  # A mandatory-component floor was tried first and is NOT this: it cannot catch a truncated
+  # TOC whose components all happen to be present, and it red-lined 40 synthetic fixtures for
+  # a reason unrelated to what they test.
+  for _t_f in "${_t_prefix}"*; do
+    [ -e "$_t_f" ] || continue
+    _t_c=${_t_f#"$_t_prefix"}
+    _t_skip=0
+    for _t_g in $_TOC_SIDECAR_GLOBS; do
+      case "$_t_c" in $_t_g) _t_skip=1; break ;; esac
+    done
+    [ "$_t_skip" -eq 1 ] && continue
+    grep -qxF "$_t_c" "$_t_toc" || return 1
+  done
   return 0
 }
 
@@ -512,6 +540,7 @@ for entry in "${EXPECTED[@]}"; do
   oa_bad=0        # a correctly-shaped dir held Data.db files, but none OA-named
   name_bad=0      # Data.db files existed, but none named like a descriptor the reader opens
   empty_bad=0     # a correctly-named binary existed but was ZERO-LENGTH (truncated fetch)
+  collide_bad=0   # a non-generation *-Data.db shares a real generation's prefix
   type_bad=0      # a correctly-named Data.db exists but is NOT a regular file
   unread_bad=0    # a correctly-named, nonempty Data.db is not readable
   toc_bad=0       # a complete-looking generation whose own TOC.txt lists an absent component
@@ -574,7 +603,44 @@ for entry in "${EXPECTED[@]}"; do
       # Not a descriptor the reader opens => not a generation at all, and must not
       # disqualify the table (the round-24 over-rejection, one level down). `junk-Data.db`
       # and a non-numeric `oa-<uuid>-big-Data.db` both land here.
-      _reader_accepts_descriptor "$fbase" || { name_bad=1; continue; }
+      if ! _reader_accepts_descriptor "$fbase"; then
+        name_bad=1
+        # PREFIX COLLISION (roborev #3493, post-rebase round). Production discovery is a
+        # bare `filename.ends_with("-Data.db")` and `SSTableComponent::from_filename` maps
+        # ANY such name to the Data component -- so a file sharing a REAL generation's
+        # prefix is read as that generation's Data component and corrupts it.
+        #
+        # Measured, garbage bytes under each name beside a healthy nb-1 generation:
+        #   nb-1-big-Foo-Data.db -> the query THROWS      <-- shares nb-1-big-
+        #   junk-Data.db         -> 100 rows (tolerated)
+        #   nb-9-big-Data.db     -> 100 rows (tolerated)  <-- valid descriptor, other gen
+        #   xx-1-big-Data.db     -> 100 rows (tolerated)
+        #   nb-foo-big-Data.db   -> 100 rows (tolerated)
+        #
+        # So the hazard is NARROWER than "any unparseable name": a non-generation file is
+        # discovered, fails to open and is SKIPPED (best-effort load) UNLESS it collides
+        # with a real generation's prefix. That is the only fatal shape measured, and it is
+        # the one checked here -- rejecting every odd `*-Data.db` would red on input the
+        # reader demonstrably tolerates.
+        #
+        # PARTLY REDUNDANT WITH THE BIDIRECTIONAL TOC CHECK, deliberately. A colliding file
+        # shares the generation prefix and is not TOC-listed, so `_toc_companions_usable`
+        # already disqualifies the table -- verified by deleting THIS check, which left the
+        # table rejected. What it does not leave is a usable diagnostic: the operator is told
+        # "no Data.db the reader would open", about a directory whose Data.db is present and
+        # fine. This branch exists to NAME the cause, which is the round-40 rule, and that is
+        # exactly the one assertion that flips when it is removed.
+        _pfx_collide=0
+        for _gen in "$cand"/*-Data.db; do
+          [ -e "$_gen" ] || [ -L "$_gen" ] || continue
+          _gbase=${_gen##*/}
+          [ "$_gbase" = "$fbase" ] && continue
+          _reader_accepts_descriptor "$_gbase" || continue
+          case "$fbase" in "${_gbase%Data.db}"*) _pfx_collide=1; break ;; esac
+        done
+        [ "$_pfx_collide" -eq 1 ] && { collide_bad=1; gen_bad=1; }
+        continue
+      fi
       # `_usable_file` is `-f && -s && -r`. Test its three parts SEPARATELY so the
       # diagnostic names the operator's ACTUAL problem (roborev #3493 round 54 self-audit).
       # Collapsing them reported a Data.db that is a DIRECTORY as "ZERO-LENGTH (truncated
@@ -699,6 +765,8 @@ for entry in "${EXPECTED[@]}"; do
   # most-specific first; a table can only be in one of these states per candidate.
   if [ -n "$data_db" ]; then
     :
+  elif [ "$collide_bad" -eq 1 ]; then
+    echo "❌ expected table has a *-Data.db that SHARES a real generation's prefix (e.g. nb-1-big-Foo-Data.db beside nb-1-big-Data.db) — the reader maps any *-Data.db to that generation's Data component and the query FAILS; remove the stray file: $entry" >&2
   elif [ "$type_bad" -eq 1 ]; then
     echo "❌ expected table has a Data.db that is NOT A REGULAR FILE (a directory, a dangling symlink, or a special file) -- replace the fixture: $entry" >&2
   elif [ "$unread_bad" -eq 1 ]; then

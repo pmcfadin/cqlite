@@ -18,6 +18,24 @@
 //! was judged unreadable, making the manifest STRICTER than the reader and suppressing the Node
 //! suite for a corpus the reader opens.
 //!
+//! WHAT THIS DOES **NOT** ESTABLISH, measured and recorded so the scope is not overread.
+//! Production DISCOVERY is not this predicate: `manager_open.rs` takes any
+//! `filename.ends_with("-Data.db")`, and `SSTableComponent::from_filename` maps any such name
+//! to the Data component -- neither consults `parse_filename`. A per-file open error is then
+//! logged and SKIPPED (best-effort load). Measured with garbage bytes beside a healthy `nb-1`:
+//!
+//!     nb-1-big-Foo-Data.db -> the query THROWS      (shares the nb-1-big- prefix)
+//!     junk-Data.db         -> 100 rows, tolerated   (discovered, open fails, skipped)
+//!     nb-9-big-Data.db     -> 100 rows, tolerated   (valid descriptor, other generation)
+//!     xx-1-big-Data.db     -> 100 rows, tolerated
+//!     nb-foo-big-Data.db   -> 100 rows, tolerated
+//!
+//! So "the reader would open this" and "an unusable file here breaks the run" are DIFFERENT
+//! questions, and only the prefix-collision shape is fatal. That shape is checked in
+//! `check-dataset-manifest.sh` directly, not here. This test's subject is narrower and worth
+//! stating plainly: that the shell predicate's notion of a GENERATION matches the descriptor
+//! parser plus the version gates. It is not a model of discovery and must not be read as one.
+//!
 //! Both directions matter and both are asserted:
 //!   * shell ACCEPT / reader REJECT -- a false-PRESENT: an unreadable fixture passes the manifest
 //!     and the Node suite then fails on it, with the #2078 opt-out unable to suppress it.

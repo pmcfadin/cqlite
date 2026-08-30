@@ -6815,6 +6815,26 @@ run_node_bindings() {
   local _dm_rc=0
   bash "$REPO_ROOT/test-data/scripts/check-dataset-manifest.sh" \
     "$CQLITE_DATASETS_ROOT" >>"$log" 2>&1 || _dm_rc=$?
+  # THE #2078 OPT-OUT HAS TO REACH THIS VERDICT TOO (roborev #3493, post-rebase round).
+  # The SKIP branch above keys on `_node_bindings_corpus_present`, which is satisfied by ANY
+  # single `test_basic` Data.db -- so on a PARTIAL corpus it reports "present", the opt-out
+  # never fires, and the manifest fails here. The diagnostic below used to tell the operator
+  # to set AGENT_GATE_ALLOW_MISSING_FIXTURES=1, which in that exact state does nothing: a
+  # remedy that does not work is worse than none, because it costs a debugging cycle to
+  # discover. So an incomplete corpus UNDER THE OPT-OUT skips, the same way an absent one
+  # does -- one behaviour for "the corpus cannot support this run", not two.
+  if [ "$_dm_rc" -eq 9 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and check-dataset-manifest.sh reports an INCOMPLETE corpus at CQLITE_DATASETS_ROOT='${CQLITE_DATASETS_ROOT:-<unset>}')"
+    echo ">>> [$name]   NOT VALIDATED by this run: the whole jest suite. A partial corpus is not"
+    echo ">>> [$name]   distinguishable from an absent one for these suites — the parity cases derive"
+    echo ">>> [$name]   their table set from disk, so they would run GREEN over the tables that remain"
+    echo ">>> [$name]   and silently omit the rest. Manifest diagnostics are in $log."
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
   if [ "$_dm_rc" -ne 0 ]; then
     status=FAIL
     if [ "$_dm_rc" -eq 9 ]; then
@@ -6822,7 +6842,8 @@ run_node_bindings() {
       echo "    Every jest suite would still RUN and could still be green: the parity cases derive"
       echo "    their table set from disk, so a missing table is simply never enumerated. Remedy:"
       echo "    bash test-data/scripts/fetch-datasets.sh, or AGENT_GATE_ALLOW_MISSING_FIXTURES=1 to"
-      echo "    opt out visibly (which SKIPs this component rather than passing it). Details in $log."
+      echo "    opt out visibly — which SKIPs this component (verified to reach THIS verdict, not just"
+      echo "    an absent corpus). Details in $log."
     else
       echo "--- [$name] FAILED: check-dataset-manifest.sh exited $_dm_rc — neither success nor its"
       echo "    reserved incomplete-corpus code 9. That is a TOOLING failure, not a corpus verdict,"
