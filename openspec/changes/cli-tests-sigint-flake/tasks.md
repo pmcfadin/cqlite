@@ -784,7 +784,8 @@ new (`the_deadline_is_never_tighter_than_the_bounds_it_replaced`,
 `any_single_stage_may_consume_the_whole_deadline`,
 `observed_progress_never_extends_the_deadline`) and two consolidate the surviving properties of five
 old ones. `cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests`:
-**9 passed, 0 failed, 0.30s.**
+**9 passed, 0 failed, 0.30s.** *(Round 10 adds three harness unit tests in `mod.rs`, one per expiry
+site — 9 → 12. See round 10.)*
 
 ### Product RED plants (AC3), re-run on the descoped oracle
 
@@ -978,3 +979,247 @@ than an assumed guarantee; the lead files it as a linked follow-up.
 
 `graceful_shutdown_tests.rs` **363**, `graceful_shutdown_support/mod.rs` **754**,
 `graceful_shutdown_support/budgets.rs` **646**. All three under the 1500-line test threshold.
+
+## Round 10 — roborev job 233 (2 findings, both fixed)
+
+Both findings were the same *shape* as findings this change has already paid for once, which is why
+neither was fixed by editing the thing complained about:
+
+| # | finding | fix |
+|---|---|---|
+| 1 | The three expiry sites declared a timeout without a last look at what had already arrived — the round-9 ruling applied to the SUCCESS path only. | A FINAL NON-BLOCKING check at each site before expiry is declared (`8efca5439`), plus the claim scoped symmetrically at every site that carried the one-directional version (`b10f41147`). |
+| 2 | `QUIET_OBSERVATION_BASELINE = 60ms` was bracketed against a hand-labelled "fastest loaded observation of 81ms" that the table three lines above it contradicts (13ms, 45ms, 76ms). | The recorded table becomes DATA and both bounds are DERIVED from it, asserted PER CONTENTION CASE (`ebc0439a9`). Baseline 60ms → **44ms**. |
+
+### 1. `mod.rs` expiry sites — THE ROUND-9 RULING, HALF-APPLIED
+
+Round 9 overruled job 232 finding 1 and ruled:
+
+> The one deadline bounds how long the test WAITS FOR EVIDENCE. **It does not bound the acceptance of
+> evidence already in hand.**
+
+That ruling was right and remains the design. What round 9 got wrong was its *reach*: it was applied
+to the SUCCESS path (a stage that observes its signal as the deadline lapses still passes) and the
+FAILURE path had the identical case sitting in it, untouched. All three expiry sites read
+`if remaining.is_zero() { return <timeout> }` **before** consuming what the readers had already
+queued.
+
+**Why that is a defect and not a tolerance.** Arrival and consumption are different events. A reader
+thread `send`s a line, the child `exit`s, a reader delivers its buffer — and this thread can be
+descheduled arbitrarily long before its next `recv_timeout` / next slice. Under exactly the
+contention this whole change exists for, the evidence lands *inside* the deadline and is looked at
+*after* it. The old code called that a timeout: **a false failure against a working product**, at the
+one moment the harness is least able to afford one.
+
+**And the diagnostic would have contradicted itself.** Every failure here prints the child
+transcript. The transcript is written by the reader threads at `send` time, so it contains the line
+regardless of whether the waiting thread consumed it. A timeout message saying the marker "was not
+observed" while the transcript printed *beneath it* holds that very marker is the most damaging
+failure available to a change whose entire thesis is *no message may assert what its measurement
+cannot establish*. It would have sent the next reader looking for a product bug that is not there.
+
+**The fix, per site — each waits for NOTHING, so none can extend the deadline:**
+
+* `wait_for` → `try_match`: drains the queued lines through the awaited predicate (`try_recv` only).
+* `poll_with_progress` → `step(Duration::ZERO)`: `wait_timeout(ZERO)` is a `try_wait`, and the
+  artifact predicate is a directory count. If the step is still not done, the *unobserved* progress
+  is folded into the message, so it describes the moment expiry is declared rather than one slice
+  earlier.
+* the read-side collection → extracted as `collect_both_streams` returning a `CollectEnd` enum, which
+  drains delivered buffers before reporting a partial collection. Extracted **so it is unit-testable**
+  — the diagnostics stay at the call site, which owns the stage-(e) context they report.
+
+A timeout is now declared only when the evidence is still absent after that look.
+
+### 2. `budgets.rs` baseline — THE THIRD HAND-LABELLED "BINDING" VALUE TO DECAY
+
+The label, and what it cost:
+
+```text
+recorded table (already in the file, three lines above the constant):
+  t_boot                       quiet 11.4-29ms   load avg 30 45-66ms   load avg 116 81-132ms
+  t_ack, SIGINT test           quiet 1.4-3ms     load avg 30 13ms      load avg 116 76ms
+  t_ack, sibling (slowest/5)   quiet 38-43ms     load avg 30 97ms      load avg 116 133ms
+
+the prose beside it: "below the FASTEST observation recorded under real contention (81ms)"
+the table's loaded observations: 13ms, 45ms, 76ms, ...   -> the label was simply false
+```
+
+With a 60ms baseline the SIGINT test's own recorded load-average-30 measurements (`t_boot` floor
+45ms, `t_ack` 13ms) both scale to **exactly 1.000**: the calibration **inert at moderate load**, which
+is the *original defect this change exists to remove*, reintroduced by a sentence.
+
+**Third instance of one class.** Round 2: `MEASURED_QUIET_T_ACK = 3ms` against a recorded 1.4ms.
+Round 6: an 11.4ms `t_boot` anchor that was itself permissive. Round 10: this. Three rounds, three
+values picked by hand and written into prose, three decays against a table a few lines away. Per this
+repository's rule — *descope or close a mechanism whose defect count does not fall, rather than patch
+it again* — the number was **not** renumbered. The label is gone.
+
+**How deriving closes it.** The recorded table is now `Series`/`RecordedRun` data in `budgets.rs`, and
+`the_baseline_is_quiet_inert_and_contention_active` computes every bound from it. Two definitions had
+to be made explicit to do that:
+
+* **An intended contention case is one TEST RUN at one recorded load level, not one cell of the
+  table.** That is the unit the mechanism operates on: `calibrate` keeps the LARGEST scale over
+  everything a run measures, so what decides whether a run's deadline scales is the MAXIMUM of that
+  run's observations, never any single one. A 13ms `t_ack` does not leave its run unscaled when the
+  same run's `t_boot` measured 45-66ms.
+* **A case's binding observation is the largest recorded FLOOR across its series at that level** — the
+  floor, because a case must scale even when its measurement lands at the fast end of what was
+  recorded.
+
+Activation is then asserted **per case and named per case**, quiet-inertness **per series**, and the
+admissible window is derived and reported: `(43ms, 45ms)` — above the slowest recorded quiet
+observation (the sibling's slowest ack) and below the least-scaled contention case (the SIGINT run at
+load average 30). **44ms is the only whole millisecond in it.** Adding a measurement is now an edit to
+the table and nothing else, and a table that leaves no admissible baseline fails with that stated
+rather than silently picking a side.
+
+**A suite-wide assertion could not have caught this, and that is the structural half of the fix.** The
+old form asserted that ONE hand-picked observation scaled. Even a "some recorded case scales" form
+stays green here, because three of the four cases scale comfortably (81ms, 97ms, 133ms). Only a
+per-case assert can see one case staying inert **behind a scaling sibling** — demonstrated below.
+
+**The window is 2ms, and narrow is safe in the direction that matters.** `scale` is floored at 1 and
+the span clamped at `base`, so calibration can only ever LOOSEN a deadline: over-eager engagement
+costs a marginally later timeout on a genuine hang, while under-eager engagement is the flake this
+change exists to remove. A quiet host that happens to measure 45ms gets a deadline 2% longer.
+
+### Round-10 RED verification (committed **and isolated** plants)
+
+Both plants are **TEST-CODE ONLY** — neither finding's fix touches the product, so neither RED needs a
+product edit. Each was committed in a throwaway `git worktree add --detach`, the applied plant re-read
+from `git show HEAD:<file>`, `git status --porcelain` confirmed empty, and the worktree
+`git worktree remove --force`d afterwards. **Whether the plant applied is printed**, because an edit
+that matches nothing is indistinguishable from an assert that does not fire.
+
+#### Plant F1 — the three pre-expiry drains reverted (finding 1)
+
+```text
+PLANT APPLIED: site1 wait_for: 1 replacement(s)
+PLANT APPLIED: site2 poll_with_progress: 1 replacement(s)
+PLANT APPLIED: site3 collect_both_streams: 1 replacement(s)
+worktree /tmp/plant-f1, git status --porcelain empty, plant re-read from git show HEAD
+
+running 10 tests
+test graceful_shutdown_support::a_line_queued_before_the_deadline_is_matched_after_it_lapses ... FAILED
+test graceful_shutdown_support::a_step_completed_before_the_deadline_is_observed_after_it_lapses ... FAILED
+test graceful_shutdown_support::read_side_buffers_queued_before_the_deadline_are_collected_after_it_lapses ... FAILED
+test result: FAILED. 7 passed; 3 failed; 2 filtered out
+
+---- a_line_queued_before_the_deadline_is_matched_after_it_lapses ----
+the marker had ALREADY ARRIVED when the deadline lapsed, and the wait reported DeadlineReached
+instead of matching it. That is a false timeout on a working product; on the real path it is also a
+self-contradicting diagnostic, because the transcript the failure prints contains the very marker the
+message says was never observed. (This synthetic `ChildIo` has no reader thread, so its transcript is
+empty by construction and is deliberately not quoted here.)
+
+---- a_step_completed_before_the_deadline_is_observed_after_it_lapses ----
+the artifact existed BEFORE the deadline lapsed, and the poll reported a timeout anyway — a false
+failure on a working product: gave up after 114.37µs, when the test's ONE deadline passed while this
+stage was pending — which is what attributes the failure to this stage and to nothing else.
+stage queued-before-expiry has been running 114.53µs. ONE per-test deadline 1.0ms = clamp(base 1.0ms
+x scale 1.000, base, cap 1.0ms) ... Spent 25.20ms, remaining 0.00ns
+progress observed while polling: NONE — 0 new output lines and 0 new durable artifacts in 114.37µs
+
+---- read_side_buffers_queued_before_the_deadline_are_collected_after_it_lapses ----
+both reader buffers were delivered BEFORE the deadline lapsed, and the collection reported a timeout
+with 0/2 collected — a false failure against a child that had already exited successfully
+```
+
+One test per site, and **all three fired** — so the three drains are three independent properties, not
+one property asserted three times. (`try_match` becomes dead code under the plant, which the compiler
+duly warns about: further evidence the plant reached the code path it was aimed at.)
+
+#### Plant F2 — a baseline that leaves ONE recorded case unscaled (finding 2)
+
+```text
+PLANT APPLIED: baseline 44ms -> 45ms: 1 replacement(s)
+worktree /tmp/plant-f2, git status --porcelain empty, plant re-read from git show HEAD:
+  -pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(44);
+  +pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(45);
+
+running 10 tests
+test graceful_shutdown_support::budgets::the_baseline_is_quiet_inert_and_contention_active ... FAILED
+test result: FAILED. 9 passed; 1 failed; 2 filtered out
+
+CONTENTION CASE `sigint_in_writable_session_flushes_before_exit` @ load avg 30: its binding
+observation 45.0ms (the largest recorded floor across that run's measurements) leaves the deadline
+UNSCALED against a 45ms baseline. The calibration is inert for this case, which is the original defect
+of this change: ONE per-test deadline 180.0s = clamp(base 180.0s x scale 1.000, base, cap 360.0s),
+where scale is the LARGEST of [recorded contention case 45.000ms => scale 1.000] over quiet baseline
+45ms. ...
+```
+
+45ms is the surgical value: the quiet half stays green (43ms < 45ms) and **three of the four cases
+still scale** (81ms, 97ms, 133ms). Exactly one case goes inert, and the assert **names it** — the
+property a suite-wide "some case scaled" cannot have.
+
+#### Plant F2b — the CONTROL: the pre-round-10 file, verbatim
+
+Without this, a red in F2 shows only that *something* fails, not that the previous form was
+permissive.
+
+```text
+git checkout ebc0439a9^ -- cqlite-cli/tests/graceful_shutdown_support/budgets.rs
+re-read from git show HEAD (worktree clean):
+  159: pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(60);
+  507:     const RECORDED_QUIET_SLOWEST: Duration = Duration::from_millis(43);
+  510:     const RECORDED_LOADED_FASTEST: Duration = Duration::from_millis(81);
+
+running 1 test
+test graceful_shutdown_support::budgets::the_baseline_is_quiet_inert_and_contention_active ... ok
+test result: ok. 1 passed; 0 failed; 11 filtered out
+```
+
+**The old guard PASSED at a baseline that left the SIGINT run inert at load average 30.** That is the
+finding, reproduced against the shipped pre-round-10 source rather than argued from it.
+
+#### Product RED plants (AC3)
+
+Round 10 changed **no product code** — the branch diff contains no `cqlite-cli/src/` and no `Cargo.*`
+— so round 8's plant-A/plant-B evidence stands unchanged and re-running it would be cost without
+information. **Plant B re-run: lead-run, isolated worktree; result appended.**
+
+### THE PLANT-ON-THE-LANE INCIDENT — the method is part of what this change delivers
+
+Mid-round-10 an implementer **committed a product plant onto this lane branch**: `PLANT B:
+engine.close() behind std::future::pending()`, editing `cqlite-cli/src/main.rs` so the CLI hangs
+forever on Ctrl-C. It was caught as branch HEAD by the lead and reset away; **it never reached the
+remote and never entered a PR**. The cause was an instruction that said to apply plants to a
+*committed* tree without repeating *in a throwaway worktree*, so committing on the lane satisfied its
+letter.
+
+**The durable rule, and both halves must always be stated together: a plant must be BOTH COMMITTED AND
+ISOLATED in a throwaway `git worktree add --detach`.** Committed-ness alone is not the weaker half of
+the rule — it is *actively dangerous*, because it is precisely what turns a scratch experiment into a
+shippable commit. Round 5 established the first half after an uncommitted plant reverted by
+`git checkout --` produced a **false GREEN**; this incident establishes that the same requirement,
+without isolation, produces a **false ARTIFACT**. Two failure modes, opposite directions, one rule.
+
+Operationally, for anyone doing this next: create the worktree, commit the plant *there*, re-read the
+applied plant from `git show HEAD:<file>`, confirm `git status --porcelain` is empty, run, capture,
+then `git worktree remove --force`. Verify the lane's own diff before the final commit —
+`git diff --name-only origin/main...HEAD` — because a plant is defined by editing code you must not
+ship, so the file list is the check that catches it.
+
+### Round-10 verification
+
+* `cargo test -p cqlite-cli --features write-support --test graceful_shutdown_tests` — **12 passed, 0
+  failed**, 0.31s (2 integration + 6 deadline unit tests in `budgets.rs` + 4 harness unit tests in
+  `mod.rs`). 9 → 12: the three new tests are the per-site ones for finding 1.
+* The three committed, isolated RED plants above (F1, F2, F2b).
+* `grep -rn` sweep for what round 10 rescoped — `60ms`, `81ms`, `fastest loaded`, `fastest
+  observation`, `RECORDED_LOADED_FASTEST`, `RECORDED_QUIET_SLOWEST` — across `cqlite-cli/tests/` and
+  the whole OpenSpec change. One live stale claim found and fixed (`68a21c7af`): the round-8 "What
+  replaced it" bullet carried the round-10 correction parenthetical and then **restated the falsified
+  bracket verbatim**, so the section describing the current code still claimed a 60ms baseline
+  bracketed below a labelled 81ms. Every other surviving occurrence is either the round-10 record of
+  the defect itself or a VERBATIM quoted transcript from an earlier round's plant — those print the
+  then-current `quiet baseline 60ms` and are kept unedited, because a transcript is a record of what
+  was printed, not a claim about the code.
+
+### File sizes after round 10
+
+`graceful_shutdown_tests.rs` **363**, `graceful_shutdown_support/mod.rs` **1002**,
+`graceful_shutdown_support/budgets.rs` **842**. All three under the 1500-line test threshold; the
+change's largest file is at 67% of it.
