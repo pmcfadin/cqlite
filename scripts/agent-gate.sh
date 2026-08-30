@@ -2578,12 +2578,14 @@ apply_schemas_preflight() {
 # show, a baseline `--list`), and routing its result through `$( )` would add a
 # newline-stripping value path for no benefit (the #3148 lesson, one guard over).
 _CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
+                   # (baseline-* includes baseline-transfer-mismatch, job 242)
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
 _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
 _CS_FETCH_REF=""   # the PRIVATE per-run ref this invocation's fetch wrote (#3544 / job 227)
+_CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
 _CS_HEAD_SET=""    # the component set as COMMITTED AT HEAD (space separated)
 _CS_HEAD_ERR=""    # why HEAD's set could not be measured (empty = measured)
 _CS_ANCESTOR=unknown   # is the baseline sha an ancestor of HEAD? yes | no | unknown
@@ -3115,6 +3117,17 @@ _component_set_drop_fetch_ref() {
   _CS_FETCH_REF=""
 }
 
+# _component_set_drop_scratch_dir: remove the isolated baseline repo (#3544 / job 242). Its
+# config holds the origin URL, which may carry a credential, so this is not merely tidiness.
+_component_set_drop_scratch_dir() {
+  [ -n "$_CS_SCRATCH_DIR" ] || return 0
+  case "$_CS_SCRATCH_DIR" in
+    */cs-baseline.*) rm -rf "$_CS_SCRATCH_DIR" >/dev/null 2>&1 || true ;;
+    *) : ;;   # refuse to rm -rf a path that does not carry our own prefix
+  esac
+  _CS_SCRATCH_DIR=""
+}
+
 # _component_set_probe: the EFFECTFUL probe, wrapped so the private fetch ref is dropped on
 # every path out — including the early returns that report an unmeasurable baseline.
 _component_set_probe() {
@@ -3128,6 +3141,7 @@ _component_set_probe() {
   _CS_BOUND_HINT="$_CS_BOUND_SECS"
   _component_set_probe_inner
   _component_set_drop_fetch_ref
+  _component_set_drop_scratch_dir
   return 0
 }
 
@@ -3150,7 +3164,15 @@ _component_set_probe_inner() {
   fi
   local origin_url origin_rc
   # local-only: a config read. It NAMES a remote; it does not contact one.
-  origin_url=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null); origin_rc=$?
+  # CAPTURE THE RAW CONFIGURED URL, with rewrites neutralised (roborev job 242). `git remote
+  # get-url` APPLIES `url.*.insteadOf`, measured: with a hostile global rewrite in place this
+  # returned the rewritten value and the identity check then rejected it as non-canonical. That
+  # was safe by accident, not by design, and it left validation and the fetch looking at
+  # DIFFERENT bytes. Neutralising global/system here means the whole baseline path is
+  # rewrite-INDEPENDENT: the raw configured URL is what is validated and, below, what is
+  # fetched. A contributor who legitimately uses `insteadOf` for convenience is unaffected —
+  # the raw canonical URL is fetched directly, which is what their rewrite was aiming at.
+  origin_url=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$REPO_ROOT" remote get-url origin 2>/dev/null); origin_rc=$?
   if [ "$origin_rc" -ne 0 ]; then
     _CS_KIND=no-remote
     _CS_DETAIL="no 'origin' remote is configured in $REPO_ROOT, so the baseline is unobtainable"
@@ -3251,7 +3273,49 @@ _component_set_probe_inner() {
   #
   # The diagnostics below deliberately say "the validated origin URL" rather than interpolating
   # it: an accepted canonical URL may carry a token, and `_CS_DETAIL` reaches the SUMMARY block.
-  err=$(_component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags "$origin_url" "refs/heads/main:$csref" 2>&1); rc=$?
+  # ISOLATED FETCH, THEN A VERIFIED TRANSFER (roborev job 242). Two findings, one mechanism.
+  #
+  # (a) REDIRECT: passing the validated URL is NOT sufficient. `url.<base>.insteadOf` rewrites
+  #     apply to an explicit URL too, and every peer's `git config` write reaches this
+  #     worktree's SHARED `.git/config`. MEASURED in an isolated sandbox: with a global-config
+  #     `insteadOf` in place, `git fetch <upstream-url>` retrieved the ATTACKER's commit; with
+  #     GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM neutralised it retrieved upstream's. The
+  #     rewrite is SILENT — nothing in the output names it — and the fetched script is EXECUTED.
+  #
+  # (b) CREDENTIAL IN ARGV: an accepted canonical URL may carry a token, and a URL in a `git`
+  #     argument is readable by any process via `ps` / `/proc/<pid>/cmdline` for the call's life.
+  #
+  # HOP 1 runs in a FRESH repository whose config we wrote, with global and system config
+  # neutralised, and the URL enters that config through a shell REDIRECT — `printf` is a bash
+  # builtin, so no process is spawned and the URL never appears in any argv. Git's config
+  # sources are a CLOSED set (system, global/XDG, local, worktree, `-c`, GIT_CONFIG_* env),
+  # which is what makes this closable rather than one more layer outward: system and global are
+  # neutralised, local is ours, worktree requires `extensions.worktreeConfig` that a fresh repo
+  # does not have, we pass no `-c`, and we set the env explicitly.
+  #
+  # HOP 2 transfers the object into this repository so the ancestry check and the extraction can
+  # proceed unchanged. That hop reads THIS repo's config and so could itself be rewritten — so
+  # it is not trusted: the sha is captured in the scratch repo and RE-ASSERTED here afterwards.
+  # A redirect necessarily yields a different commit, so equality is an AFFIRMATIVE check
+  # rather than an assumption, and a mismatch is its own fail-closed kind.
+  local csdir csconf cssha lanesha rc2 err2
+  csdir=$(mktemp -d "${TMPDIR:-/tmp}/cs-baseline.XXXXXX" 2>/dev/null) || csdir=""
+  if [ -z "$csdir" ] || [ ! -d "$csdir" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="could not create an isolated scratch repository for the baseline fetch"
+    return 0
+  fi
+  _CS_SCRATCH_DIR="$csdir"
+  if ! git init -q "$csdir/repo" >/dev/null 2>&1; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="could not initialise the isolated scratch repository for the baseline fetch"
+    return 0
+  fi
+  csconf="$csdir/repo/.git/config"
+  # 0600 BEFORE the URL is written, because the URL may carry a credential.
+  chmod 600 "$csconf" 2>/dev/null || true
+  printf '[remote "csbaseline"]\n\turl = %s\n' "$origin_url" >>"$csconf" 2>/dev/null || true
+  err=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 _component_set_bounded "$_CS_BOUND_SECS" git -C "$csdir/repo" fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline" 2>&1); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -3268,7 +3332,30 @@ _component_set_probe_inner() {
   # destination is what makes the value's provenance structural.
   # local-only: resolves a ref file plus the COMMIT object the fetch above just wrote.
   # Commit objects are never filtered out of a partial clone, so no lazy fetch is possible.
+  # The baseline sha AS THE ISOLATED HOP SAW IT — the value hop 2 must reproduce.
+  cssha=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$csdir/repo" rev-parse --verify --quiet "refs/csbaseline^{commit}" 2>/dev/null || true)
+  if [ -z "$cssha" ]; then
+    _CS_KIND=fetch-failed; _CS_SHA="-"
+    _CS_DETAIL="the isolated baseline fetch reported success but its ref does not resolve to a commit"
+    return 0
+  fi
+  err2=$(_component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags "$csdir/repo" "refs/csbaseline:$csref" 2>&1); rc2=$?
+  if [ "$rc2" -ne 0 ]; then
+    _CS_KIND=fetch-failed; _CS_SHA="-"
+    _CS_DETAIL="transferring the isolated baseline into this repository exited $rc2: $(_component_set_safe_detail "$err2")"
+    return 0
+  fi
   _CS_SHA=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$csref^{commit}" 2>/dev/null || true)
+  # THE AFFIRMATIVE CHECK that makes hop 2 untrusted-but-safe: a rewrite of the scratch path
+  # would deliver a DIFFERENT commit, so requiring equality with the sha the isolated hop
+  # observed detects it. Never derive a pass from the absence of a bad signal — this compares
+  # two measured values.
+  if [ -n "$_CS_SHA" ] && [ "$_CS_SHA" != "$cssha" ]; then
+    _CS_KIND=baseline-transfer-mismatch
+    _CS_DETAIL="the isolated fetch observed baseline ${cssha} but the copy transferred into this repository is ${_CS_SHA} — the transfer was redirected (a url.*.insteadOf rewrite on the scratch path is the way this happens), and the baseline is EXECUTED, so it is not used"
+    _CS_SHA="-"
+    return 0
+  fi
   if [ -z "$_CS_SHA" ]; then
     _CS_KIND=fetch-failed; _CS_SHA="-"
     _CS_DETAIL="git fetch origin refs/heads/main succeeded but its private destination ref does not resolve to a commit"

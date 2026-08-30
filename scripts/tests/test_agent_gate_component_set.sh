@@ -1807,7 +1807,7 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=13
+DECLARED_KIND_COUNT=14   # +baseline-transfer-mismatch (job 242)
 # Scan the WHOLE gate, not just `_component_set_probe`: every assignment lives inside that
 # function today, but a scan scoped to it would MISS a kind set elsewhere later and the
 # count would silently keep agreeing with this constant. A superset scan cannot miss.
@@ -2088,6 +2088,47 @@ if [ -z "$sfx_bad" ]; then
   ok "3544-suffix-once: a repeated '.git.git' is NOT canonical, while one suffix and none still are"
 else
   bad "3544-suffix-once: misclassified: $sfx_bad"
+fi
+
+# ---------------------------------------------------------------------------
+# 7h. THE BASELINE PATH IS REWRITE-INDEPENDENT (roborev job 242). `url.<base>.insteadOf`
+#     rewrites apply to an explicit URL, AND to `git remote get-url` — so before this fix a
+#     peer's rewrite in the SHARED .git/config could redirect the fetch of a URL that had just
+#     passed validation, and the fetched script is EXECUTED. Both the capture and the fetch now
+#     run with global/system config neutralised.
+#
+#     The POSITIVE CONTROL is essential here and is the reason this case means anything: it
+#     first proves the rewrite IS effective against a plain `git fetch`. Without that, a green
+#     result would be indistinguishable from a rewrite that never applied.
+# ---------------------------------------------------------------------------
+rw_dir="$tmp/rewrite"; mkdir -p "$rw_dir"
+printf '[url "/nonexistent/evil-redirect.git"]\n\tinsteadOf = https://github.com/pmcfadin/cqlite\n' >"$rw_dir/gitconfig"
+# CONTROL: the rewrite must actually redirect a plain fetch, or this case proves nothing.
+git init -q "$rw_dir/ctl" >/dev/null 2>&1
+rw_ctl=$(GIT_CONFIG_GLOBAL="$rw_dir/gitconfig" git -C "$rw_dir/ctl" fetch --quiet --refmap= --no-tags "https://github.com/pmcfadin/cqlite.git" 'refs/heads/main:refs/x' 2>&1)
+if ! printf '%s' "$rw_ctl" | grep -q 'evil-redirect'; then
+  bad "3544-rewrite-immune: the POSITIVE CONTROL did not redirect — the rewrite is not effective in this environment, so this case cannot discriminate (control said: $(printf '%s' "$rw_ctl" | head -1 | cut -c1-80))"
+else
+  rw_out=$(GIT_CONFIG_GLOBAL="$rw_dir/gitconfig" bash "$GATE" --component-set-line full 2>/dev/null)
+  if [ "$(field KIND "$rw_out")" = ok ]; then
+    ok "3544-rewrite-immune: a hostile url.*.insteadOf redirects a plain fetch (control) yet the pre-flight is unaffected — capture and fetch both ignore rewrites"
+  else
+    bad "3544-rewrite-immune: a global insteadOf changed the pre-flight outcome (kind '$(field KIND "$rw_out")') — the baseline path is not rewrite-independent"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7i. THE URL NEVER ENTERS ANY ARGV (job 242). An accepted canonical URL may carry a token, and
+#     a URL in a `git` argument is readable via `ps` / /proc/<pid>/cmdline. SOURCE-SHAPE assert,
+#     said plainly: proving absence from argv behaviourally would mean sampling /proc against a
+#     subprocess, which is a race.
+# ---------------------------------------------------------------------------
+if grep -qE 'fetch[^|]*"\$origin_url"' "$GATE"; then
+  bad "3544-url-not-in-argv: a git fetch interpolates \$origin_url into its arguments — a credential-bearing URL would be readable via ps and /proc/<pid>/cmdline"
+elif ! grep -q 'url = %s' "$GATE"; then
+  bad "3544-url-not-in-argv: no config-file write of the URL found — the shape changed or the scan broke (fail-closed: this is not a clean result)"
+else
+  ok "3544-url-not-in-argv: the URL reaches git through a 0600 config file written by a shell builtin, never through a process argument"
 fi
 
 
