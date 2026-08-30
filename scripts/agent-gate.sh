@@ -7036,10 +7036,18 @@ EOF
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
-# delivery-telemetry: run the delivery-pipeline telemetry tool's unit tests
-# (scripts/tests/test_delivery_telemetry.py) with the stdlib unittest runner.
-# SKIP-aware like python-bindings: no python3 -> SKIP (loud, never silent PASS);
-# any test failure -> hard FAIL. No third-party deps, no datasets, no network.
+# delivery-telemetry: run the delivery-pipeline telemetry tool's unit test
+# modules (scripts/tests/test_delivery_telemetry*.py) with the stdlib unittest
+# runner. SKIP-aware like python-bindings: no python3 -> SKIP (loud, never silent
+# PASS); any test failure -> hard FAIL. No third-party deps, no datasets, no
+# network.
+#
+# DERIVED, NEVER CURATED (issue #3559): the module set is globbed from committed
+# source at run time, so a new sibling module (the #3559 timeline-replay suite
+# was the first) is EXECUTED with no gate edit. A named single file is how a test
+# module comes to exist that no lane runs — the coverage hole CLAUDE.md's feature
+# and package sections are both about. A glob that matches NOTHING is a FAIL
+# naming the derivation, never a vacuous PASS over an empty subject set.
 run_delivery_telemetry() {
   local name=delivery-telemetry
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -7054,15 +7062,32 @@ run_delivery_telemetry() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] python3 scripts/tests/test_delivery_telemetry.py"
-  if python3 "$REPO_ROOT/scripts/tests/test_delivery_telemetry.py" >"$log" 2>&1; then
-    status=PASS
-  else
+  local modules=() m
+  while IFS= read -r m; do
+    [ -n "$m" ] && modules+=("$m")
+  done < <(ls -1 "$REPO_ROOT"/scripts/tests/test_delivery_telemetry*.py 2>/dev/null | sort)
+  if [ "${#modules[@]}" -eq 0 ]; then
     status=FAIL
-    echo "--- [$name] FAILED; last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
+    echo "--- [$name] FAILED: no scripts/tests/test_delivery_telemetry*.py module found ---"
+    echo "    (the module set is DERIVED from committed source; an empty set is a"
+    echo "     failed derivation, never a pass over nothing)"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
   fi
+  status=PASS
+  : >"$log"
+  echo ">>> [$name] python3 ${#modules[@]} module(s): $(basename -a "${modules[@]}" | tr '\n' ' ')"
+  for m in "${modules[@]}"; do
+    echo "=== $m ===" >>"$log"
+    if ! python3 "$m" >>"$log" 2>&1; then
+      status=FAIL
+      echo "--- [$name] FAILED in $(basename "$m"); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+    fi
+  done
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
