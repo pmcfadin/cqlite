@@ -26,7 +26,7 @@
 //! query-semantics oracle (`test-data/query-semantics-oracle.json`), not to a
 //! physical-dump lane.
 //!
-//! # Four normalizations, all of them equalities rather than tolerances
+//! # Five normalizations, all of them equalities rather than tolerances
 //!
 //! * **`Null` folds into `Absent`, recursively.** Arrow/Parquet has ONE null;
 //!   sstabledump renders an absent cell by omitting it and a null UDT field as
@@ -43,6 +43,14 @@
 //!   32 bits, a `decimal` recovered to the EXACT unscaled-value/scale pair its
 //!   literal denotes (never an `f64`). Both are exact, and both REFUSE rather
 //!   than round; see [`normalize_declared_numbers`].
+//! * **A STRING is typed by its DECLARED type, never by its SPELLING** — the
+//!   shared parser turns any `Z`-suffixed timestamp spelling into a
+//!   `Timestamp`, which is a guess it has to make (its other lanes have no
+//!   schema) and which this harness must undo: a declared `text`/`varchar`/
+//!   `ascii` value stays `Text` however it is spelled, and only a declared
+//!   `timestamp` compares as an instant. See [`normalize_declared_strings`] —
+//!   inferring a type from a value's bytes is the no-heuristics violation of
+//!   issue #28.
 //! * **A FROZEN map's JSON object becomes a canonical map** — sstabledump writes
 //!   a frozen map as a JSON OBJECT, which `from_json` necessarily reads as a
 //!   `Tuple`; the Arrow side reads the same column back as a `Map`. See
@@ -115,10 +123,30 @@ pub fn project_golden(
                 ));
             }
 
+            // KEY components are canonicalized against their DECLARED type
+            // too. They arrive from `from_json_key`, which recognizes a
+            // timestamp SPELLING, so a `text` key column holding a
+            // timestamp-shaped string would otherwise reach the sort key as a
+            // `Timestamp` while the Arrow side holds `Text` — a false
+            // primary-key difference on every row of the table. The `cells`
+            // entries for the key columns are cloned from these values below,
+            // so normalizing here covers both.
             let mut keys: Vec<CanonicalValue> =
                 Vec::with_capacity(part.key.len() + row.clustering.len());
-            keys.extend(part.key.iter().cloned().map(fold_null));
-            keys.extend(row.clustering.iter().cloned().map(fold_null));
+            for (name, raw) in partition_key
+                .iter()
+                .zip(part.key.iter())
+                .chain(clustering.iter().zip(row.clustering.iter()))
+            {
+                let value = fold_null(raw.clone());
+                let value = match columns.iter().find(|c| c.name == **name) {
+                    Some(col) => normalize_declared_strings(value, &col.spec),
+                    // A key column the case does not declare: the check below
+                    // fails the case by name, so there is nothing to guide by.
+                    None => value,
+                };
+                keys.push(value);
+            }
 
             let mut cells: BTreeMap<String, CanonicalValue> = BTreeMap::new();
             // Key columns carry their value in the key arrays, not in `cells`.
@@ -139,10 +167,14 @@ pub fn project_golden(
                     continue;
                 }
                 let value = project_column(&where_, row, col)?;
-                // Shape first (a frozen map's JSON object becomes a canonical
-                // map), then numbers — `normalize_declared_numbers` recurses
-                // into a `Map` but not into a `Tuple` standing in for one.
+                // Shape FIRST (a frozen map's JSON object becomes a canonical
+                // map), then strings, then numbers. The order is load-bearing in
+                // both steps: `normalize_declared_numbers` recurses into a `Map`
+                // but not into a `Tuple` standing in for one, and a frozen map's
+                // KEYS only become reachable by
+                // `normalize_declared_strings` once the object is a `Map`.
                 let value = coerce_declared_shape(value, &col.spec);
+                let value = normalize_declared_strings(value, &col.spec);
                 let value = normalize_declared_numbers(value, &col.spec)
                     .map_err(|e| format!("{where_}: column '{}': {e}", col.name))?;
                 cells.insert(col.name.clone(), value);
@@ -482,6 +514,101 @@ pub fn fold_null(v: CanonicalValue) -> CanonicalValue {
             CanonicalValue::Tuple(fs.into_iter().map(|(k, v)| (k, fold_null(v))).collect())
         }
         other => other,
+    }
+}
+
+/// Restore a golden STRING value to the representation its DECLARED CQL type
+/// implies, recursively.
+///
+/// # The defect this closes (no-heuristics, #28)
+///
+/// The shared JSON parser (`canonical_jsonl::CanonicalValue::from_json`) has one
+/// value-level type inference in it: a quoted string that SPELLS a
+/// `Z`-suffixed timestamp becomes `CanonicalValue::Timestamp`. It has to guess,
+/// because it is used by lanes that have no schema — sstabledump renders a
+/// `timestamp` as a quoted string, so without the declared type the spelling is
+/// the only signal there is.
+///
+/// This harness is not one of those lanes: every column's DECLARED CQL type is
+/// right here (`cql_type.rs`, copied from the committed Cassandra schema). So the
+/// guess is both unnecessary and WRONG in one direction — a `text`/`varchar`/
+/// `ascii` value that happens to spell a timestamp (`"2025-10-06 01:12:07.265Z"`
+/// is legal text) became a `Timestamp` on the golden side while the Arrow `Utf8`
+/// side stayed `Text`, and the two can never compare equal. That is a FALSE
+/// parity failure produced by inferring a type from a value's shape, which is
+/// exactly what the no-heuristics mandate forbids.
+///
+/// The rule, therefore: a golden value is a `Timestamp` if and only if its
+/// declared type IS `timestamp`. Every other declared scalar restores the
+/// original string — `text`/`varchar`/`ascii`, and equally `blob`/`uuid`/
+/// `timeuuid`/`date`/`time`/`inet`/`duration`, all of which the Arrow side
+/// renders as `Text` (`arrow_rows`). Nothing is weakened: the restored value is
+/// the string the golden literally carried (`Timestamp.raw` is never rewritten),
+/// so a genuine text difference still differs, and a declared `timestamp`
+/// keeps comparing as an INSTANT (`.06Z` == `.060000Z`).
+///
+/// # Where it has to reach
+///
+/// Everywhere a string can sit, not just a top-level scalar: a collection
+/// ELEMENT (`set<text>`/`list<text>`), a map KEY and a map VALUE, a tuple
+/// member, and a primary-KEY component (which arrives through
+/// `from_json_key`, whose fallback is the same `from_json`). Hence the recursion
+/// below and the key-component pass in [`project_golden`].
+///
+/// # The one position it cannot reach, and why that is not a hidden guess
+///
+/// A UDT's FIELD types are not known to the harness (`CqlTypeSpec::Udt` is a
+/// name only — a frozen UDT arrives as one JSON object whose values sstabledump
+/// has already typed), so a timestamp-shaped string in a `text` UDT field is
+/// left as the parser produced it. That is a REFUSAL to guess, not a guess: the
+/// declared type genuinely is not available, and if such a field ever appears it
+/// shows up as a loud value difference rather than as a silent pass. (The
+/// corpus's UDT columns sit behind the #3556 whole-case gap today.)
+pub fn normalize_declared_strings(v: CanonicalValue, spec: &CqlTypeSpec) -> CanonicalValue {
+    match (v, spec) {
+        (CanonicalValue::Timestamp { micros, raw }, CqlTypeSpec::Scalar(name)) => {
+            if name == "timestamp" {
+                CanonicalValue::Timestamp { micros, raw }
+            } else {
+                CanonicalValue::Text(raw)
+            }
+        }
+        (CanonicalValue::List(xs), CqlTypeSpec::Seq { elem, .. }) => CanonicalValue::List(
+            xs.into_iter()
+                .map(|x| normalize_declared_strings(x, elem))
+                .collect(),
+        ),
+        (CanonicalValue::Set(xs), CqlTypeSpec::Seq { elem, .. }) => CanonicalValue::Set(
+            xs.into_iter()
+                .map(|x| normalize_declared_strings(x, elem))
+                .collect(),
+        ),
+        // Both halves: a map KEY is a value too, and a `map<text,int>` key is
+        // precisely where a stringified timestamp spelling lands.
+        (CanonicalValue::Map(kvs), CqlTypeSpec::Map { key, value }) => CanonicalValue::Map(
+            kvs.into_iter()
+                .map(|(k, v)| {
+                    (
+                        normalize_declared_strings(k, key),
+                        normalize_declared_strings(v, value),
+                    )
+                })
+                .collect(),
+        ),
+        // A CQL tuple arrives as a positional JSON array, matched member-wise —
+        // the same shape `normalize_declared_numbers` uses.
+        (CanonicalValue::List(xs), CqlTypeSpec::Tuple(specs)) if xs.len() == specs.len() => {
+            CanonicalValue::List(
+                xs.into_iter()
+                    .zip(specs.iter())
+                    .map(|(x, s)| normalize_declared_strings(x, s))
+                    .collect(),
+            )
+        }
+        // Anything else — a `Timestamp` under a collection/UDT declaration (a
+        // shape disagreement the value comparison must report), or a non-string
+        // variant — is left EXACTLY as it was.
+        (other, _) => other,
     }
 }
 

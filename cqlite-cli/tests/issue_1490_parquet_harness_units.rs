@@ -1058,3 +1058,227 @@ fn refused_value_representations_are_keyed_on_the_declared_type() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Declared-type-guided STRING typing (#28 no-heuristics; #1490 round 5)
+//
+// The shared JSON parser types a value's string by its SPELLING: any
+// `Z`-suffixed timestamp becomes a `Timestamp`. It must, because its other
+// lanes have no schema — but THIS harness declares every column's CQL type, so
+// a `text` column holding a legal timestamp-shaped string was turned into a
+// `Timestamp` on the golden side while the Arrow `Utf8` side stayed `Text`,
+// which can only compare unequal. That is a type inferred from a value's bytes,
+// and it produces a FALSE parity failure.
+//
+// The controls below drive the REAL golden projection (`project_golden`, via the
+// real JSONL parser) once per POSITION the finding names — a top-level scalar, a
+// collection element, a map key, and a primary-key component — because a
+// recursive fix verified only at the top level is not verified. Each carries its
+// positive control: a declared `timestamp` in the same document still compares
+// as an INSTANT.
+// ---------------------------------------------------------------------------
+
+/// A legal `text` value that SPELLS an sstabledump timestamp.
+const TS_SPELLING: &str = "2025-10-06 01:12:07.265Z";
+/// The same instant in the ISO-8601 spelling, for the `timestamp` control.
+const TS_SPELLING_ISO: &str = "2025-10-06T01:12:07.265000Z";
+
+/// The declared columns of the synthetic case: a timestamp-shaped `text`
+/// PARTITION KEY, a `text` scalar, a `set<text>`, a `map<text,text>`, a
+/// `frozen<map<text,text>>` — and one real `timestamp` column as the control
+/// that the guidance types BY the declaration rather than suppressing the
+/// variant everywhere.
+fn timestamp_spelling_columns() -> Vec<parquet_parity::cql_type::ColumnType> {
+    [
+        ("id", "text"),
+        ("note", "text"),
+        ("when", "timestamp"),
+        ("tags", "set<text>"),
+        ("m", "map<text,text>"),
+        ("fm", "frozen<map<text,text>>"),
+    ]
+    .iter()
+    .map(|(n, t)| parquet_parity::cql_type::parse_column(n, t, &[]).expect("declared type parses"))
+    .collect()
+}
+
+/// Project ONE synthetic golden row carrying `TS_SPELLING` in every position the
+/// round-5 finding names, through the real parser and the real projection.
+fn project_timestamp_spelling_row() -> parquet_parity::golden_rows::GoldenRow {
+    use parquet_parity::canonical_jsonl::{parse_document_str_with_keys, KeySpec};
+
+    let columns = timestamp_spelling_columns();
+    // sstabledump's own shape (see any committed `*-Data.db.jsonl`): a
+    // stringified key array, one cell per non-frozen collection element with a
+    // `path`, and a frozen map as ONE JSON object.
+    let doc_json = format!(
+        r#"{{"partition":{{"key":["{ts}"],"position":0}},"rows":[{{"type":"row","position":0,
+           "liveness_info":{{"tstamp":"2025-10-06T01:12:07.265000Z"}},"cells":[
+             {{"name":"note","value":"{ts}"}},
+             {{"name":"when","value":"{iso}"}},
+             {{"name":"tags","path":["{ts}"]}},
+             {{"name":"m","path":["{ts}"],"value":"{ts}"}},
+             {{"name":"fm","value":{{"{ts}":"{ts}"}}}}
+           ]}}]}}"#,
+        ts = TS_SPELLING,
+        iso = TS_SPELLING_ISO,
+    );
+    let doc = parse_document_str_with_keys(
+        &doc_json.replace('\n', " "),
+        std::path::Path::new("<synthetic timestamp-spelling golden>"),
+        true,
+        &KeySpec::from_cql_types(&["text"], &[]),
+    )
+    .expect("the synthetic golden must parse");
+
+    let mut rows = parquet_parity::golden_rows::project_golden(&doc, &columns, &["id"], &[])
+        .expect("the synthetic golden must project");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the synthetic golden declares exactly one row"
+    );
+    rows.remove(0)
+}
+
+/// What the Arrow `Utf8` side of a `text` column holds for the same value.
+fn exported_text(s: &str) -> parquet_parity::canonical_jsonl::CanonicalValue {
+    parquet_parity::canonical_jsonl::CanonicalValue::Text(s.to_string())
+}
+
+/// POSITION 1 — a top-level `text` scalar. And the positive control in the same
+/// document: the declared `timestamp` column is STILL a `Timestamp`, comparing
+/// as an instant across the two spellings, so the fix types by the declaration
+/// rather than deleting the variant.
+#[test]
+fn declared_text_keeps_a_timestamp_spelling_as_text_in_a_scalar_column() {
+    use parquet_parity::canonical_jsonl::{parse_timestamp_micros, CanonicalValue};
+
+    let row = project_timestamp_spelling_row();
+    assert_eq!(
+        row.cells.get("note"),
+        Some(&exported_text(TS_SPELLING)),
+        "a declared `text` value must stay Text however it is spelled — typing it \
+         from its bytes is the no-heuristics violation of #28"
+    );
+
+    let when = row.cells.get("when").expect("the control column projects");
+    assert_eq!(
+        when,
+        &CanonicalValue::Timestamp {
+            micros: parse_timestamp_micros(TS_SPELLING).expect("the spelling is a timestamp"),
+            // `raw` is diagnostic and NOT compared, so the ISO spelling the
+            // golden carries still equals the space-separated one.
+            raw: TS_SPELLING.to_string(),
+        },
+        "a declared `timestamp` must still compare as an INSTANT"
+    );
+}
+
+/// POSITION 2 — an element of a non-frozen `set<text>`, whose element arrives as
+/// a STRINGIFIED cell path.
+#[test]
+fn declared_text_keeps_a_timestamp_spelling_as_text_in_a_collection_element() {
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+
+    let row = project_timestamp_spelling_row();
+    assert_eq!(
+        row.cells.get("tags"),
+        // A multicell set projects to an ordered `List` on both sides.
+        Some(&CanonicalValue::List(vec![exported_text(TS_SPELLING)])),
+        "a `set<text>` ELEMENT must be typed by the declared element type, not by \
+         its spelling — the recursion has to reach it"
+    );
+}
+
+/// POSITION 3 — a map KEY, in BOTH map shapes: the non-frozen map's stringified
+/// cell path and the frozen map's JSON OBJECT key.
+#[test]
+fn declared_text_keeps_a_timestamp_spelling_as_text_in_a_map_key() {
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+
+    let row = project_timestamp_spelling_row();
+    let expected = CanonicalValue::Map(vec![(
+        exported_text(TS_SPELLING),
+        exported_text(TS_SPELLING),
+    )]);
+    assert_eq!(
+        row.cells.get("m"),
+        Some(&expected),
+        "a non-frozen `map<text,text>` KEY and VALUE must both be typed by the \
+         declared key/value types"
+    );
+    assert_eq!(
+        row.cells.get("fm"),
+        Some(&expected),
+        "a FROZEN map's JSON object KEY must be too — it only becomes reachable \
+         after the object is reshaped into a Map, so the ORDER of the two \
+         normalizations is load-bearing"
+    );
+}
+
+/// POSITION 4 — a primary-KEY component. This one reaches the harness's SORT
+/// KEY as well as the cell map, so getting it wrong reports "primary key
+/// differs" on every row of the table rather than one cell.
+#[test]
+fn declared_text_keeps_a_timestamp_spelling_as_text_in_a_key_column() {
+    use parquet_parity::render_value;
+
+    let row = project_timestamp_spelling_row();
+    assert_eq!(
+        row.keys,
+        vec![exported_text(TS_SPELLING)],
+        "a declared `text` PARTITION KEY component must stay Text"
+    );
+    assert_eq!(
+        row.cells.get("id"),
+        Some(&exported_text(TS_SPELLING)),
+        "and the key column's cell entry must agree with its key component"
+    );
+    // The sort key is what the row MATCHING uses, and it renders a Timestamp as
+    // `ts:<micros>` and a Text as `text:"…"` — so a mistyped key column could
+    // never match its exported row.
+    assert_eq!(
+        render_value(&row.keys[0]),
+        render_value(&exported_text(TS_SPELLING))
+    );
+}
+
+/// SENSITIVITY control for the whole normalization: it must erase only the
+/// TYPE GUESS, never a difference in the VALUE. Two different timestamp-shaped
+/// texts stay different, and a `timestamp` column still notices a different
+/// instant.
+#[test]
+fn declared_type_string_typing_does_not_erase_a_real_difference() {
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::golden_rows::normalize_declared_strings;
+
+    let as_parsed = |s: &str| CanonicalValue::from_json(&serde_json::Value::String(s.to_string()));
+    let text = parse_column("c", "text", &[]).expect("parses");
+    let ts = parse_column("c", "timestamp", &[]).expect("parses");
+    let other = "2025-10-06 01:12:07.266Z";
+
+    assert_ne!(
+        normalize_declared_strings(as_parsed(TS_SPELLING), &text.spec),
+        normalize_declared_strings(as_parsed(other), &text.spec),
+        "two different timestamp-shaped TEXT values must still differ"
+    );
+    assert_ne!(
+        normalize_declared_strings(as_parsed(TS_SPELLING), &ts.spec),
+        normalize_declared_strings(as_parsed(other), &ts.spec),
+        "two different INSTANTS must still differ"
+    );
+    // Every other string-rendered scalar the Arrow side holds as `Text` is
+    // restored the same way — a `blob`/`uuid`/`date`/`inet` value could never
+    // legitimately be a Timestamp.
+    for declared in ["varchar", "ascii", "blob", "uuid", "date", "time", "inet"] {
+        let col = parse_column("c", declared, &[]).expect("parses");
+        assert_eq!(
+            normalize_declared_strings(as_parsed(TS_SPELLING), &col.spec),
+            exported_text(TS_SPELLING),
+            "'{declared}' is rendered as Text by the Arrow side, so the golden must \
+             not hold a Timestamp for it"
+        );
+    }
+}
