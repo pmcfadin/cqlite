@@ -344,10 +344,11 @@ pub enum CorpusMiss {
 ///
 /// So when the variable is SET and nonblank this lane requires a corpus: the value
 /// must be a directory whose `sstables/` subtree is a directory too, and anything
-/// else is [`CorpusMiss::Unusable`] naming the root and what was wrong with it.
-/// Nothing weaker is available to substitute for it — the checkout candidate is
-/// derived from a compile-time anchor, so an invalid env root cannot be "corrected"
-/// into a valid one at run time.
+/// else is [`CorpusMiss::Unusable`] naming the root and what was wrong with it. The
+/// checkout candidate is still searched, so a COMMITTED case is unaffected either
+/// way — it resolves from `git ls-files` and reads no environment at all — but a
+/// corpus-only case may no longer report an absence its configured root never
+/// established.
 ///
 /// The three operator situations a corpus miss can come from are told apart in the
 /// message, because they call for three different actions ([`EnvCorpus`]):
@@ -359,12 +360,12 @@ pub enum CorpusMiss {
 ///   * **valid corpus, table absent** — the value is a corpus and this table is not
 ///     in it. A legal skip.
 ///
-/// Two boundaries stay where they were. A nonexistent path is still an ANSWER, but it
-/// is no longer waved through: the set/nonblank test tells it from an unset variable,
-/// so "nothing here can tell them apart" — the old reason for skipping — was simply
-/// untrue. And this is still a per-CASE check of ONE variable, not a whole-corpus
-/// preflight: whether the corpus carries the tables the run needs is the gate's
-/// `missing-fixtures` component (#2078) and #3104's territory.
+/// One boundary MOVES and one stays. A nonexistent path is still an ANSWER, but it is
+/// no longer waved through: the set/nonblank test tells it from an unset variable, so
+/// "nothing here can tell them apart" — the old reason for skipping it — was simply
+/// untrue. What stays is the SCOPE: this is a per-CASE check of ONE variable, not a
+/// whole-corpus preflight, so whether a valid corpus carries the tables a run needs
+/// remains the gate's `missing-fixtures` component (#2078) and #3104's territory.
 pub fn corpus_fixture_dir(
     keyspace: &str,
     table: &str,
@@ -1166,13 +1167,12 @@ mod tests {
             Err(CorpusMiss::Unusable(_)) => {}
             other => panic!("an unusable configured root must fail: {other:?}"),
         }
-        let fixture = corpus_fixture_from(&[good.clone()], "ks", "t", tmp.path()).unwrap_or_else(
-            |e| match e {
+        let fixture = corpus_fixture_from(std::slice::from_ref(&good), "ks", "t", tmp.path())
+            .unwrap_or_else(|e| match e {
                 CorpusMiss::Absent(why) | CorpusMiss::Unusable(why) => {
                     panic!("the candidate walk on its own resolves: {why}")
                 }
-            },
-        );
+            });
         assert_eq!(fixture.dir, good.join("ks").join("t-abc"));
     }
 
