@@ -300,19 +300,38 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
 | observation | verdict | exit |
 |---|---|---|
 | terminal `RESULT:` in a complete, run-id-matching block | `COMPLETE` | 0 |
-| terminal `RESULT:`, unbound read, superseded by a **fresh** foreign beat | `UNKNOWN` | 4 |
-| terminal `RESULT:`, unbound read, foreign beat **provably stale** | `COMPLETE` | 0 |
+| terminal `RESULT:`, unbound read, heartbeat names a **different** run | `UNKNOWN` | 4 |
 | beat present, run-id matches, **fresh** | `RUNNING` | 2 |
 | beat present, run-id matches, **stale** | `STALLED` | 3 |
 | anything unmeasurable, with a named cause | `UNKNOWN` | 4 |
 
-The two middle rows are the job-206 correction and they are easy to misread as redundant. A
-heartbeat OUTLIVES the run that wrote it, so an unbound reader finding a foreign `run-id` beside a
-terminal verdict cannot assume the beat is NEWER: a run that terminated before its first beat leaves
-its own summary next to the previous run's leftover. Only a beat that is **affirmatively fresh**
-supersedes; one that is **provably stale** is a leftover and says nothing; and one whose freshness
-cannot be established stays `UNKNOWN`, because a false `COMPLETE` certifies a gate that never
-finished while a false `UNKNOWN` merely withholds a verdict.
+**There is deliberately NO AGE BRANCH in that row, and the two-round detour that established it is
+the most useful thing in this section.** A heartbeat outlives the run that wrote it, so an unbound
+reader finding a foreign `run-id` beside a terminal verdict cannot assume the beat is newer. Job 206
+was right that the old diagnostic overclaimed — it called any foreign beat "a live heartbeat … a
+NEWER run is starting", asserting a liveness it never measured. The fix attempted for that added a
+permissive branch: a **provably stale** foreign beat was ignored as an older leftover, reporting the
+summary's verdict.
+
+Job 208 (High) showed that is unsound, because **staleness establishes no ordering**. These two
+shapes are indistinguishable:
+
+| | summary | heartbeat | truth |
+|---|---|---|---|
+| a run that refused before its first beat | `B` terminal | `A` stale | beat is OLDER |
+| a run that beat, then **died** | `A` terminal | `B` stale | beat is NEWER |
+
+In the second, ignoring the beat reports A's old `PASS` as the current run's outcome — a false
+`COMPLETE`, certifying a gate that never finished. "Stale" was being read as "predates the summary",
+which is this file's own rule broken in its own favour: a positive verdict derived from a reading
+that does not support it. So every differing unbound `run-id` gets one verdict, and `--run-id` is how
+you ask a question that HAS an answer. An ordering field could rescue the permissive branch, but that
+is a new artifact contract, not a bug fix.
+
+**Worth noting where this claim lived:** the fresh/stale split was documented in this table for about
+twenty minutes before being removed. Three of this change's false claims landed in PROSE rather than
+code — code is reviewed against reality, prose against plausibility — which is why each row above was
+re-verified by running the reader against a constructed artifact rather than by reading the source.
 
 **`STALLED` is not "the gate is dead".** It says exactly what two local files can establish:
 *this run has published no liveness for N seconds.*

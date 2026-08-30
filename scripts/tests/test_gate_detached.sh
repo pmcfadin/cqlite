@@ -97,6 +97,27 @@ if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet 
   HAVE_SYSTEMD=yes
 fi
 
+# THE LAUNCHER HAS A SECOND PRECONDITION NOW (roborev job 208): `Linger=yes`. `HAVE_SYSTEMD` asks
+# only whether a user manager works, so on a host with a manager but lingering DISABLED every
+# launch-dependent case would run and fail against the linger refusal — reporting a broken launcher
+# when the host is simply unprepared, and telling us nothing about the behaviour each case is about.
+#
+# So if lingering is not affirmatively enabled, put a `loginctl` stub answering `yes` on PATH for the
+# whole suite. That is not hiding the precondition: 4b.115-4b.118 test it explicitly with their own
+# stubs (no / no-answer / cannot-answer / yes), which is a STRONGER test than this host's
+# configuration would give, because it exercises all four states on any box.
+if [ "$HAVE_SYSTEMD" = yes ] \
+   && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" != yes ]; then
+  LINGER_STUB="$TMP/linger-yes"
+  mkdir -p "$LINGER_STUB"
+  printf '#!/usr/bin/env bash\nprintf "yes\\n"\n' > "$LINGER_STUB/loginctl"
+  chmod +x "$LINGER_STUB/loginctl"
+  PATH="$LINGER_STUB:$PATH"; export PATH
+  echo "NOTE: lingering is not enabled on this host; a loginctl stub answering 'yes' is on PATH so"
+  echo "      launch-dependent cases test the launcher rather than the host. 4b.115-4b.118 test the"
+  echo "      precondition itself, with their own stubs."
+fi
+
 echo "=== section 1: usage ==="
 out=$(bash "$LAUNCHER" --help 2>&1); rc=$?
 [ "$rc" = 0 ] && printf '%s' "$out" | grep -q 'gate-detached' \

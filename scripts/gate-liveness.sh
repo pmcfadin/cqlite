@@ -548,46 +548,32 @@ case "$RESULT_TOKEN" in
         _hb_peek_text=$(_slurp "$_hb_peek")
         _hb_rid_peek=$(_field "$_hb_peek_text" run-id)
         if [ -n "$_hb_rid_peek" ] && [ "$_hb_rid_peek" != "$SUM_RUN_ID" ]; then
-          # A DIFFERING run-id IS NOT EVIDENCE OF A NEWER RUN (roborev job 206, Medium). Heartbeat
-          # files deliberately outlive the runs that wrote them, so a foreign beat can just as easily
-          # be an OLDER leftover — a run that terminated before publishing its first beat (a
-          # preflight refusal) leaves its own terminal summary beside the PREVIOUS run's stale beat.
-          # The earlier form read any readable foreign run-id as "a NEWER run is starting", so a
-          # perfectly valid terminal verdict reported UNKNOWN indefinitely, and the diagnostic said
-          # "a live heartbeat" about a beat whose liveness was never established — backwards about
-          # which run was newer, and asserting a liveness it had not measured.
+          # A DIFFERING unbound run-id is UNKNOWN, FULL STOP — and the road here is worth recording,
+          # because the middle version was WORSE than either end.
           #
-          # Three cases, and only the first may supersede:
-          #   valid + AFFIRMATIVELY FRESH   -> a newer run really is starting: UNKNOWN
-          #   valid + PROVABLY STALE        -> an older leftover: ignore it, report the verdict
-          #   invalid / freshness unmeasurable -> cannot tell newer-live from older-stale: UNKNOWN
-          # The third stays conservative on purpose. The two errors are not symmetric: a false
-          # COMPLETE certifies a gate that never finished, while a false UNKNOWN merely withholds a
-          # verdict. Only a case we can PROVE is stale earns the permissive answer.
-          _sup_state=unmeasurable
-          if _beat_valid "$_hb_peek_text"; then
-            _sup_host=$(_field "$_hb_peek_text" host)
-            _sup_myhost=$(uname -n 2>/dev/null || echo unknown)
-            if [ -n "$_sup_host" ] && [ "$_sup_host" = "$_sup_myhost" ]; then
-              _sup_iv=$(_field "$_hb_peek_text" interval); _sup_iv=$((10#${_sup_iv:-0}))
-              _sup_ep=$(_field "$_hb_peek_text" beat-epoch); _sup_ep=$((10#${_sup_ep:-0}))
-              _sup_win=$(( _sup_iv * 3 )); [ "$_sup_win" -ge 90 ] || _sup_win=90
-              _sup_age=$(( $(date +%s) - _sup_ep ))
-              if [ "$_sup_age" -ge 0 ] && [ "$_sup_age" -le "$_sup_win" ]; then
-                _sup_state=fresh
-              elif [ "$_sup_age" -gt "$_sup_win" ]; then
-                _sup_state=stale
-              fi
-            fi
-          fi
-          case "$_sup_state" in
-            fresh)
-              verdict UNKNOWN 4 "summary-superseded; the summary carries a terminal verdict for run '$SUM_RUN_ID' but a FRESH heartbeat (${_sup_age}s old, window ${_sup_win}s) names run '$_hb_rid_peek' — a NEWER run is starting on this path and publishes its beat before replacing the summary, so this verdict is the PREVIOUS run's. Pass --run-id to say which run you mean." ;;
-            unmeasurable)
-              verdict UNKNOWN 4 "summary-superseded-unmeasurable; the summary carries a terminal verdict for run '$SUM_RUN_ID' and the heartbeat names a DIFFERENT run '$_hb_rid_peek', but that beat is malformed or its freshness cannot be established in a proven shared clock domain — so it cannot be told apart from a newer run starting now. Refusing to report this verdict as current. Pass --run-id to say which run you mean." ;;
-            stale)
-              : ;;  # PROVABLY an older leftover: it says nothing about this terminal verdict
-          esac
+          # Job 206 was right that this arm's diagnostic was wrong: it called any readable foreign
+          # beat "a live heartbeat … a NEWER run is starting", asserting a liveness it never measured
+          # and an ordering it could not know. Heartbeats outlive their runs, so the foreign beat may
+          # be an older leftover.
+          #
+          # The fix attempted for that added a permissive branch — a PROVABLY STALE foreign beat was
+          # treated as an older leftover and ignored, reporting the summary's verdict. Job 208 (High)
+          # showed that is unsound: **staleness establishes no ordering.** If run A completed, run B
+          # published its early beat and then DIED before replacing A's summary, B's beat is stale
+          # and NEWER than the summary — and ignoring it reports A's old PASS as the current run's
+          # outcome. A false COMPLETE certifies a gate that never finished. The two shapes,
+          #     summary=B(terminal) + beat=A(stale)   [beat older]
+          #     summary=A(terminal) + beat=B(stale)   [beat newer]
+          # are INDISTINGUISHABLE by age, and "stale" was being read as "predates the summary".
+          # That is this file's own rule broken in its own favour: a positive verdict derived from a
+          # reading that does not support it.
+          #
+          # So there is no age branch. Any differing unbound run-id is UNKNOWN, the honest answer
+          # from two files that describe different runs, and `--run-id` is the way to ask a question
+          # that HAS an answer. Job 206's real defect — the overclaiming diagnostic — is fixed by
+          # saying what is actually known and nothing more. An ordering field could rescue the
+          # permissive branch, but that is a new artifact contract, not a bug fix.
+          verdict UNKNOWN 4 "summary-foreign-run; the summary carries a terminal verdict for run '$SUM_RUN_ID' while the heartbeat beside it names run '$_hb_rid_peek'. These two files describe DIFFERENT runs, and nothing in either says which is current: a heartbeat outlives the run that wrote it, so the foreign beat may be a newer run that has not replaced the summary yet OR an older leftover, and its age cannot tell those apart. Refusing to report one run's verdict as another's. Pass --run-id to name the run you mean."
         fi
       fi
     fi

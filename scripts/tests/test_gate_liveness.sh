@@ -1118,8 +1118,11 @@ expect_reader "11k.4 an absurd beat-epoch => UNKNOWN (out of range)" UNKNOWN 4 "
 # run's PASS as the completion of the run starting right now.
 mk_summary "$TMP/sup.txt" old-run "PASS"
 mk_beat "$TMP/sup.txt.heartbeat" new-run 5
-expect_reader "11k.5 terminal summary + beat naming a NEWER run => UNKNOWN (superseded)" \
-  UNKNOWN 4 "summary-superseded" -- "$TMP/sup.txt"
+# Retitled and re-pointed (job 208): the cause is `summary-foreign-run`, and the old title claimed
+# the beat named a NEWER run — which is exactly the ordering the reader cannot establish. The
+# VERDICT this case was written for (job 192) is unchanged; only the unprovable claim is gone.
+expect_reader "11k.5 terminal summary + beat naming a DIFFERENT run => UNKNOWN" \
+  UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
 # CONTROL: the same run in both artifacts is the ordinary finished-gate case.
 mk_summary "$TMP/sup2.txt" same-run "PASS"
 mk_beat "$TMP/sup2.txt.heartbeat" same-run 5
@@ -1389,46 +1392,60 @@ else
   fi
 fi
 
-echo "=== section 11n: a FOREIGN beat only supersedes a terminal verdict if it is LIVE (job 206) ==="
-# Heartbeat files deliberately outlive the runs that wrote them, so a foreign run-id is NOT evidence
-# of a NEWER run — it can equally be an OLDER leftover. A run that terminates before its first beat
-# (a preflight refusal) leaves its own terminal summary beside the previous run's stale beat. The
-# earlier reader called any readable foreign run-id "a live heartbeat … a NEWER run is starting":
-# backwards about which run was newer, and asserting a liveness it never measured.
+echo "=== section 11n: differing unbound run-ids are UNKNOWN — age proves no ordering (job 208) ==="
+# THIS SECTION PREVIOUSLY ASSERTED A BUG I INTRODUCED. Written for job 206, 11n.1 required a
+# PROVABLY STALE foreign beat to be ignored so the summary's verdict could be reported. Job 208
+# (High) showed that is unsound, because **staleness establishes no ordering**:
+#
+#   summary=B(terminal) + beat=A(stale)   -- beat OLDER than summary (a run that never beat)
+#   summary=A(terminal) + beat=B(stale)   -- beat NEWER than summary (a run that beat, then DIED)
+#
+# Both present identically. Ignoring the beat in the second case reports A's old PASS as the current
+# run's outcome: a false COMPLETE, certifying a gate that never finished. So there is no age branch,
+# and these cases now pin its ABSENCE. Job 206's real defect — a diagnostic claiming the foreign beat
+# was "live" and "NEWER" — is fixed by saying only what is known.
 mk_summary "$TMP/sup.txt" run-NEW "PASS"
 
-# 1. PROVABLY STALE foreign beat: an older leftover. It says nothing about this verdict.
+# Beat OLDER than the summary (job 206's shape).
 mk_beat "$TMP/sup.txt.heartbeat" run-OLD 4000 20
-expect_reader "11n.1 terminal verdict + PROVABLY STALE foreign beat => COMPLETE (leftover ignored)" \
-  COMPLETE 0 "terminal verdict" -- "$TMP/sup.txt"
+expect_reader "11n.1 terminal verdict + STALE foreign beat => UNKNOWN (age proves no ordering)" \
+  UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
 
-# 2. FRESH foreign beat: a newer run really is starting, and its beat precedes its summary. This is
-#    job 192's case and must still be refused.
+# Beat NEWER than the summary and stale because that run DIED (job 208's shape). Same verdict, and
+# that identity is the point: the reader cannot tell these apart, so it must not try.
+mk_beat "$TMP/sup.txt.heartbeat" run-DIED 4000 20
+expect_reader "11n.2 the beat-newer-and-died shape gets the SAME verdict (indistinguishable)" \
+  UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
+
+# A FRESH foreign beat: still UNKNOWN. One verdict for every differing run-id, no age branch at all.
 mk_beat "$TMP/sup.txt.heartbeat" run-NEWER 5 20
-expect_reader "11n.2 terminal verdict + FRESH foreign beat => UNKNOWN (a newer run is starting)" \
-  UNKNOWN 4 "summary-superseded" -- "$TMP/sup.txt"
+expect_reader "11n.3 terminal verdict + FRESH foreign beat => UNKNOWN" \
+  UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
 
-# 3. MALFORMED foreign beat: cannot be told apart from a newer run starting now. The two errors are
-#    not symmetric — a false COMPLETE certifies a gate that never finished — so this stays UNKNOWN.
+# Malformed and foreign-host beats reach the same place, so no shape leaks into a COMPLETE.
 { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-JUNK"
   echo "this is not a beat"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/sup.txt.heartbeat"
-expect_reader "11n.3 terminal verdict + MALFORMED foreign beat => UNKNOWN, not COMPLETE" \
-  UNKNOWN 4 "summary-superseded-unmeasurable" -- "$TMP/sup.txt"
+expect_reader "11n.4 terminal verdict + MALFORMED foreign beat => UNKNOWN" \
+  UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
 
-# 4. FOREIGN HOST: freshness cannot be established without a proven shared clock domain, so the beat
-#    cannot be classified stale either. Conservative: refuse rather than certify.
-{ echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-ELSEWHERE"; echo "gate-pid: 4242"
-  echo "parent-check: starttime"; echo "host: some-other-box"; echo "interval: 20"
-  echo "beat-seq: 7"; echo "beat-epoch: $(date +%s)"
-  echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/sup.txt.heartbeat"
-expect_reader "11n.4 terminal verdict + foreign beat on ANOTHER host => UNKNOWN (clock unproven)" \
-  UNKNOWN 4 "summary-superseded-unmeasurable" -- "$TMP/sup.txt"
+# The diagnostic must not claim what it cannot know: no "live", no "NEWER".
+mk_beat "$TMP/sup.txt.heartbeat" run-OTHER 4000 20
+_fr_out=$(bash "$READER" "$TMP/sup.txt" 2>&1 || true)
+if printf '%s' "$_fr_out" | grep -qE 'live heartbeat|a NEWER run is starting'; then
+  bad "11n.5 the diagnostic claims neither liveness nor ordering" "overclaims: $_fr_out"
+else
+  ok "11n.5 the diagnostic claims neither liveness nor ordering"
+fi
+# ...and it must name the way to ask a question that HAS an answer.
+printf '%s' "$_fr_out" | grep -q -- '--run-id' \
+  && ok "11n.6 the refusal names --run-id as the remedy" \
+  || bad "11n.6 the refusal names --run-id as the remedy" "$_fr_out"
 
-# 5. Control: the SAME run-id in summary and beat must still answer COMPLETE, or 11n.1 would be
-#    indistinguishable from "the superseding check never runs at all".
+# CONTROL: a MATCHING run-id with an equally stale beat must still be COMPLETE. Without this, every
+# case above would be satisfied by a reader that answers UNKNOWN unconditionally.
 mk_summary "$TMP/sup2.txt" run-SAME "PASS"
 mk_beat "$TMP/sup2.txt.heartbeat" run-SAME 4000 20
-expect_reader "11n.5 control: matching run-id + stale beat => COMPLETE" \
+expect_reader "11n.7 control: matching run-id + stale beat => COMPLETE" \
   COMPLETE 0 "terminal verdict" -- "$TMP/sup2.txt"
 
 echo
