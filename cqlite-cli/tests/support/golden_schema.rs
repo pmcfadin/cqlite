@@ -887,10 +887,16 @@ CREATE TABLE IF NOT EXISTS inline (
     fn every_committed_schema_this_lane_reads_parses() {
         let root = super::super::datasets_root::repo_root();
         let dir = root.join("test-data/schemas");
-        let entries = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+        // Three-valued, through the lane's shared probe (issue #1491 review finding
+        // V1's sweep): `read_dir(...).filter_map(Result::ok)` drops an entry the
+        // filesystem could not describe as if it were not there, and the subject set
+        // of this very case is that listing — a silently shortened one would still
+        // clear the `parsed > 10` floor below.
+        let entries = super::super::fs_probe::dir_entries(&dir)
+            .unwrap_or_else(|why| panic!("{why}"))
+            .unwrap_or_else(|| panic!("{} does not exist", dir.display()));
         let mut parsed = 0usize;
-        for entry in entries.filter_map(Result::ok) {
+        for entry in entries {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("cql") {
                 continue;
