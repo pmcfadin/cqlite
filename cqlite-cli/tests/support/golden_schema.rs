@@ -1065,7 +1065,12 @@ CREATE TABLE IF NOT EXISTS inline (
         let mut parsed = 0usize;
         for entry in entries {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("cql") {
+            // On the name's BYTES, like every other name test in this lane
+            // (`fs_probe::name_ends_with`): `extension().and_then(to_str)` answers
+            // `None` for a name that is not valid UTF-8, which would drop a committed
+            // schema from THIS CASE'S OWN SUBJECT SET silently — the collapse the
+            // three-valued listing above exists to prevent, one line further down.
+            if !super::super::fs_probe::name_ends_with(&entry.file_name(), ".cql") {
                 continue;
             }
             let text = std::fs::read_to_string(&path)
