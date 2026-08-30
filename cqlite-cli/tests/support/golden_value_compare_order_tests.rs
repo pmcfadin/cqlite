@@ -14,10 +14,12 @@ use super::*;
 /// Finding N2's shape ONE LEVEL UP: the emitted ROW order is compared, not sorted
 /// away.
 ///
-/// Both sides walk one SSTable — `sstabledump` emits partitions in on-disk order
-/// and rows in clustering order — so a reordering is a divergence. The sort stays,
-/// because pairing must be total whatever the order, but it no longer DISCARDS the
-/// property: measured over the whole corpus, all 56 case x format runs agree.
+/// Both sides walk one Cassandra-written SSTable, which `cassandra-5.0.8
+/// SortedTableWriter.java:175` refuses to write out of `(token, key)` order and
+/// which `SSTableExport.java:179` dumps in that same order, so a reordering is a
+/// divergence. The sort stays, because pairing must be total whatever the order,
+/// but it no longer DISCARDS the property. `compare_rows` states the invariant's
+/// preconditions in full (review finding U1); this case pins the behaviour.
 #[test]
 fn the_emitted_row_order_is_compared_and_the_pairing_still_works() {
     let schema = schema_of(NUM_DDL, "t");

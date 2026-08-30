@@ -323,13 +323,50 @@ pub fn compare_rows(
     // ROW ORDER, before the pairing sort discards it — the same rule
     // [`compare_map`] applies to a map's entries (finding N2), one level up.
     //
-    // Both sides walk ONE SSTable: `sstabledump` emits its partitions in on-disk
-    // (token) order and each partition's rows in clustering order, and a full scan
-    // of that same file sees the same sequence. So the emitted row order is a
-    // property with an oracle, and sorting both sides before comparing them
-    // discards it. Measured across the whole corpus at the time this was added:
-    // 56 case x format runs, all 56 agreeing, so this asserts an established
-    // property rather than hoping for one.
+    // A CONDITIONAL property, so its preconditions are stated rather than left to
+    // be rediscovered (issue #1491 review finding U1, which read this as an
+    // unguaranteed assertion — the earlier justification here was "measured 56/56
+    // today", which is CQLite's own output standing in for an oracle, exactly what
+    // #3042 forbids).
+    //
+    // NOT guaranteed anywhere as a public contract. No doc comment on `cqlite
+    // export`, no user-facing doc and no CLI help text states an export row order;
+    // `output_determinism_regression_tests.rs` pins COLUMN order only (the
+    // `metadata.columns` sequence, and independence from HashMap iteration), never
+    // row order.
+    //
+    // GOLDEN side — authoritative, non-CQLite:
+    //   * `cassandra-5.0.8 io/sstable/format/SortedTableWriter.java:175` throws
+    //     unless each appended `DecoratedKey` is strictly greater than the last, so
+    //     a Cassandra-written `Data.db` IS in `(token, key)` order on disk;
+    //   * within a partition, rows are in clustering order (guide ch.5, "Row
+    //     Ordering");
+    //   * `cassandra-5.0.8 tools/SSTableExport.java:179` dumps ONE SSTable through
+    //     `sstable.getScanner()` and streams the partitions to
+    //     `JsonTransformer.toJsonLines` in encounter order, so the golden's LINE
+    //     order is that on-disk order.
+    //
+    // CLI side — a cqlite-core INVARIANT (CQLite source is evidence of what CQLite
+    // does, never of what is correct, #3041 — hence a precondition, not a claim
+    // about the format): every read path yields `(token, key)` order. The
+    // materializing `scan` sorts explicitly, with a STABLE `sort_by`, so rows
+    // sharing a partition key keep their file sequence
+    // (`reader/data_access/model.rs:434`); cross-generation reconciliation is a
+    // k-way TOKEN merge; and the single-generation lazy stream that `export` takes
+    // is on-disk order under a RELEASE-ACTIVE guard that logs loudly and falls back
+    // to the authoritative scan if a prefix is not `(token, key)`-monotonic
+    // (`select_executor/limit_pushdown/mod.rs`, issue #1577).
+    //
+    // PRECONDITION this lane enforces: exactly ONE Cassandra-written SSTable per
+    // case, paired with the golden that names it — `staging::golden_path` FAILS,
+    // naming the files, on a fixture directory holding any other number of
+    // `*-Data.db` (finding L3). So the reordering this cannot see — a
+    // cross-generation merge — cannot reach the comparison.
+    //
+    // A RED here is therefore one of: CQLite stopped emitting `(token, key)` order
+    // (a #1577 invariant violation, not a licensed change); the golden is paired
+    // with a different SSTable; or `export` gained a sort, which is a deliberate
+    // contract change that must update this pin.
     if let Some(why) = row_order_divergence(&golden, &cli, pk, ck, egress) {
         report.diffs.push(why);
     }
@@ -518,9 +555,11 @@ fn row_order_divergence(
     let at = g.iter().zip(c.iter()).position(|(a, b)| a != b)?;
     Some(format!(
         "row order: the {egress:?} egress emits row {at} as `{}` where the golden \
-         emits `{}` — both sides walk ONE SSTable, whose partitions the dump emits \
-         in on-disk order and whose rows it emits in clustering order, so the \
-         emitted row order is compared and not sorted away",
+         emits `{}` — both sides walk ONE Cassandra-written SSTable, which is in \
+         `(token, key)` order on disk, and the dump emits its partitions in that \
+         order (see `compare_rows` for the invariant and its preconditions); so \
+         either the read path stopped emitting `(token, key)` order (issue #1577) \
+         or this golden describes a different SSTable",
         brief(&c[at]),
         brief(&g[at])
     ))
