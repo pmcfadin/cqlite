@@ -81,7 +81,7 @@ pub fn scan_delta(
 /// Setup for one delta scan: locate the generation's `Data.db`, build a platform,
 /// open the reader.
 ///
-/// The open uses [`SSTableReader::open_unrecorded`] because this whole function runs
+/// The open states [`OpenErrorReporting::DeferredToCaller`] because this whole function runs
 /// INSIDE [`drive_delta_scan`]'s counted region (issue #1704). `SSTableReader::open`
 /// records its own failure, so using it here counted one failed open twice.
 async fn open_delta_scan_reader(
@@ -95,22 +95,28 @@ async fn open_delta_scan_reader(
             crate::Error::corruption(format!("scan_delta: platform init failed: {e}"))
         })?);
 
-    SSTableReader::open_unrecorded(&data_db, &config, platform)
-        .await
-        .map(std::sync::Arc::new)
-        .map_err(|e| {
-            // Propagated VERBATIM rather than rewrapped as `Error::corruption(..)`
-            // (issue #1704): the rewrap relabelled every cause as corruption, so a
-            // plain unreadable/absent file reached the caller as `corruption` and the
-            // recorded category disagreed with the delivered error. The path context
-            // the rewrap added is kept here, where it belongs, as a log field.
-            tracing::error!(
-                data_db = ?data_db,
-                error = %e,
-                "scan_delta: failed to open the generation's Data.db"
-            );
-            e
-        })
+    SSTableReader::open_with_reporting(
+        &data_db,
+        &config,
+        platform,
+        // `drive_delta_scan` below records this scan's failure; see its doc.
+        crate::storage::sstable::reader::OpenErrorReporting::DeferredToCaller,
+    )
+    .await
+    .map(std::sync::Arc::new)
+    .map_err(|e| {
+        // Propagated VERBATIM rather than rewrapped as `Error::corruption(..)`
+        // (issue #1704): the rewrap relabelled every cause as corruption, so a
+        // plain unreadable/absent file reached the caller as `corruption` and the
+        // recorded category disagreed with the delivered error. The path context
+        // the rewrap added is kept here, where it belongs, as a log field.
+        tracing::error!(
+            data_db = ?data_db,
+            error = %e,
+            "scan_delta: failed to open the generation's Data.db"
+        );
+        e
+    })
 }
 
 /// [`scan_delta`]'s driver plus its error-counting seam (issue #1704).

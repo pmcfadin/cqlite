@@ -111,17 +111,18 @@ impl SSTableReader {
         .await
     }
 
-    /// [`open`](Self::open) for an open that is an INNER STEP of a larger operation
-    /// whose own error seam already records — it does NOT report its own failure
+    /// [`open`](Self::open) with the failed-open reporting mode stated BY THE CALLER
     /// (issue #1704).
     ///
-    /// # When to use this instead of [`open`](Self::open)
+    /// # Why this is a parameter and not a second named function
     ///
-    /// Use it when, and only when, a failure returned here is guaranteed to reach an
-    /// enclosing boundary that counts it. Using [`open`](Self::open) in such a
-    /// position counts one failure twice; using THIS where there is no enclosing seam
-    /// loses the signal entirely — so the name states the PRECONDITION rather than the
-    /// mechanism, because the precondition is the thing a caller has to check.
+    /// Both mistakes are silent. [`OpenErrorReporting::SelfReported`] under a caller
+    /// that also records counts one failure TWICE;
+    /// [`OpenErrorReporting::DeferredToCaller`] under a caller with no seam records it
+    /// ZERO times, which is worse and is exactly the regression a universally
+    /// non-recording open introduced. Only the caller knows which it is, so it must
+    /// say — an unparameterised `open_unrecorded` encoded a precondition that nothing
+    /// at the call site could check.
     ///
     /// # Behavioural identity, which is now real rather than claimed
     ///
@@ -132,10 +133,11 @@ impl SSTableReader {
     /// literally the same code. The first version of this function called `open_inner`
     /// directly and silently dropped the span while its doc claimed identity — the
     /// shared helper is what makes the claim checkable instead of aspirational.
-    pub(crate) async fn open_unrecorded(
+    pub(crate) async fn open_with_reporting(
         path: &Path,
         config: &Config,
         platform: Arc<Platform>,
+        reporting: OpenErrorReporting,
     ) -> Result<Self> {
         let cache = super::super::build_chunk_cache(config);
         Self::open_instrumented(
@@ -144,7 +146,7 @@ impl SSTableReader {
             platform,
             cache,
             ScanCancel::default(),
-            OpenErrorReporting::DeferredToCaller,
+            reporting,
         )
         .await
     }
@@ -209,9 +211,11 @@ impl SSTableReader {
 
 /// Who counts a failed open into `cqlite.errors.total{subsystem="reader"}`
 /// (issue #1704). The ONLY thing that varies between the two open routes.
-#[derive(Clone, Copy)]
-enum OpenErrorReporting {
-    /// This open IS the operation: it records its own failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpenErrorReporting {
+    /// This open IS the operation: it records its own failure. The mode every
+    /// PUBLIC entry point uses, so a caller who does not think about it is never
+    /// silently un-instrumented.
     SelfReported,
     /// This open is an inner step; the caller's operation seam records instead.
     DeferredToCaller,

@@ -205,6 +205,9 @@ impl SSTableRowIteratorAdapter {
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
         channel_capacity: usize,
+        // Issue #1704: WHO counts a failed reopen. Stated by the caller because only
+        // it knows whether its own seam records — see `merge::constructors`.
+        reporting: crate::storage::sstable::reader::OpenErrorReporting,
     ) -> Result<Self> {
         let path_buf = path.to_path_buf();
         let schema = schema.clone();
@@ -267,6 +270,7 @@ impl SSTableRowIteratorAdapter {
                 sender,
                 producer_sent_count,
                 fault,
+                reporting,
             );
         }) {
             Ok(handle) => handle,
@@ -321,6 +325,7 @@ impl SSTableRowIteratorAdapter {
         sender: std::sync::mpsc::SyncSender<MergeMsg>,
         sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
         mut fault: MergeProducerFault,
+        reporting: crate::storage::sstable::reader::OpenErrorReporting,
     ) {
         // Issue #2316: decrement the live producer-thread gauge when this thread
         // exits (even on panic). Created FIRST so the spawn-time increment in
@@ -392,8 +397,8 @@ impl SSTableRowIteratorAdapter {
                     // categories (measured: `io` from the raw EACCES plus `storage`
                     // from the merge's rewrap).
                     let mut reader =
-                        crate::storage::sstable::reader::SSTableReader::open_unrecorded(
-                            &path_buf, &config, platform,
+                        crate::storage::sstable::reader::SSTableReader::open_with_reporting(
+                            &path_buf, &config, platform, reporting,
                         )
                         .await?;
 

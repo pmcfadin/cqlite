@@ -171,6 +171,7 @@ jobs:
           }
           # `error_metric_tests`  -> joined_scan_stream::error_metric_tests (seam 1)
           # `setup_error_metric_tests` -> setup_fail_closed_tests::setup_error_metric_tests
+          #   (setup seam, mid-stream reopen, and the public-merger no-seam guard)
           run_lib_filter error_metric_tests
           run_lib_filter setup_error_metric_tests
 

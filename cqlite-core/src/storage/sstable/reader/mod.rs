@@ -374,6 +374,7 @@ fn sstables_open_count_for(format: &str) -> &'static AtomicI64 {
 // #1704). Their own file per the campsite rule (#1116): this one is more than twice
 // the ~800-line target.
 mod open;
+pub(crate) use open::OpenErrorReporting;
 impl SSTableReader {
     /// Open implementation; see [`open`](Self::open) for the instrumented wrapper.
     async fn open_inner(

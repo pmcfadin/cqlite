@@ -239,3 +239,72 @@ async fn a_midstream_reopen_failure_counts_exactly_one_reader_error() {
         m.find(catalog::ERRORS_TOTAL)
     );
 }
+
+/// A PUBLIC merger open-failure must still be counted (issue #1704, roborev D).
+///
+/// This is the regression guard for the fix that caused it. Making the producer's
+/// reopen universally non-recording removed the double count on the streaming read
+/// path — and, at the same time, removed the ONLY increment on every path with no
+/// enclosing seam. `KWayMerger::new` is externally reachable public API
+/// (`cqlite_core::storage::write_engine::merge::KWayMerger::new`) and neither it nor
+/// `compact_sstables_with_registry` records anything: `merge/mod.rs` contains zero
+/// `record_error`/`record_result` calls. So an input-open failure through them went
+/// from one increment to NONE — silence, which is strictly worse than the
+/// double-count it replaced, and which no test would have caught.
+///
+/// Asserts `>= 1` rather than `== 1` deliberately: the contract for an unboundaried
+/// public caller is "the signal exists", and pinning an exact count here would
+/// re-freeze the very layering decision that keeps turning out to be wrong.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_public_merger_open_failure_still_counts_a_reader_error() {
+    use crate::storage::write_engine::merge::KWayMerger;
+    use crate::storage::write_engine::test_support::create_test_schema;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().expect("tempdir");
+    let data_dir = flush_overlapping_generations(&temp_dir).await;
+    let mut data_dbs = Vec::new();
+    collect_data_dbs(&data_dir, &mut data_dbs);
+    data_dbs.sort();
+    assert!(!data_dbs.is_empty(), "fixture must produce inputs");
+
+    let victim = data_dbs[0].clone();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o000))
+        .expect("make an input unreadable");
+    if std::fs::File::open(&victim).is_ok() {
+        eprintln!("SKIP: this uid can read a mode-0 file (root?); the open cannot be failed.");
+        return;
+    }
+
+    let mc = testing::metrics_capture();
+    mc.reset();
+
+    // The PUBLIC constructor, exactly as an external consumer would call it. Producers
+    // are spawned here; the open failure surfaces on the first `step()`.
+    let schema = create_test_schema();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let mut merger = KWayMerger::new(data_dbs, &schema)?;
+        while !matches!(
+            merger.step()?,
+            crate::storage::write_engine::merge::MergeStep::Complete
+        ) {}
+        crate::Result::Ok(())
+    })
+    .await
+    .expect("merge task");
+    assert!(
+        outcome.is_err(),
+        "an unreadable input must fail the public merge, not be skipped silently"
+    );
+
+    let m = mc.flush_and_collect();
+    assert!(
+        reader_errors(&m) >= 1.0,
+        "a public merger open failure has NO enclosing recording seam, so the open \
+         itself must report it; 0 means issue #1704 traded a double count for silence. \
+         entry: {:?}",
+        m.find(catalog::ERRORS_TOTAL)
+    );
+}
