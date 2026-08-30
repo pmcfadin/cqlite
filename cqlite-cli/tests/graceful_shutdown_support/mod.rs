@@ -600,23 +600,46 @@ pub struct PollFail {
 
 impl PollFail {
     /// What the poll observed — never why it happened.
+    ///
+    /// `TotalBudgetExhausted` used to read "progress was still arriving, but the
+    /// test's own TOTAL budget ran out". That asserted a cause the branch cannot
+    /// establish: it is reached whenever the envelope expires BEFORE the stall
+    /// window elapses, and `last_progress` is initialised at poll entry — so with
+    /// a short remaining envelope it can fire having observed ZERO new lines and
+    /// ZERO new artifacts. Inside the change whose whole purpose is removing
+    /// messages that assert unestablishable causes, that was a defect of the same
+    /// class (roborev job 219, finding 3). It now reports only the ordering it
+    /// actually measured, and the observed counts speak for themselves.
     pub fn observed(&self) -> String {
+        let progress_seen = self.new_lines + self.new_artifacts;
         let why = match self.why {
             PollGaveUp::Stalled => format!(
                 "the budget expired and NOTHING was observed for the whole stall window \
                  ({:.2?}, itself calibrated)",
                 self.stall_window
             ),
-            PollGaveUp::TotalBudgetExhausted => "progress was still arriving, but the test's own \
-                 TOTAL budget ran out (it must fail before nextest's 240s hard kill)"
-                .to_string(),
+            PollGaveUp::TotalBudgetExhausted => format!(
+                "the test's own TOTAL budget ran out BEFORE the stall window ({:.2?}) elapsed, so \
+                 this is NOT a stall verdict — it establishes only that ordering. Whether the \
+                 child was making progress is reported by the counts below and by nothing else \
+                 (this branch does not require any progress to have been observed)",
+                self.stall_window
+            ),
         };
-        format!(
-            "gave up after {:.2?}: {why}\n\
-             progress observed while polling: {} new output line(s), {} new durable artifact(s); \
-             last progress was {:.2?} ago",
-            self.elapsed, self.new_lines, self.new_artifacts, self.stall
-        )
+        let counts = if progress_seen == 0 {
+            format!(
+                "progress observed while polling: NONE — 0 new output lines and 0 new durable \
+                 artifacts in {:.2?}",
+                self.elapsed
+            )
+        } else {
+            format!(
+                "progress observed while polling: {} new output line(s), {} new durable \
+                 artifact(s); last progress was {:.2?} ago",
+                self.new_lines, self.new_artifacts, self.stall
+            )
+        };
+        format!("gave up after {:.2?}: {why}\n{counts}", self.elapsed)
     }
 }
 
@@ -793,22 +816,56 @@ pub fn select_rows(
     let took = started.elapsed();
 
     // The child has exited, so both pipes are at EOF and the reader threads
-    // finish promptly; bound the collection anyway rather than block forever.
+    // finish promptly — but "promptly" is a claim about SCHEDULING, and a reader
+    // thread on a saturated host can stay descheduled for seconds. This used to
+    // be a hardcoded `recv_timeout(5s)`: a NEW, uncalibrated wall-clock bound
+    // that could false-fail the harness under exactly the contention #3515 is
+    // about (roborev job 219, finding 2). The collection is part of stage (e), so
+    // it is bounded by stage (e)'s remaining allowance and, beyond that, by the
+    // test's own remaining TOTAL budget — no fixed constant, and still incapable
+    // of reaching nextest's hard kill.
+    // `clock.remaining()` is wall-clock derived, so it has already absorbed
+    // `took`; the collection therefore gets stage (e)'s calibrated budget bounded
+    // by whatever of the test's total budget is genuinely left.
+    let collect_allowance = budget.derived.min(clock.remaining());
+    let collect_deadline = Instant::now() + collect_allowance;
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
     let mut collected = 0;
     while collected < 2 {
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok((Stream::Stdout, buf)) => stdout_buf = buf,
-            Ok((Stream::Stderr, buf)) => stderr_buf = buf,
-            Err(_) => panic!(
-                "stage (e) durability-read: the read-side child exited ({status:?}) but its \
-                 output could not be collected within 5s (collected {collected}/2 streams). \
-                 This is a defect in this test harness, not a statement about durability.\n{}",
+        let left = collect_deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            panic!(
+                "stage (e) durability-read: the read-side child exited ({status:?}) but only \
+                 {collected}/2 of its output streams could be collected within stage (e)'s \
+                 remaining allowance ({collect_allowance:.2?}).\n\
+                 {}\n\
+                 WHAT THIS ESTABLISHES: only that a reader thread had not delivered its buffer \
+                 in time. It says nothing about durability, and nothing about the child, which \
+                 exited successfully.\n{}",
+                budget.describe(),
+                clock.report()
+            );
+        }
+        match rx.recv_timeout(left.min(Duration::from_millis(250))) {
+            Ok((Stream::Stdout, buf)) => {
+                stdout_buf = buf;
+                collected += 1;
+            }
+            Ok((Stream::Stderr, buf)) => {
+                stderr_buf = buf;
+                collected += 1;
+            }
+            // Not a timeout: both reader threads dropped their senders without
+            // sending, which can only be a panic inside the harness.
+            Err(RecvTimeoutError::Disconnected) => panic!(
+                "stage (e) durability-read: the read-side output channel disconnected with only \
+                 {collected}/2 streams collected — a reader thread ended without sending. This \
+                 is a defect in this test harness, not a statement about durability.\n{}",
                 clock.report()
             ),
+            Err(RecvTimeoutError::Timeout) => {}
         }
-        collected += 1;
     }
 
     let stdout = String::from_utf8_lossy(&stdout_buf);
