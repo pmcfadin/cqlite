@@ -56,9 +56,9 @@ pub struct Report {
     pub container_cells: usize,
     /// Container cells holding at least one REFUSED position, because the
     /// golden's own content cannot survive the unquoted CSV rendering there (see
-    /// `csv_container::node_refusal`). Counted,
-    /// and named in [`Self::ambiguity_reasons`], so the narrowing is declared at
-    /// run time rather than inferred from a silent gap.
+    /// `csv_container::node_refusal`). Counted, and named in
+    /// [`Self::ambiguity_reasons`], so the narrowing is declared at run time
+    /// rather than inferred from a silent gap.
     ///
     /// A refusal is decided at the NARROWEST node it destroys, so its reach is
     /// that node and not the cell: every unambiguous sibling and every enclosing

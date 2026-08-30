@@ -111,6 +111,15 @@ fn an_unbalanced_bracket_is_refused_at_each_node_whose_split_it_breaks() {
         Some(&element_of("list<frozen<list<text>>>"))
     )
     .is_some());
+
+    // And because the refusal comes FIRST, the decoder is never asked to split
+    // the text a correct CLI renders for such a node: it requires the frame and
+    // hands the un-split body on for the emptiness bound, instead of reporting
+    // an "unbalanced bracket" divergence the CLI did not cause.
+    assert_eq!(
+        decode(&json!(["x}y"]), "[x}y]", &list).expect("the frame is satisfied"),
+        json!("x}y")
+    );
 }
 
 /// Review round 12, finding S1: BALANCE IS A PROPERTY OF THE CONCATENATED

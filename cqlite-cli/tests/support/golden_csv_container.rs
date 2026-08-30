@@ -195,8 +195,7 @@
 //! counter, so a level whose body it sits in cannot be split at all — and unlike a
 //! stray `, `, it can reach levels ABOVE that one too. That used to be stated as a
 //! whole-CELL refusal, scanned per SCALAR (a `cell_refusal` predicate, since
-//! deleted): any
-//! individually-unbalanced scalar refused the entire cell.
+//! deleted): any individually-unbalanced scalar refused the entire cell.
 //!
 //! It was over-refusal, i.e. a blind spot (finding S1), because BALANCE IS A
 //! PROPERTY OF THE CONCATENATED RENDERING AND NOT OF EACH SCALAR IN ISOLATION. An
@@ -545,7 +544,8 @@ fn golden_rendering(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
     }
 }
 
-/// The text a scalar carries inside the golden's own rendering ([`golden_rendering`]).
+/// The text a scalar carries inside the golden's own rendering
+/// ([`golden_rendering`]).
 /// `Value::Null` renders as the `null` token (NULL-TOKEN in the module doc), which
 /// is a text a `text` member can also produce — resolved by [`decode_shape`] from
 /// the golden's own type, and deliberately not a refusal.
