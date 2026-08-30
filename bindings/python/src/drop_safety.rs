@@ -45,10 +45,32 @@
 //! acquires one: no `Python::with_gil`, and no `py.allow_threads` (there is no
 //! token to call it on). None of the three cleanup steps touch a Python object
 //! — they are plain Rust calls on `cqlite_core` handles — so a GIL is not
-//! needed, and `Python::with_gil` during CPython finalization is itself a
-//! hazard (the interpreter may already be past the point where a thread state
-//! can be attached). Keeping the GIL surface at exactly zero removes that
-//! failure mode instead of guarding it.
+//! needed. Keeping the GIL surface at exactly zero removes a failure mode
+//! instead of guarding it.
+//!
+//! **The known cost, stated because it is real: this cleanup runs with the GIL
+//! HELD.** CPython frees a pyclass from its deallocator while the GIL is held,
+//! so the flush + fsync + shutdown below block every other Python thread for
+//! their duration — where an explicit `close()` releases the GIL around the
+//! same work via `py.allow_threads`. Reviewers have raised this twice, so the
+//! answer is recorded here rather than re-argued: **releasing the GIL requires
+//! first ACQUIRING a token, and every mechanism for that can PANIC in `drop`,
+//! which is a process ABORT under `panic = "abort"`.** In pyo3 0.23.5,
+//! `Python::with_gil` panics "If the `auto-initialize` feature is not enabled
+//! and the Python interpreter is not initialized" (`src/marker.rs`, and this
+//! crate does NOT enable `auto-initialize`), which is precisely the
+//! interpreter-teardown case; and GIL acquisition panics outright with "Access
+//! to the GIL is prohibited while a `__traverse__` implmentation is running"
+//! (`src/gil.rs`, `LockGIL::bail`), which a handle freed during a GC traversal
+//! can reach. `Python::assume_gil_acquired` is not an escape either: it is
+//! `unsafe` and its precondition is FALSE whenever the last reference is
+//! released from a Rust thread holding no GIL.
+//!
+//! So the trade is a bounded stall on the *implicit* cleanup path versus a
+//! possible abort — and abort is the exact failure class this issue exists to
+//! prevent. The mitigation is the one the class docs already recommend:
+//! `close()`, or the `with` block, both of which release the GIL properly. This
+//! hook is the net for code that forgot, not the recommended path.
 //!
 //! ## Why native `Drop` and not `__del__`
 //!

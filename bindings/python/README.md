@@ -73,6 +73,27 @@ db = cqlite.open(data_dir, schema=schema_path)
 db.close()
 ```
 
+#### Cleanup on garbage collection (safety net, not the recommended path)
+
+A handle that is garbage-collected without `close()` still cleans up
+best-effort: the write engine is closed (flushing any remaining memtable to an
+SSTable), the read engine is shut down, and buffered telemetry is flushed. Two
+things are worth knowing about relying on it:
+
+- **It runs with the GIL held**, because CPython frees the object from its
+  deallocator. The flush and fsync therefore block other Python threads for
+  their duration, where `close()` releases the GIL around the same work. Prefer
+  `with` or an explicit `close()` in threaded code.
+- **It is best-effort by design.** If the handle is dropped from inside a
+  running asyncio/tokio event loop thread, the cleanup is skipped rather than
+  risk an unsafe teardown — so unflushed rows stay in the write-ahead log
+  (replayable) instead of being flushed. `close()` is the only path with a
+  guarantee.
+
+A `StreamingIterator` that outlives its `Database` raises
+`RuntimeError: Database is closed` from `next()` once the handle is collected,
+the same as it does after an explicit `close()`.
+
 ### Executing Queries
 
 ```python
