@@ -74,18 +74,36 @@ WARMUP_ITERATIONS = 10
 STREAM_ROWS = 5
 
 # ---------------------------------------------------------------------------
-# BUDGET (issue #1465). Measured on this branch, Linux x86_64, Python 3.12,
-# maturin develop --profile dev, CQLITE_DATASETS_ROOT=/data/datasets:
-#   * error path, 500 iterations:            see MEASURED_* below
-#   * abandoned stream, 500 iterations:      see MEASURED_* below
-# The budget is the issue's suggested 512 KiB over 500 iterations, i.e. ~1,048
-# bytes/iteration. That is comfortably above the measured noise floor and far
-# below a real per-iteration leak: leaking even one small buffer (a few hundred
-# bytes) per iteration on a hot error path lands in the same order as the budget,
-# and anything retaining a row batch or a stream's channel state blows past it by
-# orders of magnitude.
+# BUDGETS (issue #1465) -- MEASURED, never guessed. Linux x86_64, Python 3.12,
+# maturin develop --profile dev, CQLITE_DATASETS_ROOT=/data/datasets, 500
+# iterations + 10 warm-up, 8 consecutive samples per path (2026-08-30):
+#
+#   error path:  32, 32, 32, 32, 32, 32, 32 bytes warm; 4,340 bytes on the FIRST
+#                (cold) sample of a fresh process -> observed max 4,340.
+#   stream path: 10,332 .. 15,750 bytes warm; 54,085 bytes on the first (cold)
+#                sample -> observed max 54,085.
+#
+# The cold first sample is what a real pytest run measures (one process, one
+# sample per test), so the budget must clear IT, not the warm floor.
+#
+# Budgets, and what each one BITES (measured with synthetic per-iteration leaks
+# injected into the same loop bodies -- a retained bytearray, plus the real
+# leak shape of retaining the abandoned iterator itself):
+#   ERROR_BUDGET_BYTES  =  64 KiB (131 bytes/iteration) -- 15x the observed cold
+#       max. A synthetic 64-byte-per-iteration retention measured 114 KB total
+#       and TRIPS it; the real leak shape (retaining the abandoned iterator,
+#       5,132 bytes/iteration) measured 2.57 MB and trips it by 40x.
+#   STREAM_BUDGET_BYTES = 256 KiB (524 bytes/iteration) -- 4.7x the observed
+#       cold max. Looser than the error budget because the stream path's noise
+#       is genuinely an order of magnitude larger (a per-iteration stream setup
+#       over a ~101-column table). Measured discrimination on this path: a
+#       512-byte-per-iteration retention (334 KB total) TRIPS it, a 256-byte one
+#       (205 KB) does NOT -- stated honestly rather than overclaimed. Every leak
+#       shape that retains stream/row state (>= ~1 row of a wide table) trips it
+#       by a wide margin.
 # ---------------------------------------------------------------------------
-BUDGET_BYTES = 512 * 1024
+ERROR_BUDGET_BYTES = 64 * 1024
+STREAM_BUDGET_BYTES = 256 * 1024
 
 # Traces from these files are noise from the measurement/reporting machinery
 # rather than from the loop body under test.
@@ -159,10 +177,10 @@ def test_error_path_no_leak(leak_db):
     )
 
     # BOUNDED, not zero (see module docstring).
-    assert growth < BUDGET_BYTES, (
+    assert growth < ERROR_BUDGET_BYTES, (
         f"error-path allocation grew {growth} bytes over {ITERATIONS} raising "
         f"queries ({growth / ITERATIONS:.1f} bytes/iteration), exceeding the "
-        f"{BUDGET_BYTES}-byte budget — the exception path is likely retaining "
+        f"{ERROR_BUDGET_BYTES}-byte budget — the exception path is likely retaining "
         "allocations per failure (issue #1465)"
     )
 
@@ -196,9 +214,9 @@ def test_abandoned_stream_no_leak(leak_db):
     )
 
     # BOUNDED, not zero (see module docstring).
-    assert growth < BUDGET_BYTES, (
+    assert growth < STREAM_BUDGET_BYTES, (
         f"abandoned-stream allocation grew {growth} bytes over {ITERATIONS} "
         f"abandoned iterators ({growth / ITERATIONS:.1f} bytes/iteration), "
-        f"exceeding the {BUDGET_BYTES}-byte budget — an abandoned stream is "
-        "likely retaining its buffer/channel state (issue #1465)"
+        f"exceeding the {STREAM_BUDGET_BYTES}-byte budget — an abandoned stream "
+        "is likely retaining its buffer/channel state (issue #1465)"
     )
