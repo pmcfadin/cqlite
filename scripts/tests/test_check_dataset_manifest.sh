@@ -1793,6 +1793,10 @@ if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstable
   tr_repo=$(cd "$(dirname "$GATE")/.." && pwd)
   tr_counts=$(_SCRIPT_REPO="$tr_repo" bash -c '
     _SCRIPT_REPO=$1; _SCRIPT_REPO_IS_GIT=1
+    # SSTABLES is the root the function strips (it must remove the EXACT configured root,
+    # not the first "/sstables/"), so the probe has to establish it exactly as the script
+    # does. This assertion caught that coupling the moment it was introduced.
+    SSTABLES="$3/sstables"
     eval "$(sed -n "/^_committed_toc_relpath() {/,/^}/p" "$2")"
     have=0; none=0
     while IFS= read -r f; do
@@ -1811,6 +1815,40 @@ if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstable
   fi
 else
   echo "info - no real corpus or no git; skipping the twin-reachability census"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 84 (post-rebase round 5, Low): an lstat error is not an absence.
+#
+# `entryExists` caught every `lstatSync` error and returned false, so a permission or I/O
+# error classified a present-but-unusable fixture as `absent` — and a NON-STRICT
+# abort-safety run then SKIPS instead of hard-failing. That is #1437 inverted, the same
+# defect round 52 fixed one layer up, arriving again through the ERROR HANDLER rather than
+# the predicate.
+#
+# Only ENOENT/ENOTDIR mean absent; anything else means something IS there and cannot be
+# used, which is `broken`.
+# ---------------------------------------------------------------------------
+CF_SRC2=$(cd "$(dirname "$GATE")/.." && pwd)/bindings/node/__test__/corrupt-fixture.js
+PU_SRC2=$(cd "$(dirname "$GATE")/.." && pwd)/bindings/node/__test__/parity-utils.js
+if command -v node >/dev/null 2>&1 && [ -f "$CF_SRC2" ] && [ -f "$PU_SRC2" ] && [ "$(id -u)" != 0 ]; then
+  ee_tree="$WORK/ee-tree"; mkdir -p "$ee_tree/bindings/node/__test__"
+  cp "$CF_SRC2" "$PU_SRC2" "$ee_tree/bindings/node/__test__/"
+  ee_d="$ee_tree/corpus/test_basic/simple_table-$UUID"; mkdir -p "$ee_d"
+  printf 'x\n' > "$ee_d/nb-1-big-Data.db"
+  chmod 000 "$ee_d"                       # lstat of the CHILD now fails with EACCES
+  ee_got=$(node -e "
+    global.testPaths = { SSTABLES_DIR: '$ee_tree/corpus' };
+    const cf = require('$ee_tree/bindings/node/__test__/corrupt-fixture.js');
+    console.log(cf.classifyTableDir('$ee_tree/corpus').status);" 2>/dev/null)
+  chmod 755 "$ee_d"                       # restore so the suite cleanup can remove it
+  case "$ee_got" in
+    broken) ok "an unreadable fixture directory classifies as 'broken' (hard-fail), not 'absent'" ;;
+    absent) bad "an unreadable fixture classified as 'absent'; a non-strict run would SKIP instead of hard-failing (#1437 inverted)" ;;
+    *)      bad "unreadable fixture classified as '${ee_got:-<nothing>}'; expected 'broken'" ;;
+  esac
+else
+  echo "info - node unavailable, sources missing, or running as root; skipping the lstat-error case"
 fi
 
 echo "----"

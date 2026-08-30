@@ -124,8 +124,17 @@ function entryExists(p) {
   try {
     fs.lstatSync(p);
     return true;
-  } catch (_e) {
-    return false;
+  } catch (e) {
+    // ONLY genuine absence means absent (roborev #3493, post-rebase round 5). Collapsing
+    // every lstat error onto "does not exist" turns a permission or I/O error into
+    // `absent`, and a non-strict abort-safety run then SKIPS instead of hard-failing —
+    // which is #1437 inverted, the same defect round 52 fixed one layer up, arriving again
+    // through the error handler rather than the predicate.
+    //
+    // ENOENT: nothing at that path. ENOTDIR: a parent component is not a directory, so the
+    // path cannot exist either. Anything else (EACCES, EIO, ELOOP, ENAMETOOLONG) means
+    // something IS there and we cannot use it — which is `broken`, not `absent`.
+    return e.code !== 'ENOENT' && e.code !== 'ENOTDIR';
   }
 }
 

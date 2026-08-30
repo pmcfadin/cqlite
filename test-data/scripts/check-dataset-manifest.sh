@@ -507,7 +507,12 @@ _toc_companions_usable() {
 # Collapsing 128 onto "no twin" would silently disable the trusted-inventory check.
 _committed_toc_relpath() {
   _C_TOC_REL=""
-  _c_tail=${1#*/sstables/}
+  # Strip the EXACT configured root, not the FIRST "/sstables/" (roborev, post-rebase round
+  # 5). `${1#*/sstables/}` is non-greedy from the left, so a root like
+  # `/data/sstables/current/sstables` yields `current/sstables/<ks>/...` -- a repo path that
+  # matches nothing, no twin is found, and the TOC validation silently weakens. `$SSTABLES`
+  # is the root this run was actually given, so it is the only correct thing to remove.
+  _c_tail=${1#"$SSTABLES/"}
   [ "$_c_tail" = "$1" ] && return 0
   # Not a work tree => no inventory exists to compare against. Declared, not a malfunction.
   [ "$_SCRIPT_REPO_IS_GIT" = 1 ] || return 0
@@ -551,7 +556,20 @@ _toc_matches_head() {
   # (roborev, post-rebase round 4) would let git corruption or a permission error read as
   # "no inventory" and silently disable this check. `cat-file -e` answers EXISTENCE on its
   # own, so a `show` that fails afterwards is a genuine malfunction.
-  if ! git -C "$_SCRIPT_REPO" cat-file -e "HEAD:$2" 2>/dev/null; then
+  # `ls-tree`, NOT `cat-file -e` (roborev, post-rebase round 5). `cat-file -e` answers by
+  # EXIT STATUS alone, so repository corruption or an unreadable object is indistinguishable
+  # from "absent at HEAD" -- and absent falls back to the derived checks, silently disabling
+  # the trusted comparison. `ls-tree` separates the two: status 0 with EMPTY output means
+  # genuinely absent, status 0 with output means present, and a NON-ZERO status is a
+  # malfunction that must not be read as either.
+  _tm_ls_rc=0
+  _tm_ls=$(git -C "$_SCRIPT_REPO" ls-tree --name-only HEAD -- "$2" 2>/dev/null) || _tm_ls_rc=$?
+  if [ "$_tm_ls_rc" -ne 0 ]; then
+    rm -f "$_tm_tmp"
+    echo "❌ dataset manifest check: 'git ls-tree HEAD -- $2' failed (status $_tm_ls_rc); cannot judge the corpus" >&2
+    exit 2
+  fi
+  if [ -z "$_tm_ls" ]; then
     rm -f "$_tm_tmp"
     # Tracked but absent at HEAD (added, not yet committed): the inventory does not exist
     # yet, so fall back to the derived checks rather than invent one.
