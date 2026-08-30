@@ -897,10 +897,13 @@ if grep -q 'mkdir "$_reserve"' "$LAUNCHER"; then
 else
   bad "4b.80 the reservation is a directory" "still a file-based lock"
 fi
-if grep -q 'mv "$_reserve" "$_stale"' "$LAUNCHER"; then
-  ok "4b.81 reclamation is claimed by an atomic RENAME (the compare-and-swap)"
+# The rename target is mktemp-created (11f.1 caught the predictable `$$` form), so the move is
+# `mv "$_reserve" "$_stale/"` — into the scratch directory. The compare-and-swap property is
+# unchanged: only one process can move `$_reserve` away, and the loser's mv fails.
+if grep -q 'mv "$_reserve" "$_stale/"' "$LAUNCHER" && grep -q 'mktemp -d "$_reserve.stale' "$LAUNCHER"; then
+  ok "4b.81 reclamation is claimed by an atomic RENAME into an mktemp scratch dir"
 else
-  bad "4b.81 reclamation is claimed by an atomic rename" "not found"
+  bad "4b.81 reclamation is claimed by an atomic rename into an mktemp scratch dir" "not found"
 fi
 if grep -q 'launcher-pid=' "$LAUNCHER" && grep -q 'kill -0 "$_own_pid"' "$LAUNCHER"; then
   ok "4b.82 liveness counts the LAUNCHER PID too, closing the unit-startup window"
