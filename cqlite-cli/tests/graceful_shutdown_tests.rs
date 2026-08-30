@@ -88,6 +88,12 @@ fn sigint_in_writable_session_flushes_before_exit() {
     let mut stdin = child.stdin.take().expect("child stdin");
 
     // Stage (b): write ack, timed -> `t_ack`.
+    //
+    // THE TRANSCRIPT MARK IS TAKEN BEFORE THE WRITE (roborev job 243, finding 1).
+    // The ack can be RECORDED by a reader thread and left unpublished; a mark taken
+    // after this `writeln!` would start the expiry check's window after the line
+    // was already recorded, excluding it from the window AND from the channel.
+    let mark = io.mark();
     writeln!(
         stdin,
         "INSERT INTO test_write.users (id, name, age, active) VALUES (7, 'Grace', 30, true);"
@@ -96,11 +102,14 @@ fn sigint_in_writable_session_flushes_before_exit() {
     stdin.flush().expect("flush child stdin");
 
     let stage = deadline.stage("b.write-ack");
-    let t_ack = await_write_ack(&io, "the INSERT (id=7)", &stage);
+    let t_ack = await_write_ack(&io, mark, "the INSERT (id=7)", &stage);
     stage.finish();
     deadline.calibrate("t_ack", t_ack);
 
-    // Send a real SIGINT to the child.
+    // Send a real SIGINT to the child. The mark for stage (c) is taken BEFORE the
+    // signal — the operation that produces the awaited handler-entry line (job 243,
+    // finding 1).
+    let handler_mark = io.mark();
     let pid = child.id() as libc::pid_t;
     let rc = unsafe { libc::kill(pid, libc::SIGINT) };
     assert_eq!(rc, 0, "failed to deliver SIGINT to child pid {pid}");
@@ -111,6 +120,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // claim anything about a handler's existence.
     let stage = deadline.stage("c.handler-entry");
     let entered = io.wait_for(
+        handler_mark,
         Stream::Stderr,
         |l| l.contains(MARKER_HANDLER_ENTERED),
         &stage,
@@ -130,10 +140,10 @@ fn sigint_in_writable_session_flushes_before_exit() {
              \x20 2. a shutdown handler was not entered (absent, or the interrupt lost a race);\n\
              \x20 3. the product's marker text drifted, so this test awaited a string the child \
              no longer prints — compare the awaited substring against the transcript below.\n\
-             child transcript:\n{}\n{}",
+             child transcript (the snapshot the verdict was taken from):\n{}\n{}",
             stage.describe(),
             end.describe(),
-            io.transcript_text(),
+            end.transcript(),
             stage.report()
         );
         }
@@ -158,10 +168,10 @@ fn sigint_in_writable_session_flushes_before_exit() {
                  observed {:.3?} after SIGINT, so the shutdown handler exists, was entered, and \
                  the child was scheduled. This failure therefore establishes ONLY that the flush \
                  did not complete in time; it says nothing about whether a handler is present.\n\
-                 child transcript:\n{}\n{}",
+                 child transcript (the snapshot the verdict was taken from):\n{}\n{}",
                 fail.observed(),
                 t_handler,
-                io.transcript_text(),
+                fail.transcript(),
                 stage.report()
             );
         }
@@ -255,6 +265,10 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     let acks = deadline.stage("b.write-acks");
     let mut t_ack = Duration::ZERO;
     for id in 0..WRITES {
+        // Per write, taken BEFORE the statement is sent (job 243, finding 1). Each
+        // window still excludes the PREVIOUS ack — that line was recorded before
+        // this mark — which is what stops one `OK` satisfying all five waits.
+        let mark = io.mark();
         writeln!(
             stdin,
             "INSERT INTO test_write.users (id, name, age, active) VALUES ({id}, 'row{id}', {id}, true);"
@@ -263,7 +277,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         stdin.flush().expect("flush child stdin");
 
         let before = Instant::now();
-        await_write_ack(&io, &format!("write id={id}"), &acks);
+        await_write_ack(&io, mark, &format!("write id={id}"), &acks);
         t_ack = t_ack.max(before.elapsed());
     }
     let t_acks_total = acks.finish();
@@ -295,10 +309,10 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
              — a flush still in progress, or a child that was descheduled, produces the same \
              reading. The writes WERE acknowledged (stage (b) passed), so the session was \
              accepting statements.\n\
-             child transcript:\n{}\n{}",
+             child transcript (the snapshot the verdict was taken from):\n{}\n{}",
             data_dir.display(),
             fail.observed(),
-            io.transcript_text(),
+            fail.transcript(),
             stage.report()
         );
     }
@@ -321,9 +335,9 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
                  EOF path flushes and finalizes the engine before returning, so a slow flush and \
                  a wedged one read the same here; the progress observation above reports whether \
                  anything was still happening.\n\
-                 child transcript:\n{}\n{}",
+                 child transcript (the snapshot the verdict was taken from):\n{}\n{}",
                 fail.observed(),
-                io.transcript_text(),
+                fail.transcript(),
                 stage.report()
             );
         }

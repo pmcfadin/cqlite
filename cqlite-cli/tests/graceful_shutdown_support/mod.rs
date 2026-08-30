@@ -120,6 +120,83 @@ impl Stream {
     }
 }
 
+/// A position in the cumulative transcript, taken BEFORE the operation whose
+/// response is awaited.
+///
+/// WHY THE CALLER OWNS IT (roborev job 243, finding 1). The mark bounds the window
+/// a wait's expiry check may consider, so it must be taken before the operation
+/// that can PRODUCE the awaited line — the spawn, the `writeln!`, the `kill`. Taken
+/// inside the wait instead, a reader that RECORDED a fast response and was then
+/// descheduled before publishing it left that line BEFORE the mark and OUTSIDE the
+/// channel, so it was excluded from both halves of the expiry check: a false
+/// timeout against evidence the harness already held.
+///
+/// It is a newtype, not a bare `usize`, so a call site cannot pass a length, an
+/// index or a count where a mark belongs.
+#[derive(Clone, Copy, Debug)]
+pub struct Mark(usize);
+
+/// ONE read of the transcript, used for BOTH the decision and the message.
+///
+/// DECIDE AND RENDER FROM THE SAME SNAPSHOT, NOT MERELY THE SAME STORE (roborev
+/// job 243, finding 1). Round 11 made the expiry decision read the transcript
+/// rather than the channel, but then RE-READ the transcript to render the failure
+/// — two acquisitions of the same lock, so a line appended in between could still
+/// appear in a message that had just called it absent. The two reads are now one:
+/// the snapshot is copied out under a single lock, the verdict is taken from it,
+/// and it is carried into [`WaitEnd`] so the rendered transcript is literally the
+/// bytes the decision examined.
+#[derive(Debug)]
+pub struct TranscriptSnapshot {
+    /// Every transcript line as of the decision, tags included.
+    lines: Vec<String>,
+    /// Where the awaiting wait began; `lines[mark..]` is its window.
+    mark: usize,
+    /// The lock was readable. `false` means a reader thread panicked, which is
+    /// reported rather than rendered as an empty transcript.
+    available: bool,
+}
+
+impl TranscriptSnapshot {
+    /// How many lines the decision's window covered — how much evidence it
+    /// actually looked at.
+    fn examined(&self) -> usize {
+        self.lines.len().saturating_sub(self.mark)
+    }
+
+    /// The lines in the window, on `want`, with the harness's `[stream] ` tag
+    /// stripped so the caller receives the child's own text.
+    ///
+    /// The predicate is applied OUTSIDE any lock, by construction: this reads an
+    /// owned copy. `pred` is caller code, and applying it while holding the
+    /// transcript lock deadlocks any predicate that touches the transcript — a std
+    /// `Mutex` is not reentrant. Found the hard way: the first version of a plant
+    /// for this did exactly that and wedged the test binary for nine minutes.
+    fn window_on(&self, want: Stream) -> impl Iterator<Item = &str> {
+        self.lines
+            .get(self.mark..)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(move |l| l.strip_prefix(want.transcript_prefix()))
+    }
+
+    /// The snapshot, indented for a panic message. THE SAME BYTES the verdict was
+    /// taken from — no fresh read, so no append can contradict the message.
+    pub fn render(&self) -> String {
+        if !self.available {
+            return "  (transcript unavailable: a reader thread panicked)".to_string();
+        }
+        if self.lines.is_empty() {
+            return "  (the child emitted nothing at all on stdout or stderr)".to_string();
+        }
+        self.lines
+            .iter()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 /// How a [`ChildIo::wait_for`] ended when it did NOT observe the line it awaited.
 ///
 /// Reported by every such failure because it is an OBSERVATION, not a cause: a
@@ -127,35 +204,53 @@ impl Stream {
 /// EOF are different measurements, and the second is the signature a RED run
 /// produces when the child dies instead of handling the signal. Neither variant
 /// names WHY.
+///
+/// BOTH variants carry the snapshot the verdict was taken from, and the call site
+/// renders THAT rather than re-reading the transcript, so the message and the
+/// decision are the same bytes (job 243, finding 1).
 #[derive(Debug)]
 pub enum WaitEnd {
     /// The test's one deadline passed; the child's pipes were still open, so more
-    /// output was still possible. `examined` is how many transcript lines the
-    /// final check re-read — the SAME store the failure message renders, so the
-    /// count says how much evidence the decision actually looked at.
-    DeadlineReached { examined: usize },
+    /// output was still possible.
+    DeadlineReached { snapshot: TranscriptSnapshot },
     /// Both reader threads ended and the queue drained: the child's stdout AND
     /// stderr reached EOF after this long, so no further line could ever arrive.
     /// The child had exited, crashed, or closed its pipes -- this does not say
     /// which.
-    PipesClosed(Duration),
+    PipesClosed {
+        after: Duration,
+        snapshot: TranscriptSnapshot,
+    },
 }
 
 impl WaitEnd {
     pub fn describe(&self) -> String {
         match self {
-            WaitEnd::DeadlineReached { examined } => format!(
+            WaitEnd::DeadlineReached { snapshot } => format!(
                 "how the wait ended: the test's one deadline passed with the child's pipes still \
-                 open (more output was still possible). The final check then re-read the \
-                 {examined} transcript line(s) recorded since this wait began — the same store \
-                 the transcript below is printed from — and none of them matched, so this \
-                 message cannot be contradicted by the transcript it prints"
+                 open (more output was still possible). The verdict was taken from ONE snapshot \
+                 of the transcript covering the {} line(s) recorded since this wait began, and \
+                 none of them matched. The transcript printed below IS that snapshot — not a \
+                 fresh read of a store that may since have grown — so this message cannot be \
+                 contradicted by the evidence it prints",
+                snapshot.examined()
             ),
-            WaitEnd::PipesClosed(after) => format!(
+            WaitEnd::PipesClosed { after, snapshot } => format!(
                 "how the wait ended: the child's stdout AND stderr both reached EOF after \
                  {after:.3?}, so no further line could arrive: the child had exited, crashed, or \
-                 closed its pipes (this measurement does not say which)"
+                 closed its pipes (this measurement does not say which). The {} transcript \
+                 line(s) recorded since this wait began, printed below, are the snapshot the \
+                 verdict was taken from",
+                snapshot.examined()
             ),
+        }
+    }
+
+    /// The transcript the DECISION examined, ready for a panic message.
+    pub fn transcript(&self) -> String {
+        match self {
+            WaitEnd::DeadlineReached { snapshot } => snapshot.render(),
+            WaitEnd::PipesClosed { snapshot, .. } => snapshot.render(),
         }
     }
 }
@@ -202,29 +297,57 @@ struct FinalDrain {
     disconnected: bool,
 }
 
-/// What a non-blocking [`ChildIo::drain_new`] found. Two facts, kept separate
-/// for the same reason [`FinalDrain`] keeps them separate: "nothing more is
+/// How a non-blocking [`ChildIo::drain_new`] ended. Kept as two values for the
+/// same reason [`FinalDrain`] keeps its two facts separate: "nothing more is
 /// queued right now" and "nothing more can ever arrive" are different
-/// measurements, and a progress count that collapses them reports the first
-/// about a child in the second state.
-struct DrainNew {
-    /// How many lines were newly consumed — the "a new line arrived" signal.
-    lines: usize,
-    /// The queue was drained to the end and every sender was gone: both reader
-    /// threads have ended, so the child's pipes are at EOF.
-    disconnected: bool,
+/// measurements, and collapsing them reports the first about a child in the
+/// second state.
+///
+/// It deliberately does NOT report how many lines it consumed. The "new output
+/// lines" a poll reports are counted from the TRANSCRIPT — the store its failure
+/// message renders — so a channel-derived count here would be a second store for
+/// the message to disagree with (job 243, finding 1).
+#[derive(PartialEq, Eq, Debug)]
+enum DrainEnd {
+    /// The queue was emptied and the senders are alive: more output is possible.
+    Empty,
+    /// The queue was emptied AND every sender was gone: both reader threads have
+    /// ended, so the child's pipes are at EOF.
+    Disconnected,
 }
 
 impl ChildIo {
-    /// Attach readers to a spawned child's stdout + stderr.
-    fn attach(child: &mut std::process::Child) -> Self {
+    /// Attach readers to a spawned child's stdout + stderr, returning the harness
+    /// AND the [`Mark`] for the first wait.
+    ///
+    /// THE MARK IS TAKEN BEFORE EITHER READER EXISTS, which is the earliest point
+    /// at which a mark can be taken at all: until a reader is spawned, nothing can
+    /// record into the transcript. So the first wait's window provably covers every
+    /// line the child has ever emitted, and the "recorded a fast response, then got
+    /// descheduled before the mark" race (job 243, finding 1) is not expressible
+    /// for stage (a). Returning it — rather than letting the call site take one
+    /// after `attach` — is what makes that structural instead of a convention.
+    fn attach(child: &mut std::process::Child) -> (Self, Mark) {
         let transcript: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
+        let io = Self {
+            rx,
+            transcript: Arc::clone(&transcript),
+        };
+        let mark = io.mark();
         let out = child.stdout.take().expect("child stdout");
         let err = child.stderr.take().expect("child stderr");
         spawn_reader(Stream::Stdout, out, tx.clone(), Arc::clone(&transcript));
-        spawn_reader(Stream::Stderr, err, tx, Arc::clone(&transcript));
-        Self { rx, transcript }
+        spawn_reader(Stream::Stderr, err, tx, transcript);
+        (io, mark)
+    }
+
+    /// Take a transcript [`Mark`] for a wait that has NOT YET been started.
+    ///
+    /// CALL THIS BEFORE THE OPERATION WHOSE RESPONSE YOU WILL AWAIT — before the
+    /// `writeln!`, before the `kill`. See [`Mark`] for what taking it later costs.
+    pub fn mark(&self) -> Mark {
+        Mark(self.transcript_len())
     }
 
     /// Block until a line on `want` satisfies `pred`, or the TEST's one deadline
@@ -234,20 +357,27 @@ impl ChildIo {
     /// Takes the `Stage` itself, never a `Duration`: the timeout comes from
     /// `Stage::remaining()`, the one place a per-wait timeout is computed, so no
     /// call site can be handed a fresh allowance and none can double-spend.
+    ///
+    /// `mark` bounds the window the expiry check may consider. The transcript is
+    /// CUMULATIVE across the whole test, so without a window an earlier stage's
+    /// already-consumed line would satisfy a later wait — `await_write_ack` awaits
+    /// five separate `OK`s in one test, so the first would silently satisfy all
+    /// five, and a wedged session would read as green. A false PASS is strictly
+    /// worse than a confusing diagnostic.
+    ///
+    /// THE MARK COMES FROM THE CALLER, TAKEN BEFORE THE OPERATION (job 243,
+    /// finding 1). Taking it here made the window start AFTER the `writeln!` /
+    /// `kill` that produces the awaited line, so a reader that recorded a fast
+    /// response and was then descheduled before publishing it fell outside the
+    /// window AND outside the channel — excluded from both halves of the expiry
+    /// check.
     pub fn wait_for(
         &self,
+        mark: Mark,
         want: Stream,
         pred: impl Fn(&str) -> bool,
         stage: &Stage,
     ) -> Result<(String, Duration), WaitEnd> {
-        // The transcript is CUMULATIVE across the whole test, so the expiry check
-        // below must look only at what was recorded from HERE ON. Without this
-        // mark, an earlier stage's already-consumed line would satisfy a later
-        // wait — `await_write_ack` awaits five separate `OK`s in one test, so the
-        // first one would silently satisfy all five. A false PASS is strictly
-        // worse than a confusing diagnostic, which is why the window exists and
-        // why the failure message reports how many lines it covered.
-        let mark = self.transcript_len();
         loop {
             let remaining = stage.remaining();
             if remaining.is_zero() {
@@ -288,11 +418,18 @@ impl ChildIo {
                 if let Some(line) = drained.matched {
                     return Ok((line, stage.spent()));
                 }
+                // ONE SNAPSHOT, used for the verdict AND for the message (job 243,
+                // finding 1). Round 11 scanned the transcript and then re-read it
+                // to render, which is two acquisitions of one lock: a line
+                // appended in between appeared in a message that had just called
+                // it absent. The snapshot below is the only read from here on.
+                //
                 // The transcript lines carry the harness's own `[stream] ` tag, so
-                // the scan strips it and applies the predicate to the child's own
-                // text — `await_write_ack` matches on the WHOLE trimmed line.
-                if let Some(line) = self.transcript_match(want, &pred, mark) {
-                    return Ok((line, stage.spent()));
+                // the window strips it and the predicate sees the child's own text
+                // — `await_write_ack` matches on the WHOLE trimmed line.
+                let snapshot = self.snapshot(mark);
+                if let Some(line) = snapshot.window_on(want).find(|l| pred(l)) {
+                    return Ok((line.to_string(), stage.spent()));
                 }
                 // Only now can a cause be named, and the drain above is what
                 // distinguishes them (roborev job 236, finding 3): a drain that
@@ -300,11 +437,12 @@ impl ChildIo {
                 // SENDERS reports closed pipes. Collapsing the two reported
                 // "pipes still open" about a child whose readers had both ended.
                 return Err(if drained.disconnected {
-                    WaitEnd::PipesClosed(stage.spent())
-                } else {
-                    WaitEnd::DeadlineReached {
-                        examined: self.transcript_len().saturating_sub(mark),
+                    WaitEnd::PipesClosed {
+                        after: stage.spent(),
+                        snapshot,
                     }
+                } else {
+                    WaitEnd::DeadlineReached { snapshot }
                 });
             }
             match self
@@ -320,7 +458,12 @@ impl ChildIo {
                 // Both readers ended: the child's pipes are closed and the
                 // buffer is drained, so no further line can ever arrive.
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(WaitEnd::PipesClosed(stage.spent()))
+                    return Err(WaitEnd::PipesClosed {
+                        after: stage.spent(),
+                        // Taken here for the same reason as at expiry: the message
+                        // must render the bytes this verdict was taken against.
+                        snapshot: self.snapshot(mark),
+                    });
                 }
             }
         }
@@ -374,37 +517,32 @@ impl ChildIo {
         self.transcript.lock().map(|t| t.len()).unwrap_or(0)
     }
 
-    /// Search the TRANSCRIPT — the store [`ChildIo::transcript_text`] renders —
-    /// for a line on `want` satisfying `pred`, considering only lines recorded at
-    /// or after `mark`. Returns the child's own text with the harness's
-    /// `[stream] ` tag stripped, so the caller receives the same shape the
-    /// channel path returns.
+    /// ONE read of the transcript, under ONE lock acquisition: the store the
+    /// failure message renders, windowed at `mark`.
     ///
-    /// Reads nothing but memory: it cannot extend the deadline.
-    ///
-    /// THE WINDOW IS COPIED OUT OF THE LOCK BEFORE THE PREDICATE RUNS. `pred` is
-    /// caller code, and applying it while holding the transcript lock deadlocks
-    /// any predicate that touches the transcript — a std `Mutex` is not
-    /// reentrant. Found the hard way: the first version of the plant below did
-    /// exactly that and wedged the test binary for nine minutes. Copying also
-    /// keeps the hold time proportional to the window rather than to whatever the
-    /// predicate does, so a reader thread is never blocked from RECORDING while a
-    /// decision is being made.
-    fn transcript_match(
-        &self,
-        want: Stream,
-        pred: &impl Fn(&str) -> bool,
-        mark: usize,
-    ) -> Option<String> {
-        let window: Vec<String> = {
-            let t = self.transcript.lock().ok()?;
-            t.get(mark..)?
-                .iter()
-                .filter_map(|l| l.strip_prefix(want.transcript_prefix()))
-                .map(str::to_string)
-                .collect()
-        };
-        window.into_iter().find(|l| pred(l))
+    /// Every expiry verdict and every message it produces comes from a value of
+    /// this type, so "the message prints evidence the decision did not see" is not
+    /// expressible (job 243, finding 1). Reads nothing but memory, so it cannot
+    /// extend the deadline; and the whole transcript is COPIED, so the lock is
+    /// released before any caller predicate runs (a std `Mutex` is not reentrant —
+    /// applying a predicate that touches the transcript while holding it wedged the
+    /// test binary for nine minutes once).
+    fn snapshot(&self, mark: Mark) -> TranscriptSnapshot {
+        match self.transcript.lock() {
+            Ok(t) => TranscriptSnapshot {
+                lines: t.clone(),
+                mark: mark.0,
+                available: true,
+            },
+            // A poisoned lock is REPORTED, never rendered as an empty transcript:
+            // "the child said nothing" and "a reader thread panicked" are different
+            // facts, and only one of them is about the child.
+            Err(_) => TranscriptSnapshot {
+                lines: Vec::new(),
+                mark: 0,
+                available: false,
+            },
+        }
     }
 
     /// Non-blocking: consume whatever the readers have queued.
@@ -417,28 +555,25 @@ impl ChildIo {
     /// checked to the end before the disconnect is reported, which `try_recv`
     /// guarantees: it yields `Disconnected` only once the queue is empty AND every
     /// sender is gone.
-    fn drain_new(&self) -> DrainNew {
-        let mut lines = 0;
+    fn drain_new(&self) -> DrainEnd {
         loop {
             match self.rx.try_recv() {
-                Ok(_) => lines += 1,
-                Err(mpsc::TryRecvError::Empty) => {
-                    return DrainNew {
-                        lines,
-                        disconnected: false,
-                    }
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return DrainNew {
-                        lines,
-                        disconnected: true,
-                    }
-                }
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => return DrainEnd::Empty,
+                Err(mpsc::TryRecvError::Disconnected) => return DrainEnd::Disconnected,
             }
         }
     }
 
     /// Everything the child has said so far, indented for a panic message.
+    ///
+    /// FOR CLAIMS THAT ARE NOT ABOUT THE TRANSCRIPT (job 243, finding 1). A wait
+    /// or poll failure asserts that an awaited line is ABSENT, so its message must
+    /// render the snapshot its verdict was taken from — `WaitEnd::transcript` /
+    /// `PollFail::transcript` — or a later append could contradict it. An exit
+    /// status or a missing row is a different claim, whose evidence is the status
+    /// or the rows; the transcript is CONTEXT there, and a fresh read of it can
+    /// contradict nothing.
     pub fn transcript_text(&self) -> String {
         match self.transcript.lock() {
             Ok(t) if t.is_empty() => {
@@ -473,6 +608,14 @@ impl ChildIo {
 // output lines and 0 new durable artifacts` is a materially different diagnosis
 // from one that says the flush was still landing when the deadline passed.
 
+/// What [`poll_with_progress`] returns.
+///
+/// The failure is BOXED because it carries the transcript snapshot its verdict was
+/// taken from (job 243, finding 1) and clippy's `result_large_err` is right that a
+/// 150-byte `Err` on a hot success path is the wrong shape. It is allocated only on
+/// the failure path, which then panics.
+pub type PollOutcome<T> = Result<(T, Duration), Box<PollFail>>;
+
 /// What a [`poll_with_progress`] gave up with: the observation, never a cause.
 #[derive(Debug)]
 pub struct PollFail {
@@ -482,6 +625,10 @@ pub struct PollFail {
     deadline: String,
     /// How long since anything at all was observed.
     since_progress: Duration,
+    /// New transcript lines since the poll began, COUNTED FROM THE SNAPSHOT below
+    /// — the same bytes the message renders (job 243, finding 1). Counting the
+    /// channel drains instead let the message report "0 new output lines" beside a
+    /// printed transcript that showed some.
     new_lines: usize,
     new_artifacts: usize,
     /// The artifact count from the iteration that declared the timeout — THE SAME
@@ -496,9 +643,17 @@ pub struct PollFail {
     /// the old drain discarded the distinction.
     pipes_closed: bool,
     data_dir: PathBuf,
+    /// The ONE transcript read taken at the verdict: both `new_lines` above and
+    /// the rendered transcript come from it.
+    snapshot: TranscriptSnapshot,
 }
 
 impl PollFail {
+    /// The transcript the VERDICT was taken from, ready for a panic message.
+    pub fn transcript(&self) -> String {
+        self.snapshot.render()
+    }
+
     /// What the poll observed — never why it happened.
     ///
     /// There is exactly ONE way to give up now (the test's deadline passed), so
@@ -621,7 +776,7 @@ pub fn poll_with_progress<T>(
     data_dir: &Path,
     stage: &Stage,
     step: impl FnMut(Duration, usize) -> Option<T>,
-) -> Result<(T, Duration), PollFail> {
+) -> PollOutcome<T> {
     poll_with_progress_sampled(io, data_dir, || count_data_db(data_dir), stage, step)
 }
 
@@ -639,16 +794,20 @@ fn poll_with_progress_sampled<T>(
     mut sample: impl FnMut() -> usize,
     stage: &Stage,
     mut step: impl FnMut(Duration, usize) -> Option<T>,
-) -> Result<(T, Duration), PollFail> {
+) -> PollOutcome<T> {
     const SLICE: Duration = Duration::from_millis(100);
     let mut last_progress = Instant::now();
+    // The poll's own transcript window, taken BEFORE its first sample or step, so
+    // "new output lines" means lines recorded during THIS poll (job 243, finding 1
+    // — the mark precedes the operation, and here the poll IS the operation).
+    let mark = io.mark();
+    let mut prev_lines = io.transcript_len();
     // The baseline, taken before any step runs: `new_artifacts` counts what
     // appeared DURING the poll, so iteration 0 must have something to differ
     // from. It is ALSO iteration 0's sample — taking a second scan at the first
     // loop top is the redundant walk job 243 finding 2 found.
     let mut prev_artifacts = sample();
     let mut artifacts = prev_artifacts;
-    let mut new_lines = 0usize;
     let mut new_artifacts = 0usize;
 
     loop {
@@ -661,9 +820,13 @@ fn poll_with_progress_sampled<T>(
             prev_artifacts = artifacts;
             last_progress = Instant::now();
         }
+        // The channel MUST still be drained — it is what keeps a chatty child from
+        // filling the pipe buffer — but the progress COUNT is read from the
+        // transcript, the store this poll's failure message renders.
         let drained = io.drain_new();
-        if drained.lines > 0 {
-            new_lines += drained.lines;
+        let lines_now = io.transcript_len();
+        if lines_now > prev_lines {
+            prev_lines = lines_now;
             last_progress = Instant::now();
         }
         // EOF on both pipes is a FACT the failure reports, never a reason to stop
@@ -691,16 +854,21 @@ fn poll_with_progress_sampled<T>(
             if let Some(done) = step(Duration::ZERO, artifacts) {
                 return Ok((done, stage.spent()));
             }
-            return Err(PollFail {
+            // ONE transcript read for the verdict: it supplies BOTH the reported
+            // line count and the rendered transcript, so the two cannot disagree
+            // and no later append can contradict the message (job 243, finding 1).
+            let snapshot = io.snapshot(mark);
+            return Err(Box::new(PollFail {
                 stage_spent: stage.spent(),
                 deadline: stage.describe(),
                 since_progress: last_progress.elapsed(),
-                new_lines,
+                new_lines: snapshot.examined(),
                 new_artifacts,
                 artifacts_now: artifacts,
-                pipes_closed: drained.disconnected,
+                pipes_closed: drained == DrainEnd::Disconnected,
                 data_dir: data_dir.to_path_buf(),
-            });
+                snapshot,
+            }));
         }
         if let Some(done) = step(SLICE.min(remaining), artifacts) {
             return Ok((done, stage.spent()));
@@ -1024,9 +1192,16 @@ pub fn start_writable_session(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn cqlite interactive writable session");
-    let io = ChildIo::attach(&mut child);
+    // The mark comes back from `attach`, taken before either reader existed — the
+    // earliest point at which one can be taken (job 243, finding 1).
+    let (io, mark) = ChildIo::attach(&mut child);
 
-    let ready = io.wait_for(Stream::Stderr, |l| l.contains(MARKER_SESSION_READY), &stage);
+    let ready = io.wait_for(
+        mark,
+        Stream::Stderr,
+        |l| l.contains(MARKER_SESSION_READY),
+        &stage,
+    );
     if let Err(end) = &ready {
         let _ = child.kill();
         panic!(
@@ -1038,10 +1213,10 @@ pub fn start_writable_session(
              THIS host. It does NOT distinguish a child that never reached the interactive loop \
              from one that was never scheduled, nor either of those from drift in the product's \
              banner text.\n\
-             child transcript:\n{}\n{}",
+             child transcript (the snapshot the verdict was taken from):\n{}\n{}",
             stage.describe(),
             end.describe(),
-            io.transcript_text(),
+            end.transcript(),
             stage.report()
         );
     }
@@ -1053,12 +1228,17 @@ pub fn start_writable_session(
 /// Wait for a write acknowledgement (`OK` on stdout). Returns how long the
 /// round-trip took.
 ///
+/// `mark` MUST have been taken before the statement was written to the child's
+/// stdin (job 243, finding 1): the ack can be recorded by a reader thread and left
+/// unpublished, and a mark taken after the `writeln!` excludes exactly that line
+/// from the expiry check's window.
+///
 /// Shared by both tests. The failure reports what it awaited, how the one deadline
 /// was derived, and what the child actually said. It does NOT conclude that the
 /// session dead-ended, nor that no interactive writable session exists (the two
 /// causes the retired messages named), neither of which a timeout establishes.
-pub fn await_write_ack(io: &ChildIo, what: &str, stage: &Stage) -> Duration {
-    match io.wait_for(Stream::Stdout, |l| l.trim() == "OK", stage) {
+pub fn await_write_ack(io: &ChildIo, mark: Mark, what: &str, stage: &Stage) -> Duration {
+    match io.wait_for(mark, Stream::Stdout, |l| l.trim() == "OK", stage) {
         Ok((_, took)) => took,
         Err(end) => panic!(
             "stage {}: {what} was not acknowledged with `OK` on the child's stdout.\n\
@@ -1069,11 +1249,11 @@ pub fn await_write_ack(io: &ChildIo, what: &str, stage: &Stage) -> Duration {
              deadline. It does NOT establish whether the write was rejected, is still in progress, \
              was never read, or whether the child was descheduled — inspect the transcript below \
              (the child prints `Error: ...` on stderr for a rejected statement).\n\
-             child transcript:\n{}\n{}",
+             child transcript (the snapshot the verdict was taken from):\n{}\n{}",
             stage.name(),
             stage.describe(),
             end.describe(),
-            io.transcript_text(),
+            end.transcript(),
             stage.report()
         ),
     }
