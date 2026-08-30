@@ -199,3 +199,14 @@ stage. So: **#3515's condition is NOT reproduced.** What is established is (i) t
 is no longer bounded below what it was, (ii) it is progress-checked, (iii) the calibration
 demonstrably fires under real contention, and (iv) no failure message asserts an unestablishable
 cause. Whether the class is closed on the real gate host is not shown by these runs.
+
+### Round 3 addendum — file-size split
+
+The floor-invariant work pushed the single test file to 1664 lines and the lite
+gate's `file-size` component FAILed it (limit 1500, `334 -> 1664`). Split by
+responsibility per #1135: `tests/graceful_shutdown_support/mod.rs` (1262 lines)
+holds the instrument plus the unit tests that constrain it;
+`tests/graceful_shutdown_tests.rs` (423 lines) holds only the two integration
+tests. Deliberately NOT `tests/common/`: that module is included by ~10 other
+test targets, each of which would compile an unused harness and trip `dead_code`
+under `-D warnings`. Lite re-run: PASS (all five components).
