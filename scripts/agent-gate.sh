@@ -5869,7 +5869,23 @@ run_node_bindings() {
   fi
   # Strict-fixture mode on the FULL gate only, honouring the documented #2078 opt-out.
   # See the scope note above for why enrollment in DATASET_COMPONENTS is not enough.
+  # ENFORCED WITH `env -u`, NOT MERELY BY OMITTING THE ASSIGNMENT (roborev round 1, B2;
+  # the same lesson is already recorded on the bti-multiclustering lane, which cites it
+  # as "plain `env` INHERITS an exported value, and exporting CQLITE_REQUIRE_FIXTURES=1
+  # is routine"). Both variables are strict-mode triggers for this suite —
+  # `bindings/node/__test__/setup.js` ORs them (`CQLITE_REQUIRE_FIXTURES` ||
+  # `CQLITE_PARITY_REQUIRE_DATASETS`), and `abort-safety.test.js` reads both to turn a
+  # skip into a hard failure. So an inherited export would make `--only` or the
+  # documented #2078 opt-out FAIL while the census line printed below claims fixtures are
+  # optional: an opt-out that the SUMMARY reports as TAKEN but that does not let the gate
+  # finish, which is exactly what #2078's own per-lane-veto note forbids.
+  #
+  # The mode is decided by THIS SCRIPT's own state (`$ONLY`/`$LITE`/the opt-out) and the
+  # inherited variables are then unset — never the reverse. Deriving the mode FROM the
+  # inherited variables would let the ambient environment redefine what the gate
+  # certifies.
   local require_fixtures=0 fixture_note
+  local -a fixture_env=()
   if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
     require_fixtures=1
     fixture_note="CQLITE_REQUIRE_FIXTURES=1 — an absent corpus fails ONCE, by name, in setup.js instead of as 14 separate beforeAll throws, and parity.test.js's test.skip placeholder (the one corpus-conditional path that would pass silently) cannot fire"
@@ -5877,6 +5893,11 @@ run_node_bindings() {
     fixture_note="CQLITE_REQUIRE_FIXTURES unset (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — with a corpus absent the 14 dataset-gated suites would THROW individually and parity.test.js would test.skip, so this run does NOT validate that half"
   else
     fixture_note="CQLITE_REQUIRE_FIXTURES unset (--only/--lite probe run) — with a corpus absent the 14 dataset-gated suites would THROW individually and parity.test.js would test.skip"
+  fi
+  if [ "$require_fixtures" = 1 ]; then
+    fixture_env=(CQLITE_REQUIRE_FIXTURES=1)
+  else
+    fixture_env=(-u CQLITE_REQUIRE_FIXTURES -u CQLITE_PARITY_REQUIRE_DATASETS)
   fi
 
   local -a census=()
@@ -5910,7 +5931,11 @@ run_node_bindings() {
   # agents learn to waive. Same rule as `_package_test_targets` preferring cargo
   # metadata over parsing `[[test]]` stanzas.
   local list_file="$LOG_DIR/$name.listtests.txt" suite_n=""
-  if ! CQLITE_LIST_FILE="$list_file" bash -c '
+  # Both strict-mode variables are unset here UNCONDITIONALLY, in every mode: listing
+  # tests needs no corpus, so an inherited strict flag could only turn a healthy
+  # enumeration into a failure. STEP 2 below is where the mode actually applies.
+  if ! env -u CQLITE_REQUIRE_FIXTURES -u CQLITE_PARITY_REQUIRE_DATASETS \
+       CQLITE_LIST_FILE="$list_file" bash -c '
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
       if [ -f package-lock.json ]; then npm ci; else npm install; fi
@@ -5957,12 +5982,15 @@ run_node_bindings() {
   echo "derived suite set: $suite_n *.test.js file(s) (oracle: npx jest --listTests)" >> "$log"
 
   # STEP 2 — run them.
-  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
-     RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" \
-     CQLITE_REQUIRE_FIXTURES_ARG="$require_fixtures" bash -c '
+  # `env "${fixture_env[@]}"` FIRST, because `env`'s -u options must precede any
+  # NAME=VALUE assignments. In strict mode that array IS the assignment; otherwise it is
+  # the pair of -u unsets, so the in-script conditional export this replaced (which could
+  # only ADD the variable, never remove an inherited one) is gone.
+  if env "${fixture_env[@]}" \
+     CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+     RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
-      if [ "$CQLITE_REQUIRE_FIXTURES_ARG" = 1 ]; then export CQLITE_REQUIRE_FIXTURES=1; fi
       npm test' >>"$log" 2>&1; then
     # A green `npm test` is NOT sufficient: jest reports a suite whose every describe
     # was skipped as PASSED, so the exit code alone cannot distinguish 27 suites of
