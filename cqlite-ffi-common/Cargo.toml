@@ -27,16 +27,32 @@ cqlite-core = { path = "../cqlite-core", default-features = false }
 # Declared locally at "0.4" to match cqlite-core, cqlite-cli and bindings/node.
 # There is deliberately no `[workspace.dependencies]` entry (issue #1452 non-goal).
 num-bigint = "0.4"
+# `serde_json` (issue #3505): a REAL dependency, not dev-only, because
+# `json_number` classifies a `serde_json::Number` — the type both bindings
+# already hold when they convert a `Value::Json` cell. It enters no new external
+# code into either binding: both `bindings/python` and `bindings/node` already
+# declare this exact workspace line themselves, and `cqlite-core` pulls it in
+# regardless. `tests/dependency_boundary.rs` measures that it drags in no FFI
+# framework (`serde_json` is already in that test's expected-allowed list).
+#
+# Deliberately NOT `features = ["arbitrary_precision"]` — see the AC6 section of
+# `src/json_number.rs` for the full decision. Cargo unifies features across the
+# graph, so that flag cannot be scoped to the bindings and it changes `Number`'s
+# `Serialize` impl in a way that breaks the Parquet/Arrow/Flight paths.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-# JSON parsing for the `cargo metadata` dependency-closure measurement
-# (`tests/dependency_boundary.rs`). A dev-dependency, so it is not linked into
-# either binding; it IS inside the measured closure, which is deliberate — the
-# no-FFI-framework rule covers dev-dependencies too.
-serde_json = { workspace = true }
+# NOTE (issue #3505): `serde_json` used to be declared HERE, as a dev-dependency
+# for the `cargo metadata` dependency-closure measurement in
+# `tests/dependency_boundary.rs`. It is now a real `[dependencies]` entry (see
+# above) because `src/json_number.rs` needs it at build time, so this section no
+# longer repeats it — a dependency listed in both places is one line that can
+# drift. The closure measurement is unaffected: the no-FFI-framework rule covers
+# regular, dev and build dependencies alike, and `serde_json` is in that test's
+# expected-allowed list either way.
 # SHA-256, for the exact half of the committed vector expectations: a
 # multi-kilobyte rendering is committed as its digest (readable) plus the
 # SHA-256 hex of the FULL rendering (exact). A DEV-dependency, so neither
