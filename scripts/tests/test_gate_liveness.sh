@@ -359,6 +359,15 @@ if [ -d /proc/1 ]; then
     pids=$(ls -1 /proc 2>/dev/null | grep -E '^[0-9]+$' | head -400)
     mismatch=0; compared=0
     while read -r pid mine; do
+      # `_starttime` now returns a TIERED, TAGGED token (`proc:<ticks>` or `ps:<lstart>`) so the
+      # beater can tell WHICH identity source it used (job 185). This differential compares the
+      # /proc arm, so the tag is stripped; a `ps:`-tagged answer means /proc was unavailable for
+      # that pid and there is nothing to compare against awk.
+      case "$mine" in
+        proc:*) mine="${mine#proc:}" ;;
+        ps:*)   continue ;;
+        *)      ;;
+      esac
       theirs=$(awk '{ for(i=NF;i>0;i--) if ($i ~ /\)$/) { print $(i+20); exit } }' "/proc/$pid/stat" 2>/dev/null)
       # A pid that exited between the two reads yields empty on one side; that is a
       # race, not a disagreement, so it is not counted either way.

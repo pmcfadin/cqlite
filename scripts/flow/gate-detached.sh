@@ -257,9 +257,22 @@ printf 'exec bash %q "$@"\n' "$REPO_ROOT/scripts/agent-gate.sh" >> "$ENV_SCRIPT"
 # Compared three ways because one is not enough: the literal strings may differ while pointing at
 # the same file (`./x` vs `x`, a symlinked directory, a hard link), so `-ef` (same device+inode)
 # is the authoritative test and is applied whenever both paths exist.
+# CANONICALISE before comparing (roborev job 185). `-ef` only works on files that EXIST, and the
+# log normally does not exist yet at this point — so `--summary "$PWD/x" --log "$PWD/./x"` slipped
+# through, and creating the log then created the summary path too. Resolving each path's PARENT
+# physically (`cd … && pwd -P`, which normalises `.`, `..`, doubled slashes and symlinked
+# directory components) and re-appending the basename gives a comparable form for paths that do
+# not exist yet. The `-ef` checks are kept for the cases canonicalisation cannot see — a hard
+# link between two genuinely different names — and are ALSO repeated after the log is created.
+_canon() {  # _canon <path> -> physically-resolved dir + literal basename
+  local d b phys
+  d=$(dirname -- "$1"); b=$(basename -- "$1")
+  if phys=$(cd "$d" 2>/dev/null && pwd -P); then printf '%s/%s' "$phys" "$b"; else printf '%s' "$1"; fi
+}
+_c_log=$(_canon "$LOGFILE"); _c_sum=$(_canon "$SUMMARY"); _c_hb=$(_canon "$SUMMARY.heartbeat")
 _alias_of=""
-[ "$LOGFILE" = "$SUMMARY" ] && _alias_of="the summary"
-[ -z "$_alias_of" ] && [ "$LOGFILE" = "$SUMMARY.heartbeat" ] && _alias_of="the heartbeat"
+[ "$_c_log" = "$_c_sum" ] && _alias_of="the summary"
+[ -z "$_alias_of" ] && [ "$_c_log" = "$_c_hb" ] && _alias_of="the heartbeat"
 if [ -z "$_alias_of" ] && [ -e "$LOGFILE" ]; then
   [ -e "$SUMMARY" ] && [ "$LOGFILE" -ef "$SUMMARY" ] && _alias_of="the summary (same inode)"
   [ -z "$_alias_of" ] && [ -e "$SUMMARY.heartbeat" ] && [ "$LOGFILE" -ef "$SUMMARY.heartbeat" ] \
@@ -278,7 +291,27 @@ if [ -L "$LOGFILE" ] || { [ -e "$LOGFILE" ] && [ ! -f "$LOGFILE" ]; }; then
   exit 1
 fi
 # Pre-create the log so the caller can tail it immediately even before the unit starts.
-: > "$LOGFILE" 2>/dev/null || { echo "gate-detached: cannot write log $LOGFILE" >&2; exit 1; }
+# The redirection is wrapped in a subshell so BASH's own "No such file or directory" for a bad
+# path is suppressed: a `2>/dev/null` on the command does not cover an error the shell itself
+# reports for the redirect, and the raw message landed beside our diagnostic.
+( : > "$LOGFILE" ) 2>/dev/null || {
+  echo "gate-detached: cannot create the log at '$LOGFILE' (missing directory, or not writable)." >&2
+  echo "               Refusing to launch a gate whose output would be unreadable (#3473)." >&2
+  exit 1
+}
+# ...and NOW that it exists, repeat the inode comparison. Canonicalisation above handles the
+# spellings it can see; this catches whatever it cannot, and it is the check that would have
+# caught the two-nonexistent-paths case even without canonicalisation (job 185).
+if [ -e "$SUMMARY" ] && [ "$LOGFILE" -ef "$SUMMARY" ]; then
+  echo "gate-detached: creating the log revealed it is the SAME FILE as the summary" >&2
+  echo "               ('$LOGFILE' -ef '$SUMMARY'). Refusing (#3473)." >&2
+  exit 1
+fi
+if [ -e "$SUMMARY.heartbeat" ] && [ "$LOGFILE" -ef "$SUMMARY.heartbeat" ]; then
+  echo "gate-detached: creating the log revealed it is the SAME FILE as the heartbeat" >&2
+  echo "               ('$LOGFILE' -ef '$SUMMARY.heartbeat'). Refusing (#3473)." >&2
+  exit 1
+fi
 
 # VERIFY THE SUMMARY LOCATION BEFORE LAUNCHING (roborev job 160, Medium). Only the log was
 # checked, so a bad summary directory produced a running-but-UNMONITORABLE gate: the gate

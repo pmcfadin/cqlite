@@ -3515,36 +3515,56 @@ fi
 # a gate component. A missing beater must not make the gate un-runnable, and it cannot
 # manufacture a false green either — with no beat, the reader reports UNKNOWN (naming
 # the absence), which is exactly the pre-#3473 state of knowledge and never RUNNING.
-# _hb_proc_starttime <pid> -> field 22 of /proc/<pid>/stat (immutable for a process's life), or
-# empty where /proc is absent (macOS/BSD). Field 2 may contain spaces AND parens, so fields are
-# counted from after the LAST ')'.
+# _hb_proc_starttime <pid> -> a process-IDENTITY token, or empty when none can be obtained.
+#
+# TIERED, because /proc does not exist on macOS/BSD — first-class gate hosts (roborev job 185).
+# The previous version returned empty there, which made _hb_is_ours ALWAYS false, which made
+# _hb_ensure spawn a fresh beater at EVERY component boundary without stopping the old one: a
+# full gate would have accumulated ~30 concurrent beaters. That was my own fix for the
+# recycled-pid hazard collapsing "cannot tell" onto the wrong answer.
+#
+#   proc:<ticks>  field 22 of /proc/<pid>/stat — immutable for the process's life, tick
+#                 granularity. Field 2 may contain spaces AND parens, so fields are counted from
+#                 after the LAST ')'.
+#   ps:<lstart>   `ps -o lstart=` — portable (POSIX-ish, present on Linux and macOS), stable, and
+#                 empty for an absent pid. One-SECOND granularity, so two processes started in
+#                 the same second are indistinguishable; that is immaterial here because pid
+#                 REUSE requires cycling the whole pid space, which takes far longer than a
+#                 second. Strictly better than a bare `kill -0`.
 _hb_proc_starttime() {
-  local raw rest
-  raw=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
-  rest="${raw##*) }"
-  # shellcheck disable=SC2086  # deliberate word-split into positional params
-  set -- $rest
-  [ $# -ge 20 ] || return 0
-  printf '%s' "${20}"
+  local raw rest ls
+  raw=$(cat "/proc/$1/stat" 2>/dev/null)
+  if [ -n "$raw" ]; then
+    rest="${raw##*) }"
+    # shellcheck disable=SC2086  # deliberate word-split into positional params
+    set -- $rest
+    if [ $# -ge 20 ]; then printf 'proc:%s' "${20}"; return 0; fi
+  fi
+  ls=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ')
+  [ -n "$ls" ] && printf 'ps:%s' "$ls"
+  return 0
 }
 
-# _hb_is_ours: is HEARTBEAT_PID still the beater WE started? Affirmative answers only.
-#   starttime matches  -> yes (reuse-proof)
-#   pid absent         -> no
-#   starttime differs  -> no (pid recycled)
-#   cannot tell (no /proc, or no captured starttime) -> NO, deliberately. The consequences are
-#     asymmetric: a false "yes" makes this gate SIGNAL an unrelated process, while a false "no"
-#     merely means we neither respawn nor signal — and the beater self-terminates within one
-#     interval anyway, because it checks whether ITS gate is alive. Refusing to guess costs
-#     nothing and cannot hit a stranger.
-_hb_is_ours() {
-  [ -n "${HEARTBEAT_PID:-}" ] || return 1
-  kill -0 "$HEARTBEAT_PID" 2>/dev/null || return 1
-  [ -n "${HEARTBEAT_STARTTIME:-}" ] || return 1
+# _hb_state -> `ours` | `gone` | `unverifiable`. THREE values, because the two actions this
+# feeds want opposite defaults when identity cannot be established (roborev job 185):
+#
+#   respawning on "cannot tell" spawns a DUPLICATE beater every component boundary;
+#   signalling  on "cannot tell" can SIGTERM an unrelated process.
+#
+# A two-valued predicate has to pick one of those to be wrong about. So it returns three states
+# and each caller chooses for itself: _hb_ensure respawns ONLY on `gone`, _hb_stop signals ONLY
+# on `ours`, and `unverifiable` means do nothing — the beater self-terminates within one interval
+# because it checks whether ITS gate is alive.
+_hb_state() {
+  [ -n "${HEARTBEAT_PID:-}" ] || { printf 'gone'; return 0; }
+  kill -0 "$HEARTBEAT_PID" 2>/dev/null || { printf 'gone'; return 0; }
   local now
   now=$(_hb_proc_starttime "$HEARTBEAT_PID")
-  [ -n "$now" ] || return 1
-  [ "$now" = "$HEARTBEAT_STARTTIME" ]
+  if [ -z "$now" ] || [ -z "${HEARTBEAT_STARTTIME:-}" ]; then
+    printf 'unverifiable'; return 0
+  fi
+  if [ "$now" = "$HEARTBEAT_STARTTIME" ]; then printf 'ours'; else printf 'gone'; fi
+  return 0
 }
 
 _hb_start() {
@@ -3580,9 +3600,11 @@ _hb_ensure() {
   [ "${BASHPID:-$$}" = "$$" ] || return 0   # pool subshells: not their job (cf. #1737)
   [ "$HEARTBEAT_STATE" = "on" ] || return 0
   [ -n "$HEARTBEAT_PID" ] || return 0
-  _hb_is_ours && return 0
-  # Not ours (gone, recycled, or unverifiable): forget it and start a fresh beater. Never signal
-  # the old pid here — that is exactly the stranger-SIGTERM hazard _hb_is_ours exists to avoid.
+  # Respawn ONLY when the beater is verifiably gone. `unverifiable` means a process with that pid
+  # is still there and we cannot prove it is not ours — respawning then would double the beaters
+  # at every boundary, which is precisely what happened on hosts without /proc.
+  [ "$(_hb_state)" = gone ] || return 0
+  # Never signal the old pid here — that is the stranger-SIGTERM hazard _hb_state exists for.
   HEARTBEAT_PID=""
   HEARTBEAT_STARTTIME=""
   _hb_start
@@ -3607,7 +3629,7 @@ _hb_stop() {
   # otherwise receive this SIGTERM. If we cannot prove it, we send nothing: the beater checks its
   # own gate every interval and exits on its own, so the worst case is a beater that lingers
   # seconds longer — strictly better than terminating an unrelated process.
-  if ! _hb_is_ours; then
+  if [ "$(_hb_state)" != ours ]; then
     HEARTBEAT_PID=""
     HEARTBEAT_STARTTIME=""
     return 0

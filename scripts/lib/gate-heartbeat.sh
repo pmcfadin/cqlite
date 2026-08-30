@@ -72,20 +72,32 @@ case "$INTERVAL" in ''|*[!0-9]*) echo "gate-heartbeat: --interval must be numeri
 # _starttime <pid> -> field 22 of /proc/<pid>/stat, or empty when unobtainable.
 # Field 2 (comm) may contain spaces AND parentheses, so the fields are counted from
 # after the LAST ')' — the standard way to parse this file safely.
+# TIERED identity (roborev job 185). /proc does not exist on macOS/BSD, and falling back to a
+# bare `kill -0` there meant the beater could not tell its gate from a RECYCLED pid — so after a
+# reap it would keep publishing for a stranger and a reader would report RUNNING for a gate that
+# is gone. `ps -o lstart=` is portable, stable, and empty for an absent pid; its one-second
+# granularity is immaterial for reuse detection, which requires cycling the whole pid space.
 _starttime() {
-  local pid="$1" raw rest
-  raw=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
-  rest="${raw##*) }"
-  # rest now begins at field 3 (state); starttime is field 22 => the 20th of rest.
-  # shellcheck disable=SC2086  # deliberate word-split into positional params
-  set -- $rest
-  [ $# -ge 20 ] || return 1
-  printf '%s' "${20}"
+  local pid="$1" raw rest ls
+  raw=$(cat "/proc/$pid/stat" 2>/dev/null)
+  if [ -n "$raw" ]; then
+    rest="${raw##*) }"
+    # rest begins at field 3 (state); starttime is field 22 => the 20th of rest.
+    # shellcheck disable=SC2086  # deliberate word-split into positional params
+    set -- $rest
+    if [ $# -ge 20 ]; then printf 'proc:%s' "${20}"; return 0; fi
+  fi
+  ls=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ')
+  if [ -n "$ls" ]; then printf 'ps:%s' "$ls"; return 0; fi
+  return 1
 }
 
-PARENT_CHECK=starttime
 GATE_STARTTIME=$(_starttime "$GATE_PID") || GATE_STARTTIME=""
-[ -n "$GATE_STARTTIME" ] || PARENT_CHECK=kill0
+case "$GATE_STARTTIME" in
+  proc:*) PARENT_CHECK=starttime ;;   # tick granularity, fully reuse-proof
+  ps:*)   PARENT_CHECK=lstart ;;      # second granularity, reuse-proof in practice
+  *)      PARENT_CHECK=kill0 ;;       # NEITHER available: existence only, not identity
+esac
 
 # Published purely so a HUMAN reading a heartbeat knows which box wrote it. No verdict
 # depends on it: a reader cannot inspect a pid across machines, and rather than model that,

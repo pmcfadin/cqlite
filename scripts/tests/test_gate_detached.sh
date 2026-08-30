@@ -628,34 +628,12 @@ ou=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$ou" ] && echo "$ou" >
 [ "$rc" = 0 ] && ok "4b.44 control: distinct summary and log paths still launch" \
              || bad "4b.44 control: distinct summary and log paths still launch" "rc=$rc: $out"
 
-# roborev job 183: the GATE must identify its beater by more than a pid, or a recycled pid could
-# be accepted as the beater and SIGTERMed at exit.
 GATE_SH="$REPO_ROOT/scripts/agent-gate.sh"
-if grep -q '^_hb_is_ours() {' "$GATE_SH"; then
-  ok "4b.45 the gate has an affirmative beater-identity check"
-else
-  bad "4b.45 the gate has an affirmative beater-identity check" "_hb_is_ours not found"
-fi
-gbody=$(sed 's/[[:space:]]*#.*$//' "$GATE_SH")
-# _hb_stop must not signal without proving ownership first.
-stopblk=$(sed -n '/^_hb_stop() {$/,/^}$/p' "$GATE_SH")
-if printf '%s\n' "$stopblk" | grep -q '_hb_is_ours'; then
-  ok "4b.46 _hb_stop proves ownership before signalling"
-else
-  bad "4b.46 _hb_stop proves ownership before signalling" "no ownership check before kill"
-fi
-ensblk=$(sed -n '/^_hb_ensure() {$/,/^}$/p' "$GATE_SH")
-if printf '%s\n' "$ensblk" | grep -q '_hb_is_ours'; then
-  ok "4b.47 _hb_ensure decides respawn from the identity check, not a bare kill -0"
-else
-  bad "4b.47 _hb_ensure decides respawn from the identity check" "still a bare kill -0"
-fi
-# The unverifiable case must refuse to signal rather than guess (asymmetric consequences).
-if printf '%s\n' "$stopblk" | grep -q 'return 0'; then
-  ok "4b.48 an unverifiable beater pid is left alone rather than signalled"
-else
-  bad "4b.48 an unverifiable beater pid is left alone rather than signalled" "no early return"
-fi
+# (Job 183's beater-identity assertions lived here and were SUPERSEDED by 4b.56-4b.58 below,
+# which assert the same properties against the three-valued `_hb_state` that replaced the
+# two-valued `_hb_is_ours` in job 185. Kept as one note rather than two sets of near-duplicate
+# cases, one of which would silently rot.)
+
 # BEHAVIOURAL: a real gate must still start a beater and leave none behind.
 if [ "$HAVE_SYSTEMD" = yes ]; then
   bs="$TMP/beater-life.txt"
@@ -679,6 +657,66 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
 else
   skipc "4b.49-4b.50 beater lifecycle" "no working systemd-run --user"
 fi
+
+# roborev job 185: alias detection must work on paths that DO NOT EXIST YET. `-ef` needs both
+# files present, and the log normally does not exist at check time — so two nonexistent spellings
+# of one file slipped through and creating the log created the summary too.
+ad=$(mktemp -d)
+out=$(bash "$LAUNCHER" --summary "$ad/x" --log "$ad/./x" -- --only file-size 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "4b.51 two NONEXISTENT paths resolving to one file are refused (exit $rc)" \
+               || bad "4b.51 two NONEXISTENT paths resolving to one file are refused" "exit 0: $out"
+out=$(bash "$LAUNCHER" --summary "$ad/y" --log "$ad//y" -- --only file-size 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "4b.52 a doubled-slash spelling is refused too (exit $rc)" \
+               || bad "4b.52 a doubled-slash spelling is refused too" "exit 0: $out"
+# The post-creation -ef re-check must exist as well: canonicalisation cannot see every case.
+if grep -q 'creating the log revealed it is the SAME FILE' "$LAUNCHER"; then
+  ok "4b.53 the inode comparison is repeated AFTER the log is created"
+else
+  bad "4b.53 the inode comparison is repeated AFTER the log is created" "not found"
+fi
+# CONTROL: distinct paths in the same directory must still launch.
+out=$(bash "$LAUNCHER" --summary "$ad/s1.txt" --log "$ad/l1.log" -- --only file-size 2>&1); rc=$?
+au=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$au" ] && echo "$au" >> "$UNITS_FILE"
+[ "$rc" = 0 ] && ok "4b.54 control: distinct paths in one directory still launch" \
+             || bad "4b.54 control: distinct paths in one directory still launch" "rc=$rc: $out"
+rm -rf "$ad"
+
+# roborev job 185: identity must be PORTABLE, and "cannot tell" must not cause a respawn. On a
+# host without /proc the previous version made _hb_is_ours always false, so the gate spawned a
+# NEW beater at every component boundary without stopping the old one (~30 on a full gate).
+if grep -q 'ps -o lstart= -p' "$GATE_SH" && grep -q 'ps -o lstart= -p' "$REPO_ROOT/scripts/lib/gate-heartbeat.sh"; then
+  ok "4b.55 both the gate and the beater have a portable (non-/proc) identity fallback"
+else
+  bad "4b.55 both the gate and the beater have a portable identity fallback" "ps -o lstart= missing"
+fi
+if grep -q '^_hb_state() {' "$GATE_SH"; then
+  ok "4b.56 the beater state is THREE-valued (ours / gone / unverifiable)"
+else
+  bad "4b.56 the beater state is three-valued" "_hb_state not found"
+fi
+ensblk2=$(sed -n '/^_hb_ensure() {$/,/^}$/p' "$GATE_SH")
+if printf '%s\n' "$ensblk2" | grep -q '_hb_state)" = gone'; then
+  ok "4b.57 _hb_ensure respawns ONLY on a verifiable 'gone' (never on 'unverifiable')"
+else
+  bad "4b.57 _hb_ensure respawns only on a verifiable 'gone'" "respawn condition not restricted"
+fi
+stopblk2=$(sed -n '/^_hb_stop() {$/,/^}$/p' "$GATE_SH")
+if printf '%s\n' "$stopblk2" | grep -q '_hb_state)" != ours'; then
+  ok "4b.58 _hb_stop signals ONLY on a verifiable 'ours'"
+else
+  bad "4b.58 _hb_stop signals only on a verifiable 'ours'" "signal condition not restricted"
+fi
+# BEHAVIOURAL: a real full-ish gate must end with exactly ZERO beaters, not N.
+bs2="$TMP/beaters2.txt"
+AGENT_GATE_SUMMARY_FILE="$bs2" bash "$GATE_SH" --only roborev-lints >/dev/null 2>&1 </dev/null
+sleep 1
+n=0
+for _c in /proc/[0-9]*/cmdline; do
+  [ -r "$_c" ] || continue
+  case "$(LC_ALL=C tr '\0' ' ' < "$_c" 2>/dev/null)" in *"gate-heartbeat.sh --file $bs2"*) n=$((n + 1)) ;; esac
+done
+[ "$n" -eq 0 ] && ok "4b.59 a multi-boundary gate leaves ZERO beaters (no per-boundary accumulation)" \
+              || bad "4b.59 a multi-boundary gate leaves ZERO beaters" "$n still running"
 
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"

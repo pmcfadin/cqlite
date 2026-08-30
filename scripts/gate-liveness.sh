@@ -479,6 +479,16 @@ if [ "$_shared_clock" = yes ] && [ "$RAW_AGE" -lt $(( -HB_INTERVAL )) ]; then
   # a hand-edited artifact), and it must not read as fresh forever.
   verdict UNKNOWN 4 "heartbeat-in-the-future; beat-epoch $HB_EPOCH is $(( -RAW_AGE ))s ahead of this host's clock, and the beat claims THIS host — so the timestamp is not trustworthy. $_where"
 fi
+# A beat whose beater could not establish ANY identity for its gate (`parent-check: kill0`)
+# cannot support an affirmative RUNNING from the timestamp alone (roborev job 185): after a reap
+# the beater may be publishing for a RECYCLED pid, so the beat proves the beater is alive, not
+# that the gate is. Counter progression below is the same evidence and no weaker, so such a beat
+# simply takes that path. With the portable `lstart` fallback in place this is now rare — it
+# needs a host with neither /proc nor a working `ps -o lstart=`.
+if [ "$HB_CHECK" = kill0 ]; then
+  _shared_clock=no
+  _where="$_where, beater-identity NONE (parent-check kill0) so the timestamp is not trusted"
+fi
 if [ "$_shared_clock" = yes ] && [ "$AGE" -le "$STALE_AFTER" ]; then
   verdict RUNNING 2 "this run beat ${AGE}s ago on this host — it is alive and has not reached a verdict yet; $_where"
 fi

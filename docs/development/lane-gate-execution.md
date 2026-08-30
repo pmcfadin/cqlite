@@ -240,12 +240,20 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
 - Every beat carries `run-id:`, and the reader refuses to answer about a run-id other
   than the one it was asked for — the #2874 reader contract, which holds for a `PASS`
   block just as much as for a beat. **Pass `--run-id` whenever you know it.**
-- The beater verifies the gate pid before **every** beat, pinning `/proc/<pid>/stat` field 22
-  (start time) where available so a recycled pid reads as dead — and the gate applies the same
-  pinning **in the other direction** to its view of the beater, so a recycled pid can never be
-  accepted as the beater and signalled at exit. Where identity cannot be established the gate
-  sends nothing: the consequences are asymmetric (a wrong "yes" signals an unrelated process,
-  while a wrong "no" just leaves a beater that self-terminates within one interval anyway). That check is **local by
+- **Process identity is tiered and portable, and "cannot tell" is a THIRD state.** The beater
+  verifies the gate pid before every beat, and the gate applies the same check in the other
+  direction to its view of the beater. Identity is `/proc/<pid>/stat` field 22 where available,
+  else `ps -o lstart=` — which exists on macOS, is stable, and is empty for a dead pid; its
+  one-second granularity is immaterial for detecting pid *reuse*, which requires cycling the whole
+  pid space. The beat declares which tier it used (`starttime` / `lstart` / `kill0`), and a
+  `kill0`-only beat — no identity at all — cannot earn an epoch-based `RUNNING`.
+
+  The gate's check is **three-valued** (`ours` / `gone` / `unverifiable`) because its two callers
+  want *opposite* defaults for "cannot tell": respawning on it duplicates the beater at every
+  component boundary, while signalling on it can SIGTERM an unrelated process. A two-valued
+  predicate must be wrong about one of them — and it was: an earlier revision with no portable
+  identity made every check fail on macOS, so a full gate would have accumulated ~30 concurrent
+  beaters that nothing could stop. Respawn happens only on `gone`; signalling only on `ours`. That check is **local by
   construction** — the beater always runs on the gate's own host — which is why it survived
   the descope below. A beater that kept beating after its gate died would report a dead gate
   as `RUNNING` forever: this issue's own defect, one level down.
@@ -432,7 +440,7 @@ Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
 Self-tests: `scripts/tests/test_gate_liveness.sh` (147 cases) and
-`scripts/tests/test_gate_detached.sh` (83 cases), both in the full gate's
+`scripts/tests/test_gate_detached.sh` (88 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine
