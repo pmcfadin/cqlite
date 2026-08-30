@@ -634,6 +634,21 @@ ledger <code dir="auto">docs/reports/delivery-telemetry.jsonl</code> (governed b
 <code dir="auto">docs/reports/delivery-telemetry.schema.json</code>) using <code dir="auto">scripts/delivery-telemetry.py record</code>. A
 reopened issue that ships more than once legitimately gets one record per shipped PR — retro
 aggregation by issue treats such multi-cycle issues as multiple deliveries, not one (issue #2314).
+The same holds for an issue that ships one or more <strong>slices</strong> while deliberately remaining OPEN
+(issue #3550): stamp each with <code dir="auto">--slice</code>, which writes <code dir="auto">closed_at: null</code> (the marker) and bounds
+<code dir="auto">cycle_time_s</code> on the PR’s <code dir="auto">mergedAt</code> — the authoritative terminal timestamp of a slice — and <code dir="auto">retro</code>
+reports those records as their own SLICE class rather than as completed issues. <code dir="auto">--slice</code> asserts the
+issue was open <strong>when the PR merged</strong>, which its CURRENT state cannot decide (GitHub records an
+auto-close AFTER the merge, so an ordinary completed delivery and a late-stamped slice have
+indistinguishable timestamps), so it is refused fail-closed for a currently-CLOSED issue, for one
+open only because it was REOPENED, and inside GitHub’s post-merge auto-close propagation window —
+there a completed delivery presents identically to a never-closed issue (<code dir="auto">closed_at</code> null AND
+<code dir="auto">stateReason</code> empty), and only the PR’s own <code dir="auto">closingIssuesReferences</code> tells them apart, since a
+slice PR closes NOTHING. Stamp a slice before its issue is ever closed, until #3559 lands
+timeline-based classification. The two available
+workarounds are FORBIDDEN: closing the issue to satisfy the tool (a tool’s data model must never
+decide whether a problem is recorded as solved), and hand-appending a line to the JSONL past the
+validator (the tool is the gate on the ledger’s shape).
 Records carry <strong>authoritative data only</strong>: GitHub-derived
 timestamps (issue/PR open + merge + close → cycle time and coarse phase durations) plus run-observed
 counters — claim collisions, rebase/conflict events, agent-gate pass/fail + run count, roborev findings,

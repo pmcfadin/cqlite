@@ -574,6 +574,21 @@ The pipeline measures itself so improvement is data-driven, not anecdotal — **
   `docs/reports/delivery-telemetry.schema.json`) using `scripts/delivery-telemetry.py record`. A
   reopened issue that ships more than once legitimately gets one record per shipped PR — retro
   aggregation by issue treats such multi-cycle issues as multiple deliveries, not one (issue #2314).
+  The same holds for an issue that ships one or more **slices** while deliberately remaining OPEN
+  (issue #3550): stamp each with `--slice`, which writes `closed_at: null` (the marker) and bounds
+  `cycle_time_s` on the PR's `mergedAt` — the authoritative terminal timestamp of a slice — and `retro`
+  reports those records as their own SLICE class rather than as completed issues. `--slice` asserts the
+  issue was open **when the PR merged**, which its CURRENT state cannot decide (GitHub records an
+  auto-close AFTER the merge, so an ordinary completed delivery and a late-stamped slice have
+  indistinguishable timestamps), so it is refused fail-closed for a currently-CLOSED issue, for one
+  open only because it was REOPENED, and inside GitHub's post-merge auto-close propagation window —
+  there a completed delivery presents identically to a never-closed issue (`closed_at` null AND
+  `stateReason` empty), and only the PR's own `closingIssuesReferences` tells them apart, since a
+  slice PR closes NOTHING. Stamp a slice before its issue is ever closed, until #3559 lands
+  timeline-based classification. The two available
+  workarounds are FORBIDDEN: closing the issue to satisfy the tool (a tool's data model must never
+  decide whether a problem is recorded as solved), and hand-appending a line to the JSONL past the
+  validator (the tool is the gate on the ledger's shape).
   Records carry **authoritative data only**: GitHub-derived
   timestamps (issue/PR open + merge + close → cycle time and coarse phase durations) plus run-observed
   counters — claim collisions, rebase/conflict events, agent-gate pass/fail + run count, roborev findings,
