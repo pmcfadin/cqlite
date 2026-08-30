@@ -69,17 +69,47 @@ def _class_members(node: ast.ClassDef) -> set[str]:
       only ``FunctionDef`` here reported those fields as drift on a FAITHFUL
       stub -- exactly the kind of red that teaches people to delete the test;
     * ``name = ...`` -- an unannotated class attribute.
+
+    Each name carries its SHAPE as ``name:callable`` or ``name:attribute``,
+    because a member declared as a method but implemented as a data attribute
+    (or the reverse) is real drift a name-only comparison cannot see: the stub
+    promising ``db.is_closed()`` while the runtime exposes ``db.is_closed`` means
+    exactly one of those two call sites works.
+
+    The distinction is deliberately COARSE -- callable vs not -- because that is
+    what changes the call site. A ``@property`` and a ``#[pyo3(get)]`` field both
+    surface as a non-callable attribute, and separating them would red on correct
+    code while describing no caller-visible difference.
     """
+    # A `@property`/`@cached_property` getter is a FunctionDef in the AST but a
+    # NON-callable attribute at runtime; `@staticmethod`/`@classmethod` stay
+    # callable. Decorator names are read structurally (`Name` or `Attribute`).
+    attribute_decorators = {"property", "cached_property"}
+
+    def _decorator_names(member: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for decorator in getattr(member, "decorator_list", []):
+            if isinstance(decorator, ast.Name):
+                names.add(decorator.id)
+            elif isinstance(decorator, ast.Attribute):
+                names.add(decorator.attr)
+        return names
+
     members: set[str] = set()
     for member in node.body:
         if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            members.add(member.name)
+            shape = (
+                "attribute"
+                if _decorator_names(member) & attribute_decorators
+                else "callable"
+            )
+            members.add(f"{member.name}:{shape}")
         elif isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
-            members.add(member.target.id)
+            members.add(f"{member.target.id}:attribute")
         elif isinstance(member, ast.Assign):
             for target in member.targets:
                 if isinstance(target, ast.Name):
-                    members.add(target.id)
+                    members.add(f"{target.id}:attribute")
     return members
 
 
@@ -128,8 +158,25 @@ def _runtime_own_public(cls: type) -> set[str]:
     machinery is excluded: ``dir(cqlite.SchemaError)`` drags in ``args``,
     ``with_traceback`` and ``add_note`` from ``BaseException``, none of which a
     stub re-declares, and comparing them would red on a faithful stub.
+
+    Names carry the same ``name:callable`` / ``name:attribute`` shape the stub
+    side records, so a method-vs-attribute swap fails instead of comparing equal.
+    Read from the class ``__dict__`` entry WITHOUT touching the attribute on an
+    instance -- a ``property``/``getset_descriptor`` would otherwise run its
+    getter.
     """
-    return {name for name in vars(cls) if not name.startswith("_")}
+    members: set[str] = set()
+    for name, value in vars(cls).items():
+        if name.startswith("_"):
+            continue
+        # `property` and PyO3's `getset_descriptor` are data descriptors: the
+        # caller writes `obj.name`, never `obj.name()`.
+        is_attribute = isinstance(value, property) or (
+            type(value).__name__ in {"getset_descriptor", "member_descriptor"}
+        )
+        shape = "attribute" if is_attribute else ("callable" if callable(value) else "attribute")
+        members.add(f"{name}:{shape}")
+    return members
 
 
 def _stub_param_spec(node: ast.AST) -> list[tuple[str, str, bool]]:
@@ -250,6 +297,7 @@ def test_pyi_matches_runtime():
 
     # (4)/(5) per-class comparison.
     drift: list[str] = []
+    dunder_classes_seen: dict[str, int] = {}
     for class_name, declared_members in sorted(stub.classes.items()):
         runtime_cls = getattr(cqlite, class_name)
         assert isinstance(runtime_cls, type), (
@@ -291,10 +339,15 @@ def test_pyi_matches_runtime():
         # (`__init__`, `__repr__`, `__eq__`, `__hash__`) this can only confirm
         # they RESOLVE, not that this class overrides them. Every protocol dunder
         # that matters is absent from `object`, so for those it is a real check.
+        # Members are recorded as `name:shape`, so the dunder test must run on the
+        # NAME half. Testing the raw entry silently found ZERO dunders the moment
+        # the shape suffix was introduced -- the alarm went vacuous while the suite
+        # stayed green, which is the same defect class this whole file exists to
+        # catch. Hence the non-vacuity assert below.
         declared_dunders = sorted(
-            n
-            for n in declared_members
-            if n.startswith("__") and n.endswith("__")
+            name
+            for name, _shape in (entry.split(":", 1) for entry in declared_members)
+            if name.startswith("__") and name.endswith("__")
         )
         missing_dunders = [n for n in declared_dunders if not hasattr(runtime_cls, n)]
         if missing_dunders:
@@ -302,6 +355,16 @@ def test_pyi_matches_runtime():
                 f"{class_name}: dunder declared in the stub but absent at runtime "
                 f"(broken protocol promise): {missing_dunders}"
             )
+        dunder_classes_seen[class_name] = len(declared_dunders)
+
+    # Non-vacuity for the dunder direction as a whole: the stub demonstrably
+    # declares protocol dunders (`Row.__getitem__`, `QueryResult.__len__`, the
+    # `Database` context manager), so parsing NONE anywhere means the encoding
+    # changed under the filter again, not that the stub stopped declaring them.
+    assert sum(dunder_classes_seen.values()) > 0, (
+        "parsed no stub-declared dunders from any class -- the member encoding "
+        "and the dunder filter have drifted apart, disabling the protocol check"
+    )
 
     assert not drift, "stub/runtime member drift:\n  " + "\n  ".join(drift)
 

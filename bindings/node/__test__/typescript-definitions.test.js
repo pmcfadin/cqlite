@@ -559,8 +559,22 @@ function declaredClassMembers(dtsSource, className) {
         `class ${className} declares a member with a non-identifier name in index.d.ts`
       );
     }
+    // SHAPE, not just name: a member declared as a method but implemented as a
+    // data property (or the reverse) is real drift that a name-set comparison
+    // cannot see -- `foo(): boolean` vs `foo: boolean` are different call sites
+    // (`db.foo()` vs `db.foo`), and exactly one of them works.
+    //
+    // The distinction is deliberately COARSE -- callable vs not -- because that
+    // is what changes the call site. A declared `get x(): T` and a declared
+    // `readonly x: T` both surface as a non-callable attribute at runtime (napi
+    // emits an accessor for both), so separating those two would red on correct
+    // code without describing any caller-visible difference.
+    const kind =
+      ts.isMethodDeclaration(member) || ts.isMethodSignature(member)
+        ? 'callable'
+        : 'attribute';
     const isStatic = (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) !== 0;
-    (isStatic ? statics : instance).add(member.name.text);
+    (isStatic ? statics : instance).add(`${member.name.text}:${kind}`);
   }
 
   return {
@@ -576,11 +590,25 @@ function declaredClassMembers(dtsSource, className) {
  * @returns {{instance: string[], static: string[]}} Sorted member names
  */
 function runtimeClassMembers(cls) {
+  // Read the property DESCRIPTOR, not the value: touching `obj.foo` on an
+  // accessor would invoke the getter (side effects, and it throws on a
+  // half-initialised prototype). The descriptor answers "callable or not"
+  // without calling anything.
+  const shapeOf = (owner, name) => {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, name);
+    if (descriptor && typeof descriptor.get === 'function') {
+      // An accessor surfaces as an attribute at the call site: `db.isClosed`.
+      return 'attribute';
+    }
+    return descriptor && typeof descriptor.value === 'function' ? 'callable' : 'attribute';
+  };
   const instance = Object.getOwnPropertyNames(cls.prototype)
     .filter((name) => name !== 'constructor')
+    .map((name) => `${name}:${shapeOf(cls.prototype, name)}`)
     .sort();
   const statics = Object.getOwnPropertyNames(cls)
     .filter((name) => !FUNCTION_INTRINSICS.has(name))
+    .map((name) => `${name}:${shapeOf(cls, name)}`)
     .sort();
   return { instance, static: statics };
 }
@@ -705,11 +733,14 @@ describe('Runtime surface vs index.d.ts', () => {
     const runtime = runtimeClassMembers(Database);
 
     // Sanity: an empty side would make the comparison vacuous in the dangerous
-    // direction (an empty declared set "matches" nothing missing).
+    // direction (an empty declared set "matches" nothing missing). Entries are
+    // `name:kind`, so asserting the KIND here also pins that both derivations
+    // classify a plain method the same way -- if they disagreed, every method
+    // would appear as drift and this assert names the reason instead.
     expect(declared.instance.length).toBeGreaterThan(0);
-    expect(declared.static).toContain('open');
+    expect(declared.static).toContain('open:callable');
     expect(runtime.instance.length).toBeGreaterThan(0);
-    expect(runtime.static).toContain('open');
+    expect(runtime.static).toContain('open:callable');
 
     expect(memberDrift('Database', declared, runtime)).toEqual([]);
   });
@@ -727,51 +758,31 @@ describe('Runtime surface vs index.d.ts', () => {
     expect(memberDrift('PreparedStatement', declared, runtime)).toEqual([]);
   });
 
-  test('every declared class resolves to a runtime export', () => {
-    // Phantom-class direction: `export declare class Foo` with nothing exported
-    // under that name type-checks and then fails at `new Foo()`.
-    const sourceFile = ts.createSourceFile(
-      'index.d.ts',
-      dtsContent,
-      ts.ScriptTarget.Latest,
-      true
-    );
-    const declaredClasses = [];
-    const visit = (node) => {
-      if (ts.isClassDeclaration(node) && node.name) {
-        declaredClasses.push(node.name.text);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
+  test('every exported value declaration in index.d.ts resolves to a runtime export', () => {
+    // Phantom direction: `export declare class Foo` (or function, enum, namespace,
+    // or `const`) with nothing exported under that name type-checks and then
+    // fails at the call site.
+    //
+    // This uses the SAME `declaredTopLevelNames()` derivation as the
+    // runtime->declared direction, deliberately. Two separate walks existed here
+    // before and only one of them was fixed, so this direction still recursed
+    // with `forEachChild` (counting NESTED and NON-EXPORTED declarations as
+    // top-level exports) and covered only classes and functions (so a phantom
+    // exported `const`/`enum`/`namespace` was undetectable). One derivation with
+    // several callers cannot drift against itself; two derivations did, within a
+    // single change.
+    const declared = declaredTopLevelNames(dtsContent);
 
-    expect(declaredClasses.length).toBeGreaterThan(0);
-    const phantoms = declaredClasses.filter(
-      (name) => typeof runtimeExports[name] !== 'function'
-    );
-    expect(phantoms).toEqual([]);
-  });
+    // Non-vacuity: an empty declared set would satisfy the assert below trivially.
+    expect(declared.size).toBeGreaterThan(0);
+    expect(declared.has('Database')).toBe(true);
 
-  test('every declared function resolves to a runtime export', () => {
-    const sourceFile = ts.createSourceFile(
-      'index.d.ts',
-      dtsContent,
-      ts.ScriptTarget.Latest,
-      true
-    );
-    const declaredFunctions = [];
-    const visit = (node) => {
-      if (ts.isFunctionDeclaration(node) && node.name) {
-        declaredFunctions.push(node.name.text);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
-
-    expect(declaredFunctions.length).toBeGreaterThan(0);
-    const phantoms = declaredFunctions.filter(
-      (name) => typeof runtimeExports[name] !== 'function'
-    );
+    // `hasOwnProperty`, NOT `typeof === 'function'`: an exported `const` or
+    // namespace object is a legitimate value that is not a function, and
+    // demanding callability here would red on correct code.
+    const phantoms = [...declared]
+      .filter((name) => !Object.prototype.hasOwnProperty.call(runtimeExports, name))
+      .sort();
     expect(phantoms).toEqual([]);
   });
 
