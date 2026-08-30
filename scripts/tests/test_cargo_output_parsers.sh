@@ -227,9 +227,15 @@ if not helper.strip() or 'sed -E' not in helper:
     print('EXTRACT-FAIL: _ansi_stripped_log', file=sys.stderr); sys.exit(2)
 if not guard.strip() or 'while IFS= read' not in guard:
     print('EXTRACT-FAIL: check_no_unexpected_zero_tests', file=sys.stderr); sys.exit(2)
-if '_ansi_stripped_log' not in guard:
-    print('EXTRACT-FAIL: the extracted guard does not call _ansi_stripped_log — it would '
-          'parse the raw log and this suite would certify the defect', file=sys.stderr)
+# COMMENT-BLIND (roborev job 146, Low). A bare substring test is satisfied by a COMMENT
+# that merely NAMES the helper -- and run_arrow_parity_guard_cmd's comment block names it
+# three times -- so the check would report the guard routed after the call was deleted. An
+# artifact DESCRIBING the routing would BECOME the evidence for it: #3312's shape, and the
+# same reason this repo's alternate-executor scan is `^[^#]*--test`.
+if not any('_ansi_stripped_log' in l for l in guard.split('\n')
+           if not l.lstrip().startswith('#')):
+    print('EXTRACT-FAIL: the extracted guard has no NON-COMMENT call to _ansi_stripped_log '
+          '- it parses the raw log and this suite would certify the defect', file=sys.stderr)
     sys.exit(2)
 open(out, 'w', encoding='utf-8').write(helper + '\n\n' + guard + '\n')
 PY
@@ -435,9 +441,12 @@ helper = extract(r'^_ansi_stripped_log\(\) \{', r'^\}')
 guard = extract(r'^run_arrow_parity_guard_cmd\(\) \{', r'^\}')
 if not helper.strip() or not guard.strip():
     print('EXTRACT-FAIL', file=sys.stderr); sys.exit(2)
-if '_ansi_stripped_log' not in guard:
-    print('EXTRACT-FAIL: run_arrow_parity_guard_cmd does not call _ansi_stripped_log',
-          file=sys.stderr)
+# COMMENT-BLIND: this function's own comment block names the helper three times, so a bare
+# substring test greens on a guard whose CALL has been deleted (roborev job 146, Low).
+if not any('_ansi_stripped_log' in l for l in guard.split('\n')
+           if not l.lstrip().startswith('#')):
+    print('EXTRACT-FAIL: run_arrow_parity_guard_cmd has no NON-COMMENT call to '
+          '_ansi_stripped_log', file=sys.stderr)
     sys.exit(2)
 open(out, 'w', encoding='utf-8').write(helper + '\n\n' + guard + '\n')
 ARROWPY
@@ -446,12 +455,27 @@ if [ "$arrow_extract_rc" -ne 0 ]; then
   bad "extraction of run_arrow_parity_guard_cmd (+ helper) from agent-gate.sh FAILED (rc=$arrow_extract_rc) — the arrow-parity-guard parse is uncertified"
 else
   ok "extracted run_arrow_parity_guard_cmd from the shipped agent-gate.sh (it calls _ansi_stripped_log)"
-  # Stub `cargo`: emits a COLOURED cargo log. $STUB_PASSED controls the reported count.
+  # Stub `cargo`: emits a COLOURED cargo log. $STUB_PASSED controls the reported count, and
+  # $STUB_COLOUR_RESULT controls whether the `test result:` PAYLOAD LINE is coloured too.
+  #
+  # That second knob is DELIBERATELY COUNTERFACTUAL and is the discrimination probe. Real
+  # libtest does not colour that line -- measured byte-identical under always and never, which
+  # is exactly why routing this site is BELT and not a bug fix. But that same fact makes the
+  # two cases below UNABLE TO TELL whether the guard parsed the stripped copy or the raw
+  # capture: with an uncoloured payload both parse identically, so reverting the routing would
+  # keep them green (roborev job 146, Low). Colouring the payload asks the question the belt
+  # exists to answer -- "if this line WERE coloured, would the parse survive?" -- and makes the
+  # answer observable. Cases (a)/(b) keep the MEASURED uncoloured payload, so the no-false-red
+  # and vacuous-skip properties are still asserted against real cargo behaviour.
   cat >"$tmp/arrow_stub.sh" <<STUB
 cargo() {
   printf '%s     Running%s tests/issue_1495.rs (target/debug/deps/x-1)\n' '${ESC}[1m${ESC}[92m' '${ESC}[0m'
   printf '\nrunning %s tests\n\n' "\$STUB_PASSED"
-  printf 'test result: ok. %s passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' "\$STUB_PASSED"
+  if [ -n "\${STUB_COLOUR_RESULT:-}" ]; then
+    printf '%stest result%s: ok. %s passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' '${ESC}[1m${ESC}[92m' '${ESC}[0m' "\$STUB_PASSED"
+  else
+    printf 'test result: ok. %s passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' "\$STUB_PASSED"
+  fi
 }
 STUB
   arrow_rc_ok=0
@@ -477,6 +501,60 @@ STUB
   # variable, not the prefix failing to reach it.) The prefix must stay a BARE assignment: `env CARGO_TERM_COLOR=never …` execs an
   # external binary and would bypass the stub, silently turning both cases above into real
   # cargo builds. That is why this assert pins the exact spelling.
+  # THE DISCRIMINATION PROOF (roborev job 146). Everything above is satisfied by a guard that
+  # parses the RAW capture, because the payload it parses is uncoloured either way -- so on its
+  # own this section certifies the routing it claims to test only by ASSERTING it structurally,
+  # which is the shape this whole file exists to reject. So: build a MUTANT of the extracted
+  # guard whose _ansi_stripped_log is the IDENTITY (it hands back the raw path -- exactly what
+  # "revert the routing" means), and run BOTH against a log whose `test result:` line IS
+  # coloured. Real guard PASSes, mutant FAILs, same input: the difference is the routing and
+  # nothing else. If someone deletes the strip, this pair reds.
+  #
+  # The mutant is built by REPLACING the helper definition, not by editing the guard body, so
+  # the guard under test stays byte-identical to the shipped one.
+  python3 - "$tmp/arrow_guard.sh" "$tmp/arrow_guard_raw.sh" <<'MUTPY'
+import re, sys
+src, out = sys.argv[1], sys.argv[2]
+text = open(src, encoding='utf-8').read()
+lines = text.split('\n')
+start = end = None
+for i, l in enumerate(lines):
+    if re.match(r'^_ansi_stripped_log\(\) \{', l):
+        start = i
+        for j in range(i + 1, len(lines)):
+            if re.match(r'^\}', lines[j]):
+                end = j
+                break
+        break
+if start is None or end is None:
+    print('MUTATE-FAIL: no _ansi_stripped_log definition to replace', file=sys.stderr)
+    sys.exit(2)
+identity = ['_ansi_stripped_log() {', '  printf %s "$1"', '}']
+open(out, 'w', encoding='utf-8').write('\n'.join(lines[:start] + identity + lines[end + 1:]))
+MUTPY
+  mut_rc=$?
+  if [ "$mut_rc" -ne 0 ]; then
+    bad "A4 (discrimination): could not build the identity-strip mutant (rc=$mut_rc) — the routing is asserted but not measured"
+  else
+    arrow_real_coloured=0
+    ( set +e; . "$tmp/arrow_guard.sh"; STUB_PASSED=3 STUB_COLOUR_RESULT=1; export STUB_COLOUR_RESULT; . "$tmp/arrow_stub.sh"; run_arrow_parity_guard_cmd >/dev/null 2>&1; exit $? ) || arrow_real_coloured=$?
+    arrow_mut_coloured=0
+    ( set +e; . "$tmp/arrow_guard_raw.sh"; STUB_PASSED=3 STUB_COLOUR_RESULT=1; export STUB_COLOUR_RESULT; . "$tmp/arrow_stub.sh"; run_arrow_parity_guard_cmd >/dev/null 2>&1; exit $? ) || arrow_mut_coloured=$?
+    if [ "$arrow_real_coloured" -eq 0 ] && [ "$arrow_mut_coloured" -ne 0 ]; then
+      ok "A4 (discrimination): on a log whose 'test result:' line IS coloured, the SHIPPED guard PASSes and an identity-strip mutant of it FAILs — so the cases above are measuring the ROUTING, not just the fixture"
+    else
+      bad "A4 (discrimination): expected shipped=0 / identity-strip-mutant=nonzero on a coloured result line, got shipped=$arrow_real_coloured / mutant=$arrow_mut_coloured — reverting the strip would NOT red this suite, so its green does not evidence the routing"
+    fi
+    # ...and the mutant must not be a reject-everything strawman: on the MEASURED uncoloured
+    # payload it must still PASS, which is what makes the red above attributable to the colour.
+    arrow_mut_plain=0
+    ( set +e; . "$tmp/arrow_guard_raw.sh"; STUB_PASSED=3; unset STUB_COLOUR_RESULT; . "$tmp/arrow_stub.sh"; run_arrow_parity_guard_cmd >/dev/null 2>&1; exit $? ) || arrow_mut_plain=$?
+    if [ "$arrow_mut_plain" -eq 0 ]; then
+      ok "A4 (discrimination control): the SAME mutant PASSes on the uncoloured payload — so its red above is the COLOUR, not a broken mutant"
+    else
+      bad "A4 (discrimination control): the mutant reds on the uncoloured payload too (rc=$arrow_mut_plain) — it is broken, and the case above proves nothing"
+    fi
+  fi
   if grep -Fq -- 'CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow' "$tmp/arrow_guard.sh"; then
     ok "AC4 part 2: the arrow-parity-guard cargo invocation carries the CARGO_TERM_COLOR=never belt (and the two cases above, run against a stub cargo that IGNORES CARGO_TERM_COLOR, show the STRIP is what actually carries it)"
   else
@@ -548,9 +626,11 @@ helper = extract(r'^_ansi_stripped_log\(\) \{', r'^\}')
 guard = extract(r'^check_declared_test_targets_observed\(\) \{', r'^\}')
 if not helper.strip() or not guard.strip():
     print('EXTRACT-FAIL', file=sys.stderr); sys.exit(2)
-if '_ansi_stripped_log' not in guard:
-    print('EXTRACT-FAIL: check_declared_test_targets_observed does not call '
-          '_ansi_stripped_log — it parses the raw log and reds every coloured run',
+# COMMENT-BLIND, for the same reason as the other two extractions (roborev job 146).
+if not any('_ansi_stripped_log' in l for l in guard.split('\n')
+           if not l.lstrip().startswith('#')):
+    print('EXTRACT-FAIL: check_declared_test_targets_observed has no NON-COMMENT call to '
+          '_ansi_stripped_log - it parses the raw log and reds every coloured run',
           file=sys.stderr)
     sys.exit(2)
 open(out, 'w', encoding='utf-8').write(helper + '\n\n' + guard + '\n')
