@@ -19,6 +19,16 @@
 #   m_tuple_udt     map<frozen<tuple<frozen<key_part>, int>>, int>
 #   s_list_udt      set<frozen<list<frozen<key_part>>>>          (AC5 control)
 #   f_set_tuple_udt frozen<set<frozen<tuple<frozen<key_part>, int>>>>
+#   f_map_tuple_udt frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>
+#   f_map_set_udt   frozen<map<frozen<set<frozen<key_part>>>, int>>
+#
+# The two FROZEN MAPS are the only columns whose values reach the Python
+# binding's `value_to_hashable_key` at all: a frozen map's keys are decoded
+# STRUCTURALLY (parse_frozen_map_value -> read_frozen_element ->
+# parse_value_from_raw_bytes) and handed to `map_to_py`, which projects every key
+# through that function. Every `set` column instead takes `set_to_py`'s
+# UDT list fallback, and a MULTICELL map's keys arrive as opaque `Value::Blob`
+# from the scalar-only `parse_cell_path_key` (#3612). See the schema header.
 #
 # This is a READ-fidelity fixture, not a compaction byte-parity fixture: there
 # is ONE flush and therefore ONE SSTable generation per table, no explicit
@@ -156,30 +166,45 @@ flush_ks() {
 #     key.
 #   * s_list_udt holds two lists with the same elements in DIFFERENT order, which
 #     are DISTINCT list values — the case a set-of-lists exists to test.
+#   * f_map_tuple_udt / f_map_set_udt hold two entries each, so the frozen-map
+#     KEY decode (the only route to value_to_hashable_key) is exercised with
+#     more than one key and with Cassandra's own key ordering.
 insert_full() {
   log "=== nested_udt_keys id=1 (fully populated, multi-element) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt) VALUES (
     1,
     { ({label:'zulu', rank:26}, 7), ({label:'alpha', rank:1}, 2), ({label:'alpha', rank:1}, 1) },
     { { {label:'beta', rank:2}, {label:'alpha', rank:1} }, { {label:'gamma', rank:3} } },
     { ({label:'delta', rank:4}, 9): 90, ({label:'charlie', rank:3}, 8): 80 },
     { [ {label:'one', rank:1}, {label:'two', rank:2} ], [ {label:'two', rank:2}, {label:'one', rank:1} ] },
-    { ({label:'frozen-b', rank:12}, 2), ({label:'frozen-a', rank:11}, 1) }
+    { ({label:'frozen-b', rank:12}, 2), ({label:'frozen-a', rank:11}, 1) },
+    { ({label:'mkey-b', rank:22}, 2): 220, ({label:'mkey-a', rank:21}, 1): 210 },
+    { { {label:'mset-b', rank:32}, {label:'mset-a', rank:31} }: 310, { {label:'mset-c', rank:33} }: 330 }
   )"
 }
 
 # id 2 — NULL UDT FIELDS inside every hashable position, plus an EMPTY-string
 # field (distinct from null). value_to_hashable_key's Udt arm has a
 # `None => py.None()` path that no committed fixture previously reached.
+# id 2 — NULL UDT FIELDS inside every hashable position, plus an EMPTY-string
+# field (distinct from null).
+#
+# The FROZEN-MAP keys here are what make `value_to_hashable_key`'s Udt-arm
+# `None => py.None()` branch reachable: those keys are the only values in this
+# repository that arrive at that function as a structured `Value::Udt` carrying
+# a `None` field. (The set columns' null fields go through `udt_to_py`'s own
+# `None` branch — a different function.)
 insert_null_fields() {
   log "=== nested_udt_keys id=2 (null UDT fields + empty-string field) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt) VALUES (
     2,
     { ({label:'nullrank', rank:null}, 1), ({label:null, rank:5}, 2) },
     { { {label:'nullrank2', rank:null}, {label:null, rank:null} } },
     { ({label:null, rank:null}, 0): 1, ({label:'', rank:0}, 0): 2 },
     { [ {label:'', rank:0}, {label:null, rank:9} ] },
-    { ({label:null, rank:7}, 3) }
+    { ({label:null, rank:7}, 3) },
+    { ({label:'nullrank3', rank:null}, 1): 51, ({label:null, rank:5}, 2): 52 },
+    { { {label:null, rank:null} }: 61, { {label:'', rank:0} }: 62 }
   )"
 }
 
@@ -187,17 +212,19 @@ insert_null_fields() {
 # five columns, so a decoder that confuses two columns is visible.
 insert_minimal() {
   log "=== nested_udt_keys id=3 (single element per collection) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt) VALUES (
     3,
     { ({label:'solo', rank:99}, 42) },
     { { {label:'solo', rank:99} } },
     { ({label:'solo', rank:99}, 42): 7 },
     { [ {label:'solo', rank:99} ] },
-    { ({label:'solo', rank:99}, 42) }
+    { ({label:'solo', rank:99}, 42) },
+    { ({label:'solo', rank:99}, 42): 7 },
+    { { {label:'solo', rank:99} }: 7 }
   )"
 }
 
-# id 4 — ABSENT columns: only the tuple-borne set is written. The other four
+# id 4 — ABSENT columns: only the tuple-borne set is written. The other six
 # columns have no cells at all, so the row exercises the missing-column path
 # alongside a populated hashable-position column in the same partition.
 insert_partial() {
