@@ -173,6 +173,87 @@ fn a_divergent_key_value_is_reported_as_a_value_divergence_only() {
     );
 }
 
+/// DD1: the row-order key is the FULL canonical value, so two DISTINCT keys that
+/// agree on their first 120 characters are still two keys.
+///
+/// The key used to be the DIAGNOSTIC rendering — `brief(&canon.describe())`, which
+/// truncates at 120 characters — so two distinct, equal-length keys sharing that
+/// prefix produced the SAME key: their reordering was invisible here, and then
+/// invisible altogether, because the pairing sort that follows re-sorts both sides by
+/// a key that embeds the whole row and handed the comparison a matched pair (issue
+/// #1491 review round 24, finding DD1). The corpus reaches these lengths — the
+/// wide-row tables carry multi-hundred-character `text` values.
+///
+/// Both positions are pinned, because their kindings differ (see `column_kinding`):
+/// a partition-key component arrives from the dump STRINGIFIED, a clustering
+/// component NATURAL. Neither changes what a `text` value spells — `cassandra-5.0.8`
+/// `UTF8Serializer.toString` and `UTF8Type.toJSONString` both emit the string itself
+/// — so the two long keys differ in both lanes by the DDL alone.
+#[test]
+fn two_long_keys_sharing_a_120_char_prefix_are_ordered_distinctly() {
+    const LONG_KEY_DDL: &str =
+        "CREATE TABLE t (id text, c text, n int, PRIMARY KEY (id, c));";
+    let schema = schema_of(LONG_KEY_DDL, "t");
+    // 120 shared characters, then the one that distinguishes them: equal-length keys
+    // that `brief`'s 120-character cut cannot tell apart.
+    let prefix = "k".repeat(120);
+    let long_a = format!("{prefix}a");
+    let long_b = format!("{prefix}b");
+
+    // (a) the distinguishing character is in the PARTITION key.
+    let pk_first = row(&[("id", json!(long_a)), ("c", json!("c")), ("n", json!(10))]);
+    let pk_second = row(&[("id", json!(long_b)), ("c", json!("c")), ("n", json!(20))]);
+    // (b) and in the CLUSTERING key, within one partition.
+    let ck_first = row(&[("id", json!("p")), ("c", json!(long_a)), ("n", json!(10))]);
+    let ck_second = row(&[("id", json!("p")), ("c", json!(long_b)), ("n", json!(20))]);
+
+    for (position, first, second) in [
+        ("partition key", &pk_first, &pk_second),
+        ("clustering key", &ck_first, &ck_second),
+    ] {
+        let golden = vec![first.clone(), second.clone()];
+        let report = compare_rows(
+            &golden,
+            &[first.clone(), second.clone()],
+            &schema,
+            &["id"],
+            &["c"],
+            &[],
+            Egress::Json,
+        );
+        assert!(
+            report.diffs.is_empty(),
+            "{position}: the emitted order agrees: {:?}",
+            report.diffs
+        );
+
+        let reversed = vec![second.clone(), first.clone()];
+        let report = compare_rows(&golden, &reversed, &schema, &["id"], &["c"], &[], Egress::Json);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{position}: reordering two keys that share a 120-char prefix must fail \
+             exactly once: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].starts_with("row order:"),
+            "{position}: {:?}",
+            report.diffs
+        );
+        // The MESSAGE still truncates, and says by how much: the fix moves the
+        // truncation out of the KEY, not out of the diagnostic (a wide-row key is
+        // multi-kilobyte, and an untruncated dump of it buries the one fact the
+        // reader needs).
+        assert!(
+            report.diffs[0].contains("chars total)") && !report.diffs[0].contains(&long_a),
+            "{position}: the diagnostic must quote the key truncated, with its full \
+             length: {:?}",
+            report.diffs
+        );
+    }
+}
+
 /// A UDT's fields are emitted in DECLARATION order, on both sides.
 ///
 /// `cassandra-5.0.8 UserType.toJSONString` iterates `stringFieldNames` in order,

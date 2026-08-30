@@ -37,7 +37,7 @@
 //! a `text` value is compared as an exact string.
 
 use super::schema::{Column, ColumnKind, CqlType, TableSchema};
-use super::{canon_scalar, canon_typed, csv_container, Depth, Egress, Kinding, Row};
+use super::{canon_scalar, canon_typed, csv_container, Canon, Depth, Egress, Kinding, Row};
 // The declared-gap bookkeeping lives with the divergence it books (see [`gap`]).
 use gap::{Gap, Observed, SkipPaths, Suppressions};
 use serde_json::{Map, Value};
@@ -542,6 +542,18 @@ fn count_cell(
 /// canonical key for every key column there is no order to compare, and a `<reason>`
 /// string would meet an identical `<reason>` on the other side and compare equal.
 ///
+/// # The key is the FULL structured value; only the MESSAGE is truncated
+///
+/// Each component is kept as its `(column, Canon)` pair and compared AS THAT VALUE.
+/// It used to be `format!("{name}={}", brief(&canon.describe()))` — the diagnostic
+/// rendering — so two DISTINCT keys of equal length sharing their first 120
+/// characters collapsed onto ONE key and a reordering of those rows passed unnoticed
+/// (issue #1491 review round 24, finding DD1). The corpus reaches that length: the
+/// wide-row tables carry multi-hundred-character `text` keys and 4 KiB blobs.
+/// [`render_order_key`] applies [`brief`] when the failure is FORMATTED, which is
+/// where a truncation belongs — the same rule as `display()`/`to_string_lossy()` in
+/// a path (findings W2/L3): fine in a message, never in a decision.
+///
 /// Only a REORDERING is reported — the same keys in a different sequence. Differing
 /// keys are a divergence of a key column's VALUE, which the typed per-row comparison
 /// names; see the comment at the check itself for why an order line there would state
@@ -556,8 +568,8 @@ fn row_order_divergence(
 ) -> Option<String> {
     // `golden_side` selects the kinding, which is a statement about the GOLDEN's
     // spelling alone (see [`column_kinding`] and finding M1).
-    let key = |r: &&Row, golden_side: bool| -> Result<String, String> {
-        let mut parts: Vec<String> = Vec::new();
+    let key = |r: &&Row, golden_side: bool| -> Result<Vec<(String, Canon)>, String> {
+        let mut parts: Vec<(String, Canon)> = Vec::new();
         for name in pk.iter().chain(ck.iter()) {
             let column = schema.column(name).ok_or_else(|| {
                 format!(
@@ -574,11 +586,12 @@ fn row_order_divergence(
             let value = r.get(*name).unwrap_or(&Value::Null);
             let canon = canon_typed(value, egress, &column.ty, Depth::TopLevel, kinding)
                 .map_err(|why| format!("key column `{name}`: {why}"))?;
-            parts.push(format!("{name}={}", brief(&canon.describe())));
+            parts.push(((*name).to_string(), canon));
         }
-        Ok(parts.join(","))
+        Ok(parts)
     };
-    let keys = |rows: &[&Row], golden_side: bool| -> Result<Vec<String>, String> {
+    type OrderKey = Vec<(String, Canon)>;
+    let keys = |rows: &[&Row], golden_side: bool| -> Result<Vec<OrderKey>, String> {
         rows.iter().map(|r| key(r, golden_side)).collect()
     };
     let (g, c) = match (keys(golden, true), keys(cli, false)) {
@@ -616,8 +629,25 @@ fn row_order_divergence(
          order (see `compare_rows` for the invariant and its preconditions); so \
          either the read path stopped emitting `(token, key)` order (issue #1577) \
          or this golden describes a different SSTable",
-        c[at], g[at]
+        render_order_key(&c[at]),
+        render_order_key(&g[at])
     ))
+}
+
+/// One row-order key AS A DIAGNOSTIC: each component's canonical value, truncated
+/// by [`brief`].
+///
+/// The comparison never reads this. [`row_order_divergence`] compares the
+/// `(column, Canon)` components themselves, so a truncation here cannot make two
+/// distinct keys equal — which is exactly what it did while this rendering WAS the
+/// key (finding DD1). The truncation stays in the message on purpose: a wide-row key
+/// is multi-kilobyte, and `brief` names the full length it dropped
+/// (`…(N chars total)`), so the reader is never told less than that it was cut.
+fn render_order_key(key: &[(String, Canon)]) -> String {
+    key.iter()
+        .map(|(name, canon)| format!("{name}={}", brief(&canon.describe())))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Columns present on either side that the committed `CREATE TABLE` does not

@@ -309,7 +309,13 @@ pub enum Kinding {
 }
 
 /// A canonical scalar: the unit of value equality.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Ord` is derived so a collection of canonical values can be SORTED — the
+/// row-order check compares the two sides' key multisets that way (see
+/// `compare::row_order_divergence`). It is a total order for that purpose only and
+/// carries no semantic meaning: it orders by variant first, so it is not the CQL
+/// comparator and must never be used to decide what order an egress should emit.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Canon {
     Null,
     Bool(bool),
