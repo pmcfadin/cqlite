@@ -4807,6 +4807,140 @@ else
   fi
 fi
 
+# --- 53. #3453: the all-features-check lane is REGISTERED where it must be, ABSENT ---
+#         where it must be, and its invocation cannot silently stop being all-features.
+#
+# WHY THIS EXISTS. Before #3453 no cargo invocation in the gate ever passed
+# `observability` (run_clippy EXCLUDES the OTel stack by #1844 design, core-tests runs
+# `--features cli-helpers`, minimal-build runs `--no-default-features`), so a defect
+# reachable only with that feature on could not fail the gate of record while failing
+# pr-gate.yml's `cargo test -p cqlite-core --lib --all-features`. Measured on PR #3382: a
+# 31/31 gate PASS that never executed the test pinning that PR's own fix.
+#
+# FOUR REGISTRIES MUST AGREE, and the failure of any one is SILENT: a name in COMPONENTS
+# with no dispatch arm hits `unknown component` (return 2); a name absent from COMPONENTS
+# is simply never run while every SUMMARY stays green. Both directions are asserted here,
+# for the same reason section 16 does it for the #1699 lanes.
+#
+# THE ABSENCES ARE AS LOAD-BEARING AS THE PRESENCES. This lane must NOT be in
+# DATASET_COMPONENTS (it opens no fixture; enrolling it would make a fixture-less
+# checkout fail closed for nothing — and #3522's rule is that a never-SKIPping lane
+# folded into a SKIP-aware one is a coverage hole wearing a SKIP's clothes), and it must
+# NOT leak into LITE_COMPONENTS / DELTA_COMPONENTS, whose whole value is staying fast.
+#
+# The STRUCTURAL asserts on the function body are here rather than in the opt-in
+# planted-break harness because the regression they guard is TEXTUAL: someone narrowing
+# `--all-features` to a curated list (the thing run_clippy already has to maintain by
+# hand), dropping `-p` for `--workspace` (which would build the cqlite-cli-owned duckdb
+# amalgamation from source — the #916 cost this lane was scoped to avoid), or removing
+# `_deny_warnings` because `-- -D warnings` reads as equivalent (it is not: an inherited
+# CARGO_ENCODED_RUSTFLAGS silently defeats a bare RUSTFLAGS — #1699 round 5). Sub-second,
+# no cargo, no network. The EXPENSIVE half — does the lane actually red on a planted
+# observability-only defect, and do the existing components stay green on the same plant?
+# — is scripts/tests/test_agent_gate_all_features_lane.sh, deliberately opt-in.
+AFC_LANE=all-features-check
+
+afc_list="$tmp/3453-list.txt"
+if bash "$GATE" --list >"$afc_list" 2>/dev/null && [ -s "$afc_list" ]; then
+  ok "3453-list-extract: \`--list\` produced a readable COMPONENTS listing ($(grep -c . "$afc_list" | tr -d ' ') components)"
+else
+  bad "3453-list-extract: \`--list\` failed or produced nothing — every membership assert below would be vacuous"
+fi
+if grep -qxF "$AFC_LANE" "$afc_list" 2>/dev/null; then
+  ok "3453-registered: $AFC_LANE is in COMPONENTS (printed by --list)"
+else
+  bad "3453-registered: $AFC_LANE is NOT printed by --list — dropped from COMPONENTS, so the OTel stack is once again compiled by no gate component"
+fi
+
+# Reuses section 16's extraction of the REAL dispatch arms (4-space-indented `<name>)`).
+if grep -qxF "$AFC_LANE" "$dispatch_arms" 2>/dev/null; then
+  ok "3453-dispatch: $AFC_LANE is reachable in dispatch_component"
+else
+  bad "3453-dispatch: $AFC_LANE has NO dispatch_component arm — it would hit 'unknown component' and return 2"
+fi
+
+# DATASET_COMPONENTS: must be ABSENT. `$dataset_components` is extracted (with its own
+# fail-closed guard) in section 16.
+if [ -z "$dataset_components" ]; then
+  bad "3453-dataset-absent: DATASET_COMPONENTS could not be extracted, so this absence assert has no subject"
+else
+  case " $dataset_components " in
+    *" $AFC_LANE "*)
+      bad "3453-dataset-absent: $AFC_LANE is in DATASET_COMPONENTS — it needs nothing beyond cargo, so enrolling it makes a fixture-less checkout fail closed for a lane that opens no Data.db" ;;
+    *)
+      ok "3453-dataset-absent: $AFC_LANE is correctly NOT in DATASET_COMPONENTS (never SKIPs, needs no corpus)" ;;
+  esac
+fi
+
+# The two fast-loop sets, read from the script's OWN listing hooks rather than the source.
+for _afc_mode in lite delta; do
+  _afc_f="$tmp/3453-$_afc_mode-list.txt"
+  _afc_rc=0
+  bash "$GATE" "--$_afc_mode-list" >"$_afc_f" 2>/dev/null || _afc_rc=$?
+  _afc_n=$(grep -c . "$_afc_f" 2>/dev/null || true)
+  if [ "$_afc_rc" -ne 0 ] || [ "${_afc_n:-0}" -eq 0 ]; then
+    bad "3453-$_afc_mode-absent: \`--$_afc_mode-list\` did not produce a readable list (rc=$_afc_rc, lines=${_afc_n:-0}) — the absence check has no subject"
+  elif grep -qxF "$AFC_LANE" "$_afc_f" 2>/dev/null; then
+    bad "3453-$_afc_mode-absent: $AFC_LANE leaked into ${_afc_mode^^}_COMPONENTS — it is a full-gate component (a cold --all-features build), and --$_afc_mode is the fast loop"
+  else
+    ok "3453-$_afc_mode-absent: $AFC_LANE is correctly absent from ${_afc_mode^^}_COMPONENTS (${_afc_n} entries read)"
+  fi
+done
+
+# --- the invocation itself, structurally ------------------------------------------
+afc_fn=$(awk '/^run_all_features_check\(\) \{/,/^\}/' "$GATE")
+if [ -n "$afc_fn" ]; then
+  ok "3453-fn-extract: extracted run_all_features_check's body ($(printf '%s\n' "$afc_fn" | grep -c . | tr -d ' ') lines)"
+else
+  bad "3453-fn-extract: could NOT extract run_all_features_check — it is missing, or renamed, and every structural assert below would pass vacuously"
+fi
+# The INVOCATION lines only. `^[^#]*cargo (check|clippy)` matched 8 lines, because this
+# function also NAMES its passes in its own log output (`echo "[$name] pass 1/2 cargo
+# check …"`) — a reporting line is not an invocation, and counting it made the
+# two-passes assert red on correct code. Comments and any line that merely PRINTS the
+# words are excluded; what remains is what cargo actually runs.
+afc_cargo=$(printf '%s\n' "$afc_fn" \
+  | grep -E 'cargo (check|clippy) ' \
+  | grep -vE '^[[:space:]]*#' \
+  | grep -vE '(echo|printf|declaration=)' || true)
+afc_n_cargo=$(printf '%s' "$afc_cargo" | grep -c . || true)
+if [ "${afc_n_cargo:-0}" -eq 2 ]; then
+  ok "3453-two-passes: exactly two cargo invocations (the ruled check + clippy pair)"
+else
+  bad "3453-two-passes: found ${afc_n_cargo:-0} cargo check/clippy invocations, expected 2 — the owner ruling for #3453 is a check AND a clippy pass"
+fi
+afc_bad=""
+printf '%s\n' "$afc_cargo" | grep -q -- '--all-features' || afc_bad="$afc_bad no---all-features"
+[ "$(printf '%s\n' "$afc_cargo" | grep -c -- '--all-features' || true)" = 2 ] || afc_bad="$afc_bad not-both---all-features"
+[ "$(printf '%s\n' "$afc_cargo" | grep -c -- '--all-targets' || true)" = 2 ] || afc_bad="$afc_bad not-both---all-targets"
+printf '%s\n' "$afc_cargo" | grep -q -- '--package cqlite-core' || afc_bad="$afc_bad not-package-scoped"
+printf '%s\n' "$afc_cargo" | grep -q -- '--workspace' && afc_bad="$afc_bad uses---workspace"
+if [ -z "$afc_bad" ]; then
+  ok "3453-invocation: both passes are \`--package cqlite-core --all-features --all-targets\` and neither is --workspace (which would build cqlite-cli's bundled duckdb from source — the #916 cost)"
+else
+  bad "3453-invocation:$afc_bad — this lane's entire subject is the feature set nothing else enables, so a narrowed feature list or a widened package scope silently retires it (or blows its minutes budget)"
+fi
+if [ "$(printf '%s\n' "$afc_cargo" | grep -c '_deny_warnings' || true)" = 2 ]; then
+  ok "3453-denywarn: both passes go through _deny_warnings, so -D warnings cannot be made inert by an inherited CARGO_ENCODED_RUSTFLAGS (#1699 round 5)"
+else
+  bad "3453-denywarn: a pass does not go through _deny_warnings — a bare \`env RUSTFLAGS=-D warnings\` is SILENTLY IGNORED when CARGO_ENCODED_RUSTFLAGS is set, even when empty"
+fi
+if printf '%s\n' "$afc_fn" | grep -q '_resolved_package_features cqlite-core --all-features'; then
+  ok "3453-subject-derived: the declared feature set is read back from CARGO, not echoed from the flag this function passes"
+else
+  bad "3453-subject-derived: run_all_features_check no longer derives its feature set via _resolved_package_features — a lane that prints its own arguments states nothing about the build that happened"
+fi
+if printf '%s\n' "$afc_fn" | grep -qE '^[^#]*status=SKIP'; then
+  bad "3453-never-skips: run_all_features_check gained a SKIP branch — it needs nothing beyond cargo, and a SKIP here is a coverage hole wearing a SKIP's clothes (#3522)"
+else
+  ok "3453-never-skips: run_all_features_check has no SKIP branch (it depends on nothing but cargo)"
+fi
+if printf '%s\n' "$afc_fn" | grep -q 'declaration="\[\$name\] subject:'; then
+  ok "3453-declares: the lane emits a subject declaration (package + feature set + targets), not a bare status token"
+else
+  bad "3453-declares: the lane no longer declares what it measured — issue #3453's own remedy is 'report a measurement, not a decision'"
+fi
+
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
 # coordination lead authorised, taken on the evidence below).
 #
@@ -4850,7 +4984,14 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
-ASSERT_FLOOR=392
+# 392 -> 405 on #3453: section 53 adds 13 asserts, every one of them host-INDEPENDENT
+# (bash plus the gate's own --list/--lite-list/--delta-list hooks; no cargo, no python3,
+# no jq, no network), so none of them can turn into a declared skip on any of the eight
+# host shapes enumerated above. Raising the floor by exactly the number added therefore
+# preserves the deliberate ~9 margin rather than widening it — a floor that stays put
+# while the suite grows is a floor that stops detecting a silently-dying section, which
+# is the only thing it is for.
+ASSERT_FLOOR=405
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
