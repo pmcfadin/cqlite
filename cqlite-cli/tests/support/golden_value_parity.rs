@@ -631,6 +631,20 @@ pub fn golden_rows(
     Ok(rows)
 }
 
+/// One `sstabledump` cell of a NON-frozen collection, with the one fact the
+/// reconstruction has to know before it can use the cell: is it a tombstone?
+///
+/// Kept as a struct rather than filtering on the fly because the answer is needed
+/// TWICE — once to drop the element from the reconciled container, and once to
+/// refuse a golden that would need arbitration between a tombstone and a live cell
+/// at the same path.
+struct MultiCell<'a> {
+    cell: &'a Value,
+    /// `deletion_info` and no `value`, i.e. `Cell.isTombstone()` in
+    /// `cassandra-5.0.8 JsonTransformer.serializeCell`.
+    deleted: bool,
+}
+
 fn golden_row(
     row: &Value,
     keys: &[Value],
@@ -690,7 +704,7 @@ fn golden_row(
     let kind_of = |name: &str| -> Option<Multicell> {
         multicell.iter().find(|(n, _)| *n == name).map(|(_, k)| *k)
     };
-    let mut multi: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    let mut multi: BTreeMap<String, Vec<MultiCell<'_>>> = BTreeMap::new();
     for cell in array_field(row, "cells", at)? {
         let name = cell
             .get("name")
@@ -709,7 +723,40 @@ fn golden_row(
                     at()
                 ));
             }
-            multi.entry(name.to_string()).or_default().push(cell);
+            // The deletion is examined HERE, before the cell is taken as a live
+            // member. `serializeCell` (cassandra-5.0.8 `JsonTransformer`) writes
+            // `deletion_info` INSTEAD of `value` whenever `cell.isTombstone()`,
+            // for a multicell cell exactly as for a scalar one — the committed
+            // corpus has the shape verbatim:
+            // `{"name":"tags","path":["remove_me"],"deletion_info":{"local_delete_time":…}}`
+            // next to a live `{"name":"tags","path":["keep_me"],"value":""}`.
+            // Collecting first and looking at the deletion later reconstructed a
+            // DELETED set element as PRESENT, and reported a deleted list/map
+            // element as "no value" — both wrong expectations (review finding L2).
+            let deleted = match (cell.get("deletion_info"), cell.get("value")) {
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "{}: multicell cell `{name}` carries both value and deletion",
+                        at()
+                    ))
+                }
+                // `serializeCell` writes exactly one of the two for every cell —
+                // a multicell SET's live cell carries `"value": ""`, it is not
+                // value-less — so a cell with neither is not a dump this reader
+                // understands.
+                (None, None) => {
+                    return Err(format!(
+                        "{}: multicell cell `{name}` carries neither a value nor a deletion",
+                        at()
+                    ))
+                }
+            };
+            multi
+                .entry(name.to_string())
+                .or_default()
+                .push(MultiCell { cell, deleted });
             continue;
         }
         if let Some(del) = cell.get("deletion_info") {
@@ -770,8 +817,57 @@ fn golden_row(
         }
     }
 
-    for (name, cells) in multi {
+    for (name, all_cells) in multi {
         let kind = kind_of(&name).ok_or_else(|| format!("{}: `{name}` kind vanished", at()))?;
+        // A tombstoned element sharing its path with another cell of the same
+        // column would need TIMESTAMP ARBITRATION, which is reconciliation and not
+        // something a single SSTable's dump ever asks for: within one row of one
+        // SSTable a complex column's cells are keyed by `CellPath`, so a path
+        // appears at most once. Refused rather than resolved, so the day such a
+        // golden appears the lane says so instead of picking one silently.
+        for (i, cell) in all_cells.iter().enumerate() {
+            if !cell.deleted {
+                continue;
+            }
+            let path = cell.cell.get("path");
+            if let Some(twin) = all_cells
+                .iter()
+                .enumerate()
+                .find(|(j, other)| *j != i && other.cell.get("path") == path)
+            {
+                return Err(format!(
+                    "{}: `{name}` carries a tombstoned cell and another cell for the same \
+                     path {} — deciding between them is timestamp arbitration, which this \
+                     reader does not do",
+                    at(),
+                    twin.1
+                        .cell
+                        .get("path")
+                        .map_or("<none>".to_string(), |p| p.to_string())
+                ));
+            }
+        }
+        // A DELETED element is not part of the reconciled collection: the
+        // remaining live cells are.
+        let cells: Vec<&Value> = all_cells
+            .iter()
+            .filter(|c| !c.deleted)
+            .map(|c| c.cell)
+            .collect();
+        if cells.is_empty() {
+            // Every cell of this column is a tombstone, so the column has no live
+            // cell at all and reconciles to NULL — the same state, and therefore
+            // the same expectation, as the zero-cell shape the golden already
+            // spells by omitting the column (`test-data/schemas/cql-type-parity.cql`
+            // records that an emptied multicell collection reads back as null).
+            if out.insert(name.clone(), Value::Null).is_some() {
+                return Err(format!(
+                    "{}: fully deleted collection `{name}` collides with a declared key column",
+                    at()
+                ));
+            }
+            continue;
+        }
         let value = match kind {
             // `sstabledump` puts a set element in the cell path.
             Multicell::Set => Value::Array(
@@ -915,6 +1011,11 @@ pub fn parse_iso_micros(s: &str) -> Option<i64> {
     secs.checked_mul(1_000_000)?.checked_add(micros_frac)
 }
 
+/// Unit coverage for the golden READER (split out under the campsite rule).
+#[cfg(test)]
+#[path = "golden_reader_tests.rs"]
+mod golden_reader_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,128 +1040,6 @@ mod tests {
     /// JSON kind and the two sides must therefore agree on kind.
     fn canon_natural(v: &Value, ty: &CqlType) -> Canon {
         canon_at(v, ty, Kinding::Natural)
-    }
-
-    /// Collapsing two cells for the SAME map key would silently DROP a golden cell,
-    /// shrinking the oracle rather than reporting it — so the reader refuses such a
-    /// golden instead of comparing the part of it that survives (issue #1491 finding
-    /// J2's class, golden side).
-    #[test]
-    fn two_map_cells_with_the_same_key_are_refused_rather_than_collapsed() {
-        let dup = concat!(
-            r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"#,
-            r#""liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":["#,
-            r#"{"name":"m","path":["k"],"value":"1"},"#,
-            r#"{"name":"m","path":["k"],"value":"2"}]}]}"#
-        );
-        let why = golden_rows(dup, &["id"], &[], &[("m", Multicell::Map)])
-            .expect_err("a golden the reader must discard part of is not an oracle");
-        assert!(
-            why.contains("two cells for the key `k`") && why.contains("`m`"),
-            "the refusal must name the collection and the duplicated key: {why}"
-        );
-
-        // Two DISTINCT keys are the ordinary shape, so the rule is about the
-        // duplicate and not about multicell maps.
-        let distinct = dup.replace(
-            r#"{"name":"m","path":["k"],"value":"2"}"#,
-            r#"{"name":"m","path":["k2"],"value":"2"}"#,
-        );
-        let rows = golden_rows(&distinct, &["id"], &[], &[("m", Multicell::Map)])
-            .expect("distinct map keys are comparable");
-        assert_eq!(
-            rows.first()
-                .and_then(|r| r.get("m"))
-                .and_then(Value::as_object)
-                .map(serde_json::Map::len),
-            Some(2),
-            "both map cells must survive into the expected row"
-        );
-    }
-
-    /// The permissive-default sweep (Shape B), golden side: a `rows`/`cells`
-    /// field the reader cannot enumerate is REPORTED, never read as the empty
-    /// array. `and_then(Value::as_array).unwrap_or(&[])` collapsed "I could not
-    /// tell what this is" onto "there is nothing here", so such a partition
-    /// contributed ZERO rows (and such a row ZERO cells) while every surviving
-    /// sibling kept the comparison non-empty and green.
-    #[test]
-    fn a_non_array_rows_or_cells_field_is_reported_not_read_as_empty() {
-        let live = concat!(
-            r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"#,
-            r#""liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":["#,
-            r#"{"name":"v","value":"x"}]}]}"#
-        );
-        assert_eq!(
-            golden_rows(live, &["id"], &[], &[])
-                .expect("the baseline golden is comparable")
-                .len(),
-            1
-        );
-
-        // Each of these is well-formed JSON carrying the field as an OBJECT, so
-        // the failure is attributable to the shape and not to a parse error.
-        let broken_rows = r#"{"partition":{"key":["1"],"position":0},"rows":{"0":"x"}}"#;
-        let broken_cells = concat!(
-            r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"#,
-            r#""liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":{"v":"x"}}]}"#
-        );
-        for (what, broken) in [("rows", broken_rows), ("cells", broken_cells)] {
-            let why = golden_rows(broken, &["id"], &[], &[])
-                .expect_err(&format!("a non-array `{what}` must be reported"));
-            assert!(
-                why.contains(&format!("`{what}` is an object, not an array")),
-                "the refusal must name the field and its shape: {why}"
-            );
-        }
-
-        // ABSENT is different from present-but-wrong, and stays legal: a partition
-        // `sstabledump` wrote with no rows contributes none rather than failing.
-        let no_rows = r#"{"partition":{"key":["1"],"position":0}}"#;
-        assert!(golden_rows(no_rows, &["id"], &[], &[])
-            .expect("an absent `rows` is the empty array")
-            .is_empty());
-    }
-
-    /// The same sweep, one level down: a multicell MAP's key came from
-    /// `path_head` through `Value::to_string()` for any non-string, which INVENTED
-    /// a key (`true`, `1`, `null`) that a genuine `text` key of that spelling
-    /// would then compare EQUAL to. `sstabledump` writes every cell path with
-    /// `writeString(...)` (see [`Kinding`]), so a non-string path head means the
-    /// golden is not the document this reader understands.
-    #[test]
-    fn a_non_string_map_path_head_is_refused_rather_than_stringified() {
-        let with_path = |path: &str| {
-            format!(
-                concat!(
-                    r#"{{"partition":{{"key":["1"],"position":0}},"rows":[{{"type":"row","#,
-                    r#""position":1,"liveness_info":{{"tstamp":"1970-01-01T00:00:00.001Z"}},"#,
-                    r#""cells":[{{"name":"m","path":[{path}],"value":"1"}}]}}]}}"#
-                ),
-                path = path
-            )
-        };
-        let map = &[("m", Multicell::Map)];
-        // The ordinary shape: a STRING path head keys the map.
-        let rows = golden_rows(&with_path(r#""true""#), &["id"], &[], map)
-            .expect("a string path head is the ordinary shape");
-        assert_eq!(
-            rows.first()
-                .and_then(|r| r.get("m"))
-                .and_then(Value::as_object)
-                .map(|o| o.contains_key("true")),
-            Some(true)
-        );
-        // A boolean, a number and null each used to be projected onto exactly the
-        // text a `text` key could hold.
-        for head in ["true", "1", "null"] {
-            let why = golden_rows(&with_path(head), &["id"], &[], map)
-                .expect_err("a non-string path head must be refused");
-            assert!(
-                why.contains("non-string path head") && why.contains("`m`"),
-                "the refusal must name the collection: {why}"
-            );
-        }
     }
 
     fn canon_at(v: &Value, ty: &CqlType, kinding: Kinding) -> Canon {
