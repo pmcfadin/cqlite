@@ -275,11 +275,8 @@ loosens) and preferable to licensing an inert baseline.
   quiet t_ack 3ms: the calibration would be inert`); boot baseline ->500ms -> RED; ack baseline 1ms
   (below the anchor) -> RED. The cap-sum assert also caught a real 235s>230s over-allocation in the
   first draft of the group fix.
-* **A probe method defect worth recording:** the first baseline-plant round reported two plants
-  "passing" because the probe's `git checkout --` reverted UNCOMMITTED work, so the plants ran
-  against the committed constants. Plants must be applied to a committed tree, and the probe now
-  prints whether the plant actually applied — a `sed` that matches nothing is otherwise
-  indistinguishable from an assert that does not fire.
+* A probe-method defect was found in this round; see **"The RED-verification method can itself
+  return a false GREEN"** at the end of this file, which is where the rule now lives.
 * **Product plants re-run at HEAD:** plant A (handler removed) -> stage (c), 0.02s. Plant B (flush
   hangs) -> stage (d) after **60.08s**, `progress observed while polling: NONE`, still reporting the
   handler-entry marker was observed 300.427us after SIGINT. The sibling passed in the same run.
@@ -342,3 +339,35 @@ sides of an equality proves nothing. Plants against a message string must theref
 PRODUCER only (here, by line number), and the earlier lesson still applies (plant against a COMMITTED
 tree, and print whether the plant actually applied). Both defects were in the verification method, not
 the code — but both would have produced a false all-clear.
+
+## The RED-verification method can itself return a false GREEN
+
+**This is the most transferable finding in this issue, and it is recorded on its own because a false
+GREEN in the RED-verification method is strictly worse than a false green in a test: this is the tool
+that certifies the tests.** It happened TWICE here, in two different ways, and in both cases the
+suite's output was indistinguishable from a correct all-clear.
+
+*Instance 1 — the plant never reached the code under test.* The probe applied a plant, ran the suite,
+then `git checkout --` to revert. With UNCOMMITTED work in the tree, that revert discarded the fix
+being verified, so the plants ran against the previously COMMITTED constants and two of them reported
+GREEN. Nothing in the output said the plant had not applied.
+
+*Instance 2 — the plant edited both sides of the equality.* A whole-file `sed` on a failure-message
+phrase rewrote BOTH the message that produces it and the assert that expects it, so the test could not
+see the change and reported GREEN. This is the artifact-as-its-own-oracle shape (the same shape as a
+baseline test that scales its input by the constant under examination).
+
+The rule, in three parts:
+
+* **(a) A plant must be applied to a COMMITTED tree.** Otherwise the revert step destroys the very
+  change under verification.
+* **(b) The probe must PRINT whether the plant actually applied** (`git diff --stat` before running,
+  or a diff of the planted line). A `sed` that matches nothing is otherwise indistinguishable from an
+  assert that does not fire.
+* **(c) The general rule: VERIFY THAT THE PLANT TOOK EFFECT, not merely that the suite went red or
+  stayed green.** A red proves only that something failed; a green proves nothing at all until the
+  plant is known to have reached the compiled code. For a plant on a message string this additionally
+  means targeting the PRODUCER only — never a substitution that also rewrites the expectation.
+
+Two review rounds in this issue were spent on constants whose guards looked fine. This is the reason a
+guard can look fine.
