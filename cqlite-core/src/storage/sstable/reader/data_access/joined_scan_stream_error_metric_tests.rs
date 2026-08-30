@@ -20,6 +20,7 @@ use crate::observability::{catalog, testing};
 use tokio::sync::mpsc;
 
 use super::*;
+use crate::storage::sstable::reader::ScanErrorReporting;
 
 /// This capture window's `cqlite.errors.total{subsystem="reader"}` total.
 fn reader_errors(m: &testing::CapturedMetrics) -> f64 {
@@ -97,7 +98,7 @@ async fn a_nested_stream_delegates_counting_to_the_measured_stream_above_it() {
     drop(tx);
     // `new` (not `new_measured_rows`) is exactly how a fan-out sub-scan and the
     // re-chunker's source are built.
-    let mut nested = RowScanStream::new(rx, tokio::spawn(async {}));
+    let mut nested = RowScanStream::new_nested(rx, tokio::spawn(async {}));
 
     let item = nested.recv().await.expect("one item");
     assert!(
@@ -154,6 +155,109 @@ async fn a_measured_stream_counts_the_same_forwarded_error_once() {
         ),
         1.0,
         "and carries the classifier's category for Error::Corruption; entry: {:?}",
+        m.find(catalog::ERRORS_TOTAL)
+    );
+}
+
+/// A TOP-LEVEL but UNMETERED stream whose producer dies must count ONE (issue #1704,
+/// roborev F2).
+///
+/// This is the regression guard for inferring "nested" from "has no `ReadOpMeter`".
+/// The two properties are independent: `scan_stream_batched_admitted(.., Exempt)` is
+/// unmetered because a fan-out merge owns the admission permit for the whole
+/// operation, and `summary_scan::query_rows` drains exactly that stream DIRECTLY as
+/// the top-level Flight full-scan producer. Under the inference its failures counted
+/// ZERO — the #1704 defect itself, live, on a path this issue exists to fix.
+///
+/// The dead-task arm is the one that matters here: a forwarded `Err` from such a
+/// stream is at least visible to whoever polls it, whereas a producer that UNWINDS
+/// produces a verdict this stream synthesises and nothing else can ever observe.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_top_level_unmetered_stream_counts_its_dead_producer() {
+    let mc = testing::metrics_capture();
+    mc.reset();
+
+    let _silence = crate::storage::producer_fault::silence_injected_panics();
+    let (tx, rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(4);
+    let task = tokio::spawn(async move {
+        let _tx = tx;
+        panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
+    });
+    // UNMETERED and TOP-LEVEL — the combination the meter-derived inference could not
+    // represent.
+    let mut stream = RowScanStream::unmetered_as(rx, task, ScanErrorReporting::TopLevel);
+    let first = stream.recv().await;
+    drop(_silence);
+
+    assert!(
+        matches!(first, Some(Err(_))),
+        "a dead producer must be an error, not a clean end of stream; got {first:?}"
+    );
+
+    let m = mc.flush_and_collect();
+    assert_eq!(
+        reader_errors(&m),
+        1.0,
+        "an unmetered TOP-LEVEL stream is the only observer of its producer's death, \
+         so it must count it; 0 means `Nested` was inferred from the absent meter. \
+         entry: {:?}",
+        m.find(catalog::ERRORS_TOTAL)
+    );
+}
+
+/// The complement: a stream over an ALREADY-COUNTING source counts its OWN death but
+/// NOT what it forwards — the re-chunker's shape (issue #1704).
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_stream_over_a_counted_source_counts_only_its_own_death() {
+    let mc = testing::metrics_capture();
+    mc.reset();
+
+    // Forwarded arm: the source already counted this, so this stream must not.
+    let (tx, rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(4);
+    tx.send(Err(Error::Corruption(
+        "already counted upstream".to_string(),
+    )))
+    .await
+    .expect("send");
+    drop(tx);
+    let mut forwarding = RowScanStream::unmetered_as(
+        rx,
+        tokio::spawn(async {}),
+        ScanErrorReporting::TopLevelOverCountedSource,
+    );
+    assert!(matches!(forwarding.recv().await, Some(Err(_))));
+    assert!(forwarding.recv().await.is_none());
+
+    let m = mc.flush_and_collect();
+    assert_eq!(
+        reader_errors(&m),
+        0.0,
+        "a forwarded error was already counted by the counting source; entry: {:?}",
+        m.find(catalog::ERRORS_TOTAL)
+    );
+
+    // Own-death arm: nothing upstream can see this, so it MUST be counted.
+    mc.reset();
+    let _silence = crate::storage::producer_fault::silence_injected_panics();
+    let (tx2, rx2) = mpsc::channel::<Result<(RowKey, ScanRow)>>(4);
+    let task = tokio::spawn(async move {
+        let _tx = tx2;
+        panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
+    });
+    let mut dying =
+        RowScanStream::unmetered_as(rx2, task, ScanErrorReporting::TopLevelOverCountedSource);
+    let outcome = dying.recv().await;
+    drop(_silence);
+    assert!(matches!(outcome, Some(Err(_))));
+
+    let m = mc.flush_and_collect();
+    assert_eq!(
+        reader_errors(&m),
+        1.0,
+        "this stream's OWN death is invisible to its source, so it must count it; \
+         entry: {:?}",
         m.find(catalog::ERRORS_TOTAL)
     );
 }

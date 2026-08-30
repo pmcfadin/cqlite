@@ -437,11 +437,16 @@ async fn scan_delta_open_failure_is_counted_once_not_twice() {
         }
     }
     let err = delivered.expect("a generation whose Data.db cannot be opened must fail the scan");
+    // The pre-existing `Error::corruption(..)` wrap is PRESERVED (roborev F1): this
+    // issue's contract is that the `Err` propagates identically to `main`, and the
+    // wrap predates it. What #1704 owns is the COUNT and the fact that the recorded
+    // category is the classifier's answer for the error the caller actually got —
+    // which `assert_one_reader_error_classified_as` checks below, and which now holds
+    // because the open defers rather than recording the unwrapped cause separately.
     assert!(
-        !matches!(err, Error::Corruption(_)),
-        "the open error must propagate VERBATIM, not rewrapped as corruption — an \
-         unreadable file is an io failure, and the rewrap made the delivered error \
-         disagree with the category `SSTableReader::open` recorded. Got: {err:?}"
+        matches!(err, Error::Corruption(_)),
+        "scan_delta must keep wrapping an open failure exactly as it does on main; \
+         got {err:?}"
     );
     while rx.recv().await.is_some() {}
 

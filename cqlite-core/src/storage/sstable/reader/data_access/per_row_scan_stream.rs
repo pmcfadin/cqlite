@@ -67,6 +67,7 @@ impl SSTableReader {
             schema,
             buffer_size,
             ScanAdmission::Acquire,
+            crate::storage::sstable::reader::ScanErrorReporting::TopLevel,
         )
     }
 
@@ -85,6 +86,9 @@ impl SSTableReader {
         schema: Option<crate::schema::TableSchema>,
         buffer_size: usize,
         admission: ScanAdmission,
+        // Issue #1704: whether anything ENCLOSES this stream. Not derivable from
+        // `admission` — see `ScanErrorReporting`.
+        reporting: crate::storage::sstable::reader::ScanErrorReporting,
     ) -> RowScanStream {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
         // Read-metric grain (issue #1701): a DIRECT scan is a top-level read
@@ -120,7 +124,7 @@ impl SSTableReader {
         });
         match meter {
             Some(meter) => RowScanStream::new_measured_rows(rx, task, meter),
-            None => RowScanStream::new(rx, task),
+            None => RowScanStream::unmetered_as(rx, task, reporting),
         }
     }
 

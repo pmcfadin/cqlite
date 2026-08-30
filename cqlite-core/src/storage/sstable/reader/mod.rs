@@ -374,6 +374,13 @@ fn sstables_open_count_for(format: &str) -> &'static AtomicI64 {
 // #1704). Their own file per the campsite rule (#1116): this one is more than twice
 // the ~800-line target.
 mod open;
+pub(crate) use data_access::joined_scan_stream::ScanErrorReporting;
+// Only the `delta-scan` and `write-support` consumers state a reporting mode; with
+// both features off nothing can call it, so the re-export carries their cfg rather
+// than an `allow(unused_imports)`. A bare allow would convert "no consumer compiled"
+// — the signal that the wiring is gone — into silence, on an issue whose whole
+// subject is an error path nobody can observe (#1704).
+#[cfg(any(feature = "delta-scan", feature = "write-support"))]
 pub(crate) use open::OpenErrorReporting;
 impl SSTableReader {
     /// Open implementation; see [`open`](Self::open) for the instrumented wrapper.

@@ -34,7 +34,7 @@ async fn a_dead_per_row_task_is_reported_as_an_error_and_stays_one() {
         let _ = tx.send(Ok(row(1))).await;
         panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
     });
-    let mut stream = RowScanStream::new(rx, task);
+    let mut stream = RowScanStream::new_nested(rx, task);
 
     let first = stream.recv().await;
     let mut rest = Vec::new();
@@ -73,7 +73,7 @@ async fn a_finished_per_row_task_yields_a_clean_end_of_stream() {
     let task = tokio::spawn(async move {
         let _ = tx.send(Ok(row(2))).await;
     });
-    let mut stream = RowScanStream::new(rx, task);
+    let mut stream = RowScanStream::new_nested(rx, task);
     assert!(
         matches!(stream.recv().await, Some(Ok(_))),
         "the row arrives"
@@ -111,7 +111,7 @@ async fn a_dead_scan_task_is_reported_as_an_error_and_stays_one() {
             .await;
         panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
     });
-    let mut stream = BatchedScanStream::new(rx, task);
+    let mut stream = BatchedScanStream::new_nested(rx, task);
 
     let (first, rest) = {
         let first = stream.recv().await;
@@ -172,7 +172,11 @@ fn stream_parked_after_closing_the_channel(
             panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
         }
     });
-    (BatchedScanStream::new(rx, task), closed_rx, release_tx)
+    (
+        BatchedScanStream::new_nested(rx, task),
+        closed_rx,
+        release_tx,
+    )
 }
 
 /// Cancel a `recv` WHILE it is awaiting the join, then poll again.
@@ -287,7 +291,7 @@ async fn a_cancelled_scan_task_is_reported_as_cancelled_and_stays_cancelled() {
     });
     started_rx.await.expect("the task started");
     task.abort();
-    let mut stream = RowScanStream::new(rx, task);
+    let mut stream = RowScanStream::new_nested(rx, task);
 
     for attempt in 0..3 {
         let err = stream
@@ -313,7 +317,7 @@ async fn a_finished_scan_task_yields_a_clean_end_of_stream() {
             .send(Ok(vec![(RowKey::new(vec![2]), ScanRow::Row(Vec::new()))]))
             .await;
     });
-    let mut stream = BatchedScanStream::new(rx, task);
+    let mut stream = BatchedScanStream::new_nested(rx, task);
     assert!(
         matches!(stream.recv().await, Some(Ok(_))),
         "the batch arrives"

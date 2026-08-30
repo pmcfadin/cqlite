@@ -155,39 +155,48 @@ pub struct JoinedStream<T: ScanStreamItem> {
     /// private field rather than a public-trait method, so the metric wiring adds
     /// nothing to [`ScanStreamItem`]'s published surface.
     account: ItemAccounting<T>,
-    /// Whether a failed scan is reported into `cqlite.errors.total` HERE, and
-    /// whether it already has (issue #1704). See [`ScanErrorReporting`].
-    errors: ScanErrorReporting,
+    /// Who counts a failed scan at this stream (issue #1704). See
+    /// [`ScanErrorReporting`] — stated by the constructor, never inferred.
+    reporting: ScanErrorReporting,
+    /// One increment per stream at most: the dead-task verdict is STICKY and
+    /// re-reported on every later `recv`, and a consumer may keep polling after a
+    /// terminal channel error.
+    counted: bool,
 }
 
-/// Whether THIS stream is the boundary that counts a failed scan into
-/// `cqlite.errors.total{category, subsystem="reader"}` (issue #1704).
+/// Who counts a failed scan into `cqlite.errors.total{category, subsystem="reader"}`
+/// at THIS stream (issue #1704), stated by the constructing call site.
 ///
-/// # Why the grain is per-OPERATION, not per-stream
+/// # Why this is not derived from whether the stream is metered
 ///
-/// Streams nest: a fan-out k-way merge drains one [`JoinedStream`] per generation
-/// and re-sends a sub-scan's `Err` on its own channel, and the per-row → batch
-/// re-chunker drains a per-row stream and re-sends its `Err` too. The SAME failure
-/// therefore crosses two or three `recv` boundaries, and a per-stream emission
-/// would count one failed query two or three times.
+/// It was, and that was wrong. Streams nest — a fan-out merge drains one
+/// [`JoinedStream`] per generation and re-sends a sub-scan's `Err` on its own channel,
+/// and the per-row → batch re-chunker does the same — so counting at every stream
+/// would report one failed query two or three times. The first fix inferred "nested"
+/// from "has no [`ReadOpMeter`]", reusing issue #1701's grain. That inference is FALSE:
+/// `scan_stream_batched_admitted(.., Exempt)` is unmetered because a fan-out merge owns
+/// the admission permit, and `summary_scan::query_rows` consumes exactly that stream
+/// DIRECTLY, as the top-level Flight full-scan producer. Under the inference its
+/// failures counted ZERO — the #1704 defect itself, on a path this issue exists to fix.
 ///
-/// This is the identical grain problem [`ReadOpMeter`] already solved for
-/// `read.rows`/`read.partitions`, and it takes the identical answer: exactly the
-/// streams built by [`JoinedStream::new_measured`] — the TOP-LEVEL read operations —
-/// report, and every nested stream built by [`JoinedStream::new`] delegates to the
-/// one above it. Keeping the two decisions in the same two constructors is what
-/// stops them drifting apart.
-enum ScanErrorReporting {
-    /// A nested stream: an enclosing measured stream sees (and counts) the same
-    /// error when the merge/re-chunker forwards it.
-    Delegated,
-    /// A top-level operation that has not yet failed.
-    Pending,
-    /// A top-level operation whose failure has been counted. LATCHED: the sticky
-    /// dead-task verdict is re-REPORTED to the consumer on every later `recv`
-    /// (see [`TaskState::Died`]) and must not be re-COUNTED, and neither must a
-    /// consumer that keeps polling after a terminal channel error.
-    Reported,
+/// Metering ("do my rows feed `read.rows`?") and counting ("will anyone else see my
+/// failure?") are independent properties of a stream. They are now stated separately,
+/// by name, at each construction site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScanErrorReporting {
+    /// An enclosing [`JoinedStream`] sees — and counts — everything this stream
+    /// produces, including its own dead-task verdict, because the intermediate task
+    /// forwards it. Count nothing. (A fan-out per-generation sub-scan.)
+    Nested,
+    /// Nothing encloses this stream and its source is a raw producer: it is the only
+    /// observer of every failure it delivers. Count all of them.
+    TopLevel,
+    /// Nothing encloses this stream, but its SOURCE is itself a counting
+    /// [`JoinedStream`] (or an already-counted materialized read) that has already
+    /// counted the failures it forwards. Count only THIS stream's own dead-task
+    /// verdict — which nothing else can see — and never a forwarded item.
+    /// (The per-row → batch re-chunker; the `tombstones` forwarder over `scan`.)
+    TopLevelOverCountedSource,
 }
 
 /// What a [`JoinedStream`] knows about its producer task (issue #3106, roborev).
@@ -217,31 +226,58 @@ enum TaskState {
 }
 
 impl<T: ScanStreamItem> JoinedStream<T> {
-    /// Pair a scan channel with the task that drives it, WITHOUT read-metric
-    /// accounting — for a stream that is not a top-level read operation (a fan-out
-    /// sub-scan, a re-chunker over an already-measured source, a test stand-in).
-    pub(in crate::storage::sstable) fn new(
+    /// Pair a scan channel with its producer task, WITHOUT read-metric accounting,
+    /// for a NESTED stream — see [`ScanErrorReporting::Nested`].
+    ///
+    /// `cfg(test)`: production nesting sites (the fan-out sub-scans) forward their
+    /// caller's choice as a VALUE through [`unmetered_as`](Self::unmetered_as), so
+    /// this by-name form exists only for stand-in streams in tests.
+    #[cfg(test)]
+    pub(in crate::storage::sstable) fn new_nested(
         rx: mpsc::Receiver<Result<T>>,
         task: JoinHandle<()>,
+    ) -> Self {
+        Self::unmetered_as(rx, task, ScanErrorReporting::Nested)
+    }
+
+    /// [`new_nested`](Self::new_nested) for a top-level stream whose SOURCE already
+    /// counts what it forwards — see [`ScanErrorReporting::TopLevelOverCountedSource`].
+    pub(in crate::storage::sstable) fn new_over_counted_source(
+        rx: mpsc::Receiver<Result<T>>,
+        task: JoinHandle<()>,
+    ) -> Self {
+        Self::unmetered_as(rx, task, ScanErrorReporting::TopLevelOverCountedSource)
+    }
+
+    /// The unmetered constructor whose mode is a runtime VALUE rather than a name —
+    /// for a site (`scan_stream_admitted`) that forwards its caller's choice.
+    pub(in crate::storage::sstable) fn unmetered_as(
+        rx: mpsc::Receiver<Result<T>>,
+        task: JoinHandle<()>,
+        reporting: ScanErrorReporting,
     ) -> Self {
         Self {
             rx,
             task: TaskState::Running(task),
             meter: ReadOpMeter::inert(),
             account: account_nothing,
-            // Nested stream: the enclosing measured stream counts the failure it
-            // forwards (issue #1704).
-            errors: ScanErrorReporting::Delegated,
+            reporting,
+            counted: false,
         }
     }
 
-    /// [`new`](Self::new) for a TOP-LEVEL read operation, whose rows, partitions and
-    /// duration are reported through the catalog read metrics (issue #1701).
+    /// A TOP-LEVEL read operation whose rows, partitions and duration are reported
+    /// through the catalog read metrics (issue #1701).
     ///
     /// `format` is the single-SSTable format label (`"big"` / `"bti"`) when the
     /// stream reads ONE SSTable, or `None` for a cross-generation merge, whose
     /// reconciled rows come from possibly mixed-format inputs — the
     /// format-agnostic grain [`crate::observability::catalog::READ_ROWS`] documents.
+    ///
+    /// A metered stream is always [`ScanErrorReporting::TopLevel`]: only a top-level
+    /// OPERATION may be metered (#1701), and its source is a raw producer. The
+    /// converse does NOT hold, which is why the unmetered constructors above are
+    /// three and not one.
     pub(in crate::storage::sstable) fn new_measured(
         rx: mpsc::Receiver<Result<T>>,
         task: JoinHandle<()>,
@@ -253,21 +289,41 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             task: TaskState::Running(task),
             meter,
             account,
-            // Top-level read operation: this is the ONE boundary that counts a
-            // failed scan (issue #1704).
-            errors: ScanErrorReporting::Pending,
+            reporting: ScanErrorReporting::TopLevel,
+            counted: false,
         }
     }
 
-    /// Count a terminal scan failure into `cqlite.errors.total` exactly once
-    /// (issue #1704).
+    /// Count a failure this stream FORWARDED from its producer (issue #1704): a
+    /// terminal `Err` item on the channel.
     ///
-    /// A pure side effect: the caller returns the SAME `Err` it would have returned
-    /// before, with the same variant and message. The category is derived by the
-    /// classifier via [`crate::observability::record_error`] — never chosen here.
-    fn count_scan_error(&mut self, err: &Error) {
-        if matches!(self.errors, ScanErrorReporting::Pending) {
-            self.errors = ScanErrorReporting::Reported;
+    /// Skipped for [`ScanErrorReporting::TopLevelOverCountedSource`], whose source
+    /// already counted it, and for [`ScanErrorReporting::Nested`], whose enclosing
+    /// stream will.
+    fn count_forwarded_error(&mut self, err: &Error) {
+        if self.reporting == ScanErrorReporting::TopLevel {
+            self.count_once(err);
+        }
+    }
+
+    /// Count a failure this stream ORIGINATED (issue #1704): its producer task died
+    /// or was cancelled, a verdict synthesised HERE by the join.
+    ///
+    /// Counted for BOTH top-level modes — a re-chunker's own death is invisible to
+    /// the counting source it reads from, so `TopLevelOverCountedSource` must report
+    /// it or nothing will.
+    fn count_own_failure(&mut self, err: &Error) {
+        if self.reporting != ScanErrorReporting::Nested {
+            self.count_once(err);
+        }
+    }
+
+    /// At most one increment per stream. A pure side effect: the caller returns the
+    /// SAME `Err`, and the category is derived by the classifier via
+    /// [`crate::observability::record_error`] — never chosen here.
+    fn count_once(&mut self, err: &Error) {
+        if !self.counted {
+            self.counted = true;
             crate::observability::record_error(err, "reader");
         }
     }
@@ -311,7 +367,7 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             let err = sticky_dead_task_error::<T>(cancelled);
             // Latched (issue #1704): the join-error arm below already counted this
             // failure, so re-reporting it to a still-polling consumer adds nothing.
-            self.count_scan_error(&err);
+            self.count_own_failure(&err);
             return Some(Err(err));
         }
         if let Some(item) = self.rx.recv().await {
@@ -324,7 +380,7 @@ impl<T: ScanStreamItem> JoinedStream<T> {
                 // ordinary mid-scan failure path (issue #1704). Counted here, at the
                 // one boundary every streaming surface crosses, and passed through
                 // untouched.
-                Err(e) => self.count_scan_error(e),
+                Err(e) => self.count_forwarded_error(e),
             }
             return Some(item);
         }
@@ -342,7 +398,7 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             TaskState::Finished => return None,
             TaskState::Died { cancelled } => {
                 let err = sticky_dead_task_error::<T>(*cancelled);
-                self.count_scan_error(&err);
+                self.count_own_failure(&err);
                 return Some(Err(err));
             }
         };
@@ -370,7 +426,7 @@ impl<T: ScanStreamItem> JoinedStream<T> {
                 // A dead producer IS a failed scan (issue #1704) — the case that
                 // previously reached the consumer as an error while the operator's
                 // error dashboard stayed clean.
-                self.count_scan_error(&err);
+                self.count_own_failure(&err);
                 Some(Err(err))
             }
         }

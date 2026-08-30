@@ -25,7 +25,6 @@ use std::sync::Arc;
 use super::sstables_open_count_for;
 use super::SSTableReader;
 use crate::platform::Platform;
-use crate::storage::scan_cancel::ScanCancel;
 use crate::{Config, Result};
 
 impl SSTableReader {
@@ -133,6 +132,7 @@ impl SSTableReader {
     /// literally the same code. The first version of this function called `open_inner`
     /// directly and silently dropped the span while its doc claimed identity — the
     /// shared helper is what makes the claim checkable instead of aspirational.
+    #[cfg(any(feature = "delta-scan", feature = "write-support"))]
     pub(crate) async fn open_with_reporting(
         path: &Path,
         config: &Config,
@@ -145,7 +145,7 @@ impl SSTableReader {
             config,
             platform,
             cache,
-            ScanCancel::default(),
+            crate::storage::scan_cancel::ScanCancel::default(),
             reporting,
         )
         .await

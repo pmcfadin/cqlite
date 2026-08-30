@@ -105,17 +105,18 @@ async fn open_delta_scan_reader(
     .await
     .map(std::sync::Arc::new)
     .map_err(|e| {
-        // Propagated VERBATIM rather than rewrapped as `Error::corruption(..)`
-        // (issue #1704): the rewrap relabelled every cause as corruption, so a
-        // plain unreadable/absent file reached the caller as `corruption` and the
-        // recorded category disagreed with the delivered error. The path context
-        // the rewrap added is kept here, where it belongs, as a log field.
-        tracing::error!(
-            data_db = ?data_db,
-            error = %e,
-            "scan_delta: failed to open the generation's Data.db"
-        );
-        e
+        // The pre-existing `Error::corruption(..)` wrap is PRESERVED (issue #1704,
+        // roborev F1). This issue's contract is that emission is a pure side effect
+        // and the `Err` propagates IDENTICALLY, so dropping the wrap — which changed
+        // `scan_delta`'s caller-visible variant and message relative to `main` — was
+        // out of scope here, even though it fixed a real mislabelling. With the open
+        // now `DeferredToCaller` it records nothing of its own, so `drive_delta_scan`
+        // records this WRAPPED, caller-visible error exactly once.
+        //
+        // KNOWN AND UNFIXED HERE: an `io` cause (absent/unreadable file) still
+        // surfaces as `corruption` in BOTH the error and the metric. Pre-existing
+        // classification defect, tracked separately — not a #1704 regression.
+        crate::Error::corruption(format!("scan_delta: failed to open {:?}: {e}", data_db))
     })
 }
 
