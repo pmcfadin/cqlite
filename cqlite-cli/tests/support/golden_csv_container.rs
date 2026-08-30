@@ -270,6 +270,80 @@ fn field_type<'t>(ty: Option<&'t CqlType>, key: &str) -> Option<&'t CqlType> {
     }
 }
 
+/// What is STILL decidable about a CLI cell whose golden counterpart was refused
+/// as ambiguous — so a refusal suppresses only the genuinely indistinguishable
+/// readings and not the whole cell (issue #1491 review finding N3).
+///
+/// The refusals above are all about the CONTENT of the rendering: which members
+/// it holds, and how many. None of them is about its FRAME. So three properties
+/// survive every refusal cause, each decided from the GOLDEN and the committed
+/// DDL exactly as the refusal itself is:
+///
+///   1. the cell carries a rendering AT ALL. The golden is a container, and the
+///      shortest rendering of any container is its bracket PAIR, so an empty CSV
+///      field (which [`super::compare::cli_csv_rows`] reads as `null`) or a
+///      non-text cell is a divergence, not an ambiguity;
+///   2. it is framed with the bracket pair the DECLARED type requires — the same
+///      rule [`strip`] applies on the decodable path, where a `set` rendered
+///      `[a, b]` is a failure (review finding R2);
+///   3. the member COUNT, in the two directions the ambiguities cannot reach. A
+///      golden container with NO members can only render as the empty bracket
+///      pair: both readings ambiguity 0 confuses — zero members, and one member
+///      that renders empty — are `{}` byte for byte, so ANY other body is a third
+///      thing and diverges. Symmetrically a golden with TWO OR MORE members
+///      cannot render as an empty body, because even all-empty members are
+///      separated by `, `. (At exactly ONE member the empty body IS a legal
+///      rendering — of a single empty member — so nothing is asserted there.)
+///
+/// What stays suppressed is exactly the indistinguishable set: WHICH members the
+/// body holds, and how many when the count is 1. Before this the whole cell was
+/// discarded before the CLI value was looked at, so `null`, an unrelated word or
+/// a list rendering all passed for an ambiguous empty `set<text>` — a blind spot
+/// wearing a declared-gap label.
+pub fn decidable_despite_ambiguity(
+    golden: &Value,
+    cli: &Value,
+    ty: &CqlType,
+) -> Result<(), String> {
+    let members = match golden {
+        Value::Array(items) => items.len(),
+        Value::Object(fields) => fields.len(),
+        // Not a container, so nothing was refused for it; `ambiguity` only
+        // refuses a cell whose golden is one.
+        _ => return Ok(()),
+    };
+    let Value::String(text) = cli else {
+        return Err(format!(
+            "the golden carries a container the CSV rendering cannot express \
+             unambiguously, but the csv egress cell is {} — a container always \
+             renders as at least its bracket pair, so an empty or non-text field \
+             is a divergence the ambiguity does not cover",
+            match cli {
+                Value::Null => "absent/empty".to_string(),
+                other => brief(&other.to_string()),
+            }
+        ));
+    };
+    let body = strip(text, ty)?;
+    if members == 0 && !body.is_empty() {
+        return Err(format!(
+            "the golden container is EMPTY, so the only renderings the CSV \
+             ambiguity confuses are the empty bracket pair — but the csv egress \
+             cell {} carries a body",
+            brief(text)
+        ));
+    }
+    if members >= 2 && body.is_empty() {
+        return Err(format!(
+            "the golden container holds {members} members, which cannot render as \
+             an empty body (members are `, `-separated even when each is empty), \
+             but the csv egress cell is {}",
+            brief(text)
+        ));
+    }
+    Ok(())
+}
+
 /// A predicate over a value path: `true` means the comparison excludes that path,
 /// so the decoder must not require the CLI's text there to invert the grammar.
 ///
@@ -680,6 +754,60 @@ mod tests {
         assert!(
             why.contains("empty container is indistinguishable"),
             "{why}"
+        );
+    }
+
+    /// Finding N3: a refusal suppresses the INDISTINGUISHABLE readings only.
+    ///
+    /// The subject is the ambiguity the corpus actually reaches — an empty
+    /// `frozen<set<text>>`, which renders `{}` whether it holds nothing or one
+    /// empty member. Everything else about the cell is still decided, so a
+    /// `null`, an unrelated word, the wrong bracket or a non-empty body is a
+    /// divergence. Before this the whole cell was discarded before the CLI value
+    /// was looked at, so all four passed.
+    #[test]
+    fn a_refused_cell_still_has_its_frame_and_member_count_compared() {
+        let ty = ty_of("frozen<set<text>>");
+        let empty = json!([]);
+        // The one reading pair the format genuinely cannot tell apart.
+        assert_eq!(
+            decidable_despite_ambiguity(&empty, &json!("{}"), &ty),
+            Ok(()),
+            "the empty bracket pair is exactly the indistinguishable case"
+        );
+        for (cli, expect) in [
+            (Value::Null, "empty or non-text field"),
+            (json!("null"), "opening"),
+            (json!("unrelated text"), "opening"),
+            (json!("[]"), "opening"),
+            (json!("{a}"), "carries a body"),
+        ] {
+            let why = decidable_despite_ambiguity(&empty, &cli, &ty)
+                .expect_err(&format!("{cli} must diverge from an empty golden set"));
+            assert!(why.contains(expect), "unexpected reason for {cli}: {why}");
+        }
+
+        // The other decidable count: two or more members cannot render empty,
+        // whatever the refusal cause — here a `, `-bearing member.
+        let two = json!(["a, b", "c"]);
+        assert!(
+            ambiguity(&two, &ty).is_some(),
+            "the `, ` in a member is what refuses this cell"
+        );
+        let why = decidable_despite_ambiguity(&two, &json!("{}"), &ty)
+            .expect_err("two members cannot render as an empty body");
+        assert!(why.contains("cannot render as an empty body"), "{why}");
+        // …and WHICH members the body holds stays suppressed, because that is
+        // what the ambiguity destroys.
+        assert_eq!(
+            decidable_despite_ambiguity(&two, &json!("{something, else}"), &ty),
+            Ok(())
+        );
+        // At exactly ONE member the empty body is a legal rendering (of one empty
+        // member), so nothing is asserted about the count there.
+        assert_eq!(
+            decidable_despite_ambiguity(&json!([""]), &json!("{}"), &ty),
+            Ok(())
         );
     }
 

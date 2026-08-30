@@ -59,6 +59,12 @@ pub struct Report {
     /// the unquoted CSV rendering (see `csv_container::ambiguity`). Counted, and
     /// named in [`Self::ambiguity_reasons`], so the narrowing is declared at run
     /// time rather than inferred from a silent gap.
+    ///
+    /// A refused cell is NOT uncompared: what the ambiguity cannot reach — the
+    /// bracket frame and the decidable member counts — is still compared, and a
+    /// divergence there is an ordinary diff (`decidable_despite_ambiguity`,
+    /// finding N3). It is not counted as compared coverage, because only part of
+    /// the value was decided.
     pub ambiguous_container_cells: usize,
     /// One deduplicated `column (reason)` entry per refusal cause.
     pub ambiguity_reasons: Vec<String>,
@@ -314,11 +320,33 @@ pub fn compare_rows(
                     if !report.ambiguity_reasons.contains(&entry) {
                         report.ambiguity_reasons.push(entry);
                     }
-                    if excluded_column {
-                        skips.observe(
-                            name,
-                            Observed::Unresolved(format!("the CSV cell was refused: {why}")),
-                        );
+                    // The refusal suppresses the INDISTINGUISHABLE readings, not
+                    // the whole cell: the frame and the two decidable member
+                    // counts are still compared (finding N3). The cell stays
+                    // counted as REFUSED rather than as compared coverage,
+                    // because what was checked is a proper part of the value.
+                    match csv_container::decidable_despite_ambiguity(gv, cv, &column.ty) {
+                        Ok(()) => {
+                            if excluded_column {
+                                skips.observe(
+                                    name,
+                                    Observed::Unresolved(format!(
+                                        "the CSV cell was refused: {why}"
+                                    )),
+                                );
+                            }
+                        }
+                        Err(divergence) => {
+                            if excluded_column {
+                                // The exclusion is what keeps this out of `diffs`,
+                                // so it suppressed a real divergence.
+                                skips.observe(name, Observed::Suppressed);
+                            } else {
+                                report
+                                    .diffs
+                                    .push(format!("row[{key}].{name}: {divergence}"));
+                            }
+                        }
                     }
                     continue;
                 }
@@ -426,9 +454,11 @@ fn column_kinding(column: &Column) -> Kinding {
 
 /// Why a CSV container cell could not be decoded.
 enum Refusal {
-    /// The GOLDEN's own content cannot survive the unquoted rendering, so no
-    /// reading of the CLI's text is trustworthy. Decided from the golden alone,
-    /// so it can never be caused by the defect under test.
+    /// The GOLDEN's own content cannot survive the unquoted rendering, so the
+    /// CLI text cannot be read back into members. Decided from the golden alone,
+    /// so it can never be caused by the defect under test — and it suppresses
+    /// only the readings that are genuinely indistinguishable: the caller still
+    /// applies `csv_container::decidable_despite_ambiguity` (finding N3).
     Ambiguous(String),
     /// The CLI's text is not the grammar at all (wrong bracket, unbalanced
     /// brackets, a map entry with no `: `). That IS a divergence, so it is

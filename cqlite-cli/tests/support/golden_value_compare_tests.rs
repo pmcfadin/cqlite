@@ -40,8 +40,9 @@ fn set_schema() -> TableSchema {
 fn a_csv_unrepresentable_container_is_refused_and_named() {
     let schema = set_schema();
     let golden = vec![row(&[("id", json!(1)), ("s", json!(["a, b"]))])];
-    // The CLI text is IRRELEVANT to the refusal: it is decided from the
-    // golden alone, so the defect under test can never cause it.
+    // WHETHER the cell is refused is decided from the golden alone, so the defect
+    // under test can never cause it. What survives the refusal is compared —
+    // here the frame, which this rendering satisfies (see the case below).
     let cli = vec![row(&[("id", json!("1")), ("s", json!("{a, b}"))])];
     let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Csv);
 
@@ -62,6 +63,45 @@ fn a_csv_unrepresentable_container_is_refused_and_named() {
         "the refusal must name its column: {:?}",
         report.ambiguity_reasons
     );
+}
+
+/// Finding N3, through the comparator: a refused cell still reports the
+/// divergences the ambiguity cannot reach, and is still counted as refused rather
+/// than as compared coverage.
+///
+/// The subject is the one refusal the corpus reaches — an EMPTY `set<text>`,
+/// indistinguishable from a set of one empty member. Refusing the whole cell
+/// before looking at the CLI value let `null` (and any other text) pass.
+#[test]
+fn a_refused_cell_still_reports_what_the_ambiguity_cannot_hide() {
+    let schema = set_schema();
+    let golden = vec![row(&[("id", json!(1)), ("s", json!([]))])];
+
+    // The indistinguishable rendering: still no diff, still counted as refused.
+    let ambiguous = vec![row(&[("id", json!("1")), ("s", json!("{}"))])];
+    let report = compare_rows(&golden, &ambiguous, &schema, &["id"], &[], &[], Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(report.ambiguous_container_cells, 1);
+
+    // An empty CSV field is not a container rendering at all, so it diverges.
+    let absent = vec![row(&[("id", json!("1")), ("s", Value::Null)])];
+    let report = compare_rows(&golden, &absent, &schema, &["id"], &[], &[], Egress::Csv);
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "an absent cell against a golden container must fail: {:?}",
+        report.diffs
+    );
+    assert!(report.diffs[0].contains(".s:"), "{:?}", report.diffs);
+    assert_eq!(
+        report.ambiguous_container_cells, 1,
+        "the cell is still refused: only part of it was decided"
+    );
+    assert_eq!(
+        report.container_cells, 0,
+        "a partly-decided cell is not counted as container coverage"
+    );
+    assert_eq!(report.compared_cells, 1, "`id` is still compared");
 }
 
 /// A representable container is compared, and a wrong member fails. Pins the
