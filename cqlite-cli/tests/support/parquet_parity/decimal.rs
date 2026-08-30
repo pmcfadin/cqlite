@@ -26,7 +26,7 @@
 //! are the SAME `f64`, both neighbours of the recovered `0.1` round elsewhere,
 //! so the recovery declared itself EXACT and canonicalized an eighteen-digit
 //! literal as `0.1` — a lossy export would have compared EQUAL. Recovery from a
-//! double is now GONE, not improved: `golden_lexeme.rs` preserves the literal's
+//! double is now GONE, not improved: `golden_text.rs` preserves the literal's
 //! TEXT before the shared parser can turn it into a double, every golden decimal
 //! is read by [`exact_from_text`], and `declared.rs` REFUSES a declared-`decimal`
 //! position that still arrives as an `f64`.
@@ -205,7 +205,7 @@ pub fn exact_from_decimal128(unscaled: i128, scale: i8, ctx: &str) -> Result<Exa
 ///   Cassandra writes as a quoted STRING through `AbstractType.getString`, i.e.
 ///   `BigDecimal.toString` (issue #1490 round 6);
 /// * a decimal CELL, which `sstabledump` writes as a bare JSON NUMBER — whose
-///   literal is preserved as text by `golden_lexeme.rs` BEFORE the shared
+///   literal is preserved as text by `golden_text.rs` BEFORE the shared
 ///   comparator can parse it into an `f64` (round 10).
 ///
 /// The literal digits are therefore always present and are read exactly, with no

@@ -100,8 +100,8 @@ pub mod cql_type;
 pub mod decimal;
 pub mod declared;
 pub mod failure;
-pub mod golden_lexeme;
 pub mod golden_rows;
+pub mod golden_text;
 pub mod schema_fixture;
 pub mod spelling;
 pub mod unsupported;
@@ -1168,7 +1168,7 @@ fn load_golden(
     // `decimal`'s LITERAL survives the parse: the shared comparator turns a bare
     // JSON number into an `f64`, and an `f64` cannot identify the decimal it was
     // parsed from (`0.100000000000000001` and `0.1` are the same double). See
-    // `golden_lexeme.rs` — and note the two refusals that keep this fail-closed:
+    // `golden_text.rs` — and note the two refusals that keep this fail-closed:
     // the rewrite errors on any JSON it cannot read, and `declared.rs` REFUSES a
     // declared-`decimal`/`varint` position that still arrives as a double. The
     // rewrite is POSITION-precise: it takes the whole declared column list and
@@ -1180,14 +1180,14 @@ fn load_golden(
             fixture.golden.display()
         ))
     })?;
-    if let Some(marker) = golden_lexeme::placeholder_marker(&raw) {
+    if let Some(marker) = golden_text::placeholder_marker(&raw) {
         return Err(Failures::refusal(format!(
             "the sstabledump golden {} carries the placeholder marker {marker} — it is not a \
              real Cassandra dump and cannot be an oracle",
             fixture.golden.display()
         )));
     }
-    let content = golden_lexeme::preserve_exact_lexemes(&raw, columns).map_err(|e| {
+    let content = golden_text::preserve_exact_lexemes(&raw, columns).map_err(|e| {
         Failures::refusal(format!(
             "preserving the exact literals of the sstabledump golden {} failed: {e}",
             fixture.golden.display()

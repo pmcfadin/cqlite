@@ -34,6 +34,7 @@ use parquet_parity::cql_type::CqlTypeSpec;
 use parquet_parity::declared::{
     canonicalize_arrow, canonicalize_arrow_decimal, canonicalize_golden, Declared,
 };
+use parquet_parity::golden_text::{placeholder_marker, preserve_exact_lexemes};
 
 /// A raw golden value at the top-level CELL position.
 fn golden_cell(v: CV, spec: &CqlTypeSpec) -> Result<CV, String> {
@@ -544,7 +545,7 @@ fn interval_duration_canonicalizes_to_the_golden_spelling() {
 // cannot work in principle: `0.100000000000000001` and `0.1` are the SAME
 // `f64`, so the recovery canonicalized the first as the second and reported
 // itself exact. The golden literal's TEXT is now preserved
-// (`golden_lexeme.rs`) and a decimal that still arrives as a double is
+// (`golden_text.rs`) and a decimal that still arrives as a double is
 // REFUSED — `a_golden_decimal_that_lost_its_literal_is_refused` and
 // `f64_colliding_decimal_literals_stay_distinct` are the controls.
 //
@@ -774,8 +775,9 @@ fn decimal_comparison_refuses_what_it_cannot_compare_exactly() {
 }
 
 /// A golden `decimal` cell as the harness receives it: its LITERAL, preserved
-/// by `golden_lexeme::preserve_decimal_lexemes` before the shared comparator
-/// could turn it into an `f64` (round 10). `golden_lexeme_preserves_...` in
+/// by `golden_text::preserve_exact_lexemes` before the shared comparator
+/// could turn it into an `f64` (round 10).
+/// `the_rewrite_preserves_exact_lexemes_and_nothing_else` in
 /// `issue_1490_parquet_declaration_and_keys.rs` pins that this really is the
 /// shape a `decimal` cell arrives in.
 fn golden_decimal_literal(literal: &str) -> parquet_parity::canonical_jsonl::CanonicalValue {
@@ -1410,4 +1412,82 @@ fn a_missing_golden_or_a_second_generation_is_refused() {
     let err = parquet_parity::fixture_in_table_dir("ks.t", two_gens.path().to_path_buf())
         .expect_err("a multi-generation table is not a single-generation dump");
     assert!(err.contains("*-Data.db generation"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// `golden_text.rs`: the golden TEXT preparation, and its REFUSALS
+//
+// WHAT is quoted, at which POSITIONS, and end to end through the real load path
+// lives in section 5 of `issue_1490_parquet_declaration_and_keys.rs`, beside the
+// declared-type door that decides it. HERE is the module's own unit contract:
+// the sstabledump STRUCTURE it relies on, and what it does when that structure
+// does not hold.
+// ---------------------------------------------------------------------------
+
+/// The rewrite REFUSES what it cannot read, and the placeholder refusal the
+/// harness took over from `canonical_jsonl` still fires.
+#[test]
+fn the_rewrite_fails_closed() {
+    // Malformed JSON: refused by the parse, never waved through to the
+    // untransformed text (which would silently restore the `f64` path).
+    #[rustfmt::skip]
+    let malformed = [
+        r#"{"a":}"#, r#"{"a":1,}"#, r#"{"a":01x}"#, r#"{"a":1.}"#, r#"{"a":1e}"#,
+        r#"{a:1}"#, r#"{"a":"unterminated"#, r#"{"a":1} trailing"#, r#"[1,2"#,
+        r#"{"a":tru}"#,
+    ];
+    for bad in malformed {
+        assert!(
+            preserve_exact_lexemes(&format!("{bad}\n"), &[]).is_err(),
+            "{bad:?} must be refused, never waved through to the untransformed text"
+        );
+    }
+
+    // STRUCTURE the harness relies on. Each of these is well-formed JSON, so
+    // only the structural expectation can refuse it — and each refusal must NAME
+    // what it could not read.
+    const ROWS: &str = "`rows` must be an array of JSON objects";
+    const CELLS: &str = "`cells` must be an array of JSON objects";
+    for (bad, needle) in [
+        (r#"[1,2]"#, "one JSON object"),
+        (r#"{"rows":7}"#, ROWS),
+        (r#"{"rows":[7]}"#, ROWS),
+        (r#"{"rows":[{"cells":7}]}"#, CELLS),
+        (r#"{"rows":[{"cells":[7]}]}"#, CELLS),
+        (r#"{"rows":[{"cells":[{"value":1}]}]}"#, "has no `name`"),
+        (
+            r#"{"rows":[{"cells":[{"name":7,"value":1}]}]}"#,
+            "`name` must be a JSON string",
+        ),
+    ] {
+        let err = preserve_exact_lexemes(&format!("{bad}\n"), &[])
+            .expect_err("a line whose sstabledump structure does not hold must be refused");
+        assert!(
+            err.contains(needle),
+            "the refusal for {bad:?} must name what it could not read ({needle:?}), got: {err}"
+        );
+        assert!(
+            err.starts_with("line 1:"),
+            "the refusal must name the line, got: {err}"
+        );
+    }
+
+    // Valid JSON the corpus uses, including escapes and unicode, round-trips.
+    for good in [
+        r#"{"a":"a \"quoted\" \\ é value","b":[null,true,false,-0.5,1E+3]}"#,
+        r#"{"nested":{"deep":[{"x":1}]}}"#,
+    ] {
+        let out = preserve_exact_lexemes(&format!("{good}\n"), &[]).expect("valid JSON must parse");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(out.trim()).expect("re-emit"),
+            serde_json::from_str::<serde_json::Value>(good).expect("original"),
+            "the re-emitted text must denote the same JSON"
+        );
+    }
+
+    assert_eq!(
+        placeholder_marker(r#"{"cells":[{"value":"TODO"}]}"#),
+        Some("\"TODO\"")
+    );
+    assert_eq!(placeholder_marker(r#"{"cells":[{"value":0.1}]}"#), None);
 }

@@ -72,7 +72,10 @@ use super::cql_type::{ColumnType, CqlTypeSpec, SeqKind};
 use super::decimal::{
     exact_from_decimal128, exact_from_text, is_canonical_text, ExactDecimal, EXPORT_DECIMAL_SCALE,
 };
-use super::golden_lexeme::Lex;
+use serde_json::value::RawValue;
+
+use super::golden_text::RawObject;
+
 use super::golden_rows::fold_null;
 
 /// WHERE a value sits. Two things depend on it: the diagnostic text, and
@@ -475,7 +478,7 @@ fn type_stringified_scalar(v: CanonicalValue, at: &Declared<'_>) -> Result<Canon
         },
         // Exact, with nothing to refuse for ambiguity: the literal TEXT is
         // present at every golden decimal position — written by Cassandra's
-        // `BigDecimal.toString` here, and preserved by `golden_lexeme.rs` for a
+        // `BigDecimal.toString` here, and preserved by `golden_text.rs` for a
         // decimal CELL, which `sstabledump` writes as a bare JSON number.
         "decimal" => Ok(exact_from_text(s, EXPORT_DECIMAL_SCALE, &at.ctx)?.canonical()),
         "int" | "bigint" | "smallint" | "tinyint" | "varint" | "counter" => {
@@ -507,7 +510,7 @@ fn type_stringified_scalar(v: CanonicalValue, at: &Declared<'_>) -> Result<Canon
 ///   gives (1.84 vs 1.8399999141693115). Narrowing makes both sides hold the
 ///   same double WITHOUT a tolerance — the comparison stays exact-bit.
 /// * A `decimal` becomes an EXACT decimal, and NOTHING about it goes through an
-///   `f64` (see `decimal.rs` and `golden_lexeme.rs`): the literal's TEXT is
+///   `f64` (see `decimal.rs` and `golden_text.rs`): the literal's TEXT is
 ///   preserved before the shared parser sees it, so a decimal arrives here as
 ///   that text and is read exactly by `exact_from_text`. An integer-shaped
 ///   literal (`Int`) is already exact. A decimal that arrives as a DOUBLE is
@@ -553,7 +556,7 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
                  parsed from (0.100000000000000001 and 0.1 are the same double), so the \
                  harness REFUSES rather than recover one — recovery is what let a lossy \
                  export compare equal. The literal is preserved by \
-                 golden_lexeme::preserve_decimal_lexemes, which every golden goes through; \
+                 golden_text::preserve_exact_lexemes, which every golden goes through; \
                  reaching here means this value bypassed it"
             )));
         }
@@ -591,7 +594,7 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
                  LITERAL TEXT was lost before the harness saw it — a `varint` above \
                  u64::MAX is parsed by serde_json as an f64, while the export writes it \
                  as an exact Decimal128(38, 0). The literal is preserved by \
-                 golden_lexeme::preserve_exact_lexemes, which every golden goes through; \
+                 golden_text::preserve_exact_lexemes, which every golden goes through; \
                  reaching here means this value bypassed it"
             )));
         }
@@ -603,87 +606,174 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
 // LEXEME PRESERVATION — the SAME descent, one stage earlier
 // ---------------------------------------------------------------------------
 //
-// # Why this lives here and not in `golden_lexeme.rs`
+// # Why this lives here and not in `golden_text.rs`
 //
-// `golden_lexeme.rs` owns the LEXICAL machinery (a JSON reader that retains
-// every scalar's original text, and an emitter that puts it back verbatim). It
-// does NOT own the question "must this number keep its literal?", because that
-// question is answered by a POSITION's declared type — and this module is the
-// single place that maps positions to declared types.
+// `golden_text.rs` owns the DOCUMENT half only: it deserializes an sstabledump
+// line against the structure that line actually has, holding every value as its
+// ORIGINAL TEXT (`serde_json::value::RawValue`), and hands each CELL's `value`
+// to this module. It does NOT own the question "must this number keep its
+// literal?", because that question is answered by a POSITION's declared type —
+// and this module is the single place that maps positions to declared types.
 //
-// The first version of the lexeme pass got this wrong in exactly the way rounds
-// 5–7 got the canonicalization wrong: it asked "does this COLUMN mention a
-// decimal anywhere?" and then quoted every number in the column's value. That
-// is coarse where the declared type is precise, and it produced a real false
-// failure — a `map<decimal,int>` had its `int` VALUES turned into strings. One
-// declared-type recursion, one set of positions, one answer; a second walker
-// beside it is the defect, not a detail of it.
+// So there is exactly ONE traversal that decides positions: the descent below.
+// The first version of the lexeme pass had two — a walk that guessed which
+// objects were cells from their SHAPE, plus this descent — and the two
+// disagreed. It asked "does this COLUMN mention a decimal anywhere?" and quoted
+// every number in the column's value, turning a `map<decimal,int>`'s `int`
+// VALUES into strings (a real false failure), and it rewrote any nested object
+// spelled `{"name":…,"value":…}` per the unrelated column of that name,
+// corrupting the oracle. That is the same class as rounds 5–7's
+// coarse-instead-of-positional canonicalization. One declared-type recursion,
+// one set of positions, one answer.
+
+/// Which JSON CONTAINER a retained value is, so the descent knows what to open.
+///
+/// This is JSON SYNTAX, not a CQL type: the declared type decides what the
+/// positions inside are, and this only says which bracket the descent must go
+/// through to reach them. A form that disagrees with the declared type is left
+/// verbatim — a shape difference is for the value comparison to report, never
+/// something to guess past here.
+enum JsonForm {
+    Array,
+    Object,
+    Scalar,
+}
+
+fn json_form(value: &RawValue) -> JsonForm {
+    match value.get().trim_start().as_bytes().first() {
+        Some(b'[') => JsonForm::Array,
+        Some(b'{') => JsonForm::Object,
+        _ => JsonForm::Scalar,
+    }
+}
 
 /// Preserve the literal text of every number sitting at a position whose
 /// declared type is `decimal` or `varint` — and NO other number.
+///
+/// Takes the value's RETAINED TEXT and returns the text to emit in its place, so
+/// every position this descent does not rewrite is re-emitted byte for byte.
 ///
 /// Recurses in lockstep with [`canonicalize_golden`], over the same declared
 /// type, deriving each child position with the same private [`Declared::child`]:
 /// a sequence's `Element`, a frozen map's `MapValue`, a tuple's `TupleField`,
 /// and a UDT field's explicitly NAMED absence. So the two descents cannot
 /// disagree about which position carries which declared type.
-pub(super) fn preserve_lexemes(value: &mut Lex, at: &Declared<'_>) {
+pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<String, String> {
     if at.preserves_exact_lexeme() {
         // A declared SCALAR: this position IS the value, and a scalar has no
         // children to descend into.
-        value.quote_number_lexeme();
-        return;
+        return quote_number_lexeme(value, at);
     }
-    match (value, at.spec()) {
+    match (json_form(value), at.spec()) {
         // A frozen list/set arrives as a JSON ARRAY of typed values.
-        (Lex::Arr(items), Some(CqlTypeSpec::Seq { elem, .. })) => {
-            for (i, item) in items.iter_mut().enumerate() {
+        (JsonForm::Array, Some(CqlTypeSpec::Seq { elem, .. })) => {
+            let items = raw_array(value, at)?;
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
                 let child = at.child(Some(elem), Position::Element, format!("{}[{i}]", at.ctx));
-                preserve_lexemes(item, &child);
+                out.push(reparse(preserve_lexemes(item, &child)?, &child)?);
             }
+            emit(&out, at)
         }
         // A CQL tuple arrives as a POSITIONAL JSON array; a length disagreement
         // is a difference for the value comparison to report, never something to
         // guess past here.
-        (Lex::Arr(items), Some(CqlTypeSpec::Tuple(specs))) if items.len() == specs.len() => {
-            for (i, (item, spec)) in items.iter_mut().zip(specs.iter()).enumerate() {
+        (JsonForm::Array, Some(CqlTypeSpec::Tuple(specs))) => {
+            let items = raw_array(value, at)?;
+            if items.len() != specs.len() {
+                return Ok(value.get().to_string());
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for (i, (item, spec)) in items.iter().zip(specs.iter()).enumerate() {
                 let child = at.child(
                     Some(spec),
                     Position::TupleField(i),
                     format!("{}.{i}", at.ctx),
                 );
-                preserve_lexemes(item, &child);
+                out.push(reparse(preserve_lexemes(item, &child)?, &child)?);
             }
+            emit(&out, at)
         }
         // A frozen map arrives as a JSON OBJECT. Its KEYS are strings by JSON's
         // own rules — a `map<decimal,int>` key's literal is therefore ALREADY
         // preserved, and read exactly at the `FrozenMapObjectKey` position — so
         // only the VALUES can be bare numbers here. A non-frozen map's key is
         // preserved the same way, as Cassandra's stringified `path` component.
-        (Lex::Obj(fields), Some(CqlTypeSpec::Map { value, .. })) => {
-            for (_, key, field) in fields.iter_mut() {
-                let child = at.child(Some(value), Position::MapValue, format!("{}.{key}", at.ctx));
-                preserve_lexemes(field, &child);
+        (JsonForm::Object, Some(CqlTypeSpec::Map { value: vspec, .. })) => {
+            let mut fields = raw_object(value, at)?;
+            for (key, field) in fields.iter_mut() {
+                let child = at.child(Some(vspec), Position::MapValue, format!("{}.{key}", at.ctx));
+                *field = reparse(preserve_lexemes(field, &child)?, &child)?;
             }
+            emit(&fields, at)
         }
-        // A UDT's FIELD types are not declared to the harness, so no position
-        // inside one can be known to be a `decimal`/`varint`. Descended anyway,
-        // with the same NAMED absence `canonicalize_golden` uses, so the two
-        // recursions stay structurally identical — nothing is quoted, and the
-        // matching absence in `canonicalize_golden` means nothing needs to be.
-        (Lex::Obj(fields), Some(CqlTypeSpec::Udt(_))) => {
-            for (_, name, field) in fields.iter_mut() {
-                let child = Declared::unavailable(
-                    "a UDT's FIELD types are not declared to the harness — a frozen UDT \
-                     arrives as one JSON object whose values sstabledump has already typed",
-                    Position::UdtField(name.clone()),
-                    format!("{}.{name}", at.ctx),
-                );
-                preserve_lexemes(field, &child);
-            }
-        }
-        _ => {}
+        // A UDT's FIELD types are not declared to the harness (the `UdtField`
+        // position carries an explicitly NAMED absence — see
+        // `canonicalize_golden`'s matching arm), so NO position inside one can be
+        // known to be a `decimal`/`varint` and the descent would be the identity
+        // on every field. Returned as the identity outright, so a UDT's text is
+        // provably untouched rather than untouched by arithmetic — and so a field
+        // spelled like a decimal column cannot be reached at all.
+        _ => Ok(value.get().to_string()),
     }
+}
+
+/// Turn a NUMBER's retained text into the JSON STRING of its own lexeme;
+/// anything else is returned exactly as it arrived.
+///
+/// Called once `preserve_lexemes` has decided, FROM THE DECLARED TYPE AT THIS
+/// POSITION, that the literal must survive. Deliberately not recursive and not
+/// type-aware: recursion belongs to the one declared-type descent.
+fn quote_number_lexeme(value: &RawValue, at: &Declared<'_>) -> Result<String, String> {
+    let text = value.get().trim();
+    if !matches!(text.as_bytes().first(), Some(b'-') | Some(b'0'..=b'9')) {
+        // Not a JSON number: a `null`, or the quoted text a STRINGIFIED position
+        // already carries. Nothing to preserve, and nothing to change.
+        return Ok(value.get().to_string());
+    }
+    // A JSON number lexeme contains only `-+.eE0123456789`, none of which JSON
+    // escapes, so quoting it is exact. Asserted rather than assumed: a lexeme
+    // carrying anything else would make the quoted form a DIFFERENT value, and
+    // this harness refuses rather than emit one.
+    if let Some(bad) = text
+        .chars()
+        .find(|c| !matches!(c, '-' | '+' | '.' | 'e' | 'E' | '0'..='9'))
+    {
+        return Err(at.refuse(&format!(
+            "the literal {text:?} starts like a JSON number but carries {bad:?}, which JSON's \
+             number grammar does not allow; the harness refuses to quote it rather than emit a \
+             different value"
+        )));
+    }
+    Ok(format!("\"{text}\""))
+}
+
+fn raw_array(value: &RawValue, at: &Declared<'_>) -> Result<Vec<Box<RawValue>>, String> {
+    serde_json::from_str(value.get()).map_err(|e| {
+        at.refuse(&format!(
+            "the golden value is a JSON array the harness cannot read: {e}"
+        ))
+    })
+}
+
+fn raw_object(value: &RawValue, at: &Declared<'_>) -> Result<RawObject, String> {
+    serde_json::from_str(value.get()).map_err(|e| {
+        at.refuse(&format!(
+            "the golden value is a JSON object the harness cannot read: {e}"
+        ))
+    })
+}
+
+/// Re-wrap a rewritten member's text as a retained value, so the container is
+/// re-emitted by `serde_json` and can never be assembled into invalid JSON.
+fn reparse(text: String, at: &Declared<'_>) -> Result<Box<RawValue>, String> {
+    RawValue::from_string(text)
+        .map_err(|e| at.refuse(&format!("the rewritten value is not valid JSON: {e}")))
+}
+
+fn emit<T: serde::Serialize>(value: &T, at: &Declared<'_>) -> Result<String, String> {
+    serde_json::to_string(value)
+        .map_err(|e| at.refuse(&format!("re-emitting the golden value failed: {e}")))
 }
 
 /// The declared POSITION of the `value` field of ONE `sstabledump` cell of

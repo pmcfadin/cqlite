@@ -111,7 +111,20 @@ parquet = { workspace = true }
 # is issue #3557.
 # `tests/issue_1490_parquet_jsonl_parity.rs::golden_float_literals_parse_exactly`
 # fails if it is ever dropped.
-serde_json = { workspace = true, features = ["float_roundtrip"] }
+#
+# `raw_value` (issue #1490 round 13) lets the same harness retain a cell value's
+# ORIGINAL TEXT through the parse (`serde_json::value::RawValue`), which is what
+# keeps a declared `decimal`/`varint` literal off the `f64` path — see
+# `tests/support/parquet_parity/golden_text.rs`. It is purely ADDITIVE: it adds a
+# type and changes nothing about `Number`, so no other serde_json user in these
+# test targets is affected. `arbitrary_precision` would have been the other way
+# to keep the text and is deliberately NOT enabled: it changes `Number`'s
+# representation, equality and serialization for EVERY serde_json user in this
+# crate's tests — including the ~20 files whose assertions compare serialized
+# JSON output (`output_determinism_regression_tests.rs`,
+# `output_format_tests.rs`) — so a decimal fix would silently move those
+# determinism contracts.
+serde_json = { workspace = true, features = ["float_roundtrip", "raw_value"] }
 num-bigint = "0.4"
 bytes = { workspace = true }
 tempfile = { workspace = true }

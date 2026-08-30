@@ -986,26 +986,26 @@ fn a_decimal_cell_without_a_declared_scalar_is_refused() {
 //
 // The FALSE PASS this section exists for: rounds 4–9 canonicalized a decimal
 // CELL by RECOVERING it from the `f64` the shared comparator produced (render at
-// the export scale, then check that neither one-unit neighbour parses to the
-// same double, and treat a unique answer as exact). That cannot work in
-// principle. `0.100000000000000001` and `0.1` are the SAME `f64`: the recovery
-// rendered `0.1`, found both neighbours rounding elsewhere, declared itself
-// EXACT — and canonicalized an eighteen-digit golden literal as `0.1`, so a
-// lossy export writing `0.1` compared EQUAL. By the time a value is an `f64` the
-// distinguishing digits are gone, and no amount of neighbour probing brings them
-// back.
+// the export scale, then check neither one-unit neighbour parses to the same
+// double, and treat a unique answer as exact). That cannot work in principle:
+// `0.100000000000000001` and `0.1` are the SAME `f64`, so the recovery rendered
+// `0.1`, found both neighbours rounding elsewhere, declared itself EXACT — and
+// canonicalized an eighteen-digit golden literal as `0.1`, so a lossy export
+// writing `0.1` compared EQUAL. Once a value is an `f64` the distinguishing
+// digits are gone and no probing brings them back.
 //
-// So the literal's TEXT is preserved before the shared parser sees it
-// (`golden_lexeme::preserve_exact_lexemes`, called by `mod.rs::load_golden`),
-// every golden decimal is read by `decimal::exact_from_text`, and a declared
-// `decimal` that still arrives as a double is REFUSED. The two halves are
-// coupled deliberately: `an_unrewritten_decimal_cell_is_refused_end_to_end`
-// pins that dropping the rewrite REDS every decimal table instead of quietly
-// restoring the recovery. `project_golden_types_multicell_collection_paths`
-// (section 3) goes through the same rewrite, for the same reason.
+// So the literal's TEXT is kept at deserialization time, before the shared
+// parser sees it (`golden_text::preserve_exact_lexemes`, called by
+// `mod.rs::load_golden`), every golden decimal is read by
+// `decimal::exact_from_text`, and a declared `decimal` that still arrives as a
+// double is REFUSED. The two halves are coupled deliberately:
+// `an_unrewritten_decimal_cell_is_refused_end_to_end` pins that dropping the
+// rewrite REDS every decimal table instead of quietly restoring the recovery.
+// `project_golden_types_multicell_collection_paths` (section 3) goes through the
+// same rewrite, for the same reason.
 // ===========================================================================
 
-use parquet_parity::golden_lexeme::{parse_line, placeholder_marker, preserve_exact_lexemes};
+use parquet_parity::golden_text::preserve_exact_lexemes;
 
 /// A golden decimal CELL, through THE declared-type door at the `Cell` position.
 fn decimal_cell_golden(raw: CanonicalValue) -> Result<CanonicalValue, String> {
@@ -1181,13 +1181,11 @@ fn the_rewrite_preserves_exact_lexemes_and_nothing_else() {
 /// in its value quoted, so a `map<decimal,int>` turned its `int` VALUES into
 /// strings — a false parity failure on ordinary correct data. The decision is
 /// now taken at each position from that position's declared type, by the same
-/// `declared.rs` recursion that canonicalizes the value.
-///
-/// Both map shapes are covered, because they reach the harness differently: a
-/// NON-frozen `map<decimal,int>` arrives as one cell per entry (key in the
-/// stringified `path`, value a bare JSON number), a FROZEN one as a single JSON
-/// object (keys already strings). And a `list<int>` sitting in the same
-/// decimal-bearing row must be untouched.
+/// `declared.rs` recursion that canonicalizes the value. Both map shapes are
+/// covered, because they reach the harness differently: a NON-frozen
+/// `map<decimal,int>` arrives as one cell per entry (key in the stringified
+/// `path`, value a bare JSON number), a FROZEN one as a single JSON object (keys
+/// already strings). And a `list<int>` in the same row must be untouched.
 #[test]
 fn the_rewrite_leaves_non_decimal_positions_of_a_decimal_bearing_column_alone() {
     const GOLDEN: &str = concat!(
@@ -1287,9 +1285,9 @@ fn the_rewrite_leaves_non_decimal_positions_of_a_decimal_bearing_column_alone() 
 ///
 /// `serde_json` parses such a literal as an `f64` (both `as_i64` and `as_u64`
 /// fail), while the export writes the column as an exact `Decimal128(38, 0)`
-/// that reads back as an `Int` — so the comparison was `Float` vs `Int`, a false
-/// mismatch, with the distinguishing digits already lost. The literal is now
-/// preserved by the same position-precise mechanism as a `decimal`.
+/// that reads back as an `Int` — a `Float`-vs-`Int` false mismatch with the
+/// distinguishing digits already lost. Kept by the same position-precise
+/// mechanism as a `decimal`.
 #[test]
 fn a_varint_above_u64_max_is_preserved_and_compares_exactly() {
     // 30 digits: far above u64::MAX, and inside the 38-digit unscaled range of
@@ -1366,45 +1364,57 @@ fn a_varint_above_u64_max_is_preserved_and_compares_exactly() {
     assert_eq!(rows[0].cells.get("v"), Some(&CanonicalValue::Int(-42)));
 }
 
-/// The scanner REFUSES what it cannot read, and the placeholder refusal the
-/// harness took over from `canonical_jsonl` still fires.
+/// ROUND-12 FINDING: a NESTED object spelled like a cell is NOT a cell.
+///
+/// The walker this replaced decided "is this an sstabledump cell?" from an
+/// object's SHAPE — any object, at any depth, carrying a `"name"` string that
+/// matched a declared column. So a frozen map or a UDT field spelled
+/// `{"name":"amount","value":…}` was rewritten per the unrelated `amount`
+/// COLUMN's declaration, and the oracle itself was corrupted: the value the
+/// golden carried is not the value the comparison then saw. Structure is now
+/// resolved by `serde_json` against the document's own shape, so a cell is a
+/// member of a row's `cells` array and nothing else.
 #[test]
-fn the_rewrite_fails_closed() {
-    for bad in [
-        r#"{"a":}"#,
-        r#"{"a":1,}"#,
-        r#"{"a":01x}"#,
-        r#"{"a":1.}"#,
-        r#"{"a":1e}"#,
-        r#"{a:1}"#,
-        r#"{"a":"unterminated"#,
-        r#"{"a":1} trailing"#,
-        r#"[1,2"#,
-        r#"{"a":tru}"#,
-    ] {
-        assert!(
-            parse_line(bad).is_err(),
-            "{bad:?} must be refused, never waved through to the untransformed text"
-        );
-    }
-    // Valid JSON the corpus uses, including escapes and unicode, round-trips.
-    for good in [
-        r#"{"a":"a \"quoted\" \\ é value","b":[null,true,false,-0.5,1E+3]}"#,
-        r#"{"nested":{"deep":[{"x":1}]}}"#,
-    ] {
-        let parsed = parse_line(good).expect("valid JSON must parse");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&parsed.to_json_text()).expect("re-emit"),
-            serde_json::from_str::<serde_json::Value>(good).expect("original"),
-            "the re-emitted text must denote the same JSON"
-        );
-    }
-
-    assert_eq!(
-        placeholder_marker(r#"{"cells":[{"value":"TODO"}]}"#),
-        Some("\"TODO\"")
+fn a_nested_object_named_like_a_decimal_column_is_not_a_cell() {
+    // `amount` is a declared `decimal` column, so the walker's shape test fired
+    // on every one of these — all ORDINARY VALUES of other columns: a
+    // `map<text,int>` holding the keys "name" and "value", a UDT whose FIELDS
+    // are called `name` and `value`, and the same object one level deeper.
+    const GOLDEN: &str = concat!(
+        r#"{"partition":{"key":["k"]},"rows":[{"type":"row","clustering":[],"cells":["#,
+        r#"{"name":"amount","value":2.5},"#,
+        r#"{"name":"tally","value":{"name":"amount","value":7}},"#,
+        r#"{"name":"who","value":{"name":"amount","value":7}},"#,
+        r#"{"name":"nested","value":[{"name":"amount","value":7}]}"#,
+        r#"]}]}"#,
+        "\n"
     );
-    assert_eq!(placeholder_marker(r#"{"cells":[{"value":0.1}]}"#), None);
+    let columns = vec![
+        col("id", "text"),
+        col("amount", "decimal"),
+        col("tally", "frozen<map<text, int>>"),
+        parse_column("who", "frozen<person>", &["person"]).expect("declared UDT"),
+        col("nested", "frozen<list<frozen<map<text, int>>>>"),
+    ];
+
+    let rewritten = preserve_exact_lexemes(GOLDEN, &columns).expect("the rewrite must succeed");
+
+    // The ONLY textual change a golden may undergo is the quoting of a
+    // declared-decimal/varint literal — so the whole document, byte for byte,
+    // must be the original with the one real decimal CELL quoted and NOTHING
+    // else. A byte census rather than a set of `contains` probes: a probe can
+    // only find the look-alikes someone already thought of, and the walker's
+    // defect was reaching spellings nobody had.
+    assert!(
+        rewritten.contains(r#"{"name":"amount","value":"2.5"}"#),
+        "the declared-decimal CELL must still be preserved: {rewritten}"
+    );
+    assert_eq!(
+        rewritten.replace(r#""value":"2.5""#, r#""value":2.5"#),
+        GOLDEN,
+        "a nested object spelled like the `amount` cell must NOT be rewritten per the \
+         `amount` column — that corrupts the oracle"
+    );
 }
 
 /// END TO END through the REAL load path: the rewrite, the shared parser and
