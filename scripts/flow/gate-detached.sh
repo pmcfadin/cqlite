@@ -148,6 +148,43 @@ if ! systemd-run --user --scope --quiet true >/dev/null 2>&1; then
   exit 69
 fi
 
+# LINGERING IS A SEPARATE, EQUALLY LOAD-BEARING PRECONDITION (roborev job 206, High). Escaping the
+# pane's cgroup is necessary but NOT sufficient: without lingering, the USER MANAGER itself is
+# stopped when the user's last session ends, and stopping `user@<uid>.service` tears down the
+# transient units it manages — including this gate. `systemd-run --user` succeeding says the manager
+# is running NOW; it says nothing about whether it survives a logout. systemd's own documentation is
+# the authority: lingering is what keeps a user manager "around after logouts".
+#
+# `KillUserProcesses=no` does NOT substitute for it — that governs whether a SESSION's processes are
+# killed at session end, not whether the user manager and its units are stopped.
+#
+# This refuses for the same reason the cgroup check does: the caller would otherwise believe a
+# 30-50 minute gate is protected when it is not, which is the exact false assurance this script
+# exists to remove. An UNMEASURABLE answer refuses too — a positive verdict requires an affirmative
+# measurement, and "I could not ask" is not one.
+_linger=$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)
+case "$_linger" in
+  yes) ;;
+  no)
+    echo "gate-detached: user lingering is DISABLED for '$(id -un)', so the user systemd manager" >&2
+    echo "               is stopped when your last session ends — and stopping it tears down the" >&2
+    echo "               transient unit holding the gate. Escaping the pane cgroup does not help:" >&2
+    echo "               the gate would still die at logout (#3473)." >&2
+    echo "               Remedy (one command, persists across reboots):" >&2
+    echo "                   loginctl enable-linger $(id -un)" >&2
+    echo "               Then re-run. Refusing rather than claiming a protection this host cannot" >&2
+    echo "               currently deliver." >&2
+    exit 69 ;;
+  *)
+    echo "gate-detached: could NOT determine whether user lingering is enabled" >&2
+    echo "               ('loginctl show-user -p Linger' gave '${_linger:-<no answer>}')." >&2
+    echo "               Without lingering the user manager stops at logout and takes the gate" >&2
+    echo "               with it, so this cannot be assumed (#3473). Refusing: a claim that the" >&2
+    echo "               gate survives session teardown needs an affirmative measurement." >&2
+    echo "               If lingering IS enabled, check 'loginctl' is on PATH and working." >&2
+    exit 69 ;;
+esac
+
 RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 UNIT="cqlite-gate-$RUN_TAG"
 # DEFAULT artifact paths go in a PRIVATE mkdtemp directory, never a predictable name in
@@ -556,6 +593,25 @@ _reserve="$SUMMARY.launch-lock"
 # Reclamation therefore requires an AFFIRMATIVE terminal reading. Transitional states are LIVE, and
 # an unmeasurable one is LIVE too — refusing to launch costs a retry, reclaiming a live unit's path
 # costs two gates writing one summary.
+# THREE-VALUED, and the third value is the point (owner ruling on #3473-R6). Reclamation may only
+# follow an AFFIRMATIVE reading; every "I could not tell" must refuse. But naively refusing on an
+# unreadable identity would break the NORMAL stale case — a genuinely dead owner has no /proc entry,
+# so its identity is unmeasurable too — and that is the permanent-block failure of job 196. The
+# distinction that makes the inversion safe is between the pid being ABSENT (affirmative death) and
+# the pid being PRESENT but unreadable (unknown).
+#
+# `kill -0` cannot make that distinction: it fails for BOTH "no such process" and "exists but not
+# signallable" (EPERM, e.g. another user's process). /proc answers it authoritatively, and
+# `systemd-run --user` already makes Linux a precondition of this script.
+_pid_state() {  # <pid> -> exists | gone | unknown
+  case "$1" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  if kill -0 "$1" 2>/dev/null; then printf 'exists'; return 0; fi
+  if [ -d "/proc/$1" ]; then printf 'exists'; return 0; fi     # EPERM, not ESRCH
+  if [ -d /proc ] && [ -r /proc ]; then printf 'gone'; return 0; fi
+  ps -p "$1" >/dev/null 2>&1 && { printf 'exists'; return 0; }
+  printf 'unknown'                                             # no /proc and ps inconclusive
+}
+
 _unit_is_live() {  # <unit> -> 0 = live or unmeasurable (refuse), 1 = affirmatively not running
   local st rc
   st=$(systemctl --user show -p ActiveState --value "$1" 2>/dev/null); rc=$?
@@ -656,29 +712,43 @@ if ! ln -s "$_res_target" "$_reserve" 2>/dev/null; then
     _own_unit=${_own#*unit=}; _own_unit=${_own_unit%%|*}
     _own_pid=${_own#*pid=};   _own_pid=${_own_pid%%|*}
     _own_start=${_own#*start=}
-    _live=no
-    # The LAUNCHER first: it is alive throughout its own acquisition. Its pid is pinned by a start
-    # identity so a recycled pid cannot make a finished run look live, and a ZOMBIE is GONE — its
-    # pid entry outlives its exit, so `kill -0` alone would call a launcher that can never start a
-    # unit "live" and its reservation could never self-heal.
-    case "$_own_pid" in
-      ''|*[!0-9]*) ;;
-      *) if kill -0 "$_own_pid" 2>/dev/null && ! _proc_is_zombie "$_own_pid"; then
-           if [ -n "$_own_start" ]; then
-             [ "$(_proc_identity "$_own_pid")" = "$_own_start" ] && _live=yes
-           else
-             _live=yes
-           fi
-         fi ;;
+    # THE FAILURE MODE IS INVERTED (owner ruling on #3473-R6): `unknown` is a third value that
+    # REFUSES, so a defect here can only ever produce a loud false refusal — never two gates writing
+    # one summary path, which is the harm the lock exists to prevent. Noise, never blindness. Four
+    # paths previously collapsed an unknown onto "dead, reclaim it": a non-numeric pid, `kill -0`
+    # failing with EPERM rather than ESRCH, an unreadable identity for a pid that still exists, and
+    # an empty unit field.
+    _live=unknown
+    case "$(_pid_state "$_own_pid")" in
+      exists)
+        if _proc_is_zombie "$_own_pid"; then
+          _live=no                        # already exited; can never start a unit
+        elif [ -z "$_own_start" ]; then
+          _live=yes                       # nothing to disprove liveness with => treat as live
+        else
+          _now_id=$(_proc_identity "$_own_pid" 2>/dev/null || true)
+          if [ -z "$_now_id" ]; then      _live=unknown   # present but unreadable
+          elif [ "$_now_id" = "$_own_start" ]; then _live=yes
+          else                            _live=no        # pid recycled: the owner is gone
+          fi
+        fi ;;
+      gone)    _live=no ;;                # AFFIRMATIVE: no such process
+      *)       _live=unknown ;;
     esac
-    # ...then the unit, which is what keeps the lock meaningful after the launcher exits.
+    # ...then the unit, which keeps the lock meaningful after the launcher exits. An unmeasurable
+    # unit state reads as LIVE, so this can only move `no` toward `yes`, never the reverse.
     if [ "$_live" = no ] && [ -n "$_own_unit" ] && _unit_is_live "$_own_unit"; then
       _live=yes
     fi
-    # An UNREADABLE or unparseable link is not proof of death either — refuse rather than guess.
-    if [ -z "$_own" ] || [ -z "$_own_pid" ]; then
-      echo "gate-detached: the reservation at '$_reserve' exists but its owner cannot be read." >&2
-      echo "               Refusing rather than reclaiming a lock that may be live (#3473)." >&2
+    # A link we cannot fully parse is not proof of death. Every such refusal names the manual
+    # remedy, because a refusal with no way out would be job 196's permanent block in a new hat.
+    if [ -z "$_own" ] || [ -z "$_own_pid" ] || [ -z "$_own_unit" ] || [ "$_live" = unknown ]; then
+      echo "gate-detached: the reservation at '$_reserve' exists and its owner could NOT be" >&2
+      echo "               established (owner='${_own:-<unreadable>}')." >&2
+      echo "               Refusing rather than reclaiming a lock that may be live (#3473): two" >&2
+      echo "               gates on one summary path corrupt each other silently, whereas this" >&2
+      echo "               refusal is loud. If you have CONFIRMED no gate runs against this path," >&2
+      echo "               remove that one file and retry; otherwise use a distinct path." >&2
       exit 1
     fi
     if [ "$_live" = yes ]; then

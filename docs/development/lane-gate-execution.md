@@ -102,6 +102,11 @@ supervisor recycling it, `systemctl stop`, session/logout teardown. Those do hap
 fleet, which is why the detached launch below is still the right posture; but "your turn
 ended" is not one of them.
 
+**Caveat on `logout`, added after the fact:** a detached launch survives a logout only when user
+lingering is enabled, because the user manager — and therefore every unit it holds — is stopped when
+the last session ends. See "A separate cgroup is not enough" below; the launcher now refuses rather
+than pretend otherwise.
+
 ### Demonstration
 
 Detachment does not help; a separate cgroup does. Two identical tickers, one difference:
@@ -571,6 +576,42 @@ for stating the *shape* and not just fixing instances. Zombie state is read affi
 "I could not tell" may never license reclaiming a lock that may be live. The test asserts the
 **premise** too — that `kill -0` really does report a live-looking zombie — so it cannot pass for the
 wrong reason once the platform changes.
+
+### A SEPARATE CGROUP IS NOT ENOUGH: LINGERING IS A SECOND PRECONDITION
+
+**And this corrects a claim made earlier in this document.** The text above lists "session/logout
+teardown" among the things the detached launch protects against. **It does not, unless user lingering
+is enabled** — and on the box where all of this was measured, `loginctl show-user … -p Linger`
+returned **`no`**.
+
+The mechanism is separate from the cgroup one and equally decisive. Escaping the pane's scope puts
+the gate under `user@<uid>.service/app.slice`, which survives the pane. But **the user manager itself
+is stopped when the user's last session ends** unless lingering is on — systemd's own documentation
+is the authority: lingering is what keeps a user manager *"around after logouts"* — and stopping
+`user@<uid>.service` stops the units it manages, including the gate's transient unit. A successful
+`systemd-run --user` proves the manager is running **now**; it says nothing about whether it survives
+a logout. `KillUserProcesses=no` does **not** substitute: that governs whether a *session's*
+processes are killed at session end, not whether the user manager and its units are stopped.
+
+**The AC1 measurements do not contradict this, and it is important to say why rather than let the
+2400 s figures imply more than they showed.** Those six variants ran in a session that never reached
+zero — this box carries sessions in `closing` state with the manager alive throughout — so **no
+trial ever faced a real logout**. The measurements establish what they establish: nothing kills a
+detached process at ~10 minutes, and a scope outlives the agent that created it. They never tested
+the logout path, so they never validated the property the prose above claimed for them. Asserting a
+mechanism's behaviour without exercising the case that matters is the same error as the
+compare-and-swap claim below, and it is worth noticing that the *documentation* was where it landed
+both times.
+
+`gate-detached.sh` therefore refuses with **exit 69** when lingering is off, naming the one-command
+remedy (`loginctl enable-linger <user>`), and refuses equally when the answer is **unmeasurable** —
+a claim that a 30–50 minute gate survives session teardown requires an affirmative measurement, and
+"I could not ask" is not one. This is the same posture as the cgroup refusal: a caller who believes a
+gate is protected when it is not is the exact false assurance this script exists to remove.
+
+**Fleet consequence:** lingering is a PREREQUISITE for a lane to run a detached gate, so it belongs
+in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
+a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
 ### The reservation lock: five consecutive rounds, and why it was kept anyway
 

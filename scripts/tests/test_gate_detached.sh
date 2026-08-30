@@ -895,7 +895,9 @@ fi
 # Re-pointed (job 205): this asserted the bare `is-active --quiet` form, which 4b.106 now requires to
 # be ABSENT — the two would have contradicted each other. Liveness is two readings, either of which
 # holds the reservation: the launcher pid (alive throughout its own acquisition) and the unit.
-if grep -q '_unit_is_live "$_own_unit"' "$LAUNCHER" && grep -qF 'kill -0 "$_own_pid"' "$LAUNCHER"; then
+# Re-pointed again (R6 inversion): the raw `kill -0` moved inside `_pid_state`, so assert the two
+# READINGS are consulted — the owner pid's state and the unit's — not the spelling of either.
+if grep -qF '_pid_state "$_own_pid"' "$LAUNCHER" && grep -q '_unit_is_live "$_own_unit"' "$LAUNCHER"; then
   ok "4b.74 a reservation is only honoured while its owner is LIVE (self-healing)"
 else
   bad "4b.74 a reservation is only honoured while its owner is live" "no staleness test"
@@ -984,7 +986,9 @@ if printf '%s' "$_launcher_code" | grep -qF 'exec 9>>"$_mutex"' \
 else
   bad "4b.81c the mutex fd is opened without a permanent stderr redirection" "stderr may be silenced"
 fi
-if grep -qF 'pid=$$' "$LAUNCHER" && grep -qF 'kill -0 "$_own_pid"' "$LAUNCHER"; then
+# `kill -0` now lives in `_pid_state`; what matters is that the owner PID is still consulted, which
+# is what closes the window between reserving the path and the unit becoming active.
+if grep -qF 'pid=$$' "$LAUNCHER" && grep -qF '_pid_state "$_own_pid"' "$LAUNCHER"; then
   ok "4b.82 liveness counts the LAUNCHER PID too, closing the unit-startup window"
 else
   bad "4b.82 liveness counts the launcher pid" "startup window still open"
@@ -1098,7 +1102,9 @@ fi
 # A ZOMBIE launcher is GONE: `kill -0` succeeds on one, so without this a launcher that died
 # un-reaped reads as LIVE and its reservation can never self-heal — the same permanent-block
 # failure the incomplete-owner window caused, in a different place.
-if grep -qF '! _proc_is_zombie "$_own_pid"' "$LAUNCHER"; then
+# The inversion turned this from a negated guard into its own branch: a zombie owner is classified
+# GONE outright. Assert the branch, since the negation no longer exists.
+if grep -qF 'if _proc_is_zombie "$_own_pid"; then' "$LAUNCHER"; then
   ok "4b.95 reservation liveness excludes a zombie launcher"
 else
   bad "4b.95 reservation liveness excludes a zombie launcher" "kill -0 alone treats a zombie as live"
@@ -1230,6 +1236,127 @@ for _n in ".agent-gate-summary.txt.heartbeat.tmp.foo/src/lib.rs" \
 done
 [ "$_tx_leaks" = 0 ] && ok "4b.101 no arm excludes a nested path (subtree blindness closed)" \
                      || bad "4b.101 no arm excludes a nested path" "$_tx_leaks arm(s) still excuse a subtree"
+
+# --- roborev job 206 (High): LINGERING is a second, equally load-bearing precondition ------------
+# Escaping the pane cgroup is necessary but not sufficient. Without lingering the USER MANAGER is
+# stopped when the last session ends, and stopping `user@<uid>.service` tears down the transient unit
+# holding the gate — so the gate still dies at logout. `systemd-run --user` succeeding proves the
+# manager is running NOW, not that it survives a logout.
+#
+# Tested through a STUBBED `loginctl` on PATH, so these cases assert the launcher's logic rather than
+# this host's configuration — and so they keep working on a box configured either way.
+_lstub() {  # <what-loginctl-should-do> -> prints a PATH prefix dir
+  local d; d=$(mktemp -d "$TMP/lstub.XXXXXX")
+  { echo '#!/usr/bin/env bash'
+    case "$1" in
+      yes)     echo 'printf "yes\n"' ;;
+      no)      echo 'printf "no\n"' ;;
+      silent)  echo 'exit 0' ;;              # answers nothing
+      broken)  echo 'exit 1' ;;              # cannot answer
+    esac
+  } > "$d/loginctl"
+  chmod +x "$d/loginctl"
+  printf '%s' "$d"
+}
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  _d=$(_lstub no)
+  _o=$(PATH="$_d:$PATH" bash "$LAUNCHER" --summary "$TMP/lg1.txt" --log "$TMP/lg1.log" -- --only fmt 2>&1); _r=$?
+  if [ "$_r" = 69 ] && printf '%s' "$_o" | grep -q 'lingering is DISABLED'; then
+    ok "4b.115 Linger=no REFUSES with 69 rather than claiming an unprotected gate is protected"
+  else
+    bad "4b.115 Linger=no refuses with 69" "exit $_r: $_o"
+  fi
+  # A refusal is only useful if it says what to do about it.
+  printf '%s' "$_o" | grep -q 'loginctl enable-linger' \
+    && ok "4b.116 the Linger=no refusal names the one-command remedy" \
+    || bad "4b.116 the Linger=no refusal names the remedy" "no remedy in the message"
+  # UNMEASURABLE must refuse too: a positive verdict needs an affirmative measurement, and
+  # "I could not ask" is not one. Both shapes — answers nothing, and cannot answer.
+  _bad_unknown=0
+  for _mode in silent broken; do
+    _d2=$(_lstub "$_mode")
+    _o2=$(PATH="$_d2:$PATH" bash "$LAUNCHER" --summary "$TMP/lg2.txt" --log "$TMP/lg2.log" -- --only fmt 2>&1); _r2=$?
+    if [ "$_r2" != 69 ] || ! printf '%s' "$_o2" | grep -q 'could NOT determine'; then
+      _bad_unknown=$((_bad_unknown+1)); echo "     mode=$_mode exit=$_r2"
+    fi
+  done
+  [ "$_bad_unknown" = 0 ] \
+    && ok "4b.117 an UNMEASURABLE linger state refuses too (both no-answer and cannot-answer)" \
+    || bad "4b.117 an unmeasurable linger state refuses" "$_bad_unknown of 2 proceeded"
+  # Control: with lingering affirmatively enabled the check must NOT be what stops the launch, or
+  # the three cases above would prove only that the launcher always refuses.
+  _d3=$(_lstub yes)
+  _o3=$(PATH="$_d3:$PATH" bash "$LAUNCHER" --summary "$TMP/lg3.txt" --log "$TMP/lg3.log" -- --only fmt 2>&1); _r3=$?
+  _u3=$(printf '%s' "$_o3" | sed -n 's/^unit:  *//p'); [ -n "$_u3" ] && echo "$_u3" >> "$UNITS_FILE"
+  if printf '%s' "$_o3" | grep -qE 'lingering is DISABLED|could NOT determine'; then
+    bad "4b.118 control: Linger=yes passes the precondition" "refused anyway: $_o3"
+  else
+    ok "4b.118 control: Linger=yes passes the precondition (exit $_r3)"
+  fi
+  [ -n "$_u3" ] && systemctl --user stop "$_u3" >/dev/null 2>&1
+else
+  skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
+fi
+
+# --- #3473-R6 owner ruling: the lock's failure mode is INVERTED -----------------------------------
+# Reclamation may follow only an AFFIRMATIVE reading of the owner's death. Every "I could not tell"
+# refuses, so a defect in this component can produce a loud false refusal but NEVER two gates writing
+# one summary path — the harm it exists to prevent. Noise, never blindness.
+if grep -q '_live=unknown' "$LAUNCHER" && grep -q '\[ "$_live" = unknown \]' "$LAUNCHER"; then
+  ok "4b.109 owner liveness is THREE-valued, and unknown reaches a refusal"
+else
+  bad "4b.109 owner liveness is three-valued and unknown refuses" "unknown may still reclaim"
+fi
+_pscode=$(sed -n '/^_pid_state()/,/^}/p' "$LAUNCHER")
+if printf '%s' "$_pscode" | grep -q 'EPERM, not ESRCH'; then
+  ok "4b.110 an existing-but-unsignallable pid is EXISTS, not gone (kill -0 cannot tell them apart)"
+else
+  bad "4b.110 an existing-but-unsignallable pid is exists" "kill -0 alone still decides"
+fi
+# Behavioural, through the shipped function.
+eval "$_pscode"
+_ps_bad=0
+[ "$(_pid_state 1)" = exists ]           || { _ps_bad=$((_ps_bad+1)); echo "     pid 1 not exists"; }
+[ "$(_pid_state 999999999)" = gone ]     || { _ps_bad=$((_ps_bad+1)); echo "     absent pid not gone"; }
+[ "$(_pid_state abc)" = unknown ]        || { _ps_bad=$((_ps_bad+1)); echo "     non-numeric not unknown"; }
+[ "$(_pid_state '')" = unknown ]         || { _ps_bad=$((_ps_bad+1)); echo "     empty not unknown"; }
+[ "$_ps_bad" = 0 ] && ok "4b.111 _pid_state: live=exists, absent=gone, unparseable=unknown" \
+                   || bad "4b.111 _pid_state classification" "$_ps_bad case(s) wrong"
+
+# THE DEADLOCK CHECK the ruling explicitly demanded. A genuinely dead owner has no /proc entry, so
+# its identity is unmeasurable too — inverting naively would make the NORMAL stale case
+# unreclaimable and reintroduce job 196's permanent block. `gone` must therefore stay AFFIRMATIVE.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  _dl="$TMP/inv.txt"
+  # A reservation owned by a pid that cannot exist, and a unit that does not exist.
+  ln -s "unit=cqlite-gate-nonexistent-$.service|pid=999999999|start=proc:1" "$_dl.launch-lock"
+  _o=$(bash "$LAUNCHER" --summary "$_dl" --log "$TMP/inv.log" -- --only file-size 2>&1); _r=$?
+  _u=$(printf '%s' "$_o" | sed -n 's/^unit:  *//p'); [ -n "$_u" ] && echo "$_u" >> "$UNITS_FILE"
+  if [ "$_r" = 0 ]; then
+    ok "4b.112 NO DEADLOCK: a provably-dead owner is still reclaimed after the inversion"
+  else
+    bad "4b.112 NO DEADLOCK: a provably-dead owner is still reclaimed" \
+        "the inversion made the normal stale case unreclaimable — exit $_r: $_o"
+  fi
+  # ...while an UNPARSEABLE owner refuses, and says how to get out of it.
+  _dl2="$TMP/inv2.txt"
+  ln -s "unit=|pid=abc|start=" "$_dl2.launch-lock"
+  _o2=$(bash "$LAUNCHER" --summary "$_dl2" --log "$TMP/inv2.log" -- --only file-size 2>&1); _r2=$?
+  _u2=$(printf '%s' "$_o2" | sed -n 's/^unit:  *//p'); [ -n "$_u2" ] && echo "$_u2" >> "$UNITS_FILE"
+  if [ "$_r2" != 0 ] && printf '%s' "$_o2" | grep -q 'could NOT be'; then
+    ok "4b.113 an unparseable owner REFUSES instead of being reclaimed (exit $_r2)"
+  else
+    bad "4b.113 an unparseable owner refuses instead of being reclaimed" "exit $_r2: $_o2"
+  fi
+  # A refusal with no way out IS a permanent block, so the message must name the remedy.
+  if printf '%s' "$_o2" | grep -q 'remove that one file and retry'; then
+    ok "4b.114 the unknown-owner refusal names its manual remedy (not a silent dead end)"
+  else
+    bad "4b.114 the unknown-owner refusal names its manual remedy" "no remedy in the message"
+  fi
+else
+  skip=$((skip+3)); echo "SKIP 4b.112/4b.113/4b.114 (no user systemd manager on this host)"
+fi
 
 # --- roborev job 205: the launcher's artifacts and the gate's carve-out must AGREE -------------
 # gate-detached.sh writes artifacts beside the summary; agent-gate.sh's tree-integrity carve-out

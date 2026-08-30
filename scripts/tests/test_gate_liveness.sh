@@ -1389,6 +1389,48 @@ else
   fi
 fi
 
+echo "=== section 11n: a FOREIGN beat only supersedes a terminal verdict if it is LIVE (job 206) ==="
+# Heartbeat files deliberately outlive the runs that wrote them, so a foreign run-id is NOT evidence
+# of a NEWER run — it can equally be an OLDER leftover. A run that terminates before its first beat
+# (a preflight refusal) leaves its own terminal summary beside the previous run's stale beat. The
+# earlier reader called any readable foreign run-id "a live heartbeat … a NEWER run is starting":
+# backwards about which run was newer, and asserting a liveness it never measured.
+mk_summary "$TMP/sup.txt" run-NEW "PASS"
+
+# 1. PROVABLY STALE foreign beat: an older leftover. It says nothing about this verdict.
+mk_beat "$TMP/sup.txt.heartbeat" run-OLD 4000 20
+expect_reader "11n.1 terminal verdict + PROVABLY STALE foreign beat => COMPLETE (leftover ignored)" \
+  COMPLETE 0 "terminal verdict" -- "$TMP/sup.txt"
+
+# 2. FRESH foreign beat: a newer run really is starting, and its beat precedes its summary. This is
+#    job 192's case and must still be refused.
+mk_beat "$TMP/sup.txt.heartbeat" run-NEWER 5 20
+expect_reader "11n.2 terminal verdict + FRESH foreign beat => UNKNOWN (a newer run is starting)" \
+  UNKNOWN 4 "summary-superseded" -- "$TMP/sup.txt"
+
+# 3. MALFORMED foreign beat: cannot be told apart from a newer run starting now. The two errors are
+#    not symmetric — a false COMPLETE certifies a gate that never finished — so this stays UNKNOWN.
+{ echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-JUNK"
+  echo "this is not a beat"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/sup.txt.heartbeat"
+expect_reader "11n.3 terminal verdict + MALFORMED foreign beat => UNKNOWN, not COMPLETE" \
+  UNKNOWN 4 "summary-superseded-unmeasurable" -- "$TMP/sup.txt"
+
+# 4. FOREIGN HOST: freshness cannot be established without a proven shared clock domain, so the beat
+#    cannot be classified stale either. Conservative: refuse rather than certify.
+{ echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-ELSEWHERE"; echo "gate-pid: 4242"
+  echo "parent-check: starttime"; echo "host: some-other-box"; echo "interval: 20"
+  echo "beat-seq: 7"; echo "beat-epoch: $(date +%s)"
+  echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/sup.txt.heartbeat"
+expect_reader "11n.4 terminal verdict + foreign beat on ANOTHER host => UNKNOWN (clock unproven)" \
+  UNKNOWN 4 "summary-superseded-unmeasurable" -- "$TMP/sup.txt"
+
+# 5. Control: the SAME run-id in summary and beat must still answer COMPLETE, or 11n.1 would be
+#    indistinguishable from "the superseding check never runs at all".
+mk_summary "$TMP/sup2.txt" run-SAME "PASS"
+mk_beat "$TMP/sup2.txt.heartbeat" run-SAME 4000 20
+expect_reader "11n.5 control: matching run-id + stale beat => COMPLETE" \
+  COMPLETE 0 "terminal verdict" -- "$TMP/sup2.txt"
+
 echo
 echo "==== test_gate_liveness.sh: passed=$pass failed=$fail ===="
 [ "$fail" -eq 0 ] || exit 1

@@ -545,11 +545,49 @@ case "$RESULT_TOKEN" in
     if [ -z "$WANT_RUN_ID" ] && [ -n "$SUM_RUN_ID" ] && [ -f "$HB" ] && [ -r "$HB" ]; then
       _hb_peek=$(_snap_of "$HB" hbpeek 2>/dev/null) || _hb_peek=""
       if [ -n "$_hb_peek" ] && ! _has_nul "$_hb_peek"; then
-        _hb_rid_peek=$(_field "$(_slurp "$_hb_peek")" run-id)
+        _hb_peek_text=$(_slurp "$_hb_peek")
+        _hb_rid_peek=$(_field "$_hb_peek_text" run-id)
         if [ -n "$_hb_rid_peek" ] && [ "$_hb_rid_peek" != "$SUM_RUN_ID" ]; then
-          # (this arm only runs when the caller did NOT name a run; a named run with a matching
-          #  beat is answered from the beat above, before the summary is consulted at all)
-          verdict UNKNOWN 4 "summary-superseded; the summary carries a terminal verdict for run '$SUM_RUN_ID' but a live heartbeat names run '$_hb_rid_peek' — a NEWER run is starting on this path and publishes its beat before replacing the summary, so this verdict is the PREVIOUS run's. Pass --run-id to say which run you mean."
+          # A DIFFERING run-id IS NOT EVIDENCE OF A NEWER RUN (roborev job 206, Medium). Heartbeat
+          # files deliberately outlive the runs that wrote them, so a foreign beat can just as easily
+          # be an OLDER leftover — a run that terminated before publishing its first beat (a
+          # preflight refusal) leaves its own terminal summary beside the PREVIOUS run's stale beat.
+          # The earlier form read any readable foreign run-id as "a NEWER run is starting", so a
+          # perfectly valid terminal verdict reported UNKNOWN indefinitely, and the diagnostic said
+          # "a live heartbeat" about a beat whose liveness was never established — backwards about
+          # which run was newer, and asserting a liveness it had not measured.
+          #
+          # Three cases, and only the first may supersede:
+          #   valid + AFFIRMATIVELY FRESH   -> a newer run really is starting: UNKNOWN
+          #   valid + PROVABLY STALE        -> an older leftover: ignore it, report the verdict
+          #   invalid / freshness unmeasurable -> cannot tell newer-live from older-stale: UNKNOWN
+          # The third stays conservative on purpose. The two errors are not symmetric: a false
+          # COMPLETE certifies a gate that never finished, while a false UNKNOWN merely withholds a
+          # verdict. Only a case we can PROVE is stale earns the permissive answer.
+          _sup_state=unmeasurable
+          if _beat_valid "$_hb_peek_text"; then
+            _sup_host=$(_field "$_hb_peek_text" host)
+            _sup_myhost=$(uname -n 2>/dev/null || echo unknown)
+            if [ -n "$_sup_host" ] && [ "$_sup_host" = "$_sup_myhost" ]; then
+              _sup_iv=$(_field "$_hb_peek_text" interval); _sup_iv=$((10#${_sup_iv:-0}))
+              _sup_ep=$(_field "$_hb_peek_text" beat-epoch); _sup_ep=$((10#${_sup_ep:-0}))
+              _sup_win=$(( _sup_iv * 3 )); [ "$_sup_win" -ge 90 ] || _sup_win=90
+              _sup_age=$(( $(date +%s) - _sup_ep ))
+              if [ "$_sup_age" -ge 0 ] && [ "$_sup_age" -le "$_sup_win" ]; then
+                _sup_state=fresh
+              elif [ "$_sup_age" -gt "$_sup_win" ]; then
+                _sup_state=stale
+              fi
+            fi
+          fi
+          case "$_sup_state" in
+            fresh)
+              verdict UNKNOWN 4 "summary-superseded; the summary carries a terminal verdict for run '$SUM_RUN_ID' but a FRESH heartbeat (${_sup_age}s old, window ${_sup_win}s) names run '$_hb_rid_peek' — a NEWER run is starting on this path and publishes its beat before replacing the summary, so this verdict is the PREVIOUS run's. Pass --run-id to say which run you mean." ;;
+            unmeasurable)
+              verdict UNKNOWN 4 "summary-superseded-unmeasurable; the summary carries a terminal verdict for run '$SUM_RUN_ID' and the heartbeat names a DIFFERENT run '$_hb_rid_peek', but that beat is malformed or its freshness cannot be established in a proven shared clock domain — so it cannot be told apart from a newer run starting now. Refusing to report this verdict as current. Pass --run-id to say which run you mean." ;;
+            stale)
+              : ;;  # PROVABLY an older leftover: it says nothing about this terminal verdict
+          esac
         fi
       fi
     fi
