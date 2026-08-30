@@ -484,3 +484,114 @@ fn harness_refuses_a_fixture_with_a_ttl() {
         .expect("a TTL-bearing fixture must be refused, not compared");
     assert!(err.contains("TTL"), "the refusal must name the TTL: {err}");
 }
+
+// ---------------------------------------------------------------------------
+// Unit coverage for the two normalization pieces
+//
+// These run in EVERY checkout, including one with no fetched corpus, where the
+// only `duration` column in the case list (`test_basic.simple_table`) skips —
+// otherwise the parser that decides duration equality would be untested exactly
+// where the corpus is thinnest.
+// ---------------------------------------------------------------------------
+
+/// The two writers' spellings of the SAME duration must normalize to the same
+/// (months, days, nanos) triple.
+#[test]
+fn duration_spellings_normalize_to_the_same_value() {
+    use parquet_parity::spelling::parse_duration;
+
+    // sstabledump's decomposed spelling vs the ValueFormatter's nanos spelling,
+    // taken verbatim from a `test_basic.simple_table` row.
+    assert_eq!(
+        parse_duration("50m33s", "test").expect("cassandra spelling"),
+        (0, 0, 3_033_000_000_000)
+    );
+    assert_eq!(
+        parse_duration("3033000000000ns", "test").expect("cqlite spelling"),
+        (0, 0, 3_033_000_000_000)
+    );
+    // Month/day components, and the units only one writer emits.
+    assert_eq!(
+        parse_duration("1y2mo3w4d5h6m7s8ms9us10ns", "test").expect("full grammar"),
+        (
+            14,
+            25,
+            5 * 3_600_000_000_000
+                + 6 * 60_000_000_000
+                + 7 * 1_000_000_000
+                + 8 * 1_000_000
+                + 9 * 1_000
+                + 10
+        )
+    );
+    // Both negative spellings: Cassandra's single leading sign vs the
+    // ValueFormatter's per-component signs.
+    assert_eq!(
+        parse_duration("-1mo2d", "test").expect("cassandra negative"),
+        (-1, -2, 0)
+    );
+    assert_eq!(
+        parse_duration("-1mo-2d", "test").expect("cqlite negative"),
+        (-1, -2, 0)
+    );
+    assert_eq!(parse_duration("0ns", "test").expect("zero"), (0, 0, 0));
+}
+
+/// A malformed or unknown-unit duration must ERROR — never normalize to
+/// something that quietly compares unequal for an unexplained reason.
+#[test]
+fn duration_parser_rejects_malformed_spellings() {
+    use parquet_parity::spelling::parse_duration;
+
+    for bad in ["", "33", "ns", "1x", "1mo?", "-", "1 mo"] {
+        assert!(
+            parse_duration(bad, "test").is_err(),
+            "{bad:?} must be rejected, not normalized"
+        );
+    }
+}
+
+/// The declared-type parser must REFUSE an unrecognized type rather than fall
+/// back to comparing by JSON shape, which would silently weaken the oracle.
+#[test]
+fn declared_type_parser_refuses_unknown_types() {
+    use parquet_parity::cql_type::parse_column;
+
+    assert!(parse_column("c", "int", &[]).is_ok());
+    assert!(
+        parse_column("c", "SET<Text>", &[]).is_ok(),
+        "case-insensitive"
+    );
+    assert!(parse_column("c", "frozen<list<frozen<person>>>", &["person"]).is_ok());
+    // A UDT that the case did not declare, and a type that does not exist.
+    let err =
+        parse_column("c", "frozen<person>", &[]).expect_err("an undeclared UDT must be refused");
+    assert!(err.contains("person"), "{err}");
+    assert!(parse_column("c", "quaternion", &[]).is_err());
+    assert!(
+        parse_column("c", "map<int>", &[]).is_err(),
+        "map needs 2 params"
+    );
+    assert!(parse_column("c", "set<int", &[]).is_err(), "unbalanced");
+}
+
+/// A non-frozen collection is multicell (one sstabledump cell per element); a
+/// frozen one is not. That distinction drives the whole golden projection, so it
+/// is asserted directly rather than only through a corpus case.
+#[test]
+fn frozen_wrapper_decides_multicell() {
+    use parquet_parity::cql_type::parse_column;
+
+    assert!(parse_column("s", "set<int>", &[])
+        .expect("set<int>")
+        .is_multicell_collection());
+    assert!(!parse_column("s", "frozen<set<int>>", &[])
+        .expect("frozen<set<int>>")
+        .is_multicell_collection());
+    assert!(!parse_column("p", "frozen<person>", &["person"])
+        .expect("frozen<person>")
+        .is_multicell_collection());
+    assert!(!parse_column("n", "int", &[])
+        .expect("int")
+        .is_multicell_collection());
+}

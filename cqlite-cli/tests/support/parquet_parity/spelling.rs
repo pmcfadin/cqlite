@@ -101,26 +101,40 @@ pub fn parse_duration(s: &str, ctx: &str) -> Result<(i128, i128, i128), String> 
     let mut months: i128 = 0;
     let mut days: i128 = 0;
     let mut nanos: i128 = 0;
+    // Checked throughout: the component counts come from a FILE, so an absurd
+    // literal must produce a named error rather than an arithmetic panic (or, in
+    // a release build, a wrapped value that compares equal to something).
     for (i, (raw, unit)) in tokens.iter().enumerate() {
-        let n = if global_negative && i > 0 { -raw } else { *raw };
-        match unit.as_str() {
-            "y" => months += n * MONTHS_PER_YEAR,
-            "mo" => months += n,
-            "w" => days += n * DAYS_PER_WEEK,
-            "d" => days += n,
-            "h" => nanos += n * NANOS_PER_HOUR,
-            "m" => nanos += n * NANOS_PER_MINUTE,
-            "s" => nanos += n * NANOS_PER_SECOND,
-            "ms" => nanos += n * NANOS_PER_MILLI,
-            "us" | "µs" => nanos += n * NANOS_PER_MICRO,
-            "ns" => nanos += n,
+        let n = if global_negative && i > 0 {
+            raw.checked_neg()
+                .ok_or_else(|| format!("{ctx}: duration '{s}' component {raw} cannot be negated"))?
+        } else {
+            *raw
+        };
+        let (target, scale): (&mut i128, i128) = match unit.as_str() {
+            "y" => (&mut months, MONTHS_PER_YEAR),
+            "mo" => (&mut months, 1),
+            "w" => (&mut days, DAYS_PER_WEEK),
+            "d" => (&mut days, 1),
+            "h" => (&mut nanos, NANOS_PER_HOUR),
+            "m" => (&mut nanos, NANOS_PER_MINUTE),
+            "s" => (&mut nanos, NANOS_PER_SECOND),
+            "ms" => (&mut nanos, NANOS_PER_MILLI),
+            "us" | "µs" => (&mut nanos, NANOS_PER_MICRO),
+            "ns" => (&mut nanos, 1),
             other => {
                 return Err(format!(
                     "{ctx}: duration '{s}' carries unit '{other}', which is not in the \
                      y/mo/w/d/h/m/s/ms/us/ns grammar either writer emits"
                 ))
             }
-        }
+        };
+        let scaled = n.checked_mul(scale).ok_or_else(|| {
+            format!("{ctx}: duration '{s}' component {n}{unit} overflows when scaled")
+        })?;
+        *target = target.checked_add(scaled).ok_or_else(|| {
+            format!("{ctx}: duration '{s}' overflows while accumulating {n}{unit}")
+        })?;
     }
     Ok((months, days, nanos))
 }
