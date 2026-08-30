@@ -1593,3 +1593,99 @@ guarantees (`Disconnected` arrives only once the queue is empty AND every sender
   threshold. The target name `graceful_shutdown_tests` is unchanged (`agent-gate.sh` hardcodes it).
 * This file is now past 1500 lines. The `file-size` ratchet is `.rs`-only, so it is not gated; the
   content above is the census this round exists to record and is not compressed away.
+
+## Round 13 — roborev job 247: the SECOND DESCOPE (design.md D6b) and a CORRECTED CLAIM (D6c)
+
+Two decisions, both taken by rules written down BEFORE the round that triggered them, so neither is
+fatigue: the mpsc channel is DELETED, and the floor claim is CORRECTED rather than re-implemented.
+
+### The census that triggered the descope
+
+The escalation rule (design.md D6b): *if roborev returns the evidence-identity or channel-variant
+class again at new sites, descope the channel rather than patch a fifth time.* Job 247 did exactly
+that. Across three rounds the same two shapes reappeared at new sites every time:
+
+| round | job | class | site | fix |
+|-------|-----|-------|------|-----|
+| 11 | 236 f1 | evidence identity | `wait_for` expiry decided from the CHANNEL, message rendered the TRANSCRIPT | decide from the store you report from |
+| 11 | 236 f3 | channel variant | `final_drain` collapsed `Empty` with `Disconnected` | two facts kept separate |
+| 12 | 243 f1 | evidence identity | decided from the transcript, then RE-READ it to render (two lock acquisitions) | ONE snapshot |
+| 12 | 243 f3 | channel variant | the SAME collapse at `drain_new` and at `collect_both_streams` | two more sites fixed |
+| 13 | 247 f2 | evidence identity | a queue can hold a COPY of a record the transcript already served: a stale `OK` matched from the transcript is re-delivered and accepted as the NEXT write's ack | **descope** |
+| 13 | 247 f3 | two samples | `new_lines` counted from one sample while `last_progress` was updated from another, so a line appended between them was counted without moving last-progress | **descope** |
+
+Job 247's finding 2 is **a false PASS, not a diagnostic wart**: `await_write_ack` awaits five separate
+`OK`s in the sibling test, so write N's ack could satisfy write N+1's wait and a wedged session would
+read as green. Both classes exist **only because there were two stores**: `Mark` can window a `Vec`
+and cannot window a queue that carries no sequence.
+
+Four fixes in four rounds, each correct about the site in front of it, and the family kept
+regenerating — the repository's own precedent (the removed `census-exclusion:` key, the descoped ANSI
+parse lint → #3499, #3384's withdrawn integration targets, and this change's own round-8 descope) is
+to delete such a mechanism rather than patch it again.
+
+### What the ONE sequenced store closes BY CONSTRUCTION
+
+`graceful_shutdown_support/transcript.rs` (new): reader threads append `(seq, Instant, Stream, String)`
+to one mutex-guarded log; a `Mark` is a **sequence position**; every wait, every progress count, every
+rendering and the end-of-stream fact are read from **one snapshot of that one store**.
+
+* **transcript/channel divergence** — there is nothing left to diverge from.
+* **stale re-delivery (247 f2)** — a record is served from its seq, so a record outside the window can
+  never be re-presented. A later record with the same TEXT is a new event at a new seq, which is
+  exactly what write N+1's genuine ack is.
+* **`Empty` vs `Disconnected` (236 f3, 243 f3)** — end-of-stream is a FIELD of the same store
+  (`readers_open`), read under the same lock as the records, so "closed" cannot be claimed about a
+  state whose lines the verdict did not see. Applied at BOTH sites: the child line reader and the
+  read-side buffer collection (`StreamBufs`/`BufHandle`, whose own `Look` decides and extracts under
+  one lock).
+* **two samples (247 f3)** — `new_lines` is `snapshot.examined()` and the last-progress instant is
+  derived from the same snapshot's newest record (plus the artifact-increase instant). There is no
+  running `prev_lines` and no second sample for a count to disagree with.
+* **`ReaderHandle`/`BufHandle` mark closure on DROP**, so a reader that unwinds cannot leave a wait
+  believing more output is possible — the `Sender`-drop semantics of the deleted channel, kept
+  deliberately.
+* **stream attribution is a FIELD, not a text prefix.** The old store tagged lines `[stdout] ` and
+  parsed the tag back off with `strip_prefix` for every predicate. That is control and data sharing a
+  channel (CLAUDE.md, #3312); it is now structured, so the decision and the render read the same
+  value and nothing has to be stripped.
+
+**Deleted:** `mpsc`, `Sender`, `Receiver`, `RecvTimeoutError`, `TryRecvError`, `final_drain`,
+`FinalDrain`, `drain_new`, `DrainEnd`, `transcript_len`, `Stream::transcript_prefix`, and
+`CollectEnd::Disconnected` (now `CollectorsEnded`, plus a new `Unavailable` for a poisoned store — a
+harness defect that is NOT the same one). No `mpsc` remains anywhere in the target, harness or tests.
+
+**Accepted cost, stated where it is paid** (`WAIT_POLL` in `transcript.rs`): a wait polls the log
+every 2ms instead of waking on delivery, so a stage measurement can be up to 2ms late. That is far
+below the 43ms slowest RECORDED quiet observation the calibration baseline is derived from, so
+calibration stays quiet-inert; and calibration can only ever LOOSEN a deadline, so the direction of
+any residual error is safe. On a hanging run the cost is one lock acquisition plus one clone of a
+short `Vec` per 2ms — sub-second CPU across a 180s expiry, and only on a run that is already failing.
+
+**A test whose defect is no longer expressible is REMOVED, not kept as reassurance.**
+`a_line_recorded_but_not_yet_published_is_matched_at_expiry` pinned the boundary between two stores;
+with one store there is no publish step to be preempted before. What replaces it is the structure plus
+the new regression test below.
+
+### D6c — the floor CLAIM was wrong, and the fix is the claim, not the layer
+
+roborev job 247 finding 1 is correct: the pre-#3515 code gave each wait an **independent** 60s, and
+**one absolute deadline cannot reproduce that** — an early stage may consume nearly all of it. This is
+NOT fixed by restoring per-stage limits (the layer D6a descoped for producing twelve findings in four
+rounds). It is fixed by naming the property that actually holds:
+
+* **holds** — any single stage may consume the WHOLE deadline, and the base is at or above the
+  aggregate of the bounds it replaced, so no stage is tighter *in isolation*;
+* **does not hold** — a fresh per-wait allowance after earlier consumption;
+* **bought** — a bounded TOTAL. `agent-gate.sh`'s `cli-tests` runs plain `cargo test` with no harness
+  timeout, so the sibling's seven independent 60s waits had **no total bound at all** and could
+  genuinely consume 420s+.
+
+`the_deadline_is_never_tighter_than_the_bounds_it_replaced` →
+**`no_stage_in_isolation_is_tighter_than_the_bound_it_replaced`**, with both assertion messages
+carrying the qualifier ("even one running with the deadline untouched"; "does NOT give a later stage a
+fresh 60s once earlier stages have consumed the deadline, and no single absolute deadline can"). The
+property that does NOT hold gets its own test, `an_exhausted_deadline_leaves_a_later_stage_nothing`,
+asserted from a zero-base deadline — arithmetic, no sleep, no threshold — so the stronger claim cannot
+return as a comment. The starvation path needs an early stage to burn ~180s while the product works,
+at which point the run is failing anyway; that is recorded as a MITIGATION, not as the claim.
