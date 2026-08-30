@@ -5456,6 +5456,131 @@ check_jest_suites_ran() {
 }
 export -f check_jest_suites_ran
 
+# check_jest_per_suite_passed <label> <json-file> <reconciled-set-file>
+#
+# THE PER-SUITE half of the jest affirmative measurement (issue #3522, roborev round 5 F1).
+#
+# WHY THE AGGREGATE CHECK IS NOT ENOUGH, and this is #3522's own defect at suite granularity.
+# check_jest_suites_ran requires `Tests: N passed` with N > 0 — ONE passed test across the
+# WHOLE run. Jest reports a file whose every test is individually skipped as a PASSED suite,
+# so one suite can execute ZERO assertions while its 26 siblings satisfy the aggregate and the
+# component still goes green. The original bug this issue exists for was a whole CRATE's tests
+# not executing behind a green gate; that is the same thing one level down.
+#
+# It is the COMPLEMENT of the two-oracle reconciliation, not a replacement: the reconciliation
+# proves the right FILES are present and were run, this proves each of them did WORK. Neither
+# implies the other, and a suite can pass both file-level checks while asserting nothing.
+#
+# The subject set is the RECONCILED set (the file the reconciliation validated), never the
+# JSON's own suite list — that would be self-referential in exactly the way D1 fixed. The JSON
+# list is cross-checked AGAINST it in both directions instead.
+#
+# NO EXEMPTION LIST, and that is a MEASURED result rather than an assumption (F1's design
+# trap). The two RUN_SLOW_TESTS opt-in tests are per-TEST skips inside suites that retain
+# other passing tests — measured at RUN_SLOW_TESTS=0: publish.test.js 31 passed / 1 skipped,
+# streaming.test.js 22 passed / 1 skipped, and ZERO suites with no passed test. So the
+# per-suite requirement holds on a correct tree with no excusals at all. If a suite ever
+# becomes legitimately all-skipped this guard REDS, and the remedy is to declare it BY NAME
+# WITH ITS REASON in the census — never to add a silent entry to an exemption list, which is
+# the curation this component exists not to have.
+check_jest_per_suite_passed() {
+  local label="$1" json="$2" expected_file="$3"
+  if [ ! -r "$json" ]; then
+    echo "$label: FAIL-CLOSED — jest's --json report is missing or unreadable at '$json', so no PER-SUITE measurement could be taken. The aggregate 'Tests: N passed' check alone cannot see an all-skipped suite (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ ! -r "$expected_file" ]; then
+    echo "$label: FAIL-CLOSED — the reconciled suite set '$expected_file' is missing or unreadable, so this guard has no SUBJECT. A guard with an empty subject set reports OK having measured nothing (issue #3522)" >&2
+    return 1
+  fi
+  # jq FIRST, then python3, then a FAILED derivation — the same chain and the same direction as
+  # every other metadata helper here. A single-parser guard is a false red on a host that has
+  # only the other one, and this gate treats macOS as a first-class host.
+  local counts=""
+  if command -v jq >/dev/null 2>&1; then
+    counts=$(jq -r '.testResults[]? | [ (.name | sub("^.*/__test__/"; "")), ([ .assertionResults[]? | select(.status == "passed") ] | length) ] | @tsv' "$json") || counts="__PARSE_FAILED__"
+  elif command -v python3 >/dev/null 2>&1; then
+    counts=$(python3 -c '
+import json, sys
+with open(sys.argv[1]) as fh:
+    d = json.load(fh)
+for r in d.get("testResults") or []:
+    n = r.get("name") or ""
+    i = n.find("/__test__/")
+    rel = n[i + len("/__test__/"):] if i >= 0 else n
+    p = sum(1 for a in (r.get("assertionResults") or []) if a.get("status") == "passed")
+    print("%s\t%d" % (rel, p))
+' "$json") || counts="__PARSE_FAILED__"
+  else
+    echo "$label: FAIL-CLOSED — neither jq nor python3 is available to read jest's --json report, so the PER-SUITE measurement cannot be taken. An unparseable oracle is not a pass (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ "$counts" = "__PARSE_FAILED__" ]; then
+    echo "$label: FAIL-CLOSED — could not parse jest's --json report at '$json'. The PARSE failed, not the tests; an unmeasurable per-suite result is never a pass (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ -z "$counts" ]; then
+    echo "$label: FAIL-CLOSED — jest's --json report at '$json' yielded NO per-suite records. A guard that judged zero suites has measured nothing (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+
+  # No `declare -A`: this gate supports stock macOS /bin/bash 3.2, where associative arrays do
+  # not exist (the same constraint check_unittest_targets_ran records). A TAB-delimited list
+  # plus an exact-field awk lookup is 3.2-safe, and jest's suite paths contain no tabs.
+  local bad="" missing="" extra="" seen_n=0 min_n="" min_name="" suite passed
+  while IFS= read -r suite; do
+    [ -n "$suite" ] || continue
+    passed=$(printf '%s\n' "$counts" | awk -F'\t' -v s="$suite" '$1 == s { print $2; exit }')
+    if [ -z "$passed" ]; then
+      missing="$missing $suite"
+      continue
+    fi
+    case "$passed" in
+      ''|*[!0-9]*)
+        echo "$label: FAIL-CLOSED — non-numeric passed-count '$passed' for suite '$suite' in jest's --json report. The parse is broken, which is never a pass (issue #3522, roborev F1)" >&2
+        return 1 ;;
+    esac
+    seen_n=$((seen_n + 1))
+    if [ "$passed" -eq 0 ]; then
+      bad="$bad $suite"
+    fi
+    if [ -z "$min_n" ] || [ "$passed" -lt "$min_n" ]; then
+      min_n="$passed"; min_name="$suite"
+    fi
+  done < "$expected_file"
+
+  # The reverse direction: a suite jest reported that the reconciled set does not contain. The
+  # reconciliation should already have caught this, so reaching it here means the two
+  # measurements disagree — reported separately because its remedy is different.
+  local jsuite
+  while IFS=$'\t' read -r jsuite passed; do
+    [ -n "$jsuite" ] || continue
+    grep -qxF -- "$jsuite" "$expected_file" || extra="$extra $jsuite"
+  done <<EOF
+$counts
+EOF
+
+  if [ -n "$missing" ]; then
+    echo "$label: FAIL-CLOSED — reconciled suite(s)$missing appear in NO per-suite record of jest's --json report, so whether they executed anything is UNKNOWN. The reconciliation proved the files are present and listed; this guard is what proves they did work, and it could not judge these (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ -n "$extra" ]; then
+    echo "$label: FAIL-CLOSED — jest's --json report names suite(s)$extra that are NOT in the reconciled set, so the run and the reconciliation disagree about what the suite IS. Distinct from the case above: check the reconciliation's own two oracles rather than the per-suite results (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED — suite(s)$bad executed ZERO passing tests. Jest reports a file whose every test is individually skipped as a PASSED suite, and the aggregate 'Tests: N passed' check is satisfied by the OTHER suites — so this coverage would have vacated silently. If a suite is LEGITIMATELY all-skipped it must be DECLARED BY NAME WITH ITS REASON in this component's census, never excused silently (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  if [ "$seen_n" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — judged ZERO suites against the reconciled set; a guard that measured nothing must never report OK (issue #3522, roborev F1)" >&2
+    return 1
+  fi
+  echo "$label: per-suite results OK — all $seen_n reconciled suite(s) executed >=1 passing test (leanest: $min_name with $min_n). Affirmative and PER-SUITE: the aggregate 'Tests: N passed' check cannot see one all-skipped suite among its passing siblings (issue #3522, roborev F1)" >&2
+  return 0
+}
+export -f check_jest_per_suite_passed
+
 # _package_test_targets <package>: print one TAB-separated line per declared
 # INTEGRATION (`test`) target of that workspace package — `<name>\t<required-features
 # comma-joined, empty when none>` (issue #1699, roborev round-2 finding 2).
@@ -6111,6 +6236,12 @@ run_node_bindings() {
   # absolute prefix (jest resolves rootDir from its config; this script uses $REPO_ROOT).
   local jest_set="$LOG_DIR/$name.suites-jest.txt"
   local disk_set="$LOG_DIR/$name.suites-disk.txt"
+  # Jest's machine-readable PER-SUITE report (roborev round 5, F1). Written under $LOG_DIR, so
+  # it is unique per run and a stale report from a previous run can never be read as this
+  # run's. Removed first anyway, so a jest that fails to write it is caught by the guard's
+  # unreadable-input branch rather than by silently reusing whatever was there.
+  local suite_json="$LOG_DIR/$name.jest-report.json"
+  rm -f "$suite_json"
   local only_disk only_jest
   # STATUS CHECKED, and the reason is CAUSE ATTRIBUTION, not just hygiene (roborev round 4, E1
   # class sweep). A truncated `jest_set` makes the reconciliation below report "ON DISK but NOT
@@ -6263,16 +6394,32 @@ run_node_bindings() {
   # NAME=VALUE assignments. In strict mode that array IS the assignment; otherwise it is
   # the pair of -u unsets, so the in-script conditional export this replaced (which could
   # only ADD the variable, never remove an inherited one) is gone.
+  # `npm test -- --json --outputFile=…` rather than a retyped jest command: `npm test` stays the
+  # derived answer to "what is this suite" (it runs `pretest` and passes `--expose-gc`), and the
+  # extra args after `--` reach jest. MEASURED: the human `Test Suites:`/`Tests:` summary the
+  # aggregate guard parses is STILL emitted alongside the JSON file, so both guards keep their
+  # inputs.
   if env "${fixture_env[@]}" \
      CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+     CQLITE_JEST_JSON="$suite_json" \
      RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
-      npm test' >>"$log" 2>&1; then
+      npm test -- --json --outputFile="$CQLITE_JEST_JSON"' >>"$log" 2>&1; then
     # A green `npm test` is NOT sufficient: jest reports a suite whose every describe
     # was skipped as PASSED, so the exit code alone cannot distinguish 27 suites of
     # assertions from 27 suites of nothing.
-    if check_jest_suites_ran "$name" "$log" "$suite_n" 2>>"$log"; then
+    # BOTH halves are required and neither implies the other (roborev round 5, F1):
+    # check_jest_suites_ran judges the FILE SET and the aggregate counts;
+    # check_jest_per_suite_passed judges whether EACH reconciled suite did any work. A suite
+    # whose every test is individually skipped is reported by jest as a PASSED suite and
+    # satisfies the aggregate via its siblings, so only the per-suite guard can see it.
+    # ANDed without short-circuiting, so one run reports BOTH verdicts rather than revealing
+    # them serially across re-runs.
+    local _agg_ok=0 _per_ok=0
+    check_jest_suites_ran "$name" "$log" "$suite_n" 2>>"$log" && _agg_ok=1
+    check_jest_per_suite_passed "$name" "$suite_json" "$disk_set" 2>>"$log" && _per_ok=1
+    if [ "$_agg_ok" -eq 1 ] && [ "$_per_ok" -eq 1 ]; then
       status=PASS
     else
       status=FAIL
@@ -10922,6 +11069,26 @@ run_tooling_tests() {
      ! bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition_selftest.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (tools/ crate disposition census #1716); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # node-bindings jest guard self-test (#3522, roborev E1 + F1): hermetic, no node/npm/cargo/
+  # network/datasets — synthetic jest summaries and synthetic --json reports, with both guards
+  # sourced OUT OF THE REAL GATE SCRIPT rather than copied. Its load-bearing case is the one
+  # that cannot be produced by running the real suite: ONE passing suite plus ONE all-skipped
+  # suite. Jest reports the all-skipped file as a PASSED suite and the aggregate
+  # `Tests: N passed` is satisfied by its sibling, so the file-set guard ACCEPTS it (asserted
+  # here, so the case provably still discriminates) and only the per-suite guard rejects it.
+  # A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_jest_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_jest_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (node-bindings jest guard self-test #3522); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
