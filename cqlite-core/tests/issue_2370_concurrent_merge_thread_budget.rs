@@ -8,9 +8,32 @@
 //! (`num_cpus` workers), so `C` concurrent merges over `M` inputs each cost
 //! `~C·M·num_cpus` OS threads — a context-switch storm well before disk
 //! saturated. This test drives `C ≥ 2` REAL merges SIMULTANEOUSLY (all producers
-//! alive, parked on their bounded channels) and pins the process's PEAK OS-thread
-//! delta to the O(C·M) bound via the same direct `/proc/self/task` /
-//! `proc_pidinfo` kernel observation the #2316 test uses.
+//! alive, parked on their bounded channels) and pins the process's OS-thread
+//! delta to the O(C·M) bound via the same direct kernel observation the #2316
+//! test uses — now literally the same code, from `support/os_thread_budget.rs`.
+//!
+//! ## Why the raw PEAK was the wrong instrument (issues #3438 / #3514)
+//!
+//! This pin originally asserted the whole-process PEAK against the bound with NO
+//! reap confirmation, and red in the field with deltas of 31 / 37 / 39 / 43 over
+//! a bound of 24 — while the IDENTICAL tree passed 6/6 standalone on a quiet box
+//! and passed full gates on two other hosts. Those deltas measure DELAYED THREAD
+//! REAPING UNDER CPU STARVATION, not concurrency: a genuine #2316 amplification
+//! on a 16-core host would land near `C·M·num_cpus` (~96), not at `bound + 5..19`.
+//! The steady-state peak genuinely fits under 24.
+//!
+//! The fix is the one #3385 established for the sibling, applied here and SHARED
+//! rather than copied: when the fast-path reading exceeds the bound, hold the
+//! (still-blocked) producers and poll until the thread count has drained to
+//! within budget AND HELD there for a quiescence span longer than tokio's
+//! blocking-pool `thread_keep_alive`, accepting only an AFFIRMATIVE
+//! [`os_thread_budget::ReapOutcome::Drained`]. A timeout is `Unconfirmed` and
+//! FAILS. The bound is NOT widened, no load/PSI precondition skips the test, and
+//! the confirmation can only convert reap JITTER into a pass — an amplification's
+//! runtime workers are not reapable while their runtime lives, and every
+//! producer's runtime lives until this test drains its merger. See that module's
+//! doc comment for the measured mechanism and the ACCEPTED RESIDUAL (#3438 item
+//! 3) recording what these pins do NOT cover.
 //!
 //! ## Process-isolation requirement (same as #2316)
 //!
@@ -24,7 +47,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::writer::SSTableWriter;
@@ -34,6 +57,17 @@ use cqlite_core::storage::write_engine::{
 };
 use cqlite_core::types::Value;
 use tempfile::TempDir;
+
+/// The SHARED thread-budget observation oracle — the ONE copy, also used by
+/// `issue_2316_merge_thread_budget.rs` (#3438/#3514). Never copy a piece of it
+/// back in here: a second divergent copy is exactly what let this pin red in the
+/// field with the fix already sitting in its sibling.
+#[path = "support/os_thread_budget.rs"]
+mod os_thread_budget;
+use os_thread_budget::{
+    min_cpus_for_amplification, open_cpu_pressure_window, os_thread_count, poll_until_reaped,
+    poll_until_stable, reap_confirm_timeout, ReapOutcome, REAP_QUIESCENCE_SPAN,
+};
 
 /// Rows per input SSTable. Must EXCEED the merge's per-channel capacity (up to
 /// `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent merges
@@ -47,85 +81,26 @@ const NUM_INPUTS: usize = 3;
 /// Number of CONCURRENT mergers (`C`) — the aggregate case (≥2, the field shape).
 const NUM_MERGERS: usize = 2;
 
-/// Max OS threads a single fixed (`current_thread`-runtime) producer contributes
-/// at its peak (producer thread + bounded `spawn_blocking` parse/feed threads),
-/// INDEPENDENT of `num_cpus`. The pre-#2316 multi-threaded runtime added
-/// `num_cpus` worker threads PER producer on top of this — so the pre-change peak
-/// scales with `num_cpus` and the O(C·M) bound below rejects it.
+/// Max PERSISTENT OS threads a single fixed (`current_thread`-runtime) producer
+/// contributes: the producer thread itself plus headroom, INDEPENDENT of
+/// `num_cpus`. The pre-#2316 multi-threaded runtime added `num_cpus` worker
+/// threads PER producer on top of this, and those are NOT reapable, so the
+/// O(C·M) bound below rejects it.
+///
+/// As in #2316 this is deliberately NOT a bound on the momentary PEAK (#3438):
+/// the `spawn_blocking` pool is demand-driven and inflates under starvation, so
+/// the peak is reported for DIAGNOSIS and the pin is on the reap-confirmed
+/// count. The consequent gap — unbounded TRANSIENT blocking-pool growth is
+/// pinned by neither this test nor #2316 — is recorded as an ACCEPTED RESIDUAL in
+/// `support/os_thread_budget.rs`.
 const PER_INPUT: usize = 3;
 
 /// Fixed slack over the `PER_INPUT · M · C` bound for incidental/settle threads.
 const THREAD_SLACK: usize = 6;
 
-// ── Direct, no-heuristics OS thread-count observation (mirrors #2316) ────────
-
-#[cfg(target_os = "linux")]
-fn os_thread_count() -> Option<usize> {
-    std::fs::read_dir("/proc/self/task")
-        .ok()
-        .map(|it| it.flatten().count())
-}
-
-#[cfg(target_os = "macos")]
-fn os_thread_count() -> Option<usize> {
-    let pid = unsafe { libc::getpid() };
-    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
-    let ret = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTASKINFO,
-            0,
-            &mut info as *mut libc::proc_taskinfo as *mut libc::c_void,
-            size,
-        )
-    };
-    if ret == size {
-        Some(info.pti_threadnum as usize)
-    } else {
-        None
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn os_thread_count() -> Option<usize> {
-    None
-}
-
-/// Consecutive identical readings required to treat the count as STABILIZED.
-const STABLE_STREAK: usize = 8;
-/// Delay between polls while waiting for stabilization.
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
-
-/// Poll the process OS-thread count until it STABILIZES (same reading across
-/// [`STABLE_STREAK`] consecutive polls) — synchronizing on the thread LIFECYCLE,
-/// not a fixed elapsed window. Returns `(peak, settled)`. `timeout` is a fail-loud
-/// BOUND only: a never-settling count panics with a clear diagnostic rather than
-/// silently under-sampling.
-fn poll_until_stable(timeout: Duration) -> (usize, usize) {
-    let deadline = Instant::now() + timeout;
-    let mut peak = 0usize;
-    let mut last: Option<usize> = None;
-    let mut streak = 0usize;
-    while Instant::now() < deadline {
-        let n = os_thread_count()
-            .expect("thread count observation must remain available (guard 2 confirmed it)");
-        peak = peak.max(n);
-        if last == Some(n) {
-            streak += 1;
-            if streak >= STABLE_STREAK {
-                return (peak, n);
-            }
-        } else {
-            last = Some(n);
-            streak = 1;
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-    panic!(
-        "OS thread count never stabilized within {timeout:?} (last {last:?}, streak \
-         {streak}/{STABLE_STREAK}, peak {peak}); fail-loud BOUND, not a sync mechanism"
-    );
+/// The O(C·M) bound this test pins for `m` inputs across `c` concurrent mergers.
+fn thread_bound(m: usize, c: usize) -> usize {
+    PER_INPUT * m * c + THREAD_SLACK
 }
 
 // ── Real multi-SSTable input construction (never an empty dataset) ──────────
@@ -253,10 +228,28 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
 
 #[test]
 fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
-    // Guard 1: the amplification (M·num_cpus) collapses on a single-core host.
+    // Guard 1: DERIVED from this file's own constants, never a literal (#3438 AC2).
+    // The pre-#2316 cost is `C·M·(1 + num_cpus)` = `producers·(1 + num_cpus)`, and
+    // the regression is observable only where that STRICTLY EXCEEDS the bound. With
+    // C=2, M=3 (producers=6) and bound = 3·3·2 + 6 = 24 that threshold is
+    // `24 / 6 = 4`: at num_cpus=3 the pre-change cost is `6·4 = 24`, which EQUALS
+    // the bound and so does not exceed it. The previous hardcoded `num_cpus < 2`
+    // guard therefore let this pin pass VACUOUSLY against the very defect it exists
+    // to catch on any 2- or 3-core host.
     let cpus = num_cpus::get();
-    if cpus < 2 {
-        eprintln!("[skip] num_cpus={cpus} < 2 — amplification not observable; holding trivially");
+    let c = NUM_MERGERS;
+    let declared_bound = thread_bound(NUM_INPUTS, c);
+    let producers = NUM_INPUTS * c;
+    let min_cpus = min_cpus_for_amplification(producers, declared_bound);
+    if cpus < min_cpus {
+        eprintln!(
+            "[skip] num_cpus={cpus} < {min_cpus} — with C={c}, M={NUM_INPUTS} \
+             (producers={producers}), PER_INPUT={PER_INPUT}, THREAD_SLACK={THREAD_SLACK} the \
+             pre-#2316 cost C·M·(1+num_cpus)={} does not exceed the O(C·M) bound \
+             {declared_bound}, so the amplification is not observable here; holding trivially \
+             rather than asserting a bound that holds either way",
+            producers * (1 + cpus),
+        );
         return;
     }
     // Guard 2: no direct thread-count API on this platform.
@@ -265,13 +258,26 @@ fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
         return;
     }
 
+    // The reap-confirm budget SCALES with the producer count — C·M = 6 here, vs
+    // #2316's M = 4 — because each late finish-and-reap resets the quiescence
+    // span, so the number of resets is bounded by the producers that can still
+    // hold in-flight blocking work. See `os_thread_budget::reap_confirm_timeout`
+    // for the full derivation (and its harness-budget note).
+    let confirm_timeout = reap_confirm_timeout(producers);
+
     let (_temp, inputs, schema) = build_inputs();
     let m = inputs.len();
-    let c = NUM_MERGERS;
 
     // Baseline via LIFECYCLE synchronization (the input-build runtime is dropped
     // but its teardown may still be in flight): poll until quiesced.
     let (_settle_peak, baseline) = poll_until_stable(Duration::from_secs(10));
+
+    // Open the DIAGNOSTIC-ONLY CPU-pressure window over the measured region so a
+    // future red is classifiable as starved-host vs real-regression from the panic
+    // message alone (#3514). It never influences the verdict, and it never skips
+    // this test: a load precondition would leave the pin unrun on exactly the
+    // hosts where it reds.
+    let pressure = open_cpu_pressure_window();
 
     // Construct C mergers over the SAME inputs (read-only) — each spawns its own M
     // producers, which fill their bounded channels and park. All C·M producers are
@@ -286,13 +292,67 @@ fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
     // Wait for all producers to reach their steady (blocked-on-send) state via the
     // SAME lifecycle synchronization — never a fixed window. `peak` also captures a
     // transient spike (the pre-fix per-producer runtime-worker burst).
-    let (peak, _settled) = poll_until_stable(Duration::from_secs(20));
+    let (peak, settled) = poll_until_stable(Duration::from_secs(20));
     let delta = peak.saturating_sub(baseline);
-    let bound = PER_INPUT * m * c + THREAD_SLACK;
+    let bound = thread_bound(m, c);
+    let pressure_at_peak = pressure.report();
 
     eprintln!(
-        "[issue-2370] cpus={cpus} C={c} M={m} baseline={baseline} peak={peak} delta={delta} bound={bound}"
+        "[issue-2370] cpus={cpus} C={c} M={m} baseline={baseline} peak={peak} settled={settled} \
+         delta={delta} bound={bound}"
     );
+    eprintln!("[issue-2370] {pressure_at_peak}");
+
+    // #3438 AC1 — CONFIRM an over-bound reading before condemning it. The fast
+    // path is unchanged and pays ZERO extra latency: a within-bound delta is
+    // accepted immediately. Only an overshoot takes this branch, and it does so
+    // with all C·M producers STILL blocked on `send` (every merger is drained
+    // strictly below), which is what makes the discriminator sound: reapable
+    // blocking-pool threads disappear over the hold, while the runtime workers of
+    // an actual amplification cannot be reaped while their runtime lives. The
+    // bound is NOT widened.
+    let mut pressure_at_confirm = None;
+    let (pin_satisfied, confirm_note) = if delta > bound {
+        eprintln!(
+            "[issue-2370-reap] fast-path delta={delta} exceeds bound={bound}; holding the {producers} \
+             blocked producers until the pool drains within budget and holds there for \
+             {REAP_QUIESCENCE_SPAN:?} (> tokio's 10s blocking-pool thread_keep_alive), or up to \
+             {confirm_timeout:?} before condemning the reading"
+        );
+        let outcome = poll_until_reaped(baseline + bound, REAP_QUIESCENCE_SPAN, confirm_timeout);
+        let report = pressure.report();
+        eprintln!("[issue-2370-reap] {report}");
+        pressure_at_confirm = Some(report);
+        match outcome {
+            ReapOutcome::Drained { peak: rp, settled } => {
+                let d = settled.saturating_sub(baseline);
+                eprintln!(
+                    "[issue-2370-reap] post-reap peak={rp} settled={settled} confirmed_delta={d} \
+                     bound={bound} (within bound and HELD for {REAP_QUIESCENCE_SPAN:?} — the \
+                     overshoot was reapable blocking-pool jitter, absorbed)"
+                );
+                (true, format!("drained to {d} within bound"))
+            }
+            ReapOutcome::Unconfirmed { peak: rp, last } => {
+                let d = last.saturating_sub(baseline);
+                eprintln!(
+                    "[issue-2370-reap] post-reap peak={rp} last={last} last_delta={d} \
+                     bound={bound} (UNCONFIRMED after {confirm_timeout:?} — never held within \
+                     budget for {REAP_QUIESCENCE_SPAN:?})"
+                );
+                (
+                    false,
+                    format!(
+                        "UNCONFIRMED after {confirm_timeout:?}: last reading {last} (delta {d}), \
+                         peak {rp} — the pool never drained to within budget and HELD there for \
+                         {REAP_QUIESCENCE_SPAN:?}"
+                    ),
+                )
+            }
+        }
+    } else {
+        (true, format!("fast-path delta {delta} within bound"))
+    };
 
     // Drain every merger so producers exit cleanly (no leaked threads/temp files).
     let out = TempDir::new().expect("out tempdir");
@@ -313,13 +373,30 @@ fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
         );
     }
 
-    // THE PIN: the aggregate peak OS-thread delta over baseline must be within the
+    // THE PIN: the aggregate OS-thread delta over baseline must be within the
     // O(C·M) bound. Pre-#2316 this is ~C·M·num_cpus (>> bound); post-fix ~C·M.
+    // `pin_satisfied` is true only when the fast-path delta was already within
+    // bound, or the reap confirmation returned an AFFIRMATIVE `Drained` — never
+    // merely because nothing bad was observed.
+    let pressure_note = match &pressure_at_confirm {
+        Some(confirm) => format!("{pressure_at_peak} | over the confirm window too: {confirm}"),
+        None => pressure_at_peak.clone(),
+    };
     assert!(
-        delta <= bound,
-        "C={c} concurrent merges over M={m} inputs each added {delta} OS threads over baseline \
-         (peak={peak}, baseline={baseline}); O(C·M) bound is {bound} (= {PER_INPUT}·M·C + {THREAD_SLACK}). \
-         A delta scaling with num_cpus (num_cpus={cpus}) means a producer built a multi-threaded \
-         runtime — issue #2316 amplification, unbounded under concurrency (#2370)."
+        pin_satisfied,
+        "C={c} concurrent merges over M={m} inputs each failed the O(C·M) producer-thread pin: \
+         {confirm_note}. (fast-path peak={peak}, settled={settled}, delta={delta}, \
+         baseline={baseline}; O(C·M) bound is {bound} = {PER_INPUT}·M·C + {THREAD_SLACK}.) \
+         The confirmation holds all {producers} producers blocked on `send` and waits up to \
+         {confirm_timeout:?} for tokio's blocking pool to drain, so threads still present at the \
+         end are NOT reapable spawn_blocking jitter — they are held by something with the \
+         producers' lifetime. A surviving delta scaling with num_cpus (num_cpus={cpus}; the \
+         pre-#2316 shape is C·M·num_cpus ≈ {}) means a producer built a multi-threaded runtime — \
+         the #2316 amplification, unbounded under concurrency (#2370); a smaller persistent \
+         overshoot has another origin. An UNCONFIRMED outcome means the measurement itself never \
+         settled — that FAILS closed, because an unconfirmable reading is not evidence of good \
+         behaviour. Host CPU-stall context, DIAGNOSTIC ONLY (it did not affect this verdict): \
+         {pressure_note}",
+        producers * cpus,
     );
 }
