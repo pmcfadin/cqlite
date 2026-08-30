@@ -118,6 +118,23 @@ const EXPECTED_ERROR_CODE = 'QUERY';
 // graph is visible rather than lost in noise.
 const STREAM_QUERY = 'SELECT * FROM test_wide_rows.many_columns_table';
 
+// THE ABANDONMENT MUST LEAVE NATIVE ROWS OUTSTANDING (issue #1465 round 4, roborev).
+// `bufferSize` is BOTH the native channel capacity and the per-`next()` batch size
+// (see src/streaming.rs / StreamingConfig in src/database.rs), and it defaults to
+// 1024 -- larger than this fixture's 50 rows. Measured with the default: the native
+// `rowsReceived` counter reads 50 after the FIRST yielded row, i.e. one `next()` had
+// already drained the ENTIRE native stream, so "abandoning" at row 5 abandoned only
+// JS-side buffered rows and nothing native was in flight. Two consequences, both
+// bad: the post-break re-iteration would have yielded zero even if `return()` never
+// closed anything, and the budget below measured no native cancellation at all --
+// which is the very thing this issue is about.
+//
+// With `bufferSize: 2` (<= STREAM_ROWS, so at least one refill happens mid-loop) the
+// same trace reads [2, 2, 4, 4, 6]: three native refills during the five yielded
+// rows, and 44 of the fixture's 50 rows STILL OUTSTANDING natively at the break.
+// The contract test below asserts that property rather than trusting this comment.
+const STREAM_CONFIG = { bufferSize: 2 };
+
 const ITERATIONS = 300;
 // Warm-up iterations run BEFORE any sample so one-time allocations (V8 code
 // caches, first-touch native buffers, the streaming machinery's one-time setup)
@@ -164,21 +181,27 @@ const MEASURE_PASSES = 9;
 // several consecutive runs (2026-08-30):
 //   error path:  -133,504 .. +2,496 bytes (a negative minimum means a later pass
 //                collected an earlier pass's deferred garbage)
-//   stream path:     +424 .. +1,864 bytes (1.4-6.2 bytes/iteration)
-// Budget = 32 KiB (109 bytes/iteration at 300 iterations): ~17x the largest clean
-// minimum observed on either path, so GC/platform drift cannot red it. Measured
-// discrimination, with synthetic leaks injected into these same loop bodies
-// (again as the minimum pass):
-//   * retain ONE wide row per iteration (~620 B/iter): 171-182 KB -> TRIPS (5.5x)
-//   * retain a 256-byte Buffer per iteration:          121-132 KB -> TRIPS (4.0x)
-//   * retain a 64-byte Buffer per iteration:            50-80 KB  -> TRIPS (1.5x)
+//   stream path:      +40 .. +56 bytes over 4 consecutive runs, RE-MEASURED after
+//                the round-4 switch to `bufferSize: 2` (it was +424 .. +1,864 with
+//                the default buffer, i.e. the stricter configuration is also the
+//                QUIETER one: each iteration now buffers 2 rows on the JS side
+//                instead of 50)
+// Budget = 32 KiB (109 bytes/iteration at 300 iterations) -- UNCHANGED by the
+// re-measure, so this is not a loosening: it is ~13x the largest clean minimum on
+// the error path and ~585x on the stream path, and GC/platform drift cannot red it.
+// Measured discrimination, with synthetic leaks injected into these same loop bodies
+// at `bufferSize: 2` (again as the minimum non-negative pass):
+//   * retain ONE wide row per iteration:      182,400 B (608.0/iter) -> TRIPS (5.6x)
+//   * retain a 256-byte Buffer per iteration: 132,184 B (440.6/iter) -> TRIPS (4.0x)
+//   * retain a 64-byte Buffer per iteration:   79,256 B (264.2/iter) -> TRIPS (2.4x)
 // Those are the realistic shapes of a JS-side or native-buffer leak on these
 // paths; the 64-byte case is the smallest leak this test is claimed to catch.
-// RED CONTROL (2026-08-30): planting the 256-byte retention INTO THESE EXACT
-// TEST BODIES failed the committed assertions on both paths -- error path
-// min 119,792 bytes (399.3/iteration), stream path min 133,272 bytes
-// (444.2/iteration), i.e. 3.7x and 4.1x over budget -- so the guard is known to
-// bite the code it ships with, not just a lookalike in a scratch harness.
+// RED CONTROL, re-run at `bufferSize: 2` (2026-08-30): planting the 256-byte
+// retention INTO THESE EXACT TEST BODIES failed the committed assertions on both
+// paths -- error path min 110,912 bytes (369.7/iteration, 3.4x over budget),
+// stream path min 124,832 bytes (416.1/iteration, 3.8x over) -- so the guard is
+// known to bite the code it ships with, not just a lookalike in a scratch harness.
+// The round-3 numbers do not transfer and were re-measured, not copied.
 // WHAT THAT CONTROL ESTABLISHES, precisely: the planted objects are JS-visible
 // (`Buffer`, plain objects), so it proves the instrument is sensitive to
 // JS-VISIBLE retention on these paths. It establishes NOTHING about sensitivity
@@ -186,8 +209,9 @@ const MEASURE_PASSES = 9;
 // all -- that is the RSS backstop's job below, and properly, issue #3585's.
 // ---------------------------------------------------------------------------
 // On a CI runner (GitHub sets `CI`) both budgets are doubled. Reason, and its
-// limit: the legs that run this file in CI are node-ci.yml's `test` matrix
-// (ubuntu-latest, macos-14, macos-15-intel, windows-latest), hosted runners whose
+// limit: the legs that run this file in CI are node-ci.yml's `test`-job matrix --
+// THREE of them: ubuntu-latest, macos-14, windows-latest (macos-15-intel is in the
+// separate `build` job's matrix and runs no tests) -- hosted runners whose
 // GC/allocator jitter has never been measured here, and a lane that reds on correct
 // input is the lane people learn to waive. The MERGE-GATING execution is the
 // local agent-gate's `node-bindings` component, where `CI` is unset and the
@@ -197,11 +221,15 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 
 // SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): total RSS growth
 // across the whole measured window (all MEASURE_PASSES x ITERATIONS iterations).
-// MEASURED on this machine, 2,700 iterations, 3 consecutive repetitions per path:
-//   error path:  -8,192 .. +6,311,936 bytes
-//   stream path: +430,080 .. +11,763,712 bytes
-// Budget = 96 MiB, i.e. ~8.5x the largest observed value, because RSS jitter is
-// dominated by V8 heap growth and allocator arenas rather than by the loop.
+// MEASURED on this machine, 2,700 iterations:
+//   error path:  -8,192 .. +6,311,936 bytes (3 consecutive repetitions)
+//   stream path: -385,024 .. +21,164,032 bytes (4 consecutive repetitions at
+//                `bufferSize: 2`; the largest sample is the first run of a fresh
+//                process, the other three were 2.44-3.77 MiB)
+// Budget = 96 MiB -- UNCHANGED, i.e. ~4.5x the largest observed value, because RSS
+// jitter is dominated by V8 heap growth and allocator arenas rather than by the
+// loop. Kept rather than widened: the observed maximum is a cold-start artefact and
+// widening a backstop to fit one sample is how a budget stops meaning anything.
 //   WHAT IT CATCHES: gross native retention -- at 2,700 iterations it trips on
 //       roughly >= 37 KiB/iteration held on the native heap (e.g. an un-dropped
 //       per-stream row buffer over a 101-column table). That figure is ARITHMETIC
@@ -362,27 +390,46 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     });
   });
 
-  test('breaking out of a stream abandons it mid-stream and runs return() -> close()', async () => {
-    // The fixture must hold MORE than STREAM_ROWS rows, or "abandoned
-    // mid-stream" would silently mean "exhausted".
+  test('breaking out of a stream leaves native rows outstanding, then closes them', async () => {
+    // 1. The fixture must hold MORE than STREAM_ROWS rows, or "abandoned
+    //    mid-stream" would silently mean "exhausted".
     let total = 0;
-    for await (const row of db.executeStreaming(STREAM_QUERY)) {
+    for await (const row of db.executeStreaming(STREAM_QUERY, STREAM_CONFIG)) {
       expect(row).toBeDefined();
       total += 1;
     }
     expect(total).toBeGreaterThan(STREAM_ROWS);
 
-    const stream = db.executeStreaming(STREAM_QUERY);
+    // 2. Break after STREAM_ROWS rows, sampling the NATIVE fetch counter as we go.
+    const stream = db.executeStreaming(STREAM_QUERY, STREAM_CONFIG);
     let pulled = 0;
+    let nativeFetchedAtBreak = 0;
     for await (const row of stream) {
       expect(row).toBeDefined();
       pulled += 1;
+      // `rowsReceived` is the native iterator's own count of rows FETCHED (not
+      // yielded), so it must be read INSIDE the loop: the native `close()` drops
+      // that iterator and the getter then reports 0 (see `rows_received` in
+      // src/streaming.rs, whose `None` arm returns 0).
+      nativeFetchedAtBreak = stream.rowsReceived;
       if (pulled >= STREAM_ROWS) break; // -> iterator.return() -> close()
     }
     expect(pulled).toBe(STREAM_ROWS);
 
-    // Observable proof that `return()` ran and closed the stream: a stream that
-    // was NOT closed would keep yielding the remaining rows here.
+    // 3. THE PROPERTY THIS TEST EXISTS FOR (issue #1465 round 4): the native stream
+    //    was still IN FLIGHT at the break -- it had fetched some rows but nowhere
+    //    near all of them. With the default bufferSize this assertion fails
+    //    (measured: 50 of 50 fetched after the first yield), which is why
+    //    STREAM_CONFIG exists.
+    expect(nativeFetchedAtBreak).toBeGreaterThanOrEqual(STREAM_ROWS);
+    expect(nativeFetchedAtBreak).toBeLessThan(total);
+
+    // 4. Native closure, now a real signal: the getter reports 0 only when the
+    //    native iterator is GONE. Since step 3 proved it was NOT exhausted, a 0
+    //    here can only mean `return()` -> `close()` dropped it.
+    expect(stream.rowsReceived).toBe(0);
+
+    // 5. JS-side closure: re-iterating a closed stream yields nothing.
     let afterBreak = 0;
     for await (const row of stream) {
       expect(row).toBeDefined();
@@ -436,9 +483,11 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     const counters = { rows: 0, iterators: 0 };
     const { samples, rssGrowth } = await measureGrowth(async (c) => {
       let pulled = 0;
-      for await (const row of db.executeStreaming(STREAM_QUERY)) {
+      for await (const row of db.executeStreaming(STREAM_QUERY, STREAM_CONFIG)) {
         pulled += 1;
-        if (pulled >= STREAM_ROWS) break; // abandoned: NOT exhausted
+        // Abandoned with native rows still outstanding (see STREAM_CONFIG), not
+        // merely with JS-buffered rows unread.
+        if (pulled >= STREAM_ROWS) break;
       }
       c.rows += pulled;
       c.iterators += 1;
