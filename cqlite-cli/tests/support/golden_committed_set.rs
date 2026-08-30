@@ -19,6 +19,15 @@
 //! reason `fixture_root::committed_fixture_dir` reads none — an env-settable oracle
 //! is the substitution written a second way.
 //!
+//! # What this establishes, and what it does not
+//!
+//! The question asked here is TRACKEDNESS OF THE PATH: is the golden the case was
+//! compared against the one `git ls-files` pairs with the tracked `*-Data.db`. A
+//! tracked golden whose CONTENT a working tree has modified is still the committed
+//! path, and nothing here can see the edit — that is `git status`'s answer, and the
+//! gate's, not this lane's. Declared rather than implied, because "the oracle is
+//! committed" is a claim about the path and reads like one about the bytes.
+//!
 //! Split out of `issue_1491_coverage_census.rs` (which owned the pairing rule) so
 //! the census and the comparison ask ONE implementation of it: two copies could
 //! drift, and a census that verified one file while the lane read another would be
