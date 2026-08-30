@@ -187,13 +187,16 @@ STREAM_BUFFER_SIZE = 2
 # iterations; the budgets below are UNCHANGED at 1500, which is what makes the
 # per-iteration sensitivity 3x better):
 #
-#   error path:  32 bytes warm (x7); 4,340 bytes on the FIRST (cold) sample of a
-#                fresh process -> observed max 4,340.
-#   stream path: 16,631 .. 19,623 bytes warm; 67,841 bytes on the first (cold)
-#                sample -> observed max 67,841. RE-MEASURED for round 5's
-#                `buffer_size=2` (it was 10,332 .. 54,085 with the default 1024-row
-#                channel: a smaller channel means slightly MORE per-iteration
-#                bookkeeping, so this path got noisier, not quieter).
+#   error path:  32 bytes warm (x5); 480 bytes on the FIRST (cold) sample of a fresh
+#                process -> observed max 480.
+#   stream path: 11,033 .. 13,731 bytes warm; 63,224 bytes on the first (cold)
+#                sample -> observed max 63,224.
+#   RE-MEASURED in round 9 after #1461 ("Drop safety net for the Python Database
+#   handle") changed the very drop path these budgets measure, and after #1464 split
+#   the binding's database.rs. Both paths came back QUIETER, not noisier (the error
+#   path's cold sample fell 4,340 -> 480), so NO ceiling moved; the headroom simply
+#   grew to 136x (error) and 4.1x (stream). A drop-path change legitimately could
+#   have moved these, which is why they were re-measured rather than assumed.
 #
 # The cold first sample is what a real pytest run measures (one measured window per
 # test in one process), so the budget must clear IT, not the warm floor.
@@ -241,21 +244,20 @@ STREAM_BUFFER_SIZE = 2
 # (``bytearray``), so they prove sensitivity to PYTHON-VISIBLE retention on these
 # code paths. Sensitivity to a NATIVE leak is established separately, by the
 # ``libc.malloc`` control on the RSS backstop below.
-#   ERROR_BUDGET_BYTES  =  64 KiB (43 bytes/iteration at 1500) -- 15x the observed
-#       cold max. A retained 256-byte bytearray per iteration measured 486,320
+#   ERROR_BUDGET_BYTES  =  64 KiB (43 bytes/iteration at 1500) -- 136x the observed
+#       cold max (was 15x before the round-9 re-measure). A retained 256-byte bytearray per iteration measured 486,320
 #       bytes (324.2/iteration) and TRIPS it by 7.4x. Retaining the abandoned
 #       iterator itself (5,132 bytes/iteration) measured 2.57 MB.
-#   STREAM_BUDGET_BYTES = 256 KiB (175 bytes/iteration at 1500) -- 3.9x the observed
-#       cold max (was 4.7x before the re-measure; UNCHANGED budget, so this is a
-#       tightening of the margin by measurement, never a loosening to fit).
-#       Measured floor, bracketed: a retained 64-byte bytearray per iteration
-#       measured 286,015 bytes (190.7/iteration) and TRIPS; 32 bytes/iteration
-#       PASSES. So this path now catches a Python-visible retention somewhere
-#       between 32 and 64 bytes/iteration -- an order of magnitude better than
-#       round 3's ">512 B/iter", won by raising ITERATIONS to 1500 rather than by
-#       touching the budget. For the record at larger sizes: 128 B/iter ->
-#       372,849 (1.4x over), 256 B/iter -> 572,002 (2.2x), 1 KiB/iter ->
-#       1,701,339 (6.5x).
+#   STREAM_BUDGET_BYTES = 256 KiB (175 bytes/iteration at 1500) -- 4.1x the observed
+#       cold max. UNCHANGED across every re-measure; the margin moved 4.7x -> 3.9x ->
+#       4.1x purely as the measurement moved, never the budget.
+#       Measured floor, bracketed and RE-RUN in round 9: a retained 64-byte bytearray
+#       per iteration measured 264,549 bytes (176.4/iteration) and TRIPS;
+#       32 bytes/iteration PASSES. So this path catches a Python-visible retention
+#       between 32 and 64 bytes/iteration -- unchanged by #1461, and an order of
+#       magnitude better than round 3's ">512 B/iter", won by raising ITERATIONS to
+#       1500 rather than by touching the budget. The error path's control re-ran at
+#       482,684 bytes (321.8/iteration), 7.4x over its budget.
 #
 # SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): process RSS growth
 # across the same loop, read LIVE from /proc/self/statm (peak ``ru_maxrss`` only as
@@ -276,9 +278,14 @@ STREAM_BUFFER_SIZE = 2
 #         * 64 KiB/iteration -> live RSS grew 98,750,464 B (error path) /
 #           99,332,096 B (stream path): TRIPS, ~3x over budget, while BOTH
 #           tracemalloc budgets stayed green.
-#         * 24 KiB/iteration -> 37,314,560 B: TRIPS (the floor, measured; re-run
-#           at `buffer_size=2` measured 37,294,080 B -- same floor).
-#         * 16 KiB/iteration -> PASSES (both configurations).
+#         * 16 KiB/iteration -> 37,322,752 B: TRIPS (the round-9 floor; 24 KiB
+#           tripped at 37,261,312 B in the same run).
+#         * 8 KiB/iteration -> PASSES; so do 4 KiB and 2 KiB.
+#       The floor therefore sits between 8 and 16 KiB/iteration after #1461 -- it was
+#       between 16 and 24 KiB before, i.e. the backstop got STRICTER, not looser, with
+#       the budget untouched. Note the measured per-iteration RSS cost exceeds the
+#       planted size (a 16 KiB malloc moved RSS ~24.9 KiB): glibc arena/page
+#       granularity, which is exactly why this budget is documented as gross-only.
 #       So the detection floor is between 16 and 24 KiB/iteration at 1500
 #       iterations, bracketing the ~22 KiB the budget arithmetic predicts.
 #   WHAT IT DOES NOT CATCH: any native retention below that floor -- e.g.
