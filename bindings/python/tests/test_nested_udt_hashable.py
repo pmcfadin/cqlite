@@ -116,11 +116,53 @@ SCHEMA_FILE = "nested-udt-keys.cql"
 #: skip/xfail-capable one.
 _PYTEST_ALLOWED_ATTRS = frozenset({"fixture", "raises", "fail", "approx"})
 
-#: Names that must never be imported OUT of pytest, under any alias: importing
-#: them detaches the call from the ``pytest.`` prefix the attribute scan reads.
-_PYTEST_FORBIDDEN_IMPORTS = frozenset(
-    {"skip", "skipif", "xfail", "importorskip", "exit", "mark"}
-)
+#: The ONE permitted spelling of a pytest import in this module is a bare,
+#: unaliased ``import pytest``. An ALLOWLIST of a single FORM, for exactly the
+#: reason :data:`_PYTEST_ALLOWED_ATTRS` is one. The import channel was left as a
+#: blocklist of forbidden NAMES (``skip``, ``skipif``, ``xfail``, …) and that is
+#: precisely why an eighth evasion existed: ``from pytest import *`` imports
+#: every one of those names while naming none of them, and binds them with no
+#: ``pytest.`` prefix for the attribute scan to read. There is nothing to extend
+#: here — any other route into these packages (aliased, submodule, or a
+#: ``from``-import of anything at all, star included) is an offender BY
+#: CONSTRUCTION, so evasion nine cannot be a new import spelling. ``_pytest`` is
+#: listed because ``from _pytest.outcomes import skip`` is the same skip by its
+#: private path.
+_PYTEST_IMPORT_PACKAGES = frozenset({"pytest", "_pytest"})
+
+
+def _pytest_import_offenders(node: ast.AST) -> set[str]:
+    """Offending pytest imports in ONE ``import`` / ``from ... import``.
+
+    One rule, stated positively: a bare unaliased ``import pytest`` is the only
+    permitted form, and every other way of reaching
+    :data:`_PYTEST_IMPORT_PACKAGES` is reported. Enumerating forbidden NAMES is
+    what let ``from pytest import *`` through; enumerating the one permitted
+    FORM cannot be evaded by choosing a different name, because no name is what
+    makes a form permitted.
+    """
+    offenders: set[str] = set()
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name.split(".")[0] not in _PYTEST_IMPORT_PACKAGES:
+                continue
+            if alias.name == "pytest" and alias.asname is None:
+                continue  # the one permitted spelling
+            bound = f" as {alias.asname}" if alias.asname else ""
+            offenders.add(f"import {alias.name}{bound}")
+        return offenders
+    if not isinstance(node, ast.ImportFrom):
+        return offenders
+    # A relative import (``level`` > 0, ``module`` possibly None) resolves
+    # inside this test package and cannot reach pytest.
+    if node.level or node.module is None:
+        return offenders
+    if node.module.split(".")[0] not in _PYTEST_IMPORT_PACKAGES:
+        return offenders
+    for alias in node.names:
+        bound = f" as {alias.asname}" if alias.asname else ""
+        offenders.add(f"from {node.module} import {alias.name}{bound}")
+    return offenders
 
 
 def _dotted_name(node: ast.AST) -> str:
@@ -151,19 +193,38 @@ def _skip_offenders(source: str) -> list[str]:
     prose — an assertion that fails on correct input is one that gets waived.
     Docstrings are ``Constant`` nodes and are invisible here.
 
-    Three shapes are recognised:
+    TWO channels, and BOTH are allowlists — there is no list of forbidden
+    spellings left to be incomplete:
 
-    * any ``pytest.<x>`` attribute access whose first attribute is not in
-      :data:`_PYTEST_ALLOWED_ATTRS` (so ``pytest.mark.anything``,
+    * the ATTRIBUTE channel: any ``pytest.<x>`` access whose first attribute is
+      not in :data:`_PYTEST_ALLOWED_ATTRS` (so ``pytest.mark.anything``,
       ``pytest.importorskip`` and ``pytest.skip`` are all offenders);
-    * ``from pytest import <forbidden>``, under any ``as`` alias;
-    * ``import pytest as <other>``, which would route every later call through a
-      name the attribute scan does not read.
+    * the IMPORT channel: anything but a bare unaliased ``import pytest`` —
+      see :func:`_pytest_import_offenders`. This half USED to be a blocklist of
+      forbidden names, which is why an eighth evasion (``from pytest import *``)
+      existed after seven had been named individually.
 
-    STATED LIMIT: this is a scan for STATIC constructs. A dynamic
-    ``getattr(pytest, "skip")()`` or a skip raised from an imported helper is
-    not visible to it, and no AST scan can make it so. The guard is a ratchet
-    against the ordinary ways a skip gets added, not a proof that none exists.
+    STATED LIMIT — this is a SOURCE SCANNER, and a source scanner over Python
+    cannot be complete. Recorded here deliberately: a guard documented as
+    partial is honest, while one claiming "fail-closed, no skip anywhere" with a
+    known one-line evasion is misleading. No AST rule can see any of these, and
+    they are the acknowledged residual:
+
+    * a dynamically spelled attribute — ``getattr(pytest, "sk" + "ip")()``;
+    * a dynamic import — ``__import__("pytest").skip()``;
+    * anything routed through ``exec`` / ``eval``;
+    * a skip raised from an imported helper, whose source is not this file;
+    * a marker applied to this module from OUTSIDE it — a ``conftest.py`` hook,
+      an ini-file marker, or ``--deselect`` / ``-k`` on the command line.
+
+    If a ninth evasion ever appears, the answer is NOT a tenth pattern:
+    replace this source scan with an OUTCOME-based check — assert that every
+    test function defined in this module actually collected AND ran (compare a
+    per-test ran-marker, or a count, against the module's own definitions). An
+    outcome assertion is spelling-independent and closes the entire family
+    above, dynamic and out-of-file cases included. It is deliberately NOT built
+    now: it needs a collection hook to observe, and two allowlists are
+    proportionate to the risk this one module carries.
     """
     tree = ast.parse(source)
     # An attribute chain reports ONCE, at its outermost node: without this,
@@ -180,15 +241,8 @@ def _skip_offenders(source: str) -> list[str]:
                 continue
             if name.split(".")[1] not in _PYTEST_ALLOWED_ATTRS:
                 offenders.add(name)
-        elif isinstance(node, ast.ImportFrom) and node.module == "pytest":
-            for alias in node.names:
-                if alias.name in _PYTEST_FORBIDDEN_IMPORTS:
-                    bound = f" as {alias.asname}" if alias.asname else ""
-                    offenders.add(f"from pytest import {alias.name}{bound}")
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "pytest" and alias.asname not in (None, "pytest"):
-                    offenders.add(f"import pytest as {alias.asname}")
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            offenders.update(_pytest_import_offenders(node))
     return sorted(offenders)
 
 
@@ -1311,9 +1365,12 @@ class TestFixtureResolutionContract:
         proof to the copy: gutting the real detector — the exact edit someone
         makes in order to land a skip — left this test green.
 
-        The last four cases are the shapes the previous BLOCKLIST missed. They
+        The cases after the first three are the shapes a previous BLOCKLIST
+        missed — each was found only after the one before it had been named. They
         are listed individually rather than as a loop so a failure names the
-        shape that regressed.
+        shape that regressed. Both channels are allowlists now, so this list is
+        a record of history, not a specification: a spelling absent from it
+        still fails, which is the whole point of inverting them.
         """
         # The shapes the old blocklist DID catch.
         assert _skip_offenders("pytest.skip('nope')") == ["pytest.skip"]
@@ -1336,6 +1393,36 @@ class TestFixtureResolutionContract:
         assert _skip_offenders("import pytest as pt\npt.skip('x')\n") == [
             "import pytest as pt"
         ]
+        # Evasion EIGHT, and the reason the import channel is now an allowlist
+        # of one FORM: a star import binds skip/xfail/importorskip while naming
+        # none of them, so no blocklist of names could ever have seen it, and
+        # the calls it enables carry no ``pytest.`` prefix either.
+        assert _skip_offenders("from pytest import *\nskip('x')\n") == [
+            "from pytest import *"
+        ]
+        # The same inversion covers the unaliased from-import and the submodule
+        # and private-path routes, none of which needed to be thought of
+        # individually — they are simply not the one permitted form.
+        assert _skip_offenders("from pytest import skip\nskip('x')\n") == [
+            "from pytest import skip"
+        ]
+        assert _skip_offenders("import pytest.mark\n") == ["import pytest.mark"]
+        assert _skip_offenders("from _pytest.outcomes import skip\nskip('x')\n") == [
+            "from _pytest.outcomes import skip"
+        ]
+        # A from-import of a HARMLESS name is an offender too: what is judged is
+        # the FORM, not the name, which is exactly what makes the channel closed.
+        assert _skip_offenders("from pytest import fixture\n") == [
+            "from pytest import fixture"
+        ]
+        # An alias that re-binds the same name is still not the permitted form.
+        assert _skip_offenders("import pytest as pytest\n") == [
+            "import pytest as pytest"
+        ]
+        # Non-pytest imports, including relative ones, are none of its business.
+        assert _skip_offenders(
+            "import os\nfrom pathlib import Path\nfrom . import helpers\n"
+        ) == []
         # An UNKNOWN pytest attribute is an offender too: the allowlist is what
         # makes a construct nobody has invented yet fail closed.
         assert _skip_offenders("pytest.some_future_skipper()") == [
@@ -1344,6 +1431,7 @@ class TestFixtureResolutionContract:
         # ...and the APIs this module legitimately uses must NOT be offenders,
         # or the guard would red on correct input and get waived.
         assert _skip_offenders(
+            "import pytest\n"
             "@pytest.fixture\ndef f():\n    pass\n"
             "def t():\n"
             "    with pytest.raises(AssertionError):\n        pass\n"
