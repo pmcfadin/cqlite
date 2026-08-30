@@ -57,9 +57,7 @@ use super::reader::parsing::row_decoder::partition_shadow::{
 #[cfg(not(feature = "tombstones"))]
 use super::stream_merge_probe;
 use super::{reader, scan_merge};
-use crate::storage::write_engine::merge::{
-    new_merger_deferring_open_errors, CellData, KWayMerger, MergeEntry, MergeStep, RowData,
-};
+use crate::storage::write_engine::merge::{CellData, KWayMerger, MergeEntry, MergeStep, RowData};
 use crate::types::{CellWriteMetadata, TableId as CqlTableId};
 use crate::{Result, RowCells, RowKey, ScanRow, Value};
 
@@ -711,7 +709,7 @@ pub(super) async fn stream_generations_for_read(
         // every production build. Issue #1704: the merger DEFERS open counting here.
         let constructed = match fault_scope.injected_construction_error() {
             Some(injected) => Err(injected),
-            None => new_merger_deferring_open_errors(paths, &schema),
+            None => crate::storage::write_engine::merge::merger_deferring_opens(paths, &schema),
         };
         let mut merger = match constructed {
             Ok(m) => {

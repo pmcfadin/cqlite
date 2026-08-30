@@ -218,5 +218,12 @@ pub(crate) enum OpenErrorReporting {
     /// silently un-instrumented.
     SelfReported,
     /// This open is an inner step; the caller's operation seam records instead.
+    ///
+    /// Constructed by `scan_delta` (feature `delta-scan`) and by the cross-generation
+    /// streaming merge (`not(feature = "tombstones")`). A build with `tombstones` on
+    /// and `delta-scan` off therefore has no constructor for it — the variant is still
+    /// the correct half of the distinction, so it is allowed rather than cfg'd away
+    /// into a shape that would differ per feature set.
+    #[allow(dead_code)]
     DeferredToCaller,
 }

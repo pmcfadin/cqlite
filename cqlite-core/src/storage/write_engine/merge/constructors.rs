@@ -146,7 +146,12 @@ impl KWayMerger {
 ///
 /// A named helper rather than an inline call so the one site that defers can state
 /// WHY in one place, and so `generation_merge`'s call stays a single expression.
-pub(crate) fn new_merger_deferring_open_errors(
+///
+/// Gated exactly like its ONE caller, `generation_merge::stream_generations_for_read`
+/// — a `tombstones` build routes that read through the materializing `scan`, so the
+/// streaming merge (and therefore this helper) does not exist there.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) fn merger_deferring_opens(
     input_paths: Vec<PathBuf>,
     schema: &TableSchema,
 ) -> Result<KWayMerger> {

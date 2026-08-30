@@ -432,7 +432,8 @@ pub(crate) use async_bridge::block_on_async;
 /// stays in [`from_readers`].
 #[cfg(feature = "write-support")]
 mod constructors;
-pub(crate) use constructors::new_merger_deferring_open_errors;
+#[cfg(not(feature = "tombstones"))]
+pub(crate) use constructors::merger_deferring_opens;
 mod producer_iter;
 #[cfg(feature = "write-support")]
 use producer_iter::SSTableRowIteratorAdapter;
