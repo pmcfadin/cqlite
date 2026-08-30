@@ -236,7 +236,7 @@ const SESSION_UP_DEADLINE: Duration = Duration::from_secs(40);
 // factor of two of the 500ms that was MEASURED to be inert.
 //
 // Observed quiet values across every run recorded for this change:
-//   t_boot   11.4ms (smallest, BINDING) .. 29ms
+//   t_boot    8.7ms (smallest, BINDING) .. 29ms
 //   t_ack     1.4ms (smallest, BINDING) ..  3ms (SIGINT test)
 //                                       .. 43ms (sibling, slowest of 5 writes)
 //
@@ -252,7 +252,7 @@ const SESSION_UP_DEADLINE: Duration = Duration::from_secs(40);
 // "quiet host yields exactly `base`" property holds for the SIGINT test and not
 // for the sibling; the property that matters — never TIGHTER than `base` — holds
 // for both unconditionally.
-const MEASURED_QUIET_T_BOOT: Duration = Duration::from_micros(11_400);
+const MEASURED_QUIET_T_BOOT: Duration = Duration::from_micros(8_700);
 
 const MEASURED_QUIET_T_ACK: Duration = Duration::from_micros(1_400);
 
@@ -273,7 +273,7 @@ const MEASURED_QUIET_T_ACK: Duration = Duration::from_micros(1_400);
 // tunable, they are bounded by `MAX_BASELINE_MULTIPLE`, and the guard's message
 // prints the COMPUTED multiple so a reader never has to trust prose arithmetic.
 //
-// The anchors themselves are rounded DOWN (11.4ms -> 11_400us, 1.4ms -> 1_400us),
+// The anchors themselves are rounded DOWN (8.7ms -> 8_700us, 1.4ms -> 1_400us),
 // the STRICT direction: they form an upper bound on the baselines, so rounding up
 // would loosen the guard. That asymmetry is the one this issue got wrong twice.
 
@@ -292,6 +292,51 @@ pub const BOOT_QUIET_BASELINE: Duration =
 
 /// Quiet-host reference for `t_ack`, DERIVED from the binding anchor.
 pub const ACK_QUIET_BASELINE: Duration = MEASURED_QUIET_T_ACK.saturating_mul(ACK_BASELINE_MULTIPLE);
+
+// WHAT THE DERIVED-BASELINE GUARD DOES *NOT* CLOSE, stated because it was found by
+// RED-verifying the guard and would otherwise be invisible.
+//
+// Deriving each baseline from its anchor makes the MULTIPLE undriftable. It makes
+// the ANCHOR unverifiable in exchange: the anchor is now the sole source of truth,
+// so planting a permissive anchor (1.4ms -> 3ms) scales the baseline with it, the
+// ratio stays 8x, and every assert still passes. That is the very drift that
+// produced roborev job 222 finding 2 — one level down.
+//
+// Nothing inside the file can settle it, because the anchor is a MEASUREMENT and a
+// unit test has nothing to compare it against. What CAN see it is the integration
+// tests, which measure `t_boot` and `t_ack` on every run: an anchor above the value
+// a quiet host actually reports is a permissive anchor, by definition.
+//
+// So that is REPORTED, not asserted. `notice_if_anchor_is_permissive` prints a
+// NOTICE when an observed quiet value falls below its anchor. Deliberately NOT a
+// failure: a host faster than the recorded floor is not the author's doing, and a
+// lane that reds on correct input is the lane people learn to waive. FAIL where the
+// author can act; NOTICE where only the information is actionable.
+
+/// Print a NOTICE when a measured quiet value is BELOW its recorded anchor — i.e.
+/// the anchor is permissive on this host and should be lowered. Never fails; see
+/// the comment above for why.
+pub fn notice_if_anchor_is_permissive(observed_name: &str, observed: Duration, anchor: Duration) {
+    if observed < anchor {
+        eprintln!(
+            "[#3515] NOTICE: observed quiet {observed_name} {observed:.3?} is BELOW its recorded \
+             anchor {anchor:.3?}. The anchor is PERMISSIVE on this host: it forms an upper bound \
+             on the calibration baseline, so lowering it to the newly observed value tightens \
+             that bound. Not a failure — a faster host is not a defect."
+        );
+    }
+}
+
+/// The anchors, exposed only so the integration tests can report on them.
+///
+/// The NOTICE fired on its very first run (observed t_boot 9.670ms against an
+/// 11.400ms anchor), and the anchor was lowered to the smallest value actually
+/// recorded (8.7ms). A future NOTICE on a faster host is EXPECTED and is not a
+/// defect to chase every time: it is information about that host, and lowering the
+/// anchor only ever tightens the baseline bound.
+pub fn quiet_anchors() -> (Duration, Duration) {
+    (MEASURED_QUIET_T_BOOT, MEASURED_QUIET_T_ACK)
+}
 
 /// The `cqlite` binary this test crate built with `--features write-support`.
 fn cqlite_bin() -> &'static str {

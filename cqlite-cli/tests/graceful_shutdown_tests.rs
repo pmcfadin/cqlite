@@ -89,6 +89,12 @@ fn sigint_in_writable_session_flushes_before_exit() {
     );
     clock.record("b.write-ack", t_ack);
 
+    // Report (never fail) if this host is faster than the recorded anchors, which
+    // would mean the anchors are permissive; see `notice_if_anchor_is_permissive`.
+    let (boot_anchor, ack_anchor) = quiet_anchors();
+    notice_if_anchor_is_permissive("t_boot", t_boot, boot_anchor);
+    notice_if_anchor_is_permissive("t_ack", t_ack, ack_anchor);
+
     // The stall window for the progress-checked exit wait is calibrated from the
     // same `t_ack`: on a host where a full write round-trip takes seconds, a
     // few seconds of silence is not evidence of a stall.
@@ -306,6 +312,10 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     }
     let t_acks_total = acks_started.elapsed();
     clock.record("b.write-acks", t_acks_total);
+
+    let (boot_anchor, ack_anchor) = quiet_anchors();
+    notice_if_anchor_is_permissive("t_boot", t_boot, boot_anchor);
+    notice_if_anchor_is_permissive("t_ack", t_ack, ack_anchor);
 
     let stall_window = calibrated(STALL_WINDOW, t_ack, "t_ack", ACK_QUIET_BASELINE);
 
