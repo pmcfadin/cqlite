@@ -54,7 +54,9 @@
 //!   See [`Kinding`], which derives the rule from
 //!   `cassandra-5.0.8 JsonTransformer` and the committed DDL. The comparison
 //!   itself is the pure-string [`normalize_decimal`] (no `10^scale`
-//!   materialization, no `f64` round-trip, so a 30-digit `decimal` is exact).
+//!   materialization and no `f64` round-trip OF ITS OWN, so a 30-digit `decimal`
+//!   arriving as TEXT — which is how the dump writes a cell path — keeps every
+//!   digit).
 //!
 //!   In the CSV lane every cell arrives as text — the format carries no JSON
 //!   kinds at all — so a numeric cell is compared by value everywhere.
@@ -68,13 +70,38 @@
 //!   even when its content looks numeric.
 //! * **Map spelling.** `sstabledump` renders a map as a JSON object
 //!   (`{"x": 10}`); the CLI renders it as an array of `{"key": …, "value": …}`
-//!   pairs. Both are compared as key-sorted pair lists.
+//!   pairs. The SPELLING is normalized; the ORDER is not — entries are compared
+//!   in EMITTED order, because Cassandra stores a map's entries in key-comparator
+//!   order and both sides read the same SSTable (finding N2). Sorting both sides
+//!   first, which this lane used to do, made a reordering compare equal.
 //! * **UDT `_type`.** `sstabledump` renders a UDT as a plain field→value object;
 //!   the JSON egress adds a `_type` discriminator naming the type. It is REQUIRED
 //!   to be present, a string, and the name the committed `CREATE TYPE` declares
 //!   (ASCII case folded, since an unquoted CQL identifier is case-insensitive);
 //!   only then is it dropped, and only from the CLI side. CSV renders no
 //!   discriminator, so the rule is JSON-only.
+//! * **Two spellings this DELIBERATELY does not distinguish, stated so neither
+//!   reads as an oversight.** (1) A timestamp's SPELLING: the separator, a zero
+//!   offset's form and the fraction width are normalized away on BOTH sides, so
+//!   only the instant is asserted — the golden's form is Cassandra's
+//!   `TimestampSerializer` JSON format, and requiring the CLI to copy it would
+//!   assert a product decision nothing establishes. (2) A `decimal`'s SCALE:
+//!   [`normalize_decimal`] trims trailing fractional zeros, so `1.50` and `1.5`
+//!   compare equal although CQL `decimal` carries scale. Measured on the compared
+//!   corpus at the time of writing: the only `decimal` values anywhere in it are
+//!   `test_signed_coll.signed_special_collections`'s `sd`
+//!   (`-999999999999999999999999999999.999`, `-1.5`, `0`,
+//!   `123456789012345678901234567890.123`), none of which carries a trailing
+//!   fractional zero, so nothing in the corpus is currently hidden by it.
+//! * **One narrowing of the PARSE, likewise latent rather than hidden.** Both
+//!   sides are read by [`strict_json`], which uses `serde_json`'s own number
+//!   handling (i64 / u64 / f64, no arbitrary precision). So an UNQUOTED JSON
+//!   number literal too long for that — a >2^53 `varint`, a high-precision
+//!   scalar `decimal` — is rounded IDENTICALLY on both sides and would compare
+//!   equal in the JSON lane (the CSV lane, whose cells are text, would fail
+//!   loudly instead). Measured: zero such literals in any of the 28 compared
+//!   tables' goldens. Closing it means arbitrary-precision parsing on both sides,
+//!   which is a workspace-wide `serde_json` feature change and not this lane's.
 //! * **CSV containers.** CSV carries no types, so a collection/UDT arrives as
 //!   one flat text field (`{a, b}`, `[1, 2]`, `{k: v}`) and is decoded back into
 //!   the shape the GOLDEN and the DECLARED TYPE jointly state before comparison
@@ -82,7 +109,10 @@
 //!   deliberately strict (each collection kind must use its own bracket, taken
 //!   from the DDL), and the two ambiguities CSV genuinely cannot express. A cell
 //!   whose GOLDEN content cannot survive an unquoted rendering is REFUSED, never
-//!   guessed, and the refusal is counted and named in the run census.
+//!   guessed, and the refusal is counted and named in the run census — and the
+//!   refusal suppresses only the INDISTINGUISHABLE readings: the bracket frame
+//!   and the two decidable member counts are still compared, so `null` or
+//!   unrelated text in a refused cell is still a divergence (finding N3).
 //!
 //! Everything else is compared byte-exactly, including blob `0x…` hex, decimal
 //! text, booleans, UUID text and `null`.

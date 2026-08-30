@@ -81,6 +81,11 @@
 //!    and the refusal is decided from the GOLDEN alone, so it can never be
 //!    caused by the very defect under test. Refusals are counted and named in
 //!    the run census.
+//!
+//! A refusal is not a blind spot the size of the cell: what the ambiguity cannot
+//! reach is still compared — see [`decidable_despite_ambiguity`], which holds the
+//! CLI cell to the declared bracket frame and to the two member counts the
+//! ambiguities cannot hide (finding N3).
 
 use super::schema::CqlType;
 use serde_json::{Map, Value};
