@@ -5,7 +5,8 @@
 //!
 //! * [`record_wal_size`] — the size the [`super::wal::WriteAheadLog`] TRACKS, emitted
 //!   at the same post-write seam as the memtable gauges so "memtable growing / WAL
-//!   growing" are two readings taken at one instant;
+//!   growing" are two readings taken at one instant, AND once at engine open (see
+//!   below);
 //! * [`record_wal_recovery_duration`] — how long WAL recovery at engine open took.
 //!
 //! A sibling file, not more lines in `mod.rs`, per the campsite rule (#1116): that
@@ -27,6 +28,17 @@
 //! as "flushes are not keeping up", so a flush that worked perfectly manufactured an
 //! alarm. The healthy shape the doc promises is a saw-tooth, and the post-truncate
 //! emission is the falling edge of it.
+//!
+//! # Why the size is ALSO emitted once at engine open
+//!
+//! The write/flush seams cover a process that writes. A process that RECOVERS a
+//! non-empty WAL and then receives no writes touches none of them, so it reported a
+//! [`record_wal_recovery_duration`] and no size at all (issue #1707, roborev job
+//! 145) — the operator could see that startup spent N seconds in recovery and had no
+//! way to see the WAL that caused it. `WriteEngine::open`'s single emission closes
+//! that, and it is placed AFTER the lossy-recovery branch so a corrupt-prefix reset
+//! reports the trimmed size the engine is really starting from; announcing the
+//! pre-reset size for bytes no longer on disk would be worse than the silence.
 
 use std::time::Duration;
 

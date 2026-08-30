@@ -669,6 +669,23 @@ impl WriteEngine {
             return Err(e);
         }
 
+        // OPENING SIZE GAUGE (issue #1707, roborev job 145). Recovery emitted its
+        // DURATION above; without this, a process that recovers a non-empty WAL and
+        // then takes no writes exposes NO `cqlite.wal.size` series at all — the
+        // gauge's only other call sites are the two write seams and the post-flush
+        // truncate. The operator then sees a recovery that took 12s and has no way
+        // to see the WAL that caused it. They are two halves of one story and only
+        // one of them was being told.
+        //
+        // Placed HERE, after the lossy-recovery branch, so it reports the size the
+        // engine is actually starting from: `reset_to_valid_prefix` trims the live
+        // log and updates `current_size`, and a gauge taken before it would report a
+        // pre-reset size for bytes that are no longer on disk — a wrong number,
+        // which is worse than silence. Emitted unconditionally, the fresh-WAL 0
+        // included: 0 is a real reading here (a genuinely empty log), not an
+        // invented one, and it is the baseline the saw-tooth rises from.
+        wal_gauges::record_wal_size(wal.size());
+
         if recovered > 0 {
             tracing::info!(
                 "WAL replay complete: replayed {} mutation(s); {} rows in memtable, {} bytes",

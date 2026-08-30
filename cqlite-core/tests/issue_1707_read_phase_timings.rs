@@ -574,6 +574,153 @@ mod wal_gauges {
         drop(reopened);
     }
 
+    /// A process that RECOVERS a non-empty WAL and then takes NO writes must still
+    /// expose `cqlite.wal.size` (issue #1707, roborev job 145).
+    ///
+    /// The gauge's only other call sites are the two write seams and the post-flush
+    /// truncate, so before the open-time emission such a process reported a recovery
+    /// DURATION and no size at all: the operator could see that startup spent N
+    /// seconds recovering and had no way to see the WAL that caused it. They are two
+    /// halves of one story.
+    ///
+    /// The sibling tests above are blind to this: both write immediately after
+    /// opening, so their gauge comes from the write seam, not the open.
+    #[test]
+    #[serial_test::serial(read_metrics)]
+    fn recovering_a_non_empty_wal_reports_its_size_before_any_write() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let cfg = WriteEngineConfig::new(tmp.path().join("data"), tmp.path().join("wal"), schema());
+
+        // Leave a non-empty WAL behind, WITHOUT flushing (a flush would truncate it).
+        {
+            let mut engine = WriteEngine::new(cfg.clone()).expect("engine");
+            engine
+                .execute("INSERT INTO obs1707.rows (id, name) VALUES (1, 'one')")
+                .expect("write");
+            assert!(
+                engine.wal_size() > 0,
+                "the fixture must leave a NON-EMPTY WAL, or this test cannot \
+                 distinguish the open-time emission from silence"
+            );
+        }
+
+        // Reopen and take NO writes at all: every emission below comes from the open.
+        let mc = testing::metrics_capture();
+        mc.reset();
+        let reopened = WriteEngine::new(cfg).expect("reopen engine");
+        let metrics = mc.flush_and_collect();
+        let recovered_size = reopened.wal_size();
+
+        assert!(
+            recovered_size > 0,
+            "the reopened engine must have recovered the non-empty WAL"
+        );
+        let reported = last_gauge_value(&metrics, catalog::WAL_SIZE).unwrap_or_else(|| {
+            panic!(
+                "a process that recovers a non-empty WAL and then receives no writes must \
+                 STILL report cqlite.wal.size — otherwise the recovery duration it does \
+                 report cannot be correlated with the WAL that caused it; collected \
+                 metrics: {:?}",
+                metric_names(&metrics)
+            )
+        });
+        assert_eq!(
+            reported,
+            recovered_size as f64,
+            "the open-time gauge must carry the POST-RECOVERY size the engine is \
+             actually starting from; points: {:?}",
+            metrics.find(catalog::WAL_SIZE).map(|m| &m.points)
+        );
+        assert!(
+            metrics.contains(catalog::WAL_RECOVERY_DURATION),
+            "the size gauge's counterpart, the recovery duration, must be reported by \
+             the same open; collected metrics: {:?}",
+            metric_names(&metrics)
+        );
+
+        drop(reopened);
+    }
+
+    /// The CORRUPT-PREFIX RESET path must report the POST-reset size (issue #1707,
+    /// roborev job 145).
+    ///
+    /// A lossy recovery trims the live log back to its last CRC-valid prefix, so a
+    /// gauge taken before that trim would announce bytes that are no longer on disk
+    /// — a wrong number, which is worse than the silence this emission replaces.
+    /// This is the branch a clean-recovery test cannot reach.
+    #[test]
+    #[serial_test::serial(read_metrics)]
+    fn a_lossy_recovery_reports_the_size_after_the_reset_not_before_it() {
+        use cqlite_core::storage::write_engine::WriteAheadLog;
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let wal_dir = tmp.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).expect("wal dir");
+        let cfg = WriteEngineConfig::new(tmp.path().join("data"), wal_dir.clone(), schema());
+
+        // Three entries, A B C, written straight through the WAL so the end offset of
+        // each is known. Corrupting B's PAYLOAD (not its tail) makes this MID-STREAM
+        // corruption, which `open_existing` leaves physically intact — so engine open
+        // takes the preserve-then-`reset_to_valid_prefix` branch rather than the
+        // torn-tail trim.
+        let mut ends = Vec::new();
+        {
+            let mut wal = WriteAheadLog::create(&wal_dir).expect("create wal");
+            for (id, name) in [(1, "one"), (2, "two"), (3, "three")] {
+                wal.append(&mutation(id, name)).expect("append");
+                wal.sync().expect("sync");
+                ends.push(wal.size());
+            }
+        }
+        let (end_a, total) = (ends[0], ends[2]);
+        let wal_path = wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        {
+            // B's payload starts just past its 8-byte header.
+            let at = end_a + 8;
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&wal_path)
+                .expect("open wal");
+            f.seek(SeekFrom::Start(at)).expect("seek");
+            let mut byte = [0u8; 1];
+            f.read_exact(&mut byte).expect("read");
+            f.seek(SeekFrom::Start(at)).expect("seek back");
+            f.write_all(&[byte[0] ^ 0x01]).expect("flip");
+            f.sync_all().expect("sync");
+        }
+
+        let mc = testing::metrics_capture();
+        mc.reset();
+        let engine = WriteEngine::new(cfg).expect("engine opens over a lossy WAL");
+        let metrics = mc.flush_and_collect();
+
+        assert!(
+            !engine.wal_recovery().is_clean(),
+            "the fixture must produce a LOSSY recovery, or this test never reaches the \
+             reset branch it exists for"
+        );
+        let reported = last_gauge_value(&metrics, catalog::WAL_SIZE).unwrap_or_else(|| {
+            panic!(
+                "a lossy recovery must still report cqlite.wal.size; collected metrics: {:?}",
+                metric_names(&metrics)
+            )
+        });
+        assert_eq!(
+            reported,
+            engine.wal_size() as f64,
+            "the gauge must equal the size the engine is actually starting from"
+        );
+        assert_eq!(
+            reported, end_a as f64,
+            "the reported size must be the POST-RESET valid prefix ({end_a}), not the \
+             pre-reset {total} bytes that the trim removed from disk"
+        );
+
+        drop(engine);
+    }
+
     /// The gauge must be emitted from the ASYNC write path too, and it must COME BACK
     /// DOWN when a flush truncates the WAL.
     ///
