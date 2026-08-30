@@ -18,6 +18,8 @@
 #   3. baseline `--list` broken / empty / non-component output          -> FAIL naming the derivation
 #   4. deliberate removal (main IS an ancestor of HEAD, absent at HEAD)  -> DECLARED, run NOT failed
 #   4b. removal that is only an UNCOMMITTED working-tree edit            -> FAIL naming it
+#   4d. a SHALLOW clone where rc 1 is ambiguous                          -> INDETERMINATE, never BEHIND
+#   5d. a concurrent fetch clobbering FETCH_HEAD                         -> baseline unaffected
 #   5. no skew                                                          -> affirmative PASS + baseline sha
 #   6. --lite with a real skew                                          -> line present, run NOT failed
 #   7. the REAL full-gate emit path                                     -> FAIL block + exit 1, no cargo
@@ -954,6 +956,89 @@ else
   bad "3544-indeterminate-lite: expected an ADVISORY-INDETERMINATE line and a lite run that proceeds"
   printf '%s\n' "$ind_lite"
   sed -n '1,20p' "$ind_lsum" 2>/dev/null
+fi
+
+# ---------------------------------------------------------------------------
+# 4d. A SHALLOW CLONE MAKES `--is-ancestor`'s rc 1 AMBIGUOUS (roborev job 227). rc 1 means
+#     "not an ancestor" in a complete repository, but in a SHALLOW one it ALSO means "the
+#     connecting history is not here" — so reading it as definitive reports a LEGITIMATE
+#     committed removal in a shallow checkout as BEHIND: a false FAIL on correct input, the
+#     class that teaches agents to waive a lane. It is the three-valued-predicate rule one
+#     level in: rc ∉ {0,1} was already INDETERMINATE because "cannot tell" must not collapse
+#     onto an answer, and now rc 1 itself has that shape.
+#
+#     THE FIXTURE IS THE REAL SHAPE, not a stub. The baseline's history is C1..C3 (component
+#     present) then C4..C5 (removed); both clones are taken at C5, then the origin's `main` is
+#     moved BACK to C3. C3 therefore genuinely IS an ancestor of HEAD — proven by the FULL
+#     clone's own `--is-ancestor` exiting 0 — while the depth-1 clone cannot see the link and
+#     exits 1. The pair is the whole point: the SAME repository state yields DECLARED in the
+#     complete clone and must not yield BEHIND in the shallow one.
+# ---------------------------------------------------------------------------
+sh_work="$tmp/shallow-src"; sh_bare="$tmp/shallow.git"
+mkdir -p "$sh_work/scripts"
+sed "$ADD_SENTINEL" "$GATE" >"$sh_work/scripts/agent-gate.sh"
+printf 'shallow fixture\n' >"$sh_work/README.md"
+git init -q --bare "$sh_bare" >/dev/null 2>&1
+git -C "$sh_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
+(
+  cd "$sh_work" && git init -q . \
+    && git add -A && git "${GIT_ID[@]}" commit -qm c1 \
+    && printf 'c2\n' >>README.md && git "${GIT_ID[@]}" commit -qam c2 \
+    && printf 'c3\n' >>README.md && git "${GIT_ID[@]}" commit -qam c3
+) >/dev/null 2>&1 || { echo "FATAL: could not build the shallow fixture's early history" >&2; exit 1; }
+sh_c3=$(git -C "$sh_work" rev-parse HEAD)
+(
+  cd "$sh_work" && cp "$GATE" scripts/agent-gate.sh \
+    && git "${GIT_ID[@]}" commit -qam "c4: remove the component" \
+    && printf 'c5\n' >>README.md && git "${GIT_ID[@]}" commit -qam c5 \
+    && git push -q "$sh_bare" HEAD:refs/heads/main
+) >/dev/null 2>&1 || { echo "FATAL: could not build the shallow fixture's later history" >&2; exit 1; }
+# `--depth` is IGNORED for a plain local path — git only honours it over a transport, so the
+# clone uses `file://` and the remote is then repointed at the path (the identity pin below
+# names the path). Without the `file://` the clone is COMPLETE and this case silently becomes
+# a duplicate of 4 (measured: the first cut cloned by path and was not shallow at all).
+git clone -q --depth 1 "file://$sh_bare" "$tmp/shallow-branch" >/dev/null 2>&1
+git clone -q "$sh_bare" "$tmp/complete-branch" >/dev/null 2>&1
+( cd "$tmp/shallow-branch" && git remote set-url origin "$sh_bare" ) >/dev/null 2>&1
+# …and NOW move the baseline back to C3, so both clones hold C5 while origin/main names C3.
+git -C "$sh_bare" update-ref refs/heads/main "$sh_c3" >/dev/null 2>&1
+for _r in "$tmp/shallow-branch" "$tmp/complete-branch"; do
+  agent_gate_pin_canonical_remote "$_r/scripts/agent-gate.sh" "$sh_bare" \
+    || { echo "FATAL: could not pin the canonical identity in '$_r'" >&2; exit 1; }
+done
+# THE PRECONDITION PROBE MUST RUN AFTER THE OBJECT EXISTS. Measured: in the shallow clone
+# `--is-ancestor C3 HEAD` exits 128 while C3 is simply ABSENT, and 1 once a fetch has brought
+# it — 128 is a missing OBJECT (a different failure, already INDETERMINATE) and 1 is the
+# AMBIGUOUS answer this case is about. The gate's own fetch is what brings it, so the probe
+# fetches the same ref first; verified not to deepen the clone (rc stays 1).
+for _r in "$tmp/shallow-branch" "$tmp/complete-branch"; do
+  git -C "$_r" fetch --quiet --refmap= --no-tags origin \
+      "refs/heads/main:refs/heads/cs-baseline-probe" >/dev/null 2>&1 || true
+done
+sh_is_shallow=$(git -C "$tmp/shallow-branch" rev-parse --is-shallow-repository 2>/dev/null || echo unknown)
+git -C "$tmp/shallow-branch" merge-base --is-ancestor "$sh_c3" HEAD >/dev/null 2>&1; sh_rc=$?
+git -C "$tmp/complete-branch" merge-base --is-ancestor "$sh_c3" HEAD >/dev/null 2>&1; cp_rc=$?
+if [ "$sh_is_shallow" != true ] || [ "$sh_rc" -ne 1 ] || [ "$cp_rc" -ne 0 ]; then
+  echo "skip - 3544-shallow-ancestry: this git does not reproduce the shape (shallow='$sh_is_shallow', shallow rc=$sh_rc want 1, complete rc=$cp_rc want 0) — the ambiguity is not exercisable here"
+else
+  sh_out=$(hook "$tmp/shallow-branch")
+  sh_line=$(field COMPONENT_SET_LINE "$sh_out")
+  cp_out=$(hook "$tmp/complete-branch")
+  if [ "$(field VERDICT "$cp_out")" != DECLARED ]; then
+    bad "3544-shallow-ancestry: the COMPLETE-clone control did not report DECLARED (got '$(field VERDICT "$cp_out")' kind '$(field KIND "$cp_out")') — the pair cannot discriminate"
+    printf '%s\n' "$cp_out"
+  elif [ "$(field VERDICT "$sh_out")" = INDETERMINATE ] \
+     && [ "$(field KIND "$sh_out")" = ok ] \
+     && [ "$(field ANCESTOR "$sh_out")" = unknown ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$sh_line" \
+     && grep -q 'SHALLOW clone' <<<"$sh_line" \
+     && grep -q -- 'git fetch --unshallow' <<<"$sh_line" \
+     && ! grep -q 'is BEHIND origin/main' <<<"$sh_line"; then
+    ok "3544-shallow-ancestry: in a SHALLOW clone an unreachable-but-real ancestor is INDETERMINATE naming the shallow clone, never a false BEHIND (complete-clone control: DECLARED)"
+  else
+    bad "3544-shallow-ancestry: expected INDETERMINATE naming the shallow clone (got '$(field VERDICT "$sh_out")')"
+    printf '%s\n' "$sh_out"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

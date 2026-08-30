@@ -2562,6 +2562,9 @@ apply_schemas_preflight() {
 #                                        identity IN-PROCESS (no resolution, no network).
 #     git rev-parse FETCH_HEAD^{commit}  ref + COMMIT object; commits are never filtered.
 #     git merge-base --is-ancestor       walks commit parents only.
+#     git rev-parse --is-shallow-repository / --git-path shallow
+#                                        repository STATE reads (is the history truncated?);
+#                                        no object access, no remote contact.
 #     git update-ref -d <private ref>    deletes a ref in this worktree's own namespace.
 #
 #   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, mkdir, rm, cat, tr, cut,
@@ -2966,6 +2969,41 @@ EOF_CS_HEAD
   return 0
 }
 
+# _component_set_is_shallow: `yes` | `no` | `unknown` — is $REPO_ROOT a SHALLOW clone?
+#
+# WHY IT IS CONSULTED (roborev job 227). `git merge-base --is-ancestor A HEAD` answers 1 for
+# "A is not an ancestor" — but in a SHALLOW repository it ALSO answers 1 when the connecting
+# history is simply ABSENT. So rc 1 is itself ambiguous, and reading it as definitive reports a
+# legitimate committed removal in a shallow checkout as BEHIND: a FALSE FAIL ON CORRECT INPUT,
+# which is the class that teaches agents to waive a lane.
+#
+# This is the three-valued-predicate rule re-appearing one level in. rc ∉ {0,1} is already
+# INDETERMINATE because "cannot tell" must not collapse onto an answer; the same now applies
+# INSIDE rc 1. rc 0 is unaffected: reachability is proven POSITIVELY, and a shallow repo cannot
+# invent a path it does not have.
+#
+# THREE-VALUED, never a boolean: `unknown` (an old git, an unreadable git dir) must not inherit
+# the permissive "not shallow" branch, or the false-BEHIND returns for exactly the hosts whose
+# capability could not be measured. Two independent readings, because
+# `--is-shallow-repository` is git >= 2.15 and this script supports older hosts: the command
+# first, then the `shallow` FILE, and only then `unknown`.
+_component_set_is_shallow() {
+  local out sf
+  # local-only: reads repository state; no object access, no remote contact.
+  out=$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null || true)
+  case "$out" in
+    true)  printf yes; return 0 ;;
+    false) printf no;  return 0 ;;
+  esac
+  # local-only: resolves a path INSIDE the git dir (no object read, no network).
+  sf=$(git -C "$REPO_ROOT" rev-parse --git-path shallow 2>/dev/null || true)
+  if [ -n "$sf" ]; then
+    if [ -s "$sf" ]; then printf yes; else printf no; fi
+    return 0
+  fi
+  printf unknown
+}
+
 # THE BASELINE MUST NOT BE READ FROM A SHARED MUTABLE REF — AND `FETCH_HEAD` IS ONE (roborev
 # job 227). `--refmap=` was chosen precisely so the fetch writes NO shared tracking ref, which
 # left `FETCH_HEAD` as the carrier; but `FETCH_HEAD` is a single per-repository file, so a
@@ -3230,9 +3268,22 @@ EOF_CS_LIST
   # above different in kind: no partial-clone filter omits commits, whereas `blob:none`
   # omits exactly what `show <sha>:<path>` must read — so this one cannot reach the network.
   git -C "$REPO_ROOT" merge-base --is-ancestor "$_CS_SHA" HEAD >/dev/null 2>&1; rc=$?
+  local shallow
   case "$rc" in
     0) _CS_ANCESTOR=yes ;;
-    1) _CS_ANCESTOR=no ;;
+    1) # rc 1 IS AMBIGUOUS IN A SHALLOW CLONE (job 227): it means "not an ancestor" OR "the
+       # connecting history is not here". Only a repo PROVEN complete may read it as the
+       # former; `yes`/`unknown` shallowness both go to INDETERMINATE, which is fail-closed
+       # with a diagnostic naming the shallow clone — never a false BEHIND on correct input,
+       # and never a permissive default for a host whose state could not be measured.
+       shallow="$(_component_set_is_shallow)"
+       case "$shallow" in
+         no) _CS_ANCESTOR=no ;;
+         yes) _CS_ANCESTOR=unknown
+              _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} HEAD answered 'not an ancestor', but this is a SHALLOW clone, where that answer is indistinguishable from 'the connecting history is absent' — remedy: git fetch --unshallow (then re-run)" ;;
+         *)   _CS_ANCESTOR=unknown
+              _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} HEAD answered 'not an ancestor', and whether this repository is SHALLOW could NOT be determined ('git rev-parse --is-shallow-repository' and the shallow-file probe both failed), so that answer is not definitive" ;;
+       esac ;;
     *) _CS_ANCESTOR=unknown
        _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} HEAD exited $rc" ;;
   esac
