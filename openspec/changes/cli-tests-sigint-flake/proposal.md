@@ -69,6 +69,11 @@ all four of which assert unestablishable causes today.
   nextest** — `cli-tests` runs plain `cargo test` — so there is no retry mechanism in play at all
   here, and the non-goal holds a fortiori. See `design.md` D6.)
 * Not a claim that the wall-clock bound is *eliminated*. The deadline's `base` is irreducibly
-  uncalibrated until the first in-band measurement lands; the change makes that base generous (above
-  the whole nominal aggregate of the bounds it replaced) and makes every message honest about which
+  uncalibrated until the first in-band measurement lands; the change makes that base generous (at
+  least the whole nominal aggregate of the bounds it replaced, plus one old bound for the readiness
+  stage the old code did not bound separately — round 9) and makes every message honest about which
   bound ended it. See `design.md` "The residual, stated at the seam".
+* Not a claim that a verdict is returned at the deadline instant. The deadline bounds how long the
+  test WAITS FOR EVIDENCE; a success OBSERVED while it lapses is accepted, by a bounded margin, and
+  accepting it is deliberate — rejecting it would be a false failure on a working product (round 9,
+  roborev job 232 finding 1 OVERRULED). See `design.md` D3.
