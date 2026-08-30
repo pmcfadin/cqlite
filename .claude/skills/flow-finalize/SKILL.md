@@ -17,10 +17,15 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
 > slice; see **"Slice deliveries"** below, which says exactly what to do instead. Deciding is
 > mechanical, not a judgement call: if the merged PR declared `Closes #<N>` it is a **completed
 > delivery**; if it deliberately did not, it is a **slice**.
+> Compare by **URL**, never by number — an issue NUMBER is repository-scoped, so a PR closing
+> `other-repo#<N>` would read as closing THIS repo's `#<N>` and you would close a deliberately-open
+> issue. `delivery-telemetry.py` makes the same comparison the same way (issue #3550).
 > ```bash
-> gh pr view <pr> --json closingIssuesReferences --jq '[.closingIssuesReferences[].number]'
-> # contains <N>  -> completed delivery: run every step as written
-> # does NOT      -> SLICE: follow "Slice deliveries" below
+> issue_url=$(gh issue view <N> --json url --jq .url)
+> gh pr view <pr> --json closingIssuesReferences --jq --arg u "$issue_url" \
+>   'if [.closingIssuesReferences[].url] | index($u) then "COMPLETED" else "SLICE" end'
+> # COMPLETED -> run every step as written
+> # SLICE     -> follow "Slice deliveries" below
 > ```
 
 1. **Confirm the merge + capture the merged branch.** state MUST be `MERGED`; the cleanup in step 6 keys
@@ -44,7 +49,8 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    fi
    ```
    (Archiving + cleanup below run from the worktree; they don't require local main.)
-3. **Archive the OpenSpec change** (design-driven): `openspec archive <slug> --yes` (use `--skip-specs`
+3. **Archive the OpenSpec change** — **NOT for a SLICE delivery** (see the gate above: the change is
+   unfinished and archiving strands the remaining slices). (design-driven): `openspec archive <slug> --yes` (use `--skip-specs`
    only for a doc/infra change with no capability delta). This moves the change to
    `openspec/changes/archive/` and syncs its delta spec into `openspec/specs/<capability>/spec.md`.
    Commit the archive (and push / open a small PR per the repo's merge norms).
@@ -97,7 +103,8 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    (pass it to override). `record` refuses a second stamp for the same issue (pass `--allow-duplicate` to
    override). The live ledger lives on `main`, reachable only via a PR (never a direct push).
    Confirm with `python3 scripts/delivery-telemetry.py lint`.
-5. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
+5. **Set the board to Done + release the claim.** — **NOT Done for a SLICE delivery** (see the gate
+   above: use `Ready`/`In Progress`; Done hides an unfinished issue from dispatch). The PR-merged / issue-closed server-side automation
    should already have moved the Project item to `Status=Done` (it fires even when you merge from the
    phone/web — no `flow-*` run needed); if it hasn't, set it yourself:
    ```bash

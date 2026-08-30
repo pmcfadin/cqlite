@@ -872,6 +872,35 @@ class SliceDeliveryTests(unittest.TestCase):
                 ledger, self._ghfields(tmp, None, closes_issues=[]), "--slice")))
             self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
 
+    def test_window_guard_is_repository_scoped_not_number_scoped(self):
+        """Issue NUMBERS are repository-scoped. A PR closing other-repo#3393 must NOT be read
+        as closing THIS repo's #3393 — that would refuse a genuine slice. Comparison is by
+        URL, GitHub's own global identity; a number-scoped comparison fails this."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            self.assertEqual(0, dt.main(self._rec_argv(
+                ledger, self._ghfields(
+                    tmp, None,
+                    closes_issues=["https://github.com/other/repo/issues/3393"]),
+                "--slice")))
+            self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
+
+    def test_record_refuses_a_malformed_issue_url(self):
+        """issue_url is the left operand of the identity test. Absent or malformed, the
+        comparison silently cannot match -> the window guard is off -> a false slice record.
+        Same class as the closes_issues blocker, one branch over."""
+        for bogus in (_OMIT, None, "", "   ", 0, 3393, [], {}):
+            with self.subTest(issue_url=bogus), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(
+                        ledger, self._ghfields(tmp, None, closes_issues=[_U],
+                                               issue_url=bogus), "--slice"))
+                self.assertIn("issue_url", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
     def test_window_guard_ignores_an_unrelated_closing_reference(self):
         """A PR closing some OTHER issue is not evidence about this one."""
         with tempfile.TemporaryDirectory() as d:
@@ -952,6 +981,24 @@ class SliceDeliveryTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 dt._github_fields(1, 2)
         self.assertIn("closingIssuesReferences", str(cm.exception))
+
+    def test_github_fields_refuses_when_the_issue_reply_omits_url(self):
+        """url joined the required set with the URL-identity migration; if it can go missing
+        the comparison's left operand is absent and the guard is off."""
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z", "closedAt": None,
+                    "labels": [{"name": "P1"}, {"name": "oracle"}], "stateReason": "",
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
+                "closingIssuesReferences": []}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            with self.assertRaises(SystemExit) as cm:
+                dt._github_fields(1, 2)
+        self.assertIn("url", str(cm.exception))
 
     def test_record_refuses_a_malformed_falsy_state_reason(self):
         """`(state_reason or "")` would fold False/0/[] onto the never-closed answer — the
@@ -1392,14 +1439,20 @@ class GhPathTests(unittest.TestCase):
                     "createdAt": "2026-06-01T00:00:00Z",
                     "closedAt": "2026-06-01T02:00:00Z",
                     "labels": [{"name": "P1"}, {"name": "P2"}],  # invariant violation
+                    # complete fixture: without these the missing-field check (#3550) short-
+                    # circuits and this test never reaches the label logic it exists for
+                    "stateReason": "COMPLETED",
+                    "url": "https://github.com/pmcfadin/cqlite/issues/1",
                 }))
             return _FakeProc(json.dumps({
                 "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
                 "closingIssuesReferences": []}))
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as cm:
                 dt._github_fields(1, 2)
+        # assert the LABEL error, not merely that something exited
+        self.assertIn("multiple priority labels", str(cm.exception))
 
     def test_github_fields_design_label_maps(self):
         def fake_run(argv, **kw):
@@ -1427,14 +1480,17 @@ class GhPathTests(unittest.TestCase):
                     "createdAt": "2026-06-01T00:00:00Z",
                     "closedAt": "2026-06-01T02:00:00Z",
                     "labels": [{"name": "P2"}, {"name": "oracle"}, {"name": "design"}],
+                    "stateReason": "COMPLETED",
+                    "url": "https://github.com/pmcfadin/cqlite/issues/1",
                 }))
             return _FakeProc(json.dumps({
                 "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
                 "closingIssuesReferences": []}))
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as cm:
                 dt._github_fields(1, 2)
+        self.assertIn("routing", str(cm.exception))
 
     def test_gh_failure_becomes_clean_systemexit(self):
         import subprocess as _sp
