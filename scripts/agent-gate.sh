@@ -1790,12 +1790,25 @@ _node_leak_lane_note_file() { printf '%s' "$LOG_DIR/node-bindings.leak-lane"; }
 # The note TEXT for a given state, single-sourced so the component, the SUMMARY and the
 # hidden self-test hook can never quote three different sentences. Any unrecognised state
 # is itself reported rather than silently omitted.
-_node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE> — the SAME tokens
-                         # _node_leak_lane_status echoes, plus NO-NODE for the
-                         # toolchain SKIP. One vocabulary, so a state can never
-                         # fall through to the UNKNOWN arm by spelling.
+_node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE|NOT-REACHED|NO-PASSING-TESTS>
+                         # RUN/SKIP-OPTOUT are the SAME tokens
+                         # _node_leak_lane_status echoes; the other three are
+                         # execution outcomes only the component can know. One
+                         # vocabulary, so a state can never fall through to the
+                         # UNKNOWN arm by spelling.
+                         #
+                         # RUN is a MEASUREMENT, not a plan (issue #1465 round 5):
+                         # the component writes NOT-REACHED before it starts and
+                         # only upgrades to RUN after jest's own output reports at
+                         # least one PASSING test in the leaks project. Writing RUN
+                         # up front made the block claim the budgets had run when
+                         # an earlier step had failed (set -e never reached them),
+                         # and would have claimed it for an all-skipped run too
+                         # (jest exits 0 on `Tests: 4 skipped, 4 total`).
   case "$1" in
-    RUN) printf '%s' "node-bindings-leak-lane: RAN (#1465 exception-path/abandoned-iterator leak budgets executed via npm run test:leaks)" ;;
+    RUN) printf '%s' "node-bindings-leak-lane: RAN (#1465 exception-path/abandoned-iterator leak budgets executed via npm run test:leaks; verified by jest reporting >=1 passing test)" ;;
+    NOT-REACHED) printf '%s' "node-bindings-leak-lane: NOT-REACHED — an earlier step of node-bindings (npm ci / npm run build / write-readback-content) failed, so the #1465 leak budgets never executed; this block does NOT validate them" ;;
+    NO-PASSING-TESTS) printf '%s' "node-bindings-leak-lane: NO-PASSING-TESTS — npm run test:leaks exited 0 but jest reported no passing test (an all-skipped or empty run); the #1465 leak budgets did NOT execute and the component FAILs closed" ;;
     SKIP-OPTOUT) printf '%s' "node-bindings-leak-lane: SKIPPED (canonical corpus absent + AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the #1465 exception-path/abandoned-iterator leak budgets did NOT run; this block does NOT validate them (#1465/#2078)" ;;
     NO-NODE) printf '%s' "node-bindings-leak-lane: NOT-RUN (no node/npm on PATH — the whole node-bindings component SKIPped, #1465)" ;;
     *) printf '%s' "node-bindings-leak-lane: UNKNOWN state '$1' (#1465) — treat this block as NOT validating the leak budgets" ;;
