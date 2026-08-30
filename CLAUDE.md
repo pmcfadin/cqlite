@@ -91,7 +91,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
@@ -106,7 +106,11 @@ execute NOWHERE** — not locally, not in CI — because their module-level
 `#![cfg(feature = "observability-testing")]` is off in every lane that runs them (#3375), a gap #2910's tier
 aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
 ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
-however green the gate looks. `experimental` is the remaining known instance (#3373).
+however green the gate looks. `experimental` is **one** remaining instance (#3373) and NOT the only one: in `cqlite-core` the
+crate-level-gated integration targets for `delta-scan` (13) and `observability-testing` (14) are named
+by no `--test` in the gate and execute ZERO tests at `core-tests`' feature set, as do 3 of the 5
+`dhat-heap` ones; the `delta_scan` module's own 39 lib tests run in no gate component either
+(`feature-iso-delta-scan` is `--lib --no-run`), only in the `required`-exempt `ci.yml` (#3522 audit).
 **AND THE SAME REASONING RUNS AT PACKAGE GRANULARITY, WHICH IS WHERE IT WAS COSTLIEST (#3522).**
 `cargo clippy --workspace --all-targets` compiles EVERY workspace member on every full gate, so a
 whole CRATE can be built by every run and execute nothing — and it reads as covered precisely
@@ -127,7 +131,10 @@ convention THROWS. A false rationale in a gate log is worse than none, because i
 next person looking.) The durable question is the same one shape up: for each workspace member, **which component
 EXECUTES it** — recorded, member by member, in `scripts/tests/workspace-test-disposition.txt`
 (`EXECUTED`/`PARTIAL`/`NOT-EXECUTED`, a closed label set enforced under `tooling-tests`), so a new
-crate cannot join the unexecuted set unannounced. That census records completeness and labeling, **not
+crate cannot join the unexecuted set unannounced. Each record also carries a CLASS — `silent` (no
+committed doctrine claims it is covered) vs `contradicts-doctrine` (doctrine says it is and it is not)
+— coupled to the label (`EXECUTED` ⇔ `no-gap`), because a gap our own doctrine denies is a false
+certification and not a backlog item. That census records completeness and labeling, **not
 truth** — deliberately, on #1716's precedent.
 Two corollaries the lanes are built on. **Derive, never curate**: both executing lanes compute their subject
 set from committed source at run time — `legacy-heuristics` its `--test` targets (from cargo metadata plus a
@@ -270,7 +277,15 @@ bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
 test-data/       # Real Cassandra 5.0 SSTables for testing
 tools/           # 7 crates, each with a RECORDED disposition in one of THREE
                  #   categories, pinned by the gate guard
-                 #   scripts/tests/test_tools_crate_disposition.sh (#1716):
+                 #   scripts/tests/test_tools_crate_disposition.sh (#1716).
+                 #   These labels say whether something INVOKES the crate —
+                 #   usually its BINARY — and NOT whether its TESTS execute
+                 #   (#3522). Of the WIRED four only ws0-corpus-gen's tests run
+                 #   in the gate (tooling-tests); cassandra-parity (25+9),
+                 #   sstabledump-validator (17+2) and flight-loadgen (21) have
+                 #   tests that execute NOWHERE, as does MIXED format-validator
+                 #   (8). Per-member record, with the label AND the class:
+                 #   scripts/tests/workspace-test-disposition.txt.
                  #   WIRED   — cassandra-parity, flight-loadgen,
                  #             sstabledump-validator, ws0-corpus-gen.
                  #   UNWIRED — nothing runs them AND nothing depends on them:
@@ -306,9 +321,11 @@ compiled by every workspace build" was false). The `tools/` crates are compiled 
 `-D warnings` no matter their disposition.
 
 **Their unit tests, though, run ONLY when your diff touches their package (#1716).** No CI job and
-no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests never execute —
-but `--lite`'s blast-radius maps a touched path to its package and runs that package's `--lib`
-tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
+no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests execute only
+where something names its package explicitly — `ws0-corpus-gen` under the gate's `tooling-tests`, and
+`cassandra-parity` in the path-filtered, `required`-exempt `cassandra-parity.yml`; for every other
+`tools/` crate they never execute (#3522). But `--lite`'s blast-radius maps a touched path to its
+package and runs that package's `--lib` tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
 made `--lite` run that crate's tests **for the first time**, and one failed —
 `test_hex_dump_formatting` asserted an unseparated `"48656c6c6f"` against a `hexdump -C`-style
 formatter that emits `48 65 6c 6c 6f`, an expectation that could never hold for any input. **Expect
