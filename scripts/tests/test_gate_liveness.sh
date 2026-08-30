@@ -117,6 +117,29 @@ mk_beat() {
   } > "$1"
 }
 
+# bump_beats <path> <run-id> <host> <seconds> — keep advancing beat-seq for <seconds>.
+#
+# A SINGLE-SHOT background writer racing the reader's confirmation window is a timing test: if
+# the subshell is descheduled past the window the advance is missed and the case flips. That
+# produced two intermittent failures here before this helper existed. Bumping REPEATEDLY makes
+# the assertion hold for any scheduling order in which the writer runs at all — the property
+# under test is "the reader notices progress", not "the writer hits a particular instant".
+bump_beats() {
+  local f="$1" rid="$2" host="$3" secs="$4" n=100
+  ( local end=$(( $(date +%s) + secs ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      n=$((n + 1))
+      { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: $rid"; echo "gate-pid: 4242"
+        [ -n "$host" ] && echo "host: $host"
+        echo "interval: 1"; echo "beat-seq: $n"; echo "beat-epoch: $(( $(date +%s) - 99999 ))"
+        echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$f.bump" 2>/dev/null
+      mv -f "$f.bump" "$f" 2>/dev/null
+      sleep 0.5
+    done ) &
+  echo $! >> "$TMP/pids"
+  BUMP_PID=$!
+}
+
 echo "=== section 1: usage (a reader that guesses its subject is worse than one that refuses) ==="
 run_reader;                                   [ "$RC" = 64 ] && ok "1.1 no args => 64"            || bad "1.1 no args => 64" "rc=$RC"
 run_reader --bogus x;                          [ "$RC" = 64 ] && ok "1.2 unknown option => 64"     || bad "1.2 unknown option => 64" "rc=$RC"
@@ -657,30 +680,33 @@ mk_summary "$TMP/skew.txt" run-K "INCOMPLETE (gate did not finish)"
 # A beat that LOOKS ancient by epoch, but whose counter is advancing — i.e. exactly what a
 # clock-skewed live gate produces. A background writer bumps beat-seq while the reader waits.
 mk_beat "$TMP/skew.txt.heartbeat" run-K 99999 1
-( sleep 2
-  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-K"; echo "gate-pid: 4242"
-    echo "interval: 1"; echo "beat-seq: 8"; echo "beat-epoch: $(( $(date +%s) - 99999 ))"
-    echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/skew.txt.heartbeat"
-) &
-adv_pid=$!; echo "$adv_pid" >> "$TMP/pids"
+bump_beats "$TMP/skew.txt.heartbeat" run-K "$(uname -n 2>/dev/null || echo unknown)" 20
 expect_reader "11g.1 ancient epoch but ADVANCING beat-seq => RUNNING (clocks disagree, writer alive)" \
   RUNNING 2 "beat-seq advanced" -- "$TMP/skew.txt"
-wait "$adv_pid" 2>/dev/null || true
+kill "$BUMP_PID" 2>/dev/null; wait "$BUMP_PID" 2>/dev/null || true
 # A beat that is stale AND whose counter does not move is STALLED — and the text must say the
 # decision came from progression, not from the clock comparison.
 mk_beat "$TMP/skew.txt.heartbeat" run-K 99999 1
 expect_reader "11g.2 stale epoch AND static beat-seq => STALLED" STALLED 3 "did NOT advance" -- "$TMP/skew.txt"
 # A counter that advances but under a DIFFERENT run-id is a peer's beat, not ours.
 mk_beat "$TMP/skew.txt.heartbeat" run-K 99999 1
-( sleep 2
-  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: SOMEONE-ELSE"; echo "gate-pid: 4242"
-    echo "interval: 1"; echo "beat-seq: 99"; echo "beat-epoch: $(date +%s)"
-    echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/skew.txt.heartbeat"
-) &
-adv2=$!; echo "$adv2" >> "$TMP/pids"
-expect_reader "11g.3 progression under a FOREIGN run-id does not count as ours" \
-  STALLED 3 "did NOT advance" -- "$TMP/skew.txt"
-wait "$adv2" 2>/dev/null || true
+# Progression must only count when it belongs to OUR run. Expressed structurally plus a
+# behavioural half, because the obvious behavioural form is inherently a sequencing test: to
+# have the reader read OURS first and a FOREIGN beat second, the writer must fire strictly
+# between the two reads — and a writer that fires too early makes the first read foreign, which
+# is a different (also correct) verdict. Asserting the requirement at the source is exact.
+if grep -q '\[ "\$_rid2" = "\$HB_RUN_ID" \]' "$READER"; then
+  ok "11g.3 the progression check requires the re-read to be the SAME run"
+else
+  bad "11g.3 the progression check requires the re-read to be the SAME run" "run-id equality not required"
+fi
+# Behavioural half: a beat that is wholly a peer's is refused outright, never credited.
+mk_summary "$TMP/peer2.txt" run-K "INCOMPLETE (gate did not finish)"
+bump_beats "$TMP/peer2.txt.heartbeat" SOMEONE-ELSE "$(uname -n 2>/dev/null || echo unknown)" 8
+sleep 1
+expect_reader "11g.3b a wholly foreign beat is refused, not credited as progress" \
+  UNKNOWN 4 "run-id-disagree" -- "$TMP/peer2.txt"
+kill "$BUMP_PID" 2>/dev/null; wait "$BUMP_PID" 2>/dev/null || true
 # The confirmation wait must be bounded regardless of what the artifact claims.
 if grep -qE '_confirm_wait"? -le 65' "$READER"; then
   ok "11g.4 the confirmation wait is hard-capped (a hostile interval cannot stretch it)"
@@ -718,15 +744,10 @@ expect_reader "11g.7 FRESH epoch from an unproven clock domain + static counter 
   STALLED 3 "clock-domain UNPROVEN" -- "$TMP/dom.txt"
 # Same, but the counter advances: alive, decided without comparing clocks.
 mk_beat "$TMP/dom.txt.heartbeat" run-D 0 1 &&   sed 's/^host: .*/host: someotherbox/' "$TMP/dom.txt.heartbeat" > "$TMP/dom.tmp" && mv "$TMP/dom.tmp" "$TMP/dom.txt.heartbeat"
-( sleep 2
-  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-D"; echo "gate-pid: 4242"
-    echo "host: someotherbox"; echo "interval: 1"; echo "beat-seq: 77"
-    echo "beat-epoch: $(date +%s)"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/dom.txt.heartbeat"
-) &
-dom_pid=$!; echo "$dom_pid" >> "$TMP/pids"
+bump_beats "$TMP/dom.txt.heartbeat" run-D someotherbox 20
 expect_reader "11g.8 unproven clock domain + ADVANCING counter => RUNNING" \
   RUNNING 2 "beat-seq advanced" -- "$TMP/dom.txt"
-wait "$dom_pid" 2>/dev/null || true
+kill "$BUMP_PID" 2>/dev/null; wait "$BUMP_PID" 2>/dev/null || true
 # A beat with NO host line cannot prove a shared clock either.
 mk_beat "$TMP/dom.txt.heartbeat" run-D 0 1 &&   grep -v '^host: ' "$TMP/dom.txt.heartbeat" > "$TMP/dom.tmp" && mv "$TMP/dom.tmp" "$TMP/dom.txt.heartbeat"
 expect_reader "11g.9 a beat with NO host line => clock domain unproven" \
@@ -737,6 +758,42 @@ if grep -q '\[ "\$_shared_clock" = yes \] && \[ "\$AGE" -le "\$STALE_AFTER" \]' 
 else
   bad "11g.10 the epoch shortcut is gated on a proven shared clock domain" "gate not found"
 fi
+
+echo "=== section 11h: marker dialect must MATCH and elements must be ORDERED (job 172) ==="
+# Counting "some opener" and "some closer" independently accepted a LITE opener closed by a
+# DELTA marker, and imposed no ordering at all — so a RESULT line sitting BEFORE the opener
+# passed too. Both were verified reporting COMPLETE before the fix. Both are what an interleaved
+# write produces, which is the case these checks exist for. The three dialects are kept DISTINCT
+# by CLAUDE.md precisely so no block can be pasted as another.
+for pair in "LITE:DELTA" "DELTA:LITE" ":LITE" "LITE:"; do
+  o="${pair%%:*}"; c="${pair##*:}"
+  ot="==== AGENT-GATE${o:+ $o} SUMMARY ===="
+  ct="==== END AGENT-GATE${c:+ $c} SUMMARY ===="
+  f="$TMP/mix-${o:-FULL}-${c:-FULL}.txt"
+  { echo "$ot"; echo "run-id: r1"; echo "RESULT: PASS"; echo "$ct"; } > "$f"
+  expect_reader "11h.1 opener '${o:-FULL}' + closer '${c:-FULL}' => UNKNOWN (dialect mismatch)" \
+    UNKNOWN 4 "summary-marker-dialect-mismatch" -- "$f"
+done
+# CONTROLS: every MATCHED dialect must still be accepted, or the check is just a refusal.
+for d in "" " LITE" " DELTA"; do
+  f="$TMP/match-${d:- FULL}.txt"; f="${f// /_}"
+  { echo "==== AGENT-GATE${d} SUMMARY ===="; echo "run-id: r1"; echo "RESULT: PASS"
+    echo "==== END AGENT-GATE${d} SUMMARY ===="; } > "$f"
+  expect_reader "11h.2 control: matched '${d:- (full)}' dialect => COMPLETE" COMPLETE 0 "" -- "$f"
+done
+# Ordering, both directions.
+{ echo "RESULT: PASS"; echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: r1"
+  echo "==== END AGENT-GATE SUMMARY ===="; } > "$TMP/ord1.txt"
+expect_reader "11h.3 RESULT before the opener => UNKNOWN (out of order)" \
+  UNKNOWN 4 "summary-out-of-order" -- "$TMP/ord1.txt"
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: r1"
+  echo "==== END AGENT-GATE SUMMARY ===="; echo "RESULT: PASS"; } > "$TMP/ord2.txt"
+expect_reader "11h.4 RESULT after the closer => UNKNOWN (out of order)" \
+  UNKNOWN 4 "summary-out-of-order" -- "$TMP/ord2.txt"
+{ echo "run-id: r1"; echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: PASS"
+  echo "==== END AGENT-GATE SUMMARY ===="; } > "$TMP/ord3.txt"
+expect_reader "11h.5 run-id outside the block => UNKNOWN (out of order)" \
+  UNKNOWN 4 "summary-out-of-order" -- "$TMP/ord3.txt"
 
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
 # The same shape appeared THREE times in this change: the default /tmp artifact names, the

@@ -171,6 +171,24 @@ if [ -z "${PRIVDIR:-}" ]; then
   }
 fi
 ENV_SCRIPT="$PRIVDIR/gate-env.sh"
+# gate-env.sh holds the WHOLE exported environment, tokens included (roborev job 172, Medium).
+# The first version never deleted it, so every launch left a persistent 0600 copy of this
+# session's credentials in an undisclosed directory — on success AND on every failure path.
+# Measured while fixing this: 51 such files had accumulated in /tmp during development. It
+# needs no attacker to write anything; it is a credential-at-rest leak of our own making.
+#
+# Removed unconditionally at exit. By then either the unit is proven running (so the wrapper
+# already `exec`d and no longer reads the file) or we are failing and have stopped the unit.
+# The private directory goes too, but only when it holds nothing else: with DEFAULT paths it
+# also holds the summary and log the caller needs, and deleting those would be worse than the
+# leak. `rmdir` gives exactly that semantics for free — it only succeeds on an empty directory.
+# shellcheck disable=SC2317  # runs via the EXIT trap
+_cleanup_env() {
+  [ -n "${ENV_SCRIPT:-}" ] && rm -f "$ENV_SCRIPT" 2>/dev/null
+  [ -n "${PRIVDIR:-}" ] && rmdir "$PRIVDIR" 2>/dev/null
+  return 0
+}
+trap _cleanup_env EXIT
 ( umask 077; : > "$ENV_SCRIPT" ) || {
   echo "gate-detached: cannot create $ENV_SCRIPT" >&2; exit 1
 }
@@ -383,13 +401,17 @@ while [ "$_i" -lt 40 ]; do
   sleep 0.5
   _i=$((_i + 1))
 done
-# ...and the same binding applies to this fallback: a terminal verdict only counts if it
-# belongs to the run WE just launched. A stale PASS left at that path from an earlier run would
-# otherwise excuse an unmonitorable launch — the identical mistake, one branch over.
-if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ] \
-   && grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$SUMMARY" 2>/dev/null \
-   && grep -q "^run-id: $_new_rid\$" "$SUMMARY" 2>/dev/null; then
-  _hb_seen=1
+# A gate that already reached a terminal verdict needs no heartbeat — but deciding THAT is
+# exactly what gate-liveness.sh does, so ASK IT rather than re-implement its checks here
+# (roborev job 172, Medium). The first version grepped `^RESULT: (PASS|FAIL|...)` with no end
+# anchor and no framing validation, so `RESULT: PASSENGER` or a truncated block reported
+# SUCCESS from the launcher while the reader would answer UNKNOWN — the same prefix-matching
+# defect round 1 found in the reader, reproduced here as a SECOND implementation of the same
+# grammar. One implementation, one grammar; the `--run-id` binding comes along for free.
+if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ]; then
+  if bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1; then
+    _hb_seen=1   # exit 0 == COMPLETE, and only for THIS run
+  fi
 fi
 if [ "$_hb_seen" -ne 1 ]; then
   systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
@@ -403,6 +425,11 @@ if [ "$_hb_seen" -ne 1 ]; then
   exit 1
 fi
 
+# The advertised command carries --run-id (we KNOW it, and this script tells everyone else to
+# pass it whenever they do — a peer reusing the summary path would otherwise be mistaken for
+# this launch) and is shell-escaped, so a path containing a space or a metacharacter stays
+# valid (roborev job 172, Medium).
+POLL_CMD=$(printf 'bash %q %q --run-id %q' "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" "$_new_rid")
 cat <<EOF
 ==== GATE DETACHED (#3473) ====
 unit:        $UNIT
@@ -416,7 +443,7 @@ this gate is in its OWN cgroup — it survives this session exiting, crashing or
 recycled. It does NOT skip the #1825 slot queue, so it may sit in 'waiting for gate
 slot' first.
 poll it with (never read the gate log):
-  bash scripts/gate-liveness.sh $SUMMARY
+  $POLL_CMD
 stop it with:
   systemctl --user stop $UNIT
 ==== END GATE DETACHED ====

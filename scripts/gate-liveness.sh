@@ -198,17 +198,52 @@ SUM_TEXT=$(_slurp_settled "$SUMMARY")
 # had no right to trust. More than one of any element means the file holds fragments of more
 # than one write, and then NOTHING in it can be attributed to a single run — including the
 # run-id used moments later to decide whether this artifact is even ours.
-_n_start=$(printf '%s
-' "$SUM_TEXT" | grep -cE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
-_n_end=$(printf '%s
-' "$SUM_TEXT" | grep -cE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
-_n_res=$(printf '%s
-' "$SUM_TEXT" | grep -c '^RESULT: ')
-_n_rid=$(printf '%s
-' "$SUM_TEXT" | grep -c '^run-id: ')
+_n_start=$(printf '%s\n' "$SUM_TEXT" | grep -cE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
+_n_end=$(printf '%s\n' "$SUM_TEXT" | grep -cE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
+_n_res=$(printf '%s\n' "$SUM_TEXT" | grep -c '^RESULT: ')
+_n_rid=$(printf '%s\n' "$SUM_TEXT" | grep -c '^run-id: ')
 if [ "$_n_start" -gt 1 ] || [ "$_n_end" -gt 1 ] || [ "$_n_res" -gt 1 ] || [ "$_n_rid" -gt 1 ]; then
   verdict UNKNOWN 4 "summary-not-a-single-block; found $_n_start openers / $_n_rid run-id / $_n_res RESULT / $_n_end closers — more than one of any means the file holds fragments of more than one write, so no field can be attributed to a single run"
 fi
+# The closer must MATCH THE OPENER'S DIALECT, and the elements must be IN ORDER (roborev job
+# 172, Medium). Counting "some opener" and "some closer" independently accepted a LITE opener
+# closed by a DELTA marker, and imposed no ordering — so a `RESULT:` line sitting BEFORE the
+# opener also passed. Both were verified reporting COMPLETE before this check existed, and both
+# are exactly what an interleaved write produces, which is the case these checks are for.
+#
+# The three dialects are the gate's own (full / --lite / --delta) and CLAUDE.md keeps them
+# DISTINCT so no block can ever be pasted as another; a reader that accepts a mismatched pair
+# throws that distinction away.
+_open_line=$(printf '%s\n' "$SUM_TEXT" | grep -nE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$' | head -1)
+_open_ln="${_open_line%%:*}"
+_open_txt="${_open_line#*:}"
+_dialect="${_open_txt#'==== AGENT-GATE'}"
+_dialect="${_dialect%' SUMMARY ===='}"
+_want_close="==== END AGENT-GATE${_dialect} SUMMARY ===="
+_close_ln=$(printf '%s\n' "$SUM_TEXT" | grep -nxF "$_want_close" | head -1 | cut -d: -f1)
+# NOT a verdict here: these facts are ENFORCED on the terminal-verdict path below. An
+# INCOMPLETE block deliberately falls through to the heartbeat even when truncated — that is
+# the conservative direction and the common "caught mid-write" case, and turning it into
+# UNKNOWN would make a perfectly live gate unreadable. Only a TERMINAL verdict, which we would
+# otherwise believe outright, requires the framing to be whole and ordered.
+_res_ln=$(printf '%s\n' "$SUM_TEXT" | grep -n '^RESULT: ' | head -1 | cut -d: -f1)
+_rid_ln=$(printf '%s\n' "$SUM_TEXT" | grep -n '^run-id: ' | head -1 | cut -d: -f1)
+# Ordering: opener first, closer last, RESULT and (when present) run-id between them. A missing
+# run-id is tolerated here and judged on its own terms further down.
+_order_bad=""
+if [ -n "$_res_ln" ]; then
+  if [ "$_res_ln" -lt "$_open_ln" ]; then
+    _order_bad="RESULT (line $_res_ln) precedes the opener (line $_open_ln)"
+  elif [ "$_res_ln" -gt "$_close_ln" ]; then
+    _order_bad="RESULT (line $_res_ln) follows the closer (line $_close_ln)"
+  fi
+fi
+if [ -z "$_order_bad" ] && [ -n "$_rid_ln" ]; then
+  if [ "$_rid_ln" -lt "$_open_ln" ] || [ "$_rid_ln" -gt "$_close_ln" ]; then
+    _order_bad="run-id (line $_rid_ln) lies outside the block (lines $_open_ln..$_close_ln)"
+  fi
+fi
+
 SUM_RUN_ID=$(_field "$SUM_TEXT" run-id)
 # #2874 reader contract: a block bearing a FOREIGN run-id is a peer's, and that holds
 # for a PASS just as much as for an INCOMPLETE. Refuse to answer about someone else's
@@ -273,8 +308,16 @@ case "$RESULT_TOKEN" in
     if ! _has_line "$_START_RE"; then
       verdict UNKNOWN 4 "summary-no-start-marker; '$RESULT_LINE' is present but the block has no '==== AGENT-GATE … SUMMARY ====' opener — this is not a complete gate summary"
     fi
-    if ! _has_line "$_END_RE"; then
+    # Distinguish the two shapes rather than blaming the wrong one: NO closer at all is a
+    # truncated write; a closer of a DIFFERENT dialect is two fragments spliced together.
+    if [ "$_n_end" -eq 0 ]; then
       verdict UNKNOWN 4 "summary-truncated; '$RESULT_LINE' is present but the closing '==== END AGENT-GATE … SUMMARY ====' marker is not — the write was cut short (kill or ENOSPC) and will never complete, so this verdict was never published"
+    fi
+    if [ -z "$_close_ln" ]; then
+      verdict UNKNOWN 4 "summary-marker-dialect-mismatch; the block opens with '$_open_txt' but its closer is a DIFFERENT mode (no matching '$_want_close') — an opener and closer from different modes are fragments of two writes, not one block"
+    fi
+    if [ -n "$_order_bad" ]; then
+      verdict UNKNOWN 4 "summary-out-of-order; $_order_bad — these are not one ordered block, so this verdict cannot be attributed to a single write"
     fi
     verdict COMPLETE 0 "the summary carries a terminal verdict — $RESULT_VALUE" ;;
   INCOMPLETE)

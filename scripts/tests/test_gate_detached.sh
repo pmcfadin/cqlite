@@ -393,10 +393,14 @@ fi
 # A gate that reaches a TERMINAL VERDICT without us observing a beat must NOT be refused:
 # preflight refusals and very short --only runs legitimately finish that fast, and stopping
 # them would be a false negative that kills a perfectly good gate.
-if grep -q "RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' \"\$SUMMARY\"" "$LAUNCHER"; then
-  ok "4b.21 an early terminal verdict is accepted instead of refused"
+# The property is unchanged; its implementation moved from a local grep to a delegated call to
+# gate-liveness.sh (job 172), so this assert follows it there. Both halves must hold: the guard
+# sits in the no-heartbeat fallback, and it is bound to the run we launched.
+if grep -q 'if \[ "\$_hb_seen" -ne 1 \] && \[ -n "\$_new_rid" \]; then' "$LAUNCHER" \
+   && grep -q 'gate-liveness.sh" "\$SUMMARY" --run-id "\$_new_rid"' "$LAUNCHER"; then
+  ok "4b.21 an early terminal verdict is accepted (via the delegated, run-bound check)"
 else
-  bad "4b.21 an early terminal verdict is accepted instead of refused" "guard not found"
+  bad "4b.21 an early terminal verdict is accepted (via the delegated, run-bound check)" "guard not found"
 fi
 # The gate's own re-exec markers must not be forwarded (job 166, Low): they would claim
 # wrapped-ness the new unit does not have, so it would skip nice AND report itself wrapped.
@@ -420,9 +424,12 @@ else
   bad "4b.24 the heartbeat must carry the NEW run-id" "binding not found"
 fi
 # ...including the terminal-verdict fallback, which is the same mistake one branch over.
-_fb=$(grep -c 'run-id: \$_new_rid' "$LAUNCHER")
-[ "$_fb" -ge 2 ] && ok "4b.25 the terminal-verdict fallback is bound to the new run too ($_fb sites)" \
-                 || bad "4b.25 the terminal-verdict fallback is bound to the new run" "only $_fb binding site(s)"
+# Both binding sites must exist: the heartbeat match (`^run-id: $_new_rid`) and the delegated
+# terminal check (`--run-id "$_new_rid"`). Counting only the first form missed the second once
+# delegation replaced the launcher's own grep.
+_fb=$(grep -cE 'run-id: \$_new_rid|--run-id "\$_new_rid"' "$LAUNCHER")
+[ "$_fb" -ge 2 ] && ok "4b.25 both the heartbeat and the terminal check are bound to the new run ($_fb sites)" \
+                 || bad "4b.25 both the heartbeat and the terminal check are bound to the new run" "only $_fb binding site(s)"
 # BEHAVIOURAL: a stale heartbeat sitting at the destination, in a directory the gate cannot
 # write, must still be refused — the stale beat must not stand in for a real one.
 if [ "$(id -u)" != 0 ]; then
@@ -485,6 +492,65 @@ out=$(bash "$LAUNCHER" --summary "$TMP/ls2.txt" --log "$TMP/log-link" -- --only 
 [ "$(cat "$lnk")" = "do not clobber me" ] \
   && ok "4b.32 ...and the symlink target is untouched" || bad "4b.32 the symlink target was clobbered" "$(cat "$lnk")"
 rm -f "$TMP/log-link" "$lnk"
+
+# roborev job 172: the launcher must DELEGATE the terminal-verdict decision to the reader, not
+# re-implement its grammar. Its own version grepped `^RESULT: (PASS|FAIL|...)` with no end anchor
+# and no framing check, so `RESULT: PASSENGER` or a truncated block made the LAUNCHER report
+# success while the reader would answer UNKNOWN — round 1's prefix-matching defect, reproduced in
+# a second implementation.
+if grep -q 'gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid"' "$LAUNCHER"; then
+  ok "4b.33 the launcher delegates the terminal-verdict decision to gate-liveness.sh"
+else
+  bad "4b.33 the launcher delegates the terminal-verdict decision to gate-liveness.sh" "not found"
+fi
+body=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
+if printf '%s\n' "$body" | grep -qE "RESULT: \(PASS\|FAIL"; then
+  bad "4b.34 no second copy of the verdict grammar remains in the launcher" "still grepping RESULT itself"
+else
+  ok "4b.34 no second copy of the verdict grammar remains in the launcher"
+fi
+# roborev job 172: the env script holds tokens and was never deleted — 51 copies had piled up in
+# /tmp during development. Needs no attacker to write anything; a credential-at-rest leak.
+if grep -q '_cleanup_env' "$LAUNCHER" && grep -q "trap _cleanup_env EXIT" "$LAUNCHER"; then
+  ok "4b.35 the env script is removed by an EXIT trap (every path, success and failure)"
+else
+  bad "4b.35 the env script is removed by an EXIT trap" "no unconditional cleanup"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  before=$(ls -d "${TMPDIR:-/tmp}"/cqlite-gate-*/ 2>/dev/null | wc -l)
+  cs="$TMP/clean-summary.txt"
+  out=$(bash "$LAUNCHER" --summary "$cs" --log "$TMP/clean.log" -- --only file-size 2>&1)
+  cu=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$cu" ] && echo "$cu" >> "$UNITS_FILE"
+  leftover=$(ls "${TMPDIR:-/tmp}"/cqlite-gate-*/gate-env.sh 2>/dev/null | wc -l)
+  [ "$leftover" -eq 0 ] && ok "4b.36 a successful launch leaves NO env script behind" \
+                        || bad "4b.36 a successful launch leaves NO env script behind" "$leftover found"
+  # ...and a REFUSED launch must not leave one either.
+  bash "$LAUNCHER" --summary /nonexistent-dir-3473/x.txt --log "$TMP/ref.log" -- --only file-size >/dev/null 2>&1
+  leftover2=$(ls "${TMPDIR:-/tmp}"/cqlite-gate-*/gate-env.sh 2>/dev/null | wc -l)
+  [ "$leftover2" -eq 0 ] && ok "4b.37 a REFUSED launch leaves NO env script behind" \
+                         || bad "4b.37 a REFUSED launch leaves NO env script behind" "$leftover2 found"
+else
+  skipc "4b.36-4b.37 env script cleanup" "no working systemd-run --user"
+fi
+# roborev job 172: the advertised poll command must carry --run-id (the launcher KNOWS it) and be
+# shell-escaped, or it is wrong for a path with a space and can be fooled by a peer's artifacts.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  sp="$TMP/with space.txt"
+  out=$(bash "$LAUNCHER" --summary "$sp" --log "$TMP/sp.log" -- --only file-size 2>&1)
+  su=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$su" ] && echo "$su" >> "$UNITS_FILE"
+  pc=$(printf '%s' "$out" | grep -A1 'poll it with' | tail -1)
+  printf '%s' "$pc" | grep -q -- '--run-id' \
+    && ok "4b.38 the advertised poll command carries --run-id" \
+    || bad "4b.38 the advertised poll command carries --run-id" "$pc"
+  # It must be RUNNABLE as printed, for a path containing a space.
+  if eval "$pc" >/dev/null 2>&1 || [ $? -le 4 ]; then
+    ok "4b.39 the printed command is runnable verbatim for a path with a space"
+  else
+    bad "4b.39 the printed command is runnable verbatim for a path with a space" "$pc"
+  fi
+else
+  skipc "4b.38-4b.39 advertised poll command" "no working systemd-run --user"
+fi
 
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"

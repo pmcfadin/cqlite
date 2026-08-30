@@ -317,10 +317,17 @@ sparse hole, then A's tail; a reader could pair one run's `run-id:` with another
 and end marker. That is a false `COMPLETE`, the worst verdict this script can give. It was
 verified by performing the interleaving, not reasoned about.
 
-Three things keep it out: the mandatory **end-marker** check rejects a truncated prefix; a
+Five things keep it out: the mandatory **end-marker** check rejects a truncated prefix; a
 **NUL byte** anywhere is rejected, which is the fingerprint of the sparse hole a blend leaves;
-and **more than one** opener / `run-id:` / `RESULT:` / closer is rejected before any field is
-read. The reader also re-reads **once** when framing is incomplete, resolving the common
+**more than one** opener / `run-id:` / `RESULT:` / closer is rejected before any field is read;
+the closer must **match the opener's dialect** (a LITE opener closed by a DELTA marker is two
+fragments, and the three dialects are kept distinct precisely so no block can pass as another);
+and the elements must be **ordered** — opener, then `run-id:` and `RESULT:`, then closer.
+
+Those last two are enforced only where a **terminal verdict** would otherwise be believed
+outright. An `INCOMPLETE` block deliberately falls through to the heartbeat even when truncated:
+that is the conservative direction and the common "caught mid-write" case, and rejecting it
+would make a perfectly live gate unreadable. The reader also re-reads **once** when framing is incomplete, resolving the common
 "caught mid-write" case; a permanently truncated artifact still reports `UNKNOWN`.
 
 **Residual, stated rather than papered over:** a blend that lands on no hole *and* produces a
@@ -372,7 +379,20 @@ is a check-then-create, so a symlink planted in the microsecond window is not ca
 default log path is unguessable inside a 0700 mkdtemp, so this only concerns a caller-chosen
 path in a shared directory).
 
-### The forwarded environment never rides in `argv`
+### The launcher owns no second copy of the verdict grammar
+
+The launcher needs to know whether a gate already reached a terminal verdict (a preflight
+refusal or a very short `--only` run finishes before any beat). It asks `gate-liveness.sh
+--run-id <this run>` and accepts only exit 0. Its own earlier version grepped
+`^RESULT: (PASS|FAIL|…)` with no end anchor and no framing validation, so `RESULT: PASSENGER` or
+a truncated block made the **launcher** report success while the reader would answer `UNKNOWN` —
+the prefix-matching defect from the first review round, reproduced in a second implementation of
+the same grammar. One implementation, one grammar; the run-binding comes along for free.
+
+The command the launcher advertises for polling is shell-escaped and carries `--run-id`, since
+the launcher knows it and this document tells everyone else to pass it whenever they do.
+
+### The forwarded environment never rides in `argv`, and does not outlive the launch
 
 A transient unit inherits none of the caller's environment, so it has to be carried across — but
 `systemd-run --setenv=NAME=VALUE` puts every value on a command line, and `/proc/<pid>/cmdline`
@@ -384,11 +404,17 @@ wrong — an `EnvironmentFile` approach was measured returning *empty* values an
 only the script path appears in `argv`. Verified end to end: a probe variable reaches the unit's
 environment and appears in no process command line.
 
+That file is **removed by an unconditional `EXIT` trap**, on success and on every refusal path.
+The first version never deleted it, so each launch left a persistent copy of the session's
+credentials in an undisclosed directory — 51 had accumulated in `/tmp` during development of this
+change. The private directory is removed with `rmdir`, which succeeds only when empty, so a
+default-path launch keeps the summary and log the caller still needs.
+
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (127 cases) and
-`scripts/tests/test_gate_detached.sh` (61 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (138 cases) and
+`scripts/tests/test_gate_detached.sh` (68 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine
