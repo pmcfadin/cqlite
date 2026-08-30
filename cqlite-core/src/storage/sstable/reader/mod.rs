@@ -35,6 +35,9 @@ mod partition_locator;
 // split out of `partition_lookup` for the campsite source-size rule (#1116).
 pub(crate) mod partition_successor;
 // Positional (`pread`-style) point-read backends (issue #1573, Epic C / C2).
+// Reader-reported open-descriptor accounting for `cqlite.reader.fds.open`
+// (issue #1707): an RAII guard stored beside each handle CQLite really opens.
+mod fd_gauge;
 mod read_at;
 // Concurrency scenarios for the ReadAt point-read migration (issue #1573).
 #[cfg(test)]

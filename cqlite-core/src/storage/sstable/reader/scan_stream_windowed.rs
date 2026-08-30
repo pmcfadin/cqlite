@@ -431,6 +431,11 @@ impl SSTableReader {
         // driver — I/O feed, blocking parse, join, backpressure — is identical for
         // both; only the forwarder arm differs.
         out: WindowedOut,
+        // This scan operation's read-PHASE accumulator (issue #1707), owned by the
+        // caller's `ReadOpMeter`, or `None` when the read is not metered. Propagated
+        // EXPLICITLY into each spawned half below: thread-locals are not inherited
+        // across a spawn, and io/decompress/decode all happen on those threads.
+        phase_sink: Option<Arc<crate::observability::ReadPhaseTimings>>,
     ) -> Result<()> {
         // Admission control (issue #1594, F4) is applied by the CALLER at
         // top-level scan-OPERATION granularity, NOT here per sub-scan: a direct
@@ -503,7 +508,11 @@ impl SSTableReader {
         // Detached-blocking-work marker; BEFORE the spawn so a queued task is not
         // counted as zero. Full rationale on `BlockingScanTaskGuard` (issue #3384).
         let parse_inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
+        let parse_phases = phase_sink.clone();
         let parse_task = tokio::task::spawn_blocking(move || {
+            // Issue #1707: install this scan's phase sink on the PARSE thread, so the
+            // per-partition decode seam inside `drain_scan_window` accumulates into it.
+            let _phases = crate::observability::read_phase::install(parse_phases);
             let _inflight = parse_inflight;
             reader.drain_scan_window_blocking(ctx, raw_rx, batch_tx, task_io_failed)
         });
@@ -557,6 +566,7 @@ impl SSTableReader {
             raw_tx,
             &io_failed,
             max_compressed_length,
+            phase_sink,
         )
         .await;
         // `cursor` is retained in the signature for the caller's data-section-start
@@ -631,11 +641,17 @@ impl SSTableReader {
         raw_tx: mpsc::Sender<bytes::Bytes>,
         io_failed: &Arc<AtomicBool>,
         max_compressed_length: usize,
+        // This scan's read-PHASE accumulator (issue #1707), installed on the feed
+        // thread below so the io + decompress seams reach it.
+        phase_sink: Option<Arc<crate::observability::ReadPhaseTimings>>,
     ) -> Option<Error> {
         let io_failed_feed = Arc::clone(io_failed);
         // Registered BEFORE the spawn — see the parse half (issue #3384).
         let feed_inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
         let feed = tokio::task::spawn_blocking(move || -> Option<Error> {
+            // Issue #1707: the io read AND the decompress both physically happen on
+            // THIS thread, so this is where the scan's phase sink must be installed.
+            let _phases = crate::observability::read_phase::install(phase_sink);
             let _inflight = feed_inflight;
             // Panic/early-exit guard (roborev finding, issue #1593). `raw_tx` is
             // captured (moved) into this closure and drops when the closure
@@ -925,36 +941,45 @@ impl SSTableReader {
             // at the end of this scope (loop iteration), restoring the prior
             // (`None`) state before the next chunk's refill.
             let _borrow_guard = ActiveWindowGuard::install(window);
-            let step = parser.parse_one_partition_with_timestamps(
-                window.as_slice(),
-                ctx.schema.as_ref(),
-                self,
-                at_final_chunk,
-                &mut |(_entry_table_id, key, value, _ts)| {
-                    // Issue #1578: this stitching path deliberately does NOT filter
-                    // by `table_ids_match` — it mirrors the authoritative
-                    // materializing `sequential_scan` stitch path, which skips it
-                    // because the nb parser may report header-default table_ids.
-                    // Applying it here dropped EVERY row of an nb SSTable whose parsed
-                    // table_id diverged from the query (e.g. CQLite-written output).
-                    if let Some(start) = ctx.start_key.as_ref() {
-                        if &key < start {
+            // decode PHASE (issue #1707): ONE accumulation per PARTITION parse, and
+            // the block expression scoping the timer to the PARSE CALL ALONE is
+            // load-bearing — see `observability::read_phase`, "Why the decode timer
+            // is scoped to the parse call".
+            let step = {
+                let _decode_phase = crate::observability::read_phase::scoped(
+                    crate::observability::ReadPhase::Decode,
+                );
+                parser.parse_one_partition_with_timestamps(
+                    window.as_slice(),
+                    ctx.schema.as_ref(),
+                    self,
+                    at_final_chunk,
+                    &mut |(_entry_table_id, key, value, _ts)| {
+                        // Issue #1578: this stitching path deliberately does NOT filter
+                        // by `table_ids_match` — it mirrors the authoritative
+                        // materializing `sequential_scan` stitch path, which skips it
+                        // because the nb parser may report header-default table_ids.
+                        // Applying it here dropped EVERY row of an nb SSTable whose parsed
+                        // table_id diverged from the query (e.g. CQLite-written output).
+                        if let Some(start) = ctx.start_key.as_ref() {
+                            if &key < start {
+                                return Ok(std::ops::ControlFlow::Continue(()));
+                            }
+                        }
+                        if let Some(end) = ctx.end_key.as_ref() {
+                            if &key > end {
+                                return Ok(std::ops::ControlFlow::Continue(()));
+                            }
+                        }
+                        // Suppress row tombstones from user-facing scan output (#505).
+                        if !self.filter_tombstone(&value) {
                             return Ok(std::ops::ControlFlow::Continue(()));
                         }
-                    }
-                    if let Some(end) = ctx.end_key.as_ref() {
-                        if &key > end {
-                            return Ok(std::ops::ControlFlow::Continue(()));
-                        }
-                    }
-                    // Suppress row tombstones from user-facing scan output (#505).
-                    if !self.filter_tombstone(&value) {
-                        return Ok(std::ops::ControlFlow::Continue(()));
-                    }
-                    scratch.push((key, value));
-                    Ok(std::ops::ControlFlow::Continue(()))
-                },
-            )?;
+                        scratch.push((key, value));
+                        Ok(std::ops::ControlFlow::Continue(()))
+                    },
+                )?
+            };
 
             // Record whether this partition forced `scratch` to (re)allocate its
             // backing store. With the hoist this happens only while the buffer

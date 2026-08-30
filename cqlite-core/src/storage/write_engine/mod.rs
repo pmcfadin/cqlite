@@ -80,10 +80,13 @@ pub(crate) mod durability;
 mod maintenance;
 #[cfg(feature = "write-support")]
 mod stats;
+// WAL size + replay-duration observability gauges (issue #1707), in a sibling file
+// per the campsite rule (#1116).
 #[cfg(feature = "write-support")]
 mod sweep;
 #[cfg(all(test, feature = "write-support"))]
 pub(crate) mod test_support;
+mod wal_gauges;
 // Issue #1625: honest memtable hard-limit admission tests live in a sibling
 // module to avoid growing the already-oversized `mod.rs` (epic #1116/#1135).
 #[cfg(all(test, feature = "write-support"))]
@@ -552,6 +555,17 @@ impl WriteEngine {
 
         // Initialize WAL
         let wal_path = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        // WAL RECOVERY duration (issue #1707). The timer starts HERE, BEFORE the
+        // open, not at the `replay_each` call below: `open_existing` already reads
+        // the whole log once, running a full CRC validation scan
+        // (`scan_valid_prefix`) plus any torn-tail trim, so a large WAL is read
+        // TWICE and a timer started after the open would report only the second
+        // pass. This metric exists to answer "why was startup slow?", and on a large
+        // or corrupt-tail log the validation scan is the dominant cost — excluding
+        // it would understate precisely the case the metric was created to expose.
+        // Recovery happens EXACTLY ONCE per engine open. The fresh-WAL branch is
+        // inside the window too; creating an empty log is honestly ~0s of recovery.
+        let recovery_started = std::time::Instant::now();
         let mut wal = if wal_path.exists() {
             // Recover from existing WAL
             WriteAheadLog::open_existing(&wal_path)?
@@ -602,6 +616,15 @@ impl WriteEngine {
             }
             Ok(())
         })?;
+        // Emitted UNCONDITIONALLY, including the 0-entry case: a fresh WAL with
+        // nothing to recover genuinely took ~0s, and that IS a measurement (the
+        // #2314 rule forbids inventing a value nobody took, not reporting a real one
+        // that is small). Covers the WHOLE recovery window opened above — validation
+        // scan plus replay — which is why the metric is `cqlite.wal.recovery.duration`
+        // and not `…replay…`. Recorded BEFORE the lossy-recovery branch below so a
+        // CORRUPT-WAL open, which is exactly when recovery latency matters most,
+        // still reports the time it spent.
+        wal_gauges::record_wal_recovery_duration(recovery_started.elapsed());
 
         if !wal_recovery.is_clean() {
             // Preserve the raw WAL segment aside BEFORE anything (a later flush,
@@ -645,6 +668,23 @@ impl WriteEngine {
         if let Some(e) = apply_error {
             return Err(e);
         }
+
+        // OPENING SIZE GAUGE (issue #1707, roborev job 145). Recovery emitted its
+        // DURATION above; without this, a process that recovers a non-empty WAL and
+        // then takes no writes exposes NO `cqlite.wal.size` series at all — the
+        // gauge's only other call sites are the two write seams and the post-flush
+        // truncate. The operator then sees a recovery that took 12s and has no way
+        // to see the WAL that caused it. They are two halves of one story and only
+        // one of them was being told.
+        //
+        // Placed HERE, after the lossy-recovery branch, so it reports the size the
+        // engine is actually starting from: `reset_to_valid_prefix` trims the live
+        // log and updates `current_size`, and a gauge taken before it would report a
+        // pre-reset size for bytes that are no longer on disk — a wrong number,
+        // which is worse than silence. Emitted unconditionally, the fresh-WAL 0
+        // included: 0 is a real reading here (a genuinely empty log), not an
+        // invented one, and it is the baseline the saw-tooth rises from.
+        wal_gauges::record_wal_size(wal.size());
 
         if recovered > 0 {
             tracing::info!(
@@ -846,6 +886,21 @@ impl WriteEngine {
         // 1. Append to WAL (durability) — skipped when Durability::Disabled
         if self.config.durability == Durability::SyncEachWrite {
             self.wal.append(&mutation)?;
+            // The append ALREADY GREW the WAL (`append` advances the tracked size
+            // before returning), so the gauge is published HERE, immediately, and
+            // not only at the end of a fully successful mutation (issue #1707,
+            // roborev job 149). Everything after this line can fail — the `sync`
+            // below, the decorated-key computation, the memtable insert — and every
+            // one of those returns EARLY, leaving the bytes on disk and, before
+            // this call, the gauge frozen at its pre-append value for as long as
+            // the failure persisted. That is precisely the moment an operator is
+            // looking at it: a full disk or a failing fsync makes the WAL grow
+            // while `cqlite.wal.size` reports it flat. This emission does NOT
+            // replace the post-mutation `record_size_gauges()` below (which pairs
+            // WAL and memtable readings at one instant), the post-flush truncate
+            // emission, or the open-time one — all four sites are needed; see
+            // [`wal_gauges`].
+            self.record_wal_gauges();
             self.wal.sync()?;
         }
 
@@ -859,7 +914,7 @@ impl WriteEngine {
         //    Done after a successful insert so that failed writes are not counted.
         self.rows_written += 1;
         crate::observability::add_counter(crate::observability::catalog::WRITE_MUTATIONS, 1, &[]);
-        self.record_memtable_gauges();
+        self.record_size_gauges();
 
         Ok(())
     }
@@ -960,6 +1015,21 @@ impl WriteEngine {
         // 1. Append to WAL (durability) — skipped when Durability::Disabled
         if self.config.durability == Durability::SyncEachWrite {
             self.wal.append(&mutation)?;
+            // The append ALREADY GREW the WAL (`append` advances the tracked size
+            // before returning), so the gauge is published HERE, immediately, and
+            // not only at the end of a fully successful mutation (issue #1707,
+            // roborev job 149). Everything after this line can fail — the `sync`
+            // below, the decorated-key computation, the memtable insert — and every
+            // one of those returns EARLY, leaving the bytes on disk and, before
+            // this call, the gauge frozen at its pre-append value for as long as
+            // the failure persisted. That is precisely the moment an operator is
+            // looking at it: a full disk or a failing fsync makes the WAL grow
+            // while `cqlite.wal.size` reports it flat. This emission does NOT
+            // replace the post-mutation `record_size_gauges()` below (which pairs
+            // WAL and memtable readings at one instant), the post-flush truncate
+            // emission, or the open-time one — all four sites are needed; see
+            // [`wal_gauges`].
+            self.record_wal_gauges();
             self.wal.sync()?;
         }
 
@@ -973,7 +1043,7 @@ impl WriteEngine {
         //    Done after a successful insert so that failed writes are not counted.
         self.rows_written += 1;
         crate::observability::add_counter(crate::observability::catalog::WRITE_MUTATIONS, 1, &[]);
-        self.record_memtable_gauges();
+        self.record_size_gauges();
 
         // 5. Check if memtable should be flushed
         if self
@@ -989,6 +1059,24 @@ impl WriteEngine {
         }
 
         Ok(())
+    }
+
+    /// Emit BOTH engine size gauges — memtable (issue #1036) and WAL (issue #1707) —
+    /// at one instant. Called at all THREE post-mutation write/flush seams; see
+    /// [`wal_gauges`] for why the pairing is what keeps either from going missing on
+    /// a path. The WAL half is ALSO emitted on its own immediately after each
+    /// successful `wal.append()`, because a mutation that fails AFTER the append
+    /// never reaches this pairing and would otherwise freeze the gauge.
+    fn record_size_gauges(&self) {
+        self.record_memtable_gauges();
+        self.record_wal_gauges();
+    }
+
+    /// Emit the current WAL size gauge (issue #1707) — see [`wal_gauges`]. Under
+    /// `Durability::Disabled` a write leaves the size unchanged; reporting the
+    /// unchanged value is still the truth.
+    fn record_wal_gauges(&self) {
+        wal_gauges::record_wal_size(self.wal.size());
     }
 
     /// Emit the current memtable size/row gauges (issue #1036). No-op when the
@@ -1308,7 +1396,9 @@ impl WriteEngine {
             obs::add_counter(catalog::FLUSH_SSTABLES, 1, &[]);
             obs::record_gauge(catalog::COMPACTION_LAG, self.l0_count as i64, &[]);
         }
-        self.record_memtable_gauges();
+        // Issue #1707: the flush above TRUNCATED the WAL, so this is the emission
+        // that produces the saw-tooth `cqlite.wal.size` the operator doc promises.
+        self.record_size_gauges();
 
         // Surface a post-mutation WAL-truncate failure AFTER state has been
         // committed above (issue #1392). The data is durable in the published

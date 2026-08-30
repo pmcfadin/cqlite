@@ -200,13 +200,28 @@ mod tests {
     fn the_streaming_producer_checks_closure_before_stepping() {
         let src = include_str!("../generation_merge.rs");
 
-        let check = src.find("if out_tx.is_closed()").expect(
+        // Scope the pin to the STREAMING producer (issue #1707). Two corrections to
+        // the earlier form, both found by it breaking on a change that PRESERVED the
+        // invariant: it searched the WHOLE file, where the three MATERIALIZING merges
+        // also call `merger.step()` (and do so earlier), and it matched the statement
+        // prefix `let step = match merger.step()`, i.e. an incidental SPELLING —
+        // wrapping the call in the read-phase timing helper broke the pin while the
+        // ORDER it protects was untouched. The subject is this function's step CALL.
+        let region_start = src
+            .find("async fn stream_generations_for_read")
+            .expect("the streaming cross-generation merge must still be there");
+        let region = &src[region_start..];
+        let region = &region[..region
+            .find("\n}\n")
+            .expect("the streaming producer must end at a column-0 closing brace")];
+
+        let check = region.find("if out_tx.is_closed()").expect(
             "the streaming producer must consult `is_closed()`; without it the \
                      only stop signal is a failing send, which the three `continue` \
                      paths never reach",
         );
-        let step = src
-            .find("let step = match merger.step()")
+        let step = region
+            .find("merger.step()")
             .expect("the streaming producer's merge step must still be there");
         assert!(
             check < step,
@@ -214,7 +229,7 @@ mod tests {
              stream still pays for one full step per iteration"
         );
         assert_eq!(
-            src.matches("if out_tx.is_closed()").count(),
+            region.matches("if out_tx.is_closed()").count(),
             1,
             "exactly one closure check is expected in the streaming producer"
         );

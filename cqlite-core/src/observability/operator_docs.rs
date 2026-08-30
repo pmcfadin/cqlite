@@ -28,7 +28,7 @@
 //! feature configuration.
 
 use super::catalog::{ALL_METRICS, STATS_ONLY_METRICS};
-use super::operator_docs_annotations::ANNOTATIONS;
+use super::operator_docs_annotations::all_annotations;
 
 /// Repository-relative path of the committed operator reference. The generator
 /// example and the freshness test resolve it against `CARGO_MANIFEST_DIR/..`.
@@ -138,7 +138,7 @@ impl std::error::Error for DocGenError {}
 pub fn operator_metric_docs() -> Result<Vec<MetricDoc>, DocGenError> {
     // Reject duplicate annotations first (a duplicate would mask a missing one).
     let mut seen = std::collections::HashSet::new();
-    for a in ANNOTATIONS {
+    for a in all_annotations() {
         if !seen.insert(a.name) {
             return Err(DocGenError::DuplicateAnnotation(a.name));
         }
@@ -149,7 +149,7 @@ pub fn operator_metric_docs() -> Result<Vec<MetricDoc>, DocGenError> {
     // Every catalogued metric must have an annotation, walked in catalog order.
     let mut out = Vec::with_capacity(ALL_METRICS.len());
     for name in ALL_METRICS {
-        match ANNOTATIONS.iter().find(|a| a.name == *name) {
+        match all_annotations().find(|a| a.name == *name) {
             Some(a) => out.push(a.clone()),
             None => return Err(DocGenError::MissingAnnotation(name)),
         }
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn no_annotation_names_a_metric_absent_from_the_catalog() {
         // A stale annotation (name removed from the catalog) is rejected.
-        for a in ANNOTATIONS {
+        for a in all_annotations() {
             assert!(
                 ALL_METRICS.contains(&a.name),
                 "annotation names `{}`, absent from ALL_METRICS",
