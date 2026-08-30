@@ -89,7 +89,7 @@ const MARKER_HANDLER_ENTERED: &str = "Received Ctrl-C";
 // their worst-case sum is already under the total:
 //
 //   sigint_in_writable_session_flushes_before_exit
-//     (a) session up 40 + (b) ack 30 + (c) handler 30 + (d) exit 50 = 150s <= 180s
+//     (a) session up 40 + (b) ack 30 + (c) handler 30 + (d) exit 60 = 160s <= 180s
 //
 //   writable_session_auto_flushes_mid_session_across_threshold
 //     (a) 40 + (b) 5 writes x 14 = 70 + (c) sstable 30 + (d) EOF exit 30 = 170s <= 180s
@@ -106,12 +106,37 @@ const TEST_TOTAL_BUDGET: Duration = Duration::from_secs(180);
 /// from the calibration requirement rather than silently non-compliant with it.
 const SESSION_UP_DEADLINE: Duration = Duration::from_secs(40);
 
-/// Quiet-host reference for `t_boot` (spawn -> readiness banner). Generous on
-/// purpose: a quiet host measures far below this, so `scale == 1`.
-const BOOT_QUIET_BASELINE: Duration = Duration::from_secs(3);
+// The quiet-host references below are set from MEASURED quiet values on this
+// test (warm build, unloaded 16-core box, `--test-threads=1`):
+//
+//   t_boot (spawn -> readiness banner)            22-23ms
+//   t_ack  (write -> `OK`)                        3ms (SIGINT test)
+//                                                 38ms (sibling, slowest of 5)
+//
+// They are set an order of magnitude ABOVE those, so an unloaded host always
+// measures well under the baseline and always gets `scale == 1` — but NOT
+// arbitrarily above them, and that upper limit is load-bearing rather than
+// cosmetic. `scale` is `observed / quiet_baseline`, so a baseline chosen far
+// above the quiet measurement makes the calibration INERT: with a 1s `t_ack`
+// baseline, the issue's measured ~175x contended host (t_ack ~0.5s) would still
+// yield `scale == 1`, leaving stage (d) bounded by its 25s base — TIGHTER than
+// the 60s deadline #3515 is fixing, i.e. a regression dressed as a fix.
+// (design.md D2 suggests baselines "in seconds, not milliseconds"; that was
+// written before these measurements and is the one place this implementation
+// deviates from it, for the reason above. Reported with the change.)
+//
+// With the values below, that same ~175x host derives `scale ~= 2.6` from
+// `t_ack` and lands stages (c)/(d) on their caps (30s/60s) — i.e. at least the
+// old ceiling under real contention, while a quiet box still fails a genuine
+// hang in `base`.
 
-/// Quiet-host reference for `t_ack` (write -> `OK` round-trip). Same rationale.
-const ACK_QUIET_BASELINE: Duration = Duration::from_secs(1);
+/// Quiet-host reference for `t_boot` (spawn -> readiness banner): ~22x the
+/// measured quiet value.
+const BOOT_QUIET_BASELINE: Duration = Duration::from_millis(500);
+
+/// Quiet-host reference for `t_ack` (write -> `OK` round-trip): ~5x the slowest
+/// measured quiet value (the sibling's 38ms), ~66x the SIGINT test's 3ms.
+const ACK_QUIET_BASELINE: Duration = Duration::from_millis(200);
 
 /// The `cqlite` binary this test crate built with `--features write-support`.
 fn cqlite_bin() -> &'static str {
@@ -727,8 +752,8 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // same `t_ack`: on a host where a full write round-trip takes seconds, a
     // few seconds of silence is not evidence of a stall.
     let stall_window = calibrated(
-        Duration::from_secs(3),
-        Duration::from_secs(15),
+        Duration::from_secs(5),
+        Duration::from_secs(20),
         t_ack,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -780,7 +805,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // landing slowly is never mistaken for a stall.
     let exit_budget = clock.clip(calibrated(
         Duration::from_secs(25),
-        Duration::from_secs(50),
+        Duration::from_secs(60),
         t_ack,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -932,8 +957,8 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     clock.record("b.write-acks", t_ack);
 
     let stall_window = calibrated(
-        Duration::from_secs(3),
-        Duration::from_secs(15),
+        Duration::from_secs(5),
+        Duration::from_secs(20),
         t_ack,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -1102,7 +1127,7 @@ fn calibration_only_ever_loosens_and_never_exceeds_the_cap() {
     let contended = calibrated(
         Duration::from_secs(10),
         Duration::from_secs(40),
-        Duration::from_secs(3),
+        ACK_QUIET_BASELINE * 3,
         "t_ack",
         ACK_QUIET_BASELINE,
     );
@@ -1113,7 +1138,7 @@ fn calibration_only_ever_loosens_and_never_exceeds_the_cap() {
     let saturated = calibrated(
         Duration::from_secs(10),
         Duration::from_secs(40),
-        Duration::from_secs(600),
+        ACK_QUIET_BASELINE * 600,
         "t_ack",
         ACK_QUIET_BASELINE,
     );
