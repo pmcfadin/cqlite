@@ -327,6 +327,11 @@ trino-connector/docker/field-repro-artifacts/
 # resume from it, but it is session state, not a repo artifact — never shipped
 # in a PR.
 .drive-issue-state.md
+# Implementer/subagent terminal verdicts, written to disk because subagent reports get
+# dropped (MEMORY.md: "Subagent verdicts need a file"). Same class as the state file
+# above — worktree-local session state, never a repo artifact. Untracked-but-not-ignored
+# would also make every gate in the lane stamp `dirty: yes` on its certification block.
+.impl-*-verdict.md
 # Live box-load sampler output (#3248). MUST stay out of the worktree: it is appended
 # every 10s, so an in-tree copy trips the gate tree-integrity check mid-run, and a
 # worktree is deleted at finalize which would destroy a sampler meant to outlive the issue.
