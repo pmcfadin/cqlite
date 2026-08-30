@@ -562,35 +562,46 @@ impl CpuPressureWindow {
             }
         };
         let wall_micros = self.opened.elapsed().as_micros();
-        // A BACKWARDS counter is UNMEASURABLE, never 0% (#3514 blocker 1). The `some
-        // total=` field is monotonic only within one PSI accounting domain: a cgroup
-        // or namespace change between the two reads, or a PSI reset, can move it
-        // backwards. A `saturating_sub` would render that as "0.0% stall" — printed on
-        // a genuinely starved host, i.e. this diagnostic would actively MISCLASSIFY
-        // the one red it exists to classify, in the worst direction. The rule is this
-        // module's own, stated at `read_cpu_pressure_some_total`: an unmeasurable value
-        // is not the value zero.
-        let Some(stalled) = ended.checked_sub(started) else {
-            return format!(
-                "cpu-pressure: UNMEASURED (counter went BACKWARDS: 'some total=' read \
-                 {started}us at window open and {ended}us at close, so the two readings \
-                 are not from one monotonic accounting domain — a cgroup/namespace move \
-                 or a PSI reset between them will do this). Reporting 0% here would print \
-                 'no stall' on a possibly-starved host: an unmeasurable value is not 0%"
-            );
-        };
-        if wall_micros == 0 {
-            return "cpu-pressure: UNMEASURED (zero-width window; nothing to normalise by) \
-                    — an unmeasurable value is not 0%"
-                .to_string();
-        }
-        let stalled_micros = u128::from(stalled);
-        let pct = (stalled_micros as f64) * 100.0 / (wall_micros as f64);
-        format!(
-            "cpu-pressure: some-stall {pct:.1}% of wall ({stalled_micros}us stalled over \
-             {wall_micros}us, from the monotonic 'some total=' counter in {PSI_CPU_PATH}) \
-             — DIAGNOSTIC ONLY: never an input to pass/fail, and no threshold is implied \
-             (the #3514 field evidence is n=1 on the failing side)"
-        )
+        describe_stall(started, ended, wall_micros)
     }
+}
+
+/// The PURE half of [`CpuPressureWindow::report`]: turn two bracketing `some total=`
+/// readings and a wall-time denominator into the diagnostic line.
+///
+/// Split out so every branch is unit-testable without a real starved host — see
+/// `cqlite-core/tests/issue_3514_psi_report_contract.rs`. Both callers' own files
+/// hold exactly one `#[test]` each by design (whole-process thread counting needs
+/// process isolation), so this contract could not otherwise be tested at all.
+pub fn describe_stall(started: u64, ended: u64, wall_micros: u128) -> String {
+    // A BACKWARDS counter is UNMEASURABLE, never 0% (#3514 blocker 1). The `some
+    // total=` field is monotonic only within one PSI accounting domain: a cgroup
+    // or namespace change between the two reads, or a PSI reset, can move it
+    // backwards. A `saturating_sub` would render that as "0.0% stall" — printed on
+    // a genuinely starved host, i.e. this diagnostic would actively MISCLASSIFY
+    // the one red it exists to classify, in the worst direction. The rule is this
+    // module's own, stated at `read_cpu_pressure_some_total`: an unmeasurable value
+    // is not the value zero.
+    let Some(stalled) = ended.checked_sub(started) else {
+        return format!(
+            "cpu-pressure: UNMEASURED (counter went BACKWARDS: 'some total=' read \
+             {started}us at window open and {ended}us at close, so the two readings \
+             are not from one monotonic accounting domain — a cgroup/namespace move \
+             or a PSI reset between them will do this). Reporting 0% here would print \
+             'no stall' on a possibly-starved host: an unmeasurable value is not 0%"
+        );
+    };
+    if wall_micros == 0 {
+        return "cpu-pressure: UNMEASURED (zero-width window; nothing to normalise by) \
+                — an unmeasurable value is not 0%"
+            .to_string();
+    }
+    let stalled_micros = u128::from(stalled);
+    let pct = (stalled_micros as f64) * 100.0 / (wall_micros as f64);
+    format!(
+        "cpu-pressure: some-stall {pct:.1}% of wall ({stalled_micros}us stalled over \
+         {wall_micros}us, from the monotonic 'some total=' counter in {PSI_CPU_PATH}) \
+         — DIAGNOSTIC ONLY: never an input to pass/fail, and no threshold is implied \
+         (the #3514 field evidence is n=1 on the failing side)"
+    )
 }
