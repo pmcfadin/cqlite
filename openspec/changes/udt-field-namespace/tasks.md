@@ -35,19 +35,19 @@ Public surface exercised by each task is named, per `openspec/config.yaml`.
 No corpus fixture declares a `_type`/`_keyspace` field, and the issue names generating one as part of
 the fix. **Cassandra-written, not CQLite-written**, and committed **checkout-relative**.
 
-- [ ] 4.1 `test-data/scripts/generate-issue-3504-udt-collision.sh` on the
+- [x] 4.1 `test-data/scripts/generate-issue-3504-udt-collision.sh` on the
   `generate-compaction-parity-udt.sh` pattern: Cassandra 5.0 container,
   `CREATE TYPE collide ("_type" text, "_keyspace" text, real_field int)` (quoted identifiers —
   `parse_create_type` already accepts them), one table with a `frozen<collide>` column AND a
   `map<frozen<collide>, int>` column (the latter is site 4's subject), insert, `nodetool flush`, export.
-- [ ] 4.2 Commit the SSTable components with `git add -f` (`*.db` is gitignored; force-adding tiny
+- [x] 4.2 Commit the SSTable components with `git add -f` (`*.db` is gitignored; force-adding tiny
   parity references is mandated doctrine) under a **checkout-relative per-issue** directory on the
   `cqlite-core/tests/fixtures/issue_2225/` precedent — NOT under `test-data/datasets/sstables/`.
   **Why:** `bindings/python/tests/conftest.py` and `bindings/node/__test__/helpers.js` resolve the
   corpus from `CQLITE_DATASETS_ROOT` and never fall back to the checkout, so a corpus-rooted fixture
   is invisible on any box with that env set — which is every gate run. A checkout-relative path
   cannot be hidden by an env var. Commit the `.cql` schema alongside.
-- [ ] 4.3 Record the sstabledump JSONL golden for the new table.
+- [x] 4.3 Record the sstabledump JSONL golden for the new table.
 
 ## 5. Tests (each maps to a spec scenario; executor named because several candidate homes execute NOTHING)
 
