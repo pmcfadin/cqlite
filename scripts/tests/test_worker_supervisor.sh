@@ -6141,8 +6141,10 @@ test_lock_provenance_is_recorded_once() {
   init_line="$(grep -cxF 'SUPERVISOR_LOCK_DERIVED="${SUPERVISOR_LOCK_DERIVED:-unknown}"' "$SUPERVISOR")"
   fnbody="$(sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR")"
   if [[ "$init_line" == "1" ]] && [[ "$fnbody" == *'case "$SUPERVISOR_LOCK_DERIVED" in'* ]] \
-     && [[ "$fnbody" == *'yes | no) return 0 ;;'* ]]; then
-    pass "lock-provenance STRUCTURAL: the record initialises to \`unknown\` (non-clobberingly, #3549 job 214) and \`supervisor_lock_path\` returns without writing once it is either decided value — a write-once record, not an early one"
+     && [[ "$fnbody" == *'yes | no)'* ]] \
+     && [[ "$fnbody" == *'if [[ -n "$SUPERVISOR_LOCK_RESOLVED" ]]; then'* ]] \
+     && [[ "$fnbody" == *'return 0'* ]]; then
+    pass "lock-provenance STRUCTURAL: the record initialises to \`unknown\` (non-clobberingly, #3549 job 214) and \`supervisor_lock_path\` returns without RE-DECIDING once it is either decided value — a write-once record, not an early one (the decided branch now also pins the PATH, #3549 job 217 F1)"
   else
     fail "lock-provenance-structural: init-lines=[$init_line] and the resolver does not bail out on an already-decided provenance — the record is recomputable again"
   fi
@@ -6199,7 +6201,11 @@ test_lock_provenance_is_recorded_once() {
   # ---- (5) MUTANT CONTRAST: the write-once bail-out reverted to the pre-fix recomputing form, nothing
   # else changed. The RETRY case must then show the guard SKIPPED — the bypass, measured.
   ovr="$d/m-provenance.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_lock_path '    yes | no) return 0 ;;' '    yes | no) : ;;'; then
+  # The bail-out is reverted by making its `case` pattern unmatchable, which is exactly the pre-fix
+  # recomputing form: every call re-reads `SUPERVISOR_LOCK`'s emptiness and re-decides. (The shipped
+  # pattern used to be a one-line `yes | no) return 0 ;;`; job 217 F1 gave the decided branch a body,
+  # so the mutant now neutralises the PATTERN rather than the return.)
+  if sv_mutant_override "$ovr" supervisor_lock_path '    yes | no)' '    never-a-provenance-value)'; then
     rm -rf "$derived"
     printf '%s\n' "$dead" >"$legacy/pid"
     mout="$(legacy_lock_drive_body_override "$SV_DRIVE_BODY_RESOLVE2_OVERRIDE" "$ovr" "$tmp" "$lane")" || true
@@ -6370,6 +6376,224 @@ yes'; do
 }
 
 t test_lock_provenance_survives_resourcing
+
+
+# THE PAIR DRIVES (#3549, roborev job 217 F1) — the FOURTH route to the same bypass, and the one the
+# three earlier fixes left open: the provenance was pinned and the PATH was not, so the two could
+# DISAGREE. A caller resolves an EXPLICIT path (provenance `no`), then assigns `SUPERVISOR_LOCK` the
+# per-lane DERIVED default; the sticky bail-out returned unchanged, the run acquired OUR default, and
+# the guard skipped on a provenance that had been decided about a DIFFERENT path.
+#
+# `$2` is the path the caller assigns AFTER the first resolution. All four bodies are DERIVED from the
+# shipped drive bodies by INSERTING statements, so a case that varies only the mid-run assignment (and,
+# for the `*_RESOURCE` pair, the re-source) cannot drift into a different startup path than the ordinary
+# case exercises.
+SV_DRIVE_BODY_SWITCH="${SV_DRIVE_BODY/'acquire_lock; '/'supervisor_lock_path; SUPERVISOR_LOCK="$2"; acquire_lock; '}"
+SV_DRIVE_BODY_SWITCH_RESOURCE="${SV_DRIVE_BODY_SWITCH/'supervisor_lock_path; SUPERVISOR_LOCK='/'supervisor_lock_path; source "$1"; SUPERVISOR_LOCK='}"
+
+# THE PAIR PROBE: BOTH halves of the record read at BOTH points. The finding is precisely that the
+# earlier probe read the provenance token and never the POST-ASSIGNMENT PATH, so a bypass that shows up
+# only in the path was invisible to it.
+SV_DRIVE_BODY_PAIR='source "$1"; supervisor_lock_path; p1="$SUPERVISOR_LOCK_DERIVED"; l1="$SUPERVISOR_LOCK"; SUPERVISOR_LOCK="$2"; supervisor_lock_path; p2="$SUPERVISOR_LOCK_DERIVED"; l2="$SUPERVISOR_LOCK"; printf "P1=%s L1=%s P2=%s L2=%s\n" "$p1" "$l1" "$p2" "$l2"; exit 0'
+SV_DRIVE_BODY_PAIR_RESOURCE="${SV_DRIVE_BODY_PAIR/'l1="$SUPERVISOR_LOCK"; SUPERVISOR_LOCK='/'l1="$SUPERVISOR_LOCK"; source "$1"; SUPERVISOR_LOCK='}"
+
+# legacy_lock_drive_switch <body> <script> <tmp> <lane> <mid> [explicit] — a chosen body against a chosen
+# script, with the mid-run assignment's target in `$2` and an optional EXPLICIT first `SUPERVISOR_LOCK`.
+# The explicit/unset split is spelled exactly as `legacy_lock_drive` spells it, and the chosen script is
+# what makes a whole-script mutant drivable through the same bodies.
+legacy_lock_drive_switch() {
+  local body="$1" script="$2" tmp="$3" lane="$4" mid="$5" explicit="${6:-}"
+  if [[ -n "$explicit" ]]; then
+    env TMPDIR="$tmp" SUPERVISOR_LOCK="$explicit" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$body" _ "$script" "$mid" 2>&1
+  else
+    env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$body" _ "$script" "$mid" 2>&1
+  fi
+}
+
+# The one sentence the ignored-override log line is identified by, in ONE place so a case cannot test a
+# paraphrase of it.
+SV_OVERRIDE_IGNORED='SUPERVISOR_LOCK was changed after the lock path had already been resolved'
+
+# ---------------------------------------------------------------------------
+# Test 47p (#3549, roborev job 217 F1): THE RECORD IS THE **PAIR** — PROVENANCE *AND* PATH.
+#
+# THE DEFECT. Three rounds made the provenance sticky (per-call -> per-shell -> per-source) and each one
+# left its PARTNER free: the resolved PATH. `supervisor_legacy_lock_guard` asks "is the path in use OUR
+# derived default?", and it answers from the provenance — so a provenance decided about path A while
+# path B is in use answers a question nobody asked. Sequence: resolve an EXPLICIT path (provenance
+# `no`), then assign `SUPERVISOR_LOCK` the per-lane DERIVED default. The bail-out returned unchanged,
+# `acquire_lock` created OUR default, and the guard skipped — the SAME concurrency bypass, by a FOURTH
+# route. Securing one observable and leaving its partner is the shape all four share.
+#
+# THE FIX, AND THE DECISION IN IT. `SUPERVISOR_LOCK_RESOLVED` pins the first-resolved path beside the
+# provenance, preserved across re-sourcing by the same `${VAR:-}` form and for the same reason. A later
+# change is RESTORED, not refused, and logged: "first resolution wins" is ONE contract already applied
+# silently to the provenance, an ignored change is harmless once ignored, and an aborted start would be
+# a refusal with no operator remedy. A decided provenance with NO stored path is not honoured at all —
+# the resolver re-decides both halves together, which on an empty `SUPERVISOR_LOCK` records `yes` and
+# leaves the guard RUNNING.
+# ---------------------------------------------------------------------------
+test_lock_resolved_path_is_pinned_with_its_provenance() {
+  local d tmp lane legacy derived explicit mid out rc got mut mout mgot init_line bare_lines fnbody
+
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549pair$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+  explicit="$d/explicit.lock"
+  mid="$d/midrun.lock"
+
+  # ---- PREMISE: all four bodies really are the shipped bodies plus the inserted statements. A
+  # `${var/…}` substitution that matched nothing yields the ORIGINAL string SILENTLY, and every case
+  # below would then measure a drive with NO mid-run assignment at all — i.e. nothing.
+  if [[ "$SV_DRIVE_BODY_SWITCH" != "$SV_DRIVE_BODY" ]] \
+     && [[ "$SV_DRIVE_BODY_SWITCH" == *'supervisor_lock_path; SUPERVISOR_LOCK="$2"; acquire_lock'* ]] \
+     && [[ "$SV_DRIVE_BODY_SWITCH_RESOURCE" != "$SV_DRIVE_BODY_SWITCH" ]] \
+     && [[ "$SV_DRIVE_BODY_SWITCH_RESOURCE" == *'supervisor_lock_path; source "$1"; SUPERVISOR_LOCK="$2"'* ]] \
+     && [[ "$SV_DRIVE_BODY_PAIR" == *'l2="$SUPERVISOR_LOCK"'* ]] \
+     && [[ "$SV_DRIVE_BODY_PAIR_RESOURCE" != "$SV_DRIVE_BODY_PAIR" ]] \
+     && [[ "$SV_DRIVE_BODY_PAIR_RESOURCE" == *'source "$1"; SUPERVISOR_LOCK="$2"'* ]]; then
+    pass "pair PREMISE: the switch and pair drives are DERIVED from the shipped bodies, each differs from the body it derives from, and both read the POST-ASSIGNMENT path"
+  else
+    fail "pair-premise: a derived body is identical to its source (switch-differs=$([[ "$SV_DRIVE_BODY_SWITCH" != "$SV_DRIVE_BODY" ]] && echo yes || echo no)) — the substitution did not apply and the cases below measure no mid-run assignment"
+  fi
+
+  # ---- (0) STRUCTURAL: the stored path is initialised NON-CLOBBERINGLY (so a re-source cannot blank it
+  # while the provenance stays decided), written at BOTH decision branches, and restored at exactly one
+  # place. Behaviourally covered below, but the SHAPE is pinned so an edit back to a bare assignment
+  # reds here too — that is the mistake job 214 caught on the provenance.
+  init_line="$(grep -cxF 'SUPERVISOR_LOCK_RESOLVED="${SUPERVISOR_LOCK_RESOLVED:-}"' "$SUPERVISOR")"
+  bare_lines="$(grep -cE '^SUPERVISOR_LOCK_RESOLVED=' "$SUPERVISOR")"
+  fnbody="$(sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR")"
+  if [[ "$init_line" == "1" ]] && [[ "$bare_lines" == "1" ]] \
+     && [[ "$(printf '%s\n' "$fnbody" | grep -cF 'SUPERVISOR_LOCK_RESOLVED="$SUPERVISOR_LOCK"')" == "2" ]] \
+     && [[ "$(printf '%s\n' "$fnbody" | grep -cF 'SUPERVISOR_LOCK="$SUPERVISOR_LOCK_RESOLVED"')" == "1" ]]; then
+    pass "pair STRUCTURAL: the stored path initialises non-clobberingly, is the only top-level assignment to that name, is written at BOTH decision branches (derived and caller-given) and is restored in exactly one place"
+  else
+    fail "pair-structural: init-lines=[$init_line] top-level-lines=[$bare_lines] — the stored path is not pinned in the same non-clobbering, write-both-branches shape as the provenance"
+  fi
+
+  # ---- (1a) THE PAIR ITSELF, derived first. A later assignment moves NEITHER half: the provenance
+  # stays `yes` (already covered) AND the path returns to the first-resolved one (the finding).
+  got="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_PAIR" "$SUPERVISOR" "$tmp" "$lane" "$mid")"
+  if [[ "$got" == *"P1=yes L1=$derived"* ]] && [[ "$got" == *"P2=yes L2=$derived"* ]] \
+     && [[ "$got" == *"$SV_OVERRIDE_IGNORED"* ]]; then
+    pass "pair RECORD (derived first): a mid-run SUPERVISOR_LOCK assignment moves neither half — provenance \`yes\` AND the first-resolved path restored — and the ignored override is LOGGED [$got]"
+  else
+    fail "pair-record-derived: got=[$got] — expected P1=yes L1=$derived P2=yes L2=$derived plus the ignored-override log line"
+  fi
+
+  # ---- (1b) THE FINDING'S EXACT SEQUENCE at the record level: EXPLICIT first, then the caller assigns
+  # OUR derived default. The provenance says "the operator placed this"; the path must therefore still
+  # BE the operator's, or the provenance is describing a path this run is not using.
+  got="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_PAIR" "$SUPERVISOR" "$tmp" "$lane" "$derived" "$explicit")"
+  if [[ "$got" == *"P1=no L1=$explicit"* ]] && [[ "$got" == *"P2=no L2=$explicit"* ]] \
+     && [[ "$got" == *"$SV_OVERRIDE_IGNORED"* ]]; then
+    pass "pair RECORD (explicit first, then OUR derived default): the switch to the derived path is IGNORED and the explicit path restored, so the provenance and the path in use cannot disagree [$got]"
+  else
+    fail "pair-record-explicit: got=[$got] — expected P1=no L1=$explicit P2=no L2=$explicit; the pair diverged"
+  fi
+
+  # ---- (1c) AND THE RESTORE IS CONDITIONAL: an assignment of the SAME path is not an override, so it
+  # logs nothing. A warning on every resolution would be noise, and noise is what gets waived.
+  got="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_PAIR" "$SUPERVISOR" "$tmp" "$lane" "$derived")"
+  if [[ "$got" == *"P2=yes L2=$derived"* ]] && [[ "$got" != *"$SV_OVERRIDE_IGNORED"* ]]; then
+    pass "pair RECORD (no change): re-assigning the SAME path is not an override — the path is unchanged and NOTHING is logged [$got]"
+  else
+    fail "pair-record-nochange: got=[$got] — an unchanged assignment must not report an ignored override"
+  fi
+
+  # ---- (2) END TO END, the finding's sequence with a legacy lock PRESENT. The correct outcome is NOT a
+  # refusal: the path in use is the OPERATOR'S (AC4), so the compatibility check is legitimately skipped
+  # — and the point is that OUR DERIVED DEFAULT IS NEVER CREATED. Under the defect this drive acquired
+  # the derived default with the legacy lock unchecked, which is the concurrency the guard exists to stop.
+  mkdir -p "$legacy"
+  rm -rf "$derived" "$explicit"
+  out="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_SWITCH" "$SUPERVISOR" "$tmp" "$lane" "$derived" "$explicit")"; rc=$?
+  if [[ "$rc" -eq 0 ]] && [[ "$out" == *"ACQUIRED=$explicit"* ]] && [[ ! -e "$derived" ]] \
+     && [[ "$out" != *"LEGACY GLOBAL supervisor lock"* ]] && [[ "$out" == *"$SV_OVERRIDE_IGNORED"* ]]; then
+    pass "pair END TO END (explicit then derived): the run acquires at the OPERATOR'S path, our derived default is never created, and AC4's skip is intact — the guard was skipped on a provenance whose path is genuinely the caller's"
+  else
+    fail "pair-e2e-explicit: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — expected acquisition at $explicit with the derived default untouched"
+  fi
+  rm -rf "$explicit"
+
+  # ---- (3) THE OTHER DIRECTION, END TO END: derived first, then the caller assigns an explicit path.
+  # A post-resolution assignment must not BUY the operator's exemption either — the guard still runs and
+  # a present legacy lock still refuses, and nothing is created at EITHER path.
+  rm -rf "$derived" "$explicit"
+  out="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_SWITCH" "$SUPERVISOR" "$tmp" "$lane" "$explicit")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" != *ACQUIRED=* ]] \
+     && [[ ! -e "$derived" ]] && [[ ! -e "$explicit" ]]; then
+    pass "pair END TO END (derived then explicit): a post-resolution assignment cannot buy the AC4 exemption — the legacy guard still runs and refuses, with no lock created at either path"
+  else
+    fail "pair-e2e-derived: rc=$rc out=[$out] — a mid-run explicit assignment must not disable the guard"
+  fi
+
+  # ---- (4) THE RE-SOURCE VARIANT. The stored path must survive a second `source` exactly as the
+  # provenance does: if a re-source BLANKED it while the provenance stayed decided, the pair would be
+  # incoherent, the resolver would re-decide from the CHANGED path, call it caller-provided, and skip.
+  got="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_PAIR_RESOURCE" "$SUPERVISOR" "$tmp" "$lane" "$explicit")"
+  if [[ "$got" == *"P1=yes L1=$derived"* ]] && [[ "$got" == *"P2=yes L2=$derived"* ]]; then
+    pass "pair RE-SOURCE RECORD: the stored path survives a second \`source\` — both halves still describe the first resolution after the file is sourced again [$got]"
+  else
+    fail "pair-resource-record: got=[$got] — expected P2=yes L2=$derived; a re-source blanked the stored path"
+  fi
+
+  rm -rf "$derived" "$explicit"
+  out="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_SWITCH_RESOURCE" "$SUPERVISOR" "$tmp" "$lane" "$explicit")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" != *ACQUIRED=* ]] \
+     && [[ ! -e "$derived" ]] && [[ ! -e "$explicit" ]]; then
+    pass "pair RE-SOURCE END TO END: derive, source the script AGAIN, then assign a different path — a present legacy lock still refuses acquisition"
+  else
+    fail "pair-resource-e2e: rc=$rc out=[$out] — re-sourcing plus a mid-run assignment must not disable the guard"
+  fi
+
+  # ---- (5) THE INCOHERENT PAIR IS FAIL-CLOSED. An inherited provenance of `no` — the PERMISSIVE value —
+  # with no stored path beside it is not a decision, and must not be a licence to skip. The resolver
+  # re-decides both halves together, records `yes`, and the guard REFUSES on the present legacy lock.
+  rm -rf "$derived"
+  out="$(legacy_lock_drive_body_env "$SV_DRIVE_BODY" "$tmp" "$lane" 'SUPERVISOR_LOCK_DERIVED=no')"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" != *ACQUIRED=* ]] && [[ ! -e "$derived" ]]; then
+    pass "pair FAIL-CLOSED: a decided provenance with NO stored path beside it is re-decided rather than honoured, so an inherited \`no\` cannot skip the guard on a path nobody recorded"
+  else
+    fail "pair-failclosed: rc=$rc out=[$out] — a provenance with no stored path must not inherit the permissive branch"
+  fi
+
+  # ---- (6) MUTANT CONTRAST, BOTH DIRECTIONS. Remove the RESTORE and nothing else: the stored path is
+  # still recorded, so this isolates the pinning of the path from every other part of the fix.
+  mut="$d/m-pair-supervisor.sh"
+  if sv_mutant_script "$mut" '          SUPERVISOR_LOCK="$SUPERVISOR_LOCK_RESOLVED"' '          : "restore removed"'; then
+    rm -rf "$derived" "$explicit"
+    mout="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_SWITCH" "$mut" "$tmp" "$lane" "$derived" "$explicit")" || true
+    mgot="$(legacy_lock_drive_switch "$SV_DRIVE_BODY_PAIR" "$mut" "$tmp" "$lane" "$derived" "$explicit")"
+    if [[ "$mout" == *"ACQUIRED=$derived"* ]] && [[ "$mout" != *"LEGACY GLOBAL supervisor lock"* ]] \
+       && [[ "$mgot" == *"P2=no L2=$derived"* ]]; then
+      pass "pair MUTANT CONTRAST: with the restore removed, the pair DIVERGES (P2=no while the path in use is OUR derived default), the guard is SKIPPED and the supervisor acquires the derived default alongside the legacy lock — the bypass this fix closes, measured (out=[$mout] probe=[$mgot])"
+    else
+      fail "pair-mutant: out=[$mout] probe=[$mgot] — the pre-fix form must be shown to bypass the guard, or the cases above measure nothing"
+    fi
+    # The OTHER direction: the mutant is not globally broken. On the ORDINARY single-resolution drive the
+    # same mutant still refuses, so the bypass above is attributable to the PAIR DIVERGING and not to a
+    # wholesale broken guard.
+    rm -rf "$derived"
+    mout="$(legacy_lock_drive_body_script "$SV_DRIVE_BODY" "$mut" "$tmp" "$lane")" || true
+    if legacy_refusal_ok "$mout" && [[ "$mout" != *ACQUIRED=* ]]; then
+      pass "pair MUTANT CONTRAST (other direction): the SAME mutant still refuses on the ordinary drive with no mid-run assignment, so the bypass above is attributable to the pair diverging alone"
+    else
+      fail "pair-mutant-control: out=[$mout] — the mutant must still refuse without a mid-run assignment, or the contrast does not isolate the divergence"
+    fi
+  fi
+
+  rm -rf "$legacy" "$derived" "$explicit" "$mut" "$tmp"
+}
+
+t test_lock_resolved_path_is_pinned_with_its_provenance
+
 
 
 
