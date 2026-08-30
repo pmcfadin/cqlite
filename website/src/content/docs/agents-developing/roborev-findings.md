@@ -657,9 +657,14 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    fail-closed argument for a default is only valid for the consumers that existed when it was written.* The
    `block_marker_count` `:-0` default was audited as fail-closed because `NONE` was the STRICT direction for
    `vacuity-tier1:`. Adding a consumer for which `NONE` is the PERMISSIVE direction silently inverted it, and
-   no choice of default can fix that — `0` and *unmeasurable* are the same value — so the direction is bought
-   from a **separate** `block_measured` signal instead. Re-derive such an argument whenever you add a
-   consumer.
+   no choice of default can fix that — `0` and *unmeasurable* are the same value. **The resolution is not a
+   better default or a second signal but a REMOVED CONSUMER**: `NONE` is unreachable from a marker count at
+   all (only the structured verdict letter yields it), so nothing derives a permissive verdict from that `0`
+   and the original fail-closed argument holds unchanged. Re-derive such an argument whenever you add a
+   consumer — and note that an intermediate version of this very fix added a separate `block_measured` flag,
+   which went away with the prose reconstruction it guarded while this paragraph went on citing it for a
+   round (caught by the C intent audit). **A doctrine line naming a mechanism is a claim about code and
+   decays exactly like a comment: re-grep the symbol.**
 
    **It was never one bug — it is ONE SHAPE, found repeatedly on #3229, so it is now a rule:
    *a positive verdict requires an AFFIRMATIVE MEASUREMENT.*** The shape is *a multi-state signal where

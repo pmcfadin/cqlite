@@ -849,8 +849,13 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   **And a fail-closed argument for a `${VAR:-default}` is only valid for the consumers that existed when
   it was written**: the `block_marker_count` `:-0` was audited as strict because `NONE` was the STRICT
   direction for `vacuity-tier1:`, and a new consumer for which `NONE` is PERMISSIVE inverted it silently
-  — no default can fix that (`0` and *unmeasurable* are one value), so the direction now comes from a
-  separate `block_measured` signal. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  — no default can fix that (`0` and *unmeasurable* are one value). **The resolution is not a better
+  default or a second signal but a REMOVED CONSUMER**: `NONE` is unreachable from a marker count at all
+  (only the structured verdict yields it), so nothing derives a permissive verdict from that `0` and the
+  original argument holds unchanged. An intermediate version of this fix DID add a separate
+  `block_measured` flag; it went away with the prose reconstruction it guarded, and this sentence
+  described it for one round after it was deleted — caught by the C audit. **A doctrine line naming a
+  mechanism is a claim about code, and it decays exactly like a comment: re-grep the symbol.** So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
   for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
   unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
   signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict

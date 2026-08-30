@@ -4333,6 +4333,14 @@ assert_verdict 'case (fd1)' FAIL 1
 assert_says 'case (fd1) the findings state is re-asserted from the record' '^findings: PRESENT \(2\)$'
 assert_says 'case (fd1) roborev-exit stays truthful about a process that never ran' \
   '^roborev-exit: SKIP \(recheck: no reviewer ran in this invocation; job 4656 re-decided from its record\)$'
+# THE ISOLATION CLAIM, PINNED RATHER THAN ASSERTED IN PROSE (C audit, low). Reaching the terminal gate
+# proves only that no key failed the GRAMMAR scan; it does not prove the other keys affirmatively PASSed,
+# which is what makes findings the SOLE cause. So the two keys a findings-bearing fixture is most likely
+# to disturb are asserted positively — without this, the case would keep passing for the wrong reason if
+# a future fixture change broke one of them.
+assert_says 'case (fd1) the reviewer-diff delivery key affirmatively PASSed (findings are the SOLE cause)' \
+  '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_says 'case (fd1) and completion was re-asserted from the record' '^review-completed: PASS$'
 assert_says 'case (fd1) and findings fails the verdict on its OWN terms, naming what it read' \
   "ERROR: findings: this run would have PASSED while 'findings:' reads 'PRESENT \(2\)'"
 assert_lacks 'case (fd1) THE #3473 SIGNATURE IS UNREACHABLE: no PASS beside PRESENT' '^RESULT: PASS$'
@@ -4461,7 +4469,9 @@ printf '== (fd9) #3564 roborev r1 High: a HEADERLESS findings recheck cannot rea
 # it was widened to stop false-FAILing genuine reviews from agents that emit that shape. But the
 # findings-BLOCK extraction needs a heading, so for such a transcript the block is EMPTY, and the
 # recheck fallback read 0 markers as an AFFIRMATIVE `NONE` and PASSED a findings-bearing recheck.
-# `NONE` is now sayable only when the marker count is zero across the WHOLE transcript too.
+# THE SHIPPED RULE IS STRONGER THAN THIS CASE'S FIRST FIX: an intermediate version made `NONE` require
+# zero markers across the WHOLE transcript, and round 2 defeated that too (fd10/fd11), so prose can now
+# never say `NONE` at all — only the structured verdict letter can.
 reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITH_W_PATHS"
