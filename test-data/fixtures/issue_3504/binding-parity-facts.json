@@ -1,0 +1,75 @@
+{
+  "issue": 3504,
+  "purpose": "Cross-binding UDT parity reference (spec udt-type-identity, AC3). The Python and Node suites each derive these facts from THEIR OWN binding output and assert equality against this one file, so the two surfaces are compared as DATA rather than by host type and cannot drift apart independently. Keys use the Node spelling; the Python binding exposes `type_name` for `typeName` (PyO3 exposes snake_case, napi-rs camelCases). That spelling difference is language convention; every fact below must be EQUAL in both.",
+  "sstables_root": "test-data/fixtures/issue_3504",
+  "schema": "test-data/schemas/issue-3504-udt-collision.cql",
+  "query": "SELECT * FROM test_udt_collision.udt_collide",
+  "note_on_paths": "Both paths are CHECKOUT-RELATIVE and resolved from the repo root with NO environment variable. Neither suite may route them through CQLITE_DATASETS_ROOT: that root never falls back to the checkout, so an env-rooted fixture is invisible on every gate run.",
+  "udts": {
+    "row1.c": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "user-supplied-type",
+        "_keyspace": "user-supplied-keyspace",
+        "real_field": 42
+      }
+    },
+    "row1.p": {
+      "typeName": "plain",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "label": "no-colliding-field",
+        "real_field": 7
+      }
+    },
+    "row1.fcm_key": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "key-type-marker",
+        "_keyspace": "key-keyspace-marker",
+        "real_field": 100
+      }
+    },
+    "row1.ftm_key": {
+      "typeName": "collide_twin",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "key-type-marker",
+        "_keyspace": "key-keyspace-marker",
+        "real_field": 100
+      }
+    },
+    "row1.fs_0": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "set-member-type",
+        "_keyspace": "set-member-keyspace",
+        "real_field": 200
+      }
+    },
+    "row2.p": {
+      "typeName": "plain",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "label": "contrast-row",
+        "real_field": 8
+      }
+    },
+    "row3.c": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": null,
+        "_keyspace": "keyspace-field-only",
+        "real_field": 0
+      }
+    }
+  },
+  "map_values": {
+    "row1.fcm_value": 3,
+    "row1.ftm_value": 4
+  }
+}
