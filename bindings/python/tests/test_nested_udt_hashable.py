@@ -5,7 +5,8 @@ WHAT IS UNDER TEST
 The Python binding projects a CQL ``set`` to a Python ``set`` and a CQL ``map``
 to a Python ``dict``, so every set ELEMENT and every map KEY must be reduced to
 a HASHABLE Python object. That reduction lives in
-``bindings/python/src/value.rs`` (``value_to_hashable_key`` / ``contains_udt``)
+``bindings/python/src/value_hashable.rs`` (``value_to_hashable_key`` /
+``contains_udt``, split out of ``value.rs`` by #3500)
 and was **not total** over the ``cqlite_core::Value`` tree: a UDT reached
 through a TUPLE or through a NESTED COLLECTION fell through to the generic
 converter, which yields an unhashable ``dict``/``list``, and the whole
@@ -789,8 +790,8 @@ class TestTupleBorneUdtAsMapKey:
     the trigger, says the failure is the EXPECTED signal that #3612 landed, and
     says what to do: re-pin the expectation to the structured ``(dict, int)``
     tuple key that the frozen-map columns already produce, and finish the
-    map-key half of the hashable projection (``bindings/python/src/value.rs``,
-    where #3500 put it). #3500 is cited only as WHERE the projection lives — it
+    map-key half of the hashable projection
+    (``bindings/python/src/value_hashable.rs``, where #3500 put it). #3500 is cited only as WHERE the projection lives — it
     is this PR and will be closed, and a gap marker pointing at a closed issue
     is how a gap becomes permanent.
     """
@@ -802,7 +803,7 @@ class TestTupleBorneUdtAsMapKey:
         "THE EXPECTED SIGNAL THAT #3612 HAS BEEN FIXED, not a regression of this "
         "test: re-pin the expectation to the structured (dict, int) tuple key the "
         "frozen-map columns already produce, and finish the map-key half of the "
-        "hashable projection in bindings/python/src/value.rs (added by #3500, "
+        "hashable projection in bindings/python/src/value_hashable.rs (#3500, "
         "which is closed — #3612 is the live issue)."
     )
 

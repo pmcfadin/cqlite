@@ -2,6 +2,12 @@
 //!
 //! This module handles conversion of all CQL data types to their Python equivalents.
 //! The mapping follows M4 spec section 5.2 for type fidelity.
+//!
+//! It owns the ORDINARY host conversion only. The HASHABLE PROJECTION — what a
+//! value becomes in a `dict`-key or `frozenset`-element position, which
+//! deliberately DIFFERS for a `list` and for a UDT-bearing `set` — lives in
+//! [`crate::value_hashable`] (split out by issue #3500). `set_to_py` and
+//! `map_to_py` call into it; it calls back for the scalar arms.
 
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;

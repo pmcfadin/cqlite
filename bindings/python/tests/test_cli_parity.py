@@ -941,8 +941,9 @@ class TestCollectionIdentityContract:
 
     These tests are intentionally pure: they feed the normalizer the host values
     the Python binding is documented to produce (`bindings/python/src/value.rs`:
-    `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`,
-    `value_to_hashable_key`) and need no dataset and no query, so a failure here
+    `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`; and
+    `bindings/python/src/value_hashable.rs`: `value_to_hashable_key`) and need no
+    dataset and no query, so a failure here
     is unambiguously a contract violation and never a fixture problem.
     """
 
@@ -1230,7 +1231,7 @@ class TestCollectionIdentityContract:
         JSON object carrying a literal `"_type"` key is additionally read as a UDT.
 
         Reachability is stated in exactly ONE place — the `Value::Json` arm of
-        `value_to_hashable_key` in `bindings/python/src/value.rs` — and this
+        `value_to_hashable_key` in `bindings/python/src/value_hashable.rs` — and this
         docstring asserts nothing about it (earlier wording here blamed fixture
         absence, which is not the blocker). What this test pins is the SHAPE
         divergence, which holds for any `dict`-shaped cell however it arrives:
