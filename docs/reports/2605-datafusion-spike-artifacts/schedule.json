@@ -1,0 +1,12 @@
+{
+  "issue": 2605,
+  "arm_configs": 5,
+  "iterations": 3,
+  "counterbalanced": false,
+  "note": "RECORD OF THE MEASURED RUN, written after the fact from run-matrix.sh's rotation rule for ITERS=3 (the driver now emits this file itself). 3 iterations over 5 arm configs is NOT counterbalanced: rotation only counterbalances over a complete cycle, so `datafusion:1` never occupies a position later than 3rd and `row_pushdown` never one earlier than 3rd. The residual position bias is controlled for in the analysis, not by the schedule \u2014 see the report's cold-fault covariate regression (R^2=0.980) and the per-arm residual table. The driver now REFUSES a partial cycle unless ALLOW_PARTIAL_CYCLE=1 is set.",
+  "orders": {
+    "1": "floor: row_engine: datafusion:1 datafusion: row_pushdown:",
+    "2": "row_engine: datafusion:1 datafusion: row_pushdown: floor:",
+    "3": "datafusion:1 datafusion: row_pushdown: floor: row_engine:"
+  }
+}

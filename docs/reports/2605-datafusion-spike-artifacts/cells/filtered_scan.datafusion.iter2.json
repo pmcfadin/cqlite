@@ -1,0 +1,34 @@
+{
+  "issue": 2605,
+  "corpus_dir": "/data/corpus-2605/sstables/perf_2605/wide_4kb-18fff7b0a2b311f190b27fcf9962b5ee",
+  "ddl_file": "docs/reports/2605-datafusion-spike-artifacts/wide_4kb.cql",
+  "iterations": 1,
+  "batch_size": 8192,
+  "df_target_partitions": null,
+  "runs": [
+    {
+      "scenario": "filtered_scan",
+      "arm": "data_fusion",
+      "iteration": 2,
+      "elapsed_nanos": 72441697527,
+      "rows_scanned": 1899750,
+      "rows_result": 937602,
+      "batches": 1908,
+      "sources": 2,
+      "merge_arm_observed": true,
+      "reconcile_entries": 1899750,
+      "cell_metadata_maps": 3100241,
+      "subphase_cold_fault_nanos": 84047070534,
+      "subphase_decompress_nanos": 1807425511,
+      "subphase_merge_nanos": 28065696371,
+      "subphase_encode_nanos": 5595141344,
+      "subphase_grpc_write_nanos": 0,
+      "peak_rss_bytes": 53739520,
+      "pushdown": false,
+      "df_target_partitions": 16,
+      "sql": "SELECT count(*) FROM t WHERE \"ck\" < 5"
+    }
+  ],
+  "iteration_base": 2,
+  "iteration_provenance": "iteration recovered from the cell FILENAME written by run-matrix.sh, which is authoritative for run order; measurements are byte-for-byte unchanged. Cells produced after --iteration-base exists are stamped by the harness itself."
+}
