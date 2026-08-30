@@ -46,6 +46,33 @@ def _is_compared(name: str) -> bool:
     return not name.startswith("_") or name in COMPARED_DUNDERS
 
 
+def _class_members(node: ast.ClassDef) -> set[str]:
+    """Every attribute name a stub class body declares.
+
+    Three shapes, because all three are plain attributes at runtime and the
+    runtime comparison cannot tell them apart:
+
+    * ``def name(...)`` / ``async def name(...)`` -- methods, and ``@property``
+      getters (a decorated ``FunctionDef``);
+    * ``name: int`` -- an annotated attribute, which is how the stub declares a
+      ``#[pyo3(get)]`` struct field (``StreamingConfig.buffer_size``). Collecting
+      only ``FunctionDef`` here reported those fields as drift on a FAITHFUL
+      stub -- exactly the kind of red that teaches people to delete the test;
+    * ``name = ...`` -- an unannotated class attribute.
+    """
+    members: set[str] = set()
+    for member in node.body:
+        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            members.add(member.name)
+        elif isinstance(member, ast.AnnAssign) and isinstance(member.target, ast.Name):
+            members.add(member.target.id)
+        elif isinstance(member, ast.Assign):
+            for target in member.targets:
+                if isinstance(target, ast.Name):
+                    members.add(target.id)
+    return members
+
+
 class _Stub:
     """The declared surface, read structurally from the ``.pyi`` AST."""
 
@@ -64,11 +91,7 @@ class _Stub:
 
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
-                self.classes[node.name] = {
-                    member.name
-                    for member in node.body
-                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                }
+                self.classes[node.name] = _class_members(node)
                 self.module_names.add(node.name)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.functions[node.name] = node
@@ -190,7 +213,13 @@ def test_open_signature_matches_stub():
     stub = _stub()
     assert "open" in stub.functions, f"{stub.path.name} declares no module-level `open`"
     stub_positional, stub_keyword_only = _param_names(stub.functions["open"])
+    # Non-vacuity: two empty parameter sets would "agree" trivially, so a
+    # silently under-reading AST walk would green instead of reporting drift.
+    assert stub_positional, f"{stub.path.name} declares `open` with no positional parameter"
+    assert stub_keyword_only, f"{stub.path.name} declares `open` with no keyword-only parameters"
 
+    # Raises ValueError when the extension exposes no signature at all -- which
+    # is itself drift worth failing on, not something to tolerate.
     signature = inspect.signature(cqlite.open)
     runtime_positional = [
         name
