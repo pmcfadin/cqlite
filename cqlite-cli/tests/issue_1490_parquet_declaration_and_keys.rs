@@ -1354,12 +1354,12 @@ fn a_varint_above_u64_max_is_preserved_and_compares_exactly() {
     );
 
     // A varint that fits an i64 is unaffected: same `Int`, before and after.
-    let small = format!(concat!(
-        r#"{{"partition":{{"key":["k"]}},"rows":[{{"type":"row","clustering":[],"#,
-        r#""cells":[{{"name":"v","value":-42}}]}}]}}"#,
+    let small = concat!(
+        r#"{"partition":{"key":["k"]},"rows":[{"type":"row","clustering":[],"#,
+        r#""cells":[{"name":"v","value":-42}]}]}"#,
         "\n"
-    ),);
-    let rewritten = preserve_exact_lexemes(&small, &columns).expect("the rewrite must succeed");
+    );
+    let rewritten = preserve_exact_lexemes(small, &columns).expect("the rewrite must succeed");
     let doc = parse_document_str_with_keys(&rewritten, Path::new("<synthetic>"), true, &keys)
         .expect("parse");
     let rows = project_golden(&doc, &columns, &["id"], &[]).expect("project");
