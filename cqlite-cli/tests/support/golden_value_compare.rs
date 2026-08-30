@@ -410,7 +410,15 @@ pub fn compare_rows(
             let gv = g.get(name).unwrap_or(&Value::Null);
             // CSV has no types, so a container arrives as one flat text field and
             // has to be decoded back into the golden's shape before comparison.
-            let decoded = match csv_decoded(gv, cv, egress, &column.ty, name, &skips) {
+            let decoded = match csv_decoded(
+                gv,
+                cv,
+                egress,
+                &column.ty,
+                name,
+                &skips,
+                column_kinding(column),
+            ) {
                 Ok(decoded) => decoded,
                 Err(why) => {
                     // The CLI's text is not the grammar the declared type states
@@ -697,6 +705,7 @@ fn column_kinding(column: &Column) -> Kinding {
 /// own root node; an imbalance is one way that node's derived question fails. So
 /// the decoder is never asked to split a text a CORRECT CLI would render
 /// unbalanced: such a node is refused first, and the split is not attempted.
+#[allow(clippy::too_many_arguments)]
 fn csv_decoded(
     gv: &Value,
     cv: &Value,
@@ -704,6 +713,7 @@ fn csv_decoded(
     ty: &CqlType,
     path: &str,
     skips: &SkipPaths<'_>,
+    kinding: Kinding,
 ) -> Result<Option<Value>, String> {
     if egress != Egress::Csv || !matches!(gv, Value::Array(_) | Value::Object(_)) {
         return Ok(None);
@@ -715,7 +725,10 @@ fn csv_decoded(
     // text instead of being required to invert the grammar. Without it a single
     // excluded inner field fails the whole cell, which is what forced
     // `udt_nested`'s exclusion to be whole-column (review finding F5).
-    csv_container::decode_at(gv, text, ty, path, &|p: &str| skips.excludes(p)).map(Some)
+    // The decoder is entered at the COLUMN's own kinding, which is exactly what
+    // `At::column` gives the comparator below, so the two ask `node_refusal` the
+    // same question at the same node (the drift this lane's history is made of).
+    csv_container::decode_at(gv, text, ty, path, &|p: &str| skips.excludes(p), kinding).map(Some)
 }
 
 /// A total, side-independent PAIRING key: the canonical primary key, then the whole
@@ -846,8 +859,8 @@ fn compare_value_at(
     // is deliberate and conservative — it FAILS the lane rather than minting a
     // suppression out of a partially-decided node — and it is what keeps the
     // earlier rule ("a refusal at ANY depth makes the gap `Unresolved`") true.
-    let refused_here =
-        egress == Egress::Csv && csv_container::node_refusal(golden, Some(ty)).is_some();
+    let refused_here = egress == Egress::Csv
+        && csv_container::node_refusal(golden, Some(ty), at.kinding).is_some();
     // IS THIS NODE THE DECLARED DIVERGENCE? Asked at every node of the gap's
     // subtree, because that is where the divergence lives: the `set<double>` gap
     // is declared on the column and diverges at three of its seven members.
@@ -946,7 +959,7 @@ fn compare_value_body(
     // bracket kind and every enclosing level keep being compared. It cannot fire
     // for JSON, which carries its own structure and needs no decoding.
     if egress == Egress::Csv {
-        if let Some(why) = csv_container::node_refusal(golden, Some(ty)) {
+        if let Some(why) = csv_container::node_refusal(golden, Some(ty), at.kinding) {
             at.refusals.record(&at.path, &why);
             return csv_container::decidable_despite_node_refusal(golden, cli);
         }

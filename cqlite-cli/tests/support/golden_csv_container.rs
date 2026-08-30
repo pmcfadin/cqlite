@@ -276,6 +276,7 @@
 //! defect under test.
 
 use super::schema::CqlType;
+use super::{stringified_blob_spelling, Kinding};
 use serde_json::{Map, Value};
 
 /// The ONE bracket pair a container of this declared type may be rendered with
@@ -338,7 +339,7 @@ pub fn empty_rendering(ty: &CqlType) -> Option<String> {
 /// it, and what the rendering cannot do is tell it apart from a container of one
 /// member that renders empty. The DDL is consulted for that one question only —
 /// whether a member of the declared element type can render as the empty string.
-pub fn node_refusal(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
+pub fn node_refusal(golden: &Value, ty: Option<&CqlType>, kinding: Kinding) -> Option<String> {
     // EMPTY-CONTAINER: zero members and one EMPTY member render identically.
     // Keyed on the AFFIRMATIVE answer — this element type really can render
     // empty — so an unknown or non-collection type does not refuse.
@@ -351,7 +352,7 @@ pub fn node_refusal(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
             );
         }
     }
-    decode_does_not_recover(golden, ty)
+    decode_does_not_recover(golden, ty, kinding)
 }
 
 /// Run the DECODER'S OWN splitter on the golden's own rendering: does it give THIS
@@ -390,7 +391,11 @@ pub fn node_refusal(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
 /// which happens to share the golden's bytes passes — the module doc's inherent
 /// limit of an unquoted format, of which EMPTY-CONTAINER is the one instance
 /// bounded separately because it attacks the member COUNT.
-fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
+fn decode_does_not_recover(
+    golden: &Value,
+    ty: Option<&CqlType>,
+    kinding: Kinding,
+) -> Option<String> {
     // A scalar node has no body of its own: every cause here is about the body
     // that HOLDS it, so the container one level up is what reports them.
     if is_scalar(golden) {
@@ -398,7 +403,7 @@ fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<Strin
     }
     // An undeclared type is not refused: see the note on `node_refusal`'s `ty`.
     let ty = ty?;
-    let rendering = golden_rendering(golden, Some(ty))?;
+    let rendering = golden_rendering(golden, Some(ty), kinding)?;
     let parts = match members(&rendering, ty) {
         Ok(parts) => parts,
         // The splitter cannot read the golden's own rendering at all. `members`
@@ -422,7 +427,9 @@ fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<Strin
             let want = items
                 .iter()
                 .enumerate()
-                .map(|(i, item)| golden_rendering(item, member_type(Some(ty), i)))
+                .map(|(i, item)| {
+                    golden_rendering(item, member_type(Some(ty), i), member_kinding(ty, kinding))
+                })
                 .collect::<Option<Vec<String>>>()?;
             split_mismatch(&rendering, "member", &parts, &want)
         }
@@ -430,8 +437,11 @@ fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<Strin
             let want = fields
                 .iter()
                 .map(|(key, value)| {
-                    golden_rendering(value, field_type(Some(ty), key))
-                        .map(|value| format!("{key}: {value}"))
+                    // The VALUE of a map entry / UDT field is a cell value, so it
+                    // keeps its natural kind — `compare::compare_map` and
+                    // `compare::udt::compare_udt` say the same thing.
+                    golden_rendering(value, field_type(Some(ty), key), Kinding::Natural)
+                        .map(|value| format!("{}: {value}", entry_key_rendering(ty, key)))
                 })
                 .collect::<Option<Vec<String>>>()?;
             if let Some(why) = split_mismatch(&rendering, "entry", &parts, &want) {
@@ -450,16 +460,22 @@ fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<Strin
             fields
                 .iter()
                 .zip(parts.iter())
-                .find_map(|((key, _), part)| match entry_cut(part) {
-                    Err(why) => Some(format!("the golden's own rendering: {why}")),
-                    Ok((got, _)) if got != key => Some(format!(
-                        "the decoder recovers key {} from the golden's own entry {}, not the \
-                         golden's key {}",
-                        brief(got),
-                        brief(part),
-                        brief(key)
-                    )),
-                    Ok(_) => None,
+                .find_map(|((key, _), part)| {
+                    // Compared against the key AS RENDERED, which for a map key is
+                    // the CSV spelling of the golden's stringified text — the same
+                    // text `compare::compare_map` canonicalizes the golden key to.
+                    let key = entry_key_rendering(ty, key);
+                    match entry_cut(part) {
+                        Err(why) => Some(format!("the golden's own rendering: {why}")),
+                        Ok((got, _)) if got != key => Some(format!(
+                            "the decoder recovers key {} from the golden's own entry {}, not \
+                             the golden's key {}",
+                            brief(got),
+                            brief(part),
+                            brief(&key)
+                        )),
+                        Ok(_) => None,
+                    }
                 })
         }
         // Unreachable: the scalar case returned above and every other shape is a
@@ -528,17 +544,18 @@ fn split_mismatch(rendering: &str, unit: &str, got: &[&str], want: &[String]) ->
 /// `None` means the declared type does not describe the golden's shape here. That
 /// is deliberately NOT a refusal: the disagreement is a divergence the comparison
 /// reports, and refusing would suppress it.
-fn golden_rendering(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
+fn golden_rendering(golden: &Value, ty: Option<&CqlType>, kinding: Kinding) -> Option<String> {
     match (golden, ty) {
         (
             Value::Array(items),
             Some(seq @ (CqlType::List(_) | CqlType::Set(_) | CqlType::Tuple(_))),
         ) => {
             let (open, close) = brackets(seq)?;
+            let member_kinding = member_kinding(seq, kinding);
             let body = items
                 .iter()
                 .enumerate()
-                .map(|(i, item)| golden_rendering(item, member_type(ty, i)))
+                .map(|(i, item)| golden_rendering(item, member_type(ty, i), member_kinding))
                 .collect::<Option<Vec<String>>>()?
                 .join(", ");
             Some(format!("{open}{body}{close}"))
@@ -548,8 +565,9 @@ fn golden_rendering(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
             let body = fields
                 .iter()
                 .map(|(key, value)| {
-                    golden_rendering(value, field_type(ty, key))
-                        .map(|value| format!("{key}: {value}"))
+                    // A map VALUE / UDT field is a cell value: natural kind.
+                    golden_rendering(value, field_type(ty, key), Kinding::Natural)
+                        .map(|value| format!("{}: {value}", entry_key_rendering(object, key)))
                 })
                 .collect::<Option<Vec<String>>>()?
                 .join(", ");
@@ -558,10 +576,122 @@ fn golden_rendering(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
         // A scalar renders as its own text whatever the DDL says of it: the golden
         // is the authority for what the VALUE is, and a golden/DDL shape
         // disagreement is reported by the comparison rather than refused here.
-        (scalar, _) if is_scalar(scalar) => Some(scalar_text(scalar)),
+        (scalar, _) if is_scalar(scalar) => Some(scalar_csv_text(scalar, ty, kinding)),
         // A container golden under a declared type that is not that kind of
         // container: the shape divergence belongs to the comparison.
         _ => None,
+    }
+}
+
+/// The [`Kinding`] of a member of a SEQUENCE node of declared type `seq`.
+///
+/// Mirrors `compare::compare_value_body`'s list/set/tuple split, which is where
+/// the rule is derived from `cassandra-5.0.8 JsonTransformer` (see [`Kinding`]): a
+/// multicell SET's element IS its cell PATH and is written `writeString`, while a
+/// list's element, a tuple's slot and every frozen collection's member is a cell
+/// VALUE written `writeRawValue`.
+///
+/// `seq`'s own `kinding` is passed straight through for a set, exactly as the
+/// comparator passes `at.kinding` at [`super::Depth::TopLevel`]. It needs no depth
+/// test of its own because a set reached by RECURSION is always given
+/// [`Kinding::Natural`] here — every recursive call below hands a child either
+/// `Kinding::Natural` or this function's answer for its own sequence — so only the
+/// caller-supplied ROOT kinding can ever be `Stringified`, and a nested set is
+/// frozen and holds cell values.
+fn member_kinding(seq: &CqlType, kinding: Kinding) -> Kinding {
+    match seq {
+        CqlType::Set(_) => kinding,
+        _ => Kinding::Natural,
+    }
+}
+
+/// The text the CSV rendering carries for one object entry's KEY.
+///
+/// A UDT entry's key is a FIELD NAME — not a value — and the grammar writes it
+/// verbatim. A MAP entry's key IS a value, and the golden always spells it under
+/// [`Kinding::Stringified`], because a JSON object key can only be a string; that
+/// is the same reading `compare::compare_map` applies to the golden key (and the
+/// reason it holds the CLI's own key to [`Kinding::Natural`]), so the same
+/// translation applies here.
+fn entry_key_rendering(object: &CqlType, key: &str) -> String {
+    match object {
+        CqlType::Map(key_ty, _) => stringified_csv_text(key.to_string(), key_ty),
+        _ => key.to_string(),
+    }
+}
+
+/// The text a scalar carries inside the golden's own rendering, translated to the
+/// CSV spelling where the golden's own spelling at THIS position is not it.
+///
+/// An untyped position is left verbatim: no translation can be derived without a
+/// declared type, and the shape disagreement belongs to the comparison.
+fn scalar_csv_text(scalar: &Value, ty: Option<&CqlType>, kinding: Kinding) -> String {
+    let text = scalar_text(scalar);
+    match (kinding, ty) {
+        (Kinding::Stringified, Some(ty)) => stringified_csv_text(text, ty),
+        _ => text,
+    }
+}
+
+/// The CSV text a golden scalar at a [`Kinding::Stringified`] position denotes.
+///
+/// # The two sides, and which authority each comes from
+///
+/// A stringified golden is `writeString(type.getString(v))` — the GOLDEN side, read
+/// from the pin `cassandra-5.0.8` (the per-type census is in [`Kinding`]'s doc).
+/// The CSV side is a question about CQLite's OWN output shape, so it is read from
+/// `cqlite_core::util::value_fmt::ValueFormatter::format_value`, which is
+/// legitimate for the same reason [`member_can_render_empty`] states at length.
+///
+/// # Why only `blob`
+///
+/// Walked over every type that can occupy a stringified position (a partition-key
+/// component, a multicell set's element, a map key). `getString` is
+/// `serializer.toString(deserialize(v))`:
+///
+///   * **`blob` — DIFFERS, and MATERIALLY.** `BytesSerializer.toString` is
+///     `ByteBufferUtil.bytesToHex`, the BARE lowercase hex, so the empty blob is
+///     `""`; `ValueFormatter` renders `format!("0x{hex}")`, so the empty blob is
+///     `0x`. Left untranslated, a sole empty blob member synthesized an EMPTY body
+///     and the node was refused as unrecoverable — and a refused one-member node
+///     accepts any framed body at all, so the member went uncompared. Translated
+///     by [`super::stringified_blob_spelling`], the one place this repository
+///     states the rule;
+///   * **`timestamp` — differs, IMMATERIALLY.** `FORMATTER_UTC`'s
+///     `yyyy-MM-dd'T'HH:mm:ss.SSSX` against `ValueFormatter::format_timestamp`'s
+///     `YYYY-MM-DD HH:MM:SS.fff+0000`. That is the lane's DECLARED timestamp
+///     narrowing and this function does not close it; it cannot move a `, `, a
+///     `: ` (the pattern's colons are digit-flanked) or a bracket, and neither
+///     spelling is ever empty, so the structural question is unaffected;
+///   * **every other type — IDENTICAL text.** `boolean` is `Boolean.toString()` on
+///     both sides; the integer family is `String.valueOf` / `BigInteger.toString(10)`
+///     against `to_string()`; `float`/`double`/`decimal` differ only in the
+///     narrowings this lane already declares (trailing zeros, exponent form), which
+///     like the timestamp cannot carry a separator, a bracket or an empty spelling;
+///     `text`/`varchar`/`ascii`, `uuid`/`timeuuid`, `date`, `time`, `duration` and
+///     `inet` are spelled by the same function on both sides.
+///
+/// A CONTAINER type cannot be reached: this is called for a scalar golden only,
+/// and a frozen container at a stringified position is the case [`Kinding`] names
+/// as NOT COVERED (`getString` spells the whole value as one string, which the
+/// comparison reports as a shape divergence).
+///
+/// TOTAL over `CqlType` with no wildcard, for the reason
+/// [`member_can_render_empty`] gives: a new variant must have its answer
+/// established here rather than inherited from whichever side a wildcard sat on.
+fn stringified_csv_text(text: String, ty: &CqlType) -> String {
+    match ty {
+        CqlType::Blob => stringified_blob_spelling(&text).unwrap_or(text),
+        CqlType::Numeric(_)
+        | CqlType::Text(_)
+        | CqlType::Boolean
+        | CqlType::Timestamp
+        | CqlType::Opaque(_)
+        | CqlType::List(_)
+        | CqlType::Set(_)
+        | CqlType::Map(..)
+        | CqlType::Tuple(_)
+        | CqlType::Udt(_) => text,
     }
 }
 
@@ -820,8 +950,8 @@ pub type Excluded<'a> = dyn Fn(&str) -> bool + 'a;
 /// each container kind must be rendered with. A map/UDT decodes to the
 /// `[{"key":…,"value":…}, …]` spelling the JSON egress uses, so the existing map
 /// comparison applies unchanged.
-pub fn decode(golden: &Value, text: &str, ty: &CqlType) -> Result<Value, String> {
-    decode_at(golden, text, ty, "", &|_| false)
+pub fn decode(golden: &Value, text: &str, ty: &CqlType, kinding: Kinding) -> Result<Value, String> {
+    decode_at(golden, text, ty, "", &|_| false, kinding)
 }
 
 /// [`decode`], but aware of the paths the comparison excludes.
@@ -849,12 +979,13 @@ pub fn decode_at(
     ty: &CqlType,
     path: &str,
     excluded: &Excluded<'_>,
+    kinding: Kinding,
 ) -> Result<Value, String> {
     if excluded(path) {
-        return Ok(decode_shape(golden, text, ty, path, excluded)
+        return Ok(decode_shape(golden, text, ty, path, excluded, kinding)
             .unwrap_or_else(|_| Value::String(text.to_string())));
     }
-    decode_shape(golden, text, ty, path, excluded)
+    decode_shape(golden, text, ty, path, excluded, kinding)
 }
 
 /// The decode itself, with no exclusion check of its own at this level — that
@@ -866,6 +997,7 @@ fn decode_shape(
     ty: &CqlType,
     path: &str,
     excluded: &Excluded<'_>,
+    kinding: Kinding,
 ) -> Result<Value, String> {
     // A node the GOLDEN's own content makes unsplittable is not split: its FRAME
     // is still required (that is `strip`, i.e. property 2 of
@@ -878,7 +1010,7 @@ fn decode_shape(
     //
     // The comparator asks `node_refusal` at the same node, on the same golden and
     // the same declared type, so it expects exactly what is left here.
-    if node_refusal(golden, Some(ty)).is_some() {
+    if node_refusal(golden, Some(ty), kinding).is_some() {
         return Ok(Value::String(strip(text, ty)?.to_string()));
     }
     // The declared TYPE decides the structure — including which bracket is
@@ -886,12 +1018,24 @@ fn decode_shape(
     // two disagree the child is decoded against `null`, and the comparison is what
     // reports the shape divergence.
     match ty {
-        CqlType::List(element) | CqlType::Set(element) => {
-            decode_sequence(golden, text, ty, &|_| Some(element), path, excluded)
-        }
-        CqlType::Tuple(items) => {
-            decode_sequence(golden, text, ty, &|i| items.get(i), path, excluded)
-        }
+        CqlType::List(element) | CqlType::Set(element) => decode_sequence(
+            golden,
+            text,
+            ty,
+            &|_| Some(element),
+            path,
+            excluded,
+            member_kinding(ty, kinding),
+        ),
+        CqlType::Tuple(items) => decode_sequence(
+            golden,
+            text,
+            ty,
+            &|i| items.get(i),
+            path,
+            excluded,
+            member_kinding(ty, kinding),
+        ),
         CqlType::Map(_, value_ty) => {
             decode_object(golden, text, ty, &|_| Some(value_ty), path, excluded)
         }
@@ -922,6 +1066,7 @@ fn decode_shape(
 /// `element_ty` answers `None` only for a member BEYOND a tuple's declared arity,
 /// which has no declared type; such a member is kept as raw text so the
 /// comparator reports the arity divergence rather than the decoder swallowing it.
+#[allow(clippy::too_many_arguments)]
 fn decode_sequence<'t>(
     golden: &Value,
     text: &str,
@@ -929,6 +1074,7 @@ fn decode_sequence<'t>(
     element_ty: &dyn Fn(usize) -> Option<&'t CqlType>,
     path: &str,
     excluded: &Excluded<'_>,
+    element_kinding: Kinding,
 ) -> Result<Value, String> {
     let parts = members(text, ty)?;
     let items = golden.as_array();
@@ -938,7 +1084,14 @@ fn decode_sequence<'t>(
         // length mismatch is what the comparison then reports.
         let child_golden = items.and_then(|g| g.get(i)).unwrap_or(&Value::Null);
         out.push(match element_ty(i) {
-            Some(et) => decode_at(child_golden, part, et, &format!("{path}[{i}]"), excluded)?,
+            Some(et) => decode_at(
+                child_golden,
+                part,
+                et,
+                &format!("{path}[{i}]"),
+                excluded,
+                element_kinding,
+            )?,
             None => Value::String((*part).to_string()),
         });
     }
@@ -975,7 +1128,9 @@ fn decode_object<'t>(
         };
         let child_golden = fields.and_then(|g| g.get(key)).unwrap_or(&Value::Null);
         let decoded = match value_ty(key) {
-            Some(vt) => decode_at(child_golden, value, vt, &child, excluded)?,
+            // A map VALUE / UDT field is a cell value: natural kind, as in
+            // `golden_rendering`'s object arm and in the comparator.
+            Some(vt) => decode_at(child_golden, value, vt, &child, excluded, Kinding::Natural)?,
             None => Value::String(value.to_string()),
         };
         entry.insert("value".to_string(), decoded);

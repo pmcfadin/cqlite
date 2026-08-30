@@ -20,6 +20,20 @@
 use super::*;
 use serde_json::json;
 
+/// [`super::node_refusal`] at a NATURAL position, which is where all but the
+/// stringified cases below live. Shadows the module's own name on purpose, so a
+/// case that is not about [`Kinding`] does not have to spell one; a STRINGIFIED
+/// case calls `super::node_refusal` directly and NAMES its kinding, which is the
+/// only way to tell the two apart in a diff.
+fn node_refusal(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
+    super::node_refusal(golden, ty, Kinding::Natural)
+}
+
+/// [`super::decode`] at a NATURAL position, for the same reason.
+fn decode(golden: &Value, text: &str, ty: &CqlType) -> Result<Value, String> {
+    super::decode(golden, text, ty, Kinding::Natural)
+}
+
 /// The declared type of a column, parsed by the lane's OWN DDL parser from a
 /// `CREATE TABLE` — so these cases exercise the real authority (the committed
 /// schema) rather than a hand-built type tree.
