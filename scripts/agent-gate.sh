@@ -383,6 +383,11 @@
 #                      real SIGINT probe on the driver's own trap wiring. Hermetic:
 #                      synthetic result dirs + synthetic perf CSVs, no
 #                      cargo/perf/sudo/corpus/network, never root.
+#                      Also runs scripts/tests/test_ws0_clock_guards.sh (#3248) — the
+#                      occupancy-enforced clock derivation (scripts/perf/ws0_clock.py).
+#                      16 cases; exists because #3299 published cycles/task-clock as a
+#                      frequency, retracted it, then made the same error again, so the
+#                      control had to become a tool that REFUSES rather than a caption.
 #                      Also runs scripts/tests/test_ws0_cpu_pinning_guards.sh (#3272
 #                      item 10) — the MEASUREMENT-APPARATUS half of the same rig, split
 #                      out because it asks whether the observations are of the RIGHT
@@ -5979,10 +5984,64 @@ run_tooling_tests() {
   # A broken measurement guard publishes a wrong number instead of failing, so it
   # needs a standing test rather than a review round — and per #3249 the bar is
   # "observed to fire", not "present".
+  # The CLOSED verdict-evidence checker (#3248 jobs 73/75/78). Wired HERE rather than left to be
+  # run by hand: an unwired suite is dead weight, and this one is the standing cover for a guard
+  # that review holed three rounds running.
+  echo ">>> [$name] bash scripts/tests/test_ws0_quiescence_evidence_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_quiescence_evidence_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 quiescence-evidence guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    return 1
+  fi
   echo ">>> [$name] bash scripts/tests/test_ws0_report_guards.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 measurement-rig integrity guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 CLOCK guards (#3248) — the occupancy-enforced clock derivation.
+  # AC4 of #3248 asked for a reconciliation "stating the clock basis". This test exists
+  # because STATING IT DEMONSTRABLY DOES NOT WORK: #3299 published `cycles / task-clock`
+  # as a frequency (under CPU-wide `perf stat -C` that is occupancy x frequency, since
+  # task-clock accrues elapsed x nCPUs INCLUDING IDLE CPUs), retracted it at a printed
+  # 1.271 "GHz", and then reached for the same quantity AGAIN hours later — the first
+  # retraction having overridden a caption written specifically to prevent it. A prose
+  # control failed twice in the hands of people who knew about it, so the control is now
+  # a tool that REFUSES, and this is the standing proof that it still refuses.
+  # 16 cases: every guard fed the input it must reject, asserting exit code AND cause
+  # token, plus an affirmative accept case that pins the frequency, the exact TSC, two
+  # independent occupancy sources and the labelled trap value. Hermetic — the tool
+  # consumes a perf CSV and invokes nothing, so no perf, corpus, cargo or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_clock_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_clock_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 occupancy-enforced clock guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 QUIESCENCE guards (#3248) — the box-quiescence gate for a measurement rep.
+  # Wired here because roborev job 60 finding 7 caught that it was NOT: the clock suite was
+  # added and this one was not, so 19 checks sat in the tree with no standing protection —
+  # a guard that exists and never runs, which is this issue's own subject matter.
+  echo ">>> [$name] bash scripts/tests/test_ws0_quiescence_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_quiescence_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 box-quiescence guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

@@ -277,7 +277,7 @@ for rep, rps in ((1, 300.0), (2, 480.0), (3, 200.0)):
         # preflight, so a body without it is refused correctly but for an unrelated reason.
         "rows_total": rows, "bytes_total": per_scan_bytes,
         "rows_per_s": rows / secs, "duration_s": secs}) + "\n")
-    (d / f"perf-{tag}.csv").write_text("8000000,,cycles,,,,\n16000000,,instructions,,,,\n")
+    (d / f"perf-{tag}.csv").write_text("8000000,,cycles,1000000000,100.00,1.000,GHz\n16000000,,instructions,1000000000,100.00,2.000,insn per cycle\n")
     (d / f"{tag}.prewarm.status").write_text("ok\n")
     # The UNTIMED PREFLIGHT the reporter derives the expectation from — 3 requests, so the
     # reporter has to divide rather than compare totals whole.

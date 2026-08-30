@@ -1,0 +1,77 @@
+
+==== WS0 SAME-SESSION BASELINE (issue #3096 rig, hardened #3272) ====
+baseline     : the canonical measurement corpus, measured as a WS0 BASELINE [13 canonical field(s) compared BEFORE the first rep, recorded in session-corpus-pin.json]
+corpus       : /data/ws0-3096
+corpus sha256: 4a903f6fa27c04dbf87a44fddf78615aed73fcd379ecaee6669f6b0d9bbae269
+corpus verify: size AND sha256 re-derived from nb-1-big-Data.db at report time (2,774,760,422 B) — the identity describes the bytes that were measured
+corpus comps : all 8 recorded component(s) were re-stat'ed and 8 of 8 re-hashed at report time
+config       : READ FROM the pre-measurement session manifest (session-corpus-pin.json) — reps/temps/arms/scan-passes/CPU pins are NOT arguments to this reporter, so a re-report cannot substitute them
+corpus pin   : this session was STARTED against this corpus (session-corpus-pin.json: 4000000 rows / 2,774,760,422 B), re-compared here
+boundaries   : 12/12 measurement boundaries VERIFIED mid-run — one recorded observation each, re-hashed FROM DISK against session-corpus-pin.json (>= 8 component(s) per boundary), read back here from corpus-boundary-observations.jsonl
+               expected set DERIVED from temperatures [warm cold] x 3 rep(s) x arms [scan bypass] (the bare scan is a PEER of the flight arms in the driver's rep loop), read from the pre-measurement session manifest; a MISSING, DUPLICATE or UNEXPECTED observation REFUSES this report
+corpus shape : 4000000 rows / 40000 partitions / 693.69 B/row
+binary pin   : 3 binaries at 305f20b6edc6 (DIRTY tree, 2 changed path(s) — the revision does NOT fully describe what was built), build mode built; digests in binary-provenance.json
+request pin  : ticket-template.json sha256 f4efb7b7724986f6… (534 B) — pinned BEFORE the first rep and re-derived from disk here; every Flight rep re-read this file
+pinning      : server 2,10 (physical-core siblings 2 10 verified on ip-172-31-7-163 pre-measurement, recorded in pinning-verification.json), client 4,12,5,13,6,14,7,15
+counters     : perf stat -C 2,10  [CPU-WIDE; no -p anywhere]
+server pinned: http://127.0.0.1:18815 — EVERY Flight rep's recorded `endpoint` was compared EXACTLY against this pre-measurement pin, so the rows above were served by the process those counters measure
+reps         : 3 (median reported, spread shown)
+selection    : temperatures [warm cold] x arms [bypass] x 3 rep(s)  (6 measured legs per arm-pair)
+               !! PARTIAL MATRIX — this session ran only the selection above (full = temperatures [warm cold] x arms [bypass merge]). Absent combinations were NOT MEASURED here; do not read this report as covering them.
+
+[WARM]
+  bare scan (execute_streaming)           347,987 rows/s  [344,708..348,629, spread 1.1%]       19,600 cycles/row [19,487..19,611, 0.6%]   IPC 1.44   rows=12,000,000 (n=3)
+  flight do_get (bypass requested)        206,480 rows/s  [206,239..211,211, spread 2.4%]       26,307 cycles/row [26,253..26,609, 1.4%]   IPC 1.36   rows=36,000,000 (n=3)
+      !! ARROW PAYLOAD VOLUME is a SELF-CONSISTENCY check — NOT a verification — on flight/bypass (warm) rep(s) 1, 2, 3: the reference is this session's UNTIMED PREFLIGHT, over the SAME ticket, server process and response path.
+         So a UNIFORM shortfall is present on both sides in equal measure, the byte counts AGREE, and this figure can stand on a payload that is short. The independent oracle (ARROW_BUFFER_DIGEST) is UNREACHABLE for this corpus. see the ARROW PAYLOAD VOLUME bullet in NOTES for the mechanism.
+      ratio bare/flight = 1.69x   1.3x target => do_get must reach 267,682 rows/s   [BELOW TARGET]
+      !! this [BELOW TARGET] verdict and the ratio above are CONDITIONAL on an Arrow payload volume that is SELF-CONSISTENCY-CHECKED ONLY, and on the arm the server was free to decline.
+         A short payload in the Flight arm RAISES its rows/s and LOWERS its cycles/row, so an unchecked shortfall biases this comparison TOWARD PASS — the flattering direction, whichever verdict is printed above. see the ARROW PAYLOAD VOLUME bullet in NOTES for the mechanism.
+      cycles/row delta  = +6,707 (+34.2%)
+      per-round (PAIRED by the OBSERVED round, as method §3b step 4 requires):
+        ratios r1=1.69x, r2=1.67x, r3=1.65x
+        within-round 1.3x target met in 0/3 round(s); paired ratio median 1.67x [1.65..1.69]
+        arm positions r1=bare@1/flight@2, r2=bare@2/flight@1, r3=bare@1/flight@2
+
+[COLD]
+  bare scan (execute_streaming)           197,410 rows/s  [196,551..197,977, spread 0.7%]       18,081 cycles/row [18,035..18,301, 1.5%]   IPC 1.45   rows=12,000,000 (n=3)
+  flight do_get (bypass requested)        196,573 rows/s  [196,212..196,622, spread 0.2%]       27,231 cycles/row [27,126..27,400, 1.0%]   IPC 1.34   rows=12,000,000 (n=3)
+      !! ARROW PAYLOAD VOLUME is a SELF-CONSISTENCY check — NOT a verification — on flight/bypass (cold) rep(s) 1, 2, 3: the reference is this session's UNTIMED PREFLIGHT, over the SAME ticket, server process and response path.
+         So a UNIFORM shortfall is present on both sides in equal measure, the byte counts AGREE, and this figure can stand on a payload that is short. The independent oracle (ARROW_BUFFER_DIGEST) is UNREACHABLE for this corpus. see the ARROW PAYLOAD VOLUME bullet in NOTES for the mechanism.
+      ratio bare/flight = 1.00x   1.3x target => do_get must reach 151,854 rows/s   [PASS]
+      !! this [PASS] verdict and the ratio above are CONDITIONAL on an Arrow payload volume that is SELF-CONSISTENCY-CHECKED ONLY, and on the arm the server was free to decline.
+         A short payload in the Flight arm RAISES its rows/s and LOWERS its cycles/row, so an unchecked shortfall biases this comparison TOWARD PASS — the flattering direction, whichever verdict is printed above. see the ARROW PAYLOAD VOLUME bullet in NOTES for the mechanism.
+      cycles/row delta  = +9,150 (+50.6%)
+      per-round (PAIRED by the OBSERVED round, as method §3b step 4 requires):
+        ratios r1=1.00x, r2=1.01x, r3=1.01x
+        within-round 1.3x target met in 3/3 round(s); paired ratio median 1.01x [1.00..1.01]
+        arm positions r1=bare@1/flight@2, r2=bare@2/flight@1, r3=bare@1/flight@2
+
+NOTES
+  * warm and cold are SEPARATE claims above; nothing here is blended.
+  * this rig makes NO INTERLEAVING CLAIM and NO ROUND-ORDERING CLAIM. Each rep's recorded round/position/arms_in_round/monotonic_ns are carried through to results.json (.recorded_round_metadata) as INERT RECORDED DATA for an operator to analyse; nothing here derives a property from them. Rounds recorded: [1, 2, 3], 2 arm(s) per round.
+    What IS enforced is artifact-set INTEGRITY, which is a statement about the files and not about the measurement: every arm must cover the same rounds, the positions within a round must be 1..n exactly once, arms_in_round must match the arms present, no two reps may share an instant, and the round LABELS must not contradict the recorded INSTANTS. A session violating any of these is REFUSED. Consecutive round pairs available to compare: 2 (over 6 rep(s)) — a COUNT, not a verdict: at one recorded round it is 0 and no ordering was compared.
+    A same-session interleaved drift control WAS specified for this rig and is NOT IMPLEMENTED OR ENFORCED here. The earlier claim was deleted because it reported a positive verdict having compared nothing at the default --reps 1 (#3272 round 4); re-adding an OBSERVED control on real hardware is tracked by #3287/#3299. Until then, read the per-round direction count below and treat any cross-arm difference as UNCONTROLLED for drift: the untouched bare scan moved ~10% in one hour on the recorded box.
+  * this rig makes NO INTERLEAVING CLAIM and NO ROUND-ORDERING CLAIM. Each rep's recorded round/position/arms_in_round/monotonic_ns are carried through to results.json (.recorded_round_metadata) as INERT RECORDED DATA for an operator to analyse; nothing here derives a property from them. Rounds recorded: [1, 2, 3], 2 arm(s) per round.
+    What IS enforced is artifact-set INTEGRITY, which is a statement about the files and not about the measurement: every arm must cover the same rounds, the positions within a round must be 1..n exactly once, arms_in_round must match the arms present, no two reps may share an instant, and the round LABELS must not contradict the recorded INSTANTS. A session violating any of these is REFUSED. Consecutive round pairs available to compare: 2 (over 6 rep(s)) — a COUNT, not a verdict: at one recorded round it is 0 and no ordering was compared.
+    A same-session interleaved drift control WAS specified for this rig and is NOT IMPLEMENTED OR ENFORCED here. The earlier claim was deleted because it reported a positive verdict having compared nothing at the default --reps 1 (#3272 round 4); re-adding an OBSERVED control on real hardware is tracked by #3287/#3299. Until then, read the per-round direction count below and treat any cross-arm difference as UNCONTROLLED for drift: the untouched bare scan moved ~10% in one hour on the recorded box.
+  * only the SELECTION printed above was measured; an absent temperature or arm was NOT run and nothing here speaks to it (results.json .selection).
+  * every COLD flight rep is verified to be EXACTLY ONE successful request (requests_ok == 1) and every rep's rows an exact multiple of the corpus row count, so no warm request can be reported inside a cold figure; a rep that violates either is REFUSED, not blended. The corpus row count is REQUIRED (an absent corpus-identity.json is fatal), so this check can never be skipped while these notes claim it ran (#3272).
+  * the ARM of each flight row above is the value this rig REQUESTED via CQLITE_FLIGHT_MERGE_PATH, and the arm actually EXECUTED is NOT OBSERVED (results.json .executed_merge_path). `bypass` only PREFERS the single-source fast path: cqlite-flight never lets it override a correctness precondition, so a rep can execute the K-WAY MERGER under a requested `bypass` — and the server does not report the arm it took (the computed reason is consumed by an `if` and never logged, metered or returned; read_path_probe is an IN-PROCESS atomic this rig, measuring a separate process over gRPC, cannot read).
+    So read every per-arm figure and the per-arm bare/flight RATIO as conditional on a request the server was free to decline — in the limit the two arm rows could be the same code measured twice. Emitting the selected arm needs a change to production cqlite-flight; until then this is NOT verified, exactly as §3b.1's drift control is not.
+  * the ARROW PAYLOAD VOLUME of each flight rep is compared against this session's UNTIMED PREFLIGHT WHERE ONE EXISTS — per scan and exactly — and that comparison is a SELF-CONSISTENCY check, NOT a verification (results.json .content_volume_self_consistency).
+    A session with NO PREFLIGHT (a cold-only run: the prewarm is skipped on the cold arm by design, because prewarming it would make `cold` meaningless) has NO COMPARISON AT ALL for this property — not a weak one, none. Which reps are in which state is stated beside each arm's figure above, never left to this bullet.
+    The preflight traverses the SAME ticket, the SAME server process and the SAME response path as the timed requests, so an omission that is a property of that path (a dropped Arrow column, a narrowed buffer) is present in BOTH in equal measure, their byte counts AGREE, and the check passes on a payload that is short — which would make Arrow encoding look CHEAPER, the one quantity #3096 exists to measure. What it does still refuse is a ONE-SIDED shortfall.
+    The independent oracle would be the pinned ARROW_BUFFER_DIGEST (tools/ws0-corpus-gen/src/measurement_corpus.rs); it is UNREACHABLE for this corpus, because the #3096 digest oracle refuses a corpus in which no Arrow validity bitmap ever carries an absent value, and ws0-corpus-gen writes every non-key column on every row. Closing this needs changes to production flight-loadgen (a per-step digest) AND a null plan in the corpus generator; until then this is NOT verified, exactly as the arm above is not.
+  * every figure is rows/s AND cycles/row; no CPU-share is reported (a share shift with unmoved rows/s is a FAIL, spec R1).
+  * the bare scan's cycles are SETUP-SUBTRACTED (a separately measured --setup-only perf window); the Flight arm's setup is outside its window. BOTH counters were observed — an absent or uncounted perf event is fatal, never a 0 (#3272).
+  * `cycles` is summed over BOTH SMT siblings of the pinned physical core, so cycles/row is a per-physical-core figure counted on two hardware threads.
+    Both arms are counted identically, so the ratio and the arm-to-arm delta are unaffected.
+  * every rep of BOTH arms records its PREWARM outcome in results.json (prewarm/prewarm_all_ok); a degraded prewarm is flagged above, never swallowed.
+    A warm rep is prewarmed by an UNTIMED full pass outside its perf window; the cold arm is deliberately never prewarmed, and its `skipped-cold-arm` sentinel satisfies the requirement for a COLD rep ONLY (#3272).
+  * the corpus identity is verified against the BYTES MEASURED, not trusted from corpus-identity.json: the recorded size is always re-stat'ed and the recorded sha256 re-derived from the Data.db unless --skip-corpus-digest was passed, in which case the line above says CORPUS DIGEST UNVERIFIED (#3272).
+  * the corpus was re-hashed FROM DISK at EVERY measurement boundary — after each arm's rep, not merely at the ends — against session-corpus-pin.json, and THIS REPORT READ THAT RECORD BACK: exactly one observation per (temperature, rep, arm) the session manifest declares, with a missing, duplicate or unexpected one REFUSING the report (results.json .boundary_observation_completeness).
+    The check exists because a component MUTATED mid-run and RESTORED before reporting is invisible to every end-state check — the pin, the corpus sidecar and the report-time re-hash all see the restored bytes and all agree. A refused boundary deliberately records nothing, so the ABSENCE of an observation is the signal, and a complete artifact set with an incomplete boundary record is exactly what that attack leaves behind (#3272 round 22).
+  * the corpus is CQLite-written + CQLite-read: a PERFORMANCE FIXTURE ONLY (#3042), never a correctness oracle.
+  * the #3058/#3100 absolutes (240,100 / 312,155 rows/s) were corpus- and machine-bound and are NOT reproduced here.
+

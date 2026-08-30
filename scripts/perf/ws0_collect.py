@@ -349,6 +349,7 @@ def collect_scan(
     corpus_rows: int,
     cells_per_row: int,
     pinned_corpus: pathlib.Path,
+    counted_events: tuple = REQUIRED_EVENTS,
 ) -> dict:
     """The bare-scan arm, WITH each rep's observed round/position (#3272 R3).
 
@@ -431,9 +432,15 @@ def collect_scan(
         # Both legs' counters must be OBSERVED. `.get("cycles", 0)` used to
         # fabricate a zero here, so a run with no setup artifact at all was
         # reported "SETUP-SUBTRACTED" having subtracted nothing (#3272 finding 4).
-        total = read_perf_counters(d / f"perf-{tag}.csv", f"{tag} (full run)", REQUIRED_EVENTS)
+        # EVERY CONFIGURED EVENT IS REQUIRED PRESENT, not just the two the derived figures
+        # use (#3248, roborev job 64 finding 3). The report PUBLISHES the manifest's event
+        # list, so an event that was configured but is absent from an artifact would be
+        # reported as counted while nothing had counted it -- a claim about a counter nobody
+        # verified. `perf_stat_c` passes the same `-e` set to every invocation, so every CSV
+        # of a session must carry every configured event.
+        total = read_perf_counters(d / f"perf-{tag}.csv", f"{tag} (full run)", counted_events)
         setup = read_perf_counters(
-            d / f"perf-{tag}-setup.csv", f"{tag} (setup-only leg)", REQUIRED_EVENTS
+            d / f"perf-{tag}-setup.csv", f"{tag} (setup-only leg)", counted_events
         )
         # Setup SUBTRACTED (spec R2). A non-positive result would mean the setup
         # leg somehow cost more than the full run, which is a broken measurement,

@@ -1,0 +1,14 @@
+{
+  "boot_id": "bb94898a-7792-44e1-8f38-cdafea462803",
+  "cpu_model": "Intel(R) Xeon(R) Platinum 8488C",
+  "ec2_instance_id": "i-04ac0a860eef7f241",
+  "hostname": "ip-172-31-7-163",
+  "instance_type": "c7i.4xlarge",
+  "kernel": "6.17.0-1019-aws",
+  "kptr_restrict": "0",
+  "machine_id": "ec2a413b505f9f2e0ece99141d073956",
+  "microcode": "0x2b000661",
+  "perf_event_paranoid": "-1",
+  "smt": "on",
+  "why_recorded": "The #3096 artifacts record a machine SPECIFICATION and no machine IDENTITY, so whether this is a cross-session or a cross-instance comparison is undecidable from that record. boot_id separates two sessions on one instance -- the axis #3096 lost. microcode is recorded because it moves frequency/IPC behaviour under an unchanged kernel and CPU model."
+}

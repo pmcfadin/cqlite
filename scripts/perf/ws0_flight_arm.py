@@ -252,7 +252,8 @@ def session_bound_expectations(tag: str, flight_endpoint: str) -> dict[str, str]
 
 
 def collect_flight(
-    d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int, flight_endpoint: str
+    d: pathlib.Path, temp: str, arm: str, reps: int, corpus_rows: int, flight_endpoint: str,
+    counted_events: tuple = REQUIRED_EVENTS,
 ) -> dict:
     """Arm B's measurement block for `temp`/`arm`, from this session's artifacts.
 
@@ -437,7 +438,8 @@ def collect_flight(
         # ...and its OBSERVED round + position within that round (#3272 R3).
         meta = collect_round_meta(d, tag, rep)
         round_meta[rep] = meta
-        counters = read_perf_counters(d / f"perf-{tag}.csv", tag, REQUIRED_EVENTS)
+        # Every CONFIGURED event required present, not just the derived two (#3248 finding 3).
+        counters = read_perf_counters(d / f"perf-{tag}.csv", tag, counted_events)
         # BOTH counters, not only `cycles` (#3272 review round 3, B2). This arm has no setup
         # leg to subtract, so the perf values ARE the derived quantities — and round 2
         # checked `cyc <= 0` while `ins` went straight into `ipc.append(ins / cyc)`. A perf

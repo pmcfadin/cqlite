@@ -320,6 +320,15 @@ def positive_derived(label: str, value: float, detail: str = "") -> float:
 # past any session anyone would run (the recorded #3096 sessions used 3).
 MAX_COUNT = 100_000
 
+# Minimum share of the measurement window a perf counter must have been enabled for
+# (#3248). perf prints this as field 4 of `-x,` output. Anything below it means the PMU
+# multiplexed the event and perf SCALED the count to a full window, so the value is an
+# estimate. Set just under 100 rather than at it so ordinary floating-point printing
+# ("100.00") is accepted while any real time-sharing (which shows up as clearly
+# fractional shares like 62.50 or 33.33) is refused. There is deliberately no env var
+# that lowers this: an escape hatch on a measurement guard can only buy a wrong number.
+PERF_MIN_ENABLED_PCT = 99.9
+
 
 def cli_count(name: str, value: object) -> int:
     """A COMMAND-LINE count as an int in `1..MAX_COUNT`, or `Invalid`.
@@ -408,6 +417,63 @@ def existing_dir(name: str, value: str) -> pathlib.Path:
     return p
 
 
+# The charset a perf event name may use (#3248). Deliberately conservative and an ALLOWLIST:
+# real names in use here are `cycles`, `instructions`, `ref-cycles`, `task-clock`,
+# `msr/aperf/`, `msr/mperf/`, `msr/tsc/`, plus PMU-qualified forms like `cpu/event=0x3c/`.
+# An allowlist because the value is interpolated into a `perf stat -e` argument and, more to
+# the point, an event name nobody anticipated should fail CLOSED rather than pass because no
+# deny-list entry matched it — the reason every other check in this rig is an allowlist too.
+_PERF_EVENT_RE = re.compile(r"^[A-Za-z0-9_./:=-]+$")
+
+
+def perf_event_list(label: str, value: object) -> list[str]:
+    """Parse a `perf stat -e` event list: non-empty, charset-checked, DUPLICATE-FREE.
+
+    The duplicate check is the substantive one and it is not tidiness. `read_perf_counters`
+    aggregates by event name:
+
+        counters[event] = counters.get(event, 0) + value
+
+    which is correct for a `--per-core` shape emitting several lines per event. But it means a
+    REPEATED event in `-e` — `cycles,cycles`, or the easy mistake of appending `cycles` to a
+    list that already carries it — produces two `cycles` rows that get SUMMED, reporting
+    exactly DOUBLE the true count as a perfectly ordinary integer. Nothing downstream could
+    detect it: the value is a plausible non-negative int, its enabled-percentage is 100%, and
+    every derived figure (cycles/row, IPC, the setup-subtracted delta) inherits the factor of
+    two silently. So the refusal belongs at the point the list is accepted, which is here.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise Invalid(
+            f"{label} is {value!r}, which is not a recorded event list. The report's cycles/row"
+            " and IPC are claims about specific counters, so WHICH counters is not optional."
+        )
+    tokens = [t.strip() for t in value.split(",")]
+    if any(not t for t in tokens):
+        raise Invalid(
+            f"{label} is {value!r}, which has an empty event between commas. An empty event"
+            " would be passed to perf as a bare `,` and silently counted as nothing."
+        )
+    bad = [t for t in tokens if not _PERF_EVENT_RE.match(t)]
+    if bad:
+        raise Invalid(
+            f"{label} contains event name(s) outside the permitted charset: {bad!r}."
+            " The charset is an ALLOWLIST, so an event spelling nobody anticipated fails closed"
+            " rather than passing because no deny-list entry matched it."
+        )
+    seen: dict[str, int] = {}
+    for t in tokens:
+        seen[t] = seen.get(t, 0) + 1
+    dupes = sorted(t for t, n in seen.items() if n > 1)
+    if dupes:
+        raise Invalid(
+            f"{label} repeats event(s) {dupes!r}. read_perf_counters SUMS lines by event name,"
+            " so a repeated event reports DOUBLE its true count as an ordinary integer and every"
+            " figure derived from it — cycles/row, IPC, the setup-subtracted delta — inherits the"
+            " factor of two with nothing downstream able to detect it."
+        )
+    return tokens
+
+
 def nonempty_selection(name: str, value: str, allowed: tuple[str, ...]) -> list[str]:
     """The whitespace-split selection, every member in `allowed`, or `Invalid`.
 
@@ -447,11 +513,34 @@ def read_perf_counters(
       line exists but the measurement does not, which is the silent-instrument
       failure in its purest form;
     * a value is present but unparseable, fractional, or NEGATIVE — a corrupt artifact,
+      and the FRACTIONAL half is deliberate rather than incidental: perf reports a fractional
+      count for a value it SCALED because the PMU multiplexed the event, so accepting
+      fractional counts would defeat the multiplexing guard below. (perf's HUMAN-READABLE
+      output does render time-based events like `task-clock` as fractional `msec`, but
+      `-x,` CSV mode on every form tested here emits an integer nanosecond count with an empty
+      unit. If a future perf changes that, the fix is to make the ONE consumer of that event
+      tolerant — as `ws0_clock.py` does for its advisory trap value — never to loosen this
+      parser.)
       not a zero. The negative half is #3272 review round 3, B2: hardware counters are
       non-negative by construction, and `int("-4")` used to sail through to become a
       negative `cycles`/`instructions`, then a negative setup-subtracted `ins`, then a
       negative IPC in `results.json`. Every value goes through `non_negative_int`, which
       also refuses `4.7` (a bare `int()` would truncate it to 4 and report that).
+    * a value that perf SCALED because the PMU MULTIPLEXED the event (#3248). This is the
+      fifth error and it was previously UNCHECKED: this parser read only fields 0 and 2
+      (count, event) and never field 4, perf's enabled-percentage. The docstring above
+      covers a counter that was not multiplexed IN — an absent line — but said nothing
+      about the opposite and more dangerous case, a line that IS present carrying an
+      ESTIMATE. When perf cannot fit every event on the available PMU counters it
+      time-shares them and scales the counts up to a full window, so the number looks
+      entirely ordinary and is wrong by whatever fraction the event was off. Nothing in
+      the artifact says so except that one column.
+
+      This mattered the moment `--events` became configurable (#3248 needs
+      `msr/aperf,msr/mperf,msr/tsc,ref-cycles` for the AC4 clock basis): growing the event
+      set is exactly what provokes multiplexing, so the guard is the PRECONDITION for the
+      flag, not an embellishment on it. A scaled `cycles` silently corrupts cycles/row,
+      IPC, and every setup-subtracted figure derived from it.
     """
     if not path.exists():
         raise Invalid(
@@ -469,6 +558,67 @@ def read_perf_counters(
         raw, event = fields[0].strip(), fields[2].strip()
         if not event:
             continue
+        # THE MULTIPLEXING CHECK (#3248). Field 4 is the percentage of the measurement
+        # window the counter was actually enabled for. Below 100% perf has SCALED the
+        # count, making it an estimate. Read affirmatively: an absent or unparseable
+        # percentage is an ERROR, never a permissive default, because "we could not tell
+        # whether this was scaled" and "this was not scaled" are different states and only
+        # one of them licenses using the number.
+        # FIELD 4 IS REQUIRED, NOT OPTIONAL. The first version of this guard ran only
+        # `if len(fields) > 4`, so a truncated row such as `100,,cycles` SKIPPED the
+        # enabled-percentage check entirely — a fail-open inside the guard added to close a
+        # fail-open. `perf stat -x,` always emits the column for a counter row, so its
+        # absence is a corrupt artifact rather than an older format to tolerate.
+        if len(fields) <= 4:
+            raise Invalid(
+                f"{label}: {path.name} line {lineno} event {event!r} has only"
+                f" {len(fields)} field(s); `perf stat -x,` emits at least five for a counter"
+                " row (value, unit, event, enabled_ns, enabled_pct). Without the"
+                " enabled-percentage there is no way to establish whether perf SCALED this"
+                " count for multiplexing, and an unverifiable count is not a usable one."
+            )
+        if True:
+            raw_pct = fields[4].strip()
+            if raw_pct in PERF_NOT_A_VALUE:
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} carries no"
+                    " enabled-percentage, so whether perf scaled this count for"
+                    " multiplexing cannot be established. An unverifiable count is not a"
+                    " usable one."
+                )
+            try:
+                pct = float(raw_pct)
+            except ValueError:
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} has an"
+                    f" unparseable enabled-percentage {raw_pct!r}; cannot establish"
+                    " whether the count was scaled for multiplexing."
+                ) from None
+            # NON-FINITE AND OUT-OF-RANGE FIRST. `nan < PERF_MIN_ENABLED_PCT` is False, so a
+            # NaN percentage passed the multiplexing check below — a second fail-open in the
+            # same guard, from the same cause as the missing field: the check was written as
+            # "is it BAD" rather than "is it AFFIRMATIVELY good".
+            if not math.isfinite(pct):
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} has a non-finite"
+                    f" enabled-percentage {raw_pct!r}. Every comparison with NaN is False, so"
+                    " this would not relax the multiplexing check — it would DISABLE it."
+                )
+            if not 0.0 <= pct <= 100.0:
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} reports an"
+                    f" enabled-percentage of {pct}, outside 0..100. A percentage outside its"
+                    " own range is a corrupt artifact, not a measurement."
+                )
+            if pct < PERF_MIN_ENABLED_PCT:
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} was enabled for"
+                    f" only {pct}% of the window (< {PERF_MIN_ENABLED_PCT}%), so perf"
+                    " MULTIPLEXED it and SCALED the reported count. That is an estimate,"
+                    " not a measurement, and every quantity derived from it inherits the"
+                    " error. Reduce the event set so all events fit the PMU, or measure"
+                    " them in separate runs."
+                )
         if raw in PERF_NOT_A_VALUE:
             raise Invalid(
                 f"{label}: {path.name} line {lineno} records event {event!r} as"

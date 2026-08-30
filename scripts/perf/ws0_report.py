@@ -40,7 +40,9 @@ that module permits. There is no environment variable that relaxes any of it.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import math
 import pathlib
 import sys
 
@@ -107,6 +109,10 @@ from ws0_canonical_record import verify_pinned_canonical_corpus  # noqa: E402
 # it verified and this asserts the manifest agrees with it.
 from ws0_pinning import verify_pinning_record  # noqa: E402
 from ws0_binaries import verify_binary_provenance  # noqa: E402
+from ws0_quiescence_evidence import (  # noqa: E402
+    EvidenceError,
+    assert_self_consistent as assert_verdict_self_consistent,
+)
 # DID EVERY MEASUREMENT BOUNDARY THIS SESSION OWED ACTUALLY HAPPEN — #3272 round 22. Round 21 wrote
 # the boundary record and round 22 wired the check that produces it; NOTHING READ IT. Own module
 # because ws0_report.py was at the ~800-line source target; full argument there.
@@ -274,6 +280,259 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     server_cpus = config["server_cpus"]
     client_cpus = config["client_cpus"]
     step_duration = config["step_duration"]
+    # WHICH COUNTERS AND WHICH BINARIES (#3248). Read from the manifest for the same reason as
+    # everything above: a value that cannot be supplied cannot disagree. Promoted to the report's
+    # TOP LEVEL rather than left only in the session pin, because the report makes claims ABOUT
+    # them -- cycles/row and IPC are claims about specific counters, and this rig's whole output
+    # is a ratio between two binaries, so which build produced them is not a footnote.
+    events = config["events"]
+    bin_dir = config["bin_dir"]
+    profile = config["profile"]
+    # THE QUIESCENCE CLAIM NEEDS ITS EVIDENCE, NOT JUST ITS INTENT (#3248, roborev job 64
+    # finding 2).
+    #
+    # `config.quiescence` is stamped BEFORE the first rep, so it records what the run INTENDED.
+    # The judgement happens AFTER every measurement artifact is complete, which means a session
+    # that was REJECTED or INTERRUPTED still has a complete artifact set and a manifest saying
+    # `judged against <path>` -- and re-reporting it would print that claim with no successful
+    # verdict anywhere. The intent is not the evidence.
+    #
+    # So a configured session must carry `quiescence-verdict.json`, it must say QUIESCENT, and
+    # it must name the SAME timeseries the manifest does. An unjudged session is fine and says
+    # so; a session that CLAIMS judgement and cannot show it is refused.
+    quiescence_intent = config["quiescence"]
+    quiescence_verdict = None
+    if quiescence_intent.startswith("judged against "):
+        declared_ts = quiescence_intent[len("judged against "):].strip()
+        vpath = d / "quiescence-verdict.json"
+        if not vpath.exists():
+            raise Invalid(
+                f"the session manifest says {quiescence_intent!r}, but {vpath.name} is absent."
+                " The judgement runs AFTER the measurement artifacts are complete, so a"
+                " rejected or interrupted session looks identical to a certified one from the"
+                " artifacts alone. A quiescence claim requires its verdict; re-run, or report a"
+                " session that does not claim to have been judged."
+            )
+        try:
+            verdict = json.loads(vpath.read_text())
+        except (OSError, ValueError) as exc:
+            raise Invalid(f"{vpath.name} is not readable JSON: {exc}") from None
+        if not isinstance(verdict, dict) or verdict.get("verdict") != "QUIESCENT":
+            raise Invalid(
+                f"{vpath.name} does not record a QUIESCENT verdict"
+                f" (verdict={verdict.get('verdict') if isinstance(verdict, dict) else '?'!r})."
+                " A session whose own verdict is not QUIESCENT must not be reported as judged."
+            )
+        # THE VERDICT MUST BE SELF-CONSISTENT WITH ITS OWN CONCLUSION, AND THAT CHECK IS NOW
+        # CLOSED (#3248, roborev jobs 73 + 75). This was ~95 lines of inline field checks grown
+        # one review round at a time: job 73 F2 added evidence checking at all, then job 75 found
+        # three more holes in it -- load thresholds unchecked, `coverage_gap_bound_s` optional so
+        # deleting the bound skipped its own comparison, and `census_breadth` published while
+        # contradicting `narrow_census_records`.
+        #
+        # Patching pointwise converged only as fast as the reviewer found holes, so the method was
+        # the defect. `ws0_quiescence_evidence` declares EVERY field of the verdict with its rule,
+        # errors on a MISSING one, and -- the part that stops the regress -- errors on an
+        # UNDECLARED one, so a new field in `judge()` fails here until someone decides what it
+        # means instead of silently going unchecked.
+        try:
+            assert_verdict_self_consistent(verdict, vpath.name)
+        except EvidenceError as exc:
+            raise Invalid(str(exc)) from None
+        # THE FIELD IS REQUIRED, NOT "COMPARED IF PRESENT" (#3248, roborev job 66 finding 3).
+        #
+        # The first version compared only `if recorded_ts is not None`, so a verdict WITHOUT
+        # the field was accepted — a QUIESCENT claim published with no evidence it came from
+        # the timeseries the manifest declares. That is a pass derived from the ABSENCE of a
+        # bad signal, which is the rule this issue keeps restating; it is the THIRD time this
+        # exact shape has appeared in my own guards, which is why it is called out here rather
+        # than quietly patched.
+        recorded_ts = (verdict.get("window_census") or {}).get("timeseries")
+        if recorded_ts is None:
+            raise Invalid(
+                f"{vpath.name} records no `window_census.timeseries`, so nothing establishes"
+                " WHICH load record this verdict was produced from. A verdict that cannot name"
+                " its own subject cannot support the manifest's claim; re-run with the current"
+                " ws0_quiescence.py, which records it."
+            )
+        if recorded_ts != declared_ts:
+            raise Invalid(
+                f"{vpath.name} was judged against {recorded_ts!r} but the manifest declares"
+                f" {declared_ts!r}. A verdict from a DIFFERENT timeseries does not establish"
+                " anything about this session."
+            )
+        # THE CAVEAT TRAVELS WITH THE VERDICT (#3248, roborev job 69 finding 2). A window whose
+        # records carry only the narrow census can still be certified -- a timeseries recorded
+        # before `competing_count` existed is legitimate -- but publishing the QUIESCENT verdict
+        # WITHOUT its breadth would state a stronger claim than the evidence supports, which is
+        # the whole failure mode this issue is about. The verdict recorded the breadth already;
+        # the reporter was dropping it on the floor.
+        _wc = verdict.get("window_census") or {}
+        # THE VERDICT MUST COVER *THIS* SESSION'S MEASUREMENT WINDOW, NOT MERELY NAME THE SAME
+        # FILE (#3248, roborev job 70 finding 3). The `timeseries` check above binds the verdict
+        # to the right SAMPLER; it says nothing about WHEN. `box-load.jsonl` is a single
+        # long-lived file spanning every session on this box, so a clean verdict judged over a
+        # DIFFERENT ten-minute window of the SAME file satisfied every check here and certified
+        # this session. That is a pass borrowed from an adjacent measurement -- the same shape as
+        # a verdict from a different file, one level down.
+        #
+        # The session's window is derived from the REP PAYLOADS' own `ts_unix_ms`, never from an
+        # argument: a value that cannot be supplied cannot disagree (the reason `flight_endpoint`
+        # and the corpus are read from the manifest rather than the command line). Payload records
+        # are selected STRUCTURALLY, by carrying the field, rather than by a filename allowlist a
+        # newly-added arm would silently escape.
+        _reps_seen = 0
+        _t_lo = None
+        _t_hi = None
+        for _pf in sorted(d.glob("*.jsonl")):
+            try:
+                _text = _pf.read_text()
+            except OSError as exc:
+                raise Invalid(
+                    f"{_pf.name} is unreadable, so this session's measurement window cannot be"
+                    f" established and the quiescence verdict cannot be bound to it: {exc}"
+                ) from None
+            for _line in _text.splitlines():
+                if not _line.strip():
+                    continue
+                try:
+                    _r = json.loads(_line)
+                except ValueError:
+                    continue
+                if not isinstance(_r, dict) or "ts_unix_ms" not in _r:
+                    continue
+                _ts = _r["ts_unix_ms"]
+                _dur = _r.get("duration_s", 0)
+                if isinstance(_ts, bool) or not isinstance(_ts, (int, float)) \
+                        or not math.isfinite(_ts) or _ts <= 0:
+                    raise Invalid(
+                        f"{_pf.name} carries an unusable `ts_unix_ms` ({_ts!r}) on a rep record,"
+                        " so the measurement window cannot be bounded. A window that cannot be"
+                        " COMPUTED must never be treated as covered."
+                    )
+                if isinstance(_dur, bool) or not isinstance(_dur, (int, float)) \
+                        or not math.isfinite(_dur) or _dur < 0:
+                    raise Invalid(
+                        f"{_pf.name} carries an unusable `duration_s` ({_dur!r}) beside a rep"
+                        " timestamp; the rep's extent is then unknown, so the window would be"
+                        " UNDERSTATED and the coverage check weaker than it reads."
+                    )
+                _reps_seen += 1
+                # `ts_unix_ms` IS THE REP'S END, ESTABLISHED FROM THE PRODUCER'S SOURCE RATHER
+                # THAN ASSUMED. The first version of this check widened each rep by its duration
+                # in BOTH directions, reasoning that the record "does not say which end" and that
+                # symmetric widening was the conservative choice. It was conservative and WRONG:
+                # it pushed the session window 18 s past the true end and REFUSED a correctly
+                # covered session -- a red on correct input, which is the failure mode agents
+                # learn to waive. Two independent measurements then settled it (payload mtime
+                # equals `ts` to the second) and `tools/flight-loadgen/src/ramp.rs:184-188` is the
+                # authority: `duration_s = started.elapsed()` and `ts_unix_ms = SystemTime::now()`
+                # are BOTH taken after every worker has joined. So the extent is [ts - dur, ts].
+                _lo = (_ts / 1000.0) - _dur
+                _hi = _ts / 1000.0
+                _t_lo = _lo if _t_lo is None else min(_t_lo, _lo)
+                _t_hi = _hi if _t_hi is None else max(_t_hi, _hi)
+        if _reps_seen == 0 or _t_lo is None or _t_hi is None:
+            raise Invalid(
+                "no rep payload in this session carries a `ts_unix_ms`, so the session's own"
+                " measurement window is unknown and the QUIESCENT verdict cannot be bound to it."
+                " An unbindable verdict states nothing about this session, so it is refused"
+                " rather than published (#3248)."
+            )
+        _win = _wc.get("window") if isinstance(_wc.get("window"), dict) else None
+        if _win is None or _win.get("start") is None or _win.get("end") is None:
+            raise Invalid(
+                f"{vpath.name} records no `window_census.window` start/end, so the verdict cannot"
+                " be shown to cover this session's measurement window. Re-run with the current"
+                " ws0_quiescence.py, which records the judged window."
+            )
+
+        def _epoch(label: str, value: object) -> float:
+            if not isinstance(value, str):
+                raise Invalid(f"{vpath.name} window {label} is not a string ({value!r}).")
+            try:
+                _dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                raise Invalid(
+                    f"{vpath.name} window {label} ({value!r}) is not an ISO-8601 instant, so the"
+                    " judged window cannot be compared with the measurement window."
+                ) from None
+            if _dt.tzinfo is None:
+                _dt = _dt.replace(tzinfo=datetime.timezone.utc)
+            return _dt.timestamp()
+
+        _v_start = _epoch("start", _win.get("start"))
+        _v_end = _epoch("end", _win.get("end"))
+        # THE TWO SIDES ARE RECORDED AT DIFFERENT RESOLUTIONS (#3248, roborev job 78 finding 3).
+        # The driver stamps the window with `date -u +%Y-%m-%dT%H:%M:%SZ`, i.e. TRUNCATED to whole
+        # seconds, while the rep payloads carry `ts_unix_ms` at millisecond resolution. Truncation
+        # moves both edges EARLIER, and the two directions are not symmetric:
+        #   * the START moving earlier WIDENS the window -- conservative, no slack needed;
+        #   * the END moving earlier NARROWS it, so a window that genuinely covered a rep ending
+        #     at .900 can read as ending at .000 and FALSE-RED a valid session.
+        # So the end is compared with exactly one second of slack -- the maximum the recorded
+        # resolution can hide, not a guessed margin: a stamp of T means the true instant lies in
+        # [T, T+1). Anything larger would be an invented tolerance, and this guard has already
+        # cost one round by padding "conservatively" in the wrong direction.
+        _END_TRUNCATION_SLACK_S = 1.0
+        if _v_start > _t_lo or (_v_end + _END_TRUNCATION_SLACK_S) < _t_hi:
+            raise Invalid(
+                f"{vpath.name} was judged over {_win.get('start')}..{_win.get('end')}, which does"
+                f" NOT cover this session's FLIGHT-REP window"
+                f" ({datetime.datetime.fromtimestamp(_t_lo, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                f"..{datetime.datetime.fromtimestamp(_t_hi, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')},"
+                f" from {_reps_seen} rep record(s), each spanning [ts-duration, ts]). A clean"
+                " verdict from an ADJACENT window of the same long-lived timeseries establishes"
+                " nothing about the window these numbers were measured in."
+            )
+        # REQUIRED, NOT "COPIED IF PRESENT" (#3248, roborev job 70 finding 4). These were read
+        # with `.get()`, so a verdict missing its sample count, its coverage bound or its census
+        # breadth still published `QUIESCENT` with `null` caveats -- a stronger claim than the
+        # evidence supports, printed as though the caveat had been checked and found empty. A
+        # missing caveat is an UNMEASURED caveat, which is exactly this issue's recurring shape.
+        for _k in ("samples", "coverage_largest_gap_s", "narrow_census_records", "census_breadth"):
+            if _wc.get(_k) is None:
+                raise Invalid(
+                    f"{vpath.name} records no `window_census.{_k}`, so the QUIESCENT verdict"
+                    " cannot be published with the caveats that qualify it. A null caveat reads"
+                    " as an absent concern; re-run with the current ws0_quiescence.py."
+                )
+        quiescence_verdict = {
+            "verdict": verdict.get("verdict"),
+            "in_window_samples": _wc.get("samples"),
+            "coverage_largest_gap_s": _wc.get("coverage_largest_gap_s"),
+            "narrow_census_records": _wc.get("narrow_census_records"),
+            "census_breadth": _wc.get("census_breadth"),
+            # WHICH WINDOW was judged, and that it covers the FLIGHT reps (asserted above).
+            # Recorded so a reader can re-check the binding rather than trust that it happened
+            # (#3248 job 70).
+            "judged_window": {"start": _win.get("start"), "end": _win.get("end")},
+            # DELIBERATELY NOT `covers_measurement_window`, WHICH IS WHAT THIS FIELD FIRST SAID.
+            # The window is derived from `ts_unix_ms`, and the ONLY producer of that field in the
+            # whole rig is the flight loadgen step record (tools/flight-loadgen/src/record.rs).
+            # The bare-scan arm's payload is `scan-<temp>-<rep>.json` -- a `.json`, not `.jsonl`,
+            # and it carries no absolute time at all, only `timed_scan_secs`. So the scan arm's
+            # extent CANNOT be derived from the records, and naming this field for the whole
+            # measurement would have claimed coverage of an arm the check never saw.
+            #
+            # The gap is not hypothetical: arm positions ALTERNATE, and this session's own records
+            # show it (scan at position 1,2,1 and flight at 2,1,2 across the three reps). A scan
+            # rep at position 1 therefore begins BEFORE the round's flight rep, and one at
+            # position 2 ends AFTER it, so the assert is under-strict by roughly one scan rep at
+            # each edge. What it does still catch is the case it was built for -- a verdict
+            # borrowed from an ADJACENT window of the same long-lived timeseries, which is minutes
+            # away, not seconds. Widening by a guessed margin was considered and refused: an
+            # invented bound is not a measurement, and this same guard already cost one round by
+            # padding "conservatively" in the wrong direction.
+            "covers_flight_rep_window": True,
+            "flight_rep_window_source": (
+                "derived from ts_unix_ms/duration_s in the session's *.jsonl rep payloads; the"
+                " bare-scan arm records no absolute time, so its extent is NOT covered by this"
+                " assert (#3248)"
+            ),
+            "flight_rep_records": _reps_seen,
+        }
+    quiescence = quiescence_intent
     # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
     # manifest and passed to every Flight arm, which compares it against EVERY rep's recorded
     # `endpoint`. Deliberately NOT a reporter argument, for the reason F1 gave for the whole
@@ -369,10 +628,11 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "configuration_source": {
             "manifest": config["source"],
             "note": (
-                "reps, temperatures, arms, scan_passes and the CPU pins were READ FROM the"
-                " session manifest stamped before the first rep; they are not arguments to"
-                " ws0_report.py, so a re-report cannot substitute a different configuration"
-                " and claim it was verified (#3272 F1)"
+                "reps, temperatures, arms, scan_passes, the CPU pins, the counted EVENTS and"
+                " the binary SOURCE DIRECTORY were READ FROM the session manifest stamped before"
+                " the first rep; they are not arguments to ws0_report.py, so a re-report cannot"
+                " substitute a different configuration and claim it was verified (#3272 F1,"
+                " #3248)"
             ),
         },
         # ...and that the corpus is the one the SESSION STARTED against, established from a pin
@@ -420,8 +680,51 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "reps": reps,
         "step_duration": step_duration,
         "scan_passes": scan_passes,
+        "events": events,
+        # The SOURCE directory of the measured binaries. The reps execute FROZEN COPIES under
+        # measured-bin/, so `binary_provenance` digests describe the bytes that ran but cannot
+        # say which BUILD produced them -- a symbol-bearing profiling build and a stripped
+        # release build are otherwise indistinguishable here (#3248).
+        "bin_dir": bin_dir,
+        # Whether a SAMPLING PROFILE was attached to these counting windows, and at what
+        # frequency. A profiled run pays observer overhead, so its throughput figures are not
+        # baseline figures -- and nothing else in this document could tell a reader that
+        # (#3248): the same symbol-bearing bin_dir runs both ways.
+        "profile": profile,
+        # Whether this session was judged against an external box-load timeseries, or not
+        # judged at all. Recorded both ways: an unjudged session is UNVERIFIED, not quiet
+        # (#3248).
+        "quiescence": quiescence,
+        # The VERDICT, not the intent. None when the session did not claim to be judged; a
+        # session that claimed it and could not show one never reaches here (#3248).
+        "quiescence_verdict": quiescence_verdict,
         "measurements": [],
     }
+
+    # THE SINGLE SOURCE OF TRUTH FOR BASELINE-NESS. Read by the title AND by the `profile` line, so
+    # the two cannot contradict each other -- which they did, in BOTH directions, one round apart
+    # (job 80 F3: title claimed BASELINE on a profiled run; job 82 F1: the profile line claimed
+    # "throughput is a baseline" on a non-canonical corpus while the title denied it).
+    #
+    # A run is a baseline only if the corpus is canonical AND no sampling profiler was attached:
+    # observer overhead measures 1.6-4.3% on rows/s, so a profiled run's throughput is not a
+    # baseline however canonical its corpus.
+    # DEFERRED DEFECT, MEASURED: `--bin-dir` CAN PUT A NON-RELEASE BUILD UNDER THIS LABEL.
+    # (#3248 roborev job 84 F2; follow-up https://github.com/pmcfadin/cqlite/issues/3469 family 4.)
+    #
+    # This asks about the corpus and the profiler and NOT about which BUILD produced the measured
+    # binaries. `--bin-dir` accepts any directory of executables, so a debug or custom-profile
+    # build whose codegen is not the release baseline can be reported under `BASELINE`.
+    #
+    # MEASURED IMPACT: none on any published run -- every measurement used target/perfsym or
+    # target/release, and `binary_provenance` digests each measured binary, so a reader can check
+    # which bytes ran. Deferred on that basis.
+    #
+    # THIS IS THE THIRD WAY A RUN COULD BE MISLABELLED A BASELINE (after the corpus, fixed in
+    # #3272 round 13, and the profiler, fixed in job 80 F3). The recurrence says the right shape
+    # is an ALLOWLIST of build profiles permitted to claim BASELINE, not a fourth condition bolted
+    # onto this boolean.
+    is_baseline_run = canonical["is_baseline"] and profile == "off"
 
     lines = [
         "",
@@ -430,12 +733,32 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # published under the word BASELINE in the first line of the report. The label is the ONLY
         # thing distinguishing the two to a reader, so it goes in the title rather than in a field
         # somebody would have to know to look for.
+        # A PROFILED RUN IS NOT A BASELINE EITHER, AND THE TITLE USED TO SAY IT WAS (#3248,
+        # coordination ruling on roborev job 80: make the distinction "impossible to miss rather
+        # than merely present").
+        #
+        # `is_baseline` asked only whether the CORPUS was canonical. So a profiled run on the
+        # canonical corpus printed `==== WS0 SAME-SESSION BASELINE ====` in its first line while
+        # the `profile` line six lines below said "these are NOT baseline numbers". THE REPORT
+        # CONTRADICTED ITSELF, and the title is what a reader who reads one line reads. Adding the
+        # `profile` field (F3's first half) put the truth in the document and left the headline
+        # lying, which is a worse state than not having the field: two statements, one wrong, and
+        # the wrong one louder.
+        #
+        # Observer overhead measures 1.6-4.3% on rows/s here, so it is inside every throughput
+        # figure below. That disqualifies the run as a baseline exactly as a non-canonical corpus
+        # does, and the title now says so for either cause.
         (
             "==== WS0 SAME-SESSION BASELINE (issue #3096 rig, hardened #3272) ===="
-            if canonical["is_baseline"]
+            if is_baseline_run
             else "==== WS0 SAME-SESSION MEASUREMENT — *** NOT A BASELINE *** (issue #3096 rig,"
             " hardened #3272) ===="
         ),
+        # ...and WHY it is not one, when the corpus was canonical but a profiler was attached: the
+        # reader should not have to reconcile the title with a field further down.
+        *(["               (not a baseline because a SAMPLING PROFILER was attached:"
+           f" {profile} — observer overhead is inside every throughput figure below)"]
+          if canonical["is_baseline"] and not is_baseline_run else []),
         # ...and the label IN WORDS, on its own line, in BOTH modes — an affirmative statement in
         # the baseline case too, so a reader can tell "this run was checked and IS canonical" from
         # "this rig does not check", which the absence of a line cannot express.
@@ -530,7 +853,41 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f" {pinning_verification['server_siblings_expanded'].split('(')[-1].rstrip(')')} verified"
         f" on {pinning_verification['host']} pre-measurement, recorded in"
         f" {pathlib.Path(pinning_verification['source']).name}), client {client_cpus}",
-        f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]",
+        f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]"
+        f"   events: {','.join(events)}",
+        # EVERY FIELD THAT CHANGES HOW A NUMBER SHOULD BE READ, IN THE PRINTED REPORT (#3248,
+        # roborev job 80 finding 3). These four were added to results.json and NEVER to the human
+        # summary, so a PROFILED run -- which pays 1.6-4.3% measured observer overhead and is
+        # therefore NOT a baseline -- printed IDENTICALLY to an unprofiled one, and a session whose
+        # quiescence was `NOT VERIFIED` printed identically to a certified one. A reader of the
+        # printed report could not tell them apart, which makes the machine-readable field a
+        # record nobody consults.
+        #
+        # `profile` and `quiescence` carry an explicit warning rather than a bare value: the value
+        # alone requires the reader to know what `on freq=499` implies about the throughput
+        # figures above it.
+        f"binaries     : {bin_dir}"
+        + ("   [SYMBOL-BEARING BUILD]" if "perfsym" in str(bin_dir)
+           or "perfprof" in str(bin_dir) else ""),
+        # THE BASELINE CLAIM IS MADE IN ONE PLACE AND READ IN TWO (#3248, roborev job 82 F1).
+        #
+        # This line was a conditional on `profile` ALONE, so with no profiler attached it said
+        # "throughput is a baseline" UNCONDITIONALLY -- including on a non-canonical corpus, where
+        # the title correctly says NOT A BASELINE. The fix for job 80 F3 therefore introduced the
+        # SAME contradiction in the opposite direction, one line below, in the same commit.
+        #
+        # THE GENERALISABLE FORM: FIXING A CONTRADICTION IN ONE DIRECTION DOES NOT FIX THE PAIR.
+        # When two fields must agree, assert the AGREEMENT rather than each field against a
+        # constant -- a conditional title and an unconditional string cannot agree by construction.
+        f"profile      : {profile}"
+        + ("   !! PROFILED — observer overhead is INSIDE the throughput figures above;"
+           " these are NOT baseline numbers" if profile != "off"
+           else ("   (no sampling profiler attached; throughput is a baseline)" if is_baseline_run
+                 else "   (no sampling profiler attached — but this run is NOT a baseline; see the"
+                      " title above)")),
+        f"quiescence   : {quiescence}"
+        + ("" if quiescence.startswith("judged against")
+           else "   !! this session was NOT checked for competing load — UNVERIFIED, not quiet"),
         # WHICH SERVER SERVED THE ROWS THOSE COUNTERS DESCRIBE (#3272 round 14, F2). Printed
         # directly under the `counters` line deliberately: the pairing of the two is the property —
         # `perf -C` measures the pinned cores, and this states that the rows divided by those cycles
@@ -573,13 +930,16 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             corpus_rows,
             corpus_cells_per_row,
             pinned_scan_corpus,
+            tuple(events),
         )
         results["measurements"].append(scan)
         lines.append(f"[{temp.upper()}]")
         lines.append(fmt("bare scan (execute_streaming)", scan))
         lines += prewarm_warning(scan, "bare-scan", temp)
         for arm in arms:
-            fl = collect_flight(d, temp, arm, reps, corpus_rows, flight_endpoint)
+            fl = collect_flight(
+                d, temp, arm, reps, corpus_rows, flight_endpoint, tuple(events)
+            )
             results["measurements"].append(fl)
             # The label says the arm was REQUESTED, and it is derived FROM THE BLOCK rather than
             # from the loop variable (#3272 round 16). Two properties, both deliberate:

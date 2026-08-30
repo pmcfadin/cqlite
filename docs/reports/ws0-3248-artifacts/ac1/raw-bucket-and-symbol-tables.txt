@@ -1,0 +1,41 @@
+=== BUCKET SHARES per rep (mean of 3), and cycles/row conversion ===
+
+scan: cycles/row=19,266
+  shared             mean= 38.14%  reps=['38.56', '38.06', '37.80']  ->     7,348 cycles/row
+  flight-marginal    mean=  0.00%  reps=['0.00', '0.00', '0.00']  ->         0 cycles/row
+  libc(alloc/mem)    mean= 28.95%  reps=['29.35', '28.85', '28.66']  ->     5,578 cycles/row
+  kernel             mean= 23.34%  reps=['22.45', '23.74', '23.84']  ->     4,497 cycles/row
+  unclassified       mean=  6.54%  reps=['6.52', '6.35', '6.75']  ->     1,260 cycles/row
+
+flight: cycles/row=26,854
+  shared             mean= 33.24%  reps=['33.24', '32.60', '33.88']  ->     8,926 cycles/row
+  flight-marginal    mean= 14.31%  reps=['14.64', '13.99', '14.29']  ->     3,842 cycles/row
+  libc(alloc/mem)    mean= 30.96%  reps=['30.78', '30.26', '31.85']  ->     8,315 cycles/row
+  kernel             mean= 14.42%  reps=['14.35', '16.10', '12.82']  ->     3,873 cycles/row
+  unclassified       mean=  2.58%  reps=['2.55', '2.51', '2.68']  ->       693 cycles/row
+
+=== FLIGHT-MARGINAL per-symbol, mean of 3 reps, in CYCLES/ROW ===
+     1,881 cyc/row  ( 7.00%)  cc::export::arrow_convert::rows_to_record_batch
+       592 cyc/row  ( 2.20%)  cc::export::arrow_size::estimate_arrow_row_bytes
+       386 cyc/row  ( 1.44%)  <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::It
+       163 cyc/row  ( 0.61%)  <cc::export::arrow_size::Estimator>::charge_slot
+       136 cyc/row  ( 0.51%)  <cf::producer::MergeProducer>::drive_row_source
+        98 cyc/row  ( 0.36%)  <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::It
+        93 cyc/row  ( 0.35%)  <cc::export::arrow_size::Estimator>::charge_child
+        72 cyc/row  ( 0.27%)  <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::It
+        51 cyc/row  ( 0.19%)  cc::export::arrow_convert::convert_column_to_array
+        39 cyc/row  ( 0.15%)  <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::It
+        38 cyc/row  ( 0.14%)  <cf::bypass::ScanRowSource as cf::row_source::RowSource>::next_step
+        38 cyc/row  ( 0.14%)  <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::It
+        38 cyc/row  ( 0.14%)  <arrow_array::builder::generic_bytes_builder::GenericByteBuilder<arrow_array::types::Gen
+        35 cyc/row  ( 0.13%)  <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::It
+        20 cyc/row  ( 0.07%)  <arrow_array::array::primitive_array::PrimitiveArray<arrow_array::types::Int32Type> as c
+        19 cyc/row  ( 0.07%)  <arrow_array::builder::fixed_size_binary_builder::FixedSizeBinaryBuilder>::append_value:
+        18 cyc/row  ( 0.07%)  <h2::proto::connection::Connection<hyper::common::io::compat::Compat<hyper_util::common:
+        15 cyc/row  ( 0.06%)  cc::export::arrow_builders_scalar::build_string_array
+        12 cyc/row  ( 0.04%)  cc::export::arrow_size::shape::value_branches
+  ---- listed total: 3,743 cyc/row (13.94%)
+
+=== ARM IDENTITY: which arm did the server actually take? ===
+  merge-path symbols present: NONE
+  bypass-path symbols present: ['next_step']

@@ -1121,7 +1121,7 @@ expect_reject "a flight perf CSV recording cycles=0 is still FATAL" \
 #     cannot emit one, so it is a corrupt artifact — and `int("-4")` used to sail through
 #     to become a negative `cycles`, a negative subtraction result, and a negative IPC.
 d="$TMP/neg-counter"; make_session "$d" "$GOOD_FLIGHT"
-printf -- '-4000000,,cycles,,,,\n8000000,,instructions,,,,\n' > "$d/perf-scan-warm-1.csv"
+printf -- '-4000000,,cycles,1000000000,100.00,1.000,GHz\n8000000,,instructions,1000000000,100.00,2.000,insn per cycle\n' > "$d/perf-scan-warm-1.csv"
 expect_reject "a NEGATIVE perf counter value is FATAL at parse time (a counter cannot be negative)" \
   "not a possible count" "$d" "$TMP/corpus"
 
@@ -1239,7 +1239,7 @@ expect_reject "a FRACTIONAL rows_total is FATAL (it is the cycles/row denominato
 # The same class in a perf CSV, which is TEXT: `int("4.7")` raises, but `int(" 4 ")` used
 # to accept padding silently, and neither is a canonical counter value.
 d="$TMP/frac-csv"; make_session "$d" "$GOOD_FLIGHT"
-printf '4000000.5,,cycles,,,,\n8000000,,instructions,,,,\n' > "$d/perf-scan-warm-1.csv"
+printf '4000000.5,,cycles,1000000000,100.00,1.000,GHz\n8000000,,instructions,1000000000,100.00,2.000,insn per cycle\n' > "$d/perf-scan-warm-1.csv"
 expect_reject "a FRACTIONAL perf CSV counter is FATAL (not a canonical integer)" \
   "unparseable value" "$d" "$TMP/corpus"
 # ...and the identity fields.
