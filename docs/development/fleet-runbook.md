@@ -567,87 +567,86 @@ What it guarantees:
   **lane** refuse to start, while leaving other lanes on the box free (per-machine until #3393 retracted
   one-worker-per-machine; the default lock path is scoped to the lane's checkout root). **While the
   fleet's checkouts are mid-upgrade, a lane whose lock path is DERIVED (no explicit `SUPERVISOR_LOCK`)
-  also consults the PRE-#3467 machine-global lock `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock`
-  (#3549)**, because the two paths are invisible to each other and a supervisor from an older checkout
-  would otherwise co-run in the same worktree. A LIVE holder there refuses the start with a
-  `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane "another instance is
-  already running") — remedy: stop that supervisor or upgrade its checkout past #3467. **But read the
-  wording, because there is exactly ONE live wording and it never tells you to stop a pid (#3549):
-  THIS GUARD CANNOT DETERMINE WHAT THE RECORDED PID IS.** The legacy lock records a bare `pid` file —
-  no start time, no boot id, no lane, no path — so nothing can bind a process INCARNATION to it, and
-  pid numbers are reused. The basename is no help either: up to four lanes run on one box, each with
-  its own `worker-supervisor.sh`, so "that process is running worker-supervisor.sh" does not even
-  narrow it to one process, and the most likely false match is **a live sibling lane's supervisor**.
-  An earlier version of this guard did corroborate identity from `/proc/<pid>/cmdline` and printed
-  "stop pid N first"; that probe absorbed four consecutive review rounds and was **deleted** (roborev
-  jobs 182/192/194/196/198), because positive corroboration is unachievable in principle from what the
-  lock records and its only consumer was the wording — while its false positive was an instruction to
-  kill an unrelated, possibly production, process. So the live refusal says: the pid is active, pid
-  numbers are reused, several lanes here run a supervisor with the same script name, **verify what pid
-  N actually is before stopping anything** — and it prints a bare `ps -p <pid> -o args=` line for
-  exactly that, where a HUMAN reads the rendering (reading it is fine; machine-parsing a space-joined,
-  unescaped rendering is not, which is why nothing here does). The refusal itself is unconditional
-  either way: an unverifiable holder is never a licence to start a second supervisor in the worktree.
-  **A holder whose
-  recorded pid is CONFIRMED DEAD also REFUSES; it is NOT reclaimed (lead ruling, #3549)** — the
-  diagnostic names the legacy path, the recorded pid, the classified state and an exact **non-recursive**
-  one-liner to clear it (`rm -f -- <legacy path>/pid && rmdir -- <legacy path>`, with the paths rendered
-  in a **one-line** escaping form so the printed command is paste-safe AND never wraps — a newline in
-  `TMPDIR` would otherwise split it, and the diagnostic paths, across physical lines and leave prose
-  fragments indistinguishable from the one bare command line, #3549), and the remedy is state-specific
-  so a run never tells you to stop a
-  process that is already dead. **Two things about that one-liner (#3549).** It is printed **on a line
-  of its own, bare and complete** — no prefix, no trailing prose — because a command with an
-  explanation appended to it is not pasteable: the prose becomes extra `rmdir` operands and the command
-  always fails. With an em dash it removes the directory *and* prints an error per prose word, so you
-  cannot tell whether it worked; with any prose carrying an option-shaped token it removes nothing,
-  leaving a **pid-less lock directory** — exactly the shape a pre-#3467 supervisor misreads as stale. And **the ORDER is part of the remedy**: stop or upgrade the legacy
-  launcher **first**, delete **second** — deleting first frees the legacy name for a pre-#3467
-  supervisor to take at once, which is the collision the guard refuses. The `{pid}` shape (exactly one
-  entry, `pid`, holding exactly one line) was verified **when the guard ran**, which is what licenses
-  printing a deletion at all, but it says nothing about the state when you act; the guarantee that
-  still holds then is `rmdir`'s own refusal of a non-empty directory, where an `rm -rf` would silently
-  delete contents no supervisor created. Anything undeterminable (not a directory, a SYMLINK at
-  either the lock path or its `pid`, no/garbled `pid` file, an extra entry beside `pid`, more than one
-  line in `pid`, unreadable) refuses the same way — **and carries no deletion instruction at all**, since
-  the shape was never established. **And none of those verdicts depends on the shell that
-  launched the supervisor (#3549).** The classifier runs in the caller's shell, and several of its steps
-  were decided by state the caller owns — so it now pins that state itself: the whole glob/match option
-  family plus `GLOBIGNORE` and `set -f` are neutralised around the shape check (an inherited
-  `GLOBIGNORE` could hide the extra entry, making a FOREIGN directory look like the canonical `{pid}`
-  shape and earning it a deletion remedy; an inherited `noglob` made a genuine stale lock read as an
-  unrecognised shape), the caller's options are restored exactly as found, diagnostics are emitted with
-  `printf` rather than `echo` (under bash's `xpg_echo` an `echo` re-expands the escapes the one-line
-  renderer just produced, splitting the diagnostics back across physical lines), and the pid
-  well-formedness test uses an explicit character list rather than a `[0-9]` range, which is
-  collation-dependent: under `LC_ALL=en_US.utf8` a range accepts ARABIC-INDIC DIGIT THREE as a digit,
-  so a `pid` file no supervisor wrote reached the `dead` verdict and a deletion remedy. Practical
-  consequence for an operator: a refusal you disagree with is not explained by your shell — read the
-  named cause. **This guard DETECTS AND
-  REFUSES: it never renames, deletes, adopts or re-creates the legacy lock, so it cannot corrupt any
-  holder's lock, live or dead.** The reclaim it used to perform was removed because a reclaim must be
-  able to RESTORE on its abort paths, and restoring a directory-with-contents is not atomic here —
-  `mkdir` + `mv` leaves the lock observable *without* its `pid`, a window in which a pre-#3467
-  supervisor reads it as stale, reclaims it, and our restore then corrupts ITS lock. The atomic form
-  (build the lock complete in a private staging dir, move it in ONE `rename(2)`) needs GNU-only
-  `RENAME_NOREPLACE`/`mv -T` and this script supports macOS, so it was available and declined; the
-  rationale is recorded in full at the guard. **An explicit `SUPERVISOR_LOCK` skips the check — and it
-  is documented HERE, not in the refusal (#3549).** Naming the lock yourself takes the placement
-  decision explicitly, which is why the guard only ever runs on the DERIVED default; the corollary is
-  that setting it is also a way to BYPASS the guard, so it is not something a refusal message may
-  suggest. No refusal path mentions it (it once did, in a generic remedy line printed by every state
-  including the LIVE one, which told an operator whose start had been refused *because another
-  supervisor is alive* to start anyway — the exact collision the guard exists to prevent). Before you
-  set it to get past a refusal: a refusal over a LIVE holder is not something to override at all —
-  stop that supervisor or upgrade its checkout — and overriding any other state is only safe if you
-  have independently established that the two supervisors cannot share a worktree, e.g. you are
-  deliberately placing this lane's lock somewhere no other launcher on the box can reach. The refusals
-  offer exactly two remedies, and neither is this one: stop the pre-#3467 supervisor, or upgrade that
-  checkout to #3467+ (plus, for a confirmed-dead holder, the non-recursive deletion one-liner above).
+  also checks whether the PRE-#3467 machine-global lock
+  `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock` EXISTS (#3549)**, because the two paths are invisible
+  to each other and a supervisor from an older checkout would otherwise co-run in the same worktree.
+  **The guard DETECTS that path and stops there — it does not open, read, enumerate or inspect it.**
+  It answers exactly one question, in three values:
+  - **present** (anything at that name, including a symlink, including a dangling one) → the start
+    REFUSES with a `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane
+    "another instance is already running"). Remedy: stop that supervisor, or upgrade its checkout past
+    #3467.
+  - **verified-absent** → the start proceeds.
+  - **could-not-tell** → the start REFUSES, and the cause says **THE EXISTENCE PROBE FAILED**. That is
+    not a report that a legacy lock exists; it is a report that this run could not decide whether one
+    does. Today the one reachable cause is a container (`$TMPDIR`) that is missing or not searchable by
+    this user — remedy: make it exist and `chmod +x` it, then re-run.
+
+  **Read what the refusal does and does not say, because this changed (#3549).** It names the path and
+  it says a path exists there. It makes **NO claim** about what the object is, whether a holder is
+  alive or dead, or whether removing it is safe — the guard did not look. Earlier versions classified
+  the lock (`live <pid>` / `stale <pid>` / `unknown <cause>`) by parsing its `pid` file and measuring
+  that pid's liveness, and printed a per-state remedy including a deletion one-liner. **All of it is
+  deleted.** The reason is worth knowing, because it is why you now get less information: once the
+  reclaim was removed, *every* state refused, so the classification could not change the decision —
+  its only outputs were the wording and which remedy printed, while each of its parts (a pid parse, a
+  platform pid bound, a NUL probe, a collation-free digit test, a wholesale neutralisation of the
+  caller's inherited glob state) had absorbed a review round of its own. Machinery whose output cannot
+  change the decision is not a guard.
+
+  **The one printed command is READ-ONLY, and that is deliberate (#3549).** The refusal prints, on a
+  line of its own, bare and complete, `ls -ldn -- <legacy path> && ls -lna -- <legacy path>` — the
+  paths rendered in a **one-line** escaping form so the line is paste-safe and never wraps (a newline
+  in `TMPDIR` would otherwise split it, and the diagnostic paths, across physical lines and leave
+  prose fragments indistinguishable from the one bare command line), and with `--` because an
+  option-shaped `TMPDIR` (`-scratch`) would otherwise be parsed as flags. Run it to see what is
+  actually there; the guard has not verified anything about it beyond its existence. **No deletion
+  one-liner is printed any more**, and the reason is measured, not stylistic: with a **symlink** at the
+  legacy path pointing at a foreign directory, the old `rm -f -- <legacy>/pid && rmdir -- <legacy>`
+  follows the link and **deletes that directory's `pid` file** (rc=0), after which the `rmdir` fails
+  with "Not a directory" — so an operator destroys a file the guard never examined and the lock is
+  still there. While the shape check existed it was what licensed printing a deletion; with no
+  inspection there is no licence. If you decide to remove the path, that is your call once you have
+  established that no pre-#3467 supervisor can run on the box, and **the ORDER is part of it**: stop or
+  upgrade the legacy launcher **first**, remove **second** — removing first frees the legacy name for a
+  pre-#3467 supervisor to take at once, which is the collision the guard refuses. Use a non-recursive
+  removal (`rmdir` refuses a non-empty directory) so nothing you have not examined is deleted.
+
+  **What the probe can and cannot distinguish, stated rather than implied (#3549).** Bash's file tests
+  expose no errno, so `[[ -e X ]]` is false when `lstat(X)` fails for *any* reason. Decidable, and each
+  is measured by the suite: a missing or unsearchable container (→ could-not-tell), an `lstat` of the
+  child that succeeds (→ present, for every object type including a symlink), and a searchable
+  container where the child reports ENOENT (→ verified-absent). **Not decidable, and therefore reported
+  as verified-absent**: an `lstat` of the child that fails for a reason *other* than ENOENT (EIO on a
+  failing disk, a stale network mount), and a divergence between `access(2)` — what `-x` asks — and
+  actual traversal under SELinux/AppArmor or an NFS ACL. Closing the first would need an external
+  command for the errno, which would put the probe's verdicts at the mercy of `PATH`; the gap is
+  written down instead of papered over with a probe that looks complete.
+
+  **This guard NEVER MUTATES the legacy lock, in any state**: it does not rename, delete, adopt,
+  re-create — or now even read — it, so it cannot corrupt any holder's lock, live or dead. The reclaim
+  it used to perform was removed because a reclaim must be able to RESTORE on its abort paths, and
+  restoring a directory-with-contents is not atomic here — `mkdir` + `mv` leaves the lock observable
+  *without* its `pid`, a window in which a pre-#3467 supervisor reads it as stale, reclaims it, and our
+  restore then corrupts ITS lock. The atomic form (build the lock complete in a private staging dir,
+  move it in ONE `rename(2)`) needs GNU-only `RENAME_NOREPLACE`/`mv -T` and this script supports macOS,
+  so it was available and declined; the rationale is recorded in full at the guard.
+
+  **An explicit `SUPERVISOR_LOCK` skips the check — and it is documented HERE, not in the refusal
+  (#3549).** Naming the lock yourself takes the placement decision explicitly, which is why the guard
+  only ever runs on the DERIVED default; the corollary is that setting it is also a way to BYPASS the
+  guard, so it is not something a refusal message may suggest. No refusal path mentions it (it once
+  did, in a generic remedy line printed by every state, which told an operator whose start had been
+  refused *because a legacy lock is there* to start anyway — the exact collision the guard exists to
+  prevent). Before you set it to get past a refusal: overriding is only safe if you have independently
+  established that the two supervisors cannot share a worktree, e.g. you are deliberately placing this
+  lane's lock somewhere no other launcher on the box can reach. The refusals offer exactly two
+  remedies, and neither is this one: stop the pre-#3467 supervisor, or upgrade that checkout to #3467+.
+
   **It is a STARTUP check, not machine-global exclusion: it REDUCES the collision window, it does not
   eliminate it** — a pre-#3467 supervisor that starts *after* the check cannot be stopped without
-  reimposing machine-global exclusion, which #3393 forbids (N lanes per box). The RESIDUAL block at the
-  guard records that window and why it is tolerated.
+  reimposing machine-global exclusion, which #3393 forbids (N lanes per box). That residual is tracked
+  as **#3596** and recorded in a RESIDUAL block at the guard.
   The guard is deletable once every checkout on the box is at or past #3467 — the condition is recorded
   at the guard in `scripts/local/worker-supervisor.sh`. (The Claude probe keys on the supervisor's own `-p … --agent flow-lead`
   spawn shape, so a legitimate interactive `claude` REPL or an interactive `claude --agent flow-lead`
