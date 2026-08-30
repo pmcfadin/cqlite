@@ -17,6 +17,20 @@
 //! here. A decimal is held as an [`ExactDecimal`] — an exact
 //! unscaled-value/scale pair — and compared exactly.
 //!
+//! # Round 10: the GOLDEN side stopped going through `f64` too
+//!
+//! Round 4 fixed the EXPORT side but left the golden side receiving a double
+//! from the shared comparator and RECOVERING a decimal from it (render at the
+//! export scale, then check that neither one-unit neighbour parses to the same
+//! double). That could not work in principle: `0.100000000000000001` and `0.1`
+//! are the SAME `f64`, both neighbours of the recovered `0.1` round elsewhere,
+//! so the recovery declared itself EXACT and canonicalized an eighteen-digit
+//! literal as `0.1` — a lossy export would have compared EQUAL. Recovery from a
+//! double is now GONE, not improved: `golden_lexeme.rs` preserves the literal's
+//! TEXT before the shared parser can turn it into a double, every golden decimal
+//! is read by [`exact_from_text`], and `declared.rs` REFUSES a declared-`decimal`
+//! position that still arrives as an `f64`.
+//!
 //! # SCALE EQUALITY: normalized (`1.10` == `1.1`), deliberately
 //!
 //! Two [`ExactDecimal`]s are equal iff they denote the same RATIONAL: trailing
@@ -48,15 +62,15 @@
 use super::canonical_jsonl::CanonicalValue;
 
 /// The fixed `Decimal128` scale the Parquet export writes every `decimal`
-/// column at, and therefore the maximum fractional precision a golden literal
-/// can be RECOVERED at (see [`exact_from_golden_double`]).
+/// column at, and therefore the greatest fractional precision an exported cell
+/// can CARRY (see [`exact_from_text`]).
 ///
 /// Mirrors `cqlite-core`'s `export::arrow_schema::DECIMAL_FIXED_SCALE`, which is
-/// crate-private. It is used ONLY as a PRECISION BOUND for the golden-side
-/// recovery, never as an authority for a value: the bound is enforced against
-/// the scale actually read from the exported file
-/// ([`exact_from_decimal128`] refuses a larger one), so a future change to the
-/// export scale makes the harness REFUSE rather than silently under-recover.
+/// crate-private. It is used ONLY as a PRECISION BOUND, never as an authority
+/// for a value: the bound is enforced against the scale actually read from the
+/// exported file ([`exact_from_decimal128`] refuses a larger one), so a future
+/// change to the export scale makes the harness REFUSE rather than silently
+/// compare a literal the export could not have written.
 pub const EXPORT_DECIMAL_SCALE: u32 = 9;
 
 /// The largest scale this module will represent: `Decimal128`'s precision.
@@ -76,8 +90,8 @@ impl ExactDecimal {
     /// Normalize `unscaled × 10^-scale`.
     ///
     /// All arithmetic is exact: `unscaled` is an `i128` by construction (a
-    /// `Decimal128` unscaled value IS an `i128`; the golden-side recovery is
-    /// range-checked before it gets here), and stripping a trailing zero is a
+    /// `Decimal128` unscaled value IS an `i128`; the golden-side literal parse
+    /// is range-checked before it gets here), and stripping a trailing zero is a
     /// division by 10 with a zero remainder. `10^scale` is NEVER materialized,
     /// so an unbounded exponent cannot drive an allocation.
     pub fn new(unscaled: i128, scale: u32) -> Self {
@@ -138,8 +152,24 @@ impl ExactDecimal {
     /// variant; encoding the canonical form as a tagged exact text keeps the
     /// comparison EXACT without reaching outside this harness.)
     pub fn canonical(&self) -> CanonicalValue {
-        CanonicalValue::Text(format!("decimal({})", self.text()))
+        CanonicalValue::Text(format!("{CANONICAL_PREFIX}{})", self.text()))
     }
+}
+
+/// The tag [`ExactDecimal::canonical`] wraps its exact text in.
+const CANONICAL_PREFIX: &str = "decimal(";
+
+/// Is this text ALREADY the canonical form of an exact decimal?
+///
+/// The declared-type descent is idempotent by design (`declared.rs`), and a
+/// decimal is the one position where that matters twice: a stringified position
+/// (a primary-key or collection-path component) is converted where it is
+/// assembled, and the assembled value then goes through the descent again. So
+/// the second pass must recognise its own output as canonical rather than try to
+/// parse `decimal(1.1)` as a literal. A tagged form is unambiguous: a decimal
+/// LITERAL can only contain `-+.0123456789`, so it can never spell this tag.
+pub fn is_canonical_text(text: &str) -> bool {
+    text.starts_with(CANONICAL_PREFIX) && text.ends_with(')')
 }
 
 /// Project an exported `Decimal128(_, scale)` cell — unscaled value and scale
@@ -157,23 +187,33 @@ pub fn exact_from_decimal128(unscaled: i128, scale: i8, ctx: &str) -> Result<Exa
     if scale > EXPORT_DECIMAL_SCALE {
         return Err(format!(
             "{ctx}: exported Decimal128 scale {scale} exceeds {EXPORT_DECIMAL_SCALE}, the \
-             precision the golden side can RECOVER a literal at; the harness refuses to \
-             compare rather than let two distinct decimals recover to one value \
+             fixed scale the export is declared to write; the harness refuses to compare \
+             against a scale it cannot account for \
              (raise EXPORT_DECIMAL_SCALE together with the export's fixed scale)"
         ));
     }
     Ok(ExactDecimal::new(unscaled, scale))
 }
 
-/// Parse an EXACT decimal from its literal TEXT — no `f64` anywhere.
+/// Parse an EXACT decimal from its literal TEXT — the WHOLE golden side, and no
+/// `f64` anywhere in it.
 ///
-/// Used for a `decimal` PRIMARY-KEY component (issue #1490 round 6): unlike a
-/// decimal CELL, which `sstabledump` writes as a bare JSON number (so its text
-/// is already gone by the time this harness sees it — hence
-/// [`exact_from_golden_double`]), a KEY component is written as a quoted STRING
-/// through Cassandra's `AbstractType.getString`, i.e. `BigDecimal.toString`. The
-/// literal digits are therefore still present and can be read exactly, with no
-/// recovery step and no ambiguity to refuse.
+/// Every golden decimal reaches this function, from both shapes `sstabledump`
+/// writes:
+///
+/// * a PRIMARY-KEY component or a multicell collection PATH component, which
+///   Cassandra writes as a quoted STRING through `AbstractType.getString`, i.e.
+///   `BigDecimal.toString` (issue #1490 round 6);
+/// * a decimal CELL, which `sstabledump` writes as a bare JSON NUMBER — whose
+///   literal is preserved as text by `golden_lexeme.rs` BEFORE the shared
+///   comparator can parse it into an `f64` (round 10).
+///
+/// The literal digits are therefore always present and are read exactly, with no
+/// recovery step and no ambiguity to refuse. The recovery this replaced
+/// (`exact_from_golden_double`, round 4→10) could not work even in principle:
+/// `0.100000000000000001` and `0.1` are the SAME double, so a double cannot
+/// identify the decimal it was parsed from, and its neighbour checks called that
+/// collision unique and canonicalized the eighteen-digit literal as `0.1`.
 ///
 /// Refuses rather than rounds or truncates:
 ///
@@ -219,114 +259,4 @@ pub fn exact_from_text(text: &str, max_scale: u32, ctx: &str) -> Result<ExactDec
         .checked_mul(sign)
         .ok_or_else(|| format!("{ctx}: '{text}' sits at the edge of the unscaled range"))?;
     Ok(ExactDecimal::new(unscaled, scale))
-}
-
-/// Recover the EXACT decimal a golden `double` was parsed FROM, or refuse.
-///
-/// `sstabledump` writes a `decimal` as a bare JSON number, and the shared
-/// `canonical_jsonl` comparator parses it into an `f64` before this harness sees
-/// it — so the literal's text is already gone. This recovers it, and is exact
-/// WHEN IT SUCCEEDS because it verifies both halves of the recovery instead of
-/// assuming them:
-///
-/// * FIDELITY — the recovered decimal, re-rendered and re-parsed with Rust's
-///   correctly-rounded float parser, must give back the SAME double. (A literal
-///   with more than `max_scale` fractional digits fails here, loudly: such a
-///   value cannot be exported at all, since the export refuses to truncate.)
-/// * UNIQUENESS — neither one-unit neighbour (`±10^-max_scale`) may parse to
-///   that same double. The `max_scale` decimals rounding to one double form a
-///   CONTIGUOUS run, so if both neighbours round elsewhere the recovered value
-///   is the ONLY decimal of at most `max_scale` fractional digits the golden
-///   literal could have been. If a neighbour collides, the double is genuinely
-///   ambiguous and the harness REFUSES rather than compare — a refusal is a
-///   loud non-answer; comparing would be the false PASS this module exists to
-///   remove.
-///
-/// Both checks rely on `cqlite-cli`'s `serde_json` dev-dependency enabling
-/// `float_roundtrip` (guarded by `golden_float_literals_parse_exactly`): without
-/// it serde_json's parse is up to 1 ULP off (#3557) and the FIDELITY check
-/// fails — again a refusal, never a silent pass.
-pub fn exact_from_golden_double(g: f64, max_scale: u32, ctx: &str) -> Result<ExactDecimal, String> {
-    if !g.is_finite() {
-        return Err(format!(
-            "{ctx}: golden decimal literal parsed to {g:?}, which is not a finite decimal"
-        ));
-    }
-    if max_scale > MAX_SCALE {
-        return Err(format!(
-            "{ctx}: recovery scale {max_scale} exceeds {MAX_SCALE}"
-        ));
-    }
-    // `{:.p}` prints the correctly-rounded decimal expansion of the double's
-    // EXACT binary value, so this is the nearest `max_scale`-digit decimal —
-    // computed textually, never as `g * 10^max_scale` in floating point.
-    let rendered = format!("{g:.prec$}", prec = max_scale as usize);
-    let unscaled = parse_fixed_point(&rendered, max_scale).ok_or_else(|| {
-        format!(
-            "{ctx}: golden decimal {g:?} renders as {rendered}, which does not fit a \
-             Decimal128 unscaled value; the harness refuses a lossy comparison"
-        )
-    })?;
-
-    // FIDELITY: does the recovered decimal round back to exactly this double?
-    // Signed zero is compared by VALUE, not by bits, on purpose: BigDecimal has
-    // no negative zero, so `-0.0` and `0.0` denote the same decimal.
-    if !round_trips_to(unscaled, max_scale, g)? {
-        return Err(format!(
-            "{ctx}: golden decimal {g:?} is not the double of any decimal with at most \
-             {max_scale} fractional digits (nearest is {rendered}); the harness refuses to \
-             compare rather than round"
-        ));
-    }
-    // UNIQUENESS: a one-unit neighbour must NOT share the double.
-    for delta in [-1i128, 1] {
-        let neighbour = unscaled.checked_add(delta).ok_or_else(|| {
-            format!("{ctx}: golden decimal {g:?} sits at the edge of the unscaled range")
-        })?;
-        if round_trips_to(neighbour, max_scale, g)? {
-            let a = ExactDecimal::new(unscaled, max_scale).text();
-            let b = ExactDecimal::new(neighbour, max_scale).text();
-            return Err(format!(
-                "{ctx}: the golden double {g:?} is shared by the distinct decimals {a} and \
-                 {b}, so the literal cannot be recovered exactly; the harness refuses to \
-                 compare (a one-unit divergence would be invisible)"
-            ));
-        }
-    }
-    Ok(ExactDecimal::new(unscaled, max_scale))
-}
-
-/// Does `unscaled × 10^-scale`, rendered exactly and re-parsed, equal `g`?
-fn round_trips_to(unscaled: i128, scale: u32, g: f64) -> Result<bool, String> {
-    let text = ExactDecimal { unscaled, scale }.text();
-    let parsed: f64 = text
-        .parse()
-        .map_err(|e| format!("exact decimal text {text} does not re-parse as f64: {e}"))?;
-    Ok(parsed == g)
-}
-
-/// Parse `[-]D+.D{scale}` (the output of `{:.scale}`) into an unscaled `i128`.
-/// `None` if it does not fit — a refusal, never a truncation.
-fn parse_fixed_point(text: &str, scale: u32) -> Option<i128> {
-    let (sign, rest) = match text.strip_prefix('-') {
-        Some(rest) => (-1i128, rest),
-        None => (1i128, text),
-    };
-    let (int_part, frac_part) = match rest.split_once('.') {
-        Some((i, f)) => (i, f),
-        None if scale == 0 => (rest, ""),
-        None => return None,
-    };
-    if frac_part.len() != scale as usize {
-        return None;
-    }
-    if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    if !frac_part.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let digits = format!("{int_part}{frac_part}");
-    let magnitude: i128 = digits.parse().ok()?;
-    magnitude.checked_mul(sign)
 }

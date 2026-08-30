@@ -70,8 +70,7 @@ use arrow::array::Array;
 use super::canonical_jsonl::{CanonicalValue, NormalizedFloat};
 use super::cql_type::CqlTypeSpec;
 use super::decimal::{
-    exact_from_decimal128, exact_from_golden_double, exact_from_text, ExactDecimal,
-    EXPORT_DECIMAL_SCALE,
+    exact_from_decimal128, exact_from_text, is_canonical_text, ExactDecimal, EXPORT_DECIMAL_SCALE,
 };
 use super::golden_rows::fold_null;
 
@@ -283,7 +282,8 @@ impl<'a> Declared<'a> {
 ///      spec;
 ///   5. scalars are typed from the declared type — a `Timestamp` only where
 ///      `timestamp` is declared, a `float` re-narrowed to 32 bits, a `decimal`
-///      recovered to an EXACT unscaled/scale pair rather than an `f64`.
+///      read from its PRESERVED LITERAL into an EXACT unscaled/scale pair, and
+///      REFUSED if it arrives as an `f64`.
 ///
 /// # Idempotent by construction
 ///
@@ -447,9 +447,10 @@ fn type_stringified_scalar(v: CanonicalValue, at: &Declared<'_>) -> Result<Canon
             Ok(f) if f.is_finite() => Ok(CanonicalValue::Float(NormalizedFloat(f))),
             _ => refuse("a finite decimal number"),
         },
-        // The literal TEXT is still present here (a decimal CELL arrives as a
-        // JSON number and has to be RECOVERED from a double instead), so this is
-        // exact with nothing to refuse for ambiguity.
+        // Exact, with nothing to refuse for ambiguity: the literal TEXT is
+        // present at every golden decimal position — written by Cassandra's
+        // `BigDecimal.toString` here, and preserved by `golden_lexeme.rs` for a
+        // decimal CELL, which `sstabledump` writes as a bare JSON number.
         "decimal" => Ok(exact_from_text(s, EXPORT_DECIMAL_SCALE, &at.ctx)?.canonical()),
         "int" | "bigint" | "smallint" | "tinyint" | "varint" | "counter" => {
             match s.parse::<i128>() {
@@ -479,10 +480,15 @@ fn type_stringified_scalar(v: CanonicalValue, at: &Declared<'_>) -> Result<Canon
 ///   the nearest DOUBLE to that text, which is not the double a widened `f32`
 ///   gives (1.84 vs 1.8399999141693115). Narrowing makes both sides hold the
 ///   same double WITHOUT a tolerance — the comparison stays exact-bit.
-/// * A `decimal` becomes an EXACT decimal, never an `f64` (see `decimal.rs`):
-///   an integer-shaped literal is already exact, and a fractional one is
-///   recovered from the double AND VERIFIED, refusing when the double cannot
-///   identify one decimal. A `varint` is deliberately NOT converted — it is an
+/// * A `decimal` becomes an EXACT decimal, and NOTHING about it goes through an
+///   `f64` (see `decimal.rs` and `golden_lexeme.rs`): the literal's TEXT is
+///   preserved before the shared parser sees it, so a decimal arrives here as
+///   that text and is read exactly by `exact_from_text`. An integer-shaped
+///   literal (`Int`) is already exact. A decimal that arrives as a DOUBLE is
+///   REFUSED, because a double cannot identify the decimal it was parsed from —
+///   `0.100000000000000001` and `0.1` are the same double, so the recovery this
+///   replaced (round 4→10) canonicalized the first as the second and would have
+///   passed a lossy export. A `varint` is deliberately NOT converted — it is an
 ///   integer domain on both sides.
 fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalValue, String> {
     let Some(name) = at.scalar() else {
@@ -493,19 +499,45 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
         // never invents a type.
         return Ok(v);
     };
-    Ok(match (v, name) {
-        (CanonicalValue::Timestamp { micros, raw }, name) => {
+    // A `Timestamp` is only a timestamp where `timestamp` is DECLARED; anywhere
+    // else it is the text the golden literally carried, which the rules below
+    // then apply to. Done first and unconditionally so no later rule can be
+    // skipped by the shared parser's spelling-based timestamp recognition.
+    let v = match v {
+        CanonicalValue::Timestamp { micros, raw } => {
             if name == "timestamp" {
-                CanonicalValue::Timestamp { micros, raw }
-            } else {
-                CanonicalValue::Text(raw)
+                return Ok(CanonicalValue::Timestamp { micros, raw });
             }
+            CanonicalValue::Text(raw)
         }
+        other => other,
+    };
+    Ok(match (v, name) {
         (CanonicalValue::Float(NormalizedFloat(f)), "float") => {
             CanonicalValue::Float(NormalizedFloat(f as f32 as f64))
         }
         (CanonicalValue::Float(NormalizedFloat(f)), "decimal") => {
-            exact_from_golden_double(f, EXPORT_DECIMAL_SCALE, &at.ctx)?.canonical()
+            return Err(at.refuse(&format!(
+                "the golden decimal arrived as the double {f:?}, i.e. its LITERAL TEXT was \
+                 lost before the harness saw it. A double cannot identify the decimal it was \
+                 parsed from (0.100000000000000001 and 0.1 are the same double), so the \
+                 harness REFUSES rather than recover one — recovery is what let a lossy \
+                 export compare equal. The literal is preserved by \
+                 golden_lexeme::preserve_decimal_lexemes, which every golden goes through; \
+                 reaching here means this value bypassed it"
+            )));
+        }
+        // The PRESERVED LITERAL (or, at a stringified position, the text
+        // Cassandra's `BigDecimal.toString` wrote) — read exactly.
+        // `is_canonical_text` keeps the descent idempotent: a stringified
+        // position is converted where it is assembled and passes through here
+        // again already canonical.
+        (CanonicalValue::Text(s), "decimal") => {
+            if is_canonical_text(&s) {
+                CanonicalValue::Text(s)
+            } else {
+                exact_from_text(&s, EXPORT_DECIMAL_SCALE, &at.ctx)?.canonical()
+            }
         }
         (CanonicalValue::Int(i), "decimal") => ExactDecimal::from_i128(i).canonical(),
         (other, _) => other,

@@ -100,6 +100,7 @@ pub mod cql_type;
 pub mod decimal;
 pub mod declared;
 pub mod failure;
+pub mod golden_lexeme;
 pub mod golden_rows;
 pub mod schema_fixture;
 pub mod spelling;
@@ -1073,11 +1074,41 @@ fn load_golden(
     fixture: &Fixture,
     columns: &[ColumnType],
 ) -> Result<Vec<GoldenRow>, Failures> {
-    let golden_doc =
-        canonical_jsonl::load_golden_document_with_keys(&fixture.golden, true, &case.key_spec())
-            .map_err(|e| {
-                Failures::refusal(format!("loading the sstabledump golden failed: {e}"))
-            })?;
+    // The golden TEXT is read here rather than through
+    // `canonical_jsonl::load_golden_document_with_keys` so that a declared
+    // `decimal`'s LITERAL survives the parse: the shared comparator turns a bare
+    // JSON number into an `f64`, and an `f64` cannot identify the decimal it was
+    // parsed from (`0.100000000000000001` and `0.1` are the same double). See
+    // `golden_lexeme.rs` — and note the two refusals that keep this fail-closed:
+    // the rewrite errors on any JSON it cannot read, and `declared.rs` REFUSES a
+    // declared-`decimal` position that still arrives as a double.
+    let raw = std::fs::read_to_string(&fixture.golden).map_err(|e| {
+        Failures::refusal(format!(
+            "reading the sstabledump golden {} failed: {e}",
+            fixture.golden.display()
+        ))
+    })?;
+    if let Some(marker) = golden_lexeme::placeholder_marker(&raw) {
+        return Err(Failures::refusal(format!(
+            "the sstabledump golden {} carries the placeholder marker {marker} — it is not a \
+             real Cassandra dump and cannot be an oracle",
+            fixture.golden.display()
+        )));
+    }
+    let decimals = golden_lexeme::decimal_columns(columns);
+    let content = golden_lexeme::preserve_decimal_lexemes(&raw, &decimals).map_err(|e| {
+        Failures::refusal(format!(
+            "preserving the decimal literals of the sstabledump golden {} failed: {e}",
+            fixture.golden.display()
+        ))
+    })?;
+    let golden_doc = canonical_jsonl::parse_document_str_with_keys(
+        &content,
+        &fixture.golden,
+        true,
+        &case.key_spec(),
+    )
+    .map_err(|e| Failures::refusal(format!("loading the sstabledump golden failed: {e}")))?;
     golden_rows::project_golden(&golden_doc, columns, case.partition_key, case.clustering)
         .map_err(Failures::refusal)
 }

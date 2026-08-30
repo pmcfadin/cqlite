@@ -860,8 +860,14 @@ fn project_golden_types_multicell_collection_paths() {
         col("s", "set<float>"),
         col("m", "map<boolean, decimal>"),
     ];
+    // Through `preserve_decimal_lexemes` first, exactly as `mod.rs::load_golden`
+    // does: the `map<boolean,decimal>` entry VALUE is a bare JSON number, and
+    // the harness reads a decimal from its LITERAL — a decimal that reaches the
+    // comparison as a double is refused (round 10, section 5).
+    let golden = preserve_decimal_lexemes(GOLDEN, &decimal_columns(&columns))
+        .expect("the rewrite must succeed");
     let doc = parse_document_str_with_keys(
-        GOLDEN,
+        &golden,
         Path::new("<synthetic>"),
         true,
         &KeySpec::from_cql_types(&["int"], &[]),
@@ -895,7 +901,7 @@ fn project_golden_types_multicell_collection_paths() {
 }
 
 // ===========================================================================
-// 4. A `Decimal128` cell is decoded from its DECLARED type (round 7)
+// 4b. A `Decimal128` cell is decoded from its DECLARED type (round 7)
 //
 // Every scale-zero `Decimal128` used to canonicalize as an `Int`, on the grounds
 // that scale 0 is `varint`'s mapping. But `arrow_expect` accepts
@@ -973,5 +979,280 @@ fn a_decimal_cell_without_a_declared_scalar_is_refused() {
     assert!(
         err.contains("ambiguous without the declared type") && err.contains("refuses"),
         "{err}"
+    );
+}
+
+// ===========================================================================
+// 5. A decimal CELL's LITERAL survives the parse (round 10)
+//
+// The FALSE PASS this section exists for: rounds 4–9 canonicalized a decimal
+// CELL by RECOVERING it from the `f64` the shared comparator produced (render at
+// the export scale, then check that neither one-unit neighbour parses to the
+// same double, and treat a unique answer as exact). That cannot work in
+// principle. `0.100000000000000001` and `0.1` are the SAME `f64`: the recovery
+// rendered `0.1`, found both neighbours rounding elsewhere, declared itself
+// EXACT — and canonicalized an eighteen-digit golden literal as `0.1`, so a
+// lossy export writing `0.1` compared EQUAL. By the time a value is an `f64` the
+// distinguishing digits are gone, and no amount of neighbour probing brings them
+// back.
+//
+// So the literal's TEXT is preserved before the shared parser sees it
+// (`golden_lexeme::preserve_decimal_lexemes`, called by `mod.rs::load_golden`),
+// every golden decimal is read by `decimal::exact_from_text`, and a declared
+// `decimal` that still arrives as a double is REFUSED. The two halves are
+// coupled deliberately: `an_unrewritten_decimal_cell_is_refused_end_to_end`
+// pins that dropping the rewrite REDS every decimal table instead of quietly
+// restoring the recovery. `project_golden_types_multicell_collection_paths`
+// (section 3) goes through the same rewrite, for the same reason.
+// ===========================================================================
+
+use parquet_parity::golden_lexeme::{
+    decimal_columns, parse_line, placeholder_marker, preserve_decimal_lexemes,
+};
+
+/// A golden decimal CELL, through THE declared-type door at the `Cell` position.
+fn decimal_cell_golden(raw: CanonicalValue) -> Result<CanonicalValue, String> {
+    let decimal = col("d", "decimal");
+    canonicalize_golden(raw, &Declared::cell(&decimal.spec, "decimal cell"))
+}
+
+/// The same cell as the EXPORT writes it: `Decimal128(38, scale)`.
+fn decimal_cell_arrow(unscaled: i128, scale: i8) -> Result<CanonicalValue, String> {
+    let decimal = col("d", "decimal");
+    canonicalize_arrow_decimal(
+        unscaled,
+        scale,
+        &Declared::cell(&decimal.spec, "exported decimal cell"),
+    )
+}
+
+/// A decimal cell's literal as the harness receives it once preserved.
+fn decimal_literal(literal: &str) -> CanonicalValue {
+    CanonicalValue::Text(literal.to_string())
+}
+
+/// THE ROUND-10 CONTROL: two decimal literals that are the SAME `f64` must stay
+/// DISTINCT, and neither may be canonicalized as the other.
+///
+/// The collision is ASSERTED, not assumed, so the test cannot silently stop
+/// being about a collision — which is what let the hole through: the previous
+/// control used a literal whose extra digit still survived float conversion.
+#[test]
+fn f64_colliding_decimal_literals_stay_distinct() {
+    // Premise: these two literals ARE one double, so a double-mediated golden
+    // side cannot distinguish them however it probes.
+    let long = "0.100000000000000001";
+    let short = "0.1";
+    assert_eq!(
+        long.parse::<f64>().expect("f64").to_bits(),
+        short.parse::<f64>().expect("f64").to_bits(),
+        "premise of this control: the two literals collide under f64"
+    );
+
+    assert_eq!(
+        decimal_cell_golden(decimal_literal(short)).expect("0.1 is representable at scale 9"),
+        decimal_cell_arrow(100_000_000, 9).expect("scale-9 decimal"),
+        "0.1 must compare exactly against the exported cell for 0.1"
+    );
+
+    // The eighteen-digit literal carries more fractional digits than the
+    // export's fixed scale can hold, so it is REFUSED — comparing it would mean
+    // comparing two different numbers. A refusal is a loud non-answer; the false
+    // PASS (canonicalizing it as 0.1) is what is gone.
+    let err = decimal_cell_golden(decimal_literal(long)).expect_err(
+        "a literal beyond the export's fixed scale must be refused, never canonicalized as 0.1",
+    );
+    assert!(
+        err.contains("fractional digits"),
+        "the refusal must name the precision it cannot carry, got: {err}"
+    );
+    assert!(
+        !err.contains("0.1)"),
+        "the refusal must not have canonicalized the literal as 0.1, got: {err}"
+    );
+
+    // A collision the export CAN carry: both literals are inside the fixed
+    // scale-9 precision, they are one unit apart, and they are the same double —
+    // so these are COMPARED, and compared distinct, rather than refused.
+    let (a, b) = ("9007199.254740001", "9007199.254740002");
+    assert_eq!(
+        a.parse::<f64>().expect("f64").to_bits(),
+        b.parse::<f64>().expect("f64").to_bits(),
+        "premise: two scale-9 literals inside the export scale that collide under f64"
+    );
+    let a_exact = decimal_cell_golden(decimal_literal(a)).expect("scale-9 literal");
+    let b_exact = decimal_cell_golden(decimal_literal(b)).expect("scale-9 literal");
+    assert_ne!(
+        a_exact, b_exact,
+        "two distinct decimals sharing one double must stay distinct"
+    );
+    assert_eq!(
+        a_exact,
+        decimal_cell_arrow(9_007_199_254_740_001, 9).expect("scale-9 decimal")
+    );
+    assert_eq!(
+        b_exact,
+        decimal_cell_arrow(9_007_199_254_740_002, 9).expect("scale-9 decimal"),
+        "and each must equal the exported cell for its OWN value"
+    );
+}
+
+/// A golden decimal that arrives as a DOUBLE — its literal lost — is REFUSED by
+/// name, whatever the double is.
+#[test]
+fn a_golden_decimal_that_lost_its_literal_is_refused() {
+    for double in [0.1f64, 31_595.67, 0.0, -0.0, f64::NAN, f64::INFINITY] {
+        let err = decimal_cell_golden(CanonicalValue::Float(NormalizedFloat(double)))
+            .expect_err("a decimal that arrives as a double must be refused");
+        assert!(
+            err.contains("LITERAL TEXT was lost"),
+            "the refusal must name the cause, got: {err}"
+        );
+    }
+
+    // A declared `double` column is NOT affected: the exact-bit float comparison
+    // is a different contract and stays exactly as it was.
+    let double = col("f", "double");
+    assert_eq!(
+        canonicalize_golden(
+            CanonicalValue::Float(NormalizedFloat(31_595.67)),
+            &Declared::cell(&double.spec, "double cell"),
+        )
+        .expect("a double column compares as a double"),
+        CanonicalValue::Float(NormalizedFloat(31_595.67))
+    );
+}
+
+/// The rewrite quotes ONLY declared-decimal cells, and only their numbers.
+#[test]
+fn the_rewrite_preserves_decimal_lexemes_and_nothing_else() {
+    let columns = vec![
+        col("balance", "decimal"),
+        col("rate", "double"),
+        col("tags", "frozen<set<decimal>>"),
+        col("note", "text"),
+    ];
+    let decimals = decimal_columns(&columns);
+    assert_eq!(
+        decimals.iter().cloned().collect::<Vec<_>>(),
+        vec!["balance".to_string(), "tags".to_string()],
+        "a decimal ANYWHERE in the declared type carries the column into the rewrite"
+    );
+
+    let line = concat!(
+        r#"{"partition":{"key":["k"]},"rows":[{"type":"row","clustering":[],"cells":["#,
+        r#"{"name":"balance","value":0.100000000000000001},"#,
+        r#"{"name":"rate","value":1014.5449131979983},"#,
+        r#"{"name":"tags","value":[1.5,2.25]},"#,
+        r#"{"name":"note","value":"0.1"}]}]}"#,
+        "\n"
+    );
+    let rewritten = preserve_decimal_lexemes(line, &decimals).expect("the rewrite must succeed");
+
+    assert!(
+        rewritten.contains(r#"{"name":"balance","value":"0.100000000000000001"}"#),
+        "the decimal literal must survive verbatim, quoted: {rewritten}"
+    );
+    assert!(
+        rewritten.contains(r#"{"name":"tags","value":["1.5","2.25"]}"#),
+        "a collection of decimals is quoted element-wise: {rewritten}"
+    );
+    assert!(
+        rewritten.contains(r#"{"name":"rate","value":1014.5449131979983}"#),
+        "a `double` column's literal must reach serde_json's exact parser untouched, so the \
+         exact-bit float comparison is unchanged: {rewritten}"
+    );
+    assert!(
+        rewritten.contains(r#"{"name":"note","value":"0.1"}"#),
+        "a text cell is untouched: {rewritten}"
+    );
+
+    // With NO decimal column the document is JSON-equivalent to the original —
+    // the rewrite cannot change anything else about a golden.
+    let untouched = preserve_decimal_lexemes(line, &decimal_columns(&[])).expect("no-op rewrite");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(untouched.trim()).expect("valid JSON"),
+        serde_json::from_str::<serde_json::Value>(line.trim()).expect("valid JSON"),
+        "a golden with no declared decimal must survive the rewrite unchanged"
+    );
+}
+
+/// The scanner REFUSES what it cannot read, and the placeholder refusal the
+/// harness took over from `canonical_jsonl` still fires.
+#[test]
+fn the_rewrite_fails_closed() {
+    for bad in [
+        r#"{"a":}"#,
+        r#"{"a":1,}"#,
+        r#"{"a":01x}"#,
+        r#"{"a":1.}"#,
+        r#"{"a":1e}"#,
+        r#"{a:1}"#,
+        r#"{"a":"unterminated"#,
+        r#"{"a":1} trailing"#,
+        r#"[1,2"#,
+        r#"{"a":tru}"#,
+    ] {
+        assert!(
+            parse_line(bad).is_err(),
+            "{bad:?} must be refused, never waved through to the untransformed text"
+        );
+    }
+    // Valid JSON the corpus uses, including escapes and unicode, round-trips.
+    for good in [
+        r#"{"a":"a \"quoted\" \\ é value","b":[null,true,false,-0.5,1E+3]}"#,
+        r#"{"nested":{"deep":[{"x":1}]}}"#,
+    ] {
+        let parsed = parse_line(good).expect("valid JSON must parse");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&parsed.to_json_text()).expect("re-emit"),
+            serde_json::from_str::<serde_json::Value>(good).expect("original"),
+            "the re-emitted text must denote the same JSON"
+        );
+    }
+
+    assert_eq!(
+        placeholder_marker(r#"{"cells":[{"value":"TODO"}]}"#),
+        Some("\"TODO\"")
+    );
+    assert_eq!(placeholder_marker(r#"{"cells":[{"value":0.1}]}"#), None);
+}
+
+/// END TO END through the REAL load path: the rewrite, the shared parser and
+/// `project_golden` together must keep a decimal cell's literal exact — and
+/// WITHOUT the rewrite the same golden must be REFUSED, never compared.
+#[test]
+fn an_unrewritten_decimal_cell_is_refused_end_to_end() {
+    const GOLDEN: &str = concat!(
+        r#"{"partition":{"key":["k"]},"rows":[{"type":"row","clustering":[],"#,
+        r#""cells":[{"name":"balance","value":0.1}]}]}"#,
+        "\n"
+    );
+    let columns = vec![col("id", "text"), col("balance", "decimal")];
+    let keys = KeySpec::from_cql_types(&["text"], &[]);
+
+    // WITH the rewrite: the literal is read exactly and equals the exported cell.
+    let rewritten = preserve_decimal_lexemes(GOLDEN, &decimal_columns(&columns))
+        .expect("the rewrite must succeed");
+    let doc = parse_document_str_with_keys(&rewritten, Path::new("<synthetic>"), true, &keys)
+        .expect("the rewritten golden must parse");
+    let rows = project_golden(&doc, &columns, &["id"], &[]).expect("the golden must project");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cells.get("balance"),
+        Some(&decimal_cell_arrow(100_000_000, 9).expect("scale-9 decimal")),
+        "the preserved literal must compare exactly against the exported cell"
+    );
+
+    // WITHOUT it: the cell reaches the harness as a double and the projection
+    // REFUSES. This is the coupling that makes the preservation non-optional —
+    // a future edit that drops it REDS every decimal table.
+    let doc = parse_document_str_with_keys(GOLDEN, Path::new("<synthetic>"), true, &keys)
+        .expect("the raw golden must parse");
+    let err = project_golden(&doc, &columns, &["id"], &[])
+        .expect_err("a decimal cell whose literal was lost must be refused");
+    assert!(
+        err.contains("LITERAL TEXT was lost"),
+        "the refusal must name the cause, got: {err}"
     );
 }
