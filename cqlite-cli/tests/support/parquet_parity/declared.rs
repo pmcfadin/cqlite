@@ -655,9 +655,9 @@ fn json_form(value: &RawValue) -> JsonForm {
 ///
 /// Recurses in lockstep with [`canonicalize_golden`], over the same declared
 /// type, deriving each child position with the same private [`Declared::child`]:
-/// a sequence's `Element`, a frozen map's `MapValue`, a tuple's `TupleField`,
-/// and a UDT field's explicitly NAMED absence. So the two descents cannot
-/// disagree about which position carries which declared type.
+/// a sequence's `Element`, a frozen map's `MapValue` and a tuple's
+/// `TupleField`. So the two descents cannot disagree about which position
+/// carries which declared type. A UDT is the identity — see the last arm.
 pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<String, String> {
     if at.preserves_exact_lexeme() {
         // A declared SCALAR: this position IS the value, and a scalar has no
