@@ -71,7 +71,7 @@ from conftest import DATASETS, SCHEMAS, PROJECT_ROOT
 
 # ONE implementation of numeric equality, shared with test_parity.py (#3505).
 from numeric_compare import (
-    float_equal,
+    float_equal as _float_equal,
     is_number as _is_number,
     numbers_equal as _numbers_equal,
 )
@@ -401,9 +401,10 @@ def values_equal(py_val: Any, cli_val: Any) -> bool:
     return py_val == cli_val
 
 
-def _float_equal(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-9) -> bool:
-    """Compare floats with tolerance — see `numeric_compare.float_equal`."""
-    return float_equal(a, b, rel_tol, abs_tol)
+# =============================================================================
+# CLI Execution
+# =============================================================================
+
 
 def run_cli_query(
     data_dir: Path, schema: Path, query: str, cli_binary: Path, timeout: int = 60

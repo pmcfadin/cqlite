@@ -70,6 +70,11 @@ def float_equal(
         return True
     if a != a and b != b:  # both NaN
         return True
+    if a != a or b != b:  # exactly one NaN -- never equal
+        # Explicit rather than relying on NaN propagating through the arithmetic
+        # below (it does, but implicitly). This branch is verbatim from the
+        # `test_cli_parity._float_equal` this module replaced.
+        return False
     return abs(a - b) <= max(rel_tol * max(abs(a), abs(b)), abs_tol)
 
 
