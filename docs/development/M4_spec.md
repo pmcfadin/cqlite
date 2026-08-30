@@ -669,8 +669,8 @@ the instance list further down is a floor, not a ceiling:
   | Projected type | Python projection | Canonical form | Node/CLI canonical form | Verdict |
   |---|---|---|---|---|
   | `list<T>` | `List` arm → `tuple` | array | array | **benign iff every descendant is benign** — divergent when `T` holds a `map` (a-2 at depth). A nested `udt` used to make this row divergent (a-3) and no longer does: the `Udt` arm is type-preserving since #3504 |
-  | `set<T>` | no `Set` arm — falls through to `value_to_py` → `set_to_py` → `frozenset` | sorted array | sorted array | **benign iff every descendant is benign** — and see #3500 when a UDT is nested |
-  | `tuple<...>` | no `Tuple` arm — falls through to `value_to_py` → `tuple` | array | array | **benign iff every descendant is benign** — and see #3500 when a UDT is nested |
+  | `set<T>` | no `Set` arm — falls through to `value_to_py` → `set_to_py` → `frozenset` | sorted array | sorted array | **benign iff every descendant is benign** — and a nested UDT still RAISES here (`unhashable type: 'list'`, the #804 list rendering; #3500) |
+  | `tuple<...>` | no `Tuple` arm — falls through to `value_to_py` → `tuple` | array | array | **benign iff every descendant is benign** — a nested UDT used to raise and no longer does (#3504 made the UDT hashable; #3500's arm is still missing) |
   | `map<k,v>` | `Map` arm → tuple of pairs | array of arrays | array of `{"key": …, "value": …}` | **DIVERGES** (a-2) |
   | `udt` | `Udt` arm → **`cqlite.Udt`** (identity out of band, field values recursively projected — #3504) | **object** | **object** | **benign** — the projection is type-PRESERVING, so a-1/a-3 are **CLOSED**. It used to project to a `frozenset` of `(name, value)` pairs, canonicalizing to an array of `[name, value]` where Node/the CLI produce an object |
 
@@ -735,7 +735,7 @@ nesting space and therefore cannot be closed. `Value::Frozen` adds no row: it re
 | `decimal.Decimal` | `Value::Decimal` | no | — |
 | `cqlite.Duration` | `Value::Duration` | no | — |
 | `IPv4Address` / `IPv6Address` | `Value::Inet` | no | — |
-| `list` | `list<T>`, `set<frozen<udt>>` (the `contains_udt` fallback), **JSON array**. (A *projected* `set<frozen<udt>>` would also produce a `list`, but a `list` is unhashable, so that path raises rather than canonicalizing — #3500.) | yes (3) | **MIXED** — `set` vs `list` order-sensitivity is **b-1**; a **JSON array is BENIGN**, it stays an array and matches the CLI's array, so it is *not* a canonicalization divergence (its element ORDER is unverified, but that is **b-4**, which already covers every array, not a JSON-specific defect) |
+| `list` | `list<T>`, `set<frozen<udt>>` (the `contains_udt` fallback), **JSON array**. (A *projected* `set<frozen<udt>>` would also produce a `list`, but a `list` is unhashable, so that path raises rather than canonicalizing — #3500, and MEASURED still to raise after #3504: `unhashable type: 'list'`.) | yes (3) | **MIXED** — `set` vs `list` order-sensitivity is **b-1**; a **JSON array is BENIGN**, it stays an array and matches the CLI's array, so it is *not* a canonicalization divergence (its element ORDER is unverified, but that is **b-4**, which already covers every array, not a JSON-specific defect) |
 | `frozenset` | `set<T>` (non-UDT elements), a **projected `set`** (fall-through → `set_to_py`) | yes (2) | **benign** — `set<T>` vs a projected `set` canonicalize identically. A **projected `udt`** was this row's third source and its only divergent one (**a-1**/**a-3**); since #3504 the `Udt` arm returns a `cqlite.Udt`, so it has left this row entirely |
 | `tuple` | `tuple<...>`, a **projected `list<T>`** (`List` arm), a **projected `tuple<...>`** (fall-through), a **projected `map<k,v>`** (`Map` arm → a tuple of pairs) | yes (4) | **MIXED** — benign for `tuple<...>`, a projected `list<T>` and a projected `tuple<...>` (all canonicalize to an array); **DIVERGENT for a projected `map`**, whose array-of-arrays is not the CLI/Node array of `{"key": …, "value": …}` — instance **a-2** |
 | `dict` | `map<k,v>` (cell level), **JSON object**, and a **ROW** at row level. `udt` was a fourth source and is **no longer one** (#3504: `value_to_py`'s `Udt` arm returns a `cqlite.Udt`) | yes (3) | **DIVERGES** — a cell-level `map` carrying a literal `"_type"` key is still canonicalized as a UDT, which is **b-2**'s surviving cell-level-map site (the ambiguity is no longer *with a UDT*: it is an untyped `dict` misread by the `"_type"` sniff); the JSON object is **b-5**; the ROW source is disambiguated by the explicit `is_row_level` signal and is therefore **FIXED**, not a divergence |
@@ -745,7 +745,9 @@ Reading rule: a shape with no collision needs no thought; a **benign** collision
 (that is what benign means); the **three** rows carrying a divergent source — `list`, `tuple` (for
 a projected `map` only) and `dict` — are the ones requiring #1455 to act, and their
 instances are named in the next table. A projection position that would need an unhashable shape
-(`dict`, `list`) does not reach the normalizer at all: it raises inside the binding (#3500).
+(`dict`, `list`) does not reach the normalizer at all: it raises inside the binding (#3500 — and
+since #3504 a projected UDT is no longer one of those shapes, so the surviving cases are the `dict`
+from a `map` and the `list` from a UDT-bearing `set`).
 
 **How each row was derived, and the verification trap to avoid.** A row answers "**which producers
 can emit this host shape**", counted over BOTH `value_to_py`'s arms AND `value_to_hashable_key`'s
@@ -877,15 +879,38 @@ This is exactly the shared-error blind spot `CLAUDE.md` describes for symmetric 
 the oracle has to be the *other* implementation's bytes, never the same family's output — and for
 `_type` the CLI is (still) inside the same family. The correction is recorded on **#3504**.
 
-**Some nested shapes RAISE rather than diverge (issue #3500).** `contains_udt` and
-`value_to_hashable_key` are **not total over `Value`**: `contains_udt` recurses only through
-`Frozen`, and `value_to_hashable_key` has arms for `List`/`Map`/`Frozen`/`Udt` but **none for
-`Tuple` or `Set`** (both fall through to `value_to_py`). So for shapes such as
-`set<frozen<tuple<frozen<udt>, int>>>` and `set<frozen<set<frozen<udt>>>>`, `set_to_py` commits to
-the `frozenset` path — `contains_udt` never sees the nested UDT — and the fall-through then yields
-an unhashable `dict`/`list`, raising `TypeError: unhashable type` **inside the binding, before any
-normalizer runs**. That is a production `value.rs` defect, tracked separately as **#3500** (#3497
-is shape-only), and fixing it is out of scope for #1454, which forbids `value.rs` edits.
+**Some nested shapes RAISE rather than diverge (issue #3500) — but FEWER since #3504, and the
+boundary is now measured rather than asserted.** `contains_udt` and `value_to_hashable_key` are
+**not total over `Value`**: `contains_udt` recurses only through `Frozen`, and
+`value_to_hashable_key` has arms for `List`/`Map`/`Frozen`/`Udt` but **none for `Tuple` or `Set`**
+(both fall through to `value_to_py`). `set_to_py` therefore commits to the `frozenset` path —
+`contains_udt` never sees a UDT nested inside a tuple or an inner set — and every element must then
+be hashable.
+
+What that fall-through yields changed with #3504, measured on the committed fixture table
+`test_udt_collision.udt_hashable_shapes` (point read per row, with `origin/main`'s binding built into
+the same venv for the "before" column):
+
+- `set<frozen<tuple<frozen<udt>, int>>>` and `map<frozen<tuple<frozen<udt>, int>>, int>`
+  **NOW SUCCEED** (`frozenset({(Udt, 10)})` / `{(Udt, 20): 5}`). Before #3504 both raised
+  `TypeError: unhashable type: 'dict'`, because the fall-through rendered the UDT as a `dict`.
+  Resolved INCIDENTALLY by the UDT becoming a hashable `cqlite.Udt` — **no arm was added**.
+- `set<frozen<set<frozen<udt>>>>` **still raises**, identically before and after:
+  `TypeError: unhashable type: 'list'`. The cause is the #804 CLI-parity rendering of a UDT-bearing
+  set as a Python `list`, not the UDT — the error text naming `'list'` rather than `'dict'` is what
+  distinguishes them.
+- A UDT declaring a `frozen<map<text,int>>` field also **now succeeds** in the tuple position, which
+  falsified the obvious prediction: `Udt.__hash__` hashes its field values and a `dict` would be
+  unhashable, but a collection field inside a frozen UDT decodes to `Value::Blob`, so it arrives as
+  hashable `bytes`. That decode gap is orthogonal and is pinned as characterization in
+  `bindings/python/tests/test_issue_3504_udt_field_namespace.py`.
+
+So the residual `#3500` defect is REAL but narrower and differently shaped than this section
+originally described: the arms are still missing, nothing is structurally total (projectability now
+depends on `value_to_py`'s output happening to be hashable), and the dominant remaining cause is the
+`set`-of-UDT `list` rendering rather than the UDT itself. It remains a production `value.rs`
+matter, tracked as **#3500** (#3497 is shape-only), and out of scope for #1454, which forbids
+`value.rs` edits.
 Consequence for #1455: a harness hitting one of these gets an **exception, not a mismatch**, and
 must not record it as a parity failure — it is an unsupported-shape error to be reported as such.
 
