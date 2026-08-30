@@ -1000,10 +1000,13 @@ class TestFrozenMapWithTupleBorneUdtKey:
             (kp_hashable(None, 5), 2): 52,
         }
         assert len(value) == 2, "the two null-bearing keys must not collapse"
+        # Iterating a `cqlite.Udt` yields field NAMES (it follows the mapping
+        # protocol), so the pairs come from `.items()` — the projected UDT is no
+        # longer a `frozenset` of `(name, value)` tuples (#3504).
         nulls = {
             field_value
             for key in value
-            for field_name, field_value in key[0]
+            for field_name, field_value in key[0].items()
             if field_name in ("label", "rank")
         }
         assert None in nulls, (
