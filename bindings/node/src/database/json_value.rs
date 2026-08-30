@@ -167,8 +167,11 @@ fn json_array(items: &[cqlite_core::types::Value]) -> napi::Result<Vec<serde_jso
     items.iter().map(value_to_json).collect()
 }
 
-// The legacy `value_to_json` unit tests live in a sibling file: this module is
-// already the size of the coverage added for issue #1452 (#1116).
+// The legacy `value_to_json` unit tests live in a sibling file. They were split
+// out while this code was still inside the over-threshold `database.rs` (#1116);
+// at 179 lines this module is now well under the threshold, so the split is no
+// longer forced. It is kept because #1457 deletes this whole deprecated path in
+// the next major, and two adjacent files go as cleanly as one.
 //
 // `#[path]` is required (not decorative): without it a child of a non-`mod.rs`
 // file module is looked for in `database/json_value/`, and the test file is a
