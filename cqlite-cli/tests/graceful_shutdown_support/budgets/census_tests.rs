@@ -123,6 +123,71 @@ fn the_stage_census_check_rejects_an_extra_stage_that_never_finished() {
     );
 }
 
+/// **A DECLARED STAGE THAT IS OPENED AND NEVER `finish`ED IS CAUGHT** (roborev job
+/// 259, finding 2) — the case the stage-SET check structurally cannot see.
+///
+/// The sibling test above covers an EXTRA stage that never finishes, which the set
+/// check catches on the extra name alone. THIS run declares nothing extra: every
+/// stage in the census is opened, in order, and one of them is simply never
+/// finished. The opened list therefore EQUALS the declared list, the set assert
+/// passes, and before round 16 the whole check passed — losing that stage's timing
+/// from the attribution report the stages exist to produce, with
+/// `unfinished_stages()` computed and rendered into a message that was never
+/// printed.
+#[test]
+fn the_stage_census_check_rejects_a_declared_stage_that_never_finished() {
+    let deadline = TestDeadline::start(Duration::from_secs(60), Duration::from_secs(60));
+    let mut open_forever = None;
+    for (i, entry) in T1_WAIT_CENSUS.iter().enumerate() {
+        let stage = deadline.stage(entry.stage);
+        // The LAST declared stage is opened and never finished. `Stage` has no
+        // `Drop`, so holding it is all it takes.
+        if i + 1 == T1_WAIT_CENSUS.len() {
+            open_forever = Some(stage);
+        } else {
+            stage.finish();
+        }
+    }
+    let never_finished = T1_WAIT_CENSUS
+        .last()
+        .expect("the census is not empty")
+        .stage;
+
+    // THE PRECONDITION THAT MAKES THIS THE UNCOVERED CASE: the stage SET matches,
+    // so the assert this test is about is the only thing that can fail. Asserted
+    // here rather than argued, because if a future edit made the sets differ this
+    // test would pass on the WRONG assert and the hole would reopen unnoticed.
+    assert_eq!(
+        deadline.opened_stages(),
+        T1_WAIT_CENSUS.iter().map(|e| e.stage).collect::<Vec<_>>(),
+        "this test is about the case where the stage SET matches"
+    );
+    assert_eq!(
+        deadline.unfinished_stages(),
+        vec![never_finished],
+        "exactly one declared stage was left unfinished"
+    );
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_census_matches_run("a synthetic T1 run", T1_WAIT_CENSUS, &deadline);
+    }))
+    .expect_err(
+        "the census check ACCEPTED a run that never finished a declared stage: `unfinished_stages` \
+         only ever reached a failure message, so it guarded nothing (job 259, finding 2)",
+    );
+    let panicked = panic_text(panicked.as_ref());
+    assert!(
+        panicked.contains(never_finished),
+        "the failure must NAME the stage that never finished: {panicked}"
+    );
+    assert!(
+        panicked.contains("never `finish`ed"),
+        "the failure must say what went wrong, so it is not read as a census mismatch: {panicked}"
+    );
+
+    drop(open_forever);
+}
+
 /// A caught panic's message, for the two directions above.
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload

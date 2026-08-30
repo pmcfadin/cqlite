@@ -312,14 +312,22 @@ const fn aggregate_floor(census: &[WaitCensus]) -> Duration {
 /// whose position no longer matches the run is a census a reader can no longer
 /// audit against the code.
 ///
+/// **IT ALSO ASSERTS THAT EVERY OPENED STAGE FINISHED** (roborev job 259, finding
+/// 2), as a SEPARATE assert. `unfinished_stages()` arrived in round 15 and was
+/// only ever interpolated into the message above — so a run in which every
+/// DECLARED stage is opened and one of them is never `finish`ed matched the
+/// declared list, passed, and lost that stage's timing in silence. A value that
+/// reaches nothing but a failure message is not a guard.
+///
 /// WHAT IT DOES NOT CATCH, so nobody reads more into a green run than is there: a
 /// wait ADDED INSIDE an already-declared stage. That changes `waits` and this check
-/// cannot see it. The stage set is verified; the per-stage counts are declared.
+/// cannot see it. The stage set is verified; the per-stage counts are declared, and
+/// so is every entry's `note`.
 pub fn assert_census_matches_run(test: &str, census: &[WaitCensus], deadline: &TestDeadline) {
     let declared: Vec<&str> = census.iter().map(|e| e.stage).collect();
     let ran = deadline.opened_stages();
     let unfinished = deadline.unfinished_stages();
-    let unfinished = if unfinished.is_empty() {
+    let unfinished_note = if unfinished.is_empty() {
         "(every stage this run opened also finished)".to_string()
     } else {
         format!("{unfinished:?} — opened and never finished")
@@ -330,7 +338,7 @@ pub fn assert_census_matches_run(test: &str, census: &[WaitCensus], deadline: &T
         "{test}: the stages this run OPENED are not the stages its wait census declares.\n\
          declared: {declared:?}\n\
          opened:   {ran:?}\n\
-         of those: {unfinished}\n\
+         of those: {unfinished_note}\n\
          the census, as declared (each entry's `note` says why it reads the way it does):\n{}\n\
          The census is what the aggregate floor is computed from \
          (`no_stage_in_isolation_is_tighter_than_the_bound_it_replaced`), so a stage that draws \
@@ -343,6 +351,34 @@ pub fn assert_census_matches_run(test: &str, census: &[WaitCensus], deadline: &T
          (job 255, finding 1). A stage missing from `opened` altogether means the test returned \
          before reaching it.)",
         describe_census(census)
+    );
+
+    // **ASSERTED, NOT MERELY INTERPOLATED** (roborev job 259, finding 2). Round 15
+    // added `unfinished_stages()` and used it in the message above and nowhere
+    // else, which does not GUARD anything: if every DECLARED stage is opened but
+    // one is never `finish`ed, the opened list still equals the declared list, the
+    // assert above passes, and that stage's timing is silently absent from the
+    // attribution report the stages exist for. A value that only ever reaches a
+    // failure message is diagnostics wearing a guard's name — the sixth instance of
+    // that class in this change — so the property gets its own assert.
+    //
+    // IT IS A SEPARATE ASSERT AND NOT A STRONGER FORM OF THE ONE ABOVE, because the
+    // two catch different defects and a reader has to be told which one fired: a
+    // set mismatch means the census is wrong, an unfinished stage means the test
+    // returned or panicked mid-stage. Ordered second so a run with BOTH is reported
+    // as the census mismatch it primarily is.
+    assert!(
+        unfinished.is_empty(),
+        "{test}: {unfinished:?} — opened and never `finish`ed, though the stage SET matches the \
+         census.\n\
+         opened: {ran:?}\n\
+         A stage is recorded when it is OPENED (job 255, finding 1), so such a stage passes the \
+         stage-set check above while contributing NO timing: it is missing from the attribution \
+         report, from the `slowest completed stage` figure, and from every failure message that \
+         prints them — which is the whole reason stages exist (D6a). The cause is in the test, \
+         not in the census: either the stage was dropped without `finish()`, or the test returned \
+         before reaching it.\n{}",
+        deadline.report()
     );
 }
 
