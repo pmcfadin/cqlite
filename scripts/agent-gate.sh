@@ -5387,17 +5387,61 @@ check_jest_suites_ran() {
   # `<n> total` / `<n> passed` / `<n> failed` / `<n> skipped`, read by name rather than
   # by position — jest omits a category entirely when its count is zero, so a
   # positional parse would silently misread every line whose shape it did not expect.
-  local s_total s_failed s_skipped t_passed
+  # THE `:=0` DEFAULTS ARE THE PERMISSIVE BRANCH, so they get a CROSS-CHECK (roborev round 4,
+  # E1 class sweep). jest OMITS a category entirely when its count is zero, so "no match" and
+  # "the parse broke" produce the SAME empty string — and `sed -n` exits 0 either way, so no
+  # status check can separate them. Defaulting to 0 therefore silently converts a broken parse
+  # into "nothing failed, nothing was skipped", which is the vacuous direction in the two
+  # fields whose whole job is to report trouble.
+  #
+  # Two guards instead, both affirmative:
+  #   (a) CLOSED GRAMMAR — every `<N> <word>` pair on the line must name a category this parser
+  #       knows. An unrecognised one FAILs naming it, rather than being silently dropped from
+  #       the reconciliation below (a new jest category would otherwise make the sum wrong and
+  #       be reported as a parse break, i.e. the right red with the wrong cause).
+  #   (b) SUM RECONCILIATION — the recognised parts must add up to the reported total. A sed
+  #       that half-worked cannot satisfy this, so a broken parse can no longer look like zeros.
+  # (a) is checked FIRST, so (b) can never red on a category the parser simply does not know.
+  local s_total s_failed s_skipped s_passed s_pending s_todo t_passed
+  local _unknown _pair _n _w _sum
+  _unknown=$(printf '%s' "$suites" | sed -E 's/^Test Suites:[[:space:]]*//' | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
+    | awk '{ if ($1 ~ /^[0-9]+$/ && $2 != "passed" && $2 != "failed" && $2 != "skipped" && $2 != "total" && $2 != "pending" && $2 != "todo") print $2 }' \
+    | sort -u | tr '\n' ' ') || _unknown="__PARSE_FAILED__"
+  if [ "$_unknown" = "__PARSE_FAILED__" ]; then
+    echo "$label: FAIL-CLOSED — could not tokenise jest's suite summary line ('$suites') to validate its categories. An unmeasurable parse is never a pass (issue #3522, roborev E1)" >&2
+    return 1
+  fi
+  _unknown=$(printf '%s' "$_unknown" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  if [ -n "$_unknown" ]; then
+    echo "$label: FAIL-CLOSED — jest's suite summary line names category/categories this guard does not recognise: $_unknown ('$suites'). The closed grammar is deliberate: an unrecognised category would be dropped from the sum reconciliation below and reported as a broken parse, i.e. the right red with the wrong cause. Teach this guard the category, then re-run (issue #3522, roborev E1)" >&2
+    return 1
+  fi
   s_total=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) total.*/\1/p')
   s_failed=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) failed.*/\1/p')
   s_skipped=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) skipped.*/\1/p')
+  s_passed=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) passed.*/\1/p')
+  s_pending=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) pending.*/\1/p')
+  s_todo=$(printf '%s' "$suites" | sed -nE 's/.*[^0-9]([0-9]+) todo.*/\1/p')
   t_passed=$(printf '%s' "$tests" | sed -nE 's/.*[^0-9]([0-9]+) passed.*/\1/p')
-  : "${s_failed:=0}" "${s_skipped:=0}" "${t_passed:=0}"
+  : "${s_failed:=0}" "${s_skipped:=0}" "${s_passed:=0}" "${s_pending:=0}" "${s_todo:=0}" "${t_passed:=0}"
   case "$s_total" in
     ''|*[!0-9]*)
       echo "$label: FAIL-CLOSED — could not read a suite TOTAL out of jest's summary line ('$suites'). The parse is broken, which is never a pass (issue #3522)" >&2
       return 1 ;;
   esac
+  for _n in "$s_failed" "$s_skipped" "$s_passed" "$s_pending" "$s_todo" "$t_passed"; do
+    case "$_n" in
+      ''|*[!0-9]*)
+        echo "$label: FAIL-CLOSED — a suite/test count parsed out of jest's summary is not a number ('$_n'; suites='$suites', tests='$tests'). The parse is broken, which is never a pass (issue #3522, roborev E1)" >&2
+        return 1 ;;
+    esac
+  done
+  _sum=$((s_passed + s_failed + s_skipped + s_pending + s_todo))
+  if [ "$_sum" -ne "$s_total" ]; then
+    echo "$label: FAIL-CLOSED — jest's suite categories do not add up: passed=$s_passed failed=$s_failed skipped=$s_skipped pending=$s_pending todo=$s_todo sums to $_sum but the line reports $s_total total ('$suites'). The parse is broken; the categories above default to 0 when absent, so without this reconciliation a half-working parse would read as 'nothing failed, nothing skipped' (issue #3522, roborev E1)" >&2
+    return 1
+  fi
   local bad=""
   [ "$s_total" -eq "$expected" ] || bad="$bad jest ran $s_total suite(s) but $expected '*.test.js' file(s) exist on disk — a suite file was not picked up (a filter, a rename, or testPathIgnorePatterns);"
   [ "$s_failed" -eq 0 ] || bad="$bad $s_failed suite(s) FAILED;"
@@ -6068,7 +6112,24 @@ run_node_bindings() {
   local jest_set="$LOG_DIR/$name.suites-jest.txt"
   local disk_set="$LOG_DIR/$name.suites-disk.txt"
   local only_disk only_jest
-  sed -n 's#.*/__test__/##p' "$list_file" | grep '\.test\.js$' | sort -u > "$jest_set"
+  # STATUS CHECKED, and the reason is CAUSE ATTRIBUTION, not just hygiene (roborev round 4, E1
+  # class sweep). A truncated `jest_set` makes the reconciliation below report "ON DISK but NOT
+  # LISTED BY JEST — a silent config exclusion" and send the reader to jest.config.js, when in
+  # fact the normalisation pipeline failed. That is the "verdict is right, remedy is useless"
+  # defect the flight lane's fixture preflight records; a distinct named cause is the fix.
+  if ! sed -n 's#.*/__test__/##p' "$list_file" | grep '\.test\.js$' | sort -u > "$jest_set"; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not normalise jest's --listTests output into a comparable"
+      echo "        suite set (the sed/grep/sort pipeline failed on $list_file). This is a PARSE"
+      echo "        failure, NOT a config exclusion — do not go looking at jest.config.js"
+      echo "        (issue #3522, roborev E1)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
 
   # ORACLE B — an INDEPENDENT recursive filesystem inventory. `find`, not a glob: a glob's
   # meaning depends on ambient shell options this script never sets and cannot control
@@ -6094,8 +6155,22 @@ run_node_bindings() {
   # silently split into two entries by the line-based sort/comm below, inflating the
   # inventory and producing a nonsense reconciliation. Refuse rather than mis-measure.
   local _nb_nuls _nb_lines
-  find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null \
-    | tr '\0' '\n' | sed -n 's#.*/__test__/##p' | sort -u > "$disk_set"
+  # Same treatment, same reason, opposite direction: a truncated `disk_set` would be reported
+  # as "LISTED BY JEST but NOT FOUND ON DISK" and send the reader to testMatch, when the
+  # inventory pipeline is what failed.
+  if ! find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null \
+    | tr '\0' '\n' | sed -n 's#.*/__test__/##p' | sort -u > "$disk_set"; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the independent suite inventory pipeline failed (find/tr/sed/sort"
+      echo "        over $_nb_test_dir). This is an INVENTORY failure, NOT jest running something"
+      echo "        outside __test__/ — do not go looking at testMatch (issue #3522, roborev E1)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
   _nb_nuls=$(find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null | tr -dc '\0' | wc -c | tr -d ' ')
   _nb_lines=$(grep -c . "$disk_set" || true)
   case "$_nb_nuls$_nb_lines" in
@@ -6426,7 +6501,15 @@ run_binding_rust_tests() {
     _brt_derivation_fail "cqlite-node's integration (test) target census" \
       "cargo metadata, its parser, or the package lookup failed — so this lane cannot state whether it is leaving any integration target un-run."
   else
+    # `|| true` swallows grep's legitimate 1-on-zero-matches, so the STATUS cannot be the
+    # guard — the VALUE must be (roborev round 4, E1 class sweep). Without the numeric check a
+    # failed grep yields the empty string, and `[ "" -eq 0 ]` later is a bash error rather than
+    # a named cause. Same shape as py_test_n's check below.
     node_targets_n=$(printf '%s' "$node_targets" | grep -c . || true)
+    case "$node_targets_n" in
+      ''|*[!0-9]*) _brt_derivation_fail "the count of cqlite-node's integration (test) targets" \
+                     "the count came back non-numeric ('$node_targets_n'), so the census cannot state whether this lane leaves any target un-run." ;;
+    esac
   fi
 
   # The declared-minus-enabled feature sets: what this lane leaves OFF, derived.
@@ -7114,10 +7197,27 @@ _resolved_package_features() {
   # awk EXIT STATUS carries the answer, so an empty feature field cannot be read as an absent
   # package.
   printf '%s\n' "$raw" | awk -F'|' -v pat="^$pkg v" '$1 ~ pat { found = 1 } END { exit found ? 0 : 1 }' || return 1
+  # `|| return 1` ON THE EXTRACTION PIPELINE (roborev round 4, E1 — the THIRD defect in this
+  # helper and the SECOND of this exact shape). This script runs `set -uo pipefail` WITHOUT
+  # `errexit`, so a failed awk/tr/sed/sort does NOT abort: it yields a partial or empty
+  # `feats` and the function returns SUCCESS. Callers then treat an empty enabled set as a
+  # measurement, and every `required-features` target silently becomes "excused" — the
+  # permissive direction, in the one value whose job is to say what is enabled.
+  #
+  # The `|| return 1` that used to be here caught this by accident: it was attached to the old
+  # single pipeline whose result was then rejected by `[ -n "$feats" ]`. #3522 correctly moved
+  # the presence oracle to the PACKAGE LINE (a featureless package is a real answer), and in
+  # doing so removed the only status check on the extraction. The old code caught it for the
+  # wrong reason; the new code did not catch it at all.
   feats=$(printf '%s\n' "$raw" \
     | awk -F'|' -v pat="^$pkg v" '$1 ~ pat {print $2}' \
-    | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | sort -u)
-  printf ' %s ' "$(printf '%s' "$feats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+    | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | sort -u) || return 1
+  # The NORMALIZATION pipeline needs the same treatment, and it cannot be checked inline
+  # inside the `printf` argument — a command substitution's failure there is discarded
+  # entirely. Captured into a variable first, status checked, then emitted.
+  local norm
+  norm=$(printf '%s' "$feats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//') || return 1
+  printf ' %s ' "$norm"
 }
 
 # flight-tests: EXECUTE cqlite-flight's UNIT test suite locally (issue #1699).
