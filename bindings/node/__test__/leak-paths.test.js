@@ -25,7 +25,11 @@
  *
  *   Consequence, recorded honestly: a SMALL per-iteration native leak (below the
  *   RSS budget's ~37 KiB/iteration resolution) is invisible to BOTH instruments
- *   here. The proper oracle for that class -- an isolated process, RSS measured
+ *   here. And note what that resolution is and is not: it is ARITHMETIC
+ *   (budget / iterations), NOT a measured floor -- planting a genuine
+ *   native-allocator retention needs an addon, so unlike the Python lane (whose
+ *   floor is bracketed by a `libc.malloc` control at 16-24 KiB/iteration) this
+ *   file's RSS backstop has no native-side RED control. The proper oracle for that class -- an isolated process, RSS measured
  *   against a calibrated NATIVE retention control, or native live-resource
  *   counters -- is issue #3585 and is deliberately not built here.
  *
@@ -71,9 +75,11 @@
  * Growth is NEVER asserted to be zero -- V8/GC noise, one-time caches and
  * allocator behaviour make a zero assertion flaky by construction. `external` is
  * summed in ALONGSIDE `heapUsed` because a leaked `Buffer`/native-backed
- * allocation lives OFF the V8 heap and is invisible to `heapUsed` alone
- * (measured: a retained 256-byte Buffer per iteration moved `heapUsed` by ~0 and
- * `heapUsed + external` by ~450 bytes/iteration).
+ * allocation lives OFF the V8 heap and is barely visible to `heapUsed` alone.
+ * Measured exactly (min of 9 passes x 300 iterations): a retained 256-byte
+ * `Buffer` per iteration moves `external` by 256.0 bytes/iteration -- the bytes
+ * themselves -- and `heapUsed` by only 15.7, the JS wrapper object. Summing both
+ * is what lets an off-heap retention register at all.
  *
  * NON-VACUITY IS ASSERTED EXPLICITLY (the most likely defect in a budget test):
  * a loop body that silently no-ops -- a "bad" CQL string that resolves instead
@@ -105,8 +111,9 @@ const BAD_CQL = 'THIS IS NOT VALID CQL';
 // core error category to `code`; see __test__/error.test.js): Query -> 'QUERY'.
 const EXPECTED_ERROR_CODE = 'QUERY';
 
-// Widest fixture in the corpus (~101 declared columns, 50 rows), the same table
-// the conversion-budget ratchet uses. A wide row means an abandoned stream has
+// Widest fixture in the corpus: 101 declared columns (id + col_001..col_100, per
+// test-data/schemas/wide-rows.cql) and 50 rows on disk (both counted, not
+// estimated), the same table the conversion-budget ratchet uses. A wide row means an abandoned stream has
 // really built and dropped a non-trivial per-row value graph, so a leak of that
 // graph is visible rather than lost in noise.
 const STREAM_QUERY = 'SELECT * FROM test_wide_rows.many_columns_table';
@@ -116,8 +123,10 @@ const ITERATIONS = 300;
 // caches, first-touch native buffers, the streaming machinery's one-time setup)
 // are not counted as growth.
 const WARMUP = 20;
-// Rows pulled before breaking. Must be < the fixture's row count (50, pinned by
-// the contract test below) so the iterator is genuinely abandoned mid-stream.
+// Rows pulled before breaking. Must be < the fixture's row count (50 on disk) so
+// the iterator is genuinely abandoned mid-stream. The contract test below pins the
+// property that actually matters -- that the fixture yields MORE than this -- and
+// does not hard-code 50.
 const STREAM_ROWS = 5;
 // `heapUsed`/`external` deltas are far jitterier than Python's tracemalloc:
 // individual passes over the SAME clean loop swung from -133 KB to +349 KB (V8
@@ -177,8 +186,9 @@ const MEASURE_PASSES = 9;
 // all -- that is the RSS backstop's job below, and properly, issue #3585's.
 // ---------------------------------------------------------------------------
 // On a CI runner (GitHub sets `CI`) both budgets are doubled. Reason, and its
-// limit: the leg that runs this file in CI is a 3-core `macos-14` job whose
-// GC/allocator jitter has never been measured, and a lane that reds on correct
+// limit: the legs that run this file in CI are node-ci.yml's `test` matrix
+// (ubuntu-latest, macos-14, macos-15-intel, windows-latest), hosted runners whose
+// GC/allocator jitter has never been measured here, and a lane that reds on correct
 // input is the lane people learn to waive. The MERGE-GATING execution is the
 // local agent-gate's `node-bindings` component, where `CI` is unset and the
 // unscaled budgets apply -- so the doubling cannot weaken the gate.
@@ -194,7 +204,9 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 // dominated by V8 heap growth and allocator arenas rather than by the loop.
 //   WHAT IT CATCHES: gross native retention -- at 2,700 iterations it trips on
 //       roughly >= 37 KiB/iteration held on the native heap (e.g. an un-dropped
-//       per-stream row buffer over a ~101-column table).
+//       per-stream row buffer over a 101-column table). That figure is ARITHMETIC
+//       (budget / iterations), not a measured floor: see the header for why this
+//       file has no native-side RED control while the Python lane does.
 //   WHAT IT DOES NOT CATCH: anything smaller. It is a backstop for the gross
 //       case, not an oracle (issue #3585).
 const RSS_BUDGET_BYTES = 96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER;
@@ -255,7 +267,12 @@ function assertUnderBudget(label, samples) {
   return growth;
 }
 
-/** Total tracked bytes: V8 heap PLUS off-heap (Buffer/native) allocations. */
+/**
+ * Total tracked bytes: the V8 heap PLUS the off-heap memory V8 was TOLD about
+ * (`Buffer`/ArrayBuffer, napi external-memory adjustments). Not "all native
+ * memory" -- an unreported Rust allocation appears in neither; that is the RSS
+ * backstop's job.
+ */
 function trackedBytes() {
   const usage = process.memoryUsage();
   return usage.heapUsed + usage.external;
@@ -314,8 +331,9 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     // Budget measurement is meaningless without gc control; FAIL, do not skip.
     if (typeof global.gc !== 'function') {
       throw new Error(
-        'global.gc is unavailable — run jest via `node --expose-gc ' +
-          './node_modules/jest/bin/jest.js` (see package.json "test" script)'
+        'global.gc is unavailable — this lane must be run as `npm run test:leaks` ' +
+          '(or any invocation that passes node --expose-gc, as the package.json ' +
+          '"test" script does)'
       );
     }
     db = await Database.open(DIR, { schema: SCHEMA });

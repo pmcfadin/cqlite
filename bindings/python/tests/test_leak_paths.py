@@ -19,7 +19,10 @@ because the earlier version of this docstring overclaimed):
     unguarded half -- not the whole leak surface.
   * PROCESS RSS *does* see native allocations, because it is the OS's
     resident-set figure for the whole process. It is read live from
-    ``/proc/self/statm`` where that exists (every merge-gating lane) and falls
+    ``/proc/self/statm`` where that exists -- which covers every MERGE-GATING
+    execution of this file, because .github/ci-gating-tiers.yml records
+    python-ci.yml as an EXEMPTION whose merge-gating half is the local gate's
+    Linux ``python-bindings`` component -- and falls
     back to the monotone peak ``ru_maxrss`` elsewhere, with the failure message
     naming which instrument spoke -- the peak can UNDER-report growth that stays
     below a peak the session already reached, which was measured at small scale
@@ -36,7 +39,7 @@ because the earlier version of this docstring overclaimed):
   counters -- is issue #3585 and is deliberately not built here.
 
 WHAT IS ASSERTED (and what is deliberately NOT): tracked-allocation growth across
-N iterations must stay under a documented budget, and peak-RSS growth under a
+N iterations must stay under a documented budget, and process-RSS growth under a
 much looser one. Growth is NEVER asserted to be zero -- interpreter noise,
 one-time interned strings, cached constructors and allocator behaviour all make a
 zero assertion flaky by construction. Each loop body is warmed up first so
@@ -60,11 +63,13 @@ strict mode, plus the non-vacuity row count) rather than skipping.
 
 These tests carry NO pytest marker on purpose. Both gate tiers would drop a
 ``slow``-marked test from the merge-gating set, by different mechanisms:
-the FULL gate runs ``pytest bindings/python/tests -q`` with
-``RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}"`` (scripts/agent-gate.sh:5566), which
+the FULL gate's ``python-bindings`` component runs
+``pytest bindings/python/tests -q`` under ``RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}"``
+(``run_python_bindings``, scripts/agent-gate.sh:5565-5568), which
 ``conftest.pytest_collection_modifyitems`` turns into a skip for ``slow`` items;
-``--lite`` runs ``pytest bindings/python/tests -m 'not slow' -q``
-(``PYTHON_LITE_PYTEST_CMD``, scripts/agent-gate.sh:1424), which deselects them.
+``--lite``'s python tier runs ``pytest bindings/python/tests -m 'not slow' -q``
+(``PYTHON_LITE_PYTEST_CMD``, scripts/agent-gate.sh:1424) under ``RUN_SLOW_TESTS=0``,
+which deselects them.
 Unmarked, they execute in both. Measured runtime of this whole file: ~6s.
 
 There is deliberately NO wall-clock/elapsed-time assertion anywhere in this file:
@@ -103,8 +108,9 @@ import cqlite
 # Test parameters
 # ---------------------------------------------------------------------------
 
-# Widest fixture in the corpus (~101 declared columns, 50 rows), the same table
-# the conversion-budget ratchet uses. A wide row means the abandoned stream has
+# Widest fixture in the corpus: 101 declared columns (id + col_001..col_100, per
+# test-data/schemas/wide-rows.cql) and 50 rows on disk (both counted, not
+# estimated), the same table the conversion-budget ratchet uses. A wide row means the abandoned stream has
 # really built and dropped a non-trivial per-row value graph, so a leak of that
 # graph would be visible rather than lost in noise.
 WIDE_TABLE = "test_wide_rows.many_columns_table"
@@ -118,8 +124,8 @@ BAD_CQL = "THIS IS NOT VALID CQL"
 # (issue #1465 review): the dominant noise term is the ONE-TIME cold cost (~54 KB
 # on the stream path), so tripling the iterations at an unchanged byte budget
 # triples per-iteration sensitivity for ~4s of extra runtime. Measured total
-# runtime of this file at 1500: ~6s, so it stays UNMARKED and therefore inside
-# the gate's `-m 'not slow'` python tier.
+# runtime of this file at 1500: ~6s, so it stays UNMARKED and therefore executes
+# in BOTH gate tiers (mechanisms quoted in the module docstring).
 ITERATIONS = 1500
 
 # Warm-up iterations run BEFORE the first snapshot so one-time allocations
@@ -156,9 +162,10 @@ STREAM_ROWS = 5
 # module docstring and issue #3585.
 #   ERROR_BUDGET_BYTES  =  64 KiB (43 bytes/iteration at 1500) -- 15x the observed
 #       cold max. Planting a retained 256-byte bytearray per iteration measured
-#       164,872 bytes (329.7/iteration) and TRIPS it by 2.5x. Retaining the
+#       486,320 bytes (324.2/iteration) at 1500 iterations and TRIPS it by 7.4x
+#       (164,872 bytes / 2.5x when the same plant ran at 500). Retaining the
 #       abandoned iterator itself (5,132 bytes/iteration) measured 2.57 MB.
-#   STREAM_BUDGET_BYTES = 256 KiB (175 bytes/iteration at 1500) -- 4.7x the
+#   STREAM_BUDGET_BYTES = 256 KiB (175 bytes/iteration at 1500) -- 4.8x the
 #       observed cold max. Looser than the error budget because this path's noise
 #       is genuinely an order of magnitude larger (a per-iteration stream setup
 #       over a ~101-column table). Planting a retained 1 KiB bytearray per
@@ -171,9 +178,9 @@ STREAM_ROWS = 5
 # a named fallback -- see ``_rss_instrument()``). Measured growth of the LIVE
 # instrument inside the measured window, 1500 iterations:
 #   file alone:            0 bytes (error path), 835,584 bytes (stream path)
-#   whole -m 'not slow' suite (the gate's tier, this file running 570 tests in):
+#   inside the whole 570-test suite (this file's real position in a gate run):
 #                          0 bytes (error path),  28,672 bytes (stream path)
-# Budget = 32 MiB, i.e. ~38x the largest observed value, so allocator/page
+# Budget = 32 MiB, i.e. ~40x the largest observed value, so allocator/page
 # behaviour on a slower or smaller CI runner cannot red it.
 #   WHAT IT CATCHES, and this control is the one that validates the RIGHT
 #       allocator (issue #1465 round 2): planting a retained ``libc.malloc`` +
@@ -264,8 +271,8 @@ def _rss_instrument():
     pytest process at the moment these tests run):
       * file alone:        peak == live to within 1 MiB, so the peak instrument
                            was live, not masked.
-      * whole `-m 'not slow'` suite (the gate's tier, 570 tests before these):
-                           peak was ~1.5 MiB ABOVE live, and the stream loop's
+      * inside the full 570-test suite run (this file's real position in a gate
+        run):              peak was ~1.5 MiB ABOVE live, and the stream loop's
                            28,672-byte live growth registered as a peak delta of
                            ZERO -- small-scale masking, demonstrated.
     So the peak instrument is not inert in today's ordering (a 32 MiB leak would
@@ -288,7 +295,8 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
     ``tracked`` is Python-allocator growth (tracemalloc). ``rss_growth`` is
     process RSS growth in bytes -- the loose, native-visible backstop -- measured
     with the best instrument this platform offers, named by ``rss_kind``
-    (``"live"`` or the degraded ``"peak"``; see ``_rss_instrument()``).
+    (``"live"``, the degraded ``"peak"``, or ``"unavailable"`` -- in which case
+    ``rss_growth`` is ``None``; see ``_rss_instrument()``).
 
     ``body`` is a zero-argument callable executed ``warmup`` times before the
     first snapshot, then ``iterations`` times inside the measurement window. It
@@ -353,7 +361,7 @@ def _assert_rss_under_budget(label: str, rss_growth, rss_kind: str) -> None:
 
 @pytest.fixture(scope="module")
 def leak_db():
-    """One database, opened once, shared by both leak tests (issue mandate).
+    """One database, opened once, shared by every test in this file (issue mandate).
 
     Reuses the existing conftest dataset guard: under strict mode a missing or
     empty corpus FAILS rather than skipping.

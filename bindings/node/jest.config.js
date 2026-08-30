@@ -4,18 +4,21 @@
  * Issue #306: Jest Test Infrastructure Setup
  * Epic #318: M4 Node.js Bindings
  *
- * Issue #1465: the leak lane is a SEPARATE PROJECT, and its leak DETECTORS are
- * passed on a dedicated invocation — not declared here. The suite is split into
- * two `projects` that share one base config:
- *   * `default` — every test file EXCEPT the leak lane, with exactly the
- *     behaviour it had before (same environment, setup file, and the root
- *     `testTimeout` below).
+ * Issue #1465: the leak lane is a SEPARATE PROJECT, and NO jest leak detector is
+ * enabled for it — not here, and not at any lane's invocation (the reasons are
+ * below). The suite is split into two `projects` that share one base config:
+ *   * `default` — every test file EXCEPT the leak lane. Unchanged behaviour for
+ *     the 27 pre-existing files: same environment, same setup file, same
+ *     `testMatch`, and the root `testTimeout` below; the only addition is the
+ *     `testPathIgnorePatterns` entry that hands the leak file to the other
+ *     project (jest's own default for that option is `['/node_modules/']`, which
+ *     is preserved).
  *   * `leaks`   — `__test__/leak-paths.test.js` only, so it can be selected on
  *     its own (`--selectProjects leaks`, used by `npm run test:leaks`) and so a
  *     future lane-only option has somewhere to live.
  *
- * WHY NO `detectOpenHandles`/`detectLeaks` KEY IN THE `leaks` ENTRY (measured on
- * jest 29.7.0, not assumed):
+ * WHY NO `detectOpenHandles`/`detectLeaks` ANYWHERE (measured on jest 29.7.0, not
+ * assumed):
  *   * `detectOpenHandles` is read from the GLOBAL config only
  *     (`@jest/core/build/runJest.js:322` for handle collection,
  *     `testSchedulerHelper.js:29` for the runInBand implication). Declaring it in
@@ -45,7 +48,9 @@
  */
 const LEAK_TEST = '<rootDir>/__test__/leak-paths.test.js';
 
-// Shared by both projects: whatever the single-project config used to set.
+// The two project-level options both projects need. The rest of the old
+// single-project config did not move here because it is either per-project
+// (`testMatch`) or global (`testTimeout`, coverage) — see below.
 const baseProject = {
   // Use Node.js environment for native module testing
   testEnvironment: 'node',
