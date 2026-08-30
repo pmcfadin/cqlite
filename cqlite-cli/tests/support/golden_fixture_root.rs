@@ -329,18 +329,69 @@ pub enum CorpusMiss {
 /// `CQLITE_DATASETS_ROOT` pointing at a path that does not exist therefore still
 /// skips (nothing here can tell it from an unset one) — that whole-corpus
 /// preflight is the gate's `missing-fixtures` component (#2078) and #3104's
-/// territory, not this lane's.
+/// territory, not this lane's. A value naming something that is not a directory is
+/// the same kind of answer, and skips for the same reason.
 pub fn corpus_fixture_dir(
     keyspace: &str,
     table: &str,
     checkout: &Path,
 ) -> Result<Fixture, CorpusMiss> {
+    // The candidate LIST is the shared resolver's, and its env-root test is
+    // `p.is_dir()` — two-valued, so a `CQLITE_DATASETS_ROOT` the filesystem could
+    // not DESCRIBE contributes no candidate at all and the walk below never gets to
+    // ask it. The walk would then report an absence established by the remaining
+    // candidates alone, which is this finding's shape one level ABOVE the walk
+    // (issue #1491 review finding V1's sweep). Probed three-valued here so that
+    // collapse cannot reach the verdict.
+    //
+    // The shared resolver is deliberately left alone: other lanes depend on its
+    // rule, and making it three-valued is #3104's territory.
+    env_datasets_root_answered(keyspace, table)?;
     corpus_fixture_from(
         &super::datasets_root::sstables_root_candidates(),
         keyspace,
         table,
         checkout,
     )
+}
+
+/// Did the filesystem ANSWER about `CQLITE_DATASETS_ROOT`?
+///
+/// Probes the env value itself, which is the exact path the shared resolver tests
+/// with `is_dir()` before it will contribute a candidate. Unset or blank is not a
+/// corpus at all; absent, or present as something that is not a directory, are
+/// ANSWERS and stay legal skips (see [`corpus_fixture_dir`]'s boundary); anything
+/// else means the value could not be classified, and a root that could not be
+/// classified has not been established to lack the table.
+fn env_datasets_root_answered(keyspace: &str, table: &str) -> Result<(), CorpusMiss> {
+    datasets_root_answered(
+        std::env::var_os(super::datasets_root::fixture_roots::DATASETS_ROOT_ENV).as_deref(),
+        keyspace,
+        table,
+    )
+}
+
+/// PURE form of [`env_datasets_root_answered`], parameterized on the raw value —
+/// the same seam the shared `fixture_roots::resolve_datasets_root_if_present` keeps,
+/// and for the same reason: a test that MUTATES the environment races every other
+/// test in the binary, since the environment is process-global.
+fn datasets_root_answered(
+    raw: Option<&std::ffi::OsStr>,
+    keyspace: &str,
+    table: &str,
+) -> Result<(), CorpusMiss> {
+    let Some(raw) = raw.filter(|v| !v.is_empty()) else {
+        return Ok(());
+    };
+    match fs_probe::presence(Path::new(raw)) {
+        Ok(_) => Ok(()),
+        Err(why) => Err(CorpusMiss::Unusable(format!(
+            "{keyspace}.{table}: {why}. That is the value of {}, so it is a candidate \
+             corpus root this lane could not classify — not a root that verifiably \
+             lacks the table, and the shared candidate list drops it silently",
+            super::datasets_root::fixture_roots::DATASETS_ROOT_ENV
+        ))),
+    }
 }
 
 /// PURE form of [`corpus_fixture_dir`], parameterized on the candidate list — the
@@ -794,6 +845,46 @@ mod tests {
             holds_data_db(&tmp.path().join("gone"), "ks", "t").ok(),
             Some(false)
         );
+    }
+
+    /// The sweep's outermost site: the shared candidate LIST tests
+    /// `CQLITE_DATASETS_ROOT` with `p.is_dir()`, so a value the filesystem could not
+    /// describe contributes no candidate and the walk answers from the remaining
+    /// candidates alone.
+    ///
+    /// Exercised through the pure form, because mutating the environment would race
+    /// every other test in this binary. Staged as a path THROUGH a regular file,
+    /// which cannot be resolved (`ENOTDIR`) — the same branch a permission failure
+    /// takes, and it needs no chmod (a chmod-based case passes vacuously as root).
+    #[test]
+    fn an_unclassifiable_datasets_root_env_value_is_unusable_not_absent() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let file = tmp.path().join("f");
+        write(&file, b"not a directory");
+
+        for (label, raw) in [
+            ("unset", None),
+            ("blank", Some(std::ffi::OsString::from(""))),
+            ("absent", Some(tmp.path().join("gone").into_os_string())),
+            ("not a directory", Some(file.clone().into_os_string())),
+        ] {
+            assert!(
+                datasets_root_answered(raw.as_deref(), "ks", "t").is_ok(),
+                "{label} is an ANSWER, so it stays a legal skip"
+            );
+        }
+
+        let through = file.join("inside").into_os_string();
+        match datasets_root_answered(Some(&through), "ks", "t") {
+            Err(CorpusMiss::Unusable(why)) => assert!(
+                why.contains("ks.t")
+                    && why.contains("CQLITE_DATASETS_ROOT")
+                    && why.contains("cannot be described"),
+                "the failure must name the table, the variable and the cause: {why}"
+            ),
+            Err(CorpusMiss::Absent(why)) => panic!("not a verified absence: {why}"),
+            Ok(()) => panic!("a value that could not be classified cannot be waved through"),
+        }
     }
 
     /// When no candidate root carries the table at all, the verdict is the legal
