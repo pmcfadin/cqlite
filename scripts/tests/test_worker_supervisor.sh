@@ -53,8 +53,101 @@ skip() {
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cqlite-supervisor-test.XXXXXX")"
 T_LOCKFN="$TMP_ROOT/lockfn"
-cleanup() { rm -rf "$TMP_ROOT" 2>/dev/null || true; }
+
+# ---------------------------------------------------------------------------
+# Background fixture processes: process-GROUP launch, guaranteed reap (#3549, roborev job 196 F2)
+# ---------------------------------------------------------------------------
+# THE LEAK THIS CLOSES. Cases stage REAL processes — this suite's standing technique, because a staged
+# string tests the RULE and not the PROBE — and several of those fixtures are a SHELL THAT FORKS A
+# CHILD: `bash <script-whose-body-is-sleep-300>`, `sh -c 'sleep 300; :' …`, `bash --rcfile <script> -i`
+# (the rcfile's own `sleep 300` is what keeps the shell alive). Killing the pid the case recorded kills
+# only the SHELL. The `sleep 300` is NOT an exec replacement, so it is orphaned, reparented, and sits on
+# the box for five minutes holding whatever descriptors it inherited — which is not merely untidy: THIS
+# BOX RUNS FOUR LANES, so every run degraded a shared machine, and a held output descriptor can make a
+# harness look hung.
+#
+# THE FIX IS STRUCTURAL, NOT PER CALL SITE. `fixture_bg` enables job control for exactly the duration of
+# the spawn (`set -m`), which makes the background job a PROCESS GROUP LEADER whose pgid equals its pid.
+# Everything it forks inherits that group, so ONE `kill -- -<pgid>` reaps the whole tree WHATEVER it
+# turned out to spawn — including children a future fixture adds without anyone re-reading this comment.
+# It is also why a fixture that DOES `exec` needs no special case: a group of one reaps identically.
+#
+# GUARANTEED ON EVERY EXIT PATH. The reap hangs off the suite's EXIT trap, so a `fail` that returns
+# early, an abort, the end of the run and INT/TERM all reach it. Per-case teardown (`fixture_kill`) is
+# an OPTIMISATION — it frees the box sooner — never the guarantee.
+#
+# WHY NOT `pgrep -f`, HERE OR IN THE ASSERT: this box runs sibling lanes staging the same fixture names,
+# and `pgrep` also self-matches. A pid/pgid recorded at spawn time is the only identity that is ours.
+FIXTURE_PGIDS=()
+FIXTURE_LAST_PID=""
+
+# fixture_bg <cmd> [arg...] — start a background fixture in its OWN process group and register it for
+# the reap. Sets `FIXTURE_LAST_PID` (== the pgid); it CANNOT echo the pid, because `$(fixture_bg …)`
+# would run the append to `FIXTURE_PGIDS` in a subshell and lose the registration.
+# Redirections belong at the CALL SITE (`fixture_bg tail -f "$f" >/dev/null 2>&1`): they are applied by
+# this function's caller and inherited by the job, so nothing is forced on fixtures that need a tty-less
+# stdin or a captured stream.
+fixture_bg() {
+  local had_m=off
+  case "$-" in *m*) had_m=on ;; esac
+  set -m
+  "$@" &
+  FIXTURE_LAST_PID=$!
+  # Restore the previous monitor state rather than blindly clearing it.
+  [[ "$had_m" == on ]] || set +m
+  FIXTURE_PGIDS+=("$FIXTURE_LAST_PID")
+}
+
+# fixture_kill <pid>... — per-case teardown: kill the whole GROUP of each fixture, then reap the direct
+# child so no zombie is left in this shell's job table. The pgid stays REGISTERED on purpose, so the
+# end-of-run assert re-checks the groups a case believed it had cleaned up.
+fixture_kill() {
+  local pid
+  for pid in "$@"; do
+    [[ -n "$pid" ]] || continue
+    # A group kill first; the plain-pid fallback covers a pid that was NOT group-launched.
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  return 0
+}
+
+# fixture_live_groups — echo every registered pgid that still has ANY live member. `kill -0` on a
+# NEGATIVE pid succeeds if the signal could be delivered to at least one process in the group, so this
+# sees an orphaned child even after its parent shell is gone (a pgid survives reparenting).
+# Residual, stated: pid numbers are reused, so a recycled pgid could read as live. That direction is a
+# LOUD FALSE FAILURE, never a silent pass, which is the acceptable one for a leak check.
+fixture_live_groups() {
+  local pgid
+  for pgid in ${FIXTURE_PGIDS[@]+"${FIXTURE_PGIDS[@]}"}; do
+    kill -0 "-$pgid" 2>/dev/null && printf '%s\n' "$pgid"
+  done
+  return 0
+}
+
+# fixture_reap — TERM then KILL every registered group. Idempotent: already-dead groups just fail the
+# signal. Called from the EXIT trap AND from the end-of-run assert.
+fixture_reap() {
+  local pgid sig
+  for sig in TERM KILL; do
+    for pgid in ${FIXTURE_PGIDS[@]+"${FIXTURE_PGIDS[@]}"}; do
+      kill "-$sig" "-$pgid" 2>/dev/null || true
+    done
+    sleep 0.2
+  done
+  return 0
+}
+
+# REAP BEFORE `rm -rf`: a fixture still running out of `$TMP_ROOT` holds descriptors into it.
+cleanup() {
+  fixture_reap
+  rm -rf "$TMP_ROOT" 2>/dev/null || true
+}
 trap cleanup EXIT
+# INT/TERM: cleanup, then exit with the conventional 128+signal status. The EXIT trap fires again on the
+# way out and `cleanup` is idempotent.
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 new_case_dir() {
   local d
@@ -4430,12 +4523,18 @@ test_worker_probe_two_direction_control() {
   # NEGATIVE first, before anything is spawned: if this is not 0, the harness is matching itself and
   # every later number is meaningless.
   neg=$(bash -c "$probe")
-  ( cd "$lane" && exec bash "$script" ) >/dev/null 2>&1 &
-  ( cd "$sib"  && exec bash "$script" ) >/dev/null 2>&1 &
+  # PRE-DATES #3549 AND LEAKED THE SAME WAY (roborev job 196 F2, class sweep): `$script`'s body is a
+  # `sleep 120` that is NOT an exec replacement, and the `pkill -f <marker>` below matches the SHELL's
+  # argv only — the child's argv is a bare `sleep 120`, so two of them survived every run of this suite
+  # for two minutes. Group-launched and group-killed, the child goes with its parent.
+  fixture_bg bash -c 'cd "$1" && exec bash "$2"' _ "$lane" "$script" >/dev/null 2>&1
+  local pid_lane=$FIXTURE_LAST_PID
+  fixture_bg bash -c 'cd "$1" && exec bash "$2"' _ "$sib" "$script" >/dev/null 2>&1
+  local pid_sib=$FIXTURE_LAST_PID
   sleep 1
   pos=$(bash -c "$probe")
   machine_wide=$(bash -c "pgrep -f '$match' 2>/dev/null | grep -vxF -e \$\$ -e \$PPID | wc -l | tr -d ' '") # pgrep-lint-allow: run-unique marker scoping
-  pkill -f "${marker}-worker.sh" >/dev/null 2>&1
+  fixture_kill "$pid_lane" "$pid_sib"
   if [[ "$neg" == "0" ]]; then
     pass "probe-two-direction NEGATIVE: no leftover in this lane counts 0 (so the probe does not fire unconditionally)"
   else
@@ -4553,13 +4652,12 @@ test_legacy_global_lock_refuses_live_holder() {
   rm -rf "$derived"
 
   # AC1, with a REAL live pid.
-  sleep 300 &
-  live=$!
+  fixture_bg sleep 300
+  live=$FIXTURE_LAST_PID
   mkdir -p "$legacy"
   printf '%s\n' "$live" >"$legacy/pid"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fixture_kill "$live"
 
   if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"$live"* ]]; then
     pass "legacy-lock AC1: a LIVE pre-#3467 holder (real pid $live) refuses the start, loudly, naming the legacy lock and the holder — and NOT with the per-lane message"
@@ -4599,15 +4697,14 @@ test_legacy_global_lock_refuses_live_holder() {
   fake="$d/worker-supervisor.sh"
   printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
   chmod +x "$fake"
-  bash "$fake" &
-  fakepid=$!
+  fixture_bg bash "$fake"
+  fakepid=$FIXTURE_LAST_PID
   sleep 0.3
   rm -rf "$legacy" "$derived"
   mkdir -p "$legacy"
   printf '%s\n' "$fakepid" >"$legacy/pid"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  kill "$fakepid" 2>/dev/null || true
-  wait "$fakepid" 2>/dev/null || true
+  fixture_kill "$fakepid"
   if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
      && [[ "$out" == *"CORROBORATED"* ]] \
      && [[ "$out" == *"stop pid $fakepid first"* ]] \
@@ -4644,8 +4741,8 @@ test_legacy_global_lock_refuses_stale_holder() {
 
   # A REAL dead pid: started and REAPED, so the kernel has genuinely released it (AC5). Not a made-up
   # large number, which would only ever exercise "not found" and never the reaped case.
-  sleep 0.1 &
-  dead=$!
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
   wait "$dead" 2>/dev/null || true
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
@@ -4774,8 +4871,8 @@ test_legacy_global_lock_unknown_shapes_refuse() {
   # A REAL dead pid (started and REAPED), so the shapes below differ from a VALID lock in exactly the
   # one property under test and nothing else. A shape whose pid were also bogus could refuse for the
   # wrong reason.
-  sleep 0.1 &
-  dead=$!
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
   wait "$dead" 2>/dev/null || true
 
   # AC3. Every one of these is "cannot tell", and "cannot tell" must NOT collapse onto the permissive
@@ -4907,8 +5004,8 @@ test_legacy_global_lock_symlink_shapes_refuse() {
 
   # A REAL dead pid: started and REAPED, so the kernel has genuinely released it — the same standard
   # as the reclaim case (AC5). A made-up large number would only ever exercise "not found".
-  sleep 0.1 &
-  dead=$!
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
   wait "$dead" 2>/dev/null || true
 
   # ---- (a) THE DANGEROUS ONE: a symlink to a VALID lock directory with a CONFIRMED-DEAD pid. -------
@@ -5027,13 +5124,12 @@ test_legacy_global_lock_override_skips_check() {
   # about OUR DEFAULT colliding with the OLD DEFAULT, so an explicit path skips it entirely. A LIVE
   # legacy holder is present — the strongest form of the check — and must be neither honoured nor
   # touched.
-  sleep 300 &
-  live=$!
+  fixture_bg sleep 300
+  live=$FIXTURE_LAST_PID
   mkdir -p "$legacy"
   printf '%s\n' "$live" >"$legacy/pid"
   out="$(legacy_lock_drive "$tmp" "$lane" "$explicit")"; rc=$?
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fixture_kill "$live"
 
   if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$explicit"* && "$out" != *"LEGACY GLOBAL supervisor lock"* ]]; then
     pass "legacy-lock AC4: an explicit SUPERVISOR_LOCK skips the legacy check entirely, even with a LIVE legacy holder present"
@@ -5175,10 +5271,15 @@ test_legacy_lock_container_needs_search_not_read() {
 #
 # The two definite answers are covered end-to-end in the live-holder case above (a `sleep` =>
 # uncorroborated wording; a `worker-supervisor`-named process => the "stop pid N" advice). This case
-# covers what an end-to-end run cannot reach: the `ps` FALLBACK (procfs blind, `ps` present) and the
-# `unprobeable` answer (procfs blind AND no `ps`), which on an ordinary Linux box are unreachable
-# because /proc is always there. The technique is CLAUDE.md's: substitute the artifact in a SCRATCH
-# COPY of the function — never a test-only seam in the shipped script.
+# covers what an end-to-end run cannot reach: NO USABLE PROCFS, which on an ordinary Linux box never
+# happens because /proc is always there. The technique is CLAUDE.md's: substitute the artifact in a
+# SCRATCH COPY of the function — never a test-only seam in the shipped script.
+#
+# UPDATED FOR JOB 196 F1: identity is PROCFS-ONLY. There is no `ps` fallback, so the answer with procfs
+# blinded is `unprobeable` WHETHER OR NOT `ps` is present and able to answer — and the case asserts
+# both, with the ps-present half proving `ps` COULD have answered (it is executed here, and its output
+# names the subject). "Not consulted" is only established by showing the consultation would have
+# succeeded.
 # ---------------------------------------------------------------------------
 test_legacy_lock_pid_identity_is_three_valued() {
   local d body blind stubdir live fake fakepid ans
@@ -5206,42 +5307,51 @@ test_legacy_lock_pid_identity_is_three_valued() {
     fail "legacy-lock-identity-scratch-drift: the scratch copy is not the shipped function with only the procfs substitution applied"
   fi
 
-  sleep 300 &
-  live=$!
+  fixture_bg sleep 300
+  live=$FIXTURE_LAST_PID
   fake="$d/worker-supervisor.sh"
   printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
   chmod +x "$fake"
-  bash "$fake" &
-  fakepid=$!
+  fixture_bg bash "$fake"
+  fakepid=$FIXTURE_LAST_PID
   sleep 0.3
 
-  # (1) procfs blind, `ps` PRESENT => the ps fallback answers, and it distinguishes the two identities.
-  ans="$(bash "$body" "$live")"
-  if [[ "$ans" == unconfirmed ]]; then
-    pass "legacy-lock F2: procfs blind + ps present — a live sleep(1) is 'unconfirmed' (we READ a command line and it did not match)"
+  # (1) procfs blind, `ps` PRESENT AND ABLE TO ANSWER => still `unprobeable`, for BOTH identities. `ps`
+  # is not a fallback for identity (job 196 F1): its space-joined rendering fabricates argument
+  # boundaries as readily as it loses them, so neither a match nor a non-match derived from it is
+  # evidence, and the honest verdict is "we could not determine this".
+  local psout=""
+  psout="$(ps -p "$fakepid" -o args= 2>/dev/null || true)"
+  if [[ "$psout" == *worker-supervisor.sh* ]]; then
+    pass "legacy-lock F2 PREMISE: ps IS present and DOES name the subject ([$psout]) — so the unprobeable answers below are a refusal to consult it, not a ps that could not answer"
   else
-    fail "legacy-lock-identity-ps-unconfirmed: answered [$ans] for a live sleep via the ps fallback"
+    fail "legacy-lock-identity-ps-premise: ps answered [$psout] for the staged supervisor; the 'not consulted' asserts below would be unattributable"
+  fi
+  ans="$(bash "$body" "$live")"
+  if [[ "$ans" == unprobeable ]]; then
+    pass "legacy-lock F2: procfs blind + ps present — a live sleep(1) is 'unprobeable' (we could not look), NOT 'unconfirmed' (which would assert a non-match nobody measured)"
+  else
+    fail "legacy-lock-identity-ps-unconfirmed: answered [$ans] for a live sleep with procfs blinded; expected unprobeable — identity is procfs-only"
   fi
   ans="$(bash "$body" "$fakepid")"
-  if [[ "$ans" == supervisor ]]; then
-    pass "legacy-lock F2: procfs blind + ps present — a live worker-supervisor-named process is 'supervisor' via the ps fallback (so the fallback is not blanket-cautious)"
+  if [[ "$ans" == unprobeable ]]; then
+    pass "legacy-lock F2: procfs blind + ps present — even a process whose ps rendering NAMES worker-supervisor.sh is 'unprobeable': a ps-derived match is not corroboration"
   else
-    fail "legacy-lock-identity-ps-supervisor: answered [$ans] for a worker-supervisor-named process via the ps fallback"
+    fail "legacy-lock-identity-ps-supervisor: answered [$ans] for a worker-supervisor-named process with procfs blinded; expected unprobeable — a ps rendering may never yield 'supervisor'"
   fi
 
-  # (2) procfs blind AND no `ps` on PATH => `unprobeable`, for a pid that is DEFINITELY ALIVE. The
-  # answer must not be 'unconfirmed': we did not look at anything, and claiming a non-match we never
-  # measured is exactly the "never claim corroboration you did not obtain" rule inverted.
+  # (2) procfs blind AND no `ps` on PATH => the SAME `unprobeable`, for a pid that is DEFINITELY ALIVE.
+  # Identical to (1) by design: the presence of `ps` cannot change an identity verdict any more.
   ans="$(env PATH="$stubdir" "$BASH" "$body" "$live")"
   if [[ "$ans" == unprobeable ]]; then
-    pass "legacy-lock F2: procfs blind AND no ps — a LIVE pid is 'unprobeable', distinct from the 'unconfirmed' non-match above"
+    pass "legacy-lock F2: procfs blind AND no ps — a LIVE pid is 'unprobeable', the same answer as with ps present (ps is not consulted either way)"
   else
     fail "legacy-lock-identity-unprobeable: answered [$ans] with no procfs and no ps; expected unprobeable"
   fi
-  # ...and the same stripped environment still answers `supervisor` for nothing, i.e. the stub really is
-  # blind (a `ps` that leaked through would make the assertion above accidental).
+  # ...and the stub really is blind, so the two environments above genuinely differ in ps availability
+  # and (1) vs (2) is a comparison rather than the same measurement twice.
   if ! env PATH="$stubdir" "$BASH" -c 'command -v ps >/dev/null 2>&1'; then
-    pass "legacy-lock F2 NON-VACUITY: ps really is absent under the stubbed PATH, so the unprobeable answer is attributable"
+    pass "legacy-lock F2 NON-VACUITY: ps really is absent under the stubbed PATH, so (1) and (2) are two different environments with one answer"
   else
     fail "legacy-lock-identity-stub-leak: ps is still resolvable under PATH=$stubdir; the unprobeable case measures nothing"
   fi
@@ -5258,9 +5368,7 @@ test_legacy_lock_pid_identity_is_three_valued() {
     fail "legacy-lock-identity-malformed: $ok"
   fi
 
-  kill "$live" "$fakepid" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
-  wait "$fakepid" 2>/dev/null || true
+  fixture_kill "$live" "$fakepid"
 }
 
 t test_legacy_global_lock_refuses_live_holder
@@ -5364,8 +5472,10 @@ WALKMUT
   else
     fail "identity-194-mutant-drift: mutant B differs from the shipped probe by more than the restored walk"
   fi
-  # A PROCFS-BLIND COPY, to prove the `ps` CALL SITE routes through the same helper rather than a second
-  # spelling of the rule. Only the procfs literal is substituted; the inverse must restore it exactly.
+  # A PROCFS-BLIND COPY. Since job 196 F1 there is no `ps` call site to compare against — the property
+  # it now proves is that blinding procfs REMOVES the verdict entirely (`unprobeable`) instead of
+  # falling back to a rule fed an ambiguous rendering. Only the procfs literal is substituted; the
+  # inverse must restore it exactly.
   sed "s#/proc#$blind#g" "$body" >"$psbody"
   if diff -q <(sed "s#$blind#/proc#g" "$psbody") "$body" >/dev/null; then
     pass "identity 194: the procfs-blind copy differs from the probe under test ONLY in the procfs literal"
@@ -5381,26 +5491,31 @@ WALKMUT
   printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$other"
   chmod +x "$other"
 
-  bash "$fake" &
-  pid_real=$!
+  # EVERY ONE OF THESE IS A `fixture_bg`, INCLUDING THE ONES THAT LOOK CHILDLESS. Four of the six are a
+  # SHELL THAT FORKS: the two `bash <script>` forms and the `sh -c 'sleep 300; :'` form each carry a
+  # `sleep 300` child, and `bash --rcfile <script> -i` both forks one AND IGNORES SIGTERM (an
+  # interactive shell does), so the pre-fix `kill <pid>` left the shell itself running too. Measured on
+  # this suite before the fix: 8 processes still alive after the case returned.
+  fixture_bg bash "$fake"
+  pid_real=$FIXTURE_LAST_PID
   # Editor-like: a long-lived reader HOLDING the path as its operand.
-  tail -f "$fake" >/dev/null 2>&1 &
-  pid_tail=$!
+  fixture_bg tail -f "$fake" >/dev/null 2>&1
+  pid_tail=$FIXTURE_LAST_PID
   # The path as PLAIN DATA after `-c`: what follows `-c` is a command STRING, and the trailing operand
   # is only the sub-shell's `$0`. (`; :` keeps the shell from exec-ing away and rewriting its argv.)
-  sh -c 'sleep 300; :' "$fake" &
-  pid_shc=$!
+  fixture_bg sh -c 'sleep 300; :' "$fake"
+  pid_shc=$FIXTURE_LAST_PID
   # A DIFFERENT script, invoked with our path as an argument — the shape closest to a real accident.
-  bash "$other" "$fake" &
-  pid_other=$!
+  fixture_bg bash "$other" "$fake"
+  pid_other=$FIXTURE_LAST_PID
   # THE JOB-194 CASE, AS A REAL PROCESS: an OPTION THAT CONSUMES ITS ARGUMENT. This is an interactive
   # shell whose rcfile is our path — bash sources it, the `sleep 300` inside keeps the shell alive, and
   # its argv is exactly `bash --rcfile <path>/worker-supervisor.sh -i`. Nothing here is the supervisor.
-  bash --rcfile "$fake" -i </dev/null >/dev/null 2>&1 &
-  pid_rcfile=$!
+  fixture_bg bash --rcfile "$fake" -i </dev/null >/dev/null 2>&1
+  pid_rcfile=$FIXTURE_LAST_PID
   # A DIFFERENT script whose LATER arguments name our path — the walk's other over-reach.
-  bash "$other" --config "$fake" &
-  pid_lateral=$!
+  fixture_bg bash "$other" --config "$fake"
+  pid_lateral=$FIXTURE_LAST_PID
   sleep 0.6
 
   ans="$(bash "$body" "$pid_real")"
@@ -5439,12 +5554,13 @@ WALKMUT
     else
       fail "identity-194-$name: answered [$ans] for a live process that is not the supervisor"
     fi
-    # ...and the SAME live process through the `ps` fallback, with procfs blinded: one rule, both paths.
+    # ...and the SAME live process with procfs BLINDED: `unprobeable`. There is no second probe to
+    # disagree with the first any more — blinding the only faithful source removes the verdict.
     ans="$(bash "$psbody" "${subj##*:}")"
-    if [[ "$ans" == unconfirmed ]]; then
-      pass "identity 194 (ps path): '$name' is 'unconfirmed' via the ps fallback too — the call site asks the same helper, not a second spelling"
+    if [[ "$ans" == unprobeable ]]; then
+      pass "identity 194 (no procfs): '$name' is 'unprobeable' with procfs blinded — the verdict comes from the argument vector or not at all"
     else
-      fail "identity-194-ps-$name: the ps fallback answered [$ans]; the two probes disagree, which is the drift this consolidation removes"
+      fail "identity-194-ps-$name: the procfs-blind copy answered [$ans]; expected unprobeable, since identity is procfs-only"
     fi
   done
   # MUTANT CONTRAST for the deleted walk: the `--rcfile` process the finding named classifies as
@@ -5463,8 +5579,7 @@ WALKMUT
     fail "identity-194-mutant-truepos: the restored walk answered [$mans] for a real supervisor; the contrast above is unattributable"
   fi
 
-  kill "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" "$pid_rcfile" "$pid_lateral" 2>/dev/null || true
-  wait "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" "$pid_rcfile" "$pid_lateral" 2>/dev/null || true
+  fixture_kill "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" "$pid_rcfile" "$pid_lateral"
 
   # ---- THE RULE ITSELF, over vectors a real process cannot conveniently stage: a path containing a
   # space, and a `NAME=VALUE` operand in argv (an `env FOO=1 …` command line EXECS AWAY, so the running
@@ -5554,19 +5669,18 @@ test_legacy_lock_liveness_is_three_valued() {
     printf '%s\n' 'supervisor_pid_liveness "$1"'
   } >"$body"
 
-  sleep 300 &
-  live=$!
+  fixture_bg sleep 300
+  live=$FIXTURE_LAST_PID
   ans=$(bash "$body" "$live")
   if [[ "$ans" == live ]]; then
     pass "liveness: a REAL running pid answers 'live'"
   else
     fail "liveness-live: pid $live answered [$ans]"
   fi
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fixture_kill "$live"
 
-  sleep 0.1 &
-  dead=$!
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
   wait "$dead" 2>/dev/null || true
   ans=$(bash "$body" "$dead")
   if [[ "$ans" == dead ]]; then
@@ -5776,8 +5890,8 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
   derived="$tmp/cqlite-worker-supervisor-$lane.lock"
 
   # ---- (1) LIVE, identity NOT corroborated: the remedy carries a read-only `ps` verification command.
-  sleep 300 &
-  live=$!
+  fixture_bg sleep 300
+  live=$FIXTURE_LAST_PID
   mkdir -p "$legacy"
   printf '%s\n' "$live" >"$legacy/pid"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
@@ -5795,8 +5909,7 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
   else
     fail "remedy-lines-live-not-exact: line=[$bare], expected exactly [ps -p $live -o args=]"
   fi
-  kill "$live" 2>/dev/null || true
-  wait "$live" 2>/dev/null || true
+  fixture_kill "$live"
   rm -rf "$legacy" "$derived"
 
   # ---- (2) LIVE and CORROBORATED: "stop pid N first" is advice, not a command we hand over — nothing
@@ -5804,21 +5917,20 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
   fake="$d/worker-supervisor.sh"
   printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
   chmod +x "$fake"
-  bash "$fake" &
-  fakepid=$!
+  fixture_bg bash "$fake"
+  fakepid=$FIXTURE_LAST_PID
   sleep 0.3
   mkdir -p "$legacy"
   printf '%s\n' "$fakepid" >"$legacy/pid"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
   remedy_lines_structural "live-corroborated" "$out" 0
-  kill "$fakepid" 2>/dev/null || true
-  wait "$fakepid" 2>/dev/null || true
+  fixture_kill "$fakepid"
   rm -rf "$legacy" "$derived"
 
   # ---- (3) STALE: the deletion. Structure here; the verbatim execution is asserted in the stale case
   # itself (which also checks the lock is gone afterwards).
-  sleep 0.1 &
-  dead=$!
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
   wait "$dead" 2>/dev/null || true
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
@@ -5970,8 +6082,13 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
 #
 # It also stages the AMBIGUITY the fix turns on: an empty result is indistinguishable from a kernel
 # thread's empty `cmdline` and from a read that errored, and the `read` builtin cannot tell EOF from an
-# error. So an empty procfs read is not a verdict either — `ps`, which CAN name these processes, gets to
-# answer, and if it cannot the verdict is `unprobeable`.
+# error. So an empty procfs read is not a verdict either: the answer is `unprobeable`.
+#
+# UPDATED FOR JOB 196 F1: this case used to assert that the unmeasurable read FELL THROUGH TO `ps`,
+# which named the subject and answered `supervisor`. That fallback is gone — a space-joined rendering
+# can fabricate argument boundaries as well as lose them — so the same staged premise now answers
+# `unprobeable` WITH `ps` PRESENT AND ABLE TO ANSWER, which is asserted by executing `ps` here and
+# showing it names the subject.
 # ---------------------------------------------------------------------------
 test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed() {
   local d body mutant fakeproc stubdir fake fakepid ans
@@ -6000,8 +6117,8 @@ test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed() {
   fake="$d/worker-supervisor.sh"
   printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
   chmod +x "$fake"
-  bash "$fake" &
-  fakepid=$!
+  fixture_bg bash "$fake"
+  fakepid=$FIXTURE_LAST_PID
   sleep 0.3
   # READABLE, YIELDS NOTHING: a directory named `cmdline`.
   mkdir -p "$fakeproc/$fakepid/cmdline"
@@ -6013,18 +6130,26 @@ test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed() {
     fail "identity-f3-premise: the staged path does not reproduce readable-but-unmeasurable (bytes=[$staged_bytes]); the case below measures nothing"
   fi
 
-  # (1) FIXED CODE: the failed read is not a verdict — `ps` answers, and it answers `supervisor`.
-  ans="$(bash "$body" "$fakepid")"
-  if [[ "$ans" == supervisor ]]; then
-    pass "identity F3: a cmdline that yields nothing falls through to ps, which corroborates the real subject as 'supervisor' — never a fabricated non-match"
+  # (1) FIXED CODE: the failed read is not a verdict, and there is nothing else to ask — `unprobeable`,
+  # even though `ps` is right here and would name the subject. That premise is executed, not assumed.
+  local psout=""
+  psout="$(ps -p "$fakepid" -o args= 2>/dev/null || true)"
+  if [[ "$psout" == *worker-supervisor.sh* ]]; then
+    pass "identity F3 PREMISE: ps is present and names the subject ([$psout]), so the unprobeable answer below is a refusal to consult it"
   else
-    fail "identity-f3-fixed: answered [$ans] for a worker-supervisor-named process whose cmdline yielded nothing; expected supervisor"
+    fail "identity-f3-ps-premise: ps answered [$psout]; the assert below would not be attributable to the removed fallback"
+  fi
+  ans="$(bash "$body" "$fakepid")"
+  if [[ "$ans" == unprobeable ]]; then
+    pass "identity F3: a cmdline that yields nothing is 'unprobeable' — the unmeasured state, and NOT a fabricated non-match, with no ps fallback to guess from (job 196 F1)"
+  else
+    fail "identity-f3-fixed: answered [$ans] for an unmeasurable cmdline; expected unprobeable"
   fi
 
-  # (2) FIXED CODE, no `ps` either: the answer is `unprobeable` — we could not look, and we say so.
+  # (2) FIXED CODE, no `ps` either: the SAME answer, which is the point — ps availability is irrelevant.
   ans="$(env PATH="$stubdir" "$BASH" "$body" "$fakepid")"
   if [[ "$ans" == unprobeable ]]; then
-    pass "identity F3: an unmeasurable cmdline with no usable ps answers 'unprobeable' — the unmeasured state, distinct from an affirmative non-match"
+    pass "identity F3: an unmeasurable cmdline with no usable ps answers 'unprobeable' too — the unmeasured state, distinct from an affirmative non-match"
   else
     fail "identity-f3-unprobeable: answered [$ans] with an unmeasurable cmdline and no ps; expected unprobeable"
   fi
@@ -6062,8 +6187,7 @@ test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed() {
     fail "identity-f3-mutant: the pre-fix form answered [$ans]; expected the false 'unconfirmed' this finding named, or the contrast proves nothing"
   fi
 
-  kill "$fakepid" 2>/dev/null || true
-  wait "$fakepid" 2>/dev/null || true
+  fixture_kill "$fakepid"
 }
 
 # ---------------------------------------------------------------------------
@@ -6197,8 +6321,8 @@ test_legacy_lock_ps_liveness_fallback_is_three_valued() {
 
   # (1) A REAL reaped pid, answered by the REAL ps: `kill -0` fails with ESRCH, procfs is blind, and ps
   # exits 1 with no output — the documented no-such-process answer, which IS an affirmative absence.
-  sleep 0.1 &
-  dead=$!
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
   wait "$dead" 2>/dev/null || true
   ans="$(bash "$body" "$dead")"
   if [[ "$ans" == dead ]]; then
