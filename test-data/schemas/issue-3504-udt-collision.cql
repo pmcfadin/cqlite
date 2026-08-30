@@ -40,11 +40,35 @@
 -- Table `udt_collide` columns:
 --   * c  frozen<collide>            — site 3 (the rendered UDT value).
 --   * p  frozen<plain>              — the non-colliding contrast.
---   * cm map<frozen<collide>, int>  — site 4: a UDT used as a MAP KEY, which
---                                     Python must project to a hashable value.
+--   * cm map<frozen<collide>, int>  — a UDT used as the KEY of a NON-FROZEN
+--                                     (multicell) map. MEASURED: CQLite decodes
+--                                     such a key as `Value::Blob`, not
+--                                     `Value::Udt` — `parse_cell_path_key` in
+--                                     row_decoder/complex_column.rs matches a
+--                                     closed set of PRIMITIVE cell-path types and
+--                                     falls back to Blob for a frozen UDT. So this
+--                                     column does NOT reach the Python hashable
+--                                     projection's Udt arm. It is kept because it
+--                                     is the shape a user would most naturally
+--                                     write, and it documents that gap.
 --   * tm map<frozen<collide_twin>, int>
---                                   — same-fields/different-type key, for the
---                                     distinctness property above.
+--                                   — the same, one type over.
+--   * fcm frozen<map<frozen<collide>, int>>
+--                                   — SITE 4's ACTUAL SUBJECT. A frozen map is a
+--                                     SINGLE value cell decoded by
+--                                     `parse_map_with_types`, which resolves the
+--                                     key type through the UdtRegistry, so the key
+--                                     really is a `Value::Udt` and really does
+--                                     reach the projection.
+--   * ftm frozen<map<frozen<collide_twin>, int>>
+--                                   — same field NAMES and VALUES as `fcm`'s key
+--                                     under a DIFFERENT type name: two projected
+--                                     keys that must stay DISTINCT once type
+--                                     identity is out of the field namespace.
+--   * fs  frozen<set<frozen<collide>>>
+--                                   — the set path into the same projection
+--                                     (`set_to_py`), which shares
+--                                     `value_to_hashable_key` with map keys.
 --
 -- Deliberately tiny and uncompressed (no CompressionInfo.db): the fixture is a
 -- committed binary, and the property under test is above decode. Every INSERT
@@ -87,10 +111,13 @@ CREATE TYPE IF NOT EXISTS plain (
 -- ── Table ───────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS udt_collide (
-    id INT PRIMARY KEY,
-    c  frozen<collide>,
-    p  frozen<plain>,
-    cm map<frozen<collide>, int>,
-    tm map<frozen<collide_twin>, int>
+    id  INT PRIMARY KEY,
+    c   frozen<collide>,
+    p   frozen<plain>,
+    cm  map<frozen<collide>, int>,
+    tm  map<frozen<collide_twin>, int>,
+    fcm frozen<map<frozen<collide>, int>>,
+    ftm frozen<map<frozen<collide_twin>, int>>,
+    fs  frozen<set<frozen<collide>>>
 ) WITH compression = {'enabled': 'false'}
   AND compaction = {'class': 'SizeTieredCompactionStrategy'};

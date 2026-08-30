@@ -173,14 +173,29 @@ flush_ks() {
 # All INSERTs use an explicit USING TIMESTAMP 1000 (see T_FIXED above).
 #
 #   id 1 — the collision subject, everything populated:
-#           c  = collide with BOTH colliding fields + real_field
-#           p  = plain (NO colliding field) — the contrast value
-#           cm = map<frozen<collide>, int>       — site 4 (UDT as map KEY)
-#           tm = map<frozen<collide_twin>, int>  — SAME field values as the cm
-#                key under a DIFFERENT type name, so a projection that has
-#                dropped type identity collapses the two keys and one that
-#                keeps it does not.
-#   id 2 — contrast row: `p` only. `c`/`cm`/`tm` are absent, so a consumer sees
+#           c   = collide with BOTH colliding fields + real_field (the rendered
+#                 UDT value — site 3)
+#           p   = plain (NO colliding field) — the contrast value
+#           cm  = map<frozen<collide>, int>, NON-FROZEN. MEASURED: CQLite decodes
+#                 a multicell map's cell-path key as `Value::Blob`, never
+#                 `Value::Udt` (`parse_cell_path_key` in
+#                 row_decoder/complex_column.rs matches a closed set of PRIMITIVE
+#                 cell-path types and blob-falls-back for a frozen UDT), so this
+#                 column does NOT reach the Python hashable projection. Kept
+#                 because it is the shape a user would naturally write, and it
+#                 documents the gap.
+#           tm  = the same, one type over.
+#           fcm = frozen<map<frozen<collide>, int>> — SITE 4's ACTUAL SUBJECT. A
+#                 frozen map is a single value cell decoded by
+#                 `parse_map_with_types`, which resolves the key type through the
+#                 UdtRegistry, so the key really is a `Value::Udt`.
+#           ftm = frozen<map<frozen<collide_twin>, int>> — SAME field values as
+#                 fcm's key under a DIFFERENT type name, so a projection that has
+#                 dropped type identity collapses the two keys and one that keeps
+#                 it does not.
+#           fs  = frozen<set<frozen<collide>>> — the set path into the same
+#                 projection (`set_to_py` shares `value_to_hashable_key`).
+#   id 2 — contrast row: `p` only. Every other column is absent, so a consumer sees
 #           a row where a UDT is NULL and the plain UDT has no `_type` field at
 #           all (reading `_type` out of the field namespace must fail here).
 #   id 3 — null-field row: `c` with a NULL `"_type"` field but a populated
@@ -189,12 +204,15 @@ flush_ks() {
 # ----------------------------------------------------------------------------
 insert_rows() {
   log "=== $TABLE: inserting rows (USING TIMESTAMP $T_FIXED) ==="
-  cql "INSERT INTO $TABLE (id, c, p, cm, tm) VALUES (
+  cql "INSERT INTO $TABLE (id, c, p, cm, tm, fcm, ftm, fs) VALUES (
          1,
          {\"_type\": 'user-supplied-type', \"_keyspace\": 'user-supplied-keyspace', real_field: 42},
          {label: 'no-colliding-field', real_field: 7},
          {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 1},
-         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 2}
+         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 2},
+         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 3},
+         {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 4},
+         {{\"_type\": 'set-member-type', \"_keyspace\": 'set-member-keyspace', real_field: 200}}
        ) USING TIMESTAMP $T_FIXED"
   cql "INSERT INTO $TABLE (id, p) VALUES (
          2,
