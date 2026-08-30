@@ -119,12 +119,12 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use canonical_jsonl::{CanonicalValue, KeySpec};
 use cql_type::ColumnType;
-use failure::{Failure, Failures, Stage};
+use failure::{Failure, Failures, Precondition, Stage};
 // Fixture DISCOVERY and STAGING live in `fixture_root` (round 19); the whole
 // fail-closed resolution path — candidate search, generation census,
 // golden/generation correspondence, isolated staging — is one file there, and
 // test targets reach it as `parquet_parity::fixture_root::…`.
-use fixture_root::{isolated_data_dir, resolve_fixture, Fixture};
+use fixture_root::{isolated_data_dir, resolve_fixture_in_roots, Fixture};
 use golden_rows::GoldenRow;
 
 // `ExpectedFailure` is used only by the test binaries that DECLARE a
@@ -865,14 +865,57 @@ pub struct Prepared {
 /// column declaration, an unusable fixture directory, no temp dir): with no
 /// declared types and no fixture there is nothing to aggregate.
 fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
-    // Stage ZERO — the case's own DECLARATION against the committed CQL schema.
-    // It runs before everything because the declaration is what every later
-    // stage's expectation is derived from: an unverified declaration that drifted
-    // to match a wrong export mapping makes the Arrow TYPE check and the VALUE
-    // comparison BOTH pass (issue #1490 round 6, `schema_fixture`).
+    run_stages_in_roots(case, &fixture_root::candidate_roots())
+}
+
+/// [`run_stages`] parameterized on the candidate corpus roots.
+///
+/// The seam the PRECONDITION suite is proven against: the real root list is half
+/// environment and half a COMPILE-TIME checkout path, so a test reading it could
+/// only ever observe this machine's layout — and a precondition can only be shown
+/// to be unconditional by making it FAIL on a fixture built for the purpose.
+pub fn run_stages_in_roots(
+    case: &ParityCase,
+    roots: &[PathBuf],
+) -> Result<Option<Stages>, Failures> {
+    // ===================================================================
+    // PRECONDITIONS — the checks that establish the comparison is MEANINGFUL,
+    // as opposed to the ASSERTIONS that say what it found.
+    //
+    // Every one of them is GAP-INDEPENDENT, and that is a property to preserve
+    // rather than an implementation detail: an expected-failure marker
+    // (`KnownGap`/`KnownTypeGap`) may suppress ONLY the assertion it names.
+    // They report `Failure::Precondition`, which no `ExpectedFailure` can name
+    // and which `KnownGap::mismatch` refuses up front (`failure.rs`).
+    //
+    // WHY THIS IS SEPARATED, AND WHY IT MUST STAY SEPARATED: three review
+    // rounds found the same family — a check skipped because something earlier
+    // had already been excused (round 12: the pipeline `?`-chained, so the
+    // "exact failure set" stopped at the first failing stage; round 13:
+    // eligibility decided from what a LENIENT parser parsed; round 19: the
+    // zero-row check sat AFTER the gap short-circuit, in `compare_inner`, so an
+    // expected export abort let an EMPTY oracle pass). Round 12's aggregation
+    // closed two and left the third, which is why the answer is a separated
+    // CLASS and not a moved line. Do not re-entangle them.
+    //
+    //   1. Declaration — the case's declared columns/keys match the committed
+    //      CQL schema (`schema_fixture`, and the case's own type parse).
+    //   2. Fixture — a single Data generation, the golden that CORRESPONDS to
+    //      it, and an isolated staging directory (`fixture_root`).
+    //   3-6. Golden readable/parses, structurally valid, physical-dump ELIGIBLE
+    //      (#1742), and NON-EMPTY — all inside `golden_rows::load_golden`, at
+    //      the point the oracle is LOADED.
+    // ===================================================================
+
+    // PRECONDITION 1 — the case's own DECLARATION against the committed CQL
+    // schema. It runs before everything because the declaration is what every
+    // later stage's expectation is derived from: an unverified declaration that
+    // drifted to match a wrong export mapping makes the Arrow TYPE check and the
+    // VALUE comparison BOTH pass (issue #1490 round 6, `schema_fixture`).
     match case.schema_check {
         SchemaCheck::Committed => {
-            schema_fixture::validate_declaration(case).map_err(Failures::refusal)?;
+            schema_fixture::validate_declaration(case)
+                .map_err(|e| Failures::precondition(Precondition::Declaration, e))?;
         }
         // Announced on EVERY run, never a silent exemption: an opt-out that
         // nobody can see is indistinguishable from a check that stopped working.
@@ -881,12 +924,19 @@ fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
             case.id()
         ),
     }
-    let columns = case.column_types().map_err(Failures::refusal)?;
-    let Some(fixture) = resolve_fixture(case).map_err(Failures::refusal)? else {
+    let columns = case
+        .column_types()
+        .map_err(|e| Failures::precondition(Precondition::Declaration, e))?;
+    // PRECONDITION 2 — the fixture and its CORRESPONDING golden.
+    let Some(fixture) = resolve_fixture_in_roots(case, roots)
+        .map_err(|e| Failures::precondition(Precondition::Fixture, e))?
+    else {
         return Ok(None);
     };
-    let tmp = tempfile::TempDir::new().map_err(|e| Failures::refusal(format!("tempdir: {e}")))?;
-    let data_dir = isolated_data_dir(case, &fixture, tmp.path()).map_err(Failures::refusal)?;
+    let tmp = tempfile::TempDir::new()
+        .map_err(|e| Failures::precondition(Precondition::Fixture, format!("tempdir: {e}")))?;
+    let data_dir = isolated_data_dir(case, &fixture, tmp.path())
+        .map_err(|e| Failures::precondition(Precondition::Fixture, e))?;
 
     let mut stages = Stages {
         columns,
@@ -899,9 +949,12 @@ fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
         failures: Vec::new(),
     };
 
-    // Stage GOLDEN — FIRST and unconditionally, because it depends on nothing
-    // the export does. Running it before the export is what makes it impossible
-    // for a recorded export abort to suppress it.
+    // PRECONDITIONS 3-6 (stage GOLDEN) — FIRST and unconditionally, because they
+    // depend on nothing the export does. Running them before the export is half
+    // of what makes it impossible for a recorded export abort to suppress them;
+    // the other half is that they report `Failure::Precondition`, which no gap
+    // can name (round 19: running first was NOT enough on its own, because the
+    // non-emptiness check was not here at all — it was on the comparison path).
     match golden_rows::load_golden(case, &fixture, &stages.columns) {
         Ok(golden) => stages.golden = Some(golden),
         Err(f) => {
@@ -1138,6 +1191,15 @@ pub fn stage_case(case: &ParityCase) -> Result<Option<Stages>, Failures> {
     run_stages(case).map_err(|f| f.for_case(&case.id()))
 }
 
+/// [`stage_case`] against an EXPLICIT candidate-root list — the seam the
+/// PRECONDITION suite drives (see [`run_stages_in_roots`]).
+pub fn stage_case_in_roots(
+    case: &ParityCase,
+    roots: &[PathBuf],
+) -> Result<Option<Stages>, Failures> {
+    run_stages_in_roots(case, roots).map_err(|f| f.for_case(&case.id()))
+}
+
 /// Stage VALUE-COMPARISON, then the aggregate verdict over EVERY stage.
 ///
 /// Public for the aggregate's self-tests (see [`Stages`]).
@@ -1187,6 +1249,15 @@ fn compare_inner(
     golden: Vec<GoldenRow>,
     parquet: Vec<Row>,
 ) -> Result<CaseOutcome, Failures> {
+    // A BACKSTOP for this function's DIRECT callers (the harness-sensitivity
+    // self-tests call `compare` with a hand-built golden), NOT the precondition
+    // itself: the precondition is checked where the oracle is LOADED
+    // (`golden_rows::load_golden`), unconditionally and before any KnownGap can
+    // short-circuit. It lived ONLY here until round 19, which is exactly how an
+    // expected export abort let an empty oracle through — a comparison that never
+    // runs cannot enforce a precondition of running it. Both sites call the ONE
+    // function so they can never disagree about what an empty oracle is.
+    golden_rows::require_nonempty_projection(golden.len())?;
     let mut expected: Vec<Row> = golden
         .into_iter()
         .map(|g| Row {
@@ -1199,12 +1270,14 @@ fn compare_inner(
         .collect();
     let mut actual = parquet;
 
-    if expected.is_empty() {
-        return Err(Failures::refusal(
-            "the sstabledump golden projected to ZERO rows — a dataset-dependent \
-             comparison must never pass on an empty oracle",
-        ));
-    }
+    // A BACKSTOP for this function's DIRECT callers (the harness-sensitivity
+    // self-tests call `compare` with a hand-built golden), NOT the precondition
+    // itself: the precondition is checked where the oracle is LOADED
+    // (`golden_rows::load_golden`), unconditionally and before any KnownGap can
+    // short-circuit. It lived ONLY here until round 19, which is exactly how an
+    // expected export abort let an empty oracle through — a comparison that never
+    // runs cannot enforce a precondition of running it. Both sites call the ONE
+    // function so they can never disagree about what an empty oracle is.
     expected.sort_by_key(|r| r.sort_key());
     actual.sort_by_key(|r| r.sort_key());
 
@@ -1310,6 +1383,31 @@ fn compare_inner(
 /// Drive one case and apply the per-case fail-closed rule.
 pub fn assert_case(case: &ParityCase) {
     let outcome = run_case(case);
+    // PRECONDITIONS FIRST, and BEFORE `case.known_gap` is even read: an
+    // expected-failure marker may suppress only the ASSERTION it names, never a
+    // validity precondition of the comparison. Structurally the gap could not
+    // absorb one anyway (no `ExpectedFailure` carries a `precondition[…]`
+    // signature, and `KnownGap::mismatch` refuses up front) — this third layer
+    // exists so the PANIC names the precondition instead of reporting it as an
+    // "unrecorded extra", which reads like a bookkeeping slip rather than the
+    // vacuous-comparison it is. See `failure::Precondition`.
+    if let Err(failures) = &outcome {
+        let unmet = failures.preconditions();
+        if !unmet.is_empty() {
+            panic!(
+                "{}: {} validity PRECONDITION(s) of the comparison did not hold. A KnownGap \
+                 can never excuse one — fix the precondition or the fixture.\n{}\n\nFULL \
+                 FAILURE SET: {failures}",
+                case.id(),
+                unmet.len(),
+                unmet
+                    .iter()
+                    .map(|f| format!("  - {}", f.render()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+    }
     if let Some(gap) = &case.known_gap {
         match outcome {
             Err(failures) => {

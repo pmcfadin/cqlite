@@ -80,7 +80,7 @@ use std::collections::BTreeMap;
 use super::canonical_jsonl::{self, CanonicalDocument, CanonicalRow, CanonicalValue};
 use super::cql_type::{ColumnType, CqlTypeSpec, SeqKind};
 use super::declared::{canonicalize_golden, Declared};
-use super::failure::Failures;
+use super::failure::{Failures, Precondition};
 use super::golden_text;
 use super::{Fixture, ParityCase};
 
@@ -92,8 +92,27 @@ pub struct GoldenRow {
     pub cells: BTreeMap<String, CanonicalValue>,
 }
 
-/// Stage GOLDEN: load the committed sstabledump dump and project it, including
-/// its physical-dump ELIGIBILITY refusals (#1742).
+/// Stage GOLDEN: load the committed sstabledump dump and project it.
+///
+/// # Every check here is a PRECONDITION, and preconditions are GAP-INDEPENDENT
+///
+/// This function establishes that the oracle EXISTS, PARSES, is STRUCTURALLY
+/// valid, is physical-dump ELIGIBLE (#1742) and PROJECTS TO AT LEAST ONE ROW.
+/// None of those is an assertion about the export; each is a validity
+/// precondition of the comparison being meaningful at all. They therefore report
+/// [`Failure::Precondition`], which no [`super::KnownGap`] can name or excuse
+/// (`failure.rs`).
+///
+/// **Do not re-entangle them with the comparison.** The non-emptiness check in
+/// particular used to live in `mod.rs::compare_inner`, i.e. only on the
+/// comparison path — so a case whose export ABORTED behind a recorded gap never
+/// reached it, and a golden whose partitions all held empty `rows` passed
+/// vacuously (round 19). That is the THIRD appearance of one family in this
+/// harness; rounds 12 and 13 are rolled up on [`Precondition`]. The rule the
+/// three produced: an expected-failure marker must suppress ONLY the assertion
+/// it names, never a precondition of the comparison. So a check that establishes
+/// MEANINGFULNESS belongs HERE, at the point the oracle is loaded, and never
+/// behind the export.
 pub fn load_golden(
     case: &ParityCase,
     fixture: &Fixture,
@@ -110,24 +129,34 @@ pub fn load_golden(
     // 12). Two refusals keep it fail-closed: it errors on any line whose
     // sstabledump structure does not hold, and `declared.rs` REFUSES a declared
     // `decimal`/`varint` position that still arrives as a double.
+    // PRECONDITION 3 — the golden EXISTS, is READABLE and PARSES.
     let raw = std::fs::read_to_string(&fixture.golden).map_err(|e| {
-        Failures::refusal(format!(
-            "reading the sstabledump golden {} failed: {e}",
-            fixture.golden.display()
-        ))
+        Failures::precondition(
+            Precondition::GoldenReadable,
+            format!(
+                "reading the sstabledump golden {} failed: {e}",
+                fixture.golden.display()
+            ),
+        )
     })?;
     if let Some(marker) = golden_text::placeholder_marker(&raw) {
-        return Err(Failures::refusal(format!(
-            "the sstabledump golden {} carries the placeholder marker {marker} — it is not a \
-             real Cassandra dump and cannot be an oracle",
-            fixture.golden.display()
-        )));
+        return Err(Failures::precondition(
+            Precondition::GoldenReadable,
+            format!(
+                "the sstabledump golden {} carries the placeholder marker {marker} — it is not \
+                 a real Cassandra dump and cannot be an oracle",
+                fixture.golden.display()
+            ),
+        ));
     }
     let content = golden_text::preserve_exact_lexemes(&raw, columns).map_err(|e| {
-        Failures::refusal(format!(
-            "preserving the exact literals of the sstabledump golden {} failed: {e}",
-            fixture.golden.display()
-        ))
+        Failures::precondition(
+            Precondition::GoldenReadable,
+            format!(
+                "preserving the exact literals of the sstabledump golden {} failed: {e}",
+                fixture.golden.display()
+            ),
+        )
     })?;
     // ELIGIBILITY is decided from the TEXT the parser is about to read, not from
     // what the parser managed to parse out of it: the shared parser is lenient by
@@ -135,11 +164,15 @@ pub fn load_golden(
     // into an absence or an empty collection, which is exactly how a golden that
     // this oracle must refuse (#1742) reads as live data. See
     // [`validate_golden_text`], and `golden_schema.rs`.
+    // PRECONDITION 4 — the golden's sstabledump STRUCTURE holds (total).
     validate_golden_text(&content).map_err(|e| {
-        Failures::refusal(format!(
-            "the sstabledump golden {} is not usable as a physical-dump oracle: {e}",
-            fixture.golden.display()
-        ))
+        Failures::precondition(
+            Precondition::GoldenStructure,
+            format!(
+                "the sstabledump golden {} is not usable as a physical-dump oracle: {e}",
+                fixture.golden.display()
+            ),
+        )
     })?;
     let golden_doc = canonical_jsonl::parse_document_str_with_keys(
         &content,
@@ -147,9 +180,41 @@ pub fn load_golden(
         true,
         &case.key_spec(),
     )
-    .map_err(|e| Failures::refusal(format!("loading the sstabledump golden failed: {e}")))?;
-    project_golden(&golden_doc, columns, case.partition_key, case.clustering)
-        .map_err(Failures::refusal)
+    .map_err(|e| {
+        Failures::precondition(
+            Precondition::GoldenReadable,
+            format!("loading the sstabledump golden failed: {e}"),
+        )
+    })?;
+    // PRECONDITION 5 — physical-dump ELIGIBILITY (#1742) and projectability.
+    let rows = project_golden(&golden_doc, columns, case.partition_key, case.clustering)
+        .map_err(|e| Failures::precondition(Precondition::GoldenEligible, e))?;
+    // PRECONDITION 6 — the oracle is NON-EMPTY. Checked HERE, where the oracle
+    // is LOADED, and never on the comparison path: see this function's header.
+    require_nonempty_projection(rows.len())?;
+    Ok(rows)
+}
+
+/// PRECONDITION: the golden projected to AT LEAST ONE ROW.
+///
+/// One function, taking a COUNT so both callers can share it: the LOAD site
+/// (unconditionally, before any gap can short-circuit) and, as a backstop for
+/// its direct callers, `mod.rs::compare`. The two sites must never be able to
+/// disagree about what "an empty oracle" is, or about which class of failure it
+/// produces.
+///
+/// A nonempty JSONL document whose partitions all carry empty `rows` arrays is
+/// exactly this state, and is the round-19 finding: it parses, it is
+/// structurally valid, it is eligible — and it witnesses nothing.
+pub fn require_nonempty_projection(projected_rows: usize) -> Result<(), Failures> {
+    if projected_rows == 0 {
+        return Err(Failures::precondition(
+            Precondition::GoldenNonEmpty,
+            "the sstabledump golden projected to ZERO rows — a dataset-dependent comparison \
+             must never pass on an empty oracle",
+        ));
+    }
+    Ok(())
 }
 
 /// Project a whole golden document into canonical rows.

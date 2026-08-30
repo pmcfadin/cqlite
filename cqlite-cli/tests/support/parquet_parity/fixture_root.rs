@@ -251,7 +251,7 @@ pub struct Fixture {
 /// table in an unusable shape (several generations, no golden, a golden belonging
 /// to a DIFFERENT generation — see [`fixture_in_table_dir`]) is an ERROR too,
 /// never a skip.
-pub(super) fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
+pub fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
     resolve_fixture_in_roots(case, &candidate_roots())
 }
 
