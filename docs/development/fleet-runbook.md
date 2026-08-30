@@ -571,22 +571,20 @@ What it guarantees:
   (#3549)**, because the two paths are invisible to each other and a supervisor from an older checkout
   would otherwise co-run in the same worktree. A LIVE holder there refuses the start with a
   `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane "another instance is
-  already running") — remedy: stop that supervisor or upgrade its checkout past #3467. A holder whose
-  recorded pid is CONFIRMED dead is reclaimed; anything undeterminable (not a directory, no/garbled
-  `pid` file, unreadable) REFUSES rather than proceeding — and a reclaim never destroys a lock it cannot
-  re-identify as the dead one it judged: the renamed-aside directory is re-read and, on any mismatch,
-  put back (or preserved and named) while the start refuses. **Two steps of the reclaim are arbitrated
-  by a PRIMITIVE, so a loser observes an error rather than success against the wrong object**: which
-  reclaimer wins is `rename(2)` on the legacy name (after ours succeeds the object is unreachable by
-  name to anyone else, hence frozen — which is what makes the re-identification a proof rather than a
-  second check-then-act), and whether a restore may proceed is an exclusive `mkdir` on the target. What
-  is NOT arbitrable in POSIX shell is *which object* sits at the name when the rename fires (no
-  rename-if-unchanged, no directory descriptor, and holding the legacy lock for our lifetime is the
-  machine-global exclusion #3393 forbids); that residual is detected, never destructive, and every
-  failing restore leaves the legacy name exactly as it was found — free — with the object preserved and
-  named. The rename destination is a freshly-created `mktemp -d` private directory, never a
-  `$$`-derived name: preserved asides outlive their run, so a pid-derived destination can already exist
-  and `mv` would silently NEST the lock inside it. An explicit `SUPERVISOR_LOCK` skips the check.
+  already running") — remedy: stop that supervisor or upgrade its checkout past #3467. **A holder whose
+  recorded pid is CONFIRMED DEAD also REFUSES; it is NOT reclaimed (lead ruling, #3549)** — the
+  diagnostic names the legacy path, the recorded pid, the classified state and the exact one-liner to
+  clear it (`rm -rf <legacy path>`), and the remedy is state-specific so a run never tells you to stop a
+  process that is already dead. Anything undeterminable (not a directory, a SYMLINK at either the lock
+  path or its `pid`, no/garbled `pid` file, unreadable) refuses the same way. **This guard DETECTS AND
+  REFUSES: it never renames, deletes, adopts or re-creates the legacy lock, so it cannot corrupt any
+  holder's lock, live or dead.** The reclaim it used to perform was removed because a reclaim must be
+  able to RESTORE on its abort paths, and restoring a directory-with-contents is not atomic here —
+  `mkdir` + `mv` leaves the lock observable *without* its `pid`, a window in which a pre-#3467
+  supervisor reads it as stale, reclaims it, and our restore then corrupts ITS lock. The atomic form
+  (build the lock complete in a private staging dir, move it in ONE `rename(2)`) needs GNU-only
+  `RENAME_NOREPLACE`/`mv -T` and this script supports macOS, so it was available and declined; the
+  rationale is recorded in full at the guard. An explicit `SUPERVISOR_LOCK` skips the check.
   **It is a STARTUP check, not machine-global exclusion: it REDUCES the collision window, it does not
   eliminate it** — a pre-#3467 supervisor that starts *after* the check cannot be stopped without
   reimposing machine-global exclusion, which #3393 forbids (N lanes per box). The RESIDUAL block at the
