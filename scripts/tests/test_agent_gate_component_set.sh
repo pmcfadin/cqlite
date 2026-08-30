@@ -20,6 +20,25 @@
 #   6. --lite with a real skew                                          -> line present, run NOT failed
 #   7. the REAL full-gate emit path                                     -> FAIL block + exit 1, no cargo
 #
+# CENSUS, stated so a later reader can tell "covered" from "forgotten" (a silent gap is
+# the shape this whole issue is about). The pre-flight has FOUR verdicts and SIX non-`ok`
+# probe kinds, and EVERY one is exercised below:
+#   verdicts — PASS (5), DECLARED (4), BEHIND (1), INDETERMINATE (4c).
+#   kinds    — fetch-failed + no-remote (2), baseline-list-failed / -empty / -garbage and
+#              baseline-missing (3a–3d), no-git / baseline-workspace / no-tool (3f).
+# None is declared unreachable. The ONE conditional case is `no-tool`, which needs a
+# curated git-less PATH: it verifies that PATH can start the gate at all (a positive
+# control that must reach `KIND: ok`) and, if it cannot on this host, prints a `skip -`
+# line naming that precondition rather than passing silently or reporting a false defect.
+#
+# The PASS/FAIL counters are incremented ONLY at top level — never inside `( … )` or the
+# right-hand side of a pipe, either of which would increment a copy that dies with the
+# subshell and leave the suite printing FAILs while reporting `failed: 0`. Verified
+# EMPIRICALLY, not by reading: overriding `ok()` to call `bad()` makes all 33 cases print
+# FAIL and the tally read `failed: 33` with exit 1 (a lexical paren scan cannot answer this
+# — `case` patterns and same-line `( … )` closes defeat it, and the first attempt at one
+# reported a bogus growing depth for every case in the file).
+#
 # Run standalone:   bash scripts/tests/test_agent_gate_component_set.sh
 # Or via the gate:  scripts/agent-gate.sh runs it inside the `tooling-tests` component.
 set -uo pipefail
