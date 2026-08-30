@@ -39,29 +39,31 @@
  * enabled anywhere for this file — see the jest.config.js header for the full
  * ruling.
  *
- * AND WHY `--detectOpenHandles` IS NOT USED EITHER (issue #1465 round 2 — it WAS
- * wired on this lane's invocation for one round, then removed; do not re-add it
- * without answering these four measurements):
- *   1. It has NO ENFORCEMENT. It prints a report after the run and exits 0, so it
- *      can only work by a human reading a gate-component log on a PASS. Nobody
- *      reads a PASS log.
+ * AND WHY `--detectOpenHandles` IS NOT ON ANY LANE (issue #1465 rounds 2-3 — it
+ * WAS wired on this lane's invocation for one round, then removed; do not re-add
+ * it to a lane without answering these four measurements):
+ *   1. It has NO ENFORCEMENT. It prints a report after the run and exits 0. In
+ *      its only merge-gating execution (the gate's `node-bindings` component) that
+ *      report goes to $LOG_DIR/node-bindings.log, which agent doctrine says never
+ *      to read — so the report would have no reader at all.
  *   2. Its baseline here is NOT zero: this lane always reported exactly one
  *      handle, `CustomGC`, attributed to `require`-ing the napi addon (napi-rs's
  *      process-global GC integration, present for ANY file that loads the
  *      module). So the "signal" was a human noticing a 2 where a 1 is normal.
- *   3. It carries a HANG hazard, observed: with a handle outstanding jest waits
- *      on it rather than failing, so a planted uncleared timer turned the run into
- *      a 10-minute timeout kill instead of a red. In a gate component that is a
- *      hung gate, not a failure — strictly worse than no signal.
+ *   3. It carries a HANG hazard, observed: the flag disables jest's force-exit, so
+ *      with a handle outstanding jest WAITS on it rather than failing — a planted
+ *      uncleared timer turned the run into a 10-minute timeout kill instead of a
+ *      red. In a mandatory gate component that is a hung gate, not a failure.
  *   4. The enforceable in-process alternative is VACUOUS on these paths:
  *      `process.getActiveResourcesInfo()` reports `[]` before AND after 300
  *      abandoned iterators and 300 rejections, and `[]` right after loading the
  *      addon, while correctly reporting `["Timeout"]` for a planted
- *      `setInterval`. It is live in general and blind to exactly the
- *      napi/Tokio handle class this path could leak, so asserting on it would
- *      measure nothing while looking like a guard.
- * It remains useful AD HOC for a human chasing a suspected handle leak:
- *   npx jest leak-paths --detectOpenHandles      # expect the 1 CustomGC baseline
+ *      `setInterval`. It is live in general and blind to exactly the napi/Tokio
+ *      handle class this path could leak, so asserting on it would measure
+ *      nothing while looking like a guard.
+ * It stays available to a HUMAN chasing a suspected handle leak, as its own script
+ * so no lane can pick it up by accident:
+ *   npm run test:leaks:handles     # expect the 1 CustomGC baseline, nothing more
  * That is a debugging recipe, deliberately not part of any lane.
  *
  * WHAT IS ASSERTED (and what is deliberately NOT): the growth of

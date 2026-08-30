@@ -35,6 +35,7 @@
     "test:coverage": "node --expose-gc ./node_modules/jest/bin/jest.js --coverage",
     "test:parity": "jest parity.test.js --testTimeout=60000",
     "test:leaks": "node --expose-gc ./node_modules/jest/bin/jest.js --selectProjects leaks",
+    "test:leaks:handles": "node --expose-gc ./node_modules/jest/bin/jest.js --selectProjects leaks --detectOpenHandles",
     "typecheck": "tsc --noEmit -p examples/tsconfig.json",
     "examples": "ts-node examples/basic-query.ts",
     "prepublishOnly": "echo 'Skipping napi prepublish - artifacts handled by CI workflow'"

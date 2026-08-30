@@ -26,8 +26,9 @@
  *     enforcement), its baseline on this lane is one `CustomGC` handle from
  *     loading the napi addon, and an outstanding handle makes jest HANG rather
  *     than fail, which in a gate component is worse than no signal. See the
- *     header of `__test__/leak-paths.test.js` for the four measurements and for
- *     the ad-hoc debugging recipe that keeps it available to a human.
+ *     header of `__test__/leak-paths.test.js` for the four measurements. It stays
+ *     available to a human as the separate `npm run test:leaks:handles` script,
+ *     which no lane invokes.
  *   * `detectLeaks` is deliberately absent. (It IS honoured per-project —
  *     `jest-runner/build/runTest.js:261` reads `projectConfig.detectLeaks` and
  *     `@jest/core/build/TestScheduler.js:138` surfaces the verdict — so it did
@@ -66,8 +67,11 @@ module.exports = {
       ...baseProject,
       displayName: 'leaks',
       testMatch: [LEAK_TEST],
-      // No leak-detector keys here — they are globalConfig-only (see header) and
-      // are passed by `npm run test:leaks` instead.
+      // No leak-detector keys here. `detectOpenHandles` would be inert (it is
+      // read from the GLOBAL config only) and is not wanted on a lane anyway;
+      // `detectLeaks` WOULD take effect per-project, and is deliberately not
+      // used because it measures the wrong thing. Both are explained in the
+      // header above.
     },
   ],
 
