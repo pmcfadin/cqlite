@@ -1527,8 +1527,22 @@ supervisor_pid_liveness() {
   # Well-formed = non-empty, all digits, > 0. A leading zero is rejected as malformed rather than
   # parsed: `[[ 008 -gt 0 ]]` is a bash arithmetic ERROR (invalid octal), and `kill -0 0` signals the
   # whole PROCESS GROUP.
+  #
+  # THE CHARACTER LIST IS EXPLICIT BECAUSE A RANGE IS COLLATION-DEPENDENT — i.e. THE DIGIT TEST WOULD
+  # OTHERWISE INHERIT THE CALLER'S LOCALE (#3549, roborev job 205 class sweep). A bracket RANGE is
+  # resolved through the locale's collation order, so `[!0-9]` is not "not an ASCII digit" outside the C
+  # locale. MEASURED on this box under `LC_ALL=en_US.utf8`: ARABIC-INDIC DIGIT THREE (U+0663) is NOT
+  # matched by `[!0-9]`, i.e. it PASSES as a well-formed pid — and it then reaches the reclaim-adjacent
+  # end of the classifier, where `kill -0` fails, procfs has no such entry, and the verdict is `dead`,
+  # so a `pid` file no supervisor ever wrote earns the operator a DELETION remedy. The same string is
+  # REJECTED by the explicit list under the identical locale, and by both spellings under `LC_ALL=C`.
+  #
+  # THE DEPENDENCY IS REMOVED, NOT NEUTRALISED: an explicit list contains no range for collation to
+  # reorder, so this holds under any inherited `LC_ALL`/`LC_COLLATE`/`LANG` with no save/restore, no
+  # `local LC_ALL=C` (which would silently change `printf %q`'s rendering and every message this
+  # function's callees produce) and nothing that can abort. Do not "tidy" it back to `[0-9]`.
   case "$pid" in
-    '' | *[!0-9]* | 0*) printf 'unknown\n'; return 0 ;;
+    '' | *[!0123456789]* | 0*) printf 'unknown\n'; return 0 ;;
   esac
   local err=""
   if err="$(LC_ALL=C kill -0 "$pid" 2>&1)"; then
@@ -1666,28 +1680,68 @@ supervisor_legacy_lock_state() {
   # What makes the printed command non-destructive whenever it runs is `rmdir` itself, which refuses a
   # non-empty directory, where `rm -rf` would silently delete contents this run does not own.
   #
-  # `dotglob` so a hidden entry still counts as an unexpected entry; `nullglob` so an empty directory
-  # yields 0 entries rather than the literal pattern. BOTH ARE SAVED AND RESTORED via `shopt -p`,
-  # because this function runs in the CALLER'S shell and must not leave globbing changed behind it.
-  # The array form counts exactly even for names containing whitespace or newlines.
-  local _sv_dotglob _sv_nullglob
+  # ONE NEUTRALISATION POINT FOR THE WHOLE INHERITED GLOB/MATCH STATE — NOT AN ENUMERATION OF THE
+  # EXPOSED SUBSET (#3549, roborev job 205 F1).
+  #
+  # THE DEFECT CLASS: THIS ENUMERATION'S CORRECTNESS DEPENDS ON SHELL STATE THE CALLER OWNS. The two
+  # earlier rounds each pinned the setting they had been told about (`dotglob`, `nullglob`) and left
+  # every sibling raw — and `GLOBIGNORE` is the one that matters most, because it can make a FOREIGN
+  # directory look like the canonical `{pid}` shape and it is the shape check that LICENSES PRINTING A
+  # DELETION. Measured: with `GLOBIGNORE` naming the extra entry's path, a directory holding `pid` AND
+  # `other` enumerates as exactly `{pid}`, so a directory no supervisor created is classified `stale`
+  # and the operator is handed `rm -f … && rmdir …` for it. `GLOBIGNORE` also implicitly enables
+  # `dotglob` (measured), i.e. it changes two things at once.
+  #
+  # SO THE FAMILY IS PINNED WHOLESALE, and that is the point rather than an accident: the invariant is
+  # "no inherited glob or match option reaches this block", which cannot rot when a pattern in the block
+  # changes, where "the exposed ones were enumerated correctly" has to be re-derived by every future
+  # reader. Load-bearing today, each MEASURED:
+  #   GLOBIGNORE  — filters entries out of the result: the false-`{pid}` shape above. Unset, restored.
+  #   dotglob     — a HIDDEN extra entry must still count as an unexpected entry. Set.
+  #   nullglob    — an empty directory must yield 0 entries, not the literal pattern. Set.
+  #   failglob    — errors and leaves `_entries` UNASSIGNED when nothing matches, and prints its own
+  #                 "no match" line on the caller's stderr. Reachable only if `pid` is unlinked between
+  #                 the `-e` test above and this glob, and fail-closed when it fires — but pinned, since
+  #                 it is in the family and free to pin here.
+  #   noglob (`set -f`) — the glob is NOT EXPANDED AT ALL: `_entries` becomes the one literal string
+  #                 `<legacy>/*`, so a GENUINE stale lock is misreported `unknown` — a false refusal on
+  #                 a correct configuration. It arrives from the environment (`env SHELLOPTS=noglob`
+  #                 is imported by bash — measured), which is why it is neutralised, not argued away.
+  #   nocasematch — the SHAPE COMPARISON below is `[[ != ]]`: with it on, an entry named `PID` compares
+  #                 EQUAL to `pid` (measured), so the comparison is inside the neutralised region too.
+  # Pinned for uniformity, exposure not established: `extglob` (this block's only pattern is a bare
+  # `*`, extglob-inert), `globstar` (affects `**` only), `nocaseglob` (the literal path components are
+  # not globbed at all, so it can only affect the `*`, where it is a no-op).
+  #
+  # `BASHOPTS`/`SHELLOPTS` from the environment are what make all of these reachable without anyone
+  # running `shopt` (both measured to be imported by bash), so this is inherited state, not a caller's
+  # local choice.
+  #
+  # NOTHING IN THE SAVE OR THE RESTORE MAY ABORT (#3549, roborev job 201 F3, and the reason it is still
+  # spelled this way). `shopt -p` EXITS NON-ZERO IF ANY NAMED OPTION IS UNSET — with seven names that is
+  # the COMMON path, not an edge case — and under a caller with `inherit_errexit` (or POSIX mode, where
+  # bash propagates errexit into `$( )` unconditionally) an unguarded capture killed the classifier
+  # BETWEEN the mutation and the restore, leaving the caller's shell changed and printing no refusal at
+  # all. So: `|| true` on the capture, `|| true` on the `eval` restore, `if` rather than `&&` on the two
+  # value restores, and no restore that is the last element of a list.
+  local _sv_shopts="" _sv_noglob=off _sv_globignore_set=no _sv_globignore="" _shape_ok=no
   local -a _entries=()
-  # `|| true` ON EVERY CAPTURE AND EVERY RESTORE — `shopt -p` EXITS NON-ZERO FOR A DISABLED OPTION
-  # (#3549, roborev job 201 F3). Both options are normally OFF, so `shopt -p dotglob` prints
-  # `shopt -u dotglob` and returns 1 IN THE COMMON PATH: the failure is not an edge case, it is every
-  # run. It was invisible only because bash does not propagate errexit into `$( )` by default — with a
-  # caller that sets `inherit_errexit` (or POSIX mode) the assignment's non-zero status killed the
-  # classifier HERE, between `shopt -s` and the restore, so the caller's shell was left with
-  # `dotglob`/`nullglob` CHANGED and no refusal was ever printed. The restore is guarded the same way:
-  # a restore that can abort is not a restore, and it runs on the way out of a function whose whole job
-  # is to leave the caller's shell as it found it.
-  _sv_dotglob="$(shopt -p dotglob || true)"
-  _sv_nullglob="$(shopt -p nullglob || true)"
+  _sv_shopts="$(shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true)"
+  case $- in *f*) _sv_noglob=on ;; esac
+  if [[ -n "${GLOBIGNORE+set}" ]]; then _sv_globignore_set=yes; _sv_globignore="$GLOBIGNORE"; fi
+  unset GLOBIGNORE
+  set +f
   shopt -s dotglob nullglob
+  shopt -u failglob extglob globstar nocaseglob nocasematch
+  # The array form counts exactly even for names containing whitespace or newlines. The VERDICT is
+  # computed inside the neutralised region and acted on after the restore, so the comparison gets the
+  # pinned matching options and the diagnostics below run in the caller's own shell state.
   _entries=("$legacy"/*)
-  eval "$_sv_dotglob" || true
-  eval "$_sv_nullglob" || true
-  if (( ${#_entries[@]} != 1 )) || [[ "${_entries[0]}" != "$legacy/pid" ]]; then
+  if (( ${#_entries[@]} == 1 )) && [[ "${_entries[0]}" == "$legacy/pid" ]]; then _shape_ok=yes; fi
+  eval "$_sv_shopts" || true
+  if [[ "$_sv_noglob" == on ]]; then set -f; fi
+  if [[ "$_sv_globignore_set" == yes ]]; then GLOBIGNORE="$_sv_globignore"; else unset GLOBIGNORE; fi
+  if [[ "$_shape_ok" != yes ]]; then
     # RENDERED THROUGH `supervisor_shell_quote`, not a bare `printf '%q'` (#3549, roborev job 201 F1).
     # A newline or control character in an entry name must break neither the one-line state string this
     # function's callers parse nor the prose line it is later printed on — and `%q` ALONE does not
@@ -1714,7 +1768,7 @@ supervisor_legacy_lock_state() {
   # for a file that is not the shape any supervisor writes. The pre-#3467 supervisor writes
   # `echo $$ >"$LOCK/pid"`, i.e. digits and ONE newline; anything else is an unrecognised shape and must
   # refuse, exactly as a non-digit byte does. With `IFS=` the surrounding spaces survive into `$pid`,
-  # the `*[!0-9]*` test rejects them, and the run refuses with `pid-not-well-formed` and NO deletion
+  # the `*[!0123456789]*` test rejects them, and the run refuses with `pid-not-well-formed` and NO deletion
   # instruction. The trimming was silently generous in the other direction too: it made a space- or
   # tab-only line 1 read as an EMPTY pid, i.e. one unrecognised shape reported as another.
   #
@@ -1750,8 +1804,10 @@ supervisor_legacy_lock_state() {
     printf 'unknown pid-file-not-a-single-line\n'
     return 0
   fi
+  # EXPLICIT CHARACTER LIST, NOT A RANGE — the digit test must not inherit the caller's collation; the
+  # measurement and the harm it produces are recorded at `supervisor_pid_liveness` (#3549, job 205 sweep).
   case "$pid" in
-    '' | *[!0-9]* | 0*) printf 'unknown pid-not-well-formed:[%s]\n' "$(supervisor_shell_quote "$pid")"; return 0 ;;
+    '' | *[!0123456789]* | 0*) printf 'unknown pid-not-well-formed:[%s]\n' "$(supervisor_shell_quote "$pid")"; return 0 ;;
   esac
   case "$(supervisor_pid_liveness "$pid")" in
     live) printf 'live %s\n' "$pid" ;;
@@ -1781,6 +1837,19 @@ supervisor_legacy_lock_state() {
 #     outlive the behaviour it describes.
 # Do not re-inline it, and do not append punctuation: the command line must be the WHOLE line, and it is
 # printed BARE (no `worker-supervisor:` prefix) so that selecting the line is enough to paste it.
+#
+# EVERY LINE IS EMITTED WITH `printf '%s\n'`, NEVER `echo` — THE EMITTER MUST NOT UNDO THE RENDERERS
+# (#3549, roborev job 205 F2). `supervisor_one_line` and `supervisor_shell_quote` encode a control
+# character AS A BACKSLASH SEQUENCE, which is precisely what `echo` under bash's `xpg_echo` option
+# INTERPRETS: MEASURED, `shopt -s xpg_echo; echo 'a\nb'` emits TWO PHYSICAL LINES, so the renderer's
+# guarantee is thrown away at the last step and the second half of a prose line arrives with no
+# `worker-supervisor:` prefix — the forged bare line the whole one-line contract exists to prevent. It
+# is INHERITED STATE, not a local choice: `env BASHOPTS=xpg_echo` is imported by bash (measured), so
+# nothing in this file needs to have run `shopt` for it to be on.
+#
+# `printf` is a bash BUILTIN, so this introduces no PATH exposure, and it takes NO option that changes
+# how it treats its payload; the format is the LITERAL `'%s\n'`, so a payload that begins with `-` or
+# contains a `%` is data. Do not reintroduce `echo` here for any reason, including brevity.
 supervisor_legacy_lock_refuse() {
   local legacy="$1" detail="$2" remedy="${3:-}" remedy_cmd="${4:-}"
   # EVERY PROSE ARGUMENT IS RENDERED HERE, ONCE — A CHOKE POINT, NOT N CORRECT CALL SITES (#3549,
@@ -1820,16 +1889,16 @@ supervisor_legacy_lock_refuse() {
   local legacy_shown="" own_shown=""
   legacy_shown="$(supervisor_shell_quote "$legacy")" || true
   own_shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")" || true
-  echo "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy_shown: $detail" >&2
-  echo "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($own_shown), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
+  printf '%s\n' "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy_shown: $detail" >&2
+  printf '%s\n' "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($own_shown), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
   # A CASE-SPECIFIC remedy, when there is one. The states differ in what an operator should DO — a LIVE
   # holder means "something is running, stop it"; a STALE one means "an old supervisor left this behind,
   # delete it" — so the generic line below is not sufficient on its own, and a run that told an operator
   # to stop a process that is already dead would be actively misleading.
-  [[ -z "$remedy" ]] || echo "worker-supervisor: remedy for THIS state — $remedy" >&2
-  [[ -z "$cmd_broken" ]] || echo "worker-supervisor: a remedy command for this state was built with an embedded control character, so it is NOT printed as a runnable line (it could not be one); rendered for reading only: $cmd_broken" >&2
+  [[ -z "$remedy" ]] || printf '%s\n' "worker-supervisor: remedy for THIS state — $remedy" >&2
+  [[ -z "$cmd_broken" ]] || printf '%s\n' "worker-supervisor: a remedy command for this state was built with an embedded control character, so it is NOT printed as a runnable line (it could not be one); rendered for reading only: $cmd_broken" >&2
   [[ -z "$remedy_cmd" ]] || printf '%s\n' "$remedy_cmd" >&2
-  echo "worker-supervisor: remedy — stop the pre-#3467 supervisor (or upgrade that checkout to #3467+), or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check." >&2
+  printf '%s\n' "worker-supervisor: remedy — stop the pre-#3467 supervisor (or upgrade that checkout to #3467+), or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check." >&2
   exit 1
 }
 
@@ -2018,6 +2087,9 @@ acquire_lock() {
   # `supervisor_pid_liveness`): this pid is used UNPARSED, the liveness test below is two-valued, and
   # the message asserts "another instance" without corroborating the process identity. Out of scope for
   # #3549 (a different lock, with reclaim semantics of its own), not an oversight.
+  # FOURTH SHAPE, same scope decision (#3549, job 205 F2 sweep): this lock's own refusals below still
+  # emit with `echo` and interpolate an unrendered `$SUPERVISOR_LOCK`, so they inherit `xpg_echo` and a
+  # control character in `TMPDIR` exactly as the legacy guard's did before F2. Listed, not fixed here.
   local holder_pid=""
   [[ -f "$SUPERVISOR_LOCK/pid" ]] && holder_pid="$(cat "$SUPERVISOR_LOCK/pid" 2>/dev/null || true)"
   if [[ -n "$holder_pid" ]] && kill -0 "$holder_pid" 2>/dev/null; then
