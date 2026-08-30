@@ -145,6 +145,54 @@ SETENV_ARGS+=("--setenv=AGENT_GATE_SUMMARY_FILE=$SUMMARY")
 # Pre-create the log so the caller can tail it immediately even before the unit starts.
 : > "$LOGFILE" 2>/dev/null || { echo "gate-detached: cannot write log $LOGFILE" >&2; exit 1; }
 
+# VERIFY THE SUMMARY LOCATION BEFORE LAUNCHING (roborev job 160, Medium). Only the log was
+# checked, so a bad summary directory produced a running-but-UNMONITORABLE gate: the gate
+# cannot publish its verdict, the beater cannot publish liveness, and every poll answers
+# UNKNOWN forever. The gate would burn 30-50 minutes and certify nothing — and the caller
+# would have no way to tell that from a slow queue.
+#
+# Both capabilities are probed, because they are DISTINCT permissions and the second is the
+# one nobody thinks of: publishing the summary needs write access to the FILE, while the
+# heartbeat needs to CREATE and RENAME a sibling temp in the DIRECTORY. A directory that
+# permits rewriting an existing summary but not creating new entries (e.g. sticky, or
+# write-denied with a pre-existing file) satisfies the first and fails the second.
+#
+# Probed by DOING it, not by inspecting mode bits: permissions are the resultant of owner,
+# group, ACLs, mount flags and SELinux, and `[ -w ]` answers about none of those reliably.
+_sumdir=$(dirname -- "$SUMMARY")
+if [ ! -d "$_sumdir" ]; then
+  echo "gate-detached: summary directory '$_sumdir' does not exist — refusing to launch a gate" >&2
+  echo "               that could not publish its verdict (#3473)." >&2
+  exit 1
+fi
+# The probe deliberately NEVER touches $SUMMARY itself. Truncating it to test writability
+# would destroy whatever is at that path — and under #2874 that could be a LIVE PEER's
+# summary block, i.e. the probe would cause the very data loss the no-clobber contract
+# exists to prevent, before the gate's own foreign-run-id detection ever got a chance to
+# see it. Directory capability is what both publishers actually need, and it is testable
+# without writing to any path the caller owns.
+#
+# Both probe names sit under the `.heartbeat.tmp.` prefix so they fall inside the gate's
+# existing tree-integrity carve-out, in case a concurrent gate captures the tree between
+# their creation and removal.
+_hbprobe="$SUMMARY.heartbeat.tmp.launchprobe.$$"
+_hbprobe2="$SUMMARY.heartbeat.tmp.launchprobe-renamed.$$"
+if ! : > "$_hbprobe" 2>/dev/null; then
+  rm -f "$_hbprobe" 2>/dev/null || true
+  echo "gate-detached: cannot create a file in '$_sumdir', so neither the gate's summary nor" >&2
+  echo "               the liveness heartbeat could be published there — every poll of this" >&2
+  echo "               gate would answer UNKNOWN. Refusing to launch an unmonitorable gate," >&2
+  echo "               rather than burn 30-50 minutes certifying nothing (#3473)." >&2
+  exit 1
+fi
+if ! mv -f "$_hbprobe" "$_hbprobe2" 2>/dev/null; then
+  rm -f "$_hbprobe" "$_hbprobe2" 2>/dev/null || true
+  echo "gate-detached: cannot RENAME within '$_sumdir', which the heartbeat's atomic publish" >&2
+  echo "               requires — every poll of this gate would answer UNKNOWN. Refusing (#3473)." >&2
+  exit 1
+fi
+rm -f "$_hbprobe" "$_hbprobe2" 2>/dev/null || true
+
 # --collect reaps the unit record on exit; the SUMMARY FILE is the verdict artifact, so
 # nothing of record is lost with the unit. --same-dir keeps the gate in this worktree
 # (it derives its scope from git in $PWD). stdin is closed: a gate must never wait on a

@@ -87,6 +87,20 @@ PARENT_CHECK=starttime
 GATE_STARTTIME=$(_starttime "$GATE_PID") || GATE_STARTTIME=""
 [ -n "$GATE_STARTTIME" ] || PARENT_CHECK=kill0
 
+# HOST IDENTITY (#3473, roborev job 160). A pid is only meaningful on the machine that owns
+# it, and these artifacts can be read from ANOTHER machine — the summary path may sit on a
+# shared filesystem. A reader that inspected its OWN /proc for this pid would then report a
+# perfectly live remote gate as REAPED (pid absent locally) or, worse, corroborate
+# "liveness" against an unrelated local process.
+#
+# `boot-id` is the right primitive rather than the hostname alone: it identifies a running
+# KERNEL INSTANCE, so it distinguishes a different machine AND the same machine after a
+# reboot — and after a reboot every pid from the previous boot is gone, which a reader can
+# use as affirmative evidence rather than a puzzle. Hostname is published too, because it is
+# what a human reads in a diagnostic.
+HOST_NAME=$(uname -n 2>/dev/null || echo unknown)
+BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "")
+
 # _gate_alive: AFFIRMATIVE liveness. Returns 0 only on a positive answer.
 _gate_alive() {
   if [ "$PARENT_CHECK" = starttime ]; then
@@ -116,6 +130,8 @@ _beat() {
     # plus a mismatched start time is affirmative evidence the gate is gone. Empty on a
     # host where it could not be read, which the reader reports rather than assumes.
     echo "gate-starttime: $GATE_STARTTIME"
+    echo "host: $HOST_NAME"
+    echo "boot-id: ${BOOT_ID:-unavailable}"
     echo "beater-pid: $$"
     echo "parent-check: $PARENT_CHECK"
     echo "interval: $INTERVAL"

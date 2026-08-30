@@ -245,6 +245,46 @@ else
   fi
 fi
 
+echo "=== section 4b: an UNMONITORABLE gate is refused before it starts (job 160) ==="
+# Only the log path used to be validated, so a bad summary location launched a gate that
+# could publish neither its verdict nor its liveness: 30-50 minutes burned certifying
+# nothing, and every poll answering UNKNOWN with no way to tell that from a slow queue.
+out=$(bash "$LAUNCHER" --summary /nonexistent-dir-3473/s.txt --log "$TMP/nx.log" -- --only file-size 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "4b.1 a nonexistent summary directory is refused (exit $rc)" \
+               || bad "4b.1 a nonexistent summary directory is refused" "exit 0: $out"
+printf '%s' "$out" | grep -q 'does not exist' \
+  && ok "4b.2 the refusal names the cause" || bad "4b.2 the refusal names the cause" "$out"
+if [ "$(id -u)" != 0 ]; then
+  ro="$TMP/readonly"; mkdir -p "$ro"; chmod 500 "$ro"
+  out=$(bash "$LAUNCHER" --summary "$ro/s.txt" --log "$TMP/ro.log" -- --only file-size 2>&1); rc=$?
+  [ "$rc" != 0 ] && ok "4b.3 an unwritable summary directory is refused (exit $rc)" \
+                 || bad "4b.3 an unwritable summary directory is refused" "exit 0: $out"
+  printf '%s' "$out" | grep -qE 'cannot create a file|cannot RENAME' \
+    && ok "4b.4 the refusal names the missing capability" || bad "4b.4 the refusal names the missing capability" "$out"
+  chmod 700 "$ro"
+else
+  skipc "4b.3-4b.4 unwritable summary directory" "running as root (permissions do not deny root)"
+fi
+# THE CONTROL that matters most: the probe must not be destructive. Under #2874 the path
+# could hold a LIVE PEER's summary block, and truncating it to test writability would cause
+# exactly the data loss that contract exists to prevent — before the gate's own foreign
+# run-id detection ever saw it. So a pre-existing file at the summary path must survive a
+# REFUSED launch untouched.
+peer="$TMP/peer-summary.txt"
+printf '==== AGENT-GATE SUMMARY ====\nrun-id: peers-run\nRESULT: PASS\n==== END AGENT-GATE SUMMARY ====\n' > "$peer"
+before=$(cat "$peer")
+bash "$LAUNCHER" --summary "$peer" --log /nonexistent-dir-3473/nope.log -- --only file-size >/dev/null 2>&1
+after=$(cat "$peer" 2>/dev/null)
+[ "$before" = "$after" ] \
+  && ok "4b.5 a refused launch leaves a pre-existing summary at that path UNTOUCHED" \
+  || bad "4b.5 a refused launch leaves a pre-existing summary at that path UNTOUCHED" "the probe clobbered it"
+# ...and no probe litter is left behind in either direction.
+if ls "$TMP"/peer-summary.txt.heartbeat.tmp.* >/dev/null 2>&1; then
+  bad "4b.6 the launch probe leaves no temp litter" "$(ls "$TMP"/peer-summary.txt.heartbeat.tmp.* 2>/dev/null)"
+else
+  ok "4b.6 the launch probe leaves no temp litter"
+fi
+
 echo "=== section 5: DEFAULT artifact paths are private, not predictable /tmp names ==="
 # roborev job 157, Medium. The defaults used to be derived from the timestamp and pid, so
 # they were guessable — and this script TRUNCATES the log with `>`, so on a multi-user box

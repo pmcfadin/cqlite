@@ -127,16 +127,25 @@ if kill -0 "$DEAD_PID" 2>/dev/null; then
   exit 1
 fi
 
-# mk_beat <path> <run-id> <age-secs> [interval] [gate-pid] [gate-starttime]
-# With no gate-starttime the beat exercises the reader's no-/proc-pin FALLBACK path;
-# pass one to exercise the reuse-proof path.
+# THIS host's identity. A beat must claim it for the reader to inspect /proc at all
+# (roborev job 160): a pid is meaningless off the machine that owns it.
+MY_HOST=$(uname -n 2>/dev/null || echo unknown)
+MY_BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "")
+
+# mk_beat <path> <run-id> <age-secs> [interval] [gate-pid] [gate-starttime] [host] [boot-id]
+# Defaults claim THIS machine, matching what the real beater publishes, so the ordinary
+# cases exercise the ordinary path. Pass host/boot-id explicitly for the cross-machine and
+# reboot cases; pass an empty boot-id to model a beat from a gate predating those fields.
 mk_beat() {
   local iv="${4:-20}" pid="${5:-$DEAD_PID}" st="${6:-}"
+  local host="${7-$MY_HOST}" boot="${8-$MY_BOOT}"
   { echo "==== AGENT-GATE HEARTBEAT ===="
     echo "run-id: $2"
     echo "gate-pid: $pid"
     [ -n "$st" ] && echo "gate-starttime: $st"
     echo "parent-check: starttime"
+    [ -n "$host" ] && echo "host: $host"
+    [ -n "$boot" ] && echo "boot-id: $boot"
     echo "interval: $iv"
     echo "beat-seq: 7"
     echo "beat-epoch: $(( $(date +%s) - $3 ))"
@@ -485,7 +494,7 @@ else
 fi
 # Exactly one snapshot per artifact — and the derivation must find them, or this is
 # vacuous: a renamed helper would silently satisfy the two negative checks above.
-sl=$(grep -cE '^[A-Z_]+_TEXT=\$\(_slurp "\$(SUMMARY|HB)"\)$' "$READER")
+sl=$(grep -cE '^[A-Z_]+_TEXT=\$\(_slurp(_settled)? "\$(SUMMARY|HB)"\)$' "$READER")
 [ "$sl" -eq 2 ] && ok "11b.17 each artifact is snapshotted exactly once (found $sl)" \
                 || bad "11b.17 each artifact is snapshotted exactly once" "found $sl _slurp assignments, want 2"
 
@@ -604,6 +613,80 @@ for f in "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" "$REPO_ROOT/scripts/te
   fi
 done
 [ "$port_bad" -eq 0 ] && ok "11c.12/13 both suites are free of GNU-only in-place sed and bare timeout"
+
+echo "=== section 11d: the three roborev job-160 findings ==="
+# (a) Medium — the /proc corroboration ran on the READER's host without proving it was the
+#     GATE's host. Across a shared filesystem that reports a live REMOTE gate as REAPED, or
+#     "corroborates" liveness against an unrelated local pid. The previous version's comment
+#     asserted "only possible on the gate's OWN host" and never checked the host — the same
+#     stated-not-enforced defect as the rest of this issue.
+mk_summary "$TMP/host.txt" run-H "INCOMPLETE (gate did not finish)"
+mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 "$DEAD_PID" "" "someotherbox" "ffffffff-ffff-ffff-ffff-ffffffffffff"
+expect_reader "11d.1 stale beat from ANOTHER machine => UNKNOWN, never REAPED" \
+  UNKNOWN 4 "heartbeat-foreign-host" -- "$TMP/host.txt"
+# Same hostname, different kernel boot: the box rebooted, so every pid from that boot IS
+# gone. That is affirmative evidence of death, not a puzzle.
+mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 12345 "" "$MY_HOST" "ffffffff-ffff-ffff-ffff-ffffffffffff"
+expect_reader "11d.2 stale beat, same host, DIFFERENT boot-id => REAPED (rebooted)" \
+  REAPED 3 "REBOOTED" -- "$TMP/host.txt"
+# A beat with no boot-id at all (a gate predating the field) cannot be attributed to a
+# machine, so the pid must not be inspected.
+mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 "$DEAD_PID" "" "$MY_HOST" ""
+expect_reader "11d.3 stale beat with NO boot-id => UNKNOWN (cannot attribute to a machine)" \
+  UNKNOWN 4 "heartbeat-foreign-host" -- "$TMP/host.txt"
+# Control: this machine's own identity still reaches the pid checks, both ways.
+if [ -n "$MY_BOOT" ]; then
+  mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 "$DEAD_PID"
+  expect_reader "11d.4 control: this machine + pid gone => REAPED" REAPED 3 "no longer exists" -- "$TMP/host.txt"
+  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
+  hpid=$!; echo "$hpid" >> "$TMP/pids"
+  hst=$(live_starttime "$hpid" || true)
+  mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 "$hpid" "$hst"
+  expect_reader "11d.5 control: this machine + pid alive => UNKNOWN (beater died)" \
+    UNKNOWN 4 "beater-died-gate-alive" -- "$TMP/host.txt"
+  kill -9 "$hpid" 2>/dev/null; wait "$hpid" 2>/dev/null || true
+  # And the real beater must claim this machine, or (a) degrades to UNKNOWN everywhere.
+  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
+  bpid=$!; echo "$bpid" >> "$TMP/pids"
+  hbf2="$TMP/hostpub.hb"
+  bash "$BEATER" --file "$hbf2" --run-id host-run --gate-pid "$bpid" --interval 1 </dev/null >/dev/null 2>&1 &
+  echo "$!" >> "$TMP/beater-pids"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$hbf2" ] && break; sleep 0.3; done
+  if grep -q "^host: $MY_HOST$" "$hbf2" 2>/dev/null && grep -q "^boot-id: $MY_BOOT$" "$hbf2" 2>/dev/null; then
+    ok "11d.6 the beater publishes this machine's host and boot-id"
+  else
+    bad "11d.6 the beater publishes this machine's host and boot-id" \
+        "got: $(grep -E '^(host|boot-id): ' "$hbf2" 2>/dev/null | tr '\n' ' ')"
+  fi
+  kill -9 "$bpid" 2>/dev/null; wait "$bpid" 2>/dev/null || true
+else
+  echo "skip 11d.4-11d.6 (no boot_id on this host)"
+fi
+
+# (b) Medium — the "atomic snapshot" claim held only for rename-published files. The SUMMARY
+#     is written in place with `>`, so a reader can observe a PREFIX of a block being
+#     written. Truncation is already rejected by the mandatory end-marker check (11c.1), so
+#     a torn read degrades to UNKNOWN rather than a wrong COMPLETE; `_slurp_settled` then
+#     re-reads ONCE so the common "caught mid-write" case resolves correctly.
+#
+#     Asserted structurally: a real interleaving cannot be scheduled deterministically from
+#     shell, and a timing-based case would be the flaky wall-clock shape roborev-lints
+#     reject. The properties that matter are exactly checkable at the source.
+if grep -q 'SUM_TEXT=$(_slurp_settled "$SUMMARY")' "$READER"; then
+  ok "11d.7 the summary is read through the settle-retry reader"
+else
+  bad "11d.7 the summary is read through the settle-retry reader" "not found"
+fi
+retries=$(grep -c 'sleep 0.2' "$READER")
+[ "$retries" -eq 1 ] && ok "11d.8 the settle retry is bounded to exactly one re-read" \
+                     || bad "11d.8 the settle retry is bounded to exactly one re-read" "found $retries pauses, want 1"
+# The claim itself must no longer be over-stated in the comment — a false justification is
+# how this defect survived review once already.
+if grep -q 'is NOT published that way' "$READER"; then
+  ok "11d.9 the comment states the summary is NOT atomically published"
+else
+  bad "11d.9 the comment states the summary is NOT atomically published" "the over-claim may have returned"
+fi
 
 echo "=== section 12b: an early-exiting gate emits no undefined-function noise ==="
 # The EXIT trap is armed thousands of lines above where _gate_release_slot is DEFINED,

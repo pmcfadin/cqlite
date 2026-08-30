@@ -81,13 +81,50 @@ fi
 # the cross-run confusion the #2874 reader contract exists to prevent, reintroduced by the
 # I/O pattern rather than by the logic.
 #
-# A single `cat` is a single `open()`, so it reads one inode's contents start to finish; a
-# rename landing mid-read swaps the NAME, not the open file, so the snapshot is internally
-# consistent by construction. A rename that lands BEFORE our open just means we read the
-# newer version — also consistent, and the run-id check then decides whether it is ours.
+# HOW STRONG THIS ACTUALLY IS, stated precisely, because the first version over-claimed
+# (roborev job 160, Medium). A single `cat` is a single `open()`, so it reads one inode
+# start to finish. That gives a genuinely atomic snapshot ONLY for a writer that publishes
+# by RENAME — which the heartbeat does (sibling temp + `mv`), so a rename landing mid-read
+# swaps the NAME, not our open file.
+#
+# The SUMMARY is NOT published that way: agent-gate.sh writes it in place with `>`, i.e.
+# O_TRUNC followed by sequential writes. So a reader can legitimately observe a PREFIX of a
+# block being written. It cannot observe a blend of two versions (O_TRUNC resets the length
+# and the new content is written forward), and that is the property that makes this
+# tractable: a partial block is missing its tail, so the mandatory end-marker check on the
+# COMPLETE path (below) rejects it. A torn read therefore degrades to UNKNOWN, never to a
+# wrong COMPLETE.
+#
+# `_slurp_settled` then converts the COMMON case of a torn read — we caught a write in
+# progress — into a correct answer, by re-reading once when the framing is incomplete.
+# Genuinely truncated artifacts (a killed gate, ENOSPC) still land on UNKNOWN, because a
+# second read of a permanently short file is identical to the first.
+#
+# Making the summary write itself atomic is the root fix and is deliberately NOT done here:
+# emit_summary is load-bearing for #1175's write-failure detection and #2874's no-clobber
+# contract, and changing its publish mechanism to temp+rename is a change to the gate of
+# record that deserves its own issue rather than a ride-along in this one.
 #
 # _slurp <file> — the file's contents, or empty when unreadable.
 _slurp() { cat -- "$1" 2>/dev/null; }
+
+# _slurp_settled <file> — like _slurp, but if the text does not look like a COMPLETE
+# summary block, read it once more and prefer the completed version. Bounded to exactly one
+# retry: this distinguishes "caught mid-write" (the retry completes) from "permanently
+# truncated" (the retry is identical), and cannot loop.
+_slurp_settled() {
+  local t
+  t=$(_slurp "$1")
+  if ! printf '%s\n' "$t" | grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'; then
+    sleep 0.2
+    local t2
+    t2=$(_slurp "$1")
+    if printf '%s\n' "$t2" | grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'; then
+      t="$t2"
+    fi
+  fi
+  printf '%s' "$t"
+}
 
 # _field <text> <key> — first "key: value" line's value in <text>, or empty.
 _field() {
@@ -118,7 +155,7 @@ fi
 if [ ! -r "$SUMMARY" ]; then
   verdict UNKNOWN 4 "summary-unreadable; $SUMMARY exists but cannot be read"
 fi
-SUM_TEXT=$(_slurp "$SUMMARY")
+SUM_TEXT=$(_slurp_settled "$SUMMARY")
 SUM_RUN_ID=$(_field "$SUM_TEXT" run-id)
 # #2874 reader contract: a block bearing a FOREIGN run-id is a peer's, and that holds
 # for a PASS just as much as for an INCOMPLETE. Refuse to answer about someone else's
@@ -271,6 +308,35 @@ fi
 # answer is UNKNOWN with the reason named — never REAPED on a guess, and never RUNNING
 # either.
 HB_STARTTIME=$(_field "$HB_TEXT" gate-starttime)
+# HOST GATE on the /proc corroboration (roborev job 160, Medium). A pid means nothing off
+# the machine that owns it, and these artifacts may be read across a shared filesystem — so
+# inspecting OUR /proc for the gate's pid could report a live REMOTE gate as REAPED, or
+# "corroborate" against an unrelated local process holding that pid.
+#
+# The earlier version's comment asserted "only possible on the gate's OWN host" and then
+# never CHECKED the host — a rule stated rather than enforced, which is the same defect
+# class as the rest of this issue.
+HB_HOST=$(_field "$HB_TEXT" host)
+HB_BOOT=$(_field "$HB_TEXT" boot-id)
+MY_HOST=$(uname -n 2>/dev/null || echo unknown)
+MY_BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "")
+_same_machine=no
+_reboot_since_beat=no
+if [ -n "$HB_BOOT" ] && [ "$HB_BOOT" != unavailable ] && [ -n "$MY_BOOT" ]; then
+  if [ "$HB_BOOT" = "$MY_BOOT" ]; then
+    _same_machine=yes
+  elif [ -n "$HB_HOST" ] && [ "$HB_HOST" = "$MY_HOST" ]; then
+    # Same hostname, DIFFERENT kernel boot: this machine rebooted since the beat, so every
+    # process from the previous boot is gone. That is affirmative evidence, not a puzzle.
+    _reboot_since_beat=yes
+  fi
+fi
+if [ "$_reboot_since_beat" = yes ]; then
+  verdict REAPED 3 "the gate stopped beating ${AGE}s ago and this host has REBOOTED since (boot-id $MY_BOOT != $HB_BOOT) — every process from that boot is gone; re-run it. $_where"
+fi
+if [ "$_same_machine" != yes ]; then
+  verdict UNKNOWN 4 "heartbeat-foreign-host; the beat is ${AGE}s stale but was written on host '${HB_HOST:-unknown}' (boot-id ${HB_BOOT:-absent}) and this is '$MY_HOST' (boot-id ${MY_BOOT:-unavailable}) — a pid cannot be inspected across machines, so the gate's death cannot be confirmed from here. $_where"
+fi
 _proc_starttime() {
   local pid="$1" raw rest
   raw=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
@@ -294,9 +360,9 @@ if [ -d /proc/1 ] && [ -n "$HB_STARTTIME" ]; then
   fi
   verdict UNKNOWN 4 "beater-died-gate-alive; the beat is ${AGE}s stale (window ${STALE_AFTER}s) but gate pid $HB_PID IS STILL ALIVE and is the same process — the LIVENESS SIGNAL died, not the gate. Do NOT re-run: wait, and re-read at the next component boundary, where the gate relaunches its beater. $_where"
 fi
-# No /proc, or a beat with no start time (an older gate): `kill -0` still distinguishes
-# "pid gone" from "pid present", it just cannot rule out reuse. Absence is affirmative
-# enough for REAPED; presence is not affirmative enough for anything.
+# Same machine (proven above), but no /proc or no published start time: `kill -0` still
+# distinguishes "pid gone" from "pid present", it just cannot rule out reuse. Absence is
+# affirmative enough for REAPED; presence is not affirmative enough for anything.
 if kill -0 "$HB_PID" 2>/dev/null; then
   verdict UNKNOWN 4 "beater-died-gate-maybe-alive; the beat is ${AGE}s stale but pid $HB_PID still exists and this host cannot pin its identity (no /proc, or the beat carries no 'gate-starttime:'), so it may be the gate or a recycled pid. Not re-running on a guess. $_where"
 fi
