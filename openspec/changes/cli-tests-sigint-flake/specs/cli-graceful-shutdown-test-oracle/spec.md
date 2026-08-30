@@ -50,8 +50,52 @@ duration **measured during this same test run on this same host**:
 * the spawn → readiness-banner duration (`t_boot`) SHALL calibrate the write-acknowledgement budget;
 * the write → `OK` round-trip (`t_ack`) SHALL calibrate the handler-entry and exit budgets.
 
-`quiet_baseline` SHALL be large enough that an unloaded host yields `scale == 1`, so that calibration
-can only loosen a budget and never tighten one.
+Calibration SHALL only ever LOOSEN a budget, never tighten one. That property SHALL come from the
+formula — `scale` floored at 1 and `derived` clamped at `base` — and SHALL NOT be obtained by making
+`quiet_baseline` large.
+
+`quiet_baseline` SHALL sit just above the recorded measured quiet value for its observation, within a
+small single-digit multiple of it. **An earlier version of this requirement demanded the opposite** (a
+baseline "large enough that an unloaded host yields `scale == 1`"), and it was measured to make the
+mechanism INERT — `scale` stayed at exactly 1.000 in every run including load average 116. Since
+calibration cannot tighten a budget, an over-eager `scale` cannot fail a test, so there is no
+quiet-side risk that a large baseline buys; under-engagement is the only hazard. See `design.md` D2.
+
+Each `quiet_baseline` SHALL be anchored to a committed recorded measurement and asserted against it by
+a unit test, both from below (at or above the measurement) and from above (within the stated multiple).
+Where one baseline governs observations from more than one test, the anchor SHALL be the measurement
+that BINDS — the smallest relevant quiet value — because the anchor forms the basis of an upper bound on
+the baseline, in which direction "slowest observed" is the permissive choice.
+
+#### Scenario: a baseline inflated away from its measurement
+- **WHEN** a `quiet_baseline` is raised beyond the stated multiple of its anchoring measurement
+- **THEN** a unit test SHALL fail, naming the baseline, the measurement, and that the calibration would be inert
+
+### Requirement: No wait is tighter than the bound it replaced
+
+For each wall-clock bound present before this change, the GROUP of new stages that replaced it SHALL
+be able to consume at least that old bound. The invariant is **by composition**: a single old bound was
+often split across several new stages, and each new stage can look innocent while its group is tighter.
+
+Where repeated or numerous operations previously held INDEPENDENT bounds whose nominal sum is not
+simultaneously realizable against the harness hard-kill, the stages SHALL share a GROUP deadline such
+that any single operation can still reach the full old bound when its siblings ran fast. A reduction
+SHALL be contingent on the aggregate budget being genuinely consumed, and SHALL NOT be imposed
+unconditionally by a small per-operation cap.
+
+This invariant SHALL be asserted by a unit test, not merely documented — a comment cannot fail.
+
+#### Scenario: a stage tightened below its predecessor
+- **WHEN** any stage's base is reduced so that its group can no longer reach the bound it replaced
+- **THEN** a unit test SHALL fail, naming the group and the old bound
+
+#### Scenario: one slow operation among fast siblings
+- **WHEN** repeated operations share a group deadline and all but one complete quickly
+- **THEN** the remaining operation SHALL be able to consume the full old bound
+
+#### Scenario: the group budget is genuinely exhausted
+- **WHEN** earlier stages have consumed the aggregate budget so a later stage is clipped to near zero
+- **THEN** that stage's failure SHALL name the exhaustion as the cause, so it is distinguishable from the property not holding
 
 **This requirement is deliberately NOT universal, and the exception is the point.** The first wait in
 each test — for the readiness banner — has no prior measurement to calibrate against and SHALL remain a

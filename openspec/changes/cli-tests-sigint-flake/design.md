@@ -32,11 +32,29 @@ Two measurements are taken before any shutdown ceiling is needed:
 * `t_ack` = INSERT written → `OK` observed (a full read→execute→print round-trip through the child)
 
 A stage's ceiling is `clamp(base × scale, base, cap)` where
-`scale = max(1, observed / quiet_baseline)`. `quiet_baseline` is set **generously** (seconds, not
-milliseconds) so that on any unloaded host `scale == 1` and the ceiling is exactly `base` — the
-calibration only ever *loosens*, never tightens, and cannot itself become a source of flakes on a
-quiet box. On the issue's measured 175× host, `t_ack` inflates by the same factor the shutdown does,
-so the ceiling follows.
+`scale = max(1, observed / quiet_baseline)`. On the issue's measured 175× host, `t_ack` inflates by
+the same factor the shutdown does, so the ceiling follows.
+
+**Where `quiet_baseline` sits — CORRECTED, and the first draft of this section was wrong (round 3).**
+This document originally required `quiet_baseline` to be set *generously*, "seconds, not
+milliseconds", reasoning that a large baseline guarantees `scale == 1` on a quiet host and so keeps
+the calibration from becoming a flake source itself. **That instruction was wrong and it made the
+mechanism inert:** measured, `scale` stayed at **exactly 1.000 in every run**, including load average
+116 (~7× oversubscription) — a mechanism with zero observed firings, which is indistinguishable from
+one that does not exist.
+
+The error was failing to draw the conclusion from an asymmetry stated two paragraphs later:
+**calibration can only ever LOOSEN a budget** (`scale` is floored at 1 and `derived` is clamped at
+`base`). That property comes from the *formula*, not from the size of the baseline. So a spuriously
+large `scale` cannot fail a test — it can only delay one — and there is **no quiet-side risk to
+protect against**. Over-eager engagement is harmless; under-eager engagement is the only real hazard.
+
+Therefore `quiet_baseline` SHALL sit just above the **recorded measured** quiet value for its
+observation (single-digit multiples), not orders of magnitude above it. Because the constant is then
+load-bearing, it is anchored to committed measurements and asserted against them by a unit test — and
+that anchor must be the value that BINDS (the smallest relevant quiet measurement), since the anchor
+is used as the basis of an UPPER bound on the baseline, where "slowest observed" is the permissive
+direction.
 
 **Why calibration and not just a bigger constant.** A constant has to be chosen for the worst host
 anyone will ever run on, which makes a genuine hang cost that constant on every host. A calibrated
