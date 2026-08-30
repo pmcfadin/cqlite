@@ -397,14 +397,18 @@ has "case5: no-base log carries the terminal verdict" \
 #              with ENOSPC, so the APPEND-FAILURE COUNTER fires and names its own count.
 #              Also uid-independent.
 #
-# NOT reproducible hermetically, stated rather than quietly omitted: the pure mid-sequence
-# partial write (first append accepted, later ones rejected, leaving a NON-EMPTY but
-# truncated log). On a real filesystem that needs a quota/ENOSPC boundary hit mid-write or
-# an LD_PRELOAD/FUSE fault injector — neither available to a hermetic shell self-test, and
-# a test-only seam in the gate would be one more thing a real invoker can set. `devfull`
-# covers the counter's trigger (an append the filesystem rejected) and the counter is by
-# construction indifferent to WHICH append failed, so the untested residual is only "some
-# appends succeeded first".
+# NOT reproducible here, stated rather than quietly omitted: the pure mid-sequence partial
+# write (first append accepted, later ones rejected, leaving a NON-EMPTY but truncated
+# log). Four techniques were considered. A quota/ENOSPC boundary hit mid-write and an
+# LD_PRELOAD/FUSE fault injector are unavailable to a hermetic shell self-test; a test-only
+# seam in the gate is rejected on principle (one more thing a real invoker can set). The
+# fourth — `trap "" XFSZ` (SIG_IGN survives exec) plus `ulimit -f 1` — DOES work without
+# root and IS named here so nobody re-derives it: it is rejected because the limit is
+# PROCESS-WIDE, so it would equally truncate the SUMMARY and `.result` writes and break the
+# run for reasons unrelated to the property under test. `devfull` covers the counter's
+# trigger (an append the filesystem rejected) and the counter is by construction
+# indifferent to WHICH append failed, so the untested residual is only "some appends
+# succeeded first".
 # ---------------------------------------------------------------------------
 STUBBIN="$tmp/stubbin"
 mkdir -p "$STUBBIN"
@@ -479,7 +483,18 @@ STUB
   # come from the counter having incremented per failed append.
   # -------------------------------------------------------------------------
   if [ ! -c /dev/full ]; then
-    skip "case8: no /dev/full on this host (macOS/BSD) — the append-rejection shape is unreachable here"
+    # ONE skip PER SKIPPED ASSERT (#3401 review blocker 1), the
+    # scripts/tests/test_perf_capability.sh precedent: a single skip standing for six
+    # asserts left PASS+FAIL+SKIP five short on any host without /dev/full (macOS/BSD),
+    # so the census fired `assertion census mismatch` and hard-failed the suite — a
+    # DELETED-ASSERTION accusation on a host where nothing was deleted. Keeping the count
+    # per-assert keeps ONE invariant instead of two totals that can drift apart.
+    skip "case8: no /dev/full (macOS/BSD) — sabotage-in-place control not run"
+    skip "case8: no /dev/full (macOS/BSD) — truncate-ok/append-rejected control not run"
+    skip "case8: no /dev/full (macOS/BSD) — FAIL verdict not asserted"
+    skip "case8: no /dev/full (macOS/BSD) — exact rejected-write count not asserted"
+    skip "case8: no /dev/full (macOS/BSD) — sibling presence not asserted"
+    skip "case8: no /dev/full (macOS/BSD) — sibling rejected-write cause not asserted"
   else
     mkrepo appendfail cqlite-core/src/small.rs 20 0 main; r8="$REPO"
     out8="$tmp/appendfail.out"
@@ -544,6 +559,28 @@ STUB
   else
     ok "case9: the combined failure does NOT disclaim the real ratchet violation"
   fi
+
+  # -------------------------------------------------------------------------
+  # Case 10 — persistence failure on a NO-BASE run (#3401 review L1). With no resolvable
+  # base ref the ratchet is SKIPPED, so a diagnostic claiming it "computed PASS" asserts a
+  # computation that never happened. The `SKIPPED (base ref unavailable)` phrase exists
+  # only inside the persistence block, so it cannot be satisfied by any other output.
+  # -------------------------------------------------------------------------
+  mkrepo nobasepersist cqlite-core/src/big.rs 900 950 work; r10="$REPO"
+  out10="$tmp/nobasepersist.out"
+  run_only_file_size "$r10" "$out10" PATH="$STUBBIN:$PATH" FS_SABOTAGE=dir
+  d10=$(logdir_of "$out10") || bad "case10: the run published no usable 'logs:' dir"
+
+  assert_verdict "case10: unpersistable log on a no-base run is a FAIL" "$d10" FAIL
+  has "case10: the diagnostic says the ratchet was SKIPPED, not that it computed a verdict" \
+      "$out10" "The size ratchet was SKIPPED (base ref unavailable)"
+  if [ ! -s "$out10" ]; then
+    bad "case10: no gate stdout captured — the false-computation check could not run"
+  elif grep -Fq -- "The size ratchet itself computed:" "$out10"; then
+    bad "case10: claims a ratchet verdict was computed on a run where the ratchet was skipped"
+  else
+    ok "case10: claims no ratchet verdict for a run that never computed one"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -556,7 +593,7 @@ printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\
 # precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
 # remaining asserts and lands here too, so the message names both causes rather than
 # misattributing one as the other.
-EXPECTED_CHECKS=58
+EXPECTED_CHECKS=61
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
