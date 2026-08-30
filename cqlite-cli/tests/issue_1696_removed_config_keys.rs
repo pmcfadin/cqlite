@@ -327,11 +327,9 @@ cache_size_mb = 64
     // Stage B: that later stage. `to_core_config` maps `[performance]` onto
     // `cqlite_core::Config` and validates it, and a 64 MiB block cache does not
     // fit in a 1 MiB memory limit — so the configuration does NOT, in fact, load.
-    let outcome = cqlite_cli::core_config::to_core_config(&config);
-    let error = outcome
-        .err()
-        .expect("a 64 MiB cache inside a 1 MiB memory limit must be REJECTED");
-    let error = error.to_string();
+    let error = cqlite_cli::core_config::to_core_config(&config)
+        .expect_err("a 64 MiB cache inside a 1 MiB memory limit must be REJECTED")
+        .to_string();
     assert!(
         error.contains("configuration") || error.contains("cache") || error.contains("memory"),
         "the rejection must name the real problem, not something incidental: {error}"
