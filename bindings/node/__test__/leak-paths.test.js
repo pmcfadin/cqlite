@@ -49,6 +49,11 @@
  * query really rejects, and the broken-out-of stream really was mid-stream and
  * really was closed by `return()`.
  *
+ * HOW TO RUN (this lane needs `global.gc`, exactly like conversion-budget.test.js):
+ *   cd bindings/node && npm run build && npm run test:leaks
+ * A bare `npx jest leak-paths` has no `--expose-gc` and FAILS LOUDLY in
+ * `beforeAll` rather than silently measuring GC-deferred garbage.
+ *
  * There is deliberately NO wall-clock/elapsed-time assertion in this file: these
  * are MEMORY budgets. A timing threshold in a correctness test is a known flake
  * class (#2642).
