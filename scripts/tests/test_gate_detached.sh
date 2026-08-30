@@ -975,6 +975,87 @@ else
   bad "4b.89 an unreadable owner is refused" "not found"
 fi
 
+# 4b.90 is RESTORED. It was re-pointed at the symlink and then deleted in the same edit, because it
+# lived inside the region the obsolete family occupied — so the pid-reuse invariant briefly had no
+# test at all. Enumerating the surviving case IDs is what caught that; the re-point alone did not.
+if grep -qF 'start=$_res_ident' "$LAUNCHER" && grep -q '_proc_identity' "$LAUNCHER"; then
+  ok "4b.90 the launcher pid is PINNED by a start identity (pid reuse cannot fake liveness)"
+else
+  bad "4b.90 the launcher pid is pinned by a start identity" "not found"
+fi
+
+# --- roborev job 200 ------------------------------------------------------------------------------
+# The reservation path belongs in the LOG ALIAS set, and for a reason specific to it: this script
+# CREATES A SYMLINK there, so the early `-L` refusal answers about a tree in which the launch-lock
+# does not exist yet. `--log <summary>.launch-lock` therefore passed every check and the pre-launch
+# `>` followed the reservation link, writing the gate's log into a file named after the link's own
+# owner text.
+if grep -qF '_c_lock=$(_canon "$SUMMARY.launch-lock")' "$LAUNCHER"; then
+  ok "4b.91 the reservation path is in the log alias set"
+else
+  bad "4b.91 the reservation path is in the log alias set" "not found"
+fi
+# ...and the log is re-checked at the POINT OF USE, because the early answer describes an earlier
+# tree. This is the general form of the defect: any symlink appearing at the log path between the
+# two points defeats a check made only at the first.
+if grep -q 'became a symlink after it was checked' "$LAUNCHER"; then
+  ok "4b.92 the log is re-checked for symlink-ness immediately before the truncate"
+else
+  bad "4b.92 the log is re-checked for symlink-ness before the truncate" "point-of-use check absent"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  za="$TMP/alias.txt"
+  ao=$(bash "$LAUNCHER" --summary "$za" --log "$za.launch-lock" -- --only file-size 2>&1); ar=$?
+  au=$(printf '%s' "$ao" | sed -n 's/^unit:  *//p'); [ -n "$au" ] && echo "$au" >> "$UNITS_FILE"
+  if [ "$ar" != 0 ] && printf '%s' "$ao" | grep -q 'FOLLOWS a symlink'; then
+    ok "4b.93 --log aliasing the reservation is REFUSED, naming the symlink mechanism (exit $ar)"
+  else
+    bad "4b.93 --log aliasing the reservation is refused naming the mechanism" "exit $ar: $ao"
+  fi
+  # The junk file the defect produced is named after the link target text, so its absence is the
+  # positive evidence that nothing followed the link.
+  if ls "$TMP"/unit=* >/dev/null 2>&1; then
+    bad "4b.94 no file named after the link target is created" "$(ls "$TMP"/unit=* 2>/dev/null)"
+  else
+    ok "4b.94 no file named after the link target is created"
+  fi
+else
+  skip=$((skip+1)); echo "SKIP 4b.93/4b.94 (no user systemd manager on this host)"
+fi
+
+# A ZOMBIE launcher is GONE: `kill -0` succeeds on one, so without this a launcher that died
+# un-reaped reads as LIVE and its reservation can never self-heal — the same permanent-block
+# failure the incomplete-owner window caused, in a different place.
+if grep -qF '! _proc_is_zombie "$_own_pid"' "$LAUNCHER"; then
+  ok "4b.95 reservation liveness excludes a zombie launcher"
+else
+  bad "4b.95 reservation liveness excludes a zombie launcher" "kill -0 alone treats a zombie as live"
+fi
+# Behavioural, against a REAL zombie — the structural grep above cannot show that the parse works.
+# `set -- $_state` after stripping through the last ')' is what makes it correct for a comm
+# containing spaces or parens.
+eval "$(sed -n '/^_proc_is_zombie()/,/^}/p' "$LAUNCHER")"
+python3 -c 'import subprocess,time; c=subprocess.Popen(["/bin/true"]); time.sleep(0.4); print(c.pid, flush=True); time.sleep(8)' > "$TMP/zpid" 2>/dev/null &
+_zwatch=$!
+_zp=""
+for _i in 1 2 3 4 5 6 7 8 9 10; do _zp=$(cat "$TMP/zpid" 2>/dev/null); [ -n "$_zp" ] && break; sleep 0.4; done
+if [ -n "$_zp" ] && [ "$(ps -o state= -p "$_zp" 2>/dev/null | tr -d ' ')" = "Z" ]; then
+  # The premise of the finding, asserted rather than assumed: kill -0 calls this zombie ALIVE.
+  if kill -0 "$_zp" 2>/dev/null; then
+    ok "4b.96 premise: kill -0 reports a zombie as alive (why the check is needed)"
+  else
+    bad "4b.96 premise: kill -0 reports a zombie as alive" "kill -0 already says dead; finding moot"
+  fi
+  _proc_is_zombie "$_zp" && ok "4b.97 a real zombie is detected as GONE"                          || bad "4b.97 a real zombie is detected as gone" "pid $_zp state=Z not detected"
+else
+  skip=$((skip+2)); echo "SKIP 4b.96/4b.97 (could not produce a zombie on this host)"
+fi
+kill "$_zwatch" 2>/dev/null || true; wait "$_zwatch" 2>/dev/null || true
+# No false positive on a LIVE process, and an UNMEASURABLE state must read as NOT-a-zombie so the
+# caller keeps refusing: "I could not tell" may never license reclaiming a lock that may be live.
+_proc_is_zombie $ && bad "4b.98 a live process is not called a zombie" "false positive on self"                     || ok "4b.98 a live process is not called a zombie"
+_proc_is_zombie 999999999 && bad "4b.99 an unmeasurable state reads as NOT-a-zombie (conservative)"                                  "an unreadable pid was called a zombie — that licenses lock theft"                              || ok "4b.99 an unmeasurable state reads as NOT-a-zombie (conservative)"
+
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")

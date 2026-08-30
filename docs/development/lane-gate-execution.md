@@ -529,6 +529,28 @@ is a check-then-create, so a symlink planted in the microsecond window is not ca
 default log path is unguessable inside a 0700 mkdtemp, so this only concerns a caller-chosen
 path in a shared directory).
 
+**A CHECK'S ANSWER DESCRIBES THE TREE IT RAN ON, AND TWO FINDINGS HERE WERE THAT SHAPE.** The log
+path is refused if it is a symlink, because the log is truncated with `>` and `>` follows links. That
+check ran early — and this script CREATES a symlink at the reservation path later, so
+`--log <summary>.launch-lock` passed the symlink refusal (the launch-lock did not exist yet), the
+reservation link was then created at exactly that path, and the pre-launch truncate followed it,
+writing the gate's log into a file named after the link's own owner text. The instance is fixed by
+putting the reservation path in the alias set; the CLASS is fixed by re-checking at the **point of
+use**, immediately before the truncate, because any symlink appearing in that gap — ours or a
+concurrent peer's — defeats a check made only at the start. Refusing there removes the reservation it
+owns rather than leaking it.
+
+**AND `kill -0` IS NOT A LIVENESS TEST FOR A PROCESS THAT MIGHT BE A ZOMBIE.** A zombie's pid entry
+survives until its parent reaps it, so `kill -0` succeeds on a process that has already exited and
+can never start a unit. Its reservation could therefore never self-heal — the same permanent-block
+failure the incomplete-owner window caused, resurfacing at a different site, which is the argument
+for stating the *shape* and not just fixing instances. Zombie state is read affirmatively, tiered
+`/proc/<pid>/stat` (parsed after the LAST `)`, since `comm` may contain spaces and parens) then
+`ps -o state=`; an **unmeasurable** state reads as NOT-a-zombie, keeping the caller refusing, because
+"I could not tell" may never license reclaiming a lock that may be live. The test asserts the
+**premise** too — that `kill -0` really does report a live-looking zombie — so it cannot pass for the
+wrong reason once the platform changes.
+
 ### The launcher owns no second copy of the verdict grammar
 
 The launcher needs to know whether a gate already reached a terminal verdict (a preflight

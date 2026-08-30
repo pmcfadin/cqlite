@@ -313,20 +313,39 @@ _canon() {  # _canon <path> -> physically-resolved dir + literal basename
   d=$(dirname -- "$1"); b=$(basename -- "$1")
   if phys=$(cd "$d" 2>/dev/null && pwd -P); then printf '%s/%s' "$phys" "$b"; else printf '%s' "$1"; fi
 }
+# The RESERVATION path is in this set too (roborev job 200). It is not merely a third file the gate
+# writes: this script CREATES A SYMLINK there at launch time, which defeats the `-L` refusal below —
+# that check runs while the launch-lock does not yet exist, so `--log <summary>.launch-lock` passed
+# it, and the truncate just before launch then FOLLOWED the reservation link and wrote the gate's
+# log into a file named after the link's own target text. Refusing here is the precise diagnosis.
 _c_log=$(_canon "$LOGFILE"); _c_sum=$(_canon "$SUMMARY"); _c_hb=$(_canon "$SUMMARY.heartbeat")
+_c_lock=$(_canon "$SUMMARY.launch-lock")
 _alias_of=""
 [ "$_c_log" = "$_c_sum" ] && _alias_of="the summary"
 [ -z "$_alias_of" ] && [ "$_c_log" = "$_c_hb" ] && _alias_of="the heartbeat"
+[ -z "$_alias_of" ] && [ "$_c_log" = "$_c_lock" ] && _alias_of="the launch reservation"
 if [ -z "$_alias_of" ] && [ -e "$LOGFILE" ]; then
   [ -e "$SUMMARY" ] && [ "$LOGFILE" -ef "$SUMMARY" ] && _alias_of="the summary (same inode)"
   [ -z "$_alias_of" ] && [ -e "$SUMMARY.heartbeat" ] && [ "$LOGFILE" -ef "$SUMMARY.heartbeat" ] \
     && _alias_of="the heartbeat (same inode)"
+  [ -z "$_alias_of" ] && [ -e "$SUMMARY.launch-lock" ] && [ "$LOGFILE" -ef "$SUMMARY.launch-lock" ] \
+    && _alias_of="the launch reservation (same inode)"
 fi
 if [ -n "$_alias_of" ]; then
-  echo "gate-detached: the log path '$LOGFILE' is $_alias_of. Refusing: the gate rewrites its" >&2
-  echo "               summary with '>' and the beater publishes by rename, so one of them would" >&2
-  echo "               destroy the other's file and the advertised log would hold the wrong data" >&2
-  echo "               (#3473). Give --log a path of its own." >&2
+  echo "gate-detached: the log path '$LOGFILE' is $_alias_of. Refusing (#3473)." >&2
+  # The REASON differs by which path was aliased, and a diagnosis that names the wrong mechanism
+  # sends the reader looking in the wrong place (roborev job 200).
+  case "$_alias_of" in
+    *reservation*)
+      echo "               This script creates a SYMLINK at the reservation path, and the log is" >&2
+      echo "               truncated with '>', which FOLLOWS a symlink — so the gate's output would" >&2
+      echo "               land in a file named after the link's own owner text, not at this path." >&2 ;;
+    *)
+      echo "               The gate rewrites its summary with '>' and the beater publishes by" >&2
+      echo "               rename, so one of them would destroy the other's file and the advertised" >&2
+      echo "               log would hold the wrong data." >&2 ;;
+  esac
+  echo "               Give --log a path of its own." >&2
   exit 1
 fi
 if [ -L "$LOGFILE" ] || { [ -e "$LOGFILE" ] && [ ! -f "$LOGFILE" ]; }; then
@@ -504,6 +523,29 @@ _reserve="$SUMMARY.launch-lock"
 # the beater use: /proc start ticks where available, else `ps -o lstart=` (portable, second
 # granularity, empty for a dead pid).
 
+# Is <pid> a ZOMBIE? `kill -0` succeeds on one (the entry survives until its parent reaps it), so
+# without this a launcher that died un-reaped reads as LIVE and its reservation cannot self-heal —
+# the same permanent-block failure the incomplete-owner window used to cause, resurfacing in a
+# different place. A zombie has already exited and can never start a unit, so it is GONE.
+#
+# Returns 0 only on an AFFIRMATIVE zombie reading. Unmeasurable => 1 (not a zombie), which keeps the
+# caller refusing: "I could not tell" must never license reclaiming a lock that may be live.
+_proc_is_zombie() {  # <pid> -> 0 = provably a zombie, 1 = not, or unmeasurable
+  local pid=$1 _st _state
+  if _st=$(cat "/proc/$pid/stat" 2>/dev/null) && [ -n "$_st" ]; then
+    # `comm` is parenthesised and may itself contain ')' and spaces, so read the state as the first
+    # field after the LAST ')' rather than by counting from the left.
+    _state=${_st##*)}
+    set -- $_state
+    [ "${1:-}" = "Z" ] && return 0
+    return 1
+  fi
+  if _state=$(ps -o state= -p "$pid" 2>/dev/null) && [ -n "$_state" ]; then
+    case "$_state" in Z*) return 0 ;; *) return 1 ;; esac
+  fi
+  return 1
+}
+
 _proc_identity() {
   local raw rest ls
   raw=$(cat "/proc/$1/stat" 2>/dev/null)
@@ -543,7 +585,7 @@ if ! ln -s "unit=$UNIT|pid=$$|start=$_res_ident" "$_reserve" 2>/dev/null; then
   # cannot make a finished run look live.
   case "$_own_pid" in
     ''|*[!0-9]*) ;;
-    *) if kill -0 "$_own_pid" 2>/dev/null; then
+    *) if kill -0 "$_own_pid" 2>/dev/null && ! _proc_is_zombie "$_own_pid"; then
          if [ -n "$_own_start" ]; then
            [ "$(_proc_identity "$_own_pid")" = "$_own_start" ] && _live=yes
          else
@@ -591,6 +633,18 @@ fi
 
 # NOW truncate the log: every refusal path is behind us, so this cannot destroy a previous log for
 # a launch that never happens.
+# Re-assert the log is not a symlink, because the early `-L` check answered about an EARLIER tree
+# (roborev job 200). Between there and here a symlink can appear at this path — this script creates
+# one at the reservation path, and a concurrent peer could create one at any path. `>` FOLLOWS a
+# symlink, so without this the gate's output lands wherever the link points. Checking at the point
+# of use is the only place the answer is still true.
+if [ -L "$LOGFILE" ]; then
+  echo "gate-detached: the log path '$LOGFILE' became a symlink after it was checked." >&2
+  echo "               Refusing: '>' would follow it and write the gate's log somewhere the" >&2
+  echo "               caller never named (#3473). Give --log a path of its own." >&2
+  rm -f "$_reserve" 2>/dev/null || true   # we own it and are not launching; do not leak it
+  exit 1
+fi
 ( : > "$LOGFILE" ) 2>/dev/null || {
   echo "gate-detached: cannot truncate the log at '$LOGFILE' just before launch." >&2
   exit 1
