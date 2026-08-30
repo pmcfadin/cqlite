@@ -498,9 +498,9 @@ pub fn decode(golden: &Value, text: &str, ty: &CqlType) -> Result<Value, String>
 /// position diverging (an object against a string) even after CQLite renders it
 /// correctly — so the gap could never retire itself.
 ///
-/// The ambiguity scan is deliberately NOT exclusion-aware: it is decided from the
-/// golden alone and refusing a whole cell is a conservative, counted, NAMED
-/// outcome in the census, never a silent pass.
+/// The refusal scan is deliberately NOT exclusion-aware: it is decided from the
+/// golden alone, and refusing a node is a conservative, counted, NAMED outcome in
+/// the census, never a silent pass.
 pub fn decode_at(
     golden: &Value,
     text: &str,

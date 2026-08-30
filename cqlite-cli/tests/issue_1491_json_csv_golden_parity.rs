@@ -42,9 +42,15 @@
 //! renders it correctly. Every applicable gap is named, WITH its scope, in the run
 //! census, and one that matched nothing in a lane's walk fails that lane.
 //!
-//! The CSV lane additionally REFUSES a container cell whose golden content cannot
-//! survive the unquoted rendering (see `golden::csv_container`); refusals are
-//! counted and named in the census too. Neither kind of gap is ever silent.
+//! The CSV lane additionally REFUSES a position whose golden content cannot
+//! survive the unquoted rendering (see `golden::csv_container`). A refusal is
+//! decided at the granularity the comparison walks — per member, per depth — so an
+//! indistinguishable nested member suppresses only itself while its siblings, its
+//! container's member count and every enclosing frame stay compared (review
+//! finding P2); the one exception is a structural character, which unbalances the
+//! bracket depth every level is split on and therefore refuses the whole cell.
+//! Refusals are counted and named, by path, in the census too. Neither kind of gap
+//! is ever silent.
 //!
 //! Both egress readers and the golden reader parse JSON STRICTLY — a duplicate
 //! object key is malformed output on the CLI side and a discarded oracle on the
@@ -1136,11 +1142,14 @@ fn run_lane(egress: Egress) {
                 report.compared_cells,
                 report.container_cells,
                 // A refusal is a DECLARED GAP in the same style as `Skip`: named
-                // at run time, never left as a bare counter.
+                // at run time, never left as a bare counter. Each reason names the
+                // refused POSITION, which is the granularity the refusal is decided
+                // at — a whole cell (`fs (…)`) or one member of one (`nl[0] (…)`,
+                // review finding P2).
                 if report.ambiguous_container_cells > 0 {
                     format!(
-                        ", DECLARED GAP: {} container cell(s) REFUSED as \
-                         CSV-unrepresentable: {}",
+                        ", DECLARED GAP: {} container cell(s) holding a REFUSED \
+                         CSV-unrepresentable position: {}",
                         report.ambiguous_container_cells,
                         report.ambiguity_reasons.join("; ")
                     )
@@ -1183,7 +1192,9 @@ fn run_lane(egress: Egress) {
     // there is nothing there to refuse and claiming `0 REFUSED` would advertise a
     // check that does not exist.
     let refusals = match egress {
-        Egress::Csv => format!(", {containers_refused} REFUSED as CSV-unrepresentable"),
+        Egress::Csv => {
+            format!(", {containers_refused} holding a REFUSED CSV-unrepresentable position")
+        }
         Egress::Json => String::new(),
     };
     eprintln!(

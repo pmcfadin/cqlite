@@ -421,8 +421,12 @@ pub fn compare_rows(
                 Err(Refusal::Cell(why)) => {
                     refusals.record(name, &why);
                     // The refusal suppresses the INDISTINGUISHABLE readings, not
-                    // the whole cell: the frame and the two decidable member
-                    // counts are still compared (finding N3).
+                    // everything about the cell: its frame and the two decidable
+                    // member counts are still compared (finding N3). This is the
+                    // one cause whose reach IS the whole cell — a structural
+                    // character unbalances the depth counter every level is split
+                    // on — so there is no narrower node to descend to, and the
+                    // walk below is not entered.
                     match csv_container::decidable_despite_cell_refusal(gv, cv, &column.ty) {
                         Ok(()) => {
                             if excluded_column {
@@ -644,6 +648,11 @@ enum Refusal {
 /// no decoding applies — the JSON lane, a scalar column, or a CSV cell that is
 /// not text (an empty field decodes to `null`, and [`compare_value_at`] is what
 /// then names that shape mismatch).
+///
+/// Only the WHOLE-CELL refusal is decided here, because it is the one cause that
+/// makes the rendering unsplittable at every level, so the decode must not be
+/// attempted at all. Every narrower cause is refused per NODE, by the decoder and
+/// the comparator together as they walk (review finding P2).
 fn csv_decoded(
     gv: &Value,
     cv: &Value,

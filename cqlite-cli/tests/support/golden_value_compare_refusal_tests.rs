@@ -61,8 +61,9 @@ fn a_csv_unrepresentable_container_is_refused_and_named() {
 /// than as compared coverage.
 ///
 /// The subject is the one refusal the corpus reaches — an EMPTY `set<text>`,
-/// indistinguishable from a set of one empty member. Refusing the whole cell
-/// before looking at the CLI value let `null` (and any other text) pass.
+/// indistinguishable from a set of one empty member; here it is the whole cell's
+/// own node, so the refusal is named for the column. Refusing the position before
+/// looking at the CLI value at all let `null` (and any other text) pass.
 #[test]
 fn a_refused_cell_still_reports_what_the_ambiguity_cannot_hide() {
     let schema = set_schema();

@@ -189,8 +189,10 @@ fn a_csv_skip_on_a_nested_container_retires_when_it_decodes_and_agrees() {
 #[test]
 fn a_skip_whose_cell_was_refused_is_reported_as_unevaluable() {
     let schema = set_schema();
-    // `, ` inside a member: `csv_container::ambiguity` refuses the cell from the
-    // GOLDEN alone, so the refusal is independent of what the CLI rendered.
+    // `, ` inside a member: `csv_container::node_refusal` refuses that container
+    // from the GOLDEN alone, so the refusal is independent of what the CLI
+    // rendered. The refused node here IS the excluded whole column; a refusal at
+    // any DEPTH inside an excluded subtree is reported the same way.
     let golden = vec![row(&[("id", json!(1)), ("s", json!(["a, b"]))])];
     let cli = vec![row(&[("id", json!("1")), ("s", json!("{a, b}"))])];
     let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &["s"], Egress::Csv);
