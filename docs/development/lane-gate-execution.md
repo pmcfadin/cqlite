@@ -222,6 +222,15 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
   `interval:` line, so the reader holds no duplicate of the gate's beat period and cannot
   drift from it. There is deliberately **no env var** that widens the window or disables
   the beat — that hatch could only buy a vacuous `RUNNING` for a dead gate.
+- **`STALLED` is decided by counter progression, never by comparing clocks.** The staleness
+  window is only a trigger for *looking closer*: `beat-epoch` is the writer's self-reported
+  time, and nothing guarantees the writer's clock matches the reader's, so a gate host running
+  behind would otherwise have every fresh beat read as `STALLED` — and since the documented
+  response to a persistent `STALLED` is "relaunch", a clock skew could cause a **duplicate
+  gate launch**. So when a beat *looks* stale, the reader waits one interval (bounded, capped
+  at 65 s) and checks whether `beat-seq` advanced: only the reader's clock times the wait, only
+  the writer's counter shows progress, and the two are never compared. A genuinely fresh beat
+  returns `RUNNING` immediately and pays none of this.
 
 ### The verdict set, and the death claim that was descoped
 
@@ -294,25 +303,39 @@ of #3473: `emit_summary` is load-bearing for #1175's write-failure detection and
 no-clobber contract, so changing how the **gate of record** publishes its verdict deserves its
 own issue rather than a ride-along.
 
-### The launcher refuses an unmonitorable gate
+### The launcher refuses an unmonitorable gate — verified by outcome, not by permission model
 
-`gate-detached.sh` verifies, before starting anything, that the summary can actually be
-published: the directory must hold a file and support a rename (what the summary and the
-heartbeat's atomic publish need), and an **existing** summary must be a regular file that is
-writable. A bad location would otherwise start a gate that publishes neither verdict nor
-liveness — 30–50 minutes burned certifying nothing, with every poll answering `UNKNOWN` and no
-way to tell that from a slow queue.
+A bad summary location would start a gate that publishes neither verdict nor liveness: 30–50
+minutes burned certifying nothing, with every poll answering `UNKNOWN` and no way to tell that
+from a slow queue. `gate-detached.sh` prevents that in two layers.
 
-Both probes are **non-destructive by design**, because under #2874 that path may hold a live
-peer's block: the directory is probed with a **sibling** temp file, and an existing summary with
-a zero-byte **append** (which cannot truncate and does not even alter mtime). Truncating it to
-test writability would cause exactly the data loss that contract exists to prevent.
+**Cheap pre-checks, for better messages:** the summary directory must exist and support creating
+and renaming a file, and neither the summary nor the heartbeat destination may be a symlink,
+directory, fifo or device. These catch obvious misconfiguration before anything starts.
+
+**The real guarantee is post-launch:** the gate starts its beater *before* it queues for the
+#1825 slot, so a first beat lands within a second or two even when the gate will then sit in the
+queue for 20 minutes. The launcher requires that beat and, if it does not arrive, **stops the
+unit** and refuses. That is an end-to-end proof covering every reason publication could fail —
+ownership, sticky directories, ACLs, mount flags, SELinux, a full filesystem — without this
+script modelling any of them. A gate that already reached a terminal verdict is accepted
+without a beat, since there is nothing left to monitor.
+
+Permission *modelling* was tried and removed, because it was wrong in **both** directions: a
+zero-byte append proves write access to a file but not permission to **replace** it, so it
+passed a sticky directory whose heartbeat is owned by someone else (where the beater fails
+forever) — and it *refused* a mode-400 heartbeat that works perfectly well, since POSIX takes
+rename permission from the **directory**, not the file. Both are pinned as tests.
+
+Every probe is **non-destructive**, because under #2874 these paths may hold a live peer's
+artifacts: the directory is probed with `mktemp`-created siblings, and no existing summary or
+heartbeat is written, truncated or replaced by any check.
 
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (118 cases) and
-`scripts/tests/test_gate_detached.sh` (45 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (123 cases) and
+`scripts/tests/test_gate_detached.sh` (51 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

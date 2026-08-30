@@ -321,14 +321,21 @@ out=$(bash "$LAUNCHER" --summary "$hbdir" --log "$TMP/hbd.log" -- --only file-si
 printf '%s' "$out" | grep -q 'not a regular file' \
   && ok "4b.12 the refusal names the destination's file type" || bad "4b.12 the refusal names the file type" "$out"
 rmdir "$hbdir.heartbeat" 2>/dev/null || true
+# An existing heartbeat with mode 400 must still LAUNCH FINE — and this case is kept because
+# it documents why the old append-probe was wrong in BOTH directions. POSIX takes rename and
+# unlink permission from the DIRECTORY, not the file, so the beater's temp+rename replaces an
+# unwritable file without difficulty. The append-probe therefore REFUSED a configuration that
+# works (a false refusal) while still missing the sticky-directory case that does not (job
+# 166). Verifying by outcome gets both right without modelling either.
 if [ "$(id -u)" != 0 ]; then
   hbro="$TMP/hbro.txt"; : > "$hbro.heartbeat"; chmod 400 "$hbro.heartbeat"
   out=$(bash "$LAUNCHER" --summary "$hbro" --log "$TMP/hbro.log" -- --only file-size 2>&1); rc=$?
-  [ "$rc" != 0 ] && ok "4b.13 an UNWRITABLE existing heartbeat destination is refused (exit $rc)" \
-                 || bad "4b.13 an UNWRITABLE existing heartbeat destination is refused" "exit 0: $out"
-  chmod 600 "$hbro.heartbeat"
+  unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
+  [ "$rc" = 0 ] && ok "4b.13 a mode-400 existing heartbeat still launches (rename permission is the DIRECTORY's)" \
+               || bad "4b.13 a mode-400 existing heartbeat still launches" "rc=$rc: $out"
+  chmod 600 "$hbro.heartbeat" 2>/dev/null || true
 else
-  skipc "4b.13 unwritable heartbeat destination" "running as root"
+  skipc "4b.13 mode-400 existing heartbeat" "running as root"
 fi
 # The destination probe must be NON-DESTRUCTIVE too: under #2874 an existing heartbeat may be
 # a live peer's beat, and our beater replaces it seconds after launch anyway — so clobbering
@@ -351,6 +358,52 @@ if ls "$TMP"/fresh.txt.heartbeat.tmp.* >/dev/null 2>&1; then
   bad "4b.16 the destination probe leaves no temp litter" "$(ls "$TMP"/fresh.txt.heartbeat.tmp.* 2>/dev/null)"
 else
   ok "4b.16 the destination probe leaves no temp litter"
+fi
+
+# VERIFY BY OUTCOME (roborev job 166): the launcher must require a real first beat rather than
+# model permissions. Appending zero bytes proves write access to a FILE, not permission to
+# REPLACE it — in a sticky directory a file owned by another user is appendable but not
+# renameable-over, so the old probe passed while the beater would fail forever.
+if grep -q 'published NO heartbeat' "$LAUNCHER"; then
+  ok "4b.17 the launcher verifies a first heartbeat after launching"
+else
+  bad "4b.17 the launcher verifies a first heartbeat after launching" "not found"
+fi
+if grep -q 'systemctl --user stop "$UNIT"' "$LAUNCHER"; then
+  ok "4b.18 ...and STOPS the unit rather than leaving an unmonitorable gate running"
+else
+  bad "4b.18 ...and STOPS the unit on failure" "not found"
+fi
+# The permission MODELLING must be gone, or the family it belongs to stays open.
+if grep -q ': >> "$_hbdest"' "$LAUNCHER"; then
+  bad "4b.19 the heartbeat append-probe (a permission model) is gone" "still present"
+else
+  ok "4b.19 the heartbeat append-probe (a permission model) is gone"
+fi
+# A directory the gate cannot write at all: refused, and nothing is left running.
+if [ "$(id -u)" != 0 ]; then
+  nd=$(mktemp -d); chmod 500 "$nd"
+  out=$(bash "$LAUNCHER" --summary "$nd/s.txt" --log "$TMP/nd.log" -- --only file-size 2>&1); rc=$?
+  [ "$rc" != 0 ] && ok "4b.20 an unwritable summary directory is refused end-to-end (exit $rc)" \
+                 || bad "4b.20 an unwritable summary directory is refused end-to-end" "exit 0: $out"
+  chmod 700 "$nd"; rm -rf "$nd"
+else
+  skipc "4b.20 unwritable summary directory" "running as root"
+fi
+# A gate that reaches a TERMINAL VERDICT without us observing a beat must NOT be refused:
+# preflight refusals and very short --only runs legitimately finish that fast, and stopping
+# them would be a false negative that kills a perfectly good gate.
+if grep -q "RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' \"\$SUMMARY\"" "$LAUNCHER"; then
+  ok "4b.21 an early terminal verdict is accepted instead of refused"
+else
+  bad "4b.21 an early terminal verdict is accepted instead of refused" "guard not found"
+fi
+# The gate's own re-exec markers must not be forwarded (job 166, Low): they would claim
+# wrapped-ness the new unit does not have, so it would skip nice AND report itself wrapped.
+if grep -q 'AGENT_GATE_WRAPPED|AGENT_GATE_WRAPPER) continue' "$LAUNCHER"; then
+  ok "4b.22 the gate's own wrapper markers are excluded from env forwarding"
+else
+  bad "4b.22 the gate's own wrapper markers are excluded from env forwarding" "not in the deny-list"
 fi
 
 # Control: a writable existing summary is FINE — the check must not reject the normal case.

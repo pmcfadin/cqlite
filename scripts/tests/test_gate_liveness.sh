@@ -162,7 +162,9 @@ mk_summary "$TMP/a.txt" run-a "INCOMPLETE (gate did not finish)"
 expect_reader "4.1 INCOMPLETE + no beat => UNKNOWN (absence is NOT death)" UNKNOWN 4 "no-heartbeat-artifact" -- "$TMP/a.txt"
 mk_beat "$TMP/a.txt.heartbeat" run-a 5
 expect_reader "4.2 INCOMPLETE + fresh beat => RUNNING" RUNNING 2 "alive" -- "$TMP/a.txt"
-mk_beat "$TMP/a.txt.heartbeat" run-a 4000
+# interval 1 keeps the clock-independent confirmation wait at ~6s instead of ~25s; the
+# confirmation itself is exercised on purpose in section 11g.
+mk_beat "$TMP/a.txt.heartbeat" run-a 4000 1
 expect_reader "4.3 INCOMPLETE + stale beat => STALLED" STALLED 3 "no liveness" -- "$TMP/a.txt"
 # The INCOMPLETE (foreign) variant (#2874) is likewise not a verdict.
 mk_summary "$TMP/b.txt" run-b "INCOMPLETE (foreign)"
@@ -176,12 +178,14 @@ mk_beat "$TMP/a.txt.heartbeat" run-a 89 20
 expect_reader "5.1 age 89s, floor window 90s => RUNNING"  RUNNING 2 "" -- "$TMP/a.txt"
 mk_beat "$TMP/a.txt.heartbeat" run-a 90 20
 expect_reader "5.2 age 90s == window => RUNNING"          RUNNING 2 "" -- "$TMP/a.txt"
-mk_beat "$TMP/a.txt.heartbeat" run-a 91 20
-expect_reader "5.3 age 91s > window => STALLED"           STALLED 3 "" -- "$TMP/a.txt"
+mk_beat "$TMP/a.txt.heartbeat" run-a 91 1
+expect_reader "5.3 age 91s > the 90s floor => STALLED"    STALLED 3 "window 90s" -- "$TMP/a.txt"
 mk_beat "$TMP/a.txt.heartbeat" run-a 179 60
 expect_reader "5.4 interval 60 => window 180, age 179 RUNNING" RUNNING 2 "window 180s" -- "$TMP/a.txt"
-mk_beat "$TMP/a.txt.heartbeat" run-a 181 60
-expect_reader "5.5 interval 60 => window 180, age 181 STALLED" STALLED 3 "window 180s" -- "$TMP/a.txt"
+# (The old 5.5 asserted the same 3x-interval derivation from the STALLED side with interval 60,
+# which after the clock-independent confirmation would cost a 65s wait for coverage 5.4 already
+# provides: age 179 can only read RUNNING if the window is >=179, i.e. 3x60. Dropped rather
+# than paid for twice.)
 
 echo "=== section 6: a peer's artifacts are never read as ours (#2874 reader contract) ==="
 mk_summary "$TMP/p.txt" peer-run "PASS"
@@ -494,7 +498,7 @@ expect_reader "11c.4 truncated INCOMPLETE still consults the beat (asymmetry is 
 #     the previous pid/host/boot machinery could not, which is what made these cases fail
 #     deterministically on macOS.
 mk_summary "$TMP/st.txt" run-S "INCOMPLETE (gate did not finish)"
-mk_beat "$TMP/st.txt.heartbeat" run-S 4000
+mk_beat "$TMP/st.txt.heartbeat" run-S 4000 1
 expect_reader "11c.5 stale beat => STALLED" STALLED 3 "no liveness" -- "$TMP/st.txt"
 run_reader "$TMP/st.txt"
 printf '%s' "$OUT" | grep -q 'NOT a claim that the process is dead' \
@@ -630,6 +634,66 @@ if grep -q 'It cannot observe a blend' "$READER"; then
 else
   ok "11e.8 the 'cannot blend' over-claim is gone from the comment"
 fi
+
+echo "=== section 11g: liveness is decided by counter progression, not by comparing clocks ==="
+# roborev job 166, Medium. `AGE` compares the WRITER's beat-epoch against the READER's clock.
+# Nothing guarantees they agree, and the documented response to a persistent STALLED is
+# "relaunch" — so a gate host running behind could cause a DUPLICATE gate launch. Rather than
+# special-case skew (the third cross-machine assumption to bite this script), the STALLED
+# decision now watches `beat-seq` advance over a window THIS process times: only the reader's
+# clock is used for the wait, only the writer's counter for progress, and the two are never
+# compared.
+mk_summary "$TMP/skew.txt" run-K "INCOMPLETE (gate did not finish)"
+# A beat that LOOKS ancient by epoch, but whose counter is advancing — i.e. exactly what a
+# clock-skewed live gate produces. A background writer bumps beat-seq while the reader waits.
+mk_beat "$TMP/skew.txt.heartbeat" run-K 99999 1
+( sleep 2
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-K"; echo "gate-pid: 4242"
+    echo "interval: 1"; echo "beat-seq: 8"; echo "beat-epoch: $(( $(date +%s) - 99999 ))"
+    echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/skew.txt.heartbeat"
+) &
+adv_pid=$!; echo "$adv_pid" >> "$TMP/pids"
+expect_reader "11g.1 ancient epoch but ADVANCING beat-seq => RUNNING (clocks disagree, writer alive)" \
+  RUNNING 2 "beat-seq advanced" -- "$TMP/skew.txt"
+wait "$adv_pid" 2>/dev/null || true
+# A beat that is stale AND whose counter does not move is STALLED — and the text must say the
+# decision came from progression, not from the clock comparison.
+mk_beat "$TMP/skew.txt.heartbeat" run-K 99999 1
+expect_reader "11g.2 stale epoch AND static beat-seq => STALLED" STALLED 3 "did NOT advance" -- "$TMP/skew.txt"
+# A counter that advances but under a DIFFERENT run-id is a peer's beat, not ours.
+mk_beat "$TMP/skew.txt.heartbeat" run-K 99999 1
+( sleep 2
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: SOMEONE-ELSE"; echo "gate-pid: 4242"
+    echo "interval: 1"; echo "beat-seq: 99"; echo "beat-epoch: $(date +%s)"
+    echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/skew.txt.heartbeat"
+) &
+adv2=$!; echo "$adv2" >> "$TMP/pids"
+expect_reader "11g.3 progression under a FOREIGN run-id does not count as ours" \
+  STALLED 3 "did NOT advance" -- "$TMP/skew.txt"
+wait "$adv2" 2>/dev/null || true
+# The confirmation wait must be bounded regardless of what the artifact claims.
+if grep -qE '_confirm_wait"? -le 65' "$READER"; then
+  ok "11g.4 the confirmation wait is hard-capped (a hostile interval cannot stretch it)"
+else
+  bad "11g.4 the confirmation wait is hard-capped" "no cap found"
+fi
+# A fresh beat must NOT pay the confirmation cost. Asserted STRUCTURALLY, not by timing the
+# run: a wall-clock threshold in a correctness test is exactly the flaky shape this repo's
+# roborev-lints reject (a loaded box makes it red for no reason), and the property is exactly
+# checkable — the confirmation `sleep` must sit BELOW the fresh-beat RUNNING verdict, so a
+# fresh beat returns before reaching it.
+_run_ln=$(grep -n 'verdict RUNNING 2 "this run beat' "$READER" | head -1 | cut -d: -f1)
+_slp_ln=$(grep -n 'sleep "$_confirm_wait"' "$READER" | head -1 | cut -d: -f1)
+if [ -n "$_run_ln" ] && [ -n "$_slp_ln" ] && [ "$_slp_ln" -gt "$_run_ln" ]; then
+  ok "11g.5 the confirmation wait sits below the fresh-beat verdict (a fresh beat never waits)"
+else
+  bad "11g.5 the confirmation wait sits below the fresh-beat verdict" \
+      "RUNNING at line ${_run_ln:-?}, sleep at line ${_slp_ln:-?}"
+fi
+# ...and there is exactly ONE such wait, so no path can pay it twice.
+_nslp=$(grep -c 'sleep "$_confirm_wait"' "$READER")
+[ "$_nslp" -eq 1 ] && ok "11g.6 exactly one confirmation wait exists" \
+                   || bad "11g.6 exactly one confirmation wait exists" "found $_nslp"
 
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
 # The same shape appeared THREE times in this change: the default /tmp artifact names, the

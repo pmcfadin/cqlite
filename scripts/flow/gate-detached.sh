@@ -127,6 +127,14 @@ while IFS= read -r -d '' kv; do
     INVOCATION_ID|JOURNAL_STREAM|MAINPID|LISTEN_PID|LISTEN_FDS|NOTIFY_SOCKET) continue ;;
     # session bookkeeping that must not follow the gate.
     _|SHLVL|OLDPWD|PWD) continue ;;
+    # agent-gate.sh's OWN re-exec markers (roborev job 166, Low). It sets AGENT_GATE_WRAPPED=1
+    # and AGENT_GATE_WRAPPER=<cmd> after re-execing itself under nice/taskpolicy. Forwarding
+    # them into a fresh systemd unit carries the CLAIM of being wrapped without the actual
+    # nice state, so the detached gate would skip its own wrapping and then REPORT itself as
+    # wrapped in the SUMMARY's cpu-budget line — a false accelerator claim, and unwrapped
+    # scheduling for a 30-50 minute job. Dropped so the new process decides and records its
+    # own wrapper state.
+    AGENT_GATE_WRAPPED|AGENT_GATE_WRAPPER) continue ;;
     # The gate's summary path is set explicitly below; an inherited one would be
     # de-exported by the gate anyway (#2751) but must not compete with our --setenv.
     AGENT_GATE_SUMMARY_FILE) continue ;;
@@ -220,47 +228,29 @@ if ! mv -f "$_hbprobe" "$_hbprobe2" 2>/dev/null; then
 fi
 rm -f "$_hbprobe" "$_hbprobe2" 2>/dev/null || true
 
-# ...and validate the ACTUAL heartbeat destination, not just rename-between-two-new-names
-# (roborev job 164, Medium). A rename to a fresh sibling proves the directory allows renames;
-# it does not prove the beater can REPLACE `$SUMMARY.heartbeat`. If that path is a directory,
-# or a file in a sticky directory that this user may not replace, publication fails forever
-# while the probe passes.
+# The heartbeat DESTINATION is checked only for the shapes that give a better message than a
+# post-launch failure would (a directory or symlink there can never work). Its PERMISSIONS are
+# deliberately NOT modelled (roborev job 166, Medium): appending zero bytes proves write
+# access to the FILE, not permission to REPLACE it, and in a sticky directory a file owned by
+# another user is appendable but not renameable-over — so the probe passed while the beater's
+# `mv -f` would fail forever. Modelling sticky-bit ownership rules would be a third guess at a
+# permission system; instead the launch is VERIFIED BY OUTCOME below, which is true regardless
+# of why a write might fail.
 _hbdest="$SUMMARY.heartbeat"
-if [ -e "$_hbdest" ] || [ -L "$_hbdest" ]; then
-  if [ -L "$_hbdest" ] || [ ! -f "$_hbdest" ]; then
-    echo "gate-detached: '$_hbdest' exists but is not a regular file (symlink, directory, fifo" >&2
-    echo "               or device) — the liveness heartbeat could never be published there," >&2
-    echo "               so this gate would be unmonitorable. Refusing (#3473)." >&2
-    exit 1
-  fi
-  # It exists as a regular file. Do NOT test-replace it: under #2874 it may be a live peer's
-  # beat, and our own beater will replace it seconds after launch anyway, so clobbering it
-  # HERE — and possibly then refusing to launch — would destroy data for no benefit. A
-  # zero-byte append proves writability without altering it.
-  if ! : >> "$_hbdest" 2>/dev/null; then
-    echo "gate-detached: '$_hbdest' exists and is NOT writable, so the liveness heartbeat" >&2
-    echo "               could not be published — every poll would answer UNKNOWN. Refusing (#3473)." >&2
-    exit 1
-  fi
-else
-  # It does not exist: we can prove the real replacement semantics end to end, non-destructively.
-  _hbreal=$(mktemp "$SUMMARY.heartbeat.tmp.destXXXXXX" 2>/dev/null) || {
-    echo "gate-detached: cannot create a heartbeat temp in '$_sumdir'. Refusing (#3473)." >&2
-    exit 1
-  }
-  if ! mv -f "$_hbreal" "$_hbdest" 2>/dev/null; then
-    rm -f "$_hbreal" 2>/dev/null || true
-    echo "gate-detached: cannot publish to '$_hbdest' (rename into place failed), so liveness" >&2
-    echo "               could never be read for this gate. Refusing (#3473)." >&2
-    exit 1
-  fi
-  rm -f "$_hbdest" 2>/dev/null || true
+if [ -L "$_hbdest" ] || { [ -e "$_hbdest" ] && [ ! -f "$_hbdest" ]; }; then
+  echo "gate-detached: '$_hbdest' exists but is not a regular file (symlink, directory, fifo" >&2
+  echo "               or device) — the liveness heartbeat could never be published there," >&2
+  echo "               so this gate would be unmonitorable. Refusing (#3473)." >&2
+  exit 1
 fi
 
 # --collect reaps the unit record on exit; the SUMMARY FILE is the verdict artifact, so
 # nothing of record is lost with the unit. --same-dir keeps the gate in this worktree
 # (it derives its scope from git in $PWD). stdin is closed: a gate must never wait on a
 # terminal that is not there.
+# (the ControlGroup read happens immediately after this returns — see below — because
+# `--collect` reaps the unit record as soon as a short gate exits, and reading it after the
+# heartbeat wait reported `<unavailable>` for any gate that finished quickly.)
 if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
      --property=StandardInput=null \
      --property="StandardOutput=append:$LOGFILE" \
@@ -270,8 +260,48 @@ if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
   echo "gate-detached: systemd-run failed to start unit $UNIT (see $LOGFILE)" >&2
   exit 1
 fi
-
 CG=$(systemctl --user show "$UNIT" -p ControlGroup --value 2>/dev/null)
+
+# ---------------------------------------------------------------------------
+# VERIFY BY OUTCOME, not by permission model (roborev job 166).
+#
+# The gate starts its beater BEFORE it queues for the #1825 slot, so a first beat lands within
+# a second or two even when the gate will then sit in the queue for 20 minutes. Requiring that
+# beat is therefore a cheap END-TO-END proof that this gate is monitorable — it covers every
+# reason publication could fail (ownership, sticky directories, ACLs, mount flags, SELinux, a
+# full filesystem) without this script modelling any of them.
+#
+# On failure the unit is STOPPED rather than left running: an unmonitorable gate would burn
+# 30-50 minutes and certify nothing, and the caller has no way to distinguish it from a slow
+# queue. Better to refuse loudly than to hand back a URL to nowhere.
+_hb_seen=0
+_i=0
+while [ "$_i" -lt 40 ]; do
+  if [ -s "$_hbdest" ] && grep -q '^beat-epoch: ' "$_hbdest" 2>/dev/null; then _hb_seen=1; break; fi
+  # If the unit already died, stop waiting — the log will say why.
+  systemctl --user is-active --quiet "$UNIT" 2>/dev/null || break
+  sleep 0.5
+  _i=$((_i + 1))
+done
+# A gate that already reached a TERMINAL VERDICT needs no heartbeat: there is nothing left to
+# monitor, and the artifact the caller wants is already on disk. Several real paths exit that
+# fast — a dataset/schemas preflight refusal, `--delta` fail-closed, a very short `--only` run.
+# Refusing those would be a false negative that stops a perfectly good gate.
+if [ "$_hb_seen" -ne 1 ] && grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$SUMMARY" 2>/dev/null; then
+  _hb_seen=1
+fi
+if [ "$_hb_seen" -ne 1 ]; then
+  systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
+  echo "gate-detached: the gate started but published NO heartbeat to '$_hbdest' within 20s," >&2
+  echo "               so its liveness would be unreadable and every poll would answer UNKNOWN." >&2
+  echo "               The unit has been STOPPED rather than left to burn 30-50 minutes" >&2
+  echo "               certifying nothing. See $LOGFILE for what the gate itself reported." >&2
+  echo "               Common causes: the summary directory is not writable by this user, or" >&2
+  echo "               an existing heartbeat there cannot be replaced (sticky directory owned" >&2
+  echo "               by someone else). (#3473)" >&2
+  exit 1
+fi
+
 cat <<EOF
 ==== GATE DETACHED (#3473) ====
 unit:        $UNIT

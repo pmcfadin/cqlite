@@ -346,7 +346,34 @@ _where="run-id $HB_RUN_ID, gate-pid ${HB_PID:-unknown}, beat ${HB_SEQ:-?}, age $
 [ -n "$HB_CHECK" ] && _where="$_where, parent-check $HB_CHECK"
 
 if [ "$AGE" -le "$STALE_AFTER" ]; then
-  verdict RUNNING 2 "the gate beat ${AGE}s ago — it is alive and has not reached a verdict yet; $_where"
+  verdict RUNNING 2 "this run beat ${AGE}s ago — it is alive and has not reached a verdict yet; $_where"
+fi
+
+# ---- the beat LOOKS stale. Confirm it CLOCK-INDEPENDENTLY before saying so ----------
+# `AGE` compares the WRITER's self-reported `beat-epoch` against the READER's clock, and
+# nothing guarantees those clocks agree (roborev job 166, Medium). A gate host running more
+# than one window behind would have EVERY fresh beat reported STALLED — and the documented
+# response to a persistent STALLED is "relaunch", so a clock skew could cause a DUPLICATE
+# gate launch. Comparing two clocks is the same class of cross-machine assumption this script
+# has already been burned by twice, so the fix REMOVES the assumption rather than
+# special-casing it.
+#
+# `beat-seq` is a counter the writer increments. Watching it advance over an interval THIS
+# process times uses only the reader's clock for the wait and only the writer's counter for
+# progress — the two are never compared. If it advances, the writer is alive whatever its
+# clock says.
+#
+# The cost lands only on the verdict that is expensive to get wrong: a genuinely fresh beat
+# already returned RUNNING above without waiting at all. The wait is bounded by the beat's own
+# declared interval and hard-capped, so a misconfigured or hostile artifact cannot stretch it.
+_confirm_wait=$(( HB_INTERVAL + 5 ))
+[ "$_confirm_wait" -le 65 ] || _confirm_wait=65
+sleep "$_confirm_wait"
+_hb2=$(_slurp "$HB")
+_seq2=$(_field "$_hb2" beat-seq)
+_rid2=$(_field "$_hb2" run-id)
+if [ "$_rid2" = "$HB_RUN_ID" ] && [ -n "$_seq2" ] && [ -n "$HB_SEQ" ] && [ "$_seq2" != "$HB_SEQ" ]; then
+  verdict RUNNING 2 "the beat looked ${AGE}s stale against THIS host's clock, but beat-seq advanced $HB_SEQ->$_seq2 over a ${_confirm_wait}s window timed here — the writer is alive and the clocks disagree. Liveness is decided by counter progression, never by comparing clocks. $_where"
 fi
 
 # ---- a stale beat means NO LIVENESS, and that is ALL it is claimed to mean -----------
@@ -371,4 +398,4 @@ fi
 # gate relaunches its beater at every component boundary, so a live gate whose beater alone
 # died RECOVERS to RUNNING within one component. Re-read before acting; if it is still
 # STALLED after a component's worth of time, treat the gate as gone.
-verdict STALLED 3 "no liveness for ${AGE}s (window ${STALE_AFTER}s) — this run has stopped publishing beats. This is NOT a claim that the process is dead: a beater can die under a live gate, and the gate relaunches it at the next component boundary. Re-read shortly; if it is still STALLED after a component's worth of time (the longest component is ~850s), treat the gate as gone and relaunch it. $_where"
+verdict STALLED 3 "no liveness (staleness window ${STALE_AFTER}s): beat-seq did NOT advance over a ${_confirm_wait}s window timed on this host (and the beat reads ${AGE}s old against this clock). This is NOT a claim that the process is dead: a beater can die under a live gate, and the gate relaunches it at the next component boundary. Re-read shortly; if it is still STALLED after a component's worth of time (the longest component is ~850s), treat the gate as gone and relaunch it. $_where"
