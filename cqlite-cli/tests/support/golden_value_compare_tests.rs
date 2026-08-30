@@ -703,6 +703,57 @@ fn set_element_kinding_follows_frozen_from_the_ddl() {
     assert!(report.diffs[0].contains(".fs:"), "{:?}", report.diffs);
 }
 
+/// The kinding of a set's elements is a TOP-LEVEL property, and a nested set is
+/// refused loudly rather than compared with a borrowed relaxation.
+///
+/// A stringified set is a MULTICELL one, which can only be a whole column; a set
+/// nested inside another container is frozen and its elements are ordinary cell
+/// values. The dump writes a multicell `set<frozen<set<int>>>`'s cell path as ONE
+/// string (`writeString(nameComparator().getString(...))`), so the golden's member
+/// is not an array at all and the comparison says so.
+#[test]
+fn a_nested_set_does_not_inherit_the_columns_stringified_kinding() {
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, ss set<frozen<set<int>>>);",
+        "t",
+    );
+    // What the dump really produces for this column: the path IS the whole frozen
+    // set, as one string.
+    let golden = vec![row(&[("id", json!("1")), ("ss", json!(["{1, 2}"]))])];
+    let cli = vec![row(&[("id", json!(1)), ("ss", json!([[1, 2]]))])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "the shapes differ, and that is what must be reported: {:?}",
+        report.diffs
+    );
+    assert!(report.diffs[0].contains(".ss"), "{:?}", report.diffs);
+
+    // And where a nested set IS an array on both sides — a frozen column, so the
+    // column kinding is natural anyway — the inner elements are compared by kind:
+    // a JSON string is not a JSON number.
+    let frozen = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, fs frozen<set<frozen<set<int>>>>);",
+        "t",
+    );
+    let golden = vec![row(&[("id", json!("1")), ("fs", json!([[1, 2]]))])];
+    let ok = vec![row(&[("id", json!(1)), ("fs", json!([[1, 2]]))])];
+    let report = compare_rows(&golden, &ok, &frozen, &["id"], &[], &[], Egress::Json);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    let stringified = vec![row(&[("id", json!(1)), ("fs", json!([["1", "2"]]))])];
+    let report = compare_rows(
+        &golden,
+        &stringified,
+        &frozen,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+}
+
 /// Map KEYS are canonicalized under the declared KEY type: numeric for
 /// `map<int,…>` (the dump renders every path as a string), exact for
 /// `map<text,…>`.

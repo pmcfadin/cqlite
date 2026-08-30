@@ -661,7 +661,23 @@ fn compare_value_body(
         // are separate arms: a multicell SET's element is the stringified cell
         // path, a LIST's element is the cell VALUE and so keeps its natural JSON
         // kind.
-        CqlType::Set(element) => compare_sequence(golden, cli, egress, ty, element, at.kinding, at),
+        //
+        // And only a TOP-LEVEL set's elements can be stringified, which is why the
+        // kinding is taken from `at` only there. A stringified set is a MULTICELL
+        // one, and a non-frozen collection can only be a whole column; a set
+        // NESTED inside another container is frozen, so its elements live in one
+        // value cell and keep their natural kind. Propagating the column's kinding
+        // inward was harmless only by accident — the dump writes a multicell
+        // `set<frozen<set<int>>>`'s cell path as ONE string, so the member fails
+        // the array shape check before any kinding applies — and an accident is
+        // not a rule.
+        CqlType::Set(element) => {
+            let element_kinding = match at.depth {
+                Depth::TopLevel => at.kinding,
+                Depth::Inside => Kinding::Natural,
+            };
+            compare_sequence(golden, cli, egress, ty, element, element_kinding, at)
+        }
         CqlType::List(element) => {
             compare_sequence(golden, cli, egress, ty, element, Kinding::Natural, at)
         }
