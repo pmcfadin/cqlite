@@ -723,13 +723,22 @@ will pass.
   **executes** cqlite-core's unit suite with the OTLP stack ON, at a feature set no gate
   component executes.
 
-Measured cost of leaving this implicit: PR #3382 earned a **31/31 gate PASS without ever
-executing the test that pinned its own fix**, because no cargo invocation in the gate had
-passed `observability`.
+**The size of the gap, measured on `main` rather than cited from an incident:**
+
+```
+cargo test -p cqlite-core --features cli-helpers --lib -- --list   ->  3562 tests
+cargo test -p cqlite-core --all-features         --lib -- --list   ->  3782 tests
+```
+
+**220 cqlite-core lib tests execute in `pr-gate-core` and nowhere in the gate of record.**
+#3382's own fix pin — `a_stats_only_name_cannot_create_an_instrument_through_the_emit_path`
+— is one of them, and the gate's feature set cannot even *list* it (0 matches vs 1). That
+is how PR #3382 earned a **31/31 gate PASS without executing the test pinning its own
+fix**. The issue was filed around that single instance; the standing gap is 220 tests wide.
 
 `all-features-check` closes the **compile/lint half** of that gap — a type error, or a
 `-D warnings` lint, inside a `#[cfg(feature = "observability")]` item now reds the gate of
-record. It **deliberately does not close the runtime half**: it executes nothing, so an
+record. It **deliberately does not close the runtime half**: it executes none of those 220, so an
 order-dependent defect of #3382's shape — a process-wide `OnceLock<Instruments>` poisoned
 by whichever test binds the global meter to the no-op provider first, invisible to
 `#[serial_test::serial]` grouping — still fails **only** in CI. (Those tests are gated on

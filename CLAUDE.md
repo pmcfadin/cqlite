@@ -168,11 +168,15 @@ contains the other, and this is structural, not a backlog item. The gate runs la
 (`arrow-parity-guard` names a `#![cfg(feature = "arrow")]` integration target that pr-gate's `--lib
 --all-features` compiles no path to), and pr-gate runs a lane the gate does not: `cargo test -p
 cqlite-core --lib --all-features` EXECUTES cqlite-core's unit suite with the OTLP stack ON, which no
-gate component executes. Measured cost of not saying so: PR #3382 earned a **31/31 gate PASS without
-executing the test that pinned its own fix**, because no cargo invocation in the gate had ever passed
-`observability`. `all-features-check` now closes the **compile/lint half** — a type error or a
+gate component executes. **MEASURED ON `main`, NOT CITED FROM AN INCIDENT: the gate of record
+DISCOVERS 3562 cqlite-core `--lib` tests (`--features cli-helpers`); pr-gate-core discovers 3782
+(`--all-features`) — so 220 lib tests execute in CI and NOWHERE in the gate of record.** #3382's own
+fix pin (`a_stats_only_name_cannot_create_an_instrument_through_the_emit_path`) is one the gate cannot
+even list (`-- --list` finds 0 vs 1). That is how PR #3382 earned a 31/31 gate PASS without executing
+the test pinning its own fix — the issue was filed around one instance; the standing gap is 220 tests
+wide. `all-features-check` now closes the **compile/lint half** — a type error or a
 `-D warnings` lint under `#[cfg(feature = "observability")]` reds the gate of record — and
-**deliberately not the runtime half**: it executes nothing, so an order-dependent defect like #3382's
+**deliberately not the runtime half**: it executes NONE of those 220, so an order-dependent defect like #3382's
 (a process-wide `OnceLock<Instruments>` poisoned by whichever test binds the global meter to a no-op
 provider first, invisible to `#[serial_test::serial]` grouping) STILL fails only in CI. Note the
 tests in question are gated on `observability-testing`, not `observability`. So never read a green

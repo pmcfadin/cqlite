@@ -687,9 +687,11 @@
 #                      component NO cargo invocation in this script ever passed
 #                      `observability`, and a defect reachable only with it on could
 #                      not fail the gate of record while failing pr-gate.yml's
-#                      `cargo test -p cqlite-core --lib --all-features` (measured on
-#                      PR #3382: a 31/31 gate PASS that never executed the test
-#                      pinning that PR's own fix). Package-scoped, NOT --workspace:
+#                      `cargo test -p cqlite-core --lib --all-features`. MEASURED on
+#                      main, not cited from an incident: the gate's feature set
+#                      DISCOVERS 3562 cqlite-core lib tests, pr-gate's 3782 — 220
+#                      execute in CI and nowhere here, and #3382's own fix pin is one
+#                      the gate cannot even list. Package-scoped, NOT --workspace:
 #                      --all-features only enables the SELECTED packages' features, and
 #                      the duckdb bundled-source amalgamation belongs to cqlite-cli
 #                      alone, so this stays minutes rather than the #916 cost. It
@@ -718,15 +720,24 @@
 #     feature-matrix / binding / parity lanes above are local-only in the same way.
 #   * pr-gate runs things this gate does not. Its `cargo test -p cqlite-core --lib
 #     --all-features` EXECUTES the crate's unit suite at a feature set no component
-#     here executes — including the OTel stack. `all-features-check` closes the
-#     COMPILE/LINT half of that gap (a type error or a -D warnings lint under
-#     `#[cfg(feature = "observability")]` now reds the gate of record) and DELIBERATELY
-#     NOT the RUNTIME half: it executes nothing, so an order-dependent defect in
-#     cqlite-core/tests/otel_tests.rs — the #3382 instance, a process-wide
-#     OnceLock<Instruments> poisoned by whichever test binds the global meter first,
-#     which `#[serial_test::serial]` grouping does not make visible — still fails only
-#     in CI. (Note also that some of those tests are gated on `observability-testing`,
-#     not `observability`.)
+#     here executes — including the OTel stack.
+#
+# THE SIZE OF THAT GAP, MEASURED ON main RATHER THAN CITED FROM AN INCIDENT (#3453):
+#   cargo test -p cqlite-core --features cli-helpers --lib -- --list  ->  3562 tests
+#   cargo test -p cqlite-core --all-features         --lib -- --list  ->  3782 tests
+# So 220 cqlite-core lib tests execute in pr-gate-core and NOWHERE in the gate of
+# record. #3382's own fix pin, a_stats_only_name_cannot_create_an_instrument_through_
+# the_emit_path, is one of them: the gate's feature set does not even DISCOVER it
+# (0 matches vs 1). The issue was filed around that single instance; the standing gap
+# is 220 tests wide.
+#
+# `all-features-check` closes the COMPILE/LINT half (a type error or a -D warnings lint
+# under `#[cfg(feature = "observability")]` now reds the gate of record) and
+# DELIBERATELY NOT the RUNTIME half: it EXECUTES NONE of those 220. So an order-
+# dependent defect of #3382's shape — a process-wide OnceLock<Instruments> poisoned by
+# whichever test binds the global meter to the no-op provider first, invisible to
+# `#[serial_test::serial]` grouping — still fails only in CI. (Note those tests are
+# gated on `observability-testing`, not `observability`.)
 # So a green SUMMARY here is not a prediction that pr-gate-core will pass. It never
 # was; before #3453 nothing said so out loud, which is how #3382 was surprising.
 #

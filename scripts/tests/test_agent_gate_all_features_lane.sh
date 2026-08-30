@@ -12,9 +12,15 @@
 # on the incident class it was built for.
 #
 # AND IT PROVES THE THESIS, NOT JUST THE LANE. Issue #3453's claim is not merely "a new
-# lane can go red"; it is that the EXISTING components CANNOT go red on this class —
-# that is why a 31/31 gate PASS on PR #3382 never executed the test pinning that PR's
-# own fix. So every planted run here is a THREE-WAY observation:
+# lane can go red"; it is that the EXISTING components CANNOT go red on this class. The
+# gap is MEASURED, not anecdotal: `cargo test -p cqlite-core --lib -- --list` discovers
+# 3562 tests at the gate's `--features cli-helpers` and 3782 at pr-gate's
+# `--all-features`, so 220 lib tests execute in CI and NOWHERE in the gate of record —
+# #3382's own fix pin among them, unlistable at the gate's feature set. That is how a
+# 31/31 gate PASS on PR #3382 never executed the test pinning that PR's own fix. This
+# harness cannot observe those 220 EXECUTING (nothing local does; the lane compiles and
+# lints only), which is exactly why the CONTROL below matters: it demonstrates the
+# COMPILE/LINT half was blind too. So every planted run here is a THREE-WAY observation:
 #   * all-features-check on the PLANTED tree  -> must FAIL, and must NAME the plant
 #   * all-features-check on the CLEAN tree    -> must PASS (a lane red in both
 #                                               directions proves nothing — #3229)
