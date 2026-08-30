@@ -233,11 +233,16 @@ STREAM_BUFFER_SIZE = 2
 # `process.memoryUsage().rss` is always present and cannot fail, so its lane needs
 # neither. Same property, different exposure.
 #
-# NO CI BUDGET MULTIPLIER either, unlike the Node lane: the tracemalloc budgets do
-# not depend on GC timing at all, and the one platform-sensitive number (the RSS
-# backstop) already carries ~34x headroom and degrades to a NAMED weaker instrument
-# where /proc is missing. Adding a multiplier would weaken the merge-gating lane
-# (the gate's python tier IS the merge-gating half) to buy nothing measurable.
+# NO BUDGET-RELAXATION OPT-IN either, unlike the Node lane (which has
+# CQLITE_LEAK_BUDGET_RELAX=2x-ceilings for its registered-exempt CI legs, stripped by
+# the gate so it can never relax the gate of record): the tracemalloc budgets do not
+# depend on GC timing at all, and the one platform-sensitive number (the RSS backstop)
+# already carries ~34x headroom and degrades to a NAMED weaker instrument where /proc
+# is missing. Adding a relaxation here would weaken the merge-gating lane (the gate's
+# python tier IS the merge-gating half) to buy nothing measurable. Note what the Node
+# knob is NOT: it is never inferred from an ambient `CI` marker — that was the round-12
+# defect (roborev V1), where gate.yml's nightly FULL gate silently ran every node
+# ceiling at 2x because Actions sets `CI=true`.
 #
 # Budgets, and what each one BITES -- verified by planting a synthetic
 # per-iteration retention INTO THESE EXACT TEST BODIES and observing the committed

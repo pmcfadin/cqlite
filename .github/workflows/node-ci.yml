@@ -447,6 +447,20 @@ jobs:
           # 39-table corpus) plus the JS skipIfNoDatasets throw on missing data. The flag
           # is set for parity of intent with the Rust/Python lanes.
           CQLITE_REQUIRE_FIXTURES: "1"
+          # Issue #1465 (roborev V1): the exception-path/abandoned-iterator leak budgets
+          # in __test__/leak-paths.test.js run 2x-relaxed on THESE legs, and that is now
+          # OPT-IN and explicit. It used to happen by accident — the multiplier keyed on
+          # `CI`, which every Actions runner sets — which also silently doubled the
+          # ceilings in gate.yml's nightly FULL-gate backstop on main. The gate now
+          # UNSETS this variable, so the only relaxed runs are the ones that ask.
+          #
+          # Why these legs ask: every budget number in that file was measured on one
+          # Linux fleet box, and this matrix (ubuntu-latest, macos-14, windows-latest)
+          # has never been measured. node-ci.yml is a registered exemption in
+          # .github/ci-gating-tiers.yml, so a red here is triage noise rather than a
+          # merge block — and a flaky red on an exempt lane teaches people to ignore the
+          # lane. If a leg is ever measured strict-clean, drop this line (with the data).
+          CQLITE_LEAK_BUDGET_RELAX: "2x-ceilings"
         run: npm test
 
       - name: Upload test results on failure

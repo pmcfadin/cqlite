@@ -306,7 +306,7 @@ function resolveBudgetRelaxation(env) {
   return { relaxed, multiplier: relaxed ? 2 : 1 };
 }
 
-const { relaxed: BUDGETS_RELAXED, multiplier: CI_BUDGET_MULTIPLIER } =
+const { relaxed: BUDGETS_RELAXED, multiplier: BUDGET_RELAX_MULTIPLIER } =
   resolveBudgetRelaxation(process.env);
 
 // A RELAXED RUN DECLARES ITSELF, wherever a human reads the verdict: a doubled ceiling
@@ -327,7 +327,7 @@ if (BUDGETS_RELAXED) {
 // below-quorum hard error is somewhat likelier there. Deliberate and low-stakes for the
 // reason above. If those legs ever become merge-gating, scale the quorum machinery too
 // rather than widening the ceilings.
-const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
+const BUDGET_BYTES = 32 * 1024 * BUDGET_RELAX_MULTIPLIER;
 
 // SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): total RSS growth
 // across the whole measured window (all MEASURE_PASSES x ITERATIONS iterations).
@@ -373,7 +373,9 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 // number. This one is HONESTLY
 // WEAK and the number says why: the error path's clean upper median REACHES
 // 137,416 bytes (round 7; the post-rebase re-measure saw <= 17,784) while the planted
-// 256-byte-per-iteration control sits at 133,728
+// 256-byte-per-iteration control's ERROR-path median sits at 133,656 (round 7 — the
+// only error-path planted MEDIAN ever recorded; the post-rebase re-run measured that
+// plant's error-path MINIMUM, 117,744, which is a different statistic)
 // -- noise and signal OVERLAP at this quantile, so no ceiling here can be both
 // flake-free and sensitive to that plant. 512 KiB is therefore a GROSS-majority
 // constraint only: it bites a leak retaining >= ~1.7 KB/iteration in a majority of
@@ -383,10 +385,10 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 // catch the plant would have meant 256 KiB+, which catches nothing the minimum does
 // not already catch, and accepting the 1-in-8 flake was not an option: a lane that
 // reds on correct input is the lane people learn to waive.
-const STREAM_MEDIAN_CEILING_BYTES = 64 * 1024 * CI_BUDGET_MULTIPLIER;
+const STREAM_MEDIAN_CEILING_BYTES = 64 * 1024 * BUDGET_RELAX_MULTIPLIER;
 // Named GROSS on purpose (round 8): a call site sees only the identifier, so the
 // weakness has to travel with the symbol rather than living in the comment above it.
-const ERROR_MEDIAN_GROSS_CEILING_BYTES = 512 * 1024 * CI_BUDGET_MULTIPLIER;
+const ERROR_MEDIAN_GROSS_CEILING_BYTES = 512 * 1024 * BUDGET_RELAX_MULTIPLIER;
 
 // N1 (round 8): label and ceiling are bound in ONE table and passed as ONE argument,
 // so transposing them is UNREPRESENTABLE at the call site. Swapping two positional
@@ -405,7 +407,7 @@ const BUDGET_SUBJECTS = Object.freeze({
   }),
 });
 
-const RSS_BUDGET_BYTES = 96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER;
+const RSS_BUDGET_BYTES = 96 * 1024 * 1024 * BUDGET_RELAX_MULTIPLIER;
 
 // Per-test timeout for the two multi-pass budgets (measured ~0.5s and ~4.5s on
 // this machine). Declared here rather than as a project-level `testTimeout`,
@@ -723,11 +725,11 @@ describe('leak-budget statistic (pure, issue #1465)', () => {
   test('THIS run is strict unless it declared otherwise', () => {
     // Pins the live wiring, not just the pure function: if the ceilings are doubled,
     // BUDGETS_RELAXED must be true (and the file printed its declaration).
-    expect(CI_BUDGET_MULTIPLIER).toBe(BUDGETS_RELAXED ? 2 : 1);
-    expect(BUDGET_BYTES).toBe(32 * 1024 * CI_BUDGET_MULTIPLIER);
-    expect(STREAM_MEDIAN_CEILING_BYTES).toBe(64 * 1024 * CI_BUDGET_MULTIPLIER);
-    expect(ERROR_MEDIAN_GROSS_CEILING_BYTES).toBe(512 * 1024 * CI_BUDGET_MULTIPLIER);
-    expect(RSS_BUDGET_BYTES).toBe(96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER);
+    expect(BUDGET_RELAX_MULTIPLIER).toBe(BUDGETS_RELAXED ? 2 : 1);
+    expect(BUDGET_BYTES).toBe(32 * 1024 * BUDGET_RELAX_MULTIPLIER);
+    expect(STREAM_MEDIAN_CEILING_BYTES).toBe(64 * 1024 * BUDGET_RELAX_MULTIPLIER);
+    expect(ERROR_MEDIAN_GROSS_CEILING_BYTES).toBe(512 * 1024 * BUDGET_RELAX_MULTIPLIER);
+    expect(RSS_BUDGET_BYTES).toBe(96 * 1024 * 1024 * BUDGET_RELAX_MULTIPLIER);
   });
 
   test('the quorum is a majority of MEASURE_PASSES', () => {
