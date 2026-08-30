@@ -32,8 +32,10 @@ Collection Identity Asymmetries (issue #1454):
     that this normalizer implements every row of it. The three asymmetries the
     canonical form has to erase:
 
-    - `set<frozen<udt>>` → Python `list`, **not** `frozenset` (`set_to_py`
-      falls back to a list because UDTs become unhashable `dict`s), while Node
+    - `set<frozen<udt>>` → Python `list`, **not** `frozenset` (`set_to_py`'s
+      `contains_udt` fallback, kept for CLI parity — #804; its original reason,
+      that a UDT was an unhashable `dict`, no longer holds since #3504: a
+      `cqlite.Udt` IS hashable when its field values are), while Node
       returns a JS `Set` of objects. Canonical form: a JSON array either way —
       but **NOT a sorted one**, because the Python value is indistinguishable
       from a genuine `list<T>` here, so this row's canonical form is
@@ -44,10 +46,12 @@ Collection Identity Asymmetries (issue #1454):
       Canonical form: a sorted array of `{"key": k, "value": v}`. Python map
       keys additionally arrive as the hashable projection produced by
       `value_to_hashable_key` (`list`→`tuple`, `set`→`frozenset`,
-      `udt`→`frozenset` of `(name, value)` pairs), so a UDT used as a map *key*
-      does not have the same host shape as the same UDT used as a *value* — and
-      because Node and the CLI render such a key as a UDT *object*, a UDT map
-      key is **UNSUPPORTED** under this contract rather than canonicalized.
+      `udt`→`cqlite.Udt` since #3504). A UDT map key therefore has the SAME host
+      shape as the same UDT in value position, and canonicalizes to the UDT
+      *object* Node and the CLI render — it is **supported**. It was not before
+      #3504, when the arm flattened a UDT into a `frozenset` of `(name, value)`
+      pairs (instances a-1/a-3, now closed). A `map` in a projection position is
+      still flattened to a tuple of pairs and remains **UNSUPPORTED** (a-2).
     - `tuple<...>` → Python `tuple` but a Node `Array`, i.e. Node cannot
       distinguish `tuple<...>` from `list<T>`. Canonical form: a JSON array, so
       tuple and list normalize identically.
@@ -1172,8 +1176,9 @@ class TestCollectionIdentityContract:
 
         `Value::Json` reaches Python through `json_to_py`, which maps a JSON
         **object** to a `PyDict` and a JSON **array** to a `PyList`. So the `dict`
-        row of the host-shape lattice (M4_spec §5.3) has THREE cell-level
-        sources — `map<k,v>`, `udt`, JSON object — and the normalizer, seeing only
+        row of the host-shape lattice (M4_spec §5.3) has TWO cell-level
+        sources — `map<k,v>` and a JSON object (`udt` was a third until #3504 gave
+        it its own host type) — and the normalizer, seeing only
         the host value, canonicalizes a JSON object as a **CQL map**: a sorted
         array of `{"key": ..., "value": ...}`, where the CLI keeps an object. A
         JSON object carrying a literal `"_type"` key is additionally read as a UDT.
@@ -1258,7 +1263,9 @@ class TestCollectionIdentityContract:
             a lossy projection diverges iff the projected type's canonical form
             is not a plain JSON array
 
-        which is why only `map` (a-2) and `udt` (a-1, a-3) generate instances.
+        which is why only `map` (a-2) still generates instances. `udt` generated
+        a-1/a-3 until #3504 made its projection type-preserving; those are closed
+        and the criterion is what did not change.
         This test exists so those benign cases are demonstrated rather than left
         as an unremarked pass — #1455 must NOT special-case them
         (M4_spec §5.3, family (a) table).
@@ -1298,34 +1305,58 @@ class TestCollectionIdentityContract:
             {"key": [1, 2], "value": "second"},
         ], "Python collapses equal non-scalar keys; a Node Map would keep both entries"
 
-    def test_map_with_udt_key_is_an_unsupported_divergent_shape(self):
-        """LIMITATION a-1 (lossy projection): a UDT map key is NOT canonicalizable.
+    def test_map_with_a_udt_key_canonicalizes_as_a_udt_object(self):
+        """a-1 (was LIMITATION): a UDT map key canonicalizes like any other UDT.
 
-        `map_to_py` routes keys through `value_to_hashable_key`, which projects
-        a UDT to a `frozenset` of `(field_name, value)` pairs, so the Python key
-        normalizes to a sorted array of `[name, value]` pairs — while Node and
-        the CLI render the same key as a UDT **object**. The two shapes differ
-        in kind and nothing here reconciles them; doing so needs schema-aware
-        normalization, which is a behavior change and out of scope for #1454
-        (tracked as #3497).
+        `map_to_py` routes keys through `value_to_hashable_key`, whose `Udt` arm
+        used to flatten the UDT into a `frozenset` of `(field_name, value)` pairs
+        — so the key normalized to a sorted array of `[name, value]` pairs while
+        Node and the CLI render the same key as a UDT **object**, a difference in
+        KIND that no sorting reconciles. #3504 made the arm return a `cqlite.Udt`,
+        so the projection is type-preserving and the key takes the UDT branch.
 
-        This test therefore pins the *divergent* shape as a recorded gap, NOT as
-        a canonical form: #1455 must treat a UDT map key as UNSUPPORTED rather
-        than assume this projection is comparable across bindings
-        (M4_spec §5.3, "Known LIMITATION").
+        THIS TEST'S PREDECESSOR WAS VACUOUS AND IS THE REASON THE ASSERTIONS BELOW
+        ARE SHAPED AS THEY ARE. It hand-built the old `frozenset` and asserted the
+        normalizer's array-of-pairs output — an input the binding can no longer
+        produce — so it passed identically before and after the change and could
+        never have observed the closure. The subject here is the shape the
+        production arm actually returns (`build_udt` → `cqlite.Udt`, field values
+        recursively projected), and the load-bearing assertion is an EQUALITY
+        against the value-position canonical form rather than a shape written down
+        twice. The Cassandra-written end of the same property — a real projected
+        key decoded from `test-data/fixtures/issue_3504` — is
+        `test_projected_map_key_holds_exactly_one_type_entry` in
+        `tests/test_issue_3504_udt_field_namespace.py`; this class is
+        deliberately pure (see its docstring), so it asserts the normalizer half.
         """
-        key = frozenset({("_type", "address"), ("_keyspace", "test_collections"), ("street", "1 Main St")})
-        normalized = normalize_python_value({key: 7}, is_row_level=False)
-        assert normalized == [
-            {
-                "key": [
-                    ["_keyspace", "test_collections"],
-                    ["_type", "address"],
-                    ["street", "1 Main St"],
-                ],
-                "value": 7,
-            }
+        key = cqlite.Udt("address", "test_collections", {"street": "1 Main St"})
+        assert normalize_python_value({key: 7}, is_row_level=False) == [
+            {"key": {"_type": "address", "street": "1 Main St"}, "value": 7},
         ]
+
+        # The property that makes it CANONICALIZABLE: key position and value
+        # position now agree, which is exactly what differed in kind before.
+        assert normalize_python_value({key: 7}, is_row_level=False)[0][
+            "key"
+        ] == normalize_python_value(key, is_row_level=False)
+
+        # And the divergent shape is GONE, not merely unasserted: the key is an
+        # object, never the array of `[name, value]` pairs the old projection
+        # produced. Stated negatively because the predecessor's whole failure was
+        # asserting a shape nothing produces.
+        assert not isinstance(
+            normalize_python_value({key: 7}, is_row_level=False)[0]["key"], list
+        )
+
+        # Identity still discriminates: the old projection told two same-fields
+        # UDTs apart only via its injected `_type`/`_keyspace` PAIRS. Removing
+        # those pairs would have collapsed the two keys into one had identity not
+        # moved onto the instance — so this is what keeps the closure from being a
+        # regression at the normalizer level too.
+        twin = cqlite.Udt("address_v2", "test_collections", {"street": "1 Main St"})
+        both = normalize_python_value({key: 7, twin: 8}, is_row_level=False)
+        assert len(both) == 2
+        assert {entry["key"]["_type"] for entry in both} == {"address", "address_v2"}
 
     def test_tuple_is_an_array(self):
         """`tuple<...>` → JSON array (asymmetry row 3)."""
