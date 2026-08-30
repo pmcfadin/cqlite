@@ -35,8 +35,9 @@
  *
  * WHY THE GUARD IS A MEASURED BUDGET, NOT jest `--detectLeaks` (issue #1465
  * step 3 authorises this fallback and requires the reason to be documented here):
- * jest-leak-detector watches the jest `TestEnvironment` INSTANCE
- * (`jest-runner/build/runTest.js:261`, `new LeakDetector(environment)`), so it
+ * jest-leak-detector watches the jest `TestEnvironment` INSTANCE -- `runTestInternal`
+ * in jest-runner's runTest does `new LeakDetector(environment)` when
+ * `projectConfig.detectLeaks` is set -- so it
  * answers "was the whole environment collected after this FILE finished", never
  * "does each iteration of this loop retain memory". It is blind to the property
  * under test and can red for unrelated environment retention, so it is NOT

@@ -20,8 +20,9 @@
  * WHY NO `detectOpenHandles`/`detectLeaks` ANYWHERE (measured on jest 29.7.0, not
  * assumed):
  *   * `detectOpenHandles` is read from the GLOBAL config only
- *     (`@jest/core/build/runJest.js:322` for handle collection,
- *     `testSchedulerHelper.js:29` for the runInBand implication). Declaring it in
+ *     (`runJest` in @jest/core reads `globalConfig.detectOpenHandles` to decide
+ *     whether to collect handles at all, and `shouldRunInBand` in @jest/core's
+ *     testSchedulerHelper reads it for the run-in-band implication). Declaring it in
  *     a `projects[]` entry resolves to `projectConfig.detectOpenHandles = true`
  *     and `globalConfig.detectOpenHandles = false`, i.e. it does NOTHING —
  *     verified by introspecting `readConfigs()` on this very file. It is not
@@ -33,8 +34,8 @@
  *     available to a human as the separate `npm run test:leaks:handles` script,
  *     which no lane invokes.
  *   * `detectLeaks` is deliberately absent. (It IS honoured per-project —
- *     `jest-runner/build/runTest.js:261` reads `projectConfig.detectLeaks` and
- *     `@jest/core/build/TestScheduler.js:138` surfaces the verdict — so it did
+ *     `runTestInternal` in jest-runner's runTest reads `projectConfig.detectLeaks`
+ *     and @jest/core's TestScheduler surfaces the `testResult.leaks` verdict — so it did
  *     run here; it is removed because of what it MEASURES, not because it was
  *     dead.) jest-leak-detector watches the jest `TestEnvironment` INSTANCE, so
  *     it answers "was the whole environment collected after this FILE finished",

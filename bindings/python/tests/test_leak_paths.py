@@ -65,10 +65,10 @@ These tests carry NO pytest marker on purpose. Both gate tiers would drop a
 ``slow``-marked test from the merge-gating set, by different mechanisms:
 the FULL gate's ``python-bindings`` component runs
 ``pytest bindings/python/tests -q`` under ``RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}"``
-(``run_python_bindings``, scripts/agent-gate.sh:5565-5568), which
+(``run_python_bindings`` in scripts/agent-gate.sh), which
 ``conftest.pytest_collection_modifyitems`` turns into a skip for ``slow`` items;
 ``--lite``'s python tier runs ``pytest bindings/python/tests -m 'not slow' -q``
-(``PYTHON_LITE_PYTEST_CMD``, scripts/agent-gate.sh:1424) under ``RUN_SLOW_TESTS=0``,
+(``PYTHON_LITE_PYTEST_CMD`` in scripts/agent-gate.sh) under ``RUN_SLOW_TESTS=0``,
 which deselects them.
 Unmarked, they execute in both. Measured runtime of this whole file: ~6s.
 
@@ -87,9 +87,9 @@ import pytest
 
 # ``resource`` is POSIX-only. python-ci.yml runs this whole directory on a
 # ``windows-latest`` matrix leg (`pytest bindings/python/tests/ -v --tb=short -m
-# "not slow"`, python-ci.yml:522), where a module-level Unix-only import is a
-# COLLECTION ERROR that reds the job. Import it conditionally so the tracemalloc
-# budgets -- which are pure stdlib and platform-independent -- still run
+# "not slow"`, its "Run pytest (non-slow)" step), where a module-level Unix-only
+# import is a COLLECTION ERROR that reds the job. Import it conditionally so the
+# tracemalloc budgets -- pure stdlib and platform-independent -- still run
 # everywhere, and degrade ONLY the RSS backstop where the instrument is missing.
 try:
     import resource
@@ -317,7 +317,26 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
         second = tracemalloc.take_snapshot().filter_traces(_NOISE_FILTERS)
     finally:
         tracemalloc.stop()
-    rss_growth = None if rss_reader is None else rss_reader() - rss_before
+    # G6 (issue #1465 round 4): the instrument was readable at probe time, but a
+    # mid-window failure is still possible (a /proc read denied by a sandbox, a
+    # container remount). A bare `rss_reader() - rss_before` would then raise
+    # `TypeError: unsupported operand type(s) for -: 'NoneType' and 'int'` -- loud,
+    # but naming neither the instrument nor when it failed. Fail loudly AND
+    # legibly instead.
+    rss_growth = None
+    if rss_reader is not None:
+        rss_after = rss_reader()
+        if rss_after is None or rss_before is None:
+            which = "at the START of" if rss_before is None else "at the END of"
+            raise RuntimeError(
+                f"the {rss_kind!r} RSS instrument failed {which} the measured "
+                f"window (before={rss_before}, after={rss_after}). It answered at "
+                "probe time, so this is a mid-run failure of the reader itself "
+                "(e.g. /proc/self/statm became unreadable), not an unsupported "
+                "platform -- which the three-valued _rss_instrument() reports "
+                "instead. No RSS verdict can be given for this run (issue #1465)."
+            )
+        rss_growth = rss_after - rss_before
 
     # Net delta across every (file, line) group: sums retained growth and
     # subtracts anything freed, which is the quantity a leak accumulates in.
