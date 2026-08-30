@@ -1572,6 +1572,93 @@ if [ -n "$MANIFEST_NOGIT" ]; then
   done
 fi
 
+# ---------------------------------------------------------------------------
+# Case 79 (post-rebase round 2, High): a COHERENTLY truncated TOC.
+#
+# Both derived directions — every listed component exists, every prefix-sharing file is
+# listed — are computed FROM THE CORPUS, so a TOC shortened IN STEP with the files it stopped
+# listing satisfies both and greens an incomplete generation.
+#
+# The trusted inventory is the GIT-TRACKED `*-TOC.txt` (164 committed). It is not subject to
+# the truncated fetch that damages the gitignored binaries, which is exactly what a
+# corpus-derived check cannot be. Measured: all 144 generations in the machine-local corpus
+# have a committed twin and all 144 match byte-for-byte.
+#
+# Driven against a COPY OF THE REAL CORPUS, because the property is about agreement with the
+# committed tree — a synthetic table has no committed twin and so cannot exercise it.
+# ---------------------------------------------------------------------------
+if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstables" ] \
+   && bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >/dev/null 2>&1; then
+  ct_root="$WORK/coherent-toc"; rm -rf "$ct_root"; mkdir -p "$ct_root"
+  cp -r "$CQLITE_DATASETS_ROOT/sstables" "$ct_root/" 2>/dev/null
+  ct_dir=$(find "$ct_root/sstables/test_basic" -maxdepth 1 -type d -name 'simple_table-*' | head -1)
+  if [ -n "$ct_dir" ] && [ -f "$ct_dir/nb-1-big-TOC.txt" ]; then
+    # Control: the untouched copy still passes, so a reject below is caused by the edit.
+    if bash "$MANIFEST_SRC" "$ct_root" >/dev/null 2>&1; then
+      ok "the corpus copy is a valid control (passes before the TOC is truncated)"
+    else
+      bad "the corpus copy did not pass unmodified; the coherent-truncation case proves nothing"
+    fi
+    # Shorten the TOC *and* delete exactly the components it stopped listing.
+    printf 'Data.db\nStatistics.db\nDigest.crc32\nTOC.txt\n' > "$ct_dir/nb-1-big-TOC.txt"
+    rm -f "$ct_dir"/nb-1-big-CompressionInfo.db "$ct_dir"/nb-1-big-Filter.db \
+          "$ct_dir"/nb-1-big-Index.db "$ct_dir"/nb-1-big-Summary.db
+    ct_out=$(bash "$MANIFEST_SRC" "$ct_root" 2>&1 || true)
+    if printf '%s' "$ct_out" | grep -q 'test_basic/simple_table'; then
+      ok "a COHERENTLY truncated TOC disqualifies the generation"
+    else
+      bad "a coherently truncated TOC was ACCEPTED; both derived directions are satisfied by it"
+    fi
+    # And it must NAME the trusted-inventory mismatch, not the generic listed-component cause.
+    if printf '%s' "$ct_out" | grep -q 'does NOT match the git-tracked committed twin'; then
+      ok "the coherent-truncation diagnostic names the committed-twin mismatch"
+    else
+      bad "coherent truncation was reported as some other cause: $(printf '%s' "$ct_out" | grep 'test_basic/simple_table' | head -1 | cut -c1-90)"
+    fi
+  else
+    echo "info - no simple_table generation with a TOC in the corpus copy; skipping"
+  fi
+else
+  echo "info - no passing real corpus available; skipping the coherent-truncation case"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 80 (post-rebase round 2, Medium): a broken grep in the TOC reconciliation must be a
+# MALFUNCTION, not an incomplete corpus.
+#
+# `grep -qxF ... || return 1` collapsed an OPERATIONAL failure (>1) onto "not listed", and
+# because the function is called on the left of `||`, that walked out to the script's
+# RESERVED exit 9 — a judged corpus verdict the #2078 opt-out suppresses. A broken grep must
+# never be readable as a judged corpus.
+#
+# The shadow delegates every other grep to the real one and fails ONLY the `-qxF` form the
+# reconciliation uses: shadowing grep wholesale would break the script's own tool check and
+# prove nothing about this path.
+# ---------------------------------------------------------------------------
+if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstables" ] \
+   && bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >/dev/null 2>&1; then
+  gb_bin="$WORK/grepfail-bin"; mkdir -p "$gb_bin"
+  gb_real=$(command -v grep)
+  cat >"$gb_bin/grep" <<GREPFAIL
+#!/bin/sh
+# Fail ONLY the reconciliation's exact invocation; delegate everything else.
+if [ "\$1" = "-qxF" ]; then exit 2; fi
+exec "$gb_real" "\$@"
+GREPFAIL
+  chmod +x "$gb_bin/grep"
+  gb_rc=0
+  PATH="$gb_bin:$PATH" bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >/dev/null 2>&1 || gb_rc=$?
+  if [ "$gb_rc" = 2 ]; then
+    ok "a grep malfunction in the TOC reconciliation exits 2, not the reserved corpus verdict"
+  elif [ "$gb_rc" = 9 ]; then
+    bad "a grep malfunction surfaced AS exit 9; the opt-out would suppress a broken checker"
+  else
+    bad "a grep malfunction gave exit $gb_rc; expected 2 (malfunction)"
+  fi
+else
+  echo "info - no passing real corpus available; skipping the grep-malfunction case"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

@@ -83,6 +83,25 @@ if [ "${#CANONICAL[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# DERIVATION IS FOR BUILDING FIXTURES; MEMBERSHIP IS ASSERTED INDEPENDENTLY (roborev #3493).
+# Deriving BOTH sides is a tautology: deleting a schema from the production list would delete
+# it from the expectation too, and the regression would stay green. So the entries this repo
+# depends on are named HERE, on purpose, as a second source.
+#
+# `oa-test.cql` and `write-test.cql` are required because the gate runs the WHOLE node suite
+# (#3522) and its OA parity and write cases resolve those schemas; if they leave
+# CANONICAL_SCHEMA_FILES, the #3148 preflight stops guarding them and their absence surfaces
+# as a suite failure instead of a named preflight FAIL.
+for _req in basic-types.cql oa-test.cql write-test.cql; do
+  case " ${CANONICAL[*]} " in
+    *" $_req "*) : ;;
+    *) echo "FAIL - $_req is no longer in the gate's CANONICAL_SCHEMA_FILES; the #3148 preflight" >&2
+       echo "       has stopped guarding a schema the node suite resolves. If that is intended," >&2
+       echo "       remove it from this list too — deliberately, in the same diff." >&2
+       exit 1 ;;
+  esac
+done
+
 # A dataset root whose canonical corpus IS present, so the #2078 corpus guard is
 # satisfied and the run reaches the #3148 schemas guard.
 ds_corpus="$tmp/ds-corpus"

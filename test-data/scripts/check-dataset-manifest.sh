@@ -399,6 +399,9 @@ _TOC_MAY_BE_EMPTY='Rows.db'
 # (142 `Statistics.db.txt`, 6 `CompressionInfo.db.txt`) plus the `.jsonl` goldens.
 _TOC_SIDECAR_GLOBS='*.jsonl *.db.txt'
 _toc_companions_usable() {
+  # Which of this function's several rejections fired, so the caller can NAME the cause
+  # instead of reporting them all as "the TOC lists something missing" (the round-40 rule).
+  _TOC_FAIL_REASON=listed-component
   _t_prefix=${1%Data.db}
   _t_toc="${_t_prefix}TOC.txt"
   _usable_file "$_t_toc" || return 1
@@ -435,9 +438,64 @@ _toc_companions_usable() {
       case "$_t_c" in $_t_g) _t_skip=1; break ;; esac
     done
     [ "$_t_skip" -eq 1 ] && continue
-    grep -qxF "$_t_c" "$_t_toc" || return 1
+    # STATUS DISCIPLINE, as everywhere else in this script (roborev, post-rebase round 2).
+    # `grep ... || return 1` collapses an OPERATIONAL failure (>1) onto "not listed", and
+    # because this function is called on the left of `||` that non-match walks out to the
+    # reserved exit 9 -- a judged corpus verdict the #2078 opt-out suppresses. A broken
+    # grep must never be readable as a judged corpus.
+    _t_g=0
+    grep -qxF "$_t_c" "$_t_toc" || _t_g=$?
+    case "$_t_g" in
+      0) : ;;
+      1) return 1 ;;
+      *) echo "❌ dataset manifest check: grep failed (status $_t_g) reconciling $_t_toc; cannot judge the corpus" >&2
+         exit 2 ;;
+    esac
   done
+  # THE TRUSTED INVENTORY (roborev, post-rebase round 2). Both directions above are derived
+  # from the CORPUS, so a COHERENTLY truncated TOC -- one shortened in step with the files
+  # it stopped listing -- satisfies each of them and greens an incomplete generation.
+  #
+  # `*-TOC.txt` is GIT-TRACKED (164 committed), so it is not subject to the truncated fetch
+  # that damages the gitignored binaries: it is an inventory from OUTSIDE the corpus being
+  # judged, which is exactly what the derived checks cannot be. Measured: all 144 generations
+  # in the machine-local corpus have a committed twin and all 144 match byte-for-byte, so
+  # requiring the match costs nothing today and is fail-closed.
+  #
+  # NO TWIN => the derived checks alone, and this is a DECLARED LIMIT rather than a hidden
+  # one. Making an absent twin fatal was tried and is wrong: a corpus legitimately holds
+  # tables this checkout does not commit (a scratch root, an out-of-tree corpus, a
+  # newly-generated table), and there is no trusted inventory for those BY DEFINITION, so
+  # rejecting them reports "incomplete" about something that is merely unverifiable. It also
+  # red-lined 41 synthetic fixtures whose tables cannot have a twin.
+  #
+  # THE RESIDUAL, stated because it is real: for a generation with no committed twin, a
+  # COHERENT truncation is undetectable here. It does not affect the corpus the gate actually
+  # runs against — all 144 generations there have a twin — but a corpus assembled elsewhere
+  # gets the weaker guarantee, and nothing in the output would otherwise say so.
+  _TOC_FAIL_REASON=untrusted-toc
+  _t_committed=$(_committed_toc_path "$_t_toc") || return 1
+  if [ -n "$_t_committed" ]; then
+    cmp -s "$_t_toc" "$_t_committed" || return 1
+  fi
+  _TOC_FAIL_REASON=
   return 0
+}
+
+# _committed_toc_path <corpus-toc-path> -- echo the git-tracked twin of this TOC, or nothing.
+#
+# Maps <root>/sstables/<ks>/<tabledir>/<file> onto the checkout's
+# test-data/datasets/sstables/<ks>/<tabledir>/<file>, then requires git to TRACK it -- an
+# untracked file at that path is not a trusted inventory, it is just another file on disk.
+_committed_toc_path() {
+  _c_tail=${1#*/sstables/}
+  [ "$_c_tail" = "$1" ] && { printf ''; return 0; }
+  [ -n "$_SCRIPT_REPO" ] || { printf ''; return 0; }
+  _c_path="$_SCRIPT_REPO/test-data/datasets/sstables/$_c_tail"
+  [ -f "$_c_path" ] || { printf ''; return 0; }
+  git -C "$_SCRIPT_REPO" ls-files --error-unmatch \
+      "test-data/datasets/sstables/$_c_tail" >/dev/null 2>&1 || { printf ''; return 0; }
+  printf '%s' "$_c_path"
 }
 
 # _dir_has_oa_golden <table-dir> -- rc 0 when the directory holds ANY
@@ -540,6 +598,7 @@ for entry in "${EXPECTED[@]}"; do
   oa_bad=0        # a correctly-shaped dir held Data.db files, but none OA-named
   name_bad=0      # Data.db files existed, but none named like a descriptor the reader opens
   empty_bad=0     # a correctly-named binary existed but was ZERO-LENGTH (truncated fetch)
+  toc_why=""      # which TOC rejection fired: listed-component | untrusted-toc
   collide_bad=0   # a non-generation *-Data.db shares a real generation's prefix
   type_bad=0      # a correctly-named Data.db exists but is NOT a regular file
   unread_bad=0    # a correctly-named, nonempty Data.db is not readable
@@ -656,7 +715,7 @@ for entry in "${EXPECTED[@]}"; do
       elif [ ! -r "$f" ]; then
         unread_bad=1; gen_bad=1; continue    # present and sized, but not readable
       fi
-      _toc_companions_usable "$f" || { toc_bad=1; gen_bad=1; }
+      _toc_companions_usable "$f" || { toc_bad=1; gen_bad=1; toc_why=$_TOC_FAIL_REASON; }
     done
 
     # ---- PASS 2: which generation satisfies THIS table's consumer -----------------------
@@ -783,6 +842,8 @@ for entry in "${EXPECTED[@]}"; do
       *)         _want="nb-1-big-Data.db.jsonl" ;;
     esac
     echo "❌ expected table has a Data.db but not the JSONL golden Jest reads ($_want): $entry" >&2
+  elif [ "$toc_bad" -eq 1 ] && [ "$toc_why" = untrusted-toc ]; then
+    echo "❌ expected table's TOC.txt does NOT match the git-tracked committed twin — the corpus TOC has been truncated or altered, so it cannot be trusted as the generation's inventory (a COHERENT truncation shortens the TOC in step with the files it stops listing, which every corpus-derived check accepts): $entry" >&2
   elif [ "$toc_bad" -eq 1 ]; then
     # LAST: every earlier state is a coarser breakage, and this one is only reachable
     # once a nonempty recognised binary AND its golden are both in place -- the shape a
