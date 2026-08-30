@@ -441,7 +441,10 @@ pub struct ChildIo {
     log: Arc<Mutex<Transcript>>,
 }
 
-fn spawn_reader<R: std::io::Read + Send + 'static>(
+/// `pub(super)` so the harness's own tests can drive THIS function with a reader
+/// that fails mid-stream, rather than only the store beneath it (roborev job 255,
+/// finding 2 lived in the loop below, so that is where a test has to reach).
+pub(super) fn spawn_reader<R: std::io::Read + Send + 'static>(
     stream: Stream,
     reader: R,
     handle: ReaderHandle,

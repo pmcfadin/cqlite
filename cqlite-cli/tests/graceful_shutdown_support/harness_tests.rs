@@ -474,6 +474,122 @@ fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
     }
 }
 
+/// A pipe stand-in that yields one whole line and then FAILS — what a reader
+/// thread sees when a `read(2)` on the child's pipe errors mid-stream.
+///
+/// It exists so the two tests below can drive `spawn_reader` and `collect_to_end`
+/// THEMSELVES, at the exact `Err` branches roborev job 255 finding 2 was about.
+/// Driving only the store beneath them would leave those branches uncovered, and
+/// they are the sites that discarded the result.
+#[derive(Default)]
+struct FailsAfterOneLine {
+    emitted: bool,
+}
+
+impl std::io::Read for FailsAfterOneLine {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.emitted {
+            return Err(std::io::Error::other("simulated pipe failure"));
+        }
+        self.emitted = true;
+        let line = b"a partial first line\n";
+        let n = line.len().min(buf.len());
+        buf[..n].copy_from_slice(&line[..n]);
+        Ok(n)
+    }
+}
+
+/// Poll a store until every reader has ended, bounded so a defect cannot hang the
+/// suite. Returns whether it ended.
+fn wait_for_readers_to_end(io: &ChildIo) -> bool {
+    let mark = io.mark();
+    for _ in 0..2_000 {
+        if io.snapshot(mark).pipes_closed() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+/// **THE READER THREAD ITSELF RECORDS ITS FAILURE** (roborev job 255, finding 2) —
+/// driven through `spawn_reader`, which is where the `Err` was discarded.
+///
+/// The store-level test below pins how the verdict is CHOSEN; this one pins that
+/// the choice is ever reachable from a real failing read. Without it, reverting
+/// `spawn_reader` to `let Ok(line) = line else { break }` would leave every test
+/// green.
+#[test]
+fn a_reader_thread_records_a_failed_read_rather_than_ending_silently() {
+    let (io, handles) = ChildIo::with_readers(1);
+    let mark = io.mark();
+    let handle = handles.into_iter().next().expect("one reader handle");
+    spawn_reader(Stream::Stdout, FailsAfterOneLine::default(), handle);
+
+    assert!(
+        wait_for_readers_to_end(&io),
+        "the reader thread must end after its read fails"
+    );
+    let snapshot = io.snapshot(mark);
+    assert!(
+        snapshot.a_reader_failed(),
+        "the reader ended because its read FAILED, and the store records only that it ended: \
+         a failure is then indistinguishable from EOF, which is the cause the wait goes on to \
+         name (job 255, finding 2)"
+    );
+    let note = snapshot
+        .read_failure_note()
+        .expect("a failed reader must leave a terminal result");
+    assert!(
+        note.contains("simulated pipe failure") && note.contains("stdout"),
+        "the recorded result must name the stream and carry the reader's own error: {note}"
+    );
+    assert_eq!(
+        snapshot.examined(),
+        1,
+        "the line read BEFORE the failure must still be recorded: the failure is about the rest \
+         of the stream, not about what was already seen"
+    );
+}
+
+/// **THE COLLECTOR THREAD ITSELF RECORDS ITS FAILURE, AND DELIVERS NOTHING**
+/// (roborev job 255, finding 2) — driven through `collect_to_end`, which is where
+/// `read_to_end`'s result was discarded and the partial buffer delivered as whole.
+#[test]
+fn a_collector_thread_that_fails_mid_read_delivers_nothing() {
+    let (bufs, handles) = synthetic_bufs(2);
+    let mut handles = handles.into_iter();
+    let failing = handles.next().expect("stdout collector handle");
+    let ok = handles.next().expect("stderr collector handle");
+    ok.deliver(Stream::Stderr, Vec::new());
+    collect_to_end(Stream::Stdout, FailsAfterOneLine::default(), failing);
+
+    let deadline = TestDeadline::start(Duration::from_secs(30), Duration::from_secs(30));
+    let stage = deadline.stage("collector-thread-read-failure");
+    match collect_both_streams(&bufs, &stage) {
+        CollectEnd::ReadFailed { failures, .. } => assert!(
+            failures.contains("simulated pipe failure"),
+            "the verdict must carry the collector's own error: {failures}"
+        ),
+        CollectEnd::Both(out, _) => panic!(
+            "the collector's read FAILED and the collection returned both buffers — the {} \
+             partial byte(s) it had read were presented as the whole of the child's stdout \
+             (job 255, finding 2)",
+            out.len()
+        ),
+        other => panic!(
+            "a failed read must be reported as such, not as {}",
+            match other {
+                CollectEnd::DeadlineReached { .. } => "a deadline (which was live)",
+                CollectEnd::CollectorsEnded { .. } => "end-of-collectors",
+                CollectEnd::Unavailable => "a poisoned lock",
+                _ => unreachable!("handled above"),
+            }
+        ),
+    }
+    drop(ok);
+}
+
 /// **A READER THAT ENDS IN AN I/O ERROR IS NOT REPORTED AS EOF** (roborev job 255,
 /// finding 2).
 ///
