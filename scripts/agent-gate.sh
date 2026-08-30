@@ -6210,25 +6210,60 @@ EOF
   # of the component log — because a lane that omits coverage silently is
   # indistinguishable from one that covers it, and "the log a reviewer actually reads"
   # is both of those. Not a comment: a comment is not read on a run.
-  local ffi_ids="" ffi_expect_n=0 ffi_skip="" _tn _tid _trf _troff _trfl
-  local -a ffi_expect=()
-  while IFS=$'\t' read -r _tn _tid _trf; do
-    [ -n "$_tn" ] || continue
-    ffi_ids="$ffi_ids $_tid"
-    _troff=""
-    for _trfl in ${_trf//,/ }; do
-      case "$ffi_enabled" in *" $_trfl "*) ;; *) _troff="$_trfl"; break ;; esac
-    done
-    if [ -n "$_troff" ]; then
-      # cargo SILENTLY skips a required-features target it cannot enable, printing no
-      # banner at all — so demanding an observation for it would red a healthy lane.
-      # Excluded from the expectation and DECLARED, never dropped quietly.
-      ffi_skip="$ffi_skip $_tid(required-features[$_trf]:off[$_troff])"
-    else
-      ffi_expect+=("$_tid")
-      ffi_expect_n=$((ffi_expect_n + 1))
-    fi
-  done <<< "$ffi_targets"
+  # Partition a package's DERIVED integration targets into the ones cargo can actually
+  # run at this lane's feature set and the ones it will SILENTLY skip for an unmet
+  # `required-features` (cargo prints no banner at all for those, so demanding an
+  # observation would red a healthy lane — they are excluded and DECLARED, never dropped
+  # quietly). Prints ONE tab-separated line: <runner-ids> TAB <target-names> TAB
+  # <skip-reasons>.
+  #
+  # SHARED by both packages deliberately. The cqlite-ffi-common half and the cqlite-node
+  # half are the SAME logic, and a near-copy is how one of them silently stops matching
+  # cargo's behaviour — the drift this whole component exists to prevent.
+  _brt_partition_targets() { # <target-meta> <enabled-set>
+    local meta="$1" enabled="$2"
+    local ids="" names="" skip="" tn tid trf troff trfl
+    while IFS=$'\t' read -r tn tid trf; do
+      [ -n "$tn" ] || continue
+      troff=""
+      for trfl in ${trf//,/ }; do
+        case "$enabled" in *" $trfl "*) ;; *) troff="$trfl"; break ;; esac
+      done
+      if [ -n "$troff" ]; then
+        skip="$skip $tid(required-features[$trf]:off[$troff])"
+      else
+        ids="$ids $tid"; names="$names $tn"
+      fi
+    done <<< "$meta"
+    printf '%s\t%s\t%s\n' "${ids# }" "${names# }" "${skip# }"
+  }
+
+  local ffi_ids="" ffi_names="" ffi_skip="" ffi_expect_n=0
+  local node_ids="" node_names="" node_skip="" node_expect_n=0
+  local -a ffi_expect=() node_expect=() node_test_args=()
+  local _t
+  IFS=$'\t' read -r ffi_ids ffi_names ffi_skip <<< "$(_brt_partition_targets "$ffi_targets" "$ffi_enabled")"
+  IFS=$'\t' read -r node_ids node_names node_skip <<< "$(_brt_partition_targets "$node_targets" "$node_enabled")"
+  for _t in $ffi_ids; do ffi_expect+=("$_t"); done
+  ffi_expect_n=${#ffi_expect[@]}
+  for _t in $node_ids; do node_expect+=("$_t"); done
+  node_expect_n=${#node_expect[@]}
+  # THE EXECUTION HALF, and the reason it exists (roborev round 1, B1). An earlier cut of
+  # this lane COUNTED cqlite-node's integration targets, PRINTED them in the census and
+  # ran `--lib` only — so the day someone added `bindings/node/tests/foo.rs` the lane
+  # would have counted it, announced it, and left it UNEXECUTED while both this
+  # component and the disposition census stayed green. That is issue #3522's own defect
+  # reproduced inside the fix for #3522, which makes it the most serious shape this
+  # component could have carried.
+  #
+  # Fixed by EXECUTING them, not by failing closed on a non-zero count: refusing would
+  # red the gate on the CORRECT act of adding a test, and a lane that reds on correct
+  # input is the lane agents learn to waive (CLAUDE.md). `--lib` alone does not select
+  # integration targets, so each runnable one is named explicitly. cqlite-node declares
+  # ZERO today, so this expands to nothing and the command is byte-identical to before —
+  # and it becomes correct the moment that stops being true, which is the entire point of
+  # deriving the set instead of listing it.
+  for _t in $node_names; do node_test_args+=(--test "$_t"); done
 
   local -a census=()
   census+=("cargo test --no-fail-fast -p cqlite-ffi-common            (ALL targets: lib + every integration target)")
@@ -6248,14 +6283,17 @@ EOF
   census+=("     half IS fully covered, by the python-bindings component.")
   census+=("  2. cqlite-node's JavaScript suite. Owned by the node-bindings component, which builds")
   census+=("     the napi artifact and runs jest against it. This lane never builds that artifact.")
-  census+=("  3. cqlite-node integration (test) targets: it declares $node_targets_n — a DERIVED count")
-  census+=("     from cargo metadata, not an assumption. At $node_targets_n there is nothing to omit; if")
-  census+=("     that number ever rises without this lane running them, this line is the alarm.")
+  census+=("  3. NOTHING, on the cqlite-node integration half — it is EXECUTED, not omitted. The")
+  census+=("     count is DERIVED from cargo metadata ($node_targets_n declared, $node_expect_n runnable here) and")
+  census+=("     every runnable one is passed to cargo as an explicit --test, so a target added")
+  census+=("     tomorrow is RUN, not merely counted (roborev B1: counting-without-running would be")
+  census+=("     #3522's own defect reproduced inside the fix for #3522).")
   census+=("  4. Feature-gated bodies at features this lane leaves OFF (declared-minus-enabled,")
   census+=("     derived): cqlite-ffi-common ->${ffi_off:- <none: this crate declares no features>};")
   census+=("     cqlite-node ->${node_off:- <none>}. 'observability' is off ON PURPOSE — building the")
   census+=("     OTel stack is a cost this gate declines (#1844 excludes it from clippy likewise).")
-  [ -n "$ffi_skip" ] && census+=("  5. cqlite-ffi-common targets cargo cannot run at this feature set:$ffi_skip")
+  [ -n "$ffi_skip" ]  && census+=("  5. cqlite-ffi-common targets cargo cannot run at this feature set:$ffi_skip")
+  [ -n "$node_skip" ] && census+=("  6. cqlite-node targets cargo cannot run at this feature set:$node_skip")
   census+=("SCOPE OF THE #3522 AUDIT, recorded so it is not re-litigated: this component closes TWO")
   census+=("     of the ten gaps that audit found. The other eight are RECORDED, not silently fixed,")
   census+=("     in scripts/tests/workspace-test-disposition.txt (enforced by")
@@ -6315,9 +6353,30 @@ EOF
   # libpython at link time, which is a property of pyo3, not of cdylib.
   if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
       cargo test --no-fail-fast -p cqlite-node \
-      ${node_feature_args[@]+"${node_feature_args[@]}"} --lib > "$node_log" 2>&1; then
+      ${node_feature_args[@]+"${node_feature_args[@]}"} --lib \
+      ${node_test_args[@]+"${node_test_args[@]}"} > "$node_log" 2>&1; then
     if ! check_unittest_targets_ran "$name/cqlite-node" "$node_log" "${node_unit_srcs[@]}" 2>>"$verdict_log"; then
       status=FAIL
+    fi
+    # The SAME two guards the cqlite-ffi-common half gets, on the same terms — so the
+    # integration targets this lane now EXECUTES are also observed to have run and to
+    # have run a non-zero number of tests.
+    if [ "$node_expect_n" -gt 0 ]; then
+      if ! check_test_targets_observed "$name/cqlite-node" "$node_log" "${node_expect[@]}" 2>>"$verdict_log"; then
+        status=FAIL
+      else
+        echo "$name/cqlite-node: integration targets OK — all $node_expect_n derived target(s) produced a 'Running' banner: $node_ids" >> "$verdict_log"
+      fi
+      if ! check_no_unexpected_zero_tests "$name/cqlite-node" "$node_log" 2>>"$verdict_log"; then
+        status=FAIL
+      fi
+    else
+      # NOT a skipped check: zero is the DERIVED, correct answer for a cdylib with no
+      # tests/ directory. Stated affirmatively in the verdict log so a reader can tell
+      # "there was nothing to observe" from "the observation did not happen" — and
+      # check_no_unexpected_zero_tests is deliberately NOT called, because with `--lib`
+      # only it would have an EMPTY subject set and report OK having measured nothing.
+      echo "$name/cqlite-node: 0 integration targets declared (DERIVED from cargo metadata) — nothing for the observation guard to judge, which is the correct answer for this package today, not a check that was skipped. The moment it declares one, the derived --test list executes it and both guards apply." >> "$verdict_log"
     fi
   else
     status=FAIL
