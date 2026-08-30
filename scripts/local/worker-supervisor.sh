@@ -1544,38 +1544,49 @@ supervisor_pid_liveness() {
   case "$err" in
     *'not permitted'*) printf 'live\n'; return 0 ;;
   esac
-  # Corroborate the absence. procfs first (it distinguishes EPERM: the entry exists for a live process
-  # owned by anyone), else `ps`. `command -v` is a builtin, so an absent `ps` yields `unknown`, not a
-  # crash under the stripped PATH some suite cases source this file with.
+  # Corroborate the absence. PROCFS IS THE ONLY CORROBORATING ORACLE — there is deliberately no `ps`
+  # fallback (see below). procfs distinguishes EPERM: the entry exists for a live process owned by
+  # anyone.
   # `/proc/self`, not `/proc/1`: this asks "is procfs mounted", and it is the one entry no `hidepid`
   # setting can hide from us. `/proc/1` can be invisible to a non-root user in a hardened container,
-  # which would silently route a Linux box onto the `ps` fallback.
+  # which would silently route a Linux box off procfs.
   if [[ -d /proc/self ]]; then
     if [[ -d "/proc/$pid" ]]; then printf 'live\n'; else printf 'dead\n'; fi
     return 0
   fi
-  # `ps` IS ASKED FOR ITS OUTPUT, NOT JUST ITS STATUS (#3549, roborev job 185 F3, class sweep). The
-  # previous form was `if ps -p "$pid" >/dev/null 2>&1; then live; else dead; fi`, which reads EVERY
-  # non-zero exit as an affirmative absence — including a `ps` that failed for its own reasons (bad
-  # option on an unexpected implementation, resource failure). That is the same defect as reporting an
-  # unread `cmdline` as a non-match, one function over, and here the verdict feeds an operator
-  # instruction to delete a lock. So the three states are kept apart:
-  #   - output present            => `live` (it named the process);
-  #   - exit 1 with no output     => `dead` (the documented "no process selected" answer, on procps and
-  #                                  on the BSD `ps` macOS ships);
-  #   - anything else             => `unknown` — `ps` could not answer, and `unknown` refuses.
-  if command -v ps >/dev/null 2>&1; then
-    local psout="" psrc=0
-    psout="$(ps -p "$pid" -o pid= 2>/dev/null)" || psrc=$?
-    if [[ -n "$psout" ]]; then
-      printf 'live\n'
-    elif [[ "$psrc" -eq 1 ]]; then
-      printf 'dead\n'
-    else
-      printf 'unknown\n'
-    fi
-    return 0
-  fi
+  # THE `ps` FALLBACK IS DELETED, NOT NARROWED (#3549, roborev job 203 F1) — the identity-probe
+  # precedent, applied to the third finding in one probe.
+  #
+  # THE TWO FORMS IT HAD, AND WHY BOTH WERE INFERENCES.
+  #   1. `if ps -p "$pid" >/dev/null 2>&1; then live; else dead; fi` — every non-zero exit read as an
+  #      affirmative absence, including a `ps` that failed for its OWN reasons.
+  #   2. Job 185 F3 narrowed it to `output present => live` / `exit 1 with no stdout => dead` /
+  #      anything else => `unknown`. Still an inference: `ps` also exits 1 on a usage error, and with
+  #      stderr discarded the two answers are IDENTICAL.
+  # A third narrowing (require empty STDERR too) was considered and rejected: "exit 1, nothing on
+  # either stream" is still a verdict derived from the ABSENCE of a bad signal, which is the named
+  # defect class, and no `ps` documents a distinguishable no-such-process status. Each round narrowed
+  # the window rather than closing it — the same census that ended `supervisor_pid_identity`.
+  #
+  # AND THE FALSE `dead` WAS MEASURED, NOT HYPOTHESISED. On BusyBox v1.36.1, `ps -p 1 -o pid=` (pid 1
+  # is ALIVE) exits 1 with EMPTY STDOUT and `ps: invalid option -- 'p'` plus a usage block on STDERR —
+  # `-p` is not a BusyBox option at all. Form 2 therefore answered `dead` for a LIVE process, i.e. it
+  # classified a live holder's lock STALE and earned the operator a deletion remedy. (A BusyBox host
+  # has procfs, so it never reached this branch — which is precisely the point below.)
+  #
+  # WHAT THE FALLBACK WAS WORTH, WHICH IS WHAT SETTLED IT. Since the reclaim was removed, `stale` and
+  # `unknown` BOTH REFUSE and this run mutates nothing either way; the only consumer of the
+  # `dead`-vs-`unknown` distinction is the DIAGNOSTIC WORDING and which remedy line is printed. That is
+  # the identity probe's argument verbatim: all risk (a deletion remedy aimed at a live holder), no
+  # protection. It is reached ONLY when procfs is absent — a BSD/macOS host — so on the fleet (Linux,
+  # procfs always mounted) it never ran at all outside the suite's scratch copies.
+  #
+  # THE COST, STATED: on a non-procfs host a genuinely stale legacy lock now reports
+  # `unknown liveness-unmeasurable-for-pid:N` instead of `stale N`, so the operator gets the
+  # "state could not be determined" refusal and no ready-made `rmdir` line, and must establish the
+  # pid's fate themselves. A correct, less specific refusal — strictly more conservative than a
+  # possibly-wrong specific one. Do not reintroduce a `ps` (or any other) fallback for this verdict
+  # unless it can answer AFFIRMATIVELY that a pid does not exist.
   printf 'unknown\n'
 }
 

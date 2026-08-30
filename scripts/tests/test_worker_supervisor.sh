@@ -87,6 +87,12 @@ T_LOCKFN="$TMP_ROOT/lockfn"
 # SO OWNERSHIP IS TRACKED, AND IT IS SURRENDERED AS SOON AS IT CAN BE:
 #   * `FIXTURE_OWNED` holds one record per group this run CURRENTLY owns. A group is REMOVED from it the
 #     moment we can prove we no longer own it, which happens BEFORE any later signal can reach it.
+#   * AND OWNERSHIP IS SURRENDERED AT THE POINT OF REAPING, NOT AT TEARDOWN (#3549, roborev job 203 F2).
+#     A `wait`ed fixture is dead; leaving it registered until the next probe means the next probe asks
+#     `kill -0` about a NUMBER that may already have been recycled, gets a truthful `live` about someone
+#     else, and signals them. So every reap goes through `fixture_wait`, which waits, clears the group
+#     and UNREGISTERS — and `fixture_kill` routes through it, making that the ONE place a registered
+#     fixture is reaped. No call site may `wait` a fixture directly; a structural case pins that.
 #   * `fixture_group_state` is the proof, and it is THREE-VALUED for the same reason the code under test
 #     is: `kill -0` on a negative pid fails with ESRCH (the group is gone — release it) and with EPERM
 #     (the group EXISTS and we may not signal it, i.e. the number now belongs to somebody else — release
@@ -112,6 +118,7 @@ FIXTURE_OWNED=()      # records "<pgid>|<leader-start-time>" for the groups this
 FIXTURE_FOREIGN=()    # pgids released WITHOUT being signalled, because the number was proven reused
 FIXTURE_STAGED=0      # monotone count of groups ever staged — the non-vacuity floor, since FIXTURE_OWNED shrinks
 FIXTURE_LAST_PID=""
+FIXTURE_WAIT_STATUS=0 # status of the last pid `fixture_wait` waited for (see why it is not an exit code)
 
 # fixture_leader_ident <pid> — echo an incarnation token for a pid (procfs start time), or NOTHING when
 # this host cannot answer (no procfs, e.g. macOS; an unreadable or unparseable `stat`). EMPTY MEANS
@@ -215,15 +222,87 @@ fixture_signal_owned() {
   return 0
 }
 
+# fixture_unregister <pgid>... — SURRENDER OWNERSHIP of a group, unconditionally and WITHOUT signalling
+# it. This is the only operation that removes a record on the strength of something WE did rather than
+# something we PROVED about the group, and it is sound for exactly one caller: `fixture_wait`, which has
+# already reaped the group. `fixture_release_unowned` cannot serve there, because its proof is
+# `kill -0` on a pgid NUMBER — and after a reap the number is precisely what may have been recycled.
+fixture_unregister() {
+  local rec pgid drop
+  local -a keep=()
+  [[ "$#" -gt 0 ]] || return 0
+  drop=" $* "
+  for rec in ${FIXTURE_OWNED[@]+"${FIXTURE_OWNED[@]}"}; do
+    pgid="${rec%%|*}"
+    [[ "$drop" != *" $pgid "* ]] || continue
+    keep+=("$rec")
+  done
+  FIXTURE_OWNED=(${keep[@]+"${keep[@]}"})
+  return 0
+}
+
+# fixture_wait <pid>... — WAIT for a fixture, REAP WHATEVER REMAINS OF ITS GROUP, AND SURRENDER
+# OWNERSHIP. THE ONLY SANCTIONED WAY TO WAIT FOR A REGISTERED FIXTURE.
+#
+# THE LEAK THIS CLOSES (#3549, roborev job 203 F2) — THE SAME DESTRUCTIVE-SIGNAL CLASS THE REGISTRY WAS
+# INTRODUCED FOR, ONE STEP FURTHER IN. Job 198 F2 stopped the reap iterating a HISTORICAL list; what it
+# left is that a fixture which has been `wait`ed is DEAD YET STILL REGISTERED. Nine cases staged a
+# `sleep 0.1` for a genuinely-reaped pid and waited it DIRECTLY, so its pgid sat in `FIXTURE_OWNED` for
+# the rest of the run. `fixture_release_unowned` cannot see the problem: its only evidence is `kill -0`
+# on that NUMBER, and once the kernel hands the number to an unrelated same-user process GROUP the probe
+# answers `live` — truthfully, about somebody else. The reap then delivers TERM and KILL to it. On this
+# four-lane box that is plausibly a sibling lane's supervisor, gate or worker.
+#
+# WHY THE INCARNATION TOKEN IS NOT THE MECHANISM. It is procfs-only, so it does not exist on macOS, and
+# it is refutation-only by design (`fixture_bg`'s comment): a reaped leader has no `/proc/<pid>/stat` at
+# all, so there is nothing to compare and the recycled group is not refuted. Correctness therefore may
+# not depend on it — it is a bonus that catches SOME recycles on Linux, never the guarantee.
+#
+# WHY A CHOKE POINT AND NOT N CORRECT CALL SITES. This class has now recurred twice (jobs 198, 203), and
+# both times the previous fix was correct and left the NEXT site raw — the signal that per-call-site
+# correctness is the wrong shape. So `fixture_kill` routes through here too, making this the single
+# place a registered fixture is reaped: `wait`, clear the group, unregister. No path reaps without
+# surrendering, and `test_fixture_wait_surrenders_ownership` pins that structurally as well.
+#
+# THE ORDER IS LOAD-BEARING. `wait` first (the leader is ours to reap and this shell must clear its job
+# table), then signal the group WHILE OWNERSHIP IS STILL ESTABLISHED — a non-`exec` fixture's orphaned
+# child can hold the group after its shell exits, which is the ORIGINAL leak (job 196 F2), so
+# unregistering without that sweep would trade a destructive signal for a silent five-minute leak the
+# end-of-run leak assert could no longer see. Only then unregister.
+#
+# STATUS IS RETURNED IN A VARIABLE, NOT AS AN EXIT CODE, DELIBERATELY: `t()` fails a test function that
+# returns non-zero, so a `fixture_wait` on a TERMed fixture (status 143) as a case's LAST statement
+# would fail the case. `FIXTURE_WAIT_STATUS` carries the last waited status for any caller that wants it.
+fixture_wait() {
+  local pid st
+  FIXTURE_WAIT_STATUS=0
+  for pid in "$@"; do
+    [[ -n "$pid" ]] || continue
+    st=0
+    wait "$pid" 2>/dev/null || st=$?
+    FIXTURE_WAIT_STATUS="$st"
+    fixture_signal_owned TERM "$pid"
+    # Only pay the settle for a group that is still holding the number after TERM. For the common
+    # already-exited fixture `fixture_signal_owned` has already released it and this is a no-op.
+    if [[ "$(fixture_group_state "$pid")" == live ]]; then
+      sleep 0.2
+      fixture_signal_owned KILL "$pid"
+    fi
+    fixture_unregister "$pid"
+  done
+  return 0
+}
+
 # fixture_kill <pid>... — per-case teardown: TERM the whole GROUP of each named fixture (only if still
-# owned), then reap the direct child so no zombie is left in this shell's job table. A group that is
-# already gone stays gone: it is released, not re-signalled by the end-of-run reap.
+# owned), then hand it to `fixture_wait`, which reaps the direct child (no zombie in this shell's job
+# table), clears any survivor of the group and SURRENDERS OWNERSHIP. A group that is already gone stays
+# gone: it is released, not re-signalled by the end-of-run reap.
 fixture_kill() {
   local pid
   for pid in "$@"; do
     [[ -n "$pid" ]] || continue
     fixture_signal_owned TERM "$pid"
-    wait "$pid" 2>/dev/null || true
+    fixture_wait "$pid"
   done
   fixture_release_unowned
   return 0
@@ -4996,7 +5075,7 @@ test_legacy_global_lock_refuses_stale_holder() {
   # large number, which would only ever exercise "not found" and never the reaped case.
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
   before_pid="$(cat "$legacy/pid")"
@@ -5134,7 +5213,7 @@ test_legacy_global_lock_unknown_shapes_refuse() {
   # wrong reason.
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
 
   # AC3. Every one of these is "cannot tell", and "cannot tell" must NOT collapse onto the permissive
   # answer — the two-valued-file-predicate trap named in CLAUDE.md. Each shape is asserted separately
@@ -5265,7 +5344,7 @@ test_legacy_global_lock_symlink_shapes_refuse() {
   # as the reclaim case (AC5). A made-up large number would only ever exercise "not found".
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
 
   # ---- (a) THE DANGEROUS ONE: a symlink to a VALID lock directory with a CONFIRMED-DEAD pid. -------
   # This is the case that is NOT caught by any other predicate: follow the link and it is a textbook
@@ -5569,7 +5648,7 @@ test_legacy_lock_liveness_is_three_valued() {
 
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
   ans=$(bash "$body" "$dead")
   if [[ "$ans" == dead ]]; then
     pass "liveness: a REAL reaped pid answers 'dead' (affirmatively corroborated, not inferred from a failed kill -0)"
@@ -5830,7 +5909,7 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
   # itself (which also checks the lock is gone afterwards).
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
@@ -6105,102 +6184,172 @@ PY
 }
 
 # ---------------------------------------------------------------------------
-# Test 47-lock (#3549, roborev job 185 F3, class sweep): THE `ps` LIVENESS FALLBACK DISTINGUISHES "no
-# such process" FROM "`ps` could not answer".
+# Test 47-lock (#3549, roborev job 203 F1): THERE IS NO `ps` LIVENESS FALLBACK — THE `dead` VERDICT
+# COMES FROM PROCFS OR IT DOES NOT COME AT ALL.
 #
-# The pre-fix form was `if ps -p "$pid" >/dev/null 2>&1; then live; else dead; fi` — every non-zero
-# exit, including `ps` failing for its OWN reasons, read as an affirmative absence. Same shape as
-# reporting an unread `cmdline` as a non-match, and here the verdict is what makes a lock "stale" and
-# earns an operator a deletion instruction, so the permissive collapse is the expensive direction.
+# THIS CASE REPLACES ONE THAT PINNED THE FALLBACK'S THREE-VALUED FORM (job 185 F3). That form was
+# `output present => live` / `exit 1 with no stdout => dead` / anything else => `unknown`, and it was
+# still an INFERENCE: `ps` exits 1 on a usage error too, and with stderr discarded the two answers are
+# indistinguishable. `dead` is what makes a lock `stale`, which is the ONE branch that prints a
+# DELETION remedy. So the fallback was DELETED rather than narrowed a third time — the
+# `supervisor_pid_identity` precedent, for its argument verbatim: since the reclaim was removed both
+# `stale` and `unknown` REFUSE, so the verdict's only consumer is WORDING, while its failure mode aims
+# a deletion instruction at a live holder. Full rationale at the deletion site in the supervisor.
 #
-# REACHING THE BRANCH TAKES TWO STAGED FACTS, and both are the established scratch-copy technique
-# (no seam in the shipped script): the procfs literal substituted for a nonexistent root, so procfs
-# cannot corroborate; and, for a subject that is genuinely ALIVE, the errno branch deleted — otherwise
-# `kill -0` answers `live` first and the fallback is never reached at all. With both applied, pid 1
-# under a non-root run is a LIVE process whose liveness only `ps` can establish, which is exactly the
-# macOS/hidepid shape the fallback exists for. Under root there is no EPERM subject and the live
-# sub-assertions SKIP rather than silently pass.
+# WHAT IS ASSERTED, IN BOTH DIRECTIONS:
+#   (a) STRUCTURAL — the shipped function contains no `ps` INVOCATION, so the fallback cannot creep
+#       back in behind a green behavioural case;
+#   (b) BEHAVIOURAL — with procfs blinded and the REAL `ps` on PATH, a genuinely reaped pid answers
+#       `unknown` (not `dead`) and a LIVE EPERM subject answers `unknown` (not `live`). Both refuse;
+#   (c) MUTANT CONTRAST — the two pre-deletion forms, reinstated in the scratch copy, BOTH answer
+#       `dead` for a LIVE pid 1 against a `ps` stub reproducing BusyBox v1.36.1's MEASURED behaviour:
+#       `ps -p 1 -o pid=` exits 1 with EMPTY stdout and `ps: invalid option -- 'p'` plus a usage block
+#       on STDERR, because `-p` is not a BusyBox option at all. A live process classified `dead` on a
+#       real shipped `ps`, not a hypothesis;
+#   (d) AND THE THIRD NARROWING THAT WAS REJECTED IS SHOWN NOT TO CLOSE THE CLASS — "also require
+#       empty stderr" fixes the BusyBox instance and still answers `dead` for LIVE pid 1 against a
+#       `ps` that exits 1 with NOTHING on EITHER stream. A fourth window, not a fix, which is the
+#       measured reason this is a deletion.
+# The mutant text is QUOTED from the pre-deletion revision — it CANNOT be derived from the shipped
+# file, since the point is that it is no longer there — and that is exactly why (a) pins the shipped
+# side independently of it.
 # ---------------------------------------------------------------------------
-test_legacy_lock_ps_liveness_fallback_is_three_valued() {
-  local d body noerrno mutant blind stubdir dead ans
+test_legacy_lock_has_no_ps_liveness_fallback() {
+  local d blind body noerrno shipped_fn dead ans form stub stubdir bb sil m
   d="$(new_case_dir)"
   blind="/nonexistent-procfs-for-3549-ps"
-  body="$T_LOCKFN/liveness-ps.sh"
-  noerrno="$T_LOCKFN/liveness-ps-noerrno.sh"
-  mutant="$T_LOCKFN/liveness-ps-mutant.sh"
-  stubdir="$d/psstub"
-  mkdir -p "$T_LOCKFN" "$stubdir"
+  body="$T_LOCKFN/liveness-nops.sh"
+  noerrno="$T_LOCKFN/liveness-nops-noerrno.sh"
+  bb="$d/psstub-busybox"
+  sil="$d/psstub-silent"
+  mkdir -p "$T_LOCKFN" "$bb" "$sil"
+
+  shipped_fn="$(sed -n '/^supervisor_pid_liveness()/,/^}/p' "$SUPERVISOR")"
+  if [[ -z "$shipped_fn" || "$shipped_fn" != *'supervisor_pid_liveness() {'* ]]; then
+    fail "liveness-nops-premise: the shipped supervisor_pid_liveness could not be extracted from $SUPERVISOR"
+    return 0
+  fi
+
+  # (a) STRUCTURAL PIN. Matched on the INVOCATION shape — a `ps` opening a command — with comment lines
+  # stripped first: the function's own comment block discusses `ps` at length, and flagging that would
+  # red on correct text, which is the check people learn to waive.
+  if printf '%s\n' "$shipped_fn" | grep -v '^[[:space:]]*#' | grep -qE '(^|[;|&(]|\$\()[[:space:]]*ps[[:space:]]'; then
+    fail "liveness-nops (a): the shipped supervisor_pid_liveness INVOKES ps again — the fallback deleted in job 203 F1 is back, and with it the false 'dead' below"
+    return 0
+  fi
+  pass "liveness-nops (a): the shipped supervisor_pid_liveness contains no ps INVOCATION — procfs is its only corroborating oracle"
 
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -uo pipefail'
-    sed -n '/^supervisor_pid_liveness()/,/^}/p' "$SUPERVISOR" | sed "s#/proc#$blind#g"
+    printf '%s\n' "$shipped_fn" | sed "s#/proc#$blind#g"
     printf '%s\n' 'supervisor_pid_liveness "$1"'
   } >"$body"
-  if diff -q <(sed -n '/^supervisor_pid_liveness()/,/^}/p' "$SUPERVISOR") \
+  if diff -q <(printf '%s\n' "$shipped_fn") \
              <(sed -n '/^supervisor_pid_liveness()/,/^}/p' "$body" | sed "s#$blind#/proc#g") >/dev/null; then
-    pass "liveness-ps: the scratch copy differs from the shipped function ONLY in the procfs literal (inverse substitution is byte-identical)"
+    pass "liveness-nops: the scratch copy differs from the shipped function ONLY in the procfs literal (inverse substitution is byte-identical)"
   else
-    fail "liveness-ps-scratch-drift: the scratch copy is not the shipped function with only the procfs substitution applied"
+    fail "liveness-nops-scratch-drift: the scratch copy is not the shipped function with only the procfs substitution applied"
+    return 0
   fi
   if [[ ! -d "$blind/self" ]]; then
-    pass "liveness-ps PREMISE: the substituted procfs root does not exist, so the ps fallback is the only corroboration left"
+    pass "liveness-nops PREMISE: the substituted procfs root does not exist, so procfs cannot corroborate and every verdict below comes from what remains"
   else
-    fail "liveness-ps-premise: $blind/self exists; the case below would not reach the ps branch"
-  fi
-  if ! command -v ps >/dev/null 2>&1; then
-    skip "liveness-ps: no ps on this host — the fallback under test is unreachable"
+    fail "liveness-nops-premise: $blind/self exists; the cases below would be answered by procfs"
     return 0
   fi
+  if command -v ps >/dev/null 2>&1; then
+    pass "liveness-nops PREMISE: a real ps IS resolvable on this host, so an 'unknown' below is the absence of a FALLBACK and not the absence of ps"
+  else
+    skip "liveness-nops: no ps on this host, so 'unknown' below cannot be attributed to the deletion rather than to a missing binary"
+  fi
 
-  # (1) A REAL reaped pid, answered by the REAL ps: `kill -0` fails with ESRCH, procfs is blind, and ps
-  # exits 1 with no output — the documented no-such-process answer, which IS an affirmative absence.
+  # (b) A REAL reaped pid: `kill -0` fails with ESRCH, procfs is blind, and nothing else may answer.
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
   ans="$(bash "$body" "$dead")"
-  if [[ "$ans" == dead ]]; then
-    pass "liveness-ps: procfs blind + real ps — a REAL reaped pid answers 'dead' (ps exit 1, no output: the documented no-such-process answer)"
+  if [[ "$ans" == unknown ]]; then
+    pass "liveness-nops (b): procfs blind, real ps on PATH — a REAL reaped pid answers 'unknown', NOT 'dead'; without procfs there is no verdict to give"
   else
-    fail "liveness-ps-dead: answered [$ans] for reaped pid $dead via the ps fallback"
+    fail "liveness-nops-reaped: answered [$ans] for reaped pid $dead with procfs blind; 'dead' means something is corroborating the absence again"
   fi
 
-  # The errno branch removed as well, so a LIVE subject reaches the fallback. One line, and the
-  # difference is asserted before anything is concluded from the copy.
+  # The errno branch removed as well, so a LIVE subject reaches the end of the function. One line, and
+  # the difference is asserted before anything is concluded from the copy.
   sed "/not permitted/d" "$body" >"$noerrno"
   if [[ "$(diff "$body" "$noerrno" | grep -c '^<')" == "1" ]] && bash -n "$noerrno" 2>/dev/null; then
-    pass "liveness-ps: the live-subject copy differs from the scratch copy by EXACTLY the one errno-branch line, and parses"
+    pass "liveness-nops: the live-subject copy differs from the scratch copy by EXACTLY the one errno-branch line, and parses"
   else
-    fail "liveness-ps-noerrno-shape: the copy differs by $(diff "$body" "$noerrno" | grep -c '^<') line(s) or does not parse"
+    fail "liveness-nops-noerrno-shape: the copy differs by $(diff "$body" "$noerrno" | grep -c '^<') line(s) or does not parse"
     return 0
   fi
-  if kill -0 1 2>/dev/null; then
-    skip "liveness-ps: this run can signal pid 1 (root), so no EPERM subject exists and a LIVE pid cannot be routed to the ps fallback"
-  else
-    # (2) LIVE subject, REAL ps: the fallback names pid 1, so it answers `live`. This is the direction
-    # that proves the branch is not blanket-cautious.
-    ans="$(bash "$noerrno" 1)"
-    if [[ "$ans" == live ]]; then
-      pass "liveness-ps: procfs blind, errno branch gone, real ps — LIVE pid 1 answers 'live' because ps NAMED it (output, not exit status)"
+
+  # The two stubs. `printf` not `echo` for the stderr text, and the BusyBox stub reproduces the
+  # MEASURED streams exactly: exit 1, nothing on stdout, the option error plus usage on stderr.
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' "printf '%s\\n' \"ps: invalid option -- 'p'\" 'BusyBox v1.36.1 multi-call binary.' 'Usage: ps [-o COL1,COL2=HEADER] [-T]' >&2"
+    printf '%s\n' 'exit 1'
+  } >"$bb/ps"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$sil/ps"
+  chmod +x "$bb/ps" "$sil/ps"
+  for stubdir in "$bb" "$sil"; do
+    if [[ "$(env PATH="$stubdir" "$BASH" -c 'command -v ps')" == "$stubdir/ps" ]]; then
+      pass "liveness-nops NON-VACUITY: ps resolves to $(basename "$stubdir")/ps under the scoped PATH, so verdicts driven with it are attributable to it"
     else
-      fail "liveness-ps-live: answered [$ans] for LIVE pid 1 with the real ps as the only oracle"
+      fail "liveness-nops-stub-leak: ps resolves to [$(env PATH="$stubdir" "$BASH" -c 'command -v ps')] under PATH=$stubdir"
+      return 0
     fi
-    # (3) LIVE subject, a `ps` THAT CANNOT ANSWER (exit 2, no output): the verdict is `unknown`, which
-    # refuses — never `dead`, which would call a live holder's lock stale.
-    printf '%s\n' '#!/usr/bin/env bash' 'exit 2' >"$stubdir/ps"
-    chmod +x "$stubdir/ps"
+  done
+  # ...and the stubs really do produce the streams the contrast reasons about.
+  if [[ -z "$(env PATH="$bb" "$BASH" -c 'ps -p 1 -o pid= 2>/dev/null')" ]] \
+     && [[ -n "$(env PATH="$bb" "$BASH" -c 'ps -p 1 -o pid= 2>&1 >/dev/null')" ]] \
+     && [[ -z "$(env PATH="$sil" "$BASH" -c 'ps -p 1 -o pid= 2>&1')" ]]; then
+    pass "liveness-nops NON-VACUITY: the BusyBox-shaped stub emits EMPTY stdout with a non-empty stderr, and the silent stub emits nothing on either stream"
+  else
+    fail "liveness-nops-stub-streams: the stubs do not produce the stream shapes the mutant contrast below reasons about"
+    return 0
+  fi
+
+  if kill -0 1 2>/dev/null; then
+    skip "liveness-nops: this run can signal pid 1 (root), so no EPERM subject exists and a LIVE pid cannot be routed past the errno branch"
+    return 0
+  fi
+
+  # (b, second direction) THE SHIPPED FORM IS IMMUNE TO BOTH STUBS, because it asks neither of them.
+  for stubdir in "$bb" "$sil"; do
     ans="$(env PATH="$stubdir" "$BASH" "$noerrno" 1)"
     if [[ "$ans" == unknown ]]; then
-      pass "liveness-ps: a ps that FAILS (exit 2, no output) yields 'unknown' for LIVE pid 1 — an unmeasured probe is not an affirmative absence"
+      pass "liveness-nops (b): procfs blind, errno branch gone, ps = $(basename "$stubdir")/ps — a LIVE EPERM pid answers 'unknown', never 'live' or 'dead'; the deletion makes the stub's answer irrelevant"
     else
-      fail "liveness-ps-unknown: answered [$ans] with a failing ps for LIVE pid 1; 'dead' here is the call-a-live-holder-stale outcome"
+      fail "liveness-nops-live: answered [$ans] for LIVE pid 1 with ps=$stubdir/ps"
     fi
-    # MUTANT CONTRAST: the pre-fix status-only form answers `dead` for that same failing ps.
-    python3 - "$noerrno" "$mutant" <<'PYEOF'
+  done
+
+  # (c)/(d) THE MUTANTS: each pre-deletion form (and the rejected narrowing) reinstated in the
+  # live-subject copy, inserted at the one place the fallback used to sit — immediately before the
+  # final `unknown`. Every premise is checked, because a mutant that failed to mutate would pass from
+  # the shipped code and measure nothing.
+  for form in status narrow stderr; do
+    m="$T_LOCKFN/liveness-nops-mutant-$form.sh"
+    if ! python3 - "$noerrno" "$m" "$form" <<'PYEOF'
 import sys
-src, dst = sys.argv[1], sys.argv[2]
+src, dst, form = sys.argv[1], sys.argv[2], sys.argv[3]
 s = open(src).read()
-old = """    local psout="" psrc=0
+tail = "  printf 'unknown\\n'\n}\n"
+if s.count(tail) != 1:
+    sys.exit("the scratch copy's final 'unknown' tail is not unique; the fallback insertion point moved")
+forms = {
+    # Pre-job-185: every non-zero exit is an affirmative absence.
+    'status': """  if command -v ps >/dev/null 2>&1; then
+    if ps -p "$pid" >/dev/null 2>&1; then printf 'live\\n'; else printf 'dead\\n'; fi
+    return 0
+  fi
+""",
+    # Job 185 F3 .. job 203 F1: exit 1 with no STDOUT is read as the no-such-process answer.
+    'narrow': """  if command -v ps >/dev/null 2>&1; then
+    local psout="" psrc=0
     psout="$(ps -p "$pid" -o pid= 2>/dev/null)" || psrc=$?
     if [[ -n "$psout" ]]; then
       printf 'live\\n'
@@ -6209,29 +6358,61 @@ old = """    local psout="" psrc=0
     else
       printf 'unknown\\n'
     fi
-"""
-new = """    if ps -p "$pid" >/dev/null 2>&1; then printf 'live\\n'; else printf 'dead\\n'; fi
-"""
-assert s.count(old) == 1, "the shipped ps fallback no longer has the expected shape"
-open(dst, 'w').write(s.replace(old, new))
-PYEOF
-    if [[ -s "$mutant" ]] && bash -n "$mutant" 2>/dev/null; then
-      ans="$(env PATH="$stubdir" "$BASH" "$mutant" 1)"
-      if [[ "$ans" == dead ]]; then
-        pass "liveness-ps MUTANT CONTRAST: the pre-fix status-only form answers 'dead' for LIVE pid 1 whose ps FAILED — the affirmative absence the fix removes"
-      else
-        fail "liveness-ps-mutant: the pre-fix form answered [$ans]; expected the false 'dead', or the contrast proves nothing"
-      fi
-    else
-      fail "liveness-ps-mutant-build: the pre-fix mutant could not be built from the live-subject copy"
-    fi
-    # ...and the same stub really is what `ps` resolves to, or the two asserts above are accidental.
-    if [[ "$(env PATH="$stubdir" "$BASH" -c 'command -v ps')" == "$stubdir/ps" ]]; then
-      pass "liveness-ps NON-VACUITY: ps resolves to the failing stub under the scoped PATH, so both verdicts above are attributable to it"
-    else
-      fail "liveness-ps-stub-leak: ps resolves to [$(env PATH="$stubdir" "$BASH" -c 'command -v ps')] under PATH=$stubdir"
-    fi
+    return 0
   fi
+""",
+    # The REJECTED third narrowing: exit 1 with no stdout AND no stderr.
+    'stderr': """  if command -v ps >/dev/null 2>&1; then
+    local psout="" pserr="" psrc=0
+    psout="$(LC_ALL=C ps -p "$pid" -o pid= 2>/dev/null)" || psrc=$?
+    pserr="$(LC_ALL=C ps -p "$pid" -o pid= 2>&1 >/dev/null)" || true
+    if [[ -n "$psout" ]]; then
+      printf 'live\\n'
+    elif [[ "$psrc" -eq 1 && -z "$pserr" ]]; then
+      printf 'dead\\n'
+    else
+      printf 'unknown\\n'
+    fi
+    return 0
+  fi
+""",
+}
+open(dst, 'w').write(s.replace(tail, forms[form] + tail))
+PYEOF
+    then
+      fail "liveness-nops-mutant-build ($form): the pre-deletion form could not be inserted into the live-subject copy"
+      continue
+    fi
+    if ! bash -n "$m" 2>/dev/null || ! grep -q 'ps -p "\$pid"' "$m"; then
+      fail "liveness-nops-mutant-shape ($form): the mutant does not parse or does not invoke ps, so its verdict proves nothing"
+      continue
+    fi
+    ans="$(env PATH="$bb" "$BASH" "$m" 1)"
+    case "$form" in
+      status | narrow)
+        if [[ "$ans" == dead ]]; then
+          pass "liveness-nops (c) MUTANT CONTRAST [$form]: the pre-deletion form answers 'dead' for LIVE pid 1 against the BusyBox-shaped ps — a live holder's lock called stale, with a deletion remedy attached"
+        else
+          fail "liveness-nops-mutant ($form): answered [$ans] for LIVE pid 1 against the BusyBox-shaped ps; expected the false 'dead', or the contrast measures nothing"
+        fi
+        ;;
+      stderr)
+        if [[ "$ans" == unknown ]]; then
+          pass "liveness-nops (d): the REJECTED stderr narrowing does fix the BusyBox INSTANCE — it answers 'unknown' where the shipped-then form said 'dead'"
+        else
+          fail "liveness-nops-mutant (stderr): answered [$ans] against the BusyBox-shaped ps; the narrowing's own claim does not hold, so (d) below is not the point being made"
+        fi
+        ;;
+    esac
+    if [[ "$form" == stderr ]]; then
+      ans="$(env PATH="$sil" "$BASH" "$m" 1)"
+      if [[ "$ans" == dead ]]; then
+        pass "liveness-nops (d) MUTANT CONTRAST: ...and it does NOT close the CLASS — a ps exiting 1 with NOTHING on either stream still drives it to 'dead' for LIVE pid 1, which is why the fallback is deleted and not narrowed a third time"
+      else
+        fail "liveness-nops-mutant (stderr/silent): answered [$ans] for LIVE pid 1 against a silent failing ps; the rejected narrowing must be SHOWN not to close the class"
+      fi
+    fi
+  done
 }
 
 
@@ -6267,7 +6448,7 @@ test_legacy_lock_emitted_dynamic_values_are_rendered() {
 
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
 
   # ---- (a) THE UNSEARCHABLE CONTAINER, with a NEWLINE **and** an ESC in `TMPDIR`.
   if [[ "$(id -u)" == "0" ]]; then
@@ -6425,7 +6606,6 @@ test_legacy_lock_emitted_dynamic_values_are_rendered() {
     rm -rf "$d/tmpnr"
   fi
 
-  fixture_kill "$dead"
 }
 
 # ---------------------------------------------------------------------------
@@ -6453,7 +6633,7 @@ test_legacy_lock_padded_pid_file_is_unrecognised() {
   # hidden the finding behind the `live` wording.
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
 
   legacy="$d/tmp/cqlite-worker-supervisor.lock"
 
@@ -6507,7 +6687,6 @@ test_legacy_lock_padded_pid_file_is_unrecognised() {
     rm -rf "$d/tmp"
   fi
 
-  fixture_kill "$dead"
 }
 
 # ---------------------------------------------------------------------------
@@ -6535,7 +6714,7 @@ test_legacy_lock_classifier_survives_inherit_errexit() {
 
   fixture_bg sleep 0.1
   dead=$FIXTURE_LAST_PID
-  wait "$dead" 2>/dev/null || true
+  fixture_wait "$dead"
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
 
@@ -6549,7 +6728,6 @@ test_legacy_lock_classifier_survives_inherit_errexit() {
   out="$(legacy_lock_drive_errexit "$d/tmp" "$lane")"; rc=$?
   if [[ "$out" == *ERREXIT_UNAVAILABLE* ]]; then
     skip "legacy-lock errexit: this bash cannot set inherit_errexit (pre-4.4), so an errexit-propagating caller cannot be staged"
-    fixture_kill "$dead"
     return 0
   fi
 
@@ -6610,14 +6788,13 @@ test_legacy_lock_classifier_survives_inherit_errexit() {
   fi
 
   rm -rf "$d/tmp"
-  fixture_kill "$dead"
 }
 
 t test_legacy_lock_eperm_errno_branch_is_load_bearing
 t test_legacy_lock_liveness_is_three_valued
 t test_legacy_lock_remedy_lines_are_executable_as_printed
 t test_legacy_lock_pid_file_unreadable_at_open_is_named
-t test_legacy_lock_ps_liveness_fallback_is_three_valued
+t test_legacy_lock_has_no_ps_liveness_fallback
 t test_legacy_lock_emitted_dynamic_values_are_rendered
 t test_legacy_lock_padded_pid_file_is_unrecognised
 t test_legacy_lock_classifier_survives_inherit_errexit
@@ -6667,6 +6844,8 @@ test_fixture_reap_never_signals_a_disowned_group() {
     sed -n '/^fixture_group_state()/,/^}/p' "$SELF_FILE"
     sed -n '/^fixture_release_unowned()/,/^}/p' "$SELF_FILE"
     sed -n '/^fixture_signal_owned()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_unregister()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_wait()/,/^}/p' "$SELF_FILE"
     sed -n '/^fixture_kill()/,/^}/p' "$SELF_FILE"
     sed -n '/^fixture_reap()/,/^}/p' "$SELF_FILE"
     printf '%s\n' 'FIXTURE_OWNED=("2999901|" "2999902|" "2999903|")'
@@ -6687,11 +6866,11 @@ test_fixture_reap_never_signals_a_disowned_group() {
   } >"$drv"
   # THE HARNESS ITSELF MUST BE EXTRACTABLE, or the driver would test an empty file and pass vacuously.
   local fns
-  fns="$(grep -c '^fixture_\(leader_ident\|group_state\|release_unowned\|signal_owned\|kill\|reap\)() {$' "$drv" || true)"
-  if [[ "$fns" == "6" ]]; then
-    pass "reap-ownership PREMISE: all 6 harness functions were extracted from this file into the driver (the subject is the shipped harness, not a re-implementation)"
+  fns="$(grep -c '^fixture_\(leader_ident\|group_state\|release_unowned\|signal_owned\|unregister\|wait\|kill\|reap\)() {$' "$drv" || true)"
+  if [[ "$fns" == "8" ]]; then
+    pass "reap-ownership PREMISE: all 8 harness functions were extracted from this file into the driver (the subject is the shipped harness, not a re-implementation)"
   else
-    fail "reap-ownership-premise: extracted $fns/6 harness functions into the driver; the case below would measure nothing"
+    fail "reap-ownership-premise: extracted $fns/8 harness functions into the driver; the case below would measure nothing"
     return 0
   fi
 
