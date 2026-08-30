@@ -587,16 +587,30 @@ impl PollFail {
 /// than the instant the deadline passes; `PollFail` reports the stage's real
 /// spend, so the message never understates it.
 ///
-/// THAT CLAIM WAS FALSE TWICE BEFORE IT WAS MADE TRUE. It was rescoped in round 9
-/// and was still wrong: the iteration scanned, the artifact `step` scanned again
-/// on its own, `step(ZERO)` scanned a third time at expiry, and the failure path
-/// a fourth — so a post-deadline overrun of FOUR directory walks was possible
-/// while the comment promised one. The claim is not weakened again; the code now
-/// meets it. THE SAMPLE IS TAKEN HERE, EXACTLY ONCE PER ITERATION, and is handed
-/// to `step` as its second argument — so a `step` that decides on durable
-/// artifacts MUST use the count it is given rather than scanning for itself, the
-/// expiry check reuses that same sample, and `PollFail` carries it to the call
-/// site so even the failure message takes no further scan.
+/// THAT CLAIM WAS FALSE THREE TIMES BEFORE IT WAS MADE TRUE, AND IT IS THE CLAIM
+/// THAT GETS FIXED RATHER THAN WEAKENED. It was rescoped in round 9 and was still
+/// wrong: the iteration scanned, the artifact `step` scanned again on its own,
+/// `step(ZERO)` scanned a third time at expiry, and the failure path a fourth — so
+/// a post-deadline overrun of FOUR walks was possible while the comment promised
+/// one. Round 11 removed three of those and left the fourth (roborev job 243,
+/// finding 2): the BASELINE scan was taken and then the loop immediately scanned
+/// AGAIN before its first deadline check, so a poll entered at or past expiry
+/// still walked the directory TWICE. The claim was already weakened once, in
+/// round 9; it is not weakened again.
+///
+/// SO THE BASELINE **IS** ITERATION 0'S SAMPLE, and every later iteration's sample
+/// is taken at the BOTTOM of the loop — only after that iteration has confirmed
+/// the deadline had NOT yet passed. Consequences, which are the whole point:
+/// * exactly ONE sample per iteration, asserted in `harness_tests.rs` through the
+///   `sample` seam rather than argued from reading this loop;
+/// * a poll entered ALREADY EXPIRED takes exactly ONE scan, not two;
+/// * at most ONE scan is ever taken after the deadline lapses, which is what
+///   makes the bound above true.
+///
+/// The sample is handed to `step` as its second argument, so a `step` that decides
+/// on durable artifacts MUST use the count it is given rather than scanning for
+/// itself; the expiry check reuses that same sample, and `PollFail` carries it to
+/// the call site so even the failure message takes no further scan.
 ///
 /// So read every "nothing may exceed the deadline" claim in this harness as a
 /// statement about the timeout ARITHMETIC — no wait is granted, or started, past
@@ -606,23 +620,42 @@ pub fn poll_with_progress<T>(
     io: &ChildIo,
     data_dir: &Path,
     stage: &Stage,
+    step: impl FnMut(Duration, usize) -> Option<T>,
+) -> Result<(T, Duration), PollFail> {
+    poll_with_progress_sampled(io, data_dir, || count_data_db(data_dir), stage, step)
+}
+
+/// [`poll_with_progress`] with the artifact sample supplied by the caller.
+///
+/// The seam exists so the "exactly one scan per iteration, at most one past the
+/// deadline" bound documented above can be MEASURED by a test instead of argued
+/// from reading the loop (roborev job 243, finding 2: the previous version of that
+/// bound was documented, believed and false). Production call sites use
+/// [`poll_with_progress`], which supplies `count_data_db`; nothing else may pass
+/// its own sampler, which is why this is private.
+fn poll_with_progress_sampled<T>(
+    io: &ChildIo,
+    data_dir: &Path,
+    mut sample: impl FnMut() -> usize,
+    stage: &Stage,
     mut step: impl FnMut(Duration, usize) -> Option<T>,
 ) -> Result<(T, Duration), PollFail> {
     const SLICE: Duration = Duration::from_millis(100);
     let mut last_progress = Instant::now();
     // The baseline, taken before any step runs: `new_artifacts` counts what
-    // appeared DURING the poll, so iteration 0 must have something to differ from.
-    let mut prev_artifacts = count_data_db(data_dir);
+    // appeared DURING the poll, so iteration 0 must have something to differ
+    // from. It is ALSO iteration 0's sample — taking a second scan at the first
+    // loop top is the redundant walk job 243 finding 2 found.
+    let mut prev_artifacts = sample();
+    let mut artifacts = prev_artifacts;
     let mut new_lines = 0usize;
     let mut new_artifacts = 0usize;
 
     loop {
-        // THE ITERATION'S ONE SAMPLE OF EACH SIGNAL, taken at the top and reused
-        // by everything below it: the progress accounting, `step`, the expiry
-        // status check and the failure message. Nothing downstream re-scans, which
-        // is what makes the documented overrun bound above true rather than
-        // aspirational.
-        let artifacts = count_data_db(data_dir);
+        // THE ITERATION'S ONE SAMPLE OF EACH SIGNAL, reused by everything below
+        // it: the progress accounting, `step`, the expiry status check and the
+        // failure message. Nothing downstream re-scans, which is what makes the
+        // documented overrun bound above true rather than aspirational.
         if artifacts > prev_artifacts {
             new_artifacts += artifacts - prev_artifacts;
             prev_artifacts = artifacts;
@@ -672,6 +705,11 @@ pub fn poll_with_progress<T>(
         if let Some(done) = step(SLICE.min(remaining), artifacts) {
             return Ok((done, stage.spent()));
         }
+        // THE NEXT ITERATION'S SAMPLE, taken at the BOTTOM: this iteration has
+        // already established that the deadline had not passed, so this scan is
+        // charged to a live poll. Taking it at the loop TOP instead is what let an
+        // already-expired poll walk the directory twice (job 243, finding 2).
+        artifacts = sample();
     }
 }
 

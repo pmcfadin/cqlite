@@ -12,6 +12,7 @@
 //! surface is deliberately small and these are the seams the defects lived in.
 
 use super::*;
+use std::cell::Cell;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -491,5 +492,122 @@ fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
         observed.contains("BOTH reached EOF"),
         "the poll gave up with both reader threads gone and did not report it, so the message \
          implies more output was still possible: {observed}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CLASS B: EXACTLY ONE ARTIFACT SCAN PER ITERATION, AND AT MOST ONE PAST THE
+// DEADLINE (roborev job 243, finding 2)
+// ---------------------------------------------------------------------------
+//
+// `poll_with_progress` documents an overrun bound of one slice plus ONE recursive
+// `count_data_db` walk. That bound has been wrong three times, and each time it
+// was wrong it was BELIEVED, because it was argued from reading the loop. These
+// two tests MEASURE it through the `sample` seam, so the next redundant walk reds
+// the fast loop instead of surviving another review round.
+//
+// Neither test asserts a duration, and neither depends on how many slices fit in
+// a deadline: the scan census test terminates from INSIDE its own step after a
+// fixed number of iterations, and the expiry test starts from an already-lapsed
+// deadline (a sleep can only overshoot, which makes that precondition more true).
+
+/// A poll entered when the deadline has ALREADY lapsed must take exactly ONE
+/// artifact scan.
+///
+/// The old loop took the baseline and then immediately scanned again at the first
+/// loop top, before any deadline check — so this poll walked the directory TWICE
+/// after expiry while the documented bound promised one walk. On a loaded host,
+/// where a recursive `read_dir` is not quick, that is the difference the bound
+/// exists to state.
+#[test]
+fn an_already_expired_poll_takes_exactly_one_artifact_scan() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let (io, _lines) = ChildIo::synthetic();
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("already-expired-scan-bound");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    let samples = Cell::new(0usize);
+    let outcome = poll_with_progress_sampled(
+        &io,
+        dir.path(),
+        || {
+            samples.set(samples.get() + 1);
+            0
+        },
+        &stage,
+        |_slice, _artifacts| None::<()>,
+    );
+    assert!(
+        outcome.is_err(),
+        "the step never completes, so an expired poll must give up"
+    );
+    assert_eq!(
+        samples.get(),
+        1,
+        "a poll entered past its deadline took {} recursive artifact scans; the documented \
+         overrun bound is ONE, and this bound gets FIXED rather than weakened",
+        samples.get()
+    );
+}
+
+/// Every iteration takes exactly one artifact scan — no redundant walk.
+///
+/// Asserted as an EQUALITY against the step-invocation count, which is the
+/// property ("one sample per iteration") rather than a magic number that would
+/// have to be re-derived whenever the loop changes. The poll ends from inside its
+/// own step after a fixed number of iterations, so nothing here depends on how
+/// many 100ms slices fit into a deadline — this is not a wall-clock assert.
+#[test]
+fn every_poll_iteration_takes_exactly_one_artifact_scan() {
+    const ITERATIONS: usize = 4;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let (io, _lines) = ChildIo::synthetic();
+
+    // Generous, and deliberately never reached: the step below ends the poll.
+    let deadline = TestDeadline::start(Duration::from_secs(30), Duration::from_secs(30));
+    let stage = deadline.stage("scan-census");
+
+    let samples = Cell::new(0usize);
+    let steps = Cell::new(0usize);
+    let outcome = poll_with_progress_sampled(
+        &io,
+        dir.path(),
+        || {
+            samples.set(samples.get() + 1);
+            0
+        },
+        &stage,
+        |_slice, _artifacts| {
+            steps.set(steps.get() + 1);
+            if steps.get() >= ITERATIONS {
+                Some(())
+            } else {
+                None
+            }
+        },
+    );
+    assert!(
+        outcome.is_ok(),
+        "the step completes on iteration {ITERATIONS}"
+    );
+    assert_eq!(
+        steps.get(),
+        ITERATIONS,
+        "the poll must have run {ITERATIONS} iterations for the census below to mean anything"
+    );
+    assert_eq!(
+        samples.get(),
+        steps.get(),
+        "{} recursive artifact scans across {} poll iterations: the bound the poll documents is \
+         ONE sample per iteration, reused by the progress accounting, `step`, the expiry check \
+         and the failure message",
+        samples.get(),
+        steps.get()
     );
 }
