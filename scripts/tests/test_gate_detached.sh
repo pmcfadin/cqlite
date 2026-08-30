@@ -422,12 +422,16 @@ if grep -q 'LAUNCH_NONCE=' "$LAUNCHER" && grep -q '_new_rid' "$LAUNCHER"; then
 else
   bad "4b.23 the launcher binds the post-launch check to its own run" "no nonce binding"
 fi
-# Fixed-string whole-line match (job 178, Low): the run-id is a mktemp PATH, so interpolating it
-# into a regex broke on a TMPDIR containing `[` and could stop a HEALTHY gate.
-if grep -q 'grep -qxF "run-id: \$_new_rid"' "$LAUNCHER"; then
-  ok "4b.24 the heartbeat must carry the NEW run-id, matched as a fixed string"
+# The BINDING MOVED, it did not disappear (job 198). The launcher used to grep the heartbeat for the
+# run-id itself — a second implementation of the reader's grammar, which accepted beats the reader
+# rejects. It now delegates with `--run-id "$_new_rid"`, so the run-binding is enforced by the one
+# component that owns it (asserted by 4b.100) and the nonce remains the launcher's own check (4b.101).
+# Job 178's fixed-string concern is moot here because the launcher no longer builds that pattern at
+# all; where it DOES still match the run-id (the nonce/owner paths) 4b.24b keeps regexes out.
+if grep -q 'gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid"' "$LAUNCHER"; then
+  ok "4b.24 the heartbeat's run-binding is delegated to the reader, not re-implemented"
 else
-  bad "4b.24 the heartbeat must carry the NEW run-id, matched as a fixed string" "binding not found"
+  bad "4b.24 the heartbeat's run-binding is delegated to the reader" "delegation not found"
 fi
 body=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
 if printf '%s\n' "$body" | grep -qE 'grep -q "\^run-id: '; then
@@ -1012,6 +1016,31 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
                  || bad "4b.98 a fresh incomplete lock is still refused" "exit 0 — it reclaimed a live acquisition"
 else
   skipc "4b.97-4b.98 abandoned-lock reclamation" "no working systemd-run --user"
+fi
+
+# roborev job 198: job 172 removed the launcher's duplicate verdict grammar from the TERMINAL path;
+# the same duplication survived on the HEARTBEAT path. Grepping only the nonce, run-id and the
+# presence of `beat-epoch` accepted beats the READER rejects (a `parent-check: kill0` beat, or one
+# with invalid framing/interval/epoch) — so the launcher returned success while every advertised
+# poll answered UNKNOWN.
+lbody=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
+if printf '%s\n' "$lbody" | grep -qE 'beat-epoch|parent-check'; then
+  bad "4b.99 the launcher no longer parses beat fields itself" \
+      "$(printf '%s\n' "$lbody" | grep -nE 'beat-epoch|parent-check' | head -2)"
+else
+  ok "4b.99 the launcher no longer parses beat fields itself"
+fi
+# It must accept ONLY the reader's monitorable verdicts.
+if grep -q '0|2) _hb_seen=1; break' "$LAUNCHER"; then
+  ok "4b.100 monitorability is decided by the reader's exit code (COMPLETE or RUNNING only)"
+else
+  bad "4b.100 monitorability is decided by the reader's exit code" "not found"
+fi
+# The nonce check stays the launcher's own business — the reader knows nothing about it.
+if grep -q 'launch-nonce: $LAUNCH_NONCE" "$_hbdest"' "$LAUNCHER"; then
+  ok "4b.101 the nonce is still checked by the launcher (the reader has no notion of it)"
+else
+  bad "4b.101 the nonce is still checked by the launcher" "not found"
 fi
 
 # Control: a writable existing summary is FINE — the check must not reject the normal case.

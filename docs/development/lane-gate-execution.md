@@ -327,6 +327,18 @@ is still `STALLED` after a component's worth of time (~850 s at the longest), tr
 gone and relaunch. The verdict text says all of this, so a reader acting on it needs no
 memory of this document.
 
+`STALLED` requires **two valid samples of the same run** showing no progress. If the confirmation
+sample cannot be copied, holds NUL bytes, fails validation, or belongs to another run, the verdict is
+`UNKNOWN` — and its text says explicitly that it is *not* a stall, so nobody re-runs a gate on an
+unmeasurable read. An earlier revision left the "no progress" flag unset in all of those cases and
+reported `STALLED`, which collapsed *"I could not measure"* into *"I measured no progress"* — the one
+thing this reader's own contract forbids, in the function that contract describes.
+
+The launcher owns **no** copy of this grammar either. It checks the nonce (which the reader has no
+notion of) and then asks `gate-liveness.sh --run-id`, accepting only `COMPLETE` or `RUNNING`. Grepping
+the beat itself had let it accept beats the reader rejects — a `parent-check: kill0` beat, or one with
+invalid framing — returning success while every advertised poll answered `UNKNOWN`.
+
 `RUNNING` and `STALLED` both remain **affirmative measurements** — each requires a beat that is
 present, run-id-matching, and respectively fresh or stale. A **missing** heartbeat is `UNKNOWN`,
 never `STALLED`: a gate predating this mechanism, or one whose summary path is unwritable,
@@ -537,8 +549,8 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (184 cases) and
-`scripts/tests/test_gate_detached.sh` (127 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (189 cases) and
+`scripts/tests/test_gate_detached.sh` (130 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

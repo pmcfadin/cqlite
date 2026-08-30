@@ -746,8 +746,27 @@ _hb2=""
 #
 # The run-id equality check is what keeps this sound: a different run-id is a peer, and a peer's
 # beater pid tells us nothing about our gate.
+# STALLED IS A POSITIVE VERDICT AND NEEDS TWO VALID SAMPLES (roborev job 198, Medium). The first
+# version left `_advanced=no` whenever the second snapshot could not be copied, held NULs, failed
+# validation, or belonged to another run — and then reported STALLED. That collapses "I could not
+# measure" into "I measured no progress", which is the one thing this script's own header forbids:
+# never derive a positive verdict from the absence of a bad signal. A transient read failure or a
+# concurrent replacement would have stalled a perfectly live gate.
 _advanced=no
 _adv_why=""
+_conf_err=""
+if [ -z "$_hb2_snap" ]; then
+  _conf_err="the confirmation snapshot of $HB could not be taken"
+elif [ -z "$_hb2" ]; then
+  _conf_err="the confirmation snapshot of $HB held NUL bytes, so it is not one coherent beat"
+elif ! _beat_valid "$_hb2"; then
+  _conf_err="the confirmation snapshot did not validate: $BEAT_ERR"
+elif [ "$(_field "$_hb2" run-id)" != "$HB_RUN_ID" ]; then
+  _conf_err="the confirmation snapshot belongs to run '$(_field "$_hb2" run-id)', not '$HB_RUN_ID'"
+fi
+if [ -n "$_conf_err" ]; then
+  verdict UNKNOWN 4 "confirmation-unmeasurable; $_conf_err — so no SECOND valid sample was observed and progression could not be tested. This is NOT a stall: STALLED requires two valid samples of the SAME run showing no progress. Re-read. $_where"
+fi
 if [ -n "$_hb2" ] && _beat_valid "$_hb2"; then
     # Explicit base 10 on both sides. NOT a bug fix: `[ x -gt y ]` in bash parses with base 10
     # (verified — `[ 011 -gt 08 ]` is true, i.e. 11 > 8, and `08` raises no error), unlike `$(( ))`

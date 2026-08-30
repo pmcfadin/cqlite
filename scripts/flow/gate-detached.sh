@@ -681,11 +681,20 @@ while [ "$_i" -lt 40 ]; do
   #     The match is FIXED-STRING and whole-line: the run-id is a mktemp PATH, and interpolating
   #     it into a regex broke on a TMPDIR containing `[` or `.`, so a REAL heartbeat would not
   #     match and the launcher would stop a healthy gate (job 178, Low).
+  # ASK THE READER, do not re-implement its grammar (roborev job 198, Medium). Job 172 removed the
+  # launcher's duplicate verdict grammar from the TERMINAL path; the same duplication survived here,
+  # on the heartbeat path. Grepping only the nonce, run-id and the presence of `beat-epoch` accepted
+  # beats the reader REJECTS — a `parent-check: kill0` beat, or one with invalid framing, interval or
+  # epoch — so the launcher returned success while every advertised poll answered UNKNOWN.
+  #
+  # The nonce is still ours to check (the reader knows nothing about it), but the beat's VALIDITY and
+  # the verdict are the reader's business. Exit 0 (COMPLETE) or 2 (RUNNING) both mean monitorable.
   if [ -n "$_new_rid" ] && [ -s "$_hbdest" ] \
-     && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$_hbdest" 2>/dev/null \
-     && grep -qxF "run-id: $_new_rid" "$_hbdest" 2>/dev/null \
-     && grep -q '^beat-epoch: ' "$_hbdest" 2>/dev/null; then
-    _hb_seen=1; break
+     && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$_hbdest" 2>/dev/null; then
+    bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1
+    case "$?" in
+      0|2) _hb_seen=1; break ;;   # COMPLETE or RUNNING — the reader can answer about this run
+    esac
   fi
   # If the unit already died, stop waiting — the log will say why.
   systemctl --user is-active --quiet "$UNIT" 2>/dev/null || break

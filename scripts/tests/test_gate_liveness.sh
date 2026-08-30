@@ -1011,8 +1011,12 @@ _mkbeat_r 57 1111
     echo "beat-epoch: $(date +%s)"; echo "==== END AGENT-GATE HEARTBEAT ===="
   } > "$TMP/restart.txt.heartbeat" ) &
 _rp3=$!; echo "$_rp3" >> "$TMP/pids"
-expect_reader "11j.5 control: a new beater-pid under a FOREIGN run-id is not our gate" \
-  STALLED 3 "did NOT advance" -- "$TMP/restart.txt"
+# The INTENT is unchanged — a foreign beat must never be credited as our gate's progress — but the
+# correct verdict became UNKNOWN in job 198: a second sample belonging to another run means we could
+# not measure OUR run, and STALLED (a positive claim) must not be derived from that. This case
+# expected STALLED, which was the defect; it now pins the honest answer.
+expect_reader "11j.5 control: a new beater-pid under a FOREIGN run-id is not credited as progress" \
+  UNKNOWN 4 "belongs to run 'SOMEONE-ELSE'" -- "$TMP/restart.txt"
 wait "$_rp3" 2>/dev/null || true
 
 # Portability: no external `seq`. Whether stock macOS ships it is arguable; a bash arithmetic loop
@@ -1134,6 +1138,43 @@ _mk_startup_beat "$TMP/su.txt.heartbeat" myrun
 grep -v '^parent-check: ' "$TMP/su.txt.heartbeat" > "$TMP/su.tmp" && mv "$TMP/su.tmp" "$TMP/su.txt.heartbeat"
 expect_reader "11l.6 control: an INVALID beat does not rescue a superseded summary" \
   UNKNOWN 4 "" -- "$TMP/su.txt" --run-id myrun
+
+echo "=== section 11m: STALLED needs TWO VALID samples (job 198) ==="
+# STALLED is a POSITIVE verdict. The first version left `_advanced=no` whenever the confirmation
+# snapshot could not be copied, held NULs, failed validation, or belonged to another run — and then
+# reported STALLED, collapsing "I could not measure" into "I measured no progress". That is the one
+# thing this script's own header forbids, and a transient read failure would have stalled a live gate.
+mk_summary "$TMP/cm.txt" run-C2 "INCOMPLETE (gate did not finish)"
+_mkcm() { # _mkcm <run-id>
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: $1"; echo "gate-pid: 42"
+    echo "beater-pid: 43"; echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "parent-check: starttime"; echo "interval: 1"; echo "beat-seq: 5"
+    echo "beat-epoch: $(( $(date +%s) - 99999 ))"; echo "==== END AGENT-GATE HEARTBEAT ===="
+  } > "$TMP/cm.txt.heartbeat"
+}
+_mkcm run-C2; ( sleep 1; rm -f "$TMP/cm.txt.heartbeat" ) & _c1=$!; echo "$_c1" >> "$TMP/pids"
+expect_reader "11m.1 the beat VANISHES mid-confirmation => UNKNOWN, not STALLED" \
+  UNKNOWN 4 "confirmation-unmeasurable" -- "$TMP/cm.txt"
+wait "$_c1" 2>/dev/null || true
+_mkcm run-C2; ( sleep 1; _mkcm SOMEONE-ELSE ) & _c2=$!; echo "$_c2" >> "$TMP/pids"
+expect_reader "11m.2 the beat is REPLACED by another run => UNKNOWN, not STALLED" \
+  UNKNOWN 4 "confirmation-unmeasurable" -- "$TMP/cm.txt"
+wait "$_c2" 2>/dev/null || true
+_mkcm run-C2; ( sleep 1; printf 'not a beat at all\n' > "$TMP/cm.txt.heartbeat" ) & _c3=$!; echo "$_c3" >> "$TMP/pids"
+expect_reader "11m.3 the confirmation sample is MALFORMED => UNKNOWN, not STALLED" \
+  UNKNOWN 4 "confirmation-unmeasurable" -- "$TMP/cm.txt"
+wait "$_c3" 2>/dev/null || true
+# CONTROL: two VALID samples with no progress is a genuine stall, and must still say so.
+_mkcm run-C2
+expect_reader "11m.4 control: two valid samples, no progress => STALLED" \
+  STALLED 3 "did NOT advance" -- "$TMP/cm.txt"
+# The verdict text must say it is not a stall, so nobody re-runs a gate on an unmeasurable read.
+_mkcm run-C2; ( sleep 1; rm -f "$TMP/cm.txt.heartbeat" ) & _c4=$!; echo "$_c4" >> "$TMP/pids"
+run_reader "$TMP/cm.txt"
+printf '%s' "$OUT" | grep -q 'This is NOT a stall' \
+  && ok "11m.5 the unmeasurable verdict says explicitly that it is not a stall" \
+  || bad "11m.5 the unmeasurable verdict says it is not a stall" "$(printf '%s' "$OUT" | head -1)"
+wait "$_c4" 2>/dev/null || true
 
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
 # The same shape appeared THREE times in this change: the default /tmp artifact names, the
