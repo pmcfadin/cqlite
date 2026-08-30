@@ -213,12 +213,6 @@ findings_of() {
 # It takes the RIGHT-HAND SIDES FROM THE DRIVER rather than restating them here, because a table
 # of expected values in this file would be a second copy of the driver's intent and would drift.
 #
-# WHY EVALUATING SHELL TEXT IS SAFE **HERE SPECIFICALLY**, and only here: the text is emitted by
-# `--emit-prefix`, which prints it ONLY after proving it is a run of `NAME=` words containing no
-# command separator. The eval's input is bounded by a check that already had to exist. This is
-# strictly conditional on that validation — an unvalidated prefix is never evaluated, and the
-# helper returns non-zero instead.
-#
 # The controlled values are chosen so a SWAP IS DETECTABLE BY THE SHIPPED VALIDATORS rather than
 # by a comparison written here: `temps` and `arms` have DISJOINT legal sets (warm/cold vs
 # bypass/merge), so `WS0_CFG_TEMPS="$ARMS"` yields `temps=bypass`, which `session_manifest_config`

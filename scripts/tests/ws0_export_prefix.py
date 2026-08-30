@@ -4,7 +4,7 @@
 Two modes, one subject:
 
     <driver> <VAR-PREFIX> <BLOCK-NEEDLE>                 "<in-prefix> <total-in-file>"
-    <driver> <VAR-PREFIX> <BLOCK-NEEDLE> --emit-prefix   the validated prefix TEXT
+    <driver> <VAR-PREFIX> <BLOCK-NEEDLE> --resolve VAR=VAL…   the step's environment, PARSED
 
 Extracted from `test_ws0_embedded_steps_execute.sh` so both the membership check and
 `driver_step_env` call ONE implementation — a second copy would drift, and then the eval
@@ -190,15 +190,5 @@ if "--resolve" in sys.argv[4:]:
         raise SystemExit(5)
     for name, value in resolved:
         print(f"{name}={value}")
-    raise SystemExit(0)
-if "--emit-prefix" in sys.argv[4:]:
-    # THE VALIDATED PREFIX TEXT, printed ONLY when the run above is intact. The caller evaluates
-    # it (see `driver_step_env`), and this conditionality is the whole safety argument: the text
-    # handed over has already been proved to be assignment words with no command separator.
-    if not contiguous:
-        print(f"NOT-A-PREFIX: the first non-assignment token is {following!r}, not the consuming"
-          " `python3` command", file=sys.stderr)
-        raise SystemExit(4)
-    print(head)
     raise SystemExit(0)
 print(f"{len(present)} {len(names)}")
