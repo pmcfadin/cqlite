@@ -1,24 +1,40 @@
 #!/usr/bin/env bash
 # test_cargo_output_parsers.sh — the #3400 cargo-output colour guard behaviour test.
 #
-# SUBJECT: the cargo-output parse sites in scripts/agent-gate.sh, exercised as CODE.
+# SUBJECT: every cargo-output parse site in scripts/agent-gate.sh, exercised as CODE.
 #
-# THE PINNED DEFECT, RED-first. The PRE-FIX shape of the cli-tests zero-tests guard
-# (`check_no_unexpected_zero_tests`, verbatim from main) is run against the SAME zero-test
-# cargo log twice — once coloured, once plain — and asserted to exit 0 (a silent VACUOUS
-# PASS) on the coloured one and 1 on the plain one. That is the defect, characterised and
-# pinned so it cannot come back unnoticed. The CURRENT shape, EXTRACTED FROM THE SHIPPED
-# scripts/agent-gate.sh, must then exit 1 on BOTH, still PASS when the zero-test target is
-# on the allowed-zero list (proving it recovered the target NAME from coloured text), and
-# FAIL closed on an unreadable log or a log in which it recognised no target banner at all.
+# WHY IT EXISTS. #1699 introduced `_ansi_stripped_log` and routed three guards through it
+# with NO test of its own, so the mechanism the gate's zero-test protection now depends on
+# was pinned by nothing: any later refactor could unroute a guard and every suite would stay
+# green, because a guard that parses nothing reports nothing wrong. This file is that pin,
+# and it measures BEHAVIOUR against the shipped code — each guard is EXTRACTED FROM
+# scripts/agent-gate.sh and run, never re-implemented here.
+#
+# THE PINNED DEFECT, RED-first, in BOTH directions:
+#   * VACUOUS PASS (site 1). The PRE-#1699 shape of the cli-tests zero-tests guard
+#     (`check_no_unexpected_zero_tests`) is run against the SAME zero-test cargo log twice —
+#     once coloured, once plain — and asserted to exit 0 on the coloured one and 1 on the
+#     plain one. Colour alone flips a real failure into a silent pass. The CURRENT shape must
+#     then exit 1 on BOTH, still PASS when the zero-test target is on the allowed-zero list
+#     (proving it recovered the target NAME from coloured text rather than merely erroring),
+#     and FAIL closed on an unreadable log, an empty log, a log holding no recognisable
+#     output, and a target observed but never judged.
+#   * FALSE RED (site 4, A6). `check_declared_test_targets_observed` greps the RAW log for
+#     the literal `Running tests/`, which under colour does not exist — so its observed set
+#     comes back empty and every declared target is reported unobserved on a healthy run.
+#     #3400 routes it through the helper; the control proves a genuinely absent target still
+#     FAILs, so the fix restored observation rather than disabling the check.
+#   * BELT (site 5, A4). `run_arrow_parity_guard_cmd` is driven against a stub `cargo` that
+#     emits coloured output and IGNORES CARGO_TERM_COLOR, which is what shows the STRIP —
+#     not the belt — carries the correctness.
 #
 # A STRUCTURAL LINT over the parse sites was built here and DESCOPED (#3400): its own
 # false-PASS count rose across review rounds (2, 2, 3) and two of the last round's three
 # defects were inside the two preceding fix rounds, so it was removed under the precedent
 # CLAUDE.md records for #3229's `census-exclusion:` key — a guard with known documented
 # false-PASSes is worse than no guard, because it invites reliance it cannot support.
-# Mechanization is deferred; the rule stands as doctrine. What remains here is behaviour
-# measured against real code, which is why it survived the descope.
+# Mechanization is deferred to #3499; the rule stands as doctrine. What remains here is
+# behaviour measured against real code, which is why it survived the descope.
 #
 # FIXTURE PROVENANCE. Every escape sequence below is a REAL ESC byte injected via
 # `printf '\033'` — never a hand-typed two-character `\x1b` string, which would make the
@@ -28,7 +44,8 @@
 # the payload (`Running<ESC>[0m tests/empty.rs`), so the literal `Running tests/` never
 # appears. `running N tests` and `test result:` are libtest text and were measured
 # byte-identical under `always` and `never`, so they are written here WITHOUT escapes —
-# that asymmetry is itself part of the fixture.
+# that asymmetry is itself part of the fixture, and it is why routing the arrow guard is
+# belt rather than a bug fix.
 #
 # AC3 is asserted both ways: behaviourally (a pipe-fed while-read loop over the very same
 # log silently exits 0 because its `bad` accumulator dies with the subshell, while the
@@ -164,9 +181,9 @@ check_no_unexpected_zero_tests() {
 PREFIX
 
 prefix_rc_colour=0
-( set +e; . "$tmp/prefix_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" 2 >/dev/null 2>&1; exit $? ) || prefix_rc_colour=$?
+( set +e; . "$tmp/prefix_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" >/dev/null 2>&1; exit $? ) || prefix_rc_colour=$?
 prefix_rc_plain=0
-( set +e; . "$tmp/prefix_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-plain.log" 2 >/dev/null 2>&1; exit $? ) || prefix_rc_plain=$?
+( set +e; . "$tmp/prefix_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-plain.log" >/dev/null 2>&1; exit $? ) || prefix_rc_plain=$?
 
 if [ "$prefix_rc_colour" -eq 0 ]; then
   ok "RED (pinned defect): the PRE-FIX guard exits 0 on the COLOURED zero-test log — the vacuous pass, reproduced"
@@ -200,10 +217,12 @@ def extract(start_re, end_re):
     return ''
 
 
+# Both are TOP-LEVEL functions in the shipped gate: #1699 promoted the guard out of the
+# cli-tests `bash -c` blob so its three callers share ONE implementation, so there is no
+# blob escaping left to unwind here. Anchoring at column zero is what makes that true --
+# a `^  ` anchor would silently extract nothing and the fail-closed checks below would fire.
 helper = extract(r'^_ansi_stripped_log\(\) \{', r'^\}')
-guard = extract(r'^  check_no_unexpected_zero_tests\(\) \{', r'^  \}')
-# Unwind the cli-tests `bash -c '…'` blob escaping: '"'"' is a literal single quote.
-guard = guard.replace('\'"\'"\'', "'")
+guard = extract(r'^check_no_unexpected_zero_tests\(\) \{', r'^\}')
 if not helper.strip() or 'sed -E' not in helper:
     print('EXTRACT-FAIL: _ansi_stripped_log', file=sys.stderr); sys.exit(2)
 if not guard.strip() or 'while IFS= read' not in guard:
@@ -220,15 +239,15 @@ if [ "$extract_rc" -ne 0 ]; then
 else
   ok "extracted _ansi_stripped_log + check_no_unexpected_zero_tests from the shipped agent-gate.sh"
   if bash -n "$tmp/current_guard.sh" 2>/dev/null; then
-    ok "the extracted guard is syntactically valid bash (the blob escaping unwinds cleanly)"
+    ok "the extracted guard is syntactically valid bash (so the cases below run the real thing)"
   else
-    bad "the extracted guard is not valid bash — the cli-tests blob escaping changed shape"
+    bad "the extracted guard is not valid bash — the shipped function shape changed and this extraction no longer captures it"
   fi
 
   cur_rc_colour=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" 2 >/dev/null 2>&1; exit $? ) || cur_rc_colour=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" >/dev/null 2>&1; exit $? ) || cur_rc_colour=$?
   cur_rc_plain=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-plain.log" 2 >/dev/null 2>&1; exit $? ) || cur_rc_plain=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-plain.log" >/dev/null 2>&1; exit $? ) || cur_rc_plain=$?
 
   if [ "$cur_rc_colour" -eq 1 ]; then
     ok "GREEN: the SHIPPED guard exits 1 on the COLOURED zero-test log (the #3400 fix, measured)"
@@ -244,7 +263,7 @@ else
   # A guard that reds everything is not a fix. Positive control: the same coloured log
   # with the zero-test target on the allowed-zero list must PASS.
   cur_rc_allowed=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" 2 empty >/dev/null 2>&1; exit $? ) || cur_rc_allowed=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" empty >/dev/null 2>&1; exit $? ) || cur_rc_allowed=$?
   if [ "$cur_rc_allowed" -eq 0 ]; then
     ok "positive control: the SHIPPED guard PASSes the coloured log when 'empty' is on the allowed-zero list (so it parsed the target NAME out of coloured text, not just 'something is wrong')"
   else
@@ -253,7 +272,7 @@ else
 
   # Fail-closed control: an unreadable log must FAIL, never pass having parsed nothing.
   cur_rc_missing=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/does-not-exist.log" 2 >/dev/null 2>&1; exit $? ) || cur_rc_missing=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/does-not-exist.log" >/dev/null 2>&1; exit $? ) || cur_rc_missing=$?
   if [ "$cur_rc_missing" -ne 0 ]; then
     ok "fail-closed control: the SHIPPED guard FAILs on an unreadable log rather than passing having parsed nothing"
   else
@@ -268,7 +287,7 @@ else
   # normalised log, so they isolate the banner count as the only thing that can red them.
   zero_banner_rc=0
   printf 'some cargo noise\nnothing recognisable here\n' >"$tmp/no-banners.log"
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/no-banners.log" 2 >/dev/null 2>&1; exit $? ) || zero_banner_rc=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/no-banners.log" >/dev/null 2>&1; exit $? ) || zero_banner_rc=$?
   if [ "$zero_banner_rc" -ne 0 ]; then
     ok "C3: a NON-EMPTY log with no recognised target banners FAILs (the guard judged no target, so it measured nothing)"
   else
@@ -276,7 +295,7 @@ else
   fi
   empty_log_rc=0
   : >"$tmp/empty.log"
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/empty.log" 2 >/dev/null 2>&1; exit $? ) || empty_log_rc=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/empty.log" >/dev/null 2>&1; exit $? ) || empty_log_rc=$?
   if [ "$empty_log_rc" -ne 0 ]; then
     ok "C3: an EMPTY log FAILs (zero iterations is zero measurement, not a clean bill of health)"
   else
@@ -286,160 +305,56 @@ else
   # coloured log has banners, so it still reds for the RIGHT reason (a zero-test target) and
   # still PASSes when that target is allowed.
   c3_ctrl_rc=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" 2 empty >/dev/null 2>&1; exit $? ) || c3_ctrl_rc=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" empty >/dev/null 2>&1; exit $? ) || c3_ctrl_rc=$?
   if [ "$c3_ctrl_rc" -eq 0 ]; then
     ok "C3: a log WITH banners still PASSes when its zero-test target is allowed (the banner assert is not a blanket reject)"
   else
     bad "C3: the banner assert reds a legitimate log — rc=$c3_ctrl_rc"
   fi
 
-  # E1: `>= 1` BANNER IS PARTIAL CREDIT. A log TRUNCATED after the first banner satisfies a
-  # "at least one target was parsed" test while a later zero-test target is simply ABSENT from
-  # the file — the same vacuous pass as an empty log, just needing a partial write instead of
-  # no write. The guard must compare its parsed banner count against the number of REQUESTED
-  # --test targets. This fixture is the coloured log cut off mid-way: readable, non-empty,
-  # normalises fine, ONE banner recognised, TWO requested.
-  truncated_rc=0
-  # Cut just before the SECOND target banner, so the fixture holds exactly one. The line is
-  # located ANSI-INSENSITIVELY (`Running.*tests/`) because in the coloured log the literal
-  # `Running tests/` does not exist — that asymmetry is this whole issue, and counting with the
-  # literal here is how the first version of this fixture measured 0 banners and would have red
-  # for emptiness rather than for the count.
+  # ORPHAN DETECTION, main's round-26 property, pinned here because nothing else pins it.
+  # A `Running` banner with NO following `test result:` line means the target was OBSERVED and
+  # never JUDGED -- a truncated log, a killed binary, or a result line the parse missed -- and
+  # the guard would otherwise return success having silently skipped exactly the target it was
+  # asked about. Fixture: the coloured log cut off mid-way, so the last banner has no result.
+  # The line is located ANSI-INSENSITIVELY (`Running.*tests/`) because in the coloured log the
+  # literal `Running tests/` does not exist -- that asymmetry IS this issue, and counting with
+  # the literal here would cut at the wrong place and red for emptiness instead.
   cut_at=$(grep -nE 'Running.*tests/' "$tmp/zero-colour.log" | sed -n '2p' | cut -d: -f1)
-  awk -v c="$cut_at" 'NR < c' "$tmp/zero-colour.log" >"$tmp/truncated.log"
-  trunc_banners=$(grep -cE 'Running.*tests/' "$tmp/truncated.log" || true)
-  # `empty` is ALLOWED here on purpose: the truncated fixture still holds the zero-test `empty`
-  # target, so without this the guard would red on the unexpected-zero-test condition and the
-  # assertion below would pass whether or not the banner-count check exists. Excusing `empty`
-  # leaves the COUNT mismatch (1 banner recognised, 2 requested) as the SOLE possible cause.
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/truncated.log" 2 empty >/dev/null 2>&1; exit $? ) || truncated_rc=$?
-  if [ "$truncated_rc" -ne 0 ]; then
-    ok "E1: a log TRUNCATED after the first banner FAILs — the guard judged fewer targets than were requested, which is not a measurement of its subject"
+  awk -v c="$cut_at" 'NR <= c' "$tmp/zero-colour.log" >"$tmp/orphan.log"
+  orphan_banners=$(grep -cE 'Running.*tests/' "$tmp/orphan.log" || true)
+  # `empty` is ALLOWED on purpose: the fixture still holds the zero-test `empty` target, so
+  # without this the guard would red on the unexpected-zero condition and the assertion would
+  # pass whether or not orphan detection exists. Excusing it leaves the DANGLING SECOND BANNER
+  # as the only possible cause.
+  orphan_rc=0
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/orphan.log" empty >/dev/null 2>&1; exit $? ) || orphan_rc=$?
+  if [ "$orphan_rc" -ne 0 ]; then
+    ok "orphan: a log ending on a banner with no following result FAILs — a target observed and not judged is not a measurement"
   else
-    bad "E1: the guard PASSed a truncated log — one early banner bought credit for targets absent from the file"
+    bad "orphan: the guard PASSed a log whose last target was observed and never judged"
   fi
-  # ...and the fixture must actually BE the partial case, or the assertion above proves nothing.
-  if [ "${trunc_banners:-0}" -ge 1 ] && [ "${trunc_banners:-0}" -lt 2 ] && [ -s "$tmp/truncated.log" ]; then
-    ok "E1: the truncated fixture is genuinely PARTIAL (non-empty, $trunc_banners of 2 banners) — so the red above is the COUNT, not emptiness"
+  # ...and the fixture must genuinely BE the orphan case, or the assertion above proves nothing:
+  # two banners, and the LAST line must be the second banner (nothing follows it to judge it).
+  # Keyed on the last line specifically, not on a tail WINDOW: the three-line window ending at
+  # the banner still contains the FIRST target's result line, so a window test reported the
+  # fixture malformed while it was in fact exactly right.
+  if [ "${orphan_banners:-0}" -eq 2 ] && tail -n 1 "$tmp/orphan.log" | grep -qE 'Running.*tests/'; then
+    ok "orphan: the fixture is genuinely the dangling case ($orphan_banners banners, the last line IS the second banner)"
   else
-    bad "E1: the truncated fixture is not the partial case (banners=${trunc_banners:-0}, size=$( [ -s "$tmp/truncated.log" ] && echo nonempty || echo empty )) — the case above would red for the wrong reason"
+    bad "orphan: the fixture is not the dangling case (banners=${orphan_banners:-0}) — the case above would red for the wrong reason"
   fi
-  # POSITIVE CONTROL, so the discrimination is MEASURED and not merely argued by the comment
-  # above: the SAME fixture with the requested count set to the 1 banner it actually holds must
-  # PASS. Red there and green here isolates the count as the only thing that changed, which is
-  # the property under test. Without this, "the red above is the COUNT" is an assertion about
-  # the fixture rather than evidence about the guard.
-  trunc_ctrl_rc=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/truncated.log" 1 empty >/dev/null 2>&1; exit $? ) || trunc_ctrl_rc=$?
-  if [ "$trunc_ctrl_rc" -eq 0 ]; then
-    ok "E1 (control): the SAME truncated fixture PASSes when the requested count is 1 — so the red above is PROVEN to be the count mismatch, not the fixture"
+  # POSITIVE CONTROL, so orphan detection is not a reject-everything rule: the SAME log with the
+  # dangling banner's result restored must PASS. Red there and green here isolates the missing
+  # result line as the only thing that changed.
+  cp "$tmp/orphan.log" "$tmp/orphan-closed.log"
+  printf '\nrunning 1 test\ntest one ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' >>"$tmp/orphan-closed.log"
+  orphan_ctrl_rc=0
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/orphan-closed.log" empty >/dev/null 2>&1; exit $? ) || orphan_ctrl_rc=$?
+  if [ "$orphan_ctrl_rc" -eq 0 ]; then
+    ok "orphan (control): the SAME fixture PASSes once the dangling banner gets its result — so the red above is PROVEN to be the orphan, not the fixture"
   else
-    bad "E1 (control): the truncated fixture reds even when the requested count matches its 1 banner (rc=$trunc_ctrl_rc) — the case above cannot be attributed to the count"
-  fi
-  # The expected-count argument is itself fail-closed: a guard told to expect nothing is back to
-  # accepting whatever the log happened to contain.
-  for badcount in "" 0 abc; do
-    argrc=0
-    ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" "$badcount" empty >/dev/null 2>&1; exit $? ) || argrc=$?
-    if [ "$argrc" -ne 0 ]; then
-      ok "E1: an expected-target count of '${badcount:-<empty>}' is refused (an empty subject set cannot certify anything)"
-    else
-      bad "E1: the guard accepted an expected-target count of '${badcount:-<empty>}'"
-    fi
-  done
-
-  # E1, the other half: a `tee` FAILURE must be surfaced. The callers pipe cargo through tee and
-  # historically read only ${PIPESTATUS[0]}, so a full disk or a killed tee left a TRUNCATED log
-  # while cargo itself exited 0 — feeding the case above. Demonstrated, then asserted structurally.
-  set +e
-  true 2>&1 | tee "$tmp/no-such-dir/out.log" >/dev/null 2>&1
-  # ONE assignment for the whole array. `ps0=${PIPESTATUS[0]}` is itself a command and RESETS
-  # PIPESTATUS, so a second statement reading [1] gets an unbound/empty value — which is how
-  # this very test caught the same mistake in the gate.
-  e1_ps=("${PIPESTATUS[@]}")
-  set -e
-  ps0=${e1_ps[0]}; ps1=${e1_ps[1]}
-  if [ "$ps0" -eq 0 ] && [ "$ps1" -ne 0 ]; then
-    ok "E1 (behavioural): a failing \`tee\` leaves PIPESTATUS[0]=0 and PIPESTATUS[1]=$ps1 — reading only [0] is exactly how a truncated log passes for a successful run"
-  else
-    bad "E1 (behavioural): expected PIPESTATUS[0]=0 with a nonzero [1], got [0]=$ps0 [1]=$ps1 — the premise did not reproduce on this shell"
-  fi
-  # STRUCTURAL asserts over the cli-tests blob, as FIXED STRINGS with a discrimination proof.
-  #
-  # Not a style preference. `grep` on this fleet is ugrep, and a BRE pattern containing `$((`
-  # did not match a line it visibly occurs in — so the first version of these asserts was a
-  # QUOTING PUZZLE whose verdict I could not reproduce by hand. An assert that greens because
-  # its pattern is broken is the exact false-PASS shape this whole issue is about, one level up.
-  # So: `grep -F` only, and every needle is then re-checked against a copy of the blob with that
-  # needle REMOVED — if the predicate still passes, it is not measuring anything.
-  # Terminate on /;;$/, NOT on a standalone /^ *;;$/ (roborev job 130, Low). The cli-tests branch
-  # ends with `... "$ws_expected"'"'"' ;;` -- the `;;` is TRAILING, not on its own line, and there is
-  # NO standalone `;;` anywhere after the branch start. So the old terminator NEVER FIRED and this
-  # blob captured 558 lines to EOF instead of the branch's 277: every structural assert below was
-  # scanning the rest of agent-gate.sh, and could be satisfied by unrelated later code. Measured:
-  # /;;$/ stops at exactly the branch's closing line. `test_agent_gate_cli_tests_enum.sh` already
-  # does it this way. The needle-removal control below is what kept these asserts from being fully
-  # vacuous -- it proves each needle is load-bearing -- but a needle can be load-bearing and still
-  # sit OUTSIDE the branch, which is what the wrong SCOPE allowed.
-  cli_blob_src=$(awk "/cli-tests\\) run_component cli-tests bash -c/{f=1} f{print} f&&/;;\$/{exit}" "$GATE")
-  if [ -n "$cli_blob_src" ]; then
-    ok "extracted the cli-tests dispatch blob from the shipped gate for structural assertions"
-  else
-    bad "could not extract the cli-tests dispatch blob — every structural assertion below would pass or fail for no reason"
-  fi
-
-  # blob_needs <label> <count> <fixed-string> — the string must occur at least <count> times in
-  # the blob, AND the same test must FAIL on a blob with the string stripped out.
-  blob_needs() {
-    local label="$1" want="$2" needle="$3" got mutated_got
-    got=$(printf '%s\n' "$cli_blob_src" | grep -Fc -- "$needle" || true)
-    mutated_got=$(printf '%s\n' "${cli_blob_src//"$needle"/}" | grep -Fc -- "$needle" || true)
-    if [ "${got:-0}" -ge "$want" ] && [ "${mutated_got:-0}" -eq 0 ]; then
-      ok "E1 (structural): $label — found ${got} occurrence(s), and the check is PROVEN to fire (0 on a blob with it removed)"
-    elif [ "${got:-0}" -lt "$want" ]; then
-      bad "E1 (structural): $label — expected >= $want occurrence(s) of the required text, found ${got:-0}"
-    else
-      bad "E1 (structural): $label — the check does NOT discriminate: it still reports ${mutated_got} on a blob with the text removed, so its green means nothing"
-    fi
-  }
-
-  blob_needs "both passes capture the WHOLE PIPESTATUS array in one assignment" 2 \
-    '_ps=("${PIPESTATUS[@]}")'
-  blob_needs "both passes read the tee half from that captured array" 2 \
-    'tee_rc=${_ps[1]}'
-  blob_needs "both passes fail closed on a nonzero tee status" 2 \
-    'tee_rc" -ne 0'
-  blob_needs "Pass 1 derives its expected target count from def_flags" 1 \
-    'def_expected=$(( ${#def_flags[@]} / 2 ))'
-  blob_needs "Pass 2 derives its expected target count from ws_flags" 1 \
-    'ws_expected=$(( ${#ws_flags[@]} / 2 ))'
-  # One assert PER PASS, each labelled with only what it measures. A single "each pass" assert
-  # keyed on Pass 1's call site alone would let Pass 2 stop passing its derived count while the
-  # green kept claiming both -- the stated-scope-exceeds-measured-scope shape this issue is about.
-  blob_needs "Pass 1 passes its derived count to the guard" 1 \
-    '"$log1" "$def_expected"'
-  blob_needs "Pass 2 passes its derived count to the guard" 1 \
-    '"$log2" "$ws_expected"'
-  # The needle is matched against the RAW blob text, where the single quotes are still in this
-  # file's `bash -c` escaped form — so key on the quote-free payload and let the NEGATIVE assert
-  # below (no `trap "rm -rf`) establish that the quoting is the deferred kind.
-  blob_needs "the EXIT trap removes the private dir by an explicitly-terminated path" 1 \
-    'rm -rf -- "$_cli_tmp"'
-
-  # The one-assignment rule, pinned as its own NEGATIVE property: a second statement reading
-  # PIPESTATUS is a check that silently never fires, so no caller may reintroduce that shape.
-  if printf '%s\n' "$cli_blob_src" | grep -Fq -- 'rc=${PIPESTATUS[0]}; tee_rc=${PIPESTATUS[1]}'; then
-    bad "E1: a cli-tests pass reads PIPESTATUS across TWO statements — the first assignment resets the array, so the tee status is empty and its check never fires"
-  else
-    ok "E1: no cli-tests pass reads PIPESTATUS across two statements (the first assignment would reset the array)"
-  fi
-  # ...and the DOUBLE-QUOTED trap form must not return: it bakes the literal path into a string
-  # bash re-parses, so a TMPDIR carrying a $ or a backtick both RUNS injected syntax and SKIPS
-  # cleanup. Both consequences measured on this box before the fix.
-  if printf '%s\n' "$cli_blob_src" | grep -Fq -- 'trap "rm -rf'; then
-    bad "E1: the cli-tests EXIT trap is DOUBLE-QUOTED again — a TMPDIR containing \$ or a backtick can alter the cleanup command"
-  else
-    ok "E1: the cli-tests EXIT trap is not double-quoted (expansion is deferred to when the trap runs)"
+    bad "orphan (control): the closed fixture reds too (rc=$orphan_ctrl_rc) — the case above cannot be attributed to the orphan"
   fi
 
   # AC3, structurally: the shipped guard must be REDIRECTION-fed, not pipe-fed.
@@ -570,6 +485,110 @@ STUB
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────────
+# (A6) The FALSE-RED direction, at the site #1699 left unrouted:
+#      check_declared_test_targets_observed. It greps the log for the literal
+#      `Running tests/`, which under CARGO_TERM_COLOR=always does not exist — so its
+#      `observed` set comes back EMPTY and every declared target is reported
+#      unobserved-and-UNEXPLAINED on a perfectly healthy run. Opposite direction from the
+#      zero-tests guard (a red, not a green) and just as wrong. RED-first, then the shipped
+#      shape, then a control proving it can still detect a genuinely absent target.
+# ─────────────────────────────────────────────────────────────────────────────────────
+# The declared set: two targets, neither declaring required-features, so an unobserved one
+# has no excuse available and lands in the FAIL bucket. Both DO run in the fixture log.
+DECL_META="$(printf 'empty\t\nfoo\t')"
+
+cat >"$tmp/prefix_declared.sh" <<'PREFIXDECL'
+# The pre-#3400 OBSERVATION half of check_declared_test_targets_observed, verbatim: it
+# greps the RAW logfile. Reduced to the observation + verdict, which is the part colour
+# reaches; the excusal machinery is unrelated to this defect and is not reproduced.
+prefix_declared() {
+  local logfile="$1" meta="$2"
+  local observed declared=0 seen=0 bad="" tname rf
+  observed=" $(grep -oE 'Running tests/[^[:space:]]+\.rs' "$logfile" \
+    | sed -E 's#^Running tests/(.*)\.rs$#\1#' | sort -u | tr '\n' ' ') "
+  while IFS=$'\t' read -r tname rf; do
+    [ -n "$tname" ] || continue
+    declared=$((declared + 1))
+    case "$observed" in
+      *" $tname "*) seen=$((seen + 1)); continue ;;
+    esac
+    bad="$bad $tname"
+  done <<< "$meta"
+  [ -z "$bad" ]
+}
+PREFIXDECL
+
+pd_colour=0
+( set +e; . "$tmp/prefix_declared.sh"; prefix_declared "$tmp/zero-colour.log" "$DECL_META" >/dev/null 2>&1; exit $? ) || pd_colour=$?
+pd_plain=0
+( set +e; . "$tmp/prefix_declared.sh"; prefix_declared "$tmp/zero-plain.log" "$DECL_META" >/dev/null 2>&1; exit $? ) || pd_plain=$?
+if [ "$pd_colour" -ne 0 ] && [ "$pd_plain" -eq 0 ]; then
+  ok "A6 RED (pinned defect): the raw-log reconciliation FAILs on the COLOURED log and PASSes on the same log plain — a FALSE RED on a healthy run, caused by colour alone"
+else
+  bad "A6 RED (pinned defect): expected coloured=nonzero / plain=0, got coloured=$pd_colour / plain=$pd_plain — the fixture no longer reproduces the false-red direction, so the GREEN case below proves nothing"
+fi
+
+python3 - "$GATE" "$tmp/declared_guard.sh" <<'DECLPY'
+import re, sys
+gate, out = sys.argv[1], sys.argv[2]
+lines = open(gate, encoding='utf-8').read().split('\n')
+
+
+def extract(start_re, end_re):
+    for i, l in enumerate(lines):
+        if re.match(start_re, l):
+            for j in range(i + 1, len(lines)):
+                if re.match(end_re, lines[j]):
+                    return '\n'.join(lines[i:j + 1])
+            break
+    return ''
+
+
+helper = extract(r'^_ansi_stripped_log\(\) \{', r'^\}')
+guard = extract(r'^check_declared_test_targets_observed\(\) \{', r'^\}')
+if not helper.strip() or not guard.strip():
+    print('EXTRACT-FAIL', file=sys.stderr); sys.exit(2)
+if '_ansi_stripped_log' not in guard:
+    print('EXTRACT-FAIL: check_declared_test_targets_observed does not call '
+          '_ansi_stripped_log — it parses the raw log and reds every coloured run',
+          file=sys.stderr)
+    sys.exit(2)
+open(out, 'w', encoding='utf-8').write(helper + '\n\n' + guard + '\n')
+DECLPY
+decl_extract_rc=$?
+if [ "$decl_extract_rc" -ne 0 ]; then
+  bad "A6: extraction of check_declared_test_targets_observed (+ helper) from agent-gate.sh FAILED (rc=$decl_extract_rc) — that parse site is uncertified"
+else
+  ok "A6: extracted check_declared_test_targets_observed from the shipped agent-gate.sh (it calls _ansi_stripped_log)"
+  # GATE_SELF must be readable: the guard fails closed on it before reaching the parse, and
+  # this file IS a real readable path, so the alternate-executor half is satisfiable.
+  dg_colour=0
+  ( set +e; . "$tmp/declared_guard.sh"; GATE_SELF="$GATE" check_declared_test_targets_observed "lane" "$tmp/zero-colour.log" " arrow " "$DECL_META" "" >/dev/null 2>&1; exit $? ) || dg_colour=$?
+  dg_plain=0
+  ( set +e; . "$tmp/declared_guard.sh"; GATE_SELF="$GATE" check_declared_test_targets_observed "lane" "$tmp/zero-plain.log" " arrow " "$DECL_META" "" >/dev/null 2>&1; exit $? ) || dg_plain=$?
+  if [ "$dg_colour" -eq 0 ]; then
+    ok "A6 GREEN: the SHIPPED reconciliation PASSes the COLOURED log — it recovered both target NAMES from coloured banners, so the false red is gone"
+  else
+    bad "A6 GREEN: the SHIPPED reconciliation exited $dg_colour on a healthy COLOURED log — every declared target is being reported unobserved because the literal 'Running tests/' is not there"
+  fi
+  if [ "$dg_plain" -eq 0 ]; then
+    ok "A6 GREEN: it PASSes the plain log too (colour no longer changes the verdict)"
+  else
+    bad "A6 GREEN: it exited $dg_plain on the plain log"
+  fi
+  # A reconciliation that passes everything is not a fix. Control: a target that genuinely
+  # never ran must still FAIL, on the COLOURED log — so the green above is discrimination,
+  # not blanket acceptance.
+  dg_absent=0
+  ( set +e; . "$tmp/declared_guard.sh"; GATE_SELF="$GATE" check_declared_test_targets_observed "lane" "$tmp/zero-colour.log" " arrow " "$(printf 'empty\t\nnever_built\t')" "" >/dev/null 2>&1; exit $? ) || dg_absent=$?
+  if [ "$dg_absent" -ne 0 ]; then
+    ok "A6 (control): a declared target absent from the COLOURED log still FAILs — the fix restored observation, it did not disable the check"
+  else
+    bad "A6 (control): a target that never ran PASSed on the coloured log — the reconciliation now accepts anything"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
 # (A5) The DERIVED SIBLING must be collected. _ansi_stripped_log writes
 #      `<log>.ansi-stripped` beside its input, so any caller that cleans only the
 #      original leaks a world-readable file per run — and the sibling name is derivable
@@ -578,7 +597,7 @@ fi
 #      it wholesale (issue #3400).
 # ─────────────────────────────────────────────────────────────────────────────────────
 if grep -Fq -- 'mktemp -d "${TMPDIR:-/tmp}/agent-gate-cli.XXXXXX"' "$GATE" \
-   && grep -Fq -- 'rm -rf -- "$_cli_tmp"' "$GATE"; then
+   && grep -Fq -- 'rm -rf \"$_cli_tmp\"' "$GATE"; then
   ok "A5: cli-tests logs into a private mktemp -d and removes it wholesale (the .ansi-stripped siblings go with it)"
 else
   bad "A5: cli-tests does not use a private mktemp -d + rm -rf trap — the derived .ansi-stripped siblings leak into TMPDIR"
