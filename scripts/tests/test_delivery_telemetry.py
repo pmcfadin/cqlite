@@ -1119,6 +1119,42 @@ class SliceDeliveryTests(unittest.TestCase):
                 dt._validate(v, {"type": "string", "format": "date-time"}, "x", errs)
                 self.assertNotEqual(errs, [], f"{v!r} accepted by the ledger validator")
 
+    def test_schema_pattern_and_is_rfc3339_agree_exactly(self):
+        """The schema now STATES the canonical subset as a `pattern`, so the tool cannot be
+        looser than the published contract (round 10) OR tighter than it (round 11). Both
+        complaints are unexpressible once the two are the same fact — so assert they ARE.
+
+        This is the schema's own two-audience rule: `format` is annotation-only for a
+        standard Draft 2020-12 validator, so `pattern` is what actually enforces the subset
+        for a third-party reader.
+        """
+        import re as _re
+        schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+        pats = {f: schema["properties"][f]["pattern"]
+                for f in ("created_at", "pr_opened_at", "merged_at", "closed_at",
+                          "stamped_at")}
+        self.assertEqual(len(set(pats.values())), 1, f"timestamp patterns diverged: {pats}")
+        pattern = _re.compile(next(iter(pats.values())))
+        for v in ("2026-06-10T00:00:00Z", "2026-06-10T00:00:00+00:00",
+                  "2026-06-10T00:00:00.123456Z", "2026-06-10T00:00:00-07:00",
+                  "2026-06-10T00:00:00+00:00:30", "20260610T000000Z",
+                  "2026-W24-1T00:00:00Z", "2026-06-10T00:00:00", "2026-06-10",
+                  "2026-06-10t00:00:00z", "2026-06-10T23:59:60Z", "", "x"):
+            with self.subTest(value=v):
+                # the pattern is a SYNTAX rule; _is_rfc3339 is syntax AND calendar. They must
+                # agree on every value whose calendar is valid, and the tool may only be
+                # stricter where the calendar is impossible.
+                by_pattern = bool(pattern.fullmatch(v))
+                by_tool = dt._is_rfc3339(v)
+                if by_pattern and not by_tool:
+                    # permitted ONLY for an impossible instant the regex cannot see
+                    self.assertIn(v, ("2026-06-10T23:59:60Z",),
+                                  f"{v!r} matches the published pattern but the tool refuses "
+                                  f"it — lint would reject a schema-valid record")
+                else:
+                    self.assertEqual(by_pattern, by_tool,
+                                     f"{v!r}: pattern={by_pattern} tool={by_tool}")
+
     def test_every_committed_timestamp_is_strict_rfc3339(self):
         """The tightening must not red the committed ledger — asserted, not assumed."""
         checked = 0
