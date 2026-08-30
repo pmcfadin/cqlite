@@ -7111,10 +7111,10 @@ TEST_LIMIT=1500
 # told never to read; the SUMMARY's `file-size: FAIL` therefore named neither the file nor
 # the numbers, and every reader re-derived by hand the arithmetic the component had just
 # thrown away. Nothing printed here may go to only one of the two sinks.
-_fs_emit() { # _fs_emit <logfile> <line…>
+_fs_emit() { # _fs_emit <logfile> <line> [<line>…]  — one output line per argument
   local _fs_log="$1"; shift
-  printf '%s\n' "$*"
-  printf '%s\n' "$*" >>"$_fs_log"
+  printf '%s\n' "$@"
+  printf '%s\n' "$@" >>"$_fs_log"
 }
 run_file_size() {
   local name=file-size
@@ -7207,10 +7207,10 @@ run_file_size() {
   fi
 
   end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
   # Terminal verdict goes to the log too, so a reader opening file-size.log alone sees
   # what the component concluded and never has to correlate with the SUMMARY.
   _fs_emit "$log" ">>> [$name] $status ($((end - start))s)"
-  record_result "$name" "$status" "$((end - start))"
 }
 
 # scoped-tests (issue #1821, --lite only): the blast-radius-scoped test component.

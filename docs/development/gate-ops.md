@@ -442,6 +442,17 @@ Putting it together: an `INCOMPLETE` summary + an advancing log mtime = **alive,
 are present = **dead, relaunch**. Anything else is inconclusive — prefer waiting to relaunching, and
 report `gate-timeout` on the hard deadline rather than guessing.
 
+## Component logs under `logs: <dir>` (issue #3401)
+
+Every component writes `<dir>/<component>.log`, where `<dir>` is the SUMMARY's `logs:` line —
+that is the ONLY gate text besides the SUMMARY an agent should open, and it is where you go when
+a component's one-line verdict is not enough. In particular `file-size.log` carries the whole
+ratchet computation the verdict summarises: the thresholds applied, the resolved base sha (and
+the ref it came from, or an explicit "base ref unavailable — growth ratchet skipped"), the full
+list of changed `.rs` files currently over threshold, and one `path: before -> after (limit N)`
+line per over-threshold file the change grew. It is written on **every** run, PASS included, so a
+`file-size: FAIL` never again requires re-deriving line counts across the diff by hand.
+
 ## Nested / concurrent-gate isolation (issue #2874)
 
 The gate of record is **structurally immune** to nested and concurrent gate activity — no box-exclusive ops rule and no "serialize every self-test lane" discipline is needed. The historical `#2751` workaround ("run the full gate **without** `AGENT_GATE_SUMMARY_FILE`") is **OBSOLETE**: the summary-file redirect invocation (`AGENT_GATE_SUMMARY_FILE=… bash scripts/agent-gate.sh`) is once again the documented default for callers, and running it concurrently with another lane's gate self-tests on the same box is safe. Three mechanisms guarantee this:
