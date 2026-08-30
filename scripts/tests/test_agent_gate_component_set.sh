@@ -1023,6 +1023,67 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 5d. THE BASELINE COMES FROM A REF THIS RUN OWNS, NOT FROM `FETCH_HEAD` (roborev job 227).
+#     `--refmap=` removed the shared TRACKING-ref write, which left `FETCH_HEAD` carrying the
+#     baseline — and `FETCH_HEAD` is itself a single shared mutable file per repository, so a
+#     CONCURRENT fetch (a sibling lane, a hook, an editor) overwrites it between the fetch and
+#     the read. The pre-flight would then compare against — and EXECUTE — a commit other than
+#     the `origin/main` it fetched, with nothing in the block to show it.
+#
+#     Simulated DETERMINISTICALLY rather than by racing: a stub `git` on PATH forwards every
+#     call to the real git and, after any `fetch`, CLOBBERS `FETCH_HEAD` with a decoy commit
+#     that exists in the fixture. That is the post-fetch window exactly. A run that reads
+#     `FETCH_HEAD` reports the DECOY sha; a run that reads its own private destination ref
+#     reports the true tip. (RED-verified against a copy patched back to `FETCH_HEAD`, which
+#     reports the decoy.)
+#
+#     The same case pins the CLEANUP half: the private ref lives in `refs/worktree/*` (git's
+#     per-worktree namespace, so it is not shared with a sibling lane at all) and must not
+#     survive the run — a probe that leaks a ref per invocation is a slow leak in a shared
+#     `.git`.
+# ---------------------------------------------------------------------------
+base_priv=$(mkbaseline base-priv - )
+priv=$(mkbranch priv "$base_priv" - --from-origin)
+priv_tip=$(git -C "$base_priv" rev-parse refs/heads/main)
+priv_decoy=$(git -C "$priv" rev-parse HEAD)          # the fixture's own commit — a REAL object,
+                                                     # so a FETCH_HEAD read resolves it and
+                                                     # reports it rather than failing
+priv_real_git=$(command -v git 2>/dev/null)
+if [ -z "$priv_real_git" ] || [ "$priv_decoy" = "$priv_tip" ]; then
+  echo "skip - 3544-private-fetch-ref: needs a resolvable git and a fixture commit distinct from origin/main's tip (decoy='$priv_decoy' tip='$priv_tip')"
+else
+  priv_bin="$tmp/priv-bin"; mkdir -p "$priv_bin"
+  {
+    printf '#!/bin/sh\n'
+    printf '# stub git: forward everything, then emulate a CONCURRENT fetch clobbering FETCH_HEAD\n'
+    printf '"%s" "$@"; rc=$?\n' "$priv_real_git"
+    printf 'for a in "$@"; do\n'
+    printf '  [ "$a" = fetch ] || continue\n'
+    printf '  printf "%%s\\t\\tbranch (decoy) of origin\\n" "%s" > "%s/.git/FETCH_HEAD" 2>/dev/null || true\n' \
+           "$priv_decoy" "$priv"
+    printf '  break\n'
+    printf 'done\n'
+    printf 'exit $rc\n'
+  } >"$priv_bin/git"
+  chmod +x "$priv_bin/git"
+  pv_out=$( cd "$priv" && PATH="$priv_bin:$PATH" bash "$priv/scripts/agent-gate.sh" \
+              --component-set-line full 2>/dev/null )
+  pv_sha=$(field SHA "$pv_out")
+  pv_clobbered=$(git -C "$priv" rev-parse --verify --quiet 'FETCH_HEAD^{commit}' 2>/dev/null || echo none)
+  pv_leaked=$(git -C "$priv" for-each-ref --format='%(refname)' 'refs/worktree/*' 2>/dev/null | grep -c . || true)
+  # The stub must actually have clobbered FETCH_HEAD, or the case proves nothing: that is the
+  # positive control for the simulation itself.
+  if [ "$pv_clobbered" != "$priv_decoy" ]; then
+    bad "3544-private-fetch-ref: the stub did NOT clobber FETCH_HEAD (found '$pv_clobbered', decoy '$priv_decoy') — the case cannot discriminate"
+  elif [ "$pv_sha" = "$priv_tip" ] && [ "$pv_leaked" -eq 0 ]; then
+    ok "3544-private-fetch-ref: a clobbered FETCH_HEAD does NOT change the baseline (reported the fetched tip), and the private refs/worktree ref is cleaned up"
+  else
+    bad "3544-private-fetch-ref: expected the fetched tip $priv_tip (got '$pv_sha'; decoy '$priv_decoy'), and no leaked refs/worktree ref (leaked=$pv_leaked)"
+    printf '%s\n' "$pv_out"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 5c. THE FETCH WRITES NO SHARED REF — tags included (roborev job 214). `--refmap=` stops
 #     the opportunistic `refs/remotes/origin/*` write, but `git fetch` ALSO auto-follows
 #     tags into the SHARED `refs/tags/*`, which reintroduced exactly the cross-lane ref

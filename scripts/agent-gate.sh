@@ -2562,6 +2562,7 @@ apply_schemas_preflight() {
 #                                        identity IN-PROCESS (no resolution, no network).
 #     git rev-parse FETCH_HEAD^{commit}  ref + COMMIT object; commits are never filtered.
 #     git merge-base --is-ancestor       walks commit parents only.
+#     git update-ref -d <private ref>    deletes a ref in this worktree's own namespace.
 #
 #   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, mkdir, rm, cat, tr, cut,
 #     basename, kill, sleep, true — plus `timeout`/`gtimeout` themselves, which ARE the
@@ -2579,6 +2580,7 @@ _CS_MISSING=""     # baseline components ABSENT from this tree's set (space sepa
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
 _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
+_CS_FETCH_REF=""   # the PRIVATE per-run ref this invocation's fetch wrote (#3544 / job 227)
 _CS_HEAD_SET=""    # the component set as COMMITTED AT HEAD (space separated)
 _CS_HEAD_ERR=""    # why HEAD's set could not be measured (empty = measured)
 _CS_ANCESTOR=unknown   # is the baseline sha an ancestor of HEAD? yes | no | unknown
@@ -2964,10 +2966,54 @@ EOF_CS_HEAD
   return 0
 }
 
-# _component_set_probe: perform the fetch + the two set derivations + the ancestry
+# THE BASELINE MUST NOT BE READ FROM A SHARED MUTABLE REF — AND `FETCH_HEAD` IS ONE (roborev
+# job 227). `--refmap=` was chosen precisely so the fetch writes NO shared tracking ref, which
+# left `FETCH_HEAD` as the carrier; but `FETCH_HEAD` is a single per-repository file, so a
+# CONCURRENT fetch in the same worktree (a sibling lane, a hook, an editor's auto-fetch)
+# overwrites it between the fetch and the read. This pre-flight then compares against — and
+# EXECUTES — a commit other than the `origin/main` it fetched, silently. The fix is a
+# destination this run OWNS.
+#
+# `refs/worktree/…` is git's PER-WORKTREE ref namespace, so on this fleet's layout (lanes are
+# `git worktree`s of ONE shared `.git`) it is not shared with a sibling lane at all, and the
+# name additionally carries this run's id and pid. Two properties follow, and they are the
+# whole point:
+#   * PROVENANCE. The refspec's SOURCE is the literal `refs/heads/main` and its DESTINATION is
+#     this private ref, so a value found there can only have come from THIS fetch of THAT
+#     remote ref. That is the "verify the resolved commit belongs to the requested remote ref"
+#     requirement, established by construction rather than by a second observation of a
+#     mutable name.
+#   * NO FORCE. The refspec is deliberately not `+…`: if the ref somehow already exists and is
+#     not fast-forwardable, `git fetch` FAILS and this pre-flight reports an unmeasurable
+#     baseline. Fail-closed beats overwriting a name we did not expect to be occupied.
+_component_set_fetch_ref_name() {
+  printf 'refs/worktree/agent-gate-component-set/%s-%s' "$(basename "${RUN_ID:-norunid}")" "$$"
+}
+
+# _component_set_drop_fetch_ref: delete the private ref, if this run created one. Called on
+# EVERY path out of the probe (see the wrapper below) rather than at each `return`, because a
+# cleanup that has to be repeated at nine sites is a cleanup that will be missed at one.
+_component_set_drop_fetch_ref() {
+  [ -n "$_CS_FETCH_REF" ] || return 0
+  # local-only: deletes a ref in this worktree's own ref namespace. No object access, no
+  # remote contact, no possibility of a lazy fetch.
+  git -C "$REPO_ROOT" update-ref -d "$_CS_FETCH_REF" >/dev/null 2>&1 || true
+  _CS_FETCH_REF=""
+}
+
+# _component_set_probe: the EFFECTFUL probe, wrapped so the private fetch ref is dropped on
+# every path out — including the early returns that report an unmeasurable baseline.
+_component_set_probe() {
+  _component_set_probe_inner
+  _component_set_drop_fetch_ref
+  return 0
+}
+
+# _component_set_probe_inner: perform the fetch + the two set derivations + the ancestry
 # probe, recording everything in the _CS_* globals. NEVER exits, never emits; the
 # verdict mapping and the emit live in the two functions below.
-_component_set_probe() {
+_component_set_probe_inner() {
+  _component_set_drop_fetch_ref   # a prior probe in this process must not leak its ref
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""
@@ -3039,7 +3085,15 @@ _component_set_probe() {
   #   2. NO SIDE EFFECT ON A PEER. A pre-flight must not move a ref another lane's run may
   #      be reading mid-flight; the check exists to distrust that cached ref, not to
   #      rewrite it.
-  err=$(_component_set_bounded 120 git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags origin main 2>&1); rc=$?
+  #
+  # THE DESTINATION IS THIS RUN'S PRIVATE PER-WORKTREE REF (job 227), not `FETCH_HEAD` and not
+  # a shared tracking ref: see _component_set_fetch_ref_name above for why a shared mutable
+  # name cannot carry a baseline that is about to be EXECUTED. `--refmap=` is retained so the
+  # opportunistic `refs/remotes/origin/*` update stays suppressed.
+  local csref; csref="$(_component_set_fetch_ref_name)"
+  err=$(_component_set_bounded 120 git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags \
+          origin "refs/heads/main:$csref" 2>&1); rc=$?
+  [ "$rc" -eq 0 ] && _CS_FETCH_REF="$csref"
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -3049,15 +3103,17 @@ _component_set_probe() {
     fi
     return 0
   fi
-  # FETCH_HEAD, not refs/remotes/origin/main: FETCH_HEAD is what THIS fetch just
-  # observed, whereas the remote-tracking ref is updated only opportunistically and is
-  # the cached observable this check exists to distrust.
+  # THIS RUN'S PRIVATE REF, never `FETCH_HEAD` and never `refs/remotes/origin/main`: the
+  # tracking ref is updated only opportunistically and is the cached observable this check
+  # exists to distrust, and `FETCH_HEAD` is a SHARED MUTABLE FILE a concurrent fetch in the
+  # same repository overwrites between the fetch and this read (job 227). The private
+  # destination is what makes the value's provenance structural.
   # local-only: resolves a ref file plus the COMMIT object the fetch above just wrote.
   # Commit objects are never filtered out of a partial clone, so no lazy fetch is possible.
-  _CS_SHA=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "FETCH_HEAD^{commit}" 2>/dev/null || true)
+  _CS_SHA=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$csref^{commit}" 2>/dev/null || true)
   if [ -z "$_CS_SHA" ]; then
     _CS_KIND=fetch-failed; _CS_SHA="-"
-    _CS_DETAIL="git fetch origin main succeeded but FETCH_HEAD does not resolve to a commit"
+    _CS_DETAIL="git fetch origin refs/heads/main succeeded but its private destination ref does not resolve to a commit"
     return 0
   fi
 
