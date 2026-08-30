@@ -97,6 +97,19 @@ CREATE TYPE IF NOT EXISTS key_part (
 );
 
 -- ── Table ───────────────────────────────────────────────────────────────────
+-- Both frozen-map column types were probed against Cassandra 5.0.2 before being
+-- committed and were accepted verbatim: a collection or tuple used as a map key
+-- must be frozen, and both nestings below satisfy that.
+--
+-- NO `--` COMMENT MAY APPEAR BETWEEN `CREATE TABLE (` AND ITS CLOSING `)`.
+-- CQLite's nom schema parser (cqlite-core/src/schema/cql_parser.rs) strips
+-- comments only BETWEEN statements, not inside one, so a comment in the column
+-- list makes the whole CREATE TABLE unparseable. The loader then reports
+-- `loaded 0 schemas` and the reader silently falls back to the Statistics.db
+-- marshal types: the partition key decodes to None and every frozen-outer
+-- column decodes to an opaque Blob — i.e. a green-looking schema file that
+-- takes the entire read path down. Measured on this file (issue #3500); keep
+-- per-column rationale in this header instead.
 CREATE TABLE IF NOT EXISTS nested_udt_keys (
     id              int PRIMARY KEY,
     s_tuple_udt     set<frozen<tuple<frozen<key_part>, int>>>,
@@ -104,9 +117,6 @@ CREATE TABLE IF NOT EXISTS nested_udt_keys (
     m_tuple_udt     map<frozen<tuple<frozen<key_part>, int>>, int>,
     s_list_udt      set<frozen<list<frozen<key_part>>>>,
     f_set_tuple_udt frozen<set<frozen<tuple<frozen<key_part>, int>>>>,
-    -- Accepted verbatim by Cassandra 5.0.2 (probed before committing): a
-    -- collection/tuple used as a map key must be frozen, and both nestings
-    -- below satisfy that.
     f_map_tuple_udt frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>,
     f_map_set_udt   frozen<map<frozen<set<frozen<key_part>>>, int>>
 ) WITH compression = {'enabled': 'false'}
