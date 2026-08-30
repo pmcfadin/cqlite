@@ -1,0 +1,829 @@
+//! The committed `CREATE TABLE` DDL as the AD2 lane's column/type authority
+//! (issue #1491).
+//!
+//! # Why this module exists
+//!
+//! Two false-pass paths in the first cut of this lane had the same root cause:
+//! the comparison had no statement of what columns a row must carry, or of what
+//! CQL type each value is.
+//!
+//!   * Both sides defaulted an absent column to `null`, so a column CQLite
+//!     omitted entirely compared equal to a golden null — and a spurious extra
+//!     null column also passed. The "an absent cell renders as `null`" property
+//!     was therefore untested by the very cases that exist for it.
+//!   * Every numeric-LOOKING text was canonicalized as a number, so a `text`
+//!     value `"22201"` compared equal to the JSON number `22201`, and `"00000"`
+//!     to `"0"` — type and zero-padding regressions passed silently.
+//!
+//! Both are answered by the same authority: the committed `CREATE TABLE` in
+//! `test-data/schemas/*.cql`. That is doctrine-correct rather than a workaround —
+//! the no-heuristics mandate (#28) names the schema as THE metadata source, the
+//! CLI under test is already given the same file via `--schema`, and Cassandra
+//! itself decides both questions from the DDL.
+//!
+//! # Independently parsed, on purpose
+//!
+//! This is a small hand-written DDL reader rather than a call into
+//! `cqlite_core`'s schema parser. Using CQLite's parser here would make the
+//! oracle share an implementation with the code under test: a parser that
+//! dropped a column would drop it from the *expectation* too, and the egress
+//! omitting the same column would then pass — exactly the false-pass class this
+//! module was written to close (CLAUDE.md, "a CQLite `file:line` is NEVER format
+//! authority").
+//!
+//! It is deliberately narrow and FAILS CLOSED. It understands the subset the
+//! committed fixture schemas use — `CREATE TYPE`, `CREATE TABLE`, native scalar
+//! types, `frozen<>`, `list/set/map/tuple`, UDT references, `STATIC`, inline and
+//! trailing `PRIMARY KEY` — and returns `Err` naming the input for anything else
+//! (an unknown type name, an unresolvable UDT, a block comment, an unbalanced
+//! bracket). A type it cannot name is never guessed at, because a guessed type
+//! would silently restore the permissive comparison.
+
+#![allow(dead_code)]
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+/// A CQL type, reduced to the distinctions value comparison needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CqlType {
+    /// `int`, `bigint`, `smallint`, `tinyint`, `varint`, `float`, `double`,
+    /// `decimal`, `counter`: the only types whose value may be compared
+    /// NUMERICALLY, i.e. where a JSON number and its decimal text denote the same
+    /// value. The name is kept for diagnostics.
+    Numeric(String),
+    /// `text`, `varchar`, `ascii`: compared as EXACT strings, so `"00000"` never
+    /// equals `"0"` and `"22201"` never equals the number `22201`.
+    Text(String),
+    /// `boolean`.
+    Boolean,
+    /// `blob`: `0x…` hex, compared exactly.
+    Blob,
+    /// `timestamp`: the one scalar with two legitimate spellings (see
+    /// `canon_timestamp`).
+    Timestamp,
+    /// `uuid`, `timeuuid`, `date`, `time`, `duration`, `inet`: opaque text,
+    /// compared exactly. The name is kept for diagnostics.
+    Opaque(String),
+    List(Box<CqlType>),
+    Set(Box<CqlType>),
+    Map(Box<CqlType>, Box<CqlType>),
+    Tuple(Vec<CqlType>),
+    Udt(UdtType),
+}
+
+/// A user-defined type, fully resolved at parse time (a UDT field that is itself
+/// a UDT is expanded, so comparison never has to look a name up).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UdtType {
+    pub name: String,
+    pub fields: Vec<(String, CqlType)>,
+}
+
+impl CqlType {
+    /// A short human name for failure messages.
+    pub fn describe(&self) -> String {
+        match self {
+            CqlType::Numeric(n) | CqlType::Text(n) | CqlType::Opaque(n) => n.clone(),
+            CqlType::Boolean => "boolean".to_string(),
+            CqlType::Blob => "blob".to_string(),
+            CqlType::Timestamp => "timestamp".to_string(),
+            CqlType::List(e) => format!("list<{}>", e.describe()),
+            CqlType::Set(e) => format!("set<{}>", e.describe()),
+            CqlType::Map(k, v) => format!("map<{}, {}>", k.describe(), v.describe()),
+            CqlType::Tuple(items) => format!(
+                "tuple<{}>",
+                items
+                    .iter()
+                    .map(CqlType::describe)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            CqlType::Udt(u) => u.name.clone(),
+        }
+    }
+
+    /// Is this a collection/UDT, i.e. a type whose value is multi-cell when it is
+    /// not frozen?
+    pub fn is_complex(&self) -> bool {
+        matches!(
+            self,
+            CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) | CqlType::Udt(_)
+        )
+    }
+}
+
+/// Where a column sits in the primary key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnKind {
+    Partition,
+    Clustering,
+    Static,
+    Regular,
+}
+
+/// One declared column.
+#[derive(Clone, Debug)]
+pub struct Column {
+    pub name: String,
+    pub ty: CqlType,
+    pub kind: ColumnKind,
+    /// `frozen<…>` at the top level: a frozen collection/UDT is stored as ONE
+    /// value cell, a non-frozen one is multi-cell.
+    pub frozen: bool,
+}
+
+impl Column {
+    /// A non-frozen collection or UDT: `sstabledump` flattens it into one cell
+    /// per element, each carrying a cell path.
+    pub fn is_multicell(&self) -> bool {
+        !self.frozen && self.ty.is_complex()
+    }
+}
+
+/// One `CREATE TABLE`, in DDL column order.
+#[derive(Clone, Debug)]
+pub struct TableSchema {
+    pub keyspace: Option<String>,
+    pub table: String,
+    pub columns: Vec<Column>,
+    /// Partition-key columns in KEY order.
+    pub partition_key: Vec<String>,
+    /// Clustering columns in KEY order.
+    pub clustering: Vec<String>,
+}
+
+impl TableSchema {
+    pub fn column(&self, name: &str) -> Option<&Column> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
+    pub fn column_names(&self) -> Vec<&str> {
+        self.columns.iter().map(|c| c.name.as_str()).collect()
+    }
+}
+
+/// Parse `file` and return the schema of `table`, or an error naming what could
+/// not be read. `table` is matched case-insensitively, as CQL identifiers are.
+pub fn load(file: &Path, table: &str) -> Result<TableSchema, String> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read committed schema {}: {e}", file.display()))?;
+    from_ddl(&text, table).map_err(|why| format!("{}: {why}", file.display()))
+}
+
+/// Parse DDL text and return the schema of `table`.
+pub fn from_ddl(ddl: &str, table: &str) -> Result<TableSchema, String> {
+    let ddl = strip_comments(ddl)?;
+    let mut udts: BTreeMap<String, UdtType> = BTreeMap::new();
+    let mut found: Option<TableSchema> = None;
+    let wanted = table.to_ascii_lowercase();
+    for statement in statements(&ddl)? {
+        let lower = statement.to_ascii_lowercase();
+        if lower.starts_with("create type") {
+            let (name, body) = named_body(&statement, "create type")?;
+            let fields = parse_fields(&body, &udts)?;
+            udts.insert(
+                name.clone(),
+                UdtType {
+                    name: name.clone(),
+                    fields,
+                },
+            );
+        } else if lower.starts_with("create table") || lower.starts_with("create columnfamily") {
+            let keyword = if lower.starts_with("create table") {
+                "create table"
+            } else {
+                "create columnfamily"
+            };
+            let (name, body) = named_body(&statement, keyword)?;
+            let (keyspace, bare) = match name.split_once('.') {
+                Some((ks, tbl)) => (Some(ks.to_string()), tbl.to_string()),
+                None => (None, name.clone()),
+            };
+            if bare != wanted {
+                continue;
+            }
+            if found.is_some() {
+                return Err(format!(
+                    "table `{table}` is declared more than once — the case cannot say \
+                     which declaration is authoritative"
+                ));
+            }
+            found = Some(parse_table(keyspace, bare, &body, &udts)?);
+        }
+    }
+    found.ok_or_else(|| format!("no `CREATE TABLE {table}` in this schema file"))
+}
+
+/// Remove `--` line comments. Block comments are REFUSED rather than skipped:
+/// none of the committed schemas uses one, and a half-understood comment syntax
+/// could silently swallow a column declaration.
+fn strip_comments(ddl: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(ddl.len());
+    for (i, line) in ddl.lines().enumerate() {
+        let mut in_quote = false;
+        let mut cut = line.len();
+        let bytes = line.as_bytes();
+        let mut j = 0;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'\'' => in_quote = !in_quote,
+                b'/' if !in_quote && bytes.get(j + 1) == Some(&b'*') => {
+                    return Err(format!(
+                        "line {}: block comment `/*` is not supported by this reader",
+                        i + 1
+                    ))
+                }
+                b'-' if !in_quote && bytes.get(j + 1) == Some(&b'-') => {
+                    cut = j;
+                    break;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        out.push_str(&line[..cut]);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Split into statements on `;` outside quotes and brackets, with whitespace
+/// collapsed so the rest of the reader can work on single-line text.
+fn statements(ddl: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut depth = 0i32;
+    for ch in ddl.chars() {
+        match ch {
+            '\'' => {
+                in_quote = !in_quote;
+                current.push(ch);
+            }
+            '(' | '<' if !in_quote => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | '>' if !in_quote => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err("unbalanced bracket in DDL".to_string());
+                }
+                current.push(ch);
+            }
+            ';' if !in_quote && depth == 0 => {
+                out.push(collapse(&current));
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !collapse(&current).is_empty() {
+        out.push(collapse(&current));
+    }
+    if depth != 0 {
+        return Err("unbalanced bracket in DDL".to_string());
+    }
+    Ok(out.into_iter().filter(|s| !s.is_empty()).collect())
+}
+
+fn collapse(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// From `CREATE {TABLE,TYPE} [IF NOT EXISTS] <name> ( <body> ) [WITH …]`, return
+/// the lowercased name and the parenthesised body.
+fn named_body(statement: &str, keyword: &str) -> Result<(String, String), String> {
+    let rest = statement[keyword.len()..].trim_start();
+    let rest = match rest.to_ascii_lowercase().strip_prefix("if not exists") {
+        Some(_) => rest["if not exists".len()..].trim_start(),
+        None => rest,
+    };
+    let open = rest
+        .find('(')
+        .ok_or_else(|| format!("`{keyword}` with no `(`: {statement}"))?;
+    let name = rest[..open].trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return Err(format!("`{keyword}` with no name: {statement}"));
+    }
+    let body = matched(&rest[open..])?;
+    Ok((name, body))
+}
+
+/// The content of the parenthesised group `s` starts with.
+fn matched(s: &str) -> Result<String, String> {
+    let mut depth = 0i32;
+    let mut in_quote = false;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '\'' => in_quote = !in_quote,
+            '(' if !in_quote => depth += 1,
+            ')' if !in_quote => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(s[1..i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(format!("unbalanced `(` in: {s}"))
+}
+
+/// Split on commas outside quotes, parens AND angle brackets (`map<int, text>`
+/// carries a comma that is not an item boundary).
+fn split_items(body: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let mut in_quote = false;
+    for ch in body.chars() {
+        match ch {
+            '\'' => {
+                in_quote = !in_quote;
+                current.push(ch);
+            }
+            '(' | '<' if !in_quote => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | '>' if !in_quote => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(format!("unbalanced bracket in: {body}"));
+                }
+                current.push(ch);
+            }
+            ',' if !in_quote && depth == 0 => {
+                out.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    if depth != 0 {
+        return Err(format!("unbalanced bracket in: {body}"));
+    }
+    Ok(out)
+}
+
+/// `CREATE TYPE` fields: `name type` pairs only.
+fn parse_fields(
+    body: &str,
+    udts: &BTreeMap<String, UdtType>,
+) -> Result<Vec<(String, CqlType)>, String> {
+    let mut fields = Vec::new();
+    for item in split_items(body)? {
+        let (name, ty_text) = item
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| format!("UDT field with no type: `{item}`"))?;
+        let (ty, _frozen) = parse_type(ty_text.trim(), udts)?;
+        fields.push((name.trim().to_ascii_lowercase(), ty));
+    }
+    if fields.is_empty() {
+        return Err(format!("UDT with no fields: `{body}`"));
+    }
+    Ok(fields)
+}
+
+fn parse_table(
+    keyspace: Option<String>,
+    table: String,
+    body: &str,
+    udts: &BTreeMap<String, UdtType>,
+) -> Result<TableSchema, String> {
+    let mut columns: Vec<Column> = Vec::new();
+    let mut partition_key: Vec<String> = Vec::new();
+    let mut clustering: Vec<String> = Vec::new();
+    let mut statics: Vec<String> = Vec::new();
+    let mut inline_pk: Option<String> = None;
+
+    for item in split_items(body)? {
+        let lower = item.to_ascii_lowercase();
+        if lower.starts_with("primary key") {
+            let spec = item[..]
+                .find('(')
+                .map(|i| matched(&item[i..]))
+                .transpose()?
+                .ok_or_else(|| format!("`PRIMARY KEY` with no `(`: `{item}`"))?;
+            let (pk, ck) = parse_key_spec(&spec)?;
+            if !partition_key.is_empty() {
+                return Err(format!("two PRIMARY KEY clauses in `{table}`"));
+            }
+            partition_key = pk;
+            clustering = ck;
+            continue;
+        }
+        // A column: `name type [STATIC] [PRIMARY KEY]`, in either trailing order.
+        let mut rest = item.as_str();
+        let mut is_static = false;
+        let mut is_inline_pk = false;
+        loop {
+            let lower = rest.to_ascii_lowercase();
+            if let Some(stripped) = lower.strip_suffix("primary key") {
+                is_inline_pk = true;
+                rest = rest[..stripped.len()].trim_end();
+                continue;
+            }
+            if let Some(stripped) = lower.strip_suffix("static") {
+                is_static = true;
+                rest = rest[..stripped.len()].trim_end();
+                continue;
+            }
+            break;
+        }
+        let (name, ty_text) = rest
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| format!("column with no type: `{item}`"))?;
+        let name = name.trim().to_ascii_lowercase();
+        let (ty, frozen) = parse_type(ty_text.trim(), udts)?;
+        if is_inline_pk {
+            if inline_pk.is_some() {
+                return Err(format!("two inline PRIMARY KEY columns in `{table}`"));
+            }
+            inline_pk = Some(name.clone());
+        }
+        if is_static {
+            statics.push(name.clone());
+        }
+        columns.push(Column {
+            name,
+            ty,
+            kind: ColumnKind::Regular,
+            frozen,
+        });
+    }
+
+    if let Some(pk) = inline_pk {
+        if !partition_key.is_empty() {
+            return Err(format!(
+                "`{table}` has both an inline PRIMARY KEY and a PRIMARY KEY clause"
+            ));
+        }
+        partition_key = vec![pk];
+    }
+    if partition_key.is_empty() {
+        return Err(format!("`{table}` declares no primary key"));
+    }
+    for name in partition_key.iter().chain(clustering.iter()) {
+        if !columns.iter().any(|c| &c.name == name) {
+            return Err(format!(
+                "`{table}` primary key names `{name}`, which is not a declared column"
+            ));
+        }
+    }
+    for column in &mut columns {
+        column.kind = if partition_key.contains(&column.name) {
+            ColumnKind::Partition
+        } else if clustering.contains(&column.name) {
+            ColumnKind::Clustering
+        } else if statics.contains(&column.name) {
+            ColumnKind::Static
+        } else {
+            ColumnKind::Regular
+        };
+    }
+    Ok(TableSchema {
+        keyspace,
+        table,
+        columns,
+        partition_key,
+        clustering,
+    })
+}
+
+/// `pk`, `pk, ck…`, or `(pk1, pk2), ck…`.
+fn parse_key_spec(spec: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let items = split_items(spec)?;
+    let first = items
+        .first()
+        .ok_or_else(|| format!("empty PRIMARY KEY spec: `{spec}`"))?;
+    let mut partition = Vec::new();
+    if first.starts_with('(') {
+        for name in split_items(&matched(first)?)? {
+            partition.push(name.trim().to_ascii_lowercase());
+        }
+    } else {
+        partition.push(first.trim().to_ascii_lowercase());
+    }
+    let clustering = items[1..]
+        .iter()
+        .map(|n| n.trim().to_ascii_lowercase())
+        .collect();
+    if partition.is_empty() {
+        return Err(format!("PRIMARY KEY with no partition column: `{spec}`"));
+    }
+    Ok((partition, clustering))
+}
+
+/// Parse a type reference. Returns the type and whether the TOP level was
+/// `frozen<…>`.
+fn parse_type(text: &str, udts: &BTreeMap<String, UdtType>) -> Result<(CqlType, bool), String> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("frozen") {
+        if rest.trim_start().starts_with('<') {
+            let inner = angle_body(trimmed)?;
+            let (ty, _) = parse_type(&inner, udts)?;
+            return Ok((ty, true));
+        }
+    }
+    Ok((parse_bare_type(trimmed, udts)?, false))
+}
+
+fn parse_bare_type(text: &str, udts: &BTreeMap<String, UdtType>) -> Result<CqlType, String> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(open) = trimmed.find('<') {
+        let name = lower[..open].trim().to_string();
+        let args = split_items(&angle_body(trimmed)?)?;
+        let mut parsed = Vec::new();
+        for arg in &args {
+            parsed.push(parse_type(arg, udts)?.0);
+        }
+        return match (name.as_str(), parsed.len()) {
+            ("list", 1) => Ok(CqlType::List(Box::new(parsed.remove(0)))),
+            ("set", 1) => Ok(CqlType::Set(Box::new(parsed.remove(0)))),
+            ("map", 2) => {
+                let value = parsed.remove(1);
+                let key = parsed.remove(0);
+                Ok(CqlType::Map(Box::new(key), Box::new(value)))
+            }
+            ("tuple", n) if n > 0 => Ok(CqlType::Tuple(parsed)),
+            ("frozen", 1) => Ok(parsed.remove(0)),
+            _ => Err(format!(
+                "unsupported parameterised type `{trimmed}` ({name} with {} argument(s))",
+                parsed.len()
+            )),
+        };
+    }
+    Ok(match lower.as_str() {
+        "int" | "bigint" | "smallint" | "tinyint" | "varint" | "float" | "double" | "decimal"
+        | "counter" => CqlType::Numeric(lower),
+        "text" | "varchar" | "ascii" => CqlType::Text(lower),
+        "boolean" => CqlType::Boolean,
+        "blob" => CqlType::Blob,
+        "timestamp" => CqlType::Timestamp,
+        "uuid" | "timeuuid" | "date" | "time" | "duration" | "inet" => CqlType::Opaque(lower),
+        other => match udts.get(other) {
+            Some(udt) => CqlType::Udt(udt.clone()),
+            // Fail closed: a guessed type restores the permissive comparison this
+            // module exists to remove.
+            None => {
+                return Err(format!(
+                    "unknown type `{trimmed}` — neither a native CQL type this reader \
+                     knows nor a `CREATE TYPE` declared earlier in the same file"
+                ))
+            }
+        },
+    })
+}
+
+/// The content between the first `<` and its match.
+fn angle_body(s: &str) -> Result<String, String> {
+    let open = s
+        .find('<')
+        .ok_or_else(|| format!("no `<` in type `{s}`"))?;
+    let mut depth = 0i32;
+    for (i, ch) in s[open..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(s[open + 1..open + i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(format!("unbalanced `<` in type `{s}`"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DDL: &str = r#"
+-- a comment mentioning ( unbalanced and a ; semicolon
+CREATE KEYSPACE IF NOT EXISTS ks WITH replication = {'class': 'SimpleStrategy'};
+USE ks;
+
+CREATE TYPE IF NOT EXISTS address (
+    street text,
+    city   text,
+    zip    text
+);
+
+CREATE TYPE IF NOT EXISTS employee (
+    name  text,
+    home  frozen<address>,
+    level int
+);
+
+CREATE TABLE IF NOT EXISTS t (
+    pk     int,
+    bucket text,
+    seq    int,
+    body   TEXT,
+    sdata  text STATIC,
+    ms     set<int>,
+    fm     FROZEN<MAP<INT, TEXT>>,
+    ma     map<text, frozen<address>>,
+    e      frozen<employee>,
+    tup    tuple<int, text>,
+    PRIMARY KEY ((pk, bucket), seq)
+) WITH compression = {'enabled': 'false'};
+
+CREATE TABLE IF NOT EXISTS inline (
+    id INT PRIMARY KEY,
+    v  text
+);
+"#;
+
+    fn schema(table: &str) -> TableSchema {
+        match from_ddl(DDL, table) {
+            Ok(s) => s,
+            Err(why) => panic!("{table}: {why}"),
+        }
+    }
+
+    #[test]
+    fn the_column_set_and_key_order_come_from_the_ddl() {
+        let s = schema("t");
+        assert_eq!(
+            s.column_names(),
+            vec!["pk", "bucket", "seq", "body", "sdata", "ms", "fm", "ma", "e", "tup"]
+        );
+        assert_eq!(s.partition_key, vec!["pk", "bucket"]);
+        assert_eq!(s.clustering, vec!["seq"]);
+        assert_eq!(
+            s.column("sdata").map(|c| c.kind),
+            Some(ColumnKind::Static),
+            "a STATIC column must be recognised as static"
+        );
+        assert_eq!(s.column("body").map(|c| c.kind), Some(ColumnKind::Regular));
+        assert_eq!(s.column("pk").map(|c| c.kind), Some(ColumnKind::Partition));
+        assert_eq!(s.column("seq").map(|c| c.kind), Some(ColumnKind::Clustering));
+
+        let inline = schema("inline");
+        assert_eq!(inline.partition_key, vec!["id"]);
+        assert!(inline.clustering.is_empty());
+        assert_eq!(inline.column_names(), vec!["id", "v"]);
+    }
+
+    /// The distinction BLOCKER 2 turns on: `text` is not numeric, so a numeric
+    /// text is never compared as a number.
+    #[test]
+    fn text_and_numeric_are_distinct_types() {
+        let s = schema("t");
+        assert_eq!(
+            s.column("body").map(|c| c.ty.clone()),
+            Some(CqlType::Text("text".to_string()))
+        );
+        assert_eq!(
+            s.column("seq").map(|c| c.ty.clone()),
+            Some(CqlType::Numeric("int".to_string()))
+        );
+    }
+
+    #[test]
+    fn frozen_and_multicell_are_distinguished() {
+        let s = schema("t");
+        let ms = s.column("ms").expect("ms");
+        assert!(ms.is_multicell(), "a non-frozen set is multicell");
+        let fm = s.column("fm").expect("fm");
+        assert!(!fm.is_multicell(), "a frozen map is one value cell");
+        assert_eq!(
+            fm.ty,
+            CqlType::Map(
+                Box::new(CqlType::Numeric("int".to_string())),
+                Box::new(CqlType::Text("text".to_string()))
+            ),
+            "case must not matter and frozen<> must be unwrapped"
+        );
+        assert!(
+            !s.column("body").map(|c| c.is_multicell()).unwrap_or(true),
+            "a scalar is never multicell"
+        );
+    }
+
+    #[test]
+    fn a_nested_udt_is_resolved_to_its_fields() {
+        let s = schema("t");
+        let Some(CqlType::Udt(employee)) = s.column("e").map(|c| c.ty.clone()) else {
+            panic!("e should be a UDT");
+        };
+        assert_eq!(employee.name, "employee");
+        let home = employee
+            .fields
+            .iter()
+            .find(|(n, _)| n == "home")
+            .map(|(_, t)| t.clone());
+        let Some(CqlType::Udt(address)) = home else {
+            panic!("employee.home should resolve to the address UDT");
+        };
+        assert_eq!(
+            address.fields,
+            vec![
+                ("street".to_string(), CqlType::Text("text".to_string())),
+                ("city".to_string(), CqlType::Text("text".to_string())),
+                // The zip that must NOT be compared numerically.
+                ("zip".to_string(), CqlType::Text("text".to_string())),
+            ]
+        );
+
+        let Some(CqlType::Map(key, value)) = s.column("ma").map(|c| c.ty.clone()) else {
+            panic!("ma should be a map");
+        };
+        assert_eq!(*key, CqlType::Text("text".to_string()));
+        assert!(matches!(*value, CqlType::Udt(_)));
+    }
+
+    #[test]
+    fn a_tuple_keeps_its_positional_types() {
+        let s = schema("t");
+        assert_eq!(
+            s.column("tup").map(|c| c.ty.clone()),
+            Some(CqlType::Tuple(vec![
+                CqlType::Numeric("int".to_string()),
+                CqlType::Text("text".to_string()),
+            ]))
+        );
+    }
+
+    /// Fail closed: an unknown type name is never guessed at, because a guess
+    /// would silently restore the permissive comparison.
+    #[test]
+    fn an_unknown_type_is_an_error_not_a_guess() {
+        let ddl = "CREATE TABLE t (id int PRIMARY KEY, v mystery_type);";
+        let why = from_ddl(ddl, "t").expect_err("an undeclared type must not parse");
+        assert!(why.contains("mystery_type"), "{why}");
+    }
+
+    #[test]
+    fn a_missing_table_and_a_block_comment_are_both_errors() {
+        let why = from_ddl(DDL, "nosuch").expect_err("a missing table must be an error");
+        assert!(why.contains("nosuch"), "{why}");
+        let why = from_ddl("/* block */ CREATE TABLE t (id int PRIMARY KEY);", "t")
+            .expect_err("a block comment must be refused");
+        assert!(why.contains("block comment"), "{why}");
+    }
+
+    /// The committed schemas the AD2 lane actually reads must all parse — the
+    /// subject set is derived from the case table's own schema files, so a new
+    /// case cannot quietly bypass the reader.
+    #[test]
+    fn every_committed_schema_this_lane_reads_parses() {
+        let root = super::super::datasets_root::repo_root();
+        let dir = root.join("test-data/schemas");
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+        let mut parsed = 0usize;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("cql") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            let stripped = match strip_comments(&text) {
+                Ok(s) => s,
+                // `legacy/` and other out-of-scope files may use syntax this
+                // narrow reader refuses; only the tables the lane reads matter,
+                // and those are covered by the lane itself.
+                Err(_) => continue,
+            };
+            let Ok(statements) = statements(&stripped) else {
+                continue;
+            };
+            for statement in statements {
+                let lower = statement.to_ascii_lowercase();
+                if !lower.starts_with("create table") {
+                    continue;
+                }
+                let Ok((name, _)) = named_body(&statement, "create table") else {
+                    continue;
+                };
+                let bare = name.rsplit('.').next().unwrap_or(&name).to_string();
+                if let Ok(schema) = from_ddl(&text, &bare) {
+                    assert!(
+                        !schema.columns.is_empty(),
+                        "{}: {bare} parsed with no columns",
+                        path.display()
+                    );
+                    parsed += 1;
+                }
+            }
+        }
+        assert!(
+            parsed > 10,
+            "only {parsed} committed CREATE TABLE statements parsed — the reader has \
+             lost its subject set"
+        );
+    }
+}

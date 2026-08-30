@@ -38,15 +38,23 @@
 //!   `YYYY-MM-DDTHH:MM:SS.mmmZ`. Only a ZERO UTC offset is accepted — a non-zero
 //!   offset is left as opaque text so it FAILS loudly rather than being
 //!   silently shifted.
-//! * **Numeric text vs JSON number.** `sstabledump` renders a collection's cell
-//!   *path* (a set element, a map key) as a JSON **string** — `"path": ["-5"]` —
-//!   while the CLI renders that same element as a JSON **number**. Numeric texts
-//!   are therefore compared NUMERICALLY, via the pure-string
-//!   [`normalize_decimal`] (no `10^scale` materialization, no `f64` round-trip, so
-//!   a 30-digit `decimal` is exact). Consequence, accepted and recorded: a `text`
-//!   column whose value happens to be `"1.0"` compares equal to the number `1`.
-//!   That distinction is unreachable for a formatter regression, because a text
-//!   cell's bytes pass through unchanged on both sides.
+//! * **Numeric text vs JSON number, and ONLY for a numeric CQL type.**
+//!   `sstabledump` renders a collection's cell *path* (a set element, a map key)
+//!   and a partition-key component as a JSON **string** — `"path": ["-5"]`,
+//!   `"key": ["1"]` — while the CLI renders that same value as a JSON **number**.
+//!   A value whose DECLARED CQL type is numeric (`int`, `bigint`, `smallint`,
+//!   `tinyint`, `varint`, `float`, `double`, `decimal`, `counter`) is therefore
+//!   compared NUMERICALLY, via the pure-string [`normalize_decimal`] (no
+//!   `10^scale` materialization, no `f64` round-trip, so a 30-digit `decimal` is
+//!   exact).
+//!
+//!   A `text`/`varchar`/`ascii` value is compared as an EXACT STRING, so the UDT
+//!   zip `"22201"` never equals the number `22201` and `"00000"` never equals
+//!   `"0"`. The type comes from the committed `CREATE TABLE` (see [`schema`]),
+//!   not from the golden's JSON kind — the golden renders a key/path of ANY type
+//!   as a string, so its kind cannot answer the question — and it is threaded
+//!   through nesting, so a map value or UDT field that is CQL `text` is exact
+//!   even when its content looks numeric.
 //! * **Map spelling.** `sstabledump` renders a map as a JSON object
 //!   (`{"x": 10}`); the CLI renders it as an array of `{"key": …, "value": …}`
 //!   pairs. Both are compared as key-sorted pair lists.
@@ -89,6 +97,12 @@ pub mod compare;
 #[path = "golden_csv_container.rs"]
 pub mod csv_container;
 
+/// The committed `CREATE TABLE` DDL: the authority for which columns a row must
+/// carry and what CQL type each value is (issue #1491 review findings).
+#[path = "golden_schema.rs"]
+pub mod schema;
+
+use schema::CqlType;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -166,8 +180,16 @@ impl Canon {
 // Scalar canonicalization
 // ===========================================================================
 
-/// Canonicalize a JSON scalar. Containers are rejected — the caller decides what a
-/// container in a scalar position means.
+/// Canonicalize a JSON scalar WITHOUT a declared type: ordering keys and failure
+/// messages only.
+///
+/// Deliberately NOT the comparison path — [`canon_typed`] is. Untyped, a numeric
+/// spelling has to be read numerically so that the golden's string `"1"` and the
+/// CLI's number `1` produce the same ORDERING key and the two sides pair up; using
+/// the same rule for equality is what let a `text` `"22201"` equal the number
+/// `22201`, which is the false-pass this split closes. A permissive ordering key
+/// can only mis-pair rows (and any mis-pairing then surfaces as a value diff),
+/// while a permissive equality rule silently passes a regression.
 pub fn canon_scalar(v: &Value, egress: Egress) -> Result<Canon, String> {
     let canon = match v {
         Value::Null => Canon::Null,
@@ -181,6 +203,53 @@ pub fn canon_scalar(v: &Value, egress: Egress) -> Result<Canon, String> {
         Value::String(s) => canon_text(s),
         Value::Array(_) | Value::Object(_) => {
             return Err("container value in a scalar position".to_string())
+        }
+    };
+    Ok(match egress {
+        Egress::Json => canon,
+        Egress::Csv => canon.for_csv(),
+    })
+}
+
+/// Canonicalize a scalar whose declared CQL type is KNOWN — the comparison path.
+///
+/// This, not [`canon_scalar`], decides value equality. The type is what makes the
+/// numeric normalization SAFE: it is applied only where the DDL says the value is
+/// a number, so a `text` column holding `"22201"` or `"00000"` is compared as the
+/// exact string it is. A JSON number arriving in a text-typed column is
+/// canonicalized as a number precisely so that it compares UNEQUAL to the golden's
+/// string and the failure message names both kinds.
+pub fn canon_typed(v: &Value, egress: Egress, ty: &CqlType) -> Result<Canon, String> {
+    let canon = match v {
+        Value::Null => Canon::Null,
+        Value::Bool(b) => Canon::Bool(*b),
+        Value::Number(n) => match normalize_decimal(&n.to_string()) {
+            Some(text) => Canon::Num(text),
+            // Unreachable for any JSON number serde can produce; reported rather
+            // than silently coerced so an unexpected spelling cannot pass.
+            None => return Err(format!("uncanonicalizable JSON number {n}")),
+        },
+        Value::String(s) => match ty {
+            // The one place a numeric TEXT may be read as a number.
+            CqlType::Numeric(_) => match normalize_decimal(s) {
+                Some(text) => Canon::Num(text),
+                // e.g. the golden's `Infinity`/`NaN` for a double: left opaque so
+                // it fails loudly rather than being coerced.
+                None => Canon::Text(s.clone()),
+            },
+            CqlType::Timestamp => match canon_timestamp(s) {
+                Some(text) => Canon::Text(text),
+                None => Canon::Text(s.clone()),
+            },
+            // text / varchar / ascii / blob / uuid / boolean / date / time /
+            // duration / inet: EXACT.
+            _ => Canon::Text(s.clone()),
+        },
+        Value::Array(_) | Value::Object(_) => {
+            return Err(format!(
+                "container value where the schema declares the scalar type `{}`",
+                ty.describe()
+            ))
         }
     };
     Ok(match egress {

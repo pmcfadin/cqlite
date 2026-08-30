@@ -48,6 +48,7 @@ mod golden;
 use golden::compare::{
     cli_csv_rows, cli_json_rows, compare_rows, fixture_dir, golden_path, stage_single_table,
 };
+use golden::schema::{ColumnKind, CqlType, TableSchema};
 use golden::{golden_rows, Egress, Multicell};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -514,6 +515,92 @@ fn schema_file(schema: &str) -> PathBuf {
         .join(format!("{schema}.cql"))
 }
 
+/// Cross-check the hand-transcribed case declaration against the committed DDL.
+///
+/// The case table names the key columns and the multicell kinds; the DDL is the
+/// authority for both. A disagreement is reported (and fails the case) instead of
+/// being tolerated, because a wrong transcription weakens every comparison built
+/// on it — the wrong pk means rows pair wrongly, and a missed multicell column
+/// means the golden reader reconstructs the wrong container.
+fn schema_agrees_with_case(case: &Case, table: &TableSchema) -> Vec<String> {
+    let mut out = Vec::new();
+    let declared_pk: Vec<&str> = table.partition_key.iter().map(String::as_str).collect();
+    let declared_ck: Vec<&str> = table.clustering.iter().map(String::as_str).collect();
+    if declared_pk != case.pk {
+        out.push(format!(
+            "the case declares partition key {:?} but the committed CREATE TABLE declares \
+             {declared_pk:?}",
+            case.pk
+        ));
+    }
+    if declared_ck != case.ck {
+        out.push(format!(
+            "the case declares clustering key {:?} but the committed CREATE TABLE declares \
+             {declared_ck:?}",
+            case.ck
+        ));
+    }
+    for column in &table.columns {
+        let name = column.name.as_str();
+        let declared = case
+            .multicell
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, kind)| *kind);
+        // The DDL's own answer: a NON-frozen collection is multicell, a frozen one
+        // is a single value cell.
+        let from_ddl = if column.is_multicell() {
+            match &column.ty {
+                CqlType::Set(_) => Some(Multicell::Set),
+                CqlType::List(_) => Some(Multicell::List),
+                CqlType::Map(_, _) => Some(Multicell::Map),
+                // A non-frozen UDT is multicell too, and the golden reader has no
+                // reconstruction rule for it — so it is named, never guessed at.
+                other => {
+                    out.push(format!(
+                        "column `{name}` is a NON-frozen {} — multicell shapes other than \
+                         set/list/map are not supported by this lane",
+                        other.describe()
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        if declared != from_ddl {
+            out.push(format!(
+                "column `{name}` ({}): the case declares multicell {declared:?} but the \
+                 committed CREATE TABLE implies {from_ddl:?}",
+                column.ty.describe()
+            ));
+        }
+        if column.kind == ColumnKind::Static {
+            out.push(format!(
+                "column `{name}` is STATIC — a static block is read-time reconciliation, so \
+                 the table belongs in NOT_COMPARABLE"
+            ));
+        }
+    }
+    for (name, _) in case.multicell {
+        if table.column(name).is_none() {
+            out.push(format!(
+                "the case declares multicell column `{name}`, which the committed CREATE \
+                 TABLE does not declare"
+            ));
+        }
+    }
+    for (name, _) in case.skip_columns {
+        if table.column(name).is_none() {
+            out.push(format!(
+                "the case declares skip_columns entry `{name}`, which the committed CREATE \
+                 TABLE does not declare — the declared gap is stale"
+            ));
+        }
+    }
+    out
+}
+
 /// Run `export` for one table into `out`, returning its contents.
 fn export(case: &Case, data_dir: &Path, out: &Path, format: &str) -> String {
     let schema = schema_file(case.schema);
@@ -628,6 +715,24 @@ fn run_lane(egress: Egress) {
             continue;
         }
 
+        // The committed CREATE TABLE is the authority for the row's column set and
+        // each value's CQL type (issue #1491 review findings). Loaded per case, and
+        // an unreadable/unparseable schema is a hard failure — a case with no
+        // declared column set could only compare permissively.
+        let table = match golden::schema::load(&schema_file(case.schema), case.table) {
+            Ok(table) => table,
+            Err(why) => {
+                failures.push(format!("{qualified}: committed schema unusable: {why}"));
+                continue;
+            }
+        };
+        // The case table transcribes the key columns and the multicell kinds by
+        // hand; cross-check both against the DDL so a wrong transcription is a
+        // failure here rather than a weaker comparison later.
+        for why in schema_agrees_with_case(case, &table) {
+            failures.push(format!("{qualified}: {why}"));
+        }
+
         let staging = match tempfile::TempDir::new() {
             Ok(dir) => dir,
             Err(e) => {
@@ -661,7 +766,7 @@ fn run_lane(egress: Egress) {
         }
 
         let skip: Vec<&str> = case.skip_columns.iter().map(|(c, _)| *c).collect();
-        let report = compare_rows(&expected, &actual, case.pk, case.ck, &skip, egress);
+        let report = compare_rows(&expected, &actual, &table, case.pk, case.ck, &skip, egress);
         if report.diffs.is_empty() && report.compared_cells == 0 {
             failures.push(format!(
                 "{qualified}: {format} comparison examined 0 cells — a vacuous pass"
