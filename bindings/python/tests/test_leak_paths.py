@@ -134,8 +134,34 @@ ITERATIONS = 1500
 WARMUP_ITERATIONS = 10
 
 # Rows pulled before abandoning the stream. Must be < the fixture's row count
-# (50) so the iterator is genuinely abandoned mid-stream, never exhausted.
+# (50 on disk) so the iterator is genuinely abandoned mid-stream, never exhausted.
 STREAM_ROWS = 5
+
+# THE ABANDONMENT MUST LEAVE THE NATIVE PRODUCER IN FLIGHT (issue #1465 round 5).
+# The same defect roborev filed against the Node lane applies here: `buffer_size`
+# is the capacity of the bounded channel the core streaming executor creates
+# (`mpsc::channel(config.buffer_size)` in cqlite-core's select_executor), and it
+# DEFAULTS to 1024 -- larger than this fixture's 50 rows. With the default the
+# producer task runs to completion before the break at row 5, so the budget
+# measured a fully-drained stream and no native cancellation at all.
+#
+# With capacity 2 the producer can never be more than 2 rows ahead of the
+# consumer, so after STREAM_ROWS pulls at most STREAM_ROWS + 2 of the 50 rows
+# have been produced and the scan is genuinely mid-flight at the break. The
+# contract test asserts that bound from MEASURED quantities rather than trusting
+# this comment.
+#
+# HOW THIS DIFFERS FROM THE NODE LANE, stated because the docstring claims to
+# mirror it: Node's `stream.rowsReceived` is the NATIVE iterator's fetch counter,
+# so that lane can read the in-flight state back (and reads 0 after close, which
+# is its closure proof). Python's `StreamingIterator.rows_received` is a
+# CONSUMER-side count -- measured [1, 2, 3, 4, 5] for every buffer_size from 1 to
+# 1024 -- so there is nothing to read back here. The in-flight property is
+# therefore established by the capacity BOUND above (a property of core's bounded
+# channel), not by a runtime getter, and python has no equivalent of Node's
+# native-closure assertion. Do not "port" that assertion here; there is no signal
+# for it.
+STREAM_BUFFER_SIZE = 2
 
 # ---------------------------------------------------------------------------
 # BUDGETS (issue #1465) -- MEASURED, never guessed. Linux x86_64, Python 3.12,
@@ -146,41 +172,61 @@ STREAM_ROWS = 5
 #
 #   error path:  32 bytes warm (x7); 4,340 bytes on the FIRST (cold) sample of a
 #                fresh process -> observed max 4,340.
-#   stream path: 10,332 .. 15,750 bytes warm; 54,085 bytes on the first (cold)
-#                sample -> observed max 54,085.
+#   stream path: 16,631 .. 19,623 bytes warm; 67,841 bytes on the first (cold)
+#                sample -> observed max 67,841. RE-MEASURED for round 5's
+#                `buffer_size=2` (it was 10,332 .. 54,085 with the default 1024-row
+#                channel: a smaller channel means slightly MORE per-iteration
+#                bookkeeping, so this path got noisier, not quieter).
 #
-# The cold first sample is what a real pytest run measures (one process, one
-# sample per test), so the budget must clear IT, not the warm floor.
+# The cold first sample is what a real pytest run measures (one measured window per
+# test in one process), so the budget must clear IT, not the warm floor.
+#
+# ONE COLD SAMPLE, NOT A MULTI-PASS STATISTIC -- unlike the Node lane, deliberately
+# and for a measured reason: tracemalloc counts allocations exactly rather than
+# sampling a GC'd heap, so the spread here is ~4x (16.6-67.8 KB) where Node's was
+# ~800x, and a 9-pass statistic would cost ~50s in a lane that currently costs 6s.
+# If this file ever needs passes, the runtime is why it does not have them today.
+#
+# NO CI BUDGET MULTIPLIER either, unlike the Node lane: the tracemalloc budgets do
+# not depend on GC timing at all, and the one platform-sensitive number (the RSS
+# backstop) already carries ~34x headroom and degrades to a NAMED weaker instrument
+# where /proc is missing. Adding a multiplier would weaken the merge-gating lane
+# (the gate's python tier IS the merge-gating half) to buy nothing measurable.
 #
 # Budgets, and what each one BITES -- verified by planting a synthetic
-# per-iteration retention INTO THESE EXACT TEST BODIES and observing the
-# committed assertions fail (RED control, 2026-08-30, at 500 iterations). NOTE
-# WHAT THE CONTROL ESTABLISHES: the planted objects are PYTHON allocations
-# (``bytearray``), so it proves the instrument is sensitive to PYTHON-VISIBLE
-# retention on these code paths. It establishes NOTHING about sensitivity to a
-# native (Rust-allocator) leak, which tracemalloc cannot see at all -- see the
-# module docstring and issue #3585.
+# per-iteration retention INTO THESE EXACT TEST BODIES and observing the committed
+# assertions fail (RED control, re-run at `buffer_size=2` and 1500 iterations;
+# round-4's numbers do not transfer and were re-measured, not copied). NOTE WHAT
+# THE PYTHON-OBJECT CONTROLS ESTABLISH: the planted objects are PYTHON allocations
+# (``bytearray``), so they prove sensitivity to PYTHON-VISIBLE retention on these
+# code paths. Sensitivity to a NATIVE leak is established separately, by the
+# ``libc.malloc`` control on the RSS backstop below.
 #   ERROR_BUDGET_BYTES  =  64 KiB (43 bytes/iteration at 1500) -- 15x the observed
-#       cold max. Planting a retained 256-byte bytearray per iteration measured
-#       486,320 bytes (324.2/iteration) at 1500 iterations and TRIPS it by 7.4x
-#       (164,872 bytes / 2.5x when the same plant ran at 500). Retaining the
-#       abandoned iterator itself (5,132 bytes/iteration) measured 2.57 MB.
-#   STREAM_BUDGET_BYTES = 256 KiB (175 bytes/iteration at 1500) -- 4.8x the
-#       observed cold max. Looser than the error budget because this path's noise
-#       is genuinely an order of magnitude larger (a per-iteration stream setup
-#       over a ~101-column table). Planting a retained 1 KiB bytearray per
-#       iteration measured 635,079 bytes (1,270.2/iteration) and TRIPS it by 2.4x;
-#       a planted 256-byte retention (205 KB) does NOT -- stated honestly rather
-#       than overclaimed.
+#       cold max. A retained 256-byte bytearray per iteration measured 486,320
+#       bytes (324.2/iteration) and TRIPS it by 7.4x. Retaining the abandoned
+#       iterator itself (5,132 bytes/iteration) measured 2.57 MB.
+#   STREAM_BUDGET_BYTES = 256 KiB (175 bytes/iteration at 1500) -- 3.9x the observed
+#       cold max (was 4.7x before the re-measure; UNCHANGED budget, so this is a
+#       tightening of the margin by measurement, never a loosening to fit).
+#       Measured floor, bracketed: a retained 64-byte bytearray per iteration
+#       measured 286,015 bytes (190.7/iteration) and TRIPS; 32 bytes/iteration
+#       PASSES. So this path now catches a Python-visible retention somewhere
+#       between 32 and 64 bytes/iteration -- an order of magnitude better than
+#       round 3's ">512 B/iter", won by raising ITERATIONS to 1500 rather than by
+#       touching the budget. For the record at larger sizes: 128 B/iter ->
+#       372,849 (1.4x over), 256 B/iter -> 572,002 (2.2x), 1 KiB/iter ->
+#       1,701,339 (6.5x).
 #
 # SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): process RSS growth
 # across the same loop, read LIVE from /proc/self/statm (peak ``ru_maxrss`` only as
 # a named fallback -- see ``_rss_instrument()``). Measured growth of the LIVE
 # instrument inside the measured window, 1500 iterations:
-#   file alone:            0 bytes (error path), 835,584 bytes (stream path)
+#   file alone:            0 bytes (error path), 4,096 .. 970,752 bytes (stream
+#                          path, 6 consecutive samples at `buffer_size=2`; the
+#                          maximum is the first, cold sample)
 #   inside the whole 570-test suite (this file's real position in a gate run):
 #                          0 bytes (error path),  28,672 bytes (stream path)
-# Budget = 32 MiB, i.e. ~40x the largest observed value, so allocator/page
+# Budget = 32 MiB, i.e. ~34x the largest observed value, so allocator/page
 # behaviour on a slower or smaller CI runner cannot red it.
 #   WHAT IT CATCHES, and this control is the one that validates the RIGHT
 #       allocator (issue #1465 round 2): planting a retained ``libc.malloc`` +
@@ -190,8 +236,9 @@ STREAM_ROWS = 5
 #         * 64 KiB/iteration -> live RSS grew 98,750,464 B (error path) /
 #           99,332,096 B (stream path): TRIPS, ~3x over budget, while BOTH
 #           tracemalloc budgets stayed green.
-#         * 24 KiB/iteration -> 37,314,560 B: TRIPS (the floor, measured).
-#         * 16 KiB/iteration -> PASSES.
+#         * 24 KiB/iteration -> 37,314,560 B: TRIPS (the floor, measured; re-run
+#           at `buffer_size=2` measured 37,294,080 B -- same floor).
+#         * 16 KiB/iteration -> PASSES (both configurations).
 #       So the detection floor is between 16 and 24 KiB/iteration at 1500
 #       iterations, bracketing the ~22 KiB the budget arithmetic predicts.
 #   WHAT IT DOES NOT CATCH: any native retention below that floor -- e.g.
@@ -378,6 +425,18 @@ def _assert_rss_under_budget(label: str, rss_growth, rss_kind: str) -> None:
     )
 
 
+def _stream(db):
+    """Open the abandoned-stream query with the capacity-bounded config.
+
+    One helper, used by BOTH the contract test and the measured loop, so the two
+    can never drift apart on the property the contract test pins.
+    """
+    return db.execute_streaming(
+        f"SELECT * FROM {WIDE_TABLE}",
+        config=cqlite.StreamingConfig(buffer_size=STREAM_BUFFER_SIZE),
+    )
+
+
 @pytest.fixture(scope="module")
 def leak_db():
     """One database, opened once, shared by every test in this file (issue mandate).
@@ -430,12 +489,46 @@ def test_abandoned_stream_is_really_abandoned(leak_db):
     up, and the test would pass having measured the wrong path (issue #1465
     review). Mirrors the Node lane's ``expect(total).toBeGreaterThan(STREAM_ROWS)``.
     """
-    total = sum(1 for _row in leak_db.execute_streaming(f"SELECT * FROM {WIDE_TABLE}"))
+    total = sum(1 for _row in _stream(leak_db))
     assert total > STREAM_ROWS, (
         f"fixture {WIDE_TABLE} yielded {total} rows, which is not MORE than "
         f"STREAM_ROWS={STREAM_ROWS}: the budget test below would exhaust the "
         "iterator instead of abandoning it mid-stream (issues #1230, #1465)"
     )
+
+    # THE IN-FLIGHT BOUND (issue #1465 round 5), every term MEASURED or
+    # configured -- never hardcoded: the producer is at most STREAM_BUFFER_SIZE
+    # rows ahead of the consumer, so an abandonment at STREAM_ROWS can have
+    # produced at most STREAM_ROWS + STREAM_BUFFER_SIZE rows. If that ceiling is
+    # not strictly below the fixture's measured row count, the producer may have
+    # finished and the budget below would measure a drained stream -- which is
+    # exactly what the default buffer_size=1024 did.
+    produced_ceiling = STREAM_ROWS + STREAM_BUFFER_SIZE
+    assert produced_ceiling < total, (
+        f"at most {produced_ceiling} of {total} rows can have been produced when "
+        f"the loop breaks (STREAM_ROWS={STREAM_ROWS} consumed + "
+        f"buffer_size={STREAM_BUFFER_SIZE} of channel capacity), which is not "
+        f"below the fixture's {total} rows: the native producer may run to "
+        "completion before the break, leaving nothing in flight to abandon "
+        "(issue #1465)"
+    )
+
+    # And the consumer really did stop at STREAM_ROWS: `rows_received` is
+    # python's CONSUMER-side counter (see STREAM_BUFFER_SIZE), so this pins the
+    # abandonment point itself, not the producer.
+    iterator = _stream(leak_db)
+    pulled = 0
+    for _row in iterator:
+        pulled += 1
+        if pulled >= STREAM_ROWS:
+            break
+    assert pulled == STREAM_ROWS
+    assert iterator.rows_received == STREAM_ROWS, (
+        f"consumer-side rows_received={iterator.rows_received} at the break, "
+        f"expected STREAM_ROWS={STREAM_ROWS} — the abandonment point is not "
+        "where this file thinks it is (issue #1465)"
+    )
+    del iterator
 
 
 def test_abandoned_stream_no_leak(leak_db):
@@ -444,7 +537,7 @@ def test_abandoned_stream_no_leak(leak_db):
 
     def body():
         nonlocal rows_pulled
-        iterator = leak_db.execute_streaming(f"SELECT * FROM {WIDE_TABLE}")
+        iterator = _stream(leak_db)
         pulled = 0
         for _row in iterator:
             pulled += 1
