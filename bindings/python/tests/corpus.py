@@ -89,6 +89,13 @@ IN_SCOPE_KEYSPACES: dict[str, str] = {
     "test_tomb": "tombstone read-parity corpus",
     "test_types": "extended CQL-type read-parity corpus",
     "test_deltas": "CDC-delta read-parity corpus (skip-pending, #701)",
+    "test_nested_udt_keys": (
+        "nested-UDT-in-a-hashable-position read-fidelity corpus (#3500): a UDT "
+        "reached through a tuple or a nested collection inside a set element / "
+        "map key. ENFORCED (not a skip): every partition has live rows, and the "
+        "binding-side hashable projection is exactly what this fixture exists to "
+        "exercise"
+    ),
 }
 
 
