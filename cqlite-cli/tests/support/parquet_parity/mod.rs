@@ -880,26 +880,19 @@ pub fn run_stages_in_roots(
 ) -> Result<Option<Stages>, Failures> {
     // ===================================================================
     // PRECONDITIONS — the checks that establish the comparison is MEANINGFUL,
-    // as opposed to the ASSERTIONS that say what it found.
+    // as opposed to the ASSERTIONS that say what it found. Enumerated as
+    // `failure::Precondition`; see that type for the three rounds behind them.
     //
-    // Every one of them is GAP-INDEPENDENT, and that is a property to preserve
-    // rather than an implementation detail: an expected-failure marker
-    // (`KnownGap`/`KnownTypeGap`) may suppress ONLY the assertion it names.
-    // They report `Failure::Precondition`, which no `ExpectedFailure` can name
-    // and which `KnownGap::mismatch` refuses up front (`failure.rs`).
+    // Every one is GAP-INDEPENDENT, and that is a property to PRESERVE: an
+    // expected-failure marker (`KnownGap`/`KnownTypeGap`) may suppress ONLY the
+    // assertion it names. They report `Failure::Precondition`, which no
+    // `ExpectedFailure` can name and which `KnownGap::mismatch` refuses up front
+    // (`failure.rs`). Round 19's defect was the zero-row check sitting AFTER the
+    // gap short-circuit, in `compare_inner` — so an expected export abort let an
+    // EMPTY oracle pass. Do NOT re-entangle a precondition with the comparison.
     //
-    // WHY THIS IS SEPARATED, AND WHY IT MUST STAY SEPARATED: three review
-    // rounds found the same family — a check skipped because something earlier
-    // had already been excused (round 12: the pipeline `?`-chained, so the
-    // "exact failure set" stopped at the first failing stage; round 13:
-    // eligibility decided from what a LENIENT parser parsed; round 19: the
-    // zero-row check sat AFTER the gap short-circuit, in `compare_inner`, so an
-    // expected export abort let an EMPTY oracle pass). Round 12's aggregation
-    // closed two and left the third, which is why the answer is a separated
-    // CLASS and not a moved line. Do not re-entangle them.
-    //
-    //   1. Declaration — the case's declared columns/keys match the committed
-    //      CQL schema (`schema_fixture`, and the case's own type parse).
+    //   1. Declaration — the case's declared columns/keys vs the committed CQL
+    //      schema (`schema_fixture`, and the case's own type parse).
     //   2. Fixture — a single Data generation, the golden that CORRESPONDS to
     //      it, and an isolated staging directory (`fixture_root`).
     //   3-6. Golden readable/parses, structurally valid, physical-dump ELIGIBLE
@@ -907,11 +900,10 @@ pub fn run_stages_in_roots(
     //      the point the oracle is LOADED.
     // ===================================================================
 
-    // PRECONDITION 1 — the case's own DECLARATION against the committed CQL
-    // schema. It runs before everything because the declaration is what every
-    // later stage's expectation is derived from: an unverified declaration that
-    // drifted to match a wrong export mapping makes the Arrow TYPE check and the
-    // VALUE comparison BOTH pass (issue #1490 round 6, `schema_fixture`).
+    // PRECONDITION 1 — the DECLARATION. It runs before everything because the
+    // declaration is what every later stage's expectation is derived from: an
+    // unverified declaration that drifted to match a wrong export mapping makes
+    // the Arrow TYPE check and the VALUE comparison BOTH pass (round 6).
     match case.schema_check {
         SchemaCheck::Committed => {
             schema_fixture::validate_declaration(case)
@@ -1174,7 +1166,13 @@ pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, Failures> {
 /// every stage that could be determined independently; `Ok(Skipped)` only when
 /// no candidate root carries the table.
 pub fn run_case(case: &ParityCase) -> Result<CaseOutcome, Failures> {
-    let Some(stages) = stage_case(case)? else {
+    run_case_in_roots(case, &fixture_root::candidate_roots())
+}
+
+/// [`run_case`] against an EXPLICIT candidate-root list — the seam the
+/// PRECONDITION suite drives (see [`run_stages_in_roots`]).
+pub fn run_case_in_roots(case: &ParityCase, roots: &[PathBuf]) -> Result<CaseOutcome, Failures> {
+    let Some(stages) = stage_case_in_roots(case, roots)? else {
         return Ok(CaseOutcome::Skipped(datasets_root::describe_search(
             case.keyspace,
             case.table,
@@ -1382,7 +1380,13 @@ fn compare_inner(
 
 /// Drive one case and apply the per-case fail-closed rule.
 pub fn assert_case(case: &ParityCase) {
-    let outcome = run_case(case);
+    assert_case_in_roots(case, &fixture_root::candidate_roots())
+}
+
+/// [`assert_case`] against an EXPLICIT candidate-root list — the seam the
+/// PRECONDITION suite drives (see [`run_stages_in_roots`]).
+pub fn assert_case_in_roots(case: &ParityCase, roots: &[PathBuf]) {
+    let outcome = run_case_in_roots(case, roots);
     // PRECONDITIONS FIRST, and BEFORE `case.known_gap` is even read: an
     // expected-failure marker may suppress only the ASSERTION it names, never a
     // validity precondition of the comparison. Structurally the gap could not

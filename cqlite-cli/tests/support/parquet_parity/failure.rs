@@ -154,8 +154,32 @@ pub enum Precondition {
 }
 
 impl Precondition {
+    /// EVERY precondition, as data — the census the coverage suite derives its
+    /// obligation from (`issue_1490_parquet_preconditions.rs`).
+    ///
+    /// **This is a documented OBLIGATION, not a derivation, and the limit is
+    /// stated because a census that quietly shrinks is worse than none.** Adding
+    /// a variant forces an arm in the exhaustive matches below (a compile
+    /// error), and the arm's doc is where the author is told to add it here too;
+    /// nothing mechanically proves this slice is complete. What IS mechanical:
+    /// the coverage suite asserts SET EQUALITY against this slice in both
+    /// directions, so a variant added HERE with no test reds immediately, and a
+    /// test for a variant not listed here reds too.
+    pub const ALL: &'static [Precondition] = &[
+        Precondition::Declaration,
+        Precondition::Fixture,
+        Precondition::GoldenReadable,
+        Precondition::GoldenStructure,
+        Precondition::GoldenEligible,
+        Precondition::GoldenNonEmpty,
+    ];
+
     /// The precondition's stable identifier — part of the failure signature, so
     /// it is a TOKEN and not prose.
+    ///
+    /// EXHAUSTIVE: a new variant must be given a token here — and added to
+    /// [`Precondition::ALL`], and covered in
+    /// `issue_1490_parquet_preconditions.rs`.
     pub fn name(self) -> &'static str {
         match self {
             Precondition::Declaration => "declaration-matches-committed-schema",
@@ -710,11 +734,10 @@ fn precondition_banner(observed: &[Failure]) -> Option<String> {
          there was no meaningful comparison for this gap to be about:",
     );
     for f in failed {
-        why.push_str(&format!("\n  PRECONDITION NOT MET: {}", f.render()));
+        why.push_str(&format!("\n  - {}", f.render()));
     }
     why.push('\n');
-    why
-        .push_str("Fix the precondition (or the fixture) — never record it as a known gap.\n\n");
+    why.push_str("Fix the precondition (or the fixture) — never record it as a known gap.\n\n");
     Some(why)
 }
 
