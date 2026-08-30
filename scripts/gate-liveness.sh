@@ -387,6 +387,23 @@ _summary_refusal() {  # <what-is-wrong-with-the-summary> <full-cause-for-UNKNOWN
   [ "$_beat_matches" = yes ] && return 1
   verdict UNKNOWN 4 "$2"
 }
+# THE SECOND POLICY, AND WHY THERE ARE TWO (roborev job 220). `_summary_refusal_or_defer` exists for
+# summaries that say NOTHING about whether the run terminated — absent, unreadable, unsnapshotable, no
+# RESULT line. For those, a matching beat is the better authority.
+#
+# An UNRECOGNISED RESULT TOKEN is different in kind, and job 218 wrongly treated it as the same: a
+# well-formed summary for the requested run bearing `RESULT: <something new>` tells us the gate
+# TERMINATED — we simply cannot name the verdict. Deferring to the beat then converts "I do not
+# understand this verdict" into "the gate seems dead", and a stale beat here is a CONSEQUENCE of that
+# termination rather than evidence of a stall. A caller told STALLED may relaunch a run that already
+# finished. So this path never defers, whatever the heartbeat says.
+#
+# It is a NAMED helper rather than a bare `verdict` so the structural guard can stay property-shaped:
+# every UNKNOWN in the summary region goes through one of exactly two helpers, each documenting its
+# own deferral policy, and an ad-hoc bare UNKNOWN is still a violation.
+_summary_terminal_unknown() {  # <full-cause>: the summary indicates termination; never defer
+  verdict UNKNOWN 4 "$1"
+}
 # MOVED to enclose EVERY summary-side path (roborev job 218). Three paths previously sat ABOVE this
 # wrapper and emitted a bare `verdict UNKNOWN`: `no-summary-artifact`, `no-snapshot-dir` and
 # `no-result-line`. None of them starts with `summary-`, which is exactly why the structural guard
@@ -640,7 +657,7 @@ case "$RESULT_TOKEN" in
   INCOMPLETE)
     : ;;  # the interesting case: fall through to the heartbeat
   *)
-    _summary_refusal_or_defer "the summary's verdict token is not one this reader knows" "unrecognised-result; verdict token '$RESULT_TOKEN' (from '$RESULT_LINE') is not a value this reader knows" || break ;;
+    _summary_terminal_unknown "unrecognised-result; verdict token '$RESULT_TOKEN' (from '$RESULT_LINE') is not a value this reader knows — the summary is well-formed and names this run, so the gate TERMINATED; this reader cannot name the verdict, and a heartbeat cannot answer for it" ;;
 esac
 
   break

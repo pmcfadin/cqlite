@@ -642,6 +642,33 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### A correct rule, over-applied: uniformity is not a substitute for asking what an artifact SAYS
+
+Job 218's rule was right and hard-won: **do not make per-site judgements about which paths may skip
+the funnel** — four "obviously safe to leave" sites had just turned out to be four real bypasses. So
+every summary-side path was routed, including `unrecognised-result`, on the reasoning "same class: an
+unusable summary must not pre-empt a matching beat."
+
+It is **not** the same class, and job 220 caught it. The other paths — absent, unreadable,
+unsnapshotable, no `RESULT` line — say *nothing* about whether the run terminated. A well-formed
+summary that names the requested run and carries `RESULT: <something this reader does not know>` says
+the gate **terminated**; only the verdict's NAME is unavailable. Deferring to the beat converts *"I
+cannot name this verdict"* into *"the gate seems dead"*, and the beat's staleness there is a
+**consequence** of termination, not evidence of a stall. A caller told `STALLED` may relaunch a run
+that already finished.
+
+The domain boundary is crisp once stated: **does this artifact carry information about termination?**
+If no, the beat is the better authority. If yes, no heartbeat can answer for it. Two rules, each right
+in its own domain — and the failure was applying the newer one past its edge because it had just been
+expensively learned.
+
+**How the fix avoided regressing the previous one:** not by adding an exception to the property guard,
+which would have reintroduced job 218's exact defect (a name-based carve-out in a check that must stay
+property-shaped). Instead there are now two **named** policies — `_summary_refusal_or_defer` and
+`_summary_terminal_unknown` — each documenting its own deferral stance, so the guard still reads *zero
+ad-hoc bare `verdict UNKNOWN` in the summary region* and still holds at zero. A control case
+(`11q.5c`) fails if the two ever collapse into one and silently undo job 218.
+
 ### The guard that missed four paths because it checked a NAME, not a PROPERTY
 
 Job 209 built `_summary_refusal` as *"one decision point for every summary-side refusal"* and asserted

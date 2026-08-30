@@ -100,17 +100,33 @@ run_reader() {
 }
 
 # expect_reader <label> <want-status> <want-rc> <want-substring> -- <reader args...>
+# ON FAILURE, DUMP WHAT THE READER ACTUALLY READ. Two cases in this suite have failed once each and
+# passed on every isolated re-run (11i.1 and 5.1), both with a verdict implying the reader saw
+# different artifact content than the fixture wrote. Ruled out by measurement: snapshot-name
+# collisions (SNAP_DIR is a per-process `mktemp -d`), disk/inode pressure (15% / 3%), stray beaters,
+# and — for 5.1 — a concurrent suite instance. So the cause is UNEXPLAINED, and rather than call an
+# unreproducible red a flake and move on, the failure path now emits the artifacts. A one-in-N
+# intermittency that prints its own evidence becomes diagnosable on its next occurrence; one that
+# prints only a verdict stays a mystery forever.
+_dump_artifacts() {  # <label>: show the artifacts the reader was pointed at
+  local a
+  for a in "$@"; do
+    case "$a" in --*) continue ;; esac
+    [ -f "$a" ] && { printf '     --- %s ---\n' "$a"; sed 's/^/       /' "$a"; }
+    [ -f "$a.heartbeat" ] && { printf '     --- %s.heartbeat ---\n' "$a"; sed 's/^/       /' "$a.heartbeat"; }
+  done
+}
 expect_reader() {
   local label="$1" want="$2" wantrc="$3" needle="$4"; shift 5
   run_reader "$@"
   if ! printf '%s' "$OUT" | grep -q "^gate-liveness: $want "; then
-    bad "$label" "expected status $want, got: $(printf '%s' "$OUT" | head -1)"; return
+    bad "$label" "expected status $want, got: $(printf '%s' "$OUT" | head -1)"; _dump_artifacts "$@"; return
   fi
   if [ "$RC" != "$wantrc" ]; then
-    bad "$label" "expected exit $wantrc, got $RC"; return
+    bad "$label" "expected exit $wantrc, got $RC"; _dump_artifacts "$@"; return
   fi
   if [ -n "$needle" ] && ! printf '%s' "$OUT" | grep -q "$needle"; then
-    bad "$label" "expected cause to mention '$needle', got: $(printf '%s' "$OUT" | head -1)"; return
+    bad "$label" "expected cause to mention '$needle', got: $(printf '%s' "$OUT" | head -1)"; _dump_artifacts "$@"; return
   fi
   ok "$label"
 }
@@ -1584,10 +1600,37 @@ expect_reader "11q.3 MISSING summary + stale matching beat => STALLED" \
 mk_beat "$_q-nores.txt.heartbeat" run-Q 4000 20
 expect_reader "11q.4 summary with NO RESULT line + stale matching beat => STALLED" \
   STALLED 3 "" -- "$_q-nores.txt" --run-id run-Q
+# CORRECTED by job 220, and the correction is the interesting part. Job 218 routed this path through
+# the deferral funnel "for consistency" — but an unrecognised RESULT token is NOT the same class as an
+# absent or unparseable summary. A well-formed summary naming this run and bearing `RESULT: <new>`
+# says the gate TERMINATED; only the verdict's NAME is unknown. Deferring turned "I cannot name this
+# verdict" into "the gate seems dead", and a caller told STALLED may relaunch a finished run. The
+# beat's staleness here is a CONSEQUENCE of termination, not evidence of a stall.
+#
+# The lesson: job 218's rule (do not make per-site judgements about which paths may skip the funnel)
+# was right for paths carrying NO termination information, and over-applied here, where the sites
+# genuinely differ. Uniformity is not a substitute for asking what each artifact actually says.
 mk_summary "$_q-weird.txt" run-Q "WEIRDVALUE"
 mk_beat "$_q-weird.txt.heartbeat" run-Q 4000 20
-expect_reader "11q.5 UNRECOGNISED verdict token + stale matching beat => STALLED" \
-  STALLED 3 "" -- "$_q-weird.txt" --run-id run-Q
+expect_reader "11q.5 UNRECOGNISED verdict token + stale matching beat => UNKNOWN (termination, not a stall)" \
+  UNKNOWN 4 "unrecognised-result" -- "$_q-weird.txt" --run-id run-Q
+# ...and a FRESH beat does not change it either: the closed grammar is not negotiable.
+mk_beat "$_q-weird.txt.heartbeat" run-Q 5 20
+expect_reader "11q.5b UNRECOGNISED token + FRESH matching beat => still UNKNOWN" \
+  UNKNOWN 4 "unrecognised-result" -- "$_q-weird.txt" --run-id run-Q
+# CONTROL: a summary with NO RESULT line still DEFERS to a fresh beat, or the two policies have
+# collapsed into one and job 218's fix has been undone.
+mk_beat "$_q-nores.txt.heartbeat" run-Q 5 20
+expect_reader "11q.5c control: NO RESULT line + fresh beat still DEFERS => RUNNING" \
+  RUNNING 2 "is beating" -- "$_q-nores.txt" --run-id run-Q
+# The two policies must remain DISTINCT and both named, so the property guard stays property-shaped
+# instead of growing a name-based exception.
+if grep -q '^_summary_terminal_unknown()' "$READER" \
+   && grep -q '_summary_terminal_unknown "unrecognised-result' "$READER"; then
+  ok "11q.5d the non-deferring policy is its own named helper, used by the closed-grammar path"
+else
+  bad "11q.5d the non-deferring policy is its own named helper" "not found"
+fi
 # CONTROLS: with no beat, each path must still report its own specific cause.
 rm -f "$_q-miss.txt.heartbeat"
 expect_reader "11q.6 control: missing summary + NO beat => UNKNOWN (no-summary-artifact)" \
