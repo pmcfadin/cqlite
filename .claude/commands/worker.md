@@ -161,8 +161,10 @@ onto its own branch). Rules, non-negotiable:
       THE full `scripts/agent-gate.sh` **exactly once** (the ONLY gate of record) via
       `scripts/flow/gate-detached.sh` — NOT `run_in_background`, which is not sufficient: a subagent
       runs in its own `KillMode=control-group` pane scope, so everything it spawns (`nohup`/`setsid`
-      included) is signalled when its context ends, and the gate does **not** survive as an orphan —
-      it dies, silently, leaving only the launch sentinel (#3473). It also **never idle-waits** (a
+      included) dies **silently, leaving only the launch sentinel**, if that scope is torn down by a
+      pane recycle, `kill-pane` or logout. (Precisely: the closer's own turn ending does NOT kill it —
+      a scope lives while any process remains in it — so this is about teardowns it cannot see
+      coming, #3473.) It also **never idle-waits** (a
       subagent idle-waiting on a 12-25 min gate is watchdog-killed — the #1855 failure) and polls
       with `scripts/gate-liveness.sh`, whose `REAPED` verdict means re-launch rather than keep
       waiting. Then it spawns `spec-auditor` for **C** (design),

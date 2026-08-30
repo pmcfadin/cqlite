@@ -152,15 +152,21 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   agent session spawns inherits the session's `tmux-spawn-<uuid>.scope`, which carries
   `KillMode=control-group` + `SendSIGKILL=yes`: stopping it signals **every task in the cgroup**.
   Cgroup membership is inherited across `fork` and **cannot** be shed by `nohup`, `setsid`, closing
-  fds or being reparented to init — measured, both directions, on an equivalent cgroup. **A subagent
-  gets its OWN pane scope**, so `flow-closer` — the agent that by design runs the gate of record —
-  takes its gate down with it when its context ends. That, not elapsed time, is the real content of
-  #3473's "~10 minute ceiling": six instrumented tickers (plain `nohup`, `setsid`, renamed argv,
-  harness-background, and two launched by a subagent stalled silently past 600s) each ran past
-  **2400s with zero signals**, so there is **no time-based ceiling and the 600s stall watchdog is not
-  the direct cause**. It also explains the lead's `ssh` + `nohup` control completing on the same box
-  and sha: an ssh login gets its own `session-N.scope`. So **"lanes cannot run a full gate" is
-  RETRACTED** — a lane can, detached. `gate-detached.sh` forwards the caller's whole environment (a
+  fds or being reparented to init — measured, both directions, on an equivalent cgroup, where the
+  victim died leaving **no signal record at all** (the field symptom of a traceless kill). A subagent
+  gets its OWN pane scope. **What is NOT true, and was tested: an agent FINISHING does not tear its
+  scope down** — a killed subagent's tickers kept running, orphaned, because systemd releases a scope
+  only when its LAST process exits, so a long gate holds its own scope open and outlives the agent
+  that launched it. The exposure is to pane/session teardowns (a supervisor recycle, `kill-pane`,
+  logout), not to your turn ending. **#3473's "~10 minute ceiling" does not exist**: six instrumented
+  tickers (plain `nohup`, `setsid`, renamed argv, harness-background, and two launched by a subagent
+  stalled silently past 600s) each ran past **2400s with zero signals**, so there is no time-based
+  ceiling and the 600s stall watchdog is not the direct cause either. The cgroup mechanism explains
+  the lead's `ssh` + `nohup` control completing on the same box and sha (an ssh login gets its own
+  `session-N.scope`), but **AC2 landed as a PARTIAL: a sufficient, demonstrated mechanism with
+  alternatives ruled out — NOT a confirmed diagnosis** of the original deaths, whose correlation with
+  ~10 minutes nothing measured here explains. So **"lanes cannot run a full gate" is RETRACTED** — a
+  lane can, detached. `gate-detached.sh` forwards the caller's whole environment (a
   transient systemd unit inherits **none** of it, and an allowlist of remembered variables fails
   silently) and **refuses with exit 69** where it cannot deliver a separate cgroup, rather than
   falling back to a session-scoped launch the caller would believe was protected.

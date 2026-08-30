@@ -1,9 +1,11 @@
 # Running the gate from a lane session (issue #3473)
 
-**Short version.** A gate launched from inside an agent session dies when that session's
+**Short version.** A gate launched from inside an agent session dies if that session's
 **cgroup** is torn down. `nohup`, `setsid`, closing fds and being reparented to init do
 **not** protect it, because cgroup membership is inherited across `fork` and cannot be
-shed by detaching from the terminal, the process group or the session. Use
+shed by detaching from the terminal, the process group or the session. (An agent merely
+*finishing* does **not** tear the cgroup down — see AC2 below; the exposure is to pane and
+session teardowns.) Use
 `scripts/flow/gate-detached.sh`, which puts the gate in a cgroup of its own, and poll it
 with `scripts/gate-liveness.sh`, which tells "reaped" from "still going".
 
@@ -72,10 +74,21 @@ dying alongside the gate) correctly eliminated CPU contention, memory pressure, 
 the #1825 slot cap all at once. Those all *starve* work; a cgroup kill *signals* it.
 
 **A subagent gets its own pane scope.** Probes E and F landed in a different
-`tmux-spawn-*.scope` from A–D, alongside the subagent's own process. This is the link to
-the delivery pipeline: `flow-closer` — the agent that by design runs the gate of record —
-is a subagent, so the gate it launches lives in the closer's scope and shares the
-closer's fate.
+`tmux-spawn-*.scope` from A–D, alongside the subagent's own process.
+
+**But a subagent ending does NOT tear its scope down — this was tested and ruled out.**
+The obvious next inference was that `flow-closer`, a subagent, loses its gate when its
+context ends. That is **false**, and the falsifying measurement is recorded here because it
+is the most tempting wrong conclusion in this issue. Two tickers were launched from a
+subagent, and the subagent was then killed outright. Its `claude` process disappeared; the
+scope stayed `active`; **both tickers kept running**, orphaned. systemd releases a scope
+only when the **last** process in it exits, so a long-running gate *holds its own scope
+open* and survives the agent that launched it. An agent finishing is not a teardown.
+
+So a teardown needs something that stops the scope explicitly — tmux killing the pane, a
+supervisor recycling it, `systemctl stop`, session/logout teardown. Those do happen on this
+fleet, which is why the detached launch below is still the right posture; but "your turn
+ended" is not one of them.
 
 ### Demonstration
 
@@ -107,17 +120,39 @@ when the coordination lead launched it over `ssh` + `nohup`. An ssh login gets i
 teardown never reaches it. The variable was never the work, the box or the load. It was
 the cgroup.
 
-### What is inference, and what would settle it
+### What is established, and what is NOT — AC2 is a PARTIAL
 
-Measured: there is no time-based ceiling; the pane scope has `KillMode=control-group`;
-a teardown of such a cgroup kills fully-detached work and spares work in its own cgroup;
-subagents get their own scope. **Not** measured: the specific deaths on lane-3393 were
-not observed, and this host's journal retains no `tmux-spawn` scope stop records, so the
-claim that *those* deaths were scope teardowns is the best explanation of the evidence
-rather than a direct observation. It is the only mechanism found that accounts for all
-four of the issue's findings at once (passive `sleep` killed, no OOM, no ENOSPC, ssh
-control surviving). The next occurrence can now be settled rather than argued: the
-liveness heartbeat below distinguishes reaped from running at the time it happens.
+**Established by measurement:**
+
+1. There is **no time-based ceiling**: six launch variants ran past 2400 s with zero signals.
+2. The **600 s stall watchdog is not a direct cause**: two of those tickers were launched by
+   a subagent that was then stalled silently past 600 s, and they kept running.
+3. A lane pane's scope carries `KillMode=control-group` / `SendSIGKILL=yes` (read from
+   `systemctl --user show` on the live scope).
+4. Stopping such a cgroup **kills fully-detached work** (`setsid`+`nohup`+closed fds, own
+   sid and pgid, ppid 1) and **spares identical work in its own cgroup** — demonstrated in
+   both directions, twice, and in one trial the victim died leaving **no signal record at
+   all**, reproducing the field symptom of a traceless kill.
+5. Subagents get their own pane scope.
+6. **An agent's process exiting does NOT tear down its scope**; work it launched keeps
+   running, orphaned.
+
+**NOT established:** that any of this is what killed the gates on lane-3393. Those deaths
+were not observed, this host's journal retains no `tmux-spawn` scope-stop records, and (6)
+rules out the most natural trigger. So AC2 is answered as *"here is a mechanism that
+demonstrably produces exactly this symptom, and here are the alternatives ruled out"* —
+**not** as *"this was the reaper"*. Calling it identified would be dressing an inference as
+a measurement, which is the failure mode this issue was itself filed against.
+
+What remains unexplained is the correlation with ~10 minutes, since nothing measured here
+is time-based. Candidates not yet tested: a pane or supervisor recycle on a cadence, and a
+harness-level kill of a *tracked* background task (distinct from the process-level probes
+used here, all of which survived).
+
+**The next occurrence is now diagnosable rather than arguable**, which is the durable part:
+the heartbeat below records liveness at the moment it stops, so a reaped gate is
+distinguishable from a slow one without a human on the box, and `journalctl --user -u
+<scope>` can be read against the beat's last timestamp.
 
 ## The fix (AC3)
 
@@ -190,9 +225,10 @@ Self-tests: `scripts/tests/test_gate_liveness.sh` (66 cases) and
 
 - A lane **may** run its own full gate, via `gate-detached.sh`. The claim "lanes cannot
   run a full gate" was true of the naive launch and is not true of the detached one.
-- **`flow-closer` runs its gate detached.** It is a subagent, so its pane scope is torn
-  down when its context ends, and an in-session gate would be killed by its own
-  completion.
+- **`flow-closer` runs its gate detached** — not because its own completion kills the gate
+  (measured: it does not), but because a detached gate is independent of *every* pane and
+  session teardown, which is a class of failure the closer cannot see coming and cannot
+  distinguish from a slow gate. It costs one wrapper call.
 - Never conclude "my gate is still running" from `RESULT: INCOMPLETE` alone. Ask
   `gate-liveness.sh`. A `REAPED` verdict means re-run; it will never produce a verdict.
 - On a host where `gate-detached.sh` refuses (no working user systemd manager), the gate

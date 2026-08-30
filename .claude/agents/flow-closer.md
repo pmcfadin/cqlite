@@ -48,15 +48,18 @@ So you MUST launch the full gate **detached from your own cgroup** and **end you
 the harness re-invokes you when there is something to do. Do NOT sit in a silent wait, and
 do NOT poll in a tight `ScheduleWakeup` loop.
 
-**`run_in_background` is NOT sufficient, and that was the whole of #3473.** You are a
-subagent, so you run in your OWN `tmux-spawn-<uuid>.scope`, and that scope carries
-`KillMode=control-group` + `SendSIGKILL=yes`. Everything you spawn — `run_in_background`
-included, and `nohup`/`setsid` too, since cgroup membership is inherited across `fork` and
-cannot be shed by detaching from the terminal, process group or session — lives in that
-scope and is **signalled when your context ends**. Ending your turn is exactly the event
-that can kill your own gate, and it leaves NO trace: the summary file keeps its launch
-sentinel and nothing says why. Launch it with `scripts/flow/gate-detached.sh`, which puts
-the gate under `app.slice` in a cgroup of its own, outside yours.
+**`run_in_background` is NOT sufficient (#3473).** You are a subagent, so you run in your
+OWN `tmux-spawn-<uuid>.scope`, and that scope carries `KillMode=control-group` +
+`SendSIGKILL=yes`. Everything you spawn — `run_in_background` included, and `nohup`/`setsid`
+too, since cgroup membership is inherited across `fork` and cannot be shed by detaching from
+the terminal, process group or session — lives in that scope, and a teardown of it kills
+your gate **leaving no trace**: the summary file keeps its launch sentinel and nothing says
+why. To be precise about the risk, because the overclaim is tempting: **your turn ending
+does NOT by itself kill the gate** (measured — a scope survives while any process remains in
+it, so the gate holds it open). The exposure is to a **pane or session teardown** you cannot
+see coming — a supervisor recycle, `kill-pane`, logout — and which you cannot distinguish
+from a slow gate. Launching with `scripts/flow/gate-detached.sh` costs one call and removes
+the whole dependency by putting the gate under `app.slice` in a cgroup of its own.
 
 **Polling is MANDATORY, not optional (#2668).** Poll with `gate-liveness.sh`, never a bare
 `grep`, at **5-minute intervals**:
