@@ -573,9 +573,16 @@ What it guarantees:
   `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane "another instance is
   already running") — remedy: stop that supervisor or upgrade its checkout past #3467. **But read the
   wording: PID NUMBERS ARE REUSED, so the diagnostic only tells you to stop the pid when it CORROBORATED
-  the process as a worker-supervisor** (from `/proc/<pid>/cmdline`, else `ps -o args=`). If it says the
-  identity was not corroborated — or could not be checked at all — the pid is active but may be an
-  unrelated process that inherited the number: **verify what it is before stopping anything.** The
+  the process as a worker-supervisor**, which is read from `/proc/<pid>/cmdline` **and nowhere else**
+  (#3549): a `ps -o args=` rendering is space-joined and unescaped, so splitting it both FABRICATES
+  argument boundaries (one argument `/tmp/worker-supervisor.sh extra` renders exactly like two, carving
+  out a basename no argument had) and ERASES them (a genuine supervisor under a path containing a space
+  matches nothing), which makes it useless for a match AND for a non-match. So on a host with no
+  readable `/proc/<pid>/cmdline` the identity is simply **not determined**, and the diagnostic says so.
+  If it says the identity was not corroborated — or could not be determined — the pid is active but may
+  be an unrelated process that inherited the number: **verify what it is before stopping anything**
+  (the uncorroborated refusal prints a `ps -p <pid> -o args=` line for exactly that, where a HUMAN reads
+  the rendering — reading it is fine, machine-parsing it is not). The
   refusal itself is unconditional either way; the identity probe changes only what you are told to do,
   never whether the supervisor starts. **A holder whose
   recorded pid is CONFIRMED DEAD also REFUSES; it is NOT reclaimed (lead ruling, #3549)** — the
