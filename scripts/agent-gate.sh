@@ -2535,6 +2535,34 @@ apply_schemas_preflight() {
 # can always rebase, so the remedy is universally available and an escape hatch could
 # only ever buy a vacuous green.
 
+# EXTERNAL-COMMAND ENUMERATION (roborev job 210). The invariant this pre-flight must hold
+# is "there is NO branch on which it can hang", and the way that invariant was broken three
+# times is instructive: each site looked local. So the whole set is enumerated here rather
+# than argued per site, and `scripts/tests/test_agent_gate_component_set.sh` asserts the
+# enumeration structurally — a NEW external command in this region FAILs that test until it
+# is classified, which is what stops the next reviewer finding instance four.
+#
+#   BOUNDED (network-capable; every one goes through _component_set_bounded):
+#     git fetch --refmap= origin main    the baseline read; network by definition.
+#     git show <sha>:scripts/…           reads a BLOB, so in a PARTIAL clone
+#                                        (--filter=blob:none) it fetches LAZILY. This is the
+#                                        site that looked local and was not (finding 1).
+#     bash <extracted baseline> --list   spawns; and a spawned tree can outlive a
+#                                        direct-child kill, hence the process-group signal
+#                                        in _component_set_bounded (finding 2).
+#
+#   LOCAL-ONLY (annotated `# local-only: <why>` at each site, so the claim is checkable
+#   where it is made rather than only here):
+#     git rev-parse --git-dir            .git read, no object access.
+#     git remote get-url origin          config read; names a remote, contacts none.
+#     git rev-parse FETCH_HEAD^{commit}  ref + COMMIT object; commits are never filtered.
+#     git merge-base --is-ancestor       walks commit parents only.
+#
+#   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, mkdir, rm, cat, tr, cut,
+#     basename, kill, sleep, true.
+#
+# Everything else here is a bash builtin/keyword or a function defined in this file.
+
 # Probe state, set by _component_set_probe and read by the pure verdict/line helpers.
 # Globals rather than a parsed multi-line stdout: the probe does real I/O (fetch, git
 # show, a baseline `--list`), and routing its result through `$( )` would add a
@@ -2589,6 +2617,9 @@ _component_set_bound_mechanism() {
 # granularity is 1s, which is irrelevant against a 120s bound and costs the normal path
 # nothing: the loop exits as soon as the child is gone.
 _CS_UNBOUNDABLE_RC=199
+# Bound applied to every network-capable operation in this pre-flight, in seconds. One
+# constant so the enumeration below cannot describe a bound the code does not apply.
+_CS_BOUND_HINT=120
 _component_set_bounded() {
   local secs="$1"; shift
   case "$(_component_set_bound_mechanism)" in
@@ -2596,14 +2627,36 @@ _component_set_bounded() {
     gtimeout) gtimeout "$secs" "$@" ;;
     none)     return "$_CS_UNBOUNDABLE_RC" ;;
     *)
+      # PROCESS GROUP, not just the child (roborev job 210, finding 2). Signalling only the
+      # direct child leaves any GRANDCHILD alive — a transport helper, or anything the
+      # baseline script spawns — and a surviving grandchild keeps the command-substitution
+      # pipe OPEN, so the "bounded" call never returns and the bound is not a bound.
+      # Measured both ways before choosing: direct-child TERM left a ticking grandchild
+      # (ticks 2 -> 5); group TERM froze it (2 -> 2).
+      #
+      # `set -m` (bash job control) puts the child in its OWN process group on both Linux
+      # and macOS, so `kill -- -$pid` reaches the whole tree. `setsid` would ALSO work and
+      # is NOT used: it is absent from a default macOS, and adding a Linux-only dependency
+      # to fix a portability bug is how this family regenerates (job 210, finding 3, one
+      # file over). It emits no job-control text into a capture — verified: `$( set -m; cmd
+      # & wait 2>&1 )` captured the empty string.
+      #
+      # This arm now matches the `timeout` arm's semantics rather than approximating them:
+      # GNU timeout also runs its child in a new process group and signals the group
+      # (verified here — its grandchild froze at 2 -> 2), so a bound must not mean one thing
+      # on a coreutils host and another on a bash-watchdog host.
       local pid waited=0 rc
+      set -m
       "$@" &
       pid=$!
+      set +m
       while kill -0 "$pid" 2>/dev/null; do
         if [ "$waited" -ge "$secs" ]; then
-          kill -TERM "$pid" 2>/dev/null || true
+          kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
           sleep 1
-          kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+          fi
           wait "$pid" 2>/dev/null
           return 124            # same status GNU timeout reports for a bound exceeded
         fi
@@ -2626,9 +2679,11 @@ _component_set_probe() {
   if ! command -v git >/dev/null 2>&1; then
     _CS_KIND=no-tool; _CS_DETAIL="git is not on PATH"; return 0
   fi
+  # local-only: reads .git; touches no remote and cannot lazily fetch (no object read).
   if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     _CS_KIND=no-git; _CS_DETAIL="$REPO_ROOT is not a git worktree"; return 0
   fi
+  # local-only: a config read. It NAMES a remote; it does not contact one.
   if ! git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1; then
     _CS_KIND=no-remote
     _CS_DETAIL="no 'origin' remote is configured in $REPO_ROOT, so the baseline is unobtainable"
@@ -2671,6 +2726,8 @@ _component_set_probe() {
   # FETCH_HEAD, not refs/remotes/origin/main: FETCH_HEAD is what THIS fetch just
   # observed, whereas the remote-tracking ref is updated only opportunistically and is
   # the cached observable this check exists to distrust.
+  # local-only: resolves a ref file plus the COMMIT object the fetch above just wrote.
+  # Commit objects are never filtered out of a partial clone, so no lazy fetch is possible.
   _CS_SHA=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "FETCH_HEAD^{commit}" 2>/dev/null || true)
   if [ -z "$_CS_SHA" ]; then
     _CS_KIND=fetch-failed; _CS_SHA="-"
@@ -2690,9 +2747,21 @@ _component_set_probe() {
     return 0
   fi
   mkdir -p "$tmpd/scripts"
-  if ! git -C "$REPO_ROOT" show "$_CS_SHA:$rel" >"$tmpd/scripts/$base" 2>"$tmpd/show.err"; then
+  # BOUNDED (roborev job 210, finding 1): `git show <sha>:<path>` reads a BLOB, and in a
+  # PARTIAL clone (`--filter=blob:none`/`blob:limit`, increasingly common on CI and on
+  # fleet boxes) the blob is fetched LAZILY — so this apparently-local read is a network
+  # operation that can hang on a stall or an auth prompt, exactly like the fetch above.
+  # Nothing distinguishes the two cases from inside the gate, so it takes the same bound.
+  _component_set_bounded 120 git -C "$REPO_ROOT" show "$_CS_SHA:$rel" \
+      >"$tmpd/scripts/$base" 2>"$tmpd/show.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     _CS_KIND=baseline-missing
-    _CS_DETAIL="git show ${_CS_SHA}:$rel failed: $(_component_set_flatten "$(cat "$tmpd/show.err" 2>/dev/null)")"
+    if [ "$rc" -eq 124 ]; then
+      _CS_DETAIL="git show ${_CS_SHA}:$rel EXCEEDED its ${_CS_BOUND_HINT}s bound (a partial clone fetching the blob lazily is the usual cause)"
+    else
+      _CS_DETAIL="git show ${_CS_SHA}:$rel failed (rc $rc): $(_component_set_flatten "$(cat "$tmpd/show.err" 2>/dev/null)")"
+    fi
     rm -rf "$tmpd"; return 0
   fi
   # Run it with EVERY artifact path redirected into $tmpd and CQLITE_GATE_NO_NICE=1
@@ -2772,6 +2841,9 @@ EOF_CS_LIST
   # Ancestry, probed only for what it decides: BEHIND vs a DELIBERATE REMOVAL. Read the
   # rc explicitly — `--is-ancestor` answers 1 for "not an ancestor" and something else
   # for an error, and collapsing those two would let a broken probe answer "not behind".
+  # local-only: walks COMMIT parents only. This is the distinction that makes `git show`
+  # above different in kind: no partial-clone filter omits commits, whereas `blob:none`
+  # omits exactly what `show <sha>:<path>` must read — so this one cannot reach the network.
   git -C "$REPO_ROOT" merge-base --is-ancestor "$_CS_SHA" HEAD >/dev/null 2>&1; rc=$?
   case "$rc" in
     0) _CS_ANCESTOR=yes ;;
