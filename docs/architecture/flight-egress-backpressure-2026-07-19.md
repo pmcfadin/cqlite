@@ -3,6 +3,16 @@
 **Issue:** #2600 (oracle-driven exploration) · **Field signal:** #2367 round 12 ·
 **Date:** 2026-07-19 · **Status:** characterization complete; follow-up filed.
 
+> **SUPERSEDED IN PART by issue #2820 (2026-08).** Every measurement below was
+> taken when the egress `sync_channel` carried ONE ENTRY per message, so its
+> "bounded 256-slot channel", "blocking at 256" and "ceiling is `256 ×
+> concurrent scans`" statements describe that shape. The channel now carries
+> BATCHES (`merge::egress_batch`): its capacity argument is in MESSAGES,
+> converted from the same 256-ROW budget, and the per-source resident-row worst
+> case is `max_inflight_rows` = 1024 rows at the default budget. The gauge's unit
+> is unchanged (ENTRIES), and the ATTRIBUTION and the lever (a concurrency-aware
+> per-merge ROW budget, #2765) are unaffected — the row budget is still the knob.
+
 ## TL;DR
 
 - **Attribution: (a) consumer-side drain latency**, amplified into an unbounded
