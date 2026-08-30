@@ -162,6 +162,24 @@ for _tool in find grep sort awk sed basename tr iconv; do
   }
 done
 
+# iconv is probed FUNCTIONALLY, not merely for presence (roborev, post-rebase round 12).
+#
+# `_reader_accepts_descriptor` uses `iconv -f UTF-8 -t UTF-8` to reject a descriptor whose
+# name is not valid UTF-8, because the reader reaches every filename through
+# `to_str()`. The problem: GNU iconv exits 1 for EVERY failure — invalid input, an unknown
+# encoding, an unreadable file (measured, all three) — so a nonzero status cannot on its own
+# distinguish "this name is bad" from "iconv is broken". Collapsing them means a broken iconv
+# rejects EVERY descriptor, every table reads as missing, and the run ends in the reserved
+# exit 9 that the #2078 opt-out suppresses as an incomplete corpus.
+#
+# There is no exit code that separates them, so the separation is established HERE instead:
+# a known-good round trip proves iconv works, and after that a status 1 in the predicate is
+# attributable to the INPUT. Failing this probe is a tooling failure, named as one.
+if ! printf 'probe' | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+  echo "❌ dataset manifest check: 'iconv -f UTF-8 -t UTF-8' failed on known-good input, so it cannot be used to judge descriptor names; cannot judge the corpus" >&2
+  exit 2
+fi
+
 # `${0%/*}` rather than `dirname` for the same reason as the keyspace above: no
 # subprocess, no failure mode. The `case` handles an invocation with no slash, where
 # `${0%/*}` would otherwise yield $0 unchanged.
@@ -361,6 +379,9 @@ _reader_accepts_descriptor() {
   # `nb-<0xff>-big-Data.db` was accepted here and unreadable there: a false-PRESENT, and a
   # table whose only generation had such a name would pass the manifest while giving the
   # Node suite nothing. Verified in both directions.
+  # A nonzero here means the NAME, not a broken iconv: the functional probe at startup has
+  # already established that iconv round-trips known-good input. GNU iconv exits 1 for every
+  # failure mode, so without that probe this line could not tell the two apart.
   printf '%s' "$_b" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || return 1
   _re_match '^[a-z][a-z]-.*-(big|bti)-Data\.db$' "$_b" || return 1
   _ver=${_b%%-*}

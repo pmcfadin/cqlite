@@ -2152,12 +2152,26 @@ _gate_schemas_override_present() {
 # Bracket ranges are BYTEWISE only in the C locale, so the locale is pinned for the test
 # rather than assumed. C1 is matched as its two-byte UTF-8 form 0xC2 0x80..0x9F.
 _gate_has_control_char() {
+  # THREE-VALUED, failing CLOSED (roborev, post-rebase round 12). This spawns `bash` through
+  # PATH, and callers read the result as a plain boolean -- so if the subprocess cannot launch
+  # (127) or dies (>1), "no control character" is what they see, and a control-bearing schemas
+  # root passes a preflight the node binding will then reject. An unverifiable value must not
+  # be certified, so an unexpected status is reported and treated as PRESENT: the override is
+  # refused and the gate falls back to the checkout-relative schemas, which is the safe
+  # direction and is visible rather than silent.
+  local _cc_rc=0
   LC_ALL=C bash -c '
     case "$1" in
       *[$'"'"'\x01'"'"'-$'"'"'\x1f'"'"']*|*$'"'"'\x7f'"'"'*) exit 0 ;;
       *$'"'"'\xc2'"'"'[$'"'"'\x80'"'"'-$'"'"'\x9f'"'"']*)    exit 0 ;;
     esac
-    exit 1' _ "$1"
+    exit 1' _ "$1" || _cc_rc=$?
+  case "$_cc_rc" in
+    0) return 0 ;;   # a control character IS present
+    1) return 1 ;;   # none present
+    *) echo "[agent-gate] WARNING: the control-character probe exited $_cc_rc (could not run?); treating CQLITE_SCHEMAS_ROOT as UNVERIFIABLE and refusing it" >&2
+       return 0 ;;
+  esac
 }
 
 _gate_schemas_override_reject_kind() {

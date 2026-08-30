@@ -2061,6 +2061,68 @@ else
   echo "info - git unavailable; skipping the staged-deletion case"
 fi
 
+# ---------------------------------------------------------------------------
+# Cases 89-90 (post-rebase round 12): a broken iconv, and a control-char probe that cannot run.
+#
+# 89. GNU iconv exits 1 for EVERY failure — invalid input, unknown encoding, unreadable file
+#     (measured, all three) — so a nonzero status cannot on its own distinguish "this name is
+#     bad" from "iconv is broken". Collapsed, a broken iconv rejects EVERY descriptor, every
+#     table reads as missing, and the run ends in the reserved exit 9 that the #2078 opt-out
+#     suppresses as an incomplete corpus. There is no exit code that separates them, so the
+#     script establishes the separation with a known-good round-trip probe at startup.
+#
+# 90. `_gate_has_control_char` spawns bash through PATH and callers read it as a boolean, so a
+#     subprocess that cannot launch read as "no control character" — and a control-bearing
+#     schemas root would pass a preflight the node binding then rejects.
+# ---------------------------------------------------------------------------
+if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstables" ]; then
+  ic_bin="$WORK/iconvfail-bin"; mkdir -p "$ic_bin"
+  printf '#!/bin/sh\nexit 1\n' > "$ic_bin/iconv"; chmod +x "$ic_bin/iconv"
+  ic_rc=0
+  PATH="$ic_bin:$PATH" bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >"$WORK/ic-out" 2>&1 || ic_rc=$?
+  if [ "$ic_rc" = 2 ]; then
+    ok "a broken iconv is a tooling failure (exit 2), not an incomplete corpus"
+  elif [ "$ic_rc" = 9 ]; then
+    bad "a broken iconv surfaced AS exit 9; the opt-out would suppress it as an incomplete corpus"
+  else
+    bad "a broken iconv gave exit $ic_rc; expected 2"
+  fi
+  # It must say WHY, or the operator hunts a corpus problem that does not exist.
+  grep -q 'iconv' "$WORK/ic-out" 2>/dev/null \
+    && ok "the broken-iconv diagnostic names iconv" \
+    || bad "the broken-iconv diagnostic does not name iconv: $(head -1 "$WORK/ic-out")"
+else
+  echo "info - no real corpus; skipping the iconv case"
+fi
+
+GATE_SRC2=$(cd "$(dirname "$GATE")" && pwd)/agent-gate.sh
+if [ -f "$GATE_SRC2" ]; then
+  # PRESENT / ABSENT / UNLAUNCHABLE. The third must behave like PRESENT (refuse the override),
+  # never like ABSENT (certify it).
+  # The OUTER bash is resolved ABSOLUTELY and the broken PATH is set INSIDE, just before the
+  # call. Setting it on the outer invocation stops bash itself from launching, so the probe
+  # produces nothing and the case fails for the wrong reason — which is what the first version
+  # did.
+  cc_bash=$(type -P bash)
+  cc_probe() {   # $1 = PATH for the CALL, $2 = value -> "present" | "absent"
+    "$cc_bash" -c '
+      eval "$(sed -n "/^_gate_has_control_char() {/,/^}/p" "$1")"
+      PATH=$3
+      _gate_has_control_char "$2" && printf present || printf absent' _ "$GATE_SRC2" "$2" "$1" 2>/dev/null
+  }
+  cc_bad=""
+  [ "$(cc_probe "$PATH" "/plain/path")" = absent ] || cc_bad="$cc_bad clean-path"
+  [ "$(cc_probe "$PATH" "$(printf '/a/\001b')")" = present ] || cc_bad="$cc_bad c0-control"
+  # The whole point: with bash unreachable the probe cannot answer, and an unanswerable
+  # question must not be certified.
+  [ "$(cc_probe "/nonexistent" "/plain/path")" = present ] || cc_bad="$cc_bad unlaunchable-fails-open"
+  [ -z "$cc_bad" ] \
+    && ok "the control-char probe is three-valued and fails CLOSED when it cannot run" \
+    || bad "control-char probe wrong on:$cc_bad"
+else
+  echo "info - agent-gate.sh unreadable; skipping the control-char probe case"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
