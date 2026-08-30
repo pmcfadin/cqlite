@@ -103,10 +103,13 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
 /// ERROR here instead of a runtime `TypeError` on somebody's data, which is
 /// strictly stronger than detecting it at run time.
 ///
-/// That property is PINNED by `#[deny(clippy::wildcard_enum_match_arm)]` on this
-/// function rather than by a text guard: clippy runs `-D warnings` in the gate,
-/// so a reintroduced `_ =>` is a hard error. A grep-style guard was rejected
-/// because it matches the PROSE above (which necessarily contains `_ =>`).
+/// That property is PINNED by `#[deny(clippy::wildcard_enum_match_arm)]` — on
+/// this function, on [`json_to_hashable_key`] and on [`contains_udt`] — rather
+/// than by a text guard: clippy runs `-D warnings` in the gate, so a
+/// reintroduced `_ =>` is a hard error. A grep-style guard was rejected because
+/// it matches the PROSE above (which necessarily contains `_ =>`). All three
+/// attributes were RED-verified by planting a wildcard and watching clippy
+/// error; presence of a lint attribute is not enforcement.
 ///
 /// Recursion goes through THIS function, never through [`value_to_py`] or
 /// [`set_to_py`]: `set_to_py`'s UDT branch returns an unhashable `list` **on
@@ -233,10 +236,20 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
         // `1` becomes `int`, `1.0` becomes `float` and `true` becomes `bool`.
         // Python holds `1 == 1.0 == True` with EQUAL hashes, so `{"a": 1}` and
         // `{"a": 1.0}` project to equal frozensets and COLLAPSE onto a single
-        // element in a set-element or map-key position. Fixing it needs a
-        // type-preserving JSON projection, a behaviour change out of scope for
-        // #3500; a follow-up issue is being filed (no number assigned yet, so
-        // none is cited here rather than inventing one).
+        // element in a set-element or map-key position.
+        //
+        // That is ONE INSTANCE of the collapse class tracked by **#3615** — not
+        // the whole of it. The class is "a hashable projection merges values CQL
+        // keeps distinct", and its other members are independent of JSON: `-0.0`
+        // vs `+0.0` in a `set<double>` (Cassandra orders by
+        // `Double.compare`/`Float.compare`, where `-0.0 < +0.0`, so both zeros
+        // in one set is ordinary legal data, while Python has
+        // `hash(-0.0) == hash(0.0)`); a UDT field literally named
+        // `_type`/`_keyspace` shadowing the metadata pair injected by the `Udt`
+        // arm; and `Null` vs `Tombstone` both projecting to `None` (listed for
+        // completeness — probably desired). All of them PRE-DATE #3500, which
+        // neither introduced nor widened any; fixing them needs a
+        // type-preserving projection, a behaviour change out of scope here.
         Value::Json(json) => json_to_hashable_key(py, json),
         // Every remaining variant's ordinary projection is ALREADY hashable, so
         // it delegates to `value_to_py`. Named exhaustively — never `_ =>` — so
@@ -284,8 +297,10 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
 /// Scalars delegate to [`json_to_py`], so its NUMBER projection is inherited and
 /// with it a known collapse: JSON `1`/`1.0`/`true` become Python
 /// `int`/`float`/`bool`, which compare equal with equal hashes, so `{"a": 1}`
-/// and `{"a": 1.0}` are the same frozenset. Recorded in full at the
-/// `Value::Json` arm.
+/// and `{"a": 1.0}` are the same frozenset. That is one instance of the
+/// projection-collapse class tracked by **#3615** (whose other members —
+/// `-0.0`/`+0.0`, `_type` field shadowing, `Null`/`Tombstone` — have nothing to
+/// do with JSON); recorded in full at the `Value::Json` arm.
 #[deny(clippy::wildcard_enum_match_arm)]
 fn json_to_hashable_key(py: Python<'_>, json: &serde_json::Value) -> PyResult<PyObject> {
     match json {
