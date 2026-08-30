@@ -487,3 +487,89 @@ pub fn stage_single_table(dest: &Path, keyspace: &str, fixture: &Path) -> Result
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(pairs: &[(&str, Value)]) -> Row {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    /// The refusal PATH, not just the predicate: no corpus fixture carries a
+    /// `, `-bearing collection member, so without this the wiring from
+    /// `csv_container::ambiguity` to the census counters never executes and the
+    /// lane's `0 REFUSED` line would be unfalsifiable.
+    #[test]
+    fn a_csv_unrepresentable_container_is_refused_and_named() {
+        let golden = vec![row(&[("id", json!(1)), ("s", json!(["a, b"]))])];
+        // The CLI text is IRRELEVANT to the refusal: it is decided from the
+        // golden alone, so the defect under test can never cause it.
+        let cli = vec![row(&[("id", json!("1")), ("s", json!("{a, b}"))])];
+        let report = compare_rows(&golden, &cli, &["id"], &[], &[], Egress::Csv);
+
+        assert!(
+            report.diffs.is_empty(),
+            "unexpected diffs: {:?}",
+            report.diffs
+        );
+        assert_eq!(report.ambiguous_container_cells, 1);
+        assert_eq!(
+            report.container_cells, 0,
+            "a refused cell is not a compared one"
+        );
+        assert_eq!(report.compared_cells, 1, "`id` is still compared");
+        assert_eq!(report.ambiguity_reasons.len(), 1);
+        assert!(
+            report.ambiguity_reasons[0].starts_with("s ("),
+            "the refusal must name its column: {:?}",
+            report.ambiguity_reasons
+        );
+    }
+
+    /// A representable container is compared, and a wrong member fails. Pins the
+    /// other side of the same branch so "refused" can never quietly become the
+    /// default.
+    #[test]
+    fn a_representable_container_is_compared_and_a_wrong_member_fails() {
+        let golden = vec![row(&[("id", json!(1)), ("s", json!(["a", "b"]))])];
+        let good = vec![row(&[("id", json!("1")), ("s", json!("{a, b}"))])];
+        let report = compare_rows(&golden, &good, &["id"], &[], &[], Egress::Csv);
+        assert!(
+            report.diffs.is_empty(),
+            "unexpected diffs: {:?}",
+            report.diffs
+        );
+        assert_eq!(report.container_cells, 1);
+        assert_eq!(report.ambiguous_container_cells, 0);
+
+        let bad = vec![row(&[("id", json!("1")), ("s", json!("{a, c}"))])];
+        let report = compare_rows(&golden, &bad, &["id"], &[], &[], Egress::Csv);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "a wrong member must fail: {:?}",
+            report.diffs
+        );
+        assert!(report.diffs[0].contains(".s:"), "{:?}", report.diffs);
+    }
+
+    /// A CLI cell that is not the grammar at all is a DIVERGENCE, not a refusal.
+    #[test]
+    fn an_unparseable_container_is_reported_not_refused() {
+        let golden = vec![row(&[("id", json!(1)), ("s", json!(["a", "b"]))])];
+        let cli = vec![row(&[("id", json!("1")), ("s", json!("a, b"))])];
+        let report = compare_rows(&golden, &cli, &["id"], &[], &[], Egress::Csv);
+        assert_eq!(report.ambiguous_container_cells, 0);
+        assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+        assert!(
+            report.diffs[0].contains("unparseable CSV container"),
+            "{:?}",
+            report.diffs
+        );
+    }
+}

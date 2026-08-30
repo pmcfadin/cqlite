@@ -281,3 +281,174 @@ fn brief(s: &str) -> String {
     let head: String = s.chars().take(LIMIT).collect();
     format!("`{head}…`({} chars)", s.chars().count())
 }
+
+// ===========================================================================
+// Unit coverage for the branches the corpus does not reach
+// ===========================================================================
+//
+// The committed + fetched corpus contains no container member carrying a `, `,
+// a bracket or a `: ` in a map key, so the run census reports `0 REFUSED` — a
+// true measurement, but one that leaves the refusal valve and the strictness
+// rules unexecuted. These cases exercise them directly, so "0 refusals" means
+// "the scan ran and found none" rather than "the scan may not work".
+//
+// Inputs are renderings in the grammar `ValueFormatter` documents; expected
+// outputs are the GOLDEN-side shapes `sstabledump` produces. Nothing here is
+// derived from CQLite's current output.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- the refusal valve -------------------------------------------------
+
+    #[test]
+    fn member_containing_the_element_separator_is_refused() {
+        // `{"a, b"}` and `{"a", "b"}` render identically, so no reading of the
+        // CLI's text is trustworthy.
+        let why = ambiguity(&json!(["a, b"])).expect("a `, `-bearing member must be refused");
+        assert!(why.contains("`, ` separator"), "unexpected reason: {why}");
+    }
+
+    #[test]
+    fn member_containing_a_bracket_is_refused() {
+        let why = ambiguity(&json!(["x}y"])).expect("a bracket-bearing member must be refused");
+        assert!(
+            why.contains("structural character"),
+            "unexpected reason: {why}"
+        );
+    }
+
+    #[test]
+    fn map_key_containing_the_pair_separator_is_refused() {
+        let why = ambiguity(&json!({"a: b": 1})).expect("a `: `-bearing KEY must be refused");
+        assert!(why.contains("key"), "unexpected reason: {why}");
+    }
+
+    #[test]
+    fn map_value_containing_the_pair_separator_is_not_refused() {
+        // Entries split at their FIRST top-level `: `, which is the real
+        // separator, so a colon inside the VALUE is already decoded correctly.
+        // Refusing it would narrow the lane for no reason.
+        assert_eq!(ambiguity(&json!({"k": "a: b"})), None);
+        let decoded = decode(&json!({"k": "a: b"}), "{k: a: b}").expect("decodes");
+        assert_eq!(decoded, json!([{"key": "k", "value": "a: b"}]));
+    }
+
+    #[test]
+    fn an_empty_member_of_a_non_empty_collection_is_refused() {
+        // `{}` is both "no members" and "one empty member".
+        let why = ambiguity(&json!([""])).expect("an empty member must be refused");
+        assert!(
+            why.contains("empty scalar member"),
+            "unexpected reason: {why}"
+        );
+    }
+
+    #[test]
+    fn ordinary_corpus_content_is_not_refused() {
+        // Spaces, hyphens, `0x` hex, exact decimals and nesting are all fine —
+        // only the separators and brackets are structural. (`1 Navy Way` is real
+        // content from test_compactionparityudt.udt_collections.)
+        assert_eq!(
+            ambiguity(&json!({"home": {"street": "1 Navy Way", "zip": "22201"}})),
+            None
+        );
+        assert_eq!(
+            ambiguity(&json!(["0xdeadbeef", "-1.5", "neg-five", null])),
+            None
+        );
+    }
+
+    // --- strictness: the decoder must not repair a malformed rendering ------
+
+    #[test]
+    fn the_element_separator_must_be_exactly_comma_space() {
+        // A writer that dropped the space must NOT decode as two members; that
+        // tolerance is what would let a framing regression through.
+        let decoded = decode(&json!([1, 2]), "[1,2]").expect("decodes as one member");
+        assert_eq!(decoded, json!(["1,2"]), "`,` was wrongly treated as `, `");
+    }
+
+    #[test]
+    fn a_mismatched_or_unbalanced_bracket_is_an_error() {
+        assert!(
+            decode(&json!([1]), "[1}").is_err(),
+            "mismatched bracket must fail"
+        );
+        assert!(
+            decode(&json!([1]), "[[1]").is_err(),
+            "unclosed bracket must fail"
+        );
+        assert!(
+            decode(&json!([1]), "1, 2").is_err(),
+            "a bare body must fail"
+        );
+        assert!(
+            decode(&json!({"k": 1}), "[k: 1]").is_err(),
+            "a map needs braces"
+        );
+    }
+
+    #[test]
+    fn a_map_entry_without_the_pair_separator_is_an_error() {
+        assert!(decode(&json!({"k": 1}), "{k=1}").is_err());
+    }
+
+    // --- decoding ----------------------------------------------------------
+
+    #[test]
+    fn a_golden_array_accepts_both_bracket_spellings() {
+        // Ambiguity 1: `sstabledump` renders a list AND a set as a JSON array,
+        // so the golden cannot say which bracket to expect.
+        assert_eq!(decode(&json!([1, 2]), "[1, 2]").unwrap(), json!(["1", "2"]));
+        assert_eq!(decode(&json!([1, 2]), "{1, 2}").unwrap(), json!(["1", "2"]));
+    }
+
+    #[test]
+    fn an_empty_body_decodes_to_zero_members() {
+        assert_eq!(decode(&json!([]), "[]").unwrap(), json!([]));
+        assert_eq!(decode(&json!([]), "{}").unwrap(), json!([]));
+        assert_eq!(decode(&json!({}), "{}").unwrap(), json!([]));
+    }
+
+    #[test]
+    fn nesting_is_decoded_at_depth() {
+        // A map<text, frozen<udt>>, as in test_compactionparityudt.udt_collections:
+        // the inner `, ` and `: ` must not be mistaken for outer separators.
+        let golden = json!({"home": {"street": "1 Navy Way", "city": "Arlington"}});
+        let decoded = decode(&golden, "{home: {street: 1 Navy Way, city: Arlington}}").unwrap();
+        assert_eq!(
+            decoded,
+            json!([{
+                "key": "home",
+                "value": [
+                    {"key": "street", "value": "1 Navy Way"},
+                    {"key": "city", "value": "Arlington"},
+                ],
+            }])
+        );
+    }
+
+    #[test]
+    fn the_null_token_is_resolved_from_the_goldens_type() {
+        // Ambiguity 2, in both directions: a null member decodes to null, and a
+        // `text` member holding "null" stays text.
+        assert_eq!(
+            decode(&json!({"last_name": null}), "{last_name: null}").unwrap(),
+            json!([{"key": "last_name", "value": null}])
+        );
+        assert_eq!(
+            decode(&json!({"last_name": "null"}), "{last_name: null}").unwrap(),
+            json!([{"key": "last_name", "value": "null"}])
+        );
+    }
+
+    #[test]
+    fn a_surplus_member_is_kept_so_the_length_mismatch_is_reported() {
+        // The decoder must not silently truncate to the golden's length — the
+        // comparison is what reports the divergence.
+        let decoded = decode(&json!([1]), "[1, 2]").unwrap();
+        assert_eq!(decoded, json!(["1", "2"]));
+    }
+}
