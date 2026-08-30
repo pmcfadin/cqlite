@@ -1425,9 +1425,18 @@ supervisor_shell_quote() {
 # corroborating oracle exists the answer is `unknown`, never `dead` (a verdict derived from the absence
 # of a bad signal is the defect class; require an affirmative measurement).
 #
-# SCOPED TO THE LEGACY GUARD, deliberately. `acquire_lock`'s own per-lane liveness test below is still
-# the plain two-valued `kill -0`; that is a DIFFERENT lock with its own tests, and widening the change
-# to it is out of scope for #3549. The asymmetry is known, not an oversight.
+# SCOPED TO THE LEGACY GUARD, deliberately, AND THE RESIDUAL IS WRITTEN RATHER THAN IMPLIED (#3549,
+# roborev job 182 class sweep). `acquire_lock`'s handling of its OWN per-lane lock, below, carries the
+# same three defect shapes this function and `supervisor_pid_identity` fix for the legacy one:
+#   1. the holder pid is read with `cat` and used UNPARSED — no digit check, no single-line check — so a
+#      garbled or partially-written `pid` makes `kill -0` fail and the lock be RECLAIMED;
+#   2. its liveness test is the plain TWO-VALUED `kill -0`, so an EPERM holder (another user's live
+#      supervisor) reads as dead;
+#   3. its message asserts "another instance is already running (pid N)" with no identity corroboration,
+#      i.e. the pid-reuse claim F2 removed from the legacy diagnostic.
+# That is a DIFFERENT lock with its own tests and its own reclaim semantics (it may legitimately mutate
+# a lock it owns, which the legacy guard may not), so widening the change to it is out of scope for
+# #3549 rather than forgotten. The asymmetry is known; see the pointer at `acquire_lock`.
 supervisor_pid_liveness() {
   local pid="${1:-}"
   # Well-formed = non-empty, all digits, > 0. A leading zero is rejected as malformed rather than
@@ -1774,6 +1783,10 @@ acquire_lock() {
     trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT
     return 0
   fi
+  # KNOWN RESIDUAL, recorded at the site (#3549 class sweep — the enumerated shapes are listed at
+  # `supervisor_pid_liveness`): this pid is used UNPARSED, the liveness test below is two-valued, and
+  # the message asserts "another instance" without corroborating the process identity. Out of scope for
+  # #3549 (a different lock, with reclaim semantics of its own), not an oversight.
   local holder_pid=""
   [[ -f "$SUPERVISOR_LOCK/pid" ]] && holder_pid="$(cat "$SUPERVISOR_LOCK/pid" 2>/dev/null || true)"
   if [[ -n "$holder_pid" ]] && kill -0 "$holder_pid" 2>/dev/null; then
