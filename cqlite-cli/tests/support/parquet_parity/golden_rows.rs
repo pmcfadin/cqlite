@@ -22,8 +22,9 @@
 //!   * a per-cell tombstone.
 //!
 //! …and, for the same reason in the other direction, on a golden cell that is
-//! PRESENT but carries no `value` and is not one of the tombstone shapes above:
-//! see [`require_recognized_cell_shape`].
+//! PRESENT but carries NO AUTHORITATIVE VALUE — a missing `value` OR an explicit
+//! `"value": null`, the two spellings of one state — and is not one of the
+//! tombstone shapes above: see [`require_recognized_cell_shape`].
 //!
 //! A fixture that grows one of those turns RED here instead of silently
 //! comparing the wrong things. Reconciliation-sensitive tables belong to the
@@ -40,12 +41,17 @@
 //! `value`, and a primary-key component is not a cell) and to hand it, with the
 //! declared type for that position, to `declared::canonicalize_golden`.
 //!
-//! * **`Null` folds into `Absent`, recursively.** Arrow/Parquet has ONE null;
-//!   sstabledump renders an absent cell by omitting it and a null UDT field as
-//!   an explicit JSON `null`. Both denote the same absence in CQL, so the golden
-//!   side folds `Null` into `Absent` at every depth. (This cannot mask an
-//!   empty-vs-null bug: an empty text is `Text("")`, an empty collection is an
-//!   empty container, and neither is `Absent`.)
+//! * **`Null` folds into `Absent` — but ONLY where a null is legitimate.**
+//!   Arrow/Parquet has ONE null; sstabledump renders an absent cell by omitting
+//!   it and a null UDT field as an explicit JSON `null`. Both denote the same
+//!   absence in CQL, so where CQL permits a null the golden side folds `Null`
+//!   into `Absent`. Where CQL does NOT — a collection element, a map key or
+//!   value, a primary-key or collection-path component — an absence in either
+//!   spelling is REFUSED rather than folded, because folded it would AGREE with
+//!   an export that wrongly wrote NULL (`declared::Position::permits_absence`).
+//!   (Folding cannot mask an empty-vs-null bug either: an empty text is
+//!   `Text("")`, an empty collection is an empty container, and neither is
+//!   `Absent`.)
 //! * **A multicell collection with no live elements is `Absent`.** Cassandra
 //!   reads a non-frozen collection whose elements are all gone as NULL, so an
 //!   export writing NULL there is correct. Applied ONLY to non-frozen
@@ -736,20 +742,44 @@ fn project_column(
             value_cells.len()
         ));
     }
-    Ok(fold_null(value_cells[0].value.clone()))
+    // NOT folded here: `canonicalize_golden` folds an absence at the position
+    // that OWNS it (`Position::permits_absence`), and a recursive fold applied
+    // in advance would erase which spelling the golden used — turning a nested
+    // `"value": null` into "a missing value" in the refusal that reports it.
+    Ok(value_cells[0].value.clone())
 }
 
-/// REFUSE a PRESENT golden cell that carries no `value` and is not one of the
-/// shapes whose value legitimately lives somewhere other than `value`.
+/// REFUSE a PRESENT golden cell that carries NO AUTHORITATIVE VALUE — however
+/// the golden spells that — unless the cell is one of the shapes whose value
+/// legitimately lives somewhere other than `value`.
+///
+/// # THE PROPERTY, not a list of spellings
+///
+/// A present cell must carry an authoritative value for its column, and "no
+/// authoritative value here" is REFUSED whichever way it is written. In this
+/// pipeline the absence has TWO spellings and they are ONE state:
+///
+///   * a **missing `value` key** — the shared parser
+///     (`canonical_jsonl::parse_cell`) maps it onto `CanonicalValue::Absent`;
+///   * an **explicit `"value": null`** — the same parser maps it onto
+///     `CanonicalValue::Null`, which the descent then folds into that same
+///     `Absent` wherever an absence is legitimate.
+///
+/// Both are therefore checked by ONE predicate ([`carries_no_authoritative_value`])
+/// rather than enumerated: the first version of this refusal blacklisted the
+/// missing-key spelling alone, and the explicit `null` reached `Absent` by the
+/// other route and compared EQUAL to an export that wrongly wrote NULL. A
+/// nested null at a position where Cassandra legitimately emits one (a UDT
+/// field, a tuple member) is not this state and is accepted — that decision
+/// belongs to the position, and `declared::Position::permits_absence` makes it.
 ///
 /// # Why this is a refusal and not a NULL
 ///
-/// The shared parser maps a cell with no `value` key onto
-/// `CanonicalValue::Absent` — the very value an ABSENT cell (a Cassandra NULL)
-/// projects to. Without this refusal such a cell is compared as NULL, so a
-/// golden that lost a value AGREES with an export that wrongly writes NULL, and
-/// the harness reports parity for the silent NULL-coercion this issue exists to
-/// catch (AC1, #1485). A malformed oracle must red, never bless.
+/// `Absent` is the very value an ABSENT cell (a Cassandra NULL) projects to.
+/// Without this refusal such a cell is compared as NULL, so a golden that lost a
+/// value AGREES with an export that wrongly writes NULL, and the harness reports
+/// parity for the silent NULL-coercion this issue exists to catch (AC1, #1485).
+/// A malformed oracle must red, never bless.
 ///
 /// # The three shapes that carry no `value` and are legitimate
 ///
@@ -772,7 +802,7 @@ fn require_recognized_cell_shape(
     col: &ColumnType,
     cell: &super::canonical_jsonl::CanonicalCell,
 ) -> Result<(), String> {
-    if !matches!(cell.value, CanonicalValue::Absent) {
+    if !carries_no_authoritative_value(&cell.value) {
         return Ok(());
     }
     if cell.deletion.is_some() {
@@ -792,18 +822,43 @@ fn require_recognized_cell_shape(
     }
     Err(format!(
         "{where_}: column '{}' (declared '{}') has a cell that is PRESENT but carries no \
-         `value`, and it is none of the shapes whose value lives elsewhere (a tombstone, a \
+         `value`{}, and it is none of the shapes whose value lives elsewhere (a tombstone, a \
          collection-shell deletion, or a set element whose value is its `path`). A Cassandra \
          NULL is the ABSENCE OF A CELL, not a present cell with no value, so the harness \
          REFUSES this golden instead of reading it as NULL: read as NULL it would AGREE with \
          an export that wrongly writes NULL, which is the silent NULL-coercion (AC1, #1485) \
          this oracle exists to catch",
-        col.name, col.declared
+        col.name,
+        col.declared,
+        match cell.value {
+            CanonicalValue::Null => " (it is spelled as an explicit JSON `null`)",
+            _ => "",
+        }
     ))
+}
+
+/// Does this cell value carry NO AUTHORITATIVE VALUE — in either of the two
+/// spellings the pipeline can produce?
+///
+/// The whole point of the predicate is that it is asked ONCE, of the STATE,
+/// rather than at each site of each spelling. `Absent` is a cell with no `value`
+/// key; `Null` is `"value": null`. Both mean "there is nothing here", and at a
+/// cell that is the one thing a golden may not say (see
+/// [`require_recognized_cell_shape`]).
+fn carries_no_authoritative_value(value: &CanonicalValue) -> bool {
+    matches!(value, CanonicalValue::Absent | CanonicalValue::Null)
 }
 
 /// Recursively fold an explicit JSON `null` into `Absent` — Arrow has only one
 /// null, and CQL does not distinguish the two.
+///
+/// The DECLARED-TYPE descent does not use this: it folds an absence at the
+/// position that owns it (`declared::Position::permits_absence`), and REFUSES
+/// one where CQL requires a value — a recursive fold applied in advance is
+/// exactly what let a nested `null` become an `Absent` nobody judged. This
+/// function survives for the ONE position with no declared type to descend
+/// through: a key column the case does not declare, whose case is failed by name
+/// immediately afterwards.
 pub(super) fn fold_null(v: CanonicalValue) -> CanonicalValue {
     match v {
         CanonicalValue::Null => CanonicalValue::Absent,

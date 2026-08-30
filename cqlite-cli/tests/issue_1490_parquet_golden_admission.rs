@@ -478,7 +478,11 @@ fn a_present_but_invalid_eligibility_field_is_refused_not_read_as_absent() {
 
 /// The declared columns the value-bearing cases use: an `int` partition key, a
 /// `text` scalar, a `frozen<map<text,text>>`, a `list<int>`, a `map<int,text>`
-/// and a `set<int>` — one per POSITION at which a cell's value is consumed.
+/// and a `set<int>` — one per POSITION at which a cell's value is consumed —
+/// plus the three positions at which a NESTED value sits: a `frozen<list<int>>`
+/// element, a `frozen<tuple<int,int>>` member and a `frozen<person>` UDT field.
+/// The last two are the only positions where CQL permits a null, so they are
+/// what keeps the null refusal from being "refuse every null".
 fn shape_columns() -> Vec<parquet_parity::cql_type::ColumnType> {
     [
         ("id", "int"),
@@ -487,9 +491,14 @@ fn shape_columns() -> Vec<parquet_parity::cql_type::ColumnType> {
         ("l", "list<int>"),
         ("m", "map<int,text>"),
         ("s", "set<int>"),
+        ("fl", "frozen<list<int>>"),
+        ("t", "frozen<tuple<int,int>>"),
+        ("p", "frozen<person>"),
     ]
     .iter()
-    .map(|(n, t)| parquet_parity::cql_type::parse_column(n, t, &[]).expect("declared type parses"))
+    .map(|(n, t)| {
+        parquet_parity::cql_type::parse_column(n, t, &["person"]).expect("declared type parses")
+    })
     .collect()
 }
 
@@ -720,4 +729,139 @@ fn a_golden_missing_a_value_and_an_export_null_can_no_longer_compare_equal() {
         err.contains("column 'v'") && err.contains("#1485"),
         "the refusal must name the column and the defect it prevents: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// "NO AUTHORITATIVE VALUE" IS ONE STATE WITH TWO SPELLINGS (#1490 round 15)
+//
+// Round 14 refused a present cell carrying no `value` KEY. The same defect is
+// reachable by a second spelling — `"value": null` — which the shared parser
+// renders as `CanonicalValue::Null` and `fold_null` then folds into the very
+// same `Absent`. So the refusal is now asked of the PROPERTY (does this position
+// carry an authoritative value?) and of the POSITION (may a value be absent
+// HERE?), not of the spelling: `golden_rows::carries_no_authoritative_value`
+// covers both cell spellings, and `declared::Position::permits_absence` decides
+// every nested position from a CLOSED set of three exceptions.
+//
+// The exceptions are CQL rules, not conveniences: a collection may not hold a
+// null element, a map may not hold a null key or value, and no primary-key or
+// collection-path component may be null — while a UDT field and a tuple member
+// legitimately may, and the committed corpus contains one
+// (`test_compactionparityudt/udt_frozen_person` dumps
+// `{"first_name":"Edsger","last_name":null,"age":75}`).
+// ---------------------------------------------------------------------------
+
+/// THE finding: at every position CQL requires to hold a value, an explicit
+/// `"value": null` is REFUSED — exactly like the missing-`value` spelling it
+/// used to slip past.
+#[test]
+fn an_explicit_null_is_refused_wherever_cql_requires_a_value() {
+    // (line, what the refusal must name, the phrase identifying WHICH refusal
+    // fired) — the cell-level check owns a cell's own `value`, the
+    // position-level check owns everything nested inside one.
+    #[rustfmt::skip]
+    let malformed: &[(&str, &str, &str)] = &[
+        // A scalar `text` cell — the top-level cell position.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"v","value":null}]}]}"#,
+         "v", "PRESENT but carries no `value`"),
+        // A FROZEN collection is one cell, and its whole value is that cell's.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"fm","value":null}]}]}"#,
+         "fm", "PRESENT but carries no `value`"),
+        // A non-frozen LIST element — a COLLECTION MEMBER, dumped as its own
+        // cell whose `value` is the element.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"l","path":["6ac52100-a251-11f0-a3fe-f1a551383fb9"],"value":null}]}]}"#,
+         "l", "PRESENT but carries no `value`"),
+        // A non-frozen MAP entry — the entry's VALUE half.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"m","path":["5"],"value":null}]}]}"#,
+         "m", "PRESENT but carries no `value`"),
+        // A FROZEN map's VALUE — a collection member NESTED inside one cell, so
+        // the cell-level check cannot see it and the POSITION decides.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"fm","value":{"a":null}}]}]}"#,
+         "fm", "CQL requires a value at this position"),
+        // A FROZEN list's ELEMENT, likewise nested.
+        (r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"fl","value":[1,null]}]}]}"#,
+         "fl", "CQL requires a value at this position"),
+        // A PRIMARY-KEY component: never null in Cassandra, so a null there is
+        // a malformed golden however harmless it looks.
+        (r#"{"partition":{"key":[null]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+         "id", "CQL requires a value at this position"),
+    ];
+    for (line, named, which) in malformed {
+        let err = project_shape_line(line).expect_err(
+            "an explicit `null` at a position CQL requires to hold a value must be REFUSED",
+        );
+        assert!(
+            err.contains(which),
+            "the refusal must be the one that owns this position ({which}), got: {err}"
+        );
+        assert!(
+            err.contains(&format!("'{named}'")),
+            "the refusal must name the column ('{named}'), got: {err}"
+        );
+        assert!(
+            err.contains("#1485"),
+            "the refusal must name the defect it prevents (AC1, #1485), got: {err}"
+        );
+    }
+}
+
+/// The CONTROLS for the refusal above: the positions where Cassandra
+/// LEGITIMATELY emits a null still project, and a genuinely ABSENT cell (a
+/// Cassandra NULL) is still `Absent`. Without these the refusal could be
+/// "refuse every null", which would red on the committed corpus — which does
+/// contain one (`udt_frozen_person` dumps `"last_name":null`).
+#[test]
+fn a_legitimate_nested_null_is_still_accepted_and_an_absent_cell_is_still_null() {
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+
+    // CONTROL 1 — a UDT FIELD: CQL permits a null field, and sstabledump writes
+    // it as an explicit `null` inside the UDT's one JSON object. This is the
+    // shape the real `test_compactionparityudt/udt_frozen_person` golden
+    // carries, verbatim.
+    let rows = project_shape_line(
+        r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"p","value":{"first_name":"Edsger","last_name":null,"age":75}}]}]}"#,
+    )
+    .expect("a UDT field's legitimate nested null must still project");
+    assert_eq!(
+        rows[0].cells.get("p"),
+        Some(&CanonicalValue::Tuple(vec![
+            (
+                "first_name".to_string(),
+                CanonicalValue::Text("Edsger".to_string())
+            ),
+            ("last_name".to_string(), CanonicalValue::Absent),
+            ("age".to_string(), CanonicalValue::Int(75)),
+        ])),
+        "a null UDT field must still fold to the one Arrow null"
+    );
+
+    // CONTROL 2 — a TUPLE MEMBER: CQL permits a null member, and sstabledump
+    // writes it positionally.
+    let rows = project_shape_line(
+        r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"t","value":[null,2]}]}]}"#,
+    )
+    .expect("a tuple member's legitimate null must still project");
+    assert_eq!(
+        rows[0].cells.get("t"),
+        Some(&CanonicalValue::List(vec![
+            CanonicalValue::Absent,
+            CanonicalValue::Int(2)
+        ])),
+        "a null tuple member must still fold to the one Arrow null"
+    );
+
+    // CONTROL 3 — a genuinely ABSENT cell is the Cassandra NULL and must still
+    // project as `Absent`: the refusal is about a cell that is THERE and carries
+    // nothing, never about a column with no cell.
+    let rows = project_shape_line(
+        r#"{"partition":{"key":["7"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+    )
+    .expect("a row whose other columns have NO cell must still project");
+    for null_column in ["fm", "l", "m", "s", "fl", "t", "p"] {
+        assert_eq!(
+            rows[0].cells.get(null_column),
+            Some(&CanonicalValue::Absent),
+            "a column with NO cell is a Cassandra NULL and must still project as Absent"
+        );
+    }
 }

@@ -76,8 +76,6 @@ use serde_json::value::RawValue;
 
 use super::golden_text::RawObject;
 
-use super::golden_rows::fold_null;
-
 /// WHERE a value sits. Two things depend on it: the diagnostic text, and
 /// whether Cassandra renders the value at that position as a STRING (see
 /// [`Position::is_stringified`]).
@@ -119,6 +117,50 @@ impl Position {
         matches!(
             self,
             Position::CollectionPath | Position::PrimaryKey | Position::FrozenMapObjectKey
+        )
+    }
+
+    /// May a value at this position legitimately be ABSENT — i.e. carry no
+    /// authoritative value at all, however the golden spells that (a missing
+    /// `value` key, which the shared parser renders as
+    /// [`CanonicalValue::Absent`], or an explicit JSON `null`, which it renders
+    /// as [`CanonicalValue::Null`])?
+    ///
+    /// This is the position half of ONE property: **a golden position that CQL
+    /// requires to hold a value must hold one, and "nothing here" is REFUSED
+    /// however it is spelled.** Enumerating spellings is what made the previous
+    /// version of this refusal incomplete — it rejected the missing-`value`
+    /// spelling and passed the explicit-`null` one, which then folded into
+    /// `Absent` and compared EQUAL to an export that wrongly wrote NULL (the
+    /// silent NULL-coercion of AC1, #1485). So the question is asked of the
+    /// POSITION, which is a closed set, rather than of the value's spelling,
+    /// which is not.
+    ///
+    /// `true` at exactly three positions, each because Cassandra legitimately
+    /// renders an absence there:
+    ///
+    ///   * [`Position::Cell`] — a Cassandra NULL **is** the absence of a cell,
+    ///     which `golden_rows::project_column` projects to `Absent` before this
+    ///     descent runs. Present-but-valueless is a DIFFERENT state and is
+    ///     refused one level up, by `golden_rows::require_recognized_cell_shape`,
+    ///     which still sees the cell and so can tell the two apart.
+    ///   * [`Position::UdtField`] — a frozen UDT with a null field is dumped as
+    ///     one JSON object carrying an explicit `null`
+    ///     (`{"first_name":"Edsger","last_name":null,…}` appears in the
+    ///     committed corpus), and CQL permits a null UDT field.
+    ///   * [`Position::TupleField`] — CQL permits a null tuple member, and
+    ///     sstabledump renders it as a positional `null`.
+    ///
+    /// `false` everywhere else, and each `false` is a CQL rule rather than a
+    /// convention: a collection may not contain a null element, a map may not
+    /// have a null key or a null value, and no primary-key or collection-path
+    /// component may be null. A `null` at one of those positions is a malformed
+    /// golden, and reading it as NULL is exactly how a malformed oracle blesses
+    /// a wrong export.
+    pub fn permits_absence(&self) -> bool {
+        matches!(
+            self,
+            Position::Cell | Position::UdtField(_) | Position::TupleField(_)
         )
     }
 
@@ -298,8 +340,12 @@ impl<'a> Declared<'a> {
 ///
 /// Five things happen here, in this order, and the order is load-bearing:
 ///
-///   1. an explicit JSON `null` folds into `Absent` (Arrow has one null, and CQL
-///      does not distinguish the two);
+///   1. a value that carries NO AUTHORITATIVE VALUE — an explicit JSON `null` or
+///      a missing `value`, the two spellings of the same absence — is REFUSED
+///      unless the POSITION legitimately permits one
+///      ([`require_authoritative_value`], [`Position::permits_absence`]); where
+///      it does, it folds into `Absent` (Arrow has one null, and CQL does not
+///      distinguish the two);
 ///   2. at a STRINGIFIED position ([`Position::is_stringified`]) the value's
 ///      TEXT is converted through the declared scalar type — this is the round-6
 ///      key-component conversion and the round-7 path conversion, now one
@@ -326,7 +372,7 @@ pub fn canonicalize_golden(
     raw: CanonicalValue,
     at: &Declared<'_>,
 ) -> Result<CanonicalValue, String> {
-    let value = fold_null(raw);
+    let value = require_authoritative_value(raw, at)?;
     let value = if at.position.is_stringified() {
         type_stringified_scalar(value, at)?
     } else {
@@ -425,6 +471,57 @@ pub fn canonicalize_golden(
         }
         (value, _) => type_scalar_golden(value, at),
     }
+}
+
+/// REFUSE a value that carries NO AUTHORITATIVE VALUE at a position CQL
+/// requires to hold one — whichever way the golden spells the absence.
+///
+/// THE PROPERTY, stated once: a present golden position must carry a value the
+/// harness authoritatively obtained. "Nothing here" has TWO spellings in this
+/// pipeline — a missing `value` key, which the shared parser renders as
+/// [`CanonicalValue::Absent`], and an explicit JSON `null`, which it renders as
+/// [`CanonicalValue::Null`] — and both are refused by ONE predicate, so a third
+/// spelling (a `Null` nested under a container the descent folds) is covered
+/// too. The previous version of this refusal blacklisted the missing-`value`
+/// spelling only; the explicit `null` walked past it, folded into `Absent`, and
+/// compared EQUAL to an export that wrongly wrote NULL — the silent
+/// NULL-coercion of AC1 (#1485), reported as parity.
+///
+/// WHERE an absence is legitimate is decided by [`Position::permits_absence`],
+/// a closed set of three positions, so this function never has to reason about
+/// how the absence was written.
+///
+/// Runs BEFORE any folding, because folding is what erases the difference
+/// between the two spellings. The fold it then applies is LOCAL to this position
+/// — a nested `Null` is left for its OWN position to judge, so the refusal names
+/// the spelling the golden actually used instead of the one an ancestor's
+/// recursive fold left behind.
+fn require_authoritative_value(
+    raw: CanonicalValue,
+    at: &Declared<'_>,
+) -> Result<CanonicalValue, String> {
+    let spelling = match &raw {
+        CanonicalValue::Null => Some("an explicit JSON `null`"),
+        CanonicalValue::Absent => Some("no value at all (a missing `value`)"),
+        _ => None,
+    };
+    let Some(spelling) = spelling else {
+        return Ok(raw);
+    };
+    if !at.position.permits_absence() {
+        return Err(at.refuse(&format!(
+            "the golden carries {spelling} here, but CQL requires a value at this position \
+             — a collection may not hold a null element, a map may not hold a null key or \
+             value, and no primary-key or collection-path component may be null. The harness \
+             REFUSES it instead of folding it into a NULL: folded, a malformed golden AGREES \
+             with an export that wrongly writes NULL, which is the silent NULL-coercion \
+             (AC1, #1485) this oracle exists to catch. A legitimate nested null lives at a \
+             UDT field or a tuple member, and is accepted there"
+        )));
+    }
+    // Arrow has ONE null and CQL does not distinguish the two spellings, so
+    // where an absence is legitimate both land on `Absent`.
+    Ok(CanonicalValue::Absent)
 }
 
 fn recurse_seq(
