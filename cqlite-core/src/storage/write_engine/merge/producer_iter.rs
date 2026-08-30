@@ -98,8 +98,9 @@ pub(super) enum RunState {
 /// The bounded window plus the bounded channel together make end-to-end peak
 /// memory independent of total input size: a source's decompressed content is
 /// never fully resident. Peak is roughly `max_partition_size + one_chunk +
-/// egress_batch::max_inflight_rows` per source (issue #827; 1024 rows at the
-/// default budget since #2820, up from the flat 256).
+/// egress_batch::max_inflight_rows` per source (issue #827; `4 × rows_cap` since
+/// #2820 — 1024 at the default, 32 at the throttled floor — and additionally
+/// bounded in BYTES by `egress_batch::BATCH_EMIT_BYTES_MERGE` per batch).
 ///
 /// ## Issue #591 safety (mmap vs file deletion)
 ///
@@ -362,8 +363,8 @@ impl SSTableRowIteratorAdapter {
     /// it through the bounded channel, BATCHED since issue #2820 (issue #827). The
     /// blocking `SyncSender::send` provides the backpressure that — together
     /// with the reader's sliding-window stitch+parse — keeps peak memory bounded
-    /// by `max_partition_size + one_chunk + egress_batch::max_inflight_rows`,
-    /// independent of the total source size.
+    /// by `max_partition_size + one_chunk + egress_batch::max_inflight_rows`
+    /// (and `egress_batch::max_inflight_bytes`), independent of total source size.
     ///
     /// Sends EXACTLY ONE terminal [`MergeMsg`] on EVERY exit path (issue #3120) —
     /// `Done` on a completed walk, `Failed` on an error return, `Failed(Panicked)`

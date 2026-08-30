@@ -30,6 +30,26 @@ fn entry(n: i64) -> MergeEntry {
     )
 }
 
+/// A row carrying `payload` bytes of blob, the shape the `#827` merge memory
+/// fixture writes (48 KiB per row) — the case a ROW-count bound cannot bound.
+fn fat_entry(n: i64, payload: usize) -> MergeEntry {
+    use crate::storage::write_engine::merge::model::CellData;
+    use crate::types::Value;
+    MergeEntry::new(
+        0,
+        DecoratedKey::new(n, n.to_be_bytes().to_vec()),
+        None,
+        100 + n,
+        RowData::Live {
+            cells: vec![CellData::new(
+                "payload".to_string(),
+                Value::Blob(vec![0x5a; payload].into()),
+                100 + n,
+            )],
+        },
+    )
+}
+
 /// The row budget stays 256 and stays a ROW budget (issue #2820 design item 1).
 ///
 /// Moved verbatim in intent from `merge/mod.rs::streaming_tests`: it checks only
@@ -95,26 +115,100 @@ fn a_row_budget_converts_to_a_message_capacity_that_holds_about_that_many_rows()
 
 /// The exported resident-rows bound (issue #2820 design item 3), mirroring
 /// `scan_stream_windowed::MAX_INFLIGHT_BATCH_ROWS`: channel-resident + consumer-held
-/// + producer-blocked-in-send, each up to one full batch.
+/// + producer-blocked-in-send, each up to one batch ceiling.
 #[test]
 fn the_resident_rows_bound_is_channel_plus_two_batches() {
-    let msg_cap = message_capacity_for_rows(super::super::STREAMING_CHANNEL_CAPACITY);
+    const DEFAULT: usize = super::super::STREAMING_CHANNEL_CAPACITY;
+    let msg_cap = message_capacity_for_rows(DEFAULT);
     assert_eq!(msg_cap, 2, "default row budget -> 2 messages");
+    assert_eq!(batch_limit_ceiling(DEFAULT), BATCH_EMIT_ROWS_MERGE);
     assert_eq!(
-        max_inflight_rows(msg_cap),
-        (msg_cap + 2) * BATCH_EMIT_ROWS_MERGE
+        max_inflight_rows(DEFAULT),
+        (msg_cap + 2) * batch_limit_ceiling(DEFAULT)
     );
-    // The worked example of record: 1024 rows = 4x the pre-#2820 flat 256.
-    assert_eq!(max_inflight_rows(msg_cap), 1024);
-    assert_eq!(
-        max_inflight_rows(msg_cap),
-        4 * super::super::STREAMING_CHANNEL_CAPACITY
+    // The worked example of record: 1024 rows = 4x the pre-#2820 flat 256, and
+    // unchanged by the ceiling fix AT THE DEFAULT.
+    assert_eq!(max_inflight_rows(DEFAULT), 1024);
+    assert_eq!(max_inflight_rows(DEFAULT), 4 * DEFAULT);
+    // The GAUGE's ceiling is the channel-resident half only — strictly below the
+    // in-flight bound by the consumer-held + producer-parked batches. Documenting
+    // the gauge with the wrong one of the two overstates it 2x.
+    assert_eq!(rows_resident_in_channel(DEFAULT), msg_cap * BATCH_EMIT_ROWS_MERGE);
+    assert_eq!(rows_resident_in_channel(DEFAULT), 2 * DEFAULT);
+    assert!(rows_resident_in_channel(DEFAULT) < max_inflight_rows(DEFAULT));
+}
+
+/// THE regression this round exists for (issue #2820 review round 2, roborev job
+/// 215): the resident-row bounds must SHRINK as `egress_budget`'s adaptive
+/// per-channel row capacity shrinks.
+///
+/// Keyed on capacities the PRODUCTION budget can actually return
+/// (`egress_budget::capacity_for(active_merges)`), never on a synthetic `msg_cap`
+/// sweep. That distinction IS the defect: `message_capacity_for_rows` floors at
+/// `MIN_MSG_CAP = 2` for every value in the reachable range `[MIN_CAP, MAX_CAP]`
+/// (because `div_ceil(BATCH_EMIT_ROWS_MERGE)` is 1 there), so the previous
+/// version of this pin — `for msg in 2..8` — asserted monotonicity over five
+/// message capacities of which FOUR are unreachable in production. It read as
+/// covering the shrunken-budget case while proving nothing about it, and the
+/// bound it was guarding was in fact a CONSTANT 1024 at every real setting.
+#[test]
+fn resident_bounds_shrink_as_the_adaptive_row_capacity_shrinks() {
+    use super::super::egress_budget;
+
+    // Reachable capacities, taken from the production budget function itself.
+    let caps: Vec<usize> = [1usize, 2, 4, 8, 16, 64, 256, 4096]
+        .iter()
+        .map(|&active| egress_budget::capacity_for(active))
+        .collect();
+    let solo = caps[0];
+    let squeezed = *caps.last().expect("non-empty");
+    assert_eq!(solo, super::super::STREAMING_CHANNEL_CAPACITY);
+    assert!(
+        squeezed < solo,
+        "premise: the budget must actually shrink under concurrency \
+         (solo={solo}, squeezed={squeezed}) — otherwise this test is vacuous"
     );
-    // Monotone in the message capacity, so a shrunken adaptive budget can only
-    // lower the bound (never raise it).
-    for msg in 2..8 {
-        assert!(max_inflight_rows(msg) < max_inflight_rows(msg + 1));
+
+    // Every bound is a fixed MULTIPLE of the row capacity over this whole range:
+    // 2x resident-in-channel, 4x in-flight. NOT a constant.
+    for &rows_cap in &caps {
+        assert_eq!(
+            message_capacity_for_rows(rows_cap),
+            MIN_MSG_CAP,
+            "the premise of the defect: msg_cap is floored for every reachable \
+             rows_cap ({rows_cap}), so the batch CEILING is what must scale"
+        );
+        assert_eq!(batch_limit_ceiling(rows_cap), rows_cap);
+        assert_eq!(rows_resident_in_channel(rows_cap), 2 * rows_cap);
+        assert_eq!(
+            max_inflight_rows(rows_cap),
+            4 * rows_cap,
+            "in-flight rows must be 4x the ADAPTIVE capacity at every setting — a \
+             constant here means egress_channel_capacity_for has no effect on \
+             resident memory (rows_cap={rows_cap})"
+        );
     }
+
+    // And strictly monotone across the reachable range, in the direction that
+    // matters: a smaller budget can only LOWER the bound.
+    let mut sorted = caps.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    for pair in sorted.windows(2) {
+        assert!(
+            max_inflight_rows(pair[0]) < max_inflight_rows(pair[1]),
+            "in-flight bound must rise with the row capacity ({} -> {})",
+            pair[0],
+            pair[1]
+        );
+        assert!(rows_resident_in_channel(pair[0]) < rows_resident_in_channel(pair[1]));
+    }
+
+    // The worked numbers of record at the floor: 8 rows/channel -> 32 in flight,
+    // NOT the 1024 a capacity-independent ceiling produced (a 128x regression).
+    assert_eq!(egress_budget::min_cap(), 8, "premise: the shipped floor");
+    assert_eq!(max_inflight_rows(8), 32);
+    assert_eq!(rows_resident_in_channel(8), 16);
 }
 
 /// The ramp (issue #2820 design item 7): the first flush is one row, the limit
@@ -123,10 +217,12 @@ fn the_resident_rows_bound_is_channel_plus_two_batches() {
 /// which is why `rows_in_full_channel` exists alongside `max_inflight_rows`.
 #[test]
 fn the_ramp_doubles_from_one_row_and_saturates() {
+    const DEFAULT: usize = super::super::STREAMING_CHANNEL_CAPACITY;
+    let ceiling = batch_limit_ceiling(DEFAULT);
     let mut limit = FIRST_BATCH_EMIT_ROWS;
     let mut seen = vec![limit];
     for _ in 0..12 {
-        limit = next_batch_limit(limit);
+        limit = next_batch_limit(limit, ceiling);
         seen.push(limit);
     }
     assert_eq!(&seen[..5], &[1, 2, 4, 8, 16]);
@@ -135,20 +231,36 @@ fn the_ramp_doubles_from_one_row_and_saturates() {
         BATCH_EMIT_ROWS_MERGE,
         "the ramp must saturate at the full batch size, never grow past it"
     );
+    // A THROTTLED run's ramp saturates at its own row capacity, not at the global
+    // constant — the ceiling fix of review round 2.
+    let mut low = FIRST_BATCH_EMIT_ROWS;
+    for _ in 0..12 {
+        low = next_batch_limit(low, batch_limit_ceiling(8));
+    }
+    assert_eq!(low, 8, "a rows_cap=8 run must never assemble a 256-row batch");
 
+    // Cold-start CHANNEL fill (the default channel is 2 messages, so 1 + 2).
+    assert_eq!(rows_in_full_channel(DEFAULT), 3, "ramp 1 + 2 over 2 slots");
     assert_eq!(
-        rows_in_full_channel(2),
-        3,
-        "1 + 2 rows for a 2-message channel"
+        rows_in_full_channel(BATCH_EMIT_ROWS_MERGE * 4),
+        15,
+        "1 + 2 + 4 + 8 over a 4-message channel"
     );
-    assert_eq!(rows_in_full_channel(4), 15, "1 + 2 + 4 + 8");
-    // Strictly below the saturated bound for every capacity: a fixture that
-    // derived "the producer is blocked" from `max_inflight_rows` would wait for
-    // rows that, from a cold start, can never be sent.
-    for msg in 2..10 {
+    // Strictly below the saturated bound for every reachable capacity: a fixture
+    // that derived "the producer is blocked" from `max_inflight_rows` would wait
+    // for rows that, from a cold start, can never be sent.
+    for rows_cap in [8usize, 16, 64, 128, 256] {
         assert!(
-            rows_in_full_channel(msg) < max_inflight_rows(msg),
-            "cold-start fill must be below the saturated bound at msg_cap {msg}"
+            rows_in_full_channel(rows_cap) < max_inflight_rows(rows_cap),
+            "cold-start fill must be below the saturated bound at rows_cap {rows_cap}"
+        );
+        // And the PARKING threshold adds the batch the producer still owns — the
+        // term every backpressure fixture writes by hand, now derivable.
+        let probe = merge_egress_batch_probe();
+        assert_eq!(
+            probe.rows_that_park_the_producer(rows_cap),
+            rows_in_full_channel(rows_cap) + batch_limit_ceiling(rows_cap) + 1,
+            "the parking threshold is the channel fill PLUS one in-flight batch"
         );
     }
 }
@@ -165,7 +277,7 @@ fn expected_messages_matches_the_real_batcher() {
         // batcher on ONE thread, so a full channel would deadlock).
         let (tx, rx) = std::sync::mpsc::sync_channel(rows + 4);
         let local_sent = AtomicI64::new(0);
-        let mut batcher = EgressBatcher::new(&tx, &local_sent);
+        let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
         for n in 0..rows {
             assert!(
                 matches!(batcher.push(entry(n as i64)), ControlFlow::Continue(())),
@@ -226,7 +338,7 @@ fn expected_messages_matches_the_real_batcher() {
 fn a_sub_batch_result_set_emits_its_first_row_immediately_and_loses_none() {
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     let local_sent = AtomicI64::new(0);
-    let mut batcher = EgressBatcher::new(&tx, &local_sent);
+    let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
 
     // ONE row pushed, and it is already on the channel: first-row latency is not
     // gated on a full batch.
@@ -263,7 +375,7 @@ fn a_sub_batch_result_set_emits_its_first_row_immediately_and_loses_none() {
 fn a_dropped_consumer_breaks_the_walk() {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let local_sent = AtomicI64::new(0);
-    let mut batcher = EgressBatcher::new(&tx, &local_sent);
+    let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
     drop(rx);
     assert!(
         matches!(batcher.push(entry(0)), ControlFlow::Break(())),
@@ -285,7 +397,7 @@ fn the_probe_counts_messages_entries_and_the_peak_batch() {
     const ROWS: usize = 600;
     let (tx, rx) = std::sync::mpsc::sync_channel(ROWS);
     let local_sent = AtomicI64::new(0);
-    let mut batcher = EgressBatcher::new(&tx, &local_sent);
+    let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
     for n in 0..ROWS {
         let _ = batcher.push(entry(n as i64));
     }
@@ -323,5 +435,138 @@ fn the_probe_counts_messages_entries_and_the_peak_batch() {
         after.peak_batch_rows <= BATCH_EMIT_ROWS_MERGE,
         "no batch may exceed the cap (peak={})",
         after.peak_batch_rows
+    );
+}
+
+/// THE byte bound (issue #2820 review round 2, BLOCKER 2): a ROW count is not a
+/// memory bound, so the accumulator flushes on the BYTE budget when rows are
+/// large — and this pin RUNS in a normal lane (`--lite`'s scoped tests, the
+/// gate's `write-tests`), unlike the `dhat-heap`-gated `#827` fixture, which no
+/// gate component executes.
+///
+/// The property is stated in the direction that fails on a regression: with
+/// 48 KiB rows (the `#827` fixture's shape) the byte budget must trip FIRST, so
+/// no batch may reach the 256-row ceiling and the per-batch payload stays near
+/// `BATCH_EMIT_BYTES_MERGE` instead of `256 × 48 KiB ≈ 12 MiB`.
+#[test]
+fn the_byte_budget_flushes_large_rows_long_before_the_row_ceiling() {
+    const PAYLOAD: usize = 48 * 1024;
+    const ROWS: usize = 200;
+    let probe = merge_egress_batch_probe();
+    assert_eq!(probe.batch_emit_bytes, BATCH_EMIT_BYTES_MERGE);
+
+    // The row bound ALONE would allow this many 48 KiB rows per batch.
+    let rows_per_batch_if_row_bounded = batch_limit_ceiling(super::super::STREAMING_CHANNEL_CAPACITY);
+    assert_eq!(rows_per_batch_if_row_bounded, 256);
+
+    let (tx, rx) = std::sync::mpsc::sync_channel(ROWS + 4);
+    let local_sent = AtomicI64::new(0);
+    let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
+    for n in 0..ROWS {
+        assert!(matches!(
+            batcher.push(fat_entry(n as i64, PAYLOAD)),
+            ControlFlow::Continue(())
+        ));
+    }
+    let _ = batcher.flush();
+    drop(tx);
+
+    let mut biggest_rows = 0usize;
+    let mut biggest_bytes = 0usize;
+    let mut total_rows = 0usize;
+    let mut messages = 0usize;
+    while let Ok(msg) = rx.recv() {
+        let MergeMsg::Batch(batch) = msg else {
+            panic!("the batcher sends only DATA batches");
+        };
+        let bytes: usize = batch.iter().map(super::super::RunReader::estimate_entry_size).sum();
+        biggest_rows = biggest_rows.max(batch.len());
+        biggest_bytes = biggest_bytes.max(bytes);
+        total_rows += batch.len();
+        messages += 1;
+    }
+
+    assert_eq!(total_rows, ROWS, "no row may be dropped by the byte flush");
+    assert!(
+        biggest_rows < rows_per_batch_if_row_bounded,
+        "the BYTE budget must trip first for {PAYLOAD}-byte rows: biggest batch \
+         {biggest_rows} rows vs the row ceiling {rows_per_batch_if_row_bounded}"
+    );
+    // The honest bound: the threshold is checked AFTER the push, so a batch may
+    // reach the budget plus ONE entry — never a multiple of it.
+    let one_row = super::super::RunReader::estimate_entry_size(&fat_entry(0, PAYLOAD));
+    assert!(
+        biggest_bytes <= BATCH_EMIT_BYTES_MERGE + one_row,
+        "a batch ({biggest_bytes} B) may exceed the budget by at most one row \
+         ({one_row} B), never by a multiple"
+    );
+    // Non-vacuity: the run really did produce multi-row batches (a per-row send
+    // would satisfy every bound above while losing the whole optimisation).
+    assert!(
+        messages < ROWS,
+        "the byte bound must still BATCH: {messages} messages for {ROWS} rows"
+    );
+    assert!(
+        biggest_rows > 1,
+        "some batch must carry more than one 48 KiB row (biggest={biggest_rows})"
+    );
+    // And the sizing statement the module doc makes: in-flight BYTES, not rows,
+    // are what bound memory for this shape.
+    let in_flight = probe.max_inflight_bytes(super::super::STREAMING_CHANNEL_CAPACITY, one_row);
+    assert!(
+        in_flight < 8 * 1024 * 1024,
+        "per-source in-flight bytes must stay a low-single-digit-MB term \
+         (got {in_flight}); the row bound alone would allow \
+         {} B",
+        max_inflight_rows(super::super::STREAMING_CHANNEL_CAPACITY) * one_row
+    );
+    assert!(
+        max_inflight_rows(super::super::STREAMING_CHANNEL_CAPACITY) * one_row > 32 * 1024 * 1024,
+        "premise: the ROW bound alone really is tens of MB per source for this \
+         row size — otherwise this test proves nothing"
+    );
+}
+
+/// A THROTTLED run assembles smaller batches, end to end through the real
+/// accumulator (issue #2820 review round 2): the `rows_cap` the constructor takes
+/// must actually bound the batch, not merely be recorded.
+#[test]
+fn a_throttled_row_capacity_caps_the_real_batch_size() {
+    const ROWS_CAP: usize = 8;
+    const ROWS: usize = 200;
+    let (tx, rx) = std::sync::mpsc::sync_channel(ROWS + 4);
+    let local_sent = AtomicI64::new(0);
+    let mut batcher = EgressBatcher::new(&tx, &local_sent, ROWS_CAP);
+    for n in 0..ROWS {
+        let _ = batcher.push(entry(n as i64));
+    }
+    let _ = batcher.flush();
+    drop(tx);
+
+    let mut biggest = 0usize;
+    let mut total = 0usize;
+    let mut tokens = Vec::new();
+    while let Ok(MergeMsg::Batch(batch)) = rx.recv() {
+        biggest = biggest.max(batch.len());
+        total += batch.len();
+        tokens.extend(batch.iter().map(|e| e.key.token));
+    }
+    assert_eq!(total, ROWS, "throttling must not drop rows");
+    assert_eq!(
+        tokens,
+        (0..ROWS as i64).collect::<Vec<_>>(),
+        "throttling must not reorder rows"
+    );
+    assert_eq!(
+        biggest, ROWS_CAP,
+        "a rows_cap={ROWS_CAP} run must saturate at {ROWS_CAP}-row batches, not at \
+         BATCH_EMIT_ROWS_MERGE ({BATCH_EMIT_ROWS_MERGE}) — that constant ceiling IS \
+         the defect roborev job 215 found"
+    );
+    let probe = merge_egress_batch_probe();
+    assert_eq!(
+        probe.expected_messages_at(ROWS_CAP, ROWS as u64),
+        ROWS as u64 / ROWS_CAP as u64 + 3,
+        "the ramp at a throttled ceiling: 1+2+4 then 8s (oracle sanity)"
     );
 }

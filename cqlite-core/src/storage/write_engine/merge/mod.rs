@@ -41,8 +41,9 @@
 //! valve. Its ROW budget is [`STREAMING_CHANNEL_CAPACITY`], adaptively reduced
 //! under concurrent merges (see [`egress_budget`]); since issue #2820 the channel
 //! carries BATCHES, so that budget is converted to a message capacity and the
-//! resident-rows worst case per source is `egress_batch::max_inflight_rows` (1024
-//! rows at the default budget) — see [`egress_batch`].
+//! resident-rows worst case per source is `egress_batch::max_inflight_rows` =
+//! `4 × rows_cap` (1024 at the default, 32 at the throttled floor — bounded BY
+//! the row capacity, plus a byte budget) — see [`egress_batch`].
 //!
 //! The producer thread streams its source via
 //! [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
@@ -486,8 +487,9 @@ mod producer_msg;
 /// Issue #2820: this stays a ROW budget and stays 256 — every `egress_budget`
 /// name, doc and test speaks in rows. It is NOT the `sync_channel` argument any
 /// more: the channel carries BATCHES, so the argument is
-/// `egress_batch::message_capacity_for_rows(this)` and the resident-rows worst
-/// case is `egress_batch::max_inflight_rows` of that.
+/// `egress_batch::message_capacity_for_rows(this)`, the per-batch ceiling is
+/// `egress_batch::batch_limit_ceiling(this)` and the resident-rows worst case is
+/// `egress_batch::max_inflight_rows(this)` = `4 × this`.
 #[cfg(feature = "write-support")]
 const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
