@@ -579,7 +579,7 @@ are cited instead of line numbers because line numbers drift.
 | `list<T>` | `list` (`list_to_py`) | `Array` (`list_to_array`) | positional; order preserved on both sides; no dedupe | **symmetric** |
 | `set<scalar>` | `frozenset` (`set_to_py`, non-UDT branch; elements go through `value_to_hashable_key`) | `Set` (`set_to_js_set`, `new Set(array)`) | Python: hash/`__eq__` value-equality. Node: SameValueZero — for scalars this is also value-equality | container type differs; **element identity agrees** for scalars. Iteration order differs: `frozenset` is hash-ordered, JS `Set` is insertion-ordered — canonicalize by sorting |
 | `set<frozen<udt>>` | `list` — **fallback**, because UDTs become `dict`s and `dict` is unhashable (`set_to_py` takes this branch when `contains_udt` is true for any element) | `Set` of objects (`set_to_js_set`; no UDT fallback exists on the Node side) | Python: none — a `list` does not dedupe. Node: SameValueZero on **objects = reference identity**, so structurally-equal UDT elements are *not* deduped either | **asymmetric container**: Python degrades to `list`, Node keeps `Set`. Both are effectively order-preserving and non-deduping, so a set-of-UDT round-trips as a sequence on both sides. **Consequence for canonicalization:** because the Python side is a plain `list`, it cannot be sorted without also reordering genuine `list<T>` values, so this row's canonical form is **order-sensitive** — two structurally-equal UDT sets in different orders compare unequal (instance **b-1** in the canonicalization section below) |
-| `map<k,v>` | `dict` (`map_to_py`); keys are the **hashable projection** `value_to_hashable_key` (arms: `list`→`tuple`, `map`→tuple of pairs, `udt`→`frozenset` of `(name, value)` pairs incl. `_type`/`_keyspace` sorted by field name, `frozen`→recurse; `set`/`tuple` have **no arm** and fall through to `value_to_py`, which still yields a hashable `frozenset`/`tuple` unless a UDT is nested — see #3500), values are the ordinary `value_to_py` | `Map` (`map_to_js_map`, `new Map(entries)`); **both** key and value use the ordinary `value_to_napi` | Python: keys collapse by hash/`__eq__` — writing an equal key overwrites, last-value-wins. Node: keys collapse by SameValueZero, so scalar keys collapse but **object keys (UDT / list / tuple keys) are compared by reference and never collapse** | **two asymmetries.** (1) *dict-key collapse*: structurally-equal non-scalar keys collapse in Python and survive as distinct entries on Node. (2) *key shape*: a Python map **key** is a hashable projection (a UDT key is a `frozenset` of pairs), while the same UDT as a map **value** is a `dict` — on Node a key and a value of the same CQL type have the same host shape |
+| `map<k,v>` | `dict` (`map_to_py`); keys are the **hashable projection** `value_to_hashable_key` (TOTAL and exhaustive over `Value` since #3500 — `list`/`tuple`→`tuple`, `set`→`frozenset`, `map`→tuple of pairs, `udt`→`frozenset` of `(name, value)` pairs incl. `_type`/`_keyspace` in schema order, `json`→`tuple`/`frozenset`, `frozen`→recurse, every scalar→`value_to_py`; there is no `_ =>` arm and no fall-through, pinned by `#[deny(clippy::wildcard_enum_match_arm)]`), values are the ordinary `value_to_py` | `Map` (`map_to_js_map`, `new Map(entries)`); **both** key and value use the ordinary `value_to_napi` | Python: keys collapse by hash/`__eq__` — writing an equal key overwrites, last-value-wins. Node: keys collapse by SameValueZero, so scalar keys collapse but **object keys (UDT / list / tuple keys) are compared by reference and never collapse** | **two asymmetries.** (1) *dict-key collapse*: structurally-equal non-scalar keys collapse in Python and survive as distinct entries on Node. (2) *key shape*: a Python map **key** is a hashable projection (a UDT key is a `frozenset` of pairs), while the same UDT as a map **value** is a `dict` — on Node a key and a value of the same CQL type have the same host shape |
 | `tuple<...>` | `tuple` (`tuple_to_py`) | `Array` (`list_to_array` — the `Value::Tuple` arm delegates to the list converter) | positional on both sides | **asymmetric discriminability**: Node **cannot distinguish `tuple<...>` from `list<T>`** — both are plain `Array`s. Python can (`tuple` vs `list`). Any comparison must therefore treat tuple and list as the same canonical shape |
 | `frozen<T>` | unwrapped to the inner type's mapping | unwrapped to the inner type's mapping (`Value::Frozen(inner) => value_to_napi(ctx, inner)`) | as the inner type | **symmetric** — `frozen` is transparent on both sides |
 | `udt` | `dict` with `_type` + `_keyspace` metadata keys (`udt_to_py`) | object with `_type` + `_keyspace` properties (`udt_to_object`) | Python `dict`: keys collapse by value. Node object: string property keys | symmetric in shape; relevant here because it is what makes `set<frozen<udt>>` and UDT map keys behave as they do |
@@ -807,17 +807,46 @@ This is exactly the shared-error blind spot `CLAUDE.md` describes for symmetric 
 the oracle has to be the *other* implementation's bytes, never the same family's output — and for
 `_type` the CLI is inside the same family. The correction is recorded on **#3504**.
 
-**Some nested shapes RAISE rather than diverge (issue #3500).** `contains_udt` and
-`value_to_hashable_key` are **not total over `Value`**: `contains_udt` recurses only through
-`Frozen`, and `value_to_hashable_key` has arms for `List`/`Map`/`Frozen`/`Udt` but **none for
-`Tuple` or `Set`** (both fall through to `value_to_py`). So for shapes such as
-`set<frozen<tuple<frozen<udt>, int>>>` and `set<frozen<set<frozen<udt>>>>`, `set_to_py` commits to
-the `frozenset` path — `contains_udt` never sees the nested UDT — and the fall-through then yields
-an unhashable `dict`/`list`, raising `TypeError: unhashable type` **inside the binding, before any
-normalizer runs**. That is a production `value.rs` defect, tracked separately as **#3500** (#3497
-is shape-only), and fixing it is out of scope for #1454, which forbids `value.rs` edits.
-Consequence for #1455: a harness hitting one of these gets an **exception, not a mismatch**, and
-must not record it as a parity failure — it is an unsupported-shape error to be reported as such.
+**Nested UDT shapes no longer RAISE — FIXED in #3500.** `contains_udt` and
+`value_to_hashable_key` (`bindings/python/src/value.rs`) are now **total and exhaustive over
+`Value`**: neither has a `_ =>` arm, so a future `Value` variant is a COMPILE error in both rather
+than a runtime `TypeError` on somebody's data. `contains_udt` traverses the whole subtree
+(`List`/`Set`/`Tuple` elements, BOTH sides of a `Map`, through `Frozen`), and
+`value_to_hashable_key` has recursive arms for `Tuple`, `Set`, `Map`, `Frozen`, `Udt` and `Json`.
+The exhaustiveness is pinned mechanically by `#[deny(clippy::wildcard_enum_match_arm)]` on both
+functions (clippy runs `-D warnings` in the gate).
+
+What changed observably:
+
+| CQL shape | Before #3500 | After #3500 |
+|---|---|---|
+| `set<frozen<tuple<frozen<udt>, int>>>` | `TypeError: unhashable type: 'dict'` | Python `list` of `tuple`s, each `(udt-dict, int)` |
+| `set<frozen<set<frozen<udt>>>>` | `TypeError: unhashable type: 'list'` | Python `list` of `list`s of UDT `dict`s |
+| `set<frozen<list<frozen<udt>>>>` | `frozenset` of `tuple`s of projected-UDT `frozenset`s | Python `list` of `list`s of UDT `dict`s |
+| `map<frozen<udt>, v>` **frozen** map, UDT key | `frozenset` of `(name, value)` pairs | unchanged — still the projection (LIMITATION a-1) |
+
+The third row is a **DELIBERATE SHAPE CHANGE** (#3500 AC1 over AC5), not a regression. `contains_udt`
+now sees the UDT under the inner `list`, so `set_to_py` takes its `list` branch for the whole
+column, and the UDT is projected by `value_to_py` as an ordinary `dict`. That REMOVES the
+nesting-dependent asymmetry that was the defect's own tell — the same UDT no longer had one host
+shape at depth 1 (`dict`) and another at depth 2 (a projected `frozenset`). It **narrows #3497
+without closing it**: a UDT reached through a genuinely hashable position (a `map` KEY, or a set
+element with no UDT anywhere else in it) is still projected and still differs in kind from what Node
+and the CLI render, so schema-aware normalization remains the fix for the residue.
+
+**The remaining gap is MULTICELL map keys only, filed as #3612.** A non-frozen (multicell)
+`map<K, V>` carries each key in the cell PATH, and `parse_cell_path_key`
+(`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs`) decodes cell-path
+keys from a **scalar-only allowlist** (text/ascii/varchar, uuid/timeuuid, int, bigint/counter, date,
+timestamp) with a `_ => Value::Blob` fallback. So a COMPOSITE multicell map key — a `frozen<udt>`,
+`frozen<tuple<…>>` or nested collection — arrives as an opaque `Blob`, i.e. the Python side never
+sees a structured key to project at all. This is a **core decode** gap, not a binding gap, and it is
+upstream of everything in this section. A **frozen** map is unaffected: its keys are decoded
+structurally by the frozen-collection path and reach `value_to_hashable_key` normally.
+
+Consequence for #1455: a harness no longer gets an exception for these shapes, so there is no
+unsupported-shape error to special-case. It compares them like any other row, against the
+after-column above.
 
 Benign non-instance, recorded so it is not mistaken for a gap: `tuple<...>` vs `list<T>` collide
 in the host shape on the Node side, but the canonical form merges them **by design**, so nothing
@@ -827,8 +856,9 @@ The executable half of this contract is `normalize_python_value` **and its compa
 `values_equal`** in `bindings/python/tests/test_cli_parity.py` (issue #319) — see
 `TestCollectionIdentityContract` there, which asserts the normalized shape of every row of the
 table above **and** pins each known instance, so none can be mistaken for a solved case. The
-crash cases of #3500 are deliberately not pinned there: they raise inside the binding, so the
-normalizer never sees them.
+former crash cases of #3500 ARE now pinned, in `bindings/python/tests/test_nested_udt_hashable.py`,
+against the real SSTable fixture — end-to-end through the binding, which is where the defect lived
+and where a pure normalizer test could never observe it.
 
 **Temporal Type Precision Notes (Issue #299)**:
 
