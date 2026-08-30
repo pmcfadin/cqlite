@@ -123,7 +123,9 @@
 #     more matching.
 #   * anything measured: no `perf`, no Flight server, no rep loop, no 2.8 GB corpus.
 #
-# Hermetic: python3, a few KB under `$TMPDIR`. No sudo, cargo, perf, taskset, network, root, and no
+# Hermetic: python3, a few KB under `$TMPDIR`, and `PYTHONDONTWRITEBYTECODE=1` so importing the
+# shipped modules writes no `__pycache__` into the checkout. No sudo, cargo, perf, taskset,
+# network, root, and no
 # invocation of the driver itself (this file never runs it — it reads it).
 set -uo pipefail
 
@@ -161,6 +163,12 @@ source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 # `/step-output.txt`), a privileged runner writes persistent artifacts at the filesystem root, and
 # `cleanup` then `rm -rf`s a path built the same way. Non-empty AND an existing directory, checked
 # BEFORE `trap`, is the whole fix.
+# NO BYTECODE INTO THE CHECKOUT (#3451 post-rebase round 8, F2). Importing the shipped modules
+# from `scripts/tests` and `scripts/perf` writes `__pycache__/` there, so the header's "a few KB
+# under $TMPDIR" was FALSE — gitignored, so nothing reached git, but the claim was still wrong,
+# and an overclaiming header is the class we just deleted an eval-safety paragraph for.
+export PYTHONDONTWRITEBYTECODE=1
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/ws0-embedded-steps.XXXXXX")" || TMP=""
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   echo "FAIL - could not create a scratch directory under ${TMPDIR:-/tmp}; refusing to run, because"
@@ -904,6 +912,44 @@ if [ "$skip_rc" -eq 0 ] && [ "$skip_ok" -eq 1 ]; then
   pass "census CONTROL fired (allowlisted skip): env, command and a mid-line comment are FINDINGS while every allowlisted command stays clean — skipping by membership, so the next unanticipated spelling cannot grant itself a skip by lacking a signal"
 else
   fail "census CONTROL did not fire (allowlisted skip): fixture-rc=$skip_rc problems:$skip_detail"
+fi
+
+# --- CONTROL 1k-bis: a MID-LINE comment ends at its newline (the DISCRIMINATING shape) ----------
+# Round 6 recognised a comment only at the first non-blank of a line, and round 7's control for it
+# COULD NOT TELL: `x=1 # comment \` produced a finding because `#` is not on the command
+# allowlist, not because the comment was respected — the joiner had still merged the lines. The
+# check passed and the property never held.
+#
+# So the case that discriminates puts an ALLOWLISTED command before the comment. With comments
+# handled, `grep foo file # note \` + `$PY -c 'bad'` is a finding because the joiner refuses to
+# cross the comment and `$PY` is then the command word; without, resolution reads the allowlisted
+# `grep` and skips a live invocation. The `x=1` form is kept for coverage but proves less.
+#
+# A control has to distinguish the claimed mechanism from every other reason the same result
+# could occur. That is this issue's own lesson, and it was my own test that failed it.
+python3 - "$TMP" <<'INJECT'
+import pathlib, sys
+q, bs = chr(39), chr(92)
+tmp = pathlib.Path(sys.argv[1])
+bad = q + "import os," + q
+(tmp / "midcomment-allowlisted.sh").write_text(
+    "grep foo file # note " + bs + "\n$PY -c " + bad + "\n")
+(tmp / "midcomment-assignment.sh").write_text("x=1 # comment " + bs + "\n$PY -c " + bad + "\n")
+(tmp / "midcomment-nocont.sh").write_text("grep foo file # note\n")
+INJECT
+midc_rc=$?
+midc_ok=1
+midc_detail=""
+for midc_case in allowlisted assignment; do
+  [ -n "$(findings_of "$(census "$TMP/midcomment-$midc_case.sh")")" ] \
+    || { midc_ok=0; midc_detail="$midc_detail $midc_case(missed)"; }
+done
+[ -z "$(findings_of "$(census "$TMP/midcomment-nocont.sh")")" ] \
+  || { midc_ok=0; midc_detail="$midc_detail nocont(false-red)"; }
+if [ "$midc_rc" -eq 0 ] && [ "$midc_ok" -eq 1 ]; then
+  pass "census CONTROL fired (mid-line comment, DISCRIMINATING): with an ALLOWLISTED command before the comment, a continuation across it no longer hides the following invocation — the shape that separates 'comments are respected' from 'the command word happened not to be allowlisted', while the same comment WITHOUT a continuation stays clean"
+else
+  fail "census CONTROL did not fire (mid-line comment): fixture-rc=$midc_rc problems:$midc_detail"
 fi
 
 # --- CONTROL 1l: the assignment prefix is PARSED, and refuses what an eval would have run -------
@@ -1718,7 +1764,7 @@ fi
 # which the new coverage can be deleted again and the stale floor still passes. It sat 18 below
 # actual for exactly that reason. Equality means a change in either direction is a decision
 # someone makes here, in one line, with the failure text saying which direction and why.
-MIN_CHECKS=49
+MIN_CHECKS=50
 echo
 if [ "$checks" -ne "$MIN_CHECKS" ]; then
   echo "FAIL - $checks check(s) ran; this suite has EXACTLY $MIN_CHECKS."

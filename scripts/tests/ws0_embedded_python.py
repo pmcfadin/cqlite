@@ -403,30 +403,61 @@ def _join_continuations(text: str) -> tuple[str, list[int]]:
     omap: list[int] = []
     i, n = 0, len(text)
     # A `#` COMMENT ENDS AT ITS PHYSICAL NEWLINE and a trailing backslash does NOT continue it
-    # (#3451 post-rebase round 6, F1). Joining across one swallows the next line into the
-    # comment, and the command-word resolution then reads `#` as a literal non-python command and
-    # SKIPS a live invocation: `# note \` + `$PY -c 'bad'` measured at findings=0.
+    # (#3451 post-rebase rounds 6 and 8). Joining across one swallows the next line into the
+    # comment, and command resolution then reads the comment's own first word as the command:
+    # `grep foo file # note \` + `$PY -c 'bad'` resolved to the ALLOWLISTED `grep` and skipped a
+    # live python invocation.
     #
-    # Tracked while scanning rather than tested afterwards, because "is this offset inside a
-    # comment" is only answerable in one pass. Conservative: a comment is recognised at the first
-    # non-blank of a physical line. A `#` appearing MID-line is not treated as one — deciding that
-    # needs quote awareness, which is shell modelling, and erring here costs a joined line that
-    # was already going to be classified rather than a missed invocation.
-    at_line_start, in_comment = True, False
+    # ROUND 6 RECOGNISED A COMMENT ONLY AT THE FIRST NON-BLANK OF A LINE, which left the mid-line
+    # form open — and the control written for it could not tell: `x=1 # comment \` produced a
+    # finding because `#` is not on the command allowlist, NOT because the comment was respected.
+    # The joiner had still merged the lines. A control has to distinguish the claimed mechanism
+    # from every other reason the same result could occur, so the case that discriminates puts an
+    # ALLOWLISTED command before the comment.
+    #
+    # QUOTE STATE IS TRACKED, over the whole text rather than per line, and that is the smallest
+    # thing that answers "is this `#` a comment": a bounded two-state scan, not a shell model.
+    # Whole-text is also what makes it right INSIDE a `-c '…'` body — the opening quote is still
+    # open there, so a `#` in python source is correctly not a shell comment.
+    in_single = in_double = in_comment = False
+    prev = "\n"
     while i < n:
         ch = text[i]
-        if ch == "\n":
-            at_line_start, in_comment = True, False
-        elif at_line_start and not ch.isspace():
-            in_comment = ch == "#"
-            at_line_start = False
-        if ch == "\\" and i + 1 < n and text[i + 1] == "\n" and not in_comment:
-            i += 2
-            at_line_start, in_comment = True, False
+        if in_comment:
+            if ch == "\n":
+                in_comment = False
+            out.append(ch)
+            omap.append(i)
+            prev, i = ch, i + 1
             continue
+        if not in_single and ch == "\\" and i + 1 < n and text[i + 1] == "\n":
+            i += 2
+            prev = "\n"
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+        elif in_double:
+            if ch == "\\" and i + 1 < n:
+                out.append(ch)
+                omap.append(i)
+                out.append(text[i + 1])
+                omap.append(i + 1)
+                prev, i = text[i + 1], i + 2
+                continue
+            if ch == '"':
+                in_double = False
+        else:
+            if ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+            elif ch == "#" and (prev in " \t\n;&|()<>"):
+                # A word-start `#` outside quotes. Everything to the newline is comment.
+                in_comment = True
         out.append(ch)
         omap.append(i)
-        i += 1
+        prev, i = ch, i + 1
     return "".join(out), omap
 
 
@@ -599,7 +630,7 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             findings.append({
                 "line": idx + 1,
                 "reason": "a `-c '<program>'` invocation whose command word"
-                          f" ({cmd_word if cmd_word else '(unresolvable)'!r}) is NOT A"
+                          f" ({cmd_word if cmd_word else '(unresolvable)'!r}) is NOT AN"
                           " ALLOWLISTED non-python command, so what it runs"
                           " cannot be decided without executing the shell — it may be python"
                           " carrying a program this check would never see. Anchored on the FLAG"
