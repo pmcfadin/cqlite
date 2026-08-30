@@ -36,6 +36,17 @@ arm, ``f_map_set_udt`` the ``Set`` arm, and their id=2 keys are the only values
 in this repository that execute the ``Udt`` arm's ``None => py.None()`` branch.
 Without those two columns all three could regress with zero test failures.
 
+``contains_udt`` IS A SEPARATE MATTER, AND ITS ``Map`` ARM NEEDED ITS OWN
+COLUMNS. ``set_to_py`` is that function's only caller, so the value it inspects
+is always a SET ELEMENT — a ``Map`` at the TOP of a column is never passed to
+it. Its ``Map`` arm (``any(|(k, v)| contains_udt(k) || contains_udt(v))``) was
+therefore covered by NOTHING until ``s_map_udt_key`` / ``s_map_udt_val`` put a
+frozen map INSIDE a set element, one column per half because ``||``
+short-circuits. A regression there is SILENT rather than a ``TypeError``: the
+hashable projection is total, so the element still projects hashably and the
+column merely comes back as a ``frozenset`` instead of #804's ``list`` of
+``dict``s. See :class:`TestSetElementFrozenMapWithUdtKeyHalf`.
+
 THE ORACLE
 ----------
 Real Cassandra 5.0.2-written bytes:
@@ -873,6 +884,170 @@ class TestFrozenMapWithNestedSetUdtKey:
         assert _rows_by_id(db, "f_map_set_udt")[4].get("f_map_set_udt") is None
 
 
+class TestSetElementFrozenMapWithUdtKeyHalf:
+    """``s_map_udt_key`` — ``set<frozen<map<frozen<key_part>, int>>>``.
+
+    THE COLUMN THAT COVERS ``contains_udt``'s MAP arm, KEY half. Read this
+    before deleting it as redundant with the frozen-map classes above.
+
+    ``contains_udt``'s Map arm is::
+
+        Value::Map(pairs) => pairs.iter().any(|(k, v)| contains_udt(k) || contains_udt(v))
+
+    and NOTHING in this fixture reached it before: the ``List``, ``Set`` and
+    ``Tuple`` arms are exercised by the columns above, but a ``Map`` only ever
+    appeared at the TOP of a column (``m_tuple_udt``, ``f_map_*``), where
+    ``contains_udt`` is not consulted at all — ``set_to_py`` is the only caller,
+    so the value it inspects is always a SET ELEMENT. A map therefore has to be
+    INSIDE a set element to be seen, which is exactly this column's type.
+
+    WHY A REGRESSION HERE WOULD BE SILENT, hence why the column is needed:
+    ``value_to_hashable_key`` is TOTAL, so if the Map arm stopped seeing the
+    nested UDT the element would still project HASHABLY and the ``frozenset``
+    would build. No ``TypeError``, no crash — the column would simply come back
+    as a ``frozenset`` of tuples where #804 requires a ``list`` of ``dict``s.
+    That is a SHAPE regression, and ``test_takes_the_list_fallback_not_a_frozenset``
+    below is what detects it.
+
+    ONE HALF PER COLUMN, DELIBERATELY. ``||`` short-circuits: with a UDT in both
+    the key and the value of the same map, a broken ``contains_udt(v)`` is
+    invisible (``k`` answers ``true`` first and ``v`` is never consulted), and a
+    failure could not say WHICH half broke. So this column puts the UDT in the
+    KEY only (``int`` values) and :class:`TestSetElementFrozenMapWithUdtValueHalf`
+    puts it in the VALUE only.
+
+    RED-VERIFIED against this fixture: with ``contains_udt``'s Map arm reverted
+    to ``pairs.iter().any(|(_, v)| contains_udt(v))`` — i.e. only the key half
+    removed — this class reds and the value-half class stays green.
+    """
+
+    def test_multi_element_partition(self, db):
+        """id=1: two frozen-map elements, the first with two entries.
+
+        Element order is Cassandra's: a frozen map's element comparator compares
+        the maps PAIRWISE, so ``{ka…, kb…}`` sorts before ``{kc…}`` on their
+        first keys (golden cell paths ``…6b61…6b62…`` then ``…6b63…``) — it is
+        not a raw byte compare of the serialized maps.
+
+        The dict KEY is a ``frozenset`` because ``map_to_py`` projects every key
+        through ``value_to_hashable_key``; the map values are plain ``int``.
+        """
+        row = _rows_by_id(db, "s_map_udt_key")[1]
+        assert row.get("s_map_udt_key") == [
+            {kp_hashable("ka", 1): 10, kp_hashable("kb", 2): 20},
+            {kp_hashable("kc", 3): 30},
+        ]
+
+    def test_takes_the_list_fallback_not_a_frozenset(self, db):
+        """THE assertion that reds on a Map-arm KEY-half revert.
+
+        ``contains_udt`` true => ``set_to_py`` returns a ``list`` whose elements
+        are converted with ``value_to_py`` (so each element is a ``dict``).
+        ``contains_udt`` false => a ``frozenset`` of tuples, which is hashable
+        and therefore raises nothing. Only the container TYPES distinguish them.
+        """
+        value = _rows_by_id(db, "s_map_udt_key")[1].get("s_map_udt_key")
+        assert type(value) is list, (
+            f"expected the set_to_py list fallback, got {type(value).__name__} — "
+            "contains_udt's Map arm did not see the UDT in the map KEY"
+        )
+        assert type(value[0]) is dict
+        [key] = list(value[1])
+        assert type(key) is frozenset
+        assert value[1][key] == 30
+
+    def test_empty_string_field_in_the_map_key(self, db):
+        """id=2: an EMPTY-string label and a populated one, in one element.
+
+        The two keys must stay DISTINCT (a projection that collapsed ``''`` onto
+        a default would merge them into one entry).
+        """
+        row = _rows_by_id(db, "s_map_udt_key")[2]
+        assert row.get("s_map_udt_key") == [
+            {kp_hashable("", 0): 1, kp_hashable("zz", 9): 2},
+        ]
+        assert len(row.get("s_map_udt_key")[0]) == 2
+
+    def test_single_element_partition(self, db):
+        """id=3: one element, one entry."""
+        row = _rows_by_id(db, "s_map_udt_key")[3]
+        assert row.get("s_map_udt_key") == [{kp_hashable("solo", 99): 42}]
+
+    def test_absent_in_sparse_row(self, db):
+        """id=4 never wrote this column, so it must be ``None``, not ``[]``."""
+        assert _rows_by_id(db, "s_map_udt_key")[4].get("s_map_udt_key") is None
+
+
+class TestSetElementFrozenMapWithUdtValueHalf:
+    """``s_map_udt_val`` — ``set<frozen<map<int, frozen<key_part>>>>``.
+
+    THE COLUMN THAT COVERS ``contains_udt``'s MAP arm, VALUE half — the sibling
+    of :class:`TestSetElementFrozenMapWithUdtKeyHalf`; see that docstring for
+    why the arm was covered by nothing and why the two halves are separate
+    columns rather than one map with a UDT on both sides.
+
+    Here the map KEYS are ``int`` and the UDT is in the map VALUE, so
+    ``contains_udt(k)`` answers ``false`` for every pair and only
+    ``contains_udt(v)`` can put the column on the list path. RED-VERIFIED: with
+    the Map arm reverted to ``pairs.iter().any(|(k, _)| contains_udt(k))`` this
+    class reds and the key-half class stays green.
+    """
+
+    def test_multi_element_partition(self, db):
+        """id=1: two frozen-map elements, the first with two entries.
+
+        The map values are UDTs, so they arrive as ``udt_to_py`` ``dict``s (NOT
+        the ``frozenset`` a hashable position would yield) — a map VALUE is not a
+        hashable position.
+        """
+        row = _rows_by_id(db, "s_map_udt_val")[1]
+        assert row.get("s_map_udt_val") == [
+            {1: kp("va", 11), 2: kp("vb", 12)},
+            {3: kp("vc", 13)},
+        ]
+
+    def test_takes_the_list_fallback_not_a_frozenset(self, db):
+        """THE assertion that reds on a Map-arm VALUE-half revert.
+
+        Same mechanism as the key-half class: the reverted form still projects
+        hashably (``value_to_hashable_key``'s Map arm builds a tuple of
+        ``(key, value)`` tuples), so the only observable difference is the
+        container type.
+        """
+        value = _rows_by_id(db, "s_map_udt_val")[1].get("s_map_udt_val")
+        assert type(value) is list, (
+            f"expected the set_to_py list fallback, got {type(value).__name__} — "
+            "contains_udt's Map arm did not see the UDT in the map VALUE"
+        )
+        assert type(value[0]) is dict
+        [(key, val)] = list(value[1].items())
+        assert type(key) is int
+        assert type(val) is dict
+        assert val == kp("vc", 13)
+
+    def test_null_udt_fields_in_the_map_value(self, db):
+        """id=2: a wholly-null UDT value beside an empty-string/zero one.
+
+        ``''`` is not ``None``, and both survive as separate entries. These
+        travel ``udt_to_py``'s own ``None`` branch (the map VALUE is projected
+        with ``value_to_py``), not ``value_to_hashable_key``'s — the two are
+        different functions and the frozen-map classes above cover the other one.
+        """
+        row = _rows_by_id(db, "s_map_udt_val")[2]
+        assert row.get("s_map_udt_val") == [
+            {1: kp(None, None), 2: kp("", 0)},
+        ]
+
+    def test_single_element_partition(self, db):
+        """id=3: one element, one entry."""
+        row = _rows_by_id(db, "s_map_udt_val")[3]
+        assert row.get("s_map_udt_val") == [{42: kp("solo", 99)}]
+
+    def test_absent_in_sparse_row(self, db):
+        """id=4 never wrote this column."""
+        assert _rows_by_id(db, "s_map_udt_val")[4].get("s_map_udt_val") is None
+
+
 class TestSelectStarWholeRow:
     """``SELECT *`` over every partition — the shape a user actually runs.
 
@@ -890,7 +1065,7 @@ class TestSelectStarWholeRow:
         )
 
     def test_select_star_returns_every_column(self, db):
-        """``SELECT *`` yields exactly the seven declared columns plus ``id``.
+        """``SELECT *`` yields exactly the nine declared columns plus ``id``.
 
         Pinned so the ``is None`` assertions in the sparse-row test below cannot
         be satisfied by a column having been dropped from the projection
@@ -907,6 +1082,8 @@ class TestSelectStarWholeRow:
                 "f_set_tuple_udt",
                 "f_map_tuple_udt",
                 "f_map_set_udt",
+                "s_map_udt_key",
+                "s_map_udt_val",
             ]
         )
         for row in result.rows:
@@ -928,9 +1105,11 @@ class TestSelectStarWholeRow:
         assert row.get("f_map_set_udt") == {
             frozenset({kp_hashable("solo", 99)}): 7
         }
+        assert row.get("s_map_udt_key") == [{kp_hashable("solo", 99): 42}]
+        assert row.get("s_map_udt_val") == [{42: kp("solo", 99)}]
 
     def test_select_star_sparse_row_values(self, db):
-        """id=4: one populated column, six absent ones, in one ``SELECT *``."""
+        """id=4: one populated column, EIGHT absent ones, in one ``SELECT *``."""
         result = db.execute(f"SELECT * FROM {KEYSPACE}.{TABLE}")
         rows = {row.get("id"): row for row in result.rows}
         row = rows[4]
@@ -942,6 +1121,8 @@ class TestSelectStarWholeRow:
             "m_tuple_udt",
             "f_map_tuple_udt",
             "f_map_set_udt",
+            "s_map_udt_key",
+            "s_map_udt_val",
         ):
             assert row.get(absent) is None, f"{absent} should be absent for id=4"
 
