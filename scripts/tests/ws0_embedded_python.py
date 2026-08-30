@@ -402,11 +402,29 @@ def _join_continuations(text: str) -> tuple[str, list[int]]:
     out: list[str] = []
     omap: list[int] = []
     i, n = 0, len(text)
+    # A `#` COMMENT ENDS AT ITS PHYSICAL NEWLINE and a trailing backslash does NOT continue it
+    # (#3451 post-rebase round 6, F1). Joining across one swallows the next line into the
+    # comment, and the command-word resolution then reads `#` as a literal non-python command and
+    # SKIPS a live invocation: `# note \` + `$PY -c 'bad'` measured at findings=0.
+    #
+    # Tracked while scanning rather than tested afterwards, because "is this offset inside a
+    # comment" is only answerable in one pass. Conservative: a comment is recognised at the first
+    # non-blank of a physical line. A `#` appearing MID-line is not treated as one — deciding that
+    # needs quote awareness, which is shell modelling, and erring here costs a joined line that
+    # was already going to be classified rather than a missed invocation.
+    at_line_start, in_comment = True, False
     while i < n:
-        if text[i] == "\\" and i + 1 < n and text[i + 1] == "\n":
+        ch = text[i]
+        if ch == "\n":
+            at_line_start, in_comment = True, False
+        elif at_line_start and not ch.isspace():
+            in_comment = ch == "#"
+            at_line_start = False
+        if ch == "\\" and i + 1 < n and text[i + 1] == "\n" and not in_comment:
             i += 2
+            at_line_start, in_comment = True, False
             continue
-        out.append(text[i])
+        out.append(ch)
         omap.append(i)
         i += 1
     return "".join(out), omap
@@ -556,11 +574,16 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         match_end = omap[m.end() - 1] + 1
         pos = m.end()
         idx = bisect.bisect_right(starts, match_start) - 1
-        line = lines[idx]
+        physical_line = lines[idx]  # physical-ok: diagnostics and line numbers only
         line_start = starts[idx]
+        logical_line = scan[scan_line_start:scan_line_end]
+        # A COMMENT CARRIES NO CODE — tested on the LOGICAL line like every other classification.
+        # That is only sound because the joiner now refuses to join across a comment (F1): before
+        # it did, a comment's logical line absorbed the following command and this test would
+        # have hidden it. The two changes are one fix and must not be separated.
+        if logical_line.lstrip().startswith("#"):
+            continue
         if anchored_on_flag:
-            if line.lstrip().startswith("#"):
-                continue  # see the comment-test note above: a comment ends at the newline
             # The command word, from the JOINED line and from the whole COMMAND SEGMENT rather
             # than the word that happens to sit next to the flag — see `_command_word_before`.
             cmd_word = _command_word_before(scan[scan_line_start : m.start()])
@@ -592,8 +615,6 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         while word_start > scan_line_start and scan[word_start - 1] not in _WORD_BREAK:
             word_start -= 1
         word = scan[word_start : m.end()]
-        if line.lstrip().startswith("#"):
-            continue  # see the comment-test note above
         if word.rsplit("/", 1)[-1] != scan[m.start() : m.end()]:
             # The word's BASENAME is not the matched token, i.e. the token is a SUFFIX of a longer
             # program name (`mypython3`, `jython3`). That is a different program, not a
@@ -601,7 +622,7 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             # basename and is examined. This is the one lexical exclusion, and it is a statement
             # about names rather than about shell.
             continue
-        line_end = line_start + len(line)
+        line_end = line_start + len(physical_line)  # physical-ok: diagnostic bound
         raw_rest = scan[m.end() : scan_line_end]
         rest = _strip_comment(raw_rest).strip()
         try:
@@ -624,9 +645,10 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                     " until #3451 round 6 this shape was INVISIBLE to the census — a defective"
                     " block reported as clean. Teach the allowlist if the spelling is intended.",
                 )
-            if _FOR_WORD_LIST.match(line) and rest.lstrip(";&|)").strip() in ("", "do", "then"):
+            if _FOR_WORD_LIST.match(logical_line) and rest.lstrip(";&|)").strip() in ("", "do", "then"):
                 # ALLOWLIST 3: a word in a `for … in <list>` membership test, not a command.
-                records.append({"kind": "MENTION", "line": idx + 1, "text": line.strip()})
+                records.append({"kind": "MENTION", "line": idx + 1,
+                                "text": physical_line.strip()})  # physical-ok: diagnostic
                 continue
             dash_c = _OPEN_DASH_C.match(raw_rest)
             if dash_c:
