@@ -674,6 +674,66 @@ requires exactly ONE exempting arm, so no hatch can be reintroduced.</p>
 <p><strong><code dir="auto">prompt-content:</code> expects EVERY census code path and subtracts nothing.</strong> No key is licensed to tell
 another which paths to skip; a path the reviewer really did not receive FAILs. (And it never prints a
 <code dir="auto">0/0</code> PASS: a key with no subject has no verdict to give.)</p>
+<p><strong>AND <code dir="auto">findings:</code> GATES THE VERDICT ON ITS OWN — the affirmation backstop’s six keys were never the
+whole story (#3564).</strong> <code dir="auto">findings:</code> is not one of the six (its affirmative value is <code dir="auto">NONE</code>, not <code dir="auto">PASS</code>, so
+it cannot satisfy that loop’s uniform test), and it was described as merely <em>corroborating</em> — which read
+as “guarded elsewhere” when it was guarded <strong>nowhere</strong>. <code dir="auto">PRESENT</code> is in the closed grammar’s
+<strong>non-failing</strong> set, so the only thing failing a findings-bearing run was the NEIGHBOURING key
+<code dir="auto">roborev-exit: FINDINGS (exit 1)</code>. That coupling held for a fresh review and broke exactly where it
+mattered most: on <code dir="auto">--recheck-job</code> <strong>no reviewer process runs</strong>, so <code dir="auto">roborev-exit</code> is legitimately <code dir="auto">SKIP</code>,
+and with the failing signal gone the run emitted</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">findings:     PRESENT (3)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">roborev-exit: SKIP (recheck: no reviewer ran in this invocation; job 160 re-decided from its record)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">RESULT:       PASS</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="findings:     PRESENT (3)roborev-exit: SKIP (recheck: no reviewer ran in this invocation; job 160 re-decided from its record)RESULT:       PASS"><div></div></button></div></figure></div>
+<p>— a <strong>false PASS in a merge gate</strong>, measured on #3473’s round-3 recovery. And it landed on the one path
+an authorized waiver must travel (a re-run enqueues a different job and stales the waiver), so a waiver
+scoped to <code dir="auto">prompt-content</code> <strong>absence only</strong> could carry a findings failure nobody excused.</p>
+<p>Now: on any would-be <code dir="auto">RESULT: PASS</code>, <code dir="auto">findings:</code> must reduce (token-exact) to <code dir="auto">NONE</code>, <strong>in every mode
+including recheck</strong>, and the requirement is <strong>not waivable</strong>. The fix is in the verdict scan and
+deliberately <strong>not</strong> in <code dir="auto">roborev-exit</code>, because <code dir="auto">SKIP</code> is the TRUE statement about a recheck — making that
+key claim a failure it never observed would trade one false statement for another. Its second half is
+easy to miss and is the part that keeps the break-glass alive: a recheck of a record with <strong>no structured
+<code dir="auto">verdict</code> field</strong> used to fall through to a branch keyed on the reviewer’s exit code and read <code dir="auto">UNKNOWN</code>,
+so the gate alone would have false-FAILed <strong>every clean recheck</strong>; a recheck now re-asserts findings from
+the record’s own review text (the transcript in that mode), scoped to the findings block, and reports
+<code dir="auto">UNKNOWN</code> — never <code dir="auto">NONE</code> — whenever that reconstruction cannot support a positive claim.</p>
+<p><strong>And that reconstruction was itself unsound — two review rounds proved it, and the fix was to
+DELETE it rather than patch it a third time.</strong> Round 1: <code dir="auto">review-completed</code> deliberately ACCEPTS a
+<strong>headerless</strong> findings review (a bare <code dir="auto">**Severity**:</code> line, <code dir="auto">[High]</code>, <code dir="auto">Medium:</code>), for which the
+findings-block extraction finds nothing — so “0 markers in the block” meant <em>“no block was found”</em>,
+not <em>“no findings”</em>, and read as an affirmative <code dir="auto">NONE</code>. Round 2: a <code dir="auto">## Findings</code> block whose findings
+carry <strong>no recognised severity marker</strong> leaves the block non-empty and the count at zero, defeating
+the round-1 fix too.</p>
+<p><strong>The class provably does not close.</strong> <code dir="auto">review-completed</code> accepts a bare <code dir="auto">## Summary</code> heading as a
+completed review, so a findings review whose findings are prose — no <code dir="auto">Findings</code> heading, no severity
+marker — is a <em>valid</em> completed review reporting findings, and it is textually indistinguishable from
+a clean one, whose real text is <code dir="auto">No issues found.\n\nSummary: …</code> with no <code dir="auto">Findings</code> heading either.
+Any recogniser over that prose admits some findings-bearing shape. This is <strong>#3312’s umbrella lesson
+applied one directory over: remove the channel, do not pick a rarer delimiter</strong> — and the wrapper’s
+own facts tool already said it, that the structured field “must win wherever it exists” and a
+transcript regex is “a prose heuristic”.</p>
+<p>So the direction is <strong>asymmetric and permanent</strong>: a severity marker inside a findings block is
+positive evidence <strong>of findings</strong> (<code dir="auto">PRESENT</code>); its absence is <strong>not</strong> evidence of cleanliness
+(<code dir="auto">UNKNOWN</code>). <strong><code dir="auto">NONE</code> is reachable only from the structured <code dir="auto">verdict</code> letter.</strong> And that costs
+nothing, <strong>measured rather than assumed</strong>: <code dir="auto">roborev show --json</code> synthesises that letter from the
+<code dir="auto">reviews.verdict_bool</code> column for <strong>every</strong> observed record — <code dir="auto">P</code> for a clean review (job 154,
+<code dir="auto">verdict_bool=1</code>), <code dir="auto">F</code> for a findings-bearing one (job 162, <code dir="auto">verdict_bool=0</code>) — while the
+<code dir="auto">review_jobs</code> table has no verdict column at all. A real recheck of a clean job therefore takes the
+structured path and still PASSes, so the #3312 break-glass is intact, and the verdict-less branch is
+<strong>defensive</strong>, for a payload shape no observed record produces. Making a defensive path fail closed
+is free; making it guess is how a merge gate passes over live findings.</p>
+<p><strong>Two transferable lessons.</strong> (1) <em>Delegating a key’s failure to its neighbour is a latent false PASS</em> —
+the coupling is invisible while both keys are populated by the same event and evaporates in the first mode
+where they are not. Ask of every key: <strong>what fails the run if this key alone goes bad?</strong> (2) <em>A
+fail-closed argument for a default is only valid for the consumers that existed when it was written.</em> The
+<code dir="auto">block_marker_count</code> <code dir="auto">:-0</code> default was audited as fail-closed because <code dir="auto">NONE</code> was the STRICT direction for
+<code dir="auto">vacuity-tier1:</code>. Adding a consumer for which <code dir="auto">NONE</code> is the PERMISSIVE direction silently inverted it, and
+no choice of default can fix that — <code dir="auto">0</code> and <em>unmeasurable</em> are the same value. <strong>The resolution is not a
+better default or a second signal but a REMOVED CONSUMER</strong>: <code dir="auto">NONE</code> is unreachable from a marker count at
+all (only the structured verdict letter yields it), so nothing derives a permissive verdict from that <code dir="auto">0</code>
+and the original fail-closed argument holds unchanged. Re-derive such an argument whenever you add a
+consumer — and note that an intermediate version of this very fix added a separate <code dir="auto">block_measured</code> flag,
+which went away with the prose reconstruction it guarded while this paragraph went on citing it for a
+round (caught by the C intent audit). <strong>A doctrine line naming a mechanism is a claim about code and
+decays exactly like a comment: re-grep the symbol.</strong></p>
 <p><strong>It was never one bug — it is ONE SHAPE, found repeatedly on #3229, so it is now a rule:
 <em>a positive verdict requires an AFFIRMATIVE MEASUREMENT.</em></strong> The shape is <em>a multi-state signal where
 only the BAD states are tested, so every unknown or unmeasured state inherits the PERMISSIVE branch</em>:</p>
