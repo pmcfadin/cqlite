@@ -2057,3 +2057,158 @@ the property the corrected claim admits, and it was green before and after this 
 * Every `.rs` in the change under the 1500-line test threshold: `budgets.rs` 1461, `harness_tests.rs`
   1148, `mod.rs` 963, `transcript.rs` 639, `graceful_shutdown_tests.rs` 469. **`budgets.rs` is 39 lines
   from the threshold** — the next round that adds to it should split it (#1135) rather than push it over.
+
+## Round 16 — roborev job 259: BOTH findings are round 15's own fixes, not propagated
+
+Job 259 returned two findings. Neither is a new defect class: **each is round 15's fix applied at the
+site the review named and not carried to the site next door.** That is the shape this issue keeps
+producing, so this round's acceptance test is a **grep census**, not the two reported lines.
+
+### Finding 1 — `mod.rs:156`: `PollFail` still inferred the pipes from `readers_open`
+
+Round 15 recorded each reader's terminal result (`Transcript::read_failures`) and taught `WaitEnd` to
+choose its variant from it. `PollFail` — the OTHER consumer of the same fact — went on reading
+`snapshot.pipes_closed()`, a bool derived from the reader COUNT alone. A `bool` has two answers for
+five distinguishable states, so it collapsed three of them onto a permissive one, and every collapse
+was rendered as a fact **about the child**:
+
+| state | what the bool said | what was true |
+|---|---|---|
+| a reader ended in an I/O ERROR | `pipes_closed` → "stdout AND stderr had BOTH reached EOF" | this harness could not read a pipe |
+| ONE of two readers ended | `!pipes_closed` → "the pipes were still open, more output was possible" | true of the surviving pipe only |
+| the store's lock was POISONED | `!pipes_closed` → same sentence | **nothing** was established |
+
+The fix is the one round 15 applied one type over: make the unsupported claim **unreachable**, not
+annotated. `TranscriptSnapshot::pipe_status()` is now the ONE derivation and returns a five-state
+`PipeStatus` (`Unavailable` / `AllEof` / `ReaderFailed` / `PartiallyClosed` / `AllOpen`); there is no
+`true` left for a caller to render as EOF. `ended()` now answers *"is output over?"* and names the
+verdict **in one step**, handing the snapshot back when the state establishes neither — so a caller
+cannot ask through one derivation and decide from another, and no arm is `unreachable!()`.
+`WaitEnd::DeadlineReached`'s text was propagated too: round 15 had given it a note for a FAILED reader
+only, so a **clean** partial closure and an unreadable store still read as "pipes still open".
+
+`Unavailable` is `is_terminal() == false` deliberately: an unreadable store has not established that
+output is over, and treating it as terminal abandons a wait on the strength of a measurement that
+failed. That is the "positive verdict without an affirmative measurement" class in CLAUDE.md.
+
+**CENSUS 1a — every read of a reader/collector COUNT** (`grep -rn 'readers_open\|readers_total\|
+collectors_open\|collected()'`, doc comments dropped): **27 hits, 0 remaining inferences.** On the
+transcript side every hit outside `pipe_status()` is a field declaration, an initialiser, the `Drop`
+decrement or the snapshot copy — the derivation happens in exactly one function (`transcript.rs`
+407-428). On the read side `look()` already consults `read_failures` FIRST and has four distinct
+outcomes (`ReadFailed` / `CollectorsEnded` / `DeadlineReached` / `Unavailable`), so the collector store
+needed no change: **1 of the 2 stores carried the defect, and it is the one the finding named.**
+
+**CENSUS 1b — every EOF / open-pipe CLAIM** (`grep -rn 'EOF\|pipes were still\|pipes still\|still
+open\|no further (line|output|record)'`): 50 hits. Live claim sites in non-test code: **5** — the four
+`PipeStatus::describe()` arms and `WaitEnd`'s three variant texts, all now downstream of the one
+derivation. **Sites fixed: 2** (`PollFail::observed`, `WaitEnd::DeadlineReached`). The rest are test
+assertions, comments and `budgets.rs`'s `"the post-EOF exit wait"` census note (about stdin EOF, a
+different thing).
+
+### Finding 2 — `budgets.rs:321`: `unfinished_stages()` was only interpolated
+
+It appeared solely inside the stage-mismatch assertion's TEXT. If every DECLARED stage is opened and
+one is never `finish()`ed, the opened list still EQUALS the declared list, the assert passes, and that
+stage's timing is silently absent from the attribution report the stages exist for. **A value that
+only ever reaches a failure message is not a guard — it is diagnostics wearing a guard's name**, and
+this is the SIXTH instance of that class in this change (three anchors, two floors, and now this).
+
+It is now its own assert, ordered AFTER the set check so a run with both defects is reported as the
+census mismatch it primarily is — the two catch different defects and the reader has to be told which
+fired.
+
+**CENSUS 2 — every computed quantity in the census module** (`budgets.rs` + `budgets/census_tests.rs`):
+**2 were interpolate-only; both fixed.**
+
+| quantity | before | now |
+|---|---|---|
+| `unfinished_stages()` | interpolated only | **asserted** |
+| `old_bounded_waits()` | interpolated into the floor assert's text only | **asserted** — and it pins each census's own prose ("SIX, of which TWO"; "TEN waits, of which SEVEN"), a hand-written label over derived data of exactly the kind this file's round-3 blocker was |
+| `describe_census()`, `TestDeadline::describe()/report()` (incl. its `worst` figure), `Expired::describe()`, `PollFail::observed()` | renderers | left as-is: the NAME says it renders, which is the "renamed to say it is diagnostic-only" half of the rule |
+| `Stage::spent()`, `TestDeadline::span()/spent()`, `PollFail`'s fields | reach messages AND asserts | already guarded |
+
+### RED plants — both committed, both in a throwaway `git worktree add --detach`, never on this branch
+
+**Plant 1 (finding 1) — derive the pipe state from `readers_open` alone, the pre-round-16 `PollFail`
+shape:**
+
+```rust
+    pub fn pipe_status(&self) -> PipeStatus {
+        // PLANT (round 16, FIX 1): infer the pipe state from `readers_open` ALONE, [...]
+        if self.readers_open == 0 {
+            return PipeStatus::AllEof { readers: self.readers_total };
+        }
+        PipeStatus::AllOpen { open: self.readers_open }
+    }
+```
+
+→ **FAILED. 31 passed; 6 failed.**
+
+```text
+---- a_poll_that_gives_up_after_a_failed_read_does_not_report_eof ----
+a reader ended in an I/O ERROR, so the verdict may not carry an EOF state: AllEof { readers: 2 }
+
+---- a_poll_with_one_reader_still_attached_reports_partial_closure ----
+one reader had ended at EOF and one was still attached: AllOpen { open: 1 }
+
+---- each_reader_state_is_derived_distinctly ----
+assertion `left == right` failed: one of two readers had ended: a bool could only say "not all of
+them", which every consumer then rendered as "the pipes were still open"
+  left: AllOpen { open: 1 }
+ right: PartiallyClosed { open: 1, ended: 1, failure_note: None }
+
+---- a_wait_against_an_unreadable_store_does_not_claim_the_pipes_were_open ----
+an unreadable store establishes no end of output, so no "no further line could arrive" verdict may be
+built from it: how the wait ended: the child's stdout AND stderr both reached EOF after 1.327µs, so no
+further line could arrive: the child had exited, crashed, or closed its pipes
+
+---- a_reader_that_ends_in_an_io_error_is_not_reported_as_eof ----   (round 15's test, still red)
+---- a_reader_thread_records_a_failed_read_rather_than_ending_silently ----   (round 15's, still red)
+```
+
+The last line of the unreadable-store failure is the finding measured rather than argued: **a POISONED
+store produced "the child's stdout AND stderr both reached EOF"** — a statement about a child, from a
+read that returned nothing.
+
+**Plant 2 (finding 2) — restore the interpolate-only shape**, applied to a clean checkout of the same
+commit so the two plants are independent:
+
+```rust
+    // PLANT (round 16, FIX 2): `unfinished_stages()` reaches the message above and
+    // nothing else — the pre-round-16 shape.
+```
+
+→ **FAILED. 36 passed; 1 failed.**
+
+```text
+---- the_stage_census_check_rejects_a_declared_stage_that_never_finished ----
+the census check ACCEPTED a run that never finished a declared stage: `unfinished_stages` only ever
+reached a failure message, so it guarded nothing (job 259, finding 2)
+```
+
+Exactly one test reds, which is the point: the stage-SET check structurally cannot see this case, so
+the sibling plant-2 test from round 15 (an EXTRA unfinished stage, caught on the extra name alone)
+stays green. The new test asserts the matching-set **precondition first**, so a future edit that made
+the sets differ would fail on the wrong assert instead of reopening the hole unnoticed — round 15's own
+correction (`f21a333b8`), applied here rather than rediscovered.
+
+### State at the end of round 16
+
+* **37 tests** in `graceful_shutdown_tests` (measured 31 at round 15's HEAD, not the 29 carried in the
+  round-15 hand-off note): +2 poll-side pipe states, +2 `pipe_status` derivations (all five states, and
+  a wait against an unreadable store), +1 declared-but-unfinished stage, +1 census-totals-vs-prose.
+* No constant changed: `T1_DEADLINE_BASE` 360s / cap 720s, `T2_DEADLINE_BASE` 600s / cap 900s, census
+  unchanged. This round touched no bound and no product code.
+* `budgets.rs` was 39 lines from the 1500-line threshold and this round had to add to it, so the wait
+  census's coverage moved to `budgets/census_tests.rs` (#1135), split by SUBJECT — the check that
+  verifies a census against a run there, the one deadline's arithmetic here. No test was added or
+  removed by the split (35 before, 35 after).
+* Four panic messages committed in `02443e035` had their backslash continuations eaten before the
+  commit, leaving runs of spaces mid-sentence; repaired here, same file, same class.
+* `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --features write-support --tests`: clean.
+  (`drop(open_forever)` tripped `clippy::drop_non_drop` again — `Stage` has no `Drop`. It is a named
+  binding now, with a comment saying the unfinishedness comes from never calling `finish()`.)
+* Every `.rs` in the change under the 1500-line test threshold: `budgets.rs` 1391,
+  `harness_tests.rs` 1268, `mod.rs` 981, `transcript.rs` 953, `budgets/census_tests.rs` 248,
+  `graceful_shutdown_tests.rs` 469.
