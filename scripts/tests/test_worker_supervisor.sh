@@ -4454,5 +4454,226 @@ test_worker_probe_two_direction_control() {
 }
 
 t test_worker_probe_two_direction_control
+# ---------------------------------------------------------------------------
+# Tests 38..42-lock (#3549): PRE-#3467 LEGACY GLOBAL LOCK COMPATIBILITY.
+#
+# #3467 moved the derived default lock from ONE MACHINE-GLOBAL path to a PER-LANE one. The per-lane
+# path is the correct end state (#3393), but nothing consulted the old path — so a supervisor from a
+# pre-#3467 checkout holds a lock the new one never looks at and BOTH run in one worktree, sharing
+# markers, branch, logs and `.worker-last-iteration.json`.
+#
+# EVERY EXISTING CASE IN THIS FILE IS UNAFFECTED BY DESIGN: `common_env` exports an explicit
+# `SUPERVISOR_LOCK`, which is the AC4 override path and skips the check entirely. These cases are the
+# only ones that UNSET it, and they scope `TMPDIR` to the case dir so the legacy path they build is
+# never the real machine-global one.
+#
+# THE PIDS ARE REAL (AC5): a genuinely running child for `live`, a started-and-reaped one for `dead`.
+# The liveness probe is never stubbed.
+# ---------------------------------------------------------------------------
+
+# legacy_lock_drive <tmpdir> <lane-id> [explicit-lock] — run the REAL `acquire_lock`, read out of the
+# shipped supervisor at run time (sourced, so the guard under test is the shipped code and never a
+# re-implementation). Echoes stdout+stderr; the caller reads `$?`.
+#
+# `LOCK_CMD=""`/`CLAIM_CMD=""`: with `SUPERVISOR_LOCK` unset the run also does lane-identity
+# resolution, claim-actor derivation and `supervisor_migrate_legacy_claim`, the last of which can fire
+# a network `claim.sh status`. Empty disables both seams (the colonless `${VAR-default}` form in the
+# supervisor preserves an explicitly-empty override), so these cases stay hermetic.
+legacy_lock_drive() {
+  local tmp="$1" lane="$2" explicit="${3:-}"
+  local body='source "$1"; acquire_lock; printf "ACQUIRED=%s\n" "$SUPERVISOR_LOCK"; [[ -d "$SUPERVISOR_LOCK" ]] && printf "LOCKDIR=yes\n"; exit 0'
+  if [[ -n "$explicit" ]]; then
+    env TMPDIR="$tmp" SUPERVISOR_LOCK="$explicit" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$body" _ "$SUPERVISOR" 2>&1
+  else
+    env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$body" _ "$SUPERVISOR" 2>&1
+  fi
+}
+
+# The refusal must be the LEGACY one, not the per-lane "another instance is already running" — an
+# operator and a test both have to be able to tell the two locks apart.
+legacy_refusal_ok() {
+  local out="$1"
+  [[ "$out" == *"LEGACY GLOBAL supervisor lock"* ]] \
+    && [[ "$out" == *"#3549"* ]] \
+    && [[ "$out" != *"another instance is already running"* ]]
+}
+
+test_legacy_global_lock_refuses_live_holder() {
+  local d tmp lane legacy live out rc control crc derived
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549live$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+
+  # NON-VACUITY 1: the collision this guard prevents is REAL — the derived per-lane path and the
+  # legacy global path genuinely DIFFER for this LANE_ID, so a refusal cannot be coming from the
+  # per-lane lock. (This is the whole reason the old lock is invisible to the new one.)
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+  if [[ "$derived" != "$legacy" ]]; then
+    pass "legacy-lock NON-VACUITY: the derived per-lane path differs from the legacy global path (the collision is real, and no refusal below can come from the per-lane lock)"
+  else
+    fail "legacy-lock-nonvacuity: derived [$derived] == legacy [$legacy]; the two paths must differ or these cases measure nothing"
+  fi
+
+  # NON-VACUITY 2 (two-direction control): the SAME harness with NO legacy lock present must ACQUIRE.
+  # Without this, a refusal could be any earlier failure — an unresolvable lane identity, a missing
+  # stub — wearing the guard's clothes.
+  control="$(legacy_lock_drive "$tmp" "$lane")"; crc=$?
+  if [[ "$crc" -eq 0 && "$control" == *"LOCKDIR=yes"* && "$control" == *"ACQUIRED=$derived"* ]]; then
+    pass "legacy-lock NON-VACUITY: with NO legacy lock the same harness ACQUIRES the per-lane lock (so it reaches the guard, and a refusal below is attributable to the guard)"
+  else
+    fail "legacy-lock-nonvacuity-control: rc=$crc out=[$control] — the harness must succeed when no legacy lock exists, or nothing below is attributable"
+  fi
+  rm -rf "$derived"
+
+  # AC1, with a REAL live pid.
+  sleep 300 &
+  live=$!
+  mkdir -p "$legacy"
+  printf '%s\n' "$live" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"$live"* ]]; then
+    pass "legacy-lock AC1: a LIVE pre-#3467 holder (real pid $live) refuses the start, loudly, naming the legacy lock and the holder — and NOT with the per-lane message"
+  else
+    fail "legacy-lock-live: rc=$rc (expected non-zero) out=[$out] — expected the LEGACY GLOBAL refusal naming pid $live"
+  fi
+  if [[ ! -e "$derived" ]]; then
+    pass "legacy-lock AC1: the refusal created NO per-lane lock (a refused start leaves nothing behind)"
+  else
+    fail "legacy-lock-live-sideeffect: the per-lane lock $derived exists after a refusal"
+  fi
+  rm -rf "$legacy"
+}
+
+test_legacy_global_lock_reclaims_confirmed_stale() {
+  local d tmp lane legacy dead out rc derived
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549stale$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # A REAL dead pid: started and REAPED, so the kernel has genuinely released it (AC5). Not a made-up
+  # large number, which would only ever exercise "not found" and never the reaped case.
+  sleep 0.1 &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"LOCKDIR=yes"* && "$out" == *"reclaiming STALE legacy global supervisor lock"* ]]; then
+    pass "legacy-lock AC2: a legacy lock whose recorded pid is CONFIRMED dead (real reaped pid $dead) is reclaimed and the start proceeds"
+  else
+    fail "legacy-lock-stale: rc=$rc out=[$out] — expected a reclaim and a successful acquisition"
+  fi
+  if [[ ! -e "$legacy" ]]; then
+    pass "legacy-lock AC2: the stale legacy lock directory is GONE after the reclaim (rename-aside, then removed)"
+  else
+    fail "legacy-lock-stale-residue: $legacy still exists after the reclaim"
+  fi
+  rm -rf "$derived"
+}
+
+test_legacy_global_lock_unknown_shapes_refuse() {
+  local d tmp lane legacy derived out rc shape
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549unk$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # AC3. Every one of these is "cannot tell", and "cannot tell" must NOT collapse onto the permissive
+  # answer — the two-valued-file-predicate trap named in CLAUDE.md. Each shape is asserted separately
+  # so a single passing shape cannot hide a permissive sibling.
+  for shape in regular-file no-pid-file non-numeric-pid empty-pid; do
+    rm -rf "$legacy" "$derived"
+    case "$shape" in
+      regular-file) printf 'not a lock dir\n' >"$legacy" ;;
+      no-pid-file) mkdir -p "$legacy" ;;
+      non-numeric-pid) mkdir -p "$legacy"; printf 'pid-1234\n' >"$legacy/pid" ;;
+      empty-pid) mkdir -p "$legacy"; : >"$legacy/pid" ;;
+    esac
+    out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ ! -e "$derived" ]]; then
+      pass "legacy-lock AC3 ($shape): an undeterminable legacy lock REFUSES the start and creates no per-lane lock"
+    else
+      fail "legacy-lock-unknown($shape): rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out]"
+    fi
+  done
+  rm -rf "$legacy" "$derived"
+}
+
+test_legacy_global_lock_override_skips_check() {
+  local d tmp lane legacy explicit live out rc
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549ovr$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  explicit="$d/explicit.lock"
+
+  # AC4: an operator who NAMES the lock has taken the placement decision; the compatibility check is
+  # about OUR DEFAULT colliding with the OLD DEFAULT, so an explicit path skips it entirely. A LIVE
+  # legacy holder is present — the strongest form of the check — and must be neither honoured nor
+  # touched.
+  sleep 300 &
+  live=$!
+  mkdir -p "$legacy"
+  printf '%s\n' "$live" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane" "$explicit")"; rc=$?
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$explicit"* && "$out" != *"LEGACY GLOBAL supervisor lock"* ]]; then
+    pass "legacy-lock AC4: an explicit SUPERVISOR_LOCK skips the legacy check entirely, even with a LIVE legacy holder present"
+  else
+    fail "legacy-lock-override: rc=$rc out=[$out] — an explicit lock must be honoured and the legacy check skipped"
+  fi
+  if [[ -d "$legacy" && -f "$legacy/pid" && "$(cat "$legacy/pid")" == "$live" ]]; then
+    pass "legacy-lock AC4: the legacy lock is UNTOUCHED by an override run (not reclaimed, not rewritten)"
+  else
+    fail "legacy-lock-override-touched: the legacy lock at $legacy was modified by an override run"
+  fi
+  rm -rf "$legacy"
+}
+
+test_legacy_global_lock_removal_condition_recorded() {
+  local block
+  # AC6: the check is REMOVABLE, and the condition under which it may be dropped is RECORDED IN THE
+  # CODE — not in a commit message that nobody reads at deletion time. Light on purpose: this pins the
+  # RECORD, not its prose.
+  block="$(sed -n '/LEGACY GLOBAL LOCK COMPATIBILITY/,/^supervisor_legacy_lock_guard()/p' "$SUPERVISOR")"
+  if [[ "$block" == *"REMOVAL CONDITION"* && "$block" == *"#3467"* && "$block" == *"#3549"* ]]; then
+    pass "legacy-lock AC6: the guard records its own removal condition (every checkout at or past #3467) with both issue numbers"
+  else
+    fail "legacy-lock-removal-condition: the guard does not record a removal condition naming #3467 and #3549"
+  fi
+  # The guard must be DERIVED-DEFAULT-GATED on the RECORDED flag, never on a re-detection of
+  # `SUPERVISOR_LOCK` emptiness — which is unconditionally non-empty by the time the guard runs, so
+  # `[[ -n "$SUPERVISOR_LOCK" ]]` would read "explicit" always and disable the guard outright.
+  local guard_body
+  guard_body="$(sed -n '/^supervisor_legacy_lock_guard()/,/^}/p' "$SUPERVISOR")"
+  if [[ "$guard_body" == *"SUPERVISOR_LOCK_DERIVED"* ]]; then
+    pass "legacy-lock: the guard is gated on the RECORDED derivation flag, not on a re-detection of SUPERVISOR_LOCK"
+  else
+    fail "legacy-lock-derivation-flag: supervisor_legacy_lock_guard does not consult SUPERVISOR_LOCK_DERIVED"
+  fi
+}
+
+t test_legacy_global_lock_refuses_live_holder
+t test_legacy_global_lock_reclaims_confirmed_stale
+t test_legacy_global_lock_unknown_shapes_refuse
+t test_legacy_global_lock_override_skips_check
+t test_legacy_global_lock_removal_condition_recorded
+
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
