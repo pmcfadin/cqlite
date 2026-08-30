@@ -133,7 +133,8 @@ pub enum Multicell {
 pub enum Egress {
     /// `export --format json`: values keep their JSON kind (number/bool/null).
     Json,
-    /// `export --format csv`: every cell is text, and an empty cell is `null`.
+    /// `export --format csv`: every cell is text, and an empty TOP-LEVEL field
+    /// reads as `null` (see [`Depth`] — inside a container it does not).
     Csv,
 }
 

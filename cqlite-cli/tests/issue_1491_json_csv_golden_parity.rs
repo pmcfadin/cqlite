@@ -877,8 +877,14 @@ fn json_egress_matches_sstabledump_goldens() {
     run_lane(Egress::Json);
 }
 
-/// CSV egress: every SCALAR cell compared against the golden (container syntax is
-/// a CQLite-only text form with no external authority — see the support module).
+/// CSV egress: every cell value compared against the golden.
+///
+/// Containers included: the flat `{k: v}` / `[a, b]` text is decoded back into the
+/// golden's shape and each member compared by the same rules the JSON lane uses.
+/// The SYNTAX carrying them is a CQLite-only text form with no external authority
+/// and is asserted as nothing more than a grammar to invert; the VALUES it carries
+/// are the golden's. A cell the golden's own content cannot survive unquoted is
+/// refused and named in the census — see the `csv_container` support module.
 #[test]
 fn csv_egress_matches_sstabledump_goldens() {
     run_lane(Egress::Csv);
