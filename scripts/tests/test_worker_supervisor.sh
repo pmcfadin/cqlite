@@ -4897,6 +4897,40 @@ sv_q() {
 # argument shape a paste would actually mangle.
 SV_CMD_RE="rm -f |rm -rf |rmdir ['\"/]|rmdir -- |ps -p |kill -"
 
+# remedy_lines_structural <label> <out> <expected-bare-lines> — the (a) half of Test 44-lock (see its
+# comment block below) plus the bare-line count. IT LIVES HERE, WITH `SV_DIAG_RE`/`SV_CMD_RE`, AND NOT
+# BESIDE THE CASES THAT CALL IT (#3549, roborev job 220): it is called from five cases spread across two
+# `t` blocks, and while it sat between them the earlier block called a function that did not exist yet.
+# Bash resolves a name at CALL time, so that call was `command not found`, its status was discarded (no
+# `errexit`), `FAIL_COUNT` never moved, and the suite reported success with the assertion never run —
+# the very defect `t()` was built for, reaching past `t()` because the callee is a helper, not a test.
+remedy_lines_structural() {
+  local label="$1" out="$2" want="$3" bare_count inlined
+  bare_count="$(printf '%s\n' "$out" | grep -cvE "$SV_DIAG_RE" || true)"
+  # A COUNT THAT IS NOT A NUMBER IS NOT A ZERO. An unset `SV_DIAG_RE` (these are top-level assignments,
+  # and a `t` invocation placed above them would run first) makes the substitution come back EMPTY, and
+  # `[[ "" == "0" ]]` is false — so the failure is at least visible — but the message would report a
+  # count nobody measured. Named explicitly instead; this is the same rule the code under test follows.
+  if [[ ! "$bare_count" =~ ^[0-9]+$ ]]; then
+    fail "remedy-lines-count-unmeasurable ($label): the bare-line count came back [$bare_count]; the measurement did not happen"
+    return 0
+  fi
+  if [[ "$bare_count" == "$want" ]]; then
+    pass "remedy-lines ($label): exactly $want bare (unprefixed) line(s) — the runnable command, if any, is a line of its own"
+  else
+    fail "remedy-lines-bare-count ($label): $bare_count bare lines, expected $want; out=[$out]"
+  fi
+  # A command SIGNATURE on a prefixed line is the inlined-in-prose defect, whatever the prose says
+  # around it: a line that mixes the two cannot be pasted, wherever in the line the command sits.
+  inlined="$(printf '%s\n' "$out" | grep -E "$SV_DIAG_RE" | grep -nE "$SV_CMD_RE" || true)"
+  if [[ -z "$inlined" ]]; then
+    pass "remedy-lines ($label): no diagnostic line inlines a runnable command in prose"
+  else
+    fail "remedy-lines-inlined ($label): prose lines carrying a command: [$inlined]"
+  fi
+}
+
+
 
 # The refusal must be the LEGACY one, not the per-lane "another instance is already running" — an
 # operator and a test both have to be able to tell the two locks apart.
@@ -5620,32 +5654,12 @@ t test_legacy_lock_container_needs_search_not_read
 # so "zero bare lines" cannot be confused with "the command went missing".
 # ---------------------------------------------------------------------------
 
-# remedy_lines_structural <label> <out> <expected-bare-lines> — the (a) half plus the bare-line count.
-remedy_lines_structural() {
-  local label="$1" out="$2" want="$3" bare_count inlined
-  bare_count="$(printf '%s\n' "$out" | grep -cvE "$SV_DIAG_RE" || true)"
-  # A COUNT THAT IS NOT A NUMBER IS NOT A ZERO. An unset `SV_DIAG_RE` (these are top-level assignments,
-  # and a `t` invocation placed above them would run first) makes the substitution come back EMPTY, and
-  # `[[ "" == "0" ]]` is false — so the failure is at least visible — but the message would report a
-  # count nobody measured. Named explicitly instead; this is the same rule the code under test follows.
-  if [[ ! "$bare_count" =~ ^[0-9]+$ ]]; then
-    fail "remedy-lines-count-unmeasurable ($label): the bare-line count came back [$bare_count]; the measurement did not happen"
-    return 0
-  fi
-  if [[ "$bare_count" == "$want" ]]; then
-    pass "remedy-lines ($label): exactly $want bare (unprefixed) line(s) — the runnable command, if any, is a line of its own"
-  else
-    fail "remedy-lines-bare-count ($label): $bare_count bare lines, expected $want; out=[$out]"
-  fi
-  # A command SIGNATURE on a prefixed line is the inlined-in-prose defect, whatever the prose says
-  # around it: a line that mixes the two cannot be pasted, wherever in the line the command sits.
-  inlined="$(printf '%s\n' "$out" | grep -E "$SV_DIAG_RE" | grep -nE "$SV_CMD_RE" || true)"
-  if [[ -z "$inlined" ]]; then
-    pass "remedy-lines ($label): no diagnostic line inlines a runnable command in prose"
-  else
-    fail "remedy-lines-inlined ($label): prose lines carrying a command: [$inlined]"
-  fi
-}
+# `remedy_lines_structural` — the (a) half plus the bare-line count — is DEFINED WITH THE CONSTANTS IT
+# CONSUMES (beside `SV_CMD_RE`), not here (#3549, roborev job 220). It is called from five cases across
+# TWO `t` blocks, and one of those blocks runs ABOVE this point: a definition here had been reached only
+# by the later block, so the earlier call was a `command not found` whose status bash discards — the
+# exact vacuous-pass shape `t()` exists to catch, walking past `t()` because the callee is a HELPER and
+# not a test. A shared helper therefore lives above every `t` invocation that can reach it.
 
 test_legacy_lock_remedy_lines_are_executable_as_printed() {
   local d tmp lane legacy derived out rc bare dead
