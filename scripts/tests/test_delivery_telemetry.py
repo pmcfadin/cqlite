@@ -1144,18 +1144,35 @@ class SliceDeliveryTests(unittest.TestCase):
                   "2026-06-10T00:00:00.123456Z", "2026-06-10T00:00:00-07:00",
                   "2026-06-10T00:00:00+00:00:30", "20260610T000000Z",
                   "2026-W24-1T00:00:00Z", "2026-06-10T00:00:00", "2026-06-10",
-                  "2026-06-10t00:00:00z", "2026-06-10T23:59:60Z", "", "x"):
+                  "2026-06-10t00:00:00z", "2026-06-10T23:59:60Z", "", "x",
+                  "2026-02-31T00:00:00Z", "2026-13-01T00:00:00Z", "2025-02-29T00:00:00Z",
+                  "2026-06-10T99:99:00Z", "2026-06-10T24:00:00Z",
+                  "2026-06-10T00:00:00+99:99", "2026-00-10T00:00:00Z",
+                  "2026-06-32T00:00:00Z", "2026-06-10T00:60:00Z"):
             with self.subTest(value=v):
                 # the pattern is a SYNTAX rule; _is_rfc3339 is syntax AND calendar. They must
                 # agree on every value whose calendar is valid, and the tool may only be
                 # stricter where the calendar is impossible.
-                # NO licensed divergence any more. The pattern excludes leap seconds
-                # ([0-5]\d) and asserts true end-of-input ((?![\s\S]) rather than $, which
-                # in Python's re — used by the jsonschema library — also matches before a
-                # trailing newline), so the two agree on EVERY value, with no exception list.
-                self.assertEqual(bool(pattern.search(v)), dt._is_rfc3339(v),
-                                 f"{v!r}: pattern={bool(pattern.search(v))} "
-                                 f"tool={dt._is_rfc3339(v)}")
+                # THE RULE, not an exception list. An earlier revision enumerated the
+                # permitted divergences, then a later one deleted the list and claimed full
+                # equivalence — which was false, because a regex cannot judge CALENDAR
+                # validity. So assert the invariant instead: the pattern may be more
+                # permissive than the tool ONLY on a value that is syntactically well-formed
+                # but calendrically impossible, and never the other way round. That is
+                # checkable without naming any value, so it cannot be overclaimed again.
+                by_pattern = bool(pattern.search(v))
+                by_tool = dt._is_rfc3339(v)
+                if by_tool:
+                    self.assertTrue(by_pattern,
+                                    f"{v!r}: tool accepts but the PUBLISHED pattern rejects "
+                                    f"— lint would accept a record the schema forbids")
+                elif by_pattern:
+                    # divergence permitted only here, and it must be a CALENDAR failure
+                    with self.assertRaises(ValueError,
+                                           msg=f"{v!r}: pattern accepts, tool refuses, but "
+                                               f"the value parses — an unexplained "
+                                               f"divergence, not the documented calendar one"):
+                        dt._parse_ts(v)
 
     def test_every_committed_timestamp_is_strict_rfc3339(self):
         """The tightening must not red the committed ledger — asserted, not assumed."""
@@ -1903,7 +1920,12 @@ class StandardValidatorSliceTests(unittest.TestCase):
                   "2026-06-10T23:59:60Z",        # leap second: RFC-3339 legal, unparseable
                   "2026-06-10T00:00:00Z\n",     # trailing newline: `$` would have matched
                   "20260610T000000Z", "2026-06-10T00:00:00", "2026-06-10",
-                  "2026-06-10t00:00:00z", "2026-06-10T00:00:00+00:00:30"):
+                  "2026-06-10t00:00:00z", "2026-06-10T00:00:00+00:00:30",
+                  # the impossible-calendar / out-of-range cases round 13 found omitted
+                  "2026-02-31T00:00:00Z", "2026-13-01T00:00:00Z", "2025-02-29T00:00:00Z",
+                  "2026-06-10T99:99:00Z", "2026-06-10T24:00:00Z",
+                  "2026-06-10T00:00:00+99:99", "2026-00-10T00:00:00Z",
+                  "2026-06-32T00:00:00Z"):
             with self.subTest(value=v):
                 rec = dict(base)
                 rec["created_at"] = v
@@ -1912,8 +1934,18 @@ class StandardValidatorSliceTests(unittest.TestCase):
                     std_ok = True
                 except _jsonschema.ValidationError:
                     std_ok = False
-                self.assertEqual(std_ok, dt._is_rfc3339(v),
-                                 f"{v!r}: standard validator={std_ok}, lint={dt._is_rfc3339(v)}")
+                tool_ok = dt._is_rfc3339(v)
+                if tool_ok:
+                    self.assertTrue(std_ok, f"{v!r}: lint accepts, standard validator "
+                                            f"REJECTS — the schema forbids what lint writes")
+                elif std_ok:
+                    # permitted ONLY for a calendrically impossible instant, which a JSON
+                    # Schema pattern cannot express (issue #3550, documented in the schema)
+                    with self.assertRaises(ValueError,
+                                           msg=f"{v!r}: standard validator accepts and lint "
+                                               f"refuses, but the value parses — that is an "
+                                               f"undocumented divergence"):
+                        dt._parse_ts(v)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

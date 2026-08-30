@@ -304,17 +304,34 @@ def load_schema(schema_path: Path) -> dict:
 #     is a true end-of-input assertion and is valid in BOTH Python and ECMA-262, which the
 #     JSON Schema dialect specifies; `\Z` would work only in Python.
 #   * uppercase T/Z only — `gh` always emits the canonical form (see `_parse_ts`).
+# Every FIELD RANGE a regex can express is expressed: month 01-12, day 01-31, hour 00-23,
+# minute/second 00-59, offset hour 00-23 and offset minute 00-59. What remains is stated
+# rather than chased (see _is_rfc3339): CALENDAR validity — 31 February, 29 February in a
+# non-leap year — is NOT a regular-language property, so the pattern cannot judge it and the
+# tool is legitimately stricter there. That asymmetry is IRREDUCIBLE, not a gap to close;
+# claiming full equivalence (as an earlier revision of this issue did) is what produced four
+# successive review rounds on this one subject.
 _TIMESTAMP_PATTERN = (
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:[0-5]\d(\.\d+)?(Z|[+-]\d{2}:\d{2})(?![\s\S])")
+    r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
+    r"T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d+)?"
+    r"(Z|[+-]([01]\d|2[0-3]):[0-5]\d)(?![\s\S])")
 _RFC3339_RE = re.compile(_TIMESTAMP_PATTERN)
 
 
 def _is_rfc3339(value) -> bool:
     """True when `value` is a strict RFC-3339 UTC-canonical date-time.
 
-    Syntax via `_RFC3339_RE`, then `_parse_ts` for CALENDAR validity (the regex cannot reject
-    month 13 or 31 February). Both are required: syntax alone accepts impossible dates,
-    parsing alone accepts non-RFC-3339 spellings.
+    Two checks, and BOTH are required for a reason worth stating: `_RFC3339_RE` judges
+    SYNTAX (and now every field RANGE a regex can express), `_parse_ts` judges CALENDAR
+    validity. Syntax alone accepts 2026-02-31; parsing alone accepts non-RFC-3339 spellings
+    like basic format.
+
+    The residual asymmetry is DELIBERATE and IRREDUCIBLE: a published JSON Schema `pattern`
+    cannot express "31 February is not a date" or leap-year rules, so a standard validator
+    reading the schema is necessarily more permissive than this function on exactly those
+    values — and only those. The schema says so in its own description rather than implying
+    an equivalence it cannot have. Do not try to close that gap in the regex; four review
+    rounds on this issue were spent discovering that it does not close.
     """
     if not isinstance(value, str) or not _RFC3339_RE.match(value):
         return False
