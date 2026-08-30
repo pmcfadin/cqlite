@@ -81,7 +81,6 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     }
 }
 
-
 /// Convert milliseconds since epoch to datetime.datetime (UTC).
 fn timestamp_to_datetime(py: Python<'_>, millis: i64) -> PyResult<PyObject> {
     let datetime = py.import("datetime")?;
@@ -537,7 +536,6 @@ fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
         Ok(PyFrozenSet::new(py, &converted)?.into_any().unbind())
     }
 }
-
 
 /// Convert CQL map to Python dict.
 fn map_to_py(py: Python<'_>, pairs: &[(Value, Value)]) -> PyResult<PyObject> {
