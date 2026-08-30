@@ -1410,6 +1410,11 @@ supervisor_lock_path() {
 # on a DIFFERENT path than the one we diagnosed, which is the worst kind of operator-facing text: it
 # looks precise and is wrong. `'` is closed, escaped and reopened (`'\''`), which is exact for every
 # byte a filename can hold.
+#
+# IT IS NOT OPTION-SAFETY, AND THE CALLER MUST NOT READ IT AS SUCH (#3549, roborev job 192 F2). Quoting
+# controls how the SHELL splits a word; option parsing happens inside the COMMAND, on bytes the shell
+# has already finished with. `rm -f '-scratch/pid'` is one quoted operand and still an "invalid option".
+# A printed command whose operands are derived from the environment therefore needs `--` as well.
 supervisor_shell_quote() {
   local s="${1//\'/\'\\\'\'}"
   printf "'%s'" "$s"
@@ -1494,6 +1499,102 @@ supervisor_pid_liveness() {
   printf 'unknown\n'
 }
 
+# supervisor_identity_names_script <arg>... — 0 if this ARGUMENT VECTOR's executable-or-script argument
+# is `worker-supervisor.sh`. A SUBSTRING MATCH IS NOT AN IDENTITY (#3549, roborev job 192 F1).
+#
+# The probe used to corroborate on `worker-supervisor` appearing ANYWHERE in the command line, which is
+# a cheap observable substituted for the property: `vim /x/worker-supervisor.sh`, `grep
+# worker-supervisor …`, a `tail` of its log, or this guard's own diagnostic quoted in a shell all MENTION
+# the path without being the supervisor. The consequence is not cosmetic — the `supervisor` answer is
+# what prints "stop pid N first", so a false corroboration tells an operator to KILL THE WRONG PROCESS.
+#
+# So the vector is WALKED and the argument that names the RUNNING PROGRAM must be ours:
+#   - an option (`-x`) is skipped, but only AFTER an interpreter has been seen: a leading `-foo` is not
+#     an executable at all (a login shell renders as `-bash`), so it is refused rather than skipped;
+#   - `-c` ENDS the walk with a refusal: what follows is a COMMAND STRING, not a script path, so
+#     `sh -c 'sleep 300' /x/worker-supervisor.sh` — the path as plain data — cannot corroborate;
+#   - a `NAME=VALUE` assignment is skipped after an interpreter (the `env FOO=1 bash …` shape);
+#   - the first remaining operand IS the program. Its basename must be EXACTLY `worker-supervisor.sh`,
+#     else the walk continues ONLY when that basename is a known interpreter (the `bash
+#     /path/worker-supervisor.sh` form: argv[0] is the interpreter, since a `#!/usr/bin/env bash`
+#     shebang leaves `bash <script>` in the final exec's argv). Anything else is somebody else's
+#     program, holding our path as an argument at most, and returns 1.
+# The error direction is deliberate: every case this cannot resolve returns 1, i.e. MORE `unconfirmed`
+# (verify before acting — harmless) and never more `supervisor` (kill it — not harmless).
+supervisor_identity_names_script() {
+  local arg base interp=no
+  while [[ "$#" -gt 0 ]]; do
+    arg="$1"
+    shift
+    case "$arg" in
+      -c)
+        return 1
+        ;;
+      -*)
+        if [[ "$interp" == yes ]]; then continue; fi
+        return 1
+        ;;
+      *=*)
+        if [[ "$interp" == yes ]]; then continue; fi
+        return 1
+        ;;
+    esac
+    base="${arg##*/}"
+    if [[ "$base" == "worker-supervisor.sh" ]]; then
+      return 0
+    fi
+    case "$base" in
+      bash | sh | dash | zsh | ksh | ksh93 | mksh | env)
+        interp=yes
+        continue
+        ;;
+    esac
+    return 1
+  done
+  return 1
+}
+
+# supervisor_identity_ps_names_script <field>... — the same question asked of `ps -o args=` output, and
+# a STRICTER one, because THAT OUTPUT IS INHERENTLY AMBIGUOUS (#3549, roborev job 192 F1).
+#
+# `ps -o args=` is a SPACE-JOINED RENDERING of the vector with no escaping, so argument boundaries are
+# unrecoverable: a path containing a space is indistinguishable from two arguments. Splitting on
+# whitespace therefore yields a REFINEMENT of the true vector (one true argument may appear as several
+# fields), never the vector itself. `/proc/<pid>/cmdline` is NUL-separated and is the reliable split;
+# this is the fallback for a host without a readable procfs entry (macOS, a hidepid container).
+#
+# DECISION, RECORDED BECAUSE EITHER CHOICE IS DEFENSIBLE: an UNAMBIGUOUS `ps` match IS accepted, and
+# "unambiguous" is narrowed to the two canonical shapes with NO skipping at all —
+#   field 1 = `…/worker-supervisor.sh`, or field 1 = a known interpreter and field 2 =
+#   `…/worker-supervisor.sh`.
+# Nothing else corroborates: an option, an assignment or any other field before the match means the
+# boundaries would have to be GUESSED to reach a verdict, and a guess in the corroborating direction is
+# the finding. So `ps` can FAIL to corroborate a genuine supervisor (`bash -x …/worker-supervisor.sh`
+# answers `unconfirmed` here) and that is the accepted cost — it is a false STOP on wording, not a
+# false instruction to kill. The residual false-positive shape is a SINGLE argument that itself contains
+# a space and ends in `/worker-supervisor.sh`, i.e. a script path that cannot exist as rendered;
+# splitting can only ADD fields, and basename ignores everything before the last `/`, so no other
+# refinement of a true vector turns a non-match into a match here.
+supervisor_identity_ps_names_script() {
+  local base
+  if [[ "$#" -lt 1 ]]; then
+    return 1
+  fi
+  base="${1##*/}"
+  if [[ "$base" == "worker-supervisor.sh" ]]; then
+    return 0
+  fi
+  case "$base" in
+    bash | sh | dash | zsh | ksh | ksh93 | mksh | env) ;;
+    *) return 1 ;;
+  esac
+  if [[ "$#" -lt 2 ]]; then
+    return 1
+  fi
+  base="${2##*/}"
+  [[ "$base" == "worker-supervisor.sh" ]]
+}
+
 # supervisor_pid_identity <pid> — echo `supervisor`, `unconfirmed` or `unprobeable`. THREE-VALUED,
 # DIAGNOSTIC ONLY, and it NEVER decides whether to refuse (#3549, roborev job 182 Medium).
 #
@@ -1504,24 +1605,30 @@ supervisor_pid_liveness() {
 # the operator-facing WORDING: "stop pid N" aimed at an unrelated process is an instruction to kill the
 # wrong thing, so the advice is only given when the identity was actually corroborated.
 #
-# Corroboration = `worker-supervisor` appearing in the process's own command line. NEVER CLAIM
-# CORROBORATION THAT WAS NOT OBTAINED, so the three answers are kept distinct: `unconfirmed` means we
-# READ a command line and it did not match (an affirmative non-match), `unprobeable` means we could not
-# look at all — no readable procfs entry, a procfs read that FAILED OR CAME BACK EMPTY, and no usable
-# `ps` (a hidepid container, a process that exited mid-probe, or a macOS box with a stripped PATH). An
-# unmeasured — or ambiguous — read is NEVER reported as `unconfirmed`: that would claim a non-match
-# nobody observed.
+# Corroboration = the process's own command line, PARSED INTO ARGUMENTS, naming `worker-supervisor.sh`
+# as the program it is running — see `supervisor_identity_names_script` for the walk and
+# `supervisor_identity_ps_names_script` for the stricter rule the ambiguous `ps` rendering gets.
+# NEVER CLAIM CORROBORATION THAT WAS NOT OBTAINED, so the three answers are kept distinct:
+# `unconfirmed` means we READ a command line and it did not identify the program as ours (an
+# affirmative non-identification), `unprobeable` means we could not look at all — no readable procfs
+# entry, a procfs read that FAILED OR CAME BACK EMPTY, and no usable `ps` (a hidepid container, a
+# process that exited mid-probe, or a macOS box with a stripped PATH). An unmeasured read is NEVER
+# reported as `unconfirmed`: that would claim a non-match nobody observed.
 # Both get cautious wording; only `supervisor` gets the "stop it" advice.
 supervisor_pid_identity() {
-  local pid="${1:-}" args="" part="" read_ok=no
+  local pid="${1:-}" part="" read_ok=no
+  local -a argv=()
   case "$pid" in
     '' | *[!0-9]* | 0*) printf 'unprobeable\n'; return 0 ;;
   esac
   # procfs first: `/proc/<pid>/cmdline` is NUL-separated and readable for ANY user's process on a
-  # default Linux, which is exactly the EPERM case the liveness probe cares about. Read with `-d ''`
-  # in a loop rather than `tr`/`mapfile -d`: no external command is assumed present, and the loop form
-  # works on the bash 3.2 this script still supports. The `|| [[ -n "$part" ]]` tail keeps a final
-  # field that is not NUL-terminated.
+  # default Linux, which is exactly the EPERM case the liveness probe cares about. THE NUL IS THE
+  # POINT: it is the only faithful argument boundary, and a path may legitimately contain spaces, so
+  # the fields are collected into an ARRAY here rather than joined into a string (joining is what made
+  # the old substring test possible in the first place). Read with `-d ''` in a loop rather than
+  # `tr`/`mapfile -d`: no external command is assumed present, and the loop form works on the bash 3.2
+  # this script still supports. The `|| [[ -n "$part" ]]` tail keeps a final field that is not
+  # NUL-terminated.
   #
   # THE READ'S SUCCESS IS TRACKED, BECAUSE `unconfirmed` IS AN AFFIRMATIVE CLAIM (#3549, roborev job
   # 185 F3). `-r` was true a moment ago; the process can exit between that test and the open, and a
@@ -1536,16 +1643,18 @@ supervisor_pid_identity() {
   # discarded. Order-dependent and silent if reversed.
   if [[ -r "/proc/$pid/cmdline" ]]; then
     if { while IFS= read -r -d '' part || [[ -n "$part" ]]; do
-           args+="$part "
+           argv+=("$part")
            part=""
          done; } 2>/dev/null <"/proc/$pid/cmdline"; then
       read_ok=yes
     fi
-    if [[ "$read_ok" == yes && -n "$args" ]]; then
-      case "$args" in
-        *worker-supervisor*) printf 'supervisor\n'; return 0 ;;
-      esac
-      # We LOOKED, there WAS a command line, and it did not match. That is the affirmative non-match.
+    if [[ "$read_ok" == yes && "${#argv[@]}" -gt 0 ]]; then
+      if supervisor_identity_names_script "${argv[@]}"; then
+        printf 'supervisor\n'
+        return 0
+      fi
+      # We LOOKED, there WAS a command line, and the program it names is not ours. That is the
+      # affirmative non-identification.
       printf 'unconfirmed\n'
       return 0
     fi
@@ -1557,17 +1666,24 @@ supervisor_pid_identity() {
     # distinguish from EOF. Under the affirmative-measurement rule an ambiguous state must not take the
     # affirmative branch, so an empty command line is NOT reported as a non-match either: `ps` gets to
     # answer (it prints `[kthreadd]`-style names for exactly these processes, i.e. a real non-match),
-    # and if `ps` cannot answer the verdict is `unprobeable`. Discard any partial bytes on the way — a
+    # and if `ps` cannot answer the verdict is `unprobeable`. Discard any partial fields on the way — a
     # truncated command line is not evidence in either direction.
-    args=""
+    argv=()
   fi
   if command -v ps >/dev/null 2>&1; then
-    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    if [[ -n "$args" ]]; then
-      case "$args" in
-        *worker-supervisor*) printf 'supervisor\n' ;;
-        *) printf 'unconfirmed\n' ;;
-      esac
+    local psargs=""
+    psargs="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ -n "$psargs" ]]; then
+      # `read -r -a` splits on IFS and performs NO pathname expansion, so an argument containing `*`
+      # cannot glob against the cwd here (the reason this is not `set -- $psargs`). The split is a
+      # REFINEMENT of the true vector, never the vector — hence the stricter canonical-shape rule.
+      local -a fields=()
+      read -r -a fields <<<"$psargs"
+      if [[ "${#fields[@]}" -gt 0 ]] && supervisor_identity_ps_names_script "${fields[@]}"; then
+        printf 'supervisor\n'
+      else
+        printf 'unconfirmed\n'
+      fi
       return 0
     fi
   fi
@@ -1862,9 +1978,21 @@ supervisor_legacy_lock_guard() {
       # does not own. Paths are shell-quoted so the printed line is paste-safe for a `TMPDIR`
       # containing a space or a quote, and the command occupies its own line (see F2 at
       # `supervisor_legacy_lock_refuse`).
+      #
+      # (c) QUOTING IS NOT OPTION-SAFETY, AND THEY ARE DIFFERENT HAZARDS (#3549, roborev job 192 F2).
+      #     `supervisor_shell_quote` stops word-splitting, globbing and metacharacters; it does NOTHING
+      #     about OPTION PARSING, because the shell hands `rm` the bytes and `rm` reads a leading `-`
+      #     as flags whatever quoting produced it. With a relative option-shaped `TMPDIR` (`-scratch`)
+      #     the printed `rm -f '-scratch/…/pid' && rmdir '-scratch/…'` fails with "invalid option" —
+      #     an operator-facing line advertised as executable that is not, on a legitimate
+      #     configuration. `--` terminates option parsing, which is a property of the COMMANDS and
+      #     therefore holds for EVERY path shape: absolute, relative, option-shaped or not. It is used
+      #     instead of requiring an absolute `TMPDIR` (that would be a new refusal for a working
+      #     configuration, i.e. a false STOP) and instead of special-casing a leading `-` (which fixes
+      #     one window and leaves the next one).
       supervisor_legacy_lock_refuse "$legacy" "state $state — LEFT BEHIND by a pre-#3467 supervisor that is GONE (recorded pid $pid is affirmatively dead). This guard never mutates a lock it does not own, so it is NOT removed automatically" \
         "PRECONDITION FIRST — stop the legacy launcher(s) on this box, or upgrade that checkout past #3467; a lock deleted before that is a free name a pre-#3467 supervisor can take at once. ONLY THEN run the next line, on its own, exactly as printed. Its shape was verified WHEN THIS RAN, not when you run it, so if a legacy supervisor has started since it may no longer be the lock described above; the rmdir is non-recursive and refuses a non-empty directory, which is the guarantee that still holds later" \
-        "rm -f $(supervisor_shell_quote "$legacy/pid") && rmdir $(supervisor_shell_quote "$legacy")"
+        "rm -f -- $(supervisor_shell_quote "$legacy/pid") && rmdir -- $(supervisor_shell_quote "$legacy")"
       ;;
     *)
       supervisor_legacy_lock_refuse "$legacy" "state could not be determined (${state#unknown }) — 'cannot tell' is a refusal here, never a green light"
