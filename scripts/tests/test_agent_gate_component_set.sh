@@ -21,11 +21,19 @@
 #   7. the REAL full-gate emit path                                     -> FAIL block + exit 1, no cargo
 #
 # CENSUS, stated so a later reader can tell "covered" from "forgotten" (a silent gap is
-# the shape this whole issue is about). The pre-flight has FOUR verdicts and SIX non-`ok`
+# the shape this whole issue is about). The pre-flight has FOUR verdicts and NINE non-`ok`
 # probe kinds, and EVERY one is exercised below:
-#   verdicts — PASS (5), DECLARED (4), BEHIND (1), INDETERMINATE (4c).
-#   kinds    — fetch-failed + no-remote (2), baseline-list-failed / -empty / -garbage and
-#              baseline-missing (3a–3d), no-git / baseline-workspace / no-tool (3f).
+#   verdicts (4) — PASS (case 5), DECLARED (4), BEHIND (1), INDETERMINATE (4c).
+#   kinds    (9) — fetch-failed, no-remote (case 2); baseline-list-failed,
+#                  baseline-list-empty, baseline-list-garbage, baseline-missing (3a–3d);
+#                  no-git, baseline-workspace, no-tool (3f).
+# NINE is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (eleven assignment
+# SITES: `fetch-failed` is set from two places, and `ok` is the tenth value). It was
+# written as "six" for two rounds while the enumeration beneath it listed nine — a census
+# that miscounts its own list is worse than none, because a reader who trusts the number
+# and counts the entries concludes three kinds are uncovered extras. The count is now
+# ASSERTED against the gate at run time (`3544-kind-census`, near the end of this file),
+# so the two cannot drift again silently.
 # None is declared unreachable. The ONE conditional case is `no-tool`, which needs a
 # curated git-less PATH: it verifies that PATH can start the gate at all (a positive
 # control that must reach `KIND: ok`) and, if it cannot on this host, prints a `skip -`
@@ -309,10 +317,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3f. THE REMAINING UNMEASURED KINDS. `_component_set_probe` has six non-`ok` kinds; 3a–3d
-#     cover the three baseline-derivation ones plus `baseline-missing`, and case 2 covers
-#     `fetch-failed`/`no-remote`. These three complete the census, so no fail-closed branch
-#     of the pre-flight is untested in either direction. Nothing here is declared
+# 3f. THE REMAINING UNMEASURED KINDS. `_component_set_probe` has NINE non-`ok` kinds; 3a–3d
+#     cover the three baseline-derivation ones plus `baseline-missing` (4), and case 2
+#     covers `fetch-failed`/`no-remote` (2). These three are the last (3), completing 9, so
+#     no fail-closed branch of the pre-flight is untested in either direction. Nothing here is declared
 #     unreachable: all three are reachable in a throwaway tree, which is why they are
 #     asserted rather than excused.
 # ---------------------------------------------------------------------------
@@ -776,6 +784,49 @@ if [ "$(field VERDICT "$fu_out")" = BEHIND ] \
 else
   bad "3544-grammar-future: expected KIND ok + both future-shaped names in MISSING"
   printf '%s\n' "$fu_out"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. THE CENSUS COUNT IS MECHANICAL. A PROSE count drifts, and this file proved it: the
+#    header said "six" for two rounds while its own enumeration listed nine. That is the
+#    exact shape #3544's 06:15Z comment describes one level out — "nothing anywhere relates
+#    the exemption's claim to the named component's actual scope, so the two drift silently
+#    and the drift is invisible from either file alone" — so the relation is made explicit
+#    here: derive the kind count from the GATE at run time, compare it to the ONE declared
+#    constant below, and FAIL naming BOTH numbers.
+#
+#    WHAT THIS ASSERT CLAIMS, EXACTLY — and it is narrow: *the census was re-read when the
+#    gate's kind set changed*. It does NOT claim, and must never be read as claiming, that
+#    every kind is COVERED. Coverage is what cases 2, 3a–3d, 3f and 4c do, by driving each
+#    kind through the shipped code and requiring the verdict to NAME it.
+#
+#    THE PROXY THIS DELIBERATELY IS NOT: asserting "each kind NAME appears somewhere in
+#    this file" would be satisfied by a kind mentioned ONLY in the census comment above —
+#    a false PASS, and this repository's standing ruling is that a guard with a known
+#    false-PASS is worse than no guard, because it invites reliance it cannot support. So
+#    the assert compares two DERIVED NUMBERS and nothing else; it is safe precisely because
+#    it does not attempt to answer the question it cannot answer.
+#
+#    FAIL-CLOSED on its own derivation: an empty derived set means the assignment shape in
+#    the gate changed (or the scan broke), which must be a FAIL naming the derivation —
+#    never a comparison against 0 that quietly agrees with nothing. Same rule as the
+#    baseline `--list` derivation this whole pre-flight is built on.
+# ---------------------------------------------------------------------------
+# The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
+# value, and extend the census above and a case below at the same time.
+DECLARED_KIND_COUNT=9
+# Scan the WHOLE gate, not just `_component_set_probe`: every assignment lives inside that
+# function today, but a scan scoped to it would MISS a kind set elsewhere later and the
+# count would silently keep agreeing with this constant. A superset scan cannot miss.
+derived_kinds=$(grep -o '_CS_KIND=[A-Za-z][A-Za-z0-9-]*' "$GATE" 2>/dev/null \
+                  | sed 's/_CS_KIND=//' | grep -vx ok | sort -u)
+derived_count=$(printf '%s\n' "$derived_kinds" | grep -c '[a-z]')
+if [ "$derived_count" -eq 0 ]; then
+  bad "3544-kind-census: could not DERIVE any _CS_KIND value from $GATE — the assignment shape changed or the scan broke (fail-closed: this is not a count of 0)"
+elif [ "$derived_count" -eq "$DECLARED_KIND_COUNT" ]; then
+  ok "3544-kind-census: the declared kind count ($DECLARED_KIND_COUNT) matches the gate's derived set ($derived_count) — the census was re-read; this asserts NOTHING about coverage"
+else
+  bad "3544-kind-census: the gate has $derived_count non-ok _CS_KIND values but this file declares $DECLARED_KIND_COUNT — update DECLARED_KIND_COUNT, the census comment AND a case for each new kind. Derived: $(printf '%s' "$derived_kinds" | tr '\n' ' ')"
 fi
 
 printf '\n%s\n' "----------------------------------------"
