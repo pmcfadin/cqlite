@@ -579,13 +579,20 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
             Ok(i) => CanonicalValue::Int(i),
             Err(_) => {
                 return Err(at.refuse(&format!(
-                    "the golden varint literal '{s}' does not fit an i128, which is the                      unscaled range of the Decimal128(38, 0) the export writes a `varint`                      to; the harness refuses to compare rather than truncate"
+                    "the golden varint literal '{s}' does not fit an i128, which is \
+                     the unscaled range of the Decimal128(38, 0) the export writes a \
+                     `varint` to; the harness refuses to compare rather than truncate"
                 )))
             }
         },
         (CanonicalValue::Float(NormalizedFloat(f)), "varint") => {
             return Err(at.refuse(&format!(
-                "the golden varint arrived as the double {f:?}, i.e. its LITERAL TEXT was                  lost before the harness saw it — a `varint` above u64::MAX is parsed by                  serde_json as an f64, while the export writes it as an exact                  Decimal128(38, 0). The literal is preserved by                  golden_lexeme::preserve_exact_lexemes, which every golden goes through;                  reaching here means this value bypassed it"
+                "the golden varint arrived as the double {f:?}, i.e. its \
+                 LITERAL TEXT was lost before the harness saw it — a `varint` above \
+                 u64::MAX is parsed by serde_json as an f64, while the export writes it \
+                 as an exact Decimal128(38, 0). The literal is preserved by \
+                 golden_lexeme::preserve_exact_lexemes, which every golden goes through; \
+                 reaching here means this value bypassed it"
             )));
         }
         (other, _) => other,
