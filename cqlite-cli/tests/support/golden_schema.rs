@@ -32,8 +32,9 @@
 //! authority").
 //!
 //! It is deliberately narrow and FAILS CLOSED. It understands the subset the
-//! committed fixture schemas use — `CREATE TYPE`, `CREATE TABLE`, native scalar
-//! types, `frozen<>`, `list/set/map/tuple`, UDT references, `STATIC`, inline and
+//! committed fixture schemas use — `USE <keyspace>`, `CREATE TYPE`,
+//! `CREATE TABLE` (bare or keyspace-qualified), native scalar types, `frozen<>`,
+//! `list/set/map/tuple`, UDT references, `STATIC`, inline and
 //! trailing `PRIMARY KEY` — and returns `Err` naming the input for anything else
 //! (an unknown type name, an unresolvable UDT, a block comment, an unbalanced
 //! bracket). A type it cannot name is never guessed at, because a guessed type
@@ -174,28 +175,45 @@ pub fn load(file: &Path, table: &str) -> Result<TableSchema, String> {
 /// Parse DDL text and return the schema of `table`.
 pub fn from_ddl(ddl: &str, table: &str) -> Result<TableSchema, String> {
     let ddl = strip_comments(ddl)?;
-    let mut udts: BTreeMap<String, UdtType> = BTreeMap::new();
+    let mut udts: BTreeMap<(Option<String>, String), UdtType> = BTreeMap::new();
     let mut found: Option<TableSchema> = None;
+    // The keyspace `USE` last put in effect. Every committed fixture schema is
+    // written that way — `CREATE KEYSPACE`, `USE <ks>`, then UNQUALIFIED
+    // `CREATE TABLE`s — so without reading `USE` this reader answered `keyspace:
+    // None` for every table it parsed, and the AD2 case table's declared keyspace
+    // was cross-checked against nothing (issue #1491 review round 19, finding Y1).
+    let mut in_effect: Option<String> = None;
     let wanted = table.to_ascii_lowercase();
     for statement in statements(&ddl)? {
         let lower = statement.to_ascii_lowercase();
+        if let Some(keyspace) = use_target(&statement)? {
+            in_effect = Some(keyspace);
+            continue;
+        }
         if lower.starts_with("create type") {
             let (name, body) = named_body(&statement, "create type")?;
-            let fields = parse_fields(&body, &udts)?;
+            let (keyspace, name) = split_qualified(&name, in_effect.as_deref());
+            let fields = parse_fields(
+                &body,
+                &TypeScope {
+                    declared: &udts,
+                    keyspace: keyspace.as_deref(),
+                },
+            )?;
             // A second `CREATE TYPE` of the same name used to OVERWRITE the first,
             // silently: every table declared before it kept the old field list and
             // every table after it got the new one, so one file could yield two
             // different answers for the same type name and neither would be
             // reported. Refused for the same reason a repeated `CREATE TABLE` is —
             // there is no way to say which declaration is authoritative.
-            if udts.contains_key(&name) {
+            if udts.contains_key(&(keyspace.clone(), name.clone())) {
                 return Err(format!(
                     "type `{name}` is declared more than once — the lane cannot say which \
                      declaration is authoritative for its field types"
                 ));
             }
             udts.insert(
-                name.clone(),
+                (keyspace, name.clone()),
                 UdtType {
                     name: name.clone(),
                     fields,
@@ -208,10 +226,7 @@ pub fn from_ddl(ddl: &str, table: &str) -> Result<TableSchema, String> {
                 "create columnfamily"
             };
             let (name, body) = named_body(&statement, keyword)?;
-            let (keyspace, bare) = match name.split_once('.') {
-                Some((ks, tbl)) => (Some(ks.to_string()), tbl.to_string()),
-                None => (None, name.clone()),
-            };
+            let (keyspace, bare) = split_qualified(&name, in_effect.as_deref());
             if bare != wanted {
                 continue;
             }
@@ -221,10 +236,83 @@ pub fn from_ddl(ddl: &str, table: &str) -> Result<TableSchema, String> {
                      which declaration is authoritative"
                 ));
             }
-            found = Some(parse_table(keyspace, bare, &body, &udts)?);
+            let scope = TypeScope {
+                declared: &udts,
+                keyspace: keyspace.as_deref(),
+            };
+            found = Some(parse_table(keyspace.clone(), bare, &body, &scope)?);
         }
     }
     found.ok_or_else(|| format!("no `CREATE TABLE {table}` in this schema file"))
+}
+
+/// The keyspace a `USE <keyspace>` statement puts in effect, or `None` for any
+/// other statement.
+///
+/// Reads only a BARE identifier, and REFUSES anything else — a quoted
+/// (`USE "Ks"`) or otherwise unrecognised target is an error rather than a
+/// silently ignored statement, because ignoring it would leave the previous
+/// keyspace in effect and attribute the tables below it to the wrong keyspace.
+/// Every committed fixture schema uses the bare form.
+///
+/// A second `USE` is not refused: CQL's own rule — the keyspace in effect is the
+/// one the LAST `USE` above the statement named — is exact, and applying it is
+/// cheaper than a refusal that would reject a legal file.
+fn use_target(statement: &str) -> Result<Option<String>, String> {
+    let lower = statement.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("use") else {
+        return Ok(None);
+    };
+    // `use` must be a keyword here and not the start of an identifier: statements
+    // are whitespace-collapsed, so a `USE` statement is exactly `use <target>`.
+    if !rest.is_empty() && !rest.starts_with(' ') {
+        return Ok(None);
+    }
+    let target = rest.trim();
+    if target.is_empty()
+        || !target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(format!(
+            "`{statement}`: this reader reads only a bare keyspace identifier after \
+             `USE`, so it will not guess which keyspace the tables below it declare in"
+        ));
+    }
+    Ok(Some(target.to_string()))
+}
+
+/// Split a `CREATE …` name into (keyspace, bare name): the `ks.` prefix when the
+/// name carries one, else whatever `USE` last put in effect (`None` when the file
+/// has stated no keyspace at all, which the AD2 lane treats as an UNVERIFIABLE
+/// declaration rather than as agreement).
+fn split_qualified(name: &str, in_effect: Option<&str>) -> (Option<String>, String) {
+    match name.split_once('.') {
+        Some((keyspace, bare)) => (Some(keyspace.trim().to_string()), bare.trim().to_string()),
+        None => (in_effect.map(str::to_string), name.to_string()),
+    }
+}
+
+/// The UDTs a statement may reference: the ones a `CREATE TYPE` earlier in the
+/// same file declared IN THE SAME KEYSPACE.
+///
+/// Keyed by keyspace because a UDT belongs to one. Two keyspaces may each declare
+/// a `person` with different fields, and a flat by-name registry would resolve a
+/// table's `person` to whichever was parsed last — the same
+/// decided-by-declaration-order defect the duplicate-declaration refusals exist to
+/// stop. Keyed this way, a reference that crosses keyspaces does not resolve at
+/// all, and `parse_bare_type` reports it as an unknown type rather than silently
+/// substituting the other keyspace's fields.
+struct TypeScope<'a> {
+    declared: &'a BTreeMap<(Option<String>, String), UdtType>,
+    keyspace: Option<&'a str>,
+}
+
+impl<'a> TypeScope<'a> {
+    fn resolve(&self, name: &str) -> Option<&'a UdtType> {
+        self.declared
+            .get(&(self.keyspace.map(str::to_string), name.to_string()))
+    }
 }
 
 /// Remove `--` line comments. Block comments are REFUSED rather than skipped:
@@ -386,14 +474,14 @@ fn split_items(body: &str) -> Result<Vec<String>, String> {
 /// `CREATE TYPE` fields: `name type` pairs only.
 fn parse_fields(
     body: &str,
-    udts: &BTreeMap<String, UdtType>,
+    scope: &TypeScope<'_>,
 ) -> Result<Vec<(String, CqlType)>, String> {
     let mut fields = Vec::new();
     for item in split_items(body)? {
         let (name, ty_text) = item
             .split_once(char::is_whitespace)
             .ok_or_else(|| format!("UDT field with no type: `{item}`"))?;
-        let (ty, _frozen) = parse_type(ty_text.trim(), udts)?;
+        let (ty, _frozen) = parse_type(ty_text.trim(), scope)?;
         let name = name.trim().to_ascii_lowercase();
         // A repeated field name is refused rather than kept twice: the comparison
         // resolves a field's type with `.find()`, i.e. FIRST wins, while the egress
@@ -417,7 +505,7 @@ fn parse_table(
     keyspace: Option<String>,
     table: String,
     body: &str,
-    udts: &BTreeMap<String, UdtType>,
+    scope: &TypeScope<'_>,
 ) -> Result<TableSchema, String> {
     let mut columns: Vec<Column> = Vec::new();
     let mut partition_key: Vec<String> = Vec::new();
@@ -463,7 +551,7 @@ fn parse_table(
             .split_once(char::is_whitespace)
             .ok_or_else(|| format!("column with no type: `{item}`"))?;
         let name = name.trim().to_ascii_lowercase();
-        let (ty, frozen) = parse_type(ty_text.trim(), udts)?;
+        let (ty, frozen) = parse_type(ty_text.trim(), scope)?;
         if is_inline_pk {
             if inline_pk.is_some() {
                 return Err(format!("two inline PRIMARY KEY columns in `{table}`"));
@@ -570,20 +658,20 @@ fn parse_key_spec(spec: &str) -> Result<(Vec<String>, Vec<String>), String> {
 
 /// Parse a type reference. Returns the type and whether the TOP level was
 /// `frozen<…>`.
-fn parse_type(text: &str, udts: &BTreeMap<String, UdtType>) -> Result<(CqlType, bool), String> {
+fn parse_type(text: &str, scope: &TypeScope<'_>) -> Result<(CqlType, bool), String> {
     let trimmed = text.trim();
     let lower = trimmed.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("frozen") {
         if rest.trim_start().starts_with('<') {
             let inner = angle_body(trimmed)?;
-            let (ty, _) = parse_type(&inner, udts)?;
+            let (ty, _) = parse_type(&inner, scope)?;
             return Ok((ty, true));
         }
     }
-    Ok((parse_bare_type(trimmed, udts)?, false))
+    Ok((parse_bare_type(trimmed, scope)?, false))
 }
 
-fn parse_bare_type(text: &str, udts: &BTreeMap<String, UdtType>) -> Result<CqlType, String> {
+fn parse_bare_type(text: &str, scope: &TypeScope<'_>) -> Result<CqlType, String> {
     let trimmed = text.trim();
     let lower = trimmed.to_ascii_lowercase();
     if let Some(open) = trimmed.find('<') {
@@ -591,7 +679,7 @@ fn parse_bare_type(text: &str, udts: &BTreeMap<String, UdtType>) -> Result<CqlTy
         let args = split_items(&angle_body(trimmed)?)?;
         let mut parsed = Vec::new();
         for arg in &args {
-            parsed.push(parse_type(arg, udts)?.0);
+            parsed.push(parse_type(arg, scope)?.0);
         }
         return match (name.as_str(), parsed.len()) {
             ("list", 1) => Ok(CqlType::List(Box::new(parsed.remove(0)))),
@@ -617,14 +705,15 @@ fn parse_bare_type(text: &str, udts: &BTreeMap<String, UdtType>) -> Result<CqlTy
         "blob" => CqlType::Blob,
         "timestamp" => CqlType::Timestamp,
         "uuid" | "timeuuid" | "date" | "time" | "duration" | "inet" => CqlType::Opaque(lower),
-        other => match udts.get(other) {
+        other => match scope.resolve(other) {
             Some(udt) => CqlType::Udt(udt.clone()),
             // Fail closed: a guessed type restores the permissive comparison this
             // module exists to remove.
             None => {
                 return Err(format!(
                     "unknown type `{trimmed}` — neither a native CQL type this reader \
-                     knows nor a `CREATE TYPE` declared earlier in the same file"
+                     knows nor a `CREATE TYPE` declared earlier in the same file and \
+                     in the same keyspace"
                 ))
             }
         },
@@ -878,6 +967,87 @@ CREATE TABLE IF NOT EXISTS inline (
         let why = from_ddl("/* block */ CREATE TABLE t (id int PRIMARY KEY);", "t")
             .expect_err("a block comment must be refused");
         assert!(why.contains("block comment"), "{why}");
+    }
+
+    /// The KEYSPACE a table is declared in, which is what the AD2 case table's
+    /// `keyspace` field is cross-checked against (issue #1491 review round 19,
+    /// finding Y1). Before this the reader ignored `USE`, so every committed
+    /// schema — all of which use `USE <ks>` plus unqualified `CREATE TABLE` —
+    /// answered `None`, and the case's declared keyspace was checked against
+    /// nothing.
+    #[test]
+    fn the_keyspace_comes_from_use_or_from_a_qualified_name() {
+        // `USE ks` above the `CREATE TABLE`s, which is the committed schemas' shape.
+        assert_eq!(schema("t").keyspace.as_deref(), Some("ks"));
+        assert_eq!(schema("inline").keyspace.as_deref(), Some("ks"));
+
+        // A qualified name states its own keyspace and OVERRIDES the one in effect.
+        let ddl = "USE ks; CREATE TABLE other.q (id int PRIMARY KEY, v text);";
+        let parsed = from_ddl(ddl, "q").expect("a qualified CREATE TABLE parses");
+        assert_eq!(parsed.keyspace.as_deref(), Some("other"));
+
+        // The LAST `USE` above the statement is the one in effect (CQL's own rule).
+        let ddl = "USE a; CREATE TABLE t1 (id int PRIMARY KEY); \
+                   USE b; CREATE TABLE t2 (id int PRIMARY KEY);";
+        assert_eq!(
+            from_ddl(ddl, "t1").expect("t1").keyspace.as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            from_ddl(ddl, "t2").expect("t2").keyspace.as_deref(),
+            Some("b")
+        );
+
+        // No `USE` and no qualified name: the file states no keyspace, and that is
+        // reported as UNKNOWN rather than as agreement with whatever the caller
+        // declared — the AD2 lane fails such a case instead of passing it.
+        let ddl = "CREATE TABLE t (id int PRIMARY KEY);";
+        assert_eq!(from_ddl(ddl, "t").expect("t").keyspace, None);
+    }
+
+    /// A `USE` target this narrow reader cannot read is an ERROR, never a silently
+    /// ignored statement: ignoring it would leave the PREVIOUS keyspace in effect
+    /// and attribute the tables below it to the wrong one.
+    #[test]
+    fn a_use_target_this_reader_cannot_read_is_an_error() {
+        for ddl in [
+            "USE \"Ks\"; CREATE TABLE t (id int PRIMARY KEY);",
+            "USE ; CREATE TABLE t (id int PRIMARY KEY);",
+        ] {
+            let why = from_ddl(ddl, "t").expect_err("an unreadable USE must be refused");
+            assert!(
+                why.contains("bare keyspace identifier"),
+                "the refusal must name what it will not guess: {why}"
+            );
+        }
+        // A column or table whose name merely STARTS with `use` is not a `USE`
+        // statement, so it must still parse.
+        let ddl = "USE ks; CREATE TABLE user_events (id int PRIMARY KEY, useful text);";
+        let parsed = from_ddl(ddl, "user_events").expect("`user_events` is not a USE statement");
+        assert_eq!(parsed.column_names(), vec!["id", "useful"]);
+        assert_eq!(parsed.keyspace.as_deref(), Some("ks"));
+    }
+
+    /// A UDT belongs to the keyspace it was declared in, so a reference from
+    /// ANOTHER keyspace does not resolve. Fail closed: substituting the other
+    /// keyspace's fields would decide a compared type by declaration order, which
+    /// is exactly what the duplicate-declaration refusals exist to stop.
+    #[test]
+    fn a_udt_does_not_resolve_across_keyspaces() {
+        let ddl = "USE a; CREATE TYPE p (f text); \
+                   USE b; CREATE TABLE t (id int PRIMARY KEY, v frozen<p>);";
+        let why = from_ddl(ddl, "t").expect_err("a cross-keyspace UDT must not resolve");
+        assert!(why.contains("unknown type `p`"), "{why}");
+
+        // The same-keyspace form is the ordinary shape and parses, so the rule is
+        // about the keyspace boundary and not about the reader.
+        let ddl = "USE a; CREATE TYPE p (f text); \
+                   CREATE TABLE t (id int PRIMARY KEY, v frozen<p>);";
+        let parsed = from_ddl(ddl, "t").expect("a same-keyspace UDT resolves");
+        assert!(matches!(
+            parsed.column("v").map(|c| c.ty.clone()),
+            Some(CqlType::Udt(_))
+        ));
     }
 
     /// The committed schemas the AD2 lane actually reads must all parse — the
