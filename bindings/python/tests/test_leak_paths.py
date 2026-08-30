@@ -28,8 +28,10 @@ because the earlier version of this docstring overclaimed):
     budget on it is deliberately LOOSE: it catches GROSS native retention only.
 
   Consequence, recorded honestly: a SMALL per-iteration native leak (below the
-  ru_maxrss budget's ~22 KiB/iteration resolution) is invisible to BOTH
-  instruments here. The proper oracle for that class -- an isolated process, RSS
+  RSS budget's measured 16-24 KiB/iteration floor) is invisible to BOTH
+  instruments here -- and on a platform with NEITHER RSS instrument (Windows),
+  the native half is not measured at all, which the test SAYS rather than
+  silently passing over. The proper oracle for that class -- an isolated process, RSS
   measured against a calibrated NATIVE retention control, or native live-resource
   counters -- is issue #3585 and is deliberately not built here.
 
@@ -56,9 +58,14 @@ existing ``conftest`` fixtures/guards -- it invents no dataset path. It FAILS
 LOUDLY on a present-but-empty/unreadable corpus (via ``require_test_data`` under
 strict mode, plus the non-vacuity row count) rather than skipping.
 
-These tests carry NO pytest marker on purpose: the gate's python tier runs
-``pytest bindings/python/tests -m 'not slow' -q``, so a ``slow`` marker would
-silently remove them from the merge-gating set (issue #1465 review).
+These tests carry NO pytest marker on purpose. Both gate tiers would drop a
+``slow``-marked test from the merge-gating set, by different mechanisms:
+the FULL gate runs ``pytest bindings/python/tests -q`` with
+``RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}"`` (scripts/agent-gate.sh:5566), which
+``conftest.pytest_collection_modifyitems`` turns into a skip for ``slow`` items;
+``--lite`` runs ``pytest bindings/python/tests -m 'not slow' -q``
+(``PYTHON_LITE_PYTEST_CMD``, scripts/agent-gate.sh:1424), which deselects them.
+Unmarked, they execute in both. Measured runtime of this whole file: ~6s.
 
 There is deliberately NO wall-clock/elapsed-time assertion anywhere in this file:
 these are MEMORY budgets. A timing threshold in a correctness test is a known
@@ -66,11 +73,23 @@ flake class (#2642).
 """
 
 import gc
-import resource
+import mmap
 import sys
 import tracemalloc
+import warnings
 
 import pytest
+
+# ``resource`` is POSIX-only. python-ci.yml runs this whole directory on a
+# ``windows-latest`` matrix leg (`pytest bindings/python/tests/ -v --tb=short -m
+# "not slow"`, python-ci.yml:522), where a module-level Unix-only import is a
+# COLLECTION ERROR that reds the job. Import it conditionally so the tracemalloc
+# budgets -- which are pure stdlib and platform-independent -- still run
+# everywhere, and degrade ONLY the RSS backstop where the instrument is missing.
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows only
+    resource = None
 
 from conftest import (
     DATASETS,
@@ -190,18 +209,22 @@ _NOISE_FILTERS = (
 )
 
 
-def _maxrss_bytes() -> int:
+def _maxrss_bytes():
     """PEAK resident-set size of this process, in BYTES.
 
     ``ru_maxrss`` is KILOBYTES on Linux and BYTES on macOS/BSD -- normalising
     here rather than at each call site keeps the budget one number on every
     platform.
 
+    Returns ``None`` where the POSIX ``resource`` module does not exist (Windows).
+
     This is a MONOTONE HIGH-WATER MARK, which is why it is only the FALLBACK
     instrument: growth that stays below a peak the process already reached
     earlier in the pytest session is invisible to it. That masking is measured,
     not hypothetical -- see ``_rss_instrument()``.
     """
+    if resource is None:
+        return None
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak if sys.platform == "darwin" else peak * 1024
 
@@ -219,15 +242,23 @@ def _live_rss_bytes():
             resident_pages = int(handle.read().split()[1])
     except (OSError, IndexError, ValueError):
         return None
-    return resident_pages * resource.getpagesize()
+    return resident_pages * mmap.PAGESIZE
 
 
 def _rss_instrument():
     """Return ``(reader, kind)`` for the native-visible backstop.
 
-    ``kind`` is ``"live"`` (a true RSS delta -- preferred, and what the
-    merge-gating Linux lanes use) or ``"peak"`` (``ru_maxrss``, the degraded
-    fallback where ``/proc`` is absent).
+    ``kind`` is one of THREE values, deliberately -- a two-valued answer would
+    have to fold "cannot measure" onto one of the measuring answers, and folding
+    it onto the permissive side is the silent-pass shape this file exists to
+    avoid:
+      * ``"live"``        -- a true RSS delta from ``/proc/self/statm``. Preferred,
+                             and what every merge-gating (Linux) lane uses.
+      * ``"peak"``        -- ``ru_maxrss``. Degraded fallback where ``/proc`` is
+                             absent but POSIX ``resource`` exists (macOS/BSD).
+      * ``"unavailable"`` -- neither instrument exists (Windows). ``reader`` is
+                             ``None``; the caller must then state that the native
+                             half was NOT measured rather than pass silently.
 
     WHY THIS MATTERS, measured on this branch (2026-08-30, probing the real
     pytest process at the moment these tests run):
@@ -246,7 +277,9 @@ def _rss_instrument():
     """
     if _live_rss_bytes() is not None:
         return _live_rss_bytes, "live"
-    return _maxrss_bytes, "peak"
+    if _maxrss_bytes() is not None:
+        return _maxrss_bytes, "peak"
+    return None, "unavailable"
 
 
 def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS):
@@ -266,7 +299,7 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
 
     gc.collect()
     rss_reader, rss_kind = _rss_instrument()
-    rss_before = rss_reader()
+    rss_before = rss_reader() if rss_reader is not None else None
     tracemalloc.start()
     try:
         first = tracemalloc.take_snapshot().filter_traces(_NOISE_FILTERS)
@@ -276,7 +309,7 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
         second = tracemalloc.take_snapshot().filter_traces(_NOISE_FILTERS)
     finally:
         tracemalloc.stop()
-    rss_growth = rss_reader() - rss_before
+    rss_growth = None if rss_reader is None else rss_reader() - rss_before
 
     # Net delta across every (file, line) group: sums retained growth and
     # subtracts anything freed, which is the quantity a leak accumulates in.
@@ -284,8 +317,25 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
     return tracked, rss_growth, rss_kind
 
 
-def _assert_rss_under_budget(label: str, rss_growth: int, rss_kind: str) -> None:
-    """Loose, native-visible backstop: RSS growth over the measured loop."""
+def _assert_rss_under_budget(label: str, rss_growth, rss_kind: str) -> None:
+    """Loose, native-visible backstop: RSS growth over the measured loop.
+
+    When no RSS instrument exists (Windows) this STATES that the native half was
+    not measured, via a ``warnings.warn`` that pytest surfaces in its default
+    warnings summary, and asserts nothing about it. It never reports a
+    native-visible verdict it did not measure. The tracemalloc budget in the
+    caller has already run and gated on every platform.
+    """
+    if rss_kind == "unavailable":
+        warnings.warn(
+            f"{label}: the native-visible RSS backstop did NOT run on this "
+            "platform (no POSIX `resource` module and no /proc/self/statm). The "
+            "tracemalloc budget DID run and gated this test; the native half is "
+            "UNMEASURED here, so this test's verdict covers Python-visible "
+            "retention only (issues #1465, #3585).",
+            stacklevel=2,
+        )
+        return
     degraded = (
         ""
         if rss_kind == "live"
