@@ -85,24 +85,40 @@ pub const MARKER_HANDLER_ENTERED: &str = "Received Ctrl-C";
 //   writable_session_auto_flushes_mid_session_across_threshold
 //     OLD per-write wait_for_line(OK, 60s), write id=0  [includes boot]
 //        -> (a) 40 + (b0) 25                               = 65s >= 60s  OK
-//     OLD per-write wait_for_line(OK, 60s), writes id=1..4
-//        -> (b1..4) 10s each                        DECLARED EXCEPTION, below
-//     OLD wait_for_sstable(60s)   -> (c) 35s        DECLARED EXCEPTION, below
-//     OLD wait_timeout(60s) on EOF -> (d) 35s       DECLARED EXCEPTION, below
+//     OLD per-write wait_for_line(OK, 60s), writes id=1..4  [4 INDEPENDENT bounds]
+//        -> (b1..4) per-op ceiling 60s, SHARED GROUP total 70s  see GroupBudget
+//     OLD wait_for_sstable(60s)    -> (c) 60s               = 60s >= 60s  OK
+//     OLD wait_timeout(60s) on EOF -> (d) 60s               = 60s >= 60s  OK
 //     (e) durability-read 20       [NEW ceiling: `select_rows` was unbounded]
 //
-// DECLARED EXCEPTION, and why the invariant CANNOT hold literally for the
-// sibling: its old bounds were SEVEN independent 60s deadlines = 420s nominal,
-// against nextest's 240s HARD KILL. They were therefore never simultaneously
-// realizable — a run that actually used them would have been KILLED at 240s with
-// no message, which is the outcome this whole change exists to prevent. So for
-// the sibling the old "60s per stage" is a nominal figure, not a realizable
-// bound, and the realizable old bound on any late stage was "whatever remains of
-// 240s" — which is exactly what `StageClock::clip` now computes, with an
-// attributed message instead of a kill. Those three groups are floored at
-// `SIBLING_STAGE_FLOOR` and the sibling's total base sum is held at or above
-// 3x the old bound instead. This is a REDUCTION in two of the sibling's nominal
-// ceilings, stated here rather than left to be discovered.
+// THE PER-OPERATION vs AGGREGATE DISTINCTION (roborev job 219, finding 1). An
+// earlier version of this comment argued a "DECLARED EXCEPTION": the sibling's
+// old bounds were SEVEN independent 60s deadlines = 420s nominal against a 240s
+// HARD KILL, so they were never simultaneously realizable, and three of its
+// groups were therefore floored well under 60s (writes id=1..4 at 10s, the
+// sstable and EOF waits at 35s).
+//
+// That aggregate argument is TRUE AND IRRELEVANT PER OPERATION. Under the old
+// code any SINGLE contended write could use the full 60s provided its siblings
+// were fast; a 12s cap failed it with ~200s of the envelope unused. That is the
+// round-3 blocker — a bound tighter than the one it replaced — relocated into the
+// sibling, and the aggregate reasoning papered over it.
+//
+// The resolution keeps both properties by separating them:
+//   * PER OPERATION, the ceiling is the full OLD_BOUND (60s), calibratable
+//     upward like any other stage;
+//   * the SUM of a group of repeated operations is bounded by a shared
+//     `GroupBudget`, so a run of slow writes cannot starve the later stages.
+// A reduction below the old bound therefore fires ONLY when earlier operations
+// have actually consumed the headroom — contingent on real consumption rather
+// than unconditional — and when it fires, the failure message says so.
+//
+// What remains irreducibly true is the harness arithmetic: 420s of nominal old
+// bounds cannot fit in a 240s kill, so the sibling still cannot honour ALL of
+// them at once. It now honours each one INDIVIDUALLY, and the group total plus
+// the later stages' bases fit the envelope (60+60+60+20 = 200s <= 230s), which is
+// the strongest guarantee available inside the harness. `SIBLING_STAGE_FLOOR` is
+// gone with the exception it served.
 //
 // TOTAL-BUDGET ARITHMETIC (spec: "The test owns a total budget below the harness
 // hard-kill"). `.config/nextest.toml` sets
@@ -129,10 +145,6 @@ pub const TEST_TOTAL_BUDGET: Duration = Duration::from_secs(230);
 /// is stated against this value.
 const OLD_BOUND: Duration = Duration::from_secs(60);
 
-/// Floor for the sibling stages whose old nominal 60s cannot be honoured inside
-/// the total budget — see DECLARED EXCEPTION above.
-const SIBLING_STAGE_FLOOR: Duration = Duration::from_secs(10);
-
 /// A stage's calibration inputs: `base` is the budget on a quiet host, `cap` the
 /// ceiling no amount of measured contention may exceed.
 #[derive(Clone, Copy, Debug)]
@@ -156,10 +168,24 @@ pub const T1_READ: StageSpec = spec(25, 35);
 
 // writable_session_auto_flushes_mid_session_across_threshold
 pub const T2_ACK_FIRST: StageSpec = spec(25, 28);
-pub const T2_ACK_LATER: StageSpec = spec(10, 12);
-pub const T2_SSTABLE: StageSpec = spec(35, 40);
-pub const T2_EOF_EXIT: StageSpec = spec(35, 40);
+/// Writes id=1..4. The PER-OPERATION ceiling is the full old bound (60s): each
+/// replaced an INDEPENDENT 60s wait, so a single slow write must still be able to
+/// use 60s. What bounds the SUM is `T2_ACK_GROUP_TOTAL`, not a small per-op cap.
+pub const T2_ACK_LATER: StageSpec = spec(60, 60);
+pub const T2_SSTABLE: StageSpec = spec(60, 70);
+pub const T2_EOF_EXIT: StageSpec = spec(60, 70);
 pub const T2_READ: StageSpec = spec(20, 25);
+
+/// The SHARED budget for writes id=1..4 (see `GroupBudget`), set to exactly ONE
+/// `OLD_BOUND`: the four repeats collectively get what any one of them was
+/// individually allowed, and any one of them may draw all of it. So the
+/// per-operation guarantee is unchanged from the old code while the SUM can no
+/// longer starve the later stages — the envelope check in
+/// `the_nominal_cap_sums_stay_under_the_total_budget` is what forces the size.
+///
+/// For scale: four quiet acks cost ~123ms in total, so this is ~490x the measured
+/// aggregate.
+pub const T2_ACK_GROUP_TOTAL: Duration = OLD_BOUND;
 
 /// The stall window for the progress-checked polls. Calibrated like any stage,
 /// but it is not a stage: it never bounds the test on its own.
@@ -437,6 +463,9 @@ pub struct Budget {
     /// total budget — i.e. the total budget, not this stage, is the binding
     /// constraint.
     clipped_to_total: bool,
+    /// Set when `GroupBudget::bound` shortened `derived` because earlier
+    /// operations in the same group had already consumed the headroom.
+    clipped_to_group: Option<&'static str>,
 }
 
 /// `clamp(base * scale, base, cap)` with `scale = max(1, observed /
@@ -466,6 +495,7 @@ pub fn calibrated(
         observed_name: Some(observed_name),
         quiet_baseline,
         clipped_to_total: false,
+        clipped_to_group: None,
     }
 }
 
@@ -481,6 +511,7 @@ fn bare(deadline: Duration) -> Budget {
         observed_name: None,
         quiet_baseline: Duration::ZERO,
         clipped_to_total: false,
+        clipped_to_group: None,
     }
 }
 
@@ -499,6 +530,15 @@ impl Budget {
                 self.derived
             ),
         };
+        let core = match self.clipped_to_group {
+            Some(group) => format!(
+                "{core} [CLIPPED to {:.2?} by the SHARED GROUP BUDGET `{group}` — earlier \
+                 operations in this group have already consumed the headroom, so this reduction \
+                 is contingent on real consumption, not unconditional]",
+                self.derived
+            ),
+            None => core,
+        };
         if self.clipped_to_total {
             format!(
                 "{core} [CLIPPED to {:.2?} by the test's REMAINING TOTAL BUDGET — the total \
@@ -508,6 +548,70 @@ impl Budget {
         } else {
             core
         }
+    }
+}
+
+/// A budget SHARED by a group of repeated operations that each replaced an
+/// INDEPENDENT old bound.
+///
+/// Why this exists (roborev job 219, finding 1). The sibling's four later writes
+/// were given `spec(10, 12)` on an aggregate argument: seven 60s bounds could
+/// never all be spent inside a 240s hard kill. That argument is true in aggregate
+/// and IRRELEVANT PER OPERATION — previously any single contended write could use
+/// up to 60s provided its siblings were fast, and a 12s cap failed it with ~200s
+/// of headroom unused. That is the round-3 blocker (a bound tighter than the one
+/// it replaced) relocated into the sibling.
+///
+/// So the per-operation ceiling is restored to the full old bound, and the SUM is
+/// bounded instead: each operation may draw `min(per-op ceiling, remaining
+/// group)`. The reduction therefore fires ONLY when earlier operations have
+/// actually consumed the headroom — contingent on real consumption rather than
+/// unconditional.
+pub struct GroupBudget {
+    name: &'static str,
+    total: Duration,
+    consumed: Duration,
+    ops: usize,
+}
+
+impl GroupBudget {
+    pub fn new(name: &'static str, total: Duration) -> Self {
+        Self {
+            name,
+            total,
+            consumed: Duration::ZERO,
+            ops: 0,
+        }
+    }
+
+    pub fn remaining(&self) -> Duration {
+        self.total.saturating_sub(self.consumed)
+    }
+
+    /// Bound a calibrated per-operation budget by what the group has left.
+    pub fn bound(&self, mut budget: Budget) -> Budget {
+        let remaining = self.remaining();
+        if budget.derived > remaining {
+            budget.derived = remaining;
+            budget.clipped_to_group = Some(self.name);
+        }
+        budget
+    }
+
+    pub fn charge(&mut self, took: Duration) {
+        self.consumed = self.consumed.saturating_add(took);
+        self.ops += 1;
+    }
+
+    pub fn report(&self) -> String {
+        format!(
+            "group `{}`: {:.3?} consumed over {} operation(s) of {:.1?}; {:.2?} remaining",
+            self.name,
+            self.consumed,
+            self.ops,
+            self.total,
+            self.remaining()
+        )
     }
 }
 
@@ -1030,36 +1134,64 @@ fn no_wait_is_tighter_than_the_bound_it_replaced() {
         "stages (a)+(b0) replace one {OLD_BOUND:?} deadline but sum to only {:?}",
         SESSION_UP_DEADLINE + T2_ACK_FIRST.base
     );
-    // DECLARED EXCEPTION (see the floor-invariant comment): the sibling's old
-    // bounds were SEVEN independent 60s deadlines = 420s nominal against a 240s
-    // hard kill, so they were never simultaneously realizable. These three
-    // groups are floored at SIBLING_STAGE_FLOOR instead, and the sibling's total
-    // base sum is held at >= 3x the old bound.
+    // The four LATER writes each replaced an INDEPENDENT 60s wait, so the
+    // PER-OPERATION ceiling must be the full old bound. What bounds their sum is
+    // the shared `GroupBudget`, not a small per-op cap (roborev job 219, finding
+    // 1: the aggregate argument that justified `spec(10, 12)` was true in
+    // aggregate and irrelevant per operation).
     for (name, base) in [
         ("(b1..4) per-write ack", T2_ACK_LATER.base),
         ("(c) mid-session flush", T2_SSTABLE.base),
         ("(d) EOF exit", T2_EOF_EXIT.base),
     ] {
         assert!(
-            base >= SIBLING_STAGE_FLOOR,
-            "sibling stage {name} is {base:?}, below the declared floor {SIBLING_STAGE_FLOOR:?}"
-        );
-        assert!(
-            base < OLD_BOUND,
-            "sibling stage {name} is {base:?} >= {OLD_BOUND:?}: it no longer needs the \
-             DECLARED EXCEPTION, so remove it from this loop and assert the floor directly"
+            base >= OLD_BOUND,
+            "sibling stage {name} is {base:?}, tighter than the {OLD_BOUND:?} it replaced"
         );
     }
-    let sibling_total = SESSION_UP_DEADLINE
-        + T2_ACK_FIRST.base
-        + T2_ACK_LATER.base * 4
-        + T2_SSTABLE.base
-        + T2_EOF_EXIT.base
-        + T2_READ.base;
+
+    // GROUP SEMANTICS: with a FRESH group budget, a single operation can reach the
+    // full old bound — the whole point of the group. Any reduction must be
+    // contingent on real consumption.
+    let group = GroupBudget::new("t2 later acks", T2_ACK_GROUP_TOTAL);
+    let fresh = group.bound(calibrated(
+        T2_ACK_LATER,
+        Duration::ZERO,
+        "t_ack",
+        ACK_QUIET_BASELINE,
+    ));
+    assert_eq!(
+        fresh.derived, OLD_BOUND,
+        "a fresh group must let one operation draw the full old bound: {fresh:?}"
+    );
     assert!(
-        sibling_total >= OLD_BOUND * 3,
-        "the sibling's stages sum to {sibling_total:?}, under the 3x{OLD_BOUND:?} its \
-         declared exception is predicated on"
+        fresh.clipped_to_group.is_none(),
+        "nothing has been consumed, so nothing may be clipped: {fresh:?}"
+    );
+
+    // ...and after real consumption, and only then, it is reduced — and says so.
+    let mut group = group;
+    group.charge(T2_ACK_GROUP_TOTAL - Duration::from_secs(5));
+    let squeezed = group.bound(calibrated(
+        T2_ACK_LATER,
+        Duration::ZERO,
+        "t_ack",
+        ACK_QUIET_BASELINE,
+    ));
+    assert_eq!(squeezed.derived, Duration::from_secs(5));
+    assert_eq!(squeezed.clipped_to_group, Some("t2 later acks"));
+    assert!(
+        squeezed.describe().contains("SHARED GROUP BUDGET"),
+        "a group clip must be reported: {}",
+        squeezed.describe()
+    );
+
+    // The group total plus the later stages' bases must fit the envelope, so a run
+    // of slow writes cannot starve the tail.
+    let post_boot = T2_ACK_GROUP_TOTAL + T2_SSTABLE.base + T2_EOF_EXIT.base + T2_READ.base;
+    assert!(
+        post_boot <= TEST_TOTAL_BUDGET,
+        "the sibling's post-boot stages need {post_boot:?}, over the {TEST_TOTAL_BUDGET:?} total"
     );
 
     // Stage (e) is floored against nothing: `select_rows` was an UNBOUNDED
@@ -1094,15 +1226,22 @@ fn the_nominal_cap_sums_stay_under_the_total_budget() {
         "sigint test caps sum to {t1:?}, over the {TEST_TOTAL_BUDGET:?} total"
     );
 
-    let t2 = SESSION_UP_DEADLINE
-        + T2_ACK_FIRST.cap
-        + T2_ACK_LATER.cap * 4
-        + T2_SSTABLE.cap
-        + T2_EOF_EXIT.cap
-        + T2_READ.cap;
+    // The sibling is accounted by GROUP, not by per-op caps x N: the four later
+    // acks share `T2_ACK_GROUP_TOTAL`, so that — not `T2_ACK_LATER.cap * 4` — is
+    // what they can consume. (Per-op caps x N would be 240s, exactly the
+    // unrealizable nominal figure that misled the earlier accounting.)
+    let t2 = T2_ACK_GROUP_TOTAL + T2_SSTABLE.cap + T2_EOF_EXIT.cap + T2_READ.cap;
     assert!(
         t2 <= TEST_TOTAL_BUDGET,
-        "sibling test caps sum to {t2:?}, over the {TEST_TOTAL_BUDGET:?} total"
+        "sibling post-boot caps sum to {t2:?}, over the {TEST_TOTAL_BUDGET:?} total"
+    );
+    // (a)+(b0) are the boot path — measured in tens of milliseconds. Their
+    // ceilings exist for a pathological host, on which `StageClock::clip` applies
+    // with an attributed message rather than silently squeezing a later stage.
+    assert!(
+        SESSION_UP_DEADLINE + T2_ACK_FIRST.cap + t2 > TEST_TOTAL_BUDGET,
+        "if the sibling's full nominal ceilings now FIT the envelope, delete this \
+         acknowledgement and assert the plain sum instead"
     );
 
     // Every spec must be internally coherent.
