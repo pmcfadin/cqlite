@@ -3,31 +3,31 @@
 Public surface exercised by each task is named, per `openspec/config.yaml`.
 
 ## 1. Python production surface
-- [ ] 1.1 Add `#[pyclass(module = "cqlite", frozen)] Udt` in `bindings/python/src/value.rs` with
+- [x] 1.1 Add `#[pyclass(module = "cqlite", frozen)] Udt` in `bindings/python/src/value.rs` with
   `#[pyo3(get)] type_name`, `keyspace`, `fields`, following the `cqlite.Duration` precedent.
   **Surface**: `cqlite.Udt`.
-- [ ] 1.2 Implement `__getitem__`/`__contains__`/`__iter__`/`__len__`/`keys`/`values`/`items`/`__repr__`
+- [x] 1.2 Implement `__getitem__`/`__contains__`/`__iter__`/`__len__`/`keys`/`values`/`items`/`__repr__`
   delegating to `fields`, plus `__eq__`/`__hash__` over `(keyspace, type_name, fields)`.
   **Surface**: mapping access `udt["street"]`; hashability required by task 3.
-- [ ] 1.3 Rewrite `udt_to_py` to construct `Udt` with fields ONLY — no `_type`/`_keyspace` set_item.
+- [x] 1.3 Rewrite `udt_to_py` to construct `Udt` with fields ONLY — no `_type`/`_keyspace` set_item.
   **Surface**: every Python query result containing a UDT.
-- [ ] 1.4 Export `Udt` from the module and declare it in `python/cqlite/__init__.pyi`.
+- [x] 1.4 Export `Udt` from the module and declare it in `python/cqlite/__init__.pyi`.
   **Surface**: `from cqlite import Udt`; asserted by `test_stub_fidelity.py`.
 
 ## 2. Node production surface
-- [ ] 2.1 Rewrite `udt_to_object` in `bindings/node/src/value.rs` to emit
+- [x] 2.1 Rewrite `udt_to_object` in `bindings/node/src/value.rs` to emit
   `{ typeName, keyspace, fields }` with fields in their own nested object.
   **Surface**: every Node query result containing a UDT.
-- [ ] 2.2 Update `interface UdtValue` in `bindings/node/lib/index.d.ts` — remove the
+- [x] 2.2 Update `interface UdtValue` in `bindings/node/lib/index.d.ts` — remove the
   `[field: string]: Value` index signature, add `typeName`/`keyspace`/`fields`; update the JSDoc
   example and the type-mapping table row. **Surface**: `index.d.ts`; asserted by
   `typescript-definitions.test.js`.
 
 ## 3. Site 4 — the Python hashable projection
-- [ ] 3.1 Rewrite the `Udt` arm of `value_to_hashable_key` to emit a `Udt` instance: metadata on the
+- [x] 3.1 Rewrite the `Udt` arm of `value_to_hashable_key` to emit a `Udt` instance: metadata on the
   instance, exactly one pair per declared field, no metadata pairs.
   **Surface**: `dict` keys from `map<frozen<udt>,X>` (`map_to_py`) and set members (`set_to_py`).
-- [ ] 3.2 Do NOT add `Tuple`/`Set` arms (#3500). Confirm no behaviour change for shapes that
+- [x] 3.2 Do NOT add `Tuple`/`Set` arms (#3500). Confirm no behaviour change for shapes that
   currently succeed.
 
 ## 4. The test subject — a Cassandra-written colliding UDT fixture
@@ -57,28 +57,28 @@ the fix. **Cassandra-written, not CQLite-written**, and committed **checkout-rel
 cannot be fabricated off-thread, so `udt_to_object`'s produced object cannot be asserted from
 `bindings/node/src/value_tests.rs`. Therefore the collision assertions live at script level.
 
-- [ ] 5.1 Python, `bindings/python/tests/test_issue_3504_udt_field_namespace.py`: read the 4.2 fixture
+- [x] 5.1 Python, `bindings/python/tests/test_issue_3504_udt_field_namespace.py`: read the 4.2 fixture
   through the public query API; assert `.type_name`/`.keyspace` plus all three field values, `len == 3`,
   `udt["_type"]` returns the FIELD, and `udt["_type"]` on a non-colliding UDT raises `KeyError`.
   **Executed by**: `python-bindings` (`maturin develop` + `pytest bindings/python/tests`).
-- [ ] 5.2 Node, `bindings/node/__test__/issue-3504-udt-field-namespace.test.js`: same input, asserting
+- [x] 5.2 Node, `bindings/node/__test__/issue-3504-udt-field-namespace.test.js`: same input, asserting
   `{typeName, keyspace, fields}` and that `Object.keys(result)` holds no field name.
   **Executed by**: `node-bindings` (whole jest suite).
-- [ ] 5.3 Site 4 (Python only): the `map<frozen<collide>, int>` column → exactly one `_type` entry in
+- [x] 5.3 Site 4 (Python only): the `map<frozen<collide>, int>` column → exactly one `_type` entry in
   the projected key, identity recoverable; plus two-different-types-same-fields distinctness.
   **Executed by**: `python-bindings`.
-- [ ] 5.4 Cross-binding parity for AC3: same fixture, compare type name / keyspace / field mapping as
+- [x] 5.4 Cross-binding parity for AC3: same fixture, compare type name / keyspace / field mapping as
   DATA across the two suites.
-- [ ] 5.5 Update `test_types_collections_udt.py` (6 assertion sites) from `"_type" in udt` to
+- [x] 5.5 Update `test_types_collections_udt.py` (6 assertion sites) from `"_type" in udt` to
   `.type_name`; keep dataset-skip-clean. **Executed by**: `python-bindings`.
-- [ ] 5.6 Update `types.test.js` (5 sites) to the new shape. **Executed by**: `node-bindings`.
-- [ ] 5.7 `test_cli_parity.py`: retarget `test_udt_field_named_keyspace_is_dropped` — it pins the
+- [x] 5.6 Update `types.test.js` (5 sites) to the new shape. **Executed by**: `node-bindings`.
+- [x] 5.7 `test_cli_parity.py`: retarget `test_udt_field_named_keyspace_is_dropped` — it pins the
   DEFECT, so rewrite it to pin the fix; update the a-3 projection expectation and the `_udt()` helper;
   retype the normalizer's UDT branch off the `"_type" in value` sniff (production no longer emits that
   key, so leaving the sniff makes it dead for UDTs while still firing on maps). Leave the site-1 and
   site-2 tests asserting their current, still-true behaviour. **Executed by**: `python-bindings`
   (CLI-parity suite needs `RUN_SLOW_TESTS=1`).
-- [ ] 5.8 Stub fidelity: `test_stub_fidelity.py` green with `TYPE_ONLY_STUB_NAMES` still **empty**;
+- [x] 5.8 Stub fidelity: `test_stub_fidelity.py` green with `TYPE_ONLY_STUB_NAMES` still **empty**;
   `typescript-definitions.test.js` drift alarm + the no-`any` rule green.
 - [ ] 5.9 **State the SKIP exposure in the PR rather than papering over it**: both `python-bindings`
   and `node-bindings` SKIP without their toolchain, so AC2's evidence rides on SKIP-able components.
@@ -86,12 +86,12 @@ cannot be fabricated off-thread, so `udt_to_object`'s produced object cannot be 
   fix does not otherwise need — a harness that never reaches the code is worse than a declared SKIP.
 
 ## 6. Docs
-- [ ] 6.1 `docs/development/M4_spec.md` §5.3: sites 3+4 → FIXED with mechanism; site 2 stays OPEN
+- [x] 6.1 `docs/development/M4_spec.md` §5.3: sites 3+4 → FIXED with mechanism; site 2 stays OPEN
   attributed to #3497, noting the new structural signal; correct the oracle table.
-- [ ] 6.2 `bindings/python/README.md` (:308) and `bindings/node/README.md` (:352), the module doc
+- [x] 6.2 `bindings/python/README.md` (:308) and `bindings/node/README.md` (:352), the module doc
   tables (`python/src/value.rs`, `node/src/value.rs`), and `node/examples/type-handling.ts` +
   `error-handling.ts` — no example may still show the flat shape as current.
-- [ ] 6.3 CHANGELOG: note the breaking binding-surface change and the migration
+- [x] 6.3 CHANGELOG: note the breaking binding-surface change and the migration
   (`udt["_type"]` → `udt.type_name` / `result._type` → `result.typeName`).
 
 ## 7. Certification
