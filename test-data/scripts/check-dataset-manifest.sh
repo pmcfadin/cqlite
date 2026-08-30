@@ -116,7 +116,7 @@ fi
 # absence is git-not-a-work-tree, which is a legitimate environment (Jest's own fallback)
 # and is now tested for EXPLICITLY rather than inferred from an empty result -- an empty
 # result is exactly what a failure also produces.
-for _tool in find grep sort awk sed basename cmp git; do
+for _tool in find grep sort awk sed basename cmp git tr; do
   command -v "$_tool" >/dev/null 2>&1 || {
     echo "❌ dataset manifest check: required tool '$_tool' not found; cannot judge the corpus" >&2
     exit 2
@@ -128,6 +128,17 @@ done
 # `${0%/*}` would otherwise yield $0 unchanged.
 case "$0" in */*) _SCRIPT_DIR=${0%/*} ;; *) _SCRIPT_DIR=. ;; esac
 _SCRIPT_REPO=$(cd "$_SCRIPT_DIR/../.." 2>/dev/null && pwd) || _SCRIPT_REPO=""
+# Is _SCRIPT_REPO actually a git work tree? Established ONCE. The script is also run from a
+# COPY outside any repo (the self-test's nogit fixture, and anyone who vendors it), where
+# `git ls-files` exits 128 -- which is a real malfunction status everywhere else, so without
+# this flag the trusted-inventory lookup would abort every such run. "Not a work tree" is a
+# DECLARED absence of an inventory, not a broken tool.
+_SCRIPT_REPO_IS_GIT=0
+if [ -n "$_SCRIPT_REPO" ] && command -v git >/dev/null 2>&1 \
+   && git -C "$_SCRIPT_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  _SCRIPT_REPO_IS_GIT=1
+fi
+
 COMMITTED_TABLE_DIRS=""
 if [ -n "$_SCRIPT_REPO" ] \
    && command -v git >/dev/null 2>&1 \
@@ -474,23 +485,42 @@ _toc_companions_usable() {
   # runs against — all 144 generations there have a twin — but a corpus assembled elsewhere
   # gets the weaker guarantee, and nothing in the output would otherwise say so.
   _TOC_FAIL_REASON=untrusted-toc
-  _t_relpath=$(_committed_toc_relpath "$_t_toc") || return 1
-  if [ -n "$_t_relpath" ]; then
-    _toc_matches_head "$_t_toc" "$_t_relpath" || return 1
+  # Plain call, NOT `$(...)`: see the function header -- a subshell would swallow its exit 2.
+  _committed_toc_relpath "$_t_toc"
+  if [ -n "$_C_TOC_REL" ]; then
+    _toc_matches_head "$_t_toc" "$_C_TOC_REL" || return 1
   fi
   _TOC_FAIL_REASON=
   return 0
 }
 
-# _committed_toc_relpath <corpus-toc-path> -- echo the REPO-RELATIVE path of this TOC's
-# git-tracked twin, or nothing when there is none.
+# _committed_toc_relpath <corpus-toc-path> -- set _C_TOC_REL to the REPO-RELATIVE path of
+# this TOC's git-tracked twin, or to the empty string when there is none.
+#
+# SETS A GLOBAL RATHER THAN ECHOING, deliberately. Called as `$(...)` it would run in a
+# SUBSHELL, so the `exit 2` below would kill only that subshell; the caller's `|| return 1`
+# would then turn a MALFUNCTION into "TOC mismatch" and walk it out to the reserved exit 9 --
+# the very collapse this discipline exists to prevent, reintroduced by the call syntax.
+#
+# git distinguishes the two cases and so must this: `ls-files --error-unmatch` exits 1 for
+# UNTRACKED (a legitimate "no twin") and 128 for a broken invocation / not-a-repo. Measured.
+# Collapsing 128 onto "no twin" would silently disable the trusted-inventory check.
 _committed_toc_relpath() {
+  _C_TOC_REL=""
   _c_tail=${1#*/sstables/}
-  [ "$_c_tail" = "$1" ] && { printf ''; return 0; }
-  [ -n "$_SCRIPT_REPO" ] || { printf ''; return 0; }
+  [ "$_c_tail" = "$1" ] && return 0
+  # Not a work tree => no inventory exists to compare against. Declared, not a malfunction.
+  [ "$_SCRIPT_REPO_IS_GIT" = 1 ] || return 0
   _c_rel="test-data/datasets/sstables/$_c_tail"
-  git -C "$_SCRIPT_REPO" ls-files --error-unmatch "$_c_rel" >/dev/null 2>&1 || { printf ''; return 0; }
-  printf '%s' "$_c_rel"
+  _c_rc=0
+  git -C "$_SCRIPT_REPO" ls-files --error-unmatch "$_c_rel" >/dev/null 2>&1 || _c_rc=$?
+  case "$_c_rc" in
+    0) _C_TOC_REL="$_c_rel" ;;
+    1) : ;;                                  # untracked: no twin, fall back to the derived checks
+    *) echo "❌ dataset manifest check: 'git ls-files' failed (status $_c_rc) resolving the committed twin of $1; cannot judge the corpus" >&2
+       exit 2 ;;
+  esac
+  return 0
 }
 
 # _toc_matches_head <corpus-toc-path> <repo-relative-path> -- rc 0 iff the corpus TOC matches
@@ -511,16 +541,43 @@ _committed_toc_relpath() {
 # tooling failure out to the reserved exit 9, which the #2078 opt-out suppresses as a judged
 # corpus. `cmp` is in the up-front tool check for the same reason.
 _toc_matches_head() {
-  _tm_tmp="${TMPDIR:-/tmp}/cqlite-toc-head.$$"
-  if ! git -C "$_SCRIPT_REPO" show "HEAD:$2" >"$_tm_tmp" 2>/dev/null; then
+  # mktemp, not a `$$`-derived name: a predictable path in a shared /tmp is both a symlink
+  # target and, if a previous `rm -f` ever failed, a stale file this would compare against.
+  _tm_tmp=$(mktemp "${TMPDIR:-/tmp}/cqlite-toc-head.XXXXXX") || {
+    echo "❌ dataset manifest check: mktemp failed; cannot materialise the committed twin" >&2
+    exit 2
+  }
+  # A CONFIRMED absence from HEAD is not an operational failure, and collapsing the two
+  # (roborev, post-rebase round 4) would let git corruption or a permission error read as
+  # "no inventory" and silently disable this check. `cat-file -e` answers EXISTENCE on its
+  # own, so a `show` that fails afterwards is a genuine malfunction.
+  if ! git -C "$_SCRIPT_REPO" cat-file -e "HEAD:$2" 2>/dev/null; then
     rm -f "$_tm_tmp"
-    # Tracked but not resolvable at HEAD (added-but-uncommitted). Not a corpus verdict: the
-    # inventory is unavailable, so fall back to the derived checks rather than invent one.
+    # Tracked but absent at HEAD (added, not yet committed): the inventory does not exist
+    # yet, so fall back to the derived checks rather than invent one.
     return 0
   fi
+  if ! git -C "$_SCRIPT_REPO" show "HEAD:$2" >"$_tm_tmp" 2>/dev/null; then
+    rm -f "$_tm_tmp"
+    echo "❌ dataset manifest check: 'git show HEAD:$2' failed although the object EXISTS; cannot judge the corpus" >&2
+    exit 2
+  fi
+  # COMPARE THE INVENTORY, NOT THE BYTES (roborev, post-rebase round 4). A byte-for-byte
+  # `cmp` rejects a CRLF TOC -- which the listed-component loop above explicitly TOLERATES
+  # and which the reader trims. Requiring byte equality here while accepting CRLF twenty
+  # lines up is an internal contradiction, and it would mark a valid Windows-produced corpus
+  # incomplete. The property is that the two list the SAME COMPONENTS, so that is what is
+  # compared: CR stripped, blanks dropped, `sort`ed -- a TOC is an inventory, not a sequence.
+  _tm_a="$_tm_tmp.a"; _tm_b="$_tm_tmp.b"
+  if ! tr -d '\r' <"$1" | sed '/^$/d' | sort >"$_tm_a" \
+     || ! tr -d '\r' <"$_tm_tmp" | sed '/^$/d' | sort >"$_tm_b"; then
+    rm -f "$_tm_tmp" "$_tm_a" "$_tm_b"
+    echo "❌ dataset manifest check: could not normalise $1 or its committed twin; cannot judge the corpus" >&2
+    exit 2
+  fi
   _tm_rc=0
-  cmp -s "$1" "$_tm_tmp" || _tm_rc=$?
-  rm -f "$_tm_tmp"
+  cmp -s "$_tm_a" "$_tm_b" || _tm_rc=$?
+  rm -f "$_tm_tmp" "$_tm_a" "$_tm_b"
   case "$_tm_rc" in
     0) return 0 ;;
     1) return 1 ;;

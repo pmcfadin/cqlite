@@ -1664,45 +1664,88 @@ fi
 # the working tree.
 #
 # The first version compared the corpus TOC against the working-tree file at the mapped
-# path. Under the DEFAULT dataset root — the checkout's own `test-data/datasets`, which is
-# the documented fetch target — those are THE SAME FILE, so `cmp` compared a file to itself,
+# path. Under the DEFAULT dataset root -- the checkout's own `test-data/datasets`, which is
+# the documented fetch target -- those are THE SAME FILE, so `cmp` compared a file to itself,
 # always succeeded, and the whole trusted-inventory check was VACUOUS in exactly the
 # configuration most likely to be used.
 #
-# Asserted on the function directly, because that isolates the property: modify the WORKING
-# TREE copy of a tracked TOC and require a mismatch. A whole-corpus case cannot reach it
-# without populating the checkout with gitignored binaries.
-#
-# The working-tree file is restored, and the case FAILS LOUDLY rather than leaving the
-# checkout dirty if it cannot be.
+# RUN IN AN ISOLATED SCRATCH REPO (roborev, post-rebase round 4). The first version mutated a
+# TRACKED file in the real checkout and restored it. That is unsafe here for reasons this
+# repo already documents: gate components and sibling lanes run CONCURRENTLY on this box, so
+# another reader can observe the truncated file, and an interrupt between the edit and the
+# restore leaves the checkout dirty -- with the cleanup trap deleting the backup. A scratch
+# repo has the same shape (a tracked TOC whose working copy is then modified) and touches
+# nothing shared.
 # ---------------------------------------------------------------------------
-tw_repo=$(cd "$(dirname "$GATE")/.." && pwd)
-tw_toc=$(git -C "$tw_repo" ls-files test-data/datasets/sstables 2>/dev/null | grep 'TOC\.txt$' | head -1)
-if [ -n "$tw_toc" ] && [ -f "$tw_repo/$tw_toc" ] && git -C "$tw_repo" diff --quiet -- "$tw_toc" 2>/dev/null; then
+if command -v git >/dev/null 2>&1; then
+  tw_repo="$WORK/twin-repo"
+  tw_rel="test-data/datasets/sstables/test_basic/simple_table-$UUID/nb-1-big-TOC.txt"
+  mkdir -p "$tw_repo/$(dirname "$tw_rel")"
+  printf 'Data.db\nStatistics.db\nCompressionInfo.db\nFilter.db\nTOC.txt\n' > "$tw_repo/$tw_rel"
+  (
+    cd "$tw_repo" || exit 1
+    git init -q . && git config user.email t@t && git config user.name t \
+      && git add "$tw_rel" && git commit -qm "committed inventory"
+  ) >/dev/null 2>&1
+
   tw_probe() {   # -> "match" | "mismatch"
     _SCRIPT_REPO="$tw_repo" bash -c '
       _SCRIPT_REPO=$1
       eval "$(sed -n "/^_toc_matches_head() {/,/^}/p" "$2")"
       _toc_matches_head "$3" "$4" && printf match || printf mismatch' \
-      _ "$tw_repo" "$MANIFEST_SRC" "$tw_repo/$tw_toc" "$tw_toc"
+      _ "$tw_repo" "$MANIFEST_SRC" "$tw_repo/$tw_rel" "$tw_rel"
   }
-  tw_save="$WORK/tw-save"; cp "$tw_repo/$tw_toc" "$tw_save"
-  # Control first: unmodified, it must MATCH — otherwise the mismatch below proves nothing.
-  tw_before=$(tw_probe)
-  printf 'Data.db\nTOC.txt\n' > "$tw_repo/$tw_toc"
-  tw_after=$(tw_probe)
-  cp "$tw_save" "$tw_repo/$tw_toc"
-  if ! git -C "$tw_repo" diff --quiet -- "$tw_toc" 2>/dev/null; then
-    bad "case 81 could not restore $tw_toc; the checkout is DIRTY and must be fixed by hand"
-  elif [ "$tw_before" = match ] && [ "$tw_after" = mismatch ]; then
-    ok "the trusted inventory is read from HEAD, so a working-tree truncation is detected"
-  elif [ "$tw_before" != match ]; then
-    bad "case 81's control failed: an unmodified tracked TOC did not match HEAD ($tw_before)"
+
+  if [ -d "$tw_repo/.git" ]; then
+    # Control FIRST: unmodified, it must MATCH, or the mismatch below proves nothing.
+    tw_before=$(tw_probe)
+    printf 'Data.db\nTOC.txt\n' > "$tw_repo/$tw_rel"     # working tree only; HEAD unchanged
+    tw_after=$(tw_probe)
+    # CRLF must NOT read as a mismatch: the listed-component loop tolerates it and the reader
+    # trims it, so a byte-for-byte comparison here would contradict both.
+    printf 'Data.db\r\nStatistics.db\r\nCompressionInfo.db\r\nFilter.db\r\nTOC.txt\r\n' > "$tw_repo/$tw_rel"
+    tw_crlf=$(tw_probe)
+
+    [ "$tw_before" = match ] \
+      && ok "an unmodified tracked TOC matches HEAD (the control)" \
+      || bad "case 81's control failed: an unmodified tracked TOC did not match HEAD ($tw_before)"
+    [ "$tw_after" = mismatch ] \
+      && ok "the trusted inventory is read from HEAD, so a working-tree truncation is detected" \
+      || bad "a working-tree TOC truncation was NOT detected — the comparison is vacuous when the corpus root IS the checkout"
+    [ "$tw_crlf" = match ] \
+      && ok "a CRLF TOC still matches its committed twin (inventory compared, not bytes)" \
+      || bad "a CRLF TOC was reported as a mismatch; that contradicts the CRLF tolerance twenty lines up"
+
+    # A `git show` that fails on an object that EXISTS is a MALFUNCTION, not "no inventory".
+    # Collapsing the two would let git corruption or a permission error silently disable the
+    # trusted-inventory check — the same fail-open shape as the grep and cmp cases, and the
+    # THIRD time in this file that a status-discipline fix had no test until its RED control
+    # showed there was none. The shadow answers `cat-file -e` truthfully and fails only
+    # `show`, which is exactly the state being modelled.
+    tw_gbin="$WORK/gitfail-bin"; mkdir -p "$tw_gbin"
+    tw_greal=$(command -v git)
+    cat >"$tw_gbin/git" <<GITFAIL
+#!/bin/sh
+for a in "\$@"; do
+  if [ "\$a" = show ]; then exit 128; fi
+done
+exec "$tw_greal" "\$@"
+GITFAIL
+    chmod +x "$tw_gbin/git"
+    tw_grc=0
+    PATH="$tw_gbin:$PATH" bash -c '
+      _SCRIPT_REPO=$1
+      eval "$(sed -n "/^_toc_matches_head() {/,/^}/p" "$2")"
+      _toc_matches_head "$3" "$4"' _ "$tw_repo" "$MANIFEST_SRC" "$tw_repo/$tw_rel" "$tw_rel" \
+      >/dev/null 2>&1 || tw_grc=$?
+    [ "$tw_grc" = 2 ] \
+      && ok "a failing 'git show' on an EXISTING object is a malfunction (exit 2), not 'no inventory'" \
+      || bad "a failing 'git show' gave exit $tw_grc; collapsing it onto 'no twin' disables the trusted-inventory check"
   else
-    bad "a working-tree TOC truncation was NOT detected — the twin comparison is vacuous when the corpus root IS the checkout"
+    echo "info - could not create the scratch git repo; skipping the HEAD-inventory case"
   fi
 else
-  echo "info - no clean tracked TOC.txt available; skipping the HEAD-inventory case"
+  echo "info - git unavailable; skipping the HEAD-inventory case"
 fi
 
 # ---------------------------------------------------------------------------
