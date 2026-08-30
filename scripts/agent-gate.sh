@@ -2553,7 +2553,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings binding-rust-tests delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build all-features-check smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -2579,6 +2579,13 @@ _component_lane() {
     # no-default-features+one-of parquet/delta-scan), which is class (a) of the SIDE
     # rationale below: sharing MAIN's target dir would thrash it (#2657).
     flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf side ;;
+    # all-features-check (#3453) is class (a) as well, and the most extreme case in the
+    # set: `--all-features` is the WIDEST feature set any component builds cqlite-core at
+    # (43 features, including the OTLP stack MAIN never enables), so interleaving it with
+    # MAIN's `--features cli-helpers` units in ONE target dir is feature-unification thrash
+    # by construction. Lane placement was MEASURED both ways, not reasoned (see the #3453
+    # report); SIDE won.
+    all-features-check) printf side ;;
     *) printf main ;;
   esac
 }
@@ -9748,6 +9755,157 @@ run_feature_iso() { # run_feature_iso <feature>
     --no-default-features --features "all-compression,$1" --lib --no-run
 }
 
+# all-features-check: COMPILE + LINT cqlite-core at `--all-features` (issue #3453).
+#
+# THE DEFECT IT EXISTS FOR — MEASURED, NOT ARGUED. No cargo invocation anywhere in
+# this script ever passes `observability` (or its alias `metrics`, or
+# `observability-testing`). run_clippy's per-package matrix EXCLUDES all three by
+# design (#1844: the OTLP stack is per-gate tax), core-tests runs `--features
+# cli-helpers`, and minimal-build runs `--no-default-features`. So a defect reachable
+# ONLY with the OTel stack on could not fail the gate of record while failing
+# .github/workflows/pr-gate.yml's `cargo test -p cqlite-core --lib --all-features`.
+# The instance: PR #3382 achieved a 31/31 gate PASS without ever executing the test
+# that pinned that PR's own fix.
+#
+# THE SCOPE IS DELIBERATELY THE COMPILE/LINT HALF, AND ONLY THAT (owner ruling,
+# 2026-08-30). It does NOT execute a single test, so the runtime/order-dependent half
+# of the class — e.g. a process-wide `OnceLock` poisoned by whichever test binds the
+# global meter first, which no `#[serial_test::serial]` grouping makes visible — STILL
+# cannot fail this gate. `pr-gate-core` remains the backstop for that half. A full
+# all-features TEST lane was rejected on cost: it would pay tens of minutes on every
+# endgame to cover what a required CI check already covers.
+#
+# WHY PACKAGE-SCOPED (`-p cqlite-core`) AND NOT `--workspace`. `--all-features` turns
+# on the features of the SELECTED packages, and the `duckdb` bundled-C++-amalgamation
+# dependency is owned by cqlite-cli alone (its `duckdb-tests` feature). A
+# workspace-wide `--all-features` lane would therefore build DuckDB from source (the
+# #916 cost) on every gate and blow the minutes-not-tens-of-minutes budget this
+# component was authorised under. cqlite-core's heavy optional stack is the OTel one,
+# which is exactly the uncovered set — so the narrow scope buys the whole gap.
+#
+# IT DOES NOT TOUCH run_clippy, ON PURPOSE. That function's exclusions are #1844's
+# ruling; widening them to close #3453 would silently reopen #1844 (the OTel stack
+# re-entering the four-pass scoped matrix, and the DuckDB amalgamation with it). This
+# is a SEPARATE component whose subject is precisely the excluded set.
+#
+# IT NEVER SKIPS. It needs nothing beyond cargo — no fixtures, no python, no node —
+# so it is absent from DATASET_COMPONENTS and has no SKIP branch. #3522's rule: a
+# never-SKIPping lane folded into a SKIP-aware one is a coverage hole wearing a SKIP's
+# clothes.
+#
+# NO CARGO-OUTPUT PARSE, so #3400 does not arise here: the verdict is the two cargo
+# EXIT STATUSES, and `-D warnings` (via _deny_warnings, which survives an inherited
+# CARGO_ENCODED_RUSTFLAGS) is what makes a warning one of them. There is deliberately
+# nothing keyed on a status word, coloured or otherwise.
+#
+# IT DECLARES WHAT IT MEASURED, DERIVED. The feature set is read back from CARGO
+# (`_resolved_package_features cqlite-core --all-features`), not printed from the flag
+# this function passes — a lane that echoes its own arguments proves nothing about the
+# build that happened. The declaration FAILS CLOSED both ways: an underivable set is a
+# FAIL naming the derivation, and an `--all-features` resolve that does NOT contain the
+# observability triple is a FAIL too, because the lane's entire reason for existing
+# would have silently evaporated (a renamed/removed feature) while its SUMMARY line
+# stayed green.
+run_all_features_check() {
+  local name=all-features-check
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status=PASS
+  start=$(date +%s)
+  : > "$log"
+
+  # --- the SUBJECT, derived from cargo rather than restated from the flags ----
+  # SUBJECT_FEATURES is the reason this component exists; if a rename ever empties it,
+  # that must be a red, not a quiet no-op.
+  local subject_features="observability observability-testing metrics"
+  local enabled="" n_enabled=0 missing="" f
+  if ! enabled=$(_resolved_package_features cqlite-core --all-features); then
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-core's enabled feature set under --all-features."
+      echo "        'cargo tree -p cqlite-core --all-features' failed, emitted no line for the"
+      echo "        package (a cargo failure or an offline registry), or its feature-extraction"
+      echo "        pipeline failed. The DERIVATION failed, not the build: this component's whole"
+      echo "        claim is that it compiled the OTel-bearing feature set, and an underived"
+      echo "        subject cannot state that. It FAILs naming the derivation rather than"
+      echo "        compiling something it could not describe (issue #3453)."
+    } >> "$log"
+    status=FAIL
+  else
+    n_enabled=$(printf '%s' "$enabled" | wc -w | tr -d ' ')
+    for f in $subject_features; do
+      case "$enabled" in *" $f "*) ;; *) missing="$missing $f" ;; esac
+    done
+    if [ -n "$missing" ]; then
+      {
+        echo "[$name] FAIL-CLOSED: cqlite-core's --all-features resolve does NOT enable:$missing"
+        echo "        This component exists to compile and lint the OpenTelemetry stack that"
+        echo "        run_clippy deliberately excludes (#1844) and no other component enables"
+        echo "        (issue #3453). If those features have been renamed or removed, this lane is"
+        echo "        no longer covering the gap it was created for — and would keep reporting"
+        echo "        PASS about a feature set that no longer contains its subject."
+        echo "        Remedy: update this component's subject_features to the current names, or"
+        echo "        retire the component in the same change that retires the features."
+        echo "        derived enabled set ($n_enabled features): $enabled"
+      } >> "$log"
+      status=FAIL
+    fi
+  fi
+
+  # The DECLARATION line — package, feature set, targets — on stdout AND in the log, so
+  # a pasted run states what it certified rather than emitting a bare status token.
+  local declaration
+  declaration="[$name] subject: package=cqlite-core features=--all-features (${n_enabled} enabled, derived from cargo tree; includes $(printf '%s' "$subject_features" | tr ' ' ',')) targets=--all-targets; passes: (1) cargo check (2) cargo clippy -D warnings; executes NO tests (pr-gate-core owns the runtime half)"
+  echo ">>> $declaration"
+  printf '%s\n' "$declaration" >> "$log"
+
+  # --- pass 1: cargo check ---------------------------------------------------
+  local t0 t1
+  if [ "$status" = PASS ]; then
+    t0=$(date +%s)
+    if _deny_warnings cargo check --package cqlite-core --all-features --all-targets >> "$log" 2>&1; then
+      t1=$(date +%s)
+      echo "[$name] pass 1/2 cargo check --all-features --all-targets: OK ($((t1 - t0))s)" >> "$log"
+    else
+      t1=$(date +%s)
+      status=FAIL
+      echo "[$name] pass 1/2 cargo check --all-features --all-targets: FAIL ($((t1 - t0))s)" >> "$log"
+    fi
+  fi
+
+  # --- pass 2: cargo clippy --------------------------------------------------
+  # Mirrors .github/workflows/pr-gate.yml's clippy step (`--package cqlite-core
+  # --all-targets --all-features -- -D warnings`) so the gate enforces what that
+  # required check enforces. `-- -D warnings` AND _deny_warnings' RUSTFLAGS are both
+  # present on purpose: the former is pr-gate's literal invocation, the latter is what
+  # cannot be switched off by an inherited CARGO_ENCODED_RUSTFLAGS (#1699 round-5).
+  if [ "$status" = PASS ]; then
+    t0=$(date +%s)
+    if _deny_warnings cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings >> "$log" 2>&1; then
+      t1=$(date +%s)
+      echo "[$name] pass 2/2 cargo clippy --all-features --all-targets -D warnings: OK ($((t1 - t0))s)" >> "$log"
+    else
+      t1=$(date +%s)
+      status=FAIL
+      echo "[$name] pass 2/2 cargo clippy --all-features --all-targets -D warnings: FAIL ($((t1 - t0))s)" >> "$log"
+    fi
+  else
+    # SAY that it did not run. A silent omission here reads, to anyone scanning the
+    # log, as a clean clippy pass — the vacuous-green shape one level down.
+    echo "[$name] pass 2/2 cargo clippy: NOT RUN (an earlier pass already FAILed; its diagnostics are above)" >> "$log"
+  fi
+
+  end=$(date +%s)
+  if [ "$status" != PASS ]; then
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # parity-report: verify the committed derived parity report is not stale vs its
 # source manifest (issue #1338). Renders test-data/cassandra-parity-manifest.yml
 # with `cassandra-parity report --check`; PASS when the committed report matches a
@@ -13577,6 +13735,7 @@ dispatch_component() {
   # storage::serialization) silently escaped this gate. Compile-only (--no-run)
   # keeps it fast; no data fixtures needed for a compile check.
   cargo test --package cqlite-core --no-default-features --features all-compression --lib --no-run' ;;
+    all-features-check) run_all_features_check ;;
     smoke) run_component smoke bash -c '
   cargo build --package cqlite-cli --bin cqlite &&
   CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh' ;;
