@@ -38,15 +38,27 @@ the artifact itself. They differed only in launch context.
 | B | lane top-level | `setsid` (own sid+pgid) | ran past 2400 s, 0 signals |
 | C | lane top-level | `setsid`, `cwd=/`, argv renamed | ran past 2400 s, 0 signals |
 | D | lane top-level | the harness's own background-task mechanism | ran past 2400 s, 0 signals |
-| E | **subagent** | plain `nohup … &` | ran past 1150 s, 0 signals |
-| F | **subagent** | `setsid` | ran past 1150 s, 0 signals |
+| E | **subagent** | plain `nohup … &` | ran past 2400 s, 0 signals |
+| F | **subagent** | `setsid` | ran past 2400 s, 0 signals |
 
-**There is no ~10 minute ceiling.** Every variant ran to at least twice the reported
-figure with no signal of any kind, including two launched by a subagent that was
-deliberately stalled silently past 600 s — which also rules out the harness's 600 s
-stall watchdog as a *direct* cause. The ~10 minute figure was real as an observation but
-was not a property of elapsed time; it was how long the launching context happened to
-live.
+**There is no ~10 minute ceiling.** Every variant ran the full 2400 s and self-terminated
+with its own `COMPLETE … never reaped` line, with no signal of any kind. The ~10 minute
+figure was real as an observation but was not a property of elapsed time.
+
+**The 600 s stall-watchdog hypothesis is UNTESTED, not falsified.** E and F were launched
+by a subagent that was then given a deliberately silent 700 s foreground block, the
+intention being to induce a stall and see whether the watchdog took the tickers with it.
+**No stall occurred.** On this harness version an over-timeout foreground call is
+**converted into a background task** and control returns to the agent immediately; the
+blocker later completed on its own, exit 0, after its full 700 s, and the subagent
+continued working normally throughout. So the experiment sidestepped the very condition it
+was meant to create, and nothing here bears on what the watchdog does to a genuinely
+stalled agent. (An earlier revision of this document claimed it did. It did not.)
+
+That harness behaviour is itself worth recording against the original report, which noted
+that *"the passive `sleep`-loop waiter was also killed"*: a long silent call being
+backgrounded rather than killed means a waiter of that shape is not, on this version,
+something the harness terminates.
 
 Along the way the first datum already contradicted the framing: probe A's parent Bash
 tool shell exited seconds after launch, A was reparented to init, and it kept running.
@@ -125,8 +137,9 @@ the cgroup.
 **Established by measurement:**
 
 1. There is **no time-based ceiling**: six launch variants ran past 2400 s with zero signals.
-2. The **600 s stall watchdog is not a direct cause**: two of those tickers were launched by
-   a subagent that was then stalled silently past 600 s, and they kept running.
+2. Two of those tickers were launched by a **subagent** and survived its entire lifetime.
+   This does **not** clear the 600 s stall watchdog: the attempt to induce a stall failed
+   (see above), so that hypothesis is **untested, not falsified**.
 3. A lane pane's scope carries `KillMode=control-group` / `SendSIGKILL=yes` (read from
    `systemctl --user show` on the live scope).
 4. Stopping such a cgroup **kills fully-detached work** (`setsid`+`nohup`+closed fds, own
