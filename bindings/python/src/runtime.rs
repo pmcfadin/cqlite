@@ -27,7 +27,10 @@ static INIT_LOCK: Mutex<()> = Mutex::new(());
 /// panicking initializer, a failed build does **not** poison the cell: a later
 /// call can retry once resources are available, and the error is surfaced to the
 /// caller (mapped to a catchable Python exception at the binding boundary) rather
-/// than aborting the host process under `panic = "abort"`.
+/// than panicking. (The wheel ships `--profile release-unwind`, so an escaping
+/// panic would be caught by pyo3's FFI firewall and reported through
+/// `sys.unraisablehook` rather than aborting — silent, which is why the fallible
+/// form is preferred here regardless.)
 pub fn try_get_runtime() -> Result<&'static Runtime, std::io::Error> {
     get_or_try_init(&RUNTIME, &INIT_LOCK, || {
         tokio::runtime::Builder::new_multi_thread()

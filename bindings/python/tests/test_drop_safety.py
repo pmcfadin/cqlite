@@ -197,11 +197,20 @@ print("CONSTRUCTED", flush=True)
 
 
 def test_drop_does_not_raise_at_teardown(tmp_path, schema_file):
-    """Dropping at interpreter teardown must not abort or raise.
+    """Dropping at interpreter teardown must not abort, panic, or raise.
 
-    Run in a child process: an abort (SIGABRT, rc<0) or a panic during
-    finalization would kill the pytest runner itself, so it can only be observed
-    as a test failure from outside.
+    Run in a child process because an abort would kill the pytest runner itself.
+
+    WHICH ASSERT DETECTS WHAT — worth stating, because the intuitive reading is
+    wrong. The wheel ships ``--profile release-unwind`` (``panic = "unwind"``,
+    gate component ``binding-unwind-profile``, #1440), and pyo3's ``tp_dealloc``
+    trampoline catches an escaping panic and reports it via
+    ``sys.unraisablehook``. So a panic in ``Drop`` does NOT change the exit code:
+    the child still exits 0. The detector for a panic is therefore the
+    ``"panicked at"`` stderr needle (Rust's default hook prints before
+    unwinding, independently of ``catch_unwind``), plus ``"exception ignored
+    in"``, which is what CPython prints for an unraisable. ``returncode`` is the
+    detector for a hard abort/segfault only.
     """
     data_dir = tmp_path / "teardown-data"
     data_dir.mkdir()
@@ -231,17 +240,19 @@ def test_drop_does_not_raise_at_teardown(tmp_path, schema_file):
         "precondition failed: the child had already flushed before exiting, so a "
         f"Data.db here could not be attributed to the teardown drop:\n{ctx}"
     )
+    # More specific diagnostic first: a hard abort is rc == -SIGABRT, and saying
+    # so beats "did not exit cleanly" when it fires.
+    assert proc.returncode != -signal.SIGABRT, f"child died on SIGABRT:\n{ctx}"
     assert proc.returncode == 0, f"child did not exit cleanly:\n{ctx}"
 
-    # SIGABRT is detected by the returncode assert above (-6), NOT by stderr:
-    # `subprocess.run` is given an argv list, so no shell runs, and the
-    # "Aborted (core dumped)" text is a SHELL message the child never writes
-    # itself. An "abort" needle here would therefore detect nothing it names
-    # while red-flagging any future log line containing "aborting".
-    assert proc.returncode != -signal.SIGABRT, f"child died on SIGABRT:\n{ctx}"
-
     lowered = proc.stderr.lower()
-    for needle in ("panicked at", "fatal python error", "segmentation fault"):
+    for needle in (
+        "panicked at",
+        "panicexception",
+        "exception ignored in",
+        "fatal python error",
+        "segmentation fault",
+    ):
         assert needle not in lowered, (
             f"child stderr reports a {needle!r} during teardown:\n{ctx}"
         )
@@ -257,29 +268,23 @@ def test_drop_does_not_raise_at_teardown(tmp_path, schema_file):
     )
 
 
-def test_streaming_iterator_after_drop_raises(tmp_path, schema_file):
-    """An iterator outliving its ``Database`` fails cleanly after the drop.
+def test_writable_iterator_survives_drop(tmp_path, schema_file):
+    """An iterator outliving a WRITABLE ``Database`` keeps working after the drop.
 
-    Issue #1462 established the contract for an explicit ``close()``: a
-    ``StreamingIterator`` that outlives cleanup must raise a clean
-    ``RuntimeError`` from ``__next__`` rather than drive a torn-down engine
-    (undefined behavior / a possible FFI panic).  Adding Drop extends that
-    cleanup to the *implicit* path, so this pins the same contract there.
+    This inverts an earlier version of this test, and the reason is the point.
+    That version asserted ``RuntimeError``, justified by #1462's contract for an
+    explicit ``close()``.  Two independent review rounds showed the
+    justification was false: a ``StreamingIterator`` reads an ``mpsc::Receiver``
+    fed by a detached task holding its OWN ``Arc<StorageEngine>``, so closing the
+    WRITE engine cannot invalidate it, and ``cqlite_core::Database`` has no
+    ``Drop`` — nothing the drop does can stop the stream.  Setting the shared
+    ``closed`` flag would only have broken a working pattern in exchange for
+    nothing, so the drop now READS that flag instead of claiming it, and this
+    safety net is purely additive: no user-visible iterator behavior changes.
 
-    Scope note, corrected after review: this holds for a WRITABLE handle, where
-    the drop really does close the write engine, so the flag flip accompanies
-    real teardown.  It deliberately does NOT hold for a read-only handle — see
-    ``test_readonly_iterator_survives_drop`` — because there the drop tears down
-    nothing (``StorageEngine::shutdown()`` is a documented no-op) and flipping
-    the flag would break a working read pattern in exchange for nothing.  An
-    earlier version of this docstring claimed the engine "really is shut down"
-    for every handle; that was false, and the asymmetry below is the fix.
-
-    Hermetic on purpose (no dataset corpus): ``__next__`` loads the shared
-    ``parent_closed`` flag BEFORE it locks the inner iterator or blocks on a
-    refill, so the contract is observable even when the result set is empty.
-    That ordering is the property under test, and an empty stream isolates it
-    from anything to do with rows.
+    Hermetic: the empty stream isolates *which exception ends the iteration*.
+    ``StopIteration`` means the iterator is still valid and merely exhausted;
+    ``RuntimeError: Database is closed`` would mean the drop invalidated it.
     """
     db, _write_dir = _open_writable(tmp_path, schema_file, "iterdrop")
 
@@ -289,7 +294,7 @@ def test_streaming_iterator_after_drop_raises(tmp_path, schema_file):
     del db
     gc.collect()
 
-    with pytest.raises(RuntimeError, match="Database is closed"):
+    with pytest.raises(StopIteration):
         next(iterator)
 
 
@@ -308,20 +313,49 @@ def test_readonly_iterator_survives_drop(tmp_path):
             db = cqlite.open(path)
             return db.execute_streaming("SELECT ...")   # db drops at return
 
-    So the drop must READ that flag without claiming it.  Hermetic: an empty
-    data dir gives an empty stream, and the property under test is which
-    exception ends it — ``StopIteration`` (iterator still valid, exhausted) and
-    NOT ``RuntimeError: Database is closed``.
-    """
-    data_dir = tmp_path / "ro-data"
-    data_dir.mkdir()
+    So the drop must READ that flag without claiming it.
 
-    db = cqlite.open(str(data_dir))
+    This case uses a NON-EMPTY corpus on purpose: an empty stream would only show
+    that no ``RuntimeError`` is raised, which is weaker than the claim being
+    made.  Here rows are written by a first (writable) handle, then read back by
+    a second, read-only handle whose iterator must keep DELIVERING rows across
+    the drop — the property the README promises.
+    """
+    # Phase 1: produce a real SSTable to read.
+    write_dir = tmp_path / "ro-src-wd"
+    data_dir = tmp_path / "ro-src-data"
+    data_dir.mkdir()
+    schema = tmp_path / "ro-schema.cql"
+    schema.write_text(SCHEMA_TEXT)
+    producer = cqlite.open(
+        str(data_dir), schema=str(schema), writable=True, write_dir=str(write_dir)
+    )
+    for i in range(3):
+        producer.execute(
+            f"INSERT INTO drop_test.items (id, name, value) VALUES ({i}, 'r{i}', {i})"
+        )
+    producer.close()
+
+    sstable_dir = write_dir / "data"
+    if not any(sstable_dir.rglob("*-Data.db")):
+        pytest.fail(
+            f"fixture setup failed: no *-Data.db under {sstable_dir}, so this test "
+            "could not read anything back and would prove nothing"
+        )
+
+    # Phase 2: read-only handle, pull one row, then drop the handle mid-stream.
+    db = cqlite.open(str(sstable_dir), schema=str(schema))
     iterator = db.execute_streaming("SELECT * FROM drop_test.items")
+
+    first = next(iterator)
+    assert isinstance(first, cqlite.Row)
 
     del db
     gc.collect()
 
-    # Must NOT raise RuntimeError. Exhaustion (StopIteration) is the pass.
-    with pytest.raises(StopIteration):
-        next(iterator)
+    # The remaining rows must still arrive — not merely "no RuntimeError".
+    rest = list(iterator)
+    assert len(rest) == 2, (
+        "read-only drop broke a live iterator: expected the remaining 2 rows "
+        f"after the handle was collected, got {len(rest)}"
+    )

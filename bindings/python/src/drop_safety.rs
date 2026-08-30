@@ -16,18 +16,34 @@
 //! declared in a sibling module of the same crate is legal Rust; the coherence
 //! rule is per-crate, not per-module.
 //!
-//! ## Panic-freedom is STRUCTURAL, not `catch_unwind`
+//! ## Panic-freedom is STRUCTURAL — and a panic here is SILENT, not fatal
 //!
-//! The release profile is `panic = "abort"`, so a panic here is a process
-//! abort and `catch_unwind` would catch nothing. There is therefore no
-//! `catch_unwind` anywhere below: every operation that *could* panic is instead
-//! replaced by a fallible/non-panicking form, and the guard is the choice of
-//! API rather than a recovery handler.
+//! Get this right before changing anything below, because the obvious guess is
+//! wrong. The shipped Python wheel is **not** built with `panic = "abort"`:
+//! bindings build `--profile release-unwind` (`panic = "unwind"`,
+//! `Cargo.toml`), precisely so pyo3's FFI-boundary `catch_unwind` firewall is
+//! active (issue #1440) — and the full gate's `binding-unwind-profile`
+//! component hard-FAILs any binding definition selecting an abort profile, so
+//! it cannot drift. pyo3 0.23.5's `tp_dealloc` trampoline then DOES catch an
+//! escaping panic (`src/impl_/trampoline.rs`, `trampoline_unraisable`) and
+//! routes it to `PyErr::write_unraisable`.
+//!
+//! So a panic in this `drop` does not abort the process — it becomes a
+//! `PanicException` reported through `sys.unraisablehook` on a **live
+//! interpreter that keeps running, exit code 0**. That is WORSE to rely on than
+//! an abort: it is silent, easy to ship unnoticed, and leaves cleanup half-done
+//! with nothing failing. Hence there is still no `catch_unwind` here and every
+//! operation that *could* panic is replaced by a fallible/non-panicking form —
+//! the guard is the choice of API, chosen so that silent-failure path is never
+//! entered at all.
 //!
 //! * **`block_on` re-entrancy** — `Runtime::block_on` panics when called from
-//!   inside a runtime context ("cannot block the current thread from within a
-//!   runtime"). `Handle::try_current()` answers whether we are in one, so a
-//!   re-entrant drop skips cleanup and returns.
+//!   inside a **tokio** runtime context ("cannot block the current thread from
+//!   within a runtime"). `Handle::try_current()` answers whether we are in one,
+//!   so a re-entrant drop skips cleanup and returns. Note the scope: a Python
+//!   `asyncio` event loop is NOT a tokio runtime and does not trip this guard —
+//!   these bindings have no asyncio integration — so an asyncio-thread drop
+//!   runs the cleanup in full.
 //! * **Runtime construction** — this path calls
 //!   [`crate::runtime::existing_runtime`] (a plain `OnceLock::get`), never
 //!   `try_get_runtime`. Building a multi-threaded runtime during interpreter
@@ -110,7 +126,7 @@
 //! would *change `close()`'s semantics*, and a separate completion flag would
 //! stop the `AtomicBool` being *the single source of "already cleaned up"*. The
 //! flag lying after a failed `close()` is really a `close()` defect that
-//! predates this issue; it belongs in its own change.
+//! predates this issue; it belongs in its own change — filed as **#3566**.
 //!
 //! ## Flush POLICY is out of scope
 //!
@@ -148,7 +164,16 @@
 //! `Database` for the duration of any `&self` pymethod, so no other caller can
 //! be inside `close()`/`with_write_engine` on this object while its `Drop` runs,
 //! and the engine `Arc` is never handed to another Python object. They stay as
-//! defence in depth, not as covered code.
+//! defence in depth, not as covered code. The `if let Some(engine_arc)` at step
+//! (4) is likewise structurally redundant for a read-only handle (the field is
+//! `None`), which is how a read-only drop reaches steps (5) and (6) only.
+//!
+//! One asymmetry worth naming: step (6) runs for a read-only drop too, so the
+//! `def rows(path)` pattern above pays the telemetry flush once per handle —
+//! with the `observability` feature ON, the same ~5s `force_flush` the step-(6)
+//! comment describes. It is kept because it mirrors `close()` and is the only
+//! cleanup a read-only handle has, but it is the one place this module spends
+//! real time on a path with nothing else to do. Tracked in #3566.
 
 use std::sync::atomic::Ordering;
 
@@ -159,36 +184,40 @@ use crate::runtime::existing_runtime;
 
 impl Drop for Database {
     fn drop(&mut self) {
-        // (1) There are TWO cases here, and collapsing them was a real defect
-        // (rust-reviewer B1). The `closed` flag is not private to cleanup: it is
-        // the SAME `Arc<AtomicBool>` every `StreamingIterator` this handle
-        // handed out observes (issue #1462), so flipping it makes those
-        // iterators raise `RuntimeError` from `__next__`. That is right when
-        // real teardown happened, and pure loss when none did.
+        // (1) READ the `closed` flag; never CLAIM it. Two independent review
+        // rounds landed here, so the reasoning is recorded rather than left to
+        // be rediscovered.
         //
-        // For a READ-ONLY handle none does: `write_engine` is `None`, and
-        // `StorageEngine::shutdown()` is a documented no-op ("Nothing to
-        // shutdown - read-only storage layer",
-        // `cqlite-core/src/storage/mod.rs`). Claiming the flag there would buy
-        // nothing and would silently break a pattern that works today —
-        // `return db.execute_streaming(...)` from a function, letting `db` drop
-        // at return, then iterating. An explicit `close()` invalidating an
-        // iterator is a user stating intent; a GC pass is not.
+        // The flag is not private to cleanup: it is the SAME `Arc<AtomicBool>`
+        // every `StreamingIterator` this handle handed out observes (issue
+        // #1462), so SETTING it makes those iterators raise `RuntimeError` from
+        // `__next__`. And setting it buys nothing, because the double-cleanup it
+        // would guard against cannot happen: `Drop` runs at most once per
+        // object, and pyo3 holds a strong reference to the pyclass for the whole
+        // of any `&self` pymethod, so `close()` can never overlap this `drop` on
+        // the same handle. Issue #1461's step 1 asks for a `swap` so that "a
+        // drop that ran makes a later `close()` a no-op" — that sequence is
+        // unreachable, so the `swap`'s only observable effect would be breaking
+        // a pattern that works today:
         //
-        // So: claim the flag only where there is teardown to guard, and
-        // otherwise READ it without claiming. If `StorageEngine::shutdown` ever
-        // becomes real teardown, this condition MUST change with it — the
-        // coupling is deliberate and stated rather than silent.
-        if self.write_engine.is_some() {
-            if !self.closed.swap(true, Ordering::SeqCst) {
-                self.drop_teardown();
-            }
-        } else if !self.closed.load(Ordering::SeqCst) {
-            // Read-only, not already closed: nothing to tear down, but the
-            // telemetry this handle's queries buffered should still be
-            // exported. `load` rather than `swap` is the whole point —
-            // outstanding iterators stay usable, exactly as before this module.
-            crate::observability::flush();
+        //     def rows(path):
+        //         db = cqlite.open(path)
+        //         return db.execute_streaming("SELECT ...")   # db drops here
+        //     for r in rows(p): ...                           # still yields
+        //
+        // Continuing to iterate is genuinely safe for BOTH handle kinds:
+        // `QueryResultIterator` holds only an `mpsc::Receiver`, its producer is a
+        // detached task owning its own `Arc<StorageEngine>` clone, and
+        // `cqlite_core::Database` has no `Drop` — so dropping this binding handle
+        // cannot stop the stream. Closing the WRITE engine cannot invalidate a
+        // READ iterator either. An explicit `close()` invalidating an iterator is
+        // a user stating intent; a GC pass is not.
+        //
+        // A `load` still satisfies the "AtomicBool-guarded" acceptance
+        // criterion: a `close()` that already cleaned up makes this a no-op,
+        // which is the half of the guard that is actually reachable.
+        if !self.closed.load(Ordering::SeqCst) {
+            self.drop_teardown();
         }
     }
 }
@@ -266,8 +295,21 @@ impl Database {
             }
         }
 
-        // (5) Read-side storage engine shutdown. Attempted INDEPENDENTLY of
-        // step (4): a write-engine failure must not cost us this one.
+        // (5) Read-side storage engine shutdown, attempted INDEPENDENTLY of
+        // step (4) so a write-engine failure cannot cost us this call.
+        //
+        // TODAY IT IS A NO-OP and the `Err` arm is unreachable:
+        // `StorageEngine::shutdown()` is `Ok(())` ("Nothing to shutdown -
+        // read-only storage layer", `cqlite-core/src/storage/mod.rs`), and
+        // `cqlite_core::Database::shutdown` merely delegates to it. Kept for
+        // SYMMETRY with `close()`, which makes the same call, so the two stay in
+        // step if read-side teardown ever becomes real — do not read it as live
+        // teardown, and never use it to argue that a drop tore something down.
+        //
+        // Deadlock note, forward-looking: this `block_on` runs on a thread
+        // holding the GIL, which is safe ONLY because both awaited futures are
+        // plain Rust that never touch a `Python<'_>`. If anything ever spawns a
+        // tokio task that acquires the GIL, this becomes a hard deadlock.
         if let Err(err) = runtime.block_on(self.inner.shutdown()) {
             tracing::debug!("cqlite: storage shutdown failed during Database drop: {err}");
         }
@@ -284,7 +326,7 @@ impl Database {
         // made the RECOMMENDED `with cqlite.open(...)` pattern pay that twice —
         // once in `close()`, again when the GC freed the same handle. Trading a
         // multi-second stall on the recommended path for telemetry on the
-        // failed-`close()` path is a bad trade; that gap is a follow-up.
+        // failed-`close()` path is a bad trade; that gap is #3566.
         //
         // Keeping it inside the guards is positively right, not just
         // conservative: in the re-entrancy branch that 5s `recv_timeout` would

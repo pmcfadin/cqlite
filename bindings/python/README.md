@@ -85,17 +85,23 @@ things are worth knowing about relying on it:
   their duration, where `close()` releases the GIL around the same work. Prefer
   `with` or an explicit `close()` in threaded code.
 - **It is best-effort by design.** If the handle is dropped from inside a
-  running asyncio/tokio event loop thread, the cleanup is skipped rather than
-  risk an unsafe teardown — so unflushed rows stay in the write-ahead log
-  (replayable) instead of being flushed. `close()` is the only path with a
-  guarantee.
+  running **Tokio runtime context** — CQLite driven from a Rust async host — the
+  cleanup is skipped rather than risk an unsafe teardown, so unflushed rows stay
+  in the write-ahead log (replayable) instead of being flushed. `close()` is the
+  only path with a guarantee.
+- **A Python `asyncio` event loop is NOT such a context.** These bindings have no
+  asyncio integration, so an asyncio thread has no Tokio runtime and nothing is
+  skipped: a handle collected there runs the full flush + fsync with the GIL
+  held, **blocking the event loop** (and up to ~5s more if OpenTelemetry export
+  is enabled and the collector is unreachable). In asyncio code, close handles
+  explicitly — ideally off the loop thread.
 
-A `StreamingIterator` that outlives a **writable** `Database` raises
-`RuntimeError: Database is closed` from `next()` once that handle is collected,
-the same as it does after an explicit `close()` — its write engine really was
-closed. An iterator from a **read-only** handle is unaffected and keeps yielding
-rows, because a read-only drop tears nothing down and so has no reason to
-invalidate it.
+A `StreamingIterator` that outlives its `Database` is **unaffected** by the
+handle being collected, for both read-only and writable handles: it keeps
+yielding its remaining rows. Its rows come from a background task holding its own
+reference to the storage engine, so dropping the handle cannot stop the stream,
+and this cleanup deliberately does not invalidate it. (An explicit `close()`
+still does — that is a user stating intent, and is unchanged; see issue #1462.)
 
 ### Executing Queries
 
