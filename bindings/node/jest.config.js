@@ -13,12 +13,12 @@
  *     `detectOpenHandles: true` (an abandoned iterator whose `return()`/`close()`
  *     never ran leaves a handle behind, which is exactly the signal that lane
  *     wants) and a longer timeout for its multi-pass measurement.
- * `detectLeaks` is deliberately NOT enabled: the napi addon is process-global by
- * construction (N-API keeps the addon + a lazily-initialised Tokio runtime alive
- * for the process), so module-registry leak detection reports a leak for ANY
- * file touching the addon — a measured false positive against the property under
- * test. The leak lane asserts a measured heap+external budget instead; the full
- * rationale is in the header of `__test__/leak-paths.test.js`.
+ * `detectLeaks: true` is enabled for that project as well — measured GREEN and
+ * stable against this native module — but NO correctness weight is placed on it
+ * (it watches jest's TestEnvironment instance, which test code cannot reach, so
+ * its liveness here is undemonstrable; see the header of
+ * `__test__/leak-paths.test.js`). The load-bearing guard is the measured
+ * heap+external budget asserted in that file.
  *
  * @type {import('jest').Config}
  */
@@ -41,8 +41,6 @@ module.exports = {
       testMatch: ['**/__test__/**/*.test.js'],
       // The leak lane runs in its own project (below) with its own options.
       testPathIgnorePatterns: ['/node_modules/', '/__test__/leak-paths\\.test\\.js$'],
-      // 30 second timeout for database operations
-      testTimeout: 30000,
     },
     {
       ...baseProject,
@@ -50,10 +48,15 @@ module.exports = {
       testMatch: [LEAK_TEST],
       // Abandoned iterators are exactly the shape that leaves a handle behind.
       detectOpenHandles: true,
-      // The budgets measure 9 passes x 300 iterations over a wide table.
-      testTimeout: 120000,
+      detectLeaks: true,
     },
   ],
+
+  // 30 second timeout for database operations. Set at the ROOT: verified to
+  // propagate into every project (a 7s test passes, so jest's 5s default is not
+  // in force), and project-level `testTimeout` trips a jest 29 config-validation
+  // warning. The two multi-pass leak budgets carry their own per-test timeout.
+  testTimeout: 30000,
 
   // Coverage configuration
   coverageDirectory: 'coverage',

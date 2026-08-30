@@ -9,25 +9,28 @@
  * exactly those paths, mirroring the Python tracemalloc budgets in
  * bindings/python/tests/test_leak_paths.py.
  *
- * WHY A MEASURED HEAP BUDGET AND NOT jest `--detectLeaks` (issue #1465 explicitly
- * allows this fallback, and requires the reason to be documented here):
- * `--detectLeaks` asserts that a test file's module registry is garbage-collected
- * after the file finishes. The napi native addon (`cqlite-node.<platform>.node`)
- * is process-global by construction: N-API keeps the loaded addon and its
- * per-Env instance data alive for the life of the process, and the Rust side
- * holds a lazily-initialised Tokio runtime (src/runtime.rs) plus tracing
- * subscriber state that intentionally outlives any single test file. So the
- * registry can never be collected and `--detectLeaks` reports a leak for ANY
- * test file that touches the addon -- a verdict about module-registry retention,
- * not about the per-iteration growth this issue is asking us to bound.
- * MEASURED on this branch (2026-08-30, Linux x64, release-unwind .node): with
- * `detectLeaks: true` this very file fails with "the tested module leaked" while
- * the per-iteration budgets below pass with 750x/90x headroom -- i.e. it is a
- * false positive with respect to the property under test. What IS enabled for
- * this file is `detectOpenHandles: true`, which is the leak signal that DOES
- * apply to abandoned iterators (a stream whose `return()`/`close()` never ran
- * would leave a handle behind), and it is scoped to this file via a jest
- * `projects` entry so the existing suite is untouched.
+ * WHY THE LOAD-BEARING GUARD IS A MEASURED HEAP BUDGET, NOT jest `--detectLeaks`
+ * (issue #1465 explicitly allows this fallback and requires the reason to be
+ * documented here). `detectLeaks` IS enabled for this file — scoped to it by the
+ * `leaks` project in jest.config.js, never globally — and it passes. But it
+ * cannot carry the guarantee this issue asks for, for two measured reasons:
+ *   1. It answers a DIFFERENT question. jest-leak-detector registers a
+ *      FinalizationRegistry on the jest `TestEnvironment` INSTANCE
+ *      (jest-runner/build/runTest.js: `new LeakDetector(environment)`), i.e. it
+ *      asks "was the whole test environment collected after this FILE finished",
+ *      not "does each iteration of this loop retain memory" — which is the
+ *      property a leaking error path exhibits.
+ *   2. Its liveness here is UNDEMONSTRABLE from test code. The watched value is
+ *      the environment instance, which a test cannot reach, so no planted-leak
+ *      control can prove the detector would fire. Measured 2026-08-30 (jest
+ *      29.7.0, Node v20.20.2): two planted retentions — a required module graph
+ *      and the test-environment `global` itself, both pinned on `process` so they
+ *      outlive the file — were BOTH reported clean. So a green `detectLeaks` is
+ *      not evidence of anything, and this file does not treat it as such; it is
+ *      left enabled only because it is stable and costs nothing.
+ * `detectOpenHandles: true` is also enabled for this file: an abandoned iterator
+ * whose `return()`/`close()` never ran would leave a handle behind, which is a
+ * signal that DOES apply to the path under test.
  *
  * WHAT IS ASSERTED (and what is deliberately NOT): the growth of
  * `heapUsed + external` across N iterations must stay under a documented budget.
@@ -74,50 +77,66 @@ const WARMUP = 20;
 // Rows pulled before breaking. Must be < the fixture's row count (50, pinned by
 // the contract test below) so the iterator is genuinely abandoned mid-stream.
 const STREAM_ROWS = 5;
-// `heapUsed`/`external` deltas are far jitterier than Python's tracemalloc
-// (individual samples swung -127 KB .. +255 KB while the median sat at ~72
-// bytes), so each budget is asserted on the MEDIAN of several passes -- the same
-// technique conversion-budget.test.js uses, for the same reason.
+// `heapUsed`/`external` deltas are far jitterier than Python's tracemalloc:
+// individual passes over the SAME clean loop swung from -133 KB to +349 KB (V8
+// growing its heap, or collecting an earlier pass's garbage inside a later one).
+// So each budget is measured over several passes and asserted on the MINIMUM
+// pass -- not the median, and not a single sample.
+//
+// WHY THE MINIMUM (measured, not aesthetic): a genuine per-iteration leak raises
+// EVERY pass -- for all three synthetic leak shapes below, all 9 passes were
+// elevated and the MINIMUM pass still sat 1.5x-5.5x above the budget -- whereas
+// GC jitter perturbs individual passes in both directions. The minimum therefore
+// needs only ONE quiet pass out of MEASURE_PASSES to read fairly, while a median
+// needs a majority: a median-based budget was tried first and flaked (1 red in
+// 10 runs; medians 616..3200 bytes, with occasional 150-296 KB passes).
+// The cost, stated honestly: a leak smaller than the single-pass GC-deferral
+// amplitude (~130 KB on the error path) could in principle hide in the minimum.
+// Measured, none of the three realistic shapes below does.
 const MEASURE_PASSES = 9;
 
 // ---------------------------------------------------------------------------
 // BUDGET (issue #1465) -- MEASURED, never guessed. Linux x64, Node v20.20.2,
 // release-unwind .node, CQLITE_DATASETS_ROOT=/data/datasets, 300 iterations x 9
-// passes, 4 consecutive repetitions per path (2026-08-30):
-//   error path:  median growth 72, 72, 72, 88 bytes  (0.2-0.3 bytes/iteration)
-//   stream path: median growth 496, 496, 496, 704 bytes (1.7-2.3 bytes/iteration)
-// Budget = 64 KiB (218 bytes/iteration at 300 iterations): ~750x the observed
-// error-path median and ~93x the stream-path median, so platform/GC drift cannot
-// red it, while a genuine per-iteration leak blows past it. Measured
-// discrimination, with synthetic leaks injected into these same loop bodies:
-//   * retaining ONE wide row per iteration  -> 185-187 KB (~620 B/iter): TRIPS (2.8x)
-//   * retaining a 256-byte Buffer per iter  -> 134-147 KB (~450 B/iter): TRIPS (2.1x)
-// Both are the realistic shapes of a native/JS leak on these paths.
+// passes; the numbers below are the MINIMUM pass (the asserted statistic), over
+// several consecutive runs (2026-08-30):
+//   error path:  -133,504 .. +2,496 bytes (a negative minimum means a later pass
+//                collected an earlier pass's deferred garbage)
+//   stream path:     +424 .. +1,864 bytes (1.4-6.2 bytes/iteration)
+// Budget = 32 KiB (109 bytes/iteration at 300 iterations): ~17x the largest clean
+// minimum observed on either path, so GC/platform drift cannot red it. Measured
+// discrimination, with synthetic leaks injected into these same loop bodies
+// (again as the minimum pass):
+//   * retain ONE wide row per iteration (~620 B/iter): 171-182 KB -> TRIPS (5.5x)
+//   * retain a 256-byte Buffer per iteration:          121-132 KB -> TRIPS (4.0x)
+//   * retain a 64-byte Buffer per iteration:            50-80 KB  -> TRIPS (1.5x)
+// Those are the realistic shapes of a JS-side or native-buffer leak on these
+// paths; the 64-byte case is the smallest leak this test is claimed to catch.
 // ---------------------------------------------------------------------------
-const BUDGET_BYTES = 64 * 1024;
+const BUDGET_BYTES = 32 * 1024;
+
+// Per-test timeout for the two multi-pass budgets (measured ~0.5s and ~4.5s on
+// this machine). Declared here rather than as a project-level `testTimeout`,
+// which trips a jest 29 config-validation warning.
+const BUDGET_TEST_TIMEOUT_MS = 120_000;
 
 /**
- * Assert a measured median growth is under the budget, with the full sample set
- * in the failure message (jest's own `toBeLessThan` output would show only the
- * median, and the spread is what tells a real leak from a GC artefact).
+ * Assert the measured growth is under the budget, with every per-pass sample in
+ * the failure message (jest's own `toBeLessThan` output would show only the
+ * single asserted number, and the spread is what tells a real leak from a GC
+ * artefact).
  */
 function assertUnderBudget(label, growth, samples) {
   if (growth >= BUDGET_BYTES) {
     throw new Error(
-      `${label}: tracked memory (heapUsed+external) grew a median of ${growth} ` +
-        `bytes over ${ITERATIONS} iterations ` +
-        `(${(growth / ITERATIONS).toFixed(1)} bytes/iteration), exceeding the ` +
-        `${BUDGET_BYTES}-byte budget. Per-pass samples=[${samples.join(', ')}] ` +
-        '(issue #1465)'
+      `${label}: tracked memory (heapUsed+external) grew by at least ${growth} ` +
+        `bytes in EVERY one of ${MEASURE_PASSES} passes of ${ITERATIONS} ` +
+        `iterations (${(growth / ITERATIONS).toFixed(1)} bytes/iteration), ` +
+        `exceeding the ${BUDGET_BYTES}-byte budget. ` +
+        `Per-pass samples=[${samples.join(', ')}] (issue #1465)`
     );
   }
   expect(growth).toBeLessThan(BUDGET_BYTES);
-}
-
-function median(nums) {
-  const sorted = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 /** Total tracked bytes: V8 heap PLUS off-heap (Buffer/native) allocations. */
@@ -140,7 +159,8 @@ async function settle() {
  * Run `body` WARMUP times, then measure MEASURE_PASSES x ITERATIONS of it.
  *
  * `body(counters)` is responsible for its own non-vacuity counting; this helper
- * only measures. Returns the median per-pass growth in tracked bytes.
+ * only measures. Returns the MINIMUM per-pass growth in tracked bytes (the
+ * statistic the budget is asserted on) plus every per-pass sample.
  */
 async function measureGrowth(body, counters) {
   for (let i = 0; i < WARMUP; i += 1) {
@@ -157,7 +177,8 @@ async function measureGrowth(body, counters) {
     await settle();
     samples.push(trackedBytes() - before);
   }
-  return { growth: median(samples), samples };
+  // The MINIMUM pass is the asserted statistic -- see MEASURE_PASSES above.
+  return { growth: Math.min(...samples), samples };
 }
 
 describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () => {
@@ -253,7 +274,7 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
 
     // BOUNDED, not zero (see file header).
     assertUnderBudget('error path (repeated rejections)', growth, samples);
-  });
+  }, BUDGET_TEST_TIMEOUT_MS);
 
   test('abandoned streaming iterators stay under the leak budget', async () => {
     const counters = { rows: 0, iterators: 0 };
@@ -276,5 +297,5 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
 
     // BOUNDED, not zero (see file header).
     assertUnderBudget('abandoned streaming iterators', growth, samples);
-  });
+  }, BUDGET_TEST_TIMEOUT_MS);
 });
