@@ -121,7 +121,7 @@ fn add_nanos_saturates_rather_than_wrapping() {
     );
 }
 
-#[cfg(not(feature = "tombstones"))]
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 #[test]
 fn merge_timing_subtracts_the_recv_wait_accrued_inside_it() {
     // The property: producer starvation (blocking recv on the merge inputs) is NOT
@@ -149,7 +149,7 @@ fn merge_timing_subtracts_the_recv_wait_accrued_inside_it() {
     );
 }
 
-#[cfg(not(feature = "tombstones"))]
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 #[test]
 fn merge_timing_never_underflows_when_the_wait_exceeds_the_wall_time() {
     // NOTE: this saturates the per-thread `PULL_WAIT_NANOS` accumulator to `u64::MAX`
@@ -177,9 +177,9 @@ fn an_unmetered_seam_never_builds_a_timer() {
     assert!(scoped(ReadPhase::Io).is_none());
     let mut runs = 0;
     timed(ReadPhase::Decode, || runs += 1);
-    #[cfg(not(feature = "tombstones"))]
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     timed_merge_excluding_recv_wait(|| runs += 1);
-    #[cfg(feature = "tombstones")]
+    #[cfg(not(all(feature = "write-support", not(feature = "tombstones"))))]
     {
         runs += 1; // the merge helper is configured out with its only call site
     }

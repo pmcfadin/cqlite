@@ -342,11 +342,17 @@ pub fn timed<T>(phase: ReadPhase, f: impl FnOnce() -> T) -> T {
 /// Saturating: if a nested/foreign recv were somehow attributed a longer wait than
 /// this step's wall time, the phase gets 0 rather than a wrapped enormous value.
 ///
-/// Carries the SAME `not(feature = "tombstones")` gate as its only call site,
-/// `generation_merge::stream_generations_for_read` — under `tombstones` the
-/// streaming cross-generation merge is configured out, so there is no merge step to
-/// time and an ungated definition would be provably dead code in that build.
-#[cfg(not(feature = "tombstones"))]
+/// Carries the EXACT cfg of its only call site, `generation_merge::
+/// stream_generations_for_read`, which needs BOTH conditions to exist:
+/// `write-support` gates the whole `generation_merge` module at its `mod`
+/// declaration in `storage/sstable/mod.rs`, and `not(tombstones)` gates the
+/// streaming function inside it. Either one off and there is no merge step to time,
+/// so an ungated definition is provably dead code — which is exactly what the
+/// minimal-features build (`--no-default-features --features all-compression`, i.e.
+/// write-support OFF) turns into a `-D dead-code` hard error. Keep this cfg in sync
+/// with the call site rather than silencing the lint: if the last real caller ever
+/// disappears, the build SHOULD say so.
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub fn timed_merge_excluding_recv_wait<T>(f: impl FnOnce() -> T) -> T {
     if !sink_active() {
         return f();
