@@ -78,7 +78,7 @@ mod golden;
 
 use golden::compare::{cli_csv_rows, cli_json_rows, compare_rows, golden_path, stage_single_table};
 use golden::dump_shapes::{unsupported_shapes, Unsupported};
-use golden::fixture_root::{self, RootSource};
+use golden::fixture_root;
 use golden::schema::{ColumnKind, CqlType, TableSchema};
 use golden::{golden_rows, Egress, Multicell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -874,12 +874,11 @@ fn resolve_fixture(
     case: &Case,
     committed: &fixture_root::CommittedFixtures,
     checkout: &Path,
-) -> Result<(PathBuf, RootSource), FixtureError> {
+) -> Result<fixture_root::Fixture, FixtureError> {
     let tracked = committed.get(&(case.keyspace.to_string(), case.table.to_string()));
     match (case.presence, tracked) {
         (Presence::Committed, tracked) => {
             fixture_root::committed_fixture_dir(tracked, case.keyspace, case.table, checkout)
-                .map(|dir| (dir, RootSource::Checkout))
                 .map_err(FixtureError::Failure)
         }
         (Presence::Corpus, Some(_)) => Err(FixtureError::Failure(
@@ -923,6 +922,10 @@ fn run_lane(egress: Egress) {
     let mut census: Vec<String> = Vec::new();
     let mut containers_compared = 0usize;
     let mut containers_refused = 0usize;
+    // Cases compared from ONE of several SSTable directories (finding L3). Reported
+    // affirmatively, at 0 as well, so "every covered table has exactly one" is a
+    // measurement a reader can see rather than an assumption.
+    let mut narrowed: Vec<String> = Vec::new();
 
     // The git-committed fixture set, read from `git ls-files` once per lane: it decides which
     // root each case's golden comes from (finding J1) and CHECKS every `Presence`
@@ -939,7 +942,7 @@ fn run_lane(egress: Egress) {
     for case in CASES {
         let qualified = format!("{}.{}", case.keyspace, case.table);
         // must_run: a committed fixture is never allowed to skip.
-        let (fixture, root_source) = match resolve_fixture(case, &committed, &checkout) {
+        let resolved = match resolve_fixture(case, &committed, &checkout) {
             Ok(resolved) => resolved,
             // A committed fixture is present in every checkout, so an unresolvable
             // one is a real failure, never a skip — and so is a `Presence` the git
@@ -957,6 +960,18 @@ fn run_lane(egress: Egress) {
                 continue;
             }
         };
+        let fixture = resolved.dir;
+        let root_source = resolved.source;
+        // The narrowing, COUNTED: a table with several SSTable directories is
+        // compared from the first, so the others are untested — declared here (and
+        // tallied for the lane's own summary line) rather than left silent.
+        if resolved.of_dirs > 1 {
+            narrowed.push(format!(
+                "{qualified}: SSTable directory 1 of {} compared ({} untested)",
+                resolved.of_dirs,
+                resolved.of_dirs - 1
+            ));
+        }
         let golden_file = match golden_path(&fixture) {
             Ok(path) => path,
             Err(why) => {
@@ -1132,6 +1147,25 @@ fn run_lane(egress: Egress) {
         "AD2 {format} container coverage: {containers_compared} collection/UDT cell(s) \
          value-compared{refusals}"
     );
+    // The generation narrowing, stated the same way and affirmative at zero: a
+    // table with several SSTable directories is compared from ONE of them, so the
+    // count of such tables is part of what this lane measured (finding L3). A
+    // second SSTable inside ONE directory is a different matter and is not counted
+    // here — `compare::golden_path` FAILS on it, because the staged directory would
+    // feed the CLI more data than any single golden describes.
+    if narrowed.is_empty() {
+        eprintln!(
+            "AD2 {format} generation coverage: 0 case(s) narrowed — every compared \
+             table has exactly ONE SSTable directory under the root that supplied it"
+        );
+    } else {
+        eprintln!(
+            "AD2 {format} generation coverage: DECLARED GAP, {} case(s) compared from \
+             one of several SSTable directories:\n  {}",
+            narrowed.len(),
+            narrowed.join("\n  ")
+        );
+    }
     assert!(
         failures.is_empty(),
         "AD2 {format} egress value parity failed for {} case(s):\n{}",

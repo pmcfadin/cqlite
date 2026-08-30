@@ -31,7 +31,10 @@
 //! changes for that tier.
 //!
 //! The choice is VISIBLE: [`RootSource`] is reported per case in the run census, so a
-//! reader can see the committed cases came from the checkout.
+//! reader can see the committed cases came from the checkout — and so is
+//! [`Fixture::of_dirs`], the number of SSTable directories the case could have been
+//! compared from, so comparing one of several is a DECLARED narrowing rather than a
+//! silent pick (finding L3).
 //!
 //! This is deliberately scoped to THIS lane. The shared
 //! `cqlite-core/tests/support/datasets_root.rs` resolver is untouched — other lanes
@@ -164,20 +167,37 @@ pub fn committed_fixtures(listing: &[String]) -> Result<CommittedFixtures, Strin
     Ok(out)
 }
 
+/// WHICH fixture directory a case is compared from, and how many there were.
+///
+/// `of_dirs` is the number of SSTable DIRECTORIES that were candidates for this
+/// table under the root that supplied it; `dir` is the first in sorted order. The
+/// count travels with the choice so the caller can DECLARE the narrowing in its
+/// census instead of picking one of N silently (issue #1491 review finding L3).
+/// Comparing a second directory is a different staged table and a different
+/// golden, so it is a narrowing of coverage — not, like two SSTables inside ONE
+/// directory, an unsound comparison (`compare::golden_path` fails on that).
+#[derive(Clone, Debug)]
+pub struct Fixture {
+    pub dir: PathBuf,
+    pub source: RootSource,
+    pub of_dirs: usize,
+}
+
 /// The git-committed fixture directory to compare for a COMMITTED case.
 ///
 /// `sstables` is that table's entry from [`committed_fixtures`]; an empty set means
 /// git tracks no `*-Data.db` for it, which for a case declared committed is a
 /// failure, not a fallback. When git tracks several SSTables for one table the
 /// lexicographically first `(directory, file)` is taken, so the DIRECTORY chosen is
-/// the same one the evidence-based lookup's sorted directory scan would choose, and
-/// the golden inside it is then picked exactly as before by `compare::golden_path`.
+/// the same one the evidence-based lookup's sorted directory scan would choose; how
+/// many distinct directories git tracks is returned in [`Fixture::of_dirs`] for the
+/// caller to declare.
 pub fn committed_fixture_dir(
     sstables: Option<&BTreeSet<CommittedSstable>>,
     keyspace: &str,
     table: &str,
     checkout: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<Fixture, String> {
     let Some((dir, file)) = sstables.and_then(|s| s.iter().next()) else {
         return Err(format!(
             "{keyspace}.{table} is declared a git-committed case but `git ls-files` \
@@ -194,7 +214,14 @@ pub fn committed_fixture_dir(
             data_db.display()
         ));
     }
-    Ok(fixture)
+    let dirs: BTreeSet<&String> = sstables
+        .map(|s| s.iter().map(|(dir, _)| dir).collect())
+        .unwrap_or_default();
+    Ok(Fixture {
+        dir: fixture,
+        source: RootSource::Checkout,
+        of_dirs: dirs.len(),
+    })
 }
 
 /// The fixture directory for a FETCHED-CORPUS case, plus which root supplied it.
@@ -204,20 +231,30 @@ pub fn committed_fixture_dir(
 /// [`RootSource::Checkout`] when the root that won is the checkout's own `sstables/`
 /// root and as [`RootSource::Corpus`] otherwise, so the census states what was
 /// actually read rather than what the tier implies.
-pub fn corpus_fixture_dir(
-    keyspace: &str,
-    table: &str,
-    checkout: &Path,
-) -> Result<(PathBuf, RootSource), String> {
+pub fn corpus_fixture_dir(keyspace: &str, table: &str, checkout: &Path) -> Result<Fixture, String> {
     let root = super::datasets_root::sstables_root_for_table(keyspace, table)
         .ok_or_else(|| super::datasets_root::describe_search(keyspace, table))?;
-    let dir = super::compare::fixture_dir_in(&root, keyspace, table)?;
-    let source = if root == checkout {
-        RootSource::Checkout
-    } else {
-        RootSource::Corpus
-    };
-    Ok((dir, source))
+    let mut dirs = super::compare::fixture_dirs_in(&root, keyspace, table)?;
+    if dirs.is_empty() {
+        // `sstables_root_for_table` answered on this table's `*-Data.db`, so an
+        // empty directory set here means the two disagree — reported, never
+        // resolved by falling through to another root.
+        return Err(format!(
+            "{} carries {keyspace}.{table} by the root walk but holds no \
+             {table}-* directory with a *-Data.db",
+            root.display()
+        ));
+    }
+    let of_dirs = dirs.len();
+    Ok(Fixture {
+        dir: dirs.remove(0),
+        source: if root == checkout {
+            RootSource::Checkout
+        } else {
+            RootSource::Corpus
+        },
+        of_dirs,
+    })
 }
 
 #[cfg(test)]
@@ -245,9 +282,10 @@ mod tests {
         let checkout = tmp.path().join("checkout");
         write(&checkout.join("ks/t-abc/nb-1-big-Data.db"), b"x");
         let committed = fixtures(&[("ks", "t", "t-abc", "nb-1-big-Data.db")]);
-        let dir = committed_fixture_dir(committed.get(&key("ks", "t")), "ks", "t", &checkout)
+        let fixture = committed_fixture_dir(committed.get(&key("ks", "t")), "ks", "t", &checkout)
             .expect("resolves");
-        assert_eq!(dir, checkout.join("ks").join("t-abc"));
+        assert_eq!(fixture.dir, checkout.join("ks").join("t-abc"));
+        assert_eq!(fixture.of_dirs, 1, "one tracked directory");
     }
 
     /// The J1 property: an external copy of a committed table is NOT consulted, so a
@@ -291,9 +329,48 @@ mod tests {
         write(&checkout.join("ks/t-0000/nb-9-big-Data.db"), b"stray");
         write(&checkout.join("ks/t-abc/nb-1-big-Data.db"), b"x");
         let committed = fixtures(&[("ks", "t", "t-abc", "nb-1-big-Data.db")]);
-        let dir = committed_fixture_dir(committed.get(&key("ks", "t")), "ks", "t", &checkout)
+        let fixture = committed_fixture_dir(committed.get(&key("ks", "t")), "ks", "t", &checkout)
             .expect("resolves");
-        assert_eq!(dir, checkout.join("ks").join("t-abc"));
+        assert_eq!(fixture.dir, checkout.join("ks").join("t-abc"));
+    }
+
+    /// L3: when git tracks SEVERAL SSTable directories for one table, the first is
+    /// compared and the COUNT travels with it, so the caller's census can declare
+    /// how many directories went untested. Without the count the choice is a silent
+    /// pick of one of N — the property this lane exists to prevent.
+    #[test]
+    fn several_tracked_directories_are_counted_not_just_narrowed_to_one() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let checkout = tmp.path().join("checkout");
+        write(&checkout.join("ks/t-aaa/nb-1-big-Data.db"), b"x");
+        write(&checkout.join("ks/t-bbb/nb-1-big-Data.db"), b"y");
+        let committed = fixtures(&[
+            ("ks", "t", "t-bbb", "nb-1-big-Data.db"),
+            ("ks", "t", "t-aaa", "nb-1-big-Data.db"),
+        ]);
+        let fixture = committed_fixture_dir(committed.get(&key("ks", "t")), "ks", "t", &checkout)
+            .expect("resolves");
+        assert_eq!(
+            fixture.dir,
+            checkout.join("ks").join("t-aaa"),
+            "the sorted-first directory is the one compared"
+        );
+        assert_eq!(
+            fixture.of_dirs, 2,
+            "both tracked directories must be counted, so the narrowing can be declared"
+        );
+
+        // Two SSTables tracked in ONE directory is one directory, not two: that
+        // shape is refused by `compare::golden_path`, not counted here.
+        let one_dir = fixtures(&[
+            ("ks", "u", "u-aaa", "nb-1-big-Data.db"),
+            ("ks", "u", "u-aaa", "nb-2-big-Data.db"),
+        ]);
+        write(&checkout.join("ks/u-aaa/nb-1-big-Data.db"), b"x");
+        write(&checkout.join("ks/u-aaa/nb-2-big-Data.db"), b"y");
+        let fixture = committed_fixture_dir(one_dir.get(&key("ks", "u")), "ks", "u", &checkout)
+            .expect("resolves");
+        assert_eq!(fixture.of_dirs, 1);
     }
 
     fn key(ks: &str, table: &str) -> (String, String) {

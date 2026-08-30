@@ -1058,6 +1058,23 @@ pub fn cli_csv_rows(text: &str) -> Result<Vec<Row>, String> {
 /// git-committed case is pinned to the checkout copy and only a fetched-corpus case
 /// walks the candidate roots by evidence (#1491 finding J1, #3220).
 pub fn fixture_dir_in(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, String> {
+    let mut dirs = fixture_dirs_in(root, keyspace, table)?;
+    if dirs.is_empty() {
+        return Err(format!(
+            "no {table}-* directory with a *-Data.db under {}",
+            root.join(keyspace).display()
+        ));
+    }
+    Ok(dirs.remove(0))
+}
+
+/// EVERY `<table>-<uuid>` directory holding a `*-Data.db` under `root/keyspace`,
+/// in sorted order.
+///
+/// Returned as the whole set, not just the first, so a caller that compares one of
+/// them can COUNT the narrowing and declare it instead of picking silently (issue
+/// #1491 review finding L3).
+pub fn fixture_dirs_in(root: &Path, keyspace: &str, table: &str) -> Result<Vec<PathBuf>, String> {
     let prefix = format!("{table}-");
     let mut matches: Vec<PathBuf> = std::fs::read_dir(root.join(keyspace))
         .map_err(|e| format!("cannot read {}: {e}", root.join(keyspace).display()))?
@@ -1073,12 +1090,7 @@ pub fn fixture_dir_in(root: &Path, keyspace: &str, table: &str) -> Result<PathBu
         })
         .collect();
     matches.sort();
-    matches.into_iter().next().ok_or_else(|| {
-        format!(
-            "no {prefix}* directory with a *-Data.db under {}",
-            root.join(keyspace).display()
-        )
-    })
+    Ok(matches)
 }
 
 fn has_data_db(dir: &Path) -> bool {
@@ -1094,24 +1106,73 @@ fn has_data_db(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The `*-Data.db.jsonl` golden sitting beside the fixture's `*-Data.db`.
+/// The golden that describes the fixture's `*-Data.db`, PAIRED BY NAME:
+/// `<gen>-Data.db` is described by `<gen>-Data.db.jsonl` and by no other file.
+///
+/// Two selections used to be silent here, and both could compare a CLI reading of
+/// one SSTable against a dump of another (issue #1491 review finding L3):
+///
+///   * the lexicographically FIRST golden in the directory was taken, so a
+///     directory holding `nb-1-…jsonl` next to a `nb-2-big-Data.db` compared the
+///     wrong generation's dump — 26 committed fixture directories carry more than
+///     one golden, so the shape is real even though no covered case has it today;
+///   * a directory holding SEVERAL `*-Data.db` was accepted, and
+///     [`stage_single_table`] copies the whole directory, so the CLI reads all of
+///     them while one golden describes one. That is not narrowed coverage but an
+///     unsound comparison, so it FAILS naming the files rather than being counted.
 pub fn golden_path(fixture: &Path) -> Result<PathBuf, String> {
-    let mut found: Vec<PathBuf> = std::fs::read_dir(fixture)
+    let mut data_dbs: Vec<PathBuf> = Vec::new();
+    let mut goldens: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(fixture)
         .map_err(|e| format!("cannot read {}: {e}", fixture.display()))?
         .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.ends_with("-Data.db.jsonl"))
-                .unwrap_or(false)
-        })
-        .collect();
-    found.sort();
-    found
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("no *-Data.db.jsonl golden in {}", fixture.display()))
+    {
+        let path = entry.path();
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) if name.ends_with("-Data.db.jsonl") => goldens.push(path),
+            Some(name) if name.ends_with("-Data.db") => data_dbs.push(path),
+            _ => {}
+        }
+    }
+    data_dbs.sort();
+    goldens.sort();
+    let names = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let [data_db] = data_dbs.as_slice() else {
+        return Err(format!(
+            "{} holds {} *-Data.db files ({}) — the whole directory is staged as one \
+             table, so the CLI would read all of them while a golden describes one; \
+             this lane compares exactly one SSTable per case",
+            fixture.display(),
+            data_dbs.len(),
+            if data_dbs.is_empty() {
+                "none".to_string()
+            } else {
+                names(&data_dbs)
+            }
+        ));
+    };
+    let expected = PathBuf::from(format!("{}.jsonl", data_db.display()));
+    if !expected.is_file() {
+        return Err(format!(
+            "no golden {} beside the SSTable it must describe{}",
+            expected.display(),
+            if goldens.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (the directory holds {}, which describe other generations)",
+                    names(&goldens)
+                )
+            }
+        ));
+    }
+    Ok(expected)
 }
 
 /// Stage a `--data-dir` holding EXACTLY this one table, by copying the fixture's
