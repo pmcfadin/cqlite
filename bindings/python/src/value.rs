@@ -374,11 +374,16 @@ impl Udt {
         identity.hash()
     }
 
+    /// A Python-`repr`-shaped rendering, e.g.
+    /// `Udt(type_name='address', keyspace='ks', fields={'street': '1 Main St'})`.
+    ///
+    /// The two strings are rendered by Python's own `repr` rather than Rust's
+    /// `{:?}`, so quoting and escaping match every other repr a caller sees.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
-            "Udt(type_name={:?}, keyspace={:?}, fields={})",
-            self.type_name,
-            self.keyspace,
+            "Udt(type_name={}, keyspace={}, fields={})",
+            self.type_name.as_str().into_pyobject(py)?.repr()?,
+            self.keyspace.as_str().into_pyobject(py)?.repr()?,
             self.fields.bind(py).as_any().repr()?
         ))
     }
