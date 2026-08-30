@@ -165,6 +165,28 @@ if [ ! -d "$_sumdir" ]; then
   echo "               that could not publish its verdict (#3473)." >&2
   exit 1
 fi
+# If something is ALREADY at the summary path, directory permissions are not the whole story
+# (roborev job 162, Medium): a pre-existing file the gate cannot rewrite means it can publish
+# neither its startup sentinel nor its verdict, even though creating NEW entries in that
+# directory works fine. So the existing file is checked too — and by DOING it, since `[ -w ]`
+# does not account for ACLs, mount flags or SELinux.
+#
+# `: >> "$SUMMARY"` opens for APPEND and writes zero bytes: it cannot truncate, cannot alter
+# the contents, and does not even update mtime. That matters because under #2874 the path may
+# hold a LIVE PEER's block — the check must not disturb it.
+if [ -e "$SUMMARY" ] || [ -L "$SUMMARY" ]; then
+  if [ -L "$SUMMARY" ] || [ ! -f "$SUMMARY" ]; then
+    echo "gate-detached: '$SUMMARY' exists but is not a regular file (symlink, directory, fifo or" >&2
+    echo "               device). Refusing: the gate's verdict would go somewhere unintended (#3473)." >&2
+    exit 1
+  fi
+  if ! : >> "$SUMMARY" 2>/dev/null; then
+    echo "gate-detached: '$SUMMARY' already exists and is NOT writable, so the gate could not" >&2
+    echo "               publish its sentinel or its verdict there — every poll would answer" >&2
+    echo "               UNKNOWN. Refusing to launch an unmonitorable gate (#3473)." >&2
+    exit 1
+  fi
+fi
 # The probe deliberately NEVER touches $SUMMARY itself. Truncating it to test writability
 # would destroy whatever is at that path — and under #2874 that could be a LIVE PEER's
 # summary block, i.e. the probe would cause the very data loss the no-clobber contract

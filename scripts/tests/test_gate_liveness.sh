@@ -105,64 +105,25 @@ mk_summary() {
     echo "==== END AGENT-GATE SUMMARY ===="
   } > "$1"
 }
-# A pid that is CERTAIN to be dead, so the REAPED cases are deterministic. Hard-coding a
-# number (4242) would be a coin flip: if that pid happens to exist on the host, a beat
-# naming it reads as "gate still alive" and the case silently flips to UNKNOWN.
-#
-# Spawned and reaped in THIS shell, deliberately. The first version built it inside a
-# command substitution — `$( { bash -c 'exit 0' & echo $!; } )` — where the process is a
-# child of the SUBSHELL, so the parent's `wait` cannot reap it and the pid could still be
-# live when the first REAPED case ran: a flaky test, of exactly the kind this repo's
-# roborev-lints exist to keep out. Here `wait` reaps a genuine child, and the result is
-# then VERIFIED rather than assumed.
-bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-DEAD_PID=$!
-kill -9 "$DEAD_PID" 2>/dev/null || true
-wait "$DEAD_PID" 2>/dev/null || true
-# A failed derivation is a FAIL that NAMES the derivation, never a silent fallback: if this
-# pid were still live, every REAPED case below would quietly become UNKNOWN and the suite
-# would go green having asserted nothing about death.
-if kill -0 "$DEAD_PID" 2>/dev/null; then
-  printf 'FAIL %s\n' "0.1 derive a known-dead pid (pid $DEAD_PID is still alive; REAPED cases would be vacuous)"
-  exit 1
-fi
-
-# THIS host's identity. A beat must claim it for the reader to inspect /proc at all
-# (roborev job 160): a pid is meaningless off the machine that owns it.
-MY_HOST=$(uname -n 2>/dev/null || echo unknown)
-MY_BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "")
-
-# mk_beat <path> <run-id> <age-secs> [interval] [gate-pid] [gate-starttime] [host] [boot-id]
-# Defaults claim THIS machine, matching what the real beater publishes, so the ordinary
-# cases exercise the ordinary path. Pass host/boot-id explicitly for the cross-machine and
-# reboot cases; pass an empty boot-id to model a beat from a gate predating those fields.
+# NOTE what the #3473 descope removed from this suite. While the reader claimed `REAPED` it
+# had to inspect a pid, so these tests needed a KNOWN-DEAD pid — and deriving one was itself
+# a source of flakiness (the first attempt built it inside a command substitution, where the
+# parent cannot reap it, so every death assertion could silently become UNKNOWN on a green
+# suite). `STALLED` claims nothing about a process, so none of that machinery is needed and
+# a whole class of test flakiness is gone with it.
+# mk_beat <path> <run-id> <age-secs> [interval]
 mk_beat() {
-  local iv="${4:-20}" pid="${5:-$DEAD_PID}" st="${6:-}"
-  local host="${7-$MY_HOST}" boot="${8-$MY_BOOT}"
+  local iv="${4:-20}"
   { echo "==== AGENT-GATE HEARTBEAT ===="
     echo "run-id: $2"
-    echo "gate-pid: $pid"
-    [ -n "$st" ] && echo "gate-starttime: $st"
+    echo "gate-pid: 4242"
     echo "parent-check: starttime"
-    [ -n "$host" ] && echo "host: $host"
-    [ -n "$boot" ] && echo "boot-id: $boot"
+    echo "host: $(uname -n 2>/dev/null || echo unknown)"
     echo "interval: $iv"
     echo "beat-seq: 7"
     echo "beat-epoch: $(( $(date +%s) - $3 ))"
     echo "==== END AGENT-GATE HEARTBEAT ===="
   } > "$1"
-}
-
-# live_starttime <pid> — field 22 of /proc/<pid>/stat, or empty (used to build a beat that
-# genuinely matches a living process).
-live_starttime() {
-  local raw rest
-  raw=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
-  rest="${raw##*) }"
-  # shellcheck disable=SC2086
-  set -- $rest
-  [ $# -ge 20 ] || return 1
-  printf '%s' "${20}"
 }
 
 echo "=== section 1: usage (a reader that guesses its subject is worse than one that refuses) ==="
@@ -202,7 +163,7 @@ expect_reader "4.1 INCOMPLETE + no beat => UNKNOWN (absence is NOT death)" UNKNO
 mk_beat "$TMP/a.txt.heartbeat" run-a 5
 expect_reader "4.2 INCOMPLETE + fresh beat => RUNNING" RUNNING 2 "alive" -- "$TMP/a.txt"
 mk_beat "$TMP/a.txt.heartbeat" run-a 4000
-expect_reader "4.3 INCOMPLETE + stale beat => REAPED" REAPED 3 "stopped beating" -- "$TMP/a.txt"
+expect_reader "4.3 INCOMPLETE + stale beat => STALLED" STALLED 3 "no liveness" -- "$TMP/a.txt"
 # The INCOMPLETE (foreign) variant (#2874) is likewise not a verdict.
 mk_summary "$TMP/b.txt" run-b "INCOMPLETE (foreign)"
 mk_beat "$TMP/b.txt.heartbeat" run-b 5
@@ -216,11 +177,11 @@ expect_reader "5.1 age 89s, floor window 90s => RUNNING"  RUNNING 2 "" -- "$TMP/
 mk_beat "$TMP/a.txt.heartbeat" run-a 90 20
 expect_reader "5.2 age 90s == window => RUNNING"          RUNNING 2 "" -- "$TMP/a.txt"
 mk_beat "$TMP/a.txt.heartbeat" run-a 91 20
-expect_reader "5.3 age 91s > window => REAPED"            REAPED  3 "" -- "$TMP/a.txt"
+expect_reader "5.3 age 91s > window => STALLED"           STALLED 3 "" -- "$TMP/a.txt"
 mk_beat "$TMP/a.txt.heartbeat" run-a 179 60
 expect_reader "5.4 interval 60 => window 180, age 179 RUNNING" RUNNING 2 "window 180s" -- "$TMP/a.txt"
 mk_beat "$TMP/a.txt.heartbeat" run-a 181 60
-expect_reader "5.5 interval 60 => window 180, age 181 REAPED"  REAPED  3 "window 180s" -- "$TMP/a.txt"
+expect_reader "5.5 interval 60 => window 180, age 181 STALLED" STALLED 3 "window 180s" -- "$TMP/a.txt"
 
 echo "=== section 6: a peer's artifacts are never read as ours (#2874 reader contract) ==="
 mk_summary "$TMP/p.txt" peer-run "PASS"
@@ -526,72 +487,35 @@ mk_beat "$tinc.heartbeat" run-y 5
 expect_reader "11c.4 truncated INCOMPLETE still consults the beat (asymmetry is deliberate)" \
   RUNNING 2 "" -- "$tinc"
 
-# (b) Medium — a STALE beat alone was reported REAPED. The beater is supervised only at
-#     COMPONENT boundaries and components run for minutes, so a beater that dies mid-
-#     component leaves a stale beat under a PERFECTLY LIVE gate. Reporting death there
-#     sends the caller to re-run a gate that was about to PASS. REAPED must now be an
-#     AFFIRMATIVE measurement, like RUNNING.
-mk_summary "$TMP/live.txt" run-L "INCOMPLETE (gate did not finish)"
-if [ -d /proc/1 ]; then
-  # A real, living process stands in for the gate; the beat is stale but pins its identity.
-  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-  livepid=$!
-  echo "$livepid" >> "$TMP/pids"
-  livest=$(live_starttime "$livepid" || true)
-  if [ -z "$livest" ]; then
-    bad "11c.5 read a live process's start time" "empty — cannot build the case"
-  else
-    mk_beat "$TMP/live.txt.heartbeat" run-L 4000 20 "$livepid" "$livest"
-    expect_reader "11c.5 stale beat + gate pid ALIVE => UNKNOWN (beater died, not the gate)" \
-      UNKNOWN 4 "beater-died-gate-alive" -- "$TMP/live.txt"
-    # ...and the same pid with a MISMATCHED start time is a recycled pid: the gate IS gone.
-    mk_beat "$TMP/live.txt.heartbeat" run-L 4000 20 "$livepid" "$(( livest + 1 ))"
-    expect_reader "11c.6 stale beat + pid RECYCLED (start time differs) => REAPED" \
-      REAPED 3 "RECYCLED" -- "$TMP/live.txt"
-    # Control: a FRESH beat naming a live gate is still plain RUNNING.
-    mk_beat "$TMP/live.txt.heartbeat" run-L 5 20 "$livepid" "$livest"
-    expect_reader "11c.7 control: fresh beat + live gate => RUNNING" RUNNING 2 "" -- "$TMP/live.txt"
-  fi
-  # A stale beat whose pid is genuinely gone is affirmative death.
-  mk_beat "$TMP/live.txt.heartbeat" run-L 4000 20 "$DEAD_PID" "$(live_starttime 1)"
-  expect_reader "11c.8 stale beat + pid GONE => REAPED" REAPED 3 "no longer exists" -- "$TMP/live.txt"
+# (b) Medium — a STALE beat alone was reported REAPED. Fixed by DESCOPING the death claim
+#     rather than by inspecting the process: see the note in gate-liveness.sh. What must hold
+#     now is that a stale beat yields STALLED, that STALLED says plainly it is NOT a death
+#     claim (so nobody re-runs a gate on it reflexively), and that it works on EVERY host —
+#     the previous pid/host/boot machinery could not, which is what made these cases fail
+#     deterministically on macOS.
+mk_summary "$TMP/st.txt" run-S "INCOMPLETE (gate did not finish)"
+mk_beat "$TMP/st.txt.heartbeat" run-S 4000
+expect_reader "11c.5 stale beat => STALLED" STALLED 3 "no liveness" -- "$TMP/st.txt"
+run_reader "$TMP/st.txt"
+printf '%s' "$OUT" | grep -q 'NOT a claim that the process is dead' \
+  && ok "11c.6 STALLED states it is NOT a death claim" \
+  || bad "11c.6 STALLED states it is NOT a death claim" "$(printf '%s' "$OUT" | head -1)"
+printf '%s' "$OUT" | grep -q 'relaunches it at the next component boundary' \
+  && ok "11c.7 STALLED explains the beater-recovery path instead of advising a re-run" \
+  || bad "11c.7 STALLED explains the beater-recovery path" "$(printf '%s' "$OUT" | head -1)"
+# Host-independence, asserted at the source: no verdict may depend on /proc, a pid check or a
+# machine identity, or this suite becomes host-dependent again.
+if grep -nE '/proc|kill -0|boot-id|boot_id|gate-starttime' "$READER" | grep -vE '^[0-9]+:#' >/dev/null 2>&1; then
+  bad "11c.8 no verdict depends on /proc, a pid probe or machine identity" \
+      "$(grep -nE '/proc|kill -0|boot-id|boot_id|gate-starttime' "$READER" | grep -vE '^[0-9]+:#' | head -3)"
 else
-  echo "skip 11c.5-11c.8 (no /proc on this host)"
+  ok "11c.8 no verdict depends on /proc, a pid probe or machine identity"
 fi
-# Fallback path: no gate-starttime in the beat. A live pid cannot be pinned, so the answer
-# is UNKNOWN rather than a guess in either direction.
-mk_summary "$TMP/fb.txt" run-F "INCOMPLETE (gate did not finish)"
-bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-fbpid=$!; echo "$fbpid" >> "$TMP/pids"
-mk_beat "$TMP/fb.txt.heartbeat" run-F 4000 20 "$fbpid"
-expect_reader "11c.9 stale beat, no gate-starttime, pid alive => UNKNOWN (cannot rule out reuse)" \
-  UNKNOWN 4 "beater-died-gate-maybe-alive" -- "$TMP/fb.txt"
-kill -9 "$fbpid" 2>/dev/null; wait "$fbpid" 2>/dev/null || true
-# A beat naming no usable pid cannot confirm death either.
-mk_beat "$TMP/fb.txt.heartbeat" run-F 4000 20 "notapid"
-expect_reader "11c.10 stale beat with an unusable gate-pid => UNKNOWN" \
-  UNKNOWN 4 "heartbeat-no-gate-pid" -- "$TMP/fb.txt"
-
-# (c) Medium — the beater must PUBLISH the start time the reader pins, or (b) degrades to
-#     the fallback everywhere.
-if [ -d /proc/1 ]; then
-  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-  gpid=$!; echo "$gpid" >> "$TMP/pids"
-  pubf="$TMP/pub.hb"
-  bash "$BEATER" --file "$pubf" --run-id pub-run --gate-pid "$gpid" --interval 1 \
-    </dev/null >/dev/null 2>&1 &
-  echo "$!" >> "$TMP/beater-pids"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$pubf" ] && break; sleep 0.3; done
-  want=$(live_starttime "$gpid" || true)
-  if grep -q "^gate-starttime: ${want}$" "$pubf" 2>/dev/null; then
-    ok "11c.11 the beater publishes the gate's start time, matching /proc"
-  else
-    bad "11c.11 the beater publishes the gate's start time, matching /proc" \
-        "want '$want', got '$(grep '^gate-starttime: ' "$pubf" 2>/dev/null)'"
-  fi
-  kill -9 "$gpid" 2>/dev/null; wait "$gpid" 2>/dev/null || true
+# ...and the verdict vocabulary must not quietly regain REAPED.
+if grep -qE '^\s*verdict REAPED' "$READER"; then
+  bad "11c.9 the reader emits no REAPED verdict" "the descoped death claim has returned"
 else
-  echo "skip 11c.11 (no /proc)"
+  ok "11c.9 the reader emits no REAPED verdict"
 fi
 
 # (d) Medium — PORTABILITY. This suite is wired into the full gate's tooling-tests, and
@@ -614,54 +538,10 @@ for f in "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" "$REPO_ROOT/scripts/te
 done
 [ "$port_bad" -eq 0 ] && ok "11c.12/13 both suites are free of GNU-only in-place sed and bare timeout"
 
-echo "=== section 11d: the three roborev job-160 findings ==="
-# (a) Medium — the /proc corroboration ran on the READER's host without proving it was the
-#     GATE's host. Across a shared filesystem that reports a live REMOTE gate as REAPED, or
-#     "corroborates" liveness against an unrelated local pid. The previous version's comment
-#     asserted "only possible on the gate's OWN host" and never checked the host — the same
-#     stated-not-enforced defect as the rest of this issue.
-mk_summary "$TMP/host.txt" run-H "INCOMPLETE (gate did not finish)"
-mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 "$DEAD_PID" "" "someotherbox" "ffffffff-ffff-ffff-ffff-ffffffffffff"
-expect_reader "11d.1 stale beat from ANOTHER machine => UNKNOWN, never REAPED" \
-  UNKNOWN 4 "heartbeat-foreign-host" -- "$TMP/host.txt"
-# Same hostname, different kernel boot: the box rebooted, so every pid from that boot IS
-# gone. That is affirmative evidence of death, not a puzzle.
-mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 12345 "" "$MY_HOST" "ffffffff-ffff-ffff-ffff-ffffffffffff"
-expect_reader "11d.2 stale beat, same host, DIFFERENT boot-id => REAPED (rebooted)" \
-  REAPED 3 "REBOOTED" -- "$TMP/host.txt"
-# A beat with no boot-id at all (a gate predating the field) cannot be attributed to a
-# machine, so the pid must not be inspected.
-mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 "$DEAD_PID" "" "$MY_HOST" ""
-expect_reader "11d.3 stale beat with NO boot-id => UNKNOWN (cannot attribute to a machine)" \
-  UNKNOWN 4 "heartbeat-foreign-host" -- "$TMP/host.txt"
-# Control: this machine's own identity still reaches the pid checks, both ways.
-if [ -n "$MY_BOOT" ]; then
-  mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 "$DEAD_PID"
-  expect_reader "11d.4 control: this machine + pid gone => REAPED" REAPED 3 "no longer exists" -- "$TMP/host.txt"
-  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-  hpid=$!; echo "$hpid" >> "$TMP/pids"
-  hst=$(live_starttime "$hpid" || true)
-  mk_beat "$TMP/host.txt.heartbeat" run-H 4000 20 "$hpid" "$hst"
-  expect_reader "11d.5 control: this machine + pid alive => UNKNOWN (beater died)" \
-    UNKNOWN 4 "beater-died-gate-alive" -- "$TMP/host.txt"
-  kill -9 "$hpid" 2>/dev/null; wait "$hpid" 2>/dev/null || true
-  # And the real beater must claim this machine, or (a) degrades to UNKNOWN everywhere.
-  bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-  bpid=$!; echo "$bpid" >> "$TMP/pids"
-  hbf2="$TMP/hostpub.hb"
-  bash "$BEATER" --file "$hbf2" --run-id host-run --gate-pid "$bpid" --interval 1 </dev/null >/dev/null 2>&1 &
-  echo "$!" >> "$TMP/beater-pids"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$hbf2" ] && break; sleep 0.3; done
-  if grep -q "^host: $MY_HOST$" "$hbf2" 2>/dev/null && grep -q "^boot-id: $MY_BOOT$" "$hbf2" 2>/dev/null; then
-    ok "11d.6 the beater publishes this machine's host and boot-id"
-  else
-    bad "11d.6 the beater publishes this machine's host and boot-id" \
-        "got: $(grep -E '^(host|boot-id): ' "$hbf2" 2>/dev/null | tr '\n' ' ')"
-  fi
-  kill -9 "$bpid" 2>/dev/null; wait "$bpid" 2>/dev/null || true
-else
-  echo "skip 11d.4-11d.6 (no boot_id on this host)"
-fi
+echo "=== section 11d: the surviving roborev job-160 finding (the other two were descoped) ==="
+# job 160's cross-host finding and job 162's hostname-collision finding are both GONE by
+# construction: the reader no longer inspects a process at all, so there is no host to prove.
+# Asserted by 11c.8/11c.9 above rather than by more cases here.
 
 # (b) Medium — the "atomic snapshot" claim held only for rename-published files. The SUMMARY
 #     is written in place with `>`, so a reader can observe a PREFIX of a block being

@@ -16,8 +16,8 @@ bash scripts/flow/gate-detached.sh --summary /tmp/gate-summary.txt --log /tmp/ga
 # poll (NEVER read the gate log)
 bash scripts/gate-liveness.sh /tmp/gate-summary.txt
 #   COMPLETE (exit 0) — a terminal verdict is in the summary file
-#   RUNNING  (exit 2) — alive, no verdict yet (includes queued on the #1825 slot)
-#   REAPED   (exit 3) — killed; it will never write a verdict, re-run it
+#   RUNNING  (exit 2) — beat within the freshness window (includes queued on the #1825 slot)
+#   STALLED  (exit 3) — no liveness published for a while. NOT a claim the process is dead
 #   UNKNOWN  (exit 4) — cannot tell; the printed cause names what was unmeasurable
 ```
 
@@ -213,25 +213,93 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
 - Every beat carries `run-id:`, and the reader refuses to answer about a run-id other
   than the one it was asked for — the #2874 reader contract, which holds for a `PASS`
   block just as much as for a beat. **Pass `--run-id` whenever you know it.**
-- The beater verifies the gate pid before **every** beat, pinning `/proc/<pid>/stat`
-  field 22 (start time) where available so a recycled pid reads as dead. A beater that
-  kept beating after its gate died would report a dead gate as `RUNNING` forever — this
-  issue's own defect, one level down.
-- Every positive verdict is an **affirmative measurement**. `RUNNING` requires a present,
-  run-id-matching, fresh beat; `REAPED` requires a present, run-id-matching, **stale**
-  one. A **missing** heartbeat is `UNKNOWN`, never `REAPED`: a gate predating this
-  mechanism, or one whose summary path is unwritable, produces the same absence, and
-  declaring those dead would be the fail-open shape one level down.
+- The beater verifies the gate pid before **every** beat, pinning `/proc/<pid>/stat` field 22
+  (start time) where available so a recycled pid reads as dead. That check is **local by
+  construction** — the beater always runs on the gate's own host — which is why it survived
+  the descope below. A beater that kept beating after its gate died would report a dead gate
+  as `RUNNING` forever: this issue's own defect, one level down.
 - The staleness window is `3 × interval` with a 90 s floor, read from the beat's **own**
   `interval:` line, so the reader holds no duplicate of the gate's beat period and cannot
   drift from it. There is deliberately **no env var** that widens the window or disables
   the beat — that hatch could only buy a vacuous `RUNNING` for a dead gate.
 
+### The verdict set, and the death claim that was descoped
+
+| observation | verdict | exit |
+|---|---|---|
+| terminal `RESULT:` in a complete, run-id-matching block | `COMPLETE` | 0 |
+| beat present, run-id matches, **fresh** | `RUNNING` | 2 |
+| beat present, run-id matches, **stale** | `STALLED` | 3 |
+| anything unmeasurable, with a named cause | `UNKNOWN` | 4 |
+
+**`STALLED` is not "the gate is dead".** It says exactly what two local files can establish:
+*this run has published no liveness for N seconds.*
+
+It started life as `REAPED` — a positive claim that the process was gone — and **four review
+rounds each found another way that claim was unsound**:
+
+1. a stale beat alone does not imply death: the beater is supervised only at component
+   boundaries, and components run for minutes, so a beater can die under a perfectly live gate;
+2. corroborating against the **reader's** `/proc` does not prove anything about the **gate's**
+   host — across shared storage a live remote gate reads as dead;
+3. matching **hostnames** do not prove machine identity either: two boxes can share a
+   hostname, so a differing `boot-id` was misread as a reboot;
+4. and the machinery itself was unportable — there is no `/proc` boot id on the macOS/BSD gate
+   hosts, so the death cases failed there deterministically.
+
+Each fix was correct about the case in front of it and the list did not close, because proving
+a process is dead means **proving a negative about a machine you may not be on**. So the claim
+was removed rather than defended a fifth time. What remains needs no pid, no `/proc`, no host
+identity and no boot identity — and is therefore correct on every host.
+
+**Nothing actionable is lost.** The lane's real question is *"should I keep waiting?"*, and
+`STALLED` answers it. The rule that replaces "definitely dead, re-run now" needs no process
+inspection: the gate relaunches its beater at every component boundary, so a live gate whose
+beater alone died **recovers to `RUNNING` within one component**. Re-read before acting; if it
+is still `STALLED` after a component's worth of time (~850 s at the longest), treat the gate as
+gone and relaunch. The verdict text says all of this, so a reader acting on it needs no
+memory of this document.
+
+`RUNNING` and `STALLED` both remain **affirmative measurements** — each requires a beat that is
+present, run-id-matching, and respectively fresh or stale. A **missing** heartbeat is `UNKNOWN`,
+never `STALLED`: a gate predating this mechanism, or one whose summary path is unwritable,
+produces the same absence, and reporting those as a stall would be the fail-open shape one
+level down.
+
+### What the reader does NOT guarantee
+
+The summary is **not** published atomically: `agent-gate.sh` writes it in place with `>`, so a
+reader can observe a **prefix** of a block being written. It cannot observe a blend of two
+versions (`O_TRUNC` resets the length and content is written forward), and that is what makes
+this tractable — a partial block is missing its tail, so the mandatory end-marker check rejects
+it and a torn read degrades to `UNKNOWN`, never to a wrong `COMPLETE`. The reader re-reads
+**once** when the framing is incomplete, which resolves the common "caught mid-write" case; a
+permanently truncated artifact still reports `UNKNOWN`.
+
+Making that write atomic (sibling temp + rename) is the root fix and was deliberately left out
+of #3473: `emit_summary` is load-bearing for #1175's write-failure detection and #2874's
+no-clobber contract, so changing how the **gate of record** publishes its verdict deserves its
+own issue rather than a ride-along.
+
+### The launcher refuses an unmonitorable gate
+
+`gate-detached.sh` verifies, before starting anything, that the summary can actually be
+published: the directory must hold a file and support a rename (what the summary and the
+heartbeat's atomic publish need), and an **existing** summary must be a regular file that is
+writable. A bad location would otherwise start a gate that publishes neither verdict nor
+liveness — 30–50 minutes burned certifying nothing, with every poll answering `UNKNOWN` and no
+way to tell that from a slow queue.
+
+Both probes are **non-destructive by design**, because under #2874 that path may hold a live
+peer's block: the directory is probed with a **sibling** temp file, and an existing summary with
+a zero-byte **append** (which cannot truncate and does not even alter mtime). Truncating it to
+test writability would cause exactly the data loss that contract exists to prevent.
+
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (66 cases) and
-`scripts/tests/test_gate_detached.sh` (23 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (107 cases) and
+`scripts/tests/test_gate_detached.sh` (39 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine
@@ -243,7 +311,8 @@ Self-tests: `scripts/tests/test_gate_liveness.sh` (66 cases) and
   session teardown, which is a class of failure the closer cannot see coming and cannot
   distinguish from a slow gate. It costs one wrapper call.
 - Never conclude "my gate is still running" from `RESULT: INCOMPLETE` alone. Ask
-  `gate-liveness.sh`. A `REAPED` verdict means re-run; it will never produce a verdict.
+  `gate-liveness.sh`. A `STALLED` verdict means stop waiting open-endedly: re-read once, and
+  relaunch if it persists past a long component (~850 s). It is not proof of death.
 - On a host where `gate-detached.sh` refuses (no working user systemd manager), the gate
   of record must be launched from a separate login (`ssh` + `nohup`), which gets its own
   scope. Do not launch it in-session and hope.

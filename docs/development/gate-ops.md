@@ -411,13 +411,19 @@ in this order:
   sentinel names that path. One command answers the question this whole section is about:
   ```bash
   bash scripts/gate-liveness.sh "$AGENT_GATE_SUMMARY_FILE" --run-id <run-id>
-  #   COMPLETE (0) | RUNNING (2) | REAPED (3) | UNKNOWN (4, with a named cause)
+  #   COMPLETE (0) | RUNNING (2) | STALLED (3) | UNKNOWN (4, with a named cause)
   ```
-  `RUNNING` covers queued-and-alive, so it needs no separate queue check. `REAPED` is the state
-  nothing could previously express: the gate was killed and will never write a verdict — re-launch
-  rather than wait. Pass `--run-id` whenever you know it; a concurrent peer's beat on a shared
-  default path otherwise answers about the peer's gate (#2874). A **missing** beat is `UNKNOWN`,
-  never `REAPED` — absence is not evidence of death, and an older gate simply has no beat.
+  `RUNNING` covers queued-and-alive, so it needs no separate queue check. `STALLED` is the state
+  nothing could previously express: **this run has published no liveness for a while.** It is
+  deliberately NOT a claim that the process is dead — #3473 tried that (`REAPED`) and descoped it
+  after four review rounds, because proving a process dead means proving a negative about a
+  machine you may not be on. Act on it like this: the gate relaunches its beater at every
+  component boundary, so a live gate whose beater alone died recovers to `RUNNING` within one
+  component; re-read before acting, and if it is still `STALLED` after a component's worth of
+  time (the longest is ~850s) treat the gate as gone and relaunch it. Pass `--run-id` whenever
+  you know it; a concurrent peer's beat on a shared default path otherwise answers about the
+  peer's gate (#2874). A **missing** beat is `UNKNOWN`, never `STALLED` — an older gate simply
+  has no beat.
 - **Fallback, and only a fallback: the gate LOG FILE's mtime advancing.** Use this when
   `gate-liveness.sh` reports `UNKNOWN` because there is no heartbeat.
   ```bash
@@ -429,7 +435,7 @@ in this order:
   heartbeat exists. (You are only reading the *timestamp* here — never read `gate-<N>.log`'s contents
   into context; the SUMMARY file remains the only gate text you retain.)
 - **A gate launched in-session dies with its session's cgroup (#3473).** If a gate keeps turning up
-  `REAPED`, the cause is probably that it was launched inside an agent session rather than with
+  `STALLED`, the cause is probably that it was launched inside an agent session rather than with
   `scripts/flow/gate-detached.sh`; `nohup`/`setsid` do not help. See
   `docs/development/lane-gate-execution.md`.
 - **`ps` is unreliable for this** and should not be your primary signal. A gate spends long stretches

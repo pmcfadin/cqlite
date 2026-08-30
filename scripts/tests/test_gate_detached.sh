@@ -246,9 +246,13 @@ else
 fi
 
 echo "=== section 4b: an UNMONITORABLE gate is refused before it starts (job 160) ==="
-# Only the log path used to be validated, so a bad summary location launched a gate that
-# could publish neither its verdict nor its liveness: 30-50 minutes burned certifying
-# nothing, and every poll answering UNKNOWN with no way to tell that from a slow queue.
+# SKIP-gated on systemd like sections 3, 4 and 5 (roborev job 162, Medium). Without a working
+# user systemd manager the launcher exits at its CAPABILITY check — before it ever reaches the
+# summary-location checks these cases are about — so the expected diagnostics never appear and
+# the cases failed deterministically on macOS and on any box with no user manager.
+if [ "$HAVE_SYSTEMD" != yes ]; then
+  skipc "4b.x unmonitorable-launch refusals" "no working 'systemd-run --user' on this host (the launcher refuses earlier, at the capability check)"
+else
 out=$(bash "$LAUNCHER" --summary /nonexistent-dir-3473/s.txt --log "$TMP/nx.log" -- --only file-size 2>&1); rc=$?
 [ "$rc" != 0 ] && ok "4b.1 a nonexistent summary directory is refused (exit $rc)" \
                || bad "4b.1 a nonexistent summary directory is refused" "exit 0: $out"
@@ -283,6 +287,36 @@ if ls "$TMP"/peer-summary.txt.heartbeat.tmp.* >/dev/null 2>&1; then
   bad "4b.6 the launch probe leaves no temp litter" "$(ls "$TMP"/peer-summary.txt.heartbeat.tmp.* 2>/dev/null)"
 else
   ok "4b.6 the launch probe leaves no temp litter"
+fi
+# An EXISTING but unwritable summary file: directory permissions alone would pass this.
+if [ "$(id -u)" != 0 ]; then
+  roF="$TMP/ro-summary.txt"; : > "$roF"; chmod 400 "$roF"
+  out=$(bash "$LAUNCHER" --summary "$roF" --log "$TMP/rof.log" -- --only file-size 2>&1); rc=$?
+  [ "$rc" != 0 ] && ok "4b.7 an existing UNWRITABLE summary file is refused (exit $rc)" \
+                 || bad "4b.7 an existing UNWRITABLE summary file is refused" "exit 0: $out"
+  printf '%s' "$out" | grep -q 'NOT writable' \
+    && ok "4b.8 the refusal names writability, not the directory" || bad "4b.8 the refusal names writability" "$out"
+  chmod 600 "$roF"
+else
+  skipc "4b.7-4b.8 unwritable existing summary" "running as root"
+fi
+# A non-regular file at the summary path must be refused rather than written through.
+fifo="$TMP/fifo-summary.txt"
+if mkfifo "$fifo" 2>/dev/null; then
+  out=$(bash "$LAUNCHER" --summary "$fifo" --log "$TMP/fifo.log" -- --only file-size 2>&1); rc=$?
+  [ "$rc" != 0 ] && ok "4b.9 a non-regular file at the summary path is refused (exit $rc)" \
+                 || bad "4b.9 a non-regular file at the summary path is refused" "exit 0: $out"
+  rm -f "$fifo"
+else
+  skipc "4b.9 non-regular summary path" "mkfifo unavailable"
+fi
+# Control: a writable existing summary is FINE — the check must not reject the normal case.
+okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
+before=$(cat "$okF")
+out=$(bash "$LAUNCHER" --summary "$okF" --log "$TMP/okf.log" -- --only file-size 2>&1); rc=$?
+unit=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$unit" ] && echo "$unit" >> "$UNITS_FILE"
+[ "$rc" = 0 ] && ok "4b.10 control: a writable existing summary still launches" \
+             || bad "4b.10 control: a writable existing summary still launches" "rc=$rc: $out"
 fi
 
 echo "=== section 5: DEFAULT artifact paths are private, not predictable /tmp names ==="

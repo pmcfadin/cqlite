@@ -67,11 +67,15 @@ the whole dependency by putting the gate under `app.slice` in a cgroup of its ow
 bash scripts/gate-liveness.sh /tmp/gate-<N>.txt --run-id <run-id-from-the-launch>
 #   COMPLETE (exit 0) — a terminal verdict is in the summary file; read it
 #   RUNNING  (exit 2) — alive, no verdict yet (includes queued on the #1825 slot); end your turn
-#   REAPED   (exit 3) — killed; it will NEVER write a verdict. Re-launch it, detached.
+#   STALLED  (exit 3) — no liveness published for a while. NOT proof it is dead: re-read once,
+#                       and relaunch only if still STALLED after ~850s (one long component).
 #   UNKNOWN  (exit 4) — cannot tell; the printed cause names what was unmeasurable
 ```
-`REAPED` is the state you could not previously see, and it is **actionable**: re-launch,
-do not keep waiting and do not report `gate-timeout`. A bare `grep` cannot tell `REAPED`
+`STALLED` is the state you could not previously see, and it is **actionable**: stop waiting
+open-endedly, re-read once, and relaunch if it persists — do not sit until the deadline and
+report `gate-timeout`. It is deliberately not "the gate is dead": a beater can die under a
+live gate, and the gate relaunches its beater at every component boundary, so a genuine
+live-gate case recovers to `RUNNING` within one component. A bare `grep` cannot tell `STALLED`
 from `RUNNING` — both leave the same `INCOMPLETE` text (#3041) — which is why polling the
 summary file alone once made one human the fleet's only gate-runner. Keep the `grep` below
 only as the fallback when the heartbeat is absent (`UNKNOWN`, e.g. an older gate):

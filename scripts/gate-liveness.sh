@@ -20,19 +20,22 @@
 # EVERY POSITIVE VERDICT IS AN AFFIRMATIVE MEASUREMENT (CLAUDE.md, #3229)
 # ----------------------------------------------------------------------
 # `RUNNING` is never inferred from the ABSENCE of a bad signal — it requires a beat
-# that is present, carries THIS run's run-id, and is fresh. `REAPED` likewise requires
-# a present, run-id-matching, STALE beat. Everything unmeasurable — no heartbeat at
-# all, a foreign run-id, an unparseable beat, a beat dated in the future — is
-# `UNKNOWN` with a NAMED cause, never folded into either real answer. In particular
-# "no heartbeat file" is NOT reported as REAPED: a gate predating this mechanism, or
-# one whose summary path is unwritable, produces the same absence, and a watchdog that
-# declared those dead would be the fail-open shape one level down.
+# that is present, carries THIS run's run-id, and is fresh. `STALLED` likewise requires a
+# present, run-id-matching, STALE beat. Everything unmeasurable — no heartbeat at all, a
+# foreign run-id, an unparseable beat, a beat dated in the future — is `UNKNOWN` with a
+# NAMED cause, never folded into either real answer. In particular "no heartbeat file" is
+# NOT reported as STALLED: a gate predating this mechanism, or one whose summary path is
+# unwritable, produces the same absence, and reporting those as a stall would be the
+# fail-open shape one level down.
 #
 #   STATUS     exit  meaning
-#   COMPLETE     0   the summary carries a real verdict (PASS or FAIL) for this run
-#   RUNNING      2   no verdict yet, and the gate beat within the freshness window
-#   REAPED       3   no verdict, and the gate stopped beating — it is not coming back
+#   COMPLETE     0   the summary carries a terminal verdict for this run
+#   RUNNING      2   no verdict yet, and this run beat within the freshness window
+#   STALLED      3   no verdict, and this run has published no liveness for a while
 #   UNKNOWN      4   cannot tell; the printed cause says what was unmeasurable
+#
+# STALLED is deliberately NOT "the gate is dead" — see the long note where it is returned.
+# It is "no liveness published", which is what two local files can actually establish.
 #   (usage)     64
 #
 # The exit code is a convenience for scripts; the `gate-liveness:` line is the answer.
@@ -266,7 +269,7 @@ esac
 # reader holds no duplicate of the gate's beat period and cannot drift from it. Three
 # missed beats, with a 90s floor: a gate on a loaded box (the #1825 cap admits one
 # gate, but --lite runs and cargo take no slot) can be descheduled for a while, and a
-# false REAPED is the more expensive error — it would send a lane off to re-run a gate
+# a false STALLED is the more expensive error — it would send a lane off to re-run a gate
 # that was about to PASS.
 STALE_AFTER=$(( HB_INTERVAL * 3 ))
 [ "$STALE_AFTER" -ge 90 ] || STALE_AFTER=90
@@ -285,85 +288,34 @@ HB_PID=$(_field "$HB_TEXT" gate-pid)
 HB_SEQ=$(_field "$HB_TEXT" beat-seq)
 HB_CHECK=$(_field "$HB_TEXT" parent-check)
 _where="run-id $HB_RUN_ID, gate-pid ${HB_PID:-unknown}, beat ${HB_SEQ:-?}, age ${AGE}s, window ${STALE_AFTER}s"
-# parent-check declares HOW the beater verified its gate: 'starttime' is reuse-proof,
-# 'kill0' is not. Surfaced so a reader is told which guarantee it is getting (#3229).
+# parent-check declares HOW the beater verifies its gate on the gate's own host. Surfaced as
+# a DIAGNOSTIC only: no verdict here depends on it (see the descope note below).
 [ -n "$HB_CHECK" ] && _where="$_where, parent-check $HB_CHECK"
 
 if [ "$AGE" -le "$STALE_AFTER" ]; then
   verdict RUNNING 2 "the gate beat ${AGE}s ago — it is alive and has not reached a verdict yet; $_where"
 fi
 
-# ---- a STALE beat is not by itself evidence of death (roborev job 157, Medium) ------
-# The beater is supervised only at COMPONENT BOUNDARIES, and components run for minutes
-# (tooling-tests: 687-849s). If the beater alone dies mid-component — a stray signal, an
-# OOM reap of the smallest process — the beat goes stale under a PERFECTLY LIVE gate, and
-# reporting REAPED there is a FALSE DEATH: the caller re-runs a gate that was about to
-# PASS, which is the expensive direction and precisely what this script exists to prevent.
+# ---- a stale beat means NO LIVENESS, and that is ALL it is claimed to mean -----------
+# DESCOPED DELIBERATELY (#3473). This used to report `REAPED` — a positive claim that the
+# gate PROCESS IS DEAD — and four review rounds each found another way that claim was
+# unsound: a stale beat alone (a beater can die under a live gate); inspecting the reader's
+# own /proc without proving it was the gate's host (a live remote gate on shared storage
+# read as dead); and matching hostnames not proving machine identity (two boxes can share a
+# hostname, so a differing boot-id was misread as a reboot). Each fix was correct about the
+# case in front of it, and the list did not close — because proving a process is dead means
+# proving a negative about a machine you may not even be on.
 #
-# So REAPED, like RUNNING, must be an AFFIRMATIVE measurement: the gate process itself has
-# to be shown gone. The beat names `gate-pid`, and `gate-starttime` pins that pid's
-# identity so a RECYCLED pid cannot pose as the living gate.
+# So the claim is removed rather than defended a fourth time. `STALLED` says exactly what
+# the artifacts support and no more: **this run has published no liveness for N seconds.**
+# It asserts nothing about whether the process exists, and needs no pid, no /proc, no host
+# identity and no boot identity — so it is correct on every host, including the macOS/BSD
+# gate hosts where /proc does not exist and where the previous version's REAPED cases had
+# already become a deterministic test failure.
 #
-# This corroboration is only possible on the gate's OWN host. Where it cannot be done the
-# answer is UNKNOWN with the reason named — never REAPED on a guess, and never RUNNING
-# either.
-HB_STARTTIME=$(_field "$HB_TEXT" gate-starttime)
-# HOST GATE on the /proc corroboration (roborev job 160, Medium). A pid means nothing off
-# the machine that owns it, and these artifacts may be read across a shared filesystem — so
-# inspecting OUR /proc for the gate's pid could report a live REMOTE gate as REAPED, or
-# "corroborate" against an unrelated local process holding that pid.
-#
-# The earlier version's comment asserted "only possible on the gate's OWN host" and then
-# never CHECKED the host — a rule stated rather than enforced, which is the same defect
-# class as the rest of this issue.
-HB_HOST=$(_field "$HB_TEXT" host)
-HB_BOOT=$(_field "$HB_TEXT" boot-id)
-MY_HOST=$(uname -n 2>/dev/null || echo unknown)
-MY_BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "")
-_same_machine=no
-_reboot_since_beat=no
-if [ -n "$HB_BOOT" ] && [ "$HB_BOOT" != unavailable ] && [ -n "$MY_BOOT" ]; then
-  if [ "$HB_BOOT" = "$MY_BOOT" ]; then
-    _same_machine=yes
-  elif [ -n "$HB_HOST" ] && [ "$HB_HOST" = "$MY_HOST" ]; then
-    # Same hostname, DIFFERENT kernel boot: this machine rebooted since the beat, so every
-    # process from the previous boot is gone. That is affirmative evidence, not a puzzle.
-    _reboot_since_beat=yes
-  fi
-fi
-if [ "$_reboot_since_beat" = yes ]; then
-  verdict REAPED 3 "the gate stopped beating ${AGE}s ago and this host has REBOOTED since (boot-id $MY_BOOT != $HB_BOOT) — every process from that boot is gone; re-run it. $_where"
-fi
-if [ "$_same_machine" != yes ]; then
-  verdict UNKNOWN 4 "heartbeat-foreign-host; the beat is ${AGE}s stale but was written on host '${HB_HOST:-unknown}' (boot-id ${HB_BOOT:-absent}) and this is '$MY_HOST' (boot-id ${MY_BOOT:-unavailable}) — a pid cannot be inspected across machines, so the gate's death cannot be confirmed from here. $_where"
-fi
-_proc_starttime() {
-  local pid="$1" raw rest
-  raw=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
-  rest="${raw##*) }"
-  # shellcheck disable=SC2086
-  set -- $rest
-  [ $# -ge 20 ] || return 1
-  printf '%s' "${20}"
-}
-case "$HB_PID" in
-  ''|*[!0-9]*)
-    verdict UNKNOWN 4 "heartbeat-no-gate-pid; the beat is ${AGE}s stale but names no usable 'gate-pid:', so the gate's death cannot be confirmed. $_where" ;;
-esac
-if [ -d /proc/1 ] && [ -n "$HB_STARTTIME" ]; then
-  _now_st=$(_proc_starttime "$HB_PID" || true)
-  if [ -z "$_now_st" ]; then
-    verdict REAPED 3 "the gate stopped beating ${AGE}s ago AND pid $HB_PID no longer exists — it was killed and will never write a verdict; re-run it. $_where"
-  fi
-  if [ "$_now_st" != "$HB_STARTTIME" ]; then
-    verdict REAPED 3 "the gate stopped beating ${AGE}s ago AND pid $HB_PID has been RECYCLED by a different process (start time $_now_st != $HB_STARTTIME) — the gate is gone; re-run it. $_where"
-  fi
-  verdict UNKNOWN 4 "beater-died-gate-alive; the beat is ${AGE}s stale (window ${STALE_AFTER}s) but gate pid $HB_PID IS STILL ALIVE and is the same process — the LIVENESS SIGNAL died, not the gate. Do NOT re-run: wait, and re-read at the next component boundary, where the gate relaunches its beater. $_where"
-fi
-# Same machine (proven above), but no /proc or no published start time: `kill -0` still
-# distinguishes "pid gone" from "pid present", it just cannot rule out reuse. Absence is
-# affirmative enough for REAPED; presence is not affirmative enough for anything.
-if kill -0 "$HB_PID" 2>/dev/null; then
-  verdict UNKNOWN 4 "beater-died-gate-maybe-alive; the beat is ${AGE}s stale but pid $HB_PID still exists and this host cannot pin its identity (no /proc, or the beat carries no 'gate-starttime:'), so it may be the gate or a recycled pid. Not re-running on a guess. $_where"
-fi
-verdict REAPED 3 "the gate stopped beating ${AGE}s ago AND pid $HB_PID no longer exists — it was killed and will never write a verdict; re-run it. $_where"
+# The lane's real question is "should I keep waiting?", and STALLED answers it. What is lost
+# is "definitely dead, re-run now"; what replaces it needs no process inspection at all — the
+# gate relaunches its beater at every component boundary, so a live gate whose beater alone
+# died RECOVERS to RUNNING within one component. Re-read before acting; if it is still
+# STALLED after a component's worth of time, treat the gate as gone.
+verdict STALLED 3 "no liveness for ${AGE}s (window ${STALE_AFTER}s) — this run has stopped publishing beats. This is NOT a claim that the process is dead: a beater can die under a live gate, and the gate relaunches it at the next component boundary. Re-read shortly; if it is still STALLED after a component's worth of time (the longest component is ~850s), treat the gate as gone and relaunch it. $_where"

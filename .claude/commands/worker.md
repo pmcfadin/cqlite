@@ -166,8 +166,8 @@ onto its own branch). Rules, non-negotiable:
       a scope lives while any process remains in it — so this is about teardowns it cannot see
       coming, #3473.) It also **never idle-waits** (a
       subagent idle-waiting on a 12-25 min gate is watchdog-killed — the #1855 failure) and polls
-      with `scripts/gate-liveness.sh`, whose `REAPED` verdict means re-launch rather than keep
-      waiting. Then it spawns `spec-auditor` for **C** (design),
+      with `scripts/gate-liveness.sh`, whose `STALLED` verdict means stop waiting open-endedly and
+      relaunch if it persists (it is not proof of death — re-read once first). Then it spawns `spec-auditor` for **C** (design),
       runs the final roborev confirmation pass, then — after the pre-merge SHA assert + `HOLD` re-read —
       **arms auto-merge (`gh pr merge --auto --squash --delete-branch`) so GitHub owns the CI-green wait**
       (#2667; safe because #2433 configured a real `required` check + `enforce_admins` on `main`), then

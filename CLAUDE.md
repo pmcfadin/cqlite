@@ -175,10 +175,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   **And the killed-vs-running ambiguity is now answerable without `ps` on the box**: the gate beats
   `<summary-file>.heartbeat` every 20s for as long as it lives (the startup sentinel names the path),
   and `gate-liveness.sh <summary-file> [--run-id <id>]` reports `COMPLETE`(0) / `RUNNING`(2) /
-  `REAPED`(3) / `UNKNOWN`(4). Pass `--run-id` whenever you know it — a peer's beat in the same
+  `STALLED`(3) / `UNKNOWN`(4). Pass `--run-id` whenever you know it — a peer's beat in the same
   checkout otherwise answers about the peer's gate (#2874). A **missing** beat is `UNKNOWN`, never
-  `REAPED`: absence is not evidence of death, and there is deliberately **no env var** to widen the
-  staleness window or disable the beat. Full record: `docs/development/lane-gate-execution.md`.
+  `STALLED`, and there is deliberately **no env var** to widen the staleness window or disable the
+  beat. **`STALLED` means "no liveness published", NOT "the process is dead"** — a death claim
+  (`REAPED`) was built and then DESCOPED after four review rounds each found another way it was
+  unsound (a beater can die under a live gate; the reader's `/proc` is not the gate's; two boxes can
+  share a hostname), because proving a process dead means proving a negative about a machine you may
+  not be on. The replacement needs no process inspection and so is correct on every host, macOS
+  included: the gate relaunches its beater at each component boundary, so a live gate whose beater
+  alone died recovers to `RUNNING` within one component — re-read before acting, and treat a
+  still-`STALLED` run as gone only after a component's worth of time (~850s at the longest).
+  Full record: `docs/development/lane-gate-execution.md`.
 - **A GENUINELY PROSE diff cannot change the compiled binary — so a test failure in its full gate
   is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE
   (#3042).** The waiver's precondition is that the diff touches no compiled input (no `src`, no

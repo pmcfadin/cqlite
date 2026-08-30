@@ -87,19 +87,10 @@ PARENT_CHECK=starttime
 GATE_STARTTIME=$(_starttime "$GATE_PID") || GATE_STARTTIME=""
 [ -n "$GATE_STARTTIME" ] || PARENT_CHECK=kill0
 
-# HOST IDENTITY (#3473, roborev job 160). A pid is only meaningful on the machine that owns
-# it, and these artifacts can be read from ANOTHER machine — the summary path may sit on a
-# shared filesystem. A reader that inspected its OWN /proc for this pid would then report a
-# perfectly live remote gate as REAPED (pid absent locally) or, worse, corroborate
-# "liveness" against an unrelated local process.
-#
-# `boot-id` is the right primitive rather than the hostname alone: it identifies a running
-# KERNEL INSTANCE, so it distinguishes a different machine AND the same machine after a
-# reboot — and after a reboot every pid from the previous boot is gone, which a reader can
-# use as affirmative evidence rather than a puzzle. Hostname is published too, because it is
-# what a human reads in a diagnostic.
+# Published purely so a HUMAN reading a heartbeat knows which box wrote it. No verdict
+# depends on it: a reader cannot inspect a pid across machines, and rather than model that,
+# #3473 descoped the death claim entirely (see gate-liveness.sh).
 HOST_NAME=$(uname -n 2>/dev/null || echo unknown)
-BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "")
 
 # _gate_alive: AFFIRMATIVE liveness. Returns 0 only on a positive answer.
 _gate_alive() {
@@ -115,23 +106,29 @@ _gate_alive() {
 # Write the block to a sibling temp then rename, so a reader never sees a partial
 # heartbeat (rename within a directory is atomic). A failed write is not fatal — the
 # beat simply goes stale, which a reader reports as REAPED/UNKNOWN, never as RUNNING.
+# TMP_PATH is module-scope so the signal handler can remove whatever mktemp actually chose.
+TMP_PATH=""
 _beat() {
   local seq="$1" epoch tmp
   epoch=$(date +%s)
-  tmp="$FILE.tmp.$$"
+  # SECURE, EXCLUSIVE creation (roborev job 162, Medium). This used to be the PREDICTABLE
+  # `$FILE.tmp.$$`, opened with `>` (O_TRUNC, follows symlinks). In a shared writable
+  # directory another local user can pre-create that exact path as a symlink and have EVERY
+  # beat — once every 20s, for the whole run — truncate an arbitrary file writable by the
+  # gate user. `mktemp` creates with O_EXCL|O_CREAT and mode 0600, so it cannot follow a
+  # planted symlink and cannot collide.
+  tmp=$(mktemp "$FILE.tmp.XXXXXX" 2>/dev/null) || return 1
+  TMP_PATH="$tmp"
   {
     echo "==== AGENT-GATE HEARTBEAT ===="
     echo "run-id: $RUN_ID"
     [ -n "$MODE" ] && echo "mode: $MODE"
     echo "gate-pid: $GATE_PID"
-    # #3473 (roborev job 157): published so a READER can corroborate the gate's death
-    # rather than infer it from a stale beat alone. Without this a reader can only ask
-    # "does pid N exist", which a RECYCLED pid also answers yes to; with it, a stale beat
-    # plus a mismatched start time is affirmative evidence the gate is gone. Empty on a
-    # host where it could not be read, which the reader reports rather than assumes.
-    echo "gate-starttime: $GATE_STARTTIME"
+    # `host` is a DIAGNOSTIC for whoever reads this file, not an input to any verdict.
+    # `gate-starttime` and `boot-id` were published so a reader could infer the gate's
+    # DEATH from them; that inference is descoped (see gate-liveness.sh), so they are no
+    # longer published — an unused field is surface that invites the inference back.
     echo "host: $HOST_NAME"
-    echo "boot-id: ${BOOT_ID:-unavailable}"
     echo "beater-pid: $$"
     echo "parent-check: $PARENT_CHECK"
     echo "interval: $INTERVAL"
@@ -140,8 +137,9 @@ _beat() {
     echo "beat-utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     [ -n "$LOGS" ] && echo "logs: $LOGS"
     echo "==== END AGENT-GATE HEARTBEAT ===="
-  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
-  mv -f "$tmp" "$FILE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; TMP_PATH=""; return 1; }
+  mv -f "$tmp" "$FILE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; TMP_PATH=""; return 1; }
+  TMP_PATH=""
   return 0
 }
 
@@ -153,14 +151,16 @@ SLEEP_PID=""
 # shellcheck disable=SC2317  # reached only via the trap below
 _shutdown() {
   [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2>/dev/null
-  rm -f "$FILE.tmp.$$" 2>/dev/null
+  # Remove the temp mktemp ACTUALLY chose, not a name we guessed: the old handler deleted
+  # `$FILE.tmp.$$`, which after the mktemp change would leave the real temp behind.
+  [ -n "$TMP_PATH" ] && rm -f "$TMP_PATH" 2>/dev/null
   exit 0
 }
 trap _shutdown HUP TERM INT QUIT PIPE
 
 seq=0
 while :; do
-  _gate_alive || { rm -f "$FILE.tmp.$$" 2>/dev/null; exit 0; }
+  _gate_alive || { [ -n "$TMP_PATH" ] && rm -f "$TMP_PATH" 2>/dev/null; exit 0; }
   seq=$((seq + 1))
   _beat "$seq"
   # `sleep &` + `wait`, NOT a foreground `sleep`. bash does not run a trap handler
