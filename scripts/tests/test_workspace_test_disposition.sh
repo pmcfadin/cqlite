@@ -9,6 +9,18 @@
 #   PARTIAL       the gate runs some; the detail names the component, what is not run, and why.
 #   NOT-EXECUTED  nothing runs them; the detail says why (+ an issue when one is filed).
 #
+# Each record carries a SECOND closed field, its CLASS, answering a different question:
+# does the gap make a statement THIS REPOSITORY MAKES TO AGENTS false?
+#   silent                a real gap no committed doctrine claims is covered, or one
+#                         already declared honestly where an agent reads it.
+#   contradicts-doctrine  committed doctrine says it is covered when it is not.
+#   no-gap                nothing to classify — the record is EXECUTED.
+# The two fields are COUPLED and the coupling is checked: EXECUTED <=> no-gap. That is
+# the one cross-field property available without modelling the gate, and it closes the
+# obvious escape — quietly marking an uncomfortable PARTIAL record `no-gap`.
+# The class is DOCUMENTATION, like the detail: this guard does not verify that a
+# `silent` record is really unclaimed, only that a classification was RECORDED.
+#
 # Why it exists. `cargo clippy --workspace --all-targets` compiles every member on
 # every full gate, so a crate can be BUILT by every run and EXECUTE NOTHING — and
 # before #3522 nothing said so. `cqlite-ffi-common` (52 tests) and `cqlite-node`'s 53
@@ -70,6 +82,11 @@ VALID_LABELS="EXECUTED
 PARTIAL
 NOT-EXECUTED"
 
+# The CLOSED class set, for the same reason and matched the same way.
+VALID_CLASSES="silent
+contradicts-doctrine
+no-gap"
+
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok: $*"; }
 
@@ -118,12 +135,14 @@ while IFS= read -r line || [ -n "$line" ]; do
   # Field-count first: a line with the wrong shape must be named as malformed rather
   # than silently yielding an empty package or an empty label.
   nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
-  [ "$nf" -eq 3 ] || fail "$CENSUS line $lineno is not a TAB-separated triple (<package> TAB <LABEL> TAB <detail>; found $nf field(s)): $line"
+  [ "$nf" -eq 4 ] || fail "$CENSUS line $lineno is not a TAB-separated record (<package> TAB <LABEL> TAB <CLASS> TAB <detail>; found $nf field(s)): $line"
   pkg=$(printf '%s' "$line" | awk -F'\t' '{print $1}')
   label=$(printf '%s' "$line" | awk -F'\t' '{print $2}')
-  detail=$(printf '%s' "$line" | awk -F'\t' '{print $3}')
+  class=$(printf '%s' "$line" | awk -F'\t' '{print $3}')
+  detail=$(printf '%s' "$line" | awk -F'\t' '{print $4}')
   [ -n "$pkg" ]   || fail "$CENSUS line $lineno has an empty package name: $line"
   [ -n "$label" ] || fail "$CENSUS line $lineno has an empty label: $line"
+  [ -n "$class" ] || fail "$CENSUS line $lineno has an empty class: $line"
   # A record with no detail is a label with no account behind it, which is the
   # documentation half of this guard's whole purpose.
   [ -n "$detail" ] || fail "$CENSUS line $lineno records '$pkg' as $label with NO detail. EXECUTED must NAME the gate component; PARTIAL must name the component AND what is not run AND why; NOT-EXECUTED must say why (+ the tracking issue, when one is filed)"
@@ -131,6 +150,18 @@ while IFS= read -r line || [ -n "$line" ]; do
   # accept `EXECUTEDish` / `Executed`, i.e. check a spelling rather than a state.
   printf '%s\n' "$VALID_LABELS" | grep -qxF "$label" \
     || fail "$CENSUS line $lineno labels '$pkg' as '$label', which is not in the closed label set ($(printf '%s' "$VALID_LABELS" | tr '\n' '/' | sed 's:/$::')). An unrecognised label is a FAIL, never a pass"
+  printf '%s\n' "$VALID_CLASSES" | grep -qxF "$class" \
+    || fail "$CENSUS line $lineno classes '$pkg' as '$class', which is not in the closed class set ($(printf '%s' "$VALID_CLASSES" | tr '\n' '/' | sed 's:/$::')). An unrecognised class is a FAIL, never a pass"
+  # The one CROSS-FIELD property this guard can check without modelling the gate. Both
+  # directions matter: `no-gap` on a PARTIAL/NOT-EXECUTED record is how an uncomfortable
+  # record gets excused without relabelling it (the shape the visible-gap floor below
+  # exists for, one field over), and a gap class on an EXECUTED record is a record that
+  # contradicts itself.
+  if [ "$label" = EXECUTED ]; then
+    [ "$class" = no-gap ] || fail "$CENSUS line $lineno records '$pkg' as EXECUTED but classes it '$class'. EXECUTED means there is no gap to classify, so its class must be no-gap"
+  else
+    [ "$class" != no-gap ] || fail "$CENSUS line $lineno records '$pkg' as $label — a real gap — but classes it no-gap. Classify it 'silent' (no committed doctrine claims it is covered) or 'contradicts-doctrine' (doctrine says it is covered and it is not); no-gap is reserved for EXECUTED records"
+  fi
   case "$RECORDED" in
     *"|$pkg|"*) fail "$CENSUS records '$pkg' more than once (line $lineno) — a package has exactly ONE disposition" ;;
   esac
@@ -181,6 +212,16 @@ if [ "$n_gap" -eq 0 ]; then
   fail "$CENSUS records ZERO NOT-EXECUTED/PARTIAL packages. Either every workspace member's tests are now fully executed by the gate — in which case delete this floor DELIBERATELY, in a reviewed diff that says so — or an uncomfortable record was relabelled. The visible unexecuted set is this census's entire purpose"
 fi
 ok "$n_gap of $n_members member(s) are recorded as PARTIAL or NOT-EXECUTED — the gap this census exists to keep visible is stated, not hidden"
+
+# --- 6. AFFIRMATIVE class census. Not a threshold — a REPORT, so a pasted PASS states
+# ---    how many gaps are recorded as contradicting committed doctrine rather than
+# ---    leaving that count to be rediscovered. `0 RECOGNISED` (never a bare 0), because
+# ---    a bare zero in a gate log reads as a verified all-clear from a scan that only
+# ---    checks what was RECORDED.
+n_doctrine=$(grep -cE '^[^#[:space:]]+	[A-Z-]+	contradicts-doctrine	' "$CENSUS" || true)
+n_silent=$(grep -cE '^[^#[:space:]]+	[A-Z-]+	silent	' "$CENSUS" || true)
+case "$n_doctrine$n_silent" in ''|*[!0-9]*) fail "could not count the recorded gap classes — unmeasurable is not a pass" ;; esac
+ok "gap classes: $n_doctrine RECOGNISED as contradicts-doctrine, $n_silent RECOGNISED as silent (RECORDED classifications, not verified ones — see this script's header)"
 
 echo "PASS: workspace test-execution disposition census is complete and labeled ($n_members members, $n_records records)"
 exit 0

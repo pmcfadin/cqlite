@@ -15,7 +15,7 @@
 # the omission a RECORDED, REVIEWED fact instead of a discovery.
 #
 # FORMAT — one record per line:
-#     <package-name> <TAB> <LABEL> <TAB> <detail>
+#     <package-name> <TAB> <LABEL> <TAB> <CLASS> <TAB> <detail>
 # Blank lines and `#` comments are ignored.
 #
 # LABELS — a CLOSED set. An unrecognised label is a FAIL, not a pass.
@@ -26,26 +26,45 @@
 #   NOT-EXECUTED  no gate component runs them. <detail> says WHY, and cites the
 #                 tracking issue when one is filed.
 #
+# CLASSES — also a CLOSED set, answering a SECOND and different question: does this
+# gap make a statement THIS REPOSITORY MAKES TO AGENTS false? A gap nobody claimed
+# was covered is a backlog item; a gap our own doctrine denies is a false
+# certification, and #3544's lesson is that a certification is only as good as what
+# it actually measured.
+#   silent               a real gap, but no committed doctrine claims it is covered —
+#                        or the gap is already DECLARED honestly where an agent reads
+#                        it (the `flight-tests` census is the model).
+#   contradicts-doctrine committed doctrine (CLAUDE.md, an `exempt:` reason in
+#                        .github/ci-gating-tiers.yml, a component name in the SUMMARY)
+#                        tells a reader this is covered when it is not. <detail> says
+#                        WHERE, and — once corrected — where the WORDING was fixed.
+#                        The wording is fixed in the change that records the class;
+#                        the COVERAGE may still defer to a tracking issue.
+#   no-gap               nothing to classify: the record is EXECUTED.
+# COUPLED, and checked: EXECUTED <=> no-gap. A PARTIAL/NOT-EXECUTED record may never
+# be no-gap (that is how an uncomfortable record gets quietly excused), and an
+# EXECUTED record may never carry a gap class.
+#
 # HOW TO CHANGE IT. Adding a workspace member without adding a record here FAILs the
 # gate. Wiring a member into a component means moving its record to EXECUTED and naming
 # the component. Do NOT "fix" a NOT-EXECUTED record by deleting it: the whole value of
 # this file is that the unexecuted set is visible.
 
-cqlite	NOT-EXECUTED	Workspace ROOT package. 24 integration targets under /tests, 15 of which are root-only (the other 9 are also targets of cqlite-integration-tests, and 6 of those run there). No `cargo test -p cqlite` / `--workspace` invocation exists in the gate or in CI. AUDIT GAP 3.
-cqlite-core	PARTIAL	core-tests (cargo nextest run -p cqlite-core --features cli-helpers) + write-tests + 13 targeted lanes. Of 369 integration targets, 303 execute >0 tests; 66 compile to ZERO tests at that feature set and 41 of those are named by no --test anywhere. AUDIT GAP 10 (families: delta-scan 12, observability-testing 13, dhat-heap 9).
-cqlite-cli	PARTIAL	cli-tests runs 35 of 45 integration targets in two passes. `--lib`/`--bins` is NEVER passed, so all 255 lib/bin unit `#[test]` fns are unexecuted; 8 targets are quarantined and 5 excluded. AUDIT GAP 2.
-cqlite-flight	PARTIAL	flight-tests runs `--lib --bins`; flight-query-semantics-oracle runs 2 integration targets and memory-budget 1. 39 of 42 integration targets are un-run LOCALLY — declared by that lane's own census. CI's Flight tier (the one blocking tier) runs the whole package. AUDIT GAP 7 / issues #3384, #3375.
-cqlite-ffi-common	EXECUTED	binding-rust-tests — `cargo test --no-fail-fast -p cqlite-ffi-common`, ALL targets (lib + tests/dependency_boundary.rs + tests/error_contract_table.rs). Closed AUDIT GAP 1; before #3522 this member executed NOWHERE.
-cqlite-node	PARTIAL	binding-rust-tests runs the RUST half (`--lib --features write-support`); node-bindings runs the WHOLE jest suite against the built napi artifact. Both closed by #3522 (AUDIT GAP 5). Not run: bodies gated on the `observability` feature — building the OTel stack is a cost the gate declines on purpose (#1844).
-cqlite-py	NOT-EXECUTED	Rust half only, and STRUCTURALLY so: a pyo3 cdylib's `cargo test` harness cannot link libpython, which is documented in scripts/agent-gate.sh (search: "cannot link libpython"). Its PYTHON half IS fully covered — python-bindings runs the entire pytest suite. AUDIT GAP 6.
-cqlite-integration-tests	PARTIAL	integration-tests COMPILES the whole package (`--no-run`) then runs 6 named `--test` targets. Unexecuted: the lib unit suite (206 `#[test]` fns), 13 bin targets, and 5 integration targets. AUDIT GAP 4.
-format-compatibility-tests	EXECUTED	format-compat — `cargo test -p format-compatibility-tests`, the whole package.
-cqlite-examples	NOT-EXECUTED	1 `#[test]` fn; compile-only via clippy. No component or workflow runs it. Note the `operator-metrics-doc` component runs a cqlite-core EXAMPLE, not this package.
-xtask	NOT-EXECUTED	20 inline `#[test]` fns + 1 integration target. The oom-audit component BUILDS and RUNS the binary but never `cargo test -p xtask`; no CI job does either. AUDIT GAP 9.
-cassandra-parity	NOT-EXECUTED	25 inline `#[test]` fns + 9 integration targets. The parity-report component runs the BINARY only. `cargo test -p cassandra-parity` exists solely in cassandra-parity.yml, which is path-filtered and `required`-EXEMPT. AUDIT GAP 8.
-ws0-corpus-gen	EXECUTED	tooling-tests — `cargo test -q -p ws0-corpus-gen`, the whole package. The only fully covered tools/ crate.
-sstabledump-validator	NOT-EXECUTED	17 inline `#[test]` fns + 2 integration targets. Zero references in scripts/** and .github/workflows/**. AUDIT GAP 8.
-flight-loadgen	NOT-EXECUTED	21 inline `#[test]` fns. Zero references in scripts/** and .github/workflows/**. AUDIT GAP 8.
-format-validator	NOT-EXECUTED	8 inline `#[test]` fns. Its LIBRARY is exercised INDIRECTLY, as a path dependency of format-compatibility-tests (the format-compat component), but the crate's own unit tests never run. AUDIT GAP 8. See also its tools/ disposition: MIXED.
-memory-safety-runner	NOT-EXECUTED	2 inline `#[test]` fns. Documented UNWIRED in its tools/ disposition; compile-only.
-cqlite-validator	NOT-EXECUTED	Binary only, 0 `#[test]` fns — nothing to execute. Documented UNWIRED in its tools/ disposition.
+cqlite	NOT-EXECUTED	silent	Workspace ROOT package. 24 integration targets under /tests, 15 of which are root-only (the other 9 are also targets of cqlite-integration-tests, and 6 of those run there). No `cargo test -p cqlite` / `--workspace` invocation exists in the gate or in CI. AUDIT GAP 3.
+cqlite-core	PARTIAL	contradicts-doctrine	core-tests (cargo nextest run -p cqlite-core --features cli-helpers) + write-tests + 13 targeted lanes. Of 369 integration targets, 303 execute >0 tests; 66 compile to ZERO tests at that feature set and 41 of those are named by no --test anywhere. AUDIT GAP 10; largest families re-derived on this branch: 13 `delta-scan` and 14 `observability-testing` crate-level-gated targets named by no --test, plus 3 of 5 `dhat-heap`. DOCTRINE: CLAUDE.md's #1699 paragraph called `experimental` the remaining known instance, which these falsify — wording corrected in PR #3574; coverage defers.
+cqlite-cli	PARTIAL	contradicts-doctrine	cli-tests runs 35 of 45 integration targets in two passes. `--lib`/`--bins` is NEVER passed, so all 255 lib/bin unit `#[test]` fns are unexecuted; 8 targets are quarantined and 5 excluded. AUDIT GAP 2. DOCTRINE: CLAUDE.md's gate table said the full gate runs "CLI tests" and `cli-tests` appears in the SUMMARY, so a reader concludes the package is covered — wording corrected in PR #3574; coverage defers.
+cqlite-flight	PARTIAL	silent	flight-tests runs `--lib --bins`; flight-query-semantics-oracle runs 2 integration targets and memory-budget 1. 39 of 42 integration targets are un-run LOCALLY — declared by that lane's own census. CI's Flight tier (the one blocking tier) runs the whole package. AUDIT GAP 7 / issues #3384, #3375.
+cqlite-ffi-common	EXECUTED	no-gap	binding-rust-tests — `cargo test --no-fail-fast -p cqlite-ffi-common`, ALL targets (lib + tests/dependency_boundary.rs + tests/error_contract_table.rs). Closed AUDIT GAP 1; before #3522 this member executed NOWHERE.
+cqlite-node	PARTIAL	silent	binding-rust-tests runs the RUST half (`--lib --features write-support`); node-bindings runs the WHOLE jest suite against the built napi artifact. Both closed by #3522 (AUDIT GAP 5). Not run: bodies gated on the `observability` feature — building the OTel stack is a cost the gate declines on purpose (#1844).
+cqlite-py	NOT-EXECUTED	silent	Rust half only, and STRUCTURALLY so: a pyo3 cdylib's `cargo test` harness cannot link libpython, which is documented in scripts/agent-gate.sh (search: "cannot link libpython"). Its PYTHON half IS fully covered — python-bindings runs the entire pytest suite. AUDIT GAP 6.
+cqlite-integration-tests	PARTIAL	contradicts-doctrine	integration-tests COMPILES the whole package (`--no-run`) then runs 6 named `--test` targets. Unexecuted: the lib unit suite (206 `#[test]` fns), 13 bin targets, and 5 integration targets. AUDIT GAP 4. DOCTRINE: CLAUDE.md's gate table said the full gate runs "integration" tests — wording corrected in PR #3574; coverage defers.
+format-compatibility-tests	EXECUTED	no-gap	format-compat — `cargo test -p format-compatibility-tests`, the whole package.
+cqlite-examples	NOT-EXECUTED	silent	1 `#[test]` fn; compile-only via clippy. No component or workflow runs it. Note the `operator-metrics-doc` component runs a cqlite-core EXAMPLE, not this package.
+xtask	NOT-EXECUTED	silent	20 inline `#[test]` fns + 1 integration target. The oom-audit component BUILDS and RUNS the binary but never `cargo test -p xtask`; no CI job does either. AUDIT GAP 9.
+cassandra-parity	NOT-EXECUTED	contradicts-doctrine	25 inline `#[test]` fns + 9 integration targets. The parity-report component runs the BINARY only. `cargo test -p cassandra-parity` exists solely in cassandra-parity.yml, which is path-filtered and `required`-EXEMPT. AUDIT GAP 8. DOCTRINE: CLAUDE.md labels it tools/ WIRED, which describes crate INVOCATION and not test EXECUTION — wording corrected in PR #3574; coverage defers.
+ws0-corpus-gen	EXECUTED	no-gap	tooling-tests — `cargo test -q -p ws0-corpus-gen`, the whole package. The only fully covered tools/ crate.
+sstabledump-validator	NOT-EXECUTED	contradicts-doctrine	17 inline `#[test]` fns + 2 integration targets. Its BINARY *is* built and run — scripts/ci/test-sstabledump-parity-gate.sh, used by sstabledump-parity-gate.yml (`required`-EXEMPT) — so tools/ WIRED is true of the CRATE; no `cargo test -p sstabledump-validator` exists in scripts/** or .github/workflows/**. AUDIT GAP 8. DOCTRINE: WIRED describes invocation, not test execution — wording corrected in PR #3574; coverage defers.
+flight-loadgen	NOT-EXECUTED	contradicts-doctrine	21 inline `#[test]` fns. Its BINARY *is* built and invoked — scripts/perf/lib-binaries.sh builds it and the WS0 scan driver runs it — so tools/ WIRED is true of the CRATE; no `cargo test -p flight-loadgen` exists in scripts/** or .github/workflows/**. AUDIT GAP 8. DOCTRINE: WIRED describes invocation, not test execution — wording corrected in PR #3574; coverage defers.
+format-validator	NOT-EXECUTED	contradicts-doctrine	8 inline `#[test]` fns. Its LIBRARY is exercised INDIRECTLY, as a path dependency of format-compatibility-tests (the format-compat component), but the crate's own unit tests never run. AUDIT GAP 8. DOCTRINE: its tools/ disposition is MIXED, which names its live/orphaned TARGETS and says nothing about test execution — wording corrected in PR #3574; coverage defers.
+memory-safety-runner	NOT-EXECUTED	silent	2 inline `#[test]` fns. Documented UNWIRED in its tools/ disposition; compile-only.
+cqlite-validator	NOT-EXECUTED	silent	Binary only, 0 `#[test]` fns — nothing to execute. Documented UNWIRED in its tools/ disposition.

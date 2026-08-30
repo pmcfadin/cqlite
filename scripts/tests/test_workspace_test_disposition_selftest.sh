@@ -108,25 +108,28 @@ fi
 ws=$(make_ws green_a alpha beta)
 {
   printf '# scratch census\n'
-  printf 'alpha%sEXECUTED%sscratch-component runs it\n' "$TAB" "$TAB"
-  printf 'beta%sPARTIAL%sscratch-component runs its lib only; its 2 integration targets are un-run because reasons\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component runs it\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component runs its lib only; its 2 integration targets are un-run because reasons\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 expect "green control A (complete census, one PARTIAL)" PASS "" "$ws"
 
 # ---- GREEN CONTROL B: a different shape — three members, all three labels ----
 ws=$(make_ws green_b alpha beta gamma)
 {
-  printf 'alpha%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
-  printf 'beta%sNOT-EXECUTED%snothing runs it; tracked as scratch issue #1\n' "$TAB" "$TAB"
-  printf 'gamma%sPARTIAL%sscratch-component runs 1 of 3 targets; the rest are flaky\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sNOT-EXECUTED%ssilent%snothing runs it; tracked as scratch issue #1\n' "$TAB" "$TAB" "$TAB"
+  # `contradicts-doctrine` appears in a GREEN control on purpose: it is otherwise only
+  # planted in a RED case below, so a guard that rejected the value outright would pass
+  # every case here and look fully tested.
+  printf 'gamma%sPARTIAL%scontradicts-doctrine%sscratch-component runs 1 of 3 targets; the scratch docs claim all 3\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
-expect "green control B (three members, all three labels)" PASS "" "$ws"
+expect "green control B (three members, all three labels, all three classes)" PASS "" "$ws"
 
 # ---- RED: an UNRECORDED member — the #3522 defect itself ---------------------
 ws=$(make_ws red_unrecorded alpha beta gamma)
 {
-  printf 'alpha%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
-  printf 'beta%sNOT-EXECUTED%snothing runs it\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sNOT-EXECUTED%ssilent%snothing runs it\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 expect "red: a new workspace member with no recorded disposition" FAIL "gamma" "$ws"
 
@@ -136,8 +139,8 @@ expect "red: a new workspace member with no recorded disposition" FAIL "gamma" "
 # case can: it asserts both names, so a first-offender-only regression fails here.
 ws=$(make_ws red_unrecorded2 alpha beta gamma delta)
 {
-  printf 'alpha%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
-  printf 'beta%sPARTIAL%sscratch-component runs some\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component runs some\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 run_guard "$ws"; _rc=$?
 if [ "$_rc" -eq 0 ]; then
@@ -157,34 +160,73 @@ fi
 # ---- RED: a label outside the CLOSED set ------------------------------------
 ws=$(make_ws red_label alpha beta)
 {
-  printf 'alpha%sExecuted%swrong case — a spelling is not a state\n' "$TAB" "$TAB"
-  printf 'beta%sPARTIAL%sscratch-component runs some\n' "$TAB" "$TAB"
+  printf 'alpha%sExecuted%ssilent%swrong case — a spelling is not a state\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component runs some\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 expect "red: an unrecognised label (wrong case)" FAIL "closed label set" "$ws"
+
+# ---- RED: a class outside the CLOSED set ------------------------------------
+ws=$(make_ws red_class alpha beta)
+{
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%sSilent%sa spelling is not a state, here too\n' "$TAB" "$TAB" "$TAB"
+} > "$ws/scripts/tests/$CENSUS_BASE"
+expect "red: an unrecognised class (wrong case)" FAIL "closed class set" "$ws"
+
+# ---- RED: an EMPTY class field ----------------------------------------------
+# Distinct from the malformed-shape case: the record has the right FIELD COUNT and a
+# valid label, so only a per-field emptiness check can see it.
+ws=$(make_ws red_class_empty alpha beta)
+{
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%s%sclassified with nothing at all\n' "$TAB" "$TAB" "$TAB"
+} > "$ws/scripts/tests/$CENSUS_BASE"
+expect "red: an empty class field" FAIL "empty class" "$ws"
+
+# ---- RED: the COUPLING, direction 1 — a real gap classed no-gap -------------
+# The shape this exists for: excusing an uncomfortable PARTIAL/NOT-EXECUTED record
+# WITHOUT relabelling it, which the visible-gap floor cannot see because the label is
+# untouched.
+ws=$(make_ws red_couple_gap alpha beta)
+{
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sNOT-EXECUTED%sno-gap%snothing runs it, but call it no gap\n' "$TAB" "$TAB" "$TAB"
+} > "$ws/scripts/tests/$CENSUS_BASE"
+expect "red: a PARTIAL/NOT-EXECUTED record classed no-gap (coupling)" FAIL "no-gap is reserved for EXECUTED records" "$ws"
+
+# ---- RED: the COUPLING, direction 2 — an EXECUTED record carrying a gap class -
+# Without this case the coupling check could be one-directional and still pass every
+# other case here; a self-contradicting record would then read as classified.
+ws=$(make_ws red_couple_exec alpha beta)
+{
+  printf 'alpha%sEXECUTED%scontradicts-doctrine%sruns fully AND contradicts doctrine — one of the two is false\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component runs some\n' "$TAB" "$TAB" "$TAB"
+} > "$ws/scripts/tests/$CENSUS_BASE"
+expect "red: an EXECUTED record carrying a gap class (coupling, other direction)" FAIL "its class must be no-gap" "$ws"
 
 # ---- RED: a STALE record naming a package that is not a member --------------
 ws=$(make_ws red_stale alpha beta)
 {
-  printf 'alpha%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
-  printf 'beta%sPARTIAL%sscratch-component\n' "$TAB" "$TAB"
-  printf 'deleted-crate%sNOT-EXECUTED%sthis crate was removed but its record was left behind\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'deleted-crate%sNOT-EXECUTED%ssilent%sthis crate was removed but its record was left behind\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 expect "red: a stale record for a package that is no longer a member" FAIL "deleted-crate" "$ws"
 
 # ---- RED: a DUPLICATE record ------------------------------------------------
 ws=$(make_ws red_dup alpha beta)
 {
-  printf 'alpha%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
-  printf 'alpha%sNOT-EXECUTED%sthe contradicting second record\n' "$TAB" "$TAB"
-  printf 'beta%sPARTIAL%sscratch-component\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'alpha%sNOT-EXECUTED%ssilent%sthe contradicting second record\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 expect "red: a package recorded twice" FAIL "more than once" "$ws"
 
 # ---- RED: a record with a label and NO detail behind it ---------------------
 ws=$(make_ws red_nodetail alpha beta)
 {
-  printf 'alpha%sEXECUTED%s\n' "$TAB" "$TAB"
-  printf 'beta%sPARTIAL%sscratch-component\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%s\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 expect "red: a label with no detail (no account of what runs it / what is omitted)" FAIL "NO detail" "$ws"
 
@@ -192,9 +234,9 @@ expect "red: a label with no detail (no account of what runs it / what is omitte
 ws=$(make_ws red_malformed alpha beta)
 {
   printf 'alpha EXECUTED scratch-component\n'
-  printf 'beta%sPARTIAL%sscratch-component\n' "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
-expect "red: a line that is not a TAB-separated triple" FAIL "TAB-separated triple" "$ws"
+expect "red: a line that is not a TAB-separated record" FAIL "TAB-separated record" "$ws"
 
 # ---- RED: a census with comments only, i.e. NO records ---------------------
 ws=$(make_ws red_norecords alpha beta)
@@ -205,8 +247,8 @@ expect "red: a census containing no records at all" FAIL "no records at all" "$w
 # The shape this floor exists for is someone relabelling an uncomfortable record.
 ws=$(make_ws red_allexec alpha beta)
 {
-  printf 'alpha%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
-  printf 'beta%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 expect "red: zero PARTIAL/NOT-EXECUTED records (the visible-gap floor)" FAIL "ZERO NOT-EXECUTED/PARTIAL" "$ws"
 
@@ -220,8 +262,8 @@ expect "red: the recorded census file does not exist" FAIL "does not exist" "$ws
 # greening — the guard's stated fail-closed direction.
 ws=$(make_ws red_noderive alpha beta)
 {
-  printf 'alpha%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
-  printf 'beta%sPARTIAL%sscratch-component\n' "$TAB" "$TAB"
+  printf 'alpha%sEXECUTED%sno-gap%sscratch-component\n' "$TAB" "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%ssilent%sscratch-component\n' "$TAB" "$TAB" "$TAB"
 } > "$ws/scripts/tests/$CENSUS_BASE"
 rm -f "$ws/Cargo.toml"
 expect "red: cargo metadata cannot enumerate the members (DERIVATION failure)" FAIL "DERIVATION failed" "$ws"
@@ -231,5 +273,5 @@ if [ "$fails" -ne 0 ]; then
   echo "RESULT: FAIL ($fails case(s) did not behave as specified)"
   exit 1
 fi
-echo "RESULT: PASS (2 green controls + 10 attributed red cases)"
+echo "RESULT: PASS (2 green controls + 15 attributed red cases)"
 exit 0
