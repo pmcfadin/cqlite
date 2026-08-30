@@ -231,12 +231,20 @@ PENDING_AUTOMERGE_MIN_SECS="${PENDING_AUTOMERGE_MIN_SECS:-1200}"
 # an empty value. Two suite cases went red on it immediately. So: empty by default, filled in by
 # `supervisor_lock_path` at acquisition, using only bash substitution and arithmetic.
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-}"
-# Did WE derive the lock path, or did the caller give one? RECORDED at derivation time, never
-# re-detected afterwards (#3549). By the time anything downstream looks, `SUPERVISOR_LOCK` is
-# non-empty either way, so a later `[[ -n "$SUPERVISOR_LOCK" ]]` reads as "explicit" unconditionally
-# — the exact re-detection shape this repo keeps finding. `supervisor_lock_path` sets this in BOTH
-# of its branches; the legacy-global-lock guard below is the only consumer.
-SUPERVISOR_LOCK_DERIVED=no
+# Did WE derive the lock path, or did the caller give one? RECORDED at the FIRST resolution and never
+# recomputed afterwards (#3549). By the time anything downstream looks, `SUPERVISOR_LOCK` is non-empty
+# either way, so a later `[[ -n "$SUPERVISOR_LOCK" ]]` reads as "explicit" unconditionally — the exact
+# re-detection shape this repo keeps finding.
+#
+# THREE-VALUED, AND IT STARTS AT `unknown` (#3549, roborev job 209 F1). The first cut of this fix
+# recorded the answer instead of re-detecting it at the consumer — but it RECOMPUTED THE RECORD FROM
+# THE SAME RE-DETECTABLE OBSERVABLE ON EVERY CALL, so a SECOND call to `supervisor_lock_path` saw the
+# path the FIRST call had derived, called it explicit, and disabled the guard. That is reachable from
+# two ordinary callers the fleet has: a wrapper that resolves the path before calling `acquire_lock`,
+# and any retry of the resolution inside one shell. A two-valued flag cannot express "nobody has
+# resolved yet", which is precisely the state the once-only write needs to test for — hence the third
+# value, and hence `supervisor_lock_path` writing this variable ONLY while it holds `unknown`.
+SUPERVISOR_LOCK_DERIVED=unknown
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
@@ -1368,8 +1376,27 @@ supervisor_msg_token() {
 }
 
 supervisor_lock_path() {
-  # RECORD the derivation, do not re-detect it later (#3549). "Explicit" is only knowable HERE,
-  # because after this function `SUPERVISOR_LOCK` is non-empty on both paths.
+  # RECORD the derivation, do not re-detect it later (#3549). "Explicit" is only knowable BEFORE this
+  # function has run once, because afterwards `SUPERVISOR_LOCK` is non-empty on both paths.
+  #
+  # FIRST RESOLUTION WINS, AND IT IS THE ONLY ONE THAT DECIDES ANYTHING (#3549, roborev job 209 F1).
+  # The record is STICKY, not merely early: while the provenance is still `unknown` this function
+  # writes it exactly once, and every later call returns having changed nothing. Without this bail-out
+  # the record was recomputed from `SUPERVISOR_LOCK`'s emptiness on EVERY call, so a second call
+  # observed the first call's own output and flipped the answer to "explicit" — bypassing the
+  # legacy-global-lock guard for a wrapper that pre-resolves the path, or for any retry in one shell.
+  #
+  # A `SUPERVISOR_LOCK` CHANGED BY THE CALLER BETWEEN TWO CALLS IS NOT HONOURED, DELIBERATELY. Nothing
+  # in bash can stop a caller assigning that variable, so this decides the one thing it can: the
+  # PROVENANCE recorded at first resolution governs the guard for the rest of the run. A mid-run change
+  # of lock identity is not a state this program can make coherent — the claim actor and the guard's
+  # comparison were both settled against the first answer — and treating it as a fresh "explicit"
+  # placement is exactly the bypass above. So the provenance is immutable after the first resolution,
+  # and a caller who wants to place the lock must set `SUPERVISOR_LOCK` BEFORE anything resolves it
+  # (which is what the documented `env SUPERVISOR_LOCK=… worker-supervisor.sh` invocation does).
+  case "$SUPERVISOR_LOCK_DERIVED" in
+    yes | no) return 0 ;;
+  esac
   if [[ -n "$SUPERVISOR_LOCK" ]]; then
     SUPERVISOR_LOCK_DERIVED=no
     return 0
@@ -1755,7 +1782,15 @@ supervisor_legacy_lock_state() {
   local -a _entries=()
   # SAVES ONLY, NOTHING MUTATED YET — which is what lets the verification below BAIL OUT with the
   # caller's shell untouched (#3549, roborev job 206 F1). Do not move a mutation above this point.
-  _sv_shopts="$(shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true)"
+  # `2>/dev/null` AND `|| true`, FOR TWO DIFFERENT BASHES (#3549, roborev job 209 F2). The `|| true` is
+  # for every bash: `shopt -p` exits non-zero when any named option is UNSET, which with seven names is
+  # the common case. The redirect is for BASH 3.2, which macOS ships and this file supports: `globstar`
+  # arrived in bash 4.0, so on 3.2 this line writes `shopt: globstar: invalid shell option name` to the
+  # caller's stderr — an UNPREFIXED line in the middle of a refusal whose contract is that every line it
+  # emits is prefixed or is a single bare runnable command. Suppressed here rather than dropped from the
+  # pin set: the option does not exist on 3.2 and therefore cannot affect anything, while on bash 4+ it
+  # exists and the pin is correct, so removing the name would trade a cosmetic problem for a real gap.
+  _sv_shopts="$(shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true)"
   case $- in *f*) _sv_noglob=on ;; esac
   if [[ -n "${GLOBIGNORE+set}" ]]; then _sv_globignore_set=yes; _sv_globignore="$GLOBIGNORE"; fi
   # THE NEUTRALISATION IS VERIFIED, NOT ASSUMED (#3549, roborev job 206 F1) — this issue's own rule one
@@ -1786,8 +1821,21 @@ supervisor_legacy_lock_state() {
     return 0
   fi
   set +f
-  shopt -s dotglob nullglob
-  shopt -u failglob extglob globstar nocaseglob nocasematch
+  # SAME TWO REASONS AS THE SAVE, plus one more that is not cosmetic (#3549, roborev job 209 F2): on
+  # bash 3.2 the `-u` line names `globstar` and therefore EXITS NON-ZERO, and as the last command of a
+  # list — or under a direct caller with `errexit` — that aborts between the mutation and the restore,
+  # leaving the caller's shell changed and printing no refusal. So both status and stderr are tolerated.
+  #
+  # WHAT MAKES TOLERATING THE STATUS SAFE IS THE PER-OPTION STATE VERIFICATION IMMEDIATELY BELOW, not an
+  # assumption about what bash did. Measured on this bash: `shopt -s`/`shopt -u` given an unknown name
+  # STILL APPLIES every name it does recognise and returns 1 for the one it does not — so the aggregate
+  # status cannot distinguish "nothing applied" from "one name does not exist here", and it is the wrong
+  # oracle in both directions. The loops below re-read each option's RESULTING STATE with `shopt -p`,
+  # which prints nothing at all for an option this bash lacks; an option bash does not have cannot
+  # filter, expand or match anything, so `absent` is an affirmative OK. That reading is what this
+  # suppression relies on, and it covers the mutation exactly as it covers the save.
+  shopt -s dotglob nullglob 2>/dev/null || true
+  shopt -u failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true
   # EVERY REMAINING PIN IS VERIFIED THE SAME WAY, AND BY ITS RESULTING **STATE** RATHER THAN BY THE
   # `shopt` COMMAND'S EXIT STATUS (#3549, job 206 F1, applied to the whole block rather than the one
   # reported variable). The exit status is the wrong oracle in BOTH directions: `shopt -s`/`-u` returns
@@ -2161,7 +2209,16 @@ supervisor_legacy_lock_refuse() {
 supervisor_legacy_lock_guard() {
   # DERIVED-DEFAULT ONLY (AC4). An operator who names the lock has taken the placement decision
   # explicitly; the compatibility check is about OUR default colliding with the OLD default.
-  [[ "$SUPERVISOR_LOCK_DERIVED" == yes ]] || return 0
+  #
+  # KEYED ON THE AFFIRMATIVE EXPLICIT VALUE, so the third state cannot inherit the permissive branch
+  # (#3549, job 209 F1). Only `no` — a provenance actually recorded as caller-given — skips the check.
+  # `unknown` means nothing has resolved the lock path yet, which is unreachable from `acquire_lock`
+  # (it resolves first, by construction), and if it ever became reachable "we do not know whose path
+  # this is" must not be the answer that PERMITS a start. `case` rather than `[[ … ]] && return`: a
+  # failing AND-list is an errexit abort site, and this file runs under `set -e`.
+  case "$SUPERVISOR_LOCK_DERIVED" in
+    no) return 0 ;;
+  esac
   local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state pid
   # A CLASSIFIER THAT COULD NOT ANSWER IS A REFUSAL, NEVER A SILENT EXIT (#3549, roborev job 201 F3).
   # The classifier returns 0 on every path it takes, but under a caller with `inherit_errexit` any

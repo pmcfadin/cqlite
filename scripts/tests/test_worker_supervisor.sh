@@ -4861,6 +4861,52 @@ legacy_lock_drive_prelude_override() {
     bash -c "$SV_DRIVE_BODY_PRELUDE_OVERRIDE" _ "$SUPERVISOR" "$override" 2>&1
 }
 
+# THE PRE-RESOLVED DRIVES (#3549, roborev job 209 F1) — the two REALISTIC callers the finding names: a
+# WRAPPER that resolves the lock path before calling `acquire_lock`, and a RETRY of the resolution inside
+# one shell. Both are ordinary shapes, and under the pre-fix code both DISABLED the legacy-lock guard,
+# because the provenance record was recomputed from `SUPERVISOR_LOCK`'s emptiness on every call and the
+# second call was looking at the first call's own output.
+#
+# Derived from the same `SV_DRIVE_BODY` by INSERTING calls, so a case that varies only the NUMBER of
+# resolutions cannot drift into a different startup path than the ordinary case exercises.
+SV_DRIVE_BODY_RESOLVE1="${SV_DRIVE_BODY/'acquire_lock; '/'supervisor_lock_path; acquire_lock; '}"
+SV_DRIVE_BODY_RESOLVE2="${SV_DRIVE_BODY/'acquire_lock; '/'supervisor_lock_path; supervisor_lock_path; acquire_lock; '}"
+SV_DRIVE_BODY_RESOLVE2_OVERRIDE="${SV_DRIVE_BODY_OVERRIDE/'acquire_lock; '/'supervisor_lock_path; supervisor_lock_path; acquire_lock; '}"
+
+# THE PROVENANCE PROBE — the record itself, read at four points, plus the MID-RUN EXPLICIT ASSIGNMENT
+# whose handling is a deliberate decision (first resolution wins; a later change is not honoured).
+# `$2` is the path a caller assigns BETWEEN two resolutions.
+SV_DRIVE_BODY_PROVENANCE='source "$1"; p0="$SUPERVISOR_LOCK_DERIVED"; supervisor_lock_path; p1="$SUPERVISOR_LOCK_DERIVED"; l1="$SUPERVISOR_LOCK"; supervisor_lock_path; p2="$SUPERVISOR_LOCK_DERIVED"; l2="$SUPERVISOR_LOCK"; SUPERVISOR_LOCK="$2"; supervisor_lock_path; p3="$SUPERVISOR_LOCK_DERIVED"; printf "P0=%s P1=%s P2=%s P3=%s L1=%s L2=%s\n" "$p0" "$p1" "$p2" "$p3" "$l1" "$l2"; exit 0'
+
+# legacy_lock_drive_body <body> <tmp> <lane> [explicit] — the ordinary drive with a CHOSEN body, so the
+# pre-resolution count is the only variable. An empty <explicit> unsets `SUPERVISOR_LOCK` exactly as
+# `legacy_lock_drive` does.
+legacy_lock_drive_body() {
+  local body="$1" tmp="$2" lane="$3" explicit="${4:-}"
+  if [[ -n "$explicit" ]]; then
+    env TMPDIR="$tmp" SUPERVISOR_LOCK="$explicit" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$body" _ "$SUPERVISOR" 2>&1
+  else
+    env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+      bash -c "$body" _ "$SUPERVISOR" 2>&1
+  fi
+}
+
+# legacy_lock_drive_body_override <body> <override-file> <tmp> <lane> — the same, with ONE shipped
+# function replaced by the override file (sourced after the supervisor).
+legacy_lock_drive_body_override() {
+  local body="$1" override="$2" tmp="$3" lane="$4"
+  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+    bash -c "$body" _ "$SUPERVISOR" "$override" 2>&1
+}
+
+# legacy_lock_drive_provenance <tmp> <lane> <mid-run-explicit> — the provenance probe.
+legacy_lock_drive_provenance() {
+  local tmp="$1" lane="$2" mid="$3"
+  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+    bash -c "$SV_DRIVE_BODY_PROVENANCE" _ "$SUPERVISOR" "$mid" 2>&1
+}
+
 # legacy_lock_drive_in <cwd> <tmp> <lane> — the same drive from a chosen working directory, which is
 # what makes a RELATIVE (and therefore possibly OPTION-SHAPED) `TMPDIR` testable at all.
 legacy_lock_drive_in() {
@@ -6877,7 +6923,7 @@ test_legacy_lock_classifier_survives_inherit_errexit() {
   # classifier DIES at that assignment: no STATE line is printed at all, which is precisely "aborts
   # before it can restore options or print the intended refusal".
   ovr="$d/m-shopt.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true' 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch'; then
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true' 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null'; then
     got="$(legacy_state_drive_errexit "$legacy" "$ovr")"
     if [[ "$got" != *"STATE="* ]]; then
       pass "legacy-lock errexit MUTANT CONTRAST: without the \`|| true\`, the same caller kills the classifier at the shopt capture — no state is ever printed (output=[$got])"
@@ -6899,7 +6945,7 @@ test_legacy_lock_classifier_survives_inherit_errexit() {
   # ---- AND THE FALLBACK IS LOAD-BEARING: with BOTH the shopt guard and the guard's fallback removed,
   # the supervisor exits with NO refusal at all — the silent death the fallback converts into a refusal.
   ovr="$d/m-shopt-nofallback.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true' 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch' \
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true' 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null' \
      && sv_mutant_override "$ovr" supervisor_legacy_lock_guard \
           'state="$(supervisor_legacy_lock_state "$legacy")" || state="unknown state-classifier-exited-nonzero"' \
           'state="$(supervisor_legacy_lock_state "$legacy")"'; then
@@ -6967,7 +7013,7 @@ test_legacy_lock_neutralises_inherited_glob_state() {
   fi
   # The restore must not be able to abort (round 11's lesson, re-asserted for the new save/restore):
   # a `shopt -p` over seven names exits non-zero whenever ANY is unset, which is the common path.
-  if [[ "$body" == *'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true'* ]] \
+  if [[ "$body" == *'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true'* ]] \
      && [[ "$body" == *'eval "$_sv_shopts" || true'* ]] \
      && [[ "$body" != *'&& set -f'* ]]; then
     pass "glob-state STRUCTURAL: the save and the restore are both guarded (\`|| true\`) and the value restores are \`if\` statements, so nothing on the way out of the neutralised region can abort an errexit caller"
@@ -7254,6 +7300,224 @@ test_legacy_lock_verifies_its_own_neutralisation() {
 }
 
 t test_legacy_lock_verifies_its_own_neutralisation
+
+# ---------------------------------------------------------------------------
+# Test 47k (#3549, roborev job 209 F1): THE DERIVATION RECORD IS **STICKY**, NOT MERELY EARLY.
+#
+# THE DEFECT. The guard that stops a pre-#3467 machine-global lock and this per-lane supervisor running
+# in one worktree is gated on `SUPERVISOR_LOCK_DERIVED`. That flag exists because the observable it
+# replaces — `[[ -n "$SUPERVISOR_LOCK" ]]` — is unconditionally true once the path has been resolved. But
+# the FLAG WAS ITSELF RECOMPUTED FROM THAT OBSERVABLE ON EVERY CALL, so a SECOND call to
+# `supervisor_lock_path` read the FIRST call's own output, recorded "explicit", and the guard skipped.
+# Recording an answer is not the same as recording it ONCE.
+#
+# WHY IT IS REACHABLE, and not a theoretical second call: a sourced wrapper that wants to know the lock
+# path (to log it, to check it) resolves it and then calls `acquire_lock`; and any retry of the
+# resolution inside one shell does the same thing. Neither is exotic and neither is visible at the call
+# site as a bypass.
+#
+# THE FIX IS A THIRD STATE. A two-valued flag cannot express "nobody has resolved yet", which is exactly
+# the condition a write-once record has to test for. `unknown` -> written once -> immutable.
+# ---------------------------------------------------------------------------
+test_lock_provenance_is_recorded_once() {
+  local d tmp lane legacy dead explicit out rc got ovr mout derived
+
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549prov$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+  explicit="$d/explicit.lock"
+
+  # ---- PREMISE: the pre-resolved drives really are the ordinary drive plus resolutions. A `${var/…}`
+  # substitution that matched nothing yields the ORIGINAL string silently, and every case below would
+  # then measure the ordinary startup path while claiming to measure a wrapper.
+  if [[ "$SV_DRIVE_BODY_RESOLVE1" != "$SV_DRIVE_BODY" ]] \
+     && [[ "$SV_DRIVE_BODY_RESOLVE2" != "$SV_DRIVE_BODY_RESOLVE1" ]] \
+     && [[ "$SV_DRIVE_BODY_RESOLVE2_OVERRIDE" != "$SV_DRIVE_BODY_OVERRIDE" ]] \
+     && [[ "$SV_DRIVE_BODY_RESOLVE2_OVERRIDE" == *'source "$2"'* ]]; then
+    pass "lock-provenance PREMISE: the one-resolution, two-resolution and mutant drives are all DERIVED from the ordinary drive and all differ from it"
+  else
+    fail "lock-provenance-premise: a pre-resolved drive body is identical to the one it derives from — the substitution did not apply and the cases below measure the ordinary path"
+  fi
+
+  # ---- (0) STRUCTURAL: the flag starts at the third value, and the function writes it only while it
+  # still holds that value. Behaviourally invisible once the fix works (every case below would pass on a
+  # flag that started at `no` too, since nothing reads it before `acquire_lock` resolves), so the
+  # write-once SHAPE is pinned in source.
+  local init_line fnbody
+  init_line="$(grep -c '^SUPERVISOR_LOCK_DERIVED=unknown$' "$SUPERVISOR")"
+  fnbody="$(sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR")"
+  if [[ "$init_line" == "1" ]] && [[ "$fnbody" == *'case "$SUPERVISOR_LOCK_DERIVED" in'* ]] \
+     && [[ "$fnbody" == *'yes | no) return 0 ;;'* ]]; then
+    pass "lock-provenance STRUCTURAL: the record initialises to \`unknown\` and \`supervisor_lock_path\` returns without writing once it is either decided value — a write-once record, not an early one"
+  else
+    fail "lock-provenance-structural: init-lines=[$init_line] and the resolver does not bail out on an already-decided provenance — the record is recomputable again"
+  fi
+
+  # ---- (1) THE RECORD ITSELF, read across repeated resolution AND across a mid-run assignment.
+  # The DECISION recorded here (and in code): FIRST RESOLUTION WINS. A `SUPERVISOR_LOCK` the caller
+  # changes between two calls does NOT re-open the provenance question — treating it as a fresh
+  # "explicit" placement IS the bypass, and a mid-run change of lock identity is not a state this
+  # program can make coherent anyway.
+  got="$(legacy_lock_drive_provenance "$tmp" "$lane" "$d/midrun.lock")"
+  if [[ "$got" == *"P0=unknown"* ]] && [[ "$got" == *"P1=yes"* ]] && [[ "$got" == *"P2=yes"* ]] \
+     && [[ "$got" == *"P3=yes"* ]] && [[ "$got" == *"L1=$derived"* ]] && [[ "$got" == *"L2=$derived"* ]]; then
+    pass "lock-provenance: unknown -> derived at the first resolution -> UNCHANGED by a second resolution AND by a mid-run explicit assignment (first resolution wins) [$got]"
+  else
+    fail "lock-provenance-record: got=[$got] — expected P0=unknown P1=yes P2=yes P3=yes with the derived path stable at $derived"
+  fi
+
+  # ---- (2) THE RETRY CASE, end to end: two resolutions then `acquire_lock`, with a STALE legacy lock
+  # present. The guard must still run and refuse.
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive_body "$SV_DRIVE_BODY_RESOLVE2" "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" != *ACQUIRED=* ]] && [[ ! -e "$derived" ]]; then
+    pass "lock-provenance RETRY: with the lock path resolved twice before acquisition, the legacy guard still runs and refuses (no lock acquired)"
+  else
+    fail "lock-provenance-retry: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — a repeated resolution must not disable the guard"
+  fi
+
+  # ---- (3) THE WRAPPER CASE: one pre-resolution, then `acquire_lock` (which resolves again).
+  rm -rf "$derived"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive_body "$SV_DRIVE_BODY_RESOLVE1" "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" != *ACQUIRED=* ]] && [[ ! -e "$derived" ]]; then
+    pass "lock-provenance WRAPPER: a caller that resolves the path before calling acquire_lock still gets the legacy refusal"
+  else
+    fail "lock-provenance-wrapper: rc=$rc out=[$out] — a pre-resolving wrapper must not disable the guard"
+  fi
+
+  # ---- (4) AC4 MUST NOT REGRESS: a genuinely explicit lock still skips the check, INCLUDING under the
+  # same pre-resolving wrapper. The fix must not have bought the guard back by taking the override away.
+  rm -rf "$explicit"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive_body "$SV_DRIVE_BODY_RESOLVE1" "$tmp" "$lane" "$explicit")"; rc=$?
+  if [[ "$rc" -eq 0 ]] && [[ "$out" == *"ACQUIRED=$explicit"* ]] && [[ "$out" != *"LEGACY GLOBAL supervisor lock"* ]]; then
+    pass "lock-provenance AC4: an explicit SUPERVISOR_LOCK still skips the legacy check, even when a wrapper resolved the path first"
+  else
+    fail "lock-provenance-ac4: rc=$rc out=[$out] — an explicit lock must still be honoured and the check skipped"
+  fi
+  rm -rf "$explicit"
+
+  # ---- (5) MUTANT CONTRAST: the write-once bail-out reverted to the pre-fix recomputing form, nothing
+  # else changed. The RETRY case must then show the guard SKIPPED — the bypass, measured.
+  ovr="$d/m-provenance.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_path '    yes | no) return 0 ;;' '    yes | no) : ;;'; then
+    rm -rf "$derived"
+    printf '%s\n' "$dead" >"$legacy/pid"
+    mout="$(legacy_lock_drive_body_override "$SV_DRIVE_BODY_RESOLVE2_OVERRIDE" "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *ACQUIRED=* ]] && [[ "$mout" != *"LEGACY GLOBAL supervisor lock"* ]]; then
+      pass "lock-provenance MUTANT CONTRAST: with the record recomputed on every call, the SAME two-resolution drive skips the guard entirely and acquires alongside the legacy lock — the bypass this fix closes, measured (output=[$mout])"
+    else
+      fail "lock-provenance-mutant: out=[$mout] — the pre-fix form must be shown to bypass the guard, or the cases above measure nothing"
+    fi
+  fi
+
+  rm -rf "$legacy" "$derived" "$tmp"
+}
+
+t test_lock_provenance_is_recorded_once
+
+# ---------------------------------------------------------------------------
+# Test 47l (#3549, roborev job 209 F2): THE OPTION PINS MUST NOT SPEAK ON A BASH THAT LACKS ONE OF THEM.
+#
+# `globstar` arrived in BASH 4.0. This file supports the 3.2 macOS ships, and on 3.2 both the `shopt -p`
+# save and the `shopt -u` mutation name an option that bash does not know: each writes
+# `shopt: globstar: invalid shell option name` to the CALLER'S STDERR and exits non-zero. Two real
+# consequences, neither cosmetic: an UNPREFIXED line lands in the middle of a refusal whose whole
+# contract is that every line is prefixed or is one bare runnable command; and the non-zero status of
+# the mutation can abort a direct caller under `errexit` BETWEEN the mutation and the restore, leaving
+# the caller's shell changed and printing no refusal at all.
+#
+# NOT FIXED BY DROPPING THE NAME: the option is absent on 3.2 (where it can affect nothing) and present
+# on 4+ (where the pin is correct), so removing it would trade a real gap for a cosmetic one.
+#
+# HOW IT IS MEASURED HERE. The host's bash is 4+, so 3.2 is emulated at the ONE property that matters —
+# a `shopt` that does not know the name `globstar`. The stub is a shell FUNCTION in the LAUNCHING shell
+# (functions take precedence over builtins), installed by the existing prelude mechanism, so the shipped
+# script gets no knob. It reproduces exactly what a real bash does with an unknown option name, which
+# was measured on this host with a bogus name: every RECOGNISED name is still applied, the unknown one
+# produces that stderr line, and the aggregate status is 1.
+# ---------------------------------------------------------------------------
+SV_NO_GLOBSTAR_PRELUDE='shopt() {
+  local a rc=0 names=0 hit=no
+  local -a fwd=()
+  for a in "$@"; do
+    if [[ "$a" == globstar ]]; then hit=yes; continue; fi
+    fwd+=("$a")
+    [[ "$a" == -* ]] || names=$((names + 1))
+  done
+  if (( names > 0 )); then builtin shopt ${fwd[@]+"${fwd[@]}"} || rc=$?; fi
+  if [[ "$hit" == yes ]]; then printf "shopt: globstar: invalid shell option name\n" >&2; rc=1; fi
+  return "$rc"
+}'
+
+test_legacy_lock_pins_tolerate_a_bash_without_globstar() {
+  local d tmp lane legacy dead out rc ovr mout probe
+
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549gs$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+
+  # ---- PREMISE: the stub really does behave like a bash without `globstar`, AND like one WITH every
+  # other name — measured, not assumed, because a stub that rejected everything would make the case
+  # below pass for the wrong reason.
+  probe="$(bash -c 'eval "$1"; shopt -u globstar 2>/dev/null; echo "u=$?"; s="$(shopt -p globstar 2>/dev/null)"; echo "p=[$s]"; shopt -s dotglob 2>/dev/null; echo "d=$(shopt -p dotglob)"; shopt -u nocasematch globstar 2>/dev/null; echo "m=$?/$(shopt -p nocasematch)"' _ "$SV_NO_GLOBSTAR_PRELUDE" 2>&1)"
+  if [[ "$probe" == *"u=1"* ]] && [[ "$probe" == *"p=[]"* ]] \
+     && [[ "$probe" == *"d=shopt -s dotglob"* ]] && [[ "$probe" == *"m=1/shopt -u nocasematch"* ]]; then
+    pass "no-globstar PREMISE: the stub rejects only \`globstar\` (status 1, \`shopt -p\` prints nothing) and still applies every recognised name in the same call — the shape a real bash 3.2 has"
+  else
+    fail "no-globstar-premise: probe=[$probe] — the stub does not reproduce a bash that lacks globstar"
+  fi
+
+  # ---- (1) THE SHIPPED CODE on such a bash: the refusal is complete, correct, and carries NO stray
+  # line; and the pin verification does not report the absent option, because `absent` is an
+  # affirmative OK — an option bash does not have cannot filter, expand or match anything.
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive_prelude "$SV_NO_GLOBSTAR_PRELUDE" "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"LEFT BEHIND"* ]] \
+     && [[ "$out" != *"invalid shell option name"* ]] \
+     && [[ "$out" != *"glob-state-pins-not-verified"* ]]; then
+    pass "no-globstar: on a bash without \`globstar\` the guard still classifies the stale lock and prints the refusal with NO unprefixed shell diagnostic and NO false pin failure"
+  else
+    fail "no-globstar-shipped: rc=$rc out=[$out] — expected the ordinary stale refusal with no shopt diagnostic and no pin-verification failure"
+  fi
+
+  # ---- (2) MUTANT CONTRAST: the two suppressions reverted, nothing else changed. The same drive on the
+  # same emulated bash must then leak the unprefixed diagnostic — and the unguarded MUTATION status
+  # additionally kills the classifier inside its substitution, so the refusal degrades to the
+  # fail-closed "could not be determined" branch instead of the correct stale one.
+  ovr="$d/m-globstar.sh"; : >"$ovr"
+  if sv_mutant_override_pairs "$ovr" supervisor_legacy_lock_state \
+       'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true' \
+       'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch' \
+       '  shopt -u failglob extglob globstar nocaseglob nocasematch 2>/dev/null || true' \
+       '  shopt -u failglob extglob globstar nocaseglob nocasematch'; then
+    printf '%s\n' "$dead" >"$legacy/pid"
+    mout="$(legacy_lock_drive_prelude_override "$SV_NO_GLOBSTAR_PRELUDE" "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"invalid shell option name"* ]]; then
+      pass "no-globstar MUTANT CONTRAST: with the suppressions removed, the identical drive emits the unprefixed \`shopt: globstar: invalid shell option name\` line into the refusal — the contract violation the fix removes (output=[$mout])"
+    else
+      fail "no-globstar-mutant: out=[$mout] — the unsuppressed form must be shown to leak the diagnostic, or the assert above measures nothing"
+    fi
+  fi
+
+  rm -rf "$legacy" "$tmp"
+}
+
+t test_legacy_lock_pins_tolerate_a_bash_without_globstar
 
 # ---------------------------------------------------------------------------
 # Test 47i (#3549, roborev job 206 F2): A NUL BYTE IS AN UNRECOGNISED SHAPE, AND `read` CANNOT SEE IT.
