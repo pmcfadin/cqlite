@@ -140,6 +140,10 @@
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
 #   vacuity-tier2     PASS | FAIL (...) | UNAVAILABLE | SKIP
 #   findings          NONE | PRESENT [(<n>)] | INCONSISTENT (...) | UNKNOWN | SKIP
+#                     ONLY an affirmative `NONE` permits a PASS, IN EVERY MODE including
+#                     `--recheck-job`, and that requirement is NOT WAIVABLE (#3564). It is
+#                     enforced in step 7 on its own terms rather than by the neighbouring
+#                     `roborev-exit` key, which is legitimately `SKIP` on a recheck.
 #   roborev-exit      PASS | FINDINGS (exit N) | ERROR (exit N) | SKIP
 #   model             <model> | <model> (SUBSTITUTED — requested '<r>') |
 #                     <model> (UNCONFIRMED — no model field in the job record) | -
@@ -159,6 +163,11 @@
 # VERDICT and FAILS. Testing only the bad states would let every unplanned one inherit
 # the permissive branch, which is the general shape of three separate defects found on
 # #3229 (see step 7).
+# GRAMMAR RECOGNITION IS NOT A PASS, and conflating the two was #3564: `PRESENT` is
+# RECOGNISED here — it is a documented findings state, not a typo — and that is all this
+# scan says about it. Whether a value may ride to `RESULT: PASS` is decided by the two
+# AFFIRMATIVE gates beside it in step 7: `findings:` must read exactly `NONE`, and every
+# deterministic key must read exactly `PASS`.
 #
 # THE RULE THAT GOVERNS EVERY KEY HERE, and the one to apply when adding another:
 # **A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT.** Never derive a pass from
@@ -1268,9 +1277,13 @@ roborev_check_tier2
 # form to be non-failing. The recognised set is exactly the states this block documents —
 # PASS / SKIP / NOTICE / UNAVAILABLE / DEGRADED, plus `findings:`'s own NONE / PRESENT /
 # UNKNOWN — and anything else is an UNRECOGNISED VERDICT, which fails closed and names
-# itself. UNKNOWN is recognised deliberately: `findings: UNKNOWN` is a documented value and
-# is unreachable unless `roborev-exit:` is already `ERROR (exit N)`, which fails on its own
-# terms, while `vacuity-tier1:` additionally treats it as claiming cleanliness.
+# itself. UNKNOWN is recognised deliberately: `findings: UNKNOWN` is a documented value, not a
+# typo — and recognition is all this scan grants it. It no longer RELIES on being "unreachable
+# unless `roborev-exit:` is already `ERROR (exit N)`, which fails on its own terms": that was a
+# statement about a NEIGHBOURING key, and #3564 is what happens when a key's failure is delegated
+# to its neighbour — on `--recheck-job` the neighbour is legitimately `SKIP` and the delegation
+# evaporates. `findings:` now carries its own affirmative gate below, so `UNKNOWN` fails on ITS OWN
+# terms; `vacuity-tier1:` additionally treats it as claiming cleanliness.
 #
 # ====== MATCHED ON THE VERDICT TOKEN, EXACTLY — NEVER AS A PREFIX GLOB ======
 # The scan's earlier form matched `PASS*` / `FAIL*` etc. as PREFIX globs, and a prefix glob
@@ -1326,8 +1339,14 @@ done
 # `PASS*` prefix glob would accept `PASSthisNeverRan` as an affirmative pass, i.e. the
 # backstop against unmeasured keys would itself be satisfiable by a value that measured
 # nothing. The token is the value up to its first space, compared exactly.
-# `vacuity-tier1/2` and `findings:` are deliberately EXCLUDED: they CORROBORATE, and
-# `UNAVAILABLE` / `NONE` are documented, legitimate values for them on a clean run.
+# `vacuity-tier1/2` and `findings:` are EXCLUDED FROM THIS LOOP, for two DIFFERENT reasons
+# that #3564 showed must not be stated as one. `vacuity-tier1/2` CORROBORATE, and
+# `UNAVAILABLE` is a documented, legitimate value for them on a clean run. `findings:` is
+# excluded only because its affirmative value is `NONE` rather than `PASS`, so it cannot
+# satisfy this loop's uniform test — it is NOT unguarded: it has its own affirmative gate
+# IMMEDIATELY ABOVE, which is stricter than this loop (no `WAIVED` is admitted there).
+# Reading the old wording as "findings only corroborates" is what left the recheck path
+# able to PASS beside `findings: PRESENT (3)`.
 #
 # WHY IT IS NOT REDUNDANT with the checks-file validation: that validation proves the five
 # functions EXIST, not that each reached its assignment. A check that returned early — an
@@ -1336,6 +1355,47 @@ done
 # with a key that had measured nothing. "PASS requires POSITIVE evidence" is the wrapper's
 # stated contract (see EXIT CODES above); this is the contract enforced rather than intended.
 #
+# ====== AND `findings:` MUST BE AFFIRMATIVELY `NONE` FOR A PASS, IN EVERY MODE ======
+# (#3564.) `findings:` reports whether the REVIEW found anything, and until this existed it could
+# not fail the run ON ITS OWN: `PRESENT` is in the grammar's non-failing set above, so the only
+# thing failing a findings-bearing run was the NEIGHBOURING key `roborev-exit: FINDINGS (exit 1)`.
+# That coupling held for a fresh review and broke exactly where it mattered most. On
+# `--recheck-job` NO REVIEWER PROCESS RUNS, so `roborev-exit` is legitimately `SKIP` — and with the
+# failing signal gone, a recheck of a job whose record carries findings emitted
+# `findings: PRESENT (3)` beside `RESULT: PASS`. Measured on #3473's round-3 recovery (job 160):
+# a FALSE PASS IN A MERGE GATE, and the wrapper's own documented affirmation backstop did not catch
+# it because `findings` is deliberately excluded from the loop below.
+#
+# This is this repository's named recurring defect, in the one place it is most expensive: **A
+# POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT** — never derive a pass from the ABSENCE of
+# a bad signal. So the requirement is stated POSITIVELY and on `findings`'s OWN terms: its
+# affirmative value is `NONE`, not `PASS`. That is why this is its OWN statement and not a per-key
+# affirmative token inside the loop below — a key-scoped special case there is the shape that has
+# to be re-argued every time a key is added, and the loop's uniform "every key must read PASS" is
+# the property that makes it a backstop. `PRESENT`, `UNKNOWN` and the initial `SKIP` all fail here;
+# `INCONSISTENT` already fails the grammar scan, and this is a second, independent reason it cannot
+# pass.
+#
+# MATCHED ON THE VERDICT TOKEN, EXACTLY, for the same reason both scans above are: `PRESENT (3)`
+# must reduce to `PRESENT`, and a `NONE-BUT-UNMEASURED` variant must NOT satisfy a `NONE*` prefix.
+#
+# THE FIX BELONGS HERE, NOT IN `roborev-exit`. `SKIP` is the TRUE statement about a recheck — the
+# reviewer genuinely did not run — so making that key claim a failure it did not observe would
+# trade one false statement for another.
+#
+# DELIBERATELY NOT WAIVABLE, and this is the sharpest reason the gate has to be here. The absence
+# waiver (#3312) excuses `prompt-content` ABSENCE **only**, and `--recheck-job` is the ONLY path a
+# waiver can travel (a re-run enqueues a different job and stales it) — so a waiver-bearing recheck
+# is PRECISELY the run this must still fail. Admitting `WAIVED` here would let one authorization
+# excuse findings no human agreed to excuse.
+#
+# Evaluated only on a would-be PASS, and BEFORE the affirmation loop: where both this and the
+# structural backstop would fire, OPEN FINDINGS are what the reader must act on, and a wrapper
+# defect reported over them would bury it.
+if [ "$failed" -eq 0 ] && [ "${FINDINGS%% *}" != NONE ]; then
+  failed=1
+  DETAILS+=("ERROR: findings: this run would have PASSED while 'findings:' reads '$FINDINGS' — and only an affirmative 'NONE' certifies that the review found nothing. A review with OPEN FINDINGS is not \"roborev clean\", whatever the neighbouring keys say: on --recheck-job no reviewer process runs, so 'roborev-exit' is legitimately SKIP and CANNOT be the thing that fails a findings-bearing run (#3564). If this is PRESENT, triage the findings in the review record ($LOG), fix them, then push and re-review. 'UNKNOWN' or 'SKIP' means the findings state was never ESTABLISHED, which fails closed for the same reason — a pass may not rest on a state we could not read. This requirement is NOT waivable in any mode: the absence waiver excuses prompt-content absence only.")
+fi
 # Evaluated ONLY when the run would otherwise PASS, deliberately: on an already-failing run
 # every non-affirmative key has its own diagnostic under its own name, and repeating them here
 # would bury the actionable cause under a structural one.
