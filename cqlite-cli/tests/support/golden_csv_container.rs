@@ -200,10 +200,6 @@
 use super::schema::CqlType;
 use serde_json::{Map, Value};
 
-/// Characters that carry structure in the rendering and therefore cannot appear
-/// inside an unquoted member without making it unparseable.
-const STRUCTURAL: [char; 6] = ['[', ']', '{', '}', '(', ')'];
-
 /// The ONE bracket pair a container of this declared type may be rendered with
 /// (the grammar in the module doc), or `None` for a scalar type.
 ///
@@ -224,25 +220,34 @@ fn brackets(ty: &CqlType) -> Option<(char, char)> {
 /// `Some(reason)` means it does, and the cell is refused before the decode is
 /// attempted.
 ///
-/// The one cause with that blast radius is a STRUCTURAL character in a member's
-/// (or a key's) text: [`scan`] tracks bracket depth, so a stray bracket anywhere
-/// in the rendering corrupts every enclosing level's split at once — and would
-/// otherwise surface as an "unbalanced bracket" DIVERGENCE caused by the golden
-/// rather than by the CLI. Scanned recursively for exactly that reason.
+/// The one cause with that blast radius is a bracket that does not BALANCE inside
+/// a member's (or a key's) text: [`scan`] tracks bracket depth, so an unclosed
+/// `[` or a stray `]` anywhere in the rendering corrupts every enclosing level's
+/// split at once — and would otherwise surface as an "unbalanced bracket"
+/// DIVERGENCE caused by the golden rather than by the CLI. Scanned recursively
+/// for exactly that reason.
+///
+/// A BALANCED bracket pair inside a member is NOT refused (review round 11,
+/// finding R1). It leaves the depth counter exactly where it found it, so no
+/// level's split is disturbed and the member decodes back byte for byte: a
+/// `list<text>` holding `[ok]` renders `[[ok]]`, splits into the one member
+/// `[ok]`, and IS compared. Refusing it cost coverage for nothing — the earlier
+/// character test refused any member containing a bracket, and a refused node
+/// keeps only the emptiness bound, so an incorrect non-empty body passed there.
 ///
 /// Decided from the GOLDEN — never from the CLI's output — so a refusal can never
 /// be produced by the defect the lane is looking for. The declared type is
-/// deliberately NOT a parameter: a bracket is structural whatever the DDL says,
-/// so there is no type-dependent narrowing to state here.
+/// deliberately NOT a parameter: an unbalanced bracket defeats the depth counter
+/// whatever the DDL says, so there is no type-dependent narrowing to state here.
 pub fn cell_refusal(golden: &Value) -> Option<String> {
     match golden {
         Value::Array(items) => items.iter().find_map(cell_refusal),
         Value::Object(fields) => fields.iter().find_map(|(key, value)| {
-            structural_char(key)
+            unbalanced(key)
                 .map(|why| format!("map/UDT key: {why}"))
                 .or_else(|| cell_refusal(value))
         }),
-        scalar => structural_char(&scalar_text(scalar)),
+        scalar => unbalanced(&scalar_text(scalar)),
     }
 }
 
@@ -262,90 +267,238 @@ pub fn cell_refusal(golden: &Value) -> Option<String> {
 /// rule may then fire — refusing there would suppress a real divergence rather
 /// than declare a format limit.
 ///
-/// The DDL is consulted for ONE question only: whether a member of the declared
-/// element type can render as the empty string, which is what decides
-/// EMPTY-CONTAINER. Everything else is read from the golden's own content.
+/// # Two causes, and why only one of them is a hand-written predicate
+///
+/// [`decode_does_not_recover`] is the general one, and it is not a predicate over
+/// suspicious characters at all: it RUNS the decoder's own splitter on the
+/// golden's own rendering and asks whether it gives this node's members back.
+/// That is the property the comparison needs — the comparison asserts
+/// `decode(cli) == golden`, so a correct CLI passes exactly when
+/// `decode(render(golden)) == golden` — and deriving it from the splitter is what
+/// stops "the golden looks unsafe" and "the decoder cannot read it back" drifting
+/// apart, which they had done in every round of this lane's review history.
+///
+/// EMPTY-CONTAINER is the ONE cause that survives as its own rule, because it is
+/// a different question: an empty golden container's rendering DOES decode back to
+/// it, and what the rendering cannot do is tell it apart from a container of one
+/// member that renders empty. The DDL is consulted for that one question only —
+/// whether a member of the declared element type can render as the empty string.
 pub fn node_refusal(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
+    // EMPTY-CONTAINER: zero members and one EMPTY member render identically.
+    // Keyed on the AFFIRMATIVE answer — this element type really can render
+    // empty — so an unknown or non-collection type does not refuse.
+    if let Value::Array(items) = golden {
+        if items.is_empty() && empty_container_is_ambiguous(ty) {
+            return Some(
+                "an empty container is indistinguishable from a container of one empty \
+                 member of this element type"
+                    .into(),
+            );
+        }
+    }
+    decode_does_not_recover(golden, ty)
+}
+
+/// Run the DECODER'S OWN splitter on the golden's own rendering: does it give THIS
+/// node's members back? `Some(reason)` means it does not, so a CORRECT rendering
+/// would be read as something other than the golden — and the node is refused
+/// rather than reported as a divergence the CLI did not cause.
+///
+/// This replaces four hand-written causes (a `, ` in a member, a `, ` or a `: ` in
+/// a map/UDT key, a `, ` in a map/UDT value, an empty scalar member), each of
+/// which was one symptom of the same thing, and each of which had to be
+/// discovered. What it asks instead is the decision itself, through the same
+/// [`members`] / [`entry_cut`] / [`scan`] code the decode runs, so the refusal set
+/// cannot drift from the decode:
+///
+/// * a `, ` inside a scalar member splits it in two, so the members come back
+///   different — REFUSED, exactly as before;
+/// * a `: ` in a KEY moves the key/value cut, so the key comes back different —
+///   REFUSED, while a `: ` in a VALUE is cut correctly and is COMPARED;
+/// * a SOLE empty scalar member renders as an empty body, which splits into zero
+///   members — REFUSED;
+/// * an empty member WITH SIBLINGS is recovered exactly (`["", "x"]` renders
+///   `[, x]` and splits back into `""` and `"x"`), so it is COMPARED. The earlier
+///   rule refused the whole node for any empty member, which cost the siblings
+///   their comparison and left only the emptiness bound (review round 11, finding
+///   R2);
+/// * a BALANCED bracket pair in a member does not move the depth-zero split, so
+///   it is recovered and COMPARED (finding R1).
+///
+/// It is deliberately NOT the stronger question "could another value have rendered
+/// the same bytes". That question is unusable here: CSV members are unquoted, so a
+/// `list<text>` holding `["a", "b"]` and one holding `["a, b"]` render the SAME
+/// bytes, and refusing on non-uniqueness would refuse every multi-member text
+/// collection in the corpus. What one-directional recovery buys is stated
+/// exactly: a CLI that renders what the golden means PASSES, and a CLI whose
+/// rendering decodes to anything else FAILS. A CLI that renders a DIFFERENT value
+/// which happens to share the golden's bytes passes — the module doc's inherent
+/// limit of an unquoted format, of which EMPTY-CONTAINER is the one instance
+/// bounded separately because it attacks the member COUNT.
+fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
+    // A scalar node has no body of its own: every cause here is about the body
+    // that HOLDS it, so the container one level up is what reports them.
+    if is_scalar(golden) {
+        return None;
+    }
+    // An undeclared type is not refused: see the note on `node_refusal`'s `ty`.
+    let ty = ty?;
+    let rendering = golden_rendering(golden, Some(ty))?;
+    let parts = match members(&rendering, ty) {
+        Ok(parts) => parts,
+        // The splitter cannot read the golden's own rendering at all. Reachable
+        // only through a `, ` that moves an entry boundary in a map/UDT (the
+        // second entry then carries no `: `); an unbalanced bracket is refused for
+        // the whole cell before this is asked.
+        Err(why) => {
+            return Some(format!(
+                "the decoder cannot split the golden's own rendering {}: {why}",
+                brief(&rendering)
+            ))
+        }
+    };
     match golden {
         Value::Array(items) => {
-            // EMPTY-CONTAINER: zero members and one EMPTY member render
-            // identically. Keyed on the AFFIRMATIVE answer — this element type
-            // really can render empty — so an unknown or non-collection type does
-            // not refuse.
-            if items.is_empty() && empty_container_is_ambiguous(ty) {
-                return Some(
-                    "an empty container is indistinguishable from a container of one empty \
-                     member of this element type"
-                        .into(),
-                );
-            }
-            items
+            let want = items
                 .iter()
-                .filter(|item| is_scalar(item))
-                .find_map(|item| {
-                    let text = scalar_text(item);
-                    // EMPTY-MEMBER: a member rendering to the empty string makes the
-                    // member count unrecoverable — one empty member and zero members
-                    // both render as an empty body.
-                    if text.is_empty() {
-                        return Some(
-                            "an empty scalar member is indistinguishable from no member".into(),
-                        );
-                    }
-                    // SEPARATOR: this node's body splits at every depth-zero `, `.
-                    separator_in_member(&text)
+                .enumerate()
+                .map(|(i, item)| golden_rendering(item, member_type(Some(ty), i)))
+                .collect::<Option<Vec<String>>>()?;
+            split_mismatch(&rendering, "member", &parts, &want)
+        }
+        Value::Object(fields) => {
+            let want = fields
+                .iter()
+                .map(|(key, value)| {
+                    golden_rendering(value, field_type(Some(ty), key))
+                        .map(|value| format!("{key}: {value}"))
+                })
+                .collect::<Option<Vec<String>>>()?;
+            if let Some(why) = split_mismatch(&rendering, "entry", &parts, &want) {
+                return Some(why);
+            }
+            // The entry texts came back whole; the remaining decision
+            // `decode_object` makes is the key/value cut INSIDE each, which a `: `
+            // in a KEY moves. The value needs no separate check: an entry is
+            // `key: value` by construction, so a recovered key leaves the golden's
+            // value text as the remainder.
+            fields
+                .iter()
+                .zip(parts.iter())
+                .find_map(|((key, _), part)| match entry_cut(part) {
+                    Err(why) => Some(format!("the golden's own rendering: {why}")),
+                    Ok((got, _)) if got != key => Some(format!(
+                        "the decoder recovers key {} from the golden's own entry {}, not the \
+                         golden's key {}",
+                        brief(got),
+                        brief(part),
+                        brief(key)
+                    )),
+                    Ok(_) => None,
                 })
         }
-        Value::Object(fields) => fields.iter().find_map(|(key, value)| {
-            // KEY-SEPARATOR. Only a KEY is harmed by `: `: entries are split at
-            // their FIRST top-level `: `, so a colon inside a VALUE is already
-            // correct.
-            if key.contains(": ") {
-                return Some(format!(
-                    "map/UDT key {} contains the `: ` separator",
-                    brief(key)
-                ));
-            }
-            if let Some(why) = separator_in_member(key) {
-                return Some(format!("map/UDT key: {why}"));
-            }
-            // VALUE-SEPARATOR: a `, ` in a SCALAR value splits one entry into two,
-            // destroying this object's entries exactly as one in a key does. Only
-            // a scalar's, because a nested container's members are split inside
-            // its own brackets and reported at ITS node.
-            if is_scalar(value) {
-                if let Some(why) = separator_in_member(&scalar_text(value)) {
-                    return Some(format!("map/UDT value at key {}: {why}", brief(key)));
-                }
-            }
-            None
-        }),
-        // A scalar is never refused for itself: the causes above are all about the
-        // BODY that holds it, so the container one level up is the node that
-        // reports them.
+        // Unreachable: the scalar case returned above and every other shape is a
+        // container the two arms cover.
         _ => None,
     }
 }
 
-/// SEPARATOR, for one member's text.
-fn separator_in_member(text: &str) -> Option<String> {
-    if text.contains(", ") {
+/// The refusal reason for a split that did not give the golden's own members back,
+/// or `None` when it did.
+fn split_mismatch(rendering: &str, unit: &str, got: &[&str], want: &[String]) -> Option<String> {
+    if got.len() != want.len() {
         return Some(format!(
-            "member {} contains the `, ` separator",
-            brief(text)
+            "the golden's own rendering {} splits into {} {unit}(s), not the golden's {}",
+            brief(rendering),
+            got.len(),
+            want.len()
         ));
     }
-    None
+    got.iter()
+        .zip(want.iter())
+        .enumerate()
+        .find(|(_, (got, want))| *got != want)
+        .map(|(i, (got, want))| {
+            format!(
+                "the golden's own rendering {} gives {unit} {i} back as {}, not {}",
+                brief(rendering),
+                brief(got),
+                brief(want)
+            )
+        })
 }
 
-/// STRUCTURAL, for one member's text.
-fn structural_char(text: &str) -> Option<String> {
-    STRUCTURAL.iter().find(|c| text.contains(**c)).map(|found| {
-        format!(
-            "member {} contains the structural character `{found}`",
-            brief(text)
-        )
-    })
+/// The text the documented grammar renders this golden node as, derived from the
+/// GOLDEN and the committed DDL alone: the bracket pair the declared kind
+/// requires, `, ` between members, `: ` between a key and its value, and each
+/// scalar as the text the GOLDEN carries for it.
+///
+/// It is NOT a second `ValueFormatter`, and it must never become one. It is asked
+/// one STRUCTURAL question — where the separators and brackets of the golden's own
+/// rendering fall — and every scalar spelling in it is the GOLDEN's. Taking the
+/// spellings from CQLite instead would make the refusal circular (#3042): the
+/// output under test would be deciding which of its own positions get compared.
+///
+/// Why the golden's spellings answer the structural question: the lane's three
+/// declared narrowings are all scalar SPELLINGS (a timestamp's separator, a
+/// decimal's trailing zeros, a JSON integer beyond `f64`), and no spelling of any
+/// CQL scalar type carries a `, `, a `: ` or a bracket, so a spelling difference
+/// cannot move a separator or the depth count. Where a member's text could carry
+/// one — `text`/`varchar`/`ascii`, which hold arbitrary bytes — the golden's text
+/// IS the rendering, byte for byte.
+///
+/// `None` means the declared type does not describe the golden's shape here. That
+/// is deliberately NOT a refusal: the disagreement is a divergence the comparison
+/// reports, and refusing would suppress it.
+fn golden_rendering(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
+    match (golden, ty) {
+        (
+            Value::Array(items),
+            Some(seq @ (CqlType::List(_) | CqlType::Set(_) | CqlType::Tuple(_))),
+        ) => {
+            let (open, close) = brackets(seq)?;
+            let body = items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| golden_rendering(item, member_type(ty, i)))
+                .collect::<Option<Vec<String>>>()?
+                .join(", ");
+            Some(format!("{open}{body}{close}"))
+        }
+        (Value::Object(fields), Some(object @ (CqlType::Map(..) | CqlType::Udt(_)))) => {
+            let (open, close) = brackets(object)?;
+            let body = fields
+                .iter()
+                .map(|(key, value)| {
+                    golden_rendering(value, field_type(ty, key))
+                        .map(|value| format!("{key}: {value}"))
+                })
+                .collect::<Option<Vec<String>>>()?
+                .join(", ");
+            Some(format!("{open}{body}{close}"))
+        }
+        // A scalar renders as its own text whatever the DDL says of it: the golden
+        // is the authority for what the VALUE is, and a golden/DDL shape
+        // disagreement is reported by the comparison rather than refused here.
+        (scalar, _) if is_scalar(scalar) => Some(scalar_text(scalar)),
+        // A container golden under a declared type that is not that kind of
+        // container: the shape divergence belongs to the comparison.
+        _ => None,
+    }
+}
+
+/// Can the DECODER'S OWN scanner count bracket depth through this text?
+/// `Some(reason)` means it cannot, which is the one whole-cell refusal.
+///
+/// Asked of [`scan`] itself rather than by a character test, so "unbalanced" means
+/// exactly what the splitter fails on and the two cannot drift — `scan`'s only
+/// failure mode IS an unbalanced bracket, in either direction (a close that never
+/// opened, or an open that never closed). The separator it is given is irrelevant
+/// to that answer; `, ` is passed because it is the one the split uses.
+fn unbalanced(text: &str) -> Option<String> {
+    scan(text, ", ")
+        .err()
+        .map(|why| format!("member is not bracket-balanced: {why}"))
 }
 
 /// The text `ValueFormatter` renders a scalar as, for the ambiguity scan only.
@@ -702,13 +855,7 @@ fn decode_object<'t>(
     let fields = golden.as_object();
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
-        let cut = *scan(part, ": ")?.first().ok_or_else(|| {
-            format!(
-                "map/UDT entry {} has no top-level `: ` separator",
-                brief(part)
-            )
-        })?;
-        let (key, value) = (&part[..cut], &part[cut + 2..]);
+        let (key, value) = entry_cut(part)?;
         let mut entry = Map::new();
         entry.insert("key".to_string(), Value::String(key.to_string()));
         // A UDT field step, spelled `parent.field` as the comparator spells it. A
@@ -729,6 +876,23 @@ fn decode_object<'t>(
         out.push(Value::Object(entry));
     }
     Ok(Value::Array(out))
+}
+
+/// Cut one map/UDT entry into its key and its value at the FIRST top-level `: `,
+/// which is the only cut the grammar defines: a `: ` in a VALUE is ordinary text.
+///
+/// Factored out because [`decode_object`] and [`decode_does_not_recover`] must make
+/// the IDENTICAL cut — the refusal asks whether this cut gives the golden's key
+/// back, so a second spelling of it is a second notion of decodability, which is
+/// the drift this lane's review history is made of.
+fn entry_cut(part: &str) -> Result<(&str, &str), String> {
+    let cut = *scan(part, ": ")?.first().ok_or_else(|| {
+        format!(
+            "map/UDT entry {} has no top-level `: ` separator",
+            brief(part)
+        )
+    })?;
+    Ok((&part[..cut], &part[cut + 2..]))
 }
 
 /// Strip the bracket pair `ty` requires and split the body at every depth-zero
@@ -891,12 +1055,16 @@ mod tests {
 
     #[test]
     fn member_containing_the_element_separator_is_refused_at_its_container() {
-        // `{"a, b"}` and `{"a", "b"}` render identically, so no reading of THIS
-        // body is trustworthy…
+        // The golden's own rendering `{a, b}` splits into TWO members, so the
+        // decoder cannot give this one-member golden back and a CORRECT rendering
+        // would be read as something else…
         let ty = ty_of("set<text>");
         let why = node_refusal(&json!(["a, b"]), Some(&ty))
             .expect("a `, `-bearing member must refuse its container");
-        assert!(why.contains("`, ` separator"), "unexpected reason: {why}");
+        assert!(
+            why.contains("splits into 2 member(s), not the golden's 1"),
+            "the reason must state what the decoder gave back: {why}"
+        );
         // …and the rendering is still splittable at every OTHER depth, so the cell
         // is not refused: a `, ` inside a member sits at bracket depth ≥ 1 for
         // every enclosing level.
@@ -908,30 +1076,71 @@ mod tests {
     }
 
     #[test]
-    fn member_containing_a_bracket_refuses_the_whole_cell() {
+    fn member_containing_an_unbalanced_bracket_refuses_the_whole_cell() {
         // A stray bracket unbalances the depth counter every level is split on, so
         // no level can be split reliably.
-        let why = cell_refusal(&json!(["x}y"])).expect("a bracket-bearing member must be refused");
+        let why = cell_refusal(&json!(["x}y"])).expect("an unbalanced member must refuse the cell");
         assert!(
-            why.contains("structural character"),
+            why.contains("not bracket-balanced"),
             "unexpected reason: {why}"
         );
-        // At depth, too: the cause is a property of the whole rendering.
+        // Both directions of unbalance, and at depth too: the cause is a property
+        // of the whole rendering.
+        assert!(cell_refusal(&json!(["x[y"])).is_some());
         assert!(cell_refusal(&json!([["x}y"]])).is_some());
         assert!(cell_refusal(&json!({"k": "x}y"})).is_some());
         assert!(cell_refusal(&json!({"x}y": 1})).is_some());
     }
 
+    /// Review round 11, finding R1: a BALANCED bracket pair inside a scalar member
+    /// leaves the depth counter where it found it, so every level's split is
+    /// undisturbed and the member decodes back byte for byte. Refusing it cost the
+    /// position its comparison for nothing — a refused node keeps only the
+    /// emptiness bound, so an incorrect NON-EMPTY body passed there.
+    ///
+    /// The earlier rule was a character test (`contains('[')`), which is exactly
+    /// the parallel-predicate shape this module no longer has: the question is now
+    /// asked of the splitter, whose only failure mode is an IMBALANCE.
+    #[test]
+    fn a_balanced_bracket_inside_a_member_is_not_refused_and_is_compared() {
+        let ty = ty_of("list<text>");
+        let golden = json!(["[ok]"]);
+        assert_eq!(
+            cell_refusal(&golden),
+            None,
+            "a balanced bracket does not disturb any level's split"
+        );
+        assert_eq!(node_refusal(&golden, Some(&ty)), None);
+        // …and the member is recovered exactly, so a WRONG member is a divergence
+        // rather than a position nothing checks.
+        assert_eq!(decode(&golden, "[[ok]]", &ty).expect("decodes"), golden);
+        assert_ne!(decode(&golden, "[[wrong]]", &ty).expect("decodes"), golden);
+        // A balanced pair carrying the separator INSIDE it is recovered too: the
+        // `, ` sits at depth 1, so it is not a cut.
+        let inner = json!(["[a, b]"]);
+        assert_eq!(cell_refusal(&inner), None);
+        assert_eq!(node_refusal(&inner, Some(&ty)), None);
+        assert_eq!(decode(&inner, "[[a, b]]", &ty).expect("decodes"), inner);
+    }
+
     #[test]
     fn map_key_containing_a_separator_is_refused_at_its_object() {
         let ty = ty_of("map<text, int>");
+        // The key/value cut is made at the FIRST top-level `: `, so the decoder
+        // gives the key back as `a` — not the golden's `a: b`.
         let why = node_refusal(&json!({"a: b": 1}), Some(&ty))
             .expect("a `: `-bearing KEY must refuse its object");
-        assert!(why.contains("key"), "unexpected reason: {why}");
+        assert!(
+            why.contains("recovers key `a`") && why.contains("not the golden's key `a: b`"),
+            "the reason must state which key came back: {why}"
+        );
         // A `, ` in a key splits one entry into two, which is the same loss.
         let why = node_refusal(&json!({"a, b": 1}), Some(&ty))
             .expect("a `, `-bearing KEY must refuse its object");
-        assert!(why.contains("key"), "unexpected reason: {why}");
+        assert!(
+            why.contains("splits into 2 entry(s), not the golden's 1"),
+            "the reason must state what the decoder gave back: {why}"
+        );
         assert_eq!(cell_refusal(&json!({"a: b": 1})), None);
     }
 
@@ -948,13 +1157,48 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_member_of_a_non_empty_collection_is_refused() {
-        // `{}` is both "no members" and "one empty member".
+    fn a_sole_empty_member_is_refused_because_its_rendering_splits_into_none() {
+        // `{}` is both "no members" and "one empty member", which the decoder
+        // shows by giving ZERO members back for this one-member golden.
         let ty = ty_of("set<text>");
         let why = node_refusal(&json!([""]), Some(&ty)).expect("an empty member must be refused");
         assert!(
-            why.contains("empty scalar member"),
-            "unexpected reason: {why}"
+            why.contains("splits into 0 member(s), not the golden's 1"),
+            "the reason must state what the decoder gave back: {why}"
+        );
+    }
+
+    /// Review round 11, finding R2: an empty member WITH SIBLINGS is recovered
+    /// exactly, so the node is not refused. `["", "x"]` renders `[, x]`, whose
+    /// depth-zero `, ` is the separator, and the split gives `""` and `"x"` back.
+    ///
+    /// The earlier rule refused the node for ANY empty member, which suppressed
+    /// its siblings' comparison and left only the emptiness bound — so any
+    /// non-empty body passed.
+    #[test]
+    fn an_empty_member_with_siblings_is_not_refused_and_is_compared() {
+        let ty = ty_of("list<text>");
+        for golden in [json!(["", "x"]), json!(["x", ""]), json!(["", ""])] {
+            assert_eq!(
+                node_refusal(&golden, Some(&ty)),
+                None,
+                "{golden}: the rendering splits back into exactly these members"
+            );
+        }
+        // Recovered exactly, in both member positions…
+        assert_eq!(
+            decode(&json!(["", "x"]), "[, x]", &ty).expect("decodes"),
+            json!(["", "x"])
+        );
+        assert_eq!(
+            decode(&json!(["x", ""]), "[x, ]", &ty).expect("decodes"),
+            json!(["x", ""])
+        );
+        // …so a DROPPED member is a length divergence the comparator reports,
+        // where before it was a refused node accepting any non-empty body.
+        assert_eq!(
+            decode(&json!(["", "x"]), "[x]", &ty).expect("decodes"),
+            json!(["x"])
         );
     }
 
