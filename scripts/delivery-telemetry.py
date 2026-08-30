@@ -538,6 +538,18 @@ def _issue_state_at(issue_url, issue: int, merged_at):
                 f"BE the `closed` event that decides this, so it is refused rather than "
                 f"skipped (issue #3559)")
         if kind not in _TIMELINE_STATE_EVENTS:
+            # A PADDED or differently-cased spelling of a state event is NOT "some other
+            # event type this tool ignores": it is a state event that would be silently
+            # SKIPPED, i.e. the permissive direction. GitHub emits the exact lowercase names,
+            # so anything that only matches after normalising is unmeasured input — refused
+            # here rather than normalised, because a lenient reader plus an exact-match
+            # consumer is how a non-match becomes indistinguishable from a correct non-match.
+            if kind.strip().lower() in _TIMELINE_STATE_EVENTS:
+                raise SystemExit(
+                    f"error: {what} returned a timeline entry at position {position} whose "
+                    f"'event' is {kind!r} — that matches a state-changing event only after "
+                    f"normalising, and skipping it would silently drop an event that decides "
+                    f"the classification (issue #3559)")
             continue
         at = entry.get("created_at")
         if not isinstance(at, str) or not at.strip():

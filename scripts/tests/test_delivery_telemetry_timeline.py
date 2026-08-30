@@ -186,6 +186,18 @@ class TimelineReplayTests(unittest.TestCase):
                     self._state([[bad]])
                 self.assertIn("'event'", str(cm.exception))
 
+    def test_it_refuses_a_padded_or_recased_state_event_rather_than_skipping_it(self):
+        """`closed ` / `CLOSED` matches a deciding event only after normalising. Skipping it
+        is the PERMISSIVE direction (the replay would answer "open"), and normalising it is
+        the lenient-reader shape this file refuses everywhere else — so it is a refusal."""
+        for bad in ("closed ", " closed", "CLOSED", "Reopened", "reopened\t"):
+            with self.subTest(event=bad):
+                with self.assertRaises(SystemExit) as cm:
+                    self._state([[{"event": bad, "created_at": "2026-06-10T02:00:00Z"}]])
+                msg = str(cm.exception)
+                self.assertIn("normalising", msg)
+                self.assertIn("3559", msg)
+
     def test_it_refuses_a_timeline_entry_that_is_not_an_object(self):
         for bad in (None, 3, "closed", []):
             with self.subTest(entry=bad):
