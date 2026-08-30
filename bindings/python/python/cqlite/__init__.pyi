@@ -4,7 +4,7 @@ CQLite provides read-only access to Cassandra 5.0 SSTables without a cluster.
 """
 
 from pathlib import Path
-from typing import Iterator, Any
+from typing import Iterator, Any, Mapping
 from types import TracebackType
 
 # Version information
@@ -689,6 +689,81 @@ class Duration:
         """Sub-day component in nanoseconds (may be negative)."""
         ...
 
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
+    def __repr__(self) -> str: ...
+
+class Udt:
+    """A CQL user-defined-type value, with its type identity carried OUT OF BAND
+    (issue #3504).
+
+    A UDT used to be a plain ``dict`` holding ``_type`` and ``_keyspace``
+    alongside the UDT's own fields — one flat namespace shared by control markers
+    and user-controlled field names, markers written first. A field named
+    ``_type`` or ``_keyspace`` (legal CQL via a quoted identifier) therefore
+    OVERWROTE the marker and the type name became unrecoverable. Identity now
+    lives on the instance and :attr:`fields` holds nothing but declared fields, so
+    no field name can displace it.
+
+    Breaking change: read the type name as :attr:`type_name` and the keyspace as
+    :attr:`keyspace`. ``udt["_type"]`` now reaches a FIELD of that name and raises
+    ``KeyError`` when the UDT declares none — that is the removed shared channel.
+
+    Mapping access is retained and delegates to :attr:`fields`, so ``udt["street"]``,
+    ``"city" in udt``, ``len(udt)``, ``iter(udt)`` and ``keys``/``values``/``items``
+    all keep working.
+
+    Equality and hashing are over ``(keyspace, type_name, fields)``, so two UDTs of
+    different declared types with identical fields are distinct. Hashing a UDT whose
+    field values are unhashable (a ``dict`` from a nested map) raises ``TypeError``,
+    exactly as a ``tuple`` containing a ``list`` does.
+
+    Attributes:
+        type_name: The declared UDT type name.
+        keyspace: The keyspace the UDT type is declared in.
+        fields: The declared fields, name -> value, as a read-only mapping.
+            Fields ONLY: no injected metadata entry ever appears here.
+    """
+
+    def __init__(self, type_name: str, keyspace: str, fields: dict[str, Any]) -> None: ...
+    @property
+    def type_name(self) -> str:
+        """The declared UDT type name."""
+        ...
+
+    @property
+    def keyspace(self) -> str:
+        """The keyspace the UDT type is declared in."""
+        ...
+
+    @property
+    def fields(self) -> Mapping[str, Any]:
+        """The declared fields, name -> value (fields only, no metadata).
+
+        A read-only ``types.MappingProxyType`` view of the internal mapping that
+        ``__hash__``/``__eq__`` read: handing out the mutable ``dict`` would let
+        ``udt.fields[k] = v`` move a ``Udt`` already used as a ``dict`` key out
+        of its hash bucket. Assignment raises ``TypeError``; take
+        ``dict(udt.fields)`` for a mutable copy.
+        """
+        ...
+
+    def keys(self) -> list[str]:
+        """Return the declared field names, in schema order."""
+        ...
+
+    def values(self) -> list[Any]:
+        """Return the declared field values, in schema order."""
+        ...
+
+    def items(self) -> list[tuple[str, Any]]:
+        """Return the declared (name, value) pairs, in schema order."""
+        ...
+
+    def __getitem__(self, key: str) -> Any: ...
+    def __contains__(self, key: object) -> bool: ...
+    def __iter__(self) -> Iterator[str]: ...
+    def __len__(self) -> int: ...
     def __eq__(self, other: object) -> bool: ...
     def __hash__(self) -> int: ...
     def __repr__(self) -> str: ...

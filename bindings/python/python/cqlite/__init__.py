@@ -38,6 +38,8 @@ from cqlite._cqlite import (
     StreamingIterator,
     # Exact temporal types (issue #1450)
     Duration,
+    # UDT with out-of-band type identity (issue #3504)
+    Udt,
     # Prepared statements
     PreparedStatement,
     # Statistics
@@ -87,6 +89,8 @@ __all__ = [
     "StreamingIterator",
     # Exact temporal types (issue #1450)
     "Duration",
+    # UDT with out-of-band type identity (issue #3504)
+    "Udt",
     # Prepared statements
     "PreparedStatement",
     # Statistics

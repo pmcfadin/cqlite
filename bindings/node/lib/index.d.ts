@@ -36,31 +36,58 @@ export interface Duration {
 }
 
 /**
- * User-Defined Type (UDT) value.
+ * User-Defined Type (UDT) value, with its type identity carried OUT OF BAND
+ * (issue #3504).
  *
- * UDTs are returned as plain objects with metadata fields:
- * - `_type`: The UDT type name
- * - `_keyspace`: The keyspace containing the UDT definition
- * - Additional properties for each field in the UDT
+ * UDTs are returned as plain objects with the type identity at the top level and
+ * the declared fields in their own nested namespace:
+ * - `typeName`: The UDT type name
+ * - `keyspace`: The keyspace containing the UDT definition
+ * - `fields`: The declared fields, name -> value, and nothing else
+ *
+ * **Breaking change.** A UDT used to be a flat object carrying `_type` and
+ * `_keyspace` alongside its own field names, markers written first — so a UDT
+ * field named `_type` or `_keyspace` (legal CQL via a quoted identifier)
+ * OVERWROTE the marker and the type name became unrecoverable. This interface no
+ * longer declares an index signature: that signature is what permitted the
+ * collision. Migration: `result._type` becomes `result.typeName`, and a field is
+ * read as `result.fields.street` rather than `result.street`.
  *
  * @example
  * ```typescript
  * const address: UdtValue = {
- *   _type: 'address',
- *   _keyspace: 'my_keyspace',
- *   street: '123 Main St',
- *   city: 'San Francisco',
- *   zip: '94102'
+ *   typeName: 'address',
+ *   keyspace: 'my_keyspace',
+ *   fields: {
+ *     street: '123 Main St',
+ *     city: 'San Francisco',
+ *     zip: '94102'
+ *   }
  * };
  * ```
  */
 export interface UdtValue {
-  /** UDT type name */
-  _type: string;
+  /** UDT type name — never read from, or displaced by, a field name */
+  typeName: string;
   /** Keyspace containing the UDT definition */
-  _keyspace: string;
-  /** UDT fields (additional properties) */
-  [field: string]: Value;
+  keyspace: string;
+  /**
+   * The UDT's declared fields, name -> value. Fields ONLY: no metadata entry.
+   *
+   * The object has a **null prototype** (`Object.create(null)`), so no field
+   * name can reach an inherited accessor: a field named `__proto__` — legal CQL
+   * via a quoted identifier — is an ordinary own property here, whereas on a
+   * plain object an assignment to that name would call `Object.prototype`'s
+   * `__proto__` setter and silently discard the field (issue #3504).
+   *
+   * Every read shape behaves identically (indexing, `in`, `Object.keys`,
+   * `Object.entries`, spread, destructuring, `JSON.stringify`). The one
+   * difference: `Object.prototype` methods are NOT inherited, so use
+   * `Object.hasOwn(fields, name)` (or `Object.prototype.hasOwnProperty.call`)
+   * rather than `fields.hasOwnProperty(name)` — which is the correct form for a
+   * name-keyed bag anyway.
+   */
+  fields: Record<string, Value>;
 }
 
 /**
@@ -84,7 +111,7 @@ export interface UdtValue {
  * | list, tuple | `Value[]` |
  * | set | `Set<Value>` |
  * | map | `Map<Value, Value>` |
- * | udt | `UdtValue` object |
+ * | udt | `UdtValue` object (`{ typeName, keyspace, fields }`) |
  * | frozen<T> | unwrapped inner type |
  *
  * @example

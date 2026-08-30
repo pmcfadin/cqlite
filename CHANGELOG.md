@@ -77,6 +77,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (both bindings): a UDT's type identity is carried OUT OF BAND, so a
+  UDT field named `_type`/`_keyspace` displaces nothing (#3504).** Both bindings
+  rendered a UDT as ONE flat namespace holding the injected type identity and the
+  UDT's own declared field names, markers written first — `udt_to_py` did
+  `set_item("_type")`, `set_item("_keyspace")`, then `set_item(field.name)`, and
+  `udt_to_object` did the identical thing. A UDT that DECLARES a field named
+  `_type` or `_keyspace` (legal CQL via a quoted identifier) therefore silently
+  **overwrote** the marker, and the type name became unrecoverable from the
+  result; a NULL such field nulled it outright. That is a control marker placed in
+  a namespace the data controls, so the fix removes the channel rather than
+  picking a rarer marker.
+
+  - **Python**: a UDT is now a `cqlite.Udt` (frozen `#[pyclass]`, exported from
+    the module and declared in `__init__.pyi`) with `type_name` / `keyspace` /
+    `fields`. The mapping protocol is retained and delegates to `fields`, so
+    `udt["street"]`, `"city" in udt`, `len(udt)`, `iter(udt)` and
+    `keys`/`values`/`items` keep working. `__eq__`/`__hash__` are over
+    `(keyspace, type_name, fields)`.
+  - **Node**: a UDT is now `{ typeName, keyspace, fields }`, with the declared
+    fields in the nested `fields` object. `interface UdtValue` loses its
+    `[field: string]: Value` index signature — that signature is what permitted
+    the collision. **`fields` has a NULL PROTOTYPE** (`Object.create(null)`):
+    a plain object's property assignment consults the prototype chain, so a UDT
+    field named `__proto__` — legal CQL via a quoted identifier, exactly like
+    `_type` — reached `Object.prototype`'s inherited accessor instead of becoming
+    a field (measured on the fixture: a string value VANISHED, a null value
+    REPLACED the field bag's prototype). Inheriting nothing removes that channel
+    for every name rather than special-casing one. Every read shape is unchanged
+    (indexing, `in`, `Object.keys`/`entries`, spread, `JSON.stringify`); the one
+    difference is that `fields.hasOwnProperty(...)` no longer exists — use
+    `Object.hasOwn(fields, name)`, which is the correct form for a name-keyed bag
+    regardless.
+  - **`value_to_hashable_key`'s `Udt` arm (Python)** projected a UDT to a
+    `frozenset` holding a pair for `_type`, one for `_keyspace`, then one per
+    field, so a field named `_type` produced a **duplicate** `_type` pair that
+    nothing deduped (measured on the new fixture: pair names
+    `['_keyspace', '_keyspace', '_type', '_type', 'real_field']`). It now emits a
+    `Udt` — exactly one entry per declared field, none for the metadata — and
+    identity participates in equality/hash, so two UDTs of different declared
+    types with identical fields remain distinct `dict` keys. `Tuple`/`Set` arms
+    are deliberately still absent (#3500).
+  - **Projection totality WIDENED as a side effect, measured rather than
+    assumed.** Because a `cqlite.Udt` is HASHABLE where the old `dict` was not, a
+    UDT reached through the arm-less `Tuple` fall-through in a hashed position now
+    reads successfully: `set<frozen<tuple<frozen<udt>, int>>>` and
+    `map<frozen<tuple<frozen<udt>, int>>, int>` both raised
+    `TypeError: unhashable type: 'dict'` before and now yield a `frozenset` /
+    `dict` keyed by `(Udt, …)`. `set<frozen<set<frozen<udt>>>>` still raises
+    `TypeError: unhashable type: 'list'`, unchanged, because a UDT-bearing set
+    renders as a Python `list` for CLI parity (#804) — a different cause. This is
+    NOT "#3500 is fixed": no arm was added. Boundary pinned by
+    `test_udt_collision.udt_hashable_shapes` in the fixture.
+
+  **Migration.** Python: `udt["_type"]` → `udt.type_name`, `udt["_keyspace"]` →
+  `udt.keyspace`, `isinstance(v, dict)` → `isinstance(v, cqlite.Udt)`; field
+  access is unchanged. Node: `result._type` → `result.typeName`,
+  `result._keyspace` → `result.keyspace`, `result.street` →
+  `result.fields.street`. Reading a marker out of the field namespace is the ONLY
+  thing that stops working, and that is the deliverable: `udt["_type"]` now
+  reaches a FIELD of that name (`KeyError` when none is declared) and
+  `result._type` is `undefined`.
+
+  Node's shape is a plain object and Python's a dedicated class because each
+  binding already had an established idiom for a value type (Python's
+  `cqlite.Duration` is a `#[pyclass]`; Node's `Duration` is a plain object, with
+  napi classes reserved for handles). The spelling differs by language convention
+  — PyO3 exposes snake_case, napi-rs camelCases — and the semantics are identical.
+
+  Subject: `test-data/fixtures/issue_3504/`, a **Cassandra 5.0.2-written** SSTable
+  declaring `CREATE TYPE collide ("_type" text, "_keyspace" text, "__proto__"
+  text, real_field int)` (Cassandra accepts all three as quoted identifiers). No pre-existing corpus fixture declared such a field, so the defect had
+  no test subject. The CLI is deliberately NOT changed here: its JSON writer still
+  injects `_type`, and it is the binding parity suites' comparison ORACLE — moving
+  an oracle in the same change as its subject is how a guard goes blind. Tracked
+  as a follow-up on #3504 and recorded in `docs/development/M4_spec.md` §5.3.
+
 - **Node binding (observable): a malformed `inet` cell is a typed `PARSE` error
   on BOTH read paths, and `execute()` no longer returns `null` for one
   (#1452).** Two defects found reviewing the shared-crate extraction:

@@ -1,0 +1,81 @@
+{
+  "issue": 3504,
+  "purpose": "Cross-binding UDT parity reference (spec udt-type-identity, AC3). The Python and Node suites each derive these facts from THEIR OWN binding output and assert equality against this one file, so the two surfaces are compared as DATA rather than by host type and cannot drift apart independently. Keys use the Node spelling; the Python binding exposes `type_name` for `typeName` (PyO3 exposes snake_case, napi-rs camelCases). That spelling difference is language convention; every fact below must be EQUAL in both.",
+  "sstables_root": "test-data/fixtures/issue_3504",
+  "schema": "test-data/schemas/issue-3504-udt-collision.cql",
+  "query": "SELECT * FROM test_udt_collision.udt_collide",
+  "note_on_proto_field": "The `__proto__` entries are ORDINARY DECLARED UDT FIELDS of the `collide`/`collide_twin` types, not JSON prototype trickery: `JSON.parse` and Python's `json` both create them as ordinary own keys (neither invokes a setter), so this file compares them like any other field. They exist because an ordinary JavaScript property assignment on a plain object reaches `Object.prototype`'s inherited `__proto__` accessor, which silently discarded such a field (string value) or replaced the object's prototype (null value) -- roborev R1-1 on #3504. The Node binding therefore builds its `fields` bag with a NULL PROTOTYPE. The Python side has no analogous hazard (a `dict` `__setitem__` consults no prototype chain), so the same field set is expected verbatim in both bindings.",
+  "note_on_paths": "Both paths are CHECKOUT-RELATIVE and resolved from the repo root with NO environment variable. Neither suite may route them through CQLITE_DATASETS_ROOT: the suites' corpus resolution is an either/or on that variable, and when it is set -- which every gate run does -- the checkout copy is never consulted, so a corpus-rooted fixture is invisible exactly where they run.",
+  "udts": {
+    "row1.c": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "user-supplied-type",
+        "_keyspace": "user-supplied-keyspace",
+        "__proto__": "user-supplied-proto",
+        "real_field": 42
+      }
+    },
+    "row1.p": {
+      "typeName": "plain",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "label": "no-colliding-field",
+        "real_field": 7
+      }
+    },
+    "row1.fcm_key": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "key-type-marker",
+        "_keyspace": "key-keyspace-marker",
+        "__proto__": "key-proto-marker",
+        "real_field": 100
+      }
+    },
+    "row1.ftm_key": {
+      "typeName": "collide_twin",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "key-type-marker",
+        "_keyspace": "key-keyspace-marker",
+        "__proto__": "key-proto-marker",
+        "real_field": 100
+      }
+    },
+    "row1.fs_0": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": "set-member-type",
+        "_keyspace": "set-member-keyspace",
+        "__proto__": "set-member-proto",
+        "real_field": 200
+      }
+    },
+    "row2.p": {
+      "typeName": "plain",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "label": "contrast-row",
+        "real_field": 8
+      }
+    },
+    "row3.c": {
+      "typeName": "collide",
+      "keyspace": "test_udt_collision",
+      "fields": {
+        "_type": null,
+        "_keyspace": "keyspace-field-only",
+        "__proto__": null,
+        "real_field": 0
+      }
+    }
+  },
+  "map_values": {
+    "row1.fcm_value": 3,
+    "row1.ftm_value": 4
+  }
+}

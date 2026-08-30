@@ -18,7 +18,8 @@ use cqlite_core::Value;
 /// - Temporal: Timestamp→datetime, Date→date, Time→int (nanoseconds since
 ///   midnight, lossless), Duration→[`Duration`] (exact months/days/nanos)
 /// - Collections: List→list, Set→frozenset, Map→dict, Tuple→tuple
-/// - Complex: Udt→dict, Varint→int, Decimal→decimal.Decimal
+/// - Complex: Udt→[`Udt`] (type identity out of band, issue #3504), Varint→int,
+///   Decimal→decimal.Decimal
 /// - Special: Tombstone→None, Frozen→unwrap
 pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     match value {
@@ -80,7 +81,8 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
 /// - Map → tuple of (key, value) tuples
 /// - Set → frozenset (elements recursively made hashable)
 /// - Frozen → unwrap and recurse
-/// - UDT → frozenset of (field_name, hashable_value) tuples (sorted by name)
+/// - UDT → [`Udt`] instance carrying the type identity out of band, with each
+///   field value recursively projected (issue #3504)
 /// - Other types → as-is (already hashable)
 ///
 /// Note: `SET<FROZEN<UDT>>` is handled at the `set_to_py` level by
@@ -112,51 +114,27 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
         Value::Frozen(inner) => {
             // Unwrap Frozen and recurse so that FROZEN<UDT> and FROZEN<collection>
             // are handled by the appropriate arm rather than falling through to
-            // value_to_py (which would return an unhashable dict for UDTs).
+            // value_to_py, whose conversions are not projected for hashability.
             value_to_hashable_key(py, inner)
         }
         Value::Udt(udt) => {
-            // UDT as a map/set key: represent as a frozenset of (name, value) tuples
-            // sorted by field name for deterministic ordering.
-            // Fields: _type, _keyspace, and all named fields (matching udt_to_py).
-            let mut pairs: Vec<PyObject> = Vec::with_capacity(udt.fields.len() + 2);
-
-            // _type and _keyspace metadata fields
-            let type_key = "_type".into_pyobject(py)?.into_any().unbind();
-            let type_val = udt
-                .type_name
-                .as_str()
-                .into_pyobject(py)?
-                .into_any()
-                .unbind();
-            pairs.push(PyTuple::new(py, [type_key, type_val])?.into_any().unbind());
-
-            let ks_key = "_keyspace".into_pyobject(py)?.into_any().unbind();
-            let ks_val = udt.keyspace.as_str().into_pyobject(py)?.into_any().unbind();
-            pairs.push(PyTuple::new(py, [ks_key, ks_val])?.into_any().unbind());
-
-            // Named fields (in schema order; sort by name for a stable hash)
-            let mut field_tuples: Vec<(&str, PyObject)> = udt
-                .fields
-                .iter()
-                .map(|f| {
-                    let v = match &f.value {
-                        Some(v) => value_to_hashable_key(py, v),
-                        None => Ok(py.None()),
-                    }?;
-                    Ok((f.name.as_str(), v))
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-
-            // Sort by field name so the frozenset hash is order-independent
-            field_tuples.sort_by_key(|(name, _)| *name);
-
-            for (name, val) in field_tuples {
-                let k = name.into_pyobject(py)?.into_any().unbind();
-                pairs.push(PyTuple::new(py, [k, val])?.into_any().unbind());
-            }
-
-            Ok(PyFrozenSet::new(py, &pairs)?.into_any().unbind())
+            // UDT as a map/set key (issue #3504): project to a `Udt` instance, so
+            // the type name and keyspace ride OUTSIDE the field namespace.
+            //
+            // The previous projection pushed a pair for `_type`, then one for
+            // `_keyspace`, then one per field, into a single `frozenset` — so a
+            // field named `_type` produced TWO `_type` pairs with different values
+            // and nothing deduped them. The pair set now holds exactly one entry
+            // per declared field and no metadata entry at all, while
+            // `Udt.__eq__`/`__hash__` keep the identity in the comparison, so two
+            // UDTs of different declared types with identical fields still hash
+            // differently and compare unequal.
+            //
+            // Field values are recursively projected, so a `Udt` reaching this
+            // position is hashable and usable as a `dict` key / set member.
+            // Totality is unchanged: `Tuple` and `Set` still have no arm here and
+            // still fall through to `value_to_py` (issue #3500).
+            Ok(build_udt(py, udt, value_to_hashable_key)?.into_any())
         }
         // Other types are already hashable or handled by value_to_py
         _ => value_to_py(py, value),
@@ -254,9 +232,210 @@ impl Duration {
     }
 }
 
-/// Register value-conversion types (the exact [`Duration`] class) on the module.
+/// A CQL user-defined-type value, with its **type identity carried out of band**
+/// (issue #3504).
+///
+/// Before this type, a UDT was rendered as a plain `dict` holding `_type` and
+/// `_keyspace` alongside the UDT's own fields — one flat namespace shared by
+/// control markers and user-controlled field names, with the markers written
+/// first. A UDT field named `_type` or `_keyspace` (legal CQL via a quoted
+/// identifier) therefore **overwrote** the marker and the type name became
+/// unrecoverable. Type identity now lives on the instance and the fields have a
+/// namespace of their own, so there is no slot to compete for.
+///
+/// Mapping access is retained (`udt["street"]`, `"city" in udt`, `len(udt)`,
+/// `iter(udt)`, `keys`/`values`/`items`) and delegates to [`method@Self::fields`], so
+/// ordinary field access is unchanged. `udt["_type"]` now reaches the FIELD of
+/// that name, raising `KeyError` when no such field is declared — that is the
+/// removed shared channel, observable.
+///
+/// Equality and hashing are over `(keyspace, type_name, fields)`, so two UDTs of
+/// different declared types with identical fields stay distinct. Hashing a UDT
+/// whose field values are themselves unhashable (a `dict` from a nested map)
+/// raises `TypeError`, exactly as a tuple containing a list does; in the
+/// hashable-key projection ([`value_to_hashable_key`]) every field value has
+/// already been projected to a hashable form, so hashing succeeds there.
+#[pyclass(module = "cqlite", frozen)]
+pub struct Udt {
+    /// The declared UDT type name (e.g. `address`), never read from the fields.
+    #[pyo3(get)]
+    pub type_name: String,
+    /// The keyspace the UDT type is declared in, never read from the fields.
+    #[pyo3(get)]
+    pub keyspace: String,
+    /// The UDT's declared fields, name → value. This mapping holds ONLY fields:
+    /// no injected metadata entry can appear here, and no field can displace the
+    /// type identity above.
+    ///
+    /// NOT exposed with a derived `#[pyo3(get)]` — see the [`method@Self::fields`]
+    /// getter for why that would break the hash invariant.
+    pub fields: Py<PyDict>,
+}
+
+#[pymethods]
+impl Udt {
+    /// Construct a `Udt` from its type identity and its field mapping.
+    ///
+    /// `fields` is COPIED, so a later mutation of the caller's dict cannot change
+    /// this value's equality or hash.
+    #[new]
+    fn new(type_name: String, keyspace: String, fields: &Bound<'_, PyDict>) -> PyResult<Self> {
+        Ok(Udt {
+            type_name,
+            keyspace,
+            fields: fields.copy()?.unbind(),
+        })
+    }
+
+    /// The declared fields, name → value, as a READ-ONLY mapping.
+    ///
+    /// A derived `#[pyo3(get)]` would hand out a new reference to the very
+    /// `dict` that [`Self::__hash__`] and [`Self::__eq__`] read, so
+    /// `udt.fields["z"] = 1` would move a `Udt` already used as a `dict` key out
+    /// of its hash bucket and make it unretrievable — the class is declared
+    /// `frozen` and documented as usable as a `dict` key, so that hole
+    /// contradicts its own contract. `__new__` copies the caller's `dict`, which
+    /// protects the value from the CONSTRUCTOR's argument but not from this
+    /// accessor.
+    ///
+    /// `types.MappingProxyType` is chosen over returning a fresh `dict` copy
+    /// because a copy would ACCEPT the write and silently discard it — a
+    /// permissive no-op that reads as success — whereas the proxy REFUSES it
+    /// with `TypeError`, making the immutability the class advertises
+    /// observable. It is also O(1) rather than O(fields) per access, and every
+    /// read shape callers use (`udt.fields[k]`, `dict(udt.fields)`,
+    /// `.items()`/`.keys()`/`.values()`, `in`, `len`, iteration, `==` against a
+    /// plain `dict`) works identically on a `mappingproxy`. Callers that need a
+    /// mutable mapping take `dict(udt.fields)` explicitly.
+    #[getter]
+    fn fields(&self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(py
+            .import("types")?
+            .getattr("MappingProxyType")?
+            .call1((self.fields.bind(py),))?
+            .unbind())
+    }
+
+    /// The value of the field named `key`, raising `KeyError` when the UDT
+    /// declares no such field.
+    ///
+    /// Delegates to `fields`, so `udt["_type"]` reaches a FIELD named `_type` —
+    /// never the type name.
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        Ok(self.fields.bind(py).as_any().get_item(key)?.unbind())
+    }
+
+    /// Whether the UDT declares a field named `key`.
+    fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        self.fields.bind(py).as_any().contains(key)
+    }
+
+    /// Iterate the declared field names, in schema order.
+    fn __iter__(&self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(self
+            .fields
+            .bind(py)
+            .as_any()
+            .try_iter()?
+            .into_any()
+            .unbind())
+    }
+
+    /// The number of declared fields — no injected entries are counted.
+    fn __len__(&self, py: Python<'_>) -> usize {
+        self.fields.bind(py).len()
+    }
+
+    /// The declared field names, in schema order.
+    fn keys(&self, py: Python<'_>) -> Py<PyList> {
+        self.fields.bind(py).keys().unbind()
+    }
+
+    /// The declared field values, in schema order.
+    fn values(&self, py: Python<'_>) -> Py<PyList> {
+        self.fields.bind(py).values().unbind()
+    }
+
+    /// The declared `(name, value)` pairs, in schema order.
+    fn items(&self, py: Python<'_>) -> Py<PyList> {
+        self.fields.bind(py).items().unbind()
+    }
+
+    /// Equality over `(keyspace, type_name, fields)`.
+    ///
+    /// The type identity participates, so two UDTs with identical fields but
+    /// different declared types are UNEQUAL — the property the previous
+    /// `frozenset` projection got from its injected metadata pairs, retained here
+    /// without putting metadata in the field namespace.
+    /// A non-`Udt` operand yields `NotImplemented`, NOT `False`, so Python falls
+    /// back to the other operand's reflected `__eq__` — a future cooperating type
+    /// (a UDT-shaped record from another library, a test double) can then
+    /// participate in the comparison. Returning `False` here would decide the
+    /// comparison unilaterally and silently.
+    fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+        let Ok(other) = other.downcast::<Udt>() else {
+            return Ok(py.NotImplemented());
+        };
+        let other = other.get();
+        let equal = self.type_name == other.type_name
+            && self.keyspace == other.keyspace
+            && self.fields.bind(py).as_any().eq(other.fields.bind(py))?;
+        Ok(equal.into_pyobject(py)?.to_owned().into_any().unbind())
+    }
+
+    /// Hash over `(keyspace, type_name, fields)`, consistent with `__eq__`.
+    ///
+    /// The field mapping is hashed as a `frozenset` of its items, so the hash is
+    /// independent of field order while still distinguishing different field
+    /// values. A field value that is itself unhashable propagates `TypeError`
+    /// from here rather than being silently dropped.
+    ///
+    /// Cost note: the `frozenset` is rebuilt on EVERY call, so hashing is
+    /// O(fields) with an allocation, not O(1) — nothing is cached because a
+    /// cached hash would have to be invalidated, and the fields `dict` is
+    /// internal but reachable by C-API callers. A hot UDT-keyed-map path should
+    /// start here (memoise into a `OnceCell<isize>` on the frozen instance).
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        let fields = PyFrozenSet::new(py, self.fields.bind(py).items().iter())?;
+        let identity = PyTuple::new(
+            py,
+            [
+                self.keyspace
+                    .as_str()
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
+                self.type_name
+                    .as_str()
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind(),
+                fields.into_any().unbind(),
+            ],
+        )?;
+        identity.hash()
+    }
+
+    /// A Python-`repr`-shaped rendering, e.g.
+    /// `Udt(type_name='address', keyspace='ks', fields={'street': '1 Main St'})`.
+    ///
+    /// The two strings are rendered by Python's own `repr` rather than Rust's
+    /// `{:?}`, so quoting and escaping match every other repr a caller sees.
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "Udt(type_name={}, keyspace={}, fields={})",
+            self.type_name.as_str().into_pyobject(py)?.repr()?,
+            self.keyspace.as_str().into_pyobject(py)?.repr()?,
+            self.fields.bind(py).as_any().repr()?
+        ))
+    }
+}
+
+/// Register value-conversion types (the exact [`Duration`] class and the
+/// out-of-band-identity [`Udt`] class) on the module.
 pub fn register_value(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Duration>()?;
+    m.add_class::<Udt>()?;
     Ok(())
 }
 
@@ -421,20 +600,24 @@ fn list_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
 /// Convert CQL set to Python frozenset (or list when elements contain UDTs).
 ///
 /// CQL SET semantics require unique, ordered elements. For scalar types, we
-/// return a Python `frozenset` (immutable, hashable, set-semantic). However,
-/// `dict` objects are unhashable in Python, so `SET<FROZEN<UDT>>` columns
-/// cannot use `frozenset`. In that case we fall back to a `list`, which
-/// matches the CLI JSON output and is consistent with how the CLI renders
-/// SET-of-UDT (see epic #795 and issue #804).
+/// return a Python `frozenset` (immutable, hashable, set-semantic).
+/// `SET<FROZEN<UDT>>` falls back to a `list`, which matches the CLI JSON output
+/// and is consistent with how the CLI renders SET-of-UDT (see epic #795 and issue
+/// #804).
+///
+/// That fallback is RETAINED, and its reason has narrowed. It used to be forced:
+/// a UDT was an unhashable `dict`, so no `frozenset` was possible. Since issue
+/// #3504 a UDT is a [`Udt`], which IS hashable when its field values are, so the
+/// fallback is now a deliberate CLI-parity choice rather than a hard
+/// impossibility — changing it would change the observable shape of every
+/// `SET<FROZEN<UDT>>` column, which is out of #3504's scope.
 fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
     // Check whether any element is (or wraps) a UDT.
-    // UDT values become Python dicts, which are unhashable and cannot be
-    // placed in a frozenset.
     let has_udt = items.iter().any(contains_udt);
 
     if has_udt {
-        // Return a list so that each UDT element stays as a plain Python dict.
-        // This aligns with the CLI JSON representation of SET<FROZEN<UDT>>.
+        // Return a list of `Udt` values, aligning with the CLI JSON
+        // representation of SET<FROZEN<UDT>> (issue #804).
         let converted: Vec<PyObject> = items
             .iter()
             .map(|v| value_to_py(py, v))
@@ -452,8 +635,11 @@ fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
 /// Return `true` if `value` is or wraps a UDT value.
 ///
 /// Used by `set_to_py` to decide whether a `SET` should be returned as a
-/// `frozenset` (scalars, always hashable) or a `list` (UDT elements, whose
-/// dict representation is unhashable).
+/// `frozenset` (scalars) or a `list` (UDT elements, rendered as a list for CLI
+/// parity — issue #804).
+///
+/// Not total over `Value`: a UDT nested inside a `Tuple` or a `Set` element is not
+/// detected, which is issue #3500 and is neither fixed nor worsened by #3504.
 fn contains_udt(value: &Value) -> bool {
     match value {
         Value::Udt(_) => true,
@@ -482,21 +668,47 @@ fn tuple_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
     Ok(PyTuple::new(py, converted)?.into_any().unbind())
 }
 
-/// Convert UDT to Python dict with field names as keys.
+/// Convert a UDT to a [`Udt`], whose type identity is carried OUT OF BAND.
+///
+/// Issue #3504: this used to return a plain `dict` seeded with `_type` and
+/// `_keyspace` and then filled with the UDT's fields, so a field named `_type` or
+/// `_keyspace` — legal CQL via a quoted identifier — overwrote the marker and the
+/// type name became unrecoverable. The identity now lives on the instance and
+/// `fields` holds nothing but declared fields, so no field name can displace it
+/// and no marker can shadow a field.
 fn udt_to_py(py: Python<'_>, udt: &cqlite_core::UdtValue) -> PyResult<PyObject> {
-    let dict = PyDict::new(py);
-    // Add type metadata
-    dict.set_item("_type", &udt.type_name)?;
-    dict.set_item("_keyspace", &udt.keyspace)?;
-    // Add fields
+    Ok(build_udt(py, udt, value_to_py)?.into_any())
+}
+
+/// Build a [`Udt`] from `udt`, converting each field value with `convert`.
+///
+/// The two callers differ only in that conversion: [`udt_to_py`] uses
+/// [`value_to_py`], while [`value_to_hashable_key`]'s `Udt` arm uses itself, so
+/// the field values of a projected UDT are hashable. Sharing the construction
+/// keeps the two shapes identical by construction — the previous code built the
+/// dict and the frozenset independently, which is how the projection came to emit
+/// a DUPLICATE `_type` pair while `udt_to_py` merely overwrote one.
+fn build_udt(
+    py: Python<'_>,
+    udt: &cqlite_core::UdtValue,
+    convert: impl Fn(Python<'_>, &Value) -> PyResult<PyObject>,
+) -> PyResult<Py<Udt>> {
+    let fields = PyDict::new(py);
     for field in &udt.fields {
         let value = match &field.value {
-            Some(v) => value_to_py(py, v)?,
+            Some(v) => convert(py, v)?,
             None => py.None(),
         };
-        dict.set_item(&field.name, value)?;
+        fields.set_item(&field.name, value)?;
     }
-    Ok(dict.into_any().unbind())
+    Py::new(
+        py,
+        Udt {
+            type_name: udt.type_name.clone(),
+            keyspace: udt.keyspace.clone(),
+            fields: fields.unbind(),
+        },
+    )
 }
 
 /// Convert inet bytes to Python `ipaddress.IPv4Address` or `IPv6Address`.

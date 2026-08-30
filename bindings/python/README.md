@@ -305,7 +305,38 @@ CQL types are automatically converted to Python native types:
 | `map<K,V>` | `dict` |
 | `tuple<...>` | `tuple` |
 | `frozen<T>` | Unwrapped inner type |
-| UDT | `dict` with `_type` and `_keyspace` keys |
+| UDT | `cqlite.Udt` — `.type_name` / `.keyspace` / `.fields` (see below) |
+
+### UDT type identity is carried out of band
+
+A CQL user-defined type decodes to a `cqlite.Udt`:
+
+```python
+udt = row["address"]
+udt.type_name          # 'address_type'  — the declared UDT type
+udt.keyspace           # 'test_collections'
+udt.fields             # mappingproxy({'street': '1 Main St', 'city': 'SF'}) — declared fields ONLY
+udt["street"]          # mapping access, delegating to .fields
+"city" in udt, len(udt), sorted(udt.keys())
+```
+
+**Breaking change (issue #3504).** `_type` and `_keyspace` used to be *injected as dict keys*, i.e.
+into the same namespace as the UDT's own field names — so a UDT declaring a field named `_type` or
+`_keyspace` (legal CQL via a quoted identifier) silently **overwrote** the marker and the type name
+became unrecoverable. Migration:
+
+| Before | Now |
+|---|---|
+| `udt["_type"]` | `udt.type_name` |
+| `udt["_keyspace"]` | `udt.keyspace` |
+| `udt["street"]` | `udt["street"]` (unchanged) or `udt.fields["street"]` |
+| `isinstance(v, dict)` to spot a UDT | `isinstance(v, cqlite.Udt)` |
+
+`udt["_type"]` now reaches a FIELD of that name, raising `KeyError` when the UDT declares none.
+`Udt` is frozen, and equality/hashing are over `(keyspace, type_name, fields)`, so it can be used as
+a `dict` key whenever its field values are hashable. `udt.fields` is therefore a **read-only**
+`types.MappingProxyType` view: `udt.fields["z"] = 1` raises `TypeError` rather than moving a `Udt`
+already used as a key out of its hash bucket. Take `dict(udt.fields)` for a mutable copy.
 
 ### CQL `decimal` rendering policy
 

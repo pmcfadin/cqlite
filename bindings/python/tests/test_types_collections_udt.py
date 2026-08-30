@@ -10,13 +10,15 @@ Type Mapping (Collections):
     set<T>       | Value::Set         | frozenset
     map<K,V>     | Value::Map         | dict
     tuple<...>   | Value::Tuple       | tuple
-    udt          | Value::Udt         | dict (with _type, _keyspace)
+    udt          | Value::Udt         | cqlite.Udt (identity out of band)
     frozen<T>    | Value::Frozen      | unwrapped inner type
 
 Critical Behavior:
     - Map keys that are lists convert to tuples (hashability requirement)
     - Sets return frozenset (immutable, hashable)
-    - UDTs include _type and _keyspace metadata fields
+    - UDTs return `cqlite.Udt`: `.type_name`/`.keyspace` carry the type identity
+      OUT OF BAND (issue #3504) and `.fields` holds ONLY declared fields, so a
+      field named `_type`/`_keyspace` can no longer displace the metadata
 
 Tests use real SSTable data from test_collections keyspace.
 """
@@ -222,7 +224,7 @@ class TestUdtConversion:
     """Test CQL UDT to Python dict conversion."""
 
     def test_udt_conversion(self, db):
-        """UDT should return Python dict."""
+        """UDT should return a `cqlite.Udt` (issue #3504)."""
         result = db.execute(
             "SELECT addresses FROM test_collections.collections_with_udts LIMIT 10"
         )
@@ -233,14 +235,14 @@ class TestUdtConversion:
                 # addresses is LIST<FROZEN<address_type>>, each element is a UDT
                 udt = addresses[0]
                 found_udt = True
-                assert isinstance(udt, dict), (
-                    f"Expected dict for UDT, got {type(udt).__name__}"
+                assert isinstance(udt, cqlite.Udt), (
+                    f"Expected cqlite.Udt for UDT, got {type(udt).__name__}"
                 )
         if not found_udt:
             pytest.skip("No UDT values found in test data")
 
     def test_udt_has_type_metadata(self, db):
-        """UDT dict should have _type field with type name."""
+        """`Udt.type_name` carries the type name, out of the field namespace."""
         result = db.execute(
             "SELECT addresses FROM test_collections.collections_with_udts LIMIT 10"
         )
@@ -248,13 +250,15 @@ class TestUdtConversion:
             addresses = row.get("addresses")
             if addresses is not None and len(addresses) > 0:
                 udt = addresses[0]
-                assert "_type" in udt, "UDT should have _type metadata"
-                assert isinstance(udt["_type"], str)
+                assert isinstance(udt.type_name, str)
                 # Type name should be address_type
-                assert "address" in udt["_type"].lower()
+                assert "address" in udt.type_name.lower()
+                # ...and it is NOT reachable through the field namespace: the
+                # marker key is gone, which is the removed shared channel (#3504).
+                assert "_type" not in udt
 
     def test_udt_has_keyspace_metadata(self, db):
-        """UDT dict should have _keyspace field."""
+        """`Udt.keyspace` carries the keyspace, out of the field namespace."""
         result = db.execute(
             "SELECT addresses FROM test_collections.collections_with_udts LIMIT 10"
         )
@@ -262,8 +266,9 @@ class TestUdtConversion:
             addresses = row.get("addresses")
             if addresses is not None and len(addresses) > 0:
                 udt = addresses[0]
-                assert "_keyspace" in udt, "UDT should have _keyspace metadata"
-                assert isinstance(udt["_keyspace"], str)
+                assert isinstance(udt.keyspace, str)
+                assert udt.keyspace == "test_collections"
+                assert "_keyspace" not in udt
 
     def test_udt_field_access(self, db):
         """UDT fields should be accessible by name."""
@@ -281,6 +286,11 @@ class TestUdtConversion:
                 assert len(found_fields) > 0, (
                     f"Expected address fields, got keys: {udt.keys()}"
                 )
+                # Mapping access and `.fields` agree, and `len` counts fields only.
+                for name in found_fields:
+                    assert udt[name] == udt.fields[name]
+                    assert name in udt
+                assert len(udt) == len(udt.fields)
 
 
 class TestNestedCollections:
@@ -348,7 +358,7 @@ class TestNestedCollections:
             pytest.skip("No nested map of maps found in test data")
 
     def test_udt_in_list(self, db):
-        """LIST<FROZEN<udt>> should return list of dicts."""
+        """LIST<FROZEN<udt>> should return list of `cqlite.Udt`."""
         result = db.execute(
             "SELECT addresses FROM test_collections.collections_with_udts LIMIT 10"
         )
@@ -359,9 +369,9 @@ class TestNestedCollections:
                 found_udt_list = True
                 assert isinstance(addresses, list)
                 for addr in addresses:
-                    assert isinstance(addr, dict)
-                    # Should have UDT metadata
-                    assert "_type" in addr
+                    assert isinstance(addr, cqlite.Udt)
+                    # Type identity is on the instance, not among the fields
+                    assert addr.type_name
         if not found_udt_list:
             pytest.skip("No UDT list found in test data")
 
@@ -378,17 +388,18 @@ class TestNestedCollections:
                 assert isinstance(locations, dict)
                 for key, addr in locations.items():
                     # Key is DATE, value is address_type UDT
-                    assert isinstance(addr, dict)
-                    assert "_type" in addr
+                    assert isinstance(addr, cqlite.Udt)
+                    assert addr.type_name == "address_type"
         if not found_udt_map:
             pytest.skip("No UDT map found in test data")
 
     def test_udt_in_set(self, db):
-        """SET<FROZEN<udt>> should return list of dicts (issue #804).
+        """SET<FROZEN<udt>> should return a list of `cqlite.Udt` (issue #804).
 
-        UDT values are Python dicts which are unhashable and cannot be placed
-        in a frozenset.  The binding therefore returns a list when the set
-        element type is (or wraps) a UDT, matching the CLI JSON output.
+        The `list` fallback is retained for CLI JSON parity. Its original reason
+        (UDTs were unhashable `dict`s) no longer holds — `cqlite.Udt` is hashable
+        when its field values are (issue #3504) — but changing the shape of every
+        `SET<FROZEN<UDT>>` column is out of that issue's scope.
         """
         result = db.execute(
             "SELECT contacts FROM test_collections.collections_with_udts LIMIT 10"
@@ -403,11 +414,12 @@ class TestNestedCollections:
                     f"Expected list for SET<FROZEN<UDT>>, got {type(contacts).__name__}"
                 )
                 for contact in contacts:
-                    # Each element must be a dict (UDT)
-                    assert isinstance(contact, dict), (
-                        f"Expected dict for FROZEN<UDT> element, got {type(contact).__name__}"
+                    # Each element must be a `cqlite.Udt`
+                    assert isinstance(contact, cqlite.Udt), (
+                        f"Expected cqlite.Udt for FROZEN<UDT> element, "
+                        f"got {type(contact).__name__}"
                     )
-                    assert "_type" in contact, "UDT element should have _type metadata"
+                    assert contact.type_name == "contact_info"
         if not found_udt_set:
             pytest.skip("No SET<FROZEN<UDT>> values found in test data")
 
