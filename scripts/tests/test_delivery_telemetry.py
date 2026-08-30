@@ -588,6 +588,584 @@ class GateNotRunTests(unittest.TestCase):
         self.assertTrue(all(r["gate_runs"] >= 1 for r in legacy))
 
 
+# Sentinel for "omit this key entirely" — distinct from None, which is a MEASURED
+# never-closed stateReason. issue #3550.
+_OMIT = object()
+
+_U = "https://github.com/pmcfadin/cqlite/issues/3393"
+
+
+class SliceDeliveryTests(unittest.TestCase):
+    """issue #3550: a SLICE delivery — a merged PR shipping part of an issue that
+    DELIBERATELY stays OPEN (lead ruling on #3393).
+
+    `closed_at: null` IS the slice marker (total + derivable, so it is a definition, not an
+    inference), `--slice` is the explicit opt-in coupled both ways, and `cycle_time_s` is
+    then bounded by the PR's mergedAt — the authoritative terminal timestamp of a slice.
+    The refusal for the non-opted-in path is load-bearing: the previous message read as an
+    instruction to CLOSE the issue, which is exactly the forbidden workaround.
+    """
+
+    def setUp(self):
+        self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+
+    def _ghfields(self, tmp, closed_at, merged_at="2026-06-10T03:00:00Z", name="ghfields.json",
+                  state_reason="", closes_issues=(),
+                  issue_url="https://github.com/pmcfadin/cqlite/issues/3393"):
+        p = tmp / name
+        fields = {
+            "created_at": "2026-06-10T00:00:00Z",
+            "pr_opened_at": "2026-06-10T01:00:00Z",
+            "merged_at": merged_at,
+            "closed_at": closed_at,
+            "priority": "P1",
+            "routing": "oracle",
+        }
+        if state_reason is not _OMIT:
+            fields["state_reason"] = state_reason
+        if closes_issues is not _OMIT:
+            fields["closes_issues"] = closes_issues
+        if issue_url is not _OMIT:
+            fields["issue_url"] = issue_url
+        p.write_text(json.dumps(fields))
+        return str(p)
+
+    def _rec_argv(self, ledger, ghfields, *extra, issue=3393, pr=3467):
+        return ["record", "--ledger", str(ledger),
+                "--issue", str(issue), "--pr", str(pr), "--slug", "oom-loud-dead-lanes",
+                "--gate", "pass", "--gate-runs", "1",
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "0", "--rework", "0",
+                "--from-json", ghfields, *extra]
+
+    def _committed(self):
+        return json.loads(dt.DEFAULT_LEDGER.read_text().splitlines()[0])
+
+    def _distinct_basis_record(self):
+        """A schema-valid COMPLETED record whose two candidate bases DIFFER.
+
+        Non-degeneracy matters: a PR merge usually closes its issue, so most committed
+        records have closed_at == merged_at and both bases agree — a basis test built on one
+        of those would pass under either rule (it would assert nothing).
+        """
+        rec = self._committed()
+        rec.update({
+            "created_at": "2026-06-10T00:00:00Z",
+            "pr_opened_at": "2026-06-10T01:00:00Z",
+            "merged_at": "2026-06-10T03:00:00Z",
+            "closed_at": "2026-06-10T03:05:00Z",
+            "cycle_time_s": 11100,                              # created -> closed
+            "phase_s": {"to_pr_s": 3600, "review_s": 7200},
+        })
+        self.assertNotEqual(rec["closed_at"], rec["merged_at"], "degenerate basis fixture")
+        self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+        return rec
+
+    # ---- the minimal validator must understand a UNION type ------------------------
+    def test_type_ok_accepts_a_union_of_type_names(self):
+        self.assertTrue(dt._type_ok(None, ["string", "null"]))
+        self.assertTrue(dt._type_ok("2026-06-10T00:00:00Z", ["string", "null"]))
+        self.assertFalse(dt._type_ok(17, ["string", "null"]))
+        self.assertFalse(dt._type_ok(True, ["string", "null"]))
+        # a single type name keeps working exactly as before
+        self.assertTrue(dt._type_ok("x", "string"))
+        self.assertFalse(dt._type_ok("x", "integer"))
+
+    # ---- schema declares the nullable marker + its semantics ------------------------
+    def test_schema_declares_closed_at_nullable_and_still_required(self):
+        schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+        closed = schema["properties"]["closed_at"]
+        self.assertIsInstance(closed["type"], list, "closed_at is no longer a nullable union")
+        self.assertEqual(set(closed["type"]), {"string", "null"})
+        # the KEY stays required: null is the marker, absence is a malformed record
+        self.assertIn("closed_at", schema["required"])
+        self.assertIn("3550", closed["description"])
+        self.assertIn("slice", closed["description"].lower())
+
+    def test_validator_accepts_a_null_closed_at_slice_record(self):
+        rec = self._distinct_basis_record()
+        rec["closed_at"] = None
+        rec["cycle_time_s"] = 10800                             # created -> merged
+        self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+
+    def test_validator_still_rejects_an_absent_closed_at_key(self):
+        rec = self._committed()
+        del rec["closed_at"]
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("closed_at" in e for e in errors), errors)
+
+    def test_validator_still_rejects_a_wrong_typed_closed_at(self):
+        rec = self._committed()
+        rec["closed_at"] = 1749513600
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("closed_at" in e for e in errors), errors)
+
+    def test_validator_still_rejects_a_malformed_closed_at_string(self):
+        rec = self._committed()
+        rec["closed_at"] = "2026-06-10"      # date-only: no 'T', no offset
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("closed_at" in e for e in errors), errors)
+
+    # ---- cycle_time_s basis, cross-checked in BOTH directions -----------------------
+    def test_slice_cycle_time_must_use_the_merged_at_basis(self):
+        rec = self._distinct_basis_record()
+        rec["closed_at"] = None              # cycle_time_s still on the closed_at basis
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("cycle_time_s" in e and "merged_at" in e for e in errors), errors)
+
+    def test_completed_cycle_time_must_use_the_closed_at_basis(self):
+        rec = self._distinct_basis_record()
+        rec["cycle_time_s"] = 10800          # the SLICE basis on a closed issue
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("cycle_time_s" in e and "closed_at" in e for e in errors), errors)
+
+    def test_cycle_time_basis_check_tolerates_a_malformed_timestamp(self):
+        # a bad timestamp is already flagged by the generic walk; this check must not
+        # ALSO raise a confusing traceback out of validate_record.
+        rec = self._committed()
+        rec["created_at"] = "not-a-timestamp"
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(errors)
+
+    def test_every_committed_record_satisfies_the_cycle_time_basis(self):
+        checked = 0
+        for line in dt.DEFAULT_LEDGER.read_text().splitlines():
+            if not line.strip():
+                continue
+            checked += 1
+            errors: list = []
+            dt._validate_cycle_time_basis(json.loads(line), errors)
+            self.assertEqual(errors, [], f"committed record {checked}: {errors}")
+        self.assertGreater(checked, 0, "committed ledger is empty - this test would be vacuous")
+
+    # ---- CLI: --slice, coupled BOTH directions --------------------------------------
+    def test_record_slice_writes_null_closed_at_on_the_merged_at_basis(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main(self._rec_argv(ledger, self._ghfields(tmp, None), "--slice"))
+            self.assertEqual(rc, 0)
+            rec = json.loads(ledger.read_text().splitlines()[0])
+            self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+            self.assertIsNone(rec["closed_at"])
+            self.assertEqual(rec["cycle_time_s"], 10800)          # created -> merged (3h)
+            self.assertEqual(rec["phase_s"]["to_pr_s"], 3600)     # unchanged basis
+            self.assertEqual(rec["phase_s"]["review_s"], 7200)    # unchanged basis
+
+    def test_record_slice_refused_when_the_issue_is_closed_now(self):
+        """--slice asserts the issue was open AT DELIVERY TIME, which CURRENT state cannot
+        decide, so a closed issue is refused in BOTH timestamp orderings.
+
+        The second case is the one that matters: an auto-closing PR merges BEFORE GitHub
+        records the closure, so closed_at slightly AFTER merged_at is the NORMAL ordering of
+        an ordinary COMPLETED delivery. A `closed_at <= merged_at` guard was tried and would
+        have permitted --slice on essentially every ordinary delivery while looking like a
+        check (issue #3559).
+        """
+        for label, closed in (("closed before the merge", "2026-06-10T02:00:00Z"),
+                              ("auto-closed just after the merge", "2026-06-10T03:00:05Z"),
+                              ("closed long after the merge", "2026-07-01T00:00:00Z")):
+            with self.subTest(label), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(ledger, self._ghfields(tmp, closed), "--slice"))
+                msg = str(cm.exception)
+                self.assertIn("--slice", msg)
+                self.assertIn("CLOSED", msg)
+                # the refusal must route the genuine late-stamp case somewhere real, and must
+                # not invite the hand-append workaround
+                self.assertIn("3559", msg)
+                self.assertIn("hand-append", msg.lower())
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_slice_refused_when_the_issue_is_open_only_because_it_was_reopened(self):
+        """The mirror hazard, and the one --slice could get WRONG rather than refuse: a
+        REOPENED issue also has closed_at null, so an ordinary COMPLETED delivery stamped
+        after a reopen would be forced down the slice path and permanently mislabeled."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, state_reason="REOPENED"), "--slice"))
+            msg = str(cm.exception)
+            self.assertIn("REOPENED", msg)
+            self.assertIn("3559", msg)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_slice_refuses_an_unmeasured_state_reason(self):
+        """An ABSENT stateReason is unmeasured, which is not 'never closed' — it must not
+        inherit the permissive branch."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, state_reason=_OMIT), "--slice"))
+            self.assertIn("stateReason", str(cm.exception))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_slice_refuses_a_whitespace_only_state_reason(self):
+        """`.strip()` folded "   " onto "" — a MALFORMED value taking the AFFIRMATIVE
+        never-closed branch. gh emits "" and REST emits null; neither ever emits whitespace,
+        so a blank-but-non-empty string is unmeasured input, not a measurement."""
+        for blank in ("   ", "\t", "\n", " \t "):
+            with self.subTest(state_reason=blank), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(
+                        ledger, self._ghfields(tmp, None, state_reason=blank), "--slice"))
+                self.assertIn("neither", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_slice_refuses_an_unrecognised_state_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, state_reason="COMPLETED"), "--slice"))
+            self.assertIn("neither", str(cm.exception))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_slice_accepts_a_null_state_reason_as_never_closed(self):
+        """gh emits "" and the REST API emits null for a never-closed issue; both mean the
+        same thing and both must pass."""
+        for never_closed in ("", None):
+            with self.subTest(state_reason=never_closed), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                self.assertEqual(0, dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, state_reason=never_closed), "--slice")))
+                self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
+
+    def test_record_refused_in_the_merge_to_autoclose_window(self):
+        """The propagation window: GitHub records an auto-close AFTER the merge, so for a few
+        seconds an ordinary COMPLETED delivery presents EXACTLY as a never-closed issue —
+        closed_at null AND stateReason empty. Both other signals lie; the PR's own closing
+        declaration does not, because a slice pr closes NOTHING. Refused with or without
+        --slice: recording either way in that window files a wrong record."""
+        for extra in ((), ("--slice",)):
+            with self.subTest(slice_flag=bool(extra)), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                gh = self._ghfields(tmp, None, closes_issues=["https://github.com/pmcfadin/cqlite/issues/3393"])
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(ledger, gh, *extra))
+                msg = str(cm.exception)
+                self.assertIn("CLOSES https://github.com/pmcfadin/cqlite/issues/3393", msg)
+                self.assertIn("auto-close", msg)
+                self.assertIn("WITHOUT --slice", msg)
+                self.assertIn("3550", msg)
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_a_slice_pr_closes_nothing_so_the_window_guard_does_not_fire(self):
+        """The discriminator must not block a real slice. Verified against reality: PRs
+        #3407/#3429/#3467 (the three genuine #3393 slices) each declare no closing issue,
+        while PR #3565 (a completed delivery) declares #3550."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            self.assertEqual(0, dt.main(self._rec_argv(
+                ledger, self._ghfields(tmp, None, closes_issues=[]), "--slice")))
+            self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
+
+    def test_window_guard_ignores_an_unrelated_closing_reference(self):
+        """A PR closing some OTHER issue is not evidence about this one."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            self.assertEqual(0, dt.main(self._rec_argv(
+                ledger, self._ghfields(tmp, None,
+                       closes_issues=["https://github.com/pmcfadin/cqlite/issues/9999"]),
+                "--slice")))
+            self.assertIsNone(json.loads(ledger.read_text().strip())["closed_at"])
+
+    def test_record_refuses_a_malformed_closes_issues_value(self):
+        """Presence is not a measurement. `x or []` folds null/0/false/""/{} onto the
+        permissive "closes nothing", and the RAW `gh` shape [{"number": N}] does the same
+        while looking right — it is the likeliest hand-built --from-json mistake, since the
+        natural way to build that file is to paste `gh pr view --json` output. Every one of
+        these silently filed the false slice record the guard exists to prevent, and a
+        str/int tracebacked out of the `in` test."""
+        for bogus in (None, 0, False, "", {}, [{"url": _U}], "x", 3393, [True],
+                      [None], [3393], [""], ["   "]):
+            with self.subTest(closes_issues=bogus), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(
+                        ledger, self._ghfields(tmp, None, closes_issues=bogus), "--slice"))
+                self.assertIn("closes_issues", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_github_fields_refuses_a_malformed_closing_issues_reference(self):
+        """The live path must REFUSE a malformed reply, not silently filter it: discarding an
+        unreadable element shrinks the list toward "closes nothing", the permissive answer."""
+        for refs in (None, {}, "x", [{"title": "no url"}], [None], [{"url": 3550}],
+                     [{"url": True}], [{"url": ""}], [3550], [{"url": _U}, "junk"]):
+            with self.subTest(refs=refs):
+                def fake_run(argv, **kw):
+                    if argv[:3] == ["gh", "issue", "view"]:
+                        return _FakeProc(json.dumps({
+                            "createdAt": "2026-06-01T00:00:00Z", "closedAt": None,
+                            "labels": [{"name": "P1"}, {"name": "oracle"}],
+                            "stateReason": "",
+                    "url": "https://github.com/pmcfadin/cqlite/issues/1",
+                        }))
+                    return _FakeProc(json.dumps({
+                        "createdAt": "2026-06-01T00:30:00Z",
+                        "mergedAt": "2026-06-01T01:30:00Z",
+                        "closingIssuesReferences": refs}))
+
+                with mock.patch.object(dt.subprocess, "run", fake_run):
+                    with self.assertRaises(SystemExit) as cm:
+                        dt._github_fields(1, 2)
+                self.assertIn("closingIssuesReferences", str(cm.exception))
+
+    def test_record_refuses_an_unmeasured_closes_issues(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, closes_issues=_OMIT), "--slice"))
+            self.assertIn("closingIssuesReferences", str(cm.exception))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_github_fields_refuses_an_absent_closing_issues_references(self):
+        """`.get` would map an absent field to None -> "closes nothing" -> the window guard
+        silently disabled. Absence must be a named refusal, like stateReason's."""
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z", "closedAt": None,
+                    "labels": [{"name": "P1"}, {"name": "oracle"}],
+                    "stateReason": "",
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            with self.assertRaises(SystemExit) as cm:
+                dt._github_fields(1, 2)
+        self.assertIn("closingIssuesReferences", str(cm.exception))
+
+    def test_record_refuses_a_malformed_falsy_state_reason(self):
+        """`(state_reason or "")` would fold False/0/[] onto the never-closed answer — the
+        truthiness shape this issue keeps re-finding, one level down from closed_at."""
+        for bogus in (False, 0, [], {}):
+            with self.subTest(state_reason=bogus), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(
+                        ledger, self._ghfields(tmp, None, state_reason=bogus), "--slice"))
+                self.assertIn("stateReason", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_reopened_issue_without_slice_is_routed_to_the_timeline_not_to_the_flag(self):
+        """Classification is a property of the ISSUE, not of the flag, so it is decided before
+        the coupling. Otherwise a reopened issue is told to pass --slice and the next
+        invocation refuses it, bouncing the operator between two refusals."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, state_reason="REOPENED")))
+            msg = str(cm.exception)
+            self.assertIn("REOPENED", msg)
+            self.assertIn("3559", msg)
+            self.assertNotIn("Pass --slice", msg)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_refuses_a_date_only_or_tz_naive_timestamp(self):
+        """_parse_ts accepts both, and both then raise TypeError out of the cycle-time
+        subtraction — so parseability is not the property worth asserting; being a full
+        instant is. Checked for EVERY authoritative timestamp, not just closed_at."""
+        for field, bad in (("closed_at", "2026-06-10"),
+                           ("closed_at", "2026-06-10T04:00:00"),
+                           ("merged_at", "2026-06-10"),
+                           ("merged_at", "2026-06-10T03:00:00")):
+            with self.subTest(field=field, value=bad), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                kwargs = {"closed_at": "2026-06-10T04:00:00Z"}
+                kwargs[field] = bad
+                argv = self._rec_argv(ledger, self._ghfields(
+                    tmp, kwargs["closed_at"], merged_at=kwargs.get("merged_at",
+                                                                   "2026-06-10T03:00:00Z")))
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(argv)
+                self.assertIn(field, str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_refuses_a_truthy_non_string_timestamp(self):
+        """_parse_ts calls .endswith() on its argument, so a truthy non-string raises
+        AttributeError — neither of the exceptions _require_full_timestamp catches, so it
+        would escape as the very traceback that helper exists to prevent. The falsy half is
+        already covered by the presence checks; this is the truthy half."""
+        for field, bogus in (("merged_at", 1780000000), ("merged_at", ["2026-06-10"]),
+                             ("closed_at", {"at": "2026-06-10"}), ("closed_at", 17)):
+            with self.subTest(field=field, value=bogus), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                gh = tmp / "gh.json"
+                fields = {
+                    "created_at": "2026-06-10T00:00:00Z",
+                    "pr_opened_at": "2026-06-10T01:00:00Z",
+                    "merged_at": "2026-06-10T03:00:00Z",
+                    "closed_at": "2026-06-10T04:00:00Z",
+                    "priority": "P1", "routing": "oracle", "state_reason": "",
+                }
+                fields[field] = bogus
+                gh.write_text(json.dumps(fields))
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(ledger, str(gh)))
+                self.assertIn(field, str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_refuses_an_absent_closed_at_key(self):
+        """The KEY carries the measurement; its absence is unmeasured, never a slice."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            gh = tmp / "gh.json"
+            gh.write_text(json.dumps({
+                "created_at": "2026-06-10T00:00:00Z",
+                "pr_opened_at": "2026-06-10T01:00:00Z",
+                "merged_at": "2026-06-10T03:00:00Z",
+                "priority": "P1", "routing": "oracle",
+            }))
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(ledger, str(gh), "--slice"))
+            self.assertIn("absent", str(cm.exception))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_refuses_a_falsy_non_null_closed_at(self):
+        """A truthiness read would accept "" / 0 / False as authoritative null and write a
+        valid-looking slice record. Only None or a timestamp string is a measurement."""
+        for bogus in ("", "   ", 0, False, []):
+            with self.subTest(closed_at=bogus), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(ledger, self._ghfields(tmp, bogus), "--slice"))
+                self.assertIn("closed_at", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_rejects_an_unparseable_closed_at_rather_than_tracebacking(self):
+        """An unparseable closed_at is refused BEFORE any slice/completed classification —
+        with or without --slice — so it can never reach cycle_time_s's arithmetic and surface
+        as a bare ValueError traceback instead of a named bad invocation."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(ledger, self._ghfields(tmp, "not-a-timestamp"),
+                                       "--slice"))
+            self.assertIn("not a parseable RFC-3339", str(cm.exception))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(ledger, self._ghfields(tmp, "not-a-timestamp")))
+            self.assertIn("not a parseable RFC-3339", str(cm.exception))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_without_slice_refused_when_the_issue_is_open(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(ledger, self._ghfields(tmp, None)))
+            msg = str(cm.exception)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+            # the refusal must be ACTIONABLE: it names the sanctioned path...
+            self.assertIn("--slice", msg)
+            self.assertIn("open", msg.lower())
+            # ...names BOTH forbidden workarounds...
+            self.assertIn("3550", msg)
+            self.assertIn("forbidden", msg.lower())
+            self.assertRegex(msg.lower(), r"clos\w+ the issue")
+            self.assertIn("hand-append", msg.lower())
+            self.assertIn("jsonl", msg.lower())
+            # ...and must NOT read as an instruction to close the issue.
+            self.assertNotIn("records only a merged, closed issue", msg)
+
+    def test_slice_does_not_relax_the_other_authoritative_timestamps(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(tmp, None, merged_at=None), "--slice"))
+            self.assertIn("merged_at", str(cm.exception))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_slice_record_round_trips_through_record_then_lint(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            self.assertEqual(
+                dt.main(self._rec_argv(ledger, self._ghfields(tmp, None), "--slice")), 0)
+            # a SECOND slice of the SAME open issue under a NEW pr is a legitimate cycle
+            self.assertEqual(
+                dt.main(self._rec_argv(ledger, self._ghfields(tmp, None), "--slice", pr=3429)), 0)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 0, out.getvalue())
+            self.assertIn("OK", out.getvalue())
+
+    # ---- retro must not read slices as completed issues -----------------------------
+    def test_aggregate_counts_slice_records_informationally(self):
+        completed = self._committed()
+        sliced = dict(completed)
+        sliced["closed_at"] = None
+        self.assertEqual(dt.aggregate([completed])["slice_records"], 0)
+        self.assertEqual(dt.aggregate([sliced])["slice_records"], 1)
+        self.assertEqual(dt.aggregate([completed, sliced])["slice_records"], 1)
+
+    def test_slice_records_carries_no_retro_weight(self):
+        self.assertNotIn("slice_records", dt.RETRO_WEIGHTS)
+        tally = dt.aggregate([{**self._committed(), "closed_at": None}])
+        self.assertNotIn("slice_records", [row[0] for row in dt.rank(tally)])
+
+    def test_retro_reports_the_slice_class_distinctly(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            lines = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()
+            completed = json.loads(lines[0])
+            sliced = json.loads(lines[1])
+            sliced["closed_at"] = None
+            sliced["cycle_time_s"] = dt._seconds_between(sliced["created_at"], sliced["merged_at"])
+            ledger.write_text(json.dumps(completed) + "\n" + json.dumps(sliced) + "\n")
+            _, errors = dt.load_ledger(ledger, SCHEMA)
+            self.assertEqual(errors, [])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = dt.main(["retro", "--ledger", str(ledger),
+                              "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+            self.assertEqual(rc, 0)
+            text = out.getvalue()
+            self.assertIn("SLICE", text)
+            self.assertIn("3550", text)
+            self.assertIn("separate deliveries", text)
+
+    def test_retro_says_nothing_about_slices_on_an_all_completed_ledger(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = dt.main(["retro", "--ledger", str(FIXTURES / "sample-ledger.jsonl"),
+                          "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("SLICE", out.getvalue())
+
+
 class LintTests(unittest.TestCase):
     def test_clean_ledger_passes(self):
         rc = dt.main(["lint", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
@@ -751,17 +1329,22 @@ class GhPathTests(unittest.TestCase):
     def test_github_fields_builds_argv_and_maps_json(self):
         def fake_run(argv, **kw):
             if argv[:3] == ["gh", "issue", "view"]:
-                self.assertIn("createdAt,closedAt,labels", argv)
+                self.assertIn("createdAt,closedAt,labels,stateReason,url", argv)
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:00:00Z",
                     "closedAt": "2026-06-01T02:00:00Z",
                     "labels": [{"name": "P1"}, {"name": "oracle"}],
+                    "stateReason": "COMPLETED",
+                    "url": "https://github.com/pmcfadin/cqlite/issues/1234",
                 }))
             if argv[:3] == ["gh", "pr", "view"]:
-                self.assertIn("createdAt,mergedAt", argv)
+                self.assertIn("createdAt,mergedAt,closingIssuesReferences", argv)
                 return _FakeProc(json.dumps({
                     "createdAt": "2026-06-01T00:30:00Z",
                     "mergedAt": "2026-06-01T01:30:00Z",
+                    "closingIssuesReferences": [
+                        {"number": 1234,
+                         "url": "https://github.com/pmcfadin/cqlite/issues/1234"}],
                 }))
             raise AssertionError(f"unexpected argv: {argv}")
 
@@ -773,6 +1356,34 @@ class GhPathTests(unittest.TestCase):
         self.assertEqual(fields["merged_at"], "2026-06-01T01:30:00Z")
         self.assertEqual(fields["priority"], "P1")
         self.assertEqual(fields["routing"], "oracle")  # explicit label, not inferred
+        # the live path must ALWAYS supply state_reason: --slice refuses when the key is
+        # absent, so omitting it here would make every real slice stamp fail (issue #3550)
+        self.assertEqual(fields["state_reason"], "COMPLETED")
+        self.assertEqual(fields["closes_issues"],
+                         ["https://github.com/pmcfadin/cqlite/issues/1234"])
+        self.assertEqual(fields["issue_url"],
+                         "https://github.com/pmcfadin/cqlite/issues/1234")
+
+    def test_github_fields_refuses_an_absent_state_reason_rather_than_nulling_it(self):
+        """A `.get` would map an ABSENT stateReason (a gh/API change, an older gh) to None,
+        which _assert_never_closed reads as affirmative proof the issue was NEVER closed —
+        an unmeasured signal inheriting the permissive answer, i.e. the guard defeating
+        itself. Absence must be a named refusal."""
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": None,
+                    "labels": [{"name": "P1"}, {"name": "oracle"}],
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
+                "closingIssuesReferences": []}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            with self.assertRaises(SystemExit) as cm:
+                dt._github_fields(1, 2)
+        self.assertIn("stateReason", str(cm.exception))
 
     def test_github_fields_raises_on_multiple_priority_labels(self):
         def fake_run(argv, **kw):
@@ -783,7 +1394,8 @@ class GhPathTests(unittest.TestCase):
                     "labels": [{"name": "P1"}, {"name": "P2"}],  # invariant violation
                 }))
             return _FakeProc(json.dumps({
-                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
+                "closingIssuesReferences": []}))
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit):
@@ -796,9 +1408,12 @@ class GhPathTests(unittest.TestCase):
                     "createdAt": "2026-06-01T00:00:00Z",
                     "closedAt": "2026-06-01T02:00:00Z",
                     "labels": [{"name": "P2"}, {"name": "design"}],
+                    "stateReason": "COMPLETED",
+                    "url": "https://github.com/pmcfadin/cqlite/issues/1234",
                 }))
             return _FakeProc(json.dumps({
-                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
+                "closingIssuesReferences": []}))
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             fields = dt._github_fields(1, 2)
@@ -814,7 +1429,8 @@ class GhPathTests(unittest.TestCase):
                     "labels": [{"name": "P2"}, {"name": "oracle"}, {"name": "design"}],
                 }))
             return _FakeProc(json.dumps({
-                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
+                "closingIssuesReferences": []}))
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit):
@@ -1030,6 +1646,44 @@ class StandardValidatorCouplingTests(unittest.TestCase):
             errors = list(self.validator.iter_errors(json.loads(line)))
             self.assertEqual(errors, [], f"committed record {checked} no longer validates: {errors}")
         self.assertGreater(checked, 0, "committed ledger is empty - this test would be vacuous")
+
+
+@unittest.skipUnless(_jsonschema is not None,
+                     "jsonschema not installed; the nullable closed_at is unverifiable here")
+class StandardValidatorSliceTests(unittest.TestCase):
+    """issue #3550: the nullable `closed_at` must hold under a STANDARD Draft 2020-12
+    validator too — the published schema is consumed by third parties, not only by this
+    repo's minimal subset validator (which is exactly the one that cannot see a union type
+    it does not implement).
+    """
+
+    def setUp(self):
+        self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+        self.validator = _Draft202012Validator(self.schema)
+        self.base = json.loads(dt.DEFAULT_LEDGER.read_text().splitlines()[0])
+
+    def _valid(self, closed_at):
+        rec = dict(self.base)
+        rec["closed_at"] = closed_at
+        return not list(self.validator.iter_errors(rec))
+
+    def test_schema_is_still_a_valid_draft_2020_12_schema(self):
+        _Draft202012Validator.check_schema(self.schema)
+
+    def test_standard_validator_accepts_a_null_closed_at(self):
+        self.assertTrue(self._valid(None))
+
+    def test_standard_validator_still_accepts_a_timestamp_closed_at(self):
+        self.assertTrue(self._valid("2026-08-29T12:00:00Z"))
+
+    def test_standard_validator_still_rejects_a_wrong_typed_closed_at(self):
+        self.assertFalse(self._valid(1749513600))
+        self.assertFalse(self._valid(True))
+
+    def test_standard_validator_still_requires_the_closed_at_key(self):
+        rec = dict(self.base)
+        del rec["closed_at"]
+        self.assertTrue(list(self.validator.iter_errors(rec)))
 
 
 if __name__ == "__main__":
