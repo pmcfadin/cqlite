@@ -566,10 +566,10 @@ What it guarantees:
   linger, or disk is low — it waits, it never spins. A **per-LANE** lock makes a second supervisor in the same
   **lane** refuse to start, while leaving other lanes on the box free (per-machine until #3393 retracted
   one-worker-per-machine; the default lock path is scoped to the lane's checkout root). **While the
-  fleet's checkouts are mid-upgrade, a lane whose lock path is DERIVED (no explicit `SUPERVISOR_LOCK`)
-  also checks whether the PRE-#3467 machine-global lock
-  `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock` EXISTS (#3549)**, because the two paths are invisible
-  to each other and a supervisor from an older checkout would otherwise co-run in the same worktree.
+  fleet's checkouts are mid-upgrade, EVERY supervisor start also checks whether the PRE-#3467
+  machine-global lock `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock` EXISTS (#3549)**, because the two
+  paths are invisible to each other and a supervisor from an older checkout would otherwise co-run in
+  the same worktree. **There is no opt-out — see "no way to skip it", below.**
   **The guard DETECTS that path and stops there — it does not open, read, enumerate or inspect it.**
   It answers exactly one question, in three values:
   - **present** (anything at that name, including a symlink, including a dangling one) → the start
@@ -632,16 +632,21 @@ What it guarantees:
   move it in ONE `rename(2)`) needs GNU-only `RENAME_NOREPLACE`/`mv -T` and this script supports macOS,
   so it was available and declined; the rationale is recorded in full at the guard.
 
-  **An explicit `SUPERVISOR_LOCK` skips the check — and it is documented HERE, not in the refusal
-  (#3549).** Naming the lock yourself takes the placement decision explicitly, which is why the guard
-  only ever runs on the DERIVED default; the corollary is that setting it is also a way to BYPASS the
-  guard, so it is not something a refusal message may suggest. No refusal path mentions it (it once
-  did, in a generic remedy line printed by every state, which told an operator whose start had been
-  refused *because a legacy lock is there* to start anyway — the exact collision the guard exists to
-  prevent). Before you set it to get past a refusal: overriding is only safe if you have independently
-  established that the two supervisors cannot share a worktree, e.g. you are deliberately placing this
-  lane's lock somewhere no other launcher on the box can reach. The refusals offer exactly two
-  remedies, and neither is this one: stop the pre-#3467 supervisor, or upgrade that checkout to #3467+.
+  **There is NO WAY TO SKIP IT, and `SUPERVISOR_LOCK` is not one (#3549, lead ruling 2026-08-30).**
+  The guard used to be skipped whenever you named the lock yourself, on the reasoning that you had
+  taken the placement decision. **That exemption is removed as unsound**, and the proof is one
+  sentence: an explicit `SUPERVISOR_LOCK` renames *our* lock, while a pre-#3467 supervisor uses the
+  machine-global path **regardless** — it has never heard of the variable — so the skip switched the
+  check off in exactly the case where the collision is still **live**. It conflated a naming choice
+  with an isolation guarantee. `SUPERVISOR_LOCK` remains fully supported for what it legitimately
+  does: **choosing where this lane's own lock lives**. It has no effect on this check, on any run.
+  No refusal path mentions it either (one once did, in a generic remedy line printed by every state,
+  which told an operator whose start had just been refused *because a legacy lock is there* how to
+  start anyway — the exact collision the guard exists to prevent). The refusals offer exactly two
+  remedies, and both are real: **stop the pre-#3467 supervisor, or upgrade that checkout to #3467+.**
+  If you need a lane to start while that path is occupied and you have independently established that
+  no pre-#3467 supervisor can run on the box, the action is to remove the path (order matters — see
+  the read-only inspection line above), not to look for a variable.
 
   **It is a STARTUP check, not machine-global exclusion: it REDUCES the collision window, it does not
   eliminate it** — a pre-#3467 supervisor that starts *after* the check cannot be stopped without
