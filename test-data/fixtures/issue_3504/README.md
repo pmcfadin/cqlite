@@ -8,10 +8,12 @@ declares one, so the defect had no test subject.
 
 ## Why it lives here and not in `test-data/datasets/sstables/`
 
-`bindings/python/tests/conftest.py` and `bindings/node/__test__/setup.js` resolve
-the dataset corpus from `CQLITE_DATASETS_ROOT` and **never fall back to the
-checkout**, so anything committed under `test-data/datasets/sstables/` is
-invisible on a box where that env var is set — i.e. on every gate run. This
+`bindings/python/tests/conftest.py` (`:42-48`) and `bindings/node/__test__/setup.js`
+(`:23`) resolve the dataset corpus as an **either/or on `CQLITE_DATASETS_ROOT`**:
+with the variable unset they *do* use the checkout's `test-data/datasets`. But
+**when it is set — which every gate run does — the checkout copy is never
+consulted**, so anything committed under `test-data/datasets/sstables/` is
+invisible exactly where these suites run. This
 directory is checkout-relative, so no env var can hide it. Precedent:
 `cqlite-core/tests/fixtures/issue_2225/`.
 

@@ -26,10 +26,11 @@ marker of its own — the non-colliding `p` cell dumps as
 `{"label": ..., "real_field": 7}` — so the authoritative reference tool already
 keeps type identity out of the field namespace, which is what this change does.
 
-WHY THIS FILE RESOLVES ITS OWN PATHS. `conftest.DATASETS` comes from
-`CQLITE_DATASETS_ROOT` and never falls back to the checkout, so a fixture reached
-through it would be INVISIBLE on any box with that variable set — i.e. on every
-gate run. The fixture is committed checkout-relative and is resolved from
+WHY THIS FILE RESOLVES ITS OWN PATHS. `conftest.DATASETS` is an EITHER/OR on
+`CQLITE_DATASETS_ROOT` (`conftest.py:42-48`): unset, it DOES fall back to the
+checkout's `test-data/datasets/sstables`. But when the variable IS set — which
+every gate run does — the checkout copy is never consulted, so a fixture reached
+through `DATASETS` would be INVISIBLE exactly where it has to run. The fixture is committed checkout-relative and is resolved from
 `PROJECT_ROOT` with no environment variable. `PROJECT_ROOT`/`SCHEMAS` are
 themselves checkout-derived in `conftest`, so importing them introduces no env
 dependency.

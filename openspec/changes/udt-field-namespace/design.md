@@ -129,10 +129,13 @@ evidence behind it:
   (`binding-rust-tests`, which never SKIPs), but `udt_to_object` needs a `ConvCtx` holding a live napi
   `Env`, and an `Env` cannot be fabricated off-thread — the suite's own comments say it exists to test
   Env-free helpers only.
-- **A corpus-rooted fixture is invisible to the binding suites.** `conftest.py` and `helpers.js` take
-  the corpus from `CQLITE_DATASETS_ROOT` and never fall back to the checkout, so anything committed
-  under `test-data/datasets/sstables/` is unreachable on a box where that env is set — i.e. on every
-  gate run. Hence the fixture is committed **checkout-relative**, on the
+- **A corpus-rooted fixture is invisible to the binding suites.** `bindings/python/tests/conftest.py`
+  (`:42-48`) and `bindings/node/__test__/setup.js` (`:23`) are an EITHER/OR on
+  `CQLITE_DATASETS_ROOT`: with the variable UNSET they DO fall back to the checkout's
+  `test-data/datasets`. But **when it is set — which every gate run does — the checkout copy is never
+  consulted**, so anything committed under `test-data/datasets/sstables/` is unreachable there. (An
+  earlier draft of this bullet said the two "never fall back to the checkout", which is false as
+  stated; the conclusion is unchanged, because the env var is set on every run that matters.) Hence the fixture is committed **checkout-relative**, on the
   `cqlite-core/tests/fixtures/issue_2225/` precedent, where no env var can hide it.
 
 So the collision assertions live in `bindings/python/tests/*.py` (`python-bindings`) and

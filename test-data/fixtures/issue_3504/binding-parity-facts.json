@@ -4,7 +4,7 @@
   "sstables_root": "test-data/fixtures/issue_3504",
   "schema": "test-data/schemas/issue-3504-udt-collision.cql",
   "query": "SELECT * FROM test_udt_collision.udt_collide",
-  "note_on_paths": "Both paths are CHECKOUT-RELATIVE and resolved from the repo root with NO environment variable. Neither suite may route them through CQLITE_DATASETS_ROOT: that root never falls back to the checkout, so an env-rooted fixture is invisible on every gate run.",
+  "note_on_paths": "Both paths are CHECKOUT-RELATIVE and resolved from the repo root with NO environment variable. Neither suite may route them through CQLITE_DATASETS_ROOT: the suites' corpus resolution is an either/or on that variable, and when it is set -- which every gate run does -- the checkout copy is never consulted, so a corpus-rooted fixture is invisible exactly where they run.",
   "udts": {
     "row1.c": {
       "typeName": "collide",

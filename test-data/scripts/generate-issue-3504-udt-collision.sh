@@ -25,11 +25,12 @@
 # The fixture is written CHECKOUT-RELATIVE to
 #   test-data/fixtures/issue_3504/<keyspace>/<table>-<uuid>/
 # and NOT under test-data/datasets/sstables/. Reason: both binding test suites
-# (bindings/python/tests/conftest.py, bindings/node/__test__/setup.js) resolve
-# the dataset corpus from CQLITE_DATASETS_ROOT and never fall back to the
-# checkout, so a corpus-rooted fixture is INVISIBLE on any box where that env is
-# set — i.e. on every gate run. A checkout-relative path cannot be hidden by an
-# env var. Precedent: cqlite-core/tests/fixtures/issue_2225/.
+# (bindings/python/tests/conftest.py:42-48, bindings/node/__test__/setup.js:23)
+# resolve the dataset corpus as an EITHER/OR on CQLITE_DATASETS_ROOT: unset, they
+# DO fall back to the checkout's test-data/datasets. But when it IS set -- which
+# every gate run does -- the checkout copy is never consulted, so a corpus-rooted
+# fixture is INVISIBLE exactly where these suites run. A checkout-relative path
+# cannot be hidden by an env var. Precedent: cqlite-core/tests/fixtures/issue_2225/.
 #
 # The fixture root is itself an "sstables root" — it directly contains the
 # KEYSPACE directory — so a consumer opens it exactly the way the dataset tests

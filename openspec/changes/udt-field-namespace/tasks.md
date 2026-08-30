@@ -43,9 +43,10 @@ the fix. **Cassandra-written, not CQLite-written**, and committed **checkout-rel
 - [x] 4.2 Commit the SSTable components with `git add -f` (`*.db` is gitignored; force-adding tiny
   parity references is mandated doctrine) under a **checkout-relative per-issue** directory on the
   `cqlite-core/tests/fixtures/issue_2225/` precedent — NOT under `test-data/datasets/sstables/`.
-  **Why:** `bindings/python/tests/conftest.py` and `bindings/node/__test__/helpers.js` resolve the
-  corpus from `CQLITE_DATASETS_ROOT` and never fall back to the checkout, so a corpus-rooted fixture
-  is invisible on any box with that env set — which is every gate run. A checkout-relative path
+  **Why:** `bindings/python/tests/conftest.py` and `bindings/node/__test__/setup.js` resolve the
+  corpus as an EITHER/OR on `CQLITE_DATASETS_ROOT` — unset, they do use the checkout; **set, which
+  every gate run does, the checkout copy is never consulted** — so a corpus-rooted fixture is
+  invisible on any box with that env set, which is every gate run. A checkout-relative path
   cannot be hidden by an env var. Commit the `.cql` schema alongside.
 - [x] 4.3 Record the sstabledump JSONL golden for the new table.
 

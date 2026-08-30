@@ -20,10 +20,11 @@
  * buggy injection, so physical-dump parity is blind to this defect. The oracle is
  * the spec's required shape, asserted at the binding surface below.
  *
- * WHY THIS FILE RESOLVES ITS OWN PATHS: `global.testPaths.SSTABLES_DIR` derives
- * from `CQLITE_DATASETS_ROOT` and never falls back to the checkout, so a fixture
- * reached through it is INVISIBLE on any box with that variable set — i.e. on
- * every gate run. The fixture is committed checkout-relative and resolved from
+ * WHY THIS FILE RESOLVES ITS OWN PATHS: `global.testPaths.SSTABLES_DIR` is an
+ * EITHER/OR on `CQLITE_DATASETS_ROOT` (`setup.js:23`) — unset, it DOES fall back
+ * to the checkout's `test-data/datasets`. But when the variable IS set, which
+ * every gate run does, the checkout copy is never consulted, so a fixture
+ * reached through it would be INVISIBLE exactly where it has to run. The fixture is committed checkout-relative and resolved from
  * `PROJECT_ROOT` with no environment variable, so it also does NOT depend on
  * `DATASETS_AVAILABLE` and must never be skipped: every path here is
  * git-committed source, so absence is a broken checkout, not a skippable
