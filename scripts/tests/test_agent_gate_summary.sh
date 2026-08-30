@@ -4400,7 +4400,85 @@ else
   ok "1699-pol-census: the census states how many targets are excusable, out of how many, and the one shape that earns it"
 fi
 
-ASSERT_FLOOR=382
+# ============================================================================
+# ISSUE #1465: node-bindings' LEAK LANE is skippable under the #2078 opt-out, so its
+# three-state decision + the SUMMARY note it produces need regression coverage. The
+# hook (`--node-leak-lane`) is pure: it echoes the decision and the note text, no
+# cargo, no npm, no network. Reuses the #2078 dummy roots above.
+#
+# Why the NOTE TEXT and not just the exit code: all three states exit 0, so a
+# pass/fail assertion cannot tell them apart — which is the same "a bare red is not
+# evidence" rule the rest of this suite is built on.
+# ============================================================================
+
+# 1465a. The defect this guard was rewritten for: AGENT_GATE_ALLOW_MISSING_FIXTURES=1
+#        with the corpus PRESENT must still RUN the lane. Keying the skip on the env
+#        var alone dropped the issue's only merge-gating execution on any run with a
+#        stale export, and the SUMMARY said nothing.
+nll_present=$(CQLITE_DATASETS_ROOT="$ds_corpus" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
+  bash "$GATE" --node-leak-lane 2>/dev/null)
+if [ "$(printf '%s\n' "$nll_present" | grep '^STATUS:' | sed 's/^STATUS: //')" = RUN ] \
+   && printf '%s\n' "$nll_present" | grep -q '^NOTE: node-bindings-leak-lane: RAN'; then
+  ok "1465-optout-with-corpus: opt-out var set but corpus PRESENT → RUN + a RAN note"
+else
+  bad "1465-optout-with-corpus: expected STATUS RUN + a RAN note"
+  echo "------- captured -------"; printf '%s\n' "$nll_present"; echo "------------------------"
+fi
+
+# 1465b. The legitimate opt-out: corpus ABSENT + the var → skip the lane, and SAY SO
+#        in the block (the note must state that the budgets did NOT run).
+nll_optout=$(CQLITE_DATASETS_ROOT="$ds_nocorpus" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
+  bash "$GATE" --node-leak-lane 2>/dev/null)
+if [ "$(printf '%s\n' "$nll_optout" | grep '^STATUS:' | sed 's/^STATUS: //')" = SKIP-OPTOUT ] \
+   && printf '%s\n' "$nll_optout" | grep -q '^NOTE: node-bindings-leak-lane: SKIPPED' \
+   && printf '%s\n' "$nll_optout" | grep -q 'did NOT run'; then
+  ok "1465-optout: corpus absent + opt-out → SKIP-OPTOUT + a note saying the budgets did NOT run"
+else
+  bad "1465-optout: expected STATUS SKIP-OPTOUT + a SKIPPED note naming the gap"
+  echo "------- captured -------"; printf '%s\n' "$nll_optout"; echo "------------------------"
+fi
+
+# 1465c. Corpus absent WITHOUT the opt-out: the strict answer is RUN — #2078's
+#        preflight has already failed the run closed, so the lane decision must never
+#        be the thing that silently drops coverage.
+nll_absent=$(CQLITE_DATASETS_ROOT="$ds_nocorpus" bash "$GATE" --node-leak-lane 2>/dev/null)
+if [ "$(printf '%s\n' "$nll_absent" | grep '^STATUS:' | sed 's/^STATUS: //')" = RUN ] \
+   && printf '%s\n' "$nll_absent" | grep -q '^NOTE: node-bindings-leak-lane: RAN'; then
+  ok "1465-absent-no-optout: corpus absent, no opt-out → RUN (the fail-closed answer)"
+else
+  bad "1465-absent-no-optout: expected STATUS RUN (the strict answer)"
+  echo "------- captured -------"; printf '%s\n' "$nll_absent"; echo "------------------------"
+fi
+
+# 1465d. The note vocabulary is CLOSED and single-sourced: every state the component
+#        can write must render a distinct, non-UNKNOWN line. NOT-REACHED (an earlier
+#        step failed) and NO-PASSING-TESTS (jest exited 0 with nothing passing) are
+#        execution outcomes, so they are not reachable through the pure decision hook
+#        — they are asserted here at the text level, which is what keeps a future
+#        state from silently falling through the UNKNOWN arm (one already did).
+nll_vocab_ok=1
+for _st in RUN SKIP-OPTOUT NO-NODE NOT-REACHED NO-PASSING-TESTS; do
+  _line=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note "$2"' _ "$GATE" "$_st" 2>/dev/null)
+  case "$_line" in
+    "node-bindings-leak-lane: "*) : ;;
+    *) nll_vocab_ok=0; echo "  state '$_st' rendered: '$_line'" ;;
+  esac
+  case "$_line" in
+    *UNKNOWN*) nll_vocab_ok=0; echo "  state '$_st' fell through to the UNKNOWN arm" ;;
+  esac
+done
+_unknown_line=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note "$2"' _ "$GATE" "SOMETHING-NEW" 2>/dev/null)
+case "$_unknown_line" in
+  *"UNKNOWN state 'SOMETHING-NEW'"*) : ;;
+  *) nll_vocab_ok=0; echo "  an unrecognised state did NOT report itself: '$_unknown_line'" ;;
+esac
+if [ "$nll_vocab_ok" -eq 1 ]; then
+  ok "1465-note-vocab: all five states render a distinct note, and an unrecognised state reports itself"
+else
+  bad "1465-note-vocab: the note vocabulary is not closed (see above)"
+fi
+
+ASSERT_FLOOR=386
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
