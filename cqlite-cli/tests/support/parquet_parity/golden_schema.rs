@@ -40,6 +40,16 @@
 //!   * every timestamp-bearing field (`liveness_info.tstamp`, a cell `tstamp`,
 //!     `marked_deleted`, `local_delete_time`) is written by `dateString(...)`,
 //!     which is why each is [`Rule::Timestamp`] rather than [`Rule::Text`].
+//!     `dateString` returns `Instant.ofEpochSecond(secs, nanos).toString()` —
+//!     i.e. `DateTimeFormatter.ISO_INSTANT` over `java.time` — and THAT, not
+//!     whatever the shared parser tolerates, is the grammar
+//!     [`strict_timestamp_micros`] enforces: a zero-padded 4-digit-year
+//!     proleptic-Gregorian date, hour <= 23, minute <= 59, second <= 59
+//!     (`java.time` models NO leap seconds, 86 400 s/day, so `:60` is
+//!     unwritable), a fraction of at most microsecond precision, and the `Z`
+//!     designator. `dateString`'s other branch — sstabledump's `--raw-time` —
+//!     writes a BARE INTEGER with no `Z`, which this harness does not consume
+//!     and therefore refuses.
 //!   * `liveness_info` always carries `tstamp`; a cell tombstone's
 //!     `deletion_info` always carries `local_delete_time` (and only a complex
 //!     deletion also carries `marked_deleted`).
@@ -83,10 +93,24 @@ pub enum Rule {
     AnyJson,
     /// A JSON string whose content is unconstrained.
     Text,
-    /// A JSON string that MUST parse under the CANONICAL parser's OWN timestamp
-    /// grammar — literally `canonical_jsonl::parse_timestamp_micros`, the very
-    /// function the parser calls, so the validator and the parser can never hold
-    /// two different notions of a valid timestamp.
+    /// A JSON string that MUST be a timestamp `sstabledump` could have WRITTEN
+    /// — judged by [`strict_timestamp_micros`] BEFORE the shared parser is asked
+    /// anything, and then cross-checked against
+    /// `canonical_jsonl::parse_timestamp_micros`, which must yield the SAME
+    /// instant.
+    ///
+    /// Asking the shared parser ALONE was the defect (#1490 round 17):
+    /// **delegating validation to a lenient parser is not validation.** That
+    /// parser NORMALIZES rather than refuses, so a `Some` from it establishes
+    /// only that SOME instant could be produced — `2025-01-01T24:00:00Z` yields
+    /// the same µs as `2025-01-02T00:00:00Z`, a 7th fractional digit is
+    /// truncated away, and `2025-02-30` is a real date to it — and an instant
+    /// produced from a malformed spelling compares EQUAL to a correct export,
+    /// which is a FALSE PASS. So the SPELLING is judged here and the parser is
+    /// then required to AGREE: the two can still never hold different notions of
+    /// what instant a golden denotes, and the strictness runs in the only safe
+    /// direction (this pass may REFUSE a spelling the parser would have
+    /// normalized; it may never ACCEPT one the parser cannot reproduce).
     Timestamp,
     /// A JSON integer.
     Integer,
@@ -310,10 +334,26 @@ fn check_value(
             let text = value
                 .as_str()
                 .ok_or_else(|| present_but_invalid(owner, field.key, "a JSON string", value))?;
-            if parse_timestamp_micros(text).is_none() {
-                return Err(unparseable_timestamp(owner, field.key, text));
+            // The SPELLING first, against `ISO_INSTANT` as `JsonTransformer`
+            // writes it — never by asking the lenient parser whether it managed
+            // to produce something.
+            let micros = strict_timestamp_micros(text)
+                .map_err(|why| malformed_timestamp(owner, field.key, text, &why))?;
+            // Then the AGREEMENT, re-established at every field of every golden
+            // rather than asserted once in a test: the instant this pass accepts
+            // is the instant the canonical parser will read.
+            match parse_timestamp_micros(text) {
+                Some(parsed) if parsed == micros => Ok(()),
+                Some(parsed) => Err(timestamp_disagreement(
+                    owner, field.key, text, micros, parsed,
+                )),
+                None => Err(malformed_timestamp(
+                    owner,
+                    field.key,
+                    text,
+                    "it satisfies this pass's ISO_INSTANT grammar yet the canonical parser yields                      `None` for it, so the two disagree about whether it is a timestamp at all",
+                )),
             }
-            Ok(())
         }
         Rule::Integer => {
             if value.is_i64() || value.is_u64() {
@@ -417,6 +457,239 @@ fn subject_named(template: &str, subject: Option<&str>) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// The timestamp SPELLING
+// ---------------------------------------------------------------------------
+//
+// Authority: Cassandra 5.0.8 `JsonTransformer.dateString`, read at the pinned
+// tag —
+//
+//     long secs   = from.toSeconds(time);
+//     long offset = Math.floorMod(from.toNanos(time), 1000_000_000L);
+//     return Instant.ofEpochSecond(secs, offset).toString();
+//
+// `Instant.toString()` is `DateTimeFormatter.ISO_INSTANT`, so EVERY timestamp in
+// EVERY committed golden was written by that formatter. What it can and cannot
+// write is therefore what a well-formed golden can and cannot say — decided
+// here, from Cassandra's writer, never from what CQLite's own parser happens to
+// tolerate (#3041: CQLite is not format authority for CQLite).
+
+/// The instant `text` denotes, or WHY it is not a timestamp `sstabledump` could
+/// have written.
+///
+/// Every component is range- and calendar-checked BEFORE any arithmetic, and
+/// every step of the arithmetic is checked, so no out-of-range spelling can be
+/// normalized — or overflowed — into a plausible instant.
+fn strict_timestamp_micros(text: &str) -> Result<i64, String> {
+    let body = text.strip_suffix('Z').ok_or_else(|| {
+        "it does not end in the `Z` UTC designator `ISO_INSTANT` always writes (a BARE INTEGER \
+         with no `Z` is what sstabledump's `--raw-time` emits, and this harness does not consume \
+         such a dump)"
+            .to_string()
+    })?;
+    // `ISO_INSTANT` writes `T`; the real sstabledump output in the committed
+    // corpus writes a space. Accept exactly those two, tried in the SAME order
+    // the canonical parser tries them, so the two can never split one string
+    // differently.
+    let (date_part, time_part) = body
+        .split_once('T')
+        .or_else(|| body.split_once(' '))
+        .ok_or_else(|| {
+            "it has no date/time separator — neither the `T` of `ISO_INSTANT` nor the space real \
+             sstabledump writes"
+                .to_string()
+        })?;
+
+    let (year, month, day) = strict_date(date_part)?;
+    let (hour, minute, second, frac_micros) = strict_time(time_part)?;
+
+    let days = days_since_epoch_checked(year, month, day).ok_or_else(|| {
+        format!("the date {date_part:?} is outside the range of an epoch instant")
+    })?;
+    let micros = days
+        .checked_mul(86_400)
+        .and_then(|s| s.checked_add(hour * 3_600 + minute * 60 + second))
+        .and_then(|s| s.checked_mul(1_000_000))
+        .and_then(|us| us.checked_add(frac_micros))
+        .ok_or_else(|| {
+            "the instant it denotes overflows epoch microseconds; the harness refuses it rather \
+             than let a wrapped value read as a plausible instant"
+                .to_string()
+        })?;
+    Ok(micros)
+}
+
+/// `YYYY-MM-DD`, zero-padded, and a date that EXISTS.
+fn strict_date(date_part: &str) -> Result<(i64, i64, i64), String> {
+    let parts: Vec<&str> = date_part.split('-').collect();
+    let [y, m, d] = parts[..] else {
+        return Err(format!(
+            "its date {date_part:?} is not the three `-`-separated fields `YYYY-MM-DD` \
+             `ISO_INSTANT` writes (it has {})",
+            parts.len()
+        ));
+    };
+    // A 4-digit year is what `ISO_INSTANT` writes for years 1000..=9999; outside
+    // that it writes a SIGNED, EXPANDED year (`+10000-01-01T00:00:00Z`), which no
+    // committed golden carries and which this harness refuses rather than
+    // reinterpret. Fixed widths also refuse `2025-1-1`, which the shared parser's
+    // `str::parse` would have accepted.
+    let year = strict_field(y, 4, "year", date_part)?;
+    let month = strict_field(m, 2, "month", date_part)?;
+    let day = strict_field(d, 2, "day", date_part)?;
+    if !(1..=12).contains(&month) {
+        return Err(format!(
+            "its month {month} is out of range (`ISO_INSTANT` writes 01..=12)"
+        ));
+    }
+    let last = days_in_month(year, month);
+    if !(1..=last).contains(&day) {
+        return Err(format!(
+            "its day {day} does not exist: {year}-{month:02} has {last} days. `java.time`'s \
+             `IsoChronology` is the proleptic Gregorian calendar, so a non-leap February has 28 \
+             days and no month has 31 unconditionally — a date that does not exist cannot have \
+             been written by `Instant.toString()`, and the shared parser would have rolled it \
+             forward into a real instant that compares EQUAL to a correct export"
+        ));
+    }
+    Ok((year, month, day))
+}
+
+/// `HH:MM:SS[.f{1,6}]`, zero-padded, every component in range.
+fn strict_time(time_part: &str) -> Result<(i64, i64, i64, i64), String> {
+    let (hms, frac) = match time_part.split_once('.') {
+        Some((h, f)) => (h, Some(f)),
+        None => (time_part, None),
+    };
+    let parts: Vec<&str> = hms.split(':').collect();
+    let [h, m, sec] = parts[..] else {
+        return Err(format!(
+            "its time {time_part:?} is not the three `:`-separated fields `HH:MM:SS` \
+             `ISO_INSTANT` writes (it has {})",
+            parts.len()
+        ));
+    };
+    let hour = strict_field(h, 2, "hour", time_part)?;
+    let minute = strict_field(m, 2, "minute", time_part)?;
+    let second = strict_field(sec, 2, "second", time_part)?;
+    if hour > 23 {
+        return Err(format!(
+            "its hour {hour} is out of range. `Instant.toString()` never writes an hour above 23, \
+             and the shared parser does not refuse one — it NORMALIZES it, so \
+             `2025-01-01T24:00:00Z` yields exactly the µs of `2025-01-02T00:00:00Z` and a \
+             malformed golden compares EQUAL to a correct export"
+        ));
+    }
+    if minute > 59 {
+        return Err(format!(
+            "its minute {minute} is out of range (`ISO_INSTANT` writes 00..=59)"
+        ));
+    }
+    // NO leap second. `dateString` builds an `Instant`, and `java.time` models a
+    // day as exactly 86 400 seconds (`Instant`'s epoch-second scale has no leap
+    // seconds at all), so `ISO_INSTANT` cannot write `:60`. A `:60` spelling is
+    // therefore a malformed golden, not a leap second — and the shared parser
+    // would have normalized it into the following minute.
+    if second > 59 {
+        return Err(format!(
+            "its second {second} is out of range. `java.time` models no leap seconds — an \
+             `Instant`'s day is exactly 86 400 seconds — so `Instant.toString()` cannot write \
+             `:60`, and the shared parser would have rolled it into the following minute"
+        ));
+    }
+    let frac_micros = match frac {
+        None => 0,
+        Some(f) => strict_fraction(f)?,
+    };
+    Ok((hour, minute, second, frac_micros))
+}
+
+/// A sub-second fraction, in microseconds.
+///
+/// At most SIX digits: this oracle compares at microsecond resolution (Cassandra
+/// writetimes are `TimeUnit.MICROSECONDS`), and the shared parser silently
+/// TRUNCATES a 7th digit — so `…00.1234567Z` would have compared equal to
+/// `…00.123456Z`. A golden carrying more precision than can be represented is
+/// malformed, not roundable.
+fn strict_fraction(frac: &str) -> Result<i64, String> {
+    if frac.is_empty() {
+        return Err(
+            "it ends the seconds with a `.` and no digits, which `ISO_INSTANT` never writes"
+                .to_string(),
+        );
+    }
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "its sub-second fraction {frac:?} is not all ASCII digits"
+        ));
+    }
+    if frac.len() > 6 {
+        return Err(format!(
+            "its sub-second fraction {frac:?} carries {} digits, more than the SIX this oracle \
+             compares at (Cassandra writetimes are `TimeUnit.MICROSECONDS`). The shared parser \
+             TRUNCATES the extra digits, so the golden would have compared EQUAL to the \
+             microsecond-truncated export — a golden carrying unrepresentable precision is \
+             malformed, not roundable",
+            frac.len()
+        ));
+    }
+    // Right-pad to exactly 6 digits: lossless, because the fraction is at most 6
+    // digits long. (`.06` is 60 000 µs, the same instant as `.060000`.)
+    let padded = format!("{frac:0<6}");
+    padded
+        .parse::<i64>()
+        .map_err(|e| format!("its sub-second fraction {frac:?} is not a number: {e}"))
+}
+
+/// One fixed-width, all-ASCII-digit component.
+fn strict_field(text: &str, width: usize, what: &str, whole: &str) -> Result<i64, String> {
+    if text.len() != width || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "its {what} {text:?} (in {whole:?}) is not {width} ASCII digits; `ISO_INSTANT` writes \
+             every component zero-padded to a fixed width, whereas the shared parser's \
+             `str::parse` would also have accepted an unpadded, signed or space-prefixed \
+             spelling"
+        ));
+    }
+    text.parse::<i64>()
+        .map_err(|e| format!("its {what} {text:?} is not a number: {e}"))
+}
+
+/// Days in a proleptic-Gregorian month (`java.time`'s `IsoChronology`).
+/// `month` is already validated to 1..=12; the fallthrough keeps the function
+/// total rather than panicking.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Days from 1970-01-01 for an ALREADY-VALIDATED proleptic-Gregorian date, every
+/// step checked (Howard Hinnant's `days_from_civil`).
+fn days_since_epoch_checked(year: i64, month: i64, day: i64) -> Option<i64> {
+    let y = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
+    let era = (if y >= 0 { y } else { y.checked_sub(399)? }) / 400;
+    let yoe = y.checked_sub(era.checked_mul(400)?)?;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe
+        .checked_mul(365)?
+        .checked_add(yoe / 4)?
+        .checked_sub(yoe / 100)?
+        .checked_add(doy)?;
+    era.checked_mul(146_097)?
+        .checked_add(doe)?
+        .checked_sub(719_468)
+}
+
+// ---------------------------------------------------------------------------
 // The refusals
 // ---------------------------------------------------------------------------
 
@@ -469,16 +742,46 @@ fn non_string_component(owner: &str, key: &str, index: usize, got: &Value) -> St
     )
 }
 
-/// A timestamp-bearing field that IS a string but does not PARSE.
-fn unparseable_timestamp(owner: &str, key: &str, got: &str) -> String {
+/// A timestamp-bearing field that IS a string but is not a timestamp
+/// `sstabledump` could have WRITTEN.
+///
+/// Both failure directions are named, because they are different hazards and the
+/// harness refuses for both:
+///
+///   * the shared parser yields `None` — a `None` here REPORTS NOTHING and
+///     silently drops a collection-shadowing decision onto the row liveness
+///     timestamp (or onto no timestamp at all);
+///   * the shared parser yields `Some` for a spelling `ISO_INSTANT` cannot
+///     write, because it NORMALIZES (hour 24 → the next midnight, a 7th
+///     fractional digit truncated, 2025-02-30 rolled into March) — and an
+///     instant produced from a malformed spelling compares EQUAL to a correct
+///     export, which is a FALSE PASS. This is the one this refusal exists for:
+///     asking `parse_timestamp_micros` whether it returned `Ok` establishes only
+///     that SOME instant could be produced, which is not validation.
+fn malformed_timestamp(owner: &str, key: &str, got: &str, why: &str) -> String {
     format!(
-        "{owner}: `{key}` is a string but is not an sstabledump timestamp (it is {}); \
-         `canonical_jsonl::parse_timestamp_micros` — the SAME grammar the canonical parser \
-         uses, so the two can never disagree about what a timestamp is — yields `None` for it, \
-         and a `None` here reports nothing: it silently drops a collection-shadowing decision \
-         onto the row liveness timestamp (or onto no timestamp at all), which can classify a \
-         live element as shadowed or a shadowed one as live. The harness refuses the malformed \
-         oracle instead",
+        "{owner}: `{key}` is a string but is not an sstabledump timestamp (it is {}): {why}. \
+         Cassandra 5.0.8 writes every one of these fields with `JsonTransformer.dateString`, \
+         which returns `Instant.ofEpochSecond(...).toString()` — `DateTimeFormatter.ISO_INSTANT` \
+         — so this spelling is not one the oracle's own writer can produce. The harness refuses \
+         it HERE rather than hand it to `canonical_jsonl::parse_timestamp_micros`, which \
+         normalizes what it can and so cannot tell a malformed golden from a well-formed one",
+        clipped(&format!("{got:?}"))
+    )
+}
+
+/// The spelling satisfies `ISO_INSTANT` yet this pass and the canonical parser
+/// read DIFFERENT instants out of it. Unreachable for any spelling either side
+/// accepts today — kept because the whole point of computing the instant here is
+/// that the two can never silently diverge: a divergence is a REFUSAL, never the
+/// parser's answer winning by default.
+fn timestamp_disagreement(owner: &str, key: &str, got: &str, strict: i64, parsed: i64) -> String {
+    format!(
+        "{owner}: `{key}` is a well-formed `ISO_INSTANT` timestamp ({}) but this pass reads it as \
+         {strict}µs while `canonical_jsonl::parse_timestamp_micros` — the grammar the canonical \
+         parser uses to build the comparison — reads {parsed}µs. The harness refuses a golden the \
+         validator and the parser do not agree about rather than compare against whichever \
+         instant the parser chose",
         clipped(&format!("{got:?}"))
     )
 }

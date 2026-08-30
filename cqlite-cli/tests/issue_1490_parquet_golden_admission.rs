@@ -1311,10 +1311,15 @@ fn an_unparseable_timestamp_is_refused_and_never_falls_back_to_the_row_liveness_
         );
     }
 
-    // The validator's grammar IS the canonical parser's function, asserted
-    // directly: every string the tables above refuse is a string
-    // `parse_timestamp_micros` returns `None` for, and every string they accept
-    // is one it parses.
+    // The strings above are refused by BOTH sides: each is one
+    // `parse_timestamp_micros` returns `None` for, which is what makes the
+    // fallback measurement below meaningful. The relation is DIRECTIONAL, not a
+    // biconditional — the validator also refuses spellings the parser NORMALIZES
+    // into a plausible instant (hour 24, 2025-02-30, a 7th fractional digit),
+    // which is the whole subject of
+    // `a_spelling_the_shared_parser_normalizes_is_refused_not_normalized`. The
+    // direction that must hold unconditionally, and does, is the safe one:
+    // nothing this pass ACCEPTS is a string the parser cannot reproduce.
     for refused in [
         "not-a-timestamp",
         "2025-01-01",
