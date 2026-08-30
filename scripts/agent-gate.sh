@@ -540,6 +540,44 @@
 #                      partial-extraction discard removed; guard state back under
 #                      TMPDIR with no consistency check; exact-`S` index-flag match;
 #                      failed nested scan read as clean).
+#   flight-tests       cargo test -p cqlite-flight --lib --bins (UNIT tests only).
+#                      Issue #1699: before this, the gate COMPILED cqlite-flight
+#                      (clippy --all-targets) and RAN only three of its ~44 targets by
+#                      name (two in flight-query-semantics-oracle, one dhat target in
+#                      memory-budget) — so a Flight regression elsewhere was found only
+#                      after a push, on CI. NARROWED from the whole package by #3384:
+#                      that package's INTEGRATION suite is ~50% non-deterministic under
+#                      intra-package parallelism (4 runs PASS/FAIL/PASS/FAIL, 2 distinct
+#                      victims), and a lane that reds 1-in-2 carries no information. The
+#                      lane therefore PRINTS A COVERAGE CENSUS on every run naming the
+#                      integration targets it does NOT execute, the CI Flight tier that
+#                      does, and #3384/#3383 — an omission stated is the opposite of the
+#                      silent omission #1699 exists to eliminate. Runs under a
+#                      unit-scoped zero-tests guard; no opt-out.
+#   legacy-heuristics  BUILD cqlite-core at `default + legacy-heuristics` under
+#                      -D warnings, then EXECUTE the tests that feature turns on
+#                      (issue #1699). clippy already test-compiles those bodies inside a
+#                      ~30-feature union, so the two things only this lane does are the
+#                      MINIMAL feature set and EXECUTION: an inverted assertion in a
+#                      positively-gated test body FAILs here while clippy stays green.
+#                      The --test target set is DERIVED from the committed
+#                      cqlite-core/tests/*.rs (never hard-coded, so a sixth gated file
+#                      needs no gate edit) and the derivation is FAIL-CLOSED — zero
+#                      derived targets is a FAIL naming the derivation, never a PASS or
+#                      a SKIP. Runs under the zero-tests guard; no opt-out.
+#   feature-iso-parquet / feature-iso-delta-scan
+#                      RUSTFLAGS=-D warnings cargo test -p cqlite-core
+#                      --no-default-features --features all-compression,<one-of>
+#                      --lib --no-run, each WITHOUT the other feature (issue #1699).
+#                      clippy enables parquet AND delta-scan together, which is the
+#                      shape that MASKS cross-feature coupling; these two lanes are
+#                      separately named so a SUMMARY FAIL says WHICH direction of
+#                      coupling broke. `--lib --no-run` is load-bearing and is the
+#                      minimal-build shape: it compiles the lib WITH its inline
+#                      `#[cfg(test)]` modules — where the #1978 incident class lives,
+#                      invisible to a bare `cargo check` — while pulling in none of the
+#                      ~100 integration test files, which assume default features and
+#                      fail here as noise, not leakage. No opt-out.
 #                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
 #                      the non-vacuity proof for the pub-surface component. 42 cases,
 #                      source-only (no cargo doc since the #1712 descope), each
@@ -2234,7 +2272,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -2250,6 +2288,11 @@ _component_lane() {
   case "$1" in
     python-bindings|node-bindings) printf side ;;
     parity-report|delivery-telemetry|binding-unwind-profile|smoke|memory-budget) printf side ;;
+    # #1699 feature-matrix lanes. All four build cqlite-core at a feature set that
+    # DIVERGES from MAIN's (cqlite-flight's arrow flavour; default+legacy-heuristics;
+    # no-default-features+one-of parquet/delta-scan), which is class (a) of the SIDE
+    # rationale below: sharing MAIN's target dir would thrash it (#2657).
+    flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf side ;;
     *) printf main ;;
   esac
 }
@@ -4835,6 +4878,607 @@ run_roborev_lints_cmd() {
     bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh"
 }
 
+# check_no_unexpected_zero_tests <label> <logfile> [allowed-zero-target...]
+#
+# THE zero-tests guard (originally #2039, inline in cli-tests; promoted to a single
+# top-level definition by #1699 when a second and third component needed it). Parses
+# cargo's OWN per-target "Running tests/<name>.rs" / "test result: ok. N passed"
+# output and FAILs CLOSED if any `--test` target ran 0 tests, unless that target is
+# named on the caller's explicit allowed-zero list.
+#
+# The shape it exists to catch: a test target whose body compiles out at the feature
+# set the component selected (`#[cfg(feature = ...)]` with the feature off, a
+# whole-file `#![cfg(...)]`, a required-features target landing in the wrong pass)
+# COMPILES, runs zero tests, and cargo exits 0 — so the component reads PASS while
+# its subject was never executed. That is the vacuous-green shape: a positive verdict
+# with no affirmative measurement behind it.
+#
+# Match the FULL zero-line (roborev finding, #2039): "0 passed; 0 failed" alone also
+# matches a target whose tests are ALL #[ignore]d ("0 passed; 0 failed; 3 ignored"),
+# which is a legitimate, unrelated shape this guard must never fault — only a
+# truly-empty run (0 ignored too) is the compiled-out shape.
+#
+# SCOPE, stated so a caller does not over-trust it: it keys on "Running tests/", i.e.
+# INTEGRATION `--test` targets. A `--lib` unit-test run prints "Running unittests
+# src/lib.rs", which this deliberately does not claim to cover.
+#
+# Exported (`export -f`) because the cli-tests component body runs under `bash -c`
+# and must see the SAME implementation rather than a second copy of it.
+# _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
+#
+# roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
+# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do seven other workflows and
+# scripts/local/pre-merge.sh. Cargo then emits
+#     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
+# with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
+# the literal text sees nothing. MEASURED on both guards, and the two directions differ:
+#   * check_unittest_targets_ran  -> FALSE FAIL: the new lanes would red on every clean
+#     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
+#   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
+#     associated with its result, so the #2039 guard silently reports OK. That one is
+#     PRE-EXISTING and affects its other callers (core-tests, cli-tests) on nightly CI too;
+#     filed separately.
+#
+# Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
+# would put the reading loop in a SUBSHELL and its accumulated verdict variables would be
+# discarded — which for these guards means silently passing, the exact failure they exist to
+# prevent. The ESC byte is injected via printf rather than written as `\x1b`, because BSD sed
+# does not honour `\x` escapes and macOS is a first-class gate host.
+_ansi_stripped_log() {
+  local logfile="$1" out esc
+  # FAIL CLOSED on an unreadable log (roborev round-25, Medium). Returning the original path let the
+  # caller parse a file it had just failed to read, and a guard that parses nothing reports nothing
+  # wrong. The caller's own fail-closed branch is what should decide, so tell it the truth.
+  [ -r "$logfile" ] || return 1
+  esc=$(printf '\033')
+  out="$logfile.ansi-stripped"
+  if sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" "$logfile" > "$out" 2>/dev/null; then
+    printf '%s' "$out"
+  else
+    # A FAILED normalisation is not "use the coloured original": under CARGO_TERM_COLOR the
+    # coloured original is exactly what the parsers cannot read (round 15), so silently handing it
+    # back converts a normalisation failure into a vacuous PASS. Non-zero, and the caller FAILs.
+    return 1
+  fi
+}
+
+# check_test_targets_observed <label> <logfile> <expected-id>... — every expected integration
+# target must appear as a `Running` banner in the log.
+#
+# roborev round-17 preferred this POSITIVE form alongside the zero-test check, and it is the
+# right shape: check_no_unexpected_zero_tests can only judge targets it SAW, so a target that
+# never appeared at all is invisible to it. This lane derives its target set, so it can assert
+# the stronger claim — "these are the targets that executed" — instead of assuming it.
+#
+# Ids are spelled as the guard spells them (tests-relative under tests/, package-relative
+# otherwise), so the two agree by construction.
+check_test_targets_observed() {
+  local label="$1" logfile="$2"; shift 2
+  local -a expected=("$@")
+  if [ "${#expected[@]}" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — check_test_targets_observed called with NO expected target; a guard with an empty subject set reports OK having measured nothing (issue #1699)." >&2
+    return 1
+  fi
+  local src seen="" missing="" line t e
+  src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || src=""
+  if [ -z "$src" ] || [ ! -r "$src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing, so no target could be observed (issue #1699)." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      *"Running tests/"*)
+        t=$(printf '%s' "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\\.rs.*#\\1#")
+        seen="$seen $t " ;;
+      *"Running "*".rs"*)
+        case "$line" in *"Running unittests"*) continue ;; esac
+        t=$(printf '%s' "$line" | sed -E "s#.*Running ([^[:space:]]+)\\.rs.*#\\1#")
+        seen="$seen $t " ;;
+    esac
+  done < "$src"
+  for e in "${expected[@]}"; do
+    case "$seen" in *" $e "*) ;; *) missing="$missing $e" ;; esac
+  done
+  if [ -n "$missing" ]; then
+    echo "$label: FAIL-CLOSED — derived target(s)$missing produced no 'Running' banner, so they did NOT execute. The zero-test guard cannot see this: it judges only targets it observed, and an absent target is not an observed one (issue #1699, roborev round-17)." >&2
+    return 1
+  fi
+  return 0
+}
+export -f check_test_targets_observed
+
+check_no_unexpected_zero_tests() {
+  local label="$1" logfile="$2"; shift 2
+  local _orphans=""
+  local allowed_zero=" $* "
+  local bad="" target="" _banners=0 _results=0 _unit_banners=0
+  # FAIL CLOSED if the log cannot be prepared or read (roborev round-16, HIGH). Without
+  # this, ANY failure to resolve the parse source — an unexported helper, a deleted file, a
+  # sed that could not write — leaves the read loop with nothing to consume, and a guard that
+  # consumed nothing found no problem and returns SUCCESS. That is the vacuous pass these
+  # guards exist to prevent, arriving through their own plumbing. Checked here rather than
+  # relying on every caller exporting the right helpers: the guard is responsible for knowing
+  # whether it measured anything.
+  local _parse_src
+  _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+  if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing (resolved to '${_parse_src:-<empty>}'), so this guard parsed NOTHING. A guard that consumed no input has measured nothing and must never report OK (issue #1699, roborev round-16)." >&2
+    return 1
+  fi
+  if [ -s "$logfile" ] && [ ! -s "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' is non-empty but its prepared copy '$_parse_src' is empty, so this guard would parse nothing (issue #1699)." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    # Two spellings, deliberately, and the reason is compatibility (roborev rounds 11+13).
+    # A target under tests/ keys on its path RELATIVE TO tests/ (`foo`, or `foo/main` for a
+    # directory-style target) because that is how every existing caller's allowed-zero list
+    # is spelled. A target mapped OUTSIDE tests/ by an explicit `[[test]] path = "..."` keys
+    # on its package-relative path: previously it matched nothing, was never associated with
+    # a result, and could run ZERO tests unnoticed — a vacuous PASS. Additive, and measured
+    # as a no-op today (0 mapped targets across the workspace), so it closes the hole
+    # without re-spelling a single existing allowed-zero entry.
+    #
+    # This SUPERSEDES the round-11 fix, which refused such a target instead of guarding it.
+    # That refusal was silently DELETED by a coarse round-12 edit and nothing noticed,
+    # because with no such target in the tree the branch never ran — which is why this
+    # version is pinned by a behavioural log fixture rather than by its own existence.
+    if [[ "$line" == *"Running tests/"* ]]; then
+      # An ORPHANED previous target is a FAIL (roborev round-26, Medium). If a new banner arrives
+      # while the last integration target still has no parseable result, that target was OBSERVED
+      # and never JUDGED — a truncated log, a killed binary, or a result line the parse missed. The
+      # guard would otherwise pass, having silently skipped exactly the target it was asked about.
+      [ -n "$target" ] && _orphans="$_orphans $target"
+      target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
+      _banners=$((_banners + 1))
+    elif [[ "$line" == *"Running unittests"* ]]; then
+      # NOT this guard's subject — check_unittest_targets_ran owns --lib/--bins targets. But
+      # it is COUNTED, because the affirmative check below must not red a legitimately
+      # unittest-only log (a `--lib` selection produces nothing else). Without this the new
+      # round-17 check turned a correct log into a false red; the complement assert caught it.
+      _unit_banners=$((_unit_banners + 1))
+      [ -n "$target" ] && _orphans="$_orphans $target"
+      target=""
+    elif [[ "$line" == *"Running "*".rs"* ]]; then
+      # `--lib`/`--bins` unittest lines are check_unittest_targets_ran's subject, not ours.
+      [ -n "$target" ] && _orphans="$_orphans $target"
+      target=$(printf "%s" "$line" | sed -E "s#.*Running ([^[:space:]]+)\.rs.*#\1#")
+      _banners=$((_banners + 1))
+    elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
+      _results=$((_results + 1))
+      if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
+        bad="$bad $target"
+      fi
+      target=""
+    elif [[ "$line" == "test result:"* ]]; then
+      _results=$((_results + 1))
+      target=""
+    fi
+  done < "$_parse_src"
+  # EOF with a target still pending is the same orphan case (roborev round-26): the log ended
+  # between a banner and its result, which is what a truncated or killed run looks like.
+  [ -n "$target" ] && _orphans="$_orphans $target"
+  # AN AFFIRMATIVE MEASUREMENT, not the absence of a bad signal (roborev round-17, HIGH).
+  # Round 16 made this guard fail when it could not READ its input; that was not enough. A
+  # non-empty, perfectly readable log can still contain no PARSEABLE `Running` banner — a
+  # cargo output-format change, a normalisation that drops the line, output suppressed by a
+  # wrapper — and then `target` and `bad` both stay empty and the guard returns SUCCESS even
+  # for `test result: ok. 0 passed`. The vacuous green this whole change exists to close,
+  # surviving two rounds of closing it.
+  #
+  # So: if the log contains test RESULTS, at least one banner must have been ATTRIBUTED to a
+  # target. Results with zero recognised banners means the parse is broken, not that
+  # everything is fine — and "the parse is broken" is never a pass.
+  if [ "$_results" -gt 0 ] && [ "$_banners" -eq 0 ] && [ "$_unit_banners" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' contains $_results cargo test-result line(s) but NOT ONE parseable 'Running <path>.rs' banner, so no result could be attributed to a target. The parse is broken (a cargo format change, a normalisation that dropped the line, or suppressed output); a guard that attributed nothing has measured nothing and must never report OK (issue #1699, roborev round-17)." >&2
+    return 1
+  fi
+  # AND ZERO RESULTS IS ALSO NOT A PASS (roborev round-25, Medium). Round 17 closed
+  # "results but no banners"; the complementary hole stayed open — a log with NO parseable
+  # `test result:` line at all leaves every counter at zero, `bad` empty, and the guard
+  # returning SUCCESS. A truncated log, a killed cargo, a changed output format or a
+  # normalisation that ate every line all land here. Every caller of this guard has just run
+  # cargo test to a SUCCESSFUL exit, so at least one result line must exist; none means the
+  # guard could not see what happened, which is never a pass.
+  #
+  # `--no-run` callers are not affected because they do not call this guard: the two isolation
+  # lanes compile only and are checked by their own exit status.
+  if [ -n "$_orphans" ]; then
+    echo "$label: FAIL-CLOSED —$_orphans was OBSERVED running (a 'Running' banner) but no parseable 'test result:' line followed it, so this guard never judged whether it ran zero tests. A target observed and not judged is the gap this guard exists to close, not a pass (issue #1699, roborev round-26)." >&2
+    return 1
+  fi
+  if [ "$_results" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' contains NO parseable cargo 'test result:' line at all, so this guard judged ZERO targets. The caller's cargo run exited successfully, so results must exist: a truncated log, a killed process, a changed cargo output format or a failed ANSI normalisation. A guard that judged nothing has measured nothing and must never report OK (issue #1699, roborev round-25)." >&2
+    return 1
+  fi
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED —$bad ran 0 tests unexpectedly (issue #2039: a target whose body is #[cfg]-gated out at this component's feature set, and not on the allowed-zero list, would otherwise silently never run)" >&2
+    return 1
+  fi
+  return 0
+}
+# Exported ALONGSIDE its callers (roborev round-16 finding, HIGH). Both guards call
+# _ansi_stripped_log, and the cli-tests component runs its body under `bash -c` — so with the
+# helper unexported the command substitution produced the EMPTY STRING, `done < ""` failed,
+# the loop body never ran, and the guard returned SUCCESS having parsed nothing. That silently
+# disabled the CLI zero-test protection. I had just fixed the same shape in the self-test
+# extraction and written a commit message about it, and missed this instance one function away
+# — which is why the fail-closed check below matters more than this export line.
+export -f _ansi_stripped_log
+export -f check_no_unexpected_zero_tests
+
+# check_unittest_targets_ran <label> <logfile> <unittest-src-path>...
+#
+# The `--lib`/`--bins` ANALOGUE of check_no_unexpected_zero_tests (issue #3384). That
+# guard keys on cargo's `Running tests/<name>.rs` lines and explicitly disclaims unit
+# runs, which print `Running unittests src/lib.rs (…)`. So on a lane that selects ONLY
+# `--lib --bins` it has an EMPTY SUBJECT SET and reports OK — a positive verdict with no
+# measurement behind it, i.e. the vacuous pass. This guard supplies the missing subject.
+#
+# AFFIRMATIVE, in both directions, because "no failure was seen" is not evidence that
+# anything ran:
+#   * each expected unittest target must be OBSERVED (`Running unittests <path>`) —
+#     an absent one means the selector stopped choosing it (an explicit `--lib` without
+#     `--bins` silently drops main.rs's tests), which is the never-executed hole; AND
+#   * its `running N tests` count must be NON-ZERO — a module tree cfg-gated out
+#     compiles, runs 0 tests and exits 0.
+# A positive verdict PRINTS the counts, so a pasted log shows the check RAN and on what.
+#
+# `running N tests` is parsed rather than the `test result:` line because 0 is
+# unambiguous there, and because an all-`#[ignore]`d suite (a legitimate shape) still
+# reports a non-zero `running N`.
+# _package_unittest_srcs <pkg> — the `src` paths of every lib/bin target of <pkg>, in the
+# form `cargo test` prints them after `Running unittests` (e.g. `src/lib.rs`).
+#
+# roborev round-7 finding (Medium): the flight-tests zero-test guard was called with a
+# HARD-CODED `src/lib.rs src/main.rs`. `--bins` selects EVERY binary, so adding one to
+# cqlite-flight would have let it run zero tests with the guard still reporting OK — the
+# vacuous pass the guard exists to prevent, reintroduced as a two-entry registry that
+# drifts silently. That is #2039's lesson, which this very lane's report cites; a
+# hard-coded list beside a wildcard selector is the same defect in miniature.
+#
+# Derived from cargo metadata so the guard's subject set tracks the selector. A failed
+# derivation returns non-zero and the caller FAILs — never a fallback to a partial list,
+# which would silently shrink the guard's subject exactly like the hard-coded pair did.
+_package_unittest_srcs() { # <pkg> [kinds] [enabled-features]
+  local pkg="$1" kinds="${2:-lib,bin}" enabled="${3:-}"
+  local meta out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  # jq FIRST, then python3, then failure — the same chain and the same direction as
+  # _package_index / _package_test_targets / _resolved_package_features. A single-parser
+  # helper is a FALSE RED on a jq-only host (roborev round-18, Medium): this gate treats
+  # macOS as a first-class host, and here the lane would have failed closed on a healthy
+  # tree, which is the verdict agents learn to re-run away from.
+  if command -v jq >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" --arg kinds "$kinds" --arg en "$enabled" '
+      ($kinds | split(",")) as $want
+      | ($en | split(" ") | map(select(length > 0))) as $enabled
+      | .packages[] | select(.name == $n)
+      | ((.manifest_path // "") | split("/") | .[0:-1] | join("/")) as $root
+      | .targets[]
+      | select([ (.kind // [])[] | select(. as $k | $want | index($k)) ] | length > 0)
+      | select(.test != false)
+      | ((."required-features" // .required_features // [])) as $rf
+      | select((($rf | length) == 0) or ((($rf - $enabled) | length) == 0))
+      | (.src_path // "") as $sp
+      | if ($root != "" and ($sp | startswith($root + "/")))
+        then ($sp | ltrimstr($root + "/")) else $sp end') || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | python3 -c '
+import json, sys, os
+pkg = sys.argv[1]
+enabled = set(w for w in (sys.argv[3] if len(sys.argv) > 3 else "").split() if w)
+d = json.load(sys.stdin)
+for p in d.get("packages", []):
+    if p.get("name") != pkg:
+        continue
+    root = os.path.dirname(p.get("manifest_path", ""))
+    for t in p.get("targets", []):
+        want = set(sys.argv[2].split(","))
+        kinds = t.get("kind") or []
+        if not any(k in want for k in kinds):
+            continue
+        # Only targets cargo will actually RUN under this selection (roborev round-13,
+        # Low). `test = false` in the manifest, or required-features this lane does not
+        # enable, means cargo legitimately SKIPS the target — and demanding an observation
+        # for it would FAIL the gate on correct behaviour. A false red is not the safe
+        # direction here: it is what teaches people to re-run until green.
+        if t.get("test") is False:
+            continue
+        rf = t.get("required-features") or t.get("required_features") or []
+        if rf and not set(rf).issubset(enabled):
+            continue
+        sp = t.get("src_path") or ""
+        rel = sp[len(root) + 1:] if root and sp.startswith(root + os.sep) else sp
+        print(rel)
+' "$pkg" "$kinds" "$enabled") || return 1
+  else
+    return 1
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+check_unittest_targets_ran() {
+  local label="$1" logfile="$2"; shift 2
+  local -a expected=("$@")
+  if [ "${#expected[@]}" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — check_unittest_targets_ran was called with NO expected unittest target; a guard with an empty subject set would report OK having measured nothing (issue #3384)" >&2
+    return 1
+  fi
+  # NO `declare -A` HERE, DELIBERATELY (roborev round-3 finding, High). This gate
+  # explicitly supports stock macOS /bin/bash 3.2 — see the lane-parallelism fallback
+  # at the AGENT_GATE_JOBS derivation, which degrades rather than requires bash >= 4.3 —
+  # and associative arrays are a bash 4.0 feature. A `declare -A` here would have made a
+  # SUCCESSFUL cargo run fail inside its own zero-test guard on a supported platform.
+  # A newline-delimited "<target><TAB><count>" list is 3.2-safe; target names come from
+  # cargo's own `Running unittests <path>` output and contain no tabs or newlines.
+  local line cur="" bad="" seen="" counts=""
+  # FAIL CLOSED if the log cannot be prepared or read (roborev round-16, HIGH). Without
+  # this, ANY failure to resolve the parse source — an unexported helper, a deleted file, a
+  # sed that could not write — leaves the read loop with nothing to consume, and a guard that
+  # consumed nothing found no problem and returns SUCCESS. That is the vacuous pass these
+  # guards exist to prevent, arriving through their own plumbing. Checked here rather than
+  # relying on every caller exporting the right helpers: the guard is responsible for knowing
+  # whether it measured anything.
+  local _parse_src
+  _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+  if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing (resolved to '${_parse_src:-<empty>}'), so this guard parsed NOTHING. A guard that consumed no input has measured nothing and must never report OK (issue #1699, roborev round-16)." >&2
+    return 1
+  fi
+  if [ -s "$logfile" ] && [ ! -s "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' is non-empty but its prepared copy '$_parse_src' is empty, so this guard would parse nothing (issue #1699)." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      *"Running unittests "*)
+        cur=$(printf '%s' "$line" | sed -E 's#.*Running unittests ([^[:space:]]+).*#\1#')
+        continue
+        ;;
+    esac
+    if [ -n "$cur" ]; then
+      case "$line" in
+        running\ [0-9]*\ test|running\ [0-9]*\ tests)
+          counts="$counts$cur\t$(printf '%s' "$line" | sed -E 's#^running[[:space:]]+([0-9]+)[[:space:]]+tests?$#\1#')
+"
+          cur=""
+          ;;
+      esac
+    fi
+  done < "$_parse_src"
+  local p n
+  for p in "${expected[@]}"; do
+    # Exact whole-field match on the TAB-delimited pair, so one target name cannot
+    # match another's prefix.
+    n=$(printf '%b' "$counts" | awk -F'\t' -v t="$p" '$1 == t { print $2; exit }')
+    if [ -z "$n" ]; then
+      bad="$bad $p(NOT OBSERVED: no 'Running unittests $p' line — the cargo selector no longer chooses this target)"
+    elif [ "$n" -eq 0 ]; then
+      bad="$bad $p(ran 0 tests: the unit suite compiled out at this feature set)"
+    else
+      seen="$seen $p($n tests)"
+    fi
+  done
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED — unittest target(s)$bad (issue #3384: this lane's ONLY subject is its unit suite, so an unobserved or empty unit run is a green lane that executed nothing)" >&2
+    return 1
+  fi
+  echo "$label: unittest targets OK —$seen executed (affirmative measurement, parsed from cargo's own 'Running unittests' / 'running N tests' output)" >&2
+  return 0
+}
+export -f check_unittest_targets_ran
+
+# _package_test_targets <package>: print one TAB-separated line per declared
+# INTEGRATION (`test`) target of that workspace package — `<name>\t<required-features
+# comma-joined, empty when none>` (issue #1699, roborev round-2 finding 2).
+#
+# Why this exists. `cargo test -p <pkg>` SILENTLY SKIPS any `[[test]]` target whose
+# `required-features` are not all enabled: it is never built, never run, and — the
+# part that matters — it emits NO `Running tests/<name>.rs` line at all, so the #2039
+# zero-tests guard (which keys on that line) cannot see it. Measured on this package:
+# `issue_1494_producer_mem_budget` (`required-features = ["dhat-heap"]`) appeared 0
+# times in a lane log that showed 41 `Running` lines, so a lane claiming "every
+# integration target" was overstating by exactly the targets nobody can observe.
+#
+# The oracle is `cargo metadata`, i.e. CARGO ITSELF, for the same reason
+# _resolved_package_features uses it rather than parsing `[features]`: a hand-parse of
+# `[[test]]` sections would be a SECOND IMPLEMENTATION of cargo's target
+# auto-discovery (tests/*.rs are targets with NO stanza at all) and its correctness
+# would only be knowable by differential testing against the original.
+#
+# Fail-closed, same chain and same direction as _resolved_package_features: jq, else
+# python3, else failure. An empty result is a FAILED DERIVATION (return 1), never "the
+# package declares no test targets" — treating emptiness as an answer would excuse
+# every unobserved target at once, which is the vacuous-green shape.
+_package_test_targets() {
+  # Both parser substitutions carry `|| return 1` (roborev round-27, Medium): a parser that emits
+  # SOME records and then fails left this helper returning success with a PARTIAL target census,
+  # which understates the coverage gap the flight lane exists to declare — a smaller gap is the
+  # permissive direction, and the caller cannot tell a partial census from a complete one.
+  local pkg="$1"
+  local meta out
+  meta=$(cargo metadata --format-version 1 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" \
+      '.packages[] | select(.name == $n) | .targets[]
+       | select(.kind | index("test"))
+       | [.name, ((."required-features" // []) | join(","))] | @tsv') || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | python3 -c '
+import json, sys
+n = sys.argv[1]
+d = json.load(sys.stdin)
+for p in d["packages"]:
+    if p["name"] != n:
+        continue
+    for t in p.get("targets", []):
+        if "test" in (t.get("kind") or []):
+            print("%s\t%s" % (t["name"], ",".join(t.get("required-features") or [])))
+' "$pkg") || return 1
+  else
+    return 1
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# THE FLAKE-QUARANTINE PLUMBING IS RETIRED, DELIBERATELY (issues #3383/#3384).
+#
+# It used to live here: `FLIGHT_FLAKE_SKIPS`, a curated `<target>:<issue>` list that
+# excluded named cqlite-flight integration targets from the flight-tests lane, plus
+# `_validate_flight_flake_skips`, which failed closed on a malformed or stale entry.
+#
+# Why it is GONE rather than kept inert. It existed for exactly one purpose: to paper
+# over the non-determinism of cqlite-flight's integration suite, one victim at a time.
+# That approach was measured and REJECTED (owner ruling, #3384) — two distinct victims
+# appeared in four runs, which is not a converging series, so a per-victim quarantine
+# has no visible end and would become the dumping ground its own design rule forbids.
+# The lane instead runs `--lib --bins` and DECLARES the whole integration half as an
+# un-run gap (see run_flight_tests's census). With no lane executing those targets
+# locally, the list has NO SUBJECT: an empty curated list, and a validator whose only
+# caller is gone, would be a guard reporting OK having measured nothing — the vacuous
+# shape both this issue and #1699 exist to eliminate. So there is no code path that
+# reads a flake list and silently does nothing, because there is no flake list.
+#
+# If #3384's fix ever needs a target-granular exclusion again, reintroduce it WITH its
+# validator (a curated excusal list is the thing that rots silently, so both halves of
+# every entry must be enforced) — git history at this line has the working version.
+
+# check_declared_test_targets_observed <label> <logfile> <enabled-set> <target-metadata> <skips>
+#
+# RETAINED BUT CURRENTLY UNCALLED — read this first (issues #3384/#1699). Its only
+# caller was the flight-tests lane while that lane executed cqlite-flight's integration
+# targets. It no longer does: the integration half of that package is ~50%
+# non-deterministic under intra-package parallelism, so the lane narrowed to
+# `--lib --bins` and now DECLARES the whole integration half as an un-run gap (see
+# run_flight_tests's census). Calling this reconciliation from a lane that puts no
+# integration target on the command line would FAIL every one of them, correctly and
+# uselessly.
+#
+# It is kept rather than deleted because it is the reconciliation the WIDENED lane will
+# call again the moment #3384 makes that suite deterministic, and re-deriving a subtle
+# fail-closed guard from scratch is how it comes back weaker. WHAT WILL CALL IT AGAIN:
+# run_flight_tests, once its command line carries `--test` targets — with an EMPTY
+# <skips> argument, since the flake-quarantine plumbing is retired (see the note above)
+# and #3384's resolution is a fix, not a quarantine. `_package_test_targets`, which
+# feeds it, IS still called: the lane uses it to count the targets its census reports
+# as un-run, which is what makes that census a measurement rather than a claim.
+#
+# Reconcile the DERIVED set of declared integration targets (see
+# _package_test_targets) against the targets actually OBSERVED emitting
+# `Running tests/<name>.rs` in the component log, and FAIL CLOSED naming any target
+# that is unobserved without BOTH halves of an explanation (issue #1699, roborev
+# round-2 finding 2). This is the counterpart to check_no_unexpected_zero_tests: that
+# guard catches a target that RAN and executed nothing; this one catches a target that
+# was never even BUILT, which prints nothing and is therefore invisible to it.
+#
+# An unobserved target has exactly THREE possible explanations, each named
+# EXPLICITLY in the diagnostic and never folded into another, because they are
+# different facts about different actors:
+#
+#   1. SKIPPED BY THE CALLER — the target is named in the <skips> argument as
+#      `<target>:<issue>`, i.e. the CALLING LANE CHOSE not to execute it and the entry
+#      names the issue that obliges its return. Distinct from category 2/3 below on
+#      purpose: "cargo cannot run it here" and "we decided not to run it" are not the
+#      same claim, and collapsing them would hide a deliberate coverage decision behind
+#      a mechanical one. NO CALLER PASSES A NON-EMPTY <skips> TODAY (the flake-quarantine
+#      plumbing is retired, #3384), so this branch is dormant; a future caller reviving
+#      it owes the list its own fail-closed validator, because a curated excusal list is
+#      exactly the thing that rots silently.
+#
+#   Otherwise the target must satisfy BOTH remaining halves, and the reason is printed
+#   either way:
+#   (a) EXPLAINED — its `required-features` are non-empty AND at least one of them is
+#       not in this lane's enabled set, so cargo's silent skip is accounted for by
+#       cargo's own rules rather than by a guess; AND
+#   (b) ALTERNATE EXECUTOR — some OTHER component of this gate script actually INVOKES
+#       the target: a NON-COMMENT `--test <name>` line (memory-budget carries the only
+#       one for issue_1494_producer_mem_budget). Mechanical, read from committed source,
+#       so there is no curated excusal list — and deliberately NOT a bare substring
+#       search, which the comments above would satisfy by themselves: an artifact
+#       DESCRIBING the excusal would BECOME the excusal (#3312's shape), and the target
+#       would stay excused after its only real executor was deleted.
+#
+# Anything else — an unobserved target with no off required-feature, or one no
+# component names — is the invisible skip this lane exists to prevent, and FAILs
+# naming the target and which half is missing. A positive verdict prints the
+# affirmative measurement (how many declared targets were observed), so a pasted log
+# shows the reconciliation RAN.
+check_declared_test_targets_observed() {
+  local label="$1" logfile="$2" enabled="$3" meta="$4" skips="$5"
+  if [ ! -r "$GATE_SELF" ]; then
+    echo "$label: FAIL-CLOSED — cannot read $GATE_SELF, so the alternate-executor half of the declared-vs-observed reconciliation is unmeasurable (issue #1699)" >&2
+    return 1
+  fi
+  local observed declared=0 seen=0
+  observed=" $(grep -oE 'Running tests/[^[:space:]]+\.rs' "$logfile" \
+    | sed -E 's#^Running tests/(.*)\.rs$#\1#' | sort -u | tr '\n' ' ') "
+  local bad="" excused="" flaky="" tname rf rfl off sk skissue
+  while IFS=$'\t' read -r tname rf; do
+    [ -n "$tname" ] || continue
+    declared=$((declared + 1))
+    case "$observed" in
+      *" $tname "*) seen=$((seen + 1)); continue ;;
+    esac
+    # Category 1: this lane deliberately did not run it. Checked FIRST and reported
+    # under its own label — a flake-skipped target is unobserved with no off
+    # required-feature, so without this branch it would FAIL as
+    # `unobserved-and-UNEXPLAINED`, and folding it into the required-features excusal
+    # instead would misreport a CHOICE as a cargo limitation.
+    skissue=""
+    for sk in $skips; do
+      if [ "${sk%%:*}" = "$tname" ]; then skissue="${sk#*:}"; break; fi
+    done
+    if [ -n "$skissue" ]; then
+      flaky="$flaky $tname(flake-skipped:issue #$skissue)"
+      continue
+    fi
+    off=""
+    for rfl in ${rf//,/ }; do
+      case "$enabled" in *" $rfl "*) ;; *) off="$rfl"; break ;; esac
+    done
+    if [ -z "$off" ]; then
+      if [ -z "$rf" ]; then
+        bad="$bad $tname(unobserved-and-UNEXPLAINED:no-required-features)"
+      else
+        bad="$bad $tname(unobserved-and-UNEXPLAINED:required-features[$rf]-are-all-enabled)"
+      fi
+      continue
+    fi
+    # The alternate executor must be a REAL cargo target reference on a NON-COMMENT
+    # line. A bare substring search over this file would be satisfied by PROSE — the
+    # comments above name `issue_1494_producer_mem_budget` while explaining this very
+    # mechanism, so an artifact DESCRIBING the excusal would BECOME the excusal, and the
+    # target would stay excused after its only real executor was deleted (#3312's
+    # lesson; the same `#`-blind-scan defect this change filed as #3380 against the
+    # roborev guard). Measured: that target appears 5x here — 4 comments and ONE real
+    # invocation (`--test issue_1494_producer_mem_budget`, in memory-budget).
+    # If a component ever executes a target by some other form (a nextest filter
+    # expression, say), this FAILs closed and the pattern gets widened deliberately.
+    if ! grep -qE "^[^#]*--test[[:space:]]+$tname([[:space:]]|\$)" "$GATE_SELF"; then
+      bad="$bad $tname(required-features[$rf]-off[$off]-but-NO-alternate-executor-INVOKES-it:no non-comment \`--test $tname\` in agent-gate.sh)"
+      continue
+    fi
+    excused="$excused $tname(required-features[$rf]:off[$off];alternate-executor-INVOKES-it:non-comment \`--test $tname\` in agent-gate.sh)"
+  done <<< "$meta"
+  if [ -n "$flaky" ]; then
+    echo "$label: declared-vs-observed FLAKE-SKIPPED (this lane DELIBERATELY did not execute these — a CURATED exclusion, categorically distinct from cargo being unable to run a target; each names the issue obliging its return):$flaky" >&2
+  fi
+  if [ -n "$excused" ]; then
+    echo "$label: declared-vs-observed EXCUSED (cargo silently skips a required-features target it cannot enable; another gate component executes it):$excused" >&2
+  fi
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED —$bad declared as an integration target but NEVER OBSERVED running, and explained by NONE of the three permitted categories (flake-skipped with an issue; an off required-feature WITH an alternate executor) (issue #1699: cargo skips such a target silently, printing no 'Running tests/' line at all, so the #2039 zero-tests guard cannot see it)" >&2
+    return 1
+  fi
+  echo "$label: declared-vs-observed OK — $seen/$declared declared integration targets observed running (cargo metadata vs 'Running tests/' lines)" >&2
+  return 0
+}
+
 run_component() { # run_component <name> <cmd...>
   local name="$1"; shift
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -5318,6 +5962,2065 @@ run_flight_query_semantics_oracle() {
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# _resolved_package_features <package> [cargo-feature-flag…]: print " a b c " — the
+# features cargo ACTUALLY enables for that workspace package under a `cargo test`
+# resolve, one space-delimited set (issue #1699).
+#
+# The oracle is CARGO ITSELF — `cargo tree -p <pkg>`, a PACKAGE-SCOPED resolve — deliberately
+# rather than a hand-parse of `[features]` in Cargo.toml. A parser here would be a SECOND
+# IMPLEMENTATION of cargo's feature resolver, and its correctness would only be knowable by
+# differential testing against the original — and it would get this very package wrong today:
+# cqlite-flight's `default` is empty, yet `test-util` is on for every test build via the
+# self-referential dev-dependency (`cqlite-flight = { path = ".", features = ["test-util"] }`),
+# which no reading of `default = []` can see. The resolve reports `default test-util`.
+#
+# Any feature flags the CALLER passes are forwarded, so the answer can never drift from the
+# invocation it describes.
+#
+# NOT `cargo metadata`, and this header USED to say it was (roborev round-20, Low — the header
+# survived the round-6 fix immediately below it and then contradicted its own implementation for
+# fourteen rounds, including a "known imprecision" paragraph describing a WORKSPACE-wide resolve
+# this function no longer performs and an over-broad enabled set it no longer returns). A stale
+# doc block directly above a corrected implementation is worse than no comment: it is read as the
+# contract, and here it described the exact defect the code was changed to remove. The measured
+# reason for the change is in the body comment below.
+#
+# Emptiness is impossible for a real package (`default` is always in the set), so an empty result
+# is a failed derivation, and the caller must treat it as one rather than as "no features
+# enabled".
+_resolved_package_features() {
+  # PACKAGE-SCOPED resolve, via `cargo tree -p` — NOT `cargo metadata` (roborev round-6
+  # finding, Medium). `cargo metadata` resolves the ENTIRE workspace and unions features
+  # across every member, so it reported cqlite-core as having `arrow`,
+  # `arrow-shape-corpus`, `cli-helpers`, `parquet` and `producer-fault-injection` enabled.
+  # MEASURED: 14 features workspace-wide vs 9 package-scoped, and the five extras are
+  # turned on by cqlite-flight / cqlite-py / cqlite-node / ws0-corpus-gen — OTHER
+  # members. None is a dev-dependency of cqlite-core (checked per-dependency, including
+  # `kind=dev`), so `cargo test -p cqlite-core --features …` does NOT enable them.
+  #
+  # THE DIRECTION IS WHY THIS IS NOT COSMETIC. The only consumer is the co-required-feature
+  # census, which reports a GAP: "this body needs feature X, which is not enabled here".
+  # An OVER-BROAD enabled set makes a real gap look reachable and DROPS it from the census
+  # — a silent UNDER-report, the permissive direction, in the one output whose entire job
+  # is to state omissions. Today nothing is lost (`experimental` is absent from both sets,
+  # so the current census is correct either way), but a future test gated on
+  # `all(legacy-heuristics, parquet)` would have compiled out of the lane and been
+  # announced as covered.
+  #
+  # An earlier version of this comment claimed the breadth was dev-dependency unification
+  # "verified not to be over-broad" via `cargo metadata --manifest-path
+  # cqlite-core/Cargo.toml`. That was NOT a control: for a workspace MEMBER, cargo finds
+  # the workspace root and resolves the whole workspace anyway, so it necessarily agreed.
+  # Recorded because the wrong lesson is "the numbers matched"; the right one is that a
+  # control which cannot fail is not a control.
+  #
+  # Dev edges are requested explicitly (`-e features,normal,build,dev`) so genuine
+  # dev-dependency unification — which `cargo test` DOES apply — is still counted; that
+  # was measured to make no difference here, but omitting it would bias the other way.
+  # A failed resolve returns non-zero and the caller FAILs the lane naming the census, so
+  # "could not measure" never becomes "nothing to report".
+  local pkg="$1"; shift
+  local feats
+  feats=$(cargo tree -p "$pkg" "$@" -e features,normal,build,dev --prefix none -f '{p}|{f}' 2>/dev/null \
+    | awk -F'|' -v pat="^$pkg v" '$1 ~ pat {print $2}' \
+    | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | sort -u) || return 1
+  [ -n "$feats" ] || return 1
+  printf ' %s ' "$(printf '%s' "$feats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+}
+
+# flight-tests: EXECUTE cqlite-flight's UNIT test suite locally (issue #1699).
+#
+# What the gate covered before this component: clippy COMPILES the crate
+# (--all-targets), flight-query-semantics-oracle RUNS two named integration targets
+# (query_semantics_flight_parity, issue_3095_flight_static_columns) and memory-budget
+# RUNS one dhat target. Everything else in the crate — ~38 integration targets plus
+# --lib and --bins — was compiled and never run, so a Flight regression outside those
+# three targets was discovered only AFTER a push, on CI's Flight tier. A local-first
+# gate has to catch it before the push; that is the gap this closes.
+#
+# SCOPE — `--lib --bins` ONLY, and the omission is DECLARED ON EVERY RUN (issue #3384).
+# Two earlier cuts of this lane executed cqlite-flight's integration targets: first
+# `cargo test -p cqlite-flight` (the whole package), then an explicit DERIVED `--test`
+# list minus a curated flake quarantine (#3383). Both were withdrawn on measurement:
+# the integration half of this package is ~50% NON-DETERMINISTIC under intra-package
+# parallelism. Four consecutive whole-package runs went PASS / FAIL / PASS / FAIL with
+# TWO DIFFERENT victims (issue_3058_bypass_path_taken's
+# `fast_arm_stream_stops_when_the_client_drops_it`, and issue_2370_gauge_readback_test),
+# and four hypotheses were ruled out by measurement rather than argued away: whole-box
+# load (3/3 PASS standalone at load 74), `nice` (2/2), `--test-threads=2` (2/2), and
+# concurrent MAIN-lane compilation (the failures reproduced under `--only`, where MAIN
+# runs nothing). A merge-gate lane that reds ~1-in-2 carries no information: it trains
+# agents to re-run and to waive, which is worse than not having the lane.
+#
+# Quarantining the victims one at a time was CONSIDERED AND REJECTED (owner ruling).
+# Two victims in four runs is not a converging series, so a per-victim quarantine has
+# no visible end, and it would turn the quarantine into the dumping ground its own
+# design rule forbids. The general suite-hygiene defect is #3384; #3383 is its first
+# individual victim. So the quarantine plumbing (FLIGHT_FLAKE_SKIPS and its validator)
+# is RETIRED rather than left inert — it existed only to paper over #3384, and papering
+# over #3384 is the approach that was rejected.
+#
+# THE IMPORTANT HALF: the lane STATES ITS OWN GAP. #1699 exists because a lane that
+# silently omits coverage looks identical to a lane that covers it, so a NARROWED lane
+# that stayed quiet about the narrowing would reintroduce exactly this issue's defect
+# one level down. The census below is therefore DERIVED (from cargo metadata, via
+# _package_test_targets — never a hard-coded number that could drift into a false
+# claim) and printed BOTH to stdout as `>>>` lines AND into the component log on every
+# run, naming: how many integration targets cqlite-flight declares, that THIS LANE DOES
+# NOT EXECUTE THEM, which lane does (CI's Flight tier, `.github/workflows/flight-ci.yml`
+# line 229 `cargo test --package cqlite-flight`, mandated on `cqlite-flight/**` AND
+# `cqlite-core/**`, with `required` failing closed on it per #2910), and the issues that
+# own the gap (#3384 general, #3383 first victim). A reviewer reading the log cannot
+# miss it, which is the whole point.
+#
+# What DOES run: 386 unit tests via `--lib` plus main.rs's 2 via `--bins`, observed
+# deterministic in every run of this session. `--bins` is on the command line because an
+# explicit selector SUPPRESSES every target kind not named: dropping it would silently
+# stop executing 2 tests that `-p` and the derived-list cut both ran, i.e. it would
+# create in miniature the never-executed hole this lane exists to close. There are no
+# Rust doctests in the crate to lose (measured: all 10 doc fences are ```text/```json).
+#
+# flight-query-semantics-oracle is LEFT ALONE (design D4) and now carries the ONLY
+# local execution of any cqlite-flight integration target (two of them), alongside
+# memory-budget's one dhat target. That is stated here so the census's "not executed
+# locally by this lane" is not misread as "not executed locally at all".
+#
+# No opt-out env var: cqlite-flight is a committed workspace member and is never
+# legitimately absent. Fixture-dependent sub-targets may still SKIP through the
+# existing dataset machinery, which reports the skip.
+#
+# THE ZERO-TESTS GUARD, in the form that has a SUBJECT here. `check_no_unexpected_zero_tests`
+# keys on cargo's `Running tests/<name>.rs` lines and explicitly disclaims `--lib`
+# ("Running unittests src/lib.rs"), so calling it on a `--lib --bins` selection would be
+# a guard with an EMPTY SUBJECT SET reporting OK — the vacuous-pass shape, and the one
+# thing this lane may never become. Its `--lib` analogue `check_unittest_targets_ran`
+# is called instead: it requires each SELECTED unittest target to be observed AND to
+# have executed a non-zero number of tests, so a cfg change that compiles the unit
+# suite out FAILs the lane instead of greening it.
+#
+# The DERIVATION machinery is deliberately RETAINED (not deleted) so that widening this
+# lane back once #3384 is fixed is a small change: _package_test_targets feeds the
+# census today, and check_declared_test_targets_observed — currently UNCALLED — is the
+# reconciliation the widened lane will call again. See their own comments.
+#
+# Deliberately NOT done: adding `--features observability-testing`. Building the OTel
+# stack is a cost the gate declines on purpose (#1844 excludes that stack from clippy
+# for the same reason), and reversing that is not this component's call.
+run_flight_tests() {
+  local name=flight-tests
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+
+  # The feature flags THIS component passes to cargo — declared ONCE and consumed by
+  # both the test run and the enabled-set derivation, so the two can never disagree.
+  # Empty today (cqlite-flight's `default = []`).
+  local -a feature_args=()
+
+  # LANE-SPECIFIC FIXTURE PREFLIGHT (roborev round-30, Medium). Enrolling this lane in
+  # DATASET_COMPONENTS is NOT sufficient: the generic full-gate preflight only requires the
+  # canonical `test_basic` corpus, while the unit suite this lane executes contains a real-fixture
+  # test (`cqlite-flight/src/stats.rs`, gather_table_stats over test_timeseries/sensor_data) that
+  # RETURNS EARLY — silently, three separate ways — when the fixture or its Statistics.db is absent,
+  # EVEN WITH CQLITE_DATASETS_ROOT set. So a partial corpus produced a green lane that had not
+  # exercised the coverage it advertises, which is #3220's rule ("never let a dataset-dependent test
+  # pass on an empty dataset") and this issue's own thesis in one.
+  #
+  # Checked HERE rather than by patching another package's test: the silent skip is pre-existing
+  # behaviour in cqlite-flight and is filed separately, on the #3420/#3380 precedent that a defect
+  # this lane REVEALS is fixed in its own PR. What this lane owes is not to report a green over it.
+  #
+  # FULL gate only. `--only` and `--lite` stay lenient by design (they are probes, and `--only`
+  # cannot be a verdict — it exits 3 on success), which is the same split the #2078 fixture contract
+  # uses; an opt-out is deliberately visible rather than silent.
+  # "full" spelled the way this script spells it (`-z "$ONLY"` and `LITE -eq 0`), matching the
+  # #2078 preflight's own test rather than inventing a MODE variable that does not exist here.
+  # HONOURS THE DOCUMENTED OPT-OUT (roborev round-31, Medium). Without this the #2078 escape hatch
+  # became INEFFECTIVE: `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` got past the generic preflight and then
+  # this lane failed the run anyway, so an opt-out that the SUMMARY reports as taken did not, in
+  # fact, let the gate finish. A per-lane check that ignores the global opt-out is a second,
+  # undocumented policy — and the opt-out's whole value is that it is VISIBLE in the block
+  # (`missing-fixtures: OPT-OUT`), which a silent per-lane veto destroys.
+  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ -n "${CQLITE_DATASETS_ROOT:-}" ] \
+     && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
+    # EVERY prefix-matching entry must be usable, not just one (roborev round-32, Medium). The Rust
+    # test picks the FIRST entry whose name starts with `sensor_data-` in UNSPECIFIED `read_dir`
+    # order and commits to it — so "some matching directory is complete" does not imply the test
+    # will find a complete one. A second, incomplete `sensor_data-*` directory (or a prefix-matching
+    # REGULAR FILE, which `read_dir` also yields and which makes the test's own `read_dir(&dir)`
+    # fail into its early return) is enough to make the test skip while this lane reports PASS.
+    #
+    # Requiring every match to be a directory carrying a `-Statistics.db` makes the guarantee
+    # ORDER-INDEPENDENT, which is the only way to align a shell preflight with a consumer that
+    # chooses arbitrarily. The alternative roborev offered — replicating the test's exact selection
+    # here — would be a second implementation of the test's choice, and it would go stale the moment
+    # the test changed how it selects.
+    # The corpus subdirectory must EXIST AND BE READABLE before "nothing matches" is a meaningful
+    # statement (self-review). `find … 2>/dev/null` swallows a missing or permission-denied
+    # directory and yields zero entries, which is fail-CLOSED (good) but reports the WRONG CAUSE —
+    # "no sensor_data-* here" instead of "this path is not readable". Naming the wrong cause is the
+    # defect round 20 opened on this very census, one layer down: the verdict is right and the
+    # remedy it points at is useless.
+    local _fx_base="$CQLITE_DATASETS_ROOT/sstables/test_timeseries"
+    local _fx_entry _fx_seen=0 _fx_bad="" _fx_basefail="" _fx_st_out _fx_st_rc _fx_list _fx_enum_rc
+    if [ ! -d "$_fx_base" ]; then
+      _fx_basefail="not-a-directory"
+    elif [ ! -r "$_fx_base" ] || [ ! -x "$_fx_base" ]; then
+      _fx_basefail="unreadable"
+    fi
+    # ENUMERATED BY `find`, NOT BY A GLOB, for the same reason the Statistics.db check is (round 34)
+    # and one round earlier than it would otherwise have been found: a glob's meaning depends on
+    # ambient shell options this script never sets and cannot control — `nullglob` empties an
+    # unmatched pattern, `failglob` makes it an error — and both were reachable through BASHOPTS.
+    # `find -maxdepth 1 -name` also matches the CONSUMER's semantics exactly: Rust's `read_dir`
+    # yields NAMES, including dangling symlinks, which is the invariant round 33 established (the
+    # preflight must judge exactly the set the consumer enumerates). `-print0` because a corpus path
+    # may contain spaces.
+    # mktemp, NOT "$LOG_DIR/..." — the behavioural harness extracts this block and runs it with
+    # no LOG_DIR, and depending on an ambient variable to enumerate the subject set fails open in
+    # precisely the way this status capture was added to close (caught by the r32 cases).
+    _fx_list=$(mktemp "${TMPDIR:-/tmp}/agent-gate-fixtures.XXXXXX") || _fx_list=""
+    if [ -z "$_fx_list" ]; then
+      _fx_enum_rc=99
+    else
+      find -H "$_fx_base" -maxdepth 1 -name 'sensor_data-*' -print0 > "$_fx_list" 2>/dev/null
+      _fx_enum_rc=$?
+    fi
+    # Only when no PRECISE cause is already recorded (roborev job 117, Low — a regression from the
+    # previous round). `_fx_base` missing or unreadable is already diagnosed above, and find then
+    # fails for that same reason; overwriting `not-a-directory` with a generic enumeration failure
+    # sends the reader to the wrong remedy, which is the exact thing the per-cause split exists for.
+    if [ "$_fx_enum_rc" -ne 0 ] && [ -z "$_fx_basefail" ]; then
+      # FAIL-CLOSED on an unenumerable corpus: the alternative is a check over an unknown subset.
+      _fx_basefail="fixture enumeration FAILED (find exit $_fx_enum_rc under $_fx_base) — the"
+      _fx_basefail="$_fx_basefail per-fixture checks below would have run over an unknown subset"
+    fi
+    while IFS= read -r -d '' _fx_entry; do
+      _fx_seen=$((_fx_seen + 1))
+      if [ -L "$_fx_entry" ] && [ ! -e "$_fx_entry" ]; then
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(dangling-symlink)"
+      elif [ ! -d "$_fx_entry" ]; then
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(not-a-directory)"
+      elif [ ! -r "$_fx_entry" ] || [ ! -x "$_fx_entry" ]; then
+        # Distinguished from "no Statistics.db" for the same reason as the base directory above: a
+        # permission problem and a missing fixture need different remedies, and the check that
+        # cannot tell them apart sends the reader to the wrong one.
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(unreadable-directory)"
+      elif _fx_st_out=$(find -H "$_fx_entry" -maxdepth 1 -name '*-Statistics.db' -print -quit 2>/dev/null); _fx_st_rc=$?; [ "$_fx_st_rc" -ne 0 ]; then
+        # A FAILED SCAN IS NOT AN ABSENT FIXTURE (roborev job 114, Medium). `[ -z "$(find ...)" ]`
+        # collapsed both onto one branch: a find that died partway produced empty output and was
+        # reported `no-Statistics.db`, sending the reader to fetch a corpus they already have. The
+        # status is now captured and reported as its own cause. Same three-valued discipline as the
+        # grep sites: 0 = answered, non-zero = could not answer, and "could not answer" is never
+        # folded into an answer.
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(statistics-scan-failed:find-exit-$_fx_st_rc)"
+      elif [ -z "$_fx_st_out" ]; then
+        # `-H` so a VALID symlink to a fixture directory is followed (roborev round-35, Medium).
+        # `find` defaults to `-P` and does not follow its starting point, so a `sensor_data-*`
+        # symlink pointing at a real fixture dir yielded nothing and was reported
+        # `no-Statistics.db` — a FALSE RED that would fail the full gate on a legitimate corpus
+        # layout, which is the direction that teaches people to waive a check. Rust's `read_dir`
+        # + the test's own `read_dir(&dir)` follow it, so the preflight must too. `-H` follows
+        # ONLY the command-line argument, which is exactly the entry under judgement.
+        #
+        # `find`, not `ls <glob>` (roborev round-34, Medium). With `nullglob` inherited through
+        # BASHOPTS an unmatched pattern EXPANDS TO NOTHING, so `ls` runs with no arguments, lists
+        # the CWD and SUCCEEDS — a directory with no Statistics.db would have passed preflight while
+        # the Rust test skipped. The failure depended on an ambient shell option this script never
+        # sets and cannot control, which is the worst kind: correct on the author's box, wrong on
+        # someone else's. `find` takes the pattern as an ARGUMENT, so no glob expansion is involved
+        # at all and the check means the same thing under every shell option.
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(no-Statistics.db)"
+      fi
+    done < "$_fx_list"
+    [ -n "$_fx_list" ] && rm -f "$_fx_list"
+    # ENUMERATED VIA A FILE, NOT A PROCESS SUBSTITUTION (roborev job 114, Medium). `done < <(find
+    # ...)` DISCARDS find's exit status, so a partial enumeration — a permission error midway, a
+    # vanished directory — yielded fewer entries and the "every match must qualify" check passed
+    # over the survivors. That is the empty/partial-subject-set shape this component set exists to
+    # remove, in the component set itself: fewer subjects cannot fail a per-subject check.
+    # A file makes the status observable; it is read AFTER the loop, below.
+    # `-H` on the OUTER enumeration as well (roborev round-38, Medium). Round 35 added it to the
+    # per-entry find and left this one at the default `-P`, so a corpus whose `test_timeseries`
+    # BASE directory is itself a symlink enumerated NOTHING — the preflight then failed the whole
+    # gate on a legitimate layout, while the Rust test's `read_dir` follows it happily. Fixed one
+    # site and missed its sibling: the same recurrence as rounds 11-13 and 37, fifth instance.
+    if [ -n "$_fx_basefail" ] || [ "$_fx_seen" -eq 0 ] || [ -n "$_fx_bad" ]; then
+      status=FAIL
+      {
+        echo "[$name] FAIL-CLOSED: the real-fixture stats test in this unit suite needs"
+        echo "        test_timeseries/sensor_data-*/ WITH a -Statistics.db under"
+        echo "        CQLITE_DATASETS_ROOT ($CQLITE_DATASETS_ROOT)."
+        if [ -n "$_fx_basefail" ]; then
+          echo "        The corpus subdirectory itself is $_fx_basefail:"
+          echo "          $_fx_base"
+          echo "        (so 'nothing matches sensor_data-*' would name the wrong cause)."
+        elif [ "$_fx_seen" -eq 0 ]; then
+          echo "        NOTHING matches sensor_data-* there."
+        else
+          echo "        $_fx_seen entry/entries match, and these are unusable:$_fx_bad"
+          echo "        EVERY match must qualify: the test takes the FIRST read_dir match in"
+          echo "        unspecified order, so one bad entry is enough to make it skip."
+        fi
+        echo "        That test returns early and PASSES when the fixture is missing, so this lane"
+        echo "        would report a green having skipped the coverage it advertises (#3220)."
+        echo "        Remedy: bash test-data/scripts/fetch-datasets.sh, then export the"
+        echo "        CQLITE_DATASETS_ROOT line it prints."
+      } | tee "$log"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
+    echo ">>> [$name] fixture preflight: test_timeseries/sensor_data + Statistics.db present"
+  elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ -z "$ONLY" ] && [ "$LITE" -eq 0 ]; then
+    echo ">>> [$name] fixture preflight: SKIPPED (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the real-fixture stats test may return early, so this lane does NOT validate the wide-table stats path in this run (#3425)"
+  fi
+
+  # The enabled set. A failed derivation is a FAIL naming the derivation, never a
+  # fallback to "nothing enabled" — that would be a verdict with no measurement behind
+  # it, which is the vacuous-green shape this lane exists to prevent.
+  local enabled
+  if ! enabled=$(_resolved_package_features cqlite-flight ${feature_args[@]+"${feature_args[@]}"}); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-flight's enabled feature set"
+      echo "        via 'cargo tree -p cqlite-flight' (a cargo failure, an offline registry,"
+      echo "        or no line for the package). The DERIVATION failed, not the tests."
+      echo "        NOTE: this oracle is package-scoped 'cargo tree', NOT 'cargo metadata' —"
+      echo "        metadata resolves the WHOLE workspace and reports other members'"
+      echo "        features as this package's (issue #1699, roborev round-6)."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # The DECLARED integration-target set, from cargo metadata. This lane does not RUN
+  # these targets (see the scope note above); it COUNTS them, so the census it prints
+  # states the size of its own gap truthfully rather than from a hard-coded number that
+  # would drift the moment a target is added or removed. Same fail-closed direction as
+  # the enabled set: a failed DERIVATION is a FAIL naming the derivation, never a
+  # census that quietly claims a gap of unknown size.
+  local target_meta declared_n=0 rf_n=0 rf_reasons=""
+  if ! target_meta=$(_package_test_targets cqlite-flight); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-flight's declared integration"
+      echo "        (test) targets from cargo metadata (no jq/python3, a metadata"
+      echo "        failure, or an empty target set). The DERIVATION failed, not the"
+      echo "        tests. Without it this lane cannot state the size of the coverage"
+      echo "        gap it deliberately carries (#3384), and an UNDECLARED gap is the"
+      echo "        silent omission issue #1699 exists to eliminate."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Count the declared targets, and separately those cargo could not have run here
+  # anyway (unmet `required-features`) — reported as a sub-count so the census does not
+  # overstate what a widened lane would gain.
+  local tname rf rfl off
+  while IFS=$'\t' read -r tname rf; do
+    [ -n "$tname" ] || continue
+    declared_n=$((declared_n + 1))
+    off=""
+    for rfl in ${rf//,/ }; do
+      case "$enabled" in *" $rfl "*) ;; *) off="$rfl"; break ;; esac
+    done
+    if [ -n "$off" ]; then
+      rf_n=$((rf_n + 1))
+      rf_reasons="$rf_reasons $tname(required-features[$rf]:off[$off])"
+    fi
+  done <<< "$target_meta"
+
+  # A census over ZERO declared targets is a FAILED DERIVATION, not a lane with no gap:
+  # _package_test_targets already fails closed on an empty result, so reaching here with
+  # 0 would mean the count itself broke, and a "0 integration targets un-run" line would
+  # be a false all-clear.
+  if [ "$declared_n" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: counted 0 declared integration targets for"
+      echo "        cqlite-flight. The COUNT failed, not the tests — this package"
+      echo "        declares ~42, and a census claiming an empty gap would be a false"
+      echo "        all-clear about the omission this lane must declare (#3384)."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ---- THE CENSUS -------------------------------------------------------------
+  # Built ONCE and emitted TWICE — as `>>>` lines on the gate's stdout and as the head
+  # of the component log — because "the log a reviewer actually reads" is both of those
+  # and a gap stated in only one of them is a gap someone will miss. Not a comment: a
+  # comment is not read on a run.
+  local -a census=()
+  census+=("cargo test --no-fail-fast -p cqlite-flight --lib --bins (UNIT tests only, #1699/#3384)")
+  census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT RUN:")
+  census+=("  cqlite-flight declares $declared_n integration (test) targets. THIS LANE EXECUTES NONE OF THEM.")
+  census+=("  ($rf_n of the $declared_n could not run here in any case: unmet required-features.)")
+  census+=("  WHY: the integration half of this package is ~50% NON-DETERMINISTIC under")
+  census+=("       intra-package parallelism — 4 whole-package runs went PASS/FAIL/PASS/FAIL")
+  census+=("       with 2 different victims (issue_3058_bypass_path_taken,")
+  census+=("       issue_2370_gauge_readback_test). Ruled out by measurement: box load,")
+  census+=("       nice, --test-threads=2, concurrent MAIN-lane compilation.")
+  census+=("       Issues: #3384 (the general suite-hygiene defect), #3383 (first victim).")
+  # THE OBSERVATION, NOT A TAXONOMY (roborev rounds 20-27; the rationale is on
+  # _crate_gated_test_targets). A crate-level `#![cfg(feature = "X")]` with X off means the target
+  # COMPILES, runs ZERO tests and exits 0 — so naming a runner for it is the census's most
+  # consequential claim, and it is the one that kept being wrong, five rounds running. This lane now
+  # reports what it can actually SEE: which targets carry a crate-level gate, the gate text
+  # verbatim, and its own enabled feature set. Comparing them is left to the reader, who can do it
+  # correctly, and #3375 remains the record of which targets execute nowhere fleet-wide.
+  local gated_meta gated_n=0 gated_lines="" grel ggate gname
+  if ! gated_meta=$(_crate_gated_test_targets cqlite-flight); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive which cqlite-flight targets carry a CRATE-LEVEL"
+      echo "        gate (cargo metadata, the metadata parser, or an unreadable target source)."
+      echo "        The DERIVATION failed, not the tests. Reporting no gated targets would be a"
+      echo "        false all-clear about the omission this lane exists to declare."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  while IFS=$'\t' read -r gname grel ggate; do
+    [ -n "$grel" ] || continue
+    gated_n=$((gated_n + 1))
+    gated_lines="$gated_lines $grel[$ggate]"
+  done <<< "$gated_meta"
+  census+=("  OF THOSE, $gated_n contain an INNER cfg attribute (#![cfg(...)] / #![cfg_attr(...)]),")
+  census+=("       reported as OCCURRENCES with file:line and the attribute OPENING LINE below —")
+  census+=("       not verbatim: a multiline attribute is truncated at its first line, so compare the")
+  census+=("       file:line, which is authoritative. NOT a claim that each is")
+  census+=("       CRATE-level: deciding that needs a Rust parser, and five review rounds showed a")
+  census+=("       line scan cannot approximate it (a module-level inner attribute looks identical")
+  census+=("       here). The file:line is authoritative — open it. A crate-level gate naming a feature")
+  census+=("       that is off means the target COMPILES, runs ZERO tests and exits 0.")
+  census+=("       CI's tier passes NO --features, so it enables whatever this package's own")
+  census+=("       resolve enables — which is NOT the same as 'default' (roborev round-28, Low):")
+  census+=("       cqlite-flight's 'default' is empty, yet the self-referential dev-dependency")
+  census+=("       turns 'test-util' on for every test build, so a target gated solely on")
+  census+=("       'test-util' DOES run there. Compare each gate below against the resolved")
+  census+=("       'enabled features' line printed at the end of this census — not against")
+  census+=("       'default', and not against an inference.")
+  census+=("  THIS LANE DOES NOT CLASSIFY THEM, DELIBERATELY: #3375 is the record of the targets")
+  census+=("       that execute NOWHERE. A classification here was wrong in five consecutive review")
+  census+=("       rounds (grammar, stacked gates, conjunctions, compile-only invocations,")
+  census+=("       cfg_attr), always the classification and never the observation — so the")
+  census+=("       observation is what is reported. The gate text and this lane's enabled features")
+  census+=("       are both printed; comparing them is the reader's call, not this lane's guess.")
+  census+=("  WHO RUNS THE REST: CI's Flight tier — .github/workflows/flight-ci.yml line 229,")
+  census+=("       'cargo test --package cqlite-flight', mandated on cqlite-flight/** AND")
+  census+=("       cqlite-core/**, with the 'required' check failing closed on it (#2910). SCOPED:")
+  census+=("       that claim does not extend to the crate-gated targets above, because CI's")
+  census+=("       invocation enables no features either.")
+  census+=("       Locally, flight-query-semantics-oracle runs 2 of these targets and")
+  census+=("       memory-budget runs 1 (--test issue_1494_producer_mem_budget).")
+  census+=("  This omission is DECLARED, not silent: widening the lane back is a small")
+  census+=("       change once #3384 is fixed (the derivation machinery is retained).")
+  local cl
+  for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
+  [ -n "$rf_reasons" ] && echo ">>> [$name] declared targets with unmet required-features:$rf_reasons"
+  [ -n "$gated_lines" ] && echo ">>> [$name] targets with an inner cfg attribute (file:line + attribute OPENING LINE, truncated if multiline; crate-level-ness NOT claimed):$gated_lines"
+  echo ">>> [$name] enabled features (cargo tree -p, package-scoped):$enabled"
+
+  # The log opens WITH the census (`>` here, `>>` for cargo below), so the omission is
+  # in the component log on every run whether the lane passes or fails.
+  {
+    echo "==== [$name] COVERAGE CENSUS (issue #1699 / #3384) ===="
+    for cl in "${census[@]}"; do echo "$cl"; done
+    [ -n "$rf_reasons" ] && echo "declared targets with unmet required-features:$rf_reasons"
+    [ -n "$gated_lines" ] && echo "targets with an inner cfg attribute (file:line + attribute OPENING LINE, truncated if multiline; crate-level-ness NOT claimed):$gated_lines"
+    echo "enabled features (cargo tree -p, package-scoped):$enabled"
+    echo "==== end census ===="
+  } > "$log"
+
+  # --no-fail-fast for the same reason legacy-heuristics carries it: cargo test stops
+  # after the first failing test BINARY, and a lane whose purpose is to surface
+  # never-executed rot must surface ALL of it in one run rather than as a serial reveal.
+  if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      cargo test --no-fail-fast -p cqlite-flight ${feature_args[@]+"${feature_args[@]}"} \
+      --lib --bins >>"$log" 2>&1; then
+    # A green cargo exit is NOT sufficient: a unit suite whose modules are cfg-gated out
+    # compiles, runs 0 tests and exits 0. The guard requires BOTH selected unittest
+    # targets to be OBSERVED and to have executed a non-zero count — an affirmative
+    # measurement, not the absence of a bad signal. Its verdict goes to stderr, so `2>>`
+    # lands it in the component log while the `if` tests the GUARD's own exit status.
+    # The guard's subject set is DERIVED from cargo metadata, never hard-coded: `--bins`
+    # selects every binary, so a hard-coded pair would let a newly added one run zero
+    # tests while the guard still reported OK (roborev round-7 finding).
+    local -a unit_srcs=()
+    local _us_line
+    while IFS= read -r _us_line; do
+      [ -n "$_us_line" ] && unit_srcs+=("$_us_line")
+    done <<EOF
+$(_package_unittest_srcs cqlite-flight lib,bin "$enabled")
+EOF
+    if [ "${#unit_srcs[@]}" -eq 0 ]; then
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-flight's lib/bin unittest targets" >>"$log"
+      echo "        from cargo metadata. The DERIVATION failed, so the zero-test guard has no" >>"$log"
+      echo "        subject — and a guard with no subject reports OK having measured nothing." >>"$log"
+      status=FAIL
+    elif check_unittest_targets_ran "$name" "$log" "${unit_srcs[@]}" 2>>"$log"; then
+      echo ">>> [$name] zero-test guard subject (derived): ${unit_srcs[*]}"
+      status=PASS
+    else
+      status=FAIL
+    fi
+  else
+    status=FAIL
+  fi
+  if [ "$status" = FAIL ]; then
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# legacy-heuristics: BUILD cqlite-core at `default + legacy-heuristics` AND EXECUTE
+# the tests that feature turns on (issue #1699).
+#
+# Two properties, neither of which any other component has:
+#
+#  1. THE FEATURE SET. run_clippy's cqlite-core arm enables legacy-heuristics
+#     alongside parquet, delta-scan and ~30 more features at once, so the feature is
+#     never compiled at its OWN minimal set. A warning-class defect visible only at
+#     `default + legacy-heuristics` surfaces here and nowhere else, which is why this
+#     half runs under RUSTFLAGS=-D warnings.
+#  2. EXECUTION. That same clippy pass already test-COMPILES the gated bodies
+#     (--all-targets), so a compile-only lane would add nothing. What has never
+#     happened anywhere — no gate component, no CI job — is RUNNING the positively
+#     gated bodies. The `#[cfg(not(feature = "legacy-heuristics"))]` polarity already
+#     runs in core-tests; the `#[cfg(feature = ...)]` polarity is the subject here.
+#     The distinguishing property: an INVERTED assertion in a positively-gated test
+#     body FAILs this component while clippy still passes.
+#
+# The --test target set is DERIVED from the committed source, never hard-coded: a
+# literal list drifts the moment a sixth gated test file is added, and the drift is
+# INVISIBLE (the lane stays green while its subject shrinks). Derivation is
+# FAIL-CLOSED — zero derived targets is a FAIL naming the derivation, never a PASS and
+# never a SKIP, because a lane with no subject has no verdict to give.
+#
+# --lib is included because cqlite-core/src/** carries legacy-heuristics cfg sites
+# whose inline #[cfg(test)] bodies are gated the same way.
+#
+# No opt-out env var: the committed test files are never legitimately absent.
+# _legacy_coreq_sites — report the `legacy-heuristics`-gated cfg SITES that also require a
+# feature this lane does not enable. It reports SITES. It deliberately does NOT classify
+# what each site gates.
+#
+# WHY THE CLASSIFIER IS GONE (this is a DESCOPE, on a pre-commitment, not a patch).
+# Earlier cuts of this function tried to say how many gated *test bodies* were omitted:
+# it distinguished test fns from imports, detected test-ness from attribute paths, and
+# inferred Boolean structure. That ambition produced a review finding in FOUR consecutive
+# rounds — counting attributes as bodies (r5), assuming conjunction so `any(...)` read as a
+# gap (r7), missing stacked attributes that Rust ANDs (r8), and classifying a gated `mod
+# tests` as "support code" while ignoring crate-level `#![cfg(...)]` entirely (r10). The
+# r10 reviewer's own remedy was "preferably using Rust syntax tooling", which is the tell:
+# counting test BODIES requires parsing Rust, and this is a bash gate component.
+#
+# CLAUDE.md records the precedent and the ruling. #3229's `census-exclusion` oracle was
+# DELETED by owner ruling because its defect count was RISING across review rounds and
+# later rounds kept finding defects in code the previous fix rounds had introduced — with
+# the durable lesson that a guard whose correctness is not establishable is worse than no
+# guard. The same signal appeared here, so the PR pre-committed to descoping on the next
+# classification finding rather than making that call under pressure afterwards.
+#
+# WHAT IS LOST, AND WHY IT DID NOT MATTER. The census's job is to tell a human "gated code
+# in this file does not execute here, go look". A count of bodies was never needed for
+# that, and for a gated MODULE the count is unknowable without parsing anyway (one site can
+# gate twenty tests). Reporting sites is both simpler and STRICTLY MORE HONEST: the claim
+# "anything gated by this site does not execute in this lane" is true for a test, an
+# import, a module, or a crate root, which is exactly why it needs no classification.
+#
+# WHAT IS KEPT, because it is the conservative half and it is cheap: a site whose Boolean
+# shape this function cannot evaluate — `not(...)`, `any(...)`, `cfg_attr` — is reported as
+# UNCLASSIFIED rather than as a gap. `any(feature = "legacy-heuristics", feature = "X")` is
+# REACHABLE here through the legacy arm, so calling it omitted would be a false claim; and
+# `not(...)` inverts the question. Tokens are still accumulated across the whole attribute
+# CLUSTER, because Rust ANDs stacked cfg attributes and a per-attribute view reports a
+# false zero-gap.
+#
+# Inner attributes (`#![cfg(...)]`) are now matched too — cheap once nothing is being
+# attributed to a following item, and they are how a whole test file gets gated.
+#
+# Emits one TAB-separated record per site: <site|skip> <TAB> <line no> <TAB> <missing,features>
+# ============================================================================================
+# STATED LIMIT OF THIS SCANNER — read this before adding a shape to it (issue #1699, #3472).
+#
+# THIS IS AN OCCURRENCE REPORT, NOT A PARSER, AND ITS COVERAGE IS DELIBERATELY INCOMPLETE.
+# It reports the Rust attribute and module shapes it RECOGNISES. The set of shapes it does NOT
+# model is OPEN — Rust attribute and module syntax is defined by rustc, not here — so no amount
+# of iteration finishes it. Twelve review findings across this branch were all one family: a
+# further shape the scanner did not model. Rounds 41 and 42 already made the correct structural
+# move (real trivia state; descope the crate-gate scanner to an occurrence report) and the
+# findings continued, which is the evidence that the surface is unbounded rather than merely
+# large.
+#
+# WHAT THIS SCAN DOES AND DOES NOT GIVE YOU. Read this instead of relying on a guarantee — there
+# deliberately is not one, and the two attempts to state one are recorded below because the second
+# was falsified within a day of the first.
+#
+# THE INTENT: an unrecognised shape should be reported as UNCLASSIFIED rather than omitted, so that
+# a miss costs NOISE (an unattributable entry a human reads) rather than BLINDNESS (a clean zero
+# over gated code). Every change here must push in that direction, and where the scan can detect
+# that it cannot tell, it says so at runtime — an unmodelled string-literal shape prints
+# `[UNCLASSIFIED: ...]` rather than resolving.
+#
+# THE INTENT IS NOT ENFORCED, AND IT CANNOT BE. By construction this scan cannot enumerate the
+# shapes it fails to detect: an undetected shape produces no output to mark unclassified. So the
+# direction is a design aim, NOT a property you may rely on, and the following are MEASURED
+# counterexamples rather than hypotheticals:
+#   * a delimiter inside a string literal (`doc = "]"`) closed a cluster early     — FIXED (job 101)
+#   * a `mod` form the patterns do not match (`mod r#type;`, a split declaration)  — OPEN  (job 103)
+#   * a delimiter inside a line comment (`feature = "x" // ]`)                     — OPEN  (job 105)
+# The two open ones resolve to ABSENT, not UNCLASSIFIED, and emit nothing at all.
+#
+# THEREFORE, THE ONE SENTENCE TO CARRY AWAY: a clean census is evidence that nothing was
+# RECOGNISED — never evidence that nothing is THERE.
+#
+# WHY THIS IS STATED AS A DISCLAIMER AND NOT AS A NARROWER GUARANTEE. It was a guarantee twice.
+# Unscoped, it said an unrecognised shape is always UNCLASSIFIED; job 103 falsified that. Scoped to
+# ATTRIBUTE AND CLUSTER shapes, it excluded declaration recognition; job 105 falsified that too,
+# with a comment-borne delimiter, which IS a cluster shape. A guarantee qualified per path acquires
+# a new exception per review round, for exactly the reason the scanner does — so a third
+# qualification would be the prose equivalent of an eighth pattern. An overclaimed guarantee is
+# worse than an omission: an omission leaves a reader uninformed, an overclaim has them relying on
+# cover that is not there, and a reader of this line does not read #3472.
+#
+# DO NOT FIX EITHER OPEN ITEM WITH ANOTHER PATTERN. #3472 holds the seven measured lexical contexts
+# and the reasoning; the answers there are syntax-aware tooling or deleting the scanning half.
+#
+# WHAT NOT TO DO: do not add a thirteenth shape and call the family closed. If correctness rather
+# than advice is ever required of this scan, the answer is syntax-aware tooling or deleting the
+# scanning half — not another pattern. #3472 carries the family and the reasoning.
+# ============================================================================================
+_legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
+  awk -v LH="legacy-heuristics" -v ENABLED=" $2 " '
+    function countch(str, ch,   n, i) {
+      n = 0
+      for (i = 1; i <= length(str); i++) if (substr(str, i, 1) == ch) n++
+      return n
+    }
+    # A DELIMITER INSIDE A STRING LITERAL IS TEXT, NOT STRUCTURE (roborev job 101, Medium).
+    # A stacked multiline attribute containing `")"` terminated collection early, split the
+    # cluster, and dropped a later co-required feature — so the census reported ZERO gaps while
+    # gated code was compiled out. That is the census under-reporting, i.e. the SILENT direction.
+    # Quoted spans are removed before counting. Where the removal itself cannot be trusted — an
+    # escaped quote or a raw string, both shapes this scan does not model — the CLUSTER is marked
+    # UNCLASSIFIED via the existing path rather than counted on a guess. Declaring the unknown is
+    # the whole reason cl_unclass exists; this is one more producer of it, not a new mechanism.
+    function nostr(str) { gsub(/"[^"\\]*"/, "", str); return str }
+    function litok(str) { return (str !~ /\\"/ && str !~ /r#"/ && nostr(str) !~ /"/) }
+    function emit(   kind) {
+      if (!(cl_has_lh && cl_miss != "")) return
+      kind = cl_unclass ? "skip" : "site"
+      printf "%s\t%d\t%s\n", kind, cl_line, cl_miss
+    }
+    function reset_cluster() {
+      cl_has_lh = 0; cl_miss = ""; cl_unclass = 0; cl_line = 0
+    }
+    function handle_attr(a,   tmp, m) {
+      if (cl_line == 0) cl_line = attr_line
+      tmp = a
+      while (match(tmp, /feature[ \t]*=[ \t]*"[^"]+"/)) {
+        m = substr(tmp, RSTART, RLENGTH)
+        sub(/^feature[ \t]*=[ \t]*"/, "", m)
+        sub(/"$/, "", m)
+        if (m == LH) cl_has_lh = 1
+        else if (index(ENABLED, " " m " ") == 0 && index(" " cl_miss ",", " " m ",") == 0)
+          cl_miss = (cl_miss == "" ? m : cl_miss "," m)
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+      # An unmodelled operator anywhere in the cluster makes the CLUSTER unclassifiable.
+      if (a ~ /not[ \t]*\(/ || a ~ /any[ \t]*\(/ || a ~ /cfg_attr/) cl_unclass = 1
+    }
+    {
+      t = $0
+      sub(/^[ \t]+/, "", t)
+      if (collecting) {
+        buf = buf " " t
+        if (!litok(t)) cl_unclass = 1
+        depth += countch(nostr(t), "(") - countch(nostr(t), ")")
+        if (depth <= 0) {
+          collecting = 0
+          handle_attr(buf)
+          if (collecting_inner) { emit(); reset_cluster(); collecting_inner = 0 }
+        }
+        next
+      }
+      if (t ~ /^#!?\[/) {
+        buf = t
+        attr_line = NR
+        # An INNER attribute (`#![...]`) gates the ENCLOSING scope and attaches to no
+        # following item, so it is its own cluster and is emitted immediately. Outer
+        # attributes are NOT separated this way: Rust attaches them to the next item across
+        # blank lines and comments, so consecutive `#[...]` groups genuinely are one
+        # cluster (that is what makes stacked-attribute conjunctions work). Without this
+        # split a crate-level `#![cfg(...)]` merged with the attributes of the next item into a
+        # single site, under-counting sites and merging their feature lists — caught by the
+        # fixture below rather than by review.
+        inner = (t ~ /^#!\[/)
+        if (!litok(t)) cl_unclass = 1
+        depth = countch(nostr(t), "(") - countch(nostr(t), ")")
+        if (depth > 0) { collecting = 1; collecting_inner = inner }
+        else {
+          handle_attr(buf)
+          if (inner) { emit(); reset_cluster() }
+        }
+        next
+      }
+      # Line comments, BLOCK comments and blanks are all cluster trivia (roborev round-36,
+      # Medium). Treating only `//` as trivia meant a `/* … */` between stacked
+      # `#[cfg(feature = "legacy-heuristics")]` and `#[cfg(feature = "experimental")]`
+      # attributes SPLIT the cluster, so the co-required site was dropped and the census could
+      # report a FALSE ZERO GAP — the silent under-report direction, in the one output whose
+      # entire job is to state omissions.
+      #
+      # A multi-line block comment is tracked with a state flag; `in_block` deliberately does not
+      # reset the cluster, which is the whole point. Not a Rust parser: it recognises the trivia
+      # forms this corpus contains and anything else still ends the cluster, which is the
+      # conservative direction (an unrecognised line ends a cluster ⇒ at worst a site is reported
+      # separately, never silently merged away).
+      if (in_block) { if (t ~ /\*\//) in_block = 0; next }
+      if (t ~ /^\/\*/) { if (t !~ /\*\//) in_block = 1; next }
+      if (t ~ /^\/\// || t ~ /^$/) next   # comments and blanks keep the cluster intact
+      # Any other line ENDS the cluster: emit its verdict, then start fresh. What the
+      # cluster gates is deliberately not inspected.
+      emit(); reset_cluster()
+    }
+    END { emit() }
+  ' "$1"
+}
+
+# _crate_gated_test_targets <pkg> — every declared `test` target of <pkg> whose source carries a
+# CRATE-LEVEL inner gate, as `<target-name>\t<rel-path>\t<gate text, VERBATIM>`.
+#
+# DESCOPED ON A PRE-COMMITMENT (roborev rounds 20-27). This function used to CLASSIFY each gated
+# target — off-here vs run-by-another-component vs CI-covered — with a feature grammar, a
+# conjunction evaluator, a selector-reconciliation predicate over the gate's own source, and set
+# arithmetic over target identities. That machinery produced a finding in five review rounds:
+#   r21  an OPEN grammar, so `not(...)`/`any(...)` could read as "off" (false EXECUTE NOWHERE)
+#   r21  `ci_n` counted targets cargo skips for unmet required-features
+#   r22  only the FIRST of several stacked gates was read (conjunctive; hid a gap)
+#   r22  compile-only invocations (`cargo build`, `clippy`, `--no-run`, `--lib`) counted as runners
+#   r23  only the FIRST off feature of an `all(...)` was returned
+#   r23  UNCLASSIFIED targets printed under the "executes nowhere" heading
+#   r27  `#![cfg_attr(..., cfg(...))]` unrecognised, so a compiled-out target read as CI-covered
+# EVERY ONE was the CLASSIFICATION being wrong. Not once was the OBSERVATION wrong: the gate is
+# there, and here is its text.
+#
+# The previous commit pre-committed to descoping on the next classification finding rather than
+# re-litigating it; r27 produced one, so this is that descope. It is the same call this change
+# already made for the legacy co-required census (sites, not bodies) and the same call the owner
+# made on #3312's delivery-mode classifier: when a component keeps producing findings, remove the
+# part that requires judgement instead of patching the judgement again.
+#
+# WHY THE VERBATIM FORM IS NOT MERELY SMALLER BUT CORRECT WHERE THE CLASSIFIER WAS NOT: r27's
+# `cfg_attr` case needs no handling here, because nothing is interpreted. An unrecognised gate form
+# is printed, and a reader seeing `#![cfg_attr(feature = "x", cfg(feature = "y"))]` next to this
+# lane's enabled feature set draws the right conclusion, where the classifier had to model
+# `cfg_attr` semantics to avoid asserting a wrong one. The pattern therefore matches BOTH `#![cfg(`
+# and `#![cfg_attr(` — presence, not meaning.
+#
+# What is lost: the computed 14/1/27 split. That figure corroborated CLAUDE.md's independently
+# recorded #3375 count, which is worth something — so the census still cites #3375 as the record of
+# which targets execute nowhere, and simply stops deriving it here.
+#
+# Fail-closed on a failed derivation or an unreadable declared source (rounds 25-26): an empty
+# result must mean "nothing is gated", never "I could not tell".
+_crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
+  local pkg="$1" meta sp rel gate
+  meta=$(_package_test_targets_gated "$pkg" __none__) || return 1
+  [ -n "$meta" ] || return 1
+  # FIVE fields now (roborev round-36 added required-features to the producer). Reading four would
+  # silently append the 5th to `rel`, because the LAST `read` variable absorbs the remainder — so
+  # this consumer had to change with the producer even though it ignores the new field. That
+  # coupling is exactly why the producer's record shape is documented on its own line.
+  while IFS=$'\t' read -r _tn sp _how rel _rf_ignored; do
+    # An EMPTY src_path is a FAILED derivation, not a target to skip (self-review of the round-25/26
+    # class). Skipping it drops the target from every population, so it lands among the ungated rest
+    # BY OMISSION — the same silent-exclusion shape those two rounds fixed for unreadable sources,
+    # reachable here through a metadata record cargo produced without a path.
+    if [ -z "$sp" ]; then
+      echo "NO-SRC-PATH for declared target '$_tn' (cargo metadata record carried no src_path)" >&2
+      return 1
+    fi
+    if [ ! -r "$sp" ]; then
+      echo "UNREADABLE $sp (declared target $_tn)" >&2
+      return 1
+    fi
+    # ONLY THE CRATE'S LEADING INNER-ATTRIBUTE REGION (roborev round-35, Low). An inner
+    # `#![cfg(...)]` is legal INSIDE an inline module too (`mod m { #![cfg(feature = "x")] … }`),
+    # where it gates that module and NOT the target — reporting it as a crate-level gate would
+    # overstate the census in the same "names something false" direction round 20 opened. Rust
+    # requires crate-level inner attributes to precede every item, so the region is: from the top,
+    # across blank lines, comments (`//`, `//!`) and attributes, stopping at the FIRST line that is
+    # none of those. Conservative by construction — an attribute after any item is not counted, and
+    # nothing is inferred about it.
+    #
+    # ONE awk PASS, not `grep | tr | sed` (roborev round-28, two Mediums in one line):
+    #   * the pipeline's exit status was IGNORED, so a read error produced empty or partial output
+    #     and the target silently vanished from the census — the fail-closed contract broken by the
+    #     one construct that cannot report failure. awk exits 0 for "no match" and non-zero for a
+    #     real error, which is exactly the distinction the pipeline could not make;
+    #   * a MULTILINE attribute — `#![cfg(all(` … `))]`, which rustfmt produces for a long
+    #     condition — was truncated to `#![cfg(`, discarding the very condition the reader needs.
+    #     Parens are balanced across lines instead, so the whole attribute is printed.
+    # No such attribute exists in this corpus today (measured: 0 across cqlite-flight/tests), so
+    # this is the direction where a defect would have been invisible until someone reformatted.
+    # DESCOPED TO AN OCCURRENCE REPORT (roborev rounds 37/38/40/41/42). Five consecutive rounds
+    # found the next syntax that fooled a structural scan of the leading region: `//`, `/* */`,
+    # `/*! */`, a multiline `#![cfg(all(`, a multiline NON-cfg attribute, and finally brackets
+    # inside a STRING LITERAL (`#![doc = "["]`) throwing off the bracket arithmetic. Round 42's
+    # reviewer suggested the honest remedy itself — "use Rust syntax tooling" — which a bash gate
+    # component cannot have. Deciding *whether an inner attribute is crate-level* requires a Rust
+    # parser; a line scan cannot, and every attempt to approximate it produced a new false claim.
+    #
+    # So this stops deciding. It reports OCCURRENCES: every line that looks like an inner cfg
+    # attribute, verbatim, with the file it came from. The census states the limitation in the same
+    # breath, so the reader knows a module-level inner attribute is indistinguishable from a
+    # crate-level one HERE and can open the file — which is the same call this change already made
+    # twice (the classifier became an observation in round 27; the legacy census reports sites, not
+    # bodies). What is lost is a claim nobody could support; what remains needs no grammar at all.
+    # TRI-STATE, not `|| true` (roborev root pass, Medium). `|| true` swallowed a source-read
+    # failure and every transform error, so a partial or failed scan reported "no gated
+    # occurrences" — the census's own all-clear, produced by the census failing. grep exits 0 for
+    # matches, 1 for none, >=2 for a real error; only the last is fatal, and it FAILs the
+    # derivation rather than returning a shorter list.
+    local _gr_out _gr_rc=0
+    _gr_out=$(grep -nE '^[[:space:]]*#!\[[[:space:]]*cfg(_attr)?[[:space:]]*\(' "$sp") || _gr_rc=$?
+    if [ "$_gr_rc" -ge 2 ]; then
+      echo "SCAN-ERROR grep exit $_gr_rc on $sp (declared target $_tn)" >&2
+      return 1
+    fi
+    # "OPENING LINE", not "verbatim" (roborev root pass at aabae56ea, Low). The previous label
+    # over-claimed: for a multiline `#![cfg(all(` this captures only the first line, so the census
+    # omitted the very conditions it tells the reader to compare against the enabled feature set —
+    # and the self-test only checked the `L<line>:` prefix, so it could not see the truncation.
+    # Collecting the whole attribute needs a Rust parser (see the descope note above), so the claim
+    # is narrowed to what the scan can support: file, line, and the opening line, explicitly marked
+    # `+` when more of the attribute follows. The line number is what a reader acts on.
+    # GUARDED on non-empty: `printf '%s\n' ""` emits ONE BLANK LINE, so the marker sed below
+    # turned a file with NO inner cfg attribute into a bare "+" — a false occurrence report on
+    # ordinary code. Caught by this suite's own r42 ungated case, not by either hand-built fixture:
+    # two fixtures that both HAVE the thing cannot see the empty case.
+    if [ -z "$_gr_out" ]; then
+      gate=""
+    else
+      gate=$(printf '%s\n' "$_gr_out" \
+        | sed 's/^\([0-9]*\):[[:space:]]*/L\1: /' \
+        | sed 's/$/+/; s/\()\][[:space:]]*\)+$/\1/' \
+        | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')
+    fi
+    [ -n "$gate" ] || continue
+    printf '%s\t%s\t%s\n' "$_tn" "$rel" "$gate"
+  done <<< "$meta"
+}
+
+# _package_test_targets_gated <pkg> <feature> — one TAB-separated record per `test`
+# target of <pkg>: `<name>\t<abs src_path>\t<manifest|source>\t<package-relative path>`,
+# where the fourth field is the identifier cargo prints after `Running ` (so the zero-tests
+# guard and the allowed-zero list agree by construction), and the third field is
+# `manifest` when the target's `required-features` name <feature> (cargo gates it) and
+# `source` otherwise (the caller must then scan src_path itself).
+#
+# roborev round-7 finding (Medium): the legacy lane discovered targets with a
+# `tests/*.rs` GLOB plus a cfg-string scan, which cannot see two shapes cargo does:
+# a target gated ONLY by `required-features = ["legacy-heuristics"]` (its source may
+# contain no cfg string at all), and a DIRECTORY-style target (`tests/foo/main.rs`).
+# Either would be silently omitted while the lane's own report claims the set is derived
+# so that "a new gated file is picked up with no gate edit" — so the CLAIM was wrong, not
+# only the code. cargo is the authority on which targets exist and how they are gated.
+_package_test_targets_gated() {
+  local pkg="$1" feat="$2"
+  local meta out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  # jq FIRST, then python3, then failure (roborev round-18, Medium) — see
+  # _package_unittest_srcs above for why a single-parser helper is a false red rather than
+  # a missing convenience. Differentially tested against the python half by
+  # test_agent_gate_summary.sh section 31 over this workspace's real metadata.
+  if command -v jq >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" --arg feat "$feat" '
+      .packages[] | select(.name == $n)
+      | ((.manifest_path // "") | split("/") | .[0:-1] | join("/")) as $root
+      | .targets[] | select([ (.kind // [])[] | select(. == "test") ] | length > 0)
+      | ((."required-features" // .required_features // [])) as $rf
+      | (.src_path // "") as $sp
+      | [ (.name // ""), $sp,
+          (if ($rf | index($feat)) then "manifest" else "source" end),
+          (if ($root != "" and ($sp | startswith($root + "/")))
+           then ($sp | ltrimstr($root + "/")) else $sp end),
+          ($rf | join(",")) ] | @tsv') || return 1
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
+    return 0
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  out=$(printf '%s' "$meta" | python3 -c '
+import json, os, sys
+pkg, feat = sys.argv[1], sys.argv[2]
+d = json.load(sys.stdin)
+for p in d.get("packages", []):
+    if p.get("name") != pkg:
+        continue
+    root = os.path.dirname(p.get("manifest_path", ""))
+    for t in p.get("targets", []):
+        if "test" not in (t.get("kind") or []):
+            continue
+        rf = t.get("required-features") or t.get("required_features") or []
+        how = "manifest" if feat in rf else "source"
+        sp = t.get("src_path") or ""
+        # The 4th field is the PACKAGE-RELATIVE path, which is exactly what cargo prints
+        # after `Running ` and therefore what the zero-tests guard keys on. Derived from the
+        # manifest dir rather than by stripping a `tests/` prefix: an explicitly mapped
+        # `[[test]] path = "..."` target need not live under tests/ at all, and the strip
+        # would have left an ABSOLUTE path that can never match (roborev round-10 finding).
+        rel = sp[len(root) + 1:] if root and sp.startswith(root + os.sep) else sp
+        # 5th field: the COMPLETE required-features list (roborev round-36). The caller must compare
+        # ALL of it against the resolved feature set, because cargo REJECTS an explicit
+        # `--test <name>` whose required-features are unmet, so naming such a target is a FALSE RED.
+        # NOTE no apostrophes in this comment: it sits inside a single-quoted `python3 -c` body, so
+        # one would terminate the string. That has now bitten this file twice (round 25 was the
+        # cli-tests body); `bash -n` catches it, which is why it is always worth running.
+        print("%s\t%s\t%s\t%s\t%s" % (t.get("name", ""), sp, how, rel, ",".join(rf)))
+' "$pkg" "$feat") || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# _rust_module_closure <root-file> — every source file reachable from a Rust crate/module
+# root, by standard `mod NAME;` resolution plus `#[path = "..."]`. Unresolved `mod`
+# declarations go to stderr as `UNRESOLVED <name> <from>`; the caller FAILs on them.
+#
+# WHY THIS EXISTS (roborev rounds 11 and 12). A cargo test target is a MODULE TREE, not one
+# file. Round 11 fixed discovery to look past the root and I approximated the tree with a
+# directory guess; round 12 showed that guess misses `#[path = "..."]` modules and modules
+# beside a flat root, AND — the part that matters — that the polarity scan and the census
+# were still reading only the root file. So a positive gate living in a child module made a
+# target ALLOWED-ZERO (excused from the zero-tests guard), and co-required sites in that
+# child were absent from the census. Both silent.
+#
+# THIS IS THE THIRD ROUND IN THE SAME SHAPE — change where the data comes from, forget a
+# consumer — so the fix is structural rather than another instance: ONE source set is
+# computed per target here, and discovery, polarity and the census all read THAT SET. There
+# is no longer a second place that decides which files a target consists of.
+#
+# It is not a Rust parser, and standard layouts are what it models: a crate root or `mod.rs`
+# resolves children in its own directory, a plain `dir/NAME.rs` module resolves children
+# under `dir/NAME/`, and `#[path]` resolves relative to the declaring file. An
+# UNRESOLVED `mod` is a FAIL, not a shrug: it means the source set is incomplete, and every
+# consumer of an incomplete set fails in the SILENT direction. Measured on this corpus:
+# 0 unresolved across all 364 cqlite-core test targets, so failing closed costs nothing
+# today and stays loud if a layout appears that this does not model.
+# ============================================================================================
+# STATED LIMIT OF THIS SCANNER — read this before adding a shape to it (issue #1699, #3472).
+#
+# THIS IS AN OCCURRENCE REPORT, NOT A PARSER, AND ITS COVERAGE IS DELIBERATELY INCOMPLETE.
+# It reports the Rust attribute and module shapes it RECOGNISES. The set of shapes it does NOT
+# model is OPEN — Rust attribute and module syntax is defined by rustc, not here — so no amount
+# of iteration finishes it. Twelve review findings across this branch were all one family: a
+# further shape the scanner did not model. Rounds 41 and 42 already made the correct structural
+# move (real trivia state; descope the crate-gate scanner to an occurrence report) and the
+# findings continued, which is the evidence that the surface is unbounded rather than merely
+# large.
+#
+# WHAT THIS SCAN DOES AND DOES NOT GIVE YOU. Read this instead of relying on a guarantee — there
+# deliberately is not one, and the two attempts to state one are recorded below because the second
+# was falsified within a day of the first.
+#
+# THE INTENT: an unrecognised shape should be reported as UNCLASSIFIED rather than omitted, so that
+# a miss costs NOISE (an unattributable entry a human reads) rather than BLINDNESS (a clean zero
+# over gated code). Every change here must push in that direction, and where the scan can detect
+# that it cannot tell, it says so at runtime — an unmodelled string-literal shape prints
+# `[UNCLASSIFIED: ...]` rather than resolving.
+#
+# THE INTENT IS NOT ENFORCED, AND IT CANNOT BE. By construction this scan cannot enumerate the
+# shapes it fails to detect: an undetected shape produces no output to mark unclassified. So the
+# direction is a design aim, NOT a property you may rely on, and the following are MEASURED
+# counterexamples rather than hypotheticals:
+#   * a delimiter inside a string literal (`doc = "]"`) closed a cluster early     — FIXED (job 101)
+#   * a `mod` form the patterns do not match (`mod r#type;`, a split declaration)  — OPEN  (job 103)
+#   * a delimiter inside a line comment (`feature = "x" // ]`)                     — OPEN  (job 105)
+# The two open ones resolve to ABSENT, not UNCLASSIFIED, and emit nothing at all.
+#
+# THEREFORE, THE ONE SENTENCE TO CARRY AWAY: a clean census is evidence that nothing was
+# RECOGNISED — never evidence that nothing is THERE.
+#
+# WHY THIS IS STATED AS A DISCLAIMER AND NOT AS A NARROWER GUARANTEE. It was a guarantee twice.
+# Unscoped, it said an unrecognised shape is always UNCLASSIFIED; job 103 falsified that. Scoped to
+# ATTRIBUTE AND CLUSTER shapes, it excluded declaration recognition; job 105 falsified that too,
+# with a comment-borne delimiter, which IS a cluster shape. A guarantee qualified per path acquires
+# a new exception per review round, for exactly the reason the scanner does — so a third
+# qualification would be the prose equivalent of an eighth pattern. An overclaimed guarantee is
+# worse than an omission: an omission leaves a reader uninformed, an overclaim has them relying on
+# cover that is not there, and a reader of this line does not read #3472.
+#
+# DO NOT FIX EITHER OPEN ITEM WITH ANOTHER PATTERN. #3472 holds the seven measured lexical contexts
+# and the reasoning; the answers there are syntax-aware tooling or deleting the scanning half.
+#
+# WHAT NOT TO DO: do not add a thirteenth shape and call the family closed. If correctness rather
+# than advice is ever required of this scan, the answer is syntax-aware tooling or deleting the
+# scanning half — not another pattern. #3472 carries the family and the reasoning.
+# ============================================================================================
+# STDERR carries TWO fail-closed report kinds, and the caller FAILs on either:
+#   UNRESOLVED <name> <from>              — a declared `mod` whose file was not found
+#   CFG-GATED-MOD <name> <from> [<cfg>]   — a `mod` gated by a cfg this scan does not evaluate
+# The second exists because the closure used to follow children while DISCARDING the attributes
+# gating them, so a gated child's legacy test read as executable at this lane's feature set.
+# Count of DECLARED cfg-gated-subtree gaps in the current legacy-heuristics run. Declared, not
+# fatal — see the split in run_legacy_heuristics.
+_lh_cfg_gaps=0
+_rust_module_closure() { # <root-file>  -> one path per line; both report kinds to stderr
+  # ARRAY QUEUE, not newline-delimited string surgery. The first cut used
+  # `${queue%%<newline>*}` and produced a line beginning with `}`, which truncated the
+  # `awk '/^_rust_module_closure/,/^\}/'` extraction the self-test uses — so the function
+  # could not be behaviourally tested at all, and the self-test reported a bogus 0 sources.
+  # A guard that cannot be extracted cannot be tested, so the shape matters here.
+  local root="$1"
+  local -a queue=("$root")
+  local seen=" " out="" f dir base childdir kind val
+  while [ "${#queue[@]}" -gt 0 ]; do
+    f="${queue[0]}"
+    queue=(${queue[@]+"${queue[@]:1}"})
+    [ -n "$f" ] || continue
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    # An UNREADABLE source is a FAILED derivation, not a file to skip (roborev round-26, Medium):
+    # skipping it yields an incomplete closure, which makes the polarity scan and the census read a
+    # partial module tree and can drop the target from the lane entirely — a false PASS built from
+    # a file nobody could read.
+    if [ ! -r "$f" ]; then
+      echo "UNREADABLE $f (module closure of $root)" >&2
+      return 1
+    fi
+    out="$out$f
+"
+    dir="${f%/*}"; base="${f##*/}"
+    # Where do THIS file's child modules live? A crate root or mod.rs resolves children in
+    # its own directory; a plain `dir/NAME.rs` module resolves them under `dir/NAME/`.
+    case "$base" in
+      mod.rs|main.rs|lib.rs) childdir="$dir" ;;
+      *) if [ "$f" = "$root" ]; then childdir="$dir"; else childdir="${f%.rs}"; fi ;;
+    esac
+    # THREE fields: the `G` record carries a gate text, and a 2-field `read` would absorb it
+    # into `val` and then mis-report the child as UNRESOLVED — a wrong cause on every lane.
+    while IFS="$(printf '\t')" read -r kind val extra; do
+      [ -n "$kind" ] || continue
+      if [ "$kind" = G ]; then
+        # A cfg ON the `mod` declaration. Reported, never followed silently: the subtree's
+        # reachability at this lane's feature set is UNKNOWN, and every consumer of the source
+        # set (membership, allowed-zero polarity, the co-required census) is permissive on an
+        # unknown — which is precisely how a gated child's test was counted as executable.
+        echo "CFG-GATED-MOD $val $f [$extra]" >&2
+        continue
+      fi
+      if [ "$kind" = P ]; then
+        # #[path] resolves relative to the declaring file's directory.
+        case "$val" in
+          /*) queue+=("$val") ;;
+          *)  queue+=("$dir/$val") ;;
+        esac
+      elif [ -r "$childdir/$val.rs" ]; then
+        queue+=("$childdir/$val.rs")
+      elif [ -r "$childdir/$val/mod.rs" ]; then
+        queue+=("$childdir/$val/mod.rs")
+      else
+        # REPORTED, never shrugged off: an incomplete source set is silently permissive in
+        # every consumer (membership, polarity, census). The caller FAILs on this.
+        echo "UNRESOLVED $val $f" >&2
+      fi
+    done <<EOF
+$(awk '
+  # Block comments are TRIVIA, statefully (roborev round-41). Without this, a `#[path]` or `mod`
+  # inside `/* … */` was read as a real declaration — so the closure could scan a file Rust never
+  # includes, or FAIL the lane as unresolved on a commented-out example — and a block comment
+  # between a real `#[path]` and its `mod` cleared the pending path, silently unbinding them.
+  in_block { if ($0 ~ /\*\//) in_block = 0; next }
+  /^[[:space:]]*\/\*/ { if ($0 !~ /\*\//) in_block = 1; next }
+  # A single-line `/* … */` anywhere on an otherwise-trivia line is also trivia.
+  /^[[:space:]]*\/\*.*\*\/[[:space:]]*$/ { next }
+  # A MULTILINE ATTRIBUTE IS ONE CLUSTER (roborev job 99, Medium). rustfmt legitimately writes
+  #     #[cfg(all(
+  #         feature = "state_machine",
+  #         feature = "cli-helpers"
+  #     ))]
+  #     mod child;
+  # and those continuation lines match no attribute pattern, so they fell through to the
+  # cluster-end rule, which discarded the pending gate text and left the child reading as
+  # UNCONDITIONAL — reintroducing for the multiline form the exact defect just fixed for the
+  # single-line one. Note the direction: this was a REGRESSION INTRODUCED BY THAT FIX, since
+  # clearing gatetxt at cluster end is what made a continuation line destructive.
+  # Balance is counted on SQUARE BRACKETS OUTSIDE STRING LITERALS.
+  #
+  # THE PREVIOUS COMMENT HERE CLAIMED A SAFETY PROPERTY THIS CODE DOES NOT HAVE, and it is
+  # deleted rather than softened: it said a delimiter inside a string literal "can only leave
+  # the cluster open longer ... never hide one". That is true of an unmatched `[`, which is the
+  # case it was reasoned about, and FALSE of an unmatched `]` — which closes the cluster EARLY,
+  # so the real closing line then clears the pending cfg and a gated child reads as
+  # UNCONDITIONAL. That HIDES a gap (roborev job 101, Medium). A claimed bound that holds in
+  # only one direction is worse than none, because the next reader trusts it.
+  #
+  # Quoted spans are stripped before counting. Where the strip cannot be trusted — an escaped
+  # quote or a raw string — the pending gate becomes UNCLASSIFIED rather than resolved, so the
+  # following module is DECLARED as unattributable instead of silently treated as unconditional.
+  # This is the same declare-do-not-model choice as the coreq scanner: the set of Rust attribute
+  # shapes not modelled here is OPEN, so the only safe behaviour on an unrecognised one is to
+  # say so.
+  function nostr(str) { gsub(/"[^"\\]*"/, "", str); return str }
+  function litok(str) { return (str !~ /\\"/ && str !~ /r#"/ && nostr(str) !~ /"/) }
+  attrdepth > 0 {
+    t = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+    if (incfg) gatetxt = gatetxt " " t
+    if (!litok($0)) {
+      printf "CFG-GATED-MOD <attribute-at-line-%d> %s [UNCLASSIFIED: string-literal shape this scan does not model; cluster balance unknown]\n", NR, FILENAME > "/dev/stderr"
+      attrdepth = 0
+      incfg = 0
+      gatetxt = ""
+      next
+    }
+    nostr_line = nostr($0)
+    attrdepth += gsub(/\[/, "[", nostr_line) - gsub(/\]/, "]", nostr_line)
+    if (attrdepth < 1) { attrdepth = 0; incfg = 0 }
+    next
+  }
+  # A `#[path = "..."]` ATTRIBUTE only, and a same-line `mod` must still be processed (roborev
+  # round-40, Medium). Two defects in one line:
+  #   * `next` fired unconditionally, so the very common single-line form
+  #     `#[path = "child.rs"] mod child;` recorded the path and then SKIPPED the `mod` — the child
+  #     was never queued, so legacy-gated tests inside it escaped discovery, the polarity scan and
+  #     the census entirely. Silent, and in the direction that under-reports coverage.
+  #   * the pattern matched anywhere on a line, so a doc comment or a string mentioning
+  #     `#[path = "..."]` set `haspath` and could bind a STALE path to the next real `mod`.
+  # Anchored at the start of the line (attributes are the first thing on their line; a `//`/`//!`
+  # comment or an inline mention therefore cannot match), and `next` only when no `mod` follows.
+  /^[[:space:]]*#\[[[:space:]]*path[[:space:]]*=/ {
+    if (match($0, /"[^"]+"/)) { p = substr($0, RSTART+1, RLENGTH-2); haspath = 1 }
+    if ($0 !~ /(^|[[:space:]])mod[[:space:]]/) next
+    # falls through to the mod rule below, which consumes `haspath`
+  }
+  # EVERY visibility form, not just private and plain `pub` (roborev round-13 finding):
+  # `pub(crate) mod`, `pub(super) mod` and `pub(in path) mod` are ordinary declarations, and
+  # this corpus has 30 semicolon-terminated `pub(crate) mod` lines — so skipping them was
+  # LIVE coverage loss. Their child modules were invisible to discovery, the polarity scan
+  # AND the census, all three in the silent direction.
+  # An optional leading ATTRIBUTE is allowed before `mod` (roborev round-40): the single-line form
+  # `#[path = "child.rs"] mod child;` is idiomatic, and without this the declaration was unreachable
+  # from here even after the path rule stopped swallowing the line.
+  /^[[:space:]]*(#\[[^]]*\][[:space:]]*)?(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ {
+    # a SAME-LINE cfg attribute counts too: `#[cfg(feature = "x")] mod child;`
+    if ($0 ~ /#\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/) {
+      gt = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", gt)
+      gatetxt = (gatetxt == "" ? gt : gatetxt " " gt)
+    }
+    n = $0
+    sub(/^[[:space:]]*(#\[[^]]*\][[:space:]]*)?(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+/, "", n)
+    sub(/[[:space:]]*;.*$/, "", n)
+    # A cfg ON THE `mod` DECLARATION is reported alongside the child (roborev root pass at
+    # aabae56ea, Medium). The closure followed children while DISCARDING the attributes that gate
+    # them, so `#[cfg(feature = "experimental")] mod child;` read as reachable at the feature
+    # set of this lane. NO APOSTROPHE MAY APPEAR IN THIS AWK PROGRAM: it is single-quoted, so one
+    # closes the quote early and bash then parses awk source as shell — and `bash -n` can PASS
+    # anyway when the stray quotes happen to re-balance, which is how this slipped through twice.
+    # A legacy-gated test inside `child` was then counted as executable, an ungated
+    # sibling kept the target non-zero, and the co-required census reported NO gap — which is the
+    # one thing that census exists to find.
+    #
+    # Not evaluated here, DECLARED: emitting the gating cfg text with the child lets the caller
+    # treat the subtree as an unclassified co-required site instead of silently assuming
+    # reachability. Evaluating nested cfg reachability is a Rust-parser problem, and this file has
+    # already paid five rounds for approximating one.
+    if (gatetxt != "") { printf "G\t%s\t%s\n", n, gatetxt }
+    if (haspath) { printf "P\t%s\n", p; haspath = 0 } else { printf "M\t%s\n", n }
+    gatetxt = ""
+    next
+  }
+  # An ATTRIBUTE line preserves a pending `#[path]` (roborev round-42). An outer-attribute cluster
+  # ACROSS LINES is legal and IS handled here — clearing `haspath` on the intervening attribute
+  # resolved the module to the WRONG file, or failed the lane as unresolved.
+  #
+  # THE SAME-LINE MULTI-ATTRIBUTE FORM IS NOT HANDLED, and this comment used to imply it was
+  # (roborev job 111, Medium): it offered `#[path = "mapped.rs"] #[cfg(...)] mod child;` as an
+  # example of what works, while the `mod` rule below accepts exactly ONE leading attribute, so
+  # that declaration is skipped and its child leaves the closure entirely. The example named the
+  # one shape that fails. It is corrected rather than implemented: another regex would be the
+  # ninth pattern, and the eighth lexical context belongs in #3472 as a counterexample under the
+  # disclaimer above. Measured: 0 such declarations in this workspace, so it is latent. Attributes join blank lines and comments as cluster trivia; anything else still
+  # ends the cluster, which stays the conservative direction.
+  /^[[:space:]]*#\[/ {
+    # Remember a cfg on this declaration so the `mod` rule can DECLARE it with the child.
+    iscfg = ($0 ~ /#\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/)
+    if (iscfg) {
+      t = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+      gatetxt = (gatetxt == "" ? t : gatetxt " " t)
+    }
+    # OPEN the cluster when the brackets do not close on this line, so the continuation rule
+    # above collects the rest instead of the cluster-end rule destroying it. Counted the SAME
+    # way as the continuation rule — on the string-stripped line — or the two halves disagree
+    # about where a cluster starts and ends, which is its own defect.
+    nostr_open = nostr($0)
+    attrdepth = gsub(/\[/, "[", nostr_open) - gsub(/\]/, "]", nostr_open)
+    if (attrdepth > 0) { incfg = iscfg } else { attrdepth = 0 }
+    if (!litok($0) && iscfg) {
+      printf "CFG-GATED-MOD <attribute-at-line-%d> %s [UNCLASSIFIED: string-literal shape this scan does not model; cluster balance unknown]\n", NR, FILENAME > "/dev/stderr"
+      gatetxt = ""
+    }
+    next
+  }
+  # BOTH pendings die with the cluster (roborev job 97, Medium). Clearing `haspath` while leaving
+  # `gatetxt` let a cfg on ANY item — a function, a struct, an impl — leak forward and tag the next
+  # UNGATED `mod` as gated, i.e. a false DECLARED GAP on ordinary code. Same class as the
+  # `haspath` leak of round-42, and the noleak assert missed it because it only covered a cfg
+  # attached to a mod, never a cfg attached to something else entirely.
+  { if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*\/\//) { haspath = 0; gatetxt = "" } }
+' "$f")
+EOF
+  done
+  printf '%s' "$out"
+}
+
+# _lh_positive_in_closure <closure> <cfg-site-regex> — does ANY file in this target's module
+# closure carry a POSITIVE `legacy-heuristics` cfg reference (i.e. one that survives stripping
+# every `not(feature = "legacy-heuristics")` wrapper)?
+#
+# A portable loop rather than `xargs -r` (roborev round-14): `-r` is GNU-only and this gate
+# supports stock macOS, where the lane would otherwise have mis-scanned every target. `sed |
+# grep -c` consumes each file whole, so there is no early-close SIGPIPE race either (#3380).
+_lh_positive_in_closure() {
+  # Returns 0 = POSITIVE (do NOT excuse this target), 1 = negative-only (excusable), 2 = could not
+  # read. Note the polarity of the default: anything not affirmatively recognised as the direct
+  # negative form yields 0, so a shape this function has never seen costs a target its excusal and
+  # never costs the gate a zero-tests check.
+  local closure="$1" cfg_site="$2" cf _pc_sites _pc_allowed _pc_rc
+  # THE ONE RECOGNISED SHAPE, as a whole attribute: `#[cfg(not(feature = "legacy-heuristics"))]` or
+  # its inner `#![...]` form, alone on its line. Anchored end-to-end deliberately — a substring
+  # match is what let a nested `not(feature = …)` inside a larger expression look direct.
+  local _pc_allow='^[[:space:]]*#!?\[cfg\(not\(feature[[:space:]]*=[[:space:]]*"legacy-heuristics"\)\)\][[:space:]]*$'
+  while IFS= read -r cf; do
+    [ -n "$cf" ] || continue
+    _pc_rc=0
+    _pc_sites=$(grep -cE "$cfg_site" "$cf") || _pc_rc=$?
+    if [ "$_pc_rc" -ge 2 ]; then
+      echo "POLARITY-SCAN-ERROR grep exit $_pc_rc on $cf" >&2
+      return 2
+    fi
+    [ "${_pc_sites:-0}" -gt 0 ] || continue
+    _pc_rc=0
+    _pc_allowed=$(grep -cE "$_pc_allow" "$cf") || _pc_rc=$?
+    if [ "$_pc_rc" -ge 2 ]; then
+      echo "POLARITY-SCAN-ERROR grep exit $_pc_rc on $cf (allowlist pass)" >&2
+      return 2
+    fi
+    if [ "${_pc_sites:-0}" -ne "${_pc_allowed:-0}" ]; then
+      # Not a claim that the site IS positive — a refusal to claim it is safely negative.
+      echo "POLARITY-UNRECOGNISED $cf ($_pc_sites site(s), $_pc_allowed recognised-negative) — not excused" >&2
+      return 0
+    fi
+  done <<EOF
+$closure
+EOF
+  return 1
+}
+
+run_legacy_heuristics() {
+  # reset per run: state carried in from a previous lane would misreport this one
+  _lh_cfg_gaps=0
+  local lh_gap_detail=() _gd
+  local name=legacy-heuristics
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+
+  # Derive the target set: every committed cqlite-core/tests/*.rs carrying a
+  # legacy-heuristics CFG SITE, mapped to its target name (basename without .rs).
+  # Anchored on REPO_ROOT so the derivation cannot depend on CWD.
+  #
+  # Matched on the ATTRIBUTE shape `feature = "legacy-heuristics"`, not the bare
+  # string: compile_time_heuristic_enforcement.rs alone mentions the feature 15 times
+  # in prose, and a doc comment is not a cfg site. (Measured: both spellings yield the
+  # same 5 files today, so this is precision for the future, not a change of subject.)
+  #
+  # ALLOWED-ZERO, DERIVED (never a curated list). A file whose ONLY sites are the
+  # NEGATIVE polarity `#[cfg(not(feature = "legacy-heuristics"))]` legitimately
+  # executes 0 tests HERE — its bodies compile out when the feature is ON, and they
+  # already run in core-tests, where the feature is off. It stays in the executed set
+  # (so it must still COMPILE at this feature set) but is passed to the zero-tests
+  # guard as allowed-zero, with the reason printed. The guard therefore still FAILs on
+  # the case that matters: a POSITIVE-polarity file that executes nothing.
+  #
+  # Polarity is decided by stripping every `not(feature = "legacy-heuristics")`
+  # wrapper and asking whether any cfg-shaped reference survives — mechanical, so a
+  # file that gains a positive site stops being allowed-zero with no gate edit.
+  local tests_dir="$REPO_ROOT/cqlite-core/tests"
+  local -a targets=() allow_zero=() observe_ids=()
+  local cfg_site='feature[[:space:]]*=[[:space:]]*"legacy-heuristics"'
+  local names="" negonly="" f base count=0 srcs=""
+  # CANDIDATES FROM CARGO, NOT A GLOB (roborev round-7 finding). See
+  # _package_test_targets_gated for why: a manifest-gated or directory-style target is
+  # invisible to `tests/*.rs`. A failed enumeration FAILs and names the derivation — it is
+  # never a fallback to the glob, which would silently shrink the target set.
+  local meta_targets
+  if ! meta_targets=$(_package_test_targets_gated cqlite-core legacy-heuristics); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not enumerate cqlite-core's test targets from cargo"
+      echo "        metadata, so the legacy-heuristics target set is unmeasurable. The"
+      echo "        DERIVATION failed; this is deliberately NOT a fallback to a tests/*.rs"
+      echo "        glob, which omits manifest-gated and directory-style targets."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  # HOISTED ABOVE THE TARGET LOOP (roborev round-36). It used to be resolved here, ~200 lines
+  # BELOW the loop that now needs it to compare each target's required-features — so the comparison
+  # would have run against an EMPTY set, marked every target unmet, and silently emptied the lane.
+  # I wrote that bug into this fix and caught it before it ran; it is the same
+  # unmeasured-signal-reaches-a-permissive-branch shape this whole change exists to remove.
+  local lh_enabled
+  if ! lh_enabled=$(_resolved_package_features cqlite-core --features legacy-heuristics); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-core's enabled feature set at"
+      echo "        default+legacy-heuristics via 'cargo tree -p cqlite-core' (a cargo"
+      echo "        failure or an offline registry), so the co-required-feature census is"
+      echo "        unmeasurable. A census that cannot be taken is not reported as empty."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id _mt_cnt _mt_rc _pol_rc
+  local rf_unmet=""
+  while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel _mt_rf; do
+    [ -n "$_mt_name" ] || continue
+    f="$_mt_src"
+    # Included when EITHER cargo gates the target on the feature (the arm the glob could
+    # not see) OR its own source carries a cfg reference to it.
+    # ONE source set per target, shared by membership, polarity and the census (round 12).
+    local _mt_closure _mt_unres _mt_gaps_pending=""
+    _mt_unres="$LOG_DIR/legacy-unresolved-$_mt_name.txt"
+    _mt_closure=$(_rust_module_closure "$f" 2>"$_mt_unres")
+    # TWO report kinds, TWO different consequences, and a CLOSED grammar over the rest.
+    #
+    # UNRESOLVED is fatal: a `mod` whose file was not found means the source set is INCOMPLETE,
+    # and an incomplete set is permissive in membership, the polarity scan and the census alike.
+    #
+    # CFG-GATED-MOD is a DECLARED COVERAGE GAP, not a failure. The child stays in the source set
+    # (conservative for membership — a gated test still makes its target a subject), but its
+    # reachability at this feature set is unevaluated, so the census must SAY SO instead of
+    # reporting no gap (roborev root pass at aabae56ea, Medium). Failing the lane here was tried
+    # and is WRONG: the tree legitimately carries `#[cfg(all(feature=..))] #[path=..] mod support;`
+    # on shared test helpers, so fail-closed reds ordinary code — and a lane that reds on correct
+    # input is the lane agents learn to waive. Declaring the narrowing at run time is what this
+    # whole component set is built on.
+    #
+    # Anything else in that stream FAILs: an unrecognised report is an unmeasured state, and
+    # inheriting the permissive branch for it is the shape this PR exists to remove.
+    if [ -s "$_mt_unres" ]; then
+      local _mt_fatal="$LOG_DIR/legacy-fatal-$_mt_name.txt"
+      local _mt_gaps="$LOG_DIR/legacy-cfggaps-$_mt_name.txt"
+      # STATUS OBSERVED, and the CLOSED GRAMMAR ACTUALLY IMPLEMENTED (self-review after job 115).
+      # `|| true` masked grep exit >=2, so an unreadable stream produced two EMPTY halves and the
+      # code below then found neither a fatal report nor a gap — a clean pass derived from a scan
+      # that failed. We only reach here because `[ -s "$_mt_unres" ]` was TRUE, so "both halves
+      # empty" is impossible unless a read failed: that is the unrecognised-report case the comment
+      # above claims to fail on, and it had no branch. grep 1 = no match (fine), >=2 = error.
+      local _sp_rc1=0 _sp_rc2=0
+      grep -v '^CFG-GATED-MOD ' "$_mt_unres" > "$_mt_fatal" || _sp_rc1=$?
+      grep    '^CFG-GATED-MOD ' "$_mt_unres" > "$_mt_gaps"  || _sp_rc2=$?
+      if [ "$_sp_rc1" -ge 2 ] || [ "$_sp_rc2" -ge 2 ] \
+         || { [ ! -s "$_mt_fatal" ] && [ ! -s "$_mt_gaps" ]; }; then
+        status=FAIL
+        {
+          echo "[$name] FAIL-CLOSED: could not classify the module-closure reports for test"
+          echo "        target '$_mt_name' (grep exits $_sp_rc1/$_sp_rc2; non-empty stream split"
+          echo "        into two empty halves means a read failed, or a report matched neither"
+          echo "        recognised form). A stream we know is non-empty must produce a report;"
+          echo "        treating it as silence would be a pass derived from a scan that failed."
+          sed 's/^/          /' "$_mt_unres"
+        } | tee "$log"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $status ($((end - start))s)"
+        return 0
+      fi
+      if [ -s "$_mt_fatal" ]; then
+        status=FAIL
+        {
+          echo "[$name] FAIL-CLOSED: could not resolve the module tree of test target"
+          echo "        '$_mt_name'. An incomplete source set makes membership, the"
+          echo "        allowed-zero polarity scan and the co-required census all fail in the"
+          echo "        SILENT direction, so this is a FAIL rather than a partial scan:"
+          sed 's/^/          /' "$_mt_fatal"
+        } | tee "$log"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $status ($((end - start))s)"
+        return 0
+      fi
+      # BUFFERED, not emitted here (roborev job 97, Medium + Low). Two reasons, and both were
+      # live defects:
+      #   (1) this point is BEFORE the membership and required-features filters, so declaring here
+      #       reported a "gap" for targets that are not subjects of this lane at all — measured on
+      #       issue_2827_partition_access_bytes, which carries no legacy site. A census diluted
+      #       with irrelevant entries is a census nobody reads. Decide, THEN record — the same
+      #       ordering this lane already enforces for observe_ids and --test.
+      #   (2) the detail lines were `tee -a`'d to "$log", which the census below then TRUNCATES
+      #       with `>` — so the aggregate said "listed above" and the listing was gone. The
+      #       comment three lines under that redirect says it outright: a gap that only appears on
+      #       stdout is a gap nobody reads.
+      if [ -s "$_mt_gaps" ]; then _mt_gaps_pending="$_mt_gaps"; fi
+    fi
+    if [ "$_mt_how" != "manifest" ]; then
+      [ -f "$f" ] || continue
+      # Membership over the WHOLE module tree: a gated test can live in a child module
+      # whose root never names the feature.
+      # A PORTABLE LOOP, not `xargs -r` (roborev round-14 finding, Medium). `-r` is
+      # GNU-only: BSD/macOS xargs rejects it, and this gate explicitly supports stock macOS
+      # (see the bash 3.2 note in check_unittest_targets_ran). On that host the lane would
+      # have skipped every source-gated target and then reported a failed derivation.
+      # Dropping `-r` alone is NOT the fix either: without it GNU xargs runs the command
+      # once with NO file arguments, and `grep -lE <pattern>` with no files reads STDIN —
+      # which here is the already-consumed pipe. A loop has neither problem, and `grep -c`
+      # consumes each file whole so there is no SIGPIPE race (cf. the #3380 class).
+      _mt_hit=0
+      while IFS= read -r _mt_cf; do
+        [ -n "$_mt_cf" ] || continue
+        # TRI-STATE (roborev root pass, Medium): `grep -c … 2>/dev/null` reported 0 both for "no
+        # match" and for "could not read", so a scan failure silently omitted a source-gated target
+        # from the lane — and an omitted target cannot fail the zero-tests guard, which is how an
+        # empty run passes. grep: 0 = matched, 1 = no match, >=2 = error.
+        _mt_cnt=$(grep -cE "$cfg_site" "$_mt_cf"); _mt_rc=$?
+        if [ "$_mt_rc" -ge 2 ]; then
+          echo "SCAN-ERROR grep exit $_mt_rc on $_mt_cf (target $_mt_name)" >&2
+          status=FAIL
+          {
+            echo "[$name] FAIL-CLOSED: the legacy cfg-site scan could not read $_mt_cf (grep exit"
+            echo "        $_mt_rc). A failed scan reads as 'no legacy site', which silently drops"
+            echo "        the target from the lane — and a dropped target cannot fail the"
+            echo "        zero-tests guard, so an empty run would pass."
+          } | tee -a "$log"
+          end=$(date +%s); record_result "$name" "$status" "$((end - start))"
+          echo ">>> [$name] $status ($((end - start))s)"; return 0
+        fi
+        if [ "${_mt_cnt:-0}" -gt 0 ]; then _mt_hit=1; break; fi
+      done <<EOF
+$_mt_closure
+EOF
+      [ "$_mt_hit" -eq 1 ] || continue
+      # THE NON-MANIFEST BRANCH ENDS HERE (roborev job 111, Medium). The required-features
+      # check below used to sit INSIDE it, so a target cargo gates on the feature — classified
+      # `manifest` — skipped validation entirely and was then handed to cargo explicitly. Cargo
+      # rejects a target whose required-features are unmet, so the lane FAILED on a correct
+      # target: a lane that reds on correct input is the lane agents learn to waive, which is
+      # the rule this component set is built on. Latent today (0 of 13 required-features targets
+      # name legacy-heuristics) and therefore also UNEXERCISED at runtime, which is this issue
+      # own distinction applied to its own code.
+    fi
+    # AFTER MEMBERSHIP, BEFORE INVOCATION (roborev root pass, Low). Round 37 hoisted this to the
+    # top of the loop to fix an ordering bug, and created another: the check ran BEFORE the
+    # legacy-membership test, so EVERY target with any unmet required-feature was reported as a
+    # legacy coverage gap. MEASURED false claims in the shipped census — 5 of them, none
+    # legacy-gated: issue_1495_arrow_accessor_parity(arrow),
+    # issue_1695_query_timeout(cli-helpers), issue_1869_big_clustering_slice_readat(work-counters),
+    # issue_2148_statistics_toc_single_walk(cli-helpers), issue_2302_written_index_resolve. A census
+    # inventing gaps is worse than one omitting them: it sends the reader to targets that are fine.
+    #
+    # The invariant, now stated where both orderings can be seen: membership decides WHETHER this
+    # target is our subject; the required-features check decides whether we may INVOKE it; and
+    # nothing may RECORD it before both. Round 37 got the second half right and the first wrong.
+    #
+    # (round 37, Medium) The check must still precede every record of the target —
+    # AFTER `observe_ids+=(...)` — so a target excluded here had already been added to the
+    # observation set, and `check_test_targets_observed` then demanded a `Running` banner for a
+    # target the lane deliberately never invoked: a FALSE RED on valid code, produced by the fix
+    # that was meant to prevent one. Anything that records a target must run after the decision to
+    # invoke it, so the decision goes first.
+    #
+    # A target whose FULL `required-features` are not satisfied by this feature set must
+    # NOT be named explicitly (roborev round-36, Medium). Cargo REJECTS an explicit
+    # `--test <name>` whose required-features are unmet, so the lane would fail on entirely
+    # correct code — a FALSE RED, and the kind that looks like a real breakage. The helper
+    # already carries the manifest's list; this compares ALL of it, not just the presence of
+    # `legacy-heuristics`, and reports the target as a COVERAGE GAP instead of invoking it.
+    local _rf_off=""
+    if [ -n "${_mt_rf:-}" ]; then
+      local _rf1
+      for _rf1 in ${_mt_rf//,/ }; do
+        [ -n "$_rf1" ] || continue
+        case " $lh_enabled " in
+          *" $_rf1 "*) ;;
+          *) _rf_off="${_rf_off:+$_rf_off,}$_rf1" ;;
+        esac
+      done
+    fi
+    if [ -n "$_rf_off" ]; then
+      # `$_mt_name`, NOT `$base` (roborev round-38, Medium). `base` is assigned ~60 lines below this
+      # point — a consequence of round 37 hoisting this decision to the top of the loop — so the
+      # diagnostic named the PREVIOUS iteration's target, or nothing at all on the first one. A
+      # coverage census that misattributes its own gaps is worse than one that omits them, because
+      # it sends the reader to a target that is fine.
+      rf_unmet="$rf_unmet $_mt_name(required-features unmet:$_rf_off)"
+      continue
+    fi
+    base="$_mt_name"
+    # The observation set is EVERY selected target, spelled the guard's way, so the lane can
+    # assert that each one actually ran (round-17). Distinct from allow_zero, which only says
+    # which of them may legitimately run zero tests.
+    _obs_id="$_mt_rel"
+    case "$_mt_rel" in
+      tests/*) _obs_id="${_mt_rel#tests/}" ;;
+    esac
+    # THE TARGET IS NOW A CONFIRMED SUBJECT — membership passed and required-features are met —
+    # so a buffered cfg-gated-subtree gap becomes a DECLARED one here and nowhere earlier.
+    if [ -n "${_mt_gaps_pending:-}" ] && [ -s "$_mt_gaps_pending" ]; then
+      lh_gap_detail+=("DECLARED GAP: test target '$_mt_name' reaches child module(s) through a cfg")
+      lh_gap_detail+=("  this scan does not evaluate, so their contribution to legacy coverage is")
+      lh_gap_detail+=("  UNCLASSIFIED — the subtree IS scanned, but a zero or nonzero result from it")
+      lh_gap_detail+=("  cannot be attributed. Compare the cfg against the enabled set by hand; move")
+      lh_gap_detail+=("  gated tests to their own target if the attribution matters:")
+      while IFS= read -r _gd; do
+        [ -n "$_gd" ] || continue
+        lh_gap_detail+=("    $_gd")
+      done < "$_mt_gaps_pending"
+      _lh_cfg_gaps=$((_lh_cfg_gaps + 1))
+    fi
+    observe_ids+=("${_obs_id%.rs}")
+    # The census subject is the UNION of every included target's module tree, deduped later
+    # (a shared `common/mod.rs` is one site, not one per target that includes it).
+    local _cf
+    while IFS= read -r _cf; do
+      [ -n "$_cf" ] || continue
+      srcs="$srcs${_cf#$REPO_ROOT/}	$_cf
+"
+    done <<EOF
+$_mt_closure
+EOF
+    # Two array elements per target (`--test <name>`), so ${#targets[@]} is NOT the
+    # target count — $count is.
+    targets+=(--test "$base")
+    count=$((count + 1))
+    names="$names $base"
+    # `grep -cE` and a NUMERIC test, deliberately, NOT `| grep -qE`. Under `set -o
+    # pipefail` (line 650) an early-exiting `grep -q` SIGPIPEs its upstream, so the
+    # PIPELINE reports 141 — non-zero — on a SUCCESSFUL match. Negated by the `!` here,
+    # that made a file WITH a surviving positive cfg site fall into `allow_zero`: the
+    # target would then have been EXCUSED from the #2039 zero-tests guard, so a gated
+    # target that executed nothing would NOT have failed the lane. That is the exact
+    # vacuous excusal this derivation exists to make impossible, arriving through the
+    # plumbing rather than the logic. MEASURED: with a matching site on line 1 of a
+    # 200k-line file (so `grep -q` exits while `sed` is still writing), the old form
+    # mis-classified 6/6 and this form 0/6. `grep -c` consumes all input, so there is no
+    # early close and no SIGPIPE — the count is an AFFIRMATIVE measurement, which is what
+    # a permissive branch must key on. Same defect class as #3380.
+    # A MANIFEST-GATED target is POSITIVELY gated by definition and can NEVER be
+    # allowed-zero (roborev round-8 finding, Medium): cargo runs it only when the feature
+    # is on, and its source may carry no cfg site at all — so the polarity scan below finds
+    # nothing and would have classified it negative-polarity-only, EXCUSING from the
+    # zero-tests guard the very target round 7 added discovery for. The round-7 fix was
+    # under-propagated: I threaded metadata discovery into the candidate loop and left the
+    # classifier reasoning about source text alone.
+    # THE THIRD STATE IS DECIDED BEFORE THE CHAIN, because `elif cmd; then` treats every non-zero
+    # alike: exit 2 (could not tell) would have taken the same branch as exit 1 (no positive site)
+    # and routed the target into allow_zero — the fail-open the function change closes, reintroduced
+    # one line away from it. Precomputing keeps the chain two-valued, which is all it can express.
+    _pol_rc=0
+    if [ "$_mt_how" != "manifest" ]; then
+      _lh_positive_in_closure "$_mt_closure" "$cfg_site" || _pol_rc=$?
+      if [ "$_pol_rc" -ge 2 ]; then
+        status=FAIL
+        {
+          echo "[$name] FAIL-CLOSED: the polarity scan could not read a file in the module closure"
+          echo "        of test target '$_mt_name' (exit $_pol_rc). A failed scan reads as 'no"
+          echo "        positive cfg site', which routes the target into allowed-zero — and an"
+          echo "        allowed-zero target that IS positively gated can then run zero tests and"
+          echo "        PASS. This is the one scan that must not guess."
+        } | tee "$log"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $status ($((end - start))s)"
+        return 0
+      fi
+    fi
+    if [ "$_mt_how" = "manifest" ]; then
+      :
+    # Polarity over the WHOLE module tree, not just the root (round 12): a positive gate in
+    # a child module must stop this target being allowed-zero, or the target is EXCUSED from
+    # the zero-tests guard on the strength of a file that happened to be silent.
+    elif [ "$_pol_rc" -eq 0 ]; then
+      :
+    else
+      # TWO DIFFERENT IDENTIFIERS FOR TWO DIFFERENT CONSUMERS, and conflating them was a
+      # real bug (roborev round-9 finding, Medium). `--test <name>` takes cargo's TARGET
+      # NAME, but check_no_unexpected_zero_tests parses `Running tests/<path>.rs` and keys
+      # on the PATH stem. For a directory-style or explicitly-mapped target those differ —
+      # target `foo` with `tests/foo/main.rs` yields `foo/main` — so an allowed-zero entry
+      # spelled as the target name would never match, and a legitimately negative-polarity
+      # target would FAIL the full gate. Derived from src_path so the two agree by
+      # construction rather than by coincidence of naming.
+      # The guard captures `Running tests/([^space]+)\.rs`, i.e. the path relative to
+      # `tests/` — `foo` for tests/foo.rs, `foo/main` for the directory-style
+      # tests/foo/main.rs. So strip that prefix from the package-relative path rather than
+      # stripping a `tests/` substring out of the ABSOLUTE path (which left an absolute path
+      # for an explicitly mapped target outside tests/, matching nothing — round-10 finding).
+      # A target whose source is not under tests/ is invisible to that guard in any case,
+      # since it never prints a `Running tests/...` line, so an entry for it simply never
+      # matches — harmless, and not a false FAIL.
+      # Mirrors the guard's two spellings exactly (see check_no_unexpected_zero_tests):
+      # tests-relative under tests/, package-relative otherwise.
+      local _az_id="$_mt_rel"
+      case "$_mt_rel" in
+        tests/*) _az_id="${_mt_rel#tests/}" ;;
+      esac
+      _az_id="${_az_id%.rs}"
+      allow_zero+=("$_az_id")
+      negonly="$negonly $_az_id"
+    fi
+  done <<EOF
+$meta_targets
+EOF
+  if [ "$count" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: derived ZERO legacy-heuristics --test targets from"
+      echo "        cargo metadata's test targets (cfg pattern: $cfg_site; or required-features)."
+      echo "        The derivation, not the feature, is what failed — an unreadable or"
+      echo "        moved tests dir, or a renamed feature. A lane with no subject has no"
+      echo "        verdict to give, so this is a FAIL, never a PASS and never a SKIP."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Provenance named accurately: candidates come from cargo metadata (which sees
+  # manifest-gated and directory-style targets), and membership from each target's own
+  # src_path or its required-features. Saying "from tests/*.rs" would misdescribe the
+  # derivation in a lane whose subject is accurate declaration.
+  echo ">>> [$name] derived${names} ($count target(s); candidates from cargo metadata, gated by cfg site or required-features)"
+  # DECLARED, not dropped (roborev round-36): a target excluded because its required-features are
+  # unmet is a COVERAGE GAP this lane must state, exactly as the flight lane states its census.
+  # Silently omitting it would shrink the subject set with no trace.
+  [ -n "$rf_unmet" ] && echo ">>> [$name] NOT invoked — cargo rejects an explicit --test whose required-features are unmet; reported as a coverage gap:$rf_unmet"
+  [ -n "$negonly" ] && echo ">>> [$name] allowed-zero (NEGATIVE-polarity only — cfg(not(...)) bodies compile out here and run in core-tests):$negonly"
+
+  # COVERAGE CENSUS — the co-required-feature gap (roborev round-4 finding, Medium).
+  #
+  # A test body gated `#[cfg(all(feature = "legacy-heuristics", feature = "X"))]` compiles
+  # OUT when X is not enabled, and this lane enables only `default + legacy-heuristics`.
+  # Those bodies are therefore NOT EXECUTED here — and the #2039 zero-tests guard cannot
+  # see it, because sibling ungated tests in the same target keep its count nonzero. That
+  # is the same invisible-omission shape this whole issue exists to remove (cf. the
+  # required-features targets that print no `Running` line, and the observability-testing
+  # targets of #3375), so the lane DECLARES it rather than leaving it to be discovered.
+  #
+  # DERIVED, not curated: the co-required feature names come from the committed cfg
+  # attributes, and membership is tested against cargo's OWN resolved feature set for this
+  # invocation — so if such a feature later becomes enabled here, it drops out of the
+  # census automatically with no gate edit.
+  #
+  # ON THE ORACLE, corrected (roborev round-26, Low). This block used to say the resolved set is
+  # WIDER than cqlite-core's `default + legacy-heuristics` because it includes
+  # arrow/parquet/cli-helpers, attributing that to dev-dependency unification. Both halves are now
+  # obsolete: round 6 replaced the oracle with a PACKAGE-SCOPED `cargo tree -p` resolve precisely
+  # BECAUSE those extras were a workspace-resolution artifact — they are turned on by
+  # cqlite-flight / cqlite-py / cqlite-node / ws0-corpus-gen, other members, measured 14 features
+  # workspace-wide against 9 package-scoped. So the set printed below no longer contains them, and
+  # the paragraph that explained why it did was describing the defect that was removed.
+  #
+  # THIS IS THE SECOND STALE ORACLE COMMENT THIS CHANGE HAS SHIPPED (round 20 fixed the header of
+  # `_resolved_package_features` itself, which had survived the same round-6 fix). The pattern is
+  # worth naming: when an oracle changes, its rationale is usually written in MORE THAN ONE place,
+  # and the copies do not move with it — so the search after such a fix is for every paragraph that
+  # ARGUES for the old behaviour, not just the one attached to the code.
+  #
+  # The direction still matters for THIS census specifically — it reports a GAP, so an over-broad
+  # enabled set would UNDER-report gaps (the permissive direction), which is why the narrower
+  # package-scoped resolve is the correct oracle here and not merely the tidier one.
+  #
+  # Deliberately NOT done in this change: a second `--features legacy-heuristics,experimental`
+  # pass that would actually execute them. It is a third full compile of cqlite-core at a
+  # third feature set — measured cost for the existing single pass is ~292s — and the
+  # general "experimental executes nowhere" hole is #3373's subject, not this lane's.
+  local coreq="" coreq_n=0 f_
+  # THE CENSUS SUBJECT MUST COVER WHAT THE LANE EXECUTES, and `--lib` was missing from it
+  # (roborev round-9 finding, Medium). The lane runs cqlite-core's inline unit tests, so an
+  # inline `#[cfg(all(feature = "legacy-heuristics", feature = "X"))]` test in
+  # cqlite-core/src/** compiles out here exactly like a gated integration body — but the
+  # census only looked at integration-target roots and would therefore have reported "every
+  # gated body is reachable" while one was silently absent. A FALSE ZERO-GAP, the silent
+  # direction. The aggregate non-zero unit-test guard cannot see it either: 3478 sibling
+  # unit tests keep the count nonzero. Same shape as the guard-subject findings of rounds 7
+  # and 8 — the subject was narrower than the claim.
+  #
+  # Pre-filtered with grep so the awk pass runs only over files that mention the feature
+  # (8 of cqlite-core/src's files today, none of them co-required).
+  local _libsrc
+  # The scan's EXIT STATUS is checked, and "no matches" is distinguished from a READ ERROR
+  # (roborev round-37, Low). `grep -rl … 2>/dev/null` swallowed both: an unreadable directory or a
+  # partial walk produced an empty list, and an empty list was reported as a CLEAN ZERO-GAP census.
+  # grep exits 0 = matches, 1 = none, >=2 = error; only >=2 is fatal, and it FAILs the lane naming
+  # the scan rather than reporting a census nobody took.
+  local _libsrc_list _libsrc_rc=0
+  _libsrc_list=$(grep -rlE 'feature[[:space:]]*=[[:space:]]*"legacy-heuristics"' \
+    "$REPO_ROOT/cqlite-core/src" 2>/dev/null | sort) || _libsrc_rc=$?
+  if [ "$_libsrc_rc" -ge 2 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the library census scan of cqlite-core/src FAILED (grep exit"
+      echo "        $_libsrc_rc — an unreadable directory or a partial walk), so the co-required"
+      echo "        census would have been taken over an INCOMPLETE source set and reported as a"
+      echo "        clean zero gap. A census that could not be taken is never reported as empty."
+    } | tee -a "$log"
+    end=$(date +%s); record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"; return 0
+  fi
+  while IFS= read -r _libsrc; do
+    [ -n "$_libsrc" ] || continue
+    srcs="$srcs${_libsrc#$REPO_ROOT/}	$_libsrc
+"
+  done <<EOF
+$_libsrc_list
+EOF
+  # Dedupe: one file, one scan, one site list — a helper module shared by several targets
+  # must not be reported once per including target.
+  srcs=$(printf '%s' "$srcs" | sort -u)
+  local lh_sites=0 lh_skip=0 _sites _k _ln _ms _m f_ f_src lh_where=""
+  while IFS="	" read -r f_ f_src; do
+    [ -n "$f_" ] || continue
+    # cargo's OWN src_path, not a reconstructed `tests/<name>.rs` (roborev round-8
+    # finding, Low): a directory-style or explicitly-mapped `[[test]]` target does not live
+    # at that reconstructed path, so the census silently skipped it while the lane claims
+    # to fail closed. And an UNREADABLE included source is a FAIL, never a `continue` — a
+    # census that cannot read its subject is unmeasurable, not empty.
+    if [ ! -r "$f_src" ]; then
+      status=FAIL
+      {
+        echo "[$name] FAIL-CLOSED: the co-required-feature census could not read the source of"
+        echo "        an INCLUDED target: $f_ ($f_src). A census that cannot read its subject is"
+        echo "        unmeasurable, and unmeasurable is never reported as empty."
+      } | tee "$log"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
+    # A census that CANNOT be taken is never reported as empty (the lane's standing rule):
+    # a failed derivation FAILs and names the derivation.
+    if ! _sites=$(_legacy_coreq_sites "$f_src" "$lh_enabled"); then
+      status=FAIL
+      {
+        echo "[$name] FAIL-CLOSED: the co-required-feature census could not be derived from"
+        echo "        $f_src. The derivation, not the feature, is what failed."
+        echo "        A census that cannot be taken is not reported as empty."
+      } | tee "$log"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
+    while IFS=$'\t' read -r _k _ln _ms; do
+      [ -n "$_k" ] || continue
+      case "$_k" in
+        site) lh_sites=$((lh_sites + 1)); lh_where="$lh_where $f_:$_ln" ;;
+        skip) lh_skip=$((lh_skip + 1)) ;;
+      esac
+      for _m in $(echo "$_ms" | tr ',' ' '); do
+        case " $coreq " in *" $_m "*) ;; *) coreq="$coreq $_m" ;; esac
+      done
+    done <<EOF
+$_sites
+EOF
+  done <<EOF
+$srcs
+EOF
+  coreq_n=$lh_sites
+  local -a lh_census=()
+  # THE SAME TWO DECLARATIONS, INTO THE COMPONENT LOG (found by probing the job-111 fix, which is
+  # the only reason it surfaced). Both are echoed to stdout above, and stdout-only was the whole of
+  # job 108's Low finding: the census write below opens "$log" with `>`, so anything appended before
+  # it is TRUNCATED, and a reader inspecting the component log saw neither declaration. The comment
+  # beside those echoes already states the principle in this file — a coverage gap this lane must
+  # state — and they were stating it only where nobody reads. Routed through the census array so
+  # they land AFTER the header, exactly as the cfg-gated-subtree detail is.
+  [ -n "$rf_unmet" ] && lh_census+=("NOT invoked (required-features unmet) — DECLARED coverage gap:$rf_unmet")
+  [ -n "$negonly" ] && lh_census+=("allowed-zero (NEGATIVE-polarity cfg(not(...)) only):$negonly")
+  lh_census+=("polarity: ${#allow_zero[@]} of $count target(s) excusable (allowed-zero). A target is")
+  lh_census+=("  excusable ONLY when EVERY legacy-heuristics cfg site in its module closure is the")
+  lh_census+=("  recognised direct-negative attribute #[cfg(not(feature = \"legacy-heuristics\"))].")
+  lh_census+=("  Any other shape — nested, compound, multiline, unfamiliar — is NOT excused, so an")
+  lh_census+=("  unrecognised expression costs a target its excusal and never costs a zero-tests")
+  lh_census+=("  check. Per-target reasons are on stdout as POLARITY-UNRECOGNISED.")
+  if [ "$lh_sites" -gt 0 ] || [ "$lh_skip" -gt 0 ]; then
+    lh_census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT EXECUTE:")
+    if [ "$lh_sites" -gt 0 ]; then
+      local _sw="sites"; [ "$lh_sites" -eq 1 ] && _sw="site"
+      # SITES, not bodies. The count of gated test bodies is deliberately NOT claimed: one
+      # site can gate a whole module, and counting bodies needs a Rust parser (see
+      # _legacy_coreq_sites for the descope and the four review rounds behind it).
+      lh_census+=("  $lh_sites legacy-heuristics-gated cfg $_sw ALSO require$coreq, which this")
+      lh_census+=("  lane does NOT enable — so whatever each one gates (a test, a module, an")
+      lh_census+=("  import) does NOT execute here. Sites, not bodies: one site can gate a whole")
+      lh_census+=("  module, so a body count would be a guess.")
+      lh_census+=("  The #2039 zero-tests guard CANNOT detect this: sibling ungated tests in the")
+      lh_census+=("  same target keep its count nonzero.")
+      lh_census+=("  Tracked by #3373 (experimental-gated tests execute in NO lane at all).")
+      lh_census+=("  where:$lh_where")
+      lh_census+=("  This census is NON-EXHAUSTIVE (#3472): these are the sites it RECOGNISED, not")
+      lh_census+=("  necessarily all that exist — a cfg or declaration shape it does not model is")
+      lh_census+=("  invisible to it and is absent from the list above, not marked.")
+    fi
+    if [ "$lh_skip" -gt 0 ]; then
+      lh_census+=("  $lh_skip further co-required site(s) use a Boolean shape this census does not")
+      lh_census+=("  evaluate (not(...) / any(...) / cfg_attr) and are NOT counted above — a token")
+      lh_census+=("  list cannot tell a conjunction from a disjunction, and any(...) IS reachable")
+      lh_census+=("  here. Reported rather than guessed: a named unknown beats a wrong entry.")
+    fi
+  else
+    lh_census+=("co-required-feature census: 0 RECOGNISED — no recognised legacy-heuristics-gated cfg")
+    lh_census+=("  site requires a feature this lane omits. The scan is NON-EXHAUSTIVE (#3472): this is")
+    lh_census+=("  evidence that none was RECOGNISED, never evidence that none is THERE.")
+  fi
+  # DECLARED alongside the co-required census, because it is the same kind of blind spot: a
+  # subtree whose reachability was not evaluated cannot be counted either way, and the census
+  # claiming "0 gaps" over it would be the silent direction (roborev root pass at aabae56ea).
+  if [ "$_lh_cfg_gaps" -gt 0 ]; then
+    lh_census+=("cfg-gated-subtree gaps: $_lh_cfg_gaps subject target(s) reach a child module through")
+    lh_census+=("  a cfg this scan does not evaluate — their legacy coverage is UNCLASSIFIED:")
+    lh_census+=("  NON-EXHAUSTIVE (#3472): these are the gaps it RECOGNISED, not necessarily all.")
+    # the DETAIL goes in the census itself, so it lands in the component log rather than being
+    # truncated out of it by the `>` below (roborev job 97, Low). "listed above" has to be true.
+    for _gd in "${lh_gap_detail[@]:-}"; do
+      [ -n "$_gd" ] || continue
+      lh_census+=("  $_gd")
+    done
+  else
+    lh_census+=("cfg-gated-subtree gaps: 0 RECOGNISED — every module the scan RECOGNISED is reached")
+    lh_census+=("  unconditionally; a declaration form it does not recognise is invisible to it (#3472).")
+  fi
+  lh_census+=("enabled features (cargo tree -p, package-scoped):$lh_enabled")
+  local _cl
+  for _cl in "${lh_census[@]}"; do echo ">>> [$name] $_cl"; done
+  # The log OPENS with the census (`>` here; the cargo build below switches to `>>`), so
+  # the omission is in the component log on every run, pass or fail — the same contract
+  # the flight-tests lane uses. A gap that only appears on stdout is a gap nobody reads.
+  {
+    echo "==== [$name] COVERAGE CENSUS (issue #1699 / #3373) ===="
+    for _cl in "${lh_census[@]}"; do echo "$_cl"; done
+    echo "==== end census ===="
+  } > "$log"
+  echo ">>> [$name] RUSTFLAGS=-D warnings cargo build -p cqlite-core --features legacy-heuristics, then cargo test --no-fail-fast --lib + derived targets (#1699)"
+  # --no-fail-fast is load-bearing for THIS lane specifically. cargo test stops after the
+  # first failing test BINARY, and this lane is the first thing ever to execute these
+  # targets — so fail-fast reports one target's failures, hides the rest, and turns
+  # triage into a serial reveal (measured: run 1 showed only P0_4_modern_format_rejection,
+  # run 2 then showed 3 more in sstable_discovery_comprehensive). A lane whose purpose is
+  # to surface never-executed rot must surface ALL of it in one run.
+  # RUSTFLAGS="-D warnings" MUST cover the cargo test compile too (roborev round-3
+  # finding, Medium). A `RUSTFLAGS=... cargo build && cargo test` chain applies it to the
+  # BUILD ONLY, and `cargo test` then recompiles the lib's cfg(test) code plus the
+  # selected --test targets WITHOUT warnings-as-errors — so the warning-class defect this
+  # lane exists to catch at this feature set (#1981's dead-code shape: a cfg(test) helper
+  # whose only caller is gated out) would have passed silently in exactly the half of the
+  # lane that compiles test code. `env` both invocations so neither half is unguarded.
+  # The `--lib` half needs its OWN guard (roborev round-8 finding, Medium). The existing
+  # zero-tests guard keys on `Running tests/<name>.rs` — integration targets only — so the
+  # library unit suite could execute ZERO tests, or `--lib` could be dropped from the
+  # invocation entirely, and the lane would stay green on its integration targets alone.
+  # cqlite-core's inline `#[cfg(feature = "legacy-heuristics")]` unit tests live exactly
+  # there (3478 tests observed at this feature set), and they are half of what this lane
+  # claims to execute. Derived, not hard-coded, for the same reason as the flight lane's.
+  local -a lh_unit_srcs=()
+  local _lh_us
+  while IFS= read -r _lh_us; do
+    [ -n "$_lh_us" ] && lh_unit_srcs+=("$_lh_us")
+  done <<EOF
+$(_package_unittest_srcs cqlite-core lib "$lh_enabled")
+EOF
+  if [ "${#lh_unit_srcs[@]}" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-core's lib unittest target from cargo"
+      echo "        metadata, so the --lib half of this lane would run under NO zero-test guard."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Both halves go through _deny_warnings, which is what makes `-D warnings` real: a bare
+  # `env RUSTFLAGS=...` is silently ignored when CARGO_ENCODED_RUSTFLAGS is set (round-5).
+  if _deny_warnings cargo build --package cqlite-core --features legacy-heuristics >>"$log" 2>&1 \
+      && _deny_warnings env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" CARGO_TERM_COLOR=never \
+        cargo test --no-fail-fast --package cqlite-core --features legacy-heuristics --lib "${targets[@]}" >>"$log" 2>&1; then
+    # Green cargo exit is not sufficient — see the guard's own doc block.
+    # The guard writes its verdict to stderr only, so `2>>` lands the message in the
+    # component log (where the FAIL branch below tails it) while the `if` still tests
+    # the GUARD's exit status directly — not a pipeline's last stage.
+    # BOTH halves are guarded: check_no_unexpected_zero_tests covers the integration
+    # targets, check_unittest_targets_ran covers the `--lib` unit suite. Either alone
+    # leaves half of this lane able to execute nothing while the lane reports PASS
+    # (roborev round-8 finding, Medium): the existing guard keys on `Running
+    # tests/<name>.rs`, so a zero-test lib suite — or `--lib` dropped from the invocation
+    # entirely — was invisible to it, and cqlite-core's inline legacy-gated unit tests
+    # (3478 observed at this feature set) are half of what this lane claims to execute.
+    if check_no_unexpected_zero_tests "$name" "$log" \
+        ${allow_zero[@]+"${allow_zero[@]}"} 2>>"$log" \
+        && check_test_targets_observed "$name" "$log" ${observe_ids[@]+"${observe_ids[@]}"} 2>>"$log" \
+        && check_unittest_targets_ran "$name" "$log" "${lh_unit_srcs[@]}" 2>>"$log"; then
+      echo ">>> [$name] zero-test guards: integration targets + unit suite (derived): ${lh_unit_srcs[*]}"
+      status=PASS
+    else
+      status=FAIL
+    fi
+  else
+    status=FAIL
+  fi
+  if [ "$status" = FAIL ]; then
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# run_feature_iso <feature>: ONE isolation lane, parameterized by the feature under
+# test (issue #1699). Two dispatch arms consume it — feature-iso-parquet and
+# feature-iso-delta-scan — so the rationale lives once, here, and the two lanes can
+# never drift apart.
+#
+# WHY these lanes exist: run_clippy's cqlite-core arm enables legacy-heuristics,
+# parquet AND delta-scan together with ~30 more features. That combined shape is
+# exactly what MASKS cross-feature coupling — a parquet-gated item that accidentally
+# references a delta-scan-gated item compiles fine whenever both features are on, so
+# no existing component can see it. Each lane therefore enables exactly ONE of the two
+# and asserts the code still compiles without the other. Never --all-features here:
+# isolation is the entire point.
+#
+# `all-compression` stays in both lanes because it is in `default`; dropping it would
+# change what the lane measures from FEATURE ISOLATION to NO-COMPRESSION support,
+# which is a different (and already covered) question — minimal-build owns that one.
+#
+# COMPILING TEST CODE IS LOAD-BEARING, but `--all-targets` was the wrong instrument.
+# The argument STANDS: the #1978 incident class is an ungated `#[cfg(test)]` module
+# referencing a feature-gated item, and a library-only `cargo check` never compiles
+# `cfg(test)` code at all — so a bare `cargo check` would compile the library, go
+# green, and miss the very incident class this lane cites.
+#
+# But that incident class lives in `cqlite-core/src/**`'s INLINE `#[cfg(test)]`
+# modules, and `--all-targets` reaches far past them: it also compiles cqlite-core's
+# ~100 INTEGRATION test files, which are written against the DEFAULT feature set and
+# therefore fail here on modules this lane deliberately configures out. Measured:
+# issue_1004_primitive_codec_vectors.rs:23 (`storage::serialization`),
+# issue_2412_wraparound_scan.rs:42 (`storage::write_engine`),
+# contract_stability_tests.rs:23 (`cqlite_core::query`). Those are NOISE — the
+# integration suite assuming default features — not cross-feature leakage, which is
+# what this lane exists to measure.
+#
+# The correct instrument is `cargo test --lib --no-run`: it compiles the lib WITH its
+# `cfg(test)` modules (the incident class) and pulls in NO integration test target.
+# minimal-build is the precedent — it uses this exact shape for exactly this reason.
+# Do NOT "simplify" this to `cargo check --lib`: that does not compile `cfg(test)` and
+# is blind to #1978.
+#
+# RUSTFLAGS=-D warnings is load-bearing for the same reason minimal-build sets it
+# (#1981): a feature-orphaned helper (a `#[cfg(test)]` helper whose only caller is
+# gated out at this feature set) surfaces as a DEAD-CODE WARNING, and a lane without
+# -D warnings demotes that to a line nobody reads.
+#
+# `--no-run` rather than executing keeps the cost proportionate to the purpose: the
+# question is "does it still compile in isolation", not "do the tests pass" (core-tests
+# owns that, at the default feature set).
+#
+# No opt-out env var: a committed feature is never legitimately absent.
+# _deny_warnings — run a cargo invocation with `-D warnings` ACTUALLY in effect.
+#
+# roborev round-5 finding (Medium): `env RUSTFLAGS="-D warnings" cargo …` is SILENTLY
+# INERT whenever CARGO_ENCODED_RUSTFLAGS is present in the environment, because cargo
+# reads the ENCODED variable first and ignores RUSTFLAGS entirely when it is set. Every
+# lane in this issue exists to stop a guard that looks enforced from enforcing nothing,
+# so a warnings-as-errors guard an inherited env var can switch off is precisely the
+# defect class — and this file already knows the precedence rule (the managed-config
+# check near the top tests BOTH variables for exactly this reason).
+#
+# When the encoded form is present it is APPENDED to, not replaced: dropping an
+# operator's flags would trade one silent behaviour change for another, and the
+# question here is only whether `-D warnings` is added. cargo's element separator is
+# US (\x1f), and `-D warnings` is TWO elements (the space-split form RUSTFLAGS would
+# have produced). The append is announced on stderr — which every caller redirects into
+# its component log — so a non-default flag environment is visible rather than assumed.
+#
+# The plain branch UNSETS the encoded variable rather than leaving it: an empty-but-set
+# value is still "present" to cargo and would suppress RUSTFLAGS, which is the same
+# vacuous outcome by a quieter route.
+_deny_warnings() {
+  # REFUSE inherited lint controls that DEFEAT the appended `-D warnings` (roborev round-35,
+  # Medium). `-D warnings` going last wins over another `-D`/`-W`, but it does NOT win over:
+  #   --cap-lints allow      caps every lint below deny, so nothing can become an error
+  #   --force-warn <spec>    forces the lint back to a warning regardless of later -D
+  # Either one makes these lanes' entire warning-class guard SILENTLY INERT while their SUMMARY
+  # line stays green — the #1981 defect reintroduced through the environment instead of the code.
+  # A guard that can be switched off by an inherited variable is not a guard, and detecting it is
+  # cheap, so this fails closed and names the offending flag rather than compiling anyway.
+  local _dw_all="${RUSTFLAGS:-} ${CARGO_ENCODED_RUSTFLAGS:-}"
+  case "$_dw_all" in
+    *--cap-lints*|*--force-warn*)
+      echo "[deny-warnings] FAIL-CLOSED: the inherited lint flags contain --cap-lints or" >&2
+      echo "[deny-warnings] --force-warn, either of which prevents '-D warnings' from making a" >&2
+      echo "[deny-warnings] warning an error — so this lane's warning guard would be inert while" >&2
+      echo "[deny-warnings] reporting PASS. Unset them (RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS) and" >&2
+      echo "[deny-warnings] re-run; the guard is refusing rather than compiling something it" >&2
+      echo "[deny-warnings] cannot vouch for (issue #1699, roborev round-35)." >&2
+      return 1
+      ;;
+  esac
+  if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
+    local _us
+    _us=$(printf '\037')
+    echo "[deny-warnings] CARGO_ENCODED_RUSTFLAGS is set and takes precedence over RUSTFLAGS;" >&2
+    echo "[deny-warnings] appending -D warnings to it so the guard is not silently inert." >&2
+    CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${_us}-D${_us}warnings" "$@"
+  else
+    # APPEND, never replace (roborev round-12 finding, Medium). The encoded branch above
+    # preserves the operator's flags, and this branch replacing them was an indefensible
+    # asymmetry: it would silently drop target, sanitizer or codegen flags for THESE LANES
+    # ONLY, so the lanes would compile something subtly different from every other component
+    # in the same run. `-D warnings` goes last so it wins on conflict.
+    env -u CARGO_ENCODED_RUSTFLAGS RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings" "$@"
+  fi
+}
+
+run_feature_iso() { # run_feature_iso <feature>
+  _deny_warnings cargo test --package cqlite-core \
+    --no-default-features --features "all-compression,$1" --lib --no-run
 }
 
 # parity-report: verify the committed derived parity report is not stale vs its
@@ -8174,6 +10877,12 @@ run_file_size
 #     report PASS. python-bindings is therefore in this set (#1175 finding 2): the
 #     preflight must FAIL loudly rather than let a skipped suite pass green — the
 #     same #646 failure mode that motivated guarding the Rust dataset suites.
+#     Added by #1699: flight-tests (its --lib unit suite reads real Data.db — e.g.
+#     stats.rs's real-fixture test, which SKIPS with a printed notice when
+#     CQLITE_DATASETS_ROOT is unset, exactly the silent-skip shape this set guards;
+#     it stays enrolled after the #3384 narrowing for that reason) and legacy-heuristics
+#     (several of its derived cqlite-core/tests targets — sstable_discovery_*,
+#     parsing_improvements_test — read real Data.db).
 #   dataset-free (deliberately NOT guarded): fmt, clippy, file-size (operate on
 #     source text),
 #     parity-report (renders the manifest + diffs the committed report; reads no
@@ -8182,13 +10891,15 @@ run_file_size
 #     CQLITE_DATASETS_ROOT in test_agent_gate_summary.sh *sets an empty* root to
 #     exercise the preflight, it consumes no real data), minimal-build (a cargo
 #     build plus a compile-only `cargo test --lib --no-run`; no tests run, no
-#     data — issue #1978), and format-compat. format-compat is excluded (#1175
+#     data — issue #1978), the two #1699 feature-isolation lanes
+#     (feature-iso-parquet / feature-iso-delta-scan: `cargo test --lib --no-run`,
+#     compile-only — nothing executes, so no fixture can be consumed), and format-compat. format-compat is excluded (#1175
 #     finding 1): its sole target (cargo test -p format-compatibility-tests,
 #     tests/format-compatibility) is pure in-memory byte-level format-compliance
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings smoke"
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings smoke flight-tests legacy-heuristics"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
@@ -8551,55 +11262,63 @@ dispatch_component() {
   # This shape is proven real: write_readback_content_tests/graceful_shutdown_tests
   # ARE this shape (that is exactly why they are the hardcoded ground truth).
   #
-  # Guard: after each pass, parse cargo'"'"'s own per-target "Running tests/<name>.rs"
-  # / "test result: ok. N passed" text and FAIL CLOSED if any target ran 0 tests
-  # unless it is on that pass'"'"'s explicit allowed-zero list. Only the two Pass-1
-  # ground-truth names are allowed to run 0 there; NOTHING is allowed to run 0 in
-  # Pass 2 (every real write-support target must execute at least one test).
-  check_no_unexpected_zero_tests() {
-    local pass_name="$1" logfile="$2"; shift 2
-    local allowed_zero=" $* "
-    local bad="" target=""
-    while IFS= read -r line; do
-      if [[ "$line" == *"Running tests/"* ]]; then
-        target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
-      elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
-        # Match the FULL zero-line (roborev finding, #2039): "0 passed; 0 failed"
-        # alone also matches a target whose tests are ALL #[ignore]d (e.g.
-        # "0 passed; 0 failed; 3 ignored; ..."), which is a legitimate, unrelated
-        # shape this guard must never fault — only a truly-empty run (0 ignored
-        # too) is the write-support-#[cfg]-gated-with-no-required-features shape.
-        if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
-          bad="$bad $target"
-        fi
-        target=""
-      elif [[ "$line" == "test result:"* ]]; then
-        target=""
-      fi
-    done < "$logfile"
-    if [ -n "$bad" ]; then
-      echo "cli-tests: FAIL-CLOSED —$bad ran 0 tests in $pass_name unexpectedly (issue #2039: a write-support-#[cfg]-gated target with no declared required-features, not on the allowed-zero list, would otherwise silently never run)" >&2
-      return 1
-    fi
-    return 0
-  }
+  # The guard itself is agent-gate.sh:check_no_unexpected_zero_tests, a single
+  # top-level definition `export -f`-ed into this `bash -c` body (#1699 promoted it
+  # out of here when legacy-heuristics/flight-tests needed the same check — one
+  # implementation, not three copies). Only the two Pass-1 ground-truth names are
+  # allowed to run 0 there; NOTHING is allowed to run 0 in Pass 2 (every real
+  # write-support target must execute at least one test).
 
-  log1=$(mktemp) && log2=$(mktemp)
-  trap "rm -f \"$log1\" \"$log2\"" EXIT
+  # A PRIVATE DIRECTORY, not two bare mktemp files in the shared tmp (roborev round-31, Medium).
+  # `_ansi_stripped_log` writes `<log>.ansi-stripped` — a PREDICTABLE sibling — and these tests run
+  # for minutes, so another local user could pre-create that sibling as a SYMLINK and have the
+  # guard`s `sed` overwrite any file the gate user can write. Inside a 0700 mktemp -d the sibling
+  # path is not guessable and not creatable by anyone else. (The other callers were already safe:
+  # they log into $LOG_DIR, itself a per-run mktemp -d.)
+  # NO `local` here: this body runs under `bash -c`, not inside a function, and bash rejects
+  # `local` at the top level with "can only be used in a function" — which would have failed the
+  # component on its first real run rather than at parse time (`bash -n` accepts it).
+  _cli_tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cli.XXXXXX") || exit 1
+  chmod 700 "$_cli_tmp" 2>/dev/null || true
+  log1="$_cli_tmp/pass1.log"; log2="$_cli_tmp/pass2.log"
+  # The `.ansi-stripped` siblings too (roborev round-18, Low): the zero-test guards
+  # parse a stripped COPY that _ansi_stripped_log writes beside the log, so cleaning
+  # only the originals leaks two files per gate run into TMPDIR. NOTE: no apostrophes in
+  # this comment — the cli-tests component body is a single-quoted `bash -c` string, so one
+  # would terminate it (it did, first try). The lane logs of the other components
+  # live under $LOG_DIR, which is retained deliberately as the `logs:` bundle; these
+  # two bare mktemps are the only ones nobody else collects.
+  trap "rm -rf \"$_cli_tmp\"" EXIT
 
   cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
+  check_no_unexpected_zero_tests "cli-tests Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
 
   cargo test --package cqlite-cli --features write-support "${ws_flags[@]}" 2>&1 | tee "$log2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "Pass 2 (write-support)" "$log2"' ;;
+  check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
     bti-multiclustering) run_bti_multiclustering ;;
     query-semantics-oracle) run_query_semantics_oracle ;;
     flight-query-semantics-oracle) run_flight_query_semantics_oracle ;;
+    flight-tests) run_flight_tests ;;
+    legacy-heuristics) run_legacy_heuristics ;;
+    # The two #1699 feature-ISOLATION lanes: cqlite-core with ONE of parquet /
+    # delta-scan and NOT the other. The instrument is `cargo test --lib --no-run` under
+    # `_deny_warnings` — NOT `--all-targets`, which section 34 of
+    # test_agent_gate_summary.sh now FORBIDS here (it pulls in ~100 default-feature
+    # integration files, measured noise), and NOT `cargo check`, which is blind to
+    # `cfg(test)` and therefore to the #1978 incident class these lanes exist to catch.
+    # `-D warnings` via `_deny_warnings` stays load-bearing (#1981: the dead-code lint
+    # must be an error, and a bare `env RUSTFLAGS=` is ignored when
+    # CARGO_ENCODED_RUSTFLAGS is set). Full rationale on run_feature_iso.
+    # (This comment previously claimed `--all-targets` was load-bearing — the opposite of
+    # what the lane does. Corrected on the C re-audit; comments beside code are not
+    # pinned by section 34, which scans the function body.)
+    feature-iso-parquet) run_component feature-iso-parquet run_feature_iso parquet ;;
+    feature-iso-delta-scan) run_component feature-iso-delta-scan run_feature_iso delta-scan ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     delivery-telemetry) run_delivery_telemetry ;;

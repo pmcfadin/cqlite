@@ -12,7 +12,11 @@
 // All tests in this file require state_machine feature for Database.execute()
 #![cfg(feature = "state_machine")]
 
-#[cfg(feature = "legacy-heuristics")]
+// `Value` is used ONLY by test_database_lifecycle_with_cassandra_tables, whose cfg
+// requires BOTH features — so the import must carry the SAME cfg or it is an unused
+// import (a hard error under -D warnings) at `default + legacy-heuristics`, the
+// feature set the `legacy-heuristics` gate component builds (issue #1699).
+#[cfg(all(feature = "legacy-heuristics", feature = "experimental"))]
 use cqlite_core::Value;
 use cqlite_core::{Config, Database};
 use tempfile::TempDir;
@@ -233,7 +237,11 @@ async fn test_database_stats_retrieval() {
 }
 
 #[tokio::test]
-#[cfg(feature = "legacy-heuristics")]
+// Body calls db.flush()/db.compact() (below), both `experimental`-gated, so the cfg
+// must name BOTH features — matching test_database_lifecycle_with_cassandra_tables
+// above. Without `experimental` this failed to compile at `default +
+// legacy-heuristics` (issue #1699).
+#[cfg(all(feature = "legacy-heuristics", feature = "experimental"))]
 async fn test_database_component_interactions() {
     let temp_dir = TempDir::new().expect("temp dir");
     let config = Config::default();

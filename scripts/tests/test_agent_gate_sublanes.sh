@@ -31,6 +31,10 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # SIDE-lane load, so it stays SERIAL on the MAIN lane.
 EXPECTED_NEW_SIDE="parity-report delivery-telemetry binding-unwind-profile smoke memory-budget"
 EXPECTED_EXISTING_SIDE="python-bindings node-bindings"
+# The #1699 feature-matrix lanes. Each builds cqlite-core (or cqlite-flight against it) at a
+# feature set that DIVERGES from MAIN's cli-helpers set, which is precisely the shared-target
+# thrash shape #2657 documents — so all four belong on SIDE, each in its own CARGO_TARGET_DIR.
+EXPECTED_FEATURE_MATRIX_SIDE="flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan"
 # Components that MUST stay on the strictly-serial MAIN lane despite being otherwise
 # isolatable — tooling-tests is here because its shell self-tests are latency-sensitive.
 EXPECTED_MAIN_ONLY="tooling-tests"
@@ -65,6 +69,17 @@ for c in $EXPECTED_EXISTING_SIDE; do
   fi
 done
 
+# 3b) The #1699 feature-matrix lanes MUST be on the SIDE lane, each for the same
+#     divergent-feature-set reason (#2657). Asserted per component, not only via the
+#     exact-membership check below, so a FAIL names which lane moved.
+for c in $EXPECTED_FEATURE_MATRIX_SIDE; do
+  if [ "$(lane_of "$c")" = side ]; then
+    ok "$c runs in the SIDE lane with its own CARGO_TARGET_DIR (#1699 divergent feature set)"
+  else
+    bad "$c is NOT on the SIDE lane (lane='$(lane_of "$c")') — it builds at a feature set that diverges from MAIN's and would thrash the shared target dir (#2657)"
+  fi
+done
+
 # 4) core-tests (the shared-target long pole) and the guard components that build
 #    cqlite-core under MAIN's feature set MUST stay on the strictly-serial MAIN lane
 #    — moving them to a concurrent lane is the shared-target thrash #1737 documents.
@@ -91,9 +106,9 @@ done
 # 5) The SIDE lane must be exactly the union of the two sets — nothing else silently
 #    joined it, so the MAIN build profile is unchanged for every other component.
 side_sorted=$(printf '%s\n' $side_list | sort)
-expected_side_sorted=$(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE | sort)
+expected_side_sorted=$(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE $EXPECTED_FEATURE_MATRIX_SIDE | sort)
 if [ "$side_sorted" = "$expected_side_sorted" ]; then
-  ok "SIDE lane is exactly the 7 expected isolatable components (tooling-tests excluded)"
+  ok "SIDE lane is exactly the 11 expected isolatable components (7 pre-existing + the 4 #1699 feature-matrix lanes; tooling-tests excluded)"
 else
   bad "SIDE lane membership drifted:
 --- got ---
@@ -130,7 +145,7 @@ fi
 # 9) is_side_component and _component_lane agree (single source of truth): every
 #    component the classifier calls "side" must be a member of the union above.
 for c in $side_list; do
-  case " $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE " in
+  case " $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE $EXPECTED_FEATURE_MATRIX_SIDE " in
     *" $c "*) : ;;
     *) bad "classifier put unexpected '$c' on the SIDE lane" ;;
   esac

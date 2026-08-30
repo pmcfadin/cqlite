@@ -52,8 +52,18 @@ enum FileContentType {
 }
 
 /// Comprehensive SSTable discovery test with Cassandra naming patterns
+/// IGNORED (issue #3374): never executed by anything until #1699 added a lane that
+/// EXECUTES legacy-heuristics-gated tests. It fails on first run because it asserts
+/// behaviour CQLite deliberately does NOT support: it hand-synthesizes SSTable
+/// components whose Statistics.db is filler bytes (correctly rejected with
+/// `code: Verify`), and — for the discovery case — `mc-` filenames, a Cassandra 3.x
+/// PRE-`na` format version that CLAUDE.md places out of scope ("SHALL NOT be
+/// introduced, supported, or reviewed for correctness"; `BigVersionGates::from_version`
+/// rejects `< na` by design). The code is right and the assertion is pre-doctrine, so
+/// it is NOT "fixed" by loosening the parser. #3374 proposes deleting these three.
 #[tokio::test]
 #[cfg(feature = "legacy-heuristics")]
+#[ignore = "asserts out-of-scope behaviour (invalid mocked components / pre-na `mc-` versions); see issue #3374"]
 async fn test_cassandra_data_db_discovery() {
     let temp_dir = TempDir::new().unwrap();
     let test_root = temp_dir.path();
@@ -605,8 +615,18 @@ async fn test_sstable_discovery_edge_cases() {
 }
 
 /// Integration test for actual table loading with discovered SSTable files
+/// IGNORED (issue #3374): never executed by anything until #1699 added a lane that
+/// EXECUTES legacy-heuristics-gated tests. It fails on first run because it asserts
+/// behaviour CQLite deliberately does NOT support: it hand-synthesizes SSTable
+/// components whose Statistics.db is filler bytes (correctly rejected with
+/// `code: Verify`), and — for the discovery case — `mc-` filenames, a Cassandra 3.x
+/// PRE-`na` format version that CLAUDE.md places out of scope ("SHALL NOT be
+/// introduced, supported, or reviewed for correctness"; `BigVersionGates::from_version`
+/// rejects `< na` by design). The code is right and the assertion is pre-doctrine, so
+/// it is NOT "fixed" by loosening the parser. #3374 proposes deleting these three.
 #[tokio::test]
 #[cfg(feature = "legacy-heuristics")]
+#[ignore = "asserts out-of-scope behaviour (invalid mocked components / pre-na `mc-` versions); see issue #3374"]
 async fn test_integration_table_loading() {
     let temp_dir = TempDir::new().unwrap();
     let test_root = temp_dir.path();
@@ -697,8 +717,18 @@ async fn test_integration_table_loading() {
 }
 
 /// Performance regression test for SSTable discovery optimization
+/// IGNORED (issue #3374): never executed by anything until #1699 added a lane that
+/// EXECUTES legacy-heuristics-gated tests. It fails on first run because it asserts
+/// behaviour CQLite deliberately does NOT support: it hand-synthesizes SSTable
+/// components whose Statistics.db is filler bytes (correctly rejected with
+/// `code: Verify`), and — for the discovery case — `mc-` filenames, a Cassandra 3.x
+/// PRE-`na` format version that CLAUDE.md places out of scope ("SHALL NOT be
+/// introduced, supported, or reviewed for correctness"; `BigVersionGates::from_version`
+/// rejects `< na` by design). The code is right and the assertion is pre-doctrine, so
+/// it is NOT "fixed" by loosening the parser. #3374 proposes deleting these three.
 #[tokio::test]
 #[cfg(feature = "legacy-heuristics")]
+#[ignore = "asserts out-of-scope behaviour (invalid mocked components / pre-na `mc-` versions); see issue #3374"]
 async fn test_performance_discovery_regression() {
     let temp_dir = TempDir::new().unwrap();
     let test_root = temp_dir.path();

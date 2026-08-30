@@ -256,7 +256,45 @@ fi
 #     file. Extract check_no_unexpected_zero_tests() VERBATIM from the gate (source
 #     of truth, no re-typed copy to drift) and drive it against synthetic cargo-style
 #     "Running tests/<name>.rs" / "test result:" log text.
-FUNC_SRC=$(awk '/^  check_no_unexpected_zero_tests\(\) \{/{f=1} f{print} f&&/^  \}$/{exit}' "$GATE")
+# INDENTATION-AGNOSTIC extraction (issue #1699). This used to hard-code a two-space
+# indent, which broke the moment check_no_unexpected_zero_tests() was promoted from a
+# nested definition to a top-level one — a silent-coverage-loss shape: the extraction
+# yields empty and the behavioural cases below never run. Capture the definition's OWN
+# leading whitespace and terminate on the closing brace at that SAME indentation, so
+# the self-test follows the function instead of pinning its position.
+# DEPENDENCIES TRAVEL WITH THE FUNCTION (issue #1699, roborev round-16). The guard calls
+# _ansi_stripped_log, so extracting the guard alone left the helper undefined — and the
+# consequence was not a loud error: the redirection source resolved to the empty string, the
+# read loop consumed nothing, and the guard reported OK having parsed no lines. That is the
+# vacuous pass this whole file exists to prevent, produced by the harness itself. The guard now
+# also FAILS CLOSED on an unpreparable log, so this extraction being wrong reds instead of
+# greening — but both layers stay, because either alone has a silent failure mode.
+DEP_SRC=$(awk '
+  !f && /^[[:space:]]*_ansi_stripped_log\(\) \{/ {
+    f = 1
+    indent = $0; sub(/[^[:space:]].*$/, "", indent)
+    close_re = "^" indent "\\}$"
+    print
+    next
+  }
+  f { print; if ($0 ~ close_re) exit }
+' "$GATE")
+if [ -z "$DEP_SRC" ]; then
+  bad "could not extract _ansi_stripped_log() from $GATE — the guard calls it, and without it the guard parses NOTHING and reports OK"
+else
+  ok "extracted _ansi_stripped_log() (the guard's dependency) from the gate"
+  eval "$DEP_SRC"
+fi
+FUNC_SRC=$(awk '
+  !f && /^[[:space:]]*check_no_unexpected_zero_tests\(\) \{/ {
+    f = 1
+    indent = $0; sub(/[^[:space:]].*$/, "", indent)
+    close_re = "^" indent "\\}$"
+    print
+    next
+  }
+  f { print; if ($0 ~ close_re) exit }
+' "$GATE")
 if [ -z "$FUNC_SRC" ]; then
   bad "could not extract check_no_unexpected_zero_tests() from $GATE"
 else
