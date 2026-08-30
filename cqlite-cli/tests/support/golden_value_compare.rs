@@ -350,10 +350,11 @@ pub fn compare_rows(
             // [`gap::Divergence`]. What it suppresses is that one divergence, and
             // with it this cell's compared-cell COUNTERS: a cell part of whose
             // value was discarded is not compared coverage.
-            // The gap declared for this WHOLE column, if any. A dotted
-            // `col.field` entry does not match here; it is observed inside the
-            // walk, so the column's other fields keep being compared and counted.
-            let column_gap = skips.declared(name);
+            //
+            // Does a gap name this WHOLE column? A dotted `col.field` entry does
+            // not, so its column keeps being compared and counted; the field is
+            // reached inside the walk.
+            let column_has_gap = skips.excludes(name);
             // Where this cell's own refusals and gap suppressions start (see
             // [`Refusals::mark`] and [`Suppressions::mark`]).
             let cell_mark = refusals.mark();
@@ -380,7 +381,7 @@ pub fn compare_rows(
                          rendered (a null cell as `null`, an empty CSV field){}",
                         schema.table,
                         column.ty.describe(),
-                        if column_gap.is_some() {
+                        if column_has_gap {
                             " — the declared gap for this path excludes its VALUE, not \
                              the column's PRESENCE"
                         } else {
@@ -388,7 +389,7 @@ pub fn compare_rows(
                         }
                     ));
                 }
-                if column_gap.is_some() {
+                if column_has_gap {
                     // There is no value at that path to compare, so what the
                     // exclusion suppresses cannot be read off this row: the gap is
                     // UNRESOLVED, never applied. Reported as its own cause by
@@ -412,38 +413,14 @@ pub fn compare_rows(
             let decoded = match csv_decoded(gv, cv, egress, &column.ty, name, &skips) {
                 Ok(decoded) => decoded,
                 Err(why) => {
-                    // The CLI's text does not invert the grammar the declared type
-                    // states. That IS a divergence, so under a whole-column gap it
-                    // is judged against the DECLARED divergence exactly as any
-                    // other is — the raw text is the value the egress rendered, and
-                    // the gap may only suppress it if that is the shape it names.
-                    // Suppressing it unconditionally is the same defect one level
-                    // out: it let a gap absorb any unparseable rendering at all.
-                    if let Some(divergence) = column_gap {
-                        let kinding = column_kinding(column);
-                        if divergence.matched(gv, cv, &column.ty, egress, Depth::TopLevel, kinding)
-                        {
-                            skips.observe(name, Observed::Suppressed);
-                            continue;
-                        }
-                        skips.observe(
-                            name,
-                            Observed::Undeclared(format!(
-                                "the CSV text does not invert the declared grammar \
-                                 ({}) — where the gap declares: {}",
-                                brief(&why),
-                                divergence.declared()
-                            )),
-                        );
-                        report.diffs.push(format!(
-                            "row[{key}].{name}: unparseable CSV container: {why} — and that \
-                             is NOT the divergence the declared gap for `{name}` stands for, \
-                             which is: {}. A declared gap suppresses only the divergence it \
-                             names",
-                            divergence.declared()
-                        ));
-                        continue;
-                    }
+                    // The CLI's text is not the grammar the declared type states
+                    // at all. Reachable ONLY for a column no gap names: an
+                    // excluded path's text is never required to invert the grammar
+                    // — `csv_container::decode_at` falls back to raw text there
+                    // (finding F5) — and that raw text then reaches
+                    // [`compare_value_at`], where the gap's DECLARED divergence is
+                    // asked of it like any other value. So there is nothing for a
+                    // gap to suppress here, and no second copy of the gap rule.
                     report.compared_cells += 1;
                     report.container_cells += 1;
                     report.diffs.push(format!(
