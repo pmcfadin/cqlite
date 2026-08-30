@@ -251,6 +251,18 @@ docs/sstable-guide-audit/
 /.agent-gate-summary.txt.integrity-fail.*
 /.agent-gate-lite-summary.txt.integrity-fail.*
 /.agent-gate-delta-summary.txt.integrity-fail.*
+# agent-gate liveness heartbeat for the checkout-default summary paths (#3473). The gate
+# rewrites these every 20s for the whole run; they are runtime artifacts, never source.
+# The tree-integrity guard carves them out explicitly too (_tree_excluded) — that is what
+# covers a caller-PINNED in-repo summary path, which no .gitignore rule can predict. These
+# entries additionally keep the checkout clean and stop a heartbeat left by an EARLIER run
+# from counting against a later one.
+/.agent-gate-summary.txt.heartbeat
+/.agent-gate-lite-summary.txt.heartbeat
+/.agent-gate-delta-summary.txt.heartbeat
+/.agent-gate-summary.txt.heartbeat.tmp.*
+/.agent-gate-lite-summary.txt.heartbeat.tmp.*
+/.agent-gate-delta-summary.txt.heartbeat.tmp.*
 
 # parity-report self-test probe (issue #1338): removed by trap, ignored as a safety net
 test-data/.tmp-parity-manifest-mutated*

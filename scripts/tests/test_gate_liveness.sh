@@ -411,6 +411,82 @@ else
   fi
 fi
 
+echo "=== section 14: the heartbeat must not make the gate fail ITSELF (#2926 x #3473) ==="
+# The gate's tree-integrity guard hashes every untracked NON-IGNORED path in the checkout
+# and FAILs closed if the identity changes mid-run. The heartbeat is a file the gate
+# writes into the checkout — every 20s, for the whole run, whenever the summary path is
+# the checkout default or any in-repo path. Without an explicit carve-out the gate creates
+# it after the start capture and then FAILs ITSELF with `tree-mutated-midrun`, naming its
+# own heartbeat as the mutation.
+#
+# This was NOT caught by a short `--only` run: file-size completes in ~0s, so the first
+# beat can land after the last boundary check and the run passes by RACE. On a 30-50 min
+# full gate the beat always precedes the first boundary, so it would be a DETERMINISTIC
+# failure of the gate of record. Hence a deterministic probe here — the gate's own
+# `AGENT_GATE_TREE_SELFTEST=capture` hook, which prints the identity it would compare —
+# instead of a timing-dependent end-to-end run.
+#
+# Run inside a DETACHED THROWAWAY WORKTREE: the control case deliberately creates a path
+# that must NOT be excluded, and creating that in the live checkout would trip the
+# enclosing gate's own tree guard when this test runs inside tooling-tests.
+if ! command -v git >/dev/null 2>&1; then
+  echo "skip section 14 (no git)"
+else
+  wt="$TMP/wt"
+  if ! git -C "$REPO_ROOT" worktree add --detach "$wt" HEAD >/dev/null 2>&1; then
+    bad "14.0 create a detached scratch worktree" "git worktree add failed"
+  else
+    ok "14.0 create a detached scratch worktree"
+    # digest_of <summary-path-relative-to-worktree> -> the identity digest the guard uses
+    digest_of() {
+      ( cd "$wt" && AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_SUMMARY_FILE="$1" \
+          bash "$wt/scripts/agent-gate.sh" 2>/dev/null \
+          | sed -n 's/.*digest=\([0-9a-f]*\).*/\1/p' )
+    }
+    base=$(digest_of .agent-gate-summary.txt)
+    if [ -z "$base" ]; then
+      bad "14.1 the capture hook yields a digest" "empty — cannot measure, so nothing below is asserted"
+    else
+      ok "14.1 the capture hook yields a digest"
+      # (a) the DEFAULT summary path's heartbeat is excluded.
+      : > "$wt/.agent-gate-summary.txt.heartbeat"
+      d=$(digest_of .agent-gate-summary.txt)
+      [ "$d" = "$base" ] && ok "14.2 the run's own heartbeat (default path) is excluded from the tree identity" \
+        || bad "14.2 the run's own heartbeat (default path) is excluded from the tree identity" "$base -> $d"
+      rm -f "$wt/.agent-gate-summary.txt.heartbeat"
+      # (b) so is the atomic-write temp the beater renames from.
+      : > "$wt/.agent-gate-summary.txt.heartbeat.tmp.4242"
+      d=$(digest_of .agent-gate-summary.txt)
+      [ "$d" = "$base" ] && ok "14.3 the beater's atomic-write temp is excluded too" \
+        || bad "14.3 the beater's atomic-write temp is excluded too" "$base -> $d"
+      rm -f "$wt/.agent-gate-summary.txt.heartbeat.tmp.4242"
+      # (c) and a CALLER-PINNED in-repo path gets the same carve-out — no .gitignore rule
+      #     can predict that path, so the code carve-out is what covers it.
+      pinbase=$(digest_of .pinned-3473.txt)
+      : > "$wt/.pinned-3473.txt.heartbeat"
+      d=$(digest_of .pinned-3473.txt)
+      [ "$d" = "$pinbase" ] && ok "14.4 a caller-pinned in-repo path's heartbeat is excluded" \
+        || bad "14.4 a caller-pinned in-repo path's heartbeat is excluded" "$pinbase -> $d"
+      rm -f "$wt/.pinned-3473.txt.heartbeat"
+      # (d) THE CONTROL. An exclusion that swallowed any sibling of the summary path would
+      #     satisfy (a)-(c) while re-opening the hole #2926 exists to close, so an
+      #     unrelated sibling must STILL change the identity.
+      : > "$wt/.agent-gate-summary.txt.somethingelse"
+      d=$(digest_of .agent-gate-summary.txt)
+      [ "$d" != "$base" ] && ok "14.5 CONTROL: an unrelated sibling still counts (exclusion is not over-broad)" \
+        || bad "14.5 CONTROL: an unrelated sibling still counts" "excluded at $d — the carve-out is too wide"
+      rm -f "$wt/.agent-gate-summary.txt.somethingelse"
+      # (e) and an ordinary untracked file anywhere still counts.
+      : > "$wt/zzz-unrelated-3473.txt"
+      d=$(digest_of .agent-gate-summary.txt)
+      [ "$d" != "$base" ] && ok "14.6 CONTROL: an ordinary untracked file still counts" \
+        || bad "14.6 CONTROL: an ordinary untracked file still counts" "excluded at $d"
+      rm -f "$wt/zzz-unrelated-3473.txt"
+    fi
+    git -C "$REPO_ROOT" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  fi
+fi
+
 echo
 echo "==== test_gate_liveness.sh: passed=$pass failed=$fail ===="
 [ "$fail" -eq 0 ] || exit 1

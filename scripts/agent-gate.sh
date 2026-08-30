@@ -2871,6 +2871,18 @@ _tree_excluded() {
     case "$1" in
       "$TREE_EXCLUDE_REL") return 0 ;;
       "$TREE_EXCLUDE_REL".integrity-fail.*) return 0 ;;
+      # #3473: the liveness heartbeat, a THIRD file this run writes beside its summary by
+      # contract — and the one it rewrites most often (every 20s for the whole run).
+      # Without this arm a default-path (or any in-repo-pinned) gate creates a
+      # non-ignored untracked file after the start capture and then FAILS ITSELF with
+      # `tree-mutated-midrun`, naming its own heartbeat as the mutation. On a short
+      # `--only` run that is a RACE the gate can win (the first beat can land after the
+      # last boundary check); on a 30-50 min full gate the beat always precedes the first
+      # boundary, so it would be a DETERMINISTIC failure of the gate of record.
+      "$TREE_EXCLUDE_REL".heartbeat) return 0 ;;
+      # The beater writes atomically via a sibling temp then renames, so the temp can be
+      # observed mid-write by a concurrent capture. Same artifact, same carve-out.
+      "$TREE_EXCLUDE_REL".heartbeat.tmp.*) return 0 ;;
     esac
   fi
   if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL" ]; then return 0; fi
