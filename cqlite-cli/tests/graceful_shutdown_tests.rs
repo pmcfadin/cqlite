@@ -89,11 +89,39 @@ fn sigint_in_writable_session_flushes_before_exit() {
 
     // Stage (b): write ack, timed -> `t_ack`.
     //
-    // THE TRANSCRIPT MARK IS TAKEN BEFORE THE WRITE (roborev job 243, finding 1).
-    // The ack can be RECORDED by a reader thread and left unpublished; a mark taken
-    // after this `writeln!` would start the expiry check's window after the line
-    // was already recorded, excluding it from the window AND from the channel.
+    // THE STAGE IS OPENED BEFORE THE WRITE, AND THAT ORDERING IS LOAD-BEARING
+    // (roborev job 253, finding 1). `t_ack` is the stage's own spend, and it is a
+    // CALIBRATION INPUT: `scale = max(1, t_ack / QUIET_OBSERVATION_BASELINE)`.
+    // Opening the stage after the `writeln!`/`flush()` started the timer AFTER the
+    // operation whose round-trip it measures, so a fast child — or a test thread
+    // descheduled across the write — could have its `OK` recorded before timing
+    // began, collapsing the measurement to nearly zero. `scale` then stays at
+    // 1.000 and the deadline does not expand under contention: that is #3515's
+    // ORIGINAL DEFECT reintroduced through a mis-placed timer.
+    //
+    // It was MASKED in the one contended run ever observed (tasks.md round 13):
+    // `t_boot` measured 68.5ms and carried scale 1.557 while `t_ack` measured
+    // 4.094ms and contributed 1.000. `calibrate` takes the LARGEST scale, so a
+    // `t_boot` that happened to be slow hid it — if both are under-measured the
+    // mechanism is inert again. Pinned by
+    // `the_measured_acknowledgement_includes_the_write_itself`.
+    let stage = deadline.stage("b.write-ack");
+    // THE TRANSCRIPT MARK IS ALSO TAKEN BEFORE THE WRITE (roborev job 243,
+    // finding 1). The ack can be RECORDED by a reader thread and left unpublished;
+    // a mark taken after this `writeln!` would start the expiry check's window
+    // after the line was already recorded, excluding it from the window.
     let mark = io.mark();
+    // NOTHING NEW MAY BE INITIATED ONCE THE ONE DEADLINE HAS PASSED (roborev job
+    // 253, finding 2). A write issued after expiry can still produce an `OK` that
+    // the wait's final look accepts — evidence manufactured after the sole bound,
+    // which is a different thing from accepting evidence already in hand (the
+    // round-9 ruling, deliberately preserved).
+    require_live_or_kill(
+        &stage,
+        &io,
+        &mut child,
+        "the INSERT (id=7) write to the child's stdin",
+    );
     writeln!(
         stdin,
         "INSERT INTO test_write.users (id, name, age, active) VALUES (7, 'Grace', 30, true);"
@@ -101,24 +129,33 @@ fn sigint_in_writable_session_flushes_before_exit() {
     .expect("write INSERT to child stdin");
     stdin.flush().expect("flush child stdin");
 
-    let stage = deadline.stage("b.write-ack");
     let t_ack = await_write_ack(&io, mark, "the INSERT (id=7)", &stage);
     stage.finish();
     deadline.calibrate("t_ack", t_ack);
-
-    // Send a real SIGINT to the child. The mark for stage (c) is taken BEFORE the
-    // signal — the operation that produces the awaited handler-entry line (job 243,
-    // finding 1).
-    let handler_mark = io.mark();
-    let pid = child.id() as libc::pid_t;
-    let rc = unsafe { libc::kill(pid, libc::SIGINT) };
-    assert_eq!(rc, 0, "failed to deliver SIGINT to child pid {pid}");
 
     // Stage (c): handler ENTERED. Observing this marker establishes, together,
     // that the signal was delivered, that a shutdown handler exists and was
     // entered, and that the child was scheduled — so stage (d) below may never
     // claim anything about a handler's existence.
+    //
+    // The stage is opened BEFORE the signal, for the same two reasons as stage (b):
+    // the `kill` is the operation the stage measures, and the deadline must be
+    // checked before it is DELIVERED (job 253, findings 1 and 2). A SIGINT
+    // delivered after expiry can still make the child print the handler-entry
+    // marker, which the wait's final look would then accept.
     let stage = deadline.stage("c.handler-entry");
+    // The mark for stage (c) is taken BEFORE the signal — the operation that
+    // produces the awaited handler-entry line (job 243, finding 1).
+    let handler_mark = io.mark();
+    let pid = child.id() as libc::pid_t;
+    require_live_or_kill(
+        &stage,
+        &io,
+        &mut child,
+        "the SIGINT delivery to the interactive child",
+    );
+    let rc = unsafe { libc::kill(pid, libc::SIGINT) };
+    assert_eq!(rc, 0, "failed to deliver SIGINT to child pid {pid}");
     let entered = io.wait_for(
         handler_mark,
         Stream::Stderr,
@@ -268,7 +305,24 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         // Per write, taken BEFORE the statement is sent (job 243, finding 1). Each
         // window still excludes the PREVIOUS ack — that line was recorded before
         // this mark — which is what stops one `OK` satisfying all five waits.
+        //
+        // THE PER-WRITE TIMER STARTS BEFORE THE WRITE (roborev job 253, finding
+        // 1). `t_ack` is the calibration input, and a timer started after the
+        // `writeln!`/`flush()` misses an ack recorded in that gap — the
+        // mis-placed-timer form of this change's own original defect, which
+        // leaves `scale` at 1.000 on a contended host. Unlike stage (b) in the
+        // sibling test this cannot be the stage's own spend: the stage covers all
+        // five writes (see above), so the per-write round-trip needs its own
+        // instant, taken here.
+        let before = Instant::now();
         let mark = io.mark();
+        // Nothing new may be INITIATED past the one deadline (job 253, finding 2).
+        require_live_or_kill(
+            &acks,
+            &io,
+            &mut child,
+            &format!("the id={id} write to the child's stdin"),
+        );
         writeln!(
             stdin,
             "INSERT INTO test_write.users (id, name, age, active) VALUES ({id}, 'row{id}', {id}, true);"
@@ -276,7 +330,6 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         .expect("write INSERT to child stdin");
         stdin.flush().expect("flush child stdin");
 
-        let before = Instant::now();
         await_write_ack(&io, mark, &format!("write id={id}"), &acks);
         t_ack = t_ack.max(before.elapsed());
     }
@@ -318,9 +371,18 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     }
     stage.finish();
 
-    // Stage (d): cleanly end via EOF; progress-observed exit wait.
-    drop(stdin);
+    // Stage (d): cleanly end via EOF; progress-observed exit wait. The stage is
+    // opened BEFORE the `drop`, which is the operation that produces the awaited
+    // exit — and the deadline is checked before it, because an EOF delivered after
+    // expiry can still produce the exit this stage waits for (job 253, finding 2).
     let stage = deadline.stage("d.eof-exit");
+    require_live_or_kill(
+        &stage,
+        &io,
+        &mut child,
+        "closing the child's stdin (the EOF that ends the session)",
+    );
+    drop(stdin);
     let exited = poll_with_progress(&io, &data_dir, &stage, |slice, _artifacts| {
         child.wait_timeout(slice).expect("wait_timeout on child")
     });

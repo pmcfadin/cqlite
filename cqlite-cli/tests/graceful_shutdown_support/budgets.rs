@@ -407,6 +407,39 @@ pub struct Stage<'d> {
     started: Instant,
 }
 
+/// The ONE deadline had ALREADY PASSED when an operation was about to be
+/// INITIATED, so that operation was refused (roborev job 253, finding 2).
+///
+/// It reports what was not started and how the bound was derived, and it names NO
+/// cause: which stage exhausted the deadline is the attribution report's job, and
+/// this measurement cannot select between "an earlier stage was slow" and "the
+/// product is wedged".
+#[derive(Debug)]
+pub struct Expired {
+    stage: &'static str,
+    what: String,
+    spent: Duration,
+    deadline: String,
+}
+
+impl Expired {
+    pub fn describe(&self) -> String {
+        format!(
+            "stage {}: the test's ONE deadline had ALREADY PASSED, so {} was NOT initiated \
+             (roborev job 253, finding 2: an operation issued after expiry can still produce \
+             fresh evidence — an `OK`, a handler-entry marker, an exit — that a wait's final \
+             look would accept, carrying the test past its sole bound with work that began \
+             after it).\n\
+             this stage had been running {:.2?} when the operation was refused.\n\
+             {}\n\
+             WHAT THIS ESTABLISHES: only that the deadline was exhausted before this operation \
+             began. It does NOT say which stage consumed it, and nothing here is a statement \
+             about the product — read the stage timings below for the attribution.",
+            self.stage, self.what, self.spent, self.deadline
+        )
+    }
+}
+
 impl Stage<'_> {
     /// **THE ONE PLACE A PER-WAIT TIMEOUT IS COMPUTED**, and what it returns is
     /// the TEST's remaining time — not a stage allowance, because there is none.
@@ -418,6 +451,50 @@ impl Stage<'_> {
     /// it. (Not named `elapsed`; see [`TestDeadline::spent`].)
     pub fn spent(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// **REFUSE TO INITIATE NEW EVIDENCE-PRODUCING WORK ONCE THE ONE DEADLINE HAS
+    /// PASSED** (roborev job 253, finding 2). Call this immediately before every
+    /// write, signal, spawn or stdin close.
+    ///
+    /// THE DISTINCTION THIS PRESERVES, WHICH IS NOT THE SAME THING AS THE ROUND-9
+    /// RULING. The deadline bounds how long the test WAITS FOR EVIDENCE, never
+    /// whether it ACCEPTS evidence already in hand: every expiry site takes a final
+    /// non-blocking look and returns a success it finds there, deliberately,
+    /// because failing a stage that observed its signal is a false failure on a
+    /// working product. That stays exactly as it is.
+    ///
+    /// What is NOT sound is *manufacturing* evidence after expiry. An operation
+    /// ISSUED past the deadline — the `writeln!`, the `libc::kill`, a child spawn,
+    /// the stdin `drop` — can still produce a fresh `OK`, a fresh handler-entry
+    /// marker or a fresh exit, which the final look then accepts as though it had
+    /// arrived in time. That carries the test past its SOLE bound with work that
+    /// began after it, which no amount of care inside `wait_for` can distinguish:
+    /// by the time the line exists, it is indistinguishable from one that arrived
+    /// late. The check therefore belongs at the point of INITIATION, which is the
+    /// only place the two cases are still distinguishable.
+    ///
+    /// `Err` rather than a panic so the call site can clean up first — a
+    /// post-expiry failure must not leak a running child (see
+    /// `require_live_or_kill` in `mod.rs`).
+    pub fn check_live(&self, what: &str) -> Result<(), Expired> {
+        if self.remaining().is_zero() {
+            return Err(Expired {
+                stage: self.name,
+                what: what.to_string(),
+                spent: self.spent(),
+                deadline: self.deadline.describe(),
+            });
+        }
+        Ok(())
+    }
+
+    /// [`Stage::check_live`] for a site with nothing to clean up (a spawn that has
+    /// not happened yet), which panics rather than returning.
+    pub fn require_live(&self, what: &str) {
+        if let Err(expired) = self.check_live(what) {
+            panic!("{}\n{}", expired.describe(), self.report());
+        }
     }
 
     pub fn name(&self) -> &'static str {

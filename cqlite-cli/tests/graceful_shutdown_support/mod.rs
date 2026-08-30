@@ -592,13 +592,18 @@ fn collect_both_streams(bufs: &Arc<Mutex<StreamBufs>>, stage: &Stage) -> Collect
 /// runs `cqlite-cli`'s tests under a harness that would cut it short (design.md
 /// D6).
 ///
-/// THIS STAGE PERFORMS THREE WAITS (spawn, `wait_timeout`, two pipe collections)
-/// AND WAS THE SITE OF THREE SEPARATE FINDINGS, all the same defect: each wait
-/// separately received the stage's full budget, so the stage could consume a
-/// multiple of its own declared cap. Every wait below takes `stage.remaining()`,
-/// which is the TEST's one deadline: the spawn is charged, the collection gets
-/// only what the child wait left, and there is no per-call-site subtraction left
-/// to forget.
+/// THIS STAGE TAKES TWO BOUNDED WAITS — `wait_timeout` on the child, and the pipe
+/// collection — PLUS A CHARGED SPAWN, and it was the site of three separate
+/// findings, all the same defect: each wait separately received the stage's full
+/// budget, so the stage could consume a multiple of its own declared cap. Every
+/// wait below takes `stage.remaining()`, which is the TEST's one deadline: the
+/// spawn is charged, the collection gets only what the child wait left, and there
+/// is no per-call-site subtraction left to forget.
+///
+/// TWO IS ALSO WHAT THE WAIT CENSUS DECLARES for `e.durability-read`
+/// (`budgets.rs`): a wait counted there is one that is GRANTED `stage.remaining()`,
+/// and the spawn is charged without being granted a bound of its own. If a third
+/// bounded wait is ever added here, the census entry has to change with it.
 pub fn select_rows(
     data_dir: &Path,
     schema: &Path,
@@ -609,6 +614,10 @@ pub fn select_rows(
     // is already charged to stage (e) — the fix for roborev job 224, finding 2,
     // which timed the stage from before the spawn but then handed the wait a fresh
     // full budget.
+    // Nothing new may be INITIATED once the one deadline has passed (job 253,
+    // finding 2): a read-side child spawned after expiry can still exit and
+    // deliver its rows, which is fresh evidence produced after the sole bound.
+    stage.require_live("the read-side `cqlite --execute` spawn");
     let mut child = Command::new(cqlite_bin())
         .args([
             "--data-dir",
@@ -763,6 +772,11 @@ pub fn start_writable_session(
     // The bound here is the test's deadline, still at its UNCALIBRATED base (no
     // measurement exists yet to calibrate it from — design.md, "The residual").
     let stage = deadline.stage("a.session-up");
+    // Nothing new may be INITIATED once the one deadline has passed (roborev job
+    // 253, finding 2): a child spawned after expiry can still print the readiness
+    // banner this stage awaits. There is no child to clean up yet, so this site
+    // panics directly rather than going through `require_live_or_kill`.
+    stage.require_live("the interactive writable session spawn");
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -800,6 +814,32 @@ pub fn start_writable_session(
     // `t_boot` is the stage's own spend, which starts before the spawn (above).
     let t_boot = stage.finish();
     (child, io, t_boot)
+}
+
+/// **REFUSE TO INITIATE NEW EVIDENCE-PRODUCING WORK PAST THE ONE DEADLINE**, and
+/// kill the child before failing so a post-expiry failure does not leak it
+/// (roborev job 253, finding 2).
+///
+/// The rule and its scope live on [`Stage::check_live`]: the deadline never
+/// stopped the test ACCEPTING evidence already in hand — that is the round-9
+/// ruling and it is untouched — but an operation ISSUED after expiry can
+/// MANUFACTURE evidence a final look then accepts. Call this immediately before
+/// each `writeln!`, `libc::kill`, spawn and stdin `drop`.
+pub fn require_live_or_kill(
+    stage: &Stage,
+    io: &ChildIo,
+    child: &mut std::process::Child,
+    what: &str,
+) {
+    if let Err(expired) = stage.check_live(what) {
+        let _ = child.kill();
+        panic!(
+            "{}\nchild transcript:\n{}\n{}",
+            expired.describe(),
+            io.transcript_text(),
+            stage.report()
+        );
+    }
 }
 
 /// Wait for a write acknowledgement (`OK` on stdout). Returns how long the

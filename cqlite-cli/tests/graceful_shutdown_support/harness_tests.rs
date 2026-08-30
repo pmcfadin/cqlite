@@ -786,3 +786,118 @@ fn a_line_appended_after_the_decision_cannot_contradict_the_failure() {
     );
     drop((out, err));
 }
+
+/// **THE MEASURED ACKNOWLEDGEMENT MUST INCLUDE THE WRITE IT ACKNOWLEDGES**
+/// (roborev job 253, finding 1) — the property that keeps the calibration from
+/// going inert.
+///
+/// `t_ack` is a CALIBRATION INPUT: `scale = max(1, t_ack /
+/// QUIET_OBSERVATION_BASELINE)`. Both integration tests used to start their
+/// acknowledgement timer AFTER the `writeln!`/`flush()` — the sibling by opening
+/// the stage late, the five-write loop by taking its `Instant` late — so the timer
+/// began after the operation whose round-trip it measures. A fast child, or a test
+/// thread descheduled across the write, could then have its `OK` recorded before
+/// timing started, collapsing the measurement to nearly zero: `scale` stays at
+/// 1.000 and the deadline does not expand under contention, which is #3515's
+/// ORIGINAL DEFECT reintroduced through a mis-placed timer.
+///
+/// It was masked in the one contended run ever observed (tasks.md round 13):
+/// `t_boot` measured 68.5ms (scale 1.557) while `t_ack` measured 4.094ms (scale
+/// 1.000), and `calibrate` takes the LARGEST scale. Under-measure both and the
+/// mechanism is inert again, silently.
+///
+/// THIS IS A LOWER BOUND ON A MEASUREMENT, NOT A LATENCY BUDGET (the #2642
+/// class): `thread::sleep` sleeps AT LEAST its argument, so overshoot — the only
+/// direction a loaded host can move this — makes the assertion MORE true. There is
+/// no threshold a busy box can breach.
+#[test]
+fn the_measured_acknowledgement_includes_the_write_itself() {
+    // Stands in for `writeln!` + `flush()` to a child on a contended host. Any
+    // value works: the assertion compares the measurement against THIS constant,
+    // never against the calibration baseline, so it stays valid whatever that
+    // baseline becomes.
+    const WRITE_COST: Duration = Duration::from_millis(50);
+
+    let deadline = TestDeadline::start(Duration::from_secs(30), Duration::from_secs(30));
+    let (io, out, err) = ChildIo::synthetic();
+
+    // The ordering both integration tests now use: open the stage, THEN mark, THEN
+    // write.
+    let stage = deadline.stage("b.write-ack");
+    let mark = io.mark_from_the_start();
+    thread::sleep(WRITE_COST);
+    // The ack lands as part of the write, i.e. BEFORE the wait is ever entered —
+    // exactly the case a timer started after the write cannot see. A wait that
+    // returns instantly is what makes the mis-measurement invisible.
+    out.record(Stream::Stdout, "OK");
+
+    let t_ack = await_write_ack(&io, mark, "the stand-in write", &stage);
+    assert!(
+        t_ack >= WRITE_COST,
+        "the acknowledgement measurement must span the write it acknowledges: got {t_ack:?} for \
+         a write that took at least {WRITE_COST:?}. A measurement that excludes the write \
+         collapses to ~0 whenever the ack is already in hand, `scale` stays at 1.000, and the \
+         one deadline does not expand under contention — #3515's own original defect, \
+         reintroduced through a mis-placed timer"
+    );
+    drop((out, err));
+}
+
+/// **AN OPERATION INITIATED AFTER EXPIRY CANNOT SATISFY ITS WAIT** (roborev job
+/// 253, finding 2) — and the round-9 ruling it must not break.
+///
+/// Two halves, in one test because the point is the boundary between them:
+///
+/// * The guard REFUSES to initiate the operation once the one deadline has passed,
+///   naming what was not started. That is the fix: an `OK`, a handler-entry marker
+///   or an exit produced by work ISSUED after expiry is fresh evidence
+///   manufactured past the sole bound, and by the time such a line exists it is
+///   indistinguishable from one that arrived in time.
+/// * Had it been issued anyway, its evidence WOULD have satisfied the wait — and
+///   that is CORRECT and stays (the round-9 ruling, `poll_with_progress` and
+///   `wait_for`): the deadline bounds how long the test WAITS FOR evidence, never
+///   whether it accepts evidence in hand, because failing a stage that observed
+///   its signal is a false failure on a working product. So the check belongs at
+///   the point of INITIATION, which is the only place the two cases are still
+///   distinguishable.
+#[test]
+fn an_operation_initiated_after_expiry_cannot_satisfy_its_wait() {
+    let deadline = TestDeadline::start(Duration::ZERO, Duration::ZERO);
+    let stage = deadline.stage("b.write-ack");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-exhausted deadline"
+    );
+
+    let (io, out, err) = ChildIo::synthetic();
+    let mark = io.mark_from_the_start();
+
+    // Half one: the write is REFUSED, and the refusal names it.
+    let refused = stage
+        .check_live("the INSERT (id=7) write to the child's stdin")
+        .expect_err("an exhausted deadline must refuse to initiate new work");
+    let described = refused.describe();
+    for needle in [
+        "the INSERT (id=7) write to the child's stdin",
+        "NOT initiated",
+        "b.write-ack",
+    ] {
+        assert!(
+            described.contains(needle),
+            "the refusal must name {needle:?} — what was not started, and where: {described}"
+        );
+    }
+
+    // Half two: the evidence such a write would have produced satisfies the wait,
+    // which is why the guard above is the fix and `wait_for` is deliberately NOT
+    // changed.
+    out.record(Stream::Stdout, "OK");
+    let accepted = io.wait_for(mark, Stream::Stdout, |l| l.trim() == "OK", &stage);
+    assert!(
+        accepted.is_ok(),
+        "evidence in hand must still be ACCEPTED as the deadline lapses (the round-9 ruling): \
+         rejecting it would be a false failure on a working product. The fix for post-expiry \
+         work is the initiation guard, not this wait"
+    );
+    drop((out, err));
+}
