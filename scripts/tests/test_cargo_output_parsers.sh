@@ -201,7 +201,12 @@ fi
 #      Extraction is fail-closed: an empty extraction would run a guard that parses
 #      nothing and "passes", which is the very shape under test (#1699 round-13 lesson).
 # ─────────────────────────────────────────────────────────────────────────────────────
-python3 - "$GATE" "$tmp/current_guard.sh" <<'PY'
+extract_rc=0
+# `|| extract_rc=$?` and not a following `extract_rc=$?` line: under `set -e` a
+# failing extraction kills the script outright, so the fail-closed branch below
+# would be UNREACHABLE and the run would end with no diagnostic and no summary.
+# Demonstrated on a mutated scratch tree, not reasoned about.
+python3 - "$GATE" "$tmp/current_guard.sh" <<'PY' || extract_rc=$?
 import re, sys
 gate, out = sys.argv[1], sys.argv[2]
 lines = open(gate, encoding='utf-8').read().split('\n')
@@ -239,7 +244,6 @@ if not any('_ansi_stripped_log' in l for l in guard.split('\n')
     sys.exit(2)
 open(out, 'w', encoding='utf-8').write(helper + '\n\n' + guard + '\n')
 PY
-extract_rc=$?
 if [ "$extract_rc" -ne 0 ]; then
   bad "extraction of the shipped guard + _ansi_stripped_log from agent-gate.sh FAILED (rc=$extract_rc) — cannot certify the current shape"
 else
@@ -421,7 +425,12 @@ fi
 #      _ansi_stripped_log as BELT. Exercised here with a stub `cargo` so the belt is
 #      proven not to have broken the guard in either direction.
 # ─────────────────────────────────────────────────────────────────────────────────────
-python3 - "$GATE" "$tmp/arrow_guard.sh" <<'ARROWPY'
+arrow_extract_rc=0
+# `|| arrow_extract_rc=$?` and not a following `arrow_extract_rc=$?` line: under `set -e` a
+# failing extraction kills the script outright, so the fail-closed branch below
+# would be UNREACHABLE and the run would end with no diagnostic and no summary.
+# Demonstrated on a mutated scratch tree, not reasoned about.
+python3 - "$GATE" "$tmp/arrow_guard.sh" <<'ARROWPY' || arrow_extract_rc=$?
 import re, sys
 gate, out = sys.argv[1], sys.argv[2]
 lines = open(gate, encoding='utf-8').read().split('\n')
@@ -450,7 +459,6 @@ if not any('_ansi_stripped_log' in l for l in guard.split('\n')
     sys.exit(2)
 open(out, 'w', encoding='utf-8').write(helper + '\n\n' + guard + '\n')
 ARROWPY
-arrow_extract_rc=$?
 if [ "$arrow_extract_rc" -ne 0 ]; then
   bad "extraction of run_arrow_parity_guard_cmd (+ helper) from agent-gate.sh FAILED (rc=$arrow_extract_rc) — the arrow-parity-guard parse is uncertified"
 else
@@ -512,7 +520,12 @@ STUB
   #
   # The mutant is built by REPLACING the helper definition, not by editing the guard body, so
   # the guard under test stays byte-identical to the shipped one.
-  python3 - "$tmp/arrow_guard.sh" "$tmp/arrow_guard_raw.sh" <<'MUTPY'
+  mut_rc=0
+  # `|| mut_rc=$?` and not a following `mut_rc=$?` line: under `set -e` a
+  # failing extraction kills the script outright, so the fail-closed branch below
+  # would be UNREACHABLE and the run would end with no diagnostic and no summary.
+  # Demonstrated on a mutated scratch tree, not reasoned about.
+  python3 - "$tmp/arrow_guard.sh" "$tmp/arrow_guard_raw.sh" <<'MUTPY' || mut_rc=$?
 import re, sys
 src, out = sys.argv[1], sys.argv[2]
 text = open(src, encoding='utf-8').read()
@@ -532,7 +545,6 @@ if start is None or end is None:
 identity = ['_ansi_stripped_log() {', '  printf %s "$1"', '}']
 open(out, 'w', encoding='utf-8').write('\n'.join(lines[:start] + identity + lines[end + 1:]))
 MUTPY
-  mut_rc=$?
   if [ "$mut_rc" -ne 0 ]; then
     bad "A4 (discrimination): could not build the identity-strip mutant (rc=$mut_rc) — the routing is asserted but not measured"
   else
@@ -606,7 +618,12 @@ else
   bad "A6 RED (pinned defect): expected coloured=nonzero / plain=0, got coloured=$pd_colour / plain=$pd_plain — the fixture no longer reproduces the false-red direction, so the GREEN case below proves nothing"
 fi
 
-python3 - "$GATE" "$tmp/declared_guard.sh" <<'DECLPY'
+decl_extract_rc=0
+# `|| decl_extract_rc=$?` and not a following `decl_extract_rc=$?` line: under `set -e` a
+# failing extraction kills the script outright, so the fail-closed branch below
+# would be UNREACHABLE and the run would end with no diagnostic and no summary.
+# Demonstrated on a mutated scratch tree, not reasoned about.
+python3 - "$GATE" "$tmp/declared_guard.sh" <<'DECLPY' || decl_extract_rc=$?
 import re, sys
 gate, out = sys.argv[1], sys.argv[2]
 lines = open(gate, encoding='utf-8').read().split('\n')
@@ -635,7 +652,6 @@ if not any('_ansi_stripped_log' in l for l in guard.split('\n')
     sys.exit(2)
 open(out, 'w', encoding='utf-8').write(helper + '\n\n' + guard + '\n')
 DECLPY
-decl_extract_rc=$?
 if [ "$decl_extract_rc" -ne 0 ]; then
   bad "A6: extraction of check_declared_test_targets_observed (+ helper) from agent-gate.sh FAILED (rc=$decl_extract_rc) — that parse site is uncertified"
 else
