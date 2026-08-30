@@ -1142,7 +1142,9 @@ Several of these delivery costs now FAIL in the fast `scripts/agent-gate.sh --li
 | Vacuous roborev reviews (a “clean” verdict that reviewed nothing)                     | `scripts/tests/test_roborev_review_guard.sh` (#2964) — hermetic regression check over every vacuity trigger of `scripts/flow/roborev-review.sh`                                                                                                                                  | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
 | Executable harness files under `docs/` being classified as prose (the PR #3222 class) | `scripts/tests/test_roborev_review_guard.sh` (#3229) — the `(cx*)` cases drive the census classification and the `prompt-content:` match. **NOT mechanized: whether the configuration would swallow them.** No guard predicts roborev’s exclusion set; that is deferred to #3283 | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
 
-The other classes below (integer/decimal overflow, float ordering, no-heuristics, process-global counters, gitignored references) are **not mechanized**: they are semantic or structural, with no low-false-positive static signal (a gitignored-references lint would false-positive on the intentionally-fetched dataset corpus). Walk them by hand.
+The other classes below (integer/decimal overflow, float ordering, no-heuristics, process-global counters, gitignored references, colour-blind cargo-output parses) are **not mechanized**: they are semantic or structural, with no low-false-positive static signal (a gitignored-references lint would false-positive on the intentionally-fetched dataset corpus). Walk them by hand.
+
+One of them was mechanized and then **deliberately un-mechanized**: a structural lint over the cargo-output parse sites was built on #3400 and **descoped** because its own false-PASS count rose across review rounds (2, 2, 3) and two of the last round’s three defects were inside the two preceding fix rounds. That is the same ruling as #3229’s removed `census-exclusion:` key — **a guard with known documented false-PASSes is worse than no guard, because it invites reliance it cannot support.** Mechanization is deferred to #3499. The standing coverage is behavioural, not structural: `scripts/tests/test_cargo_output_parsers.sh` (in `tooling-tests`) EXTRACTS each parser from the shipped `scripts/agent-gate.sh` and runs it against real coloured cargo bytes, so it pins the defect against real code rather than predicting it from source shape.
 
 **Escape hatches** (deliberate, reviewer-visible, one-line rationale required): the injection lint honours `injection-lint-allow` on the offending `run:` line or the line above it; the wall-clock guard honours `perf-gate-allow`.
 
@@ -1212,6 +1214,18 @@ Asserting a value sampled at one instant against a window captured at a differen
 A test that asserts a **delta** on a process-global counter (an `AtomicU64` incremented deep in the read/scan path) flakes under CI’s thread-parallel `cargo test` — unrelated concurrent tests bump the same counter between the before/after reads. `#[serial(tag)]` only serializes same-tag tests, so an untagged sibling still contaminates the delta. Local per-process runners (nextest) never reproduce it.
 
 **Fix (structural):** scope the measurement to the current thread — a `#[cfg(test)]` thread-local scope guard (the `StreamWalkScope` pattern, #2428; `index_probes` follow-up #2451) that reads only its own thread’s increments, contamination-proof by construction. Production builds keep the plain atomic. Serial tags on the counter then become redundant.
+
+### Cargo-output parses keyed on literal status text
+
+[Section titled “Cargo-output parses keyed on literal status text”](#cargo-output-parses-keyed-on-literal-status-text)
+
+A guard that greps a `cargo test` log for a literal like `Running tests/` or `warning:` is **inert under colour**. 18 workflows set `CARGO_TERM_COLOR: always` — including the nightly FULL `gate.yml` — as does `scripts/local/pre-merge.sh`, and **colour survives redirection to a file**, so the gate’s own mandated `> gate.log 2>&1` capture is coloured too. This is not a tty-only artifact.
+
+Cargo colours the **status word** and emits the reset immediately after it (`Running<ESC>[0m tests/foo.rs`), so a pattern anchored on the status word alone survives while one spanning `<status> <payload>` matches **nothing**. It breaks both ways and neither is safe: the cli-tests zero-tests guard reported OK having judged no target at all (a vacuous PASS, live on `main` for months, fixed by #1699), and the declared-vs-observed reconciliation reported every declared target unobserved on a perfectly healthy run (a false RED, fixed by #3400).
+
+`test result:` and `running N tests` are libtest’s own output and carry no escapes — cargo does not pass `--color` through to the harness — so parses keyed on those are safe **for a reason that is not visible at the parse site**. That inherited-correctness coupling is exactly what left the zero-tests guard inert, which is why the rule is applied uniformly rather than only where it is load-bearing.
+
+**Fix:** route every cargo-output parse through `_ansi_stripped_log` and read the result by **redirection, never a pipe** — a piped `while read` runs in a subshell, so its accumulated verdict is discarded on exit and the guard passes silently for a second, independent reason. `CARGO_TERM_COLOR=never` at the invocation is **belt, not the fix**; `gate.yml` keeps `always` on purpose, because colour is a presentation property of a log read by humans and moving correctness into a workflow file 18 files away from the parse is a worse coupling than the one being removed.
 
 ### No-heuristics violations
 
