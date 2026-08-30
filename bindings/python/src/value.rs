@@ -545,10 +545,16 @@ fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
 /// `Set([Frozen(Tuple([Frozen(Udt), …]))])` while a frozen outer collection
 /// yields `Frozen(Set([Tuple([Udt, …])]))`).
 ///
-/// Every remaining variant is a scalar and cannot contain anything, so it is
-/// `false`. Reaching a `Udt` answers `true` immediately: a UDT nested inside
-/// another UDT's field cannot change that answer, so there is no recursion into
-/// UDT fields here — it would be code with no reachable effect.
+/// Every remaining variant is a scalar and cannot contain a `Value::Udt`, so it
+/// is `false` — including `Json`, whose payload is a `serde_json::Value` tree
+/// with no CQL values in it. Those variants are named EXHAUSTIVELY: like
+/// [`value_to_hashable_key`], this function has no `_ =>` arm, because the two
+/// are a matched pair and a wildcard in either one defeats the other's
+/// exhaustiveness (see the comment at that arm).
+///
+/// Reaching a `Udt` answers `true` immediately: a UDT nested inside another
+/// UDT's field cannot change that answer, so there is no recursion into UDT
+/// fields here — it would be code with no reachable effect.
 fn contains_udt(value: &Value) -> bool {
     match value {
         Value::Udt(_) => true,
@@ -559,7 +565,41 @@ fn contains_udt(value: &Value) -> bool {
         Value::Map(pairs) => pairs
             .iter()
             .any(|(k, v)| contains_udt(k) || contains_udt(v)),
-        _ => false,
+        // Scalars cannot contain anything, so they are `false`. Named
+        // exhaustively — there is deliberately no `_ =>` arm, for the same
+        // reason as in `value_to_hashable_key` and one more besides: these two
+        // functions are a MATCHED PAIR. This one decides WHICH path
+        // `set_to_py` takes; that one executes it. A wildcard here would
+        // desynchronise them — adding a composite `Value` variant would be a
+        // compile error there (correct) while this function silently answered
+        // `false`, putting `set_to_py` back on the frozenset path with an
+        // unhashable element, i.e. reproducing #3500 inside its own fix. So a
+        // new composite variant must fail to compile in BOTH halves.
+        //
+        // `false` here also has to be an ANSWER, not a default: `_ => false`
+        // said "no UDT" because it recognised no composite, which is not the
+        // same as having looked.
+        Value::Null
+        | Value::Boolean(_)
+        | Value::TinyInt(_)
+        | Value::SmallInt(_)
+        | Value::Integer(_)
+        | Value::BigInt(_)
+        | Value::Counter(_)
+        | Value::Float32(_)
+        | Value::Float(_)
+        | Value::Text(_)
+        | Value::Blob(_)
+        | Value::Timestamp(_)
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::Uuid(_)
+        | Value::Varint(_)
+        | Value::Decimal { .. }
+        | Value::Duration { .. }
+        | Value::Json(_)
+        | Value::Inet(_)
+        | Value::Tombstone(_) => false,
     }
 }
 

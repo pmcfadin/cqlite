@@ -598,3 +598,147 @@ class TestSelectStarWholeRow:
         assert row.get("s_tuple_udt") == [(kp("partial", 4), 4)]
         for absent in ("s_set_udt", "s_list_udt", "f_set_tuple_udt", "m_tuple_udt"):
             assert row.get(absent) is None, f"{absent} should be absent for id=4"
+
+
+class TestFixtureResolutionContract:
+    """The resolver itself (#3220) — the guard that stops this file passing vacuously.
+
+    Every test above depends on the ``db`` fixture having found the RIGHT corpus
+    root. On this fleet ``CQLITE_DATASETS_ROOT=/data/datasets``, whose
+    ``sstables/`` does NOT contain ``test_nested_udt_keys`` — so a conftest-style
+    single-root resolution would skip this entire file green and nobody would
+    know. These cases pin the two properties that make that impossible.
+    """
+
+    def test_selection_is_by_evidence_not_by_root_order(self):
+        """The chosen root must be one that actually holds the table.
+
+        This is the #3220 defect in miniature: the old shape picked a root by
+        KEYSPACE and committed to it, so a root holding the keyspace but not the
+        table won the selection and the table was then declared absent.
+        """
+        chosen = _sstables_root_for_table(KEYSPACE, TABLE)
+        assert _table_has_data(chosen, KEYSPACE, TABLE), (
+            f"resolver returned {chosen}, which does not carry {KEYSPACE}.{TABLE}"
+        )
+        assert chosen in _sstables_root_candidates()
+
+    def test_keyspace_present_but_table_absent_is_not_a_match(self, tmp_path):
+        """A root with the keyspace dir but no table dir must not qualify."""
+        (tmp_path / KEYSPACE).mkdir()
+        assert _table_has_data(tmp_path, KEYSPACE, TABLE) is False
+
+    def test_table_dir_without_a_data_db_is_not_a_match(self, tmp_path):
+        """Presence is judged by a real ``*-Data.db``, never by a directory.
+
+        This repo commits JSONL sidecars for fixtures whose binaries are
+        gitignored, so a ``<table>-<uuid>/`` dir can exist with no SSTable in it
+        — the exact shape that would otherwise be mistaken for a usable corpus.
+        """
+        table_dir = tmp_path / KEYSPACE / f"{TABLE}-cafebabe"
+        table_dir.mkdir(parents=True)
+        (table_dir / "nb-1-big-Data.db.jsonl").write_text("{}\n", encoding="utf-8")
+        assert _table_has_data(tmp_path, KEYSPACE, TABLE) is False
+        (table_dir / "nb-1-big-Data.db").write_bytes(b"\x00")
+        assert _table_has_data(tmp_path, KEYSPACE, TABLE) is True
+
+    def test_unresolvable_table_fails_closed_naming_every_root(self):
+        """An unresolvable table RAISES and names every root searched.
+
+        Never ``pytest.skip``: this fixture is git-committed, so "not found" is a
+        broken checkout or a broken resolver, and a skip here would be a green
+        report about a test that never ran.
+        """
+        with pytest.raises(AssertionError) as excinfo:
+            _sstables_root_for_table(KEYSPACE, "no_such_table_3500")
+        message = str(excinfo.value)
+        for root in _sstables_root_candidates():
+            assert str(root) in message, f"diagnostic omits candidate root {root}"
+        assert "must never be skipped" in message
+
+    def test_no_skip_anywhere_in_this_module(self):
+        """Structural: this module must contain no skip of any kind.
+
+        A ``pytest.skip(...)`` call or a ``@pytest.mark.skip``/``skipif``
+        decorator added later would silently restore exactly the failure mode
+        the rest of this class exists to prevent, and no behavioural test can
+        see a skip that was never added.
+
+        Judged over the PARSED SYNTAX TREE, not the file's text: this module
+        discusses skipping at length in its docstrings, and a text search would
+        red on its own prose — an assertion that fails on correct input is one
+        that gets waived. Docstrings are ``Constant`` nodes and are therefore
+        invisible here; only real attribute access counts.
+        """
+        import ast
+
+        def dotted(node) -> str:
+            parts: list[str] = []
+            while isinstance(node, ast.Attribute):
+                parts.append(node.attr)
+                node = node.value
+            if not isinstance(node, ast.Name):
+                return ""
+            parts.append(node.id)
+            return ".".join(reversed(parts))
+
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        offenders = sorted(
+            {
+                name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Attribute)
+                for name in (dotted(node),)
+                if name.startswith("pytest.")
+                and any(part in ("skip", "skipif") for part in name.split("."))
+            }
+        )
+        assert offenders == [], (
+            f"skip constructs found in {Path(__file__).name}: {offenders} — this "
+            "module is fail-closed by contract (#3220) and must never skip"
+        )
+
+    def test_the_no_skip_guard_can_actually_fail(self):
+        """RED-verify the guard above against a planted skip.
+
+        A structural assert over a file that legitimately contains none of the
+        forbidden constructs passes whether or not its detection works, so the
+        detection is exercised here against source that DOES contain them.
+        Without this, ``test_no_skip_anywhere_in_this_module`` would be a
+        vacuous green.
+        """
+        import ast
+
+        def dotted(node) -> str:
+            parts: list[str] = []
+            while isinstance(node, ast.Attribute):
+                parts.append(node.attr)
+                node = node.value
+            if not isinstance(node, ast.Name):
+                return ""
+            parts.append(node.id)
+            return ".".join(reversed(parts))
+
+        def offenders_in(source: str) -> list[str]:
+            tree = ast.parse(source)
+            return sorted(
+                {
+                    name
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Attribute)
+                    for name in (dotted(node),)
+                    if name.startswith("pytest.")
+                    and any(part in ("skip", "skipif") for part in name.split("."))
+                }
+            )
+
+        # A skip CALL, a mark decorator, and a conditional mark are each caught.
+        assert offenders_in("pytest.skip('nope')") == ["pytest.skip"]
+        assert offenders_in(
+            "@pytest.mark.skip\ndef t():\n    pass\n"
+        ) == ["pytest.mark.skip"]
+        assert offenders_in(
+            "@pytest.mark.skipif(True, reason='x')\ndef t():\n    pass\n"
+        ) == ["pytest.mark.skipif"]
+        # Prose mentioning them is NOT a violation — the point of using the AST.
+        assert offenders_in('"""never pytest.skip; no pytest.mark.skipif."""') == []
