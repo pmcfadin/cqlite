@@ -24,24 +24,52 @@
 # wrong: a checkout prefix containing `__test__`. A fixture set that only contains healthy
 # input would agree under both the broken and the fixed code and would prove nothing.
 #
-# REQUIRES BOTH TOOLS, and SAYS SO rather than asserting parity it could not measure: with only
-# one of jq/python3 present the affected pairs are reported UNMEASURED and the run exits 2. A
-# green over an unexercised comparison is the vacuous pass this whole issue exists to remove.
+# DEGRADES, IT DOES NOT DEMAND (roborev round 7, H1). With both tools it compares them. With
+# ONE it still exercises that one against every fixture via PROPERTY checks — invariants of the
+# transformation rather than golden output — and DECLARES, per fixture and in the summary, that
+# the differential half did not run. It never requires both tools, because the production
+# parsers do not: demanding them turned a valid python3-only host into a mandatory-component
+# FAILURE, which is the same false-red class G1 fixed, reintroduced by G1's own test.
+# The counts are reported separately and affirmatively, so "0 divergences found" can never be
+# read off a run that performed 0 comparisons.
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
 [ -r "$GATE" ] || { echo "FAIL: cannot read $GATE" >&2; exit 1; }
 
+# TOOL AVAILABILITY, AND WHY THIS IS NOT "REQUIRE BOTH" (roborev round 7, H1).
+#
+# The first cut of this file demanded BOTH jq and python3 and exited non-zero otherwise. That
+# made the MANDATORY tooling-tests component FAIL on a valid python3-only host — because the
+# UNUSED jq implementation could not be compared. The production parsers support either tool
+# INDEPENDENTLY, so the harness had invented a provisioning requirement the shipped code does
+# not have. The irony is the lesson and it is recorded here deliberately: G1 fixed a false red
+# that hit python3-only hosts, and the fix introduced a HARD FAIL on single-tool hosts — same
+# population, worse outcome, in the guard built to make the gate trustworthy. "A lane that reds
+# on correct input is the lane agents learn to waive" (CLAUDE.md) applies to self-tests too.
+#
+# So the work is split in two, and what ran is DECLARED either way:
+#   * PROPERTY checks run against EVERY AVAILABLE implementation, always. They assert
+#     invariants of the transformation rather than golden output, so a single-tool host gets
+#     REAL COVERAGE rather than a skip — and they are not a weaker consolation prize: the
+#     "normalised suite path must not still contain the anchor" property CATCHES THE ACTUAL G1
+#     DEFECT on its own, with one tool.
+#   * The DIFFERENTIAL comparison runs only when both tools exist, because comparing one
+#     implementation against itself is not a comparison.
+# NEITHER tool present is a FAIL: nothing can be tested, and the production parsers would fail
+# on that host too.
 have_jq=0; have_py=0
 command -v jq >/dev/null 2>&1 && have_jq=1
 command -v python3 >/dev/null 2>&1 && have_py=1
-if [ "$have_jq" -ne 1 ] || [ "$have_py" -ne 1 ]; then
-  echo "UNMEASURED: this test needs BOTH jq and python3 to compare the two branches" >&2
-  echo "  (jq present=$have_jq, python3 present=$have_py). Reporting UNMEASURED rather than" >&2
-  echo "  PASS: a parity claim over a comparison that never ran is a vacuous green." >&2
-  exit 2
+if [ "$have_jq" -ne 1 ] && [ "$have_py" -ne 1 ]; then
+  echo "FAIL: neither jq nor python3 is present, so NO parser implementation can be exercised." >&2
+  echo "  This is a hard failure rather than a skip: the production parsers need one of the two," >&2
+  echo "  so a host with neither cannot run the lane this test covers either." >&2
+  exit 1
 fi
+DIFFERENTIAL=0
+[ "$have_jq" -eq 1 ] && [ "$have_py" -eq 1 ] && DIFFERENTIAL=1
 
 # Source the anchor and every named implementation OUT OF THE REAL GATE SCRIPT — never a copy,
 # which would pass while the shipped parser rotted.
@@ -58,15 +86,106 @@ done
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/parserparity.XXXXXX") || exit 1
 trap 'rm -rf "$WORK"' EXIT
 PASS=0; FAIL=0
+DIFF_N=0     # differential comparisons actually PERFORMED
+PROP_N=0     # property checks actually PERFORMED
+SKIPPED_N=0  # differential comparisons NOT performed for want of a tool
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+skipped() { printf 'skip - %s\n' "$1"; SKIPPED_N=$((SKIPPED_N + 1)); }
+
+echo "tools: jq=$have_jq python3=$have_py -> differential comparison $([ "$DIFFERENTIAL" -eq 1 ] && echo ENABLED || echo 'DISABLED (only one implementation is runnable here)')"
+echo
+
+# ---------------------------------------------------------------------------
+# PROPERTY CHECKS — invariants of the transformation, asserted against every AVAILABLE
+# implementation. Not golden output: a golden would re-derive the transformation, which is the
+# very thing differential testing exists to avoid. These are the checks that give a SINGLE-TOOL
+# host real coverage.
+# ---------------------------------------------------------------------------
+# prop_jest <impl-fn> <label> <json>
+prop_jest() {
+  local fn="$1" lbl="$2" j="$3" out line nf errs=""
+  out=$("$fn" "$j" 2>/dev/null) || { bad "$lbl — implementation exited non-zero"; return; }
+  PROP_N=$((PROP_N + 1))
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
+    [ "$nf" = 2 ] || errs="$errs [$line] has $nf TSV fields, want 2;"
+    # THE G1 INVARIANT: a normalised suite path must not still contain the anchor. This alone
+    # catches the defect that started all of this, with one tool and no comparison.
+    case "${line%%	*}" in
+      *"$NB_TEST_ANCHOR"*) errs="$errs [$line] still contains the anchor $NB_TEST_ANCHOR — normalisation did not strip it;" ;;
+    esac
+    # DELIBERATELY NOT asserted: "the path must be RELATIVE". That is NOT an invariant — for an
+    # input carrying no anchor at all both implementations correctly emit the raw absolute name
+    # (the `NO anchor in the path` fixture below pins that identical fallback), so the check
+    # red on correct output the first time it ran. Removed rather than special-cased: an
+    # invariant that needs an exception per fixture is not an invariant, and the anchor-free
+    # check above is the one that actually catches G1 — the divergent python3 output was
+    # `proj/bindings/node/__test__/value.test.js`, which CONTAINS the anchor.
+    case "${line##*	}" in
+      ''|*[!0-9]*) errs="$errs [$line] passed-count is not a number;" ;;
+    esac
+  done <<EOF
+$out
+EOF
+  if [ -z "$errs" ]; then ok "$lbl"; else bad "$lbl —$errs"; fi
+}
+# prop_ids <impl-fn> <label> <meta> <pkg>
+prop_ids() {
+  local fn="$1" lbl="$2" meta="$3" pkg="$4" out line nf errs=""
+  out=$("$fn" "$meta" "$pkg" 2>/dev/null) || { ok "$lbl (implementation refused, as expected for this input)"; PROP_N=$((PROP_N + 1)); return; }
+  PROP_N=$((PROP_N + 1))
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
+    [ "$nf" = 3 ] || errs="$errs [$line] has $nf TSV fields, want 3;"
+    case "$line" in
+      *Cargo.toml*) errs="$errs [$line] leaks a manifest path;" ;;
+    esac
+  done <<EOF
+$out
+EOF
+  if [ -z "$errs" ]; then ok "$lbl"; else bad "$lbl —$errs"; fi
+}
+# prop_feats <impl-fn> <label> <meta> <pkg> — output must be SORTED and UNIQUE, since the
+# consumer subtracts it from a resolved set and relies on a stable order.
+prop_feats() {
+  local fn="$1" lbl="$2" meta="$3" pkg="$4" out
+  out=$("$fn" "$meta" "$pkg" 2>/dev/null) || { ok "$lbl (implementation refused, as expected for this input)"; PROP_N=$((PROP_N + 1)); return; }
+  PROP_N=$((PROP_N + 1))
+  if [ "$out" = "$(printf '%s' "$out" | sort -u)" ]; then ok "$lbl"; else bad "$lbl — output is not sorted/unique: [$out]"; fi
+}
 
 # cmp_pair <name> <jq-fn> <py-fn> <args...> — run both, require byte-identical stdout AND the
 # same exit status. Status matters as much as output: one branch failing while the other
 # succeeds is a divergence even when the successful one's output looks right.
 cmp_pair() {
   local nm="$1" fjq="$2" fpy="$3"; shift 3
-  local o1 o2 r1 r2
+  local o1 o2 r1 r2 kind
+
+  # The property KIND is inferred from the implementation's own name, so adding a fixture needs
+  # no extra argument and cannot silently skip its property check by omission.
+  case "$fjq" in
+    _jest_json_suite_counts_*)            kind=jest ;;
+    _package_integration_target_ids_*)    kind=ids ;;
+    _package_declared_features_*)         kind=feats ;;
+    *) bad "$nm — HARNESS ERROR: no property kind known for implementation '$fjq'; refusing to run a comparison with no property coverage behind it"; return ;;
+  esac
+
+  # PROPERTIES FIRST, on every AVAILABLE implementation. These run on a single-tool host, and
+  # they are what makes such a host covered rather than skipped.
+  [ "$have_jq" -eq 1 ] && "prop_$kind" "$fjq" "$nm [prop: jq]" "$@"
+  [ "$have_py" -eq 1 ] && "prop_$kind" "$fpy" "$nm [prop: python3]" "$@"
+
+  if [ "$DIFFERENTIAL" -ne 1 ]; then
+    # DECLARED, never silent, and counted separately from the comparisons that RAN — see the
+    # affirmative summary at the end. A pass line that cannot distinguish "compared and agreed"
+    # from "could not compare" is the vacuous-green shape this whole file exists to prevent.
+    skipped "$nm — differential comparison NOT PERFORMED (jq=$have_jq python3=$have_py; only one implementation is runnable here). The available implementation WAS exercised by the property checks above."
+    return
+  fi
+  DIFF_N=$((DIFF_N + 1))
   o1=$("$fjq" "$@" 2>/dev/null); r1=$?
   o2=$("$fpy" "$@" 2>/dev/null); r2=$?
   if [ "$r1" -ne "$r2" ]; then
@@ -217,5 +336,19 @@ else
 fi
 
 echo
+# AFFIRMATIVE ACCOUNTING. "0 divergences found" must never be reachable from "0 comparisons
+# performed", so the two are reported as separate numbers and the skipped count is named
+# explicitly. A reader can tell, from this line alone, whether the differential half ran.
+echo "differential comparisons PERFORMED: $DIFF_N"
+echo "property checks PERFORMED:          $PROP_N"
+echo "differential comparisons SKIPPED:   $SKIPPED_N$([ "$SKIPPED_N" -gt 0 ] && echo "  (jq=$have_jq python3=$have_py — only one implementation runnable on this host)")"
+if [ "$DIFFERENTIAL" -eq 1 ] && [ "$DIFF_N" -eq 0 ]; then
+  echo "FAIL - both tools are present but ZERO comparisons ran; a parity claim with no comparison behind it is exactly the vacuous green this file exists to prevent" >&2
+  FAIL=$((FAIL + 1))
+fi
+if [ "$PROP_N" -eq 0 ]; then
+  echo "FAIL - ZERO property checks ran, so no implementation was exercised at all" >&2
+  FAIL=$((FAIL + 1))
+fi
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
