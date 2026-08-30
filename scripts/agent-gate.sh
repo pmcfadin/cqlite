@@ -3416,28 +3416,29 @@ _tree_recapture_after_slot() {
 # Synthetic-identity modes: they never certify a real tree and several need to emit a
 # block with NO git state at all. They stamp the `selftest` identity so the block SHAPE
 # stays uniform. (--list and --python-build-verify exit before LOG_DIR even exists.)
-if [ "$SELFTEST" -eq 1 ] || [ "$LITE_AGG_SELFTEST" -eq 1 ] || [ -n "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
-  TREE_START_LINE="tree-start: selftest dirty: no digest: selftest"
-  TREE_END_LINE="tree-end: selftest dirty: no digest: selftest"
-  TREE_INTEGRITY_LINE="tree-integrity: PASS (selftest)"
-else
-  _tree_capture_start
-fi
-
-# Startup invalidation (#1175 roborev finding 2): a stale .agent-gate-summary.txt
-# from a PREVIOUS run must never survive into THIS run. If the current run exits
-# early (dataset preflight fail, any pre-emit `exit 1`) or can't write later, a
-# caller reading the recovery path would otherwise see an OLD complete PASS block
-# as if it were this run's result. So, as early as possible — before the dataset
-# preflight and before any component — overwrite the caller-known file with an
-# INCOMPLETE sentinel stamped with THIS run's run-id. emit_summary replaces it
-# with the real block on normal completion. Best-effort: if we cannot write the
-# sentinel (unwritable path) we do not abort here; emit_summary's authoritative
-# write guard catches an unwritable path at the end and forces a FAIL.
-# SENTINEL_WROTE (#2874 review finding 6): record whether OUR run-id sentinel actually
-# landed. If it did NOT (unwritable path), a later summary that lacks our run-id is a
-# STALE prior-run block / unwritable file — NOT a live foreign clobber — so the
-# integrity guard names that cause accurately instead of blaming a "foreign run-id".
+# ===========================================================================
+# LIVENESS HEARTBEAT — STARTED AS EARLY AS POSSIBLE (#3473, roborev job 190)
+#
+# This used to start after the tree-identity capture and the startup sentinel. Two problems, and
+# the second is the one that matters:
+#
+#   1. gate-detached.sh requires a first beat within a bounded window before it will trust a gate
+#      as monitorable, and the tree capture ran first. Measured at ~150ms on this checkout (6114
+#      tracked files) but unbounded in principle on a larger or heavily-contended one — so a slow
+#      capture would have made the launcher STOP A PERFECTLY HEALTHY GATE as unmonitorable.
+#
+#   2. more fundamentally, the first seconds of every gate published NO liveness at all — the
+#      exact blind spot the heartbeat exists to close, left open at the moment a reader is most
+#      likely to look: right after launch.
+#
+# Everything needed is resolved by here: RUN_ID, LOG_DIR, the summary path (and therefore
+# TREE_EXCLUDE_REL, which carves the beat out of the tree identity) and the mode flags. Starting
+# before the capture means the beat file exists when the capture runs, which is exactly why that
+# carve-out has to be in place first — and it keeps changing all run for the same reason.
+#
+# The SENTINEL deliberately stays where it was, after the capture: it carries `tree-start:`, so
+# it cannot precede the thing that computes it.
+# ===========================================================================
 # #3473: resolve the heartbeat path/mode BEFORE the sentinel, so the sentinel — the
 # artifact a lane finds when its gate was reaped — can NAME the file that answers
 # "reaped or running". A placeholder that cannot point at its own liveness signal
@@ -3458,25 +3459,6 @@ HEARTBEAT_PID=""
 HEARTBEAT_STARTTIME=""
 HEARTBEAT_STATE="off"
 
-SENTINEL_WROTE=0
-if {
-  echo "$SUMMARY_START_MARKER"
-  echo "run-id: $RUN_ID"
-  [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
-  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
-  # #2926: the sentinel carries `tree-start:` (and NO `tree-end:` — there is no end
-  # yet), so even a gate that is killed mid-run leaves an artifact recording the tree
-  # it BEGAN on. Its terminal line stays exactly `RESULT: INCOMPLETE (gate did not
-  # finish)` — the #2908 liveness placeholder is unchanged.
-  echo "$TREE_START_LINE"
-  echo "heartbeat: $HEARTBEAT_FILE (interval ${HEARTBEAT_INTERVAL}s) — read it with: $(printf 'bash %q %q --run-id %q' "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY_FILE" "$RUN_ID") (#3473)"
-  echo "RESULT: INCOMPLETE (gate did not finish)"
-  echo "$SUMMARY_END_MARKER"
-} > "$SUMMARY_FILE" 2>/dev/null; then
-  SENTINEL_WROTE=1
-fi
-
-# ===========================================================================
 # LIVENESS HEARTBEAT (#3473): a lane MUST be able to tell "my gate was reaped"
 # from "my gate is still going" without a human reading `ps` on the box.
 #
@@ -3676,6 +3658,48 @@ if [ -z "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
   trap '_gate_atexit' EXIT
   _hb_start
 fi
+
+if [ "$SELFTEST" -eq 1 ] || [ "$LITE_AGG_SELFTEST" -eq 1 ] || [ -n "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
+  TREE_START_LINE="tree-start: selftest dirty: no digest: selftest"
+  TREE_END_LINE="tree-end: selftest dirty: no digest: selftest"
+  TREE_INTEGRITY_LINE="tree-integrity: PASS (selftest)"
+else
+  _tree_capture_start
+fi
+
+# Startup invalidation (#1175 roborev finding 2): a stale .agent-gate-summary.txt
+# from a PREVIOUS run must never survive into THIS run. If the current run exits
+# early (dataset preflight fail, any pre-emit `exit 1`) or can't write later, a
+# caller reading the recovery path would otherwise see an OLD complete PASS block
+# as if it were this run's result. So, as early as possible — before the dataset
+# preflight and before any component — overwrite the caller-known file with an
+# INCOMPLETE sentinel stamped with THIS run's run-id. emit_summary replaces it
+# with the real block on normal completion. Best-effort: if we cannot write the
+# sentinel (unwritable path) we do not abort here; emit_summary's authoritative
+# write guard catches an unwritable path at the end and forces a FAIL.
+# SENTINEL_WROTE (#2874 review finding 6): record whether OUR run-id sentinel actually
+# landed. If it did NOT (unwritable path), a later summary that lacks our run-id is a
+# STALE prior-run block / unwritable file — NOT a live foreign clobber — so the
+# integrity guard names that cause accurately instead of blaming a "foreign run-id".
+SENTINEL_WROTE=0
+if {
+  echo "$SUMMARY_START_MARKER"
+  echo "run-id: $RUN_ID"
+  [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
+  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
+  # #2926: the sentinel carries `tree-start:` (and NO `tree-end:` — there is no end
+  # yet), so even a gate that is killed mid-run leaves an artifact recording the tree
+  # it BEGAN on. Its terminal line stays exactly `RESULT: INCOMPLETE (gate did not
+  # finish)` — the #2908 liveness placeholder is unchanged.
+  echo "$TREE_START_LINE"
+  echo "heartbeat: $HEARTBEAT_FILE (interval ${HEARTBEAT_INTERVAL}s) — read it with: $(printf 'bash %q %q --run-id %q' "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY_FILE" "$RUN_ID") (#3473)"
+  echo "RESULT: INCOMPLETE (gate did not finish)"
+  echo "$SUMMARY_END_MARKER"
+} > "$SUMMARY_FILE" 2>/dev/null; then
+  SENTINEL_WROTE=1
+fi
+
+# ===========================================================================
 
 # emit_summary <result> [meta-line ...]
 #
