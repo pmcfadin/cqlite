@@ -521,6 +521,42 @@ else
   bad "3544-bound-grandchild: expected rc 124 and a dead grandchild (rc='$g_rc_line' ticks $g_at_return -> $g_later)"
 fi
 
+# A TERM-IGNORING DESCENDANT is bounded on BOTH mechanisms (roborev job 214). This is the
+# case that showed a TERM-only bound is not a bound at all: measured before the fix,
+# `timeout 2 <script with trap '' TERM>` held for the FULL 2 minutes of an outer bound and
+# never returned. Covering only the bash arm would leave the more common branch — the one
+# every coreutils host takes — unproven, so the case runs the SAME fixture through both.
+#
+# Accepted statuses are 124 OR 137: an external `timeout` reports 137 once `--kill-after`
+# escalates to SIGKILL, and both values mean "bound exceeded". Liveness is judged by whether
+# the descendant is still writing, never by elapsed time.
+tignore="$tmp/term-ignoring.sh"
+titick="$tmp/term-ignoring-tick.txt"
+{ printf '#!/bin/sh\n'
+  printf "trap '' TERM\n"
+  printf 'while : ; do echo tick >> "%s"; sleep 1; done\n' "$titick"
+} >"$tignore"
+chmod +x "$tignore"
+# mech_label <PATH> is only for the failure message; the assertion is on behaviour.
+for _mech_path in "$PATH" "$bin_no_timeout"; do
+  _mech=$(bound_of "$_mech_path")
+  : >"$titick"
+  _ti_rc=$( cd "$behind" && PATH="$_mech_path" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+              --component-set-bounded-run 1 "$tignore" 2>/dev/null | sed -n 's/^RC: //p' )
+  _ti_at=$(wc -l <"$titick" | tr -d ' ')
+  sleep 3
+  _ti_later=$(wc -l <"$titick" | tr -d ' ')
+  case "$_ti_rc" in
+    124|137) _ti_rc_ok=1 ;;
+    *)       _ti_rc_ok=0 ;;
+  esac
+  if [ "$_ti_rc_ok" -eq 1 ] && [ "$_ti_later" = "$_ti_at" ]; then
+    ok "3544-bound-term-ignoring[$_mech]: a TERM-IGNORING descendant is KILLed within the bound (rc $_ti_rc) and stops"
+  else
+    bad "3544-bound-term-ignoring[$_mech]: expected rc 124|137 and a dead descendant (rc='$_ti_rc' ticks $_ti_at -> $_ti_later)"
+  fi
+done
+
 # A HANGING `git` is bounded too — the composition that covers the partial-clone `git show`
 # without a 120-second test: this proves the RUNNER bounds a hanging `git`, and the
 # structural enumeration assert (case 9b) proves `git show` goes THROUGH that runner. Each
@@ -760,6 +796,39 @@ if [ "$(field SHA "$fr_out")" = "$fresh_tip" ] \
 else
   bad "3544-fresh-baseline: expected the new tip $fresh_tip (got '$(field SHA "$fr_out")'), cached ref unmoved (before='$fresh_cached_before' after='$fresh_cached_after')"
   printf '%s\n' "$fr_out"
+fi
+
+# ---------------------------------------------------------------------------
+# 5c. THE FETCH WRITES NO SHARED REF — tags included (roborev job 214). `--refmap=` stops
+#     the opportunistic `refs/remotes/origin/*` write, but `git fetch` ALSO auto-follows
+#     tags into the SHARED `refs/tags/*`, which reintroduced exactly the cross-lane ref
+#     contention `--refmap=` was added to remove: four lanes share one `.git` here, so a new
+#     upstream tag meant concurrent fetches racing a tag ref, and the loser's non-zero fetch
+#     made this fail-closed pre-flight reject a run for a purely CONCURRENT cause.
+#
+#     The assertion is on REF STATE, not on the fetch's exit status: a fetch that succeeds
+#     while writing a tag is precisely the passing-but-wrong case (5b makes the same point
+#     for branch refs, and the two together are the whole guarantee).
+# ---------------------------------------------------------------------------
+base_tag=$(mkbaseline base-tag - )
+tagged=$(mkbranch tagged "$base_tag" - --from-origin)
+# A NEW tag on the baseline, created AFTER the fixture cloned it — so an auto-following
+# fetch would have something to write.
+( cd "$tmp/base-tag-src" && git "${GIT_ID[@]}" tag -a v99.99.99-selftest -m 'tag the baseline' \
+    && git push -q "$base_tag" refs/tags/v99.99.99-selftest ) >/dev/null 2>&1
+tags_before=$(git -C "$tagged" for-each-ref --format='%(refname) %(objectname)' refs/tags | sort)
+tg_out=$(hook "$tagged")
+tags_after=$(git -C "$tagged" for-each-ref --format='%(refname) %(objectname)' refs/tags | sort)
+upstream_tag=$(git -C "$base_tag" for-each-ref --format='%(refname)' refs/tags | grep -c 'v99.99.99-selftest')
+if [ "$upstream_tag" -ge 1 ] \
+   && [ "$(field KIND "$tg_out")" = ok ] \
+   && [ "$tags_after" = "$tags_before" ] \
+   && ! printf '%s\n' "$tags_after" | grep -q 'v99.99.99-selftest'; then
+  ok "3544-no-tag-writes: the baseline fetch leaves shared refs/tags/* UNCHANGED even when upstream gained a tag"
+else
+  bad "3544-no-tag-writes: expected an unchanged tag ref set (upstream_tag=$upstream_tag kind=$(field KIND "$tg_out"))"
+  echo "   before: [$tags_before]"
+  echo "   after:  [$tags_after]"
 fi
 
 # ---------------------------------------------------------------------------
