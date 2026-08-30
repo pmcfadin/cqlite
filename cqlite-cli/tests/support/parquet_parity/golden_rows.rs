@@ -55,6 +55,12 @@
 //!   a frozen map as a JSON OBJECT, which `from_json` necessarily reads as a
 //!   `Tuple`; the Arrow side reads the same column back as a `Map`. See
 //!   [`coerce_declared_shape`].
+//! * **A PRIMARY-KEY component is typed from its full declared type** —
+//!   sstabledump writes every key component as a quoted STRING, so a `boolean`,
+//!   `float`, `double` or `decimal` key arrives as text and must be converted to
+//!   the same canonical form the Arrow side lands on. See
+//!   [`canonicalize_key_component`], which is applied ONCE, before the value is
+//!   put into BOTH `keys` and `cells`.
 
 #![allow(dead_code)]
 
@@ -64,7 +70,9 @@ use super::canonical_jsonl::{
     CanonicalDocument, CanonicalRow, CanonicalValue, KeyKind, NormalizedFloat,
 };
 use super::cql_type::{ColumnType, CqlTypeSpec, SeqKind};
-use super::decimal::{exact_from_golden_double, ExactDecimal, EXPORT_DECIMAL_SCALE};
+use super::decimal::{
+    exact_from_golden_double, exact_from_text, ExactDecimal, EXPORT_DECIMAL_SCALE,
+};
 
 /// One row projected out of the golden: the primary-key components in declared
 /// order, plus every declared column's canonical value.
@@ -123,14 +131,10 @@ pub fn project_golden(
                 ));
             }
 
-            // KEY components are canonicalized against their DECLARED type
-            // too. They arrive from `from_json_key`, which recognizes a
-            // timestamp SPELLING, so a `text` key column holding a
-            // timestamp-shaped string would otherwise reach the sort key as a
-            // `Timestamp` while the Arrow side holds `Text` — a false
-            // primary-key difference on every row of the table. The `cells`
-            // entries for the key columns are cloned from these values below,
-            // so normalizing here covers both.
+            // KEY components are canonicalized from their FULL declared type
+            // ([`canonicalize_key_component`]) — ONCE, here, BEFORE they are
+            // inserted into `keys` and cloned into `cells`, so the two can never
+            // disagree about the same component.
             let mut keys: Vec<CanonicalValue> =
                 Vec::with_capacity(part.key.len() + row.clustering.len());
             for (name, raw) in partition_key
@@ -138,12 +142,12 @@ pub fn project_golden(
                 .zip(part.key.iter())
                 .chain(clustering.iter().zip(row.clustering.iter()))
             {
-                let value = fold_null(raw.clone());
                 let value = match columns.iter().find(|c| c.name == **name) {
-                    Some(col) => normalize_declared_strings(value, &col.spec),
+                    Some(col) => canonicalize_key_component(raw, col)
+                        .map_err(|e| format!("{where_}: key column '{name}': {e}"))?,
                     // A key column the case does not declare: the check below
                     // fails the case by name, so there is nothing to guide by.
-                    None => value,
+                    None => fold_null(raw.clone()),
                 };
                 keys.push(value);
             }
@@ -181,14 +185,18 @@ pub fn project_golden(
             }
 
             // Every declared key column must have been filled by the key arrays.
+            //
+            // A PRESENCE check only: the value was canonicalized once, above,
+            // and `cells` holds a CLONE of the very `keys` entry. Re-normalizing
+            // it here is what made the two able to disagree (round-6 finding:
+            // the numeric pass ran on `cells` and not on `keys`, so a valid
+            // `float`/`decimal` key produced a false primary-KEY difference
+            // while its cell compared equal).
             for name in partition_key.iter().chain(clustering.iter()) {
-                let v = cells.get(*name).ok_or_else(|| {
-                    format!("{where_}: declared key column '{name}' is not in the golden row")
-                })?;
-                if let Some(col) = columns.iter().find(|c| c.name == *name) {
-                    let narrowed = normalize_declared_numbers(v.clone(), &col.spec)
-                        .map_err(|e| format!("{where_}: key column '{name}': {e}"))?;
-                    cells.insert((*name).to_string(), narrowed);
+                if !cells.contains_key(*name) {
+                    return Err(format!(
+                        "{where_}: declared key column '{name}' is not in the golden row"
+                    ));
                 }
             }
 
@@ -609,6 +617,94 @@ pub fn normalize_declared_strings(v: CanonicalValue, spec: &CqlTypeSpec) -> Cano
         // shape disagreement the value comparison must report), or a non-string
         // variant — is left EXACTLY as it was.
         (other, _) => other,
+    }
+}
+
+/// Canonicalize ONE primary-key component from its FULL declared type.
+///
+/// # The defect this closes (issue #1490 round 6)
+///
+/// `sstabledump` renders EVERY primary-key component as a quoted JSON string —
+/// Cassandra serializes it through `AbstractType.getString`, so an `int` key `1`
+/// is dumped as `"1"`, a `boolean` as `"true"`, a `float` through
+/// `Float.toString` and a `decimal` through `BigDecimal.toString`. (Measured in
+/// the committed corpus: `test_comp.lz4_table`'s golden carries
+/// `"partition":{"key":["1"]}` for its `pk int`.)
+///
+/// The shared loader coerced exactly ONE of those families back:
+/// `CanonicalValue::from_json_key` turns a clean numeric string into `Int` for an
+/// INTEGRAL key column ([`KeyKind::Integral`]) and leaves everything else as
+/// `Text`. So a declared `boolean` key stayed `Text("true")` while the Arrow side
+/// held `Bool(true)`, a `float` key stayed `Text("1.84")` against `Float(...)`,
+/// and a `decimal` key stayed `Text("10576.6")` against the exact decimal form —
+/// a FALSE primary-key difference on every row of such a table, i.e. a
+/// false FAIL, reported as if the export were wrong.
+///
+/// Worse, the two halves were canonicalized SEPARATELY: the numeric pass ran
+/// over `cells` only, so a key's cell and the same key's sort-key component could
+/// disagree with each other. This function is therefore called ONCE per
+/// component, and its result is what goes into both.
+///
+/// # It converts, it never guesses
+///
+/// The conversion is driven entirely by the DECLARED type, and a value that does
+/// not denote that type is a REFUSAL (`Err`), never a fallback to the string: a
+/// declared `boolean` key holding `"maybe"` is a broken fixture or a broken
+/// declaration, and comparing it as text would hide both. Non-scalar key types (a
+/// `frozen<list<text>>` clustering key, which the corpus has and this lane does
+/// not yet cover) are left untouched — a refusal to guess, and the case declaring
+/// one is enumerated as uncovered rather than silently mishandled.
+pub fn canonicalize_key_component(
+    raw: &CanonicalValue,
+    col: &ColumnType,
+) -> Result<CanonicalValue, String> {
+    let value = type_key_string(fold_null(raw.clone()), &col.spec)?;
+    let value = normalize_declared_strings(value, &col.spec);
+    normalize_declared_numbers(value, &col.spec)
+}
+
+/// Turn a key component's STRING rendering into the variant its declared scalar
+/// type denotes. `Int` coercion is included so this function alone settles an
+/// integral key, whether or not the loader's `KeySpec` already did it.
+fn type_key_string(v: CanonicalValue, spec: &CqlTypeSpec) -> Result<CanonicalValue, String> {
+    let (CanonicalValue::Text(s), CqlTypeSpec::Scalar(name)) = (&v, spec) else {
+        return Ok(v);
+    };
+    let refuse = |what: &str| {
+        Err(format!(
+            "declared '{name}' but the golden renders the key component as {s:?}, which is not              {what}; the harness refuses to compare it as text rather than hide the disagreement"
+        ))
+    };
+    match name.as_str() {
+        "boolean" => match s.as_str() {
+            // Cassandra's `BooleanType.getString` is Java's `Boolean.toString`.
+            "true" => Ok(CanonicalValue::Bool(true)),
+            "false" => Ok(CanonicalValue::Bool(false)),
+            _ => refuse("'true' or 'false'"),
+        },
+        // Narrowing for `float` is applied by `normalize_declared_numbers`, which
+        // runs next — the same rule a `float` CELL goes through, so the two
+        // cannot diverge.
+        "float" | "double" => match s.parse::<f64>() {
+            Ok(f) if f.is_finite() => Ok(CanonicalValue::Float(NormalizedFloat(f))),
+            _ => refuse("a finite decimal number"),
+        },
+        // The literal TEXT is still present here (a decimal CELL arrives as a
+        // JSON number and has to be RECOVERED from a double instead), so this is
+        // exact with nothing to refuse for ambiguity.
+        "decimal" => {
+            Ok(exact_from_text(s, EXPORT_DECIMAL_SCALE, "golden decimal key")?.canonical())
+        }
+        "int" | "bigint" | "smallint" | "tinyint" | "varint" | "counter" => {
+            match s.parse::<i128>() {
+                Ok(i) => Ok(CanonicalValue::Int(i)),
+                Err(_) => refuse("an integer"),
+            }
+        }
+        // text/varchar/ascii/blob/uuid/timeuuid/date/time/inet/duration all
+        // compare as `Text` on the Arrow side, and `timestamp` is handled by
+        // `normalize_declared_strings` — nothing to convert.
+        _ => Ok(v),
     }
 }
 

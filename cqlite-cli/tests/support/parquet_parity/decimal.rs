@@ -165,6 +165,62 @@ pub fn exact_from_decimal128(unscaled: i128, scale: i8, ctx: &str) -> Result<Exa
     Ok(ExactDecimal::new(unscaled, scale))
 }
 
+/// Parse an EXACT decimal from its literal TEXT — no `f64` anywhere.
+///
+/// Used for a `decimal` PRIMARY-KEY component (issue #1490 round 6): unlike a
+/// decimal CELL, which `sstabledump` writes as a bare JSON number (so its text
+/// is already gone by the time this harness sees it — hence
+/// [`exact_from_golden_double`]), a KEY component is written as a quoted STRING
+/// through Cassandra's `AbstractType.getString`, i.e. `BigDecimal.toString`. The
+/// literal digits are therefore still present and can be read exactly, with no
+/// recovery step and no ambiguity to refuse.
+///
+/// Refuses rather than rounds or truncates:
+///
+/// * a scale beyond `max_scale` — such a value cannot be exported at all (the
+///   export refuses to truncate), so comparing it would compare two different
+///   numbers;
+/// * exponent notation, an empty digit run, a stray character, or a magnitude
+///   that does not fit a `Decimal128` unscaled `i128`.
+pub fn exact_from_text(text: &str, max_scale: u32, ctx: &str) -> Result<ExactDecimal, String> {
+    if max_scale > MAX_SCALE {
+        return Err(format!(
+            "{ctx}: recovery scale {max_scale} exceeds {MAX_SCALE}"
+        ));
+    }
+    let trimmed = text.trim();
+    let (sign, rest) = match trimmed.strip_prefix('-') {
+        Some(rest) => (-1i128, rest),
+        None => (1i128, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let (int_part, frac_part) = match rest.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (rest, ""),
+    };
+    let digits_ok = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if int_part.is_empty() || !digits_ok(int_part) || !digits_ok(frac_part) {
+        return Err(format!(
+            "{ctx}: '{text}' is not a plain decimal literal (the harness refuses exponent \
+             notation and any non-digit rather than guessing what it denotes)"
+        ));
+    }
+    let scale = frac_part.len() as u32;
+    if scale > max_scale {
+        return Err(format!(
+            "{ctx}: '{text}' carries {scale} fractional digits, more than the {max_scale} the \
+             export's fixed Decimal128 scale can represent; the harness refuses to compare \
+             rather than truncate"
+        ));
+    }
+    let magnitude: i128 = format!("{int_part}{frac_part}")
+        .parse()
+        .map_err(|_| format!("{ctx}: '{text}' does not fit a Decimal128 unscaled value (i128)"))?;
+    let unscaled = magnitude
+        .checked_mul(sign)
+        .ok_or_else(|| format!("{ctx}: '{text}' sits at the edge of the unscaled range"))?;
+    Ok(ExactDecimal::new(unscaled, scale))
+}
+
 /// Recover the EXACT decimal a golden `double` was parsed FROM, or refuse.
 ///
 /// `sstabledump` writes a `decimal` as a bare JSON number, and the shared

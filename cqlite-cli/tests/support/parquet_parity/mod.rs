@@ -51,6 +51,13 @@
 //!
 //! # Fail-closed rules
 //!
+//! * The case's own DECLARATION (columns, types, key definitions) is VALIDATED
+//!   against the committed `test-data/schemas/*.cql` before any stage runs
+//!   (`schema_fixture`). The declaration is the ground truth stages 4 and 5 are
+//!   derived from, so an unverified one that drifted to match a wrong export
+//!   mapping would make both of them pass. Only the harness's own
+//!   deliberate-misdeclaration controls opt out, by naming a reason
+//!   ([`SchemaCheck::Synthetic`]), which is announced on every run.
 //! * Fixture roots are resolved PER TABLE (`sstables_root_for_table`), never by
 //!   keyspace: a root holding the keyspace but not the table would otherwise win
 //!   the selection and the case would skip while the fixture sat in the checkout
@@ -92,6 +99,7 @@ pub mod cql_type;
 pub mod decimal;
 pub mod failure;
 pub mod golden_rows;
+pub mod schema_fixture;
 pub mod spelling;
 pub mod unsupported;
 
@@ -116,6 +124,7 @@ use golden_rows::GoldenRow;
 // record would be worse.
 #[allow(unused_imports)]
 pub use failure::{ExpectedFailure, KnownGap, KnownTypeGap};
+pub use schema_fixture::SchemaCheck;
 
 /// One corpus table under value parity.
 pub struct ParityCase {
@@ -129,11 +138,22 @@ pub struct ParityCase {
     /// EVERY column of the table as `(name, declared CQL type)`, copied from the
     /// committed schema — i.e. from the Cassandra schema the fixture was written
     /// with, never from CQLite's Arrow mapping (#3041).
+    ///
+    /// A hand-copied declaration is the harness's GROUND TRUTH, so it is
+    /// VERIFIED against that schema on every run — see [`schema_check`] and
+    /// `schema_fixture`.
+    ///
+    /// [`schema_check`]: ParityCase::schema_check
     pub columns: &'static [(&'static str, &'static str)],
     /// Partition-key columns in declared order.
     pub partition_key: &'static [&'static str],
     /// Clustering columns in declared order.
     pub clustering: &'static [&'static str],
+    /// Whether the three declarations above (columns, types, key definitions)
+    /// are validated against the committed `test-data/schemas/<schema>` — the
+    /// default for every REAL case, and opted out of, visibly and with a stated
+    /// reason, only by the harness's own deliberate-misdeclaration controls.
+    pub schema_check: SchemaCheck,
     /// SSTable binaries are committed to git → a SKIP is a hard failure.
     pub must_run: bool,
     /// What this case buys the corpus (type families, format).
@@ -755,6 +775,22 @@ pub struct Prepared {
 /// column declaration, an unusable fixture directory, no temp dir): with no
 /// declared types and no fixture there is nothing to aggregate.
 fn run_stages(case: &ParityCase) -> Result<Option<Stages>, Failures> {
+    // Stage ZERO — the case's own DECLARATION against the committed CQL schema.
+    // It runs before everything because the declaration is what every later
+    // stage's expectation is derived from: an unverified declaration that drifted
+    // to match a wrong export mapping makes the Arrow TYPE check and the VALUE
+    // comparison BOTH pass (issue #1490 round 6, `schema_fixture`).
+    match case.schema_check {
+        SchemaCheck::Committed => {
+            schema_fixture::validate_declaration(case).map_err(Failures::refusal)?;
+        }
+        // Announced on EVERY run, never a silent exemption: an opt-out that
+        // nobody can see is indistinguishable from a check that stopped working.
+        SchemaCheck::Synthetic { why } => eprintln!(
+            "[{}] SCHEMA DECLARATION CHECK OPTED OUT — synthetic control: {why}",
+            case.id()
+        ),
+    }
     let columns = case.column_types().map_err(Failures::refusal)?;
     let Some(fixture) = resolve_fixture(case).map_err(Failures::refusal)? else {
         return Ok(None);

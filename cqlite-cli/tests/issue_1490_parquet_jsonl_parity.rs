@@ -163,7 +163,9 @@ mod parquet_parity;
 
 use parquet_parity::canonical_jsonl::CanonicalValue;
 use parquet_parity::failure::Stage;
-use parquet_parity::{assert_case, ExpectedFailure, KnownGap, KnownTypeGap, ParityCase};
+use parquet_parity::{
+    assert_case, ExpectedFailure, KnownGap, KnownTypeGap, ParityCase, SchemaCheck,
+};
 
 // ---------------------------------------------------------------------------
 // test_da — BTI (`da`) fixtures, binaries COMMITTED to git
@@ -184,6 +186,7 @@ const DA_SIMPLE: ParityCase = ParityCase {
     ],
     partition_key: &["id"],
     clustering: &[],
+    schema_check: SchemaCheck::Committed,
     must_run: true,
     covers: "BTI da: uuid/text/int/bigint/boolean/timestamp scalars",
     known_gap: None,
@@ -208,6 +211,7 @@ const DA_COLLECTIONS: ParityCase = ParityCase {
     ],
     partition_key: &["id"],
     clustering: &[],
+    schema_check: SchemaCheck::Committed,
     must_run: true,
     covers: "BTI da: non-frozen set/list/map assembled from per-element cells",
     known_gap: None,
@@ -231,6 +235,7 @@ const SIGNED_INT_COLLECTIONS: ParityCase = ParityCase {
     columns: &[("id", "int"), ("s", "set<int>"), ("m", "map<int, text>")],
     partition_key: &["id"],
     clustering: &[],
+    schema_check: SchemaCheck::Committed,
     must_run: true,
     covers: "negative integers as set elements and map keys (stringified paths)",
     known_gap: None,
@@ -254,6 +259,7 @@ const COMP_LZ4: ParityCase = ParityCase {
     columns: &[("pk", "int"), ("ck", "int"), ("body", "text")],
     partition_key: &["pk"],
     clustering: &["ck"],
+    schema_check: SchemaCheck::Committed,
     must_run: true,
     covers: "LZ4-compressed BIG nb, 600 clustering rows in one partition",
     known_gap: None,
@@ -277,6 +283,7 @@ const UDT_FROZEN_PERSON: ParityCase = ParityCase {
     columns: &[("id", "int"), ("p", "frozen<person>")],
     partition_key: &["id"],
     clustering: &[],
+    schema_check: SchemaCheck::Committed,
     must_run: true,
     covers: "frozen UDT with a NULL inner field",
     known_gap: Some(KnownGap {
@@ -338,6 +345,7 @@ const UDT_COLLECTIONS: ParityCase = ParityCase {
     ],
     partition_key: &["id"],
     clustering: &[],
+    schema_check: SchemaCheck::Committed,
     must_run: true,
     covers: "frozen collections of frozen UDTs (single-cell nested values)",
     known_gap: Some(KnownGap {
@@ -426,6 +434,7 @@ const BASIC_SIMPLE: ParityCase = ParityCase {
     ],
     partition_key: &["id"],
     clustering: &[],
+    schema_check: SchemaCheck::Committed,
     must_run: false,
     covers: "the full scalar zoo: float/double/decimal/date/time/blob/inet/duration/timeuuid",
     known_gap: None,
@@ -465,6 +474,7 @@ const BASIC_COMPOSITE_KEY: ParityCase = ParityCase {
     ],
     partition_key: &["partition_key"],
     clustering: &["clustering_key1", "clustering_key2"],
+    schema_check: SchemaCheck::Committed,
     must_run: false,
     covers: "two-component clustering key (timestamp DESC, text ASC)",
     known_gap: None,
@@ -492,6 +502,7 @@ const COLLECTIONS_TABLE: ParityCase = ParityCase {
     ],
     partition_key: &["id"],
     clustering: &[],
+    schema_check: SchemaCheck::Committed,
     must_run: false,
     covers: "six non-frozen collections incl. list<timestamp> and map<text,bigint>",
     known_gap: None,
@@ -520,6 +531,7 @@ const TIMESERIES_SENSOR_DATA: ParityCase = ParityCase {
     ],
     partition_key: &["sensor_id"],
     clustering: &["timestamp"],
+    schema_check: SchemaCheck::Committed,
     must_run: false,
     covers: "2000 clustering rows across 10 partitions, float/double/tinyint",
     known_gap: None,
@@ -700,6 +712,7 @@ fn harness_refuses_a_fixture_with_a_row_deletion() {
         columns: &[("id", "int"), ("ck", "int"), ("v", "text")],
         partition_key: &["id"],
         clustering: &["ck"],
+        schema_check: SchemaCheck::Committed,
         must_run: true,
         covers: "NEGATIVE control: a committed fixture with a row tombstone",
         known_gap: None,
@@ -727,6 +740,7 @@ fn harness_refuses_a_fixture_with_a_ttl() {
         columns: &[("id", "uuid"), ("data", "text"), ("expiring_value", "int")],
         partition_key: &["id"],
         clustering: &[],
+        schema_check: SchemaCheck::Committed,
         must_run: true,
         covers: "NEGATIVE control: a committed fixture carrying a TTL",
         known_gap: None,
@@ -761,9 +775,16 @@ const AGE_AS_BIGINT: &[(&str, &str)] = &[
     ("created", "timestamp"),
 ];
 
+/// `schema_check` is a PARAMETER rather than a fixed `Synthetic`: some of these
+/// variants mis-declare a column on purpose (so the schema check must be opted
+/// out of, or it reds on the very property under test) and some declare
+/// `test_da.simple_table` CORRECTLY and vary only a `KnownTypeGap` — those must
+/// keep the check ON, or the opt-out would quietly spread to controls that do not
+/// need it.
 const fn da_simple_variant(
     columns: &'static [(&'static str, &'static str)],
     known_type_gaps: &'static [KnownTypeGap],
+    schema_check: SchemaCheck,
 ) -> ParityCase {
     ParityCase {
         keyspace: "test_da",
@@ -773,6 +794,7 @@ const fn da_simple_variant(
         columns,
         partition_key: &["id"],
         clustering: &[],
+        schema_check,
         must_run: true,
         covers: "NEGATIVE CONTROL for the Arrow type check",
         known_gap: None,
@@ -784,7 +806,14 @@ const fn da_simple_variant(
 /// type, the expected Arrow type and the actual one.
 #[test]
 fn type_check_reds_on_a_wrong_arrow_type() {
-    const CASE: ParityCase = da_simple_variant(AGE_AS_BIGINT, &[]);
+    const CASE: ParityCase = da_simple_variant(
+        AGE_AS_BIGINT,
+        &[],
+        SchemaCheck::Synthetic {
+            why: "mis-declares `age` as `bigint` on purpose, so the Arrow type check can be \
+                   shown to red",
+        },
+    );
     let err = parquet_parity::prepare(&CASE)
         .err()
         .map(|f| f.to_string())
@@ -809,6 +838,10 @@ fn a_matching_known_type_gap_excuses_only_that_column() {
             actual: "int32",
             what: "NEGATIVE CONTROL: the mis-declaration above",
         }],
+        SchemaCheck::Synthetic {
+            why: "mis-declares `age` as `bigint` on purpose, so the Arrow type check can be \
+                   shown to red",
+        },
     );
     let prepared = parquet_parity::prepare(&CASE)
         .expect("a matching type gap must not block the value comparison")
@@ -831,6 +864,10 @@ fn a_known_type_gap_cannot_absorb_a_different_type_defect() {
             actual: "utf8",
             what: "NEGATIVE CONTROL: a gap recorded for another type",
         }],
+        SchemaCheck::Synthetic {
+            why: "mis-declares `age` as `bigint` on purpose, so the Arrow type check can be \
+                   shown to red",
+        },
     );
     let err = parquet_parity::prepare(&CASE)
         .err()
@@ -854,6 +891,7 @@ fn a_known_type_gap_that_no_longer_reproduces_fails() {
             actual: "int32",
             what: "NEGATIVE CONTROL: a gap on a column whose type is correct",
         }],
+        SchemaCheck::Committed,
     );
     let err = parquet_parity::prepare(&CASE)
         .err()
@@ -903,6 +941,10 @@ const fn da_simple_gap_variant(
         columns,
         partition_key: &["id"],
         clustering: &[],
+        schema_check: SchemaCheck::Synthetic {
+            why: "every caller mis-declares two columns on purpose, so the schema check \
+                   would red on the property these controls exist to demonstrate",
+        },
         must_run: true,
         covers: "NEGATIVE CONTROL for known_gap exclusivity",
         known_gap,
@@ -1144,6 +1186,10 @@ fn a_known_gap_cannot_hide_an_ineligible_golden_behind_an_aborting_export() {
         columns: &[("id", "uuid"), ("data", "text"), ("expiring_value", "int")],
         partition_key: &["id"],
         clustering: &[],
+        schema_check: SchemaCheck::Synthetic {
+            why: "names a schema that deliberately does NOT declare this table, so the real \
+                   `cqlite export` aborts",
+        },
         must_run: true,
         covers: "NEGATIVE CONTROL: an ineligible golden alongside an aborting export",
         known_gap: Some(GAP),
@@ -1227,6 +1273,7 @@ fn a_known_type_gap_must_name_a_declared_column() {
             actual: "utf8",
             what: "NEGATIVE CONTROL: a gap on a column that does not exist",
         }],
+        SchemaCheck::Committed,
     );
     let err = parquet_parity::prepare(&CASE)
         .err()
@@ -1267,7 +1314,14 @@ const NAME_AS_TUPLE: &[(&str, &str)] = &[
 /// representations — and the refusal fails the case.
 #[test]
 fn a_declared_cql_tuple_column_is_refused_not_compared() {
-    const CASE: ParityCase = da_simple_variant(NAME_AS_TUPLE, &[]);
+    const CASE: ParityCase = da_simple_variant(
+        NAME_AS_TUPLE,
+        &[],
+        SchemaCheck::Synthetic {
+            why: "declares `name` as a CQL tuple on purpose, to exercise the representation \
+                   refusal",
+        },
+    );
 
     let failures = parquet_parity::run_case(&CASE)
         .err()
@@ -1319,6 +1373,10 @@ fn a_refusal_cannot_be_recorded_as_a_known_gap() {
         columns: NAME_AS_TUPLE,
         partition_key: &["id"],
         clustering: &[],
+        schema_check: SchemaCheck::Synthetic {
+            why: "declares `name` as a CQL tuple on purpose, to exercise the representation \
+                   refusal",
+        },
         must_run: true,
         covers: "NEGATIVE CONTROL: a refusal is not a known gap",
         known_gap: Some(GAP),
@@ -1374,6 +1432,10 @@ fn a_missing_committed_fixture_reds_the_suite() {
         columns: &[("id", "uuid")],
         partition_key: &["id"],
         clustering: &[],
+        schema_check: SchemaCheck::Synthetic {
+            why: "names a table no schema declares, because the property under test is the \
+                   ABSENT-fixture rule",
+        },
         must_run: true,
         covers: "NEGATIVE CONTROL: a must_run case whose fixture is absent",
         known_gap: None,
