@@ -134,12 +134,19 @@
 #                      The full pytest run includes the #1231 Python write→read
 #                      content proof (test_write_readback_content.py), so a core
 #                      write-format regression reds a binding content test.
-#   node-bindings      napi build + the #1231 Node write→read content proof
-#                      (npx jest write-readback-content) in bindings/node; SKIPs
-#                      (never silently PASSes) if node/npm is unavailable. Scoped
-#                      to the content proof (not full `npm test`) so it stays
-#                      fast and corpus-free while still failing closed on a Node
-#                      write-path regression (#1255).
+#   node-bindings      napi build + TWO named jest subsets in bindings/node: the
+#                      #1231 Node write→read content proof (jest
+#                      write-readback-content) and the #1456 stub-fidelity drift
+#                      alarm (jest typescript-definitions, index.d.ts vs the real
+#                      runtime surface). SKIPs (never silently PASSes) if node/npm
+#                      is unavailable. Scoped to named subsets (not full
+#                      `npm test`) so it stays fast and corpus-free while still
+#                      failing closed on a Node write-path regression (#1255) and
+#                      on declared-vs-runtime surface drift (#1456). NOTE: this is
+#                      the ONLY lane that executes the #1456 alarm — `--lite` has
+#                      no node tier, and node-ci.yml is `exempt` in
+#                      .github/ci-gating-tiers.yml, so do not narrow this back to
+#                      one subset without moving that coverage somewhere that runs.
 #   parity-report      cassandra-parity report --check: FAILs (naming
 #                      docs/reports/cassandra-test-parity.md) when the committed
 #                      derived report drifts from a fresh render of
@@ -5593,13 +5600,28 @@ run_node_bindings() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] npm ci + npm run build + jest write-readback-content (#1231)"
+  # Two NAMED jest subsets, not the whole suite — each is here for a stated reason:
+  #
+  #   write-readback-content   the #1231 Node write->read content proof.
+  #   typescript-definitions   the #1456 stub-fidelity drift alarm: index.d.ts vs
+  #                            the real runtime surface, both directions.
+  #
+  # #1456's alarm is wired HERE because this is the only lane that executes it.
+  # Measured when it was added: `--lite` has no node tier at all, and BOTH
+  # `node-ci.yml` and `python-ci.yml` sit in `.github/ci-gating-tiers.yml`'s
+  # `exempt` section, so neither gates `required`. Without this line the drift
+  # alarm ran in NO lane — the #1699/#3375 trap, where a test that exists
+  # everywhere and executes nowhere reads as coverage it does not provide. The
+  # marginal cost is ~0.5s: this component already paid for `npm ci` + the napi
+  # build, which is the expensive part.
+  echo ">>> [$name] npm ci + npm run build + jest write-readback-content (#1231) + typescript-definitions (#1456)"
   if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
       if [ -f package-lock.json ]; then npm ci; else npm install; fi
       npm run build
-      npx jest write-readback-content' >"$log" 2>&1; then
+      npx jest write-readback-content
+      npx jest typescript-definitions' >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL

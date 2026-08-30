@@ -633,20 +633,46 @@ function declaredTopLevelNames(dtsSource) {
     ts.ScriptTarget.Latest,
     true
   );
+  // Only EXPORTED, VALUE-BEARING, TOP-LEVEL declarations count as "declared" for
+  // a runtime export, and each of those three qualifiers closes a false-PASS:
+  //
+  // * VALUE-BEARING -- an `interface` or `type` alias declares a TYPE and emits
+  //   no value, so `QueryResult` being declared as an interface does NOT make a
+  //   runtime `module.exports.QueryResult` usable by a TypeScript caller. Counting
+  //   type-only declarations let a runtime value pass by NAME COLLISION with an
+  //   unrelated interface.
+  // * EXPORTED -- a declaration without `export` is not reachable by any caller.
+  // * TOP-LEVEL -- the walk used to recurse with `forEachChild`, so a member or a
+  //   declaration nested inside a namespace/module block satisfied a top-level
+  //   export by name alone.
+  //
+  // This is the permissive-branch shape CLAUDE.md warns about: the test asked
+  // "does this name appear anywhere in the .d.ts" when the property it needs is
+  // "is this name an exported value declaration".
   const names = new Set();
-  const visit = (node) => {
+  const isExported = (node) =>
+    Boolean(
+      node.modifiers &&
+        node.modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    );
+
+  for (const node of sourceFile.statements) {
+    if (!isExported(node)) {
+      continue;
+    }
+    // Classes, functions, enums and namespaces all emit a runtime value.
     if (
       (ts.isClassDeclaration(node) ||
         ts.isFunctionDeclaration(node) ||
-        ts.isInterfaceDeclaration(node) ||
-        ts.isTypeAliasDeclaration(node) ||
         ts.isEnumDeclaration(node) ||
         ts.isModuleDeclaration(node)) &&
       node.name &&
       ts.isIdentifier(node.name)
     ) {
       names.add(node.name.text);
+      continue;
     }
+    // `export declare const x: T` also emits a value.
     if (ts.isVariableStatement(node)) {
       for (const declaration of node.declarationList.declarations) {
         if (ts.isIdentifier(declaration.name)) {
@@ -654,9 +680,9 @@ function declaredTopLevelNames(dtsSource) {
         }
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+    // Interfaces and type aliases are deliberately NOT collected: they are
+    // type-only and cannot satisfy a runtime export.
+  }
   return names;
 }
 
