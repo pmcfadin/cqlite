@@ -15,7 +15,8 @@
 #   1. baseline has a component the branch lacks, main NOT an ancestor  -> FAIL naming it
 #   2. `git fetch` fails (unreachable origin)                           -> non-PASS naming the fetch
 #   3. baseline `--list` broken / empty / non-component output          -> FAIL naming the derivation
-#   4. deliberate removal (main IS an ancestor of HEAD)                 -> DECLARED, run NOT failed
+#   4. deliberate removal (main IS an ancestor of HEAD, absent at HEAD)  -> DECLARED, run NOT failed
+#   4b. removal that is only an UNCOMMITTED working-tree edit            -> FAIL naming it
 #   5. no skew                                                          -> affirmative PASS + baseline sha
 #   6. --lite with a real skew                                          -> line present, run NOT failed
 #   7. the REAL full-gate emit path                                     -> FAIL block + exit 1, no cargo
@@ -23,12 +24,14 @@
 # CENSUS, stated so a later reader can tell "covered" from "forgotten" (a silent gap is
 # the shape this whole issue is about). The pre-flight has FOUR verdicts and TEN non-`ok`
 # probe kinds, and EVERY one is exercised below:
-#   verdicts (4) — PASS (case 5), DECLARED (4), BEHIND (1), INDETERMINATE (4c).
-#   kinds   (10) — fetch-failed, no-remote (case 2); baseline-list-failed,
+#   verdicts (6) — PASS (case 5), DECLARED (4), UNCOMMITTED (4b), BEHIND (1),
+#                  INDETERMINATE (4c), UNMEASURED (2, 3a–3g, 4b-ii).
+#   kinds   (11) — fetch-failed, no-remote (case 2); baseline-list-failed,
 #                  baseline-list-empty, baseline-list-garbage, baseline-missing (3a–3d);
-#                  no-git, baseline-workspace, no-tool (3f); unboundable (3g).
-# TEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (twelve assignment
-# SITES: `fetch-failed` is set from two places, and `ok` is the eleventh value). It was
+#                  no-git, baseline-workspace, no-tool (3f); unboundable (3g);
+#                  head-set-unmeasured (4b-ii).
+# ELEVEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
+# set from two places, and `ok` is the twelfth value). It was
 # written as "six" for two rounds while the enumeration beneath it listed nine — a census
 # that miscounts its own list is worse than none, because a reader who trusts the number
 # and counts the entries concludes three kinds are uncovered extras. The count is now
@@ -725,6 +728,133 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 4b. THE DECLARED BYPASS (roborev job 215, blocker 2) — REPRODUCED, not theorised.
+#     `ANCESTOR: yes` answers "is origin/main reachable from HEAD?"; DECLARED's sentence
+#     claims "the removal is in THIS branch's own diff". Different questions — so with
+#     origin/main an ancestor of HEAD, deleting one component from the WORKING COPY alone
+#     (HEAD untouched) produced a NON-FATAL DECLARED in a CERTIFYING mode, i.e. a full gate
+#     that would certify 35 of 36 components, AND a factually FALSE line asserting committed
+#     provenance for an uncommitted edit.
+#
+#     The fixture is the repro exactly: a from-origin clone (ancestor yes) whose COMMITTED
+#     gate has every component, with ONE component removed from the working copy AFTER the
+#     commit. Fail-closed on its own construction — if the edit matches nothing the two
+#     scripts are identical and the case would pass while testing nothing.
+# ---------------------------------------------------------------------------
+UNC_REMOVED=pub-surface
+base_unc=$(mkbaseline base-unc - )
+unc=$(mkbranch uncommitted "$base_unc" - --from-origin)
+sed "/^COMPONENTS=(/ s/ $UNC_REMOVED / /" "$unc/scripts/agent-gate.sh" >"$tmp/unc-gate.sh"
+if cmp -s "$unc/scripts/agent-gate.sh" "$tmp/unc-gate.sh"; then
+  bad "3544-uncommitted: could not build the fixture — the COMPONENTS edit removing '$UNC_REMOVED' matched nothing, so the case would test nothing"
+else
+  cp "$tmp/unc-gate.sh" "$unc/scripts/agent-gate.sh"
+  # The fixture's own precondition, asserted rather than assumed: the WORKING copy must no
+  # longer list the component while HEAD's committed copy still does. Without this the case
+  # could pass because the clone was broken rather than because the guard works.
+  unc_wt_has=$( cd "$unc" && bash scripts/agent-gate.sh --list 2>/dev/null | grep -cx -- "$UNC_REMOVED" )
+  unc_head_has=$( cd "$unc" && git show "HEAD:scripts/agent-gate.sh" 2>/dev/null \
+                    | grep -c "^COMPONENTS=(.* $UNC_REMOVED " )
+  unc_out=$(hook "$unc")
+  unc_line=$(field COMPONENT_SET_LINE "$unc_out")
+  if [ "$unc_wt_has" -eq 0 ] && [ "$unc_head_has" -ge 1 ] \
+     && [ "$(field VERDICT "$unc_out")" = UNCOMMITTED ] \
+     && [ "$(field KIND "$unc_out")" = ok ] \
+     && [ "$(field ANCESTOR "$unc_out")" = yes ] \
+     && grep -qw -- "$UNC_REMOVED" <<<"$(field MISSING "$unc_out")" \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$unc_line" \
+     && grep -q 'UNCOMMITTED WORKING-TREE EDIT' <<<"$unc_line" \
+     && grep -q 'PRESENT in the gate script AT HEAD' <<<"$unc_line" \
+     && grep -qw -- "$UNC_REMOVED" <<<"$unc_line" \
+     && ! grep -q '^component-set: DECLARED' <<<"$unc_line" \
+     && ! grep -q "own COMMITTED diff, NOT skew" <<<"$unc_line"; then
+    ok "3544-uncommitted: an UNCOMMITTED removal under ANCESTOR yes FAILs closed and is NOT DECLARED (wt has it: $unc_wt_has, HEAD has it: $unc_head_has)"
+  else
+    bad "3544-uncommitted: expected VERDICT UNCOMMITTED naming $UNC_REMOVED with no DECLARED claim (wt=$unc_wt_has head=$unc_head_has)"
+    printf '%s\n' "$unc_out"
+  fi
+
+  # The REAL full-gate emit: its own cause and its own remedy. `git rebase` is NOT the
+  # remedy here (there is nothing to rebase) and the committed-provenance sentence must not
+  # appear, so the block must name the uncommitted edit and say commit-or-restore.
+  unc_sum="$tmp/uncommitted-summary.txt"
+  ( cd "$unc" && AGENT_GATE_SUMMARY_FILE="$unc_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+      bash scripts/agent-gate.sh >"$tmp/uncommitted.log" 2>&1 ); unc_rc=$?
+  if [ "$unc_rc" -ne 0 ] \
+     && grep -q '^RESULT: FAIL' "$unc_sum" 2>/dev/null \
+     && grep -q '^preflight: FAIL (component-set: component(s) removed by an UNCOMMITTED working-tree edit' "$unc_sum" 2>/dev/null \
+     && grep -q '^hint: commit the removal' "$unc_sum" 2>/dev/null \
+     && ! grep -q 'hint: git fetch origin && git rebase' "$unc_sum" 2>/dev/null \
+     && ! grep -q "own COMMITTED diff" "$unc_sum" 2>/dev/null; then
+    ok "3544-uncommitted-emit: the FULL gate FAILs with the uncommitted-edit cause and a commit-or-restore remedy"
+  else
+    bad "3544-uncommitted-emit: expected an uncommitted-named preflight line + its own hint (rc=$unc_rc)"
+    sed -n '1,20p' "$unc_sum" 2>/dev/null
+  fi
+
+  # …and ADVISORY under --lite, like every other verdict: the fast loop runs on a dirty tree
+  # by definition, so a working-copy edit must be REPORTED there, never fatal.
+  unc_lite=$(hook "$unc" lite)
+  unc_lite_line=$(field COMPONENT_SET_LINE "$unc_lite")
+  if [ "$(field STRICT "$unc_lite")" = no ] \
+     && grep -q '^component-set: ADVISORY-UNCOMMITTED (#3544)' <<<"$unc_lite_line" \
+     && grep -q -- '--lite is lenient' <<<"$unc_lite_line" \
+     && ! grep -q 'FAIL-CLOSED' <<<"$unc_lite_line"; then
+    ok "3544-uncommitted-lite: --lite stamps ADVISORY-UNCOMMITTED and does not fail on it"
+  else
+    bad "3544-uncommitted-lite: expected ADVISORY-UNCOMMITTED under --lite"
+    printf '%s\n' "$unc_lite"
+  fi
+fi
+
+# THE COUNTER-CASE, and the reason the fix keys on HEAD's SET rather than on "is the tree
+# dirty": a dirty working tree that ADDS a component must still PASS. Extra components are
+# never skew, and a guard that reds on a correct tree is the guard agents learn to waive —
+# failing on dirtiness alone would red every branch mid-edit.
+add=$(mkbranch uncommitted-add "$base_unc" - --from-origin)
+sed "/^COMPONENTS=(/ s/^COMPONENTS=(/COMPONENTS=($SENTINEL /" "$add/scripts/agent-gate.sh" >"$tmp/add-gate.sh"
+if cmp -s "$add/scripts/agent-gate.sh" "$tmp/add-gate.sh"; then
+  bad "3544-uncommitted-add: could not build the fixture (the COMPONENTS edit matched nothing)"
+else
+  cp "$tmp/add-gate.sh" "$add/scripts/agent-gate.sh"
+  add_out=$(hook "$add")
+  add_line=$(field COMPONENT_SET_LINE "$add_out")
+  if [ "$(field VERDICT "$add_out")" = PASS ] \
+     && grep -qw -- "$SENTINEL" <<<"$(field EXTRA "$add_out")" \
+     && grep -q '^component-set: PASS (' <<<"$add_line" \
+     && ! grep -q 'FAIL-CLOSED' <<<"$add_line" \
+     && ! grep -q 'UNCOMMITTED' <<<"$add_line"; then
+    ok "3544-uncommitted-add: an UNCOMMITTED ADDITION still PASSes (dirtiness is not the signal; HEAD's SET is)"
+  else
+    bad "3544-uncommitted-add: expected PASS with $SENTINEL branch-only, never a dirty-tree failure"
+    printf '%s\n' "$add_out"
+  fi
+fi
+
+# 4b-ii. HEAD'S SET UNMEASURABLE: the provenance oracle is the SOLE evidence for DECLARED's
+#     claim, so a run that cannot consult it must NOT excuse the removal. Forced by dropping
+#     the gate script from the INDEX and committing (HEAD's tree no longer holds it) while
+#     the working copy stays in place: `git show HEAD:scripts/agent-gate.sh` then fails for
+#     real, through the shipped code path, with ancestry still `yes`.
+base_hu=$(mkbaseline base-headmiss "$ADD_SENTINEL")
+hu=$(mkbranch headmiss "$base_hu" - --from-origin)
+( cd "$hu" && git rm -q --cached scripts/agent-gate.sh \
+   && git "${GIT_ID[@]}" commit -qm "drop the gate from the index" ) >/dev/null 2>&1
+hu_out=$(hook "$hu")
+hu_line=$(field COMPONENT_SET_LINE "$hu_out")
+if [ "$(field VERDICT "$hu_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$hu_out")" = head-set-unmeasured ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$hu_line" \
+   && grep -q 'git show HEAD:scripts/agent-gate.sh' <<<"$hu_line" \
+   && ! grep -q '^component-set: DECLARED' <<<"$hu_line" \
+   && ! grep -q "own COMMITTED diff, NOT skew" <<<"$hu_line"; then
+  ok "3544-head-unmeasured: an unreadable HEAD gate script is its own named non-PASS, never a DECLARED excusal"
+else
+  bad "3544-head-unmeasured: expected KIND head-set-unmeasured FAIL-CLOSED naming the git show"
+  printf '%s\n' "$hu_out"
+fi
+
+# ---------------------------------------------------------------------------
 # 4c. INDETERMINATE — the THIRD ancestry state, and the one a two-way test cannot express.
 #     `git merge-base --is-ancestor` answers 0 (ancestor) or 1 (not), and ANYTHING ELSE is
 #     an error, so collapsing "cannot tell" onto either answer is a false verdict on
@@ -1361,7 +1491,7 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=10
+DECLARED_KIND_COUNT=11
 # Scan the WHOLE gate, not just `_component_set_probe`: every assignment lives inside that
 # function today, but a scan scoped to it would MISS a kind set elsewhere later and the
 # count would silently keep agreeing with this constant. A superset scan cannot miss.

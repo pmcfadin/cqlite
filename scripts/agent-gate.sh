@@ -2546,10 +2546,12 @@ apply_schemas_preflight() {
 #     git fetch --refmap= --no-tags …    the baseline read; network by definition. Both
 #                                        flags suppress SHARED-ref writes (branches, tags).
 #     git show <sha>:scripts/…           reads a BLOB, so in a PARTIAL clone
-#                                        (--filter=blob:none) it fetches LAZILY. This is the
-#                                        site that looked local and was not (finding 1).
+#     git show HEAD:scripts/…            (--filter=blob:none) it fetches LAZILY. This is the
+#                                        site that looked local and was not (finding 1). TWO
+#                                        revs are read: the fetched baseline, and HEAD (the
+#                                        job-215 removal-provenance measurement).
 #     bash <extracted baseline> --list   spawns; and a spawned tree can outlive a
-#                                        direct-child kill, hence the process-group signal
+#     bash <extracted HEAD> --list       direct-child kill, hence the process-group signal
 #                                        in _component_set_bounded (finding 2).
 #
 #   LOCAL-ONLY (annotated `# local-only: <why>` at each site, so the claim is checkable
@@ -2573,6 +2575,10 @@ _CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-fai
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
+_CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
+                   # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
+_CS_HEAD_SET=""    # the component set as COMMITTED AT HEAD (space separated)
+_CS_HEAD_ERR=""    # why HEAD's set could not be measured (empty = measured)
 _CS_ANCESTOR=unknown   # is the baseline sha an ancestor of HEAD? yes | no | unknown
 _CS_BASE_N=0       # size of the baseline set
 _CS_DETAIL=""      # one-line cause text for the non-`ok` kinds
@@ -2707,12 +2713,89 @@ _component_set_bounded() {
   esac
 }
 
+# _component_set_head_set: derive the component set from the gate script AS COMMITTED AT
+# HEAD. Sets _CS_HEAD_SET (rc 0) or _CS_HEAD_ERR (rc 1); never emits, never exits.
+#
+# WHY IT EXISTS (roborev job 215, blocker 2). The branch side of the comparison is the
+# WORKING TREE's COMPONENTS array — correctly, because that is the set this run will
+# actually dispatch. But the DECLARED verdict's CLAIM is about the COMMITTED diff ("the
+# removal is in THIS branch's own diff"), and `origin/main IS an ancestor of HEAD` answers a
+# DIFFERENT question ("is origin/main reachable from HEAD?"). Answering the second while
+# asserting the first was both a false sentence and a REAL BYPASS: with origin/main an
+# ancestor of HEAD, deleting one component from the WORKING COPY alone yielded a
+# NON-FATAL DECLARED in a CERTIFYING mode, so a full gate would have certified 35 of 36
+# components — the exact defect #3544 exists to prevent (reproduced, not theorised).
+#
+# THE MEASUREMENT IS AFFIRMATIVE, not a proxy. Failing merely because the working tree is
+# DIRTY would red every branch that has an unrelated uncommitted edit, and would still not
+# establish provenance where the tree is clean-but-stale; HEAD's OWN set is the fact the
+# DECLARED sentence claims, so HEAD's own set is what is read.
+_component_set_head_set() {
+  _CS_HEAD_SET=""; _CS_HEAD_ERR=""
+  local rel base tmpd out rc line
+  base=$(basename "$GATE_SELF"); rel="scripts/$base"
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs-head.XXXXXX") || tmpd=""
+  if [ -z "$tmpd" ] || [ ! -d "$tmpd" ]; then
+    _CS_HEAD_ERR="could not create a temp dir to extract $rel at HEAD"; return 1
+  fi
+  mkdir -p "$tmpd/scripts"
+  # BOUNDED for exactly the reason the baseline extraction is (job 210, finding 1):
+  # `git show <rev>:<path>` reads a BLOB, and a PARTIAL clone fetches it LAZILY, so this
+  # apparently-local read is network-capable. `HEAD` is a LITERAL, like `origin`/`main`
+  # above: a variable rev would be a way to point the provenance check at a commit of the
+  # invoker's choosing.
+  _component_set_bounded 120 git -C "$REPO_ROOT" show "HEAD:$rel" \
+      >"$tmpd/scripts/$base" 2>"$tmpd/show.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_HEAD_ERR="git show HEAD:$rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
+    else
+      _CS_HEAD_ERR="git show HEAD:$rel failed (rc $rc): $(_component_set_flatten "$(cat "$tmpd/show.err" 2>/dev/null)")"
+    fi
+    rm -rf "$tmpd"; return 1
+  fi
+  # Derived by EXECUTION, like the baseline's, and pinned into $tmpd for the same reasons.
+  out=$(
+    AGENT_GATE_SUMMARY_FILE="$tmpd/head-summary.txt" \
+    AGENT_GATE_PARENT_RUN_ID="${RUN_ID:-component-set-preflight}" \
+    CQLITE_GATE_NO_NICE=1 \
+    _component_set_bounded 120 bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
+  ); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_HEAD_ERR="'bash <HEAD:$rel> --list' exited $rc: $(_component_set_flatten "$(cat "$tmpd/list.err" 2>/dev/null)")"
+    rm -rf "$tmpd"; return 1
+  fi
+  rm -rf "$tmpd"
+  # SAME CLOSED GRAMMAR as the baseline derivation, for the mirror-image reason: filtering
+  # an unrecognised line away would SHRINK the HEAD set, and a shrunken HEAD set reports an
+  # uncommitted removal as a committed one — the bypass re-opened from the other side.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *[![:alnum:]._-]*|-*)
+        _CS_HEAD_SET=""
+        _CS_HEAD_ERR="'bash <HEAD:$rel> --list' printed a line that is not a component name: '$(_component_set_flatten "$line")'"
+        return 1 ;;
+    esac
+    _CS_HEAD_SET="${_CS_HEAD_SET:+$_CS_HEAD_SET }$line"
+  done <<EOF_CS_HEAD
+$out
+EOF_CS_HEAD
+  if [ -z "$_CS_HEAD_SET" ]; then
+    _CS_HEAD_ERR="'bash <HEAD:$rel> --list' printed no components; an empty HEAD set would report EVERY missing component as a committed removal"
+    return 1
+  fi
+  return 0
+}
+
 # _component_set_probe: perform the fetch + the two set derivations + the ancestry
 # probe, recording everything in the _CS_* globals. NEVER exits, never emits; the
 # verdict mapping and the emit live in the two functions below.
 _component_set_probe() {
-  _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""
+  _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
+  _CS_HEAD_SET=""; _CS_HEAD_ERR=""
 
   local err rc
   if ! command -v git >/dev/null 2>&1; then
@@ -2904,13 +2987,39 @@ EOF_CS_LIST
     *) _CS_ANCESTOR=unknown
        _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} HEAD exited $rc" ;;
   esac
+
+  # PROVENANCE OF A REMOVAL (job 215, blocker 2). Consulted ONLY where it DECIDES something:
+  # a missing component with origin/main an ancestor of HEAD is about to be EXCUSED as this
+  # branch's own committed removal, so that claim is measured against HEAD's own set. With
+  # nothing missing (PASS) or a non-ancestor baseline (BEHIND/INDETERMINATE) HEAD's set
+  # changes no verdict, so the common path spawns nothing extra. A component missing here
+  # but PRESENT at HEAD was removed by an UNCOMMITTED edit — not this branch's diff, and not
+  # DECLARED. An unmeasurable HEAD set is its own named non-PASS: no provenance, no excusal.
+  if [ -n "$_CS_MISSING" ] && [ "$_CS_ANCESTOR" = yes ]; then
+    if _component_set_head_set; then
+      local head_padded=" $_CS_HEAD_SET "
+      # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
+      for c in $_CS_MISSING; do
+        case "$head_padded" in
+          *" $c "*) _CS_UNCOMMITTED="${_CS_UNCOMMITTED:+$_CS_UNCOMMITTED }$c" ;;
+        esac
+      done
+    else
+      _CS_KIND=head-set-unmeasured
+      _CS_DETAIL="$_CS_HEAD_ERR"
+      return 0
+    fi
+  fi
   _CS_KIND=ok
 }
 
 # _component_set_verdict: PURE mapping of the probe state onto exactly one token.
 #   PASS          — every baseline component is present in this tree's set.
-#   DECLARED      — components are missing AND origin/main IS an ancestor of HEAD, so
-#                   this branch removed them in its OWN diff. Not skew.
+#   DECLARED      — components are missing, origin/main IS an ancestor of HEAD, AND they
+#                   are absent at HEAD too, so this branch removed them in its OWN
+#                   COMMITTED diff. Not skew.
+#   UNCOMMITTED   — components are missing from the WORKING TREE but PRESENT at HEAD, so
+#                   the removal is an uncommitted edit and nothing recorded it.
 #   BEHIND        — components are missing AND origin/main is NOT an ancestor of HEAD.
 #   INDETERMINATE — components are missing and the ancestry probe could not tell which.
 #   UNMEASURED    — the baseline could not be measured at all.
@@ -2919,6 +3028,10 @@ EOF_CS_LIST
 _component_set_verdict() {
   [ "$_CS_KIND" = ok ] || { printf UNMEASURED; return 0; }
   [ -n "$_CS_MISSING" ] || { printf PASS; return 0; }
+  # BEFORE the ancestry split, and only reachable from it: _CS_UNCOMMITTED is populated
+  # exclusively on the ancestor==yes path (the DECLARED candidate), so this cannot displace
+  # BEHIND — a branch that is behind AND dirty still FAILs as BEHIND first.
+  [ -z "$_CS_UNCOMMITTED" ] || { printf UNCOMMITTED; return 0; }
   case "$_CS_ANCESTOR" in
     yes) printf DECLARED ;;
     no)  printf BEHIND ;;
@@ -2950,6 +3063,9 @@ _component_set_line() {
   fi
   # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
   for c in $_CS_MISSING; do n_missing=$((n_missing + 1)); done
+  local n_uncommitted=0
+  # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
+  for c in $_CS_UNCOMMITTED; do n_uncommitted=$((n_uncommitted + 1)); done
   local extra=""
   [ -n "$_CS_EXTRA" ] && extra=" [branch-only, NOT skew: $_CS_EXTRA]"
   case "$verdict" in
@@ -2962,8 +3078,20 @@ _component_set_line() {
           "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra"
       fi ;;
     DECLARED)
-      printf 'component-set: DECLARED (#3544) — this branch REMOVES %s of origin/main %s'"'"'s %s component(s): %s; origin/main IS an ancestor of HEAD, so the removal is in THIS branch'"'"'s own diff, NOT skew — recorded, not fatal%s%s' \
+      printf 'component-set: DECLARED (#3544) — this branch REMOVES %s of origin/main %s'"'"'s %s component(s): %s; origin/main IS an ancestor of HEAD and they are absent from the gate script AT HEAD too, so the removal is in THIS branch'"'"'s own COMMITTED diff, NOT skew — recorded, not fatal%s%s' \
         "$n_missing" "$_CS_SHA" "$_CS_BASE_N" "$_CS_MISSING" "$extra" "$lenient" ;;
+    UNCOMMITTED)
+      # The DECLARED excusal WITHOUT its precondition. Named separately from BEHIND because
+      # it is a different fact with a different remedy (commit or restore, never rebase),
+      # and never merged into DECLARED's wording: that sentence asserts committed-diff
+      # provenance, and here the measurement says the opposite.
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-UNCOMMITTED (#3544) — %s of the %s component(s) missing vs origin/main %s are PRESENT in the gate script AT HEAD (%s), so the removal is an UNCOMMITTED WORKING-TREE EDIT, not this branch'"'"'s committed diff%s%s' \
+          "$n_uncommitted" "$n_missing" "$_CS_SHA" "$_CS_UNCOMMITTED" "$extra" "$lenient"
+      else
+        printf 'component-set: FAIL-CLOSED (#3544) — %s of the %s component(s) missing vs origin/main %s are PRESENT in the gate script AT HEAD (%s), so the removal is an UNCOMMITTED WORKING-TREE EDIT, not this branch'"'"'s committed diff and cannot be DECLARED; a PASS here would certify a set nothing recorded; overall verdict FAIL' \
+          "$n_uncommitted" "$n_missing" "$_CS_SHA" "$_CS_UNCOMMITTED"
+      fi ;;
     BEHIND)
       if [ -n "$lenient" ]; then
         printf 'component-set: ADVISORY-BEHIND (#3544) — this tree is BEHIND origin/main %s; %s component(s) MISSING from its gate script: %s%s%s' \
@@ -3005,8 +3133,10 @@ apply_component_set_preflight() {
   COMPONENT_SET_LINE="$(_component_set_line)"
 
   # DECLARED is deliberately NON-FATAL, and this is the whole reason the ancestry probe
-  # exists: when origin/main is an ancestor of HEAD, the missing components were removed
-  # BY THIS BRANCH'S OWN DIFF — the author is not behind and has nothing to rebase, so
+  # exists: when origin/main is an ancestor of HEAD **and the components are absent at HEAD
+  # too** (job 215 — the ancestry answer ALONE excused an uncommitted deletion, a real
+  # bypass), the missing components were removed BY THIS BRANCH'S OWN COMMITTED DIFF —
+  # the author is not behind and has nothing to rebase, so
   # only the INFORMATION is actionable (CLAUDE.md: FAIL where the author can act; NOTICE
   # where only the information is actionable; never silence). Failing here would red on
   # correct input, and a guard that reds on correct input is the guard agents learn to
@@ -3035,6 +3165,15 @@ apply_component_set_preflight() {
       echo "            true N/N verdict about a set that is no longer the coverage claim, and be" >&2
       echo "            SILENT about every component added since (measured: PR #3467, 31 of 35)." >&2
       echo "agent-gate: remedy: git fetch origin && git rebase origin/main   (then re-run the gate)" >&2 ;;
+    UNCOMMITTED)
+      why_summary="preflight: FAIL (component-set: component(s) removed by an UNCOMMITTED working-tree edit — the committed script at HEAD still has them)"
+      hint="hint: commit the removal (git add scripts/agent-gate.sh && git commit) or restore the component(s) in the working tree, then re-run scripts/agent-gate.sh"
+      echo "agent-gate: component(s) are missing from THIS WORKING TREE's gate script but are" >&2
+      echo "            PRESENT in the script AS COMMITTED AT HEAD, so the removal is an" >&2
+      echo "            UNCOMMITTED EDIT — nothing recorded it, and a certifying run must" >&2
+      echo "            measure the committed script. 'origin/main is an ancestor of HEAD'" >&2
+      echo "            answers a DIFFERENT question and cannot excuse this (#3544 job 215)." >&2
+      echo "agent-gate: remedy: commit the removal, or restore the component(s), then re-run." >&2 ;;
     INDETERMINATE)
       why_summary="preflight: FAIL (component-set: components missing vs origin/main and the ancestry probe could not classify them)"
       hint="hint: repair the repository so 'git merge-base --is-ancestor <origin/main> HEAD' answers (HEAD must resolve to a commit), then re-run scripts/agent-gate.sh"
