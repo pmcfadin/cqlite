@@ -102,6 +102,18 @@ onto its own branch). Rules, non-negotiable:
    The claim ref — not the branch — arbitrates the race (git server-side, per-issue, slug-independent):
    a UNIQUE root-commit push means a different-slug or identical-base competitor can no longer
    double-claim (#2665). `worktree add` leaves the root checkout untouched — that is the entire point.
+
+   **Where the SUPERVISOR runs is a separate question from where the WORKER works, and the two used to
+   contradict each other (#3393 round 36).** The lines above describe the WORKER: it acts from a root
+   checkout and creates a per-issue worktree. `worker-supervisor.sh` is not covered by them — it needs
+   to know **which lane it is**, and it used to answer that from its own script location, which is
+   "where is my script" standing in for "which lane am I". That worked only because a lane worktree
+   carries a full `scripts/` tree, i.e. by coincidence. So:
+   **the supervisor's lane identity is now GIVEN, via `LANE_ID`.** Set it per lane. With it unset the
+   supervisor falls back to deriving one from its worktree, and that fallback **refuses to start**
+   rather than degrade silently — `lane-identity-unprovable` when there is no lane to derive from, and
+   `lane-attribution-impossible` when the worker-orphan probe could only ever count zero. An identity
+   token is not a directory, so `LANE_ID` fixes the first and not the second.
    If `claim.sh claim` reports `CLAIM LOST`, do NOT create the worktree; go back to step 2. If you are
    adopting a reaped claim (flow-board marked it), acquire it with `bash scripts/flow/claim.sh adopt
    <N> --expect <old-sha>` instead. Run the gate with

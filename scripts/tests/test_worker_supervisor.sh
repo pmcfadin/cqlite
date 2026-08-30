@@ -2828,15 +2828,19 @@ test_supervisor_lock_is_per_lane() {
   # `supervisor_lock_path` now BUILDS ON `supervisor_lane_id` (roborev round 34) rather than carrying a
   # second copy of its body, so extracting the lock function alone yields an undefined call and an EMPTY
   # path — which is how this case caught the change, loudly and in the right place.
+  # DRIVEN BY `LANE_ID`, THE GIVEN IDENTITY (lead ruling B, 2026-08-30). This case used to drive the
+  # lock by REPO_ROOT, because the lock inferred its own identity from the script's location — which is
+  # exactly the coincidence the ruling rejected. The PROPERTY is unchanged (distinct lanes get distinct
+  # locks; one lane is stable); only the SOURCE of the identity moved, from an inference to a value.
   {
     printf '%s\n' '#!/usr/bin/env bash'
     sed -n '/^supervisor_lane_id()/,/^}/p' "$SUPERVISOR"
     sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR"
     printf '%s\n' 'supervisor_lock_path; printf "%s\n" "$SUPERVISOR_LOCK"'
   } >"$body"
-  a=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp bash "$body")
-  b=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/lanes/lane-2222 TMPDIR=/tmp bash "$body")
-  same=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp bash "$body")
+  a=$(SUPERVISOR_LOCK="" LANE_ID=lane-1111 REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp bash "$body")
+  b=$(SUPERVISOR_LOCK="" LANE_ID=lane-2222 REPO_ROOT=/data/lanes/lane-2222 TMPDIR=/tmp bash "$body")
+  same=$(SUPERVISOR_LOCK="" LANE_ID=lane-1111 REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp bash "$body")
   if [[ -n "$a" && -n "$b" && "$a" != "$b" && "$a" == "$same" ]]; then
     pass "claim: two lanes get DIFFERENT default locks and one lane is stable across runs ($a vs $b)"
   else
@@ -2845,16 +2849,16 @@ test_supervisor_lock_is_per_lane() {
   # Two lanes whose directories share a BASENAME must still differ, or the readable half would alias
   # them onto one lock and reintroduce the machine-global failure for the common fleet layout.
   local c e
-  c=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/boxA/lane TMPDIR=/tmp bash "$body")
-  e=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/boxB/lane TMPDIR=/tmp bash "$body")
+  c=$(SUPERVISOR_LOCK="" LANE_ID=boxA-lane REPO_ROOT=/data/boxA/lane TMPDIR=/tmp bash "$body")
+  e=$(SUPERVISOR_LOCK="" LANE_ID=boxB-lane REPO_ROOT=/data/boxB/lane TMPDIR=/tmp bash "$body")
   if [[ "$c" != "$e" ]]; then
-    pass "claim: two lanes sharing a directory BASENAME still get different locks"
+    pass "claim: two distinct LANE_IDs get different locks (the basename coincidence is no longer load-bearing)"
   else
     fail "lock-per-lane-basename: both resolved to [$c]"
   fi
   # An explicit SUPERVISOR_LOCK still wins — the fix must not take the override away.
   local ov
-  ov=$(SUPERVISOR_LOCK=/tmp/explicit.lock REPO_ROOT=/data/lanes/lane-1111 bash "$body")
+  ov=$(SUPERVISOR_LOCK=/tmp/explicit.lock LANE_ID=lane-1111 REPO_ROOT=/data/lanes/lane-1111 bash "$body")
   if [[ "$ov" == "/tmp/explicit.lock" ]]; then
     pass "claim: an explicit SUPERVISOR_LOCK is still honoured"
   else
@@ -2863,10 +2867,18 @@ test_supervisor_lock_is_per_lane() {
   # ONE CONSTRUCTION (roborev round 34, Medium): the lock path must be built FROM `supervisor_lane_id`,
   # not from a second copy of its body — two spellings of one identity drift, and the bound added to one
   # would silently not apply to the other.
-  if sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR" | grep -q 'supervisor_lane_id'; then
-    pass "lock-path: built from supervisor_lane_id rather than a duplicated construction"
+  # ONE IDENTITY, TWO CONSUMERS (lead ruling B): the lock and the claim actor must BOTH derive from
+  # `LANE_ID`. Two independent derivations of "which lane am I" is two things to keep in step, and the
+  # one that drifts is found in production. The earlier form of this assert required the lock to call
+  # `supervisor_lane_id`; that was the same property when identity was inferred, and is the wrong
+  # spelling of it now that identity is given.
+  local lock_uses actor_uses
+  lock_uses=$(sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR" | grep -c 'LANE_ID')
+  actor_uses=$(sed -n '/^supervisor_claim_actor()/,/^}/p' "$SUPERVISOR" | grep -c 'LANE_ID')
+  if [[ "$lock_uses" -ge 1 && "$actor_uses" -ge 1 ]]; then
+    pass "identity: the lock AND the claim actor both derive from the given LANE_ID (one identity, two consumers)"
   else
-    fail "lock-path-duplication: supervisor_lock_path does not call supervisor_lane_id"
+    fail "identity-drift: lock refs LANE_ID $lock_uses time(s), actor $actor_uses — a consumer re-inferring its own lane identity will drift from the other"
   fi
   # BUILTINS ONLY (#3464 family 2, reintroduced in the first cut of this very fix). Several cases
   # SOURCE the supervisor under a stripped PATH to prove the no-jq/no-python3 paths, so an external
@@ -2875,7 +2887,7 @@ test_supervisor_lock_is_per_lane() {
   # `$BASH` is the ABSOLUTE path of the running shell. `PATH="" bash …` cannot find bash itself, so
   # the first cut of this case failed with "bash: No such file or directory" — and its NON-VACUITY
   # control PASSED for that same wrong reason, which is the shape this whole change keeps meeting.
-  stripped=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp PATH="" "$BASH" "$body" 2>&1)
+  stripped=$(SUPERVISOR_LOCK="" LANE_ID=lane-1111 REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp PATH="" "$BASH" "$body" 2>&1)
   if [[ "$stripped" == "$a" ]]; then
     pass "claim: the lock path resolves with an EMPTY PATH — builtins only, no tr/cksum/awk"
   else
@@ -3600,8 +3612,14 @@ test_real_pgrep_usages_are_pid_scoped() {
   local bad="" line
   # Strip comment lines (first non-blank char `#`), then flag any real pgrep scan
   # whose line does not PID-scope via `grep -qw`.
+  # TWO acceptable scopings, and `pgrep-lint-allow` is not a blanket exemption — it asserts the SECOND:
+  #   * `grep -qw $pid`      — pid-scoped: the scan can only match a pid this test owns.
+  #   * a RUN-UNIQUE MARKER  — the pattern contains a token minted for this run ($$ + $RANDOM), so no
+  #                            host process can carry it. Used by the probe two-direction control, which
+  #                            must exercise the REAL pgrep pipeline and therefore cannot pid-scope it.
+  # Both bound the scan to this test's own processes, which is the property #2849 is about.
   while IFS= read -r line; do
-    [[ "$line" == *'grep -qw'* ]] || bad="${bad}${line}\n"
+    [[ "$line" == *'grep -qw'* || "$line" == *'pgrep-lint-allow'* ]] || bad="${bad}${line}\n"
   done < <(grep -vE '^[[:space:]]*#' "${BASH_SOURCE[0]}" | grep -E 'pgrep[[:space:]]+-[a-zA-Z]*f')
   if [[ -z "$bad" ]]; then
     pass "#2849: every real pgrep process scan is PID-scoped (grep -qw \$pid) — hermetic vs host processes"
@@ -3710,18 +3728,19 @@ test_claim_actor_is_lane_unique() {
     printf '%s\n' '[[ "${T_UNSET_ACTOR:-}" == 1 ]] && unset CLAIM_ACTOR'
     printf '%s\n' 'supervisor_claim_actor; "$BASH" -c '"'"'printf "%s\n" "${CLAIM_ACTOR:-UNSET-IN-CHILD}"'"'"''
   } >"$body"
-  a=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
-  b=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/lanes/lane-2222 "$BASH" "$body")
-  same=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
+  # FROM `LANE_ID` (lead ruling B): the actor no longer re-infers the lane from REPO_ROOT.
+  a=$(T_UNSET_ACTOR=1 LANE_ID=lane-1111 "$BASH" "$body")
+  b=$(T_UNSET_ACTOR=1 LANE_ID=lane-2222 "$BASH" "$body")
+  same=$(T_UNSET_ACTOR=1 LANE_ID=lane-1111 "$BASH" "$body")
   if [[ "$a" != "UNSET-IN-CHILD" && "$a" != "$b" && "$a" == "$same" ]]; then
-    pass "claim-actor: EXPORTED to the child, lane-unique, and stable for one lane ($a vs $b)"
+    pass "claim-actor: EXPORTED to the child, derived from the GIVEN LANE_ID, and stable ($a vs $b)"
   else
     fail "claim-actor: a=[$a] b=[$b] same=[$same] — must reach the child, differ per lane, and be stable"
   fi
-  c=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/boxA/lane "$BASH" "$body")
-  e=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/boxB/lane "$BASH" "$body")
+  c=$(T_UNSET_ACTOR=1 LANE_ID=boxA-lane "$BASH" "$body")
+  e=$(T_UNSET_ACTOR=1 LANE_ID=boxB-lane "$BASH" "$body")
   if [[ "$c" != "$e" ]]; then
-    pass "claim-actor: two lanes sharing a directory BASENAME still get different actors"
+    pass "claim-actor: two distinct LANE_IDs get different actors"
   else
     fail "claim-actor-basename: both resolved to [$c]"
   fi
@@ -3732,39 +3751,34 @@ test_claim_actor_is_lane_unique() {
   else
     fail "claim-actor-shape: [$a] is not a recordable single token of >=3 chars"
   fi
-  # THE BOUND, which is finding 2's actual property (roborev round 34, Medium). `claim.sh`'s
-  # `sanitize_field` caps a field at 120 chars, so with the hash LAST a long lane-directory basename
-  # truncated the hash away and two distinct lanes shared one actor. The token must therefore stay well
-  # under the cap AND keep the hash where truncation cannot reach it. Driven by a 200-char basename.
-  local longroot longactor otherlong
-  longroot="/data/lanes/$(printf 'l%.0s' $(seq 1 200))"
-  otherlong="/data/other/$(printf 'l%.0s' $(seq 1 200))"
-  longactor=$(T_UNSET_ACTOR=1 REPO_ROOT="$longroot" "$BASH" "$body")
-  if [[ "${#longactor}" -le 120 && "${#longactor}" -ge 3 ]]; then
-    pass "claim-actor: a 200-char lane basename still yields a <=120-char actor (${#longactor} chars) — under claim.sh's cap"
+  # THE BOUND AND THE ORDER ARE PROPERTIES OF THE FALLBACK DERIVATION, so they are tested THERE.
+  # They used to be reached through the actor, because the actor inferred its own lane; after the
+  # ruling the actor takes a GIVEN identity, and it is `supervisor_lane_id` — the fallback used when
+  # `LANE_ID` is unset — that must stay bounded and hash-first. `claim.sh`'s `sanitize_field` caps a
+  # field at 120 chars, so a hash placed LAST is truncatable and two lanes could collapse onto one.
+  local lidbody long_a long_b
+  lidbody="$T_LOCKFN/lidonly.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    sed -n '/^supervisor_lane_id()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_lane_id'
+  } >"$lidbody"
+  long_a=$(REPO_ROOT="/data/lanes/$(printf 'l%.0s' $(seq 1 200))" "$BASH" "$lidbody")
+  long_b=$(REPO_ROOT="/data/other/$(printf 'l%.0s' $(seq 1 200))" "$BASH" "$lidbody")
+  if [[ "${#long_a}" -le 60 && "$long_a" =~ ^[0-9]+- ]]; then
+    pass "fallback-derivation: a 200-char basename yields a bounded, hash-FIRST id (${#long_a} chars) — truncation costs readability, never uniqueness"
   else
-    fail "claim-actor-bound: [$longactor] is ${#longactor} chars — claim.sh truncates at 120, which would drop the uniqueness half"
+    fail "fallback-derivation-bound: [$long_a] is ${#long_a} chars and/or not hash-first"
   fi
-  # And the two long-basename lanes must still DIFFER, which is the property truncation destroyed.
-  local otherlongactor
-  otherlongactor=$(T_UNSET_ACTOR=1 REPO_ROOT="$otherlong" "$BASH" "$body")
-  if [[ "$longactor" != "$otherlongactor" ]]; then
-    pass "claim-actor: two 200-char-basename lanes still get DIFFERENT actors (truncation cannot alias them)"
+  if [[ "$long_a" != "$long_b" ]]; then
+    pass "fallback-derivation: two 200-char-basename lanes still derive DIFFERENT ids"
   else
-    fail "claim-actor-bound-alias: both long lanes resolved to [$longactor]"
-  fi
-  # NON-VACUITY, true of the broken code too: the hash must sit BEFORE the readable slug, so that a
-  # truncation at ANY length preserves the distinguishing half. Asserted on the token's shape rather
-  # than on a length, because a bound alone would still alias if the hash were last.
-  if [[ "$longactor" =~ ^flow-[0-9]+- ]]; then
-    pass "claim-actor: the hash precedes the readable slug, so truncation costs only readability"
-  else
-    fail "claim-actor-order: [$longactor] does not carry its hash before the slug"
+    fail "fallback-derivation-alias: both long lanes derived [$long_a]"
   fi
 
   # An operator-set actor still wins — the fix must not seize the override.
   local ov
-  ov=$(CLAIM_ACTOR=owner-run REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
+  ov=$(CLAIM_ACTOR=owner-run LANE_ID=lane-1111 "$BASH" "$body")
   if [[ "$ov" == "owner-run" ]]; then
     pass "claim-actor: an explicit CLAIM_ACTOR is still honoured"
   else
@@ -3773,7 +3787,7 @@ test_claim_actor_is_lane_unique() {
   # Builtins only, same reason as the lock path (#3464 family 2): cases source this file under a
   # stripped PATH. `$BASH` absolute, since PATH='' cannot find bash itself.
   local stripped
-  stripped=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/lanes/lane-1111 PATH="" "$BASH" "$body" 2>&1)
+  stripped=$(T_UNSET_ACTOR=1 LANE_ID=lane-1111 PATH="" "$BASH" "$body" 2>&1)
   if [[ "$stripped" == "$a" ]]; then
     pass "claim-actor: resolves with an EMPTY PATH — builtins only"
   else
@@ -4280,64 +4294,165 @@ $out"
 t test_placeholder_endgame_protection_transfers
 
 # ---------------------------------------------------------------------------
-# Test 36-claim (#3393, roborev round 36 part C): a supervisor whose REPO_ROOT is the MAIN worktree
-# cannot distinguish itself from its siblings — every per-lane identity here derives from REPO_ROOT.
-# Whether that layout is supported is escalated and undecided; that it must not degrade SILENTLY is
-# not. The check is structural (git's own worktree answer), never a lane-directory naming heuristic —
-# assuming a layout is what made #3393's AC3 unimplementable.
+# Test 36-claim (#3393, roborev round 36; lead ruling B + C, 2026-08-30): lane identity is GIVEN, and a
+# fallback that cannot prove it landed in a lane REFUSES rather than degrades. The earlier cut of this
+# case asserted a WARN; the ruling replaced warning with refusal, because a warning still starts four
+# silently-degraded mechanisms.
+#
+# TWO REFUSALS AND THEY ARE INDEPENDENT — the case that proves it is MAIN-worktree + LANE_ID given:
+# identity is then fine and attribution is still impossible, because an identity token is not a
+# directory.
 # ---------------------------------------------------------------------------
-test_lane_identity_check_reports_a_shared_root() {
-  local d main linked body out
+lane_identity_case() {
+  # lane_identity_case <linked|main> [env...] -> echoes the FATAL token, or the accepted-identity line
+  local kind="$1"; shift
+  local d root
   d="$(new_case_dir)"
-  main="$d/mainwt"
-  mkdir -p "$main"
-  git -C "$main" init -q 2>/dev/null
-  git -C "$main" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
-  linked="$d/lanewt"
-  git -C "$main" worktree add -q -b issue-88-x "$linked" 2>/dev/null
-  if [[ ! -e "$linked/.git" ]]; then
-    skip "lane-identity: this host would not create a linked worktree — premise unstageable, not faked"
+  if [[ "$kind" == linked ]]; then
+    root="$d/lanewt"
+    mkdir -p "$d/main"; git -C "$d/main" init -q
+    git -C "$d/main" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+    git -C "$d/main" worktree add -q -b issue-88-x "$root" 2>/dev/null
+    [[ -e "$root/.git" ]] || { skip "lane-identity: host would not create a linked worktree — premise unstageable"; return 1; }
+  else
+    root="$d/mainwt"
+    mkdir -p "$root"; git -C "$root" init -q
+    git -C "$root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+  fi
+  mkdir -p "$root/scripts/local" "$root/scripts/lib"
+  cp "$SUPERVISOR" "$root/scripts/local/worker-supervisor.sh"
+  # scripts/lib is needed by the default notify path (learned the hard way — an incomplete scratch tree
+  # produced an unattributable failure).
+  cp "$REPO_ROOT/scripts/lib/gate-notify.sh" "$root/scripts/lib/" 2>/dev/null || true
+  # A FATAL WINS OVER THE IDENTITY LINE, because identity is resolved and LOGGED first and the
+  # attribution refusal fires after it. Taking `head -1` across both alternatives returned the
+  # identity line and hid the refusal — the case reported "started fine" for a run that refused.
+  local raw
+  # `PROC_PROBE_WORKER_CMD=` FIRST, and this is the whole case. `common_env` EXPORTS that variable to
+  # stub the probe, so it leaks into every later case — and the attribution refusal deliberately yields
+  # to an operator who set it. The refusal was therefore ALWAYS yielding to a phantom override, and the
+  # two cases below both passed for the same wrong reason. Cleared here; "$@" comes after, so a case
+  # that genuinely wants the override still gets it (later `env` assignments win).
+  raw=$(env PROC_PROBE_WORKER_CMD= "$@" NOTIFY_CMD=true STOP_FILE=/nonexistent LOCK_CMD="" CLAIM_CMD="" MAX_ISSUES=1 \
+    timeout 30 bash "$root/scripts/local/worker-supervisor.sh" 2>&1)
+  if printf '%s\n' "$raw" | grep -oE 'FATAL: lane-[a-z-]+' | head -1 | grep .; then
     return 0
   fi
-  body="$d/lic.sh"
-  {
-    printf '%s\n' '#!/usr/bin/env bash'
-    printf '%s\n' 'log() { printf "LOG: %s\n" "$*"; }'
-    sed -n '/^supervisor_lane_identity_check()/,/^}/p' "$SUPERVISOR"
-    printf '%s\n' 'supervisor_lane_identity_check'
-  } >"$body"
-  # (a) the MAIN worktree must WARN and name the consequence.
-  out=$(REPO_ROOT="$main" bash "$body" 2>&1)
-  if printf '%s\n' "$out" | grep -q 'WARN' && printf '%s\n' "$out" | grep -qi 'MAIN worktree'; then
-    pass "lane-identity: a supervisor rooted at the MAIN worktree WARNs that per-lane liveness is not in effect"
-  else
-    fail "lane-identity-main: expected a WARN naming the main worktree, got: [$out]"
-  fi
-  # (b) NON-VACUITY, and true of the broken code too: a LINKED worktree is SILENT. Without this, a
-  # function that always warned would satisfy (a).
-  out=$(REPO_ROOT="$linked" bash "$body" 2>&1)
-  if [[ -z "$out" ]]; then
-    pass "NON-VACUITY: a LANE (linked) worktree produces NO warning — the check discriminates rather than always firing"
-  else
-    fail "lane-identity-linked: a lane worktree warned anyway: [$out]"
-  fi
-  # (c) NO LAYOUT HEURISTIC. The lane worktree above is named `lanewt`, and the main one `mainwt`;
-  # neither matches any fleet naming convention, so (a)/(b) cannot be passing on a path pattern. Asserted
-  # structurally too: the implementation must not reference a lane-directory name.
-  if sed -n '/^supervisor_lane_identity_check()/,/^}/p' "$SUPERVISOR" | grep -qiE '/data/lanes|lane-\[0-9\]|lane-\*'; then
-    fail "lane-identity-heuristic: the check references a lane-directory naming convention — the trap that made AC3 unimplementable"
-  else
-    pass "lane-identity: the check assumes NO lane-directory naming convention (git answers it structurally)"
-  fi
-  # WIRED at startup, or it reports nothing.
-  if grep -qE '^[[:space:]]*supervisor_lane_identity_check$' "$SUPERVISOR"; then
-    pass "lane-identity: supervisor_lane_identity_check is CALLED (not just defined)"
-  else
-    fail "lane-identity-unwired: defined but never invoked"
-  fi
-  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+  printf '%s\n' "$raw" | grep -oE 'lane identity given explicitly|LANE_ID unset; derived' | head -1
+  return 0
 }
 
-t test_lane_identity_check_reports_a_shared_root
+test_lane_identity_is_given_or_refused() {
+  local out
+  # (a) a LANE worktree with LANE_ID unset: the fallback may derive, because it can PROVE it is a lane.
+  out=$(lane_identity_case linked X=1) || return 0
+  if [[ "$out" == "LANE_ID unset; derived" ]]; then
+    pass "lane-identity: in a LANE worktree the fallback derives an identity (it can prove where it is)"
+  else
+    fail "lane-identity(linked-fallback): got [$out]"
+  fi
+  # (b) MAIN worktree, LANE_ID unset -> lane-identity-unprovable. Nothing to derive FROM.
+  out=$(lane_identity_case main X=1) || return 0
+  if [[ "$out" == "FATAL: lane-identity-unprovable" ]]; then
+    pass "lane-identity: MAIN worktree + LANE_ID unset REFUSES (lane-identity-unprovable), rather than sharing one identity across lanes"
+  else
+    fail "lane-identity(main-unprovable): got [$out]"
+  fi
+  # (c) THE CASE THAT PROVES THE TWO REFUSALS ARE INDEPENDENT: MAIN worktree + LANE_ID GIVEN. Identity
+  # is satisfied; attribution is still impossible, because an identity token is not a directory.
+  out=$(lane_identity_case main LANE_ID=explicit-lane-x) || return 0
+  if [[ "$out" == "FATAL: lane-attribution-impossible" ]]; then
+    pass "lane-identity: LANE_ID satisfies IDENTITY but not ATTRIBUTION — the second refusal is independent (an identity token is not a directory)"
+  else
+    fail "lane-identity(main-attribution): got [$out] — expected the attribution refusal, since LANE_ID cannot supply a directory"
+  fi
+  # (d) an operator who overrode the probe has taken responsibility, so it starts.
+  out=$(lane_identity_case main LANE_ID=explicit-lane-x PROC_PROBE_WORKER_CMD="echo 0") || return 0
+  if [[ "$out" == "lane identity given explicitly" ]]; then
+    pass "lane-identity: an explicit PROC_PROBE_WORKER_CMD yields the attribution refusal to the operator"
+  else
+    fail "lane-identity(probe-override): got [$out]"
+  fi
+  # (e) a LANE_ID that claim.sh would refuse is refused HERE, loudly, rather than failing every claim.
+  out=$(lane_identity_case linked LANE_ID=ab) || return 0
+  if [[ "$out" == "FATAL: lane-identity-unusable" ]]; then
+    pass "lane-identity: a LANE_ID under 3 recordable chars is refused at startup (claim.sh would reject the actor on every call)"
+  else
+    fail "lane-identity(short): got [$out]"
+  fi
+  # NO LAYOUT HEURISTIC: the worktrees above are named `lanewt`/`mainwt`, matching no fleet convention,
+  # and the implementation must contain no such pattern — that assumption is what made AC3 unimplementable.
+  if sed -n '/^lane_worktree_ok()/,/^}/p' "$SUPERVISOR" | grep -qiE '/data/lanes|lane-\[0-9\]'; then
+    fail "lane-identity-heuristic: lane_worktree_ok references a lane-directory naming convention"
+  else
+    pass "lane-identity: the proof is structural (git worktree), assuming NO directory naming convention"
+  fi
+}
+
+t test_lane_identity_is_given_or_refused
+
+# ---------------------------------------------------------------------------
+# Test 37-claim (#3393, roborev round 36 row 4; lead condition 1): the worker-orphan probe needs a
+# TWO-DIRECTION control, not a passing test. A probe whose subject set can be EMPTY passes vacuously
+# when it is — the same shape as `--delta-classify`'s ALLOW on an empty subject set (#3480). So:
+#   POSITIVE: a leftover IS in this lane  -> counted  (would STOP)
+#   NEGATIVE: no leftover in this lane    -> zero     (would NOT stop)
+# and the OLD machine-wide probe counted the sibling too, which is the false STOP being fixed.
+#
+# The marker must be IN THE ARGV, which took three wrong attempts worth recording: a `# comment` is
+# stripped by bash before exec so it never reaches /proc/<pid>/cmdline; a pattern containing regex
+# metacharacters MATCHES ITS OWN TEXT in the probe subshell (the bracket trick only defeats a LITERAL
+# self-match, and the real probe's $$/$PPID exclusion is load-bearing); and `exec sleep` replaces the
+# process image, discarding the marker. Hence: a marker-named SCRIPT that does not exec.
+# ---------------------------------------------------------------------------
+test_worker_probe_two_direction_control() {
+  local d lane sib marker script match probe neg pos machine_wide
+  d="$(new_case_dir)"
+  lane="$d/lane"; sib="$d/sibling"
+  mkdir -p "$lane" "$sib"
+  marker="probe$$x$RANDOM"
+  script="$d/${marker}-worker.sh"
+  printf '%s\n%s\n' '#!/usr/bin/env bash' 'sleep 120' >"$script"
+  chmod +x "$script"
+  # LITERAL match only, plus the real probe's self-exclusion — both for the reasons in the header.
+  match="[p]${marker#p}-worker"
+  # REPO_ROOT MUST BE SET BEFORE THE EVAL. `LANE_PID_FILTER`'s literal contains `'$REPO_ROOT'`, which
+  # expands AT EVAL TIME — so eval'ing it first and passing REPO_ROOT to the probe later bakes in the
+  # TEST's own lane and the case measures the wrong directory. That is how the first cut of this case
+  # reported POSITIVE=0 while the machine-wide count was 2: the marker matched, the attribution did not.
+  # REPO_ROOT MUST BE SET IN *THIS* SHELL BEFORE THE EVAL. `LANE_PID_FILTER`'s literal contains
+  # `'$REPO_ROOT'`, and `eval` expands it in the shell that RUNS the eval — so wrapping the command
+  # substitution in a subshell that sets REPO_ROOT does nothing at all (my first fix was a no-op, and
+  # the case still measured the test's own lane). A function-local shadow is what actually applies.
+  local LANE_PID_FILTER REPO_ROOT="$lane"
+  eval "$(sed -n '/^LANE_PID_FILTER=/p' "$SUPERVISOR")"
+  probe="pgrep -f '$match' 2>/dev/null | grep -vxF -e \$\$ -e \$PPID | $LANE_PID_FILTER | wc -l | tr -d ' '" # pgrep-lint-allow: run-unique marker scoping
+  # NEGATIVE first, before anything is spawned: if this is not 0, the harness is matching itself and
+  # every later number is meaningless.
+  neg=$(bash -c "$probe")
+  ( cd "$lane" && exec bash "$script" ) >/dev/null 2>&1 &
+  ( cd "$sib"  && exec bash "$script" ) >/dev/null 2>&1 &
+  sleep 1
+  pos=$(bash -c "$probe")
+  machine_wide=$(bash -c "pgrep -f '$match' 2>/dev/null | grep -vxF -e \$\$ -e \$PPID | wc -l | tr -d ' '") # pgrep-lint-allow: run-unique marker scoping
+  pkill -f "${marker}-worker.sh" >/dev/null 2>&1
+  if [[ "$neg" == "0" ]]; then
+    pass "probe-two-direction NEGATIVE: no leftover in this lane counts 0 (so the probe does not fire unconditionally)"
+  else
+    fail "probe-two-direction: NEGATIVE control counted $neg before anything was spawned — the harness is matching itself, so no later number means anything"
+  fi
+  if [[ "$pos" == "1" ]]; then
+    pass "probe-two-direction POSITIVE: a leftover IN this lane counts 1 (so the probe DOES fire, and the negative above is a measurement)"
+  else
+    fail "probe-two-direction: POSITIVE control counted $pos (expected 1) — a probe that cannot count its subject passes vacuously"
+  fi
+  if [[ "$machine_wide" == "2" ]]; then
+    pass "probe-two-direction: the OLD machine-wide probe counts 2 (lane + sibling) — the false STOP this fixes, measured rather than asserted"
+  else
+    fail "probe-two-direction: machine-wide counted $machine_wide (expected 2); the comparison that motivates lane scoping is not established"
+  fi
+}
+
+t test_worker_probe_two_direction_control
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
