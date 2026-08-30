@@ -336,6 +336,26 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **THE ISOLATED HOP'S ENVIRONMENT IS AN ALLOWLIST, AND THE OBJECTS ARE FETCHED ONLY WHEN
+  ABSENT (roborev job 258).** Neutralising `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and stopping
+  there left the "isolated" hop inheriting `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`,
+  `GIT_CONFIG_PARAMETERS` and `GIT_TEMPLATE_DIR` — each measured to redirect a fetch via
+  `url.<attacker>.insteadOf`, the template by seeding the *new* repo's own LOCAL config. A HOP 1
+  redirect is worse than a hop 2 one: the sha the isolated hop observes and the commit
+  transferred in then BOTH come from the attacker, so the equality assert compares two values
+  that AGREE and emits a **false PASS**. That was **enumerating one axis and declaring the space
+  enumerated** — so every isolated git call now runs under **`env -i` plus an allowlist**
+  (`ADMIT` what git needs to REACH and AUTHENTICATE to the remote, each entry carrying its
+  reason; `CLEAR` everything that can change WHAT it fetches or WHAT it runs), which makes new
+  git environment variables cleared BY DEFAULT rather than needing to be discovered. Lane-local
+  reads are deliberately NOT wrapped: the only value needing provenance is the SHA, and
+  everything addressed by it is **content-addressed**. **And the baseline sha now comes from a
+  ref ORACLE (`git ls-remote`), with objects fetched only when this repository lacks that
+  commit** — measured 3.74 s / **92 MB of full history per invocation** → 0.51 s / no transfer;
+  `--filter=blob:none` was rejected on measurement (it leaves the manifest blob absent exactly
+  when `main` changed it, failing a correct tree). The ref value is still read live, which is
+  what "fetched in THIS invocation" is about; the oracle's output is remote-controlled text and
+  is VALIDATED (`baseline-ref-unparsable`), never merely parsed.
   **THE BASELINE IS READ AS DATA; NOTHING FETCHED IS EVER EXECUTED (REQ-3544-01, lead ruling).**
   The first design derived the baseline set by extracting `origin/main:scripts/agent-gate.sh` and
   RUNNING it (`bash <fetched> --list`). **Six of that mechanism's seven High-severity findings

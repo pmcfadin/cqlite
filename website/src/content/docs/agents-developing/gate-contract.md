@@ -468,6 +468,30 @@ pinning, the isolated fetch (the validated URL written into a `0600` config by a
 it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
 handling and the redact-and-flatten detail path.
 
+**The isolated hop's environment is an allowlist, and objects are fetched only when absent.**
+Neutralising `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and stopping there left the hop inheriting
+`GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`, `GIT_CONFIG_PARAMETERS` and `GIT_TEMPLATE_DIR` — all three
+measured to redirect a fetch through `url.<attacker>.insteadOf` (the template by seeding the new
+repository's own *local* config, which global/system neutralisation cannot touch). A redirect of
+the **isolated** hop is worse than one of the transfer: both observations then come from the
+attacker, so the equality assert compares two values that agree and emits a **false PASS**. Every
+isolated git call therefore runs under **`env -i` plus an allowlist** — admit what git needs to
+*reach and authenticate to* the remote (each entry with its reason), clear everything that can
+change *what it fetches* or *what it runs* — so a new git environment variable is cleared by
+default instead of having to be discovered. Lane-local reads are deliberately not wrapped: the
+only value needing provenance is the **sha**, and everything addressed by it is content-addressed.
+
+The sha itself comes from a **ref oracle** (`git ls-remote`, no objects), and objects are fetched
+only when this repository does not already hold that commit. Measured on one fleet box: a plain
+fetch into the fresh scratch repository cost **3.74 s and 92 MB of full history on every gate
+invocation**; the oracle costs 0.29 s and 120 KB, and the whole pre-flight went 3.9 s → 0.51 s.
+`--filter=blob:none` (0.73 s, 6.4 MB) was rejected **on measurement**: the manifest and gate
+blobs are read in this repository at the baseline sha, so a blob-filtered transfer leaves them
+absent exactly when `main` has changed them — a correct tree failing. "Fetched in this
+invocation" is about the staleness of the *ref value*, which is still read live; and the oracle's
+output is remote-controlled text, so it is **validated** (object id of a known length plus the
+ref name that was asked for) rather than parsed — `baseline-ref-unparsable` otherwise.
+
 **The local manifest is asserted against the running array on every run**, fail-closed, before
 anything is fetched. That assert is what makes a manifest baseline trustworthy at all: without it
 the file is an unverified claim, and a branch that grew `COMPONENTS` without regenerating the
