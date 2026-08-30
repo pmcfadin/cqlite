@@ -923,7 +923,9 @@ class SliceDeliveryTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as cm:
                     dt.main(self._rec_argv(
                         ledger, self._ghfields(tmp, None, issue=bogus), "--slice"))
-                self.assertIn("issue", str(cm.exception))
+                # tight: bare "issue" also matches the "(issue #3550)" citation in nearly
+                # every message, so it could not catch a WRONG message
+                self.assertIn("'issue'", str(cm.exception))
                 self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
     def test_record_refuses_an_unmeasured_pr_closes_this_issue(self):
@@ -1149,7 +1151,7 @@ class SliceDeliveryTests(unittest.TestCase):
                   "2026-02-31T00:00:00Z", "2026-13-01T00:00:00Z", "2025-02-29T00:00:00Z",
                   "2026-06-10T99:99:00Z", "2026-06-10T24:00:00Z",
                   "2026-06-10T00:00:00+99:99", "2026-00-10T00:00:00Z",
-                  "2026-06-32T00:00:00Z", "2026-06-10T00:60:00Z",
+                  "2026-06-32T00:00:00Z", "2026-06-10T00:60:00Z", "0000-06-10T00:00:00Z",
                   # round 14: Python \\d matches Unicode digits; [0-9] does not
                   "\u0662\u0660\u0662\u0666-06-10T00:00:00Z",
                   "2026-\u0660\u0666-10T00:00:00Z"):
@@ -1609,6 +1611,59 @@ class GhPathTests(unittest.TestCase):
                 dt._github_fields(1, 2)
         self.assertIn("stateReason", str(cm.exception))
 
+    def _issue_pr_fakes(self, issue_url, closing_url):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z", "closedAt": None,
+                    "labels": [{"name": "P1"}, {"name": "oracle"}], "stateReason": "",
+                    "url": issue_url}))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z",
+                "closingIssuesReferences": ([] if closing_url is None
+                                            else [{"number": 3393, "url": closing_url}])}))
+        return fake_run
+
+    def test_github_fields_derives_identity_by_repository_not_by_number(self):
+        """`other/repo#3393` shares a NUMBER with this repo's #3393 and is a DIFFERENT issue,
+        so the boolean must be False and such a slice must stay recordable.
+
+        Pinned HERE because collapsing the window guard (issue #3550) moved the operands OUT
+        of the --from-json seam — where they had an end-to-end test — and INTO this function,
+        and the seam-level test was deleted without a replacement. Three mutants survived a
+        green 120-test suite as a result: a number-scoped comparison, dropping the
+        (issue, pr) binding from the returned dict, and deleting the canonical-issue-URL
+        refusal. Each assertion below kills one.
+        """
+        with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(
+                "https://github.com/pmcfadin/cqlite/issues/3393",
+                "https://github.com/other/repo/issues/3393")):
+            fields = dt._github_fields(3393, 3467)
+        # a same-NUMBER, different-REPOSITORY closing ref is not this issue
+        self.assertIs(fields["pr_closes_this_issue"], False)
+        # the live path must supply the (issue, pr) binding build_record requires
+        self.assertEqual((fields["issue"], fields["pr"]), (3393, 3467))
+
+        # and the positive control: the SAME repository's issue does close it
+        with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(
+                "https://github.com/pmcfadin/cqlite/issues/3393",
+                "https://github.com/pmcfadin/cqlite/issues/3393")):
+            self.assertIs(dt._github_fields(3393, 3467)["pr_closes_this_issue"], True)
+
+    def test_github_fields_refuses_a_non_canonical_issue_url(self):
+        """The refusal added with the collapse had no test. Its failure mode is fail-OPEN:
+        an unrecognised issue url yields an identity of None, which matches nothing, so the
+        window guard silently reports 'this PR does not close this issue' and a completed
+        delivery is recorded as a slice."""
+        for bad in ("https://github.com/pmcfadin/cqlite/pull/3393",
+                    "https://example.com/pmcfadin/cqlite/issues/3393",
+                    "https://github.com/pmcfadin/cqlite/issues/3393\n", "", "3393"):
+            with self.subTest(url=bad):
+                with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(bad, None)):
+                    with self.assertRaises(SystemExit) as cm:
+                        dt._github_fields(3393, 3467)
+                self.assertIn("canonical", str(cm.exception))
+
     def test_github_fields_raises_on_multiple_priority_labels(self):
         def fake_run(argv, **kw):
             if argv[:3] == ["gh", "issue", "view"]:
@@ -1936,7 +1991,7 @@ class StandardValidatorSliceTests(unittest.TestCase):
                   "2026-02-31T00:00:00Z", "2026-13-01T00:00:00Z", "2025-02-29T00:00:00Z",
                   "2026-06-10T99:99:00Z", "2026-06-10T24:00:00Z",
                   "2026-06-10T00:00:00+99:99", "2026-00-10T00:00:00Z",
-                  "2026-06-32T00:00:00Z",
+                  "2026-06-32T00:00:00Z", "0000-06-10T00:00:00Z",
                   "\u0662\u0660\u0662\u0666-06-10T00:00:00Z",
                   "2026-\u0660\u0666-10T00:00:00Z"):
             with self.subTest(value=v):

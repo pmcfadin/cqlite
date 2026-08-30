@@ -317,7 +317,7 @@ def load_schema(schema_path: Path) -> dict:
 # a SYNTAX divergence, and unlike the calendar one below it IS expressible, so it is closed
 # rather than documented. [0-9] is exact ASCII; there is no further generalisation.
 _TIMESTAMP_PATTERN = (
-    r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+    r"^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
     r"T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?"
     r"(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])(?![\s\S])")
 _RFC3339_RE = re.compile(_TIMESTAMP_PATTERN)
@@ -396,7 +396,7 @@ def _require_full_timestamp(value: str, field: str) -> None:
 # \Z, not $: Python's `$` also matches immediately BEFORE a trailing newline, so a value
 # ending "\n" would be accepted here and then compared raw — the lenient-reader/strict-
 # consumer split that fails OPEN. \Z is the true end of string.
-_ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/\s]+)/([^/\s]+)/issues/(\d+)\Z")
+_ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/\s]+)/([^/\s]+)/issues/([0-9]+)\Z")
 
 
 def _issue_identity(value):
@@ -658,7 +658,7 @@ def build_record(args, gh_fields: dict) -> dict:
                 f"(a record needs the issue's createdAt and the PR's createdAt/mergedAt — "
                 f"finalize records only a MERGED pr)")
 
-    # THE PAYLOAD IS BOUND TO --issue, before any field is read from it (issue #3550). The
+    # THE PAYLOAD IS BOUND TO (--issue, --pr) before any field is USED (issue #3550). The
     # --from-json seam is how a caller injects GitHub-derived fields, and a STALE or COPIED
     # file built for a different issue would otherwise be applied wholesale: a wrong
     # closed_at/created_at corrupts the kind and the cycle time, and a wrong
@@ -1206,7 +1206,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "open only because it was REOPENED, or if this PR declares it "
                           "closes the issue (a slice PR closes nothing)")
     rec.add_argument("--from-json", dest="from_json", default=None,
-                     help="inject GitHub-derived fields from a JSON file (else pull via gh)")
+                     help="inject GitHub-derived fields from a JSON file (else pull via gh). "
+                          "The file must name the delivery it was built for with integer "
+                          "'issue' and 'pr' keys matching --issue/--pr (issue #3550): a stale "
+                          "or copied payload would otherwise be applied to another delivery")
     rec.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
                      help="append even if this (issue, pr) cycle already has a record "
                           "(default: refuse; a reopened issue's NEW pr never needs this)")
