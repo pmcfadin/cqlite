@@ -504,7 +504,7 @@ impl std::io::Read for FailsAfterOneLine {
 fn wait_for_readers_to_end(io: &ChildIo) -> bool {
     let mark = io.mark();
     for _ in 0..2_000 {
-        if io.snapshot(mark).pipes_closed() {
+        if io.snapshot(mark).pipe_status().is_terminal() {
             return true;
         }
         thread::sleep(Duration::from_millis(1));
@@ -532,10 +532,11 @@ fn a_reader_thread_records_a_failed_read_rather_than_ending_silently() {
     );
     let snapshot = io.snapshot(mark);
     assert!(
-        snapshot.a_reader_failed(),
+        matches!(snapshot.pipe_status(), PipeStatus::ReaderFailed { .. }),
         "the reader ended because its read FAILED, and the store records only that it ended: \
          a failure is then indistinguishable from EOF, which is the cause the wait goes on to \
-         name (job 255, finding 2)"
+         name (job 255, finding 2). Derived state: {:?}",
+        snapshot.pipe_status()
     );
     let note = snapshot
         .read_failure_note()
@@ -780,12 +781,21 @@ fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
     );
 
     let outcome = poll_with_progress(&io, dir.path(), &stage, |_slice, _artifacts| None::<()>);
-    let observed = match outcome {
+    let fail = match outcome {
         Ok(_) => unreachable!("the step never completes"),
-        Err(fail) => fail.observed(),
+        Err(fail) => fail,
     };
+    // THE STATE FIRST, THEN THE SENTENCE (round 16). Asserting only on the rendered
+    // text lets the message drift away from what was derived; asserting only on the
+    // state lets the message stop saying it.
     assert!(
-        observed.contains("BOTH reached EOF"),
+        matches!(fail.pipes(), PipeStatus::AllEof { readers: 2 }),
+        "both readers ended AT EOF, so that is the state the verdict must carry: {:?}",
+        fail.pipes()
+    );
+    let observed = fail.observed();
+    assert!(
+        observed.contains("ended AT EOF"),
         "the poll gave up with every reader gone and did not report it, so the message implies \
          more output was still possible: {observed}"
     );

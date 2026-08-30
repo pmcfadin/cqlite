@@ -114,6 +114,12 @@ struct Transcript {
     /// further record can ever appear — but NOT that each of them ended at EOF:
     /// see `read_failures`.
     readers_open: usize,
+    /// How many readers were EVER attached, so a snapshot can say how many of
+    /// them have ended rather than only whether ALL of them have (round 16). A
+    /// bare `readers_open` cannot express PARTIAL closure, which is what let a
+    /// poll report "the child's pipes were still open" about a child one of whose
+    /// pipes had already ended — in an I/O error, at that.
+    readers_total: usize,
     /// **THE READERS' TERMINAL RESULTS, for the ones that did not end at EOF**
     /// (roborev job 255, finding 2). A reader's `Err` used to be dropped on the
     /// floor, so an I/O failure on a pipe ended the reader exactly as EOF does and
@@ -130,6 +136,7 @@ impl Transcript {
             records: Vec::new(),
             next_seq: 0,
             readers_open: readers,
+            readers_total: readers,
             read_failures: Vec::new(),
         }
     }
@@ -215,6 +222,99 @@ impl Drop for ReaderHandle {
 #[derive(Clone, Copy, Debug)]
 pub struct Mark(usize);
 
+/// **WHAT THE READERS' STATE ESTABLISHES ABOUT THE CHILD'S PIPES** — the ONE
+/// derivation every verdict in this harness reads (round 16).
+///
+/// **WHY IT IS AN ENUM AND NOT THE BOOL IT REPLACES.** `pipes_closed: bool` has
+/// exactly two answers for FIVE distinguishable states, so it had to collapse
+/// three of them onto a permissive one — and both collapses were reported as
+/// facts about the child:
+///
+/// * a reader that ended in an I/O ERROR counted as closure, so a verdict named
+///   EOF for a pipe this harness had simply failed to read (round 15 fixed that in
+///   `WaitEnd` and left `PollFail`, which is what this enum propagates);
+/// * ONE of two readers having ended left the bool `false`, so a verdict said "the
+///   child's pipes were still open, more output was still possible" about a child
+///   one of whose pipes could produce nothing further;
+/// * an UNREADABLE store (a reader panicked holding the lock) also left it
+///   `false`, so a verdict that had established NOTHING about the pipes reported
+///   that they were open.
+///
+/// A permissive default for an unmeasured state is the "positive verdict without
+/// an affirmative measurement" class this repository names in doctrine
+/// (CLAUDE.md); the fix is the same one round 15 applied one type over — make the
+/// unsupported claim UNREACHABLE rather than annotate it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PipeStatus {
+    /// The store could not be read — a reader thread panicked while holding its
+    /// lock. NOTHING is established about the pipes: not that they are open, and
+    /// not that they are closed.
+    Unavailable,
+    /// Every reader had ended, and every one of them ended AT EOF, so no further
+    /// line can arrive. The child had exited, crashed, or closed its pipes — this
+    /// does not say which.
+    AllEof { readers: usize },
+    /// Every reader had ended and at least one ended in an I/O ERROR rather than at
+    /// EOF. No further line can arrive either, but the CAUSE is this harness's read
+    /// and not the child (roborev job 255, finding 2).
+    ReaderFailed { note: String },
+    /// Some readers had ended and at least one was still attached: more output is
+    /// still possible ON THE SURVIVING PIPE(S) ONLY.
+    PartiallyClosed {
+        open: usize,
+        ended: usize,
+        /// Set when one of the ENDED readers ended in an I/O error rather than at
+        /// EOF: the deadline is still what bound the wait, but a pipe was lost.
+        failure_note: Option<String>,
+    },
+    /// Every reader was still attached, so output was still possible on both pipes.
+    AllOpen { open: usize },
+}
+
+impl PipeStatus {
+    /// **NO FURTHER RECORD CAN EVER ARRIVE**, so continuing to wait could only
+    /// delay the same verdict.
+    ///
+    /// TRUE ONLY FOR THE TWO STATES THAT ESTABLISH IT. `Unavailable` is deliberately
+    /// NOT terminal: an unreadable store has not established that output is over,
+    /// and treating it as terminal would abandon a wait on the strength of a
+    /// measurement that failed.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, PipeStatus::AllEof { .. } | PipeStatus::ReaderFailed { .. })
+    }
+
+    /// This state as a sentence for a failure message. Each one states what was
+    /// measured and stops there.
+    pub fn describe(&self) -> String {
+        match self {
+            PipeStatus::Unavailable => "the transcript store's lock was POISONED when the verdict                  was taken — a reader thread panicked while holding it — so NOTHING was                  established about the child's pipes: not that they were open, and not that they                  were closed. This is a defect in this test harness, and it is not a statement                  about the child"
+                .to_string(),
+            PipeStatus::AllEof { readers } => format!(
+                "all {readers} of the child's pipe readers had ended AT EOF when the verdict was                  taken, so no further output could arrive: the child had exited, crashed, or                  closed its pipes (this measurement does not say which)"
+            ),
+            PipeStatus::ReaderFailed { note } => format!(
+                "every reader had ended when the verdict was taken, so no further output could                  arrive — but at least one ended in an I/O ERROR rather than at EOF, so this is                  NOT the \"both pipes reached EOF\" measurement: {note}. WHAT THAT ESTABLISHES:                  only that this harness could not read the child's output to its end. It is a                  statement about the pipe, NOT about the child"
+            ),
+            PipeStatus::PartiallyClosed {
+                open,
+                ended,
+                failure_note,
+            } => format!(
+                "{ended} of the child's pipe readers had already ENDED and {open} was/were still                  attached, so further output was possible ONLY on the surviving pipe(s) — NOT on                  the ended one(s){}",
+                failure_note
+                    .as_ref()
+                    .map(|note| format!(
+                        ", and the reader(s) that ended did NOT all end at EOF: {note}"
+                    ))
+                    .unwrap_or_default()
+            ),
+            PipeStatus::AllOpen { open } => format!(
+                "all {open} of the child's pipe readers were still attached when the verdict was                  taken, so more output was still possible on either pipe"
+            ),
+        }
+    }
+}
+
 /// ONE read of the one store, used for BOTH the decision and the message.
 ///
 /// DECIDE AND RENDER FROM THE SAME SNAPSHOT, NOT MERELY THE SAME STORE (roborev
@@ -230,15 +330,19 @@ pub struct TranscriptSnapshot {
     records: Vec<Record>,
     /// The awaiting wait's window start: records with `seq >= mark`.
     mark: usize,
-    /// Every reader had ended at the moment of this read, so no further record
-    /// can ever arrive. Read under the SAME lock as `records`.
-    pipes_closed: bool,
+    /// Readers still attached at the moment of this read, and how many were ever
+    /// attached — read under the SAME lock as `records`. TWO COUNTS RATHER THAN A
+    /// BOOL (round 16): `pipes_closed` collapsed "one of two pipes has ended" onto
+    /// "the pipes are still open", so a verdict could report that more output was
+    /// possible on a pipe that had already ended.
+    readers_open: usize,
+    readers_total: usize,
     /// The lock was readable. `false` means a reader thread panicked, which is
     /// reported rather than rendered as an empty transcript.
     available: bool,
     /// Readers that ended in an I/O ERROR rather than at EOF, read under the SAME
-    /// lock as `records` and `pipes_closed` — so "every reader ended" and "one of
-    /// them ended badly" can never come from different moments.
+    /// lock as `records` and the reader counts — so "every reader ended" and "one
+    /// of them ended badly" can never come from different moments.
     read_failures: Vec<(Stream, String)>,
 }
 
@@ -268,17 +372,45 @@ impl TranscriptSnapshot {
             .map(|r| r.text.as_str())
     }
 
-    /// Every reader had ended when this snapshot was taken. Says NOTHING about
-    /// HOW each ended — see [`TranscriptSnapshot::read_failure_note`].
-    pub fn pipes_closed(&self) -> bool {
-        self.pipes_closed
-    }
-
-    /// A reader ended in an I/O ERROR rather than at EOF (roborev job 255, finding
-    /// 2). Read from the same snapshot as `pipes_closed`, so a verdict cannot claim
-    /// EOF about a reader this call knows failed.
-    pub fn a_reader_failed(&self) -> bool {
-        !self.read_failures.is_empty()
+    /// **THE ONE PLACE PIPE STATE IS DERIVED** — from the readers' counts AND their
+    /// recorded terminal results, read under the one lock this snapshot was taken
+    /// under (round 16).
+    ///
+    /// It replaces a `pipes_closed()` bool that two separate verdicts consulted.
+    /// Round 15 recorded the readers' terminal results and taught `WaitEnd` to use
+    /// them, and `PollFail` — the other consumer — kept inferring pipe state from
+    /// the count alone, so a poll reported EOF for a reader that had FAILED and
+    /// "still open" for a child one of whose pipes had ended. Both are statements
+    /// the measurement had not established. Returning a state rather than a bool is
+    /// what makes each of them unspellable: there is no `true` for a caller to
+    /// render as EOF.
+    pub fn pipe_status(&self) -> PipeStatus {
+        if !self.available {
+            return PipeStatus::Unavailable;
+        }
+        let ended = self.readers_total.saturating_sub(self.readers_open);
+        // CHECKED BEFORE ANY EOF CLAIM: a failed reader ends exactly as one at EOF
+        // does, so the terminal results — not the count — decide (job 255, finding
+        // 2, now applied to every consumer).
+        let failure_note = self.read_failure_note();
+        if self.readers_open == 0 {
+            return match failure_note {
+                Some(note) => PipeStatus::ReaderFailed { note },
+                None => PipeStatus::AllEof {
+                    readers: self.readers_total,
+                },
+            };
+        }
+        if ended > 0 {
+            return PipeStatus::PartiallyClosed {
+                open: self.readers_open,
+                ended,
+                failure_note,
+            };
+        }
+        PipeStatus::AllOpen {
+            open: self.readers_open,
+        }
     }
 
     /// Those terminal results, rendered for a failure message; `None` when every
@@ -364,23 +496,20 @@ impl WaitEnd {
     pub fn describe(&self) -> String {
         match self {
             WaitEnd::DeadlineReached { snapshot } => format!(
-                "how the wait ended: the test's one deadline passed with the child's pipes still \
-                 open (more output was still possible). The verdict was taken from ONE snapshot \
-                 of the ONE transcript log covering the {} record(s) sequenced since this wait \
+                "how the wait ended: the test's one deadline passed, and the readers' state did \
+                 NOT establish that output was over. The verdict was taken from ONE snapshot of \
+                 the ONE transcript log covering the {} record(s) sequenced since this wait \
                  began, and none of them matched. The transcript printed below IS that snapshot — \
                  not a fresh read of a store that may since have grown — so this message cannot \
-                 be contradicted by the evidence it prints{}",
+                 be contradicted by the evidence it prints.\n\
+                 pipe state at the verdict: {}",
                 snapshot.examined(),
-                // A reader may have failed while its sibling stayed open: the
-                // deadline is still the cause, but "more output was possible" is
-                // only true of the surviving pipe (job 255, finding 2).
-                snapshot
-                    .read_failure_note()
-                    .map(|note| format!(
-                        ".\nNOTE: not every pipe was still live — a reader had already ended in \
-                         an I/O ERROR rather than at EOF: {note}"
-                    ))
-                    .unwrap_or_default()
+                // WHAT THE PIPES WERE, FROM THE ONE DERIVATION (round 16). This
+                // used to say "with the child's pipes still open" and append a note
+                // only when a reader had FAILED — so a CLEAN partial closure (one
+                // pipe at EOF, its sibling live) and an UNREADABLE store were both
+                // reported as both pipes open. `PipeStatus` states each case.
+                snapshot.pipe_status().describe()
             ),
             WaitEnd::PipesClosed { after, snapshot } => format!(
                 "how the wait ended: the child's stdout AND stderr both reached EOF after \
@@ -424,11 +553,24 @@ impl WaitEnd {
 ///
 /// One function, called from both of `wait_for`'s closed-pipe branches, so neither
 /// branch can name EOF for a reader whose terminal result says otherwise.
-fn ended(after: Duration, snapshot: TranscriptSnapshot) -> WaitEnd {
-    if snapshot.a_reader_failed() {
-        WaitEnd::ReaderFailed { after, snapshot }
-    } else {
-        WaitEnd::PipesClosed { after, snapshot }
+///
+/// **IT ANSWERS "IS OUTPUT OVER?" AND NAMES THE VERDICT IN ONE STEP** (round 16),
+/// returning the snapshot back on `Err` when the state does NOT establish that
+/// output is over — a live pipe, a PARTIAL closure, or an unreadable store. A
+/// caller therefore cannot ask the question through one derivation and build its
+/// verdict from another, and no arm of this match is unreachable.
+fn ended(
+    after: Duration,
+    snapshot: TranscriptSnapshot,
+) -> Result<WaitEnd, TranscriptSnapshot> {
+    match snapshot.pipe_status() {
+        PipeStatus::ReaderFailed { .. } => Ok(WaitEnd::ReaderFailed { after, snapshot }),
+        PipeStatus::AllEof { .. } => Ok(WaitEnd::PipesClosed { after, snapshot }),
+        // NOT established: output may still arrive (or the store could not be
+        // read), so no "no further line could arrive" variant may be built.
+        PipeStatus::PartiallyClosed { .. } | PipeStatus::AllOpen { .. } | PipeStatus::Unavailable => {
+            Err(snapshot)
+        }
     }
 }
 
@@ -534,21 +676,25 @@ impl ChildIo {
     ///
     /// A poisoned lock is REPORTED, never rendered as an empty transcript: "the
     /// child said nothing" and "a reader thread panicked" are different facts, and
-    /// only one of them is about the child. `pipes_closed` is `false` there — an
-    /// unreadable store has not established that output is over.
+    /// only one of them is about the child. Its [`PipeStatus`] there is
+    /// `Unavailable` — an unreadable store has established NOTHING about the pipes,
+    /// which is a third state and not the "still open" a bool had to collapse it
+    /// onto (round 16).
     pub fn snapshot(&self, mark: Mark) -> TranscriptSnapshot {
         match self.log.lock() {
             Ok(log) => TranscriptSnapshot {
                 records: log.records.clone(),
                 mark: mark.0,
-                pipes_closed: log.readers_open == 0,
+                readers_open: log.readers_open,
+                readers_total: log.readers_total,
                 available: true,
                 read_failures: log.read_failures.clone(),
             },
             Err(_) => TranscriptSnapshot {
                 records: Vec::new(),
                 mark: 0,
-                pipes_closed: false,
+                readers_open: 0,
+                readers_total: 0,
                 available: false,
                 read_failures: Vec::new(),
             },
@@ -601,24 +747,29 @@ impl ChildIo {
                 // whose readers are live reports the deadline (roborev job 236,
                 // finding 3 — collapsing the two reported "pipes still open"
                 // about a child whose readers had both ended).
-                return Err(if snapshot.pipes_closed() {
-                    // EOF and a failed read both END a reader, so the variant is
-                    // chosen from the readers' recorded TERMINAL RESULTS and never
-                    // from the count alone (job 255, finding 2).
-                    ended(stage.spent(), snapshot)
-                } else {
-                    WaitEnd::DeadlineReached { snapshot }
+                //
+                // EOF and a failed read both END a reader, so the variant is chosen
+                // from the readers' recorded TERMINAL RESULTS and never from a count
+                // (job 255, finding 2). A state that establishes neither — including
+                // a PARTIAL closure and an unreadable store — hands the snapshot
+                // back, and the deadline is then the cause.
+                return Err(match ended(stage.spent(), snapshot) {
+                    Ok(end) => end,
+                    Err(snapshot) => WaitEnd::DeadlineReached { snapshot },
                 });
             }
             let snapshot = self.snapshot(mark);
             if let Some(line) = snapshot.window_on(want).find(|l| pred(l)) {
                 return Ok((line.to_string(), stage.spent()));
             }
-            if snapshot.pipes_closed() {
-                // Every reader has ended AND this snapshot read their records, so
-                // no further line can ever arrive: waiting out the deadline could
-                // only delay the same verdict.
-                return Err(ended(stage.spent(), snapshot));
+            // Every reader has ended AND this snapshot read their records, so no
+            // further line can ever arrive: waiting out the deadline could only
+            // delay the same verdict. `ended` is what decides that — asking it is
+            // the same act as naming the verdict — and on `Err` the wait continues
+            // because output is still possible (or the store could not be read).
+            match ended(stage.spent(), snapshot) {
+                Ok(end) => return Err(end),
+                Err(_still_possible) => {}
             }
             thread::sleep(WAIT_POLL.min(remaining));
         }

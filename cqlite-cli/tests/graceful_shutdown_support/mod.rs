@@ -153,19 +153,30 @@ pub struct PollFail {
     /// report it without taking another directory scan after the verdict
     /// (roborev job 236, finding 2).
     artifacts_now: usize,
-    /// Both reader threads had ended when the verdict was taken, so the child's
-    /// stdout AND stderr were at EOF. A separate FACT from the progress counts
-    /// (roborev job 243, finding 3): a poll that gave up with the pipes closed is
-    /// a different diagnosis from one that gave up with output still possible.
+    /// **WHAT THE READERS' STATE ESTABLISHED ABOUT THE CHILD'S PIPES** — the
+    /// [`PipeStatus`] derived from the snapshot below. A separate FACT from the
+    /// progress counts (roborev job 243, finding 3): a poll that gave up with the
+    /// pipes closed is a different diagnosis from one that gave up with output
+    /// still possible.
+    ///
+    /// **A STATE, NOT A BOOL (round 16 — roborev job 259, finding 1).** This was
+    /// `pipes_closed: bool`, taken from the reader COUNT alone, and it survived
+    /// round 15's fix at the neighbouring site: a reader that ended in an I/O
+    /// ERROR was reported here as a clean EOF, a child one of whose two pipes had
+    /// ended was reported as having both still open, and an UNREADABLE store —
+    /// which establishes nothing at all — was reported the same way. Deriving the
+    /// state from [`TranscriptSnapshot::pipe_status`] makes each of those claims
+    /// unspellable rather than merely annotated, which is what round 15 did for
+    /// `WaitEnd` and what this propagates.
     ///
     /// Read from the SAME snapshot as the records, under one lock, so it can never
     /// be claimed about a state whose lines the verdict did not examine — which is
     /// what retired the `Empty`-vs-`Disconnected` family rather than fixing it at a
     /// fourth site (design.md D6b).
-    pipes_closed: bool,
+    pipes: PipeStatus,
     data_dir: PathBuf,
     /// The ONE store read taken at the verdict: `new_lines`, `since_progress`,
-    /// `pipes_closed` and the rendered transcript all come from it.
+    /// `pipes` and the rendered transcript all come from it.
     snapshot: TranscriptSnapshot,
 }
 
@@ -173,6 +184,17 @@ impl PollFail {
     /// The transcript the VERDICT was taken from, ready for a panic message.
     pub fn transcript(&self) -> String {
         self.snapshot.render()
+    }
+
+    /// The pipe state THIS VERDICT was taken from — the same snapshot everything
+    /// else in the message comes from.
+    ///
+    /// Exposed so the harness's own tests can assert the STATE rather than
+    /// pattern-match the sentence [`PollFail::observed`] renders it as: a test that
+    /// greps prose passes on a message that has drifted away from what was
+    /// measured (round 16).
+    pub fn pipes(&self) -> &PipeStatus {
+        &self.pipes
     }
 
     /// What the poll observed — never why it happened.
@@ -200,14 +222,10 @@ impl PollFail {
                 self.new_lines, self.new_artifacts, self.since_progress
             )
         };
-        let pipes = if self.pipes_closed {
-            "\nthe child's stdout AND stderr had BOTH reached EOF when the verdict was taken, so \
-             no further output could arrive: the child had exited, crashed, or closed its pipes \
-             (this measurement does not say which)"
-        } else {
-            "\nthe child's pipes were still open when the verdict was taken, so more output was \
-             still possible"
-        };
+        // ONE derivation, rendered rather than re-decided (round 16): the two
+        // branches this replaces asserted EOF from a count that could not establish
+        // it, and "still open" from a count that could not establish that either.
+        let pipes = format!("\npipe state at the verdict: {}", self.pipes.describe());
         format!(
             "gave up after {:.2?}, when the test's ONE deadline passed while this stage was \
              pending — which is what attributes the failure to this stage and to nothing else.\n\
@@ -384,7 +402,7 @@ fn poll_with_progress_sampled<T>(
                 new_lines: snapshot.examined(),
                 new_artifacts,
                 artifacts_now: artifacts,
-                pipes_closed: snapshot.pipes_closed(),
+                pipes: snapshot.pipe_status(),
                 data_dir: data_dir.to_path_buf(),
                 snapshot,
             }));
