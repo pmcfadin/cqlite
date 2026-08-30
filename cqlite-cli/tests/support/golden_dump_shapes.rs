@@ -23,9 +23,12 @@ use std::collections::BTreeSet;
 /// `every_declarable_shape_is_one_the_golden_reader_refuses`, so the enum cannot
 /// drift into listing something the reader would happily parse.
 ///
-/// Deliberately NOT a variant: a **cell tombstone**. It reconciles to `null`,
-/// which is a property this lane compares rather than excludes
-/// (`test_types.nb_absent_vs_null_regular`), so it can never justify an exclusion.
+/// Deliberately NOT a variant: a **cell tombstone**, in either of its two dump
+/// spellings. A scalar cell tombstone reconciles to `null`, which is a property
+/// this lane compares rather than excludes
+/// (`test_types.nb_absent_vs_null_regular`); a multicell one (a `path` plus
+/// `deletion_info`) reconciles to that element being absent from its collection,
+/// which `super::golden_row` reconstructs. Neither can justify an exclusion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Unsupported {
     /// `partition.deletion_info`.
