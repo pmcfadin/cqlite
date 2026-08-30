@@ -173,6 +173,31 @@ const STREAM_ROWS = 5;
 // ALL passes negative is a HARD ERROR, never a pass: that state means the
 // instrument measured nothing about this loop, and a positive verdict requires an
 // affirmative measurement (CLAUDE.md).
+//
+// AND THE MINIMUM ALONE IS NOT ENOUGH (issue #1465 round 5, roborev H1): the
+// minimum is the most FAVOURABLE sample, so one slightly-positive pass would
+// excuse eight that blew the budget. That hole is now closed by a SECOND
+// assertion on the MEDIAN (see MEDIAN_BUDGET_BYTES), which a majority of passes
+// must satisfy. Both numbers come from re-measuring the CURRENT configuration
+// (`bufferSize: 2`) over 10 runs of 9 passes x 300 iterations -- the old
+// justification was measured under the noisier default-buffer config and was
+// stale:
+//   error path   min-of-nonneg    16 (x9), 9,328 (x1)      -> max 9,328
+//                median-of-nonneg 5,312 .. 22,196          -> max 22,196
+//                MAX-of-nonneg    11,088 .. 428,064        -> max 428,064
+//   stream path  min-of-nonneg    56 (x10)                 -> max 56
+//                median-of-nonneg 56 (x9), 852 (x1)        -> max 852
+//                MAX-of-nonneg    56 .. 6,136              -> max 6,136
+// WHY NOT THE STRICTEST (max-of-nonneg), which would close the hole completely:
+// on the error path a CLEAN run reaches 428,064 bytes in some pass -- 13x the
+// budget -- so a max-based assertion would red 6 of those 10 clean runs, and
+// raising the budget past that noise would put it ABOVE the RED-control signal
+// (110,912), i.e. it would destroy discrimination to buy strictness. Measured,
+// not assumed.
+// RESIDUAL, stated so nobody has to rediscover it: with a median ceiling, up to
+// 4 of 9 passes can still exceed the budget while the test passes. That is a
+// strictly smaller hole than "8 of 9", and the min assertion still fires on the
+// quiet-pass end.
 const MEASURE_PASSES = 9;
 
 // ---------------------------------------------------------------------------
@@ -238,6 +263,16 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 //       file has no native-side RED control while the Python lane does.
 //   WHAT IT DOES NOT CATCH: anything smaller. It is a backstop for the gross
 //       case, not an oracle (issue #3585).
+// The MEDIAN ceiling (issue #1465 round 5, roborev H1). One number for both paths:
+// 64 KiB is 2.9x the largest clean median observed on the noisy error path
+// (22,196) and 77x the stream path's (852), and it still TRIPS both planted RED
+// controls: the same 256-byte-per-iteration retention that reds the minimum also
+// reds this ceiling, at medians of 133,656 (error) and 134,736 (stream) bytes,
+// i.e. 2.0x over it -- measured in-file, not extrapolated. Looser than
+// BUDGET_BYTES on purpose -- it is a MAJORITY constraint on a noisier statistic,
+// not a second sensitivity knob.
+const MEDIAN_BUDGET_BYTES = 64 * 1024 * CI_BUDGET_MULTIPLIER;
+
 const RSS_BUDGET_BYTES = 96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER;
 
 // Per-test timeout for the two multi-pass budgets (measured ~0.5s and ~4.5s on
@@ -266,7 +301,9 @@ function assertRssUnderBudget(label, rssGrowth) {
  * single asserted number, and the spread is what tells a real leak from a GC
  * artefact).
  *
- * The asserted statistic is the MINIMUM NON-NEGATIVE pass (see MEASURE_PASSES).
+ * TWO statistics are asserted (see MEASURE_PASSES): the MINIMUM non-negative pass
+ * against BUDGET_BYTES (sensitivity) and the MEDIAN non-negative pass against the
+ * looser MEDIAN_BUDGET_BYTES (so one quiet pass cannot excuse the rest).
  * An all-negative sample set is a hard error: nothing was measured, so there is
  * no verdict to give.
  */
@@ -281,6 +318,24 @@ function assertUnderBudget(label, samples) {
         'gc settling in settle() is broken (issue #1465)'
     );
   }
+  // H1: the MEDIAN of the non-negative passes must also clear its (looser)
+  // ceiling, so a single quiet pass can no longer excuse the rest.
+  const sorted = [...nonNegative].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const medianGrowth =
+    sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  if (medianGrowth >= MEDIAN_BUDGET_BYTES) {
+    throw new Error(
+      `${label}: the MEDIAN non-negative pass grew ${medianGrowth} bytes over ` +
+        `${ITERATIONS} iterations (${(medianGrowth / ITERATIONS).toFixed(1)} ` +
+        `bytes/iteration), exceeding the ${MEDIAN_BUDGET_BYTES}-byte median ` +
+        'ceiling — a majority of passes are retaining memory, which the minimum ' +
+        `alone would not catch. Per-pass samples=[${samples.join(', ')}] ` +
+        '(issue #1465)'
+    );
+  }
+  expect(medianGrowth).toBeLessThan(MEDIAN_BUDGET_BYTES);
+
   const growth = Math.min(...nonNegative);
   if (growth >= BUDGET_BYTES) {
     throw new Error(
