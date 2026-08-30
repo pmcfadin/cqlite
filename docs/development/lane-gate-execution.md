@@ -642,6 +642,46 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### Audit the TIME axis too: where does this code sleep, and what can change underneath it?
+
+The sibling audits above enumerate **space** — which files, which paths, which fields. Job 228 found two
+defects neither of those could have surfaced, because both live in **time**:
+
+- the reader sleeps up to 65s to confirm whether a non-advancing beat is stalled, and **the summary can
+  become terminal while it sleeps**. If the gate finished and stopped its beater, the counter cannot
+  advance — so a completed gate was reported `STALLED`, inviting a relaunch of a finished run. That is
+  job 220's rule ("termination outranks a stale beat") on a new axis.
+- the launcher's verification loop advertised **"within 20s"** and bounded itself by an ITERATION COUNT
+  of 40 — while each iteration could block for `interval + 5`. Roughly seventeen minutes. **A count
+  bounds work only when each unit of work is bounded**, and a diagnostic stating a limit the code does
+  not enforce is the same defect class as a comment asserting a property the code lacks.
+
+So the question is worth asking deliberately, and it is enumerable — these scripts sleep in exactly
+three places:
+
+| where time passes | what can change during it | status |
+|---|---|---|
+| reader's confirmation wait (≤65s) | the summary becomes terminal | **was the defect** (job 228) |
+| reader's confirmation wait | the beat is replaced by a peer's | handled: the second snapshot clears the same bar, run-id checked |
+| reader's settle-retry re-read | framing completes mid-write | handled: that is what the retry exists for |
+| launcher's verification loop (≤20s) | the unit dies | handled: `is-active` break + settled re-derivation (job 213) |
+| launcher's verification loop | artifacts replaced by a peer's | handled: single-snapshot nonce+run-id pairing (job 223) |
+| beater's inter-beat sleep | the destination becomes a directory | handled: checked before EVERY publish (job 213) |
+| beater's inter-beat sleep | the gate dies | handled: identity verified before every beat |
+
+One of seven was unhandled, and it was the one review found. The table is recorded so the next person
+re-runs the question instead of rediscovering the axis.
+
+Two scoping notes worth keeping. The post-wait re-check may only **PROMOTE to `COMPLETE`, never refuse** —
+that is what makes its small overlap with the main summary grammar safe, because the divergence risk jobs
+172 and 198 removed is a second implementation that can produce a false REFUSAL; one that can only
+recognise an unambiguous completion either fires or leaves the existing verdict untouched. And the
+deadline's own tests **state what they cannot prove**: the pathological path it guards (a gate that starts
+but never publishes a beat carrying our nonce) could not be constructed, because preflight already refuses
+every heartbeat destination that would produce it. So the deadline is defence in depth, the tests assert
+that the bound exists and that the advertised number EQUALS the enforced one, and they do not claim to
+have observed it firing.
+
 ### When a finding names N instances, find the property and enforce it where all N pass through
 
 Three times in this change an enumeration was fixed and the class stayed open, and each time the

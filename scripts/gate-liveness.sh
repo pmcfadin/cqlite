@@ -875,6 +875,33 @@ fi
 _confirm_wait=$(( HB_INTERVAL + 5 ))
 [ "$_confirm_wait" -le 65 ] || _confirm_wait=65
 sleep "$_confirm_wait"
+# THE GATE MAY HAVE FINISHED DURING THE WAIT (roborev job 228). If it completed and stopped its beater
+# before publishing another beat, the counter cannot advance — and this code would report STALLED while
+# a TERMINAL SUMMARY now exists beside it. A false STALLED for a finished gate invites relaunching it,
+# which is the same harm job 220 fixed in the artifact dimension; this is the same defect in the TIME
+# dimension, because the summary can become terminal WHILE we sleep.
+#
+# The re-check is deliberately NARROWER than the main summary path and may only PROMOTE to COMPLETE —
+# it can never produce a refusal. That is what makes the small overlap with the main grammar safe: a
+# second implementation that could REFUSE would be the divergence risk jobs 172 and 198 removed, while
+# one that can only recognise an unambiguous completion either fires or leaves the existing verdict
+# untouched. Every condition below must hold, or we fall through unchanged.
+_post_snap=$(_snap_of "$SUMMARY" postwait 2>/dev/null) || _post_snap=""
+if [ -n "$_post_snap" ] && ! _has_nul "$_post_snap"; then
+  _post_text=$(_slurp "$_post_snap")
+  _post_open=$(printf '%s\n' "$_post_text" | grep -cE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
+  _post_close=$(printf '%s\n' "$_post_text" | grep -cE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
+  _post_rid=$(_field "$_post_text" run-id)
+  _post_res=$(printf '%s\n' "$_post_text" | grep -m1 '^RESULT: ' || true)
+  _post_tok=${_post_res#RESULT: }; _post_tok=${_post_tok%% *}
+  if [ "$_post_open" = 1 ] && [ "$_post_close" = 1 ] \
+     && [ -n "$_post_rid" ] && [ "$_post_rid" = "$HB_RUN_ID" ]; then
+    case "$_post_tok" in
+      PASS|FAIL|PARTIAL|ERROR|REFUSED)
+        verdict COMPLETE 0 "the gate reached a terminal verdict DURING the confirmation wait — ${_post_res#RESULT: } (run-id $_post_rid). Its beater stopped with it, so the heartbeat could not advance; that is completion, not a stall" ;;
+    esac
+  fi
+fi
 _hb2_snap=$(_snap_of "$HB" heartbeat2) || _hb2_snap=""
 _hb2=""
 [ -n "$_hb2_snap" ] && ! _has_nul "$_hb2_snap" && _hb2=$(_slurp "$_hb2_snap")

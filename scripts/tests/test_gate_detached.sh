@@ -1319,6 +1319,80 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# --- roborev job 228: the verification phase needs a WALL-CLOCK bound, not an iteration count ------
+# The loop advertises "within 20s" and runs up to 40 iterations, but each iteration may call
+# `gate-liveness.sh`, which BLOCKS for `interval + 5` (capped at 65s) to confirm whether a
+# non-advancing beat is stalled. Forty of those is roughly seventeen minutes, so an unmonitorable gate
+# could run far longer than the message promised. A count bounds work only when each unit of work is
+# bounded, and this one is not.
+if grep -q '_verify_deadline=' "$LAUNCHER" \
+   && grep -qF '[ "$(date +%s)" -ge "$_verify_deadline" ]' "$LAUNCHER"; then
+  ok "4b.134 the verification phase is bounded by WALL CLOCK, not just an iteration count"
+else
+  bad "4b.134 the verification phase is bounded by wall clock" "only an iteration count bounds it"
+fi
+# The advertised limit and the enforced limit must be the SAME NUMBER, or the diagnostic is a claim the
+# code does not keep — the same defect class as a comment asserting a property the code lacks.
+_adv=$(grep -oE "within [0-9]+s" "$LAUNCHER" | head -1 | grep -oE '[0-9]+')
+_enf=$(grep -oE '_verify_deadline=\$\(\( \$\(date \+%s\) \+ [0-9]+ \)\)' "$LAUNCHER" | grep -oE '\+ [0-9]+ ' | grep -oE '[0-9]+')
+if [ -n "$_adv" ] && [ -n "$_enf" ] && [ "$_adv" = "$_enf" ]; then
+  ok "4b.135 the advertised limit (${_adv}s) equals the enforced deadline (${_enf}s)"
+else
+  bad "4b.135 the advertised limit equals the enforced deadline" "advertised='${_adv:-?}' enforced='${_enf:-?}'"
+fi
+# COVERAGE LIMIT, stated rather than implied: the pathological path this deadline protects — a gate that
+# STARTS but never publishes a beat carrying our nonce — could not be constructed here, because the
+# launcher's preflight already refuses every heartbeat destination that would produce it (a directory, a
+# non-regular file, an unwritable path). So the deadline is DEFENCE IN DEPTH behind preflight, and these
+# two cases assert the bound exists and is honest, not that it has been observed firing. Claiming
+# behavioural proof for a path I could not reach would be worse than saying so.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  _dt="$TMP/deadline.txt"; _ds=$(date +%s)
+  _do=$(bash "$LAUNCHER" --summary "$_dt" --log "$TMP/deadline.log" -- --only fmt 2>&1); _dr=$?
+  _du=$(printf '%s' "$_do" | sed -n 's/^unit:  *//p'); [ -n "$_du" ] && echo "$_du" >> "$UNITS_FILE"
+  _del=$(( $(date +%s) - _ds ))
+  if [ "$_dr" = 0 ] && [ "$_del" -le 25 ]; then
+    ok "4b.136 a healthy launch still verifies well inside the deadline (${_del}s)"
+  else
+    bad "4b.136 a healthy launch verifies inside the deadline" "exit $_dr after ${_del}s"
+  fi
+  [ -n "$_du" ] && systemctl --user stop "$_du" >/dev/null 2>&1
+else
+  skip=$((skip+1)); echo "SKIP 4b.136 (no user systemd manager on this host)"
+fi
+
+# --- NO SILENT REFUSAL, asserted at the SOURCE ---------------------------------------------------
+# `4b.76` established that asserting a refusal by EXIT CODE ALONE cannot see a launcher that exits
+# non-zero while printing NOTHING — it caught exactly that, caused by an `exec` redirection applying to
+# the whole shell. A sibling audit of this suite then found ~15 cases that check only `$rc != 0`, any of
+# which would pass a silently-refusing launcher, and the launcher has refusal paths no case exercises
+# at all.
+#
+# Rewriting 15 assertions would cover only the paths those assertions happen to visit. The PROPERTY is
+# "every refusal explains itself", and it is checkable directly against the source for EVERY exit,
+# tested or not. Measured at introduction: 0 violations, so this pins a clean state rather than
+# excusing a dirty one.
+_silent=$(python3 - "$LAUNCHER" <<'PYEOF_INNER'
+import re, sys
+lines = open(sys.argv[1]).read().split('\n')
+bad = []
+for i, l in enumerate(lines):
+    m = re.match(r'\s*exit\s+(\d+)\s*$', l)
+    if not m or int(m.group(1)) == 0:
+        continue
+    if '>&2' not in '\n'.join(lines[max(0, i - 12):i]):
+        bad.append(str(i + 1))
+print(','.join(bad))
+PYEOF_INNER
+) || _silent="PROBE-FAILED"
+if [ "$_silent" = "PROBE-FAILED" ]; then
+  bad "4b.133 every non-zero exit in the launcher explains itself" "the probe could not run — this proves nothing"
+elif [ -z "$_silent" ]; then
+  ok "4b.133 every non-zero exit in the launcher explains itself (no silent refusal)"
+else
+  bad "4b.133 every non-zero exit in the launcher explains itself" "silent refusal at line(s): $_silent"
+fi
+
 # --- roborev job 223: the nonce and the run-id must come from ONE snapshot ----------------------
 # They were read by two separate `grep`s of a file a concurrent peer can rewrite between them, so the
 # launcher could pair ITS OWN nonce with a PEER's run-id, accept the peer's heartbeat as proof of

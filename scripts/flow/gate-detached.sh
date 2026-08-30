@@ -829,9 +829,21 @@ CG=$(systemctl --user show "$UNIT" -p ControlGroup --value 2>/dev/null)
 # 30-50 minutes and certify nothing, and the caller has no way to distinguish it from a slow
 # queue. Better to refuse loudly than to hand back a URL to nowhere.
 _hb_seen=0
+# A WALL-CLOCK DEADLINE, because the iteration count is not a time bound (roborev job 228). This loop
+# advertises "within 20s" and runs up to 40 iterations — but each iteration may call
+# `gate-liveness.sh`, which BLOCKS for `interval + 5` (capped at 65s) whenever it needs to confirm
+# whether a non-advancing beat is stalled. Forty of those is roughly SEVENTEEN MINUTES, so an
+# unmonitorable gate could run far longer than the message promised. A count bounds work only when each
+# unit of work is bounded, and this one is not.
+#
+# The message and the mechanism now agree, which is the actual fix: a diagnostic that states a limit
+# the code does not enforce is the same class of defect as a comment asserting a property the code does
+# not have.
+_verify_deadline=$(( $(date +%s) + 20 ))
 _new_rid=""
 _i=0
 while [ "$_i" -lt 40 ]; do
+  if [ "$(date +%s)" -ge "$_verify_deadline" ]; then break; fi
   # (a) find OUR run-id from whichever of our two artifacts carries OUR NONCE first.
   #
   # The HEARTBEAT is checked FIRST, and that ordering is the whole point (roborev job 192). The
