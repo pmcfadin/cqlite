@@ -2835,15 +2835,34 @@ apply_component_set_preflight() {
     return 0
   fi
 
-  echo "agent-gate: FAIL: component-set skew vs origin/main (#3544)" >&2
+  # Per-VERDICT diagnosis and remedy. One arm per fatal verdict, because they are three
+  # DIFFERENT facts and a shared message is a false one: INDETERMINATE means the baseline
+  # WAS measured and the ANCESTRY was not, so telling its reader "the baseline could not be
+  # measured" would send them to fix the wrong thing (and `git rebase` is not its remedy).
+  local why_summary hint
+  echo "agent-gate: FAIL: component-set pre-flight (#3544)" >&2
   echo "agent-gate: $COMPONENT_SET_LINE" >&2
   case "$verdict" in
     BEHIND)
+      why_summary="preflight: FAIL (component-set BEHIND origin/main — this gate script predates components it does not run)"
+      hint="hint: git fetch origin && git rebase origin/main, then re-run scripts/agent-gate.sh"
       echo "agent-gate: this gate script is older than origin/main's, so the run would report a" >&2
       echo "            true N/N verdict about a set that is no longer the coverage claim, and be" >&2
       echo "            SILENT about every component added since (measured: PR #3467, 31 of 35)." >&2
       echo "agent-gate: remedy: git fetch origin && git rebase origin/main   (then re-run the gate)" >&2 ;;
+    INDETERMINATE)
+      why_summary="preflight: FAIL (component-set: components missing vs origin/main and the ancestry probe could not classify them)"
+      hint="hint: repair the repository so 'git merge-base --is-ancestor <origin/main> HEAD' answers (HEAD must resolve to a commit), then re-run scripts/agent-gate.sh"
+      echo "agent-gate: components are missing vs origin/main, and 'git merge-base --is-ancestor'" >&2
+      echo "            could NOT say whether this tree is BEHIND or removed them in its own diff." >&2
+      echo "            The two have OPPOSITE verdicts (FAIL vs a declared, non-fatal removal), so" >&2
+      echo "            guessing either way is a false verdict on correct input — one direction reds" >&2
+      echo "            a legitimate removal, the other swallows the skew this guard exists to catch." >&2
+      echo "agent-gate: remedy: make HEAD resolve to a commit (an unborn/detached-broken HEAD is the" >&2
+      echo "            usual cause), then re-run the gate." >&2 ;;
     *)
+      why_summary="preflight: FAIL (component-set baseline NOT measured — $_CS_KIND)"
+      hint="hint: restore access to origin/main (git fetch origin main), then re-run scripts/agent-gate.sh"
       echo "agent-gate: the baseline component set could NOT be measured, so this run cannot" >&2
       echo "            certify its own coverage; a pass derived from an unmeasured baseline is" >&2
       echo "            exactly the vacuous green #3544 exists to close." >&2
@@ -2857,10 +2876,10 @@ apply_component_set_preflight() {
   [ "$report_only" -eq 1 ] && return 1
   _tree_meta_array   # #2926: every emitted block carries the tree provenance
   emit_summary FAIL \
-    "preflight: FAIL (component-set skew vs origin/main — see component-set: below)" \
+    "$why_summary" \
     "$COMPONENT_SET_LINE" \
     "${TREE_META_LINES[@]}" \
-    "hint: git fetch origin && git rebase origin/main, then re-run scripts/agent-gate.sh"
+    "$hint"
   exit 1
 }
 

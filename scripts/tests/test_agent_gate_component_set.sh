@@ -290,6 +290,89 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3f. THE REMAINING UNMEASURED KINDS. `_component_set_probe` has six non-`ok` kinds; 3a–3d
+#     cover the three baseline-derivation ones plus `baseline-missing`, and case 2 covers
+#     `fetch-failed`/`no-remote`. These three complete the census, so no fail-closed branch
+#     of the pre-flight is untested in either direction. Nothing here is declared
+#     unreachable: all three are reachable in a throwaway tree, which is why they are
+#     asserted rather than excused.
+# ---------------------------------------------------------------------------
+# 3f-i. no-git: a checkout that is not a git worktree at all (a tarball export). The
+#       run cannot obtain a baseline, so the certifying modes FAIL — the tree-integrity
+#       guard already SKIPs there, and a SKIP here would be the vacuous pass.
+nogit="$tmp/nogit-tree"
+mkdir -p "$nogit/scripts"
+cp "$GATE" "$nogit/scripts/agent-gate.sh"
+ng_out=$(hook "$nogit")
+if [ "$(field VERDICT "$ng_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$ng_out")" = no-git ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$(field COMPONENT_SET_LINE "$ng_out")" \
+   && grep -qF "$nogit" <<<"$(field COMPONENT_SET_LINE "$ng_out")"; then
+  ok "3544-no-git: a non-git checkout FAILs, naming the directory that is not a worktree"
+else
+  bad "3544-no-git: expected KIND no-git naming $nogit"
+  printf '%s\n' "$ng_out"
+fi
+
+# 3f-ii. baseline-workspace: the scratch dir for extracting the baseline script cannot be
+#        created. Forced with a TARGETED `mktemp` stub that fails ONLY for this
+#        pre-flight's own template (the gate's other mktemp calls — its LOG_DIR — must keep
+#        working, or the run would die before reaching the branch under test).
+mt_repo=$(mkbranch mtfail "$base_ok" - )
+mt_stub="$tmp/mtfail-stub"
+mkdir -p "$mt_stub"
+{ printf '#!/bin/sh\n'
+  printf 'case "$*" in *agent-gate-cs*) exit 1 ;; esac\n'
+  printf 'exec %s "$@"\n' "$(command -v mktemp)"
+} >"$mt_stub/mktemp"
+chmod +x "$mt_stub/mktemp"
+mt_out=$( cd "$mt_repo" && PATH="$mt_stub:$PATH" bash "$mt_repo/scripts/agent-gate.sh" \
+            --component-set-line full 2>/dev/null )
+if [ "$(field VERDICT "$mt_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$mt_out")" = baseline-workspace ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$(field COMPONENT_SET_LINE "$mt_out")" \
+   && grep -q 'temp dir' <<<"$(field COMPONENT_SET_LINE "$mt_out")"; then
+  ok "3544-baseline-workspace: an uncreatable scratch dir FAILs, naming the extraction"
+else
+  bad "3544-baseline-workspace: expected KIND baseline-workspace"
+  printf '%s\n' "$mt_out"
+fi
+
+# 3f-iii. no-tool: `git` absent from PATH entirely. Driven over a CURATED tool directory,
+#         which needs a PRECONDITION: if that directory is not sufficient to start the
+#         gate on this host, the case cannot distinguish "no-tool was misreported" from
+#         "the stub PATH was too thin", so it is SKIPPED with that named cause rather than
+#         reported as a defect. The precondition is measured AFFIRMATIVELY — the same PATH
+#         *with* git linked in must reach `KIND: ok` — never assumed from the tool list.
+nt_bin="$tmp/notool-bin"
+mkdir -p "$nt_bin"
+for _t in bash sh sed awk grep cut tr mktemp date basename dirname cat head tail wc sort \
+          uniq rm mkdir cp mv ln uname nproc env find touch stat comm od xargs sleep kill \
+          ps df readlink id iconv timeout nice; do
+  _src=$(command -v "$_t" 2>/dev/null) && [ -n "$_src" ] && ln -sf "$_src" "$nt_bin/$_t"
+done
+nt_repo=$(mkbranch notool "$base_ok" - )
+ln -sf "$(command -v git)" "$nt_bin/git"
+nt_control=$( cd "$nt_repo" && PATH="$nt_bin" bash "$nt_repo/scripts/agent-gate.sh" \
+                --component-set-line full 2>/dev/null )
+rm -f "$nt_bin/git"
+if [ "$(field KIND "$nt_control")" != ok ]; then
+  echo "skip - 3544-no-tool: the curated tool PATH cannot start the gate on this host (control KIND='$(field KIND "$nt_control")') — the no-tool branch is not exercisable here"
+else
+  nt_out=$( cd "$nt_repo" && PATH="$nt_bin" bash "$nt_repo/scripts/agent-gate.sh" \
+              --component-set-line full 2>/dev/null )
+  if [ "$(field VERDICT "$nt_out")" = UNMEASURED ] \
+     && [ "$(field KIND "$nt_out")" = no-tool ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$(field COMPONENT_SET_LINE "$nt_out")" \
+     && grep -q 'git is not on PATH' <<<"$(field COMPONENT_SET_LINE "$nt_out")"; then
+    ok "3544-no-tool: an absent git FAILs, naming the missing tool (control reached KIND ok)"
+  else
+    bad "3544-no-tool: expected KIND no-tool naming git (control reached KIND ok, so the PATH is sufficient)"
+    printf '%s\n' "$nt_out"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 4. DELIBERATE REMOVAL: components are missing AND origin/main IS an ancestor of HEAD,
 #    so this branch removed them in its own diff. A loud DECLARED line, NOT a FAIL — a
 #    guard that reds on correct input is the guard agents learn to waive.
@@ -322,6 +405,89 @@ if [ "$(field VERDICT "$fp_out")" = BEHIND ] \
 else
   bad "3544-fixpoint: expected BEHIND to win over DECLARED (got '$(field VERDICT "$fp_out")')"
   printf '%s\n' "$fp_out"
+fi
+
+# ---------------------------------------------------------------------------
+# 4c. INDETERMINATE — the THIRD ancestry state, and the one a two-way test cannot express.
+#     `git merge-base --is-ancestor` answers 0 (ancestor) or 1 (not), and ANYTHING ELSE is
+#     an error, so collapsing "cannot tell" onto either answer is a false verdict on
+#     correct input: onto BEHIND it reds a legitimate removal, onto DECLARED it SWALLOWS
+#     the skew this whole guard exists to catch. It must therefore be its own fail-closed
+#     verdict, and this case is the only thing standing between that branch and a
+#     miswiring nobody would notice — the rc classification is invisible from a
+#     BEHIND/DECLARED pair, both of which pass whichever way an error is bucketed.
+#
+#     Forced with an UNBORN HEAD (a fixture with a remote and a fetchable origin/main but
+#     no commit of its own): the probe then measures the baseline fine — `_CS_KIND` is `ok`
+#     and the missing component is named — while `--is-ancestor` exits 128 because HEAD
+#     resolves to nothing. That is a REAL rc≠0,1, not a simulated one, and it is reached
+#     through the shipped code path rather than by stubbing git.
+#
+#     Note the branch's own set comes from the RUNNING script's COMPONENTS array, not from
+#     a commit, which is exactly why an unborn HEAD still produces a measurable comparison.
+# ---------------------------------------------------------------------------
+base_ind=$(mkbaseline base-ind "$ADD_SENTINEL")
+ind="$tmp/indeterminate"
+mkdir -p "$ind/scripts"
+cp "$GATE" "$ind/scripts/agent-gate.sh"
+( cd "$ind" && git init -q . && git remote add origin "$base_ind" ) >/dev/null 2>&1
+ind_out=$(hook "$ind")
+ind_line=$(field COMPONENT_SET_LINE "$ind_out")
+ind_sha=$(git -C "$base_ind" rev-parse refs/heads/main)
+if [ "$(field VERDICT "$ind_out")" = INDETERMINATE ] \
+   && [ "$(field KIND "$ind_out")" = ok ] \
+   && [ "$(field ANCESTOR "$ind_out")" = unknown ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$ind_line" \
+   && grep -q -- "$SENTINEL" <<<"$ind_line" \
+   && grep -q 'ancestry probe could not tell BEHIND from a deliberate removal' <<<"$ind_line" \
+   && grep -q 'merge-base --is-ancestor' <<<"$ind_line" \
+   && grep -q "origin/main $ind_sha" <<<"$ind_line"; then
+  ok "3544-indeterminate: an unanswerable ancestry probe is its OWN fail-closed verdict, naming the probe"
+else
+  bad "3544-indeterminate: expected VERDICT INDETERMINATE naming the ancestry probe and $SENTINEL"
+  printf '%s\n' "$ind_out"
+fi
+
+# The REAL emit for it, and its OWN diagnosis: a shared "the baseline could not be
+# measured" message would be FALSE here (the baseline WAS measured; the ancestry was not)
+# and would send its reader to fix the wrong thing, so the block's `preflight:` line and
+# `hint:` must name the ancestry probe, and must NOT offer `git rebase` — which is not the
+# remedy for an unresolvable HEAD.
+ind_sum="$tmp/indeterminate-summary.txt"
+( cd "$ind" && AGENT_GATE_SUMMARY_FILE="$ind_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+    bash scripts/agent-gate.sh >"$tmp/indeterminate.log" 2>&1 ); ind_rc=$?
+if [ "$ind_rc" -ne 0 ] \
+   && grep -q '^RESULT: FAIL' "$ind_sum" 2>/dev/null \
+   && grep -q '^preflight: FAIL (component-set: components missing vs origin/main and the ancestry probe could not classify' "$ind_sum" 2>/dev/null \
+   && grep -q '^hint: repair the repository so' "$ind_sum" 2>/dev/null \
+   && ! grep -q 'hint: git fetch origin && git rebase' "$ind_sum" 2>/dev/null \
+   && ! grep -q 'baseline NOT measured' "$ind_sum" 2>/dev/null; then
+  ok "3544-indeterminate-emit: the FULL gate FAILs with the ancestry-specific cause and remedy"
+else
+  bad "3544-indeterminate-emit: expected an ancestry-named preflight line + its own hint (rc=$ind_rc)"
+  sed -n '1,20p' "$ind_sum" 2>/dev/null
+fi
+
+# …and under --lite it is ADVISORY-INDETERMINATE: the line is there, named, and the run is
+# NOT failed by it (--lite runs every fix round; a repo state it cannot classify must not
+# stop the fast loop).
+ind_lite=$(hook "$ind" lite)
+ind_lite_line=$(field COMPONENT_SET_LINE "$ind_lite")
+ind_lsum="$tmp/indeterminate-lite.txt"
+( cd "$ind" && AGENT_GATE_SUMMARY_FILE="$ind_lsum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+    bash scripts/agent-gate.sh --lite >"$tmp/indeterminate-lite.log" 2>&1 ) >/dev/null 2>&1
+if [ "$(field STRICT "$ind_lite")" = no ] \
+   && grep -q '^component-set: ADVISORY-INDETERMINATE (#3544)' <<<"$ind_lite_line" \
+   && grep -q -- '--lite is lenient' <<<"$ind_lite_line" \
+   && ! grep -q 'FAIL-CLOSED' <<<"$ind_lite_line" \
+   && grep -q '^component-set: ADVISORY-INDETERMINATE (#3544)' "$ind_lsum" 2>/dev/null \
+   && ! grep -q 'preflight: FAIL (component-set' "$ind_lsum" 2>/dev/null \
+   && grep -qE '^fmt: +(PASS|FAIL)' "$ind_lsum" 2>/dev/null; then
+  ok "3544-indeterminate-lite: --lite stamps ADVISORY-INDETERMINATE and still reaches its components"
+else
+  bad "3544-indeterminate-lite: expected an ADVISORY-INDETERMINATE line and a lite run that proceeds"
+  printf '%s\n' "$ind_lite"
+  sed -n '1,20p' "$ind_lsum" 2>/dev/null
 fi
 
 # ---------------------------------------------------------------------------
@@ -450,8 +616,8 @@ fout="$tmp/full.log"
 if [ "$frc" -ne 0 ] \
    && grep -q '^RESULT: FAIL' "$sum" 2>/dev/null \
    && grep -q "^component-set: FAIL-CLOSED (#3544).*$SENTINEL" "$sum" 2>/dev/null \
-   && grep -q '^preflight: FAIL (component-set skew' "$sum" 2>/dev/null \
-   && grep -q 'git rebase origin/main' "$sum" 2>/dev/null; then
+   && grep -q '^preflight: FAIL (component-set BEHIND origin/main' "$sum" 2>/dev/null \
+   && grep -q '^hint: git fetch origin && git rebase origin/main' "$sum" 2>/dev/null; then
   ok "3544-full-emit: the FULL gate exits at the pre-flight with a FAIL block + the remedy"
 else
   bad "3544-full-emit: expected a FAIL SUMMARY naming the skew and the rebase remedy (rc=$frc)"
