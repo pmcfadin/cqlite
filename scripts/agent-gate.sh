@@ -5456,6 +5456,68 @@ check_jest_suites_ran() {
 }
 export -f check_jest_suites_ran
 
+# NB_TEST_ANCHOR — the ONE path anchor every node-suite normalisation uses (issue #3522,
+# roborev round 6 G1). Referenced by _jest_json_suite_counts's two implementations AND by the
+# two `sed` normalisations in run_node_bindings, so the four cannot drift.
+#
+# WHY IT IS THREE COMPONENTS AND NOT `/__test__/`. The short anchor was AMBIGUOUS, and the two
+# implementations resolved the ambiguity DIFFERENTLY: jq's `sub("^.*/__test__/"; "")` is greedy
+# (strips at the LAST occurrence) and so is `sed 's#.*/__test__/##'`, while python's
+# `n.find("/__test__/")` took the FIRST. On a python3-only host whose CHECKOUT PATH itself
+# contains a `__test__` directory, every suite is then reported missing and extra at once — a
+# FALSE RED on a correct tree, which is the direction that teaches agents to waive a lane. It is
+# latent wherever jq exists, so no run on a jq-equipped box can see it.
+#
+# Fixed by removing the ambiguity rather than picking a side: the anchor now names three path
+# components, which cannot plausibly recur inside a checkout prefix, AND every implementation
+# uses LAST-occurrence semantics on it. Same rule, same anchor, four places.
+NB_TEST_ANCHOR='/bindings/node/__test__/'
+
+# _jest_json_suite_counts <json-file> — print `<suite-path-relative-to-__test__>\t<passed-count>`
+# per suite from a jest `--json` report.
+#
+# SPLIT INTO TWO NAMED IMPLEMENTATIONS ON PURPOSE. CLAUDE.md records the rule this defect broke:
+# "a port is a second implementation, and a second implementation's correctness is only knowable
+# by differential testing against the original" (#3283 — a bash port of Go's exclusion logic
+# whose NBSP divergence was unfindable by care, because it was tested against a MODEL of the
+# original rather than the original). A jq branch and a python3 branch are exactly that, and
+# they had diverged. Naming them separately is what lets a self-test drive BOTH over one fixture
+# set and assert byte-identical output — differential testing against the original, not against
+# a model of it. It is NOT a test seam (#3312): the dispatcher's behaviour is unchanged and
+# nothing selects an implementation by variable.
+_jest_json_suite_counts_jq() { # <json-file>
+  jq -r --arg a "$NB_TEST_ANCHOR" '
+    .testResults[]?
+    | [ (.name | if index($a) then sub("^.*" + $a; "") else . end),
+        ([ .assertionResults[]? | select(.status == "passed") ] | length) ]
+    | @tsv' "$1"
+}
+_jest_json_suite_counts_py() { # <json-file>
+  python3 -c '
+import json, sys
+path, anchor = sys.argv[1], sys.argv[2]
+with open(path) as fh:
+    d = json.load(fh)
+for r in d.get("testResults") or []:
+    n = r.get("name") or ""
+    # rfind: LAST occurrence, matching jq'"'"'s greedy `^.*` and sed'"'"'s greedy `.*` (G1).
+    i = n.rfind(anchor)
+    rel = n[i + len(anchor):] if i >= 0 else n
+    p = sum(1 for a in (r.get("assertionResults") or []) if a.get("status") == "passed")
+    print("%s\t%d" % (rel, p))
+' "$1" "$NB_TEST_ANCHOR"
+}
+_jest_json_suite_counts() { # <json-file>
+  if command -v jq >/dev/null 2>&1; then
+    _jest_json_suite_counts_jq "$1"
+  elif command -v python3 >/dev/null 2>&1; then
+    _jest_json_suite_counts_py "$1"
+  else
+    printf '__PARSE_NO_TOOL__'
+    return 0
+  fi
+}
+
 # check_jest_per_suite_passed <label> <json-file> <reconciled-set-file>
 #
 # THE PER-SUITE half of the jest affirmative measurement (issue #3522, roborev round 5 F1).
@@ -5493,25 +5555,12 @@ check_jest_per_suite_passed() {
     echo "$label: FAIL-CLOSED — the reconciled suite set '$expected_file' is missing or unreadable, so this guard has no SUBJECT. A guard with an empty subject set reports OK having measured nothing (issue #3522)" >&2
     return 1
   fi
-  # jq FIRST, then python3, then a FAILED derivation — the same chain and the same direction as
-  # every other metadata helper here. A single-parser guard is a false red on a host that has
-  # only the other one, and this gate treats macOS as a first-class host.
+  # The parse is DELEGATED to _jest_json_suite_counts, whose two implementations are
+  # differentially tested against each other over a shared fixture set
+  # (scripts/tests/test_agent_gate_parser_parity.sh). See its header for why that matters.
   local counts=""
-  if command -v jq >/dev/null 2>&1; then
-    counts=$(jq -r '.testResults[]? | [ (.name | sub("^.*/__test__/"; "")), ([ .assertionResults[]? | select(.status == "passed") ] | length) ] | @tsv' "$json") || counts="__PARSE_FAILED__"
-  elif command -v python3 >/dev/null 2>&1; then
-    counts=$(python3 -c '
-import json, sys
-with open(sys.argv[1]) as fh:
-    d = json.load(fh)
-for r in d.get("testResults") or []:
-    n = r.get("name") or ""
-    i = n.find("/__test__/")
-    rel = n[i + len("/__test__/"):] if i >= 0 else n
-    p = sum(1 for a in (r.get("assertionResults") or []) if a.get("status") == "passed")
-    print("%s\t%d" % (rel, p))
-' "$json") || counts="__PARSE_FAILED__"
-  else
+  counts=$(_jest_json_suite_counts "$json") || counts="__PARSE_FAILED__"
+  if [ "$counts" = "__PARSE_NO_TOOL__" ]; then
     echo "$label: FAIL-CLOSED — neither jq nor python3 is available to read jest's --json report, so the PER-SUITE measurement cannot be taken. An unparseable oracle is not a pass (issue #3522, roborev F1)" >&2
     return 1
   fi
@@ -5665,49 +5714,67 @@ for p in d["packages"]:
 #
 # Same parser chain and same direction as its neighbours: jq, else python3, else a
 # FAILED derivation. Never a fallback to a partial or empty census.
-_package_integration_target_ids() {
-  local pkg="$1"
-  local meta present out
-  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
-  [ -n "$meta" ] || return 1
-  if command -v jq >/dev/null 2>&1; then
-    # PRESENCE first: without it, an unknown/renamed package would print nothing and
-    # be reported as "declares no integration targets" — a false all-clear about a
-    # package the lane cannot see at all.
-    present=$(printf '%s' "$meta" | jq -r --arg n "$pkg" '[.packages[] | select(.name == $n)] | length') || return 1
-    [ "$present" = 1 ] || return 1
-    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" \
-      '.packages[] | select(.name == $n)
-       | ((.manifest_path // "") | split("/") | .[0:-1] | join("/")) as $root
-       | .targets[]
-       | select(.kind | index("test"))
-       | ((.src_path // "")) as $sp
-       | (if ($root != "" and ($sp | startswith($root + "/")))
-          then ($sp | ltrimstr($root + "/")) else $sp end) as $rel
-       | (if ($rel | startswith("tests/")) then ($rel | ltrimstr("tests/")) else $rel end) as $rel2
-       | (if ($rel2 | endswith(".rs")) then ($rel2 | .[0:-3]) else $rel2 end) as $id
-       | [.name, $id, ((."required-features" // []) | join(","))] | @tsv') || return 1
-  elif command -v python3 >/dev/null 2>&1; then
-    out=$(printf '%s' "$meta" | python3 -c '
-import json, os, sys
+# SPLIT INTO NAMED IMPLEMENTATIONS (issue #3522, roborev round 6 G1 sweep) for the reason on
+# _jest_json_suite_counts: a jq branch and a python3 branch are two implementations of one
+# transformation, and "correctness only knowable by differential testing against the original"
+# applies to every such pair, not only to the one that was found divergent. Naming them is what
+# lets scripts/tests/test_agent_gate_parser_parity.sh drive BOTH over one fixture set and assert
+# byte-identical output. Each takes the metadata JSON as an ARGUMENT rather than calling cargo,
+# which is what makes a fixture possible at all.
+_package_integration_target_ids_jq() { # <meta-json> <pkg>
+  local meta="$1" pkg="$2" present
+  # PRESENCE first: without it, an unknown/renamed package would print nothing and be
+  # reported as "declares no integration targets" — a false all-clear about a package the
+  # lane cannot see at all.
+  present=$(printf '%s' "$meta" | jq -r --arg n "$pkg" '[.packages[] | select(.name == $n)] | length') || return 1
+  [ "$present" = 1 ] || return 1
+  printf '%s' "$meta" | jq -r --arg n "$pkg" \
+    '.packages[] | select(.name == $n)
+     | ((.manifest_path // "") | split("/") | .[0:-1] | join("/")) as $root
+     | (.targets // [])[]
+     | select((.kind // []) | index("test"))
+     | ((.src_path // "")) as $sp
+     | (if ($root != "" and ($sp | startswith($root + "/")))
+        then ($sp | ltrimstr($root + "/")) else $sp end) as $rel
+     | (if ($rel | startswith("tests/")) then ($rel | ltrimstr("tests/")) else $rel end) as $rel2
+     | (if ($rel2 | endswith(".rs")) then ($rel2 | .[0:-3]) else $rel2 end) as $id
+     | [.name, $id, (((."required-features" // [])) | join(","))] | @tsv'
+}
+_package_integration_target_ids_py() { # <meta-json> <pkg>
+  printf '%s' "$1" | python3 -c '
+import json, sys
 pkg = sys.argv[1]
 d = json.load(sys.stdin)
 pkgs = [p for p in d.get("packages", []) if p.get("name") == pkg]
 if len(pkgs) != 1:
     sys.exit(1)
 p = pkgs[0]
-root = os.path.dirname(p.get("manifest_path", ""))
-for t in p.get("targets", []):
+mp = p.get("manifest_path", "") or ""
+# `/`-split dirname, matching jq exactly. os.path.dirname was the previous form and is
+# platform-dependent; cargo metadata paths are always `/`-separated, and using os.sep here
+# would be a second rule the jq branch does not share (G1 sweep).
+root = mp.rsplit("/", 1)[0] if "/" in mp else ""
+for t in p.get("targets", []) or []:
     if "test" not in (t.get("kind") or []):
         continue
     sp = t.get("src_path") or ""
-    rel = sp[len(root) + 1:] if root and sp.startswith(root + os.sep) else sp
+    rel = sp[len(root) + 1:] if root and sp.startswith(root + "/") else sp
     if rel.startswith("tests/"):
         rel = rel[len("tests/"):]
     if rel.endswith(".rs"):
         rel = rel[:-3]
-    print("%s\t%s\t%s" % (t["name"], rel, ",".join(t.get("required-features") or [])))
-' "$pkg") || return 1
+    print("%s\t%s\t%s" % (t.get("name") or "", rel, ",".join(t.get("required-features") or [])))
+' "$2"
+}
+_package_integration_target_ids() {
+  local pkg="$1"
+  local meta out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    out=$(_package_integration_target_ids_jq "$meta" "$pkg") || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(_package_integration_target_ids_py "$meta" "$pkg") || return 1
   else
     return 1
   fi
@@ -6248,7 +6315,9 @@ run_node_bindings() {
   # LISTED BY JEST — a silent config exclusion" and send the reader to jest.config.js, when in
   # fact the normalisation pipeline failed. That is the "verdict is right, remedy is useless"
   # defect the flight lane's fixture preflight records; a distinct named cause is the fix.
-  if ! sed -n 's#.*/__test__/##p' "$list_file" | grep '\.test\.js$' | sort -u > "$jest_set"; then
+  # Same anchor and same LAST-occurrence rule as _jest_json_suite_counts (G1): four
+  # normalisations, one definition, so they cannot resolve an ambiguity differently again.
+  if ! sed -n "s#.*${NB_TEST_ANCHOR}##p" "$list_file" | grep '\.test\.js$' | sort -u > "$jest_set"; then
     status=FAIL
     {
       echo "[$name] FAIL-CLOSED: could not normalise jest's --listTests output into a comparable"
@@ -6290,7 +6359,7 @@ run_node_bindings() {
   # as "LISTED BY JEST but NOT FOUND ON DISK" and send the reader to testMatch, when the
   # inventory pipeline is what failed.
   if ! find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null \
-    | tr '\0' '\n' | sed -n 's#.*/__test__/##p' | sort -u > "$disk_set"; then
+    | tr '\0' '\n' | sed -n "s#.*${NB_TEST_ANCHOR}##p" | sort -u > "$disk_set"; then
     status=FAIL
     {
       echo "[$name] FAIL-CLOSED: the independent suite inventory pipeline failed (find/tr/sed/sort"
@@ -6477,27 +6546,36 @@ _brt_partition_targets() { # <target-meta> <enabled-set>
 # (_resolved_package_features) from this DECLARED set is how the lane states, as a
 # derived fact rather than a curated sentence, which of a binding crate's features it
 # leaves off — and therefore which `#[cfg(feature = ...)]` test bodies it does not run.
-_package_declared_features() {
-  local pkg="$1"
-  local meta present out
-  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
-  [ -n "$meta" ] || return 1
-  if command -v jq >/dev/null 2>&1; then
-    present=$(printf '%s' "$meta" | jq -r --arg n "$pkg" '[.packages[] | select(.name == $n)] | length') || return 1
-    [ "$present" = 1 ] || return 1
-    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" \
-      '.packages[] | select(.name == $n) | (.features // {}) | keys[]') || return 1
-  elif command -v python3 >/dev/null 2>&1; then
-    out=$(printf '%s' "$meta" | python3 -c '
+_package_declared_features_jq() { # <meta-json> <pkg>
+  local meta="$1" pkg="$2" present
+  present=$(printf '%s' "$meta" | jq -r --arg n "$pkg" '[.packages[] | select(.name == $n)] | length') || return 1
+  [ "$present" = 1 ] || return 1
+  printf '%s' "$meta" | jq -r --arg n "$pkg" \
+    '.packages[] | select(.name == $n) | (.features // {}) | keys[]'
+}
+_package_declared_features_py() { # <meta-json> <pkg>
+  printf '%s' "$1" | python3 -c '
 import json, sys
 pkg = sys.argv[1]
 d = json.load(sys.stdin)
 pkgs = [p for p in d.get("packages", []) if p.get("name") == pkg]
 if len(pkgs) != 1:
     sys.exit(1)
+# jq'"'"'s `keys` sorts by unicode codepoint; python'"'"'s sorted() on str does the same, so the two
+# orderings agree. Asserted by differential test rather than assumed (G1 sweep).
 for f in sorted((pkgs[0].get("features") or {}).keys()):
     print(f)
-' "$pkg") || return 1
+' "$2"
+}
+_package_declared_features() {
+  local pkg="$1"
+  local meta out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    out=$(_package_declared_features_jq "$meta" "$pkg") || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(_package_declared_features_py "$meta" "$pkg") || return 1
   else
     return 1
   fi
@@ -11080,6 +11158,29 @@ run_tooling_tests() {
      ! bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition_selftest.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (tools/ crate disposition census #1716); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # jq/python3 PARSER PARITY differential test (#3522, roborev G1): drives BOTH branches of
+  # every parser pair this lane added over ONE fixture set and requires byte-identical output
+  # AND identical exit status. The defect it exists for: _jest_json_suite_counts's jq branch
+  # stripped at the LAST `/__test__/` and its python3 branch at the FIRST, so on a python3-only
+  # host whose checkout path contains a `__test__` directory every suite was reported missing
+  # and extra at once — a FALSE RED on a correct tree, latent on every box that has jq. Per
+  # CLAUDE.md's #3283 rule, a port's correctness is only knowable by differential testing
+  # against the ORIGINAL, which is what this does rather than re-deriving expected output.
+  # It EXITS 2 (reported, not silently passed) when only one of jq/python3 is present, since a
+  # parity claim over a comparison that never ran is a vacuous green — so the component treats
+  # a non-zero exit as FAIL and an UNMEASURED run is visible rather than green.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_parser_parity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parser_parity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (jq/python3 parser parity #3522); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

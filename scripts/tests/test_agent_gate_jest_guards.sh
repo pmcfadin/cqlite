@@ -22,7 +22,14 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
 [ -r "$GATE" ] || { echo "FAIL: cannot read $GATE" >&2; exit 1; }
 
-for fn in _ansi_stripped_log check_jest_suites_ran check_jest_per_suite_passed; do
+# NB_TEST_ANCHOR is a top-level assignment, not a function, and check_jest_per_suite_passed
+# DELEGATES its parse to _jest_json_suite_counts (the G1 extraction) — so both must be sourced
+# too, or every case fails with `command not found`. Sourcing the dependency explicitly rather
+# than duplicating the parser keeps this test driving the SHIPPED code.
+eval "$(sed -n '/^NB_TEST_ANCHOR=/p' "$GATE")"
+[ -n "${NB_TEST_ANCHOR:-}" ] || { echo "FAIL: could not extract NB_TEST_ANCHOR from $GATE" >&2; exit 1; }
+for fn in _ansi_stripped_log _jest_json_suite_counts_jq _jest_json_suite_counts_py \
+          _jest_json_suite_counts check_jest_suites_ran check_jest_per_suite_passed; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
   [ -n "$src" ] || { echo "FAIL: could not extract $fn from $GATE — renamed or reshaped; this self-test must not pass having tested nothing" >&2; exit 1; }
   eval "$src" || { echo "FAIL: extracted $fn does not parse" >&2; exit 1; }
@@ -60,16 +67,27 @@ mk_json() {
 }
 mk_set() { local out="$1"; shift; printf '%s\n' "$@" > "$out"; }
 
-# expect_per_suite <name> <PASS|FAIL> <needle> <json> <set>
+# expect_per_suite <name> <PASS|FAIL> <comma-separated-needles> <json> <set>
+#
+# EVERY needle must be named, not just one (roborev round 6, G2). A single-substring check over
+# a message that lists MULTIPLE offenders can only establish that something was reported — never
+# that nothing was omitted. So a regression that reported only the FIRST empty suite would have
+# passed the all-empty case below, which is the same defect G2 found in the partition self-test.
+# Needles are comma-separated because the interesting cases are inherently multi-item.
 expect_per_suite() {
-  local nm="$1" want="$2" needle="$3" j="$4" e="$5" rc out
+  local nm="$1" want="$2" needles="$3" j="$4" e="$5" rc out n missing=""
   out=$(check_jest_per_suite_passed L "$j" "$e" 2>&1); rc=$?
   if [ "$want" = PASS ]; then
     [ "$rc" -eq 0 ] && ok "$nm" || bad "$nm — expected PASS, got $rc: $out"
     return
   fi
   if [ "$rc" -eq 0 ]; then bad "$nm — expected FAIL but the guard PASSED: $out"; return; fi
-  case "$out" in *"$needle"*) ok "$nm" ;; *) bad "$nm — failed but never named '$needle': $out" ;; esac
+  local IFS=,
+  for n in $needles; do
+    case "$out" in *"$n"*) ;; *) missing="$missing $n" ;; esac
+  done
+  unset IFS
+  if [ -z "$missing" ]; then ok "$nm"; else bad "$nm — failed but never named:$missing (got: $out)"; fi
 }
 
 # ---- check_jest_per_suite_passed ------------------------------------------------
@@ -94,7 +112,19 @@ mk_json "$WORK/good.json" "a.test.js:5:0" "b.test.js:2:1"
 expect_per_suite "every suite with >=1 passing test is ACCEPTED" PASS "" "$WORK/good.json" "$WORK/set2"
 
 mk_json "$WORK/allzero.json" "a.test.js:0:1" "b.test.js:0:1"
-expect_per_suite "ALL suites empty is REJECTED" FAIL "a.test.js" "$WORK/allzero.json" "$WORK/set2"
+expect_per_suite "ALL suites empty is REJECTED, naming EVERY one (G2)" FAIL "a.test.js,b.test.js" \
+  "$WORK/allzero.json" "$WORK/set2"
+
+# THREE empty suites: the case a first-offender-only regression would pass.
+mk_set "$WORK/set3" a.test.js b.test.js c.test.js
+mk_json "$WORK/zero3.json" "a.test.js:0:1" "b.test.js:0:1" "c.test.js:0:1"
+expect_per_suite "three empty suites -> ALL THREE named (G2)" FAIL "a.test.js,b.test.js,c.test.js" \
+  "$WORK/zero3.json" "$WORK/set3"
+
+# Two suites MISSING from the report: likewise both must be named.
+mk_json "$WORK/onlyA.json" "a.test.js:1:0"
+expect_per_suite "two suites absent from the report -> BOTH named (G2)" FAIL "b.test.js,c.test.js" \
+  "$WORK/onlyA.json" "$WORK/set3"
 
 mk_json "$WORK/one.json" "a.test.js:5:0"
 expect_per_suite "a reconciled suite ABSENT from the report is REJECTED (unjudged, not passed)" \
