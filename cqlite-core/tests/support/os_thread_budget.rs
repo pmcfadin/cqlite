@@ -93,6 +93,75 @@
 //! the owner on #3438 rather than being an oversight. Do not "fix" it by widening
 //! a peak allowance in either caller; that reintroduces the flake and still would
 //! not detect the transient.
+//!
+//! ## SECOND ACCEPTED RESIDUAL — the sample point has no producer-readiness
+//! barrier, so a REGRESSION can be missed under starvation (#3603 owns the fix)
+//!
+//! Same instrument, same section, deliberately: this is the other face of "the
+//! whole-process count cannot see what happened between two polls".
+//!
+//! [`poll_until_stable`] treats **200 ms** of unchanged thread count (8 polls ×
+//! 25 ms) as evidence that the producers have reached their steady state. They
+//! have not necessarily: `KWayMerger::new` spawns each producer thread and returns
+//! with NO barrier, and each producer builds its own Tokio runtime *inside* the
+//! spawned thread — i.e. strictly after the count already includes that thread.
+//! So a pre-#2316 amplified worker pool is created LATER than the point at which
+//! the count is stable at `baseline + producers`. If that first stable window
+//! elapses before any producer has built its runtime, the fast path samples a
+//! within-bound delta, the reap confirmation is SKIPPED, and the amplification
+//! goes undetected.
+//!
+//! Three facts bound how much this matters, and all three are load-bearing:
+//!
+//! * **Only the FIRST stable window is exposed.** The poll returns on the first
+//!   completed streak, so the race is a 200 ms window at the start of sampling —
+//!   not the whole 15 s/20 s budget.
+//! * **It needs ALL `M` (or `C·M`) producers unscheduled for 200 CONSECUTIVE ms.**
+//!   Partial construction is harmless: a rising count RESETS the streak, the poll
+//!   keeps going, and the run lands in the confirm branch — i.e. behaves correctly.
+//! * **The direction is FALSE-NEGATIVE ONLY.** It can lose coverage for one run;
+//!   it can never fail a healthy one. Nothing here is a flake source.
+//!
+//! **It is PRE-EXISTING on `main`, verbatim** — see
+//! `origin/main:cqlite-core/tests/issue_2316_merge_thread_budget.rs:264-291` for
+//! the identical function and `:568/:577/:594` for the identical
+//! construct-then-sample-then-`if delta > bound` structure. `main`'s #2370 is
+//! strictly worse: it ends in a bare `delta <= bound` with no confirm branch to
+//! skip at all. This module did not introduce the gap; it centralized the oracle,
+//! which is what made the gap visible. **Do not re-triage it as a #3514
+//! regression.**
+//!
+//! **No sound TEST-ONLY fix exists**, which is why it is recorded rather than
+//! closed here. Four candidates were evaluated and rejected, one line each so
+//! nobody re-derives them:
+//!
+//! 1. **A longer stable span** (e.g. 2 s instead of 200 ms) makes the race rarer
+//!    by ~10× and closes nothing — a rarer defect is not a fix.
+//! 2. **A lifetime high-water sampler** spanning construction→drain would see the
+//!    pool, but the confirmation can only run while the producers are still BLOCKED
+//!    (after the drain they are gone), and a bound on the lifetime peak is exactly
+//!    what the FIRST residual above rules out (correct code peaked 8→76 vs an
+//!    amplified ~96 — the ranges overlap).
+//! 3. **Waiting for `>= baseline + 2·producers`** (assuming one blocking thread per
+//!    producer) infers behaviour from tokio's internal thread population — a
+//!    no-heuristics violation that would degrade into a hang-then-panic flake on a
+//!    tokio bump.
+//! 4. **Polling the existing `cqlite.merge.producer_threads` gauge** cannot work
+//!    even if it were reachable (`producer_gauge` is a private `mod` at
+//!    `write_engine/merge/mod.rs`, everything `pub(super)`): its `spawned()`
+//!    increment happens deliberately BEFORE the `std::thread::Builder::spawn`, for
+//!    gauge-pairing correctness, so it is already satisfied at the sample point and
+//!    signals nothing about readiness. This is the least discoverable of the four.
+//!
+//! The fix therefore needs a real readiness signal in `cqlite-core/src` (a
+//! ready-counter in `producer_gauge`, incremented once each producer's runtime
+//! exists, awaited by the test before sampling) — production code added for a
+//! test's benefit, which needs its own justification and review rather than a
+//! round-3 expansion of a test-only change. **#3603 owns it**, and must first
+//! settle the question this module deliberately does not guess: whether tokio
+//! spawns multi-thread worker threads EAGERLY in `Builder::build()` (in which case
+//! a post-`build()` signal is a sound barrier) or lazily on first poll (in which
+//! case it is not, and the signal must move).
 
 #![allow(dead_code)] // shared module: not every consumer uses every item.
 
