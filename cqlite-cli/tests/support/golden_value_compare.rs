@@ -249,6 +249,19 @@ pub fn compare_rows(
     }
     let mut golden: Vec<&Row> = golden.iter().collect();
     let mut cli: Vec<&Row> = cli.iter().collect();
+    // ROW ORDER, before the pairing sort discards it — the same rule
+    // [`compare_map`] applies to a map's entries (finding N2), one level up.
+    //
+    // Both sides walk ONE SSTable: `sstabledump` emits its partitions in on-disk
+    // (token) order and each partition's rows in clustering order, and a full scan
+    // of that same file sees the same sequence. So the emitted row order is a
+    // property with an oracle, and sorting both sides before comparing them
+    // discards it. Measured across the whole corpus at the time this was added:
+    // 56 case x format runs, all 56 agreeing, so this asserts an established
+    // property rather than hoping for one.
+    if let Some(why) = row_order_divergence(&golden, &cli, pk, ck, egress) {
+        report.diffs.push(why);
+    }
     // `sort_by_cached_key`: the key embeds the whole row (see `row_sort_key`), so a
     // 900-row table with 300-byte payloads would otherwise rebuild multi-kilobyte
     // keys O(n log n) times.
@@ -383,6 +396,32 @@ pub fn compare_rows(
     }
     report.stale_skips = skips.stale();
     report
+}
+
+/// The first position where the two sides' EMITTED row order differs, or `None`.
+///
+/// Keyed on the primary key alone (the rows are paired by it), and reported ONCE
+/// with the first divergent position rather than per row: a single moved row makes
+/// every later position differ, and 900 lines saying so name nothing.
+fn row_order_divergence(
+    golden: &[&Row],
+    cli: &[&Row],
+    pk: &[&str],
+    ck: &[&str],
+    egress: Egress,
+) -> Option<String> {
+    let key = |r: &&Row| row_message_key(r, pk, ck, egress);
+    let g: Vec<String> = golden.iter().map(key).collect();
+    let c: Vec<String> = cli.iter().map(key).collect();
+    let at = g.iter().zip(c.iter()).position(|(a, b)| a != b)?;
+    Some(format!(
+        "row order: the {egress:?} egress emits row {at} as `{}` where the golden \
+         emits `{}` — both sides walk ONE SSTable, whose partitions the dump emits \
+         in on-disk order and whose rows it emits in clustering order, so the \
+         emitted row order is compared and not sorted away",
+        brief(&c[at]),
+        brief(&g[at])
+    ))
 }
 
 /// Columns present on either side that the committed `CREATE TABLE` does not

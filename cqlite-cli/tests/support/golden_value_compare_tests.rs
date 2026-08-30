@@ -666,6 +666,66 @@ fn a_map_key_relaxation_is_the_goldens_and_the_cli_keeps_its_declared_kind() {
     );
 }
 
+/// Finding N2's shape ONE LEVEL UP: the emitted ROW order is compared, not sorted
+/// away.
+///
+/// Both sides walk one SSTable — `sstabledump` emits partitions in on-disk order
+/// and rows in clustering order — so a reordering is a divergence. The sort stays,
+/// because pairing must be total whatever the order, but it no longer DISCARDS the
+/// property: measured over the whole corpus, all 56 case x format runs agree.
+#[test]
+fn the_emitted_row_order_is_compared_and_the_pairing_still_works() {
+    let schema = schema_of(NUM_DDL, "t");
+    let golden = vec![
+        row(&[("id", json!("1")), ("n", json!(10))]),
+        row(&[("id", json!("2")), ("n", json!(20))]),
+    ];
+    let in_order = vec![
+        row(&[("id", json!(1)), ("n", json!(10))]),
+        row(&[("id", json!(2)), ("n", json!(20))]),
+    ];
+    let report = compare_rows(&golden, &in_order, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+
+    let reversed = vec![
+        row(&[("id", json!(2)), ("n", json!(20))]),
+        row(&[("id", json!(1)), ("n", json!(10))]),
+    ];
+    let report = compare_rows(&golden, &reversed, &schema, &["id"], &[], &[], Egress::Json);
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a reordered result set must fail exactly once: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].starts_with("row order:"),
+        "{:?}",
+        report.diffs
+    );
+    assert_eq!(
+        report.compared_cells, 4,
+        "the pairing still runs, so the values are still compared"
+    );
+
+    // A reordered result set with a WRONG value reports both: the order line and
+    // the value line, because the pairing is by key and not by position.
+    let reordered_and_wrong = vec![
+        row(&[("id", json!(2)), ("n", json!(20))]),
+        row(&[("id", json!(1)), ("n", json!(99))]),
+    ];
+    let report = compare_rows(
+        &golden,
+        &reordered_and_wrong,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(report.diffs.len(), 2, "{:?}", report.diffs);
+}
+
 /// A UDT's fields are emitted in DECLARATION order, on both sides.
 ///
 /// `cassandra-5.0.8 UserType.toJSONString` iterates `stringFieldNames` in order,
