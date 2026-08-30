@@ -722,14 +722,38 @@ describe('leak-budget statistic (pure, issue #1465)', () => {
     expect(LEAK_BUDGET_RELAX_TOKEN).toBe('2x-ceilings');
   });
 
-  test('THIS run is strict unless it declared otherwise', () => {
-    // Pins the live wiring, not just the pure function: if the ceilings are doubled,
-    // BUDGETS_RELAXED must be true (and the file printed its declaration).
-    expect(BUDGET_RELAX_MULTIPLIER).toBe(BUDGETS_RELAXED ? 2 : 1);
+  test('a GATE-OF-RECORD run can never be relaxed (defence in depth)', () => {
+    // The previous version of this test asserted
+    // `BUDGET_RELAX_MULTIPLIER === (BUDGETS_RELAXED ? 2 : 1)`, which cannot fail on a
+    // relaxed run — so nothing IN THE LANE could catch a relaxed gate, and the
+    // gate-side `env -u` was the sole control. X1 then showed that single control
+    // breaking (an operand-order bug made the component exit 127), which is exactly
+    // why this needs a second, independent check.
+    //
+    // The signal: `CQLITE_JEST_JSON` is exported ONLY by the gate's node-bindings
+    // component (it is where that component tells jest to write the report the
+    // named-budget affirmation reads). Its presence therefore means "this is the
+    // merge-gating execution", and in that execution relaxation is forbidden.
+    const inGateComponent = (process.env.CQLITE_JEST_JSON || '') !== '';
+    if (inGateComponent) {
+      expect(process.env.CQLITE_LEAK_BUDGET_RELAX || '<unset>').not.toBe(
+        LEAK_BUDGET_RELAX_TOKEN
+      );
+      expect(BUDGETS_RELAXED).toBe(false);
+      expect(BUDGET_BYTES).toBe(32 * 1024);
+      expect(STREAM_MEDIAN_CEILING_BYTES).toBe(64 * 1024);
+      expect(ERROR_MEDIAN_GROSS_CEILING_BYTES).toBe(512 * 1024);
+      expect(RSS_BUDGET_BYTES).toBe(96 * 1024 * 1024);
+    }
+    // Everywhere (gate or not): each ceiling must be its documented base times the
+    // multiplier — this catches a hard-coded doubled base, which no env check would.
     expect(BUDGET_BYTES).toBe(32 * 1024 * BUDGET_RELAX_MULTIPLIER);
     expect(STREAM_MEDIAN_CEILING_BYTES).toBe(64 * 1024 * BUDGET_RELAX_MULTIPLIER);
     expect(ERROR_MEDIAN_GROSS_CEILING_BYTES).toBe(512 * 1024 * BUDGET_RELAX_MULTIPLIER);
     expect(RSS_BUDGET_BYTES).toBe(96 * 1024 * 1024 * BUDGET_RELAX_MULTIPLIER);
+    // WHAT THIS DELIBERATELY DOES NOT DO: red on a relaxed run OUTSIDE the gate.
+    // node-ci.yml's exempt legs relax on purpose and declare it; failing them here
+    // would be the flaky red on an exempt lane that the opt-in exists to avoid.
   });
 
   test('the quorum is a majority of MEASURE_PASSES', () => {

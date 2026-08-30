@@ -4563,6 +4563,30 @@ nll_env_launches=$(printf '%s\n' "$nll_comp_v1" | grep -cE '^[[:space:]]*if (! )
 nll_env_stripped=$(printf '%s\n' "$nll_comp_v1" | grep -c 'leak_strict_env\[@\]')
 [ "$nll_env_launches" -ge 2 ] && [ "$nll_env_stripped" -eq "$nll_env_launches" ] \
   || { nll_v1_ok=0; echo "  $nll_env_stripped of $nll_env_launches env launches strip CQLITE_LEAK_BUDGET_RELAX"; }
+# ...AND IN THE RIGHT ORDER, which is the property presence cannot see (round 13, X1,
+# roborev High). `env` stops parsing options at the first operand, so a `-u` placed after a
+# NAME=VALUE is treated as the COMMAND: in full-gate mode `fixture_env` is
+# `CQLITE_REQUIRE_FIXTURES=1`, and `env "${fixture_env[@]}" "${leak_strict_env[@]}" …`
+# died with `env: '-u': No such file or directory` (127) on every host with node+npm —
+# while `--only`/`--lite`, where `fixture_env` is itself the `-u` pair, passed. Only an
+# order assertion distinguishes those two compositions, so this counts POSITIONS.
+nll_order_ok=1
+nll_order_seen=0
+while IFS= read -r _envline; do
+  nll_order_seen=$((nll_order_seen + 1))
+  # position of the first NAME=VALUE (or the fixture_env array, which IS an assignment in
+  # full-gate mode) vs the position of the option-bearing unset array
+  _first_assign=$(printf '%s\n' "$_envline" | tr ' ' '\n' | grep -nE '^[A-Za-z_][A-Za-z0-9_]*=|fixture_env\[@\]' | head -1 | cut -d: -f1)
+  _opt_pos=$(printf '%s\n' "$_envline" | tr ' ' '\n' | grep -nE '^-u$|^-i$|leak_strict_env\[@\]' | head -1 | cut -d: -f1)
+  if [ -n "$_first_assign" ] && [ -n "$_opt_pos" ] && [ "$_opt_pos" -gt "$_first_assign" ]; then
+    nll_order_ok=0
+    echo "  operand-order hazard: an option/unset-array at position $_opt_pos follows an assignment at $_first_assign in: $_envline"
+  fi
+done <<EOF_ORDER
+$(printf '%s\n' "$nll_comp_v1" | tr '\n' '\001' | sed 's/\\\001[[:space:]]*/ /g' | tr '\001' '\n' | grep -E '^[[:space:]]*if (! )?env ')
+EOF_ORDER
+[ "$nll_order_seen" -ge 2 ] || { nll_order_ok=0; echo "  only $nll_order_seen env launch(es) found to order-check (expected >= 2)"; }
+[ "$nll_order_ok" -eq 1 ] || nll_v1_ok=0
 if [ ! -r "$nll_leakfile_v1" ]; then
   nll_v1_ok=0; echo "  leak lane not readable at $nll_leakfile_v1"
 else
@@ -4574,7 +4598,7 @@ else
     || { nll_v1_ok=0; echo "  the lane has no named opt-in resolver"; }
 fi
 if [ "$nll_v1_ok" -eq 1 ]; then
-  ok "1465-gate-strict: node-bindings unsets CQLITE_LEAK_BUDGET_RELAX for all $nll_env_launches node launches, and the lane decides relaxation by a named opt-in rather than an ambient CI marker"
+  ok "1465-gate-strict: node-bindings unsets CQLITE_LEAK_BUDGET_RELAX for all $nll_env_launches node launches, every -u PRECEDES every assignment in all $nll_order_seen of them (the X1 full-gate hazard), and the lane decides relaxation by a named opt-in rather than an ambient CI marker"
 else
   bad "1465-gate-strict: the gate path could be relaxed by an inherited environment (see above)"
 fi

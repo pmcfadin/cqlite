@@ -6750,7 +6750,14 @@ run_node_bindings() {
   # extra args after `--` reach jest. MEASURED: the human `Test Suites:`/`Tests:` summary the
   # aggregate guard parses is STILL emitted alongside the JSON file, so both guards keep their
   # inputs.
-  if env "${fixture_env[@]}" "${leak_strict_env[@]}" \
+  # OPERAND ORDER IS LOAD-BEARING (issue #1465 X1, roborev High): `env` stops parsing
+  # options at the FIRST operand, so every `-u` must precede every NAME=VALUE. In FULL-gate
+  # mode `fixture_env` IS an assignment (`CQLITE_REQUIRE_FIXTURES=1`), so putting it first
+  # made `env` try to EXECUTE `-u`:
+  #     env: '-u': No such file or directory   -> 127 -> node-bindings FAIL on every host
+  # `--only`/`--lite` could not see it: there `fixture_env` is itself the `-u` pair, so the
+  # options happened to come first. The unset array therefore goes FIRST, unconditionally.
+  if env "${leak_strict_env[@]}" "${fixture_env[@]}" \
      CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
      CQLITE_JEST_JSON="$suite_json" \
      RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
