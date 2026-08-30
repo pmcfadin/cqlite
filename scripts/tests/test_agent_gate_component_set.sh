@@ -1706,14 +1706,13 @@ id_bad=""
 for _u in "https://github.com/pmcfadin/cqlite.git" \
           "https://github.com/pmcfadin/cqlite" \
           "https://github.com/pmcfadin/cqlite/" \
-          "http://github.com/pmcfadin/cqlite.git" \
+          "https://github.com:443/pmcfadin/cqlite.git" \
           "git@github.com:pmcfadin/cqlite.git" \
           "git@github.com:/pmcfadin/cqlite.git" \
           "ssh://git@github.com/pmcfadin/cqlite.git" \
           "ssh://git@github.com:22/pmcfadin/cqlite" \
           "git+ssh://git@github.com/pmcfadin/cqlite.git" \
-          "git://github.com/pmcfadin/cqlite.git" \
-          "https://user:token@github.com/pmcfadin/cqlite.git" \
+          "https://x-access-token:ghp_example@github.com/pmcfadin/cqlite.git" \
           "HTTPS://WWW.GitHub.com/PMcFadin/CQLite.git/"; do
   [ "$(identity "$_u")" = canonical ] || id_bad="${id_bad:+$id_bad }REJECTED:$_u"
 done
@@ -1735,13 +1734,41 @@ for _u in "https://github.com/contributor/cqlite.git" \
           "/tmp/anything/pmcfadin/cqlite" \
           "file:///tmp/x/pmcfadin/cqlite.git" \
           "ssh://git@github.com:notaport/pmcfadin/cqlite" \
+          "http://github.com/pmcfadin/cqlite.git" \
+          "git://github.com/pmcfadin/cqlite.git" \
+          "ssh://git@github.com:2222/pmcfadin/cqlite" \
+          "https://github.com:8443/pmcfadin/cqlite" \
           "/tmp/scratch/my-clone.git"; do
   [ "$(identity "$_u")" = not-canonical ] || id_bad="${id_bad:+$id_bad }ACCEPTED:$_u"
 done
 if [ -z "$id_bad" ]; then
-  ok "3544-remote-identity: every canonical spelling of the pinned host is accepted; every unverifiable host (hostile, look-alike, alias, mirror, local path, unknown scheme) is rejected"
+  ok "3544-remote-identity: every axis of the URL grammar has a rule — authenticated transports + pinned host + default port + exact path accepted; http/git/file, non-default ports, look-alike and unverifiable hosts, aliases, mirrors and local paths rejected"
 else
   bad "3544-remote-identity: misclassified: $id_bad"
+fi
+
+# THE TRANSPORT AXIS, as its own case because its reason is different in KIND from the
+# others: `http://` and `git://` authenticate nothing, and this pre-flight EXTRACTS AND RUNS
+# the fetched repository's copy of the gate — so an on-path attacker who can impersonate
+# `github.com` supplies arbitrary git objects and gets CODE EXECUTION, not merely a wrong
+# baseline (roborev job 227, the High). The pair is asserted TOGETHER with their secure
+# counterparts on the SAME host and path, so the case can only be about the transport.
+tr_bad=""
+for _pair in "https://github.com/pmcfadin/cqlite.git=canonical" \
+             "http://github.com/pmcfadin/cqlite.git=not-canonical" \
+             "git://github.com/pmcfadin/cqlite.git=not-canonical" \
+             "ssh://git@github.com/pmcfadin/cqlite.git=canonical"; do
+  _u="${_pair%=*}"; _want="${_pair##*=}"
+  _got=$(identity "$_u")
+  [ "$_got" = "$_want" ] || tr_bad="${tr_bad:+$tr_bad }$_u(want $_want got $_got)"
+done
+# …and the rejection must NAME THE AXIS, so the reader learns which rule was broken rather
+# than "not canonical" for four different reasons.
+tr_marker=$(bash "$GATE" --component-set-remote-identity "http://github.com/pmcfadin/cqlite.git" 2>/dev/null | sed -n 's/^NORMALISED: //p')
+if [ -z "$tr_bad" ] && grep -q '^insecure-transport:' <<<"$tr_marker"; then
+  ok "3544-transport-axis: unauthenticated http/git are rejected on the canonical host+path (the baseline is EXECUTED), and the rejection names the axis"
+else
+  bad "3544-transport-axis: misclassified: ${tr_bad:-none}; marker '$tr_marker'"
 fi
 
 # (b) END TO END. A fork-shaped origin holding the SAME history as the branch: fetchable,
@@ -1828,6 +1855,33 @@ if [ "$(field VERDICT "$nu_out")" = UNMEASURED ] \
 else
   bad "3544-remote-unreadable: expected KIND remote-unreadable FAIL-CLOSED naming the empty URL"
   printf '%s\n' "$nu_out"
+fi
+
+# (d) NO CREDENTIAL LEAK (roborev job 227). A remote URL legitimately carries a token —
+# GitHub Actions rewrites `origin` to `https://x-access-token:<TOKEN>@github.com/…` — and this
+# pre-flight renders the offending URL into stderr AND into the SUMMARY block, which this
+# repository's workflow tells agents to PASTE INTO PR COMMENTS. So the leak path is the
+# documented practice, which is why this outranks its severity label. Asserted in BOTH
+# directions: the secret must appear in NEITHER stream, and `<redacted>` must appear in the
+# block — absence alone would also be satisfied by a diagnostic that lost the URL entirely, or
+# by a check that never ran.
+leak_secret="s3cr3t-3544-must-not-appear"
+leak=$(mkbranch leaky "$base_same" - --from-origin)
+( cd "$leak" && git remote set-url origin "https://x-access-token:$leak_secret@evil.example/pmcfadin/cqlite.git" ) >/dev/null 2>&1
+leak_sum="$tmp/leak-summary.txt"
+( cd "$leak" && AGENT_GATE_SUMMARY_FILE="$leak_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+    bash scripts/agent-gate.sh >"$tmp/leak.log" 2>&1 ); leak_rc=$?
+leak_hook=$(hook "$leak")
+if [ "$leak_rc" -ne 0 ] \
+   && ! grep -qF "$leak_secret" "$leak_sum" 2>/dev/null \
+   && ! grep -qF "$leak_secret" "$tmp/leak.log" 2>/dev/null \
+   && ! grep -qF "$leak_secret" <<<"$leak_hook" \
+   && grep -qF '<redacted>@evil.example' "$leak_sum" 2>/dev/null \
+   && grep -q 'remote-not-canonical' "$leak_sum" 2>/dev/null; then
+  ok "3544-no-credential-leak: a userinfo-bearing origin URL is REDACTED in the SUMMARY and never appears verbatim in the block, the log or the hook"
+else
+  bad "3544-no-credential-leak: the secret leaked, or the redacted form is absent (rc=$leak_rc)"
+  grep -n 'component-set\|preflight' "$leak_sum" 2>/dev/null | head -4
 fi
 
 # STRUCTURAL: the expected identity must be a LITERAL. An env-derived (or config-derived)

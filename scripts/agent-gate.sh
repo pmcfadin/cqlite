@@ -2749,50 +2749,89 @@ _component_set_bounded() {
 # the same hole one level out. There is no env var and none may be added.
 _CS_CANONICAL_REMOTE="github.com/pmcfadin/cqlite"
 
-# _component_set_normalise_remote <url>: the comparable `<host>/<owner>/<repo>` form of a
-# remote URL, or a NON-HOST form (`local:<path>` / `unsupported-scheme:<url>`) which can
-# never equal a `<host>/…` constant and therefore always fails closed. Deliberately total:
-# it never errors, so the caller has exactly one comparison to make.
+# THE GRAMMAR, AXIS BY AXIS, WITH A STATED RULE FOR EACH (roborev job 227). Three rounds of
+# this check were "too permissive" in a NEW place each time — round 4 had no host at all,
+# round 5 pinned the host but not the transport, and round 6 found `http://`/`git://`
+# accepted. Patching the newest instance is what produced the next one, so the grammar is
+# CLOSED here instead: a git remote URL has exactly the axes below, each axis has one rule,
+# and there is therefore no further variant to find. A NEW axis would be a change to git's
+# URL syntax, not a gap in this list.
 #
-# Lowercased whole: scheme and host are case-insensitive by RFC, and GitHub treats
-# owner/repo case-insensitively too, so this direction only ever ACCEPTS a legitimate
-# spelling. `tr -d '[:space:]'`: a git URL has no legitimate whitespace, and removing it can
-# only make a pathological value fail a later comparison — never turn a fork into upstream.
+#   TRANSPORT  ACCEPT `https://`, `ssh://`, `git+ssh://`, and the scp-form `git@host:path`.
+#              REJECT `http://` and `git://` — both are UNAUTHENTICATED, and this pre-flight
+#              EXTRACTS AND RUNS the fetched repository's own `agent-gate.sh`, so anyone able
+#              to impersonate the hostname on the wire supplies arbitrary git objects and gets
+#              CODE EXECUTION (job 227, the High). Also REJECT `file://`, any other scheme,
+#              and a bare LOCAL PATH: their integrity rests on a filesystem this gate cannot
+#              vouch for, and a local path needs no attacker at all (round 5's finding).
+#   USERINFO   ACCEPTED (any), and REDACTED from every rendering — see
+#              _component_set_redact_url. Rejecting it was considered and refused: GitHub
+#              Actions' own checkout rewrites `origin` to
+#              `https://x-access-token:<TOKEN>@github.com/<owner>/<repo>`, so rejecting
+#              userinfo would red a legitimate CI checkout, and a guard that reds on correct
+#              input is the guard agents learn to waive. It carries no identity, so it is
+#              dropped before the comparison.
+#   HOST       EXACTLY `github.com`, case-insensitively, with an optional `www.`.
+#   PORT       ACCEPTED only when it is the scheme's DEFAULT (443 for https, 22 for ssh) —
+#              i.e. an explicit port that changes nothing. A NON-DEFAULT port on `github.com`
+#              is a different endpoint, so it is not the canonical upstream. scp-form has no
+#              port axis at all (git reads `host:path`), which is why the port rule lives only
+#              in the scheme arm.
+#   PATH       EXACTLY `pmcfadin/cqlite`, with an optional trailing `.git` and optional
+#              surrounding `/`.
+#
+# _component_set_normalise_remote <url>: the comparable `<host>/<owner>/<repo>` form of a
+# remote URL, or a NON-CANONICAL form (`local:<path>`, `unsupported-scheme:<url>`,
+# `insecure-transport:<url>`, `non-default-port:<host>/<path>`) which can never equal a
+# `<host>/<path>` constant and therefore always fails closed. Deliberately total: it never
+# errors, so the caller has exactly one comparison to make, and the marker NAMES the axis that
+# rejected it so the diagnostic can say which rule was broken.
+#
+# Lowercased whole: scheme and host are case-insensitive by RFC, and GitHub treats owner/repo
+# case-insensitively too, so this direction only ever ACCEPTS a legitimate spelling.
+# `tr -d '[:space:]'`: a git URL has no legitimate whitespace, and removing it can only make a
+# pathological value fail a later comparison — never turn a fork into upstream.
 _component_set_normalise_remote() {
-  local u scheme=0 host path hport
+  local u scheme="" host path hport
   u=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
   case "$u" in
-    https://*)   scheme=1; u="${u#https://}" ;;
-    http://*)    scheme=1; u="${u#http://}" ;;
-    ssh://*)     scheme=1; u="${u#ssh://}" ;;
-    git+ssh://*) scheme=1; u="${u#git+ssh://}" ;;
-    git://*)     scheme=1; u="${u#git://}" ;;
-    # ANY OTHER SCHEME IS UNVERIFIABLE, INCLUDING `file://`: naming it explicitly here is
-    # what stops a future reader "fixing" the local-path branch by adding a scheme.
-    *://*)       printf 'unsupported-scheme:%s' "$u"; return 0 ;;
+    https://*)   scheme=https; u="${u#https://}" ;;
+    ssh://*)     scheme=ssh;   u="${u#ssh://}" ;;
+    git+ssh://*) scheme=ssh;   u="${u#git+ssh://}" ;;
+    # UNAUTHENTICATED TRANSPORTS, named individually so nobody "restores" one as a spelling:
+    # with no server authentication, an on-path attacker IS the baseline, and the baseline is
+    # EXECUTED.
+    #
+    # THE MARKER NAMES THE SCHEME AND NOT THE URL, deliberately: the rejected value may carry
+    # USERINFO (`http://x-access-token:<TOKEN>@…`), this output is rendered into `_CS_DETAIL`,
+    # and `_CS_DETAIL` reaches the SUMMARY block agents paste into PR comments. Redaction lives
+    # in _component_set_redact_url for the RAW url; a normalised form must simply never carry a
+    # credential in the first place.
+    http://*|git://*)
+      printf 'insecure-transport:%s' "${u%%://*}"; return 0 ;;
+    # Any other scheme, `file://` included: naming it explicitly is what stops a future reader
+    # "fixing" the local-path branch by adding a scheme.
+    *://*)       printf 'unsupported-scheme:%s' "${u%%://*}"; return 0 ;;
   esac
-  # USERINFO, stripped only when the `@` is in the AUTHORITY (before the first `/`) — an
-  # `@` inside a path is path data, not credentials.
+  # USERINFO, dropped only when the `@` is in the AUTHORITY (before the first `/`) — an `@`
+  # inside a path is path data, not credentials. It carries no identity; it is redacted, never
+  # rendered, by _component_set_redact_url.
   case "${u%%/*}" in
     *@*) u="${u#*@}" ;;
   esac
-  if [ "$scheme" -eq 1 ]; then
+  if [ -n "$scheme" ]; then
     host="${u%%/*}"
     case "$u" in */*) path="${u#*/}" ;; *) path="" ;; esac
-    # An explicit port is legal ONLY in the scheme form. Stripped only when it is ALL
-    # DIGITS; anything else stays in `host` and fails the comparison rather than being
-    # guessed at.
     case "$host" in
       *:*) hport="${host##*:}"
-           case "$hport" in
-             ''|*[!0-9]*) : ;;
-             *) host="${host%:*}" ;;
+           case "$scheme/$hport" in
+             https/443|ssh/22) host="${host%:*}" ;;
+             *) printf 'non-default-port:%s' "$u"; return 0 ;;
            esac ;;
     esac
   else
-    # NO SCHEME: git reads `host:path` as scp-like, and everything else as a LOCAL PATH.
-    # scp-like syntax has NO port, so there is no ambiguity to resolve here — which is why
-    # the port branch above lives only in the scheme arm.
+    # NO SCHEME: git reads `host:path` as scp-like (an AUTHENTICATED ssh transport), and
+    # everything else as a LOCAL PATH.
     case "${u%%/*}" in
       *:*) host="${u%%:*}"; path="${u#*:}" ;;
       *)   printf 'local:%s' "$(_component_set_strip_repo_suffix "$u")"; return 0 ;;
@@ -2815,6 +2854,31 @@ _component_set_strip_repo_suffix() {
     esac
   done
   printf '%s' "$p"
+}
+
+# _component_set_redact_url <url>: <url> with any AUTHORITY userinfo replaced by `<redacted>`,
+# for rendering in a diagnostic (roborev job 227). A remote URL legitimately carries a
+# credential — GitHub Actions writes `https://x-access-token:<TOKEN>@github.com/…` into
+# `origin` — and this gate's diagnostics reach TWO places that are routinely published: the
+# run's stderr/log bundle, and the SUMMARY block, which this repository's own workflow tells
+# agents to PASTE INTO PR COMMENTS. So the leak path is the documented practice, which is why
+# this outranks its severity label.
+#
+# BLANKET, never a judgement about which usernames are secret: `git@` and
+# `x-access-token:ghp_…` are indistinguishable to a rule, and the userinfo carries no identity
+# worth printing anyway. The host and path are preserved, because those are the fact a reader
+# needs. A URL with no authority userinfo passes through unchanged.
+_component_set_redact_url() {
+  local u="$1" scheme="" rest
+  case "$u" in
+    *://*) scheme="${u%%://*}://"; rest="${u#*://}" ;;
+    *)     rest="$u" ;;
+  esac
+  # Only an `@` BEFORE the first `/` is userinfo (an `@` in a path is path data).
+  case "${rest%%/*}" in
+    *@*) rest="<redacted>@${rest#*@}" ;;
+  esac
+  printf '%s%s' "$scheme" "$rest"
 }
 
 # _component_set_remote_is_canonical <url>: rc 0 iff <url> names the canonical upstream.
@@ -2935,7 +2999,9 @@ _component_set_probe() {
   fi
   if ! _component_set_remote_is_canonical "$origin_url"; then
     _CS_KIND=remote-not-canonical
-    _CS_DETAIL="origin is '$origin_url' (normalised '$(_component_set_normalise_remote "$origin_url")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork or a re-pointed remote is a DIFFERENT baseline, and comparing against it would stamp a PASS about the wrong component set"
+    # REDACTED, never the raw URL (job 227): this detail is rendered into the SUMMARY block,
+    # which the delivery workflow tells agents to paste into PR comments.
+    _CS_DETAIL="origin is '$(_component_set_redact_url "$origin_url")' (normalised '$(_component_set_normalise_remote "$origin_url")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork, a re-pointed remote, an unauthenticated transport (http/git) or a non-default port is a DIFFERENT baseline — and this pre-flight EXECUTES the baseline's copy of this script, so it must be the upstream and nothing else"
     return 0
   fi
 
