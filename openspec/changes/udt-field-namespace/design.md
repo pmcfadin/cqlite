@@ -114,3 +114,38 @@ goes blind. Proposed as a follow-up on the issue thread under `coord:follow-up-p
   Python analogue) and because symbol-keyed data is invisible to `JSON.stringify`, spreads and
   `Object.keys` — the parity harnesses and every doc example would need special handling to see the
   type at all.
+
+## Where the tests can actually execute (this constrained the plan, so it is recorded)
+
+Three candidate homes execute **nothing**, and picking one would have produced a green diff with no
+evidence behind it:
+
+- **`bindings/python/src/**` `#[cfg(test)]` — executes in NO component, anywhere.** `cargo test -p
+  cqlite-py` is structurally impossible: a pyo3 `cdylib` test harness cannot link libpython, because
+  the crate builds with `extension-module` and without `auto-initialize`. The ~14 existing
+  `Python::with_gil` unit tests in that crate already run nowhere; they compile under clippy and stop
+  there. `binding-rust-tests` names this as a census omission and only grep-counts the `#[test]`s.
+- **`bindings/node/src/value_tests.rs` cannot assert the produced object.** That suite *is* executed
+  (`binding-rust-tests`, which never SKIPs), but `udt_to_object` needs a `ConvCtx` holding a live napi
+  `Env`, and an `Env` cannot be fabricated off-thread — the suite's own comments say it exists to test
+  Env-free helpers only.
+- **A corpus-rooted fixture is invisible to the binding suites.** `conftest.py` and `helpers.js` take
+  the corpus from `CQLITE_DATASETS_ROOT` and never fall back to the checkout, so anything committed
+  under `test-data/datasets/sstables/` is unreachable on a box where that env is set — i.e. on every
+  gate run. Hence the fixture is committed **checkout-relative**, on the
+  `cqlite-core/tests/fixtures/issue_2225/` precedent, where no env var can hide it.
+
+So the collision assertions live in `bindings/python/tests/*.py` (`python-bindings`) and
+`bindings/node/__test__/*.test.js` (`node-bindings`). **Both of those components SKIP when their
+toolchain is absent**, so AC2's evidence rides on SKIP-able lanes. That is stated in the PR rather
+than engineered around: the alternative — inventing an Env-free abstraction inside `udt_to_object`
+purely to host a never-SKIP `binding-rust-tests` case — would be a harness that never reaches the
+shipped code path, which is worse than a declared SKIP.
+
+**The fixture is Cassandra-written, not CQLite-written.** Not because the round-trip warning applies
+to this defect — it does not; the defect is entirely above decode, so a constructed in-memory
+`Value::Udt` would be a legitimate oracle for the *rendering* rule — but because a Cassandra-written
+fixture additionally proves the **decoder** can produce such a UDT at all, which a constructed value
+cannot, and because it is reusable by #3497/#3500/#1455. Note also that the CQLite write path could
+not supply it anyway: nothing in `cqlite-core/src/cql/` ever constructs a `CqlLiteral::Udt`, so an
+`INSERT` cannot produce a UDT, and the codec hard-codes an empty keyspace for one.

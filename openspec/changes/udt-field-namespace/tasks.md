@@ -30,39 +30,72 @@ Public surface exercised by each task is named, per `openspec/config.yaml`.
 - [ ] 3.2 Do NOT add `Tuple`/`Set` arms (#3500). Confirm no behaviour change for shapes that
   currently succeed.
 
-## 4. Tests (each maps to a spec scenario)
-- [ ] 4.1 Rust unit tests in `bindings/python/src/value.rs` constructing a `Value::Udt` with fields
-  named `_type` and `_keyspace`: assert type identity + all three field values recoverable, and
-  `len == 3`. **Executed by**: `binding-rust-tests`.
-- [ ] 4.2 Rust unit tests in `bindings/node/src/value_tests.rs` for the same input asserting the
-  `{typeName, keyspace, fields}` shape. **Executed by**: `binding-rust-tests`.
-- [ ] 4.3 Site-4 unit test: colliding-field UDT as a map key → exactly one `_type` entry; plus the
-  two-different-types-same-fields distinctness case. **Executed by**: `binding-rust-tests`.
-- [ ] 4.4 Python-level tests: update `test_types_collections_udt.py` (6 assertion sites) from
-  `"_type" in udt` to `.type_name`; keep them dataset-skip-clean.
-  **Executed by**: `python-bindings`.
-- [ ] 4.5 Node-level tests: update `types.test.js` (5 sites) to the new shape.
-  **Executed by**: `node-bindings`.
-- [ ] 4.6 `test_cli_parity.py`: retarget `test_udt_field_named_keyspace_is_dropped` (it pins the
-  DEFECT — rewrite to pin the fix), update the a-3 projection expectation and `_udt()` helper, and
-  retype the normalizer's UDT branch off the `"_type" in value` sniff. Leave the site-2 test
-  (`test_map_with_literal_type_key_is_misclassified_as_a_udt`) and the site-1 test asserting their
-  current, still-true behaviour. **Executed by**: `python-bindings`.
-- [ ] 4.7 Stub-fidelity: `test_stub_fidelity.py` green with `TYPE_ONLY_STUB_NAMES` still empty;
-  `typescript-definitions.test.js` drift alarm + no-`any` green.
-- [ ] 4.8 Cross-binding parity assertion for AC3 (same input → equal facts both sides).
+## 4. The test subject — a Cassandra-written colliding UDT fixture
 
-## 5. Docs
-- [ ] 5.1 `docs/development/M4_spec.md` §5.3: sites 3+4 → FIXED with mechanism; site 2 stays OPEN
+No corpus fixture declares a `_type`/`_keyspace` field, and the issue names generating one as part of
+the fix. **Cassandra-written, not CQLite-written**, and committed **checkout-relative**.
+
+- [ ] 4.1 `test-data/scripts/generate-issue-3504-udt-collision.sh` on the
+  `generate-compaction-parity-udt.sh` pattern: Cassandra 5.0 container,
+  `CREATE TYPE collide ("_type" text, "_keyspace" text, real_field int)` (quoted identifiers —
+  `parse_create_type` already accepts them), one table with a `frozen<collide>` column AND a
+  `map<frozen<collide>, int>` column (the latter is site 4's subject), insert, `nodetool flush`, export.
+- [ ] 4.2 Commit the SSTable components with `git add -f` (`*.db` is gitignored; force-adding tiny
+  parity references is mandated doctrine) under a **checkout-relative per-issue** directory on the
+  `cqlite-core/tests/fixtures/issue_2225/` precedent — NOT under `test-data/datasets/sstables/`.
+  **Why:** `bindings/python/tests/conftest.py` and `bindings/node/__test__/helpers.js` resolve the
+  corpus from `CQLITE_DATASETS_ROOT` and never fall back to the checkout, so a corpus-rooted fixture
+  is invisible on any box with that env set — which is every gate run. A checkout-relative path
+  cannot be hidden by an env var. Commit the `.cql` schema alongside.
+- [ ] 4.3 Record the sstabledump JSONL golden for the new table.
+
+## 5. Tests (each maps to a spec scenario; executor named because several candidate homes execute NOTHING)
+
+**Constraint that shapes all of this**: `cargo test -p cqlite-py` is *structurally impossible* (a pyo3
+`cdylib` test harness cannot link libpython — no `auto-initialize`), so a `#[cfg(test)]` test in
+`bindings/python/src/**` executes in **no component anywhere** and is a dead test. And a napi `Env`
+cannot be fabricated off-thread, so `udt_to_object`'s produced object cannot be asserted from
+`bindings/node/src/value_tests.rs`. Therefore the collision assertions live at script level.
+
+- [ ] 5.1 Python, `bindings/python/tests/test_issue_3504_udt_field_namespace.py`: read the 4.2 fixture
+  through the public query API; assert `.type_name`/`.keyspace` plus all three field values, `len == 3`,
+  `udt["_type"]` returns the FIELD, and `udt["_type"]` on a non-colliding UDT raises `KeyError`.
+  **Executed by**: `python-bindings` (`maturin develop` + `pytest bindings/python/tests`).
+- [ ] 5.2 Node, `bindings/node/__test__/issue-3504-udt-field-namespace.test.js`: same input, asserting
+  `{typeName, keyspace, fields}` and that `Object.keys(result)` holds no field name.
+  **Executed by**: `node-bindings` (whole jest suite).
+- [ ] 5.3 Site 4 (Python only): the `map<frozen<collide>, int>` column → exactly one `_type` entry in
+  the projected key, identity recoverable; plus two-different-types-same-fields distinctness.
+  **Executed by**: `python-bindings`.
+- [ ] 5.4 Cross-binding parity for AC3: same fixture, compare type name / keyspace / field mapping as
+  DATA across the two suites.
+- [ ] 5.5 Update `test_types_collections_udt.py` (6 assertion sites) from `"_type" in udt` to
+  `.type_name`; keep dataset-skip-clean. **Executed by**: `python-bindings`.
+- [ ] 5.6 Update `types.test.js` (5 sites) to the new shape. **Executed by**: `node-bindings`.
+- [ ] 5.7 `test_cli_parity.py`: retarget `test_udt_field_named_keyspace_is_dropped` — it pins the
+  DEFECT, so rewrite it to pin the fix; update the a-3 projection expectation and the `_udt()` helper;
+  retype the normalizer's UDT branch off the `"_type" in value` sniff (production no longer emits that
+  key, so leaving the sniff makes it dead for UDTs while still firing on maps). Leave the site-1 and
+  site-2 tests asserting their current, still-true behaviour. **Executed by**: `python-bindings`
+  (CLI-parity suite needs `RUN_SLOW_TESTS=1`).
+- [ ] 5.8 Stub fidelity: `test_stub_fidelity.py` green with `TYPE_ONLY_STUB_NAMES` still **empty**;
+  `typescript-definitions.test.js` drift alarm + the no-`any` rule green.
+- [ ] 5.9 **State the SKIP exposure in the PR rather than papering over it**: both `python-bindings`
+  and `node-bindings` SKIP without their toolchain, so AC2's evidence rides on SKIP-able components.
+  Do NOT manufacture a never-SKIP `binding-rust-tests` test by inventing an Env-free abstraction the
+  fix does not otherwise need — a harness that never reaches the code is worse than a declared SKIP.
+
+## 6. Docs
+- [ ] 6.1 `docs/development/M4_spec.md` §5.3: sites 3+4 → FIXED with mechanism; site 2 stays OPEN
   attributed to #3497, noting the new structural signal; correct the oracle table.
-- [ ] 5.2 `bindings/python/README.md` (:308) and `bindings/node/README.md` (:352), the module doc
+- [ ] 6.2 `bindings/python/README.md` (:308) and `bindings/node/README.md` (:352), the module doc
   tables (`python/src/value.rs`, `node/src/value.rs`), and `node/examples/type-handling.ts` +
   `error-handling.ts` — no example may still show the flat shape as current.
-- [ ] 5.3 CHANGELOG: note the breaking binding-surface change and the migration
+- [ ] 6.3 CHANGELOG: note the breaking binding-surface change and the migration
   (`udt["_type"]` → `udt.type_name` / `result._type` → `result.typeName`).
 
-## 6. Certification
-- [ ] 6.1 `scripts/agent-gate.sh --lite` PASS each fix round (summary-file redirect).
-- [ ] 6.2 `rust-reviewer` + sanctioned roborev clean on the lite-green diff, BEFORE any full gate.
-- [ ] 6.3 ONE full `scripts/agent-gate.sh` (gate of record) in `flow-closer`; `spec-auditor` C PASS
+## 7. Certification
+- [ ] 7.1 `scripts/agent-gate.sh --lite` PASS each fix round (summary-file redirect).
+- [ ] 7.2 `rust-reviewer` + sanctioned roborev clean on the lite-green diff, BEFORE any full gate.
+- [ ] 7.3 ONE full `scripts/agent-gate.sh` (gate of record) in `flow-closer`; `spec-auditor` C PASS
   against this spec; final roborev clean; then `gh pr merge --auto --squash --delete-branch`.
