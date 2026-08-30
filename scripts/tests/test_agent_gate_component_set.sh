@@ -37,11 +37,11 @@
 #                  baseline-unreadable (3d); manifest-missing, manifest-garbage,
 #                  manifest-stale (3e2); no-git, baseline-workspace, no-tool (3f);
 #                  unboundable (3g); baseline-transfer-mismatch (5f);
-#                  baseline-probe-unmeasured (3a-iv);
+#                  baseline-probe-unmeasured (3a-iv); baseline-ref-unparsable (2b);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10).
-# EIGHTEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
-# set from several places, and `ok` is the nineteenth value). THE SET CHANGED SHAPE with #3544
+# NINETEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
+# set from several places, and `ok` is the twentieth value). THE SET CHANGED SHAPE with #3544
 # REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
 # `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
 # fail at (`baseline-unreadable`, `baseline-set-garbage`, `baseline-set-empty`,
@@ -533,6 +533,10 @@ mkgitshim() {
         printf 'for a in "$@"; do if [ "$a" = ls-tree ]; then echo "gitshim: ls-tree refused" >&2; exit 128; fi; done\n' ;;
       fail-manifest-show)
         printf 'for a in "$@"; do case "$a" in *:scripts/agent-gate.components) echo "gitshim: manifest blob read refused" >&2; exit 128 ;; esac; done\n' ;;
+      lsremote-not-a-sha)
+        printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then printf "%%s\\t%%s\\n" "deadbeef-not-an-object-id" "refs/heads/main"; exit 0; fi; done\n' ;;
+      lsremote-wrong-ref)
+        printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then printf "%%s\\t%%s\\n" "0000000000000000000000000000000000000000" "refs/heads/somewhere-else"; exit 0; fi; done\n' ;;
       *) echo "FATAL: mkgitshim: unknown mode '$mode'" >&2; exit 1 ;;
     esac
     printf 'exec "$REAL" "$@"\n'
@@ -611,6 +615,80 @@ elif [ "$(field VERDICT "$probe_out")" = UNMEASURED ] \
 else
   bad "3544-manifest-probe-unmeasured: expected KIND baseline-probe-unmeasured naming the probe, with no fallback"
   printf '%s\n' "$probe_out"
+fi
+
+# ---------------------------------------------------------------------------
+# 3a-v. THE REF ORACLE'S OUTPUT IS REMOTE-CONTROLLED TEXT, SO IT IS VALIDATED (job 258). The
+#     pre-flight now learns the baseline sha from `git ls-remote` — which downloads no objects
+#     and replaced a 92 MB full-history fetch — and that value is interpolated into later `git`
+#     arguments AND into the SUMMARY block this repository tells agents to paste into PR
+#     comments. So it is CHECKED, not merely split: an object id of a known length, and the ref
+#     name that was asked for. Both halves are driven, because a validator that accepts the
+#     wrong ref would compare against a baseline nobody named.
+# ---------------------------------------------------------------------------
+base_lsr=$(mkbaseline base-lsr - )
+for _lsr_mode in lsremote-not-a-sha lsremote-wrong-ref; do
+  _lsr_fx=$(mkbranch "lsr-${_lsr_mode}" "$base_lsr" - )
+  _lsr_ctl=$(hook "$_lsr_fx")
+  _lsr_bin=$(mkgitshim "$_lsr_mode" "$_lsr_mode")
+  _lsr_out=$( fx "$_lsr_fx" && PATH="$_lsr_bin:$PATH" bash "$_lsr_fx/scripts/agent-gate.sh" \
+                --component-set-line full 2>/dev/null )
+  _lsr_line=$(field COMPONENT_SET_LINE "$_lsr_out")
+  if [ "$(field KIND "$_lsr_ctl")" != ok ]; then
+    bad "3544-ref-unparsable[$_lsr_mode]: the POSITIVE CONTROL (same fixture, no shim) did not reach KIND ok (got '$(field KIND "$_lsr_ctl")') — the case cannot discriminate"
+  elif [ "$(field VERDICT "$_lsr_out")" = UNMEASURED ] \
+     && [ "$(field KIND "$_lsr_out")" = baseline-ref-unparsable ] \
+     && [ "$(field SHA "$_lsr_out")" = "-" ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$_lsr_line" \
+     && grep -q 'remote-controlled text is validated' <<<"$_lsr_line"; then
+    ok "3544-ref-unparsable[$_lsr_mode]: an advertisement that is not <object-id> refs/heads/main is refused BY NAME, never passed on to a git argument or a SUMMARY line"
+  else
+    bad "3544-ref-unparsable[$_lsr_mode]: expected KIND baseline-ref-unparsable + SHA '-'"
+    printf '%s\n' "$_lsr_out"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# 3a-vi. THE OBJECTS ARE FETCHED ONLY WHEN THIS REPOSITORY LACKS THEM (job 258, the perf fix)
+#     — and BOTH paths must produce the SAME verdict for the same baseline. Measured on this box
+#     before the change: 3.74 s and 92 MB of full history downloaded into a fresh scratch
+#     repository on EVERY invocation, then deleted. After: 0.51 s and no object transfer when the
+#     commit is already here, which on this fleet is the common case (lanes are worktrees of ONE
+#     shared `.git`, so a peer's fetch — or this pre-flight's own slow path — already put it
+#     there). The sha still comes from the remote in THIS invocation; only the OBJECT transfer is
+#     skipped, and a git object is content-addressed, so "we hold <sha>" and "the remote
+#     advertises <sha>" is the same commit.
+#
+#     THE PAIR IS THE ASSERTION. A case that only saw `reused` could not tell the fast path from
+#     a broken fetch, and one that only saw `fetched` would not notice the fast path never
+#     running. Two fixtures off ONE baseline, in separate repositories so neither warms the
+#     other — the slow path leaves the objects behind, which is exactly how the first cut of the
+#     transfer-mismatch case stopped discriminating.
+# ---------------------------------------------------------------------------
+base_obj=$(mkbaseline base-obj - )
+obj_reuse=$(mkbranch obj-reuse "$base_obj" - --from-origin)
+obj_fetch=$(mkbranch obj-fetch "$base_obj" - --from-origin)
+# Advance origin/main only for the SECOND fixture's baseline read: it cloned before the advance,
+# so it cannot hold the new tip and must fetch.
+( fx "$tmp/base-obj-src" && printf 'advanced past both clones\n' >>README.md \
+  && git "${GIT_ID[@]}" commit -qam advance \
+  && git push -q "$base_obj" HEAD:refs/heads/main ) >/dev/null 2>&1
+obj_tip=$(git -C "$base_obj" rev-parse refs/heads/main)
+obj_fetch_out=$(hook "$obj_fetch")
+# …and the reuse fixture is brought up to date the way a peer's fetch would: fetching the tip
+# into a ref of its own. That is the state the fast path exists for.
+( fx "$obj_reuse" && git fetch -q origin refs/heads/main:refs/heads/peer-fetched ) >/dev/null 2>&1
+obj_reuse_out=$(hook "$obj_reuse")
+if [ "$(field BASELINE_OBJECTS "$obj_fetch_out")" = fetched ] \
+   && [ "$(field BASELINE_OBJECTS "$obj_reuse_out")" = reused ] \
+   && [ "$(field SHA "$obj_fetch_out")" = "$obj_tip" ] \
+   && [ "$(field SHA "$obj_reuse_out")" = "$obj_tip" ] \
+   && [ "$(field KIND "$obj_fetch_out")" = ok ] \
+   && [ "$(field KIND "$obj_reuse_out")" = ok ] \
+   && [ "$(field VERDICT "$obj_fetch_out")" = "$(field VERDICT "$obj_reuse_out")" ]; then
+  ok "3544-baseline-objects: objects are fetched only when absent (fetched/reused observed as a PAIR), and both paths report the SAME baseline sha and verdict"
+else
+  bad "3544-baseline-objects: expected fetched+reused as a pair on the same tip $obj_tip (fetch: objects=$(field BASELINE_OBJECTS "$obj_fetch_out") sha=$(field SHA "$obj_fetch_out") kind=$(field KIND "$obj_fetch_out"); reuse: objects=$(field BASELINE_OBJECTS "$obj_reuse_out") sha=$(field SHA "$obj_reuse_out") kind=$(field KIND "$obj_reuse_out"))"
 fi
 
 # 3b. the baseline's manifest lists NOTHING (an empty baseline must never be accepted). A
@@ -1579,8 +1657,9 @@ fr_out=$(hook "$fresh")
 fresh_cached_after=$(git -C "$fresh" rev-parse refs/remotes/origin/main 2>/dev/null)
 if [ "$(field SHA "$fr_out")" = "$fresh_tip" ] \
    && [ "$fresh_tip" != "$fresh_cached_before" ] \
+   && [ "$(field BASELINE_OBJECTS "$fr_out")" = fetched ] \
    && [ "$fresh_cached_after" = "$fresh_cached_before" ]; then
-  ok "3544-fresh-baseline: the comparison uses the FETCHED tip, and leaves the shared cached ref alone"
+  ok "3544-fresh-baseline: the comparison uses the FETCHED tip (objects really were fetched), and leaves the shared cached ref alone"
 else
   bad "3544-fresh-baseline: expected the new tip $fresh_tip (got '$(field SHA "$fr_out")'), cached ref unmoved (before='$fresh_cached_before' after='$fresh_cached_after')"
   printf '%s\n' "$fr_out"
@@ -1608,6 +1687,14 @@ fi
 # ---------------------------------------------------------------------------
 base_priv=$(mkbaseline base-priv - )
 priv=$(mkbranch priv "$base_priv" - --from-origin)
+# ADVANCE origin/main AFTER the clone, so this repository does NOT already hold the tip (job
+# 258). The pre-flight now asks the remote for the tip sha and only fetches objects when it
+# lacks them; a fixture that already holds the commit takes the fast path, no fetch happens, and
+# a case about a property OF THE FETCH would assert nothing. The `BASELINE_OBJECTS: fetched`
+# check below is what keeps that from happening silently again.
+( fx "$tmp/base-priv-src" && printf 'advance for the fetch path\n' >>README.md \
+  && git "${GIT_ID[@]}" commit -qam advance \
+  && git push -q "$base_priv" HEAD:refs/heads/main ) >/dev/null 2>&1
 priv_tip=$(git -C "$base_priv" rev-parse refs/heads/main)
 priv_decoy=$(git -C "$priv" rev-parse HEAD)          # the fixture's own commit — a REAL object,
                                                      # so a FETCH_HEAD read resolves it and
@@ -1633,11 +1720,14 @@ else
   pv_out=$( fx "$priv" && PATH="$priv_bin:$PATH" bash "$priv/scripts/agent-gate.sh" \
               --component-set-line full 2>/dev/null )
   pv_sha=$(field SHA "$pv_out")
+  pv_objects=$(field BASELINE_OBJECTS "$pv_out")
   pv_clobbered=$(git -C "$priv" rev-parse --verify --quiet 'FETCH_HEAD^{commit}' 2>/dev/null || echo none)
   pv_leaked=$(git -C "$priv" for-each-ref --format='%(refname)' 'refs/worktree/*' 2>/dev/null | grep -c . || true)
   # The stub must actually have clobbered FETCH_HEAD, or the case proves nothing: that is the
   # positive control for the simulation itself.
-  if [ "$pv_clobbered" != "$priv_decoy" ]; then
+  if [ "$pv_objects" != fetched ]; then
+    bad "3544-private-fetch-ref: no fetch happened (BASELINE_OBJECTS='$pv_objects') — this case is about a property OF THE FETCH, so it cannot discriminate; the fixture must not already hold origin/main's tip"
+  elif [ "$pv_clobbered" != "$priv_decoy" ]; then
     bad "3544-private-fetch-ref: the stub did NOT clobber FETCH_HEAD (found '$pv_clobbered', decoy '$priv_decoy') — the case cannot discriminate"
   elif [ "$pv_sha" = "$priv_tip" ] && [ "$pv_leaked" -eq 0 ]; then
     ok "3544-private-fetch-ref: a clobbered FETCH_HEAD does NOT change the baseline (reported the fetched tip), and the private refs/worktree ref is cleaned up"
@@ -1671,8 +1761,15 @@ tagged=$(mkbranch tagged "$base_tag" - --from-origin)
 # not the shape where nothing happens either way.
 git -C "$tagged" config remote.origin.tagOpt --tags
 # A NEW tag on the baseline, created AFTER the fixture cloned it — so an auto-following
-# fetch would have something to write.
-( fx "$tmp/base-tag-src" && git "${GIT_ID[@]}" tag -a v99.99.99-selftest -m 'tag the baseline' \
+# fetch would have something to write. The COMMIT is advanced in the same step, because the
+# pre-flight only fetches objects it does not already hold (job 258): a fixture still sitting on
+# origin/main's tip takes the fast path, performs NO fetch, and this case would then be asserting
+# that a fetch which never happened wrote no tags. `BASELINE_OBJECTS: fetched` below is the guard
+# against that recurring silently.
+( fx "$tmp/base-tag-src" && printf 'advance for the fetch path\n' >>README.md \
+    && git "${GIT_ID[@]}" commit -qam advance \
+    && git "${GIT_ID[@]}" tag -a v99.99.99-selftest -m 'tag the baseline' \
+    && git push -q "$base_tag" HEAD:refs/heads/main \
     && git push -q "$base_tag" refs/tags/v99.99.99-selftest ) >/dev/null 2>&1
 tags_before=$(git -C "$tagged" for-each-ref --format='%(refname) %(objectname)' refs/tags | sort)
 tg_out=$(hook "$tagged")
@@ -1680,11 +1777,12 @@ tags_after=$(git -C "$tagged" for-each-ref --format='%(refname) %(objectname)' r
 upstream_tag=$(git -C "$base_tag" for-each-ref --format='%(refname)' refs/tags | grep -c 'v99.99.99-selftest')
 if [ "$upstream_tag" -ge 1 ] \
    && [ "$(field KIND "$tg_out")" = ok ] \
+   && [ "$(field BASELINE_OBJECTS "$tg_out")" = fetched ] \
    && [ "$tags_after" = "$tags_before" ] \
    && ! printf '%s\n' "$tags_after" | grep -q 'v99.99.99-selftest'; then
-  ok "3544-no-tag-writes: the baseline fetch leaves shared refs/tags/* UNCHANGED even with tagOpt=--tags and a new upstream tag"
+  ok "3544-no-tag-writes: the baseline fetch leaves shared refs/tags/* UNCHANGED even with tagOpt=--tags and a new upstream tag (and a fetch DID happen: BASELINE_OBJECTS=fetched)"
 else
-  bad "3544-no-tag-writes: expected an unchanged tag ref set (upstream_tag=$upstream_tag kind=$(field KIND "$tg_out"))"
+  bad "3544-no-tag-writes: expected an unchanged tag ref set after a REAL fetch (upstream_tag=$upstream_tag kind=$(field KIND "$tg_out") objects=$(field BASELINE_OBJECTS "$tg_out"))"
   echo "   before: [$tags_before]"
   echo "   after:  [$tags_after]"
 fi
@@ -1714,9 +1812,14 @@ fi
 # ---------------------------------------------------------------------------
 base_mm=$(mkbaseline base-mismatch - )
 mm=$(mkbranch mismatch "$base_mm" - )
-# POSITIVE CONTROL FIRST: without the shim this fixture must reach a real verdict, or a
-# `baseline-transfer-mismatch` below could be any other breakage wearing that name.
-mm_ctl=$(hook "$mm")
+# THE CONTROL GETS ITS OWN FIXTURE, and that is not tidiness (job 258): the slow path WARMS the
+# repository it fetches into — the transferred objects survive the private ref's deletion — so
+# running the control against the SAME fixture made the measured run find the commit already
+# present, take the fast path, never reach hop 2, and report a clean PASS. The case failed
+# honestly ("expected baseline-transfer-mismatch") rather than passing vacuously, but only
+# because it asserts a KIND; two fixtures off one baseline removes the coupling entirely.
+mm_ctl_fx=$(mkbranch mismatch-control "$base_mm" - )
+mm_ctl=$(hook "$mm_ctl_fx")
 mm_decoy=$(git -C "$mm" rev-parse HEAD 2>/dev/null)
 mm_bin="$tmp/mismatch-bin"
 mkdir -p "$mm_bin"
@@ -1746,6 +1849,7 @@ elif [ "$mm_decoy" = "$mm_base_sha" ]; then
   bad "3544-transfer-mismatch: the decoy commit EQUALS the baseline sha, so the shim could not make the two hops disagree — the fixture would test nothing"
 elif [ "$(field VERDICT "$mm_out")" = UNMEASURED ] \
    && [ "$(field KIND "$mm_out")" = baseline-transfer-mismatch ] \
+   && [ "$(field BASELINE_OBJECTS "$mm_out")" = fetched ] \
    && [ "$(field SHA "$mm_out")" = "-" ] \
    && grep -q 'FAIL-CLOSED (#3544)' <<<"$mm_line" \
    && grep -qF "$mm_base_sha" <<<"$mm_line" \
@@ -2369,7 +2473,9 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=18   # +baseline-probe-unmeasured (the three-valued manifest presence
+DECLARED_KIND_COUNT=19   # +baseline-ref-unparsable (the ref oracle's output is
+                         # remote-controlled text and is VALIDATED, not merely parsed — job 258)
+                         # +baseline-probe-unmeasured (the three-valued manifest presence
                          # probe: "cannot tell" is REFUSED, never read as "absent"),
                          # +manifest-{missing,garbage,stale} +baseline-decl-unrecognised
                          # (#3544 REQ-3544-01); baseline-list-{failed,garbage,empty} and

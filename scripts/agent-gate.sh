@@ -2603,6 +2603,8 @@ _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT H
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
 _CS_FETCH_REF=""   # the PRIVATE per-run ref this invocation's fetch wrote (#3544 / job 227)
 _CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
+_CS_BASE_OBJ=""    # HOW the baseline COMMIT was obtained: reused (already in this repository)
+                   # | fetched (the isolated hop + verified transfer) — job 258
 _CS_BASE_SRC=""    # HOW the baseline set was read: manifest | declaration (#3544 REQ-3544-01)
 _CS_HEAD_SRC=""    # HOW HEAD's set was read: manifest | declaration
 _CS_HEAD_SET=""    # the component set as COMMITTED AT HEAD (space separated)
@@ -3632,7 +3634,7 @@ _component_set_probe_inner() {
   _component_set_drop_fetch_ref   # a prior probe in this process must not leak its ref
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
-  _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""
+  _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
   # Build the ALLOWLISTED environment before ANY isolated git call (job 258). Not memoized: it
   # is cheap, and a stale copy would be a second source of truth for the one thing this
   # function exists to control.
@@ -3829,6 +3831,86 @@ _component_set_probe_inner() {
   # 0600 BEFORE the URL is written, because the URL may carry a credential.
   chmod 600 "$csconf" 2>/dev/null || true
   printf '[remote "csbaseline"]\n\turl = %s\n' "$origin_url" >>"$csconf" 2>/dev/null || true
+
+  # ---- HOP A: THE REF ORACLE — LEARN THE TIP SHA WITHOUT DOWNLOADING A HISTORY -------------
+  #
+  # THE DEFECT THIS REMOVES (roborev job 258, Medium). The scratch repository is created FRESH
+  # every invocation, so a `git fetch` in it has NO "haves" to negotiate with and downloads the
+  # entire reachable graph — then the directory is deleted. MEASURED on this box, from a fresh
+  # repo against this repository:
+  #     plain fetch (what this used to do)   3.74 s   92 MB
+  #     --depth=1                            3.89 s   44 MB   (still ships the tip's whole tree)
+  #     --filter=blob:none                   0.73 s  6.4 MB
+  #     ls-remote                            0.29 s  120 KB
+  # `--lite` runs EVERY fix round, so 3.7 s of that on a fast link is 15 s+ on a slow one — the
+  # lenient bound — and a correctness guard that routinely costs the fast loop its budget is a
+  # guard people learn to waive. That makes it a usability defect with correctness consequences.
+  #
+  # WHY NOT `--filter=blob:none`, MEASURED RATHER THAN ARGUED: the manifest and the gate script
+  # are read IN THIS REPOSITORY at the baseline sha, so a blob-filtered transfer leaves those
+  # blobs absent exactly when `main` has changed them — which is precisely the PR set this guard
+  # is for — and the read then fails on a CORRECT tree. Fast and wrong.
+  #
+  # WHAT IS ACTUALLY NEEDED is the tip SHA, and `ls-remote` is the operation that returns it: no
+  # objects at all. This does NOT weaken #3544's "the baseline is fetched in THIS invocation"
+  # requirement — that requirement is about the staleness of the REF VALUE (a remote-tracking ref
+  # is a cached observable), and this reads that value live from the canonical remote through the
+  # same isolated config, sanitised environment and bound as the fetch it replaces.
+  local remote_sha=""
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" ls-remote csbaseline "refs/heads/main" >"$csdir/lsr" 2>"$csdir/lsr.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_KIND=fetch-failed
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_DETAIL="reading refs/heads/main from the validated origin URL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc — the bound fired; a stalled network or an auth prompt is the usual cause)"
+    else
+      _CS_DETAIL="reading refs/heads/main from the validated origin URL exited $rc: $(_component_set_safe_detail "$(cat "$csdir/lsr.err" 2>/dev/null)")"
+    fi
+    return 0
+  fi
+  # THE OUTPUT IS REMOTE-CONTROLLED TEXT, so it is VALIDATED, not merely parsed. `_CS_SHA` is
+  # interpolated into later `git` arguments and into the SUMMARY block, so a value that is not
+  # an object id is refused BY NAME rather than passed on. Both hash lengths are accepted (sha1
+  # and sha256), and the REF NAME is checked too — an advertisement for something other than
+  # `refs/heads/main` is not the baseline this guard compares against.
+  local lsr_line="" lsr_sha="" lsr_ref=""
+  IFS= read -r lsr_line <"$csdir/lsr" 2>/dev/null || lsr_line="${lsr_line:-}"
+  set -f
+  # shellcheck disable=SC2086  # deliberate field split of git's own `<sha> TAB <ref>` output
+  set -- $lsr_line
+  set +f
+  lsr_sha="${1:-}"; lsr_ref="${2:-}"
+  case "$lsr_sha" in
+    *[!0-9a-f]*|'') lsr_sha="" ;;
+    *) case "${#lsr_sha}" in 40|64) : ;; *) lsr_sha="" ;; esac ;;
+  esac
+  if [ -z "$lsr_sha" ] || [ "$lsr_ref" != "refs/heads/main" ]; then
+    _CS_KIND=baseline-ref-unparsable
+    _CS_DETAIL="the canonical remote's advertisement of refs/heads/main is not an object id and a ref name: '$(_component_set_flatten "$lsr_line")' — remote-controlled text is validated, never passed on to a git argument or a SUMMARY line"
+    return 0
+  fi
+  remote_sha="$lsr_sha"
+
+  # ---- DO WE ALREADY HOLD THAT COMMIT? -----------------------------------------------------
+  # If this repository already has the object, there is NOTHING to fetch: a git object is
+  # CONTENT-ADDRESSED, so "the lane holds <sha>" and "the canonical remote advertises <sha>" is
+  # the same commit, byte for byte. On this fleet lanes are worktrees of ONE shared `.git`, so a
+  # peer's fetch (or an earlier run's slow path below) usually put it there already.
+  #
+  # BOUNDED, not annotated local-only: `cat-file -e` on a MISSING object in a partial clone asks
+  # the promisor remote for it, which is network-capable.
+  #
+  # AND "CANNOT TELL" COLLAPSES ONTO *ABSENT* HERE — deliberately the opposite choice from the
+  # manifest presence probe, for a stated reason: the branch an unmeasurable answer falls into is
+  # the SLOW path, which fetches and verifies authoritatively. Guessing "absent" costs time;
+  # guessing "present" would skip a verification. The permissive-looking answer is the expensive
+  # one, so there is no unknown taking a shortcut.
+  if _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1; then
+    _CS_SHA="$remote_sha"
+    _CS_BASE_OBJ=reused
+    _component_set_drop_scratch_dir
+  else
+    _CS_BASE_OBJ=fetched
   err=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline" 2>&1); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
@@ -3877,6 +3959,12 @@ _component_set_probe_inner() {
     _CS_DETAIL="git fetch origin refs/heads/main succeeded but its private destination ref does not resolve to a commit"
     return 0
   fi
+  fi
+  # ---- end of the OBJECTS-ABSENT (slow) path. Both paths have now set `_CS_SHA` to a commit
+  # this repository holds, whose value came from the canonical remote in THIS invocation:
+  # the fast path took it from the ref oracle, the slow path from its own verified transfer.
+  # The block above is deliberately left at its original indentation — re-indenting 60 lines
+  # would bury the one-line change that matters in a diff nobody can review.
 
   # THE BASELINE SET, READ AS DATA (see the reader's header above): the committed manifest at
   # the fetched sha, or — transitionally, while `origin/main` predates the manifest — its gate
@@ -4693,6 +4781,11 @@ case "${1:-}" in
     # `declaration` (the transitional TEXT extraction). Exposed so the self-test can assert
     # WHICH data-only path ran, rather than inferring it from a verdict that both paths produce.
     echo "BASELINE_SRC: ${_CS_BASE_SRC:-<none>}"
+    # `reused` = this repository already held the commit the ref oracle named (nothing was
+    # downloaded); `fetched` = the isolated hop + verified transfer ran. Exposed so a case that
+    # asserts a property OF THE FETCH can require the fetch to have HAPPENED — otherwise the
+    # fast path would make such a case pass vacuously (job 258).
+    echo "BASELINE_OBJECTS: ${_CS_BASE_OBJ:-<none>}"
     echo "HEAD_SRC: ${_CS_HEAD_SRC:-<none>}"
     # BOUND is exposed so scripts/tests can assert the mode-dependent deadline (job 234)
     # WITHOUT a wall-clock threshold. A timing assert would be the flakier test AND would
