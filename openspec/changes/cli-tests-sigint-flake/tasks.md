@@ -271,3 +271,62 @@ loosens) and preferable to licensing an inert baseline.
 * **Product plants re-run at HEAD:** plant A (handler removed) -> stage (c), 0.02s. Plant B (flush
   hangs) -> stage (d) after **60.08s**, `progress observed while polling: NONE`, still reporting the
   handler-entry marker was observed 300.427us after SIGINT. The sibling passed in the same run.
+
+## Round 5 — the clock IS the group deadline (lead design note)
+
+`GroupBudget` is DELETED. `StageClock` already bounded the aggregate, so the new type was a second
+mechanism for the same job. Every sibling stage that replaced an INDEPENDENT 60s wait now carries the
+FULL old bound as its base and the clock bounds the aggregate by subtracting what has ACTUALLY been
+consumed:
+
+| stage | spec | old bound | reaches it from a fresh clock? |
+|---|---|---|---|
+| (b1..4) per-write ack | `spec(60, 70)` | 60s each | yes (asserted) |
+| (c) mid-session flush | `spec(60, 70)` | 60s | yes (asserted) |
+| (d) EOF exit | `spec(60, 70)` | 60s | yes (asserted) |
+
+The three consequences, handled rather than absorbed:
+
+1. **The floor assert now measures the DERIVED ceiling from a fresh `StageClock`**, not the spec
+   constants — a clip that silently reduced them would otherwise pass — and additionally requires the
+   budget to be neither clipped nor starved when nothing has been consumed.
+2. **`the_nominal_cap_sums_stay_under_the_total_budget` is re-scoped, not deleted.** Test 1 keeps the
+   plain nominal-sum assert. The sibling's nominal ceilings deliberately do NOT fit the envelope, and
+   that is now ASSERTED (with a message telling a future editor to promote the sibling to the
+   stronger assert if the arithmetic ever changes). In its place the sibling asserts the property that
+   actually holds: `clip` never returns more than the remaining total, a stage that cannot reach its
+   base is marked, and it names itself. The file states plainly that the sibling's guarantee is weaker
+   than test 1's rather than choosing whichever assert passes.
+3. **`Budget::starved`** — set when the remaining total is below the stage's own base. `describe()`
+   then leads with `TOTAL BUDGET ALREADY EXHAUSTED BY EARLIER STAGES ... A failure here is about the
+   budget, NOT about the property under test`, so a stage clipped to near zero failing on its first
+   poll is distinguishable from the property genuinely not holding.
+
+`the_stage_clock_clips_a_budget_to_the_remaining_total` now covers both states separately:
+clipped-but-not-starved (calibration headroom taken back, base intact) and starved (base unreachable,
+distinct message).
+
+**Residual, accepted and stated:** the deleted group total also capped the SUM of the four acks, which
+protected the later stages from being starved by slow acks. Under clock-only that scenario instead
+starves stage (c)/(d) — which is why consequence 3 is load-bearing rather than cosmetic: the failure
+names the exhaustion instead of reading as "no durable artifact appeared".
+
+### Round-5 RED verification, and a METHOD defect worth more than the result
+
+Producer-only plants (targeted by line, against a committed tree):
+
+| plant | result |
+|---|---|
+| `T2_SSTABLE` base back to 35s | RED: `(c) mid-session flush derives 35s from a FRESH clock, tighter than the 60s it replaced` |
+| starvation never marked (`budget.starved = false`) | RED: `T2_ACK_LATER could not reach its 60s base and must be marked starved` |
+| starved marker text removed (line 544 only) | RED: `must name the exhaustion` (2 tests) |
+| starved disclaimer removed (line 546 only) | RED: `a starved stage must disclaim the property` |
+
+**METHOD DEFECT (second one this issue, same shape).** Two of those plants first reported GREEN when
+applied with a whole-file `sed`, because the asserted phrase and the message that produces it are the
+same literal in the same file — the substitution rewrote BOTH the producer and the expectation, so the
+test could not see the change. That is the artifact-as-its-own-oracle shape: a plant that edits both
+sides of an equality proves nothing. Plants against a message string must therefore target the
+PRODUCER only (here, by line number), and the earlier lesson still applies (plant against a COMMITTED
+tree, and print whether the plant actually applied). Both defects were in the verification method, not
+the code — but both would have produced a false all-clear.
