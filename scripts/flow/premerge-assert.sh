@@ -131,8 +131,11 @@
 #         (plus "PREMERGE: DELTA-RECERT ..." in Case B)
 #   2   no/invalid gate of record, OR head moved (mismatch), OR PR closed/merged
 #       — LOUD multi-line refusal
-#   3   gh/network failure, a required TOOL failing, or a usage error
-#       — fail closed, never merge on uncertainty
+#   3   gh/network failure, a required TOOL failing, or a usage error — fail
+#       closed, never merge on uncertainty. The three are distinguished by the
+#       printed marker, NOT by the code: `PREMERGE: USAGE` (you called it wrong),
+#       `PREMERGE: TOOL-FAILURE` (a broken box — fix the box, do NOT re-run the
+#       gate), `PREMERGE: GH-FAILURE` (auth/network/no-such-PR).
 #
 # macOS bash 3.2 compatible, shellcheck-clean.
 set -euo pipefail
@@ -140,6 +143,10 @@ set -euo pipefail
 repo="${GH_REPO:-pmcfadin/cqlite}"
 
 usage() {
+  # A distinct grepable marker (#3465 review nit 8): exit 3 covers a USAGE error,
+  # a TOOL failure and a GH failure, and a caller must be able to tell them apart
+  # — "you called me wrong" is not "GitHub is down". The exit CODES are unchanged.
+  printf 'PREMERGE: USAGE — the call is wrong (this is NOT a gh/network failure)\n' >&2
   printf 'usage: %s <pr-number> <certified-sha> <gate-of-record-summary> [<delta-summary>]\n' \
     "$(basename "$0")" >&2
   printf '       <gate-of-record-summary> is REQUIRED: the AGENT_GATE_SUMMARY_FILE of the\n' >&2

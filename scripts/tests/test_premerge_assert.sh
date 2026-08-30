@@ -866,6 +866,30 @@ if run 0 "success path prints SCOPE in the anchored-delta case too" \
   esac
 fi
 
+# --- Case 40: the three exit-3 causes are DISTINGUISHABLE (nit 8) ------------
+# Exit 3 covers a usage error, a tool failure and a gh failure. The CODES are
+# unchanged (documented), so the caller tells them apart by the MARKER — a
+# forgotten third argument must never be escalated upward as a GitHub outage.
+if run 3 "usage error prints PREMERGE: USAGE" 2421 "$CERTIFIED"; then
+  case "$OUT" in
+    *"PREMERGE: USAGE"*) ok "exit 3: a usage error carries the PREMERGE: USAGE marker" ;;
+    *) bad "exit 3: usage error must carry PREMERGE: USAGE (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"GH-FAILURE"*|*"TOOL-FAILURE"*)
+      bad "exit 3: a usage error must not read as a gh/tool failure (got: $OUT)" ;;
+    *) ok "exit 3: a usage error is NOT reported as a gh failure" ;;
+  esac
+fi
+export MOCK_GH_FAIL=1
+if run 3 "gh failure prints PREMERGE: GH-FAILURE only" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: USAGE"*) bad "exit 3: a gh failure must not read as a usage error (got: $OUT)" ;;
+    *) ok "exit 3: a gh failure is NOT reported as a usage error" ;;
+  esac
+fi
+export MOCK_GH_FAIL=0
+
 # --- summary -----------------------------------------------------------------
 printf '\n=== premerge-assert: %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
