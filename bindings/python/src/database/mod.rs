@@ -78,7 +78,7 @@ pub use open_fn::open;
 /// ```
 #[pyclass(module = "cqlite")]
 pub struct Database {
-    inner: Arc<cqlite_core::Database>,
+    pub(crate) inner: Arc<cqlite_core::Database>,
     /// Closed flag, shared (via `Arc`) with any `StreamingIterator` this
     /// database hands out (issue #1462). `Arc<AtomicBool>` derefs to
     /// `AtomicBool`, so every existing `.load(..)`/`.swap(..)` call site is
@@ -86,12 +86,12 @@ pub struct Database {
     /// exact atomic lets an iterator observe `close()` atomically and raise a
     /// clean `RuntimeError` from `__next__` instead of driving a torn-down
     /// engine.
-    closed: Arc<AtomicBool>,
+    pub(crate) closed: Arc<AtomicBool>,
     /// Optional write engine — present only when opened with `writable=True`.
     /// A `tokio::sync::Mutex` (not `std`) so its guard is `Send` and survives the
     /// `py.allow_threads` boundary (issue #1444): blocking writes (WAL fsync +
     /// SSTable materialization) run with the GIL released, matching the read path.
-    write_engine: Option<Arc<AsyncMutex<PyWriteEngine>>>,
+    pub(crate) write_engine: Option<Arc<AsyncMutex<PyWriteEngine>>>,
     /// W3C `traceparent` captured at `open` time (issue #1039). When set, every
     /// per-call span is re-parented to this trace unless a per-call traceparent
     /// overrides it, so the bindings' Rust spans correlate with the caller's

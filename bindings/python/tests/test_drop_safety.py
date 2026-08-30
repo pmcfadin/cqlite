@@ -216,3 +216,13 @@ def test_drop_does_not_raise_at_teardown(tmp_path, schema_file):
         assert needle not in lowered, (
             f"child stderr reports a {needle!r} during teardown:\n{ctx}"
         )
+
+    # Non-vacuity: a clean exit alone is also what a MISSING Drop hook looks
+    # like, so additionally require that the finalization-time drop actually did
+    # the work. CPython clears ``__main__``'s globals during finalization, which
+    # deallocates the handle and runs the Rust ``Drop``; the flushed generation
+    # file is the proof it ran there, not merely that nothing crashed.
+    assert _count_data_db(write_dir) >= 1, (
+        "child exited cleanly but the teardown drop ran no cleanup: expected a "
+        f"flushed *-Data.db under {write_dir / 'data'}\n{ctx}"
+    )
