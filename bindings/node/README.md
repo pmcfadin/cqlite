@@ -387,6 +387,25 @@ Fields are deliberately NOT also mirrored at the top level — that would re-fla
 `typeName` and reintroduce the defect. The Python binding keeps `udt["street"]` via a dedicated
 `cqlite.Udt` type, so the two bindings differ in ergonomics and agree on semantics.
 
+**`fields` has a null prototype.** A field name is data, and a plain object's property assignment
+consults the prototype chain — so a UDT field named `__proto__` (legal CQL via a quoted identifier,
+exactly like `_type`) would call `Object.prototype`'s inherited accessor rather than become a field:
+a string value vanished, a null value replaced the object's prototype. `fields` is therefore built
+with `Object.create(null)`, which inherits nothing, so **every** field name — including any that a
+future JavaScript adds to `Object.prototype` — is an ordinary own data property:
+
+```javascript
+udt.fields.__proto__;                              // the declared field's value
+Object.getPrototypeOf(udt.fields);                 // null
+Object.hasOwn(udt.fields, '__proto__');            // true
+udt.fields.hasOwnProperty('x');                    // TypeError — not inherited
+Object.hasOwn(udt.fields, 'x');                    // use this instead
+```
+
+Indexing, `in`, `Object.keys`/`entries`, spread, destructuring and `JSON.stringify` are all
+unaffected. The outer object keeps a normal prototype: its keys (`typeName`, `keyspace`, `fields`)
+are chosen by the binding, never by data.
+
 ### CQL `decimal` rendering policy
 
 A CQL `decimal` is `unscaled x 10^(-scale)` where `unscaled` is an

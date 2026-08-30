@@ -71,7 +71,22 @@ export interface UdtValue {
   typeName: string;
   /** Keyspace containing the UDT definition */
   keyspace: string;
-  /** The UDT's declared fields, name -> value. Fields ONLY: no metadata entry. */
+  /**
+   * The UDT's declared fields, name -> value. Fields ONLY: no metadata entry.
+   *
+   * The object has a **null prototype** (`Object.create(null)`), so no field
+   * name can reach an inherited accessor: a field named `__proto__` — legal CQL
+   * via a quoted identifier — is an ordinary own property here, whereas on a
+   * plain object an assignment to that name would call `Object.prototype`'s
+   * `__proto__` setter and silently discard the field (issue #3504).
+   *
+   * Every read shape behaves identically (indexing, `in`, `Object.keys`,
+   * `Object.entries`, spread, destructuring, `JSON.stringify`). The one
+   * difference: `Object.prototype` methods are NOT inherited, so use
+   * `Object.hasOwn(fields, name)` (or `Object.prototype.hasOwnProperty.call`)
+   * rather than `fields.hasOwnProperty(name)` — which is the correct form for a
+   * name-keyed bag anyway.
+   */
   fields: Record<string, Value>;
 }
 

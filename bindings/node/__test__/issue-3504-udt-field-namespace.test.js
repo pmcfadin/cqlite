@@ -10,6 +10,17 @@
  * `{ typeName, keyspace, fields }`: identity at the top level, declared fields in
  * a namespace of their own.
  *
+ * THE SAME CLASS ONE LAYER DOWN (roborev R1-1): giving the fields their own
+ * object is not sufficient while it is a PLAIN object, because an ordinary
+ * property assignment consults the prototype chain — so a field named
+ * `__proto__` (just as legal, and just as quoted) reached
+ * `Object.prototype`'s inherited accessor instead of becoming a field. The
+ * fixture's `collide`/`collide_twin` types now declare one, and `fields` is
+ * built with a NULL PROTOTYPE. Measured before the fix, on these exact rows:
+ * row 1's string-valued `__proto__` VANISHED (absent from `Object.keys`, not an
+ * own property, reading back as `Object.prototype`) and row 3's null-valued one
+ * REPLACED the field bag's prototype with `null`.
+ *
  * THE SUBJECT IS CASSANDRA-WRITTEN. `test-data/fixtures/issue_3504/` comes from
  * `test-data/scripts/generate-issue-3504-udt-collision.sh` (cassandra:5.0.2
  * container), not from CQLite's write path — which additionally proves the
@@ -85,6 +96,28 @@ function facts(udt) {
 }
 
 /**
+ * Build an expected field bag from `[name, value]` pairs.
+ *
+ * AN OBJECT LITERAL CANNOT EXPRESS THIS SUITE'S EXPECTATIONS. In a literal,
+ * `{ __proto__: v }` — quoted or not — is the SPECIAL prototype-setting form,
+ * not a property definition: for a string value it creates NO own property at
+ * all, so a literal-based expectation would silently drop the very field under
+ * test and then pass against output that had also dropped it. `Object.fromEntries`
+ * uses `CreateDataProperty`, which defines an own property for any name. (This
+ * is the same control/data collision the production fix removes, met again in
+ * the test's own syntax — hence a helper rather than a comment at each site.)
+ */
+function fieldsOf(entries) {
+  return Object.fromEntries(entries);
+}
+
+/** Own-property-safe read of `name` from a field bag with a null prototype. */
+function ownField(fields, name) {
+  expect(Object.prototype.hasOwnProperty.call(fields, name)).toBe(true);
+  return fields[name];
+}
+
+/**
  * Cross-realm `Map` test, matching `types.test.js`'s helper.
  *
  * `instanceof Map` is FALSE here even for a genuine map: jest runs this file in a
@@ -138,13 +171,24 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(udt.typeName).toBe('collide');
     expect(udt.keyspace).toBe('test_udt_collision');
 
-    // ...and the declared fields, all three, unmodified.
-    expect(udt.fields).toEqual({
-      _type: 'user-supplied-type',
-      _keyspace: 'user-supplied-keyspace',
-      real_field: 42,
-    });
-    expect(Object.keys(udt.fields)).toHaveLength(3);
+    // ...and the declared fields, all four, unmodified.
+    expect(udt.fields).toEqual(
+      fieldsOf([
+        ['_type', 'user-supplied-type'],
+        ['_keyspace', 'user-supplied-keyspace'],
+        ['__proto__', 'user-supplied-proto'],
+        ['real_field', 42],
+      ])
+    );
+    // The exact field-NAME SET, not a count: a count says only "four of
+    // something" and cannot see a lost field masked by an injected one, which is
+    // exactly how the `__proto__` loss survived a `toHaveLength(3)` assertion.
+    expect(Object.keys(udt.fields).sort()).toEqual([
+      '__proto__',
+      '_keyspace',
+      '_type',
+      'real_field',
+    ]);
   });
 
   test('the field namespace is `fields` ALONE — Object.keys holds no field name', () => {
@@ -175,6 +219,7 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(udt.fields.label).toBe('no-colliding-field');
     expect(udt.fields.real_field).toBe(7);
     expect(udt.fields).toEqual({ label: 'no-colliding-field', real_field: 7 });
+    expect(Object.keys(udt.fields).sort()).toEqual(['label', 'real_field']);
   });
 
   test('a NULL colliding field does not null the type name', () => {
@@ -186,11 +231,91 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(udt.keyspace).toBe('test_udt_collision');
     expect(udt.fields._type).toBeNull();
     expect(Object.prototype.hasOwnProperty.call(udt.fields, '_type')).toBe(true);
-    expect(udt.fields).toEqual({
-      _type: null,
-      _keyspace: 'keyspace-field-only',
-      real_field: 0,
+    expect(udt.fields).toEqual(
+      fieldsOf([
+        ['_type', null],
+        ['_keyspace', 'keyspace-field-only'],
+        ['__proto__', null],
+        ['real_field', 0],
+      ])
+    );
+  });
+
+  // ==========================================================================
+  // R1-1 — a field name cannot reach JavaScript's own object model
+  // ==========================================================================
+
+  test('a UDT field named `__proto__` is a FIELD, not a prototype write', () => {
+    // MEASURED BEFORE THE FIX, on this exact row: `Object.keys(fields)` was
+    // ["_type","_keyspace","real_field"], `hasOwnProperty('__proto__')` was
+    // false, and `fields.__proto__` read back `Object.prototype` — the declared
+    // field was silently GONE, because `[[Set]]` had called the inherited
+    // accessor instead of defining a property.
+    const fields = rows.get(1).c.fields;
+    expect(ownField(fields, '__proto__')).toBe('user-supplied-proto');
+    expect(Object.keys(fields)).toContain('__proto__');
+    // An own DATA property, not an accessor: the descriptor is the only thing
+    // that distinguishes "defined the field" from "wrote through a setter that
+    // happened to store the value somewhere".
+    expect(Object.getOwnPropertyDescriptor(fields, '__proto__')).toEqual({
+      value: 'user-supplied-proto',
+      writable: true,
+      enumerable: true,
+      configurable: true,
     });
+    // ...and it survives the ordinary ways a caller consumes a field bag.
+    expect(JSON.parse(JSON.stringify(fields)).__proto__).toBe('user-supplied-proto');
+    expect(Object.entries(fields)).toContainEqual(['__proto__', 'user-supplied-proto']);
+  });
+
+  test('a NULL `__proto__` field does not replace the field bag prototype', () => {
+    // The harsher half of the hazard, and a DIFFERENT failure mode from the
+    // string case: `obj.__proto__ = null` REPLACES the object's prototype, so
+    // before the fix row 3's field bag came back with its prototype mutated by
+    // data AND the field missing. Measured then: prototype `null` for row 3,
+    // `Object.prototype` for row 1 — i.e. the shape of the object depended on a
+    // field VALUE.
+    const fields = rows.get(3).c.fields;
+    expect(ownField(fields, '__proto__')).toBeNull();
+    expect(Object.keys(fields)).toContain('__proto__');
+  });
+
+  test('every UDT field bag has a null prototype, by construction not by data', () => {
+    // The property that makes the fix a CLASS fix rather than a `__proto__`
+    // special case: the bag inherits NOTHING, so no field name — not
+    // `__proto__`, not `constructor`, not a name a future JavaScript adds to
+    // `Object.prototype` — can reach an inherited accessor. Asserted across a
+    // UDT that declares `__proto__` (rows 1/3), one that does not (`p`), and a
+    // UDT in key and element position, so it is visibly independent of the data.
+    const bags = [
+      rows.get(1).c.fields,
+      rows.get(1).p.fields,
+      rows.get(2).p.fields,
+      rows.get(3).c.fields,
+      soleEntry(rows.get(1).fcm)[0].fields,
+      soleEntry(rows.get(1).ftm)[0].fields,
+      [...rows.get(1).fs][0].fields,
+    ];
+    for (const fields of bags) {
+      expect(Object.getPrototypeOf(fields)).toBeNull();
+      // Nothing is inherited, so an absence probe on the bag is exactly an
+      // absence: on a plain object `fields.constructor` is truthy and
+      // `'toString' in fields` is true, both of which read as fields that do not
+      // exist.
+      expect(fields.constructor).toBeUndefined();
+      expect('toString' in fields).toBe(false);
+    }
+    // The OUTER object is developer-keyed (`typeName`/`keyspace`/`fields` are
+    // chosen here, never by data), so it deliberately keeps a normal prototype —
+    // stated as an assertion so the asymmetry is intentional and visible.
+    // Compared BEHAVIOURALLY, not by identity against this realm's
+    // `Object.prototype`: jest runs each file in a sandboxed VM context whose
+    // intrinsics are different objects from the ones the addon reaches through
+    // `env.get_global()` (the same realm split the `isMap` helper above exists
+    // for), so an identity check would fail on correct output.
+    const outer = rows.get(1).c;
+    expect(Object.getPrototypeOf(outer)).not.toBeNull();
+    expect(typeof outer.hasOwnProperty).toBe('function');
   });
 
   // ==========================================================================
@@ -206,11 +331,14 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(value).toBe(3);
     expect(key.typeName).toBe('collide');
     expect(key.keyspace).toBe('test_udt_collision');
-    expect(key.fields).toEqual({
-      _type: 'key-type-marker',
-      _keyspace: 'key-keyspace-marker',
-      real_field: 100,
-    });
+    expect(key.fields).toEqual(
+      fieldsOf([
+        ['_type', 'key-type-marker'],
+        ['_keyspace', 'key-keyspace-marker'],
+        ['__proto__', 'key-proto-marker'],
+        ['real_field', 100],
+      ])
+    );
   });
 
   test('same fields, different UDT types stay distinguishable as map keys', () => {
@@ -226,11 +354,14 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     const members = [...rows.get(1).fs];
     expect(members).toHaveLength(1);
     expect(members[0].typeName).toBe('collide');
-    expect(members[0].fields).toEqual({
-      _type: 'set-member-type',
-      _keyspace: 'set-member-keyspace',
-      real_field: 200,
-    });
+    expect(members[0].fields).toEqual(
+      fieldsOf([
+        ['_type', 'set-member-type'],
+        ['_keyspace', 'set-member-keyspace'],
+        ['__proto__', 'set-member-proto'],
+        ['real_field', 200],
+      ])
+    );
   });
 
   test('RECORDED GAP: a non-frozen map keyed by a UDT decodes to a Buffer key', () => {
@@ -281,9 +412,14 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
     expect(soleEntry(rows.get(1).fcm)[1]).toBe(reference.map_values['row1.fcm_value']);
     expect(soleEntry(rows.get(1).ftm)[1]).toBe(reference.map_values['row1.ftm_value']);
 
-    // Non-vacuity: the reference must actually carry the colliding subject, or an
-    // emptied/renamed file would let this pass having compared nothing.
+    // Non-vacuity: the reference must actually carry the colliding subjects, or
+    // an emptied/renamed file would let this pass having compared nothing. Both
+    // collision classes are named: the `_type` field and the `__proto__` field.
+    // `JSON.parse` defines `__proto__` as an ORDINARY OWN PROPERTY (it never
+    // invokes a setter), so the reference really does carry the field and
+    // `toEqual` above really does compare it.
     expect(expected['row1.c'].fields._type).toBe('user-supplied-type');
+    expect(ownField(expected['row1.c'].fields, '__proto__')).toBe('user-supplied-proto');
     expect(expected['row1.c'].typeName).toBe('collide');
   });
 });

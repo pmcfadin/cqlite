@@ -30,7 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Node**: a UDT is now `{ typeName, keyspace, fields }`, with the declared
     fields in the nested `fields` object. `interface UdtValue` loses its
     `[field: string]: Value` index signature — that signature is what permitted
-    the collision.
+    the collision. **`fields` has a NULL PROTOTYPE** (`Object.create(null)`):
+    a plain object's property assignment consults the prototype chain, so a UDT
+    field named `__proto__` — legal CQL via a quoted identifier, exactly like
+    `_type` — reached `Object.prototype`'s inherited accessor instead of becoming
+    a field (measured on the fixture: a string value VANISHED, a null value
+    REPLACED the field bag's prototype). Inheriting nothing removes that channel
+    for every name rather than special-casing one. Every read shape is unchanged
+    (indexing, `in`, `Object.keys`/`entries`, spread, `JSON.stringify`); the one
+    difference is that `fields.hasOwnProperty(...)` no longer exists — use
+    `Object.hasOwn(fields, name)`, which is the correct form for a name-keyed bag
+    regardless.
   - **`value_to_hashable_key`'s `Udt` arm (Python)** projected a UDT to a
     `frozenset` holding a pair for `_type`, one for `_keyspace`, then one per
     field, so a field named `_type` produced a **duplicate** `_type` pair that
@@ -57,8 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — PyO3 exposes snake_case, napi-rs camelCases — and the semantics are identical.
 
   Subject: `test-data/fixtures/issue_3504/`, a **Cassandra 5.0.2-written** SSTable
-  declaring `CREATE TYPE collide ("_type" text, "_keyspace" text, real_field
-  int)`. No pre-existing corpus fixture declared such a field, so the defect had
+  declaring `CREATE TYPE collide ("_type" text, "_keyspace" text, "__proto__"
+  text, real_field int)` (Cassandra accepts all three as quoted identifiers). No pre-existing corpus fixture declared such a field, so the defect had
   no test subject. The CLI is deliberately NOT changed here: its JSON writer still
   injects `_type`, and it is the binding parity suites' comparison ORACLE — moving
   an oracle in the same change as its subject is how a guard goes blind. Tracked
