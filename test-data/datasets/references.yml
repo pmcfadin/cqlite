@@ -1054,24 +1054,31 @@ tables:
         present: false
         path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-Summary.db.txt"
     generated_at: 2026-06-25T07:05:19Z
+  # Paths below are REPO-RELATIVE, unlike the generator-machine absolute
+  # paths of the entries above. Both are readable by the only consumer:
+  # dataset_helpers::resolve_table_dir_via_manifest takes only the
+  # `file_name()` of sstable_dir and re-roots it under the caller's datasets
+  # root, and the `references.*.path` fields are not deserialized at all.
+  # Relative keeps the entry correct after this worktree is merged and gone
+  # (issue #3500).
   - keyspace: test_nested_udt_keys
     table: nested_udt_keys
-    sstable_dir: "/data/lanes/lane-3500/test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-cfc55f10a49f11f1ad3a550d0b4e09ce"
+    sstable_dir: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-1845cfe0a4aa11f1825b37de43fc9927"
     prefix: nb-1-big
     references:
       data_jsonl:
         present: true
-        path: "/data/lanes/lane-3500/test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-cfc55f10a49f11f1ad3a550d0b4e09ce/nb-1-big-Data.db.jsonl"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-1845cfe0a4aa11f1825b37de43fc9927/nb-1-big-Data.db.jsonl"
       statistics_txt:
         present: true
-        path: "/data/lanes/lane-3500/test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-cfc55f10a49f11f1ad3a550d0b4e09ce/nb-1-big-Statistics.db.txt"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-1845cfe0a4aa11f1825b37de43fc9927/nb-1-big-Statistics.db.txt"
       toc_txt:
         present: true
-        path: "/data/lanes/lane-3500/test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-cfc55f10a49f11f1ad3a550d0b4e09ce/nb-1-big-TOC.txt"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-1845cfe0a4aa11f1825b37de43fc9927/nb-1-big-TOC.txt"
       digest_crc32:
         present: true
-        path: "/data/lanes/lane-3500/test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-cfc55f10a49f11f1ad3a550d0b4e09ce/nb-1-big-Digest.crc32"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-1845cfe0a4aa11f1825b37de43fc9927/nb-1-big-Digest.crc32"
       summary_txt:
         present: false
-        path: "/data/lanes/lane-3500/test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-cfc55f10a49f11f1ad3a550d0b4e09ce/nb-1-big-Summary.db.txt"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-1845cfe0a4aa11f1825b37de43fc9927/nb-1-big-Summary.db.txt"
     generated_at: 2026-08-30T18:30:28Z
