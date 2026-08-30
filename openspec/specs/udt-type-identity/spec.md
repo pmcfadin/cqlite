@@ -20,6 +20,14 @@ namespace SHALL NOT be an object that inherits accessors, since an ordinary prop
 such an object consults the prototype chain — so a field named `__proto__` would call an inherited
 setter instead of becoming a field.
 
+**Delivered subject — substitution note (strictly stronger).** The scenario GIVENs below name a
+constructed `address` in `test_collections` with three fields; the delivered oracle is the
+Cassandra-5.0.2-written `collide` in `test_udt_collision`, which carries four — the same
+`_type`/`_keyspace`/`real_field` plus `__proto__`. The substitution is strictly stronger in both
+directions (Cassandra-written bytes rather than a constructed in-memory value, so it additionally
+proves the DECODER can produce such a UDT; and one further colliding field name), so the requirement
+below is satisfied a fortiori and the scenarios stand as written.
+
 #### Scenario: Python — a UDT with both colliding field names round-trips
 
 - **GIVEN** a `Value::Udt` for type `address` in keyspace `test_collections` whose fields are
