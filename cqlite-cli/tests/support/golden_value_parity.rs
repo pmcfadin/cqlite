@@ -128,11 +128,18 @@ pub enum Canon {
 
 impl Canon {
     /// The CSV projection: CSV carries no JSON kinds, so a boolean is compared as
-    /// its text spelling. Numbers stay numeric (so `1` == `"1"`), and `null` stays
-    /// distinct from a value.
+    /// its text spelling and numbers stay numeric (`1` == `"1"`).
+    ///
+    /// An EMPTY string collapses onto `null`, because CSV cannot distinguish them:
+    /// the CLI writes an absent value as an empty field and an empty `text` value
+    /// as the same empty field. Cassandra's own CSV egress (`cqlsh COPY TO`) has
+    /// exactly this ambiguity, so it is a property of the format, not of CQLite —
+    /// and the JSON lane keeps the distinction strict (`null` vs `""`), so it is
+    /// still asserted somewhere.
     fn for_csv(self) -> Canon {
         match self {
             Canon::Bool(b) => Canon::Text(b.to_string()),
+            Canon::Text(t) if t.is_empty() => Canon::Null,
             other => other,
         }
     }
@@ -497,10 +504,20 @@ fn golden_row(
             // older than itself, so it is ignorable ONLY when every cell of this
             // row is strictly newer — asserted, never assumed.
             if kind_of(name).is_none() {
-                return Err(format!(
-                    "{}: complex deletion on `{name}` but no collection kind is declared",
-                    at()
-                ));
+                // A CELL tombstone on a scalar column: the column reconciles to
+                // NULL — exactly the "tombstone → null" egress property this lane
+                // exists to pin. `sstabledump` keeps the marker; a `SELECT` sees a
+                // null. There can be no competing value cell for the same name in
+                // the same row (that collision is an error), so no timestamp
+                // arbitration is needed.
+                if out.insert(name.to_string(), Value::Null).is_some() {
+                    return Err(format!(
+                        "{}: cell tombstone for `{name}` collides with another cell or \
+                         a declared key column",
+                        at()
+                    ));
+                }
+                continue;
             }
             let marked = del
                 .get("marked_deleted")

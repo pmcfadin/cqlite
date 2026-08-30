@@ -17,19 +17,22 @@
 //!
 //! # Fail-closed, per case (#3220)
 //!
-//! Every entry in [`CASES`] is a **git-committed** fixture, so it is present in any
-//! checkout and there is deliberately NO skip path: an unresolvable fixture, an
-//! empty golden, an empty egress, or a zero-cell comparison each fail that case.
-//! The datasets root is resolved per TABLE by evidence (does this table's
-//! `*-Data.db` exist under that root), never by an env-first/checkout-first
-//! preference. There is no suite-wide `assert!(ran > 0)`, which cannot see one
-//! case skipping behind its siblings.
+//! Most entries in [`CASES`] are **git-committed** fixtures, so they are present in
+//! any checkout and there is deliberately NO skip path for them: an unresolvable
+//! fixture, an empty golden, an empty egress, or a zero-cell comparison each fail
+//! that case. A small [`Presence::Corpus`] tier covers null/empty/absent-cell
+//! properties no committed fixture has; those report `NOT PRESENT` in the census
+//! when the fetched corpus is absent, and are compared with identical strictness
+//! when it is there. The datasets root is resolved per TABLE by evidence (does this
+//! table's `*-Data.db` exist under that root), never by an env-first/
+//! checkout-first preference. There is no suite-wide `assert!(ran > 0)`, which
+//! cannot see one case skipping behind its siblings.
 //!
 //! # Coverage census
 //!
 //! [`committed_fixture_coverage_census`] enumerates the git-committed
-//! `*-Data.db` fixtures from `git ls-files` and requires each to be either a case
-//! or a NAMED entry in [`NOT_COMPARABLE`] with a reason. A new committed fixture
+//! `*-Data.db` fixtures from `git ls-files` and requires each to be either a
+//! compared case or a NAMED entry in [`NOT_COMPARABLE`] with a reason. A new committed fixture
 //! therefore has to be classified rather than silently uncovered — derived at run
 //! time from committed source, not from a hand-kept count.
 //!
@@ -49,8 +52,23 @@ use golden::{golden_rows, Egress, Multicell};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Whether a case's fixture is guaranteed present.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    /// Git-committed under `test-data/datasets/sstables/`: present in EVERY
+    /// checkout, so the case is `must_run` and fails closed unconditionally.
+    Committed,
+    /// Present only in the FETCHED corpus (`fetch-datasets.sh`). Reported as
+    /// `NOT PRESENT` when the corpus is absent, and compared with the same
+    /// strictness when it is. These carry properties no committed fixture has —
+    /// an absent regular cell, a scalar cell tombstone, empty text vs empty blob
+    /// vs null — which is the whole reason the tier exists.
+    Corpus,
+}
+
 /// One comparable table.
 struct Case {
+    presence: Presence,
     keyspace: &'static str,
     table: &'static str,
     /// The committed CQL schema under `test-data/schemas/` (without `.cql`).
@@ -80,6 +98,7 @@ const CASES: &[Case] = &[
     // Seven codec variants: the same logical rows through LZ4 / Snappy / Deflate /
     // Zstd / uncompressed / a short final chunk, plus a BLOB payload table.
     Case {
+        presence: Presence::Committed,
         keyspace: "test_comp",
         table: "lz4_table",
         schema: "compression-parity",
@@ -89,6 +108,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_comp",
         table: "snappy_table",
         schema: "compression-parity",
@@ -98,6 +118,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_comp",
         table: "deflate_table",
         schema: "compression-parity",
@@ -107,6 +128,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_comp",
         table: "zstd_table",
         schema: "compression-parity",
@@ -116,6 +138,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_comp",
         table: "uncompressed_table",
         schema: "compression-parity",
@@ -125,6 +148,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_comp",
         table: "short_final_chunk",
         schema: "compression-parity",
@@ -135,6 +159,7 @@ const CASES: &[Case] = &[
     },
     // `payload BLOB` — the blob `0x…` hex rendering, compared byte-exactly.
     Case {
+        presence: Presence::Committed,
         keyspace: "test_comp",
         table: "incompressible_uncompressed_chunk",
         schema: "compression-parity",
@@ -145,6 +170,7 @@ const CASES: &[Case] = &[
     },
     // test-data/schemas/compaction-parity.cql
     Case {
+        presence: Presence::Committed,
         keyspace: "test_compactionparity",
         table: "live_no_clustering",
         schema: "compaction-parity",
@@ -154,6 +180,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_compactionparity",
         table: "live_clustering",
         schema: "compaction-parity",
@@ -165,6 +192,7 @@ const CASES: &[Case] = &[
     // test-data/schemas/compaction-parity-udt.cql — frozen UDTs and frozen
     // collections OF UDTs, i.e. the `_type`-discriminator and map-spelling rules.
     Case {
+        presence: Presence::Committed,
         keyspace: "test_compactionparityudt",
         table: "udt_frozen_person",
         schema: "compaction-parity-udt",
@@ -174,6 +202,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_compactionparityudt",
         table: "udt_collections",
         schema: "compaction-parity-udt",
@@ -183,6 +212,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_compactionparityudt",
         table: "udt_null_inner",
         schema: "compaction-parity-udt",
@@ -192,6 +222,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_compactionparityudt",
         table: "udt_nested",
         schema: "compaction-parity-udt",
@@ -213,6 +244,7 @@ const CASES: &[Case] = &[
     // collections of signed numerics: the "path is a JSON string, CLI element is a
     // JSON number" rule, and exact 30-digit decimal text.
     Case {
+        presence: Presence::Committed,
         keyspace: "test_signed_coll",
         table: "signed_int_collections",
         schema: "signed-collection-parity",
@@ -222,6 +254,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_signed_coll",
         table: "frozen_int_collections",
         schema: "signed-collection-parity",
@@ -231,6 +264,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_signed_coll",
         table: "signed_width_collections",
         schema: "signed-collection-parity",
@@ -244,6 +278,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_signed_coll",
         table: "signed_special_collections",
         schema: "signed-collection-parity",
@@ -259,6 +294,7 @@ const CASES: &[Case] = &[
     // test-data/schemas/da-test.cql — BTI (`da`) format, timestamp/uuid/boolean
     // scalars plus non-frozen set/list/map.
     Case {
+        presence: Presence::Committed,
         keyspace: "test_da",
         table: "simple_table",
         schema: "da-test",
@@ -268,6 +304,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_da",
         table: "collection_table",
         schema: "da-test",
@@ -283,6 +320,7 @@ const CASES: &[Case] = &[
     // BTI wide/multi-clustering shapes: many rows per partition, so row pairing
     // and clustering-column rendering are exercised at scale.
     Case {
+        presence: Presence::Committed,
         keyspace: "test_da",
         table: "wide_table",
         schema: "wide-table-bti",
@@ -292,6 +330,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_da",
         table: "multiclustering_table",
         schema: "multiclustering-table-bti",
@@ -301,6 +340,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_da",
         table: "wide_multiclustering_small",
         schema: "wide-multiclustering-small-bti",
@@ -311,6 +351,7 @@ const CASES: &[Case] = &[
     },
     // test-data/schemas/write-load-parity.cql
     Case {
+        presence: Presence::Committed,
         keyspace: "test_writeparity",
         table: "finished_data",
         schema: "write-load-parity",
@@ -320,6 +361,7 @@ const CASES: &[Case] = &[
         skip_columns: &[],
     },
     Case {
+        presence: Presence::Committed,
         keyspace: "test_writeparity",
         table: "partition_boundary",
         schema: "write-load-parity",
@@ -327,6 +369,90 @@ const CASES: &[Case] = &[
         ck: &["ck"],
         multicell: &[],
         skip_columns: &[],
+    },
+    // ---------------------------------------------------------------------
+    // FETCHED-corpus tier (test-data/schemas/cql-type-parity.cql). These four
+    // tables carry the null/empty/absent properties NO committed fixture has —
+    // verified by scanning every committed golden: none of them has a row that
+    // omits a regular cell, so without this tier "an absent cell renders as
+    // null" and "a cell tombstone renders as null" would be unasserted.
+    // ---------------------------------------------------------------------
+
+    // Row 1 omits `reg` (never written), row 2 carries a CELL TOMBSTONE for it,
+    // row 3 writes it as the empty string: absent vs deleted vs empty, the three
+    // spellings a formatter can confuse.
+    Case {
+        presence: Presence::Corpus,
+        keyspace: "test_types",
+        table: "nb_absent_vs_null_regular",
+        schema: "cql-type-parity",
+        pk: &["pk"],
+        ck: &["ck"],
+        multicell: &[],
+        skip_columns: &[],
+    },
+    // `target_text`/`target_blob` cycle through absent / NULL / '' / 0x with live
+    // neighbours either side, so a shifted or swallowed value is visible.
+    Case {
+        presence: Presence::Corpus,
+        keyspace: "test_types",
+        table: "nb_null_empty_text_blob",
+        schema: "cql-type-parity",
+        pk: &["pk"],
+        ck: &["ck"],
+        multicell: &[],
+        skip_columns: &[],
+    },
+    // text/blob at length 0, 1, 127, 128, 255, 256, 16383, 16384 — the
+    // length-prefix edges, where a truncating formatter shows up.
+    Case {
+        presence: Presence::Corpus,
+        keyspace: "test_types",
+        table: "nb_length_prefix_edges",
+        schema: "cql-type-parity",
+        pk: &["pk"],
+        ck: &["ck"],
+        multicell: &[],
+        skip_columns: &[],
+    },
+    // An EMPTY multicell collection is stored ABSENT by Cassandra (the dump holds
+    // only a complex deletion) while an empty FROZEN one persists as a present
+    // empty value. `fl`/`fs`/`fm` therefore pin `[]` and `{}` as PRESENT empty
+    // containers, which is the half of the property CQLite gets right.
+    Case {
+        presence: Presence::Corpus,
+        keyspace: "test_types",
+        table: "nb_empty_collections",
+        schema: "cql-type-parity",
+        pk: &["pk"],
+        ck: &["ck"],
+        multicell: &[
+            ("ml", Multicell::List),
+            ("ms", Multicell::Set),
+            ("mm", Multicell::Map),
+        ],
+        // MEASURED DIVERGENCE: for the row whose multicell collections were
+        // written EMPTY, the golden carries a complex deletion and no cells — i.e.
+        // the column is absent, and Cassandra's `SELECT` returns `null` (the DDL
+        // comment in cql-type-parity.cql states this, and the same on-disk shape is
+        // what `DELETE ml FROM …` writes). Both CQLite egress formats instead
+        // render a PRESENT empty container (`[]`, `{}`), which is a different
+        // value. Non-empty multicell rendering stays covered by four other cases
+        // (test_da.collection_table and the three test_signed_coll tables).
+        skip_columns: &[
+            (
+                "ml",
+                "empty multicell list renders as [] where Cassandra reads null",
+            ),
+            (
+                "ms",
+                "empty multicell set renders as {} where Cassandra reads null",
+            ),
+            (
+                "mm",
+                "empty multicell map renders as {} where Cassandra reads null",
+            ),
+        ],
     },
 ];
 
@@ -449,7 +575,18 @@ fn run_lane(egress: Egress) {
         let fixture = match fixture_dir(case.keyspace, case.table) {
             Ok(dir) => dir,
             Err(why) => {
-                failures.push(format!("{qualified}: fixture unresolvable: {why}"));
+                match case.presence {
+                    // A committed fixture is present in every checkout, so an
+                    // unresolvable one is a real failure, never a skip.
+                    Presence::Committed => {
+                        failures.push(format!("{qualified}: fixture unresolvable: {why}"))
+                    }
+                    // A fetched-corpus fixture may legitimately be absent; the
+                    // absence is DECLARED in the census rather than swallowed.
+                    Presence::Corpus => census.push(format!(
+                        "  {qualified}: NOT PRESENT (fetched corpus) — {why}"
+                    )),
+                }
                 continue;
             }
         };
@@ -640,11 +777,16 @@ fn committed_fixture_coverage_census() {
             ));
         }
     }
+    let committed_cases = CASES
+        .iter()
+        .filter(|c| c.presence == Presence::Committed)
+        .count();
     eprintln!(
-        "AD2 census: {} committed fixture tables — {} compared, {} declared not-comparable",
+        "AD2 census: {} committed fixture tables — {committed_cases} compared, {} declared \
+         not-comparable; plus {} fetched-corpus case(s)",
         committed.len(),
-        CASES.len(),
-        NOT_COMPARABLE.len()
+        NOT_COMPARABLE.len(),
+        CASES.len() - committed_cases
     );
     assert!(
         unclassified.is_empty(),

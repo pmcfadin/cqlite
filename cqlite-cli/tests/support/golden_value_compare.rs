@@ -61,7 +61,7 @@ pub fn compare_rows(
     cli.sort_by_key(|r| row_sort_key(r, pk, ck, egress));
 
     for (g, c) in golden.iter().zip(cli.iter()) {
-        let key = row_sort_key(g, pk, ck, egress);
+        let key = row_message_key(g, pk, ck, egress);
         let mut columns: Vec<&String> = g.keys().chain(c.keys()).collect();
         columns.sort();
         columns.dedup();
@@ -97,6 +97,34 @@ fn row_sort_key(row: &Row, pk: &[&str], ck: &[&str], egress: Egress) -> String {
         parts.push(format!("{name}={}", describe(value, egress)));
     }
     parts.join("\u{1}")
+}
+
+/// The primary key alone, for diagnostics. Deliberately NOT [`row_sort_key`]: that
+/// one appends the whole row so pairing stays total, which would put a 4 KiB blob
+/// into every failure message.
+fn row_message_key(row: &Row, pk: &[&str], ck: &[&str], egress: Egress) -> String {
+    pk.iter()
+        .chain(ck.iter())
+        .map(|name| {
+            format!(
+                "{name}={}",
+                brief(&describe(row.get(*name).unwrap_or(&Value::Null), egress))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Truncate a rendering for a diagnostic. Failure messages have to be READABLE:
+/// the tables here carry 4 KiB blobs and 300-character text payloads, and an
+/// untruncated diff of 64 such cells buries the one fact the reader needs.
+fn brief(s: &str) -> String {
+    const LIMIT: usize = 120;
+    if s.chars().count() <= LIMIT {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(LIMIT).collect();
+    format!("{head}…({} chars total)", s.chars().count())
 }
 
 /// A stable textual description of any value, for ordering and diagnostics only.
@@ -137,8 +165,8 @@ pub fn compare_value(golden: &Value, cli: &Value, egress: Egress) -> Result<(), 
                     "collection length golden {} vs cli {} (golden={}, cli={})",
                     g.len(),
                     c.len(),
-                    describe(golden, egress),
-                    describe(cli, egress)
+                    brief(&describe(golden, egress)),
+                    brief(&describe(cli, egress))
                 ));
             }
             for (i, (gi, ci)) in g.iter().zip(c.iter()).enumerate() {
@@ -172,13 +200,13 @@ pub fn compare_value(golden: &Value, cli: &Value, egress: Egress) -> Result<(), 
         }
         (Value::Array(_) | Value::Object(_), _) => Err(format!(
             "golden container vs non-container cli value (golden={}, cli={})",
-            describe(golden, egress),
-            describe(cli, egress)
+            brief(&describe(golden, egress)),
+            brief(&describe(cli, egress))
         )),
         (_, Value::Array(_) | Value::Object(_)) => Err(format!(
             "golden scalar vs cli container (golden={}, cli={})",
-            describe(golden, egress),
-            describe(cli, egress)
+            brief(&describe(golden, egress)),
+            brief(&describe(cli, egress))
         )),
         _ => {
             let g = canon_scalar(golden, egress)?;
@@ -186,7 +214,11 @@ pub fn compare_value(golden: &Value, cli: &Value, egress: Egress) -> Result<(), 
             if g == c {
                 Ok(())
             } else {
-                Err(format!("golden {} vs cli {}", g.describe(), c.describe()))
+                Err(format!(
+                    "golden {} vs cli {}",
+                    brief(&g.describe()),
+                    brief(&c.describe())
+                ))
             }
         }
     }
@@ -208,7 +240,7 @@ fn compare_map(golden: &Map<String, Value>, cli: &[Value], egress: Egress) -> Re
         if object.len() != 2 || !object.contains_key("key") || !object.contains_key("value") {
             return Err(format!(
                 "cli map entry is not a {{key,value}} pair: {}",
-                describe(entry, egress)
+                brief(&describe(entry, egress))
             ));
         }
         let key = object.get("key").unwrap_or(&Value::Null);
