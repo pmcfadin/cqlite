@@ -44,12 +44,34 @@ re-invoke you carrying the spawned agent's verdict/report. You never idle-wait o
 ## NEVER idle-wait on the gate — poll the summary file on a hard deadline (#1855/#2668)
 A subagent that **idle-waits** on a 12–25 min gate is killed by the 600s stall watchdog
 and takes its child gate process down with it (3 implementers lost this way 2026-07-03/04).
-So you MUST run the full gate with `Bash run_in_background` and **end your turn** — the
-harness re-invokes you when the gate process exits. Do NOT sit in a silent wait, and do
-NOT poll in a tight `ScheduleWakeup` loop.
+So you MUST launch the full gate **detached from your own cgroup** and **end your turn** —
+the harness re-invokes you when there is something to do. Do NOT sit in a silent wait, and
+do NOT poll in a tight `ScheduleWakeup` loop.
 
-**Polling is MANDATORY, not optional (#2668).** After launching the gate, poll the
-**SUMMARY FILE** (never the log) with a cheap `grep` at **5-minute intervals**:
+**`run_in_background` is NOT sufficient, and that was the whole of #3473.** You are a
+subagent, so you run in your OWN `tmux-spawn-<uuid>.scope`, and that scope carries
+`KillMode=control-group` + `SendSIGKILL=yes`. Everything you spawn — `run_in_background`
+included, and `nohup`/`setsid` too, since cgroup membership is inherited across `fork` and
+cannot be shed by detaching from the terminal, process group or session — lives in that
+scope and is **signalled when your context ends**. Ending your turn is exactly the event
+that can kill your own gate, and it leaves NO trace: the summary file keeps its launch
+sentinel and nothing says why. Launch it with `scripts/flow/gate-detached.sh`, which puts
+the gate under `app.slice` in a cgroup of its own, outside yours.
+
+**Polling is MANDATORY, not optional (#2668).** Poll with `gate-liveness.sh`, never a bare
+`grep`, at **5-minute intervals**:
+```bash
+bash scripts/gate-liveness.sh /tmp/gate-<N>.txt --run-id <run-id-from-the-launch>
+#   COMPLETE (exit 0) — a terminal verdict is in the summary file; read it
+#   RUNNING  (exit 2) — alive, no verdict yet (includes queued on the #1825 slot); end your turn
+#   REAPED   (exit 3) — killed; it will NEVER write a verdict. Re-launch it, detached.
+#   UNKNOWN  (exit 4) — cannot tell; the printed cause names what was unmeasurable
+```
+`REAPED` is the state you could not previously see, and it is **actionable**: re-launch,
+do not keep waiting and do not report `gate-timeout`. A bare `grep` cannot tell `REAPED`
+from `RUNNING` — both leave the same `INCOMPLETE` text (#3041) — which is why polling the
+summary file alone once made one human the fleet's only gate-runner. Keep the `grep` below
+only as the fallback when the heartbeat is absent (`UNKNOWN`, e.g. an older gate):
 ```bash
 grep -qE 'RESULT: (PASS|FAIL)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ gate finished
 ```
@@ -89,9 +111,14 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    to a pre-chosen file so raw stdout never has to be read into context:
    ```bash
    bash scripts/flow/claim-heartbeat.sh beat <N>
-   AGENT_GATE_SUMMARY_FILE=/tmp/gate-<N>.txt \
-     bash scripts/agent-gate.sh > gate-<N>.log 2>&1 < /dev/null   # via Bash run_in_background
+   # Detached: its own cgroup, so it survives YOUR context ending (#3473). Returns
+   # immediately and prints the unit, summary, heartbeat and poll command.
+   bash scripts/flow/gate-detached.sh --summary /tmp/gate-<N>.txt --log /tmp/gate-<N>.log
    ```
+   If that refuses with **exit 69** (no working `systemd-run --user` on this host), this box
+   cannot run a cgroup-detached gate: emit `NEEDS-SPAWN`/escalate for the gate to be run
+   from a separate login (`ssh` + `nohup`, which gets its own scope). Do **not** fall back
+   to an in-session launch — it will die when you end your turn.
    End your turn; on re-invoke, `cat /tmp/gate-<N>.txt` — the complete `==== AGENT-GATE
    SUMMARY ====` block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end marker; a terminal
    `RESULT: INCOMPLETE` means the run never finished, so there is no verdict to read).

@@ -147,6 +147,30 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   a **just-launched or still-queued** gate as its gate of record — a verdict that does not exist.
   Anchor every poll (agents, skills, docs, helper scripts) on `PASS|FAIL`; a sentinel-only summary
   means "still running, died, or queued", never certified.
+- **A gate launched in-session dies with its session's CGROUP, and no detach idiom saves it — run it
+  with `scripts/flow/gate-detached.sh` and poll `scripts/gate-liveness.sh` (#3473).** Every process an
+  agent session spawns inherits the session's `tmux-spawn-<uuid>.scope`, which carries
+  `KillMode=control-group` + `SendSIGKILL=yes`: stopping it signals **every task in the cgroup**.
+  Cgroup membership is inherited across `fork` and **cannot** be shed by `nohup`, `setsid`, closing
+  fds or being reparented to init — measured, both directions, on an equivalent cgroup. **A subagent
+  gets its OWN pane scope**, so `flow-closer` — the agent that by design runs the gate of record —
+  takes its gate down with it when its context ends. That, not elapsed time, is the real content of
+  #3473's "~10 minute ceiling": six instrumented tickers (plain `nohup`, `setsid`, renamed argv,
+  harness-background, and two launched by a subagent stalled silently past 600s) each ran past
+  **2400s with zero signals**, so there is **no time-based ceiling and the 600s stall watchdog is not
+  the direct cause**. It also explains the lead's `ssh` + `nohup` control completing on the same box
+  and sha: an ssh login gets its own `session-N.scope`. So **"lanes cannot run a full gate" is
+  RETRACTED** — a lane can, detached. `gate-detached.sh` forwards the caller's whole environment (a
+  transient systemd unit inherits **none** of it, and an allowlist of remembered variables fails
+  silently) and **refuses with exit 69** where it cannot deliver a separate cgroup, rather than
+  falling back to a session-scoped launch the caller would believe was protected.
+  **And the killed-vs-running ambiguity is now answerable without `ps` on the box**: the gate beats
+  `<summary-file>.heartbeat` every 20s for as long as it lives (the startup sentinel names the path),
+  and `gate-liveness.sh <summary-file> [--run-id <id>]` reports `COMPLETE`(0) / `RUNNING`(2) /
+  `REAPED`(3) / `UNKNOWN`(4). Pass `--run-id` whenever you know it — a peer's beat in the same
+  checkout otherwise answers about the peer's gate (#2874). A **missing** beat is `UNKNOWN`, never
+  `REAPED`: absence is not evidence of death, and there is deliberately **no env var** to widen the
+  staleness window or disable the beat. Full record: `docs/development/lane-gate-execution.md`.
 - **A GENUINELY PROSE diff cannot change the compiled binary — so a test failure in its full gate
   is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE
   (#3042).** The waiver's precondition is that the diff touches no compiled input (no `src`, no
