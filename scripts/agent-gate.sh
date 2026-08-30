@@ -2545,14 +2545,18 @@ apply_schemas_preflight() {
 #   BOUNDED (network-capable; every one goes through _component_set_bounded):
 #     git fetch --refmap= --no-tags …    the baseline read; network by definition. Both
 #                                        flags suppress SHARED-ref writes (branches, tags).
-#     git show <sha>:scripts/…           reads a BLOB, so in a PARTIAL clone
-#     git show HEAD:scripts/…            (--filter=blob:none) it fetches LAZILY. This is the
-#                                        site that looked local and was not (finding 1). TWO
-#                                        revs are read: the fetched baseline, and HEAD (the
-#                                        job-215 removal-provenance measurement).
-#     bash <extracted baseline> --list   spawns; and a spawned tree can outlive a
-#     bash <extracted HEAD> --list       direct-child kill, hence the process-group signal
-#                                        in _component_set_bounded (finding 2).
+#     git show <rev>:scripts/agent-gate.components   reads a BLOB, so in a PARTIAL clone
+#     git show <rev>:scripts/agent-gate.sh           (--filter=blob:none) it fetches LAZILY.
+#                                        This is the site that looked local and was not
+#                                        (finding 1). Each is read at up to TWO revs — the
+#                                        fetched baseline and HEAD (the job-215
+#                                        removal-provenance measurement) — and the second is
+#                                        the TRANSITIONAL fallback, read AS TEXT.
+#
+#     NOTHING IS EXECUTED HERE ANY MORE (#3544 REQ-3544-01). The two
+#     `bash <extracted …> --list` spawns are GONE: the component set is now read as DATA (see
+#     the reader block below). No entry in this enumeration spawns a shell, which is also why
+#     `bash` has left the declared external set.
 #
 #   LOCAL-ONLY (annotated `# local-only: <why>` at each site, so the claim is checkable
 #   where it is made rather than only here):
@@ -2567,9 +2571,14 @@ apply_schemas_preflight() {
 #                                        no object access, no remote contact.
 #     git update-ref -d <private ref>    deletes a ref in this worktree's own namespace.
 #
-#   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, mkdir, rm, cat, tr, cut,
-#     basename, kill, sleep, true — plus `timeout`/`gtimeout` themselves, which ARE the
+#   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, rm, cat, tr, cut, sed,
+#     basename, kill, sleep, true, chmod — plus `timeout`/`gtimeout` themselves, which ARE the
 #     bounding mechanism (local, and bounded by construction: they take the bound).
+#     `chmod` is the 0600 on the isolated fetch config BEFORE the URL (which may carry a
+#     credential) is written into it: a mode change on a path we just created, no network, no
+#     spawn. `sed` is the userinfo redaction in _component_set_redact_text — a local text
+#     transform. Both are classified here rather than merely listed, which is the point of the
+#     list: the self-test FAILs on an external program that has not been classified.
 #
 # Everything else here is a bash builtin/keyword or a function defined in this file.
 
@@ -2586,6 +2595,8 @@ _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT H
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
 _CS_FETCH_REF=""   # the PRIVATE per-run ref this invocation's fetch wrote (#3544 / job 227)
 _CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
+_CS_BASE_SRC=""    # HOW the baseline set was read: manifest | declaration (#3544 REQ-3544-01)
+_CS_HEAD_SRC=""    # HOW HEAD's set was read: manifest | declaration
 _CS_HEAD_SET=""    # the component set as COMMITTED AT HEAD (space separated)
 _CS_HEAD_ERR=""    # why HEAD's set could not be measured (empty = measured)
 _CS_ANCESTOR=unknown   # is the baseline sha an ancestor of HEAD? yes | no | unknown
@@ -3048,80 +3059,287 @@ _component_set_remote_is_canonical() {
   [ "$(_component_set_normalise_remote "$1")" = "$_CS_CANONICAL_REMOTE" ]
 }
 
-# _component_set_head_set: derive the component set from the gate script AS COMMITTED AT
-# HEAD. Sets _CS_HEAD_SET (rc 0) or _CS_HEAD_ERR (rc 1); never emits, never exits.
+# ---- THE COMPONENT SET IS READ AS DATA, NEVER EXECUTED (#3544, REQ-3544-01) -------------
 #
-# WHY IT EXISTS (roborev job 215, blocker 2). The branch side of the comparison is the
-# WORKING TREE's COMPONENTS array — correctly, because that is the set this run will
-# actually dispatch. But the DECLARED verdict's CLAIM is about the COMMITTED diff ("the
-# removal is in THIS branch's own diff"), and `origin/main IS an ancestor of HEAD` answers a
-# DIFFERENT question ("is origin/main reachable from HEAD?"). Answering the second while
-# asserting the first was both a false sentence and a REAL BYPASS: with origin/main an
-# ancestor of HEAD, deleting one component from the WORKING COPY alone yielded a
-# NON-FATAL DECLARED in a CERTIFYING mode, so a full gate would have certified 35 of 36
-# components — the exact defect #3544 exists to prevent (reproduced, not theorised).
+# THE RULING AND WHY. This pre-flight used to derive the baseline's set by EXTRACTING the
+# fetched `origin/main:scripts/agent-gate.sh` and RUNNING it (`bash <fetched> --list`). SIX of
+# that mechanism's SEVEN High-severity review findings trace to that single decision, and the
+# three fixes it went through each moved the hole ONE LAYER OUTWARD: a symbolic remote name,
+# then the validated URL, then the URL in `argv`. That is not a hardening curve — it is
+# CLAUDE.md's umbrella rule (#3312) restated: CONTROL AND DATA MUST NOT SHARE A CHANNEL WHEN
+# THE DATA IS ATTACKER-CONTROLLED, and the fix is to REMOVE the channel, not to choose a rarer
+# delimiter. `fetch-then-execute` IS the shared channel: what this check wants is a COMPONENT
+# LIST (data) and what it retrieved was a SCRIPT (control).
 #
-# THE MEASUREMENT IS AFFIRMATIVE, not a proxy. Failing merely because the working tree is
-# DIRTY would red every branch that has an unrelated uncommitted edit, and would still not
-# establish provenance where the tree is clean-but-stale; HEAD's OWN set is the fact the
-# DECLARED sentence claims, so HEAD's own set is what is read.
-_component_set_head_set() {
-  _CS_HEAD_SET=""; _CS_HEAD_ERR=""
-  local rel base tmpd out rc line
-  base=$(basename "$GATE_SELF"); rel="scripts/$base"
-  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs-head.XXXXXX") || tmpd=""
-  if [ -z "$tmpd" ] || [ ! -d "$tmpd" ]; then
-    _CS_HEAD_ERR="could not create a temp dir to extract $rel at HEAD"; return 1
+# WHAT THE CHANGE CONVERTS, stated precisely because "the findings are eliminated" would be
+# false: a redirected/hostile baseline now yields a WRONG COMPONENT LIST — which the comparison
+# itself detects and reports — instead of ARBITRARY CODE EXECUTION with the developer's
+# credentials. The identity pinning, the isolated fetch, the argv/credential fixes and the
+# verified transfer hop all REMAIN, as defence in depth (this fleet has twice been saved by the
+# older dumber layer surviving beside the newer cleverer one).
+#
+# TWO READ PATHS, BOTH PURE DATA, NEITHER EXECUTING ANYTHING:
+#
+#  1. PRIMARY — the committed manifest `scripts/agent-gate.components`, read with
+#     `git show <rev>:<path>` and parsed under a CLOSED grammar (one component name per line;
+#     blank lines and `#` comments skipped; ANYTHING else is a NAMED refusal). Data by
+#     construction.
+#
+#  2. TRANSITIONAL FALLBACK — when the manifest is ABSENT at that rev, the gate script's
+#     single-line top-level `COMPONENTS=(…)` declaration is extracted AS TEXT and the names are
+#     parsed out of it. It exists because `origin/main` carries no manifest until THIS change
+#     merges, so a manifest-only read would leave this very PR unable to certify itself (the
+#     "a PR whose subject is a config read from root cannot certify itself" class). It is
+#     SELF-LIMITING: once the manifest is on `main` it is unreachable for any baseline at or
+#     after that merge. It is not an escape hatch — it REFUSES loudly on any shape it does not
+#     recognise (a multi-line array, a computed array, more than one declaration, a character
+#     outside the name grammar), and it never runs code.
+#
+#     ITS ONE REAL COST, named rather than left to be rediscovered: a TEXT extractor is
+#     format-brittle in a SHARED direction. If `main` ever reflows that array across lines,
+#     path 2 refuses for EVERY branch at once. That is fail-closed rather than a false green,
+#     and it is the other reason the manifest is primary.
+#
+# `scripts/ci/check-pub-surface.sh` is the precedent for a BOUNDED single-question source read
+# that can REFUSE; what #1712 deleted was the UNBOUNDED scanner, which is a different shape.
+#
+# THE LOCAL MANIFEST IS ASSERTED AGAINST THE RUNNING ARRAY ON EVERY RUN, and that assert is
+# what makes the manifest trustworthy as a baseline at all. Without it the file is an
+# UNVERIFIED CLAIM about the component set: a branch that added a component to `COMPONENTS`
+# and not to the manifest would, once merged, leave `main`'s manifest SHORT — and every later
+# branch would then compare against a too-small baseline and silently excuse real skew. So
+# `manifest-missing` / `manifest-garbage` / `manifest-stale` are fail-closed named kinds, and
+# comparing against an unverified manifest would be worse than comparing against nothing.
+_CS_MANIFEST_REL="scripts/agent-gate.components"
+
+# _component_set_valid_name <token>: rc 0 iff <token> is a plausible component name.
+# The class is deliberately WIDER than today's all-`[a-z0-9-]` names — a future `write_tests`
+# or `bti.v2` must be MEASURED, not called garbage, because a guard that reds on correct input
+# is the guard agents learn to waive. What it still rejects is everything a prose line or a
+# leaked diagnostic contains (whitespace, `:`, `/`, glob characters), which is the class that
+# actually threatens the derivation, plus a leading `-` so a name can never be read as an
+# option downstream.
+_component_set_valid_name() {
+  case "$1" in
+    ''|-*) return 1 ;;
+    *[![:alnum:]._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# _component_set_parse_manifest_file <path>: parse a component manifest under the closed
+# grammar. Sets _CS_PARSED_SET / _CS_PARSED_N; rc 0 = parsed, rc 1 = REFUSED (the offending
+# line is in _CS_PARSED_BAD), rc 2 = parsed to NO names.
+#
+# NO TRIMMING, deliberately: a line with leading or trailing whitespace is REFUSED, because a
+# parser that trims is a parser that guesses, and this file is the baseline of a fail-closed
+# comparison. Pure shell — no external command, so nothing here can reach the network.
+_CS_PARSED_SET=""
+_CS_PARSED_N=0
+_CS_PARSED_BAD=""
+_component_set_parse_manifest_file() {
+  local f="$1" line
+  _CS_PARSED_SET=""; _CS_PARSED_N=0; _CS_PARSED_BAD=""
+  # `|| [ -n "$line" ]`: a file whose last line has NO trailing newline would otherwise lose
+  # its last component silently — a SHRUNKEN baseline, i.e. the vacuous pass inverted.
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '') continue ;;
+      '#'*) continue ;;
+    esac
+    if ! _component_set_valid_name "$line"; then
+      _CS_PARSED_SET=""; _CS_PARSED_N=0
+      _CS_PARSED_BAD="$(_component_set_flatten "$line")"
+      return 1
+    fi
+    _CS_PARSED_SET="${_CS_PARSED_SET:+$_CS_PARSED_SET }$line"
+    _CS_PARSED_N=$((_CS_PARSED_N + 1))
+  done <"$f"
+  [ "$_CS_PARSED_N" -gt 0 ] || return 2
+  return 0
+}
+
+# _component_set_extract_declaration <path-to-a-gate-script>: the TRANSITIONAL fallback.
+# Reads the file AS TEXT and parses the names out of its ONE top-level single-line
+# `COMPONENTS=(…)` declaration. Sets _CS_PARSED_SET / _CS_PARSED_N on success; rc 1 = REFUSED
+# (why is in _CS_DECL_ERR), rc 2 = the declaration lists no names.
+#
+# BOUNDED IN WHAT IT ASKS, which is what distinguishes it from the scanner #1712 deleted: one
+# question, one shape, anchored at COLUMN ZERO (a declaration inside a function or a here-doc
+# is indented or otherwise not at column zero, and is not this shape). Everything it does not
+# recognise is a REFUSAL that names what it saw — never a partial parse, and never a guess.
+_CS_DECL_ERR=""
+_component_set_extract_declaration() {
+  local f="$1" line n=0 decl="" rest inner w
+  _CS_PARSED_SET=""; _CS_PARSED_N=0; _CS_DECL_ERR=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'COMPONENTS=('*) n=$((n + 1)); decl="$line" ;;
+    esac
+  done <"$f"
+  if [ "$n" -ne 1 ]; then
+    _CS_DECL_ERR="found $n top-level 'COMPONENTS=(' declaration(s), expected exactly one; the component set could not be read as TEXT"
+    return 1
   fi
-  mkdir -p "$tmpd/scripts"
-  # BOUNDED for exactly the reason the baseline extraction is (job 210, finding 1):
-  # `git show <rev>:<path>` reads a BLOB, and a PARTIAL clone fetches it LAZILY, so this
-  # apparently-local read is network-capable. `HEAD` is a LITERAL, like `origin`/`main`
-  # above: a variable rev would be a way to point the provenance check at a commit of the
-  # invoker's choosing.
-  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "HEAD:$rel" \
-      >"$tmpd/scripts/$base" 2>"$tmpd/show.err"
+  rest="${decl#'COMPONENTS=('}"
+  case "$rest" in
+    *')') inner="${rest%')'}" ;;
+    *) _CS_DECL_ERR="the 'COMPONENTS=(' declaration does not CLOSE on its own line ('$(_component_set_flatten "$decl")'); a multi-line or computed array is REFUSED, never guessed at"
+       return 1 ;;
+  esac
+  # THE CHARACTER CHECK COMES BEFORE ANY WORD SPLITTING, and that order is load-bearing: the
+  # loop below relies on shell word splitting, which also GLOBS, so a `*` reaching it would
+  # expand against the current directory. Refusing every character outside the name grammar
+  # first makes the split provably glob-free (the same reasoning as the `shellcheck disable`
+  # word-splits elsewhere in this pre-flight).
+  case "$inner" in
+    *[![:alnum:]._[:space:]-]*)
+      _CS_DECL_ERR="the 'COMPONENTS=(' declaration contains a character outside the component-name grammar ('$(_component_set_flatten "$decl")'); a substitution, a quote or a glob is REFUSED"
+      return 1 ;;
+  esac
+  # shellcheck disable=SC2086  # intentional word-split over the declaration's tokens; the
+  # character check above guarantees no glob character can be present
+  for w in $inner; do
+    if ! _component_set_valid_name "$w"; then
+      _CS_PARSED_SET=""; _CS_PARSED_N=0
+      _CS_DECL_ERR="the 'COMPONENTS=(' declaration holds a token that is not a component name: '$(_component_set_flatten "$w")'"
+      return 1
+    fi
+    _CS_PARSED_SET="${_CS_PARSED_SET:+$_CS_PARSED_SET }$w"
+    _CS_PARSED_N=$((_CS_PARSED_N + 1))
+  done
+  [ "$_CS_PARSED_N" -gt 0 ] || return 2
+  return 0
+}
+
+# _component_set_local_manifest_check: rc 0 iff the WORKING TREE's manifest exists, parses,
+# and equals THIS gate's own COMPONENTS array EXACTLY, order included. On failure it sets
+# _CS_KIND (manifest-missing | manifest-garbage | manifest-stale) and _CS_DETAIL and returns 1.
+#
+# ORDER IS PART OF THE EQUALITY, and that is not pedantry: `--list` prints dispatch order, the
+# manifest claims to be what `--list` prints, and the remedy for a reorder is the same
+# one-line regeneration as for anything else. A weaker comparison would let the file drift into
+# something that is only approximately the claim.
+#
+# NO EXTERNAL COMMAND: this is a local file read plus string compares, so it cannot hang and
+# needs no bound — which is also why it runs BEFORE the fetch.
+_component_set_local_manifest_check() {
+  local f="$REPO_ROOT/$_CS_MANIFEST_REL" rc only_gate="" only_man="" c padded_man padded_gate
+  if [ ! -f "$f" ] || [ ! -r "$f" ]; then
+    _CS_KIND=manifest-missing
+    _CS_DETAIL="the component manifest $_CS_MANIFEST_REL is missing or unreadable in $REPO_ROOT; it is COMMITTED SOURCE and the baseline comparison is derived from it, so its absence is not an excusable state — remedy: regenerate it from this gate's own --list"
+    return 1
+  fi
+  _component_set_parse_manifest_file "$f"; rc=$?
+  if [ "$rc" -eq 1 ]; then
+    _CS_KIND=manifest-garbage
+    _CS_DETAIL="$_CS_MANIFEST_REL holds a line that is not a component name: '$_CS_PARSED_BAD'; the grammar is closed (one name per line, '#' comments and blank lines allowed) and a line it does not recognise is refused rather than skipped, because skipping would SHRINK the set this file publishes as the baseline"
+    return 1
+  fi
+  if [ "$_CS_PARSED_SET" = "${COMPONENTS[*]}" ]; then
+    return 0
+  fi
+  padded_man=" $_CS_PARSED_SET "
+  padded_gate=" ${COMPONENTS[*]} "
+  for c in "${COMPONENTS[@]}"; do
+    case "$padded_man" in *" $c "*) : ;; *) only_gate="${only_gate:+$only_gate }$c" ;; esac
+  done
+  # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
+  for c in $_CS_PARSED_SET; do
+    case "$padded_gate" in *" $c "*) : ;; *) only_man="${only_man:+$only_man }$c" ;; esac
+  done
+  _CS_KIND=manifest-stale
+  if [ -z "$only_gate" ] && [ -z "$only_man" ]; then
+    _CS_DETAIL="$_CS_MANIFEST_REL lists the same $_CS_PARSED_N component(s) as this gate's COMPONENTS array but in a DIFFERENT ORDER; the manifest claims to be what --list prints, so it must match it exactly"
+  else
+    _CS_DETAIL="$_CS_MANIFEST_REL does not match this gate's COMPONENTS array (manifest $_CS_PARSED_N, gate ${#COMPONENTS[@]}): missing from the manifest: ${only_gate:-<none>}; present only in the manifest: ${only_man:-<none>}. A manifest that does not match is an UNVERIFIED baseline for every future branch — once merged, every later run would compare against this wrong set"
+  fi
+  return 1
+}
+
+# _component_set_set_at_rev <rev>: THE ONE READER for a component set at a COMMIT — used for
+# both the fetched baseline and for HEAD (the removal-provenance measurement), so the two can
+# never diverge in grammar, in refusal behaviour or in what they read.
+#
+# Sets _CS_REV_SET / _CS_REV_N / _CS_REV_SRC (`manifest` | `declaration`) and returns 0; on
+# failure returns 1 with _CS_REV_ERRKIND (workspace | unreadable | decl-unrecognised | garbage
+# | empty) and a one-line _CS_REV_ERR. The CALLER maps the errkind onto a `_CS_KIND`, because
+# the same failure means different things for the baseline and for HEAD.
+#
+# <rev> is either the sha40 this run's own fetch produced or the literal `HEAD`; nothing
+# invoker-supplied reaches it.
+_CS_REV_SET=""
+_CS_REV_N=0
+_CS_REV_SRC=""
+_CS_REV_ERRKIND=""
+_CS_REV_ERR=""
+_component_set_set_at_rev() {
+  local rev="$1" tmpd rc prc gate_rel
+  _CS_REV_SET=""; _CS_REV_N=0; _CS_REV_SRC=""; _CS_REV_ERRKIND=""; _CS_REV_ERR=""
+  gate_rel="scripts/$(basename "$GATE_SELF")"
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs.XXXXXX") || tmpd=""
+  if [ -z "$tmpd" ] || [ ! -d "$tmpd" ]; then
+    _CS_REV_ERRKIND=workspace
+    _CS_REV_ERR="could not create a temp dir to read the component set at $rev"
+    return 1
+  fi
+  # BOUNDED for exactly the reason every other read here is (job 210, finding 1):
+  # `git show <rev>:<path>` reads a BLOB, and in a PARTIAL clone (`--filter=blob:none`) the
+  # blob is fetched LAZILY — so this apparently-local read is network-capable.
+  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    _component_set_parse_manifest_file "$tmpd/manifest"; prc=$?
+    rm -rf "$tmpd"
+    case "$prc" in
+      0) _CS_REV_SET="$_CS_PARSED_SET"; _CS_REV_N="$_CS_PARSED_N"; _CS_REV_SRC=manifest; return 0 ;;
+      1) _CS_REV_ERRKIND=garbage
+         _CS_REV_ERR="$rev:$_CS_MANIFEST_REL holds a line that is not a component name: '$_CS_PARSED_BAD'"
+         return 1 ;;
+      *) _CS_REV_ERRKIND=empty
+         _CS_REV_ERR="$rev:$_CS_MANIFEST_REL lists NO components; an empty set would excuse every branch"
+         return 1 ;;
+    esac
+  fi
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    _CS_REV_ERRKIND=unreadable
+    _CS_REV_ERR="git show $rev:$_CS_MANIFEST_REL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
+    rm -rf "$tmpd"; return 1
+  fi
+  if [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+    _CS_REV_ERRKIND=unreadable
+    _CS_REV_ERR="git show $rev:$_CS_MANIFEST_REL could not be run under a bound, so it was NOT RUN (rc $rc)"
+    rm -rf "$tmpd"; return 1
+  fi
+  # THE MANIFEST IS ABSENT AT THIS REV -> the transitional text fallback. A NON-BOUND failure
+  # is treated as absence, which is what it is in every case that matters (`fatal: path … does
+  # not exist`); a corrupt object would fail the fallback too, and the fallback's own refusal
+  # names it. Bound-exceeded is handled ABOVE rather than here, because falling back after a
+  # HANG would be reading a second blob in a clone that has already proven it cannot serve one.
+  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
+    _CS_REV_ERRKIND=unreadable
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-      _CS_HEAD_ERR="git show HEAD:$rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
+      _CS_REV_ERR="neither $rev:$_CS_MANIFEST_REL nor $rev:$gate_rel could be read: git show $rev:$gate_rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
+    elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_REV_ERR="neither $rev:$_CS_MANIFEST_REL nor $rev:$gate_rel could be read: git show $rev:$gate_rel could not be run under a bound, so it was NOT RUN (rc $rc)"
     else
-      _CS_HEAD_ERR="git show HEAD:$rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/show.err" 2>/dev/null)")"
+      _CS_REV_ERR="neither $rev:$_CS_MANIFEST_REL nor $rev:$gate_rel could be read: git show $rev:$gate_rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/g.err" 2>/dev/null)")"
     fi
     rm -rf "$tmpd"; return 1
   fi
-  # Derived by EXECUTION, like the baseline's, and pinned into $tmpd for the same reasons.
-  out=$(
-    AGENT_GATE_SUMMARY_FILE="$tmpd/head-summary.txt" \
-    AGENT_GATE_PARENT_RUN_ID="${RUN_ID:-component-set-preflight}" \
-    CQLITE_GATE_NO_NICE=1 \
-    _component_set_bounded "$_CS_BOUND_SECS" bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
-  ); rc=$?
-  if [ "$rc" -ne 0 ]; then
-    _CS_HEAD_ERR="'bash <HEAD:$rel> --list' exited $rc: $(_component_set_safe_detail "$(cat "$tmpd/list.err" 2>/dev/null)")"
-    rm -rf "$tmpd"; return 1
-  fi
+  _component_set_extract_declaration "$tmpd/gate"; prc=$?
   rm -rf "$tmpd"
-  # SAME CLOSED GRAMMAR as the baseline derivation, for the mirror-image reason: filtering
-  # an unrecognised line away would SHRINK the HEAD set, and a shrunken HEAD set reports an
-  # uncommitted removal as a committed one — the bypass re-opened from the other side.
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in
-      *[![:alnum:]._-]*|-*)
-        _CS_HEAD_SET=""
-        _CS_HEAD_ERR="'bash <HEAD:$rel> --list' printed a line that is not a component name: '$(_component_set_flatten "$line")'"
-        return 1 ;;
-    esac
-    _CS_HEAD_SET="${_CS_HEAD_SET:+$_CS_HEAD_SET }$line"
-  done <<EOF_CS_HEAD
-$out
-EOF_CS_HEAD
-  if [ -z "$_CS_HEAD_SET" ]; then
-    _CS_HEAD_ERR="'bash <HEAD:$rel> --list' printed no components; an empty HEAD set would report EVERY missing component as a committed removal"
-    return 1
-  fi
-  return 0
+  case "$prc" in
+    0) _CS_REV_SET="$_CS_PARSED_SET"; _CS_REV_N="$_CS_PARSED_N"; _CS_REV_SRC=declaration; return 0 ;;
+    2) _CS_REV_ERRKIND=empty
+       _CS_REV_ERR="$rev has no $_CS_MANIFEST_REL and its $gate_rel declares NO components; an empty set would excuse every branch"
+       return 1 ;;
+    *) _CS_REV_ERRKIND=decl-unrecognised
+       _CS_REV_ERR="$rev has no $_CS_MANIFEST_REL, and its $gate_rel could not be read as TEXT: $_CS_DECL_ERR (this transitional path never EXECUTES the script; it refuses instead)"
+       return 1 ;;
+  esac
 }
 
 # _component_set_is_shallow: `yes` | `no` | `unknown` — is $REPO_ROOT a SHALLOW clone?
@@ -3230,7 +3448,7 @@ _component_set_probe_inner() {
   _component_set_drop_fetch_ref   # a prior probe in this process must not leak its ref
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
-  _CS_HEAD_SET=""; _CS_HEAD_ERR=""
+  _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""
 
   local err rc
   if ! command -v git >/dev/null 2>&1; then
@@ -3282,6 +3500,16 @@ _component_set_probe_inner() {
     # is the one external value that was missing it.
     _CS_DETAIL="origin is '$(_component_set_flatten "$(_component_set_redact_url "$origin_url")")' (normalised '$(_component_set_flatten "$(_component_set_normalise_remote "$origin_url")")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork, a re-pointed remote, an unauthenticated transport (http/git) or a non-default port is a DIFFERENT baseline — and this pre-flight EXECUTES the baseline's copy of this script, so it must be the upstream and nothing else"
     return 0
+  fi
+
+  # THE LOCAL MANIFEST IS VERIFIED BEFORE THE BASELINE IS FETCHED. It needs no network and no
+  # bound (a local file read plus string compares), and it is the check that makes a manifest
+  # baseline trustworthy at all: an unverified manifest is a claim, and comparing against a
+  # claim is worse than comparing against nothing. Fail-closed with its own named kind —
+  # `manifest-*`, never folded into a baseline-* kind, because the FILE IS THIS TREE'S and the
+  # remedy is one regeneration away.
+  if ! _component_set_local_manifest_check; then
+    return 0    # _CS_KIND / _CS_DETAIL set by the check
   fi
 
   # NO UNBOUNDED PROBE. Checked BEFORE the fetch, not after it fails: the whole point is
@@ -3395,7 +3623,13 @@ _component_set_probe_inner() {
     return 0
   fi
   _CS_SCRATCH_DIR="$csdir"
-  if ! git init -q "$csdir/repo" >/dev/null 2>&1; then
+  # GLOBAL/SYSTEM CONFIG NEUTRALISED ON `git init` TOO, not only on the fetch. `git init`
+  # reads `init.templateDir`, and a template directory's non-dot files are COPIED into the new
+  # `$GIT_DIR` — `config` included — so a peer's global config (this fleet shares one user)
+  # could seed the "isolated" repo's own LOCAL config, which the fetch below DOES read. Both
+  # hops would then agree on the wrong commit, so the transfer assert cannot see it. One env
+  # prefix closes it; cheap hardening beats a hole whose only defence is that it is obscure.
+  if ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git init -q "$csdir/repo" >/dev/null 2>&1; then
     _CS_KIND=baseline-workspace
     _CS_DETAIL="could not initialise the isolated scratch repository for the baseline fetch"
     return 0
@@ -3451,89 +3685,28 @@ _component_set_probe_inner() {
     return 0
   fi
 
-  # The baseline's copy of THIS script, extracted at the fetched sha and run with its own
-  # `--list`. Deriving the set by EXECUTION rather than by parsing means a baseline that
-  # computes its components (or renames the array) is still measured correctly.
-  local rel base tmpd out
-  base=$(basename "$GATE_SELF"); rel="scripts/$base"
-  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs.XXXXXX") || tmpd=""
-  if [ -z "$tmpd" ] || [ ! -d "$tmpd" ]; then
-    _CS_KIND=baseline-workspace
-    _CS_DETAIL="could not create a temp dir to extract $rel at ${_CS_SHA}"
-    return 0
-  fi
-  mkdir -p "$tmpd/scripts"
-  # BOUNDED (roborev job 210, finding 1): `git show <sha>:<path>` reads a BLOB, and in a
-  # PARTIAL clone (`--filter=blob:none`/`blob:limit`, increasingly common on CI and on
-  # fleet boxes) the blob is fetched LAZILY — so this apparently-local read is a network
-  # operation that can hang on a stall or an auth prompt, exactly like the fetch above.
-  # Nothing distinguishes the two cases from inside the gate, so it takes the same bound.
-  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$_CS_SHA:$rel" \
-      >"$tmpd/scripts/$base" 2>"$tmpd/show.err"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    _CS_KIND=baseline-missing
-    # 124 AND 137 both mean "bound exceeded": 137 is what an external `timeout` reports once
-    # `--kill-after` has had to escalate to SIGKILL. Reading only 124 would file a KILLed
-    # extraction under the generic failure text and hide the actual cause.
-    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-      _CS_DETAIL="git show ${_CS_SHA}:$rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
-    else
-      _CS_DETAIL="git show ${_CS_SHA}:$rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/show.err" 2>/dev/null)")"
-    fi
-    rm -rf "$tmpd"; return 0
-  fi
-  # Run it with EVERY artifact path redirected into $tmpd and CQLITE_GATE_NO_NICE=1
-  # (skip the re-exec wrapper). `--list` exits at the arg-parse `case`, before this
-  # script writes any summary/sentinel — but the baseline is by definition a DIFFERENT
-  # version of this file, and "an older version wrote its sentinel before dispatching"
-  # is not a property we can assert about code we did not read. Pinning the paths costs
-  # nothing and makes clobbering the caller's summary file impossible either way.
-  # The same property is why `--list` cannot recurse into THIS pre-flight: the
-  # pre-flight runs only after the mode dispatch, which `--list` exits at.
-  out=$(
-    AGENT_GATE_SUMMARY_FILE="$tmpd/baseline-summary.txt" \
-    AGENT_GATE_PARENT_RUN_ID="${RUN_ID:-component-set-preflight}" \
-    CQLITE_GATE_NO_NICE=1 \
-    _component_set_bounded "$_CS_BOUND_SECS" bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
-  ); rc=$?
-  if [ "$rc" -ne 0 ]; then
-    _CS_KIND=baseline-list-failed
-    _CS_DETAIL="'bash <origin/main:$rel> --list' exited $rc: $(_component_set_safe_detail "$(cat "$tmpd/list.err" 2>/dev/null)")"
-    rm -rf "$tmpd"; return 0
-  fi
-  rm -rf "$tmpd"
-
-  # CLOSED GRAMMAR on the baseline's stdout: a line that is not a plausible component
-  # name is a FAILED DERIVATION, never a line to skip. Filtering unrecognised lines away
-  # would silently shrink the baseline, and a shrunken baseline excuses a branch — the
-  # vacuous pass inverted.
-  #
-  # The character class is deliberately WIDER than today's names (all `[a-z0-9-]`): it
-  # admits any alnum/`.`/`_`/`-` token, because a guard that reds on correct input is the
-  # guard agents learn to waive, and a future component named `write_tests` or `bti.v2`
-  # would otherwise make EVERY branch FAIL on a correct baseline. What it still rejects is
-  # everything a leaked diagnostic or a prose line contains — whitespace, `:`, `/`, glob
-  # characters — which is the class that actually threatens the derivation. Rejecting a
-  # leading `-` additionally keeps a component name from being read as an option anywhere
-  # downstream, and glob characters can never reach the word-split loops below.
-  local line baseline=""
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in
-      *[![:alnum:]._-]*|-*)
-        _CS_KIND=baseline-list-garbage
-        _CS_DETAIL="'bash <origin/main:$rel> --list' printed a line that is not a component name: '$(_component_set_flatten "$line")'"
-        return 0 ;;
+  # THE BASELINE SET, READ AS DATA (see the reader's header above): the committed manifest at
+  # the fetched sha, or — transitionally, while `origin/main` predates the manifest — its gate
+  # script's single-line COMPONENTS declaration extracted AS TEXT. Nothing fetched is EXECUTED.
+  local baseline=""
+  if _component_set_set_at_rev "$_CS_SHA"; then
+    baseline="$_CS_REV_SET"
+    _CS_BASE_N="$_CS_REV_N"
+    _CS_BASE_SRC="$_CS_REV_SRC"
+  else
+    # ONE ARM PER ERRKIND, because they are DIFFERENT facts with different remedies, and a
+    # shared kind would send a reader to fix the wrong thing. The `*)` arm cannot be silent:
+    # an unmapped errkind is reported AS unmapped rather than folded into a plausible name.
+    case "$_CS_REV_ERRKIND" in
+      workspace)        _CS_KIND=baseline-workspace ;;
+      unreadable)       _CS_KIND=baseline-unreadable ;;
+      decl-unrecognised) _CS_KIND=baseline-decl-unrecognised ;;
+      garbage)          _CS_KIND=baseline-set-garbage ;;
+      empty)            _CS_KIND=baseline-set-empty ;;
+      *)                _CS_KIND=baseline-unreadable
+                        _CS_REV_ERR="unclassified baseline-read failure ('$_CS_REV_ERRKIND'): $_CS_REV_ERR" ;;
     esac
-    baseline="${baseline:+$baseline }$line"
-    _CS_BASE_N=$((_CS_BASE_N + 1))
-  done <<EOF_CS_LIST
-$out
-EOF_CS_LIST
-  if [ "$_CS_BASE_N" -eq 0 ]; then
-    _CS_KIND=baseline-list-empty
-    _CS_DETAIL="'bash <origin/main:$rel> --list' printed no components; an empty baseline would excuse EVERY branch"
+    _CS_DETAIL="$_CS_REV_ERR"
     return 0
   fi
 
@@ -3592,7 +3765,14 @@ EOF_CS_LIST
   # but PRESENT at HEAD was removed by an UNCOMMITTED edit — not this branch's diff, and not
   # DECLARED. An unmeasurable HEAD set is its own named non-PASS: no provenance, no excusal.
   if [ -n "$_CS_MISSING" ] && [ "$_CS_ANCESTOR" = yes ]; then
-    if _component_set_head_set; then
+    # HEAD'S OWN SET, through the SAME data-only reader as the baseline (never by executing
+    # HEAD's script either): the committed manifest at HEAD, else its gate script's
+    # declaration as TEXT. An unmeasurable HEAD set is its own named non-PASS — the
+    # provenance oracle is the SOLE evidence for DECLARED's claim, so no provenance means no
+    # excusal.
+    if _component_set_set_at_rev HEAD; then
+      _CS_HEAD_SET="$_CS_REV_SET"
+      _CS_HEAD_SRC="$_CS_REV_SRC"
       local head_padded=" $_CS_HEAD_SET "
       # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
       for c in $_CS_MISSING; do
@@ -3602,7 +3782,8 @@ EOF_CS_LIST
       done
     else
       _CS_KIND=head-set-unmeasured
-      _CS_DETAIL="$_CS_HEAD_ERR"
+      _CS_HEAD_ERR="$_CS_REV_ERR"
+      _CS_DETAIL="$_CS_REV_ERR"
       return 0
     fi
   fi
@@ -3664,14 +3845,27 @@ _component_set_line() {
   for c in $_CS_UNCOMMITTED; do n_uncommitted=$((n_uncommitted + 1)); done
   local extra=""
   [ -n "$_CS_EXTRA" ] && extra=" [branch-only, NOT skew: $_CS_EXTRA]"
+  # THE POSITIVE LINE NAMES HOW THE BASELINE WAS READ (#3544 REQ-3544-01). There are two
+  # data-only read paths — the committed manifest, and the TRANSITIONAL text extraction of the
+  # baseline's `COMPONENTS=(…)` declaration — and a reader must be able to tell which one a
+  # certification used, because the second is format-brittle in a shared direction and becomes
+  # unreachable once the manifest is on `main`. It is stamped on the PASS/ADVISORY-PASS line
+  # only: that is the line a PR records as certification, and on every other verdict the
+  # source is already secondary to the failure being reported (the hook exposes it for all of
+  # them, so nothing is unobservable).
+  local src_note=""
+  case "$_CS_BASE_SRC" in
+    manifest)    src_note=" via the committed manifest" ;;
+    declaration) src_note=" via the baseline's COMPONENTS declaration read as TEXT (transitional #3544; nothing fetched is executed)" ;;
+  esac
   case "$verdict" in
     PASS)
       if [ -n "$lenient" ]; then
-        printf 'component-set: ADVISORY-PASS (%s/%s vs origin/main %s)%s%s' \
-          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra" "$lenient"
+        printf 'component-set: ADVISORY-PASS (%s/%s vs origin/main %s%s)%s%s' \
+          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$src_note" "$extra" "$lenient"
       else
-        printf 'component-set: PASS (%s/%s vs origin/main %s)%s' \
-          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra"
+        printf 'component-set: PASS (%s/%s vs origin/main %s%s)%s' \
+          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$src_note" "$extra"
       fi ;;
     DECLARED)
       printf 'component-set: DECLARED (#3544) — this branch REMOVES %s of origin/main %s'"'"'s %s component(s): %s; origin/main IS an ancestor of HEAD and they are absent from the gate script AT HEAD too, so the removal is in THIS branch'"'"'s own COMMITTED diff, NOT skew — recorded, not fatal%s%s' \
@@ -3705,13 +3899,29 @@ _component_set_line() {
           "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL"
       fi ;;
     *)
-      if [ -n "$lenient" ]; then
-        printf 'component-set: ADVISORY-UNMEASURED (#3544) — baseline NOT measured (%s: %s)%s; this block asserts NOTHING about the component set' \
-          "$_CS_KIND" "$_CS_DETAIL" "$lenient"
-      else
-        printf 'component-set: FAIL-CLOSED (#3544) — baseline NOT measured (%s: %s); no PASS may be derived from an unmeasured baseline; overall verdict FAIL' \
-          "$_CS_KIND" "$_CS_DETAIL"
-      fi ;;
+      # THE `manifest-*` KINDS GET THEIR OWN SENTENCE, because "baseline NOT measured" would be
+      # a FALSE statement about them: the baseline was never reached. What is unusable is THIS
+      # TREE's own manifest, the remedy is a regeneration rather than anything to do with
+      # `origin`, and a wrong remedy in a fail-closed diagnostic is what makes an author
+      # suspect their own diff (the #3148 lesson).
+      case "$_CS_KIND" in
+        manifest-*)
+          if [ -n "$lenient" ]; then
+            printf 'component-set: ADVISORY-UNMEASURED (#3544) — the LOCAL component manifest is not usable (%s: %s), so no baseline comparison was made%s; this block asserts NOTHING about the component set' \
+              "$_CS_KIND" "$_CS_DETAIL" "$lenient"
+          else
+            printf 'component-set: FAIL-CLOSED (#3544) — the LOCAL component manifest is not usable (%s: %s); it is what every FUTURE branch compares against, so a PASS here would publish an UNVERIFIED baseline; overall verdict FAIL' \
+              "$_CS_KIND" "$_CS_DETAIL"
+          fi ;;
+        *)
+          if [ -n "$lenient" ]; then
+            printf 'component-set: ADVISORY-UNMEASURED (#3544) — baseline NOT measured (%s: %s)%s; this block asserts NOTHING about the component set' \
+              "$_CS_KIND" "$_CS_DETAIL" "$lenient"
+          else
+            printf 'component-set: FAIL-CLOSED (#3544) — baseline NOT measured (%s: %s); no PASS may be derived from an unmeasured baseline; overall verdict FAIL' \
+              "$_CS_KIND" "$_CS_DETAIL"
+          fi ;;
+      esac ;;
   esac
 }
 
@@ -3786,6 +3996,17 @@ apply_component_set_preflight() {
       # reader of a re-pointed/fork `origin` to fix the wrong thing, and a wrong remedy in a
       # fail-closed diagnostic is what makes an agent suspect its own diff (the #3148 lesson).
       case "$_CS_KIND" in
+        manifest-missing|manifest-garbage|manifest-stale)
+          why_summary="preflight: FAIL (component-set: the LOCAL component manifest $_CS_MANIFEST_REL is not usable — $_CS_KIND)"
+          hint="hint: regenerate the manifest — { sed -n -e '/^[^#]/q' -e p $_CS_MANIFEST_REL; scripts/agent-gate.sh --list; } >\$TMPDIR/agent-gate.components && mv \$TMPDIR/agent-gate.components $_CS_MANIFEST_REL — then COMMIT it and re-run scripts/agent-gate.sh"
+          echo "agent-gate: $_CS_MANIFEST_REL is the DATA this gate publishes as its component" >&2
+          echo "            set, and the baseline every future branch compares against is read" >&2
+          echo "            from it (never by executing a fetched script — #3544 REQ-3544-01)." >&2
+          echo "            A manifest that is absent, ungrammatical or out of step with this" >&2
+          echo "            gate's own COMPONENTS array is an UNVERIFIED baseline: once merged," >&2
+          echo "            every later run would compare against the wrong set and silently" >&2
+          echo "            excuse real skew. That is why this is fail-closed and not advisory." >&2
+          echo "agent-gate: remedy: regenerate $_CS_MANIFEST_REL from this gate's own --list, then commit it." >&2 ;;
         remote-not-canonical|remote-unreadable)
           hint="hint: point origin at the canonical upstream (git remote set-url origin https://$_CS_CANONICAL_REMOTE.git) — or add it as a second remote and run the gate in a checkout whose origin is upstream — then re-run scripts/agent-gate.sh"
           echo "agent-gate: 'origin' does not name the canonical upstream $_CS_CANONICAL_REMOTE, so the" >&2
@@ -4270,6 +4491,11 @@ case "${1:-}" in
     echo "MISSING: ${_CS_MISSING:-}"
     echo "EXTRA: ${_CS_EXTRA:-}"
     echo "ANCESTOR: ${_CS_ANCESTOR:-unknown}"
+    # HOW each side's set was READ (#3544 REQ-3544-01): `manifest` (the committed data file) or
+    # `declaration` (the transitional TEXT extraction). Exposed so the self-test can assert
+    # WHICH data-only path ran, rather than inferring it from a verdict that both paths produce.
+    echo "BASELINE_SRC: ${_CS_BASE_SRC:-<none>}"
+    echo "HEAD_SRC: ${_CS_HEAD_SRC:-<none>}"
     # BOUND is exposed so scripts/tests can assert the mode-dependent deadline (job 234)
     # WITHOUT a wall-clock threshold. A timing assert would be the flakier test AND would
     # trip this repo's own wall-clock lint in `roborev-lints`; asserting the RESOLVED value
