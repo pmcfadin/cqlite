@@ -4809,6 +4809,58 @@ legacy_lock_drive_override() {
     bash -c "$SV_DRIVE_BODY_OVERRIDE" _ "$SUPERVISOR" "$override" 2>&1
 }
 
+# legacy_lock_drive_env <tmp> <lane> [VAR=VALUE ...] — the ordinary drive with EXTRA INHERITED
+# ENVIRONMENT (#3549, roborev job 205). Derived from the same `SV_DRIVE_BODY`, so a case that varies the
+# inherited state cannot drift into exercising a different startup path than the ordinary case does.
+#
+# THE STATE IS SET HERE, IN THE DRIVER, AND NEVER IN THE SHIPPED SCRIPT. That is the whole point of an
+# inherited-state case: the subject is what the shipped code does with state IT DID NOT CHOOSE, so a
+# knob in production code would test the knob instead. `GLOBIGNORE`, `LC_ALL`, and — measured —
+# `SHELLOPTS`/`BASHOPTS` are all imported by bash from the environment, so `env` is sufficient to put the
+# shell into the state under test with no cooperation from the script.
+legacy_lock_drive_env() {
+  local tmp="$1" lane="$2"; shift 2
+  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" "$@" \
+    bash -c "$SV_DRIVE_BODY" _ "$SUPERVISOR" 2>&1
+}
+
+# legacy_lock_drive_env_override <override-file> <tmp> <lane> [VAR=VALUE ...] — the mutant drive with the
+# same extra inherited environment, so a contrast varies ONE function and nothing else.
+legacy_lock_drive_env_override() {
+  local override="$1" tmp="$2" lane="$3"; shift 3
+  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" "$@" \
+    bash -c "$SV_DRIVE_BODY_OVERRIDE" _ "$SUPERVISOR" "$override" 2>&1
+}
+
+# THE PRELUDE DRIVES — for inherited state that an ENVIRONMENT VARIABLE ALONE CANNOT ESTABLISH.
+#
+# MEASURED, and it is the reason these exist: `GLOBIGNORE` arriving in the ENVIRONMENT is INERT. Bash
+# imports the variable but does not run its special-variable hook at startup, so `env GLOBIGNORE=<path>
+# bash -c '…'` enumerates the excluded entry anyway — a case built that way would have passed against
+# the UNFIXED code, measuring nothing. The hook fires on ASSIGNMENT, so the reachable shape is a shell
+# that assigns `GLOBIGNORE` and then runs the supervisor's code IN THAT SAME SHELL: the supervisor being
+# SOURCED from such a shell (which is exactly what every drive in this file does, and what a wrapper
+# does), or `BASH_ENV` naming a file that assigns it. The prelude is inserted BEFORE the source, so the
+# state is the LAUNCHING shell's and the shipped script still gets no knob.
+SV_DRIVE_BODY_PRELUDE="${SV_DRIVE_BODY/'source "$1"; '/'eval "$PRELUDE"; source "$1"; '}"
+SV_DRIVE_BODY_PRELUDE_OVERRIDE="${SV_DRIVE_BODY_OVERRIDE/'source "$1"; '/'eval "$PRELUDE"; source "$1"; '}"
+
+# legacy_lock_drive_prelude <prelude-statements> <tmp> <lane> — the ordinary drive with the prelude run
+# in the launching shell first.
+legacy_lock_drive_prelude() {
+  local prelude="$1" tmp="$2" lane="$3"
+  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" PRELUDE="$prelude" \
+    bash -c "$SV_DRIVE_BODY_PRELUDE" _ "$SUPERVISOR" 2>&1
+}
+
+# legacy_lock_drive_prelude_override <prelude> <override-file> <tmp> <lane> — the mutant drive with the
+# same prelude, so a contrast varies ONE function and nothing else.
+legacy_lock_drive_prelude_override() {
+  local prelude="$1" override="$2" tmp="$3" lane="$4"
+  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" PRELUDE="$prelude" \
+    bash -c "$SV_DRIVE_BODY_PRELUDE_OVERRIDE" _ "$SUPERVISOR" "$override" 2>&1
+}
+
 # legacy_lock_drive_in <cwd> <tmp> <lane> — the same drive from a chosen working directory, which is
 # what makes a RELATIVE (and therefore possibly OPTION-SHAPED) `TMPDIR` testable at all.
 legacy_lock_drive_in() {
@@ -6775,7 +6827,7 @@ test_legacy_lock_classifier_survives_inherit_errexit() {
   # classifier DIES at that assignment: no STATE line is printed at all, which is precisely "aborts
   # before it can restore options or print the intended refusal".
   ovr="$d/m-shopt.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob || true' 'shopt -p dotglob'; then
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true' 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch'; then
     got="$(legacy_state_drive_errexit "$legacy" "$ovr")"
     if [[ "$got" != *"STATE="* ]]; then
       pass "legacy-lock errexit MUTANT CONTRAST: without the \`|| true\`, the same caller kills the classifier at the shopt capture — no state is ever printed (output=[$got])"
@@ -6797,7 +6849,7 @@ test_legacy_lock_classifier_survives_inherit_errexit() {
   # ---- AND THE FALLBACK IS LOAD-BEARING: with BOTH the shopt guard and the guard's fallback removed,
   # the supervisor exits with NO refusal at all — the silent death the fallback converts into a refusal.
   ovr="$d/m-shopt-nofallback.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob || true' 'shopt -p dotglob' \
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true' 'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch' \
      && sv_mutant_override "$ovr" supervisor_legacy_lock_guard \
           'state="$(supervisor_legacy_lock_state "$legacy")" || state="unknown state-classifier-exited-nonzero"' \
           'state="$(supervisor_legacy_lock_state "$legacy")"'; then
@@ -6820,6 +6872,373 @@ t test_legacy_lock_has_no_ps_liveness_fallback
 t test_legacy_lock_emitted_dynamic_values_are_rendered
 t test_legacy_lock_padded_pid_file_is_unrecognised
 t test_legacy_lock_classifier_survives_inherit_errexit
+
+# ---------------------------------------------------------------------------
+# Test 47f (#3549, roborev job 205 F1 + class sweep): THE GUARD NEUTRALISES THE INHERITED SHELL STATE
+# ITS CORRECTNESS DEPENDS ON.
+#
+# THE CLASS, not the two reported instances. The classifier runs IN THE CALLER'S SHELL, and several of
+# its steps are decided by state the caller owns — glob options, `GLOBIGNORE`, `set -f`, the emitter's
+# `xpg_echo`, the collation used by a bracket range. Two earlier rounds pinned the option they had been
+# told about and left every sibling raw, which is the signal that per-setting correctness is the wrong
+# shape; this case measures the pinning as a FAMILY.
+#
+# WHY IT MATTERS HERE SPECIFICALLY: the exactly-`{pid}` shape check is what LICENSES PRINTING A
+# DELETION. Anything that removes an entry from the enumeration makes a FOREIGN directory look like the
+# canonical lock, so the operator is handed `rm -f … && rmdir …` for a directory no supervisor created.
+#
+# THE STATE IS SET IN THE DRIVER (`legacy_lock_drive_env`), never in the shipped script: production code
+# gets no knob, or the case would measure the knob.
+# ---------------------------------------------------------------------------
+test_legacy_lock_neutralises_inherited_glob_state() {
+  local d tmp lane legacy dead out rc body ovr mout
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549glob$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+
+  # ---- (0) STRUCTURAL: the whole glob/match family is pinned in ONE place, and the restore cannot
+  # abort. This is the half that covers the settings whose harm is NOT reachable on this host
+  # (`failglob` needs `pid` to vanish mid-function; `nocasematch` needs a case-insensitive filesystem) —
+  # a behavioural case for those would assert nothing, so the invariant asserted is the one the fix
+  # actually establishes: no inherited glob or match option reaches the enumeration.
+  body="$(sed -n '/^supervisor_legacy_lock_state()/,/^}/p' "$SUPERVISOR")"
+  local missing="" opt
+  for opt in dotglob nullglob failglob extglob globstar nocaseglob nocasematch; do
+    [[ "$body" == *"$opt"* ]] || missing+="$opt "
+  done
+  [[ "$body" == *'unset GLOBIGNORE'* ]] || missing+="GLOBIGNORE "
+  [[ "$body" == *'set +f'* ]] || missing+="set+f(noglob) "
+  if [[ -z "$missing" ]]; then
+    pass "glob-state STRUCTURAL: the classifier pins every member of the glob/match family plus GLOBIGNORE and noglob — the invariant is \"no inherited glob or match option reaches the enumeration\", which cannot rot when a pattern in the block changes"
+  else
+    fail "glob-state-structural-missing: the classifier does not pin [$missing] — an inherited setting reaches the shape check that licenses a deletion"
+  fi
+  # The restore must not be able to abort (round 11's lesson, re-asserted for the new save/restore):
+  # a `shopt -p` over seven names exits non-zero whenever ANY is unset, which is the common path.
+  if [[ "$body" == *'shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true'* ]] \
+     && [[ "$body" == *'eval "$_sv_shopts" || true'* ]] \
+     && [[ "$body" != *'&& set -f'* ]]; then
+    pass "glob-state STRUCTURAL: the save and the restore are both guarded (\`|| true\`) and the value restores are \`if\` statements, so nothing on the way out of the neutralised region can abort an errexit caller"
+  else
+    fail "glob-state-structural-abortable: the save/restore is not guarded — a restore that can abort is not a restore (body did not match the expected guarded spellings)"
+  fi
+
+  # ---- (1) GLOBIGNORE hides the EXTRA entry (F1). A dead pid PLUS a foreign entry: with the inherited
+  # `GLOBIGNORE` honoured, the enumeration is exactly `{pid}` and the state is `stale` — a deletion
+  # remedy for a directory no supervisor created. Neutralised, both entries are seen and the run refuses
+  # with the unrecognised-shape cause and NO command line at all.
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  : >"$legacy/other"
+  # THE PATTERN IS THE EXTRA ENTRY'S FULL PATH: bash matches `GLOBIGNORE` with pathname semantics, so
+  # `*other*` does NOT match a multi-component path (measured). And the assignment is a PRELUDE, not an
+  # environment variable, because an env-imported `GLOBIGNORE` is INERT (measured — see the prelude
+  # drives above).
+  local gi_prelude="GLOBIGNORE=$(printf '%q' "$legacy/other")"
+  # NON-VACUITY PREMISE, and this case needs it more than most: the two ways this could measure nothing
+  # are an inert `GLOBIGNORE` and a pattern that matches nothing, and BOTH look exactly like a pass.
+  # So the exclusion is DEMONSTRATED on the very directory under test, outside the supervisor.
+  local gi_probe
+  gi_probe="$(bash -c 'eval "$1"; shopt -s dotglob nullglob; e=("$2"/*); printf "%s\n" "${#e[@]}"' _ "$gi_prelude" "$legacy")"
+  if [[ "$gi_probe" == 1 ]]; then
+    pass "glob-state PREMISE (GLOBIGNORE): the staged GLOBIGNORE really does hide the extra entry — a bare glob of this directory yields $gi_probe of 2 entries, so the case below measures a live exclusion and not an inert variable"
+  else
+    fail "glob-state-globignore-premise: a bare glob under the staged GLOBIGNORE yielded [$gi_probe] entries, expected 1 — the exclusion is not active and the case below would pass against the UNFIXED code"
+  fi
+  out="$(legacy_lock_drive_prelude "$gi_prelude" "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
+     && [[ "$out" == *"lock-directory-not-exactly-one-pid-file"* ]] && [[ "$out" == *"entries=2"* ]] \
+     && [[ "$out" != *"LEFT BEHIND"* ]]; then
+    pass "glob-state (GLOBIGNORE): an inherited GLOBIGNORE naming the extra entry does not hide it — the directory classifies as an unrecognised shape (entries=2), NOT as a stale lock"
+  else
+    fail "glob-state-globignore: rc=$rc out=[$out] — an inherited GLOBIGNORE must not change the enumeration"
+  fi
+  remedy_lines_structural "globignore-unknown-shape" "$out" 0
+  if [[ -e "$legacy/other" && -e "$legacy/pid" ]]; then
+    pass "glob-state (GLOBIGNORE): the guard mutated nothing — both entries survive"
+  else
+    fail "glob-state-globignore-mutated: the guard removed something from a lock it does not own"
+  fi
+
+  # MUTANT CONTRAST: the shipped classifier with `unset GLOBIGNORE` removed — one statement, everything
+  # else shipped. The SAME drive must then classify the foreign directory as STALE and print a deletion.
+  ovr="$d/m-globignore.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '  unset GLOBIGNORE' '  :'; then
+    mout="$(legacy_lock_drive_prelude_override "$gi_prelude" "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"LEFT BEHIND"* ]] && [[ "$mout" == *"rm -f -- "* ]] \
+       && [[ "$mout" != *"lock-directory-not-exactly-one-pid-file"* ]]; then
+      pass "glob-state MUTANT CONTRAST (GLOBIGNORE): with the neutralisation removed, the identical drive classifies the FOREIGN directory as stale and hands the operator a deletion command — the harm the fix prevents, measured"
+    else
+      fail "glob-state-globignore-mutant: out=[$mout] — the pre-fix form must be shown to break, or the assert above measures nothing"
+    fi
+  fi
+  rm -f "$legacy/other"
+
+  # ---- (2) `set -f` (noglob) arrives from the ENVIRONMENT: `env SHELLOPTS=noglob` is imported by bash
+  # (measured). The glob is then not expanded at all, so a GENUINE stale lock reads as an unrecognised
+  # shape — a FALSE REFUSAL on a correct configuration, which is the other direction of the same class.
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive_env "$tmp" "$lane" SHELLOPTS=noglob)"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"LEFT BEHIND"* ]] \
+     && [[ "$out" == *"state stale $dead"* ]]; then
+    pass "glob-state (noglob): with \`set -f\` inherited from SHELLOPTS the enumeration still happens, so a genuine stale lock is still classified \`stale $dead\` and gets its own remedy"
+  else
+    fail "glob-state-noglob: rc=$rc out=[$out] — an inherited noglob must not turn a genuine stale lock into an unrecognised shape"
+  fi
+  remedy_lines_structural "noglob-stale" "$out" 1
+
+  # MUTANT CONTRAST: with `set +f` removed the same drive must MISCLASSIFY — and the tell is the literal
+  # glob pattern surviving into the entry list.
+  ovr="$d/m-noglob.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '  set +f' '  :'; then
+    printf '%s\n' "$dead" >"$legacy/pid"
+    mout="$(legacy_lock_drive_env_override "$ovr" "$tmp" "$lane" SHELLOPTS=noglob)" || true
+    if [[ "$mout" == *"lock-directory-not-exactly-one-pid-file"* ]] && [[ "$mout" != *"LEFT BEHIND"* ]]; then
+      pass "glob-state MUTANT CONTRAST (noglob): with the neutralisation removed, the identical drive cannot enumerate at all and refuses a GENUINE stale lock as an unrecognised shape — a false refusal on a working configuration"
+    else
+      fail "glob-state-noglob-mutant: out=[$mout] — the pre-fix form must be shown to break, or the assert above measures nothing"
+    fi
+  fi
+
+  # ---- (3) THE CALLER'S SHELL IS LEFT AS IT WAS FOUND, which is the other half of a save/restore: the
+  # classifier mutates seven options, `GLOBIGNORE` and `noglob`, all in the caller's own shell.
+  local before after
+  before="$(bash -c '
+    source "$1"
+    shopt -s extglob nocasematch; shopt -u dotglob nullglob
+    GLOBIGNORE="keepme"; set -f
+    printf "%s|%s|%s|%s|" "$(shopt -p dotglob || true)" "$(shopt -p extglob || true)" "$(shopt -p nocasematch || true)" "$(shopt -p nullglob || true)"
+    printf "%s|%s\n" "${GLOBIGNORE-UNSET}" "$(case $- in *f*) echo noglob-on ;; *) echo noglob-off ;; esac)"
+  ' _ "$SUPERVISOR" 2>&1 | tail -1)"
+  after="$(bash -c '
+    source "$1"
+    shopt -s extglob nocasematch; shopt -u dotglob nullglob
+    GLOBIGNORE="keepme"; set -f
+    supervisor_legacy_lock_state "$2" >/dev/null
+    printf "%s|%s|%s|%s|" "$(shopt -p dotglob || true)" "$(shopt -p extglob || true)" "$(shopt -p nocasematch || true)" "$(shopt -p nullglob || true)"
+    printf "%s|%s\n" "${GLOBIGNORE-UNSET}" "$(case $- in *f*) echo noglob-on ;; *) echo noglob-off ;; esac)"
+  ' _ "$SUPERVISOR" "$legacy" 2>&1 | tail -1)"
+  if [[ -n "$before" && "$before" == "$after" ]]; then
+    pass "glob-state (restore): the classifier leaves the caller's glob options, GLOBIGNORE and noglob exactly as it found them ([$after])"
+  else
+    fail "glob-state-restore: before=[$before] after=[$after] — the classifier changed the caller's shell state"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_legacy_lock_neutralises_inherited_glob_state
+
+# ---------------------------------------------------------------------------
+# Test 47g (#3549, roborev job 205 F2): THE EMITTER MUST NOT UNDO THE RENDERERS.
+#
+# THE DEFECT. `supervisor_one_line` and `supervisor_shell_quote` encode a control character AS A
+# BACKSLASH SEQUENCE — that is what keeps a diagnostic on ONE PHYSICAL LINE and the runnable command
+# identifiable as the ONE bare (unprefixed) line. `echo` under bash's `xpg_echo` option INTERPRETS
+# backslash sequences, so the last step turns every `\n` the renderers produced back into a real
+# newline: the renderers are correct and their guarantee is thrown away at the emitter. The result is
+# prose fragments with no `worker-supervisor:` prefix — indistinguishable from the command line an
+# operator is told to select and paste.
+#
+# IT IS INHERITED STATE: `env BASHOPTS=xpg_echo` is imported by bash (measured), so nothing in this file
+# needs to have run `shopt` for the option to be on. Set in the DRIVER; the shipped script gets no knob.
+# ---------------------------------------------------------------------------
+test_legacy_lock_diagnostics_survive_xpg_echo() {
+  local d nltmp lane legacy dead out rc bare ovr mout mbare mbare_count mrc=0
+  d="$(new_case_dir)"
+  common_env "$d"
+  lane="lane3549xpg$$"
+  # A newline in `TMPDIR` is what makes the renderers actually PRODUCE a backslash sequence: with an
+  # ordinary path there is nothing to interpret and the case would be vacuous under either emitter.
+  nltmp="$d/nl${SV_LF}dir"
+  mkdir -p "$nltmp"
+  legacy="$nltmp/cqlite-worker-supervisor.lock"
+  if [[ -d "$nltmp" && "$nltmp" == *"$SV_LF"* ]]; then
+    pass "xpg_echo PREMISE: a TMPDIR containing a newline was staged, so the renderers emit a backslash sequence for the emitter to (mis)interpret"
+  else
+    fail "xpg_echo-premise: could not stage a newline-containing TMPDIR on this host; the case below would measure nothing"
+    return 0
+  fi
+  # The option really is inherited from the environment — measured here rather than assumed, because an
+  # inert BASHOPTS would make every assertion below pass against the UNFIXED emitter.
+  local xpg_probe
+  xpg_probe="$(env BASHOPTS=xpg_echo bash -c "shopt -p xpg_echo" 2>&1)"
+  if [[ "$xpg_probe" == "shopt -s xpg_echo" ]]; then
+    pass "xpg_echo PREMISE: \`env BASHOPTS=xpg_echo\` is imported by bash ([$xpg_probe]), so the drives below really do run with the option on"
+  else
+    fail "xpg_echo-premise-import: BASHOPTS=xpg_echo did not reach the shell ([$xpg_probe]) — the case below would measure nothing"
+    return 0
+  fi
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive_env "$nltmp" "$lane" BASHOPTS=xpg_echo)"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out"; then
+    pass "xpg_echo: the guard still classifies and REFUSES with xpg_echo inherited"
+  else
+    fail "xpg_echo-no-refusal: rc=$rc out=[$out]"
+  fi
+  remedy_lines_structural "xpg_echo-stale" "$out" 1
+  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
+  local nl_rc=0
+  eval "$bare" >/dev/null 2>&1 || nl_rc=$?
+  if [[ "$nl_rc" -eq 0 && ! -e "$legacy" ]]; then
+    pass "xpg_echo: the ONE bare line still runs VERBATIM under an inherited xpg_echo and leaves the lock GONE (line=[$bare])"
+  else
+    fail "xpg_echo-not-runnable: rc=$nl_rc leftover=$([[ -e "$legacy" ]] && echo yes || echo no) line=[$bare]"
+  fi
+
+  # MUTANT CONTRAST: the shipped refusal with all five `printf '%s\n'` emissions restored to `echo` —
+  # ONE function replaced, everything else shipped, and the SAME inherited option. The rendered `\n`
+  # sequences are then interpreted back into physical newlines, so the output carries MORE bare lines
+  # than the one the contract promises.
+  ovr="$d/m-xpg-echo.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_refuse \
+       "printf '%s\\n' \"worker-supervisor" 'echo "worker-supervisor' 5; then
+    mkdir -p "$legacy"
+    printf '%s\n' "$dead" >"$legacy/pid"
+    mout="$(legacy_lock_drive_env_override "$ovr" "$nltmp" "$lane" BASHOPTS=xpg_echo)" || true
+    mbare_count="$(printf '%s\n' "$mout" | grep -cvE "$SV_DIAG_RE" || true)"
+    mbare="$(printf '%s\n' "$mout" | grep -vE "$SV_DIAG_RE" | head -1)"
+    eval "$mbare" >/dev/null 2>&1 || mrc=$?
+    if [[ "$mbare_count" =~ ^[0-9]+$ ]] && [[ "$mbare_count" -gt 1 ]] && [[ "$mrc" -ne 0 || -e "$legacy" ]]; then
+      pass "xpg_echo MUTANT CONTRAST: with \`echo\` restored, the identical drive emits $mbare_count bare lines instead of 1 — the emitter interpreted the renderers' escapes back into newlines — and the line an operator would select fails or leaves the lock behind (line=[$mbare])"
+    else
+      fail "xpg_echo-mutant: bare=$mbare_count rc=$mrc leftover=$([[ -e "$legacy" ]] && echo yes || echo no) line=[$mbare] out=[$mout] — the pre-fix emitter must be shown to break, or the assert above measures nothing"
+    fi
+  fi
+  # ...and the same mutant is INVISIBLE without the inherited option, which is what makes this an
+  # inherited-state defect rather than a rendering one: `echo` and `printf '%s\n'` agree when xpg_echo
+  # is off, so no ordinary run could ever have exposed it.
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  mout="$(legacy_lock_drive_override "$ovr" "$nltmp" "$lane")" || true
+  mbare_count="$(printf '%s\n' "$mout" | grep -cvE "$SV_DIAG_RE" || true)"
+  if [[ "$mbare_count" == 1 ]]; then
+    pass "xpg_echo MUTANT CONTRAST (option off): the SAME \`echo\` mutant emits exactly 1 bare line with xpg_echo off — the defect is reachable ONLY through inherited state, which is why no ordinary run exposed it"
+  else
+    fail "xpg_echo-mutant-optionoff: $mbare_count bare lines with the option off, expected 1 — the two channels differ for some other reason and the contrast above is not about xpg_echo"
+  fi
+
+  rm -rf "$nltmp"
+}
+
+# ---------------------------------------------------------------------------
+# Test 47h (#3549, roborev job 205 class sweep): THE PID DIGIT TEST DOES NOT INHERIT THE CALLER'S
+# COLLATION.
+#
+# A bracket RANGE is resolved through the locale's collation order, so `[!0-9]` does not mean "not an
+# ASCII digit" outside the C locale. MEASURED under `LC_ALL=en_US.utf8`: ARABIC-INDIC DIGIT THREE
+# (U+0663) is NOT matched by `[!0-9]` and therefore PASSES the well-formedness test — after which
+# `kill -0` fails, procfs has no such entry, the verdict is `dead`, and the operator is handed a
+# DELETION remedy for a `pid` file no supervisor ever wrote. The same string is rejected by an explicit
+# character LIST under the identical locale, which is why the fix REMOVES the dependency rather than
+# neutralising it: no save, no restore, nothing that can abort.
+#
+# `LC_ALL` in the environment IS effective (bash calls setlocale at startup — unlike `GLOBIGNORE`), so
+# the state is set with plain `env` in the driver.
+# ---------------------------------------------------------------------------
+
+# sv_collating_locale — echo an installed locale under which a bracket RANGE and an explicit character
+# LIST DISAGREE about U+0663, or nothing. DISCOVERED BY MEASUREMENT on this host, never hardcoded: the
+# set of installed locales is a host property, and a hardcoded name would make the case silently vacuous
+# (or red) elsewhere.
+sv_collating_locale() {
+  local L
+  while IFS= read -r L; do
+    [[ -n "$L" ]] || continue
+    if LC_ALL="$L" bash -c 'case "$1" in *[!0-9]*) exit 1 ;; esac; case "$1" in *[!0123456789]*) exit 0 ;; esac; exit 1' \
+         _ "$SV_NONASCII_DIGIT" 2>/dev/null; then
+      printf '%s\n' "$L"
+      return 0
+    fi
+  done < <(locale -a 2>/dev/null)
+  return 1
+}
+# U+0663 as UTF-8 BYTES, so this file's own encoding cannot change what is tested.
+SV_NONASCII_DIGIT=$'\xd9\xa3'
+
+test_legacy_lock_digit_test_is_collation_independent() {
+  local d tmp lane legacy out rc loc ovr mout body fn
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549coll$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+
+  # ---- (0) STRUCTURAL, and it NEVER SKIPS: the two pid tests must contain no bracket RANGE at all.
+  # This is the half that holds on a host with no divergent locale installed — the exposure is a
+  # property of the CODE, and a host that happens not to be able to demonstrate it does not make the
+  # code correct.
+  local ranges=""
+  for fn in supervisor_pid_liveness supervisor_legacy_lock_state; do
+    body="$(sed -n "/^$fn()/,/^}/p" "$SUPERVISOR" | grep -vE '^[[:space:]]*#')"
+    [[ -n "$body" ]] || { fail "collation-structural: could not extract $fn from $SUPERVISOR"; return 0; }
+    [[ "$body" != *'[!0-9]'* && "$body" != *'[0-9]'* ]] || ranges+="$fn "
+    [[ "$body" == *'[!0123456789]'* ]] || ranges+="$fn(no-explicit-list) "
+  done
+  if [[ -z "$ranges" ]]; then
+    pass "collation STRUCTURAL: neither pid test uses a bracket range — the digit test is an explicit character list, so it cannot inherit the caller's collation"
+  else
+    fail "collation-structural-range: [$ranges] — a collation-dependent digit test decides whether a pid is well formed, and a well-formed dead pid earns a DELETION remedy"
+  fi
+
+  # ---- (1) BEHAVIOURAL, on a host that can demonstrate it.
+  loc="$(sv_collating_locale || true)"
+  if [[ -z "$loc" ]]; then
+    skip "collation (behavioural): no installed locale on this host makes a bracket range and an explicit list disagree about U+0663 — the structural half above still holds unconditionally"
+    rm -rf "$tmp"
+    return 0
+  fi
+  pass "collation PREMISE: locale [$loc] is installed and DISCRIMINATES — under it \`[!0-9]\` accepts U+0663 as a digit and \`[!0123456789]\` rejects it, so the drives below measure a live divergence"
+  mkdir -p "$legacy"
+  printf '%s\n' "$SV_NONASCII_DIGIT" >"$legacy/pid"
+  out="$(legacy_lock_drive_env "$tmp" "$lane" LC_ALL="$loc")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"pid-not-well-formed"* ]] \
+     && [[ "$out" != *"LEFT BEHIND"* ]]; then
+    pass "collation: under LC_ALL=$loc a non-ASCII digit in the pid file is still an UNRECOGNISED SHAPE (pid-not-well-formed), not a well-formed pid"
+  else
+    fail "collation-behavioural: rc=$rc out=[$out] — the digit test inherited the locale"
+  fi
+  remedy_lines_structural "collation-not-well-formed" "$out" 0
+
+  # MUTANT CONTRAST: both explicit lists restored to the pre-fix RANGE — the classifier's own test and
+  # the liveness probe's, since the classifier's runs first and a single mutation would stop at
+  # `liveness-unmeasurable`. Everything else is shipped, and the locale is the same.
+  ovr="$d/m-collation.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_pid_liveness '*[!0123456789]*' '*[!0-9]*' \
+     && sv_mutant_override "$ovr" supervisor_legacy_lock_state '*[!0123456789]*' '*[!0-9]*' 2; then
+    printf '%s\n' "$SV_NONASCII_DIGIT" >"$legacy/pid"
+    mout="$(legacy_lock_drive_env_override "$ovr" "$tmp" "$lane" LC_ALL="$loc")" || true
+    if [[ "$mout" == *"LEFT BEHIND"* ]] && [[ "$mout" == *"rm -f -- "* ]]; then
+      pass "collation MUTANT CONTRAST: with the ranges restored, the identical drive under LC_ALL=$loc accepts U+0663 as a well-formed pid, calls it dead, and hands the operator a DELETION command for a pid file no supervisor wrote — the harm the fix removes, measured"
+    else
+      fail "collation-mutant: out=[$mout] — the pre-fix form must be shown to break, or the assert above measures nothing"
+    fi
+    # ...and the same mutant is INVISIBLE under LC_ALL=C, which is what makes this inherited state and
+    # not an ordinary parsing bug.
+    printf '%s\n' "$SV_NONASCII_DIGIT" >"$legacy/pid"
+    mout="$(legacy_lock_drive_env_override "$ovr" "$tmp" "$lane" LC_ALL=C)" || true
+    if [[ "$mout" == *"pid-not-well-formed"* ]] && [[ "$mout" != *"LEFT BEHIND"* ]]; then
+      pass "collation MUTANT CONTRAST (LC_ALL=C): the SAME range mutant behaves CORRECTLY under the C locale — the defect is reachable only through the inherited locale, which is why no ordinary run exposed it"
+    else
+      fail "collation-mutant-c-locale: out=[$mout] — expected the range form to be correct under LC_ALL=C; the contrast above is then not about collation"
+    fi
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_legacy_lock_diagnostics_survive_xpg_echo
+t test_legacy_lock_digit_test_is_collation_independent
 
 # ---------------------------------------------------------------------------
 # Test 47b (#3549, roborev job 198 F2): THE REAP NEVER SIGNALS A GROUP IT NO LONGER OWNS.

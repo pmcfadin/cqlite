@@ -1729,6 +1729,8 @@ supervisor_legacy_lock_state() {
   _sv_shopts="$(shopt -p dotglob nullglob failglob extglob globstar nocaseglob nocasematch || true)"
   case $- in *f*) _sv_noglob=on ;; esac
   if [[ -n "${GLOBIGNORE+set}" ]]; then _sv_globignore_set=yes; _sv_globignore="$GLOBIGNORE"; fi
+  # `unset GLOBIGNORE` PRECEDES `shopt -s dotglob` for the same coupling the restore documents below:
+  # unsetting the variable disables `dotglob`, so the reverse order would leave it off.
   unset GLOBIGNORE
   set +f
   shopt -s dotglob nullglob
@@ -1738,9 +1740,16 @@ supervisor_legacy_lock_state() {
   # pinned matching options and the diagnostics below run in the caller's own shell state.
   _entries=("$legacy"/*)
   if (( ${#_entries[@]} == 1 )) && [[ "${_entries[0]}" == "$legacy/pid" ]]; then _shape_ok=yes; fi
+  # THE GLOBIGNORE RESTORE COMES **FIRST**, AND THE ORDER IS LOAD-BEARING (#3549, job 205; caught by
+  # this file's own pre-existing shell-option-hygiene case, which went RED on the obvious order).
+  # Assigning or unsetting `GLOBIGNORE` has a DOCUMENTED SIDE EFFECT ON `dotglob`: a non-null value
+  # implicitly ENABLES it and unsetting the variable DISABLES it again. So restoring the options first
+  # and the variable second let the variable restore silently re-clear `dotglob` — MEASURED: a caller
+  # that entered with `dotglob` ON came back out with it OFF. Variable first, options second, and the
+  # options restore therefore has the last word on every option it names.
+  if [[ "$_sv_globignore_set" == yes ]]; then GLOBIGNORE="$_sv_globignore"; else unset GLOBIGNORE; fi
   eval "$_sv_shopts" || true
   if [[ "$_sv_noglob" == on ]]; then set -f; fi
-  if [[ "$_sv_globignore_set" == yes ]]; then GLOBIGNORE="$_sv_globignore"; else unset GLOBIGNORE; fi
   if [[ "$_shape_ok" != yes ]]; then
     # RENDERED THROUGH `supervisor_shell_quote`, not a bare `printf '%q'` (#3549, roborev job 201 F1).
     # A newline or control character in an entry name must break neither the one-line state string this
