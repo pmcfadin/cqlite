@@ -11648,6 +11648,14 @@ run_pub_surface() {
 # its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
+# Also runs scripts/tests/test_agent_gate_component_set.sh (#3544), the POSITIVE CONTROL
+# for the COMPONENT-SET skew pre-flight: a branch whose agent-gate.sh predates a
+# component-set expansion on main reports a true `N/N nonpass=0` and is SILENT about
+# everything added since (measured: PR #3467's gate would have certified 31 of 35), and
+# neither merge-cleanliness nor `required` can see it. Each incident class (behind, dead
+# fetch, broken/empty/garbage/absent baseline, deliberate removal, no skew, lite leniency)
+# is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
+# red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
 # the pub-surface component: 42 cases driving scripts/ci/check-pub-surface.sh through
 # 10 greens, 30 reds, the usage case and the kill-safety case, substituting the artifact
@@ -11809,6 +11817,27 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_schemas_preflight.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (committed-schemas preflight guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # component-set skew pre-flight guard (#3544): the POSITIVE CONTROL for the check that
+  # refuses a gate script older than origin/main's component set — the skew that let PR
+  # #3467's run report a true `31/31 nonpass=0` while saying nothing about 4 components
+  # that had landed 39 minutes earlier. Every incident class is planted in a THROWAWAY git
+  # repo with a LOCAL bare `origin` (the fetch is real; no network), and each case requires
+  # the check to NAME the missing/failing symbol — a bare red is not evidence, since an
+  # unrelated breakage produces an identical exit code. Hermetic: the fail-closed cases
+  # exit AT the pre-flight, before any component, so no cargo and no #1825 slot.
+  # A failure FAILs the component, mirroring the schemas guard above.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_component_set.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_component_set.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (component-set skew preflight guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

@@ -72,6 +72,18 @@ mkrepo() { # mkrepo <name> [extra `git init` args…] -> echoes the repo path
   # `${1+"$@"}` (never a bare "$@"): expanding an EMPTY "$@" under `set -u` on bash 3.2 —
   # the floor this script declares — is an unbound-variable error (#2926 review B8).
   ( cd "$root" && git init -q ${1+"$@"} . && git add -A && git "${GIT_ID[@]}" commit -qm init ) >/dev/null 2>&1
+  # A LOCAL bare `origin` holding this fixture's own commit as `main` (#3544): the gate's
+  # component-set pre-flight fetches origin/main and FAILS CLOSED in the certifying modes
+  # when the baseline is unobtainable, so a fixture with no remote would now exit at that
+  # pre-flight instead of exercising the tree-integrity guard under test. A path remote
+  # keeps the fetch REAL and the fixture hermetic (no network), and pushing this very
+  # commit makes origin/main an ancestor of HEAD with an identical component set — so the
+  # pre-flight PASSes and every case below still measures what it says it measures.
+  git init -q --bare "$root.origin.git" >/dev/null 2>&1
+  git -C "$root.origin.git" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
+  ( cd "$root" \
+      && git remote add origin "$root.origin.git" \
+      && git push -q origin HEAD:refs/heads/main ) >/dev/null 2>&1
   printf '%s\n' "$root"
 }
 

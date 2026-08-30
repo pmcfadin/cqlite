@@ -78,6 +78,23 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-delta-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
+# add_local_origin <repo> (#3544): give a scratch fixture a LOCAL bare `origin` whose
+# `main` is the fixture's own current commit. The gate's component-set pre-flight fetches
+# origin/main and FAILS CLOSED in the certifying modes (--delta is one) when the baseline
+# is unobtainable, so a remote-less fixture would exit at that pre-flight instead of
+# reaching the --delta classification these cases are about. A path remote keeps the fetch
+# REAL while staying hermetic (no network), and pushing the fixture's own commit makes
+# origin/main an ancestor of HEAD with an identical component set — so the pre-flight
+# PASSes and the case still measures what it says it measures.
+add_local_origin() {
+  local repo="$1"
+  git init -q --bare "$repo.origin.git" >/dev/null 2>&1
+  git -C "$repo.origin.git" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
+  ( cd "$repo" \
+      && git remote add origin "$repo.origin.git" \
+      && git push -q origin HEAD:refs/heads/main ) >/dev/null 2>&1
+}
+
 # assert_verdict <label> <expected> <paths...>: pipe the paths through the hidden
 # --delta-classify hook and assert the final VERDICT line equals <expected>.
 assert_verdict() {
@@ -469,6 +486,7 @@ cp "$GATE" "$rn_repo/scripts/agent-gate.sh"
     && printf '#!/usr/bin/env bash\necho production\n' > scripts/deploy.sh \
     && git add -A && git commit -qm anchor
 ) >/dev/null 2>&1 && rn_ok=1 || rn_ok=0
+add_local_origin "$rn_repo"   # #3544 component-set pre-flight baseline
 if [ "$rn_ok" = 1 ]; then
   rn_anchor=$(cd "$rn_repo" && git rev-parse HEAD 2>/dev/null)
   ( cd "$rn_repo" && git mv scripts/deploy.sh docs/deploy.md && git commit -qm rename ) >/dev/null 2>&1
@@ -558,6 +576,7 @@ cp "$GATE" "$nd_repo/scripts/agent-gate.sh"
     && printf 'test("x", () => {});\n' > bindings/node/__test__/probe.test.js \
     && git add -A && git commit -qm anchor
 ) >/dev/null 2>&1 && nd_ok=1 || nd_ok=0
+add_local_origin "$nd_repo"   # #3544 component-set pre-flight baseline
 if [ "$nd_ok" = 1 ]; then
   nd_anchor=$(cd "$nd_repo" && git rev-parse HEAD 2>/dev/null)
   ( cd "$nd_repo" && printf 'test("x", () => { expect(1).toBe(1); });\n' > bindings/node/__test__/probe.test.js \
