@@ -26,7 +26,6 @@ asserted by its *effect*, never by how long it took.
 from __future__ import annotations
 
 import errno
-import fcntl
 import gc
 import os
 import signal
@@ -468,6 +467,11 @@ def test_fork_child_drop_does_not_touch_parent_state(tmp_path, schema_file):
     #
     # The probe must use a FRESH open(): a duplicated/inherited fd shares the
     # open-file-description and would not conflict with itself.
+    # `fcntl` is Unix-only, so it is imported HERE rather than at module scope:
+    # a top-level import fails COLLECTION on Windows, before the skipif on this
+    # test can take effect (roborev job 174).
+    import fcntl
+
     lock_path = write_dir / "wal" / ".lock"
     if not lock_path.is_file():
         pytest.fail(
