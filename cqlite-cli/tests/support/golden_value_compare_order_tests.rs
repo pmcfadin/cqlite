@@ -191,8 +191,7 @@ fn a_divergent_key_value_is_reported_as_a_value_divergence_only() {
 /// — so the two long keys differ in both lanes by the DDL alone.
 #[test]
 fn two_long_keys_sharing_a_120_char_prefix_are_ordered_distinctly() {
-    const LONG_KEY_DDL: &str =
-        "CREATE TABLE t (id text, c text, n int, PRIMARY KEY (id, c));";
+    const LONG_KEY_DDL: &str = "CREATE TABLE t (id text, c text, n int, PRIMARY KEY (id, c));";
     let schema = schema_of(LONG_KEY_DDL, "t");
     // 120 shared characters, then the one that distinguishes them: equal-length keys
     // that `brief`'s 120-character cut cannot tell apart.
@@ -228,7 +227,15 @@ fn two_long_keys_sharing_a_120_char_prefix_are_ordered_distinctly() {
         );
 
         let reversed = vec![second.clone(), first.clone()];
-        let report = compare_rows(&golden, &reversed, &schema, &["id"], &["c"], &[], Egress::Json);
+        let report = compare_rows(
+            &golden,
+            &reversed,
+            &schema,
+            &["id"],
+            &["c"],
+            &[],
+            Egress::Json,
+        );
         assert_eq!(
             report.diffs.len(),
             1,
