@@ -531,9 +531,9 @@ pub fn select_rows(
                  {}\n\
                  WHAT THIS ESTABLISHES: only that the independent read-only reopen did not finish \
                  within the budget. It says NOTHING about whether the row is durable, and nothing \
-                 about the write side, which had already exited cleanly. This wait is inside the \
-                 test\'s own total budget precisely so that THIS message appears instead of the \
-                 harness\'s 240s hard kill.\n{}",
+                 about the write side, which had already exited cleanly. `Command::output()` has no \
+                 timeout and no test harness bounds this target, so without this stage the wait \
+                 would be UNBOUNDED and no message would appear at all.\n{}",
                 data_dir.display(),
                 budget.describe(),
                 clock.report()

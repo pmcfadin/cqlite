@@ -12,7 +12,7 @@ exits cleanly); what changes is the **oracle** used to observe it.
 | AC2 — the failure message must not assert a cause the measurement cannot establish | ADDED *Every wait failure reports only what its measurement establishes* |
 | AC3 — RED-verify by actually breaking the shutdown handler | ADDED *The new oracle is observed to red on a genuinely broken handler* |
 | AC4 — check the sibling test for the same shape | ADDED *The sibling threshold-flush test carries the same oracle* |
-| — (design obligation, `design.md`) | ADDED *The test owns a total budget below the harness hard-kill* |
+| — (design obligation, `design.md`) | ADDED *The test owns a total budget that every stage's allowance fits inside* (round 7: renamed from *below the harness hard-kill*, a premise verified FALSE — see the requirement) |
 
 ## ADDED Requirements
 
@@ -77,11 +77,18 @@ For each wall-clock bound present before this change, the GROUP of new stages th
 be able to consume at least that old bound. The invariant is **by composition**: a single old bound was
 often split across several new stages, and each new stage can look innocent while its group is tighter.
 
-Where repeated or numerous operations previously held INDEPENDENT bounds whose nominal sum is not
-simultaneously realizable against the harness hard-kill, the stages SHALL share a GROUP deadline such
-that any single operation can still reach the full old bound when its siblings ran fast. A reduction
-SHALL be contingent on the aggregate budget being genuinely consumed, and SHALL NOT be imposed
-unconditionally by a small per-operation cap.
+Where repeated or numerous operations previously held INDEPENDENT bounds, each replacing stage SHALL
+carry the full old bound as its own allowance. Any aggregate bound on such a group SHALL be a GROUP
+DEADLINE, so that a single operation can still reach the full old bound when its siblings ran fast: a
+reduction SHALL be contingent on the aggregate budget being genuinely consumed, and SHALL NOT be
+imposed unconditionally by a small per-operation cap.
+
+(An earlier version of this paragraph conditioned the group deadline on the group's nominal sum being
+"not simultaneously realizable against the harness hard-kill". There is no harness hard-kill for this
+test — see the total-budget requirement below — and the total budget is now sized so that every
+group's nominal sum IS simultaneously realizable. The group deadline therefore remains as a BACKSTOP
+on non-stage overruns rather than as the primary bound, and the per-operation floor above holds
+unconditionally, which is the stronger of the two properties.)
 
 This invariant SHALL be asserted by a unit test, not merely documented — a comment cannot fail.
 

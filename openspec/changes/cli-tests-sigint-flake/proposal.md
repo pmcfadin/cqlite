@@ -56,8 +56,11 @@ all four of which assert unestablishable causes today.
 ## Non-goals
 
 * No `src/` change. No new product surface, no test-only product hooks.
-* No `retries` for these tests. Doctrine (`.config/nextest.toml`) keeps correctness tests at
-  `retries = 0`; a retry would mask exactly the defect the test exists to catch.
+* No `retries` for these tests, and a retry would mask exactly the defect the test exists to catch.
+  (Round 7 correction: this originally cited `.config/nextest.toml`'s `retries = 0` as the mechanism.
+  That file governs `cargo nextest run` only, and **nothing runs `cqlite-cli`'s tests under
+  nextest** — `cli-tests` runs plain `cargo test` — so there is no retry mechanism in play at all
+  here, and the non-goal holds a fortiori. See `design.md` D6.)
 * Not a claim that the wall-clock bound is *eliminated*. One bound at the front is irreducibly
   uncalibrated; the change makes it the cheapest operation in the test and makes its message honest.
   See `design.md` "The residual, stated at the seam".
