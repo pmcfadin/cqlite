@@ -262,10 +262,16 @@ fn merge_bounds_producer_threads_to_o_m() {
     let out = TempDir::new().expect("out tempdir");
 
     // ── THE SINGLE SOURCE OF SCENARIO SIZE (#3514 blocker 2) ────────────────────
-    // `m` is the DISCOVERED input count, and here `m` == the producer count. EVERY
-    // size-dependent quantity below — the bound, the reap-confirm budget and the
-    // vacuity threshold — is derived from THIS ONE binding; nothing downstream may
-    // re-derive any of them from the `NUM_INPUTS` constant. `build_inputs` asserts
+    // `m` is the DISCOVERED input count, and here `m` == the producer count. Every
+    // quantity the THREAD-BUDGET PIN depends on — the bound, the reap-confirm budget
+    // and the vacuity threshold — is derived from THIS ONE binding; nothing on that
+    // path may re-derive any of them from the `NUM_INPUTS` constant.
+    //
+    // ONE quantity deliberately still uses the constant, and it is not on that path:
+    // the row-count sanity assert after the drain (`NUM_INPUTS * ROWS_PER_INPUT`) is
+    // a FLOOR on rows actually merged, guarding against an empty dataset. Since
+    // `m >= NUM_INPUTS` the constant makes it conservative, so it stays correct while
+    // `m` varies and decides nothing about which host can observe the amplification. `build_inputs` asserts
     // only `>= NUM_INPUTS`, so a constant-derived guard beside an `m`-derived bound
     // can disagree about which host can observe the defect, which SKIPS the pin on a
     // host where the amplification is plainly detectable. Deriving both from one

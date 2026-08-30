@@ -242,10 +242,18 @@ fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
     let (_temp, inputs, schema) = build_inputs();
 
     // ── THE SINGLE SOURCE OF SCENARIO SIZE (#3514 blocker 2) ────────────────────
-    // `m` is the DISCOVERED input count, and EVERY size-dependent quantity below —
-    // the producer count, the asserted bound, the reap-confirm budget and the
-    // vacuity threshold — is derived from THIS ONE binding. Nothing downstream may
-    // re-derive any of them from the `NUM_INPUTS` constant.
+    // `m` is the DISCOVERED input count, and every quantity the THREAD-BUDGET PIN
+    // depends on is derived from THIS ONE binding: the producer count, the asserted
+    // bound, the reap-confirm budget and the vacuity threshold. Nothing on that path
+    // may re-derive any of them from the `NUM_INPUTS` constant — that divergence is
+    // the defect this binding exists to remove.
+    //
+    // ONE quantity deliberately still uses the constant, and it is not on that path:
+    // the row-count sanity assert after the drain (`NUM_INPUTS * ROWS_PER_INPUT`) is
+    // a FLOOR on rows actually merged, guarding against an empty dataset. Since
+    // `m >= NUM_INPUTS`, the constant makes it conservative — a larger `m` can only
+    // exceed it — so it stays correct while `m` varies, and it decides nothing about
+    // which host can observe the amplification.
     //
     // Why this is structural and not merely tidier: `build_inputs` asserts only
     // `inputs.len() >= NUM_INPUTS`, so `m` CAN exceed the constant if a flush ever
