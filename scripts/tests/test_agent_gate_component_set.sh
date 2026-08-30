@@ -1096,6 +1096,151 @@ else
   bad "3544-kind-census: the gate has $derived_count non-ok _CS_KIND values but this file declares $DECLARED_KIND_COUNT — update DECLARED_KIND_COUNT, the census comment AND a case for each new kind. Derived: $(printf '%s' "$derived_kinds" | tr '\n' ' ')"
 fi
 
+# ---------------------------------------------------------------------------
+# 9b. NO UNBOUNDED EXTERNAL OPERATION IN THE PRE-FLIGHT — derived from source, because this
+#     family regenerated three times (the fetch, then `git show`'s lazy blob read in a
+#     partial clone, then a grandchild surviving a direct-child kill). Each site LOOKED
+#     local, which is exactly why "audit it again" is not a fix and an assert is.
+#
+#     Two questions, both answered from the gate's own text:
+#       (i)  every `git` invocation in the region is either routed through
+#            `_component_set_bounded` or carries a `# local-only: <reason>` annotation at
+#            its own site — an unannotated one is a GAP;
+#       (ii) the set of EXTERNAL PROGRAMS the region invokes equals a DECLARED list, so a
+#            new one (`curl`, `ssh`, `python3`, another `bash`) cannot appear unclassified.
+#
+#     WHAT IT CLAIMS: every external invocation is CLASSIFIED. It cannot prove a command
+#     is truly network-free — that is a judgement, recorded per site in the annotations and
+#     in the enumeration comment at the head of the block, which is where a reviewer should
+#     check it. What it does guarantee is that the judgement was MADE and is visible in the
+#     diff, which is what would have caught `git show`.
+# ---------------------------------------------------------------------------
+region="$tmp/preflight-region.sh"
+awk '/^# ---- issue #3544: component-set skew pre-flight/ { inr = 1 }
+     /^# ---- issue #2081:/ { inr = 0 }
+     inr { print }' "$GATE" >"$region"
+region_lines=$(wc -l <"$region" | tr -d ' ')
+
+# ONE audit program, written once and used for BOTH the region and its positive controls.
+# The first cut inlined the same awk twice; two copies of one rule is the drift this file
+# keeps finding elsewhere, and the control is worthless if it audits a different rule.
+#
+# `git` must be at COMMAND POSITION. The first cut matched `git ` anywhere and flagged 12
+# DIAGNOSTIC STRINGS (`_CS_DETAIL="git fetch … exited $rc"`, `hint="… git rebase …"`) as
+# unbounded invocations — a guard that reds on correct input, which is the guard agents
+# learn to waive. So quoted spans are removed BEFORE matching, and the line is split into
+# command fragments.
+# ONE program, two records — `GAP` (a git invocation that is neither bounded nor annotated)
+# and `EXT` (an external program word at command position). Both halves need the SAME
+# strip-and-split rules, and two copies of one rule is the drift this file keeps finding:
+# the first cut split the census on `;` WITHOUT removing quoted spans, so prose inside a
+# diagnostic string (`"… no components; an empty baseline would excuse …"`) was reported as
+# external programs `a` and `an`. The controls run through this same program for the same
+# reason — a control that audits a different rule proves nothing.
+GIT_AUDIT_AWK="$tmp/preflight-audit.awk"
+cat >"$GIT_AUDIT_AWK" <<'GIT_AUDIT_PROG'
+{ line[NR] = $0 }
+function annotated(i) {
+  return (line[i]   ~ /# local-only:[ \t]*[^ \t]/ \
+       || line[i-1] ~ /# local-only:[ \t]*[^ \t]/ \
+       || line[i-2] ~ /# local-only:[ \t]*[^ \t]/ \
+       || line[i-3] ~ /# local-only:[ \t]*[^ \t]/)
+}
+END {
+  for (i = 1; i <= NR; i++) {
+    if (line[i] ~ /^[ \t]*#/) continue
+    l = line[i]
+    # ORDER IS LOAD-BEARING: quoted spans come off BEFORE the comment strip. Stripping
+    # comments first truncates at a `#` INSIDE a string (`"… (measured: PR #3467, 31 of
+    # 35)."`), which leaves an unbalanced quote, defeats the quote strip and reported
+    # `measured:` as an external program. A `#` inside quotes is not a comment.
+    # Strip quoted spans FIRST: string CONTENT must never look like a command.
+    while (match(l, /"[^"]*"/)) l = substr(l, 1, RSTART-1) " " substr(l, RSTART+RLENGTH)
+    while (match(l, /'"'"'[^'"'"']*'"'"'/)) l = substr(l, 1, RSTART-1) " " substr(l, RSTART+RLENGTH)
+    # Arithmetic spans: `$(( waited + 1 ))` is not a command, and splitting it on `(`
+    # reported `waited` and `n_missing` as external programs.
+    while (match(l, /\$\(\([^)]*\)\)/)) l = substr(l, 1, RSTART-1) " " substr(l, RSTART+RLENGTH)
+    sub(/#.*$/, "", l)
+    # A `case` LABEL is not a command either: splitting on `)` reported `none`, `no` and
+    # `yes` as programs. Strip a leading label (never a `name()` definition, which the
+    # character class excludes by refusing `(`).
+    sub(/^[ \t]*[A-Za-z0-9_*?.:\/|-]+\)[ \t]*/, "", l)
+    bounded = (l ~ /_component_set_bounded/)
+    probe   = (l ~ /command -v/)
+    gsub(/\$\(/, "\n", l); gsub(/`/, "\n", l)
+    gsub(/&&|\|\||[;|&(){}]/, "\n", l)
+    n = split(l, frag, "\n")
+    for (f = 1; f <= n; f++) {
+      t = frag[f]
+      sub(/^[ \t]*/, "", t)
+      sub(/^![ \t]*/, "", t)
+      while (t ~ /^(if|while|until|then|else|elif|do|not)[ \t]+/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)
+        sub(/^([A-Za-z_][A-Za-z0-9_]*=[^ \t]*|[a-z]+)[ \t]+/, "", t)
+      split(t, w, /[ \t]/)
+      cmd = w[1]
+      if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) continue
+      printf "EXT\t%s\n", cmd
+      if (cmd == "git" && !bounded && !probe && !annotated(i))
+        printf "GAP\t%d\t%s\n", i, substr(line[i], 1, 60)
+    }
+  }
+}
+GIT_AUDIT_PROG
+
+if [ "$region_lines" -lt 100 ]; then
+  bad "3544-no-unbounded: could not extract the pre-flight region from $GATE (got $region_lines lines) — the block markers changed (fail-closed: not a clean audit)"
+else
+  audit_out=$(awk -f "$GIT_AUDIT_AWK" "$region")
+  git_gaps=$(printf '%s\n' "$audit_out" | sed -n 's/^GAP\t//p')
+  # (ii) the external-program census: first word of every command fragment, minus shell
+  #      keywords/builtins and minus every function this gate defines (derived, not listed).
+  gate_fns=$(grep -Eo '^[A-Za-z_][A-Za-z0-9_]*\(\) \{' "$GATE" | sed 's/() {//' | sort -u)
+  # The DECLARED external set, mirroring the enumeration comment at the head of the
+  # pre-flight block. `timeout`/`gtimeout` are the bounding mechanisms themselves (local,
+  # no network); the rest are local utilities. A program not in this list FAILs the case
+  # until someone classifies it — which is the property that closes the family.
+  declared_externals="basename bash cat cut git gtimeout kill mkdir mktemp rm sleep timeout tr true"
+  externals=$(printf '%s\n' "$audit_out" | sed -n 's/^EXT\t//p' | sort -u)
+  undeclared=""
+  for _w in $externals; do
+    case " then if fi else elif return local echo printf esac case do done while for shift exit continue wait set true : command read eval test unset export trap cd type hash pwd let declare readonly source break " in
+      *" $_w "*) continue ;;
+    esac
+    printf '%s\n' "$gate_fns" | grep -qx -- "$_w" && continue
+    case " $declared_externals " in *" $_w "*) continue ;; esac
+    undeclared="${undeclared:+$undeclared }$_w"
+  done
+  if [ -n "$git_gaps" ]; then
+    bad "3544-no-unbounded: git invocation(s) in the pre-flight neither bounded nor annotated '# local-only: <reason>':"
+    printf '%s\n' "$git_gaps" | while IFS= read -r _g; do echo "   $_g"; done
+  elif [ -n "$undeclared" ]; then
+    bad "3544-no-unbounded: UNDECLARED external program(s) in the pre-flight region: $undeclared — classify each in the enumeration comment (bounded or local-only) and add it to declared_externals"
+  else
+    ok "3544-no-unbounded: every git invocation in the pre-flight is bounded or annotated local-only, and no undeclared external program appears (region $region_lines lines)"
+  fi
+
+  # POSITIVE CONTROLS for BOTH halves, through the SAME audit program: plant each defect
+  # class in a throwaway copy and require it to be reported. Without this the audit could
+  # stop matching and report a clean bill of health on a region it no longer parses — the
+  # shape of every finding in this issue.
+  ctl_unbounded="$tmp/region-unbounded.sh"
+  {   cat "$region"; printf 'run_probe() { git -C "$REPO_ROOT" fetch origin main >/dev/null 2>&1; }\n'; } >"$ctl_unbounded"
+  ctl_annotated="$tmp/region-annotated.sh"
+  {   cat "$region"
+      printf '# local-only: a declared reason, so this one must NOT be reported\n'
+      printf 'run_probe() { git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; }\n'; } >"$ctl_annotated"
+  ctl_curl="$tmp/region-curl.sh"
+  {   cat "$region"; printf 'run_probe() { curl -sS https://example.invalid/x >/dev/null; }\n'; } >"$ctl_curl"
+  ctl_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_unbounded" | grep -c '^GAP	')
+  ctl_ann_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_annotated" | grep -c '^GAP	')
+  ctl_curl_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_curl" | sed -n 's/^EXT\t//p' | grep -cx curl)
+  if [ "$ctl_gaps" -eq 1 ] && [ "$ctl_ann_gaps" -eq 0 ] && [ "$ctl_curl_seen" -ge 1 ]; then
+    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), stays silent on an ANNOTATED one (0), and the census sees a planted network program — live in both directions"
+  else
+    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
+  fi
+fi
+
 printf '\n%s\n' "----------------------------------------"
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

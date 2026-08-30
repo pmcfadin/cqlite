@@ -2559,7 +2559,8 @@ apply_schemas_preflight() {
 #     git merge-base --is-ancestor       walks commit parents only.
 #
 #   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, mkdir, rm, cat, tr, cut,
-#     basename, kill, sleep, true.
+#     basename, kill, sleep, true — plus `timeout`/`gtimeout` themselves, which ARE the
+#     bounding mechanism (local, and bounded by construction: they take the bound).
 #
 # Everything else here is a bash builtin/keyword or a function defined in this file.
 
