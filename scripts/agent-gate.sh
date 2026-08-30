@@ -9742,6 +9742,30 @@ run_tooling_tests() {
     return 0
   fi
 
+  # file-size component-log guard (#3401): hermetic (throwaway git repos under one
+  # mktemp, each holding only a copy of the gate script, driven through the real
+  # `--only file-size` path — no cargo/python3/datasets/network/Docker, ~2s). The
+  # `file-size` component used to write ONLY a bare `file-size.result` (`FAIL 0`),
+  # echoing the base ref, the over-threshold advisory list and the exact
+  # `path: before -> after (limit N)` arithmetic to STDOUT — i.e. only into gate.log,
+  # the one file agents are told never to read. So a `file-size: FAIL` in a pasted
+  # SUMMARY named nothing, and every reader re-derived by hand what the component had
+  # just computed and discarded — on a FAIL that is routinely EXPECTED. This pins the
+  # LOG'S CONTENT (never its mere existence: a zero-byte file would satisfy that and
+  # restore the whole defect) across all six paths, PASS ones included. A failure FAILs
+  # the component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_file_size_log.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_file_size_log.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (file-size component-log guard #3401); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -9786,24 +9810,65 @@ run_tooling_tests() {
 # Degrades to advisory-only (no ratchet) when the base ref can't be resolved.
 SRC_LIMIT=800
 TEST_LIMIT=1500
+# Emit one line to BOTH stdout and the component log (#3401). Everything this component
+# computes — the base ref, the advisory list, the `before -> after` growth entries, the
+# verdict — used to exist ONLY on stdout, i.e. only in gate.log, the one file agents are
+# told never to read; the SUMMARY's `file-size: FAIL` therefore named neither the file nor
+# the numbers, and every reader re-derived by hand the arithmetic the component had just
+# thrown away. Nothing printed here may go to only one of the two sinks.
+# _fs_emit counts appends that FAILED, in `_FS_WRITE_FAILURES` — declared `local` by
+# run_file_size and reached here through bash's DYNAMIC SCOPING (deliberately not a global:
+# a global could carry a value in from anywhere, #3401 review L3). Tracked rather than
+# ignored because the `[ -s "$log" ]` end-state check cannot see a PARTIAL log: a
+# filesystem that accepts the first line and rejects the rest leaves a non-empty file
+# missing the growth entries — #3401's own defect with extra steps, reported as PASS.
+_fs_emit() { # _fs_emit <logfile> <line> [<line>…]  — one output line per argument
+  local _fs_log="$1"; shift
+  # Zero args must emit NOTHING: `printf '%s\n'` with no operands still prints the format
+  # once, i.e. a spurious blank line to BOTH sinks (#3401 review N2).
+  [ "$#" -gt 0 ] || return 0
+  printf '%s\n' "$@"
+  # The append's STATUS is kept, its MESSAGE suppressed: an unwritable log makes the shell
+  # print one error per line, ~5 lines of noise burying the diagnostic that has to be
+  # unmistakable. ORDER MATTERS and the obvious spelling is WRONG (#3401 review blocker 2):
+  # redirections apply LEFT TO RIGHT, so `>>"$log" 2>/dev/null` attempts the open FIRST and
+  # bash reports the failure on the still-unredirected stderr. `2>/dev/null` must come
+  # first. Verified empirically against a log path that is a directory, not by reasoning.
+  printf '%s\n' "$@" 2>/dev/null >>"$_fs_log" ||
+    _FS_WRITE_FAILURES=$((_FS_WRITE_FAILURES + 1))
+}
 run_file_size() {
   local name=file-size
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
     return 0
   fi
+  local log="$LOG_DIR/$name.log"
   local start end status=PASS
+  # PERSISTENCE (#3401 blocker B): this component now PROMISES a log — the SUMMARY's
+  # `logs:` line is the only route an agent has to the ratchet arithmetic. An unverified
+  # promise is the original defect one level up (reader follows the pointer, finds
+  # nothing, hand-computes line counts again), so both the truncate and the end state are
+  # CHECKED and a persistence failure is a FAIL, never a silent PASS.
+  local log_persist_err=""
+  # Declared HERE so _fs_emit sees it by dynamic scoping and it cannot outlive the call.
+  local _FS_WRITE_FAILURES=0
   start=$(date +%s)
+  if ! : 2>/dev/null >"$log"; then
+    log_persist_err="could not create or truncate it (unwritable path, or not a regular file)"
+  fi
 
   # Base ref: an explicit override (issue #1892 --delta uses the anchor commit),
   # else merge-base with the default branch. If none resolves, we can still do the
   # advisory list but not the growth comparison.
-  local base="" ref
+  local base="" base_src="" ref
   if [ -n "${GATE_BASE_OVERRIDE:-}" ]; then
     base="$GATE_BASE_OVERRIDE"
+    base_src="GATE_BASE_OVERRIDE"
   else
     for ref in origin/main main origin/master master; do
       if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
-        base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
+        base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] &&
+          { base_src="merge-base HEAD $ref"; break; }
       fi
     done
   fi
@@ -9836,32 +9901,220 @@ run_file_size() {
     fi
   done <<<"$files"
 
-  echo ">>> [$name] thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)"
+  local line
+  _fs_emit "$log" ">>> [$name] thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)"
+  if [ -n "$base" ]; then
+    _fs_emit "$log" ">>> [$name] base ref: $base (via $base_src)"
+  fi
   if [ "${#over[@]}" -eq 0 ]; then
-    echo ">>> [$name] no changed .rs files over threshold"
+    _fs_emit "$log" ">>> [$name] no changed .rs files over threshold"
   else
-    echo "--- [$name] changed files over threshold (campsite rule — split per epic #1116 / #1135):"
-    printf '      %s\n' "${over[@]}"
+    _fs_emit "$log" "--- [$name] changed files over threshold (campsite rule — split per epic #1116 / #1135):"
+    for line in ${over[@]+"${over[@]}"}; do
+      _fs_emit "$log" "      $line"
+    done
   fi
 
   if [ -z "$base" ]; then
-    echo ">>> [$name] base ref unavailable — growth ratchet skipped (advisory only)"
+    _fs_emit "$log" ">>> [$name] base ref unavailable — growth ratchet skipped (advisory only)"
   elif [ "${#grew[@]}" -gt 0 ]; then
     if [ "${CQLITE_ALLOW_FILE_GROWTH:-0}" = 1 ]; then
-      echo ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
-      printf '      %s\n' "${grew[@]}"
+      _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
+      for line in ${grew[@]+"${grew[@]}"}; do
+        _fs_emit "$log" "      $line"
+      done
     else
       status=FAIL
-      echo "--- [$name] FAIL: change makes over-threshold file(s) larger."
-      echo "    Split per the campsite rule (epic #1116 source / #1135 tests), or, if a split"
-      echo "    is genuinely out of scope, re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge:"
-      printf '      %s\n' "${grew[@]}"
+      _fs_emit "$log" "--- [$name] FAIL: change makes over-threshold file(s) larger."
+      _fs_emit "$log" "    Split per the campsite rule (epic #1116 source / #1135 tests), or, if a split"
+      _fs_emit "$log" "    is genuinely out of scope, re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge:"
+      for line in ${grew[@]+"${grew[@]}"}; do
+        _fs_emit "$log" "      $line"
+      done
+      # AC2 (#3401): name the log path in the remedy block. The SUMMARY carries only
+      # `logs: <dir>`, so without this the reader has to guess the filename.
+      _fs_emit "$log" "    Full detail (thresholds, base ref, every entry above): $log"
     fi
   fi
 
   end=$(date +%s)
+
+  # What this guarantees, precisely (#3401 review A4): for the case where the LOG FILE
+  # cannot be written, the component never reports a silent PASS. It is NOT a general
+  # LOG_DIR guarantee — a wholly unwritable LOG_DIR also loses record_result's `.result`,
+  # and that falls through to the gate's generic "component produced no result" FAIL, which
+  # is fail-closed but carries none of this wording.
+  # Three independent signals, because each is blind to a different shape: the truncate
+  # check (unwritable path / not a regular file), the append-failure counter (a PARTIAL log
+  # — non-empty, so `-s` is satisfied, but missing the growth entries), and the end-state
+  # `-s` (created-but-empty, e.g. every write rejected).
+  if [ -z "$log_persist_err" ] && [ "$_FS_WRITE_FAILURES" -gt 0 ]; then
+    log_persist_err="$_FS_WRITE_FAILURES write(s) to it were rejected, so the log is partial or empty"
+  fi
+  if [ -z "$log_persist_err" ] && [ ! -s "$log" ]; then
+    log_persist_err="the file is absent or empty after writing (filesystem full?)"
+  fi
+  if [ -n "$log_persist_err" ]; then
+    local ratchet_verdict="$status" sib="$LOG_DIR/$name.persistence-error.log" _m _g
+    local sib_ok=1 _sib_lines=0 _allow_shown=""
+    local -a msg=()
+    status=FAIL
+    # The diagnostic MUST NOT live on stdout alone: stdout is gate.log, the one file agents
+    # are told never to read, and the whole failure mode here is "the log you were pointed
+    # at is missing". So it also goes to a NON-CLOBBERING SIBLING in LOG_DIR (the #2874
+    # pattern), which is reachable from the SUMMARY's `logs:` line, and the stdout block
+    # names that sibling so both routes lead to it (#3401 review blocker B).
+    : 2>/dev/null >"$sib" || sib_ok=0
+    # WORDING is the ONLY thing that varies by ratchet state; the CONTENT below is
+    # unconditional (#3401 review FIX 1).
+    if [ "$ratchet_verdict" = FAIL ]; then
+      # BOTH failed. Saying "this is NOT a ratchet violation" here would steer the reader
+      # away from a REAL growth violation (#3401 review blocker C), so report both.
+      msg+=("--- [$name] TWO failures: a REAL size-ratchet violation AND a log-persistence failure.")
+      msg+=("    (1) RATCHET (a genuine violation — act on this): the change makes over-threshold")
+      msg+=("        file(s) larger. Split per the campsite rule (epic #1116 source / #1135 tests),")
+      msg+=("        or re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge.")
+      msg+=("    (2) PERSISTENCE: the diagnostic log could not be written: $log")
+      msg+=("        Cause: $log_persist_err")
+      msg+=("        Fix the log directory (writable? full?) — that half needs no source split.")
+    else
+      msg+=("--- [$name] LOG PERSISTENCE FAILURE — this is NOT a campsite-rule / size-ratchet violation.")
+      if [ -z "$base" ]; then
+        # No base ref means the ratchet never RAN (advisory-only run), so claiming it
+        # "computed PASS" would assert a computation that did not happen (#3401 review L1).
+        msg+=("    The size ratchet was SKIPPED (base ref unavailable), so no growth comparison was")
+        msg+=("    made at all. What failed is PERSISTING the diagnostic log the SUMMARY's 'logs:'")
+        msg+=("    line points at: $log")
+      else
+        msg+=("    The size ratchet itself computed: $ratchet_verdict. What failed is PERSISTING the")
+        msg+=("    diagnostic log the SUMMARY's 'logs:' line points at: $log")
+      fi
+      msg+=("    Cause: $log_persist_err")
+      msg+=("    Fix the log directory (writable? full?) and re-run; no source file needs splitting.")
+    fi
+    # CONTENT — IDENTICAL IN EVERY RATCHET STATE (#3401 review FIX 1). Deriving the
+    # sibling's content from the ratchet verdict has now been wrong three times (the FAIL
+    # state, then the no-base state, then the PASS / CQLITE_ALLOW_FILE_GROWTH state, where
+    # the file names and counts were lost from every reachable artifact — stdout only
+    # reaches gate.log). So the arithmetic is restated unconditionally and only the wording
+    # above varies.
+    msg+=("    --- computed ratchet detail (what the unwritable log would have held) ---")
+    msg+=("    thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)")
+    if [ -n "$base" ]; then
+      msg+=("    base ref: $base (via $base_src)")
+    else
+      msg+=("    base ref: unavailable — growth ratchet skipped (advisory only)")
+    fi
+    if [ "${#over[@]}" -eq 0 ]; then
+      msg+=("    over threshold: none")
+    else
+      msg+=("    over threshold (current/limit  path):")
+      for _g in ${over[@]+"${over[@]}"}; do
+        msg+=("      $_g")
+      done
+    fi
+    if [ -z "$base" ]; then
+      # `grown: none` would assert a COMPLETED comparison that never ran — it contradicts
+      # the "ratchet skipped" line above and could conceal real growth (#3401 review
+      # item 2, the fourth instance of this class). `none` is reserved for a comparison
+      # that finished and found nothing.
+      msg+=("    grown: not computed (base unavailable)")
+    elif [ "${#grew[@]}" -eq 0 ]; then
+      msg+=("    grown: none")
+    else
+      msg+=("    grown:")
+      for _g in ${grew[@]+"${grew[@]}"}; do
+        msg+=("      $_g")
+      done
+      # ITEM 1 / roborev F3: record WHY a populated grown list did not fail the ratchet.
+      # Without it the sibling shows grown files beside a non-FAIL verdict with no
+      # provenance — and, from the test side, the allowed-growth state emits bytes
+      # identical to the FAIL state, so nothing can tell the two apart.
+      # "unset" was a CLAIM about a state never determined — the predicate only tested
+      # `!= 1`, so `CQLITE_ALLOW_FILE_GROWTH=0` or a typo (`true`, `yes`) was reported as
+      # never set, hiding from the reader the one fact that fixes their invocation (#3401
+      # review, sixth instance of the compute-claim class). `${VAR+set}` distinguishes the
+      # two without a second read. The value is flattened to one line and capped because a
+      # multi-line value would break the sibling's landed-line-count check below.
+      if [ "${CQLITE_ALLOW_FILE_GROWTH:-0}" = 1 ]; then
+        msg+=("    growth allowance: ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1")
+      elif [ -n "${CQLITE_ALLOW_FILE_GROWTH+set}" ]; then
+        _allow_shown=$(printf '%s' "$CQLITE_ALLOW_FILE_GROWTH" | tr -d '\n\r' | cut -c1-40)
+        msg+=("    growth allowance: NOT enabled — CQLITE_ALLOW_FILE_GROWTH is set to '$_allow_shown', expected exactly 1; this IS a ratchet violation")
+      else
+        msg+=("    growth allowance: NOT enabled — CQLITE_ALLOW_FILE_GROWTH is not set, expected exactly 1; this IS a ratchet violation")
+      fi
+    fi
+
+    # Write the sibling FIRST and VERIFY WHAT LANDED, then make the claim (#3401 review
+    # FIX 2). `sib_ok` from the truncate alone only proved the file could be OPENED: a
+    # quota/ENOSPC boundary accepts the open and rejects the writes, leaving an empty or
+    # short sibling while stdout asserts the complete block is there. A false pointer is
+    # worse than none — it sends the reader to a file that lacks what they were promised.
+    if [ "$sib_ok" = 1 ]; then
+      for _m in ${msg[@]+"${msg[@]}"}; do
+        printf '%s\n' "$_m" 2>/dev/null >>"$sib" || { sib_ok=0; break; }
+      done
+    fi
+    if [ "$sib_ok" = 1 ]; then
+      # MUST stay AFTER the write loop: reading a sibling that is a character device such
+      # as /dev/full returns zeros forever, so a `wc -l` moved above the loop would HANG.
+      # It is safe only because a device like that fails the writes first and leaves
+      # sib_ok=0, short-circuiting this read. Do not "optimise" the order.
+      _sib_lines=$(wc -l <"$sib" 2>/dev/null | tr -d ' ')
+      [ "${_sib_lines:-0}" = "${#msg[@]}" ] || sib_ok=0
+    fi
+    if [ "$sib_ok" = 1 ]; then
+      msg+=("    This block is also written to: $sib")
+      printf '%s\n' "    This block is also written to: $sib" 2>/dev/null >>"$sib"
+    else
+      # Covers all three sub-cases truthfully — truncate failed (no sibling), the append
+      # loop broke mid-block (a PARTIAL sibling exists), or the landed line count differs.
+      # "the only copy" was false for the middle one (#3401 review item 4).
+      msg+=("    (It could NOT be written IN FULL to $sib — stdout carries the complete copy.)")
+    fi
+    for _m in ${msg[@]+"${msg[@]}"}; do
+      printf '%s\n' "$_m"
+    done
+  fi
+
+  # Terminal verdict, written in TWO halves ON PURPOSE (#3401 blockers B/C) — do NOT tidy
+  # these back into one _fs_emit call, either merge direction re-opens one of the two:
+  #   * to the LOG *before* record_result, because record_result can TERMINATE the run
+  #     (tree-integrity / summary-integrity guards) and the log must still carry the
+  #     terminal verdict it promises;
+  #   * to STDOUT *after* record_result, because every other component prints in that
+  #     order and a gratuitous divergence is its own bug magnet.
+  # This LAST log write is deliberately UNVERIFIED — an ACCEPTED RESIDUAL under a lead
+  # ruling (Option A, https://github.com/pmcfadin/cqlite/issues/3401#issuecomment-5466376424),
+  # not an open question and not a resolved defect: the code here is unchanged, so nothing
+  # about the substance was answered. The obvious fix — "attempt and check the terminal
+  # append before the final persistence decision" — is not implementable, and the argument
+  # is set out here so it can be weighed on its merits instead of re-derived each review
+  # round (#3401 review A2, re-raised as job 138 F1):
+  #   * CIRCULARITY: this line's CONTENT IS THE VERDICT, and the verdict depends on the
+  #     persistence decision. It cannot be written before the decision it reports.
+  #   * A POST-WRITE RE-CHECK BUYS NOTHING: a read-back can VERIFY the append without
+  #     writing anything, but RECORDING that outcome in the same sink requires a later
+  #     write, whose own success is then unverified — the same one-write window, moved
+  #     along. Reporting it on STDOUT *is* implementable (a different sink needs no further
+  #     log write), but it would only restate what stdout already prints, which is why the
+  #     bullet below is the load-bearing one.
+  #   * THE LOSS IS BOUNDED: everything #3401 exists for (thresholds, base ref, over/grown
+  #     entries) is written AND checked above; a failure here costs only the terminal
+  #     verdict LINE, which the SUMMARY carries independently.
+  # WHAT WOULD FALSIFY ALL OF THAT — check it before relying on the argument above. The
+  # rejection holds ONLY WHILE BOTH of these remain true of this call site:
+  #   (a) this line's content IS the component verdict, and
+  #   (b) that verdict depends on the persistence decision computed above.
+  # Break either — record the verdict earlier, write a provisional marker here and amend
+  # it, move the persistence decision after this write — and the circularity is gone, the
+  # check becomes implementable, and THIS REJECTION IS VOID: re-examine the finding on its
+  # merits rather than citing this comment, which would then be arguing for a constraint
+  # that no longer exists.
+  printf '%s\n' ">>> [$name] $status ($((end - start))s)" 2>/dev/null >>"$log"
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
+  printf '%s\n' ">>> [$name] $status ($((end - start))s)"
 }
 
 # scoped-tests (issue #1821, --lite only): the blast-radius-scoped test component.

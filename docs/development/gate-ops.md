@@ -442,6 +442,23 @@ Putting it together: an `INCOMPLETE` summary + an advancing log mtime = **alive,
 are present = **dead, relaunch**. Anything else is inconclusive — prefer waiting to relaunching, and
 report `gate-timeout` on the hard deadline rather than guessing.
 
+## Component logs under `logs: <dir>` (issue #3401)
+
+Every component that RUNS writes `<dir>/<component>.log`, where `<dir>` is the SUMMARY's `logs:`
+line — that is the ONLY gate text besides the SUMMARY an agent should open, and it is where you go
+when a component's one-line verdict is not enough. A component that **SKIPs** (`python-bindings`,
+`oom-audit` and `tooling-tests` each have a no-toolchain SKIP path) writes no log at all: its reason
+is in the SUMMARY line only, so do not read an absent `<component>.log` as a missing artifact. In particular `file-size.log` carries the whole
+ratchet computation the verdict summarises: the thresholds applied, the resolved base sha (and
+the ref it came from, or an explicit "base ref unavailable — growth ratchet skipped"), the full
+list of changed `.rs` files currently over threshold, and one `path: before -> after (limit N)`
+line per over-threshold file the change grew. It is written on **every** run, PASS included, so a
+`file-size: FAIL` never again requires re-deriving line counts across the diff by hand. If the
+component cannot write that log at all (unwritable path, filesystem full, rejected appends) it FAILs
+rather than passing silently, and puts the diagnostic — including the grown-file list, which would
+otherwise die with the log — in the sibling `file-size.persistence-error.log` under the same `logs:`
+directory, so the failure of the log has a log of its own.
+
 ## Nested / concurrent-gate isolation (issue #2874)
 
 The gate of record is **structurally immune** to nested and concurrent gate activity — no box-exclusive ops rule and no "serialize every self-test lane" discipline is needed. The historical `#2751` workaround ("run the full gate **without** `AGENT_GATE_SUMMARY_FILE`") is **OBSOLETE**: the summary-file redirect invocation (`AGENT_GATE_SUMMARY_FILE=… bash scripts/agent-gate.sh`) is once again the documented default for callers, and running it concurrently with another lane's gate self-tests on the same box is safe. Three mechanisms guarantee this:
