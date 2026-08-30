@@ -227,13 +227,21 @@ plant_desc_observability_type='a TYPE ERROR inside a #[cfg(feature = "observabil
 # so a lane enabling only `observability` would have missed them. It also discriminates
 # the two halves of the lane — this fires ONLY because -D warnings is in force, so it is
 # evidence about the guard, not merely about the compile.
+#
+# THE MARKER IS THE VARIABLE NAME, NOT THE FUNCTION NAME — measured, not guessed. The
+# first version of this plant named the enclosing fn `afc3453_planted_..._break` and used
+# that as the marker; the lane duly went red and the harness reported FIRED-UNATTRIBUTED,
+# because rustc's diagnostic is `unused variable: \`<binding>\`` and names the BINDING and
+# a file:line, never the item it sits in. So the binding carries the marker. That round
+# is worth recording: the harness refused to accept a red it could not attribute, which
+# is exactly the discrimination it exists for.
 plant_observability_lint() {
   cat >> "$TREE/cqlite-core/src/lib.rs" <<'EOF'
 
 // #3453 PLANTED BREAK (all-features lane observation harness) — reverted by the harness.
 #[cfg(feature = "observability-testing")]
-pub fn afc3453_planted_observability_lint_break() -> bool {
-    let unused_on_purpose = 42;
+pub fn afc3453_planted_observability_lint_fn() -> bool {
+    let afc3453_planted_observability_lint_break = 42;
     true
 }
 EOF
