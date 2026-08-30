@@ -406,6 +406,86 @@ else
   bad "4b.22 the gate's own wrapper markers are excluded from env forwarding" "not in the deny-list"
 fi
 
+# roborev job 169: the post-launch check must be BOUND TO THE NEW RUN. It used to accept any
+# heartbeat containing `beat-epoch:`, so a stale or foreign beat already at that path excused an
+# unmonitorable launch — precisely the sticky-directory case the check exists to catch.
+if grep -q '_pre_sum_rid' "$LAUNCHER" && grep -q '_new_rid' "$LAUNCHER"; then
+  ok "4b.23 the launcher snapshots pre-launch run-ids and binds the check to a NEW one"
+else
+  bad "4b.23 the launcher binds the post-launch check to a NEW run-id" "no pre-launch snapshot"
+fi
+if grep -q 'grep -q "\^run-id: \$_new_rid' "$LAUNCHER"; then
+  ok "4b.24 the heartbeat must carry the NEW run-id (a pre-existing beat cannot satisfy it)"
+else
+  bad "4b.24 the heartbeat must carry the NEW run-id" "binding not found"
+fi
+# ...including the terminal-verdict fallback, which is the same mistake one branch over.
+_fb=$(grep -c 'run-id: \$_new_rid' "$LAUNCHER")
+[ "$_fb" -ge 2 ] && ok "4b.25 the terminal-verdict fallback is bound to the new run too ($_fb sites)" \
+                 || bad "4b.25 the terminal-verdict fallback is bound to the new run" "only $_fb binding site(s)"
+# BEHAVIOURAL: a stale heartbeat sitting at the destination, in a directory the gate cannot
+# write, must still be refused — the stale beat must not stand in for a real one.
+if [ "$(id -u)" != 0 ]; then
+  sd=$(mktemp -d)
+  printf '==== AGENT-GATE HEARTBEAT ====\nrun-id: ancient\ngate-pid: 1\nbeat-epoch: 1\n==== END AGENT-GATE HEARTBEAT ====\n' > "$sd/s.txt.heartbeat"
+  chmod 500 "$sd"
+  out=$(bash "$LAUNCHER" --summary "$sd/s.txt" --log "$TMP/stale.log" -- --only file-size 2>&1); rc=$?
+  [ "$rc" != 0 ] && ok "4b.26 a STALE pre-existing heartbeat does not excuse an unmonitorable launch (exit $rc)" \
+                 || bad "4b.26 a STALE pre-existing heartbeat does not excuse an unmonitorable launch" "exit 0: $out"
+  chmod 700 "$sd"; rm -rf "$sd"
+else
+  skipc "4b.26 stale heartbeat + unwritable directory" "running as root"
+fi
+
+# roborev job 169: env values must NOT ride in argv — /proc/<pid>/cmdline is world-readable
+# while /proc/<pid>/environ is owner-only, and this fleet's environment holds real tokens.
+# Comments are stripped first: the launcher explains WHY it avoids --setenv, and a naive scan
+# matched its own explanation (the same self-match trap as the portability guard).
+if printf '%s\n' "$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")" | grep -q -- '--setenv='; then
+  bad "4b.27 no environment value is passed via --setenv (argv is world-readable)" "still present in code"
+else
+  ok "4b.27 no environment value is passed via --setenv (argv is world-readable)"
+fi
+if grep -q "umask 077" "$LAUNCHER" && grep -q 'printf .export %s=%q' "$LAUNCHER"; then
+  ok "4b.28 the env is written to a 0600 script with shell-exact quoting"
+else
+  bad "4b.28 the env is written to a 0600 script with shell-exact quoting" "not found"
+fi
+# BEHAVIOURAL end-to-end: the value must REACH the gate while never appearing in any argv.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  probe="cqlite3473secret$$"
+  ls="$TMP/leak-summary.txt"
+  out=$(env "SECRET_PROBE_3473=$probe" bash "$LAUNCHER" --summary "$ls" --log "$TMP/leak.log" -- --only roborev-lints 2>&1)
+  lu=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$lu" ] && echo "$lu" >> "$UNITS_FILE"
+  mp=$(systemctl --user show "$lu" -p MainPID --value 2>/dev/null)
+  if [ -n "$mp" ] && [ -r "/proc/$mp/environ" ]; then
+    LC_ALL=C tr '\0' '\n' < "/proc/$mp/environ" | grep -q "SECRET_PROBE_3473=$probe" \
+      && ok "4b.29 a caller variable REACHES the detached unit's environment" \
+      || bad "4b.29 a caller variable REACHES the detached unit's environment" "absent"
+    leak=0
+    for c in /proc/[0-9]*/cmdline; do
+      [ -r "$c" ] || continue
+      LC_ALL=C tr '\0' ' ' < "$c" 2>/dev/null | grep -q "$probe" && { leak=1; break; }
+    done
+    [ "$leak" -eq 0 ] && ok "4b.30 ...and appears in NO process command line" \
+                      || bad "4b.30 the value leaked into a process command line" "found in argv"
+  else
+    skipc "4b.29-4b.30 env delivery" "unit exited before it could be inspected"
+  fi
+  systemctl --user stop "$lu" >/dev/null 2>&1 || true
+else
+  skipc "4b.29-4b.30 env delivery" "no working systemd-run --user"
+fi
+# roborev job 169: a symlinked log destination must be refused, not truncated through.
+lnk="$TMP/victim.txt"; : > "$lnk"; ln -sf "$lnk" "$TMP/log-link"
+printf 'do not clobber me\n' > "$lnk"
+out=$(bash "$LAUNCHER" --summary "$TMP/ls2.txt" --log "$TMP/log-link" -- --only file-size 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "4b.31 a SYMLINKED log path is refused (exit $rc)" \
+               || bad "4b.31 a SYMLINKED log path is refused" "exit 0: $out"
+[ "$(cat "$lnk")" = "do not clobber me" ] \
+  && ok "4b.32 ...and the symlink target is untouched" || bad "4b.32 the symlink target was clobbered" "$(cat "$lnk")"
+rm -f "$TMP/log-link" "$lnk"
+
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")

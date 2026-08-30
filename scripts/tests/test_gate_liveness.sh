@@ -74,21 +74,12 @@ expect_reader() {
 # repo, and this suite is wired into the full gate's `tooling-tests` — so a GNU-only
 # construct here does not fail "a test", it fails the GATE on every macOS host.
 #
-#   * `sed -i` needs a suffix argument on BSD (`sed -i '' -e …`) and rejects the GNU form,
-#     so in-place editing is done by rewriting through a temp file instead. That is
-#     portable everywhere and needs no per-platform branch at all.
+#   * in-place `sed` needs a suffix argument on BSD and rejects the GNU form, so no fixture
+#     here edits a file in place at all — each is written directly with the content it means.
 #   * `timeout` is GNU coreutils and is absent from a stock macOS; coreutils installs it
 #     as `gtimeout`. Resolved once, with an explicit no-timeout fallback rather than an
 #     unconditional invocation that would be a "command not found".
 #
-# edit_lines <file> <sed-expression> — apply <sed-expression> to <file> in place, portably.
-edit_lines() {
-  local f="$1" expr="$2" tmpf
-  tmpf="$f.edit.$$"
-  sed "$expr" "$f" > "$tmpf" 2>/dev/null && mv -f "$tmpf" "$f"
-  rm -f "$tmpf" 2>/dev/null || true
-}
-
 # TIMEOUT_CMD: the resolved timeout runner, or empty when this host has none. Callers use
 # it unquoted-and-empty-safe via $TIMEOUT_CMD, so a host without it simply runs the
 # command directly rather than failing.
@@ -206,13 +197,32 @@ expect_reader "6.4 control: matching run-ids => RUNNING" RUNNING 2 "" -- "$TMP/q
 echo "=== section 7: malformed beats are UNKNOWN, never silently fresh ==="
 mk_summary "$TMP/m.txt" run-m "INCOMPLETE (gate did not finish)"
 hb="$TMP/m.txt.heartbeat"
-mk_beat "$hb" run-m 5; edit_lines "$hb" 's/^run-id: .*//'
+# These fixtures are written DIRECTLY rather than by post-editing a good beat. The previous
+# form used a sed-into-temp-then-mv helper whose sed errors were silenced, so a failed edit
+# left the beat VALID and the case silently asserted the wrong thing — observed as a real
+# intermittent failure of 7.4. A gate-wired suite that reds at random is worse than no suite,
+# and building the fixture you actually mean removes the vector entirely.
+#
+# mk_beat_field <path> <run-id-line> <epoch-line> <interval-line>
+mk_beat_field() {
+  { echo "==== AGENT-GATE HEARTBEAT ===="
+    [ -n "$2" ] && echo "$2"
+    echo "gate-pid: 4242"
+    echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "$4"
+    echo "beat-seq: 7"
+    echo "$3"
+    echo "==== END AGENT-GATE HEARTBEAT ===="
+  } > "$1"
+}
+_now=$(date +%s)
+mk_beat_field "$hb" "" "beat-epoch: $(( _now - 5 ))" "interval: 20"
 expect_reader "7.1 beat with no run-id => UNKNOWN" UNKNOWN 4 "heartbeat-no-run-id" -- "$TMP/m.txt"
-mk_beat "$hb" run-m 5; edit_lines "$hb" 's/^beat-epoch: .*/beat-epoch: soon/'
+mk_beat_field "$hb" "run-id: run-m" "beat-epoch: soon" "interval: 20"
 expect_reader "7.2 non-numeric beat-epoch => UNKNOWN" UNKNOWN 4 "unparseable-epoch" -- "$TMP/m.txt"
-mk_beat "$hb" run-m 5; edit_lines "$hb" 's/^interval: .*/interval: often/'
+mk_beat_field "$hb" "run-id: run-m" "beat-epoch: $(( _now - 5 ))" "interval: often"
 expect_reader "7.3 non-numeric interval => UNKNOWN" UNKNOWN 4 "unparseable-interval" -- "$TMP/m.txt"
-mk_beat "$hb" run-m 5; edit_lines "$hb" 's/^interval: .*/interval: 0/'
+mk_beat_field "$hb" "run-id: run-m" "beat-epoch: $(( _now - 5 ))" "interval: 0"
 expect_reader "7.4 interval 0 => UNKNOWN" UNKNOWN 4 "bad-interval" -- "$TMP/m.txt"
 # A future-dated beat would otherwise be fresh FOREVER — a clock step or a hand-edited
 # artifact must not buy an unlimited RUNNING.
@@ -694,6 +704,39 @@ fi
 _nslp=$(grep -c 'sleep "$_confirm_wait"' "$READER")
 [ "$_nslp" -eq 1 ] && ok "11g.6 exactly one confirmation wait exists" \
                    || bad "11g.6 exactly one confirmation wait exists" "found $_nslp"
+
+# roborev job 169: round 6 made STALLED clock-independent and LEFT RUNNING comparing clocks —
+# an incomplete fix, exploitable in the other direction. A DEAD beat written by a host whose
+# clock ran AHEAD later falls inside the freshness window and would read RUNNING with nothing
+# advancing, so a lane waits forever on a gate that is gone. The epoch may now only decide
+# anything inside a PROVEN shared clock domain (the beat names its host); outside one, both
+# answers come from counter progression.
+mk_summary "$TMP/dom.txt" run-D "INCOMPLETE (gate did not finish)"
+# FRESH epoch, foreign host, static counter — F2's exact shape.
+mk_beat "$TMP/dom.txt.heartbeat" run-D 0 1 &&   sed 's/^host: .*/host: someotherbox/' "$TMP/dom.txt.heartbeat" > "$TMP/dom.tmp" && mv "$TMP/dom.tmp" "$TMP/dom.txt.heartbeat"
+expect_reader "11g.7 FRESH epoch from an unproven clock domain + static counter => STALLED, not RUNNING" \
+  STALLED 3 "clock-domain UNPROVEN" -- "$TMP/dom.txt"
+# Same, but the counter advances: alive, decided without comparing clocks.
+mk_beat "$TMP/dom.txt.heartbeat" run-D 0 1 &&   sed 's/^host: .*/host: someotherbox/' "$TMP/dom.txt.heartbeat" > "$TMP/dom.tmp" && mv "$TMP/dom.tmp" "$TMP/dom.txt.heartbeat"
+( sleep 2
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-D"; echo "gate-pid: 4242"
+    echo "host: someotherbox"; echo "interval: 1"; echo "beat-seq: 77"
+    echo "beat-epoch: $(date +%s)"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/dom.txt.heartbeat"
+) &
+dom_pid=$!; echo "$dom_pid" >> "$TMP/pids"
+expect_reader "11g.8 unproven clock domain + ADVANCING counter => RUNNING" \
+  RUNNING 2 "beat-seq advanced" -- "$TMP/dom.txt"
+wait "$dom_pid" 2>/dev/null || true
+# A beat with NO host line cannot prove a shared clock either.
+mk_beat "$TMP/dom.txt.heartbeat" run-D 0 1 &&   grep -v '^host: ' "$TMP/dom.txt.heartbeat" > "$TMP/dom.tmp" && mv "$TMP/dom.tmp" "$TMP/dom.txt.heartbeat"
+expect_reader "11g.9 a beat with NO host line => clock domain unproven" \
+  STALLED 3 "clock-domain UNPROVEN" -- "$TMP/dom.txt"
+# Structural: the epoch shortcut must be gated on the shared-clock test, not stand alone.
+if grep -q '\[ "\$_shared_clock" = yes \] && \[ "\$AGE" -le "\$STALE_AFTER" \]' "$READER"; then
+  ok "11g.10 the epoch shortcut is gated on a proven shared clock domain"
+else
+  bad "11g.10 the epoch shortcut is gated on a proven shared clock domain" "gate not found"
+fi
 
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
 # The same shape appeared THREE times in this change: the default /tmp artifact names, the

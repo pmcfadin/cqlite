@@ -222,15 +222,20 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
   `interval:` line, so the reader holds no duplicate of the gate's beat period and cannot
   drift from it. There is deliberately **no env var** that widens the window or disables
   the beat — that hatch could only buy a vacuous `RUNNING` for a dead gate.
-- **`STALLED` is decided by counter progression, never by comparing clocks.** The staleness
-  window is only a trigger for *looking closer*: `beat-epoch` is the writer's self-reported
-  time, and nothing guarantees the writer's clock matches the reader's, so a gate host running
-  behind would otherwise have every fresh beat read as `STALLED` — and since the documented
-  response to a persistent `STALLED` is "relaunch", a clock skew could cause a **duplicate
-  gate launch**. So when a beat *looks* stale, the reader waits one interval (bounded, capped
-  at 65 s) and checks whether `beat-seq` advanced: only the reader's clock times the wait, only
-  the writer's counter shows progress, and the two are never compared. A genuinely fresh beat
-  returns `RUNNING` immediately and pays none of this.
+- **A timestamp is only trusted inside a proven shared clock domain; otherwise both answers
+  come from counter progression.** `beat-epoch` is the writer's self-reported time, and nothing
+  guarantees the writer's clock matches the reader's. Both directions bite: a writer running
+  *behind* makes every fresh beat look `STALLED` (and since the response to a persistent
+  `STALLED` is "relaunch", that risks a **duplicate gate launch**), while a dead beat from a
+  writer that ran *ahead* later falls inside the freshness window and would look `RUNNING`
+  forever. So the beat names its `host:`; when that is this host the timestamps are
+  commensurable and a fresh beat returns `RUNNING` immediately. Otherwise the reader waits one
+  interval (bounded, capped at 65 s) and checks whether `beat-seq` advanced — only the reader's
+  clock times the wait, only the writer's counter shows progress, and the two are never
+  compared. The same progression check settles a stale-looking beat in the shared-clock case.
+  *Residual:* two boxes sharing a hostname and a filesystem would be treated as one clock
+  domain; the consequence is a possibly-wrong `RUNNING`/`STALLED`, never a claim that a process
+  is dead.
 
 ### The verdict set, and the death claim that was descoped
 
@@ -313,10 +318,15 @@ from a slow queue. `gate-detached.sh` prevents that in two layers.
 and renaming a file, and neither the summary nor the heartbeat destination may be a symlink,
 directory, fifo or device. These catch obvious misconfiguration before anything starts.
 
-**The real guarantee is post-launch:** the gate starts its beater *before* it queues for the
-#1825 slot, so a first beat lands within a second or two even when the gate will then sit in the
-queue for 20 minutes. The launcher requires that beat and, if it does not arrive, **stops the
-unit** and refuses. That is an end-to-end proof covering every reason publication could fail —
+**The real guarantee is post-launch, and it is BOUND TO THE NEW RUN:** the gate starts its
+beater *before* it queues for the #1825 slot, so a first beat lands within a second or two even
+when the gate will then sit in the queue for 20 minutes. The launcher snapshots the run-ids
+already present, then requires the summary to publish a *different* run-id **and** the heartbeat
+to carry *that* run-id — so a stale or foreign beat already sitting at the path cannot stand in
+for a real one (which it could, in the first version of this check: exactly the
+sticky-directory case the check exists to catch). The same binding applies to the
+early-terminal-verdict shortcut. If no such beat arrives the launcher **stops the unit** and
+refuses. That is an end-to-end proof covering every reason publication could fail —
 ownership, sticky directories, ACLs, mount flags, SELinux, a full filesystem — without this
 script modelling any of them. A gate that already reached a terminal verdict is accepted
 without a beat, since there is nothing left to monitor.
@@ -329,13 +339,29 @@ rename permission from the **directory**, not the file. Both are pinned as tests
 
 Every probe is **non-destructive**, because under #2874 these paths may hold a live peer's
 artifacts: the directory is probed with `mktemp`-created siblings, and no existing summary or
-heartbeat is written, truncated or replaced by any check.
+heartbeat is written, truncated or replaced by any check. A caller-supplied **log** path is
+refused if it is a symlink or non-regular file, since the log is truncated with `>` (residual: it
+is a check-then-create, so a symlink planted in the microsecond window is not caught — the
+default log path is unguessable inside a 0700 mkdtemp, so this only concerns a caller-chosen
+path in a shared directory).
+
+### The forwarded environment never rides in `argv`
+
+A transient unit inherits none of the caller's environment, so it has to be carried across — but
+`systemd-run --setenv=NAME=VALUE` puts every value on a command line, and `/proc/<pid>/cmdline`
+is **world-readable** while `/proc/<pid>/environ` is owner-only. This fleet's environment
+routinely holds `GH_TOKEN`, `PROJECTS_TOKEN` and `PARITY_HEAL_TOKEN`, so that is a real
+downgrade. The launcher instead writes a mode-**0600** wrapper script inside its private
+directory, quoted with `printf %q` (shell-exact, so there are no systemd quoting semantics to get
+wrong — an `EnvironmentFile` approach was measured returning *empty* values and abandoned), and
+only the script path appears in `argv`. Verified end to end: a probe variable reaches the unit's
+environment and appears in no process command line.
 
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (123 cases) and
-`scripts/tests/test_gate_detached.sh` (51 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (127 cases) and
+`scripts/tests/test_gate_detached.sh` (61 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

@@ -345,11 +345,37 @@ _where="run-id $HB_RUN_ID, gate-pid ${HB_PID:-unknown}, beat ${HB_SEQ:-?}, age $
 # a DIAGNOSTIC only: no verdict here depends on it (see the descope note below).
 [ -n "$HB_CHECK" ] && _where="$_where, parent-check $HB_CHECK"
 
-if [ "$AGE" -le "$STALE_AFTER" ]; then
-  verdict RUNNING 2 "this run beat ${AGE}s ago — it is alive and has not reached a verdict yet; $_where"
+# CLOCK DOMAIN (roborev job 169, Medium). Round 6 made STALLED clock-independent and left
+# RUNNING comparing clocks — an incomplete fix, and the reviewer was right that it is exploitable
+# in the other direction: a DEAD beat written by a host whose clock ran AHEAD later falls inside
+# the freshness window and reads RUNNING, with no sequence advancing, so a lane waits forever on
+# a gate that is gone. (A beat that is ahead *right now* is already caught as
+# `heartbeat-in-the-future`; the problem is the same beat re-read later.)
+#
+# So the epoch may only decide anything when the writer and reader demonstrably share a clock:
+# the beat names its `host:`, and if that is THIS host the timestamps are commensurable. This is
+# a SCOPE test, not the evidence-for-death that was descoped — and its residual is stated: two
+# boxes sharing a hostname and a filesystem would be treated as one clock domain. The
+# consequence there is a possibly-wrong RUNNING/STALLED, never a claim that a process is dead.
+#
+# Outside a proven shared clock domain, BOTH answers come from counter progression below, which
+# compares no clocks at all.
+HB_HOST=$(_field "$HB_TEXT" host)
+MY_HOST=$(uname -n 2>/dev/null || echo unknown)
+_shared_clock=no
+if [ -n "$HB_HOST" ] && [ "$HB_HOST" = "$MY_HOST" ]; then
+  _shared_clock=yes
+  _where="$_where, clock-domain shared ($MY_HOST)"
+else
+  _where="$_where, clock-domain UNPROVEN (beat host '${HB_HOST:-absent}' vs '$MY_HOST')"
+fi
+if [ "$_shared_clock" = yes ] && [ "$AGE" -le "$STALE_AFTER" ]; then
+  verdict RUNNING 2 "this run beat ${AGE}s ago on this host — it is alive and has not reached a verdict yet; $_where"
 fi
 
-# ---- the beat LOOKS stale. Confirm it CLOCK-INDEPENDENTLY before saying so ----------
+# ---- decide by COUNTER PROGRESSION: no clocks compared ------------------------------
+# Reached when the beat looks stale, OR when the clock domain is unproven (so the epoch may
+# not be trusted in EITHER direction).
 # `AGE` compares the WRITER's self-reported `beat-epoch` against the READER's clock, and
 # nothing guarantees those clocks agree (roborev job 166, Medium). A gate host running more
 # than one window behind would have EVERY fresh beat reported STALLED — and the documented
@@ -373,7 +399,7 @@ _hb2=$(_slurp "$HB")
 _seq2=$(_field "$_hb2" beat-seq)
 _rid2=$(_field "$_hb2" run-id)
 if [ "$_rid2" = "$HB_RUN_ID" ] && [ -n "$_seq2" ] && [ -n "$HB_SEQ" ] && [ "$_seq2" != "$HB_SEQ" ]; then
-  verdict RUNNING 2 "the beat looked ${AGE}s stale against THIS host's clock, but beat-seq advanced $HB_SEQ->$_seq2 over a ${_confirm_wait}s window timed here — the writer is alive and the clocks disagree. Liveness is decided by counter progression, never by comparing clocks. $_where"
+  verdict RUNNING 2 "beat-seq advanced $HB_SEQ->$_seq2 over a ${_confirm_wait}s window timed on THIS host — the writer is alive. Decided by counter progression, comparing no clocks (the epoch read ${AGE}s old here, which is not trusted for this run). $_where"
 fi
 
 # ---- a stale beat means NO LIVENESS, and that is ALL it is claimed to mean -----------
