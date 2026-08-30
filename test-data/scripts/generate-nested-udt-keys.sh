@@ -1043,8 +1043,9 @@ $ks_dir, found ${#TABLE_DIRS[@]} ($found_desc)")
 
     # --- CASSANDRA'S components: DERIVED from its own TOC.txt manifest -------
     local -a required_suffixes=()
-    local component
+    local component toc_ok=0
     if toc_components "$tdir/$prefix-TOC.txt"; then
+      toc_ok=1
       for component in "${TOC_COMPONENTS[@]}"; do
         required_suffixes+=("-$component")
       done
@@ -1070,20 +1071,26 @@ missing components pass.")
     # REQUIRE, or the manifest and the contract disagree about the set. Checked
     # here rather than in update_references_yml because this is where the
     # TOC-derived half of the required set is known.
+    # Only when the TOC-derived half of the required set is actually KNOWN: with a
+    # failed derivation this check has no subject, and running it anyway blamed
+    # references.yml for a damaged TOC.txt — the right verdict for the wrong
+    # stated reason. The derivation failure above is already a problem.
     local ref_suffix ref_ok
-    for ref_suffix in "${REFERENCED_SIDECAR_SUFFIXES[@]}"; do
-      ref_ok=0
-      for suffix in "${required_suffixes[@]}"; do
-        if [[ "$ref_suffix" == "$suffix" ]]; then
-          ref_ok=1
-        fi
-      done
-      if [[ "$ref_ok" -ne 1 ]]; then
-        problems+=("$table: references.yml advertises '$prefix$ref_suffix', which is neither a \
+    if [[ "$toc_ok" -eq 1 ]]; then
+      for ref_suffix in "${REFERENCED_SIDECAR_SUFFIXES[@]}"; do
+        ref_ok=0
+        for suffix in "${required_suffixes[@]}"; do
+          if [[ "$ref_suffix" == "$suffix" ]]; then
+            ref_ok=1
+          fi
+        done
+        if [[ "$ref_ok" -ne 1 ]]; then
+          problems+=("$table: references.yml advertises '$prefix$ref_suffix', which is neither a \
 TOC.txt component nor one of this script's derived goldens (${DERIVED_ARTIFACT_SUFFIXES[*]}) — the \
 manifest and this post-condition disagree about the artifact set")
-      fi
-    done
+        fi
+      done
+    fi
 
     # --- CONTENT of the JSONL golden, not just its size ---------------------
     # Skipped only when the golden is absent or empty, which the artifact loop
