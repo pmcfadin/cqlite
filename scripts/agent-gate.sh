@@ -3489,7 +3489,7 @@ fi
 # rewrites $HEARTBEAT_FILE every $HEARTBEAT_INTERVAL seconds for as long as THIS
 # process lives, verifying our pid (and, on /proc hosts, our start time, so a recycled
 # pid reads as dead) before every beat. scripts/gate-liveness.sh reads the summary and
-# the beat together and reports COMPLETE / RUNNING / REAPED / UNKNOWN.
+# the beat together and reports COMPLETE / RUNNING / STALLED / UNKNOWN.
 #
 # Started HERE, immediately after the sentinel and BEFORE acquire_gate_slot, because a
 # QUEUED gate must read as RUNNING — it is alive and legitimately verdict-less, and a
@@ -3532,7 +3532,7 @@ _hb_start() {
 # _hb_ensure: re-launch the beater if it died while the gate lives. Called at every
 # component boundary. WHY: if the beater alone is killed (a pgid-directed signal that
 # misses us, an OOM reap of the smallest process) the beat goes stale under a LIVE
-# gate, and the reader would report REAPED about a gate that is still working — a false
+# gate, and the reader would report STALLED about a gate that is still working — a false
 # death is expensive, it sends a lane off to re-run a gate that was about to PASS.
 # Component boundaries are the only cheap place to notice, and they are frequent
 # enough: the longest single component (tooling-tests, 687-849s) is bounded by one
@@ -3550,7 +3550,7 @@ _hb_ensure() {
 # _hb_stop: tear the beater down on gate exit. The BASHPID guard is load-bearing and
 # copied from _gate_release_slot for the same reason: a backgrounded `( … ) &` pool
 # subshell runs the inherited EXIT trap on ITS own exit, and must not kill the parent's
-# beater — that would freeze the beat mid-run and make a live gate read as REAPED.
+# beater — that would freeze the beat mid-run and make a live gate read as STALLED.
 #
 # Stopping the beat at exit is correct, not a gap: by then emit_summary has replaced
 # the sentinel with a real verdict, so the reader answers COMPLETE from the summary and
@@ -8549,8 +8549,8 @@ run_pub_surface() {
 # failure -> hard FAIL.
 # Also runs scripts/tests/test_gate_liveness.sh (#3473), the non-vacuity proof for the
 # gate liveness mechanism: 66 cases over scripts/lib/gate-heartbeat.sh and
-# scripts/gate-liveness.sh, pinning that a reaped gate reads REAPED, a queued/running one
-# reads RUNNING, a MISSING beat reads UNKNOWN (never REAPED — absence is not death), and a
+# scripts/gate-liveness.sh, pinning that a gate which stopped beating reads STALLED, a
+# reads RUNNING, a MISSING beat reads UNKNOWN (never STALLED — absence is not a stall), and a
 # peer's artifacts are never answered as ours. Includes the /proc starttime parser tested
 # differentially against awk over every live pid. Hermetic; one bounded nested
 # `--only file-size` for wiring evidence (cannot select tooling-tests, so no recursion).

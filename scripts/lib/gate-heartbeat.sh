@@ -105,7 +105,7 @@ _gate_alive() {
 
 # Write the block to a sibling temp then rename, so a reader never sees a partial
 # heartbeat (rename within a directory is atomic). A failed write is not fatal — the
-# beat simply goes stale, which a reader reports as REAPED/UNKNOWN, never as RUNNING.
+# beat simply goes stale, which a reader reports as STALLED/UNKNOWN, never as RUNNING.
 # TMP_PATH is module-scope so the signal handler can remove whatever mktemp actually chose.
 TMP_PATH=""
 _beat() {

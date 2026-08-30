@@ -35,7 +35,7 @@
 # It does not make the gate faster, and it does not remove the #1825 slot cap — a
 # detached gate still queues. It also does not let you walk away without a plan for
 # reading the verdict: use scripts/gate-liveness.sh, which distinguishes RUNNING from
-# REAPED (this script prints the exact command).
+# STALLED (this script prints the exact command, bound to this run).
 #
 # THREAT MODEL — STATED, so findings in this area get TRIAGED rather than patched (#3473)
 # ---------------------------------------------------------------------------------------
@@ -391,8 +391,11 @@ while [ "$_i" -lt 40 ]; do
   fi
   # (b) ...and the heartbeat must carry THAT run-id. A pre-existing beat cannot satisfy this,
   #     whatever it contains, so an unreplaceable file no longer masks an unmonitorable launch.
+  #     The match is FIXED-STRING and whole-line: the run-id is a mktemp PATH, and interpolating
+  #     it into a regex broke on a TMPDIR containing `[` or `.`, so a REAL heartbeat would not
+  #     match and the launcher would stop a healthy gate (job 178, Low).
   if [ -n "$_new_rid" ] && [ -s "$_hbdest" ] \
-     && grep -q "^run-id: $_new_rid\$" "$_hbdest" 2>/dev/null \
+     && grep -qxF "run-id: $_new_rid" "$_hbdest" 2>/dev/null \
      && grep -q '^beat-epoch: ' "$_hbdest" 2>/dev/null; then
     _hb_seen=1; break
   fi

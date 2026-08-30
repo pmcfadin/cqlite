@@ -418,10 +418,18 @@ if grep -q '_pre_sum_rid' "$LAUNCHER" && grep -q '_new_rid' "$LAUNCHER"; then
 else
   bad "4b.23 the launcher binds the post-launch check to a NEW run-id" "no pre-launch snapshot"
 fi
-if grep -q 'grep -q "\^run-id: \$_new_rid' "$LAUNCHER"; then
-  ok "4b.24 the heartbeat must carry the NEW run-id (a pre-existing beat cannot satisfy it)"
+# Fixed-string whole-line match (job 178, Low): the run-id is a mktemp PATH, so interpolating it
+# into a regex broke on a TMPDIR containing `[` and could stop a HEALTHY gate.
+if grep -q 'grep -qxF "run-id: \$_new_rid"' "$LAUNCHER"; then
+  ok "4b.24 the heartbeat must carry the NEW run-id, matched as a fixed string"
 else
-  bad "4b.24 the heartbeat must carry the NEW run-id" "binding not found"
+  bad "4b.24 the heartbeat must carry the NEW run-id, matched as a fixed string" "binding not found"
+fi
+body=$(sed 's/[[:space:]]*#.*$//' "$LAUNCHER")
+if printf '%s\n' "$body" | grep -qE 'grep -q "\^run-id: '; then
+  bad "4b.24b the run-id binding uses no regex interpolation" "a regex form remains"
+else
+  ok "4b.24b the run-id binding uses no regex interpolation"
 fi
 # ...including the terminal-verdict fallback, which is the same mistake one branch over.
 # Both binding sites must exist: the heartbeat match (`^run-id: $_new_rid`) and the delegated
@@ -515,6 +523,29 @@ if grep -q '_cleanup_env' "$LAUNCHER" && grep -q "trap _cleanup_env EXIT" "$LAUN
   ok "4b.35 the env script is removed by an EXIT trap (every path, success and failure)"
 else
   bad "4b.35 the env script is removed by an EXIT trap" "no unconditional cleanup"
+fi
+# The trap alone is not enough (job 178, Medium): it cannot run if the LAUNCHER is SIGKILLed
+# after the unit started, leaving the 0600 secrets file forever. The wrapper must unlink ITSELF,
+# tying the file's lifetime to the process that consumed it.
+if grep -q "printf 'rm -f -- %q" "$LAUNCHER"; then
+  ok "4b.35b the generated wrapper unlinks itself before exec"
+else
+  bad "4b.35b the generated wrapper unlinks itself before exec" "self-unlink not emitted"
+fi
+# ...and the self-unlink must be the LAST thing before exec, or bash may not have read the file.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  et="$TMP/envorder"; mkdir -p "$et"
+  TMPDIR="$et" bash "$LAUNCHER" --summary "$TMP/eo.txt" --log "$TMP/eo.log" -- --only file-size >/dev/null 2>&1
+  # the script is gone by now, so assert the ORDER from the generator instead
+  gen_rm=$(grep -n "printf 'rm -f -- %q" "$LAUNCHER" | head -1 | cut -d: -f1)
+  gen_exec=$(grep -n "printf 'exec bash %q" "$LAUNCHER" | head -1 | cut -d: -f1)
+  if [ -n "$gen_rm" ] && [ -n "$gen_exec" ] && [ "$gen_rm" -lt "$gen_exec" ]; then
+    ok "4b.35c the self-unlink is emitted immediately before the exec line"
+  else
+    bad "4b.35c the self-unlink is emitted immediately before the exec line" "rm at ${gen_rm:-?}, exec at ${gen_exec:-?}"
+  fi
+else
+  skipc "4b.35c self-unlink ordering" "no working systemd-run --user"
 fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   # Scoped to a PRIVATE TMPDIR (roborev job 176, Medium). The first version counted every

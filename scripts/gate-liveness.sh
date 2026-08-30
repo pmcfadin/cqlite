@@ -119,8 +119,8 @@ fi
 # plus making the write atomic at the source — which is a change to how the GATE OF RECORD
 # publishes its verdict and belongs in its own issue, not as a ride-along here.
 #
-# `_slurp_settled` then converts the COMMON case of a torn read — we caught a write in
-# progress — into a correct answer, by re-reading once when the framing is incomplete.
+# A bounded settle-retry then converts the COMMON case of a torn read — we caught a write in
+# progress — into a correct answer, by re-snapshotting once when the framing is incomplete.
 # Genuinely truncated artifacts (a killed gate, ENOSPC) still land on UNKNOWN, because a
 # second read of a permanently short file is identical to the first.
 #
@@ -132,6 +132,31 @@ fi
 # _slurp <file> — the file's contents, or empty when unreadable.
 _slurp() { cat -- "$1" 2>/dev/null; }
 
+# SNAPSHOT DISCIPLINE (roborev job 178, Medium). The NUL check and the parse must see the SAME
+# bytes. The previous version opened each artifact TWICE — once for `_has_nul`, once for the
+# parse — so an interleaved write arriving between them was missed entirely, and because `$( )`
+# strips NUL bytes the parse could then accept the blended block as COMPLETE. That is a
+# regression of the FIRST review round's finding (per-field re-opens), reintroduced by a check
+# added to fix a different problem.
+#
+# So each artifact is copied ONCE into a private snapshot and every later read — NUL detection
+# included — is of that immutable copy. `cp` is a single open of the original, and nothing else
+# can write our snapshot.
+SNAP_DIR=""
+# shellcheck disable=SC2317  # runs via the EXIT trap
+_cleanup_snaps() { [ -n "$SNAP_DIR" ] && rm -rf "$SNAP_DIR" 2>/dev/null; return 0; }
+trap _cleanup_snaps EXIT
+# _snap_of <file> <tag> -> path to an immutable copy on stdout; non-zero on failure.
+_snap_of() {
+  if [ -z "$SNAP_DIR" ]; then
+    SNAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gate-liveness-snap.XXXXXX" 2>/dev/null) || return 1
+  fi
+  local dst="$SNAP_DIR/$2"
+  cp -- "$1" "$dst" 2>/dev/null || return 1
+  printf '%s' "$dst"
+}
+
+
 # _has_nul <file> — true when the file contains a NUL byte. Checked on the FILE, never on a
 # slurped string: `$( )` silently strips NULs, so the evidence is gone by the time the text
 # reaches a variable. A NUL is the fingerprint of the sparse hole an interleaved O_TRUNC
@@ -141,23 +166,6 @@ _has_nul() {
   return 0
 }
 
-# _slurp_settled <file> — like _slurp, but if the text does not look like a COMPLETE
-# summary block, read it once more and prefer the completed version. Bounded to exactly one
-# retry: this distinguishes "caught mid-write" (the retry completes) from "permanently
-# truncated" (the retry is identical), and cannot loop.
-_slurp_settled() {
-  local t
-  t=$(_slurp "$1")
-  if ! printf '%s\n' "$t" | grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'; then
-    sleep 0.2
-    local t2
-    t2=$(_slurp "$1")
-    if printf '%s\n' "$t2" | grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'; then
-      t="$t2"
-    fi
-  fi
-  printf '%s' "$t"
-}
 
 # _field <text> <key> — first "key: value" line's value in <text>, or empty.
 _field() {
@@ -188,10 +196,27 @@ fi
 if [ ! -r "$SUMMARY" ]; then
   verdict UNKNOWN 4 "summary-unreadable; $SUMMARY exists but cannot be read"
 fi
-if _has_nul "$SUMMARY"; then
+_SUM_SNAP=$(_snap_of "$SUMMARY" summary) || _SUM_SNAP=""
+if [ -z "$_SUM_SNAP" ]; then
+  verdict UNKNOWN 4 "summary-unsnapshotable; could not take a private copy of $SUMMARY to read it consistently (no writable temp dir, or the file vanished)"
+fi
+if _has_nul "$_SUM_SNAP"; then
   verdict UNKNOWN 4 "summary-contains-nul; $SUMMARY holds NUL bytes, the signature of two writers interleaving on one path (#2874 requires concurrent gates to use distinct summary paths) — its fields cannot be attributed to a single run"
 fi
-SUM_TEXT=$(_slurp_settled "$SUMMARY")
+SUM_TEXT=$(_slurp "$_SUM_SNAP")
+# Settle-retry: incomplete framing may mean we caught a write in progress. Re-SNAPSHOT once and
+# prefer the completed copy — re-snapshotting rather than re-reading is what keeps the NUL check
+# and the parse on the same bytes.
+if ! printf '%s\n' "$SUM_TEXT" | grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'; then
+  sleep 0.2
+  _SUM_SNAP2=$(_snap_of "$SUMMARY" summary2) || _SUM_SNAP2=""
+  if [ -n "$_SUM_SNAP2" ] && ! _has_nul "$_SUM_SNAP2"; then
+    _t2=$(_slurp "$_SUM_SNAP2")
+    if printf '%s\n' "$_t2" | grep -qE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'; then
+      SUM_TEXT="$_t2"
+    fi
+  fi
+fi
 # EXACTLY ONE of each framing element. Checked HERE — before any field is read — not on the
 # COMPLETE path only, which is where it first lived: a file whose first RESULT happens to be
 # `INCOMPLETE` would then have skipped the check entirely and been dispatched on a field it
@@ -346,10 +371,14 @@ fi
 if [ ! -r "$HB" ]; then
   verdict UNKNOWN 4 "heartbeat-unreadable; $HB exists but cannot be read"
 fi
-if _has_nul "$HB"; then
+_HB_SNAP=$(_snap_of "$HB" heartbeat) || _HB_SNAP=""
+if [ -z "$_HB_SNAP" ]; then
+  verdict UNKNOWN 4 "heartbeat-unsnapshotable; could not take a private copy of $HB to read it consistently"
+fi
+if _has_nul "$_HB_SNAP"; then
   verdict UNKNOWN 4 "heartbeat-contains-nul; $HB holds NUL bytes, so it is not a single coherent beat"
 fi
-HB_TEXT=$(_slurp "$HB")
+HB_TEXT=$(_slurp "$_HB_SNAP")
 HB_RUN_ID=$(_field "$HB_TEXT" run-id)
 if [ -z "$HB_RUN_ID" ]; then
   verdict UNKNOWN 4 "heartbeat-no-run-id; $HB carries no 'run-id:' line, so it cannot be attributed to any run"
@@ -388,9 +417,15 @@ AGE=$(( NOW - HB_EPOCH ))
 # A beat dated in the FUTURE is unmeasurable, not fresh — otherwise a clock step (or a
 # hand-edited artifact) would read as RUNNING indefinitely. One interval of slop
 # absorbs ordinary clock jitter between the beater's write and this read.
-if [ "$AGE" -lt $(( -HB_INTERVAL )) ]; then
-  verdict UNKNOWN 4 "heartbeat-in-the-future; beat-epoch $HB_EPOCH is $(( -AGE ))s ahead of this host's clock"
-fi
+# A future epoch is only MEANINGFUL inside a proven shared clock domain (roborev job 178).
+# Rejecting it first meant a LIVE beat from another host whose clock runs ahead returned UNKNOWN
+# without ever reaching the counter-progression check that exists precisely for that case. Off a
+# shared clock the epoch carries no information in EITHER direction, so it must not produce a
+# verdict of its own; the clock domain is resolved below, and this rejection is applied there.
+# RAW_AGE keeps the signed value: the future-epoch check happens LATER (once the clock domain
+# is known), and clamping before it would hide exactly the anomaly it looks for — measured, as a
+# future-dated beat reporting RUNNING with "age 0s".
+RAW_AGE="$AGE"
 [ "$AGE" -ge 0 ] || AGE=0
 
 HB_PID=$(_field "$HB_TEXT" gate-pid)
@@ -425,6 +460,11 @@ if [ -n "$HB_HOST" ] && [ "$HB_HOST" = "$MY_HOST" ]; then
 else
   _where="$_where, clock-domain UNPROVEN (beat host '${HB_HOST:-absent}' vs '$MY_HOST')"
 fi
+if [ "$_shared_clock" = yes ] && [ "$RAW_AGE" -lt $(( -HB_INTERVAL )) ]; then
+  # Same clock, yet the beat is dated in the future: that is a genuine anomaly (a clock step, or
+  # a hand-edited artifact), and it must not read as fresh forever.
+  verdict UNKNOWN 4 "heartbeat-in-the-future; beat-epoch $HB_EPOCH is $(( -RAW_AGE ))s ahead of this host's clock, and the beat claims THIS host — so the timestamp is not trustworthy. $_where"
+fi
 if [ "$_shared_clock" = yes ] && [ "$AGE" -le "$STALE_AFTER" ]; then
   verdict RUNNING 2 "this run beat ${AGE}s ago on this host — it is alive and has not reached a verdict yet; $_where"
 fi
@@ -451,7 +491,9 @@ fi
 _confirm_wait=$(( HB_INTERVAL + 5 ))
 [ "$_confirm_wait" -le 65 ] || _confirm_wait=65
 sleep "$_confirm_wait"
-_hb2=$(_slurp "$HB")
+_hb2_snap=$(_snap_of "$HB" heartbeat2) || _hb2_snap=""
+_hb2=""
+[ -n "$_hb2_snap" ] && ! _has_nul "$_hb2_snap" && _hb2=$(_slurp "$_hb2_snap")
 _seq2=$(_field "$_hb2" beat-seq)
 _rid2=$(_field "$_hb2" run-id)
 if [ "$_rid2" = "$HB_RUN_ID" ] && [ -n "$_seq2" ] && [ -n "$HB_SEQ" ] && [ "$_seq2" != "$HB_SEQ" ]; then

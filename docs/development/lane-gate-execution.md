@@ -411,7 +411,10 @@ wrong — an `EnvironmentFile` approach was measured returning *empty* values an
 only the script path appears in `argv`. Verified end to end: a probe variable reaches the unit's
 environment and appears in no process command line.
 
-That file is **removed by an unconditional `EXIT` trap**, on success and on every refusal path.
+That file **unlinks itself** from inside the generated wrapper, immediately before `exec` — the
+launcher's `EXIT` trap remains as a fallback for paths where the wrapper never runs, but a trap
+cannot fire if the launcher is SIGKILLed after the unit started, and then the secrets file would
+survive indefinitely. Tying its lifetime to the process that consumed it closes that.
 The first version never deleted it, so each launch left a persistent copy of the session's
 credentials in an undisclosed directory — 51 had accumulated in `/tmp` during development of this
 change. The private directory is removed with `rmdir`, which succeeds only when empty, so a
@@ -420,8 +423,8 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (141 cases) and
-`scripts/tests/test_gate_detached.sh` (69 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (145 cases) and
+`scripts/tests/test_gate_detached.sh` (73 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

@@ -492,11 +492,22 @@ if grep -nE 'grep [^|]*"\$(SUMMARY|HB)"' "$READER" >/dev/null 2>&1; then
 else
   ok "11b.16 no grep reads the artifact path directly"
 fi
-# Exactly one snapshot per artifact — and the derivation must find them, or this is
-# vacuous: a renamed helper would silently satisfy the two negative checks above.
-sl=$(grep -cE '^[A-Z_]+_TEXT=\$\(_slurp(_settled)? "\$(SUMMARY|HB)"\)$' "$READER")
-[ "$sl" -eq 2 ] && ok "11b.17 each artifact is snapshotted exactly once (found $sl)" \
-                || bad "11b.17 each artifact is snapshotted exactly once" "found $sl _slurp assignments, want 2"
+# Each artifact is copied ONCE and every read is of that copy (job 178). The NUL check and the
+# parse must see the same bytes — reading the live path twice let an interleaved write slip
+# between them, and `$( )` strips NULs so the parse could not see the damage either.
+_texts=$(grep -cE '^[A-Z_]+_TEXT=\$\(_slurp "\$_[A-Z_]+_SNAP"\)$' "$READER")
+[ "$_texts" -eq 2 ] && ok "11b.17 both artifacts are parsed from a private snapshot (found $_texts)" \
+                    || bad "11b.17 both artifacts are parsed from a private snapshot" "found $_texts, want 2"
+# The NUL check must run on a SNAPSHOT, never on the live path — that was the defect.
+if grep -qE '_has_nul "\$(SUMMARY|HB)"' "$READER"; then
+  bad "11b.17b the NUL check reads a snapshot, not the live path" "$(grep -nE '_has_nul "\$(SUMMARY|HB)"' "$READER" | head -2)"
+else
+  ok "11b.17b the NUL check reads a snapshot, not the live path"
+fi
+# And the snapshots must be created exclusively, in a private directory that is cleaned up.
+grep -q 'mktemp -d "${TMPDIR:-/tmp}/gate-liveness-snap' "$READER" && grep -q 'trap _cleanup_snaps EXIT' "$READER" \
+  && ok "11b.17c snapshots live in a private mkdtemp removed by an EXIT trap" \
+  || bad "11b.17c snapshots live in a private mkdtemp removed by an EXIT trap" "not found"
 
 echo "=== section 11c: the four roborev job-157 findings, each with a control ==="
 # (a) Medium — a TERMINAL result in a TRUNCATED block was reported COMPLETE. emit_summary
@@ -614,10 +625,12 @@ echo "=== section 11d: the surviving roborev job-160 finding (the other two were
 #     Asserted structurally: a real interleaving cannot be scheduled deterministically from
 #     shell, and a timing-based case would be the flaky wall-clock shape roborev-lints
 #     reject. The properties that matter are exactly checkable at the source.
-if grep -q 'SUM_TEXT=$(_slurp_settled "$SUMMARY")' "$READER"; then
-  ok "11d.7 the summary is read through the settle-retry reader"
+# The settle-retry must RE-SNAPSHOT rather than re-read a variable, or it would reintroduce the
+# two-opens defect it shares a code path with.
+if grep -q '_SUM_SNAP2=$(_snap_of "$SUMMARY" summary2)' "$READER"; then
+  ok "11d.7 the settle-retry takes a fresh snapshot (not a bare re-read)"
 else
-  bad "11d.7 the summary is read through the settle-retry reader" "not found"
+  bad "11d.7 the settle-retry takes a fresh snapshot" "not found"
 fi
 retries=$(grep -c 'sleep 0.2' "$READER")
 [ "$retries" -eq 1 ] && ok "11d.8 the settle retry is bounded to exactly one re-read" \
@@ -777,6 +790,37 @@ kill "$BUMP_PID" 2>/dev/null; wait "$BUMP_PID" 2>/dev/null || true
 mk_beat "$TMP/dom.txt.heartbeat" run-D 0 1 &&   grep -v '^host: ' "$TMP/dom.txt.heartbeat" > "$TMP/dom.tmp" && mv "$TMP/dom.tmp" "$TMP/dom.txt.heartbeat"
 expect_reader "11g.9 a beat with NO host line => clock domain unproven" \
   STALLED 3 "clock-domain UNPROVEN" -- "$TMP/dom.txt"
+# roborev job 178: a future epoch must only be a VERDICT inside a proven shared clock domain.
+# Rejecting it first meant a LIVE beat from a host whose clock runs ahead returned UNKNOWN
+# without ever reaching the progression check that exists for exactly that case.
+mk_summary "$TMP/fut.txt" run-F2 "INCOMPLETE (gate did not finish)"
+mk_beat "$TMP/fut.txt.heartbeat" run-F2 -600 1 && \
+  sed 's/^host: .*/host: someotherbox/' "$TMP/fut.txt.heartbeat" > "$TMP/fut.tmp" && mv "$TMP/fut.tmp" "$TMP/fut.txt.heartbeat"
+bump_beats_future() {
+  ( local end=$(( $(date +%s) + 20 )) n=200
+    while [ "$(date +%s)" -lt "$end" ]; do
+      n=$((n + 1))
+      { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-F2"; echo "gate-pid: 4242"
+        echo "host: someotherbox"; echo "interval: 1"; echo "beat-seq: $n"
+        echo "beat-epoch: $(( $(date +%s) + 600 ))"; echo "==== END AGENT-GATE HEARTBEAT ===="
+      } > "$TMP/fut.txt.heartbeat.b" 2>/dev/null
+      mv -f "$TMP/fut.txt.heartbeat.b" "$TMP/fut.txt.heartbeat" 2>/dev/null
+      sleep 0.5
+    done ) &
+  BUMP_PID=$!; echo "$BUMP_PID" >> "$TMP/pids"
+}
+bump_beats_future
+expect_reader "11g.11 FOREIGN host + FUTURE epoch + advancing counter => RUNNING (not UNKNOWN)" \
+  RUNNING 2 "beat-seq advanced" -- "$TMP/fut.txt"
+kill "$BUMP_PID" 2>/dev/null; wait "$BUMP_PID" 2>/dev/null || true
+# CONTROL: on THIS host a future epoch is a genuine anomaly and must still be refused (7.5 covers
+# the default case; this one asserts the clock-domain wording is present).
+mk_beat "$TMP/fut.txt.heartbeat" run-F2 -600 20
+run_reader "$TMP/fut.txt"
+printf '%s' "$OUT" | grep -q 'the beat claims THIS host' \
+  && ok "11g.12 a same-host future epoch is refused, and says why" \
+  || bad "11g.12 a same-host future epoch is refused, and says why" "$(printf '%s' "$OUT" | head -1)"
+
 # Structural: the epoch shortcut must be gated on the shared-clock test, not stand alone.
 if grep -q '\[ "\$_shared_clock" = yes \] && \[ "\$AGE" -le "\$STALE_AFTER" \]' "$READER"; then
   ok "11g.10 the epoch shortcut is gated on a proven shared clock domain"
