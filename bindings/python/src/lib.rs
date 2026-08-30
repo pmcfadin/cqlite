@@ -16,6 +16,7 @@ mod result;
 mod runtime;
 mod stats;
 mod value;
+mod value_hashable;
 mod vectors;
 mod write;
 
