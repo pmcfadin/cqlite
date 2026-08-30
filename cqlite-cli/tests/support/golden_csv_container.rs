@@ -134,8 +134,9 @@
 //!
 //! So there is now ONE derived cause, asked through the decode's own code
 //! ([`members`], [`entry_cut`], [`scan`]): run the splitter on the golden's OWN
-//! structural rendering ([`golden_rendering`], derived from the golden and the
-//! committed DDL — never from CQLite's output, which would be circular) and refuse
+//! structural rendering ([`golden_rendering`], derived from the golden, the
+//! committed DDL and the position's [`Kinding`] — never from CQLite's output,
+//! which would be circular) and refuse
 //! exactly when it does not give this node's members back
 //! ([`decode_does_not_recover`]).
 //!
@@ -510,27 +511,46 @@ fn split_mismatch(rendering: &str, unit: &str, got: &[&str], want: &[String]) ->
 }
 
 /// The text the documented grammar renders this golden node as, derived from the
-/// GOLDEN and the committed DDL alone: the bracket pair the declared kind
-/// requires, `, ` between members, `: ` between a key and its value, and each
-/// scalar as the text the GOLDEN carries for it.
+/// GOLDEN, the committed DDL and the position's [`Kinding`]: the bracket pair the
+/// declared kind requires, `, ` between members, `: ` between a key and its value,
+/// and each scalar as the text the golden carries for it AT THAT POSITION.
 ///
 /// It is NOT a second `ValueFormatter`, and it must never become one. It is asked
 /// one STRUCTURAL question — where the separators and brackets of the golden's own
-/// rendering fall — and every scalar spelling in it is the GOLDEN's. Taking the
-/// spellings from CQLite instead would make the refusal circular (#3042): the
-/// output under test would be deciding which of its own positions get compared.
+/// rendering fall. Deciding a scalar's spelling from CQLite's output would make
+/// the refusal circular (#3042): the output under test would be choosing which of
+/// its own positions get compared.
 ///
-/// Why the golden's spellings answer the structural question: the lane's three
-/// declared narrowings are all scalar SPELLINGS (a timestamp's separator, a
-/// decimal's trailing zeros, a JSON integer beyond `f64`), and no spelling of any
-/// CQL scalar type carries a `, `, a `: ` or a bracket, so a spelling difference
-/// cannot move a separator or the depth count. Where a member's text could carry
-/// one — `text`/`varchar`/`ascii`, which hold arbitrary bytes — the golden's text
-/// IS the rendering, byte for byte.
+/// # The spelling rule, and why it is not the golden's text alone
 ///
-/// The RESIDUAL of using the golden's spellings, in both directions, because it is
-/// the one assumption this function rests on:
+/// `sstabledump` uses TWO writers, and the one it uses at a STRINGIFIED position
+/// (`writeString(type.getString(v))` — a partition-key component, a multicell
+/// set's element, a map key) spells a `blob` as the BARE hex, so the empty blob is
+/// `""` where the CSV egress renders `0x`. Reading the golden's text verbatim
+/// there synthesized `{}` for a sole empty-blob member, judged the node
+/// unrecoverable and REFUSED it — and a refused ONE-member node accepts any framed
+/// body at all, so the member went uncompared. [`stringified_csv_text`] performs
+/// exactly that translation, and its per-type census names what it does and does
+/// NOT translate.
 ///
+/// That is a bounded CONSTANT recorded here from reading `ValueFormatter`, not a
+/// call into it: nothing about the CLI's actual output reaches this decision at
+/// run time, and `tests::a_stringified_blob_renders_as_the_0x_form_the_csv_egress_emits`
+/// measures the constant against that formatter, so a CQLite regression that
+/// dropped the prefix reds a test instead of being silently followed here.
+///
+/// # The RESIDUAL that remains, NARROWED to what is still true
+///
+/// For every position the translation does not cover, the scalar's text is the
+/// GOLDEN's, and the two sides' spellings can still differ — the lane's declared
+/// narrowings (a timestamp's `T`-vs-space separator, a decimal's trailing zeros, a
+/// JSON integer beyond `f64`) are exactly those cases. Each is IMMATERIAL to the
+/// structural question, and stated in both directions because this is the one
+/// assumption the function still rests on:
+///
+/// * none of those spellings is ever EMPTY and none carries a `, `, a `: ` or a
+///   bracket on either side, so none can move a separator or the depth count.
+///   `blob` was the one that could — via emptiness — and it is translated;
 /// * if CQLite were to spell some scalar WITH a `, ` where the golden does not,
 ///   this says "recovered" and the node is compared — and the CLI's extra
 ///   separator then shows up as a member-count divergence rather than as a value
