@@ -1522,6 +1522,12 @@ while an exit status or a missing row is evidence of its own and the transcript 
 sites: 11 (+2 removals). Tests: `a_line_recorded_before_the_wait_started_is_matched_at_expiry` (the
 mark end) and `a_line_appended_after_the_decision_cannot_contradict_the_failure` (the render end).
 
+One site was fixed that no finding named: `wait_for`'s BLOCKING `Disconnected` branch declared
+`PipesClosed` without the final transcript look its expiry sibling takes. Every recorded line should
+already have been published and tested when `recv_timeout` reports a disconnect — but that is an
+ARGUMENT, and arguments about this interleaving have been wrong in rounds 10, 11 and 12. Both failure
+paths now take one snapshot, check it, and render it.
+
 `ChildIo::attach` now RETURNS the first mark, taken before either reader thread exists — the earliest
 point at which a mark can be taken at all, so stage (a)'s instance of this race is not expressible
 rather than merely avoided by convention.

@@ -458,11 +458,21 @@ impl ChildIo {
                 // Both readers ended: the child's pipes are closed and the
                 // buffer is drained, so no further line can ever arrive.
                 Err(RecvTimeoutError::Disconnected) => {
+                    // THE FINAL LOOK IS TAKEN HERE TOO, so the two failure paths
+                    // are symmetric. `Disconnected` means the queue was empty AND
+                    // every sender was gone, so every recorded line should already
+                    // have been published and tested above — but that is an
+                    // ARGUMENT, and the expiry path exists because arguments about
+                    // this interleaving have been wrong repeatedly in this change.
+                    // One snapshot is taken, checked, and then rendered by the
+                    // failure, which costs one memory read on a path about to panic.
+                    let snapshot = self.snapshot(mark);
+                    if let Some(line) = snapshot.window_on(want).find(|l| pred(l)) {
+                        return Ok((line.to_string(), stage.spent()));
+                    }
                     return Err(WaitEnd::PipesClosed {
                         after: stage.spent(),
-                        // Taken here for the same reason as at expiry: the message
-                        // must render the bytes this verdict was taken against.
-                        snapshot: self.snapshot(mark),
+                        snapshot,
                     });
                 }
             }
