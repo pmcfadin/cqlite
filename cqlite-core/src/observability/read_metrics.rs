@@ -368,13 +368,31 @@ impl ReadOpMeter {
         // The four read PHASES (issue #1707): ONE sample per phase per completed
         // operation, from the counters the pipeline threads accumulated into.
         //
-        // A phase with ZERO accumulated nanos is SKIPPED, not recorded as `0.0`, and
-        // that asymmetry with `read.duration` above is deliberate: a zero there means
-        // "measured, and it was fast", while a zero here means the phase NEVER RAN —
-        // an uncompressed SSTable decompresses nothing, a single-generation scan
-        // merges nothing. Recording `0.0` would assert a measurement that was never
-        // taken, and would drag every percentile of a real phase toward zero for
-        // every read that does not perform it.
+        // A phase is emitted iff it RAN — `phases.entered(phase)` — and NOT iff it
+        // accumulated nanos (issue #1707, roborev job 145). The two are different
+        // questions, and gating on the duration answered the wrong one: it reported
+        // "ran but measured zero" as "did not run".
+        //
+        // Absence carries load-bearing meaning here that it does not carry for
+        // `read.duration` above: no `decompress` series means the SSTable is
+        // UNCOMPRESSED, no `merge` series means a SINGLE GENERATION. Under the old
+        // `nanos > 0` gate a phase that genuinely ran and measured zero was
+        // indistinguishable from one that never ran, so the metric asserted the
+        // opposite of the truth.
+        //
+        // That is not hypothetical for MERGE. `timed_merge_excluding_recv_wait`
+        // saturates to 0 when the recv-wait it subtracts exceeds the step's wall
+        // time — documented, tested, and the honest thing to do — so a real
+        // multi-generation merge whose producer starved records 0 nanos and was
+        // skipped, telling the operator "single generation". The honesty mechanism
+        // manufactured the false statement.
+        //
+        // So `0.0` now MEANS something precise: the phase ran and measured zero
+        // (too fast for the clock, or a merge whose whole wall time was recv-wait).
+        // It is no longer "a measurement that was never taken", because entry is
+        // tracked separately from duration. Absence means exactly what the docs
+        // say — the phase DID NOT RUN — and a zero-valued sample is a real
+        // observation, not a fabrication.
         //
         // ATTRIBUTE-FREE, deliberately, and NOT `attrs`: this family is declared
         // "**Attributes**: none" by `catalog_read_phase` and carries an empty
@@ -404,8 +422,8 @@ impl ReadOpMeter {
             (ReadPhase::Decode, catalog::READ_PHASE_DECODE),
             (ReadPhase::Merge, catalog::READ_PHASE_MERGE),
         ] {
-            let nanos = acc.phases.nanos(phase);
-            if nanos > 0 {
+            if acc.phases.entered(phase) {
+                let nanos = acc.phases.nanos(phase);
                 obs::record_histogram(name, Duration::from_nanos(nanos).as_secs_f64(), phase_attrs);
             }
         }

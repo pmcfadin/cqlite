@@ -88,6 +88,22 @@
 //! at once. If you see `read.duration` rising with no phase breakdown, you are
 //! looking at one of them.
 //!
+//! # What ABSENCE and `0.0` each mean, and why they are tracked separately
+//!
+//! Within a MEASURED surface, absence of a phase series means the phase DID NOT RUN
+//! — that is the whole content of "no `decompress` means uncompressed", "no `merge`
+//! means a single generation". A `0.0` sample means something else: the phase RAN
+//! and measured zero.
+//!
+//! Those two are only distinguishable because [`ReadPhaseTimings`] tracks phase
+//! ENTRY separately from accumulated duration. Deriving absence from `nanos == 0`
+//! — which emission used to do — collapses them, and the collapse is not academic:
+//! [`timed_merge_excluding_recv_wait`] SATURATES to `0` whenever the recv-wait it
+//! subtracts exceeds the step's wall time, so a real multi-generation merge whose
+//! producers starved recorded `0`, was skipped, and told the operator "single
+//! generation" (issue #1707). The mechanism that exists to keep merge honest was
+//! manufacturing a false statement.
+//!
 //! ## Why they are not simply instrumented too (issue #1707)
 //!
 //! Their phase work sits BELOW `.await` points, on the async worker threads, reached
@@ -138,7 +154,7 @@
 //! the whole thing degenerates to that one branch.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -164,6 +180,20 @@ pub enum ReadPhase {
     Merge,
 }
 
+impl ReadPhase {
+    /// This phase's bit in [`ReadPhaseTimings::entered`]. Kept beside the enum so a
+    /// future fifth variant is a compile error here rather than a silently
+    /// unrepresented phase.
+    const fn bit(self) -> u32 {
+        match self {
+            ReadPhase::Io => 1 << 0,
+            ReadPhase::Decompress => 1 << 1,
+            ReadPhase::Decode => 1 << 2,
+            ReadPhase::Merge => 1 << 3,
+        }
+    }
+}
+
 /// Per-scan accumulator of read-phase wall time, in nanoseconds.
 ///
 /// Four `AtomicU64`s so the concurrent pipeline threads (IO feed, blocking parse,
@@ -177,6 +207,23 @@ pub struct ReadPhaseTimings {
     decompress_nanos: AtomicU64,
     decode_nanos: AtomicU64,
     merge_nanos: AtomicU64,
+    /// Bitmask of the phases that ACTUALLY RAN, tracked SEPARATELY from their
+    /// accumulated nanos (issue #1707, roborev job 145).
+    ///
+    /// Emission needs to distinguish "this phase never ran" from "this phase ran and
+    /// measured zero", and a duration cannot answer that: both are `0`. The docs
+    /// assign load-bearing meaning to ABSENCE — no `decompress` series means the
+    /// SSTable is uncompressed, no `merge` series means a single generation — so
+    /// deriving absence from `nanos == 0` makes a real phase that measured zero
+    /// report the opposite of the truth.
+    ///
+    /// That is not hypothetical for [`ReadPhase::Merge`]:
+    /// [`timed_merge_excluding_recv_wait`] deliberately SATURATES to `0` when the
+    /// recv-wait it subtracts exceeds the step's wall time, so a genuine
+    /// multi-generation merge whose producer starved records `0` — and would have
+    /// been reported to the operator as "single generation", a false statement
+    /// manufactured by the very mechanism that exists to keep the number honest.
+    entered: AtomicU32,
 }
 
 impl ReadPhaseTimings {
@@ -195,11 +242,27 @@ impl ReadPhaseTimings {
     /// (practically unreachable) `u64` nanosecond overflow: a wrap would turn a huge
     /// total into a tiny one, which reads as "this phase was fast".
     pub fn add_nanos(&self, phase: ReadPhase, nanos: u64) {
+        // Entry is marked HERE, in the one funnel every timing site already passes
+        // through — `timed`, `timed_merge_excluding_recv_wait` and
+        // `ReadPhaseTimer::drop` all end in this call, unconditionally, whatever
+        // elapsed. A separate `mark_entered` at each site would be a second thing to
+        // remember and a second thing to drift; reaching this function IS the
+        // evidence that a timed region for `phase` completed, including one that
+        // completed in zero measurable time.
+        self.entered.fetch_or(phase.bit(), Ordering::Relaxed);
         let _ = self
             .counter(phase)
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_add(nanos))
             });
+    }
+
+    /// Whether `phase` RAN during this scan — true even if it accumulated zero
+    /// nanoseconds (issue #1707). This, not `nanos(phase) > 0`, is what emission
+    /// gates on: see [`ReadPhaseTimings::entered`] for why the two are different
+    /// questions.
+    pub fn entered(&self, phase: ReadPhase) -> bool {
+        self.entered.load(Ordering::Relaxed) & phase.bit() != 0
     }
 
     /// Read `phase`'s accumulated nanoseconds (a snapshot).
@@ -341,6 +404,9 @@ pub fn timed<T>(phase: ReadPhase, f: impl FnOnce() -> T) -> T {
 ///
 /// Saturating: if a nested/foreign recv were somehow attributed a longer wait than
 /// this step's wall time, the phase gets 0 rather than a wrapped enormous value.
+/// That 0 is still an OBSERVATION and is emitted as a `0.0` sample, not swallowed:
+/// entry is recorded by the `add_nanos` call below independently of the value, so a
+/// merge that ran cannot be reported as a scan with no merge at all (#1707).
 ///
 /// Carries the EXACT cfg of its only call site, `generation_merge::
 /// stream_generations_for_read`, which needs BOTH conditions to exist:

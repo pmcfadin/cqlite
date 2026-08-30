@@ -189,6 +189,33 @@ jobs:
           run_lib_filter error_metric_tests
           run_lib_filter setup_error_metric_tests
 
+      # Read-PHASE emission semantics (issue #1707): a phase that RAN and measured
+      # zero must publish a 0.0 sample, and a phase that never ran must stay ABSENT.
+      # Library tests because `ReadOpMeter` is `pub(crate)` and the merge-saturation
+      # case cannot be provoked deterministically through the public read path — so
+      # like the two steps above, this is the ONLY place they execute.
+      - name: Read-phase emission semantics tests (library, issue #1707)
+        run: |
+          # Same fail-closed zero-match guard as the step above: a cargo test filter
+          # that matches nothing exits 0, so a rename would leave this step green
+          # forever while asserting nothing.
+          out=$(cargo test -p cqlite-core \
+            --features observability-testing,cli-helpers \
+            --lib observability::read_phase 2>&1)
+          printf '%s\n' "$out"
+          if printf '%s' "$out" | grep -q 'running 0 tests'; then
+            echo "::error::--lib filter 'observability::read_phase' matched NO tests: \
+          the module was renamed, un-declared, or configured out. A zero-match filter \
+          is a vacuous pass."
+            exit 1
+          fi
+          if ! printf '%s' "$out" | grep -q 'phase_emission_tests::'; then
+            echo "::error::the phase_emission_tests module did not run — it is gated on \
+          observability-testing and is the only coverage of the ran-but-measured-zero \
+          emission rule (#1707)."
+            exit 1
+          fi
+
       # Scan-path error counting end to end (issue #1704): the three disjoint scan
       # exit seams (`JoinedStream::recv`, `scan_delta`'s terminal send, the
       # materializing `SSTableReader::scan`) each count ONE

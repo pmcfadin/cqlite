@@ -26,13 +26,35 @@ fn timed_accumulates_into_the_installed_bucket_only() {
     });
     assert!(sink.nanos(ReadPhase::Decompress) > 0);
     for other in [ReadPhase::Io, ReadPhase::Decode, ReadPhase::Merge] {
-        assert_eq!(
-            sink.nanos(other),
-            0,
-            "an unentered phase stays zero, so an absent phase can be reported as \
-             ABSENT rather than as a fabricated 0.0 sample"
+        assert_eq!(sink.nanos(other), 0, "only the timed phase accumulates");
+        assert!(
+            !sink.entered(other),
+            "a phase no timed region ever covered must report NOT ENTERED, which is \
+             what lets emission report it as ABSENT"
         );
     }
+    assert!(sink.entered(ReadPhase::Decompress));
+}
+
+#[test]
+fn a_phase_that_ran_and_measured_zero_is_not_a_phase_that_never_ran() {
+    // The distinction emission depends on (issue #1707, roborev job 145): a duration
+    // alone cannot express it, because both cases are 0 nanos. Absence is documented
+    // to MEAN "did not run" — no decompress series means an uncompressed SSTable, no
+    // merge series means a single generation — so a phase that ran and measured zero
+    // must be reportable as a real zero, not as an absence that says the opposite.
+    let sink = ReadPhaseTimings::default();
+    sink.add_nanos(ReadPhase::Merge, 0);
+
+    assert_eq!(sink.nanos(ReadPhase::Merge), 0);
+    assert!(
+        sink.entered(ReadPhase::Merge),
+        "completing a timed region IS the evidence the phase ran, whatever it measured"
+    );
+    assert!(
+        !sink.entered(ReadPhase::Io),
+        "a phase nothing timed stays unentered — the two zeros are distinguishable"
+    );
 }
 
 #[test]
@@ -166,6 +188,15 @@ fn merge_timing_never_underflows_when_the_wait_exceeds_the_wall_time() {
         super::super::stream_subphase::add_pull_wait_nanos(u64::MAX);
     });
     assert_eq!(sink.nanos(ReadPhase::Merge), 0);
+    // ...and that saturated 0 is an OBSERVATION, not an absence. This is the exact
+    // case that used to be silently dropped: a real multi-generation merge whose
+    // producers starved recorded 0 nanos, was skipped by the `nanos > 0` emit gate,
+    // and told the operator "single generation" (issue #1707, roborev job 145).
+    assert!(
+        sink.entered(ReadPhase::Merge),
+        "a merge step whose recv-wait consumed its whole wall time still RAN; \
+         reporting it as absent states there was nothing to merge, which is false"
+    );
 }
 
 #[test]
@@ -184,4 +215,118 @@ fn an_unmetered_seam_never_builds_a_timer() {
         runs += 1; // the merge helper is configured out with its only call site
     }
     assert_eq!(runs, 2, "the closure runs on the unmetered fast path too");
+}
+
+/// Emission-level coverage: what the meter actually PUBLISHES for a phase that ran
+/// and measured zero (issue #1707, roborev job 145).
+///
+/// These live in the library's own test build because `ReadOpMeter` is `pub(crate)`
+/// — no integration test can construct one, and the case under test (a merge step
+/// whose recv-wait subtraction saturates to zero) cannot be provoked deterministically
+/// through the public read path. Gated on `observability-testing` because the
+/// assertions read the emitted series back through the in-memory capture; the
+/// `observability-gate` workflow runs them with a fail-closed zero-match filter, so
+/// a rename cannot turn them into a silently empty target.
+#[cfg(feature = "observability-testing")]
+mod phase_emission_tests {
+    use super::*;
+    use crate::observability::read_metrics::ReadOpMeter;
+    use crate::observability::{catalog, testing};
+
+    /// A phase that RAN and measured zero must publish a `0.0` sample, because
+    /// absence is documented to mean "did not run".
+    ///
+    /// The concrete case: `timed_merge_excluding_recv_wait` saturates to 0 when the
+    /// recv-wait it subtracts exceeds the step's wall time (see
+    /// `merge_timing_never_underflows_when_the_wait_exceeds_the_wall_time`). Under
+    /// the old `nanos > 0` emit gate that real multi-generation merge was SKIPPED,
+    /// and the operator doc reads a missing merge series as "single generation" — a
+    /// false statement manufactured by the honesty mechanism itself.
+    #[test]
+    #[serial_test::serial(read_metrics)]
+    fn a_phase_that_ran_and_measured_zero_is_published_as_a_zero_sample() {
+        let mc = testing::metrics_capture();
+        mc.reset();
+        {
+            let mut meter = ReadOpMeter::start(None);
+            let sink = meter
+                .phase_sink()
+                .expect("an installed capture makes the meter live, not inert");
+            // Byte-for-byte what the saturating merge helper records in that case.
+            sink.add_nanos(ReadPhase::Merge, 0);
+            meter.finish();
+        }
+        let metrics = mc.flush_and_collect();
+
+        let entry = metrics.find(catalog::READ_PHASE_MERGE).unwrap_or_else(|| {
+            panic!(
+                "a merge that RAN must publish a sample even when it measured zero — \
+                 skipping it tells the operator there was nothing to merge, which is \
+                 the opposite of the truth; collected: {:?}",
+                metrics
+                    .entries()
+                    .iter()
+                    .map(|m| m.name.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            entry
+                .points
+                .iter()
+                .map(|p| p.count.unwrap_or(0))
+                .sum::<u64>(),
+            1,
+            "exactly ONE sample, and its presence — not its value — is what proves \
+             the phase ran; points: {:?}",
+            entry.points
+        );
+        assert_eq!(
+            entry.points.iter().map(|p| p.value).sum::<f64>(),
+            0.0,
+            "and its value is an honest zero: the phase ran and measured zero; \
+             points: {:?}",
+            entry.points
+        );
+    }
+
+    /// The other half of the same contract: a phase NOTHING ever timed is still
+    /// ABSENT. Tracking entry must not turn every scan into four samples — that
+    /// would drag the percentiles of every real phase toward zero and destroy the
+    /// documented meaning of absence in the other direction.
+    #[test]
+    #[serial_test::serial(read_metrics)]
+    fn a_phase_that_never_ran_is_still_absent() {
+        let mc = testing::metrics_capture();
+        mc.reset();
+        {
+            let mut meter = ReadOpMeter::start(None);
+            let sink = meter.phase_sink().expect("live meter");
+            sink.add_nanos(ReadPhase::Decode, 5_000);
+            meter.finish();
+        }
+        let metrics = mc.flush_and_collect();
+
+        assert!(
+            metrics.contains(catalog::READ_PHASE_DECODE),
+            "the phase that ran is published; collected: {:?}",
+            metrics
+                .entries()
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        for absent in [
+            catalog::READ_PHASE_IO,
+            catalog::READ_PHASE_DECOMPRESS,
+            catalog::READ_PHASE_MERGE,
+        ] {
+            assert!(
+                !metrics.contains(absent),
+                "{absent} must be ABSENT — no timed region for it ever ran, and \
+                 absence is how an operator learns the SSTable was uncompressed / \
+                 the scan was single-generation"
+            );
+        }
+    }
 }

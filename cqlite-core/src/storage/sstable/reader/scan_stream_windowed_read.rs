@@ -163,10 +163,11 @@ impl SSTableReader {
         // roborev job 133). Every exit below — no `CompressionInfo`, past the last
         // chunk (EOF), the degenerate empty trailing chunk (#2225) — performs NO
         // read at all. Timing them would charge function-call and EOF-check time to
-        // `read.phase.io` and emit an io SAMPLE for a scan that read nothing, which
-        // is a FABRICATED measurement: the same defect this phase design legislates
-        // against (a phase that never ran emits no sample, because a 0.0 asserts a
-        // measurement that was never taken) pointing the other way.
+        // `read.phase.io` and emit an io SAMPLE for a scan that read nothing. The
+        // emitter treats a recorded phase as EVIDENCE THAT THE PHASE RAN (entry is
+        // tracked separately from duration, #1707), so constructing a timer here
+        // would state that this scan performed `Data.db` reads when it performed
+        // none — an absent io series is how a caller learns the opposite.
         let comp_info = match self.compression_info.as_ref() {
             Some(ci) => ci,
             // Callers gate on `compression_info.is_some()`; a None here is a bug.

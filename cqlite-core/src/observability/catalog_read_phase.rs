@@ -48,7 +48,8 @@
 ///
 /// **Coverage**: the windowed scan driver (the dominant `SELECT *` path). A read
 /// that never enters that driver (a point read, the BTI trie walk) records NO
-/// sample rather than a fabricated 0. **Attributes**: none.
+/// sample at all — absence means the phase DID NOT RUN. A `0.0` sample is a
+/// different statement: the phase ran and measured zero. **Attributes**: none.
 pub const READ_PHASE_IO: &str = "cqlite.read.phase.io";
 
 /// `cqlite.read.phase.decompress` — histogram `s` (issue #1707).
@@ -65,9 +66,11 @@ pub const READ_PHASE_IO: &str = "cqlite.read.phase.io";
 ///
 /// **ABSENT, never zero, for an UNCOMPRESSED SSTable** — CQLite's own write surface
 /// emits uncompressed SSTables (#1406) and those reads decompress NOTHING, so this
-/// series carries no sample at all for them. A `0.0` sample would assert that a
-/// measurement was taken and came back zero, which is a different (and false)
-/// claim. **Attributes**: none.
+/// series carries no sample at all for them. Absence and `0.0` are DIFFERENT
+/// statements and the emitter distinguishes them by tracking phase ENTRY separately
+/// from duration (#1707): absence means the phase did not run, while `0.0` means it
+/// ran and measured zero — decompression too fast for the clock, not the absence of
+/// decompression. **Attributes**: none.
 pub const READ_PHASE_DECOMPRESS: &str = "cqlite.read.phase.decompress";
 
 /// `cqlite.read.phase.decode` — histogram `s` (issue #1707).
@@ -97,6 +100,13 @@ pub const READ_PHASE_DECODE: &str = "cqlite.read.phase.decode";
 /// recorded only on the CROSS-GENERATION merge route (`stream_generations_for_read`).
 /// A single-generation scan performs no k-way merge, so it records NO sample —
 /// absence here means "there was nothing to merge", not "merge was free".
+///
+/// **A `0.0` sample means a merge DID run and measured zero**, which on this series
+/// has a specific and useful reading: the recv-wait subtraction consumed the whole
+/// step, i.e. the merge thread spent all its time waiting on starved producers. That
+/// case used to be reported as ABSENCE — "single generation" — which was a false
+/// statement produced by the subtraction that exists to keep the number honest
+/// (#1707). Entry is now tracked separately from duration, so the zero is emitted.
 ///
 /// **Healthy vs alarming**: grows with the number of overlapping generations and
 /// with reconcile work (tombstones, LWW collapse); a merge-dominated read with few
