@@ -21,7 +21,7 @@
 # convention was honour-system doctrine; this script is the one point every merge
 # passes through, so the convention becomes a mechanism here: a summary file
 # carrying a FULL-gate block with `RESULT: PASS`, `tree-integrity: PASS`, and
-# provenance (`commit:` + `tree-start:`) matching the certified sha is REQUIRED.
+# provenance (`commit:` + `tree-start:`) covering the certified sha is REQUIRED.
 #
 # TWO DISTINCT ESCAPES, ONE MECHANISM
 #   * #3408 — NO GATE AT ALL. That PR merged on 22 `--lite` PASSes and not one
@@ -41,15 +41,42 @@
 #     mechanical refusal at the merge point. The sha comparison is therefore not
 #     bookkeeping — it is the guard for the #3616 class.
 #
-# The gate-summary argument is deliberately REQUIRED, not optional: an optional
+# The gate-of-record argument is deliberately REQUIRED, not optional: an optional
 # argument would leave the honour system exactly where it is. Omitting it is a
 # usage failure (exit 3), which breaks pre-#3465 callers loudly and on purpose.
 #
+# TWO ACCEPTED SHAPES (#3465 review blocker): DIRECT, or ANCHORED DELTA
+# --------------------------------------------------------------------
+# CLAUDE.md's #1892 post-gate-polish rule MANDATES that a test/docs-only diff on
+# top of a full PASS at anchor `X` re-certifies with `scripts/agent-gate.sh
+# --delta X` and "never a repeat full gate", and that the PR record BOTH the
+# delta block AND the anchor's full SUMMARY. So the merged head `Y` legitimately
+# differs from the gate of record's `X`, and a guard that accepted only the
+# 3-argument shape red on correct, doctrine-mandated input — the guard agents
+# learn to waive. Hence the OPTIONAL fourth argument:
+#
+#   CASE A (3 args) — DIRECT. The full block's `commit:`/`tree-start:` must
+#     cover the certified sha. The gate of record ran on the merged tree itself.
+#   CASE B (4 args) — ANCHORED DELTA. The full block is the ANCHOR (its sha need
+#     NOT be the certified sha), and the fourth argument must be a `--delta`
+#     block that (i) is a PASS with an intact tree, (ii) names that exact anchor
+#     in `delta-anchor:`, and (iii) whose OWN `commit:`/`tree-start:` cover the
+#     certified sha. The chain is therefore closed end to end: full PASS at X →
+#     delta re-cert anchored at X → delta ran on Y → Y is the PR head.
+#
+# In BOTH cases a full-gate PASS must EXIST, and the merged tree is covered
+# either directly (A) or by an anchored delta re-cert on top of it (B). What is
+# never accepted is a delta or lite block ALONE — the #3408 escape.
+#
 # We parse gh with gh's built-in `--jq` (jq expression run inside gh), so gh's
 # JSON serialization is NOT load-bearing — we never read raw JSON with
-# sed/regex. The gate summary is parsed by whole-line-anchored marker matching
-# after ANSI stripping (#3400: colour survives redirection to a file, and the
-# gate's own mandated capture is coloured).
+# sed/regex. The gate summary is parsed by whole-line-anchored marker matching,
+# after an ANSI strip that is BELT rather than the load-bearing part: the summary
+# FILE's block lines are `echo`s of computed strings (scripts/agent-gate.sh
+# emit_summary), so they are not coloured; `CARGO_TERM_COLOR` colours cargo
+# output inside `gate.log`, not the block. The strip covers the case where the
+# block was recovered from a coloured CAPTURE rather than from the summary file
+# (#3400: colour survives redirection).
 #
 # TWO RESIDUALS, STATED RATHER THAN FAKED
 # ---------------------------------------
@@ -60,8 +87,8 @@
 #     precisely why the `commit:`/`tree-start:` binding carries the weight for the
 #     #3616 cross-lane class above: it is the only property of a peer's summary
 #     this script CAN falsify without having launched the run.
-#  2. This assert proves a summary EXISTS claiming a full-gate PASS at this sha
-#     with an intact tree. It cannot prove that summary was produced by a
+#  2. This assert proves a summary EXISTS claiming a full-gate PASS covering this
+#     sha with an intact tree. It cannot prove that summary was produced by a
 #     genuine gate run rather than hand-written. A HOSTILE INVOKER IS OUT OF THE
 #     THREAT MODEL — whoever runs this script controls the process and could
 #     edit the script, fake the file, or skip the script entirely; no check
@@ -69,9 +96,29 @@
 #     this guard defends is ACCIDENT AND DRIFT, which is the observed failure
 #     mode: a diligent worker with no step in its path telling it the gate of
 #     record was never run.
+#  3. THE CERTIFIED TREE IS NOT THE MERGED TREE (#3650). A squash-merge composes
+#     this diff with main's CURRENT tip, not with the base the branch was written
+#     against, so for any PR whose base is behind main the tree this script
+#     certifies and the tree that lands are DIFFERENT OBJECTS. Measured on
+#     #3358/PR #3362: base 2bde26a7c with main 10 commits ahead, whose head gate
+#     FAILed `core-tests` only because the fix for a known flake (5e08db201,
+#     #3514) was on main and absent from that base — the benign direction. The
+#     MALIGN direction is a PASS at a stale head hiding an interaction with
+#     something that landed in between: this assert would accept it, and the
+#     merge would compose two things never tested together. So this script
+#     proves FACT 1 — the diff is unchanged since certification and a full gate
+#     of record PASSed on that exact tree — and it explicitly does NOT prove
+#     FACT 2 — that the diff was certified against the main it will join. Fact 2
+#     is a gate on the MERGE RESULT and is filed as #3650; it is deliberately
+#     NOT implemented here, and neither is a staleness bound or a "your base is N
+#     commits behind" advisory. The success path SAYS so (`PREMERGE: SCOPE`),
+#     because an enforcement that certifies the wrong tree while CLAIMING to
+#     close #3465 would be the vacuous-pass shape one level up — worse than the
+#     gap it replaces, which is at least visible.
 #
 # USAGE
-#   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> <gate-summary-file>
+#   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
+#       <gate-of-record-summary> [<delta-summary>]
 #
 # ENVIRONMENT
 #   GH_REPO   the target repo (default: pmcfadin/cqlite). `gh` honors GH_REPO
@@ -79,10 +126,13 @@
 #
 # EXIT CODES
 #   0   gate of record verified + head matches + PR OPEN
-#       — prints "PREMERGE: OK <sha>" and "PREMERGE: GATE-OF-RECORD ..."
+#       — prints "PREMERGE: OK <sha>", "PREMERGE: SCOPE ..." (what was and was
+#         NOT proven, #3650) and "PREMERGE: GATE-OF-RECORD ..."
+#         (plus "PREMERGE: DELTA-RECERT ..." in Case B)
 #   2   no/invalid gate of record, OR head moved (mismatch), OR PR closed/merged
 #       — LOUD multi-line refusal
-#   3   gh/network/usage failure   — fail closed, never merge on uncertainty
+#   3   gh/network failure, a required TOOL failing, or a usage error
+#       — fail closed, never merge on uncertainty
 #
 # macOS bash 3.2 compatible, shellcheck-clean.
 set -euo pipefail
@@ -90,13 +140,18 @@ set -euo pipefail
 repo="${GH_REPO:-pmcfadin/cqlite}"
 
 usage() {
-  printf 'usage: %s <pr-number> <certified-sha> <gate-summary-file>\n' "$(basename "$0")" >&2
-  printf '       <gate-summary-file> is REQUIRED: the AGENT_GATE_SUMMARY_FILE of the\n' >&2
-  printf '       FULL gate of record (a "==== AGENT-GATE SUMMARY ====" block with\n' >&2
-  printf '       RESULT: PASS, tree-integrity: PASS, at the certified sha). See #3465.\n' >&2
+  printf 'usage: %s <pr-number> <certified-sha> <gate-of-record-summary> [<delta-summary>]\n' \
+    "$(basename "$0")" >&2
+  printf '       <gate-of-record-summary> is REQUIRED: the AGENT_GATE_SUMMARY_FILE of the\n' >&2
+  printf '       FULL gate (a "==== AGENT-GATE SUMMARY ====" block with RESULT: PASS and\n' >&2
+  printf '       tree-integrity: PASS). With 3 args it must be AT the certified sha.\n' >&2
+  printf '       <delta-summary> is OPTIONAL: an "==== AGENT-GATE DELTA SUMMARY ====" block\n' >&2
+  printf '       whose delta-anchor: is the full block above and whose own commit:/\n' >&2
+  printf '       tree-start: are AT the certified sha (the #1892 post-gate-polish route).\n' >&2
+  printf '       See #3465.\n' >&2
 }
 
-if [ "$#" -ne 3 ]; then
+if [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
   usage
   exit 3
 fi
@@ -104,8 +159,15 @@ fi
 pr="$1"
 certified="$2"
 summary_file="$3"
+delta_file="${4:-}"
 
 if [ -z "$pr" ] || [ -z "$certified" ] || [ -z "$summary_file" ]; then
+  usage
+  exit 3
+fi
+# An EMPTY fourth argument is a usage failure, not "3-arg mode": a caller whose
+# variable expanded to nothing must be told, never silently downgraded.
+if [ "$#" -eq 4 ] && [ -z "$delta_file" ]; then
   usage
   exit 3
 fi
@@ -137,6 +199,7 @@ refuse_no_gate() {
   printf '========================================================\n' >&2
   printf 'PREMERGE: NO-GATE-OF-RECORD — REFUSING TO MERGE\n' >&2
   printf '  summary file: %s\n' "$summary_file" >&2
+  [ -n "$delta_file" ] && printf '  delta summary file: %s\n' "$delta_file" >&2
   printf '  certified sha: %s\n' "$certified" >&2
   while [ "$#" -gt 0 ]; do
     printf '  %s\n' "$1" >&2
@@ -145,54 +208,93 @@ refuse_no_gate() {
   printf '  The FULL gate is the only run that counts (#719). Run it once,\n' >&2
   printf '  immediately pre-merge, with the mandated redirect:\n' >&2
   printf '    AGENT_GATE_SUMMARY_FILE=<path> bash scripts/agent-gate.sh > gate.log 2>&1\n' >&2
-  printf '  then pass <path> as the third argument. See #3465.\n' >&2
+  printf '  then pass <path> as the third argument.\n' >&2
+  printf '  If the ONLY diff since a full PASS at anchor X is test/docs-only, the\n' >&2
+  printf '  sanctioned route is the ANCHORED DELTA PAIR (#1892) — not a repeat full\n' >&2
+  printf '  gate: scripts/agent-gate.sh --delta X --anchor-run-id <id>, then pass BOTH\n' >&2
+  printf '  summaries: <anchor-full-summary> <delta-summary>. See #3465.\n' >&2
   printf '========================================================\n' >&2
   exit 2
 }
 
-if [ ! -f "$summary_file" ]; then
-  refuse_no_gate "The gate summary file does not exist (or is not a regular file)."
-fi
-if [ ! -r "$summary_file" ]; then
-  refuse_no_gate "The gate summary file exists but is not readable."
-fi
-if [ ! -s "$summary_file" ]; then
-  refuse_no_gate "The gate summary file is EMPTY — nothing was certified."
-fi
+# A required TOOL failing is NOT "no gate of record" and must NOT be answered
+# with "go run a 45-minute gate" (#3465 review nit 6). The header reserves exit 3
+# for tool/usage failure; route it there, naming the tool.
+refuse_tool_failure() {
+  printf '========================================================\n' >&2
+  printf 'PREMERGE: TOOL-FAILURE\n' >&2
+  printf '  %s failed while parsing %s.\n' "$1" "$2" >&2
+  printf '  This is a broken/absent tool on THIS box (missing, ENOMEM, bad PATH),\n' >&2
+  printf '  not a verdict about the gate of record. Fix the box and re-run this\n' >&2
+  printf '  assert — do NOT re-run the gate. Refusing to merge (fail closed).\n' >&2
+  printf '========================================================\n' >&2
+  exit 3
+}
+
+# assert_readable_summary <file> <what> — the three file-level preconditions.
+assert_readable_summary() {
+  if [ ! -f "$1" ]; then
+    refuse_no_gate "The $2 file does not exist (or is not a regular file)."
+  fi
+  if [ ! -r "$1" ]; then
+    refuse_no_gate "The $2 file exists but is not readable."
+  fi
+  if [ ! -s "$1" ]; then
+    refuse_no_gate "The $2 file is EMPTY — nothing was certified."
+  fi
+}
 
 # Parse the summary by REDIRECTION, never a pipe (#3400: a piped `while read`
 # runs in a subshell and its verdict is discarded). One awk pass:
-#   * strips ANSI escapes and a trailing CR before matching anything
-#   * counts blocks by WHOLE-LINE-EXACT marker equality, never substring —
-#     CLAUDE.md, issue threads and PR bodies quote these markers in prose, and
-#     "==== END AGENT-GATE SUMMARY ====" CONTAINS the start marker as a substring
-#   * also counts LITE/DELTA blocks purely so a refusal can NAME what it found
-#     (those headers are distinct by construction: scripts/agent-gate.sh)
+#   * strips ANSI escapes and a trailing CR before matching anything (belt — see
+#     the header: the summary file's own block lines are not coloured)
+#   * counts blocks by WHOLE-LINE-EXACT marker equality, never substring. That
+#     anchoring defends against (a) PROSE copies of a marker — indented,
+#     `>`-quoted, fenced, or mid-sentence — which CLAUDE.md, issue bodies, PR
+#     comments and the very doctrine files this change edits all contain, and
+#     (b) a TRUNCATED pattern such as `AGENT-GATE SUMMARY ====`, which matches
+#     ALL FOUR markers (full/lite start and end). Note the end marker does NOT
+#     contain the start marker as a substring — `END ` sits between `====` and
+#     `AGENT-GATE` — so substring matching would fail for the reasons above,
+#     not for that one.
+#   * counts all three block families so a refusal can NAME what it found
+#     (the headers are distinct by construction: scripts/agent-gate.sh)
 #   * emits key=value lines with per-key occurrence COUNTS, so a duplicated key
 #     inside one block is refusable rather than silently last-wins
-gate_parse=$(awk '
+# WANT selects which family is "the block": full (default) or delta.
+_gate_awk() {
+  awk -v WANT="$2" '
   BEGIN {
-    S = "==== AGENT-GATE SUMMARY ===="
-    E = "==== END AGENT-GATE SUMMARY ===="
-    LS = "==== AGENT-GATE LITE SUMMARY ===="
-    DS = "==== AGENT-GATE DELTA SUMMARY ===="
-    blocks = 0; lite = 0; delta = 0; open = 0; unterminated = 0
+    FULL_S  = "==== AGENT-GATE SUMMARY ===="
+    FULL_E  = "==== END AGENT-GATE SUMMARY ===="
+    LITE_S  = "==== AGENT-GATE LITE SUMMARY ===="
+    DELTA_S = "==== AGENT-GATE DELTA SUMMARY ===="
+    DELTA_E = "==== END AGENT-GATE DELTA SUMMARY ===="
+    if (WANT == "delta") { S = DELTA_S; E = DELTA_E } else { S = FULL_S; E = FULL_E }
+    blocks = 0; full = 0; lite = 0; delta = 0; open = 0; unterminated = 0
     n_result = 0; n_ti = 0; n_commit = 0; n_ts = 0; n_mode = 0
+    n_anchor = 0; n_nested = 0; anchor_unresolved = 0
     v_result = ""; v_ti = ""; v_commit = ""; v_ts = ""; v_dirty = ""
+    v_mode = ""; v_anchor = ""
   }
   {
     gsub(/\033\[[0-9;]*[a-zA-Z]/, "")
     sub(/\r$/, "")
   }
-  $0 == S { blocks++; if (open == 1) unterminated = 1; open = 1; next }
-  $0 == E { if (open == 1) open = 0; next }
-  $0 == LS { lite++; next }
-  $0 == DS { delta++; next }
+  $0 == FULL_S  { full++;  if (S == FULL_S)  { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
+  $0 == DELTA_S { delta++; if (S == DELTA_S) { blocks++; if (open == 1) unterminated = 1; open = 1 } next }
+  $0 == LITE_S  { lite++;  next }
+  $0 == E       { if (open == 1) open = 0; next }
   open == 1 {
-    if ($1 == "MODE:")           { n_mode++ }
-    else if ($1 == "RESULT:")    { n_result++; v_result = $2 }
-    else if ($1 == "tree-integrity:") { n_ti++; v_ti = $2 }
-    else if ($1 == "tree-start:") { n_ts++; v_ts = $2 }
+    if ($1 == "MODE:")                { n_mode++;   v_mode = $2 }
+    else if ($1 == "RESULT:")         { n_result++; v_result = $2 }
+    else if ($1 == "tree-integrity:") { n_ti++;     v_ti = $2 }
+    else if ($1 == "tree-start:")     { n_ts++;     v_ts = $2 }
+    else if ($1 == "nested-under:")   { n_nested++ }
+    else if ($1 == "delta-anchor:") {
+      n_anchor++; v_anchor = $2
+      for (i = 2; i <= NF; i++) if ($i == "(UNRESOLVED)") anchor_unresolved = 1
+    }
     else if ($1 == "commit:") {
       n_commit++; v_commit = $2
       for (i = 2; i < NF; i++) if ($i == "dirty:") v_dirty = $(i + 1)
@@ -202,6 +304,7 @@ gate_parse=$(awk '
   END {
     if (open == 1) unterminated = 1
     print "blocks=" blocks
+    print "full=" full
     print "lite=" lite
     print "delta=" delta
     print "unterminated=" unterminated
@@ -210,160 +313,308 @@ gate_parse=$(awk '
     print "n_ti=" n_ti
     print "n_commit=" n_commit
     print "n_ts=" n_ts
+    print "n_anchor=" n_anchor
+    print "n_nested=" n_nested
+    print "anchor_unresolved=" anchor_unresolved
     print "v_result=" v_result
     print "v_ti=" v_ti
     print "v_commit=" v_commit
     print "v_ts=" v_ts
     print "v_dirty=" v_dirty
+    print "v_mode=" v_mode
+    print "v_anchor=" v_anchor
   }
-' <"$summary_file") || refuse_no_gate "Could not parse the gate summary file (awk failed)."
+' <"$1"
+}
 
-blocks=""; lite=""; delta=""; unterminated=""
-n_mode=""; n_result=""; n_ti=""; n_commit=""; n_ts=""
-v_result=""; v_ti=""; v_commit=""; v_ts=""; v_dirty=""
-while IFS='=' read -r gp_k gp_v; do
-  case "$gp_k" in
-    blocks)       blocks="$gp_v" ;;
-    lite)         lite="$gp_v" ;;
-    delta)        delta="$gp_v" ;;
-    unterminated) unterminated="$gp_v" ;;
-    n_mode)       n_mode="$gp_v" ;;
-    n_result)     n_result="$gp_v" ;;
-    n_ti)         n_ti="$gp_v" ;;
-    n_commit)     n_commit="$gp_v" ;;
-    n_ts)         n_ts="$gp_v" ;;
-    v_result)     v_result="$gp_v" ;;
-    v_ti)         v_ti="$gp_v" ;;
-    v_commit)     v_commit="$gp_v" ;;
-    v_ts)         v_ts="$gp_v" ;;
-    v_dirty)      v_dirty="$gp_v" ;;
-  esac
-done <<GATE_PARSE
-$gate_parse
+# gate_parse_file <file> <want> <what> — run the parse and publish its fields as
+# GP_* globals (bash 3.2: no namerefs, no associative arrays). Every COUNT is
+# validated as a non-negative integer here, keyed on its AFFIRMATIVE value: an
+# unparseable/absent count is refused, never treated as "no problem found".
+gate_parse_file() {
+  local gp_out gp_k gp_v
+  gp_out=$(_gate_awk "$1" "$2") || refuse_tool_failure awk "$3"
+  GP_blocks=""; GP_full=""; GP_lite=""; GP_delta=""; GP_unterminated=""
+  GP_n_mode=""; GP_n_result=""; GP_n_ti=""; GP_n_commit=""; GP_n_ts=""
+  GP_n_anchor=""; GP_n_nested=""; GP_anchor_unresolved=""
+  GP_v_result=""; GP_v_ti=""; GP_v_commit=""; GP_v_ts=""; GP_v_dirty=""
+  GP_v_mode=""; GP_v_anchor=""
+  while IFS='=' read -r gp_k gp_v; do
+    case "$gp_k" in
+      blocks)       GP_blocks="$gp_v" ;;
+      full)         GP_full="$gp_v" ;;
+      lite)         GP_lite="$gp_v" ;;
+      delta)        GP_delta="$gp_v" ;;
+      unterminated) GP_unterminated="$gp_v" ;;
+      n_mode)       GP_n_mode="$gp_v" ;;
+      n_result)     GP_n_result="$gp_v" ;;
+      n_ti)         GP_n_ti="$gp_v" ;;
+      n_commit)     GP_n_commit="$gp_v" ;;
+      n_ts)         GP_n_ts="$gp_v" ;;
+      n_anchor)     GP_n_anchor="$gp_v" ;;
+      n_nested)     GP_n_nested="$gp_v" ;;
+      anchor_unresolved) GP_anchor_unresolved="$gp_v" ;;
+      v_result)     GP_v_result="$gp_v" ;;
+      v_ti)         GP_v_ti="$gp_v" ;;
+      v_commit)     GP_v_commit="$gp_v" ;;
+      v_ts)         GP_v_ts="$gp_v" ;;
+      v_dirty)      GP_v_dirty="$gp_v" ;;
+      v_mode)       GP_v_mode="$gp_v" ;;
+      v_anchor)     GP_v_anchor="$gp_v" ;;
+    esac
+  done <<GATE_PARSE
+$gp_out
 GATE_PARSE
+  for gp_k in blocks full lite delta unterminated n_mode n_result n_ti n_commit \
+              n_ts n_anchor n_nested anchor_unresolved; do
+    eval "gp_v=\${GP_$gp_k}"
+    case "$gp_v" in
+      ''|*[!0-9]*)
+        refuse_no_gate "Gate summary parse produced no usable '$gp_k' count for the $3 — refusing (fail closed)."
+        ;;
+    esac
+  done
+}
 
-gp_k=""; gp_v=""
-# Every field is keyed on its AFFIRMATIVE value: an unparseable/absent count is
-# refused, never treated as "no problem found".
-for gp_k in blocks lite delta unterminated n_mode n_result n_ti n_commit n_ts; do
-  eval "gp_v=\${$gp_k}"
-  case "$gp_v" in
-    ''|*[!0-9]*)
-      refuse_no_gate "Gate summary parse produced no usable '$gp_k' count — refusing (fail closed)."
+# assert_single_key <count> <label> <what>: the key must appear EXACTLY once.
+# Zero certifies nothing; more than one is ambiguous and a "last one wins" rule
+# would let a doctored line override the real verdict. Asserted per key,
+# immediately before that key is USED, so the diagnostic names the first thing
+# that is wrong — e.g. the #3041 launch sentinel (a FULL-header block carrying
+# `tree-start:` and `RESULT: INCOMPLETE`, with no `tree-integrity:`/`commit:`
+# yet) is reported as the INCOMPLETE verdict it is, not as a missing
+# tree-integrity line.
+assert_single_key() {
+  if [ "$1" -eq 0 ]; then
+    refuse_no_gate "The $3 has no '$2:' line — it cannot certify anything."
+  fi
+  if [ "$1" -gt 1 ]; then
+    refuse_no_gate "The $3 has $1 '$2:' lines — AMBIGUOUS, refusing."
+  fi
+}
+
+# assert_hex_abbrev <label> <value> <what>: the value must be a lowercase-hex
+# abbreviation of SOME sha. A non-hex value ("(not captured)", "(capture
+# unavailable — no git worktree)", "selftest", "unverified") REFUSES — it is
+# never skipped.
+assert_hex_abbrev() {
+  local n
+  case "$2" in
+    ''|*[!0-9a-f]*)
+      refuse_no_gate \
+        "'$1:' value '$2' in the $3 is not lowercase hex — nothing verifiable was recorded." \
+        "The gate writes a non-hex placeholder when its capture failed or there was no" \
+        "git worktree; such a run proves nothing about which tree it executed against."
       ;;
   esac
-done
+  n=${#2}
+  # FLOOR 7, not 4 (#3465 review nit 5): 7 is the NARROWEST abbreviation the gate
+  # ever emits (`commit:` is `printf '%.7s'`; `tree-start:` is `%.12s`), and a
+  # 4-hex value accepted at its own width is a 1-in-65536 accidental cross-lane
+  # match — precisely the #3616 class this compare exists to refuse. Accepting a
+  # width the gate cannot produce buys nothing and weakens the binding.
+  if [ "$n" -lt 7 ] || [ "$n" -gt 40 ]; then
+    refuse_no_gate \
+      "'$1:' value '$2' in the $3 is $n hex chars — outside the 7..40 range." \
+      "The gate emits 7 (commit:) and 12 (tree-start:) hex; a narrower value cannot" \
+      "bind a run to a tree (a 4-hex 'match' is 1-in-65536 by accident)."
+  fi
+}
 
-if [ "$unterminated" != 0 ]; then
-  refuse_no_gate \
-    "An AGENT-GATE SUMMARY block is UNTERMINATED (no exact '==== END AGENT-GATE SUMMARY ====')." \
-    "A truncated summary certifies nothing — the gate may still be running or have died."
-fi
+# assert_covers <label> <value> <full-40-sha> <what> <subject>: the abbreviation
+# must be a prefix of the full sha AT ITS OWN EXACT WIDTH.
+#
+# `commit:` carries a 7-char abbreviation and `tree-start:` a 12-char one (both
+# `printf '%.Ns'` of the same VERIFIED capture in scripts/agent-gate.sh), so
+# "matches the certified sha" cannot be string equality against the 40-hex sha.
+# Compare each value at ITS OWN width, using the value's own length — never a
+# glob, never `case $x in $y*)`, never a fixed assumed width. BOTH must match:
+# two independent widths off one verified capture is materially stronger than one
+# 7-hex compare — and this pair is what refuses the #3616 cross-lane class (a
+# peer lane's perfectly valid summary, recovered by recency, naming a DIFFERENT
+# PR's head).
+assert_covers() {
+  local label="$1" val="$2" full="$3" what="$4" subject="$5" n
+  assert_hex_abbrev "$label" "$val" "$what"
+  n=${#val}
+  if [ "${full:0:n}" != "$val" ]; then
+    refuse_no_gate \
+      "'$label:' value '$val' in the $what does not match the $subject at $n chars." \
+      "$subject: $full" \
+      "That run executed against a DIFFERENT tree than the one it must cover." \
+      "If the only diff since the gate's anchor is test/docs-only, the route is the" \
+      "ANCHORED DELTA PAIR below — a fourth argument, not a repeat full gate."
+  fi
+}
 
-if [ "$blocks" -eq 0 ]; then
+# assert_pass_block <what>: the verdict half every accepted block must satisfy —
+# terminated, RESULT: PASS, tree-integrity: PASS, and not a nested sub-gate.
+assert_pass_block() {
+  local what="$1"
+  if [ "$GP_unterminated" != 0 ]; then
+    refuse_no_gate \
+      "A block in the $what is UNTERMINATED (no exact end marker)." \
+      "A truncated summary certifies nothing — the gate may still be running or have died."
+  fi
+
+  assert_single_key "$GP_n_result" RESULT "$what"
+  # Verdict TOKENS are compared EXACTLY, never by prefix (#3229): a `PASS*` glob
+  # accepts `PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN`, i.e. it would
+  # check a SPELLING rather than a STATE. awk already gave us the first
+  # whitespace-delimited token after the key, so this is a token-exact compare.
+  if [ "$GP_v_result" != PASS ]; then
+    refuse_no_gate \
+      "RESULT verdict token in the $what is '$GP_v_result', not PASS." \
+      "INCOMPLETE is the launch-time liveness SENTINEL, not a verdict (#3041): it is" \
+      "written when the gate starts (before the slot is even granted) and overwritten" \
+      "only at the terminal emit. Such a summary means still running, queued, or died." \
+      "PARTIAL is an --only run, which does NOT count as the gate."
+  fi
+
+  assert_single_key "$GP_n_ti" tree-integrity "$what"
+  if [ "$GP_v_ti" != PASS ]; then
+    refuse_no_gate \
+      "tree-integrity verdict token in the $what is '$GP_v_ti', not PASS." \
+      "A run whose worktree mutated mid-run cannot certify (#2926); PENDING means the" \
+      "run never reached its terminal emit, and SKIP means the check never ran."
+  fi
+
+  # A NESTED sub-gate (#2874: launched by an enclosing gate, stamped
+  # `nested-under: <parent-run-id>`) emits the SAME markers at the SAME tree, so
+  # the sha binding provably cannot distinguish it from the real thing — this
+  # one affirmative line closes the only wrong-file class the sha compare cannot
+  # see. A self-test/sub-gate verdict is about the gate's own machinery, never
+  # about this PR.
+  if [ "$GP_n_nested" -ne 0 ]; then
+    refuse_no_gate \
+      "The $what carries a 'nested-under:' line — it is a NESTED sub-gate (#2874)." \
+      "A sub-gate spawned by an enclosing gate runs at the SAME tree, so the sha" \
+      "binding cannot tell it apart; it certifies the gate's machinery, not this PR."
+  fi
+}
+
+# --- the FULL gate of record (arg 3) -----------------------------------------
+assert_readable_summary "$summary_file" "gate summary"
+gate_parse_file "$summary_file" full "gate summary"
+
+if [ "$GP_blocks" -eq 0 ]; then
   refuse_no_gate \
-    "The file contains ZERO full-gate blocks (found $lite lite, $delta delta)." \
-    "--lite and --delta emit DISTINCT headers and are NOT the gate of record:" \
-    "  --lite  is fast iteration; --delta re-certifies a post-full-PASS polish round." \
+    "The file contains ZERO full-gate blocks (found $GP_lite lite, $GP_delta delta)." \
+    "--lite and --delta emit DISTINCT headers; NEITHER is the gate of record:" \
+    "  --lite  is fast iteration and is never acceptable here." \
+    "  --delta re-certifies a post-full-PASS test/docs-only round — pass the ANCHOR's" \
+    "          FULL summary as argument 3 and the delta summary as argument 4." \
     "This is the #3408 failure exactly: many lite PASSes, no full gate."
 fi
 
-if [ "$blocks" -gt 1 ]; then
+if [ "$GP_blocks" -gt 1 ]; then
   refuse_no_gate \
-    "The file contains $blocks full-gate blocks — AMBIGUOUS." \
+    "The file contains $GP_blocks full-gate blocks — AMBIGUOUS." \
     "Refusing rather than picking one (a 'take the last block' rule would let a" \
     "stale or foreign run certify this merge). Point at ONE run's summary file."
 fi
 
 # Belt for the header separation above: the FULL gate emits NO `MODE:` line;
-# --lite and --delta each emit one naming themselves.
-if [ "$n_mode" -ne 0 ]; then
+# --lite and --delta each emit one naming themselves. (An `--only` run emits the
+# FULL markers with a LOWERCASE `mode: PARTIAL (--only …)` line, which this
+# case-sensitive check deliberately does NOT catch — that run is refused by the
+# `RESULT: PARTIAL` compare above, which is the property that matters.)
+if [ "$GP_n_mode" -ne 0 ]; then
   refuse_no_gate \
     "The full-gate block carries a MODE: line — the FULL gate emits none." \
     "This block was produced by (or doctored from) a lite/delta run."
 fi
 
-# assert_single_key <count> <label>: the key must appear EXACTLY once. Zero
-# certifies nothing; more than one is ambiguous and a "last one wins" rule would
-# let a doctored line override the real verdict. Asserted per key, immediately
-# before that key is USED, so the diagnostic names the first thing that is wrong
-# — e.g. the #3041 launch sentinel (a FULL-header block carrying `tree-start:` and
-# `RESULT: INCOMPLETE`, with no `tree-integrity:`/`commit:` yet) is reported as
-# the INCOMPLETE verdict it is, not as a missing tree-integrity line.
-assert_single_key() {
-  if [ "$1" -eq 0 ]; then
-    refuse_no_gate "The full-gate block has no '$2:' line — it cannot certify anything."
+assert_pass_block "full-gate block"
+
+assert_single_key "$GP_n_commit" commit "full-gate block"
+assert_single_key "$GP_n_ts" tree-start "full-gate block"
+full_commit="$GP_v_commit"
+full_ts="$GP_v_ts"
+full_dirty="$GP_v_dirty"
+
+if [ -z "$delta_file" ]; then
+  # CASE A — DIRECT: the gate of record ran on the merged tree itself.
+  assert_covers commit "$full_commit" "$certified" "full-gate block" "certified sha"
+  assert_covers tree-start "$full_ts" "$certified" "full-gate block" "certified sha"
+else
+  # CASE B — ANCHORED DELTA (#1892). The full block is the ANCHOR: its sha need
+  # not be the certified sha, but it must still be a real, verifiable sha, and
+  # the delta block must name exactly it.
+  assert_hex_abbrev commit "$full_commit" "full-gate block"
+  assert_hex_abbrev tree-start "$full_ts" "full-gate block"
+
+  assert_readable_summary "$delta_file" "delta summary"
+  gate_parse_file "$delta_file" delta "delta summary"
+
+  if [ "$GP_blocks" -eq 0 ]; then
+    refuse_no_gate \
+      "The fourth argument holds ZERO delta blocks (found $GP_full full, $GP_lite lite)." \
+      "It must be the AGENT_GATE_SUMMARY_FILE of a 'scripts/agent-gate.sh --delta' run" \
+      "('==== AGENT-GATE DELTA SUMMARY ====' — a DISTINCT header, by construction)."
   fi
-  if [ "$1" -gt 1 ]; then
-    refuse_no_gate "The full-gate block has $1 '$2:' lines — AMBIGUOUS, refusing."
+  if [ "$GP_blocks" -gt 1 ]; then
+    refuse_no_gate \
+      "The fourth argument holds $GP_blocks delta blocks — AMBIGUOUS." \
+      "Point at ONE run's summary file; picking one would let a stale run re-certify."
   fi
-}
 
-assert_single_key "$n_result" RESULT
-# Verdict TOKENS are compared EXACTLY, never by prefix (#3229): a `PASS*` glob
-# accepts `PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN`, i.e. it would
-# check a SPELLING rather than a STATE. awk already gave us the first
-# whitespace-delimited token after the key, so this is a token-exact compare.
-if [ "$v_result" != PASS ]; then
-  refuse_no_gate \
-    "RESULT verdict token is '$v_result', not PASS." \
-    "INCOMPLETE is the launch-time liveness SENTINEL, not a verdict (#3041): it is" \
-    "written when the gate starts (before the slot is even granted) and overwritten" \
-    "only at the terminal emit. Such a summary means still running, queued, or died."
-fi
+  # The INVERSE of the full block's belt: here a `MODE: delta` line is REQUIRED
+  # and asserted AFFIRMATIVELY. A delta block always carries it
+  # (scripts/agent-gate.sh SUMMARY_MODE_LINE), so its absence means the block was
+  # doctored or is not what its header claims.
+  assert_single_key "$GP_n_mode" MODE "delta block"
+  if [ "$GP_v_mode" != delta ]; then
+    refuse_no_gate \
+      "The delta block's MODE token is '$GP_v_mode', not 'delta'." \
+      "A --delta run stamps 'MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION …)'; anything" \
+      "else is a different mode wearing the delta header."
+  fi
 
-assert_single_key "$n_ti" tree-integrity
-if [ "$v_ti" != PASS ]; then
-  refuse_no_gate \
-    "tree-integrity verdict token is '$v_ti', not PASS." \
-    "A run whose worktree mutated mid-run cannot certify (#2926); PENDING means the" \
-    "run never reached its terminal emit, and SKIP means the check never ran."
-fi
+  assert_pass_block "delta block"
 
-# The sha comparison. `commit:` carries a 7-char abbreviation and `tree-start:` a
-# 12-char one (both `printf '%.Ns'` of the same VERIFIED capture in
-# scripts/agent-gate.sh), so "matches the certified sha" cannot be string
-# equality against the 40-hex certified sha. Compare each value at ITS OWN exact
-# width, using the value's own length — never a glob, never `case $x in $y*)`,
-# never a fixed assumed width. BOTH must match: two independent widths off one
-# verified capture is materially stronger than one 7-hex compare — and this pair
-# is what refuses the #3616 cross-lane class (a peer lane's perfectly valid
-# summary, recovered by recency, naming a DIFFERENT PR's head). A non-hex value
-# ("(not captured)", "(capture unavailable — no git worktree)", "selftest",
-# "unverified") REFUSES — it is never skipped.
-assert_sha_prefix() {
-  # $1 = label, $2 = value from the summary
-  local label="$1" val="$2" n
-  case "$val" in
+  # delta-anchor: must name the FULL block above. The gate emits
+  # 'delta-anchor: <40-hex> (full-gate PASS commit)' from `git rev-parse
+  # --verify`, and 'delta-anchor: <ref> (UNRESOLVED)' on the ERROR path — the
+  # latter MUST refuse (it certifies nothing about any tree).
+  assert_single_key "$GP_n_anchor" delta-anchor "delta block"
+  if [ "$GP_anchor_unresolved" -ne 0 ]; then
+    refuse_no_gate \
+      "The delta block's 'delta-anchor:' is (UNRESOLVED) — the anchor did not resolve" \
+      "to a commit, so that run re-certified nothing against the gate of record."
+  fi
+  case "$GP_v_anchor" in
     ''|*[!0-9a-f]*)
       refuse_no_gate \
-        "'$label:' value '$val' is not lowercase hex — nothing verifiable was recorded." \
-        "The gate writes a non-hex placeholder when its capture failed or there was no" \
-        "git worktree; such a run proves nothing about which tree it executed against."
+        "The delta block's 'delta-anchor:' value '$GP_v_anchor' is not lowercase hex."
       ;;
   esac
-  n=${#val}
-  if [ "$n" -lt 4 ] || [ "$n" -gt 40 ]; then
-    refuse_no_gate "'$label:' value '$val' is $n hex chars — outside the 4..40 range."
-  fi
-  if [ "${certified:0:n}" != "$val" ]; then
+  if [ "${#GP_v_anchor}" -ne 40 ]; then
     refuse_no_gate \
-      "'$label:' value '$val' does not match the certified sha at $n chars." \
-      "certified: $certified" \
-      "The gate of record ran against a DIFFERENT tree than the one being merged."
+      "The delta block's 'delta-anchor:' value '$GP_v_anchor' is ${#GP_v_anchor} hex chars," \
+      "not the full 40 the gate resolves it to (git rev-parse --verify of the anchor)."
   fi
-}
+  delta_anchor="$GP_v_anchor"
+  # Both of the anchor block's independent widths must prefix that anchor sha.
+  assert_covers commit "$full_commit" "$delta_anchor" "full-gate block" "delta block's anchor sha"
+  assert_covers tree-start "$full_ts" "$delta_anchor" "full-gate block" "delta block's anchor sha"
 
-assert_single_key "$n_commit" commit
-assert_sha_prefix commit "$v_commit"
-assert_single_key "$n_ts" tree-start
-assert_sha_prefix tree-start "$v_ts"
+  # ...and the delta run's OWN provenance must cover the tree being merged.
+  assert_single_key "$GP_n_commit" commit "delta block"
+  assert_single_key "$GP_n_ts" tree-start "delta block"
+  assert_covers commit "$GP_v_commit" "$certified" "delta block" "certified sha"
+  assert_covers tree-start "$GP_v_ts" "$certified" "delta block" "certified sha"
+  delta_commit="$GP_v_commit"
+  delta_ts="$GP_v_ts"
+  delta_dirty="$GP_v_dirty"
+  [ -n "$delta_dirty" ] || delta_dirty=unknown
+fi
 
 # `dirty:` is REPORTED, not enforced — DELIBERATELY. Failing on `dirty: yes` is
-# not in the owner's ruling on #3465 and is not absorbed into this change; a
-# follow-up issue will propose it. This is a decision, not an oversight: print it
-# so a dirty gate of record is VISIBLE at the merge point.
-[ -n "$v_dirty" ] || v_dirty=unknown
+# not in the owner's ruling on #3465 and is not absorbed into this change; it is
+# proposed separately in #3648. This is a decision, not an oversight: print it so
+# a dirty gate of record is VISIBLE at the merge point.
+[ -n "$full_dirty" ] || full_dirty=unknown
 
 # ---------------------------------------------------------------------------
 # PR HEAD + STATE (#2456)
@@ -418,6 +669,16 @@ if [ "$actual" != "$certified" ]; then
 fi
 
 printf 'PREMERGE: OK %s\n' "$certified"
+# Scope clause (#3650) — printed on EVERY success so `GATE-OF-RECORD` can never be
+# read as "certified against main". See residual 3 in the header.
+printf 'PREMERGE: SCOPE this proves a full gate PASSed on THIS tree (%s); it does NOT prove\n' \
+  "$certified"
+printf 'PREMERGE: SCOPE the tree was certified against current main (#3650) — a squash-merge\n'
+printf 'PREMERGE: SCOPE composes this diff with main tip, which no gate here has executed.\n'
 printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
-  "$v_commit" "$v_ts" "$v_dirty" "$summary_file"
+  "$full_commit" "$full_ts" "$full_dirty" "$summary_file"
+if [ -n "$delta_file" ]; then
+  printf 'PREMERGE: DELTA-RECERT anchor: %s commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
+    "$delta_anchor" "$delta_commit" "$delta_ts" "$delta_dirty" "$delta_file"
+fi
 exit 0
