@@ -468,6 +468,22 @@
 #                      through `ws0_driver_run` leaves the recording file EMPTY and the
 #                      priors UNCHANGED. Hermetic everywhere; a check-count floor closes
 #                      the suite-level 0/0.
+#                      Also runs scripts/tests/test_ws0_embedded_steps_execute.sh (#3451)
+#                      — the EXECUTE direction of the driver's own embedded python. Every
+#                      suite above stops at `--validate-args-only`, and the accept cases
+#                      deliberately execute NOTHING, so the two multi-line `python3 -c`
+#                      steps BELOW that boundary (the session-corpus-pin and the CPU-pin
+#                      verification, both fatal-on-failure) had no coverage that RAN them:
+#                      they shipped for months with an f-string spelling no CPython parses,
+#                      invisible because the python is not a `.py` file and `bash -n` sees
+#                      one opaque single-quoted string. This EXTRACTS each block from the
+#                      shipped driver (never a copy — a copy stays green while the step is
+#                      broken) and RUNS it over a few-KB fixture corpus, asserting the
+#                      artifact, the pin lines and the SHIPPED reader accepting them, plus
+#                      the total property that EVERY embedded block compiles. Each accept
+#                      is paired with a control OBSERVED to fire on a scratch copy carrying
+#                      the injected defect. Hermetic: python3 + $TMPDIR; the driver is
+#                      READ, never invoked.
 #                      Also runs `cargo test -p ws0-corpus-gen` (#3272 items 8-9) — a
 #                      tools/* package NO other component and no CI lane compiles, so
 #                      without this hook the corpus determinism oracle would be a test
@@ -9278,6 +9294,67 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_primary_path_admits_a_legitimate_run.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 primary-path ACCEPT-direction guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 EMBEDDED-STEP EXECUTE DIRECTION (#3451). The complement of every suite above in a
+  # different axis from the accept/reject one: those suites all stop at `--validate-args-only`,
+  # and #3272 round 2 finding 14 deliberately made the accept cases execute NOTHING (running the
+  # real driver invoked `sudo sysctl` and three cargo builds inside this component). Correct, and
+  # it left the driver's TWO multi-line embedded python blocks — the session-corpus-pin step and
+  # the CPU-pin-verification step, both BELOW that boundary and both `|| exit 2` — with no
+  # coverage that EXECUTES them. They shipped for months carrying SEVEN instances of a backslash
+  # inside an f-string EXPRESSION, which no CPython parses, so the whole WS0 measurement path was
+  # unrunnable end to end on main. Nothing saw it: the python is not a `.py` file so no linter or
+  # import reads it, and `bash -n` parses the driver as SHELL, where the body is one opaque
+  # single-quoted string. What this asserts: both steps RUN on a few-KB fixture corpus with the
+  # argv and environment the driver gives them — exit 0, the artifact written, every pin line
+  # printed, and the SHIPPED reader (`verify_session_corpus_pin`/`verify_pinning_record`)
+  # accepting what the step wrote; the `WS0_CFG_*` names are DERIVED from the shipped
+  # `MANIFEST_CONFIG_FIELDS` and asserted equal to it, three ways — the names the DRIVER EXPORTS
+  # (from its bash source), the shipped field list (by import) and this suite's environment must
+  # all agree, because executing the blocks alone cannot see a RENAMED EXPORT: the python is
+  # untouched, everything stays green, and the real rig hits the step's own `FATAL: … was not
+  # exported` and exits 2 — #3451's exact symptom again; EVERY embedded block in the driver COMPILES,
+  # so instance #8 anywhere in that file is caught and not only the two repaired steps. That compile
+  # check speaks for THE INTERPRETER RUNNING IT and claims nothing about cross-interpreter
+  # portability; the suite's NOT-REACHED list records the one regression that therefore escapes it
+  # and names a real 3.9/3.11 CI compile as the only honest oracle. A tokenizer model of that
+  # regression lived here for two review rounds and was REMOVED (#3451 round 4) after being wrong
+  # twice, the second time flagging legal code — a second implementation of CPython's tokenizer is
+  # correct only insofar as it is differentially tested against an original this box does not have.
+  # What survives is the oracle that is real: no CPython accepts the backslash form, so the defect
+  # this issue is about is caught on 3.9 through 3.12 alike.
+  # The block text is EXTRACTED from the shipped driver on every run (`ws0_embedded_python.py`,
+  # which discovers candidates on TWO anchors — any word whose basename is python/python3, and the
+  # `-c` FLAG itself so an indirectly-spelled command word like `$PYTHON -c` is still found — both
+  # discovered AND classified over the LOGICAL-LINE reconstruction (bodies excepted, since inside
+  # single quotes a backslash is literal), so a continuation neither hides an anchor nor turns an
+  # ordinary invocation into a refusal — and
+  # then ALLOWLISTS exactly the shapes this driver uses, making everything else a FINDING) rather
+  # than copied,
+  # because a copy stays green while the shipped step is broken — the exact state #3451 found. The
+  # delimiter is bash's own quoting rule, not a line pattern, and is asserted in BOTH directions:
+  # a column-0-closer-only rule was MEASURED finding 31 blocks tree-wide where the correct rule
+  # finds 59 (a loose delimiter under-COUNTS subjects, the vacuous-green shape) while a
+  # next-quote rule manufactures a false SyntaxError on `lib-ws0-fixtures.sh`, which uses the
+  # literal-apostrophe idiom — and a key that reds on correct input is the key agents learn to
+  # waive. Both are controls in the suite.
+  # Every accept is paired with a positive control OBSERVED to fire against a scratch copy of the
+  # driver under $TMPDIR carrying the injected defect, which is this issue's own lesson: a `grep -c`
+  # for the bad spelling returned 0 against a file holding all seven instances, and a check that
+  # cannot fire looks identical to one that fired and found nothing. Hermetic: python3 and a few KB
+  # under $TMPDIR; the driver is READ, never invoked — no sudo, cargo, perf, taskset, corpus,
+  # network or root.
+  echo ">>> [$name] bash scripts/tests/test_ws0_embedded_steps_execute.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_embedded_steps_execute.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 embedded-step EXECUTE-direction coverage); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
