@@ -44,17 +44,37 @@
 #
 # Usage:
 #   bash test-data/scripts/generate-nested-udt-keys.sh [--out <dir>] [--dry-run]
+#   bash test-data/scripts/generate-nested-udt-keys.sh --verify-only [--out <dir>]
+#
+# `--verify-only` runs ONLY the outcome-based post-condition
+# (verify_generated_artifacts) against an ALREADY-generated fixture tree and
+# exits. It starts no container and needs no engine, so the post-condition can be
+# exercised — including RED-verified against a deliberately damaged copy of the
+# tree — without a 5-minute Cassandra run.
 #
 # Prerequisites: Docker (or podman) in PATH; ~4 GB RAM for the container.
+# (`--verify-only` and `--dry-run` need neither.)
 #
 # ============================================================================
-# MANDATORY: committing the .db binaries
+# MANDATORY: committing the fixture
 #
-# The *.db binary files produced by this script are gitignored (`*.db` is
-# ignored globally) and will NOT be included by a bare `git add`. They MUST be
-# force-added with `git add -f`, otherwise the committed JSONL/Digest sidecars
-# point at a Data.db that is not in the tree and every consumer of the fixture
-# silently reads ZERO rows. The script prints the exact commands at exit.
+# TWO independent traps, both of which have bitten this fixture:
+#
+#  1. The *.db binaries are gitignored (`*.db` is ignored globally) and will NOT
+#     be included by a bare `git add`. Without `-f`, the committed
+#     JSONL/Digest sidecars point at a Data.db that is not in the tree and every
+#     consumer of the fixture silently reads ZERO rows.
+#
+#  2. Every regeneration mints a NEW Cassandra table UUID, so the fixture
+#     DIRECTORY NAME changes and the previous one is deleted. A staging command
+#     that only adds CURRENT files leaves the deletion UNSTAGED, so the commit
+#     carries BOTH generations — and the manifest, if it is not updated too,
+#     keeps selecting the stale directory (roborev job 254, F2).
+#
+# So the staging command is `git add -f -A -- <keyspace path>` (`-A` stages
+# deletions; `-f` forces the ignored binaries), and this script rewrites the
+# `references.yml` entry ITSELF rather than printing a reminder. The exact
+# commands are printed at exit.
 # ============================================================================
 #
 # Backs: issue #3500.
@@ -67,16 +87,26 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OUT_DIR="${OUT_DIR:-$ROOT/datasets}"
 DRY_RUN="${DRY_RUN:-0}"
+VERIFY_ONLY="${VERIFY_ONLY:-0}"
 KEEP_CONTAINER="${KEEP_CONTAINER:-0}"
 CONTAINER_NAME="cqlite-nestedudtkeys"
 CASSANDRA_IMAGE="cassandra:5.0.2"
 KEYSPACE="test_nested_udt_keys"
 TABLES=(nested_udt_keys)
 
+# Every artifact a COMPLETE generation must leave beside the Data.db, as a suffix
+# appended to whatever SSTable prefix is actually found (never a hard-coded
+# `nb-1-big`). Consumed by verify_generated_artifacts and by the references.yml
+# rewrite, so the post-condition and the manifest cannot disagree about the set.
+REQUIRED_SIDECAR_SUFFIXES=(-Data.db.jsonl -Statistics.db.txt -TOC.txt -Digest.crc32)
+
+REFERENCES_YML="$ROOT/datasets/references.yml"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out)            OUT_DIR="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1; shift ;;
+    --verify-only)    VERIFY_ONLY=1; shift ;;
     --keep-container) KEEP_CONTAINER=1; shift ;;
     *) echo "[nuk] Unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -126,14 +156,26 @@ fail() { echo "[nuk][ERROR] $*" >&2; exit 1; }
 #     "WARNING: Empty statistics" and carried on. Now FAILS on a non-zero exit
 #     AND on an empty output file; stderr is no longer discarded.
 #   * find driving the JSONL loop             was `2>/dev/null || true`, so a
-#     failed/empty find wrote ZERO goldens silently. Suppression removed and
-#     the number of goldens written is asserted non-zero.
+#     failed/empty find wrote ZERO goldens silently. Suppression removed.
 #   * find driving the statistics loop        never suppressed, but had no
-#     count; the number written is now asserted non-zero too.
+#     count.
 #   * find for the exactly-one-Data.db check  `2>/dev/null` removed: `cnt=0`
 #     failed the check but the reason was discarded.
 #   * find -delete junk sweep                 was `2>/dev/null || true`; a
 #     silent failure leaves `._*` files inside the committed fixture directory.
+#
+#  FIXED AGAIN (roborev job 254, F1): removing the suppression was not enough.
+#  All four of those `find`s ran inside a PROCESS SUBSTITUTION or behind an
+#  ASSIGNMENT, both of which DISCARD the exit status — so a find that emitted
+#  some paths and then failed drove a partial loop and the run still reported
+#  success, and the non-zero COUNTs added above cannot tell "3 of 3" from "3 of
+#  10, then failed". Every one of them now goes through collect_matching_files /
+#  an explicit `if !`, and the junk sweep's `-delete` status is checked by name.
+#
+#  AND THE AUDIT ITSELF IS NOT THE CONTRACT. An enumeration of suppression sites
+#  closes only the mechanisms someone has already thought of; six findings across
+#  four rounds were six different mechanisms. The contract is the outcome-based
+#  post-condition, verify_generated_artifacts — see its header.
 #
 #  KEPT, each a PROBE whose non-zero exit is an ANSWER rather than a fault, and
 #  none of which produces a committed artifact:
@@ -266,6 +308,82 @@ rm_rf_guarded() {
   rm -rf -- "$target"
 }
 
+# Scratch directory for NUL-delimited file lists (see collect_matching_files).
+# Created lazily, removed by the EXIT trap.
+WORK_TMP=""
+#
+# Deliberately sets a GLOBAL rather than echoing the path: `fail` inside a
+# command substitution exits only that SUBSHELL, so an echoing variant would
+# leave the caller running with an empty path (the same defect documented on
+# validate_destructive_target below). Callers run it, then read $WORK_TMP.
+ensure_work_tmp() {
+  if [[ -n "$WORK_TMP" && -d "$WORK_TMP" ]]; then
+    return 0
+  fi
+  WORK_TMP="$(mktemp -d "${TMPDIR:-/tmp}/nuk-lists.XXXXXX")" \
+    || fail "could not create a scratch directory for file lists."
+  [[ -n "$WORK_TMP" && -d "$WORK_TMP" ]] \
+    || fail "scratch directory for file lists was not created."
+}
+
+# Materialize a `find` result into the NUL-delimited list file $2, with find's
+# EXIT STATUS EXPLICITLY CHECKED (roborev job 254, F1). Remaining arguments are
+# the find predicates.
+#
+# WHY THIS EXISTS. `while IFS= read -r -d '' f; do … done < <(find …)` DISCARDS
+# find's exit status: the `while` reports the status of the last `read`, and a
+# process substitution's status is not propagated anywhere at all. So a `find`
+# that emitted three paths and THEN failed — an unreadable subdirectory, a tree
+# that changed under it — drove the loop over a PARTIAL set and the run carried
+# on to report a COMPLETE generation with incomplete artifacts.
+#
+# A non-zero COUNT does not close that hole, which is what round 4 of review got
+# wrong: "found 3 of 3" and "found 3 of 10, then failed" are the SAME count. A
+# count is not an affirmative measurement of COMPLETENESS. `mapfile -t x <
+# <(find …)` has the identical defect — the status is still the substitution's.
+#
+# So find runs as the sole command of an `if !` (its status is checked directly,
+# not left to `set -e`, which is suppressed inside `&&`/`||`/`!` lists), its
+# output goes to a file, and callers iterate the FILE.
+#
+# `set -o pipefail` is in effect (see `set -euo pipefail` at the top of this
+# file), so the pipelines elsewhere in this script fail on any stage's failure;
+# there is deliberately no pipeline here.
+collect_matching_files() {
+  local search_root="$1" dest="$2"
+  shift 2
+  if [[ ! -d "$search_root" ]]; then
+    fail "collect_matching_files: '$search_root' is not a directory."
+  fi
+  if ! find "$search_root" "$@" -print0 > "$dest"; then
+    fail "find under '$search_root' exited NON-ZERO. Its output may be a PARTIAL file \
+list, so this generation is aborted rather than continued against an incomplete set."
+  fi
+}
+
+# Populate the global array TABLE_DIRS with the DIRECTORIES matching
+# `<keyspace-dir>/<table>-*`, and nothing else (an unmatched glob leaves it
+# empty; a non-directory sharing the prefix is not counted).
+#
+# A GLOBAL, not an echoed value, because callers need the COUNT as well as the
+# path, and because `fail` inside a command substitution would exit only the
+# subshell (see validate_destructive_target's note).
+#
+# Exactly ONE match is what a clean generation produces. Two means a previous
+# generation is still sitting beside this one — each regeneration mints a new
+# Cassandra table UUID, so the directory NAME changes — which is precisely the
+# state the old staging instructions would have committed (roborev job 254, F2).
+TABLE_DIRS=()
+list_table_dirs() {
+  local table="$1" ks_dir="$SSTABLES_DIR/$KEYSPACE" d
+  TABLE_DIRS=()
+  for d in "$ks_dir/$table"-*; do
+    if [[ -d "$d" ]]; then
+      TABLE_DIRS+=("$d")
+    fi
+  done
+}
+
 run() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] $*"
@@ -279,9 +397,9 @@ if command -v docker >/dev/null 2>&1; then
 elif command -v podman >/dev/null 2>&1; then
   ENGINE="podman"
 else
-  if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ "$DRY_RUN" -eq 1 || "$VERIFY_ONLY" -eq 1 ]]; then
     ENGINE="docker"
-    echo "[nuk] (dry-run) no container engine found; using placeholder 'docker'"
+    echo "[nuk] no container engine found; using placeholder 'docker' (no container is started in --dry-run/--verify-only)"
   else
     fail "Neither docker nor podman found in PATH."
   fi
@@ -290,6 +408,12 @@ log "Using container engine: $ENGINE"
 
 STARTED_CONTAINER=0
 cleanup() {
+  # Scratch file lists only; never a committed artifact, so a removal failure
+  # WARNS rather than rewriting this run's exit status from inside the trap.
+  if [[ -n "$WORK_TMP" && -d "$WORK_TMP" ]]; then
+    rm -rf -- "$WORK_TMP" \
+      || echo "[nuk][WARNING] could not remove scratch dir '$WORK_TMP'; remove it by hand." >&2
+  fi
   if [[ "$DRY_RUN" -eq 0 && "$KEEP_CONTAINER" -eq 0 && "$STARTED_CONTAINER" -eq 1 ]]; then
     log "Cleaning up container..."
     # An EXIT-trap failure must not change this run's exit status, so the
@@ -468,6 +592,13 @@ generate_sstabledump_jsonl() {
   local sstables_dir="$1"
   local goldens_written=0
   log "Generating sstabledump JSONL golden files for $KEYSPACE..."
+  # The driving `find` is MATERIALIZED with its exit status checked before the
+  # loop runs (roborev job 254, F1) — a process substitution would discard it and
+  # the loop would silently walk a partial set.
+  ensure_work_tmp
+  local data_list="$WORK_TMP/jsonl-data-files.list"
+  collect_matching_files "$sstables_dir/$KEYSPACE" "$data_list" \
+    -type f -name "*-Data.db" -not -name "._*"
   while IFS= read -r -d '' data_file; do
     local rel
     rel="${data_file#"$sstables_dir"/}"
@@ -497,15 +628,283 @@ for line in sys.stdin:
       log "  OK: $jsonl_file ($lines partitions)"
     fi
     goldens_written=$((goldens_written + 1))
-  done < <(find "$sstables_dir/$KEYSPACE" -type f -name "*-Data.db" -not -name "._*" -print0)
+  done < "$data_list"
 
-  # Affirmative measurement: a `find` that failed, or a keyspace directory with
-  # no Data.db in it, is indistinguishable from a clean pass by the loop alone.
+  # Affirmative measurement that the loop had a SUBJECT. It is NOT a completeness
+  # check — a count cannot distinguish a complete find from a truncated one, which
+  # is why the find above is status-checked and why the outcome-based
+  # post-condition (verify_generated_artifacts) is the actual contract.
   if [[ "$goldens_written" -eq 0 ]]; then
     fail "no *-Data.db found under $sstables_dir/$KEYSPACE — ZERO JSONL goldens were written. \
 Refusing to report a complete generation with no golden."
   fi
   log "  $goldens_written JSONL golden(s) written"
+}
+
+# ----------------------------------------------------------------------------
+# OUTCOME-BASED POST-CONDITION — the PRIMARY correctness contract of this script
+# (roborev job 254)
+#
+# Six review findings across four rounds of this one script were the SAME SHAPE:
+# a step could fail silently and the run still reported SUCCESS. The MECHANISMS
+# all differed — `|| true`, `2>/dev/null`, a process substitution's discarded
+# exit status, and printed staging commands that omitted deletions — and each
+# round fixed the mechanism in front of it. That enumeration does not close:
+# there is always another way for a step to fail quietly.
+#
+# So this function checks the OUTCOME instead of the failure modes: is the
+# artifact set on disk EXACTLY what a complete generation produces? A silent
+# failure by a mechanism nobody has thought of is then caught by THE ARTIFACTS
+# BEING WRONG, rather than by someone having predicted the mechanism. It is the
+# same move as replacing an enumerated blocklist with an allowlist.
+#
+# EVERY per-step check in this script — the removed `|| true`s, the unsuppressed
+# stderr, the status-checked `find`s, the non-zero counters — is DEFENCE IN
+# DEPTH, NOT the contract. Their value is naming the step that broke early and
+# close to the cause; their absence would not let an incomplete artifact set pass,
+# because this does.
+#
+# The expected set is DERIVED from $TABLES and from the Data.db actually present
+# (never hard-coded to a prefix or a directory id); every artifact must exist AND
+# be non-empty; and EVERY problem found is reported, not just the first.
+#
+# Exercisable on its own with `--verify-only`, which is how it is RED-verified.
+# ----------------------------------------------------------------------------
+verify_generated_artifacts() {
+  local sstables_dir="$1"
+  local ks_dir="$sstables_dir/$KEYSPACE"
+  local -a problems=()
+  local tables_checked=0
+  local table
+
+  log "=== POST-CONDITION: verifying the artifact set under $ks_dir ==="
+
+  if [[ ! -d "$ks_dir" ]]; then
+    fail "POST-CONDITION FAILED: keyspace directory '$ks_dir' does not exist — nothing was generated."
+  fi
+
+  for table in "${TABLES[@]}"; do
+    list_table_dirs "$table"
+    if [[ "${#TABLE_DIRS[@]}" -ne 1 ]]; then
+      local found_desc="none"
+      if [[ "${#TABLE_DIRS[@]}" -gt 0 ]]; then
+        found_desc="${TABLE_DIRS[*]}"
+      fi
+      problems+=("$table: expected exactly ONE table directory matching '$table-*' under \
+$ks_dir, found ${#TABLE_DIRS[@]} ($found_desc)")
+      continue
+    fi
+    local tdir="${TABLE_DIRS[0]}"
+
+    ensure_work_tmp
+    local data_list="$WORK_TMP/postcond-data-$table.list"
+    collect_matching_files "$tdir" "$data_list" \
+      -type f -name "*-Data.db" -not -name "._*"
+    local -a data_files=()
+    local f
+    while IFS= read -r -d '' f; do data_files+=("$f"); done < "$data_list"
+    if [[ "${#data_files[@]}" -ne 1 ]]; then
+      problems+=("$table: expected exactly ONE *-Data.db in $tdir, found ${#data_files[@]}")
+      continue
+    fi
+    local data_file="${data_files[0]}"
+    if [[ ! -s "$data_file" ]]; then
+      problems+=("$table: EMPTY artifact $data_file")
+    fi
+
+    local prefix
+    prefix="$(basename -- "$data_file")"
+    prefix="${prefix%-Data.db}"
+
+    local suffix artifact
+    for suffix in "${REQUIRED_SIDECAR_SUFFIXES[@]}"; do
+      artifact="$tdir/$prefix$suffix"
+      if [[ ! -f "$artifact" ]]; then
+        problems+=("$table: MISSING artifact $artifact")
+      elif [[ ! -s "$artifact" ]]; then
+        problems+=("$table: EMPTY artifact $artifact")
+      fi
+    done
+
+    # Junk the staging command would otherwise force-add into the fixture.
+    local junk_list="$WORK_TMP/postcond-junk-$table.list"
+    collect_matching_files "$tdir" "$junk_list" \
+      \( -name '._*' -o -name '.DS_Store' \)
+    local -a junk=()
+    while IFS= read -r -d '' f; do junk+=("$f"); done < "$junk_list"
+    if [[ "${#junk[@]}" -ne 0 ]]; then
+      problems+=("$table: ${#junk[@]} junk file(s) present that the staging command \
+would commit: ${junk[*]}")
+    fi
+
+    tables_checked=$((tables_checked + 1))
+    log "  $table: $tdir (prefix $prefix) — Data.db + ${#REQUIRED_SIDECAR_SUFFIXES[@]} required sidecar(s) present and non-empty"
+  done
+
+  # The post-condition must have had a SUBJECT. An empty $TABLES, or every table
+  # short-circuiting above, must never read as a pass.
+  if [[ "$tables_checked" -eq 0 && "${#problems[@]}" -eq 0 ]]; then
+    problems+=("the post-condition verified ZERO tables (TABLES=${TABLES[*]}) — nothing \
+was measured, so nothing may be reported complete")
+  fi
+
+  if [[ "${#problems[@]}" -ne 0 ]]; then
+    echo "[nuk][ERROR] POST-CONDITION FAILED: the artifact set under $ks_dir is not what a \
+COMPLETE generation produces." >&2
+    local problem
+    for problem in "${problems[@]}"; do
+      echo "[nuk][ERROR]   - $problem" >&2
+    done
+    fail "${#problems[@]} artifact problem(s) listed above. Commit NOTHING from this run."
+  fi
+
+  log "POST-CONDITION OK: $tables_checked table(s) verified; full artifact set present and non-empty."
+}
+
+# ----------------------------------------------------------------------------
+# references.yml rewrite (roborev job 254, F2)
+#
+# WHY THE SCRIPT DOES THIS instead of printing a reminder: every regeneration
+# mints a NEW Cassandra table UUID, so the fixture DIRECTORY NAME changes and the
+# previous directory is deleted. A manifest left untouched keeps selecting the
+# PREVIOUS generation, which no longer exists, and the fixture reads as absent.
+# Issue #3500's fixture directory id changed THREE times and stayed consistent
+# only because a human remembered to hand-edit the manifest each time — an
+# instruction a human must not forget is not a mechanism.
+#
+# Rewrites the single `- keyspace: $KEYSPACE` entry in place (appending it if it
+# is absent), then AFFIRMATIVELY re-reads the file to assert the new directory is
+# named and that no line still references a different directory under this
+# keyspace.
+# ----------------------------------------------------------------------------
+update_references_yml() {
+  local table_dir="$1" prefix="$2"
+  local dirname
+  dirname="$(basename -- "$table_dir")"
+
+  local canonical_datasets
+  if ! canonical_datasets="$(resolve_physical "$ROOT/datasets")"; then
+    fail "could not resolve '$ROOT/datasets'; refusing to update references.yml blind."
+  fi
+  if [[ "$OUT_DIR" != "$canonical_datasets" ]]; then
+    log "references.yml NOT updated: output went to '$OUT_DIR', not this repository's own \
+'$canonical_datasets', so this run's fixture is not the committed one."
+    return 0
+  fi
+  if [[ ! -f "$REFERENCES_YML" ]]; then
+    fail "references.yml not found at '$REFERENCES_YML'; refusing to report a complete \
+generation with an un-updated manifest."
+  fi
+
+  log "Updating $REFERENCES_YML -> $dirname (prefix $prefix)"
+  if ! NUK_YML="$REFERENCES_YML" \
+       NUK_KS="$KEYSPACE" \
+       NUK_TABLE="${TABLES[0]}" \
+       NUK_DIRNAME="$dirname" \
+       NUK_PREFIX="$prefix" \
+       NUK_SIDECARS="${REQUIRED_SIDECAR_SUFFIXES[*]}" \
+       python3 - <<'PY'
+import datetime
+import os
+import sys
+
+yml = os.environ["NUK_YML"]
+ks = os.environ["NUK_KS"]
+table = os.environ["NUK_TABLE"]
+dirname = os.environ["NUK_DIRNAME"]
+prefix = os.environ["NUK_PREFIX"]
+required = os.environ["NUK_SIDECARS"].split()
+
+rel = f"test-data/datasets/sstables/{ks}/{dirname}"
+ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# The manifest field name for each artifact suffix. Every suffix in
+# REQUIRED_SIDECAR_SUFFIXES must appear here, so adding one to the post-condition
+# without teaching the manifest about it is an ERROR rather than a silent
+# omission.
+FIELD_FOR_SUFFIX = {
+    "-Data.db.jsonl": "data_jsonl",
+    "-Statistics.db.txt": "statistics_txt",
+    "-TOC.txt": "toc_txt",
+    "-Digest.crc32": "digest_crc32",
+}
+unknown = [s for s in required if s not in FIELD_FOR_SUFFIX]
+if unknown:
+    sys.exit(
+        "references.yml rewrite does not know a manifest field for required "
+        f"artifact suffix(es): {unknown}. Teach FIELD_FOR_SUFFIX about them."
+    )
+
+# `present: true` for everything the post-condition requires, plus the one
+# artifact this fixture deliberately does NOT ship.
+entries = [(FIELD_FOR_SUFFIX[s], s, "true") for s in required]
+entries.append(("summary_txt", "-Summary.db.txt", "false"))
+
+# Paths are REPO-RELATIVE here, unlike the generator-machine absolute paths of
+# the older entries: the only consumer,
+# dataset_helpers::resolve_table_dir_via_manifest, takes file_name() of
+# sstable_dir and re-roots it under the caller's datasets root, and the
+# references.*.path fields are not deserialized at all. Relative keeps the entry
+# correct after the generating worktree is merged and gone (issue #3500).
+block = [
+    f"  - keyspace: {ks}\n",
+    f"    table: {table}\n",
+    f'    sstable_dir: "{rel}"\n',
+    f"    prefix: {prefix}\n",
+    "    references:\n",
+]
+for field, suffix, present in entries:
+    block += [
+        f"      {field}:\n",
+        f"        present: {present}\n",
+        f'        path: "{rel}/{prefix}{suffix}"\n',
+    ]
+block.append(f"    generated_at: {ts}\n")
+
+with open(yml, encoding="utf-8") as fh:
+    lines = fh.readlines()
+
+start = None
+for i, line in enumerate(lines):
+    if line.rstrip("\n") == f"  - keyspace: {ks}":
+        start = i
+        break
+
+if start is None:
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.extend(block)
+    action = "appended"
+else:
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("  - "):
+            end = j
+            break
+    lines[start:end] = block
+    action = "replaced"
+
+with open(yml, "w", encoding="utf-8") as fh:
+    fh.writelines(lines)
+
+# AFFIRMATIVE re-read: the new directory must be named, and NO surviving line may
+# reference a DIFFERENT directory under this keyspace — that is exactly the
+# two-generations state this fix is about.
+after = open(yml, encoding="utf-8").read()
+if f'sstable_dir: "{rel}"' not in after:
+    sys.exit(f"references.yml does not name the new sstable_dir after the {action}: {rel}")
+stale = [ln for ln in after.splitlines() if f"sstables/{ks}/" in ln and dirname not in ln]
+if stale:
+    sys.exit(
+        f"references.yml still references a DIFFERENT directory under {ks}:\n  "
+        + "\n  ".join(stale)
+    )
+print(f"[nuk] references.yml entry {action}: {ks}.{table} -> {dirname} (prefix {prefix})")
+PY
+  then
+    fail "failed to update '$REFERENCES_YML' for $dirname (see the error above). The \
+manifest would keep selecting a directory this run deleted."
+  fi
 }
 
 # ----------------------------------------------------------------------------
@@ -525,6 +924,18 @@ log "Starting $KEYSPACE generation (issue #3500)"
 log "Output directory: $OUT_DIR"
 
 SSTABLES_DIR="$OUT_DIR/sstables"
+
+# `--verify-only`: run ONLY the outcome-based post-condition against an existing
+# fixture tree, then exit. It starts no container, needs no engine and mutates
+# nothing — which is what makes the post-condition independently exercisable, and
+# RED-verifiable against a deliberately damaged COPY of the tree
+# (`--out <copy>/datasets --verify-only`).
+if [[ "$VERIFY_ONLY" -eq 1 ]]; then
+  log "--verify-only: running the post-condition only (no container, no generation)"
+  verify_generated_artifacts "$SSTABLES_DIR"
+  log "=== --verify-only COMPLETE ==="
+  exit 0
+fi
 
 # ----------------------------------------------------------------------------
 # Container lifecycle: ALWAYS RECREATE. There is deliberately NO reuse path.
@@ -639,20 +1050,28 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     fail "tar export from container failed."
   fi
 
-  # ONE flush => exactly ONE Data.db per table.
+  # ONE flush => exactly ONE table directory and exactly ONE Data.db per table.
+  # This is an EARLY locator (it fails next to the export that produced the
+  # problem); the authoritative check is verify_generated_artifacts at the end.
   for table in "${TABLES[@]}"; do
-    tdirs=( "$SSTABLES_DIR/$KEYSPACE/$table"* )
-    if [[ ! -d "${tdirs[0]}" ]]; then
-      fail "$table: no table directory matched under $SSTABLES_DIR/$KEYSPACE/ \
-(glob '$SSTABLES_DIR/$KEYSPACE/$table*' did not expand); export failed"
+    list_table_dirs "$table"
+    if [[ "${#TABLE_DIRS[@]}" -ne 1 ]]; then
+      fail "$table: expected exactly ONE table directory under \
+$SSTABLES_DIR/$KEYSPACE/ matching '$table-*', found ${#TABLE_DIRS[@]}; export failed"
     fi
-    # stderr NOT suppressed: a `find` failure here shows up as `cnt=0` and fails
-    # the check below, but only its stderr says WHY (roborev job 245, F2).
-    cnt=$(find "${tdirs[@]}" -name "*-Data.db" -not -name "._*" | wc -l | tr -d ' ')
+    # Materialized with find's status CHECKED, for the same reason as the two
+    # loops below (roborev job 254, F1): the previous `find … | wc -l` form put
+    # find's status behind an assignment, which always succeeds.
+    ensure_work_tmp
+    one_data_list="$WORK_TMP/one-data-$table.list"
+    collect_matching_files "${TABLE_DIRS[0]}" "$one_data_list" \
+      -type f -name "*-Data.db" -not -name "._*"
+    cnt=0
+    while IFS= read -r -d '' _f; do cnt=$((cnt + 1)); done < "$one_data_list"
     if [[ "$cnt" -ne 1 ]]; then
       fail "$table: expected exactly ONE flushed Data.db, found $cnt."
     fi
-    log "  $table: exactly one Data.db (OK)"
+    log "  $table: exactly one table directory and one Data.db (OK)"
   done
 
   generate_sstabledump_jsonl "$SSTABLES_DIR"
@@ -666,6 +1085,12 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # (roborev job 245, F2). Both halves now fail the generation: a non-zero exit,
   # and an empty output file. stderr is no longer discarded.
   log "Generating Statistics.db.txt for $KEYSPACE tables..."
+  # Same materialization as the JSONL loop: find's status is checked BEFORE the
+  # loop, because a process substitution discards it (roborev job 254, F1).
+  ensure_work_tmp
+  stats_data_list="$WORK_TMP/stats-data-files.list"
+  collect_matching_files "$SSTABLES_DIR/$KEYSPACE" "$stats_data_list" \
+    -type f -name "*-Data.db" -not -name "._*"
   stats_written=0
   while IFS= read -r -d '' data_file; do
     rel="${data_file#"$SSTABLES_DIR"/}"
@@ -684,7 +1109,8 @@ $stats_base golden would be empty or partial while references.yml declares it pr
     fi
     log "  OK: $stats_base"
     stats_written=$((stats_written + 1))
-  done < <(find "$SSTABLES_DIR/$KEYSPACE" -name "*-Data.db" -not -name "._*" -print0)
+  done < "$stats_data_list"
+  # Subject check, not a completeness check — see the JSONL loop's note.
   if [[ "$stats_written" -eq 0 ]]; then
     fail "ZERO Statistics.db.txt goldens were written for $KEYSPACE. \
 Refusing to report a complete generation with no statistics golden."
@@ -699,26 +1125,56 @@ Refusing to report a complete generation with no statistics golden."
   # Not suppressed either: this sweep removes macOS junk that would otherwise be
   # picked up by the commit globs the script prints, so a silent failure here
   # ends up in the committed fixture directory (roborev job 245, F2).
-  find "$_cleanup_root" \( -name '._*' -o -name '.DS_Store' \) -delete
+  if ! find "$_cleanup_root" \( -name '._*' -o -name '.DS_Store' \) -delete; then
+    fail "junk sweep under '$_cleanup_root' exited NON-ZERO; junk files may remain \
+inside the fixture directory and would be picked up by the staging command below."
+  fi
+
+  # THE CONTRACT. Everything above is defence in depth; this is what decides
+  # whether the run may report COMPLETE (roborev job 254).
+  verify_generated_artifacts "$SSTABLES_DIR"
+
+  # The post-condition just guaranteed exactly one table directory holding exactly
+  # one Data.db, so the fixture directory and SSTable prefix are unambiguous.
+  list_table_dirs "${TABLES[0]}"
+  FIXTURE_DIR="${TABLE_DIRS[0]}"
+  ensure_work_tmp
+  collect_matching_files "$FIXTURE_DIR" "$WORK_TMP/manifest-data.list" \
+    -type f -name "*-Data.db" -not -name "._*"
+  FIXTURE_PREFIX=""
+  while IFS= read -r -d '' _data_file; do
+    FIXTURE_PREFIX="$(basename -- "$_data_file")"
+    FIXTURE_PREFIX="${FIXTURE_PREFIX%-Data.db}"
+  done < "$WORK_TMP/manifest-data.list"
+  [[ -n "$FIXTURE_PREFIX" ]] \
+    || fail "could not derive the SSTable prefix from '$FIXTURE_DIR'."
+
+  update_references_yml "$FIXTURE_DIR" "$FIXTURE_PREFIX"
 
   log "=== $KEYSPACE generation COMPLETE ==="
-  log "SSTables: $SSTABLES_DIR/$KEYSPACE"
+  log "SSTables: $FIXTURE_DIR"
 
   echo ""
   echo "=============================================================="
-  echo "  NEXT: commit the generated fixtures"
+  echo "  NEXT: commit the generated fixture"
   echo "=============================================================="
   echo ""
-  echo "  # Force-add the .db binaries (gitignored — MUST use -f):"
-  echo "  git -C '$REPO_ROOT' add -f \\"
-  echo "    test-data/datasets/sstables/$KEYSPACE/*/*.db"
+  echo "  # Stage the WHOLE keyspace path, INCLUDING DELETIONS:"
+  echo "  #   -A  stages the REMOVAL of the previous generation's directory."
+  echo "  #       Every regeneration mints a new Cassandra table UUID, so the old"
+  echo "  #       directory is gone; a command that adds only CURRENT files leaves"
+  echo "  #       that deletion unstaged and commits BOTH generations."
+  echo "  #   -f  forces the gitignored *.db binaries."
+  echo "  git -C '$REPO_ROOT' add -f -A -- test-data/datasets/sstables/$KEYSPACE"
   echo ""
-  echo "  # Add the sidecars normally (not gitignored):"
-  echo "  git -C '$REPO_ROOT' add \\"
-  echo "    test-data/datasets/sstables/$KEYSPACE/*/*.jsonl \\"
-  echo "    test-data/datasets/sstables/$KEYSPACE/*/*-TOC.txt \\"
-  echo "    test-data/datasets/sstables/$KEYSPACE/*/*-Digest.crc32 \\"
-  echo "    test-data/datasets/sstables/$KEYSPACE/*/*-Statistics.db.txt"
+  echo "  # references.yml has ALREADY been rewritten in place by this script to"
+  echo "  # name $(basename -- "$FIXTURE_DIR") / $FIXTURE_PREFIX — stage it in the SAME commit,"
+  echo "  # or the manifest will keep selecting a directory that no longer exists:"
+  echo "  git -C '$REPO_ROOT' add -- test-data/datasets/references.yml"
+  echo ""
+  echo "  # Confirm what is staged: the NEW directory added, any PREVIOUS"
+  echo "  # generation's files deleted, references.yml modified, nothing else."
+  echo "  git -C '$REPO_ROOT' status --short -- test-data/datasets"
   echo ""
   echo "  # Commit:"
   echo "  git -C '$REPO_ROOT' commit -m 'test(#3500): nested-UDT hashable-position fixture SSTables'"
