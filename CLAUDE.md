@@ -159,9 +159,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   only when its LAST process exits, so a long gate holds its own scope open and outlives the agent
   that launched it. The exposure is to pane/session teardowns (a supervisor recycle, `kill-pane`,
   logout), not to your turn ending. **#3473's "~10 minute ceiling" does not exist**: six instrumented
-  tickers (plain `nohup`, `setsid`, renamed argv, harness-background, and two launched by a subagent
-  stalled silently past 600s) each ran past **2400s with zero signals**, so there is no time-based
-  ceiling and the 600s stall watchdog is not the direct cause either. The cgroup mechanism explains
+  tickers (plain `nohup`, `setsid`, renamed argv, harness-background, and two launched by a subagent)
+  each ran the full **2400s with zero signals** and self-terminated. The 600s stall watchdog is
+  **untested, NOT cleared** — the attempt to induce a stall failed, because this harness version
+  **backgrounds** an over-timeout foreground call instead of killing it (the blocker completed
+  unmolested, exit 0, after its full 700s). The cgroup mechanism explains
   the lead's `ssh` + `nohup` control completing on the same box and sha (an ssh login gets its own
   `session-N.scope`), but **AC2 landed as a PARTIAL: a sufficient, demonstrated mechanism with
   alternatives ruled out — NOT a confirmed diagnosis** of the original deaths, whose correlation with
