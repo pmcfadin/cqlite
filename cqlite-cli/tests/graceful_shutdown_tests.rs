@@ -187,6 +187,40 @@ impl Stream {
     }
 }
 
+/// How a [`ChildIo::wait_for`] ended when it did NOT observe the line it awaited.
+///
+/// Reported by every such failure because it is an OBSERVATION, not a cause: a
+/// budget that expired with the pipes still open and a child whose pipes reached
+/// EOF are different measurements, and the second is the signature a RED run
+/// produces when the child dies instead of handling the signal. Neither variant
+/// names WHY.
+#[derive(Debug)]
+enum WaitEnd {
+    /// The budget expired; the child's pipes were still open, so more output was
+    /// still possible.
+    BudgetExpired,
+    /// Both reader threads ended and the queue drained: the child's stdout AND
+    /// stderr reached EOF after this long, so no further line could ever arrive.
+    /// The child had exited, crashed, or closed its pipes -- this does not say
+    /// which.
+    PipesClosed(Duration),
+}
+
+impl WaitEnd {
+    fn describe(&self) -> String {
+        match self {
+            WaitEnd::BudgetExpired => "how the wait ended: the budget expired with the child's \
+                 pipes still open (more output was still possible)"
+                .to_string(),
+            WaitEnd::PipesClosed(after) => format!(
+                "how the wait ended: the child's stdout AND stderr both reached EOF after \
+                 {after:.3?}, so no further line could arrive: the child had exited, crashed, or \
+                 closed its pipes (this measurement does not say which)"
+            ),
+        }
+    }
+}
+
 /// Drains BOTH of the child's pipes (design.md D7: `stderr` was piped and never
 /// read — discarding the evidence this oracle needs, and a latent wedge for any
 /// chattier session) and accumulates every line into a shared transcript, so a
@@ -237,13 +271,13 @@ impl ChildIo {
         want: Stream,
         pred: impl Fn(&str) -> bool,
         budget: Duration,
-    ) -> Option<(String, Duration)> {
+    ) -> Result<(String, Duration), WaitEnd> {
         let started = Instant::now();
         let deadline = started + budget;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return None;
+                return Err(WaitEnd::BudgetExpired);
             }
             match self
                 .rx
@@ -251,13 +285,15 @@ impl ChildIo {
             {
                 Ok((stream, line)) => {
                     if stream == want && pred(&line) {
-                        return Some((line, started.elapsed()));
+                        return Ok((line, started.elapsed()));
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 // Both readers ended: the child's pipes are closed and the
                 // buffer is drained, so no further line can ever arrive.
-                Err(RecvTimeoutError::Disconnected) => return None,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(WaitEnd::PipesClosed(started.elapsed()))
+                }
             }
         }
     }
@@ -650,11 +686,12 @@ fn start_writable_session(
         |l| l.contains(MARKER_SESSION_READY),
         budget.derived,
     );
-    if ready.is_none() {
+    if let Err(end) = &ready {
         let _ = child.kill();
         panic!(
             "stage (a) session-up: the readiness banner was not observed on the child's stderr.\n\
              awaited substring on stderr: {MARKER_SESSION_READY:?}\n\
+             {}\n\
              {}\n\
              WHAT THIS ESTABLISHES: only that the banner was not observed within that deadline on \
              THIS host. It does NOT distinguish a child that never reached the interactive loop \
@@ -662,6 +699,7 @@ fn start_writable_session(
              banner text.\n\
              child transcript:\n{}\n{}",
             budget.describe(),
+            end.describe(),
             io.transcript_text(),
             clock.report()
         );
@@ -688,10 +726,11 @@ fn await_write_ack(
     clock: &StageClock,
 ) -> Duration {
     match io.wait_for(Stream::Stdout, |l| l.trim() == "OK", budget.derived) {
-        Some((_, took)) => took,
-        None => panic!(
+        Ok((_, took)) => took,
+        Err(end) => panic!(
             "{stage}: {what} was not acknowledged with `OK` on the child's stdout.\n\
              awaited on stdout: a line whose trimmed text is exactly \"OK\"\n\
+             {}\n\
              {}\n\
              WHAT THIS ESTABLISHES: only that no acknowledgement was observed within that budget. \
              It does NOT establish whether the write was rejected, is still in progress, was \
@@ -699,6 +738,7 @@ fn await_write_ack(
              (the child prints `Error: ...` on stderr for a rejected statement).\n\
              child transcript:\n{}\n{}",
             budget.describe(),
+            end.describe(),
             io.transcript_text(),
             clock.report()
         ),
@@ -780,12 +820,15 @@ fn sigint_in_writable_session_flushes_before_exit() {
         |l| l.contains(MARKER_HANDLER_ENTERED),
         handler_budget.derived,
     );
-    let Some((_, t_handler)) = entered else {
-        let _ = child.kill();
-        panic!(
+    let t_handler = match entered {
+        Ok((_, took)) => took,
+        Err(end) => {
+            let _ = child.kill();
+            panic!(
             "stage (c) handler-entry: the shutdown handler's entry marker was not observed on the \
              child's stderr after SIGINT was delivered to pid {pid}.\n\
              awaited substring on stderr: {MARKER_HANDLER_ENTERED:?}\n\
+             {}\n\
              {}\n\
              CANDIDATE CAUSES (this measurement does NOT select between them):\n\
              \x20 1. the signal was not delivered to / not received by the child;\n\
@@ -794,9 +837,11 @@ fn sigint_in_writable_session_flushes_before_exit() {
              no longer prints — compare the awaited substring against the transcript below.\n\
              child transcript:\n{}\n{}",
             handler_budget.describe(),
+            end.describe(),
             io.transcript_text(),
             clock.report()
         );
+        }
     };
     clock.record("c.handler-entry", t_handler);
 
