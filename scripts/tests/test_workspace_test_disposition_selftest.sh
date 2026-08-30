@@ -130,6 +130,30 @@ ws=$(make_ws red_unrecorded alpha beta gamma)
 } > "$ws/scripts/tests/$CENSUS_BASE"
 expect "red: a new workspace member with no recorded disposition" FAIL "gamma" "$ws"
 
+# ---- RED: TWO unrecorded members — BOTH must be named (roborev round 6, G2) ---
+# The single-unrecorded case above is satisfied by a message naming one crate, so it cannot
+# distinguish "reports every unrecorded member" from "reports the first one it finds". This
+# case can: it asserts both names, so a first-offender-only regression fails here.
+ws=$(make_ws red_unrecorded2 alpha beta gamma delta)
+{
+  printf 'alpha%sEXECUTED%sscratch-component\n' "$TAB" "$TAB"
+  printf 'beta%sPARTIAL%sscratch-component runs some\n' "$TAB" "$TAB"
+} > "$ws/scripts/tests/$CENSUS_BASE"
+run_guard "$ws"; _rc=$?
+if [ "$_rc" -eq 0 ]; then
+  fail_case "two unrecorded members — expected FAIL, guard PASSED: $GUARD_OUT"
+else
+  _miss=""
+  for _c in gamma delta; do
+    printf '%s' "$GUARD_OUT" | grep -qF "$_c" || _miss="$_miss $_c"
+  done
+  if [ -z "$_miss" ]; then
+    pass_case "two unrecorded members — guard FAILED and named BOTH (gamma, delta)"
+  else
+    fail_case "two unrecorded members — guard failed but never named:$_miss ($GUARD_OUT)"
+  fi
+fi
+
 # ---- RED: a label outside the CLOSED set ------------------------------------
 ws=$(make_ws red_label alpha beta)
 {

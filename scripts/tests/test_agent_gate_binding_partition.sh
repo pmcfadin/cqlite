@@ -37,10 +37,19 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 TAB=$(printf '\t')
 
-# check <name> <meta> <enabled> <want-ids> <want-names> <want-skip-substring-or-EMPTY>
+# check <name> <meta> <enabled> <want-ids> <want-names> <want-skip>
 #
 # Reads the helper's output exactly as the production caller does — same IFS, same single
 # `read` — so a delimiter regression fails HERE rather than in the lane.
+#
+# ALL THREE FIELDS ARE COMPARED EXACTLY (roborev round 6, G2). The skip field used to be a
+# SUBSTRING check, and the two-target case asserted only `gated_a` — so a regression that
+# DROPPED `gated_b` entirely still passed. A substring check over a multi-item field almost
+# never discriminates: it can only detect that something is present, never that nothing else
+# went missing, and "the skip census is complete" is the whole property that field carries.
+#
+# The cost is that every expectation must be spelled in full, which is the point: the
+# expectation is now a specification of the output rather than a hint about it.
 check() {
   local name="$1" meta="$2" enabled="$3" wid="$4" wnm="$5" wsk="$6"
   local gid gnm gsk
@@ -48,11 +57,7 @@ check() {
   local errs=""
   [ "$gid" = "$wid" ] || errs="$errs ids=[$gid] want=[$wid];"
   [ "$gnm" = "$wnm" ] || errs="$errs names=[$gnm] want=[$wnm];"
-  if [ -z "$wsk" ]; then
-    [ -z "$gsk" ] || errs="$errs skip=[$gsk] want empty;"
-  else
-    case "$gsk" in *"$wsk"*) ;; *) errs="$errs skip=[$gsk] want to contain [$wsk];" ;; esac
-  fi
+  [ "$gsk" = "$wsk" ] || errs="$errs skip=[$gsk] want=[$wsk];"
   if [ -z "$errs" ]; then ok "$name"; else bad "$name —$errs"; fi
 }
 
@@ -66,10 +71,10 @@ error_contract_table${TAB}error_contract_table${TAB}" \
 #    fields are BOTH empty and the empty LEADING field must survive the read. With the old
 #    TAB delimiter this returned ids=<the skip text>, which the census then printed as
 #    executed targets.
-check "all targets gated off -> empty ids AND empty names, skip populated (C3)" \
+check "all targets gated off -> empty ids AND names, and BOTH skips listed exactly (C3+G2)" \
   "gated_a${TAB}gated_a${TAB}observability
 gated_b${TAB}gated_b${TAB}observability" \
-  " default write-support " "" "" "gated_a(required-features[observability]:off[observability])"
+  " default write-support " "" "" "gated_a(required-features[observability]:off[observability]) gated_b(required-features[observability]:off[observability])"
 
 # 3) A single gated target, same property with one record.
 check "one gated target -> empty ids, empty names" \
@@ -89,9 +94,19 @@ check "required-features that are all enabled -> runnable" \
 
 # 6) Multiple required-features, only one missing, is still skipped — and the diagnostic
 #    names the SPECIFIC missing one rather than the whole list.
-check "partially-satisfied required-features -> skipped, naming the missing feature" \
+check "partially-satisfied required-features -> skipped; FULL reason compared, not a substring" \
   "multi${TAB}multi${TAB}write-support,observability" \
-  " default write-support " "" "" "off[observability]"
+  " default write-support " "" "" "multi(required-features[write-support,observability]:off[observability])"
+
+# 6b) THREE gated targets, all three required in the skip census. This is the case the old
+#     substring assertion provably could not catch: it asserted only the FIRST entry, so a
+#     regression dropping any later one passed. With an exact comparison, dropping `gated_c`
+#     changes the field and the case fails.
+check "three gated targets -> ALL THREE listed in the skip census, in order (G2)" \
+  "g_a${TAB}g_a${TAB}parquet
+g_b${TAB}g_b${TAB}parquet
+g_c${TAB}g_c${TAB}parquet" \
+  " default " "" "" "g_a(required-features[parquet]:off[parquet]) g_b(required-features[parquet]:off[parquet]) g_c(required-features[parquet]:off[parquet])"
 
 # 7) EMPTY metadata (the zero-integration-target package, i.e. cqlite-node today) yields
 #    three empty fields and NOT an error — zero is a derived fact, not a failure.
