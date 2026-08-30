@@ -263,7 +263,11 @@ required-features = ["cli-helpers"]
 # compile to an empty test binary that passes vacuously.
 [[test]]
 name = "issue_1704_scan_path_error_counts"
-required-features = ["observability-testing", "delta-scan"]
+# `lz4` too: every corpus case here reads `test_comp.lz4_table` (the bit-flip fixture
+# and its clean source), so without the decoder the target would still RUN and the
+# clean-fixture control could not decode its chunks — coverage that executes but
+# cannot assert what it claims.
+required-features = ["observability-testing", "delta-scan", "lz4"]
 
 [[bench]]
 name = "partition_lookup"

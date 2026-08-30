@@ -305,6 +305,34 @@ pub fn record_error_with_attrs(err: &Error, subsystem: &'static str, extra: &[At
     }
 }
 
+/// Mark the active span as errored WITHOUT counting the failure (issue #1704).
+///
+/// [`record_error`] does TWO things: it increments [`catalog::ERRORS_TOTAL`] and it
+/// marks the active span errored. Those have different owners. The COUNT belongs to
+/// the operation — exactly one per user-visible failure, which is why an inner step
+/// whose caller records must not increment. The SPAN belongs to the call that opened
+/// it, and an inner step that returns `Err` under an unmarked span reports a
+/// successful-looking span for a failed operation.
+///
+/// Suppressing the whole of `record_error` therefore over-suppresses. This is the
+/// span-only half, for a call site that defers only the counter. Gated identically to
+/// [`record_error`] so the marked/unmarked decision cannot diverge between the two.
+#[inline]
+pub fn mark_span_error(err: &Error) {
+    #[cfg(feature = "observability")]
+    {
+        if otel::metrics_active() {
+            otel::mark_span_error(err.obs_category());
+        } else {
+            let _ = err;
+        }
+    }
+    #[cfg(not(feature = "observability"))]
+    {
+        let _ = err;
+    }
+}
+
 /// Convenience: run a `Result`-returning closure and [`record_error`] on the
 /// `Err` path, returning the result unchanged. Lets call sites instrument an
 /// operation without restructuring their error handling.

@@ -195,14 +195,20 @@ impl SSTableReader {
                 );
             }
             Err(e) => {
-                if matches!(reporting, OpenErrorReporting::SelfReported) {
-                    // Record the error WHILE the open span is current so
-                    // `mark_span_error` marks THIS `sstable.reader.open` span. The
-                    // instrumented future has already completed here, so the span is
-                    // no longer entered; `in_scope` re-enters it for the duration of
-                    // the error-recording call.
-                    span.in_scope(|| obs::record_error(e, "reader"));
-                }
+                // Both arms run WHILE the open span is current: the instrumented
+                // future has already completed, so the span is no longer entered and
+                // `in_scope` re-enters it for the duration of the call.
+                //
+                // Only the COUNTER is deferred (issue #1704). The SPAN is this call's
+                // own and must be marked either way — suppressing all of
+                // `record_error` also suppressed its `mark_span_error`, so a deferred
+                // open returned `Err` under a span that still looked successful. Same
+                // shape as roborev E, where this function dropped the span outright:
+                // an observability change must not quietly lose span fidelity.
+                span.in_scope(|| match reporting {
+                    OpenErrorReporting::SelfReported => obs::record_error(e, "reader"),
+                    OpenErrorReporting::DeferredToCaller => obs::mark_span_error(e),
+                });
             }
         }
         result
