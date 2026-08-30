@@ -1560,6 +1560,46 @@ grep -q '^run-id: okprobe$' "$_dok.heartbeat" 2>/dev/null \
   && ok "11o.4 control: an ordinary file destination IS still published" \
   || bad "11o.4 control: an ordinary file destination is still published" "no beat at $_dok.heartbeat"
 
+echo "=== section 11t: beater-pid is validated because it MOVES A VERDICT (job 223) ==="
+# `beater-pid` is optional — an older gate's beats omit it — but it is NOT inert: a CHANGED value
+# between two samples counts as a beater RELAUNCH and therefore as PROGRESS, which yields RUNNING.
+# It was checked only for uniqueness and placement, so two DIFFERENT MALFORMED values read as a
+# restart and a pair of invalid beats could produce RUNNING. Absent stays safe (progression decides);
+# present-but-nonsense must not be believed.
+_bp="$TMP/bpid.txt"
+mk_summary "$_bp" run-P "INCOMPLETE (gate did not finish)"
+_mkbeat_bp() {  # <beater-pid-value> <age> ; empty value omits the field
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-P"; echo "gate-pid: 4242"
+    echo "parent-check: starttime"; echo "host: $(uname -n 2>/dev/null || echo somebox)"
+    [ -n "$1" ] && echo "beater-pid: $1"
+    echo "interval: 20"; echo "beat-seq: 7"; echo "beat-epoch: $(( $(date +%s) - $2 ))"
+    echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$_bp.heartbeat"
+}
+_bp_bad=0
+for _v in garbage-one 0 123456789012 " " -5 12.3; do
+  _mkbeat_bp "$_v" 4000
+  run_reader "$_bp" --run-id run-P
+  [ "$RC" = 4 ] || { _bp_bad=$((_bp_bad+1)); echo "     beater-pid '$_v' accepted (rc=$RC)"; }
+done
+[ "$_bp_bad" = 0 ] && ok "11t.1 a malformed beater-pid invalidates the beat (6 shapes)" \
+                   || bad "11t.1 a malformed beater-pid invalidates the beat" "$_bp_bad shape(s) accepted"
+# CONTROL 1: a VALID beater-pid must still be accepted, or 11t.1 passes by rejecting everything.
+_mkbeat_bp 12345 4000
+expect_reader "11t.2 control: a VALID beater-pid is accepted (stale => STALLED)" \
+  STALLED 3 "" -- "$_bp" --run-id run-P
+# CONTROL 2: an ABSENT beater-pid must remain acceptable — older gates omit it entirely.
+_mkbeat_bp "" 4000
+expect_reader "11t.3 control: an ABSENT beater-pid still degrades safely" \
+  STALLED 3 "" -- "$_bp" --run-id run-P
+# CONTROL 3, the one that matters most: validation must not break the LEGITIMATE restart signal.
+# Two DIFFERENT VALID pids under one run-id is a relaunch, which only a live gate performs => RUNNING.
+_mkbeat_bp 11111 5
+( sleep 1; _mkbeat_bp 22222 1 ) & _bpw=$!
+remember_pid "$_bpw"
+expect_reader "11t.4 control: two DIFFERENT VALID beater-pids still count as a relaunch => RUNNING" \
+  RUNNING 2 "" -- "$_bp" --run-id run-P
+wait "$_bpw" 2>/dev/null || true
+
 echo "=== section 11r: a FAILED lookup never proves a shared clock domain (job 221) ==="
 # Both the reader and the beater used `uname -n 2>/dev/null || echo unknown`. When BOTH lookups fail
 # the two literal `unknown`s compare EQUAL and were accepted as proof of a SHARED CLOCK DOMAIN — which

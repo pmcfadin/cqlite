@@ -1319,6 +1319,53 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# --- roborev job 223: the nonce and the run-id must come from ONE snapshot ----------------------
+# They were read by two separate `grep`s of a file a concurrent peer can rewrite between them, so the
+# launcher could pair ITS OWN nonce with a PEER's run-id, accept the peer's heartbeat as proof of
+# monitorability, and print a poll command bound to the wrong run. `gate-liveness.sh` had already
+# solved this for its own reads by deciding from an immutable copy; the launcher never inherited it.
+if grep -q '_snap_pair()' "$LAUNCHER" && grep -qF 'cp -- "$src" "$snap"' "$LAUNCHER"; then
+  ok "4b.127 the launcher decides from an immutable snapshot, not a live file"
+else
+  bad "4b.127 the launcher decides from an immutable snapshot" "no snapshot helper"
+fi
+# The defect SHAPE must be gone: no run-id read straight from the live artifacts.
+_lcode=$(grep -vE '^[[:space:]]*#' "$LAUNCHER")
+if printf '%s' "$_lcode" | grep -qE 'grep -m1 .\^run-id: . "\$(_hbdest|SUMMARY)"'; then
+  bad "4b.128 no run-id is read from a live artifact" "a direct read remains"
+else
+  ok "4b.128 no run-id is read from a live artifact"
+fi
+# Both facts must be checked against the SAME copy, so the nonce grep targets the snapshot too.
+if printf '%s' "$_lcode" | grep -qF 'grep -qxF "launch-nonce: $LAUNCH_NONCE" "$snap"'; then
+  ok "4b.129 the nonce is verified against that same snapshot"
+else
+  bad "4b.129 the nonce is verified against the same snapshot" "nonce and run-id may come from different reads"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  # Behavioural, on BOTH artifact-path shapes, because PRIVDIR (where the snapshot is taken) is created
+  # by one of two different blocks depending on whether the caller supplied paths.
+  _sp1="$TMP/snap1.txt"
+  _o1=$(bash "$LAUNCHER" --summary "$_sp1" --log "$TMP/snap1.log" -- --only fmt 2>&1); _r1=$?
+  _u1=$(printf '%s' "$_o1" | sed -n 's/^unit:  *//p'); [ -n "$_u1" ] && echo "$_u1" >> "$UNITS_FILE"
+  [ "$_r1" = 0 ] && ok "4b.130 explicit --summary AND --log still launch (snapshot path reachable)" \
+                 || bad "4b.130 explicit --summary and --log still launch" "exit $_r1: $_o1"
+  [ -n "$_u1" ] && systemctl --user stop "$_u1" >/dev/null 2>&1
+  _o2=$(bash "$LAUNCHER" -- --only fmt 2>&1); _r2=$?
+  _u2=$(printf '%s' "$_o2" | sed -n 's/^unit:  *//p'); [ -n "$_u2" ] && echo "$_u2" >> "$UNITS_FILE"
+  [ "$_r2" = 0 ] && ok "4b.131 DEFAULT paths still launch (the other PRIVDIR block)" \
+                 || bad "4b.131 default paths still launch" "exit $_r2: $_o2"
+  [ -n "$_u2" ] && systemctl --user stop "$_u2" >/dev/null 2>&1
+  # The snapshot must not litter: it is removed whether or not it matched.
+  if ls /tmp/cqlite-gate-*/launchsnap.* >/dev/null 2>&1; then
+    bad "4b.132 launch snapshots leave no litter" "$(ls /tmp/cqlite-gate-*/launchsnap.* 2>/dev/null | wc -l) left"
+  else
+    ok "4b.132 launch snapshots leave no litter"
+  fi
+else
+  skip=$((skip+3)); echo "SKIP 4b.130-4b.132 (no user systemd manager on this host)"
+fi
+
 # --- roborev job 213: a gate that finishes FAST must not be refused ------------------------------
 # The verification loop broke the moment the unit went inactive. A fast gate (a preflight refusal, a
 # tiny `--only`) can publish its terminal summary and exit in the window between the artifact reads

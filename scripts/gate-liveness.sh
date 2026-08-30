@@ -223,6 +223,19 @@ _beat_valid() {
       return 1
     fi
   done
+  # `beater-pid`, WHEN PRESENT, must be a plausible pid (roborev job 223, Low). It is optional — an
+  # older gate's beats omit it — but it is NOT inert: a CHANGED value between two samples counts as a
+  # beater relaunch and therefore as PROGRESS, which yields RUNNING. Checking only uniqueness and
+  # placement meant two DIFFERENT malformed values read as a restart, so a pair of invalid beats could
+  # produce a RUNNING verdict. Absent stays safe (progression decides); present-but-nonsense must not.
+  _bp=$(printf '%s\n' "$1" | sed -n 's/^beater-pid: //p' | head -1)
+  if [ -n "$_bp" ]; then
+    case "$_bp" in
+      ''|*[!0-9]*) return 1 ;;          # not a decimal
+      0) return 1 ;;                    # never a real pid
+    esac
+    [ "${#_bp}" -le 7 ] || return 1     # bounded: no pid namespace goes past 7 digits
+  fi
   for f in host beater-pid; do
     cnt=$(printf '%s\n' "$t" | grep -c "^$f: ")
     if [ "$cnt" -gt 1 ]; then

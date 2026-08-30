@@ -845,13 +845,33 @@ while [ "$_i" -lt 40 ]; do
   # `--only`) can reach its verdict before any beat is published; then the summary is the only
   # artifact that exists. Either way the NONCE is what establishes ownership — never a run-id we
   # could not have predicted.
-  if [ -z "$_new_rid" ] && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$_hbdest" 2>/dev/null; then
-    _cur=$(grep -m1 '^run-id: ' "$_hbdest" 2>/dev/null || true)
-    [ -n "$_cur" ] && _new_rid="${_cur#run-id: }"
+  # ONE IMMUTABLE SNAPSHOT PER ARTIFACT, not two opens (roborev job 223). The nonce and the run-id
+  # were read by two separate `grep`s of a file a concurrent peer can rewrite between them, so the
+  # launcher could pair ITS OWN nonce with a PEER's run-id — then accept the peer's heartbeat as proof
+  # of monitorability and print a poll command bound to the wrong run. `gate-liveness.sh` already
+  # solved exactly this for its own reads by copying each artifact once and deciding from the copy;
+  # the launcher simply never inherited that discipline.
+  #
+  # Both facts must come from the SAME bytes: a snapshot that carries our nonce AND a run-id is proof
+  # about one write, which two independent greps of a live file can never be.
+  _snap_pair() {  # <file> -> prints the run-id iff this snapshot also carries OUR nonce
+    local src="$1" snap rid
+    snap=$(mktemp "$PRIVDIR/launchsnap.XXXXXX" 2>/dev/null) || return 1
+    if ! cp -- "$src" "$snap" 2>/dev/null; then rm -f "$snap"; return 1; fi
+    if grep -qxF "launch-nonce: $LAUNCH_NONCE" "$snap" 2>/dev/null; then
+      rid=$(grep -m1 '^run-id: ' "$snap" 2>/dev/null || true)
+      [ -n "$rid" ] && printf '%s' "${rid#run-id: }"
+    fi
+    rm -f "$snap"
+    return 0
+  }
+  if [ -z "$_new_rid" ]; then
+    _cur=$(_snap_pair "$_hbdest" 2>/dev/null || true)
+    [ -n "$_cur" ] && _new_rid="$_cur"
   fi
-  if [ -z "$_new_rid" ] && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$SUMMARY" 2>/dev/null; then
-    _cur=$(grep -m1 '^run-id: ' "$SUMMARY" 2>/dev/null || true)
-    [ -n "$_cur" ] && _new_rid="${_cur#run-id: }"
+  if [ -z "$_new_rid" ]; then
+    _cur=$(_snap_pair "$SUMMARY" 2>/dev/null || true)
+    [ -n "$_cur" ] && _new_rid="$_cur"
   fi
   # (b) ...and the heartbeat must carry THAT run-id. A pre-existing beat cannot satisfy this,
   #     whatever it contains, so an unreplaceable file no longer masks an unmonitorable launch.

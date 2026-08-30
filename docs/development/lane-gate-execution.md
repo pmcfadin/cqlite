@@ -642,6 +642,38 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### The recurring shape in the LATE rounds: discipline present in one component, absent in its sibling
+
+The early findings here were genuine design mistakes — a lock that could not tell *slow* from *dead*,
+an "atomic rename" that was not a compare-and-swap. The late ones are a different animal, and naming
+the difference is what makes them predictable:
+
+| the discipline | where it already existed | where it was missing |
+|---|---|---|
+| decide from an immutable SNAPSHOT, never two reads of a live file | `gate-liveness.sh`, for all its own reads | the launcher, pairing its nonce with a run-id (job 223) |
+| a terminal verdict needs the CLOSING marker | the recognised-`RESULT` path, from the start | the unrecognised-token branch added one round earlier (job 221) |
+| exclude the exact artifact, never a subtree | `_tree_excluded`, narrowed twice | `.gitignore`, excluding the same paths (job 209) |
+| gate-control variables must not reach the gate | the caller-side deny-list | the user manager's environment block (job 211) |
+
+**Every one of these disciplines was already written down and demonstrated elsewhere in this same
+change.** The failure was never ignorance of the rule — it was not asking *where else does this
+apply?* That question is cheap to answer deliberately and expensive to have answered for you one
+review round at a time, so it is worth running as an explicit audit after any fix that establishes a
+rule: enumerate the sibling sites, and record the ones that are NOT instances along with why.
+
+Two results from running that audit here are worth keeping, because both are cases where the rule does
+**not** apply and the reasoning is what distinguishes them:
+
+- **`gate-pid` is consumed by the reader but deliberately unvalidated.** Unlike `host` and
+  `beater-pid`, it reaches exactly one place — a human-readable diagnostic string — and never a
+  comparison. It even renders as `${HB_PID:-unknown}`, and that is fine: **a placeholder in DISPLAY
+  text is harmless; the `host` defect was a placeholder entering a COMPARISON.** The distinction is
+  the whole content of the rule, and "it's only a diagnostic" is trustworthy only when checked, since
+  that exact claim about `host` was false.
+- **The launcher's one remaining read of a live artifact is not an instance.** It establishes ONE fact
+  from ONE read (does this beat carry our nonce). Job 223's defect was pairing TWO facts from TWO
+  reads, where a peer could write between them. A single read cannot be internally inconsistent.
+
 ### A false COMMENT licensed a real defect — and prose has been the weak layer throughout
 
 The beater read `HOST_NAME=$(uname -n 2>/dev/null || echo unknown)`, and the comment directly above it
