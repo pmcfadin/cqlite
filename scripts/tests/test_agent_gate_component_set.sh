@@ -76,6 +76,24 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
+# fx <dir>: `cd` into a FIXTURE directory, REFUSING an empty or non-existent path.
+#
+# `cd ""` SUCCEEDS in bash and leaves you in the CURRENT directory. Combined with the fixture
+# builders' `exit 1` — which, inside a `$( )`, exits only the SUBSTITUTION SUBSHELL and leaves
+# the caller's variable EMPTY — every `( cd "$fixture" && git … )` in this file was one failed
+# builder away from running IN THE LIVE CHECKOUT. Measured the hard way: an empty fixture path
+# made `git remote set-url origin <a deliberately leaky test URL>` rewrite THIS repository's
+# own origin, which then made the next gate run report an unmeasurable baseline about itself.
+# Every fixture `cd` in this file goes through this, so that class is a loud failure instead of
+# a silent mutation of the developer's tree.
+fx() {
+  if [ -z "${1:-}" ] || [ ! -d "$1" ]; then
+    echo "FATAL: fixture path '${1:-}' is empty or not a directory — refusing to run in the CURRENT tree" >&2
+    return 1
+  fi
+  fx "$1"
+}
+
 # Scratch root VALIDATED before anything is built under it: this script runs without
 # `errexit` (every case must run so one failure does not hide the rest), so an unchecked
 # `mktemp -d` would leave $tmp EMPTY, every derived path would resolve under `/`, and the
@@ -121,7 +139,7 @@ mkbaseline() {
   # silently converts every `--from-origin` fixture into the BEHIND shape and would make
   # the DECLARED and no-skew cases pass for the wrong reason (observed, first run).
   git -C "$bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
-  ( cd "$work" \
+  ( fx "$work" \
     && git init -q . \
     && git add -A \
     && git "${GIT_ID[@]}" commit -qm baseline \
@@ -144,8 +162,8 @@ mkbranch() {
   else
     mkdir -p "$root/scripts"
     printf 'branch fixture\n' >"$root/README.md"
-    ( cd "$root" && git init -q . ) >/dev/null 2>&1
-    [ "$bare" = - ] || ( cd "$root" && git remote add origin "$bare" ) >/dev/null 2>&1
+    ( fx "$root" && git init -q . ) >/dev/null 2>&1
+    [ "$bare" = - ] || ( fx "$root" && git remote add origin "$bare" ) >/dev/null 2>&1
   fi
   mkdir -p "$root/scripts"
   if [ "$prog" = - ]; then
@@ -166,7 +184,7 @@ mkbranch() {
   # that has nothing to do with what it tests.
   agent_gate_pin_canonical_remote "$root/scripts/agent-gate.sh" "$bare" \
     || { echo "FATAL: could not pin the canonical identity in branch fixture '$name'" >&2; exit 1; }
-  ( cd "$root" && git add -A && git "${GIT_ID[@]}" commit -qm branch ) >/dev/null 2>&1 \
+  ( fx "$root" && git add -A && git "${GIT_ID[@]}" commit -qm branch ) >/dev/null 2>&1 \
     || { echo "FATAL: could not commit branch fixture '$name'" >&2; exit 1; }
   printf '%s\n' "$root"
 }
@@ -251,7 +269,7 @@ ADD_SENTINEL="s|^COMPONENTS=(file-size|COMPONENTS=($SENTINEL file-size|"
 # notices to stderr on every invocation.
 hook() {
   local repo="$1" mode="${2:-full}"
-  ( cd "$repo" && bash "$repo/scripts/agent-gate.sh" --component-set-line "$mode" 2>/dev/null )
+  ( fx "$repo" && bash "$repo/scripts/agent-gate.sh" --component-set-line "$mode" 2>/dev/null )
 }
 field() { # field <name> <hook-output>
   printf '%s\n' "$2" | grep "^$1: " | sed "s/^$1: //"
@@ -264,7 +282,7 @@ field() { # field <name> <hook-output>
 #    scripts and a PASS that means nothing).
 # ---------------------------------------------------------------------------
 base_ok=$(mkbaseline base-ok "$ADD_SENTINEL")
-base_list=$( cd "$tmp/base-ok-src" && bash scripts/agent-gate.sh --list 2>/dev/null )
+base_list=$( fx "$tmp/base-ok-src" && bash scripts/agent-gate.sh --list 2>/dev/null )
 if grep -qx -- "$SENTINEL" <<<"$base_list" && [ "$(printf '%s\n' "$base_list" | wc -l)" -gt 30 ]; then
   ok "3544-fixture: the baseline fixture's --list really carries the sentinel component"
 else
@@ -275,7 +293,7 @@ fi
 # baseline derivation would recurse (and, with an unreachable origin, could not answer at
 # all). Proven where it is observable: a repo with a DEAD origin still lists fine.
 dead_list_repo=$(mkbranch dead-list "$tmp/nonexistent-origin.git" - )
-dl_out=$( cd "$dead_list_repo" && bash scripts/agent-gate.sh --list 2>/dev/null ); dl_rc=$?
+dl_out=$( fx "$dead_list_repo" && bash scripts/agent-gate.sh --list 2>/dev/null ); dl_rc=$?
 if [ "$dl_rc" -eq 0 ] && [ "$(printf '%s\n' "$dl_out" | wc -l)" -gt 30 ] \
    && ! grep -q 'component-set' <<<"$dl_out"; then
   ok "3544-list-no-preflight: --list exits at arg parse (no fetch, no pre-flight, no recursion)"
@@ -396,7 +414,7 @@ fi
 
 # 3d. the baseline does not carry the gate script at all under scripts/
 base_nofile=$(mkbaseline base-nofile - )
-( cd "$tmp/base-nofile-src" && git rm -q scripts/agent-gate.sh \
+( fx "$tmp/base-nofile-src" && git rm -q scripts/agent-gate.sh \
   && git "${GIT_ID[@]}" commit -qm "drop the gate" \
   && git push -qf "$base_nofile" HEAD:refs/heads/main ) >/dev/null 2>&1
 nofile=$(mkbranch nofile "$base_nofile" - )
@@ -449,7 +467,7 @@ mkdir -p "$mt_stub"
   printf 'exec %s "$@"\n' "$(command -v mktemp)"
 } >"$mt_stub/mktemp"
 chmod +x "$mt_stub/mktemp"
-mt_out=$( cd "$mt_repo" && PATH="$mt_stub:$PATH" bash "$mt_repo/scripts/agent-gate.sh" \
+mt_out=$( fx "$mt_repo" && PATH="$mt_stub:$PATH" bash "$mt_repo/scripts/agent-gate.sh" \
             --component-set-line full 2>/dev/null )
 if [ "$(field VERDICT "$mt_out")" = UNMEASURED ] \
    && [ "$(field KIND "$mt_out")" = baseline-workspace ] \
@@ -476,13 +494,13 @@ for _t in bash sh sed awk grep cut tr mktemp date basename dirname cat head tail
 done
 nt_repo=$(mkbranch notool "$base_ok" - )
 ln -sf "$(command -v git)" "$nt_bin/git"
-nt_control=$( cd "$nt_repo" && PATH="$nt_bin" bash "$nt_repo/scripts/agent-gate.sh" \
+nt_control=$( fx "$nt_repo" && PATH="$nt_bin" bash "$nt_repo/scripts/agent-gate.sh" \
                 --component-set-line full 2>/dev/null )
 rm -f "$nt_bin/git"
 if [ "$(field KIND "$nt_control")" != ok ]; then
   echo "skip - 3544-no-tool: the curated tool PATH cannot start the gate on this host (control KIND='$(field KIND "$nt_control")') — the no-tool branch is not exercisable here"
 else
-  nt_out=$( cd "$nt_repo" && PATH="$nt_bin" bash "$nt_repo/scripts/agent-gate.sh" \
+  nt_out=$( fx "$nt_repo" && PATH="$nt_bin" bash "$nt_repo/scripts/agent-gate.sh" \
               --component-set-line full 2>/dev/null )
   if [ "$(field VERDICT "$nt_out")" = UNMEASURED ] \
      && [ "$(field KIND "$nt_out")" = no-tool ] \
@@ -513,7 +531,7 @@ fi
 #     is still running, and whether the command ran at all.
 # ---------------------------------------------------------------------------
 bound_of() { # bound_of <PATH> -> the mechanism token the gate reports under that PATH
-  ( cd "$behind" && PATH="$1" bash "$behind/scripts/agent-gate.sh" --component-set-bound 2>/dev/null ) \
+  ( fx "$behind" && PATH="$1" bash "$behind/scripts/agent-gate.sh" --component-set-bound 2>/dev/null ) \
     | sed -n 's/^MECHANISM: //p'
 }
 bin_no_timeout=$(mkbin nowd timeout gtimeout)          # watchdog territory
@@ -556,7 +574,7 @@ if [ -z "$wd_outer" ]; then
   echo "skip - 3544-bound-enforced: no host 'timeout' to bound this case from the OUTSIDE; letting the mechanism under test bound its own test would be circular"
   echo "skip - 3544-bound-grandchild: same precondition (no outer host bound available)"
 else
-wd_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+wd_rc_line=$( fx "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
                 --component-set-bounded-run 1 "$ticker" 2>/dev/null | sed -n 's/^RC: //p' )
 ticks_at_return=$(wc -l <"$tick" | tr -d ' ')
 sleep 3
@@ -578,7 +596,7 @@ gparent="$tmp/grandchild-parent.sh"
 gpid="$tmp/grandchild.pid"
 mk_ticker "$gparent" "$gtick" "$gpid" 0 1
 : >"$gtick"
-g_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+g_rc_line=$( fx "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
                --component-set-bounded-run 1 "$gparent" 2>/dev/null | sed -n 's/^RC: //p' )
 g_at_return=$(wc -l <"$gtick" | tr -d ' ')
 sleep 3
@@ -607,7 +625,7 @@ mk_ticker "$tignore" "$titick" "$tipid" 1 0
 for _mech_path in "$PATH" "$bin_no_timeout"; do
   _mech=$(bound_of "$_mech_path")
   : >"$titick"
-  _ti_rc=$( cd "$behind" && PATH="$_mech_path" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+  _ti_rc=$( fx "$behind" && PATH="$_mech_path" $wd_outer bash "$behind/scripts/agent-gate.sh" \
               --component-set-bounded-run 1 "$tignore" 2>/dev/null | sed -n 's/^RC: //p' )
   _ti_at=$(wc -l <"$titick" | tr -d ' ')
   sleep 3
@@ -637,7 +655,7 @@ mk_ticker "$gtterm" "$gttick" "$gtpid" 1 1
 for _mech_path in "$PATH" "$bin_no_timeout"; do
   _mech=$(bound_of "$_mech_path")
   : >"$gttick"
-  _gt_rc=$( cd "$behind" && PATH="$_mech_path" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+  _gt_rc=$( fx "$behind" && PATH="$_mech_path" $wd_outer bash "$behind/scripts/agent-gate.sh" \
               --component-set-bounded-run 1 "$gtterm" 2>/dev/null | sed -n 's/^RC: //p' )
   _gt_at=$(wc -l <"$gttick" | tr -d ' ')
   sleep 3
@@ -662,7 +680,7 @@ done
 ghang="$tmp/hanging-git.sh"
 { printf '#!/bin/sh\n'; printf 'exec sleep 300\n'; } >"$ghang"
 chmod +x "$ghang"
-gh_rc_line=$( cd "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
+gh_rc_line=$( fx "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
                 --component-set-bounded-run 1 "$ghang" 2>/dev/null | sed -n 's/^RC: //p' )
 if [ "$gh_rc_line" = 124 ]; then
   ok "3544-bound-hanging-git: a hanging git-shaped command is bounded (rc 124), not waited on forever"
@@ -675,7 +693,7 @@ fi
 # reporting "unboundable" while still running the command unbounded would fix nothing.
 nb_marker="$tmp/must-not-run-marker"
 rm -f "$nb_marker"
-nb_rc_line=$( cd "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
+nb_rc_line=$( fx "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
                 --component-set-bounded-run 1 touch "$nb_marker" 2>/dev/null | sed -n 's/^RC: //p' )
 if [ "$nb_rc_line" = 199 ] && [ ! -e "$nb_marker" ]; then
   ok "3544-bound-none-refuses: with no bounding mechanism the command is REFUSED (rc 199), not run unbounded"
@@ -687,14 +705,14 @@ fi
 # certifying modes and ADVISORY under --lite — and the fetch is never attempted, so there is
 # no branch on which this pre-flight can hang. Positive control first: the SAME curated PATH
 # WITH a bounding tool must reach a real verdict, or the case would pass for the wrong reason.
-ub_control=$( cd "$behind" && PATH="$bin_no_timeout" bash "$behind/scripts/agent-gate.sh" \
+ub_control=$( fx "$behind" && PATH="$bin_no_timeout" bash "$behind/scripts/agent-gate.sh" \
                 --component-set-line full 2>/dev/null )
 if [ "$(field KIND "$ub_control")" != ok ]; then
   echo "skip - 3544-unboundable: the curated tool PATH cannot complete a probe on this host (control KIND='$(field KIND "$ub_control")') — the unboundable branch is not exercisable here"
 else
-  ub_out=$( cd "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
+  ub_out=$( fx "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
               --component-set-line full 2>/dev/null )
-  ub_lite=$( cd "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
+  ub_lite=$( fx "$behind" && PATH="$bin_no_bound" bash "$behind/scripts/agent-gate.sh" \
               --component-set-line lite 2>/dev/null )
   ub_line=$(field COMPONENT_SET_LINE "$ub_out")
   if [ "$(field VERDICT "$ub_out")" = UNMEASURED ] \
@@ -734,7 +752,7 @@ fi
 # The fixpoint: BOTH behind AND removing a component must FAIL as BEHIND first, and can
 # only reach the DECLARED case after rebasing. Same tree as `declared`, except origin/main
 # has moved on (a second baseline commit), so HEAD is no longer a descendant of its tip.
-( cd "$tmp/base-rm-src" && printf 'moved on\n' >>README.md \
+( fx "$tmp/base-rm-src" && printf 'moved on\n' >>README.md \
   && git "${GIT_ID[@]}" commit -qam "advance main" \
   && git push -q "$base_rm" HEAD:refs/heads/main ) >/dev/null 2>&1
 fp_out=$(hook "$declared")
@@ -771,8 +789,8 @@ else
   # The fixture's own precondition, asserted rather than assumed: the WORKING copy must no
   # longer list the component while HEAD's committed copy still does. Without this the case
   # could pass because the clone was broken rather than because the guard works.
-  unc_wt_has=$( cd "$unc" && bash scripts/agent-gate.sh --list 2>/dev/null | grep -cx -- "$UNC_REMOVED" )
-  unc_head_has=$( cd "$unc" && git show "HEAD:scripts/agent-gate.sh" 2>/dev/null \
+  unc_wt_has=$( fx "$unc" && bash scripts/agent-gate.sh --list 2>/dev/null | grep -cx -- "$UNC_REMOVED" )
+  unc_head_has=$( fx "$unc" && git show "HEAD:scripts/agent-gate.sh" 2>/dev/null \
                     | grep -c "^COMPONENTS=(.* $UNC_REMOVED " )
   unc_out=$(hook "$unc")
   unc_line=$(field COMPONENT_SET_LINE "$unc_out")
@@ -797,7 +815,7 @@ else
   # remedy here (there is nothing to rebase) and the committed-provenance sentence must not
   # appear, so the block must name the uncommitted edit and say commit-or-restore.
   unc_sum="$tmp/uncommitted-summary.txt"
-  ( cd "$unc" && AGENT_GATE_SUMMARY_FILE="$unc_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+  ( fx "$unc" && AGENT_GATE_SUMMARY_FILE="$unc_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
       bash scripts/agent-gate.sh >"$tmp/uncommitted.log" 2>&1 ); unc_rc=$?
   if [ "$unc_rc" -ne 0 ] \
      && grep -q '^RESULT: FAIL' "$unc_sum" 2>/dev/null \
@@ -857,7 +875,7 @@ fi
 #     real, through the shipped code path, with ancestry still `yes`.
 base_hu=$(mkbaseline base-headmiss "$ADD_SENTINEL")
 hu=$(mkbranch headmiss "$base_hu" - --from-origin)
-( cd "$hu" && git rm -q --cached scripts/agent-gate.sh \
+( fx "$hu" && git rm -q --cached scripts/agent-gate.sh \
    && git "${GIT_ID[@]}" commit -qm "drop the gate from the index" ) >/dev/null 2>&1
 hu_out=$(hook "$hu")
 hu_line=$(field COMPONENT_SET_LINE "$hu_out")
@@ -898,7 +916,7 @@ mkdir -p "$ind/scripts"
 cp "$GATE" "$ind/scripts/agent-gate.sh"
 agent_gate_pin_canonical_remote "$ind/scripts/agent-gate.sh" "$base_ind" \
   || { echo "FATAL: could not pin the canonical identity in the indeterminate fixture" >&2; exit 1; }
-( cd "$ind" && git init -q . && git remote add origin "$base_ind" ) >/dev/null 2>&1
+( fx "$ind" && git init -q . && git remote add origin "$base_ind" ) >/dev/null 2>&1
 ind_out=$(hook "$ind")
 ind_line=$(field COMPONENT_SET_LINE "$ind_out")
 ind_sha=$(git -C "$base_ind" rev-parse refs/heads/main)
@@ -922,7 +940,7 @@ fi
 # `hint:` must name the ancestry probe, and must NOT offer `git rebase` — which is not the
 # remedy for an unresolvable HEAD.
 ind_sum="$tmp/indeterminate-summary.txt"
-( cd "$ind" && AGENT_GATE_SUMMARY_FILE="$ind_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+( fx "$ind" && AGENT_GATE_SUMMARY_FILE="$ind_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh >"$tmp/indeterminate.log" 2>&1 ); ind_rc=$?
 if [ "$ind_rc" -ne 0 ] \
    && grep -q '^RESULT: FAIL' "$ind_sum" 2>/dev/null \
@@ -942,7 +960,7 @@ fi
 ind_lite=$(hook "$ind" lite)
 ind_lite_line=$(field COMPONENT_SET_LINE "$ind_lite")
 ind_lsum="$tmp/indeterminate-lite.txt"
-( cd "$ind" && AGENT_GATE_SUMMARY_FILE="$ind_lsum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+( fx "$ind" && AGENT_GATE_SUMMARY_FILE="$ind_lsum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh --lite >"$tmp/indeterminate-lite.log" 2>&1 ) >/dev/null 2>&1
 if [ "$(field STRICT "$ind_lite")" = no ] \
    && grep -q '^component-set: ADVISORY-INDETERMINATE (#3544)' <<<"$ind_lite_line" \
@@ -981,14 +999,14 @@ printf 'shallow fixture\n' >"$sh_work/README.md"
 git init -q --bare "$sh_bare" >/dev/null 2>&1
 git -C "$sh_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
 (
-  cd "$sh_work" && git init -q . \
+  fx "$sh_work" && git init -q . \
     && git add -A && git "${GIT_ID[@]}" commit -qm c1 \
     && printf 'c2\n' >>README.md && git "${GIT_ID[@]}" commit -qam c2 \
     && printf 'c3\n' >>README.md && git "${GIT_ID[@]}" commit -qam c3
 ) >/dev/null 2>&1 || { echo "FATAL: could not build the shallow fixture's early history" >&2; exit 1; }
 sh_c3=$(git -C "$sh_work" rev-parse HEAD)
 (
-  cd "$sh_work" && cp "$GATE" scripts/agent-gate.sh \
+  fx "$sh_work" && cp "$GATE" scripts/agent-gate.sh \
     && git "${GIT_ID[@]}" commit -qam "c4: remove the component" \
     && printf 'c5\n' >>README.md && git "${GIT_ID[@]}" commit -qam c5 \
     && git push -q "$sh_bare" HEAD:refs/heads/main
@@ -999,7 +1017,7 @@ sh_c3=$(git -C "$sh_work" rev-parse HEAD)
 # a duplicate of 4 (measured: the first cut cloned by path and was not shallow at all).
 git clone -q --depth 1 "file://$sh_bare" "$tmp/shallow-branch" >/dev/null 2>&1
 git clone -q "$sh_bare" "$tmp/complete-branch" >/dev/null 2>&1
-( cd "$tmp/shallow-branch" && git remote set-url origin "$sh_bare" ) >/dev/null 2>&1
+( fx "$tmp/shallow-branch" && git remote set-url origin "$sh_bare" ) >/dev/null 2>&1
 # …and NOW move the baseline back to C3, so both clones hold C5 while origin/main names C3.
 git -C "$sh_bare" update-ref refs/heads/main "$sh_c3" >/dev/null 2>&1
 for _r in "$tmp/shallow-branch" "$tmp/complete-branch"; do
@@ -1051,7 +1069,7 @@ same=$(mkbranch same "$base_same" - --from-origin)
 s_out=$(hook "$same")
 s_line=$(field COMPONENT_SET_LINE "$s_out")
 s_sha=$(git -C "$base_same" rev-parse refs/heads/main)
-n_components=$( cd "$same" && bash scripts/agent-gate.sh --list 2>/dev/null | wc -l | tr -d ' ' )
+n_components=$( fx "$same" && bash scripts/agent-gate.sh --list 2>/dev/null | wc -l | tr -d ' ' )
 if [ "$(field VERDICT "$s_out")" = PASS ] \
    && grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha)$" <<<"$s_line"; then
   ok "3544-no-skew: an in-sync tree stamps an affirmative PASS naming its baseline sha"
@@ -1092,7 +1110,7 @@ fi
 base_fresh=$(mkbaseline base-fresh - )
 fresh=$(mkbranch fresh "$base_fresh" - --from-origin)
 fresh_cached_before=$(git -C "$fresh" rev-parse refs/remotes/origin/main 2>/dev/null)
-( cd "$tmp/base-fresh-src" && printf 'advanced after the clone\n' >>README.md \
+( fx "$tmp/base-fresh-src" && printf 'advanced after the clone\n' >>README.md \
   && git "${GIT_ID[@]}" commit -qam advance \
   && git push -q "$base_fresh" HEAD:refs/heads/main ) >/dev/null 2>&1
 fresh_tip=$(git -C "$base_fresh" rev-parse refs/heads/main)
@@ -1151,7 +1169,7 @@ else
     printf 'exit $rc\n'
   } >"$priv_bin/git"
   chmod +x "$priv_bin/git"
-  pv_out=$( cd "$priv" && PATH="$priv_bin:$PATH" bash "$priv/scripts/agent-gate.sh" \
+  pv_out=$( fx "$priv" && PATH="$priv_bin:$PATH" bash "$priv/scripts/agent-gate.sh" \
               --component-set-line full 2>/dev/null )
   pv_sha=$(field SHA "$pv_out")
   pv_clobbered=$(git -C "$priv" rev-parse --verify --quiet 'FETCH_HEAD^{commit}' 2>/dev/null || echo none)
@@ -1193,7 +1211,7 @@ tagged=$(mkbranch tagged "$base_tag" - --from-origin)
 git -C "$tagged" config remote.origin.tagOpt --tags
 # A NEW tag on the baseline, created AFTER the fixture cloned it — so an auto-following
 # fetch would have something to write.
-( cd "$tmp/base-tag-src" && git "${GIT_ID[@]}" tag -a v99.99.99-selftest -m 'tag the baseline' \
+( fx "$tmp/base-tag-src" && git "${GIT_ID[@]}" tag -a v99.99.99-selftest -m 'tag the baseline' \
     && git push -q "$base_tag" refs/tags/v99.99.99-selftest ) >/dev/null 2>&1
 tags_before=$(git -C "$tagged" for-each-ref --format='%(refname) %(objectname)' refs/tags | sort)
 tg_out=$(hook "$tagged")
@@ -1265,7 +1283,7 @@ fi
 # ---------------------------------------------------------------------------
 sum="$tmp/full-summary.txt"
 fout="$tmp/full.log"
-( cd "$behind" && AGENT_GATE_SUMMARY_FILE="$sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+( fx "$behind" && AGENT_GATE_SUMMARY_FILE="$sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh >"$fout" 2>&1 ); frc=$?
 if [ "$frc" -ne 0 ] \
    && grep -q '^RESULT: FAIL' "$sum" 2>/dev/null \
@@ -1298,7 +1316,7 @@ fi
 # pre-flight let the run through and stamped its PASS line into a real block.
 sum2="$tmp/delta-insync-summary.txt"
 fout2="$tmp/delta-insync.log"
-( cd "$same" && AGENT_GATE_SUMMARY_FILE="$sum2" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+( fx "$same" && AGENT_GATE_SUMMARY_FILE="$sum2" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh --delta HEAD~1 --anchor-run-id selftest >"$fout2" 2>&1 ) >/dev/null 2>&1
 if grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha)$" "$sum2" 2>/dev/null \
    && grep -q '^==== AGENT-GATE DELTA SUMMARY ====' "$sum2" 2>/dev/null \
@@ -1312,7 +1330,7 @@ fi
 # …and the same --delta on the BEHIND tree must be REFUSED BY THE PRE-FLIGHT, before the
 # delta's own classification: --delta is a certifying mode, so it fails closed on skew.
 sum3="$tmp/delta-behind-summary.txt"
-( cd "$behind" && AGENT_GATE_SUMMARY_FILE="$sum3" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+( fx "$behind" && AGENT_GATE_SUMMARY_FILE="$sum3" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh --delta HEAD --anchor-run-id selftest >/dev/null 2>&1 ); drc=$?
 if [ "$drc" -ne 0 ] \
    && grep -q '^RESULT: FAIL' "$sum3" 2>/dev/null \
@@ -1333,7 +1351,7 @@ fi
 #     PRESENCE of component rows, never from RESULT.)
 # ---------------------------------------------------------------------------
 lsum="$tmp/lite-summary.txt"
-( cd "$behind" && AGENT_GATE_SUMMARY_FILE="$lsum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+( fx "$behind" && AGENT_GATE_SUMMARY_FILE="$lsum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh --lite >"$tmp/lite.log" 2>&1 ) >/dev/null 2>&1
 if grep -q '^==== AGENT-GATE LITE SUMMARY ====' "$lsum" 2>/dev/null \
    && grep -q "^component-set: ADVISORY-BEHIND (#3544).*$SENTINEL" "$lsum" 2>/dev/null \
@@ -1583,7 +1601,7 @@ fi
 man_home="$tmp/manual-emit"
 mkdir -p "$man_home/scripts"
 cp "$GATE" "$man_home/scripts/agent-gate.sh"
-man_block=$( cd "$man_home" && AGENT_GATE_SUMMARY_FILE="$man_home/sum.txt" \
+man_block=$( fx "$man_home" && AGENT_GATE_SUMMARY_FILE="$man_home/sum.txt" \
                AGENT_GATE_INTEGRITY_SELFTEST=marker CQLITE_GATE_NO_NICE=1 \
                bash scripts/agent-gate.sh 2>/dev/null )
 man_lines=$(printf '%s\n' "$man_block" | grep -c '^component-set: ')
@@ -1926,7 +1944,7 @@ cp "$GATE" "$fk_work/scripts/agent-gate.sh"
 printf 'fork fixture\n' >"$fk_work/README.md"
 git init -q --bare "$fk_bare" >/dev/null 2>&1
 git -C "$fk_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
-( cd "$fk_work" && git init -q . && git add -A && git "${GIT_ID[@]}" commit -qm fork \
+( fx "$fk_work" && git init -q . && git add -A && git "${GIT_ID[@]}" commit -qm fork \
   && git push -q "$fk_bare" HEAD:refs/heads/main ) >/dev/null 2>&1 \
   || { echo "FATAL: could not build the fork fixture" >&2; exit 1; }
 git clone -q "$fk_bare" "$tmp/fork-branch" >/dev/null 2>&1
@@ -1939,7 +1957,7 @@ git clone -q "$fk_bare" "$tmp/fork-control" >/dev/null 2>&1
 fk_upstream="$tmp/fork-upstream/cqlite.git"
 mkdir -p "$tmp/fork-upstream"
 cp -R "$fk_bare" "$fk_upstream"
-( cd "$tmp/fork-control" && git remote set-url origin "$fk_upstream" ) >/dev/null 2>&1
+( fx "$tmp/fork-control" && git remote set-url origin "$fk_upstream" ) >/dev/null 2>&1
 agent_gate_pin_canonical_remote "$tmp/fork-branch/scripts/agent-gate.sh" "$fk_upstream" \
   || { echo "FATAL: could not pin the fork fixture's gate copy" >&2; exit 1; }
 agent_gate_pin_canonical_remote "$tmp/fork-control/scripts/agent-gate.sh" "$fk_upstream" \
@@ -1968,7 +1986,7 @@ fi
 # this reader to "restore access to origin/main" would send them to fix the wrong thing.
 fk_lite=$(hook "$tmp/fork-branch" lite)
 fk_sum="$tmp/fork-summary.txt"
-( cd "$tmp/fork-branch" && AGENT_GATE_SUMMARY_FILE="$fk_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+( fx "$tmp/fork-branch" && AGENT_GATE_SUMMARY_FILE="$fk_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh >"$tmp/fork.log" 2>&1 ); fk_rc=$?
 if [ "$(field STRICT "$fk_lite")" = no ] \
    && grep -q '^component-set: ADVISORY-UNMEASURED (#3544)' <<<"$(field COMPONENT_SET_LINE "$fk_lite")" \
@@ -1989,7 +2007,7 @@ fi
 git clone -q "$fk_upstream" "$tmp/nourl-branch" >/dev/null 2>&1
 agent_gate_pin_canonical_remote "$tmp/nourl-branch/scripts/agent-gate.sh" "$fk_upstream" \
   || { echo "FATAL: could not pin the no-URL fixture's gate copy" >&2; exit 1; }
-( cd "$tmp/nourl-branch" && git config --unset-all remote.origin.url \
+( fx "$tmp/nourl-branch" && git config --unset-all remote.origin.url \
    && git config --add remote.origin.url "" ) >/dev/null 2>&1
 nu_out=$(hook "$tmp/nourl-branch")
 nu_line=$(field COMPONENT_SET_LINE "$nu_out")
@@ -2013,9 +2031,9 @@ fi
 # by a check that never ran.
 leak_secret="s3cr3t-3544-must-not-appear"
 leak=$(mkbranch leaky "$base_same" - --from-origin)
-( cd "$leak" && git remote set-url origin "https://x-access-token:$leak_secret@evil.example/pmcfadin/cqlite.git" ) >/dev/null 2>&1
+( fx "$leak" && git remote set-url origin "https://x-access-token:$leak_secret@evil.example/pmcfadin/cqlite.git" ) >/dev/null 2>&1
 leak_sum="$tmp/leak-summary.txt"
-( cd "$leak" && AGENT_GATE_SUMMARY_FILE="$leak_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+( fx "$leak" && AGENT_GATE_SUMMARY_FILE="$leak_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh >"$tmp/leak.log" 2>&1 ); leak_rc=$?
 leak_hook=$(hook "$leak")
 if [ "$leak_rc" -ne 0 ] \

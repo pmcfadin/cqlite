@@ -59,6 +59,11 @@ GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 # summary path and mutation stays inside this run's mktemp namespace.
 # ---------------------------------------------------------------------------
 mkrepo() { # mkrepo <name> [extra `git init` args…] -> echoes the repo path
+  # `$tmp` is validated at the top of this file and `$1` is a literal at every call site, so
+  # `$root` cannot be empty here — but `cd ""` SUCCEEDS in bash and would run the fixture's
+  # git commands in the LIVE checkout, so the invariant is asserted rather than assumed.
+  [ -n "${1:-}" ] && [ -n "${tmp:-}" ] \
+    || { echo "FATAL: mkrepo needs a name and a scratch root" >&2; exit 1; }
   local root="$tmp/$1"; shift
   mkdir -p "$root/scripts"
   cp "$GATE" "$root/scripts/agent-gate.sh"

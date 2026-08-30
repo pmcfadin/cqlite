@@ -90,7 +90,12 @@ trap 'rm -rf "$tmp"' EXIT
 # origin/main an ancestor of HEAD with an identical component set — so the pre-flight
 # PASSes and the case still measures what it says it measures.
 add_local_origin() {
-  local repo="$1"
+  local repo="${1:-}"
+  # An EMPTY/absent path would make the `( cd "$repo" && git remote add … )` below run in the
+  # CURRENT tree — `cd ""` succeeds in bash and stays put. Refused loudly instead (the class
+  # cost a real `git remote set-url origin` on a live checkout in the component-set suite).
+  [ -n "$repo" ] && [ -d "$repo" ] \
+    || { echo "FATAL: add_local_origin needs an existing fixture dir (got '${1:-}')" >&2; exit 1; }
   git init -q --bare "$repo.origin.git" >/dev/null 2>&1
   git -C "$repo.origin.git" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
   ( cd "$repo" \
@@ -117,7 +122,9 @@ add_local_origin() {
 # anchor..HEAD diff — so that case REFUSED naming `scripts/agent-gate.sh` instead of the
 # unbuilt module, i.e. passed/failed for a reason unrelated to what it tests (measured).
 copy_gate_with_pin() {
-  local repo="$1"
+  local repo="${1:-}"
+  [ -n "$repo" ] \
+    || { echo "FATAL: copy_gate_with_pin needs a fixture dir" >&2; exit 1; }
   mkdir -p "$repo/scripts"
   cp "$GATE" "$repo/scripts/agent-gate.sh"
   agent_gate_pin_canonical_remote "$repo/scripts/agent-gate.sh" "$repo.origin.git" \
