@@ -7133,15 +7133,25 @@ run_delivery_telemetry() {
         "Ran "*" test"*) ran="${line#Ran }"; ran="${ran%% *}" ;;
       esac
     done < "$mlog"
-    if [ -z "$ran" ]; then
-      status=FAIL
-      echo "--- [$name] FAILED: $(basename "$m") emitted no 'Ran N tests' line, so this lane could not measure whether it executed ANYTHING ---"
-      echo "    (an unmeasurable count is a FAIL, never an assumed pass: a module"
-      echo "     that ran nothing and one that could not be read are the same"
-      echo "     observation to this guard — issue #3559)"
-      continue
-    fi
-    if [ "$ran" -eq 0 ] 2>/dev/null; then
+    # DIGITS-ONLY BEFORE ARITHMETIC, and this is not defensive padding — the
+    # first version of this guard was itself the fail-open shape it exists to
+    # catch (roborev finding, #3559). `[ "$ran" -eq 0 ] 2>/dev/null` on a
+    # non-numeric $ran (`Ran unknown tests`) makes test(1) EXIT 2 with its
+    # complaint swallowed by the redirect, `if` reads that non-zero exit as
+    # "not zero tests", and the module is marked PASS on a count nobody could
+    # read. An empty and a non-numeric count are the same state — UNMEASURABLE —
+    # so they take one branch, and the arithmetic below runs only on digits.
+    case "$ran" in
+      ''|*[!0-9]*)
+        status=FAIL
+        echo "--- [$name] FAILED: $(basename "$m") gave no readable test count (parsed ${ran:-<nothing>} from its 'Ran N tests' line) ---"
+        echo "    (an unmeasurable count is a FAIL, never an assumed pass: a module"
+        echo "     that ran nothing and one whose count could not be read are the"
+        echo "     same observation to this guard — issue #3559)"
+        continue
+        ;;
+    esac
+    if [ "$ran" -eq 0 ]; then
       status=FAIL
       echo "--- [$name] FAILED: $(basename "$m") executed 0 tests ---"
       echo "    (the module is in the DERIVED set and exited 0, which is exactly"

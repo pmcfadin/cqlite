@@ -123,13 +123,49 @@ class TimelineReplayTests(unittest.TestCase):
             ("two full cycles, the last one before the merge",
              [_ev("closed", "2026-06-10T00:30:00Z"), _ev("reopened", "2026-06-10T01:00:00Z"),
               _ev("closed", before), _ev("reopened", after)], False, before),
-            ("closed at exactly mergedAt", [_ev("closed", self.MERGED)], False, self.MERGED),
-            ("reopened at exactly mergedAt",
-             [_ev("closed", before), _ev("reopened", self.MERGED)], True, None),
         )
         for label, pages, open_expected, close_at in cases:
             with self.subTest(label):
                 self.assertEqual(self._state([pages]), (open_expected, close_at))
+
+    def test_an_event_in_the_same_second_as_merged_at_is_refused_not_ordered(self):
+        """A second-precision tie with mergedAt is UNMEASURABLE, never a permissive 'before'.
+
+        Both GitHub timestamps are one-second resolution, so an event stamped in the same
+        second as the merge could have landed either side of it. These two cases previously
+        asserted the `<=` behaviour, which resolved the tie permissively and could reject a
+        genuine slice or accept one that was still closed when its PR merged (roborev
+        finding, issue #3559). An event at exactly mergedAt is always the deciding one, so
+        there is no case where the tie is harmless.
+        """
+        before = "2026-06-10T02:00:00Z"
+        for label, pages in (
+            ("closed at exactly mergedAt", [_ev("closed", self.MERGED)]),
+            ("reopened at exactly mergedAt",
+             [_ev("closed", before), _ev("reopened", self.MERGED)]),
+            ("a tie that is NOT the newest event still decides",
+             [_ev("closed", self.MERGED), _ev("reopened", "2026-06-10T05:00:00Z")]),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(SystemExit) as caught:
+                    self._state([pages])
+                msg = str(caught.exception)
+                self.assertIn("SAME SECOND", msg)
+                self.assertIn("UNMEASURABLE", msg)
+                self.assertIn("#3559", msg)
+
+    def test_a_tie_strictly_before_the_merge_is_still_ordered_by_the_api_order(self):
+        """The refusal is scoped to a tie WITH mergedAt, not to ties in general.
+
+        Two events sharing a second well before the merge fall unambiguously on the same
+        side of it, so the classification is decidable and must not be refused — otherwise
+        the fix for the mergedAt tie would red an ordinary correct invocation.
+        """
+        tie = "2026-06-10T01:00:00Z"
+        self.assertEqual(self._state([[_ev("closed", tie), _ev("reopened", tie)]]),
+                         (True, None))
+        self.assertEqual(self._state([[_ev("reopened", tie), _ev("closed", tie)]]),
+                         (False, tie))
 
     def test_the_decision_does_not_depend_on_the_apis_delivery_order(self):
         """Ordering is established by the parsed timestamps here, not assumed of the API."""

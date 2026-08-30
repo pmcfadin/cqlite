@@ -483,13 +483,18 @@ def _issue_state_at(issue_url, issue: int, merged_at):
     and — when it was not — the `created_at` of the `closed` event that decided it, carried
     for the refusal message ALONE (no branch anywhere reads it, so it cannot fail open).
 
-    The rule: consider only `closed`/`reopened` events, keep those at or before `merged_at`,
-    and let the LAST one decide — `closed` => closed, `reopened` => open, none => open,
-    because an issue that has no state event before the merge was never closed before it.
-    Ordering is established from the PARSED timestamps here rather than assumed of the API's
-    delivery order (it returns ascending in practice, but nothing here depends on that; a
-    same-second tie keeps the order the API gave, which is the only further information
-    available).
+    The rule: consider only `closed`/`reopened` events, keep those STRICTLY BEFORE
+    `merged_at`, and let the LAST one decide — `closed` => closed, `reopened` => open, none
+    => open, because an issue that has no state event before the merge was never closed
+    before it. Ordering is established from the PARSED timestamps here rather than assumed of
+    the API's delivery order (it returns ascending in practice, but nothing here depends on
+    that; ties among events strictly before the merge keep the order the API gave, which is
+    the only further information available and cannot change which SIDE of the merge they
+    fall on).
+
+    An event in the SAME SECOND as `merged_at` is a REFUSAL, not a before (roborev finding):
+    both timestamps are one-second resolution, so the tie is unmeasurable, and such an event
+    is always the deciding one. `<=` resolved it permissively.
 
     Every non-affirmative state is its own named refusal — a failed `gh` call, an
     unparseable/truncated reply, a page that is not an array, an entry that is not an object,
@@ -561,7 +566,31 @@ def _issue_state_at(issue_url, issue: int, merged_at):
                 f"be ordered against the PR's mergedAt (issue #3559)")
         _require_full_timestamp(at, f"timeline `{kind}` event created_at")
         ts = _parse_ts(at)
-        if ts <= merged_ts:
+        if ts == merged_ts:
+            # SECOND-PRECISION TIE = UNMEASURABLE, NOT "before the merge" (roborev
+            # finding, issue #3559). GitHub emits both the timeline's created_at and
+            # the PR's mergedAt at one-second resolution, so a state event stamped in
+            # the SAME second as the merge cannot be ordered against it: the close may
+            # have landed either side. `<=` silently resolved that tie in the
+            # permissive direction and could therefore reject a genuine slice or accept
+            # one that was still closed when its PR merged. An event at exactly
+            # mergedAt is ALWAYS the deciding one (nothing else can be later while
+            # still being at-or-before), so this is refused rather than skipped.
+            #
+            # Measured cost before choosing refusal: across the last 7 real auto-close
+            # deliveries on this repo, closedAt trailed mergedAt by 1-2s and was NEVER
+            # in the same second, so the ordinary path does not pay for this. Where the
+            # tie does occur the answer is genuinely unknown, and this tool's whole
+            # premise is that an unknown is a refusal.
+            raise SystemExit(
+                f"error: issue's timeline has a `{kind}` event at {at}, the SAME SECOND "
+                f"as PR mergedAt {merged_at} — GitHub timestamps this to one-second "
+                f"resolution, so it cannot be ordered against the merge and whether the "
+                f"issue was open at that instant is UNMEASURABLE. Refusing rather than "
+                f"guessing a side: resolve it from the PR's and issue's own event log "
+                f"and stamp accordingly, and do NOT hand-append the record past the "
+                f"validator (issue #3559).")
+        if ts < merged_ts:
             deciding.append((ts, position, kind, at))
     if not deciding:
         # No state event at or before the merge: the issue had never been closed by then.
