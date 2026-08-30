@@ -239,13 +239,17 @@ impl EgressBatchProbe {
     /// assert an EXACT expected count rather than a hand-waved "fewer".
     pub fn expected_messages(&self, entries: u64) -> u64 {
         let mut left = entries;
-        let mut limit = self.first_batch_emit_rows as u64;
+        // `max(1)` on BOTH the seed and the step: a future `FIRST_BATCH_EMIT_ROWS`
+        // (or `BATCH_EMIT_ROWS_MERGE`) of 0 would otherwise make `take` 0 and spin
+        // this loop forever — a hang in a probe method used by tests.
+        let mut limit = (self.first_batch_emit_rows as u64).max(1);
+        let cap = (self.batch_emit_rows as u64).max(1);
         let mut messages = 0u64;
         while left > 0 {
             let take = limit.min(left);
             left -= take;
             messages += 1;
-            limit = (limit * 2).min(self.batch_emit_rows as u64);
+            limit = limit.saturating_mul(2).min(cap);
         }
         messages
     }

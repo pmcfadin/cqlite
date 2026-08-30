@@ -6,8 +6,8 @@
 //! `storage::write_engine::merge::channel_depth` pins the depth arithmetic
 //! against a PRIVATE atomic via `adjust()` (deliberately, to stay immune to the
 //! #2451 flake class — see that module's tests) — but that means nothing
-//! public-surface would fail if the PRODUCTION `channel_depth::sent()` /
-//! `received()` call sites (`from_readers::forward_row`,
+//! public-surface would fail if the PRODUCTION `channel_depth::sent_n()` /
+//! `received_n()` call sites (`egress_batch::EgressBatcher::flush`,
 //! `SSTableRowIteratorAdapter::next`) were ever unwired, since the private-atomic
 //! pin never touches them. This test closes that gap: it drives a REAL k-way
 //! merge whose per-input channels back up past capacity (so `sent()` must fire
@@ -186,11 +186,20 @@ fn depth_points(snap: &testing::CapturedMetrics) -> Vec<f64> {
 /// The egress-depth gauge RISES to reflect real bounded-channel backpressure
 /// while a k-way merge holds M producers backed up past capacity, and RETURNS
 /// to baseline once the merge is drained to completion — driven ENTIRELY
-/// through the production `channel_depth::sent()` / `received()` call sites
-/// (issue #2419 C-audit Req 3): a lower-bound/positive-observation style
-/// throughout (never an exact-equality assertion against the shared global),
-/// so this stays immune to the #2451 flake class even though the gauge is a
-/// process-wide atomic.
+/// through the production `channel_depth::sent_n()` / `received_n()` call sites
+/// (issue #2419 C-audit Req 3): a lower-bound/positive-observation style on the
+/// GAUGE throughout (never an exact-equality assertion against the shared
+/// global), so this stays immune to the #2451 flake class even though the gauge
+/// is a process-wide atomic.
+///
+/// Issue #2820 adds exact-equality assertions on the FAN-IN PROBE deltas
+/// (`merge_egress_batch_probe`) — the entries-vs-messages discriminator for the
+/// gauge's declared `{entry}` unit. Those are safe for the SAME reason the
+/// adaptive-capacity derivation below is exact and NOT for a weaker one: this
+/// file holds ONE test, so no concurrent merge in this binary can contribute to
+/// the delta, and the counters are monotonic (a hypothetical concurrent merge
+/// could only ADD to both sides, which a strict equality catches loudly rather
+/// than passing vacuously). The GAUGE assertions stay threshold-based.
 #[test]
 fn egress_depth_gauge_rises_and_returns_to_baseline() {
     let capture = testing::metrics_capture();
@@ -244,8 +253,8 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a
     // reading proving multiple channels are genuinely backed up concurrently —
-    // never inferred from an absent/stale window. If `channel_depth::sent()`
-    // were removed from `forward_row`, this loop would exhaust its deadline and
+    // never inferred from an absent/stale window. If `channel_depth::sent_n()`
+    // were removed from `EgressBatcher::flush`, this loop would exhaust its deadline and
     // fail explicitly. Half the adaptive ceiling (`NUM_INPUTS * cap`) requires
     // more than one full channel's worth (for NUM_INPUTS >= 2), so it still
     // proves CONCURRENT multi-channel backpressure, adaptively.
@@ -334,7 +343,7 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
     capture.reset();
 
     // Drain the merge to completion: every producer's remaining entries are
-    // received (channel_depth::received() fires per entry via
+    // received (channel_depth::received_n() fires per BATCH, by its entry count, via
     // `SSTableRowIteratorAdapter::next`), so the gauge should settle back to 0
     // through completely ordinary consumption — no cancellation/reconcile
     // needed for this scenario.
@@ -357,7 +366,7 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
     // inferred from an absent/un-updated window (see `issue_2316_producer_gauge.rs`'s
     // identical DELTA-temporality caveat: an absent metric defaults to 0.0 in
     // `counter_sum`, which would pass vacuously whether `received()` fired or is
-    // entirely broken). If `channel_depth::received()` were removed, the gauge
+    // entirely broken). If `channel_depth::received_n()` were removed, the gauge
     // would stay pinned at its backed-up level forever and this loop would
     // exhaust its deadline and fail explicitly.
     let deadline = Instant::now() + Duration::from_secs(10);

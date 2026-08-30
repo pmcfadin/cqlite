@@ -87,16 +87,19 @@ pub(super) enum RunState {
 /// runtime and calls
 /// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
 /// which decompresses one chunk at a time, drains every fully-decoded partition
-/// out of the window, and forwards each entry one at a time into a bounded
-/// `sync_channel`. The channel capacity is up to [`STREAMING_CHANNEL_CAPACITY`](super::STREAMING_CHANNEL_CAPACITY)
-/// entries, adaptively reduced under concurrent merges (see [`egress_budget`](super::egress_budget));
-/// once the channel is full the producer blocks until the consumer (the main
-/// merge thread) pulls the next entry.
+/// out of the window, and forwards the entries into a bounded `sync_channel` in
+/// BATCHES (issue #2820 — one cross-thread wake per batch instead of per row; see
+/// [`egress_batch`](super::egress_batch)). The channel's capacity is in MESSAGES,
+/// converted from the [`STREAMING_CHANNEL_CAPACITY`](super::STREAMING_CHANNEL_CAPACITY)
+/// ROW budget, adaptively reduced under concurrent merges (see
+/// [`egress_budget`](super::egress_budget)); once the channel is full the producer
+/// blocks until the consumer (the main merge thread) pulls the next batch.
 ///
 /// The bounded window plus the bounded channel together make end-to-end peak
 /// memory independent of total input size: a source's decompressed content is
 /// never fully resident. Peak is roughly `max_partition_size + one_chunk +
-/// channel_capacity` per source (issue #827).
+/// egress_batch::max_inflight_rows` per source (issue #827; 1024 rows at the
+/// default budget since #2820, up from the flat 256).
 ///
 /// ## Issue #591 safety (mmap vs file deletion)
 ///
@@ -354,12 +357,12 @@ impl SSTableRowIteratorAdapter {
     /// source one partition at a time via
     /// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
     /// converting each entry to a [`MergeEntry`] (populating the clustering key
-    /// from the decoded cells when the schema has clustering columns) and
-    /// sending it through the bounded channel immediately (issue #827). The
+    /// from the decoded cells when the schema has clustering columns) and sending
+    /// it through the bounded channel, BATCHED since issue #2820 (issue #827). The
     /// blocking `SyncSender::send` provides the backpressure that — together
     /// with the reader's sliding-window stitch+parse — keeps peak memory bounded
-    /// by `max_partition_size + one_chunk + channel_capacity`, independent of
-    /// the total source size.
+    /// by `max_partition_size + one_chunk + egress_batch::max_inflight_rows`,
+    /// independent of the total source size.
     ///
     /// Sends EXACTLY ONE terminal [`MergeMsg`] on EVERY exit path (issue #3120) —
     /// `Done` on a completed walk, `Failed` on an error return, `Failed(Panicked)`
@@ -746,7 +749,11 @@ impl Drop for SSTableRowIteratorAdapter {
         //    before the join). Any DATA entries this adapter's producer
         //    successfully sent but this consumer never received — abandoned when
         //    the channel was torn down while entries were still buffered —
-        //    are exactly `sent_count - received_count`; reconcile the shared
+        //    are exactly `sent_count - received_count`. Issue #2820: entries of a
+        //    partially-drained HELD batch are NOT part of that residual; they were
+        //    counted as received when the batch left the channel, which is the same
+        //    moment the gauge was decremented for them, so abandoning them here is
+        //    already balanced. reconcile the shared
         //    gauge by that residual in ONE atomic op so a cancelled/disconnected
         //    scan returns `cqlite.merge.egress_channel_depth` to baseline instead
         //    of drifting upward.

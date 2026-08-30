@@ -252,7 +252,7 @@ fn cancelled_backed_up_merge_reconciles_egress_depth_to_baseline_on_drop() {
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a
     // reading proving multiple channels are genuinely backed up concurrently —
-    // never inferred from an absent/stale window. If `channel_depth::sent()` were
+    // never inferred from an absent/stale window. If `channel_depth::sent_n()` were
     // unwired, this loop would exhaust its deadline and fail explicitly. This
     // reading is the proof that a genuine `residual > 0` exists BEFORE teardown.
     let backpressure_threshold = (NUM_INPUTS as f64) * (rows_when_backed_up as f64) * 0.5;

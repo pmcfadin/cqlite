@@ -162,8 +162,9 @@ fn finish_batched_walk(walk: Result<()>, batcher: &mut EgressBatcher<'_>) -> Res
 /// the two must NOT drift toward each other: the path-based/compaction thread
 /// (`mod.rs`) keeps its byte-parity full-ring materialising walk unchanged, while
 /// ONLY the warm reader-based producer takes the streaming + token-scoped path.
-/// The per-row conversion/backpressure (`forward_row`) is still shared, so the
-/// emit contract cannot diverge.
+/// The row conversion + batched backpressure (`forward_row` into one
+/// `EgressBatcher`, then [`finish_batched_walk`]) is still shared, so the emit
+/// contract — including the pre-terminator tail flush — cannot diverge.
 pub(super) async fn drive_query_stream(
     reader: &SSTableReader,
     run_index: usize,
