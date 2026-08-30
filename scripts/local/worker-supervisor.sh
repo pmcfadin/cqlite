@@ -1862,7 +1862,7 @@ supervisor_legacy_lock_state() {
   # while still ASSIGNING, so a single-line file with no trailing newline is a normal, well-formed lock
   # whose read "fails". Open failure is what is now distinguished, not read status.
   # A NUL BYTE MAKES THE FILE AN UNRECOGNISED SHAPE, AND IT IS PROBED FOR **BEFORE** THE FILE IS PARSED,
-  # BECAUSE `read` CANNOT SEE IT (#3549, roborev job 206 F2). Measured: `IFS= read -r pid` on the bytes
+  # BECAUSE `read` CANNOT SEE IT (#3549, roborev job 206 F2). Measured: a plain `read -r pid` on the bytes
   # `123<NUL>\n` — and on `<NUL>123\n` — assigns the canonical-looking value `123`, because a bash
   # variable cannot hold a NUL and `read` DISCARDS it silently. So the exact-shape validation the
   # deletion remedy rests on was not exact: the pre-#3467 supervisor writes `echo $$ >"$LOCK/pid"`,

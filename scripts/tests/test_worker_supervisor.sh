@@ -7007,10 +7007,15 @@ test_legacy_lock_neutralises_inherited_glob_state() {
     fail "glob-state-globignore-mutated: the guard removed something from a lock it does not own"
   fi
 
-  # MUTANT CONTRAST: the shipped classifier with `unset GLOBIGNORE` removed — one statement, everything
-  # else shipped. The SAME drive must then classify the foreign directory as STALE and print a deletion.
+  # MUTANT CONTRAST: the shipped classifier with the neutralisation removed, everything else shipped.
+  # BOTH statements go, because since job 206 F1 there are two: the `unset` and the verification that it
+  # TOOK. Removing only the `unset` now lands on the verification and produces a named refusal
+  # (`globignore-not-neutralisable`) — fail-closed, and asserted in test 47h — so the pre-#3549 harm this
+  # case measures is only reachable with the pair gone, which is exactly the shape the code had.
   ovr="$d/m-globignore.sh"; : >"$ovr"
-  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '  unset GLOBIGNORE' '  :'; then
+  if sv_mutant_override_pairs "$ovr" supervisor_legacy_lock_state \
+       '  if unset GLOBIGNORE 2>/dev/null; then _sv_globignore_unset=yes; fi' '  :' \
+       '  if [[ -n "${GLOBIGNORE:-}" ]]; then' '  if false; then'; then
     mout="$(legacy_lock_drive_prelude_override "$gi_prelude" "$ovr" "$tmp" "$lane")" || true
     if [[ "$mout" == *"LEFT BEHIND"* ]] && [[ "$mout" == *"rm -f -- "* ]] \
        && [[ "$mout" != *"lock-directory-not-exactly-one-pid-file"* ]]; then
@@ -7034,14 +7039,20 @@ test_legacy_lock_neutralises_inherited_glob_state() {
   fi
   remedy_lines_structural "noglob-stale" "$out" 1
 
-  # MUTANT CONTRAST: with `set +f` removed the same drive must MISCLASSIFY — and the tell is the literal
-  # glob pattern surviving into the entry list.
+  # MUTANT CONTRAST: with `set +f` removed the same drive must MISCLASSIFY a GENUINE stale lock — a
+  # false refusal on a working configuration, which is this class's other direction.
+  # SINCE JOB 206 F1 THE CAUSE IT REPORTS IS THE PIN VERIFICATION'S, not the shape check's: `noglob` is
+  # one of the pins whose resulting state is now re-read, so the mutant is caught one step earlier and
+  # named (`glob-state-pins-not-verified:[noglob!=off]`) instead of surfacing as a mysterious
+  # unrecognised shape. The contrast is unchanged — the pre-fix form still cannot classify the lock —
+  # and the assert follows the better diagnostic rather than pinning the worse one.
   ovr="$d/m-noglob.sh"; : >"$ovr"
   if sv_mutant_override "$ovr" supervisor_legacy_lock_state '  set +f' '  :'; then
     printf '%s\n' "$dead" >"$legacy/pid"
     mout="$(legacy_lock_drive_env_override "$ovr" "$tmp" "$lane" SHELLOPTS=noglob)" || true
-    if [[ "$mout" == *"lock-directory-not-exactly-one-pid-file"* ]] && [[ "$mout" != *"LEFT BEHIND"* ]]; then
-      pass "glob-state MUTANT CONTRAST (noglob): with the neutralisation removed, the identical drive cannot enumerate at all and refuses a GENUINE stale lock as an unrecognised shape — a false refusal on a working configuration"
+    if [[ "$mout" == *"glob-state-pins-not-verified"* ]] && [[ "$mout" == *"noglob!=off"* ]] \
+       && [[ "$mout" != *"LEFT BEHIND"* ]]; then
+      pass "glob-state MUTANT CONTRAST (noglob): with the neutralisation removed, the identical drive cannot enumerate at all and refuses a GENUINE stale lock — now named by the pin verification (noglob!=off) rather than mis-reported as an unrecognised shape"
     else
       fail "glob-state-noglob-mutant: out=[$mout] — the pre-fix form must be shown to break, or the assert above measures nothing"
     fi
