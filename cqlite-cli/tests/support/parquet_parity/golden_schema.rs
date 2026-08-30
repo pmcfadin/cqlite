@@ -334,25 +334,18 @@ fn check_value(
             let text = value
                 .as_str()
                 .ok_or_else(|| present_but_invalid(owner, field.key, "a JSON string", value))?;
-            // The SPELLING first, against `ISO_INSTANT` as `JsonTransformer`
-            // writes it — never by asking the lenient parser whether it managed
-            // to produce something.
-            let micros = strict_timestamp_micros(text)
-                .map_err(|why| malformed_timestamp(owner, field.key, text, &why))?;
-            // Then the AGREEMENT, re-established at every field of every golden
-            // rather than asserted once in a test: the instant this pass accepts
-            // is the instant the canonical parser will read.
-            match parse_timestamp_micros(text) {
-                Some(parsed) if parsed == micros => Ok(()),
-                Some(parsed) => Err(timestamp_disagreement(
-                    owner, field.key, text, micros, parsed,
-                )),
-                None => Err(malformed_timestamp(
-                    owner,
-                    field.key,
-                    text,
-                    "it satisfies this pass's ISO_INSTANT grammar yet the canonical parser yields                      `None` for it, so the two disagree about whether it is a timestamp at all",
-                )),
+            // ONE notion of a valid timestamp, shared with every DECLARED
+            // timestamp VALUE (`declared::type_declared_timestamp`): the
+            // SPELLING judged against `ISO_INSTANT`, then the canonical
+            // parser's AGREEMENT required.
+            match checked_timestamp_micros(text) {
+                Ok(_) => Ok(()),
+                Err(TimestampFault::Malformed(why)) => {
+                    Err(malformed_timestamp(owner, field.key, text, &why))
+                }
+                Err(TimestampFault::Disagreement { strict, parsed }) => Err(
+                    timestamp_disagreement(owner, field.key, text, strict, parsed),
+                ),
             }
         }
         Rule::Integer => {
@@ -516,6 +509,75 @@ fn strict_timestamp_micros(text: &str) -> Result<i64, String> {
                 .to_string()
         })?;
     Ok(micros)
+}
+
+/// WHY a string is not a timestamp `sstabledump` could have written — the two
+/// failure directions, kept apart because they are different hazards whose
+/// refusals name different things.
+pub(super) enum TimestampFault {
+    /// The SPELLING is not one `ISO_INSTANT` can produce (hour 24, a date that
+    /// does not exist, an unpadded field, a 7th fractional digit). The lenient
+    /// parser NORMALIZES most of these into a plausible instant, which is the
+    /// FALSE PASS this whole rule exists to remove.
+    Malformed(String),
+    /// Well-formed under this pass's grammar, yet this pass and the canonical
+    /// parser read DIFFERENT instants out of it — refused rather than let
+    /// whichever instant the parser chose win by default.
+    Disagreement { strict: i64, parsed: i64 },
+}
+
+impl TimestampFault {
+    /// The fault as a clause a caller can embed in its own refusal — so a
+    /// consumer with a different subject (a POSITION rather than a field) says
+    /// exactly what this pass found without restating the grammar.
+    pub(super) fn describe(&self) -> String {
+        match self {
+            TimestampFault::Malformed(why) => why.clone(),
+            TimestampFault::Disagreement { strict, parsed } => format!(
+                "it satisfies this pass's `ISO_INSTANT` grammar as {strict}µs while \
+                 `canonical_jsonl::parse_timestamp_micros` — the grammar the comparison itself \
+                 is built from — reads {parsed}µs, so the two disagree about WHICH instant it \
+                 denotes"
+            ),
+        }
+    }
+}
+
+/// THE notion of a valid `sstabledump` timestamp, in ONE place.
+///
+/// Two steps, and both are needed:
+///
+///   1. the SPELLING, judged strictly against `ISO_INSTANT` as
+///      `JsonTransformer.dateString` writes it — never by asking the lenient
+///      parser whether it managed to produce something, which establishes only
+///      that SOME instant could be produced;
+///   2. the AGREEMENT: the instant this pass accepts is the instant
+///      `canonical_jsonl::parse_timestamp_micros` — the grammar the comparison
+///      is actually built from — will read. Re-established at every timestamp of
+///      every golden rather than asserted once in a test.
+///
+/// **Every consumer shares this function, and that is the point.** Round 17
+/// validated the metadata timestamp FIELDS here and left the declared timestamp
+/// VALUES (a cell, a key, a clustering component, a collection path, a nested
+/// element) to the lenient parser, so `2025-02-30T00:00:00Z` still normalized
+/// into an instant that compared EQUAL to a correct export. The declared-type
+/// door (`declared::type_declared_timestamp`) now calls THIS function, so the
+/// validator and the canonical parser cannot drift apart and no position can
+/// have its own weaker notion of a timestamp.
+pub(super) fn checked_timestamp_micros(text: &str) -> Result<i64, TimestampFault> {
+    let micros = strict_timestamp_micros(text).map_err(TimestampFault::Malformed)?;
+    match parse_timestamp_micros(text) {
+        Some(parsed) if parsed == micros => Ok(micros),
+        Some(parsed) => Err(TimestampFault::Disagreement {
+            strict: micros,
+            parsed,
+        }),
+        None => Err(TimestampFault::Malformed(
+            "it satisfies this pass's ISO_INSTANT grammar yet the canonical parser yields `None` \
+             for it, so the two disagree about whether it is a timestamp at all"
+                .to_string(),
+        )),
+    }
 }
 
 /// `YYYY-MM-DD`, zero-padded, and a date that EXISTS.

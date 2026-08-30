@@ -629,17 +629,17 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
         // never invents a type.
         return Ok(v);
     };
-    // A `Timestamp` is only a timestamp where `timestamp` is DECLARED; anywhere
-    // else it is the text the golden literally carried, which the rules below
-    // then apply to. Done first and unconditionally so no later rule can be
-    // skipped by the shared parser's spelling-based timestamp recognition.
+    // A declared `timestamp` is settled HERE — at the ONE door every position's
+    // scalar reaches — and its SPELLING is VALIDATED before it is accepted.
+    if name == "timestamp" {
+        return type_declared_timestamp(v, at);
+    }
+    // Anywhere else a `Timestamp` is the text the golden literally carried,
+    // which the rules below then apply to. Done first and unconditionally so no
+    // later rule can be skipped by the shared parser's spelling-based timestamp
+    // recognition.
     let v = match v {
-        CanonicalValue::Timestamp { micros, raw } => {
-            if name == "timestamp" {
-                return Ok(CanonicalValue::Timestamp { micros, raw });
-            }
-            CanonicalValue::Text(raw)
-        }
+        CanonicalValue::Timestamp { raw, .. } => CanonicalValue::Text(raw),
         other => other,
     };
     Ok(match (v, name) {
@@ -710,6 +710,94 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
         }
         (other, _) => other,
     })
+}
+
+/// THE declared-`timestamp` door: accept a golden timestamp only if its SPELLING
+/// is one `sstabledump` could have WRITTEN.
+///
+/// # Why this is here and not beside each position (round 18)
+///
+/// Round 17 validated the timestamp SPELLING of every metadata FIELD
+/// (`liveness_info.tstamp`, a cell `tstamp`, `marked_deleted`,
+/// `local_delete_time`) in `golden_schema.rs`. Declared timestamp VALUES were
+/// left to the shared parser, which NORMALIZES: `2025-02-30T00:00:00Z` rolls
+/// into March and yields exactly the microseconds of a well-formed
+/// `2025-03-02T00:00:00Z`, so a malformed golden compared EQUAL to a correct
+/// export at a `timestamp` CELL, KEY, clustering component, collection PATH, map
+/// key/value or nested element — a FALSE PASS in the one direction this harness
+/// exists to measure, one level inside the pass built to prevent it.
+///
+/// The fix is placed at the DOOR rather than at the positions the finding named.
+/// Every scalar of every one of the seven positions reaches
+/// [`type_scalar_golden`] through `canonicalize_golden`'s scalar fallthrough, and
+/// a declared `timestamp` there routes here UNCONDITIONALLY — so a position added
+/// to the recursion later inherits this validation by construction, with nothing
+/// to remember. There is deliberately no second timestamp check anywhere.
+///
+/// The notion of a valid timestamp is [`golden_schema::checked_timestamp_micros`]
+/// — the SAME function the metadata pass uses, so the strict validator and the
+/// canonical parser that builds the comparison can never drift apart, and no
+/// position can hold a weaker notion of a timestamp than another.
+///
+/// # The shapes a declared `timestamp` may arrive in
+///
+/// * `Timestamp` — the shared parser recognized the string `sstabledump` wrote
+///   and kept it as `raw`. `raw` is validated, and the micros the value CARRIES
+///   must be the micros that spelling denotes (a value whose two halves disagree
+///   is refused, never compared on the half it happened to carry).
+/// * `Text` — the string reached here WITHOUT the shared parser's recognition.
+///   Two real routes: a frozen map's JSON OBJECT key, which
+///   `canonicalize_golden` takes from the object literally, and a stringified
+///   position whose spelling the parser REFUSED. Validated identically and then
+///   converted, so such a position compares as an INSTANT instead of silently
+///   comparing text against the export's timestamp.
+/// * `Absent` — an absence already judged legitimate at this position by
+///   [`require_authoritative_value`]; there is no spelling to validate.
+///
+/// Anything else (a JSON number, a boolean, a container) is REFUSED: `--raw-time`
+/// integer timestamps are a dump shape this harness does not consume, and
+/// comparing one as whatever variant it arrived in is how an unrecognized dump
+/// reaches a comparison.
+fn type_declared_timestamp(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalValue, String> {
+    let (carried, raw) = match v {
+        CanonicalValue::Absent => return Ok(CanonicalValue::Absent),
+        CanonicalValue::Timestamp { micros, raw } => (Some(micros), raw),
+        CanonicalValue::Text(raw) => (None, raw),
+        other => {
+            return Err(at.refuse(&format!(
+                "the golden carries {} where a declared `timestamp` must be the STRING \
+                 Cassandra's `JsonTransformer.dateString` writes (`Instant.toString()`, i.e. \
+                 `DateTimeFormatter.ISO_INSTANT`). A bare integer instant is what \
+                 `sstabledump --raw-time` emits, which this harness does not consume; the \
+                 harness REFUSES rather than compare a shape it cannot attribute to a dump it \
+                 understands",
+                super::render_value(&other)
+            )))
+        }
+    };
+    let micros = super::golden_schema::checked_timestamp_micros(&raw).map_err(|fault| {
+        at.refuse(&format!(
+            "the golden renders this declared `timestamp` as {raw:?}, which is not a timestamp \
+             `sstabledump` could have written ({}). Cassandra 5.0.8 writes every timestamp with \
+             `JsonTransformer.dateString` — `Instant.ofEpochSecond(...).toString()` — so this \
+             spelling is not one the oracle's own writer can produce. It is refused HERE rather \
+             than handed to `canonical_jsonl::parse_timestamp_micros`, which NORMALIZES what it \
+             can (2025-02-30 into March, hour 24 into the next midnight, a 7th fractional digit \
+             away) and so cannot tell a malformed golden from a well-formed one — and an instant \
+             recovered from a malformed spelling compares EQUAL to a correct export",
+            fault.describe()
+        ))
+    })?;
+    if let Some(carried) = carried {
+        if carried != micros {
+            return Err(at.refuse(&format!(
+                "the golden value carries {carried}µs while its own spelling {raw:?} denotes \
+                 {micros}µs. The harness refuses a value whose two halves disagree rather than \
+                 compare on the half it happened to carry"
+            )));
+        }
+    }
+    Ok(CanonicalValue::Timestamp { micros, raw })
 }
 
 // ---------------------------------------------------------------------------
