@@ -129,6 +129,18 @@ DERIVED_ARTIFACT_SUFFIXES=(-Data.db.jsonl -Statistics.db.txt)
 # INCOMPLETE SSTable as complete. Any nonempty TOC naming `Data.db` was accepted,
 # so a TOC cut down to that one line demanded exactly one component.
 #
+# MEASURED, including the part that makes it easy to miss: a TOC truncated to the
+# single line `Data.db` DID red before this floor existed — but via the NEIGHBOURING
+# references.yml cross-check ("advertises 'nb-1-big-TOC.txt', which is neither a
+# TOC.txt component nor ..."), i.e. the right verdict for a stated reason that has
+# nothing to do with an incomplete SSTable. Trim the TOC to
+# `Data.db / Digest.crc32 / TOC.txt` instead — keeping exactly what
+# $REFERENCED_SIDECAR_SUFFIXES advertises — and the neighbour falls silent: that
+# tree reported `POST-CONDITION OK ... 3 declared by TOC.txt` with
+# `Statistics.db`, `CRC.db`, `Index.db` and `Summary.db` unrequired. A check whose
+# failure is delegated to a neighbour is a latent false pass, because the coupling
+# evaporates the moment the neighbour's subject changes.
+#
 # The floor is the components Cassandra 5.0 ALWAYS writes for an UNCOMPRESSED BIG
 # (`nb`) table, and the required set is TOC UNION FLOOR. It is a MINIMUM, never
 # an expectation of equality: a legitimately richer TOC (this fixture's, which
