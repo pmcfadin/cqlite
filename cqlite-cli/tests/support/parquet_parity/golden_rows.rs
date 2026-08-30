@@ -76,6 +76,7 @@ use super::decimal::{
 
 /// One row projected out of the golden: the primary-key components in declared
 /// order, plus every declared column's canonical value.
+#[derive(Debug)]
 pub struct GoldenRow {
     pub keys: Vec<CanonicalValue>,
     pub cells: BTreeMap<String, CanonicalValue>,

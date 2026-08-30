@@ -95,6 +95,7 @@ pub mod datasets_root;
 
 pub mod arrow_expect;
 pub mod arrow_rows;
+pub mod cases;
 pub mod cql_type;
 pub mod decimal;
 pub mod failure;

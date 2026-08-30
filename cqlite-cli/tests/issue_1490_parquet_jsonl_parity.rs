@@ -5,6 +5,11 @@
 //! `#[test]` per corpus table, so a case that cannot run is visible on its own
 //! line instead of hiding behind a sibling that did (#3220).
 //!
+//! The real cases' DECLARATIONS live in `tests/support/parquet_parity/cases.rs`
+//! so that `issue_1490_parquet_declaration_and_keys.rs` can validate the SAME
+//! declarations against the committed CQL schemas — duplicating them here would
+//! defeat the check, since an unverified copy is exactly what round 6 found.
+//!
 //! # Corpus coverage: 8 tables compared, and every exclusion NAMED
 //!
 //! A blanket sentence ("the remaining tables are not yet covered") is how a gap
@@ -162,6 +167,10 @@
 mod parquet_parity;
 
 use parquet_parity::canonical_jsonl::CanonicalValue;
+use parquet_parity::cases::{
+    BASIC_COMPOSITE_KEY, BASIC_SIMPLE, COLLECTIONS_TABLE, COMP_LZ4, DA_COLLECTIONS, DA_SIMPLE,
+    SIGNED_INT_COLLECTIONS, TIMESERIES_SENSOR_DATA, UDT_COLLECTIONS, UDT_FROZEN_PERSON,
+};
 use parquet_parity::failure::Stage;
 use parquet_parity::{
     assert_case, ExpectedFailure, KnownGap, KnownTypeGap, ParityCase, SchemaCheck,
@@ -171,52 +180,10 @@ use parquet_parity::{
 // test_da — BTI (`da`) fixtures, binaries COMMITTED to git
 // ---------------------------------------------------------------------------
 
-const DA_SIMPLE: ParityCase = ParityCase {
-    keyspace: "test_da",
-    table: "simple_table",
-    schema: "da-test.cql",
-    udts: &[],
-    columns: &[
-        ("id", "uuid"),
-        ("name", "text"),
-        ("age", "int"),
-        ("salary", "bigint"),
-        ("active", "boolean"),
-        ("created", "timestamp"),
-    ],
-    partition_key: &["id"],
-    clustering: &[],
-    schema_check: SchemaCheck::Committed,
-    must_run: true,
-    covers: "BTI da: uuid/text/int/bigint/boolean/timestamp scalars",
-    known_gap: None,
-    known_type_gaps: &[],
-};
-
 #[test]
 fn parquet_values_match_golden_test_da_simple_table() {
     assert_case(&DA_SIMPLE);
 }
-
-const DA_COLLECTIONS: ParityCase = ParityCase {
-    keyspace: "test_da",
-    table: "collection_table",
-    schema: "da-test.cql",
-    udts: &[],
-    columns: &[
-        ("id", "uuid"),
-        ("tags", "set<text>"),
-        ("scores", "list<int>"),
-        ("properties", "map<text, text>"),
-    ],
-    partition_key: &["id"],
-    clustering: &[],
-    schema_check: SchemaCheck::Committed,
-    must_run: true,
-    covers: "BTI da: non-frozen set/list/map assembled from per-element cells",
-    known_gap: None,
-    known_type_gaps: &[],
-};
 
 #[test]
 fn parquet_values_match_golden_test_da_collection_table() {
@@ -227,21 +194,6 @@ fn parquet_values_match_golden_test_da_collection_table() {
 // test_signed_coll — signed integers inside collections, binaries COMMITTED
 // ---------------------------------------------------------------------------
 
-const SIGNED_INT_COLLECTIONS: ParityCase = ParityCase {
-    keyspace: "test_signed_coll",
-    table: "signed_int_collections",
-    schema: "signed-collection-parity.cql",
-    udts: &[],
-    columns: &[("id", "int"), ("s", "set<int>"), ("m", "map<int, text>")],
-    partition_key: &["id"],
-    clustering: &[],
-    schema_check: SchemaCheck::Committed,
-    must_run: true,
-    covers: "negative integers as set elements and map keys (stringified paths)",
-    known_gap: None,
-    known_type_gaps: &[],
-};
-
 #[test]
 fn parquet_values_match_golden_test_signed_coll_signed_int_collections() {
     assert_case(&SIGNED_INT_COLLECTIONS);
@@ -250,21 +202,6 @@ fn parquet_values_match_golden_test_signed_coll_signed_int_collections() {
 // ---------------------------------------------------------------------------
 // test_comp — compressed BIG (`nb`) with a clustering key, binaries COMMITTED
 // ---------------------------------------------------------------------------
-
-const COMP_LZ4: ParityCase = ParityCase {
-    keyspace: "test_comp",
-    table: "lz4_table",
-    schema: "compression-parity.cql",
-    udts: &[],
-    columns: &[("pk", "int"), ("ck", "int"), ("body", "text")],
-    partition_key: &["pk"],
-    clustering: &["ck"],
-    schema_check: SchemaCheck::Committed,
-    must_run: true,
-    covers: "LZ4-compressed BIG nb, 600 clustering rows in one partition",
-    known_gap: None,
-    known_type_gaps: &[],
-};
 
 #[test]
 fn parquet_values_match_golden_test_comp_lz4_table() {
@@ -275,125 +212,10 @@ fn parquet_values_match_golden_test_comp_lz4_table() {
 // test_compactionparityudt — frozen UDTs and frozen nesting, binaries COMMITTED
 // ---------------------------------------------------------------------------
 
-const UDT_FROZEN_PERSON: ParityCase = ParityCase {
-    keyspace: "test_compactionparityudt",
-    table: "udt_frozen_person",
-    schema: "compaction-parity-udt.cql",
-    udts: &["person", "address", "employee"],
-    columns: &[("id", "int"), ("p", "frozen<person>")],
-    partition_key: &["id"],
-    clustering: &[],
-    schema_check: SchemaCheck::Committed,
-    must_run: true,
-    covers: "frozen UDT with a NULL inner field",
-    known_gap: Some(KnownGap {
-        issue: "#3556",
-        // The gap is an ABORT of the export itself, and it is the ONLY failure
-        // the case exhibits. Recorded as structured data and compared by SET
-        // EQUALITY, so a parity difference, an unreadable Parquet file or an
-        // Arrow type mismatch appearing ALONGSIDE it is an unrecorded extra and
-        // fails the case.
-        //
-        // The three UNRUNNABLE stages are recorded too, by name: the abort is
-        // what PREVENTS them, and a deferral that does not say how much it
-        // defers is exactly what let an earlier failure shrink the "exact set"
-        // (round-3 roborev finding). The golden stage is NOT in this list
-        // because it runs INDEPENDENTLY of the export and PASSES — an ineligible
-        // golden here would be an unrecorded extra and would fail the case.
-        expect: &[
-            ExpectedFailure::ExportAborted {
-                detail: "expected Blob value, got Udt",
-            },
-            ExpectedFailure::Unrunnable {
-                stage: Stage::ParquetRead,
-                column: None,
-                blocked_by: Stage::Export,
-            },
-            ExpectedFailure::Unrunnable {
-                stage: Stage::ArrowTypes,
-                column: None,
-                blocked_by: Stage::Export,
-            },
-            ExpectedFailure::Unrunnable {
-                stage: Stage::ValueComparison,
-                column: None,
-                blocked_by: Stage::Export,
-            },
-        ],
-        what: "a frozen UDT column reaches the Arrow converter with no CqlType, so the \
-               export aborts instead of writing a Struct",
-    }),
-    known_type_gaps: &[],
-};
-
 #[test]
 fn parquet_values_match_golden_test_compactionparityudt_udt_frozen_person() {
     assert_case(&UDT_FROZEN_PERSON);
 }
-
-const UDT_COLLECTIONS: ParityCase = ParityCase {
-    keyspace: "test_compactionparityudt",
-    table: "udt_collections",
-    schema: "compaction-parity-udt.cql",
-    udts: &["person", "address", "employee"],
-    columns: &[
-        ("id", "int"),
-        ("fl", "frozen<list<int>>"),
-        ("fm", "frozen<map<text,int>>"),
-        ("lp", "frozen<list<frozen<person>>>"),
-        ("ma", "frozen<map<text, frozen<address>>>"),
-    ],
-    partition_key: &["id"],
-    clustering: &[],
-    schema_check: SchemaCheck::Committed,
-    must_run: true,
-    covers: "frozen collections of frozen UDTs (single-cell nested values)",
-    known_gap: Some(KnownGap {
-        issue: "#3556",
-        // TWO columns carry the SAME #3556 defect, and recording the failure
-        // SET is what surfaced the second one: while the gap was matched by a
-        // conjunction of substrings pinning `lp`, `ma`'s mismatch was
-        // aggregated into the same message and rode along completely unnoticed.
-        // Set EQUALITY forced it to be recorded (or fixed) — which is the whole
-        // argument for structured failure data.
-        //
-        // Both are compared by equality on (column, expected, actual), so a
-        // THIRD column joining them, or either of these two changing its wrong
-        // type, still FAILS.
-        expect: &[
-            ExpectedFailure::ArrowType {
-                column: "lp",
-                expected: "list<struct(udt 'person')>",
-                actual: "list<utf8>",
-            },
-            ExpectedFailure::ArrowType {
-                column: "ma",
-                expected: "map<utf8 | large_utf8,struct(udt 'address')>",
-                actual: "map<utf8,utf8>",
-            },
-            // The wrong TYPE on these two columns blocks THEIR values and
-            // nothing else: `id`, `fl` and `fm` are still compared per cell on
-            // every run, and a regression in any of them is an unrecorded extra
-            // that fails this case. Before the aggregate, the first type
-            // mismatch cancelled the whole comparison and those three columns
-            // were silently uncovered.
-            ExpectedFailure::Unrunnable {
-                stage: Stage::ValueComparison,
-                column: Some("lp"),
-                blocked_by: Stage::ArrowTypes,
-            },
-            ExpectedFailure::Unrunnable {
-                stage: Stage::ValueComparison,
-                column: Some("ma"),
-                blocked_by: Stage::ArrowTypes,
-            },
-        ],
-        what: "a UDT nested inside a frozen collection (list element 'lp', map value \
-               'ma') is exported as a Utf8 ValueFormatter rendering instead of an Arrow \
-               Struct",
-    }),
-    known_type_gaps: &[],
-};
 
 #[test]
 fn parquet_values_match_golden_test_compactionparityudt_udt_collections() {
@@ -406,137 +228,20 @@ fn parquet_values_match_golden_test_compactionparityudt_udt_collections() {
 // promotes them to must-run.
 // ---------------------------------------------------------------------------
 
-const BASIC_SIMPLE: ParityCase = ParityCase {
-    keyspace: "test_basic",
-    table: "simple_table",
-    schema: "basic-types.cql",
-    udts: &[],
-    columns: &[
-        ("id", "uuid"),
-        ("name", "text"),
-        ("age", "int"),
-        ("salary", "bigint"),
-        ("height", "float"),
-        ("weight", "double"),
-        ("active", "boolean"),
-        ("created", "timestamp"),
-        ("birth_date", "date"),
-        ("work_time", "time"),
-        ("description", "blob"),
-        ("account_balance", "decimal"),
-        ("session_id", "timeuuid"),
-        ("ip_address", "inet"),
-        ("small_number", "tinyint"),
-        ("medium_number", "smallint"),
-        ("duration_val", "duration"),
-        ("varchar_field", "varchar"),
-        ("ascii_field", "ascii"),
-    ],
-    partition_key: &["id"],
-    clustering: &[],
-    schema_check: SchemaCheck::Committed,
-    must_run: false,
-    covers: "the full scalar zoo: float/double/decimal/date/time/blob/inet/duration/timeuuid",
-    known_gap: None,
-    // FOUND BY THIS CHECK on its first run: `session_id timeuuid` is exported as
-    // `Utf8` while `id uuid` — the identical 128-bit domain — is exported as
-    // `FixedSizeBinary(16)`. The VALUES compare equal (both sides render the
-    // UUID text), which is precisely why only a type assertion can see it.
-    //
-    // Recorded per COLUMN rather than as a whole-case `known_gap`: this table's
-    // other 18 columns and all 19,000 cell comparisons — session_id's included —
-    // still run.
-    known_type_gaps: &[KnownTypeGap {
-        column: "session_id",
-        issue: "#3563",
-        actual: "utf8",
-        what: "'timeuuid' never parses (the scalar `alt` matches `time` first), so the \
-               column's declared type is dropped and it degrades to Text",
-    }],
-};
-
 #[test]
 fn parquet_values_match_golden_test_basic_simple_table() {
     assert_case(&BASIC_SIMPLE);
 }
-
-const BASIC_COMPOSITE_KEY: ParityCase = ParityCase {
-    keyspace: "test_basic",
-    table: "composite_key_table",
-    schema: "basic-types.cql",
-    udts: &[],
-    columns: &[
-        ("partition_key", "uuid"),
-        ("clustering_key1", "timestamp"),
-        ("clustering_key2", "text"),
-        ("data", "text"),
-        ("value", "int"),
-    ],
-    partition_key: &["partition_key"],
-    clustering: &["clustering_key1", "clustering_key2"],
-    schema_check: SchemaCheck::Committed,
-    must_run: false,
-    covers: "two-component clustering key (timestamp DESC, text ASC)",
-    known_gap: None,
-    known_type_gaps: &[],
-};
 
 #[test]
 fn parquet_values_match_golden_test_basic_composite_key_table() {
     assert_case(&BASIC_COMPOSITE_KEY);
 }
 
-const COLLECTIONS_TABLE: ParityCase = ParityCase {
-    keyspace: "test_collections",
-    table: "collection_table",
-    schema: "collections.cql",
-    udts: &[],
-    columns: &[
-        ("id", "uuid"),
-        ("tags", "set<text>"),
-        ("scores", "list<int>"),
-        ("properties", "map<text, text>"),
-        ("numbers_set", "set<int>"),
-        ("ordered_values", "list<timestamp>"),
-        ("metadata_map", "map<text, bigint>"),
-    ],
-    partition_key: &["id"],
-    clustering: &[],
-    schema_check: SchemaCheck::Committed,
-    must_run: false,
-    covers: "six non-frozen collections incl. list<timestamp> and map<text,bigint>",
-    known_gap: None,
-    known_type_gaps: &[],
-};
-
 #[test]
 fn parquet_values_match_golden_test_collections_collection_table() {
     assert_case(&COLLECTIONS_TABLE);
 }
-
-const TIMESERIES_SENSOR_DATA: ParityCase = ParityCase {
-    keyspace: "test_timeseries",
-    table: "sensor_data",
-    schema: "time-series.cql",
-    udts: &[],
-    columns: &[
-        ("sensor_id", "uuid"),
-        ("timestamp", "timestamp"),
-        ("temperature", "float"),
-        ("humidity", "float"),
-        ("pressure", "double"),
-        ("battery_level", "tinyint"),
-        ("location", "text"),
-        ("status", "text"),
-    ],
-    partition_key: &["sensor_id"],
-    clustering: &["timestamp"],
-    schema_check: SchemaCheck::Committed,
-    must_run: false,
-    covers: "2000 clustering rows across 10 partitions, float/double/tinyint",
-    known_gap: None,
-    known_type_gaps: &[],
-};
 
 #[test]
 fn parquet_values_match_golden_test_timeseries_sensor_data() {
