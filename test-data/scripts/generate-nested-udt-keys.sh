@@ -119,6 +119,49 @@ SCHEMA_FILE="$ROOT/schemas/nested-udt-keys.cql"
 #     nothing else declares them — this script is what produces them.
 DERIVED_ARTIFACT_SUFFIXES=(-Data.db.jsonl -Statistics.db.txt)
 
+#  1b. A MANDATORY-COMPONENT FLOOR, because a TRUNCATED TOC.txt UNDER-DEMANDS
+#      (roborev job 260).
+#
+# Deriving the requirement from TOC.txt makes it a fact declared by the WRITER —
+# but it also makes the MANIFEST the only thing consulted, so a TOC.txt that is
+# ITSELF damaged (truncated by a partial copy, an interrupted write, a bad
+# staging step) requires LESS, and this post-condition then certifies an
+# INCOMPLETE SSTable as complete. Any nonempty TOC naming `Data.db` was accepted,
+# so a TOC cut down to that one line demanded exactly one component.
+#
+# The floor is the components Cassandra 5.0 ALWAYS writes for an UNCOMPRESSED BIG
+# (`nb`) table, and the required set is TOC UNION FLOOR. It is a MINIMUM, never
+# an expectation of equality: a legitimately richer TOC (this fixture's, which
+# also names `Filter.db`) still has every entry required, because the union keeps
+# everything the manifest declares.
+#
+# AUTHORITY — CASSANDRA'S OWN WRITER AT THE PINNED TAG. A CQLite file:line is
+# never format authority, so nothing here is derived from our reader. Read it:
+#   git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java
+#   git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java
+#   git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/SortedTableWriter.java
+# Component name -> on-disk repr strings come from `SSTableFormat.Components.Types`
+# (SSTableFormat.java) and `BigFormat.Components.Types` (BigFormat.java);
+# cross-checked against docs/sstables-definitive-guide/ Ch.5 (Data.db) and Ch.6
+# (Index.db / Summary.db), which agree.
+#
+#   * `SSTableWriter.Builder#addDefaultComponents` — UNCONDITIONAL:
+#     DATA "Data.db", STATS "Statistics.db", DIGEST "Digest.crc32", TOC "TOC.txt".
+#     Then it branches on `params.compression.isEnabled()`: COMPRESSION_INFO
+#     "CompressionInfo.db" in the `if`, CRC "CRC.db" in the `else`. These tables
+#     are DELIBERATELY UNCOMPRESSED, so `CRC.db` is IN the floor and
+#     `CompressionInfo.db` is NOT — requiring it would fail a correct fixture,
+#     which is the same error the old curated list made.
+#   * `BigTableWriter.Builder#addDefaultComponents` — UNCONDITIONAL for BIG:
+#     PRIMARY_INDEX "Index.db", SUMMARY "Summary.db".
+#   * `SortedTableWriter.Builder#addDefaultComponents` adds FILTER "Filter.db"
+#     ONLY under `FilterComponent.shouldUseBloomFilter(...bloomFilterFpChance)`,
+#     so it is CONDITIONAL (a table at fp_chance 1.0 writes none) and is
+#     deliberately OUT of the floor. This fixture DOES write it, and the union
+#     with TOC.txt is what requires it — no authority disagrees with the
+#     committed TOC.txt here: it names all 7 floor components plus `Filter.db`.
+MANDATORY_TOC_COMPONENTS=(Data.db Statistics.db Digest.crc32 CRC.db TOC.txt Index.db Summary.db)
+
 # What references.yml advertises to fixture CONSUMERS. Every entry must be part
 # of the required set above (a derived-artifact suffix, or `-<TOC component>`);
 # verify_generated_artifacts asserts exactly that, so the manifest cannot come to
@@ -714,14 +757,30 @@ toc_components() {
     echo "[nuk][ERROR]   - TOC.txt '$toc' named ZERO components." >&2
     return 1
   fi
-  local c found=0
-  for c in "${TOC_COMPONENTS[@]}"; do
-    if [[ "$c" == "Data.db" ]]; then
-      found=1
+  # THE MANDATORY-COMPONENT FLOOR (roborev job 260). A TOC.txt is the writer's
+  # declaration, and a DAMAGED one declares LESS — so a manifest missing a
+  # component Cassandra 5.0 unconditionally writes is not a smaller valid
+  # configuration, it is an UNTRUSTWORTHY MANIFEST, and deriving from it would
+  # require less than a complete SSTable has. See $MANDATORY_TOC_COMPONENTS for
+  # the floor and its pinned-Cassandra citation. This subsumes the former
+  # `Data.db`-only check, which any one-line truncation satisfied.
+  local want have absent=()
+  for want in "${MANDATORY_TOC_COMPONENTS[@]}"; do
+    local found=0
+    for have in "${TOC_COMPONENTS[@]}"; do
+      if [[ "$have" == "$want" ]]; then
+        found=1
+      fi
+    done
+    if [[ "$found" -ne 1 ]]; then
+      absent+=("$want")
     fi
   done
-  if [[ "$found" -ne 1 ]]; then
-    echo "[nuk][ERROR]   - TOC.txt '$toc' does not name 'Data.db' (components: ${TOC_COMPONENTS[*]}); refusing to derive a component set from it." >&2
+  if [[ "${#absent[@]}" -ne 0 ]]; then
+    echo "[nuk][ERROR]   - TOC.txt '$toc' is MISSING ${#absent[@]} mandatory component(s) \
+${absent[*]} that Cassandra 5.0 ALWAYS writes for an uncompressed BIG table (it names: \
+${TOC_COMPONENTS[*]}). The MANIFEST is damaged or truncated, so refusing to derive a component set \
+from it — a shorter TOC would require LESS and certify an INCOMPLETE SSTable." >&2
     return 1
   fi
   return 0
@@ -735,6 +794,34 @@ toc_components() {
 # four-partition, nine-column golden from a three-partition one, from one missing
 # a column across every row, or from a golden dumped from a DIFFERENT table
 # (roborev job 257). All three are valid JSON of a plausible size.
+#
+# SCOPE, AND WHY VALUES ARE DELIBERATELY OUT OF IT (roborev job 260 asked for an
+# expected-value oracle here; this is the recorded decision NOT to build one, so
+# it is read as a scoping argument rather than re-raised as a gap).
+#
+# This post-condition's job is STRUCTURAL COMPLETENESS — the artifact set, the
+# partition ids, the column coverage. It answers "did this generation produce a
+# complete set of the RIGHT SHAPE". It deliberately does not compare normalized
+# cell paths or VALUES against an expected fixture, because:
+#
+#   * VALUE correctness is ALREADY ORACLED, TWICE, AND BETTER. The 54 tests
+#     (117 assertions) in bindings/python/tests/test_nested_udt_hashable.py
+#     compare exact Python structures against THIS fixture, and the sstabledump
+#     JSONL golden is itself the physical oracle that suite and the parity suite
+#     read. A wrong value fails pytest — which runs in `python-bindings` on every
+#     full gate, and in `--lite`'s `python-tier:` on any bindings/python diff.
+#     Nothing added here would catch it sooner or more precisely.
+#   * Re-deriving the expected values in bash/python here would be a SECOND
+#     IMPLEMENTATION OF THE ORACLE IN A WEAKER LANGUAGE, and by this repo's own
+#     recorded lesson (#3229) a port's correctness is only knowable by
+#     differential testing against the original. Two oracles that must agree is a
+#     DRIFT SURFACE, not extra safety — and the one in this script is the one
+#     nobody updates when the fixture changes, so it would fail on correct input,
+#     which is the shape of a check people learn to waive.
+#
+# So the division of labour is: THIS checks that generation produced a complete
+# artifact set of the declared shape; PYTEST checks that the values in it are
+# right. Widening this to values would not add a property, it would duplicate one.
 #
 # Returns 1 and lists EVERY problem on stderr; the caller collects the verdict.
 verify_jsonl_content() {
@@ -859,6 +946,7 @@ if not expected:
 
 # ---- OBSERVED --------------------------------------------------------------
 observed = {}
+observed_ids = []
 lines_read = 0
 try:
     fh = open(jsonl, encoding="utf-8")
@@ -884,7 +972,13 @@ with fh:
         if not isinstance(key, list) or not key:
             problems.append("%s line %d carries no partition key" % (jsonl, lines_read))
             continue
-        cells = observed.setdefault(str(key[0]), set())
+        pid = str(key[0])
+        # The ORDERED list, kept alongside the set-valued map: reducing each
+        # partition to a set of column names is what the column checks need, and
+        # it is exactly what makes two lines carrying the SAME id merge into one
+        # silently (roborev job 260). A duplicated partition is then invisible.
+        observed_ids.append(pid)
+        cells = observed.setdefault(pid, set())
         for row in partition.get("rows", []):
             for cell in row.get("cells", []):
                 name = cell.get("name")
@@ -893,6 +987,28 @@ with fh:
 
 if not observed:
     problems.append("%s holds ZERO partitions (%d line(s) read)" % (jsonl, lines_read))
+
+# DUPLICATE partition ids. sstabledump emits one line per partition, so a repeat
+# is a duplicated or spliced golden — and the set reduction above cannot see it,
+# because the second occurrence merges into the first and the id/column checks
+# below still pass. Asserted as "the observed id LIST is exactly the expected set
+# with NO repeats", which is strictly stronger than comparing the two as sets.
+duplicated = sorted(
+    set(pid for pid in observed_ids if observed_ids.count(pid) > 1),
+    key=lambda pid: (len(pid), pid),
+)
+if duplicated:
+    problems.append(
+        "%s holds DUPLICATE partition id(s) %s (%d partition line(s) for %d distinct id(s); "
+        "counts: %s) — the golden repeats a partition, which merging by id hides"
+        % (
+            jsonl,
+            duplicated,
+            len(observed_ids),
+            len(observed),
+            ", ".join("%s x%d" % (pid, observed_ids.count(pid)) for pid in duplicated),
+        )
+    )
 
 missing_ids = sorted(set(expected) - set(observed))
 extra_ids = sorted(set(observed) - set(expected))
@@ -935,8 +1051,9 @@ if problems:
     sys.exit(1)
 
 print(
-    "[nuk]   JSONL content OK: partitions %s; all %d schema column(s) covered"
-    % (sorted(observed), len(all_columns))
+    "[nuk]   JSONL content OK: %d partition line(s), no duplicate id(s), partitions %s; "
+    "all %d schema column(s) covered"
+    % (len(observed_ids), sorted(observed), len(all_columns))
 )
 PY
 }
@@ -1041,18 +1158,38 @@ $ks_dir, found ${#TABLE_DIRS[@]} ($found_desc)")
     prefix="${prefix%-Data.db}"
     local problems_before="${#problems[@]}"
 
-    # --- CASSANDRA'S components: DERIVED from its own TOC.txt manifest -------
+    # --- CASSANDRA'S components: TOC.txt manifest UNION the mandatory FLOOR ---
+    # The floor is seeded FIRST and unconditionally, so it is required even when
+    # the derivation fails: a damaged manifest must not be able to shrink the
+    # required set (roborev job 260). This is a MINIMUM, not the curated list the
+    # round-8 finding removed — the union keeps every component TOC.txt declares,
+    # including ones the floor deliberately omits as configuration-dependent
+    # (`Filter.db`), and still demands nothing a correct uncompressed fixture
+    # lacks (`CompressionInfo.db` is in neither).
     local -a required_suffixes=()
-    local component toc_ok=0
+    local component floor_component toc_ok=0 already seen_suffix
+    for floor_component in "${MANDATORY_TOC_COMPONENTS[@]}"; do
+      required_suffixes+=("-$floor_component")
+    done
+    local floor_count="${#required_suffixes[@]}"
     if toc_components "$tdir/$prefix-TOC.txt"; then
       toc_ok=1
       for component in "${TOC_COMPONENTS[@]}"; do
-        required_suffixes+=("-$component")
+        already=0
+        for seen_suffix in "${required_suffixes[@]}"; do
+          if [[ "$seen_suffix" == "-$component" ]]; then
+            already=1
+          fi
+        done
+        if [[ "$already" -ne 1 ]]; then
+          required_suffixes+=("-$component")
+        fi
       done
     else
       problems+=("$table: could not derive the required component set from \
 $tdir/$prefix-TOC.txt (see above). Refusing to fall back to a curated list, which is what let \
-missing components pass.")
+missing components pass; the ${floor_count}-component mandatory FLOOR is still required below, but a \
+manifest this script cannot trust is itself the failure.")
     fi
     # --- OUR OWN derived goldens: in no TOC.txt, so declared by this script --
     required_suffixes+=("${DERIVED_ARTIFACT_SUFFIXES[@]}")
@@ -1117,8 +1254,10 @@ would commit: ${junk[*]}")
     tables_checked=$((tables_checked + 1))
     if [[ "${#problems[@]}" -eq "$problems_before" ]]; then
       log "  $table: $tdir (prefix $prefix) — ${#required_suffixes[@]} required artifact(s) \
-(${#TOC_COMPONENTS[@]} declared by TOC.txt + ${#DERIVED_ARTIFACT_SUFFIXES[@]} derived by this script) \
-present and non-empty; JSONL content matches"
+($(( ${#required_suffixes[@]} - ${#DERIVED_ARTIFACT_SUFFIXES[@]} )) components = \
+${#TOC_COMPONENTS[@]} declared by TOC.txt UNION $floor_count mandatory floor, \
++ ${#DERIVED_ARTIFACT_SUFFIXES[@]} derived by this script) present and non-empty; JSONL content \
+matches"
     else
       log "  $table: $tdir (prefix $prefix) — $(( ${#problems[@]} - problems_before )) problem(s) \
 found (itemized below)"
@@ -1142,8 +1281,9 @@ COMPLETE generation produces." >&2
     fail "${#problems[@]} artifact problem(s) listed above. Commit NOTHING from this run."
   fi
 
-  log "POST-CONDITION OK: $tables_checked table(s) verified; every component TOC.txt declares is \
-present and non-empty, and the JSONL golden holds this fixture's dataset."
+  log "POST-CONDITION OK: $tables_checked table(s) verified; every component TOC.txt declares \
+UNION the ${#MANDATORY_TOC_COMPONENTS[@]} Cassandra 5.0 mandatory ones is present and non-empty, \
+and the JSONL golden holds this fixture's dataset with no duplicated partition."
 }
 
 # ----------------------------------------------------------------------------
