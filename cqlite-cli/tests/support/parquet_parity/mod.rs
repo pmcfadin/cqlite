@@ -7,9 +7,14 @@
 //!   1. export it to Parquet through the WIRED writer — the real `cqlite export
 //!      --format parquet` binary, not a library shortcut;
 //!   2. read the Parquet back with the `arrow`/`parquet` crates;
-//!   3. project both the Parquet rows and the table's committed
+//!   3. validate the Parquet schema — column SET and every field's Arrow TYPE —
+//!      against the case's independently declared CQL types (`arrow_expect`),
+//!      BEFORE any value is compared: canonicalization is width-blind, so a
+//!      wrong CQL→Arrow mapping would otherwise round-trip its values unchanged
+//!      and pass;
+//!   4. project both the Parquet rows and the table's committed
 //!      `*-Data.db.jsonl` sstabledump golden into ONE canonical value space;
-//!   4. sort both sides by primary key (Parquet row order is not guaranteed) and
+//!   5. sort both sides by primary key (Parquet row order is not guaranteed) and
 //!      assert FULL PER-CELL equality.
 //!
 //! The pre-existing Parquet tests check row counts, `PAR1` magic, a few spot
@@ -39,6 +44,7 @@ pub mod canonical_jsonl;
 #[path = "../../../../cqlite-core/tests/support/datasets_root.rs"]
 pub mod datasets_root;
 
+pub mod arrow_expect;
 pub mod arrow_rows;
 pub mod cql_type;
 pub mod golden_rows;
@@ -83,19 +89,43 @@ pub struct ParityCase {
     /// bug is fixed this test FAILS and demands the case be promoted to a full
     /// parity case. A known gap can never quietly become an unnoticed pass, and
     /// it cannot be used to silence a NEW divergence either — the recorded
-    /// `expect` substring has to be the one that shows up.
+    /// signature has to be the one that shows up.
     pub known_gap: Option<KnownGap>,
 }
 
 /// A recorded, issue-tracked export gap.
+///
+/// # The signature is a CONJUNCTION, and it has to be a precise one
+///
+/// A `known_gap` is only defensible over a plain skip because it is a PRECISE,
+/// SELF-RETIRING record: it names one divergence, fails when that divergence
+/// stops reproducing, and refuses to absorb anything else. A signature broad
+/// enough to match a different failure in the same place — a column name alone,
+/// say — turns it into exactly the permanent excuse the mechanism exists to
+/// avoid.
+///
+/// So `expect` is a LIST of substrings, EVERY one of which must appear in the
+/// failure. Each entry should pin a distinct fact about the expected divergence
+/// (which check failed, which column, the expected value/type, the actual one),
+/// so an unrelated error touching the same column cannot satisfy all of them.
 pub struct KnownGap {
     /// The GitHub issue tracking the fix, e.g. `"#3551"`.
     pub issue: &'static str,
-    /// A substring the failure message MUST contain, so this case cannot mask a
-    /// different failure.
-    pub expect: &'static str,
+    /// Substrings the failure message must ALL contain.
+    pub expect: &'static [&'static str],
     /// Why the gap exists, in one line.
     pub what: &'static str,
+}
+
+impl KnownGap {
+    /// The substrings this gap's signature does NOT find in `error`.
+    fn unmatched(&self, error: &str) -> Vec<&'static str> {
+        self.expect
+            .iter()
+            .copied()
+            .filter(|needle| !error.contains(needle))
+            .collect()
+    }
 }
 
 /// What one case did, for the per-case assertion and the run census.
@@ -327,7 +357,11 @@ impl Row {
 
 /// Project the exported Parquet file into canonical rows, asserting its column
 /// set is exactly the declared one.
-fn project_parquet(case: &ParityCase, path: &Path) -> Result<Vec<Row>, String> {
+fn project_parquet(
+    case: &ParityCase,
+    columns: &[ColumnType],
+    path: &Path,
+) -> Result<Vec<Row>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
         .map_err(|e| format!("{} is not a readable Parquet file: {e}", path.display()))?
@@ -357,6 +391,33 @@ fn project_parquet(case: &ParityCase, path: &Path) -> Result<Vec<Row>, String> {
             "{}: the Parquet schema's columns {actual:?} do not match the case's declared \
              columns {declared:?} — reconcile the case with the fixture's CQL schema",
             case.id()
+        ));
+    }
+
+    // The TYPE half of the schema check. Deliberately reports EVERY mismatching
+    // column rather than the first: a wrong mapping usually affects a family of
+    // columns, and one message naming all of them is what makes the diagnosis
+    // possible.
+    let mut type_errors: Vec<String> = Vec::new();
+    for field in first_schema.fields() {
+        let Some(col) = columns.iter().find(|c| c.name == *field.name()) else {
+            // Unreachable: the column-set equality above already ran.
+            return Err(format!(
+                "{}: Parquet column '{}' has no declared CQL type",
+                case.id(),
+                field.name()
+            ));
+        };
+        if let Err(e) = arrow_expect::validate_field(&case.id(), col, field.data_type()) {
+            type_errors.push(e);
+        }
+    }
+    if !type_errors.is_empty() {
+        return Err(format!(
+            "{}: {} Arrow type mismatch(es) vs the case's declared CQL types:\n  {}",
+            case.id(),
+            type_errors.len(),
+            type_errors.join("\n  ")
         ));
     }
 
@@ -458,7 +519,7 @@ pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, String> {
         golden_rows::project_golden(&golden_doc, &columns, case.partition_key, case.clustering)
             .map_err(|e| format!("{}: {e}", case.id()))?;
 
-    let parquet = project_parquet(case, &parquet_path)?;
+    let parquet = project_parquet(case, &columns, &parquet_path)?;
     Ok(Some(Prepared {
         columns,
         golden,
@@ -531,7 +592,14 @@ pub fn compare(
             let ctx = format!("{} row {i} column '{}'", case.id(), col.name);
             // Spelling normalization applies to BOTH sides through the same
             // function, so it can only erase a difference in HOW a value is
-            // written, never a difference in the value (see spelling.rs).
+            // written, never a difference in the VALUE (see spelling.rs).
+            //
+            // It says nothing about the value's TYPE, and neither does this
+            // comparison: canonicalization folds every integer width into one
+            // `Int` and both float widths into one `Float`, so a wrong CQL→Arrow
+            // mapping compares equal here. Type fidelity is asserted separately,
+            // per field, by `arrow_expect::validate_field` in
+            // `project_parquet` — before any value reaches this loop.
             let ev = spelling::normalize_spelling(
                 e.cells
                     .get(&col.name)
@@ -590,15 +658,17 @@ pub fn assert_case(case: &ParityCase) {
     if let Some(gap) = &case.known_gap {
         match outcome {
             Err(e) => {
+                let unmatched = gap.unmatched(&e);
                 assert!(
-                    e.contains(gap.expect),
+                    unmatched.is_empty(),
                     "{}: this case records a KNOWN export gap ({} — {}) whose signature is \
-                     {:?}, but it failed for a DIFFERENT reason, which the recorded gap must \
-                     never hide:\n{e}",
+                     {:?}, but the failure does not carry {:?}, so it is a DIFFERENT failure \
+                     — which the recorded gap must never hide:\n{e}",
                     case.id(),
                     gap.issue,
                     gap.what,
-                    gap.expect
+                    gap.expect,
+                    unmatched
                 );
                 eprintln!(
                     "[{}] KNOWN GAP {} still present ({}) — parity comparison deferred",

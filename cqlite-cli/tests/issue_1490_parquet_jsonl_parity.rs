@@ -125,7 +125,15 @@ const UDT_FROZEN_PERSON: ParityCase = ParityCase {
     covers: "frozen UDT with a NULL inner field",
     known_gap: Some(KnownGap {
         issue: "#3556",
-        expect: "expected Blob value, got Udt",
+        // The gap is an ABORT of the export itself, so the signature pins all
+        // three facts: which case's export ran, that it failed, and the
+        // converter error that ended it. A parity difference, an unreadable
+        // Parquet file or an Arrow type mismatch for this same table all fail to
+        // carry the conjunction.
+        expect: &[
+            "cqlite export failed for test_compactionparityudt.udt_frozen_person",
+            "expected Blob value, got Udt",
+        ],
         what: "a frozen UDT column reaches the Arrow converter with no CqlType, so the \
                export aborts instead of writing a Struct",
     }),
@@ -154,7 +162,15 @@ const UDT_COLLECTIONS: ParityCase = ParityCase {
     covers: "frozen collections of frozen UDTs (single-cell nested values)",
     known_gap: Some(KnownGap {
         issue: "#3556",
-        expect: "column 'lp'",
+        // The gap is a TYPE defect, so the signature is the type-mismatch
+        // sentence with BOTH rendered types — not the bare column name, which
+        // any unrelated failure mentioning 'lp' (a value difference, a
+        // projection error, a new regression) would also carry.
+        expect: &[
+            "Arrow type mismatch for column 'lp' declared 'frozen<list<frozen<person>>>'",
+            "expected list<struct(udt 'person')>",
+            "got list<utf8>",
+        ],
         what: "a UDT nested inside a frozen collection is exported as a Utf8 \
                ValueFormatter rendering instead of an Arrow Struct",
     }),
@@ -573,6 +589,220 @@ fn declared_type_parser_refuses_unknown_types() {
         "map needs 2 params"
     );
     assert!(parse_column("c", "set<int", &[]).is_err(), "unbalanced");
+}
+
+// ---------------------------------------------------------------------------
+// Unit coverage for the Arrow TYPE expectation
+//
+// Value canonicalization folds every integer width into one `Int`, so the type
+// check is the ONLY thing standing between a wrong CQL→Arrow mapping and a green
+// suite. These cases prove it both accepts the faithful mapping and REJECTS a
+// mis-width — the guard has to have been seen to red.
+// ---------------------------------------------------------------------------
+
+/// Every declared scalar in the corpus maps to exactly one faithful Arrow type.
+#[test]
+fn expected_arrow_type_pins_each_scalar() {
+    use arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
+    use parquet_parity::arrow_expect::expected_shape;
+    use parquet_parity::cql_type::parse_column;
+
+    let accepts = |declared: &str, actual: &DataType| -> bool {
+        let col = parse_column("c", declared, &[]).expect("declared type must parse");
+        expected_shape(&col.spec)
+            .expect("every corpus scalar has a declared expectation")
+            .accepts(actual)
+    };
+
+    for (declared, expected) in [
+        ("boolean", DataType::Boolean),
+        ("tinyint", DataType::Int8),
+        ("smallint", DataType::Int16),
+        ("int", DataType::Int32),
+        ("bigint", DataType::Int64),
+        ("counter", DataType::Int64),
+        ("float", DataType::Float32),
+        ("double", DataType::Float64),
+        ("text", DataType::Utf8),
+        ("varchar", DataType::Utf8),
+        ("ascii", DataType::Utf8),
+        ("inet", DataType::Utf8),
+        ("blob", DataType::Binary),
+        ("uuid", DataType::FixedSizeBinary(16)),
+        ("timeuuid", DataType::FixedSizeBinary(16)),
+        ("date", DataType::Date32),
+        ("time", DataType::Time64(TimeUnit::Nanosecond)),
+        ("decimal", DataType::Decimal128(38, 9)),
+        ("varint", DataType::Decimal128(38, 0)),
+        ("duration", DataType::Utf8),
+        ("duration", DataType::Interval(IntervalUnit::MonthDayNano)),
+        (
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+        ),
+    ] {
+        assert!(
+            accepts(declared, &expected),
+            "'{declared}' must accept {expected:?}"
+        );
+    }
+
+    // The mis-width family this check exists for: a value round-trips
+    // unchanged through any of these, so ONLY the type check can see it.
+    for (declared, wrong) in [
+        ("tinyint", DataType::Int64),
+        ("tinyint", DataType::Int16),
+        ("smallint", DataType::Int32),
+        ("int", DataType::Int64),
+        ("bigint", DataType::Int32),
+        ("float", DataType::Float64),
+        ("double", DataType::Float32),
+        ("varint", DataType::Decimal128(38, 9)),
+        ("varint", DataType::Int64),
+        ("uuid", DataType::Utf8),
+        ("blob", DataType::Utf8),
+        ("date", DataType::Utf8),
+        ("time", DataType::Utf8),
+        ("boolean", DataType::Int8),
+        ("inet", DataType::Binary),
+        // A timestamp must be UTC epoch MILLIS, not a zone-less local one.
+        (
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+        ),
+        (
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        ),
+    ] {
+        assert!(
+            !accepts(declared, &wrong),
+            "'{declared}' must REJECT {wrong:?} — a wrong width round-trips its values \
+             unchanged, so nothing else in this harness can catch it"
+        );
+    }
+}
+
+/// Nested types are matched structurally: element/key/value types recurse, and a
+/// UDT must be a `Struct` (#3556's `Utf8` flattening is exactly this check).
+#[test]
+fn expected_arrow_type_recurses_into_nested_types() {
+    use arrow::datatypes::{DataType, Field, Fields};
+    use parquet_parity::arrow_expect::{expected_shape, validate_field};
+    use parquet_parity::cql_type::parse_column;
+    use std::sync::Arc;
+
+    let list_of = |t: DataType| DataType::List(Arc::new(Field::new("item", t, true)));
+    let map_of = |k: DataType, v: DataType| {
+        DataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("key", k, false),
+                    Field::new("value", v, true),
+                ])),
+                false,
+            )),
+            false,
+        )
+    };
+    let shape = |declared: &str, udts: &[&str]| {
+        let col = parse_column("c", declared, udts).expect("declared type must parse");
+        expected_shape(&col.spec).expect("expectation must be derivable")
+    };
+
+    assert!(shape("set<int>", &[]).accepts(&list_of(DataType::Int32)));
+    assert!(shape("list<int>", &[]).accepts(&list_of(DataType::Int32)));
+    // …but not a list of the wrong element width.
+    assert!(!shape("set<int>", &[]).accepts(&list_of(DataType::Int64)));
+    assert!(shape("map<int, text>", &[]).accepts(&map_of(DataType::Int32, DataType::Utf8)));
+    assert!(!shape("map<int, text>", &[]).accepts(&map_of(DataType::Utf8, DataType::Utf8)));
+    // A UDT is a Struct with fields the case does not declare…
+    let person = DataType::Struct(Fields::from(vec![Field::new("nm", DataType::Utf8, true)]));
+    assert!(shape("frozen<person>", &["person"]).accepts(&person));
+    // …and a Utf8 rendering of one is NOT.
+    assert!(!shape("frozen<person>", &["person"]).accepts(&DataType::Utf8));
+    assert!(!shape("frozen<list<frozen<person>>>", &["person"]).accepts(&list_of(DataType::Utf8)));
+
+    // The mismatch message must name the column, the declared CQL type and both
+    // Arrow types — it is what the #3556 known-gap signature pins.
+    let col = parse_column("lp", "frozen<list<frozen<person>>>", &["person"]).expect("parses");
+    let err = validate_field("ks.t", &col, &list_of(DataType::Utf8))
+        .expect_err("a Utf8-flattened UDT must be rejected");
+    assert!(
+        err.contains("Arrow type mismatch for column 'lp' declared 'frozen<list<frozen<person>>>'")
+            && err.contains("expected list<struct(udt 'person')>")
+            && err.contains("got list<utf8>"),
+        "{err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Whole-valued decimals: the golden renders `1`, the export `Decimal128(38,9)`
+//
+// No corpus table currently carries a scale-0 decimal (measured: 2650 decimal
+// cells across every golden, none integer-shaped), so this path is covered by a
+// unit test over the two normalizers rather than by inventing a fixture.
+// ---------------------------------------------------------------------------
+
+/// A decimal whose golden literal has no fractional part must canonicalize to
+/// the SAME canonical value as the exported `Decimal128(38, 9)` cell.
+#[test]
+fn whole_valued_decimal_canonicalizes_on_both_sides() {
+    use parquet_parity::arrow_rows::decimal_to_canonical;
+    use parquet_parity::canonical_jsonl::{CanonicalValue, NormalizedFloat};
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::golden_rows::normalize_declared_numbers;
+
+    let decimal = parse_column("d", "decimal", &[]).expect("decimal parses");
+    let varint = parse_column("v", "varint", &[]).expect("varint parses");
+
+    for whole in [0i128, 1, -1, 42, -31_595] {
+        // Golden side: sstabledump writes a whole decimal as a JSON integer.
+        let golden = normalize_declared_numbers(CanonicalValue::Int(whole), &decimal.spec);
+        // Export side: Decimal128(38, 9) holds whole * 10^9.
+        let exported = decimal_to_canonical(whole * 1_000_000_000, 9, "test")
+            .expect("scale-9 decimal must canonicalize");
+        assert_eq!(
+            golden, exported,
+            "a whole decimal {whole} must compare equal across the two sides"
+        );
+        assert_eq!(
+            golden,
+            CanonicalValue::Float(NormalizedFloat(whole as f64)),
+            "the canonical form of a whole decimal is the exact double it denotes"
+        );
+    }
+
+    // A fractional decimal is untouched by the rule, and still compares exactly.
+    assert_eq!(
+        normalize_declared_numbers(
+            CanonicalValue::Float(NormalizedFloat(31_595.67)),
+            &decimal.spec
+        ),
+        decimal_to_canonical(31_595_670_000_000, 9, "test").expect("fractional decimal")
+    );
+
+    // varint is an integer domain on BOTH sides: it must stay an `Int`, or the
+    // rule would turn a type confusion into a silent pass.
+    assert_eq!(
+        normalize_declared_numbers(CanonicalValue::Int(7), &varint.spec),
+        CanonicalValue::Int(7)
+    );
+    assert_eq!(
+        decimal_to_canonical(7, 0, "test").expect("varint"),
+        CanonicalValue::Int(7)
+    );
+
+    // Beyond 2^53 the conversion would be lossy, so the golden value is LEFT as
+    // an Int (and the export side refuses outright) — a loud failure, never a
+    // rounded comparison.
+    let huge = 1i128 << 60;
+    assert_eq!(
+        normalize_declared_numbers(CanonicalValue::Int(huge), &decimal.spec),
+        CanonicalValue::Int(huge)
+    );
+    assert!(decimal_to_canonical(huge, 9, "test").is_err());
 }
 
 /// A non-frozen collection is multicell (one sstabledump cell per element); a

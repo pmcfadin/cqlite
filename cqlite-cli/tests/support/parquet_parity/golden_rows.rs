@@ -26,7 +26,7 @@
 //! query-semantics oracle (`test-data/query-semantics-oracle.json`), not to a
 //! physical-dump lane.
 //!
-//! # Two normalizations, both of them equalities rather than tolerances
+//! # Three normalizations, all of them equalities rather than tolerances
 //!
 //! * **`Null` folds into `Absent`, recursively.** Arrow/Parquet has ONE null;
 //!   sstabledump renders an absent cell by omitting it and a null UDT field as
@@ -39,6 +39,9 @@
 //!   export writing NULL there is correct. Applied ONLY to non-frozen
 //!   collections: a `frozen<set<int>>` really can hold an empty set, which stays
 //!   an empty container and so still differs from NULL.
+//! * **Numbers are canonicalized by DECLARED type** — a `float` re-narrowed to
+//!   32 bits, a whole-valued `decimal` read as the exact double it denotes. Both
+//!   are exact conversions; see [`normalize_declared_numbers`].
 
 #![allow(dead_code)]
 
@@ -130,7 +133,10 @@ pub fn project_golden(
                     continue;
                 }
                 let value = project_column(&where_, row, col)?;
-                cells.insert(col.name.clone(), narrow_floats(value, &col.spec));
+                cells.insert(
+                    col.name.clone(),
+                    normalize_declared_numbers(value, &col.spec),
+                );
             }
 
             // Every declared key column must have been filled by the key arrays.
@@ -139,7 +145,7 @@ pub fn project_golden(
                     format!("{where_}: declared key column '{name}' is not in the golden row")
                 })?;
                 if let Some(col) = columns.iter().find(|c| c.name == *name) {
-                    let narrowed = narrow_floats(v.clone(), &col.spec);
+                    let narrowed = normalize_declared_numbers(v.clone(), &col.spec);
                     cells.insert((*name).to_string(), narrowed);
                 }
             }
@@ -371,37 +377,70 @@ pub fn fold_null(v: CanonicalValue) -> CanonicalValue {
     }
 }
 
-/// Re-narrow a CQL `float` to 32 bits wherever the DECLARED type says `float`.
+/// Canonicalize a golden NUMBER according to its DECLARED CQL type.
 ///
-/// sstabledump prints a `float` with Java's `Float.toString`, which round-trips
-/// through 32 bits; parsed as JSON it becomes the nearest DOUBLE to that decimal
-/// text, which is not the double a widened `f32` gives (1.84 vs
-/// 1.8399999141693115). Narrowing the golden value to `f32` and widening it back
-/// makes both sides hold the same double, WITHOUT introducing a tolerance: any
-/// genuinely different float still differs.
-pub fn narrow_floats(v: CanonicalValue, spec: &CqlTypeSpec) -> CanonicalValue {
+/// Two rules, both of them equalities rather than tolerances:
+///
+/// * **`float` re-narrows to 32 bits.** sstabledump prints a `float` with Java's
+///   `Float.toString`, which round-trips through 32 bits; parsed as JSON it
+///   becomes the nearest DOUBLE to that decimal text, which is not the double a
+///   widened `f32` gives (1.84 vs 1.8399999141693115). Narrowing the golden
+///   value to `f32` and widening it back makes both sides hold the same double,
+///   WITHOUT introducing a tolerance: any genuinely different float still
+///   differs, and the comparison stays exact-bit.
+/// * **A whole-valued `decimal` becomes a `Float`.** JSON has one number type
+///   and sstabledump renders a scale-0 (or trailing-zero) decimal WITHOUT a
+///   fractional part — `1`, not `1.0` — which `canonical_jsonl` classifies as
+///   `Int`. The exported `Decimal128(38, s>0)` side canonicalizes to
+///   `Float(1.0)` (see `arrow_rows::decimal_to_canonical`), so the two would
+///   compare unequal for a value both sides agree on. The DECLARED type is what
+///   settles it: `decimal` is a real-number domain, so the golden's
+///   integer-shaped literal is the exact double `i as f64` — no rounding, hence
+///   no weakening of the exact-bit float comparison.
+///
+///   Applied only while `i` is exactly f64-representable (`|i| < 2^53`); beyond
+///   that the value is LEFT as `Int` so the comparison fails loudly rather than
+///   comparing two rounded doubles. (`arrow_rows` refuses the same range on its
+///   side.) A `varint` is deliberately NOT converted: it is an integer domain on
+///   both sides (`Decimal128(_, 0)` → `Int`), so converting it would be the
+///   type confusion this rule exists to avoid.
+pub fn normalize_declared_numbers(v: CanonicalValue, spec: &CqlTypeSpec) -> CanonicalValue {
     match (v, spec) {
         (CanonicalValue::Float(NormalizedFloat(f)), CqlTypeSpec::Scalar(name))
             if name == "float" =>
         {
             CanonicalValue::Float(NormalizedFloat(f as f32 as f64))
         }
-        (CanonicalValue::List(xs), CqlTypeSpec::Seq { elem, .. }) => {
-            CanonicalValue::List(xs.into_iter().map(|x| narrow_floats(x, elem)).collect())
+        (CanonicalValue::Int(i), CqlTypeSpec::Scalar(name))
+            if name == "decimal" && i.unsigned_abs() < (1u128 << 53) =>
+        {
+            CanonicalValue::Float(NormalizedFloat(i as f64))
         }
-        (CanonicalValue::Set(xs), CqlTypeSpec::Seq { elem, .. }) => {
-            CanonicalValue::Set(xs.into_iter().map(|x| narrow_floats(x, elem)).collect())
-        }
+        (CanonicalValue::List(xs), CqlTypeSpec::Seq { elem, .. }) => CanonicalValue::List(
+            xs.into_iter()
+                .map(|x| normalize_declared_numbers(x, elem))
+                .collect(),
+        ),
+        (CanonicalValue::Set(xs), CqlTypeSpec::Seq { elem, .. }) => CanonicalValue::Set(
+            xs.into_iter()
+                .map(|x| normalize_declared_numbers(x, elem))
+                .collect(),
+        ),
         (CanonicalValue::Map(kvs), CqlTypeSpec::Map { key, value }) => CanonicalValue::Map(
             kvs.into_iter()
-                .map(|(k, v)| (narrow_floats(k, key), narrow_floats(v, value)))
+                .map(|(k, v)| {
+                    (
+                        normalize_declared_numbers(k, key),
+                        normalize_declared_numbers(v, value),
+                    )
+                })
                 .collect(),
         ),
         (CanonicalValue::List(xs), CqlTypeSpec::Tuple(specs)) if xs.len() == specs.len() => {
             CanonicalValue::List(
                 xs.into_iter()
                     .zip(specs.iter())
-                    .map(|(x, s)| narrow_floats(x, s))
+                    .map(|(x, s)| normalize_declared_numbers(x, s))
                     .collect(),
             )
         }

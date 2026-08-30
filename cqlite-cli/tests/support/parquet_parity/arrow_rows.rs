@@ -17,7 +17,7 @@
 //! | `Int8/16/32/64`             | `Int`                                | JSON number |
 //! | `Float32`                   | `Float` (f32 widened)                | JSON number, narrowed to f32 by the golden side |
 //! | `Float64`                   | `Float`                              | JSON number |
-//! | `Decimal128(38, s>0)`       | `Float` (unscaled / 10^s)            | JSON number |
+//! | `Decimal128(38, s>0)`       | `Float` (unscaled / 10^s)            | JSON number, incl. an integer-shaped whole decimal (`golden_rows::normalize_declared_numbers`) |
 //! | `Decimal128(38, 0)`         | `Int` (varint)                       | JSON number |
 //! | `Utf8`                      | `Text`                               | JSON string |
 //! | `Binary`                    | `Text("0x" + lower hex)`             | `"0x…"` string |
@@ -80,7 +80,7 @@ pub fn canonical_from_arrow(
         )),
         // A CQL `float` is 32-bit; sstabledump prints Java's `Float.toString`,
         // which the golden side re-narrows to f32 before widening, so both sides
-        // hold the SAME double. See `golden_rows::narrow_floats`.
+        // hold the SAME double. See `golden_rows::normalize_declared_numbers`.
         DataType::Float32 => Ok(CanonicalValue::Float(NormalizedFloat(
             downcast::<Float32Array>(array, ctx)?.value(row) as f64,
         ))),
@@ -193,7 +193,11 @@ fn type_name<T>() -> &'static str {
 /// accepts: `unscaled` and `10^scale` are both exactly representable, so IEEE
 /// division returns the correctly-rounded true quotient — bit-identical to the
 /// double `serde_json` produces from the golden's decimal literal.
-fn decimal_to_canonical(unscaled: i128, scale: i8, ctx: &str) -> Result<CanonicalValue, String> {
+pub fn decimal_to_canonical(
+    unscaled: i128,
+    scale: i8,
+    ctx: &str,
+) -> Result<CanonicalValue, String> {
     if scale == 0 {
         return Ok(CanonicalValue::Int(unscaled));
     }
