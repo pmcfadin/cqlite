@@ -91,7 +91,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
@@ -107,6 +107,25 @@ execute NOWHERE** — not locally, not in CI — because their module-level
 aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
 ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
 however green the gate looks. `experimental` is the remaining known instance (#3373).
+**AND THE SAME REASONING RUNS AT PACKAGE GRANULARITY, WHICH IS WHERE IT WAS COSTLIEST (#3522).**
+`cargo clippy --workspace --all-targets` compiles EVERY workspace member on every full gate, so a
+whole CRATE can be built by every run and execute nothing — and it reads as covered precisely
+because the workspace builds clean. Measured: `cqlite-ffi-common` appeared **zero times** in
+`scripts/**` and `.github/workflows/**` (37 unit tests + `tests/dependency_boundary.rs` +
+`tests/error_contract_table.rs`, executed by nothing anywhere), and `cqlite-node`'s 53 Rust unit
+tests were in the same hole because `node-bindings` runs jest against the BUILT ARTIFACT and never
+`cargo test`. Both now run in `binding-rust-tests`. Two design rules came out of it. **A
+never-SKIPping lane must not be folded into a SKIP-aware one**: `node-bindings` correctly SKIPs
+without node/npm, and putting cqlite-node's *Rust* tests behind that SKIP would be a coverage hole
+wearing a SKIP's clothes — so the Rust lane depends on nothing beyond cargo and never SKIPs. **And
+enrolling a lane in `DATASET_COMPONENTS` is not enough to stop a corpus-dependent suite skipping**:
+the widened `node-bindings` also exports `CQLITE_REQUIRE_FIXTURES=1` on the full gate, because
+without it 7 of the 27 jest suites `describe.skip` SILENTLY and jest reports an all-skipped suite as
+PASSED. The durable question is the same one shape up: for each workspace member, **which component
+EXECUTES it** — recorded, member by member, in `scripts/tests/workspace-test-disposition.txt`
+(`EXECUTED`/`PARTIAL`/`NOT-EXECUTED`, a closed label set enforced under `tooling-tests`), so a new
+crate cannot join the unexecuted set unannounced. That census records completeness and labeling, **not
+truth** — deliberately, on #1716's precedent.
 Two corollaries the lanes are built on. **Derive, never curate**: both executing lanes compute their subject
 set from committed source at run time — `legacy-heuristics` its `--test` targets (from cargo metadata plus a
 module closure, so a manifest-gated or directory-style target is not missed) and its allowed-zero set, and
@@ -128,7 +147,10 @@ incomplete source set is permissive everywhere, an unevaluated one is merely una
 proves nothing. `scripts/tests/test_agent_gate_feature_matrix_lanes.sh` (opt-in) plants each lane's
 incident-class break in a throwaway `git worktree` and requires the lane to red **and** to NAME the planted
 symbol — a bare red is not evidence either, since an unrelated breakage produces an identical exit code and
-SUMMARY line.
+SUMMARY line. `scripts/tests/test_agent_gate_binding_rust_lanes.sh` does the same for the #3522 binding
+lanes, and adds the case the failing-assertion plants cannot reach: one that cfg's a unit suite OUT, so it
+compiles, runs **zero** tests and exits 0 — the only plant that exercises the non-zero-count half of
+`check_unittest_targets_ran`.
 
 **Required invocation — summary-file redirect, never raw stdout (issues #1175/#2079), full AND lite:**
 
