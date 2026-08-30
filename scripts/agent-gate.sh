@@ -6070,6 +6070,14 @@ run_binding_rust_tests() {
   local log="$LOG_DIR/$name.log"
   local ffi_log="$LOG_DIR/$name.cqlite-ffi-common.log"
   local node_log="$LOG_DIR/$name.cqlite-node.log"
+  # A THIRD file, for the guards' own verdicts — they must NOT be appended to the cargo
+  # log a LATER guard parses. check_unittest_targets_ran's success line contains the
+  # literal `Running unittests`, and check_no_unexpected_zero_tests keys on exactly that
+  # token: writing one guard's verdict into the other's input makes the two guards'
+  # ORDER load-bearing, which is the kind of coupling that decays into a vacuous pass.
+  # Concatenated LAST into the component log, so the FAIL branch's `tail -40` shows the
+  # verdicts (the informative half of a guard failure) rather than trailing cargo output.
+  local verdict_log="$LOG_DIR/$name.guards.log"
   local start end status
   start=$(date +%s)
 
@@ -6080,7 +6088,10 @@ run_binding_rust_tests() {
 
   # --- one place to report a failed DERIVATION -------------------------------
   # Every derivation below is fatal in the same way and for the same reason, so they
-  # report through one helper rather than five near-copies that could drift apart.
+  # report through one helper rather than five near-copies that could drift apart. It is
+  # defined here (so it reads `$name`/`$log`/`$_derivation_failed` by bash's dynamic
+  # scoping and takes no plumbing arguments) and therefore lands in the GLOBAL function
+  # namespace; the `_brt_` prefix is what keeps that from colliding with anything else.
   local _derivation_failed=0
   _brt_derivation_fail() { # <what> <why...>
     local what="$1"; shift
@@ -6096,6 +6107,7 @@ run_binding_rust_tests() {
   }
 
   : > "$log"
+  : > "$verdict_log"
 
   # NOTE the empty-but-successful case: cqlite-ffi-common declares no features at all, so
   # this legitimately returns the EMPTY SET. That is a measurement, and treating it as a
@@ -6255,7 +6267,7 @@ EOF
     echo "==== [$name] COVERAGE CENSUS (issue #3522) ===="
     for cl in "${census[@]}"; do echo "$cl"; done
     echo "enabled features (cargo tree -p, package-scoped): cqlite-ffi-common [$ffi_enabled] cqlite-node [$node_enabled]"
-    echo "per-package cargo logs: $ffi_log , $node_log"
+    echo "per-package cargo logs: $ffi_log , $node_log ; guard verdicts: $verdict_log"
     echo "==== end census ===="
   } > "$log"
 
@@ -6271,25 +6283,25 @@ EOF
       ${ffi_feature_args[@]+"${ffi_feature_args[@]}"} > "$ffi_log" 2>&1; then
     # Three affirmative guards, ANDed. Order matters only for readability; each writes
     # its own verdict to the log, so a pasted log shows which ones RAN and on what.
-    if ! check_unittest_targets_ran "$name/cqlite-ffi-common" "$ffi_log" "${ffi_unit_srcs[@]}" 2>>"$ffi_log"; then
+    if ! check_unittest_targets_ran "$name/cqlite-ffi-common" "$ffi_log" "${ffi_unit_srcs[@]}" 2>>"$verdict_log"; then
       status=FAIL
     fi
     if [ "$ffi_expect_n" -gt 0 ]; then
-      if ! check_test_targets_observed "$name/cqlite-ffi-common" "$ffi_log" "${ffi_expect[@]}" 2>>"$ffi_log"; then
+      if ! check_test_targets_observed "$name/cqlite-ffi-common" "$ffi_log" "${ffi_expect[@]}" 2>>"$verdict_log"; then
         status=FAIL
       else
-        echo "$name/cqlite-ffi-common: integration targets OK — all $ffi_expect_n derived target(s) produced a 'Running' banner:${ffi_ids}" >> "$ffi_log"
+        echo "$name/cqlite-ffi-common: integration targets OK — all $ffi_expect_n derived target(s) produced a 'Running' banner:${ffi_ids}" >> "$verdict_log"
       fi
     else
       # Unreachable while this package declares runnable targets (the derivation above
       # FAILs on zero), but stated rather than left implicit: an expectation set that
       # emptied itself would be a guard with no subject.
-      echo "$name/cqlite-ffi-common: FAIL-CLOSED — every declared integration target was excused by an unmet required-feature, leaving the observation guard with NO subject (issue #3522)." >> "$ffi_log"
+      echo "$name/cqlite-ffi-common: FAIL-CLOSED — every declared integration target was excused by an unmet required-feature, leaving the observation guard with NO subject (issue #3522)." >> "$verdict_log"
       status=FAIL
     fi
     # EMPTY allowed-zero list, deliberately: no cqlite-ffi-common integration target is
     # permitted to run zero tests, so a cfg change that empties one FAILs here.
-    if ! check_no_unexpected_zero_tests "$name/cqlite-ffi-common" "$ffi_log" 2>>"$ffi_log"; then
+    if ! check_no_unexpected_zero_tests "$name/cqlite-ffi-common" "$ffi_log" 2>>"$verdict_log"; then
       status=FAIL
     fi
   else
@@ -6304,14 +6316,14 @@ EOF
   if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
       cargo test --no-fail-fast -p cqlite-node \
       ${node_feature_args[@]+"${node_feature_args[@]}"} --lib > "$node_log" 2>&1; then
-    if ! check_unittest_targets_ran "$name/cqlite-node" "$node_log" "${node_unit_srcs[@]}" 2>>"$node_log"; then
+    if ! check_unittest_targets_ran "$name/cqlite-node" "$node_log" "${node_unit_srcs[@]}" 2>>"$verdict_log"; then
       status=FAIL
     fi
   else
     status=FAIL
   fi
 
-  cat "$ffi_log" "$node_log" >> "$log" 2>/dev/null
+  cat "$ffi_log" "$node_log" "$verdict_log" >> "$log" 2>/dev/null
   if [ "$status" = FAIL ]; then
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
