@@ -895,11 +895,13 @@ pub fn cli_csv_rows(text: &str) -> Result<Vec<Row>, String> {
 // Fixture staging
 // ===========================================================================
 
-/// The `<keyspace>/<table>-<uuid>` directory holding this table's SSTable, chosen
-/// per TABLE by evidence (#3220), or an error naming every root searched.
-pub fn fixture_dir(keyspace: &str, table: &str) -> Result<PathBuf, String> {
-    let root = super::datasets_root::sstables_root_for_table(keyspace, table)
-        .ok_or_else(|| super::datasets_root::describe_search(keyspace, table))?;
+/// The `<table>-<uuid>` directory holding this table's SSTable under an ALREADY
+/// CHOSEN `sstables/` root, or an error naming that root.
+///
+/// Choosing the root is the caller's job — see `super::fixture_root`, where a
+/// git-committed case is pinned to the checkout copy and only a fetched-corpus case
+/// walks the candidate roots by evidence (#1491 finding J1, #3220).
+pub fn fixture_dir_in(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, String> {
     let prefix = format!("{table}-");
     let mut matches: Vec<PathBuf> = std::fs::read_dir(root.join(keyspace))
         .map_err(|e| format!("cannot read {}: {e}", root.join(keyspace).display()))?

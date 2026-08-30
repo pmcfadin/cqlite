@@ -54,9 +54,8 @@
 #[path = "support/golden_value_parity.rs"]
 mod golden;
 
-use golden::compare::{
-    cli_csv_rows, cli_json_rows, compare_rows, fixture_dir, golden_path, stage_single_table,
-};
+use golden::compare::{cli_csv_rows, cli_json_rows, compare_rows, golden_path, stage_single_table};
+use golden::fixture_root::{self, RootSource};
 use golden::schema::{ColumnKind, CqlType, TableSchema};
 use golden::{golden_rows, Egress, Multicell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -871,6 +870,51 @@ fn export(case: &Case, data_dir: &Path, out: &Path, format: &str) -> String {
         .unwrap_or_else(|e| panic!("{qualified}: cannot read {}: {e}", out.display()))
 }
 
+/// Why a case's fixture could not be resolved.
+enum FixtureError {
+    /// Fail-closed: this fails the case whatever tier it is in.
+    Failure(String),
+    /// A fetched-corpus fixture that is legitimately absent — declared in the
+    /// census rather than swallowed.
+    CorpusAbsent(String),
+}
+
+/// A case's fixture directory, and which root supplied it.
+///
+/// A git-committed case is served from the CHECKOUT copy and only from there: an
+/// external `CQLITE_DATASETS_ROOT` corpus may carry its own copy of the same table —
+/// stale, regenerated, or simply a different generation — and comparing that copy
+/// while the census reports the committed table as covered is finding J1. A
+/// fetched-corpus case keeps the evidence-based walk over the candidate roots.
+///
+/// The `Presence` declaration is CHECKED against `git ls-files`, never trusted: a
+/// case declared committed whose table git does not track, and a case declared
+/// fetched-corpus that git DOES track, are both mis-declarations that fail here.
+fn resolve_fixture(
+    case: &Case,
+    committed: &fixture_root::CommittedFixtures,
+    checkout: &Path,
+) -> Result<(PathBuf, RootSource), FixtureError> {
+    let tracked = committed.get(&(case.keyspace.to_string(), case.table.to_string()));
+    match (case.presence, tracked) {
+        (Presence::Committed, tracked) => {
+            fixture_root::committed_fixture_dir(tracked, case.keyspace, case.table, checkout)
+                .map(|dir| (dir, RootSource::Checkout))
+                .map_err(FixtureError::Failure)
+        }
+        (Presence::Corpus, Some(_)) => Err(FixtureError::Failure(
+            "declared Presence::Corpus, but `git ls-files` tracks a *-Data.db for it — \
+             a committed fixture must be declared Presence::Committed so it is compared \
+             from the checkout copy, and fails closed when absent"
+                .to_string(),
+        )),
+        (Presence::Corpus, None) => {
+            fixture_root::corpus_fixture_dir(case.keyspace, case.table, checkout)
+                .map_err(FixtureError::CorpusAbsent)
+        }
+    }
+}
+
 /// JSON egress: every cell value deep-compared against the golden.
 #[test]
 fn json_egress_matches_sstabledump_goldens() {
@@ -900,24 +944,36 @@ fn run_lane(egress: Egress) {
     let mut containers_compared = 0usize;
     let mut containers_refused = 0usize;
 
+    // The git-committed fixture set, read once from `git ls-files`: it decides which
+    // root each case's golden comes from (finding J1) and CHECKS every `Presence`
+    // declaration. An unusable listing fails the lane rather than being worked
+    // around, since without it no case's tier is known.
+    let committed = match fixture_root::committed_listing()
+        .and_then(|listing| fixture_root::committed_fixtures(&listing))
+    {
+        Ok(committed) => committed,
+        Err(why) => panic!("AD2 {format}: cannot read the committed fixture set: {why}"),
+    };
+    let checkout = fixture_root::checkout_sstables_root();
+
     for case in CASES {
         let qualified = format!("{}.{}", case.keyspace, case.table);
         // must_run: a committed fixture is never allowed to skip.
-        let fixture = match fixture_dir(case.keyspace, case.table) {
-            Ok(dir) => dir,
-            Err(why) => {
-                match case.presence {
-                    // A committed fixture is present in every checkout, so an
-                    // unresolvable one is a real failure, never a skip.
-                    Presence::Committed => {
-                        failures.push(format!("{qualified}: fixture unresolvable: {why}"))
-                    }
-                    // A fetched-corpus fixture may legitimately be absent; the
-                    // absence is DECLARED in the census rather than swallowed.
-                    Presence::Corpus => census.push(format!(
-                        "  {qualified}: NOT PRESENT (fetched corpus) — {why}"
-                    )),
-                }
+        let (fixture, root_source) = match resolve_fixture(case, &committed, &checkout) {
+            Ok(resolved) => resolved,
+            // A committed fixture is present in every checkout, so an unresolvable
+            // one is a real failure, never a skip — and so is a `Presence` the git
+            // listing contradicts.
+            Err(FixtureError::Failure(why)) => {
+                failures.push(format!("{qualified}: {why}"));
+                continue;
+            }
+            // A fetched-corpus fixture may legitimately be absent; the absence is
+            // DECLARED in the census rather than swallowed.
+            Err(FixtureError::CorpusAbsent(why)) => {
+                census.push(format!(
+                    "  {qualified}: NOT PRESENT (fetched corpus) — {why}"
+                ));
                 continue;
             }
         };
@@ -1029,7 +1085,9 @@ fn run_lane(egress: Egress) {
         }
         if report.diffs.is_empty() {
             census.push(format!(
-                "  {qualified}: {} rows, {} cells compared ({} of them containers){}{}",
+                "  {qualified}: golden from {} — {} rows, {} cells compared ({} of them \
+                 containers){}{}",
+                root_source.as_str(),
                 expected.len(),
                 report.compared_cells,
                 report.container_cells,
@@ -1102,39 +1160,21 @@ fn run_lane(egress: Egress) {
 #[test]
 fn committed_fixture_coverage_census() {
     let root = repo_root();
-    let output = Command::new("git")
-        .args(["ls-files", "test-data/datasets/sstables"])
-        .current_dir(&root)
-        .output()
-        .unwrap_or_else(|e| panic!("cannot run `git ls-files` in {}: {e}", root.display()));
-    assert!(
-        output.status.success(),
-        "`git ls-files` failed in {}: {}",
-        root.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let listing = String::from_utf8_lossy(&output.stdout);
+    let listing = fixture_root::committed_listing()
+        .unwrap_or_else(|why| panic!("cannot read the committed fixture set: {why}"));
 
     let mut committed: Vec<(String, String)> = Vec::new();
     // Every committed golden, per table: a table may have several SSTables and the
     // exclusion is a property of the SET, so the shape scan unions all of them.
     let mut goldens: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for line in listing.lines() {
-        let jsonl = line.ends_with("-Data.db.jsonl");
-        if !line.ends_with("-Data.db") && !jsonl {
+    for line in &listing {
+        // The same path parser the fixture-root selection uses, so "committed" means
+        // one thing in this lane: an unrecognised shape is refused, not guessed at.
+        let Some(path) = fixture_root::classify(line).unwrap_or_else(|why| panic!("{why}")) else {
             continue;
-        }
-        let parts: Vec<&str> = line.split('/').collect();
-        // test-data/datasets/sstables/<keyspace>/<table>-<uuid>/<gen>-Data.db[.jsonl]
-        let (Some(keyspace), Some(dir)) = (parts.get(3), parts.get(4)) else {
-            panic!("unexpected committed fixture path shape: {line}");
         };
-        let table = dir
-            .rsplit_once('-')
-            .map(|(table, _uuid)| table.to_string())
-            .unwrap_or_else(|| panic!("fixture dir has no -<uuid> suffix: {dir}"));
-        let key = ((*keyspace).to_string(), table);
-        if jsonl {
+        let key = (path.keyspace, path.table);
+        if path.is_golden {
             goldens.entry(key).or_default().push(line.to_string());
         } else {
             committed.push(key);

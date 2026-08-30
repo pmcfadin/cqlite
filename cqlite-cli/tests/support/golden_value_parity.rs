@@ -113,6 +113,12 @@ pub mod csv_container;
 #[path = "golden_schema.rs"]
 pub mod schema;
 
+/// WHICH root supplies a case's fixture: a git-committed case is pinned to the
+/// checkout copy, a fetched-corpus case walks the candidate roots by evidence
+/// (issue #1491 review finding J1).
+#[path = "golden_fixture_root.rs"]
+pub mod fixture_root;
+
 use schema::CqlType;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
