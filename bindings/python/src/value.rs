@@ -77,16 +77,18 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
 /// `frozenset` element.
 ///
 /// Python `dict` keys and `frozenset` elements must be hashable, but the
-/// ordinary projection of several CQL types is not: a `Udt` becomes a `dict`,
-/// and a `List`/`Set` that contains UDTs becomes a `list` (see `set_to_py`).
+/// ordinary projection of several CQL types is not: a `Udt` becomes a `dict`, a
+/// `List` becomes a `list` UNCONDITIONALLY (`list_to_py`), and a `Set` becomes a
+/// `list` when it contains a UDT anywhere inside (`set_to_py`).
 /// This function is the TOTAL hashable projection over `cqlite_core::Value`:
 ///
 /// - `List`, `Tuple` → `tuple` (elements recursively projected)
 /// - `Set` → `frozenset` (elements recursively projected)
 /// - `Map` → `tuple` of `(key, value)` tuples (both sides recursively projected)
-/// - `Udt` → `frozenset` of `(field_name, value)` tuples, sorted by field name
+/// - `Udt` → `frozenset` of `(field_name, value)` tuples
 /// - `Frozen` → unwrap and recurse
-/// - `Json` → `tuple` (array) / `frozenset` of pairs (object), recursively
+/// - `Json` → `tuple` (array) / `frozenset` of pairs (object), recursively — a
+///   reachable case, not a defensive one (see that arm)
 /// - every other variant → its ordinary [`value_to_py`] projection, which is
 ///   already hashable
 ///
@@ -101,10 +103,16 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
 /// ERROR here instead of a runtime `TypeError` on somebody's data, which is
 /// strictly stronger than detecting it at run time.
 ///
+/// That property is PINNED by `#[deny(clippy::wildcard_enum_match_arm)]` on this
+/// function rather than by a text guard: clippy runs `-D warnings` in the gate,
+/// so a reintroduced `_ =>` is a hard error. A grep-style guard was rejected
+/// because it matches the PROSE above (which necessarily contains `_ =>`).
+///
 /// Recursion goes through THIS function, never through [`value_to_py`] or
 /// [`set_to_py`]: `set_to_py`'s UDT branch returns an unhashable `list` **on
 /// purpose** (issue #804) because that is the right answer for a top-level
 /// column, and the wrong one inside a hashable position.
+#[deny(clippy::wildcard_enum_match_arm)]
 pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     match value {
         // Both project to a Python `tuple`: a list needs one for hashability, a
@@ -119,9 +127,19 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
             Ok(PyTuple::new(py, converted)?.into_any().unbind())
         }
         Value::Set(items) => {
-            // NOT routed through `set_to_py`, whose UDT fallback returns a
-            // `list` — unhashable, and therefore the #3500 failure for
-            // `set<frozen<set<frozen<udt>>>>`.
+            // Recursion stays HERE and never re-enters `set_to_py`, whose UDT
+            // branch deliberately returns an unhashable `list` (#804): the right
+            // answer for a top-level column, the wrong one inside a hashable
+            // position.
+            //
+            // What this arm buys AS THE CODE NOW STANDS is (a) the MAP-KEY path
+            // — a `map<frozen<set<…>>, v>` key, projected by `map_to_py` — and
+            // (b) compiler-enforced totality. It is NOT what fixes
+            // `set<frozen<set<frozen<udt>>>>`: post-fix `contains_udt` sees the
+            // nested UDT, so `set_to_py` routes that column to its `list`
+            // branch and this arm is never reached for it. (PRE-fix that column
+            // did reach a frozenset holding an unhashable element — that was the
+            // #3500 failure, and it is history, not current behaviour.)
             let converted: Vec<PyObject> = items
                 .iter()
                 .map(|v| value_to_hashable_key(py, v))
@@ -154,9 +172,15 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
             value_to_hashable_key(py, inner)
         }
         Value::Udt(udt) => {
-            // UDT as a map/set key: represent as a frozenset of (name, value) tuples
-            // sorted by field name for deterministic ordering.
+            // UDT in a hashable position: a frozenset of (name, value) tuples.
             // Fields: _type, _keyspace, and all named fields (matching udt_to_py).
+            //
+            // The pairs are pushed in schema order and NOT sorted: a
+            // `frozenset`'s hash and equality are order-independent BY
+            // CONSTRUCTION, so ordering the pairs first cannot change the
+            // resulting object. An earlier version sorted by field name "so the
+            // frozenset hash is order-independent" — dead work resting on a
+            // false premise, removed rather than kept as a cosmetic step.
             let mut pairs: Vec<PyObject> = Vec::with_capacity(udt.fields.len() + 2);
 
             // _type and _keyspace metadata fields
@@ -173,36 +197,46 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
             let ks_val = udt.keyspace.as_str().into_pyobject(py)?.into_any().unbind();
             pairs.push(PyTuple::new(py, [ks_key, ks_val])?.into_any().unbind());
 
-            // Named fields (in schema order; sort by name for a stable hash)
-            let mut field_tuples: Vec<(&str, PyObject)> = udt
-                .fields
-                .iter()
-                .map(|f| {
-                    let v = match &f.value {
-                        Some(v) => value_to_hashable_key(py, v),
-                        None => Ok(py.None()),
-                    }?;
-                    Ok((f.name.as_str(), v))
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-
-            // Sort by field name so the frozenset hash is order-independent
-            field_tuples.sort_by_key(|(name, _)| *name);
-
-            for (name, val) in field_tuples {
-                let k = name.into_pyobject(py)?.into_any().unbind();
+            // Named fields, in schema order (immaterial — see above).
+            for field in &udt.fields {
+                let val = match &field.value {
+                    Some(v) => value_to_hashable_key(py, v)?,
+                    None => py.None(),
+                };
+                let k = field.name.as_str().into_pyobject(py)?.into_any().unbind();
                 pairs.push(PyTuple::new(py, [k, val])?.into_any().unbind());
             }
 
             Ok(PyFrozenSet::new(py, &pairs)?.into_any().unbind())
         }
-        // DEFENSIVE. No real Cassandra SSTable produces `Value::Json`:
-        // `ComparatorType::Json` has no INBOUND parser — `schema/parser.rs` maps
-        // only OUTWARD, onto `CqlType::Custom("json")` — so no marshal class
-        // decodes to this variant. It is still projected hashably rather than
-        // delegated to `json_to_py`, which returns an unhashable `list`/`dict`
-        // for arrays/objects: that is the exact defect class #3500 removed, and
-        // leaving one variant-shaped hole would reintroduce it.
+        // LIVE, not defensive. `Value::Json` does arrive from real SSTable
+        // bytes, by two decode paths in cqlite-core:
+        //
+        // * `reader/parsing/custom_scalar.rs` (`decode_custom_scalar`, the
+        //   `"json"` arm) parses a `Custom("json")` body UTF-8-then-JSON into
+        //   `Value::Json`. `CqlType::parse("json")` yields exactly that
+        //   `Custom("json")` (`schema/cql_type_parser.rs`: an all-lowercase name
+        //   that is not a primitive falls through to `Custom`), and this binding
+        //   opens WITH a schema — so a user `.cql` declaring a `json` column
+        //   reads real cells into this arm.
+        // * `reader/parsing/comparator_value_parsing.rs` decodes
+        //   `ComparatorType::Json` the same way and returns `Ok(Value::Json(..))`.
+        //
+        // The one TRUE narrow statement — all this comment used to say, and it
+        // said it far too broadly — is that no Cassandra MARSHAL CLASS maps onto
+        // `ComparatorType::Json`: `schema/parser.rs` maps that comparator only
+        // OUTWARD, onto `CqlType::Custom("json")`. So a HEADER-DERIVED schema
+        // will not produce this variant. A schema-declared `json` column will.
+        //
+        // KNOWN LIMITATION, deliberately not changed here: the projection below
+        // inherits `json_to_py`'s number handling (see `json_to_py`), so JSON
+        // `1` becomes `int`, `1.0` becomes `float` and `true` becomes `bool`.
+        // Python holds `1 == 1.0 == True` with EQUAL hashes, so `{"a": 1}` and
+        // `{"a": 1.0}` project to equal frozensets and COLLAPSE onto a single
+        // element in a set-element or map-key position. Fixing it needs a
+        // type-preserving JSON projection, a behaviour change out of scope for
+        // #3500; a follow-up issue is being filed (no number assigned yet, so
+        // none is cited here rather than inventing one).
         Value::Json(json) => json_to_hashable_key(py, json),
         // Every remaining variant's ordinary projection is ALREADY hashable, so
         // it delegates to `value_to_py`. Named exhaustively — never `_ =>` — so
@@ -240,11 +274,19 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
 
 /// Hashable projection of a JSON value (companion to [`json_to_py`]).
 ///
-/// DEFENSIVE ONLY — see the `Value::Json` arm of [`value_to_hashable_key`] for
-/// why this variant cannot arrive from a Cassandra SSTable. Arrays become
-/// `tuple`s and objects become `frozenset`s of `(key, value)` pairs so that a
-/// JSON value in a hashable position can never be the unhashable `list`/`dict`
-/// that [`json_to_py`] would build.
+/// REACHABLE from real data — see the `Value::Json` arm of
+/// [`value_to_hashable_key`] for the two decode paths that produce this variant
+/// from a schema-declared `json` column. Arrays become `tuple`s and objects
+/// become `frozenset`s of `(key, value)` pairs so that a JSON value in a
+/// hashable position can never be the unhashable `list`/`dict` that
+/// [`json_to_py`] would build.
+///
+/// Scalars delegate to [`json_to_py`], so its NUMBER projection is inherited and
+/// with it a known collapse: JSON `1`/`1.0`/`true` become Python
+/// `int`/`float`/`bool`, which compare equal with equal hashes, so `{"a": 1}`
+/// and `{"a": 1.0}` are the same frozenset. Recorded in full at the
+/// `Value::Json` arm.
+#[deny(clippy::wildcard_enum_match_arm)]
 fn json_to_hashable_key(py: Python<'_>, json: &serde_json::Value) -> PyResult<PyObject> {
     match json {
         serde_json::Value::Array(arr) => {
@@ -555,6 +597,7 @@ fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
 /// Reaching a `Udt` answers `true` immediately: a UDT nested inside another
 /// UDT's field cannot change that answer, so there is no recursion into UDT
 /// fields here — it would be code with no reachable effect.
+#[deny(clippy::wildcard_enum_match_arm)]
 fn contains_udt(value: &Value) -> bool {
     match value {
         Value::Udt(_) => true,
@@ -572,9 +615,17 @@ fn contains_udt(value: &Value) -> bool {
         // `set_to_py` takes; that one executes it. A wildcard here would
         // desynchronise them — adding a composite `Value` variant would be a
         // compile error there (correct) while this function silently answered
-        // `false`, putting `set_to_py` back on the frozenset path with an
-        // unhashable element, i.e. reproducing #3500 inside its own fix. So a
-        // new composite variant must fail to compile in BOTH halves.
+        // `false`, putting `set_to_py` back on the frozenset path.
+        //
+        // The consequence of that is a #804 SHAPE regression, NOT a
+        // `TypeError`: `value_to_hashable_key` is now TOTAL, so a new composite
+        // variant given a recursive arm there still projects HASHABLY, and the
+        // frozenset would build. The column would simply come back as a
+        // `frozenset` of projected elements where #804 requires the `list` of
+        // `dict`s the CLI renders. So what `contains_udt` buys post-fix is
+        // SHAPE POLICY, not hashability safety — and a new composite variant
+        // must still fail to compile in BOTH halves, because the compiler is
+        // the only thing keeping the two in step.
         //
         // `false` here also has to be an ANSWER, not a default: `_ => false`
         // said "no UDT" because it recognised no composite, which is not the
