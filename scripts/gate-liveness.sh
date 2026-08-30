@@ -292,6 +292,14 @@ if [ -z "$_order_bad" ] && [ -n "$_open_ln" ] && [ -n "$_rid_ln" ]; then
     _order_bad="run-id (line $_rid_ln) follows the closer (line $_close_ln)"
   fi
 fi
+# ...and run-id must precede RESULT (roborev job 191, Medium). The previous version checked only
+# that each field was INSIDE the markers, not their RELATIVE order — so a block with `RESULT: PASS`
+# ahead of a matching `run-id` was accepted as COMPLETE while claiming to validate an ordered block.
+# The gate always writes run-id immediately after the opener and RESULT last, so any other order is
+# fragments of more than one write.
+if [ -z "$_order_bad" ] && [ -n "$_rid_ln" ] && [ -n "$_res_ln" ] && [ "$_rid_ln" -gt "$_res_ln" ]; then
+  _order_bad="run-id (line $_rid_ln) comes AFTER RESULT (line $_res_ln); the gate writes run-id first and RESULT last"
+fi
 
 if [ -z "$_open_ln" ]; then
   verdict UNKNOWN 4 "summary-no-opener; $SUMMARY has no '==== AGENT-GATE … SUMMARY ====' opener, so it is not a gate summary block and none of its fields can be attributed to a run"
@@ -611,16 +619,40 @@ _hb2=""
 # matching run-id plus a "different" beat-seq let a malformed or truncated re-read carry a RUNNING
 # verdict — and "different" is itself too weak: a peer's smaller counter differs too. Progress
 # means STRICTLY GREATER.
+# WHY A CHANGED beater-pid ALSO COUNTS AS PROGRESS (roborev job 191, Medium).
+#
+# Round 15 tightened this from "the counter differs" to "the counter is strictly greater", to stop
+# a peer's SMALLER counter passing as progress. That opened the opposite hole: every replacement
+# beater starts its counter at 1, and the gate respawns its beater at component boundaries
+# (_hb_ensure). A restart inside this confirmation window therefore produces a LOWER second
+# sequence — and a live gate would be reported STALLED. That is the precise false-death this whole
+# script is built to avoid, introduced by my own fix for the previous hole.
+#
+# The resolution needs no new field: a CHANGED `beater-pid` under the SAME run-id is itself
+# affirmative evidence the gate is alive, because the only thing that starts a new beater for a
+# run is that run's own gate reaching a component boundary. So progress is either the counter
+# advancing within one beater incarnation, or the incarnation changing.
+#
+# The run-id equality check is what keeps this sound: a different run-id is a peer, and a peer's
+# beater pid tells us nothing about our gate.
 _advanced=no
+_adv_why=""
 if [ -n "$_hb2" ] && _beat_valid "$_hb2"; then
   _seq2=$(_field "$_hb2" beat-seq)
   _rid2=$(_field "$_hb2" run-id)
-  if [ "$_rid2" = "$HB_RUN_ID" ] && [ "$_seq2" -gt "$HB_SEQ" ] 2>/dev/null; then
-    _advanced=yes
+  _bpid1=$(_field "$HB_TEXT" beater-pid)
+  _bpid2=$(_field "$_hb2" beater-pid)
+  if [ "$_rid2" = "$HB_RUN_ID" ]; then
+    if [ "$_seq2" -gt "$HB_SEQ" ] 2>/dev/null; then
+      _advanced=yes; _adv_why="beat-seq advanced $HB_SEQ->$_seq2"
+    elif [ -n "$_bpid1" ] && [ -n "$_bpid2" ] && [ "$_bpid1" != "$_bpid2" ]; then
+      # A new incarnation: the gate relaunched its beater, which only a live gate does.
+      _advanced=yes; _adv_why="the beater was RELAUNCHED (beater-pid $_bpid1->$_bpid2), which only this run's own live gate does at a component boundary"
+    fi
   fi
 fi
 if [ "$_advanced" = yes ]; then
-  verdict RUNNING 2 "beat-seq advanced $HB_SEQ->$_seq2 over a ${_confirm_wait}s window timed on THIS host — the writer is alive. Decided by counter progression, comparing no clocks (the epoch read ${AGE}s old here, which is not trusted for this run). $_where"
+  verdict RUNNING 2 "$_adv_why over a ${_confirm_wait}s window timed on THIS host — the writer is alive. Decided by counter progression, comparing no clocks (the epoch read ${AGE}s old here, which is not trusted for this run). $_where"
 fi
 
 # ---- a stale beat means NO LIVENESS, and that is ALL it is claimed to mean -----------

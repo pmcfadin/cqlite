@@ -128,7 +128,7 @@ CAGE
     bad "3.0 start the cage cgroup" "systemd-run failed"
   else
     ok "3.0 start the cage cgroup"
-    for _ in $(seq 1 60); do
+    for ((_i_=0; _i_<60; _i_++)); do
       [ -s "$TMP/in.log" ] && [ -s "$TMP/out.log" ] && break
       sleep 1
     done
@@ -155,7 +155,7 @@ CAGE
 
       systemctl --user stop "$cage_unit" >/dev/null 2>&1
       # Bounded wait for the kill to land, then assert the split.
-      for _ in $(seq 1 60); do
+      for ((_i_=0; _i_<60; _i_++)); do
         kill -0 "$in_pid" 2>/dev/null || break
         sleep 1
       done
@@ -214,7 +214,7 @@ else
       && ok "4.3 the launcher reports how many variables it forwarded" \
       || bad "4.3 the launcher reports how many variables it forwarded" "$out"
     # Wait for the gate to reach a verdict, using the mechanism under test.
-    for _ in $(seq 1 60); do
+    for ((_i_=0; _i_<60; _i_++)); do
       grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$summ" 2>/dev/null && break
       sleep 2
     done
@@ -759,7 +759,7 @@ _g=$!; echo "$_g" >> "$TMP/pids"
 _hbf="$TMP/tier.hb"
 bash "$BEATER_SH" --file "$_hbf" --run-id tier --gate-pid "$_g" --interval 1 </dev/null >/dev/null 2>&1 &
 _b=$!; echo "$_b" >> "$TMP/beater-pids"
-for _ in $(seq 1 40); do [ -s "$_hbf" ] && break; sleep 0.5; done
+for ((_i_=0; _i_<40; _i_++)); do [ -s "$_hbf" ] && break; sleep 0.5; done
 _s1=$(sed -n 's/^beat-seq: //p' "$_hbf" 2>/dev/null)
 kill -9 "$_g" 2>/dev/null; wait "$_g" 2>/dev/null || true
 sleep 3
@@ -786,7 +786,7 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   ns="$TMP/nonce-s.txt"
   out=$(bash "$LAUNCHER" --summary "$ns" --log "$TMP/nonce.log" -- --only file-size 2>&1)
   nu=$(printf '%s' "$out" | sed -n 's/^unit:  *//p'); [ -n "$nu" ] && echo "$nu" >> "$UNITS_FILE"
-  for _ in $(seq 1 60); do grep -q '^launch-nonce: ' "$ns" 2>/dev/null && break; sleep 0.5; done
+  for ((_i_=0; _i_<60; _i_++)); do grep -q '^launch-nonce: ' "$ns" 2>/dev/null && break; sleep 0.5; done
   sn=$(sed -n 's/^launch-nonce: //p' "$ns" 2>/dev/null | head -1)
   hn=$(sed -n 's/^launch-nonce: //p' "$ns.heartbeat" 2>/dev/null | head -1)
   if [ -n "$sn" ] && [ "$sn" = "$hn" ]; then
@@ -873,7 +873,7 @@ else
       *)               bad "5.5 the default directory is an mkdtemp under TMPDIR" "$ddir" ;;
     esac
     # And the gate must still actually work through the default path.
-    for _ in $(seq 1 60); do
+    for ((_i_=0; _i_<60; _i_++)); do
       grep -qE '^RESULT: (PASS|FAIL|PARTIAL|ERROR|REFUSED)' "$dsum" 2>/dev/null && break
       sleep 2
     done

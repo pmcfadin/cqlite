@@ -301,7 +301,7 @@ echo "$beater_pid" >> "$TMP/beater-pids"
 # fails the case instead of hanging the suite).
 # 60 x 0.5s = 30s ceiling; breaks the moment the beater publishes. A 3s ceiling
 # was load-sensitive on a host running several lanes and produced intermittent reds.
-for _ in $(seq 1 60); do [ -f "$hbf" ] && break; sleep 0.5; done
+for ((_i_=0; _i_<60; _i_++)); do [ -f "$hbf" ] && break; sleep 0.5; done
 if [ -f "$hbf" ]; then
   ok "9.1 beater writes a beat for a live gate"
   grep -q "^run-id: live-run$"      "$hbf" && ok "9.2 beat carries the run-id"       || bad "9.2 beat carries the run-id" "$(cat "$hbf")"
@@ -318,7 +318,7 @@ expect_reader "9.6 live beater => reader says RUNNING" RUNNING 2 "" -- "$TMP/liv
 # Now kill the "gate". The beater must notice and EXIT, leaving the last beat to age.
 kill -9 "$sleep_pid" 2>/dev/null; wait "$sleep_pid" 2>/dev/null
 beater_gone=no
-for _ in $(seq 1 60); do
+for ((_i_=0; _i_<60; _i_++)); do
   kill -0 "$beater_pid" 2>/dev/null || { beater_gone=yes; break; }
   sleep 0.4
 done
@@ -690,7 +690,7 @@ blend="$TMP/blend.txt"
 {
   exec 3> "$blend"
   printf '==== AGENT-GATE SUMMARY ====\nrun-id: run-AAAA\n' >&3
-  printf 'padding %.0s' $(seq 1 40) >&3
+  for ((_p_=0; _p_<40; _p_++)); do printf 'padding ' >&3; done
   exec 4> "$blend"                     # writer B truncates; A keeps its offset
   printf '==== AGENT-GATE SUMMARY ====\nrun-id: run-BBBB\n' >&4
   exec 4>&-
@@ -946,6 +946,68 @@ expect_reader "11i.8 a duplicated beat-seq => UNKNOWN (no field attributable to 
 _mkbeat_pc starttime 20; grep -v '^==== END AGENT-GATE HEARTBEAT ====$' "$hbv" > "$hbv.t" && mv "$hbv.t" "$hbv"
 expect_reader "11i.9 a beat with no closer => UNKNOWN" \
   UNKNOWN 4 "heartbeat-not-a-single-block" -- "$TMP/hbv.txt"
+
+echo "=== section 11j: field ORDER, and a beater restart during confirmation (job 191) ==="
+# The ordering check verified that run-id and RESULT were both INSIDE the markers but not their
+# RELATIVE order, so a block with RESULT ahead of a matching run-id was accepted as COMPLETE while
+# claiming to validate an ordered block. The gate writes run-id first and RESULT last.
+{ echo "==== AGENT-GATE SUMMARY ===="; echo "RESULT: PASS"; echo "run-id: r1"
+  echo "==== END AGENT-GATE SUMMARY ===="; } > "$TMP/rev.txt"
+expect_reader "11j.1 RESULT before run-id => UNKNOWN (out of order)" \
+  UNKNOWN 4 "comes AFTER RESULT" -- "$TMP/rev.txt"
+mk_summary "$TMP/fwd.txt" r1 "PASS"
+expect_reader "11j.2 control: run-id before RESULT is still COMPLETE" COMPLETE 0 "" -- "$TMP/fwd.txt"
+
+# A BEATER RESTART during the confirmation window must not read as a stall. Round 15 tightened
+# progression to "strictly greater" to stop a peer's smaller counter passing — but every
+# replacement beater restarts its counter at 1, and the gate respawns the beater at component
+# boundaries, so a restart mid-window produces a LOWER second sequence. A live gate would have been
+# reported STALLED: the exact false death this script exists to prevent, caused by the previous fix.
+mk_summary "$TMP/restart.txt" run-R "INCOMPLETE (gate did not finish)"
+_mkbeat_r() { # _mkbeat_r <beat-seq> <beater-pid>
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-R"; echo "gate-pid: 4242"
+    echo "beater-pid: $2"; echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "parent-check: starttime"; echo "interval: 1"; echo "beat-seq: $1"
+    echo "beat-epoch: $(( $(date +%s) - 99999 ))"
+    echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/restart.txt.heartbeat"
+}
+_mkbeat_r 57 1111
+# During the reader's wait, a NEW beater incarnation appears with a LOWER counter.
+( sleep 1; _mkbeat_r 1 2222; sleep 1; _mkbeat_r 2 2222 ) &
+_rp=$!; echo "$_rp" >> "$TMP/pids"
+expect_reader "11j.3 a beater RESTART mid-window => RUNNING, not a false STALLED" \
+  RUNNING 2 "RELAUNCHED" -- "$TMP/restart.txt"
+wait "$_rp" 2>/dev/null || true
+# CONTROL: a lower counter under the SAME beater incarnation is NOT progress (that is a peer or a
+# corrupt write, not a restart).
+_mkbeat_r 57 1111
+( sleep 1; _mkbeat_r 3 1111 ) &
+_rp2=$!; echo "$_rp2" >> "$TMP/pids"
+expect_reader "11j.4 control: a LOWER counter under the same beater-pid is not progress" \
+  STALLED 3 "did NOT advance" -- "$TMP/restart.txt"
+wait "$_rp2" 2>/dev/null || true
+# CONTROL: a changed beater-pid under a DIFFERENT run-id is a peer, not our gate.
+_mkbeat_r 57 1111
+( sleep 1
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: SOMEONE-ELSE"; echo "gate-pid: 4242"
+    echo "beater-pid: 9999"; echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "parent-check: starttime"; echo "interval: 1"; echo "beat-seq: 1"
+    echo "beat-epoch: $(date +%s)"; echo "==== END AGENT-GATE HEARTBEAT ===="
+  } > "$TMP/restart.txt.heartbeat" ) &
+_rp3=$!; echo "$_rp3" >> "$TMP/pids"
+expect_reader "11j.5 control: a new beater-pid under a FOREIGN run-id is not our gate" \
+  STALLED 3 "did NOT advance" -- "$TMP/restart.txt"
+wait "$_rp3" 2>/dev/null || true
+
+# Portability: no external `seq`. Whether stock macOS ships it is arguable; a bash arithmetic loop
+# needs no external utility at all, so there is nothing left to argue about (job 191).
+sq_bad=0
+for f in "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" "$REPO_ROOT/scripts/tests/test_gate_detached.sh"; do
+  if sed 's/[[:space:]]*#.*$//' "$f" | grep -qE '\$\(seq '; then
+    bad "11j.6 no external seq in $(basename "$f")" "found one"; sq_bad=1
+  fi
+done
+[ "$sq_bad" -eq 0 ] && ok "11j.6 neither suite depends on an external seq"
 
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
 # The same shape appeared THREE times in this change: the default /tmp artifact names, the
