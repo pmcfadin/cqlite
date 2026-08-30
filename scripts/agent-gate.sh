@@ -2802,7 +2802,12 @@ _component_set_normalise_remote() {
   case "$u" in
     https://*)   scheme=https; u="${u#https://}" ;;
     ssh://*)     scheme=ssh;   u="${u#ssh://}" ;;
+    # BOTH legacy ssh aliases git accepts, not one of them (roborev job 230): accepting
+    # `git+ssh://` while rejecting the equivalent `ssh+git://` red a VALID canonical checkout,
+    # which is the false-FAIL class — worth fixing at Low precisely because that is the class
+    # agents learn to waive a lane over.
     git+ssh://*) scheme=ssh;   u="${u#git+ssh://}" ;;
+    ssh+git://*) scheme=ssh;   u="${u#ssh+git://}" ;;
     # UNAUTHENTICATED TRANSPORTS, named individually so nobody "restores" one as a spelling:
     # with no server authentication, an on-path attacker IS the baseline, and the baseline is
     # EXECUTED.
