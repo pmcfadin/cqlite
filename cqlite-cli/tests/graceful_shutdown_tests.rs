@@ -12,10 +12,10 @@
 //!
 //! The subject property above is unchanged. What changed is *how it is
 //! observed*. A single bare `wait_timeout(60s)` after `SIGINT` cannot tell a
-//! broken shutdown handler from a child that was never scheduled, so its expiry
-//! message ("no graceful shutdown handler") asserted a cause the measurement
-//! could not establish — and it expired on a contended gate host while the
-//! handler worked (standalone: 0.34s; under six concurrent gates: >60s).
+//! broken shutdown handler from a child that was never scheduled, yet its expiry
+//! message named an absent shutdown handler as the cause — a cause the
+//! measurement cannot establish — and it expired on a contended gate host while
+//! the handler worked (standalone: 0.34s; under six concurrent gates: >60s).
 //!
 //! The wait is therefore **staged**, and each stage's failure reports only what
 //! that stage measured:
@@ -677,9 +677,9 @@ fn start_writable_session(
 /// in-band measurement. Returns how long the round-trip took.
 ///
 /// Shared by both tests. The failure reports what it awaited, how the budget was
-/// derived, and what the child actually said — it does NOT claim the session
-/// "dead-ended" or that "there is no interactive writable session", neither of
-/// which a timeout establishes.
+/// derived, and what the child actually said. It does NOT conclude that the
+/// session dead-ended, nor that no interactive writable session exists (the two
+/// causes the retired messages named), neither of which a timeout establishes.
 fn await_write_ack(
     io: &ChildIo,
     stage: &'static str,
@@ -897,10 +897,9 @@ fn sigint_in_writable_session_flushes_before_exit() {
 ///
 /// Oracle (issue #3515 AC4): this test carried the same defective shape in THREE
 /// places (per-write ack, mid-session artifact wait, EOF exit), each a bare 60s
-/// deadline whose expiry claimed the session had "dead-ended" or that the
-/// interactive loop "did not use the threshold-flushing path". A timeout
-/// establishes neither. All three are now staged, calibrated and (where they
-/// poll) progress-checked.
+/// deadline whose expiry blamed a dead-ended session, or an interactive loop
+/// that had bypassed the threshold-flushing path. A timeout establishes neither.
+/// All three are now staged, calibrated and (where they poll) progress-checked.
 #[test]
 fn writable_session_auto_flushes_mid_session_across_threshold() {
     const WRITES: i64 = 5;
