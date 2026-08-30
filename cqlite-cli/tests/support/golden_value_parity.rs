@@ -66,15 +66,19 @@
 //!   (`{"x": 10}`); the CLI renders it as an array of `{"key": …, "value": …}`
 //!   pairs. Both are compared as key-sorted pair lists.
 //! * **UDT `_type`.** `sstabledump` renders a UDT as a plain field→value object;
-//!   the CLI adds a `_type` discriminator naming the type. It is dropped from the
-//!   CLI side (and only from the CLI side).
+//!   the JSON egress adds a `_type` discriminator naming the type. It is REQUIRED
+//!   to be present, a string, and the name the committed `CREATE TYPE` declares
+//!   (ASCII case folded, since an unquoted CQL identifier is case-insensitive);
+//!   only then is it dropped, and only from the CLI side. CSV renders no
+//!   discriminator, so the rule is JSON-only.
 //! * **CSV containers.** CSV carries no types, so a collection/UDT arrives as
 //!   one flat text field (`{a, b}`, `[1, 2]`, `{k: v}`) and is decoded back into
-//!   the shape the GOLDEN declares before comparison — see [`csv_container`],
-//!   which states the grammar, why the decoder is deliberately strict, and the
-//!   three ambiguities CSV genuinely cannot express. A cell whose GOLDEN content
-//!   cannot survive an unquoted rendering is REFUSED, never guessed, and the
-//!   refusal is counted and named in the run census.
+//!   the shape the GOLDEN and the DECLARED TYPE jointly state before comparison
+//!   — see [`csv_container`], which states the grammar, why the decoder is
+//!   deliberately strict (each collection kind must use its own bracket, taken
+//!   from the DDL), and the two ambiguities CSV genuinely cannot express. A cell
+//!   whose GOLDEN content cannot survive an unquoted rendering is REFUSED, never
+//!   guessed, and the refusal is counted and named in the run census.
 //!
 //! Everything else is compared byte-exactly, including blob `0x…` hex, decimal
 //! text, booleans, UUID text and `null`.

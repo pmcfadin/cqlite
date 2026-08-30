@@ -111,19 +111,61 @@ impl<'a> SkipPaths<'a> {
     }
 }
 
-/// `parent` extended by a named step (a UDT field).
-fn field_path(parent: &str, step: &str) -> String {
-    if parent.is_empty() {
-        step.to_string()
-    } else {
-        format!("{parent}.{step}")
-    }
+/// Everything the walk knows about ONE position in a row's value tree.
+///
+/// Kept as one value rather than four parallel parameters because all four are
+/// threaded through every level identically, and because the child of a position
+/// is derived from its parent in exactly two ways — a NAMED step (a UDT field) and
+/// a POSITIONAL/keyed one (a collection member, a tuple slot, a map value).
+#[derive(Clone)]
+struct At<'s, 'p> {
+    /// What CSV's empty-field rule keys on (see [`super::Depth`]).
+    depth: Depth,
+    /// How the GOLDEN spells this value's JSON kind (see [`super::Kinding`] and
+    /// [`column_kinding`]).
+    kinding: Kinding,
+    /// The fully-qualified path from the row, which is how a `SkipPaths` entry can
+    /// name one UDT field rather than a whole column.
+    path: String,
+    skips: &'s SkipPaths<'p>,
 }
 
-/// `parent` extended by a positional/keyed step (a collection member, a tuple
-/// slot, a map value).
-fn index_path(parent: &str, index: &str) -> String {
-    format!("{parent}[{index}]")
+impl<'s, 'p> At<'s, 'p> {
+    /// A whole column's value.
+    fn column(name: &str, kinding: Kinding, skips: &'s SkipPaths<'p>) -> Self {
+        At {
+            depth: Depth::TopLevel,
+            kinding,
+            path: name.to_string(),
+            skips,
+        }
+    }
+
+    /// One level in, at a NAMED step (a UDT field).
+    fn field(&self, step: &str, kinding: Kinding) -> Self {
+        let path = if self.path.is_empty() {
+            step.to_string()
+        } else {
+            format!("{}.{step}", self.path)
+        };
+        At {
+            depth: Depth::Inside,
+            kinding,
+            path,
+            skips: self.skips,
+        }
+    }
+
+    /// One level in, at a POSITIONAL/keyed step (a collection member, a tuple
+    /// slot, a map value).
+    fn index(&self, index: &str, kinding: Kinding) -> Self {
+        At {
+            depth: Depth::Inside,
+            kinding,
+            path: format!("{}[{index}]", self.path),
+            skips: self.skips,
+        }
+    }
 }
 
 /// Pair rows by primary key and compare every column the committed DDL declares.
@@ -225,16 +267,8 @@ pub fn compare_rows(
             if matches!(gv, Value::Array(_) | Value::Object(_)) {
                 report.container_cells += 1;
             }
-            if let Err(why) = compare_value_at(
-                gv,
-                cv,
-                egress,
-                &column.ty,
-                Depth::TopLevel,
-                column_kinding(column),
-                name,
-                &skips,
-            ) {
+            let at = At::column(name, column_kinding(column), &skips);
+            if let Err(why) = compare_value_at(gv, cv, egress, &column.ty, &at) {
                 report.diffs.push(format!("row[{key}].{name}: {why}"));
             }
         }
@@ -324,8 +358,8 @@ enum Refusal {
 
 /// Decode a CSV cell whose golden counterpart is a container. `Ok(None)` means
 /// no decoding applies — the JSON lane, a scalar column, or a CSV cell that is
-/// not text (an empty field decodes to `null`, and `compare_value` is what
-/// should name that shape mismatch).
+/// not text (an empty field decodes to `null`, and [`compare_value_at`] is what
+/// then names that shape mismatch).
 fn csv_decoded(
     gv: &Value,
     cv: &Value,
@@ -421,30 +455,6 @@ fn describe(value: &Value, egress: Egress) -> String {
     }
 }
 
-/// Compare one golden value against one CLI value, under the column's DECLARED
-/// CQL type, with no exclusions — the entry point unit tests use.
-///
-/// `kinding` is the caller's statement of whether `sstabledump` stringifies this
-/// position; [`compare_rows`] derives it from the DDL via [`column_kinding`].
-pub fn compare_value(
-    golden: &Value,
-    cli: &Value,
-    egress: Egress,
-    ty: &CqlType,
-    kinding: Kinding,
-) -> Result<(), String> {
-    compare_value_at(
-        golden,
-        cli,
-        egress,
-        ty,
-        Depth::TopLevel,
-        kinding,
-        "",
-        &SkipPaths::new(&[]),
-    )
-}
-
 /// The recursive worker.
 ///
 /// The type drives the whole walk: it says which shape each side must have and,
@@ -452,22 +462,16 @@ pub fn compare_value(
 /// nesting so a `text` map value or UDT field is compared exactly even when its
 /// content looks numeric.
 ///
-/// `depth` is what CSV's empty-field rule keys on (see [`super::Depth`]),
-/// `kinding` is whether `sstabledump` stringifies this position (see
-/// [`super::Kinding`] and [`column_kinding`]), and `path` is the fully-qualified
-/// position of this value in the row, which is how a `SkipPaths` entry can name
-/// one UDT field rather than a whole column.
+/// `at` carries the position: its depth, its [`super::Kinding`] and its
+/// fully-qualified path, plus the exclusion set (see [`At`]).
 fn compare_value_at(
     golden: &Value,
     cli: &Value,
     egress: Egress,
     ty: &CqlType,
-    depth: Depth,
-    kinding: Kinding,
-    path: &str,
-    skips: &SkipPaths<'_>,
+    at: &At<'_, '_>,
 ) -> Result<(), String> {
-    if skips.excludes(path) {
+    if at.skips.excludes(&at.path) {
         return Ok(());
     }
     // A column that is absent/null on BOTH sides, whatever its declared shape.
@@ -483,19 +487,10 @@ fn compare_value_at(
         // are separate arms: a multicell SET's element is the stringified cell
         // path, a LIST's element is the cell VALUE and so keeps its natural JSON
         // kind.
-        CqlType::Set(element) => {
-            compare_sequence(golden, cli, egress, ty, element, kinding, path, skips)
+        CqlType::Set(element) => compare_sequence(golden, cli, egress, ty, element, at.kinding, at),
+        CqlType::List(element) => {
+            compare_sequence(golden, cli, egress, ty, element, Kinding::Natural, at)
         }
-        CqlType::List(element) => compare_sequence(
-            golden,
-            cli,
-            egress,
-            ty,
-            element,
-            Kinding::Natural,
-            path,
-            skips,
-        ),
         CqlType::Tuple(items) => {
             let (g, c) = arrays(golden, cli, egress, ty)?;
             if g.len() != items.len() || c.len() != items.len() {
@@ -507,39 +502,29 @@ fn compare_value_at(
                 ));
             }
             for (i, ((gi, ci), ity)) in g.iter().zip(c.iter()).zip(items.iter()).enumerate() {
-                compare_value_at(
-                    gi,
-                    ci,
-                    egress,
-                    ity,
-                    Depth::Inside,
-                    // A tuple is always frozen: the whole value is one cell, so
-                    // every slot keeps its natural JSON kind.
-                    Kinding::Natural,
-                    &index_path(path, &i.to_string()),
-                    skips,
-                )
-                .map_err(|why| format!("[{i}] {why}"))?;
+                // A tuple is always frozen: the whole value is one cell, so
+                // every slot keeps its natural JSON kind.
+                let slot = at.index(&i.to_string(), Kinding::Natural);
+                compare_value_at(gi, ci, egress, ity, &slot)
+                    .map_err(|why| format!("[{i}] {why}"))?;
             }
             Ok(())
         }
         // map: object in the dump, array of {"key","value"} pairs in the CLI (and
         // the CSV decoder produces that same pair spelling).
         CqlType::Map(key_ty, value_ty) => match (golden, cli) {
-            (Value::Object(g), Value::Array(c)) => {
-                compare_map(g, c, egress, key_ty, value_ty, path, skips)
-            }
+            (Value::Object(g), Value::Array(c)) => compare_map(g, c, egress, key_ty, value_ty, at),
             _ => Err(shape_error("map", golden, cli, egress)),
         },
         CqlType::Udt(udt) => match golden {
-            Value::Object(g) => compare_udt(g, cli, egress, udt, path, skips),
+            Value::Object(g) => compare_udt(g, cli, egress, udt, at),
             _ => Err(shape_error(&udt.name, golden, cli, egress)),
         },
         // A scalar type: both sides canonicalized UNDER THAT TYPE, so the numeric
         // rule applies only where the DDL declares a number.
         _ => {
-            let g = canon_typed(golden, egress, ty, depth, kinding)?;
-            let c = canon_typed(cli, egress, ty, depth, kinding)?;
+            let g = canon_typed(golden, egress, ty, at.depth, at.kinding)?;
+            let c = canon_typed(cli, egress, ty, at.depth, at.kinding)?;
             if g == c {
                 Ok(())
             } else {
@@ -556,7 +541,6 @@ fn compare_value_at(
 
 /// The shared list/set walk. `element_kinding` is the caller's statement of how
 /// the GOLDEN spells this collection's elements (see [`column_kinding`]).
-#[allow(clippy::too_many_arguments)]
 fn compare_sequence(
     golden: &Value,
     cli: &Value,
@@ -564,8 +548,7 @@ fn compare_sequence(
     ty: &CqlType,
     element: &CqlType,
     element_kinding: Kinding,
-    path: &str,
-    skips: &SkipPaths<'_>,
+    at: &At<'_, '_>,
 ) -> Result<(), String> {
     let (g, c) = arrays(golden, cli, egress, ty)?;
     if g.len() != c.len() {
@@ -578,17 +561,8 @@ fn compare_sequence(
         ));
     }
     for (i, (gi, ci)) in g.iter().zip(c.iter()).enumerate() {
-        compare_value_at(
-            gi,
-            ci,
-            egress,
-            element,
-            Depth::Inside,
-            element_kinding,
-            &index_path(path, &i.to_string()),
-            skips,
-        )
-        .map_err(|why| format!("[{i}] {why}"))?;
+        let member = at.index(&i.to_string(), element_kinding);
+        compare_value_at(gi, ci, egress, element, &member).map_err(|why| format!("[{i}] {why}"))?;
     }
     Ok(())
 }
@@ -649,8 +623,7 @@ fn compare_udt(
     cli: &Value,
     egress: Egress,
     udt: &UdtType,
-    path: &str,
-    skips: &SkipPaths<'_>,
+    at: &At<'_, '_>,
 ) -> Result<(), String> {
     let c: Map<String, Value> = match (egress, cli) {
         (Egress::Json, Value::Object(fields)) => {
@@ -710,20 +683,12 @@ fn compare_udt(
                 )
             })?;
         let cv = c.get(field).unwrap_or(&Value::Null);
-        compare_value_at(
-            gv,
-            cv,
-            egress,
-            field_ty,
-            Depth::Inside,
-            // A UDT field is a cell VALUE (a frozen UDT's fields live inside one
-            // value cell; a non-frozen UDT's field IS the cell value), so the
-            // golden keeps its natural JSON kind.
-            Kinding::Natural,
-            &field_path(path, field),
-            skips,
-        )
-        .map_err(|why| format!(".{field} {why}"))?;
+        // A UDT field is a cell VALUE (a frozen UDT's fields live inside one value
+        // cell; a non-frozen UDT's field IS the cell value), so the golden keeps
+        // its natural JSON kind.
+        let member = at.field(field, Kinding::Natural);
+        compare_value_at(gv, cv, egress, field_ty, &member)
+            .map_err(|why| format!(".{field} {why}"))?;
     }
     Ok(())
 }
@@ -818,8 +783,7 @@ fn compare_map(
     egress: Egress,
     key_ty: &CqlType,
     value_ty: &CqlType,
-    path: &str,
-    skips: &SkipPaths<'_>,
+    at: &At<'_, '_>,
 ) -> Result<(), String> {
     if !is_scalar_type(key_ty) {
         return Err(format!(
@@ -858,19 +822,11 @@ fn compare_map(
         if gk != ck {
             return Err(format!("map key golden {gk} vs cli {ck}"));
         }
-        compare_value_at(
-            gv,
-            cv,
-            egress,
-            value_ty,
-            Depth::Inside,
-            // A map VALUE is the cell value (`writeRawValue`), so it keeps its
-            // natural JSON kind even when the key beside it was stringified.
-            Kinding::Natural,
-            &index_path(path, gk),
-            skips,
-        )
-        .map_err(|why| format!("[{gk}] {why}"))?;
+        // A map VALUE is the cell value (`writeRawValue`), so it keeps its natural
+        // JSON kind even when the key beside it was stringified.
+        let entry = at.index(gk, Kinding::Natural);
+        compare_value_at(gv, cv, egress, value_ty, &entry)
+            .map_err(|why| format!("[{gk}] {why}"))?;
     }
     Ok(())
 }
