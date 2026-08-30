@@ -2654,6 +2654,12 @@ _component_set_flatten() {
 _CS_BOUND_MECH=""
 _component_set_bound_mechanism() {
   if [ -n "$_CS_BOUND_MECH" ]; then printf '%s' "$_CS_BOUND_MECH"; return 0; fi
+  # THIS FUNCTION IS PURE ON PURPOSE, and the reason is a defect it caused: every caller
+  # reads it through `$(…)`, so ANY state it sets is set in a SUBSHELL and lost — the first
+  # cut created the runner's capture files here and every bounded call then found the paths
+  # EMPTY, redirected into `""` and ran nothing (rc 1, no output). Capture availability is
+  # therefore checked by DIRECT calls to _component_set_capture_paths — in the runner, and
+  # at the probe entry where it decides the `unboundable` kind. Nothing effectful goes here.
   if command -v timeout >/dev/null 2>&1 && timeout --kill-after=1 1 true >/dev/null 2>&1; then
     _CS_BOUND_MECH=timeout
   elif command -v gtimeout >/dev/null 2>&1 && gtimeout --kill-after=1 1 true >/dev/null 2>&1; then
@@ -2664,6 +2670,40 @@ _component_set_bound_mechanism() {
     _CS_BOUND_MECH=none
   fi
   printf '%s' "$_CS_BOUND_MECH"
+}
+
+# _component_set_capture_paths: rc 0 iff this process has the two capture files the bounded
+# runner writes its child's stdout/stderr into. Created ONCE per process and reused (the
+# probe's bounded calls are strictly sequential — there is no nesting and no recursion), and
+# removed by the probe wrapper's cleanup.
+#
+# The template is deliberately NOT `agent-gate-cs*`: the self-test forces `baseline-workspace`
+# with a `mktemp` stub that fails for that template alone, and a capture file caught by the
+# same stub would turn that case into `unboundable` — a fixture that no longer models what it
+# claims to.
+_CS_CAP_OUT=""
+_CS_CAP_ERR=""
+_component_set_capture_paths() {
+  if [ -n "$_CS_CAP_OUT" ] && [ -n "$_CS_CAP_ERR" ]; then return 0; fi
+  _CS_CAP_OUT=$(mktemp "${TMPDIR:-/tmp}/agent-gate-bcap.XXXXXX" 2>/dev/null) || _CS_CAP_OUT=""
+  _CS_CAP_ERR=$(mktemp "${TMPDIR:-/tmp}/agent-gate-bcap.XXXXXX" 2>/dev/null) || _CS_CAP_ERR=""
+  if [ -z "$_CS_CAP_OUT" ] || [ -z "$_CS_CAP_ERR" ]; then
+    [ -n "$_CS_CAP_OUT" ] && rm -f "$_CS_CAP_OUT" 2>/dev/null
+    [ -n "$_CS_CAP_ERR" ] && rm -f "$_CS_CAP_ERR" 2>/dev/null
+    _CS_CAP_OUT=""; _CS_CAP_ERR=""
+    return 1
+  fi
+  return 0
+}
+
+# _component_set_drop_capture_files: remove this process's capture files. Called from the
+# probe wrapper's cleanup, beside the fetch ref and the scratch repo.
+_component_set_drop_capture_files() {
+  [ -n "$_CS_CAP_OUT" ] && rm -f "$_CS_CAP_OUT" 2>/dev/null
+  [ -n "$_CS_CAP_ERR" ] && rm -f "$_CS_CAP_ERR" 2>/dev/null
+  _CS_CAP_OUT=""; _CS_CAP_ERR=""
+  _CS_BOUND_MECH=""   # the memoized mechanism was decided WITH those files; do not outlive them
+  return 0
 }
 
 # _component_set_bounded <secs> <cmd...>: run <cmd> under a bound, whatever this host has.
@@ -2706,20 +2746,50 @@ _component_set_bounded() {
   # rung (their status is then 137 rather than 124 — both mean "bound exceeded"), and the
   # bash arm KILLs the process GROUP unconditionally after the grace period.
   #
-  # SCOPE, stated so it is not mistaken for a gap: neither arm kills a descendant that
-  # outlives a SUCCESSFUL exit. Deliberate — the three commands bounded here (git fetch,
-  # git show, bash --list) detach nothing, and adding a post-success group kill to only one
-  # arm would make the two arms mean different things, which is the divergence these
-  # comments exist to prevent.
-  case "$(_component_set_bound_mechanism)" in
-    timeout)  timeout --kill-after=1 "$secs" "$@" ;;
-    gtimeout) gtimeout --kill-after=1 "$secs" "$@" ;;
-    none)     return "$_CS_UNBOUNDABLE_RC" ;;
+  # THE SUCCESS PATH LEAKED THE BOUND, NOT MERELY A PROCESS (roborev job 246). Neither arm
+  # kills a descendant that outlives a SUCCESSFUL exit — and while a stray process is
+  # tolerable, the CONSEQUENCE was not: with the child's stdout wired to the CALLER's pipe
+  # (every `x=$(_component_set_bounded …)` site), a background descendant holding that pipe
+  # keeps the command substitution open INDEFINITELY after the direct child exited 0, so the
+  # call never returns and the 15/120s bound is not a bound at all. Rounds 3 and 6 fixed the
+  # TERM-ignoring descendant on the TIMEOUT path; this is the same family on the path that
+  # succeeds.
+  #
+  # THE FIX IS TO REMOVE THE PIPE, NOT TO ADD A KILL. The child's streams are captured into
+  # two REGULAR FILES and replayed to the caller after the child completes, so a leaked
+  # descendant inherits FILE descriptors and can hold nothing the caller waits on. Two
+  # reasons this beats a post-success process-group kill:
+  #   1. IT IS ARM-INDEPENDENT. The redirection lives in this wrapper, so `timeout`,
+  #      `gtimeout` and the bash watchdog behave identically. A group kill is expressible
+  #      only in the bash arm (we do not know GNU timeout's child pgid), and two arms that
+  #      mean different things is the divergence these comments exist to prevent.
+  #   2. `kill -- -$pid` AFTER SUCCESS IS NOT SAFE. bash reaps a background job as soon as
+  #      it notices SIGCHLD, so by the time the poll loop observes the child gone its pid —
+  #      and therefore the process-GROUP id — is already free for REUSE, and the group kill
+  #      could reach an unrelated process group (this repo's own "kill by PID you own, never
+  #      by pattern" lesson, one level down). There is no window in which the pid is both
+  #      known-dead and still reserved.
+  # A stray descendant can therefore still outlive a successful call; it holds nothing, and
+  # the bound it used to break is intact.
+  local mech rc pid waited=0
+  # NO MECHANISM => THE COMMAND IS NOT RUN. "Cannot bound" includes "cannot CAPTURE": an
+  # uncaptured bounded call is not bounded (see this header), so a missing capture file takes
+  # the SAME refusal as a missing `timeout`/`sleep` — never a permissive fallback to running
+  # the command with the caller's pipe attached. DIRECT call, never `$( … )`: this one sets
+  # process state, and a substitution would discard it.
+  if ! _component_set_capture_paths; then return "$_CS_UNBOUNDABLE_RC"; fi
+  mech="$(_component_set_bound_mechanism)"
+  if [ "$mech" = none ]; then return "$_CS_UNBOUNDABLE_RC"; fi
+  : >"$_CS_CAP_OUT" 2>/dev/null || true
+  : >"$_CS_CAP_ERR" 2>/dev/null || true
+  case "$mech" in
+    timeout)  timeout  --kill-after=1 "$secs" "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR"; rc=$? ;;
+    gtimeout) gtimeout --kill-after=1 "$secs" "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR"; rc=$? ;;
     *)
       # PROCESS GROUP, not just the child (roborev job 210, finding 2). Signalling only the
-      # direct child leaves any GRANDCHILD alive — a transport helper, or anything the
-      # baseline script spawns — and a surviving grandchild keeps the command-substitution
-      # pipe OPEN, so the "bounded" call never returns and the bound is not a bound.
+      # direct child leaves any GRANDCHILD alive, and before the capture files above that
+      # also meant the "bounded" call never returned. The group signal stays: a bound whose
+      # descendants keep running is not a bound even when nothing hangs.
       # Measured both ways before choosing: direct-child TERM left a ticking grandchild
       # (ticks 2 -> 5); group TERM froze it (2 -> 2).
       #
@@ -2734,11 +2804,11 @@ _component_set_bounded() {
       # GNU timeout also runs its child in a new process group and signals the group
       # (verified here — its grandchild froze at 2 -> 2), so a bound must not mean one thing
       # on a coreutils host and another on a bash-watchdog host.
-      local pid waited=0 rc
       set -m
-      "$@" &
+      "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR" &
       pid=$!
       set +m
+      rc=0
       while kill -0 "$pid" 2>/dev/null; do
         if [ "$waited" -ge "$secs" ]; then
           kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
@@ -2751,14 +2821,21 @@ _component_set_bounded() {
           # must not gate the escalation.
           kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null
-          return 124            # a status GNU timeout also uses for a bound exceeded
+          rc=124            # a status GNU timeout also uses for a bound exceeded
+          break
         fi
         sleep 1
         waited=$((waited + 1))
       done
-      wait "$pid" 2>/dev/null; rc=$?
-      return "$rc" ;;
+      if [ "$rc" -ne 124 ]; then wait "$pid" 2>/dev/null; rc=$?; fi
+      ;;
   esac
+  # REPLAY, in the caller's own streams, AFTER the child is done. Stdout and stderr stay
+  # SEPARATE (a caller that wants them merged says `2>&1` at its own call site, and gets
+  # exactly that); interleaving order is lost, which nothing here depends on.
+  cat "$_CS_CAP_OUT" 2>/dev/null || true
+  cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
+  return "$rc"
 }
 
 # THE CANONICAL UPSTREAM IDENTITY (roborev job 215 blocker 3, TIGHTENED by job 225). Before
@@ -3142,6 +3219,7 @@ _component_set_probe() {
   _component_set_probe_inner
   _component_set_drop_fetch_ref
   _component_set_drop_scratch_dir
+  _component_set_drop_capture_files
   return 0
 }
 
@@ -3210,9 +3288,20 @@ _component_set_probe_inner() {
   # that an unboundable command must never be RUN, so there is no branch on which this
   # pre-flight can hang. A missing bound is an unmeasurable baseline (UNMEASURED ⇒ FAIL in
   # the certifying modes, ADVISORY-UNMEASURED under --lite/--only), never a permissive pass.
+  # TWO causes, ONE named state: no bounding TOOL, or no writable CAPTURE FILE. The second
+  # is not a nicety — the runner routes a child's streams through files precisely so a leaked
+  # descendant cannot hold the caller's pipe past the bound (roborev job 246), so without them
+  # a "bounded" call is not bounded. Both are checked HERE, before anything network-capable
+  # runs, and `_component_set_capture_paths` is called DIRECTLY (never through `$( )`, which
+  # would create the files in a subshell and lose them).
   if [ "$(_component_set_bound_mechanism)" = none ]; then
     _CS_KIND=unboundable
     _CS_DETAIL="no bounded-run mechanism on PATH (no timeout, no gtimeout, and no sleep for the bash watchdog) — refusing to run an UNBOUNDED fetch, which could hang the gate"
+    return 0
+  fi
+  if ! _component_set_capture_paths; then
+    _CS_KIND=unboundable
+    _CS_DETAIL="no writable temp file for the bounded runner's stream capture (\$TMPDIR=${TMPDIR:-/tmp}) — refusing to run a fetch whose output would reach this process through a pipe a leaked descendant can hold open past the bound, i.e. UNBOUNDED in effect"
     return 0
   fi
 
@@ -4162,7 +4251,9 @@ case "${1:-}" in
   # safe rather than merely reported).
   --component-set-bounded-run)
     _csb_secs="${2:?--component-set-bounded-run needs <secs> <cmd...>}"; shift 2
-    _component_set_bounded "$_csb_secs" "$@"; echo "RC: $?"; exit 0 ;;
+    _component_set_bounded "$_csb_secs" "$@"; _csb_rc=$?
+    _component_set_drop_capture_files   # this hook has no probe wrapper to clean up after it
+    echo "RC: $_csb_rc"; exit 0 ;;
   --component-set-line)
     case "${2:-full}" in
       full) : ;;
