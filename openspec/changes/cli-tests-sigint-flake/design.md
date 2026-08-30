@@ -124,6 +124,47 @@ bound there is.
 Raising nextest's slow-timeout was considered and rejected in the original draft as a way to buy
 headroom. That rejection is now moot rather than right: there was no ceiling to raise.
 
+## D6a. DESCOPE (round 8): the per-stage calibrated budget layer is replaced by ONE per-test deadline
+
+**Decision, on a finding census rather than an argument.** roborev has run four rounds on this change
+and returned **12 findings. All 12 are in the per-stage budget layer**, and the count per round is
+flat — 3, 3, 3, 3 — while the *oracle* (staged waits, stderr progress markers, honest attribution) has
+produced **zero** findings since round 3. This repository's own precedent is to descope a mechanism
+whose defect count does not fall across review rounds rather than patch it again (the removed
+`census-exclusion:` key, the descoped ANSI parse lint → #3499, #3384's withdrawn integration targets).
+The same ruling applies here.
+
+**The load-bearing realisation: the ACs never asked for the calibration.** AC1 asks for
+"liveness confirmation rather than a bare deadline". That is supplied by **stage (c)'s handler-entry
+marker**, which proves the signal was delivered, the handler was entered, and the child was scheduled.
+The per-stage calibrated budgets were an addition of the lead's, and they are what generated every one
+of the 12 findings — including the round-4 finding that *the composition rule itself was wrong*: summing
+per-stage caps does not preserve a SHARED old deadline, so a handler entering at 31s and exiting at 32s
+(which the old flat 60s allowed) now fails against a 30s `T1_HANDLER` cap.
+
+**What replaces it.**
+
+* **ONE deadline per test**, calibrated ONCE from the larger of the `t_boot`/`t_ack` scales, with a
+  generous base and a cap. Any single stage may consume the whole of it, so the floor invariant
+  ("never tighter than the bound it replaced") holds **unconditionally and trivially**, which is
+  stronger than the group-deadline formulation it replaces.
+* **Stages remain, purely for ATTRIBUTION.** Which stage was pending when the deadline passed is what
+  names the failure — the property AC2 needs — and it no longer depends on any budget arithmetic.
+* **Progress observation remains, as EVIDENCE IN THE MESSAGE, not as an input to the bound.** It
+  reports `progress observed: NONE` / counts; it no longer extends anything. That removes the
+  "declared cap is not the actual maximum" family at the root: there is one bound and nothing may
+  exceed it.
+
+**What is deleted:** per-stage `StageSpec` base/cap pairs, the quiet-baseline anchors and their derived
+multiples, the permissive-anchor NOTICE, `clip`, `starved`, the floor-by-composition rule and its
+assert, and the cap-sum assert. Roughly 900 lines of `budgets.rs`.
+
+**The cost, stated plainly.** A genuine defect now takes the full deadline to surface rather than
+failing fast against a tight per-stage cap: the hung-flush plant will red at the deadline instead of at
+60s. That is the whole price, it is paid only on a real failure, and it buys the elimination of a defect
+family that four review rounds could not close. The calibration's only benefit was a tighter bound on a
+quiet host; it was not what made the oracle honest.
+
 ## D7. Drain stderr
 
 `stderr` is piped and never read today. Beyond discarding the evidence this change needs, an
