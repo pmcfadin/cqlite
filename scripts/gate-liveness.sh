@@ -575,7 +575,7 @@ RAW_AGE="$AGE"
 [ "$AGE" -ge 0 ] || AGE=0
 
 HB_PID=$(_field "$HB_TEXT" gate-pid)
-HB_SEQ=$(_field "$HB_TEXT" beat-seq)
+HB_SEQ=$(_field "$HB_TEXT" beat-seq); HB_SEQ=$((10#${HB_SEQ:-0}))
 HB_CHECK=$(_field "$HB_TEXT" parent-check)
 _where="run-id $HB_RUN_ID, gate-pid ${HB_PID:-unknown}, beat ${HB_SEQ:-?}, age ${AGE}s, window ${STALE_AFTER}s"
 # parent-check declares HOW the beater verifies its gate on the gate's own host. Surfaced as
@@ -689,8 +689,14 @@ _hb2=""
 _advanced=no
 _adv_why=""
 if [ -n "$_hb2" ] && _beat_valid "$_hb2"; then
-  _seq2=$(_field "$_hb2" beat-seq)
-  _rid2=$(_field "$_hb2" run-id)
+    # Explicit base 10 on both sides. NOT a bug fix: `[ x -gt y ]` in bash parses with base 10
+    # (verified — `[ 011 -gt 08 ]` is true, i.e. 11 > 8, and `08` raises no error), unlike `$(( ))`
+    # which rejects `08` as invalid octal. So the leading-zero hazard job 194 flagged does not
+    # actually reach this comparison. The normalisation stays anyway, because the difference between
+    # `[ -gt ]` and `(( ))` is exactly the kind of thing a later edit changes without noticing —
+    # and it makes the intent legible instead of resting on which comparison primitive is in use.
+    _seq2=$(_field "$_hb2" beat-seq); _seq2=$((10#${_seq2:-0}))
+    _rid2=$(_field "$_hb2" run-id)
   _bpid1=$(_field "$HB_TEXT" beater-pid)
   _bpid2=$(_field "$_hb2" beater-pid)
   if [ "$_rid2" = "$HB_RUN_ID" ]; then

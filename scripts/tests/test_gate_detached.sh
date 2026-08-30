@@ -838,15 +838,18 @@ if printf '%s\n' "$body" | grep -q '_pre_sum_rid\|_pre_hb_rid'; then
 else
   ok "4b.72 the dead pre-launch run-id captures are gone"
 fi
-if grep -q 'set -C; echo "$UNIT" > "$_reserve"' "$LAUNCHER"; then
-  ok "4b.73 the summary path is reserved with an O_EXCL create recording the owning unit"
+# (4b.73's O_EXCL FILE lock was superseded by the atomic DIRECTORY lock in job 194 — see
+#  4b.80-4b.87. Asserting the reservation exists at all is kept here; its mechanism is asserted
+#  there, so the two do not drift apart.)
+if grep -q '_reserve="$SUMMARY.launch-lock"' "$LAUNCHER"; then
+  ok "4b.73 the summary path is reserved before launch"
 else
-  bad "4b.73 the summary path is reserved with an O_EXCL create" "not found"
+  bad "4b.73 the summary path is reserved before launch" "not found"
 fi
-if grep -q 'is-active --quiet "$_owner"' "$LAUNCHER"; then
-  ok "4b.74 a reservation is only honoured while its recorded unit is LIVE (self-healing)"
+if grep -q 'is-active --quiet "$_own_unit"' "$LAUNCHER"; then
+  ok "4b.74 a reservation is only honoured while its owner is LIVE (self-healing)"
 else
-  bad "4b.74 a reservation is only honoured while its unit is live" "no staleness test"
+  bad "4b.74 a reservation is only honoured while its owner is live" "no staleness test"
 fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   cp1="$TMP/concurrent.txt"
@@ -859,8 +862,8 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   else
     bad "4b.75 a second launcher on the same summary path is refused" "first=$r1 second=$r2"
   fi
-  printf '%s' "$o2" | grep -q 'already owns the summary path' \
-    && ok "4b.76 the refusal names the live owner" || bad "4b.76 the refusal names the live owner" "$o2"
+  printf '%s' "$o2" | grep -q 'already owned by a LIVE run' \
+    && ok "4b.76 the refusal says the owner is LIVE" || bad "4b.76 the refusal says the owner is live" "$o2"
   systemctl --user stop "$u1" >/dev/null 2>&1 || true
   # ...and once that owner is gone, the reservation is reclaimed rather than blocking forever.
   o3=$(bash "$LAUNCHER" --summary "$cp1" --log "$TMP/c3.log" -- --only file-size 2>&1); r3=$?
@@ -884,6 +887,54 @@ pn="$TMP/nonexistent-probe.log"
 bash "$LAUNCHER" --summary /nonexistent-dir-3473/s.txt --log "$pn" -- --only file-size >/dev/null 2>&1
 [ ! -e "$pn" ] && ok "4b.79 a refused launch leaves no log probe behind" \
               || bad "4b.79 a refused launch leaves no log probe behind" "$pn exists"
+
+# roborev job 194: reclaiming a stale reservation must be ATOMIC. The file-based lock was racy in
+# two ways — a second launcher could read a freshly acquired lock BEFORE its owner's unit became
+# active and judge it stale, and two reclaimers could delete each other's replacement locks. Both
+# ended with two gates writing one summary path.
+if grep -q 'mkdir "$_reserve"' "$LAUNCHER"; then
+  ok "4b.80 the reservation is a DIRECTORY (mkdir is atomic)"
+else
+  bad "4b.80 the reservation is a directory" "still a file-based lock"
+fi
+if grep -q 'mv "$_reserve" "$_stale"' "$LAUNCHER"; then
+  ok "4b.81 reclamation is claimed by an atomic RENAME (the compare-and-swap)"
+else
+  bad "4b.81 reclamation is claimed by an atomic rename" "not found"
+fi
+if grep -q 'launcher-pid=' "$LAUNCHER" && grep -q 'kill -0 "$_own_pid"' "$LAUNCHER"; then
+  ok "4b.82 liveness counts the LAUNCHER PID too, closing the unit-startup window"
+else
+  bad "4b.82 liveness counts the launcher pid" "startup window still open"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  dl="$TMP/dirlock.txt"
+  o1=$(bash "$LAUNCHER" --summary "$dl" --log "$TMP/dl1.log" -- --only roborev-lints 2>&1); r1=$?
+  du1=$(printf '%s' "$o1" | sed -n 's/^unit:  *//p'); [ -n "$du1" ] && echo "$du1" >> "$UNITS_FILE"
+  [ -d "$dl.launch-lock" ] && ok "4b.83 a launch creates the reservation directory" \
+                           || bad "4b.83 a launch creates the reservation directory" "absent"
+  grep -q '^unit=' "$dl.launch-lock/owner" 2>/dev/null && grep -q '^launcher-pid=' "$dl.launch-lock/owner" 2>/dev/null \
+    && ok "4b.84 the owner record names both the unit and the launcher pid" \
+    || bad "4b.84 the owner record names both the unit and the launcher pid" "$(cat "$dl.launch-lock/owner" 2>/dev/null)"
+  o2=$(bash "$LAUNCHER" --summary "$dl" --log "$TMP/dl2.log" -- --only file-size 2>&1); r2=$?
+  du2=$(printf '%s' "$o2" | sed -n 's/^unit:  *//p'); [ -n "$du2" ] && echo "$du2" >> "$UNITS_FILE"
+  [ "$r1" = 0 ] && [ "$r2" != 0 ] \
+    && ok "4b.85 a LIVE owner refuses a second launcher (first=$r1 second=$r2)" \
+    || bad "4b.85 a live owner refuses a second launcher" "first=$r1 second=$r2"
+  systemctl --user stop "$du1" >/dev/null 2>&1 || true
+  o3=$(bash "$LAUNCHER" --summary "$dl" --log "$TMP/dl3.log" -- --only file-size 2>&1); r3=$?
+  du3=$(printf '%s' "$o3" | sed -n 's/^unit:  *//p'); [ -n "$du3" ] && echo "$du3" >> "$UNITS_FILE"
+  [ "$r3" = 0 ] && ok "4b.86 a STALE owner is reclaimed (a finished gate does not block the path)" \
+                || bad "4b.86 a stale owner is reclaimed" "exit $r3: $o3"
+  # No stale-rename litter may survive a successful reclamation.
+  if ls -d "$dl.launch-lock.stale."* >/dev/null 2>&1; then
+    bad "4b.87 reclamation leaves no .stale.* litter" "$(ls -d "$dl.launch-lock.stale."* 2>/dev/null)"
+  else
+    ok "4b.87 reclamation leaves no .stale.* litter"
+  fi
+else
+  skipc "4b.83-4b.87 directory reservation" "no working systemd-run --user"
+fi
 
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"

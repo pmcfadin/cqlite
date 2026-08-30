@@ -452,12 +452,18 @@ rename permission from the **directory**, not the file. Both are pinned as tests
 **The summary path is reserved for the gate's lifetime.** The nonce proves ownership of the
 artifacts the launcher *reads*; it does nothing to stop two launchers pointing at one summary path,
 where each would prove ownership of its own artifacts while their heartbeat renames and summary
-rewrites destroyed each other. An `O_EXCL` reservation beside the summary records the owning unit,
-and a second launcher is refused while that unit is live. It is deliberately **self-healing rather
-than released**: the gate outlives its launcher, so no process could reliably remove the lock, and a
-lock nobody can release is worse than no lock — so a reservation whose unit is no longer active is
-reclaimed. (#2874 already forbids two gates on one path; the launcher now detects it rather than
-walking into it.)
+rewrites destroyed each other. A **lock directory** beside the summary records the owning unit *and* the launcher pid, and a second
+launcher is refused while either is alive. It is deliberately **self-healing rather than released**:
+the gate outlives its launcher, so no process could reliably remove the lock, and a lock nobody can
+release is worse than no lock.
+
+Both halves of that are load-bearing, and a file-based first attempt got both wrong. `mkdir` is
+atomic, and *renaming a directory away* is the compare-and-swap that decides who owns a reclamation —
+so two reclaimers cannot delete each other's replacement locks, because only one `mv` can succeed and
+the loser refuses rather than racing. And liveness counts the **launcher pid**, not just the unit,
+which is what closes the window between acquiring the lock and the unit becoming active — during it
+the launcher is by definition alive. (#2874 already forbids two gates on one path; the launcher now
+detects it rather than walking into it.)
 
 Every probe is **non-destructive**, because under #2874 these paths may hold a live peer's
 artifacts — including the **log**, which is probed with a zero-byte append (or created and removed
@@ -507,7 +513,7 @@ Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
 Self-tests: `scripts/tests/test_gate_liveness.sh` (174 cases) and
-`scripts/tests/test_gate_detached.sh` (108 cases), both in the full gate's
+`scripts/tests/test_gate_detached.sh` (116 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

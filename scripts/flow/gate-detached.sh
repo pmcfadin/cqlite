@@ -489,26 +489,63 @@ fi
 # reliably remove it, and a lock nobody can release is worse than no lock. A reservation whose
 # recorded unit is no longer active is therefore stale, and is reclaimed once.
 _reserve="$SUMMARY.launch-lock"
-if ! ( set -C; echo "$UNIT" > "$_reserve" ) 2>/dev/null; then
-  _owner=$(cat "$_reserve" 2>/dev/null || true)
-  if [ -n "$_owner" ] && systemctl --user is-active --quiet "$_owner" 2>/dev/null; then
-    echo "gate-detached: another LIVE gate ($_owner) already owns the summary path" >&2
-    echo "               '$SUMMARY'. Two gates on one path overwrite each other's summary and" >&2
-    echo "               heartbeat, so neither could be polled reliably (#2874/#3473)." >&2
-    echo "               Give this run a summary path of its own." >&2
+# A LOCK DIRECTORY, not a lock file, because reclaiming a stale lock must be ATOMIC (roborev job
+# 194, Medium). The file version was racy in two ways: a second launcher could read a freshly
+# acquired lock BEFORE its owner's systemd unit became active, judge it stale, and delete it; and
+# two reclaimers could delete each other's replacement locks. Both ended with two gates writing one
+# summary path — the exact thing the lock exists to prevent.
+#
+# `mkdir` is atomic, and so is renaming a directory: only ONE process can successfully move a given
+# directory away, so the rename is the compare-and-swap that decides who owns the reclamation.
+#
+# Liveness is also fixed: the owner is live if its LAUNCHER PROCESS is still running OR its unit is
+# active. That closes the startup window, because during it the launcher is by definition alive.
+_res_owner="$_reserve/owner"
+if ! mkdir "$_reserve" 2>/dev/null; then
+  _own_unit=$(sed -n 's/^unit=//p' "$_res_owner" 2>/dev/null | head -1)
+  _own_pid=$(sed -n 's/^launcher-pid=//p' "$_res_owner" 2>/dev/null | head -1)
+  _live=no
+  case "$_own_pid" in ''|*[!0-9]*) ;; *) kill -0 "$_own_pid" 2>/dev/null && _live=yes ;; esac
+  if [ "$_live" = no ] && [ -n "$_own_unit" ] \
+     && systemctl --user is-active --quiet "$_own_unit" 2>/dev/null; then
+    _live=yes
+  fi
+  if [ "$_live" = yes ]; then
+    echo "gate-detached: the summary path '$SUMMARY' is already owned by a LIVE run" >&2
+    echo "               (unit=${_own_unit:-?} launcher-pid=${_own_pid:-?}). Two gates on one path" >&2
+    echo "               overwrite each other's summary and heartbeat, so neither could be polled" >&2
+    echo "               reliably (#2874/#3473). Give this run a summary path of its own." >&2
     exit 1
   fi
-  rm -f "$_reserve" 2>/dev/null || true
-  ( set -C; echo "$UNIT" > "$_reserve" ) 2>/dev/null || {
-    echo "gate-detached: cannot reserve the summary path '$SUMMARY' (lock at '$_reserve')." >&2
+  # Stale. Claim the RECLAMATION by renaming the directory away — whoever wins that rename is the
+  # only process that proceeds. A loser refuses rather than racing, which is the fail-safe side.
+  # The rename target is created by mktemp, NOT built from $$ — flagged by this change's own
+  # no-predictable-temp rule (11f.1), and correctly: a predictable target an attacker can
+  # pre-create as a DIRECTORY changes `mv`'s semantics, moving the lock INTO it rather than onto
+  # it. The compare-and-swap property is unaffected, because only one process can move
+  # `$_reserve` away — the loser's `mv` fails with the source already gone.
+  _stale=$(mktemp -d "$_reserve.stale.XXXXXX" 2>/dev/null) || {
+    echo "gate-detached: cannot create a scratch name to reclaim the stale reservation." >&2
+    echo "               Refusing rather than racing another launcher (#3473)." >&2
+    exit 1
+  }
+  if ! mv "$_reserve" "$_stale/" 2>/dev/null; then
+    rm -rf "$_stale" 2>/dev/null || true
+    echo "gate-detached: another launcher is reclaiming the stale reservation at '$_reserve'." >&2
+    echo "               Refusing rather than racing it (#3473). Retry, or use a distinct path." >&2
+    exit 1
+  fi
+  rm -rf "$_stale" 2>/dev/null || true
+  mkdir "$_reserve" 2>/dev/null || {
+    echo "gate-detached: cannot create the reservation directory '$_reserve'." >&2
     echo "               Refusing rather than racing another launcher (#3473)." >&2
     exit 1
   }
 fi
+# Record who owns it. The launcher pid is what makes the startup window safe; the unit is what keeps
+# the lock meaningful after this process exits.
+{ echo "unit=$UNIT"; echo "launcher-pid=$$"; } > "$_res_owner" 2>/dev/null || true
 
-# (the ControlGroup read happens immediately after this returns — see below — because
-# `--collect` reaps the unit record as soon as a short gate exits, and reading it after the
-# heartbeat wait reported `<unavailable>` for any gate that finished quickly.)
 # NOW truncate the log: every refusal path is behind us, so this cannot destroy a previous log for
 # a launch that never happens.
 ( : > "$LOGFILE" ) 2>/dev/null || {
