@@ -4907,8 +4907,9 @@ run_roborev_lints_cmd() {
 # _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
 #
 # roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
-# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do seven other workflows and
-# scripts/local/pre-merge.sh. Cargo then emits
+# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do 17 other workflows under
+# .github/workflows/ (18 in total, measured — an earlier version of this comment said 8, which was
+# never measured) and scripts/local/pre-merge.sh. Cargo then emits
 #     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
 # with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
 # the literal text sees nothing. MEASURED on both guards, and the two directions differ:
@@ -4916,8 +4917,9 @@ run_roborev_lints_cmd() {
 #     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
 #   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
 #     associated with its result, so the #2039 guard silently reports OK. That one is
-#     PRE-EXISTING and affects its other callers (core-tests, cli-tests) on nightly CI too;
-#     filed separately.
+#     PRE-EXISTING and affects its OTHER CALLER on nightly CI too — which is `cli-tests`, both
+#     of whose passes call it. An earlier version of this comment also named `core-tests`;
+#     core-tests does NOT call this guard, and that claim was never measured. Filed as #3400.
 #
 # Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
 # would put the reading loop in a SUBSHELL and its accumulated verdict variables would be

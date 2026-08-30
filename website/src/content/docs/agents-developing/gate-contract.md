@@ -243,8 +243,13 @@ datasets_root;`, the shape shared test helpers actually use (3 such targets in `
 closure followed such a child while **discarding the attribute gating it**, so a legacy-gated test inside the
 subtree counted as *executable* at this lane's feature set, an ungated sibling kept the target non-zero, and
 the co-required census reported **no gap** — the one thing that census exists to find. Such a subtree is now
-emitted as a `DECLARED GAP` naming the target, the module and the cfg text, with a `cfg-gated-subtree gaps: N`
-census line that is affirmative at `0` (so a pasted census shows the scan ran).
+emitted as a `DECLARED GAP` naming the target, the module and the cfg text, with a
+`cfg-gated-subtree gaps: N RECOGNISED` census line that is affirmative at `0` (so a pasted census shows the
+scan ran) **and that states its own non-exhaustiveness in the emitted text**. The `RECOGNISED` qualifier is
+load-bearing rather than decorative: a bare `0` reads as a verified all-clear, and this scan is documented as
+incomplete, so the census must say that a clean result means *nothing was recognised* — never that nothing is
+there. The same applies to the co-required census, whose populated branch also carries the qualifier: the
+disclaimer belongs on the surface a reader acts on, not only in the source comments.
 
 It is **declared, not fatal**, and the distinction is load-bearing: failing the lane on it was implemented,
 measured against the real tree, and reverted — those helpers are correct code, and **a lane that reds on
