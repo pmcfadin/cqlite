@@ -36,12 +36,12 @@
 #                  baseline-set-empty (3b), baseline-set-garbage (3c/3c-ii),
 #                  baseline-unreadable (3d); manifest-missing, manifest-garbage,
 #                  manifest-stale (3e2); no-git, baseline-workspace, no-tool (3f);
-#                  unboundable (3g); baseline-transfer-mismatch (5f);
-#                  baseline-probe-unmeasured (3a-iv); baseline-ref-unparsable (2b);
+#                  unboundable (3g);
+#                  baseline-probe-unmeasured (3a-iv); baseline-ref-unparsable (3a-v);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10).
-# NINETEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
-# set from several places, and `ok` is the twentieth value). THE SET CHANGED SHAPE with #3544
+# EIGHTEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
+# set from several places, and `ok` is the nineteenth value). THE SET CHANGED SHAPE with #3544
 # REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
 # `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
 # fail at (`baseline-unreadable`, `baseline-set-garbage`, `baseline-set-empty`,
@@ -1713,76 +1713,21 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5d. THE BASELINE COMES FROM A REF THIS RUN OWNS, NOT FROM `FETCH_HEAD` (roborev job 227).
-#     `--refmap=` removed the shared TRACKING-ref write, which left `FETCH_HEAD` carrying the
-#     baseline — and `FETCH_HEAD` is itself a single shared mutable file per repository, so a
-#     CONCURRENT fetch (a sibling lane, a hook, an editor) overwrites it between the fetch and
-#     the read. The pre-flight would then compare against — and EXECUTE — a commit other than
-#     the `origin/main` it fetched, with nothing in the block to show it.
+# 5d. RETIRED (job 264): "the baseline comes from a ref this run owns, not FETCH_HEAD".
 #
-#     Simulated DETERMINISTICALLY rather than by racing: a stub `git` on PATH forwards every
-#     call to the real git and, after any `fetch`, CLOBBERS `FETCH_HEAD` with a decoy commit
-#     that exists in the fixture. That is the post-fetch window exactly. A run that reads
-#     `FETCH_HEAD` reports the DECOY sha; a run that reads its own private destination ref
-#     reports the true tip. (RED-verified against a copy patched back to `FETCH_HEAD`, which
-#     reports the decoy.)
+#     That case existed because the pre-flight fetched the baseline INTO this repository, and the
+#     question was which ref carried the result — `FETCH_HEAD` being a single shared mutable file
+#     that a concurrent fetch overwrites between the write and the read. There is now NO fetch
+#     into this repository at all (the objects are read out of the isolated scratch store), so
+#     there is no destination ref to own and no `FETCH_HEAD` to race. The property is stronger and
+#     is asserted where it now lives: `3544-no-import` above requires that after a slow-path run
+#     this repository still LACKS the baseline commit, holds no `refs/worktree/*` entry, and has
+#     an unchanged `FETCH_HEAD`.
 #
-#     The same case pins the CLEANUP half: the private ref lives in `refs/worktree/*` (git's
-#     per-worktree namespace, so it is not shared with a sibling lane at all) and must not
-#     survive the run — a probe that leaks a ref per invocation is a slow leak in a shared
-#     `.git`.
+#     Recorded rather than silently dropped: a reader who finds the old case in git history should
+#     see why it went, and a future change that reintroduces a fetch into the live repository has
+#     to reintroduce this coverage with it.
 # ---------------------------------------------------------------------------
-base_priv=$(mkbaseline base-priv - )
-priv=$(mkbranch priv "$base_priv" - --from-origin)
-# ADVANCE origin/main AFTER the clone, so this repository does NOT already hold the tip (job
-# 258). The pre-flight now asks the remote for the tip sha and only fetches objects when it
-# lacks them; a fixture that already holds the commit takes the fast path, no fetch happens, and
-# a case about a property OF THE FETCH would assert nothing. The `BASELINE_OBJECTS: fetched`
-# check below is what keeps that from happening silently again.
-( fx "$tmp/base-priv-src" && printf 'advance for the fetch path\n' >>README.md \
-  && git "${GIT_ID[@]}" commit -qam advance \
-  && git push -q "$base_priv" HEAD:refs/heads/main ) >/dev/null 2>&1
-priv_tip=$(git -C "$base_priv" rev-parse refs/heads/main)
-priv_decoy=$(git -C "$priv" rev-parse HEAD)          # the fixture's own commit — a REAL object,
-                                                     # so a FETCH_HEAD read resolves it and
-                                                     # reports it rather than failing
-priv_real_git=$(command -v git 2>/dev/null)
-if [ -z "$priv_real_git" ] || [ "$priv_decoy" = "$priv_tip" ]; then
-  echo "skip - 3544-private-fetch-ref: needs a resolvable git and a fixture commit distinct from origin/main's tip (decoy='$priv_decoy' tip='$priv_tip')"
-else
-  priv_bin="$tmp/priv-bin"; mkdir -p "$priv_bin"
-  {
-    printf '#!/bin/sh\n'
-    printf '# stub git: forward everything, then emulate a CONCURRENT fetch clobbering FETCH_HEAD\n'
-    printf '"%s" "$@"; rc=$?\n' "$priv_real_git"
-    printf 'for a in "$@"; do\n'
-    printf '  [ "$a" = fetch ] || continue\n'
-    printf '  printf "%%s\\t\\tbranch (decoy) of origin\\n" "%s" > "%s/.git/FETCH_HEAD" 2>/dev/null || true\n' \
-           "$priv_decoy" "$priv"
-    printf '  break\n'
-    printf 'done\n'
-    printf 'exit $rc\n'
-  } >"$priv_bin/git"
-  chmod +x "$priv_bin/git"
-  pv_out=$( fx "$priv" && PATH="$priv_bin:$PATH" bash "$priv/scripts/agent-gate.sh" \
-              --component-set-line full 2>/dev/null )
-  pv_sha=$(field SHA "$pv_out")
-  pv_objects=$(field BASELINE_OBJECTS "$pv_out")
-  pv_clobbered=$(git -C "$priv" rev-parse --verify --quiet 'FETCH_HEAD^{commit}' 2>/dev/null || echo none)
-  pv_leaked=$(git -C "$priv" for-each-ref --format='%(refname)' 'refs/worktree/*' 2>/dev/null | grep -c . || true)
-  # The stub must actually have clobbered FETCH_HEAD, or the case proves nothing: that is the
-  # positive control for the simulation itself.
-  if [ "$pv_objects" != fetched ]; then
-    bad "3544-private-fetch-ref: no fetch happened (BASELINE_OBJECTS='$pv_objects') — this case is about a property OF THE FETCH, so it cannot discriminate; the fixture must not already hold origin/main's tip"
-  elif [ "$pv_clobbered" != "$priv_decoy" ]; then
-    bad "3544-private-fetch-ref: the stub did NOT clobber FETCH_HEAD (found '$pv_clobbered', decoy '$priv_decoy') — the case cannot discriminate"
-  elif [ "$pv_sha" = "$priv_tip" ] && [ "$pv_leaked" -eq 0 ]; then
-    ok "3544-private-fetch-ref: a clobbered FETCH_HEAD does NOT change the baseline (reported the fetched tip), and the private refs/worktree ref is cleaned up"
-  else
-    bad "3544-private-fetch-ref: expected the fetched tip $priv_tip (got '$pv_sha'; decoy '$priv_decoy'), and no leaked refs/worktree ref (leaked=$pv_leaked)"
-    printf '%s\n' "$pv_out"
-  fi
-fi
 
 # ---------------------------------------------------------------------------
 # 5c. THE FETCH WRITES NO SHARED REF — tags included (roborev job 214). `--refmap=` stops
@@ -1835,76 +1780,48 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5f. THE TRANSFER HOP IS VERIFIED, NOT TRUSTED (roborev jobs 242 + 246). The baseline is
-#     fetched in an ISOLATED repository (global/system config neutralised, the validated URL in
-#     a 0600 config) and then TRANSFERRED into this repository so the ancestry check and the
-#     set read can proceed. That second hop reads THIS repo's config and so could itself be
-#     redirected — which is why the sha the isolated hop observed is RE-ASSERTED against what
-#     arrived, and a mismatch is its own fail-closed kind rather than a silently different
-#     baseline.
+# 5f. NOTHING IS WRITTEN INTO THIS REPOSITORY, AND THE BASELINE OBJECTS ARE NOT IMPORTED
+#     (roborev job 264, High — superseding the transfer-verification case that stood here).
 #
-#     `baseline-transfer-mismatch` had its census count bumped for it and NO behavioural case,
-#     while this file's own header claims every non-`ok` kind is exercised — the claim exceeding
-#     the check, which is the exact class this whole issue keeps fixing. So it is driven here.
+#     WHAT THIS REPLACES AND WHY. The pre-flight used to fetch the baseline from the isolated
+#     scratch repository INTO this one and then compare the sha that arrived against the sha the
+#     isolated hop had observed. That comparison was called "untrusted but safe" and it was wrong
+#     in KIND: `git fetch` in the live repository reads the live repository's LOCAL config, which
+#     `env -i` cannot suppress, so a local `url.*.insteadOf` plus `protocol.ext.allow=always`
+#     rewrites the scratch path to an `ext::` remote helper and RUNS COMMANDS DURING THE FETCH —
+#     before any comparison can happen. A check after the fact cannot defend against harm that
+#     happens during, and on this fleet lanes are worktrees of ONE shared `.git`, so a peer's
+#     config write reaches it. The transfer is therefore GONE, and with it the
+#     `baseline-transfer-mismatch` kind: the objects are read where they landed, through
+#     `GIT_ALTERNATE_OBJECT_DIRECTORIES`, which resolves no URL and can name no helper.
 #
-#     HOW THE REDIRECT IS PLANTED, and why it is a `git` SHIM rather than a real
-#     `url.*.insteadOf`: an insteadOf rewrite matches a URL PREFIX, and the scratch repository's
-#     path carries a random `mktemp` suffix, so no rewrite can name it and still resolve to a
-#     real repository. Writing one into shared git config is forbidden outright (a worktree
-#     shares .git/config — this lane took `origin` out for four live lanes that way, #3617). The
-#     shim therefore stands in for the redirect at the tool boundary: it performs hop 2 FOR REAL
-#     and then repoints the destination ref at a DIFFERENT commit, which is precisely the
-#     observable a redirected transfer produces. The assertion is about the gate's affirmative
-#     comparison, which cannot tell the two apart — and must not.
+#     THE ASSERTION IS THE ABSENCE OF AN IMPORT, MEASURED POSITIVELY. After a run that took the
+#     SLOW path (asserted: `BASELINE_OBJECTS: fetched`) and reported the correct tip, this
+#     repository must STILL NOT HOLD that commit — the scratch store is gone by then, so
+#     `git cat-file -e <tip>` must FAIL. That single check is what distinguishes "read without
+#     importing" from "imported quietly", and it could not have been made against the old design.
+#     Plus the shared-state invariants the old case pinned: no `refs/worktree/*` ref, and
+#     `FETCH_HEAD` untouched.
 # ---------------------------------------------------------------------------
-base_mm=$(mkbaseline base-mismatch - )
-mm=$(mkbranch mismatch "$base_mm" - )
-# THE CONTROL GETS ITS OWN FIXTURE, and that is not tidiness (job 258): the slow path WARMS the
-# repository it fetches into — the transferred objects survive the private ref's deletion — so
-# running the control against the SAME fixture made the measured run find the commit already
-# present, take the fast path, never reach hop 2, and report a clean PASS. The case failed
-# honestly ("expected baseline-transfer-mismatch") rather than passing vacuously, but only
-# because it asserts a KIND; two fixtures off one baseline removes the coupling entirely.
-mm_ctl_fx=$(mkbranch mismatch-control "$base_mm" - )
-mm_ctl=$(hook "$mm_ctl_fx")
-mm_decoy=$(git -C "$mm" rev-parse HEAD 2>/dev/null)
-mm_bin="$tmp/mismatch-bin"
-mkdir -p "$mm_bin"
-mm_real_git=$(command -v git)
-{ printf '#!/bin/sh\n'
-  printf 'REAL=%s\n' "$mm_real_git"
-  # HOP 2 IS IDENTIFIED BY ITS REFSPEC, not by the scratch path (random) and not by the remote
-  # (hop 2 has none): only hop 2 fetches FROM refs/csbaseline INTO the private per-run ref.
-  printf 'dest=""\n'
-  printf 'for a in "$@"; do case "$a" in refs/csbaseline:refs/worktree/*) dest=${a#refs/csbaseline:} ;; esac; done\n'
-  printf 'if [ -n "$dest" ]; then\n'
-  printf '  "$REAL" "$@" || exit $?\n'
-  printf '  "$REAL" -C %s update-ref "$dest" %s || exit $?\n' "$mm" "$mm_decoy"
-  printf '  exit 0\n'
-  printf 'fi\n'
-  printf 'exec "$REAL" "$@"\n'
-} >"$mm_bin/git"
-chmod +x "$mm_bin/git"
-mm_out=$( fx "$mm" && PATH="$mm_bin:$PATH" bash "$mm/scripts/agent-gate.sh" \
-            --component-set-line full 2>/dev/null )
-mm_line=$(field COMPONENT_SET_LINE "$mm_out")
-mm_base_sha=$(git -C "$base_mm" rev-parse refs/heads/main)
-if [ "$(field KIND "$mm_ctl")" != ok ]; then
-  bad "3544-transfer-mismatch: the POSITIVE CONTROL (same fixture, no shim) did not reach KIND ok (got '$(field KIND "$mm_ctl")') — the case cannot discriminate"
-  printf '%s\n' "$mm_ctl"
-elif [ "$mm_decoy" = "$mm_base_sha" ]; then
-  bad "3544-transfer-mismatch: the decoy commit EQUALS the baseline sha, so the shim could not make the two hops disagree — the fixture would test nothing"
-elif [ "$(field VERDICT "$mm_out")" = UNMEASURED ] \
-   && [ "$(field KIND "$mm_out")" = baseline-transfer-mismatch ] \
-   && [ "$(field BASELINE_OBJECTS "$mm_out")" = fetched ] \
-   && [ "$(field SHA "$mm_out")" = "-" ] \
-   && grep -q 'FAIL-CLOSED (#3544)' <<<"$mm_line" \
-   && grep -qF "$mm_base_sha" <<<"$mm_line" \
-   && grep -qF "$mm_decoy" <<<"$mm_line"; then
-  ok "3544-transfer-mismatch: a transfer that delivers a DIFFERENT commit than the isolated hop observed is UNMEASURED/baseline-transfer-mismatch, naming BOTH shas (control reached KIND ok)"
+base_noimp=$(mkbaseline base-noimport "$ADD_SENTINEL")
+noimp=$(mkbranch noimport "$base_noimp" - )
+noimp_tip=$(git -C "$base_noimp" rev-parse refs/heads/main)
+noimp_fh_before=$(cat "$noimp/.git/FETCH_HEAD" 2>/dev/null || echo '<none>')
+noimp_out=$(hook "$noimp")
+noimp_fh_after=$(cat "$noimp/.git/FETCH_HEAD" 2>/dev/null || echo '<none>')
+noimp_refs=$(git -C "$noimp" for-each-ref --format='%(refname)' 'refs/worktree/*' 2>/dev/null | grep -c . || true)
+git -C "$noimp" cat-file -e "$noimp_tip^{commit}" 2>/dev/null && noimp_have=yes || noimp_have=no
+if [ "$(field BASELINE_OBJECTS "$noimp_out")" != fetched ]; then
+  bad "3544-no-import: the run did not take the slow path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$noimp_out")'), so there was no object transfer to be absent — the case cannot discriminate"
+elif [ "$(field SHA "$noimp_out")" != "$noimp_tip" ] || [ "$(field KIND "$noimp_out")" != ok ]; then
+  bad "3544-no-import: the baseline was not measured correctly (kind='$(field KIND "$noimp_out")' sha='$(field SHA "$noimp_out")', expected ok + $noimp_tip) — reading through the alternate object store is broken"
+  printf '%s\n' "$noimp_out"
+elif [ "$noimp_have" = yes ]; then
+  bad "3544-no-import: this repository now HOLDS the baseline commit $noimp_tip — the objects were imported after all, which is the transport hop this fix removed"
+elif [ "${noimp_refs:-0}" -ne 0 ] || [ "$noimp_fh_after" != "$noimp_fh_before" ]; then
+  bad "3544-no-import: the pre-flight wrote shared state (refs/worktree entries=$noimp_refs, FETCH_HEAD changed=$( [ "$noimp_fh_after" = "$noimp_fh_before" ] && echo no || echo yes ))"
 else
-  bad "3544-transfer-mismatch: expected KIND baseline-transfer-mismatch naming $mm_base_sha and $mm_decoy"
-  printf '%s\n' "$mm_out"
+  ok "3544-no-import: the baseline is measured correctly from the isolated store WITHOUT importing it (this repo still lacks the commit afterwards), and no ref or FETCH_HEAD is written"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2341,43 +2258,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7d. THE PRIVATE FETCH REF IS REGISTERED FOR CLEANUP *BEFORE* THE FETCH (roborev job 237).
-#     A fetch can update the destination ref and then fail afterwards, so registering only on
-#     success leaks a ref the drop helper cannot name.
+# 7d. RETIRED (job 264): the private fetch ref's registration order and its cleanup.
 #
-#     THIS IS A SOURCE-ORDER ASSERT, AND THAT LIMITATION IS THE POINT OF SAYING SO: a
-#     behavioural case would need a fetch that CREATES the ref and THEN fails, which is a race
-#     to construct and would be a flaky test. So this checks the ORDERING that makes the leak
-#     impossible, not the leak itself. It cannot catch a future refactor that keeps the order
-#     but breaks the cleanup another way — `3544-fetch-ref-dropped` below covers the drop
-#     itself. Two narrow checks, each honest about its half, beats one that implies more
-#     coverage than it has.
+#     Both cases were about a ref this pre-flight created in the live repository. It creates none
+#     now — the baseline objects are read out of the isolated scratch store rather than fetched in
+#     — so there is no registration to order and no ref to drop. What replaced the ordering rule
+#     is broader: `_component_set_cleanup_resources` is ONE entry point covering every resource,
+#     it is installed as an INT/TERM/HUP handler BEFORE any resource exists (7l), and
+#     `3544-no-import` asserts that a completed slow-path run leaves no ref behind at all.
 # ---------------------------------------------------------------------------
-fr_assign=$(grep -n '_CS_FETCH_REF="\$csref"' "$GATE" | head -1 | cut -d: -f1)
-fr_fetch=$(grep -n 'fetch --quiet --refmap= --no-tags' "$GATE" | head -1 | cut -d: -f1)
-if [ -z "$fr_assign" ] || [ -z "$fr_fetch" ]; then
-  bad "3544-fetch-ref-registered-first: could not locate the assignment (got '$fr_assign') or the fetch (got '$fr_fetch') in $GATE — the shape changed or the scan broke (fail-closed: this is not a clean result)"
-elif [ "$fr_assign" -lt "$fr_fetch" ]; then
-  ok "3544-fetch-ref-registered-first: the private fetch ref is registered for cleanup (line $fr_assign) BEFORE the fetch that can create it (line $fr_fetch)"
-else
-  bad "3544-fetch-ref-registered-first: the fetch (line $fr_fetch) precedes the cleanup registration (line $fr_assign) — a fetch that creates the ref then fails would leak it into the SHARED .git"
-fi
-
-# The drop itself, behaviourally: a set ref name is deleted and the variable cleared.
-fr_probe="$tmp/fetch-ref-drop"
-mkdir -p "$fr_probe"
-if ( fx "$fr_probe" && git init -q . && git commit -q --allow-empty -m x \
-     && git update-ref refs/cqlite-fetchref-probe HEAD ) >/dev/null 2>&1; then
-  if ( fx "$fr_probe" && git rev-parse --verify -q refs/cqlite-fetchref-probe >/dev/null \
-       && git update-ref -d refs/cqlite-fetchref-probe \
-       && ! git rev-parse --verify -q refs/cqlite-fetchref-probe >/dev/null ) >/dev/null 2>&1; then
-    ok "3544-fetch-ref-dropped: update-ref -d removes a private ref (the mechanism the drop helper relies on), and deleting an absent ref is tolerated"
-  else
-    bad "3544-fetch-ref-dropped: update-ref -d did not remove the probe ref"
-  fi
-else
-  bad "3544-fetch-ref-dropped: could not build the fetch-ref probe fixture"
-fi
 
 # ---------------------------------------------------------------------------
 # 7e. EXTERNAL TEXT REACHING `_CS_DETAIL` IS BOTH REDACTED **AND** FLATTENED (job 239).
@@ -2520,7 +2409,11 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=19   # +baseline-ref-unparsable (the ref oracle's output is
+DECLARED_KIND_COUNT=18   # -baseline-transfer-mismatch: the transfer it detected is GONE (job
+                         # 264) — the baseline objects are read out of the isolated scratch
+                         # store instead of being fetched into this repository, so the class is
+                         # ELIMINATED rather than detected.
+                         # +baseline-ref-unparsable (the ref oracle's output is
                          # remote-controlled text and is VALIDATED, not merely parsed — job 258)
                          # +baseline-probe-unmeasured (the three-valued manifest presence
                          # probe: "cannot tell" is REFUSED, never read as "absent"),

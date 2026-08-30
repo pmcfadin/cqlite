@@ -2595,13 +2595,15 @@ apply_schemas_preflight() {
 # show, a baseline `--list`), and routing its result through `$( )` would add a
 # newline-stripping value path for no benefit (the #3148 lesson, one guard over).
 _CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
-                   # (baseline-* includes baseline-transfer-mismatch, job 242)
+                   # | manifest-* | head-set-unmeasured
 _CS_SHA="-"        # the origin/main sha40 the comparison actually used
 _CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
 _CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
 _CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
                    # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
-_CS_FETCH_REF=""   # the PRIVATE per-run ref this invocation's fetch wrote (#3544 / job 227)
+_CS_ALT=""         # the scratch repository's object dir, made visible to the baseline reads
+                   # instead of IMPORTING the objects (#3544 / job 264). Empty on the fast path.
+_CS_ALT_ENV=()     # `GIT_ALTERNATE_OBJECT_DIRECTORIES=…` as an argv fragment, or EMPTY
 _CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
 _CS_BASE_OBJ=""    # HOW the baseline COMMIT was obtained: reused (already in this repository)
                    # | fetched (the isolated hop + verified transfer) — job 258
@@ -3338,12 +3340,20 @@ _component_set_local_manifest_check() {
 #
 # BOUNDED like every other read here: `ls-tree` reads a TREE object, and a partial clone made
 # with `--filter=tree:0` fetches trees LAZILY, so this apparently-local read is network-capable.
+#
+# `env ${_CS_ALT_ENV[@]+"${_CS_ALT_ENV[@]}"}` carries the isolated scratch repository's object
+# store when the slow path fetched one, and expands to NOTHING otherwise (the `${x[@]+…}` form is
+# the bash-3.2-safe spelling for an empty array under `set -u`). That is how the baseline objects
+# are read WITHOUT being imported into this repository — see the slow path for why a transport hop
+# into the live repository could not be made safe. `--no-replace-objects` is passed explicitly
+# because these reads are deliberately NOT `env -i`-wrapped, so the allowlist's
+# GIT_NO_REPLACE_OBJECTS does not reach them.
 _CS_PRESENCE=""
 _CS_PRESENCE_ERR=""
 _component_set_manifest_presence() {
   local rev="$1" tmpd="$2" rc line ltype lpath
   _CS_PRESENCE=""; _CS_PRESENCE_ERR=""
-  _component_set_bounded "$_CS_BOUND_SECS" git --no-replace-objects -C "$REPO_ROOT" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
+  _component_set_bounded "$_CS_BOUND_SECS" env ${_CS_ALT_ENV[@]+"${_CS_ALT_ENV[@]}"} git --no-replace-objects -C "$REPO_ROOT" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -3435,7 +3445,7 @@ _component_set_set_at_rev() {
     # PATH 1 — THE COMMITTED MANIFEST, AND NOTHING ELSE. Bounded for the same reason as every
     # read here (job 210, finding 1): `git show <rev>:<path>` reads a BLOB, and in a PARTIAL
     # clone (`--filter=blob:none`) the blob is fetched LAZILY.
-    _component_set_bounded "$_CS_BOUND_SECS" git --no-replace-objects -C "$REPO_ROOT" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
+    _component_set_bounded "$_CS_BOUND_SECS" env ${_CS_ALT_ENV[@]+"${_CS_ALT_ENV[@]}"} git --no-replace-objects -C "$REPO_ROOT" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then
       # PRESENT BUT UNREADABLE IS AN ERROR, NEVER A FALLBACK: the data is there, so a run that
@@ -3465,7 +3475,7 @@ _component_set_set_at_rev() {
   fi
 
   # PATH 2 — THE TRANSITIONAL TEXT EXTRACTION, reachable ONLY from `verified-absent` above.
-  _component_set_bounded "$_CS_BOUND_SECS" git --no-replace-objects -C "$REPO_ROOT" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
+  _component_set_bounded "$_CS_BOUND_SECS" env ${_CS_ALT_ENV[@]+"${_CS_ALT_ENV[@]}"} git --no-replace-objects -C "$REPO_ROOT" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_REV_ERRKIND=unreadable
@@ -3612,40 +3622,15 @@ _component_set_build_git_env() {
   return 0
 }
 
-# THE BASELINE MUST NOT BE READ FROM A SHARED MUTABLE REF — AND `FETCH_HEAD` IS ONE (roborev
-# job 227). `--refmap=` was chosen precisely so the fetch writes NO shared tracking ref, which
-# left `FETCH_HEAD` as the carrier; but `FETCH_HEAD` is a single per-repository file, so a
-# CONCURRENT fetch in the same worktree (a sibling lane, a hook, an editor's auto-fetch)
-# overwrites it between the fetch and the read. This pre-flight then compares against — and
-# compares against — a commit other than the `origin/main` it fetched, silently. The fix is a
-# destination this run OWNS.
-#
-# `refs/worktree/…` is git's PER-WORKTREE ref namespace, so on this fleet's layout (lanes are
-# `git worktree`s of ONE shared `.git`) it is not shared with a sibling lane at all, and the
-# name additionally carries this run's id and pid. Two properties follow, and they are the
-# whole point:
-#   * PROVENANCE. The refspec's SOURCE is the literal `refs/heads/main` and its DESTINATION is
-#     this private ref, so a value found there can only have come from THIS fetch of THAT
-#     remote ref. That is the "verify the resolved commit belongs to the requested remote ref"
-#     requirement, established by construction rather than by a second observation of a
-#     mutable name.
-#   * NO FORCE. The refspec is deliberately not `+…`: if the ref somehow already exists and is
-#     not fast-forwardable, `git fetch` FAILS and this pre-flight reports an unmeasurable
-#     baseline. Fail-closed beats overwriting a name we did not expect to be occupied.
-_component_set_fetch_ref_name() {
-  printf 'refs/worktree/agent-gate-component-set/%s-%s' "$(basename "${RUN_ID:-norunid}")" "$$"
-}
-
-# _component_set_drop_fetch_ref: delete the private ref, if this run created one. Called on
-# EVERY path out of the probe (see the wrapper below) rather than at each `return`, because a
-# cleanup that has to be repeated at nine sites is a cleanup that will be missed at one.
-_component_set_drop_fetch_ref() {
-  [ -n "$_CS_FETCH_REF" ] || return 0
-  # local-only: deletes a ref in this worktree's own ref namespace. No object access, no
-  # remote contact, no possibility of a lazy fetch.
-  git -C "$REPO_ROOT" update-ref -d "$_CS_FETCH_REF" >/dev/null 2>&1 || true
-  _CS_FETCH_REF=""
-}
+# NO REF, NO `FETCH_HEAD`, NO SHARED WRITE AT ALL (#3544 / job 264 superseding job 227). This
+# used to fetch the baseline into a PRIVATE per-worktree ref, because `FETCH_HEAD` is a single
+# shared mutable file that a concurrent fetch overwrites between the fetch and the read, and
+# `refs/remotes/origin/main` is the cached observable this whole check exists to distrust. Both
+# hazards are now GONE BY CONSTRUCTION rather than avoided: the pre-flight performs no fetch into
+# this repository at all, so there is no destination ref to own, nothing to clean up, and no
+# shared ref a sibling lane could contend on. The baseline objects are read out of the isolated
+# scratch store through `GIT_ALTERNATE_OBJECT_DIRECTORIES` — see the slow path in
+# `_component_set_probe_inner` for why a transport hop could not be made safe.
 
 # _component_set_drop_scratch_dir: remove the isolated baseline repo (#3544 / job 242). Its
 # config holds the origin URL, which may carry a credential, so this is not merely tidiness.
@@ -3663,7 +3648,6 @@ _component_set_drop_scratch_dir() {
 # so possibly a credential) and the bounded runner's capture files. One entry point because the
 # normal path and the signal path must not be able to drop different sets.
 _component_set_cleanup_resources() {
-  _component_set_drop_fetch_ref
   _component_set_drop_scratch_dir
   _component_set_drop_capture_files
   return 0
@@ -3724,7 +3708,7 @@ _component_set_probe() {
 # probe, recording everything in the _CS_* globals. NEVER exits, never emits; the
 # verdict mapping and the emit live in the two functions below.
 _component_set_probe_inner() {
-  _component_set_drop_fetch_ref   # a prior probe in this process must not leak its ref
+  _CS_ALT=""; _CS_ALT_ENV=()
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
@@ -3841,27 +3825,16 @@ _component_set_probe_inner() {
   #      be reading mid-flight; the check exists to distrust that cached ref, not to
   #      rewrite it.
   #
-  # THE DESTINATION IS THIS RUN'S PRIVATE PER-WORKTREE REF (job 227), not `FETCH_HEAD` and not
-  # a shared tracking ref: see _component_set_fetch_ref_name above for why a shared mutable
-  # name cannot carry the baseline this run is about to compare against. `--refmap=` is retained so the
-  # opportunistic `refs/remotes/origin/*` update stays suppressed.
-  local csref; csref="$(_component_set_fetch_ref_name)"
+  # THE DESTINATION IS A REF INSIDE THE SCRATCH REPOSITORY, which is deleted with it. Nothing is
+  # written into THIS repository at any point (job 264): the earlier design fetched into a private
+  # per-worktree ref here, and the ref-ownership reasoning that went with it is preserved above
+  # where that machinery used to live. `--refmap=` and `--no-tags` are retained even inside the
+  # scratch, because "the fetch writes no ref it was not asked for" is a property worth keeping
+  # true wherever the fetch runs.
   # ONE LINE, deliberately: the structural audit in test_agent_gate_component_set.sh reads a
   # `git` invocation's BOUND from the line the invocation is on, so splitting this across a
   # `\` continuation makes the audit report the continuation's first word as an unclassified
   # external program (measured: it reported `origin`). Keep every git call here on one line.
-  # REGISTER FOR CLEANUP BEFORE THE FETCH CAN CREATE THE REF (roborev job 237). This was
-  # assigned only on `rc -eq 0`, which leaks: a fetch can UPDATE the destination ref and then
-  # fail afterwards — during disconnect, or when the bound fires between the ref write and the
-  # process exiting — leaving a private ref behind that `_component_set_drop_fetch_ref` cannot
-  # delete because it never learned its name. Registering first is safe in the other direction
-  # because the drop is `update-ref -d … || true`, so deleting a ref that was never created is
-  # a no-op. Cleanup registration precedes resource creation; the reverse ordering can only
-  # ever leak.
-  #
-  # The leak is not merely untidy on this fleet: lanes are worktrees of ONE shared `.git`, so a
-  # leaked ref per failed fetch accumulates in state every lane on the box shares.
-  _CS_FETCH_REF="$csref"
   # FETCH THE VALIDATED URL, NOT THE SYMBOLIC NAME (roborev job 239). The check above validates
   # the value captured from `git remote get-url origin`; re-resolving `origin` here would be a
   # TIME-OF-CHECK / TIME-OF-USE gap, and on this fleet that gap is not theoretical: lanes are
@@ -4014,50 +3987,74 @@ _component_set_probe_inner() {
     fi
     return 0
   fi
-  # THIS RUN'S PRIVATE REF, never `FETCH_HEAD` and never `refs/remotes/origin/main`: the
-  # tracking ref is updated only opportunistically and is the cached observable this check
-  # exists to distrust, and `FETCH_HEAD` is a SHARED MUTABLE FILE a concurrent fetch in the
-  # same repository overwrites between the fetch and this read (job 227). The private
-  # destination is what makes the value's provenance structural.
-  # local-only: resolves a ref file plus the COMMIT object the fetch above just wrote.
-  # Commit objects are never filtered out of a partial clone, so no lazy fetch is possible.
-  # The baseline sha AS THE ISOLATED HOP SAW IT — the value hop 2 must reproduce.
-  cssha=$(env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" rev-parse --verify --quiet "refs/csbaseline^{commit}" 2>/dev/null || true)
+  # THE SHA AS THE ISOLATED HOP OBSERVED IT. Read in the scratch repository, whose config we
+  # wrote and whose environment is allowlisted, so nothing about this value depends on the live
+  # repository's state.
+  # local-only: resolves a ref file plus the COMMIT object the fetch above just wrote, in a
+  # repository this run created. The scratch fetch is unfiltered and configures no promisor
+  # remote, so there is no object here that could be fetched lazily and no network to reach.
+  cssha=$(env -i "${_CS_GIT_ENV[@]}" git --no-replace-objects -C "$csdir/repo" rev-parse --verify --quiet "refs/csbaseline^{commit}" 2>/dev/null || true)
   if [ -z "$cssha" ]; then
     _CS_KIND=fetch-failed; _CS_SHA="-"
     _CS_DETAIL="the isolated baseline fetch reported success but its ref does not resolve to a commit"
     return 0
   fi
-  err2=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags "$csdir/repo" "refs/csbaseline:$csref" 2>&1); rc2=$?
-  if [ "$rc2" -ne 0 ]; then
-    _CS_KIND=fetch-failed; _CS_SHA="-"
-    _CS_DETAIL="transferring the isolated baseline into this repository exited $rc2: $(_component_set_safe_detail "$err2")"
+
+  # ---- THE OBJECTS ARE READ WHERE THEY LANDED; NOTHING IS IMPORTED (roborev job 264, High) ----
+  #
+  # WHAT WAS HERE AND WHY IT WAS UNSAFE. This used to run a second `git fetch` — from the scratch
+  # path INTO the live repository — and then compare the sha that arrived against the one the
+  # isolated hop observed. That comparison was described as making the hop "untrusted but safe",
+  # and that was WRONG IN KIND: `git fetch` in the live repository reads the live repository's
+  # LOCAL config, which `env -i` cannot suppress (only the environment is sanitisable; a
+  # `.git/config` is a file). A local `url.*.insteadOf` plus `protocol.ext.allow=always` rewrites
+  # the scratch path to an `ext::` remote helper and RUNS COMMANDS DURING THE FETCH — before any
+  # comparison. A verification after the fact cannot defend against harm that happens during, and
+  # on this fleet lanes are worktrees of ONE shared `.git`, so a peer's config write reaches it.
+  #
+  # Nor is a protocol allowlist expressible here: `-c protocol.allow=never` is overridden by a
+  # more specific `protocol.<name>.allow=always` in local config, and the set of helper names is
+  # whatever `git-remote-*` exists on PATH — a receding list, which is the shape this issue keeps
+  # removing rather than narrowing.
+  #
+  # SO THERE IS NO IMPORT AT ALL. The scratch repository's object store is made VISIBLE to the
+  # baseline reads through `GIT_ALTERNATE_OBJECT_DIRECTORIES`, which is an object SOURCE and not a
+  # transport: no URL is resolved, no remote helper can be named, no negotiation happens, and
+  # nothing is written into the shared `.git` — no pack, no private ref, no FETCH_HEAD. It is also
+  # strictly faster than either the fetch it replaces or the `git bundle` route (which would have
+  # written a redundant full-history pack into the shared object store).
+  #
+  # THE PROVENANCE CHAIN IS NOW UNBROKEN AND NEEDS NO POST-HOC COMPARISON: canonical URL ->
+  # isolated config -> allowlisted environment -> the scratch's own ref -> `cssha`, and every
+  # subsequent read is BY THAT SHA. A git object is content-addressed, so an object store cannot
+  # substitute different bytes for a given sha; that is why exposing the store is safe where
+  # invoking a transport was not. `baseline-transfer-mismatch` is gone with the transfer: the
+  # class is ELIMINATED rather than detected.
+  case "$csdir" in
+    *[:[:space:]]*)
+      # `GIT_ALTERNATE_OBJECT_DIRECTORIES` is a COLON-separated list, so a colon (or whitespace)
+      # in the path would silently split it into paths that are not this one. Refused, never
+      # quoted-and-hoped: the scratch dir comes from `mktemp` under $TMPDIR, so this is a
+      # pathological-TMPDIR guard rather than an expected state.
+      _CS_KIND=baseline-workspace
+      _CS_DETAIL="the isolated scratch repository's path contains a colon or whitespace, which cannot be expressed in GIT_ALTERNATE_OBJECT_DIRECTORIES; refusing rather than reading objects from a path this run cannot name exactly"
+      return 0 ;;
+  esac
+  _CS_ALT="$csdir/repo/.git/objects"
+  if [ ! -d "$_CS_ALT" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="the isolated scratch repository has no object directory at $_CS_ALT after a successful fetch"
     return 0
   fi
-  # local-only: resolves THIS run's private ref plus the COMMIT object hop 2 just wrote.
-  # Commit objects are never filtered out of a partial clone, so no lazy fetch is possible.
-  _CS_SHA=$(git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "$csref^{commit}" 2>/dev/null || true)
-  # THE AFFIRMATIVE CHECK that makes hop 2 untrusted-but-safe: a rewrite of the scratch path
-  # would deliver a DIFFERENT commit, so requiring equality with the sha the isolated hop
-  # observed detects it. Never derive a pass from the absence of a bad signal — this compares
-  # two measured values.
-  if [ -n "$_CS_SHA" ] && [ "$_CS_SHA" != "$cssha" ]; then
-    _CS_KIND=baseline-transfer-mismatch
-    _CS_DETAIL="the isolated fetch observed baseline ${cssha} but the copy transferred into this repository is ${_CS_SHA} — the transfer was redirected (a url.*.insteadOf rewrite on the scratch path is the way this happens), so the transferred copy is NOT used as the baseline"
-    _CS_SHA="-"
-    return 0
-  fi
-  if [ -z "$_CS_SHA" ]; then
-    _CS_KIND=fetch-failed; _CS_SHA="-"
-    _CS_DETAIL="git fetch origin refs/heads/main succeeded but its private destination ref does not resolve to a commit"
-    return 0
-  fi
+  _CS_ALT_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=$_CS_ALT")
+  _CS_SHA="$cssha"
   fi
   # ---- end of the OBJECTS-ABSENT (slow) path. Both paths have now set `_CS_SHA` to a commit
-  # this repository holds, whose value came from the canonical remote in THIS invocation:
-  # the fast path took it from the ref oracle, the slow path from its own verified transfer.
-  # The block above is deliberately left at its original indentation — re-indenting 60 lines
-  # would bury the one-line change that matters in a diff nobody can review.
+  # this run can READ, whose value came from the canonical remote in THIS invocation: the fast
+  # path took it from the ref oracle and the objects were already here; the slow path took it from
+  # the isolated fetch and reads the objects out of the scratch store via `_CS_ALT_ENV`.
+  # The slow-path block above is deliberately left at its original indentation: re-indenting it
+  # would bury the change that matters in a diff nobody can review.
 
   # THE BASELINE SET, READ AS DATA (see the reader's header above): the committed manifest at
   # the fetched sha, or — transitionally, while `origin/main` predates the manifest — its gate
@@ -4115,7 +4112,7 @@ _component_set_probe_inner() {
   # local-only: walks COMMIT parents only. This is the distinction that makes `git show`
   # above different in kind: no partial-clone filter omits commits, whereas `blob:none`
   # omits exactly what `show <sha>:<path>` must read — so this one cannot reach the network.
-  git --no-replace-objects -C "$REPO_ROOT" merge-base --is-ancestor "$_CS_SHA" HEAD >/dev/null 2>&1; rc=$?
+  env ${_CS_ALT_ENV[@]+"${_CS_ALT_ENV[@]}"} git --no-replace-objects -C "$REPO_ROOT" merge-base --is-ancestor "$_CS_SHA" HEAD >/dev/null 2>&1; rc=$?
   local shallow
   case "$rc" in
     0) _CS_ANCESTOR=yes ;;
