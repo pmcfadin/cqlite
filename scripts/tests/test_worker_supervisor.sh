@@ -4651,7 +4651,7 @@ test_legacy_global_lock_refuses_stale_holder() {
   fi
   # The live refusal's remedy must NOT be the one printed here: telling an operator to stop a process
   # that is already dead is actively misleading, which is why the remedy is per-state.
-  if [[ "$out" != *"STILL RUNNING"* && "$out" == *"remove the leftover lock by hand"* ]]; then
+  if [[ "$out" != *"STILL RUNNING"* && "$out" == *"PRECONDITION FIRST"* && "$out" == *"stop the legacy launcher"* ]]; then
     pass "legacy-lock AC2 (ruling): the stale remedy is state-specific — 'remove the leftover lock', never the live holder's 'stop pid N first'"
   else
     fail "legacy-lock-stale-remedy: out=[$out] — the stale refusal printed the LIVE remedy"
@@ -4668,15 +4668,27 @@ test_legacy_global_lock_refuses_stale_holder() {
   else
     fail "legacy-lock-stale-mutated: dir=$([[ -d "$legacy" ]] && echo yes || echo GONE) pid=[$(cat "$legacy/pid" 2>/dev/null || echo GONE)] (was [$before_pid]) inode=$(ls -di "$legacy" 2>/dev/null | awk '{print $1}') (was $before_inode) residue=$residue"
   fi
-  # THE PRINTED REMEDY IS EXECUTED, not merely matched (#3549, roborev job 182 F1). Operator-facing
-  # text that does not do what it says is the finding's whole subject, so the exact command lifted out
-  # of the refusal is run and must leave the legacy path GONE.
-  local printed
-  printed="$(printf '%s\n' "$out" | sed -n 's/.*non-recursively: \(rm -f .*rmdir [^ ]*\).*/\1/p' | head -1)"
-  if [[ -n "$printed" ]] && eval "$printed" >/dev/null 2>&1 && [[ ! -e "$legacy" ]]; then
-    pass "legacy-lock AC2 (ruling): the EXACT command printed in the refusal, run verbatim, clears the legacy lock (extracted=[$printed])"
+  # THE PRINTED REMEDY IS EXECUTED AS PRINTED — THE WHOLE LINE, NOT A COMMAND PARSED OUT OF IT (#3549,
+  # roborev job 185 F2). The previous version of this assert lifted the command out of a prose line with
+  # a `sed` capture, which is what let the defect through: `rm -f <dir>/pid && rmdir <dir> — the shape
+  # was ...` passes an extracted-command test and FAILS when an operator pastes the line, because the
+  # em dash and the clause after it become extra `rmdir` arguments. `rm -f` then succeeds and `rmdir`
+  # does not, leaving a PID-LESS lock directory: the exact shape a pre-#3467 supervisor reads as stale.
+  # So the operand is the raw line, byte for byte, selected STRUCTURALLY — every diagnostic line carries
+  # the `worker-supervisor:` prefix and the command line is deliberately bare, so "the unprefixed line"
+  # identifies it without parsing prose.
+  local printed bare_count
+  bare_count="$(printf '%s\n' "$out" | grep -cvE "$SV_DIAG_RE" || true)"
+  printed="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
+  if [[ "$bare_count" == "1" ]]; then
+    pass "legacy-lock AC2 (F2): the stale refusal prints EXACTLY ONE bare line — the command — so it is identifiable without parsing prose"
   else
-    fail "legacy-lock-stale-remedy-broken: extracted=[$printed] legacy-still-there=$([[ -e "$legacy" ]] && echo yes || echo no) — the operator-facing remedy does not do what it says"
+    fail "legacy-lock-stale-remedy-bare-count: $bare_count unprefixed lines in [$out]; expected exactly 1 (the command)"
+  fi
+  if [[ -n "$printed" ]] && eval "$printed" >/dev/null 2>&1 && [[ ! -e "$legacy" ]]; then
+    pass "legacy-lock AC2 (F2): the refusal's command line, run VERBATIM (whole line, nothing stripped), clears the legacy lock and leaves nothing behind (line=[$printed])"
+  else
+    fail "legacy-lock-stale-remedy-broken: line=[$printed] legacy-still-there=$([[ -e "$legacy" ]] && echo yes || echo no) — the operator-facing remedy is not executable as printed"
   fi
   # ...AND ITS NON-RECURSIVENESS IS LOAD-BEARING, measured rather than asserted: against a directory
   # holding an unexpected entry the same command FAILS and leaves that entry intact, where the `rm -rf`
@@ -5426,8 +5438,380 @@ test_legacy_lock_eperm_errno_branch_is_load_bearing() {
   fi
 }
 
+
+# ---------------------------------------------------------------------------
+# Test 44-lock (#3549, roborev job 185 F2): EVERY OPERATOR-FACING REMEDY LINE IS EXECUTABLE AS PRINTED,
+# and no diagnostic line mixes a runnable command with prose.
+#
+# The defect: `rm -f <dir>/pid && rmdir <dir> — the shape was verified ...` was printed as ONE line.
+# Pasted, the em dash and the clause after it become extra `rmdir` arguments; `rm -f` SUCCEEDS and
+# `rmdir` FAILS, leaving a PID-LESS lock directory — precisely the shape a pre-#3467 supervisor reads
+# as stale and reclaims. So the remedy would have manufactured the hazard this guard exists to prevent,
+# which is why the property under test is executability of the RAW LINE and not the presence of a
+# command somewhere in the text.
+#
+# TWO ASSERTS PER STATE, and the structural one is the sweep the finding asked for:
+#   (a) no `worker-supervisor:`-prefixed line contains a command token — a command inside prose is by
+#       construction not pasteable, wherever it appears;
+#   (b) a command, when there is one, is the WHOLE of exactly one bare line, and running that line
+#       verbatim does what the prose says.
+# States with no command at all (a live CORROBORATED holder, an undeterminable shape) must print NO
+# bare line — asserted too, so "zero bare lines" cannot be confused with "the command went missing".
+# ---------------------------------------------------------------------------
+
+# THE SUPERVISOR HAS TWO OUTPUT CHANNELS AND BOTH LABEL THEMSELVES: `log()` writes
+# `[worker-supervisor] ...` and this guard's diagnostics write `worker-supervisor: ...`. A runnable
+# command line carries NEITHER, which is what makes it identifiable without parsing prose. `SV_DIAG_RE`
+# is that pair, in one place, so a case cannot accidentally test only one of them.
+SV_DIAG_RE='^(\[worker-supervisor\]|worker-supervisor:) '
+# A COMMAND SIGNATURE IS A VERB PLUS AN OPERAND, not a bare mention. The prose legitimately NAMES the
+# tools ("the rmdir is non-recursive"), and flagging that would make the sweep red on correct text — a
+# check that reds on correct input is the check people learn to waive. So the patterns require the
+# argument shape a paste would actually mangle.
+SV_CMD_RE="rm -f |rm -rf |rmdir ['\"/]|ps -p |kill -"
+
+# remedy_lines_structural <label> <out> <expected-bare-lines> — the (a) half plus the bare-line count.
+remedy_lines_structural() {
+  local label="$1" out="$2" want="$3" bare_count inlined
+  bare_count="$(printf '%s\n' "$out" | grep -cvE "$SV_DIAG_RE" || true)"
+  if [[ "$bare_count" == "$want" ]]; then
+    pass "remedy-lines ($label): exactly $want bare (unprefixed) line(s) — the runnable command, if any, is a line of its own"
+  else
+    fail "remedy-lines-bare-count ($label): $bare_count bare lines, expected $want; out=[$out]"
+  fi
+  # A command SIGNATURE on a prefixed line is the inlined-in-prose defect, whatever the prose says
+  # around it: a line that mixes the two cannot be pasted, wherever in the line the command sits.
+  inlined="$(printf '%s\n' "$out" | grep -E "$SV_DIAG_RE" | grep -nE "$SV_CMD_RE" || true)"
+  if [[ -z "$inlined" ]]; then
+    pass "remedy-lines ($label): no diagnostic line inlines a runnable command in prose"
+  else
+    fail "remedy-lines-inlined ($label): prose lines carrying a command: [$inlined]"
+  fi
+}
+
+test_legacy_lock_remedy_lines_are_executable_as_printed() {
+  local d tmp lane legacy derived out rc bare live fake fakepid dead
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549remedy$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) LIVE, identity NOT corroborated: the remedy carries a read-only `ps` verification command.
+  sleep 300 &
+  live=$!
+  mkdir -p "$legacy"
+  printf '%s\n' "$live" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  remedy_lines_structural "live-unconfirmed" "$out" 1
+  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
+  # EXECUTED AS PRINTED, while the subject is still alive: the whole line, nothing stripped. `ps -p N
+  # -o args=` exits non-zero for a pid that is gone, so this is a real two-sided check of the line.
+  if [[ -n "$bare" ]] && eval "$bare" >/dev/null 2>&1; then
+    pass "remedy-lines (live-unconfirmed): the bare line runs VERBATIM against the live pid and succeeds (line=[$bare])"
+  else
+    fail "remedy-lines-live-not-runnable: line=[$bare] rc=$? — the printed verification command is not executable as printed"
+  fi
+  if [[ "$bare" == "ps -p $live -o args=" ]]; then
+    pass "remedy-lines (live-unconfirmed): the bare line is EXACTLY the command, with no trailing prose or punctuation appended"
+  else
+    fail "remedy-lines-live-not-exact: line=[$bare], expected exactly [ps -p $live -o args=]"
+  fi
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  rm -rf "$legacy" "$derived"
+
+  # ---- (2) LIVE and CORROBORATED: "stop pid N first" is advice, not a command we hand over — nothing
+  # here should print a runnable line, and a `kill` is not something this guard tells anyone to paste.
+  fake="$d/worker-supervisor.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
+  chmod +x "$fake"
+  bash "$fake" &
+  fakepid=$!
+  sleep 0.3
+  mkdir -p "$legacy"
+  printf '%s\n' "$fakepid" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  remedy_lines_structural "live-corroborated" "$out" 0
+  kill "$fakepid" 2>/dev/null || true
+  wait "$fakepid" 2>/dev/null || true
+  rm -rf "$legacy" "$derived"
+
+  # ---- (3) STALE: the deletion. Structure here; the verbatim execution is asserted in the stale case
+  # itself (which also checks the lock is gone afterwards).
+  sleep 0.1 &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  remedy_lines_structural "stale" "$out" 1
+  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
+  # THE PRECONDITION IS FIRST (#3549, roborev job 185 F1): the prose must tell an operator to stop or
+  # upgrade the legacy launcher BEFORE the deletion, because deleting first frees the legacy name for a
+  # pre-#3467 supervisor to take at once. And it must NOT claim the command is safe on current
+  # contents — that observation was made when the guard ran, not when the operator acts.
+  if [[ "$out" == *"PRECONDITION FIRST"* ]] \
+     && [[ "$out" == *"WHEN THIS RAN, not when you run it"* ]] \
+     && [[ "$out" != *"fails loudly if anything unexpected is present"* ]]; then
+    pass "remedy-lines (stale, F1): the precondition is stated FIRST and the run makes no safety claim about the state at deletion time"
+  else
+    fail "remedy-lines-stale-precondition: out=[$out] — expected the precondition first and no 'fails loudly if anything unexpected' claim"
+  fi
+  # An em dash on the command line is the exact byte that broke the paste, so it is asserted by name.
+  if [[ "$bare" != *"—"* && "$bare" != *"#"* && "$bare" == "rm -f "* ]]; then
+    pass "remedy-lines (stale): the bare line begins with the command and carries no em dash and no comment marker"
+  else
+    fail "remedy-lines-stale-line-shape: line=[$bare]"
+  fi
+  # STRONG FORM, in a SCRATCH copy of the described shape rather than the real one: run the line
+  # verbatim and require BOTH that it succeeds AND that it leaves nothing behind. A command that
+  # half-succeeds (the defect: `rm -f` yes, `rmdir` no) leaves a pid-less directory, so "nothing behind"
+  # is the assertion that distinguishes a working remedy from the broken one.
+  local vrc=0
+  eval "$bare" >/dev/null 2>&1 || vrc=$?
+  if [[ "$vrc" -eq 0 && ! -e "$legacy" ]]; then
+    pass "remedy-lines (stale): the bare line, run VERBATIM, succeeds and leaves the legacy path GONE (no pid-less directory)"
+  else
+    fail "remedy-lines-stale-verbatim: rc=$vrc leftover=$([[ -e "$legacy" ]] && echo "$(ls -A "$legacy" 2>/dev/null | tr '\n' ' ')" || echo none) — the printed line is not executable as printed"
+  fi
+  # NON-VACUITY, AND THE FINDING REPRODUCED — MEASURED, in both of its outcomes. The pre-fix form
+  # appended prose to this same command, and pasting it makes the prose extra `rmdir` OPERANDS. That
+  # ALWAYS fails; what survives depends on the prose, so both shapes are run rather than argued:
+  #   (i)  with the shipped em dash, `rmdir` removes the directory AND THEN errors once per prose word,
+  #        so the operator gets a non-zero exit plus alarming messages and cannot tell whether the lock
+  #        was cleared;
+  #   (ii) with an option-shaped token in the prose, `rmdir` rejects the whole invocation before
+  #        removing anything — leaving a PID-LESS lock directory, the shape a pre-#3467 supervisor reads
+  #        as stale and reclaims, i.e. the remedy manufacturing the hazard the guard refuses.
+  # Without this contrast the verbatim assert above could pass for a line that merely happens to work.
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  local emdash_rc=0 emdash_err=""
+  emdash_err="$(eval "$bare — the shape was verified to be exactly that one file" 2>&1 >/dev/null)" || emdash_rc=$?
+  if [[ "$emdash_rc" -ne 0 && "$emdash_err" == *"shape"* ]]; then
+    pass "remedy-lines NON-VACUITY (stale, em dash): the pre-fix INLINED form, pasted, FAILS (rc=$emdash_rc) and errors on the prose words — the operator cannot tell whether the lock was cleared"
+  else
+    fail "remedy-lines-oldform-emdash: rc=$emdash_rc err=[$emdash_err] — the pre-fix form must be shown to break, or the assert above measures nothing"
+  fi
+  rm -rf "$legacy"
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  local optish_rc=0
+  eval "$bare -x explanatory prose" >/dev/null 2>&1 || optish_rc=$?
+  if [[ "$optish_rc" -ne 0 && -d "$legacy" && ! -e "$legacy/pid" ]]; then
+    pass "remedy-lines NON-VACUITY (stale, option-shaped prose): the pre-fix INLINED form fails (rc=$optish_rc) having removed NOTHING — a PID-LESS lock directory, the hazard the guard refuses, manufactured by its own remedy"
+  else
+    fail "remedy-lines-oldform-optish: rc=$optish_rc dir=$([[ -d "$legacy" ]] && echo yes || echo no) pid=$([[ -e "$legacy/pid" ]] && echo yes || echo no) — expected rmdir to reject the invocation and leave the pid-less directory"
+  fi
+  rm -rf "$legacy" "$derived"
+
+  # ---- (4) UNDETERMINABLE shape: no deletion instruction at all, so no bare line either.
+  printf 'not a lock\n' >"$legacy"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  remedy_lines_structural "unknown-not-a-directory" "$out" 0
+  rm -f "$legacy"
+  rm -rf "$derived"
+}
+
+# ---------------------------------------------------------------------------
+# Test 45-lock (#3549, roborev job 185 F3): A FAILED `cmdline` READ IS NOT AN AFFIRMATIVE NON-MATCH.
+#
+# `unconfirmed` asserts "we READ a command line and it did not match". `-r` is true a moment before the
+# open, and the process can exit in between — so a suppressed open failure used to leave `$args` empty
+# and fall straight into `unconfirmed`, claiming a measurement that never happened. That is the whole
+# reason the third value exists, one level down from the liveness probe's `unknown`.
+#
+# THE PREMISE IS STAGED WITHOUT ANY STUB IN THE SHIPPED SCRIPT: the procfs literal is substituted for a
+# scratch root (the technique already used by the three-valued identity case, with the same inverse
+# byte-identity check), and `<root>/<pid>/cmdline` is created as a DIRECTORY. `-r` on a directory is
+# TRUE, and reading it yields NOTHING (Linux opens a directory read-only and then fails the read with
+# EISDIR) — a readable path that produces no bytes, reproducible deterministically and with no source
+# substitution beyond the procfs literal.
+#
+# It also stages the AMBIGUITY the fix turns on: an empty result is indistinguishable from a kernel
+# thread's empty `cmdline` and from a read that errored, and the `read` builtin cannot tell EOF from an
+# error. So an empty procfs read is not a verdict either — `ps`, which CAN name these processes, gets to
+# answer, and if it cannot the verdict is `unprobeable`.
+# ---------------------------------------------------------------------------
+test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed() {
+  local d body mutant fakeproc stubdir fake fakepid ans
+  d="$(new_case_dir)"
+  fakeproc="$d/fakeproc"
+  body="$T_LOCKFN/identity-unreadable.sh"
+  mutant="$T_LOCKFN/identity-unreadable-mutant.sh"
+  mkdir -p "$T_LOCKFN" "$d/stub"
+  stubdir="$d/stub"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR" | sed "s#/proc#$fakeproc#g"
+    printf '%s\n' 'supervisor_pid_identity "$1"'
+  } >"$body"
+  if diff -q <(sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR") \
+             <(sed -n '/^supervisor_pid_identity()/,/^}/p' "$body" | sed "s#$fakeproc#/proc#g") >/dev/null; then
+    pass "identity F3: the scratch probe differs from the shipped one ONLY in the procfs literal (inverse substitution is byte-identical)"
+  else
+    fail "identity-f3-scratch-drift: the scratch copy is not the shipped function with only the procfs substitution applied"
+  fi
+
+  # A REAL process whose command line names worker-supervisor, so `ps` has a true answer to give.
+  fake="$d/worker-supervisor.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
+  chmod +x "$fake"
+  bash "$fake" &
+  fakepid=$!
+  sleep 0.3
+  # READABLE, YIELDS NOTHING: a directory named `cmdline`.
+  mkdir -p "$fakeproc/$fakepid/cmdline"
+  local staged_bytes=""
+  staged_bytes="$(cat "$fakeproc/$fakepid/cmdline" 2>/dev/null || true)"
+  if [[ -r "$fakeproc/$fakepid/cmdline" && -z "$staged_bytes" ]]; then
+    pass "identity F3 PREMISE: the staged path passes -r and yields NO bytes — a readable command line that cannot be measured, staged deterministically"
+  else
+    fail "identity-f3-premise: the staged path does not reproduce readable-but-unmeasurable (bytes=[$staged_bytes]); the case below measures nothing"
+  fi
+
+  # (1) FIXED CODE: the failed read is not a verdict — `ps` answers, and it answers `supervisor`.
+  ans="$(bash "$body" "$fakepid")"
+  if [[ "$ans" == supervisor ]]; then
+    pass "identity F3: a cmdline that yields nothing falls through to ps, which corroborates the real subject as 'supervisor' — never a fabricated non-match"
+  else
+    fail "identity-f3-fixed: answered [$ans] for a worker-supervisor-named process whose cmdline yielded nothing; expected supervisor"
+  fi
+
+  # (2) FIXED CODE, no `ps` either: the answer is `unprobeable` — we could not look, and we say so.
+  ans="$(env PATH="$stubdir" "$BASH" "$body" "$fakepid")"
+  if [[ "$ans" == unprobeable ]]; then
+    pass "identity F3: an unmeasurable cmdline with no usable ps answers 'unprobeable' — the unmeasured state, distinct from an affirmative non-match"
+  else
+    fail "identity-f3-unprobeable: answered [$ans] with an unmeasurable cmdline and no ps; expected unprobeable"
+  fi
+
+  # (3) MUTANT CONTRAST, both directions: restore the pre-fix read (suppress the failure, no tracking)
+  # and the SAME staged premise answers `unconfirmed` — the false affirmative the finding named. The
+  # mutant is built from the scratch copy by collapsing the tracked read back to the `|| true` form.
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    printf '%s\n' 'supervisor_pid_identity() {'
+    printf '%s\n' '  local pid="${1:-}" args="" part=""'
+    printf '%s\n' '  case "$pid" in'
+    printf '%s\n' "    '' | *[!0-9]* | 0*) printf 'unprobeable\\n'; return 0 ;;"
+    printf '%s\n' '  esac'
+    printf '%s\n' "  if [[ -r \"$fakeproc/\$pid/cmdline\" ]]; then"
+    printf '%s\n' "    while IFS= read -r -d '' part || [[ -n \"\$part\" ]]; do"
+    printf '%s\n' '      args+="$part "'
+    printf '%s\n' '      part=""'
+    printf '%s\n' "    done <\"$fakeproc/\$pid/cmdline\" 2>/dev/null || true"
+    printf '%s\n' '    case "$args" in'
+    printf '%s\n' "      *worker-supervisor*) printf 'supervisor\\n'; return 0 ;;"
+    printf '%s\n' '    esac'
+    printf '%s\n' "    printf 'unconfirmed\\n'"
+    printf '%s\n' '    return 0'
+    printf '%s\n' '  fi'
+    printf '%s\n' "  printf 'unprobeable\\n'"
+    printf '%s\n' '}'
+    printf '%s\n' 'supervisor_pid_identity "$1"'
+  } >"$mutant"
+  ans="$(bash "$mutant" "$fakepid")"
+  if [[ "$ans" == unconfirmed ]]; then
+    pass "identity F3 MUTANT CONTRAST: the pre-fix read (failure suppressed, success untracked) answers 'unconfirmed' for the SAME staged premise — an affirmative non-match about a read that never happened"
+  else
+    fail "identity-f3-mutant: the pre-fix form answered [$ans]; expected the false 'unconfirmed' this finding named, or the contrast proves nothing"
+  fi
+
+  kill "$fakepid" 2>/dev/null || true
+  wait "$fakepid" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Test 46-lock (#3549, roborev job 185 F3, class sweep): THE PID FILE'S OPEN IS TRACKED TOO, so an
+# unreadable file is not reported as a MALFORMED one. Same shape, one function over: the file passed
+# `-f -r` and can vanish before the open, and an empty `$pid` then landed in
+# `pid-not-well-formed:[]` — a cause token asserting we PARSED contents that were never read. Both
+# spellings refuse (every `unknown` refuses), so the property under test is the DIAGNOSTIC's truth.
+#
+# THE PREMISE CANNOT BE STAGED FROM OUTSIDE, and that is stated rather than faked: the `pid` path has
+# to pass `-f -r` and then fail to OPEN, which is a change of state BETWEEN two statements of the
+# shipped function — not something a caller can arrange (a directory fails `-f` first; a mode-000 file
+# fails `-r` first; a FIFO with no writer blocks instead of failing). So the race is WRITTEN DOWN: a
+# scratch copy of the shipped classifier in which the gate's subject and the OPEN's subject are
+# different paths, verified to differ from the shipped code in exactly that one place. Everything else
+# is the shipped code, and the pre-fix mutant is built from the same copy.
+# ---------------------------------------------------------------------------
+test_legacy_lock_pid_file_unreadable_at_open_is_named() {
+  local d body legacy state
+  d="$(new_case_dir)"
+  legacy="$d/cqlite-worker-supervisor.lock"
+  body="$T_LOCKFN/statefn-unreadable.sh"
+  mkdir -p "$T_LOCKFN" "$legacy"
+  printf '12345\n' >"$legacy/pid"
+
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    sed -n '/^supervisor_pid_liveness()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_legacy_lock_state()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_legacy_lock_state "$1"'
+  } >"$body"
+
+  # The `-f -r` gate passes (the real `pid` is there); the OPEN is pointed at a sibling that is not.
+  local raced="$T_LOCKFN/statefn-raced.sh"
+  sed "s#{ read -r pid || true; if IFS= read -r extra; then more=yes; fi; } 2>/dev/null <\"\$legacy/pid\"#{ read -r pid || true; if IFS= read -r extra; then more=yes; fi; } 2>/dev/null <\"\$legacy/pid-vanished\"#" "$body" >"$raced"
+  if ! diff -q "$body" "$raced" >/dev/null; then
+    pass "state F3-sweep: the raced copy differs from the shipped classifier ONLY in the OPEN's path (the post-check race, written down)"
+  else
+    fail "state-f3-sweep-substitution: the substitution did not apply — the shipped open no longer has the expected shape"
+    return 0
+  fi
+  state="$(bash "$raced" "$legacy")"
+  if [[ "$state" == "unknown pid-file-unreadable-at-open" ]]; then
+    pass "state F3-sweep: an open that FAILS is named 'pid-file-unreadable-at-open', not 'pid-not-well-formed' — the cause token states what actually happened"
+  else
+    fail "state-f3-sweep: got [$state]; expected 'unknown pid-file-unreadable-at-open'"
+  fi
+  # MUTANT CONTRAST: the pre-fix form (open failure suppressed, untracked) reports the MALFORMED cause
+  # for the same premise — a false affirmative about contents nobody read.
+  local mutant="$T_LOCKFN/statefn-raced-mutant.sh"
+  python3 - "$raced" "$mutant" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+old_open = '''  local extra="" more=no open_ok=no
+  if { read -r pid || true; if IFS= read -r extra; then more=yes; fi; } 2>/dev/null <"$legacy/pid-vanished"; then
+    open_ok=yes
+  fi
+  if [[ "$open_ok" != yes ]]; then
+    printf 'unknown pid-file-unreadable-at-open\\n'
+    return 0
+  fi
+'''
+new_open = '''  local extra="" more=no
+  { read -r pid || true; if IFS= read -r extra; then more=yes; fi; } <"$legacy/pid-vanished" 2>/dev/null || true
+'''
+assert s.count(old_open) == 1, "pre-fix mutant cannot be constructed: the open no longer has the expected shape"
+open(dst, 'w').write(s.replace(old_open, new_open))
+PY
+  if [[ -s "$mutant" ]]; then
+    state="$(bash "$mutant" "$legacy")"
+    if [[ "$state" == "unknown pid-not-well-formed:[]" ]]; then
+      pass "state F3-sweep MUTANT CONTRAST: the pre-fix form reports [$state] for the same premise — a parse verdict about a file that was never opened"
+    else
+      fail "state-f3-sweep-mutant: the pre-fix form reported [$state]; expected the false 'pid-not-well-formed:[]'"
+    fi
+  else
+    fail "state-f3-sweep-mutant-build: the pre-fix mutant could not be built"
+  fi
+}
+
 t test_legacy_lock_eperm_errno_branch_is_load_bearing
 t test_legacy_lock_liveness_is_three_valued
+t test_legacy_lock_remedy_lines_are_executable_as_printed
+t test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed
+t test_legacy_lock_pid_file_unreadable_at_open_is_named
 
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

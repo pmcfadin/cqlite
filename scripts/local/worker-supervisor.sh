@@ -1489,9 +1489,10 @@ supervisor_pid_liveness() {
 # Corroboration = `worker-supervisor` appearing in the process's own command line. NEVER CLAIM
 # CORROBORATION THAT WAS NOT OBTAINED, so the three answers are kept distinct: `unconfirmed` means we
 # READ a command line and it did not match (an affirmative non-match), `unprobeable` means we could not
-# look at all — no readable procfs entry, a procfs read that FAILED, and no usable `ps` (a hidepid
-# container, a process that exited mid-probe, or a macOS box with a stripped PATH). An unmeasured read
-# is NEVER reported as `unconfirmed`: that would claim a non-match nobody observed.
+# look at all — no readable procfs entry, a procfs read that FAILED OR CAME BACK EMPTY, and no usable
+# `ps` (a hidepid container, a process that exited mid-probe, or a macOS box with a stripped PATH). An
+# unmeasured — or ambiguous — read is NEVER reported as `unconfirmed`: that would claim a non-match
+# nobody observed.
 # Both get cautious wording; only `supervisor` gets the "stop it" advice.
 supervisor_pid_identity() {
   local pid="${1:-}" args="" part="" read_ok=no
@@ -1522,17 +1523,24 @@ supervisor_pid_identity() {
          done; } 2>/dev/null <"/proc/$pid/cmdline"; then
       read_ok=yes
     fi
-    if [[ "$read_ok" == yes ]]; then
+    if [[ "$read_ok" == yes && -n "$args" ]]; then
       case "$args" in
         *worker-supervisor*) printf 'supervisor\n'; return 0 ;;
       esac
-      # We LOOKED and it did not match. An EMPTY cmdline (kernel thread, or a process that rewrote its
-      # own argv) lands here too, and for the same reason: nothing corroborating was found.
+      # We LOOKED, there WAS a command line, and it did not match. That is the affirmative non-match.
       printf 'unconfirmed\n'
       return 0
     fi
-    # Read FAILED. Discard whatever partial bytes arrived — a partial command line is not evidence
-    # either way — and let `ps` answer.
+    # NO VERDICT FROM PROCFS. Two states land here and they are deliberately treated alike:
+    #   - the open/read FAILED (tracked above);
+    #   - the read succeeded and produced NOTHING.
+    # An EMPTY result is AMBIGUOUS — a kernel thread and a process that rewrote its own argv both have
+    # an empty `cmdline`, and so does a read that errored mid-stream, which the `read` builtin cannot
+    # distinguish from EOF. Under the affirmative-measurement rule an ambiguous state must not take the
+    # affirmative branch, so an empty command line is NOT reported as a non-match either: `ps` gets to
+    # answer (it prints `[kthreadd]`-style names for exactly these processes, i.e. a real non-match),
+    # and if `ps` cannot answer the verdict is `unprobeable`. Discard any partial bytes on the way — a
+    # truncated command line is not evidence in either direction.
     args=""
   fi
   if command -v ps >/dev/null 2>&1; then
@@ -1685,12 +1693,18 @@ supervisor_legacy_lock_state() {
 #
 # A RUNNABLE COMMAND IS A SEPARATE ARGUMENT AND GETS A LINE OF ITS OWN — NEVER INLINED IN PROSE (#3549,
 # roborev job 185 F2). It was inlined once, with a trailing em dash and an explanatory clause after it,
-# and the consequence is worse than the untidiness: pasted verbatim, the prose became extra arguments,
-# `rm -f <dir>/pid` SUCCEEDED and `rmdir <dir> — the shape was ...` FAILED, leaving a PID-LESS lock
-# directory. That is precisely the shape a pre-#3467 supervisor reads as stale and reclaims — so the
-# remedy would have manufactured the hazard this guard exists to prevent. Do not re-inline it, and do
-# not append punctuation: the command line must be the WHOLE line, and it is printed BARE (no
-# `worker-supervisor:` prefix) so that selecting the line is enough to paste it.
+# and the consequence is worse than untidiness. Pasted verbatim, the prose becomes extra `rmdir`
+# OPERANDS and the command ALWAYS fails; what it leaves behind depends on the prose, and both measured
+# outcomes are bad (`scripts/tests/test_worker_supervisor.sh` runs them):
+#   - with the shipped em dash, `rm -f` succeeds and `rmdir` removes the directory AND THEN errors on
+#     each prose word ("failed to remove 'the'", …), so the operator gets a non-zero exit and three
+#     alarming messages with no way to tell whether the lock was actually cleared;
+#   - with any prose carrying an option-shaped token (`-x`), `rmdir` rejects the whole invocation before
+#     removing anything — leaving a PID-LESS lock directory, which is precisely the shape a pre-#3467
+#     supervisor reads as stale and reclaims, i.e. the remedy manufacturing the hazard this guard
+#     exists to prevent.
+# Do not re-inline it, and do not append punctuation: the command line must be the WHOLE line, and it is
+# printed BARE (no `worker-supervisor:` prefix) so that selecting the line is enough to paste it.
 supervisor_legacy_lock_refuse() {
   local legacy="$1" detail="$2" remedy="${3:-}" remedy_cmd="${4:-}"
   echo "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy: $detail" >&2

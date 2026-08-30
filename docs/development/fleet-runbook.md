@@ -584,9 +584,10 @@ What it guarantees:
   paste-safe), and the remedy is state-specific so a run never tells you to stop a
   process that is already dead. **Two things about that one-liner (#3549).** It is printed **on a line
   of its own, bare and complete** — no prefix, no trailing prose — because a command with an
-  explanation appended to it is not pasteable: the prose becomes extra arguments, `rm -f` succeeds and
-  `rmdir` fails, leaving a **pid-less lock directory**, which is exactly the shape a pre-#3467
-  supervisor misreads as stale. And **the ORDER is part of the remedy**: stop or upgrade the legacy
+  explanation appended to it is not pasteable: the prose becomes extra `rmdir` operands and the command
+  always fails. With an em dash it removes the directory *and* prints an error per prose word, so you
+  cannot tell whether it worked; with any prose carrying an option-shaped token it removes nothing,
+  leaving a **pid-less lock directory** — exactly the shape a pre-#3467 supervisor misreads as stale. And **the ORDER is part of the remedy**: stop or upgrade the legacy
   launcher **first**, delete **second** — deleting first frees the legacy name for a pre-#3467
   supervisor to take at once, which is the collision the guard refuses. The `{pid}` shape (exactly one
   entry, `pid`, holding exactly one line) was verified **when the guard ran**, which is what licenses
