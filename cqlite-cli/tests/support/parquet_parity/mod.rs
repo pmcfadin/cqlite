@@ -58,7 +58,8 @@
 //!   mapping would make both of them pass. Only the harness's own
 //!   deliberate-misdeclaration controls opt out, by naming a reason
 //!   ([`SchemaCheck::Synthetic`]), which is announced on every run.
-//! * Fixture roots are resolved PER TABLE (`sstables_root_for_table`), never by
+//! * Fixture roots are resolved PER TABLE, and FALLIBLY
+//!   (`fixture_root::first_candidate_root_with_table`), never by
 //!   keyspace: a root holding the keyspace but not the table would otherwise win
 //!   the selection and the case would skip while the fixture sat in the checkout
 //!   (#3220).
@@ -100,6 +101,7 @@ pub mod cql_type;
 pub mod decimal;
 pub mod declared;
 pub mod failure;
+pub mod fixture_root;
 pub mod golden_rows;
 pub mod golden_schema;
 pub mod golden_text;
@@ -118,6 +120,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use canonical_jsonl::{CanonicalValue, KeySpec};
 use cql_type::ColumnType;
 use failure::{Failure, Failures, Stage};
+use fixture_root::read_dir_completely;
 use golden_rows::GoldenRow;
 
 // `ExpectedFailure` is used only by the test binaries that DECLARE a
@@ -235,44 +238,30 @@ pub struct Fixture {
     pub golden: PathBuf,
 }
 
-/// Every entry of `dir`, with an entry the OS could not deliver propagated as a
-/// REFUSAL rather than dropped.
-///
-/// `read_dir` yields one `io::Result<DirEntry>` PER ENTRY, so an individual entry
-/// can fail on its own — and the `filter_map(|e| e.ok())` this replaces collapsed
-/// that three-valued signal ("here", "not here", "cannot tell") onto the
-/// PERMISSIVE answer, exactly the shape CLAUDE.md names for two-valued file
-/// predicates. The consequence is specific, not theoretical: every caller below
-/// takes a CENSUS of the directory — how many `*-Data.db` generations, how many
-/// goldens, how many table directories — and concludes the fixture is UNIQUE. A
-/// census taken over an incomplete listing can only ever conclude "fewer", so an
-/// entry that was silently dropped is precisely how a SECOND generation, or a
-/// golden belonging to another one, passes as a unique fixture.
-fn read_dir_completely(dir: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
-    let listing =
-        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
-    let mut entries = Vec::new();
-    for (i, entry) in listing.enumerate() {
-        entries.push(entry.map_err(|e| {
-            format!(
-                "cannot read entry {i} of {}: {e}; the harness REFUSES a fixture directory it \
-                 could not inspect COMPLETELY, because an entry it cannot read is UNKNOWN, not \
-                 ABSENT — dropped, it leaves the generation census one entry short",
-                dir.display()
-            )
-        })?);
-    }
-    Ok(entries)
-}
-
 /// Resolve `<root>/<keyspace>/<table>-*/` per TABLE across every candidate root.
 ///
-/// Returns `Ok(None)` only when no candidate root carries the table at all; a
-/// root that carries it in an unusable shape (several generations, no golden, a
-/// golden belonging to a DIFFERENT generation — see [`fixture_in_table_dir`]) is
-/// an ERROR, never a skip.
+/// Returns `Ok(None)` only when EVERY candidate root was read successfully and
+/// none carries the table; a root that could not be READ is a REFUSAL
+/// (`fixture_root::first_candidate_root_with_table`, round 18 — an unreadable
+/// root used to read as an absent fixture and SKIP), and a root that carries the
+/// table in an unusable shape (several generations, no golden, a golden belonging
+/// to a DIFFERENT generation — see [`fixture_in_table_dir`]) is an ERROR too,
+/// never a skip.
 fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
-    let Some(root) = datasets_root::sstables_root_for_table(case.keyspace, case.table) else {
+    resolve_fixture_in_roots(case, &fixture_root::candidate_roots())
+}
+
+/// [`resolve_fixture`] parameterized on the candidate roots — the seam the
+/// round-18 refusal is proven against, since the real list is half environment
+/// and half a COMPILE-TIME checkout path and a test reading it could only ever
+/// observe this machine's layout.
+pub fn resolve_fixture_in_roots(
+    case: &ParityCase,
+    roots: &[PathBuf],
+) -> Result<Option<Fixture>, String> {
+    let Some(root) =
+        fixture_root::first_candidate_root_with_table(roots, case.keyspace, case.table)?
+    else {
         return Ok(None);
     };
     let ks_dir = root.join(case.keyspace);

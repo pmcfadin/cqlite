@@ -414,8 +414,13 @@ fn int32_col0(bytes: &[u8]) -> Vec<Option<i32>> {
 
 /// TABLE-granular corpus resolution (#3220): walk EVERY candidate root for the
 /// table this lane needs, rather than committing to a root by keyspace.
-#[path = "../../cqlite-core/tests/support/datasets_root.rs"]
-mod datasets_root;
+// The parity HARNESS itself, so the fixture-discovery refusal below is asserted
+// against the code the parity cases actually run (round 18) — and `datasets_root`
+// comes from it rather than being included a second time.
+#[path = "support/parquet_parity/mod.rs"]
+mod parquet_parity;
+
+use parquet_parity::datasets_root;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -727,4 +732,201 @@ fn command_surface_control_export_succeeds_under_the_committed_schema() {
         live > 0,
         "`{REWRITTEN_COLUMN}` must export live values under its committed TEXT declaration"
     );
+}
+
+// ===========================================================================
+// Round 18: FIXTURE DISCOVERY refuses an unreadable root, never skips it
+// ===========================================================================
+
+/// A candidate root the harness could not READ is a REFUSAL, never an absent
+/// fixture — the third state `Option` could not carry (#1490 round 18).
+///
+/// # The hole, MEASURED before it is closed
+///
+/// Discovery used to start at `datasets_root::sstables_root_for_table`, an
+/// `Option`-returning search whose `table_has_data` maps a failed `read_dir` to
+/// `false` and drops per-entry errors with `filter_map(|e| e.ok())`. So the
+/// three-state signal — here / verifiably not here / could not tell — collapsed
+/// onto the PERMISSIVE value, and an unreadable corpus root read as an absent
+/// fixture: `Ok(None)`, which optional cases report as a SKIP. The
+/// complete-directory checks that would have caught it never ran, because
+/// discovery had already concluded the table was not there.
+///
+/// Every case below therefore MEASURES the old permissive answer first (the
+/// legacy helper really does say "no table here" about a directory it could not
+/// read) and only then asserts the new refusal. Without the first half the
+/// second proves nothing.
+#[test]
+fn an_unreadable_candidate_root_is_refused_never_read_as_absent() {
+    use parquet_parity::datasets_root::table_has_data;
+    use parquet_parity::fixture_root::first_candidate_root_with_table;
+    use std::fs;
+    use std::path::PathBuf;
+
+    const KS: &str = "test_da";
+    const TABLE: &str = "simple_table";
+
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let root = |name: &str| -> PathBuf { tmp.path().join(name) };
+    let search = |roots: &[PathBuf]| first_candidate_root_with_table(roots, KS, TABLE);
+
+    // A root that HOLDS the fixture, with the golden its generation implies.
+    let present = root("present");
+    let gen_dir = present.join(KS).join(format!("{TABLE}-aaaa"));
+    fs::create_dir_all(&gen_dir).expect("scratch dirs");
+    fs::write(gen_dir.join("nb-1-big-Data.db"), b"not really an sstable").expect("scratch data");
+    fs::write(gen_dir.join("nb-1-big-Data.db.jsonl"), b"{}\n").expect("scratch golden");
+    assert_eq!(
+        search(std::slice::from_ref(&present)).expect("a readable root is not a refusal"),
+        Some(present.clone()),
+        "a root carrying <keyspace>/<table>-*/*-Data.db must be selected"
+    );
+
+    // VERIFIED absences — the ONLY state that may legitimately become a skip.
+    // Each is judged by an actual `*-Data.db`, never by directory existence.
+    let no_keyspace = root("no-keyspace");
+    fs::create_dir_all(&no_keyspace).expect("scratch dirs");
+    let sidecar_only = root("sidecar-only");
+    let sidecar_dir = sidecar_only.join(KS).join(format!("{TABLE}-bbbb"));
+    fs::create_dir_all(&sidecar_dir).expect("scratch dirs");
+    fs::write(sidecar_dir.join("nb-1-big-Data.db.jsonl"), b"{}\n").expect("scratch golden");
+    let never_created = root("never-created");
+    for absent in [&no_keyspace, &sidecar_only, &never_created] {
+        assert_eq!(
+            search(std::slice::from_ref(absent)).unwrap_or_else(|e| panic!(
+                "{} is READABLE and simply lacks the table, which is an affirmative absence, \
+                 not a refusal: {e}",
+                absent.display()
+            )),
+            None,
+            "{} holds no *-Data.db for {KS}.{TABLE}",
+            absent.display()
+        );
+    }
+
+    // UNREADABLE, in the shape that needs no permission games and so holds for
+    // any uid (including a root-running CI): the keyspace PATH is a FILE, so
+    // `read_dir` fails with something other than `NotFound` — "I cannot tell",
+    // which the old code mapped to `false`.
+    let ks_is_a_file = root("ks-is-a-file");
+    fs::create_dir_all(&ks_is_a_file).expect("scratch dirs");
+    fs::write(ks_is_a_file.join(KS), b"not a directory").expect("scratch file");
+    // THE DEFECT, measured: the permissive helper reports the table ABSENT from a
+    // root it could not inspect, which is what made an optional case SKIP.
+    assert!(
+        !table_has_data(&ks_is_a_file, KS, TABLE),
+        "this case's premise is that the legacy Option-shaped helper answers \"no table here\" \
+         about a candidate it could NOT read; if it now refuses, the assertion below is \
+         guarding something else and must be re-derived"
+    );
+    let err = search(std::slice::from_ref(&ks_is_a_file))
+        .expect_err("a candidate root the harness could not read must REFUSE, not answer None");
+    assert!(
+        err.contains(&ks_is_a_file.join(KS).display().to_string()),
+        "the refusal must name the path it could not read: {err}"
+    );
+    assert!(
+        err.contains("REFUSES") && err.contains("SKIP"),
+        "…and say WHY an unreadable root is not an absent fixture: {err}"
+    );
+
+    // An unreadable root is refused even when a LATER candidate holds the table:
+    // the harness cannot know the unreadable root did not hold a DIFFERENT
+    // generation, and it refuses ambiguity it cannot measure rather than compare
+    // against whichever root it happened to be able to read.
+    search(&[ks_is_a_file.clone(), present.clone()])
+        .expect_err("an unreadable EARLIER candidate must refuse, not fall through to a later one");
+    // …and the order is not what decides it: a readable candidate first still
+    // wins outright, so the refusal above is about readability, not about
+    // position in the list.
+    assert_eq!(
+        search(&[present.clone(), ks_is_a_file.clone()]).expect("the first root serves the table"),
+        Some(present.clone()),
+        "a root that HOLDS the table ends the search before any later candidate is read"
+    );
+
+    // The generation directory is read too, so an unreadable one refuses as well
+    // — the census inside it is what decides whether a `*-Data.db` is there.
+    let gen_is_a_file = root("gen-is-a-file");
+    let gen_ks = gen_is_a_file.join(KS);
+    fs::create_dir_all(&gen_ks).expect("scratch dirs");
+    fs::create_dir_all(gen_ks.join(format!("{TABLE}-cccc"))).expect("scratch dirs");
+    fs::write(
+        gen_ks
+            .join(format!("{TABLE}-cccc"))
+            .join("unreadable-child"),
+        b"x",
+    )
+    .expect("scratch file");
+    // (A readable-but-empty generation directory is an affirmative absence.)
+    fs::remove_file(
+        gen_ks
+            .join(format!("{TABLE}-cccc"))
+            .join("unreadable-child"),
+    )
+    .expect("scratch cleanup");
+    assert_eq!(
+        search(std::slice::from_ref(&gen_is_a_file))
+            .expect("an empty generation directory is readable"),
+        None,
+        "a <table>-* directory with no *-Data.db is an affirmative absence"
+    );
+
+    // THE FIXTURE DOOR, not merely the search: the case-level resolution the
+    // stages call must propagate the refusal rather than report `Ok(None)`,
+    // which is what `run_case` turns into a skip.
+    let case = &parquet_parity::cases::DA_SIMPLE;
+    assert_eq!(
+        (case.keyspace, case.table),
+        (KS, TABLE),
+        "the scratch layout above is built for this case's keyspace/table"
+    );
+    parquet_parity::resolve_fixture_in_roots(case, std::slice::from_ref(&ks_is_a_file))
+        .expect_err("an unreadable candidate root must REFUSE the fixture, never skip the case");
+    let resolved = parquet_parity::resolve_fixture_in_roots(case, std::slice::from_ref(&present))
+        .expect("a readable scratch root carrying the fixture must resolve")
+        .expect("…to Some(fixture)");
+    assert_eq!(resolved.table_dir, gen_dir);
+    assert_eq!(resolved.golden, gen_dir.join("nb-1-big-Data.db.jsonl"));
+    assert!(
+        parquet_parity::resolve_fixture_in_roots(case, std::slice::from_ref(&no_keyspace))
+            .expect("a readable root that simply lacks the table is not a refusal")
+            .is_none(),
+        "Ok(None) — the legitimate skip — is reachable ONLY from a verified absence"
+    );
+
+    // The permission-denied shape, when this process is not privileged enough to
+    // read past a `chmod 000`. Additive: the file-shaped cases above cover the
+    // same property for any uid, so this one asserts nothing when the probe shows
+    // the mode did not actually make the directory unreadable (a root-running
+    // CI), instead of failing for the wrong reason.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let denied = root("denied");
+        let denied_ks = denied.join(KS);
+        fs::create_dir_all(denied_ks.join(format!("{TABLE}-dddd"))).expect("scratch dirs");
+        fs::write(
+            denied_ks
+                .join(format!("{TABLE}-dddd"))
+                .join("nb-1-big-Data.db"),
+            b"x",
+        )
+        .expect("scratch data");
+        fs::set_permissions(&denied_ks, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        if fs::read_dir(&denied_ks).is_err() {
+            assert!(
+                !table_has_data(&denied, KS, TABLE),
+                "the legacy helper reports a permission-denied root as lacking the table"
+            );
+            let err = search(std::slice::from_ref(&denied))
+                .expect_err("a permission-denied candidate root must REFUSE, not answer None");
+            assert!(
+                err.contains(&denied_ks.display().to_string()),
+                "the refusal must name the unreadable path: {err}"
+            );
+        }
+        // Restored so the TempDir can be removed.
+        fs::set_permissions(&denied_ks, fs::Permissions::from_mode(0o755)).expect("chmod restore");
+    }
 }
