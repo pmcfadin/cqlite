@@ -485,6 +485,114 @@ fn a_numeric_cell_rendered_as_a_string_is_a_json_divergence() {
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
 }
 
+/// Finding M1: the [`Kinding`] relaxation is the GOLDEN's, so it must not license
+/// a CLI spelling. At a stringified position the dump's `"1"` still pairs with the
+/// CLI's `1`, and the CLI rendering the same `int` partition key as `"1"` is a
+/// DIVERGENCE — while the mechanism was symmetric it compared equal, so an egress
+/// regression to `"id":"1"` passed at exactly the positions the relaxation covers.
+#[test]
+fn the_kinding_relaxation_applies_to_the_golden_side_only() {
+    let schema = schema_of(NUM_DDL, "t");
+    let golden = vec![row(&[("id", json!("1")), ("n", json!(-5))])];
+
+    // Unchanged: the dump stringifies its partition key, the CLI numbers it.
+    let good = vec![row(&[("id", json!(1)), ("n", json!(-5))])];
+    let report = compare_rows(&golden, &good, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(
+        report.diffs.is_empty(),
+        "the dump's stringified partition key must still pair with the CLI's number: {:?}",
+        report.diffs
+    );
+
+    // The regression this closes: the CLI stringifies the numeric partition key.
+    let stringified_pk = vec![row(&[("id", json!("1")), ("n", json!(-5))])];
+    let report = compare_rows(
+        &golden,
+        &stringified_pk,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "an `int` partition key rendered as the JSON string \"1\" must fail: {:?}",
+        report.diffs
+    );
+    assert!(report.diffs[0].contains("id"), "{:?}", report.diffs);
+
+    // CSV carries no JSON kinds at all, so there the same pair is one value.
+    let report = compare_rows(
+        &golden,
+        &stringified_pk,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Csv,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+}
+
+/// The same asymmetry at a multicell set's elements — the dump's other stringified
+/// position. The golden's `["-2","-1"]` pairs with the CLI's `[-2,-1]`; the CLI
+/// emitting the strings itself is a divergence.
+#[test]
+fn a_multicell_set_element_the_cli_stringifies_is_a_divergence() {
+    let schema = schema_of(SET_DDL, "t");
+    let golden = vec![row(&[
+        ("id", json!("1")),
+        ("s", json!(["-2", "-1"])),
+        ("fs", json!([-2, -1])),
+    ])];
+    let stringified = vec![row(&[
+        ("id", json!(1)),
+        ("s", json!(["-2", "-1"])),
+        ("fs", json!([-2, -1])),
+    ])];
+    let report = compare_rows(
+        &golden,
+        &stringified,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a multicell `set<int>` element rendered as a JSON string must fail: {:?}",
+        report.diffs
+    );
+    assert!(report.diffs[0].contains(".s"), "{:?}", report.diffs);
+}
+
+/// A map KEY is the one position the relaxation is still two-sided, and that is a
+/// stated cost rather than an oversight: the golden renders a map as a JSON object,
+/// whose key can only be a string, so it makes no statement about kind there.
+/// Pinned so the asymmetry above cannot be widened onto map keys without this
+/// case saying so — and so the `map<text,…>` half stays strict.
+#[test]
+fn a_map_key_is_still_compared_with_the_two_sided_kinding() {
+    let schema = schema_of(INT_MAP_DDL, "t");
+    let golden = vec![row(&[("id", json!("1")), ("mi", json!({"-5": "x"}))])];
+    for key in [json!(-5), json!("-5")] {
+        let cli = vec![row(&[
+            ("id", json!(1)),
+            ("mi", json!([{"key": key, "value": "x"}])),
+        ])];
+        let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
+        assert!(
+            report.diffs.is_empty(),
+            "a `map<int,…>` key pairs by value in either spelling: {:?}",
+            report.diffs
+        );
+    }
+}
+
 /// Finding R1 at collection elements, where `frozen` decides the answer and the
 /// committed DDL is what knows it: a MULTICELL `set<int>`'s elements are cell
 /// paths (`writeString`, so the golden carries `["-2","-1"]`), while a

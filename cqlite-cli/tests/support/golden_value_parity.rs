@@ -45,9 +45,12 @@
 //!   Cassandra's own dumper writes a string: a partition-key component
 //!   (`"key": ["1"]`) and a non-frozen collection's cell path
 //!   (`"path": ["-5"]`, i.e. a multicell set's elements and a multicell map's
-//!   keys), plus a map key anywhere (the dump renders a map as a JSON object, and
-//!   an object key can only be a string). Those, and only those, are compared
-//!   NUMERICALLY — see [`Kinding`], which derives the rule from
+//!   keys). There the GOLDEN's string is read as a number — and only the
+//!   golden's: the CLI is held to its declared type's JSON kind everywhere, so a
+//!   CLI `"id":"1"` for an `int` partition key is a divergence (finding M1). A
+//!   map key is the one two-sided case, because the dump renders a map as a JSON
+//!   object and an object key can only be a string, so the golden states nothing
+//!   about kind there. See [`Kinding`], which derives the rule from
 //!   `cassandra-5.0.8 JsonTransformer` and the committed DDL. The comparison
 //!   itself is the pure-string [`normalize_decimal`] (no `10^scale`
 //!   materialization, no `f64` round-trip, so a 30-digit `decimal` is exact).
@@ -182,8 +185,13 @@ pub enum Depth {
     Inside,
 }
 
-/// Whether the GOLDEN's spelling of this position may disagree in JSON KIND with
-/// the CLI's — i.e. whether a numeric JSON *string* may be read as a number here.
+/// How the GOLDEN spells this position's JSON kind — i.e. whether a numeric JSON
+/// *string* found HERE, on the golden side, denotes a number.
+///
+/// A statement about ONE side. `compare::compare_value_at` applies it to the
+/// golden and holds the CLI to [`Kinding::Natural`] at every position, because the
+/// stringification below is `sstabledump`'s documented behaviour and not a licence
+/// for the CLI to spell a number as a string (issue #1491 review finding M1).
 ///
 /// Derived from Cassandra's own dumper, `cassandra-5.0.8`
 /// `org.apache.cassandra.tools.JsonTransformer`, which uses exactly two writers:
@@ -207,12 +215,18 @@ pub enum Kinding {
     /// kind: for a numeric column `1` and `"1"` are DIFFERENT renderings.
     Natural,
     /// `sstabledump` stringified the golden here, so a numeric golden string and
-    /// a numeric CLI number denote the same value.
+    /// a numeric CLI number denote the same value. Bounded to partition keys,
+    /// multicell cell paths and map keys.
     ///
-    /// The unavoidable cost, stated rather than hidden: at such a position the
-    /// golden cannot say which kind the CLI *should* have used, so the JSON lane
-    /// cannot tell `1` from `"1"` there. It is bounded to partition keys, multicell
-    /// cell paths and map keys.
+    /// Applied to the GOLDEN side only, so it relaxes what the golden may be
+    /// SPELLED as and never what the CLI may emit: at a stringified position the
+    /// CLI must still render a numeric column as a JSON number.
+    ///
+    /// The one residual, stated rather than hidden: a map KEY is compared with
+    /// this kinding on BOTH sides, because the golden renders a map as a JSON
+    /// object whose key can only be a string — so there the golden makes no
+    /// statement about kind, and the JSON lane cannot tell a CLI `1` from a CLI
+    /// `"1"`. See `compare::compare_map`.
     Stringified,
 }
 
@@ -305,9 +319,12 @@ pub fn canon_scalar(v: &Value, egress: Egress) -> Result<Canon, String> {
 ///   * the declared TYPE — it is applied only where the DDL says the value is a
 ///     number, so a `text` column holding `"22201"` or `"00000"` is compared as
 ///     the exact string it is;
-///   * the [`Kinding`] of the POSITION — in the JSON lane a numeric string is
-///     read as a number only where `sstabledump` stringifies, so an ordinary
-///     numeric cell must match by JSON kind as well as by value.
+///   * the [`Kinding`] the CALLER states for this value — in the JSON lane a
+///     numeric string is read as a number only where `sstabledump` stringifies,
+///     so an ordinary numeric cell must match by JSON kind as well as by value.
+///     `compare::compare_value_at` passes the position's kinding for the GOLDEN
+///     and [`Kinding::Natural`] for the CLI, so the relaxation never licenses a
+///     CLI spelling (finding M1).
 ///
 /// A JSON number arriving in a text-typed column is canonicalized as a number
 /// precisely so that it compares UNEQUAL to the golden's string and the failure

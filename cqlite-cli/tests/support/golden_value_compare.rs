@@ -626,10 +626,27 @@ fn compare_value_body(
             _ => Err(shape_error(&udt.name, golden, cli, egress)),
         },
         // A scalar type: both sides canonicalized UNDER THAT TYPE, so the numeric
-        // rule applies only where the DDL declares a number.
+        // rule applies only where the DDL declares a number — and ASYMMETRICALLY
+        // by side, because the two sides are under different constraints.
+        //
+        // `at.kinding` is a statement about the GOLDEN's spelling alone (see
+        // [`column_kinding`]): `sstabledump` writes a partition key and a
+        // multicell cell path with `writeString`, so a numeric golden STRING there
+        // denotes a number. The CLI's JSON is under no such constraint — it
+        // renders a numeric column as a JSON number — so the CLI side is held to
+        // `Kinding::Natural`, i.e. to its declared type's JSON kind, at EVERY
+        // position.
+        //
+        // Applying the golden's relaxation to both sides made the mechanism
+        // symmetric, so at a stringified position an egress regression that
+        // rendered `"id":"1"` for an `int` partition key still compared equal
+        // (issue #1491 review finding M1). A map KEY is deliberately still
+        // symmetric, and [`compare_map`] says why: the golden renders a map as a
+        // JSON object, whose key can only be a string, so the golden carries no
+        // statement about kind there to hold the CLI to.
         _ => {
             let g = canon_typed(golden, egress, ty, at.depth, at.kinding)?;
-            let c = canon_typed(cli, egress, ty, at.depth, at.kinding)?;
+            let c = canon_typed(cli, egress, ty, at.depth, Kinding::Natural)?;
             if g == c {
                 Ok(())
             } else {
