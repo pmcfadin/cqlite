@@ -200,6 +200,18 @@ pub struct ArrowRowAccumulator<'a> {
     /// how much capacity may stay resident between batches. A batch's own present
     /// cells are what the byte cap bounds, so they are the only sound basis.
     peak_cells: usize,
+    /// Canonical indices the CURRENT staged row filled, in fill order.
+    ///
+    /// `commit` walks THIS instead of every projected column: only present canonical
+    /// cells need work, so an all-columns pass was an extra O(projection_width) per
+    /// row on the hot path — penalising exactly the wide sparse projections this
+    /// accumulator exists to optimise (issue #3552, roborev round 14). `stage` fills
+    /// only canonical slots, so this set is EXACT, not an optimisation hint.
+    ///
+    /// NOTE the charge is a different matter: `prepared.row_bytes` must still visit
+    /// every projected column, because an ABSENT cell contributes to the width. That
+    /// O(width) pass is required by the byte-cap semantics and is NOT removable.
+    staged_idx: Vec<usize>,
     /// Per-column present-cell count at the LAST `clear` — what each store actually
     /// needed most recently, so the trim can keep an active store warm and reclaim
     /// from the ones that went quiet.
@@ -259,6 +271,7 @@ impl<'a> ArrowRowAccumulator<'a> {
             has_staged: false,
             rows: 0,
             peak_cells: 0,
+            staged_idx: Vec::new(),
             last_used: vec![0; columns.len()],
         }
     }
@@ -349,8 +362,12 @@ impl<'a> ArrowRowAccumulator<'a> {
         // not. The `debug_assert` makes the skipped invariant CHECKED in debug builds
         // rather than merely argued for here.
         if self.has_staged {
-            for slot in &mut self.staged {
-                *slot = None;
+            // Only the slots the previous (uncommitted) row actually filled — the same
+            // exactness that lets `commit` skip the all-columns pass.
+            for &idx in &self.staged_idx {
+                if let Some(slot) = self.staged.get_mut(idx) {
+                    *slot = None;
+                }
             }
         } else {
             debug_assert!(
@@ -362,7 +379,9 @@ impl<'a> ArrowRowAccumulator<'a> {
         // Resolve by iterating the ROW's own entries — the large per-row value map
         // is never probed by column name (issue #1495 / parser epic J1). An entry
         // whose name is not projected is dropped, as the transpose dropped it.
+        self.staged_idx.clear();
         let staged = &mut self.staged;
+        let staged_idx = &mut self.staged_idx;
         let name_to_canonical = &self.name_to_canonical;
         for (name, value) in row.values {
             if let Some(&canonical_idx) = name_to_canonical.get(name.as_ref()) {
@@ -388,6 +407,7 @@ impl<'a> ArrowRowAccumulator<'a> {
                 // built from the same `columns` that sized `staged`, so it is in
                 // range by construction (review N3).
                 staged[canonical_idx] = Some(value);
+                staged_idx.push(canonical_idx);
             }
         }
         self.has_staged = true;
@@ -417,13 +437,20 @@ impl<'a> ArrowRowAccumulator<'a> {
             cells,
             staged,
             canonical,
+            staged_idx,
             ..
         } = self;
-        for (idx, slot) in staged.iter_mut().enumerate() {
-            // Always TAKE, so a value can never survive into the next row —
-            // including for a duplicate-name column, where it is dropped (it is
-            // `None` already, since `stage` only ever fills canonical slots, but
-            // taking it makes that true by construction rather than by argument).
+        // Walk ONLY the canonical slots this row filled. An all-columns pass was an
+        // extra O(projection_width) per row (roborev round 14); `stage` fills only
+        // canonical slots, so this set is exact and nothing can be missed.
+        //
+        // Still TAKE rather than read: a value must never survive into the next row.
+        // A repeated index (a row carrying the same name twice) takes `None` on the
+        // second visit and stores nothing, so duplicates are harmless.
+        for &idx in staged_idx.iter() {
+            let Some(slot) = staged.get_mut(idx) else {
+                continue;
+            };
             let value = slot.take();
             match (canonical.get(idx), cells.get_mut(idx)) {
                 // The canonical column for this name owns the storage — and stores
@@ -437,6 +464,7 @@ impl<'a> ArrowRowAccumulator<'a> {
                 _ => {}
             }
         }
+        self.staged_idx.clear();
         // Saturating for hygiene: a batch is bounded by the row cap long before
         // this could matter, but a wrapping row count would corrupt the arity
         // checks that guard the charge.
