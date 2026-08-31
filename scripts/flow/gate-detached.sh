@@ -256,7 +256,7 @@ ENV_SCRIPT="$PRIVDIR/gate-env.sh"
 # The private directory goes too, but only when it holds nothing else: with DEFAULT paths it
 # also holds the summary and log the caller needs, and deleting those would be worse than the
 # leak. `rmdir` gives exactly that semantics for free — it only succeeds on an empty directory.
-# shellcheck disable=SC2317  # runs via the EXIT trap
+# shellcheck disable=SC2317,SC2329  # invoked indirectly, by the EXIT trap below
 _cleanup_env() {
   [ -n "${ENV_SCRIPT:-}" ] && rm -f "$ENV_SCRIPT" 2>/dev/null
   [ -n "${PRIVDIR:-}" ] && rmdir "$PRIVDIR" 2>/dev/null
@@ -657,8 +657,12 @@ _proc_is_zombie() {  # <pid> -> 0 = provably a zombie, 1 = not, or unmeasurable
     # `comm` is parenthesised and may itself contain ')' and spaces, so read the state as the first
     # field after the LAST ')' rather than by counting from the left.
     _state=${_st##*)}
-    set -- $_state
-    [ "${1:-}" = "Z" ] && return 0
+    # Parameter expansion only (round-48 class audit, class 1). `set -- $_state` word-SPLIT and
+    # GLOB-EXPANDED every field; the fields after `comm` are numeric or a single letter, so no
+    # expansion could match today, but the safe form costs nothing and does not depend on that
+    # staying true. It also stops clobbering this function's own positional parameters.
+    _state=${_state#"${_state%%[![:space:]]*}"}
+    [ "${_state%%[[:space:]]*}" = "Z" ] && return 0
     return 1
   fi
   if _state=$(ps -o state= -p "$pid" 2>/dev/null) && [ -n "$_state" ]; then
@@ -706,8 +710,23 @@ _res_ident=$(_proc_identity $$)
 # primitives as the main path (`_pid_state`, `_proc_is_zombie`, `_proc_identity`, `_unit_is_live`) rather
 # than a second copy of the classification.
 _foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another launch's reserved summary?)
-  local lk="$1.launch-lock" own own_unit own_pid own_start now_id
-  [ -L "$lk" ] || [ -e "$lk" ] || { printf 'free'; return 0; }
+  local lk="$1.launch-lock" own own_unit own_pid own_start now_id _lkdir
+  # ABSENCE IS ONLY CONCLUSIVE IF WE COULD LOOK (round-48 class audit, class 4: two-valued predicates).
+  # `-L` and `-e` are two-valued, so they collapse "no such path" and "not permitted to look" onto the
+  # same FALSE — and this branch answered `free`, the PERMISSIVE value, for BOTH. That is the worst
+  # place in the file for it: `free` licenses THIS launch to take a path a LIVE peer may hold, i.e.
+  # exactly the two-writers-on-one-summary outcome the reservation exists to prevent — and, per the
+  # 4b.155 retraction, the rollback downstream is unreachable BECAUSE this pre-check is authoritative,
+  # so nothing behind it would catch the mistake. A negative lookup means nothing unless the directory
+  # is searchable, so require that AFFIRMATIVELY; otherwise answer `unknown`, which every caller
+  # already refuses on. The composition degrades the safe way: an unsearchable GRANDparent makes `-d`
+  # false and lands here too.
+  if [ -L "$lk" ] || [ -e "$lk" ]; then :
+  else
+    _lkdir=${lk%/*}; [ "$_lkdir" = "$lk" ] && _lkdir=.
+    if [ -d "$_lkdir" ] && [ -x "$_lkdir" ]; then printf 'free'; return 0; fi
+    printf 'unknown'; return 0
+  fi
   own=$(readlink "$lk" 2>/dev/null || true)
   [ -n "$own" ] || { printf 'unknown'; return 0; }
   own_unit=${own#*unit=}; own_unit=${own_unit%%|*}

@@ -135,8 +135,10 @@ _proc_is_zombie() {  # <pid> -> 0 = provably a zombie, 1 = not, or unmeasurable
   if _st=$(cat "/proc/$pid/stat" 2>/dev/null) && [ -n "$_st" ]; then
     # `comm` is parenthesised and may contain ')' and spaces: read state after the LAST ')'.
     _state=${_st##*)}
-    set -- $_state
-    [ "${1:-}" = "Z" ] && return 0
+    # Parameter expansion only (round-48 class audit, class 1) — the SAME defect as gate-detached.sh's
+    # copy of this helper, fixed in both. See the fuller note there.
+    _state=${_state#"${_state%%[![:space:]]*}"}
+    [ "${_state%%[[:space:]]*}" = "Z" ] && return 0
     return 1
   fi
   if _state=$(ps -o state= -p "$pid" 2>/dev/null) && [ -n "$_state" ]; then
