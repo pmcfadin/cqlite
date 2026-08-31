@@ -367,7 +367,7 @@ describe('UDT field-name / type-identity collision (issue #3504)', () => {
   test('FIXED (#3612): a non-frozen map keyed by a UDT decodes structurally', () => {
     // This test used to pin the DEFECT. A NON-frozen `map<frozen<udt>, int>` is
     // multicell, so its key lives in the CELL PATH, and `parse_cell_path_key`
-    // (cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_path_key.rs)
+    // (cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs)
     // used to match a closed set of PRIMITIVE cell-path types and fall back to
     // `Value::Blob` for a frozen UDT — so `cm`/`tm` keys arrived as a Buffer. It
     // now delegates to the structural decoder.

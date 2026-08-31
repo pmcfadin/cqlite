@@ -144,7 +144,7 @@ while `fcm`/`ftm`/`fs` did. #3504's projection work therefore had to use the
 frozen columns as its subject, and the non-frozen ones documented the gap.
 
 **FIXED by #3612.** The cell-path key site (now
-`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_path_key.rs`)
+`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs`)
 delegates to the structural decoder `parse_value_from_raw_bytes`, so `cm`/`tm`
 decode to `Map([(Udt{…}, int)])` — the SAME key value the frozen `fcm`/`ftm`
 produce, which is what

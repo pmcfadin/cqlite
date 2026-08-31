@@ -54,6 +54,13 @@ const QUERY: &str = "SELECT * FROM test_udt_collision.udt_collide";
 /// The fixture row that carries every map column (rows 2 and 3 are contrasts).
 const SUBJECT_ROW_ID: i32 = 1;
 
+/// The DECLARED field order of the `collide` / `collide_twin` UDTs, from
+/// `test-data/schemas/issue-3504-udt-collision.cql`. Named explicitly so the
+/// golden's frozen-map key (a JSON object, whose key order depends on whether
+/// `serde_json`'s `preserve_order` feature happens to be enabled) is read BY
+/// NAME rather than by iteration order.
+const COLLIDE_FIELD_ORDER: [&str; 4] = ["_type", "_keyspace", "__proto__", "real_field"];
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -175,11 +182,26 @@ fn golden_entries() -> BTreeMap<String, GoldenEntry> {
                     let Some(key_obj) = key_doc.as_object() else {
                         continue;
                     };
-                    let components: Vec<String> = key_obj
-                        .values()
-                        .map(|fv| match fv {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
+                    // Read the fields BY NAME, in the DECLARED order, never by
+                    // iterating the JSON object. `serde_json::Map` is a
+                    // `BTreeMap` unless the `preserve_order` feature is on, so
+                    // `.values()` would silently reorder to
+                    // `__proto__, _keyspace, _type, real_field` in any build
+                    // without that feature and this test would fail on correct
+                    // output. The declared order is the fixture's schema
+                    // (`test-data/schemas/issue-3504-udt-collision.cql`,
+                    // `CREATE TYPE collide`), which is also the order
+                    // `sstabledump` uses for the multicell `path` rendering, so
+                    // this makes the two goldens directly comparable.
+                    let components: Vec<String> = COLLIDE_FIELD_ORDER
+                        .iter()
+                        .map(|fname| {
+                            match key_obj.get(*fname).unwrap_or_else(|| {
+                                panic!("golden frozen-map key has no field '{fname}'")
+                            }) {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            }
                         })
                         .collect();
                     let value = v

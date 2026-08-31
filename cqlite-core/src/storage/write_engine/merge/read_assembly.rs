@@ -359,11 +359,21 @@ fn sort_elements_by_cell_path(elements: &mut Vec<CellData>, cmp: &ComparatorType
 /// True when `cmp` names an element/key type the scalar [`deserialize_value_bytes`]
 /// codec CANNOT decode — a frozen tuple / UDT / nested collection (or any other
 /// non-scalar `Custom`). Such a key/element is served as an opaque
-/// `Value::Blob(cell_path)` in raw-byte order, mirroring the canonical
-/// single-generation reader's `parse_cell_path_key` (complex_column.rs) rather
-/// than failing the whole query. The set of decodable scalars is kept in lockstep
-/// with `deserialize_value_bytes`; branching on the DECLARED type only, never a
-/// byte pattern (no-heuristics, issue #28).
+/// `Value::Blob(cell_path)` in raw-byte order rather than failing the whole
+/// query. The set of decodable scalars is kept in lockstep with
+/// `deserialize_value_bytes`; branching on the DECLARED type only, never a byte
+/// pattern (no-heuristics, issue #28).
+///
+/// NO LONGER MIRRORS THE SINGLE-GENERATION READER (issue #3612). That reader's
+/// cell-path key decode — `V5CompressedLegacyParser::parse_cell_path_key`, which
+/// #3612 moved out of `parse_complex_column`'s file into its own module —
+/// now decodes a COMPOSITE key STRUCTURALLY (`Value::Udt` / `Value::Tuple` /
+/// nested collections) by delegating to
+/// `V5CompressedLegacyParser::parse_value_from_raw_bytes`. THIS
+/// multi-generation merge path deliberately still serves an opaque blob, so the
+/// two now DIVERGE for exactly the composite key types named above. Closing that
+/// divergence is tracked by issue #2339 and is out of #3612's scope; do not
+/// re-derive the claim from this comment.
 #[cfg(feature = "write-support")]
 fn key_is_opaque_composite(cmp: &ComparatorType) -> bool {
     match cmp {

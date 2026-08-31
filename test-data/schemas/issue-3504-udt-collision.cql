@@ -52,7 +52,7 @@
 --                                     matched a closed set of PRIMITIVE
 --                                     cell-path types and fell back to Blob for
 --                                     a frozen UDT. FIXED by #3612 — the site
---                                     (now row_decoder/cell_path_key.rs)
+--                                     (now row_decoder/complex_column/cell_path_key.rs)
 --                                     delegates to the structural decoder, so
 --                                     this column decodes to `Value::Udt` and
 --                                     DOES reach the Python hashable
