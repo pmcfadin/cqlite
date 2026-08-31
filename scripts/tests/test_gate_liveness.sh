@@ -772,11 +772,43 @@ printf '%s' "$OUT" | grep -q 'relaunches it at the next component boundary' \
   || bad "11c.7 STALLED explains the beater-recovery path" "$(printf '%s' "$OUT" | head -1)"
 # Host-independence, asserted at the source: no verdict may depend on /proc, a pid check or a
 # machine identity, or this suite becomes host-dependent again.
-if grep -nE '/proc|kill -0|boot-id|boot_id|gate-starttime' "$READER" | grep -vE '^[0-9]+:#' >/dev/null 2>&1; then
+# THE GUARD TESTS ITS STATED PROPERTY: a verdict must not DEPEND on /proc. The first version grepped
+# the reader for the string and excluded only comment lines, so it could not tell "reads /proc to
+# decide" from "MENTIONS /proc in emitted advice" -- and it fired on a change that added
+# /proc/<gate-pid>/stat to RUNNING's disclosure text, i.e. it punished an improvement satisfying its
+# own intent. A SPELLING test standing in for a STATE test, which is the defect class this suite
+# exists to catch -- so it is fixed here rather than evaded by rewording the note, which would
+# defeat the guard by paraphrase and leave it broken for whoever comes next.
+#
+# A pure OUTPUT statement cannot read anything: echo/printf with no command substitution and no
+# backtick has no way to reach the filesystem. Everything else still counts, so echo "$(cat
+# /proc/...)" is still caught -- the exclusion is keyed on the ABSENCE of a substitution mechanism,
+# not on the line looking like output.
+_proc_scan() { # <file> -> prints offending lines
+  grep -nE '/proc|kill -0|boot-id|boot_id|gate-starttime' "$1" 2>/dev/null | awk '{
+      line = $0; sub(/^[0-9]+:/, "", line);
+      if (line ~ /^[[:space:]]*#/) next;
+      if (line ~ /^[[:space:]]*(echo|printf)/ && line !~ /[$]\\(/ && line !~ /`/) next;
+      print
+    }'
+}
+_proc_offenders=$(_proc_scan "$READER")
+if [ -n "$_proc_offenders" ]; then
   bad "11c.8 no verdict depends on /proc, a pid probe or machine identity" \
-      "$(grep -nE '/proc|kill -0|boot-id|boot_id|gate-starttime' "$READER" | grep -vE '^[0-9]+:#' | head -3)"
+      "$(printf '%s' "$_proc_offenders" | head -3)"
 else
   ok "11c.8 no verdict depends on /proc, a pid probe or machine identity"
+fi
+# RED-VERIFY THE GUARD ITSELF: a narrowed guard must still catch a genuine read, or it has been
+# weakened rather than narrowed. Plant a real read in a scratch copy and require a hit.
+_plant="$TMP/reader-with-proc-read.sh"
+{ cat "$READER"; printf '%s\n' 'if [ -r /proc/1/stat ]; then _x=$(cat /proc/1/stat); fi'; } > "$_plant"
+_planted=$(_proc_scan "$_plant" | wc -l)
+if [ "$_planted" -ge 1 ]; then
+  ok "11c.8b control: the narrowed guard still catches a genuine /proc READ ($_planted hit)"
+else
+  bad "11c.8b control: the narrowed guard still catches a genuine /proc read" \
+      "planted a real read and the guard stayed silent -- weakened, not narrowed"
 fi
 # ...and the verdict vocabulary must not quietly regain REAPED.
 if grep -qE '^\s*verdict REAPED' "$READER"; then
