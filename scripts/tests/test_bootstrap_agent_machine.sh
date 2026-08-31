@@ -3460,21 +3460,37 @@ else
   fi
 
   # 11aj. ...but where NO system-wide value can be established the append still happens,
-  #      so 11ai cannot pass against a build that simply stopped writing profiles. The
-  #      reachable state is a MISSING system env file: bootstrap writes nothing there, so
-  #      PAM delivers nothing, and the profile is the only lever left. (A box that merely
-  #      STARTS empty is not this case — `--yes` persists into it and the append is then
-  #      correctly skipped, because PAM now delivers the value to interactive shells too.
-  #      I discovered that by writing this case the obvious way first and watching it
-  #      fail, which is the distinction worth recording here.)
+  #      so 11ai cannot pass against a build that simply stopped writing profiles.
+  #
+  #      THE STATE HAS TO BE AN UNWRITABLE ENV FILE, NOT A MISSING ONE — and this case's
+  #      premise was invalidated by THIS BRANCH. A missing file used to qualify, because
+  #      bootstrap refused to create one, so PAM delivered nothing and the profile was the
+  #      only lever left. `--fix-gate-pin`/`--yes` now CREATE it, so on a missing file
+  #      bootstrap establishes the system-wide value and then CORRECTLY skips the profile
+  #      (that skip is 11ai's whole point). Measured: the run emits `CREATED <file>
+  #      carrying CQLITE_GATE_MAX_CONCURRENCY=1` and then `not touching <profile>`.
+  #      A file that EXISTS but cannot be written is still genuinely unestablishable —
+  #      `the append to <file> FAILED — the pin was NOT persisted` — so the profile is
+  #      once again the only lever, and the case tests what it claims to.
+  #
+  #      (A box that merely STARTS empty is not this case either — `--yes` persists into
+  #      it and the append is correctly skipped for the same reason. I discovered that by
+  #      writing this case the obvious way first and watching it fail.)
   pin_home_aj="$tmp/pin-home-aj"; mkdir -p "$pin_home_aj/.cargo"; : >"$pin_home_aj/.bashrc"
-  envf_aj="$tmp/pin-env-aj-missing"; rm -f "$envf_aj"
+  envf_aj="$tmp/pin-env-aj-ro"; printf '# no pin here\n' >"$envf_aj"; chmod 0444 "$envf_aj"
   out_aj=$(runpin "$pinroot" "$shims_none" "$envf_aj" HOME="$pin_home_aj" SHELL=/bin/bash --yes)
+  chmod 0644 "$envf_aj" 2>/dev/null || true
   if grep -q '^export CQLITE_GATE_MAX_CONCURRENCY=1' "$pin_home_aj/.bashrc"; then
-    ok "gate-pin: on a box with no system-wide value the profile append still happens"
+    ok "gate-pin: on a box where no system-wide value CAN be established the profile append still happens"
   else
     bad "gate-pin: the profile append stopped happening even with no system-wide value (11ai would pass vacuously)"
+    # DUMP THE SCRIPT OUTPUT, not just the profile: this case previously printed only
+    # `.bashrc`, so when the premise above went stale the failure could not show WHY the
+    # append was skipped, and it was misdiagnosed as a flake in unrelated code. A failure
+    # diagnostic must carry the evidence its own assertion turns on (#3758 nit 7).
     cat "$pin_home_aj/.bashrc"
+    printf '%s\n' "$out_aj" | grep -iE 'CREATED|not touching|NOT persisted|gate-pin:' | head -8
+    echo "  env-file: mode=$(stat -c %a "$envf_aj" 2>/dev/null) content=[$(cat "$envf_aj" 2>/dev/null | tr '\n' '|')]"
   fi
 
   # 11ak. THE SEAM MUST NOT STEER A ROOT-PRIVILEGED WRITE (issue #3414 roborev round 5,
