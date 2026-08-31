@@ -22,8 +22,11 @@ readme = "../README.md"
 # exist. A skip would reintroduce exactly the vacuous green #3220 removed, and a
 # "am I a git checkout?" runtime probe would be the environment heuristic #28 forbids.
 #
-# 454 sibling integration tests have the same repo-root-fixture property; fixing the
-# class (likely `exclude = ["tests/**"]`) is a packaging decision tracked in #3677.
+# This test JOINS a pre-existing class rather than creating it: #3677 measured 106
+# `cqlite-core` integration tests reading repo-root `test-data/datasets`, 104 of which
+# already fail hard rather than skip. Fixing the class (its recommended option (a),
+# `exclude = ["tests/**"]`) is a packaging call it holds open deliberately, so the
+# narrow single-file exclusion here is scoped to what this lane may decide.
 exclude = ["tests/issue_3358_bti_query_token_bound.rs"]
 
 # docs.rs build: document the commonly used features. Deliberately excludes

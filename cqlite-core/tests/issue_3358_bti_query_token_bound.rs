@@ -46,11 +46,21 @@
 //! documented — #3310 added reporting for git-tracked fixtures a SIGKILLed fetch
 //! left deleted — which is exactly the case a skip would swallow.
 //!
-//! `CQLITE_DATASETS_ROOT` is honored first, then the in-repo `test-data/datasets`
-//! corpus; EVERY candidate root is walked for this TABLE's own `Data.db` rather than
-//! committing to a root by keyspace (issue #3220), because neither root is a superset
-//! — the root `fetch-datasets.sh` prints does not carry this fixture and the checkout
-//! does.
+//! Fixture roots resolve through the SHARED `support/datasets_root.rs` resolver, not a
+//! private copy: `CQLITE_DATASETS_ROOT` is honored first, then the in-repo
+//! `test-data/datasets` corpus, and EVERY candidate is probed for this TABLE's own
+//! `da-1-bti-Data.db` rather than committing to a root by keyspace (issue #3220),
+//! because neither root is a superset — the root `fetch-datasets.sh` prints does not
+//! carry this fixture and the checkout does.
+//!
+//! Using the shared module rather than re-deriving the rule is what makes the
+//! fail-closed guard OBSERVABLE (#3220 AC3). The checkout candidate is built from
+//! `CARGO_MANIFEST_DIR`, a COMPILE-TIME constant, so with a private resolver the only
+//! way to stage "the committed fixture is unreadable" is deleting a git-tracked file
+//! from the working tree — which also trips the gate's mid-run `tree-integrity` check
+//! (#2926). The shared module's `CQLITE_TEST_CHECKOUT_SSTABLES_ROOT` seam substitutes
+//! the checkout candidate instead, and can only ever REMOVE fixtures from view, so a
+//! stray value makes this lane FAIL, never pass vacuously.
 
 #![cfg(feature = "state_machine")]
 
@@ -66,11 +76,16 @@ use cqlite_core::storage::sstable::reader::{SSTableReader, ScanTokenBound};
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_core::Config;
 
+// The #3220 fixture-root rule lives HERE, once, and is regression-tested on synthetic
+// roots by `issue_3220_datasets_root_resolution.rs`. A private re-derivation in this
+// file would be the very shape #3220 exists to remove, and would carry no test seam.
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
 const KEYSPACE: &str = "test_da";
 const TABLE: &str = "wide_multiclustering_small";
 const SSTABLE_PREFIX: &str = "da-1-bti";
 
-/// Repo root = the parent of this crate's manifest dir (`<repo>/cqlite-core`).
 /// Single-quote a path for safe pasting into a shell.
 ///
 /// Checkout paths on this fleet contain no spaces today, but a remedy is copied by
@@ -81,25 +96,28 @@ fn shell_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cqlite-core has a parent repo dir")
-        .to_path_buf()
-}
-
-/// The `<table>-<cfid>` generation dir, requiring a real `Data.db` so a JSONL-only
-/// root is passed over rather than yielding zero rows. `None` means no candidate root
-/// held it, which [`fixture`] turns into a hard failure (this fixture is committed).
+/// The `<table>-<cfid>` generation dir holding this fixture's `da-1-bti` generation.
+///
+/// Candidate roots come from [`datasets_root::sstables_root_candidates`] — the shared,
+/// deduplicated, workspace-anchored list, including the override seam the RED
+/// verification uses — and each is probed with THIS generation's own `Data.db`. The
+/// first root that actually holds it wins: resolution is by EVIDENCE, never by a fixed
+/// env-first/checkout-first preference, because neither root is a superset (#3104).
+///
+/// The probe is `{SSTABLE_PREFIX}-Data.db` rather than the shared
+/// [`datasets_root::table_has_data`]'s any-`*-Data.db` test, matching the oracle's
+/// `sstables_root_for_case` precedent for a format-specific fixture. The stricter
+/// predicate matters in the safe direction: a root carrying some OTHER generation of
+/// this table would satisfy `table_has_data`, win the selection, and then hard-FAIL
+/// this `must_run` lane on a checkout that does hold the `da` copy — a guard that reds
+/// on correct input is the guard agents learn to waive.
+///
+/// `None` means no candidate held it, which [`fixture`] turns into a hard failure —
+/// this fixture is committed source.
 fn fixture_dir() -> Option<PathBuf> {
-    let roots = std::env::var("CQLITE_DATASETS_ROOT")
-        .ok()
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(std::iter::once(repo_root().join("test-data/datasets")));
-    for root in roots {
-        let keyspace_dir = root.join("sstables").join(KEYSPACE);
-        let Ok(entries) = std::fs::read_dir(&keyspace_dir) else {
+    let data_db = format!("{SSTABLE_PREFIX}-Data.db");
+    for root in datasets_root::sstables_root_candidates() {
+        let Ok(entries) = std::fs::read_dir(root.join(KEYSPACE)) else {
             continue;
         };
         let mut candidates: Vec<PathBuf> = entries
@@ -112,10 +130,7 @@ fn fixture_dir() -> Option<PathBuf> {
             })
             .collect();
         candidates.sort();
-        if let Some(dir) = candidates
-            .into_iter()
-            .find(|p| p.join(format!("{SSTABLE_PREFIX}-Data.db")).is_file())
-        {
+        if let Some(dir) = candidates.into_iter().find(|p| p.join(&data_db).is_file()) {
             return Some(dir);
         }
     }
@@ -265,13 +280,14 @@ fn fixture() -> Fixture {
         // caller's environment and the caller's directory. A remedy that is correct only
         // from the repository root is a remedy that gets pasted from somewhere else and
         // quietly reads as an all-clear — the exact silent-pass this test exists to stop.
-        let root = repo_root();
+        // The roots named here come from the RESOLVER, via `describe_search`, so the
+        // message can never name a candidate list the lookup above did not use.
+        let root = datasets_root::repo_root();
         let verify_cmd = shell_quote(&root.join("test-data/scripts/fetch-datasets.sh"));
         let verify_root = shell_quote(&root.join("test-data/datasets"));
-        let default_root = root.join("test-data/datasets").display().to_string();
+        let searched = datasets_root::describe_search(KEYSPACE, TABLE);
         panic!(
-            "{KEYSPACE}.{TABLE} `{SSTABLE_PREFIX}-Data.db` was not found under any \
-             candidate dataset root (CQLITE_DATASETS_ROOT, then {default_root}).\n\
+            "{KEYSPACE}.{TABLE} `{SSTABLE_PREFIX}-Data.db` was not found: {searched}.\n\
              \n\
              This fixture is COMMITTED SOURCE (git-tracked, not gitignored), so this \
              is a broken checkout rather than a missing optional corpus, and it fails \
