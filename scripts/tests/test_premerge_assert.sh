@@ -35,7 +35,19 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-T=$(mktemp -d "${TMPDIR:-/tmp}/premerge-assert-test.XXXXXX")
+# THE SCRATCH DIR IS VALIDATED BEFORE ANY PATH IS BUILT FROM IT (#3650 review
+# B5). An unchecked `mktemp` leaves `$T` EMPTY, after which every `"$T/..."` in
+# this suite resolves to an ABSOLUTE path at the ROOT — `/all-output.txt` and
+# synthetic git repos directly under `/` — which a privileged run would really
+# create. Aborting here, BEFORE the trap is installed, also keeps the trap from
+# ever running `rm -rf ""`.
+if ! T=$(mktemp -d "${TMPDIR:-/tmp}/premerge-assert-test.XXXXXX" 2>/dev/null) ||
+  [ -z "$T" ] || [ ! -d "$T" ]; then
+  printf 'FAIL - could not create a scratch directory under %s: refusing to run, because\n' \
+    "${TMPDIR:-/tmp}" >&2
+  printf 'FAIL - every path in this suite would resolve under / instead.\n' >&2
+  exit 1
+fi
 trap 'rm -rf "$T"' EXIT
 
 # --- gh mock -----------------------------------------------------------------
