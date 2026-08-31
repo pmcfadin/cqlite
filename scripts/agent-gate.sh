@@ -5011,10 +5011,23 @@ _component_set_line() {
   case "$verdict" in
     PASS)
       if [ -n "$lenient" ]; then
-        printf 'component-set: ADVISORY-PASS (%s/%s vs origin/main %s)%s%s%s' \
+        printf 'component-set: ADVISORY-PASS (%s/%s names vs origin/main %s; NAMES ONLY — not implementations, and no component is run here)%s%s%s' \
           "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra" "$lenient" "$src_note"
       else
-        printf 'component-set: PASS (%s/%s vs origin/main %s)%s%s' \
+        # WHAT A PASS HERE DOES AND DOES NOT ESTABLISH — STATED IN THE EMITTED LINE, not only here.
+      #
+      # `PASS (37/37)` reads as "the component set is verified", and a gate reader will over-read it
+      # exactly that far. What it actually establishes is the SET OF NAMES: that this script declares
+      # every component `origin/main` declares. It does NOT compare any component's IMPLEMENTATION
+      # (a component whose name matches while its body changed on main is invisible here), it does
+      # NOT verify that any component RUNS or passes, and it does NOT establish that the code this
+      # process is EXECUTING is the code the certified tree contains — that half is #3705.
+      #
+      # A caveat that lives only in a source comment is not a disclosure to the person reading a
+      # pasted SUMMARY block, which is the whole audience for this line. The `names` token and the
+      # scope clause below are therefore part of the verdict, not decoration, and they cost one line
+      # in a block that already spans several.
+      printf 'component-set: PASS (%s/%s names vs origin/main %s; NAMES ONLY — not implementations, and no component is run here)%s%s' \
           "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra" "$src_note"
       fi ;;
     DECLARED)
