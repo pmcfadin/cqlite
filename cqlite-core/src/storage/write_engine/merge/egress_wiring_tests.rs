@@ -28,7 +28,7 @@
 //! together establish the "solo K-way merge = 256 per source" contract (AC#1)
 //! without a wall-clock/shared-global race.
 
-use super::{build_single_partition_merger, egress_budget, KWayMerger};
+use super::{build_single_partition_merger, egress_batch, egress_budget, KWayMerger};
 use crate::platform::Platform;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::SSTableReader;
@@ -77,8 +77,9 @@ async fn open_reader(path: &std::path::Path) -> SSTableReader {
         .expect("open reader")
 }
 
-/// The observed per-source egress `sync_channel` capacities of a built merger,
-/// one entry per channel-backed run (reaches into the merge module's private
+/// The observed per-source egress `sync_channel` capacities of a built merger, in
+/// MESSAGES — the EXACT argument each channel was constructed with (issue #2820)
+/// — one entry per channel-backed run (reaches into the merge module's private
 /// `runs`/`reader` — legal from this descendant module).
 fn source_caps(merger: &KWayMerger) -> Vec<usize> {
     merger
@@ -88,7 +89,28 @@ fn source_caps(merger: &KWayMerger) -> Vec<usize> {
         .collect()
 }
 
-fn assert_single_shared_snapshot(caps: &[usize], site: &str) {
+/// The ROW capacity snapshot each of those message capacities was derived from
+/// (issue #2820) — the units `egress_budget` speaks.
+fn source_rows_caps(merger: &KWayMerger) -> Vec<usize> {
+    merger
+        .runs
+        .iter()
+        .filter_map(|r| r.reader.egress_rows_capacity())
+        .collect()
+}
+
+/// One shared snapshot across every source channel, in BOTH units, plus the
+/// ROWS→MESSAGES conversion between them (issue #2820).
+///
+/// The conversion is asserted here rather than only in `egress_batch`'s unit
+/// tests because this is the only place that sees what the PRODUCTION constructors
+/// actually passed to `sync_channel`: a channel silently built with the ROW budget
+/// as its MESSAGE capacity holds `256 × 256` entries per source — a 256x
+/// resident-row blow-up — and the pre-#2820 shape of this assertion (a plausible
+/// number inside the row clamp) would have called it correct.
+fn assert_single_shared_snapshot(merger: &KWayMerger, site: &str) {
+    let caps = source_caps(merger);
+    let rows_caps = source_rows_caps(merger);
     assert_eq!(
         caps.len(),
         K,
@@ -96,18 +118,38 @@ fn assert_single_shared_snapshot(caps: &[usize], site: &str) {
          (got {})",
         caps.len()
     );
+    assert_eq!(
+        rows_caps.len(),
+        K,
+        "{site}: every one of the {K} source channels must expose its ROW snapshot \
+         (got {})",
+        rows_caps.len()
+    );
     let first = caps[0];
+    let first_rows = rows_caps[0];
     assert!(
-        caps.iter().all(|&c| c == first),
+        caps.iter().all(|&c| c == first) && rows_caps.iter().all(|&c| c == first_rows),
         "{site}: all {K} source channels of ONE merge must share ONE capacity \
-         snapshot (per-merge keying) — got {caps:?}. A per-SOURCE count would \
-         shrink the later sources below the first."
+         snapshot (per-merge keying) — got messages {caps:?}, rows {rows_caps:?}. A \
+         per-SOURCE count would shrink the later sources below the first."
     );
     assert!(
-        (egress_budget::min_cap()..=egress_budget::MAX_CAP).contains(&first),
-        "{site}: shared cap {first} must be within [{}, {}]",
+        (egress_budget::min_cap()..=egress_budget::MAX_CAP).contains(&first_rows),
+        "{site}: shared ROW cap {first_rows} must be within [{}, {}]",
         egress_budget::min_cap(),
         egress_budget::MAX_CAP
+    );
+    assert_eq!(
+        first,
+        egress_batch::message_capacity_for_rows(first_rows),
+        "{site}: the sync_channel argument must be the MESSAGE capacity converted \
+         from the {first_rows}-row snapshot, never the row count itself"
+    );
+    assert!(
+        first >= egress_batch::MIN_MSG_CAP,
+        "{site}: message capacity {first} must never fall below MIN_MSG_CAP ({}), \
+         which would serialise producer and consumer",
+        egress_batch::MIN_MSG_CAP
     );
 }
 
@@ -123,7 +165,7 @@ fn path_based_merge_shares_one_capacity_snapshot() {
 
     let merger =
         KWayMerger::new_cancellable(paths, &schema, ScanCancel::default()).expect("merger builds");
-    assert_single_shared_snapshot(&source_caps(&merger), "open (path-based)");
+    assert_single_shared_snapshot(&merger, "open (path-based)");
 }
 
 /// `open_from_reader` (shared-reader) call site: the reader-based `K`-way merge
@@ -145,7 +187,7 @@ fn reader_based_merge_shares_one_capacity_snapshot() {
         KWayMerger::new_from_readers(readers, &schema, ScanCancel::default(), None)
             .expect("reader-based merger builds")
     });
-    assert_single_shared_snapshot(&source_caps(&merger), "open_from_reader (shared)");
+    assert_single_shared_snapshot(&merger, "open_from_reader (shared)");
 }
 
 /// Raw partition-key bytes for `id = <id>` under the test schema.
@@ -321,19 +363,28 @@ fn needs_scan_point_read_shares_snapshot_and_registers_one_slot() {
             .expect("index-stripped candidates fall back to a scan merger");
 
     let caps = source_caps(&merger);
+    let rows_caps = source_rows_caps(&merger);
     assert_eq!(
         caps.len(),
         2,
         "both NeedsScan candidates must open an egress channel (got {caps:?})"
     );
     let first = caps[0];
+    let first_rows = rows_caps[0];
     assert!(
-        caps.iter().all(|&c| c == first),
-        "both point-read fail-safe channels must share ONE snapshot: {caps:?}"
+        caps.iter().all(|&c| c == first) && rows_caps.iter().all(|&c| c == first_rows),
+        "both point-read fail-safe channels must share ONE snapshot: messages \
+         {caps:?}, rows {rows_caps:?}"
     );
     assert!(
-        (egress_budget::min_cap()..=egress_budget::MAX_CAP).contains(&first),
-        "shared cap {first} within clamp"
+        (egress_budget::min_cap()..=egress_budget::MAX_CAP).contains(&first_rows),
+        "shared ROW cap {first_rows} within clamp"
+    );
+    assert_eq!(
+        first,
+        egress_batch::message_capacity_for_rows(first_rows),
+        "the point-read seam must convert its row snapshot to a MESSAGE capacity \
+         too (issue #2820)"
     );
     assert!(
         merger._egress_slot.is_some(),
@@ -410,11 +461,14 @@ fn concurrency_drives_real_per_channel_cap_below_max() {
     // Built while all `hold_count` mergers are still alive (owned by `held`).
     let extra = KWayMerger::new_cancellable(paths.clone(), &schema, ScanCancel::default())
         .expect("extra merger");
-    let caps = source_caps(&extra);
+    // Asserted on the ROW snapshot, which is what the #2765 budget throttles;
+    // the message capacity is that value converted (issue #2820) and is pinned
+    // against it by `assert_single_shared_snapshot` above.
+    let caps = source_rows_caps(&extra);
     assert!(!caps.is_empty(), "the extra merger has an egress channel");
     assert!(
         caps.iter().all(|&c| c < egress_budget::MAX_CAP),
-        "with {hold_count}+ concurrent merges the new merge's per-channel caps \
+        "with {hold_count}+ concurrent merges the new merge's per-channel ROW caps \
          must fall below {} — the adaptive throttle firing end-to-end (got \
          {caps:?})",
         egress_budget::MAX_CAP

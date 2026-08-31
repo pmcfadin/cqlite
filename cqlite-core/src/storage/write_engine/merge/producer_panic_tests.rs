@@ -557,8 +557,12 @@ fn synthetic_entry(n: i64) -> MergeEntry {
 ///    advanced again would otherwise get a clean end-of-input for a truncated run.
 #[test]
 fn a_producer_that_disconnects_without_a_terminator_is_an_error_not_end_of_input() {
-    let (sender, receiver) =
-        std::sync::mpsc::sync_channel::<MergeMsg>(super::STREAMING_CHANNEL_CAPACITY);
+    // Issue #2820: the channel's capacity is in MESSAGES, converted from the row
+    // budget by the same function both production construction sites use — never a
+    // row count passed through as a message count.
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<MergeMsg>(
+        super::egress_batch::message_capacity_for_rows(super::STREAMING_CHANNEL_CAPACITY),
+    );
     let sent_count = Arc::new(AtomicI64::new(0));
     let producer_sent_count = sent_count.clone();
 
@@ -569,11 +573,15 @@ fn a_producer_that_disconnects_without_a_terminator_is_an_error_not_end_of_input
     let producer = std::thread::Builder::new()
         .spawn(move || {
             for n in 0..ROWS_BEFORE_THE_BARE_DISCONNECT as i64 {
-                let msg = MergeMsg::Item(synthetic_entry(n));
-                let is_data = msg.is_tracked_data();
-                if sender.send(msg).is_ok() && is_data {
-                    channel_depth::sent();
-                    producer_sent_count.fetch_add(1, Ordering::SeqCst);
+                // Issue #2820: a ONE-row batch per iteration, so the entries reach
+                // the consumer one at a time exactly as this test's premise needs,
+                // while the accounting stays the production one (per ENTRY, from
+                // `tracked_entries`, mirroring `EgressBatcher::flush`).
+                let msg = MergeMsg::Batch(vec![synthetic_entry(n)]);
+                let tracked = msg.tracked_entries();
+                if sender.send(msg).is_ok() && tracked > 0 {
+                    channel_depth::sent_n(tracked);
+                    producer_sent_count.fetch_add(tracked as i64, Ordering::SeqCst);
                 }
             }
             drop(sender);
@@ -587,7 +595,11 @@ fn a_producer_that_disconnects_without_a_terminator_is_an_error_not_end_of_input
         sent_count,
         received_count: 0,
         state: RunState::Streaming,
-        egress_channel_capacity: super::STREAMING_CHANNEL_CAPACITY,
+        held: Vec::new().into_iter(),
+        egress_channel_capacity: super::egress_batch::message_capacity_for_rows(
+            super::STREAMING_CHANNEL_CAPACITY,
+        ),
+        egress_rows_capacity: super::STREAMING_CHANNEL_CAPACITY,
     };
 
     let mut rows = 0;

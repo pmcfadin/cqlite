@@ -2,16 +2,37 @@
 //!
 //! Backs the [`crate::observability::catalog::MERGE_EGRESS_CHANNEL_DEPTH`] gauge
 //! with a process-global live count of merged DATA entries currently buffered in
-//! the bounded producer→consumer `sync_channel` (capacity up to
-//! `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent
-//! merges — see `merge/egress_budget.rs`). `std::sync::mpsc`'s
+//! the bounded producer→consumer `sync_channel`. `std::sync::mpsc`'s
 //! `sync_channel` exposes no `len()`, so occupancy is tracked explicitly, exactly
 //! as the #2316 producer-thread gauge tracks live producer threads:
 //!
-//! * [`sent`] increments the count after a successful DATA-entry `send`
-//!   (`from_readers::forward_row`).
-//! * [`received`] decrements it when the consumer pulls that entry off the
+//! * [`sent_n`] adds the entries of one successfully sent DATA BATCH
+//!   (`egress_batch::EgressBatcher::flush`).
+//! * [`received_n`] subtracts them when the consumer pulls that batch off the
 //!   channel (`SSTableRowIteratorAdapter::next`).
+//!
+//! # THE UNIT IS ENTRIES (rows), and issue #2820 did not change it
+//!
+//! The channel carries BATCHES since #2820 (one message per up to
+//! `egress_batch::BATCH_EMIT_ROWS_MERGE` rows, so its `sync_channel` capacity is
+//! in MESSAGES — `egress_budget`'s row budget converted by
+//! `egress_batch::message_capacity_for_rows`), but this gauge stays in ENTRIES on
+//! BOTH sides: a batch of `n` rows moves the level by `n`, never by 1. Counting
+//! messages on one side and entries on the other is precisely the invisible
+//! asymmetry documented below.
+//!
+//! # THIS gauge's ceiling is CHANNEL-RESIDENT rows, not the in-flight bound
+//!
+//! Because [`sent_n`] fires on a successful `send` and [`received_n`] on the
+//! consumer's `recv`, the level counts ONLY entries currently sitting in the
+//! channel — never the batch the consumer is handing out (already received) nor
+//! the batch a producer is PARKED holding (never sent). So the ceiling is
+//! `egress_batch::rows_resident_in_channel(rows_cap)` = `msg_cap × batch_ceiling`
+//! (512 rows at the shipped default), NOT
+//! `egress_batch::max_inflight_rows(rows_cap)` = `(msg_cap + 2) × batch_ceiling`
+//! (1024), which is the MEMORY bound and overstates what this gauge can reach by
+//! exactly two batches. Both scale with the #2765 adaptive row capacity since
+//! #2820 (`2 × rows_cap` and `4 × rows_cap`), so neither is a constant.
 //! * [`reconcile_residual`] (issue #2419 roborev job 1733) subtracts, in ONE
 //!   atomic op, any entries a producer sent but its consumer never received — a
 //!   cancelled/disconnected merge whose channel was torn down while entries were
@@ -24,13 +45,13 @@
 //!
 //! # THE invariant this module depends on (issue #3120)
 //!
-//! Only DATA entries (`MergeMsg::Item`) are tracked, and they are tracked on BOTH
-//! sides. The TERMINATORS (`MergeMsg::Failed` / `MergeMsg::Done`) are untracked on
-//! send AND on receive, so they can never unbalance the level. Formally, per
-//! adapter `A`, with `data(m) = 1` iff `m` is a DATA entry:
+//! Only DATA entries (the rows of a `MergeMsg::Batch`) are tracked, and they are
+//! tracked on BOTH sides. The TERMINATORS (`MergeMsg::Failed` / `MergeMsg::Done`)
+//! are untracked on send AND on receive, so they can never unbalance the level.
+//! Formally, per adapter `A`, with `data(m)` = the number of DATA entries in `m`:
 //!
 //! ```text
-//! ∀ m:  counted_on_send(m) ⟺ counted_on_receive_or_residual(m) ⟺ data(m)
+//! ∀ m:  counted_on_send(m) = counted_on_receive_or_residual(m) = data(m)
 //! and   sentA − recvA ≥ 0 at every join point
 //! ```
 //!
@@ -45,20 +66,24 @@
 //! would hide the real gap:
 //!
 //! * **Receive side** (`SSTableRowIteratorAdapter::next`) is a hand-written
-//!   `MergeMsg::Item(entry)` match arm that never calls `is_tracked_data`. Two
+//!   `MergeMsg::Batch(entries)` match arm that never calls `tracked_entries`. Two
 //!   properties make it correct anyway: that `match` is **EXHAUSTIVE with no
 //!   wildcard arm**, so a future 4th `MergeMsg` variant is a COMPILE ERROR there
-//!   rather than silently falling into a catch-all; and [`received`],
-//!   `received_count`, and `add_merge_run_entry_decoded` each appear at EXACTLY ONE
-//!   site in the crate, all three inside that `Item` arm.
-//! * **Send side** (`from_readers::forward_row`) builds `MergeMsg::Item(entry)`
-//!   unconditionally, so its `msg.is_tracked_data()` is a TAUTOLOGY today — it can
-//!   only be `true`. Its value is as a compile-time tripwire, not a runtime test:
-//!   `MergeMsg::is_tracked_data`'s body is itself an exhaustive match, so adding a
-//!   variant forces an explicit tracked/untracked decision there.
-//! * The `channel_depth` test below pins `is_tracked_data`'s CLASSIFICATION (that
-//!   both terminators are untracked). It cannot — and does not claim to — detect a
-//!   divergence at the hand-written receive site.
+//!   rather than silently falling into a catch-all; and [`received_n`] and
+//!   `received_count` each appear at EXACTLY ONE site in the crate, both inside
+//!   that `Batch` arm, and both are passed the SAME `entries.len()` (issue #2820:
+//!   the arm decrements by the batch length, so a batch counted as ONE message
+//!   here against `n` entries on send would drive the residual negative — the
+//!   defect this section exists for).
+//! * **Send side** (`egress_batch::EgressBatcher::flush`) builds
+//!   `MergeMsg::Batch(batch)` unconditionally, so its `msg.tracked_entries()` is a
+//!   TAUTOLOGY today — it can only be the batch length. Its value is as a
+//!   compile-time tripwire, not a runtime test: `MergeMsg::tracked_entries`'s body
+//!   is itself an exhaustive match, so adding a variant forces an explicit
+//!   tracked/untracked decision there.
+//! * The `channel_depth` test below pins `tracked_entries`'s CLASSIFICATION (that
+//!   a batch counts per ENTRY and both terminators are untracked). It cannot — and
+//!   does not claim to — detect a divergence at the hand-written receive site.
 //! * [`reconcile_residual`] checks `residual >= 0` at the one place a violation
 //!   becomes observable, reporting it WITHOUT panicking from a `Drop` (see that
 //!   function).
@@ -86,7 +111,7 @@ fn record(level: i64) {
 }
 
 /// Apply `delta` to `atomic` and return the resulting level — the exact
-/// arithmetic [`sent`], [`received`], and [`reconcile_residual`] apply to the
+/// arithmetic [`sent_n`], [`received_n`], and [`reconcile_residual`] apply to the
 /// shared [`DEPTH`]. Parameterized over the atomic (issue #2419 roborev job
 /// 1733, the #2451 flake class) so a test can pin this SAME logic against a
 /// private, per-test atomic instead of racing every other concurrently-running
@@ -95,17 +120,23 @@ fn adjust(atomic: &AtomicI64, delta: i64) -> i64 {
     atomic.fetch_add(delta, Ordering::SeqCst) + delta
 }
 
-/// Account one DATA entry that was just successfully sent into the bounded
-/// egress channel. Balanced by exactly one [`received`] or, for entries a
-/// consumer never pulled, by [`reconcile_residual`] post-join.
-pub(super) fn sent() {
-    record(adjust(&DEPTH, 1));
+/// Account the `entries` DATA rows of one BATCH that was just successfully sent
+/// into the bounded egress channel (issue #2820 — the gauge's unit is ENTRIES,
+/// not messages; see the module doc). Balanced by exactly one [`received_n`] of
+/// the same count or, for entries a consumer never pulled, by
+/// [`reconcile_residual`] post-join.
+///
+/// `entries` is `MergeMsg::tracked_entries()` of the message actually sent, so a
+/// terminator (0) is a no-op by construction rather than by a caller's judgement.
+pub(super) fn sent_n(entries: usize) {
+    record(adjust(&DEPTH, entries as i64));
 }
 
-/// Account one DATA entry that was just received (consumed) from the egress
-/// channel, decrementing the live occupancy.
-pub(super) fn received() {
-    record(adjust(&DEPTH, -1));
+/// Account the `entries` DATA rows of one BATCH just received (pulled off the
+/// channel) by the consumer, decrementing the live occupancy by the same count
+/// its send incremented it.
+pub(super) fn received_n(entries: usize) {
+    record(adjust(&DEPTH, -(entries as i64)));
 }
 
 /// Subtract `residual` DATA entries from the shared depth in ONE atomic op
@@ -175,7 +206,7 @@ mod tests {
     ///
     /// Roborev job 1733 (the #2451 flake class): this now runs against a
     /// PRIVATE, per-test `AtomicI64` via [`adjust`] — the exact same arithmetic
-    /// [`sent`]/[`received`] apply to the shared [`DEPTH`] — rather than the
+    /// [`sent_n`]/[`received_n`] apply to the shared [`DEPTH`] — rather than the
     /// process-global atomic. The prior version drove `DEPTH` directly, so any
     /// concurrently-running test in this binary that ALSO exercises a real merge
     /// egress channel (elsewhere in the crate) could perturb the shared level
@@ -184,11 +215,26 @@ mod tests {
     #[test]
     fn depth_rises_while_backed_up_and_returns_to_baseline() {
         let local = AtomicI64::new(0);
-        const CAP: i64 = 256;
+        // The notional per-source CHANNEL-RESIDENT ROW ceiling: issue #2820 made
+        // the channel carry BATCHES, so the bound this gauge can reach is
+        // `rows_resident_in_channel(rows_cap)` — NOT `max_inflight_rows`, which
+        // adds the consumer-held and producer-parked batches this gauge counts on
+        // neither side. Derived from the shipped constants rather than the
+        // pre-batching flat 256.
+        let cap = super::super::egress_batch::rows_resident_in_channel(
+            super::super::STREAMING_CHANNEL_CAPACITY,
+        ) as i64;
 
-        // Producer races ahead: fill toward the bounded capacity.
-        for _ in 0..CAP {
-            adjust(&local, 1);
+        // Producer races ahead in BATCHES (the ramp saturates at this run's
+        // ceiling), filling toward the bounded capacity.
+        let batch = super::super::egress_batch::batch_limit_ceiling(
+            super::super::STREAMING_CHANNEL_CAPACITY,
+        ) as i64;
+        let mut filled = 0;
+        while filled < cap {
+            let rows = batch.min(cap - filled);
+            adjust(&local, rows);
+            filled += rows;
         }
         let backed_up = local.load(Ordering::SeqCst);
         assert!(
@@ -197,14 +243,17 @@ mod tests {
              (backed_up={backed_up})"
         );
         assert!(
-            backed_up <= CAP,
-            "tracked depth must stay bounded by the channel capacity \
-             (backed_up={backed_up}, cap={CAP})"
+            backed_up <= cap,
+            "tracked depth must stay bounded by the resident-rows bound \
+             (backed_up={backed_up}, cap={cap})"
         );
 
-        // Consumer drains every entry.
-        for _ in 0..CAP {
-            adjust(&local, -1);
+        // Consumer drains every entry, one batch at a time.
+        let mut drained = 0;
+        while drained < cap {
+            let rows = batch.min(cap - drained);
+            adjust(&local, -rows);
+            drained += rows;
         }
         assert_eq!(
             local.load(Ordering::SeqCst),
@@ -348,19 +397,26 @@ mod tests {
         );
     }
 
-    /// Issue #3120: `MergeMsg::is_tracked_data` CLASSIFIES both terminators as
+    /// Issue #3120: `MergeMsg::tracked_entries` CLASSIFIES both terminators as
     /// untracked, so a run that ends with one returns the depth to exactly baseline
     /// and leaves a residual of exactly ZERO — never a negative residual, which the
     /// `> 0` guard would skip and the `max(0)` floor would hide forever.
     ///
+    /// Issue #2820 adds the BATCH dimension to the same property: the DATA
+    /// messages here carry MULTI-row batches, and both sides account the batch
+    /// LENGTH, so the residual is zero for a batched run exactly as it was for a
+    /// per-row one. A side that counted messages instead of entries leaves a
+    /// residual of `entries - messages` (positive here, i.e. a permanent upward
+    /// gauge leak) or its negative mirror, and this test fails on both.
+    ///
     /// SCOPE, stated honestly (rust-reviewer): this pins the PREDICATE, not the
     /// symmetry of the two production call sites. The receive site
-    /// (`SSTableRowIteratorAdapter::next`) is a hand-written `MergeMsg::Item` match
-    /// arm that never calls `is_tracked_data`, so a divergence introduced THERE
+    /// (`SSTableRowIteratorAdapter::next`) is a hand-written `MergeMsg::Batch` match
+    /// arm that never calls `tracked_entries`, so a divergence introduced THERE
     /// would not fail this test. What protects that site is structural, not this
     /// test: its `match` is exhaustive with no wildcard arm (a 4th variant is a
-    /// compile error) and the three receive-side accounting calls each appear at
-    /// exactly one place, inside that arm. See the module doc.
+    /// compile error) and the receive-side accounting calls each appear at exactly
+    /// one place, inside that arm. See the module doc.
     ///
     /// Against a PRIVATE atomic, never the shared `DEPTH` (the #2451 flake class):
     /// thousands of tests share this binary and several drive real merge egress
@@ -372,16 +428,28 @@ mod tests {
         use crate::storage::write_engine::mutation::DecoratedKey;
         use crate::types::Value;
 
-        fn data_item(n: i64) -> MergeMsg {
-            MergeMsg::Item(MergeEntry::new(
-                0,
-                DecoratedKey::new(n, n.to_be_bytes().to_vec()),
-                None,
-                100,
-                RowData::Live {
-                    cells: vec![CellData::new("name".to_string(), Value::text("v"), 100)],
-                },
-            ))
+        /// One DATA message carrying `rows` entries — the batched shape every
+        /// producer now sends (issue #2820).
+        fn data_batch(rows: usize) -> MergeMsg {
+            MergeMsg::Batch(
+                (0..rows as i64)
+                    .map(|n| {
+                        MergeEntry::new(
+                            0,
+                            DecoratedKey::new(n, n.to_be_bytes().to_vec()),
+                            None,
+                            100,
+                            RowData::Live {
+                                cells: vec![CellData::new(
+                                    "name".to_string(),
+                                    Value::text("v"),
+                                    100,
+                                )],
+                            },
+                        )
+                    })
+                    .collect(),
+            )
         }
 
         // Each run: N data entries followed by exactly ONE terminator — the shape
@@ -391,34 +459,40 @@ mod tests {
             MergeMsg::Failed(MergeProducerError::Panicked("boom".to_string())),
             MergeMsg::Failed(MergeProducerError::Cancelled),
         ] {
-            const DATA_ENTRIES: usize = 5;
+            // A ramped run: batches of 1, 2 then 4 rows — the shape
+            // `EgressBatcher` produces before its limit saturates — so the pin
+            // covers MULTI-row batches, not just the degenerate 1-row one.
+            const BATCH_ROWS: [usize; 3] = [1, 2, 4];
+            let data_entries: i64 = BATCH_ROWS.iter().sum::<usize>() as i64;
             let depth = AtomicI64::new(0);
             let baseline = depth.load(Ordering::SeqCst);
             let mut sent_count: i64 = 0;
             let mut received_count: i64 = 0;
 
-            let mut stream: Vec<MergeMsg> = (0..DATA_ENTRIES as i64).map(data_item).collect();
+            let mut stream: Vec<MergeMsg> = BATCH_ROWS.iter().copied().map(data_batch).collect();
             stream.push(terminator);
 
-            // SEND side: exactly what `from_readers::forward_row` does.
+            // SEND side: exactly what `egress_batch::EgressBatcher::flush` does.
             for msg in &stream {
-                if msg.is_tracked_data() {
-                    adjust(&depth, 1);
-                    sent_count += 1;
+                let tracked = msg.tracked_entries();
+                if tracked > 0 {
+                    adjust(&depth, tracked as i64);
+                    sent_count += tracked as i64;
                 }
             }
             assert_eq!(
-                sent_count, DATA_ENTRIES as i64,
-                "only the DATA entries may be tracked on send — the terminator must \
-                 not be"
+                sent_count, data_entries,
+                "only the DATA entries may be tracked on send, one slot per ENTRY \
+                 (never one per batch) — and the terminator must not be tracked"
             );
 
-            // RECEIVE side: exactly what the `MergeMsg::Item` arm of
+            // RECEIVE side: exactly what the `MergeMsg::Batch` arm of
             // `SSTableRowIteratorAdapter::next` does (and no other arm does).
             for msg in &stream {
-                if msg.is_tracked_data() {
-                    adjust(&depth, -1);
-                    received_count += 1;
+                let tracked = msg.tracked_entries();
+                if tracked > 0 {
+                    adjust(&depth, -(tracked as i64));
+                    received_count += tracked as i64;
                 }
             }
 

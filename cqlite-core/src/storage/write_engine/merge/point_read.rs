@@ -129,6 +129,14 @@ impl SSTableRowIterator for SinglePartitionFilterRun {
         self.inner.egress_channel_capacity()
     }
 
+    /// Issue #2820: delegate the ROW snapshot too, so the wiring test can assert
+    /// the ROWS→MESSAGES conversion on this seam as well as on the two full-scan
+    /// construction sites.
+    #[cfg(test)]
+    fn egress_rows_capacity(&self) -> Option<usize> {
+        self.inner.egress_rows_capacity()
+    }
+
     fn next(&mut self) -> Option<Result<MergeEntry>> {
         loop {
             match self.inner.next() {

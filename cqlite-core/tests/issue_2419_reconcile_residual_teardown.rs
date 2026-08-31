@@ -48,14 +48,13 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. MUST be ≥ the merge's MAXIMUM 256-entry channel
-/// capacity (`STREAMING_CHANNEL_CAPACITY`, private to `merge/mod.rs`) so every
-/// producer fills its own channel and blocks on `send`, staying backed up (none
-/// received) until teardown — mirroring `issue_2419_egress_depth_gauge.rs`'s
-/// identical rationale. Issue #2765: the channel capacity is now ADAPTIVE (up to
-/// 256), so the backpressure threshold below is derived from the live per-channel
-/// capacity, not the hard-coded 256.
-const ROWS_PER_INPUT: i32 = 400;
+/// Rows per input SSTable so every producer parks in `send` — the shared
+/// derivation in `support/egress_backpressure.rs` (issue #2820 review round 2;
+/// six verbatim copies of this sum reintroduced, one level up, exactly the
+/// drift the probe exists to prevent).
+#[path = "support/egress_backpressure.rs"]
+mod egress_backpressure;
+use egress_backpressure::rows_that_park_the_producer as rows_per_input;
 const NUM_INPUTS: usize = 4;
 
 fn make_schema() -> TableSchema {
@@ -131,7 +130,7 @@ fn collect_inputs(dir: &std::path::Path, out: &mut Vec<(u64, PathBuf)>, depth: u
     }
 }
 
-/// Build `NUM_INPUTS` REAL nb SSTables (each `ROWS_PER_INPUT` live rows over a
+/// Build `NUM_INPUTS` REAL nb SSTables (each `rows_per_input()` live rows over a
 /// disjoint partition range). Never empty.
 fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -146,8 +145,8 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
     let mut engine = WriteEngine::new(config).expect("engine");
     for input in 0..NUM_INPUTS {
-        let base = input as i32 * ROWS_PER_INPUT;
-        for r in 0..ROWS_PER_INPUT {
+        let base = input as i32 * rows_per_input();
+        for r in 0..rows_per_input() {
             engine
                 .write(write_row(
                     base + r,
@@ -226,13 +225,26 @@ fn cancelled_backed_up_merge_reconciles_egress_depth_to_baseline_on_drop() {
     let per_channel_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
         (before + 1).max(after),
     );
+    // Issue #2820: the channel carries BATCHES, and the batch-size ramp starts at
+    // ONE row — so a producer whose consumer never steps parks in `send` holding
+    // `rows_in_full_channel(per_channel_cap)` rows, NOT `per_channel_cap` rows.
+    // Deriving the threshold from the ROW capacity (as this did pre-#2820) would
+    // wait for rows the producer structurally cannot send from a cold start, and
+    // deadline out. The gauge's UNIT is unchanged (entries) — only how many
+    // entries a full channel holds changed.
+    let rows_when_backed_up = cqlite_core::storage::write_engine::merge::merge_egress_batch_probe()
+        .rows_in_full_channel(per_channel_cap);
+    assert!(
+        rows_when_backed_up > 0,
+        "a full channel must hold at least one row, else this test is vacuous"
+    );
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a
     // reading proving multiple channels are genuinely backed up concurrently —
-    // never inferred from an absent/stale window. If `channel_depth::sent()` were
+    // never inferred from an absent/stale window. If `channel_depth::sent_n()` were
     // unwired, this loop would exhaust its deadline and fail explicitly. This
     // reading is the proof that a genuine `residual > 0` exists BEFORE teardown.
-    let backpressure_threshold = (NUM_INPUTS as f64) * (per_channel_cap as f64) * 0.5;
+    let backpressure_threshold = (NUM_INPUTS as f64) * (rows_when_backed_up as f64) * 0.5;
     let mid_deadline = Instant::now() + Duration::from_secs(10);
     let mut mid_reached = false;
     let mut mid_last_seen: Option<f64> = None;
