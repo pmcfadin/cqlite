@@ -4109,9 +4109,25 @@ _component_set_probe_inner() {
   # SCOPE, so the diagnostic does not overclaim: the scratch directory comes from `mktemp -d`,
   # which creates it 0700, so another user cannot traverse into it even if this check fails. The
   # mode on the file is defence in depth; refusing costs nothing and a leak needs both to fail.
-  if ! chmod 600 "$csconf" 2>/dev/null || [ -z "$(find "$csconf" -perm 600 -print 2>/dev/null)" ]; then
+  local mode_out mode_rc
+  if ! chmod 600 "$csconf" 2>/dev/null; then
     _CS_KIND=baseline-workspace
-    _CS_DETAIL="could not set mode 0600 on the isolated fetch config (or the mode did not take): the origin URL may carry a credential, so it is NOT written to a file whose permissions this run cannot verify"
+    _CS_DETAIL="chmod 600 on the isolated fetch config FAILED: the origin URL may carry a credential, so it is NOT written to a file whose permissions this run could not set"
+    return 0
+  fi
+  # THREE-VALUED, because `[ -z "$(find …)" ]` collapses "the scan FAILED" onto "no match" and the
+  # two need different diagnostics — the repository lints for exactly this shape
+  # (`1699-find-tristate` in test_agent_gate_summary.sh, which caught this on its first run here).
+  # Both non-affirmative states refuse; only the AFFIRMATIVE one proceeds.
+  mode_out=$(find "$csconf" -perm 600 -print 2>/dev/null); mode_rc=$?
+  if [ "$mode_rc" -ne 0 ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="the mode of the isolated fetch config could not be VERIFIED (the exact-mode scan exited $mode_rc): the origin URL may carry a credential, so it is not written to a file whose permissions are unknown — this is 'cannot tell', not 'the mode is wrong'"
+    return 0
+  fi
+  if [ -z "$mode_out" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="chmod 600 reported success but the isolated fetch config is NOT mode 0600: the origin URL may carry a credential, so it is not written to a broadly readable file"
     return 0
   fi
   printf '[remote "csbaseline"]\n\turl = %s\n' "$origin_url" >>"$csconf" 2>/dev/null || true

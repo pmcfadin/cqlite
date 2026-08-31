@@ -3411,31 +3411,58 @@ fi
 base_cm=$(mkbaseline base-chmod - )
 cm_fx=$(mkbranch chmodfail "$base_cm" - )
 cm_ctl=$(hook "$cm_fx")
-cm_bin="$tmp/chmod-stub"
-mkdir -p "$cm_bin"
 cm_real=$(command -v chmod 2>/dev/null)
-if [ -z "$cm_real" ]; then
-  echo "skip - 3544-config-mode-verified: no resolvable chmod to build the failing stub"
+cm_real_find=$(command -v find 2>/dev/null)
+if [ -z "$cm_real" ] || [ -z "$cm_real_find" ]; then
+  echo "skip - 3544-config-mode-verified: no resolvable chmod/find to build the failing stubs"
 elif [ "$(field KIND "$cm_ctl")" != ok ]; then
   bad "3544-config-mode-verified: the POSITIVE CONTROL (same fixture, no stub) did not reach KIND ok (got '$(field KIND "$cm_ctl")') — the case cannot discriminate"
 else
-  { printf '#!/bin/sh\n'
-    printf 'for a in "$@"; do case "$a" in */cs-baseline.*/repo/.git/config) exit 1 ;; esac; done\n'
-    printf 'exec %s "$@"\n' "$cm_real"
-  } >"$cm_bin/chmod"
-  chmod +x "$cm_bin/chmod"
-  cm_out=$( fx "$cm_fx" && PATH="$cm_bin:$PATH" bash "$cm_fx/scripts/agent-gate.sh" \
-              --component-set-line full 2>/dev/null )
-  cm_line=$(field COMPONENT_SET_LINE "$cm_out")
-  if [ "$(field VERDICT "$cm_out")" = UNMEASURED ] \
-     && [ "$(field KIND "$cm_out")" = baseline-workspace ] \
-     && grep -q 'FAIL-CLOSED (#3544)' <<<"$cm_line" \
-     && grep -q '0600' <<<"$cm_line" \
-     && grep -q 'credential' <<<"$cm_line"; then
-    ok "3544-config-mode-verified: a chmod that FAILS makes the pre-flight refuse before the credential-bearing URL is written (control reached KIND ok)"
+  # ALL THREE STATES of the check are driven, because they are three different facts with three
+  # different sentences and a shared one would be false for two of them:
+  #   chmod-fails  — the mode could not be SET.
+  #   chmod-noop   — chmod reported success and the mode is NOT 0600 (a filesystem where the call
+  #                  is accepted and ignored; the stub models it by doing nothing and exiting 0).
+  #   find-fails   — the mode could not be VERIFIED. "Cannot tell" is not "the mode is wrong",
+  #                  which is what `[ -z "$(find …)" ]` collapsed them into (the repository's own
+  #                  `1699-find-tristate` lint caught that shape here on its first run).
+  cm_bad=""
+  for _cm_mode in chmod-fails chmod-noop find-fails; do
+    _cm_bin="$tmp/chmod-stub-$_cm_mode"
+    mkdir -p "$_cm_bin"
+    case "$_cm_mode" in
+      chmod-fails)
+        { printf '#!/bin/sh\n'
+          printf 'for a in "$@"; do case "$a" in */cs-baseline.*/repo/.git/config) exit 1 ;; esac; done\n'
+          printf 'exec %s "$@"\n' "$cm_real"; } >"$_cm_bin/chmod"
+        _cm_want='FAILED' ;;
+      chmod-noop)
+        { printf '#!/bin/sh\n'
+          printf 'for a in "$@"; do case "$a" in */cs-baseline.*/repo/.git/config) exit 0 ;; esac; done\n'
+          printf 'exec %s "$@"\n' "$cm_real"; } >"$_cm_bin/chmod"
+        _cm_want='NOT mode 0600' ;;
+      find-fails)
+        { printf '#!/bin/sh\n'
+          printf 'for a in "$@"; do case "$a" in */cs-baseline.*/repo/.git/config) exit 3 ;; esac; done\n'
+          printf 'exec %s "$@"\n' "$cm_real_find"; } >"$_cm_bin/find"
+        _cm_want='could not be VERIFIED' ;;
+    esac
+    chmod +x "$_cm_bin"/* 2>/dev/null
+    _cm_out=$( fx "$cm_fx" && PATH="$_cm_bin:$PATH" bash "$cm_fx/scripts/agent-gate.sh" \
+                 --component-set-line full 2>/dev/null )
+    _cm_line=$(field COMPONENT_SET_LINE "$_cm_out")
+    if [ "$(field VERDICT "$_cm_out")" != UNMEASURED ] \
+       || [ "$(field KIND "$_cm_out")" != baseline-workspace ] \
+       || ! grep -q 'FAIL-CLOSED (#3544)' <<<"$_cm_line" \
+       || ! grep -qF "$_cm_want" <<<"$_cm_line" \
+       || ! grep -q 'credential' <<<"$_cm_line"; then
+      cm_bad="${cm_bad:+$cm_bad }$_cm_mode(kind=$(field KIND "$_cm_out"))"
+    fi
+  done
+  if [ -z "$cm_bad" ]; then
+    ok "3544-config-mode-verified: all three states refuse BEFORE the credential-bearing URL is written, each with its own cause — chmod failed, chmod succeeded but the mode is not 0600, and the mode could not be verified at all (control reached KIND ok)"
   else
-    bad "3544-config-mode-verified: expected KIND baseline-workspace naming the 0600 and the credential (kind='$(field KIND "$cm_out")')"
-    printf '%s\n' "$cm_out"
+    bad "3544-config-mode-verified: expected a fail-closed baseline-workspace naming each cause; wrong for: $cm_bad"
   fi
 fi
 
