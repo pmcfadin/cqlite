@@ -3001,6 +3001,21 @@ _fm_describe_cargo() {
       --version|-V) return 1 ;;
     esac
   done
+  # `cargo nextest run` reads better than a bare `nextest`, and the distinction is
+  # load-bearing on core-tests' line: `nextest run` EXECUTES the unit suite while the
+  # `cargo test --doc` beside it is the separate doctest pass, and both appear there.
+  # MUST run while "$@" is still intact — the flag scan below shifts it away (it did,
+  # first try, and the descriptor silently read `nextest`).
+  if [ "$sub" = nextest ]; then
+    local seen_nextest=0
+    for tok in "$@"; do
+      case "$tok" in
+        -*|+*) continue ;;
+        nextest) [ "$seen_nextest" -eq 1 ] || { seen_nextest=1; continue; } ;;
+      esac
+      [ "$seen_nextest" -eq 1 ] && { sub="nextest $tok"; break; }
+    done
+  fi
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -p|--package) pkgs+=("${2:-?}"); shift ;;
@@ -13772,9 +13787,16 @@ run_core_tests() {
   # fair share of cores so N concurrent gates never oversubscribe the box.
   # nextest reads --test-threads; the cargo-test fallback takes it after `--`.
   if [ "$NEXTEST" -eq 1 ]; then
+    # #3453: the nextest branch runs its two passes inside a `bash -c` body, which does
+    # NOT inherit the cargo observer — so (package, features) is hoisted into ONE pair of
+    # variables expanded into BOTH passes AND into the two records below. Without this the
+    # gate's longest component reported PASS with an UNDECLARED matrix (measured).
+    local core_pkg=cqlite-core core_feats=cli-helpers
+    _fm_observe_cargo_argv nextest run --package "$core_pkg" --features "$core_feats"
+    _fm_observe_cargo_argv test --doc --package "$core_pkg" --features "$core_feats"
     run_component core-tests bash -c '
-      cargo nextest run --package cqlite-core --features cli-helpers --test-threads "$1" -E "$2" &&
-      cargo test --doc --package cqlite-core --features cli-helpers -- "${@:3}"' \
+      cargo nextest run --package '"$core_pkg"' --features '"$core_feats"' --test-threads "$1" -E "$2" &&
+      cargo test --doc --package '"$core_pkg"' --features '"$core_feats"' -- "${@:3}"' \
       cqlite-agent-gate "$GATE_TEST_THREADS" "$nx_filter" "${skip_args[@]}"
   else
     run_component core-tests cargo test --package cqlite-core --features cli-helpers -- \

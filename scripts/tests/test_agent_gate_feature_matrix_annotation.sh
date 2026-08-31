@@ -200,6 +200,8 @@ expect_desc "U6: multi-package scope"           'clippy cqlite-flight+cqlite-py+
 expect_desc "U7: workspace + exclude count"     'clippy workspace(excl 5) --all-features' clippy --workspace --all-targets --all-features --exclude a --exclude b --exclude c --exclude d --exclude e
 expect_desc "U8: repeated --features accumulate" 'test cqlite-core --features a,b' test -p cqlite-core --features a --features b
 expect_desc "U9: --features=X form"             'test cqlite-core --features a,b' test -p cqlite-core --features=a,b
+expect_desc "U9b: nextest names its RUN subcommand" 'nextest run cqlite-core --features cli-helpers' nextest run --package cqlite-core --features cli-helpers --test-threads 16
+expect_reject "U9c: cargo nextest --version is a version PROBE, not a compile" nextest --version
 expect_reject "U10: cargo tree is not a compile" tree -p cqlite-core --all-features
 expect_reject "U11: cargo metadata is not a compile" metadata --format-version 1
 expect_reject "U12: cargo --version is not a compile" --version
@@ -334,8 +336,8 @@ describe_shim_log() {
 #                smoke needs a real binary), so the executed sets must be a SUBSET of the
 #                declared ones. Named here rather than quietly asserted as EXACT: a test
 #                that claims a strength it does not have is the defect this issue is about.
-run_differential() { # <component> <mode EXACT|CONTAINS>
-  local c="$1" mode="$2"
+run_differential() { # <component> <mode EXACT|CONTAINS> [why-not-exact]
+  local c="$1" mode="$2" why="${3:-}"
   local sum="$tmp/only-$c.txt" log="$tmp/only-$c.log" shimlog="$tmp/argv-$c.log"
   : > "$shimlog"
   FM_SHIM_LOG="$shimlog" \
@@ -377,7 +379,7 @@ run_differential() { # <component> <mode EXACT|CONTAINS>
       case "$ann" in *"$dsc"*) ;; *) missing+=("$dsc") ;; esac
     done < <(sort -u "$exec_side")
     if [ "${#missing[@]}" -eq 0 ]; then
-      ok "C-$c: every EXECUTED set is named in the declared matrix (CONTAINS; body aborts under a cargo stub)  $ann"
+      ok "C-$c: every EXECUTED set is named in the declared matrix (CONTAINS${why:+; $why})  $ann"
     else
       bad "C-$c: executed set(s) NOT named in the block: ${missing[*]}"
     fi
@@ -387,12 +389,18 @@ run_differential() { # <component> <mode EXACT|CONTAINS>
 if [ "${FM_SKIP_DIFFERENTIAL:-0}" = 1 ]; then
   echo "note - (C) differential skipped by FM_SKIP_DIFFERENTIAL=1 (debug only; the gate never sets it)"
 else
+  # core-tests' nextest branch is a SEVENTH `bash -c` body (conditional on nextest being
+  # installed), and it is the component whose line is pasted most often. CONTAINS, not
+  # EXACT: on a host WITHOUT cargo-nextest the gate takes the direct-cargo fallback
+  # branch, which records ONE set (the observer sees it) while the shim run here may
+  # observe either shape — asserting equality would make this case host-dependent.
+  run_differential core-tests        CONTAINS "host-dependent: nextest branch vs direct-cargo fallback"
   run_differential minimal-build     EXACT
   run_differential write-tests       EXACT
   run_differential memory-budget     EXACT
   run_differential integration-tests EXACT
-  run_differential cli-tests         CONTAINS
-  run_differential smoke             CONTAINS
+  run_differential cli-tests         CONTAINS "pass 2 unreached: the zero-tests guard fires under a cargo stub"
+  run_differential smoke             CONTAINS "the smoke script needs a real built binary"
 fi
 
 echo
