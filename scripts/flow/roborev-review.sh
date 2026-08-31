@@ -533,12 +533,12 @@ class #3564 closed by REMOVING prose reconstruction.
 issues= RECORDS THAT THE FINDING IS TRACKED, and each number must be a RETRIEVABLE
 GitHub issue — asked of GitHub, and THREE-VALUED: 'the issue does not exist'
 (ISSUE-ABSENT) and 'this box could not ask' (ISSUE-UNVERIFIABLE) are separate
-non-granting states, because `gh issue view` exits 1 for both and only the first is an
+non-granting states, because gh issue view exits 1 for both and only the first is an
 ANSWER. A deferral naming an issue that does not exist is a dropped finding wearing a
 link.
 
 NO PR-BODY LINK IS REQUIRED, DELIBERATELY (#3626). An earlier version also demanded a
-visible `#<N>` in the PR BODY. It was removed, not fixed: a PR body is EDITABLE AT ANY
+visible #<N> reference in the PR BODY. It was removed, not fixed: a PR body is EDITABLE
 TIME BY ANYONE WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, whereas a top-level
 comment is PERMANENT AND ATTRIBUTABLE — so the body was the weaker artifact, and would
 stay weaker even if Markdown parsed trivially. Its Markdown recognisers leaked in two

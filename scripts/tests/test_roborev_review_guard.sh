@@ -4958,7 +4958,7 @@ assert_says 'case (df7b) the could-not-ask has its OWN state, textually distinct
 assert_says 'case (df7b) it carries the diagnostic it could not interpret' 'HTTP 401: Bad credentials'
 assert_says 'case (df7b) it says this is not an answer' 'this is a could-not-ask, not an answer'
 assert_says 'case (df7b) and it sends the operator at the network, NOT at the marker' \
-  'fix the ability to reach GitHub (auth, network, rate limit) and re-run; do NOT change the marker'
+  'fix the ability to reach GitHub \(auth, network, rate limit\) and re-run; do NOT change the marker'
 # THE TWO NON-GRANTING STATES MUST NOT BE CONFUSABLE: a run that could not ask must never print the
 # state that means GitHub gave an answer.
 assert_lacks 'case (df7b) a could-not-ask never reports itself as an absent issue' '^deferral: ISSUE-ABSENT'
@@ -6060,10 +6060,12 @@ fi
 # The state machine must live in the SCANNER (one implementation of the parse) and must track both fence
 # characters; a shell-side copy is how the in-band channel of job 26 came back.
 _sole_ok=1
-# THE PREFIX IS A PARAMETER, so BOTH marker kinds (the absence waiver and the #3626 findings
+# THE STEM IS A PARAMETER, so BOTH marker kinds (the absence waiver and the #3626 findings
 # deferral) inherit this rule BY CALL. A second copy of it for the second kind would be a second
-# place for the channel rule to diverge, and a divergence here is an authorization bypass.
-grep -qF 'def sole_marker_line(body, prefix):' "$SCAN_TOOL" || _sole_ok=0
+# place for the channel rule to diverge, and a divergence here is an authorization bypass. It is a
+# STEM rather than a prefix-with-space since roborev round 2: an attempt is the stem plus whitespace
+# OR END OF LINE, so a comment that is exactly the stem is MALFORMED instead of silently NONE.
+grep -qF 'def sole_marker_line(body, stem):' "$SCAN_TOOL" || _sole_ok=0
 grep -qF 'if len(nonblank) != 1:' "$SCAN_TOOL" || _sole_ok=0
 grep -qF 'ONE DECISION, NO PARSE' "$SCAN_TOOL" || _sole_ok=0
 # AND NO MARKDOWN RECOGNISER MAY RETURN. Four were tried and superseded; reintroducing one would restore the
