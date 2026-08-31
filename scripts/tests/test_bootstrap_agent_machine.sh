@@ -3332,6 +3332,47 @@ else
     printf '%s\n' "$out_ap" | grep -i 'gate-pin' | head -2
   fi
 
+  # 11aq. TWO WAYS THE WEAKEN-SIGNAL COULD MISREAD A STACK (issue #3414, lead refinement).
+  #      (a) `envfile=` REDIRECTS which file is read, so a pam_env line pointing at
+  #          /etc/default/locale — both real service files here carry one — is not
+  #          evidence about ours. A stack whose ONLY pam_env line was that would otherwise
+  #          read as pinned when it is not.
+  #      (b) A distro may factor pam_env into the COMMON stack via `@include`; both real
+  #          files carry `@include common-session`. Reading only the service file would
+  #          report "no pam_env" there and weaken a correct box — the red-on-correct-input
+  #          shape, for the fifth time. One level is followed; deeper is not, and the
+  #          diagnostic says so rather than asserting an absence it did not establish.
+  pin_pamd_inc="$tmp/pin-pamd-inc"; pin_pamd_loc="$tmp/pin-pamd-loc"
+  mkdir -p "$pin_pamd_inc" "$pin_pamd_loc"
+  printf '@include common-session\n'                                  >"$pin_pamd_inc/sshd"
+  printf 'session required pam_env.so\n'                              >"$pin_pamd_inc/common-session"
+  printf 'session required pam_env.so\n'                              >"$pin_pamd_inc/login"
+  printf 'session required pam_env.so envfile=/etc/default/locale\n'  >"$pin_pamd_loc/sshd"
+  printf 'session required pam_env.so\n'                              >"$pin_pamd_loc/login"
+  envf_aq="$tmp/pin-env-aq"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_aq"
+  out_aq_inc=$(runpin "$pinroot" "$shims_one" "$envf_aq" HOME="$pin_home_plain" \
+    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_inc")
+  out_aq_loc=$(runpin "$pinroot" "$shims_one" "$envf_aq" HOME="$pin_home_plain" \
+    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_loc")
+  if printf '%s' "$out_aq_inc" | grep -qE '\[ok\].*gate-pin: VERIFIED'; then
+    ok "gate-pin: pam_env reached only through @include is found (one level), not read as absent"
+  else
+    bad "gate-pin: a stack that loads pam_env via @include was wrongly weakened"
+    printf '%s\n' "$out_aq_inc" | grep -i 'gate-pin' | head -2
+  fi
+  if printf '%s' "$out_aq_loc" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
+     && ! printf '%s' "$out_aq_loc" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: a pam_env line whose envfile= names ANOTHER file is not evidence for ours"
+  else
+    bad "gate-pin: an envfile=-redirected pam_env line was counted as reading our file"
+    printf '%s\n' "$out_aq_loc" | grep -i 'gate-pin' | head -2
+  fi
+  if printf '%s' "$out_aq_loc" | grep -q 'ONE level of @include'; then
+    ok "gate-pin: the gap diagnostic declares its own search limit (one @include level)"
+  else
+    bad "gate-pin: the gap diagnostic asserts an absence without naming how far it looked"
+  fi
+
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the

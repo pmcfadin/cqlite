@@ -2304,6 +2304,29 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       /*) [ -d "$CQLITE_BOOTSTRAP_PAM_DIR" ] && PIN_PAM_DIR="$CQLITE_BOOTSTRAP_PAM_DIR" ;;
     esac
   fi
+  # pin_pam_effective_lines <service-file>: the service file PLUS one level of @include.
+  #
+  # A DISTRIBUTION MAY FACTOR pam_env INTO THE COMMON STACK. Both /etc/pam.d/sshd and
+  # /etc/pam.d/login here carry `@include common-session`, and a predicate reading only the
+  # service file would report "no pam_env" on any distro that puts it there — weakening a
+  # correctly configured box, which is the red-on-correct-input shape this lane has hit
+  # four times. Measured on THIS box: common-session carries no pam_env line, so following
+  # the include changes nothing here; it is done for the distros where it would.
+  #
+  # ONE LEVEL, NOT RECURSIVE, and the not-found diagnostic SAYS SO — an absence you did not
+  # fully search for is not an absence, so the limit is declared rather than papered over.
+  pin_pam_effective_lines() {
+    local f="$1" inc
+    cat "$f" 2>/dev/null
+    while IFS= read -r inc; do
+      [ -n "$inc" ] || continue
+      case "$inc" in /*) : ;; *) inc="$PIN_PAM_DIR/$inc" ;; esac
+      [ -r "$inc" ] && cat "$inc" 2>/dev/null
+    done <<EOF
+$(awk '/^[[:space:]]*@include[[:space:]]+/ { print $2 }' "$f" 2>/dev/null)
+EOF
+  }
+
   PIN_PAM_UNCHECKED=""
   pin_pam_services_missing_readenv() {
     local svc f missing=""
@@ -2314,14 +2337,19 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
         PIN_PAM_UNCHECKED="${PIN_PAM_UNCHECKED:+$PIN_PAM_UNCHECKED }$svc"
         continue
       fi
-      if ! awk -v envfile="$PIN_ENV_FILE" '
+      # `envfile=` REDIRECTS WHICH FILE IS READ, so a pam_env line is evidence about ours
+      # only if it does not point elsewhere. Both service files here carry a second
+      # pam_env line with envfile=/etc/default/locale — that one reads the locale file and
+      # must not count, or a stack whose ONLY pam_env line was the locale one would read
+      # as pinned when it is not. sshd still qualifies, via its bare line alone.
+      if ! pin_pam_effective_lines "$f" | awk -v envfile="$PIN_ENV_FILE" '
             /^[[:space:]]*#/ { next }
             $1 == "session" && /pam_env\.so/ {
               if ($0 ~ /readenv=0/) next
               if ($0 ~ /envfile=/) { if ($0 !~ ("envfile=" envfile "([[:space:]]|$)")) next }
               found = 1
             }
-            END { exit(found ? 0 : 1) }' "$f" 2>/dev/null; then
+            END { exit(found ? 0 : 1) }' 2>/dev/null; then
         missing="${missing:+$missing }$svc"
       fi
     done
@@ -2494,7 +2522,8 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
                   # gate is actually created by do not read this file, so what was
                   # measured through sudo is not evidence about them.
                   warn "gate-pin: NOT-SYSTEM-WIDE ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE and a sudo session sees it, but the PAM stack for [$pin_pam_gap] does NOT read $PIN_ENV_FILE — sessions created by those services, which is how gates are launched, will not get it)"
-                  info "add a session-stage 'pam_env.so' (readenv defaults to on) to /etc/pam.d/{$(printf '%s' "$pin_pam_gap" | tr ' ' ',')}, then re-run"
+                  info "add a session-stage 'pam_env.so' (readenv defaults to on) to $PIN_PAM_DIR/{$(printf '%s' "$pin_pam_gap" | tr ' ' ',')}, then re-run"
+                  info "searched each service file plus ONE level of @include; a pam_env buried deeper than that would not have been seen, so confirm by hand before rewriting a stack"
                   info "the sudo-session result above is real but does not generalise; the per-run authority stays the gate's own cpu-budget: max-concurrency=N(...) token"
                 else
                 ok "gate-pin: VERIFIED ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE AND a fresh PAM-created, profile-free session sees that SAME value, which the gate HONOURS verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first)"
