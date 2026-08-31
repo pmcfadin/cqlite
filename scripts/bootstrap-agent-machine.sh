@@ -2365,6 +2365,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # session type the probe could open. What it does NOT buy is a launch path with no
     # PAM in its ancestry at all — that residual is real and is stated, not implied.
     info "scope: measured through a PAM-created (sudo) session against the line in $PIN_ENV_FILE. Whether the service stacks a gate is actually launched from also read that file is NOT checked here — and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has it applied at all"
+    info "scope: pam_env reads $PIN_ENV_FILE at SESSION CREATION, so this verdict is about FUTURE sessions. THIS shell, and every process already descended from it — including workers a launcher started before now — do NOT have the pin and will not until their sessions are recreated. A gate launched by such a worker still resolves the #1825 cap from the formula (#3728)"
     info "the authoritative per-run confirmation is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) there means that gate did not see the pin)"
     [ -n "$PIN_PROBE_SUBJECT_NOTE" ] && info "subject: $PIN_PROBE_SUBJECT_NOTE"
   }

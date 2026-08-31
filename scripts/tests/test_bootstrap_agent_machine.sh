@@ -3231,10 +3231,19 @@ else
   # The PAM weaken-signal was DELETED (#3414 round 7 ruling), so the note no longer claims
   # the service stacks were checked — it now states that they are NOT checked here. That
   # is the whole point of the deletion: the note must not assert a scope nothing measured.
+  # AND IT MUST DISCLOSE THE TEMPORAL HALF (#3728). pam_env reads the file at SESSION
+  # CREATION, so a VERIFIED verdict is about FUTURE sessions: this shell and everything
+  # already descended from it — including workers a launcher started earlier — do not have
+  # the pin until their sessions are recreated. That was disclosed in the PR body and in
+  # #3728 and NOWHERE IN THE EMITTED LINE, which is the only place an operator reads. A
+  # caveat that lives where only a caveat-hunter looks is not a disclosure; asserted here
+  # so a later edit cannot drop it silently.
   if printf '%s' "$out_x" | grep -q 'is NOT checked here' \
      && printf '%s' "$out_x" | grep -q 'created WITHOUT PAM' \
+     && printf '%s' "$out_x" | grep -q 'SESSION CREATION' \
+     && printf '%s' "$out_x" | grep -q 'already descended from it' \
      && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
-    ok "gate-pin: the scope note states what it did NOT check and names the gate's token as authority"
+    ok "gate-pin: the scope note states what it did NOT check, that the verdict covers FUTURE sessions only, and names the gate's token as authority"
   else
     bad "gate-pin: the scope note does not match the correlated verdict"
     printf '%s\n' "$out_x" | grep -iA 3 'gate-pin: VERIFIED' | head -4
