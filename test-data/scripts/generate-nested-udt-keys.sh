@@ -577,8 +577,8 @@ flush_ks() {
 #   * s_list_udt holds two lists with the same elements in DIFFERENT order, which
 #     are DISTINCT list values — the case a set-of-lists exists to test.
 #   * f_map_tuple_udt / f_map_set_udt hold two entries each, so the frozen-map
-#     KEY decode (the only route to value_to_hashable_key) is exercised with
-#     more than one key and with Cassandra's own key ordering.
+#     KEY decode is exercised with more than one key and with Cassandra's own
+#     key ordering.
 #   * s_map_udt_key / s_map_udt_val hold TWO set elements, the first a two-entry
 #     frozen map written out of key order: so the element is a real multi-pair
 #     `Value::Map` when `contains_udt`'s Map arm walks it, and `any(...)` is not

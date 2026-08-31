@@ -4,7 +4,7 @@
 -- WHY THIS FIXTURE EXISTS
 -- The Python binding projects a CQL `set` to a Python `set` and a CQL `map` to a
 -- Python `dict`, so every set ELEMENT and every map KEY has to be reduced to a
--- HASHABLE Python object. That reduction (bindings/python/src/value.rs
+-- HASHABLE Python object. That reduction (bindings/python/src/value_hashable.rs
 -- `value_to_hashable_key` / `contains_udt`) was not TOTAL over the
 -- `cqlite_core::Value` tree: a UDT reached through a tuple or through a nested
 -- collection fell through to the generic converter and raised
