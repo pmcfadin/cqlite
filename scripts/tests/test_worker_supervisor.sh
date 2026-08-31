@@ -8078,43 +8078,110 @@ t test_lane_lock_failed_reclaim_rename_is_named
 # pointing the other way.
 # ---------------------------------------------------------------------------
 test_lane_lock_pid_bound_is_the_platform_pid_space() {
-  local d ceiling verdict f
+  local d verdict raw_max ceiling inclusive
   d="$(new_case_dir)"
   common_env "$d"
-  ceiling="$(env SUP="$SUPERVISOR" bash -c 'source "$SUP"; supervisor_pid_space_ceiling' 2>/dev/null || true)"
-  case "$ceiling" in
-    '' | *[!0123456789]*)
-      fail "lane-lock-pid-ceiling: [$ceiling] — the ceiling must be a decimal number on every platform, from the platform where it publishes one and from the conservative constant where it does not"
-      return 0
-      ;;
-  esac
-  pass "lane-lock B3: the pid-space ceiling resolves to [$ceiling] on this host"
 
   probe_pid() {
     printf '%s\n' "$1" >"$d/pidfile"
     env SUP="$SUPERVISOR" F="$d/pidfile" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true
   }
-  # The two widths that used to disagree.
-  local ten fifteen above at_ceiling
+
+  ceiling="$(env SUP="$SUPERVISOR" bash -c 'source "$SUPERVISOR"; supervisor_pid_space_ceiling' 2>/dev/null || true)"
+  # THE PROBE IS THREE-VALUED, so the case must handle BOTH of its answers rather than requiring the one
+  # this host happens to give (#3601, roborev job 231 B10). An earlier cut of this case required the
+  # ceiling to parse as a bare number, which on a platform that publishes none would have failed a
+  # CORRECT implementation — and, worse, it asserted a pid EQUAL to the ceiling was accepted, pinning the
+  # off-by-one as correct. That is the #3559 shape (a test pinning wrong behaviour) inside this suite, so
+  # it is fixed here together with the code rather than by moving the boundary.
+  case "$ceiling" in
+    'authoritative '*)
+      inclusive="${ceiling#authoritative }"
+      pass "lane-lock B3/B10: this platform publishes a pid bound; the probe converts it to the INCLUSIVE maximum [$inclusive]"
+      ;;
+    'unknown '*)
+      pass "lane-lock B3/B10: this platform publishes no readable pid bound, so the probe says [$ceiling] — the gate does not apply and, critically, nothing invents a number in its place"
+      ;;
+    *)
+      fail "lane-lock-pid-ceiling: [$ceiling] — the probe must answer 'authoritative <n>' or 'unknown <cause>' and nothing else"
+      unset -f probe_pid
+      return 0
+      ;;
+  esac
+
+  # ---- (1) THE OFF-BY-ONE, MEASURED AGAINST THE PLATFORM'S OWN FILE. `proc(5)` says `pid_max` is the
+  # value at which pids WRAP — one greater than the maximum pid — so `pid_max` itself is not issuable and
+  # must REFUSE, while `pid_max - 1` is a pid a real process can hold and must be ACCEPTED. Both
+  # directions, because a bound that rejects a legal pid would turn live holders into "malformed" and
+  # wedge the lane, which is the same harm inverted.
+  if [[ "$ceiling" == 'authoritative '* ]]; then
+    raw_max="$(cat /proc/sys/kernel/pid_max 2>/dev/null || true)"
+    if [[ "$raw_max" =~ ^[0-9]+$ ]] && [[ "$inclusive" == "$((raw_max - 1))" ]]; then
+      pass "lane-lock B10: the inclusive maximum [$inclusive] is exactly the platform's exclusive wrap point [$raw_max] minus one, as proc(5) defines it"
+    else
+      fail "lane-lock-pid-ceiling-conversion: pid_max=[$raw_max] inclusive=[$inclusive] — the exclusive wrap point must be converted, not used as-is"
+    fi
+    verdict="$(probe_pid "$raw_max")"
+    if [[ "$verdict" == 'unparseable pid-above-the-platform-pid-space' ]]; then
+      pass "lane-lock B10: a pid EQUAL to the exclusive wrap point REFUSES — the value no process can hold no longer parses as a holder pid"
+    else
+      fail "lane-lock-pid-ceiling-offbyone: verdict=[$verdict] for pid_max=$raw_max — this is the one malformed value the pre-B10 boundary let through, and the case that used to assert it was ACCEPTED"
+    fi
+    verdict="$(probe_pid "$inclusive")"
+    if [[ "$verdict" == "pid $inclusive" ]]; then
+      pass "lane-lock B10 (the other direction): the largest pid a process CAN hold is still accepted — the corrected bound rejects nothing legal, so it cannot wedge the lane"
+    else
+      fail "lane-lock-pid-ceiling-rejects-legal: verdict=[$verdict] — rejecting an issuable pid is the same harm pointing the other way"
+    fi
+    verdict="$(probe_pid $((raw_max + 1)))"
+    if [[ "$verdict" == 'unparseable pid-above-the-platform-pid-space' ]]; then
+      pass "lane-lock B3: a pid past the wrap point refuses"
+    else
+      fail "lane-lock-pid-bound-above: [$verdict]"
+    fi
+  fi
+
+  # ---- (2) THE WIDTH INCONSISTENCY THE BOUND EXISTS FOR. A 10-digit and a 15-digit corruption used to
+  # get OPPOSITE verdicts — the narrower one accepted, probed, reported dead and RECLAIMED. Asserted only
+  # as "the same verdict", so the case stays true on a platform that publishes no bound (where both are
+  # refused by the arithmetic guard, or both accepted) rather than pinning this host's answer.
+  local ten fifteen
   ten="$(probe_pid 9999999999)"
   fifteen="$(probe_pid 999999999999999)"
-  if [[ "$ten" == 'unparseable pid-above-the-platform-pid-space' && "$fifteen" == 'unparseable pid-above-the-platform-pid-space' ]]; then
+  if [[ "$ten" == "$fifteen" ]]; then
     pass "lane-lock B3: a 10-digit and a 15-digit corruption now get the SAME verdict [$ten] — the width-dependent inconsistency is gone, and the accepting half of it (which reclaimed) with it"
   else
     fail "lane-lock-pid-bound-inconsistent: ten=[$ten] fifteen=[$fifteen] — a corruption that reclaims at one width and refuses at another is the hole this closes"
   fi
-  above="$(probe_pid $((ceiling + 1)))"
-  at_ceiling="$(probe_pid "$ceiling")"
-  if [[ "$above" == 'unparseable pid-above-the-platform-pid-space' ]]; then
-    pass "lane-lock B3: a pid one past the platform ceiling refuses"
+
+  # ---- (3) NO INVENTED CONSTANT SURVIVES. The rejected design substituted Linux's PID_MAX_LIMIT
+  # wherever `/proc` was absent, which on macOS accepted values 42x the real platform limit and was a
+  # guess about an unmeasured platform presented as a bound. Structural, because no behavioural case on a
+  # Linux host can observe the non-Linux path.
+  local invented
+  invented="$(grep -nE 'SUPERVISOR_PID_MAX_FALLBACK|4194304' "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  if [[ -z "$invented" ]]; then
+    pass "lane-lock B10 STRUCTURAL: no cross-platform pid ceiling constant exists in the supervisor's code — an unreadable bound yields \`unknown\`, never a number nobody measured (CLAUDE.md #28)"
   else
-    fail "lane-lock-pid-bound-above: [$above]"
+    fail "lane-lock-pid-ceiling-invented: [$invented] — a guessed bound for an unmeasured platform is a no-heuristics violation, not a conservative default"
   fi
-  if [[ "$at_ceiling" == "pid $ceiling" ]]; then
-    pass "lane-lock B3 (the other direction): a pid AT the platform ceiling is ACCEPTED — the bound cannot turn a pid a real process could hold into 'malformed', which would wedge the lane"
-  else
-    fail "lane-lock-pid-bound-at-ceiling: [$at_ceiling] — rejecting a legal pid is the same harm pointing the other way"
+
+  # ---- (4) MUTANT CONTRAST for the conversion: use the exclusive value as if it were inclusive, which
+  # is the pre-B10 spelling, and the wrap-point pid is accepted again.
+  local ovr mverdict
+  ovr="$d/m-ceiling.sh"; : >"$ovr"
+  if [[ "$ceiling" == 'authoritative '* ]] && sv_mutant_override "$ovr" supervisor_pid_space_ceiling \
+       "  printf 'authoritative %s' \"\$((b - 1))\"" \
+       "  printf 'authoritative %s' \"\$b\""; then
+    printf '%s\n' "$raw_max" >"$d/pidfile"
+    mverdict="$(env SUP="$SUPERVISOR" OVR="$ovr" F="$d/pidfile" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+    if [[ "$mverdict" == "pid $raw_max" ]]; then
+      pass "lane-lock B10 MUTANT: with the exclusive wrap point used as an inclusive maximum the unissuable value $raw_max is ACCEPTED again — so the conversion is what refuses it, and the assert above is not vacuous"
+    else
+      fail "lane-lock-mutant-ceiling: verdict=[$mverdict] — the pre-B10 spelling must be shown to accept the wrap point"
+    fi
   fi
+
   unset -f probe_pid
 }
 
