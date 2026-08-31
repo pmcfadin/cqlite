@@ -151,19 +151,54 @@ FIXTURE_STATUS_BEFORE=$(git -C "$REPO" status --porcelain -- "$FIXTURE_REL" 2>/d
 # taken is `UNMEASURED`, never a hash, and UNMEASURED on either side FAILS the case — an
 # unanswerable question is not a clean answer.
 _fixture_content_digest() {
-  local n out
-  n=$(find "$REPO/$FIXTURE_REL" -type f 2>/dev/null | wc -l | tr -d ' ')
+  # PORTABLE, and git-only by design. The first version used `sort -z` and `sha256sum`,
+  # both GNU-only: on stock macOS — a supported host — neither exists, the digest became
+  # UNMEASURED, and this script's own fail-closed rule then FAILED `bti-multiclustering`
+  # on a healthy tree (roborev job 268). A guard that reds on a supported platform is the
+  # guard that platform's operators learn to waive.
+  #
+  # `git ls-files -z` + `git hash-object` need nothing but git, which this script already
+  # requires for the status leg, and `-z` is git's own flag rather than a coreutils
+  # extension. ls-files emits in git's own sorted order, so no external sort is needed —
+  # which also removes the newline-in-filename hazard a plain `sort` would reintroduce.
+  #
+  # The VALUE is the sorted "<blob-sha> <path>" text itself, not a hash of it: comparing
+  # the text is exact, and it means no digest utility is required at all.
+  #
+  # EVERY status is checked, per the same finding's second half: a partial traversal or a
+  # failed per-file hash must yield UNMEASURED, never a well-formed digest of incomplete
+  # input.
+  # NUL-delimited data CANNOT round-trip through a shell variable — command substitution
+  # strips NUL ("bash: ignored null byte in input"), which silently collapsed the file
+  # list and made every call return UNMEASURED. Caught by running the helper rather than
+  # reading it. So the list goes to a temp FILE, which holds NULs fine and also lets
+  # git's exit status be checked before the list is used.
+  local tmpf n out h rc emitted
+  tmpf=$(mktemp "${TMPDIR:-/tmp}/i3358-dg.XXXXXX") || { printf 'UNMEASURED(mktemp)'; return; }
+  if ! git -C "$REPO" ls-files -z -- "$FIXTURE_REL" >"$tmpf" 2>/dev/null; then
+    rm -f "$tmpf"; printf 'UNMEASURED(ls-files-failed)'; return
+  fi
+  n=$(tr -cd '\0' <"$tmpf" | wc -c | tr -d ' ')
   case $n in
-    ''|*[!0-9]*) printf 'UNMEASURED(count)'; return ;;
-    0)           printf 'UNMEASURED(no-files)'; return ;;
+    ''|*[!0-9]*) rm -f "$tmpf"; printf 'UNMEASURED(count)'; return ;;
+    0)           rm -f "$tmpf"; printf 'UNMEASURED(no-tracked-files)'; return ;;
   esac
-  out=$(find "$REPO/$FIXTURE_REL" -type f -print0 2>/dev/null \
-        | LC_ALL=C sort -z \
-        | xargs -0 sha256sum 2>/dev/null \
-        | sha256sum 2>/dev/null | cut -d' ' -f1)
-  case $out in
-    ''|*[!0-9a-f]*) printf 'UNMEASURED(digest)'; return ;;
-  esac
+  out=""
+  while IFS= read -r -d '' f; do
+    h=$(git -C "$REPO" hash-object -- "$f" 2>/dev/null); rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$h" ]; then
+      rm -f "$tmpf"; printf 'UNMEASURED(hash-object-failed)'; return
+    fi
+    out="$out$h $f
+"
+  done <"$tmpf"
+  rm -f "$tmpf"
+  # Re-assert the count: a `while read` that terminated early would otherwise emit a
+  # shorter, perfectly well-formed value.
+  emitted=$(printf '%s' "$out" | grep -c .)
+  if [ "$emitted" != "$n" ]; then
+    printf 'UNMEASURED(truncated:%s-of-%s)' "$emitted" "$n"; return
+  fi
   printf '%s:%s' "$n" "$out"
 }
 FIXTURE_DIGEST_BEFORE=$(_fixture_content_digest)
