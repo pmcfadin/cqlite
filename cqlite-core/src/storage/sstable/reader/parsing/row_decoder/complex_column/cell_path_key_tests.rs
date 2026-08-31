@@ -1502,3 +1502,38 @@ fn a_foreign_type_ending_in_bytes_type_is_not_treated_as_a_declared_blob() {
     assert!(!p.cell_path_key_declares_blob("org.apache.cassandra.db.marshal.bytestype"));
     assert!(!p.cell_path_key_declares_blob("bytestype"));
 }
+
+/// R10-F1: a `float` map key keeps CQL type identity.
+///
+/// `float` keys became reachable when #3612 widened the cell-path allowlist, and
+/// the shared arm was widening f32 to the f64 `Value::Float` — so such a key
+/// compared UNEQUAL to the same float decoded on the ordinary column path or as a
+/// UDT field, both of which produce `Value::Float32`. Pinned on both spellings and
+/// against the frozen reader, since a map key that cannot compare equal to its own
+/// value is the same collapse-class this issue exists for.
+#[test]
+fn float_cell_path_key_keeps_cql_type_identity() {
+    let p = parser();
+    let bytes = 1.5f32.to_be_bytes();
+    for spelling in ["float", &format!("{MARSHAL}.FloatType")] {
+        assert_eq!(
+            p.parse_cell_path_key(&bytes, spelling, "k").unwrap(),
+            Value::Float32(1.5),
+            "{spelling}: a float key is Float32, not the f64 Float"
+        );
+    }
+    // Cross-spelling parity, same property as the composite keys: the frozen
+    // reader must agree, or one map's two spellings disagree on a float key.
+    assert_eq!(
+        p.parse_cell_path_key(&bytes, "float", "k").unwrap(),
+        p.parse_value_from_raw_bytes(&bytes, "float", "k", 0)
+            .unwrap(),
+    );
+    // `double` is untouched and REMAINS the f64 `Value::Float` — the fix narrows
+    // `float` alone and must not have swept its neighbour up.
+    assert_eq!(
+        p.parse_cell_path_key(&9.876f64.to_be_bytes(), "double", "k")
+            .unwrap(),
+        Value::Float(9.876)
+    );
+}

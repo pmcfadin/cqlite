@@ -332,8 +332,15 @@ impl V5CompressedLegacyParser {
     /// from the schema (`frozen<collide>`, `int`) or a Cassandra marshal form from
     /// `Statistics.db` (`org.apache.cassandra.db.marshal.UserType(…)`) — and is
     /// forwarded WITH ITS CASE INTACT (see the module header).
-    /// Decode a cell-path key. Convenience form that DISCARDS the
-    /// undecodable-key signal; see [`Self::parse_cell_path_key_reporting`].
+    /// Decode a cell-path key, DISCARDING the undecodable-key signal; see
+    /// [`Self::parse_cell_path_key_reporting`], which is the production entry point.
+    ///
+    /// TEST-ONLY, and gated so `-D dead-code` says so honestly: the only production
+    /// caller (`complex_column`'s map branch) takes the reporting form, because it
+    /// aggregates the signal across a row's entries. This wrapper exists solely to
+    /// keep this module's 62 unit call sites on the simpler signature; an
+    /// `#[allow(dead_code)]` would have silenced a true statement instead.
+    #[cfg(test)]
     pub(super) fn parse_cell_path_key(
         &self,
         data: &[u8],
