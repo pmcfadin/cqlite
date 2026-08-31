@@ -71,11 +71,12 @@
 #      session that sees a value the gate honours — because file-only was the original
 #      #3414 defect and session-only certifies a pin that may reach sudo sessions alone,
 #      and the file's VALUE must EQUAL the session's (presence alone let a file saying
-#      `abc` pass while a per-user override supplied `1`). NON-LINUX hosts report an
-#      a NARROWER question, never an exemption: there is no PAM-read system-wide file to
-#      correlate against, so the file half is dropped and the verdict is the scoped
-#      VERIFIED-NO-SYSTEM-FILE — but an unpinned non-Linux host is still NON-PASSING. An
-#      unconditional `ok` there let `--strict` certify an unpinned Mac. `--yes` persists it, and
+#      `abc` pass while a per-user override supplied `1`). NON-LINUX hosts get UNMEASURED
+#      and never a success: with no PAM-read system-wide file there is nothing to correlate
+#      the session value against, so a machine-wide pin cannot be told apart from a sudo-
+#      or user-scoped one that ordinary gate processes never see. No verdict that reports a
+#      state is available there, so none is given. `verify.run` runs on Linux, so nothing
+#      on this fleet regresses. `--yes` persists it, and
 #      so does the narrow `--fix-gate-pin` that `.agent-ami/profile.yaml`'s verify.run
 #      passes, so a freshly launched box is PINNED rather than merely reported unpinned.
 #      PAM reads /etc/environment at session creation, so the probe in the SAME run sees
@@ -2526,8 +2527,26 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
           # an unpinned host still lands in the non-passing branch below (#3414 final
           # roborev — the earlier `NOT-APPLICABLE` ok certified exactly that host).
           if [ "${PIN_PLATFORM_UNMANAGED:-0}" = 1 ]; then
-            ok "gate-pin: VERIFIED-NO-SYSTEM-FILE (a fresh, profile-free session on this $PLATFORM host sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate HONOURS it verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first. There is no PAM-read system-wide file here, so this does NOT establish the pin is system-wide — only that a fresh session gets it)"
-            pin_scope_note
+            # NO SUCCESS VERDICT IS AVAILABLE HERE, SO NONE IS GIVEN (#3414 roborev round
+            # 14). With no PAM-read system-wide file there is nothing to correlate the
+            # session value against — and that correlation is exactly how the Linux path
+            # tells a machine-wide pin from a sudo- or user-scoped one (a sudoers
+            # `env_file`, `~/.pam_environment`). The problem is not merely unsolved here,
+            # it is UNSOLVABLE with the machinery this section has.
+            #
+            # So every verdict that reports a state either over-claims or permanently reds:
+            # an `ok` certifies a host whose ordinary gate processes may be unpinned, and a
+            # FAILED asserts an absence nothing established. The honest third answer is that
+            # the measurement could not be taken, cause named. "Could not measure" is a
+            # different statement from "wrong", and it is the true one — so this is NOT the
+            # red-on-correct-input shape refused elsewhere in this section.
+            #
+            # SECOND GUARD ON THIS BRANCH REPLACED RATHER THAN PATCHED, after the PAM
+            # weaken-signal. Introduced round 11, amended round 13, defective again round
+            # 14; the pre-committed trigger for that pattern is deletion, and it applies to
+            # a verdict the LEAD introduced exactly as it applied to the PAM signal.
+            warn "gate-pin: UNMEASURED (a fresh, profile-free session on this $PLATFORM host sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate would HONOUR it — but this platform has no PAM-read system-wide file to compare it against, so a machine-wide pin cannot be told apart from a sudo- or user-scoped one that ordinary gate processes never see)"
+            info "on this platform the per-run authority is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) means that gate did not see the pin)"
           else
           case "$PIN_FILE_HAS_LINE" in
             yes)

@@ -225,9 +225,19 @@ pin_tree_id() {
   local head dig
   if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     head=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'UNKNOWN')
+    # UNTRACKED CONTENTS ARE HASHED TOO (#3414 roborev round 14, finding EE). `git status
+    # --porcelain` NAMES an untracked file; `git diff` omits its CONTENT — so editing an
+    # already-untracked file left the digest unchanged and reported STABLE. The lead
+    # preferred narrowing the claim to tracked files; I covered them instead, because the
+    # hole is closable in one line and a narrower claim would still have missed a real
+    # shared-worktree edit. IGNORED paths stay excluded on purpose (`--exclude-standard`):
+    # this lane's own scratch — the verdict file, the follow-up list — changes constantly
+    # and hashing it would make every run report MOVED, which is the alarm nobody reads.
     dig=$( { git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null
              git -C "$SCRIPT_DIR" diff 2>/dev/null
              git -C "$SCRIPT_DIR" diff --cached 2>/dev/null
+             git -C "$SCRIPT_DIR" ls-files --others --exclude-standard -z 2>/dev/null \
+               | xargs -0 -r git -C "$SCRIPT_DIR" hash-object -- 2>/dev/null
            } | git hash-object --stdin 2>/dev/null )
     case "$dig" in
       ?*) dig=$(printf '%s' "$dig" | cut -c1-12) ;;
@@ -239,7 +249,7 @@ pin_tree_id() {
   fi
 }
 PIN_TREE_START=$(pin_tree_id)
-printf 'tree-start: %s\n' "$PIN_TREE_START"
+printf 'tree-start: %s  (worktree digest covers tracked diffs + untracked contents; ignored paths excluded)\n' "$PIN_TREE_START"
 
 # --- 1. syntax check (bash -n) ---
 if bash -n "$BOOTSTRAP" 2>/dev/null; then
@@ -1207,7 +1217,21 @@ EOF
 mk_push_bin() {
   local dir="$1" setup="${2:-:}"
   mkdir -p "$dir"
-  mk_stub "$dir" uname 'echo Darwin'
+  # LINUX, plus a perf stub — changed by finding DD (#3414 round 14). This sandbox reported
+  # Darwin purely to skip the Linux-only perf section. But DD made a non-Linux host
+  # permanently NON-PASSING (with no system-wide file there is nothing to correlate a
+  # session value against), so Darwin now costs a gate-pin warn instead: `base_warns` went
+  # 1 -> 2 and the three green-path cases silently skipped for the FOURTH time. Measured
+  # both ways before choosing — Darwin: gate-pin warns; Linux: gate-pin passes and only the
+  # perf section warns. So the sandbox becomes Linux and the one section that made Darwin
+  # attractive is satisfied directly. It also makes the green-path cases MORE meaningful:
+  # "this box certifies green" is now a Linux-only claim, so they must model a Linux box.
+  mk_stub "$dir" uname 'echo Linux'
+  # perf stat is invoked with CSV output, so the stub emits `<count>,,cycles` on stderr as
+  # the real one does — a human-formatted row parses as no-cycles-row (verified against the
+  # shipped awk rather than guessed).
+  mk_stub "$dir" perf 'case "$*" in *stat*) echo "1234567,,cycles" >&2 ;; esac
+exit 0'
   mk_stub "$dir" sccache 'exit 0'
   mk_stub "$dir" cargo-nextest 'exit 0'
   mk_stub "$dir" cargo 'exit 0'
@@ -2857,9 +2881,12 @@ else
   # them is what keeps this a real guard — a bare count of 2 would let a third `ok` in as
   # soon as someone removed one of these.
   pin_ok_total=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "' || true)
-  pin_ok_named=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: (VERIFIED|VERIFIED-NO-SYSTEM-FILE)' || true)
-  if [ -n "$pin_section" ] && [ "${pin_ok_total:-0}" = 2 ] && [ "${pin_ok_named:-0}" = 2 ]; then
-    ok "gate-pin: section 5b's ONLY success verdicts are VERIFIED and VERIFIED-NO-SYSTEM-FILE"
+  pin_ok_named=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: VERIFIED [(]' || true)
+  # ONE success verdict again (#3414 round 14): the non-Linux `ok` was deleted, because on a
+  # platform with no system-wide file to correlate against no verdict that reports a state
+  # is available. A second `ok` reappearing here means someone re-added an exemption.
+  if [ -n "$pin_section" ] && [ "${pin_ok_total:-0}" = 1 ] && [ "${pin_ok_named:-0}" = 1 ]; then
+    ok "gate-pin: section 5b's ONLY success verdict is VERIFIED (no platform exemption)"
   else
     bad "gate-pin: section 5b has ${pin_ok_total:-0} ok() call(s), ${pin_ok_named:-0} of them a named verdict"
   fi
@@ -3291,12 +3318,12 @@ else
   mk_stub "$shims_mac" uname 'echo Darwin'
   envf_ac="$tmp/pin-env-ac"; : >"$envf_ac"
   out_ac=$(runpin "$pinroot" "$shims_mac" "$envf_ac" HOME="$pin_home_plain")
-  if printf '%s' "$out_ac" | grep -qE '\[ok\].*gate-pin: VERIFIED-NO-SYSTEM-FILE' \
-     && printf '%s' "$out_ac" | grep -q 'does NOT establish the pin is system-wide' \
-     && ! printf '%s' "$out_ac" | grep -qE '\[warn\].*gate-pin'; then
-    ok "gate-pin: a non-Linux host WITH an honoured pin gets the scoped ok, worded to claim less"
+  if printf '%s' "$out_ac" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+     && printf '%s' "$out_ac" | grep -q 'no PAM-read system-wide file to compare it against' \
+     && ! printf '%s' "$out_ac" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: a non-Linux host with a session-visible pin is UNMEASURED, never certified"
   else
-    bad "gate-pin: a non-Linux host with a good pin was not reported with the scoped verdict"
+    bad "gate-pin: a non-Linux host was given a verdict its platform cannot support"
     printf '%s\n' "$out_ac" | grep -i 'gate-pin' | head -3
   fi
 
@@ -3309,7 +3336,7 @@ else
   out_ac2=$(runpin "$pinroot" "$shims_mac_none" "$envf_ac2" HOME="$pin_home_plain")
   if ! printf '%s' "$out_ac2" | grep -qE '\[ok\].*gate-pin' \
      && printf '%s' "$out_ac2" | grep -qE '\[warn\].*gate-pin'; then
-    ok "gate-pin: an UNPINNED non-Linux host is NON-PASSING — no platform exemption certifies it"
+    ok "gate-pin: an UNPINNED non-Linux host is also NON-PASSING — no platform exemption certifies it"
   else
     bad "gate-pin: an unpinned non-Linux host was certified (the finding-BB defect)"
     printf '%s\n' "$out_ac2" | grep -i 'gate-pin' | head -3
