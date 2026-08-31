@@ -64,7 +64,27 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 skipped() { printf 'skip - %s\n' "$1"; }
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-annot.XXXXXX") || exit 1
-trap 'rm -rf "$tmp"' EXIT
+
+# AN EARLY ABORT MUST NEVER EXIT 0 — measured, not predicted (roborev job 273, F1).
+# `tooling-tests` judges this file by its EXIT STATUS, and under real /bin/bash 3.2
+# (3.2.57, in a container) the pre-F1 version of this guard hit its `declare -A`, then died
+# on the `set -u` unbound-variable that followed — after ONE of 84 cases — and exited 0.
+# So the bash-4-only construct did not red the gate on macOS: it degraded this guard to a
+# VACUOUS PASS, which is strictly worse than the loud failure F1 described. The construct is
+# now linted (test_agent_gate_summary.sh section 8c), but the abort CLASS is general — a
+# missing tool, a set -u slip, a syntax error in a future edit — so it is closed here at the
+# exit boundary rather than one construct at a time.
+FM_REACHED_END=0
+_fm_on_exit() {
+  local rc=$?
+  rm -rf "$tmp"
+  if [ "$FM_REACHED_END" -ne 1 ]; then
+    printf 'FAIL - the guard ABORTED before its terminal tally (set -u, a syntax error, or a missing tool). Whatever the exit status was, this run certified nothing.\n' >&2
+    exit 1
+  fi
+  exit "$rc"
+}
+trap _fm_on_exit EXIT
 
 [ -r "$GATE" ] || { echo "FAIL - cannot read $GATE"; exit 1; }
 
@@ -928,10 +948,22 @@ FAKESELF
     _fm_annotate scoped-tests
   )
 }
+# SUBJECT-AVAILABILITY (measured under real /bin/bash 3.2 in a minimal container, where
+# these four reported FAIL for a reason that had nothing to do with the subject):
+# run_scoped_tests takes its #2658 fail-closed NO-PARSER exit before any routing when
+# NEITHER jq nor python3 is present, so on such a host the python tier is never reached and
+# these cases have no subject. Reported as SKIPs, counted in neither total (#3249's rule) —
+# a case that reds on correct input is the case agents learn to waive. P5 below is
+# deliberately NOT gated: it drives that very exit on purpose.
+fm_have_meta_parser=0
+{ type -P jq >/dev/null 2>&1 || type -P python3 >/dev/null 2>&1; } && fm_have_meta_parser=1
 py_plan_pure='python-tier: maturin develop && pytest'
 py_plan_mixed='rust-pkg: cqlite-core
 python-tier: maturin develop && pytest'
 want_via='[via maturin: feature set NOT observed]'
+if [ "$fm_have_meta_parser" -eq 0 ]; then
+  skipped "P1-P4: neither jq nor python3 on PATH — run_scoped_tests takes its no-parser fail-closed exit before the python tier, so these have no subject here"
+else
 got=$(py_run "$py_plan_pure" 0)
 [ "$got" = "$want_via" ] \
   && ok "P1: a PURE-python route renders $want_via — the state is NAMED as unobservable, not left UNDECLARED" \
@@ -951,6 +983,7 @@ got=$(py_run "$py_plan_pure" 2)
 [ "$got" = "$want_via" ] \
   && ok "P4: rc 2 (maturin RAN and failed) still records the maturin invocation — a failed build is an invocation that happened" \
   || bad "P4: got '$got' want '$want_via'"
+fi
 
 # (P5) run_scoped_tests' OWN TERMINAL PATHS RECORD, THOUGH THEY BYPASS record_result —
 # roborev job 273, F4. This function appends its verdict DIRECTLY to NAMES/STATUSES/TIMES,
@@ -1106,5 +1139,18 @@ fi
 
 echo
 echo "feature-matrix annotation guard: $PASS passed, $FAIL failed"
+# A COUNT FLOOR beside the abort trap: a section that silently stops contributing verdicts
+# (an extraction that broke, a subshell dying quietly) shrinks the subject set without
+# aborting, and "failed: 0" over a shrunken set is the vacuous pass this file exists to
+# prevent. Measured: 84 on a fully-equipped host, 75 under /bin/bash 3.2 in a minimal
+# container (no jq/python3/git/cargo — the P/PB sections declare SKIPs there). The floor is
+# set below the minimal-host figure so it reds on a structural loss, never on a lean host.
+FM_CASE_FLOOR=60
+FM_REACHED_END=1
+if [ $((PASS + FAIL)) -lt "$FM_CASE_FLOOR" ]; then
+  printf 'FAIL - only %s verdicts were produced (floor %s): sections are being skipped or dying silently, and a "0 failed" over a shrunken subject set certifies nothing.\n' \
+    "$((PASS + FAIL))" "$FM_CASE_FLOOR" >&2
+  exit 1
+fi
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0
