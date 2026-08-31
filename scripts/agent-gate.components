@@ -25,10 +25,24 @@
 # so every later branch would compare against a too-small set and the guard would silently
 # excuse real skew. Regenerate, header included:
 #
-#   t=$(mktemp "${TMPDIR:-/tmp}/agent-gate.components.XXXXXX") \
+#   t=$(mktemp scripts/agent-gate.components.XXXXXX) \
 #     && { sed -n -e '/^[^#]/q' -e p scripts/agent-gate.components; scripts/agent-gate.sh --list; } >"$t" \
 #     && mv "$t" scripts/agent-gate.components
 #
+# THE TEMPORARY IS CREATED BESIDE THE DESTINATION, NOT UNDER $TMPDIR (roborev job 300, Low).
+# `mv` is atomic only WITHIN one filesystem. Across filesystems it degrades to copy-and-delete, and
+# a reader can then observe a PARTIAL manifest — which for this file means a SHORT component set,
+# i.e. exactly the silent under-count the whole guard exists to prevent. Not hypothetical on this
+# fleet, measured:
+#
+#   ${TMPDIR:-/tmp}                 -> /dev/root
+#   /data/lanes/<lane>/scripts      -> /dev/nvme1n1
+#
+# Two different devices, so the old form was a copy-and-delete every time. `mktemp` in `scripts/`
+# keeps the O_EXCL unpredictable-name property that job 299 added AND makes the publish genuinely
+# atomic. Cost: the temporary is briefly visible in a tracked directory — harmless, since it is
+# `mktemp`-named, removed by the `&&` chain, and `.gitignore` need not know about it for a command
+# a human runs by hand.
 # THE TEMPORARY IS `mktemp`, NOT A PREDICTABLE NAME (roborev job 299, Low). This used to write
 # through a fixed `/tmp/agent-gate.components`. On this fleet EVERY lane runs as the same user
 # with a shared writable `/tmp`, so a same-user peer can pre-plant that path as a SYMLINK and the

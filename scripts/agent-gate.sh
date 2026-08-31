@@ -4603,18 +4603,32 @@ _component_set_probe_inner() {
   #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with space/objects"  -> git cat-file -t <sha> = commit
   #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with:colon/objects"  -> FAILS
   #
-  # The value is handed to git as ONE quoted environment argument and git splits it on the
-  # colon PATH separator only, so a space-bearing path is expressible and a colon-bearing one is
-  # not. Only the actual separator is refused. (The URL whitespace check elsewhere STAYS: a URL has
-  # no legitimate whitespace, so there the rejection is not a false FAIL.)
+  # A COLON IS EXPRESSIBLE AFTER ALL — C-STYLE QUOTING (roborev job 300, Low). The rejection above
+  # rested on my own measurement, and the measurement was INCOMPLETE: I tested the RAW form only,
+  # found a colon-bearing path failed, and concluded "a colon cannot be expressed". The true answer
+  # is that it cannot be expressed RAW. git accepts a C-QUOTED entry in this list, and with proper
+  # escaping every shape works:
+  #
+  #   raw     "/tmp/with:colon/objects"      -> FAILS
+  #   \-escaped "/tmp/with\:colon/objects"   -> FAILS
+  #   C-quoted "\"/tmp/with:colon/objects\"" -> cat-file -t <sha> = commit
+  #
+  # Measured across five shapes with the encoder below — plain, colon, space, embedded `"`,
+  # embedded `\` — all five resolve the object. So the guard is REMOVED rather than narrowed a
+  # third time (it went whitespace-or-colon -> colon -> gone, each step from an under-measured
+  # claim about what git accepts). What stays is the EMPTY refusal: an empty path names nothing.
+  #
+  # ORDER IS LOAD-BEARING in the encoder: escape backslashes FIRST, then quotes. Reversed, the
+  # backslash pass would escape the backslashes the quote pass just added.
   case "$lane_objects" in
-    ''|*:*)
+    '')
       _CS_KIND=baseline-workspace
-      _CS_DETAIL="this repository's object directory could not be resolved to a path expressible in GIT_ALTERNATE_OBJECT_DIRECTORIES (empty, or containing a COLON — the separator that variable splits on), so HEAD's own objects cannot be made readable to the isolated repository"
+      _CS_DETAIL="this repository's object directory resolved to an EMPTY path, so HEAD's own objects cannot be made readable to the isolated repository"
       return 0 ;;
   esac
+  _cs_alt_q="${lane_objects//\\/\\\\}"; _cs_alt_q="${_cs_alt_q//\"/\\\"}"
   _CS_READ_DIR="$csdir/repo"
-  _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=$lane_objects")
+  _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=\"$_cs_alt_q\"")
 
   # ---- DO WE ALREADY HOLD THAT COMMIT? -----------------------------------------------------
   # If this repository already has the object, there is NOTHING to fetch: a git object is
@@ -5145,7 +5159,7 @@ apply_component_set_preflight() {
           # an attacker-chosen file as the manifest this guard derives its verdict from. `mktemp`
           # creates the file itself under a name it chooses, and the `&&` chain makes creation a
           # PRECONDITION rather than an assumption.
-          hint="hint: regenerate the manifest — t=\$(mktemp \"\${TMPDIR:-/tmp}/agent-gate.components.XXXXXX\") && { sed -n -e '/^[^#]/q' -e p $_CS_MANIFEST_REL; scripts/agent-gate.sh --list; } >\"\$t\" && mv \"\$t\" $_CS_MANIFEST_REL — then COMMIT it and re-run scripts/agent-gate.sh"
+          hint="hint: regenerate the manifest — t=\$(mktemp scripts/agent-gate.components.XXXXXX) && { sed -n -e '/^[^#]/q' -e p $_CS_MANIFEST_REL; scripts/agent-gate.sh --list; } >\"\$t\" && mv \"\$t\" $_CS_MANIFEST_REL — then COMMIT it and re-run scripts/agent-gate.sh"
           echo "agent-gate: $_CS_MANIFEST_REL is the DATA this gate publishes as its component" >&2
           echo "            set, and the baseline every future branch compares against is read" >&2
           echo "            from it (never by executing a fetched script — #3544 REQ-3544-01)." >&2
