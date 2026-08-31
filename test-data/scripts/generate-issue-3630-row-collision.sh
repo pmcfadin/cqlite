@@ -287,7 +287,27 @@ for line in sys.stdin:
 
 # ----------------------------------------------------------------------------
 # OUT_DIR safety: the export step rm -rf's the keyspace subtree.
-# ----------------------------------------------------------------------------
+#
+# CANONICALIZE FIRST (roborev job 287, Medium). The prefix tests below are
+# LEXICAL string comparisons, so a path containing `..` segments or a symlinked
+# component can SATISFY `$OUT_DIR == $REPO_ROOT/*` while resolving somewhere else
+# entirely — and what follows is `rm -rf "$OUT_DIR/$KEYSPACE"`. Measured example
+# of the hole: `--out "$REPO_ROOT/../../var/tmp/x"` passes the repo-prefix test
+# unchanged. Resolving the path BEFORE validating it closes the class rather than
+# blacklisting `..`, which is the same "remove the channel, do not filter the
+# input" rule this whole issue is about.
+#
+# `realpath -m` resolves symlinks in the components that exist and normalises the
+# rest without requiring the leaf to exist (the output dir legitimately may not
+# exist yet). It is REQUIRED rather than optional: silently skipping
+# canonicalization would leave the destructive path unvalidated, which is the
+# permissive branch of a two-valued test and exactly the shape that fails open.
+if ! command -v realpath >/dev/null 2>&1; then
+  fail "realpath(1) is required to canonicalize OUT_DIR before destructive operations."
+fi
+OUT_DIR="$(realpath -m "$OUT_DIR")"
+OUT_DIR="${OUT_DIR%/}"
+
 if [[ "${#OUT_DIR}" -lt 4 ]]; then
   fail "OUT_DIR '$OUT_DIR' is suspiciously short (< 4 chars). Refusing."
 fi

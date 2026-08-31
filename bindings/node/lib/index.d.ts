@@ -187,12 +187,29 @@ export interface JsonObject {
  * ## Guaranteed shape (issue #3630)
  *
  * * Every column is an **own, enumerable, writable, configurable DATA property**.
- * * The prototype is `Object.prototype` — a row is an ordinary object, so
- *   `row.hasOwnProperty(...)`, `row.toString()`, spread and `JSON.stringify` all
- *   work. (This is why rows do NOT get the null prototype that
+ * * The prototype is `Object.prototype`, so a row is an ordinary object: spread,
+ *   `JSON.stringify(row)`, `Object.keys`/`entries`, `for…in` and destructuring
+ *   all behave normally. (This is why rows do NOT get the null prototype that
  *   {@link JsonObject} and {@link UdtValue.fields} have: a row travels beside
  *   `result.columns`, so it has an authoritative key list to be probed against,
  *   which a bare mapping does not.)
+ * * **BUT DO NOT CALL INHERITED METHODS ON A ROW.** Because columns are own
+ *   properties and a column name is arbitrary, ANY inherited member can be
+ *   shadowed by data — `row.toString` is a *string* for a table with a column
+ *   named `toString`, and `row.hasOwnProperty` would be a value rather than a
+ *   function for a column named `hasOwnProperty`. Both are legal CQL via a
+ *   quoted identifier or a `SELECT … AS` alias. Always use the free-standing
+ *   forms, which cannot be shadowed by any column:
+ *
+ *   ```typescript
+ *   Object.hasOwn(row, name)                          // presence
+ *   Object.prototype.hasOwnProperty.call(row, name)    // presence, older runtimes
+ *   Object.prototype.toString.call(row)                // stringification
+ *   ```
+ *
+ *   This is not a defect of the shape — it is the *consequence* of columns being
+ *   real own properties, which is what makes a column named `__proto__` arrive
+ *   at all.
  * * A column name is never interpreted. Columns are DEFINED, not assigned, so a
  *   column named `__proto__`, `constructor` or `toString` — reachable via a
  *   quoted CQL identifier or a `SELECT ... AS` alias — arrives as an ordinary
@@ -201,12 +218,15 @@ export interface JsonObject {
  * ## Probing for a column: use `Object.hasOwn`, not `in` and not truthiness
  *
  * Because the prototype is `Object.prototype`, inherited names still answer `in`
- * and are still truthy:
+ * and are still truthy — and the failure runs in BOTH directions, which is why
+ * neither `in` nor truthiness is usable here:
  *
  * ```typescript
  * 'toString' in row              // true even when there is no such COLUMN
  * if (row.constructor) { ... }   // truthy even when there is no such COLUMN
- * Object.hasOwn(row, 'toString') // CORRECT: true only if the column exists
+ * typeof row.toString            // 'string' when there IS such a column —
+ *                                // the inherited METHOD is gone, shadowed by data
+ * Object.hasOwn(row, 'toString') // CORRECT in both directions
  * ```
  *
  * That is the accepted cost of keeping the plain-object contract above, and
