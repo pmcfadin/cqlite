@@ -3027,6 +3027,40 @@ _component_set_bounded() {
   #
   # Stderr's replay stays best-effort: it feeds diagnostics only, and losing part of a message must
   # not turn a measured result into a refusal.
+  # ---- DECLARED RESIDUAL: DESCENDANTS ARE NOT TERMINATED (roborev job 298, tracked as #3717) ----
+  #
+  # The cap below bounds the READ. It does NOT bound a surviving descendant's WRITES. On the
+  # `timeout`/`gtimeout` arms a descendant that outlives a SUCCESSFUL child keeps its inherited
+  # capture fd; cleanup unlinks the file; an unlinked inode goes on consuming disk until the last fd
+  # closes. DEMONSTRATED, not theorised — a planted child that backgrounds a writer and exits 0:
+  #
+  #   pid 518642 fd 1 -> /tmp/agent-gate-bcap.E0hYnc (deleted)     4 capture fds, all DELETED
+  #   inode size 563B -> 605B over 3s                              still growing after the return
+  #
+  # WHY IT IS DORMANT, and this is a property of the CALLERS rather than of this function:
+  #
+  #   6 clean full pre-flight runs, capture fds held: 0 (ground verified empty before AND after,
+  #     instrument proven by finding the 4 above)
+  #   a REAL bounded `git fetch` whose 2s bound FIRED: 2 git-remote-https SURVIVED, and held
+  #     0 capture fds
+  #
+  # So a real caller DOES strand descendants; those descendants do NOT hold the capture. The
+  # inference — offered as inference, unverified — is that git wires transport helpers over PIPES,
+  # so a helper's stdout is a pipe to the parent git and not the capture it inherited. The `0` is the
+  # measurement; the mechanism is a hypothesis.
+  #
+  # THE CONDITION TO RE-CHECK IS THEREFORE PRECISE: a caller that BACKGROUNDS A WRITER ONTO ITS OWN
+  # STDOUT. Nothing in this pre-flight does that. Add one and this residual becomes live with no
+  # warning, which is why it is declared here rather than left as an absence someone must rediscover.
+  #
+  # NOT FIXED HERE, deliberately: a post-success group kill is rejected in this function on record
+  # (bash reaps the leader, so the pgid is free for REUSE and the kill could reach an unrelated
+  # group — this repo's incident: a pattern kill destroyed a peer lane's gate at component 28 of 30).
+  # Doing it safely means owning a supervisor on EVERY arm, i.e. restructuring the function that has
+  # already produced four findings, one of which was created by the previous fix to it. `ulimit -f`
+  # was tried and rejected on measurement: it is per-PROCESS, so it also caps the pack a legitimate
+  # `git fetch` writes (92 MB, measured), making a safe limit weak and a growing write a false FAIL.
+  #
   # THE REPLAY IS BOUNDED (roborev job 297, Medium). An unbounded `cat` on `$_CS_CAP_OUT` is not
   # bounded by the execution deadline: a descendant that OUTLIVES a successful child keeps writing to
   # that fd, and `cat` on a regular file only stops when it reaches EOF — which never happens while a
