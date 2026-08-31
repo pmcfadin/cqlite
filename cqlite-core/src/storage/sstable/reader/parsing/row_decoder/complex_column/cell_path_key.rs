@@ -85,9 +85,13 @@ impl V5CompressedLegacyParser {
         // key would compare, sort and render as raw bytes and no caller could tell
         // that from a real blob key. No-heuristics (#28): decode from
         // authoritative metadata or fail, never surface a guess.
-        if matches!(decoded, Value::Blob(_)) && !Self::cell_path_key_declares_blob(type_str) {
+        if matches!(decoded, Value::Blob(_)) && !self.cell_path_key_declares_blob(type_str) {
             return Err(Error::schema(format!(
-                "Map key for column '{}' is declared as type '{}', but the decoder                  returned opaque bytes ({} bytes) instead of a decoded value. The                  key type is not one this reader can decode — check that the schema                  (or the on-disk SerializationHeader) resolves it, e.g. that a UDT                  named here is registered.",
+                "Map key for column '{}' is declared as type '{}', but the decoder \
+                 returned opaque bytes ({} bytes) instead of a decoded value. This \
+                 key type is not one this reader can decode; check that the schema \
+                 (or the on-disk SerializationHeader) resolves it, e.g. that a \
+                 UDT named here is registered.",
                 column_name,
                 type_str,
                 data.len()
@@ -104,31 +108,20 @@ impl V5CompressedLegacyParser {
     /// DECLARED type. `frozen<…>`/`FrozenType(…)` is peeled first: CQL does not
     /// permit `frozen<blob>` as a map key, but a blob is still a blob under any
     /// spelling and must not be misdiagnosed as undecoded.
-    fn cell_path_key_declares_blob(type_str: &str) -> bool {
-        let mut t = type_str.trim();
-        // Bounded peel: `frozen<…>` nesting is not legal CQL beyond one level, and
-        // a loop bound keeps a pathological type string from spinning.
+    fn cell_path_key_declares_blob(&self, type_str: &str) -> bool {
+        let mut t = type_str.trim().to_string();
+        // Peel via the ONE existing frozen-unwrapper (`extract_frozen_inner_type`,
+        // which accepts `frozen<T>` and `FrozenType(T)` case-insensitively), so
+        // this cannot form a second opinion about what "frozen" means. Bounded by
+        // the decoder's own nesting limit; `Err` simply means "not frozen".
         for _ in 0..MAX_TYPE_NESTING_DEPTH {
-            let inner = t
-                .strip_prefix("frozen<")
-                .and_then(|r| r.strip_suffix('>'))
-                .or_else(|| {
-                    let lower = t.to_ascii_lowercase();
-                    lower
-                        .starts_with("org.apache.cassandra.db.marshal.frozentype(")
-                        .then(|| {
-                            t["org.apache.cassandra.db.marshal.frozentype(".len()..]
-                                .strip_suffix(')')
-                        })
-                        .flatten()
-                });
-            match inner {
-                Some(i) => t = i.trim(),
-                None => break,
+            match self.extract_frozen_inner_type(&t) {
+                Ok(inner) => t = inner.trim().to_string(),
+                Err(_) => break,
             }
         }
         if t.contains("org.apache.cassandra.db.marshal.") {
-            return Self::primitive_marshal_to_cql_short(t) == Some("blob");
+            return Self::primitive_marshal_to_cql_short(&t) == Some("blob");
         }
         matches!(t.to_ascii_lowercase().as_str(), "blob" | "bytes")
     }

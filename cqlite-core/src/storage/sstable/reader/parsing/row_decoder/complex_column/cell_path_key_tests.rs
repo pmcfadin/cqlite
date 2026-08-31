@@ -465,6 +465,15 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
             .unwrap(),
         Value::blob(vec![1, 2, 3])
     );
+    // Case-INSENSITIVELY, because `parse_value_from_raw_bytes` routes off a
+    // LOWERCASED guard: were the declared-blob test case-sensitive where the
+    // decode is not, a `Frozen<BLOB>` would decode to a blob and then be
+    // rejected as undecoded.
+    assert_eq!(
+        p.parse_cell_path_key(&[1, 2, 3], "Frozen<BLOB>", "k")
+            .unwrap(),
+        Value::blob(vec![1, 2, 3])
+    );
     assert_eq!(
         p.parse_cell_path_key(
             &[1, 2, 3],
@@ -507,7 +516,17 @@ fn unregistered_udt_name_cell_path_key_fails_closed() {
     );
     assert!(
         msg.contains("opaque bytes"),
-        "the error must say the decoder returned opaque bytes, so the next          reader is not sent back to first principles, got: {msg}"
+        "the error must say the decoder returned opaque bytes, so the next \
+         reader is not sent back to first principles, got: {msg}"
+    );
+    // The message is a multi-line Rust string literal, which is easy to mangle:
+    // a lost `\` continuation leaves the source indentation embedded in the
+    // rendered text. That happened once in this very diff and the substring
+    // assertions above did NOT see it, so it is pinned as its own property.
+    assert!(
+        !msg.contains("   "),
+        "the error text must not carry source indentation from a lost line \
+         continuation, got: {msg}"
     );
 }
 
