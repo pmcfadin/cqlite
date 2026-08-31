@@ -2035,6 +2035,7 @@ apply_fixture_preflight() {
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
         "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "hint: bash test-data/scripts/fetch-datasets.sh  (opt-out: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores SKIP + stamps this block)"
       exit 1 ;;
@@ -2074,6 +2075,25 @@ CANONICAL_SCHEMA_FILES="basic-types.cql da-test.cql oa-test.cql write-test.cql t
 # Stamped into the SUMMARY on a successful check so the pasted block shows POSITIVELY
 # that the schemas root was validated, not merely that nothing complained.
 SCHEMAS_LINE=""
+
+# ---- issue #3544: component-set skew ---------------------------------------
+# COMPONENT_SET_LINE: the `component-set:` line every SUMMARY block carries (full,
+# lite, delta). Stamped by apply_component_set_preflight below. Empty only before that
+# pre-flight has run (a boundary block emitted earlier omits the line rather than
+# inventing it, exactly as SCHEMAS_LINE does).
+COMPONENT_SET_LINE=""
+
+# _component_set_meta: the `component-set:` line for an emit_summary POSITIONAL slot,
+# where an empty value would print a BLANK line into the block. Every emit reached AFTER
+# the mode dispatch has the line stamped; the fallback names the one state that could
+# otherwise be mistaken for a check that ran and passed.
+_component_set_meta() {
+  if [ -n "${COMPONENT_SET_LINE:-}" ]; then
+    printf '%s' "$COMPONENT_SET_LINE"
+  else
+    printf '%s' 'component-set: NOT EVALUATED (this block was emitted before the #3544 pre-flight) — it asserts NOTHING about the component set'
+  fi
+}
 
 # _gate_checkout_test_data_dir: the enclosing checkout's `test-data`, anchored on the
 # WORKSPACE-ROOT `Cargo.toml` (nearest ancestor manifest declaring `[workspace]`) exactly
@@ -2448,6 +2468,7 @@ apply_schemas_preflight() {
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
       "$marker" \
+      "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
       "hint: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
     exit 1
@@ -2475,10 +2496,2981 @@ apply_schemas_preflight() {
       emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
         "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "hint: expected $root/${missing%% *} — unset CQLITE_SCHEMAS_ROOT, or: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas"
       exit 1 ;;
   esac
+}
+
+# ---- issue #3544: component-set skew pre-flight -------------------------------
+# scripts/agent-gate.sh is READ FROM THE TREE UNDER TEST. So a branch whose copy of
+# this script predates a component-set expansion on `main` runs the OLD script, reports
+# `N/N nonpass=0`, and is SILENT about every component added since — a perfectly true
+# statement about a set that is no longer the coverage claim. Merge-cleanliness cannot
+# detect it (`git merge-tree --write-tree` returns CLEAN; the skew is SEMANTIC, not
+# textual), and CI cannot backstop it: `.github/ci-gating-tiers.yml` EXEMPTS the CI
+# feature-matrix lane on the ground that "the merge-gating minimal-features build runs in
+# the local gate", so a stale local gate does not run the component and `required` does
+# not poll the CI lane because it is deferring to the local gate — each side's coverage
+# justified by the other's, the component exercised by NEITHER. Measured instance: PR
+# #3467's gate would have certified 31 of 35 components (#3403 had landed +4 components
+# 39 minutes earlier).
+#
+# THE COMPARISON IS ON THE COMPONENT SET, derived at RUN TIME from `--list` on both
+# sides — never a line count, never a blob hash. #3403's expansion was a +2,819-line
+# diff, but a 2,819-line refactor that leaves the SET alone is not a coverage problem,
+# and a guard that reds on one is a guard agents learn to waive.
+#
+# THE BASELINE IS FETCHED IN THIS INVOCATION, IMMEDIATELY BEFORE THE COMPARISON (#3544
+# amendment). A remote-tracking ref is a CACHED observable: comparing against a stale
+# `origin/main` returns "no skew" against a superseded baseline — a green pre-flight
+# certifying nothing, i.e. the very vacuous pass this guard exists to close, arriving
+# silently and reassuringly. Measured on the #3393 lane: its `origin/main` was 23
+# minutes stale at the moment it acted on it. So the fetch happens here, its success is
+# ASSERTED, and the sha it produced is RECORDED in the emitted line — a verdict that
+# does not name its baseline cannot be audited.
+#
+# There is deliberately NO env-var opt-out and none may be added: a branch behind `main`
+# can always rebase, so the remedy is universally available and an escape hatch could
+# only ever buy a vacuous green.
+
+# EXTERNAL-COMMAND ENUMERATION (roborev job 210). The invariant this pre-flight must hold
+# is "there is NO branch on which it can hang", and the way that invariant was broken three
+# times is instructive: each site looked local. So the whole set is enumerated here rather
+# than argued per site, and `scripts/tests/test_agent_gate_component_set.sh` asserts the
+# enumeration structurally — a NEW external command OR A NEW GIT OPERATION in this region FAILs
+# that test until it is classified, which is what stops the next reviewer finding instance four.
+#
+# THE OPERATION HALF OF THAT ASSERT IS NEW (roborev job 309), and this list is why: the sentence
+# above claimed the whole set was enumerated and pointed at a test that checked external program
+# NAMES only, so the git operations were guarded by nothing — and had drifted BOTH WAYS. Five
+# operations (`init`, `ls-remote`, `cat-file`, `rev-list`, and two `rev-parse` forms) had appeared
+# without being listed, while `update-ref -d` and `rev-parse FETCH_HEAD^{commit}` were still
+# listed with ZERO live uses. The stale direction is the worse one: a listed operation
+# PRE-AUTHORISES its own re-introduction, which is exactly why `bash` and `mkdir` were removed
+# from the declared external set rather than left in place. Both directions now FAIL the test.
+#
+#   BOUNDED (network-capable; every one goes through _component_set_bounded):
+#     git ls-remote csbaseline refs/heads/main
+#                                        the REF ORACLE: the baseline sha, read live from the
+#                                        canonical remote, with NO object transfer. It replaced a
+#                                        92 MB full-history fetch (3.74 s -> 0.51 s). Its output
+#                                        is remote-controlled TEXT and is validated, not parsed.
+#     git fetch --refmap= --no-tags …    the object transfer, run ONLY when this repository lacks
+#                                        the baseline commit. Network by definition. Both flags
+#                                        suppress SHARED-ref writes (branches, tags).
+#     git cat-file -e <sha>^{commit}     presence probe for the baseline commit IN THE ISOLATED
+#                                        repository (never the live one: there it answers about
+#                                        PROMISED objects, measured — rc 0 for a blob whose `show`
+#                                        then failed, even with GIT_NO_LAZY_FETCH=1).
+#     git rev-list --objects --missing=print --no-walk
+#                                        the COMPLETENESS half of that probe: a commit can be
+#                                        present while its tree/blobs are not, and "the commit
+#                                        exists" is not "the manifest can be read".
+#     git ls-tree <rev> -- scripts/agent-gate.components
+#                                        the THREE-VALUED presence probe that decides which
+#                                        read path runs. Reads a TREE, which a
+#                                        `--filter=tree:0` partial clone fetches LAZILY.
+#     git show <rev>:scripts/agent-gate.components   reads a BLOB, so in a PARTIAL clone
+#     git show <rev>:scripts/agent-gate.sh           (--filter=blob:none) it fetches LAZILY.
+#                                        This is the site that looked local and was not
+#                                        (finding 1). Each is read at up to TWO revs — the
+#                                        fetched baseline and HEAD (the job-215
+#                                        removal-provenance measurement) — and the second is
+#                                        the TRANSITIONAL fallback, read AS TEXT.
+#
+#     NOTHING IS EXECUTED HERE ANY MORE (#3544 REQ-3544-01). The two
+#     `bash <extracted …> --list` spawns are GONE: the component set is now read as DATA (see
+#     the reader block below). No entry in this enumeration spawns a shell, which is also why
+#     `bash` has left the declared external set.
+#
+#   THERE IS NO "LOCAL-ONLY" CATEGORY ANY MORE (roborev job 315). Every git call in this region is
+#   BOUNDED, and the `# local-only: <why>` excusal has been removed from the self-test. Three
+#   consecutive findings — 312 (four live-repository probes), 314 (the shallowness helper), 315
+#   (the ancestry walk) — were each ANNOTATED, and all three annotations were true about the
+#   NETWORK and silent about BLOCKING. The judgement was made at the call site and nothing checked
+#   it. Bounding costs nothing; the escape hatch cost three review rounds. The calls below are
+#   listed for WHAT THEY READ, not as an exemption:
+#     git rev-parse --git-dir            .git read, no object access.
+#     git remote get-url origin          config read; names a remote, contacts none. Its
+#                                        value is judged against the canonical upstream
+#                                        identity IN-PROCESS (no resolution, no network).
+#     git init -q <scratch>              creates an EMPTY repository in a directory this
+#                                        pre-flight just made. No remote is named, no object is
+#                                        read, and with global/system config neutralised no
+#                                        template can be pulled in. It is created in git's
+#                                        DEFAULT object format, which is why a sha256 baseline
+#                                        advertisement is refused at the ref oracle rather than
+#                                        failing here as a mystery transfer error (job 309).
+#     git rev-parse --verify --quiet <rev>
+#                                        resolves a sha to a COMMIT in the isolated repository —
+#                                        the transfer assert and HEAD's own sha. Commits are
+#                                        never filtered out of a clone.
+#     git merge-base --is-ancestor       walks commit parents only.
+#     git rev-parse --is-shallow-repository / --git-path shallow / --git-path objects
+#                                        repository STATE reads (is the history truncated? where
+#                                        is the object store, so it can be offered to the
+#                                        isolated repo as an ALTERNATE?); no object access, no
+#                                        remote contact.
+#
+#   LOCAL UTILITIES (no network, no spawn, bounded work). THE AUTHORITATIVE SET IS
+#     `declared_externals` in scripts/tests/test_agent_gate_component_set.sh, which is checked
+#     against this region on every run in BOTH directions; it is deliberately NOT re-listed here,
+#     because a second copy of a set is a second thing to drift — this list carried `env`, `find`
+#     and `chmod` at various times while the census could not see their sites, and omitted `head`
+#     and `wc` while the test declared them. What belongs HERE is the REASONING that the name list
+#     cannot carry:
+#     `timeout`/`gtimeout` ARE the bounding mechanism (local, and bounded by construction: they
+#     take the bound).
+#     `find` is the PORTABLE exact-mode test on the isolated fetch config (`find <file> -perm
+#     600`): one named path, no tree traversal, no network. It is used rather than `stat` because
+#     that is `-c %a` on GNU and `-f %Lp` on BSD (job 279).
+#     `env` is the ALLOWLISTED-ENVIRONMENT wrapper for every isolated git call (`env -i` plus
+#     _component_set_build_git_env's entries — job 258). It execs the command it is given and
+#     adds no network or shell of its own; the self-test's audit looks THROUGH it so the `git`
+#     behind it is still checked for its bound.
+#     `chmod` is the 0600 on the isolated fetch config BEFORE the URL (which may carry a
+#     credential) is written into it: a mode change on a path we just created, no network, no
+#     spawn. `sed` is the userinfo redaction in _component_set_redact_text — a local text
+#     transform. Both are classified here rather than merely listed, which is the point of the
+#     list: the self-test FAILs on an external program that has not been classified.
+#
+# Everything else here is a bash builtin/keyword or a function defined in this file.
+#
+# ---- WHAT COULD MAKE A GIT CALL EXECUTE SOMETHING, AND WHY NONE OF IT IS REACHED -------------
+# Enumerated because this is where the last two Highs came from, and both had the same shape: an
+# axis was closed (config sources; then the environment) and the SPACE was declared closed with
+# it. So the question is asked the other way round here — not "which variables are dangerous"
+# but "by what route could any git call below run a command at all":
+#
+#   REMOTE HELPERS (`ext::`, any `git-remote-*`) via `url.*.insteadOf` + `protocol.*.allow`
+#     — reachable ONLY where a URL is RESOLVED, i.e. from a fetch/ls-remote. Every one of those
+#     runs INSIDE the scratch repository, whose config this run wrote and whose environment is
+#     `env -i` + allowlist, so neither an `insteadOf` nor a `protocol.<name>.allow` from anywhere
+#     else is visible. There is NO fetch in the live repository (job 264): that hop was removed
+#     rather than hardened, because a check downstream of an execution can only report it.
+#     `scripts/tests/test_agent_gate_component_set.sh::3544-ext-helper-unreachable` asserts the
+#     unreachability, with a control proving the attack executes for a plain fetch.
+#   HOOKS (`core.hooksPath`, `reference-transaction`, …) — fire on REF WRITES and on operations
+#     this pre-flight does not perform. It writes NO ref in the live repository at all now, and
+#     the scratch's hooks come from a `git init` run with no template (see the isolated init).
+#   `core.fsmonitor` — a config-specified COMMAND, but git runs it only for operations that READ
+#     THE INDEX. None of the lane-local reads here do: `ls-tree <rev>`, `show <rev>:<path>`,
+#     `cat-file -e`, `merge-base`, `rev-parse` and `remote get-url` are all index-free. This one
+#     is listed precisely because it is NOT currently reachable: adding an index-touching command
+#     (`git status`, `git diff`, `git checkout`, `git stash`) to this pre-flight would open it.
+#   `core.pager`, `diff.external`, textconv and smudge filters — pagers need a TTY on stdout and
+#     every call here redirects to a file; `show <rev>:<path>` on a blob emits raw bytes (no
+#     textconv without `--textconv`, no smudge without a checkout). Adding a `git diff`, a
+#     `git archive` or an interactive-friendly invocation would change that.
+#   `alias.*` — git refuses to let an alias shadow a builtin, so no subcommand used here can be
+#     redefined.
+#
+# The rule that generalises all five: THIS PRE-FLIGHT ONLY EVER RESOLVES A URL INSIDE THE
+# ISOLATED SCRATCH REPOSITORY, AND ONLY EVER READS OBJECTS BY SHA IN THE LIVE ONE. A change that
+# breaks either half re-opens this list and belongs in review, not in a follow-up.
+
+# Probe state, set by _component_set_probe and read by the pure verdict/line helpers.
+# Globals rather than a parsed multi-line stdout: the probe does real I/O (fetch, git
+# show, a baseline `--list`), and routing its result through `$( )` would add a
+# newline-stripping value path for no benefit (the #3148 lesson, one guard over).
+_CS_KIND=""        # ok | no-tool | no-git | no-remote | unboundable | fetch-failed | baseline-*
+                   # | manifest-* | head-set-unmeasured
+_CS_SHA="-"        # the origin/main sha40 the comparison actually used
+_CS_MISSING=""     # baseline components ABSENT from this tree's set (space separated)
+_CS_EXTRA=""       # branch-only components (NOT skew; recorded for audit only)
+_CS_UNCOMMITTED="" # of _CS_MISSING, those still PRESENT in the gate script AT HEAD, i.e.
+                   # removed by an UNCOMMITTED working-tree edit (#3544 / job 215)
+_CS_READ_DIR=""    # THE REPOSITORY EVERY BASELINE/HEAD OBJECT READ RUNS IN (#3544 / job 268).
+                   # The isolated scratch when one exists, else this checkout.
+_CS_READ_ENV=()    # env fragment for those reads: `GIT_ALTERNATE_OBJECT_DIRECTORIES=<lane
+                   # objects>` when reading in the scratch (HEAD's objects live in the lane),
+                   # else EMPTY
+_CS_HEAD_SHA=""    # HEAD resolved to a sha IN THIS CHECKOUT, so the scratch can be asked about
+                   # it: `HEAD` inside the scratch would mean the SCRATCH's own unborn HEAD
+_CS_SCRATCH_DIR="" # the isolated scratch repo the baseline fetch ran in (#3544 / job 242)
+_CS_BASE_OBJ=""    # HOW the baseline COMMIT was obtained: reused (already in this repository)
+                   # | fetched (the isolated hop + verified transfer) — job 258
+_CS_BASE_SRC=""    # HOW the baseline set was read: manifest | declaration (#3544 REQ-3544-01)
+_CS_HEAD_SRC=""    # HOW HEAD's set was read: manifest | declaration
+_CS_HEAD_SET=""    # the component set as COMMITTED AT HEAD (space separated)
+_CS_HEAD_ERR=""    # why HEAD's set could not be measured (empty = measured)
+_CS_ANCESTOR=unknown   # is the baseline sha an ancestor of HEAD? yes | no | unknown
+_CS_BASE_N=0       # size of the baseline set
+_CS_DETAIL=""      # one-line cause text for the non-`ok` kinds
+
+# _component_set_flatten: collapse arbitrary command stderr into ONE bounded line, so a
+# multi-line git error cannot smuggle extra lines into a SUMMARY block (a reader — and
+# every `grep`-based consumer — treats one line as one fact).
+# _component_set_safe_detail: the ONE way external text may enter `_CS_DETAIL`. Applies BOTH
+# properties, because applying one and not the other is this pre-flight's most-repeated defect:
+#
+#   job 227 — the origin URL was rendered RAW            -> credential leak, fixed by redacting
+#   job 234 — the origin URL was REDACTED but not flattened -> newline injection forging `RESULT: PASS`
+#   job 239 — fetch stderr was FLATTENED but not redacted   -> credential leak again, one path over
+#
+# Three rounds, one value, two properties, fixed one at a time. The enumeration that found 234
+# swept every interpolation for FLATTENING and never asked about REDACTION — a single-property
+# sweep where the obligation is the CROSS-PRODUCT of sites x properties. This helper removes the
+# choice: there is nothing to remember at a call site, and adding a third property later means
+# editing one function rather than re-running a sweep nobody will think to re-run.
+_component_set_safe_detail() {
+  _component_set_flatten "$(_component_set_redact_text "$1")"
+}
+
+# _component_set_redact_text: redact userinfo inside ANY url-like substring of FREE TEXT.
+# Distinct from _component_set_redact_url, which takes a single URL: git transport errors quote
+# the resolved URL, and a CANONICAL url may legitimately carry a token
+# (`https://x-access-token:<TOKEN>@github.com/pmcfadin/cqlite.git` is on the accept list), so
+# stderr from a failed fetch can carry a live credential into a SUMMARY block that this repo's
+# workflow tells agents to paste into PR comments.
+# TWO RULES, because the URL grammar this pre-flight ACCEPTS has two shapes (job 264, Medium —
+# the third instance of this leak family). The first covers `scheme://user:pass@host`; the second
+# covers the SCP FORM `user@host:path`, which has no scheme and which the earlier one could not
+# see. An ssh transport failure quotes the URL it was given, so a credential-bearing scp remote
+# reached `_CS_DETAIL` — and `_CS_DETAIL` is rendered into the SUMMARY block agents paste into PR
+# comments.
+#
+# The scp rule is deliberately BROADER than git's grammar (it also redacts an ordinary
+# `name@example.com:` in prose): over-redaction costs a slightly less readable diagnostic, while
+# under-redaction costs a leaked token, and this function's whole job is to be conservative.
+_component_set_redact_text() {
+  printf '%s' "$1" \
+    | sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@[:space:]]*@#\1<redacted>@#g' \
+    | sed -E 's#[^[:space:]/@]+@([a-zA-Z0-9._-]+:)#<redacted>@\1#g'
+}
+
+_component_set_flatten() {
+  printf '%s' "$1" | tr '\n\r\t' '   ' | cut -c1-200
+}
+
+# _component_set_one_line: enforce ONE PHYSICAL LINE, with NO truncation.
+#
+# Distinct from `_component_set_flatten` on purpose: that one `cut -c1-200`s, which is right for an
+# embedded DETAIL fragment and catastrophic for the whole verdict — a `component-set:` line carries a
+# sha40, a remedy sentence and a MISSING list, so truncating it would decapitate the verdict itself.
+#
+# WHY THIS EXISTS AS A CHOKE POINT RATHER THAN N CALL-SITE FIXES (roborev job 295, Medium). The
+# injection class here is now FIVE rounds old — 227 (raw URL), 234 (redacted, not flattened), 239
+# (flattened, not redacted), 264 (scp form), 282 (query strings) — and every fix patched the sites
+# someone had NAMED. Job 295 named two more (`$REPO_ROOT` in the manifest and no-remote details), and
+# sweeping for the report found MORE than it named: `$REPO_ROOT` at a third site, `$TMPDIR` (an
+# environment variable), `$lsr_line` (remote-controlled `ls-remote` output) and refused manifest lines
+# (file content). The pattern is unmistakable: the set of "externally influenced values" is not
+# enumerable by inspection, and `_component_set_safe_detail` only ever removed the choice for the
+# values I had already CLASSIFIED as external. A checkout path did not feel external; it is chosen by
+# whoever creates the worktree.
+#
+# So the property is enforced where it is actually needed — at the ONE point the line is assembled —
+# and no call site can violate it. A newline in ANY interpolated value, present or future, can no
+# longer add a physical line to a SUMMARY block. That matters concretely: this repo's workflow tells
+# agents to paste SUMMARY blocks into PR comments, `RESULT: PASS` at column zero is the token the
+# gate's own completion probe greps for, and `--delta` anchor validation accepts any matching
+# `RESULT: PASS` line — so a forged field in a FAILING block could pass as a valid anchor.
+#
+# Redaction stays per-value in `_component_set_safe_detail`: flattening is universal, redaction is a
+# judgement about what a specific value may contain, and conflating them is how 239 happened.
+_component_set_one_line() {
+  printf '%s' "$1" | tr '\n\r' '  '
+}
+
+# _component_set_bound_mechanism: WHICH bounded-run mechanism is available, as one token —
+# `timeout` | `gtimeout` | `bash-watchdog` | `none`. Never "unbounded".
+#
+# THE DEFECT THIS REPLACES, stated because it is the repo's own recurring shape and this is
+# its cleanest instance: the first cut ran the command UNBOUNDED when neither `timeout` nor
+# `gtimeout` existed (`else shift; "$@"`), reasoning that "a missing tool must not become a
+# reason to skip the check". That inherits the PERMISSIVE branch for a missing CAPABILITY —
+# the same error as deriving a pass from the absence of a bad signal. Its consequence is
+# concrete rather than theoretical: on a default macOS box (no coreutils) a hung fetch or an
+# auth prompt would stall `--lite` INDEFINITELY, in the mode that runs every fix round, and
+# a wedged `--lite` is exactly how a worker gets stall-watchdog-killed. Nothing local would
+# ever have caught it, because this box HAS `timeout`.
+#
+# So "cannot bound the probe" is now its own NAMED state, and it is genuinely narrow:
+# `bash-watchdog` needs only bash plus a `sleep`, so `none` requires a tree with no
+# `timeout`, no `gtimeout` AND no `sleep`. A busy-wait is deliberately NOT offered as a
+# fallback — burning a core for up to the whole bound is not a bound worth having.
+# A TERM-only `timeout` is NOT a bound (roborev job 214): measured here, `timeout 2 <script
+# with trap '' TERM>` blocked for the full 2 minutes of an outer bound and never returned.
+# So the external mechanisms are accepted only WITH `--kill-after`, and that support is
+# MEASURED rather than assumed (busybox and ancient coreutils lack the flag) — a probe that
+# runs the real flag against `true` and requires success. A host whose `timeout` cannot
+# escalate falls back to the bash watchdog, which performs the full ladder itself; it is
+# never used in a TERM-only mode, because "bounded" would then be false on exactly the input
+# that matters. Memoized: it is consulted on every bounded call and cannot change within one
+# process.
+_CS_BOUND_MECH=""
+_component_set_bound_mechanism() {
+  if [ -n "$_CS_BOUND_MECH" ]; then printf '%s' "$_CS_BOUND_MECH"; return 0; fi
+  # THIS FUNCTION IS PURE ON PURPOSE, and the reason is a defect it caused: every caller
+  # reads it through `$(…)`, so ANY state it sets is set in a SUBSHELL and lost — the first
+  # cut created the runner's capture files here and every bounded call then found the paths
+  # EMPTY, redirected into `""` and ran nothing (rc 1, no output). Capture availability is
+  # therefore checked by DIRECT calls to _component_set_capture_paths — in the runner, and
+  # at the probe entry where it decides the `unboundable` kind. Nothing effectful goes here.
+  if command -v timeout >/dev/null 2>&1 && timeout --kill-after=1 1 true >/dev/null 2>&1; then
+    _CS_BOUND_MECH=timeout
+  elif command -v gtimeout >/dev/null 2>&1 && gtimeout --kill-after=1 1 true >/dev/null 2>&1; then
+    _CS_BOUND_MECH=gtimeout
+  elif command -v sleep >/dev/null 2>&1; then
+    _CS_BOUND_MECH=bash-watchdog
+  else
+    _CS_BOUND_MECH=none
+  fi
+  printf '%s' "$_CS_BOUND_MECH"
+}
+
+# _component_set_capture_paths: rc 0 iff this process has the two capture files the bounded
+# runner writes its child's stdout/stderr into. Created ONCE per process and reused (the
+# probe's bounded calls are strictly sequential — there is no nesting and no recursion), and
+# removed by the probe wrapper's cleanup.
+#
+# The template is deliberately NOT `agent-gate-cs*`: the self-test forces `baseline-workspace`
+# with a `mktemp` stub that fails for that template alone, and a capture file caught by the
+# same stub would turn that case into `unboundable` — a fixture that no longer models what it
+# claims to.
+_CS_CAP_OUT=""
+_CS_CAP_ERR=""
+_CS_CAP_RC=""
+_component_set_capture_paths() {
+  if [ -n "$_CS_CAP_OUT" ] && [ -n "$_CS_CAP_ERR" ] && [ -n "$_CS_CAP_RC" ]; then return 0; fi
+  _CS_CAP_OUT=$(mktemp "${TMPDIR:-/tmp}/agent-gate-bcap.XXXXXX" 2>/dev/null) || _CS_CAP_OUT=""
+  _CS_CAP_ERR=$(mktemp "${TMPDIR:-/tmp}/agent-gate-bcap.XXXXXX" 2>/dev/null) || _CS_CAP_ERR=""
+  # The THIRD file carries the command's exit status out of the supervisor subshell (job 279): the
+  # watchdog arm no longer learns it from `wait`, because the process it waits for is a supervisor
+  # it keeps alive on purpose rather than the command itself.
+  _CS_CAP_RC=$(mktemp "${TMPDIR:-/tmp}/agent-gate-bcap.XXXXXX" 2>/dev/null) || _CS_CAP_RC=""
+  if [ -z "$_CS_CAP_OUT" ] || [ -z "$_CS_CAP_ERR" ] || [ -z "$_CS_CAP_RC" ]; then
+    [ -n "$_CS_CAP_OUT" ] && rm -f "$_CS_CAP_OUT" 2>/dev/null
+    [ -n "$_CS_CAP_ERR" ] && rm -f "$_CS_CAP_ERR" 2>/dev/null
+    [ -n "$_CS_CAP_RC" ] && rm -f "$_CS_CAP_RC" 2>/dev/null
+    _CS_CAP_OUT=""; _CS_CAP_ERR=""; _CS_CAP_RC=""
+    return 1
+  fi
+  return 0
+}
+
+# _component_set_poll_interval: the shortest sleep this host accepts, as ONE token in
+# `_CS_POLL_SLEEP` (`0.05` or `1`). Memoized, and set by a DIRECT call — never through `$( )`,
+# which would set it in a subshell and lose it (the mechanism function's recorded trap).
+#
+# WHY IT EXISTS: the watchdog arm now polls for a completion RECORD rather than waiting on the
+# command, and a 1-second granularity would add up to a second to every bounded call on the hosts
+# that use this arm. `sleep 0.05` is not POSIX but is accepted by GNU and BSD sleep alike; a host
+# that rejects it falls back to 1s, which is correct but slower — measured, not assumed, by running
+# it once.
+_CS_POLL_SLEEP=""
+_component_set_poll_interval() {
+  [ -n "$_CS_POLL_SLEEP" ] && return 0
+  if sleep 0.05 2>/dev/null; then _CS_POLL_SLEEP=0.05; else _CS_POLL_SLEEP=1; fi
+  return 0
+}
+
+# _component_set_drop_capture_files: remove this process's capture files. Called from the
+# probe wrapper's cleanup, beside the fetch ref and the scratch repo.
+_component_set_drop_capture_files() {
+  [ -n "$_CS_CAP_OUT" ] && rm -f "$_CS_CAP_OUT" 2>/dev/null
+  [ -n "$_CS_CAP_ERR" ] && rm -f "$_CS_CAP_ERR" 2>/dev/null
+  [ -n "$_CS_CAP_RC" ] && rm -f "$_CS_CAP_RC" 2>/dev/null
+  _CS_CAP_OUT=""; _CS_CAP_ERR=""; _CS_CAP_RC=""
+  _CS_BOUND_MECH=""   # the memoized mechanism was decided WITH those files; do not outlive them
+  return 0
+}
+
+# _component_set_bounded <secs> <cmd...>: run <cmd> under a bound, whatever this host has.
+# Returns the command's status, the bound-exceeded status of the mechanism used, or
+# _CS_UNBOUNDABLE_RC when NO mechanism exists — in which case the command is NOT RUN. The
+# caller MUST treat that rc as "could not measure", never as a command failure.
+#
+# The pure-bash arm backgrounds the command, polls to a deadline, then TERMs, gives one
+# grace poll, KILLs, and `wait`s — so the normal path leaks nothing (the child is reaped by
+# the same `wait` that returns its status) and the timeout path leaves no orphan. Poll
+# granularity is 1s, which is irrelevant against a 120s bound and costs the normal path
+# nothing: the loop exits as soon as the child is gone.
+_CS_UNBOUNDABLE_RC=199
+# Returned when the child ran but its captured STDOUT could not be replayed in full (roborev job
+# 292). Distinct from 199 ("not run") and from 124/137 ("bound exceeded"), because the remedy and
+# the sentence differ: the command succeeded and its OUTPUT is unusable.
+_CS_REPLAY_RC=198
+# Largest stdout a bounded pre-flight call may produce.
+#
+# THE FIRST VALUE WAS 1 MiB, AND IT WAS BELOW ITS OWN LARGEST LEGITIMATE INPUT (found while
+# verifying roborev job 299 — a defect NOT among that round's findings). Its stated rationale was
+# "every real one is a git read of a manifest or a sha (tens of bytes to a few KiB)", and that was
+# FALSE WHEN IT WAS WRITTEN: the transitional declaration path reads `<rev>:scripts/agent-gate.sh`
+# — THE WHOLE OF THIS SCRIPT — through this same capture, and this script had already passed
+# 1,049,943 bytes. So the cap sat ~1.3 KB BELOW its largest legitimate input and EVERY declaration
+# read was refused as unreplayable. MEASURED at HEAD bb6c71525, on a clean checkout:
+#
+#   scripts/tests/test_agent_gate_component_set.sh   passed: 105  failed: 9
+#   8 of those 9 carry the refusal verbatim: "... succeeded but its captured output could not be
+#   replayed in full (rc 198)"; the 9th is the pair-control that depends on DECLARED working.
+#
+# The affected verdicts are UNCOMMITTED / DECLARED / head provenance — i.e. a false FAIL-CLOSED on
+# any branch that legitimately REMOVES a component. A cap below a legitimate input is not a bound,
+# it is an outage, and this one grew into existence silently as the script grew.
+#
+# SO THE VALUE IS SET FROM THE LARGEST LEGITIMATE INPUT, WITH STATED HEADROOM, not from a guess at
+# what "looks big": 64 MiB is ~64x this script's current size, so ordinary growth cannot reach it,
+# while a runaway writer (measured: 4.1 GB in ~6s when this was unbounded) crosses it in well under
+# a second — the bound still bounds. It is deliberately NOT derived from the script's size on disk:
+# that would make a bound on a read depend on a filesystem read, and the input is a git BLOB at a
+# baseline sha, not the file in the worktree.
+_CS_CAP_MAX_BYTES=67108864
+# Largest STDERR a bounded pre-flight call may replay. A SEPARATE constant, because the two bounds
+# answer different questions and one number cannot answer both:
+#   * the stdout cap is set from BELOW, by the largest LEGITIMATE output — under it, a correct run
+#     is REFUSED (the outage above);
+#   * this one is set from ABOVE, by what a diagnostic is for. Nothing parses stderr; a git error
+#     message is a few hundred bytes, and past a screenful the excess is noise a human will not
+#     read. Reusing the 64 MiB stdout cap here would let a runaway writer dump 64 MiB into the gate
+#     log, which is the spirit of the defect job 299 raised rather than a fix for it.
+# 64 KiB is ~100x the largest real diagnostic and ~0.001x the stdout cap.
+_CS_CAP_ERR_MAX_BYTES=65536
+# Bound applied to every network-capable operation in this pre-flight, in seconds. ONE
+# variable, read by every call site AND by the diagnostics, so the enumeration below cannot
+# describe a bound the code does not apply — it used to be a `120` literal at five call sites
+# plus a separate hint constant, which is two places that can drift.
+#
+# MODE-DEPENDENT (roborev job 234): a strict run is a certification and may spend two minutes
+# establishing its baseline, but `--lite` runs EVERY fix round and its contract is fast and
+# network-lenient. Being lenient in the VERDICT is not the same as being lenient in COST, and
+# the first cut conflated them: a stalled or offline remote blocked `--lite` for the full 120s
+# before printing an ADVISORY result nobody was going to fail on. Lenient modes get a short
+# deadline and fall through to ADVISORY-UNMEASURED, which is the honest answer — the baseline
+# genuinely was not measured — rather than a slow one.
+_CS_BOUND_STRICT_SECS=120
+_CS_BOUND_LENIENT_SECS=15
+_CS_BOUND_SECS="$_CS_BOUND_STRICT_SECS"   # resolved per mode at probe entry
+_CS_BOUND_HINT="$_CS_BOUND_SECS"          # legacy alias kept in step with the above
+# _component_set_replay_err: replay a bounded call's captured STDERR into the caller's stderr,
+# BOUNDED, and never change the caller's status.
+#
+# THE DEFECT (roborev job 299, Medium). This was a bare `cat "$_CS_CAP_ERR" >&2 || true` at four
+# sites. That is the SAME defect the stdout replay was capped for one round earlier, on the other
+# stream: a descendant that outlives a SUCCESSFUL child keeps the stderr fd it inherited, and `cat`
+# on a regular file only stops at EOF — which never arrives while a writer outpaces the reader. So
+# the replay HANGS past the execution deadline and the file grows while it hangs (measured on the
+# stdout side with a fast writer: no termination in 6s, 4.1 GB written — and on this fleet a full
+# disk breaks every lane, presenting as a link-time bus error that names the wrong subsystem).
+#
+# THE TWO STREAMS GET OPPOSITE DISPOSITIONS, DELIBERATELY, AND THE ASYMMETRY IS THE POINT:
+#
+#   stdout, OVERSIZE => REFUSAL (`$_CS_REPLAY_RC`, job 292). Its bytes are PARSED, and a TRUNCATED
+#           manifest is still perfectly GRAMMATICAL — every surviving line a valid component name —
+#           so the closed-grammar parser cannot see the loss and the missing trailing components
+#           produce a FALSE PASS. A partial stdout is therefore a failed MEASUREMENT.
+#
+#   stderr, OVERSIZE => TRUNCATION, and the caller's status is returned UNCHANGED. Nothing parses
+#           this stream (its own bound is `$_CS_CAP_ERR_MAX_BYTES`, argued where it is set); it
+#           feeds DIAGNOSTICS only, and the rule already recorded at the replay site
+#           is that losing part of a message must not turn a MEASURED result into a refusal.
+#           Refusing here would convert a runaway writer on a stream nobody reads into a failed
+#           pre-flight — a false FAIL on a correct measurement, which is the class that teaches
+#           agents to waive a lane.
+#
+# So every failure of this function's own is swallowed, exactly as the `|| true` it replaces did:
+# it returns 0 always, and no caller derives a verdict from it.
+_component_set_replay_err() {
+  [ -n "$_CS_CAP_ERR" ] || return 0
+  # `head -c N` reads AT MOST N bytes and exits, so this terminates against a growing file where
+  # `cat` does not. The truncation is silent BY DESIGN (see the asymmetry above): announcing it
+  # would itself be a diagnostic line competing with the diagnostic being truncated.
+  head -c "$_CS_CAP_ERR_MAX_BYTES" "$_CS_CAP_ERR" >&2 2>/dev/null || true
+  return 0
+}
+
+_component_set_bounded() {
+  local secs="$1"; shift
+  # THE LADDER IS TERM -> grace -> unconditional group KILL, AND IT IS COMPLETE. There is
+  # no fourth rung to add, because SIGKILL cannot be caught, blocked or ignored — a process
+  # that survives it does not exist. This is stated because the bound has now been the
+  # subject of three review rounds (an unbounded fallback, a direct-child-only signal, a
+  # TERM-only external tool), each one a missing rung; the ladder being complete is what
+  # ends that sequence.
+  #
+  # Both arms implement the SAME ladder: `--kill-after=1` gives the external tools the KILL
+  # rung (their status is then 137 rather than 124 — both mean "bound exceeded"), and the
+  # bash arm KILLs the process GROUP unconditionally after the grace period.
+  #
+  # THE SUCCESS PATH LEAKED THE BOUND, NOT MERELY A PROCESS (roborev job 246). Neither arm
+  # kills a descendant that outlives a SUCCESSFUL exit — and while a stray process is
+  # tolerable, the CONSEQUENCE was not: with the child's stdout wired to the CALLER's pipe
+  # (every `x=$(_component_set_bounded …)` site), a background descendant holding that pipe
+  # keeps the command substitution open INDEFINITELY after the direct child exited 0, so the
+  # call never returns and the 15/120s bound is not a bound at all. Rounds 3 and 6 fixed the
+  # TERM-ignoring descendant on the TIMEOUT path; this is the same family on the path that
+  # succeeds.
+  #
+  # THE FIX IS TO REMOVE THE PIPE, NOT TO ADD A KILL. The child's streams are captured into
+  # two REGULAR FILES and replayed to the caller after the child completes, so a leaked
+  # descendant inherits FILE descriptors and can hold nothing the caller waits on. Two
+  # reasons this beats a post-success process-group kill:
+  #   1. IT IS ARM-INDEPENDENT. The redirection lives in this wrapper, so `timeout`,
+  #      `gtimeout` and the bash watchdog behave identically. A group kill is expressible
+  #      only in the bash arm (we do not know GNU timeout's child pgid), and two arms that
+  #      mean different things is the divergence these comments exist to prevent.
+  #   2. `kill -- -$pid` AFTER SUCCESS IS NOT SAFE. bash reaps a background job as soon as
+  #      it notices SIGCHLD, so by the time the poll loop observes the child gone its pid —
+  #      and therefore the process-GROUP id — is already free for REUSE, and the group kill
+  #      could reach an unrelated process group (this repo's own "kill by PID you own, never
+  #      by pattern" lesson, one level down). There is no window in which the pid is both
+  #      known-dead and still reserved.
+  # A stray descendant can therefore still outlive a successful call; it holds nothing, and
+  # the bound it used to break is intact.
+  local mech rc pid waited=0
+  # NO MECHANISM => THE COMMAND IS NOT RUN. "Cannot bound" includes "cannot CAPTURE": an
+  # uncaptured bounded call is not bounded (see this header), so a missing capture file takes
+  # the SAME refusal as a missing `timeout`/`sleep` — never a permissive fallback to running
+  # the command with the caller's pipe attached. DIRECT call, never `$( … )`: this one sets
+  # process state, and a substitution would discard it.
+  if ! _component_set_capture_paths; then return "$_CS_UNBOUNDABLE_RC"; fi
+  mech="$(_component_set_bound_mechanism)"
+  if [ "$mech" = none ]; then return "$_CS_UNBOUNDABLE_RC"; fi
+  : >"$_CS_CAP_OUT" 2>/dev/null || true
+  : >"$_CS_CAP_ERR" 2>/dev/null || true
+  case "$mech" in
+    timeout)  timeout  --kill-after=1 "$secs" "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR"; rc=$? ;;
+    gtimeout) gtimeout --kill-after=1 "$secs" "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR"; rc=$? ;;
+    *)
+      # PROCESS GROUP, not just the child (roborev job 210, finding 2). Signalling only the
+      # direct child leaves any GRANDCHILD alive, and before the capture files above that
+      # also meant the "bounded" call never returned. The group signal stays: a bound whose
+      # descendants keep running is not a bound even when nothing hangs.
+      # Measured both ways before choosing: direct-child TERM left a ticking grandchild
+      # (ticks 2 -> 5); group TERM froze it (2 -> 2).
+      #
+      # `set -m` (bash job control) puts the child in its OWN process group on both Linux
+      # and macOS, so `kill -- -$pid` reaches the whole tree. `setsid` would ALSO work and
+      # is NOT used: it is absent from a default macOS, and adding a Linux-only dependency
+      # to fix a portability bug is how this family regenerates (job 210, finding 3, one
+      # file over). It emits no job-control text into a capture — verified: `$( set -m; cmd
+      # & wait 2>&1 )` captured the empty string.
+      #
+      # This arm now matches the `timeout` arm's semantics rather than approximating them:
+      # GNU timeout also runs its child in a new process group and signals the group
+      # (verified here — its grandchild froze at 2 -> 2), so a bound must not mean one thing
+      # on a coreutils host and another on a bash-watchdog host.
+      # NEVER SIGNAL A PROCESS GROUP YOU NO LONGER OWN — AND OWNERSHIP ENDS AT REAP, NOT AT EXIT
+      # (roborev job 279). The previous shape backgrounded the command itself, so the pgid WAS the
+      # command's pid; after TERM and the one-second grace it sent an unconditional
+      # `kill -KILL -$pid`, by which time the command and its descendants may all have exited and
+      # bash may already have REAPED the leader — releasing that id for reuse. On this box, which
+      # runs up to four lanes, the group that inherits it is most likely A PEER LANE'S GATE. This
+      # repository has the incident on record: a pattern-based `pkill` destroyed a peer's gate at
+      # component 28 of 30, and the standing rule from it is to kill by an id you OWN, never one
+      # you inferred.
+      #
+      # So the group leader is now a SUPERVISOR we keep alive on purpose: it runs the command,
+      # records the exit status, and then PARKS. Its pid — and therefore the pgid — cannot be
+      # released while we are still escalating, because the only thing that ends it is our own
+      # KILL followed by our own `wait`. Every signal below targets `$sup`, which is alive by
+      # construction at the moment it is sent.
+      #
+      # The park is BOUNDED at `secs + 5`: if this gate is itself SIGKILLed mid-call, the
+      # supervisor must not outlive it forever. Our deadline is `secs` and the grace is 1s, so our
+      # KILL always lands first on every path that reaches it.
+      #
+      # The exit status therefore arrives through a FILE rather than `wait`, with a trailing `.` as
+      # a completeness marker — a partial read of a record being written would otherwise be
+      # indistinguishable from a status.
+      local sup t deadline tps iv rcraw
+      : >"$_CS_CAP_RC" 2>/dev/null || true
+      _component_set_poll_interval
+      iv="$_CS_POLL_SLEEP"; tps=1
+      [ "$iv" = 1 ] || tps=20
+      deadline=$(( secs * tps ))
+      t=0
+      # `set -m` (bash job control) puts the child in its OWN process group on both Linux and
+      # macOS, so `kill -- -$sup` reaches the whole tree. `setsid` would ALSO work and is NOT
+      # used: it is absent from a default macOS, and adding a Linux-only dependency to fix a
+      # portability bug is how this family regenerates (job 210, finding 3, one file over).
+      set -m
+      ( "$@" >"$_CS_CAP_OUT" 2>"$_CS_CAP_ERR"; printf '%s.\n' "$?" >"$_CS_CAP_RC"
+        sleep "$(( secs + 5 ))" ) &
+      sup=$!
+      # REGISTERED IMMEDIATELY, with no command in between: this is as close to "before creation"
+      # as a pid allows, and it is what lets the INT/TERM/HUP handler stop a hung command.
+      _CS_SUP_PID="$sup"
+      set +m
+      rc=""
+      while : ; do
+        if [ -s "$_CS_CAP_RC" ]; then
+          rcraw=$(cat "$_CS_CAP_RC" 2>/dev/null)
+          case "$rcraw" in
+            *.) rc="${rcraw%.}" ;;
+          esac
+          if [ -n "$rc" ]; then break; fi
+        fi
+        if [ "$t" -ge "$deadline" ]; then rc=124; break; fi
+        sleep "$iv"
+        t=$(( t + 1 ))
+      done
+      # THE LADDER, unchanged in meaning: TERM -> grace -> unconditional group KILL when the bound
+      # fired; an immediate group KILL when the command finished on its own (a graceful TERM buys
+      # nothing for a command that has already exited, and skipping it keeps the normal path from
+      # paying a second per call). The KILL also reaps STRAY descendants, which the previous shape
+      # left running after a successful call.
+      if [ "$rc" = 124 ]; then
+        kill -TERM "-$sup" 2>/dev/null || true
+        sleep 1
+      fi
+      kill -KILL "-$sup" 2>/dev/null || true
+      wait "$sup" 2>/dev/null
+      # CLEARED AT REAP, not at exit: from here the id may be reused, so nothing may signal it
+      # again — including the signal handler.
+      _CS_SUP_PID=""
+      case "$rc" in
+        ''|*[!0-9]*) rc=124 ;;
+      esac
+      ;;
+  esac
+  # REPLAY, in the caller's own streams, AFTER the child is done. Stdout and stderr stay
+  # SEPARATE (a caller that wants them merged says `2>&1` at its own call site, and gets
+  # exactly that); interleaving order is lost, which nothing here depends on.
+  # A FAILED STDOUT REPLAY IS A FAILED MEASUREMENT, NOT A COSMETIC PROBLEM (roborev job 292). This
+  # used to be `|| true`. Every caller that PARSES output redirects this stdout into a file and then
+  # reads it, so a partial replay — storage filling, a broken pipe — leaves a TRUNCATED manifest
+  # that is still perfectly GRAMMATICAL: every line a valid component name, so the closed-grammar
+  # parser cannot see the loss, and the missing trailing components produce a false PASS. The
+  # child's own status is therefore NOT returned when its output did not survive.
+  #
+  # Stderr's replay stays best-effort: it feeds diagnostics only, and losing part of a message must
+  # not turn a measured result into a refusal. It is nonetheless BOUNDED (job 299) — an unbounded
+  # `cat` on a stream a stray descendant is still writing hangs past the deadline and fills the
+  # disk, whichever stream it is. `_component_set_replay_err` truncates and returns 0; the
+  # asymmetry with stdout's refusal is argued in full at that function.
+  # ---- DECLARED RESIDUAL: DESCENDANTS ARE NOT TERMINATED (roborev job 298, tracked as #3717) ----
+  #
+  # The cap below bounds the READ. It does NOT bound a surviving descendant's WRITES. On the
+  # `timeout`/`gtimeout` arms a descendant that outlives a SUCCESSFUL child keeps its inherited
+  # capture fd; cleanup unlinks the file; an unlinked inode goes on consuming disk until the last fd
+  # closes. DEMONSTRATED, not theorised — a planted child that backgrounds a writer and exits 0:
+  #
+  #   pid 518642 fd 1 -> /tmp/agent-gate-bcap.E0hYnc (deleted)     4 capture fds, all DELETED
+  #   inode size 563B -> 605B over 3s                              still growing after the return
+  #
+  # WHY IT IS DORMANT, and this is a property of the CALLERS rather than of this function:
+  #
+  #   6 clean full pre-flight runs, capture fds held: 0 (ground verified empty before AND after,
+  #     instrument proven by finding the 4 above)
+  #   a REAL bounded `git fetch` whose 2s bound FIRED: 2 git-remote-https SURVIVED, and held
+  #     0 capture fds
+  #
+  # So a real caller DOES strand descendants; those descendants do NOT hold the capture. The
+  # inference — offered as inference, unverified — is that git wires transport helpers over PIPES,
+  # so a helper's stdout is a pipe to the parent git and not the capture it inherited. The `0` is the
+  # measurement; the mechanism is a hypothesis.
+  #
+  # THE CONDITION TO RE-CHECK IS THEREFORE PRECISE: a caller that BACKGROUNDS A WRITER ONTO ITS OWN
+  # STDOUT. Nothing in this pre-flight does that. Add one and this residual becomes live with no
+  # warning, which is why it is declared here rather than left as an absence someone must rediscover.
+  #
+  # NOT FIXED HERE, deliberately: a post-success group kill is rejected in this function on record
+  # (bash reaps the leader, so the pgid is free for REUSE and the kill could reach an unrelated
+  # group — this repo's incident: a pattern kill destroyed a peer lane's gate at component 28 of 30).
+  # Doing it safely means owning a supervisor on EVERY arm, i.e. restructuring the function that has
+  # already produced four findings, one of which was created by the previous fix to it. `ulimit -f`
+  # was tried and rejected on measurement: it is per-PROCESS, so it also caps the pack a legitimate
+  # `git fetch` writes (92 MB, measured), making a safe limit weak and a growing write a false FAIL.
+  #
+  # THE REPLAY IS BOUNDED (roborev job 297, Medium). An unbounded `cat` on `$_CS_CAP_OUT` is not
+  # bounded by the execution deadline: a descendant that OUTLIVES a successful child keeps writing to
+  # that fd, and `cat` on a regular file only stops when it reaches EOF — which never happens while a
+  # writer outpaces the reader. MEASURED, and my first attempt to measure it was wrong in the
+  # permissive direction: a slow bash-loop writer let `cat` terminate, which looked like a refutation.
+  # With a fast writer (`yes`):
+  #
+  #   cat on the growing capture -> DID NOT terminate in 6s (rc 124)
+  #   the capture grew to 4.1 GB in those ~6s
+  #
+  # So the practical consequence is not only a hang, it is filling the filesystem — and on this fleet
+  # a full disk breaks every lane (link-time ENOSPC even presents as a bus error, which names the
+  # wrong subsystem entirely).
+  #
+  # WHY NOT THE REVIEW'S OTHER OPTION (kill the process group after success): this function ALREADY
+  # rejected that, on record, and re-adding it would reintroduce roborev job 279's defect. Two
+  # reasons, both still true — bash reaps the leader as soon as it exits, so the pgid is free for
+  # REUSE and the kill could land on an unrelated group (this repo's incident: a pattern kill
+  # destroyed a peer's gate at component 28 of 30); and the group kill is expressible only in the
+  # bash-watchdog arm, because GNU `timeout`'s child pgid is unknown to us — while the finding is
+  # specifically about the `timeout`/`gtimeout` path. So the bound goes on the READ, which is
+  # expressible in every arm.
+  #
+  # OVERSIZE IS A REFUSAL, NOT A TRUNCATION, for job 292's reason: a truncated manifest is still
+  # perfectly GRAMMATICAL, so the closed-grammar parser cannot see the loss and the missing trailing
+  # components produce a false PASS. An unmeasurable size is likewise a refusal — not a permissive
+  # branch for a measurement that did not happen.
+  local _cap_n
+  _cap_n=$(head -c "$((_CS_CAP_MAX_BYTES + 1))" "$_CS_CAP_OUT" 2>/dev/null | wc -c 2>/dev/null)
+  case "$_cap_n" in
+    ''|*[!0-9]*)
+      _component_set_replay_err
+      return "$_CS_REPLAY_RC" ;;
+  esac
+  if [ "$_cap_n" -gt "$_CS_CAP_MAX_BYTES" ]; then
+    _component_set_replay_err
+    return "$_CS_REPLAY_RC"
+  fi
+  if ! head -c "$_CS_CAP_MAX_BYTES" "$_CS_CAP_OUT" 2>/dev/null; then
+    _component_set_replay_err
+    return "$_CS_REPLAY_RC"
+  fi
+  _component_set_replay_err
+  return "$rc"
+}
+
+# THE CANONICAL UPSTREAM IDENTITY (roborev job 215 blocker 3, TIGHTENED by job 225). Before
+# this, the baseline was trusted because a remote NAMED `origin` merely EXISTED — so `git
+# remote set-url origin <anything>` re-pointed the comparison, which is precisely the env-var
+# opt-out requirement 9 forbids, reachable through git config instead of the environment. And
+# it fires BY ACCIDENT in the documented fork workflow: there `origin` legitimately names a
+# contributor's FORK whose `main` may be months stale, so the guard silently compares against
+# the wrong baseline and stamps a PASS — the vacuous green this pre-flight exists to close.
+#
+# THE HOST IS PART OF THE IDENTITY, AND THE FIRST CUT'S "ERR TOWARD ACCEPTING AN AMBIGUOUS
+# HOST" WAS WRONG (job 225). Matching on OWNER/REPO alone accepted `https://evil.example/
+# pmcfadin/cqlite` — and, needing no hostile host at all, ANY LOCAL PATH ending in
+# `pmcfadin/cqlite`. Two reasons that is not a tolerable boundary:
+#   1. IT USED TO COMPOUND WITH AN EXECUTION SURFACE, and the pinning is kept for what
+#      remains. When this was written the pre-flight EXTRACTED AND RAN the baseline's copy of
+#      this script, so a loose identity admitted arbitrary code from any repository whose path
+#      ended in the right two segments — identity and execution MULTIPLIED. Since #3544
+#      REQ-3544-01 the baseline is read as DATA and nothing fetched is executed, so what a
+#      loose identity now buys is a WRONG COMPONENT SET: a baseline of unknown provenance,
+#      from which no PASS may be derived. That is a smaller consequence, not a removed one,
+#      and the check stays exactly as strict — it is now defence in depth rather than the
+#      only thing standing between a re-pointed remote and code execution.
+#   2. THE TEST HOOK AND THE VULNERABILITY WERE THE SAME FACT. The self-test's local file
+#      remotes were "genuinely canonical" only because the check was weak enough to accept a
+#      local path — i.e. the property that made the fixtures work WAS the hole. The fixtures
+#      now substitute this constant in their own SCRATCH COPY of this script (the pattern
+#      CLAUDE.md prescribes), which needs no weakening of the shipped check and no seam a
+#      real invoker can set.
+# What is still accepted is only what is VERIFIABLE from the string: the legitimate spellings
+# of ONE host — `https://`, `http://`, `git://`, `ssh://`, scp-like `git@host:owner/repo`,
+# optional userinfo, an explicit `ssh://` port, an optional `www.` and a trailing `.git`,
+# case-insensitively. An unverifiable alias (`mygithub:pmcfadin/cqlite`), a mirror, a local
+# path and an unknown scheme (`file://`) FAIL CLOSED as `remote-not-canonical` — a named
+# non-PASS with a remedy, which the author can always act on by pointing `origin` at upstream.
+#
+# ONE HARD-CODED LITERAL, and that is the point: a configurable expected identity would be
+# the same hole one level out. There is no env var and none may be added.
+_CS_CANONICAL_REMOTE="github.com/pmcfadin/cqlite"
+
+# THE GRAMMAR, AXIS BY AXIS, WITH A STATED RULE FOR EACH (roborev job 227). Three rounds of
+# this check were "too permissive" in a NEW place each time — round 4 had no host at all,
+# round 5 pinned the host but not the transport, and round 6 found `http://`/`git://`
+# accepted. Patching the newest instance is what produced the next one, so the grammar is
+# CLOSED here instead: a git remote URL has exactly the axes below, each axis has one rule,
+# and there is therefore no further variant to find. A NEW axis would be a change to git's
+# URL syntax, not a gap in this list.
+#
+#   TRANSPORT  ACCEPT `https://`, `ssh://`, `git+ssh://`, and the scp-form `git@host:path`.
+#              REJECT `http://` and `git://` — both are UNAUTHENTICATED, so anyone able to
+#              impersonate the hostname on the wire supplies arbitrary git objects. When this
+#              rule was written those objects were EXECUTED (`bash <fetched gate> --list`),
+#              which is why it was a High; since REQ-3544-01 they are read as DATA and the
+#              consequence is a forged component set instead — still a baseline whose
+#              provenance is unknown, so still rejected. Also REJECT `file://`, any scheme,
+#              and a bare LOCAL PATH: their integrity rests on a filesystem this gate cannot
+#              vouch for, and a local path needs no attacker at all (round 5's finding).
+#   USERINFO   ACCEPTED (any), and REDACTED from every rendering — see
+#              _component_set_redact_url. Rejecting it was considered and refused: GitHub
+#              Actions' own checkout rewrites `origin` to
+#              `https://x-access-token:<TOKEN>@github.com/<owner>/<repo>`, so rejecting
+#              userinfo would red a legitimate CI checkout, and a guard that reds on correct
+#              input is the guard agents learn to waive. It carries no identity, so it is
+#              dropped before the comparison.
+#   HOST       EXACTLY `github.com`, case-insensitively, with an optional `www.`.
+#   PORT       ACCEPTED only when it is the scheme's DEFAULT (443 for https, 22 for ssh) —
+#              i.e. an explicit port that changes nothing. A NON-DEFAULT port on `github.com`
+#              is a different endpoint, so it is not the canonical upstream. scp-form has no
+#              port axis at all (git reads `host:path`), which is why the port rule lives only
+#              in the scheme arm.
+#   PATH       EXACTLY `pmcfadin/cqlite`, with an optional trailing `.git` and optional
+#              surrounding `/`.
+#
+# _component_set_normalise_remote <url>: the comparable `<host>/<owner>/<repo>` form of a
+# remote URL, or a NON-CANONICAL form (`local:<path>`, `unsupported-scheme:<url>`,
+# `insecure-transport:<url>`, `non-default-port:<host>/<path>`) which can never equal a
+# `<host>/<path>` constant and therefore always fails closed. Deliberately total: it never
+# errors, so the caller has exactly one comparison to make, and the marker NAMES the axis that
+# rejected it so the diagnostic can say which rule was broken.
+#
+# Lowercased whole: scheme and host are case-insensitive by RFC, and GitHub treats owner/repo
+# case-insensitively too, so this direction only ever ACCEPTS a legitimate spelling.
+# WHITESPACE IS NOT STRIPPED, AND THIS COMMENT IS THE REASON WHY NOT — it used to read "a git
+# URL has no legitimate whitespace, and removing it can only make a pathological value fail a
+# later comparison — never turn a fork into upstream." That was FALSE, and roborev job 230
+# falsified it: git resolves a remote whose scheme is not at byte ZERO as a LOCAL PATH, so
+# stripping a single leading space turns " https://github.com/pmcfadin/cqlite.git" — a local
+# path as far as git is concerned — into a canonical HTTPS verdict. It did not turn a fork into
+# upstream; it turned an ATTACKER-CONTROLLED LOCAL REPOSITORY into upstream, and this pre-flight
+# reads the baseline. A whitespace-bearing value is now refused outright, before normalising.
+# The wrong version is quoted here on purpose: it is exactly the plausible argument that would
+# otherwise get the strip restored.
+_component_set_normalise_remote() {
+  local u scheme="" host path hport
+  # WHITESPACE IS REJECTED, NEVER STRIPPED (roborev job 230). Stripping it CHANGES GIT'S
+  # READING of the value: git resolves a remote whose scheme is not at byte ZERO as a LOCAL
+  # PATH, so " https://github.com/pmcfadin/cqlite.git" is a local path to git while a
+  # whitespace-stripping normaliser sees a canonical HTTPS URL — a canonical verdict on an
+  # attacker-controlled local repository, which this pre-flight would then read as its baseline.
+  #
+  # The general rule, and the reason this is a REFUSAL rather than one more accepted shape:
+  # VALIDATE THE BYTES GIT WILL CONSUME. Any value whose interpretation a transformation could
+  # change is refused outright, before normalising — otherwise the check certifies a string
+  # that git will never use. (Lowercasing below is safe under that rule for a reason worth
+  # stating: git does not re-resolve a remote by case, so it cannot move a value between the
+  # scheme and local-path readings.)
+  #
+  # The marker carries NO PART of the value: it reaches `_CS_DETAIL`, which reaches the SUMMARY
+  # block agents paste into PR comments, and the value may carry userinfo credentials.
+  case "$1" in
+    *[[:space:]]*) printf 'whitespace-bearing'; return 0 ;;
+  esac
+  u=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  case "$u" in
+    https://*)   scheme=https; u="${u#https://}" ;;
+    # ---- SSH TRANSPORTS ARE NOT CANONICAL (roborev job 296, High) -------------------------
+    #
+    # An ssh-form origin was judged canonical FROM ITS URL STRING, but the isolated environment
+    # admits `HOME` (ssh key + known_hosts discovery), so OpenSSH still honours `~/.ssh/config`.
+    # A `Host github.com` rule there can rewrite `HostName` to another server, or run
+    # `ProxyCommand` / `Match exec` — so the fetch could take a NON-CANONICAL baseline, and could
+    # EXECUTE, while passing the identity check.
+    #
+    # WHY THIS IS A DESCOPE AND NOT A HARDENING. This is another route in the family that has
+    # produced `url.*.insteadOf`, an `ext::` helper on the transfer hop, promisor lazy-fetch,
+    # `refs/replace` and `info/grafts`. The standing ruling on a further residual of that family is
+    # explicit: descope, or accept a bounded PROVABLY NON-EXECUTING residual — and NOT "harden the
+    # fourth route". A bounded residual is unavailable here because `ProxyCommand` executes, and the
+    # usual mitigating argument (a redirected baseline degrades to a WRONG COMPONENT LIST that the
+    # comparison detects) does not reach it: the harm lands during transport, before any comparison.
+    # So the grammar is narrowed instead. `~/.ssh/config`, `ProxyCommand` and `Match exec` leave the
+    # design rather than being defended against.
+    #
+    # IN MODEL because HOME IS SHARED: every lane on this fleet runs as one user with
+    # `HOME=/home/ubuntu`, writable by all of them, so the party who can plant that file is a PEER
+    # LANE — a different agent session — not the invoker. (An invoker editing their own config is
+    # out of model; a non-invoker route is a defect.) Same shape as the shared `.git/config`
+    # incident, #3617.
+    #
+    # COST, measured rather than assumed: every lane's `origin` is
+    # `https://github.com/pmcfadin/cqlite.git`, and CI uses
+    # `https://x-access-token:<TOKEN>@github.com/…`, so nothing on this fleet or in CI is affected.
+    # A checkout whose origin IS ssh-form now fails closed with this named refusal; the remedy is
+    # `git remote set-url origin https://github.com/pmcfadin/cqlite.git`.
+    ssh://*|git+ssh://*|ssh+git://*)
+      printf 'ssh-transport:%s' "${u%%://*}"; return 0 ;;
+    # BOTH legacy ssh aliases git accepts, not one of them (roborev job 230): accepting
+    # `git+ssh://` while rejecting the equivalent `ssh+git://` red a VALID canonical checkout,
+    # which is the false-FAIL class — worth fixing at Low precisely because that is the class
+    # agents learn to waive a lane over.
+    # UNAUTHENTICATED TRANSPORTS, named individually so nobody "restores" one as a spelling:
+    # with no server authentication, an on-path attacker IS the baseline, and the baseline is
+    # read as the baseline.
+    #
+    # THE MARKER NAMES THE SCHEME AND NOT THE URL, deliberately: the rejected value may carry
+    # USERINFO (`http://x-access-token:<TOKEN>@…`), this output is rendered into `_CS_DETAIL`,
+    # and `_CS_DETAIL` reaches the SUMMARY block agents paste into PR comments. Redaction lives
+    # in _component_set_redact_url for the RAW url; a normalised form must simply never carry a
+    # credential in the first place.
+    http://*|git://*)
+      printf 'insecure-transport:%s' "${u%%://*}"; return 0 ;;
+    # Any other scheme, `file://` included: naming it explicitly is what stops a future reader
+    # "fixing" the local-path branch by adding a scheme.
+    *://*)       printf 'unsupported-scheme:%s' "${u%%://*}"; return 0 ;;
+  esac
+  # USERINFO, dropped only when the `@` is in the AUTHORITY (before the first `/`) — an `@`
+  # inside a path is path data, not credentials. It carries no identity; it is redacted, never
+  # rendered, by _component_set_redact_url. It is CAPTURED rather than discarded because the
+  # scp-form arm below has to judge it (job 264).
+  local uinfo=""
+  case "${u%%/*}" in
+    *@*) uinfo="${u%%@*}"; u="${u#*@}" ;;
+  esac
+  # USERINFO IS REFUSED OUTRIGHT — AND THIS REVERSES AN EARLIER, WRONG JUSTIFICATION (roborev job
+  # 276). It used to be ACCEPTED for schemed URLs, on the ground that GitHub Actions rewrites
+  # `origin` to `https://x-access-token:<TOKEN>@github.com/…` and rejecting it would red a
+  # legitimate CI checkout; the credential was then kept out of `git`'s own argv by writing it to
+  # an isolated config. THAT MITIGATION DOES NOT HOLD: git hands the configured URL to a TRANSPORT
+  # HELPER (`git-remote-https`), so the token appears in THE HELPER's command line — a different
+  # process's argv than the one that was checked — for the life of every `ls-remote` and `fetch`.
+  #
+  # So the credential is removed instead of hidden: a canonical upstream has no business carrying
+  # one, which is the same reasoning that narrowed the scp form to `git@github.com`. VERIFIED
+  # before choosing refusal over stripping: this repository's own CI checks out with
+  # `actions/checkout@v5`, which stores its token in `http.<url>.extraheader` and leaves `origin`
+  # WITHOUT userinfo — so refusing cannot red the nightly gate. Stripping was the alternative and
+  # is worse: it would leave the token in the config we write while fetching without it.
+  #
+  # `git@` in the scp form is not userinfo in this sense (it is how ssh addresses github.com at
+  # all), and it is handled in the scp arm below.
+  # ONE RULE FOR EVERY FORM: userinfo must be ABSENT or exactly `git`. The first cut refused ALL
+  # userinfo and immediately red `ssh://git@github.com/pmcfadin/cqlite.git` — the standard ssh
+  # spelling, i.e. a false FAIL on a correct origin, which is the class agents learn to waive.
+  # `git@` is not a credential; it is how ssh addresses github.com at all. Everything else in that
+  # position IS one.
+  #
+  # THE MARKER CARRIES NO PART OF THE VALUE — it IS the credential.
+  if [ -n "$uinfo" ] && [ "$uinfo" != git ]; then
+    printf 'userinfo-bearing'; return 0
+  fi
+  if [ -n "$scheme" ]; then
+    host="${u%%/*}"
+    case "$u" in */*) path="${u#*/}" ;; *) path="" ;; esac
+    case "$host" in
+      *:*) hport="${host##*:}"
+           case "$scheme/$hport" in
+             https/443|ssh/22) host="${host%:*}" ;;
+             # THE FULL REMAINDER STAYS IN THE KEY. It is tempting to reduce this to the port
+             # because the value reaches a diagnostic — and that is the WRONG LAYER: this
+             # function's output is the COMPARISON KEY the canonical-identity check equates, so
+             # anything dropped here makes two DIFFERENT remotes compare EQUAL. Rendering is
+             # reduced separately, by _component_set_axis_only (job 282).
+             *) printf 'non-default-port:%s' "$u"; return 0 ;;
+           esac ;;
+    esac
+  else
+    # NO SCHEME: git reads `host:path` as scp-like (an AUTHENTICATED ssh transport), and
+    # everything else as a LOCAL PATH.
+    case "${u%%/*}" in
+      # SCP FORM IS AN SSH TRANSPORT, so it is refused for the reason above (job 296). The
+      # reasoning below is RETAINED because it established the userinfo narrowing that the
+      # schemed arm still relies on — it is history, not current behaviour.
+      # SCP FORM IS AN SSH TRANSPORT and is refused for the reason above (job 296). The
+      # reasoning below is RETAINED as history — it established the userinfo narrowing the
+      # SCHEMED arm still relies on — and describes behaviour this arm NO LONGER HAS.
+      *:*) printf 'ssh-transport:scp-form'; return 0 ;;
+           # (unreachable below — retained as the record of what this arm used to accept)
+           # (SCP-FORM USERINFO is covered by the ONE userinfo rule above — job 276 unified them.
+           # The reasoning is kept here because this is where it was first established.)
+           # SCP-FORM USERINFO IS RESTRICTED TO `git` (roborev job 264, Medium). The canonical
+           # upstream has no business being reached as an arbitrary user, and every OTHER
+           # spelling of userinfo here is a CREDENTIAL — `TOKEN@github.com:pmcfadin/cqlite` was
+           # accepted as canonical, and an ssh transport error then echoed it verbatim into
+           # `_CS_DETAIL` and so into a SUMMARY block this repository tells agents to paste into
+           # PR comments. This is the THIRD instance of that leak family (rendered raw, then
+           # flattened-but-not-redacted, then redacted for `scheme://user@` only), and the two
+           # earlier fixes were both "extend the redactor". NARROWING WHAT IS ACCEPTED is
+           # tighter than widening what is scrubbed: a shape that cannot be canonical never
+           # reaches the renderer at all. (The redactor is extended as well — belt — because
+           # a REJECTED value is still rendered, and the marker below is what keeps this one's
+           # bytes out of it.)
+           #
+           # The schemed arm above deliberately still ACCEPTS userinfo: GitHub Actions rewrites
+           # `origin` to `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red
+           # a legitimate CI checkout.
+           #
+           # THE MARKER CARRIES NO PART OF THE VALUE, for the same reason as `whitespace-bearing`.
+      # THE PATH STAYS IN THE KEY, for the reason the port does: dropping it made EVERY local path
+      # normalise to one value, so a canonical identity pinned to a local path matched ANY local
+      # path — measured, and it turned the fork fixture's non-canonical origin into a PASS. That is
+      # the "any local path ending in those two segments" hole (job 225) re-created from the other
+      # end. The path is withheld at RENDER time by _component_set_axis_only instead.
+      *)   printf 'local:%s' "$(_component_set_strip_repo_suffix "$u")"; return 0 ;;
+    esac
+  fi
+  case "$host" in www.*) host="${host#www.}" ;; esac
+  printf '%s/%s' "$host" "$(_component_set_strip_repo_suffix "$path")"
+}
+
+# _component_set_strip_repo_suffix <path>: drop the decorations git allows on a repository
+# path — leading/trailing `/` and a trailing `.git` — in a loop, so `…/cqlite.git/` folds too.
+_component_set_strip_repo_suffix() {
+  local p="$1"
+  # Slashes: any number, both ends. A leading `/` after `host:` and a trailing `/` are both
+  # legitimate spellings on the accept list.
+  while :; do
+    case "$p" in
+      /*) p="${p#/}" ;;
+      */) p="${p%/}" ;;
+      *)  break ;;
+    esac
+  done
+  # `.git`: AT MOST ONE (roborev job 239). Looping here made `pmcfadin/cqlite.git.git`
+  # normalise to the canonical repo, so a DIFFERENT path was accepted as upstream — and the
+  # documented grammar permits exactly one optional suffix. A normaliser must not be more
+  # permissive than the grammar it implements.
+  case "$p" in *.git) p="${p%.git}" ;; esac
+  printf '%s' "$p"
+}
+
+# _component_set_redact_url <url>: <url> with any AUTHORITY userinfo replaced by `<redacted>`,
+# for rendering in a diagnostic (roborev job 227). A remote URL legitimately carries a
+# credential — GitHub Actions writes `https://x-access-token:<TOKEN>@github.com/…` into
+# `origin` — and this gate's diagnostics reach TWO places that are routinely published: the
+# run's stderr/log bundle, and the SUMMARY block, which this repository's own workflow tells
+# agents to PASTE INTO PR COMMENTS. So the leak path is the documented practice, which is why
+# this outranks its severity label.
+#
+# BLANKET, never a judgement about which usernames are secret: `git@` and
+# `x-access-token:ghp_…` are indistinguishable to a rule, and the userinfo carries no identity
+# worth printing anyway. The host and path are preserved, because those are the fact a reader
+# needs. A URL with no authority userinfo passes through unchanged.
+_component_set_redact_url() {
+  local u="$1" scheme="" rest
+  case "$u" in
+    *://*) scheme="${u%%://*}://"; rest="${u#*://}" ;;
+    *)     rest="$u" ;;
+  esac
+  # Only an `@` BEFORE the first `/` is userinfo (an `@` in a path is path data).
+  case "${rest%%/*}" in
+    *@*) rest="<redacted>@${rest#*@}" ;;
+  esac
+  printf '%s%s' "$scheme" "$rest"
+}
+
+# _component_set_axis_only <normalised>: the part of a normalised value that is SAFE TO RENDER.
+#
+# WHY THIS EXISTS AT ALL (roborev job 282, the FIFTH finding in one family). The family:
+#   227 — the raw URL was rendered                        -> credential leak
+#   234 — redacted but not flattened                      -> newline forged `RESULT: PASS`
+#   239 — flattened but not redacted (fetch stderr)       -> credential leak, one path over
+#   264 — redaction handled `scheme://user@` only         -> scp-form leak
+#   282 — query strings verbatim; multi-`@` authorities redacted only to the first `@`
+# Every fix improved the SANITISER, and the list of places a secret can hide in a URL does not
+# close — which is the "rarer delimiter" this repository's mechanism ruling warns about. So the
+# rejected URL is NOT RENDERED ANY MORE. What is rendered is the AXIS the value was rejected on,
+# and the normalised identity ONLY when the normalised identity is itself grammatically clean.
+#
+# That second clause is load-bearing: a normalised value is not categorically safe. For an
+# otherwise well-formed URL the normaliser returns `<host>/<owner>/<repo>` — and a URL like
+# `https://github.com/owner/repo?token=SECRET` normalises to a value CARRYING that query string.
+# So the shape is checked, not assumed: a value matching a clean host/owner/repo is rendered whole
+# (it is what a reader needs to see they pointed at a fork), and anything else is reduced to its
+# leading token — the axis — which every rejection path above constructs from a fixed vocabulary
+# plus, at most, a port number.
+_component_set_axis_only() {
+  case "$1" in
+    *[![:alnum:]._/-]*)
+      # NOT CLEAN. If it carries an axis prefix (`non-default-port:8443`), render THAT — the
+      # vocabulary before the `:` is ours and the remainder is at most a port. Otherwise render a
+      # FIXED token: this is the branch a query string reaches
+      # (`github.com/owner/repo?token=SECRET` normalises to a value carrying the query), and the
+      # first cut of this function fell through to `${1%%:*}` — which, with no colon present, is
+      # the WHOLE VALUE. Measured: it printed the query string verbatim, i.e. it reproduced the
+      # very finding it was written to close.
+      case "$1" in
+        *:*) printf '%s' "${1%%:*}"; return 0 ;;
+      esac
+      printf 'identity-mismatch'; return 0 ;;
+  esac
+  # CLEAN. A `<host>/<owner>/<repo>` is rendered whole — that is what shows a reader they pointed
+  # at a fork — and a clean single token (`local-path`, `userinfo-bearing`) is its own axis.
+  printf '%s' "$1"
+}
+
+# _component_set_remote_is_canonical <url>: rc 0 iff <url> names the canonical upstream.
+# EXACT equality against the one literal — never a suffix or prefix test, which is what
+# admitted `evil.example/pmcfadin/cqlite` and every local path (job 225).
+_component_set_remote_is_canonical() {
+  [ "$(_component_set_normalise_remote "$1")" = "$_CS_CANONICAL_REMOTE" ]
+}
+
+# ---- THE COMPONENT SET IS READ AS DATA, NEVER EXECUTED (#3544, REQ-3544-01) -------------
+#
+# THE RULING AND WHY. This pre-flight used to derive the baseline's set by EXTRACTING the
+# fetched `origin/main:scripts/agent-gate.sh` and RUNNING it (`bash <fetched> --list`). SIX of
+# that mechanism's SEVEN High-severity review findings trace to that single decision, and the
+# three fixes it went through each moved the hole ONE LAYER OUTWARD: a symbolic remote name,
+# then the validated URL, then the URL in `argv`. That is not a hardening curve — it is
+# CLAUDE.md's umbrella rule (#3312) restated: CONTROL AND DATA MUST NOT SHARE A CHANNEL WHEN
+# THE DATA IS ATTACKER-CONTROLLED, and the fix is to REMOVE the channel, not to choose a rarer
+# delimiter. `fetch-then-execute` IS the shared channel: what this check wants is a COMPONENT
+# LIST (data) and what it retrieved was a SCRIPT (control).
+#
+# WHAT THE CHANGE CONVERTS, stated precisely because "the findings are eliminated" would be
+# false: a redirected/hostile baseline now yields a WRONG COMPONENT LIST — which the comparison
+# itself detects and reports — instead of ARBITRARY CODE EXECUTION with the developer's
+# credentials. The identity pinning, the isolated fetch, the argv/credential fixes and the
+# verified transfer hop all REMAIN, as defence in depth (this fleet has twice been saved by the
+# older dumber layer surviving beside the newer cleverer one).
+#
+# TWO READ PATHS, BOTH PURE DATA, NEITHER EXECUTING ANYTHING:
+#
+#  1. PRIMARY — the committed manifest `scripts/agent-gate.components`, read with
+#     `git show <rev>:<path>` and parsed under a CLOSED grammar (one component name per line;
+#     blank lines and `#` comments skipped; ANYTHING else is a NAMED refusal). Data by
+#     construction.
+#
+#  2. TRANSITIONAL FALLBACK — when the manifest is ABSENT at that rev, the gate script's
+#     single-line top-level `COMPONENTS=(…)` declaration is extracted AS TEXT and the names are
+#     parsed out of it. It exists because `origin/main` carries no manifest until THIS change
+#     merges, so a manifest-only read would leave this very PR unable to certify itself (the
+#     "a PR whose subject is a config read from root cannot certify itself" class). It is
+#     SELF-LIMITING: once the manifest is on `main` it is unreachable for any baseline at or
+#     after that merge. It is not an escape hatch — it REFUSES loudly on any shape it does not
+#     recognise (a multi-line array, a computed array, more than one declaration, a character
+#     outside the name grammar), and it never runs code.
+#
+#     ITS ONE REAL COST, named rather than left to be rediscovered: a TEXT extractor is
+#     format-brittle in a SHARED direction. If `main` ever reflows that array across lines,
+#     path 2 refuses for EVERY branch at once. That is fail-closed rather than a false green,
+#     and it is the other reason the manifest is primary.
+#
+# `scripts/ci/check-pub-surface.sh` is the precedent for a BOUNDED single-question source read
+# that can REFUSE; what #1712 deleted was the UNBOUNDED scanner, which is a different shape.
+#
+# THE LOCAL MANIFEST IS ASSERTED AGAINST THE RUNNING ARRAY ON EVERY RUN, and that assert is
+# what makes the manifest trustworthy as a baseline at all. Without it the file is an
+# UNVERIFIED CLAIM about the component set: a branch that added a component to `COMPONENTS`
+# and not to the manifest would, once merged, leave `main`'s manifest SHORT — and every later
+# branch would then compare against a too-small baseline and silently excuse real skew. So
+# `manifest-missing` / `manifest-garbage` / `manifest-stale` are fail-closed named kinds, and
+# comparing against an unverified manifest would be worse than comparing against nothing.
+_CS_MANIFEST_REL="scripts/agent-gate.components"
+
+# _component_set_valid_name <token>: rc 0 iff <token> is a plausible component name.
+# The class is deliberately WIDER than today's all-`[a-z0-9-]` names — a future `write_tests`
+# or `bti.v2` must be MEASURED, not called garbage, because a guard that reds on correct input
+# is the guard agents learn to waive. What it still rejects is everything a prose line or a
+# leaked diagnostic contains (whitespace, `:`, `/`, glob characters), which is the class that
+# actually threatens the derivation, plus a leading `-` so a name can never be read as an
+# option downstream.
+_component_set_valid_name() {
+  case "$1" in
+    ''|-*) return 1 ;;
+    # ASCII RANGES, NOT `[:alnum:]` (roborev job 297, Low). `[:alnum:]` is LOCALE-DEPENDENT, so the
+    # same manifest was valid on one host and invalid on another. Measured across three locales:
+    #
+    #   LC_ALL=C            "café" -> REJECTED     "фmt" -> REJECTED
+    #   LC_ALL=en_US.UTF-8  "café" -> ACCEPTED (!) "фmt" -> REJECTED by the range form
+    #   LC_ALL=C.UTF-8      "café" -> ACCEPTED (!)
+    #
+    # The explicit range REJECTS both under every locale tested, so it is used rather than forcing a
+    # locale globally. (If a host is ever found whose collation breaks `A-Za-z`, the fully enumerated
+    # character list gives the same answers and is the fallback — measured alongside these.)
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# _component_set_parse_manifest_file <path>: parse a component manifest under the closed
+# grammar. Sets _CS_PARSED_SET / _CS_PARSED_N; rc 0 = parsed, rc 1 = REFUSED (the offending
+# line is in _CS_PARSED_BAD), rc 2 = parsed to NO names.
+#
+# NO TRIMMING, deliberately: a line with leading or trailing whitespace is REFUSED, because a
+# parser that trims is a parser that guesses, and this file is the baseline of a fail-closed
+# comparison. Pure shell — no external command, so nothing here can reach the network.
+_CS_PARSED_SET=""
+_CS_PARSED_N=0
+_CS_PARSED_BAD=""
+_component_set_parse_manifest_file() {
+  local f="$1" line
+  _CS_PARSED_SET=""; _CS_PARSED_N=0; _CS_PARSED_BAD=""
+  # `|| [ -n "$line" ]`: a file whose last line has NO trailing newline would otherwise lose
+  # its last component silently — a SHRUNKEN baseline, i.e. the vacuous pass inverted.
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '') continue ;;
+      '#'*) continue ;;
+    esac
+    if ! _component_set_valid_name "$line"; then
+      _CS_PARSED_SET=""; _CS_PARSED_N=0
+      _CS_PARSED_BAD="$(_component_set_flatten "$line")"
+      return 1
+    fi
+    _CS_PARSED_SET="${_CS_PARSED_SET:+$_CS_PARSED_SET }$line"
+    _CS_PARSED_N=$((_CS_PARSED_N + 1))
+  done <"$f"
+  [ "$_CS_PARSED_N" -gt 0 ] || return 2
+  return 0
+}
+
+# _component_set_extract_declaration <path-to-a-gate-script>: the TRANSITIONAL fallback.
+# Reads the file AS TEXT and parses the names out of its ONE top-level single-line
+# `COMPONENTS=(…)` declaration. Sets _CS_PARSED_SET / _CS_PARSED_N on success; rc 1 = REFUSED
+# (why is in _CS_DECL_ERR), rc 2 = the declaration lists no names.
+#
+# BOUNDED IN WHAT IT ASKS, which is what distinguishes it from the scanner #1712 deleted: one
+# question, one shape, anchored at COLUMN ZERO (a declaration inside a function or a here-doc
+# is indented or otherwise not at column zero, and is not this shape). Everything it does not
+# recognise is a REFUSAL that names what it saw — never a partial parse, and never a guess.
+_CS_DECL_ERR=""
+_component_set_extract_declaration() {
+  local f="$1" line n=0 decl="" rest inner w
+  _CS_PARSED_SET=""; _CS_PARSED_N=0; _CS_DECL_ERR=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'COMPONENTS=('*) n=$((n + 1)); decl="$line" ;;
+    esac
+  done <"$f"
+  if [ "$n" -ne 1 ]; then
+    _CS_DECL_ERR="found $n top-level 'COMPONENTS=(' declaration(s), expected exactly one; the component set could not be read as TEXT"
+    return 1
+  fi
+  rest="${decl#'COMPONENTS=('}"
+  case "$rest" in
+    *')') inner="${rest%')'}" ;;
+    *) _CS_DECL_ERR="the 'COMPONENTS=(' declaration is not a SINGLE-LINE literal — it does not close with ')' on its own line ('$(_component_set_flatten "$decl")'); a multi-line (reflowed) or computed array is REFUSED, never guessed at"
+       return 1 ;;
+  esac
+  # THE CHARACTER CHECK COMES BEFORE ANY WORD SPLITTING, and that order is load-bearing: the
+  # loop below relies on shell word splitting, which also GLOBS, so a `*` reaching it would
+  # expand against the current directory. Refusing every character outside the name grammar
+  # first makes the split provably glob-free (the same reasoning as the `shellcheck disable`
+  # word-splits elsewhere in this pre-flight).
+  case "$inner" in
+    *[![:alnum:]._[:space:]-]*)
+      _CS_DECL_ERR="the 'COMPONENTS=(' declaration contains a character outside the component-name grammar ('$(_component_set_flatten "$decl")'); a substitution, a quote or a glob is REFUSED"
+      return 1 ;;
+  esac
+  # shellcheck disable=SC2086  # intentional word-split over the declaration's tokens; the
+  # character check above guarantees no glob character can be present
+  for w in $inner; do
+    if ! _component_set_valid_name "$w"; then
+      _CS_PARSED_SET=""; _CS_PARSED_N=0
+      _CS_DECL_ERR="the 'COMPONENTS=(' declaration holds a token that is not a component name: '$(_component_set_flatten "$w")'"
+      return 1
+    fi
+    _CS_PARSED_SET="${_CS_PARSED_SET:+$_CS_PARSED_SET }$w"
+    _CS_PARSED_N=$((_CS_PARSED_N + 1))
+  done
+  [ "$_CS_PARSED_N" -gt 0 ] || return 2
+  return 0
+}
+
+# _component_set_local_manifest_check: rc 0 iff the WORKING TREE's manifest exists, parses,
+# and equals THIS gate's own COMPONENTS array EXACTLY, order included. On failure it sets
+# _CS_KIND (manifest-missing | manifest-garbage | manifest-stale) and _CS_DETAIL and returns 1.
+#
+# ORDER IS PART OF THE EQUALITY, and that is not pedantry: `--list` prints dispatch order, the
+# manifest claims to be what `--list` prints, and the remedy for a reorder is the same
+# one-line regeneration as for anything else. A weaker comparison would let the file drift into
+# something that is only approximately the claim.
+#
+# NO EXTERNAL COMMAND: this is a local file read plus string compares, so it cannot hang and
+# needs no bound — which is also why it runs BEFORE the fetch.
+_component_set_local_manifest_check() {
+  local f="$REPO_ROOT/$_CS_MANIFEST_REL" rc only_gate="" only_man="" c padded_man padded_gate
+  # A SYMLINK IS REFUSED HERE TOO, and this is the half that made the attack work (job 285): `-f`
+  # FOLLOWS a symlink, so a link to a full manifest passed local validation while the COMMITTED
+  # object published its target text as the whole baseline. Both halves must read the same
+  # document, so both require a regular file.
+  if [ -L "$f" ]; then
+    _CS_KIND=manifest-garbage
+    _CS_DETAIL="$_CS_MANIFEST_REL is a SYMLINK: this check would FOLLOW it while the committed object published to every future branch is the link's TARGET TEXT — two different documents, so a link is refused rather than resolved. The manifest must be a regular file"
+    return 1
+  fi
+  if [ ! -f "$f" ] || [ ! -r "$f" ]; then
+    _CS_KIND=manifest-missing
+    _CS_DETAIL="the component manifest $_CS_MANIFEST_REL is missing or unreadable in $REPO_ROOT; it is COMMITTED SOURCE and the baseline comparison is derived from it, so its absence is not an excusable state — remedy: regenerate it from this gate's own --list"
+    return 1
+  fi
+  _component_set_parse_manifest_file "$f"; rc=$?
+  if [ "$rc" -eq 1 ]; then
+    _CS_KIND=manifest-garbage
+    _CS_DETAIL="$_CS_MANIFEST_REL holds a line that is not a component name: '$_CS_PARSED_BAD'; the grammar is closed (one name per line, '#' comments and blank lines allowed) and a line it does not recognise is refused rather than skipped, because skipping would SHRINK the set this file publishes as the baseline"
+    return 1
+  fi
+  if [ "$_CS_PARSED_SET" = "${COMPONENTS[*]}" ]; then
+    return 0
+  fi
+  padded_man=" $_CS_PARSED_SET "
+  padded_gate=" ${COMPONENTS[*]} "
+  for c in "${COMPONENTS[@]}"; do
+    case "$padded_man" in *" $c "*) : ;; *) only_gate="${only_gate:+$only_gate }$c" ;; esac
+  done
+  # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
+  for c in $_CS_PARSED_SET; do
+    case "$padded_gate" in *" $c "*) : ;; *) only_man="${only_man:+$only_man }$c" ;; esac
+  done
+  _CS_KIND=manifest-stale
+  if [ -z "$only_gate" ] && [ -z "$only_man" ]; then
+    _CS_DETAIL="$_CS_MANIFEST_REL lists the same $_CS_PARSED_N component(s) as this gate's COMPONENTS array but in a DIFFERENT ORDER; the manifest claims to be what --list prints, so it must match it exactly"
+  else
+    _CS_DETAIL="$_CS_MANIFEST_REL does not match this gate's COMPONENTS array (manifest $_CS_PARSED_N, gate ${#COMPONENTS[@]}): missing from the manifest: ${only_gate:-<none>}; present only in the manifest: ${only_man:-<none>}. A manifest that does not match is an UNVERIFIED baseline for every future branch — once merged, every later run would compare against this wrong set"
+  fi
+  return 1
+}
+
+# _component_set_manifest_presence <rev> <tmpd>: THREE-VALUED presence probe for the manifest
+# at <rev>. Sets _CS_PRESENCE to `present` or `verified-absent` and returns 0; returns 1 with
+# a one-line _CS_PRESENCE_ERR for `could-not-tell`.
+#
+# WHY THIS EXISTS AS ITS OWN STEP, AND WHY THE FALLBACK IS GATED ON IT (lead ruling on
+# REQ-3544-01). "Path 2 is self-limiting — unreachable once the manifest is on `main`" is TRUE
+# and NOT ENOUGH: it is a property somebody reasoned about, and nothing measures it. A refactor,
+# a baseline pointed at an older commit, or an accidentally deleted manifest would silently
+# re-enable the brittle textual path with nobody noticing — a pass derived from the ABSENCE of a
+# bad signal, which is the shape this whole guard exists to close. So presence is MEASURED
+# first, and the fallback is entered ONLY from an affirmative `verified-absent`.
+#
+# `git show <rev>:<path>` CANNOT ANSWER THIS. Its non-zero exit conflates "no such path" with
+# "bad object" with "the repository could not be read", so inferring absence from it is exactly
+# the two-valued-predicate error CLAUDE.md names: a predicate that must collapse "cannot tell"
+# onto one of its answers always picks the permissive one. `git ls-tree <rev> -- <path>`
+# separates them affirmatively:
+#     rc 0 + an entry   -> the tree WAS read and lists the path        => present
+#     rc 0 + NO entry   -> the tree WAS read and does NOT list it      => verified-absent
+#     rc != 0           -> the tree could not be read at all           => could-not-tell
+# An entry that is not a `blob` (a directory at that path) is its own refusal: it can neither be
+# read as a manifest nor called absent.
+#
+# BOUNDED like every other read here: `ls-tree` reads a TREE object, and a partial clone made
+# with `--filter=tree:0` fetches trees LAZILY, so this apparently-local read is network-capable.
+#
+# EVERY OBJECT READ RUNS IN `$_CS_READ_DIR`, WHICH IS THE ISOLATED SCRATCH REPOSITORY WHENEVER ONE
+# EXISTS (roborev job 268). The live repository is never asked to RESOLVE a baseline object,
+# because in a PARTIAL clone that resolution is a network operation: a filtered-out tree or blob is
+# fetched lazily through the live repo's PROMISOR remote, under the live repo's own config, so a
+# local `url.*.insteadOf` plus an enabled external protocol executes a remote helper — the third
+# route of one family, after `insteadOf` on the fetch and `ext::` on the transfer hop. Suppressing
+# it per call site had failed three times; this removes the mechanism instead.
+#
+# EVERY ONE OF THESE READS RUNS UNDER `env -i` PLUS THE ONE ALLOWLIST (roborev job 276, High).
+# They used to run under a bare `env`, inheriting the caller's environment — which is the round-13
+# hole re-opened at the sites this migration ADDED, not a new route: an inherited `GIT_DIR` points
+# the read at another repository, and `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*` or
+# `GIT_CONFIG_PARAMETERS` inject a promisor remote or an `insteadOf`, restoring exactly the
+# lazy-fetch-and-execute path the migration removed. The rationale for the bare `env` expired when
+# the reads moved: it was "these are lane reads, governed by the same environment as the rest of
+# the gate", and they are now scratch reads whose environment must be ours.
+#
+# ONE SCHEME, NOT TWO: `_CS_GIT_ENV` first (transport reachability plus every neutraliser), then
+# `_CS_READ_ENV` on top for what is specific to the read LOCATION. `GIT_ALTERNATE_OBJECT_DIRECTORIES`
+# has to be IN that array rather than inherited — with `env -i` an inherited alternate is gone, and
+# the object join with it (measured while building this: dropping the alternate makes every
+# cross-source ancestry answer `unknown`).
+#
+# `$_CS_READ_ENV` carries `GIT_ALTERNATE_OBJECT_DIRECTORIES=<the LANE's object dir>` when reading
+# in the scratch, because HEAD's objects live in the lane; it expands to NOTHING when reading in
+# the lane itself (the `${x[@]+…}` form is the bash-3.2-safe spelling for an empty array under
+# `set -u`). An alternate is PURE OBJECT STORAGE: it carries no config, so it brings no promisor
+# remote, no `insteadOf` and no `protocol.*.allow` — there is nothing for a helper to be invoked
+# FROM. And a missing object in the scratch is simply MISSING (no promisor there), i.e. a named
+# refusal rather than a network call.
+#
+# `--no-replace-objects` is passed explicitly because these reads are deliberately NOT
+# `env -i`-wrapped, so the allowlist's GIT_NO_REPLACE_OBJECTS does not reach them.
+_CS_PRESENCE=""
+_CS_PRESENCE_ERR=""
+_component_set_manifest_presence() {
+  local rev="$1" tmpd="$2" rc line lmode ltype lpath
+  _CS_PRESENCE=""; _CS_PRESENCE_ERR=""
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq "$_CS_REPLAY_RC" ]; then
+      _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL ran but its captured output could not be replayed in full (rc $rc), so the presence answer would rest on a TRUNCATED read"
+    elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the tree lazily is the usual cause)"
+    elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL could not be run under a bound, so it was NOT RUN (rc $rc)"
+    else
+      _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/ls.err" 2>/dev/null)")"
+    fi
+    return 1
+  fi
+  line=""
+  IFS= read -r line <"$tmpd/ls" 2>/dev/null || line="${line:-}"
+  if [ -z "$line" ]; then
+    # THE AFFIRMATIVE ABSENCE: the tree was read successfully and does not list the path.
+    _CS_PRESENCE=verified-absent
+    return 0
+  fi
+  # `<mode> SP <type> SP <oid> TAB <path>` — split into POSITIONAL FIELDS rather than with
+  # `${line#…}` prefix-stripping, and that is not a style choice: the structural externals audit
+  # in scripts/tests/test_agent_gate_component_set.sh strips comments at the first `#`, so a
+  # `${line#* }` leaves it reading `line` as an external PROGRAM and the audit FAILs on correct
+  # code. Field splitting is also the shape git's format actually is (TAB is in the default IFS).
+  # `set -f` around the split because an unquoted expansion also GLOBS; the pathspec is a fixed
+  # ASCII literal so nothing here can contain one, and the guard costs nothing.
+  set -f
+  # shellcheck disable=SC2086  # deliberate field split of git's own `<mode> <type> <oid> <path>`
+  set -- $line
+  set +f
+  lmode="${1:-}"
+  ltype="${2:-}"
+  lpath="${4:-}"
+  if [ "$lpath" != "$_CS_MANIFEST_REL" ]; then
+    _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL returned an entry this parse does not recognise: '$(_component_set_flatten "$line")'"
+    return 1
+  fi
+  # THE MODE, NOT ONLY THE TYPE (roborev job 285, High). A SYMLINK IS A BLOB — the difference is
+  # the mode (`120000` against `100644`/`100755`) — and accepting every blob made the two halves of
+  # this check read DIFFERENT THINGS:
+  #   * the LOCAL validation opens the working-tree path, which FOLLOWS the symlink, so it sees a
+  #     full, matching manifest and passes;
+  #   * `git show <rev>:<path>` on a symlink blob prints its TARGET TEXT, so the published baseline
+  #     is one line — `agent-gate.components -> fmt` publishes a ONE-COMPONENT baseline.
+  # Every future skew then passes silently, which is the exact vacuous green this guard exists to
+  # close, arriving through the guard's own data file. A tree (`040000`) or a submodule gitlink
+  # (`160000`) is refused by the same check.
+  case "$lmode/$ltype" in
+    100644/blob|100755/blob) _CS_PRESENCE=present; return 0 ;;
+    120000/*)
+      _CS_PRESENCE_ERR="$rev:$_CS_MANIFEST_REL is a SYMLINK (mode 120000): reading it in the working tree would FOLLOW the link while reading it from the commit yields the link's TARGET TEXT, so local validation and the published baseline would be different documents — the manifest must be a regular file"
+      return 1 ;;
+    *)    _CS_PRESENCE_ERR="$rev:$_CS_MANIFEST_REL is mode '$(_component_set_flatten "$lmode")' type '$(_component_set_flatten "$ltype")', not a regular file, so the manifest can neither be read nor called absent"
+          return 1 ;;
+  esac
+}
+
+# _component_set_set_at_rev <rev>: THE ONE READER for a component set at a COMMIT — used for
+# both the fetched baseline and for HEAD (the removal-provenance measurement), so the two can
+# never diverge in grammar, in refusal behaviour or in what they read.
+#
+# Sets _CS_REV_SET / _CS_REV_N / _CS_REV_SRC (`manifest` | `declaration`) and returns 0; on
+# failure returns 1 with _CS_REV_ERRKIND (workspace | probe | unreadable | decl-unrecognised |
+# garbage | empty) and a one-line _CS_REV_ERR. The CALLER maps the errkind onto a `_CS_KIND`,
+# because the same failure means different things for the baseline and for HEAD.
+#
+# THE TWO PATHS ARE MUTUALLY EXCLUSIVE AND CHOSEN BY MEASUREMENT, never by failure (lead ruling
+# on REQ-3544-01):
+#   present         -> PATH 1 ONLY. Every failure of the manifest read — unreadable, bound
+#                      exceeded, ungrammatical, empty — is an ERROR. The textual fallback is a
+#                      HARD REFUSAL here: falling back would re-enter the brittle path on a
+#                      baseline that HAS the data, which is the silent re-enablement this
+#                      gating exists to prevent.
+#   verified-absent -> PATH 2, the transitional TEXT extraction, and the SUMMARY line NAMES it.
+#   could-not-tell  -> REFUSE. Not path 2.
+# The payoff is MECHANICAL EXPIRY rather than trust: once the manifest is on `main`, every later
+# baseline measures `present`, so path 2 stops being reachable and any attempt to enter it is an
+# error someone sees — at the cost of one extra bounded probe.
+#
+# <rev> is either the sha40 this run's own fetch produced or the literal `HEAD`; nothing
+# invoker-supplied reaches it.
+_CS_REV_SET=""
+_CS_REV_N=0
+_CS_REV_SRC=""
+_CS_REV_ERRKIND=""
+_CS_REV_ERR=""
+_component_set_set_at_rev() {
+  local rev="$1" policy="${2:-auto}" tmpd rc prc gate_rel
+  _CS_REV_SET=""; _CS_REV_N=0; _CS_REV_SRC=""; _CS_REV_ERRKIND=""; _CS_REV_ERR=""
+  gate_rel="scripts/$(basename "$GATE_SELF")"
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs.XXXXXX") || tmpd=""
+  if [ -z "$tmpd" ] || [ ! -d "$tmpd" ]; then
+    _CS_REV_ERRKIND=workspace
+    _CS_REV_ERR="could not create a temp dir to read the component set at $rev"
+    return 1
+  fi
+  # POLICY `declaration`: SKIP THE MANIFEST ENTIRELY (roborev job 290, Medium). Used for HEAD's
+  # PROVENANCE, and the reason is an asymmetry in the trust chain rather than a preference. The
+  # LOCAL manifest is checked against the LOCAL `COMPONENTS` declaration on every run
+  # (`manifest-stale`), so it is a VERIFIED claim; HEAD's manifest had no equivalent check and was
+  # trusted anyway. A STALE manifest at HEAD omitting a component — while HEAD's gate still
+  # declares it — then matched an uncommitted removal of that component and classified it as the
+  # non-fatal `DECLARED`: a false green, produced by the very oracle that exists to refuse one.
+  #
+  # The fix removes the second source rather than reconciling it: for provenance the authoritative
+  # committed statement is the `COMPONENTS` DECLARATION — that is what the gate at that commit
+  # would actually dispatch — so it is read directly, as TEXT, and the manifest is not consulted.
+  # (The manifest stays PRIMARY for the BASELINE, where it is the published cross-repository datum
+  # and a branch has no way to verify a remote declaration either.)
+  if [ "$policy" = declaration ]; then
+    _component_set_declaration_at_rev "$rev" "$tmpd" "$gate_rel"
+    return $?
+  fi
+
+  # STEP 1 — WHICH PATH, decided by an affirmative three-valued measurement (see the probe).
+  if ! _component_set_manifest_presence "$rev" "$tmpd"; then
+    _CS_REV_ERRKIND=probe
+    _CS_REV_ERR="could not determine whether $rev carries $_CS_MANIFEST_REL: $_CS_PRESENCE_ERR. 'Cannot tell' is NOT 'absent', so the transitional TEXT fallback is REFUSED rather than entered on an unmeasured premise"
+    rm -rf "$tmpd"; return 1
+  fi
+  if [ "$_CS_PRESENCE" = present ]; then
+    # PATH 1 — THE COMMITTED MANIFEST, AND NOTHING ELSE. Bounded for the same reason as every
+    # read here (job 210, finding 1): `git show <rev>:<path>` reads a BLOB, and in a PARTIAL
+    # clone (`--filter=blob:none`) the blob is fetched LAZILY.
+    _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      # PRESENT BUT UNREADABLE IS AN ERROR, NEVER A FALLBACK: the data is there, so a run that
+      # cannot read it has not measured the baseline — and reading the script text instead
+      # would substitute a different, brittler source for one that exists.
+      _CS_REV_ERRKIND=unreadable
+      if [ "$rc" -eq "$_CS_REPLAY_RC" ]; then
+        _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL and the read succeeded, but its captured output could not be replayed in full (rc $rc) — a TRUNCATED manifest is still grammatical, so it is refused rather than parsed"
+      elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL but reading it EXCEEDED the ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause); the TEXT fallback is not taken when the manifest EXISTS"
+      elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+        _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL but 'git show' could not be run under a bound, so it was NOT RUN (rc $rc); the TEXT fallback is not taken when the manifest EXISTS"
+      else
+        _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL but git show $rev:$_CS_MANIFEST_REL failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/m.err" 2>/dev/null)"); the TEXT fallback is not taken when the manifest EXISTS"
+      fi
+      rm -rf "$tmpd"; return 1
+    fi
+    _component_set_parse_manifest_file "$tmpd/manifest"; prc=$?
+    rm -rf "$tmpd"
+    case "$prc" in
+      0) _CS_REV_SET="$_CS_PARSED_SET"; _CS_REV_N="$_CS_PARSED_N"; _CS_REV_SRC=manifest; return 0 ;;
+      1) _CS_REV_ERRKIND=garbage
+         _CS_REV_ERR="$rev:$_CS_MANIFEST_REL holds a line that is not a component name: '$_CS_PARSED_BAD'"
+         return 1 ;;
+      *) _CS_REV_ERRKIND=empty
+         _CS_REV_ERR="$rev:$_CS_MANIFEST_REL lists NO components; an empty set would excuse every branch"
+         return 1 ;;
+    esac
+  fi
+
+  # PATH 2 — THE TRANSITIONAL TEXT EXTRACTION, reachable ONLY from `verified-absent` above.
+  _component_set_declaration_at_rev "$rev" "$tmpd" "$gate_rel" fallback
+  return $?
+}
+
+# _component_set_declaration_at_rev <rev> <tmpd> <gate-rel>: read the component set from <rev>'s
+# gate script `COMPONENTS=(…)` declaration, AS TEXT. Sets the same `_CS_REV_*` outputs as its
+# caller and OWNS <tmpd> (it removes it on every path).
+#
+# TWO CALLERS, ONE IMPLEMENTATION: the baseline's transitional fallback (manifest verified-absent)
+# and HEAD's provenance read (policy `declaration`, job 290). They must not drift — a difference in
+# grammar or refusal behaviour between "what main declares" and "what HEAD declares" would be a
+# difference in what counts as a removal.
+_component_set_declaration_at_rev() {
+  local rev="$1" tmpd="$2" gate_rel="$3" context="${4:-provenance}" rc prc pre=""
+  # THE DIAGNOSTIC SAYS WHICH QUESTION WAS BEING ASKED. On the baseline's FALLBACK path the
+  # manifest's absence is part of the story ("there is no manifest at this rev, and its gate script
+  # could not be read either"); on HEAD's PROVENANCE path the manifest is NOT CONSULTED AT ALL
+  # (job 290), so naming it would send the reader to look at a file this run never opened.
+  [ "$context" = fallback ] && pre="$rev carries no $_CS_MANIFEST_REL and "
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_REV_ERRKIND=unreadable
+    if [ "$rc" -eq "$_CS_REPLAY_RC" ]; then
+      _CS_REV_ERR="${pre}reading $rev:$gate_rel succeeded but its captured output could not be replayed in full (rc $rc) — a TRUNCATED declaration could parse to a SHORT component set, so it is refused"
+    elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_REV_ERR="${pre}reading $rev:$gate_rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
+    elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_REV_ERR="${pre}git show $rev:$gate_rel could not be run under a bound, so it was NOT RUN (rc $rc)"
+    else
+      _CS_REV_ERR="${pre}git show $rev:$gate_rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/g.err" 2>/dev/null)")"
+    fi
+    rm -rf "$tmpd"; return 1
+  fi
+  _component_set_extract_declaration "$tmpd/gate"; prc=$?
+  rm -rf "$tmpd"
+  case "$prc" in
+    0) _CS_REV_SET="$_CS_PARSED_SET"; _CS_REV_N="$_CS_PARSED_N"; _CS_REV_SRC=declaration; return 0 ;;
+    2) _CS_REV_ERRKIND=empty
+       _CS_REV_ERR="${pre}$rev:$gate_rel declares NO components; an empty set would excuse every branch"
+       return 1 ;;
+    *) _CS_REV_ERRKIND=decl-unrecognised
+       _CS_REV_ERR="${pre}$rev:$gate_rel could not be read as TEXT: $_CS_DECL_ERR (this path never EXECUTES the script; it refuses instead)"
+       return 1 ;;
+  esac
+}
+
+# _component_set_is_shallow: `yes` | `no` | `unknown` — is $REPO_ROOT a SHALLOW clone?
+#
+# WHY IT IS CONSULTED (roborev job 227). `git merge-base --is-ancestor A HEAD` answers 1 for
+# "A is not an ancestor" — but in a SHALLOW repository it ALSO answers 1 when the connecting
+# history is simply ABSENT. So rc 1 is itself ambiguous, and reading it as definitive reports a
+# legitimate committed removal in a shallow checkout as BEHIND: a FALSE FAIL ON CORRECT INPUT,
+# which is the class that teaches agents to waive a lane.
+#
+# This is the three-valued-predicate rule re-appearing one level in. rc ∉ {0,1} is already
+# INDETERMINATE because "cannot tell" must not collapse onto an answer; the same now applies
+# INSIDE rc 1. rc 0 is unaffected: reachability is proven POSITIVELY, and a shallow repo cannot
+# invent a path it does not have.
+#
+# THREE-VALUED, never a boolean: `unknown` (an old git, an unreadable git dir) must not inherit
+# the permissive "not shallow" branch, or the false-BEHIND returns for exactly the hosts whose
+# capability could not be measured. Two independent readings, because
+# `--is-shallow-repository` is git >= 2.15 and this script supports older hosts: the command
+# first, then the `shallow` FILE, and only then `unknown`.
+# A FOURTH VALUE, `blocked`, AND WHY IT IS PRINTED RATHER THAN SET (roborev job 314). Both reads
+# below were UNBOUNDED live-repository calls — the job-312 class, in a helper the job-312 fix did
+# not reach, because that fix enumerated the probe BODY and this helper is defined above it. I
+# patched the reported sites and did not SWEEP the file; the sweep is what found these.
+#
+# This helper is consumed as `$( … )`, i.e. IN A SUBSHELL, so it cannot set `_CS_KIND` — an
+# assignment there dies with the subshell, which is the same fact that leaked capture files one
+# round ago. Its only channel to the parent is STDOUT, so a blocked read is a fourth PRINTED
+# token and the caller (which runs in the parent) turns it into the named refusal. Mapping it onto
+# `unknown` would have been fail-closed too, but it would report "shallowness could not be
+# determined" for a poisoned config — a true refusal with a misleading cause, which is the thing
+# this pre-flight keeps ruling against.
+_component_set_is_shallow() {
+  local sf
+  _cs_live_git -C "$REPO_ROOT" rev-parse --is-shallow-repository
+  case "$_CS_LIVE_STATE" in
+    blocked|unboundable) printf blocked; return 0 ;;
+  esac
+  case "$_CS_LIVE_OUT" in
+    true)  printf yes; return 0 ;;
+    false) printf no;  return 0 ;;
+  esac
+  _cs_live_git -C "$REPO_ROOT" rev-parse --git-path shallow
+  case "$_CS_LIVE_STATE" in
+    blocked|unboundable) printf blocked; return 0 ;;
+  esac
+  sf="$_CS_LIVE_OUT"
+  if [ -n "$sf" ]; then
+    if [ -s "$sf" ]; then printf yes; else printf no; fi
+    return 0
+  fi
+  printf unknown
+}
+
+# ---- THE ISOLATED-GIT ENVIRONMENT IS AN ALLOWLIST (roborev job 258, High) ----------------
+#
+# THE DEFECT. The "isolated" scratch fetch neutralised `GIT_CONFIG_GLOBAL` and
+# `GIT_CONFIG_SYSTEM` and stopped there — so it still inherited `GIT_CONFIG_COUNT` /
+# `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*`, `GIT_CONFIG_PARAMETERS`, `GIT_TEMPLATE_DIR`,
+# `GIT_ALTERNATE_OBJECT_DIRECTORIES` and the rest of that family, ANY of which can define or
+# override `remote.csbaseline.url` AFTER `origin` passed canonical validation and redirect the
+# isolated hop itself.
+#
+# WHY THAT WAS WORSE THAN A REDIRECT OF HOP 2, AND WHY THE EQUALITY ASSERT DID NOT SAVE IT: if
+# HOP 1 is redirected, the sha the isolated hop observes AND the commit transferred into this
+# repository both come from the attacker's repository — so the two values AGREE and the assert
+# emits a **PASS**. A false PASS on skew detection is the exact outcome this whole guard exists
+# to prevent. That assert only ever defended hop 2.
+#
+# THE FIX IS AN ALLOWLIST, AND THE REASON IS THE SAME ONE THAT PRODUCED THIS FINDING: the
+# previous comment argued that git's config sources are "a closed set — system, global/XDG,
+# local, worktree, `-c`, GIT_CONFIG_* env", then neutralised TWO variables of that env family
+# and called the space closed. Enumerating one axis and declaring the space enumerated. A
+# denylist of git environment variables RECEDES exactly the way the fetch-resolution surface
+# did (symbolic remote -> validated URL -> URL in argv), so this repository's rule applies:
+# allowlist the safe shape, never blocklist the dangerous one.
+#
+# THE LINE THE ALLOWLIST DRAWS, stated so a future addition can be judged rather than argued:
+#   ADMIT  what git needs to REACH the remote and AUTHENTICATE to it.
+#   CLEAR  everything that can change WHAT it fetches (config, templates, object stores,
+#          alternates, refs, index) or WHAT IT RUNS (ssh/askpass commands, proxies-as-commands).
+# Anything not listed below is cleared by `env -i`, which is what makes this closed: new git
+# environment variables are cleared BY DEFAULT rather than needing to be discovered.
+#
+# WHAT IS DELIBERATELY NOT ADMITTED, and the cost accepted with it:
+#   GIT_SSH_COMMAND / GIT_SSH / GIT_ASKPASS / SSH_ASKPASS  — they NAME A COMMAND TO RUN. A
+#     developer who requires one to reach github.com gets a NAMED `fetch-failed`, which is a
+#     diagnosable stop rather than an execution vector.
+#   SSL_CERT_FILE / SSL_CERT_DIR / GIT_SSL_CAINFO — the system trust store is the default; an
+#     override is a trust decision this pre-flight must not inherit.
+#   LANG / LC_* — not needed, and the C locale is the better one for parsing git's output.
+#
+# WHY THE LANE-LOCAL READS ARE NOT WRAPPED (and this is not an oversight): the ONLY value whose
+# provenance this isolation establishes is the baseline SHA. Everything else the pre-flight
+# reads is addressed BY that sha — `<sha>:scripts/agent-gate.components`, `<sha>:…agent-gate.sh`,
+# the ancestry walk — and a git object is CONTENT-ADDRESSED, so no environment variable, alternate
+# object store or config can make a given sha resolve to different bytes. Wrapping only some of
+# the gate's lane reads in `env -i` would also mean this pre-flight silently read a DIFFERENT
+# repository than the rest of the gate whenever a caller legitimately set `GIT_DIR`.
+_CS_GIT_ENV=()
+_component_set_build_git_env() {
+  _CS_GIT_ENV=()
+  # REACHABILITY / AUTHENTICATION — each with its reason, because an allowlist entry with no
+  # stated reason is how an allowlist decays into the environment it was meant to replace.
+  # PATH: find `git` itself (and `ssh`, and the bounding `timeout`).
+  _CS_GIT_ENV+=("PATH=${PATH:-/usr/bin:/bin}")
+  # HOME: ssh key + known_hosts discovery for an ssh-form `origin`. It also names the global
+  # config, which is why GIT_CONFIG_GLOBAL=/dev/null below still has to be set.
+  [ -n "${HOME:-}" ] && _CS_GIT_ENV+=("HOME=$HOME")
+  # TMPDIR: git's own temporary files (pack indexing).
+  [ -n "${TMPDIR:-}" ] && _CS_GIT_ENV+=("TMPDIR=$TMPDIR")
+  # SSH_AUTH_SOCK: agent-based ssh authentication; without it an ssh-form origin fails.
+  [ -n "${SSH_AUTH_SOCK:-}" ] && _CS_GIT_ENV+=("SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+  # USER / LOGNAME: some ssh and credential paths derive a default username from them.
+  [ -n "${USER:-}" ]    && _CS_GIT_ENV+=("USER=$USER")
+  [ -n "${LOGNAME:-}" ] && _CS_GIT_ENV+=("LOGNAME=$LOGNAME")
+  # PROXY vars: REACHABILITY on a proxied box. They cannot change WHICH repository is fetched —
+  # TLS still authenticates github.com — and clearing them would red a correct tree behind a
+  # corporate proxy, which is the guard-that-reds-on-correct-input failure mode.
+  local _pv
+  for _pv in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
+    # `${!_pv:-}` is an indirect read of the named variable; safe under `set -u`.
+    [ -n "${!_pv:-}" ] && _CS_GIT_ENV+=("$_pv=${!_pv}")
+  done
+  # THE NEUTRALISERS, set LAST so they cannot be shadowed by anything above: global/system
+  # config off (HOME above still points at the former), and no interactive prompt — an auth
+  # prompt on a stalled credential path is one of the ways this probe could hang.
+  # AND REPLACEMENT REFS OFF (roborev job 264, High). `refs/replace/<sha>` transparently
+  # substitutes ANOTHER commit for that sha, everywhere git reads objects — so the pre-flight
+  # would report the CANONICAL sha while reading a FORGED, smaller manifest, and PASS. That
+  # pairing is the worst one available: the audit trail looks right and the bytes are wrong.
+  # Config sources were closed and "untrusted repository STATE" was treated as closed with them;
+  # replace refs, grafts and alternates are the rest of that space. This is the config-agnostic
+  # half — `--no-replace-objects` is passed explicitly on the lane-local reads that are
+  # deliberately NOT env-wrapped, so no object read anywhere in this pre-flight honours a
+  # replacement.
+  # `GIT_NO_LAZY_FETCH=1` is a BELT, not the control (job 268, TIGHTENED by job 299). The control
+  # is structural: NO OBJECT READ IN THIS PRE-FLIGHT RUNS IN THE LIVE REPOSITORY AT ALL — the
+  # baseline reads, the ancestry walk and (since job 299) the fast path's presence probe all run in
+  # the isolated scratch, over the lane's object directory as an alternate, which carries no config
+  # and therefore no promisor. This variable additionally tells git not to consult a promisor for a
+  # missing object — but it is git >= 2.36, and an unset variable on an older host does nothing
+  # silently, which is exactly why it cannot BE the control. A probe of whether THIS checkout is a
+  # partial clone is no longer needed and was deleted with the live read it gated (job 299): a
+  # stale predicate left in place would pre-authorise a re-introduced live read.
+  _CS_GIT_ENV+=("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" "GIT_TERMINAL_PROMPT=0" "GIT_NO_REPLACE_OBJECTS=1" "GIT_NO_LAZY_FETCH=1")
+  return 0
+}
+
+# NO REF, NO `FETCH_HEAD`, NO SHARED WRITE AT ALL (#3544 / job 264 superseding job 227). This
+# used to fetch the baseline into a PRIVATE per-worktree ref, because `FETCH_HEAD` is a single
+# shared mutable file that a concurrent fetch overwrites between the fetch and the read, and
+# `refs/remotes/origin/main` is the cached observable this whole check exists to distrust. Both
+# hazards are now GONE BY CONSTRUCTION rather than avoided: the pre-flight performs no fetch into
+# this repository at all, so there is no destination ref to own, nothing to clean up, and no
+# shared ref a sibling lane could contend on. The baseline objects are read out of the isolated
+# scratch store through `GIT_ALTERNATE_OBJECT_DIRECTORIES` — see the slow path in
+# `_component_set_probe_inner` for why a transport hop could not be made safe.
+
+# _component_set_drop_scratch_dir: remove the isolated baseline repo (#3544 / job 242). Its
+# config holds the origin URL, which may carry a credential, so this is not merely tidiness.
+_component_set_drop_scratch_dir() {
+  [ -n "$_CS_SCRATCH_DIR" ] || return 0
+  case "$_CS_SCRATCH_DIR" in
+    */cs-baseline.*) rm -rf "$_CS_SCRATCH_DIR" >/dev/null 2>&1 || true ;;
+    *) : ;;   # refuse to rm -rf a path that does not carry our own prefix
+  esac
+  _CS_SCRATCH_DIR=""
+}
+
+# _CS_SUP_PID: the bounded runner's CURRENTLY ACTIVE supervisor, registered so the SIGNAL path can
+# reach it (roborev job 282). Empty whenever no bounded command is in flight.
+#
+# THIS IS THE THIRD INSTANCE OF ONE FAMILY, and that is why it is written as a rule rather than a
+# patch: round 9 was "register cleanup BEFORE creating the resource" (the private fetch ref),
+# round 14 was "clean up on SIGNALS too, not only on return", and round 17's fix for a racy kill
+# CREATED A NEW RESOURCE — the owned supervisor — whose cleanup was never registered with the
+# signal path. Fixing a resource-lifetime bug introduced a resource with the same lifetime bug.
+#
+# THE RULE, for whoever adds the next one: ANY OWNED CHILD MUST BE REGISTERED HERE THE MOMENT IT
+# EXISTS AND CLEARED THE MOMENT IT IS REAPED. Registration cannot precede creation for a pid — we
+# cannot know it before `$!` — so the assignment sits immediately after it, with no command in
+# between, and the cleared value is what tells the handler there is nothing to signal. Clearing at
+# reap is the round-17 invariant restated: never signal a pgid you no longer own.
+_CS_SUP_PID=""
+
+# _component_set_reap_supervisor: terminate and reap the ACTIVE supervisor's process group, if
+# there is one. Safe to call from a signal handler and safe to call twice.
+#
+# Why the group and not just the pid: the supervisor is the group LEADER (`set -m`), and the thing
+# that must stop is the bounded COMMAND, which is its child. Without this, a signal during a hung
+# command terminated the gate and left the command running — unbounded, and able to recreate the
+# capture files after cleanup had deleted them.
+_component_set_reap_supervisor() {
+  [ -n "$_CS_SUP_PID" ] || return 0
+  local sup="$_CS_SUP_PID"
+  # Cleared FIRST: if this is re-entered (a second signal), it must not signal an id whose
+  # ownership we are in the middle of releasing.
+  _CS_SUP_PID=""
+  kill -TERM "-$sup" 2>/dev/null || true
+  sleep 1
+  kill -KILL "-$sup" 2>/dev/null || true
+  wait "$sup" 2>/dev/null
+  return 0
+}
+
+# _component_set_cleanup_resources: EVERY resource this probe can create, dropped in ONE call —
+# the active supervisor (and through it the bounded command), the isolated scratch repository
+# (whose config holds the origin URL and so possibly a credential) and the bounded runner's
+# capture files. One entry point because the normal path and the signal path must not be able to
+# drop different sets.
+#
+# THE SUPERVISOR GOES FIRST, and the order is the fix: deleting the capture files while the command
+# still runs lets it RECREATE them (it holds the paths), so the process is stopped before the files
+# it writes to are removed.
+_component_set_cleanup_resources() {
+  _component_set_reap_supervisor
+  _component_set_drop_scratch_dir
+  _component_set_drop_capture_files
+  return 0
+}
+
+# _component_set_probe: the EFFECTFUL probe, wrapped so every resource is dropped on every path
+# out — the early returns that report an unmeasurable baseline, AND a signal (roborev job 264).
+#
+# SIGNALS ARE A SECOND AXIS OF "CLEANUP REGISTRATION PRECEDES RESOURCE CREATION" (round 9 closed
+# the RETURN-path axis). Cleanup used to run only after `_component_set_probe_inner` RETURNED, so
+# a SIGINT or SIGTERM during a network operation — a Ctrl-C, a `kill` from a supervisor, an SSH
+# hangup on this fleet — left the scratch repository behind WITH ITS CREDENTIAL-BEARING CONFIG,
+# plus the capture files and any private ref. Bash does not run an EXIT trap for a signal that
+# still has its default disposition, so nothing covered it.
+#
+# The handlers are installed BEFORE the resources exist and REMOVED afterwards, and the caller's
+# handlers are SAVED AND RESTORED (`trap -p` prints a re-evaluable command): the gate installs its
+# own EXIT/INT handling elsewhere, and a pre-flight that silently replaced it would be a far worse
+# bug than the leak. Each handler cleans up, restores the DEFAULT disposition for its own signal
+# and re-raises it, so the process still dies of what it was sent — never converted into a normal
+# exit, which would let an interrupted run look like a completed one.
+#
+# HUP is included alongside INT/TERM because on this fleet it is the LIKELIEST of the three: lanes
+# run under ssh and tmux, and a dropped connection is a HUP.
+#
+# ONE RESIDUAL, stated because it is a bash property rather than a gap here: bash defers a trap
+# handler until the current FOREGROUND command completes, so a signal delivered to THIS PROCESS
+# ALONE while a bounded network operation is in flight runs the cleanup only when that operation
+# returns — bounded by the probe's own deadline, never unbounded. Every real interruption signals
+# the process GROUP (a terminal Ctrl-C, an ssh/tmux hangup, a supervisor killing a lane), which
+# takes the in-flight child down too and makes the handler run immediately; that is the shape
+# `3544-signal-cleanup` drives. SIGKILL is uncatchable and therefore out of scope by definition.
+_component_set_probe() {
+  # Resolve the bound for THIS mode before anything network-capable runs. Safe here:
+  # `_component_set_strict` reads $ONLY/$LITE, both settled during arg parsing.
+  if _component_set_strict; then
+    _CS_BOUND_SECS="$_CS_BOUND_STRICT_SECS"
+  else
+    _CS_BOUND_SECS="$_CS_BOUND_LENIENT_SECS"
+  fi
+  _CS_BOUND_HINT="$_CS_BOUND_SECS"
+  local _cs_prev_int _cs_prev_term _cs_prev_hup
+  _cs_prev_int=$(trap -p INT); _cs_prev_term=$(trap -p TERM); _cs_prev_hup=$(trap -p HUP)
+  trap '_component_set_cleanup_resources; trap - INT;  kill -INT  $$' INT
+  trap '_component_set_cleanup_resources; trap - TERM; kill -TERM $$' TERM
+  trap '_component_set_cleanup_resources; trap - HUP;  kill -HUP  $$' HUP
+  _component_set_probe_inner
+  _component_set_cleanup_resources
+  # RESTORE, never merely clear: an empty `trap -p` means the caller had no handler, and the two
+  # cases are not the same thing.
+  if [ -n "$_cs_prev_int" ];  then eval "$_cs_prev_int";  else trap - INT;  fi
+  if [ -n "$_cs_prev_term" ]; then eval "$_cs_prev_term"; else trap - TERM; fi
+  if [ -n "$_cs_prev_hup" ];  then eval "$_cs_prev_hup";  else trap - HUP;  fi
+  return 0
+}
+
+# _component_set_probe_inner: perform the fetch + the two set derivations + the ancestry
+# probe, recording everything in the _CS_* globals. NEVER exits, never emits; the
+# verdict mapping and the emit live in the two functions below.
+# _cs_live_git <git args…>: run a git call against THE LIVE REPOSITORY under the bound, and
+# report a THREE-VALUED outcome. Stdout lands in `$_CS_LIVE_OUT`, the state in `$_CS_LIVE_STATE`.
+#
+# WHY THESE CALLS ARE BOUNDED AND NOT ANNOTATED `# local-only` (roborev job 312, Medium). Four
+# live-repository probes carried a `# local-only:` annotation whose justification was about the
+# NETWORK — "touches no remote", "cannot lazily fetch", "NAMES a remote; it does not contact one" —
+# and was SILENT about blocking. But this pre-flight's stated invariant is "there is NO branch on
+# which it can hang", and EVERY git command reads the repository config, where `include.path` names
+# a file git OPENS AND READS. Point it at a FIFO and the command never returns.
+#
+# MEASURED, with a positive control (an isolated scratch repo; the same commands with no include
+# answer in 5 ms):
+#
+#   include.path -> FIFO:  rev-parse --git-dir            BLOCKED (bound fired at 5s)
+#                          remote get-url origin          BLOCKED
+#                          rev-parse --git-path objects   BLOCKED
+#                          rev-parse --verify HEAD        BLOCKED
+#
+# `env -i` does NOT help, and that is job 264's lesson verbatim: only the ENVIRONMENT is
+# sanitisable — a `.git/config` is a FILE. On this fleet every lane on a box is a worktree of ONE
+# shared `.git`, so the planter is a PEER LANE, which under the triage rule makes it a defect and
+# not an out-of-model invoker bypass. The blast radius is every gate on the box, and it presents as
+# a gate that simply never finishes.
+#
+# THREE-VALUED ON PURPOSE. Wrapping the calls and keeping their two-valued `if !` tests would
+# collapse "the bound fired" onto "this is not a git worktree" / "there is no origin" — the
+# permissive-answer error this issue keeps ruling against, and here it would report a confidently
+# WRONG cause for a hang. `unboundable` is its own state for the same reason the fetch refuses on a
+# host that cannot bound: a missing capability must never inherit the permissive branch.
+_CS_LIVE_OUT=""
+_CS_LIVE_STATE=""
+_cs_live_git() {
+  local rc
+  _CS_LIVE_OUT=""; _CS_LIVE_STATE=""
+  # THE CAPTURE TRIPLE IS CREATED **HERE, IN THE PARENT**, AND THAT IS NOT A STYLE CHOICE. The
+  # bounded call below is a COMMAND SUBSTITUTION, so everything it assigns — including
+  # `_CS_CAP_OUT/_ERR/_RC` — dies with the subshell, while the three `mktemp` FILES survive on
+  # disk with nobody holding their paths. Measured: `3544-signal-cleanup[host]` and `[watchdog]`
+  # reported `capture files left=6` (two calls x three files) the moment these probes became the
+  # FIRST bounded calls in the probe. The gate says this out loud one function up — "DIRECT call,
+  # never `$( … )`: this one sets process state, and a substitution would discard it" — and the
+  # pre-existing `err=$( _component_set_bounded … fetch … )` site is safe only BY ACCIDENT of
+  # ordering, because a direct bounded call had already memoized the paths in the parent.
+  #
+  # This is the family CLAUDE.md names as "a fix that adds a resource inherits that resource's
+  # lifetime bugs": bounding four calls to close a hang introduced a leak on the signal path.
+  if ! _component_set_capture_paths; then _CS_LIVE_STATE=unboundable; return 0; fi
+  _CS_LIVE_OUT=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git "$@" 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ]; then _CS_LIVE_STATE=ok
+  elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then _CS_LIVE_STATE=unboundable
+  elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then _CS_LIVE_STATE=blocked
+  else _CS_LIVE_STATE=failed
+  fi
+  return 0
+}
+
+# _cs_live_refuse <what>: the two states every caller of _cs_live_git handles identically, so the
+# remedy text exists once. Returns 0 when it SET a refusal (the caller must return), 1 otherwise.
+_cs_live_refuse() {
+  case "$_CS_LIVE_STATE" in
+    blocked)
+      _CS_KIND=repo-read-blocked
+      _CS_DETAIL="reading $1 from $REPO_ROOT EXCEEDED its ${_CS_BOUND_HINT}s bound — the read never returned. Every git command reads the repository config, and a \`include.path\` there naming a FIFO or other blocking file hangs it; on this fleet that config is SHARED by every lane on the box. Inspect it with \`git config --show-origin --get-all include.path\`"
+      return 0 ;;
+    unboundable)
+      # THE EXISTING KIND, NOT A NEW ONE. `unboundable` already names exactly this condition for
+      # the fetch (and already has its verdict mapping), so a second spelling would be two names
+      # for one fact — the drift this pre-flight keeps removing. Caught by the pre-existing
+      # `3544-unboundable` case, which knew what to expect because the kind was already there.
+      _CS_KIND=unboundable
+      # "UNBOUNDED" IS UPPERCASE TO MATCH THE FETCH PATH'S DETAIL, and that is a contract, not
+      # decoration: `3544-unboundable` requires the emitted line to NAME the refusal with that
+      # token, and this branch now fires FIRST (at the git-directory read), so it — not the
+      # fetch's — is the text a reader greps. Same idiom, same word, one refusal vocabulary.
+      _CS_DETAIL="no bounded-run mechanism available (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of $1 from $REPO_ROOT, which could hang the gate outright; a missing capability must not inherit the permissive branch"
+      return 0 ;;
+  esac
+  return 1
+}
+
+_component_set_probe_inner() {
+  # `_CS_READ_ENV` now carries ONLY what is specific to a read location (the alternate). The
+  # neutralisers — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, the config suppressors — live in
+  # the ONE allowlist (`_CS_GIT_ENV`) that every git call in this pre-flight now runs under.
+  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""
+  _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
+  _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
+  _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
+  # Build the ALLOWLISTED environment before ANY isolated git call (job 258). Not memoized: it
+  # is cheap, and a stale copy would be a second source of truth for the one thing this
+  # function exists to control.
+  _component_set_build_git_env
+
+  # THE CAPTURE TRIPLE IS OWNED BY THE PARENT, STRUCTURALLY — NOT BY LUCK OF ORDERING (job 314).
+  # `_cs_live_git` creates it on first use, and that was safe only because the first such call
+  # happens here in the probe body. But `_component_set_is_shallow` is consumed as `$( … )`, so a
+  # `_cs_live_git` reached through it runs in a SUBSHELL: if the triple did not already exist, its
+  # three `mktemp` files would be created there and survive with nobody holding their paths — the
+  # exact leak `3544-signal-cleanup` measured one round ago. Relying on "the parent happens to go
+  # first" is the ordering argument I criticised in the pre-existing `err=$( … fetch … )` site, so
+  # it is made explicit instead: create it ONCE, HERE, before any subshell can.
+  if ! _component_set_capture_paths; then
+    _CS_KIND=unboundable
+    _CS_DETAIL="no capture file could be created for a bounded run (mktemp failed under \${TMPDIR:-/tmp}) — refusing to run an UNBOUNDED read of this repository, which could hang the gate outright"
+    return 0
+  fi
+
+  local err rc
+  if ! command -v git >/dev/null 2>&1; then
+    _CS_KIND=no-tool; _CS_DETAIL="git is not on PATH"; return 0
+  fi
+  # BOUNDED, not annotated local-only (job 312): a config `include.path` naming a FIFO blocks this,
+  # and it is the FIRST repository call the pre-flight makes — see _cs_live_git's header.
+  _cs_live_git -C "$REPO_ROOT" rev-parse --git-dir
+  if _cs_live_refuse "the git directory"; then return 0; fi
+  if [ "$_CS_LIVE_STATE" != ok ]; then
+    _CS_KIND=no-git; _CS_DETAIL="$REPO_ROOT is not a git worktree"; return 0
+  fi
+  local origin_url origin_rc
+  # CAPTURE THE RAW CONFIGURED URL, with rewrites neutralised (roborev job 242). `git remote
+  # get-url` APPLIES `url.*.insteadOf`, measured: with a hostile global rewrite in place this
+  # returned the rewritten value and the identity check then rejected it as non-canonical. That
+  # was safe by accident, not by design, and it left validation and the fetch looking at
+  # DIFFERENT bytes. Neutralising global/system here means the whole baseline path is
+  # rewrite-INDEPENDENT: the raw configured URL is what is validated and, below, what is
+  # fetched. A contributor who legitimately uses `insteadOf` for convenience is unaffected —
+  # the raw canonical URL is fetched directly, which is what their rewrite was aiming at.
+  # BOUNDED, not annotated local-only (job 312): a config read is exactly the operation an
+  # `include.path` FIFO blocks, and "no origin" must not absorb "the read never returned".
+  _cs_live_git -C "$REPO_ROOT" remote get-url origin
+  if _cs_live_refuse "the 'origin' remote URL"; then return 0; fi
+  origin_url="$_CS_LIVE_OUT"; origin_rc=0
+  if [ "$_CS_LIVE_STATE" != ok ]; then
+    _CS_KIND=no-remote
+    _CS_DETAIL="no 'origin' remote is configured in $REPO_ROOT, so the baseline is unobtainable"
+    return 0
+  fi
+  # IDENTITY BEFORE FETCH (job 215, blocker 3). `origin` EXISTING is not evidence that it
+  # points at the upstream whose component set is the coverage claim. Each answer is its own
+  # NAMED non-PASS — never a silent pass and never a SKIP, because a baseline of unknown
+  # provenance is an UNMEASURED baseline, and no PASS may be derived from one.
+  if [ -z "$(printf '%s' "$origin_url" | tr -d '[:space:]')" ]; then
+    _CS_KIND=remote-unreadable
+    _CS_DETAIL="'git remote get-url origin' returned no URL, so the baseline's identity cannot be established"
+    return 0
+  fi
+  if ! _component_set_remote_is_canonical "$origin_url"; then
+    _CS_KIND=remote-not-canonical
+    # REDACTED, never the raw URL (job 227): this detail is rendered into the SUMMARY block,
+    # which the delivery workflow tells agents to paste into PR comments.
+    # FLATTENED as well as redacted (roborev job 234). Redaction (job 227) removed the
+    # CREDENTIAL from this value; it did not remove the NEWLINES. `_CS_DETAIL` is rendered
+    # into the SUMMARY block, so an origin URL containing a newline could inject arbitrary
+    # lines — summary MARKERS included — into an artifact this repo's workflow tells agents
+    # to paste into PR comments, and an oversized value could bloat it. Two properties of
+    # the same untrusted string, and only one of them was fixed the first time round.
+    #
+    # This is the umbrella rule in CLAUDE.md: control and data must not share a channel when
+    # the data is attacker-controlled. `_component_set_flatten` is the existing answer and is
+    # already applied to every command-output interpolation in this function; the origin URL
+    # is the one external value that was missing it.
+    _CS_DETAIL="origin does not name the canonical upstream $_CS_CANONICAL_REMOTE — rejected on: $(_component_set_axis_only "$(_component_set_normalise_remote "$origin_url")"). THE URL IS DELIBERATELY NOT RENDERED (#3544 / job 282): five successive findings leaked a credential out of this one value (raw, then unflattened, then unredacted stderr, then scp-form, then query strings and multi-@ authorities), and the set of places a secret can hide in a URL does not close — so the axis is named instead of the bytes. A fork, a re-pointed remote, an unauthenticated transport (http/git), a non-default port or a credential-bearing URL is a DIFFERENT baseline, and no PASS may be derived from one"
+    return 0
+  fi
+
+  # THE LOCAL MANIFEST IS VERIFIED BEFORE THE BASELINE IS FETCHED. It needs no network and no
+  # bound (a local file read plus string compares), and it is the check that makes a manifest
+  # baseline trustworthy at all: an unverified manifest is a claim, and comparing against a
+  # claim is worse than comparing against nothing. Fail-closed with its own named kind —
+  # `manifest-*`, never folded into a baseline-* kind, because the FILE IS THIS TREE'S and the
+  # remedy is one regeneration away.
+  if ! _component_set_local_manifest_check; then
+    return 0    # _CS_KIND / _CS_DETAIL set by the check
+  fi
+
+  # NO UNBOUNDED PROBE. Checked BEFORE the fetch, not after it fails: the whole point is
+  # that an unboundable command must never be RUN, so there is no branch on which this
+  # pre-flight can hang. A missing bound is an unmeasurable baseline (UNMEASURED ⇒ FAIL in
+  # the certifying modes, ADVISORY-UNMEASURED under --lite/--only), never a permissive pass.
+  # TWO causes, ONE named state: no bounding TOOL, or no writable CAPTURE FILE. The second
+  # is not a nicety — the runner routes a child's streams through files precisely so a leaked
+  # descendant cannot hold the caller's pipe past the bound (roborev job 246), so without them
+  # a "bounded" call is not bounded. Both are checked HERE, before anything network-capable
+  # runs, and `_component_set_capture_paths` is called DIRECTLY (never through `$( )`, which
+  # would create the files in a subshell and lose them).
+  if [ "$(_component_set_bound_mechanism)" = none ]; then
+    _CS_KIND=unboundable
+    _CS_DETAIL="no bounded-run mechanism on PATH (no timeout, no gtimeout, and no sleep for the bash watchdog) — refusing to run an UNBOUNDED fetch, which could hang the gate"
+    return 0
+  fi
+  if ! _component_set_capture_paths; then
+    _CS_KIND=unboundable
+    _CS_DETAIL="no writable temp file for the bounded runner's stream capture (\$TMPDIR=${TMPDIR:-/tmp}) — refusing to run a fetch whose output would reach this process through a pipe a leaked descendant can hold open past the bound, i.e. UNBOUNDED in effect"
+    return 0
+  fi
+
+  # THE FETCH. `origin` and `main` are LITERALS, not variables: a configurable remote or
+  # branch would be an env-settable way to point the comparison at a baseline of the
+  # invoker's choosing, i.e. the opt-out this guard must not have.
+  #
+  # `--refmap=` (EMPTY) suppresses the opportunistic `refs/remotes/origin/*` update and
+  # `--no-tags` suppresses AUTOMATIC TAG FOLLOWING. BOTH are required, and `--refmap=`
+  # ALONE WAS NOT ENOUGH (roborev job 214): `git fetch` also auto-follows tags reachable
+  # from what it fetched and writes them to the SHARED `refs/tags/*`, which reintroduces
+  # exactly the shared-ref mutation `--refmap=` was added to remove — so a new upstream tag
+  # meant concurrent lanes contending on a tag ref, the loser's fetch exiting non-zero, and
+  # this fail-closed pre-flight rejecting a run for a purely CONCURRENT cause. That is the
+  # false-FAIL class the whole guard exists to avoid, which is why it outranks its severity
+  # label. Two reasons for suppressing shared writes at all, both about this fleet's layout —
+  # lanes are `git worktree`s of ONE shared `.git`, so `refs/remotes/origin/main` is
+  # SHARED between them:
+  #   1. NO SHARED REF LOCK. Two sibling lanes fetching at once would contend on that
+  #      ref's lock, and the loser's `git fetch` exits non-zero — which this guard reports
+  #      (correctly) as an unmeasurable baseline, i.e. a FAIL CLOSED for a purely
+  #      concurrent cause. Removing the write removes the contention class outright rather
+  #      than papering over it with a retry (a retry would also double the stall on a
+  #      genuine outage, in the mode that runs every fix round).
+  #   2. NO SIDE EFFECT ON A PEER. A pre-flight must not move a ref another lane's run may
+  #      be reading mid-flight; the check exists to distrust that cached ref, not to
+  #      rewrite it.
+  #
+  # THE DESTINATION IS A REF INSIDE THE SCRATCH REPOSITORY, which is deleted with it. Nothing is
+  # written into THIS repository at any point (job 264): the earlier design fetched into a private
+  # per-worktree ref here, and the ref-ownership reasoning that went with it is preserved above
+  # where that machinery used to live. `--refmap=` and `--no-tags` are retained even inside the
+  # scratch, because "the fetch writes no ref it was not asked for" is a property worth keeping
+  # true wherever the fetch runs.
+  # ONE LINE, deliberately: the structural audit in test_agent_gate_component_set.sh reads a
+  # `git` invocation's BOUND from the line the invocation is on, so splitting this across a
+  # `\` continuation makes the audit report the continuation's first word as an unclassified
+  # external program (measured: it reported `origin`). Keep every git call here on one line.
+  # FETCH THE VALIDATED URL, NOT THE SYMBOLIC NAME (roborev job 239). The check above validates
+  # the value captured from `git remote get-url origin`; re-resolving `origin` here would be a
+  # TIME-OF-CHECK / TIME-OF-USE gap, and on this fleet that gap is not theoretical: lanes are
+  # worktrees of ONE shared `.git`, so any peer's `git config` write changes what `origin` means
+  # mid-run. This lane proved it the hard way — a `git remote set-url` from a throwaway worktree
+  # re-pointed `origin` for four live lanes (#3617). Passing the exact bytes that passed
+  # validation closes the window: what was approved is what is fetched, and therefore what is
+  # READ as the baseline.
+  #
+  # The diagnostics below deliberately say "the validated origin URL" rather than interpolating
+  # it: an accepted canonical URL may carry a token, and `_CS_DETAIL` reaches the SUMMARY block.
+  # ISOLATED FETCH, THEN A VERIFIED TRANSFER (roborev job 242). Two findings, one mechanism.
+  #
+  # (a) REDIRECT: passing the validated URL is NOT sufficient. `url.<base>.insteadOf` rewrites
+  #     apply to an explicit URL too, and every peer's `git config` write reaches this
+  #     worktree's SHARED `.git/config`. MEASURED in an isolated sandbox: with a global-config
+  #     `insteadOf` in place, `git fetch <upstream-url>` retrieved the ATTACKER's commit; with
+  #     GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM neutralised it retrieved upstream's. The
+  #     rewrite is SILENT — nothing in the output names it, and the fetched bytes ARE the
+  #     baseline this run certifies against.
+  #
+  # (b) CREDENTIAL IN ARGV: a URL in a `git` argument is readable by any process via `ps` /
+  #     `/proc/<pid>/cmdline` for the call's life. The config file keeps it out of THE GATE's own
+  #     argv — but NOT out of the transport helper's, which git invokes with the configured URL
+  #     (job 276). That is why a userinfo-bearing origin is now refused as non-canonical rather
+  #     than carefully handled: the only reliable way to keep a credential out of every argv is
+  #     for there not to be one.
+  #
+  # HOP 1 runs in a FRESH repository whose config we wrote, with global and system config
+  # neutralised, and the URL enters that config through a shell REDIRECT — `printf` is a bash
+  # builtin, so no process is spawned and the URL never appears in any argv. Git's config
+  # sources are a CLOSED set (system, global/XDG, local, worktree, `-c`, GIT_CONFIG_* env),
+  # which is what makes this closable rather than one more layer outward: system and global are
+  # neutralised, local is ours, worktree requires `extensions.worktreeConfig` that a fresh repo
+  # does not have, we pass no `-c`, and we set the env explicitly.
+  #
+  # HOP 2 transfers the object into this repository so the ancestry check and the extraction can
+  # proceed unchanged. That hop reads THIS repo's config and so could itself be rewritten — so
+  # it is not trusted: the sha is captured in the scratch repo and RE-ASSERTED here afterwards.
+  # A redirect necessarily yields a different commit, so equality is an AFFIRMATIVE check
+  # rather than an assumption, and a mismatch is its own fail-closed kind.
+  local csdir csconf cssha lanesha rc2 err2
+  csdir=$(mktemp -d "${TMPDIR:-/tmp}/cs-baseline.XXXXXX" 2>/dev/null) || csdir=""
+  if [ -z "$csdir" ] || [ ! -d "$csdir" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="could not create an isolated scratch repository for the baseline fetch"
+    return 0
+  fi
+  _CS_SCRATCH_DIR="$csdir"
+  # GLOBAL/SYSTEM CONFIG NEUTRALISED ON `git init` TOO, not only on the fetch. `git init`
+  # reads `init.templateDir`, and a template directory's non-dot files are COPIED into the new
+  # `$GIT_DIR` — `config` included — so a peer's global config (this fleet shares one user)
+  # could seed the "isolated" repo's own LOCAL config, which the fetch below DOES read. Both
+  # hops would then agree on the wrong commit, so the transfer assert cannot see it. One env
+  # prefix closes it; cheap hardening beats a hole whose only defence is that it is obscure.
+  # BOUNDED like every other git call here. The old reasoning — a fresh directory, no remote, no
+  # object read, global/system config neutralised — is still true, and after three findings whose
+  # annotations were each true about the NETWORK and silent about BLOCKING, "this one is fine" is
+  # not a claim worth defending for the price of a bound. Bounding costs nothing.
+  if ! _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git init -q "$csdir/repo" >/dev/null 2>&1; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="could not initialise the isolated scratch repository for the baseline fetch"
+    return 0
+  fi
+  csconf="$csdir/repo/.git/config"
+  # 0600 BEFORE THE URL IS WRITTEN, AND THE MODE IS VERIFIED, NOT ASSUMED (roborev job 276). The
+  # `|| true` here specified a control and then ignored whether it had been applied: on a
+  # filesystem where the write succeeds and the chmod does not, the URL would have been written
+  # into a broadly readable file anyway. Fail closed instead — and verify the RESULT rather than
+  # the exit status, because "chmod said 0" and "the file is 0600" are different claims (a
+  # no-op chmod on some filesystems reports success).
+  #
+  # `find -perm 600` is the portable exact-mode test: POSIX, and identical on GNU and BSD for an
+  # octal mode with no `-`/`/` prefix. `stat` is NOT usable here — `-c %a` is GNU and `-f %Lp` is
+  # BSD, and this script must run on both.
+  #
+  # SCOPE, so the diagnostic does not overclaim: the scratch directory comes from `mktemp -d`,
+  # which creates it 0700, so another user cannot traverse into it even if this check fails. The
+  # mode on the file is defence in depth; refusing costs nothing and a leak needs both to fail.
+  local mode_out mode_rc
+  if ! chmod 600 "$csconf" 2>/dev/null; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="chmod 600 on the isolated fetch config FAILED: the origin URL may carry a credential, so it is NOT written to a file whose permissions this run could not set"
+    return 0
+  fi
+  # THREE-VALUED, because `[ -z "$(find …)" ]` collapses "the scan FAILED" onto "no match" and the
+  # two need different diagnostics — the repository lints for exactly this shape
+  # (`1699-find-tristate` in test_agent_gate_summary.sh, which caught this on its first run here).
+  # Both non-affirmative states refuse; only the AFFIRMATIVE one proceeds.
+  mode_out=$(find "$csconf" -perm 600 -print 2>/dev/null); mode_rc=$?
+  if [ "$mode_rc" -ne 0 ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="the mode of the isolated fetch config could not be VERIFIED (the exact-mode scan exited $mode_rc): the origin URL may carry a credential, so it is not written to a file whose permissions are unknown — this is 'cannot tell', not 'the mode is wrong'"
+    return 0
+  fi
+  if [ -z "$mode_out" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="chmod 600 reported success but the isolated fetch config is NOT mode 0600: the origin URL may carry a credential, so it is not written to a broadly readable file"
+    return 0
+  fi
+  printf '[remote "csbaseline"]\n\turl = %s\n' "$origin_url" >>"$csconf" 2>/dev/null || true
+
+  # ---- HOP A: THE REF ORACLE — LEARN THE TIP SHA WITHOUT DOWNLOADING A HISTORY -------------
+  #
+  # THE DEFECT THIS REMOVES (roborev job 258, Medium). The scratch repository is created FRESH
+  # every invocation, so a `git fetch` in it has NO "haves" to negotiate with and downloads the
+  # entire reachable graph — then the directory is deleted. MEASURED on this box, from a fresh
+  # repo against this repository:
+  #     plain fetch (what this used to do)   3.74 s   92 MB
+  #     --depth=1                            3.89 s   44 MB   (still ships the tip's whole tree)
+  #     --filter=blob:none                   0.73 s  6.4 MB
+  #     ls-remote                            0.29 s  120 KB
+  # `--lite` runs EVERY fix round, so 3.7 s of that on a fast link is 15 s+ on a slow one — the
+  # lenient bound — and a correctness guard that routinely costs the fast loop its budget is a
+  # guard people learn to waive. That makes it a usability defect with correctness consequences.
+  #
+  # WHY NOT `--filter=blob:none`, MEASURED RATHER THAN ARGUED: the manifest and the gate script
+  # are read IN THIS REPOSITORY at the baseline sha, so a blob-filtered transfer leaves those
+  # blobs absent exactly when `main` has changed them — which is precisely the PR set this guard
+  # is for — and the read then fails on a CORRECT tree. Fast and wrong.
+  #
+  # WHAT IS ACTUALLY NEEDED is the tip SHA, and `ls-remote` is the operation that returns it: no
+  # objects at all. This does NOT weaken #3544's "the baseline is fetched in THIS invocation"
+  # requirement — that requirement is about the staleness of the REF VALUE (a remote-tracking ref
+  # is a cached observable), and this reads that value live from the canonical remote through the
+  # same isolated config, sanitised environment and bound as the fetch it replaces.
+  local remote_sha=""
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" ls-remote csbaseline "refs/heads/main" >"$csdir/lsr" 2>"$csdir/lsr.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_KIND=fetch-failed
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_DETAIL="reading refs/heads/main from the validated origin URL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc — the bound fired; a stalled network or an auth prompt is the usual cause)"
+    else
+      _CS_DETAIL="reading refs/heads/main from the validated origin URL exited $rc: $(_component_set_safe_detail "$(cat "$csdir/lsr.err" 2>/dev/null)")"
+    fi
+    return 0
+  fi
+  # THE OUTPUT IS REMOTE-CONTROLLED TEXT, so it is VALIDATED, not merely parsed. `_CS_SHA` is
+  # interpolated into later `git` arguments and into the SUMMARY block, so a value that is not
+  # an object id is refused BY NAME rather than passed on. The REF NAME is checked too — an
+  # advertisement for something other than `refs/heads/main` is not the baseline this guard
+  # compares against.
+  #
+  # ONLY THE 40-CHARACTER (sha1) FORM IS ACCEPTED, and that is a DELIBERATE NARROWING (roborev
+  # job 309). A 64-character sha256 id used to be accepted here while the isolated scratch
+  # repository is created by a plain `git init` — i.e. in git's DEFAULT object format — so a
+  # sha256 baseline could neither be read through the lane's object store as an alternate nor
+  # transferred into the scratch. The run would have failed several steps later as a generic
+  # `fetch-failed`, blaming the network for a format mismatch. Accepting a value nothing behind
+  # this line can use is a CLAIM OF SUPPORT that no code honours, so the claim is DELETED rather
+  # than qualified: the refusal happens HERE, by name, carrying its reason.
+  #
+  # `--object-format` on the `git init` was the alternative and was rejected on scope: it is
+  # capability for a state this guard's own origin pin makes unreachable (the pin requires
+  # `github.com/pmcfadin/cqlite`, whose remote serves sha1, and a sha1 remote cannot be cloned
+  # into a sha256 checkout), and it needs a git-version fallback — new surface bought for
+  # nothing this repository can test. If GitHub ever serves sha256, this refusal is the line
+  # that will say so, in one sentence, instead of a mystery `fetch-failed`.
+  local lsr_line="" lsr_sha="" lsr_ref="" lsr_why=""
+  IFS= read -r lsr_line <"$csdir/lsr" 2>/dev/null || lsr_line="${lsr_line:-}"
+  set -f
+  # shellcheck disable=SC2086  # deliberate field split of git's own `<sha> TAB <ref>` output
+  set -- $lsr_line
+  set +f
+  lsr_sha="${1:-}"; lsr_ref="${2:-}"
+  case "$lsr_sha" in
+    *[!0-9a-f]*|'')
+      lsr_why="the object-id field is empty or not lowercase hex" ; lsr_sha="" ;;
+    *)
+      case "${#lsr_sha}" in
+        40) : ;;
+        64) lsr_why="the object id is the 64-character (sha256) form, which this pre-flight refuses because its isolated scratch repository is created in git's default object format and could not read or transfer sha256 objects — the refusal is stated here rather than deferred to a generic fetch failure" ; lsr_sha="" ;;
+        *)  lsr_why="the object-id field is ${#lsr_sha} hex characters, not git's 40" ; lsr_sha="" ;;
+      esac ;;
+  esac
+  if [ -z "$lsr_sha" ] || [ "$lsr_ref" != "refs/heads/main" ]; then
+    # A VALID id with the WRONG ref name reaches here with no reason recorded above, so the
+    # remaining cause is named rather than left to a reader of the raw line.
+    [ -n "$lsr_why" ] || lsr_why="the ref name advertised is not refs/heads/main"
+    _CS_KIND=baseline-ref-unparsable
+    _CS_DETAIL="the canonical remote's advertisement of refs/heads/main is not an object id and a ref name ($lsr_why): '$(_component_set_flatten "$lsr_line")' — remote-controlled text is validated, never passed on to a git argument or a SUMMARY line"
+    return 0
+  fi
+  remote_sha="$lsr_sha"
+
+  # ---- EVERY OBJECT READ, ON BOTH PATHS, HAPPENS IN THE ISOLATED REPOSITORY ------------------
+  #
+  # The live repository is never asked to RESOLVE a baseline object (job 268), and never to answer
+  # an ANCESTRY question either (job 285): in a partial clone a read there is a lazy fetch through
+  # its promisor, and its `$GIT_DIR/info/grafts` — which `--no-replace-objects` does NOT disable —
+  # can forge parentage. Both are properties of the live repository that no per-call flag removes,
+  # so the reads move instead. The LANE's object store comes to THEM as an alternate.
+  #
+  # A KNOWN, REASONED BOUNDARY, recorded rather than left to be rediscovered: this makes the lane's
+  # object directory an INPUT to the isolated repository. That is accepted. Object storage is not a
+  # control channel — an alternate carries no config, so it brings no promisor, no `insteadOf`, no
+  # grafts, and a peer writing objects there cannot cause execution; objects are content-addressed,
+  # so it cannot substitute bytes for a sha we ask for — and comparing two histories requires both
+  # of them to be readable in one place. Do not "fix" it by copying objects instead; that would
+  # reintroduce a transfer.
+  if [ ! -d "$csdir/repo/.git/objects" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="the isolated scratch repository has no object directory"
+    return 0
+  fi
+  # THE LANE'S OBJECT DIR, resolved rather than assumed: in a `git worktree` this is the SHARED
+  # store of the parent checkout, which is exactly the one HEAD's objects live in.
+  local lane_objects
+  # BOUNDED, not annotated local-only (job 312): same config read, same FIFO exposure. And the
+  # `|| true` that used to swallow the failure would have turned a HANG-then-kill into an EMPTY
+  # value, i.e. `baseline-workspace` — a fail-closed refusal naming a confidently WRONG cause.
+  _cs_live_git -C "$REPO_ROOT" rev-parse --git-path objects
+  if _cs_live_refuse "the object-directory path"; then return 0; fi
+  lane_objects="$_CS_LIVE_OUT"
+  # MADE ABSOLUTE, because `--git-path` answers RELATIVE TO THE REPOSITORY ROOT for a plain clone
+  # (`.git/objects`) and absolute only for a worktree (`/…/repo/.git/objects` — the SHARED store).
+  # A relative value would be resolved against the SCRATCH repository, which is a different
+  # directory: measured, the alternate then pointed at nothing, `merge-base` exited 128 and every
+  # BEHIND verdict became INDETERMINATE. `--path-format=absolute` is git >= 2.31, so the prefix is
+  # applied here instead of relying on it.
+  case "$lane_objects" in
+    /*) : ;;
+    ?*) lane_objects="$REPO_ROOT/$lane_objects" ;;
+  esac
+  # WHITESPACE IS NOT A SEPARATOR HERE (roborev job 296, Medium). This used to reject a colon OR
+  # whitespace, which failed CLOSED on any valid checkout or TMPDIR containing a space — a guard
+  # that reds on correct input is the guard agents learn to waive. MEASURED, with a discriminating
+  # control, rather than reasoned from the docs:
+  #
+  #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with space/objects"  -> git cat-file -t <sha> = commit
+  #   GIT_ALTERNATE_OBJECT_DIRECTORIES="/tmp/with:colon/objects"  -> FAILS
+  #
+  # A COLON IS EXPRESSIBLE AFTER ALL — C-STYLE QUOTING (roborev job 300, Low). The rejection above
+  # rested on my own measurement, and the measurement was INCOMPLETE: I tested the RAW form only,
+  # found a colon-bearing path failed, and concluded "a colon cannot be expressed". The true answer
+  # is that it cannot be expressed RAW. git accepts a C-QUOTED entry in this list, and with proper
+  # escaping every shape works:
+  #
+  #   raw     "/tmp/with:colon/objects"      -> FAILS
+  #   \-escaped "/tmp/with\:colon/objects"   -> FAILS
+  #   C-quoted "\"/tmp/with:colon/objects\"" -> cat-file -t <sha> = commit
+  #
+  # Measured across five shapes with the encoder below — plain, colon, space, embedded `"`,
+  # embedded `\` — all five resolve the object. So the guard is REMOVED rather than narrowed a
+  # third time (it went whitespace-or-colon -> colon -> gone, each step from an under-measured
+  # claim about what git accepts). What stays is the EMPTY refusal: an empty path names nothing.
+  #
+  # ORDER IS LOAD-BEARING in the encoder: escape backslashes FIRST, then quotes. Reversed, the
+  # backslash pass would escape the backslashes the quote pass just added.
+  case "$lane_objects" in
+    '')
+      _CS_KIND=baseline-workspace
+      _CS_DETAIL="this repository's object directory resolved to an EMPTY path, so HEAD's own objects cannot be made readable to the isolated repository"
+      return 0 ;;
+  esac
+  _cs_alt_q="${lane_objects//\\/\\\\}"; _cs_alt_q="${_cs_alt_q//\"/\\\"}"
+  _CS_READ_DIR="$csdir/repo"
+  _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=\"$_cs_alt_q\"")
+
+  # ---- DO WE ALREADY HOLD THAT COMMIT? -----------------------------------------------------
+  # If this repository already has the object, there is NOTHING to fetch: a git object is
+  # CONTENT-ADDRESSED, so "the lane holds <sha>" and "the canonical remote advertises <sha>" is
+  # the same commit, byte for byte. On this fleet lanes are worktrees of ONE shared `.git`, so a
+  # peer's fetch (or an earlier run's slow path below) usually put it there already.
+  #
+  # THE PROBE RUNS IN THE ISOLATED REPOSITORY, NOT IN THE LIVE ONE (roborev job 299, High —
+  # THE THIRD FINDING OF ONE FAMILY, so the ruling recorded below was applied rather than carved
+  # around again). What was here asked `_component_set_is_partial` about the LIVE repository and
+  # then ran `cat-file -e` in the LIVE repository. Both of those read `.git/config`, and on this
+  # fleet every lane is a worktree of ONE SHARED `.git` — so between the two reads a PEER LANE can
+  # write that config: a promisor remote plus a `url.*.insteadOf` rewrite to an `ext::` helper, and
+  # the `cat-file -e` on a missing object then LAZY-FETCHES, which EXECUTES the helper. A TOCTOU
+  # across a shared file, and `GIT_NO_LAZY_FETCH=1` is only a belt (git >= 2.36; silently absent on
+  # an older supported host, which is exactly why it cannot BE the control).
+  #
+  # THE SHAPE, and why the answer is not a fourth carve: every live-repository read preserved for
+  # speed has turned into a route — round 16's partial-clone lazy fetch, then `info/grafts` (job
+  # 285), now this. The recorded ruling was that a third finding here should REMOVE the live read
+  # rather than narrow it again.
+  #
+  # BUT "REMOVE IT" IS NOT "DELETE THE BRANCH". Deleting the short-circuit would make EVERY
+  # invocation fetch, and the fetch it avoids was measured at 3.74 s / 92 MB of full history per
+  # invocation before the ref oracle reduced this path to 0.51 s and NO transfer. `--lite` runs
+  # every fix round; reinstating that cost to close this finding is not the trade. So the READ
+  # MOVES, exactly as the baseline object reads and the ancestry walk already did: the probe runs
+  # in `$_CS_READ_DIR` (the scratch this run created) with `$_CS_READ_ENV` supplying the LANE's
+  # object directory as `GIT_ALTERNATE_OBJECT_DIRECTORIES` — established above, before either
+  # path runs, which is why that block was hoisted.
+  #
+  # WHY THAT IS SOUND WHERE THE LIVE READ WAS NOT, and it is the same argument the alternate was
+  # adopted under: an alternate is PURE OBJECT STORAGE. It carries no config, so there is no
+  # promisor to consult, no `insteadOf` to rewrite anything, and no remote helper that could be
+  # named — a missing object there is a PLAIN NEGATIVE, not a network trigger. That also dissolves
+  # the reason the partial-clone special case existed at all: `cat-file -e`'s "answers about
+  # PROMISED objects" hazard (measured — it answered 0 for a blob whose `git show` then FAILED) is
+  # a property of a promisor, and this read has none. So `_component_set_is_partial` is not
+  # consulted here, and having no other caller it was DELETED rather than left as a stale entry
+  # that would pre-authorise a re-introduced live read.
+  #
+  # STILL BOUNDED, not annotated `# local-only`: the object store reached through the alternate is
+  # the LANE's, on shared storage, and a bound on a read that cannot be a network call still costs
+  # nothing while a missing bound on one that could is the whole class this pre-flight guards.
+  #
+  # ---- AND "WE HOLD THE COMMIT" IS NOT "WE CAN READ IT" (found while fixing job 299) -----------
+  #
+  # THE REGRESSION MOVING THE PROBE INTRODUCED, and it is why the probe is a CONJUNCTION. The old
+  # code refused the fast path in a partial clone via a CONFIG probe. Removing that probe (its
+  # reason — a live-repository read — is gone) left `cat-file -e <sha>^{commit}` as the whole
+  # precondition, and IN A PARTIAL CLONE THAT COMMIT IS PRESENT WHILE ITS BLOBS ARE NOT. RED-verified
+  # in a real `--filter=blob:none` clone that had fetched the tip:
+  #
+  #   cat-file -e <tip>^{commit}                              -> 0 (PRESENT)
+  #   rev-list --objects --missing=print --no-walk <tip>       -> ?5ea2ed41…  (the blob is ABSENT)
+  #
+  # So the fast path was taken and the manifest read then failed: `baseline-unreadable`, FAIL-CLOSED,
+  # on a CORRECT partial checkout — a false FAIL on correct input, the class this issue keeps ruling
+  # against. Measured as `3544-partial-clone-unreachable` / `3544-ancestry-cross-source` reddening.
+  #
+  # THE PRECONDITION IS THEREFORE OBJECT COMPLETENESS AT THAT COMMIT, not object presence of the
+  # commit. `rev-list --objects --missing=print --no-walk` enumerates the commit's own tree and
+  # blobs and prefixes every ABSENT one with `?`, so ONE probe answers it without duplicating the
+  # reader's source selection (manifest, else the gate-script declaration) — a second copy of that
+  # logic would be a second source to drift, which this pre-flight has already removed once.
+  # Deliberately a SUPERSET of what the reader needs: conservative in the only direction that is
+  # cheap, since a false "incomplete" costs a fetch and a false "complete" costs a false FAIL.
+  #
+  # AFFIRMATIVE, not "no bad signal": the enumeration must have PRODUCED OUTPUT (a commit always
+  # yields at least itself and its tree), so an empty or unmeasurable result is INCOMPLETE rather
+  # than clean. An unsupported `--missing=` on an older git exits non-zero and lands there too.
+  #
+  # AND "CANNOT TELL" COLLAPSES ONTO *ABSENT* HERE — deliberately the opposite choice from the
+  # manifest presence probe, for a stated reason: the branch an unmeasurable answer falls into is
+  # the SLOW path, which fetches and verifies authoritatively. Guessing "absent" costs time;
+  # guessing "present" would skip a verification. The permissive-looking answer is the expensive
+  # one, so there is no unknown taking a shortcut.
+  local _cs_complete=no _cs_obj_total="" _cs_obj_absent=""
+  if _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1 \
+     && _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" rev-list --objects --missing=print --no-walk "$remote_sha" >"$csdir/objcensus" 2>/dev/null; then
+    _cs_obj_total=$(wc -c <"$csdir/objcensus" 2>/dev/null)
+    _cs_obj_absent=$(sed -n '/^?/p' "$csdir/objcensus" 2>/dev/null | wc -c 2>/dev/null)
+    case "$_cs_obj_total" in ''|*[!0-9]*) _cs_obj_total=0 ;; esac
+    case "$_cs_obj_absent" in ''|*[!0-9]*) _cs_obj_absent=1 ;; esac
+    if [ "$_cs_obj_total" -gt 0 ] && [ "$_cs_obj_absent" -eq 0 ]; then _cs_complete=yes; fi
+  fi
+  if [ "$_cs_complete" = yes ]; then
+    _CS_SHA="$remote_sha"
+    _CS_BASE_OBJ=reused
+    # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
+    # made explicitly). It used to be dropped, because "nothing was fetched, so nothing needs an
+    # isolated store" — and that left the ancestry walk running in the LIVE repository, where
+    # `$GIT_DIR/info/grafts` applies. `--no-replace-objects` does NOT disable grafts (they are a
+    # separate, legacy mechanism), so a graft could make `origin/main` look like an ancestor of
+    # HEAD and reclassify missing components from BEHIND to the non-fatal DECLARED: a false green,
+    # which is what this guard exists to prevent.
+    #
+    # The reuse path keeps what it was for — no fetch, no object transfer — and gives up only
+    # "creates no scratch repository", which is a `mktemp -d` plus a `git init` against a
+    # 15-second bound. THE PATTERN THAT CLOSED: every live-repository read preserved for speed
+    # became a route (round 16's partial-clone lazy fetch, then grafts, then job 299's TOCTOU on
+    # the shared config). The third one landed, and the answer taken was the recorded one — the
+    # LIVE READ is gone, not narrowed. What survives is the SHORT-CIRCUIT (no fetch), which is a
+    # decision about whether to transfer objects and not a read of the live repository at all:
+    # the probe above runs in the scratch, over the lane's objects as an alternate. THERE IS NO
+    # LIVE-REPOSITORY OBJECT OR CONFIG READ LEFT ON THIS PATH TO CARVE.
+  else
+    _CS_BASE_OBJ=fetched
+  err=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    _CS_KIND=fetch-failed
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_DETAIL="the fetch of the validated origin URL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc — the bound fired; a stalled network or an auth prompt is the usual cause)"
+    else
+      _CS_DETAIL="the fetch of the validated origin URL exited $rc: $(_component_set_safe_detail "$err")"
+    fi
+    return 0
+  fi
+  # THE SHA AS THE ISOLATED HOP OBSERVED IT. Read in the scratch repository, whose config we
+  # wrote and whose environment is allowlisted, so nothing about this value depends on the live
+  # repository's state.
+  # BOUNDED (job 315). It reads a ref file plus the COMMIT object the fetch above just wrote, in a
+  # repository this run created — no promisor, no lazy fetch, no network. That reasoning is intact
+  # and is no longer load-bearing: every git call in this region is bounded, and the
+  # `# local-only:` excusal has been REMOVED from the audit rather than trusted a fourth time.
+  cssha=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --no-replace-objects -C "$csdir/repo" rev-parse --verify --quiet "refs/csbaseline^{commit}" 2>/dev/null || true)
+  if [ -z "$cssha" ]; then
+    _CS_KIND=fetch-failed; _CS_SHA="-"
+    _CS_DETAIL="the isolated baseline fetch reported success but its ref does not resolve to a commit"
+    return 0
+  fi
+
+  # ---- THE OBJECTS ARE READ WHERE THEY LANDED; NOTHING IS IMPORTED (roborev job 264, High) ----
+  #
+  # WHAT WAS HERE AND WHY IT WAS UNSAFE. This used to run a second `git fetch` — from the scratch
+  # path INTO the live repository — and then compare the sha that arrived against the one the
+  # isolated hop observed. That comparison was described as making the hop "untrusted but safe",
+  # and that was WRONG IN KIND: `git fetch` in the live repository reads the live repository's
+  # LOCAL config, which `env -i` cannot suppress (only the environment is sanitisable; a
+  # `.git/config` is a file). A local `url.*.insteadOf` plus `protocol.ext.allow=always` rewrites
+  # the scratch path to an `ext::` remote helper and RUNS COMMANDS DURING THE FETCH — before any
+  # comparison. A verification after the fact cannot defend against harm that happens during, and
+  # on this fleet lanes are worktrees of ONE shared `.git`, so a peer's config write reaches it.
+  #
+  # Nor is a protocol allowlist expressible here: `-c protocol.allow=never` is overridden by a
+  # more specific `protocol.<name>.allow=always` in local config, and the set of helper names is
+  # whatever `git-remote-*` exists on PATH — a receding list, which is the shape this issue keeps
+  # removing rather than narrowing.
+  #
+  # SO THERE IS NO IMPORT AT ALL. The scratch repository's object store is made VISIBLE to the
+  # baseline reads through `GIT_ALTERNATE_OBJECT_DIRECTORIES`, which is an object SOURCE and not a
+  # transport: no URL is resolved, no remote helper can be named, no negotiation happens, and
+  # nothing is written into the shared `.git` — no pack, no private ref, no FETCH_HEAD. It is also
+  # strictly faster than either the fetch it replaces or the `git bundle` route (which would have
+  # written a redundant full-history pack into the shared object store).
+  #
+  # THE PROVENANCE CHAIN IS NOW UNBROKEN AND NEEDS NO POST-HOC COMPARISON: canonical URL ->
+  # isolated config -> allowlisted environment -> the scratch's own ref -> `cssha`, and every
+  # subsequent read is BY THAT SHA. A git object is content-addressed, so an object store cannot
+  # substitute different bytes for a given sha; that is why exposing the store is safe where
+  # invoking a transport was not. `baseline-transfer-mismatch` is gone with the transfer: the
+  # class is ELIMINATED rather than detected.
+  # NO CHECK ON `$csdir` HERE (roborev job 297, Low). It used to be refused for containing a colon,
+  # on the `GIT_ALTERNATE_OBJECT_DIRECTORIES` reasoning above — but `$csdir` NEVER ENTERS that
+  # variable. Only `$lane_objects` does (see `_CS_READ_ENV` above); `$csdir` is passed as a quoted
+  # `git -C` argument, where a colon is inert.
+  #
+  # The check was worse than merely redundant: it lived on the objects-ABSENT path only, so an
+  # otherwise valid colon-bearing `TMPDIR` failed the gate **only when the baseline object happened
+  # to need fetching** — the same checkout passing or failing depending on cache state. A
+  # cache-dependent refusal is harder to diagnose than either a consistent pass or a consistent fail,
+  # and this one had no property to defend.
+  #
+  # Introduced by the fix for job 296, which narrowed whitespace-or-colon to colon at BOTH sites
+  # without asking whether each site needed a check at all. Narrowing a guard is not the same as
+  # establishing that the guard has a subject.
+  _CS_SHA="$cssha"
+  fi
+
+  # ---- Both paths have now set `_CS_SHA` to a commit this run can READ, whose value came from
+  # the canonical remote in THIS invocation: the fast path took it from the ref oracle and the
+  # objects were already here; the slow path took it from the isolated fetch. `_CS_READ_DIR` and
+  # `_CS_READ_ENV` were established ABOVE, before either path ran, so every object read below —
+  # and the fast path's own presence probe — runs IN the scratch with the lane's object store as
+  # an alternate.
+  # The slow-path block above is deliberately left at its original indentation: re-indenting it
+  # would bury the change that matters in a diff nobody can review.
+
+  # THE BASELINE SET, READ AS DATA (see the reader's header above): the committed manifest at
+  # the fetched sha, or — transitionally, while `origin/main` predates the manifest — its gate
+  # script's single-line COMPONENTS declaration extracted AS TEXT. Nothing fetched is EXECUTED.
+  local baseline=""
+  if _component_set_set_at_rev "$_CS_SHA"; then
+    baseline="$_CS_REV_SET"
+    _CS_BASE_N="$_CS_REV_N"
+    _CS_BASE_SRC="$_CS_REV_SRC"
+  else
+    # ONE ARM PER ERRKIND, because they are DIFFERENT facts with different remedies, and a
+    # shared kind would send a reader to fix the wrong thing. The `*)` arm cannot be silent:
+    # an unmapped errkind is reported AS unmapped rather than folded into a plausible name.
+    case "$_CS_REV_ERRKIND" in
+      workspace)        _CS_KIND=baseline-workspace ;;
+      # `probe` is its OWN kind, never folded into baseline-unreadable: "I read the tree and the
+      # manifest is not there" and "I could not read the tree" have opposite consequences — the
+      # first legitimately enters the transitional TEXT path, the second must never — so a
+      # shared name would hide exactly the distinction this gating was added for.
+      probe)            _CS_KIND=baseline-probe-unmeasured ;;
+      unreadable)       _CS_KIND=baseline-unreadable ;;
+      decl-unrecognised) _CS_KIND=baseline-decl-unrecognised ;;
+      garbage)          _CS_KIND=baseline-set-garbage ;;
+      empty)            _CS_KIND=baseline-set-empty ;;
+      *)                _CS_KIND=baseline-unreadable
+                        _CS_REV_ERR="unclassified baseline-read failure ('$_CS_REV_ERRKIND'): $_CS_REV_ERR" ;;
+    esac
+    _CS_DETAIL="$_CS_REV_ERR"
+    return 0
+  fi
+
+  # This tree's set is the COMPONENTS array — the exact thing `--list` prints (see the
+  # `--list` case in the arg dispatch), read in-process so the running gate's own set
+  # needs no subprocess and cannot diverge from what it will actually dispatch.
+  local branch=" ${COMPONENTS[*]} " c
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated set; the
+  # closed grammar above guarantees no glob character can be in it
+  for c in $baseline; do
+    case "$branch" in
+      *" $c "*) : ;;
+      *) _CS_MISSING="${_CS_MISSING:+$_CS_MISSING }$c" ;;
+    esac
+  done
+  local base_padded=" $baseline "
+  for c in "${COMPONENTS[@]}"; do
+    case "$base_padded" in
+      *" $c "*) : ;;
+      *) _CS_EXTRA="${_CS_EXTRA:+$_CS_EXTRA }$c" ;;
+    esac
+  done
+
+  # Ancestry, probed only for what it decides: BEHIND vs a DELIBERATE REMOVAL. Read the
+  # rc explicitly — `--is-ancestor` answers 1 for "not an ancestor" and something else
+  # for an error, and collapsing those two would let a broken probe answer "not behind".
+  # It walks COMMIT parents only, which is what makes `git show` above different in kind: no
+  # partial-clone filter omits commits, whereas `blob:none` omits exactly what `show <sha>:<path>`
+  # must read. That is about the NETWORK, and job 315 is why it is no longer an excuse — the walk
+  # is BOUNDED, because the objects it reads come from the shared store.
+  # HEAD IS RESOLVED TO A SHA IN THIS CHECKOUT FIRST, because the ancestry walk now runs in
+  # `$_CS_READ_DIR` — and inside the isolated scratch the ref `HEAD` would mean the SCRATCH's own
+  # (unborn) HEAD, silently answering a different question. Commit objects are never omitted by any
+  # partial-clone filter, so resolving it is genuinely local; an unresolvable HEAD (unborn, or a
+  # broken detached HEAD) is INDETERMINATE below, exactly as an unanswerable probe was before.
+  # BOUNDED, not annotated local-only (job 312): same config read, same FIFO exposure; and the
+  # `|| true` would have turned a kill into an empty sha, taking the rc=128 branch below with a
+  # cause that names HEAD rather than the blocked read.
+  _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"
+  if _cs_live_refuse "HEAD's commit sha"; then return 0; fi
+  _CS_HEAD_SHA="$_CS_LIVE_OUT"
+  if [ -z "$_CS_HEAD_SHA" ]; then
+    rc=128
+  else
+  # BOUNDED, AND THE OLD ANNOTATION IS WHY (roborev job 315, Medium — THIRD instance of one
+  # blind spot). It read: "No filter omits commits, the scratch configures no promisor, and an
+  # alternate carries no config — so this read has no route to the NETWORK at all." Every word of
+  # that is true and it answers the wrong question. This walk reads COMMIT OBJECTS through
+  # `_CS_READ_ENV`, i.e. out of the LANE's shared object store, and a loose object there is read
+  # with `open()` + `read()` on a zlib stream — which BLOCKS on a FIFO.
+  #
+  # MEASURED (isolated scratch repo, the object served from an alternate):
+  #   real file:  cat-file -e  4ms      merge-base --is-ancestor  3ms
+  #   FIFO:       cat-file -e  BLOCKED  merge-base --is-ancestor  BLOCKED
+  # A pack `.idx`/`.pack` FIFO does NOT block (git mmaps those, and mmap on a FIFO fails rather
+  # than waiting) — which is exactly the case I measured first and wrongly generalised from.
+  # Every lane on a box is a worktree of ONE `.git`, so the planter is a PEER LANE.
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" merge-base --is-ancestor "$_CS_SHA" "$_CS_HEAD_SHA" >/dev/null 2>&1; rc=$?
+  # A BLOCKED OR UNBOUNDABLE WALK IS NAMED, not folded into the `*)` arm's "exited $rc". That arm
+  # is already fail-closed (`_CS_ANCESTOR=unknown`), so this changes no verdict — it changes the
+  # CAUSE the operator reads, from a bare exit status to the poisoned object store that produced
+  # it. A true refusal with a misleading cause is the thing this pre-flight keeps ruling against.
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+    _CS_KIND=repo-read-blocked
+    if [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_DETAIL="the ancestry walk could not be BOUNDED on this host (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of the lane's object store, which could hang the gate outright"
+    else
+      _CS_DETAIL="the ancestry walk (git merge-base --is-ancestor) EXCEEDED its ${_CS_BOUND_HINT}s bound reading commit objects from this lane's SHARED object store — the read never returned. A LOOSE object there is read as a stream, so a FIFO planted at an object path hangs it, and on this fleet that store is shared by every lane on the box. Inspect it by resolving the object directory with \`git rev-parse --git-path objects\` and searching that directory for FIFOs with \`find <objdir> -type p\`"
+    fi
+    return 0
+  fi
+  fi
+  local shallow
+  case "$rc" in
+    0) _CS_ANCESTOR=yes ;;
+    1) # rc 1 IS AMBIGUOUS IN A SHALLOW CLONE (job 227): it means "not an ancestor" OR "the
+       # connecting history is not here". Only a repo PROVEN complete may read it as the
+       # former; `yes`/`unknown` shallowness both go to INDETERMINATE, which is fail-closed
+       # with a diagnostic naming the shallow clone — never a false BEHIND on correct input,
+       # and never a permissive default for a host whose state could not be measured.
+       shallow="$(_component_set_is_shallow)"
+       case "$shallow" in
+         # THE BLOCKED READ IS NAMED HERE, IN THE PARENT (job 314). The helper runs in a subshell
+         # and cannot set `_CS_KIND`; this is the first frame that can, so the poisoned config is
+         # reported as itself rather than as an unmeasurable shallowness.
+         blocked)
+           _CS_KIND=repo-read-blocked
+           _CS_DETAIL="deciding whether $REPO_ROOT is a SHALLOW clone required reading its repository state, and that read EXCEEDED its ${_CS_BOUND_HINT}s bound — the read never returned. Every git command reads the repository config, and an \`include.path\` there naming a FIFO or other blocking file hangs it; on this fleet that config is SHARED by every lane on the box. Inspect it with \`git config --show-origin --get-all include.path\`"
+           return 0 ;;
+         no) _CS_ANCESTOR=no ;;
+         yes) _CS_ANCESTOR=unknown
+              _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> answered 'not an ancestor', but this is a SHALLOW clone, where that answer is indistinguishable from 'the connecting history is absent' — remedy: git fetch --unshallow (then re-run)" ;;
+         *)   _CS_ANCESTOR=unknown
+              _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> answered 'not an ancestor', and whether this repository is SHALLOW could NOT be determined ('git rev-parse --is-shallow-repository' and the shallow-file probe both failed), so that answer is not definitive" ;;
+       esac ;;
+    *) _CS_ANCESTOR=unknown
+       _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> exited $rc${_CS_HEAD_SHA:+ (HEAD is ${_CS_HEAD_SHA})}${_CS_HEAD_SHA:-; HEAD does not resolve to a commit in this checkout}" ;;
+  esac
+
+  # PROVENANCE OF A REMOVAL (job 215, blocker 2). Consulted ONLY where it DECIDES something:
+  # a missing component with origin/main an ancestor of HEAD is about to be EXCUSED as this
+  # branch's own committed removal, so that claim is measured against HEAD's own set. With
+  # nothing missing (PASS) or a non-ancestor baseline (BEHIND/INDETERMINATE) HEAD's set
+  # changes no verdict, so the common path spawns nothing extra. A component missing here
+  # but PRESENT at HEAD was removed by an UNCOMMITTED edit — not this branch's diff, and not
+  # DECLARED. An unmeasurable HEAD set is its own named non-PASS: no provenance, no excusal.
+  if [ -n "$_CS_MISSING" ] && [ "$_CS_ANCESTOR" = yes ]; then
+    # HEAD'S OWN SET, through the SAME data-only reader as the baseline (never by executing
+    # HEAD's script either): the committed manifest at HEAD, else its gate script's
+    # declaration as TEXT. An unmeasurable HEAD set is its own named non-PASS — the
+    # provenance oracle is the SOLE evidence for DECLARED's claim, so no provenance means no
+    # excusal.
+    if _component_set_set_at_rev "${_CS_HEAD_SHA:-HEAD}" declaration; then
+      _CS_HEAD_SET="$_CS_REV_SET"
+      _CS_HEAD_SRC="$_CS_REV_SRC"
+      local head_padded=" $_CS_HEAD_SET "
+      # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
+      for c in $_CS_MISSING; do
+        case "$head_padded" in
+          *" $c "*) _CS_UNCOMMITTED="${_CS_UNCOMMITTED:+$_CS_UNCOMMITTED }$c" ;;
+        esac
+      done
+    else
+      _CS_KIND=head-set-unmeasured
+      _CS_HEAD_ERR="$_CS_REV_ERR"
+      _CS_DETAIL="$_CS_REV_ERR"
+      return 0
+    fi
+  fi
+  _CS_KIND=ok
+}
+
+# _component_set_verdict: PURE mapping of the probe state onto exactly one token.
+#   PASS          — every baseline component is present in this tree's set.
+#   DECLARED      — components are missing, origin/main IS an ancestor of HEAD, AND they
+#                   are absent at HEAD too, so this branch removed them in its OWN
+#                   COMMITTED diff. Not skew.
+#   UNCOMMITTED   — components are missing from the WORKING TREE but PRESENT at HEAD, so
+#                   the removal is an uncommitted edit and nothing recorded it.
+#   BEHIND        — components are missing AND origin/main is NOT an ancestor of HEAD.
+#   INDETERMINATE — components are missing and the ancestry probe could not tell which.
+#   UNMEASURED    — the baseline could not be measured at all.
+# Components present here but ABSENT from main are NOT skew and never a non-PASS: this
+# branch may legitimately be the one adding them.
+_component_set_verdict() {
+  [ "$_CS_KIND" = ok ] || { printf UNMEASURED; return 0; }
+  [ -n "$_CS_MISSING" ] || { printf PASS; return 0; }
+  # BEFORE the ancestry split, and only reachable from it: _CS_UNCOMMITTED is populated
+  # exclusively on the ancestor==yes path (the DECLARED candidate), so this cannot displace
+  # BEHIND — a branch that is behind AND dirty still FAILs as BEHIND first.
+  [ -z "$_CS_UNCOMMITTED" ] || { printf UNCOMMITTED; return 0; }
+  case "$_CS_ANCESTOR" in
+    yes) printf DECLARED ;;
+    no)  printf BEHIND ;;
+    *)   printf INDETERMINATE ;;
+  esac
+}
+
+# _component_set_strict: rc 0 iff this mode may FAIL on the verdict — the FULL gate and
+# --delta, the two modes whose blocks are recorded in a PR as certification. `--lite`
+# and `--only` emit the SAME line ADVISORY, matching how the #2078 fixture and #3148
+# schemas pre-flights already split leniency: --lite runs every fix round and must not
+# require the network to function.
+_component_set_strict() {
+  [ -z "$ONLY" ] && [ "$LITE" -eq 0 ]
+}
+
+# _component_set_line: PURE text for the current probe state + mode. The strict wording
+# says `FAIL-CLOSED (#3544)` (the shape #2078/#3148 established); the lenient wording
+# carries an ADVISORY-* token so a lenient block can NEVER be misread as a certification
+# — and, per #3148's lesson, so a positive line is never stamped for a check that could
+# not fail. A PASS is AFFIRMATIVE and names its baseline: a pasted SUMMARY must show the
+# check RAN, and `0` on its own is not a measurement.
+_component_set_line() {
+  local verdict lenient="" mode="" n_missing=0 c
+  verdict="$(_component_set_verdict)"
+  if ! _component_set_strict; then
+    if [ -n "$ONLY" ]; then mode="--only $ONLY"; else mode="--lite"; fi
+    lenient=" — $mode is lenient (#3544); this run does NOT fail on component-set skew"
+  fi
+  # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
+  for c in $_CS_MISSING; do n_missing=$((n_missing + 1)); done
+  local n_uncommitted=0
+  # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
+  for c in $_CS_UNCOMMITTED; do n_uncommitted=$((n_uncommitted + 1)); done
+  local extra=""
+  [ -n "$_CS_EXTRA" ] && extra=" [branch-only, NOT skew: $_CS_EXTRA]"
+  # EVERY LINE THAT HAS A BASELINE NAMES HOW THAT BASELINE WAS READ (#3544 REQ-3544-01, lead
+  # ruling). There are two data-only read paths — the committed manifest, and the TRANSITIONAL
+  # TEXT extraction of the baseline's `COMPONENTS=(…)` declaration — and use of the second must
+  # be VISIBLE, not inferred: it is format-brittle in a shared direction, and it is now entered
+  # only on an affirmative `verified-absent` measurement, which the wording states. Appended
+  # LAST and uniformly rather than woven into each sentence, so the rule is "the line ends by
+  # naming its baseline source" and no arm can quietly omit it. The UNMEASURED arms have no
+  # baseline to name, which is exactly why they do not carry it.
+  local src_note=""
+  case "$_CS_BASE_SRC" in
+    manifest)    src_note=" — baseline read via the committed manifest" ;;
+    declaration) src_note=" — baseline read via the TEXTUAL FALLBACK: $_CS_MANIFEST_REL is VERIFIED ABSENT at that sha (#3544 transitional; the declaration is parsed as TEXT, never executed)" ;;
+  esac
+  # THE OBJECT STORE IS TRUSTED, NOT VERIFIED — AND THAT IS DECLARED IN THE LINE (roborev job 311,
+  # High; lead ruling on REQ-3544-OBJTRUST, option A; owned by #3746).
+  #
+  # Git does not rehash a packed object against the id it was asked for on an ordinary read, and on
+  # this fleet EVERY LANE ON A BOX IS A WORKTREE OF ONE SHARED `.git` (measured:
+  # `/data/lanes/repo/.git/objects` for lane-3544, lane-3473 and lane-3629 alike). So a peer lane
+  # that plants a forged pack/index can make a canonical sha resolve to different content — a
+  # shortened manifest, and a false PASS. Under the triage rule that is a NON-INVOKER route, hence
+  # a defect and not an out-of-model bypass.
+  #
+  # WHY IT IS DECLARED RATHER THAN CLOSED HERE, which is a ruling and not a shrug. The recorded
+  # "a third finding here should REMOVE the reuse optimisation" ruling assumes removal CLOSES the
+  # exposure, and it does not: the ancestry walk and the provenance leg read HEAD's COMMITTED
+  # content, which has no source other than this store — the working tree cannot substitute,
+  # because `UNCOMMITTED` exists precisely to compare against what is committed. So removing the
+  # fast path leaves a forged HEAD object still able to turn `UNCOMMITTED` (fatal) into `DECLARED`
+  # (non-fatal), while charging every `--lite` round for it: measured 2026-08-31, 3.41 s / 93 MB
+  # full and 3.58 s / 45 MB at `--depth=1` (shallow is NOT cheaper — it still ships the tip's whole
+  # tree). A permanent tax for a half-closure is the guard people learn to waive.
+  #
+  # So the line says what it depends on. A check that claims nothing false is worth more than one
+  # claiming a closure it does not deliver — the same move the roborev waiver's threat model makes
+  # where a dependency cannot be removed. It is FOLDED INTO `src_note` deliberately: that suffix is
+  # already the uniform "this line ends by naming its baseline source", eleven printf arms consume
+  # it, and appending an twelfth-argument clause to each would be one fact written eleven times.
+  case "${src_note:+set}" in
+    set)
+      case "$_CS_BASE_OBJ" in
+        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3746)" ;;
+        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3746)" ;;
+        *)       src_note="$src_note; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3746)" ;;
+      esac ;;
+  esac
+  case "$verdict" in
+    PASS)
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-PASS (%s/%s names vs origin/main %s; NAMES ONLY — not implementations, and no component is run here)%s%s%s' \
+          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra" "$lenient" "$src_note"
+      else
+        # WHAT A PASS HERE DOES AND DOES NOT ESTABLISH — STATED IN THE EMITTED LINE, not only here.
+      #
+      # `PASS (37/37)` reads as "the component set is verified", and a gate reader will over-read it
+      # exactly that far. What it actually establishes is the SET OF NAMES: that this script declares
+      # every component `origin/main` declares. It does NOT compare any component's IMPLEMENTATION
+      # (a component whose name matches while its body changed on main is invisible here), it does
+      # NOT verify that any component RUNS or passes, and it does NOT establish that the code this
+      # process is EXECUTING is the code the certified tree contains — that half is #3705.
+      #
+      # A caveat that lives only in a source comment is not a disclosure to the person reading a
+      # pasted SUMMARY block, which is the whole audience for this line. The `names` token and the
+      # scope clause below are therefore part of the verdict, not decoration, and they cost one line
+      # in a block that already spans several.
+      printf 'component-set: PASS (%s/%s names vs origin/main %s; NAMES ONLY — not implementations, and no component is run here)%s%s' \
+          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra" "$src_note"
+      fi ;;
+    DECLARED)
+      printf 'component-set: DECLARED (#3544) — this branch REMOVES %s of origin/main %s'"'"'s %s component(s): %s; origin/main IS an ancestor of HEAD and they are absent from the committed component set AT HEAD too, so the removal is in THIS branch'"'"'s own COMMITTED diff, NOT skew — recorded, not fatal%s%s%s' \
+        "$n_missing" "$_CS_SHA" "$_CS_BASE_N" "$_CS_MISSING" "$extra" "$lenient" "$src_note" ;;
+    UNCOMMITTED)
+      # The DECLARED excusal WITHOUT its precondition. Named separately from BEHIND because
+      # it is a different fact with a different remedy (commit or restore, never rebase),
+      # and never merged into DECLARED's wording: that sentence asserts committed-diff
+      # provenance, and here the measurement says the opposite.
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-UNCOMMITTED (#3544) — %s of the %s component(s) missing vs origin/main %s are PRESENT in the committed component set AT HEAD (%s), so the removal is an UNCOMMITTED WORKING-TREE EDIT, not this branch'"'"'s committed diff%s%s%s' \
+          "$n_uncommitted" "$n_missing" "$_CS_SHA" "$_CS_UNCOMMITTED" "$extra" "$lenient" "$src_note"
+      else
+        printf 'component-set: FAIL-CLOSED (#3544) — %s of the %s component(s) missing vs origin/main %s are PRESENT in the committed component set AT HEAD (%s), so the removal is an UNCOMMITTED WORKING-TREE EDIT, not this branch'"'"'s committed diff and cannot be DECLARED; a PASS here would certify a set nothing recorded; overall verdict FAIL%s' \
+          "$n_uncommitted" "$n_missing" "$_CS_SHA" "$_CS_UNCOMMITTED" "$src_note"
+      fi ;;
+    BEHIND)
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-BEHIND (#3544) — this tree is BEHIND origin/main %s; %s component(s) MISSING from its gate script: %s%s%s%s' \
+          "$_CS_SHA" "$n_missing" "$_CS_MISSING" "$extra" "$lenient" "$src_note"
+      else
+        printf 'component-set: FAIL-CLOSED (#3544) — this tree is BEHIND origin/main %s; %s of its %s component(s) MISSING from this gate script: %s; a PASS here would certify a set that is no longer the coverage claim; overall verdict FAIL%s' \
+          "$_CS_SHA" "$n_missing" "$_CS_BASE_N" "$_CS_MISSING" "$src_note"
+      fi ;;
+    INDETERMINATE)
+      if [ -n "$lenient" ]; then
+        printf 'component-set: ADVISORY-INDETERMINATE (#3544) — %s component(s) missing vs origin/main %s (%s) and the ancestry probe could not tell BEHIND from a deliberate removal (%s)%s%s' \
+          "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL" "$lenient" "$src_note"
+      else
+        printf 'component-set: FAIL-CLOSED (#3544) — %s component(s) missing vs origin/main %s (%s) and the ancestry probe could not tell BEHIND from a deliberate removal (%s); overall verdict FAIL%s' \
+          "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL" "$src_note"
+      fi ;;
+    *)
+      # THE `manifest-*` KINDS GET THEIR OWN SENTENCE, because "baseline NOT measured" would be
+      # a FALSE statement about them: the baseline was never reached. What is unusable is THIS
+      # TREE's own manifest, the remedy is a regeneration rather than anything to do with
+      # `origin`, and a wrong remedy in a fail-closed diagnostic is what makes an author
+      # suspect their own diff (the #3148 lesson).
+      case "$_CS_KIND" in
+        manifest-*)
+          if [ -n "$lenient" ]; then
+            printf 'component-set: ADVISORY-UNMEASURED (#3544) — the LOCAL component manifest is not usable (%s: %s), so no baseline comparison was made%s; this block asserts NOTHING about the component set' \
+              "$_CS_KIND" "$_CS_DETAIL" "$lenient"
+          else
+            printf 'component-set: FAIL-CLOSED (#3544) — the LOCAL component manifest is not usable (%s: %s); it is what every FUTURE branch compares against, so a PASS here would publish an UNVERIFIED baseline; overall verdict FAIL' \
+              "$_CS_KIND" "$_CS_DETAIL"
+          fi ;;
+        *)
+          if [ -n "$lenient" ]; then
+            printf 'component-set: ADVISORY-UNMEASURED (#3544) — baseline NOT measured (%s: %s)%s; this block asserts NOTHING about the component set' \
+              "$_CS_KIND" "$_CS_DETAIL" "$lenient"
+          else
+            printf 'component-set: FAIL-CLOSED (#3544) — baseline NOT measured (%s: %s); no PASS may be derived from an unmeasured baseline; overall verdict FAIL' \
+              "$_CS_KIND" "$_CS_DETAIL"
+          fi ;;
+      esac ;;
+  esac
+}
+
+# apply_component_set_preflight [report-only]: EFFECTFUL pre-flight. Probes, stamps
+# COMPONENT_SET_LINE, and in the CERTIFYING modes emits a FAIL SUMMARY + exits 1 on a
+# fatal verdict. `report-only` is a POSITIONAL ARGUMENT, never an env var — an
+# uninitialized env-readable flag was itself a way to defeat #3148's fail-closed guard,
+# and `$1` inside a function comes from the CALL, so no `export` can supply it.
+apply_component_set_preflight() {
+  local mode="${1:-}" verdict report_only=0
+  [ "$mode" = report-only ] && report_only=1
+
+  _component_set_probe
+  verdict="$(_component_set_verdict)"
+  # ONE PHYSICAL LINE, enforced HERE — the single point the line is assembled — so that no
+  # interpolated value at any call site can add a field to a SUMMARY block (job 295; see
+  # `_component_set_one_line` for why this is a choke point and not another call-site sweep).
+  COMPONENT_SET_LINE="$(_component_set_one_line "$(_component_set_line)")"
+
+  # DECLARED is deliberately NON-FATAL, and this is the whole reason the ancestry probe
+  # exists: when origin/main is an ancestor of HEAD **and the components are absent at HEAD
+  # too** (job 215 — the ancestry answer ALONE excused an uncommitted deletion, a real
+  # bypass), the missing components were removed BY THIS BRANCH'S OWN COMMITTED DIFF —
+  # the author is not behind and has nothing to rebase, so
+  # only the INFORMATION is actionable (CLAUDE.md: FAIL where the author can act; NOTICE
+  # where only the information is actionable; never silence). Failing here would red on
+  # correct input, and a guard that reds on correct input is the guard agents learn to
+  # waive. The fixpoint is sound: a branch that is BOTH behind AND removes a component is
+  # not an ancestor of origin/main's tip, so it FAILs as BEHIND first and can only reach
+  # this branch after rebasing.
+  case "$verdict" in
+    PASS|DECLARED) return 0 ;;
+  esac
+  if ! _component_set_strict; then
+    return 0
+  fi
+
+  # Per-VERDICT diagnosis and remedy. One arm per fatal verdict, because they are three
+  # DIFFERENT facts and a shared message is a false one: INDETERMINATE means the baseline
+  # WAS measured and the ANCESTRY was not, so telling its reader "the baseline could not be
+  # measured" would send them to fix the wrong thing (and `git rebase` is not its remedy).
+  local why_summary hint
+  echo "agent-gate: FAIL: component-set pre-flight (#3544)" >&2
+  echo "agent-gate: $COMPONENT_SET_LINE" >&2
+  case "$verdict" in
+    BEHIND)
+      why_summary="preflight: FAIL (component-set BEHIND origin/main — this gate script predates components it does not run)"
+      hint="hint: git fetch origin && git rebase origin/main, then re-run scripts/agent-gate.sh"
+      echo "agent-gate: this gate script is older than origin/main's, so the run would report a" >&2
+      echo "            true N/N verdict about a set that is no longer the coverage claim, and be" >&2
+      echo "            SILENT about every component added since (measured: PR #3467, 31 of 35)." >&2
+      echo "agent-gate: remedy: git fetch origin && git rebase origin/main   (then re-run the gate)" >&2 ;;
+    UNCOMMITTED)
+      why_summary="preflight: FAIL (component-set: component(s) removed by an UNCOMMITTED working-tree edit — the committed script at HEAD still has them)"
+      hint="hint: commit the removal (git add scripts/agent-gate.sh && git commit) or restore the component(s) in the working tree, then re-run scripts/agent-gate.sh"
+      echo "agent-gate: component(s) are missing from THIS WORKING TREE's gate script but are" >&2
+      echo "            PRESENT in the script AS COMMITTED AT HEAD, so the removal is an" >&2
+      echo "            UNCOMMITTED EDIT — nothing recorded it, and a certifying run must" >&2
+      echo "            measure the committed script. 'origin/main is an ancestor of HEAD'" >&2
+      echo "            answers a DIFFERENT question and cannot excuse this (#3544 job 215)." >&2
+      echo "agent-gate: remedy: commit the removal, or restore the component(s), then re-run." >&2 ;;
+    INDETERMINATE)
+      why_summary="preflight: FAIL (component-set: components missing vs origin/main and the ancestry probe could not classify them)"
+      hint="hint: repair the repository so 'git merge-base --is-ancestor <origin/main> HEAD' answers (HEAD must resolve to a commit), then re-run scripts/agent-gate.sh"
+      echo "agent-gate: components are missing vs origin/main, and 'git merge-base --is-ancestor'" >&2
+      echo "            could NOT say whether this tree is BEHIND or removed them in its own diff." >&2
+      echo "            The two have OPPOSITE verdicts (FAIL vs a declared, non-fatal removal), so" >&2
+      echo "            guessing either way is a false verdict on correct input — one direction reds" >&2
+      echo "            a legitimate removal, the other swallows the skew this guard exists to catch." >&2
+      echo "agent-gate: remedy: make HEAD resolve to a commit (an unborn/detached-broken HEAD is the" >&2
+      echo "            usual cause), then re-run the gate." >&2 ;;
+    *)
+      why_summary="preflight: FAIL (component-set baseline NOT measured — $_CS_KIND)"
+      # ONE arm, but the REMEDY is per-kind: "restore access to origin/main" would send the
+      # reader of a re-pointed/fork `origin` to fix the wrong thing, and a wrong remedy in a
+      # fail-closed diagnostic is what makes an agent suspect its own diff (the #3148 lesson).
+      case "$_CS_KIND" in
+        manifest-missing|manifest-garbage|manifest-stale)
+          why_summary="preflight: FAIL (component-set: the LOCAL component manifest $_CS_MANIFEST_REL is not usable — $_CS_KIND)"
+          # THE HINT AND THE MANIFEST HEADER ARE THE SAME INSTRUCTION WRITTEN TWICE — keep them
+          # in step (roborev job 299, Low). It used to name a PREDICTABLE `\$TMPDIR/agent-gate.
+          # components` AND expand an unset `TMPDIR` to the filesystem ROOT. Every lane on this
+          # fleet is the same user with a shared writable `/tmp`, so a peer can pre-plant that
+          # path as a symlink and the truncating `>` follows it — after which the `mv` publishes
+          # an attacker-chosen file as the manifest this guard derives its verdict from. `mktemp`
+          # creates the file itself under a name it chooses, and the `&&` chain makes creation a
+          # PRECONDITION rather than an assumption.
+          hint="hint: regenerate the manifest — t=\$(mktemp scripts/agent-gate.components.XXXXXX) && { sed -n -e '/^[^#]/q' -e p $_CS_MANIFEST_REL; scripts/agent-gate.sh --list; } >\"\$t\" && mv \"\$t\" $_CS_MANIFEST_REL — then COMMIT it and re-run scripts/agent-gate.sh"
+          echo "agent-gate: $_CS_MANIFEST_REL is the DATA this gate publishes as its component" >&2
+          echo "            set, and the baseline every future branch compares against is read" >&2
+          echo "            from it (never by executing a fetched script — #3544 REQ-3544-01)." >&2
+          echo "            A manifest that is absent, ungrammatical or out of step with this" >&2
+          echo "            gate's own COMPONENTS array is an UNVERIFIED baseline: once merged," >&2
+          echo "            every later run would compare against the wrong set and silently" >&2
+          echo "            excuse real skew. That is why this is fail-closed and not advisory." >&2
+          echo "agent-gate: remedy: regenerate $_CS_MANIFEST_REL from this gate's own --list, then commit it." >&2 ;;
+        remote-not-canonical|remote-unreadable)
+          hint="hint: point origin at the canonical upstream (git remote set-url origin https://$_CS_CANONICAL_REMOTE.git) — or add it as a second remote and run the gate in a checkout whose origin is upstream — then re-run scripts/agent-gate.sh"
+          echo "agent-gate: 'origin' does not name the canonical upstream $_CS_CANONICAL_REMOTE, so the" >&2
+          echo "            baseline component set would come from a DIFFERENT repository (a fork's" >&2
+          echo "            main can be months stale). That is a baseline of unknown provenance, not" >&2
+          echo "            a measurement, so no PASS may be derived from it (#3544 job 215)." >&2
+          echo "agent-gate: remedy: git remote set-url origin https://$_CS_CANONICAL_REMOTE.git" >&2 ;;
+        *)
+          hint="hint: restore access to origin/main (git fetch origin main), then re-run scripts/agent-gate.sh"
+          echo "agent-gate: the baseline component set could NOT be measured, so this run cannot" >&2
+          echo "            certify its own coverage; a pass derived from an unmeasured baseline is" >&2
+          echo "            exactly the vacuous green #3544 exists to close." >&2
+          echo "agent-gate: remedy: restore access to origin/main (git fetch origin main) and re-run." >&2 ;;
+      esac ;;
+  esac
+  # REPORT-ONLY (the --component-set-line hook): return with the line stamped instead of
+  # emitting. The hook cannot emit — emit_summary/_tree_meta_array are defined AFTER the
+  # arg dispatch — and STUBBING them there would define a second `_tree_meta_array`,
+  # which breaks test_agent_gate_tree_portability.sh's derived-inventory uniqueness
+  # assert (the #3148 trap, recorded so it is not re-sprung).
+  [ "$report_only" -eq 1 ] && return 1
+  _tree_meta_array   # #2926: every emitted block carries the tree provenance
+  emit_summary FAIL \
+    "$why_summary" \
+    "$COMPONENT_SET_LINE" \
+    "${TREE_META_LINES[@]}" \
+    "$hint"
+  exit 1
 }
 
 # ---- issue #2081: --delta executes node __test__/ + scripts/tests/*.sh ---------
@@ -2874,6 +5866,83 @@ case "${1:-}" in
     [ -n "${2:-}" ] && ONLY="$2"
     apply_schemas_preflight report-only || true
     echo "SCHEMAS_LINE: ${SCHEMAS_LINE:-<none>}"
+    exit 0 ;;
+  # Hidden self-test hook (issue #3544): run the REAL apply_component_set_preflight and
+  # print the VERDICT plus the COMPONENT_SET_LINE it stamped, so the self-test observes
+  # the ACTUAL summary text and the ACTUAL decision rather than a re-implementation of
+  # either. Optional $2 seeds the MODE (full | lite | delta | only:<components>) because
+  # the arg dispatch is a single `case "$1"` — `--lite --component-set-line` is not
+  # expressible — and because a real `--lite` run would spend minutes in cargo before
+  # printing anything. Drives the EFFECTFUL function on purpose (`report-only`, an
+  # ARGUMENT: see that function's header): the property under test is that a positive
+  # line is never stamped for a check that could not fail.
+  # Hidden self-test hooks (issue #3544, roborev job 207 Medium): expose the BOUND
+  # mechanism and drive the bounded runner directly. The defect they exist for is that the
+  # pre-flight used to run the fetch UNBOUNDED when neither `timeout` nor `gtimeout` was on
+  # PATH — invisible on any box that HAS `timeout`, which is every box we develop on, so the
+  # only way to test it is to force the absence and ask the code what it decided.
+  --component-set-bound) echo "MECHANISM: $(_component_set_bound_mechanism)"; exit 0 ;;
+  # --component-set-remote-identity <url>: REPORT-ONLY evaluation of the canonical-upstream
+  # predicate on a URL passed as an ARGUMENT (issue #3544 / job 215). It reads no config,
+  # performs no I/O and cannot influence a real run: the identity a real run judges is always
+  # `git remote get-url origin`, which neither this hook nor any env var can redirect. It
+  # exists so the URL-shape variants (ssh, scp-like, https, ports, case, `.git`, a fork) are
+  # covered WITHOUT a network fetch and WITHOUT a settable expected-identity — per CLAUDE.md,
+  # the constrained party must not choose its own enforcer.
+  # Hook for the DETAIL sanitiser (roborev job 239), so scripts/tests asserts the SAME
+  # redact+flatten path `_CS_DETAIL` uses rather than a reimplementation of it.
+  --component-set-safe-detail)
+    printf 'SAFE_DETAIL: %s\n' "$(_component_set_safe_detail "${2:-}")"; exit 0 ;;
+  --component-set-remote-identity)
+    _csri="${2:?--component-set-remote-identity needs <url>}"
+    printf 'NORMALISED: %s\n' "$(_component_set_normalise_remote "$_csri")"
+    if _component_set_remote_is_canonical "$_csri"; then
+      echo "IDENTITY: canonical"
+    else
+      echo "IDENTITY: not-canonical"
+    fi
+    exit 0 ;;
+  # --component-set-bounded-run <secs> <cmd...>: run <cmd> through the real bounded runner
+  # and print its status. `RC: 124` = bound exceeded, `RC: 199` = NO mechanism, in which
+  # case the command must NOT have run at all (the property that makes an unboundable probe
+  # safe rather than merely reported).
+  --component-set-bounded-run)
+    _csb_secs="${2:?--component-set-bounded-run needs <secs> <cmd...>}"; shift 2
+    _component_set_bounded "$_csb_secs" "$@"; _csb_rc=$?
+    _component_set_drop_capture_files   # this hook has no probe wrapper to clean up after it
+    echo "RC: $_csb_rc"; exit 0 ;;
+  --component-set-line)
+    case "${2:-full}" in
+      full) : ;;
+      lite) LITE=1 ;;
+      delta) DELTA=1 ;;
+      only:*) ONLY="${2#only:}" ;;
+      *) echo "unknown --component-set-line mode: ${2:-}" >&2; exit 2 ;;
+    esac
+    apply_component_set_preflight report-only || true
+    echo "VERDICT: $(_component_set_verdict)"
+    echo "STRICT: $(_component_set_strict && echo yes || echo no)"
+    echo "KIND: ${_CS_KIND:-<none>}"
+    echo "SHA: ${_CS_SHA:--}"
+    echo "MISSING: ${_CS_MISSING:-}"
+    echo "EXTRA: ${_CS_EXTRA:-}"
+    echo "ANCESTOR: ${_CS_ANCESTOR:-unknown}"
+    # HOW each side's set was READ (#3544 REQ-3544-01): `manifest` (the committed data file) or
+    # `declaration` (the transitional TEXT extraction). Exposed so the self-test can assert
+    # WHICH data-only path ran, rather than inferring it from a verdict that both paths produce.
+    echo "BASELINE_SRC: ${_CS_BASE_SRC:-<none>}"
+    # `reused` = this repository already held the commit the ref oracle named (nothing was
+    # downloaded); `fetched` = the isolated hop + verified transfer ran. Exposed so a case that
+    # asserts a property OF THE FETCH can require the fetch to have HAPPENED — otherwise the
+    # fast path would make such a case pass vacuously (job 258).
+    echo "BASELINE_OBJECTS: ${_CS_BASE_OBJ:-<none>}"
+    echo "HEAD_SRC: ${_CS_HEAD_SRC:-<none>}"
+    # BOUND is exposed so scripts/tests can assert the mode-dependent deadline (job 234)
+    # WITHOUT a wall-clock threshold. A timing assert would be the flakier test AND would
+    # trip this repo's own wall-clock lint in `roborev-lints`; asserting the RESOLVED value
+    # tests the decision instead of the weather.
+    echo "BOUND: ${_CS_BOUND_SECS:-<unset>}"
+    echo "COMPONENT_SET_LINE: ${COMPONENT_SET_LINE:-<none>}"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and
   # the shell-selftest executor so scripts/tests assert the SAME logic run_delta uses.
@@ -4472,6 +7541,9 @@ fi
 # STALE prior-run block / unwritable file — NOT a live foreign clobber — so the
 # integrity guard names that cause accurately instead of blaming a "foreign run-id".
 SENTINEL_WROTE=0
+# component-set-exempt: #3544 — the startup INCOMPLETE sentinel is written BEFORE the
+# component-set pre-flight runs (it is the #2908 liveness placeholder, not a verdict), so
+# there is no measured verdict to stamp; emit_summary replaces it with a stamped block.
 if {
   echo "$SUMMARY_START_MARKER"
   echo "run-id: $RUN_ID"
@@ -4675,14 +7747,24 @@ _integrity_fail_block() {
   # mutated-AND-clobbered run would emit a block missing them. Incoming `tree-*` meta
   # lines are dropped and re-emitted from the live globals below, so exactly ONE
   # authoritative set appears no matter which caller supplied the meta.
+  #
+  # #3544: the same argument applies to the `component-set:` line — this block is
+  # hand-rolled, so it must thread that verdict itself or the "every SUMMARY carries
+  # component-set:" contract has a hole exactly where a run is already in trouble. It is
+  # re-emitted from the LIVE global (_component_set_meta) and any incoming `component-set:`
+  # meta line is dropped, so exactly ONE authoritative line appears no matter which caller
+  # supplied the meta (the --lite/--delta terminals push it into SUMMARY_META; the MAIN
+  # foreground lane passes none).
   local line
   for line in ${@+"$@"}; do
     case "$line" in
       tree-start:*|tree-end:*|tree-integrity:*|tree-hash-cap:*) continue ;;
+      component-set:*) continue ;;
     esac
     echo "$line"
   done
   _tree_meta_lines
+  printf '%s\n' "$(_component_set_meta)"
   echo "logs: $LOG_DIR"
   echo "summary-file: $SUMMARY_FILE (NOT rewritten — live peer owns it)"
   echo "integrity-fail-sibling: $sibling"
@@ -4773,6 +7855,7 @@ _assert_summary_integrity() {
   emit_summary FAIL \
     "summary-integrity: FAIL ($reason)" \
     "detected-after-component: $comp" \
+    "$(_component_set_meta)" \
     "${TREE_META_LINES[@]}"
   exit 1
 }
@@ -4827,6 +7910,7 @@ _emit_terminal_summary() {
     _publish_integrity_fail "$reason" "$comp" ${@+"$@"}   # ${@+"$@"}: empty-safe under set -u on bash 3.2
     return 1
   fi
+  # component-set-exempt: forwarder — this is the shared no-clobber publish path; it stamps nothing of its own and every CALLER is checked by this same census
   emit_summary "$result" "$@"
 }
 
@@ -5167,6 +8251,9 @@ _tree_boundary_meta_lines() {
   # #3148: the POSITIVE schemas-root assertion (empty until the full gate's preflight
   # has run, so a --lite/--delta boundary simply omits it rather than inventing it).
   [ -n "${SCHEMAS_LINE:-}" ] && printf '%s\n' "$SCHEMAS_LINE"
+  # #3544: the component-set verdict (empty until the mode-dispatch pre-flight has run,
+  # so an earlier boundary omits the line rather than inventing it).
+  [ -n "${COMPONENT_SET_LINE:-}" ] && printf '%s\n' "$COMPONENT_SET_LINE"
   [ -n "${PINS:-}" ] && printf 'ci-pins: %s\n' "$PINS"
   # Both printers deliberately emit NO trailing newline (their normal callers capture them
   # into a SUMMARY_META element), so each needs its own '%s\n' here or the whole block
@@ -5543,6 +8630,7 @@ if [ "$SELFTEST" -eq 1 ]; then
   if [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ "$(_fixture_status)" = OPTOUT ]; then
     meta+=("$(_missing_fixtures_marker)")
   fi
+  # component-set-exempt: --emit-summary-selftest exits at the arg dispatch, BEFORE the #3544 pre-flight runs, so there is no verdict to stamp (a synthetic block, never a certification)
   emit_summary PASS "${meta[@]}"
   # Even the selftest must not exit 0 if it could not write its summary file —
   # the whole point of the selftest is to prove the recovery artifact is produced.
@@ -5576,6 +8664,8 @@ fi
 # (fail-closed guard for these hooks ran earlier, before the startup sentinel — #2874)
 case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
   1)
+    # component-set-exempt: a synthetic FOREIGN PEER's block seeded by the #2874
+    # self-test — it models another run's artifact, not this run's verdict block
     {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: /tmp/agent-gate.FOREIGN-$$"
@@ -5586,6 +8676,8 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     echo "integrity-selftest: BUG — guard did NOT fire on a foreign run-id" >&2
     exit 0 ;;
   side)
+    # component-set-exempt: a synthetic FOREIGN PEER's block seeded by the #2874
+    # self-test — it models another run's artifact, not this run's verdict block
     {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: /tmp/agent-gate.FOREIGN-$$"
@@ -5608,6 +8700,8 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     # publish FAIL to the private log + non-clobbering sibling WITHOUT rewriting the contended path
     # (ratified job-2106 no-clobber contract). SENTINEL_WROTE=1 here (writable throwaway took our
     # startup sentinel before we seeded the foreign block).
+    # component-set-exempt: a synthetic FOREIGN PEER's block seeded by the #2874
+    # self-test — it models another run's artifact, not this run's verdict block
     {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: /tmp/agent-gate.FOREIGN-$$"
@@ -5622,6 +8716,7 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     # the very "emit sites nobody enumerated" shape this change set out to close (review
     # H3). _tree_meta_array finalizes in the CURRENT shell (never a subshell, B2).
     _tree_meta_array
+    # component-set-exempt: #2874 summary-integrity self-test hook — pre-dispatch, synthetic block
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
       ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"} \
       "${TREE_META_LINES[@]}" || true
@@ -5634,6 +8729,8 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     # SIDE-lane marker exists. The terminal path must STILL detect the foreign run-id on the
     # observable condition alone, refuse to clobber the peer, publish to the sibling, and force a
     # non-zero result — even though OVERALL started PASS (all components passed).
+    # component-set-exempt: a synthetic FOREIGN PEER's block seeded by the #2874
+    # self-test — it models another run's artifact, not this run's verdict block
     {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: /tmp/agent-gate.FOREIGN-$$"
@@ -5644,6 +8741,7 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     _term_rc=0
     # Threaded for the same reason as the `marker` hook above (#2926 review H3).
     _tree_meta_array
+    # component-set-exempt: #2874 summary-integrity self-test hook — pre-dispatch, synthetic block
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
       "${TREE_META_LINES[@]}" || _term_rc=$?
     printf 'terminal-nomarker-selftest: contended-untouched=%s sibling=%s overall=%s rc=%s\n' \
@@ -5790,6 +8888,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       # capture-derived `commit:` line the full/lite/delta emits publish.
       _tree_commit_meta
       _tree_meta_array
+      # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
       printf 'tree-selftest: mode=%s overall=%s mutated=%s\n' \
@@ -5805,6 +8904,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tree_selftest_mutate
       _tree_commit_meta
       _tree_meta_array
+      # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
       printf 'tree-selftest: mode=postfinalize overall=%s mutated=%s commit-line=%s\n' \
@@ -5823,6 +8923,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tree_finalize || true
       _tree_commit_meta
       _tree_meta_array
+      # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
       printf 'tree-selftest: mode=side overall=%s mutated=%s\n' "$OVERALL" "$TREE_MUTATED"
@@ -11261,6 +14362,14 @@ run_pub_surface() {
 # its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
+# Also runs scripts/tests/test_agent_gate_component_set.sh (#3544), the POSITIVE CONTROL
+# for the COMPONENT-SET skew pre-flight: a branch whose agent-gate.sh predates a
+# component-set expansion on main reports a true `N/N nonpass=0` and is SILENT about
+# everything added since (measured: PR #3467's gate would have certified 31 of 35), and
+# neither merge-cleanliness nor `required` can see it. Each incident class (behind, dead
+# fetch, broken/empty/garbage/absent baseline, deliberate removal, no skew, lite leniency)
+# is planted in a throwaway git repo with a LOCAL bare origin and must be NAMED, not just
+# red. Hermetic: no network (path remote), no cargo, no #1825 slot.
 # Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
 # the pub-surface component: 42 cases driving scripts/ci/check-pub-surface.sh through
 # 10 greens, 30 reds, the usage case and the kill-safety case, substituting the artifact
@@ -11422,6 +14531,27 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_schemas_preflight.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (committed-schemas preflight guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # component-set skew pre-flight guard (#3544): the POSITIVE CONTROL for the check that
+  # refuses a gate script older than origin/main's component set — the skew that let PR
+  # #3467's run report a true `31/31 nonpass=0` while saying nothing about 4 components
+  # that had landed 39 minutes earlier. Every incident class is planted in a THROWAWAY git
+  # repo with a LOCAL bare `origin` (the fetch is real; no network), and each case requires
+  # the check to NAME the missing/failing symbol — a bare red is not evidence, since an
+  # unrelated breakage produces an identical exit code. Hermetic: the fail-closed cases
+  # exit AT the pre-flight, before any component, so no cargo and no #1825 slot.
+  # A failure FAILs the component, mirroring the schemas guard above.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_component_set.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_component_set.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (component-set skew preflight guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -13638,6 +16768,9 @@ run_lite() {
   _tree_commit_meta
   SUMMARY_META+=("$TREE_COMMIT_LINE")
   SUMMARY_META+=("lite-scope: file-size fmt clippy roborev-lints scoped-tests (full gate NOT run — run it once before merge)")
+  # #3544: the component-set verdict, ADVISORY in --lite (informative; it cannot fail the
+  # run — --lite executes every fix round and must not require the network to function).
+  [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
   # Python-tier verdict marker (roborev job 1450): when a python-binding diff was
   # in scope, the block carries the tier's verdict — a SKIPPED marker makes a
   # "green but validated nothing" block detectable from the block alone.
@@ -13770,6 +16903,7 @@ run_delta() {
     emit_summary ERROR \
       "delta-anchor: $anchor (UNRESOLVED)" \
       "$(accelerators_line)" \
+      "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
       "error: anchor does not resolve to a commit — cannot re-certify"
     exit 2
@@ -13787,6 +16921,7 @@ run_delta() {
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "error: --anchor-summary-file not found: $DELTA_ANCHOR_SUMMARY_FILE"
       exit 2
@@ -13800,6 +16935,7 @@ run_delta() {
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "error: anchor summary is not a full-gate SUMMARY block (lite/delta cannot anchor a delta)"
       exit 2
@@ -13811,6 +16947,7 @@ run_delta() {
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "error: anchor summary RESULT is not PASS — cannot anchor a delta re-cert"
       exit 2
@@ -13905,6 +17042,7 @@ run_delta() {
     emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
+      "$COMPONENT_SET_LINE" \
       "$(accelerators_line)" \
       "${TREE_META_LINES[@]}" \
       "${file_meta[@]}" \
@@ -13931,6 +17069,7 @@ run_delta() {
     emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
+      "$COMPONENT_SET_LINE" \
       "$(accelerators_line)" \
       "${TREE_META_LINES[@]}" \
       "${file_meta[@]}" \
@@ -14006,6 +17145,7 @@ run_delta() {
     declare -a SUMMARY_META=()
     SUMMARY_META+=("${anchor_meta[@]}")
     SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (python tier REQUIRED but did NOT run — re-cert incomplete)")
+  [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")   # #3544
     SUMMARY_META+=("${PYTHON_TIER_NOTE:-python-tier: NOT RUN — python-binding tests NOT validated by this delta run}")
     SUMMARY_META+=("$(accelerators_line)")
     _tree_meta_array
@@ -14031,6 +17171,9 @@ run_delta() {
   declare -a SUMMARY_META=()
   SUMMARY_META+=("${anchor_meta[@]}")
   SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (test/docs-only re-cert; clippy/core/write/cli/bindings/parity/smoke NOT run — see gate-of-record)")
+  # #3544: --delta is a CERTIFYING mode, so this line is fail-closed (a fatal verdict
+  # exited at the mode dispatch); it names the origin/main sha the set was compared to.
+  [ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
   # #2081: name the executors that actually RAN this re-cert (scoped-tests always; the
   # node/shell executors only when their file class changed).
   SUMMARY_META+=("delta-executors: ${DELTA_EXECUTORS:-scoped-tests(rust/python)} (executors that RAN this re-cert)")
@@ -14216,10 +17359,20 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
   # via SUMMARY_WRITE_FAILED when one does).
+  # component-set-exempt: --lite-aggregate-selftest drives aggregation hermetically and exits before the #3544 pre-flight — nothing measured, nothing to stamp
   _emit_terminal_summary "$OVERALL" "${SUMMARY_META[@]}" || true
   [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || exit 1
   case "$OVERALL" in PASS) exit 0 ;; *) exit 1 ;; esac
 fi
+
+# COMPONENT-SET skew pre-flight (issue #3544). Placed HERE, at the mode dispatch, for
+# three reasons: it is AFTER arg parsing (so `--list` and every hidden hook exit before
+# it, and the baseline's own `--list` therefore cannot recurse into it), it covers ALL
+# modes from ONE call site (full, --lite, --delta, --only) so a mode cannot be forgotten,
+# and it is BEFORE acquire_gate_slot so a run that cannot certify never queues for a slot
+# (nor compiles anything). FAIL-CLOSED for the full gate and --delta; ADVISORY for --lite
+# and --only, which stamp the same line but cannot fail on it.
+apply_component_set_preflight
 
 # --lite (issue #1821): run the fast subset and EXIT before the full-gate flow.
 # Kept fully separate from the full-gate execution below so the no-flag path is
@@ -14243,6 +17396,31 @@ acquire_gate_slot
 # #2926: the full gate's certification window begins HERE — after the (possibly very
 # long) queue for that slot, when work actually begins. See _tree_recapture_after_slot.
 _tree_recapture_after_slot
+
+# ---- A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES (roborev job 290, High) ----------------
+#
+# THE RULE, and it is the mirror of the one the lead ruled on earlier in this issue ("a check
+# placed AFTER the harmful effect can only report it, never prevent it"):
+#
+#     A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES — NOT BEFORE IT, NOT AFTER THE HARM.
+#
+# THE DEFECT. The pre-flight above runs at the mode dispatch, BEFORE `acquire_gate_slot`, and
+# `_tree_recapture_after_slot` then RESETS the certification window to whatever the tree is once
+# the slot is granted. That recapture is deliberate and must stay — a queue can be very long, and
+# edits made while queued should start a fresh window rather than void the run — but it means the
+# `component-set:` line was computed against a tree the gate has since REPLACED. An edit to the
+# gate script or the manifest during the queue was accepted as the new starting tree with a STALE
+# component-set verdict: a full PASS carrying a line about a set that is no longer the one being
+# dispatched, or a manifest that no longer matches the running `COMPONENTS` array.
+#
+# So the pre-flight is REPEATED here, inside the window `_tree_recapture_after_slot` just opened.
+# It is idempotent (probe, stamp, and fail closed on a fatal verdict), and the earlier call is
+# kept rather than moved: it is what stops a run that cannot certify from queueing for a slot or
+# compiling anything at all. Cost is one ref-oracle round trip after the queue.
+#
+# `--lite` and `--delta` have already returned above and are exempt from the slot cap, so this
+# call is reached only by the modes that HAVE a queue window: the full gate and `--only`.
+apply_component_set_preflight
 
 # file-size runs first and needs no dataset, so it executes before the dataset
 # preflight (which exits early when data is missing).
@@ -14381,6 +17559,7 @@ if selected_needs_datasets; then
     _tree_meta_array   # #2926
     emit_summary FAIL \
       "preflight: FAIL (no Data.db files under $CQLITE_DATASETS_ROOT/sstables)" \
+      "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
       "hint: bash test-data/scripts/fetch-datasets.sh"
     exit 1
@@ -15069,6 +18248,10 @@ fi
 # the check RAN rather than merely that nothing complained. Empty when the preflight was
 # skipped (no dataset-dependent component selected) → no line.
 [ -n "$SCHEMAS_LINE" ] && SUMMARY_META+=("$SCHEMAS_LINE")
+# #3544: stamp the component-set verdict (which origin/main sha this run's component set
+# was compared against), so a pasted block shows the skew check RAN and names its
+# baseline. Always non-empty on this path — the pre-flight runs at the mode dispatch.
+[ -n "$COMPONENT_SET_LINE" ] && SUMMARY_META+=("$COMPONENT_SET_LINE")
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")

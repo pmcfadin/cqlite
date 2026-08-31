@@ -1,0 +1,96 @@
+# scripts/agent-gate.components — THE COMPONENT SET OF THE FULL GATE, AS DATA (issue #3544).
+#
+# WHY THIS FILE EXISTS. The component-set pre-flight in scripts/agent-gate.sh compares this
+# branch's component set against origin/main's, so it needs main's set. It used to obtain it
+# by FETCHING main's copy of agent-gate.sh and RUNNING it (`bash <fetched> --list`) — and six
+# of that mechanism's seven High-severity review findings traced to that one decision, each
+# fix moving the hole one layer outward (a symbolic remote name, then the validated URL, then
+# the URL in argv). Per CLAUDE.md's umbrella rule (#3312): control and data must not share a
+# channel when the data is attacker-controlled, and the fix is to REMOVE the channel, not to
+# choose a rarer delimiter. `git show <sha>:scripts/agent-gate.components` is data by
+# construction: the worst a redirected fetch can now produce is a WRONG COMPONENT LIST, which
+# the comparison itself detects, rather than code execution with the developer's credentials.
+#
+# THE GRAMMAR IS CLOSED, and the reader REFUSES rather than guesses:
+#   * one component name per line, in the gate's own dispatch order;
+#   * a name matches [A-Za-z0-9._-]+ and may not start with `-`;
+#   * a blank line is skipped, and a line whose FIRST character is `#` is a comment;
+#   * ANYTHING else — including a name with leading or trailing whitespace — is a NAMED
+#     refusal. A parser that trims is a parser that guesses.
+#
+# IT MUST MATCH `scripts/agent-gate.sh --list` EXACTLY, ORDER INCLUDED, and the pre-flight
+# ASSERTS that on every run (`manifest-stale`, fail-closed). That local assert is what makes
+# this file trustworthy as a baseline at all: without it the manifest is an unverified claim,
+# and a branch that added a component here-but-not-there would leave main's manifest SHORT —
+# so every later branch would compare against a too-small set and the guard would silently
+# excuse real skew. Regenerate, header included:
+#
+#   t=$(mktemp scripts/agent-gate.components.XXXXXX) \
+#     && { sed -n -e '/^[^#]/q' -e p scripts/agent-gate.components; scripts/agent-gate.sh --list; } >"$t" \
+#     && mv "$t" scripts/agent-gate.components
+#
+# THE TEMPORARY IS CREATED BESIDE THE DESTINATION, NOT UNDER $TMPDIR (roborev job 300, Low).
+# `mv` is atomic only WITHIN one filesystem. Across filesystems it degrades to copy-and-delete, and
+# a reader can then observe a PARTIAL manifest — which for this file means a SHORT component set,
+# i.e. exactly the silent under-count the whole guard exists to prevent. Not hypothetical on this
+# fleet, measured:
+#
+#   ${TMPDIR:-/tmp}                 -> /dev/root
+#   /data/lanes/<lane>/scripts      -> /dev/nvme1n1
+#
+# Two different devices, so the old form was a copy-and-delete every time. `mktemp` in `scripts/`
+# keeps the O_EXCL unpredictable-name property that job 299 added AND makes the publish genuinely
+# atomic. Cost: the temporary is briefly visible in a tracked directory — harmless, since it is
+# `mktemp`-named, removed by the `&&` chain, and `.gitignore` need not know about it for a command
+# a human runs by hand.
+# THE TEMPORARY IS `mktemp`, NOT A PREDICTABLE NAME (roborev job 299, Low). This used to write
+# through a fixed `/tmp/agent-gate.components`. On this fleet EVERY lane runs as the same user
+# with a shared writable `/tmp`, so a same-user peer can pre-plant that path as a SYMLINK and the
+# truncating `>` redirect follows it — writing the component list wherever the link points, and
+# then `mv`ing an attacker-chosen file over the manifest this guard's whole verdict is derived
+# from. `mktemp` creates the file itself with O_EXCL under a name it chooses, so there is nothing
+# to pre-plant; the `&&` chain makes CREATION a precondition rather than an assumption (a failed
+# `mktemp` must not leave the redirect writing to an empty `$t`, which is `>` on the CWD); and the
+# `mv` is the atomic publish, so a reader never sees a half-written manifest. `${TMPDIR:-/tmp}`
+# rather than a bare `$TMPDIR`: an unset `TMPDIR` expands to the empty string, which makes the
+# path `/agent-gate.components` — the filesystem ROOT.
+#
+# THIS COMMAND AND THE HINT `scripts/agent-gate.sh` EMITS ON A STALE MANIFEST ARE THE SAME
+# INSTRUCTION WRITTEN TWICE. Change one, change the other.
+file-size
+fmt
+clippy
+roborev-lints
+core-tests
+tombstones-scan
+scan-offload-guard
+work-counters-guard
+byte-budget-guard
+arrow-parity-guard
+memory-budget
+integration-tests
+format-compat
+write-tests
+cli-tests
+compaction-byte-parity
+bti-multiclustering
+query-semantics-oracle
+flight-query-semantics-oracle
+flight-tests
+legacy-heuristics
+feature-iso-parquet
+feature-iso-delta-scan
+python-bindings
+node-bindings
+binding-rust-tests
+delivery-telemetry
+oom-audit
+parity-report
+operator-metrics-doc
+kit-dashboard-drift
+binding-unwind-profile
+pub-surface
+tooling-tests
+minimal-build
+all-features-check
+smoke
