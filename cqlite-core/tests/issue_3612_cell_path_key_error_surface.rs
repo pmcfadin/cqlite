@@ -26,7 +26,8 @@
 //!
 //! ## How the error is provoked, and why this is honest
 //! The committed Cassandra fixture `test_udt_collision.udt_collide` stores `cm`'s
-//! key as a 26-byte serialized `collide` UDT. This test hands the reader a schema
+//! key as a 70-byte serialized `collide` UDT cell path (four components: 16
+//! bytes of `[i32 BE len]` prefixes plus 15+19+16+4 bytes of data). This test hands the reader a schema
 //! that declares that same column `map<int, int>` — ONE substitution, applied to
 //! the committed `.cql` at run time so the mutation is visible and cannot drift —
 //! so the exact-width check refuses the key. That is a genuine, reachable
@@ -64,7 +65,7 @@ const QUERY: &str = "SELECT * FROM test_udt_collision.udt_collide";
 const SUBJECT_ROW_ID: i32 = 1;
 
 /// The declared type of `cm` in the committed schema, and the mismatching type
-/// this test substitutes for it. `map<int, int>` makes the 26-byte on-disk UDT
+/// this test substitutes for it. `map<int, int>` makes the 70-byte on-disk UDT
 /// key fail the exact-width check (`int` is exactly 4 bytes).
 const DECLARED_CM: &str = "cm  map<frozen<collide>, int>,";
 const MISMATCHED_CM: &str = "cm  map<int, int>,";
@@ -256,19 +257,51 @@ async fn the_compaction_read_swallows_the_same_error() {
         .expect("the compaction read must not error either — that is the finding");
     assert!(!rows.is_empty(), "the fixture has partitions");
 
-    // The compaction read reports the row LIVE and simply lacks the dropped
-    // columns; it does not surface the decode failure to its caller.
-    let mut saw_live = false;
+    // The property, asserted where it is OBSERVABLE. `cm` is a COMPLEX column, so
+    // it can only ever appear in `complex` — asserting its absence from `simple`
+    // would hold no matter what the decoder did (a vacuous assertion this test
+    // shipped with for one round, caught by a mutant check).
+    //
+    // This fixture's ONLY complex columns are `cm` and `tm` (every other
+    // collection column is FROZEN, hence a single cell and therefore `simple`),
+    // so there is no earlier complex column to use as an in-vector control. The
+    // control is the `simple` vector instead: its frozen map columns prove the
+    // row really was read and is not simply empty.
+    let mut checked_rows = 0usize;
     for row in &rows {
-        if let CompactionRowData::Live { simple, .. } = &row.row_data {
-            saw_live = true;
-            for cell in simple {
-                assert_ne!(
-                    cell.column, "cm",
-                    "cm is dropped by the swallow, so it must not appear as a cell"
+        if let CompactionRowData::Live {
+            simple, complex, ..
+        } = &row.row_data
+        {
+            let simple_names: Vec<&str> = simple.iter().map(|c| c.column.as_str()).collect();
+            if !simple_names.contains(&"fcm") {
+                // Not the subject row (rows 2/3 carry no map columns).
+                continue;
+            }
+            checked_rows += 1;
+            // CONTROL: the frozen siblings decoded, so the read happened.
+            assert!(
+                simple_names.contains(&"ftm"),
+                "control: the frozen map columns must be present; got {simple_names:?}"
+            );
+            let complex_names: Vec<&str> = complex.iter().map(|c| c.column.as_str()).collect();
+            assert!(
+                !complex_names.contains(&"cm"),
+                "cm's key failed to decode, so the swallow drops it from the \
+                 compaction read's complex columns; got {complex_names:?}"
+            );
+            for later in COLUMNS_AFTER_CM_ON_DISK {
+                assert!(
+                    !complex_names.contains(&later),
+                    "'{later}' follows cm on disk and is dropped by the same \
+                     `break`; got {complex_names:?}"
                 );
             }
         }
     }
-    assert!(saw_live, "at least one live row must be produced");
+    assert_eq!(
+        checked_rows, 1,
+        "exactly one fixture row carries the map columns; if this is 0 the \
+         assertions above ran against nothing"
+    );
 }
