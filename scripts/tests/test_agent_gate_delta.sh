@@ -78,8 +78,8 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-delta-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
-# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.sh
-. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.sh"
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
 
 # add_local_origin <repo> (#3544): give a scratch fixture a LOCAL bare `origin` whose
 # `main` is the fixture's own current commit. The gate's component-set pre-flight fetches

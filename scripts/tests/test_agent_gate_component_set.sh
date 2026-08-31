@@ -127,8 +127,8 @@ GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 # bare `origin`, and a local path is deliberately NOT the canonical upstream, so each
 # fixture's OWN COPY of the gate is rewritten to name its own origin — substituting the
 # ARTIFACT, never adding a settable seam. See the helper's header for the full reasoning.
-# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.sh
-. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.sh"
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
 
 # ---------------------------------------------------------------------------
 # Fixture builders.
@@ -164,7 +164,7 @@ mkmanifest() {
     derive)
       # ONE implementation, shared with the delta and tree-integrity suites (which copy the
       # gate for their own reasons and hit the same pre-flight): see
-      # agent_gate_install_components_manifest in lib/agent-gate-canonical-pin.sh. Two copies
+      # agent_gate_install_components_manifest in lib/agent-gate-canonical-pin.bash. Two copies
       # of this rule is the drift this file keeps finding elsewhere.
       agent_gate_install_components_manifest "$root/scripts/agent-gate.sh" || return 1
       return 0 ;;

@@ -50,8 +50,8 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 
-# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.sh
-. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.sh"
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
 
 # ---------------------------------------------------------------------------
 # Fixture: a FAKE checkout. Copying ONLY the gate into <root>/scripts/ makes the gate's
