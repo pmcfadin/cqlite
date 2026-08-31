@@ -277,9 +277,14 @@ mkbin() {
   local name="$1"; shift
   local dir="$tmp/$name-bin" t src omit=" $* "
   mkdir -p "$dir"
+  # `chmod` and `find` are in this list because the PRE-FLIGHT declares them (the 0600 on the
+  # isolated fetch config, and the portable exact-mode verification of it — job 276). A curated
+  # PATH missing a tool the gate legitimately needs does not test an absence branch; it makes the
+  # POSITIVE CONTROL unreachable, and both cases that use this helper then SKIP with a misleading
+  # cause (measured: they reported `baseline-workspace`).
   for t in bash sh sed awk grep cut tr mktemp date basename dirname cat head tail wc sort \
            uniq rm mkdir cp mv ln uname nproc env find touch stat comm od xargs kill ps df \
-           readlink id iconv git sleep timeout gtimeout nice; do
+           readlink id iconv git sleep timeout gtimeout nice chmod; do
     case "$omit" in *" $t "*) continue ;; esac
     src=$(command -v "$t" 2>/dev/null) && [ -n "$src" ] && ln -sf "$src" "$dir/$t"
   done
@@ -952,7 +957,7 @@ nt_bin="$tmp/notool-bin"
 mkdir -p "$nt_bin"
 for _t in bash sh sed awk grep cut tr mktemp date basename dirname cat head tail wc sort \
           uniq rm mkdir cp mv ln uname nproc env find touch stat comm od xargs sleep kill \
-          ps df readlink id iconv timeout nice; do
+          ps df readlink id iconv timeout nice chmod; do
   _src=$(command -v "$_t" 2>/dev/null) && [ -n "$_src" ] && ln -sf "$_src" "$nt_bin/$_t"
 done
 nt_repo=$(mkbranch notool "$base_ok" - )
@@ -2655,8 +2660,10 @@ identity() { # identity <url> -> canonical | not-canonical
 }
 id_bad=""
 # ACCEPT only what is VERIFIABLE FROM THE STRING: the legitimate spellings of the ONE
-# canonical host — scheme forms, scp-like, userinfo, an ssh port, `www.`, a trailing `.git`,
-# any case. Over-rejecting one of these would red a correct checkout, and a guard that reds on
+# canonical host — scheme forms, scp-like, `git@` (which is how ssh addresses github.com, not a
+# credential), an ssh port, `www.`, a trailing `.git`, any case. USERINFO OTHER THAN `git@` IS NOW
+# REJECTED (job 276): the config-file mitigation for a token-bearing URL did not hold, because git
+# passes the configured URL to a transport helper whose argv then carries it. Over-rejecting one of these would red a correct checkout, and a guard that reds on
 # correct input is the guard agents learn to waive.
 for _u in "https://github.com/pmcfadin/cqlite.git" \
           "https://github.com/pmcfadin/cqlite" \
@@ -2668,7 +2675,6 @@ for _u in "https://github.com/pmcfadin/cqlite.git" \
           "ssh://git@github.com:22/pmcfadin/cqlite" \
           "git+ssh://git@github.com/pmcfadin/cqlite.git" \
           "ssh+git://git@github.com/pmcfadin/cqlite.git" \
-          "https://x-access-token:ghp_example@github.com/pmcfadin/cqlite.git" \
           "HTTPS://WWW.GitHub.com/PMcFadin/CQLite.git/"; do
   [ "$(identity "$_u")" = canonical ] || id_bad="${id_bad:+$id_bad }REJECTED:$_u"
 done
@@ -2690,6 +2696,8 @@ for _u in "https://github.com/contributor/cqlite.git" \
           "git@github.com:pmcfadin/other-repo.git" \
           "ghp_scpsecret_3544@github.com:pmcfadin/cqlite.git" \
           "x-access-token:ghp_scpsecret_3544@github.com:pmcfadin/cqlite.git" \
+          "https://x-access-token:ghp_example@github.com/pmcfadin/cqlite.git" \
+          "https://ghp_example@github.com/pmcfadin/cqlite.git" \
           "https://gitlab.com/someone/cqlite-fork" \
           "https://evil.example/pmcfadin/cqlite" \
           "https://github.com.evil.tld/pmcfadin/cqlite" \
@@ -2876,7 +2884,7 @@ scp_detail=$(bash "$GATE" --component-set-safe-detail "$(printf 'fatal: %s: Perm
 if [ -z "$scp_norm" ] || [ -z "$scp_detail" ]; then
   bad "3544-scp-userinfo: the identity or sanitiser hook produced nothing (norm='$scp_norm') — neither half can be asserted (fail-closed)"
 elif [ "$scp_verdict" != not-canonical ]; then
-  bad "3544-scp-userinfo: a credential-bearing scp remote was accepted as canonical ('$scp_verdict') — the identity check must refuse it, not merely drop the userinfo before comparing"
+  bad "3544-scp-userinfo: a credential-bearing scp remote was accepted as canonical ('$scp_verdict') — the identity check must refuse it (ONE rule now covers every URL form: userinfo must be absent or exactly 'git'), not merely drop the userinfo before comparing"
 elif printf '%s' "$scp_norm" | grep -qF "$scp_secret"; then
   bad "3544-scp-userinfo: the REJECTION MARKER carries part of the value — it is rendered into _CS_DETAIL and thence into a pasted SUMMARY block"
 elif printf '%s' "$scp_detail" | grep -qF "$scp_secret"; then
@@ -3290,6 +3298,52 @@ else
     ok "3544-read-env-allowlisted: GIT_DIR and injected git config both take effect on a plain git here (controls) yet change NOTHING about the pre-flight's verdict, baseline sha or missing set — every read runs under env -i plus the one allowlist"
   else
     bad "3544-read-env-allowlisted: the inherited environment changed the pre-flight: $ei_bad (clean run was kind=$(field KIND "$ei_clean") sha=$(field SHA "$ei_clean") verdict=$(field VERDICT "$ei_clean"))"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7r. THE ISOLATED CONFIG'S MODE IS VERIFIED, NOT ASSUMED (roborev job 276, Medium). The 0600 was
+#     applied with `|| true` — a control specified and then not required to have worked. On a
+#     filesystem where the write succeeds and the chmod does not, a credential-bearing URL would
+#     have been written into a broadly readable file anyway.
+#
+#     TWO HALVES, because "chmod exited 0" and "the file is 0600" are different claims: the mode is
+#     applied AND the result is verified with `find -perm 600` (POSIX; `stat` is unusable — `-c %a`
+#     is GNU and `-f %Lp` is BSD). Driven by making `chmod` fail: a stub on PATH that exits 1 for
+#     this config file and forwards everything else, so the pre-flight must REFUSE and must NOT
+#     have written the URL.
+#
+#     The positive control is the same fixture without the stub reaching a real verdict — otherwise
+#     "it refused" could be any other breakage wearing that name.
+# ---------------------------------------------------------------------------
+base_cm=$(mkbaseline base-chmod - )
+cm_fx=$(mkbranch chmodfail "$base_cm" - )
+cm_ctl=$(hook "$cm_fx")
+cm_bin="$tmp/chmod-stub"
+mkdir -p "$cm_bin"
+cm_real=$(command -v chmod 2>/dev/null)
+if [ -z "$cm_real" ]; then
+  echo "skip - 3544-config-mode-verified: no resolvable chmod to build the failing stub"
+elif [ "$(field KIND "$cm_ctl")" != ok ]; then
+  bad "3544-config-mode-verified: the POSITIVE CONTROL (same fixture, no stub) did not reach KIND ok (got '$(field KIND "$cm_ctl")') — the case cannot discriminate"
+else
+  { printf '#!/bin/sh\n'
+    printf 'for a in "$@"; do case "$a" in */cs-baseline.*/repo/.git/config) exit 1 ;; esac; done\n'
+    printf 'exec %s "$@"\n' "$cm_real"
+  } >"$cm_bin/chmod"
+  chmod +x "$cm_bin/chmod"
+  cm_out=$( fx "$cm_fx" && PATH="$cm_bin:$PATH" bash "$cm_fx/scripts/agent-gate.sh" \
+              --component-set-line full 2>/dev/null )
+  cm_line=$(field COMPONENT_SET_LINE "$cm_out")
+  if [ "$(field VERDICT "$cm_out")" = UNMEASURED ] \
+     && [ "$(field KIND "$cm_out")" = baseline-workspace ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$cm_line" \
+     && grep -q '0600' <<<"$cm_line" \
+     && grep -q 'credential' <<<"$cm_line"; then
+    ok "3544-config-mode-verified: a chmod that FAILS makes the pre-flight refuse before the credential-bearing URL is written (control reached KIND ok)"
+  else
+    bad "3544-config-mode-verified: expected KIND baseline-workspace naming the 0600 and the credential (kind='$(field KIND "$cm_out")')"
+    printf '%s\n' "$cm_out"
   fi
 fi
 

@@ -3054,6 +3054,33 @@ _component_set_normalise_remote() {
   case "${u%%/*}" in
     *@*) uinfo="${u%%@*}"; u="${u#*@}" ;;
   esac
+  # USERINFO IS REFUSED OUTRIGHT — AND THIS REVERSES AN EARLIER, WRONG JUSTIFICATION (roborev job
+  # 276). It used to be ACCEPTED for schemed URLs, on the ground that GitHub Actions rewrites
+  # `origin` to `https://x-access-token:<TOKEN>@github.com/…` and rejecting it would red a
+  # legitimate CI checkout; the credential was then kept out of `git`'s own argv by writing it to
+  # an isolated config. THAT MITIGATION DOES NOT HOLD: git hands the configured URL to a TRANSPORT
+  # HELPER (`git-remote-https`), so the token appears in THE HELPER's command line — a different
+  # process's argv than the one that was checked — for the life of every `ls-remote` and `fetch`.
+  #
+  # So the credential is removed instead of hidden: a canonical upstream has no business carrying
+  # one, which is the same reasoning that narrowed the scp form to `git@github.com`. VERIFIED
+  # before choosing refusal over stripping: this repository's own CI checks out with
+  # `actions/checkout@v5`, which stores its token in `http.<url>.extraheader` and leaves `origin`
+  # WITHOUT userinfo — so refusing cannot red the nightly gate. Stripping was the alternative and
+  # is worse: it would leave the token in the config we write while fetching without it.
+  #
+  # `git@` in the scp form is not userinfo in this sense (it is how ssh addresses github.com at
+  # all), and it is handled in the scp arm below.
+  # ONE RULE FOR EVERY FORM: userinfo must be ABSENT or exactly `git`. The first cut refused ALL
+  # userinfo and immediately red `ssh://git@github.com/pmcfadin/cqlite.git` — the standard ssh
+  # spelling, i.e. a false FAIL on a correct origin, which is the class agents learn to waive.
+  # `git@` is not a credential; it is how ssh addresses github.com at all. Everything else in that
+  # position IS one.
+  #
+  # THE MARKER CARRIES NO PART OF THE VALUE — it IS the credential.
+  if [ -n "$uinfo" ] && [ "$uinfo" != git ]; then
+    printf 'userinfo-bearing'; return 0
+  fi
   if [ -n "$scheme" ]; then
     host="${u%%/*}"
     case "$u" in */*) path="${u#*/}" ;; *) path="" ;; esac
@@ -3069,6 +3096,8 @@ _component_set_normalise_remote() {
     # everything else as a LOCAL PATH.
     case "${u%%/*}" in
       *:*) host="${u%%:*}"; path="${u#*:}"
+           # (SCP-FORM USERINFO is covered by the ONE userinfo rule above — job 276 unified them.
+           # The reasoning is kept here because this is where it was first established.)
            # SCP-FORM USERINFO IS RESTRICTED TO `git` (roborev job 264, Medium). The canonical
            # upstream has no business being reached as an arbitrary user, and every OTHER
            # spelling of userinfo here is a CREDENTIAL — `TOKEN@github.com:pmcfadin/cqlite` was
@@ -3087,14 +3116,7 @@ _component_set_normalise_remote() {
            # a legitimate CI checkout.
            #
            # THE MARKER CARRIES NO PART OF THE VALUE, for the same reason as `whitespace-bearing`.
-           # An `if`, not a `case`, and deliberately: a `case` label of `''|git)` is not a shape
-           # the structural externals audit's label-stripper recognises, so it split the line and
-           # reported `git` as an unbounded external invocation — a FAIL on correct code
-           # (measured). Fail-closed, but the fix belongs here rather than in a broadened
-           # stripper, which would weaken an audit that has caught four real defects.
-           if [ -n "$uinfo" ] && [ "$uinfo" != git ]; then
-             printf 'scp-userinfo'; return 0
-           fi ;;
+           : ;;
       *)   printf 'local:%s' "$(_component_set_strip_repo_suffix "$u")"; return 0 ;;
     esac
   fi
@@ -3963,8 +3985,12 @@ _component_set_probe_inner() {
   #     rewrite is SILENT — nothing in the output names it, and the fetched bytes ARE the
   #     baseline this run certifies against.
   #
-  # (b) CREDENTIAL IN ARGV: an accepted canonical URL may carry a token, and a URL in a `git`
-  #     argument is readable by any process via `ps` / `/proc/<pid>/cmdline` for the call's life.
+  # (b) CREDENTIAL IN ARGV: a URL in a `git` argument is readable by any process via `ps` /
+  #     `/proc/<pid>/cmdline` for the call's life. The config file keeps it out of THE GATE's own
+  #     argv — but NOT out of the transport helper's, which git invokes with the configured URL
+  #     (job 276). That is why a userinfo-bearing origin is now refused as non-canonical rather
+  #     than carefully handled: the only reliable way to keep a credential out of every argv is
+  #     for there not to be one.
   #
   # HOP 1 runs in a FRESH repository whose config we wrote, with global and system config
   # neutralised, and the URL enters that config through a shell REDIRECT — `printf` is a bash
@@ -4001,8 +4027,25 @@ _component_set_probe_inner() {
     return 0
   fi
   csconf="$csdir/repo/.git/config"
-  # 0600 BEFORE the URL is written, because the URL may carry a credential.
-  chmod 600 "$csconf" 2>/dev/null || true
+  # 0600 BEFORE THE URL IS WRITTEN, AND THE MODE IS VERIFIED, NOT ASSUMED (roborev job 276). The
+  # `|| true` here specified a control and then ignored whether it had been applied: on a
+  # filesystem where the write succeeds and the chmod does not, the URL would have been written
+  # into a broadly readable file anyway. Fail closed instead — and verify the RESULT rather than
+  # the exit status, because "chmod said 0" and "the file is 0600" are different claims (a
+  # no-op chmod on some filesystems reports success).
+  #
+  # `find -perm 600` is the portable exact-mode test: POSIX, and identical on GNU and BSD for an
+  # octal mode with no `-`/`/` prefix. `stat` is NOT usable here — `-c %a` is GNU and `-f %Lp` is
+  # BSD, and this script must run on both.
+  #
+  # SCOPE, so the diagnostic does not overclaim: the scratch directory comes from `mktemp -d`,
+  # which creates it 0700, so another user cannot traverse into it even if this check fails. The
+  # mode on the file is defence in depth; refusing costs nothing and a leak needs both to fail.
+  if ! chmod 600 "$csconf" 2>/dev/null || [ -z "$(find "$csconf" -perm 600 -print 2>/dev/null)" ]; then
+    _CS_KIND=baseline-workspace
+    _CS_DETAIL="could not set mode 0600 on the isolated fetch config (or the mode did not take): the origin URL may carry a credential, so it is NOT written to a file whose permissions this run cannot verify"
+    return 0
+  fi
   printf '[remote "csbaseline"]\n\turl = %s\n' "$origin_url" >>"$csconf" 2>/dev/null || true
 
   # ---- HOP A: THE REF ORACLE — LEARN THE TIP SHA WITHOUT DOWNLOADING A HISTORY -------------
