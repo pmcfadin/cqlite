@@ -39,7 +39,7 @@
 //! actually seen (see `super::compare_value_at`).
 
 use super::super::schema::CqlType;
-use super::{canon_typed, csv_container, Depth, Egress, Kinding};
+use super::{canon_typed, csv_container, is_scalar_type, Depth, Egress, Kinding};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -138,6 +138,61 @@ pub enum Divergence {
     /// NOT COVERED: a different number, a null, a non-numeric string, and the CSV
     /// lane (where every cell is text and the 30-digit values match exactly).
     DecimalRendersAsJsonString,
+    /// A frozen value nested inside a multi-cell collection is left UNDECODED by
+    /// the golden as a flat scalar, while the egress decodes it into a structure.
+    ///
+    /// ORACLE: `sstabledump` does not descend into a frozen value that sits inside
+    /// a multi-cell collection. The element lives in the cell PATH, where Cassandra
+    /// wrote its raw serialized bytes, so the golden carries a flat STRING at a
+    /// position the DDL declares a container — hex digits for a nested frozen
+    /// collection (`set<frozen<set<key_part>>>` gives `000000020000...`) and
+    /// sstabledump's colon-joined tuple spelling for a nested frozen tuple
+    /// (`set<frozen<tuple<frozen<key_part>, int>>>` gives `alpha\:1:1`).
+    ///
+    /// EGRESS SHAPE: a DECODED structure — a JSON array or object — at that same
+    /// position.
+    ///
+    /// NOTE THE DIRECTION. It is the OPPOSITE of
+    /// [`Divergence::NestedFrozenUdtRendersAsBlobHex`], where the GOLDEN decodes and
+    /// the egress emits hex. Here the golden leaves the value undecoded and the
+    /// egress decodes it. The two are not interchangeable, and declaring the wrong
+    /// one matches nothing and is reported stale (issue #3500).
+    ///
+    /// NOT COVERED: a null, a number, a golden that DID decode (the two sides are
+    /// then compared normally), and an egress that also emitted a flat scalar (then
+    /// there is no shape difference to excuse). DECLARED RESIDUAL: the CONTENT
+    /// behind the golden's flat scalar is not compared — recovering it would mean
+    /// re-implementing Cassandra's collection and tuple serializers here. This gap
+    /// costs the nested value's content; what it does not cost is the shape.
+    NestedFrozenValueLeftUndecodedByGolden,
+    /// THIS LANE HAS NO RULE FOR PAIRING CONTAINER-TYPED MAP KEYS.
+    ///
+    /// **A LANE LIMITATION, NOT A VALUE DISAGREEMENT.** The two sides are never
+    /// compared at this position, so nothing here asserts that they differ. A
+    /// reader grepping declared divergences for parity defects must NOT count this
+    /// one: it records a capability the COMPARATOR lacks, not a defect in either
+    /// side's output. `super::compare_map` pairs entries by their canonical SCALAR
+    /// key form and refuses outright when the declared key type is a container.
+    ///
+    /// ORACLE/DDL: the position's declared type is `map<K, V>` where `K` is a
+    /// container (`list`/`set`/`map`/`tuple`/UDT). Decided from the COMMITTED DDL
+    /// alone, via the same `super::is_scalar_type` predicate `compare_map` refuses
+    /// on, so the gap and the refusal can never disagree about what a container is.
+    ///
+    /// EGRESS SHAPE: none, and that asymmetry IS the point. Every other variant
+    /// here is a conjunction of an oracle side and a rendered shape because it
+    /// describes a disagreement between two values. This one describes the absence
+    /// of a comparison, so it reads no values at all — asserting a shape would be
+    /// inventing a claim about output nobody examined.
+    ///
+    /// NOT COVERED: a map with a SCALAR key type (compared normally in both
+    /// formats), and any non-map position.
+    ///
+    /// EXPIRY: a scaffold, not an end state. Real container-key comparison support
+    /// is issue #3726; when it lands this variant stops matching, every skip naming
+    /// it is reported STALE by `Report::stale_skips`, and the lane FAILS until they
+    /// are removed. That is what stops the scaffold becoming permanent.
+    ContainerMapKeyNotPairableByThisLane,
 }
 
 impl Divergence {
@@ -163,6 +218,17 @@ impl Divergence {
                 "the golden's decimal is an unquoted JSON number (DecimalType.toJSONString \
                  returns BigDecimal.toString()) while the JSON egress quotes the SAME \
                  number as a JSON string"
+            }
+            Divergence::NestedFrozenValueLeftUndecodedByGolden => {
+                "the golden leaves a frozen value nested in a multi-cell collection \
+                 UNDECODED as a flat scalar (raw bytes as hex for a collection, \
+                 colon-joined text for a tuple) while the egress decodes it into a \
+                 structure"
+            }
+            Divergence::ContainerMapKeyNotPairableByThisLane => {
+                "the declared map KEY type is a container, which this lane has no rule \
+                 for pairing, so the two sides are not compared at all — a limitation of \
+                 this comparator, NOT a disagreement between the two sides (issue #3726)"
             }
         }
     }
@@ -235,6 +301,42 @@ impl Divergence {
                     (Ok(g), Ok(c)) => g == c,
                     _ => false,
                 }
+            }
+            Divergence::NestedFrozenValueLeftUndecodedByGolden => {
+                // The GOLDEN side: a flat scalar STRING at a position the committed
+                // DDL declares a container. Stated against the DDL, not against the
+                // string's appearance, so this does not depend on recognising hex
+                // versus colon-joined text — either spelling is `sstabledump`
+                // declining to descend, and the DDL is what says a structure was
+                // expected there.
+                if !matches!(golden, Value::String(_)) {
+                    return false;
+                }
+                if !matches!(
+                    ty,
+                    CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..) | CqlType::Tuple(_)
+                ) {
+                    return false;
+                }
+                // The EGRESS side: a DECODED structure. Both spellings the CLI uses
+                // for a container are accepted (it spells list/set/map as a JSON
+                // array and a UDT as an object), and nothing else is — a flat
+                // scalar, a null or a number at this position is NOT this gap and is
+                // reported as an ordinary diff.
+                matches!(cli, Value::Array(_) | Value::Object(_))
+            }
+            Divergence::ContainerMapKeyNotPairableByThisLane => {
+                // Decided from the DDL ALONE — no value is read, because this
+                // variant records the ABSENCE of a comparison rather than a
+                // disagreement between two rendered values. Asking anything of
+                // `golden` or `cli` here would be inventing a claim about output
+                // that was never examined.
+                //
+                // The predicate is the SAME ONE `super::compare_map` refuses on, so
+                // the gap and the refusal cannot disagree about what counts as a
+                // container key.
+                let _ = (golden, cli, egress, depth, kinding);
+                matches!(ty, CqlType::Map(key_ty, _) if !is_scalar_type(key_ty))
             }
         }
     }

@@ -654,7 +654,76 @@ const CASES: &[Case] = &[
             ("s_map_udt_key", Multicell::Set),
             ("s_map_udt_val", Multicell::Set),
         ],
-        skips: &[],
+        // Eight of the eleven columns are excluded, in TWO distinct classes. What
+        // survives is compared: `id` and `f_set_tuple_udt` — so this entry still
+        // compares one genuinely nested frozen column, which is why it is a CASES
+        // entry rather than a NOT_COMPARABLE one.
+        //
+        // CLASS 1 — the golden leaves the nested frozen element UNDECODED (raw
+        // bytes as hex for a collection, colon-joined text for a tuple) while the
+        // CLI decodes it. A value disagreement, in the direction OPPOSITE to
+        // `NestedFrozenUdtRendersAsBlobHex`.
+        //
+        // CLASS 2 — a LANE LIMITATION, not a disagreement: the declared map KEY is
+        // a container and this lane has no pairing rule for one, so the two sides
+        // are never compared. Tracked for real support in #3726; when that lands
+        // these four skips go stale and FAIL, which is what removes them.
+        skips: &[
+            Skip {
+                path: "s_tuple_udt",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen tuple element as sstabledump's colon-joined text; the CLI decodes it",
+            },
+            Skip {
+                path: "s_set_udt",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen inner set as raw serialized hex; the CLI decodes it",
+            },
+            Skip {
+                path: "s_list_udt",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen inner list as raw serialized hex; the CLI decodes it",
+            },
+            Skip {
+                path: "s_map_udt_key",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen inner map as raw serialized hex; the CLI decodes it",
+            },
+            Skip {
+                path: "s_map_udt_val",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen inner map (UDT as VALUE) as raw serialized hex; the CLI decodes it",
+            },
+            Skip {
+                path: "m_tuple_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is tuple<key_part, int>; this lane pairs map keys by scalar form only (#3726)",
+            },
+            Skip {
+                path: "f_map_tuple_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "frozen map key is tuple<key_part, int>; no container-key pairing rule (#3726)",
+            },
+            Skip {
+                path: "f_map_set_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "frozen map key is set<key_part>; no container-key pairing rule (#3726)",
+            },
+            Skip {
+                path: "f_map_tuple_list_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "frozen map key is tuple<list<key_part>, int>; no container-key pairing rule (#3726)",
+            },
+        ],
     },
 ];
 
