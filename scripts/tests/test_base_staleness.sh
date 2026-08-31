@@ -403,6 +403,15 @@ commit_paths "$R_RES" "behind: a SPACE-bearing path" \
 # line with NO prefix at all, breaking the one anchor everything rests on.
 NL_PATH=$'test-data/notes/we\nird.md'
 commit_paths "$R_RES" "behind: a NEWLINE-bearing path" "$NL_PATH"
+# CR, TAB and the GENERIC [[:cntrl:]] FALLBACK (roborev job 271, Low). sane()
+# handles \r, \n and \t by NAME through parameter substitution and sends every
+# OTHER control byte down a per-character \xNN loop — four distinct branches, of
+# which only the newline one was exercised. An explicitly implemented guarantee
+# with a single tested branch is the "compiling is not covering" shape one
+# directory over, so each branch now has a byte in a REAL path: CR and TAB take
+# the substitution branch, ESC (0x1b) and DEL (0x7f) force the fallback loop.
+CTL_PATH=$'test-data/notes/cr\rtab\tesc\x1bdel\x7f.md'
+commit_paths "$R_RES" "behind: a CR/TAB/ESC/DEL-bearing path" "$CTL_PATH"
 publish_main "$R_RES"
 back_to_feature "$R_RES"
 
@@ -1112,9 +1121,9 @@ fi
 # FALSIFIED by review: the advisory prints repository-controlled paths verbatim.
 # What is asserted instead is that such a path is printed VERBATIM (masking it
 # would mangle it for the reader) and that the ANCHOR survives it.
-if run 4 "reserved-substring / space / NEWLINE bearing matched paths" "$R_RES"; then
-  has "reserved: all four staling commits are counted" \
-    "blast-radius 4 RECOGNISED of 4 commits behind"
+if run 4 "reserved-substring / space / NEWLINE / CR-TAB-ESC-DEL matched paths" "$R_RES"; then
+  has "reserved: all five staling commits are counted" \
+    "blast-radius 5 RECOGNISED of 5 commits behind"
   has "reserved: an OK-bearing path is printed VERBATIM" \
     "gate-global test-data/scripts/CI_SMOKE_TEST_USAGE.md"
   has "reserved: a PASS-bearing path is printed VERBATIM" \
@@ -1123,6 +1132,25 @@ if run 4 "reserved-substring / space / NEWLINE bearing matched paths" "$R_RES"; 
     "gate-global test-data/notes/a spaced PASS name.md"
   has "reserved: the NEWLINE in a path is escaped VISIBLY, not emitted raw" \
     "gate-global test-data/notes/we\nird.md"
+  # One assertion per sane() BRANCH, not one per byte: \r and \t prove the
+  # substitution branch, \x1b and \x7f prove the per-character fallback loop.
+  # The expected text is the ESCAPE, so a regression emitting the raw byte fails
+  # HERE, naming the branch, rather than only in the whole-suite anchor.
+  has "reserved: CR is escaped VISIBLY as a two-char escape (substitution branch)" \
+    "gate-global test-data/notes/cr\rtab"
+  has "reserved: TAB is escaped VISIBLY as a two-char escape (substitution branch)" \
+    "tab\tesc"
+  has "reserved: ESC 0x1b is escaped as a hex escape (per-character fallback)" \
+    "esc\x1bdel"
+  has "reserved: DEL 0x7f is escaped as a hex escape (per-character fallback)" \
+    "del\x7f.md"
+  # The COMPLEMENT of the four asserts above, and not implied by them: they would
+  # all still pass if a SECOND copy of the path were ALSO emitted unescaped.
+  if printf '%s' "$OUT" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    bad "reserved: a RAW control byte survived into the output"
+  else
+    ok "reserved: NO raw control byte anywhere in the output (every C0/DEL escaped)"
+  fi
   if [ "$(verdict_lines)" -eq 1 ]; then
     ok "reserved: exactly ONE 'verdict ' line, despite paths carrying foreign verdict tokens"
   else
@@ -1178,16 +1206,29 @@ if run 5 "a NEWLINE-bearing subject rev stays anchored and is escaped visibly" \
 fi
 # (b) REPOSITORY-controlled data: on the reserved fixture the pass-through splits
 # one matched path across TWO `matched` records, so the listing disagrees with the
-# count it reports. The shipped script lists exactly the 4 it counted.
+# count it reports. The shipped script lists exactly the N it counted.
+#
+# The expected N is DERIVED from the shipped run's own `blast-radius` line, never
+# curated: it was hard-coded as 4 and adding ONE fixture path (the CR/TAB/ESC/DEL
+# case above) broke it at 5/6 — a red on correct input, from a constant standing in
+# for the invariant this comment already states. Deriving it asserts the REAL
+# property, "the listing agrees with the count it reports", and cannot drift when
+# the fixture grows. A derivation that yields nothing is a FAIL naming the
+# derivation, never a default: an unmeasured expectation would make the whole
+# comparison vacuous.
 OUT=$(cd "$R_RES" && bash "$MUT_SANE" 2>&1)
 mut_matched=$(printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: matched ')
 OUT=$(cd "$R_RES" && bash "$ADVISORY" 2>&1)
 record_out "shipped run on the reserved fixture"
 ship_matched=$(printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: matched ')
-if [ "$ship_matched" -eq 4 ] && [ "$mut_matched" -gt "$ship_matched" ]; then
-  ok "sane-mutant: unsanitized, a newline-bearing PATH inflates the listing ($mut_matched vs $ship_matched matched lines)"
+ship_declared=$(printf '%s\n' "$OUT" |
+  sed -n 's/^BASE-STALENESS: blast-radius \([0-9][0-9]*\) RECOGNISED .*/\1/p' | head -1)
+if [ -z "$ship_declared" ]; then
+  bad "sane-mutant: could NOT derive the shipped blast-radius count from its own output (derivation failed; not defaulted)"
+elif [ "$ship_matched" -eq "$ship_declared" ] && [ "$mut_matched" -gt "$ship_matched" ]; then
+  ok "sane-mutant: unsanitized, a control-char-bearing PATH inflates the listing ($mut_matched vs $ship_matched matched lines; declared $ship_declared)"
 else
-  bad "sane-mutant: expected the shipped script to list 4 and the mutant more (got $ship_matched / $mut_matched)"
+  bad "sane-mutant: expected the shipped listing to equal its declared count ($ship_declared) and the mutant to exceed it (got $ship_matched / $mut_matched)"
 fi
 
 # --- Case 16 (BLOCKER A): rename symmetry — the fail-open the pin closes -----
