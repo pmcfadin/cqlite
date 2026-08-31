@@ -3775,8 +3775,16 @@ STUBEOF
 # racers only one `mv "$LOCK" "$LOCK.stale.$$"` can succeed against a given
 # stale directory name; the loser's `mv` fails (source already gone) and it
 # falls through to its own `mkdir "$LOCK"`, which fails against the winner's
-# fresh lock, hitting the existing loud "failed to acquire lock" exit path.
+# fresh lock, hitting the loud lost-race exit path.
 # No test function here by design — see comment in acquire_lock() itself.
+# UPDATED (#3601): that exit path is now `supervisor_lock_refuse_lost_race`, which names the cause
+# instead of the pre-#3601 bare "failed to acquire lock", and it is reached only when the name is taken
+# by someone else — a `mkdir` that fails because the PATH cannot hold a lock is diagnosed separately
+# (`test_lane_lock_uncreatable_path_is_not_reported_as_contention`). The reclaim's operands also now
+# terminate option parsing, which `test_lane_lock_option_shaped_tmpdir_starts_normally` drives. The
+# same-instant two-racer interleaving remains untested for the reason above; the interleaving that IS
+# reproducible — a peer holding a PID-LESS lock — is driven with a real competing process by
+# `test_lane_lock_pidless_window_is_never_read_as_dead`.
 
 # ---------------------------------------------------------------------------
 # Test (#2841): the resolved DEFAULT WORKER_CMD (caller does not export one)
@@ -4816,6 +4824,15 @@ legacy_lock_drive() {
 # ordinary case exercises. The override file holds exactly the pre-fix spelling of one function.
 SV_DRIVE_BODY_OVERRIDE="${SV_DRIVE_BODY/'source "$1"; '/'source "$1"; source "$2"; '}"
 
+# SV_MAIN_DRIVE_BODY — the WHOLE supervisor loop, not just `acquire_lock`, for the cases whose subject is
+# inside `run_iteration`. ONE body used by both a control and its mutant, differing only in argument 2
+# (the override file; empty for the control), because a contrast whose two sides differ in their ENTRY
+# POINT does not isolate the property under test (#3601, roborev job 231 B4). No `|| true` and no
+# `2>/dev/null` on the source: swallowing a startup failure would let a broken mutant read as a result.
+# `main` is called explicitly because the supervisor's own guard runs it only when executed directly.
+SV_MAIN_DRIVE_BODY='source "$1"; [[ -z "${2:-}" ]] || source "$2"; main'
+
+
 # legacy_lock_drive_override <override-file> <tmp> <lane> — the ordinary drive with one shipped function
 # replaced by the file's redefinition (sourced AFTER the supervisor).
 legacy_lock_drive_override() {
@@ -5221,11 +5238,45 @@ test_legacy_global_lock_refuses_a_present_lock() {
   # depended on. `kill -0` is deliberately NOT in the list: the per-lane lock and the worker-liveness
   # loop both use it legitimately, and a pattern that reds on correct code is the pattern people learn
   # to waive.
-  revived="$(grep -nE 'supervisor_legacy_lock_state|supervisor_pid_liveness|GLOBIGNORE|pid_max' "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  revived="$(grep -nE 'supervisor_legacy_lock_state|supervisor_pid_liveness|GLOBIGNORE' "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [[ -z "$revived" ]]; then
-    pass "legacy-lock (ruling 2): the classifier, the pid-liveness probe, the pid_max bound and the glob-state neutralisation are GONE from the supervisor's code"
+    pass "legacy-lock (ruling 2): the classifier, the deleted pid-liveness SYMBOL and the glob-state neutralisation are GONE from the supervisor's code"
   else
     fail "legacy-lock-classifier-resurrected: [$revived] — machinery whose output cannot change the decision is back on the decision path"
+  fi
+  # ...AND THE PROPERTY THE NAME CHECK CANNOT SEE (#3601). A NAME BAN IS NOT A PROPERTY ASSERT: the
+  # ruling deleted pid liveness from THIS decision path, not from the file, and #3601 legitimately
+  # rebuilt the capability for the PER-LANE lock — where, unlike here, the verdict selects between
+  # refusing and reclaiming, so it is a guard and not a description generator. Read as a file-wide ban
+  # the assert above would have to red on that correct code, which is the assert people learn to waive;
+  # read as a name it can be satisfied by a rename, which is the assert that sees nothing. So the
+  # durable half is stated over the three functions that ARE the legacy decision: none of them may
+  # measure a pid's liveness, by any spelling — no `kill`, and no call to the per-lane probes.
+  #
+  # `pid_max` MOVED OUT OF THE FILE-WIDE NAME LIST FOR THE SAME REASON (#3601, roborev job 231 B3). The
+  # classifier's `/proc/sys/kernel/pid_max` read was deleted because ITS verdict could not change the
+  # decision; the per-lane parser reads the same file to bound a holder pid, where the verdict selects
+  # between refusing and reclaiming. A file-wide ban would have to red on that correct code — the ban
+  # people learn to waive — so what is asserted is the property: the legacy path reads no pid bound.
+  local legacy_fn legacy_body legacy_code liveness_on_legacy_path=""
+  for legacy_fn in supervisor_legacy_lock_presence supervisor_legacy_lock_refuse supervisor_legacy_lock_guard; do
+    legacy_body="$(sed -n "/^$legacy_fn()/,/^}/p" "$SUPERVISOR")"
+    if [[ -z "$legacy_body" || "$legacy_body" != *"$legacy_fn() {"* ]]; then
+      fail "legacy-lock-liveness-property-premise: could not extract $legacy_fn from $SUPERVISOR; the scan below has no subject"
+      legacy_code=""
+      break
+    fi
+    legacy_code="$(printf '%s\n' "$legacy_body" | grep -vE '^[[:space:]]*#' || true)"
+    if [[ -z "$legacy_code" ]]; then
+      fail "legacy-lock-liveness-property-premise: $legacy_fn has no non-comment line"
+      break
+    fi
+    liveness_on_legacy_path+="$(printf '%s\n' "$legacy_code" | grep -nE 'kill[[:space:]]|supervisor_lock_holder_liveness|supervisor_lock_pid_read|pid_max|/proc/' || true)"
+  done
+  if [[ -n "$legacy_code" && -z "$liveness_on_legacy_path" ]]; then
+    pass "legacy-lock (ruling 2, as a PROPERTY): no function on the legacy decision path measures a pid's liveness, parses a pid, or reads a platform pid bound, by any spelling — so the deletion holds even though those capabilities exist elsewhere in the file for a path where their verdict changes the decision"
+  elif [[ -n "$legacy_code" ]]; then
+    fail "legacy-lock-liveness-on-legacy-path: [$liveness_on_legacy_path] — the legacy guard tests for EXISTENCE and stops; measuring a holder's liveness or reading a pid bound there is the machinery the ruling removed, whatever it is called"
   fi
   # ...AND THE PROBE STILL EXECUTES NO EXTERNAL COMMAND, so none of its verdicts depends on `PATH`.
   # Comment lines are stripped first (the prose legitimately NAMES tools it does not use, and a check
@@ -6771,6 +6822,2511 @@ test_legacy_lock_refusals_never_advertise_the_override() {
 
 t test_legacy_lock_refusals_never_advertise_the_override
 
+
+
+
+
+# ===========================================================================
+# THE PER-LANE LOCK (#3601) — `acquire_lock`'s OWN lock, the one every lane executes on every start.
+#
+# The cases below are the LIVE-PATH half of #3549's defect family. #3549 hardened the legacy
+# COMPATIBILITY guard, whose activation precondition was measurably empty, and recorded these four at
+# the site as out of scope. They are:
+#
+#   1. the holder pid used UNPARSED — an empty, garbled or multi-line `pid` file made `kill -0` fail,
+#      which read as "dead", and the lock was RECLAIMED FROM A LIVE HOLDER;
+#   2. the `mkdir`-then-populate window — a lock observable with NO pid file, which a peer read as a
+#      dead holder;
+#   3. two-valued liveness — `kill -0` fails with EPERM as well as ESRCH, so a live holder owned by
+#      another user read as dead;
+#   4. an "already running (pid N)" refusal asserting an identity it never checked;
+#   5. (addendum) every `TMPDIR`-derived operand missing a `--`, so an option-shaped `TMPDIR` stopped
+#      the lane from starting at all, with a diagnostic that blamed a stale lock instead of the path.
+#
+# MEASURED PRE-FIX, against `origin/main` at `674cffa9d`, so none of this is inferred:
+#   pid-less lock      -> `reclaiming stale lock …(holder pid  not alive)` + ACQUIRED
+#   pid file `not-a-pid` -> `reclaiming stale lock …(holder pid not-a-pid not alive)` + ACQUIRED
+#   pid file `1` (live, EPERM for a non-root uid) -> `…(holder pid 1 not alive)` + ACQUIRED
+#   TMPDIR=-scratch    -> `reclaiming stale lock -scratch/…` then `failed to acquire lock -scratch/…`
+#
+# EVERY CASE CARRIES A MUTANT CONTRAST, and the mutants are DERIVED from the shipped functions by
+# `sv_mutant_override` (one literal substitution, premises checked), so a mutant can never drift into a
+# re-implementation and a green assert can never be a green over code that was never the pre-fix form.
+# ===========================================================================
+
+# lane_lock_drive_at <cwd> <override|-> <tmp> <lane> [VAR=VAL ...] — ONE driver for every per-lane-lock
+# case, derived from the SAME `SV_DRIVE_BODY`/`SV_DRIVE_BODY_OVERRIDE` the legacy-guard cases use, so a
+# case that varies the working directory, the environment, or one function cannot drift into exercising
+# a different startup path than the ordinary case does. `-` for no override.
+#
+# A working directory is a parameter because a RELATIVE — and therefore possibly OPTION-SHAPED — `TMPDIR`
+# is only testable from a chosen cwd. `REPO_ROOT` is resolved from the SUPERVISOR's own location, not
+# from cwd, so moving cwd does not change any other resolution (verified by the pre-existing
+# `legacy_lock_drive_in` cases, which do the same thing).
+lane_lock_drive_at() {
+  local cwd="$1" override="$2" tmp="$3" lane="$4"
+  shift 4
+  if [[ "$override" == '-' ]]; then
+    ( cd "$cwd" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" "$@" \
+        bash -c "$SV_DRIVE_BODY" _ "$SUPERVISOR" 2>&1 )
+  else
+    ( cd "$cwd" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" "$@" \
+        bash -c "$SV_DRIVE_BODY_OVERRIDE" _ "$SUPERVISOR" "$override" 2>&1 )
+  fi
+}
+
+# A per-lane-lock refusal, told apart from the LEGACY one — an operator and a test both have to be able
+# to tell the two locks apart, which is why `legacy_refusal_ok` asserts the converse.
+lane_refusal_ok() {
+  local out="$1"
+  [[ "$out" == *"worker-supervisor: "* ]] \
+    && [[ "$out" != *"LEGACY GLOBAL supervisor lock"* ]] \
+    && [[ "$out" != *"ACQUIRED="* ]]
+}
+
+# The undecidable refusal must carry ITS REMEDY, and the remedy must be RUNNABLE AS PRINTED. That is
+# #3549 lead ruling 2 in mechanized form: "cannot tell ⇒ refuse" with no way out is a lane blocked by a
+# directory forever, which is broken rather than fail-closed. Asserted per case, not once, because each
+# refusing state builds its own text.
+lane_lock_remedy_ok() {
+  local label="$1" out="$2" lock="$3" bare
+  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | grep -v '^$' | head -1)"
+  if [[ "$out" == *"worker-supervisor: remedy — "* ]] && [[ "$bare" == "rmdir -- "* ]]; then
+    pass "lane-lock remedy ($label): the refusal names a remedy and prints exactly one BARE runnable line, and it is the NON-RECURSIVE removal (line=[$bare]) — a refusal with no way out is a permanently blocked lane, not fail-closed"
+  else
+    fail "lane-lock-remedy-missing ($label): bare=[$bare] out=[$out] — every undecidable refusal must print the command that clears the lock"
+    return 0
+  fi
+  # ...AND IT MUST BE RUNNABLE, VERBATIM, AGAINST THE REAL PATH. A remedy that is only prose is what
+  # ruling 2 calls a permanent refusal with extra words.
+  local run_rc=0
+  eval "$bare" 2>/dev/null || run_rc=$?
+  if [[ "$run_rc" -eq 0 && ! -d "$lock" ]]; then
+    pass "lane-lock remedy ($label): the printed line runs VERBATIM and clears the lock — so this refusal is an instruction, not a dead end"
+  else
+    fail "lane-lock-remedy-not-runnable ($label): rc=$run_rc line=[$bare] lock still present=[$([[ -d "$lock" ]] && echo yes || echo no)]"
+  fi
+}
+
+
+# ---------------------------------------------------------------------------
+# AC1 — THE HOLDER PID IS PARSED BEFORE IT IS USED, AND AN UNPARSEABLE PID REFUSES.
+# ---------------------------------------------------------------------------
+test_lane_lock_holder_pid_is_parsed_before_use() {
+  local d tmp lane lock out rc dead shape ovr mout mrc
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601parse$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+
+  # ---- (0) THE NON-VACUITY FLOOR, FIRST, BECAUSE EVERY ASSERT BELOW IS A REFUSAL. A suite of
+  # refusals is satisfied by code that refuses unconditionally, and that code is BROKEN (ruling 2: a
+  # guard that never permits work is not fail-closed). So: a WELL-FORMED pid whose process is
+  # affirmatively gone must still be RECLAIMED, automatically, with no operator. This is the stale case
+  # that actually happens on this fleet — a holder killed by -9, an OOM, a reboot.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$lock"* && "$out" == *"affirmatively DEAD"* ]]; then
+    pass "lane-lock AC1 NON-VACUITY: a well-formed pid whose process is affirmatively gone is still RECLAIMED automatically — the refusals below are decisions, not a guard that always says no"
+  else
+    fail "lane-lock-reclaim-lost: rc=$rc out=[$out] — an affirmatively dead holder must still be reclaimed, or this change has broken the only automated way a stale lock clears"
+  fi
+  rm -rf "$lock"
+
+  # ---- (1) EVERY UNPARSEABLE SHAPE REFUSES, AND LEAVES THE LOCK EXACTLY AS FOUND. The shapes are the
+  # ones a crash, a truncation or a foreign writer produces — not a curated list of things that happen
+  # to fail, but one per rejection reason in `supervisor_lock_pid_read`.
+  local staged
+  for shape in EMPTY GARBLED TWOLINE TRAILING ZERO LEADINGZERO OVERLONG NOTAFILE NUL NULMID; do
+    rm -rf "$lock"
+    mkdir -p "$lock"
+    case "$shape" in
+      EMPTY)       : >"$lock/pid" ;;
+      GARBLED)     printf 'not-a-pid\n' >"$lock/pid" ;;
+      TWOLINE)     printf '%s\n%s\n' "$dead" "$dead" >"$lock/pid" ;;
+      TRAILING)    printf '%s x\n' "$dead" >"$lock/pid" ;;
+      ZERO)        printf '0\n' >"$lock/pid" ;;
+      LEADINGZERO) printf '0%s\n' "$dead" >"$lock/pid" ;;
+      # 19 DIGITS, AND THE WIDTH IS LOAD-BEARING (#3601, roborev job 236 B14). This fixture was 15
+      # digits, which only exceeds a bound the platform PUBLISHES: where none is published the ceiling
+      # gate does not apply and the parser's own platform-independent guard allows up to 18, so a
+      # 15-digit value is ACCEPTED and this shape's required refusal failed — on macOS/bash 3.2, a
+      # platform this file explicitly supports. 19 digits is past the arithmetic-length guard, which is
+      # a property of the shell's integer width rather than of any platform's pid space, so this shape
+      # refuses everywhere. Same class as B13, and surfaced BY the B13 fix: making the no-bound branch
+      # measured on this host instead of platform-conditional is what made this sibling's assumption
+      # visible.
+      OVERLONG)    printf '1234567890123456789\n' >"$lock/pid" ;;
+      NOTAFILE)    mkdir -p "$lock/pid" ;;
+      # REAL NUL BYTES, WRITTEN AS BYTES (#3601, roborev job 231) — not a stand-in, because the entire
+      # defect is that a NUL is INVISIBLE to every check that runs on a shell variable. `NUL` is the
+      # dangerous shape: `<dead-pid> NUL LF`, whose NUL-stripped content is a clean, plausible, DEAD pid,
+      # so it passed non-empty + single-line + all-digits + non-zero and the lock was reclaimed. `NULMID`
+      # is the same hazard with the NUL INSIDE the digits, where the value the shell sees is a DIFFERENT
+      # number than the file records.
+      NUL)         printf '%s\000\n' "$dead" >"$lock/pid" ;;
+      NULMID)      printf '%s\000%s\n' "${dead%?}" "${dead#${dead%?}}" >"$lock/pid" ;;
+    esac
+    staged="$(ls -A "$lock" | tr '\n' ' ')"
+    out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && lane_refusal_ok "$out" \
+       && [[ "$out" == *"could NOT DECIDE"* ]] && [[ "$out" != *"reclaiming stale lock"* ]] \
+       && [[ -d "$lock" ]] && [[ "$(ls -A "$lock" | tr '\n' ' ')" == "$staged" ]]; then
+      pass "lane-lock AC1 ($shape): an unparseable holder pid REFUSES, names the parse verdict, reclaims nothing and leaves the lock byte-for-byte as found"
+    else
+      fail "lane-lock-unparsed-pid ($shape): rc=$rc out=[$out] lock-contents=[$(ls -A "$lock" 2>/dev/null | tr '\n' ' ')] — an unparseable pid must never be read as a dead holder"
+    fi
+    # The cause must NAME the parse verdict, not merely refuse: "cannot tell" and "the holder is there"
+    # are different facts with different remedies (#3549 lead ruling 1).
+    if [[ "$out" == *"unparseable pid-"* ]]; then
+      pass "lane-lock AC1 ($shape): the refusal names WHICH parse rejected the content, so the cause is the probe's verdict and not a bare 'refused'"
+    else
+      fail "lane-lock-unparsed-cause ($shape): out=[$out] — the refusal must name the parse verdict"
+    fi
+    # AND THE WAY OUT (ruling 2). Checked for the shapes whose lock a non-recursive removal can clear —
+    # for the two shapes that leave content behind, `rmdir` correctly REFUSES, which is the safety
+    # property the command was chosen for and is asserted separately below.
+    case "$shape" in
+      EMPTY | GARBLED | TWOLINE | TRAILING | ZERO | LEADINGZERO | OVERLONG | NUL | NULMID)
+        rm -f -- "$lock/pid"
+        lane_lock_remedy_ok "$shape" "$out" "$lock"
+        ;;
+    esac
+  done
+
+  # ---- (1b) THE `OVERLONG` WIDTH IS PINNED MECHANICALLY, NOT BY THE COMMENT ABOVE IT (#3601 B14). A
+  # comment saying "19 digits, because 15 only beats a published bound" does not stop the next edit
+  # shrinking it, and the shrink is INVISIBLE on this host — it reds only on a platform without
+  # `/proc/sys/kernel/pid_max`, which nobody runs the suite on. So the same fixture content is driven
+  # through the parser with the ceiling FORCED to `unknown`, which is the macOS shape, and must still
+  # refuse. This is the mechanism-not-care point: a human catches instance N, a test catches the class.
+  local ovr_unk over_verdict
+  ovr_unk="$d/f-unknown-ceiling.sh"; : >"$ovr_unk"
+  if sv_mutant_override "$ovr_unk" supervisor_pid_space_ceiling \
+       "  printf 'authoritative %s' \"\$((b - 1))\"" \
+       "  printf '%s' 'unknown forced-for-test'; return 0"; then
+    rm -rf "$lock"
+    mkdir -p "$lock"
+    printf '1234567890123456789\n' >"$lock/pid"
+    over_verdict="$(env SUP="$SUPERVISOR" OVR="$ovr_unk" F="$lock/pid" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+    if [[ "$over_verdict" == 'unparseable pid-digit-count-out-of-well-formedness-bound' ]]; then
+      pass "lane-lock AC1 (OVERLONG, platform-independent): the fixture is refused by the ARITHMETIC-LENGTH guard even with no platform pid bound published [$over_verdict] — so this shape's refusal does not depend on the host publishing a ceiling"
+    else
+      fail "lane-lock-overlong-platform-dependent: verdict=[$over_verdict] — this fixture must be wide enough to be refused with no published ceiling, or the shape reds on macOS (the B14 defect); 15 digits was not"
+    fi
+    rm -rf "$lock"
+  fi
+
+  # ---- (2) THE PRINTED REMEDY IS NON-RECURSIVE, AND THAT IS THE SAFETY PROPERTY. With content still in
+  # the lock the printed line must FAIL rather than delete something nobody examined — the opposite of
+  # an `rm -rf`, which would destroy the evidence of the state we could not decide.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf 'not-a-pid\n' >"$lock/pid"
+  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")" || true
+  local bare rmrc=0
+  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | grep -v '^$' | head -1)"
+  eval "$bare" 2>/dev/null || rmrc=$?
+  if [[ "$rmrc" -ne 0 && -f "$lock/pid" ]]; then
+    pass "lane-lock AC1 (remedy safety): with content still inside the lock the printed removal REFUSES (rc=$rmrc) and the pid file survives — a mis-paste cannot destroy a holder's record"
+  else
+    fail "lane-lock-remedy-destructive: rc=$rmrc line=[$bare] — the printed remedy deleted contents nobody examined"
+  fi
+
+  # ---- (3) MUTANT CONTRAST: the PRE-FIX semantics, which is exactly "an unparseable pid is a holder
+  # pid, and `kill -0` failing on it means dead". Expressed as ONE substitution in the shipped parse: the
+  # non-digit rejection returns a (known-dead) pid instead of a named refusal. With that, the shipped
+  # decision path reclaims the lock — which is the measured pre-fix behaviour, reproduced from shipped
+  # code rather than from a copy of it.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf 'not-a-pid\n' >"$lock/pid"
+  ovr="$d/m-parse.sh"; : >"$ovr"
+  mrc=0
+  if sv_mutant_override "$ovr" supervisor_lock_pid_read \
+       "      printf '%s' 'unparseable pid-not-all-decimal-digits'" \
+       "      printf '%s' 'pid $dead'"; then
+    mout="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || mrc=$?
+    if [[ "$mrc" -eq 0 && "$mout" == *"ACQUIRED=$lock"* && "$mout" == *"reclaiming stale lock"* ]]; then
+      pass "lane-lock AC1 MUTANT: with the parse's non-digit rejection turned back into a holder pid, the SAME drive RECLAIMS the lock (the measured pre-fix behaviour) — so the refusals above are the parse doing the work, not the harness"
+    else
+      fail "lane-lock-mutant-parse: rc=$mrc out=[$mout] — the pre-fix form must be shown to reclaim, or every AC1 assert measures nothing"
+    fi
+  fi
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_holder_pid_is_parsed_before_use
+
+
+# ---------------------------------------------------------------------------
+# AC2 / AC5 — THE PID-LESS WINDOW, DRIVEN WITH A REAL COMPETING PROCESS AND A FORCED INTERLEAVING.
+#
+# The window is `mkdir` (the lock now exists) … `pid` published. A peer arriving inside it saw a lock
+# with no pid file and reclaimed it from a holder that was alive and starting. This case stages that
+# interleaving with an actual second process rather than by argument, in both of its shapes:
+#
+#   (i)  THE HOLDER IS STARTING — pid-less now, published shortly. The arriving run must end up
+#        refusing over the REAL holder pid: the window resolves into a fact, and the fact is "held".
+#   (ii) THE HOLDER DIED INSIDE THE WINDOW — pid-less forever. The arriving run must REFUSE (never
+#        reclaim), because "pid-less" is not evidence of death, and must print the way out.
+#
+# THE DISCRIMINATOR IS PERSISTENCE, NOT DURATION, and that is why (i) and (ii) are BOTH here: a timing
+# heuristic would have to pick a number that is right for one of them and wrong for the other. Case (i)
+# uses a delay well inside the bounded window and case (ii) never publishes at all, so the two are
+# separated by whether the state RESOLVES, not by how long the test waited.
+# ---------------------------------------------------------------------------
+test_lane_lock_pidless_window_is_never_read_as_dead() {
+  local d tmp lane lock out rc peer peerpid ovr mout mrc
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601window$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (i) A REAL PEER HOLDING A PID-LESS LOCK THAT IT THEN PUBLISHES.
+  #
+  # THE INTERLEAVING IS SEQUENCED BY OBSERVABLE EVENTS, NOT BY A TUNED `sleep` (see the header note on
+  # this component's latency). A `sleep 0.4` in the peer would be exactly the load-dependent shape that
+  # flakes a serial gate component: under co-scheduled load the peer publishes late, the arriving run
+  # exhausts its window, and a correct implementation reds. So the two processes BLOCK ON EACH OTHER:
+  #
+  #   * the PEER creates the lock, then waits for a sentinel file before publishing;
+  #   * the sentinel is created by the ARRIVING RUN's own first read of the pid file — an override that
+  #     ADDS a `touch` to the shipped parse and changes nothing else, derived by `sv_mutant_override` so
+  #     it cannot drift into a re-implementation;
+  #   * the arriving run then re-reads until the pid appears, which is what it does in production.
+  #
+  # So the ordering is PROVEN rather than hoped: the peer CANNOT publish before the arriving run has
+  # entered the window, and the arriving run does not leave the window until the peer publishes. Load
+  # changes how long the case takes (normally milliseconds) and cannot change what it measures. The two
+  # bounds present are generous safety stops, not tuned values, and each FAILS LOUDLY if reached.
+  rm -rf "$lock"
+  local probe_seen="$d/first-read-happened"
+  rm -f "$probe_seen"
+  ovr="$d/m-observe.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_pid_read \
+       "  local f=\"\$1\" first='' line='' n=0 readrc=0" \
+       "  local f=\"\$1\" first='' line='' n=0 readrc=0
+  : >>\"$probe_seen\""; then
+    pass "lane-lock AC2 PREMISE (i): the arriving run's first pid read is observable — the peer's publish is sequenced on it, so the interleaving needs no tuned delay"
+  else
+    fail "lane-lock-window-observer: the observing override could not be derived; the interleaving below would be timing-dependent, so the case stops rather than becoming a flake"
+    return 0
+  fi
+  # The peer's wait is bounded so a failed handshake ends the case instead of hanging the suite; it
+  # publishes anyway on expiry, which makes the assert below FAIL loudly rather than block.
+  fixture_bg bash -c 'mkdir -p "$1"; i=0; while [[ ! -e "$2" && "$i" -lt 1500 ]]; do sleep 0.02; i=$((i + 1)); done; printf "%s\n" "$$" >"$1/pid"; sleep 60' _ "$lock" "$probe_seen"
+  peer=$FIXTURE_LAST_PID
+  # Precondition, polled on an OBSERVABLE state change with a generous bound: the lock must exist and be
+  # PID-LESS before the arriving run starts, or the window was never staged.
+  local waited=0
+  while [[ ! -d "$lock" && "$waited" -lt 1500 ]]; do sleep 0.02; waited=$((waited + 1)); done
+  if [[ -d "$lock" && ! -f "$lock/pid" ]] && [[ ! -e "$probe_seen" ]]; then
+    pass "lane-lock AC2 PREMISE (i): the arriving run starts with the peer's lock present and PID-LESS, and the peer is blocked until that run reads it — the interleaving is staged, not assumed"
+  else
+    fail "lane-lock-window-premise: lock present=[$([[ -d "$lock" ]] && echo yes || echo no)] pid present=[$([[ -f "$lock/pid" ]] && echo yes || echo no)] sentinel=[$([[ -e "$probe_seen" ]] && echo yes || echo no)] — the window was not staged and the assert below has no subject"
+  fi
+  out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+  peerpid="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [[ "$rc" -ne 0 ]] && lane_refusal_ok "$out" && [[ "$out" != *"reclaiming stale lock"* ]] \
+     && [[ -d "$lock" ]] && [[ -n "$peerpid" ]] && [[ "$out" == *"already running (pid $peerpid)"* ]]; then
+    pass "lane-lock AC2 (i): a run arriving inside a real peer's PID-LESS window waits the window out, reads the peer's PUBLISHED pid and refuses over it — the peer's lock is untouched and nothing was reclaimed"
+  else
+    fail "lane-lock-window-starting: rc=$rc peerpid=[$peerpid] lock=[$([[ -d "$lock" ]] && echo present || echo GONE)] out=[$out] — a starting holder must never be read as a dead one"
+  fi
+  fixture_kill "$peer"
+  rm -rf "$lock"
+
+  # ---- (ii) THE PID-LESS LOCK THAT NEVER RESOLVES — a holder killed inside its own window. Persistent,
+  # so the verdict is "undecidable", and undecidable REFUSES. The bound is small here on purpose: the
+  # measurement is of PERSISTENCE, so a short bound is sufficient to establish it and the case does not
+  # pay for the long window (i) needs.
+  mkdir -p "$lock"
+  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && lane_refusal_ok "$out" && [[ "$out" == *"pid-file-absent"* ]] \
+     && [[ "$out" != *"reclaiming stale lock"* ]] && [[ -d "$lock" ]]; then
+    pass "lane-lock AC2 (ii): a PERSISTENTLY pid-less lock is UNDECIDABLE and refuses — it is never read as stale, and the lock is left as found"
+  else
+    fail "lane-lock-window-persistent: rc=$rc out=[$out] lock=[$([[ -d "$lock" ]] && echo present || echo GONE)]"
+  fi
+  # It must also say how many reads it took, so the refusal reports a MEASUREMENT and not an assumption.
+  if [[ "$out" == *"read(s) over a bounded window"* ]]; then
+    pass "lane-lock AC2 (ii): the refusal states that the verdict came from repeated reads over a bounded window — a measurement of persistence, reported as one"
+  else
+    fail "lane-lock-window-not-reported: out=[$out]"
+  fi
+  lane_lock_remedy_ok "pid-file-absent" "$out" "$lock"
+
+  # ---- (iii) NO `.stale.*` RESIDUE ANYWHERE. A refusal must leave nothing behind it: the reclaim path
+  # renames the lock aside, so a refusal that had touched it would leave that name in the tree.
+  local residue
+  residue="$(find "$tmp" -name '*.stale.*' 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "$residue" == "0" ]]; then
+    pass "lane-lock AC2: no rename-aside residue exists anywhere under the case TMPDIR after the refusals — a refusing run mutated nothing"
+  else
+    fail "lane-lock-stale-residue: $residue path(s) — a refusal touched a lock it does not own"
+  fi
+
+  # ---- (iv) MUTANT CONTRAST: pid-less read as a dead holder, which IS the pre-fix behaviour (measured:
+  # `reclaiming stale lock … (holder pid  not alive)` + ACQUIRED). One substitution, in the shipped
+  # parse's absent-file branch.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  local deadpid
+  fixture_bg sleep 0.1
+  deadpid=$FIXTURE_LAST_PID
+  fixture_wait "$deadpid"
+  ovr="$d/m-window.sh"; : >"$ovr"
+  mrc=0
+  if sv_mutant_override "$ovr" supervisor_lock_pid_read \
+       "    printf '%s' 'unparseable pid-file-absent'" \
+       "    printf '%s' 'pid $deadpid'"; then
+    mout="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || mrc=$?
+    if [[ "$mrc" -eq 0 && "$mout" == *"ACQUIRED=$lock"* && "$mout" == *"reclaiming stale lock"* ]]; then
+      pass "lane-lock AC2 MUTANT: with a pid-less lock reported as a (dead) holder pid, the SAME drive RECLAIMS a lock whose holder it never established — the measured pre-fix behaviour, so the refusals above are the probe doing the work"
+    else
+      fail "lane-lock-mutant-window: rc=$mrc out=[$mout] — the pre-fix form must be shown to reclaim"
+    fi
+  fi
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_pidless_window_is_never_read_as_dead
+
+
+# ---------------------------------------------------------------------------
+# AC3 — LIVENESS IS THREE-VALUED, AND ONLY AN AFFIRMATIVE `dead` RECLAIMS.
+#
+# THE CASE IS REAL EPERM, NOT A SIMULATION OF IT. `kill -0 1` from a non-root uid fails with EPERM: pid 1
+# EXISTS and is not ours to signal. Pre-fix that failure read as "not alive" and the lock was reclaimed
+# (measured). This is the same errno a live holder owned by ANOTHER USER produces, which is the fleet
+# case the two-valued test could not see.
+# ---------------------------------------------------------------------------
+test_lane_lock_liveness_is_three_valued() {
+  local d tmp lane lock out rc ovr mout mrc live
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601live$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) A LIVE HOLDER WE CAN SIGNAL: refuse. The ordinary case, kept as the floor.
+  rm -rf "$lock"; mkdir -p "$lock"
+  fixture_bg sleep 30
+  live=$FIXTURE_LAST_PID
+  printf '%s\n' "$live" >"$lock/pid"
+  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 && "$out" == *"already running (pid $live)"* && "$out" != *"reclaiming stale lock"* ]]; then
+    pass "lane-lock AC3 (live, signallable): a live holder refuses and is named"
+  else
+    fail "lane-lock-live-signallable: rc=$rc out=[$out]"
+  fi
+  fixture_kill "$live"
+
+  # ---- (2) A LIVE HOLDER WE CANNOT SIGNAL — REAL EPERM. This is the assert #3601 exists for.
+  if kill -0 1 2>/dev/null; then
+    skip "lane-lock AC3 (EPERM): this uid CAN signal pid 1 (running as root), so no EPERM case is stageable here — the property is unmeasurable on this host rather than passing vacuously"
+  else
+    rm -rf "$lock"; mkdir -p "$lock"
+    printf '1\n' >"$lock/pid"
+    out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"already running (pid 1)"* ]] \
+       && [[ "$out" != *"reclaiming stale lock"* ]] && [[ -f "$lock/pid" ]]; then
+      pass "lane-lock AC3 (EPERM): a holder that EXISTS but is not ours to signal refuses — the errno that a live holder owned by another user produces is no longer read as death"
+    else
+      fail "lane-lock-eperm-reclaimed: rc=$rc out=[$out] — a live, unsignallable holder was read as dead; this is the measured pre-fix defect"
+    fi
+
+    # ---- MUTANT CONTRAST for (2): the pre-fix two-valued test, restored by ONE substitution — any
+    # non-zero `kill -0` means dead. Both of the shipped probe's existence witnesses (procfs, and the
+    # EPERM message) are bypassed by it, so the mutant is the pre-fix decision exactly.
+    ovr="$d/m-live.sh"; : >"$ovr"
+    mrc=0
+    if sv_mutant_override "$ovr" supervisor_lock_holder_liveness \
+         '  if [[ -d /proc/self && -d "/proc/$pid" ]]; then' \
+         '  if [[ "$rc" -ne 0 ]]; then printf "%s" dead; return 0; fi
+  if [[ -d /proc/self && -d "/proc/$pid" ]]; then'; then
+      mout="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || mrc=$?
+      if [[ "$mrc" -eq 0 && "$mout" == *"ACQUIRED=$lock"* && "$mout" == *"reclaiming stale lock"* ]]; then
+        pass "lane-lock AC3 MUTANT: with liveness collapsed back to the two-valued \`kill -0\`, the SAME drive RECLAIMS pid 1's lock — a LIVE process's lock, which is the pre-fix behaviour and the harm #3601 fixes"
+      else
+        fail "lane-lock-mutant-live: rc=$mrc out=[$mout] — the two-valued form must be shown to reclaim a live holder's lock"
+      fi
+    fi
+  fi
+
+  # ---- (3) THE PROBE'S THIRD VALUE EXISTS AND REFUSES. A pid `kill` cannot even interpret is neither
+  # live nor dead; `unknown` must refuse, never reclaim. Reached through the probe directly, because the
+  # parse (correctly) rejects such content before `acquire_lock` ever calls the probe — asserting it here
+  # is what stops the third value being unreachable dead code that a later edit deletes as unused.
+  local verdict
+  verdict="$(env SUP="$SUPERVISOR" bash -c 'source "$SUP"; supervisor_lock_holder_liveness "not-a-pid"' 2>/dev/null || true)"
+  if [[ "$verdict" == unknown* ]]; then
+    pass "lane-lock AC3 (third value): a pid the kernel cannot be asked about yields \`$verdict\` — not \`dead\`, so nothing downstream can read an unanswerable probe as a licence to reclaim"
+  else
+    fail "lane-lock-liveness-not-three-valued: verdict=[$verdict] — a probe that cannot answer must say so"
+  fi
+  # ...and the two answerable values, from the same probe, so the three-valued claim is measured whole.
+  verdict="$(env SUP="$SUPERVISOR" bash -c 'source "$SUP"; supervisor_lock_holder_liveness "$$"' 2>/dev/null || true)"
+  if [[ "$verdict" == live ]]; then
+    pass "lane-lock AC3: the probe reports \`live\` for a process that demonstrably exists (its own pid)"
+  else
+    fail "lane-lock-liveness-live: verdict=[$verdict]"
+  fi
+  local dead2
+  fixture_bg sleep 0.1
+  dead2=$FIXTURE_LAST_PID
+  fixture_wait "$dead2"
+  verdict="$(env SUP="$SUPERVISOR" DP="$dead2" bash -c 'source "$SUP"; supervisor_lock_holder_liveness "$DP"' 2>/dev/null || true)"
+  if [[ "$verdict" == dead ]]; then
+    pass "lane-lock AC3: the probe reports \`dead\` for a reaped process — the affirmative verdict the reclaim requires is reachable, so the fix has not made every lock permanent"
+  else
+    fail "lane-lock-liveness-dead: verdict=[$verdict] — without a reachable \`dead\` nothing ever clears a stale lock automatically"
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_liveness_is_three_valued
+
+
+# ---------------------------------------------------------------------------
+# AC4 — THE "ALREADY RUNNING" REFUSAL DOES NOT ASSERT AN IDENTITY IT NEVER CHECKED.
+#
+# It has established that the recorded pid EXISTS. It has NOT established that the process is a
+# supervisor, and pids are REUSED — so a lock abandoned by a dead holder can name a number the kernel
+# has since given to something unrelated. AC4 allows either corroborating the identity or declaring the
+# gap; the gap is declared, because the verdict could not change the decision (`live` refuses whatever
+# the process is) and #3549's ruling on exactly that shape is that such machinery is a description
+# generator on the decision path, not a guard.
+# ---------------------------------------------------------------------------
+test_lane_lock_running_refusal_declares_unverified_identity() {
+  local d tmp lane lock out rc live ovr mout
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601ident$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+  mkdir -p "$lock"
+  fixture_bg sleep 30
+  live=$FIXTURE_LAST_PID
+  printf '%s\n' "$live" >"$lock/pid"
+
+  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 && "$out" == *"already running (pid $live)"* ]]; then
+    pass "lane-lock AC4 PREMISE: the running refusal was reached, so the text below has a subject"
+  else
+    fail "lane-lock-ac4-premise: rc=$rc out=[$out]"
+  fi
+  if [[ "$out" == *"IDENTITY IS NOT VERIFIED"* ]] && [[ "$out" == *"pids are REUSED"* ]]; then
+    pass "lane-lock AC4: the refusal states plainly that it did NOT verify the pid is a supervisor and that pids are reused — the scope is declared in the text an operator reads, which is what stops the message asserting a fact it never established"
+  else
+    fail "lane-lock-ac4-unqualified-identity: out=[$out] — 'another instance is already running (pid N)' with no scope statement asserts an identity the run never checked"
+  fi
+  # The refusal must also hand the operator the read-only line that ANSWERS the question it left open.
+  if [[ "$out" == *"ps -p $live -o pid,ppid,user,lstart,args"* ]]; then
+    pass "lane-lock AC4: it names the read-only command that settles the identity it did not check — the declared gap comes with the way to close it"
+  else
+    fail "lane-lock-ac4-no-identity-probe-offered: out=[$out]"
+  fi
+
+  # ---- MUTANT CONTRAST: the pre-fix wording, restored by one substitution. The assert above must be
+  # shown to red on exactly that text, or it is a green over a string that was never absent.
+  ovr="$d/m-ident.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" acquire_lock \
+       '        "pid $holder_pid is recorded as this lane'"'"'s lock holder and that process EXISTS (verified: it is signallable, or the kernel reports it exists but is not ours to signal). ITS IDENTITY IS NOT VERIFIED — this run did not check that pid $holder_pid is a worker-supervisor, and pids are REUSED, so a lock abandoned by a dead holder can name a number that now belongs to an unrelated process" \' \
+       '        "another instance is already running (pid $holder_pid)" \'; then
+    mout="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"already running (pid $live)"* ]] && [[ "$mout" != *"IDENTITY IS NOT VERIFIED"* ]]; then
+      pass "lane-lock AC4 MUTANT: with the scope statement removed the refusal still fires and now claims 'another instance' with nothing behind it — so the assert above reds on exactly the pre-fix text"
+    else
+      fail "lane-lock-mutant-ident: out=[$mout] — the pre-fix wording must be shown to lose the scope statement"
+    fi
+  fi
+  fixture_kill "$live"
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_running_refusal_declares_unverified_identity
+
+
+# ---------------------------------------------------------------------------
+# AC7 — AN OPTION-SHAPED `TMPDIR` MUST NOT STOP THE LANE FROM STARTING.
+#
+# QUOTING IS NOT OPTION-SAFETY. `"$SUPERVISOR_LOCK"` stops word-splitting and globbing and does nothing
+# about option parsing: `mkdir`, `mv` and `rm` read a leading `-` in an operand as flags whatever quoting
+# produced it. MEASURED pre-fix with `TMPDIR=-scratch`: `reclaiming stale lock -scratch/…` followed by
+# `failed to acquire lock -scratch/…` — the lane cannot start, and the diagnostic blames a stale lock
+# that does not exist, which is the expensive half.
+#
+# BOTH PATHS ARE DRIVEN, because they use different operands: the fresh-claim path (`mkdir`, and the
+# publish's `mv`) and the reclaim path (`mv` aside, `rm -rf`). The pid is read by REDIRECTION, which
+# parses no options at all, so the `cat` the addendum named is gone rather than terminated.
+# ---------------------------------------------------------------------------
+test_lane_lock_option_shaped_tmpdir_starts_normally() {
+  local d optdir opttmp lane lock out rc dead ovr mout mrc
+  d="$(new_case_dir)"
+  common_env "$d"
+  optdir="$d/optshaped"
+  opttmp="-scratch"
+  lane="lane3601opt$$"
+  mkdir -p "$optdir/$opttmp"
+  lock="$optdir/$opttmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) THE FRESH CLAIM.
+  rm -rf "$lock"
+  out="$(lane_lock_drive_at "$optdir" - "$opttmp" "$lane")"; rc=$?
+  if [[ "$rc" -eq 0 ]] && [[ "$out" == *"ACQUIRED=$opttmp/cqlite-worker-supervisor-$lane.lock"* ]] \
+     && [[ "$out" == *"LOCKDIR=yes"* ]] && [[ "$out" != *"reclaiming stale lock"* ]] \
+     && [[ "$out" != *"failed to acquire"* ]]; then
+    pass "lane-lock AC7 (fresh claim): with a relative, option-shaped TMPDIR the lock is acquired NORMALLY — no invented stale lock, no refusal"
+  else
+    fail "lane-lock-optshaped-fresh: rc=$rc out=[$out] — an option-shaped TMPDIR must not stop the lane from starting"
+  fi
+
+  # ---- (2) THE RECLAIM PATH, same TMPDIR shape: `mv` aside and `rm -rf` both take the option-shaped
+  # operand, and neither is exercised by (1).
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  out="$(lane_lock_drive_at "$optdir" - "$opttmp" "$lane")"; rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"reclaiming stale lock"* && "$out" == *"LOCKDIR=yes"* ]]; then
+    pass "lane-lock AC7 (reclaim): the rename-aside and removal operands are option-safe too — a genuinely stale lock under an option-shaped TMPDIR is still cleared automatically"
+  else
+    fail "lane-lock-optshaped-reclaim: rc=$rc out=[$out]"
+  fi
+  local residue
+  residue="$(find "$optdir" -name '*.stale.*' 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "$residue" == "0" ]]; then
+    pass "lane-lock AC7 (reclaim): the renamed-aside copy was removed — the `rm -rf` operand parsed as a path, not as flags"
+  else
+    fail "lane-lock-optshaped-aside-leak: $residue leftover aside path(s) under $optdir — the removal's operand was eaten as an option"
+  fi
+
+  # ---- (3) MUTANT CONTRAST: strip the `--` from the claim's `mkdir`, which is the pre-fix spelling.
+  # Without it the identical case must FAIL, or the `--` in the shipped line is decoration.
+  rm -rf "$lock"
+  ovr="$d/m-opt.sh"; : >"$ovr"
+  mrc=0
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1' \
+       '  mkdir "$SUPERVISOR_LOCK" 2>/dev/null || return 1'; then
+    mout="$(lane_lock_drive_at "$optdir" "$ovr" "$opttmp" "$lane")" || mrc=$?
+    if [[ "$mrc" -ne 0 && "$mout" != *"ACQUIRED="* ]]; then
+      pass "lane-lock AC7 MUTANT: with \`--\` stripped from the claim's mkdir the SAME case FAILS to start (rc=$mrc) — so the terminator is load-bearing, not decoration"
+    else
+      fail "lane-lock-mutant-opt: rc=$mrc out=[$mout] — the pre-fix spelling must be shown to break here"
+    fi
+  fi
+  # ...and the same for the reclaim's `mv`, whose operand (1) and (3) never reach.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  ovr="$d/m-opt-mv.sh"; : >"$ovr"
+  mrc=0
+  if sv_mutant_override "$ovr" acquire_lock \
+       '  if mv -f -- "$SUPERVISOR_LOCK" "$SUPERVISOR_LOCK.stale.$$" 2>/dev/null; then' \
+       '  if mv -f "$SUPERVISOR_LOCK" "$SUPERVISOR_LOCK.stale.$$" 2>/dev/null; then'; then
+    mout="$(lane_lock_drive_at "$optdir" "$ovr" "$opttmp" "$lane")" || mrc=$?
+    if [[ "$mrc" -ne 0 && "$mout" != *"ACQUIRED="* ]]; then
+      pass "lane-lock AC7 MUTANT (reclaim mv): with \`--\` stripped from the rename-aside the SAME reclaim FAILS (rc=$mrc) — the reclaim path's terminator is load-bearing on its own"
+    else
+      fail "lane-lock-mutant-opt-mv: rc=$mrc out=[$mout]"
+    fi
+  fi
+
+  rm -rf "$optdir"
+}
+
+t test_lane_lock_option_shaped_tmpdir_starts_normally
+
+
+# ---------------------------------------------------------------------------
+# THE OWNERSHIP HALF, FOUND BY THE CALL-SITE SWEEP THIS ISSUE MANDATES (#3601).
+#
+# AC1-AC3 stop us TAKING a lock we do not own. The same defect class points the other way at the same
+# call site and had no acceptance criterion: the EXIT trap was an unconditional
+# `rm -rf "$SUPERVISOR_LOCK"`, so a run that had LOST its lock (a peer running pre-#3601 code reclaims a
+# pid-less lock, which ours is for one rename at startup) deleted the NEW holder's lock on the way out,
+# handing the lane to a third process while the second believed it held exclusion.
+#
+# Both halves are decided by the same ONE observation — does the lock's pid file read back as OUR pid —
+# which is #3549 lead ruling 5 applied: the question "do we hold this lock?" is answered by a single
+# reading rather than by a tuple of pid, liveness and identity agreeing.
+# ---------------------------------------------------------------------------
+test_lane_lock_release_only_removes_a_lock_we_still_own() {
+  local d tmp lane lock out rc ovr mout foreign
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601own$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+  foreign=424242
+
+  # A drive that acquires the lock and then has the lock STOLEN (its pid file replaced) before exiting,
+  # so the EXIT trap runs against a lock that is no longer ours. Derived from the shipped drive body by
+  # inserting one statement before its exit, so it cannot drift into a different startup path.
+  local body_steal="${SV_DRIVE_BODY/'exit 0'/'printf "%s\n" "$2" >"$SUPERVISOR_LOCK/pid"; exit 0'}"
+  if [[ "$body_steal" != "$SV_DRIVE_BODY" && "$body_steal" == *'"$SUPERVISOR_LOCK/pid"'* ]]; then
+    pass "lane-lock ownership PREMISE: the steal drive is derived from the shipped drive body by one insertion"
+  else
+    fail "lane-lock-steal-drive-premise: [$body_steal]"
+    return 0
+  fi
+
+  rm -rf "$lock"
+  out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+            bash -c "$body_steal" _ "$SUPERVISOR" "$foreign" 2>&1 )"; rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$lock"* ]]; then
+    pass "lane-lock ownership PREMISE: the run acquired the lock, then the lock was taken from it"
+  else
+    fail "lane-lock-ownership-premise: rc=$rc out=[$out]"
+  fi
+  if [[ -d "$lock" ]] && [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "$foreign" ]]; then
+    pass "lane-lock ownership: the EXIT trap left the lock ALONE because it no longer held our pid — a run that lost its lock does not delete the new holder's"
+  else
+    fail "lane-lock-release-deleted-foreign: lock=[$([[ -d "$lock" ]] && echo present || echo GONE)] pid=[$(cat "$lock/pid" 2>/dev/null || true)] — the exit path removed a lock this run did not own"
+  fi
+  # The fixture writes a PARSED foreign pid, so B17's foreign branch is the one that must fire — matched
+  # on the wording that branch now uses (#3601, roborev job 240 B17 reworded this: "no longer holds this
+  # process's pid" was said for unparseable states too, where no holder had been read).
+  if [[ "$out" == *"NOT removing"* && "$out" == *"records holder pid $foreign, not this process"* ]]; then
+    pass "lane-lock ownership: and it SAYS so, naming the holder it read — 'my lock vanished' is otherwise unattributable, so the non-removal is logged rather than silent"
+  else
+    fail "lane-lock-release-silent: out=[$out]"
+  fi
+
+  # ---- MUTANT CONTRAST: the pre-fix unconditional removal, by one substitution in the shipped release.
+  rm -rf "$lock"
+  ovr="$d/m-release.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_release \
+       '  if [[ "$state" == "pid $$" ]]; then' \
+       '  if true; then'; then
+    local body_steal_ovr="${SV_DRIVE_BODY_OVERRIDE/'exit 0'/'printf "%s\n" "$3" >"$SUPERVISOR_LOCK/pid"; exit 0'}"
+    mout="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+               bash -c "$body_steal_ovr" _ "$SUPERVISOR" "$ovr" "$foreign" 2>&1 )" || true
+    if [[ "$mout" == *"ACQUIRED=$lock"* ]] && [[ ! -d "$lock" ]]; then
+      pass "lane-lock ownership MUTANT: with the ownership test removed the identical drive DELETES the new holder's lock on exit — so the test above is what protects it"
+    else
+      fail "lane-lock-mutant-release: out=[$mout] lock=[$([[ -d "$lock" ]] && echo present || echo GONE)] — the unconditional removal must be shown to destroy a foreign lock"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_release_only_removes_a_lock_we_still_own
+
+
+# ---------------------------------------------------------------------------
+# THE PUBLISH IS VERIFIED, NOT ASSUMED (#3601, AC2's other half).
+#
+# `mkdir` makes the NAME ours; it does not make the lock ours, because a peer running pre-#3601 code
+# reclaims a pid-less lock and our lock is pid-less for exactly one rename. So the publish READS BACK
+# what it wrote and requires our own pid. The pair of mutants below is what shows the read-back is the
+# thing refusing, and not something else: the first forges a foreign pid into the publish (the shipped
+# read-back must catch it), the second forges the SAME pid and blinds the read-back (it must not).
+# ---------------------------------------------------------------------------
+test_lane_lock_publish_is_read_back_before_it_is_trusted() {
+  local d tmp lane lock ovr out rc
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601pub$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) A clean claim publishes OUR pid and leaves no temporary behind: the rename is what makes the
+  # `pid` NAME appear only with complete content, so a `pid.tmp.*` survivor would mean the publish is
+  # back to create-then-write.
+  rm -rf "$lock"
+  local body_keep="${SV_DRIVE_BODY/'exit 0'/'printf "KEPT=%s\n" "$(ls -A "$SUPERVISOR_LOCK" | tr "\n" " ")"; printf "PID=%s\n" "$(<"$SUPERVISOR_LOCK/pid")"; trap - EXIT; exit 0'}"
+  out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+            bash -c "$body_keep" _ "$SUPERVISOR" 2>&1 )"; rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"KEPT=pid "* && "$out" != *"pid.tmp."* ]]; then
+    pass "lane-lock publish: the acquired lock holds exactly one file, \`pid\`, with no staging temporary left behind — the name is published by rename, so a reader never sees it holding partial content"
+  else
+    fail "lane-lock-publish-residue: rc=$rc out=[$out] — a leftover staging file means the publish is not a rename"
+  fi
+  rm -rf "$lock"
+
+  # ---- (2) FORGE A FOREIGN PID INTO THE PUBLISH: the read-back must refuse.
+  ovr="$d/m-pub-forge.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if ! { printf '"'"'%s\n'"'"' 424243 >"$tmpf"; } 2>/dev/null; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 && "$out" != *"ACQUIRED="* && "$out" == *"could not verify it OWNS it"* ]]; then
+      pass "lane-lock publish: when the lock does not read back as ours the run REFUSES and says which step failed — the read-back has teeth"
+    else
+      fail "lane-lock-publish-unverified: rc=$rc out=[$out] — a lock that does not hold our pid must never be treated as acquired"
+    fi
+  fi
+  rm -rf "$lock"
+
+  # ---- (3) NON-VACUITY: the same forgery with the read-back BLINDED must acquire. Without this, (2)
+  # could be passing because of the forgery rather than because of the check.
+  ovr="$d/m-pub-blind.sh"; : >"$ovr"
+  # THE TARGET IS THE COMPARISON, NOT THE READ ITSELF: B11 added a second, identical read-back line in
+  # the decline branch, so a substitution on the read would no longer be unique — `sv_mutant_override`
+  # correctly refused it as a moved source. The comparison occurs once and expresses the same mutation
+  # (forge a foreign pid, then accept regardless of what came back).
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if [[ "$state" == "pid $$" ]]; then' \
+       '  printf '"'"'%s\n'"'"' 424243 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$lock"* ]]; then
+      pass "lane-lock publish MUTANT: with the read-back blinded the SAME forged publish is accepted and the run starts holding a lock whose pid is someone else's — so (2) is the read-back refusing, not the forgery failing"
+    else
+      fail "lane-lock-mutant-publish: rc=$rc out=[$out] — the blinded form must be shown to accept a foreign lock"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_publish_is_read_back_before_it_is_trusted
+
+
+# ---------------------------------------------------------------------------
+# A FAILED `mkdir` IS NOT EVIDENCE OF CONTENTION (#3601).
+#
+# The addendum's expensive half was the DIAGNOSIS, not the failure: pre-fix, an option-shaped `TMPDIR`
+# produced `reclaiming stale lock …` then `failed to acquire lock …`, sending an operator to hunt a
+# stale lock that did not exist. `mkdir` also fails when the parent is missing, is not a directory, or
+# is not writable — so the cause is checked before it is attributed to a holder.
+# ---------------------------------------------------------------------------
+test_lane_lock_uncreatable_path_is_not_reported_as_contention() {
+  local d lane out rc ro
+  d="$(new_case_dir)"
+  common_env "$d"
+  lane="lane3601nopath$$"
+  # THE `TMPDIR` MUST EXIST AND BE SEARCHABLE, AND ONLY THEN UNWRITABLE. An absent container is refused
+  # EARLIER, by the legacy guard's existence probe ("cannot tell" — measured), so it never reaches
+  # `mkdir` and would test the wrong refusal. Read-and-search but not write (0555) is the shape that
+  # reaches the claim and fails there.
+  ro="$d/readonly-tmp"
+  mkdir -p "$ro"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if ( : >"$ro/.probe" ) 2>/dev/null; then
+    rm -f "$ro/.probe" 2>/dev/null || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    skip "lane-lock (uncreatable path): this uid can write a 0555 directory (running as root), so an uncreatable lock path is not stageable here — unmeasurable on this host rather than passing vacuously"
+    return 0
+  fi
+  out="$(lane_lock_drive_at "$d" - "$ro" "$lane")"; rc=$?
+  chmod 0755 "$ro" 2>/dev/null || true
+  # B21 removed the confident "NOT contention": a post-failure existence test cannot establish the cause.
+  # What must survive is the OBSERVATION (nothing is at that name) and the operator's first check (the
+  # parent), which is the half of #3601's AC7 fix that has operator value.
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"NOTHING is at that name now"* ]] \
+     && [[ "$out" == *"check the PARENT directory"* ]] && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+     && [[ "$out" != *"reclaiming stale lock"* ]] \
+     && [[ "$out" != *"already running"* ]]; then
+    pass "lane-lock (uncreatable path): a lock that cannot be created is reported as a PATH problem and explicitly not as contention — no invented stale lock, no invented holder"
+  else
+    fail "lane-lock-uncreatable-misdiagnosed: rc=$rc out=[$out] — a failed mkdir must not be attributed to a holder"
+  fi
+}
+
+t test_lane_lock_uncreatable_path_is_not_reported_as_contention
+
+
+
+
+# ---------------------------------------------------------------------------
+# `log_size`: A FAILED MEASUREMENT IS NOT A VALUE (#3601, the issue's fourth item).
+#
+# `log_size` returned the EMPTY STRING when `wc` failed, and empty collapses to `0` in the caller's
+# `-eq` comparison — so two UNMEASURABLE reads compared EQUAL and the wedge detector read a healthy,
+# growing log as FROZEN. That is the "an empty probe is not a zero" shape: a measurement that did not
+# happen became the value 0. It was mitigated, not prevented, by the conjoined prompt-signature
+# requirement, which is why it is fixed with the rest of this family rather than left as a landmine.
+#
+# BOTH LEVELS ARE DRIVEN: the probe's own three answers, and the CONSUMER — because a probe returning a
+# sentinel nobody checks is not a fix.
+# ---------------------------------------------------------------------------
+test_log_size_unmeasurable_is_not_zero() {
+  local d shadow out absent present unmeasurable
+  d="$(new_case_dir)"
+  common_env "$d"
+  printf '12345' >"$d/some.log"
+
+  absent="$(env SUP="$SUPERVISOR" F="$d/no-such.log" bash -c 'source "$SUP"; log_size "$F"' 2>/dev/null || true)"
+  present="$(env SUP="$SUPERVISOR" F="$d/some.log" bash -c 'source "$SUP"; log_size "$F"' 2>/dev/null || true)"
+  # `wc` FAILS FOR REAL — a shadow earlier on `PATH`, not a stubbed function — because the defect is
+  # what happens when the external tool this probe depends on cannot answer.
+  shadow="$d/shadow"
+  mkdir -p "$shadow"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/wc"
+  chmod +x "$shadow/wc"
+  # TWO CALLER SHAPES, AND THE DIFFERENCE IS THE POINT. The BARE call runs the probe in the caller's own
+  # shell, which inherits the supervisor's `set -euo pipefail`; the WRAPPED call runs it inside a command
+  # substitution, where errexit is NOT inherited. A failing `wc` makes an internal pipeline non-zero, and
+  # in the bare shape that aborts the caller BEFORE the probe classifies anything — measured: the bare
+  # call produced NO OUTPUT AT ALL, no sentinel and no error, i.e. the probe killed its caller instead of
+  # answering. The pre-#3601 form was safe only because its one caller sits inside a `set +e` region, and
+  # a probe whose correctness depends on that is one edit away from taking the supervisor down.
+  local unmeasurable_bare=''
+  unmeasurable_bare="$(env SUP="$SUPERVISOR" F="$d/some.log" PATH="$shadow:$PATH" bash -c 'source "$SUP"; log_size "$F"' 2>/dev/null || true)"
+  unmeasurable="$(env SUP="$SUPERVISOR" F="$d/some.log" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(log_size "$F")"' 2>/dev/null || true)"
+
+  if [[ "$absent" == "0" && "$present" == "5" && "$unmeasurable" == "-1" ]]; then
+    pass "log_size: absent=[0] (a real zero), present=[5] (a real count), unmeasurable=[-1] (a NAMED non-value) — three answers, so a failed measurement can never be mistaken for a byte count"
+  else
+    fail "log-size-collapses: absent=[$absent] present=[$present] unmeasurable=[$unmeasurable] — an unmeasurable read must not come back as an empty string (which \`-eq\` reads as 0) or as any real count"
+  fi
+  if [[ "$unmeasurable_bare" == "-1" ]]; then
+    pass "log_size (errexit caller): the BARE call from a shell carrying the supervisor's own \`set -euo pipefail\` still returns the sentinel — the probe answers rather than aborting its caller"
+  else
+    fail "log-size-aborts-errexit-caller: bare=[$unmeasurable_bare] — a failing internal pipeline aborted the caller before the probe could classify anything, so it returns no sentinel at all"
+  fi
+
+  # ---- THE CONSUMER, BEHAVIOURALLY. Same wedge scenario as the genuine-wedge case (a worker that
+  # prints the prompt signature and then stops), with `wc` shadowed so the size is UNMEASURABLE on every
+  # scan. The wedge must NOT be confirmed: two failed reads are not evidence of a frozen log. Pre-fix
+  # this reported `stuck-on-question` and paged the owner, from a measurement that never happened.
+  local d2 call_ctr jf rc scount acount fcount
+  d2="$(new_case_dir)"
+  common_env "$d2"
+  call_ctr="$d2/calls"
+  write_stuck_then_finalize_stub "$d2/bin/worker.sh" "$call_ctr"
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=2
+  export STUCK_POLL_SECS=1
+  export MAX_ITER_SECS=5
+  jf="$JOURNAL_FILE"
+  mkdir -p "$d2/shadow"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$d2/shadow/wc"
+  chmod +x "$d2/shadow/wc"
+
+  env PATH="$d2/shadow:$PATH" bash -c "$SV_MAIN_DRIVE_BODY" _ "$SUPERVISOR" '' >"$d2/stdout.log" 2>&1
+  rc=$?
+  scount=$(jline_count "$jf" '"outcome":"stuck-on-question"')
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  if [[ "$rc" -eq 0 && "$scount" -eq 0 && "$acount" -eq 1 && "$fcount" -eq 1 ]]; then
+    pass "log_size CONSUMER: with the byte size UNMEASURABLE on every scan the wedge is NOT confirmed (stuck=0) and the iteration is judged on what IS known (abnormal, then finalize) — two failed reads are not a frozen log"
+  else
+    fail "log-size-consumer-false-wedge: rc=$rc stuck=$scount abnormal=$acount finalized=$fcount (see $jf) — an unmeasurable size must not confirm a wedge"
+  fi
+
+  # ---- MUTANT CONTRAST: the pre-fix probe, restored by one substitution — an unmeasurable read comes
+  # back EMPTY. `-eq` then reads it as 0, both scans agree, and the same run reports a wedge that never
+  # happened. Driven through the probe AND through the consumer, because the empty value is harmless
+  # until something compares it.
+  local ovr mval
+  ovr="$d/m-logsize.sh"; : >"$ovr"
+  # THE PREMISE THIS CONTRAST NEEDS, ASSERTED RATHER THAN COMMENTED: control and mutant reach the
+  # supervisor's `main` through ONE body, so the only difference between the two runs is the override.
+  if [[ "$SV_MAIN_DRIVE_BODY" == *'source "$1"'* && "$SV_MAIN_DRIVE_BODY" == *'main'* \
+        && "$SV_MAIN_DRIVE_BODY" != *'2>/dev/null'* ]]; then
+    pass "log_size CONTRAST PREMISE: control and mutant share one entry body that sources the shipped supervisor and calls its own \`main\`, with no error suppression around the source — so the contrast below isolates the probe"
+  else
+    fail "log-size-contrast-premise: [$SV_MAIN_DRIVE_BODY] — control and mutant must differ only in the override file"
+  fi
+  if sv_mutant_override "$ovr" log_size \
+       "      printf '%s' '-1'" \
+       "      printf '%s' ''"; then
+    mval="$(env SUP="$SUPERVISOR" OVR="$ovr" F="$d/some.log" PATH="$shadow:$PATH" \
+             bash -c 'source "$SUP"; source "$OVR"; printf "[%s]" "$(log_size "$F")"' 2>/dev/null || true)"
+    if [[ "$mval" == "[]" ]]; then
+      pass "log_size MUTANT: the pre-fix probe returns the EMPTY STRING for an unmeasurable read (mval=$mval) — which \`[[ x -eq y ]]\` reads as 0, so two failures compared equal; the assert above reds on exactly that"
+    else
+      fail "log-size-mutant: mval=[$mval] — the pre-fix form must be shown to return empty"
+    fi
+    # ...and the consumer, with that same pre-fix probe, DOES confirm the false wedge. This is the harm,
+    # measured rather than argued.
+    local d3 jf3 mscount
+    d3="$(new_case_dir)"
+    common_env "$d3"
+    write_stuck_then_finalize_stub "$d3/bin/worker.sh" "$d3/calls"
+    export WORKER_CMD="$d3/bin/worker.sh"
+    export MAX_ISSUES=1
+    export BREAKER_N=2
+    export STUCK_POLL_SECS=1
+    export MAX_ITER_SECS=5
+    jf3="$JOURNAL_FILE"
+    mkdir -p "$d3/shadow"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$d3/shadow/wc"
+    chmod +x "$d3/shadow/wc"
+    # THE SAME ENTRY POINT AS THE CONTROL, WHICH IS THE ONLY THING THAT MAKES THIS A CONTRAST (#3601,
+    # roborev job 231 B4). An earlier cut ran the control as `bash "$SUPERVISOR"` and the mutant as
+    # `bash -c 'source …; main "$@"'` with a `2>/dev/null || true` on the source that additionally
+    # swallowed errexit during startup — two differences besides the probe, under a comment that claimed
+    # there were none. A mutant IS the evidence for its property, so a comment asserting an isolation the
+    # code does not provide is a false claim in the artifact a reviewer is asked to trust. Both sides now
+    # run `$SV_MAIN_DRIVE_BODY` and differ in ONE argument: the override file, empty for the control.
+    env PATH="$d3/shadow:$PATH" bash -c "$SV_MAIN_DRIVE_BODY" _ "$SUPERVISOR" "$ovr" >"$d3/stdout.log" 2>&1 || true
+    mscount=$(jline_count "$jf3" '"outcome":"stuck-on-question"')
+    if [[ "$mscount" -ge 1 ]]; then
+      pass "log_size CONSUMER MUTANT: with the pre-fix probe the identical run reports a wedge (stuck=$mscount) from a measurement that never happened — so the consumer assert above is the sentinel doing the work"
+    else
+      fail "log-size-consumer-mutant: stuck=$mscount (see $jf3) — the pre-fix form must be shown to produce the false wedge, or the consumer assert measures nothing"
+    fi
+  fi
+  unset WORKER_CMD
+}
+
+t test_log_size_unmeasurable_is_not_zero
+
+
+
+
+# ---------------------------------------------------------------------------
+# NUL BYTES IN THE PID FILE (#3601, roborev job 231) — the hole in AC1's own guarantee.
+#
+# THE DEFECT, MEASURED BEFORE THE FIX: bash cannot hold a NUL and `read` discards it silently, so a pid
+# file whose BYTES are `<dead-pid> NUL LF` reads back as a clean `<dead-pid>` — non-empty, single line,
+# all decimal digits, non-zero. Every gate in `supervisor_lock_pid_read` passed it, the liveness probe
+# then said `dead`, and the lock was RECLAIMED. That is exactly the outcome AC1 exists to prevent, from
+# exactly the input AC1 is about: a partially-written pid file, which is where NULs come from, because a
+# crash mid-write can leave allocated-but-zeroed bytes.
+#
+# SO THE CHECK CANNOT LIVE IN THE SHELL, and this case asserts that premise rather than assuming it: it
+# first demonstrates that the shell's own view of the file is a clean all-digit pid, and only then that
+# the parser refuses anyway. Without the first half a green here would not show that anything hard was
+# happening.
+#
+# NOT VIA BASH'S WARNING, EITHER. `$(cat …)` on such a file emits `warning: … ignored null byte in
+# input` — on STDERR, which the `2>/dev/null` in use at every one of these sites already suppresses; and
+# keying correctness on bash's message TEXT would be the cargo-status-word defect class (CLAUDE.md
+# #3400). The shipped check measures bytes.
+# ---------------------------------------------------------------------------
+test_lane_lock_nul_bearing_pid_file_refuses() {
+  local d tmp lane lock out rc dead verdict shell_view ovr mout mrc shadow
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601nul$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+
+  mkdir -p "$lock"
+  # REAL BYTES. `printf '%s\000\n'` writes an actual NUL; nothing here simulates one, because a simulated
+  # NUL would be visible to the shell and would therefore not reproduce the defect at all.
+  printf '%s\000\n' "$dead" >"$lock/pid"
+  local raw_bytes stripped_bytes
+  raw_bytes="$(wc -c <"$lock/pid" | tr -d '[:space:]')"
+  stripped_bytes="$(tr -d '\000' <"$lock/pid" | wc -c | tr -d '[:space:]')"
+  if [[ "$raw_bytes" -eq $((stripped_bytes + 1)) ]]; then
+    pass "lane-lock NUL PREMISE: the staged pid file really carries a NUL byte — $raw_bytes bytes on disk, $stripped_bytes with NULs stripped"
+  else
+    fail "lane-lock-nul-premise: raw=$raw_bytes stripped=$stripped_bytes — the fixture does not contain a NUL, so this case measures nothing"
+    return 0
+  fi
+  # ...AND THE SHELL CANNOT SEE IT. This is the half that shows why a byte-level check is required.
+  shell_view="$(env F="$lock/pid" bash -c 'IFS= read -r v <"$F"; printf "%s|%s" "$v" "${#v}"' 2>/dev/null || true)"
+  if [[ "$shell_view" == "$dead|${#dead}" ]]; then
+    pass "lane-lock NUL PREMISE: \`read\` hands the shell a CLEAN all-digit pid [$shell_view] — non-empty, single line, all digits, non-zero — so no check running on that value can possibly reject this file"
+  else
+    fail "lane-lock-nul-shell-view: [$shell_view] expected [$dead|${#dead}] — the premise of this case is that the NUL is invisible to the shell"
+  fi
+
+  # ---- (1) THE PARSER REFUSES, WITH ITS OWN NAMED CAUSE, consistent with the other gates.
+  verdict="$(env SUP="$SUPERVISOR" F="$lock/pid" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  if [[ "$verdict" == 'unparseable pid-file-contains-nul' ]]; then
+    pass "lane-lock NUL: the parser reads the FILE'S BYTES and refuses with its own cause [$verdict] — it is \`unparseable\`, never \`dead\`"
+  else
+    fail "lane-lock-nul-accepted: verdict=[$verdict] — a NUL-bearing pid file must not parse as a pid"
+  fi
+
+  # ---- (2) END TO END: refuse, reclaim nothing, leave the lock exactly as found, print the way out.
+  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && lane_refusal_ok "$out" && [[ "$out" == *"pid-file-contains-nul"* ]] \
+     && [[ "$out" != *"reclaiming stale lock"* ]] && [[ -f "$lock/pid" ]] \
+     && [[ "$(wc -c <"$lock/pid" | tr -d '[:space:]')" == "$raw_bytes" ]]; then
+    pass "lane-lock NUL: the start REFUSES over a NUL-bearing lock, names the cause, reclaims nothing and leaves the file byte-for-byte as found"
+  else
+    fail "lane-lock-nul-reclaimed: rc=$rc out=[$out] — this is the reclaim-from-a-live-holder path the NUL defect reopened"
+  fi
+  rm -f -- "$lock/pid"
+  lane_lock_remedy_ok "pid-file-contains-nul" "$out" "$lock"
+
+  # ---- (3) THE DETECTOR IS FORK-FREE, WHICH IS THE PROPERTY, NOT AN OPTIMISATION. An earlier cut made
+  # the byte-count form the primary and this parser then depended on `wc`/`tr` — and because
+  # `supervisor_lock_publish` calls it on EVERY start for its read-back, a box without `wc` could not
+  # start a supervisor at all. So: with `wc` unavailable the verdict must be UNCHANGED, in both
+  # directions. (The byte-count form's own three-valued failure handling is asserted where that fallback
+  # is forced to run, in the differential case below.)
+  shadow="$d/shadow"
+  mkdir -p "$shadow"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/wc"
+  chmod +x "$shadow/wc"
+  printf '%s\n' "$dead" >"$d/clean-pid"
+  # Re-staged at a path of its own: the remedy step above deliberately CLEARED the lock, so `$lock/pid`
+  # no longer exists by here and reading it would assert `pid-file-absent` instead of the NUL verdict.
+  printf '%s\000\n' "$dead" >"$d/nul-pid"
+  local v_nul_nowc v_clean_nowc
+  v_nul_nowc="$(env SUP="$SUPERVISOR" F="$d/nul-pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  v_clean_nowc="$(env SUP="$SUPERVISOR" F="$d/clean-pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  if [[ "$v_clean_nowc" == "pid $dead" ]]; then
+    pass "lane-lock NUL (fork-free): a clean pid file still parses as [$v_clean_nowc] with \`wc\` unavailable — the detector is a builtin, so a missing coreutils tool cannot stop this lane starting"
+  else
+    fail "lane-lock-nul-probe-needs-wc: verdict=[$v_clean_nowc] — the primary detector must not depend on an external command"
+  fi
+  # ...and the refusing direction is equally unaffected: a broken `wc` must not turn a NUL-bearing file
+  # into an accepted pid either.
+  if [[ "$v_nul_nowc" == 'unparseable pid-file-contains-nul' ]]; then
+    pass "lane-lock NUL (fork-free): and the NUL-bearing file is STILL refused with \`wc\` unavailable [$v_nul_nowc] — being fork-free did not cost the detection"
+  else
+    fail "lane-lock-nul-nowc-accepted: verdict=[$v_nul_nowc]"
+  fi
+  # ---- THE PRIMARY'S OWN THIRD VALUE, at the one state it can actually reach: content longer than the
+  # bounded scan. It is unreachable through `supervisor_lock_pid_read` (the structural gates reject any
+  # such file first), so it is driven at the probe, which is what stops it being dead code a later edit
+  # deletes as unused. `could-not-measure`, never `nul-free`.
+  local big
+  big="$d/big-pid"
+  : >"$big"
+  local i=0
+  while [[ "$i" -lt 130 ]]; do printf '%s' '0123456789012345678901234567890123456789' >>"$big"; i=$((i + 1)); done
+  verdict="$(env SUP="$SUPERVISOR" F="$big" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+  if [[ "$verdict" == 'could-not-measure pid-file-longer-than-the-nul-scan-bound' ]]; then
+    pass "lane-lock NUL (third value): content past the bounded scan is [$verdict] — a NUL beyond the bound is UNOBSERVED, and unobserved is never reported as nul-free"
+  else
+    fail "lane-lock-nul-scan-bound: verdict=[$verdict] — a scan that could not see the whole file must say so"
+  fi
+  # ---- (4) MUTANT CONTRAST: the NUL gate removed by ONE literal substitution — its `contains-nul`
+  # verdict joins the accepting branch. Everything else, including the byte measurement itself, is
+  # shipped code, so the contrast isolates the GATE and not the probe.
+  mkdir -p "$lock"
+  printf '%s\000\n' "$dead" >"$lock/pid"
+  ovr="$d/m-nul.sh"; : >"$ovr"
+  mrc=0
+  if sv_mutant_override "$ovr" supervisor_lock_pid_read \
+       '    nul-free) ;;' \
+       '    nul-free | contains-nul) ;;'; then
+    mout="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || mrc=$?
+    if [[ "$mrc" -eq 0 && "$mout" == *"ACQUIRED=$lock"* && "$mout" == *"reclaiming stale lock"* ]]; then
+      pass "lane-lock NUL MUTANT: with the NUL gate removed the SAME byte-for-byte file is ACCEPTED and the lock RECLAIMED — the measured pre-job-231 behaviour, so the refusals above are that gate doing the work"
+    else
+      fail "lane-lock-mutant-nul: rc=$mrc out=[$mout] — the ungated form must be shown to reclaim, or every NUL assert measures nothing"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_nul_bearing_pid_file_refuses
+
+
+
+
+# ---------------------------------------------------------------------------
+# THE LOCK NAME BECAME OURS AND WE COULD NOT RECORD OURSELVES IN IT (#3601, roborev job 231 B1).
+#
+# Three facts were collapsed onto one caller verdict — the write never happened, the rename never
+# happened, the lock is not ours — and the refusal built from that collapse ASSERTED all three steps had
+# run: it told the operator "our pid was published into it, and reading it back did not return our pid"
+# for an ENOSPC that never wrote a byte. On a fleet that hits ENOSPC routinely that points the operator
+# at a race that did not occur. Worse, the empty directory we had just created was LEFT BEHIND, so this
+# run manufactured the pid-less lock every other branch here refuses to reclaim and wedged its own lane.
+#
+# THE FAULT IS INJECTED, AND THE CODE UNDER TEST IS SHIPPED. A read-only lock directory is a REAL
+# filesystem failure for the publish (no mutation at all); the end-to-end half needs `mkdir` to succeed
+# and only the write to fail, which no permission bit can stage, so the WRITE is failed by a
+# shipped-derived override while `take`'s cleanup and the refusal — the things being asserted — stay
+# shipped code. That is fault injection, not a mutant contrast; the contrast is the non-vacuity case.
+# ---------------------------------------------------------------------------
+test_lane_lock_publish_failure_is_named_and_leaves_nothing() {
+  local d tmp lane lock out rc verdict ovr
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601pubfail$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) THE SHIPPED PUBLISH, against a REAL unwritable lock directory: it must say WHICH step failed.
+  mkdir -p "$lock"
+  chmod 0555 "$lock" 2>/dev/null || true
+  if ( : >"$lock/.probe" ) 2>/dev/null; then
+    rm -f "$lock/.probe" 2>/dev/null || true
+    chmod 0755 "$lock" 2>/dev/null || true
+    skip "lane-lock B1: this uid can write a 0555 directory (running as root), so a publish write failure is not stageable here — unmeasurable on this host rather than passing vacuously"
+  else
+    verdict="$(env SUP="$SUPERVISOR" L="$lock" bash -c 'source "$SUP"; SUPERVISOR_LOCK="$L"; printf "%s" "$(supervisor_lock_publish)"' 2>&1 || true)"
+    chmod 0755 "$lock" 2>/dev/null || true
+    if [[ "$verdict" == 'write-failed' ]]; then
+      pass "lane-lock B1: the publish reports WHICH step failed [$verdict] — and reports it SILENTLY, with no shell redirection error leaking the raw path to stderr"
+    else
+      fail "lane-lock-publish-cause: verdict=[$verdict] — expected exactly 'write-failed'; a stray shell error here is also the unrendered-path class (#3549 job 201 F1)"
+    fi
+  fi
+  rm -rf "$lock"
+
+  # ---- (2) END TO END with the write failed: the refusal must name a FILESYSTEM failure, must NOT claim
+  # the read-back happened, and the directory this run created must be GONE.
+  ovr="$d/f-write.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    # B21 retired the confident "FILESYSTEM failure, not contention" here too: this code cannot know which
+    # it was. What B1 is actually about survives unchanged — the refusal is its OWN refusal, it names the
+    # step that failed, and it does not claim a read-back that never ran.
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"could not record itself in it"* ]] \
+       && [[ "$out" == *"no byte of it was written"* ]] \
+       && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+       && [[ "$out" != *"reading it back did not return our pid"* ]] \
+       && [[ "$out" != *"ACQUIRED="* ]]; then
+      pass "lane-lock B1/B21: a publish that never wrote produces its OWN refusal naming the step that failed, does NOT claim a read-back that never ran, and does not assert a cause it cannot establish"
+    else
+      fail "lane-lock-publish-misdiagnosed: rc=$rc out=[$out] — the refusal must not assert steps that did not run"
+    fi
+    if [[ ! -e "$lock" && ! -L "$lock" ]]; then
+      pass "lane-lock B1: the directory this run created and never published into was REMOVED AGAIN — the run does not manufacture the pid-less lock it would then have to refuse over (ruling 2)"
+    else
+      fail "lane-lock-publish-residue: [$(ls -A "$lock" 2>/dev/null | tr '\n' ' ')] — an unpublished lock left behind wedges this lane until an operator clears it"
+    fi
+    # NON-VACUITY: the SAME drive with the shipped publish acquires normally, so (2) measured the
+    # injected failure and not a broken fixture.
+    out="$(lane_lock_drive_at "$d" - "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$lock"* ]]; then
+      pass "lane-lock B1 NON-VACUITY: the identical drive with the shipped publish ACQUIRES — so the refusal above is the injected write failure, not the harness"
+    else
+      fail "lane-lock-publish-nonvacuity: rc=$rc out=[$out]"
+    fi
+  fi
+
+  # ---- (3) THE NON-RECURSIVE CLEANUP CANNOT EAT A PEER'S RECORD. If a peer reclaimed our pid-less
+  # directory and wrote its own pid into it while our publish was failing, `rmdir` refuses and the peer's
+  # record survives. Staged by failing the write AND pre-seeding a foreign pid into the directory the
+  # moment it exists — which is what a pre-#3601 peer's reclaim looks like from here.
+  rm -rf "$lock"
+  ovr="$d/f-write-peer.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  printf "%s\n" 515151 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || true
+    if [[ -d "$lock" ]] && [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "515151" ]]; then
+      pass "lane-lock B1: with a foreign pid already in the directory the cleanup's \`rmdir\` REFUSES and the peer's record survives — the un-create can only ever remove the empty shell we made"
+    else
+      fail "lane-lock-cleanup-destructive: lock=[$([[ -d "$lock" ]] && echo present || echo GONE)] pid=[$(cat "$lock/pid" 2>/dev/null || true)] — the cleanup deleted a record it does not own"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_publish_failure_is_named_and_leaves_nothing
+
+
+# ---------------------------------------------------------------------------
+# A FAILED RECLAIM RENAME IS NAMED, NOT MISATTRIBUTED (#3601, roborev job 231 B2).
+#
+# `if mv …; then rm …; fi` with no `else` swallowed the failure, the following claim then failed too, and
+# the run printed the LOST-RACE refusal: "a stale lock was cleared and the name was immediately claimed
+# by someone else" — which had not happened — followed by "re-run this supervisor", which loops forever.
+# Same family as the AC7 addendum this issue already fixed: a message that sends an operator after a
+# problem that is not there.
+#
+# STAGED WITHOUT MUTATION: a lock holding a DEAD pid inside a directory that is readable and searchable
+# but NOT WRITABLE. The holder is affirmatively dead, so the run is entitled to the lock and reaches the
+# rename; the rename cannot succeed, because clearing a lock needs write permission on its PARENT and
+# being able to read a lock does not imply that.
+# ---------------------------------------------------------------------------
+test_lane_lock_failed_reclaim_rename_is_named() {
+  local d ro lane lock out rc dead ovr mout
+  d="$(new_case_dir)"
+  common_env "$d"
+  ro="$d/ro-parent"
+  lane="lane3601mvfail$$"
+  mkdir -p "$ro"
+  lock="$ro/cqlite-worker-supervisor-$lane.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if ( : >"$ro/.probe" ) 2>/dev/null; then
+    rm -f "$ro/.probe" 2>/dev/null || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    skip "lane-lock B2: this uid can write a 0555 directory (running as root), so a failed reclaim rename is not stageable here — unmeasurable on this host rather than passing vacuously"
+    rm -rf "$ro"
+    return 0
+  fi
+  out="$(lane_lock_drive_at "$d" - "$ro" "$lane")"; rc=$?
+  chmod 0755 "$ro" 2>/dev/null || true
+
+  # B21: "names a filesystem cause" was itself a claim beyond the evidence. What B2 is about survives — the
+  # failure is reported rather than swallowed, and no race is invented.
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"could not be cleared"* ]] \
+     && [[ "$out" == *"nothing was cleared and nothing was claimed"* ]] \
+     && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+     && [[ "$out" != *"immediately claimed by someone else"* ]]; then
+    pass "lane-lock B2/B21: a reclaim whose rename FAILS says so, states plainly that nothing was cleared or claimed, never invents a race, and does not assert a cause it cannot establish"
+  else
+    fail "lane-lock-mv-misattributed: rc=$rc out=[$out] — the pre-fix path printed the lost-race refusal plus 're-run this supervisor', which loops"
+  fi
+  # ---- B18: THE IDENTITY IS UNESTABLISHED BY NOW, AND THE PRINTED COMMAND MUST BE SAFE IF THE LOCK IS
+  # LIVE (#3601, roborev job 242). The liveness verdict describes the pid file as it was BEFORE the
+  # rename was attempted; the path can be replaced in between. The pre-B18 text declared "this lock IS
+  # stale and this run is entitled to it" and printed the non-recursive REMOVAL for it — the code
+  # destroys nothing, but the operator pasting that line does, and these remedies exist to be pasted.
+  if [[ "$out" == *"IDENTITY OF WHAT IS THERE IS NOW UNESTABLISHED"* ]] \
+     && [[ "$out" == *"does not declare the lock stale"* ]] \
+     && [[ "$out" == *"Do NOT remove anything on the strength of this message"* ]]; then
+    pass "lane-lock B18: after a failed rename the refusal reports the identity as UNESTABLISHED, declines to call the lock stale, and tells the operator not to remove anything on its word"
+  else
+    fail "lane-lock-b18-declares-stale: out=[$out] — a lock whose identity is unverified must not be declared stale or removable"
+  fi
+  local b18_bare b18_rc=0
+  b18_bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | grep -v '^$' | head -1)"
+  if [[ "$b18_bare" == 'ls -ldn -- '* ]] && [[ "$out" != *$'\n''rmdir -- '* ]] \
+     && ! printf '%s\n' "$out" | grep -qE '^(rmdir|rm) '; then
+    pass "lane-lock B18: the ONLY command printed on this branch is a READ-ONLY inspection and no removal appears anywhere in the refusal — the one command shape that is safe if the lock turns out to be live"
+  else
+    fail "lane-lock-b18-prints-removal: bare=[$b18_bare] — a paste-ready removal aimed at a possibly-live holder is harm via the operator's hands"
+  fi
+  # ...and it must RUN verbatim, or it is the "remedy that cannot work" defect in the other direction.
+  eval "$b18_bare" >/dev/null 2>&1 || b18_rc=$?
+  if [[ "$b18_rc" -eq 0 && -d "$lock" && -f "$lock/pid" ]]; then
+    pass "lane-lock B18: that line runs verbatim (rc=0) and removes nothing — the lock and its record are untouched after the operator's inspection"
+  else
+    fail "lane-lock-b18-remedy-unrunnable: rc=$b18_rc lock=[$([[ -d "$lock" ]] && echo present || echo GONE)]"
+  fi
+
+  # It also must not have destroyed the dead holder's lock on the way out, and must not have claimed it.
+  if [[ -d "$lock" && -f "$lock/pid" ]] && [[ "$out" != *"ACQUIRED="* ]]; then
+    pass "lane-lock B2: the lock is left exactly as found and nothing was claimed"
+  else
+    fail "lane-lock-mv-residue: lock=[$([[ -d "$lock" ]] && echo present || echo GONE)] out=[$out]"
+  fi
+
+  # ---- MUTANT CONTRAST: the pre-fix swallow, restored by one substitution — the `elif` branch becomes
+  # unreachable, and the SAME case then produces the lost-race misdiagnosis.
+  ovr="$d/m-mv.sh"; : >"$ovr"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if sv_mutant_override "$ovr" acquire_lock \
+       '  elif [[ -e "$SUPERVISOR_LOCK" || -L "$SUPERVISOR_LOCK" ]]; then' \
+       '  elif false; then'; then
+    mout="$(lane_lock_drive_at "$d" "$ovr" "$ro" "$lane")" || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    # The expected string is the CURRENT lost-race wording. It changed once already, in the B9 class
+    # sweep, which removed the attribution this mutant is demonstrating — so match the surviving text.
+    if [[ "$mout" == *"taken again before this run could claim it"* ]]; then
+      pass "lane-lock B2 MUTANT: with the rename's failure swallowed the identical case falls through to the lost-race refusal — a claim contest that did not happen — so the assert above is the new branch doing the work"
+    else
+      fail "lane-lock-mutant-mv: out=[$mout] — the pre-fix swallow must be shown to misattribute"
+    fi
+  fi
+  chmod 0755 "$ro" 2>/dev/null || true
+
+  # ---- B18 (b): A DIFFERENT HOLDER APPEARS between the liveness verdict and the failed rename — the
+  # interleaving the finding is about. Fault-injected on the liveness probe so it publishes a foreign pid
+  # and THEN answers `dead`, which is exactly the ordering the real race produces; the branch under test
+  # (`acquire_lock`'s post-rename reclassification) is shipped code.
+  local ovrb mout
+  ovrb="$d/f-swap-holder.sh"; : >"$ovrb"
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if sv_mutant_override "$ovrb" supervisor_lock_holder_liveness \
+       '  local pid="$1" msg='"''"' rc=0' \
+       '  local pid="$1" msg='"''"' rc=0
+  printf "%s\n" 987654 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  printf "%s" dead
+  return 0'; then
+    mout="$(lane_lock_drive_at "$d" "$ovrb" "$ro" "$lane")" || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    if [[ "$mout" == *"now records a DIFFERENT holder, pid 987654"* ]] \
+       && [[ "$mout" == *"may be ALIVE"* ]] \
+       && ! printf '%s\n' "$mout" | grep -qE '^(rmdir|rm) '; then
+      pass "lane-lock B18 (different holder): when the record changed under us the refusal names the NEW pid, says it may be alive, and still prints no removal — the case where the pre-B18 text would have aimed a paste-ready delete at a live holder"
+    else
+      fail "lane-lock-b18-different-holder: out=[$mout]"
+    fi
+  fi
+  chmod 0755 "$ro" 2>/dev/null || true
+
+  # ---- B18 MUTANT: the pre-B18 remedy restored — the removal command comes back, aimed at a lock whose
+  # identity this run cannot vouch for.
+  local ovrm2
+  ovrm2="$d/m-b18.sh"; : >"$ovrm2"
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if sv_mutant_override "$ovrm2" acquire_lock \
+       '      "ls -ldn -- $(supervisor_shell_quote "$SUPERVISOR_LOCK") && ls -lna -- $(supervisor_shell_quote "$SUPERVISOR_LOCK")"' \
+       '      "$(supervisor_lock_clear_command)"'; then
+    mout="$(lane_lock_drive_at "$d" "$ovrm2" "$ro" "$lane")" || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    if printf '%s\n' "$mout" | grep -qE '^rmdir -- '; then
+      pass "lane-lock B18 MUTANT: with the pre-fix remedy restored the refusal prints a paste-ready REMOVAL for a lock it cannot vouch for — the harm, reproduced, so the read-only assert above is doing the work"
+    else
+      fail "lane-lock-mutant-b18: out=[$mout] — the pre-fix remedy must be shown to print a removal"
+    fi
+  fi
+  chmod 0755 "$ro" 2>/dev/null || true
+  rm -rf "$ro"
+}
+
+t test_lane_lock_failed_reclaim_rename_is_named
+
+
+# ---------------------------------------------------------------------------
+# THE PID BOUND IS THE PLATFORM'S PID SPACE, NOT A DIGIT COUNT (#3601, roborev job 231 B3).
+#
+# The bound was 10 digits and every real pid space is at most 7, so a 10-digit corruption was ACCEPTED,
+# cast to `pid_t` by `kill`, reliably reported ESRCH, became an affirmative `dead` and RECLAIMED THE
+# LOCK — while a 15-digit corruption of the same kind refused. One defect class, two widths, opposite
+# outcomes, and the accepting one is the direction #3601 exists to close.
+#
+# THE ASSERT IS CONSISTENCY PLUS A REAL CEILING: both widths must refuse, a pid just above the platform
+# ceiling must refuse, and a pid the platform CAN issue must still be accepted — because a bound that
+# rejected real pids would turn live holders into "malformed" and wedge the lane, which is the same harm
+# pointing the other way.
+# ---------------------------------------------------------------------------
+test_lane_lock_pid_bound_is_the_platform_pid_space() {
+  local d verdict raw_max ceiling inclusive
+  d="$(new_case_dir)"
+  common_env "$d"
+
+  probe_pid() {
+    printf '%s\n' "$1" >"$d/pidfile"
+    env SUP="$SUPERVISOR" F="$d/pidfile" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true
+  }
+
+  ceiling="$(env SUP="$SUPERVISOR" bash -c 'source "$SUP"; supervisor_pid_space_ceiling' 2>/dev/null || true)"
+  # THE PROBE IS THREE-VALUED, so the case must handle BOTH of its answers rather than requiring the one
+  # this host happens to give (#3601, roborev job 231 B10). An earlier cut of this case required the
+  # ceiling to parse as a bare number, which on a platform that publishes none would have failed a
+  # CORRECT implementation — and, worse, it asserted a pid EQUAL to the ceiling was accepted, pinning the
+  # off-by-one as correct. That is the #3559 shape (a test pinning wrong behaviour) inside this suite, so
+  # it is fixed here together with the code rather than by moving the boundary.
+  case "$ceiling" in
+    'authoritative '*)
+      inclusive="${ceiling#authoritative }"
+      pass "lane-lock B3/B10: this platform publishes a pid bound; the probe converts it to the INCLUSIVE maximum [$inclusive]"
+      ;;
+    'unknown '*)
+      pass "lane-lock B3/B10: this platform publishes no readable pid bound, so the probe says [$ceiling] — the gate does not apply and, critically, nothing invents a number in its place"
+      ;;
+    *)
+      fail "lane-lock-pid-ceiling: [$ceiling] — the probe must answer 'authoritative <n>' or 'unknown <cause>' and nothing else"
+      unset -f probe_pid
+      return 0
+      ;;
+  esac
+
+  # ---- (1) THE OFF-BY-ONE, MEASURED AGAINST THE PLATFORM'S OWN FILE. `proc(5)` says `pid_max` is the
+  # value at which pids WRAP — one greater than the maximum pid — so `pid_max` itself is not issuable and
+  # must REFUSE, while `pid_max - 1` is a pid a real process can hold and must be ACCEPTED. Both
+  # directions, because a bound that rejects a legal pid would turn live holders into "malformed" and
+  # wedge the lane, which is the same harm inverted.
+  if [[ "$ceiling" == 'authoritative '* ]]; then
+    raw_max="$(cat /proc/sys/kernel/pid_max 2>/dev/null || true)"
+    if [[ "$raw_max" =~ ^[0-9]+$ ]] && [[ "$inclusive" == "$((raw_max - 1))" ]]; then
+      pass "lane-lock B10: the inclusive maximum [$inclusive] is exactly the platform's exclusive wrap point [$raw_max] minus one, as proc(5) defines it"
+    else
+      fail "lane-lock-pid-ceiling-conversion: pid_max=[$raw_max] inclusive=[$inclusive] — the exclusive wrap point must be converted, not used as-is"
+    fi
+    verdict="$(probe_pid "$raw_max")"
+    if [[ "$verdict" == 'unparseable pid-above-the-platform-pid-space' ]]; then
+      pass "lane-lock B10: a pid EQUAL to the exclusive wrap point REFUSES — the value no process can hold no longer parses as a holder pid"
+    else
+      fail "lane-lock-pid-ceiling-offbyone: verdict=[$verdict] for pid_max=$raw_max — this is the one malformed value the pre-B10 boundary let through, and the case that used to assert it was ACCEPTED"
+    fi
+    verdict="$(probe_pid "$inclusive")"
+    if [[ "$verdict" == "pid $inclusive" ]]; then
+      pass "lane-lock B10 (the other direction): the largest pid a process CAN hold is still accepted — the corrected bound rejects nothing legal, so it cannot wedge the lane"
+    else
+      fail "lane-lock-pid-ceiling-rejects-legal: verdict=[$verdict] — rejecting an issuable pid is the same harm pointing the other way"
+    fi
+    verdict="$(probe_pid $((raw_max + 1)))"
+    if [[ "$verdict" == 'unparseable pid-above-the-platform-pid-space' ]]; then
+      pass "lane-lock B3: a pid past the wrap point refuses"
+    else
+      fail "lane-lock-pid-bound-above: [$verdict]"
+    fi
+  fi
+
+  # ---- (2) THE WIDTH INCONSISTENCY THE BOUND EXISTS FOR. A 10-digit and a 15-digit corruption used to get
+  # OPPOSITE verdicts — the narrower one accepted, probed, reported dead and RECLAIMED.
+  #
+  # THE COMPARISON IS BETWEEN ACCEPT/REJECT CLASSES, NOT BETWEEN VERDICT STRINGS (#3601, roborev job 236
+  # B13). This case compared the two strings EXACTLY while its own comment claimed it "stays true on a
+  # platform that publishes no bound … rather than pinning this host's answer". That claim was FALSE, and
+  # falsifiable without leaving this file: where no bound is published the gate does not apply, both pids
+  # are ACCEPTED, and the two strings then differ by construction (`pid 9999999999` vs
+  # `pid 999999999999999`) — so the case RED on macOS/bash 3.2, a platform this file explicitly supports,
+  # and the first person to run it there would have spent an hour deciding whether they had broken
+  # something. It is the alibi family again — a comment describing a tolerance the code does not have —
+  # and it is fixed here rather than downgraded, because a suite that reds on a supported platform is not
+  # a nit. The property that actually matters is that BOTH WIDTHS LAND IN THE SAME CLASS, and the expected
+  # class is then asserted EXPLICITLY per ceiling branch, which is stronger than either version.
+  pid_verdict_class() {
+    case "$1" in
+      'pid '*)         printf '%s' accepted ;;
+      'unparseable '*) printf '%s' refused ;;
+      *)               printf '%s' unrecognised ;;
+    esac
+  }
+  local ten fifteen ten_class fifteen_class want_class
+  ten="$(probe_pid 9999999999)"
+  fifteen="$(probe_pid 999999999999999)"
+  ten_class="$(pid_verdict_class "$ten")"
+  fifteen_class="$(pid_verdict_class "$fifteen")"
+  if [[ "$ten_class" == "$fifteen_class" && "$ten_class" != unrecognised ]]; then
+    pass "lane-lock B3: a 10-digit and a 15-digit corruption land in the SAME class [$ten_class] — the width-dependent inconsistency is gone, and the accepting half of it (which reclaimed) with it"
+  else
+    fail "lane-lock-pid-bound-inconsistent: ten=[$ten]($ten_class) fifteen=[$fifteen]($fifteen_class) — a corruption that reclaims at one width and refuses at another is the hole this closes"
+  fi
+  # ...and WHICH class it is, is decided by the ceiling branch, stated rather than left to the host.
+  case "$ceiling" in
+    'authoritative '*) want_class=refused ;;
+    *)                 want_class=accepted ;;
+  esac
+  if [[ "$ten_class" == "$want_class" ]]; then
+    pass "lane-lock B13: with the ceiling [${ceiling%% *}] the expected class for an out-of-range corruption is [$want_class], and that is what both widths got — the case asserts the platform's own consequence instead of this host's string"
+  else
+    fail "lane-lock-pid-bound-class: ceiling=[$ceiling] want=[$want_class] got=[$ten_class] — where a bound IS published an out-of-range pid must be refused; where none is, the gate does not apply and the pid is accepted"
+  fi
+
+  # ---- (2b) THE NO-BOUND BRANCH IS EXERCISED ON THIS HOST TOO, not left to a platform nobody runs the
+  # suite on. `supervisor_pid_space_ceiling` is made to report `unknown` by a shipped-derived override, so
+  # the macOS/no-`/proc` path is measured here: both widths must be ACCEPTED (the gate cannot apply) and
+  # the parser must still reject on its own structural gates.
+  local ovru u_ten u_wide
+  ovru="$d/f-unknown-ceiling.sh"; : >"$ovru"
+  if sv_mutant_override "$ovru" supervisor_pid_space_ceiling \
+       "  printf 'authoritative %s' \"\$((b - 1))\"" \
+       "  printf '%s' 'unknown forced-for-test'"; then
+    probe_pid_ovr() {
+      printf '%s\n' "$1" >"$d/pidfile"
+      env SUP="$SUPERVISOR" OVR="$ovru" F="$d/pidfile" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true
+    }
+    u_ten="$(pid_verdict_class "$(probe_pid_ovr 9999999999)")"
+    u_wide="$(pid_verdict_class "$(probe_pid_ovr 999999999999999)")"
+    if [[ "$u_ten" == accepted && "$u_wide" == accepted ]]; then
+      pass "lane-lock B13: forced onto the no-published-bound path (the macOS shape) both widths are ACCEPTED and consistent — so the case above is correct on a platform without /proc, which is what its comment used to claim without being true"
+    else
+      fail "lane-lock-b13-unknown-branch: ten=[$u_ten] wide=[$u_wide] — with no bound published the gate cannot apply, so both must be accepted"
+    fi
+    # ...and the structural gates still bite on that path, so "the gate does not apply" is not "anything goes".
+    if [[ "$(pid_verdict_class "$(probe_pid_ovr 9999999999999999999999)")" == refused ]]; then
+      pass "lane-lock B13: on the same no-bound path a pid past the arithmetic guard is still REFUSED — an unapplied platform gate is not licence to accept anything"
+    else
+      fail "lane-lock-b13-unknown-unbounded: a 22-digit value must still be refused with no platform bound published"
+    fi
+    unset -f probe_pid_ovr
+  fi
+
+  # ---- (3) NO INVENTED CONSTANT SURVIVES. The rejected design substituted Linux's PID_MAX_LIMIT
+  # wherever `/proc` was absent, which on macOS accepted values 42x the real platform limit and was a
+  # guess about an unmeasured platform presented as a bound. Structural, because no behavioural case on a
+  # Linux host can observe the non-Linux path.
+  local invented
+  invented="$(grep -nE 'SUPERVISOR_PID_MAX_FALLBACK|4194304' "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  if [[ -z "$invented" ]]; then
+    pass "lane-lock B10 STRUCTURAL: no cross-platform pid ceiling constant exists in the supervisor's code — an unreadable bound yields \`unknown\`, never a number nobody measured (CLAUDE.md #28)"
+  else
+    fail "lane-lock-pid-ceiling-invented: [$invented] — a guessed bound for an unmeasured platform is a no-heuristics violation, not a conservative default"
+  fi
+
+  # ---- (4) MUTANT CONTRAST for the conversion: use the exclusive value as if it were inclusive, which
+  # is the pre-B10 spelling, and the wrap-point pid is accepted again.
+  local ovr mverdict
+  ovr="$d/m-ceiling.sh"; : >"$ovr"
+  if [[ "$ceiling" == 'authoritative '* ]] && sv_mutant_override "$ovr" supervisor_pid_space_ceiling \
+       "  printf 'authoritative %s' \"\$((b - 1))\"" \
+       "  printf 'authoritative %s' \"\$b\""; then
+    printf '%s\n' "$raw_max" >"$d/pidfile"
+    mverdict="$(env SUP="$SUPERVISOR" OVR="$ovr" F="$d/pidfile" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+    if [[ "$mverdict" == "pid $raw_max" ]]; then
+      pass "lane-lock B10 MUTANT: with the exclusive wrap point used as an inclusive maximum the unissuable value $raw_max is ACCEPTED again — so the conversion is what refuses it, and the assert above is not vacuous"
+    else
+      fail "lane-lock-mutant-ceiling: verdict=[$mverdict] — the pre-B10 spelling must be shown to accept the wrap point"
+    fi
+  fi
+
+  unset -f probe_pid pid_verdict_class
+}
+
+t test_lane_lock_pid_bound_is_the_platform_pid_space
+
+
+# ---------------------------------------------------------------------------
+# THE NUL PROBE'S FALLBACK IS A SECOND IMPLEMENTATION, SO IT IS DIFFERENTIALLY TESTED (#3601).
+#
+# The primary detector is `read -d ''` — a builtin, so no fork and no `PATH` dependency. The `wc`/`tr`
+# byte-count form survives as the FALLBACK for a shell whose `read` rejects `-d`/`-n`, chosen by
+# capability (a `read` that refuses the options exits >1, distinguishable from both "found a NUL" and
+# "reached EOF"). CLAUDE.md's ruling is that a second implementation's correctness is only knowable by
+# differential testing against the original, so both are driven over the SAME inputs here rather than
+# the fallback being assumed unreachable and left uncovered.
+#
+# WHY THE PRIMARY IS NOT THE BYTE-COUNT FORM, MEASURED: `supervisor_lock_publish` calls this parser on
+# EVERY start for its read-back, so with `wc` unavailable a supervisor could not start AT ALL — on a
+# FRESH, uncontended lock — and refused forever with a diagnostic about a read-back that never ran.
+# Turning a missing coreutils tool into "this lane can never start" is the permanent-refusal harm this
+# change exists to remove, so that case is asserted below too.
+# ---------------------------------------------------------------------------
+test_lane_lock_nul_probe_primary_and_fallback_agree() {
+  local d shadow nulf cleanf ovr pv fv
+  d="$(new_case_dir)"
+  common_env "$d"
+  nulf="$d/nul-pid"
+  cleanf="$d/clean-pid"
+  printf '4242\000\n' >"$nulf"
+  printf '4242\n' >"$cleanf"
+  shadow="$d/shadow"
+  mkdir -p "$shadow"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/wc"
+  chmod +x "$shadow/wc"
+
+  # ---- (1) THE PRIMARY IS FORK-FREE: with BOTH `wc` and `tr` unavailable it still answers both ways.
+  # This is the PROBE called directly, deliberately: `tr` is used all over the supervisor's own startup
+  # (lane-identity sanitisation, the proc probes), so a whole-run drive with `tr` shadowed would fail for
+  # reasons that have nothing to do with this probe and would measure nothing. The whole-run case below
+  # shadows `wc` only, which is the tool the rejected byte-count-as-primary form actually wedged on.
+  local shadow2="$d/shadow2"
+  mkdir -p "$shadow2"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow2/wc"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow2/tr"
+  chmod +x "$shadow2/wc" "$shadow2/tr"
+  pv="$(env SUP="$SUPERVISOR" F="$nulf" PATH="$shadow2:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+  fv="$(env SUP="$SUPERVISOR" F="$cleanf" PATH="$shadow2:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+  if [[ "$pv" == 'contains-nul' && "$fv" == 'nul-free' ]]; then
+    pass "lane-lock NUL probe: the primary detector answers correctly with \`wc\` AND \`tr\` both unavailable — it is a builtin, so no verdict here depends on PATH"
+  else
+    fail "lane-lock-nul-primary-forks: nul=[$pv] clean=[$fv] — the primary must not depend on an external command"
+  fi
+
+  # ---- (2) A FRESH START ON SUCH A BOX MUST WORK. This is the wedge the byte-count-as-primary form
+  # measurably caused: the parser runs on every start, for the publish's read-back.
+  local tmp lane lock out rc
+  tmp="$d/tmp"; lane="lane3601nofork$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+  out="$(lane_lock_drive_at "$d" - "$tmp" "$lane" PATH="$shadow:$PATH")"; rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$lock"* ]]; then
+    pass "lane-lock NUL probe: a FRESH uncontended start still succeeds on a box with no \`wc\` — a missing coreutils tool cannot make this lane unable to start (ruling 2), which the byte-count-as-primary form measurably did"
+  else
+    fail "lane-lock-nul-probe-wedges-start: rc=$rc out=[$out] — this is the permanent-refusal harm the primary detector avoids"
+  fi
+
+  # ---- (3) THE FALLBACK, FORCED. `read` is made to look unsupported by a shipped-derived override that
+  # returns >1 from the primary read — the same capability signal a shell without `-d` produces — so the
+  # fallback runs for real rather than being assumed correct.
+  ovr="$d/m-nulfallback.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_pid_nul_free \
+       '  { opened=1; IFS= read -r -d '"'"''"'"' -n "$SUPERVISOR_PID_NUL_SCAN" probe; } 2>/dev/null <"$f" || rrc=$?' \
+       '  opened=1; rrc=2'; then
+    pv="$(env SUP="$SUPERVISOR" OVR="$ovr" F="$nulf" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+    fv="$(env SUP="$SUPERVISOR" OVR="$ovr" F="$cleanf" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+    if [[ "$pv" == 'contains-nul' && "$fv" == 'nul-free' ]]; then
+      pass "lane-lock NUL probe DIFFERENTIAL: with the builtin reporting itself unsupported, the byte-count fallback returns the SAME two verdicts over the SAME two files — the second implementation agrees with the first where it can be compared"
+    else
+      fail "lane-lock-nul-fallback-diverges: nul=[$pv] clean=[$fv] — the fallback must agree with the primary, or one of them is wrong"
+    fi
+    # ...and the fallback's own third value: with `wc` gone it must refuse, never report `nul-free`.
+    pv="$(env SUP="$SUPERVISOR" OVR="$ovr" F="$cleanf" PATH="$shadow:$PATH" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+    if [[ "$pv" == 'could-not-measure'* ]]; then
+      pass "lane-lock NUL probe DIFFERENTIAL: the fallback's failed measurement is [$pv] — three-valued like the primary, so an unmeasurable read is never 'nul-free' in either implementation"
+    else
+      fail "lane-lock-nul-fallback-permissive: [$pv]"
+    fi
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_nul_probe_primary_and_fallback_agree
+
+
+
+
+# ---------------------------------------------------------------------------
+# THE PUBLISH DECLINES A PRE-EXISTING HOLDER RECORD RATHER THAN OVERWRITING IT (#3601, job 231 B11).
+#
+# THE DEFECT: publication was not tied to the directory instance this process created. A peer can rename
+# our pid-less directory away, create and publish its OWN lock at the same name, and our forced `mv` then
+# overwrote THAT peer's ownership record — destroying the evidence of who holds the lane, which is
+# strictly worse than failing to start.
+#
+# WHAT IS FIXED HERE AND WHAT IS NOT: the OVERWRITE is refused, so we decline instead of corrupting. The
+# RACE is not closed — test-then-move is not an atomic create-exclusive — and closing it needs
+# serialisation across the whole claim-and-publication operation, which is #3683 together with the
+# reclaim ABA and the release read-then-remove. The asserts below are about the non-destruction only, and
+# the site comment says the same, because a comment claiming more than the code does is the B9 family.
+# ---------------------------------------------------------------------------
+test_lane_lock_publish_declines_instead_of_clobbering() {
+  local d tmp lane lock verdict out rc ovr peer_pid
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601decl$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+  peer_pid=515151
+
+  # ---- (1) THE SHIPPED PUBLISH against a directory that already carries a record.
+  mkdir -p "$lock"
+  printf '%s\n' "$peer_pid" >"$lock/pid"
+  verdict="$(env SUP="$SUPERVISOR" L="$lock" bash -c 'source "$SUP"; SUPERVISOR_LOCK="$L"; printf "%s" "$(supervisor_lock_publish)"' 2>&1 || true)"
+  if [[ "$verdict" == "declined pid $peer_pid" ]] && [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "$peer_pid" ]]; then
+    pass "lane-lock B11: the publish DECLINES when a holder record already exists [$verdict] and the peer's pid is untouched — it reports the record it found rather than replacing it"
+  else
+    fail "lane-lock-publish-clobbers: verdict=[$verdict] pid=[$(cat "$lock/pid" 2>/dev/null || true)] — a peer's ownership record must never be overwritten"
+  fi
+  # ...and the staging file it wrote on the way is cleaned up, so declining leaves no debris either.
+  if [[ -z "$(ls -A "$lock" 2>/dev/null | grep 'pid\.tmp\.' || true)" ]]; then
+    pass "lane-lock B11: the declined publish removed its own staging file — declining leaves nothing behind"
+  else
+    fail "lane-lock-publish-decline-residue: [$(ls -A "$lock" | tr '\n' ' ')]"
+  fi
+
+  # ---- (2) THE LEGITIMATE CASE IS UNCHANGED: a directory we just created has no `pid`, so the branch is
+  # never taken and the publish succeeds. Without this the assert above is satisfied by code that never
+  # publishes at all.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  verdict="$(env SUP="$SUPERVISOR" L="$lock" bash -c 'source "$SUP"; SUPERVISOR_LOCK="$L"; printf "%s|%s" "$(supervisor_lock_publish)" "$(cat "$L/pid" 2>/dev/null)"' 2>&1 || true)"
+  if [[ "$verdict" == "ok|"* ]]; then
+    pass "lane-lock B11 NON-VACUITY: an empty lock directory still publishes normally [$verdict] — the non-overwrite costs the legitimate path nothing"
+  else
+    fail "lane-lock-publish-broken: verdict=[$verdict]"
+  fi
+
+  # ---- (3) END TO END: a peer publishes into the directory we created. The refusal must say we wrote
+  # NOTHING, must say the path is untouched, and the peer's record must survive.
+  rm -rf "$lock"
+  ovr="$d/f-peerpub.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
+  printf "%s\n" 626262 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    # THE ASSERTED PROPERTY IS PRESERVATION OF THE HOLDER RECORD, not an absence of modification (#3601,
+    # roborev job 238 B15). The old form required the refusal to say "wrote NOTHING" and "NOTHING at that
+    # path has been modified" — and so it PINNED two claims that were false in detail: the publish writes
+    # its staging file before it tests for an existing `pid`, and the un-create may remove an ownership
+    # marker from that same directory. A test that requires a false claim keeps the claim alive, which is
+    # how the alibi family survives being fixed; so this now asserts what the code actually guarantees.
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"declined to publish over it"* ]] \
+       && [[ "$out" == *"is INTACT — it was neither overwritten nor replaced"* ]] \
+       && [[ "$out" == *"[pid 626262]"* ]] && [[ "$out" != *"ACQUIRED"* ]]; then
+      pass "lane-lock B11/B15: with a peer's record published into the directory we created, the run refuses, names the record it found, and claims exactly the preservation it provides — not an absence of modification it does not"
+    else
+      fail "lane-lock-b11-endtoend: rc=$rc out=[$out]"
+    fi
+    # ...and the claim is not merely WORDED correctly, it is TRUE: the record's bytes are unchanged.
+    if [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "626262" ]]; then
+      pass "lane-lock B15: the holder record is byte-for-byte as the peer left it — the refusal's one load-bearing claim is measured, not asserted"
+    else
+      fail "lane-lock-b15-record-not-preserved: pid=[$(cat "$lock/pid" 2>/dev/null || true)]"
+    fi
+    # NEGATIVE CONTROL for B19: the refusal must not name a CAUSE it did not observe. Finding a `pid`
+    # record proves publication must be declined; it does not identify how the record got there, and
+    # directory-instance identity is unverifiable on this path (#3683). The pre-B19 text asserted a
+    # specific race ("a peer renamed ours aside and published its own between our two steps").
+    if [[ "$out" == *"APPEARED in the lock"* ]] \
+       && [[ "$out" == *"HOW that record got there is NOT established"* ]] \
+       && [[ "$out" != *"renamed ours aside"* ]]; then
+      pass "lane-lock B19: the refusal reports that a holder record APPEARED and was preserved, and says outright that how it got there is not established — the invented race is gone"
+    else
+      fail "lane-lock-b19-invents-a-race: out=[$out] — naming one of several possible causes as the cause is a claim beyond the evidence"
+    fi
+    # NEGATIVE CONTROL for the wording: the refusal must NOT claim the path is untouched, because it is
+    # not. This is the assert that stops the false claim being reintroduced by a well-meaning edit.
+    if [[ "$out" != *"NOTHING at that path has been modified"* ]]; then
+      pass "lane-lock B15: the refusal does NOT claim the path is untouched — it says plainly that it wrote and removed its own scratch entries, because it did"
+    else
+      fail "lane-lock-b15-overclaims: the refusal claims nothing at that path was modified, which is false: a staging file and an ownership marker are written there"
+    fi
+    if [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "626262" ]]; then
+      pass "lane-lock B11: and the peer's record survives the whole refusal path — nothing on the way out removed or rewrote it"
+    else
+      fail "lane-lock-b11-peer-record-lost: pid=[$(cat "$lock/pid" 2>/dev/null || true)]"
+    fi
+  fi
+
+  # ---- (4) MUTANT CONTRAST: the pre-B11 spelling — the decline branch removed, so the forced rename
+  # overwrites whatever is there. One literal substitution.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$peer_pid" >"$lock/pid"
+  ovr="$d/m-clobber.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if [[ -e "$SUPERVISOR_LOCK/pid" || -L "$SUPERVISOR_LOCK/pid" ]]; then' \
+       '  if false; then'; then
+    verdict="$(env SUP="$SUPERVISOR" OVR="$ovr" L="$lock" bash -c 'source "$SUP"; source "$OVR"; SUPERVISOR_LOCK="$L"; printf "%s" "$(supervisor_lock_publish)"' 2>&1 || true)"
+    if [[ "$verdict" == 'ok' ]] && [[ "$(cat "$lock/pid" 2>/dev/null || true)" != "$peer_pid" ]]; then
+      pass "lane-lock B11 MUTANT: with the decline removed the publish reports [$verdict] and the peer's record $peer_pid is GONE, replaced by ours — the measured pre-B11 behaviour, so the assert above is the non-overwrite doing the work"
+    else
+      fail "lane-lock-mutant-clobber: verdict=[$verdict] pid=[$(cat "$lock/pid" 2>/dev/null || true)] — the pre-fix form must be shown to destroy the peer's record"
+    fi
+  fi
+
+  # ---- (5) THE RESIDUAL IS STATED AT THE SITE, IN THE NARROWED-NOT-CLOSED FORM, and does not claim
+  # atomicity. Structural, because no behavioural case can observe a comment — and the comment is the
+  # artifact a reviewer is asked to trust about a race that is still open.
+  local body
+  body="$(sed -n '/^supervisor_lock_publish()/,/^}/p' "$SUPERVISOR")"
+  if [[ "$body" == *'NARROWED, NOT CLOSED'* ]] && [[ "$body" == *'#3683'* ]] \
+     && [[ "$body" == *'NOT bound to the directory instance'* || "$body" == *'NOT bound to the directory'* ]] \
+     && [[ "$body" == *'not equivalent to an atomic'* || "$body" == *'NOT equivalent to an atomic'* ]]; then
+    pass "lane-lock B11: the site states that publication is not bound to the created directory instance, that test-then-move is not atomic, and that closing it is #3683 — the comment claims exactly what the code does"
+  else
+    fail "lane-lock-b11-comment-overclaims: the publish's comment must name the residual and the follow-up; a comment claiming more than the code does is the B9 family"
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_publish_declines_instead_of_clobbering
+
+
+
+
+# ---------------------------------------------------------------------------
+# NO DIAGNOSTIC NAMES A STEP THAT DID NOT RUN (#3601, roborev job 231 B9 — and the CLASS, not just the
+# reported instance).
+#
+# THE REPORTED INSTANCE: `supervisor_lock_take` ignores its two cleanup failures — deliberately, because a
+# peer populating the directory is a legitimate reason for `rmdir` to refuse — and the refusal then stated
+# unconditionally that the directory "has been REMOVED AGAIN". With a peer's record inside, or a
+# filesystem that refuses the removal, the lock REMAINED while the operator was told there was nothing to
+# clear.
+#
+# THE CLASS: four instances of it landed in this one diff — a refusal claiming a read-back that never ran
+# (B1), a mutant comment claiming an isolation it did not have (B4), a code comment vouching for the race
+# it sits on (fixed by hand), and this one. The lead's ruling is that such an artifact is worse than no
+# artifact, because it is what stops the next reader looking. So the cases below assert the property for
+# EVERY branch of the cleanup, including the two the reported finding did not name.
+# ---------------------------------------------------------------------------
+test_lane_lock_cleanup_outcome_is_verified_not_claimed() {
+  local d tmp lane lock out rc ovr
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601cln$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # The publish's write is failed by a shipped-derived override in every case below; `take`'s cleanup and
+  # the refusal — the code being asserted — stay shipped.
+  ovr="$d/f-write.sh"; : >"$ovr"
+  if ! sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if true; then'; then
+    return 0
+  fi
+
+  # ---- (a) THE CLEANUP SUCCEEDS: only here may the refusal say the directory is gone, and it says the
+  # absence was VERIFIED rather than assumed.
+  rm -rf "$lock"
+  out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"absence was VERIFIED after the removal"* ]] \
+     && [[ "$out" == *"Nothing needs clearing by hand"* ]] && [[ ! -e "$lock" ]]; then
+    pass "lane-lock B9 (cleanup succeeded): the refusal claims the removal ONLY with the absence verified afterwards, and the lock really is gone"
+  else
+    fail "lane-lock-b9-verified: rc=$rc lock=[$([[ -e "$lock" ]] && echo present || echo gone)] out=[$out]"
+  fi
+
+  # ---- (b) A PEER'S RECORD BLOCKS THE `rmdir`: the lock REMAINS, and the refusal must say so, name the
+  # foreign holder, and offer NO removal command — the record is not ours to delete.
+  local ovrb
+  ovrb="$d/f-write-peer.sh"; : >"$ovrb"
+  rm -rf "$lock"
+  if sv_mutant_override "$ovrb" supervisor_lock_publish \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
+  printf "%s\n" 717171 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then printf "%s" write-failed; return 1; fi'; then
+    out="$(lane_lock_drive_at "$d" "$ovrb" "$tmp" "$lane")"; rc=$?
+    local bare
+    bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | grep -v '^$' | head -1)"
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"it REMAINS"* ]] && [[ "$out" == *"NOT ours ([pid 717171])"* ]] \
+       && [[ "$out" != *"absence was VERIFIED"* ]] && [[ -z "$bare" ]]; then
+      pass "lane-lock B9 (peer record blocks the cleanup): the refusal says the lock REMAINS, names the foreign holder, and prints NO removal command — a record we do not own is not ours to offer for deletion"
+    else
+      fail "lane-lock-b9-foreign: rc=$rc bare=[$bare] out=[$out]"
+    fi
+    if [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "717171" ]]; then
+      pass "lane-lock B9: and the peer's record survives — the cleanup's \`rmdir\` is non-recursive precisely so it cannot delete it"
+    else
+      fail "lane-lock-b9-foreign-destroyed: pid=[$(cat "$lock/pid" 2>/dev/null || true)]"
+    fi
+  fi
+
+  # ---- (c) A RESIDUAL THAT IS NOT A HOLDER: the lock remains with unusable content, so the refusal says
+  # it remains AND offers the non-recursive clear command, which the (b) case must not.
+  local ovrc
+  ovrc="$d/f-write-junk.sh"; : >"$ovrc"
+  rm -rf "$lock"
+  if sv_mutant_override "$ovrc" supervisor_lock_publish \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
+  printf "%s\n" not-a-pid >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then printf "%s" write-failed; return 1; fi'; then
+    out="$(lane_lock_drive_at "$d" "$ovrc" "$tmp" "$lane")"; rc=$?
+    local barec
+    barec="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | grep -v '^$' | head -1)"
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"it REMAINS"* ]] && [[ "$out" == *"unparseable pid-not-all-decimal-digits"* ]] \
+       && [[ "$barec" == 'rmdir -- '* ]]; then
+      pass "lane-lock B9 (residual, not a holder): the refusal says the lock REMAINS, names what is in it, and DOES offer the non-recursive clear — the three cleanup outcomes get three different remedies because the right action differs"
+    else
+      fail "lane-lock-b9-residual: rc=$rc bare=[$barec] out=[$out]"
+    fi
+  fi
+
+  # ---- (d) MUTANT CONTRAST: the pre-B9 spelling — the cleanup verdict is asserted unconditionally, so
+  # the operator is told the directory was removed while it demonstrably remains. Applied to the shipped
+  # `take` by ONE substitution, driven over case (b)'s staging.
+  local ovrd mout
+  ovrd="$d/m-claim.sh"; : >"$ovrd"
+  rm -rf "$lock"
+  if sv_mutant_override "$ovrd" supervisor_lock_take \
+       '  if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then' \
+       '  if true; then'; then
+    cat "$ovrb" >>"$ovrd"
+    mout="$(lane_lock_drive_at "$d" "$ovrd" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"absence was VERIFIED after the removal"* ]] && [[ -e "$lock" ]]; then
+      pass "lane-lock B9 MUTANT: with the cleanup verdict asserted rather than observed, the refusal tells the operator the directory was removed WHILE IT IS STILL THERE — the exact false artifact, so the asserts above are the verification doing the work"
+    else
+      fail "lane-lock-mutant-b9: lock=[$([[ -e "$lock" ]] && echo present || echo gone)] out=[$mout] — the unconditional claim must be shown to lie"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_cleanup_outcome_is_verified_not_claimed
+
+
+
+
+# ---------------------------------------------------------------------------
+# THE OTHER TWO SITES THE B9 CLASS SWEEP FOUND (#3601, roborev job 231 B9).
+#
+# Neither was in the finding. Both are the same shape: an artifact whose text is not bound to what the run
+# actually observed.
+#
+#   (1) THE LOST-RACE REFUSAL attributed the clearing and the new ownership to specific actors — "a stale
+#       lock was cleared and the name was immediately claimed by someone else" — when all the run observed
+#       is that its own claim found the name taken. It does not know its own rename is what cleared the
+#       lock (a racer may have), and it never read the new holder.
+#   (2) THE RELEASE'S REMOVAL made NO claim, silently: `rm -rf … || true`. The silence is the same problem
+#       one step earlier — a lock left behind by a supervisor that exited cleanly is unattributable, and
+#       the next start has to deal with it. It is self-healing, so it reports rather than escalates.
+# ---------------------------------------------------------------------------
+test_lane_lock_sweep_no_unobserved_attribution() {
+  local d tmp lane lock out rc dead ovr
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601sweep$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+
+  # ---- (1) THE LOST-RACE PATH, reached by failing every claim attempt while a genuinely dead holder's
+  # lock is present: the reclaim runs, the claim that follows finds the name unavailable, and this is the
+  # refusal. Fault-injected on `take`'s return, so the refusal text under test is shipped.
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  ovr="$d/f-take.sh"; : >"$ovr"
+  # THE NAME MUST BE OCCUPIED FOR THIS TO BE A LOST RACE (#3601, roborev job 244 B20). This override used
+  # to just `return 1`, which after the reclaim left NOTHING at the name — and B20 correctly reports that
+  # as a path failure, not a race. So the fault now also holds the name, which is what a lost race means.
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1' \
+       '  mkdir -p -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+  return 1'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"taken again before this run could claim it"* ]] \
+       && [[ "$out" == *"both unestablished"* ]] \
+       && [[ "$out" != *"immediately claimed by someone else"* ]] \
+       && [[ "$out" != *"Only one racer can win"* ]]; then
+      pass "lane-lock B9 sweep (lost race): the refusal reports what the run OBSERVED — the name was taken again — and states that who cleared the lock and who holds it now are both unestablished, instead of attributing either"
+    else
+      fail "lane-lock-sweep-lostrace: rc=$rc out=[$out] — the pre-sweep wording attributed a clearing and an ownership this run never established"
+    fi
+  fi
+  rm -rf "$lock"
+
+  # ---- (2) THE RELEASE PATH, with its own removal made to FAIL for real: the lock's parent is made
+  # unwritable after the lock is taken, so the EXIT trap cannot remove it. Derived from the shipped drive
+  # body by one insertion, so the startup path is the ordinary one.
+  local rop body_ro
+  rop="$d/ro-parent"
+  mkdir -p "$rop"
+  body_ro="${SV_DRIVE_BODY/'exit 0'/'chmod 0555 "$2" 2>/dev/null || true; exit 0'}"
+  if [[ "$body_ro" == "$SV_DRIVE_BODY" ]]; then
+    fail "lane-lock-sweep-release-premise: the read-only drive body was not derived from the shipped one"
+  elif ( : >"$rop/.probe" ) 2>/dev/null && { rm -f "$rop/.probe"; chmod 0555 "$rop" 2>/dev/null; ( : >"$rop/.probe2" ) 2>/dev/null; }; then
+    rm -f "$rop/.probe2" 2>/dev/null || true
+    chmod 0755 "$rop" 2>/dev/null || true
+    skip "lane-lock B9 sweep (release): this uid can write a 0555 directory (running as root), so a failed self-removal is not stageable here — unmeasurable on this host rather than passing vacuously"
+  else
+    chmod 0755 "$rop" 2>/dev/null || true
+    out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$rop" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+              bash -c "$body_ro" _ "$SUPERVISOR" "$rop" 2>&1 )"; rc=$?
+    chmod 0755 "$rop" 2>/dev/null || true
+    # WHAT THIS CASE ACTUALLY PRODUCES IS A PARTIAL REMOVAL, AND IT USED TO PIN THE FALSE CLAIM ABOUT IT
+    # (#3601, roborev job 240 B16). `rm -rf` unlinks CONTENTS before the directory, and those need write
+    # permission on DIFFERENT directories — `<lock>/pid` needs write on `<lock>`, `<lock>` needs write on
+    # its PARENT — so an unwritable parent deletes the pid record and leaves the directory. This case
+    # therefore reaches the pid-less state, and the assert here REQUIRED the log to promise that the next
+    # start would "reclaim it automatically", which is false: a pid-less lock is undecidable and the next
+    # start refuses over it indefinitely. A test that requires a false promise is what keeps the promise
+    # alive, so the state is now measured on disk FIRST and the claim asserted against it.
+    local surviving_pid='no' surviving_dir='no'
+    [[ -d "$rop/cqlite-worker-supervisor-$lane.lock" ]] && surviving_dir='yes'
+    [[ -f "$rop/cqlite-worker-supervisor-$lane.lock/pid" ]] && surviving_pid='yes'
+    if [[ "$surviving_dir" == 'yes' && "$surviving_pid" == 'no' ]]; then
+      pass "lane-lock B16 PREMISE: this case really does produce the PARTIAL removal — the lock directory survives and its pid record is GONE, so the claim below has the state it is about"
+    else
+      fail "lane-lock-b16-premise: dir=[$surviving_dir] pid=[$surviving_pid] — the partial-removal state was not staged, so the asserts below would measure something else"
+    fi
+    if [[ "$out" == *"ACQUIRED="* ]] && [[ "$out" == *"PARTIALLY removed our own lock"* ]] \
+       && [[ "$out" == *"will NOT clear itself"* ]] && [[ "$out" == *"ACTION IS NEEDED"* ]] \
+       && [[ "$out" == *"PARENT directory is not writable"* ]]; then
+      pass "lane-lock B16: the partial removal is named as a partial removal, stated NOT to self-clear, flagged as needing action, and the cause an operator must fix (the parent's permissions) is named — because the removal a later refusal prints needs that same permission"
+    else
+      fail "lane-lock-b16-report: rc=$rc out=[$out] — a partial removal must be reported as the wedge it is"
+    fi
+    # NEGATIVE CONTROL: the pre-B16 promise must be ABSENT. This is the assert that stops it returning.
+    if [[ "$out" != *"reclaim it automatically"* ]]; then
+      pass "lane-lock B16: and it does NOT promise automatic reclaim — the promise that pointed away from this wedge is gone"
+    else
+      fail "lane-lock-b16-false-promise: the log still promises the next start will reclaim automatically, which is false for a pid-less lock"
+    fi
+    chmod 0755 "$rop" 2>/dev/null || true
+    rm -rf "$rop" 2>/dev/null || true
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_sweep_no_unobserved_attribution
+
+
+# ---------------------------------------------------------------------------
+# "NOT OURS" IS NOT THE SAME FACT AS "SOMEONE ELSE'S" (#3601, roborev job 240 B17).
+#
+# The release reported EVERY state other than its own pid as "Something else owns that name now" —
+# including absent, unreadable, malformed and NUL-bearing records. Those establish only that ownership
+# CANNOT BE VERIFIED. Attributing them to another process names a holder that may not exist and sends an
+# operator looking for it; the DECISION is identical either way (remove nothing), so the wording is the
+# entire content of the finding, which is why it has to be the wording that is true.
+# ---------------------------------------------------------------------------
+test_lane_lock_release_distinguishes_foreign_from_unverifiable() {
+  local d tmp lane out body_steal foreign
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601b17$$"
+  mkdir -p "$tmp"
+
+  # One drive, derived from the shipped body by a single insertion, that replaces the lock's pid record
+  # with a value the caller chooses just before exiting — so the EXIT trap runs against that state.
+  body_steal="${SV_DRIVE_BODY/'exit 0'/'printf "%s\n" "$2" >"$SUPERVISOR_LOCK/pid"; exit 0'}"
+  if [[ "$body_steal" == "$SV_DRIVE_BODY" ]]; then
+    fail "lane-lock-b17-premise: the steal drive was not derived from the shipped body"
+    return 0
+  fi
+
+  # ---- (1) A PARSED FOREIGN PID: naming another holder is justified, because one was read.
+  foreign=909090
+  out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+            bash -c "$body_steal" _ "$SUPERVISOR" "$foreign" 2>&1 )"
+  if [[ "$out" == *"records holder pid $foreign, not this process"* ]] \
+     && [[ "$out" == *"Another holder owns that name"* ]]; then
+    pass "lane-lock B17 (parsed foreign pid): the refusal names the holder it actually read — an attribution backed by a parse is fine, and this is the only branch that may make one"
+  else
+    fail "lane-lock-b17-foreign: out=[$out]"
+  fi
+  rm -rf "$tmp"; mkdir -p "$tmp"
+
+  # ---- (2) AN UNPARSEABLE RECORD: ownership is unverifiable, and that is all that may be said.
+  out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+            bash -c "$body_steal" _ "$SUPERVISOR" 'not-a-pid' 2>&1 )"
+  if [[ "$out" == *"could not VERIFY that it owns it"* ]] \
+     && [[ "$out" == *"does NOT establish that another process holds this lock"* ]] \
+     && [[ "$out" == *"left exactly as found"* ]]; then
+    pass "lane-lock B17 (unparseable record): the refusal reports that ownership could not be VERIFIED and says explicitly that this does not establish another holder — the decision is unchanged, only the claim is now true"
+  else
+    fail "lane-lock-b17-unverifiable: out=[$out]"
+  fi
+  # NEGATIVE CONTROL, which is the whole finding: the unparseable branch must not attribute a holder.
+  if [[ "$out" != *"Another holder owns that name"* ]] && [[ "$out" != *"Something else owns that name"* ]]; then
+    pass "lane-lock B17: and it does NOT say another holder owns the name — the attribution that named a process nobody read is gone"
+  else
+    fail "lane-lock-b17-attributes: the unparseable branch still attributes the lock to another holder, which it never established"
+  fi
+  # ...and either way the record is untouched, so the wording change did not come with a behaviour change.
+  if [[ "$(cat "$tmp/cqlite-worker-supervisor-$lane.lock/pid" 2>/dev/null || true)" == 'not-a-pid' ]]; then
+    pass "lane-lock B17: the unverifiable record is left byte-for-byte as found — the decision was always to remove nothing, and it still is"
+  else
+    fail "lane-lock-b17-removed: the unverifiable record was modified or removed"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_release_distinguishes_foreign_from_unverifiable
+
+
+
+
+# ---------------------------------------------------------------------------
+# THE UN-CREATE IS BOUND TO THE DIRECTORY INSTANCE THIS RUN CREATED (#3601, roborev job 236 B12).
+#
+# THE DEFECT, AND IT WAS A REGRESSION THIS DIFF INTRODUCED. B1 made a failed publish remove the directory
+# it had created, so a run would stop manufacturing the pid-less lock every other branch refuses to
+# reclaim. But the removal was an UNCONDITIONAL `rmdir`, not bound to the instance: a legacy peer can
+# rename ours aside and `mkdir` its OWN pid-less lock at the same name, and a non-recursive `rmdir`
+# SUCCEEDS against that empty startup directory. B1 therefore traded "we wedge our own lane with an empty
+# lock" for "we can delete a peer's startup lock" — the worse of the two.
+#
+# WHY NON-RECURSIVE WAS NOT ENOUGH, which is the whole subtlety: `rmdir` protects a peer that has already
+# PUBLISHED (non-empty directory, removal fails harmlessly) and protects nothing at all against a peer
+# that has `mkdir`'d and not yet published. The dangerous case is precisely the empty one.
+#
+# WHAT IS FIXED AND WHAT IS NOT: the UNCONDITIONAL DESTRUCTION is gone. The race is not closed — creating
+# the marker is a second step after `mkdir`, so a peer that replaces the directory inside THAT window
+# still receives our marker — and the site says so with the bound (two adjacent syscalls, no intervening
+# I/O, versus the whole publish attempt before). #3683 closes it.
+# ---------------------------------------------------------------------------
+test_lane_lock_uncreate_is_bound_to_the_created_instance() {
+  local d tmp lane lock out rc ovr swap contents
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601inst$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) THE MARKER DOES NOT OUTLIVE THE ACQUIRE. A held lock carrying an extra file would make the
+  # non-recursive clear command handed to operators elsewhere refuse, so this is a property of the fix and
+  # not an incidental detail.
+  rm -rf "$lock"
+  local body_peek
+  body_peek="${SV_DRIVE_BODY/'exit 0'/'printf "CONTENTS=[%s]\n" "$(ls -A "$SUPERVISOR_LOCK" | tr "\n" " ")"; trap - EXIT; exit 0'}"
+  if [[ "$body_peek" == "$SV_DRIVE_BODY" ]]; then
+    fail "lane-lock-b12-premise: the contents-peek drive body was not derived from the shipped one"
+    return 0
+  fi
+  out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+            bash -c "$body_peek" _ "$SUPERVISOR" 2>&1 )"
+  contents="$(printf '%s\n' "$out" | grep -o 'CONTENTS=\[[^]]*\]' || true)"
+  if [[ "$contents" == 'CONTENTS=[pid ]' ]]; then
+    pass "lane-lock B12: an acquired lock holds exactly \`pid\` — the ownership marker is removed the moment ownership is verified, so it cannot make a later manual clear refuse"
+  else
+    fail "lane-lock-b12-marker-outlives: $contents — the marker must not survive a successful acquire"
+  fi
+  rm -rf "$lock"
+
+  # ---- (2) THE REPORTED INTERLEAVING, STAGED FOR REAL. The publish fails, and BEFORE it does, a peer
+  # renames our directory aside and `mkdir`s its own PID-LESS lock at the same name — the exact case a
+  # non-recursive `rmdir` succeeds against. Fault-injected on the publish; `take`'s un-create decision,
+  # which is what is being asserted, is shipped code.
+  swap='  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
+  mv -- "$SUPERVISOR_LOCK" "$SUPERVISOR_LOCK.peeraside" 2>/dev/null || true
+  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+  if true; then printf "%s" write-failed; return 1; fi'
+  ovr="$d/f-swap.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" "$swap"; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ -d "$lock" ]]; then
+      pass "lane-lock B12: with a peer's PID-LESS lock at that name the run refuses and the peer's lock SURVIVES — the case a bare non-recursive removal destroys"
+    else
+      fail "lane-lock-b12-peer-lock-destroyed: rc=$rc lock=[$([[ -d "$lock" ]] && echo present || echo DESTROYED)] — this is the regression B1 introduced and B12 removes"
+    fi
+    if [[ "$out" == *"NOT the one it created"* ]] && [[ "$out" == *"removed NOTHING"* ]] \
+       && [[ "$out" == *"start in progress"* ]] && [[ "$out" != *"absence was VERIFIED"* ]]; then
+      pass "lane-lock B12: and the refusal says WHY it removed nothing — the marker is gone, so the directory is another run's start in progress — instead of claiming a removal (the B9 family)"
+    else
+      fail "lane-lock-b12-diagnostic: out=[$out]"
+    fi
+  fi
+  rm -rf "$lock" "$lock.peeraside"
+
+  # ---- (3) NON-VACUITY: with NO peer, the same failed publish still un-creates its own directory and the
+  # absence is verified. Without this, (2) is satisfied by code that never removes anything at all — which
+  # would reinstate the wedge B1 fixed.
+  ovr="$d/f-write.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || true
+    if [[ "$out" == *"absence was VERIFIED after the removal"* ]] && [[ ! -e "$lock" ]]; then
+      pass "lane-lock B12 NON-VACUITY: with no peer involved the run still removes the directory it created and verifies its absence — the instance binding costs the legitimate path nothing"
+    else
+      fail "lane-lock-b12-nonvacuity: lock=[$([[ -e "$lock" ]] && echo present || echo gone)] out=[$out] — declining to remove our OWN empty lock would reinstate the wedge B1 fixed"
+    fi
+  fi
+
+  # ---- (4) MUTANT CONTRAST: the marker check disabled, which is the pre-B12 spelling. The identical
+  # staging from (2) must then DESTROY the peer's lock.
+  rm -rf "$lock" "$lock.peeraside"
+  local ovrm mout
+  ovrm="$d/m-uncond.sh"; : >"$ovrm"
+  if sv_mutant_override "$ovrm" supervisor_lock_take \
+       '  if [[ ! -e "$marker" && ! -L "$marker" ]]; then' \
+       '  if false; then'; then
+    # the same peer-swap fault, appended so ONE override carries both
+    if sv_mutant_override "$ovrm" supervisor_lock_publish \
+         '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" "$swap"; then
+      mout="$(lane_lock_drive_at "$d" "$ovrm" "$tmp" "$lane")" || true
+      if [[ ! -d "$lock" ]] && [[ "$mout" == *"absence was VERIFIED"* ]]; then
+        pass "lane-lock B12 MUTANT: with the instance binding removed the identical case DELETES the peer's pid-less lock and reports the absence as its own success — the regression, measured, so (2) is the marker doing the work"
+      else
+        fail "lane-lock-mutant-b12: lock=[$([[ -d "$lock" ]] && echo present || echo gone)] out=[$mout] — the unconditional form must be shown to destroy the peer's lock"
+      fi
+    fi
+  fi
+  rm -rf "$lock" "$lock.peeraside"
+
+  # ---- (5) A MARKER THAT CANNOT BE WRITTEN IS NOT OWNERSHIP EVIDENCE, so nothing is removed. Staged with
+  # a lock directory whose creation succeeds and whose contents cannot be written — the parent is
+  # writable-and-searchable, the created directory is not writable, which `mkdir -m` cannot express, so
+  # the marker write is faulted instead and the DECISION is shipped.
+  local ovrk
+  ovrk="$d/f-marker.sh"; : >"$ovrk"
+  if sv_mutant_override "$ovrk" supervisor_lock_take \
+       '  if [[ "$marker_written" -eq 0 ]]; then' \
+       '  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovrk" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"did NOT attempt to remove"* ]] \
+       && [[ "$out" == *"cannot prove"* ]] && [[ "$out" == *"makes no claim either way"* ]]; then
+      pass "lane-lock B12: a marker that could not be written leaves the directory ALONE and says so — no ownership evidence means no removal, and the refusal claims nothing about what is at that path"
+    else
+      fail "lane-lock-b12-marker-failed: rc=$rc out=[$out] — with no marker the run must neither remove nor claim"
+    fi
+  fi
+  rm -rf "$lock"
+
+  # ---- (6) THE RESIDUAL IS STATED AT THE SITE, in the same NARROWED-NOT-CLOSED form as the other two,
+  # and does not present the marker as airtight. The comment is the artifact a reviewer is asked to trust
+  # about a window that is still open, which is the B9 family if it overclaims.
+  local body
+  body="$(sed -n '/^supervisor_lock_take()/,/^}/p' "$SUPERVISOR")"
+  if [[ "$body" == *'NARROWED, NOT CLOSED'* ]] && [[ "$body" == *'#3683'* ]] \
+     && [[ "$body" == *'two adjacent syscalls'* ]] \
+     && [[ "$body" == *'not read the marker as a guarantee'* ]]; then
+    pass "lane-lock B12: the site states the marker's OWN window, bounds it (two adjacent syscalls), names #3683 and says explicitly not to read it as a guarantee"
+  else
+    fail "lane-lock-b12-comment-overclaims: the marker's own absence window must be stated with its bound; presenting it as airtight is the alibi family"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_uncreate_is_bound_to_the_created_instance
+
+
+
+
+# ---------------------------------------------------------------------------
+# A RACE AND AN I/O ERROR MUST NOT SHARE A DIAGNOSTIC (#3601, roborev job 244 B20 + class sweep).
+#
+# THE DEFECT: `supervisor_lock_take` returns 1 when its `mkdir` fails, and `mkdir` fails BOTH because
+# someone else took the name (EEXIST — a race, where re-running is exactly right) and because the path
+# cannot hold a lock (EACCES/ENOSPC/ENOENT — where re-running loops forever over a state that cannot
+# resolve until permissions or disk are fixed). After a SUCCESSFUL rename-aside, every status 1 was
+# reported as a lost race: "a stale lock was cleared and the name was claimed by someone else … re-run
+# this supervisor". On a broken filesystem that tells an operator nothing is wrong and sends them into a
+# retry loop.
+#
+# WHY THIS ONE IS NOT JUST ANOTHER OVERCLAIM: it is #3601'S OWN HEADLINE DEFECT, one branch over. The AC7
+# addendum exists because the pre-fix code "blames the lock rather than the path shape, and an operator
+# goes looking for a stale lock that isn't there". The two facts want OPPOSITE actions — retry versus fix
+# the box — which is what makes conflating them a misdirection rather than an imprecision.
+#
+# THE SWEEP: three sites in this file shared that predicate and did not disambiguate (the post-reclaim
+# take, the publish's rename, the marker write); two others already did (the FIRST take, and the reclaim
+# rename), which is what made the omissions oversights rather than design. All five are asserted here.
+# ---------------------------------------------------------------------------
+test_lane_lock_race_and_io_error_are_not_conflated() {
+  local d tmp lane lock out rc dead ovr
+
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601conflate$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+
+  # ---- (1) B20: the SECOND take's mkdir fails while NOTHING is at the name. Fault-injected so only the
+  # second call fails, which is the interleaving the finding describes; the branch under test — the
+  # existence check that picks the refusal — is shipped code.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  ovr="$d/f-second-take.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1' \
+       '  if [[ -n "${SV_SECOND_TAKE:-}" ]]; then return 1; fi
+  export SV_SECOND_TAKE=1
+  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"NOTHING is at that name now"* ]] \
+       && [[ "$out" == *"after a stale lock was successfully cleared"* ]] \
+       && [[ "$out" == *"ORDER TO TELL THEM APART"* ]] \
+       && [[ "$out" != *"taken again before this run could claim it"* ]]; then
+      pass "lane-lock B20/B21: a post-reclaim claim that fails with NOTHING at the name reports that observation and the phase it happened in, and hands the operator both candidate causes in order — never the lost-race story"
+    else
+      fail "lane-lock-b20-conflated: rc=$rc out=[$out] — reporting a filesystem failure as a lost race sends the operator into a retry loop over a state that cannot resolve"
+    fi
+  fi
+
+  # ---- (2) NON-VACUITY: a real lost race must still be reported as one, or (1) is satisfied by code
+  # that has simply stopped recognising contention. The name is occupied by a LIVE holder at the moment
+  # the second take runs, so the existence check must select the race refusal.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  ovr="$d/f-second-take-occupied.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1' \
+       '  if [[ -n "${SV_SECOND_TAKE:-}" ]]; then mkdir -p -- "$SUPERVISOR_LOCK" 2>/dev/null || true; printf "%s\n" 313131 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true; return 1; fi
+  export SV_SECOND_TAKE=1
+  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"taken again before this run could claim it"* ]] \
+       && [[ "$out" != *"NOTHING is at that name now"* ]]; then
+      pass "lane-lock B20 NON-VACUITY: when the name IS occupied the same failure is still reported as a lost race — the existence test discriminates, it does not just relabel everything as a path failure"
+    else
+      fail "lane-lock-b20-nonvacuity: rc=$rc out=[$out] — a genuine race must still read as a race"
+    fi
+  fi
+
+  # ---- (3) SWEEP SITE: the publish's RENAME fails because the lock directory vanished under it. That is
+  # contention, and the pre-sweep text called every rename failure a FILESYSTEM failure and sent the
+  # operator to check a disk that is fine.
+  rm -rf "$lock"
+  ovr="$d/f-rename-gone.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! mv -f -- "$tmpf" "$SUPERVISOR_LOCK/pid" 2>/dev/null; then' \
+       '  rm -rf -- "$SUPERVISOR_LOCK"
+  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    # B21: the vanished directory is an OBSERVATION and may be reported; the CAUSE may not be claimed from
+    # it, because a peer can remove or recreate that name between the failure and the check either way.
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"was GONE when this run looked"* ]] \
+       && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+       && [[ "$out" == *"ORDER TO TELL THEM APART"* ]] \
+       && [[ "$out" != *"This is CONTENTION"* ]] && [[ "$out" != *"This is a FILESYSTEM failure"* ]]; then
+      pass "lane-lock sweep/B21 (publish rename): the vanished directory is reported as what was OBSERVED, the cause is explicitly not established, and the operator gets both candidates in order"
+    else
+      fail "lane-lock-sweep-rename: rc=$rc out=[$out]"
+    fi
+  fi
+
+  # ---- (4) SWEEP SITE: the MARKER write fails because the directory vanished under it. Same predicate,
+  # same two natures, one step earlier.
+  rm -rf "$lock"
+  ovr="$d/f-marker-gone.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  if { : >"$marker"; } 2>/dev/null; then marker_written=1; fi' \
+       '  rm -rf -- "$SUPERVISOR_LOCK" 2>/dev/null || true'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"was GONE when this run looked"* ]] \
+       && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+       && [[ "$out" == *"already gone when it looked"* ]] \
+       && [[ "$out" != *"This is CONTENTION"* ]] && [[ "$out" != *"This is a FILESYSTEM failure"* ]]; then
+      pass "lane-lock sweep/B21 (marker write): same at the marker step — the observation is reported, the cause is not claimed, and it still states that nothing was left behind because nothing was there to remove"
+    else
+      fail "lane-lock-sweep-marker: rc=$rc out=[$out]"
+    fi
+  fi
+
+  # ---- (5) NON-VACUITY for (3)/(4): a REAL filesystem failure must still read as one. The write fails
+  # with the directory intact, so the nature must be `filesystem` and the action must be to check the box.
+  rm -rf "$lock"
+  ovr="$d/f-write-fs.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || true
+    # B21 RETIRED THIS CONTROL'S ORIGINAL PROPERTY, AND THE REPLACEMENT IS THE ONE THAT IS TRUE. It used
+    # to require a genuine filesystem failure to be REPORTED as one — but this code cannot know that it
+    # was one (no errno, and the path's later state cannot decide it), so requiring the confident verdict
+    # was requiring a claim beyond the evidence: a test pinning an overclaim, the shape that kept this
+    # family alive. What must hold instead: the step that failed is named, both candidate causes are
+    # given with the order to check them, and NEITHER is asserted.
+    if [[ "$out" == *"no byte of it was written"* ]] \
+       && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+       && [[ "$out" == *"check the PARENT directory"* ]] \
+       && [[ "$out" == *"CONTENTION: if all of those are clean"* ]] \
+       && [[ "$out" != *"This is a FILESYSTEM failure"* ]] && [[ "$out" != *"This is CONTENTION,"* ]]; then
+      pass "lane-lock B21: a failed write names the STEP that failed, states the cause is not established, and gives both candidates in order — the confident verdict is gone in BOTH directions, not swapped for the other one"
+    else
+      fail "lane-lock-sweep-nonvacuity: out=[$out]"
+    fi
+  fi
+
+  # ---- (6) STRUCTURAL: every remedy branch in the publish-failure refusal takes its FIRST ACTION from
+  # the failure's nature rather than hard-coding one. This is what stops a new cleanup branch being added
+  # with "fix the filesystem problem" baked in, which is how sites 3 and 4 came to misdirect.
+  local body hardcoded
+  body="$(sed -n '/^supervisor_lock_refuse_publish_failed()/,/^}/p' "$SUPERVISOR")"
+  if [[ -z "$body" || "$body" != *'supervisor_lock_refuse_publish_failed() {'* ]]; then
+    fail "lane-lock-sweep-structural-premise: could not extract the refusal from $SUPERVISOR"
+  else
+    # Anchored on an INDENTED assignment, so the function's own `local … remedy='' …` declaration is not
+    # matched — an earlier cut of this guard flagged that line and reported a defect that was not there,
+    # which is this diff's own family showing up in a guard written for it.
+    hardcoded="$(printf '%s\n' "$body" | grep -nE '^ +remedy=' | grep -v 'first_action' || true)"
+    if [[ -z "$hardcoded" ]]; then
+      pass "lane-lock sweep STRUCTURAL: every remedy branch derives its first action from the failure's NATURE — no branch hard-codes an action that could be aimed at the wrong cause"
+    else
+      fail "lane-lock-sweep-hardcoded-remedy: [$hardcoded] — a remedy that names an action without consulting the nature is how a race gets reported as a disk problem"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_race_and_io_error_are_not_conflated
+
+
+
+
+# ---------------------------------------------------------------------------
+# A FAILURE'S CAUSE IS NOT INFERRED FROM THE PATH'S LATER STATE (#3601, roborev job 245 B21).
+#
+# THE TWO DIRECTIONS, INTRODUCED TWO ROUNDS APART, BOTH FROM THE SAME PREDICATE:
+#   * job 244 (B20): `mkdir` fails with EEXIST, the name is present, and the code called it a PATH failure
+#     — contention reported as a disk problem, retry-able state reported as needing repair.
+#   * job 245 (B21): contender A moves the old lock aside; B's operation fails while the name is ABSENT;
+#     A republishes before B reaches the check. B reports a FILESYSTEM fault and sends an operator to
+#     repair permissions on a box that is fine — a disk problem reported where there was contention.
+#
+# A post-failure existence test cannot decide this in either direction, because a peer can remove or
+# recreate that name between the failure and the check. The failing call's errno is the only thing that
+# could, and this script cannot see it; recovering it from `mv`/`mkdir` stderr is locale-dependent guessing
+# dressed as a verdict (the cargo-output-parse class, CLAUDE.md #3400). So the ambiguity is PRESERVED —
+# and made actionable, because "retry versus fix the box" was the sweep's whole value and a shrug would
+# throw it away: the text names both candidates with what to check for each, in order.
+#
+# THE INTERLEAVING IS STAGED FOR REAL — the operation fails while the name is absent and the name is then
+# recreated with a foreign holder record before the code looks, which is exactly A republishing.
+# ---------------------------------------------------------------------------
+test_lane_lock_failure_cause_is_not_inferred_from_later_state() {
+  local d tmp lane lock out rc ovr
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601cause$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) THE B21 INTERLEAVING: disappearance, then reappearance, before the check.
+  rm -rf "$lock"
+  ovr="$d/f-gone-then-back.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! mv -f -- "$tmpf" "$SUPERVISOR_LOCK/pid" 2>/dev/null; then' \
+       '  rm -rf -- "$SUPERVISOR_LOCK"
+  mkdir -p -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+  printf "%s\n" 424242 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+       && [[ "$out" != *"This is a FILESYSTEM failure"* ]] \
+       && [[ "$out" != *"This is CONTENTION,"* ]]; then
+      pass "lane-lock B21: when the name vanishes and REAPPEARS before the check, the refusal asserts NEITHER cause — the interleaving that made the post-failure existence test report a disk fault over pure contention"
+    else
+      fail "lane-lock-b21-infers-cause: rc=$rc out=[$out] — a cause inferred from the path's later state is wrong in this interleaving whichever way it lands"
+    fi
+    # ...and it is still ACTIONABLE, which is the constraint that makes ambiguity acceptable here.
+    if [[ "$out" == *"ORDER TO TELL THEM APART"* ]] \
+       && [[ "$out" == *"A FILESYSTEM FAULT: check the PARENT directory"* ]] \
+       && [[ "$out" == *"CONTENTION: if all of those are clean"* ]]; then
+      pass "lane-lock B21: and the ambiguity is ACTIONABLE — both candidates are named, each with what to check, in the order to check them; an honest 'one of these two, here is how to tell' rather than a shrug"
+    else
+      fail "lane-lock-b21-unactionable: out=[$out] — going ambiguous without telling the operator how to discriminate gives up the sweep's whole value"
+    fi
+  fi
+
+  # ---- (2) THE PATH IS STILL NAMED FIRST, so #3601's own AC7 value survives the ambiguity: an operator
+  # facing an option-shaped or unwritable TMPDIR is still pointed at the parent before anything else.
+  local ro
+  ro="$d/ro-parent"
+  mkdir -p "$ro"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if ( : >"$ro/.probe" ) 2>/dev/null; then
+    rm -f "$ro/.probe" 2>/dev/null || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    skip "lane-lock B21 (2): this uid can write a 0555 directory (running as root), so an uncreatable lock path is not stageable here"
+  else
+    out="$(lane_lock_drive_at "$d" - "$ro" "$lane")"; rc=$?
+    chmod 0755 "$ro" 2>/dev/null || true
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"NOTHING is at that name now"* ]] \
+       && [[ "$out" == *"A FILESYSTEM FAULT: check the PARENT directory"* ]] \
+       && [[ "$out" == *"TMPDIR"* ]]; then
+      pass "lane-lock B21: the uncreatable-path refusal still reports what it OBSERVED and still puts the parent directory and TMPDIR first — the useful half of AC7's fix survives dropping the confident verdict"
+    else
+      fail "lane-lock-b21-lost-ac7-value: rc=$rc out=[$out] — dropping the false claim must not drop the operator's first check"
+    fi
+  fi
+
+  # ---- (3) STRUCTURAL: no site may reintroduce a confident cause. The two emitters are the ONLY place a
+  # cause is described, so a new failure branch cannot quietly assert one — which is how B20 and B21 each
+  # arrived, one branch at a time.
+  local confident
+  confident="$(grep -nE "This is a FILESYSTEM failure|This is CONTENTION|not contention|nature='(filesystem|contention)'" "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  if [[ -z "$confident" ]]; then
+    pass "lane-lock B21 STRUCTURAL: no code line in the supervisor asserts a failure's cause as contention or filesystem — every site routes through the shared ambiguity emitters, so a new branch cannot claim one by accident"
+  else
+    fail "lane-lock-b21-confident-nature-returned: [$confident] — a cause asserted from a post-failure state check is unsound in both directions"
+  fi
+  # ...and both emitters must actually exist and be used, or (3) passes vacuously on a file that says
+  # nothing at all about causes.
+  local uses
+  uses="$(grep -c 'supervisor_lock_nature_unestablished\|supervisor_lock_nature_actions' "$SUPERVISOR" || true)"
+  if [[ "$uses" -ge 6 ]]; then
+    pass "lane-lock B21 STRUCTURAL: the ambiguity emitters are defined and referenced $uses times — (3) is asserting an absence over a file that does discuss causes, not over silence"
+  else
+    fail "lane-lock-b21-emitters-missing: only $uses reference(s) — the absence assert above would be vacuous"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_failure_cause_is_not_inferred_from_later_state
 
 
 # ---------------------------------------------------------------------------

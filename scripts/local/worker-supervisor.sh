@@ -881,14 +881,35 @@ captured_question() {
     | head -n 3 | tr '\n' ' ' | cut -c1-300
 }
 
-# log_size <logfile>: byte size of the file, or 0 when absent. A wedged
-# interactive prompt produces NO further output, so a frozen byte size across two
-# consecutive scans is the positive evidence that distinguishes a genuine wedge
-# from a busy worker that merely printed a tool name and kept writing.
+# log_size <logfile>: byte size of the file, `0` when absent, or `-1` when it COULD NOT BE MEASURED. A
+# wedged interactive prompt produces NO further output, so a frozen byte size across two consecutive
+# scans is the positive evidence that distinguishes a genuine wedge from a busy worker that merely
+# printed a tool name and kept writing.
+#
+# A FAILED MEASUREMENT IS NOT A VALUE (#3601). This used to return the EMPTY STRING when `wc` failed,
+# and empty collapses to `0` in the caller's `-eq` comparison — so two UNMEASURABLE reads compared
+# EQUAL and a healthy worker's log read as frozen. `-1` is the same "no measurement" sentinel the
+# caller's `prev_size` already starts at, so an unmeasurable read can never satisfy the caller's
+# `-ge 0` guards and can never be mistaken for a real byte count.
 log_size() {
-  local f="$1"
+  local f="$1" n
   [[ -f "$f" ]] || { printf '0'; return 0; }
-  wc -c <"$f" 2>/dev/null | tr -d ' '
+  # `|| n=''` IS LOAD-BEARING UNDER `set -e`, NOT DEFENSIVE PADDING. `wc` failing makes the pipeline
+  # non-zero (`pipefail`), and a non-zero command substitution in an ASSIGNMENT aborts an errexit shell
+  # before the classification below ever runs — so without this the probe would not return a sentinel,
+  # it would kill its caller. Measured: the bare call `log_size "$f"` from a `set -e` shell produced NO
+  # output at all. The pre-#3601 form was safe only by accident, because its one caller sits inside a
+  # `set +e` region; a probe's correctness must not depend on that.
+  n="$( { wc -c <"$f"; } 2>/dev/null | tr -d ' ')" || n=''
+  # The digits are enumerated rather than given as a `[0-9]` RANGE, whose members are decided by the
+  # caller's collation.
+  case "$n" in
+    '' | *[!0123456789]*)
+      printf '%s' '-1'
+      return 0
+      ;;
+  esac
+  printf '%s' "$n"
 }
 
 marker_field() {
@@ -1528,7 +1549,9 @@ supervisor_one_line() {
 # (`supervisor_legacy_lock_state`) that opened the lock directory, enumerated it, parsed its `pid` file
 # and measured the recorded pid's liveness, producing `live <pid>` / `stale <pid>` / `unknown <cause>`;
 # it needed a pid-liveness probe (`supervisor_pid_liveness`, deleted with it — this was its only
-# caller), a platform pid bound read from `/proc/sys/kernel/pid_max`, a NUL probe, a single-line parse,
+# caller; #3601 later rebuilt the CAPABILITY, under a name that says whose question it answers, for the
+# PER-LANE lock, where the verdict does change the decision — see the probes above `acquire_lock`), a
+# platform pid bound read from `/proc/sys/kernel/pid_max`, a NUL probe, a single-line parse,
 # a collation-free digit test, and a wholesale neutralisation of the caller's inherited glob/match state
 # (`GLOBIGNORE`, `dotglob`, `nullglob`, `failglob`, `noglob`, `nocasematch`, …) with per-option
 # verification and an order-sensitive restore — because the enumeration's correctness depended on all of
@@ -1927,6 +1950,1018 @@ supervisor_legacy_lock_guard() {
   esac
 }
 
+# ---------------------------------------------------------------------------
+# THE PER-LANE LOCK'S HOLDER PROBES (#3601) — WHY THEY EXIST AND WHY THEY ARE SHAPED LIKE THIS
+#
+# `acquire_lock` below claims a per-lane lock with `mkdir`, and when the name is already taken it has
+# to answer ONE question: MAY WE TAKE IT? Before #3601 it answered with `cat` + `kill -0`, which is
+# two-valued in three separate ways at once, and every one of them collapsed onto the PERMISSIVE
+# answer — RECLAIM:
+#
+#   * the recorded pid was used UNPARSED, so an empty, garbled or multi-line `pid` file made `kill -0`
+#     fail, and that failure read as "the holder is dead";
+#   * `kill -0` fails with EPERM as well as ESRCH, so a LIVE holder owned by another user read as dead;
+#   * `mkdir` followed by `echo $$ >…/pid` leaves a window in which the lock exists with NO pid file,
+#     and a peer arriving in that window read a STARTING holder as a dead one.
+#
+# In all three the outcome is identical and it is the worst one available: the lock is taken from a LIVE
+# holder and two supervisors run in one worktree — the concurrency the lock exists to prevent.
+#
+# THE PROBES ARE THREE-VALUED AND "CANNOT TELL" REFUSES. That is the standing rule (CLAUDE.md; #3549
+# lead ruling 1), and it is the whole content of this fix: `dead` is the ONLY verdict that licenses a
+# reclaim, and it must be AFFIRMATIVE — evidence the process is GONE, never absence of evidence that it
+# is there.
+#
+# AND A REFUSAL IS NOT A DEAD END — RULING 2, WHICH IS THE HARD HALF. "Cannot tell ⇒ refuse" applied
+# without an answer to "then how does a stale lock EVER get cleared, and by whom?" produces a lane
+# blocked forever by a directory, and a guard that never permits work is broken, not fail-closed. The
+# answer, in full:
+#
+#   1. NORMAL EXIT — the holder's own EXIT trap (`supervisor_lock_release`) removes the lock. Nobody
+#      else is involved and nothing has to be cleared.
+#   2. HOLDER KILLED (-9, OOM, reboot) — the lock survives WITH a well-formed pid. The next start reads
+#      it, `supervisor_lock_holder_liveness` returns an AFFIRMATIVE `dead`, and the lock is RECLAIMED
+#      AUTOMATICALLY, exactly as before #3601. This is the stale case that actually happens on this
+#      fleet; it needs no operator, and nothing in this change narrows it.
+#   3. THE UNDECIDABLE REMAINDER — a pid file that is PERSISTENTLY absent or unparseable, or a liveness
+#      probe that could not answer. Only here do we refuse, and every such refusal PRINTS THE PATH AND
+#      A COMMAND THAT CLEARS IT, so the operator is the mechanism and the refusal is the instruction.
+#      A refusal naming no remedy is what turns "fail closed" into "wedged", which is itself a defect.
+#
+# WHY (3) IS A VANISHINGLY SMALL SET, BY CONSTRUCTION RATHER THAN BY HOPE. The pid is published by
+# RENAME (`supervisor_lock_publish`), so the `pid` NAME never exists holding partial content: a reader
+# either does not see the name, or sees the complete value. The only undecidable shapes left are a lock
+# whose holder died inside the one-rename window after `mkdir`, and a `pid` file corrupted by something
+# outside this script. Neither is a state a healthy supervisor passes through.
+#
+# WHAT THESE PROBES DO NOT DEFEND AGAINST, STATED. Anything that can WRITE our lock directory can write
+# any pid it likes into it, and no parse can tell a forged pid from a recorded one. That is not a hole
+# these probes could close: whoever can write `$SUPERVISOR_LOCK` can also `rmdir` it. The parse's job is
+# to reject content no legitimate writer produces (crash residue, a partial write, a truncated file),
+# not to authenticate the writer.
+#
+# WHY NOT `supervisor_pid_liveness`, THE NAME AC3 ASKED FOR: that symbol was DELETED in #3549's final
+# form together with the legacy classifier that was its only caller (see the note above
+# `supervisor_legacy_lock_presence`), and the deletion is asserted by this file's suite. It is not
+# revived here, because the argument that removed it — a verdict that cannot change the decision is a
+# description generator on the decision path — is TRUE of the legacy guard and FALSE here: on this path
+# the verdict selects between refusing and reclaiming. So the capability is rebuilt under a name that
+# says WHOSE question it answers, and the legacy path is asserted (as a PROPERTY, not a name) to
+# measure no pid liveness at all.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# THE PER-LANE LOCK'S CONSTANTS — DELIBERATELY NOT KNOBS (#3601, roborev job 231 B6).
+#
+# Every one of these is an UNCONDITIONAL assignment, not the file's `${VAR:-default}` knob form, and
+# that is the point: a `${VAR:-…}` here would be settable from the environment, and CLAUDE.md's #3312
+# ruling is that a test-only seam is one more thing a real invoker can set — while this suite's own
+# doctrine (`test_worker_supervisor.sh`, the inherited-state drives) says a knob added so tests can go
+# fast ends up testing the knob instead of the code. An earlier cut of this change DID expose
+# `SUPERVISOR_LOCK_PID_TRIES`/`_WAIT` as knobs for exactly that reason; they are constants now and the
+# cases drive the shipped values.
+#
+# The re-read window is sized for PRODUCTION, not for the tests: the state it waits out is ONE rename
+# wide (microseconds), so 1s is four orders of magnitude of margin and survives a heavily loaded box,
+# and it is paid ONLY on a start that finds a peer's lock pid-less — never on an ordinary start.
+# 20 x 0.05s = 1s.
+SUPERVISOR_LOCK_PID_TRIES=20
+SUPERVISOR_LOCK_PID_WAIT=0.05
+# How far into the pid file the NUL scan looks. Any legitimate pid file is a handful of bytes, so this is
+# four orders of magnitude of headroom; beyond it the scan reports `could-not-measure`, never `nul-free`.
+SUPERVISOR_PID_NUL_SCAN=4096
+# supervisor_pid_space_ceiling — echo EXACTLY one of
+#   authoritative <inclusive-max>   the largest pid this platform can ISSUE, from its own metadata
+#   unknown <cause>                 this platform publishes no bound we can read
+#
+# WHY A VALUE BOUND REPLACED A DIGIT-COUNT BOUND (#3601, roborev job 231 B3). The digit count was 10 and
+# every real pid space is at most 7 digits, so a 10-digit corruption was ACCEPTED, cast to `pid_t` by
+# `kill`, reliably reported ESRCH, became an affirmative `dead` and RECLAIMED THE LOCK — while a 15-digit
+# corruption of the same kind refused. One defect class, two widths, opposite outcomes, and the accepting
+# width is the direction #3601 exists to close.
+#
+# THE VALUE IS EXCLUSIVE AND IS CONVERTED (#3601, roborev job 231 B10). `proc(5)` on
+# `/proc/sys/kernel/pid_max`: "This file specifies the value at which PIDs wrap around (i.e., the value
+# in this file is one greater than the maximum PID)." So `pid_max` itself is NOT an issuable pid, and
+# accepting a holder pid equal to it was an off-by-one that let exactly one malformed value through. The
+# inclusive maximum is `pid_max - 1`, and that is what this echoes. A suite case pinned the pre-fix
+# boundary as correct and was fixed with the code, not around it.
+#
+# AND THERE IS NO CROSS-PLATFORM FALLBACK CONSTANT ANY MORE, WHICH IS THE POINT OF THE THIRD VALUE. An
+# earlier cut of this change substituted Linux's own `PID_MAX_LIMIT` (4194304) wherever `/proc` was
+# absent. On macOS, whose real ceiling is 99999, that accepted values up to 42x the platform limit — so
+# malformed pids passed there — and, worse, it was a GUESS ABOUT A PLATFORM WE HAD NOT MEASURED
+# presented as a bound, which is the no-heuristics violation this repository forbids outright
+# (CLAUDE.md #28: authoritative metadata only, never inference). An unmeasurable ceiling is not licence
+# to accept anything, and it is equally not licence to invent a number.
+#
+# SO WHAT DOES `unknown` DO? It makes the platform check NOT APPLY, and — this is the half that matters —
+# the parser then does not CLAIM it applied one. It cannot mean "refuse every pid": that would wedge
+# every non-Linux box permanently, which is the lead's ruling 2 (a guard that never permits work is
+# broken, not fail-closed). It is sound for this specific check, and only because of what the check IS:
+# a REJECTION-ONLY filter. It can turn `accept` into `refuse` and never the reverse, so its absence
+# cannot cause a wrong reclaim that was not already possible — it only fails to tighten. That reasoning
+# does NOT generalise to the liveness or NUL probes, whose verdicts SELECT the reclaim; theirs is
+# `cannot tell => refuse`. The residual with no platform bound is stated at the call site.
+#
+# THIS IS NOT THE DELETED `pid_max` READ COMING BACK. #3549 removed a `/proc/sys/kernel/pid_max` read
+# from the LEGACY guard's classifier because that classifier's verdict could not change the decision.
+# Here it does. The suite asserts the deletion as a PROPERTY over the legacy functions rather than as a
+# name ban over the file, for that reason.
+supervisor_pid_space_ceiling() {
+  local b=''
+  if [[ ! -r /proc/sys/kernel/pid_max ]]; then
+    printf '%s' 'unknown no-platform-pid-bound-published'
+    return 0
+  fi
+  { IFS= read -r b; } 2>/dev/null </proc/sys/kernel/pid_max || b=''
+  # Validated the way a holder pid is: enumerated digits (collation-free, no `[0-9]` range), and short
+  # enough that the arithmetic below cannot overflow a 64-bit shell integer.
+  case "$b" in
+    '' | *[!0123456789]*)
+      printf '%s' 'unknown platform-pid-bound-unparseable'
+      return 0
+      ;;
+  esac
+  if [[ "${#b}" -gt 18 ]]; then
+    printf '%s' 'unknown platform-pid-bound-out-of-arithmetic-range'
+    return 0
+  fi
+  # A wrap point below 2 cannot issue a usable pid at all, so it is not a bound we can convert; saying so
+  # beats echoing `authoritative 0`, which would refuse every pid on this box.
+  if [[ "$b" -lt 2 ]]; then
+    printf '%s' 'unknown platform-pid-bound-implausible'
+    return 0
+  fi
+  printf 'authoritative %s' "$((b - 1))"
+}
+
+# supervisor_lock_pid_nul_free <file> — echo EXACTLY one of
+#   nul-free | contains-nul | could-not-measure <cause>
+#
+# WHY THIS EXISTS AT ALL (#3601, roborev job 231). A NUL byte is invisible to every check that runs on a
+# shell VARIABLE: bash cannot hold one, and `read` discards it silently. MEASURED on bash 5.2.21 — a pid
+# file whose bytes are `4242 NUL LF` reads back as the string `4242`, length 4: non-empty, single line,
+# all decimal digits, non-zero. It therefore passed every gate in `supervisor_lock_pid_read`, the
+# liveness probe said `dead`, and the lock was RECLAIMED — precisely the AC1 defect this parser exists to
+# close, from precisely the input AC1 is about, since a crash mid-write can leave allocated-but-zeroed
+# bytes. So the check must observe the FILE'S BYTES, not the string the shell was able to hold.
+#
+# BASH'S OWN WARNING IS NOT A USABLE SIGNAL, recorded because it looks like one. `$(cat …)` on such a
+# file does emit `warning: … ignored null byte in input` — on STDERR, which the `2>/dev/null` in use at
+# every one of these sites already suppresses; and keying correctness on bash's message TEXT would be
+# the same defect class as a gate parser keyed on cargo's literal status words (CLAUDE.md #3400).
+#
+# THE PRIMARY DETECTOR IS A BUILTIN, AND THAT CHOICE IS LOAD-BEARING, NOT STYLISTIC. `read -d ''` sets
+# the delimiter to NUL, so read STOPS AT the first NUL byte and its stop condition is a direct
+# observation of the raw bytes — no fork, no `PATH` dependency, and nothing for the shell to have
+# discarded first. The obvious alternative, comparing `wc -c` against `tr -d '\000' | wc -c`, was BUILT
+# AND MEASURED AND REJECTED AS PRIMARY: it makes this parser — which `supervisor_lock_publish` calls on
+# EVERY start, for the read-back — depend on two external commands, and with `wc` unavailable a
+# supervisor could not start AT ALL, on a FRESH uncontended lock, refusing forever with a diagnostic
+# about a read-back that never happened. Turning a missing coreutils tool into "this lane can never
+# start" is the permanent-refusal harm this whole change exists to remove (#3549 lead ruling 2).
+#
+# IT SURVIVES AS THE FALLBACK, chosen by CAPABILITY rather than by guess: a `read` that rejects `-d` (or
+# `-n`) exits >1, which is distinguishable from both "found a NUL" (0) and "reached EOF" (1), and only
+# then is the byte-count form used. This is deliberately a capability probe against the real file and
+# not a version test. Two implementations of one predicate is a cost — CLAUDE.md's ruling is that a
+# second implementation's correctness is only knowable by DIFFERENTIAL TESTING — so both paths are
+# driven over the same NUL / clean / unmeasurable inputs by the suite, with the fallback forced through
+# a shipped-derived override rather than assumed unreachable.
+#
+# A FAILED MEASUREMENT IS NOT "NO NULS FOUND", in either path — the third value, for the same reason
+# `log_size` grew one in this change. In the fallback the two counts are validated as DIGIT STRINGS and
+# compared as STRINGS, never with `-eq`, because `-eq` reads an empty operand as 0 and two failed
+# measurements would then compare EQUAL and report `nul-free`.
+#
+# Both paths open the file by REDIRECTION, never as an argument, so an option-shaped path (#3601 AC7)
+# needs no `--` and no quoting here.
+supervisor_lock_pid_nul_free() {
+  local f="$1" probe='' rrc=0 opened=0
+  # `opened=1` is the FIRST command inside the group, so a FAILED REDIRECTION — which never executes the
+  # group's body — is distinguishable from a `read` that ran and reported EOF. Both return 1, and
+  # folding "could not open" onto "no NUL found" would be the permissive collapse this function is for.
+  # `2>/dev/null` precedes `<"$f"`: redirections are applied LEFT TO RIGHT, so a failed open is only
+  # silent if stderr is already redirected when it is attempted.
+  { opened=1; IFS= read -r -d '' -n "$SUPERVISOR_PID_NUL_SCAN" probe; } 2>/dev/null <"$f" || rrc=$?
+  if [[ "$opened" -eq 0 ]]; then
+    printf '%s' 'could-not-measure pid-file-unreadable-by-the-nul-scan'
+    return 0
+  fi
+  if [[ "$rrc" -eq 0 ]]; then
+    # read returned SUCCESS, which means it stopped for one of two reasons and they are told apart by
+    # how much it consumed: fewer characters than the scan bound means it hit the NUL DELIMITER; exactly
+    # the bound means it hit the character LIMIT, and a NUL beyond that point is unobserved — which is
+    # `could-not-measure`, never `nul-free`.
+    if [[ "${#probe}" -lt "$SUPERVISOR_PID_NUL_SCAN" ]]; then
+      printf '%s' 'contains-nul'
+    else
+      printf '%s' 'could-not-measure pid-file-longer-than-the-nul-scan-bound'
+    fi
+    return 0
+  fi
+  if [[ "$rrc" -eq 1 ]]; then
+    # EOF with no NUL delimiter anywhere in the file: AFFIRMATIVELY NUL-free. This is the only branch
+    # that permits acceptance, and it depends on `-d ''` alone — never on `-n`, whose only job is to
+    # bound memory, so an ignored `-n` cannot manufacture a false `nul-free`.
+    printf '%s' 'nul-free'
+    return 0
+  fi
+  # rrc > 1: `read` refused the options, so THIS SHELL cannot run the builtin probe. Fall back.
+  supervisor_lock_pid_nul_free_bytes "$f"
+}
+
+# supervisor_lock_pid_nul_free_bytes <file> — the FALLBACK, same three values, for a shell whose `read`
+# does not support `-d`/`-n`. Compares the file's byte count against its NUL-stripped byte count; `wc -c`
+# and `tr -d '\000'` are both POSIX (no GNU-only flag, no `grep -P`, no `od` parsing, no bash 4).
+#
+# TWO OPENS, so a file rewritten between them yields mismatched counts and is reported `contains-nul` —
+# a REFUSAL. The ambiguity costs a start and can never cost a live holder its lock, which is the
+# direction every branch here is biased in. `wc`'s leading whitespace differs across platforms, so both
+# counts are whitespace-stripped before they are compared.
+supervisor_lock_pid_nul_free_bytes() {
+  local f="$1" raw='' stripped=''
+  raw="$( { wc -c <"$f"; } 2>/dev/null | tr -d '[:space:]')" || raw=''
+  stripped="$( { tr -d '\000' <"$f"; } 2>/dev/null | wc -c | tr -d '[:space:]')" || stripped=''
+  case "$raw" in
+    '' | *[!0123456789]*)
+      printf '%s' 'could-not-measure raw-byte-count-unmeasurable'
+      return 0
+      ;;
+  esac
+  case "$stripped" in
+    '' | *[!0123456789]*)
+      printf '%s' 'could-not-measure nul-stripped-byte-count-unmeasurable'
+      return 0
+      ;;
+  esac
+  if [[ "$raw" == "$stripped" ]]; then
+    printf '%s' 'nul-free'
+  else
+    printf '%s' 'contains-nul'
+  fi
+  return 0
+}
+
+# supervisor_lock_pid_read <pid-file> — echo EXACTLY one of
+#   pid <digits>          a single, canonical, non-zero decimal pid
+#   unparseable <cause>   nothing usable is there, for a NAMED reason
+#
+# Every failure is a NAMED cause and never a bare empty string, because the caller must be able to tell
+# "no pid" from "pid 0" from "unreadable" — collapsing them is the original defect.
+#
+# THE STRUCTURAL PARSE USES NO EXTERNAL COMMAND — `read` and `[[ ]]` only, so none of those verdicts
+# depends on `PATH` — and the file is opened by REDIRECTION, which parses no options, so an
+# option-shaped path (#3601 AC7) needs no `--` here. The digit test enumerates the ten digits rather
+# than using a `[0-9]` RANGE, whose members are decided by the caller's collation (a locale-dependent
+# digit test cost #3549 a review round).
+#
+# THE NUL CHECK IS ALSO BUILTIN-ONLY ON THE PATH THAT RUNS (`supervisor_lock_pid_nul_free`, whose
+# primary detector is `read -d ''`), so the whole parser forks nothing and no verdict depends on `PATH`.
+# Its `wc`/`tr` FALLBACK is reached only by a shell that rejects `read -d ''`, and even then the probe
+# is THREE-valued: an unavailable tool makes this parser REFUSE with a named cause rather than accept an
+# unverified pid. The NUL check runs LAST, after the cheap structural gates, because by then the content
+# is known to be a short run of decimal digits and a NUL is the one remaining thing that could make
+# those digits a different number than the file records.
+supervisor_lock_pid_read() {
+  local f="$1" first='' line='' n=0 readrc=0
+  if [[ ! -e "$f" && ! -L "$f" ]]; then
+    printf '%s' 'unparseable pid-file-absent'
+    return 0
+  fi
+  if [[ ! -f "$f" ]]; then
+    printf '%s' 'unparseable pid-name-is-not-a-regular-file'
+    return 0
+  fi
+  # ONE redirection over the whole loop, so both lines come from ONE open. A failed open makes the
+  # group return non-zero, which is CAPTURED (never folded into "empty"): unreadable and empty are
+  # different facts with different remedies. `|| [[ -n "$line" ]]` keeps a final line that has no
+  # trailing newline, which `read` reports as failure while still assigning it.
+  { while IFS= read -r line || [[ -n "$line" ]]; do
+      n=$((n + 1))
+      if [[ "$n" -eq 1 ]]; then first="$line"; fi
+      if [[ "$n" -ge 2 ]]; then break; fi
+      line=''
+    done; } 2>/dev/null <"$f" || readrc=$?
+  if [[ "$readrc" -ne 0 ]]; then
+    printf '%s' 'unparseable pid-file-unreadable'
+    return 0
+  fi
+  if [[ "$n" -eq 0 ]]; then
+    printf '%s' 'unparseable pid-file-empty'
+    return 0
+  fi
+  if [[ "$n" -gt 1 ]]; then
+    printf '%s' 'unparseable pid-file-has-more-than-one-line'
+    return 0
+  fi
+  case "$first" in
+    '' | *[!0123456789]*)
+      printf '%s' 'unparseable pid-not-all-decimal-digits'
+      return 0
+      ;;
+    # `0*` is BOTH halves of "non-zero and canonical" in one pattern: it rejects `0` itself (a pid 0
+    # target means the whole process GROUP to `kill`, which is the most dangerous operand available
+    # here) and rejects a leading-zero spelling, which no legitimate writer of `$$` produces.
+    0*)
+      printf '%s' 'unparseable pid-zero-or-leading-zero'
+      return 0
+      ;;
+  esac
+  # TWO BOUNDS, IN THIS ORDER, AND THE ORDER IS REQUIRED. The digit count is checked FIRST purely so the
+  # value comparison below cannot overflow a 64-bit shell integer (19 digits can; 18 cannot). It is not
+  # the correctness bound and is deliberately far too loose to be one.
+  if [[ "${#first}" -gt 18 ]]; then
+    printf '%s' 'unparseable pid-digit-count-out-of-well-formedness-bound'
+    return 0
+  fi
+  # ...and then the bound that actually decides: a pid this platform CANNOT ISSUE is malformed content,
+  # not an unusual pid (#3601, roborev job 231 B3). The previous 10-digit rule accepted a corruption that
+  # `kill` then reported ESRCH for, which became an affirmative `dead` and RECLAIMED the lock — while a
+  # wider corruption of the same kind refused.
+  # THE PLATFORM BOUND, WHEN THE PLATFORM PUBLISHES ONE — and nothing pretending to be one when it does
+  # not (#3601, roborev job 231 B10). `unknown` leaves this gate UNAPPLIED, so on a platform with no
+  # published pid space the parser is exactly as strong here as it was before the bound existed: the
+  # structural gates and the 18-digit arithmetic guard above still reject, and a plausible-looking
+  # corruption within them is still accepted, probed, and reclaimed if the kernel says no such process.
+  # That residual is REAL and is stated rather than papered over with a guessed constant.
+  local pidceil=''
+  pidceil="$(supervisor_pid_space_ceiling)" || pidceil='unknown ceiling-probe-aborted'
+  case "$pidceil" in
+    'authoritative '*)
+      if [[ "$first" -gt "${pidceil#authoritative }" ]]; then
+        printf '%s' 'unparseable pid-above-the-platform-pid-space'
+        return 0
+      fi
+      ;;
+  esac
+  # LAST GATE BEFORE ACCEPTANCE: the FILE'S BYTES, not the string the shell was able to hold (#3601,
+  # roborev job 231). Everything above ran on a value `read` had already stripped NULs out of, so a
+  # `<digits> NUL LF` file satisfied all of it. It is deliberately last: it is the only gate that forks,
+  # and by here the content is known to be a short run of decimal digits, so a NUL is the one remaining
+  # thing that could make those digits a different number than the file records.
+  #
+  # A file that carries BOTH a NUL and other junk is refused ABOVE, under whichever gate it trips
+  # first, and that cause is also true of it — the dangerous shape, the one that reaches this line, is
+  # the file whose NUL-stripped content is a clean plausible pid.
+  local nul=''
+  nul="$(supervisor_lock_pid_nul_free "$f")" || nul='could-not-measure nul-probe-aborted'
+  case "$nul" in
+    nul-free) ;;
+    contains-nul)
+      printf '%s' 'unparseable pid-file-contains-nul'
+      return 0
+      ;;
+    *)
+      printf '%s' "unparseable pid-file-nul-check-${nul}"
+      return 0
+      ;;
+  esac
+  printf 'pid %s' "$first"
+}
+
+# supervisor_lock_holder_liveness <pid> — echo EXACTLY one of
+#   live | dead | unknown <cause>
+#
+# `dead` REQUIRES AFFIRMATIVE EVIDENCE OF ABSENCE. `kill -0` returning non-zero is not that evidence: it
+# fails with EPERM (the process EXISTS and we may not signal it — another user's, or one this uid cannot
+# reach) exactly as it fails with ESRCH, and reading the first as the second is what reclaimed live
+# holders' locks.
+#
+# THE TWO WITNESSES, AND THE DIRECTION EACH IS USED IN:
+#   * procfs — `/proc/<pid>` existing is a LOCALE-FREE witness that the process EXISTS. It is used in
+#     that ONE direction. ABSENCE of `/proc/<pid>` is NOT absence of the process (`hidepid=2` hides
+#     another user's pid entirely), so it never yields `dead`. `/proc/self` is checked first so that a
+#     host with no procfs at all (macOS) is distinguished from a host whose procfs answered "no".
+#   * the errno text — bash renders `kill`'s errno, so the two cases are distinguishable by message.
+#     It is read under a `C` locale so the patterns are deterministic; a message matching NEITHER
+#     pattern yields `unknown`, never `dead`.
+#
+# The locale is set by ASSIGNMENT INSIDE the subshell, not as a prefix to the builtin: a temporary
+# assignment to a regular builtin is not guaranteed to reach `setlocale`, and this probe's correctness
+# would then depend on the caller's environment.
+supervisor_lock_holder_liveness() {
+  local pid="$1" msg='' rc=0
+  msg="$( LC_ALL=C; LC_MESSAGES=C; export LC_ALL LC_MESSAGES; kill -0 "$pid" 2>&1 )" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    printf '%s' 'live'
+    return 0
+  fi
+  if [[ -d /proc/self && -d "/proc/$pid" ]]; then
+    printf '%s' 'live'
+    return 0
+  fi
+  case "$msg" in
+    *'No such process'*)
+      printf '%s' 'dead'
+      return 0
+      ;;
+    *'Operation not permitted'*)
+      printf '%s' 'live'
+      return 0
+      ;;
+  esac
+  printf '%s' 'unknown kill-0-verdict-unrecognised'
+}
+
+# Where `supervisor_lock_take` reports WHICH step failed. A plain variable rather than an echoed value
+# because `take` installs the EXIT trap, and a function whose output is captured runs in a subshell where
+# a trap would be discarded. Assigned before any call can read it, so `set -u` is satisfied.
+SUPERVISOR_LOCK_TAKE_CAUSE=''
+
+# supervisor_lock_publish — the `mkdir` has already succeeded, so the NAME is ours. Publish our pid and
+# then VERIFY WE OWN THE LOCK by reading it back. Returns 0 only on verified ownership.
+#
+# THIS IS WHERE THE TUPLE IS MADE UNNECESSARY (#3549 lead ruling 5). The question "do we hold this
+# lock?" was previously answered by inference from three separate values (a parsed pid, its liveness,
+# its identity), and pinning them one at a time is what cost that issue four rounds. It is answered here
+# by ONE observation: the lock's `pid` file reads back as OUR pid.
+#
+# THE PUBLISH IS A RENAME, WHICH IS WHAT CLOSES THE PARTIAL-PID HALF OF AC2. `echo $$ >…/pid` creates
+# the `pid` NAME and then writes it, so a peer can observe the name holding nothing. A rename makes the
+# name appear only with its complete content: a reader sees the name absent, or sees the whole value.
+# The residual window is therefore "the `pid` name is not there yet", one rename wide, and the caller
+# resolves that by measuring persistence rather than by assuming death.
+#
+# WHAT THE READ-BACK DOES AND DOES NOT PROVE. It proves the publish landed and was not clobbered by a
+# racer between the `mkdir` and this read — the case that matters, because a peer running PRE-#3601 code
+# reclaims a pid-less lock and would rename ours aside mid-startup. It is a point-in-time verification
+# and does not prove nobody steals the lock later; `supervisor_lock_release` re-checks ownership at exit
+# for exactly that reason.
+#
+# IT ECHOES WHICH STEP FAILED, AND THAT IS NOT COSMETIC (#3601, roborev job 231 B1). A single "publish
+# failed" collapsed three different facts — the write never happened, the rename never happened, the
+# lock is not ours — onto one caller verdict, and the refusal built from it then ASSERTED all three
+# steps had run: it told the operator "our pid was published into it, and reading it back did not return
+# our pid" for an ENOSPC that never wrote a byte. On a fleet that hits ENOSPC routinely that is a
+# diagnostic pointing at a race that did not occur. Distinguishing them also decides whether the
+# directory we just created is ours to remove again, which is the difference between recovering and
+# manufacturing the undecidable state ourselves.
+supervisor_lock_publish() {
+  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state=''
+  # THE GROUP FORM IS REQUIRED, NOT TIDINESS: a redirection that fails is reported by the SHELL, and
+  # `2>/dev/null` attached to the command does not suppress that — measured, it printed the raw
+  # `TMPDIR`-derived path to stderr, which is both noise and the unrendered-path class (#3549 job 201
+  # F1). Redirecting the group's stderr FIRST covers the redirection setup itself.
+  if ! { printf '%s\n' "$$" >"$tmpf"; } 2>/dev/null; then
+    printf '%s' 'write-failed'
+    return 1
+  fi
+  # DECLINE RATHER THAN OVERWRITE (#3601, roborev job 231 F3/B11; race tracked as #3683). Publication is
+  # NOT bound to the directory instance this process created: a peer can rename our pid-less directory
+  # away, create and publish its OWN lock at the same name, and our `mv -f` then overwrites THAT peer's
+  # ownership record — destroying the evidence of who holds the lane, which is strictly worse than
+  # failing to start. In the legitimate case the directory was created microseconds ago by our own
+  # `mkdir`, so `pid` CANNOT exist and this branch is never taken; if it does exist the directory is not
+  # the one we made, and declining costs us a start we were not entitled to anyway.
+  #
+  # NARROWED, NOT CLOSED — DO NOT READ THIS AS A GUARANTEE. Test-then-move is NOT equivalent to an atomic
+  # create-exclusive: a peer that publishes between this test and the rename below is still overwritten.
+  # The window shrinks from "the whole publish" to "between these two lines" and no further, because
+  # closing it needs serialisation across the complete claim-and-publication operation — the same
+  # primitive as the reclaim ABA above and the read-then-remove in `supervisor_lock_release`, all three
+  # tracked as ONE follow-up (#3683). `mv -n` was considered and NOT used: it is outside POSIX, and GNU
+  # `mv -n` exits 0 WITHOUT MOVING, so its success proves nothing about publication and a platform
+  # lacking `-n` would fail every publish outright — a wedge in exchange for a narrower window that
+  # #3683 closes properly.
+  if [[ -e "$SUPERVISOR_LOCK/pid" || -L "$SUPERVISOR_LOCK/pid" ]]; then
+    rm -f -- "$tmpf" 2>/dev/null || true
+    state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='unparseable read-back-aborted'
+    printf '%s' "declined $state"
+    return 1
+  fi
+  # `--` because both operands are `TMPDIR`-derived and may be option-shaped (#3601 AC7); quoting stops
+  # word-splitting and globbing and does nothing about option parsing.
+  if ! mv -f -- "$tmpf" "$SUPERVISOR_LOCK/pid" 2>/dev/null; then
+    rm -f -- "$tmpf" 2>/dev/null || true
+    # A RACE AND AN I/O ERROR SHARE THIS FAILURE, AND THEY WANT OPPOSITE ACTIONS (#3601, job 244 sweep).
+    # The rename fails with ENOENT when a peer has removed the directory under us — contention, where the
+    # answer is "re-run" — and with EACCES/ENOSPC when the filesystem is broken, where the answer is "fix
+    # the box" and re-running loops forever. They are told apart by whether the directory is still there.
+    if [[ ! -d "$SUPERVISOR_LOCK" ]]; then
+      printf '%s' 'rename-failed-lock-gone'
+    else
+      printf '%s' 'rename-failed'
+    fi
+    return 1
+  fi
+  state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='unparseable read-back-aborted'
+  if [[ "$state" == "pid $$" ]]; then
+    printf '%s' 'ok'
+    return 0
+  fi
+  printf '%s' "not-owned $state"
+  return 1
+}
+
+# supervisor_lock_release — the EXIT trap. Remove the lock ONLY while it is still OURS.
+#
+# THE PRE-#3601 TRAP WAS AN UNCONDITIONAL `rm -rf "$SUPERVISOR_LOCK"`, which is the same defect class as
+# the reclaim it sat next to, pointing the other way: by the time we exit, the directory at that name
+# may be a DIFFERENT holder's lock (a peer reclaimed ours, or an operator cleared it and a new
+# supervisor started), and deleting it hands the lane to a third process while the second one believes
+# it holds exclusion. Ownership is decided by the same one observation the publish used, so the two
+# cannot disagree. A lock that is NOT ours is left exactly as found and the fact is logged — never
+# silently, because "my lock vanished" is otherwise unattributable.
+#
+# THIS CLOSES ONE HALF OF ITS PROBLEM AND IS RECORDED AS PARTIAL, DELIBERATELY (#3601, roborev job 231).
+# CLOSED: the UNCONDITIONAL DELETE. Before this change the trap was `rm -rf "$SUPERVISOR_LOCK"` with no
+# ownership test at all, so a run that had lost its lock deleted the new holder's on the way out.
+# NOT CLOSED: the read and the removal are two operations, so a lock that becomes someone else's between
+# them is still removed. Closing that needs serialization across classify -> reclaim -> claim, which is
+# the same root as the reclaim ABA race at the rename below, and it is tracked as ONE follow-up (#3683)
+# than patched here: the primitive it needs is a lock protecting a lock, whose own staleness reopens
+# "how does a stale instance get cleared, and by whom?" one level down. Left as an explicit partial
+# because dropping the ownership test to avoid a half-fix would REGRESS to the unconditional delete.
+supervisor_lock_release() {
+  local state=''
+  state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='unparseable read-aborted'
+  if [[ "$state" == "pid $$" ]]; then
+    rm -rf -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+    if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then
+      return 0
+    fi
+    # THE SURVIVING LOCK IS RE-READ, BECAUSE `rm -rf` CAN SUCCEED IN PART (#3601, roborev job 240 B16).
+    #
+    # `rm -rf` recurses: it unlinks the CONTENTS first and the directory last, and those need permission
+    # on DIFFERENT directories — unlinking `<lock>/pid` needs write on `<lock>`, unlinking `<lock>` needs
+    # write on its PARENT. So an unwritable parent produces a partial removal, and MEASURED it does
+    # exactly that: `pid` is gone and the directory remains. The previous wording asserted the pid record
+    # was still there and promised the next start would reclaim automatically; in that state the next
+    # start sees a PID-LESS lock, which is undecidable, and REFUSES INDEFINITELY. So the promise was not
+    # merely inaccurate, it pointed away from a wedge — and our own read-only-parent suite case reaches
+    # this state, which is how it was found.
+    #
+    # THIS REPORTS THE WEDGE; IT DOES NOT PREVENT IT, and that distinction is the honest one. The
+    # alternative fix — rename the directory aside before deleting it, so the NAME is freed atomically —
+    # CANNOT prevent this wedge, and that is measured rather than argued: `mv <lock> <lock>.aside` needs
+    # write on the same PARENT that just refused the unlink, and fails with the same EACCES. Restoring the
+    # pid record instead would need a test-then-write against a directory that may by then be a peer's,
+    # i.e. the clobber hazard B11/B12 exist to remove, on the one path that runs at exit with no ability
+    # to report the outcome. So this path stays DIAGNOSIS ONLY: no new operation, no new window, and no
+    # new primitive — serialising the whole release is #3683.
+    #
+    # WHAT IT BUYS, precisely: the state was already reachable before this change (the pre-#3601 trap was
+    # the same unconditional `rm -rf`, silently), and it was undiagnosed. It is now named at the moment it
+    # happens, with the cause an operator must fix — the parent's permissions — because the remedy printed
+    # by a later start's refusal (`rmdir`) needs that same permission and fails without it.
+    local after=''
+    after="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || after='unparseable post-removal-probe-aborted'
+    case "$after" in
+      "pid $$")
+        log "$(supervisor_one_line "exit: FAILED to remove our own lock $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it still exists and STILL records this process's pid ($$), verified after the attempt. The next start will find that holder affirmatively dead and reclaim it automatically; no action is needed unless starts keep refusing (#3601).")"
+        ;;
+      'pid '*)
+        log "$(supervisor_one_line "exit: did NOT remove $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it still exists and now records holder pid ${after#pid }, which is not this process ($$). Something took that name during our exit; its record is intact and this run did not overwrite it. The next start will read that holder and report it by pid (#3601).")"
+        ;;
+      *)
+        log "$(supervisor_one_line "exit: PARTIALLY removed our own lock $(supervisor_shell_quote "$SUPERVISOR_LOCK") — the pid record is GONE and the directory REMAINS (its pid file now reads [$after]). This will NOT clear itself: a pid-less lock is undecidable, so the next start REFUSES over it rather than reclaiming it. ACTION IS NEEDED. \`rm -rf\` removes a directory's contents before the directory itself, and those need write permission on DIFFERENT directories, so the usual cause is that this lock's PARENT directory is not writable by this user — check that first, because the removal a refusing start prints needs the same permission and will fail without it (#3601).")"
+        ;;
+    esac
+    return 0
+  fi
+  # NOT OURS — AND "NOT OURS" IS NOT THE SAME FACT AS "SOMEONE ELSE'S" (#3601, roborev job 240 B17).
+  # Every state other than our own pid used to be reported as "Something else owns that name now",
+  # including absent, unreadable, malformed and NUL-bearing records. Those establish only that ownership
+  # CANNOT BE VERIFIED; attributing them to another process names a holder that may not exist, and sends
+  # an operator looking for it. The decision is the same either way — we remove nothing — so only the
+  # wording differs, which is exactly why it has to be the wording that is true.
+  #
+  # Rendered, not interpolated raw (#3549 job 201 F1 class, at a new site — #3601 roborev job 231 B7):
+  # the path comes from the environment, and a newline or an ESC in it would split this line or forge an
+  # unprefixed one. `supervisor_shell_quote` renders the path as a paste-safe value; `supervisor_one_line`
+  # guarantees the composed message is ONE physical line whatever it interpolated.
+  case "$state" in
+    'pid '*)
+      log "$(supervisor_one_line "exit: NOT removing $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it records holder pid ${state#pid }, not this process ($$). Another holder owns that name, so removing it would break a holder that is not us (#3601).")"
+      ;;
+    *)
+      log "$(supervisor_one_line "exit: NOT removing $(supervisor_shell_quote "$SUPERVISOR_LOCK") — this run could not VERIFY that it owns it: its pid file reads [$state], which is an absent, unreadable or malformed record. That does NOT establish that another process holds this lock, and it is not a reason to delete one either — an unverifiable record is left exactly as found (#3601).")"
+      ;;
+  esac
+  return 0
+}
+
+# supervisor_lock_refuse <headline> <detail> <remedy-prose> [<remedy-command>] — the per-lane lock's
+# refusal channel, and the counterpart of ruling 2: NO REFUSAL LEAVES WITHOUT A REMEDY.
+#
+# `printf`, never `echo`: `echo` inherits `xpg_echo` and would interpret a backslash sequence in a
+# `TMPDIR`-derived path (this was the FOURTH SHAPE recorded as a residual at this call site under #3549;
+# it is closed for these lines by this emitter). Prose is rendered through `supervisor_one_line` so no
+# interpolated path can split a line or forge an unprefixed one, and a printed COMMAND is built by the
+# caller through `supervisor_shell_quote` so it is paste-safe and stays on one physical line — the same
+# contract the legacy guard's emitter holds, for the same reasons, stated at length there.
+supervisor_lock_refuse() {
+  local headline="$1" detail="$2" remedy="$3" remedy_cmd="${4:-}" shown=''
+  headline="$(supervisor_one_line "$headline")" || true
+  detail="$(supervisor_one_line "$detail")" || true
+  remedy="$(supervisor_one_line "$remedy")" || true
+  shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")" || true
+  printf '%s\n' "worker-supervisor: $headline (lock $shown)" >&2
+  printf '%s\n' "worker-supervisor: $detail" >&2
+  printf '%s\n' "worker-supervisor: remedy — $remedy" >&2
+  # A command that is not one physical line is DEMOTED TO PROSE rather than printed bare, so the
+  # one-bare-line-is-the-command contract holds by the EMITTER's rules and not by a caller's discipline.
+  case "$remedy_cmd" in
+    '') ;;
+    *"$SUPERVISOR_LF"* | *"$SUPERVISOR_CR"* | *"$SUPERVISOR_ESC"*)
+      printf '%s\n' "worker-supervisor: a remedy command for this state carries an embedded control character, so it is NOT printed as a runnable line; rendered for reading only: $(supervisor_one_line "$remedy_cmd")" >&2
+      ;;
+    *)
+      printf '%s\n' "$remedy_cmd" >&2
+      ;;
+  esac
+  exit 1
+}
+
+# supervisor_lock_take — claim the lock NAME and prove we own it. Returns
+#   0 = the lock is ours, published and read back, EXIT trap installed
+#   1 = the name was not free (or could not be created) — nothing was written
+#   2 = the name became ours but the published pid did NOT read back as ours
+#
+# Return 2 is a genuine state, not paranoia: a peer running PRE-#3601 code reclaims a pid-less lock, so
+# it can rename ours aside inside our own publish window. Distinguishing it from 1 matters because the
+# two have different remedies (1 = someone holds it; 2 = someone took it FROM us mid-startup).
+#
+# The trap is installed only AFTER ownership is verified. A crash in the window before that leaves an
+# ordinary reclaimable stale lock (case 2 of the clearing story above), which is the benign residue.
+supervisor_lock_take() {
+  SUPERVISOR_LOCK_TAKE_CAUSE=''
+  # `--` because the operand is `TMPDIR`-derived and may be option-shaped (#3601 AC7).
+  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1
+  local marker="$SUPERVISOR_LOCK/own.$$" pub=''
+  # THE OWNERSHIP MARKER, WRITTEN BEFORE ANYTHING ELSE (#3601, roborev job 236 B12).
+  #
+  # WHY IT EXISTS. The un-create below used to be an UNCONDITIONAL `rmdir`, which is not bound to the
+  # directory this process created: a legacy peer can rename ours aside and `mkdir` its OWN pid-less lock
+  # at the same name, and a non-recursive `rmdir` then SUCCEEDS against the peer's empty startup
+  # directory — deleting a live peer's lock and freeing the name for a third claimant. That is a
+  # regression the previous round introduced, not a pre-existing defect: it traded "we wedge our own lane
+  # with an empty lock" for "we can delete a peer's startup lock", which is the worse of the two. The
+  # marker makes the removal conditional on the directory still being the instance we made.
+  #
+  # WHY A STALE MARKER CANNOT ALIAS US. This path is reached only when OUR `mkdir` succeeded, which means
+  # the directory did not exist a moment ago — so it cannot already contain an `own.<pid>` left by a dead
+  # process that happened to have our pid. Pid reuse therefore cannot forge this token for this decision.
+  #
+  # NARROWED, NOT CLOSED — AND HERE IS THE BOUND, BECAUSE THE MARKER IS NOT AIRTIGHT. Creating it is a
+  # SECOND step after `mkdir`, so there is a window in which the directory exists without it. A peer that
+  # replaces the directory inside THAT window receives our marker in its own directory, and the un-create
+  # would then remove the peer's directory exactly as before. What makes this worth doing anyway is the
+  # window's SIZE: it is two adjacent syscalls with no intervening I/O, where the window it replaces
+  # spanned the whole publish attempt (a write, a decline test and a rename). Ordering the marker before
+  # the publish is what makes it the narrowest window available to this code, and nothing here can make it
+  # zero — that needs serialisation of the complete claim-and-publication operation, which is #3683,
+  # together with the reclaim ABA and the release read-then-remove. Do not read the marker as a guarantee.
+  # SAME PREDICATE AS THE RENAME BELOW (#3601, job 244 sweep): this write fails with ENOENT when a peer
+  # has already removed the directory we just created — contention — and with EACCES/ENOSPC when the
+  # filesystem cannot take a zero-byte file. Reporting the first as the second sends an operator to check
+  # a disk that is fine.
+  # ONE OUTCOME VARIABLE, SO EACH BRANCH HAS A LINE OF ITS OWN. An earlier cut folded the write and the
+  # existence re-test into two `if`s whose conditions were indistinguishable from the un-create's, which
+  # made a mutant unable to name either uniquely — `sv_mutant_override` correctly refused it.
+  local marker_written=0
+  if { : >"$marker"; } 2>/dev/null; then marker_written=1; fi
+  if [[ "$marker_written" -eq 0 ]]; then
+    # NO OWNERSHIP EVIDENCE, SO NO REMOVAL. We know we created the directory and we cannot PROVE the one
+    # at that name now is still ours, so it is left in place and reported. That risks the empty-lock wedge
+    # B1 removed — but the cause is a filesystem that cannot take a zero-byte file, the same failure the
+    # remedy names, and guessing our way to a deletion is how a peer's lock gets destroyed.
+    if [[ ! -d "$SUPERVISOR_LOCK" ]]; then
+      SUPERVISOR_LOCK_TAKE_CAUSE='marker-failed-lock-gone cleanup-declined-lock-already-gone'
+    else
+      SUPERVISOR_LOCK_TAKE_CAUSE='marker-failed cleanup-declined-no-ownership-evidence'
+    fi
+    return 3
+  fi
+  # `supervisor_lock_publish` runs in a command substitution, which is a SUBSHELL — fine, because it
+  # installs no trap. The `trap` below must NOT be inside one, which is why the cause travels back
+  # through a variable instead of this function echoing it.
+  pub="$(supervisor_lock_publish)" || true
+  if [[ "$pub" == 'ok' ]]; then
+    # The marker's job is done the moment ownership is verified, and it must not outlive it: a held lock
+    # carrying an extra file makes the non-recursive clear command an operator is handed elsewhere refuse.
+    if ! rm -f -- "$marker" 2>/dev/null; then
+      log "$(supervisor_one_line "startup: could not remove our own ownership marker $(supervisor_shell_quote "$marker") after acquiring the lock. Harmless to this run — the lock is held and its release removes the directory wholesale — but a non-recursive manual clear of that lock would refuse until the marker is gone (#3601).")"
+    fi
+    trap 'supervisor_lock_release' EXIT
+    return 0
+  fi
+  SUPERVISOR_LOCK_TAKE_CAUSE="$pub"
+  # `declined` joins `not-owned` (#3601 B11): both mean the directory at that name is not ours, so both
+  # LEAVE IT ALONE. The difference is only whether we wrote into it, and the refusal says which. Our own
+  # marker is removed either way — it is unambiguously ours by name, and on the `declined` path it may be
+  # sitting in the PEER's directory, where leaving it would be litter in someone else's lock.
+  if [[ "$pub" == 'not-owned'* || "$pub" == 'declined'* ]]; then
+    rm -f -- "$marker" 2>/dev/null || true
+    return 2
+  fi
+  # WE CREATED THE DIRECTORY AND NEVER PUBLISHED INTO IT (#3601, roborev job 231 B1). Leaving it would
+  # MANUFACTURE the pid-less lock that every other branch here refuses to reclaim — this run would wedge
+  # its own lane until an operator cleared it, which is the lead's ruling 2 inverted: we would have
+  # created the undecidable state ourselves and then refused over it.
+  #
+  # SO THE REMOVAL IS BOUND TO THE INSTANCE WE CREATED, not merely non-recursive (#3601 B12). The
+  # non-recursive `rmdir` protects a peer that has already PUBLISHED — the directory is then non-empty and
+  # the removal fails harmlessly — and protects nothing at all against a peer that has `mkdir`'d and not
+  # yet published, which is an EMPTY directory a `rmdir` succeeds against. The marker is what distinguishes
+  # those: if it is gone, the directory at that name is not the one we made, and we remove NOTHING.
+  if [[ ! -e "$marker" && ! -L "$marker" ]]; then
+    local foreign=''
+    foreign="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || foreign='unparseable residual-probe-aborted'
+    case "$foreign" in
+      'pid '*) SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-declined-foreign-holder $foreign" ;;
+      *)       SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-declined-foreign-instance $foreign" ;;
+    esac
+    return 3
+  fi
+  rm -f -- "$marker" 2>/dev/null || true
+  rm -f -- "$SUPERVISOR_LOCK/pid.tmp.$$" 2>/dev/null || true
+  rmdir -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+  # ...AND THE OUTCOME IS VERIFIED, NOT ASSUMED (#3601, roborev job 231 B9). Both removals above ignore
+  # their exit status — deliberately, because a peer populating the directory is a legitimate reason for
+  # `rmdir` to refuse — so NOTHING here knows whether the lock is gone until it looks. The refusal built
+  # from this cause used to state unconditionally that the directory "has been REMOVED AGAIN": with a
+  # peer's record inside, or a filesystem that refuses the removal, the lock REMAINED while the operator
+  # was told there was nothing to clear. Same defect family as the refusal that claimed a read-back it
+  # never made (B1) and the mutant comment that claimed an isolation it did not have (B4) — an artifact
+  # asserting a step that did not run, which is worse than no artifact because it is what stops the next
+  # reader looking. So the verdict carries what was OBSERVED after the attempt, and the cases are
+  # distinguished because their remedies differ: nothing to do, a foreign holder to leave alone, or a
+  # residual to clear.
+  if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then
+    SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-verified-absent"
+    return 3
+  fi
+  local residual=''
+  residual="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || residual='unparseable residual-probe-aborted'
+  case "$residual" in
+    'pid '*) SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-failed-foreign-holder $residual" ;;
+    *)       SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-failed-residual $residual" ;;
+  esac
+  return 3
+}
+
+# supervisor_lock_refuse_unowned — the name became ours and the read-back said it is not.
+#
+# TWO REACHING PATHS, TWO DIFFERENT TRUTHS, AND THE TEXT MUST NOT MIX THEM UP (#3601, B9 family). The
+# `declined` path never wrote anything — a `pid` file already existed, so the publish refused to
+# overwrite it — while the `not-owned` path DID publish and then read back someone else's pid. Saying
+# "our pid was published into it" on the declined path would assert a step that did not run, which is the
+# defect class B1, B4 and the reclaim comment were all instances of.
+supervisor_lock_refuse_unowned() {
+  local cause="${1:-not-owned unrecorded}" detail=''
+  case "$cause" in
+    'declined'*)
+      # AND IT DOES NOT NAME A CAUSE IT DID NOT OBSERVE (#3601, roborev job 242 B19). It used to conclude
+      # "the directory at that name is therefore not the one this process created: a peer renamed ours
+      # aside and published its own between our two steps". Finding a `pid` record proves only that
+      # publication must be DECLINED. It does not identify how the record got there: a peer renaming ours
+      # aside and publishing is one way, and something writing a `pid` file straight into the directory we
+      # created — an external writer, an operator, a stray tool — is another, and this code cannot tell
+      # them apart. Directory-instance identity is not verifiable on this path and per #3683 cannot be
+      # made so here, so the specific race is a story, not an observation.
+      #
+      # WHAT THIS PATH MAY CLAIM, NARROWED TO WHAT IS TRUE (#3601, roborev job 238 B15 — the SEVENTH
+      # instance of the alibi family, and it is in the text written to FIX the family's second instance).
+      # It used to say the run "wrote NOTHING" and that "NOTHING at that path has been modified", and
+      # both are false in detail: `supervisor_lock_publish` writes its staging file `pid.tmp.$$` BEFORE it
+      # tests for an existing `pid`, and `supervisor_lock_take` may then remove an ownership marker from
+      # the very directory being described. The load-bearing claim — the only one an operator needs and
+      # the only one this path establishes — is that THE EXISTING HOLDER RECORD WAS NOT OVERWRITTEN OR
+      # PUBLISHED OVER. That is what it says now, and the test asserts PRESERVATION OF THAT RECORD rather
+      # than an absence of modification the code never provided.
+      detail="the lock directory was created by this process and a holder record then APPEARED in the lock before this run could publish its own, so it declined to publish over it; that record reads [${cause#declined }] and is INTACT — it was neither overwritten nor replaced. HOW that record got there is NOT established by this run: another supervisor may have taken the name, or something may have written a pid file into the directory directly, and nothing here can tell those apart. This run did write and then remove its own scratch entries in that directory (a staging file, and an ownership marker), so it is not true that nothing there was touched — what is true, and what matters, is that the holder record itself was left exactly as found"
+      ;;
+    *)
+      # This path DID write: `pid` at that name currently holds OUR pid, over whatever was there. Saying
+      # "nothing has been modified" here would be false, and it was — for about an hour, until the B9
+      # class sweep read it back (#3601, roborev job 231 B9).
+      detail="the lock directory was created by this process and our pid WAS published into it; reading it back did not return our pid ($$) — the read-back said [${cause#not-owned }] — so between those two steps something else took the lock name, and our published pid may have overwritten that holder's record (the race #3683 closes)"
+      ;;
+  esac
+  supervisor_lock_refuse \
+    "refusing to start — this run CREATED the lock and then could not verify it OWNS it" \
+    "$detail. The most likely cause is a supervisor running PRE-#3601 code on this box: it reads a lock whose pid file is not yet present as STALE and renames it aside, which is the defect #3601 fixes. Starting now would put two supervisors in one worktree, so this run stops instead" \
+    "re-run this supervisor: if the other holder is a real one, the next start will say so and name its pid; if it was a pre-#3601 reclaim, upgrade every checkout on this box that can launch a supervisor past #3601 so no peer reclaims a pid-less lock again"
+}
+
+# supervisor_lock_refuse_publish_failed <cause> — the lock NAME became ours and we could not record
+# ourselves in it (#3601, roborev job 231 B1).
+#
+# THIS IS A SEPARATE REFUSAL BECAUSE IT IS A SEPARATE FACT, and conflating it cost a false diagnostic:
+# an ENOSPC or a read-only filesystem never writes a byte, so telling the operator that "our pid was
+# published and read back wrong" describes a race that did not happen and hides the one that did. It also
+# reports that the directory we created was REMOVED AGAIN, because an operator who reads "could not
+# start" and then finds a lock sitting there will otherwise go looking for a holder.
+supervisor_lock_refuse_publish_failed() {
+  local cause="$1" pub="$1" cleanup='' what='' aftermath='' remedy='' cmd=''
+  pub="${cause%% *}"
+  case "$cause" in
+    *' '*) cleanup="${cause#* }" ;;
+  esac
+  # THE STEP THAT FAILED IS REPORTED; THE *CAUSE* IS NOT CLAIMED (#3601, roborev job 245 B21). An earlier
+  # cut carried a `nature` per cause — `filesystem` for a failed write or rename, `contention` when the
+  # directory had vanished — derived from a post-failure `-d` test. That test cannot decide it in either
+  # direction (see `supervisor_lock_nature_unestablished`), and `write-failed` claimed a filesystem fault
+  # with no test at all. So each branch now states only WHAT it observed, and the shared ambiguity text
+  # states what could have caused it, with the order to check.
+  local what='' nature_line='' first_action=''
+  case "$pub" in
+    marker-failed)
+      what='writing our OWNERSHIP MARKER into the lock FAILED — this run got the lock name and could not record, even provisionally, that the directory is its own; the directory was still there when this run looked'
+      ;;
+    marker-failed-lock-gone)
+      what='writing our OWNERSHIP MARKER into the lock FAILED, and the lock directory this run had just created was GONE when this run looked'
+      ;;
+    write-failed)
+      what='writing our pid into the lock FAILED — no byte of it was written'
+      ;;
+    rename-failed)
+      what='publishing our pid into the lock FAILED at the rename — the staging file was written and could not be moved into place; the lock directory was still there when this run looked'
+      ;;
+    rename-failed-lock-gone)
+      what='publishing our pid into the lock FAILED at the rename, and the lock directory this run had created was GONE when this run looked'
+      ;;
+    *)
+      what="recording our pid in the lock FAILED ([$pub])"
+      ;;
+  esac
+  nature_line="$(supervisor_lock_nature_unestablished)"
+  first_action="$(supervisor_lock_nature_actions)"
+  # EVERY SENTENCE BELOW IS BOUND TO AN OBSERVATION `supervisor_lock_take` ACTUALLY MADE (#3601 B9).
+  case "$cleanup" in
+    cleanup-verified-absent)
+      aftermath='The directory this run created has been removed again and its absence was VERIFIED after the removal, so this failure leaves no pid-less lock behind for the next start to have to refuse over'
+      remedy="$first_action. Nothing needs clearing by hand"
+      ;;
+    'cleanup-failed-foreign-holder '*)
+      aftermath="This run then tried to remove the directory it had created and it REMAINS — and it now holds a holder record that is NOT ours ([${cleanup#cleanup-failed-foreign-holder }]). A peer published into it while our publish was failing; the removal is NON-RECURSIVE precisely so that it cannot delete that record, and nothing of that peer's has been touched"
+      remedy="nothing to clear: the path named above belongs to another holder, which this run left intact. $first_action; the next start will read that holder and report it by pid"
+      ;;
+    cleanup-declined-lock-already-gone)
+      aftermath='There was nothing for this run to remove: the directory it created was already gone when it looked. Nothing was removed and nothing is left behind by this run'
+      remedy="$first_action"
+      ;;
+    cleanup-declined-no-ownership-evidence)
+      aftermath='This run therefore did NOT attempt to remove the directory it created: with no marker written it cannot prove the directory now at that name is still its own, and a removal on that guess is how a peer that took the name in the meantime loses its lock. A lock MAY be sitting at that path — this run makes no claim either way'
+      remedy="$first_action. If starts keep refusing over a lock at that path, inspect it and clear it with the next line, which is NON-RECURSIVE and refuses if anything is inside that you have not examined$(supervisor_lock_shape_note)"
+      cmd="$(supervisor_lock_clear_command)"
+      ;;
+    'cleanup-declined-foreign-holder '*)
+      aftermath="This run then found that the directory at that name is NOT the one it created — its ownership marker is gone from it — and that it holds a holder record ([${cleanup#cleanup-declined-foreign-holder }]). Another supervisor took the name while our publish was failing, so this run removed NOTHING"
+      remedy="nothing to clear: the path named above belongs to another holder, which this run left intact. $first_action; the next start will read that holder and report it by pid"
+      ;;
+    'cleanup-declined-foreign-instance '*)
+      aftermath="This run then found that the directory at that name is NOT the one it created — its ownership marker is gone from it — and that it carries no holder record yet ([${cleanup#cleanup-declined-foreign-instance }]). That is another supervisor's start in progress, which is exactly the lock a blind removal would have destroyed, so this run removed NOTHING"
+      remedy="nothing to clear: another supervisor is starting at that path and this run left it alone. $first_action; the next start will read that holder and report it by pid"
+      ;;
+    'cleanup-failed-residual '*)
+      aftermath="This run then tried to remove the directory it had created and it REMAINS ([${cleanup#cleanup-failed-residual }]) — the removal did NOT succeed, so a lock DOES sit at that path and the next start will refuse over it until it is cleared"
+      remedy="$first_action. Then clear the leftover lock with the next line, on its own, exactly as printed — it is NON-RECURSIVE, so it refuses if anything is inside that you have not examined$(supervisor_lock_shape_note)"
+      cmd="$(supervisor_lock_clear_command)"
+      ;;
+    *)
+      aftermath='The removal outcome for the directory this run created was NOT ESTABLISHED, so this refusal makes no claim about whether a lock remains at that path'
+      remedy="$first_action. Then inspect the path named above before re-running: this run could not establish whether it left a lock there"
+      ;;
+  esac
+  supervisor_lock_refuse \
+    "refusing to start — the lock name became ours and this run could not record itself in it" \
+    "$what. $nature_line. $aftermath" \
+    "$remedy" \
+    "$cmd"
+}
+
+# supervisor_lock_refuse_undecidable <cause> <what-was-observed> — the "cannot tell" refusal, and the
+# only place ruling 2's remedy obligation actually bites: this is the branch that would otherwise leave a
+# lane blocked by a directory with nothing to do about it.
+#
+# THE PRINTED COMMAND IS `rmdir`, AND THE CHOICE IS THE SAFETY ARGUMENT. `rmdir` is NON-RECURSIVE and
+# REFUSES a non-empty directory, so a mis-paste cannot delete a holder's pid record: the worst outcome is
+# "Directory not empty", which is itself the signal to go and look. `rm -rf` would be the opposite — it
+# would silently destroy the evidence of the very state we could not decide. `--` terminates option
+# parsing because the path is `TMPDIR`-derived, and the path is rendered by `supervisor_shell_quote` so
+# the line is paste-safe on one physical line.
+supervisor_lock_refuse_undecidable() {
+  local cause="$1" observed="$2"
+  supervisor_lock_refuse \
+    "refusing to start — the lock is HELD and this run could NOT DECIDE whether its holder is alive ($cause)" \
+    "$observed. THIS IS NOT A REPORT THAT THE HOLDER IS DEAD, and it is not a report that it is alive: it is a report that the question was undecidable here. A reclaim needs AFFIRMATIVE evidence that the recorded holder is gone, and there is none, so this run stops rather than take a lock that may belong to a live supervisor (#3601). An ordinary stale lock — one left by a holder that was killed — carries a well-formed pid, is decided automatically, and never reaches this message" \
+    "PRECONDITION FIRST — establish that no supervisor is running for this lane (bash scripts/flow/claim-heartbeat.sh dead-lanes, and check for a live worker-supervisor process for this lane). Once you have, clear the lock by running the next line, on its own, exactly as printed. It is NON-RECURSIVE on purpose: it REFUSES if anything is still inside, so it cannot delete a holder's record you have not examined — if it refuses, list the contents and decide before removing anything. Removing a lock also needs WRITE permission on its PARENT directory, which reading one does not: if the line below fails with a permission error, that is why, and it is also how a supervisor's own exit can leave a pid-less lock here (#3601)$(supervisor_lock_shape_note)" \
+    "$(supervisor_lock_clear_command)"
+}
+
+# supervisor_lock_clear_command / supervisor_lock_shape_note — THE REMEDY MUST MATCH WHAT IS ACTUALLY AT
+# THAT NAME (#3601, roborev job 231 B2).
+#
+# A refusal that prints a command which CANNOT WORK is worse than one that prints none: it spends the
+# operator's trust and then fails, and they have no way to tell whether the failure means "wrong command"
+# or "something is seriously wrong with this lock". `rmdir` is right for a DIRECTORY and wrong for every
+# other shape, and the other shapes are reachable — a lock NAME that is a regular file or a dangling
+# symlink refuses with `pid-file-absent`, because `<file>/pid` does not exist.
+#
+# `-L` IS TESTED BEFORE `-d`, and that order is the whole correctness of it: `[[ -d ]]` FOLLOWS a symlink,
+# so a symlink-to-a-directory would otherwise be handed `rmdir`, which fails with ENOTDIR. `rm -f` on a
+# symlink removes the LINK and never touches the target, so it is the safe answer for both link shapes.
+# Every command emitted here is NON-RECURSIVE, so none of them can delete contents nobody examined.
+supervisor_lock_clear_command() {
+  local shown=''
+  shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")" || true
+  if [[ -L "$SUPERVISOR_LOCK" ]]; then
+    printf 'rm -f -- %s' "$shown"
+  elif [[ -d "$SUPERVISOR_LOCK" ]]; then
+    printf 'rmdir -- %s' "$shown"
+  elif [[ -e "$SUPERVISOR_LOCK" ]]; then
+    printf 'rm -f -- %s' "$shown"
+  fi
+}
+
+supervisor_lock_shape_note() {
+  if [[ -L "$SUPERVISOR_LOCK" ]]; then
+    printf '%s' '. NOTE: that name is a SYMLINK, not a lock directory — the line below removes the LINK and does not touch whatever it points at, which is why it is not an rmdir'
+  elif [[ -d "$SUPERVISOR_LOCK" ]]; then
+    # THE ONE CASE WHERE A CORRECT `rmdir` STILL REFUSES, NAMED RATHER THAN LEFT TO SURPRISE (#3601 B12).
+    # This is NOT the B2 defect of printing a command that could never work for the shape at that name:
+    # `rmdir` is the right command for a directory, and it refuses only when there is content the
+    # operator must look at first, which is the safety property it was chosen for. A supervisor killed
+    # between creating its lock and recording its pid leaves an ownership marker behind — a state this
+    # change introduced — so the note says so and says what to do when the line refuses.
+    printf '%s' '. NOTE: the line below is NON-RECURSIVE and will REFUSE if anything is inside — including an `own.<pid>` ownership marker or a `pid.tmp.<pid>` staging file left by a supervisor killed between creating this lock and recording its pid. If it refuses, list the contents (ls -lna on the path above) and decide before removing anything'
+  elif [[ -e "$SUPERVISOR_LOCK" ]]; then
+    printf '%s' '. NOTE: that name is NOT a directory, so it is not a lock this script could ever have written — the line below removes that one file, non-recursively'
+  else
+    printf '%s' '. NOTE: nothing exists at that name any more, so there is nothing to clear and no command is printed below'
+  fi
+}
+
+# supervisor_lock_refuse_lost_race — a dead holder's lock was cleared and the name was taken again
+# before we could claim it. This is the loud exit the pre-#3601 code reached as "failed to acquire lock",
+# kept loud and given the cause it always had: we lost a race, we are not co-running.
+supervisor_lock_refuse_lost_race() {
+  supervisor_lock_refuse \
+    "refusing to start — the lock name was taken again before this run could claim it" \
+    "a stale lock left by a dead holder is gone from that name and the name was claimed again before this run could take it, so this run did NOT get the lock. WHO cleared it and WHO holds it now are both unestablished — this run reached its own claim and found the name taken, which is all it observed; it does not know that its own rename is what cleared the lock, and it has not read the new holder. The loser stops here rather than co-running" \
+    "nothing is wrong: re-run this supervisor. If it keeps losing, the winner is a live supervisor for this lane and the next start will name its pid"
+}
+
+# supervisor_lock_nature_unestablished / supervisor_lock_nature_actions — THE ONE THING EVERY FAILURE
+# SITE IN THIS FILE MAY SAY ABOUT *WHY* AN OPERATION FAILED (#3601, roborev job 245 B21).
+#
+# WHY THERE IS NO CONFIDENT VERDICT LEFT. Every one of these sites tried to tell contention apart from a
+# filesystem fault by looking at whether the lock path exists AFTER the failure. That is unsound in BOTH
+# directions, and the two directions were introduced two rounds apart:
+#   * job 244 (B20) fixed "contention reported as a disk problem": `mkdir` fails with EEXIST, the name is
+#     present, and the code called it a path failure.
+#   * job 245 (B21) is the inverse it created: contender A moves the old lock aside, B's operation fails
+#     while the name is ABSENT, A republishes before B reaches the check — and B reports a filesystem
+#     fault and sends an operator to repair permissions on a box that is fine.
+# A post-failure existence test cannot decide this, because a peer can remove or recreate that name
+# between the failure and the check, either way round. The failing call's errno is the only thing that
+# could decide it and this script cannot see it.
+#
+# AND IT IS NOT RECOVERED BY PARSING `mv`/`mkdir` STDERR. Message text is locale-dependent and is not a
+# contract — that is the cargo-output-parse defect class this repo has already paid for (CLAUDE.md
+# #3400), and a locale-sensitive guess dressed as a verdict is worse than an honest ambiguity.
+#
+# SO THE AMBIGUITY IS PRESERVED — AND MADE ACTIONABLE, which is the whole point. The sweep's value was
+# telling "retry" apart from "fix the box", and going ambiguous gives that up unless the text says both
+# possibilities WITH what to check for each and in what order. An honest "it is one of these two, here is
+# how to tell" beats a confident wrong nature and it also beats a shrug.
+#
+# THE SOUND ALTERNATIVE, NOT BUILT HERE, RECORDED SO IT IS NOT REDISCOVERED: measure the filesystem
+# AFFIRMATIVELY instead of inferring it — try to create and unlink a scratch file in the lock's PARENT, so
+# a success proves the filesystem is fine (hence contention) and a failure demonstrates the fault. That is
+# a real answer rather than an inference, and it is deliberately NOT added here: it puts a new write on
+# every failure path, and a mechanism that produces one new instance per fix is one to remove rather than
+# iterate. It belongs with #3683/#3697.
+#
+# APPLIED AT ALL FIVE SITES, not the three the finding named. The first `take`'s uncreatable refusal and
+# the reclaim rename's refusal made the same claim from the same kind of test, and `write-failed` claimed
+# a filesystem fault with no test at all; leaving those confident while fixing the others would have been
+# the same defect with a smaller blast radius.
+supervisor_lock_nature_unestablished() {
+  printf '%s' "WHETHER THIS WAS CONTENTION OR A FILESYSTEM FAULT IS NOT ESTABLISHED: this script cannot see the failing call's error code, and the state of that path afterwards cannot decide it either, because a peer can remove or recreate the name between the failure and any check made here — in either direction"
+}
+
+supervisor_lock_nature_actions() {
+  printf '%s' "IT IS ONE OF TWO THINGS AND THIS IS THE ORDER TO TELL THEM APART. (1) A FILESYSTEM FAULT: check the PARENT directory of the path named above — it must exist, be a directory, be writable by this user, and its filesystem must have free space and not be mounted read-only (ls -ld on the parent, df, mount). If any of those is wrong, that is the cause, and re-running changes nothing until it is fixed. (2) CONTENTION: if all of those are clean, another supervisor was taking or releasing this lock at the same moment, nothing is wrong with this box, and re-running is sufficient"
+}
+
+# supervisor_lock_refuse_uncreatable [<phase-note>] — `mkdir` failed AND nothing is at that name, so the
+# failure is about the PATH and not about a holder (#3601 AC7 addendum; reused post-reclaim by job 244 B20).
+#
+# TWO CALL SITES, ONE TEXT, because the operator's problem is identical in both: the lock path cannot be
+# created. The optional phase note says WHERE in the start we were, which is the only thing that differs.
+supervisor_lock_refuse_uncreatable() {
+  local phase="${1:-}"
+  supervisor_lock_refuse \
+    "refusing to start — the lock directory could NOT BE CREATED, and nothing exists at that path" \
+    "\`mkdir\` failed and NOTHING is at that name now${phase:+ ($phase)}. $(supervisor_lock_nature_unestablished)" \
+    "$(supervisor_lock_nature_actions). The path is \${TMPDIR:-/tmp}-derived unless this run's launcher named it, so a TMPDIR pointing somewhere absent, read-only or full is the usual first cause to check"
+}
+
 acquire_lock() {
   # IDENTITY FIRST: both the lock path and the claim actor are derived FROM it, so resolving it after
   # them would leave them on a stale inference.
@@ -1940,45 +2975,205 @@ acquire_lock() {
   supervisor_legacy_lock_guard
   supervisor_claim_actor
   supervisor_migrate_legacy_claim
-  if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
-    echo $$ >"$SUPERVISOR_LOCK/pid"
-    trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT
+
+  local takerc=0
+  supervisor_lock_take || takerc=$?
+  if [[ "$takerc" -eq 0 ]]; then
     return 0
   fi
-  # KNOWN RESIDUAL, recorded at the site (#3549 class sweep): this pid is used UNPARSED, the liveness
-  # test below is TWO-VALUED (a `kill -0` failing with EPERM — a live process owned by another user —
-  # reads as dead and the lock is RECLAIMED), and the message asserts "another instance" without
-  # corroborating the process identity. Out of scope for #3549 (a different lock, with reclaim
-  # semantics of its own), not an oversight. The three-valued liveness probe that used to be quoted
-  # here was DELETED with the legacy classifier (lead's second ruling), so this residual now stands on
-  # its own description rather than pointing at code.
-  # FOURTH SHAPE, same scope decision (#3549, job 205 F2 sweep): this lock's own refusals below still
-  # emit with `echo` and interpolate an unrendered `$SUPERVISOR_LOCK`, so they inherit `xpg_echo` and a
-  # control character in `TMPDIR` exactly as the legacy guard's did before F2. Listed, not fixed here.
-  local holder_pid=""
-  [[ -f "$SUPERVISOR_LOCK/pid" ]] && holder_pid="$(cat "$SUPERVISOR_LOCK/pid" 2>/dev/null || true)"
-  if [[ -n "$holder_pid" ]] && kill -0 "$holder_pid" 2>/dev/null; then
-    echo "worker-supervisor: another instance is already running (pid $holder_pid, lock $SUPERVISOR_LOCK)" >&2
-    exit 1
+  if [[ "$takerc" -eq 2 ]]; then
+    supervisor_lock_refuse_unowned "$SUPERVISOR_LOCK_TAKE_CAUSE"
   fi
-  log "reclaiming stale lock $SUPERVISOR_LOCK (holder pid $holder_pid not alive)"
-  # Atomic reclaim (rename-then-remove), not rm-then-mkdir: two supervisors
-  # racing a dead-pid lock both taking the rm-then-mkdir path could both end up
-  # believing they won. `mv` on the same filesystem is atomic, so only ONE
-  # racer's mv can succeed against a given stale directory name; that racer
-  # removes the renamed-aside copy and falls through to its own mkdir below.
-  # The loser's mv fails (the name is already gone), so it falls through to the
-  # normal mkdir-fails path and exits loudly instead of silently co-running.
-  if mv "$SUPERVISOR_LOCK" "$SUPERVISOR_LOCK.stale.$$" 2>/dev/null; then
-    rm -rf "$SUPERVISOR_LOCK.stale.$$"
+  if [[ "$takerc" -eq 3 ]]; then
+    supervisor_lock_refuse_publish_failed "$SUPERVISOR_LOCK_TAKE_CAUSE"
   fi
-  if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
-    echo $$ >"$SUPERVISOR_LOCK/pid"
-    trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT
+
+  # `mkdir` FAILING IS NOT YET EVIDENCE OF CONTENTION, and conflating the two is the diagnostic defect
+  # #3601's addendum measured: with an option-shaped `TMPDIR` the pre-fix code printed "reclaiming stale
+  # lock" and then "failed to acquire lock", sending an operator to hunt a stale lock that did not exist.
+  # `mkdir` also fails when the parent is missing, unwritable, or not a directory. So before attributing
+  # the failure to a holder, check that something IS at that name.
+  if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then
+    supervisor_lock_refuse_uncreatable ''
+  fi
+
+  # THE NAME IS TAKEN. WHO HOLDS IT? Three-valued, and only an AFFIRMATIVE `dead` reclaims.
+  local holder='' holder_pid='' liveness='' tries=0
+  # THE BOUNDS ARE CONSTANTS, NOT KNOBS (#3601, roborev job 231 B5/B6). An earlier cut of this change
+  # read them from the environment so the cases could go fast, which is both a seam a real invoker can
+  # set (CLAUDE.md #3312) and a knob the tests would then be testing instead of the code — and its
+  # validation covered only the try count, leaving `sleep "$wait_secs"` to be handed anything at all
+  # (`999999` makes the window this code calls bounded unbounded; `--help` puts sleep's usage on our
+  # stdout). Being literals, there is nothing to validate and nothing to override.
+
+  # THE PROBE ASSIGNMENTS CARRY A FAIL-CLOSED FALLBACK (#3549 job 201 F3, same shape). Both probes
+  # return 0 on every path they take, so these are unreachable today — but a non-zero inside a `$( )`
+  # makes the ASSIGNMENT non-zero, and under this script's own errexit that would abort the start
+  # silently instead of refusing. The fallbacks land on the REFUSING verdict of each probe, so an
+  # unforeseen internal failure costs a start and can never cost a live holder its lock.
+  holder="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || holder='unparseable pid-probe-aborted'
+  # THE PID-LESS WINDOW IS RESOLVED BY MEASURING PERSISTENCE, WHICH IS NOT A TIMING HEURISTIC — and it
+  # will read like one, so here is the difference. A heuristic infers WHAT is happening from HOW LONG it
+  # has been happening. This measures a different property: a pid-less lock is a state a STARTING holder
+  # passes through in ONE rename, and a state a lock abandoned inside that window stays in FOREVER.
+  # Transient and persistent are distinguishable by observation alone, and re-reading is how you observe
+  # it. Both outcomes are affirmative: either a pid APPEARS — a real answer, and the wait ends early —
+  # or it PERSISTENTLY does not, which is itself the answer "this is not a holder that is starting". The
+  # second branch still refuses; it does not conclude death. The bound exists because an unbounded wait
+  # is a hang, and it is short because the state it waits out is one rename wide.
+  #
+  # ONLY THE TWO TRANSIENT CAUSES ARE RE-READ. `pid-file-absent` and `pid-file-empty` are the two states
+  # a writer passes through (the name not yet renamed into place; a pre-#3601 peer's `echo $$ >…/pid`
+  # between create and write). A garbled, multi-line or non-decimal pid is not a startup artifact of any
+  # writer, so re-reading it would only add delay to a refusal that is already decided.
+  while [[ "$tries" -lt "$SUPERVISOR_LOCK_PID_TRIES" ]]; do
+    case "$holder" in
+      'unparseable pid-file-absent' | 'unparseable pid-file-empty') ;;
+      *) break ;;
+    esac
+    tries=$((tries + 1))
+    # A `sleep` that cannot take a fractional argument (some minimal builds) fails harmlessly: the loop
+    # then spins its bounded number of iterations instead of pausing, which measures the same property
+    # with less patience.
+    sleep "$SUPERVISOR_LOCK_PID_WAIT" 2>/dev/null || true
+    holder="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || holder='unparseable pid-probe-aborted'
+  done
+
+  case "$holder" in
+    'pid '*)
+      holder_pid="${holder#pid }"
+      ;;
+    *)
+      supervisor_lock_refuse_undecidable "${holder#unparseable }" \
+        "the lock exists and this run could not read a usable holder pid out of it after $((tries + 1)) read(s) over a bounded window; the pid probe's verdict was [$holder]"
+      ;;
+  esac
+
+  liveness="$(supervisor_lock_holder_liveness "$holder_pid")" || liveness='unknown liveness-probe-aborted'
+  case "$liveness" in
+    live)
+      # AC4: THE REFUSAL SAYS WHAT IT KNOWS AND SAYS WHAT IT DID NOT CHECK. It has established that pid
+      # $holder_pid EXISTS; it has NOT established that the process is a supervisor. Pids are reused, so
+      # a lock left by a dead holder can name a number the kernel has since given to something else.
+      #
+      # WHY NO IDENTITY PROBE IS RUN, rather than one being added: the verdict could not change the
+      # decision. `live` refuses whatever the process turns out to be, because reclaiming on an identity
+      # GUESS is precisely how a live holder's lock gets stolen — and #3549's ruling on exactly this
+      # shape is that machinery whose output cannot change the decision is not a guard but a description
+      # generator on the decision path. So the scope is DECLARED in the text an operator reads instead,
+      # which is AC4's own second option.
+      supervisor_lock_refuse \
+        "another instance is already running (pid $holder_pid)" \
+        "pid $holder_pid is recorded as this lane's lock holder and that process EXISTS (verified: it is signallable, or the kernel reports it exists but is not ours to signal). ITS IDENTITY IS NOT VERIFIED — this run did not check that pid $holder_pid is a worker-supervisor, and pids are REUSED, so a lock abandoned by a dead holder can name a number that now belongs to an unrelated process" \
+        "if that pid IS the supervisor for this lane, wait for it or stop it. If it is NOT — check with: ps -p $holder_pid -o pid,ppid,user,lstart,args — then the lock is stale in a way this run cannot prove, and clearing it is the operator's call once no supervisor is running for this lane"
+      ;;
+    dead) ;;
+    *)
+      supervisor_lock_refuse_undecidable "holder-liveness-${liveness#unknown }" \
+        "the lock records holder pid $holder_pid, and the liveness probe could not decide whether that process exists (verdict [$liveness])"
+      ;;
+  esac
+
+  # THE ONLY RECLAIMING PATH, AND IT IS REACHED ONLY FROM AN AFFIRMATIVE `dead`.
+  log "$(supervisor_one_line "reclaiming stale lock $(supervisor_shell_quote "$SUPERVISOR_LOCK") (holder pid $holder_pid is affirmatively DEAD: the kernel reports no such process)")"
+  # Reclaim by rename-then-remove, not rm-then-mkdir: the rename is a single atomic operation, so a
+  # racer that loses it does not get a window in which the lock name simply does not exist.
+  #
+  # WHAT THIS DOES **NOT** DO, STATED HERE BECAUSE THE COMMENT THAT USED TO SIT ON THIS LINE CLAIMED
+  # OTHERWISE (#3601, roborev job 231 F1; tracked as #3683). The prior wording asserted that "only ONE
+  # racer's mv can succeed" and that the loser therefore "refuses loudly instead of silently
+  # co-running". Both are FALSE, and the interleaving that falsifies them is this one:
+  #
+  #   A and B both read holder pid P and both get an affirmative `dead`.
+  #   A renames the stale lock aside, removes it, takes the name, publishes pid A -- A is now LIVE.
+  #   B's rename now runs. The name EXISTS again (it is A's fresh, live lock), so B's `mv` SUCCEEDS,
+  #   moving A's lock aside; B removes it and takes the name. A and B now BOTH believe they hold the
+  #   lane, and nothing printed a refusal.
+  #
+  # So the rename serialises the case where the loser arrives BEFORE the winner republishes, and it does
+  # not close the ABA window where the loser arrives AFTER. Closing that needs serialisation across
+  # classify -> reclaim -> claim (the same root as the read-then-remove in `supervisor_lock_release`),
+  # which is one follow-up (#3683) and not a widening of this change: the primitive it needs is a lock
+  # protecting a lock, whose own staleness reopens "how does a stale instance get cleared, and by whom?"
+  # one level down. Two shortcuts are already measured closed -- `mkdir`+`mv` is not atomic (it leaves a
+  # pid-less window), and `mv -T` is NOT `RENAME_NOREPLACE`: it refuses a non-empty target but SUCCEEDS
+  # against an EMPTY one, which is exactly a peer's pid-less window, besides being GNU-only.
+  #
+  # NARROWED, NOT CLOSED: this path is now reached ONLY from an affirmative `dead`, where the pre-#3601
+  # code reclaimed on ANY non-live answer (unparseable pid, EPERM, pid-less window), so the set of states
+  # that can reach the race is much smaller than it was -- but it is not empty. Do not read the paragraph
+  # above as a guarantee; it is a bound.
+  #
+  # `--` on both operands: `TMPDIR`-derived (#3601 AC7).
+  if mv -f -- "$SUPERVISOR_LOCK" "$SUPERVISOR_LOCK.stale.$$" 2>/dev/null; then
+    rm -rf -- "$SUPERVISOR_LOCK.stale.$$" 2>/dev/null || true
+  elif [[ -e "$SUPERVISOR_LOCK" || -L "$SUPERVISOR_LOCK" ]]; then
+    # THE RENAME FAILED AND THE LOCK IS STILL THERE (#3601, roborev job 231 B2). Ignoring this was a
+    # MISDIAGNOSIS, not just a missing branch: the `take` below then failed too and the run printed the
+    # lost-race refusal — "a stale lock was cleared and the name was immediately claimed by someone
+    # else" — which had not happened, together with "re-run this supervisor", which loops forever. Same
+    # family as the AC7 addendum: a message that sends the operator after a problem that is not there.
+    # The realistic cause is the parent directory becoming unwritable after the lock appeared.
+    #
+    # AND THE IDENTITY WE MEASURED IS STALE BY THE TIME WE GET HERE (#3601, roborev job 242 B18). The
+    # liveness verdict above describes the pid file as it was read BEFORE the rename was attempted; the
+    # path can be replaced in between, so the object now at that name may belong to a LIVE holder. The
+    # previous wording declared "this lock IS stale and this run is entitled to it" and printed the
+    # NON-RECURSIVE REMOVAL COMMAND for it.
+    #
+    # THAT IS WHY THIS ONE IS NOT MERELY ANOTHER OVERCLAIM. The code destroys nothing here; the printed
+    # line does, in the operator's hands, and remedies in this file exist precisely to be pasted. It is
+    # the sibling of "a remedy that cannot work is worse than none" — a remedy that WORKS, aimed at the
+    # wrong target. So this branch now re-reads the lock, reports what is ACTUALLY there, declares
+    # nothing stale or removable, and prints only a READ-ONLY inspection: the one command shape that is
+    # safe under the assumption that the lock is live. `ls -ldn` names the object without following a
+    # symlink and `ls -lna` shows a directory's contents (both measured rc=0 on all three shapes under
+    # #3549), `--` because the path is `TMPDIR`-derived, and the path is rendered paste-safe.
+    local after_mv='' identity=''
+    after_mv="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || after_mv='unparseable post-rename-probe-aborted'
+    case "$after_mv" in
+      "pid $holder_pid")
+        identity="it still records pid $holder_pid, the holder this run measured as dead. That is consistent with the same lock still being there, but it is NOT proof: this run cannot establish that the object now at that name is the same one it measured, so it does not declare the lock stale"
+        ;;
+      'pid '*)
+        identity="it now records a DIFFERENT holder, pid ${after_mv#pid }, and not the pid $holder_pid this run measured as dead. Something took that name while the rename was failing, and that holder may be ALIVE — the dead-holder measurement above no longer describes what is at that path"
+        ;;
+      *)
+        identity="its pid file no longer reads as a usable holder record ([$after_mv]), so this run cannot tell whether the object now at that name is the stale lock it measured or something else that has since taken the name"
+        ;;
+    esac
+    supervisor_lock_refuse \
+      "refusing to start — a lock this run measured as stale could not be cleared" \
+      "renaming the lock aside FAILED, so nothing was cleared and nothing was claimed; nothing at that path has been modified by this run. $(supervisor_lock_nature_unestablished). AND THE IDENTITY OF WHAT IS THERE IS NOW UNESTABLISHED TOO — $identity" \
+      "$(supervisor_lock_nature_actions). Either way, RE-RUN rather than clearing anything by hand: the next start re-measures the holder from scratch and will reclaim the lock if it is genuinely stale, or name its live holder. Do NOT remove anything on the strength of this message — this run measured a dead holder BEFORE its rename failed and cannot vouch for what is at that path now. To see what is actually there, run the next line, on its own, exactly as printed; it only reads" \
+      "ls -ldn -- $(supervisor_shell_quote "$SUPERVISOR_LOCK") && ls -lna -- $(supervisor_shell_quote "$SUPERVISOR_LOCK")"
+  fi
+  takerc=0
+  supervisor_lock_take || takerc=$?
+  if [[ "$takerc" -eq 0 ]]; then
     return 0
   fi
-  echo "worker-supervisor: failed to acquire lock $SUPERVISOR_LOCK" >&2
-  exit 1
+  if [[ "$takerc" -eq 2 ]]; then
+    supervisor_lock_refuse_unowned "$SUPERVISOR_LOCK_TAKE_CAUSE"
+  fi
+  if [[ "$takerc" -eq 3 ]]; then
+    supervisor_lock_refuse_publish_failed "$SUPERVISOR_LOCK_TAKE_CAUSE"
+  fi
+  # STATUS 1 IS `mkdir` FAILING, AND THAT IS TWO DIFFERENT FACTS WITH OPPOSITE REMEDIES (#3601, roborev
+  # job 244 B20). EEXIST means someone else took the name — a race, and re-running is exactly right.
+  # EACCES/ENOSPC/ENOENT mean the path cannot hold a lock — and then "a stale lock was cleared and the
+  # name was claimed by someone else, re-run this supervisor" tells an operator that nothing is wrong and
+  # sends them into a retry loop over a state that cannot resolve until permissions or disk are fixed.
+  #
+  # THIS IS #3601'S OWN HEADLINE DEFECT, ONE BRANCH OVER: the AC7 addendum exists because the pre-fix code
+  # "blames the lock rather than the path shape, and an operator goes looking for a stale lock that isn't
+  # there". Shipping this issue with a fresh instance of its own rationale is not defensible. The FIRST
+  # take already disambiguates exactly this way, which is what makes the omission here an oversight rather
+  # than a design choice — so the same existence test decides it.
+  if [[ -e "$SUPERVISOR_LOCK" || -L "$SUPERVISOR_LOCK" ]]; then
+    supervisor_lock_refuse_lost_race
+  fi
+  supervisor_lock_refuse_uncreatable 'after a stale lock was successfully cleared, so the name was free a moment ago'
 }
 
 # ---------------------------------------------------------------------------
@@ -2334,6 +3529,13 @@ run_iteration() {
   local deadline=$((t0 + MAX_ITER_SECS))
   local stuck_notified=0 g now
   local last_scan_ts=$t0 prev_size=-1 prev_sig=0 cur_size cur_sig
+  # SWEPT AND LEFT TWO-VALUED, DELIBERATELY (#3601 call-site audit). `#3601` made the LOCK's liveness
+  # probe three-valued because that pid comes off DISK, from a process we have never seen, possibly
+  # owned by another user — so `kill -0` failing there could mean EPERM and reading it as death stole a
+  # live holder's lock. None of that applies here: `$wpid` is the pid of a child THIS SHELL just forked,
+  # same uid, same session, so EPERM is not reachable and a non-zero `kill -0` means exactly one thing.
+  # Recorded so a later sweep of the `kill -0` sites does not "fix" a correct one — the three-valued
+  # probe belongs where the pid's provenance is untrusted, not everywhere the primitive appears.
   while kill -0 "$wpid" 2>/dev/null; do
     now=$(date +%s)
     if [[ "$now" -ge "$deadline" ]]; then
@@ -2352,7 +3554,11 @@ run_iteration() {
       # this scan and the prior one AND the log did not grow between them (and
       # the process is still alive — the loop condition). prev_size<0 = no prior
       # scan yet, so the very first scan can never confirm.
-      if [[ "$prev_sig" -eq 1 && "$cur_sig" -eq 1 && "$prev_size" -ge 0 && "$cur_size" -eq "$prev_size" ]]; then
+      # AND BOTH SCANS MUST BE REAL MEASUREMENTS (#3601). `log_size` reports `-1` when it could not
+      # measure; without `cur_size -ge 0` two FAILED reads compare equal and the log reads as frozen —
+      # the "an empty probe is not a zero" shape. A `-1` also propagates into `prev_size` below, so the
+      # next scan cannot confirm against it either.
+      if [[ "$prev_sig" -eq 1 && "$cur_sig" -eq 1 && "$prev_size" -ge 0 && "$cur_size" -ge 0 && "$cur_size" -eq "$prev_size" ]]; then
         local qtext
         qtext="$(captured_question "$logfile")"
         printf '%s' "$qtext" >"$stuck_flag"
