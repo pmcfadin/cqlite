@@ -57,7 +57,11 @@ use crate::types::Value;
 /// accounting from drifting into two charging models — they differ ONLY in how a
 /// column's cell is resolved, which is the property the fused accounting's
 /// equivalence test pins.
-fn charge_row<'a, I>(cells: I) -> usize
+///
+/// `pub(super)` and no wider: `arrow_size`'s own `estimate_arrow_row_bytes` is the
+/// second caller (a PARENT cannot see a child's private items, unlike the reverse),
+/// and nothing outside `arrow_size` has any business charging a row directly.
+pub(super) fn charge_row<'a, I>(cells: I) -> usize
 where
     I: IntoIterator<Item = (Shape<'a>, Option<&'a Value>)>,
 {
