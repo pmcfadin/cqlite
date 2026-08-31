@@ -3739,6 +3739,85 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     printf '%s\n' "$out_bb" | grep -iE 'CREATED|gate-pin' | head -2
   fi
 
+  # 11bc. THE CREATE IS TWO STEPS, AND ITS FAILURE MUST NOT LEAVE A POPULATED FILE
+  #      (roborev job 311, Low). Content-then-mode: a `tee` that succeeded followed by a
+  #      mode that could not be established took the failure branch, reported "the pin was
+  #      NOT persisted", and left the pin line on disk. The NEXT run then reads a present
+  #      CQLITE_GATE_MAX_CONCURRENCY line, treats the pin as persisted, and never repairs
+  #      the mode — one run's reported failure becoming the next run's silent success at a
+  #      permission nothing chose.
+  #
+  #      `chmod` is STUBBED TO FAIL rather than removed from the PATH, so the case models
+  #      exactly one thing going wrong. `umask 077` forces `tee` to create 0600, so the mode
+  #      genuinely cannot reach 0644 — set explicitly rather than inherited, or the case
+  #      would silently stop testing anything on a runner whose ambient umask is 022.
+  shims_nochmod="$tmp/pin-shims-nochmod"; mkpinshims "$shims_nochmod" 1
+  mk_stub "$shims_nochmod" chmod 'exit 1'
+  envf_bc="$tmp/pin-env-bc"; rm -f "$envf_bc"
+  out_bc=$( (umask 077; runpin "$pinroot" "$shims_nochmod" "$envf_bc" HOME="$pin_home_plain" --fix-gate-pin) )
+  if [ ! -e "$envf_bc" ] \
+     && printf '%s' "$out_bc" | grep -q 'the pin was NOT persisted' \
+     && printf '%s' "$out_bc" | grep -q 'was REMOVED'; then
+    ok "gate-pin: a create whose mode cannot be established rolls the partial file back and says so (nothing populated for the next run to inherit)"
+  else
+    bad "gate-pin: the failed create left a residue, or did not report rolling it back"
+    printf '%s\n' "$out_bc" | grep -iE 'gate-pin|CREATED|REMOVED|persisted' | head -4
+    echo "  file-exists=$([ -e "$envf_bc" ] && echo yes || echo no) content=[$(cat "$envf_bc" 2>/dev/null | tr '\n' '|')]"
+  fi
+
+  # 11bd. A REMEDY MUST BE CHOSEN BY THE FACT THAT DISCRIMINATES IT (roborev job 311, Low).
+  #      The verdict `case` dispatches on the GATE's classification of what the SESSION saw,
+  #      which says nothing about WHERE that value came from. So a box whose system file is
+  #      CORRECT (`=1`) but whose session is overridden by a per-user `abc` reached the
+  #      not-honoured branch and was told to "fix the VALUE in <file>" — a file that is
+  #      already right. The operator finds nothing wrong and re-runs into the same verdict.
+  #      This is #3414's own subject one level down: a remedy keyed on a verdict rather than
+  #      on the fact that decides between two remedies.
+  envf_bd="$tmp/pin-env-bd"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_bd"
+  shims_bd="$tmp/pin-shims-bd"; mkpinshims "$shims_bd" abc
+  out_bd=$(runpin "$pinroot" "$shims_bd" "$envf_bd" HOME="$pin_home_plain")
+  if printf '%s' "$out_bd" | grep -q 'gate-pin: NOT-HONOURED' \
+     && printf '%s' "$out_bd" | grep -q 'is OVERRIDING it' \
+     && ! printf '%s' "$out_bd" | grep -q 'fix the VALUE (not the presence)'; then
+    ok "gate-pin: a bad SESSION value over a CORRECT system file is diagnosed as an override, not as a bad file"
+  else
+    bad "gate-pin: the override case was handed the edit-the-system-file remedy"
+    printf '%s\n' "$out_bd" | grep -iE 'gate-pin:|OVERRIDING|fix the VALUE' | head -4
+  fi
+
+  # 11be. THE NEGATIVE TWIN, so 11bd cannot pass by suppressing the remedy outright: where
+  #      the system file REALLY holds the bad value, "edit the VALUE in that file" is the
+  #      correct advice and must survive.
+  envf_be="$tmp/pin-env-be"; printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_be"
+  out_be=$(runpin "$pinroot" "$shims_bd" "$envf_be" HOME="$pin_home_plain")
+  if printf '%s' "$out_be" | grep -q 'gate-pin: NOT-HONOURED' \
+     && printf '%s' "$out_be" | grep -q 'fix the VALUE (not the presence)' \
+     && ! printf '%s' "$out_be" | grep -q 'is OVERRIDING it'; then
+    ok "gate-pin: where the system file really holds the bad value, the edit-the-file remedy survives"
+  else
+    bad "gate-pin: the genuine bad-file case lost its remedy to the override branch"
+    printf '%s\n' "$out_be" | grep -iE 'gate-pin:|OVERRIDING|fix the VALUE' | head -4
+  fi
+
+  # 11bf. VERIFIED DISCLOSES WHAT IT MEASURED (roborev job 311, Medium). Matching values do
+  #      not prove the session got the value FROM the system file: a box that also sets it
+  #      from a sudoers env_file or ~/.pam_environment to the same value would read VERIFIED
+  #      with an /etc/environment no PAM stack loads. That cannot be settled without either
+  #      inspecting PAM config (deleted in round 7 — config inspection standing in for
+  #      runtime behaviour) or perturbing a live system file, so the CLAIM is scoped in the
+  #      output instead of being overstated. Asserted because an unstated limit is
+  #      indistinguishable from one nobody noticed.
+  envf_bf="$tmp/pin-env-bf"; : >"$envf_bf"
+  shims_bf="$tmp/pin-shims-bf"; mkpinshims "$shims_bf" "file:$envf_bf"
+  out_bf=$(runpin "$pinroot" "$shims_bf" "$envf_bf" HOME="$pin_home_plain" --fix-gate-pin)
+  if printf '%s' "$out_bf" | grep -q 'gate-pin: VERIFIED' \
+     && printf '%s' "$out_bf" | grep -q 'Agreement is measured; provenance is not'; then
+    ok "gate-pin: VERIFIED states that it measured agreement and NOT provenance (the alternate-source residual is disclosed with the verdict)"
+  else
+    bad "gate-pin: VERIFIED did not disclose the agreement-vs-provenance limit"
+    printf '%s\n' "$out_bf" | grep -iE 'VERIFIED|provenance|scope:' | head -4
+  fi
+
   envf_k="$tmp/pin-env-k"; : >"$envf_k"
   # `-u CQLITE_BOOTSTRAP_TEST_MODE` is the point of this half: the marker is exported
   # suite-wide for host safety, and the case is about a seam set WITHOUT it.

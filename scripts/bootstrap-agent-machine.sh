@@ -2188,6 +2188,33 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     fi
   fi
 
+  PIN_CREATE_RESIDUE=""
+  # pin_create_mode_ok: establish 0644 on a JUST-CREATED env file and CONFIRM it by reading
+  # the mode BACK. chmod's exit status answers a different question than "is the mode
+  # right": a chmod that fails on a file already at 0644 is harmless, and one that reports
+  # success is still worth confirming — the same affirmative-measurement rule this whole
+  # section is built on, applied to its own write.
+  #
+  # Where the mode cannot be established (or cannot be READ, which is indistinguishable
+  # from wrong for our purposes) the partial file is REMOVED. That is the fail-closed
+  # direction and it costs nothing: the file did not exist a moment ago, so deleting it
+  # restores the state the run started in, whereas LEAVING it makes the next run read a
+  # present CQLITE_GATE_MAX_CONCURRENCY line and treat the pin as persisted at a permission
+  # nothing chose. Linux-only path — the caller is behind PIN_PLATFORM_UNMANAGED — so
+  # `stat -c` is the right spelling here and needs no BSD fallback.
+  pin_create_mode_ok() {
+    local f="$1" mode
+    ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} chmod 0644 "$f" 2>/dev/null || true
+    mode=$(${PIN_ROOT[@]+"${PIN_ROOT[@]}"} stat -c %a "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null)
+    if [ "$mode" = 644 ]; then PIN_CREATE_RESIDUE=""; return 0; fi
+    if ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} rm -f "$f" 2>/dev/null && [ ! -e "$f" ]; then
+      PIN_CREATE_RESIDUE="mode came out ${mode:-unreadable}, not 0644 — the partial file was REMOVED so the next run creates it cleanly instead of inheriting it"
+    else
+      PIN_CREATE_RESIDUE="mode came out ${mode:-unreadable}, not 0644, AND the partial file could not be removed — it still carries the pin line; chmod 0644 or delete $f by hand"
+    fi
+    return 1
+  }
+
   # ---- (1) persist. Reported with info/warn ONLY — a write is never the verdict ----
   # AND ONLY ON LINUX (#3414 final roborev). The verdict half already treats a non-Linux
   # host as unmanaged, but this block still APPENDED to /etc/environment whenever that file
@@ -2220,7 +2247,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       info "create it as root:  printf '%s\n' '$PIN_ENV_COMMENT' '$PIN_ENV_LINE' > $PIN_ENV_FILE && chmod 0644 $PIN_ENV_FILE"
     elif printf '%s\n%s\n' "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" \
            | ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} tee "$PIN_ENV_FILE" >/dev/null 2>&1 \
-         && ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} chmod 0644 "$PIN_ENV_FILE" 2>/dev/null; then
+         && pin_create_mode_ok "$PIN_ENV_FILE"; then
       PIN_FILE_HAS_LINE=yes; PIN_FILE_VALUE="$PIN_ENV_VALUE"
       # REPORT WHAT IT ACTUALLY IS, read back — not what the write intended. An earlier
       # draft of this line asserted "root:root 0644" unconditionally, which is false
@@ -2230,6 +2257,17 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # in the section's own output.
       pin_made=$(ls -ld -- "$PIN_ENV_FILE" 2>/dev/null | awk '{print $1" "$3":"$4}')
       info "CREATED $PIN_ENV_FILE (${pin_made:-mode/owner unreadable}) carrying '$PIN_ENV_LINE' — pam_env reads it at session creation, so NEW sessions pick it up"
+    elif [ -n "$PIN_CREATE_RESIDUE" ]; then
+      # THE FAILURE REPORT MUST MATCH THE FILESYSTEM (roborev job 311, Low). The write is
+      # two steps — content then mode — so a `tee` that succeeded followed by a mode that
+      # could not be established used to take this branch and say "NOT persisted" while
+      # leaving a POPULATED file behind. The next run then reads a present
+      # CQLITE_GATE_MAX_CONCURRENCY line, treats the pin as already persisted, and never
+      # repairs the mode: one run's reported failure becomes the next run's silent success
+      # at a permission nothing chose. So the residue is rolled back, and where it cannot
+      # be, that is stated rather than folded into the generic message.
+      PIN_PERSIST_NOTE="could not create $PIN_ENV_FILE ($PIN_CREATE_RESIDUE)"
+      warn "gate-pin: could not create $PIN_ENV_FILE — the pin was NOT persisted ($PIN_CREATE_RESIDUE)"
     else
       PIN_PERSIST_NOTE="could not create $PIN_ENV_FILE"
       warn "gate-pin: could not create $PIN_ENV_FILE — the pin was NOT persisted"
@@ -2408,6 +2446,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # PAM in its ancestry at all — that residual is real and is stated, not implied.
     info "scope: measured through a PAM-created (sudo) session against the line in $PIN_ENV_FILE. Whether the service stacks a gate is actually launched from also read that file is NOT checked here — and a process tree created WITHOUT PAM (a systemd unit, a container entrypoint) never has it applied at all"
     info "scope: pam_env reads $PIN_ENV_FILE at SESSION CREATION, so this verdict is about FUTURE sessions. THIS shell, and every process already descended from it — including workers a launcher started before now — do NOT have the pin and will not until their sessions are recreated. A gate launched by such a worker still resolves the #1825 cap from the formula (#3728)"
+    info "scope: VERIFIED asserts that the file SETS this value and a fresh session SEES that same value — it does NOT prove the file is where the session got it. If this box also sets CQLITE_GATE_MAX_CONCURRENCY to the same value from a sudoers env_file or ~/.pam_environment, an $PIN_ENV_FILE that no PAM stack actually loads would still read VERIFIED. Agreement is measured; provenance is not (#3728)"
     info "the authoritative per-run confirmation is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) there means that gate did not see the pin)"
     [ -n "$PIN_PROBE_SUBJECT_NOTE" ] && info "subject: $PIN_PROBE_SUBJECT_NOTE"
   }
@@ -2415,7 +2454,18 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # pin_value_remedy: the remedy for a VISIBLE but NOT-HONOURED value. Shared by both
   # not-honoured branches so neither can silently lose it.
   pin_value_remedy() {
-    if [ "$PIN_FILE_HAS_LINE" = yes ]; then
+    if [ "$PIN_FILE_HAS_LINE" = yes ] && [ "$PIN_FILE_VALUE" != "$pin_probe_seen" ]; then
+      # COMPARE BEFORE PRESCRIBING (roborev job 311, Low). The enclosing `case` dispatches
+      # on the GATE's classification of what the SESSION saw, which says nothing about
+      # where that value came from. So a box whose system file is CORRECT (`=1`) but whose
+      # session is overridden by a sudoers env_file or ~/.pam_environment holding `abc`
+      # lands here, and the unconditional branch below sent the operator to edit a file
+      # that is already right — they find nothing wrong and re-run into the same verdict.
+      # That is the #3414 defect one level down: a remedy keyed on a verdict rather than on
+      # the fact that decides between two remedies.
+      info "the bad value is NOT coming from $PIN_ENV_FILE — that file sets CQLITE_GATE_MAX_CONCURRENCY='$PIN_FILE_VALUE' while this session sees '$pin_probe_seen', so a sudo- or user-specific source (a sudoers env_file, ~/.pam_environment, a launcher-injected env) is OVERRIDING it"
+      info "fix or remove THAT override — editing $PIN_ENV_FILE would change a value that is already being ignored"
+    elif [ "$PIN_FILE_HAS_LINE" = yes ]; then
       info "fix the VALUE (not the presence) — edit the CQLITE_GATE_MAX_CONCURRENCY line in $PIN_ENV_FILE to a positive integer; bootstrap deliberately never rewrites an existing value"
     else
       info "the value is visible but is NOT coming from $PIN_ENV_FILE — find and fix whatever sets it (a systemd unit, the image, a launcher-injected env), then re-run"
