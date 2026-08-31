@@ -518,7 +518,8 @@ currently detects a public-API change**, and a green `pub-surface` must never be
 principled route (reachability from rustc's own dep-info) is **issue #3366**.
 
 ### Code quality
-- `RUSTFLAGS="-D warnings"` must pass; no `unwrap()`/`expect()` in library code; `thiserror` for errors
+- `env RUSTFLAGS="-D warnings" cargo clippy ...` must pass (**always the env PREFIX, never `export`** — see
+  the warning below); no `unwrap()`/`expect()` in library code; `thiserror` for errors
 - Memory target: <128MB for large files
 
 ### File size (campsite rule)
@@ -624,7 +625,15 @@ Default (cqlite-core): `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_ma
   `CQLITE_DATASETS_ROOT=` line it prints — NOT `$PWD/test-data/datasets`, which on a fleet box is a
   corpus-less root the fetch never populates. `--verify-only` re-checks an existing root
   non-destructively. No `schemas` sibling is needed (#3131).
-- **Clippy failures**: run with `RUSTFLAGS="-D warnings"` to match CI
+- **Clippy failures**: run `env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
+  --all-features` to match CI. **NEVER `export RUSTFLAGS` in a worker shell (#3740).** An exported
+  value is inherited by every gate you launch from it (`systemd-run --scope` inherits caller env),
+  and it SUPPRESSES cargo's `target.rustflags` managed block entirely — so mold is silently not
+  applied AND components that deliberately do *not* use `-D warnings` (the gate scopes it to
+  `clippy` alone) start failing on warnings they were never meant to treat as errors. **The tell is
+  `mold=overridden` in the gate SUMMARY's `accelerators:` line** — that token exists precisely to
+  surface this footgun, so treat it as a contaminated run, not noise. Cost of missing it: #3740 was
+  filed P0 and the fleet halted for ~1h on a FAIL that was purely environmental.
 - **Parsing issues**: `docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md`
 - **Python bindings**: Rust 1.85+, Python 3.9+, `pip install maturin`, then
   `cd bindings/python && maturin develop --profile dev`
