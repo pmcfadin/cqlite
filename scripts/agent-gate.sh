@@ -5073,6 +5073,39 @@ _component_set_line() {
     manifest)    src_note=" — baseline read via the committed manifest" ;;
     declaration) src_note=" — baseline read via the TEXTUAL FALLBACK: $_CS_MANIFEST_REL is VERIFIED ABSENT at that sha (#3544 transitional; the declaration is parsed as TEXT, never executed)" ;;
   esac
+  # THE OBJECT STORE IS TRUSTED, NOT VERIFIED — AND THAT IS DECLARED IN THE LINE (roborev job 311,
+  # High; lead ruling on REQ-3544-OBJTRUST, option A; owned by #3746).
+  #
+  # Git does not rehash a packed object against the id it was asked for on an ordinary read, and on
+  # this fleet EVERY LANE ON A BOX IS A WORKTREE OF ONE SHARED `.git` (measured:
+  # `/data/lanes/repo/.git/objects` for lane-3544, lane-3473 and lane-3629 alike). So a peer lane
+  # that plants a forged pack/index can make a canonical sha resolve to different content — a
+  # shortened manifest, and a false PASS. Under the triage rule that is a NON-INVOKER route, hence
+  # a defect and not an out-of-model bypass.
+  #
+  # WHY IT IS DECLARED RATHER THAN CLOSED HERE, which is a ruling and not a shrug. The recorded
+  # "a third finding here should REMOVE the reuse optimisation" ruling assumes removal CLOSES the
+  # exposure, and it does not: the ancestry walk and the provenance leg read HEAD's COMMITTED
+  # content, which has no source other than this store — the working tree cannot substitute,
+  # because `UNCOMMITTED` exists precisely to compare against what is committed. So removing the
+  # fast path leaves a forged HEAD object still able to turn `UNCOMMITTED` (fatal) into `DECLARED`
+  # (non-fatal), while charging every `--lite` round for it: measured 2026-08-31, 3.41 s / 93 MB
+  # full and 3.58 s / 45 MB at `--depth=1` (shallow is NOT cheaper — it still ships the tip's whole
+  # tree). A permanent tax for a half-closure is the guard people learn to waive.
+  #
+  # So the line says what it depends on. A check that claims nothing false is worth more than one
+  # claiming a closure it does not deliver — the same move the roborev waiver's threat model makes
+  # where a dependency cannot be removed. It is FOLDED INTO `src_note` deliberately: that suffix is
+  # already the uniform "this line ends by naming its baseline source", eleven printf arms consume
+  # it, and appending an twelfth-argument clause to each would be one fact written eleven times.
+  case "${src_note:+set}" in
+    set)
+      case "$_CS_BASE_OBJ" in
+        reused)  src_note="$src_note; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3746)" ;;
+        fetched) src_note="$src_note; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3746)" ;;
+        *)       src_note="$src_note; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3746)" ;;
+      esac ;;
+  esac
   case "$verdict" in
     PASS)
       if [ -n "$lenient" ]; then

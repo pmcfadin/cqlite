@@ -1883,6 +1883,25 @@ n_components=$( fx "$same" && bash scripts/agent-gate.sh --list 2>/dev/null | wc
 # The line names WHICH data-only read path certified it (#3544 REQ-3544-01) — asserted as part
 # of the exact match, because a PASS whose baseline source is unstated cannot be audited: the
 # transitional TEXT path is format-brittle and becomes unreachable once the manifest is on main.
+# _cs_pass_line_ok <line> <expected-head>: the PASS line equals <expected-head> followed by EXACTLY
+# ONE of the three legal object-provenance clauses (#3746 / roborev job 311). Pinned as a CLOSED SET
+# rather than one literal because which clause is emitted is ENVIRONMENT-DEPENDENT — it says whether
+# this box's shared object store already held the fixture's baseline commit, which a peer lane's
+# fetch can change between runs. Pinning one literal would red on correct input; pinning nothing
+# would let the declaration be dropped in a wording pass, which is what the exact match exists to
+# prevent. So: string EQUALITY against a closed set, no regex (the head carries `(`/`)`/`/`, and
+# escaping it for ERE at two call sites is one fact written twice).
+_cs_pass_line_ok() {
+  local l="$1" h="$2" tail
+  case "$l" in "$h"*) tail="${l#"$h"}" ;; *) return 1 ;; esac
+  case "$tail" in
+    "; objects: baseline REUSED from this lane's SHARED store — store TRUSTED, not verified (#3746)") return 0 ;;
+    "; objects: baseline FETCHED from the canonical remote, HEAD's own from this lane's SHARED store — store TRUSTED, not verified (#3746)") return 0 ;;
+    "; objects: provenance NOT RECORDED — treat the store as TRUSTED, not verified (#3746)") return 0 ;;
+  esac
+  return 1
+}
+
 # THE SCOPE CLAUSE IS INSIDE THE EXACT MATCH ON PURPOSE. `NAMES ONLY — not implementations, and no
 # component is run here` is what stops a reader over-reading `PASS (37/37)` as "the component set is
 # verified". Pinning it here means it cannot be quietly dropped in a later wording pass: a comment
@@ -1890,10 +1909,10 @@ n_components=$( fx "$same" && bash scripts/agent-gate.sh --list 2>/dev/null | wc
 # holding a pasted SUMMARY block. The exactness IS the enforcement.
 if [ "$(field VERDICT "$s_out")" = PASS ] \
    && [ "$(field BASELINE_SRC "$s_out")" = manifest ] \
-   && grep -q "^component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest$" <<<"$s_line"; then
-  ok "3544-no-skew: an in-sync tree stamps an affirmative PASS naming its baseline sha AND the read path"
+   && _cs_pass_line_ok "$s_line" "component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest"; then
+  ok "3544-no-skew: an in-sync tree stamps an affirmative PASS naming its baseline sha, the read path AND the object-store trust boundary"
 else
-  bad "3544-no-skew: expected 'component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest'"
+  bad "3544-no-skew: expected 'component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest' + one of the three legal '; objects: …(#3746)' clauses"
   printf '%s\n' "$s_out"
 fi
 
@@ -2147,7 +2166,7 @@ sum2="$tmp/delta-insync-summary.txt"
 fout2="$tmp/delta-insync.log"
 ( fx "$same" && AGENT_GATE_SUMMARY_FILE="$sum2" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh --delta HEAD~1 --anchor-run-id selftest >"$fout2" 2>&1 ) >/dev/null 2>&1
-if grep -q "^component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest$" "$sum2" 2>/dev/null \
+if _cs_pass_line_ok "$(grep -m1 '^component-set: ' "$sum2" 2>/dev/null)" "component-set: PASS ($n_components/$n_components names vs origin/main $s_sha; NAMES ONLY — not implementations, and no component is run here) — baseline read via the committed manifest" \
    && grep -q '^==== AGENT-GATE DELTA SUMMARY ====' "$sum2" 2>/dev/null \
    && ! grep -q 'component-set: FAIL-CLOSED' "$sum2" 2>/dev/null; then
   ok "3544-strict-inSync: an in-sync tree passes the strict pre-flight; its block carries the PASS line"

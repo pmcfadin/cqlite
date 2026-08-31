@@ -605,6 +605,24 @@ fleet-wide stop into a five-minute fix. Every baseline-bearing verdict line ends
 baseline source (`— baseline read via the committed manifest` / `— baseline read via the TEXTUAL
 FALLBACK: … VERIFIED ABSENT at that sha`), so use of the fallback is visible rather than inferred.
 
+**And it ends by naming the OBJECT provenance too, because the shared object store is TRUSTED, not
+verified** (`; objects: baseline REUSED from this lane's SHARED store` / `baseline FETCHED from the
+canonical remote, HEAD's own from this lane's SHARED store` / `provenance NOT RECORDED` — each
+followed by `store TRUSTED, not verified (#3746)`). Git does not rehash a packed object against the
+id it was asked for on an ordinary read, and on this fleet **every lane on a box is a worktree of
+one shared `.git`**, so a peer lane planting a forged pack/index can make a canonical sha resolve to
+a shortened manifest — a false `PASS`, and a non-invoker route, hence a defect.
+
+It is **declared rather than closed** because removal does not close it. The ancestry walk and the
+provenance leg read HEAD's **committed** content, which has no source other than that store — the
+working tree cannot substitute, since the `UNCOMMITTED` verdict exists precisely to compare against
+what is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal) into `DECLARED`
+(non-fatal) after removal, while charging every `--lite` round for a half-closure (measured
+3.41 s / 93 MB full, 3.58 s / 45 MB at `--depth=1`; shallow is *not* cheaper — it still ships the
+tip's whole tree). A check that claims nothing false is worth more than one claiming a closure it
+does not deliver. Closing it properly — including the possibility that the real subject is the
+infrastructure decision that lanes share an object store at all — is **#3746**.
+
 **The baseline's identity is validated before the fetch.** Trusting a remote merely *named*
 `origin` made `git remote set-url origin <anything>` a git-config-shaped opt-out — and it fires
 **by accident** in the fork workflow, where `origin` legitimately names a contributor's fork whose
@@ -627,11 +645,22 @@ a **named non-PASS** (`remote-not-canonical`), as is an `origin` with no URL
 
 **The grammar is closed axis by axis** — transport, userinfo, host, port, path — each with one
 stated rule, because three successive rounds were "too permissive" in a *new* place (no host;
-host but no transport; `http://`/`git://` accepted). Only **authenticated** transports are
-accepted (`https://`, `ssh://`, `git+ssh://`, scp-form `git@host:path`): `http://` and `git://`
-authenticate nothing, so an on-path impersonator of the hostname supplies the objects this run
-certifies against — and when the rule was written those objects were *executed*, which is why it
-was a High. A non-default port is a
+host but no transport; `http://`/`git://` accepted). **`https://` is now the ONLY accepted
+transport.** `http://` and `git://` authenticate nothing, so an on-path impersonator of the
+hostname supplies the objects this run certifies against — and when the rule was written those
+objects were *executed*, which is why it was a High.
+
+**`ssh://`, `git+ssh://`, `ssh+git://` and scp-form `git@host:path` were accepted and are now
+REFUSED** (`ssh-transport:<form>`). The isolated environment must admit `HOME` so OpenSSH can find
+keys and `known_hosts`, and OpenSSH then also honours **`~/.ssh/config`**, where a `Host github.com`
+rule can rewrite `HostName` or run `ProxyCommand`/`Match exec`. That is a redirected baseline *and*
+arbitrary execution behind a URL string that passes the identity check. It is **in model because
+HOME is shared**: every lane runs as one user with a writable home, so the planter is a **peer
+lane**, not the invoker. It was met by **descope, not hardening** — a bounded residual was
+unavailable because `ProxyCommand` executes, and the usual mitigation (a redirected baseline
+degrades to a wrong component list the comparison detects) does not reach a harm that lands during
+*transport*, before any comparison. Measured cost: nil — every lane and CI already use `https://`,
+so an ssh-form checkout fails closed with the remedy named. A non-default port is a
 different endpoint and is rejected. **Userinfo is accepted** — GitHub Actions rewrites `origin`
 to `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red a legitimate CI
 checkout — and is therefore **redacted** from every rendering, because SUMMARY blocks are routinely
