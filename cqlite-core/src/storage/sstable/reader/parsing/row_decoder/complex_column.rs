@@ -1508,7 +1508,12 @@ impl V5CompressedLegacyParser {
 
     /// Parse a cell path key (for map keys stored in cell paths).
     /// Cell path keys are stored as raw bytes WITHOUT length prefixes.
-    fn parse_cell_path_key(&self, data: &[u8], type_str: &str, column_name: &str) -> Result<Value> {
+    pub(super) fn parse_cell_path_key(
+        &self,
+        data: &[u8],
+        type_str: &str,
+        column_name: &str,
+    ) -> Result<Value> {
         let normalized_type = type_str.to_lowercase();
 
         match normalized_type.as_str() {

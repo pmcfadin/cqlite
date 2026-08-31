@@ -865,6 +865,12 @@ mod regression_1795_overflow_tests;
 #[cfg(test)]
 mod regression_2807_qualified_udt_decode_tests;
 
+// Issue #3612: the DECODE surface for a MULTICELL map's cell-path KEY — a
+// composite (UDT/tuple/frozen-collection) key and ~10 scalar families used to
+// fall out of a narrow allowlist as an opaque `Blob`.
+#[cfg(test)]
+mod regression_3612_cell_path_key_tests;
+
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser
     ///
