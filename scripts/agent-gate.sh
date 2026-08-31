@@ -3659,7 +3659,7 @@ _CS_REV_SRC=""
 _CS_REV_ERRKIND=""
 _CS_REV_ERR=""
 _component_set_set_at_rev() {
-  local rev="$1" tmpd rc prc gate_rel
+  local rev="$1" policy="${2:-auto}" tmpd rc prc gate_rel
   _CS_REV_SET=""; _CS_REV_N=0; _CS_REV_SRC=""; _CS_REV_ERRKIND=""; _CS_REV_ERR=""
   gate_rel="scripts/$(basename "$GATE_SELF")"
   tmpd=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cs.XXXXXX") || tmpd=""
@@ -3668,6 +3668,24 @@ _component_set_set_at_rev() {
     _CS_REV_ERR="could not create a temp dir to read the component set at $rev"
     return 1
   fi
+  # POLICY `declaration`: SKIP THE MANIFEST ENTIRELY (roborev job 290, Medium). Used for HEAD's
+  # PROVENANCE, and the reason is an asymmetry in the trust chain rather than a preference. The
+  # LOCAL manifest is checked against the LOCAL `COMPONENTS` declaration on every run
+  # (`manifest-stale`), so it is a VERIFIED claim; HEAD's manifest had no equivalent check and was
+  # trusted anyway. A STALE manifest at HEAD omitting a component — while HEAD's gate still
+  # declares it — then matched an uncommitted removal of that component and classified it as the
+  # non-fatal `DECLARED`: a false green, produced by the very oracle that exists to refuse one.
+  #
+  # The fix removes the second source rather than reconciling it: for provenance the authoritative
+  # committed statement is the `COMPONENTS` DECLARATION — that is what the gate at that commit
+  # would actually dispatch — so it is read directly, as TEXT, and the manifest is not consulted.
+  # (The manifest stays PRIMARY for the BASELINE, where it is the published cross-repository datum
+  # and a branch has no way to verify a remote declaration either.)
+  if [ "$policy" = declaration ]; then
+    _component_set_declaration_at_rev "$rev" "$tmpd" "$gate_rel"
+    return $?
+  fi
+
   # STEP 1 — WHICH PATH, decided by an affirmative three-valued measurement (see the probe).
   if ! _component_set_manifest_presence "$rev" "$tmpd"; then
     _CS_REV_ERRKIND=probe
@@ -3708,16 +3726,35 @@ _component_set_set_at_rev() {
   fi
 
   # PATH 2 — THE TRANSITIONAL TEXT EXTRACTION, reachable ONLY from `verified-absent` above.
+  _component_set_declaration_at_rev "$rev" "$tmpd" "$gate_rel" fallback
+  return $?
+}
+
+# _component_set_declaration_at_rev <rev> <tmpd> <gate-rel>: read the component set from <rev>'s
+# gate script `COMPONENTS=(…)` declaration, AS TEXT. Sets the same `_CS_REV_*` outputs as its
+# caller and OWNS <tmpd> (it removes it on every path).
+#
+# TWO CALLERS, ONE IMPLEMENTATION: the baseline's transitional fallback (manifest verified-absent)
+# and HEAD's provenance read (policy `declaration`, job 290). They must not drift — a difference in
+# grammar or refusal behaviour between "what main declares" and "what HEAD declares" would be a
+# difference in what counts as a removal.
+_component_set_declaration_at_rev() {
+  local rev="$1" tmpd="$2" gate_rel="$3" context="${4:-provenance}" rc prc pre=""
+  # THE DIAGNOSTIC SAYS WHICH QUESTION WAS BEING ASKED. On the baseline's FALLBACK path the
+  # manifest's absence is part of the story ("there is no manifest at this rev, and its gate script
+  # could not be read either"); on HEAD's PROVENANCE path the manifest is NOT CONSULTED AT ALL
+  # (job 290), so naming it would send the reader to look at a file this run never opened.
+  [ "$context" = fallback ] && pre="$rev carries no $_CS_MANIFEST_REL and "
   _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_REV_ERRKIND=unreadable
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-      _CS_REV_ERR="$rev carries no $_CS_MANIFEST_REL and reading $rev:$gate_rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
+      _CS_REV_ERR="${pre}reading $rev:$gate_rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
     elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
-      _CS_REV_ERR="$rev carries no $_CS_MANIFEST_REL and git show $rev:$gate_rel could not be run under a bound, so it was NOT RUN (rc $rc)"
+      _CS_REV_ERR="${pre}git show $rev:$gate_rel could not be run under a bound, so it was NOT RUN (rc $rc)"
     else
-      _CS_REV_ERR="$rev carries no $_CS_MANIFEST_REL and git show $rev:$gate_rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/g.err" 2>/dev/null)")"
+      _CS_REV_ERR="${pre}git show $rev:$gate_rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/g.err" 2>/dev/null)")"
     fi
     rm -rf "$tmpd"; return 1
   fi
@@ -3726,10 +3763,10 @@ _component_set_set_at_rev() {
   case "$prc" in
     0) _CS_REV_SET="$_CS_PARSED_SET"; _CS_REV_N="$_CS_PARSED_N"; _CS_REV_SRC=declaration; return 0 ;;
     2) _CS_REV_ERRKIND=empty
-       _CS_REV_ERR="$rev has no $_CS_MANIFEST_REL and its $gate_rel declares NO components; an empty set would excuse every branch"
+       _CS_REV_ERR="${pre}$rev:$gate_rel declares NO components; an empty set would excuse every branch"
        return 1 ;;
     *) _CS_REV_ERRKIND=decl-unrecognised
-       _CS_REV_ERR="$rev has no $_CS_MANIFEST_REL, and its $gate_rel could not be read as TEXT: $_CS_DECL_ERR (this transitional path never EXECUTES the script; it refuses instead)"
+       _CS_REV_ERR="${pre}$rev:$gate_rel could not be read as TEXT: $_CS_DECL_ERR (this path never EXECUTES the script; it refuses instead)"
        return 1 ;;
   esac
 }
@@ -4576,7 +4613,7 @@ _component_set_probe_inner() {
     # declaration as TEXT. An unmeasurable HEAD set is its own named non-PASS — the
     # provenance oracle is the SOLE evidence for DECLARED's claim, so no provenance means no
     # excusal.
-    if _component_set_set_at_rev "${_CS_HEAD_SHA:-HEAD}"; then
+    if _component_set_set_at_rev "${_CS_HEAD_SHA:-HEAD}" declaration; then
       _CS_HEAD_SET="$_CS_REV_SET"
       _CS_HEAD_SRC="$_CS_REV_SRC"
       local head_padded=" $_CS_HEAD_SET "
@@ -16766,6 +16803,31 @@ acquire_gate_slot
 # #2926: the full gate's certification window begins HERE — after the (possibly very
 # long) queue for that slot, when work actually begins. See _tree_recapture_after_slot.
 _tree_recapture_after_slot
+
+# ---- A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES (roborev job 290, High) ----------------
+#
+# THE RULE, and it is the mirror of the one the lead ruled on earlier in this issue ("a check
+# placed AFTER the harmful effect can only report it, never prevent it"):
+#
+#     A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES — NOT BEFORE IT, NOT AFTER THE HARM.
+#
+# THE DEFECT. The pre-flight above runs at the mode dispatch, BEFORE `acquire_gate_slot`, and
+# `_tree_recapture_after_slot` then RESETS the certification window to whatever the tree is once
+# the slot is granted. That recapture is deliberate and must stay — a queue can be very long, and
+# edits made while queued should start a fresh window rather than void the run — but it means the
+# `component-set:` line was computed against a tree the gate has since REPLACED. An edit to the
+# gate script or the manifest during the queue was accepted as the new starting tree with a STALE
+# component-set verdict: a full PASS carrying a line about a set that is no longer the one being
+# dispatched, or a manifest that no longer matches the running `COMPONENTS` array.
+#
+# So the pre-flight is REPEATED here, inside the window `_tree_recapture_after_slot` just opened.
+# It is idempotent (probe, stamp, and fail closed on a fatal verdict), and the earlier call is
+# kept rather than moved: it is what stops a run that cannot certify from queueing for a slot or
+# compiling anything at all. Cost is one ref-oracle round trip after the queue.
+#
+# `--lite` and `--delta` have already returned above and are exempt from the slot cap, so this
+# call is reached only by the modes that HAVE a queue window: the full gate and `--only`.
+apply_component_set_preflight
 
 # file-size runs first and needs no dataset, so it executes before the dataset
 # preflight (which exits early when data is missing).

@@ -1405,7 +1405,7 @@ else
      && [ "$(field KIND "$unc_out")" = ok ] \
      && [ "$(field ANCESTOR "$unc_out")" = yes ] \
      && grep -qw -- "$UNC_REMOVED" <<<"$(field MISSING "$unc_out")" \
-     && [ "$(field HEAD_SRC "$unc_out")" = manifest ] \
+     && [ "$(field HEAD_SRC "$unc_out")" = declaration ] \
      && grep -q 'FAIL-CLOSED (#3544)' <<<"$unc_line" \
      && grep -q 'UNCOMMITTED WORKING-TREE EDIT' <<<"$unc_line" \
      && grep -q 'PRESENT in the committed component set AT HEAD' <<<"$unc_line" \
@@ -1480,7 +1480,12 @@ else
   fi
 fi
 
-# 4b-ii. HEAD'S SET UNMEASURABLE (the diagnostic names the PATHS, not a literal `HEAD:` rev —
+# 4b-ii. HEAD'S SET UNMEASURABLE — and since job 290 the diagnostic names the GATE SCRIPT ONLY,
+#     because HEAD's provenance is read from the committed `COMPONENTS` DECLARATION and the manifest
+#     is NOT CONSULTED there: HEAD's manifest had no equivalent of the local `manifest-stale` check,
+#     so a stale one could excuse an uncommitted removal. Naming a file this run never opened would
+#     send the reader to look in the wrong place, so the case asserts its ABSENCE from the line.
+#     (The diagnostic names the PATHS, not a literal `HEAD:` rev —
 #     since job 268 HEAD is resolved to a SHA in this checkout and the read happens in the isolated
 #     repository, because `HEAD` inside the scratch would mean the SCRATCH's own unborn HEAD): the provenance oracle is the SOLE evidence for DECLARED's
 #     claim, so a run that cannot consult it must NOT excuse the removal. Forced by dropping
@@ -1500,7 +1505,7 @@ if [ "$(field VERDICT "$hu_out")" = UNMEASURED ] \
    && [ "$(field KIND "$hu_out")" = head-set-unmeasured ] \
    && grep -q 'FAIL-CLOSED (#3544)' <<<"$hu_line" \
    && grep -q 'scripts/agent-gate.sh' <<<"$hu_line" \
-   && grep -q 'scripts/agent-gate.components' <<<"$hu_line" \
+   && ! grep -q 'scripts/agent-gate.components' <<<"$hu_line" \
    && ! grep -q '^component-set: DECLARED' <<<"$hu_line" \
    && ! grep -q "own COMMITTED diff, NOT skew" <<<"$hu_line"; then
   ok "3544-head-unmeasured: an unreadable HEAD gate script is its own named non-PASS, never a DECLARED excusal"
@@ -2461,6 +2466,147 @@ for _ur in 'query:https://github.com/pmcfadin/cqlite?access_token=SEK_query_3544
     ok "3544-url-not-rendered[$_ur_label]: a secret in this position never reaches the normalised value or the emitted line, and the line says the URL is withheld rather than dropping it silently"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# 7u. THE PRE-FLIGHT RUNS INSIDE THE WINDOW IT CERTIFIES (roborev job 290, High). THE RULE, which
+#     is the mirror of the earlier ruling in this issue ("a check placed AFTER the harmful effect
+#     can only report it, never prevent it"):
+#
+#         A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES — NOT BEFORE IT, NOT AFTER THE HARM.
+#
+#     The pre-flight ran at the mode dispatch, BEFORE the #1825 slot wait, and
+#     `_tree_recapture_after_slot` then RESET the certification window to whatever the tree was when
+#     the slot was granted. So an edit made WHILE QUEUED became the new starting tree carrying a
+#     STALE `component-set:` verdict — a full PASS about a set that is no longer the one being
+#     dispatched. The recapture is deliberate and stays; the pre-flight is repeated inside the
+#     window instead.
+#
+#     DRIVEN THROUGH THE REAL SLOT WAIT: the fixture holds the only slot with a lock file, so the
+#     gate genuinely QUEUES; the manifest is edited during that queue; then the lock is released.
+#     A POSITIVE CONTROL asserts the edit really landed inside the queue window (the gate had not
+#     yet started work when it was made), because otherwise this case could pass by editing after
+#     the run had already finished the pre-flight for unrelated reasons.
+# ---------------------------------------------------------------------------
+base_win=$(mkbaseline base-window - )
+win_fx=$(mkbranch windowed "$base_win" - --from-origin)
+# The fixture needs the gate's OWN slot daemon, or `acquire_gate_slot` reports it missing and
+# DISABLES the cap — and then the run never queues, so the edit could not land inside the window.
+mkdir -p "$win_fx/scripts/lib"
+cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$win_fx/scripts/lib/" 2>/dev/null
+win_slots="$tmp/window-slots"
+win_ready="$tmp/window-holder.ready"
+win_sum="$tmp/window-summary.txt"
+win_log="$tmp/window.log"
+mkdir -p "$win_slots"
+if [ ! -f "$win_fx/scripts/lib/gate_slot_daemon.py" ] || ! command -v python3 >/dev/null 2>&1; then
+  echo "skip - 3544-preflight-in-window: the slot daemon or python3 is unavailable, so the queue window cannot be held open"
+else
+  # HOLD THE ONLY SLOT with a second instance of the gate's own daemon, tied to a throwaway pid.
+  sleep 300 &
+  win_holder=$!
+  python3 "$win_fx/scripts/lib/gate_slot_daemon.py" --slots-dir "$win_slots" --slots 1 \
+      --gate-pid "$win_holder" --ready-file "$win_ready" --poll-secs 1 </dev/null >/dev/null 2>&1 &
+  win_daemon=$!
+  win_held=0
+  win_i=0
+  while [ "$win_i" -lt 100 ]; do
+    [ -f "$win_ready" ] && { win_held=1; break; }
+    sleep 0.2
+    win_i=$((win_i + 1))
+  done
+  if [ "$win_held" -ne 1 ]; then
+    bad "3544-preflight-in-window: could not hold a slot with the gate's own daemon, so the queue window cannot be opened (fail-closed rather than assert on nothing)"
+    kill "$win_holder" 2>/dev/null || true
+    kill "$win_daemon" 2>/dev/null || true
+  else
+    ( fx "$win_fx" && CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_SLOTS_DIR="$win_slots" \
+        AGENT_GATE_SUMMARY_FILE="$win_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+        bash scripts/agent-gate.sh >"$win_log" 2>&1 ) &
+    win_pid=$!
+    # WAIT ON THE CONDITION, not a timer: the gate prints its queued notice once.
+    win_queued=0
+    win_j=0
+    while [ "$win_j" -lt 200 ]; do
+      if grep -q 'waiting for gate slot' "$win_log" 2>/dev/null; then win_queued=1; break; fi
+      kill -0 "$win_pid" 2>/dev/null || break
+      sleep 0.2
+      win_j=$((win_j + 1))
+    done
+    # THE EDIT, made while the run is QUEUED: drop a component from the manifest so it no longer
+    # matches the gate's own COMPONENTS array. Post-recapture that must FAIL the run.
+    if [ "$win_queued" -eq 1 ]; then
+      grep -vx -- 'smoke' "$win_fx/scripts/agent-gate.components" >"$tmp/window-manifest.txt"
+      cp "$tmp/window-manifest.txt" "$win_fx/scripts/agent-gate.components"
+    fi
+    kill "$win_holder" 2>/dev/null || true
+    wait "$win_pid" 2>/dev/null; win_rc=$?
+    kill "$win_daemon" 2>/dev/null || true
+    wait "$win_holder" 2>/dev/null
+    if [ "$win_queued" -ne 1 ]; then
+      bad "3544-preflight-in-window: the gate never reported queueing for a slot, so the edit could not be made INSIDE the window — the case cannot discriminate"
+      sed -n '1,5p' "$win_log" 2>/dev/null
+    elif [ "$win_rc" -ne 0 ] \
+       && grep -q '^component-set: FAIL-CLOSED (#3544)' "$win_sum" 2>/dev/null \
+       && grep -q 'manifest-stale' "$win_sum" 2>/dev/null; then
+      ok "3544-preflight-in-window: a manifest edited WHILE THE RUN WAS QUEUED is caught after the slot wait — the pre-flight is repeated inside the window the recapture opens, so the emitted line describes the tree that actually ran"
+    else
+      bad "3544-preflight-in-window: expected a FAIL-CLOSED component-set line naming manifest-stale after an in-queue edit (rc=$win_rc)"
+      grep -E '^(RESULT|component-set|preflight)' "$win_sum" 2>/dev/null | head -4
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7v. HEAD'S PROVENANCE COMES FROM THE COMMITTED DECLARATION, NOT FROM HEAD'S MANIFEST (roborev
+#     job 290, Medium). The asymmetry: the LOCAL manifest is checked against the LOCAL `COMPONENTS`
+#     array on every run (`manifest-stale`), so it is a VERIFIED claim — while HEAD's manifest was
+#     trusted with no equivalent check. A STALE manifest at HEAD, omitting a component that HEAD's
+#     gate still DECLARES, then matched an uncommitted removal of that component and classified it
+#     as the NON-FATAL `DECLARED`: a false green produced by the oracle that exists to refuse one.
+#
+#     THE FIXTURE IS THAT EXACT STATE, and its construction is the assertion: HEAD's manifest is
+#     committed WITHOUT the component while HEAD's gate still declares it, and the working tree then
+#     removes it from both. A run that reads HEAD's MANIFEST sees "absent at HEAD" and says
+#     DECLARED; a run that reads HEAD's DECLARATION sees it present and says UNCOMMITTED.
+#
+#     The local `manifest-stale` guard is why the working tree must edit BOTH — otherwise the run
+#     stops before provenance is ever consulted, which is a different (also correct) refusal.
+# ---------------------------------------------------------------------------
+# A component with a space on BOTH sides in the array: `smoke` is LAST (`… minimal-build smoke)`),
+# so a ` smoke ` pattern matches nothing and the fixture builds silently wrong — which its own
+# fail-closed construction check caught on the first run.
+PROV_REMOVED=pub-surface
+base_pv=$(mkbaseline base-provenance - )
+pv_fx=$(mkbranch provenance "$base_pv" - --from-origin)
+pv_ok=1
+# COMMIT a stale manifest at HEAD: the component is dropped from the manifest only, leaving the
+# gate's own declaration intact.
+( fx "$pv_fx" && grep -vx -- "$PROV_REMOVED" scripts/agent-gate.components >../prov-manifest.txt \
+  && cp ../prov-manifest.txt scripts/agent-gate.components \
+  && git add -A && git "${GIT_ID[@]}" commit -qm "stale manifest at HEAD" ) >/dev/null 2>&1 || pv_ok=0
+# …then remove the component in the WORKING TREE from both the array and the manifest, uncommitted.
+sed "/^COMPONENTS=(/ s/ $PROV_REMOVED / /" "$pv_fx/scripts/agent-gate.sh" >"$tmp/prov-gate.sh" 2>/dev/null || pv_ok=0
+if [ "$pv_ok" -ne 1 ] || cmp -s "$pv_fx/scripts/agent-gate.sh" "$tmp/prov-gate.sh"; then
+  bad "3544-head-provenance-declaration: could not build the fixture (the COMPONENTS edit removing '$PROV_REMOVED' matched nothing, or the stale-manifest commit failed) — the case would test nothing"
+else
+  cp "$tmp/prov-gate.sh" "$pv_fx/scripts/agent-gate.sh"
+  pv_head_manifest=$(git -C "$pv_fx" show "HEAD:scripts/agent-gate.components" 2>/dev/null | grep -cx -- "$PROV_REMOVED")
+  pv_head_decl=$(git -C "$pv_fx" show "HEAD:scripts/agent-gate.sh" 2>/dev/null | grep -c "^COMPONENTS=(.* $PROV_REMOVED ")
+  pv_out=$(hook "$pv_fx")
+  pv_line=$(field COMPONENT_SET_LINE "$pv_out")
+  if [ "$pv_head_manifest" -ne 0 ] || [ "$pv_head_decl" -lt 1 ]; then
+    bad "3544-head-provenance-declaration: the fixture is not in the stale state (HEAD manifest has it: $pv_head_manifest want 0; HEAD declaration has it: $pv_head_decl want >=1) — the two sources do not disagree, so the case cannot discriminate"
+  elif [ "$(field VERDICT "$pv_out")" = UNCOMMITTED ] \
+     && [ "$(field HEAD_SRC "$pv_out")" = declaration ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$pv_line" \
+     && grep -qw -- "$PROV_REMOVED" <<<"$pv_line" \
+     && ! grep -q '^component-set: DECLARED' <<<"$pv_line"; then
+    ok "3544-head-provenance-declaration: with HEAD's manifest STALE and HEAD's declaration intact, the removal is classified UNCOMMITTED from the DECLARATION — a stale manifest at HEAD can no longer excuse an uncommitted edit"
+  else
+    bad "3544-head-provenance-declaration: expected UNCOMMITTED from HEAD_SRC=declaration naming $PROV_REMOVED (verdict='$(field VERDICT "$pv_out")' head_src='$(field HEAD_SRC "$pv_out")')"
+    printf '%s\n' "$pv_out"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 8. NO OPT-OUT. The remedy (rebase) is universally available, so an escape hatch could
