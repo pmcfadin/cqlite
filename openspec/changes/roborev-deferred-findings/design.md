@@ -83,18 +83,58 @@ could not read". Only an affirmatively measured `PRESENT (n)` is deferrable.
 
 ## Where the finding went: the disposition requirement
 
-The issue requires a finding be *addressed*, and a deferral without a linked issue is a dropped
-finding. So each `issues=` number must be:
+The issue requires a finding be *addressed*, and a deferral naming an issue that does not exist is a
+dropped finding wearing a link. So each `issues=` number must be:
 
-1. **A retrievable GitHub issue.** Unretrievable ⇒ the deferral is not granted (fail-closed, under
-   its own cause — never silently ignored).
-2. **Referenced from the PR body.** The nit rule already requires one follow-up issue at merge time;
-   this makes the link mechanical instead of remembered.
-3. **Citable to a ruling** — satisfied by the authorization comment itself, which is permanent,
+1. **A retrievable GitHub issue, asked THREE-VALUED.** `present` (a payload affirmatively naming that
+   number) is the only state that permits a grant. `absent` — GitHub answered that it does not exist —
+   is `ISSUE-ABSENT`. `could-not-ask` — no `gh`, no auth, a network/API failure, an unparseable
+   payload, or **any diagnostic that does not say the issue is missing** — is `ISSUE-UNVERIFIABLE`.
+   `gh issue view` **exits 1 for both** (measured on gh 2.98.0: `GraphQL: Could not resolve to an
+   issue or pull request with the number of N.` vs `HTTP 401: Bad credentials`), so an exit-code-only
+   test is the two-valued predicate that always picks the permissive answer, and it would grant over
+   issues nobody confirmed exist. The verdict therefore comes from the diagnostic, unrecognised ⇒
+   could-not-ask, and the two non-granting states are textually distinct because they are **different
+   operator actions**.
+2. **Citable to a ruling** — satisfied by the authorization comment itself, which is permanent,
    attributable, and in the PR. There is no separate ruling artifact to hunt for.
 
-All three are recorded in the block, so the disposition of every deferred finding is legible from a
-pasted summary alone.
+Both are recorded in the block, so the disposition of every deferred finding is legible from a pasted
+summary alone.
+
+### A PR-body link was ALSO required, and that leg was DELETED (lead ruling, option A)
+
+The first two revisions of this design required each `issues=` number to appear as a **local, visible
+`#N` in the PR body** (`PR-UNLINKED` otherwise). It is gone, and the reason is not the bypasses:
+
+**A PR body is editable at any time by anyone with write access, with NO per-edit attribution. A
+top-level comment is permanent and attributable.** So the body-link leg was the **weaker artifact**,
+and it would stay weaker **even if Markdown parsed trivially** — an authorization the constrained
+party can silently rewrite after it is granted evidences nothing. The recogniser problem was a
+symptom. The wording invited it too: *"name where the finding went"* invited a **prose scan**, when
+the property wanted is that the finding is **TRACKED**, which retrievability enforces.
+
+The bypass census, kept because it is the evidence the class does not close (Markdown-handling
+references in that one predicate: **0 → 11**):
+
+| shape | round | status when the leg was deleted |
+|---|---|---|
+| `other/repo#3602` cross-repository | R1 | closed |
+| `#3602suffix` | R1 | closed |
+| fenced code block | R1 | closed |
+| `<!-- #3602 -->` HTML comment | R1 | closed |
+| `` `#3602` `` single-backtick span | R1 | closed |
+| ``` ``#3602`` ``` multi-backtick span | **R2** | **ACCEPTED (bypass)** |
+| `[#3602](https://example.com)` explicit link | **R2** | **ACCEPTED (bypass)** |
+| 4-space indented code block | — | ACCEPTED (declared residual) |
+| GFM autolinks, `[#N][ref]`, raw HTML, entity refs, nested emphasis | — | unhandled by any generation |
+
+#3312 (*remove the shared channel, do not pick a rarer delimiter*) and #3229's owner ruling (*a guard
+with known documented false-PASSes is worse than no guard, because it invites reliance it cannot
+support*) both apply. **Subtraction cannot introduce a false PASS**: with nothing predicted about the
+body, nothing is excused by it. Any future strengthening must come from an **immutable or attributed**
+artifact — a structured GitHub relation, or the authorization comment itself — never from parsing the
+mutable body of the PR under review. Reinstating a body scan is reinstating generation three.
 
 ## Reporting: a distinct token, and a key that speaks when nothing was granted
 
@@ -118,7 +158,7 @@ unconfined admission would let one authorization excuse a check nobody authorize
 the accident that no other key emits the token.
 
 `deferral:` states its own state even when nothing was granted — `NONE` / `STALE` / `MALFORMED` /
-`UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-UNRESOLVABLE` / `PR-UNLINKED` / `UNAVAILABLE` — each
+`UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE` — each
 leaving the FAIL in place. This is the `waiver:` key's lesson: *"your marker names the wrong job"*
 and *"there is no marker"* are different operator actions, and a bare FAIL distinguishes neither.
 Per #3312's own finding, a **marker-only comment with bad fields is `MALFORMED`; a comment with other

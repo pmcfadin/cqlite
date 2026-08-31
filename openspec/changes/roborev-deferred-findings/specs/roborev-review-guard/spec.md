@@ -73,6 +73,19 @@ containing the marker **plus other content** SHALL be ignored **silently** (repo
 `MALFORMED`: someone documenting the form never attempted an authorization, and a false accusation
 reprinted on every later run is worse than silence.
 
+A marker **ATTEMPT** SHALL be recognised as the marker's **stem followed by whitespace OR by the end
+of the line** — never the stem plus a mandatory trailing space. A marker-only comment reading exactly
+the stem (`roborev-defer: findings`, `roborev-waive: prompt-content-absent`) is a truncated
+authorization someone plainly meant to write, so it SHALL be `MALFORMED` and SHALL NOT be reported as
+if no authorization existed: a **fail-quiet on an attempted authorization** sends the author to
+re-read syntax they typed correctly and to conclude the mechanism is broken. The token boundary SHALL
+still be tested rather than dropped, so a different word (`roborev-defer: findingsfoo`) is not an
+attempt. This rule SHALL hold for **both** marker kinds, expressed once and inherited by call.
+
+#### Scenario: A marker-only comment that is the bare stem
+- **WHEN** the sole nonblank content of a top-level comment from an allowlisted author is exactly the marker's stem, with or without a trailing newline, for either marker kind
+- **THEN** the run reports that kind's `MALFORMED` state and `RESULT: FAIL`, and never reports `NONE`
+
 #### Scenario: A well-formed marker from an allowlisted author, sole content of a top-level comment
 - **WHEN** `--recheck-job <id>` runs against a findings-bearing job whose PR carries such a comment naming this base, head, job, an issue list and the observed count
 - **THEN** the deferral is granted, and the run reports `deferral: GRANTED (…)`
@@ -112,19 +125,52 @@ resolved from base+head, or a re-run could inherit an authorization written for 
 marker written before its job's findings were read, and any **new** finding arriving at the same
 head, each raise or lower the observed count and therefore fail.
 
-**Disposition.** Each issue number in `issues=` SHALL be an issue that (a) is **retrievable**, and
-(b) is **referenced from the pull-request body**. An unretrievable issue SHALL leave the run FAILing
-under `deferral: ISSUE-UNRESOLVABLE (…)`; an issue absent from the PR body SHALL leave it FAILing
-under `deferral: PR-UNLINKED (…)`. A deferral without a linked issue is a dropped finding.
+**Disposition.** Each issue number in `issues=` SHALL be **retrievable** from GitHub, and that
+retrievability SHALL be **three-valued**: an issue GitHub answers does not exist SHALL leave the run
+FAILing under `deferral: ISSUE-ABSENT (…)`; an issue whose existence could **not be asked** — no `gh`,
+no auth, a network or API failure, an unparseable payload, or any diagnostic that does not say the
+issue is missing — SHALL leave the run FAILing under `deferral: ISSUE-UNVERIFIABLE (…)`, a
+**textually distinct** state. A could-not-ask SHALL NEVER be read as verified-present, and only a
+payload affirmatively naming that issue's number SHALL count as present. `gh issue view` exits 1 for
+BOTH a missing issue and an auth failure (measured on gh 2.98.0), so the two SHALL NOT be
+distinguished by exit code; where they cannot be told apart, the verdict SHALL be the could-not-ask.
+The two non-granting states are separate because they are **different operator actions** ("that issue
+number is wrong" vs "this box cannot reach GitHub"). A deferral naming an issue that does not exist is
+a dropped finding wearing a link.
 
-The PR body is authored by the **worker** — the party the disposition requirement constrains — so the
-reference SHALL be recognised only as a **LOCAL** issue reference bounded on **both** sides by a
-non-token, non-repository-qualifier character, and only where it appears in **visible** body content.
-A cross-repository reference (`owner/repo#N`), a reference carrying an alphanumeric suffix (`#Nsuffix`)
-and a reference appearing **only** inside a fenced code block, an inline code span or an HTML comment
-SHALL each leave the run FAILing under `deferral: PR-UNLINKED (…)`. Every ambiguity SHALL resolve
-toward **not referenced**: the remedy for a false `PR-UNLINKED` is one line in the PR body, whereas the
-opposite error lets a deferred finding be dropped with no recorded disposition.
+**SUPERSEDED — the PR-body reference requirement is REMOVED (lead ruling, option A).** This
+requirement previously ALSO demanded that each `issues=` number be **referenced from the
+pull-request body** as a local, visible `#N`, with `deferral: PR-UNLINKED (…)` otherwise, and it
+carried scenarios for cross-repository references, alphanumeric suffixes, fenced blocks, code spans,
+HTML comments and a declared 4-space-indent residual. **That leg is deleted, not weakened**, and it
+SHALL NOT be reinstated. The requirement text is superseded **in place** rather than removed silently,
+because the reason is the durable part:
+
+1. **THE ARTIFACT WAS THE WRONG ONE.** A PR body is **editable at any time by anyone with write
+   access, with NO per-edit attribution**. A top-level comment is **permanent and attributable**. So
+   the body-link leg was the **weaker** artifact of the two, and it would stay weaker **even if
+   Markdown parsed trivially**: an authorization that the constrained party can silently rewrite after
+   it is granted evidences nothing. The Markdown-recogniser problem was a **symptom**, not the cause.
+2. **THE WORDING INVITED THE MISTAKE.** "Name where the finding went" invited a **prose scan**, when
+   the property actually wanted is that the finding is **TRACKED** — which retrievability enforces and
+   a sentence in a body never did.
+3. **THE RECOGNISER CLASS DID NOT CLOSE.** Markdown-handling references in the one predicate went
+   **0 → 11** across two review rounds. Round 1 closed five shapes (cross-repository, `#Nsuffix`,
+   fenced block, HTML comment, single-backtick span); round 2 then found **two more** — a
+   multi-backtick span ``` ``#3602`` ``` and an explicit link `[#3602](https://example.com)` — with
+   GFM autolinks, reference-style links, raw HTML, entity references and nested emphasis unhandled by
+   any generation, and the 4-space-indent case already a declared residual. Per #3312 (*remove the
+   shared channel, do not pick a rarer delimiter*) and #3229's owner ruling (*a guard with known
+   documented false-PASSes is worse than no guard, because it invites reliance it cannot support*),
+   the leg is removed.
+
+**Subtraction cannot introduce a false PASS**: with nothing predicted about the PR body, nothing is
+excused by it. The property is now carried by three legs — (1) the marker **names** the issue numbers,
+on the permanent, attributable, allowlisted comment channel; (2) each named issue must be
+**retrievable**, three-valued as above, which is the leg that enforces **not-dropped**; (3) the
+summary block **records** the numbers, the count, the scope and the reason verbatim. Any future
+strengthening of the disposition SHALL come from an **immutable or attributed** artifact, never from
+parsing the mutable body of the pull request under review.
 
 **Non-deferrable states.** `findings: UNKNOWN` and `findings: SKIP` SHALL NOT be deferrable in any
 mode. Those values mean the findings state was never **established**, and a pass may not rest on a
@@ -141,39 +187,17 @@ removing prose reconstruction, and it SHALL NOT be reopened.
 - **WHEN** a later job at the same base and head reports one finding more than the authorization covers
 - **THEN** the marker's `job=` no longer names this job, so nothing is granted and the FAIL stands
 
-#### Scenario: The authorization names an issue that is not linked from the PR body
-- **WHEN** `issues=` names a retrievable issue that the PR body does not reference
-- **THEN** the run reports `deferral: PR-UNLINKED (…)` and `RESULT: FAIL`
+#### Scenario: The authorization names an issue GitHub says does not exist
+- **WHEN** an `issues=` number is answered by GitHub as not existing in this repository
+- **THEN** the run reports `deferral: ISSUE-ABSENT (…)` and `RESULT: FAIL` — an issue that does not exist fails closed rather than being skipped, and the remedy named is the marker or the missing issue
 
-#### Scenario: The PR body references the issue only in another repository, with a suffix, or in inert content
-- **WHEN** `issues=` names retrievable issues and the PR body references them only as `owner/repo#N`, as `#Nsuffix`, inside a fenced code block, inside an inline code span, or inside an HTML comment
-- **THEN** the run reports `deferral: PR-UNLINKED (…)` naming those issues and `RESULT: FAIL` — the constrained party may not satisfy its own disposition constraint with a reference to something else or with content the reader does not see as a link
+#### Scenario: The existence of a named issue could not be asked
+- **WHEN** `gh issue view` fails with a diagnostic that does **not** say the issue is missing (for example `HTTP 401: Bad credentials`), every other part of the authorization being perfect
+- **THEN** the run reports `deferral: ISSUE-UNVERIFIABLE (…)` and `RESULT: FAIL`, textually distinct from `ISSUE-ABSENT`, carrying the diagnostic and directing the operator at the network rather than at the marker — a could-not-ask is never read as verified
 
-#### Scenario: The PR body references the issue in ordinary visible prose
-- **WHEN** `issues=` names retrievable issues and the PR body references each as a bare `#N` in visible text (parenthesised or sentence-final included), beside unrelated inert content
-- **THEN** the disposition half is satisfied, so a granted, matching marker still reports `deferral: GRANTED (…)`, `findings: DEFERRED (…)` and `RESULT: PASS`
-
-**DECLARED RESIDUAL — a 4-space INDENTED code block is NOT stripped, deliberately (#3626).** A
-`    #3602` line inside an indented code block therefore still counts as a reference. This is
-**measured, not overlooked**, and it is left open on purpose: in CommonMark the *same* 4-space indent
-is both an indented code block (which should be stripped) and a **list continuation line** (which is
-ordinary visible prose and MUST NOT be stripped), and the predicate cannot tell them apart without a
-full block-structure parse. Both shapes were probed and both currently report `True`:
-
-| body | today | a naive 4-space stripper |
-|---|---|---|
-| `text\n\n    #3602` (code block) | `True` | `False` — desired |
-| `- item\n    see #3602` (list continuation) | `True` | `False` — **WRONG, legitimate prose** |
-
-So a naive stripper buys the narrow case at the price of **false `PR-UNLINKED` refusals on ordinary
-Markdown**, and a deferral has no waiver-of-the-waiver to recover with — *a guard that reds on
-correct input is the guard agents learn to waive*. The fence, inline-span and HTML-comment shapes the
-reviewers named ARE closed. Closing the indented case properly needs a CommonMark block parse and is
-tracked separately; until then this residual is STATED rather than silently carried.
-
-#### Scenario: The authorization names an unretrievable issue
-- **WHEN** an `issues=` number cannot be retrieved
-- **THEN** the run reports `deferral: ISSUE-UNRESOLVABLE (…)` and `RESULT: FAIL` — the unretrievable case fails closed rather than being skipped
+#### Scenario: The PR body is not consulted at all
+- **WHEN** a granted, matching, count-equal authorization names retrievable issues and the pull-request body mentions none of them
+- **THEN** the run still reports `deferral: GRANTED (…)`, `findings: DEFERRED (…)` and `RESULT: PASS` — the body is evidence for nothing, because it is editable without attribution (see the superseded requirement above)
 
 #### Scenario: A findings state that was never established
 - **WHEN** `findings:` reads `UNKNOWN` or `SKIP` and a granted-shaped marker is present
@@ -262,7 +286,7 @@ excuse a real defect.
 The block SHALL carry a `deferral:` key whenever the findings branch had a deferral to look for, and
 it SHALL state its own state even when nothing was granted, with one cause per distinguishable
 operator action: `GRANTED` / `NONE` / `STALE` / `MALFORMED` / `UNAUTHORIZED` / `COUNT-MISMATCH` /
-`ISSUE-UNRESOLVABLE` / `PR-UNLINKED` / `UNAVAILABLE`. Every non-`GRANTED` value SHALL leave the
+`ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE`. Every non-`GRANTED` value SHALL leave the
 existing FAIL in place.
 
 A `GRANTED` record SHALL name the authorizing author, the issue numbers, the count, the bound scope
@@ -312,7 +336,7 @@ key, and SHALL NOT become a general "override any check" mechanism.
 
 `scripts/tests/test_roborev_review_guard.sh` — already executed by the agent gate's `tooling-tests`
 component — SHALL gain a case for **every** state named above: the grant, and each of `NONE`,
-`STALE`, `MALFORMED`, `UNAUTHORIZED`, `COUNT-MISMATCH`, `ISSUE-UNRESOLVABLE`, `PR-UNLINKED`,
+`STALE`, `MALFORMED`, `UNAUTHORIZED`, `COUNT-MISMATCH`, `ISSUE-ABSENT`, `ISSUE-UNVERIFIABLE`,
 `UNAVAILABLE`, plus the non-deferrable `UNKNOWN`/`SKIP` states, the sole-content refusals (indented,
 quoted, bulleted, mid-sentence, fenced, HTML-wrapped), the diagnostic-is-not-a-credential property,
 and the separate-scoping pair. Each case SHALL plant its artifacts in its **own scratch copy of the

@@ -23,11 +23,15 @@
       base+head.
 - [x] 2.3 Assert `count=` equals the **observed** findings count and `issues=` is non-empty →
       otherwise `COUNT-MISMATCH`.
-- [x] 2.4 Assert disposition per issue: retrievable (`ISSUE-UNRESOLVABLE` otherwise) **and**
-      referenced from the PR body (`PR-UNLINKED` otherwise). The body reference is recognised only as a
-      LOCAL `#N` bounded on both sides (no `owner/repo#N`, no `#Nsuffix`) and only in VISIBLE content
-      (fenced blocks, inline code spans and HTML comments removed first), because the body is written
-      by the constrained party; every ambiguity resolves toward NOT referenced.
+- [x] 2.4 Assert disposition per issue: **retrievable**, asked THREE-VALUED — `present` (the only
+      granting state) / `absent` ⇒ `ISSUE-ABSENT` / could-not-ask ⇒ `ISSUE-UNVERIFIABLE`, textually
+      distinct, keyed on the DIAGNOSTIC because `gh issue view` exits 1 for both, unrecognised ⇒
+      could-not-ask. **The PR-body link requirement is DELETED** (lead ruling, option A): a PR body is
+      editable by anyone with write access with no per-edit attribution while a comment is permanent
+      and attributable, so it was the weaker artifact — and its Markdown recognisers leaked in two
+      successive rounds (census in `design.md`). Reinstating it is reinstating generation three.
+- [x] 2.4b A marker ATTEMPT is the stem plus whitespace **or end of line**, both kinds: a marker-only
+      comment that is exactly the stem is `MALFORMED`, never a fail-quiet `NONE`.
 - [x] 2.5 Refuse to defer `findings: UNKNOWN` / `SKIP` in every mode; add **no** prose reconstruction
       of per-finding identity.
 - [x] 2.6 Resolve the scanner from the wrapper's own directory — no override, no `${…:-…}` fallback.
@@ -36,7 +40,7 @@
 - [x] 3.1 `findings: DEFERRED (<n>, issues=#…, authorized @<login>, job <id>)`; never `NONE` for a
       deferral (`NONE` stays reachable only from the record's structured verdict letter).
 - [x] 3.2 Add `deferral:` key with the full cause set: `GRANTED` / `NONE` / `STALE` / `MALFORMED` /
-      `UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-UNRESOLVABLE` / `PR-UNLINKED` / `UNAVAILABLE`;
+      `UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE`;
       every non-`GRANTED` value leaves the FAIL. `GRANTED` names author, issues, count, scope and the
       **verbatim** reason. The `NONE` cause teaches both the sole-content and top-level rules.
 - [x] 3.3 Extend the **closed** verdict grammar: `DEFERRED` non-failing only when the oracle granted;
@@ -54,7 +58,8 @@
 ## 5. Hermetic coverage (`scripts/tests/test_roborev_review_guard.sh`, gate `tooling-tests`)
 - [x] 5.1 Grant case: findings-bearing recheck + matching marker ⇒ `DEFERRED` + `RESULT: PASS`.
 - [x] 5.2 A case per refusal state: `NONE`, `STALE`, `MALFORMED`, `UNAUTHORIZED`, `COUNT-MISMATCH`,
-      `ISSUE-UNRESOLVABLE`, `PR-UNLINKED`, `UNAVAILABLE`.
+      `ISSUE-ABSENT`, `ISSUE-UNVERIFIABLE` (with a naive-two-valued mutant control proving the
+      could-not-ask case is not vacuous), `UNAVAILABLE`.
 - [x] 5.3 Non-deferrable: `findings: UNKNOWN` and `SKIP` with a granted-shaped marker ⇒ FAIL.
 - [x] 5.4 Sole-content refusals: indented, `>`-quoted, bulleted, mid-sentence, fenced, HTML
       `<pre>`/`<code>`.
