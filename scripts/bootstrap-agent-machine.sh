@@ -62,8 +62,11 @@
 #      into /etc/environment — which PAM reads at SESSION CREATION, with no
 #      interactivity guard — and takes its VERDICT from an AFFIRMATIVE PROBE of a
 #      fresh, profile-free session, never from a grep of the file it just wrote.
-#      Three-valued on one greppable `gate-pin:` line: VERIFIED / FAILED /
-#      UNMEASURED, with UNMEASURED a [warn] (same posture as `git-push:`).
+#      VISIBILITY IS ONLY HALF THE QUESTION: a value the gate does not HONOUR is a pin
+#      in name only, so the gate itself is then asked (via its `--cpu-budget` hook,
+#      never a re-derivation of its rules) what it will do with the value. One
+#      greppable `gate-pin:` line: VERIFIED / NOT-HONOURED / FAILED / UNMEASURED, and
+#      only VERIFIED is an [ok] (same posture as `git-push:`).
 #   6. Health check: run the gate's fmt component and print its authoritative
 #      `accelerators:` line.
 #
@@ -1887,6 +1890,22 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # write" true IN CODE rather than merely by construction.
   if [ "$PIN_ENV_FILE_IS_SEAM" = 1 ]; then PIN_ROOT=(); PIN_WRITE_PRIV=1; fi
 
+  # Does the file ALREADY carry a pin line? Read ONCE, here, because two very different
+  # boxes reach the FAILED verdict below and they need different remedies: a box with no
+  # line (persist it) and a box whose line is present yet invisible to a fresh session
+  # (a PAM condition — re-running with --yes finds the line already there and changes
+  # NOTHING, so an operator told to do that just loops).
+  PIN_FILE_HAS_LINE=unknown
+  if [ ! -e "$PIN_ENV_FILE" ]; then
+    PIN_FILE_HAS_LINE=absent-file
+  elif [ ! -L "$PIN_ENV_FILE" ] && [ -r "$PIN_ENV_FILE" ]; then
+    if grep -Eq '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$PIN_ENV_FILE" 2>/dev/null; then
+      PIN_FILE_HAS_LINE=yes
+    else
+      PIN_FILE_HAS_LINE=no
+    fi
+  fi
+
   # ---- (1) persist. Reported with info/warn ONLY — a write is never the verdict ----
   if [ ! -e "$PIN_ENV_FILE" ]; then
     PIN_PERSIST_NOTE="no $PIN_ENV_FILE on this host"
@@ -1897,7 +1916,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   elif [ ! -r "$PIN_ENV_FILE" ]; then
     PIN_PERSIST_NOTE="$PIN_ENV_FILE is unreadable"
     warn "gate-pin: cannot read $PIN_ENV_FILE — cannot tell whether the pin is already there, so nothing was written (a blind append could duplicate or contradict an existing line)"
-  elif grep -Eq '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$PIN_ENV_FILE" 2>/dev/null; then
+  elif [ "$PIN_FILE_HAS_LINE" = yes ]; then
     info "$PIN_ENV_FILE already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is (a box deliberately running >1 concurrent gate overrides the pin; bootstrap never rewrites an existing value)"
   elif [ "$AUTO_YES" != 1 ]; then
     PIN_PERSIST_NOTE="not persisted (no --yes)"
@@ -1925,6 +1944,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # nothing already there is disturbed.
     if printf '%s%s\n%s\n' "$pin_prefix" "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" \
          | ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} tee -a "$PIN_ENV_FILE" >/dev/null 2>&1; then
+      PIN_FILE_HAS_LINE=yes
       info "appended '$PIN_ENV_LINE' to $PIN_ENV_FILE — PAM reads it at session creation, so NEW sessions pick it up with no reboot and no re-login"
     else
       PIN_PERSIST_NOTE="the append to $PIN_ENV_FILE failed"
@@ -1952,6 +1972,43 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       info "could not append to $PROFILE (interactive convenience only) — add by hand: $EXPORT_LINE"
     fi
   fi
+
+  # pin_gate_source_for <value>: what the GATE will do with <value>, echoed as its own
+  # source token (`pinned` / `default` / `invalid` / `clamped`); rc 1 if the gate could
+  # not be consulted.
+  #
+  # ASK THE GATE, DO NOT RE-DERIVE ITS RULES HERE. A copy of the resolver would be a
+  # SECOND IMPLEMENTATION, and a second implementation's correctness is only knowable by
+  # differential testing against the original (CLAUDE.md's #3283 lesson, learned from a
+  # bash port of a Go function that was tested against a MODEL of Go rather than Go). The
+  # original is one `--cpu-budget` call away: measured 0.4s, and it exits before the
+  # #1825 slot logic so it creates no run directory and takes no slot. If the gate cannot
+  # be consulted the answer is UNKNOWN, never an assumed `pinned` — a positive verdict
+  # requires an affirmative measurement.
+  pin_gate_source_for() {
+    local v="$1" line tok
+    [ -r "$GATE" ] || return 1
+    line=$(bounded 30 env CQLITE_GATE_MAX_CONCURRENCY="$v" CQLITE_GATE_NO_NICE=1 \
+             bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1)
+    [ -n "$line" ] || return 1
+    # The line is space-delimited key=value tokens; max-concurrency=N(source) is ONE of
+    # them, which is exactly why that token carries no spaces.
+    tok=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^max-concurrency=//p' | head -1)
+    case "$tok" in
+      *"("*")") tok=${tok#*(}; printf '%s' "${tok%)}" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  # pin_value_remedy: the remedy for a VISIBLE but NOT-HONOURED value. Shared by both
+  # not-honoured branches so neither can silently lose it.
+  pin_value_remedy() {
+    if [ "$PIN_FILE_HAS_LINE" = yes ]; then
+      info "fix the VALUE (not the presence) — edit the CQLITE_GATE_MAX_CONCURRENCY line in $PIN_ENV_FILE to a positive integer; bootstrap deliberately never rewrites an existing value"
+    else
+      info "the value is visible but is NOT coming from $PIN_ENV_FILE — find and fix whatever sets it (a systemd unit, the image, a launcher-injected env), then re-run"
+    fi
+  }
 
   # ---- (2) THE VERDICT: an affirmative probe of a fresh, profile-free session ----
   #
@@ -1990,23 +2047,71 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     warn "gate-pin: UNMEASURED (sudo works but will not run a command as '$PIN_SELF_USER', so no probe session could be opened — pin visibility is UNKNOWN, not ok)"
   else
     pin_probe_rc=0
+    # TWO markers, because SET-BUT-EMPTY and UNSET are different facts with different
+    # consequences — the gate DISCARDS an empty value for its default formula and stamps
+    # `(invalid)`, which is a misconfigured box, not an unprovisioned one. `${VAR+1}`
+    # separates them; `${VAR-}` alone cannot, and collapsing them here would put the
+    # `:-` defect this issue removed from the gate back into the tool that verifies it.
     pin_probe_out=$(bounded "$PIN_PROBE_BOUND" env -u CQLITE_GATE_MAX_CONCURRENCY \
       sudo -n -u "$PIN_SELF_USER" \
-      bash -c 'printf "cqlite-gate-pin-probe=%s\n" "${CQLITE_GATE_MAX_CONCURRENCY-}"' 2>/dev/null) || pin_probe_rc=$?
-    # Anchored on our own marker at line start, and the value is read from the FIRST
+      bash -c 'printf "cqlite-gate-pin-probe-set=%s\ncqlite-gate-pin-probe=%s\n" "${CQLITE_GATE_MAX_CONCURRENCY+1}" "${CQLITE_GATE_MAX_CONCURRENCY-}"' 2>/dev/null) || pin_probe_rc=$?
+    # Anchored on our own markers at line start, and each value is read from the FIRST
     # matching line: the probe's stdout can also carry a shell's own noise, and a
     # verdict decided by an unanchored match would be decided by whatever else printed.
+    pin_probe_set=$(printf '%s\n' "$pin_probe_out" | sed -n 's/^cqlite-gate-pin-probe-set=//p' | head -1)
     pin_probe_seen=$(printf '%s\n' "$pin_probe_out" | sed -n 's/^cqlite-gate-pin-probe=//p' | head -1)
     if [ "$pin_probe_rc" = 124 ] || [ "$pin_probe_rc" = 137 ]; then
       warn "gate-pin: UNMEASURED (the probe exceeded its ${PIN_PROBE_BOUND}s bound and was killed — pin visibility is UNKNOWN, not ok)"
-    elif ! printf '%s\n' "$pin_probe_out" | grep -q '^cqlite-gate-pin-probe='; then
-      warn "gate-pin: UNMEASURED (the probe session produced no cqlite-gate-pin-probe= line, rc=$pin_probe_rc — pin visibility is UNKNOWN, not ok)"
-    elif [ -n "$pin_probe_seen" ]; then
-      ok "gate-pin: VERIFIED (a fresh profile-free session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen; this run's own value was scrubbed first, so it came from the system env file via PAM, not from inheritance)"
+    elif ! printf '%s\n' "$pin_probe_out" | grep -q '^cqlite-gate-pin-probe-set='; then
+      warn "gate-pin: UNMEASURED (the probe session produced no cqlite-gate-pin-probe-set= line, rc=$pin_probe_rc — pin visibility is UNKNOWN, not ok)"
+    elif [ -n "$pin_probe_set" ]; then
+      # VISIBLE. That is only HALF the question: a value the gate does not HONOUR is a
+      # pin in name only, and certifying it here would be this issue's own shape one
+      # level further out — presence of a VISIBLE value standing in for a value that has
+      # EFFECT. So the gate is asked what it will actually do with it.
+      pin_gate_src=$(pin_gate_source_for "$pin_probe_seen") || pin_gate_src=""
+      case "$pin_gate_src" in
+        pinned)
+          ok "gate-pin: VERIFIED (a fresh profile-free session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate HONOURS it verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value was scrubbed first, so it came from the system env file via PAM, not from inheritance)"
+          ;;
+        invalid)
+          # Its OWN verdict, not FAILED: the pin is present and visible, so "persist the
+          # pin" is the wrong remedy and would send the operator to a file that already
+          # has a line in it. What is wrong is the VALUE.
+          warn "gate-pin: NOT-HONOURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY='$pin_probe_seen', but the gate DISCARDS it — it is empty or non-numeric — and falls back to the #1825 default formula, stamping max-concurrency=N(invalid))"
+          pin_value_remedy
+          ;;
+        clamped)
+          warn "gate-pin: NOT-HONOURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY='$pin_probe_seen', but the gate silently raises it to 1, stamping max-concurrency=1(clamped) — the cap you asked for is not the cap you get)"
+          pin_value_remedy
+          ;;
+        *)
+          # Visibility WAS measured; honouring was not. Not a pass: the sole oracle for
+          # the second half could not be consulted.
+          warn "gate-pin: UNMEASURED (a fresh session sees CQLITE_GATE_MAX_CONCURRENCY='$pin_probe_seen', but $GATE could not be consulted to confirm the gate HONOURS that value — half the question is unanswered, which is not ok)"
+          ;;
+      esac
     else
+      # NOT VISIBLE. Two different boxes, two different remedies — split on a fact we
+      # already read above rather than printing one remedy and hoping.
       warn "gate-pin: FAILED (a fresh profile-free session does NOT see CQLITE_GATE_MAX_CONCURRENCY — every non-interactive gate on this box will resolve the #1825 cap from the default formula and admit co-tenants, #3414)"
-      [ -n "$PIN_PERSIST_NOTE" ] && info "nothing was persisted this run: $PIN_PERSIST_NOTE"
-      info "fix:  bash scripts/bootstrap-agent-machine.sh --yes   (appends '$PIN_ENV_LINE' to /etc/environment)"
+      case "$PIN_FILE_HAS_LINE" in
+        yes)
+          info "the pin IS in $PIN_ENV_FILE and a fresh session still does not see it — this is a PAM condition, NOT a missing pin"
+          info "re-running with --yes will NOT help: it finds the line already present and changes nothing"
+          info "check the session stack reads it:  grep -n pam_env /etc/pam.d/sudo /etc/pam.d/login /etc/pam.d/sshd   (each needs 'pam_env.so readenv=1')"
+          ;;
+        absent-file)
+          # No remedy that names a file this host does not have (the ruling on #3414's
+          # residual 4): telling a Mac to re-run --yes to append to /etc/environment is
+          # advice that cannot work on the box it is printed for.
+          info "this $PLATFORM host has no $PIN_ENV_FILE, so bootstrap has nowhere to persist it — set CQLITE_GATE_MAX_CONCURRENCY=1 in this host's own session-startup mechanism (launchd/systemd/the image), NOT in a shell profile"
+          ;;
+        *)
+          [ -n "$PIN_PERSIST_NOTE" ] && info "nothing was persisted this run: $PIN_PERSIST_NOTE"
+          info "fix:  bash scripts/bootstrap-agent-machine.sh --yes   (appends '$PIN_ENV_LINE' to $PIN_ENV_FILE)"
+          ;;
+      esac
       info "the gate reports the same fact on its cpu-budget line as max-concurrency=N(default) instead of N(pinned)"
     fi
   fi

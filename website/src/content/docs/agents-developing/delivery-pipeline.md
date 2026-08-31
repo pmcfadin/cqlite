@@ -189,9 +189,13 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   path (e.g. `$(mktemp /tmp/gate-<issue>-XXXXXX.txt)`) — shared `/tmp` names get contended under
   multi-lane load, so one lane's summary can clobber or be misread as another's.
 - **Single full gate per machine — enforced mechanically (#2640).** The default posture is one full
-  gate at a time on a box: `bootstrap-agent-machine.sh` pins `CQLITE_GATE_MAX_CONCURRENCY=1`, so the
-  #1825 machine-wide cap admits exactly one full gate and the #2640 per-gate core budget hands that
-  sole gate the full core count. The gate also derives `CARGO_BUILD_JOBS` + nextest `--test-threads`
+  gate at a time on a box: `bootstrap-agent-machine.sh` persists `CQLITE_GATE_MAX_CONCURRENCY=1`
+  into `/etc/environment` — which PAM reads at session creation, so non-interactive shells see it —
+  and then **verifies from a fresh, profile-free session that the value is visible and that the gate
+  honours it** (`gate-pin: VERIFIED`, #3414), rather than trusting that the write happened. With the
+  pin in effect the #1825 machine-wide cap admits exactly one full gate and the #2640 per-gate core
+  budget hands that sole gate the full core count; a gate that resolved its cap from the default
+  formula instead says so on its own `cpu-budget:` line as `max-concurrency=N(default)`. The gate also derives `CARGO_BUILD_JOBS` + nextest `--test-threads`
   from the slot count and wraps itself in `taskpolicy -c utility` (macOS) / `nice` (Linux), so even
   if two gates do overlap neither oversubscribes the CPU. No manual `pgrep`-serialization is needed.
 

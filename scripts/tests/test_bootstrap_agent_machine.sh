@@ -2403,6 +2403,11 @@ runpin() {
 pinroot="$tmp/pin-root"
 if ! mknotifyroot "$pinroot" good; then
   bad "gate-pin: could not stage the bootstrap tree"
+elif ! cp "$SCRIPT_DIR/../agent-gate.sh" "$pinroot/scripts/agent-gate.sh"; then
+  # The verdict asks the GATE what it will do with the probed value (rather than
+  # re-deriving the gate's rules inside bootstrap), so the throwaway tree needs a real
+  # agent-gate.sh. A tree WITHOUT one is its own case — 11m below.
+  bad "gate-pin: could not stage agent-gate.sh into the bootstrap tree"
 else
   mkdir -p "$tmp/pin-cargo"
   pin_home_plain="$tmp/pin-home-plain"; mkdir -p "$pin_home_plain/.cargo"
@@ -2554,6 +2559,91 @@ else
   else
     bad "gate-pin: the opt-out did not report as a non-passing OPT-OUT"
     printf '%s\n' "$out_j" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11l. VISIBLE IS NOT HONOURED. A value the gate DISCARDS (non-numeric/empty) or
+  #      silently CLAMPS (<1) is a pin in name only: bootstrap would be certifying a cap
+  #      the gate does not apply, while the gate's own summary says (invalid)/(clamped)
+  #      for the same box. That is this issue's shape one level further out, so it gets
+  #      its own non-passing verdict — never VERIFIED, and never the bare FAILED, whose
+  #      remedy ("persist the pin") is wrong for a pin that is already there.
+  for pin_case in "abc:DISCARDS" "0:silently raises it to 1"; do
+    pin_val=${pin_case%%:*}; pin_expect=${pin_case#*:}
+    shims_nh="$tmp/pin-shims-nh-$pin_val"; mkpinshims "$shims_nh" "$pin_val"
+    envf_nh="$tmp/pin-env-nh-$pin_val"; printf 'CQLITE_GATE_MAX_CONCURRENCY=%s\n' "$pin_val" >"$envf_nh"
+    out_nh=$(runpin "$pinroot" "$shims_nh" "$envf_nh" HOME="$pin_home_plain")
+    if printf '%s' "$out_nh" | grep -q 'gate-pin: NOT-HONOURED' \
+       && printf '%s' "$out_nh" | grep -q "$pin_expect" \
+       && ! printf '%s' "$out_nh" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: a visible '$pin_val' the gate does not honour is NOT-HONOURED, never VERIFIED"
+    else
+      bad "gate-pin: a visible-but-not-honoured '$pin_val' was not surfaced"
+      printf '%s\n' "$out_nh" | grep -i 'gate-pin' | head -3
+    fi
+  done
+
+  # 11m. A value >= 1 is VERIFIED whatever the number: a box deliberately running >1
+  #      concurrent gate is legitimate and bootstrap correctly never rewrites it, so the
+  #      verdict is "visible AND honoured", not "equal to 1". Without this, 11l would
+  #      also pass against a section that only ever accepts the literal 1.
+  shims_four="$tmp/pin-shims-four"; mkpinshims "$shims_four" 4
+  envf_m="$tmp/pin-env-m"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_m"
+  out_m=$(runpin "$pinroot" "$shims_four" "$envf_m" HOME="$pin_home_plain")
+  if printf '%s' "$out_m" | grep -q 'gate-pin: VERIFIED' \
+     && printf '%s' "$out_m" | grep -q 'max-concurrency=4(pinned)'; then
+    ok "gate-pin: a deliberate override >1 is VERIFIED and reported as the cap the gate will apply"
+  else
+    bad "gate-pin: a legitimate >1 override was not VERIFIED"
+    printf '%s\n' "$out_m" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11n. THE HONOURING ORACLE IS NOT OPTIONAL. With no agent-gate.sh to consult, the
+  #      second half of the question is unanswered — that must be UNMEASURED, never an
+  #      assumed pass. (A positive verdict requires an affirmative measurement.)
+  nogate="$tmp/pin-root-nogate"
+  if mknotifyroot "$nogate" good; then
+    envf_n="$tmp/pin-env-n"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_n"
+    out_n=$(runpin "$nogate" "$shims_one" "$envf_n" HOME="$pin_home_plain")
+    if printf '%s' "$out_n" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_n" | grep -q 'could not be consulted to confirm' \
+       && ! printf '%s' "$out_n" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: a visible pin whose honouring could NOT be checked is UNMEASURED, not VERIFIED"
+    else
+      bad "gate-pin: an unconsultable gate still produced a verdict about honouring"
+      printf '%s\n' "$out_n" | grep -i 'gate-pin' | head -3
+    fi
+  else
+    bad "gate-pin: could not stage the gate-less bootstrap tree"
+  fi
+
+  # 11o. THE PAM CASE. The pin IS in the file and a fresh session still does not see it.
+  #      That is not a missing pin, and `--yes` cannot fix it — it finds the line already
+  #      present and changes nothing, so an operator handed the persist remedy loops.
+  #      The two boxes that reach FAILED must be told apart.
+  envf_o="$tmp/pin-env-o"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_o"
+  out_o=$(runpin "$pinroot" "$shims_none" "$envf_o" HOME="$pin_home_plain")
+  if printf '%s' "$out_o" | grep -q 'gate-pin: FAILED' \
+     && printf '%s' "$out_o" | grep -q 'this is a PAM condition, NOT a missing pin' \
+     && printf '%s' "$out_o" | grep -q 'pam_env' \
+     && ! printf '%s' "$out_o" | grep -q 'fix:  bash scripts/bootstrap-agent-machine.sh --yes'; then
+    ok "gate-pin: a present-but-invisible pin is diagnosed as a PAM condition, not handed the persist remedy"
+  else
+    bad "gate-pin: the two FAILED boxes were not told apart"
+    printf '%s\n' "$out_o" | grep -i 'gate-pin\|pam_env\|fix:' | head -4
+  fi
+
+  # 11p. ...and the ABSENT-file box (a Mac has no /etc/environment) is not handed a
+  #      remedy naming a file it does not have. A remedy that cannot work on the box it
+  #      is printed for costs a cycle before the operator learns that.
+  envf_p="$tmp/pin-env-p-missing"; rm -f "$envf_p"
+  out_p=$(runpin "$pinroot" "$shims_none" "$envf_p" HOME="$pin_home_plain")
+  if printf '%s' "$out_p" | grep -q 'gate-pin: FAILED' \
+     && printf '%s' "$out_p" | grep -q 'has nowhere to persist it' \
+     && ! printf '%s' "$out_p" | grep -q 'fix:  bash scripts/bootstrap-agent-machine.sh --yes'; then
+    ok "gate-pin: a host with no system env file is not told to re-run --yes against it"
+  else
+    bad "gate-pin: the absent-env-file box got a remedy that cannot work there"
+    printf '%s\n' "$out_p" | grep -i 'gate-pin\|nowhere\|fix:' | head -4
   fi
 
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
