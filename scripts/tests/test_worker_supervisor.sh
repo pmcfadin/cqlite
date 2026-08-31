@@ -5238,9 +5238,9 @@ test_legacy_global_lock_refuses_a_present_lock() {
   # depended on. `kill -0` is deliberately NOT in the list: the per-lane lock and the worker-liveness
   # loop both use it legitimately, and a pattern that reds on correct code is the pattern people learn
   # to waive.
-  revived="$(grep -nE 'supervisor_legacy_lock_state|supervisor_pid_liveness|GLOBIGNORE|pid_max' "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  revived="$(grep -nE 'supervisor_legacy_lock_state|supervisor_pid_liveness|GLOBIGNORE' "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [[ -z "$revived" ]]; then
-    pass "legacy-lock (ruling 2): the classifier, the deleted pid-liveness SYMBOL, the pid_max bound and the glob-state neutralisation are GONE from the supervisor's code"
+    pass "legacy-lock (ruling 2): the classifier, the deleted pid-liveness SYMBOL and the glob-state neutralisation are GONE from the supervisor's code"
   else
     fail "legacy-lock-classifier-resurrected: [$revived] — machinery whose output cannot change the decision is back on the decision path"
   fi
@@ -5252,6 +5252,12 @@ test_legacy_global_lock_refuses_a_present_lock() {
   # read as a name it can be satisfied by a rename, which is the assert that sees nothing. So the
   # durable half is stated over the three functions that ARE the legacy decision: none of them may
   # measure a pid's liveness, by any spelling — no `kill`, and no call to the per-lane probes.
+  #
+  # `pid_max` MOVED OUT OF THE FILE-WIDE NAME LIST FOR THE SAME REASON (#3601, roborev job 231 B3). The
+  # classifier's `/proc/sys/kernel/pid_max` read was deleted because ITS verdict could not change the
+  # decision; the per-lane parser reads the same file to bound a holder pid, where the verdict selects
+  # between refusing and reclaiming. A file-wide ban would have to red on that correct code — the ban
+  # people learn to waive — so what is asserted is the property: the legacy path reads no pid bound.
   local legacy_fn legacy_body legacy_code liveness_on_legacy_path=""
   for legacy_fn in supervisor_legacy_lock_presence supervisor_legacy_lock_refuse supervisor_legacy_lock_guard; do
     legacy_body="$(sed -n "/^$legacy_fn()/,/^}/p" "$SUPERVISOR")"
@@ -5265,12 +5271,12 @@ test_legacy_global_lock_refuses_a_present_lock() {
       fail "legacy-lock-liveness-property-premise: $legacy_fn has no non-comment line"
       break
     fi
-    liveness_on_legacy_path+="$(printf '%s\n' "$legacy_code" | grep -nE 'kill[[:space:]]|supervisor_lock_holder_liveness|supervisor_lock_pid_read' || true)"
+    liveness_on_legacy_path+="$(printf '%s\n' "$legacy_code" | grep -nE 'kill[[:space:]]|supervisor_lock_holder_liveness|supervisor_lock_pid_read|pid_max|/proc/' || true)"
   done
   if [[ -n "$legacy_code" && -z "$liveness_on_legacy_path" ]]; then
-    pass "legacy-lock (ruling 2, as a PROPERTY): no function on the legacy decision path measures a pid's liveness or parses a pid, by any spelling — so the deletion holds even though the capability exists elsewhere in the file for a path where its verdict changes the decision"
+    pass "legacy-lock (ruling 2, as a PROPERTY): no function on the legacy decision path measures a pid's liveness, parses a pid, or reads a platform pid bound, by any spelling — so the deletion holds even though those capabilities exist elsewhere in the file for a path where their verdict changes the decision"
   elif [[ -n "$legacy_code" ]]; then
-    fail "legacy-lock-liveness-on-legacy-path: [$liveness_on_legacy_path] — the legacy guard tests for EXISTENCE and stops; measuring a holder's liveness there is the machinery the ruling removed, whatever it is called"
+    fail "legacy-lock-liveness-on-legacy-path: [$liveness_on_legacy_path] — the legacy guard tests for EXISTENCE and stops; measuring a holder's liveness or reading a pid bound there is the machinery the ruling removed, whatever it is called"
   fi
   # ...AND THE PROBE STILL EXECUTES NO EXTERNAL COMMAND, so none of its verdicts depends on `PATH`.
   # Comment lines are stripped first (the prose legitimately NAMES tools it does not use, and a check
@@ -7528,8 +7534,8 @@ test_lane_lock_publish_is_read_back_before_it_is_trusted() {
   # ---- (2) FORGE A FOREIGN PID INTO THE PUBLISH: the read-back must refuse.
   ovr="$d/m-pub-forge.sh"; : >"$ovr"
   if sv_mutant_override "$ovr" supervisor_lock_publish \
-       '  printf '"'"'%s\n'"'"' "$$" >"$tmpf" 2>/dev/null || return 1' \
-       '  printf '"'"'%s\n'"'"' 424243 >"$tmpf" 2>/dev/null || return 1'; then
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if ! { printf '"'"'%s\n'"'"' 424243 >"$tmpf"; } 2>/dev/null; then'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
     if [[ "$rc" -ne 0 && "$out" != *"ACQUIRED="* && "$out" == *"could not verify it OWNS it"* ]]; then
       pass "lane-lock publish: when the lock does not read back as ours the run REFUSES and says which step failed — the read-back has teeth"
@@ -7543,7 +7549,7 @@ test_lane_lock_publish_is_read_back_before_it_is_trusted() {
   # could be passing because of the forgery rather than because of the check.
   ovr="$d/m-pub-blind.sh"; : >"$ovr"
   if sv_mutant_override "$ovr" supervisor_lock_publish \
-       '  state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || true' \
+       '  state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='"'"'unparseable read-back-aborted'"'"'' \
        '  printf '"'"'%s\n'"'"' 424243 >"$SUPERVISOR_LOCK/pid"; state="pid $$"'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
     if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$lock"* ]]; then
@@ -7815,29 +7821,47 @@ test_lane_lock_nul_bearing_pid_file_refuses() {
   rm -f -- "$lock/pid"
   lane_lock_remedy_ok "pid-file-contains-nul" "$out" "$lock"
 
-  # ---- (3) THE THIRD VALUE: the NUL check is TWO EXTERNAL COMMANDS, so either can fail, and a failed
-  # measurement must REFUSE rather than report "no NULs found" — the same discipline `log_size` grew in
-  # this change, for the same reason. `wc` is made to fail for real, by a shadow earlier on `PATH`.
+  # ---- (3) THE DETECTOR IS FORK-FREE, WHICH IS THE PROPERTY, NOT AN OPTIMISATION. An earlier cut made
+  # the byte-count form the primary and this parser then depended on `wc`/`tr` — and because
+  # `supervisor_lock_publish` calls it on EVERY start for its read-back, a box without `wc` could not
+  # start a supervisor at all. So: with `wc` unavailable the verdict must be UNCHANGED, in both
+  # directions. (The byte-count form's own three-valued failure handling is asserted where that fallback
+  # is forced to run, in the differential case below.)
   shadow="$d/shadow"
   mkdir -p "$shadow"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/wc"
   chmod +x "$shadow/wc"
   printf '%s\n' "$dead" >"$d/clean-pid"
-  verdict="$(env SUP="$SUPERVISOR" F="$d/clean-pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
-  if [[ "$verdict" == 'unparseable pid-file-nul-check-could-not-measure'* ]]; then
-    pass "lane-lock NUL (third value): with the byte count UNMEASURABLE the parser refuses and names the measurement failure [$verdict] — an unmeasurable read is never 'nul-free'"
+  local v_nul_nowc v_clean_nowc
+  v_nul_nowc="$(env SUP="$SUPERVISOR" F="$lock/pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  v_clean_nowc="$(env SUP="$SUPERVISOR" F="$d/clean-pid" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
+  if [[ "$v_clean_nowc" == "pid $dead" ]]; then
+    pass "lane-lock NUL (fork-free): a clean pid file still parses as [$v_clean_nowc] with \`wc\` unavailable — the detector is a builtin, so a missing coreutils tool cannot stop this lane starting"
   else
-    fail "lane-lock-nul-measurement-collapsed: verdict=[$verdict] — a failed measurement must not become the permissive answer"
+    fail "lane-lock-nul-probe-needs-wc: verdict=[$v_clean_nowc] — the primary detector must not depend on an external command"
   fi
-  # NON-VACUITY for (3): the SAME clean file parses normally once `wc` works, so the refusal above is the
-  # measurement failing and not the file.
-  verdict="$(env SUP="$SUPERVISOR" F="$d/clean-pid" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true)"
-  if [[ "$verdict" == "pid $dead" ]]; then
-    pass "lane-lock NUL (third value, non-vacuity): the identical file parses as [$verdict] with a working \`wc\` — so (3) measured the probe's failure, not a bad fixture"
+  # ...and the refusing direction is equally unaffected: a broken `wc` must not turn a NUL-bearing file
+  # into an accepted pid either.
+  if [[ "$v_nul_nowc" == 'unparseable pid-file-contains-nul' ]]; then
+    pass "lane-lock NUL (fork-free): and the NUL-bearing file is STILL refused with \`wc\` unavailable [$v_nul_nowc] — being fork-free did not cost the detection"
   else
-    fail "lane-lock-nul-nonvacuity: verdict=[$verdict]"
+    fail "lane-lock-nul-nowc-accepted: verdict=[$v_nul_nowc]"
   fi
-
+  # ---- THE PRIMARY'S OWN THIRD VALUE, at the one state it can actually reach: content longer than the
+  # bounded scan. It is unreachable through `supervisor_lock_pid_read` (the structural gates reject any
+  # such file first), so it is driven at the probe, which is what stops it being dead code a later edit
+  # deletes as unused. `could-not-measure`, never `nul-free`.
+  local big
+  big="$d/big-pid"
+  : >"$big"
+  local i=0
+  while [[ "$i" -lt 130 ]]; do printf '%s' '0123456789012345678901234567890123456789' >>"$big"; i=$((i + 1)); done
+  verdict="$(env SUP="$SUPERVISOR" F="$big" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+  if [[ "$verdict" == 'could-not-measure pid-file-longer-than-the-nul-scan-bound' ]]; then
+    pass "lane-lock NUL (third value): content past the bounded scan is [$verdict] — a NUL beyond the bound is UNOBSERVED, and unobserved is never reported as nul-free"
+  else
+    fail "lane-lock-nul-scan-bound: verdict=[$verdict] — a scan that could not see the whole file must say so"
+  fi
   # ---- (4) MUTANT CONTRAST: the NUL gate removed by ONE literal substitution — its `contains-nul`
   # verdict joins the accepting branch. Everything else, including the byte measurement itself, is
   # shipped code, so the contrast isolates the GATE and not the probe.
@@ -8124,10 +8148,17 @@ test_lane_lock_nul_probe_primary_and_fallback_agree() {
   chmod +x "$shadow/wc"
 
   # ---- (1) THE PRIMARY IS FORK-FREE: with BOTH `wc` and `tr` unavailable it still answers both ways.
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow/tr"
-  chmod +x "$shadow/tr"
-  pv="$(env SUP="$SUPERVISOR" F="$nulf" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
-  fv="$(env SUP="$SUPERVISOR" F="$cleanf" PATH="$shadow:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+  # This is the PROBE called directly, deliberately: `tr` is used all over the supervisor's own startup
+  # (lane-identity sanitisation, the proc probes), so a whole-run drive with `tr` shadowed would fail for
+  # reasons that have nothing to do with this probe and would measure nothing. The whole-run case below
+  # shadows `wc` only, which is the tool the rejected byte-count-as-primary form actually wedged on.
+  local shadow2="$d/shadow2"
+  mkdir -p "$shadow2"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow2/wc"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$shadow2/tr"
+  chmod +x "$shadow2/wc" "$shadow2/tr"
+  pv="$(env SUP="$SUPERVISOR" F="$nulf" PATH="$shadow2:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
+  fv="$(env SUP="$SUPERVISOR" F="$cleanf" PATH="$shadow2:$PATH" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_nul_free "$F")"' 2>/dev/null || true)"
   if [[ "$pv" == 'contains-nul' && "$fv" == 'nul-free' ]]; then
     pass "lane-lock NUL probe: the primary detector answers correctly with \`wc\` AND \`tr\` both unavailable — it is a builtin, so no verdict here depends on PATH"
   else
@@ -8142,7 +8173,7 @@ test_lane_lock_nul_probe_primary_and_fallback_agree() {
   lock="$tmp/cqlite-worker-supervisor-$lane.lock"
   out="$(lane_lock_drive_at "$d" - "$tmp" "$lane" PATH="$shadow:$PATH")"; rc=$?
   if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$lock"* ]]; then
-    pass "lane-lock NUL probe: a FRESH uncontended start still succeeds on a box with neither \`wc\` nor \`tr\` — a missing coreutils tool cannot make this lane unable to start (ruling 2)"
+    pass "lane-lock NUL probe: a FRESH uncontended start still succeeds on a box with no \`wc\` — a missing coreutils tool cannot make this lane unable to start (ruling 2), which the byte-count-as-primary form measurably did"
   else
     fail "lane-lock-nul-probe-wedges-start: rc=$rc out=[$out] — this is the permanent-refusal harm the primary detector avoids"
   fi
