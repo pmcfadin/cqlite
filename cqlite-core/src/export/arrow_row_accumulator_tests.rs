@@ -545,7 +545,11 @@ fn a_stably_dense_column_stays_warm_across_batches() {
             acc.commit();
         }
         acc.clear();
-        retained_after.push(acc.retained_cell_slots());
+        // THE COLUMN'S OWN capacity, not the total. The total cannot express this
+        // property: an equal-share trim holds the TOTAL at its allowance precisely
+        // BY shrinking whichever column is active, so a total-based assertion passes
+        // for the churning implementation. Verified by mutant run.
+        retained_after.push(acc.retained_cell_slots_for(0));
     }
 
     // Under the equal-share trim the stable column was shrunk to allowance/N_COLS (21
@@ -562,7 +566,9 @@ fn a_stably_dense_column_stays_warm_across_batches() {
     // And the total bound still holds: this must not be a warmth-for-unboundedness trade.
     let allowance = (ROWS_PER_BATCH * 2).max(1024) + N_COLS;
     assert!(
-        last <= allowance,
-        "retained {last} exceeds the documented allowance {allowance}"
+        acc.retained_cell_slots() <= allowance,
+        "total retained {} exceeds the documented allowance {allowance} — warmth must \
+         not be bought with unboundedness",
+        acc.retained_cell_slots()
     );
 }

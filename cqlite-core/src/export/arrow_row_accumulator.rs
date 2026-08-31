@@ -519,6 +519,19 @@ impl<'a> ArrowRowAccumulator<'a> {
         self.cells.iter().map(Vec::capacity).sum()
     }
 
+    /// Retained slots of ONE column's store.
+    ///
+    /// Separate from [`Self::retained_cell_slots`] because the two answer different
+    /// questions and the total cannot stand in for the per-column value: an
+    /// equal-share trim keeps the TOTAL at its allowance while shrinking whichever
+    /// column is actually being used, so a test asserting on the total passes for an
+    /// implementation that churns (issue #3552, roborev round 12 — caught by a mutant
+    /// run, not by the test itself).
+    #[cfg(test)]
+    pub(crate) fn retained_cell_slots_for(&self, column: usize) -> usize {
+        self.cells.get(column).map_or(0, Vec::capacity)
+    }
+
     /// Re-derive the payload estimate of exactly the COMMITTED rows, charged from
     /// the stored cells (not from a remembered running total).
     ///
