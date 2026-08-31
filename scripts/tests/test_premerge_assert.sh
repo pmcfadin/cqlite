@@ -1082,6 +1082,149 @@ if flow_copy adv-silent "$SILENT_ADV" &&
   esac
 fi
 
+# --- Case 41b: the 60s BOUND is never silently dropped (#3650 review B1) -----
+# Two paths, one HANGING stub, and the stub TOUCHES A MARKER FILE before it
+# sleeps — so "was it executed?" is answered by an artifact on disk rather than
+# by reading elapsed time, which would be a wall-clock assert in a correctness
+# test. The stub sleeps a BOUNDED 20s (not forever) so a REGRESSION of either
+# path fails the case instead of hanging the suite, and it redirects the sleep's
+# stdout to /dev/null: a surviving grandchild holding the command-substitution
+# pipe would block the parent for the full sleep even after the bounded child was
+# killed, which is a way for the timeout to "work" and the caller to hang anyway.
+hang_stub() {
+  cat <<STUB
+#!/usr/bin/env bash
+printf 'BASE-STALENESS: hanging stub REACHED\\n'
+: >"$1"
+sleep 20 >/dev/null 2>&1
+printf 'BASE-STALENESS: hanging stub FINISHED - the bound did not apply\\n'
+exit 0
+STUB
+}
+
+# Path 1 — `timeout` PRESENT. A shim stands in for it (the suite cannot wait 60s
+# for the real bound): it RECORDS the bound the script requested, then applies a
+# short one of its own and reports 124 the way `timeout` does. So the case
+# asserts both halves of the contract: the constant really reaches `timeout`, and
+# a hanging advisory really is cut off without touching the exit code.
+SHIMD="$T/timeout-shim-bin"
+mkdir -p "$SHIMD"
+cat >"$SHIMD/timeout" <<'SHIM'
+#!/usr/bin/env bash
+printf 'BASE-STALENESS: timeout-shim requested %s\n' "$1"
+shift
+"$@" &
+child=$!
+( sleep 2; kill -9 "$child" 2>/dev/null ) &
+killer=$!
+wait "$child"
+rc=$?
+kill "$killer" 2>/dev/null
+[ "$rc" -ge 128 ] && rc=124
+exit "$rc"
+SHIM
+chmod +x "$SHIMD/timeout"
+
+MARK_A="$T/hang-marker-bounded"
+rm -f "$MARK_A"
+if flow_copy adv-hang-bounded "$(hang_stub "$MARK_A")"; then
+  OUT=$(PATH="$SHIMD:$BIN:$PATH" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    bad "advisory bound: a hanging advisory must not change the exit code (exit $RC, wanted 0)"
+  else
+    ok "advisory bound: a HANGING advisory still reaches exit 0 (the bound applied)"
+  fi
+  # NON-VACUITY: the stub really ran, so "not FINISHED" below is a bound and not
+  # a stub that never started.
+  if [ -f "$MARK_A" ]; then
+    ok "advisory bound: the hanging stub really executed (the case is not vacuous)"
+  else
+    bad "advisory bound: the hanging stub never ran — the bounded case proves nothing"
+  fi
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: timeout-shim requested 60"*)
+      ok "advisory bound: the 60s bound is what is handed to \`timeout\`" ;;
+    *) bad "advisory bound: the advisory must be invoked through \`timeout <secs>\` (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"hanging stub FINISHED"*)
+      bad "advisory bound: the advisory was AWAITED to completion — the bound did not apply" ;;
+    *) ok "advisory bound: the hanging advisory was cut off before completing" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY"*"exit 124"*)
+      ok "advisory bound: the timeout is REPORTED with its exit code, and is not fatal" ;;
+    *) bad "advisory bound: a timed-out advisory must be reported as exit 124 (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory bound: the verdict survives a timed-out advisory" ;;
+    *) bad "advisory bound: the verdict must be unchanged by a timed-out advisory (got: $OUT)" ;;
+  esac
+fi
+
+# Path 2 — `timeout` ABSENT (stock macOS). The advisory must NOT be executed
+# unbounded; it must be reported unavailable, and the exit code must be
+# untouched. `timeout` cannot be hidden by shadowing (a non-executable file is
+# skipped by PATH lookup, which then finds the real one), so PATH is rebuilt from
+# an explicit symlink set holding every tool the assert needs and NOT `timeout`.
+# `sleep` IS included deliberately: with it present a regression genuinely hangs
+# for the stub's 20s and is caught by the marker, rather than dying instantly for
+# an unrelated reason and passing for the wrong one.
+NOBIN="$T/no-timeout-bin"
+mkdir -p "$NOBIN"
+nobin_ok=1
+for tool in bash awk tr basename dirname sleep; do
+  tp=$(command -v "$tool" 2>/dev/null) || tp=""
+  if [ -z "$tp" ]; then
+    bad "advisory bound: cannot build the no-timeout PATH — \`$tool\` is not on PATH"
+    nobin_ok=0
+    continue
+  fi
+  ln -sf "$tp" "$NOBIN/$tool"
+done
+cp "$BIN/gh" "$NOBIN/gh"
+chmod +x "$NOBIN/gh"
+if [ "$(PATH="$NOBIN" command -v timeout 2>/dev/null)" != "" ]; then
+  bad "advisory bound: the no-timeout PATH still resolves \`timeout\` (the case would be vacuous)"
+  nobin_ok=0
+fi
+
+MARK_B="$T/hang-marker-unbounded"
+rm -f "$MARK_B"
+if [ "$nobin_ok" -eq 1 ] && flow_copy adv-hang-no-timeout "$(hang_stub "$MARK_B")"; then
+  OUT=$(PATH="$NOBIN" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    bad "advisory bound: an unavailable bound must not change the exit code (exit $RC, wanted 0)"
+  else
+    ok "advisory bound: no \`timeout\` on PATH still reaches exit 0"
+  fi
+  if [ -f "$MARK_B" ]; then
+    bad "advisory bound: the advisory RAN UNBOUNDED with no \`timeout\` available (#3650 B1)"
+  else
+    ok "advisory bound: with no \`timeout\`, the advisory is NOT executed at all"
+  fi
+  case "$OUT" in
+    *"PREMERGE: ADVISORY"*"NOT RUN"*"timeout"*)
+      ok "advisory bound: the missing bound is NAMED on an ADVISORY line" ;;
+    *) bad "advisory bound: the unavailable bound must be reported (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"hanging stub REACHED"*)
+      bad "advisory bound: the advisory's output appears — it was executed unbounded" ;;
+    *) ok "advisory bound: no advisory report is produced when it cannot be bounded" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory bound: the verdict survives an unavailable bound" ;;
+    *) bad "advisory bound: the verdict must be unchanged (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: SCOPE"*"#3650"*) ok "advisory bound: the SCOPE lines survive an unavailable bound" ;;
+    *) bad "advisory bound: the SCOPE lines must survive (got: $OUT)" ;;
+  esac
+fi
+
 # A REFUSAL is unaffected: the advisory runs only on the success path, so a
 # refusing invocation carries no ADVISORY lines and still exits 2.
 if flow_copy adv-refuse "$STALE_ADV" &&

@@ -303,9 +303,18 @@ fi
 # grows with how far the base is behind, and an unbounded child of the merge
 # gate is a hang the closer cannot distinguish from a slow gh call. A timeout is
 # just another non-zero exit here: REPORTED on an ADVISORY line (`exit 124`) and
-# ignored, per the paragraph above. `timeout` is not POSIX and is absent on a
-# stock macOS, so its absence degrades to the unbounded call rather than
-# skipping the advisory.
+# ignored, per the paragraph above.
+#
+# AN ABSENT `timeout` SKIPS THE ADVISORY — IT DOES NOT DEGRADE TO AN UNBOUNDED
+# CALL (#3650 review B1). `timeout` is not POSIX and is absent on a stock macOS,
+# which this repo supports, and the earlier code took the UNBOUNDED branch there
+# and said so in this comment as though it were a considered trade. It was not:
+# an unbounded child on the MERGE CRITICAL PATH is precisely the hang the bound
+# exists to prevent, and a rationale written down is what stops the next reader
+# questioning it. Skipping keeps BOTH invariants — the bound is never silently
+# dropped, and the advisory still cannot touch this script's exit code, because
+# the unavailability is REPORTED on a `PREMERGE: ADVISORY` line naming the
+# missing mechanism, exactly like an absent artifact.
 ADVISORY_TIMEOUT_SECS=60
 
 print_base_staleness_advisory() {
@@ -317,12 +326,19 @@ print_base_staleness_advisory() {
     printf 'PREMERGE: ADVISORY advisory changes no verdict, so its absence changes none either.\n'
     return 0
   fi
-  if command -v timeout >/dev/null 2>&1; then
-    adv_out=$(timeout "$ADVISORY_TIMEOUT_SECS" bash "$advisory_script" "$certified" 2>&1) ||
-      adv_rc=$?
-  else
-    adv_out=$(bash "$advisory_script" "$certified" 2>&1) || adv_rc=$?
+  if ! command -v timeout >/dev/null 2>&1; then
+    printf 'PREMERGE: ADVISORY base-staleness.sh was NOT RUN: no `timeout` on PATH, so the\n'
+    printf 'PREMERGE: ADVISORY %ss bound could not be applied, and the bound is not droppable\n' \
+      "$ADVISORY_TIMEOUT_SECS"
+    printf 'PREMERGE: ADVISORY (#3650 review B1) — an UNBOUNDED child here is the merge-path\n'
+    printf 'PREMERGE: ADVISORY hang the bound exists to prevent, so the advisory is SKIPPED.\n'
+    printf 'PREMERGE: ADVISORY NOT fatal in #3650 slice 1: the advisory changes no verdict, so\n'
+    printf 'PREMERGE: ADVISORY its absence changes none either. Install coreutils (GNU/`gtimeout`\n'
+    printf 'PREMERGE: ADVISORY on macOS) to get the report back.\n'
+    return 0
   fi
+  adv_out=$(timeout "$ADVISORY_TIMEOUT_SECS" bash "$advisory_script" "$certified" 2>&1) ||
+    adv_rc=$?
   if [ -z "$adv_out" ]; then
     printf 'PREMERGE: ADVISORY base-staleness.sh produced NO output (exit %s) — reported, and\n' \
       "$adv_rc"
