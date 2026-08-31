@@ -1728,5 +1728,70 @@ $out38c"
 fi
 kill "$UP38" 2>/dev/null || true
 
+# ===========================================================================
+echo 'TEST 39: release is ABA-safe with --expect, and compare-mode refuses a zombie (round 21)'
+# ===========================================================================
+# (a) THE TOKEN SURVIVES A RELEASE AND REACQUIRE; THE LEASE DOES NOT. Every one of the five
+#     identity components is unchanged when the SAME process releases and acquires again, so a
+#     DELAYED or DUPLICATED release from the earlier acquisition matched SELF against the LATER
+#     record and deleted a LIVE lock. TEST 21 pins exactly this for `reclaim --expect`; release
+#     compared only the token, so the distinction was made in one subcommand and not its sibling.
+ABA="$LANES/aba39"; mkdir -p "$ABA"
+sleep 300 & A39=$!
+ll acquire 943 --lane-dir "$ABA" --pid "$A39"
+lease_first=$(lease_of 943)
+ll release 943 --pid "$A39"
+ll acquire 943 --lane-dir "$ABA" --pid "$A39"     # SAME process, SAME token, NEW incarnation
+lease_second=$(lease_of 943)
+tok_first="${lease_first%%#*}"; tok_second="${lease_second%%#*}"
+if [ "$tok_first" = "$tok_second" ] && [ "$lease_first" != "$lease_second" ]; then
+  ok "(a1) the token is IDENTICAL across release+reacquire and the lease DIFFERS — the ABA precondition holds"
+else
+  bad "(a1) precondition not reproduced: tok '$tok_first' vs '$tok_second', lease '$lease_first' vs '$lease_second'"
+fi
+# the stale release, carrying the FIRST lease, must be refused rather than deleting the live lock
+ll release 943 --pid "$A39" --expect "$lease_first"; rc39=$RC; out39=$OUT
+still="$(cat "$(record_of 943)" 2>/dev/null | head -c 1)"
+if [ "$rc39" -ne 0 ] && printf '%s' "$out39" | grep -q 'RELEASE-LOST' && [ -n "$still" ]; then
+  ok "(a2) a stale release carrying the OLD lease is refused and the live record SURVIVES"
+else
+  bad "(a2) a stale release deleted a live lock: rc=$rc39 record-present=${still:+yes}
+$out39"
+fi
+# CONTROL: the CURRENT lease still releases — a CAS that refuses everything is broken.
+ll release 943 --pid "$A39" --expect "$lease_second"
+if [ "$RC" -eq 0 ] && [ ! -f "$(record_of 943)" ]; then
+  ok "(a3) CONTROL: release with the CURRENT lease succeeds"
+else
+  bad "(a3) CONTROL: the current lease was refused: rc=$RC
+$OUT"
+fi
+kill "$A39" 2>/dev/null || true
+
+# (b) COMPARE mode had the same zombie hole the WRITE branch got in round 20 — a sibling in the
+#     same if/elif chain, one line above the arm I added. A zombie keeps /proc and start-ticks,
+#     so `probe` could match a DEAD record as SELF, which claim.sh reads to decide
+#     `released-then-resumed`. Compare mode NOTES rather than dies: a read-only report must not
+#     change its caller's verdict, but it must not report SELF for a corpse either.
+sh -c 'sleep 0.1 & exec sleep 30' &
+Z39_PARENT=$!
+i=0; Z39=""
+while [ "$i" -lt 30 ] && [ -z "$Z39" ]; do
+  Z39=$(ps -o pid=,stat= --ppid "$Z39_PARENT" 2>/dev/null | awk '$2 ~ /^Z/ {print $1}' | head -1)
+  [ -n "$Z39" ] || { sleep 0.1; i=$((i + 1)); }
+done
+if [ -n "$Z39" ]; then
+  out39b="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" probe 944 --lane-dir "$LANES/z39" --pid "$Z39" 2>&1)"
+  if printf '%s' "$out39b" | grep -qi 'zombie' && ! printf '%s' "$out39b" | grep -q 'liveness=SELF'; then
+    ok "(b) compare-mode names the ZOMBIE and does not report SELF for a dead pid"
+  else
+    bad "(b) compare mode accepted a zombie identity:
+$out39b"
+  fi
+else
+  bad "(b) could not construct a zombie — this case must not pass vacuously"
+fi
+kill "$Z39_PARENT" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

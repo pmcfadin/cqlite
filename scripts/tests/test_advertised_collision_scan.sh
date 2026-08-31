@@ -86,6 +86,12 @@ mk_gh() {
     for n in "$@"; do
       case "$n" in
         *"|"*) printf 'printf "%%s\\n" %s\n' "$(printf '%q' "$n")" ;;
+        # A bare `null` is a DRAFT item, which is what `.content.type` reports it as — NOT an
+        # Issue with a null number, which the API never emits and which the scan now correctly
+        # calls schema drift (#3436, roborev round 21). The round-14 rewrite expanded every bare
+        # value as an Issue, so this mock was manufacturing an impossible row and a control case
+        # was asserting the scan tolerate it.
+        null)  printf 'printf "%%s\\n" %s\n' "$(printf '%q' "DraftIssue|null|null")" ;;
         *)     printf 'printf "%%s\\n" %s\n' "$(printf '%q' "Issue|pmcfadin/cqlite|$n")" ;;
       esac
     done

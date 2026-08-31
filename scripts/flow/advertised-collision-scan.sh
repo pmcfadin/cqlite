@@ -375,8 +375,22 @@ scan_board() {
         BOARD_UNPARSEABLE_ROW="$line"
         return 1 ;;                           # caller maps this to UNMEASURABLE
     esac
+    # AN `Issue` WITH NO NUMBER OR NO REPOSITORY IS SCHEMA DRIFT, NOT A NON-CANDIDATE (#3436,
+    # roborev round 21). A DraftIssue legitimately has a null number and is recognised by TYPE
+    # above; an Issue always has one, so `null` here means the payload is not the shape this
+    # parse was written for. Likewise a null repository means the metadata was unavailable, and
+    # skipping it silently classifies an unknown as "another repo" — hiding a matching Ready
+    # issue behind a green scan. That is round 5's rule, which the round-14 three-field rewrite
+    # re-opened for the two new fields it introduced.
+    case "$row_repo" in
+      null|'')
+        BOARD_UNPARSEABLE_ROW="$line"
+        return 1 ;;
+    esac
     case "$row_num" in
-      null) continue ;;
+      null)
+        BOARD_UNPARSEABLE_ROW="$line"
+        return 1 ;;
       *[!0-9]*)
         BOARD_UNPARSEABLE_ROW="$line"
         return 1 ;;

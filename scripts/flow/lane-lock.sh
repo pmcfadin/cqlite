@@ -626,7 +626,16 @@ resolve_pid() {
   # so for purpose=compare a non-live pid is a NOTE and the comparison simply cannot
   # match SELF. A non-NUMERIC pid stays fatal in both modes — that is unambiguously a
   # caller typo, not an environment state.
-  if [ "$scope" = explicit ] && [ "$purpose" = compare ] && proc_available && [ ! -e "/proc/$candidate" ]; then
+  if [ "$scope" = explicit ] && [ "$purpose" = compare ] && proc_available && [ "$(proc_state "$candidate" 2>/dev/null)" = "Z" ]; then
+    # THE COMPARE BRANCH NEEDS THIS TOO (#3436, roborev round 21). Round 20 added the zombie arm
+    # to the WRITE branch one elif below and left this one testing existence only — a sibling in
+    # the same if/elif chain, missed one round earlier. A zombie keeps /proc and its start-ticks,
+    # so `probe` matched a dead record as SELF before record_liveness could call it
+    # DEAD-NO-PROCESS, and claim.sh reads that SELF to decide `released-then-resumed`. Compare
+    # mode NOTES rather than dies, because a read-only report must never change its caller's
+    # verdict — but it must not report SELF for a corpse.
+    note "pid $candidate is a ZOMBIE (state Z) on this host: /proc/$candidate still exists but the process is dead, so a compare-only identity must not match the holder's."
+  elif [ "$scope" = explicit ] && [ "$purpose" = compare ] && proc_available && [ ! -e "/proc/$candidate" ]; then
     note "pid $candidate is not live on this host (no /proc/$candidate); a compare-only identity cannot match the holder's, so SELF is unreachable for this call"
   elif [ "$scope" = explicit ] && [ "$purpose" = write ] && proc_available && [ "$(proc_state "$candidate" 2>/dev/null)" = "Z" ]; then
     # A ZOMBIE HAS /proc AND IS DEAD (#3436, roborev round 20). The existence test below is
@@ -1504,7 +1513,7 @@ cmd_probe() {
 # release
 # ---------------------------------------------------------------------------
 _release_locked() {
-  local force="$1" liveness prev_token
+  local force="$1" expect="$2" liveness prev_token prev_lease
   if ! parse_record "$G_RECORD"; then
     # IDEMPOTENT on purpose: cleanup paths (trap handlers, a supervisor's teardown, a
     # second operator) must be safe to run twice or after a crash.
@@ -1512,6 +1521,23 @@ _release_locked() {
     return 0
   fi
   prev_token="$(record_token)"
+  prev_lease="$(record_lease)"
+  # ABA: THE TOKEN SURVIVES A RELEASE AND REACQUIRE, THE LEASE DOES NOT (#3436, roborev round 21).
+  # `record_is_self` compares the five identity components, and every one of them is unchanged
+  # when the SAME process releases and acquires again — so a DELAYED or DUPLICATED release from an
+  # earlier acquisition matched SELF against the LATER record and deleted a live lock. This is the
+  # hole TEST 21 pins for `reclaim --expect`, which compares the LEASE (`<token>#<nonce>`, the
+  # record INCARNATION); release compared only the token, so the same distinction was made in one
+  # subcommand and not its sibling.
+  #
+  # `--expect <lease>` makes release compare-and-swap like reclaim. It is OPTIONAL, and the
+  # residual is stated rather than hidden: WITHOUT it, release stays idempotent-by-token, which is
+  # what the cleanup paths (trap handlers, a supervisor teardown, a second operator) rely on. A
+  # caller that can hold a lease across the gap — finalize can, it acquired — SHOULD pass it.
+  if [ -n "$expect" ] && [ "$expect" != "$prev_lease" ]; then
+    emit "RELEASE-LOST issue=$G_ISSUE reason=lease-mismatch expected=$expect actual=$prev_lease $(self_fields) (the record is a DIFFERENT INCARNATION than the one you acquired — the same process releasing and reacquiring reproduces the token exactly, so only the lease can tell them apart. Refusing rather than deleting a live lock.) lane-dir=$G_LANE"
+    return 2
+  fi
   liveness="$(record_liveness)"
   if [ "$force" != "1" ] && [ "$liveness" != "SELF" ]; then
     emit "RELEASE-REFUSED issue=$G_ISSUE reason=not-holder liveness=$liveness $(holder_fields) our-token=$G_TOKEN lane-dir=$G_LANE"
@@ -1531,12 +1557,13 @@ _release_locked() {
 }
 
 cmd_release() {
-  local issue="" lane_opt="" actor="${LANE_LOCK_ACTOR:-flow}" force=0 lane pid_opt=""
+  local issue="" lane_opt="" actor="${LANE_LOCK_ACTOR:-flow}" force=0 lane pid_opt="" expect=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
       --force)    force=1; shift ;;
+    --expect)   [ "$#" -ge 2 ] || die_usage "--expect requires a value"; expect="$2"; shift 2 ;;
       # --pid: name the holder explicitly. WHY release needs it (#3436, roborev round 2):
       # the holder gate is our exact token, and the auto-resolved pid comes from the cwd
       # walk — so a holder that has MOVED CWD (or whose lane directory has been removed,
@@ -1601,7 +1628,7 @@ cmd_release() {
   else
     prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
   fi
-  with_lock 9 "$G_MUTEX" _release_locked "$force"
+  with_lock 9 "$G_MUTEX" _release_locked "$force" "$expect"
 }
 
 # ---------------------------------------------------------------------------
