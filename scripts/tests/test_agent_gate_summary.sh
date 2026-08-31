@@ -782,6 +782,45 @@ if [ -x /bin/bash ]; then
   fi
 fi
 
+# 8c. …AND THE SAME FLOOR APPLIES TO EVERY SCRIPT THE GATE INVOKES (roborev job 273, F1).
+#     8/8b exercise the GATE under /bin/bash; nothing enforced the floor on the ~80
+#     `scripts/tests/*.sh` and `scripts/ci/*.sh` files the gate SHELLS OUT TO, and one of
+#     them (the #3453 feature-matrix annotation guard, which `tooling-tests` ALWAYS runs)
+#     shipped a `declare -A` — a bash-4.0-only construct that FAILs the gate of record on
+#     macOS's stock /bin/bash 3.2, a host this repository treats as first-class.
+#
+#     DERIVED, NEVER CURATED: the subject set is every scripts/{ci,tests}/*.sh path that
+#     appears in agent-gate.sh, read out of the gate SOURCE, so a newly-wired script joins
+#     the lint with no edit here and a new file cannot enter the gate path unchecked.
+#
+#     ONE construct class, deliberately: the ASSOCIATIVE ARRAY (`declare/local/typeset -A`).
+#     It is the construct that actually bit us, it has no bash-3.2 fallback, and it cannot
+#     produce a false positive — an associative array on a gate path IS the defect. A wider
+#     bash-4-feature lint (`mapfile`, `${v^^}`, `&>>`, negative subscripts) was NOT written:
+#     each needs context to judge, and a lint with false positives is the lint agents learn
+#     to waive (#3400's descoped parse lint, #3229's removed census oracle).
+b32_scripts=$(grep -oE 'scripts/(ci|tests)/[a-z0-9_-]+\.sh' "$GATE" | sort -u)
+b32_offenders=""
+b32_scanned=0
+while IFS= read -r _b32f; do
+  [ -n "$_b32f" ] || continue
+  [ -r "$SCRIPT_DIR/../../$_b32f" ] || continue
+  b32_scanned=$((b32_scanned + 1))
+  if grep -nE '^[[:space:]]*(declare|local|typeset)[[:space:]]+-[A-Za-z]*A' \
+       "$SCRIPT_DIR/../../$_b32f" >/dev/null 2>&1; then
+    b32_offenders="$b32_offenders $_b32f"
+  fi
+done <<EOF
+$b32_scripts
+EOF
+if [ "$b32_scanned" -lt 20 ]; then
+  bad "bash-compat-8c: derived only $b32_scanned gate-invoked script(s) from $GATE — the derivation looks broken, so this lint would pass having scanned almost nothing"
+elif [ -n "$b32_offenders" ]; then
+  bad "bash-compat-8c: gate-invoked script(s) use a bash-4.0-only ASSOCIATIVE ARRAY, which aborts under macOS /bin/bash 3.2:$b32_offenders"
+else
+  ok "bash-compat-8c: none of the $b32_scanned gate-invoked scripts/{ci,tests} scripts uses a bash-4.0-only associative array (macOS /bin/bash 3.2 floor)"
+fi
+
 # 9. Accelerator absence WARN + state markers (issue #1848). The gate must:
 #    (a) mark an intentionally-disabled accelerator (CQLITE_DISABLE_*) `off` and
 #        emit NO WARN; (b) mark a truly MISSING accelerator `absent` and emit a

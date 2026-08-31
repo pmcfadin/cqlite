@@ -106,15 +106,23 @@ else
   fi
   unclassified=()
   blank=()
-  declare -A class_count=()
+  # SCALAR counters, never `declare -A`: associative arrays are bash 4.0+ and macOS ships
+  # /bin/bash 3.2, which this repository treats as a supported gate host
+  # (test_agent_gate_summary.sh section 8) — and `tooling-tests` ALWAYS runs this file, so a
+  # bash-4-only construct here FAILs the gate of record on a supported platform (roborev job
+  # 273, F1). Section 8c of test_agent_gate_summary.sh now lints every gate-invoked script
+  # for the construct, so a reintroduction here is caught mechanically.
+  n_cargo=0; n_nocargo=0; n_indirect=0; n_unobservable=0
   export AGENT_GATE_FM_DIR="$tmp/empty"; mkdir -p "$AGENT_GATE_FM_DIR"
   for c in "${comps_arr[@]}" scoped-tests; do
     if cls=$(_fm_component_class "$c"); then
       case "$cls" in
-        indirect:*) key=indirect ;;
-        *) key="$cls" ;;
+        indirect:*)      n_indirect=$((n_indirect + 1)) ;;
+        unobservable:*)  n_unobservable=$((n_unobservable + 1)) ;;
+        no-cargo)        n_nocargo=$((n_nocargo + 1)) ;;
+        cargo)           n_cargo=$((n_cargo + 1)) ;;
+        *)               unclassified+=("$c") ;;
       esac
-      class_count[$key]=$(( ${class_count[$key]:-0} + 1 ))
     else
       unclassified+=("$c")
     fi
@@ -122,12 +130,12 @@ else
     [ -n "$ann" ] || blank+=("$c")
   done
   if [ "${#unclassified[@]}" -eq 0 ]; then
-    ok "A1: every COMPONENTS name (+scoped-tests) is declared in _fm_component_class"
+    ok "A1: every COMPONENTS name (+scoped-tests) resolves to one of the FOUR declared classes in _fm_component_class"
   else
-    bad "A1: UNDECLARED in _fm_component_class: ${unclassified[*]}"
+    bad "A1: undeclared, or declared with a class this guard does not recognise (cargo / no-cargo / indirect:<driver> / unobservable:<why>): ${unclassified[*]}"
   fi
   if [ "${#blank[@]}" -eq 0 ]; then
-    ok "A2: no component renders a BLANK annotation (${class_count[cargo]:-0} cargo, ${class_count[no-cargo]:-0} no-cargo, ${class_count[indirect]:-0} indirect)"
+    ok "A2: no component renders a BLANK annotation ($n_cargo cargo, $n_nocargo no-cargo, $n_indirect indirect, $n_unobservable unobservable)"
   else
     bad "A2: BLANK annotation for: ${blank[*]}"
   fi
