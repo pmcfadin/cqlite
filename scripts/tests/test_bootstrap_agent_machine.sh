@@ -3789,18 +3789,25 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     echo "  file-exists=$([ -e "$envf_bc" ] && echo yes || echo no) content=[$(cat "$envf_bc" 2>/dev/null | tr '\n' '|')]"
   fi
 
-  # 11bh. TWO CONCURRENT RUNS MUST PRODUCE ONE LINE, NOT TWO (roborev job 316, Medium). The
-  #      append was a bare `tee -a` decided from a check taken ~150 lines earlier, so two
-  #      bootstraps on the same box — the standing model since #3393 is several lanes per box
-  #      — both saw "no line" and both appended, leaving DUPLICATE assignments that pam_env
-  #      resolves by taking the last.
+  # 11bh. AN INVARIANT GUARD, EXPLICITLY *NOT* A DISCRIMINATOR FOR THE LOCK. Two concurrent
+  #      runs must leave exactly ONE CQLITE_GATE_MAX_CONCURRENCY line, because pam_env
+  #      resolves duplicates by taking the last.
   #
-  #      This is the one half of that fix a test can actually schedule, and it is deterministic
-  #      in its OUTCOME rather than its timing: whichever run takes the flock first appends,
-  #      and the other re-reads INSIDE the lock, sees the line and declines. So the assertion
-  #      is on the count, never on which run won. (The other half — a NON-cooperating writer
-  #      using a plain `>>` — is declared uncovered at 11bg above: flock is advisory, and no
-  #      test can inject a write between another implementation's check and its append.)
+  #      MEASURED, and stated because the first version of this comment claimed the opposite:
+  #      this case passes against the pre-lock bootstrap TOO (RED run: PASS=199 FAIL=0, with
+  #      the sanity checks confirming 11bh present and `pin_append_env_file` absent). Two
+  #      runs started together do enough work before their append that one finishes before
+  #      the other reads, so the unlocked implementation serialises by luck and the duplicate
+  #      state never materialises. The case therefore pins the INVARIANT — useful against a
+  #      future change that reintroduces duplicates in a way that does race — and evidences
+  #      NOTHING about job 316's lock.
+  #
+  #      That makes THREE consecutive failed attempts to discriminate a concurrency fix in
+  #      this script (11bg's umask, this case's duplicate count, and the O_EXCL race itself).
+  #      The generalisation is worth more than the cases: a fix that narrows a WINDOW is not
+  #      observable from a harness that cannot schedule the window, and a test that passes
+  #      either way is indistinguishable from coverage until you run it against the defect.
+  #      Both concurrency fixes are DECLARED UNCOVERED — see the note at 11bg.
   envf_bh="$tmp/pin-env-bh"; : >"$envf_bh"
   runpin "$pinroot" "$shims_one" "$envf_bh" HOME="$tmp/pin-home-bh1" --fix-gate-pin >/dev/null 2>&1 &
   pin_bh1=$!
@@ -3809,7 +3816,7 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   wait "$pin_bh1" 2>/dev/null; wait "$pin_bh2" 2>/dev/null
   bh_lines=$(grep -cE '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$envf_bh" 2>/dev/null)
   if [ "$bh_lines" = 1 ]; then
-    ok "gate-pin: two concurrent runs leave exactly ONE CQLITE_GATE_MAX_CONCURRENCY line (the loser re-reads inside the lock and declines)"
+    ok "gate-pin: two concurrent runs leave exactly ONE CQLITE_GATE_MAX_CONCURRENCY line (invariant guard; passes with and without the lock)"
   else
     bad "gate-pin: concurrent runs left $bh_lines CQLITE_GATE_MAX_CONCURRENCY lines (pam_env would take the last)"
     cat "$envf_bh"
