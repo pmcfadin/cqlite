@@ -2408,6 +2408,29 @@ supervisor_lock_publish() {
     printf '%s' 'write-failed'
     return 1
   fi
+  # DECLINE RATHER THAN OVERWRITE (#3601, roborev job 231 F3/B11; race tracked as #3683). Publication is
+  # NOT bound to the directory instance this process created: a peer can rename our pid-less directory
+  # away, create and publish its OWN lock at the same name, and our `mv -f` then overwrites THAT peer's
+  # ownership record — destroying the evidence of who holds the lane, which is strictly worse than
+  # failing to start. In the legitimate case the directory was created microseconds ago by our own
+  # `mkdir`, so `pid` CANNOT exist and this branch is never taken; if it does exist the directory is not
+  # the one we made, and declining costs us a start we were not entitled to anyway.
+  #
+  # NARROWED, NOT CLOSED — DO NOT READ THIS AS A GUARANTEE. Test-then-move is NOT equivalent to an atomic
+  # create-exclusive: a peer that publishes between this test and the rename below is still overwritten.
+  # The window shrinks from "the whole publish" to "between these two lines" and no further, because
+  # closing it needs serialisation across the complete claim-and-publication operation — the same
+  # primitive as the reclaim ABA above and the read-then-remove in `supervisor_lock_release`, all three
+  # tracked as ONE follow-up (#3683). `mv -n` was considered and NOT used: it is outside POSIX, and GNU
+  # `mv -n` exits 0 WITHOUT MOVING, so its success proves nothing about publication and a platform
+  # lacking `-n` would fail every publish outright — a wedge in exchange for a narrower window that
+  # #3683 closes properly.
+  if [[ -e "$SUPERVISOR_LOCK/pid" || -L "$SUPERVISOR_LOCK/pid" ]]; then
+    rm -f -- "$tmpf" 2>/dev/null || true
+    state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='unparseable read-back-aborted'
+    printf '%s' "declined $state"
+    return 1
+  fi
   # `--` because both operands are `TMPDIR`-derived and may be option-shaped (#3601 AC7); quoting stops
   # word-splitting and globbing and does nothing about option parsing.
   if ! mv -f -- "$tmpf" "$SUPERVISOR_LOCK/pid" 2>/dev/null; then
@@ -2515,7 +2538,9 @@ supervisor_lock_take() {
     return 0
   fi
   SUPERVISOR_LOCK_TAKE_CAUSE="$pub"
-  if [[ "$pub" == 'not-owned'* ]]; then
+  # `declined` joins `not-owned` (#3601 B11): both mean the directory at that name is not ours, so both
+  # LEAVE IT ALONE. The difference is only whether we wrote into it, and the refusal says which.
+  if [[ "$pub" == 'not-owned'* || "$pub" == 'declined'* ]]; then
     # The NAME became ours and the directory now holds someone else's pid. Leaving it alone is the whole
     # point: it is a live holder's lock as far as we can tell.
     return 2
@@ -2535,11 +2560,25 @@ supervisor_lock_take() {
 }
 
 # supervisor_lock_refuse_unowned — the name became ours and the read-back said it is not.
+#
+# TWO REACHING PATHS, TWO DIFFERENT TRUTHS, AND THE TEXT MUST NOT MIX THEM UP (#3601, B9 family). The
+# `declined` path never wrote anything — a `pid` file already existed, so the publish refused to
+# overwrite it — while the `not-owned` path DID publish and then read back someone else's pid. Saying
+# "our pid was published into it" on the declined path would assert a step that did not run, which is the
+# defect class B1, B4 and the reclaim comment were all instances of.
 supervisor_lock_refuse_unowned() {
-  local cause="${1:-not-owned unrecorded}"
+  local cause="${1:-not-owned unrecorded}" detail=''
+  case "$cause" in
+    'declined'*)
+      detail="the lock directory was created by this process and then found to ALREADY CONTAIN a holder record, so this run declined to overwrite it and wrote NOTHING; that record reads [${cause#declined }]. The directory at that name is therefore not the one this process created — a peer renamed ours aside and published its own between our two steps"
+      ;;
+    *)
+      detail="the lock directory was created by this process and our pid was published into it; reading it back did not return our pid ($$) — the read-back said [${cause#not-owned }] — so between those two steps something else took the lock name"
+      ;;
+  esac
   supervisor_lock_refuse \
     "refusing to start — this run CREATED the lock and then could not verify it OWNS it" \
-    "the lock directory was created by this process and our pid was published into it; reading it back did not return our pid ($$) — the read-back said [${cause#not-owned }] — so between those two steps something else took the lock name. The most likely cause is a supervisor running PRE-#3601 code on this box: it reads a lock whose pid file is not yet present as STALE and renames it aside, which is the defect #3601 fixes. Starting now would put two supervisors in one worktree, so this run stops instead" \
+    "$detail. The most likely cause is a supervisor running PRE-#3601 code on this box: it reads a lock whose pid file is not yet present as STALE and renames it aside, which is the defect #3601 fixes. Starting now would put two supervisors in one worktree, so this run stops instead. NOTHING at that path has been modified by this run" \
     "re-run this supervisor: if the other holder is a real one, the next start will say so and name its pid; if it was a pre-#3601 reclaim, upgrade every checkout on this box that can launch a supervisor past #3601 so no peer reclaims a pid-less lock again"
 }
 
