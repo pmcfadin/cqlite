@@ -7548,9 +7548,14 @@ test_lane_lock_publish_is_read_back_before_it_is_trusted() {
   # ---- (3) NON-VACUITY: the same forgery with the read-back BLINDED must acquire. Without this, (2)
   # could be passing because of the forgery rather than because of the check.
   ovr="$d/m-pub-blind.sh"; : >"$ovr"
+  # THE TARGET IS THE COMPARISON, NOT THE READ ITSELF: B11 added a second, identical read-back line in
+  # the decline branch, so a substitution on the read would no longer be unique — `sv_mutant_override`
+  # correctly refused it as a moved source. The comparison occurs once and expresses the same mutation
+  # (forge a foreign pid, then accept regardless of what came back).
   if sv_mutant_override "$ovr" supervisor_lock_publish \
-       '  state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='"'"'unparseable read-back-aborted'"'"'' \
-       '  printf '"'"'%s\n'"'"' 424243 >"$SUPERVISOR_LOCK/pid"; state="pid $$"'; then
+       '  if [[ "$state" == "pid $$" ]]; then' \
+       '  printf '"'"'%s\n'"'"' 424243 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
     if [[ "$rc" -eq 0 && "$out" == *"ACQUIRED=$lock"* ]]; then
       pass "lane-lock publish MUTANT: with the read-back blinded the SAME forged publish is accepted and the run starts holding a lock whose pid is someone else's — so (2) is the read-back refusing, not the forgery failing"
@@ -8051,8 +8056,10 @@ test_lane_lock_failed_reclaim_rename_is_named() {
        '  elif false; then'; then
     mout="$(lane_lock_drive_at "$d" "$ovr" "$ro" "$lane")" || true
     chmod 0755 "$ro" 2>/dev/null || true
-    if [[ "$mout" == *"immediately claimed by someone else"* ]]; then
-      pass "lane-lock B2 MUTANT: with the rename's failure swallowed the identical case reports a race that did not happen — so the assert above is the new branch doing the work"
+    # The expected string is the CURRENT lost-race wording. It changed once already, in the B9 class
+    # sweep, which removed the attribution this mutant is demonstrating — so match the surviving text.
+    if [[ "$mout" == *"taken again before this run could claim it"* ]]; then
+      pass "lane-lock B2 MUTANT: with the rename's failure swallowed the identical case falls through to the lost-race refusal — a claim contest that did not happen — so the assert above is the new branch doing the work"
     else
       fail "lane-lock-mutant-mv: out=[$mout] — the pre-fix swallow must be shown to misattribute"
     fi
@@ -8087,7 +8094,7 @@ test_lane_lock_pid_bound_is_the_platform_pid_space() {
     env SUP="$SUPERVISOR" F="$d/pidfile" bash -c 'source "$SUP"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true
   }
 
-  ceiling="$(env SUP="$SUPERVISOR" bash -c 'source "$SUPERVISOR"; supervisor_pid_space_ceiling' 2>/dev/null || true)"
+  ceiling="$(env SUP="$SUPERVISOR" bash -c 'source "$SUP"; supervisor_pid_space_ceiling' 2>/dev/null || true)"
   # THE PROBE IS THREE-VALUED, so the case must handle BOTH of its answers rather than requiring the one
   # this host happens to give (#3601, roborev job 231 B10). An earlier cut of this case required the
   # ceiling to parse as a bare number, which on a platform that publishes none would have failed a
