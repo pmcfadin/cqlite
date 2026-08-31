@@ -2585,8 +2585,13 @@ apply_schemas_preflight() {
 #     the reader block below). No entry in this enumeration spawns a shell, which is also why
 #     `bash` has left the declared external set.
 #
-#   LOCAL-ONLY (annotated `# local-only: <why>` at each site, so the claim is checkable
-#   where it is made rather than only here):
+#   THERE IS NO "LOCAL-ONLY" CATEGORY ANY MORE (roborev job 315). Every git call in this region is
+#   BOUNDED, and the `# local-only: <why>` excusal has been removed from the self-test. Three
+#   consecutive findings — 312 (four live-repository probes), 314 (the shallowness helper), 315
+#   (the ancestry walk) — were each ANNOTATED, and all three annotations were true about the
+#   NETWORK and silent about BLOCKING. The judgement was made at the call site and nothing checked
+#   it. Bounding costs nothing; the escape hatch cost three review rounds. The calls below are
+#   listed for WHAT THEY READ, not as an exemption:
 #     git rev-parse --git-dir            .git read, no object access.
 #     git remote get-url origin          config read; names a remote, contacts none. Its
 #                                        value is judged against the canonical upstream
@@ -4613,9 +4618,11 @@ _component_set_probe_inner() {
   # could seed the "isolated" repo's own LOCAL config, which the fetch below DOES read. Both
   # hops would then agree on the wrong commit, so the transfer assert cannot see it. One env
   # prefix closes it; cheap hardening beats a hole whose only defence is that it is obscure.
-  # local-only: creates an empty repository in a directory we just made. No remote is named,
-  # no object is read, and with global/system config neutralised no template can be pulled in.
-  if ! env -i "${_CS_GIT_ENV[@]}" git init -q "$csdir/repo" >/dev/null 2>&1; then
+  # BOUNDED like every other git call here. The old reasoning — a fresh directory, no remote, no
+  # object read, global/system config neutralised — is still true, and after three findings whose
+  # annotations were each true about the NETWORK and silent about BLOCKING, "this one is fine" is
+  # not a claim worth defending for the price of a bound. Bounding costs nothing.
+  if ! _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git init -q "$csdir/repo" >/dev/null 2>&1; then
     _CS_KIND=baseline-workspace
     _CS_DETAIL="could not initialise the isolated scratch repository for the baseline fetch"
     return 0
@@ -4936,10 +4943,11 @@ _component_set_probe_inner() {
   # THE SHA AS THE ISOLATED HOP OBSERVED IT. Read in the scratch repository, whose config we
   # wrote and whose environment is allowlisted, so nothing about this value depends on the live
   # repository's state.
-  # local-only: resolves a ref file plus the COMMIT object the fetch above just wrote, in a
-  # repository this run created. The scratch fetch is unfiltered and configures no promisor
-  # remote, so there is no object here that could be fetched lazily and no network to reach.
-  cssha=$(env -i "${_CS_GIT_ENV[@]}" git --no-replace-objects -C "$csdir/repo" rev-parse --verify --quiet "refs/csbaseline^{commit}" 2>/dev/null || true)
+  # BOUNDED (job 315). It reads a ref file plus the COMMIT object the fetch above just wrote, in a
+  # repository this run created — no promisor, no lazy fetch, no network. That reasoning is intact
+  # and is no longer load-bearing: every git call in this region is bounded, and the
+  # `# local-only:` excusal has been REMOVED from the audit rather than trusted a fourth time.
+  cssha=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git --no-replace-objects -C "$csdir/repo" rev-parse --verify --quiet "refs/csbaseline^{commit}" 2>/dev/null || true)
   if [ -z "$cssha" ]; then
     _CS_KIND=fetch-failed; _CS_SHA="-"
     _CS_DETAIL="the isolated baseline fetch reported success but its ref does not resolve to a commit"
@@ -5055,9 +5063,10 @@ _component_set_probe_inner() {
   # Ancestry, probed only for what it decides: BEHIND vs a DELIBERATE REMOVAL. Read the
   # rc explicitly — `--is-ancestor` answers 1 for "not an ancestor" and something else
   # for an error, and collapsing those two would let a broken probe answer "not behind".
-  # local-only: walks COMMIT parents only. This is the distinction that makes `git show`
-  # above different in kind: no partial-clone filter omits commits, whereas `blob:none`
-  # omits exactly what `show <sha>:<path>` must read — so this one cannot reach the network.
+  # It walks COMMIT parents only, which is what makes `git show` above different in kind: no
+  # partial-clone filter omits commits, whereas `blob:none` omits exactly what `show <sha>:<path>`
+  # must read. That is about the NETWORK, and job 315 is why it is no longer an excuse — the walk
+  # is BOUNDED, because the objects it reads come from the shared store.
   # HEAD IS RESOLVED TO A SHA IN THIS CHECKOUT FIRST, because the ancestry walk now runs in
   # `$_CS_READ_DIR` — and inside the isolated scratch the ref `HEAD` would mean the SCRATCH's own
   # (unborn) HEAD, silently answering a different question. Commit objects are never omitted by any
@@ -5072,10 +5081,33 @@ _component_set_probe_inner() {
   if [ -z "$_CS_HEAD_SHA" ]; then
     rc=128
   else
-  # local-only: walks COMMIT parents in `$_CS_READ_DIR`, whose objects are either its own or come
-  # from the lane via an alternate. No filter omits commits, the scratch configures no promisor,
-  # and an alternate carries no config — so this read has no route to the network at all.
-  env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" merge-base --is-ancestor "$_CS_SHA" "$_CS_HEAD_SHA" >/dev/null 2>&1; rc=$?
+  # BOUNDED, AND THE OLD ANNOTATION IS WHY (roborev job 315, Medium — THIRD instance of one
+  # blind spot). It read: "No filter omits commits, the scratch configures no promisor, and an
+  # alternate carries no config — so this read has no route to the NETWORK at all." Every word of
+  # that is true and it answers the wrong question. This walk reads COMMIT OBJECTS through
+  # `_CS_READ_ENV`, i.e. out of the LANE's shared object store, and a loose object there is read
+  # with `open()` + `read()` on a zlib stream — which BLOCKS on a FIFO.
+  #
+  # MEASURED (isolated scratch repo, the object served from an alternate):
+  #   real file:  cat-file -e  4ms      merge-base --is-ancestor  3ms
+  #   FIFO:       cat-file -e  BLOCKED  merge-base --is-ancestor  BLOCKED
+  # A pack `.idx`/`.pack` FIFO does NOT block (git mmaps those, and mmap on a FIFO fails rather
+  # than waiting) — which is exactly the case I measured first and wrongly generalised from.
+  # Every lane on a box is a worktree of ONE `.git`, so the planter is a PEER LANE.
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" merge-base --is-ancestor "$_CS_SHA" "$_CS_HEAD_SHA" >/dev/null 2>&1; rc=$?
+  # A BLOCKED OR UNBOUNDABLE WALK IS NAMED, not folded into the `*)` arm's "exited $rc". That arm
+  # is already fail-closed (`_CS_ANCESTOR=unknown`), so this changes no verdict — it changes the
+  # CAUSE the operator reads, from a bare exit status to the poisoned object store that produced
+  # it. A true refusal with a misleading cause is the thing this pre-flight keeps ruling against.
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+    _CS_KIND=repo-read-blocked
+    if [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_DETAIL="the ancestry walk could not be BOUNDED on this host (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of the lane's object store, which could hang the gate outright"
+    else
+      _CS_DETAIL="the ancestry walk (git merge-base --is-ancestor) EXCEEDED its ${_CS_BOUND_HINT}s bound reading commit objects from this lane's SHARED object store — the read never returned. A LOOSE object there is read as a stream, so a FIFO planted at an object path hangs it, and on this fleet that store is shared by every lane on the box. Inspect it with \`git count-objects -v\` and \`find \$(git rev-parse --git-path objects) -type p\`"
+    fi
+    return 0
+  fi
   fi
   local shallow
   case "$rc" in

@@ -3160,9 +3160,9 @@ fi
 #     local, which is exactly why "audit it again" is not a fix and an assert is.
 #
 #     Two questions, both answered from the gate's own text:
-#       (i)  every `git` invocation in the region is either routed through
-#            `_component_set_bounded` or carries a `# local-only: <reason>` annotation at
-#            its own site — an unannotated one is a GAP;
+#       (i)  EVERY `git` invocation in the region is routed through `_component_set_bounded`
+#            (or `_cs_live_git`, which supplies its own bound) — there is no annotation
+#            escape any more, because three consecutive findings came through one;
 #       (ii) the set of EXTERNAL PROGRAMS the region invokes equals a DECLARED list, so a
 #            new one (`curl`, `ssh`, `python3`, another `bash`) cannot appear unclassified;
 #       (iii) the set of GIT OPERATIONS (subcommands) it invokes equals a DECLARED list, in
@@ -3207,12 +3207,6 @@ region_lines=$(wc -l <"$region" | tr -d ' ')
 GIT_AUDIT_AWK="$tmp/preflight-audit.awk"
 cat >"$GIT_AUDIT_AWK" <<'GIT_AUDIT_PROG'
 { line[NR] = $0 }
-function annotated(i) {
-  return (line[i]   ~ /# local-only:[ \t]*[^ \t]/ \
-       || line[i-1] ~ /# local-only:[ \t]*[^ \t]/ \
-       || line[i-2] ~ /# local-only:[ \t]*[^ \t]/ \
-       || line[i-3] ~ /# local-only:[ \t]*[^ \t]/)
-}
 # classify(text, i, bounded, probe): emit EXT for the first word of <text> and GAP if it is an
 # unbounded, unannotated `git`. ONE implementation, called from BOTH the de-quoted fragment loop
 # and the substitution scan below — the blind spot this fixes came from having only the former.
@@ -3274,7 +3268,12 @@ function classify(t, i, bounded, probe,   w, cmd) {
     if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) return
     printf "EXT\t%s\n", cmd
   }
-  if (cmd == "git" && !bounded && !probe && !annotated(i))
+  # NO ANNOTATION ESCAPE (roborev job 315). `# local-only: <why>` used to excuse an unbounded git
+  # call, and three consecutive findings came through it — 312, 314, 315 — each with an annotation
+  # that was true about the NETWORK and silent about BLOCKING. It had ZERO remaining users once
+  # every call was bounded, so it is DELETED rather than trusted a fourth time: subtraction cannot
+  # introduce a false PASS. Every git call in the region must now be bounded, full stop.
+  if (cmd == "git" && !bounded && !probe)
     printf "GAP\t%d\t%s\n", i, substr(line[i], 1, 60)
   # THE GIT OPERATION ITSELF (job 309). Keyed on the SUBCOMMAND, deliberately, not on subcommand
   # plus flags: the property worth guarding is which git COMMANDS run here, because that is what
@@ -3440,7 +3439,7 @@ else
   elif [ -z "$git_ops" ]; then
     bad "3544-no-unbounded: the git-operation census came back EMPTY on a region of $region_lines lines — the derivation broke (fail-closed: an empty subject set would declare every operation classified)"
   elif [ -n "$git_gaps" ]; then
-    bad "3544-no-unbounded: git invocation(s) in the pre-flight neither bounded nor annotated '# local-only: <reason>':"
+    bad "3544-no-unbounded: UNBOUNDED git invocation(s) in the pre-flight — every one must go through _component_set_bounded or _cs_live_git; the '# local-only' excusal was removed (job 315) after three findings came through it:"
     printf '%s\n' "$git_gaps" | while IFS= read -r _g; do echo "   $_g"; done
   elif [ -n "$undeclared" ]; then
     bad "3544-no-unbounded: UNDECLARED external program(s) in the pre-flight region: $undeclared — classify each in the enumeration comment (bounded or local-only) and add it to declared_externals"
@@ -3458,9 +3457,13 @@ else
   # shape of every finding in this issue.
   ctl_unbounded="$tmp/region-unbounded.sh"
   {   cat "$region"; printf 'run_probe() { git -C "$REPO_ROOT" fetch origin main >/dev/null 2>&1; }\n'; } >"$ctl_unbounded"
+  # THE ANNOTATION CONTROL IS INVERTED (job 315): it used to prove `# local-only:` SUPPRESSED the
+  # report; it now proves the excusal is GONE. An unbounded call carrying the old annotation must
+  # be reported like any other — otherwise the escape is still live and three findings' worth of
+  # lesson is undone silently.
   ctl_annotated="$tmp/region-annotated.sh"
   {   cat "$region"
-      printf '# local-only: a declared reason, so this one must NOT be reported\n'
+      printf '# local-only: the old excusal, which must NO LONGER suppress the report\n'
       printf 'run_probe() { git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; }\n'; } >"$ctl_annotated"
   ctl_curl="$tmp/region-curl.sh"
   {   cat "$region"; printf 'run_probe() { curl -sS https://example.invalid/x >/dev/null; }\n'; } >"$ctl_curl"
@@ -3493,12 +3496,12 @@ else
   ctl_qsub_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_qsub" | sed -n 's/^EXT\t//p' | grep -cx newprog7279)
   ctl_ifbang_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_ifbang" | grep -c '^GAP	')
   ctl_newop_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_newop" | sed -n 's/^OP\t//p' | grep -cx diff)
-  if [ "$ctl_gaps" -eq 1 ] && [ "$ctl_ann_gaps" -eq 0 ] && [ "$ctl_curl_seen" -ge 1 ] \
+  if [ "$ctl_gaps" -eq 1 ] && [ "$ctl_ann_gaps" -eq 1 ] && [ "$ctl_curl_seen" -ge 1 ] \
      && [ "$ctl_envwrap_gaps" -eq 1 ] && [ "$ctl_qsub_seen" -ge 1 ] \
      && [ "$ctl_ifbang_gaps" -eq 1 ] && [ "$ctl_newop_seen" -ge 1 ]; then
-    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), the same defect WRAPPED IN env (1), the same defect after \`if !\` (1 — the job-309 blind spot), a program inside a QUOTED SUBSTITUTION (the job-279 blind spot), a NEW git operation behind the bound wrapper, stays silent on an ANNOTATED one (0), and the census sees a planted network program — live in both directions"
+    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), the same defect WRAPPED IN env (1), the same defect after \`if !\` (1 — the job-309 blind spot), a program inside a QUOTED SUBSTITUTION (the job-279 blind spot), a NEW git operation behind the bound wrapper, REPORTS an ANNOTATED one too (1 — the excusal is gone, job 315), and the census sees a planted network program — live in both directions"
   else
-    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, env-wrapped=$ctl_envwrap_gaps expected 1, if-bang=$ctl_ifbang_gaps expected 1, quoted-subst seen=$ctl_qsub_seen expected >=1, new-op seen=$ctl_newop_seen expected >=1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
+    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, env-wrapped=$ctl_envwrap_gaps expected 1, if-bang=$ctl_ifbang_gaps expected 1, quoted-subst seen=$ctl_qsub_seen expected >=1, new-op seen=$ctl_newop_seen expected >=1, annotated=$ctl_ann_gaps expected 1 (the excusal was removed), curl seen=$ctl_curl_seen expected >=1)"
   fi
 fi
 
