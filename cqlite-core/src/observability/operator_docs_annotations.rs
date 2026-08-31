@@ -8,6 +8,22 @@
 use super::catalog::{self, attr};
 use super::operator_docs::{MetricDoc, MetricKind};
 
+// Read-PHASE timings + reader/WAL resource gauges (issue #1707): a SECOND
+// annotation table in its own file, because this one was already at the campsite
+// source target (#1116) and the table is append-only data.
+#[path = "operator_docs_annotations_read_phase.rs"]
+mod read_phase;
+
+/// Every operator annotation table, in declaration order. The renderer walks the
+/// UNION (and sorts by name), so a family lives in whichever file it was declared
+/// in — `operator_docs::operator_metric_docs` never reads one table directly.
+pub(super) const ANNOTATION_TABLES: &[&[MetricDoc]] = &[ANNOTATIONS, read_phase::ANNOTATIONS];
+
+/// Every operator annotation across [`ANNOTATION_TABLES`].
+pub(super) fn all_annotations() -> impl Iterator<Item = &'static MetricDoc> {
+    ANNOTATION_TABLES.iter().copied().flatten()
+}
+
 /// The operator annotation table (catalog declaration order; renderer sorts by name).
 pub(super) const ANNOTATIONS: &[MetricDoc] = &[
     MetricDoc {
@@ -708,9 +724,9 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::MERGE_EGRESS_CHANNEL_DEPTH,
         kind: MetricKind::Gauge,
         unit: catalog::unit::ENTRIES,
-        summary: "Live occupancy of the bounded merge egress sync_channel (cap up to 256, adaptively reduced under concurrent merges — #2765) feeding do_get / compaction.",
+        summary: "Live occupancy, in ENTRIES (rows), of the bounded merge egress sync_channel feeding do_get / compaction — batched since #2820 (up to 256 rows per message). Its per-source ceiling is CHANNEL-RESIDENT rows, 2 x rows_cap = 512 at the default #2765 budget — NOT the 4 x rows_cap = 1024 total-in-flight MEMORY bound, which also counts the consumer-held and producer-blocked batches this gauge never sees.",
         attributes: &[],
-        interpretation: "Near zero = consumer keeping up (or a stalled producer); riding near capacity = producer outrunning a slower consumer (back-pressured egress).",
+        interpretation: "Near zero = consumer keeping up (or a stalled producer); riding near the per-source channel-resident bound (512 at the default) = producer outrunning a slower consumer (back-pressured egress). Threshold alerts on 2 x rows_cap, never on 1024: a 1024 threshold is UNREACHABLE per source and can never fire. Process-globally the gauge is the SUM over concurrent sources, so it can exceed any single source ceiling. The unit is ENTRIES, so a batch of n rows moves it by n, never by 1.",
         round_item: "egress backpressure watch (#2419/#2399)",
     },
     MetricDoc {

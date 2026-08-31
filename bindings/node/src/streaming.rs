@@ -41,7 +41,8 @@ use napi_derive::napi;
 
 use crate::database::ColumnInfo;
 use crate::error::{runtime_init_error, to_napi_error};
-use crate::value::{intern_column_keys, row_to_object, ConvCtx};
+use crate::row::{intern_column_keys, row_to_object};
+use crate::value::ConvCtx;
 
 /// Streaming query result iterator.
 ///

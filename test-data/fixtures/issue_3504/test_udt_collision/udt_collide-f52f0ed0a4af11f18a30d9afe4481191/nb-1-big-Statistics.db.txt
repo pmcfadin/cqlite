@@ -1,0 +1,68 @@
+SSTable: /data/test_udt_collision/udt_collide-f52f0ed0a4af11f18a30d9afe4481191/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 01/01/1970 00:00:00 (999)
+Maximum timestamp: 01/01/1970 00:00:00 (1000)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 08/30/2026 20:18:27 (1788121107)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: -
+TTL min: 0
+TTL max: 0
+First token: -4069959284402364209 (1)
+Last token: 9010454139840013625 (3)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: ed7de369-fa3e-40b4-b516-19f204b7d4dd
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1788121043398, position=65361)=CommitLogPosition(segmentId=1788121043398, position=70426)}
+totalColumnsSet: 9
+totalRows: 3
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1788121140 (08/30/2026 20:19:00) |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   50 (50 B)    |     1 ( 33) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   72 (72 B)    |     1 ( 33) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   642 (642 B)  |     1 ( 33) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      72 (72 B)
+   75th      642 (642 B)
+   95th      642 (642 B)
+   98th      642 (642 B)
+   99th      642 (642 B)
+   Min       43 (43 B)
+   Max       642 (642 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   1       |     2 ( 66) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   7       |     1 ( 33) OOOOOOOOOOOOOOO
+   Percentiles
+   50th      1
+   75th      7
+   95th      7
+   98th      7
+   99th      7
+   Min       0
+   Max       7
+Local token space coverage: NaN
+Estimated cardinality: 3
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 08/30/2026 20:18:27 (1788121107)
+EncodingStats minTimestamp: 01/01/1970 00:00:00 (999)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: p:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_udt_collision,706c61696e,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,7265616c5f6669656c64:org.apache.cassandra.db.marshal.Int32Type)), fcm:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UserType(test_udt_collision,636f6c6c696465,5f74797065:org.apache.cassandra.db.marshal.UTF8Type,5f6b65797370616365:org.apache.cassandra.db.marshal.UTF8Type,5f5f70726f746f5f5f:org.apache.cassandra.db.marshal.UTF8Type,7265616c5f6669656c64:org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type)), c:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_udt_collision,636f6c6c696465,5f74797065:org.apache.cassandra.db.marshal.UTF8Type,5f6b65797370616365:org.apache.cassandra.db.marshal.UTF8Type,5f5f70726f746f5f5f:org.apache.cassandra.db.marshal.UTF8Type,7265616c5f6669656c64:org.apache.cassandra.db.marshal.Int32Type)), tm:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_udt_collision,636f6c6c6964655f7477696e,5f74797065:org.apache.cassandra.db.marshal.UTF8Type,5f6b65797370616365:org.apache.cassandra.db.marshal.UTF8Type,5f5f70726f746f5f5f:org.apache.cassandra.db.marshal.UTF8Type,7265616c5f6669656c64:org.apache.cassandra.db.marshal.Int32Type)),org.apache.cassandra.db.marshal.Int32Type), cm:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_udt_collision,636f6c6c696465,5f74797065:org.apache.cassandra.db.marshal.UTF8Type,5f6b65797370616365:org.apache.cassandra.db.marshal.UTF8Type,5f5f70726f746f5f5f:org.apache.cassandra.db.marshal.UTF8Type,7265616c5f6669656c64:org.apache.cassandra.db.marshal.Int32Type)),org.apache.cassandra.db.marshal.Int32Type), fs:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UserType(test_udt_collision,636f6c6c696465,5f74797065:org.apache.cassandra.db.marshal.UTF8Type,5f6b65797370616365:org.apache.cassandra.db.marshal.UTF8Type,5f5f70726f746f5f5f:org.apache.cassandra.db.marshal.UTF8Type,7265616c5f6669656c64:org.apache.cassandra.db.marshal.Int32Type))), ftm:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UserType(test_udt_collision,636f6c6c6964655f7477696e,5f74797065:org.apache.cassandra.db.marshal.UTF8Type,5f6b65797370616365:org.apache.cassandra.db.marshal.UTF8Type,5f5f70726f746f5f5f:org.apache.cassandra.db.marshal.UTF8Type,7265616c5f6669656c64:org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type))
+IsTransient: false

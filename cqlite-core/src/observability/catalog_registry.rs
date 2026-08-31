@@ -30,6 +30,12 @@ pub const ALL_METRICS: &[&str] = &[
     READ_PARTITION_ACCESS_DROPPED,
     READ_PARTITION_ACCESS_SAMPLING_FLOOR,
     READ_PARTITION_ACCESS_WINDOW_DROPPED,
+    // Read-path phase timings + reader-reported fd gauge (#1707)
+    READ_PHASE_IO,
+    READ_PHASE_DECOMPRESS,
+    READ_PHASE_DECODE,
+    READ_PHASE_MERGE,
+    READER_FDS_OPEN,
     MERGE_ROWS_IN,
     MERGE_ROWS_OUT,
     QUERY_DEGRADED_PATH,
@@ -56,6 +62,9 @@ pub const ALL_METRICS: &[&str] = &[
     MEMTABLE_SIZE_BYTES,
     MEMTABLE_ROWS,
     WAL_SYNC_DURATION,
+    // WAL size + recovery-at-open duration (#1707)
+    WAL_SIZE,
+    WAL_RECOVERY_DURATION,
     FLUSH_DURATION,
     FLUSH_ROWS,
     FLUSH_BYTES,

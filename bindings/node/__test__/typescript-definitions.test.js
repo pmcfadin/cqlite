@@ -245,16 +245,41 @@ describe('TypeScript Definitions (Issue #312)', () => {
   });
 
   describe('UdtValue interface', () => {
-    test('should have _type property', () => {
-      expect(dtsContent).toMatch(/interface\s+UdtValue[\s\S]*?_type\s*:\s*string/);
+    // Issue #3504: the UDT's type identity is carried OUT OF BAND. The declared
+    // shape is `{ typeName, keyspace, fields }`, and the ABSENCE of an index
+    // signature is load-bearing -- `[field: string]: Value` is what let a UDT
+    // field named `_type`/`_keyspace` share a namespace with the markers.
+    //
+    // The interface BODY is isolated first. A `[\s\S]*?` scan from the interface
+    // name reaches arbitrarily far into the rest of the file, so a match proves
+    // only that the token appears SOMEWHERE after it -- which for the negative
+    // assertions below would be a vacuous pass (`_type` and `[field: string]`
+    // both appear later in this file's own JSDoc and in `Row`).
+    const udtBody = () => {
+      const match = dtsContent.match(/export\s+interface\s+UdtValue\s*\{([\s\S]*?)\n\}/);
+      expect(match).not.toBeNull();
+      return match[1];
+    };
+
+    test('should have typeName property', () => {
+      expect(udtBody()).toMatch(/\btypeName\s*:\s*string/);
     });
 
-    test('should have _keyspace property', () => {
-      expect(dtsContent).toMatch(/interface\s+UdtValue[\s\S]*?_keyspace\s*:\s*string/);
+    test('should have keyspace property', () => {
+      expect(udtBody()).toMatch(/\bkeyspace\s*:\s*string/);
     });
 
-    test('should have index signature for fields', () => {
-      expect(dtsContent).toMatch(/interface\s+UdtValue[\s\S]*?\[field\s*:\s*string\]\s*:\s*Value/);
+    test('should have a fields mapping', () => {
+      expect(udtBody()).toMatch(/\bfields\s*:\s*Record\s*<\s*string\s*,\s*Value\s*>/);
+    });
+
+    test('should NOT declare an index signature (that is what permitted the collision)', () => {
+      expect(udtBody()).not.toMatch(/\[\s*\w+\s*:\s*string\s*\]\s*:/);
+    });
+
+    test('should NOT declare the removed _type/_keyspace markers', () => {
+      expect(udtBody()).not.toMatch(/_type\s*:/);
+      expect(udtBody()).not.toMatch(/_keyspace\s*:/);
     });
   });
 
@@ -478,5 +503,462 @@ describe('TypeScript Definitions (Issue #312)', () => {
       );
       expect(packageJson.types).toBe('lib/index.d.ts');
     });
+  });
+});
+
+/**
+ * Runtime-surface drift alarm (issue #1456).
+ *
+ * The regex assertions above check that individual members are DECLARED, which
+ * can only ever catch the members somebody thought to write a test for. This
+ * block compares the two surfaces as SETS, so both drift directions fail:
+ *
+ *   - a `Database` prototype/static method missing from `index.d.ts`
+ *     (invisible to every TypeScript caller), and
+ *   - a member declared in `index.d.ts` with no runtime counterpart
+ *     (a phantom declaration that type-checks and then throws).
+ *
+ * The declared side is read with the TypeScript compiler API rather than by
+ * regex: `ts.createSourceFile` gives the real class-member list, so a member
+ * inside a JSDoc block, a string literal or a commented-out line cannot be
+ * mistaken for a declaration (and vice versa).
+ *
+ * SCOPE -- compared, and deliberately NOT compared. Each omission is written down
+ * because a recorded omission is reviewable while an absent one is a trap.
+ *
+ * Compared: string-keyed member NAMES on the prototype and the constructor (both
+ * directions), each member's coarse SHAPE (callable vs attribute, read from the
+ * property descriptor so no getter is invoked), module-level exported value
+ * declarations and their KIND (class vs function vs enum/namespace vs const), and
+ * every public runtime export being declared.
+ *
+ * NOT compared:
+ *   - TYPES. A declared `(): string` returning a number passes. That is `tsc`'s
+ *     job against real call sites, a different tool with a different failure mode.
+ *   - CONSTRUCTORS. Both classes advertise an implicit public zero-argument
+ *     constructor, yet `Database` must come from `open()` and `PreparedStatement`
+ *     needs an internal native statement, so `new Database()` type-checks and
+ *     yields an unusable object. Real defect, but the fix is to declare private
+ *     constructors in `index.d.ts` -- hand-written PRODUCTION surface, and a
+ *     TS-breaking public-API change. Raised as REQ-1456-03 on issue #1456 for the
+ *     owner; deliberately not decided by a test-only change.
+ *   - SYMBOL-KEYED members. A `[Symbol.iterator]`/`[Symbol.asyncDispose]` added at
+ *     runtime without a declaration would pass. Measured when this was written:
+ *     `Object.getOwnPropertySymbols` is EMPTY for both prototypes, both
+ *     constructors and the module object, so this closes no live gap today.
+ *     Batched as a nit under REQ-1456-03.
+ */
+
+const ts = require('typescript');
+
+// Members every JS function object carries; they are not part of any declared
+// class surface, so they are excluded from the static-side comparison.
+const FUNCTION_INTRINSICS = new Set(['length', 'name', 'prototype']);
+
+/**
+ * Collect the members a `.d.ts` class declaration declares, split by staticness.
+ *
+ * Methods, properties and get/set accessors all count: each is an attribute a
+ * caller can reach, which is exactly what the runtime comparison sees.
+ *
+ * @param {string} dtsSource - Full `.d.ts` source text
+ * @param {string} className - e.g. 'Database'
+ * @returns {{instance: string[], static: string[]}} Sorted member names
+ */
+function declaredClassMembers(dtsSource, className) {
+  const sourceFile = ts.createSourceFile(
+    'index.d.ts',
+    dtsSource,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true
+  );
+
+  // Select from TOP-LEVEL EXPORTED statements only, and fail on ambiguity.
+  //
+  // This used to recurse with `forEachChild` and accept any same-named class
+  // anywhere -- nested inside a namespace, or not exported at all. A shadow
+  // `Database` declaration would then be compared instead of the exported one,
+  // hiding real drift in the declaration callers actually see. Same defect as the
+  // module-level walk had; that one was fixed and this one was not, which is the
+  // argument for one derivation rather than two.
+  const matches = sourceFile.statements.filter(
+    (node) =>
+      ts.isClassDeclaration(node) &&
+      node.name &&
+      node.name.text === className &&
+      (node.modifiers || []).some(
+        (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+      )
+  );
+
+  if (matches.length === 0) {
+    throw new Error(
+      `class ${className} not found as a top-level exported declaration in index.d.ts`
+    );
+  }
+  if (matches.length > 1) {
+    // Ambiguity is not something to resolve by picking one: whichever we picked,
+    // the other would go uncompared.
+    throw new Error(
+      `class ${className} has ${matches.length} top-level exported declarations in ` +
+        'index.d.ts; cannot decide which one the runtime class corresponds to'
+    );
+  }
+  const declaration = matches[0];
+
+  const instance = new Set();
+  const statics = new Set();
+  for (const member of declaration.members) {
+    const isMember =
+      ts.isMethodDeclaration(member) ||
+      ts.isMethodSignature(member) ||
+      ts.isPropertyDeclaration(member) ||
+      ts.isPropertySignature(member) ||
+      ts.isGetAccessorDeclaration(member) ||
+      ts.isSetAccessorDeclaration(member);
+    if (!isMember) {
+      // Constructor signatures and index signatures are not named attributes.
+      continue;
+    }
+    if (!member.name || !ts.isIdentifier(member.name)) {
+      // Computed / string-literal member names have no runtime counterpart to
+      // compare by name; there are none today, and skipping them silently would
+      // be the permissive branch, so fail loudly instead.
+      throw new Error(
+        `class ${className} declares a member with a non-identifier name in index.d.ts`
+      );
+    }
+    // SHAPE, not just name: a member declared as a method but implemented as a
+    // data property (or the reverse) is real drift that a name-set comparison
+    // cannot see -- `foo(): boolean` vs `foo: boolean` are different call sites
+    // (`db.foo()` vs `db.foo`), and exactly one of them works.
+    //
+    // The distinction is deliberately COARSE -- callable vs not -- because that
+    // is what changes the call site. A declared `get x(): T` and a declared
+    // `readonly x: T` both surface as a non-callable attribute at runtime (napi
+    // emits an accessor for both), so separating those two would red on correct
+    // code without describing any caller-visible difference.
+    const kind =
+      ts.isMethodDeclaration(member) || ts.isMethodSignature(member)
+        ? 'callable'
+        : 'attribute';
+    const isStatic = (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) !== 0;
+    (isStatic ? statics : instance).add(`${member.name.text}:${kind}`);
+  }
+
+  return {
+    instance: [...instance].sort(),
+    static: [...statics].sort(),
+  };
+}
+
+/**
+ * The members a runtime class actually exposes, split by staticness.
+ *
+ * @param {Function} cls - The runtime class (constructor function)
+ * @returns {{instance: string[], static: string[]}} Sorted member names
+ */
+function runtimeClassMembers(cls) {
+  // Read the property DESCRIPTOR, not the value: touching `obj.foo` on an
+  // accessor would invoke the getter (side effects, and it throws on a
+  // half-initialised prototype). The descriptor answers "callable or not"
+  // without calling anything.
+  const shapeOf = (owner, name) => {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, name);
+    if (descriptor && typeof descriptor.get === 'function') {
+      // An accessor surfaces as an attribute at the call site: `db.isClosed`.
+      return 'attribute';
+    }
+    return descriptor && typeof descriptor.value === 'function' ? 'callable' : 'attribute';
+  };
+  const instance = Object.getOwnPropertyNames(cls.prototype)
+    .filter((name) => name !== 'constructor')
+    .map((name) => `${name}:${shapeOf(cls.prototype, name)}`)
+    .sort();
+  const statics = Object.getOwnPropertyNames(cls)
+    .filter((name) => !FUNCTION_INTRINSICS.has(name))
+    .map((name) => `${name}:${shapeOf(cls, name)}`)
+    .sort();
+  return { instance, static: statics };
+}
+
+/**
+ * Compare the declared and runtime member sets, returning human-readable drift.
+ *
+ * @param {string} className - For the message
+ * @param {{instance: string[], static: string[]}} declared
+ * @param {{instance: string[], static: string[]}} runtime
+ * @returns {string[]} One entry per drift direction found; empty when faithful
+ */
+function memberDrift(className, declared, runtime) {
+  const drift = [];
+  for (const kind of ['instance', 'static']) {
+    const declaredSet = new Set(declared[kind]);
+    const runtimeSet = new Set(runtime[kind]);
+    const phantom = declared[kind].filter((name) => !runtimeSet.has(name));
+    const undeclared = runtime[kind].filter((name) => !declaredSet.has(name));
+    if (phantom.length > 0) {
+      drift.push(
+        `${className} ${kind}: declared in index.d.ts but absent at runtime ` +
+          `(phantom declaration): ${phantom.join(', ')}`
+      );
+    }
+    if (undeclared.length > 0) {
+      drift.push(
+        `${className} ${kind}: present at runtime but NOT declared in index.d.ts ` +
+          `(invisible to TypeScript callers): ${undeclared.join(', ')}`
+      );
+    }
+  }
+  return drift;
+}
+
+/**
+ * Every top-level NAME `index.d.ts` declares, whatever the declaration kind.
+ *
+ * A caller can write `import { X } from '@cqlite/node'` for a class, function,
+ * interface, type alias, enum or exported const alike, so the runtime->declared
+ * check must consider all of them -- not just classes and functions.
+ *
+ * @param {string} dtsSource - Full `.d.ts` source text
+ * @returns {Map<string, 'callable'|'object'|'value'>} Declared top-level name ->
+ *   the runtime shape that declaration promises: 'callable' for a class or
+ *   function, 'object' for an enum or namespace, 'value' for an exported const
+ *   (any type, so existence is all that can be required).
+ */
+function declaredTopLevelNames(dtsSource) {
+  const sourceFile = ts.createSourceFile(
+    'index.d.ts',
+    dtsSource,
+    ts.ScriptTarget.Latest,
+    true
+  );
+  // Only EXPORTED, VALUE-BEARING, TOP-LEVEL declarations count as "declared" for
+  // a runtime export, and each of those three qualifiers closes a false-PASS:
+  //
+  // * VALUE-BEARING -- an `interface` or `type` alias declares a TYPE and emits
+  //   no value, so `QueryResult` being declared as an interface does NOT make a
+  //   runtime `module.exports.QueryResult` usable by a TypeScript caller. Counting
+  //   type-only declarations let a runtime value pass by NAME COLLISION with an
+  //   unrelated interface.
+  // * EXPORTED -- a declaration without `export` is not reachable by any caller.
+  // * TOP-LEVEL -- the walk used to recurse with `forEachChild`, so a member or a
+  //   declaration nested inside a namespace/module block satisfied a top-level
+  //   export by name alone.
+  //
+  // This is the permissive-branch shape CLAUDE.md warns about: the test asked
+  // "does this name appear anywhere in the .d.ts" when the property it needs is
+  // "is this name an exported value declaration".
+  // The map records each name's KIND, because existence alone is not the property
+  // callers depend on. `lib/index.js` re-exports via `const { version } =
+  // nativeBinding`, so if the native export disappears the destructure yields
+  // `undefined` and `module.exports.version` REMAINS AN OWN PROPERTY -- an
+  // ownership test passes while the declared `version()` crashes. An earlier
+  // version of this check required `typeof === 'function'`, which was relaxed to
+  // ownership so an exported `const` would not red; that fixed the const case and
+  // silently dropped callability for classes and functions. Kind is what lets both
+  // be right at once.
+  const names = new Map();
+  const isExported = (node) =>
+    Boolean(
+      node.modifiers &&
+        node.modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    );
+
+  for (const node of sourceFile.statements) {
+    if (!isExported(node)) {
+      continue;
+    }
+    // Classes, functions, enums and namespaces all emit a runtime value, but they
+    // do not all emit the SAME KIND of value, which is what the runtime check
+    // needs to know.
+    if (node.name && ts.isIdentifier(node.name)) {
+      // A class and a function are BOTH `typeof === 'function'`, so collapsing
+      // them (an earlier version of this file did) means `version()` could become
+      // an ES class and pass while every caller breaks: measured, `Database()`
+      // without `new` throws "Class constructor Database cannot be invoked
+      // without 'new'". The declared side already knows which it is; throwing
+      // that away was the defect.
+      if (ts.isClassDeclaration(node)) {
+        names.set(node.name.text, 'class');
+        continue;
+      }
+      if (ts.isFunctionDeclaration(node)) {
+        names.set(node.name.text, 'function');
+        continue;
+      }
+      if (ts.isEnumDeclaration(node) || ts.isModuleDeclaration(node)) {
+        names.set(node.name.text, 'object');
+        continue;
+      }
+    }
+    // `export declare const x: T` also emits a value -- of ANY type, so its only
+    // requirement is that it exists.
+    if (ts.isVariableStatement(node)) {
+      for (const declaration of node.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) {
+          names.set(declaration.name.text, 'value');
+        }
+      }
+    }
+    // Interfaces and type aliases are deliberately NOT collected: they are
+    // type-only and cannot satisfy a runtime export.
+  }
+  return names;
+}
+
+describe('Runtime surface vs index.d.ts', () => {
+  let dtsContent;
+  let runtimeExports;
+
+  beforeAll(() => {
+    dtsContent = fs.readFileSync(LIB_DTS_PATH, 'utf8');
+    // The published entry point (package.json `main`), i.e. the surface the
+    // `.d.ts` describes -- NOT the raw napi binding, which `lib/index.js` wraps.
+    runtimeExports = require('../lib/index.js');
+  });
+
+  test('Database declared members equal the runtime members', () => {
+    const { Database } = runtimeExports;
+    expect(typeof Database).toBe('function');
+
+    const declared = declaredClassMembers(dtsContent, 'Database');
+    const runtime = runtimeClassMembers(Database);
+
+    // Sanity: an empty side would make the comparison vacuous in the dangerous
+    // direction (an empty declared set "matches" nothing missing). Entries are
+    // `name:kind`, so asserting the KIND here also pins that both derivations
+    // classify a plain method the same way -- if they disagreed, every method
+    // would appear as drift and this assert names the reason instead.
+    expect(declared.instance.length).toBeGreaterThan(0);
+    expect(declared.static).toContain('open:callable');
+    expect(runtime.instance.length).toBeGreaterThan(0);
+    expect(runtime.static).toContain('open:callable');
+
+    expect(memberDrift('Database', declared, runtime)).toEqual([]);
+  });
+
+  test('PreparedStatement declared members equal the runtime members', () => {
+    const { PreparedStatement } = runtimeExports;
+    expect(typeof PreparedStatement).toBe('function');
+
+    const declared = declaredClassMembers(dtsContent, 'PreparedStatement');
+    const runtime = runtimeClassMembers(PreparedStatement);
+
+    expect(declared.instance.length).toBeGreaterThan(0);
+    expect(runtime.instance.length).toBeGreaterThan(0);
+
+    expect(memberDrift('PreparedStatement', declared, runtime)).toEqual([]);
+  });
+
+  test('every exported value declaration in index.d.ts resolves to a runtime export', () => {
+    // Phantom direction: `export declare class Foo` (or function, enum, namespace,
+    // or `const`) with nothing exported under that name type-checks and then
+    // fails at the call site.
+    //
+    // This uses the SAME `declaredTopLevelNames()` derivation as the
+    // runtime->declared direction, deliberately. Two separate walks existed here
+    // before and only one of them was fixed, so this direction still recursed
+    // with `forEachChild` (counting NESTED and NON-EXPORTED declarations as
+    // top-level exports) and covered only classes and functions (so a phantom
+    // exported `const`/`enum`/`namespace` was undetectable). One derivation with
+    // several callers cannot drift against itself; two derivations did, within a
+    // single change.
+    const declared = declaredTopLevelNames(dtsContent);
+
+    // Non-vacuity: an empty declared map would satisfy the assert below trivially.
+    expect(declared.size).toBeGreaterThan(0);
+    // Pins the KIND, not just presence: if the derivation ever collapses class and
+    // function again, this assert names the reason rather than letting a
+    // class-vs-function swap pass unnoticed.
+    expect(declared.get('Database')).toBe('class');
+    expect(declared.get('version')).toBe('function');
+
+    // KIND-AWARE, because ownership alone is not the property callers rely on.
+    // `module.exports.version = undefined` (what a lost native export produces via
+    // the `const { version } = nativeBinding` re-export) is an OWN property, so an
+    // ownership-only test passes while `version()` crashes. Conversely an exported
+    // `const` may legitimately hold a non-callable, so demanding callability
+    // everywhere would red on correct code. Each kind gets the check it warrants.
+    const phantoms = [];
+    for (const [name, kind] of [...declared].sort()) {
+      if (!Object.prototype.hasOwnProperty.call(runtimeExports, name)) {
+        phantoms.push(`${name}: declared (${kind}) but absent from the runtime exports`);
+        continue;
+      }
+      const value = runtimeExports[name];
+      // An ES class is `typeof === 'function'` but throws when called without
+      // `new`, so "is it callable" cannot separate a declared function from a
+      // declared class. `Function.prototype.toString` can: napi emits real
+      // `class Database {...}` text for classes and `function version() { [native
+      // code] }` for functions (both verified against the built module).
+      const isEsClass =
+        typeof value === 'function' &&
+        /^\s*class\s/.test(Function.prototype.toString.call(value));
+      if (kind === 'class') {
+        if (typeof value !== 'function') {
+          phantoms.push(
+            `${name}: declared as a class but ${
+              value === undefined ? 'undefined' : typeof value
+            } at runtime (\`new ${name}()\` would throw)`
+          );
+        } else if (!isEsClass) {
+          phantoms.push(
+            `${name}: declared as a class but is a plain function at runtime`
+          );
+        }
+      } else if (kind === 'function') {
+        if (typeof value !== 'function') {
+          phantoms.push(
+            `${name}: declared as a function but ${
+              value === undefined ? 'undefined' : typeof value
+            } at runtime (calling it would throw)`
+          );
+        } else if (isEsClass) {
+          phantoms.push(
+            `${name}: declared as a function but is a CLASS at runtime ` +
+              `(\`${name}()\` throws without \`new\`)`
+          );
+        }
+      } else if (kind === 'object' && (value === null || typeof value !== 'object')) {
+        phantoms.push(
+          `${name}: declared as an enum/namespace but ${typeof value} at runtime`
+        );
+      }
+    }
+    expect(phantoms).toEqual([]);
+  });
+
+  test('every public runtime export is declared in index.d.ts', () => {
+    // The declared->runtime direction is covered above. This is the OTHER
+    // direction, and it is the scenario issue #1456 exists for: a new PUBLIC
+    // export added to `lib/index.js` and forgotten in `index.d.ts` is invisible
+    // to every TypeScript caller, and nothing else in this suite notices.
+    //
+    // Underscore-prefixed exports are excluded because they are internal test
+    // hooks, not API: `_errorContractProbe` and `_errorContractNodeCodes`
+    // (issue #1451) and `_ffiCommonRenderVectors` (issue #1452) are reached only
+    // by this test suite, and each is documented `@private` in `lib/index.js`.
+    // This mirrors the Python side, which scopes its `__all__`-vs-stub direction
+    // to non-underscore names for the same reason.
+    // `getOwnPropertyNames`, NOT `Object.keys`: an export defined with
+    // `Object.defineProperty` (the default is non-enumerable) is reachable by
+    // callers as `require('cqlite').Name` but absent from `Object.keys`, so it
+    // would evade this alarm entirely. Same principle as the Python side reading
+    // `vars(cqlite)` rather than `__all__` -- derive from the COMPLETE surface and
+    // subtract by rule, never enumerate what to include.
+    const publicExports = Object.getOwnPropertyNames(runtimeExports)
+      .filter((name) => !name.startsWith('_'))
+      .sort();
+    // Non-vacuity: an empty public-export set would satisfy the assert below
+    // trivially, so an entry point that failed to load could green.
+    expect(publicExports.length).toBeGreaterThan(0);
+    expect(publicExports).toContain('Database');
+
+    const declared = declaredTopLevelNames(dtsContent);
+    expect(declared.size).toBeGreaterThan(0);
+
+    const undeclared = publicExports.filter((name) => !declared.has(name));
+    expect(undeclared).toEqual([]);
   });
 });

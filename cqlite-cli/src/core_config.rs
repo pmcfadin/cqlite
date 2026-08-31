@@ -18,6 +18,12 @@
 //! query-engine chokepoint (`cqlite_core::query::engine::deadline`). **`0` means
 //! no timeout** — it maps to `Duration::ZERO`, the core's documented unbounded
 //! sentinel.
+//!
+//! That table is now EXHAUSTIVE. Until issue #1696 this function also set
+//! `query.enable_optimization = true` and `storage.enable_bloom_filters = true`
+//! — two WRITE-ONLY assignments to core fields no production code read, so they
+//! made the mapping look richer than it was. Both fields are deleted; the
+//! assignments went with them.
 
 use anyhow::Result;
 use cqlite_core::Config as CoreConfig;
@@ -43,10 +49,6 @@ pub fn to_core_config(cli_config: &CliConfig) -> Result<CoreConfig> {
     // `Duration::ZERO`, the core's documented "no timeout" sentinel.
     core_config.query.max_execution_time =
         std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
-
-    // Enable optimizations for better performance
-    core_config.query.enable_optimization = true;
-    core_config.storage.enable_bloom_filters = true;
 
     // Validate the configuration
     core_config

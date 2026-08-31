@@ -12,7 +12,8 @@
 
 use cqlite_core::types::Value;
 use cqlite_ffi_common::vectors::{
-    vector_outcome, VectorOutcome, DECIMAL_VECTORS, INET_VECTORS, VARINT_VECTORS,
+    vector_outcome, VectorOutcome, DECIMAL_VECTORS, INET_VECTORS, JSON_NUMBER_VECTORS,
+    VARINT_VECTORS,
 };
 use napi::{Env, JsUnknown, Result};
 use napi_derive::napi;
@@ -48,8 +49,15 @@ pub struct VectorReport {
     pub rendered: Option<String>,
     /// The DECIMAL scale (`0` for the other types).
     pub scale: i32,
-    /// The entry's input bytes.
+    /// The entry's input bytes. For a `json_number` entry these are the UTF-8
+    /// bytes of the JSON literal, so a suite can re-drive it through
+    /// `_jsonNumberFromText`.
     pub bytes: Vec<u8>,
+    /// `"integer"`/`"float"` for a `json_number` entry (issue #3505): the host
+    /// SHAPE the value must arrive as. `null` for the byte-input types, which
+    /// have no host-shape choice to make.
+    #[napi(js_name = "hostKind")]
+    pub host_kind: Option<String>,
 }
 
 impl VectorReport {
@@ -65,7 +73,14 @@ impl VectorReport {
             rendered: reported.rendered.clone(),
             scale,
             bytes: input.to_vec(),
+            host_kind: None,
         }
+    }
+
+    /// The same record with the JSON host-shape field set (issue #3505).
+    fn with_host_kind(mut self, host_kind: &str) -> Self {
+        self.host_kind = Some(host_kind.to_string());
+        self
     }
 }
 
@@ -129,7 +144,71 @@ pub fn ffi_common_render_vectors(env: Env) -> Result<Vec<VectorReport>> {
         ));
     }
 
+    // JSON numbers (issue #3505). The input is TEXT, so its UTF-8 bytes ride in
+    // `bytes` and the suite re-drives the literal through `_jsonNumberFromText`
+    // for the host-TYPE assertion — `String(x)` cannot tell a `BigInt` from a
+    // `number` when both hold the same value.
+    //
+    // The rendering goes through the FULL `value_to_napi` dispatch, so a binding
+    // that stopped calling the shared classifier is caught here.
+    for vector in JSON_NUMBER_VECTORS {
+        let bytes = vector.json_text.as_bytes();
+        let produced = match serde_json::from_str::<serde_json::Number>(vector.json_text) {
+            Ok(number) => render_through_dispatch(
+                &env,
+                &Value::Json(Box::new(serde_json::Value::Number(number))),
+            ),
+            // A committed literal that does not parse is a table defect; report
+            // it as a refusal rather than skipping the entry, so it cannot pass
+            // silently.
+            Err(err) => Err(napi::Error::from_reason(format!(
+                "committed literal `{}` did not parse: {err}",
+                vector.json_text
+            ))),
+        };
+        reports.push(
+            VectorReport::new(
+                "json_number",
+                0,
+                bytes,
+                &reported(vector.name, vector.expect, &produced),
+            )
+            .with_host_kind(vector.host_kind.name()),
+        );
+    }
+
     Ok(reports)
+}
+
+/// Test-support: convert a JSON number LITERAL to the JS value the production
+/// path delivers, through the exact production conversion
+/// ([`value_to_napi`] on a `Value::Json`).
+///
+/// The full chain is the one a real result row takes:
+/// `value_to_napi` → `json_to_napi` → `json_number_to_napi` →
+/// `cqlite_ffi_common::json_number::classify_json_number`. Nothing is
+/// re-implemented here, which is the point: without this surface the production
+/// adapter had NO test caller at all, so #3505's observable claim — a JSON
+/// integer above `i64::MAX` reaches JS as a `BigInt`, never a rounded `number` —
+/// was asserted by nothing (issue #3505 review round 2).
+///
+/// `text` is a JSON number literal (`"18446744073709551615"`, `"1.5"`), parsed
+/// with `serde_json` exactly as the reader would, so the LEXICAL form decides
+/// the class. Input that is not a JSON number throws (fail-closed: a typo'd
+/// literal must never look like a passing conversion).
+///
+/// Not part of the stable public API; `lib/index.js` re-exports it as
+/// `_jsonNumberFromText`.
+#[napi]
+pub fn json_number_from_text(env: Env, text: String) -> Result<JsUnknown> {
+    let number: serde_json::Number = serde_json::from_str(&text).map_err(|err| {
+        napi::Error::from_reason(format!("`{text}` is not a JSON number literal: {err}"))
+    })?;
+    let ctx = ConvCtx::new(&env);
+    value_to_napi(
+        &ctx,
+        &Value::Json(Box::new(serde_json::Value::Number(number))),
+    )
 }
 
 /// Adapt a `napi::Result<String>` into the shared crate's outcome record.

@@ -91,7 +91,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests **at the TARGET granularity each component names, NEVER whole packages** (#3522: `cli-tests` runs 35 of 45 `--test` targets and passes no `--lib`/`--bins`, so `cqlite-cli`'s 255 lib/bin unit tests execute nowhere; `integration-tests` COMPILES `cqlite-integration-tests` (`--no-run`) then runs 6 named targets, leaving its lib's 206 tests and 13 bins unexecuted — per-member record: `scripts/tests/workspace-test-disposition.txt`), `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), the **binding lanes** (#3522: `binding-rust-tests` EXECUTES `cqlite-ffi-common` (ALL targets) and `cqlite-node` (`--lib`), whose Rust tests previously ran NOWHERE, and never SKIPs — it needs nothing beyond cargo; `node-bindings` runs the WHOLE jest suite, not 1 of 27 files), `all-features-check` (#3453: `cargo check` + `cargo clippy -D warnings`, both at `-p cqlite-core --all-features --all-targets` — the ONLY component that enables the OTLP stack; never SKIPs), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
@@ -106,7 +106,37 @@ execute NOWHERE** — not locally, not in CI — because their module-level
 `#![cfg(feature = "observability-testing")]` is off in every lane that runs them (#3375), a gap #2910's tier
 aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
 ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
-however green the gate looks. `experimental` is the remaining known instance (#3373).
+however green the gate looks. `experimental` is **one** remaining instance (#3373) and NOT the only
+one: in `cqlite-core` the crate-level-gated integration targets for `delta-scan` (13) and
+`observability-testing` (14) are named by no `--test` in the gate and execute ZERO tests at
+`core-tests`' feature set, as do 3 of the 5 `dhat-heap` ones; the `delta_scan` module's own 39 lib
+tests run in no gate component either (`feature-iso-delta-scan` is `--lib --no-run`), only in the
+`required`-exempt `ci.yml` (#3522 audit).
+**AND THE SAME REASONING RUNS AT PACKAGE GRANULARITY, WHICH IS WHERE IT WAS COSTLIEST (#3522).**
+`cargo clippy --workspace --all-targets` compiles EVERY workspace member on every full gate, so a
+whole CRATE can be built by every run and execute nothing — and it reads as covered precisely
+because the workspace builds clean. Measured: `cqlite-ffi-common` appeared **zero times** in
+`scripts/**` and `.github/workflows/**` (37 unit tests + `tests/dependency_boundary.rs` +
+`tests/error_contract_table.rs`, executed by nothing anywhere), and `cqlite-node`'s 53 Rust unit
+tests were in the same hole because `node-bindings` runs jest against the BUILT ARTIFACT and never
+`cargo test`. Both now run in `binding-rust-tests`. Two design rules came out of it. **A
+never-SKIPping lane must not be folded into a SKIP-aware one**: `node-bindings` correctly SKIPs
+without node/npm, and putting cqlite-node's *Rust* tests behind that SKIP would be a coverage hole
+wearing a SKIP's clothes — so the Rust lane depends on nothing beyond cargo and never SKIPs. **And
+enrolling a lane in `DATASET_COMPONENTS` is not enough to stop a corpus-dependent suite skipping**:
+the widened `node-bindings` also exports `CQLITE_REQUIRE_FIXTURES=1` on the full gate, which buys ONE
+named setup failure instead of 14 separate `beforeAll` throws and closes `parity.test.js`'s `test.skip`
+placeholder — the one corpus-conditional path in that suite that would pass silently. (An earlier draft
+of this paragraph said those suites `describe.skip`; **measured, none does** — the repo's Node
+convention THROWS. A false rationale in a gate log is worse than none, because it is what stops the
+next person looking.) The durable question is the same one shape up: for each workspace member, **which component
+EXECUTES it** — recorded, member by member, in `scripts/tests/workspace-test-disposition.txt`
+(`EXECUTED`/`PARTIAL`/`NOT-EXECUTED`, a closed label set enforced under `tooling-tests`), so a new
+crate cannot join the unexecuted set unannounced. Each record also carries a CLASS — `silent` (no
+committed doctrine claims it is covered) vs `contradicts-doctrine` (doctrine says it is and it is not)
+— coupled to the label (`EXECUTED` ⇔ `no-gap`), because a gap our own doctrine denies is a false
+certification and not a backlog item. That census records completeness and labeling, **not
+truth** — deliberately, on #1716's precedent.
 Two corollaries the lanes are built on. **Derive, never curate**: both executing lanes compute their subject
 set from committed source at run time — `legacy-heuristics` its `--test` targets (from cargo metadata plus a
 module closure, so a manifest-gated or directory-style target is not missed) and its allowed-zero set, and
@@ -128,7 +158,59 @@ incomplete source set is permissive everywhere, an unevaluated one is merely una
 proves nothing. `scripts/tests/test_agent_gate_feature_matrix_lanes.sh` (opt-in) plants each lane's
 incident-class break in a throwaway `git worktree` and requires the lane to red **and** to NAME the planted
 symbol — a bare red is not evidence either, since an unrelated breakage produces an identical exit code and
-SUMMARY line.
+SUMMARY line. `scripts/tests/test_agent_gate_binding_rust_lanes.sh` does the same for the #3522 binding
+lanes, and adds the case the failing-assertion plants cannot reach: one that cfg's a unit suite OUT, so it
+compiles, runs **zero** tests and exits 0 — the only plant that exercises the non-zero-count half of
+`check_unittest_targets_ran`.
+
+**A CI exemption that defers to a local gate component is only as true as that component's SCOPE
+(#3493).** `.github/ci-gating-tiers.yml` excuses a workflow from `required` by naming the local
+component that supposedly owns its merge-gating half — and nothing checks that the named component
+actually covers it. Measured instance, since FIXED by #3522/#3574: the `node-ci.yml` exemption read
+*"the merge-gating half is the local gate's node-bindings component"* while `node-bindings` ran ONE
+of the Node suite's 27 test files (`npx jest write-readback-content`, narrowed for speed under
+#1255), so **26 files were gated by neither side** — and a deterministic export-surface red sat on
+`main` for ~2 days across 4 Node contexts without blocking a merge. Its sibling is the control:
+`python-bindings` runs the whole pytest suite, so the identically-worded Python exemption was true.
+This is the **circular-deferral** shape #3544 records for `ci-minimal-features.yml` — each side's
+coverage justified by the other's, the content exercised by neither, **with a documented rationale
+on both sides explaining why that is fine** — and it is a confirmed family, not a one-off. Two rules
+follow. **Narrowing a component for speed is a CHANGE TO A MERGE GATE**: if a registry exemption
+names it, correct that entry in the same diff or the exemption silently becomes false. And **when
+you widen or narrow, measure first** — the #1255 narrowing outlived its own premise (the widened
+component measures **138s**, dominated by the `release-unwind` LTO build it already paid), so the
+speed argument that justified the hole had stopped being true long before anyone re-checked it.
+
+**AND "DOES EVERY TEST RUN" IS NOT "IS THE CORPUS COMPLETE" (#3493).** #3522's census answers the
+first; it cannot answer the second, and neither can its per-suite guard. The Node parity cases
+**derive their table set FROM DISK**, so a partial extraction is green BY OMISSION: every suite
+runs, every suite does real work, and the missing tables are simply never enumerated. Hence
+`test-data/scripts/check-dataset-manifest.sh`, paired with `npm test` in `node-bindings`, asserting
+that every expected table is present AND usable. Measured against the real binding, on an otherwise
+intact generation: a **zero-length `CompressionInfo.db` or `Statistics.db` makes `SELECT` return 0
+ROWS silently** (not an error — the "0-rows-when-present" failure this repo says must never pass),
+and a second generation whose `Data.db` is well-formed garbage makes the reader throw. A
+completeness check proves files are present and usable AS FILES; it cannot prove they parse — that
+is the reader's job, and no amount of `stat`ing substitutes for it.
+
+**A GREEN FULL GATE DOES NOT SUBSUME `pr-gate-core` (#3453).** The two check sets overlap; neither
+contains the other, and this is structural, not a backlog item. The gate runs lanes CI cannot
+(`arrow-parity-guard` names a `#![cfg(feature = "arrow")]` integration target that pr-gate's `--lib
+--all-features` compiles no path to), and pr-gate runs a lane the gate does not: `cargo test -p
+cqlite-core --lib --all-features` EXECUTES cqlite-core's unit suite with the OTLP stack ON, which no
+gate component executes. **MEASURED ON `main`, NOT CITED FROM AN INCIDENT: the gate of record
+DISCOVERS 3562 cqlite-core `--lib` tests (`--features cli-helpers`); pr-gate-core discovers 3782
+(`--all-features`) — so 220 lib tests execute in CI and NOWHERE in the gate of record.** #3382's own
+fix pin (`a_stats_only_name_cannot_create_an_instrument_through_the_emit_path`) is one the gate cannot
+even list (`-- --list` finds 0 vs 1). That is how PR #3382 earned a 31/31 gate PASS without executing
+the test pinning its own fix — the issue was filed around one instance; the standing gap is 220 tests
+wide. `all-features-check` now closes the **compile/lint half** — a type error or a
+`-D warnings` lint under `#[cfg(feature = "observability")]` reds the gate of record — and
+**deliberately not the runtime half**: it executes NONE of those 220, so an order-dependent defect like #3382's
+(a process-wide `OnceLock<Instruments>` poisoned by whichever test binds the global meter to a no-op
+provider first, invisible to `#[serial_test::serial]` grouping) STILL fails only in CI. Note the
+tests in question are gated on `observability-testing`, not `observability`. So never read a green
+SUMMARY as a prediction about `required`; a red CI check on a green-gate PR is an ordinary event.
 
 **Required invocation — summary-file redirect, never raw stdout (issues #1175/#2079), full AND lite:**
 
@@ -226,6 +308,33 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   the process EXIT CODE as primary and MUST verify the `run-id:` line matches the run it launched
   before trusting a pinned-path block — a mismatched/foreign `run-id` block (even `RESULT: PASS`) is a
   peer's, not yours; on a mismatch, read the `.integrity-fail.<run-id>` sibling / `logs:` bundle instead.
+- **A gate parser must be colour-immune AT THE PARSE SITE (#3400).** 18 workflows set
+  `CARGO_TERM_COLOR: always` (incl. the nightly `gate.yml`) plus `scripts/local/pre-merge.sh`, and
+  **colour SURVIVES redirection to a file** (measured: 25 ESC bytes vs 0) — the gate's own mandated
+  `> gate.log 2>&1` capture is coloured too, so this is not a tty-only artifact. Cargo colours the
+  STATUS WORD and emits the reset immediately after it (`Running<ESC>[0m tests/foo.rs`), so a
+  pattern anchored on the status word alone survives while one spanning `<status> <payload>` — the
+  literal `Running tests/`, or `warning:` — matches NOTHING. **It breaks BOTH ways, and neither is
+  safe**: the cli-tests zero-tests guard reported OK having judged no target at all (a vacuous PASS,
+  live on `main` for months, fixed by #1699); the declared-vs-observed reconciliation reported EVERY
+  declared target unobserved on a healthy run (a false RED, fixed by #3400). Conversely
+  `test result:` / `running N tests` are libtest's, and cargo does not pass `--color` through to the
+  harness, so they carry no escapes — safe for a reason that is NOT in the code, which is why this
+  is a lint and not a comment. Route every cargo-output parse
+  through `_ansi_stripped_log` and read by **redirection, never a pipe** (a piped `while read` runs
+  in a subshell and its verdict is discarded — a second, independent silent pass). **This rule is
+  DOCTRINE and is NOT mechanically enforced.** A structural lint over the parse sites was built on
+  #3400 and **descoped**: its own false-PASS count rose across review rounds (2, 2, 3) and two of
+  the last round's three defects were inside the two preceding fix rounds — the same shape, and the
+  same ruling, as #3229's removed `census-exclusion:` key, because a guard with known documented
+  false-PASSes is worse than no guard, since it invites reliance it cannot support. Mechanization is
+  deferred to **#3499**; until it lands, this is a review-time rule, and the standing coverage is
+  behavioural (`scripts/tests/test_cargo_output_parsers.sh`, in `tooling-tests`), which pins the
+  defect against real code rather than predicting it from source shape — it EXTRACTS each guard from
+  the shipped `agent-gate.sh` and runs it, so unrouting one reds the suite instead of greening it.
+  `CARGO_TERM_COLOR=never` at the invocation is belt, not the fix; `gate.yml` KEEPS
+  `always` — colour is a presentation property of a log for humans, and moving correctness into a
+  workflow file 18 files from the parse is a worse coupling than the one being removed.
 - clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the source-built
   DuckDB amalgamation (cqlite-cli `duckdb-tests`) + OTel stack (`observability`/
   `observability-testing`); parquet/arrow stay linted. `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`)
@@ -250,6 +359,64 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   block's `commit:`/`dirty:` are derived from that verified capture, never a fresh emit-time git
   read. No env var bypasses it; remedy is to re-run on a stable tree (don't edit a worktree while
   its gate runs).
+- **Every component line NAMES the feature matrix it ran, in ALL THREE modes (#3453).**
+  `core-tests: PASS (412s)  [test cqlite-core --features cli-helpers]` — read as
+  `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare
+  `PASS (412s)` could not distinguish a run that certified the OTLP stack from one that never
+  enabled it, which is this issue's whole subject. It is **DERIVED, never curated**: `cargo` and `env` are shell FUNCTIONS in the gate, so a
+  matrix is described from the REAL argv about to execute. **AND IT RECORDS EXECUTION, NOT INTENT.**
+  The eight components whose cargo calls live in a single-quoted `bash -c` body (core-tests'
+  nextest branch, memory-budget, integration-tests, write-tests, cli-tests,
+  compaction-byte-parity, minimal-build, smoke) first declared their sets in the PARENT, before the
+  child ran — so `cli-tests: FAIL` named BOTH of its feature sets even when Pass 1, or the
+  fail-closed target derivation above it, died before Pass 2 started, and write-tests claimed the
+  same set `x3` after failing on the first of three `&&`-chained passes. **A failure summary that
+  claims an invocation which never occurred is affirmatively false, and strictly worse than
+  silence** — it is what stops the next person looking. Each body now calls the EXPLICIT recorder
+  `_fm_observe_child` on the line immediately BEFORE each cargo command, from the same hoisted
+  package/feature variables the argv is built from, so a short-circuit records nothing later. The
+  cargo/env INTERCEPTORS stay deliberately NOT `export -f`-ed — exporting an interceptor would make
+  every bash DESCENDANT record, so `tooling-tests` (which runs nested agent-gate self-tests) would
+  attribute a nested run's cargo to itself — while `_fm_observe_child`, which intercepts nothing and
+  fires only where a body calls it by name, IS exported (with the gate's own `_fm_describe_cargo`,
+  so there is no second formatter to drift). It **never renders blank**: `[UNDECLARED]` (cargo
+  expected, nothing observed), `[no-cargo]`, `[via <driver>: feature set NOT observed]`,
+  `[cargo not observable: <why>]`, or a named SKIP / FAILed-before-its-first-cargo /
+  never-reached-its-driver state; a long list abbreviates as `33:a,b,c,+30 more`, never
+  a silent truncation. **A driver we cannot see is NAMED, not guessed** — `python-bindings`,
+  `node-bindings` and the `--lite` scoped-tests PYTHON TIER (whose maturin build runs in a child
+  process) render `via <driver>: feature set NOT observed`, ADDITIVELY beside the rust sets a mixed
+  diff also observes (`[test cqlite-core --features cli-helpers | via maturin: feature set NOT
+  observed]`): "nobody said" and "known to be indirect, therefore unobservable" are different facts
+  and only one of them is a defect.
+  **AND THE CLASS DECIDES WHAT MAY BE CLAIMED — three rules, from one family of findings (roborev
+  job 273).** (1) A component whose cargo runs ONLY IN A CHILD PROCESS is **never class `cargo`**:
+  the interceptors are unexported by design, so `cargo` means "observable in this shell (or
+  self-recorded from a `bash -c` body)". `tooling-tests` was declared `cargo` while its only cargo
+  runs inside ~60 nested test scripts, so a PASS read `[UNDECLARED]` and a FAIL could claim it
+  "FAILed before its first cargo invocation" after a child `cargo build` really ran — hence the
+  fourth class `unobservable:<why>`, which asserts NOTHING in either direction and takes no
+  SKIP/FAIL note. (2) An `indirect:<driver>` component must **RECORD whether its driver was
+  REACHED, from an explicit signal** (a build-verify rc, or a recorder call on the line before the
+  driver runs) — never inferred from the terminal status: `python-bindings` can die in venv/pip
+  before maturin and `node-bindings` in `npm ci` before `npm run build`, and both used to claim an
+  unobserved cargo run. An indirect component with NO record renders `UNDECLARED` **naming the
+  driver** — a visible recording gap, not a claim. (3) The misclassification is now
+  **MECHANICALLY DETECTABLE**, because the census that missed (1) READ THE TABLE instead of
+  exercising it: every `cargo`-class component is RUN under `--only` with a recording shim `cargo`
+  and an `UNDECLARED` annotation is a FAIL, while a component that cannot be exercised without
+  recursion (`tooling-tests` runs the guard) must be declared non-`cargo` — also a FAIL.
+  **Observation beats declaration** — a component
+  declared `no-cargo` that IS observed running cargo renders the observed sets plus
+  `!declared-no-cargo`, so a mis-declaration self-corrects. Guard (hermetic, in
+  `tooling-tests`): `scripts/tests/test_agent_gate_feature_matrix_annotation.sh` — every
+  `COMPONENTS` name must resolve to a declared class (a new component cannot join with a blank
+  matrix), all six emit sites must route through the one renderer, the DECLARED matrix of each
+  `bash -c` component must equal the argv that ACTUALLY EXECUTED under a recording PATH-shim
+  `cargo` (described through the gate's own `_fm_describe_cargo`, never re-derived), and the same
+  differential is re-run under a FAILING shim, where each body must name exactly the one invocation
+  it reached — with the short-circuit proved by measurement (strictly fewer invocations than the
+  passing run) rather than assumed.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
@@ -285,7 +452,15 @@ bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
 test-data/       # Real Cassandra 5.0 SSTables for testing
 tools/           # 7 crates, each with a RECORDED disposition in one of THREE
                  #   categories, pinned by the gate guard
-                 #   scripts/tests/test_tools_crate_disposition.sh (#1716):
+                 #   scripts/tests/test_tools_crate_disposition.sh (#1716).
+                 #   These labels say whether something INVOKES the crate —
+                 #   usually its BINARY — and NOT whether its TESTS execute
+                 #   (#3522). Of the WIRED four only ws0-corpus-gen's tests run
+                 #   in the gate (tooling-tests); cassandra-parity (25+9),
+                 #   sstabledump-validator (17+2) and flight-loadgen (21) have
+                 #   tests that execute NOWHERE, as does MIXED format-validator
+                 #   (8). Per-member record, with the label AND the class:
+                 #   scripts/tests/workspace-test-disposition.txt.
                  #   WIRED   — cassandra-parity, flight-loadgen,
                  #             sstabledump-validator, ws0-corpus-gen.
                  #   UNWIRED — nothing runs them AND nothing depends on them:
@@ -321,10 +496,13 @@ compiled by every workspace build" was false). The `tools/` crates are compiled 
 `-D warnings` no matter their disposition.
 
 **Their unit tests, though, run ONLY when your diff touches their package (#1716).** No CI job and
-no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests never execute —
-but `--lite`'s blast-radius maps a touched path to its package and runs that package's `--lib`
-tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
-made `--lite` run that crate's tests **for the first time**, and one failed —
+no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests execute only
+where something names its package explicitly — `ws0-corpus-gen` under the gate's `tooling-tests`, and
+`cassandra-parity` in the path-filtered, `required`-exempt `cassandra-parity.yml`; for every other
+`tools/` crate they never execute (#3522). But `--lite`'s blast-radius maps a touched path to its
+package and runs that package's `--lib` tests. Consequence, found the hard way on #1716: editing
+only `tools/format-validator/README.md` made `--lite` run that crate's tests **for the first time**,
+and one failed —
 `test_hex_dump_formatting` asserted an unseparated `"48656c6c6f"` against a `hexdump -C`-style
 formatter that emits `48 65 6c 6c 6f`, an expectation that could never hold for any input. **Expect
 latent failures the first time you touch a long-unwired crate**; they are pre-existing, not yours,
@@ -549,7 +727,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `AGENT-GATE *SUMMARY` blocks so neither can be pasted as the other), never the transcript — that goes
   to the `log:` path named in the block. Exit `0` PASS / `1` FAIL / `3` NOTHING-TO-REVIEW / `2` usage
   error; **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and
-  a blocked merge, never "roborev clean". Four rules: **(1)** the NON-SANCTIONED direct forms are
+  a blocked merge, never "roborev clean". **"ROBOREV CLEAN" MEANS NO UNADDRESSED FINDINGS, NOT "THE TOOL
+  PRINTED ZERO" (#3626)** — a LEAD-DEFERRED finding is re-reported by every later round, so the (correct,
+  unwaivable) affirmative-`NONE` rule below blocked such a merge FOREVER; the route past it is a
+  `roborev-defer: findings` authorization reported as `findings: DEFERRED (…)`, never `NONE`, and every
+  OTHER non-PASS verdict still blocks exactly as before. Four rules: **(1)** the NON-SANCTIONED direct forms are
   `--branch` **WITHOUT** an explicit `--repo` (from a worktree it resolves against the ROOT checkout),
   the two-positional commit-range form (its range base is git's EMPTY TREE), and a SINGLE-SHA review (it
   covers ONE COMMIT, certifying a multi-commit branch from its last commit alone). `--repo` is what makes
@@ -827,7 +1009,174 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   configured", then never required it to have *answered*); a `${end:-$start}` default degraded a failed
   `awk` bound to a 1-line scan. Those instances lived in a subsystem since deleted; **the shape is the
   lesson, and it was never theirs** — it was in the wrapper's own terminal verdict scan, which predates
-  them all. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  them all. **AND `findings:` WAS THE SAME SHAPE, ONE KEY OVER (#3564).** `findings:` is not one of the
+  six affirmation keys — its affirmative value is `NONE`, not `PASS` — and it was documented as merely
+  CORROBORATING, which read as "guarded elsewhere" when it was guarded NOWHERE: `PRESENT` is in the
+  closed grammar's NON-FAILING set, so the only thing failing a findings-bearing run was the
+  NEIGHBOURING key `roborev-exit: FINDINGS (exit 1)`. On `--recheck-job` **no reviewer runs**, so
+  `roborev-exit` is legitimately `SKIP` — and the run emitted `findings: PRESENT (3)` beside
+  `RESULT: PASS`, a **false PASS in a merge gate** (measured on #3473 round 3), on the ONE path an
+  authorized waiver must travel, letting a waiver scoped to `prompt-content` ABSENCE excuse findings
+  nobody excused. Now a would-be PASS requires `findings:` to reduce token-exactly to `NONE` **in every
+  mode including recheck**, and that requirement is **NOT waivable**. Fixed in the verdict scan and
+  deliberately NOT in `roborev-exit`: `SKIP` is the TRUE statement about a recheck, and making a key
+  claim a failure it never observed trades one false statement for another. Second half, the part that
+  keeps the break-glass alive: a recheck of a record with no structured `verdict` field used to read
+  `UNKNOWN` (its branch was keyed on the reviewer's exit code, and there is no reviewer), which would
+  have false-FAILed EVERY clean recheck — so a recheck now re-asserts findings from the record's own
+  review text — but ONLY in the direction prose can actually evidence. **PROSE CAN EVIDENCE FINDINGS;
+  IT CANNOT EVIDENCE CLEANLINESS**, so a marker in a findings block yields `PRESENT` while its ABSENCE
+  yields `UNKNOWN`, never `NONE`. `NONE` is reachable only from the record's STRUCTURED `verdict`
+  letter. **Two review rounds each found a review SHAPE the previous recogniser missed** — a HEADERLESS
+  findings review (no `Findings` heading, which `review-completed` deliberately accepts), then a
+  findings BLOCK with no recognised severity marker — and the class provably does not close, because
+  `review-completed` accepts a bare `## Summary` heading as a completed review: a findings review whose
+  findings are prose is then INDISTINGUISHABLE from a clean one, whose real text is
+  `No issues found.\n\nSummary: …` with no `Findings` heading either. That is #3312's lesson applied
+  one directory over: **REMOVE THE CHANNEL, do not pick a rarer delimiter** — a recogniser over
+  author-controlled prose never closes. **And it costs nothing, measured rather than assumed**:
+  `roborev show --json` SYNTHESISES the verdict letter from the `reviews.verdict_bool` column for every
+  observed record (`P` clean / `F` findings; `review_jobs` has no verdict column), so a real clean
+  recheck takes the structured path and the break-glass is intact, and the verdict-less branch is
+  defensive for a payload shape nothing observed emits. **The generalisation to carry elsewhere: DELEGATING A KEY'S FAILURE TO ITS NEIGHBOUR IS A
+  LATENT FALSE PASS** — the coupling is invisible while one event populates both keys and evaporates in
+  the first mode where it does not, so ask of every key *what fails the run if THIS key alone goes bad*.
+  **And a fail-closed argument for a `${VAR:-default}` is only valid for the consumers that existed when
+  it was written**: the `block_marker_count` `:-0` was audited as strict because `NONE` was the STRICT
+  direction for `vacuity-tier1:`, and a new consumer for which `NONE` is PERMISSIVE inverted it silently
+  — no default can fix that (`0` and *unmeasurable* are one value). **The resolution is not a better
+  default or a second signal but a REMOVED CONSUMER**: `NONE` is unreachable from a marker count at all
+  (only the structured verdict yields it), so nothing derives a permissive verdict from that `0` and the
+  original argument holds unchanged. An intermediate version of this fix DID add a separate
+  `block_measured` flag; it went away with the prose reconstruction it guarded, and this sentence
+  described it for one round after it was deleted — caught by the C audit. **A doctrine line naming a
+  mechanism is a claim about code, and it decays exactly like a comment: re-grep the symbol.**
+  **AND THE UNWAIVABLE RULE MADE ONE MERGE UNOBTAINABLE, WHICH IS ITS OWN DEFECT CLASS (#3626).** #3586's
+  requirement is right, and it interacted with a fact nobody designed for: **roborev re-reports a
+  LEAD-DEFERRED finding on every later round.** So once a lead defers a finding — as a nit, as a batched
+  follow-up, or by explicit ruling — `findings: PRESENT (n)` persists, `RESULT` stays `FAIL`, and *"any
+  non-PASS terminal RESULT is a blocked merge"* blocks that merge **forever**: neither escape hatch applies
+  (the absence waiver excuses `prompt-content` ABSENCE only, by design, and a correct `--recheck-job` of a
+  findings-bearing job re-reports the same `FAIL`). Measured on PR #3572 job 262: two findings, **ZERO
+  new** — both already filed (#3602, #3613) and both already lead-deferred — 5.9M input / 5.7M cached
+  tokens, every deterministic key PASS, and the merge required an out-of-band lead comment. The lane the
+  fix protects is the one that behaved CORRECTLY: it refused to arm `--auto` over a `FAIL`, refused to fix
+  the deferrals to manufacture a green, refused a waiver that does not apply, and asked the owner instead.
+  **A rule that punishes the correct behaviour will not survive contact.** So *"roborev clean"* is
+  redefined as **NO UNADDRESSED FINDINGS**, and the distinction is made MECHANICAL rather than a matter of
+  lead memory: a **second marker**, `roborev-defer: findings issues=<N>[,<N>...] count=<n> base=<40-hex>
+  head=<40-hex> job=<id> reason=<why>`, travels the **absence waiver's channel** (top-level PR comment,
+  column-zero, **sole nonblank content**, hard-coded `ROBOREV_WAIVER_AUTHORS` allowlist, structured
+  `gh --json` author parsing, applied via `--recheck-job`, placeholder reasons refused, no part of the
+  marker in any diagnostic) and inherits those rules **BY CALL** — the same scanner, kind selected
+  explicitly — never by copy, because a second implementation of a channel rule is a second place for it
+  to diverge and a divergence there is an authorization bypass. **There is deliberately NO flag, NO file
+  in the worktree and NO env var**, each of which would hand the constrained party the power to satisfy
+  its own constraint (#3312's corollary). **The match is AFFIRMATIVE, which is what makes this a match
+  and not a mute button**: `count=` must EQUAL the observed findings count and `issues=` must be
+  non-empty, so a PRE-AUTHORIZATION written before the findings were read fails on a mismatch, and **any
+  new finding at the same head raises the observed count and fails** — that is how the UNDEFERRED set is
+  computed without a per-finding identity roborev's prose does not provide, and **no such identity is
+  reconstructed from that prose** (the class #3564 closed by REMOVING prose reconstruction stays closed).
+  `issues=` records that the finding is **TRACKED**, and THE ISSUE-STATE LEG is what enforces it:
+  each number must be an **OPEN** GitHub issue, asked **FOUR-VALUED** — only a payload affirmatively
+  naming that number **and an OPEN state** is `present` and may grant; an issue GitHub answers does not
+  exist is `ISSUE-ABSENT`; an issue GitHub answers is CLOSED is `ISSUE-CLOSED`; an issue whose existence
+  could NOT BE ASKED (no `gh`, no auth, a network/API failure, an unparseable payload, or any diagnostic
+  that does not say the issue is missing) is `ISSUE-UNVERIFIABLE`. They are **textually distinct**
+  because they are different operator actions ("that issue number is wrong" / "that issue is closed" /
+  "this box cannot reach GitHub"), and **`gh issue view` EXITS 1 FOR BOTH THE FIRST AND THE LAST**
+  (measured, gh 2.98.0) — so an exit-code-only test is the two-valued predicate that always picks
+  the permissive answer and would grant over issues nobody confirmed exist. Unrecognised ⇒ could-not-ask,
+  and a could-not-ask is NEVER read as verified.
+  **AND "RETRIEVABLE" WAS NOT ENOUGH, WHICH IS WHY THE CHECK IS STRONGER THAN THE CONDITION THAT ASKED
+  FOR IT (#3626 round 3).** `gh issue view` returns the number and **exits 0 for a CLOSED issue**, so a
+  number-only test made "the finding is tracked" satisfiable by an issue closed as a duplicate three
+  weeks ago: `present` ⇒ `GRANTED` ⇒ `RESULT: PASS`, the finding permanently untracked while the block
+  asserted it was filed. The condition said *retrievable* and closed-is-retrievable satisfies the letter
+  — but three separate statements of this leg claim it enforces **not-dropped**, so the claim was made
+  TRUE rather than weakened to match a weaker implementation. **The generalisable ruling: when the
+  implementation satisfies the LETTER of a condition and contradicts the PROPERTY every statement of it
+  claims, strengthen the implementation — do not narrow three claims.** A false refusal here is
+  recoverable (reopen it, or file a fresh tracking issue) and is the fail-closed direction.
+  **The disposition backstop COUNTS VERIFICATIONS PERFORMED; it does not test the string.** It was
+  `[ -z "$ISSUES" ]` — a non-emptiness test standing in for a verification test — and `ISSUES=","`
+  passes it, splits into ZERO words, runs the loop body never, and returns with the state still
+  `granted`: a `DEFERRED` ⇒ `PASS` with not one `gh issue view` executed. Unreachable only because the
+  `issues=` PATTERN forbade that value, i.e. **exactly the upstream dependency a backstop must not
+  have**. Now the count of verifications must EQUAL the count of declared comma-separated fields.
+  **A PR-BODY LINK WAS ALSO REQUIRED, AND THAT LEG IS DELETED — DO NOT REINSTATE IT (#3626, lead
+  ruling).** An earlier revision demanded each number also appear as a local, visible `#N` in the PR
+  BODY (`PR-UNLINKED` otherwise), with recognisers for `owner/repo#N`, `#Nsuffix`, fences, code spans and
+  HTML comments. **The reason it is gone is NOT the bypasses: a PR body is EDITABLE AT ANY TIME BY ANYONE
+  WITH WRITE ACCESS, WITH NO PER-EDIT ATTRIBUTION, while a top-level comment is PERMANENT AND
+  ATTRIBUTABLE.** So it was the WEAKER artifact and would stay weaker **even if Markdown parsed
+  trivially** — an authorization the constrained party can silently rewrite after it is granted evidences
+  nothing; the recogniser problem was a SYMPTOM. The requirement's own wording invited it, too: "name
+  where the finding went" invited a PROSE SCAN when the property wanted is that the finding is TRACKED.
+  The census, kept because it is the evidence the class does not close (Markdown-handling references in
+  that one predicate went **0 → 11** over two rounds): round 1 closed five shapes (cross-repository,
+  `#Nsuffix`, fenced block, HTML comment, single-backtick span); round 2 found **two more** — a
+  multi-backtick span and an explicit `[#N](url)` link — with GFM autolinks, reference-style links, raw
+  HTML, entity refs and nested emphasis unhandled by any generation and the 4-space indent already a
+  declared residual. #3312 (*remove the shared channel, do not pick a rarer delimiter*) and #3229's owner
+  ruling (*a guard with known documented false-PASSes is worse than no guard*) both apply, and
+  **subtraction cannot introduce a false PASS**: with nothing predicted about the body, nothing is
+  excused by it. Any future strengthening must come from an **immutable or attributed** artifact (a
+  structured GitHub relation, or the authorization comment itself), never from parsing the mutable body
+  of the PR under review. It reports
+  a **distinct token** — `findings: DEFERRED (<n>, issues=#…, authorized @<login>, job <id>)`, **NEVER
+  `NONE`** (which stays reachable only from the record's structured verdict letter, so nobody grepping
+  `findings: NONE` reads a deferred run as clean) — beside a `deferral:` key that speaks even when
+  nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAUTHORIZED`/`COUNT-MISMATCH`/`ISSUE-ABSENT`/
+  `ISSUE-CLOSED`/`ISSUE-UNVERIFIABLE`/`UNAVAILABLE`, each leaving the FAIL). A marker **attempt** is the
+  stem plus whitespace **or end-of-line**, so a marker-only comment that is exactly the stem is
+  `MALFORMED`, never a fail-quiet `NONE`. Three field rules, both kinds, one parser: `base=`/`head=` are
+  **exactly 40 hex** (an abbreviated sha is `MALFORMED`, never `STALE` — it names THIS review in a
+  spelling the form forbids, and an authorizer sent to re-check *which review* finds nothing wrong); a
+  recorded `reason` keeps its internal whitespace **VERBATIM** (only the BLOCK boundary renders a
+  control character as a visible escape, because the property required is one line per value, not
+  collapsed whitespace); and a `reason` may **not contain either marker stem** — refused, not escaped,
+  since **the structural assert covers the CODE while a RUNTIME value can inject what no source scan
+  sees, so an invariant over OUTPUT needs a check on the OUTPUT PATH**. **AND THAT RULE IS OVER EVERY
+  EMITTED VALUE, NOT OVER THE `reason` — fixing the field and not the class cost a review round
+  (roborev job 230).** The reason is the field an authorizer CHOOSES, so refusing it removes that class;
+  a keyword also arrives through fields nobody chooses — an unauthorized commenter's **GitHub login**
+  (which `UNAUTHORIZED` must report to say who was refused), **`gh issue view`'s stdout/stderr** (which
+  reach `deferral:` as an `ISSUE-UNVERIFIABLE` cause), the allowlist, and whatever a future key
+  interpolates. So each process neutralises the keywords at its **ONE emit boundary** (`safe_value` in
+  the scanner; `roborev_safe_line` in the wrapper, already the gate for every block value and every
+  DETAILS line), never per interpolation site — a per-site escape is a list to keep complete. There the
+  value is **REDACTED, not refused**: it is an identity or a diagnostic the run must still report.
+  Only where the keyword is **not continued by another letter** — a longer word is a different word,
+  exactly as `roborev-defer: findingsfoo` is — because the scanner's own FILE NAME embeds a keyword and
+  is printed by the fail-closed `waiver: UNAVAILABLE (… tool: <path>)` cause an operator has to read.
+  It is **display-only, which is the whole safety argument**: every authorization decision is made on
+  the RAW value before any renderer runs, so two boundaries can only redact differently, never grant —
+  acceptable where two marker PARSERS would not be, since a parser decides and a renderer does not.
+  Deliberately **not** a security layer: a login admits letters, digits and hyphens and NOT colons or
+  spaces, so it cannot hold a full stem, and an emitted line begins `deferral: UNAUTHORIZED (`, which
+  the sole-content rule refuses. **`findings: UNKNOWN` and `SKIP` are NOT
+  deferrable in any mode**: those states were never ESTABLISHED, and a pass may not rest on a state that
+  could not be read. **The two authorizations stay SEPARATELY SCOPED and neither falls back to the
+  other** — an absence waiver confers no authority over `findings:`, a findings deferral none over
+  `prompt-content:` — because collapsing them would let a delivery-artifact waiver excuse a real defect;
+  a run may legitimately carry both, each under its own key. `DEFERRED` is a value of the **closed**
+  verdict grammar, non-failing **only** on the single coupled granted state that the grammar scan and the
+  findings gate both read — one state, not two, so they cannot drift into two opinions about whether one
+  authorization was granted. **AND THAT ADMISSION IS CONFINED TO ONE KEY, `findings:`, BY CONSTRUCTION**
+  (roborev job 225): the scan carries each key's NAME beside its value and admits the token for
+  `findings` alone, and the deterministic-key affirmation backstop carries **no** `DEFERRED` arm and
+  reads the state not at all. The confinement was first left resting on an ABSENCE — no other key
+  happened to emit the token — which is #3564's lesson verbatim, so ask of every key *what fails the run
+  if THIS key alone goes bad*. The contrast with the absence waiver is the reason: **a waiver authorizes a
+  PROPERTY** (an absence) that only one key can ever report, so its provenance IS the whole test and it is
+  correctly not key-scoped; **a deferral authorizes a NAMED SET OF FINDINGS** and says nothing about
+  whether the reviewer's diff arrived or the reviewed range matched, so an unconfined admission would let
+  ONE authorization excuse a check NOBODY authorized. Relatedly, **no emitted diagnostic reproduces any
+  part of either marker — not even its prefix**: the MALFORMED detail used to quote the whole required
+  form and is interpolated into the summary key, so the block printed a fillable authorization beside a
+  live base/head/job while a comment beside the interpolation asserted it never did. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
   for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
   unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
   signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict
@@ -909,14 +1258,67 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   stops, emits a `NEEDS-SPAWN {role: spec-auditor, …}` packet, and the lead spawns `spec-auditor`
   then re-invokes with the verdict; a src-design fix respawns `sstable-developer` the same way).
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha>` (#2456) — refusing to merge unless the PR
-  head still equals the certified SHA — and re-reads comments for a fresh `HOLD:` order. With `--auto`
-  armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
+  (#2456/#3465) — refusing to merge unless the PR head still equals the certified SHA **AND** a gate
+  of record exists for it — and re-reads comments for a fresh `HOLD:` order. **The third argument is
+  REQUIRED, and that is the #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
+  certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
+  22 `--lite` PASSes and not one full `scripts/agent-gate.sh` run, because nothing in the merge path
+  ever asked for the block). #3616 = **a real gate, someone else's** — a closer located its run dir by
+  RECENCY (`ls -t /tmp/agent-gate.*`), read a PEER LANE's dir, saw 33 of 37 components PASS and was
+  about to merge #3616 on PR #3580's verdict; the count, the dir and the timestamps were all real, and
+  only the `run-id:` line exposed it, read by a human. With 14000-27000 stale run dirs per box and up
+  to 4 concurrent gates, recency picks a peer ROUTINELY. **That second class is what the
+  `commit:`+`tree-start:` binding refuses**: a peer's summary carries the OTHER PR's branch head, so
+  requiring both abbreviations to match the certified sha converts "a human might notice the `run-id:`
+  line" into a mechanical refusal at the merge point — the sha compare is the guard, not bookkeeping.
+  The script now requires the summary file to hold exactly ONE
+  `==== AGENT-GATE SUMMARY ====` block (whole-line-anchored; `--lite`/`--delta` headers are distinct
+  and refused by name, as is a second or unterminated block) with `RESULT: PASS` and
+  `tree-integrity: PASS` compared **token-exactly** (`INCOMPLETE` is the launch sentinel, not a
+  verdict — #3041; a mutated-mid-run tree is not a certification — #2926), and with BOTH `commit:`
+  (7 hex) and `tree-start:` (12 hex) prefix-matching the certified sha **at each value's own width**
+  — a non-hex placeholder REFUSES rather than being skipped. It cannot verify `run-id:` (it did not
+  launch the gate — #2874's reader contract needs the launcher) and it cannot prove the summary came
+  from a real run rather than a hand-written file: a **hostile invoker is out of the threat model**;
+  what this closes is **accident and drift** — a diligent worker with no step in its path telling it
+  the gate of record was never run. `dirty:` is REPORTED in the success line, not enforced (failing on it
+  is proposed separately in #3648). **The FOURTH argument is optional and is the ONLY way a `--delta`
+  re-cert can certify a merge** — because #1892 *mandates* `--delta`, "never a repeat full gate", for a
+  test/docs-only diff on top of a full PASS at anchor `X`, and mandates that the PR record BOTH blocks.
+  A 3-arg-only guard therefore red on correct, doctrine-mandated input, which is the guard agents learn
+  to waive. So: **Case A (3 args)** the full block's `commit:`/`tree-start:` must cover the certified
+  sha; **Case B (4 args)** the third argument is the ANCHOR's full PASS (its sha need NOT be the
+  certified sha) and the fourth must be one `==== AGENT-GATE DELTA SUMMARY ====` block with
+  `MODE: delta` (asserted affirmatively — the inverse of Case A's belt), `RESULT: PASS`,
+  `tree-integrity: PASS`, a `delta-anchor:` naming exactly that anchor (an `(UNRESOLVED)` anchor
+  refuses), and its OWN `commit:`/`tree-start:` at the certified sha. Either way a full-gate PASS must
+  EXIST and the merged tree is covered — directly, or by an anchored delta re-cert on top of it. A
+  block carrying `nested-under:` (#2874) is refused outright: a nested sub-gate runs at the SAME tree,
+  so the sha binding provably cannot see it.
+  **What a `PREMERGE: OK` does NOT prove (#3650) — it says so itself, on a `PREMERGE: SCOPE` line.**
+  It proves the diff is unchanged since certification and that a full gate PASSed on **that exact
+  tree**. It does NOT prove the change was certified against the `main` it will join: a squash-merge
+  composes the diff with main's CURRENT tip, so for any PR whose base is behind main **the certified
+  tree and the merged tree are different objects**. Measured on #3358/PR #3362: base `2bde26a7c` with
+  main 10 commits ahead, whose head gate FAILed `core-tests` only because a known flake's fix
+  (`5e08db201`, #3514) was on main and absent from that base — the benign direction; the malign one is
+  a PASS at a stale head hiding an interaction with something that landed in between. A gate on the
+  MERGE RESULT is #3650 and is deliberately not implemented here (nor is a staleness bound or a "your
+  base is N commits behind" advisory). Report the verdict as "gate of record verified at `<sha>`",
+  never "certified against main". With
+  `--auto` armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
   are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration
   target) → re-review` (#2087). **Nits** never trigger
   a re-verify round: batch all of a PR's nits into ONE linked follow-up issue at merge time. When in
   doubt, blocker. Every pre-roborev self-check class below is BLOCKER by definition.
+  **A DEFERRED finding still has to get PAST roborev, and since #3626 that is mechanical rather than a
+  matter of lead memory**: roborev re-reports a deferred finding on every later round, so batching nits
+  into a follow-up issue does not by itself make `findings:` read `NONE`. The lead records the deferral
+  with a `roborev-defer: findings` PR comment naming the filed issue numbers and the observed count, and
+  applies it with `--recheck-job`; the run then reports `findings: DEFERRED (…)` (never `NONE`) and may
+  reach `PASS`. See the roborev-invocation bullet above for the marker and its constraints.
 - **Post-gate polish (#1892)**: after a full PASS at `X`, a test/docs-only diff `X..Y` re-certifies
   with `--delta` (fail-closed; see gate table above), never a repeat full gate. The nightly
   `gate.yml` deep-check re-runs the FULL gate on `main` as the standing backstop.
@@ -941,6 +1343,10 @@ loop, not a review round. The rest stay hand-checked (no low-false-positive stat
 - **Wall-clock races in tests** — capture the time window to cover ALL sampled operations.
   MECHANIZED (`roborev-lints`/`tooling-tests`, #2642): a wall-clock threshold assert in the
   correctness test path FAILs; mark a deliberate `#[ignore]`d perf assert `perf-gate-allow`.
+- **Cargo-output parses keyed on literal status text** — route through `_ansi_stripped_log`,
+  read by redirection not a pipe (#3400). NOT mechanized: the lint written for this was
+  descoped for an increasing false-PASS count (see the gate section above); mechanization is
+  deferred to #3499, so this one is hand-checked.
 - **No-heuristics violations** — never infer type/behavior from byte patterns.
 - **Gitignored reference binaries** — `git add -f` tiny parity references; verify against a fresh
   `git worktree add --detach HEAD`, not the dirty tree.
@@ -1150,7 +1556,26 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `docs/reports/delivery-telemetry.jsonl` (schema `docs/reports/delivery-telemetry.schema.json`)
   via `scripts/delivery-telemetry.py record` — a reopened issue that ships more than once
   legitimately gets one record per shipped PR, so retro aggregation by issue treats such
-  multi-cycle issues as multiple deliveries, not one (issue #2314). Records hold authoritative
+  multi-cycle issues as multiple deliveries, not one (issue #2314). An issue that ships one or more
+  SLICES while **deliberately staying OPEN** gets one record per shipped PR too, stamped with
+  `--slice` and carrying `closed_at: null` (cycle time then bounded by the PR's `mergedAt`), which
+  `retro` reports as its own class rather than as completed issues (#3550). `--slice` asserts the issue
+  was open **when the PR merged**, which current state cannot decide (GitHub auto-closes AFTER the
+  merge), so since #3559 it is decided by replaying the issue's own **timeline** to the PR's
+  `mergedAt` — the only record that can place a close/reopen relative to the merge. The rule is a
+  **conjunction**: slice ⟺ the issue was OPEN at `mergedAt` **AND** this PR closes NOTHING. Both
+  halves are permanent: open-at-`mergedAt` alone never becomes sufficient, because the auto-close is
+  recorded *after* the merge, so an ordinary completed delivery whose PR declares `Closes #N` was
+  **also** literally open at `mergedAt` and only `closingIssuesReferences` tells the two apart (a
+  slice PR closes NOTHING). So `--slice` is now ACCEPTED for an issue that has since been closed or
+  reopened — the three owed #3393 records (#3407/#3429/#3467) were what this unblocked — and REFUSED
+  when the LAST `closed`/`reopened` event STRICTLY BEFORE `mergedAt` is a `closed` (the last one decides — a close then reopen before the merge is ACCEPTED; that delivery COMPLETED the
+  issue; a later reopen does not change it) or when the PR declares the close. **`--slice` is an
+  operator ASSERTION and the tool refuses it wherever it can be DISPROVED**; where it cannot be, the
+  assertion stands — a completed delivery whose PR omits `Closes #N` and whose issue is closed by
+  hand later is observationally identical to a genuine slice completed later by another PR, and the
+  difference is intent (doctrine bounds it: `flow-implement` mandates `Closes #<N>` in every PR body).
+  Closing an issue to satisfy the tool, or hand-appending past the validator, are both FORBIDDEN. Records hold authoritative
   data only (a counter not observed is an error, never a fabricated 0; a delivery with no full gate
   of record is `gate: not-run` + `gate_runs: 0`, coupled both ways and reported by `retro` as its own
   ungated class — #3448). On a cadence the manager

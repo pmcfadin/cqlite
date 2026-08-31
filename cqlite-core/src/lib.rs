@@ -11,6 +11,7 @@
 #![deny(clippy::large_enum_variant)]
 
 pub mod config;
+pub mod config_removed_keys;
 pub mod cql;
 pub mod error;
 // FFI error contract moved to `cqlite_ffi_common::error_contract` (#1452; no re-export, see CHANGELOG).
@@ -199,7 +200,8 @@ impl Database {
     /// Returns an error if:
     /// - The path cannot be created or accessed
     /// - Database files are corrupted
-    /// - Configuration is invalid
+    /// - Configuration is invalid — currently the `storage.direct_io_memory_fraction`
+    ///   range only, not every rule `Config::validate` states (residual: #3525)
     ///
     /// # Examples
     ///
@@ -214,6 +216,22 @@ impl Database {
     /// # });
     /// ```
     pub async fn open(path: &Path, config: Config) -> Result<Self> {
+        // Judge the ONE rule this issue is about — the
+        // `direct_io_memory_fraction` range — BEFORE building anything from the
+        // config (#1696 AC2). Out of range it used to be silently CLAMPED by the
+        // reader, so a value set through the documented database-open API was not
+        // the value that ran.
+        //
+        // This is deliberately NOT `config.validate()`. Calling the full
+        // validator here was a scope overreach (roborev r3 F3): it also enforces
+        // the cache-budget rule, which the Node binding's documented and tested
+        // `memoryLimit: 1` contract violates (a 1-byte memory limit leaves the
+        // default 256 MiB block cache in place), so full validation broke a
+        // public contract this issue never proposed to change. The residual —
+        // that this method documents "Configuration is invalid" while enforcing
+        // only the fraction — is tracked in #3525.
+        config.storage.validated_direct_io_memory_fraction()?;
+
         // Initialize platform abstraction layer
         let platform = Arc::new(Platform::new(&config).await?);
 
@@ -349,6 +367,13 @@ impl Database {
         config: Config,
         schema_registry: Option<Arc<tokio::sync::RwLock<schema::SchemaRegistry>>>,
     ) -> Result<Self> {
+        // Same contract as `Database::open` (#1696 roborev F2/r3 F3): the
+        // `direct_io_memory_fraction` range — and only it — is judged before
+        // anything is built from the config. Not the full `Config::validate`:
+        // see the note on `open` for why widening this boundary's contract is a
+        // separate product decision (#3525).
+        config.storage.validated_direct_io_memory_fraction()?;
+
         // Initialize platform abstraction layer
         let platform = Arc::new(Platform::new(&config).await?);
 
@@ -739,61 +764,5 @@ impl PreparedStatement {
 pub use query::result::{QueryResult, QueryRow};
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[tokio::test]
-    async fn test_database_open_close() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = Config::test_config();
-
-        let db = Database::open(temp_dir.path(), config).await.unwrap();
-        db.close().await.unwrap();
-    }
-
-    /// Documents that open_with_discovered_sstables_and_registry is crate-private.
-    /// This test exists to document the API contract - the function should NOT be
-    /// callable from integration tests or external crates.
-    #[cfg(feature = "state_machine")]
-    #[test]
-    fn test_open_with_discovered_sstables_and_registry_is_crate_private() {
-        // This test compiling proves the function exists and is accessible within the crate
-        // If we accidentally made it pub instead of pub(crate), integration tests could access it
-        // The function signature itself enforces this via pub(crate) keyword
-
-        // Note: We don't actually call the function here since it requires async setup
-        // The mere existence of this test documents the API boundary
-        assert!(
-            true,
-            "open_with_discovered_sstables_and_registry is correctly marked pub(crate)"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "state_machine")]
-    async fn test_database_open_with_discovered_sstables() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = Config::test_config();
-
-        // Create an empty list of discovered table directories
-        let discovered_dirs = Vec::new();
-
-        let db = Database::open_with_discovered_sstables(temp_dir.path(), discovered_dirs, config)
-            .await
-            .unwrap();
-
-        // Verify database was created successfully
-        let stats = db.stats().await.unwrap();
-        assert_eq!(stats.storage_stats.sstables.sstable_count, 0);
-
-        db.close().await.unwrap();
-    }
-
-    // NOTE: `test_database_basic_operations` (CREATE TABLE → INSERT → SELECT) was
-    // removed in Issue #1880. It asserted the row-count of data inserted via the
-    // write path, which was deleted in Issue #175 (`execute` on an INSERT now
-    // returns `UnsupportedFormat`), so the test could only ever panic under
-    // `--all-features`. Read-path SELECT coverage lives in the real-SSTable
-    // integration/parity tests; open/close lifecycle is covered above.
-}
+#[path = "lib_tests.rs"]
+mod tests;

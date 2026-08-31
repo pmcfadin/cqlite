@@ -38,6 +38,40 @@ function evictIfNeeded(cache) {
 // =============================================================================
 
 /**
+ * The canonical shape of a Cassandra table directory: `<table>-<32 hex uuid>`.
+ *
+ * Hoisted here (issue #3493) because the two golden lookups below now apply it.
+ * They previously selected a directory with a bare `startsWith(`${table}-`)`,
+ * which accepts committed siblings this regex rejects — `<table>-wip`,
+ * `<table>-extra-<uuid>` — so Jest could select a directory that
+ * `check-dataset-manifest.sh` (which requires the UUID shape) never validated,
+ * and the manifest would report the corpus complete while Jest read a broken
+ * golden out of the sibling. Consumer and validator now share ONE rule.
+ *
+ * Measured across both corpus roots when this was tightened: the only non-UUID
+ * table directory anywhere is `system/_paxos_repair_state`, which no lookup can
+ * select (it has no `<table>-` prefix), so this narrows nothing that resolves today.
+ */
+const TABLE_DIR_RE = /^(.+)-[0-9a-f]{32}$/;
+
+/**
+ * True if `entryName` is the canonical table directory FOR EXACTLY `table`.
+ *
+ * Equality on the captured table name, not a prefix test: `startsWith` treats
+ * `orders-extra-<uuid>` as a directory of table `orders`, while TABLE_DIR_RE
+ * parses its table name as `orders-extra`. This mirrors the manifest's
+ * `${base#"${table}-"}` + 32-hex-suffix test exactly.
+ *
+ * @param {string} entryName - Directory basename
+ * @param {string} table - Logical table name
+ * @returns {boolean}
+ */
+function isTableDirFor(entryName, table) {
+  const m = TABLE_DIR_RE.exec(entryName);
+  return m !== null && m[1] === table;
+}
+
+/**
  * Find the JSONL reference file for a given keyspace and table.
  * Tables have hash-suffixed directories: {table}-{hash}/nb-1-big-Data.db.jsonl
  *
@@ -63,7 +97,7 @@ function findJsonlFile(keyspace, table) {
   for (const entry of entries) {
     if (
       entry.isDirectory() &&
-      entry.name.startsWith(`${table}-`) &&
+      isTableDirFor(entry.name, table) &&
       isCommittedTableDir(keyspace, entry.name)
     ) {
       const jsonlFile = path.join(keyspaceDir, entry.name, 'nb-1-big-Data.db.jsonl');
@@ -100,7 +134,7 @@ function findOaJsonlFile(keyspace, table) {
   for (const entry of entries) {
     if (
       entry.isDirectory() &&
-      entry.name.startsWith(`${table}-`) &&
+      isTableDirFor(entry.name, table) &&
       isCommittedTableDir(keyspace, entry.name)
     ) {
       const tableDir = path.join(keyspaceDir, entry.name);
@@ -576,14 +610,35 @@ function valuesEqual(actual, expected) {
     return actual.equals(Buffer.from(expected.slice(2), 'hex'));
   }
 
-  // BigInt comparison
+  // BigInt comparison (issue #3505).
+  //
+  // These arms are already EXACT and deliberately stay that way: unlike Python's
+  // `values_equal`, which coerced an int/float pair through `float()` and so
+  // rounded the exact side down to the lossy side (the #3505 mask), Node never
+  // coerces a bigint to a double here.  Do NOT "align" this with Python by
+  // adding a tolerance -- the alignment goes the other way.
+  //
+  // The hardening #3505 DID need: `BigInt(x)` THROWS `RangeError` for a
+  // non-integer / NaN / Infinity `number`, which crashed the harness instead of
+  // reporting a mismatch.  A number that is not an integer can never equal a
+  // bigint, so that case is `false`.
+  //
+  // The Node CEILING here is the ORACLE, not the binding, and it is documented
+  // rather than coerced away: `JSON.parse` reads a golden's
+  // `18446744073709551615` into an f64 (`18446744073709552000`) and the digits
+  // are gone before `valuesEqual` is ever called.  JS has no lossless integer
+  // JSON parse without a custom reviver, so a Node-side parity comparison above
+  // 2**53 is limited by the harness's own JSON reader -- not by this function
+  // and not by the binding, which returns an exact `BigInt`.
   if (typeof actual === 'bigint' && typeof expected === 'bigint') {
     return actual === expected;
   }
   if (typeof actual === 'bigint' && typeof expected === 'number') {
+    if (!Number.isInteger(expected)) return false;
     return actual === BigInt(expected);
   }
   if (typeof actual === 'number' && typeof expected === 'bigint') {
+    if (!Number.isInteger(actual)) return false;
     return BigInt(actual) === expected;
   }
 
@@ -591,6 +646,21 @@ function valuesEqual(actual, expected) {
   if (typeof actual === 'number' && typeof expected === 'number') {
     if (actual === expected) return true;
     if (Number.isNaN(actual) && Number.isNaN(expected)) return true;
+    // The tolerance formula below DEGENERATES on an infinite operand (issue
+    // #3505): `Math.abs(actual - expected)` is `Infinity` and so is
+    // `relTol * Math.max(|actual|, |expected|)`, leaving
+    // `Infinity <= Infinity` -- which is `true`.  So every finite value
+    // compared equal to infinity, and `+Infinity` compared equal to
+    // `-Infinity`.  CQL `float`/`double` columns can legitimately hold
+    // `Infinity`, so that masked a real mismatch.
+    //
+    // This MUST sit after the `actual === expected` branch above: two genuine
+    // equal infinities ARE equal in IEEE-754 and that case is already answered
+    // there.  By here the operands differ, and a differing pair with an
+    // infinite member can never be within any finite tolerance.  (A NaN
+    // operand is also non-finite; NaN-vs-NaN is answered above and
+    // NaN-vs-anything-else correctly falls to `false` either way.)
+    if (!Number.isFinite(actual) || !Number.isFinite(expected)) return false;
 
     const relTol = 1e-6;
     const absTol = 1e-9;
@@ -730,7 +800,8 @@ function formatValue(value) {
 // bindings/python/tests/corpus.py.
 // =============================================================================
 
-const TABLE_DIR_RE = /^(.+)-[0-9a-f]{32}$/;
+// (declaration hoisted above findJsonlFile — see the top-of-file definition)
+
 
 /**
  * All `system*` keyspaces (system, system_auth, system_schema,
@@ -1017,6 +1088,7 @@ function getKnownIssue(keyspace, table) {
 
 module.exports = {
   // JSONL utilities
+  isTableDirFor,
   findJsonlFile,
   findOaJsonlFile,
   countRowsInJsonl,

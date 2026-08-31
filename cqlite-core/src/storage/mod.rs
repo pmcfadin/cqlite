@@ -155,6 +155,11 @@ impl StorageEngine {
             Arc<RwLock<crate::schema::SchemaRegistry>>,
         >,
     ) -> Result<Self> {
+        // Reject a bad `direct_io_memory_fraction` BEFORE any filesystem work
+        // (#1696 roborev r3 F2): discovery logs-and-skips a per-file reader error,
+        // so otherwise this PUBLIC boundary reports SUCCESS with ZERO SSTables.
+        config.storage.validated_direct_io_memory_fraction()?;
+
         // Create storage directory if it doesn't exist
         crate::observability::record_result("reader", platform.fs().create_dir_all(path).await)?;
 
@@ -264,6 +269,9 @@ impl StorageEngine {
             Arc<RwLock<crate::schema::SchemaRegistry>>,
         >,
     ) -> Result<Self> {
+        // Same fraction check, same reason, as `open` above (#1696 roborev r3 F2).
+        config.storage.validated_direct_io_memory_fraction()?;
+
         // Create storage directory if it doesn't exist
         crate::observability::record_result("reader", platform.fs().create_dir_all(path).await)?;
 

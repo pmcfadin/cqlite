@@ -68,7 +68,7 @@
 
 pub mod tables;
 
-pub use tables::{DECIMAL_VECTORS, INET_VECTORS, VARINT_VECTORS};
+pub use tables::{DECIMAL_VECTORS, INET_VECTORS, JSON_NUMBER_VECTORS, VARINT_VECTORS};
 
 /// Digit runs longer than this collapse to `{<length>}` in a `digest`.
 ///
@@ -361,6 +361,53 @@ pub struct VarintVector {
     /// The cell's big-endian two's-complement payload.
     pub bytes: Input,
     /// The single expected outcome — the integer's canonical decimal string.
+    pub expect: Expect,
+}
+
+/// The host-language SHAPE a JSON number must arrive as.
+///
+/// Deliberately coarse — `Integer` / `Float` — because the two bindings' exact
+/// types differ by design (issue #3505 AC5): Python renders both integer classes
+/// as `int`, while Node uses `number` inside `i32` range and `BigInt` beyond it.
+/// Each suite maps this to its own rule, and the shared table only commits the
+/// property both must satisfy: an integer literal must NOT arrive as a float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonHostKind {
+    /// A JSON INTEGER literal. Must arrive as an exact integer, never a float:
+    /// this is the property #3505 was violating.
+    Integer,
+    /// A JSON FLOAT literal. Arrives as the host's double.
+    Float,
+}
+
+impl JsonHostKind {
+    /// The stable wire name both bindings' reports carry (`"integer"`/`"float"`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            JsonHostKind::Integer => "integer",
+            JsonHostKind::Float => "float",
+        }
+    }
+}
+
+/// One JSON-number cross-binding entry (issue #3505).
+///
+/// Unlike the other three tables the input is TEXT, not bytes: the whole point
+/// of #3505 is that the JSON **lexical form** decides the class (an integer
+/// literal stays exact; a float literal is an `f64` by construction), so a
+/// vector that started from bytes could not express the distinction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsonNumberVector {
+    /// Stable identifier, reported by both suites on failure.
+    pub name: &'static str,
+    /// The JSON number literal, verbatim, as it would appear in a `Value::Json`
+    /// payload.
+    pub json_text: &'static str,
+    /// The host shape the value must arrive as.
+    pub host_kind: JsonHostKind,
+    /// The single expected outcome — the value's canonical decimal string as
+    /// BOTH hosts render it (see the table's docs for why the table is
+    /// restricted to literals the two hosts stringify identically).
     pub expect: Expect,
 }
 

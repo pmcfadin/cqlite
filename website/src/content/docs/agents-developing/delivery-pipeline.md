@@ -124,11 +124,54 @@ ever regress (contexts emptied, `enforce_admins` disabled), this doctrine govern
 The `flow-closer` certifies a **specific SHA** — the tree the full gate of record and the final
 roborev pass actually ran on. Three mechanical rules keep the merge honest:
 
-- **Pre-merge SHA assertion (#2456/#2668, scripted hard precondition).** Immediately before
-  arming `gh pr merge --auto`, the closer does `git push`, then runs
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha>` — which asserts the PR is OPEN and its
-  `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a loud refusal)
-  on a moved head, a closed/merged PR, or a gh failure. The closer **refuses to merge on any
+- **Pre-merge SHA + gate-of-record assertion (#2456/#2668/#3465, scripted hard precondition).**
+  Immediately before arming `gh pr merge --auto`, the closer does `git push`, then runs
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]` —
+  which asserts the PR is
+  OPEN and its `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a
+  loud refusal) on a moved head, a closed/merged PR, or a gh failure.
+  **The third argument is REQUIRED (#3465), and it closes TWO distinct escapes with one mechanism.**
+  Verifying the head against a *claimed* certified sha never verified that a certified sha EXISTS.
+  **#3408 = no gate at all**: it merged on 22 `--lite` PASSes and no full `scripts/agent-gate.sh` run,
+  because nothing in the merge path ever asked for the gate of record. **PR #3616 = a real gate,
+  someone else's**: a closer located its run dir by RECENCY (`ls -t /tmp/agent-gate.*`), read a PEER
+  LANE's dir, saw 33 of 37 components PASS, and was about to merge #3616 on PR #3580's verdict — the
+  count, the dir and the timestamps were all real, and only the `run-id:` line exposed it, read by a
+  human. With 14000-27000 stale run dirs per box and up to 4 concurrent gates, recency picks a peer
+  routinely. This script **cannot** verify `run-id:` (see below), so the `commit:`+`tree-start:`
+  binding is what makes that class a mechanical refusal: a peer's summary carries the OTHER PR's
+  branch head. It is now asked for here, at the one point every merge passes through: the summary file must
+  hold exactly ONE whole-line-anchored `==== AGENT-GATE SUMMARY ====` block (`--lite`/`--delta` emit
+  distinct headers and are refused by name; a second or unterminated block is ambiguous and also
+  refused) with `RESULT: PASS` and `tree-integrity: PASS` compared **token-exactly** — `INCOMPLETE` is
+  the launch-time liveness sentinel and not a verdict (#3041), and a mutated-mid-run tree is not a
+  certification (#2926) — and with BOTH `commit:` (7 hex) and `tree-start:` (12 hex) prefix-matching
+  the certified sha **at each value's own width**; a non-hex placeholder (`(not captured)`,
+  `unverified`, `selftest`) REFUSES rather than being skipped. An OPTIONAL argument would have left the
+  convention honour-system, so the pre-#3465 two-argument call is a loud usage failure.
+  **What it does NOT do, stated rather than implied:** it cannot verify `run-id:` (the #2874 reader
+  contract requires the party that LAUNCHED the run, which this script is not), and it cannot prove
+  the summary came from a genuine gate rather than a hand-written file — a hostile invoker is out of
+  the threat model, since whoever runs the script controls the process. What it closes is **accident
+  and drift**, which is the observed failure mode. `dirty:` is reported in the success line, not
+  enforced (failing on it is proposed separately in #3648).
+  **The OPTIONAL fourth argument is the only way a `--delta` re-cert can certify a merge.** #1892
+  *mandates* `--delta` — "never a repeat full gate" — for a test/docs-only diff on top of a full PASS
+  at anchor `X`, and mandates that the PR record BOTH blocks, so a 3-arg-only guard red on correct,
+  doctrine-mandated input: the guard agents learn to waive. With four arguments the third is the
+  ANCHOR's full PASS (its sha need NOT be the certified sha) and the fourth is exactly one
+  `==== AGENT-GATE DELTA SUMMARY ====` block carrying `MODE: delta` (asserted affirmatively — the
+  inverse of the full block's `MODE:` belt), `RESULT: PASS`, `tree-integrity: PASS`, a `delta-anchor:`
+  naming exactly that anchor (an `(UNRESOLVED)` anchor refuses), and its OWN `commit:`/`tree-start:`
+  at the certified sha. A block carrying `nested-under:` (#2874) is refused in either shape: a nested
+  sub-gate runs at the SAME tree, so the sha binding provably cannot distinguish it.
+  **And what `PREMERGE: OK` does NOT prove (#3650), which the success path states itself on a
+  `PREMERGE: SCOPE` line:** it proves the diff is unchanged since certification and that a full gate
+  PASSed on THAT EXACT TREE — not that the change was certified against the `main` it will join. A
+  squash-merge composes the diff with main's CURRENT tip, so for any PR whose base is behind main the
+  certified tree and the merged tree are different objects (measured on #3358/PR #3362). A gate on the
+  MERGE RESULT is #3650; it is deliberately not implemented here, and neither is a staleness bound.
+  Report a pass as "gate of record verified at `<sha>`", never "certified against main". The closer **refuses to merge on any
   non-zero exit** (fail closed). It also re-reads issue/PR comments for a fresh `HOLD:` order in the
   same pre-merge pass. Motivated by the 2026-07-14 stale-merge escape on
   #2299/PR #2421: the closer certified a rebased-and-fixed tip locally but never pushed it, so
@@ -574,6 +617,34 @@ The pipeline measures itself so improvement is data-driven, not anecdotal — **
   `docs/reports/delivery-telemetry.schema.json`) using `scripts/delivery-telemetry.py record`. A
   reopened issue that ships more than once legitimately gets one record per shipped PR — retro
   aggregation by issue treats such multi-cycle issues as multiple deliveries, not one (issue #2314).
+  The same holds for an issue that ships one or more **slices** while deliberately remaining OPEN
+  (issue #3550): stamp each with `--slice`, which writes `closed_at: null` (the marker) and bounds
+  `cycle_time_s` on the PR's `mergedAt` — the authoritative terminal timestamp of a slice — and `retro`
+  reports those records as their own SLICE class rather than as completed issues. `--slice` asserts the
+  issue was open **when the PR merged**, which its CURRENT state cannot decide (GitHub records an
+  auto-close AFTER the merge, so an ordinary completed delivery and a late-stamped slice have
+  indistinguishable timestamps). Since issue #3559 the tool decides it by replaying the issue's own
+  **timeline** to the PR's `mergedAt`, and the rule is a **conjunction**: slice ⟺ the issue was OPEN at
+  `mergedAt` **AND** this PR closes NOTHING. Both halves are permanent — every auto-closing PR's issue
+  was *also* open at `mergedAt`, because the close is recorded afterwards, so only the PR's own
+  `closingIssuesReferences` separates "open because the issue is never closing" from "open because the
+  close lands five seconds later" (a slice PR closes NOTHING). A slice is therefore stampable after its
+  issue has been closed or reopened — which is what unblocked the three owed #3393 records
+  (#3407/#3429/#3467) — and is refused when the **last** `closed`/`reopened` event
+  STRICTLY BEFORE `mergedAt` is a `closed`, because that delivery COMPLETED the issue and a later
+  reopen does not change it. The *last* one decides, so a close FOLLOWED by a reopen before the merge
+  leaves the issue open at `mergedAt` and is ACCEPTED. An
+  event in the SAME SECOND as `mergedAt` is a third answer, neither before nor after: both GitHub
+  timestamps are one-second resolution, so the tie is **unmeasurable** and is refused as such rather
+  than resolved permissively.
+  `--slice` is an operator **assertion**: the tool refuses it wherever it can be **disproved**, and
+  where it cannot be, the assertion stands. One residual is genuinely **undecidable** and is not
+  claimed: a completed delivery whose PR omits `Closes #N` and whose issue is closed by hand later is
+  observationally identical to a genuine slice completed later by another PR, so the difference is
+  intent — bounded by doctrine (`flow-implement` mandates `Closes #<N>`), not by mechanism. The two available
+  workarounds are FORBIDDEN: closing the issue to satisfy the tool (a tool's data model must never
+  decide whether a problem is recorded as solved), and hand-appending a line to the JSONL past the
+  validator (the tool is the gate on the ledger's shape).
   Records carry **authoritative data only**: GitHub-derived
   timestamps (issue/PR open + merge + close → cycle time and coarse phase durations) plus run-observed
   counters — claim collisions, rebase/conflict events, agent-gate pass/fail + run count, roborev findings,

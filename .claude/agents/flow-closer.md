@@ -183,7 +183,9 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
 4. **Who fixes what (closer ↔ implementer boundary).**
    - A **mechanical** blocker (fmt/clippy nit, a missing assertion, a one-line fix) you fix
      **inline** in the worktree, re-cert with `scripts/agent-gate.sh --lite` (+ any diff-
-     relevant parity/integration target), and re-review.
+     relevant parity/integration target), and re-review. `--lite` is a fast re-check, NEVER
+     the gate of record — the fix still has to be re-certified per the two
+     re-certification bullets at the end of this step.
    - A **src-design** blocker (needs real implementation judgment) → you have no `Agent`
      tool, so **emit a NEEDS-SPAWN packet and end your turn**; the lead respawns a fresh
      `sstable-developer` (explicit model) to fix it TDD and re-invokes you with its
@@ -195,6 +197,14 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
      **postdate the final src change AND the final rebase** — if you fixed src (yours or the
      implementer's) or rebased after step 1, **re-run the full gate** (back to step 1).
      `--lite` re-certs are never the gate of record.
+   - **The ONE exception is #1892 post-gate polish, and it has its own premerge form.** If the
+     diff since the full PASS at `X` is **test/docs-only** (no src, no `Cargo.*`, no build
+     script, no workflow, no test-data — decide it by running
+     `git diff --name-only origin/main...HEAD | bash scripts/ci/classify-docs-only.sh`, not by
+     eye), do **NOT** re-run the full gate: re-certify with
+     `scripts/agent-gate.sh --delta X --anchor-run-id <id>` and pass **BOTH** summaries to
+     premerge-assert (step 5a, Case B). A **code** fix has no such route — it needs a NEW full
+     gate at the new head.
 5. **Merge on green (worker-merges-own-PR model).** When gate PASS + C PASS (design) +
    roborev clean (a terminal `RESULT: PASS` from the wrapper — never `NOTHING-TO-REVIEW`)
    all hold on the final tree: beat the heartbeat, rebase on `origin/main`
@@ -202,17 +212,53 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    `git push` the certified tip, open the nits follow-up issue if any, then — **before** arming
    `gh pr merge --auto` — run the two mechanical pre-merge guards:
 
-   **(a) Scripted pre-merge SHA assert (#2456/#2668).** Never merge a head the gate of
-   record did not cover. Run the script with the SHA whose gate SUMMARY you hold
-   (`git rev-parse HEAD` on the certified worktree tip):
+   **(a) Scripted pre-merge SHA + gate-of-record assert (#2456/#2668/#3465).** Never merge a
+   head the gate of record did not cover — and never merge without a gate of record at all.
+   Run the script with the SHA whose gate SUMMARY you hold (`git rev-parse HEAD` on the
+   certified worktree tip) **and the summary file of the FULL gate from step 1** — which is the
+   literal path step 1 wrote, `/tmp/gate-<N>.txt`:
    ```bash
-   bash scripts/flow/premerge-assert.sh <pr> <certified-sha>
+   # CASE A — the usual shape: the full gate ran on the head being merged.
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt
+   # CASE B — #1892 post-gate polish: full PASS at anchor X, then a test/docs-only diff.
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> /tmp/gate-<N>.txt /tmp/delta-<N>.txt
    ```
-   It exits `0` (prints `PREMERGE: OK <sha>`) only when the PR is OPEN **and** its
-   `headRefOid` equals `<certified-sha>`. On exit `2` (stale head or closed/merged PR) →
-   **do NOT merge**, return terminal packet `verdict: stale-head` with the script output.
-   On exit `3` (gh/network failure) → **do NOT merge**, return `verdict: gh-failure` with
-   the script output. Fail closed — never "assume ok".
+   The third argument is **REQUIRED** (an optional one would leave the convention
+   honour-system): it is the `AGENT_GATE_SUMMARY_FILE` you already hold from step 1's full
+   gate. A `--lite` summary is never acceptable anywhere, and a `--delta` summary is never
+   acceptable as the THIRD argument — both are refused by name.
+   The **fourth argument is optional and is the only way a `--delta` re-cert can certify a
+   merge.** CLAUDE.md's #1892 rule mandates `--delta`, "never a repeat full gate", for a
+   test/docs-only diff on top of a full PASS at anchor `X`, and mandates that the PR record
+   BOTH blocks — so in Case B the third argument is the **ANCHOR's** full summary (its sha need
+   NOT equal `<certified-sha>`) and the fourth is the delta block, which must carry
+   `MODE: delta`, `RESULT: PASS`, `tree-integrity: PASS`, a `delta-anchor:` naming exactly that
+   anchor, and its OWN `commit:`/`tree-start:` at `<certified-sha>`. The chain is closed end to
+   end: full PASS at X → delta anchored at X → delta ran on the merged tree.
+   It exits `0` (prints `PREMERGE: OK <sha>`, `PREMERGE: SCOPE …` **and**
+   `PREMERGE: GATE-OF-RECORD …`, plus `PREMERGE: DELTA-RECERT …` in Case B) only when the
+   summary holds exactly one `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`,
+   `tree-integrity: PASS`, no `nested-under:` line, and `commit:`/`tree-start:` covering
+   `<certified-sha>` (Case A) or the delta chain above (Case B), **and** the PR is OPEN **and**
+   its `headRefOid` equals `<certified-sha>`.
+   **What exit 0 does NOT prove (#3650) — do not over-report it.** It proves the diff is
+   unchanged since certification and that a full gate PASSed on **that exact tree**. It does
+   **not** prove the change was certified against the `main` it will join: a squash-merge
+   composes this diff with main's CURRENT tip, so for any PR whose base is behind main the
+   certified tree and the merged tree are different objects (measured on #3358/PR #3362). The
+   script says so itself on the success path (`PREMERGE: SCOPE`); a gate on the merge result is
+   #3650. Report the verdict as "gate of record verified at `<sha>`", never as "certified
+   against main".
+   On exit `2` → **do NOT merge**: `PREMERGE: NO-GATE-OF-RECORD` → return terminal packet
+   `verdict: no-gate-of-record` (the remedy is to RUN the full gate — or, for a test/docs-only
+   polish diff, the anchored delta pair above — never to hand-edit a summary); stale head or
+   closed/merged PR → `verdict: stale-head`; either with the script output. On exit `3` → **do
+   NOT merge**, and read the MARKER, because exit 3 has three distinct causes: `PREMERGE: USAGE`
+   → `verdict: usage-error` (you called the script wrong — e.g. the third argument is missing;
+   fix the call and re-run, this is NOT a GitHub outage); `PREMERGE: TOOL-FAILURE` →
+   `verdict: tool-failure` (a broken box: `awk` missing/ENOMEM — fix the box and re-run the
+   ASSERT, never the gate); `PREMERGE: GH-FAILURE` → `verdict: gh-failure`. Fail closed — never
+   "assume ok".
 
    **(b) Re-read for a fresh `HOLD:` order.** Immediately before merge, one pass over the
    issue + PR comments for a manager hold:

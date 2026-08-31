@@ -162,7 +162,7 @@ pub struct SSTableReaderConfig {
     ///
     /// The backend is chosen by `storage.disk_access_mode` ([`crate::Config`]),
     /// which defaults to [`Auto`](crate::config::DiskAccessMode::Auto). See
-    /// `resolve_disk_access_mode` in the reader module for the exact resolution:
+    /// `reader::backend_resolve::resolve_disk_access_mode` for the exact resolution:
     /// `Auto` yields buffered I/O for files below [`Self::mmap_min_size_bytes`]
     /// (4 KiB) and **mmap** for anything larger, up to
     /// `storage.direct_io_memory_fraction` of system RAM (default half); above that

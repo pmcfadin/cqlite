@@ -12,9 +12,10 @@ A crate named `cqlite-ffi-common` SHALL exist at the repository root as a member
 crates, and SHALL be built, linted (`RUSTFLAGS="-D warnings"`) and tested by the default workspace
 commands and by `scripts/agent-gate.sh` without any additional flag or feature.
 
-Its module files SHALL be split by responsibility (decimal, varint, inet, error contract, OTel keys,
-vectors) and SHALL each stay well under the ~800-line source target (#1116), so the file-size ratchet
-is satisfied by construction rather than by an allowance.
+Its module files SHALL be split by responsibility (decimal, varint, inet, JSON-number
+classification, error contract, OTel keys, vectors) and SHALL each stay well under the ~800-line
+source target (#1116), so the file-size ratchet is satisfied by construction rather than by an
+allowance.
 
 #### Scenario: The crate is a first-class workspace member
 - **GIVEN** a clean checkout at the change's head
@@ -241,17 +242,18 @@ the shared crate is explicitly NOT sufficient evidence that a binding calls it (
 
 ### Requirement: A committed vector table makes the cross-binding invariant an assertion
 
-`cqlite-ffi-common` SHALL export committed canonical vector tables for DECIMAL, VARINT and INET, each
-entry pairing an input with its single expected rendering (or its single expected error message). The
-tables SHALL be ordinary public data, reachable from the bindings' test builds without a feature flag.
+`cqlite-ffi-common` SHALL export committed canonical vector tables for DECIMAL, VARINT, INET and
+JSON numbers, each entry pairing an input with its single expected rendering (or its single expected
+error message). The tables SHALL be ordinary public data, reachable from the bindings' test builds
+without a feature flag.
 
 Each binding SHALL expose one internal, underscore-prefixed test-support surface that renders **every**
 entry through that binding's production conversion path, and each binding's suite SHALL assert the full
 table. Because both suites read the same committed table, a divergence between the bindings — or a
 re-introduced local implementation in either — SHALL fail both suites.
 
-The tables SHALL cover, at minimum, every edge case enumerated in the DECIMAL, VARINT and INET
-requirements above, including at least one entry whose expected outcome is a typed error.
+The tables SHALL cover, at minimum, every edge case enumerated in the DECIMAL, VARINT, INET and
+JSON-number requirements above, including at least one entry whose expected outcome is a typed error.
 
 Every entry's check SHALL be EXACT. An entry whose rendering is short enough to commit verbatim SHALL
 be compared character for character. An entry whose rendering is too long to commit verbatim (the
@@ -291,6 +293,52 @@ every rendering is ASCII, no side has an encoding choice to make.
 - **WHEN** that binding's suite runs
 - **THEN** the vector assertion FAILS on that entry
 
+### Requirement: JSON-number host classification has exactly one implementation and one policy
+
+`cqlite-ffi-common` SHALL expose the single implementation of the JSON-number-to-host-type decision as
+`classify_json_number(&serde_json::Number) -> JsonNumberClass`, with the classes `I64`, `U64`, `F64` and
+`Beyond`. Both bindings SHALL obtain the class from it, and neither SHALL retain a local
+`as_i64`/`as_f64` ladder.
+
+The accessor ORDER SHALL be `as_i64()`, then `as_u64()`, then `as_f64()`, then the raw text, and that
+order SHALL be documented at the site as load-bearing. Without `arbitrary_precision` a
+`serde_json::Number` is one of `PosInt(u64) | NegInt(i64) | Float(f64)`, so the `as_u64()` arm is what
+confines `as_f64()` to the `Float` variant — where it is an identity and therefore exact. Placing
+`as_f64()` above `as_u64()` SHALL be understood to silently re-round every integer above `i64::MAX`,
+with no compiler error and no failing type check.
+
+Each host SHALL receive the class in its own exact type, and the choice SHALL be STATED rather than
+assumed, because the correct answer differs per host: Python `int` is arbitrary-precision, so `I64` and
+`U64` both become `int`; a JS `number` is an `f64` and cannot carry an integer above `2^53`, so `U64`
+becomes a `BigInt` — the type this binding already uses for `i64` outside `i32` range. An
+unrepresentable value SHALL be REFUSED with a typed error routed through the shared error contract, and
+SHALL NOT be delivered as a rounded float, a substituted string, or a fabricated `null`.
+
+Whether `serde_json`'s `arbitrary_precision` feature is enabled SHALL be a recorded decision rather
+than an accident, and its rationale SHALL be verified against the pinned `serde_json` source rather
+than inferred from the feature's name: under that feature `as_f64` parses the stored string, so an
+integer above `u64::MAX` still classifies `F64` lossily and the feature ALONE recovers nothing.
+
+The shared crate SHALL unit-test at minimum: `i64::MIN`, `0`, `i64::MAX`, `i64::MAX + 1`, `2^53`,
+`2^53 + 1`, `u64::MAX`, a negative, a genuine float literal, and a pair distinguished only by lexical
+form (`1e19` versus `10000000000000000000`). Every `u64`-range expectation SHALL be asserted against a
+`u64` literal, never against an `f64`, so a lossy classification cannot pass by rounding both sides.
+
+#### Scenario: An integer above i64::MAX survives the conversion in both bindings
+- **GIVEN** the committed JSON-number vector table exported by `cqlite-ffi-common`
+- **WHEN** each entry is converted through the Python binding's production path and the Node binding's production path
+- **THEN** an entry above `i64::MAX` arrives as a Python `int` and a JS `BigInt` equal to the committed value, and never as a float
+
+#### Scenario: A lossy classification arm fails the binding suites
+- **GIVEN** the `U64` arm changed to deliver the value as an `f64`
+- **WHEN** both bindings' vector suites are run
+- **THEN** both fail, naming the value that arrived as a float
+
+#### Scenario: The unreachable class is asserted, not faked
+- **GIVEN** a default build, in which no input can produce `Beyond`
+- **WHEN** the crate's tests classify integer literals outside `[i64::MIN, u64::MAX]`
+- **THEN** each is measured to classify `F64` because the parser collapsed it before the classifier ran, and the test states that a `Beyond` result means `arbitrary_precision` was enabled and the recorded decision needs revisiting
+
 ### Requirement: Routines that are not duplicated are not extracted
 
 The change SHALL NOT extract `duration` or `date` helpers. Verification records that both bindings pass
@@ -304,7 +352,10 @@ oversight, and so a later reader does not "complete" the extraction by adding si
 #### Scenario: No single-caller helper is introduced
 - **GIVEN** the shared crate at the change's head
 - **WHEN** its public surface is enumerated
-- **THEN** every exported routine has at least one caller in each of the two bindings, or is documented vector/constant data
+- **THEN** every exported routine has at least one caller in each of the two bindings, or is documented
+  vector/constant data, or is one shape of a documented two-shape value projection whose sibling shape
+  has a caller in the other binding (the `*_to_bigint` / `*_to_sign_and_le_words` pairs: Python consumes
+  the `BigInt`, Node the words form, and each pair is asserted to agree by construction)
 
 ### Requirement: Non-goals remain untouched
 

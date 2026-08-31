@@ -7,7 +7,158 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Both bindings (observable): a JSON number above `i64::MAX` no longer loses
+  precision, and neither binding fabricates a substitute value (#3505).** A
+  `Value::Json` cell's number was classified inline in each binding as
+  `as_i64()` → `as_f64()` → *fallback*. For a legal JSON integer above
+  `i64::MAX`, `as_i64()` returns `None` and **`as_f64()` succeeds lossily**
+  (`u64 → f64` has 53 mantissa bits), so `18446744073709551615` was delivered as
+  `1.8446744073709552e19`. The `fallback` arm was unreachable in both bindings.
+  - The classification now lives ONCE, in `cqlite-ffi-common::json_number`, as
+    `i64` → `u64` → `f64` → refusal. Adding the `u64` arm is the whole fix: it
+    makes the `f64` arm reachable only for the `Float` variant, where the
+    conversion is exact.
+  - **Python**: a `u64`-range integer is an exact `int` (Python integers are
+    arbitrary precision). The old `n.to_string()` fallback — which shifted the
+    host type from a number to a `str` — is gone.
+  - **Node**: a `u64`-range integer is a `BigInt`, the type this binding already
+    used for an `i64` outside `i32` range. The old fallback returned
+    `env.get_null()`, delivering a **fabricated `null`** for an unrepresentable
+    number, indistinguishable from a genuine JSON `null`; it is now a typed
+    `PARSE`/`Data` error.
+  - `serde_json`'s `arbitrary_precision` is deliberately **not** enabled; the
+    decision and its three reasons are recorded in
+    `cqlite-ffi-common/src/json_number.rs`.
+  - Residual, out of reach at this layer (**#3636**): an integer literal outside
+    `[i64::MIN, u64::MAX]` is collapsed to `f64` by `serde_json`'s **parser**
+    before any CQLite code runs, so it still arrives rounded. Enabling
+    `arbitrary_precision` alone does NOT fix it — under that feature `as_f64`
+    parses the stored string, so such a literal still classifies `F64` lossily.
+    A real fix additionally needs an exact-integer parse of `Number::as_str()`
+    placed BEFORE the `as_f64()` arm.
+  - Reachability, stated honestly: `Value::Json` requires a `"json"` comparator
+    and no fixture in `test-data/` has one, so this path is unreachable from
+    today's corpus.
+  - **Wiring evidence** (`JSON_NUMBER_VECTORS`, the #1452 mechanism): unit tests
+    on the shared classifier do NOT prove either binding CALLS it — the mutation
+    "make the `U64` arm `u as f64`" originally reddened nothing in the
+    repository. A committed cross-binding table of JSON number literals is now
+    driven through each binding's PRODUCTION dispatch
+    (`value_to_py`/`value_to_napi` → `json_to_*` → `json_number_to_*`) by
+    `cqlite._json_number_from_text` / `_jsonNumberFromText`, and both suites
+    assert the rendered text AND the host type. In JS the type half is the
+    load-bearing one: `String(9223372036854775808)` is identical for a lossy
+    double and an exact `BigInt`.
+
+- **Python parity harnesses: `values_equal` no longer masks int/float precision
+  loss (#3505).** Both copies coerced a mixed `int`/`float` pair through
+  `float()`, which rounded the EXACT side down to the LOSSY side — so the bug
+  above was invisible to the harness that should have caught it. The coercion is
+  now bounded at `2**53`: below it every integer is exactly representable in an
+  IEEE-754 double so the tolerant compare genuine `FLOAT`/`DOUBLE` columns need
+  is provably lossless and is retained; strictly above it (`2**53` itself is
+  exactly representable, so it stays on the tolerant side) the comparison is
+  exact.
+  `bool` is excluded in both directions (`isinstance(True, int)` is `True`, so
+  `True` and `1.0` compared equal). The rule was duplicated in
+  `test_cli_parity.py` and `test_parity.py` and now lives once in
+  `bindings/python/tests/numeric_compare.py`.
+  `bool` vs `Decimal` is rejected too, not only `bool` vs `int`/`float`:
+  `Decimal(1) == True` is `True` in Python, so the first pass left the `Decimal`
+  dispatch open.
+  A second degeneracy in the same formula is closed in both languages: with an
+  infinite operand `abs(a-b) <= max(rel_tol*max(|a|,|b|), abs_tol)` reduces to
+  `inf <= inf`, so EVERY finite value compared equal to `Infinity` and `+inf`
+  compared equal to `-inf` — real values for a CQL `float`/`double` column. Two
+  genuine equal infinities still match.
+  Node's `parity-utils.js` did NOT have the int/float mask — its
+  `bigint`↔`number` arms were already exact — but `BigInt(x)` threw `RangeError`
+  on a non-integer `number`, crashing the harness instead of reporting a
+  mismatch; hardened.
+  `test_parity`'s tolerant branch keeps its pre-#3505 ASYMMETRY (entered only
+  when the binding side is a float), so an `int` binding value against a `float`
+  golden stays an exact comparison — a change that removes a mask must not widen
+  a golden-file oracle as a side effect.
+
 ### Changed
+
+- **BREAKING (both bindings): a UDT's type identity is carried OUT OF BAND, so a
+  UDT field named `_type`/`_keyspace` displaces nothing (#3504).** Both bindings
+  rendered a UDT as ONE flat namespace holding the injected type identity and the
+  UDT's own declared field names, markers written first — `udt_to_py` did
+  `set_item("_type")`, `set_item("_keyspace")`, then `set_item(field.name)`, and
+  `udt_to_object` did the identical thing. A UDT that DECLARES a field named
+  `_type` or `_keyspace` (legal CQL via a quoted identifier) therefore silently
+  **overwrote** the marker, and the type name became unrecoverable from the
+  result; a NULL such field nulled it outright. That is a control marker placed in
+  a namespace the data controls, so the fix removes the channel rather than
+  picking a rarer marker.
+
+  - **Python**: a UDT is now a `cqlite.Udt` (frozen `#[pyclass]`, exported from
+    the module and declared in `__init__.pyi`) with `type_name` / `keyspace` /
+    `fields`. The mapping protocol is retained and delegates to `fields`, so
+    `udt["street"]`, `"city" in udt`, `len(udt)`, `iter(udt)` and
+    `keys`/`values`/`items` keep working. `__eq__`/`__hash__` are over
+    `(keyspace, type_name, fields)`.
+  - **Node**: a UDT is now `{ typeName, keyspace, fields }`, with the declared
+    fields in the nested `fields` object. `interface UdtValue` loses its
+    `[field: string]: Value` index signature — that signature is what permitted
+    the collision. **`fields` has a NULL PROTOTYPE** (`Object.create(null)`):
+    a plain object's property assignment consults the prototype chain, so a UDT
+    field named `__proto__` — legal CQL via a quoted identifier, exactly like
+    `_type` — reached `Object.prototype`'s inherited accessor instead of becoming
+    a field (measured on the fixture: a string value VANISHED, a null value
+    REPLACED the field bag's prototype). Inheriting nothing removes that channel
+    for every name rather than special-casing one. Every read shape is unchanged
+    (indexing, `in`, `Object.keys`/`entries`, spread, `JSON.stringify`); the one
+    difference is that `fields.hasOwnProperty(...)` no longer exists — use
+    `Object.hasOwn(fields, name)`, which is the correct form for a name-keyed bag
+    regardless.
+  - **`value_to_hashable_key`'s `Udt` arm (Python)** projected a UDT to a
+    `frozenset` holding a pair for `_type`, one for `_keyspace`, then one per
+    field, so a field named `_type` produced a **duplicate** `_type` pair that
+    nothing deduped (measured on the new fixture: pair names
+    `['_keyspace', '_keyspace', '_type', '_type', 'real_field']`). It now emits a
+    `Udt` — exactly one entry per declared field, none for the metadata — and
+    identity participates in equality/hash, so two UDTs of different declared
+    types with identical fields remain distinct `dict` keys. `Tuple`/`Set` arms
+    are deliberately still absent (#3500).
+  - **Projection totality WIDENED as a side effect, measured rather than
+    assumed.** Because a `cqlite.Udt` is HASHABLE where the old `dict` was not, a
+    UDT reached through the arm-less `Tuple` fall-through in a hashed position now
+    reads successfully: `set<frozen<tuple<frozen<udt>, int>>>` and
+    `map<frozen<tuple<frozen<udt>, int>>, int>` both raised
+    `TypeError: unhashable type: 'dict'` before and now yield a `frozenset` /
+    `dict` keyed by `(Udt, …)`. `set<frozen<set<frozen<udt>>>>` still raises
+    `TypeError: unhashable type: 'list'`, unchanged, because a UDT-bearing set
+    renders as a Python `list` for CLI parity (#804) — a different cause. This is
+    NOT "#3500 is fixed": no arm was added. Boundary pinned by
+    `test_udt_collision.udt_hashable_shapes` in the fixture.
+
+  **Migration.** Python: `udt["_type"]` → `udt.type_name`, `udt["_keyspace"]` →
+  `udt.keyspace`, `isinstance(v, dict)` → `isinstance(v, cqlite.Udt)`; field
+  access is unchanged. Node: `result._type` → `result.typeName`,
+  `result._keyspace` → `result.keyspace`, `result.street` →
+  `result.fields.street`. Reading a marker out of the field namespace is the ONLY
+  thing that stops working, and that is the deliverable: `udt["_type"]` now
+  reaches a FIELD of that name (`KeyError` when none is declared) and
+  `result._type` is `undefined`.
+
+  Node's shape is a plain object and Python's a dedicated class because each
+  binding already had an established idiom for a value type (Python's
+  `cqlite.Duration` is a `#[pyclass]`; Node's `Duration` is a plain object, with
+  napi classes reserved for handles). The spelling differs by language convention
+  — PyO3 exposes snake_case, napi-rs camelCases — and the semantics are identical.
+
+  Subject: `test-data/fixtures/issue_3504/`, a **Cassandra 5.0.2-written** SSTable
+  declaring `CREATE TYPE collide ("_type" text, "_keyspace" text, "__proto__"
+  text, real_field int)` (Cassandra accepts all three as quoted identifiers). No pre-existing corpus fixture declared such a field, so the defect had
+  no test subject. The CLI is deliberately NOT changed here: its JSON writer still
+  injects `_type`, and it is the binding parity suites' comparison ORACLE — moving
+  an oracle in the same change as its subject is how a guard goes blind. Tracked
+  as a follow-up on #3504 and recorded in `docs/development/M4_spec.md` §5.3.
 
 - **Node binding (observable): a malformed `inet` cell is a typed `PARSE` error
   on BOTH read paths, and `execute()` no longer returns `null` for one
@@ -92,6 +243,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Note for reviewers: the gate's `pub-surface` component checks
     declaration/inner-`cfg` consistency and is **not** an API-drift detector
     (#1712/#3366), so nothing flags this mechanically — hence this entry.
+- **BREAKING (public API): decorative configuration knobs are deleted (#1696,
+  epic #1685 "config honesty" / audit finding AH3).** Every knob below had ZERO
+  production readers: setting it changed nothing, silently. A deleted field on
+  `cqlite_core::Config` is now a COMPILE error for an embedder, which is the
+  loudest signal available and the intended posture.
+  - `cqlite_core::config::StorageConfig`: `max_sstable_size`, `block_size`,
+    `enable_bloom_filters`, `bloom_filter_fp_rate`, `io_threads`, `sync_mode`
+    (and with it the now-unreferenced `SyncMode` enum).
+  - **On the two bloom knobs specifically, stated precisely because both loose
+    versions are wrong:** the bloom-filter path EXISTS, is tested AND is WIRED —
+    `cqlite-core/src/storage/sstable/bloom.rs` is a real Cassandra-parity
+    `BloomFilter` whose double-hashing operand order and `Filter.db` binary
+    layout are both verified against `BloomFilterSerializer.java` /
+    `OffHeapBitSet.java`, and the production point-read paths DO consult a loaded
+    `Filter.db` (`reader/component_loading.rs` loads it;
+    `reader/partition_lookup.rs` / `reader/partition_successor.rs` prune an
+    SSTable on `might_contain == false`). So this removal does NOT say the bloom
+    path is unwired. What had zero production readers is the two CONFIG KNOBS:
+    bloom behaviour follows from the SSTable's own `Filter.db`/schema metadata,
+    never from a knob, so `enable_bloom_filters` could not switch anything on or
+    off and `bloom_filter_fp_rate` sized no filter. They are deleted rather than
+    given a consumer speculatively, because a knob should arrive WITH its
+    consumer. **#2632** ("wire folded murmur3 h2 into bloom-filter (`Filter.db`)
+    plumbing") is the open issue that would introduce a bloom knob WITH one.
+  - `cqlite_core::config::QueryConfig`: `plan_cache_size`, `enable_optimization`,
+    `parallel` (and with it the `ParallelQueryConfig` struct).
+  - `cqlite_core::config::Config::performance` entirely, with the
+    `PerformanceConfig` and `BackgroundTaskConfig` structs.
+  - The `Config::validate` arms that judged deleted fields (`block_size`,
+    `bloom_filter_fp_rate`) went with them: validating a field nothing reads is
+    theatre.
+  - **CLI config-file keys**: the whole `[connection]` section
+    (`timeout_ms`/`retry_attempts`/`pool_size` — CQLite reads local files and
+    never opens a network connection), `output.pager` (nothing ever spawned a
+    pager) and `output.timestamp_format` (no formatter ever read it).
+  - **Migration (CLI files): a config that still names a removed key STILL
+    LOADS.** The CLI surface is a file, not a Rust type, so the posture is
+    *parse-and-ignore PLUS a named deprecation warning* rather than
+    `deny_unknown_fields` — hard-failing would break every user who copied our
+    own shipped `examples/example-config.toml`, which named all three. On load,
+    each still-present removed key is reported by name on stderr, so a dead
+    setting can no longer look like a live one. Delete the keys to silence it.
+  - **Migration (embedders writing Rust):** drop the field assignment. None of
+    these knobs had an effect, so there is no behavior to preserve and no
+    replacement to adopt.
+  - **Migration (Python / any JSON or dict config surface): the old shape still
+    DESERIALIZES, and now WARNS.** A Rust embedder gets a compile error, but the Python
+    bindings' dict/JSON bridge is a `serde_json::from_str`, and serde DISCARDS
+    unknown fields — so a saved pre-change config naming `performance`,
+    `storage.block_size`, `query.parallel` and the rest deserialized
+    successfully and was silently ignored. `cqlite_core::Config::from_json_str`
+    (and the bindings on top of it) now report every removed key the document
+    still sets: a Python `UserWarning` naming each dead path, raised only once
+    the operation has SUCCEEDED — validation included, so a document that names a
+    removed key AND carries an invalid surviving value gets the rejection alone
+    and no deprecation warning about a config that never took effect.
+    **The warning text itself makes no claim about whether the load succeeds**,
+    and that is deliberate: it names the dead keys and says they have NO EFFECT,
+    nothing more. It had said "they are IGNORED — the configuration still loads",
+    which is a promise about a LATER stage, and review found it false three times
+    running — each fix moved the emission one stage later and the next stage
+    falsified it again (the CLI's `to_core_config` rejects
+    `memory_limit_mb = 1` beside `cache_size_mb = 64` after the assurance has
+    already printed). There is always a later stage, so no placement can make
+    such a promise safe; a warning that reports only what it knows cannot be
+    wrong about anything else. `UserWarning` and not
+    `DeprecationWarning` because Python HIDES the latter under its default
+    filters (shown only from `__main__` or under `-W`), which would have left the
+    signal silent for an ordinary caller. Same posture as the CLI file surface,
+    one posture crate-wide: parse-and-ignore PLUS a named warning, never
+    `deny_unknown_fields`, which would hard-fail an existing caller with no
+    migration path over keys that never did anything.
+  - **Known residual, stated because the rule above is NOT universal (#3520):**
+    the removed-key report is enforced on the CLI config-file loader, the Python
+    bindings entry points, and Rust field access (a compile error, Rust callers
+    only). It is NOT enforced on a DIRECT serde deserialization of
+    `cqlite_core::Config` — `serde_json::from_str::<Config>` /
+    `from_value::<Config>` bypass the reporting constructors and still discard
+    removed keys silently. Enforcing it at the serde boundary needs a custom
+    `Deserialize` capturing unknown keys across every nested config struct, which
+    is tracked as #3520 rather than absorbed here.
 
 - **BREAKING (public API): the schema JSON exporter and the never-compiled CQL
   generator are deleted (#1715, epic #1688 / audit finding AK4; ~2.0k LOC).**
@@ -128,6 +360,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `experimental` feature flag itself is unchanged — it still gates
     `Database::flush()`/`compact()`, the INSERT executor path, bloom-filter tests
     and the `Storage::put`/`delete` stubs.
+
+### Added
+
+- **`storage.direct_io_memory_fraction` is now VALIDATED (#1696).** It was live
+  but unvalidated: the reader silently CLAMPED nonsense (`<= 0.0`, NaN and the
+  infinities fell back to the `0.5` default; anything `> 1.0` was pinned to
+  `1.0`), so an operator who wrote `2.0` got the default and no word about it.
+  `Config::validate` now rejects anything outside the documented `(0.0, 1.0]`,
+  naming the knob and the offending value — and the rejection is REACHABLE from
+  the public surfaces that were doing the clamping: `Database::open` validates
+  the config it is handed (a failure mode that method already documented but
+  never checked), and `SSTableReader::open` — reachable without a `Database` —
+  enforces the range itself as the FIRST thing it does, before any `tokio::fs`
+  call — so a missing or unreadable file cannot mask an invalid config behind an
+  I/O error, and the caller is told about the problem it actually has. `1.0` is
+  legal; `0.0` is
+  REJECTED rather than read as "never use direct I/O", because a zero threshold
+  makes every nonempty file exceed it, i.e. it reads as "never" and behaves as
+  "always" (say `disk_access_mode = Direct` for always, `Mmap`/`Buffered` for
+  never). A tiny/subnormal positive fraction is legal and honoured literally.
+- **A standing knob-behavior guard (#1696):**
+  `cqlite-core/tests/config_knob_behavior_guard.rs`. Every leaf field of the
+  public config structs must be registered with either a set-knob →
+  assert-observable-difference test, or an explicit reason why no observable
+  difference is expressible. The registry is checked against `src/config.rs` in
+  BOTH directions, so a NEWLY ADDED public knob with no evidence entry fails the
+  build rather than joining the backlog that created epic #1685.
 
 ### Fixed
 
@@ -355,6 +614,7 @@ format — CommitLog segment files — alongside SSTables. No breaking changes; 
 module and CLI subcommand are purely additive.
 
 ### Added
+
 
 - Cassandra 5.0 CommitLog reader: `cqlite_core::storage::commitlog` with
   `CommitLogReader::open` / `open_with_schemas` and a lazy streaming `MutationIter`

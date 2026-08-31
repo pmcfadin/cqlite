@@ -9,6 +9,28 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
 
 ## Steps
 
+> **FIRST — is this a COMPLETED delivery or a SLICE? (issue #3550)** A **slice** is a merged PR that
+> shipped part of an issue which **deliberately stays OPEN** (the shape the lead ruled correct on
+> #3393). This skill's default path ends by **archiving the change, setting the board to Done, and
+> CLOSING the issue** — every one of which is **WRONG for a slice**, and closing the issue is the
+> named FORBIDDEN workaround #3550 exists to prevent. Do not run steps 3, 5 and 7 unmodified for a
+> slice; see **"Slice deliveries"** below, which says exactly what to do instead. Deciding is
+> mechanical, not a judgement call: if the merged PR declared `Closes #<N>` it is a **completed
+> delivery**; if it deliberately did not, it is a **slice**.
+> Compare by **URL**, never by number — an issue NUMBER is repository-scoped, so a PR closing
+> `other-repo#<N>` would read as closing THIS repo's `#<N>` and you would close a deliberately-open
+> issue. `delivery-telemetry.py` makes the same comparison the same way (issue #3550).
+> ```bash
+> # gh's built-in --jq takes NO --arg, so the issue url is passed through the ENVIRONMENT
+> # and read with jq's env.U. (`gh pr view --jq --arg u "$u" '<expr>'` is a usage error:
+> # --jq consumes "--arg" and the rest become surplus positionals.)
+> export U=$(gh issue view <N> --json url --jq .url)
+> gh pr view <pr> --json closingIssuesReferences \
+>   --jq 'if [.closingIssuesReferences[].url] | index(env.U) then "COMPLETED" else "SLICE" end'
+> # COMPLETED -> run every step as written
+> # SLICE     -> follow "Slice deliveries" below
+> ```
+
 1. **Confirm the merge + capture the merged branch.** state MUST be `MERGED`; the cleanup in step 6 keys
    off the merged PR's **`headRefName`** (NOT a `issue-<N>-*` glob — see the #1162 guardrails below):
    ```bash
@@ -30,7 +52,8 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    fi
    ```
    (Archiving + cleanup below run from the worktree; they don't require local main.)
-3. **Archive the OpenSpec change** (design-driven): `openspec archive <slug> --yes` (use `--skip-specs`
+3. **Archive the OpenSpec change** (design-driven) — **NOT for a SLICE delivery** (see the gate above:
+   the change is unfinished and archiving strands the remaining slices): `openspec archive <slug> --yes` (use `--skip-specs`
    only for a doc/infra change with no capability delta). This moves the change to
    `openspec/changes/archive/` and syncs its delta spec into `openspec/specs/<capability>/spec.md`.
    Commit the archive (and push / open a small PR per the repo's merge norms).
@@ -45,6 +68,20 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
      --gate pass|fail|not-run --gate-runs <runs through the first PASS; don't re-run after a pass> \
      # `--gate not-run --gate-runs 0` (#3448) is the ONLY honest record when NO full gate of
      # record ran; the two are coupled both ways (not-run <=> 0) and neither flag is optional.
+     # Add --slice (#3550) when the ISSUE deliberately stays OPEN and this PR shipped a SLICE of it:
+     # it records closed_at: null and bounds cycle_time_s on the PR's mergedAt. The kind is decided by
+     # replaying the issue TIMELINE to the PR's mergedAt (#3559): slice <=> the issue was OPEN at
+     # mergedAt AND this PR closes NOTHING. So a slice STAYS stampable after its issue is closed or
+     # reopened, and --slice is refused when the LAST `closed`/`reopened` event STRICTLY BEFORE
+     # mergedAt is a `closed` -- the LAST one decides, so a close FOLLOWED by a reopen before the
+     # merge leaves the issue open at mergedAt and is ACCEPTED (a deciding close COMPLETED the issue), when a state event falls in the SAME SECOND as
+     # mergedAt (one-second resolution, so the tie is unmeasurable and is refused as that), or when
+     # this PR declares it closes the issue (an ordinary completed delivery whose auto-close lands
+     # after the merge — retry WITHOUT --slice once GitHub records the close). An issue open at
+     # mergedAt stamped WITHOUT --slice is refused too. Where the tool CANNOT disprove your flag it
+     # accepts it and says on stderr that the kind rests on YOUR assertion, not a measurement — read
+     # that note, it is not noise. NEVER close the issue to satisfy the tool, and NEVER hand-append
+     # to the JSONL: both are FORBIDDEN.
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
    # This skill NEVER invokes roborev (the closer owns the final pass, via the only sanctioned invocation
@@ -76,7 +113,8 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    (pass it to override). `record` refuses a second stamp for the same issue (pass `--allow-duplicate` to
    override). The live ledger lives on `main`, reachable only via a PR (never a direct push).
    Confirm with `python3 scripts/delivery-telemetry.py lint`.
-5. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
+5. **Set the board to Done + release the claim.** — **NOT Done for a SLICE delivery** (see the gate
+   above: use `Ready`/`In Progress`; Done hides an unfinished issue from dispatch). The PR-merged / issue-closed server-side automation
    should already have moved the Project item to `Status=Done` (it fires even when you merge from the
    phone/web — no `flow-*` run needed); if it hasn't, set it yourself:
    ```bash
@@ -122,8 +160,10 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    ```bash
    bash scripts/flow/claim-heartbeat.sh clear "$(hostname -s)"
    ```
-7. **Close the issue** with a traceable comment referencing the merged PR + commit (only if its
-   acceptance criteria are fully met — never close an epic):
+7. **Close the issue** with a traceable comment referencing the merged PR + commit — **only** if its
+   acceptance criteria are fully met, **never** for a SLICE delivery (see the gate at the top and
+   "Slice deliveries" above: a slice's issue stays OPEN by design, and closing it here is the
+   FORBIDDEN workaround of #3550), and never an epic:
    ```bash
    gh issue close <N> --reason completed --comment "Merged via #<pr> (<commit>). <one-line why>."
    ```
@@ -131,6 +171,22 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
    exhausted, fall back to `gh api` REST (comment → `repos/OWNER/REPO/issues/N/comments`,
    close → `PATCH repos/OWNER/REPO/issues/N -f state=closed`). Never stall finalize on one exhausted bucket.
+### Slice deliveries — what changes (issue #3550)
+
+A slice finalizes the **delivery**, never the **issue**. Run steps 1, 2, 4 and 6 as written; the other
+three are wrong for a slice, in the direction that destroys the thing the issue is protecting:
+
+| step | completed delivery | **slice** |
+|---|---|---|
+| 3 — archive the OpenSpec change | archive it | **DO NOT.** The change is not finished; archiving it strands the remaining slices with no spec. |
+| 4 — stamp telemetry | as written | add **`--slice`**. It records `closed_at: null` and bounds `cycle_time_s` on the PR's `mergedAt`. Since **#3559** the tool decides this by replaying the issue's **timeline** to the PR's `mergedAt`, so it now **ACCEPTS** `--slice` for an issue that is closed or reopened NOW but was open when your PR merged — the case that used to be unstampable. It REFUSES when the **last** `closed`/`reopened` event **strictly before** `mergedAt` is a `closed` (that delivery COMPLETED the issue; a later reopen does not change it — but a close FOLLOWED by a reopen *before* the merge leaves the issue open at `mergedAt` and IS accepted), when a state event falls in the **same second** as `mergedAt` (one-second resolution, so the tie is unmeasurable), and when **this PR declares it closes the issue** (`Closes #N` ⇒ completed delivery, whatever the issue's current state). A refusal therefore still means you classified wrong — but re-read *which* of those it names, and **never** close the issue to make the stamp succeed. |
+| 5 — board `Status=Done` | set Done | **DO NOT.** Set `Status=Ready` (more slices to claim) or leave `In Progress` if you are continuing. Done on an unfinished issue hides it from dispatch. |
+| 7 — **close the issue** | close it | **DO NOT CLOSE.** Comment instead, naming the slice shipped and what remains: `gh issue comment <N> --body "Slice shipped: #<pr> (<commit>) — <what landed>. Remaining: <what does not>. Issue stays OPEN by design (#3393 ruling)."` |
+
+**Closing a deliberately-open issue because this skill's default path says to is exactly the
+substitution #3550 forbids** — a tool's or a checklist's shape must never decide whether a problem is
+recorded as solved. If you are unsure which kind you have, ASK the lead rather than closing.
+
 8. **Report** the closed issue, the live capability (if a spec was synced), and surface the next board
    item.
 9. **Reset before the next item (issue #2085).** This is the inter-issue compaction point. The ledger stamp

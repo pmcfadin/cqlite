@@ -87,16 +87,20 @@ pub(super) enum RunState {
 /// runtime and calls
 /// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
 /// which decompresses one chunk at a time, drains every fully-decoded partition
-/// out of the window, and forwards each entry one at a time into a bounded
-/// `sync_channel`. The channel capacity is up to [`STREAMING_CHANNEL_CAPACITY`](super::STREAMING_CHANNEL_CAPACITY)
-/// entries, adaptively reduced under concurrent merges (see [`egress_budget`](super::egress_budget));
-/// once the channel is full the producer blocks until the consumer (the main
-/// merge thread) pulls the next entry.
+/// out of the window, and forwards the entries into a bounded `sync_channel` in
+/// BATCHES (issue #2820 — one cross-thread wake per batch instead of per row; see
+/// [`egress_batch`](super::egress_batch)). The channel's capacity is in MESSAGES,
+/// converted from the [`STREAMING_CHANNEL_CAPACITY`](super::STREAMING_CHANNEL_CAPACITY)
+/// ROW budget, adaptively reduced under concurrent merges (see
+/// [`egress_budget`](super::egress_budget)); once the channel is full the producer
+/// blocks until the consumer (the main merge thread) pulls the next batch.
 ///
 /// The bounded window plus the bounded channel together make end-to-end peak
 /// memory independent of total input size: a source's decompressed content is
 /// never fully resident. Peak is roughly `max_partition_size + one_chunk +
-/// channel_capacity` per source (issue #827).
+/// egress_batch::max_inflight_rows` per source (issue #827; `4 × rows_cap` since
+/// #2820 — 1024 at the default, 32 at the throttled floor — and additionally
+/// bounded in BYTES by `egress_batch::BATCH_EMIT_BYTES_MERGE` per batch).
 ///
 /// ## Issue #591 safety (mmap vs file deletion)
 ///
@@ -152,20 +156,48 @@ pub(super) struct SSTableRowIteratorAdapter {
     /// the shared `cqlite.merge.egress_channel_depth` gauge upward across
     /// repeated cancellations on a long-running server.
     pub(super) sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
-    /// This adapter's own count of DATA entries actually received/consumed,
-    /// incremented alongside every [`channel_depth::received`] call this adapter
-    /// makes ([`Self::next`]'s normal consumption). Only ever touched by the
-    /// thread holding `&mut self` (never shared), so a plain `i64`.
+    /// This adapter's own count of DATA entries actually received off the
+    /// channel, incremented by the same batch length as every
+    /// [`channel_depth::received_n`] call this adapter makes ([`Self::next`]'s
+    /// normal consumption). Only ever touched by the thread holding `&mut self`
+    /// (never shared), so a plain `i64`.
+    ///
+    /// Issue #2820: "received" means PULLED OFF THE CHANNEL, not handed to the
+    /// consumer — entries still sitting in [`Self::held`] are counted here,
+    /// because the gauge they balance tracks channel occupancy and they have
+    /// already left it. That keeps the `Drop` reconcile exact for an abandoned
+    /// partial batch: it was never a residual to begin with.
     pub(super) received_count: i64,
     /// This run's verdict (issue #3120) — see [`RunState`]. The single place a
     /// "this run is exhausted" answer may come from.
     pub(super) state: RunState,
     /// Test-only (issue #2765): the exact `sync_channel` capacity this adapter's
-    /// egress channel was built with — the merge-scoped adaptive snapshot the
-    /// constructor threaded in. Observed via [`SSTableRowIterator::egress_channel_capacity`]
-    /// so a wiring test proves the budget reaches BOTH construction sites.
+    /// egress channel was built with. Since issue #2820 that argument is in
+    /// MESSAGES (batches) — the truth of what was passed to `sync_channel` —
+    /// while the merge-scoped adaptive snapshot the constructor threaded in is in
+    /// ROWS; see [`Self::egress_rows_capacity`]. Observed via
+    /// [`SSTableRowIterator::egress_channel_capacity`] so a wiring test proves the
+    /// budget reaches BOTH construction sites.
     #[cfg(test)]
     pub(super) egress_channel_capacity: usize,
+    /// Test-only (issue #2820): the ROW capacity snapshot
+    /// [`Self::egress_channel_capacity`] was derived from — i.e. the value
+    /// `egress_budget::begin_merge` handed the constructor, in the units every
+    /// `egress_budget` doc and test speaks. Keeping BOTH observable is what lets a
+    /// wiring test assert the CONVERSION (`message_capacity_for_rows(rows) ==
+    /// messages`) rather than just a plausible-looking number: a channel silently
+    /// built with the ROW budget as its message capacity is a 256x resident-row
+    /// blow-up that an unconverted assertion would have called correct.
+    #[cfg(test)]
+    pub(super) egress_rows_capacity: usize,
+    /// The BATCH this adapter received from the channel and is handing out one
+    /// entry per [`SSTableRowIterator::next`] (issue #2820). Empty between
+    /// batches; refilled by exactly one `recv`.
+    ///
+    /// Its entries have ALREADY left the bounded channel, so they are already
+    /// accounted on the egress-depth gauge as received — see `next` and the
+    /// `Drop` reconcile.
+    pub(super) held: std::vec::IntoIter<MergeEntry>,
 }
 
 /// Poll interval for the cancel-aware blocking `recv` in
@@ -214,7 +246,14 @@ impl SSTableRowIteratorAdapter {
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
         let adapter_cancel = scan_cancel.clone();
 
-        let (sender, receiver) = std::sync::mpsc::sync_channel(channel_capacity);
+        // Issue #2820: `channel_capacity` is a ROW budget (`egress_budget`'s whole
+        // vocabulary is rows); the channel carries BATCHES, so it is converted to a
+        // MESSAGE capacity here — the same conversion, from the same constant, as
+        // the shared-reader construction site in `from_readers`. Passing the row
+        // budget straight through would budget 256 BATCHES = 65_536 entries per
+        // source. See `egress_batch::message_capacity_for_rows`.
+        let message_capacity = super::egress_batch::message_capacity_for_rows(channel_capacity);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(message_capacity);
         // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
         // with the producer thread so `Drop` can read its post-join-stable value
         // for the egress-depth reconcile (see the field doc).
@@ -244,6 +283,18 @@ impl SSTableRowIteratorAdapter {
         // imply current parity coverage. (This file is far over the #1116 campsite
         // target; the +2 lines are the minimal propagation.)
         let subphase_sink = crate::observability::stream_subphase::current();
+        // Issue #1707: the read-PHASE sink, propagated the SAME way and for the same
+        // reason — and on THIS path it is exercised in production, unlike the
+        // sub-phase sink above: `generation_merge::stream_generations_for_read`
+        // reaches `KWayMerger::new` → `MergeInput::Paths` → here, so the chunk decode
+        // of every cross-generation read runs on this thread. Installing the sink on
+        // the merge/consumer thread alone left that route recording `merge` and
+        // nothing else. It reaches the shared chunk-decode plane
+        // (`reader::chunk_source`), so DECOMPRESS is measured through it; the io seam
+        // lives only in the windowed scan's read helpers and is therefore still NOT
+        // reached from here — see `observability::read_phase`'s coverage boundary.
+        // `None` (no-op) for an unmetered caller.
+        let read_phase_sink = crate::observability::read_phase::current();
 
         // Issue #3120: whatever fault a test armed FOR THIS INPUT is captured HERE
         // (never re-read mid-walk) and owned by the producer thread. Always empty —
@@ -261,6 +312,7 @@ impl SSTableRowIteratorAdapter {
         // worker threads beyond itself (Issue #2316).
         let producer = match std::thread::Builder::new().spawn(move || {
             let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
+            let _read_phase_guard = crate::observability::read_phase::install(read_phase_sink);
             Self::producer_thread(
                 path_buf,
                 run_index,
@@ -269,6 +321,7 @@ impl SSTableRowIteratorAdapter {
                 scan_cancel,
                 sender,
                 producer_sent_count,
+                channel_capacity,
                 fault,
                 reporting,
             );
@@ -289,11 +342,14 @@ impl SSTableRowIteratorAdapter {
             scan_cancel: adapter_cancel,
             sent_count,
             received_count: 0,
+            held: Vec::new().into_iter(),
             // Issue #3120: no terminator observed yet. `None` (end of input) is
             // reachable ONLY from a `Done`-proven `RunState::Finished`.
             state: RunState::Streaming,
             #[cfg(test)]
-            egress_channel_capacity: channel_capacity,
+            egress_channel_capacity: message_capacity,
+            #[cfg(test)]
+            egress_rows_capacity: channel_capacity,
         })
     }
 
@@ -303,12 +359,12 @@ impl SSTableRowIteratorAdapter {
     /// source one partition at a time via
     /// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
     /// converting each entry to a [`MergeEntry`] (populating the clustering key
-    /// from the decoded cells when the schema has clustering columns) and
-    /// sending it through the bounded channel immediately (issue #827). The
+    /// from the decoded cells when the schema has clustering columns) and sending
+    /// it through the bounded channel, BATCHED since issue #2820 (issue #827). The
     /// blocking `SyncSender::send` provides the backpressure that — together
     /// with the reader's sliding-window stitch+parse — keeps peak memory bounded
-    /// by `max_partition_size + one_chunk + channel_capacity`, independent of
-    /// the total source size.
+    /// by `max_partition_size + one_chunk + egress_batch::max_inflight_rows`
+    /// (and `egress_batch::max_inflight_bytes`), independent of total source size.
     ///
     /// Sends EXACTLY ONE terminal [`MergeMsg`] on EVERY exit path (issue #3120) —
     /// `Done` on a completed walk, `Failed` on an error return, `Failed(Panicked)`
@@ -324,6 +380,10 @@ impl SSTableRowIteratorAdapter {
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
         sender: std::sync::mpsc::SyncSender<MergeMsg>,
         sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
+        // Issue #2820: the merge-scoped adaptive ROW capacity, which bounds this
+        // run's BATCH size as well as its channel's message capacity — see
+        // `egress_batch::batch_limit_ceiling`.
+        channel_capacity: usize,
         mut fault: MergeProducerFault,
         reporting: crate::storage::sstable::reader::OpenErrorReporting,
     ) {
@@ -438,6 +498,7 @@ impl SSTableRowIteratorAdapter {
                         &scan_cancel,
                         &sender,
                         sent_count.as_ref(),
+                        channel_capacity,
                         fault,
                     )
                     .await
@@ -510,40 +571,60 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
             if self.scan_cancel.is_cancelled() {
                 return Some(Err(Error::Cancelled));
             }
+            // Hand out the next entry of the batch already in hand (issue #2820)
+            // BEFORE touching the channel. Deliberately BELOW the cancel check, so
+            // cancellation wins over a partially-drained batch too: the run is
+            // abandoned, and a torn-down consumer that kept draining buffered rows
+            // would delay the very teardown the cancel exists to start. Its
+            // entries were already accounted as received when the batch was pulled
+            // off the channel, so abandoning them here cannot unbalance the
+            // egress-depth gauge (nor the `Drop` reconcile, which is computed from
+            // the SAME `received_count`).
+            if let Some(entry) = self.held.next() {
+                // Issue #2096: one merge entry decoded from `Data.db` by THIS
+                // adapter-driven run — a full scan, compaction, or (via the
+                // fail-safe `SinglePartitionFilterRun`) a point read all share
+                // this increment site, so `merge_run_entries_decoded` counts
+                // entries for any of them, not point reads alone. It is counted
+                // per ENTRY HANDED OUT (never per batch received): its unit is
+                // entries decoded, and every existing bound test reads it as such.
+                // See `work_counters::merge_run_entries_decoded`'s doc for the
+                // process-global caveat when using it as a delta assertion.
+                crate::storage::sstable::work_counters::add_merge_run_entry_decoded();
+                return Some(Ok(entry));
+            }
             match receiver.recv_timeout(RECV_CANCEL_POLL) {
-                Ok(MergeMsg::Item(entry)) => {
-                    // Issue #2419 (WS2): this DATA entry just left the bounded
-                    // egress channel — decrement the live occupancy gauge,
-                    // balancing the `channel_depth::sent()` at its send site
-                    // (`from_readers::forward_row`). `received_count` is this
-                    // adapter's OWN mirror of that decrement (roborev job 1733),
-                    // read by `Drop` post-join to compute the exact reconcile
-                    // residual — see the field doc.
+                Ok(MergeMsg::Batch(entries)) => {
+                    // Issue #2419 (WS2): these DATA entries just left the bounded
+                    // egress channel — decrement the live occupancy gauge by the
+                    // BATCH LENGTH, balancing the `channel_depth::sent_n` at its
+                    // send site (`egress_batch::EgressBatcher::flush`).
+                    // `received_count` is this adapter's OWN mirror of that
+                    // decrement (roborev job 1733), read by `Drop` post-join to
+                    // compute the exact reconcile residual — see the field doc.
+                    // Issue #2820: BOTH must move by entries, never by 1 per
+                    // message, or the residual drifts by `entries - messages` and
+                    // the `> 0` guard plus `max(0)` floor hide it forever.
                     //
                     // Issue #3120 — the receive-side half of "a TERMINATOR is
                     // untracked on both sides". Note what enforces it HERE: this
-                    // arm does NOT call `MergeMsg::is_tracked_data` (that is the
+                    // arm does NOT call `MergeMsg::tracked_entries` (that is the
                     // send site's compile-time tripwire). It is correct because
                     // (a) the `match` it belongs to is EXHAUSTIVE with no wildcard
                     // arm, so a future 4th variant is a compile error rather than
-                    // a silent catch-all, and (b) `channel_depth::received`,
-                    // `received_count` and `add_merge_run_entry_decoded` each
-                    // appear at exactly ONE site in the crate — all three right
-                    // here. Counting a terminator on exactly one side drives the
-                    // reconcile residual negative, which `reconcile_residual`'s
-                    // `> 0` guard skips and `record`'s `max(0)` floor then hides
-                    // from every observer, permanently.
-                    channel_depth::received();
-                    self.received_count += 1;
-                    // Issue #2096: one merge entry decoded from `Data.db` by THIS
-                    // adapter-driven run — a full scan, compaction, or (via the
-                    // fail-safe `SinglePartitionFilterRun`) a point read all share
-                    // this increment site, so `merge_run_entries_decoded` counts
-                    // entries for any of them, not point reads alone. See
-                    // `work_counters::merge_run_entries_decoded`'s doc for the
-                    // process-global caveat when using it as a delta assertion.
-                    crate::storage::sstable::work_counters::add_merge_run_entry_decoded();
-                    return Some(Ok(entry));
+                    // a silent catch-all, and (b) `channel_depth::received_n` and
+                    // `received_count` each appear at exactly ONE site in the
+                    // crate — both right here, both passed the same length.
+                    let received = entries.len();
+                    channel_depth::received_n(received);
+                    self.received_count += received as i64;
+                    // Hold the batch and loop: the top of the loop re-checks the
+                    // cancel flag, then hands out its first entry. An EMPTY batch
+                    // (never sent by `EgressBatcher`, which returns early on an
+                    // empty accumulator) simply polls again — it can never be
+                    // mistaken for end-of-input, which only `Done` proves.
+                    self.held = entries.into_iter();
+                    continue;
                 }
                 // TERMINAL failure. Recorded so a repeat poll re-reports the
                 // identical error. `Cancelled` stays a distinct `Error::Cancelled`
@@ -574,12 +655,19 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
         }
     }
 
-    /// Issue #2765 wiring hook: the exact adaptive capacity this adapter's egress
-    /// `sync_channel` was constructed with (the merge-scoped snapshot the
-    /// constructor threaded in).
+    /// Issue #2765 wiring hook: the exact capacity this adapter's egress
+    /// `sync_channel` was constructed with — in MESSAGES since issue #2820.
     #[cfg(test)]
     fn egress_channel_capacity(&self) -> Option<usize> {
         Some(self.egress_channel_capacity)
+    }
+
+    /// Issue #2820 wiring hook: the ROW capacity snapshot the message capacity
+    /// above was derived from (the merge-scoped `egress_budget` snapshot the
+    /// constructor threaded in).
+    #[cfg(test)]
+    fn egress_rows_capacity(&self) -> Option<usize> {
+        Some(self.egress_rows_capacity)
     }
 }
 
@@ -668,7 +756,11 @@ impl Drop for SSTableRowIteratorAdapter {
         //    before the join). Any DATA entries this adapter's producer
         //    successfully sent but this consumer never received — abandoned when
         //    the channel was torn down while entries were still buffered —
-        //    are exactly `sent_count - received_count`; reconcile the shared
+        //    are exactly `sent_count - received_count`. Issue #2820: entries of a
+        //    partially-drained HELD batch are NOT part of that residual; they were
+        //    counted as received when the batch left the channel, which is the same
+        //    moment the gauge was decremented for them, so abandoning them here is
+        //    already balanced. reconcile the shared
         //    gauge by that residual in ONE atomic op so a cancelled/disconnected
         //    scan returns `cqlite.merge.egress_channel_depth` to baseline instead
         //    of drifting upward.

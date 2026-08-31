@@ -587,6 +587,55 @@ pub const MEMTABLE_ROWS: &str = "cqlite.memtable.rows";
 /// attributes.
 pub const WAL_SYNC_DURATION: &str = "cqlite.wal.sync.duration";
 
+/// `cqlite.wal.size` — gauge `By` (issue #1707).
+///
+/// Current on-disk size of the active write-ahead log segment, in bytes, reported
+/// by the write engine after each successful mutation (the same seam that reports
+/// the memtable gauges) — the engine already tracks it, so nothing is sampled or
+/// stat'ed to produce this.
+///
+/// **Healthy vs alarming**: saw-tooths — it grows with writes and drops back when a
+/// flush truncates/rotates the log. A level that only ever climbs means flushes are
+/// not keeping up (or are not happening), which is both a durability-replay-time
+/// problem and a disk-space one: recovery cost at next open is a function of this
+/// size, so cross-check [`WAL_RECOVERY_DURATION`]. **Attributes**: none.
+pub const WAL_SIZE: &str = "cqlite.wal.size";
+
+/// `cqlite.wal.recovery.duration` — histogram `s` (issue #1707).
+///
+/// How long write-ahead-log recovery at engine open took, in seconds. Recovery is
+/// BOTH halves of what open does to the log: the CRC validation scan (plus any
+/// torn-tail trim) and the replay of its entries into the memtable. On a large or
+/// corrupt-tail WAL the validation scan is the dominant half, which is why the
+/// timer spans the whole window — a replay-only timing would understate exactly the
+/// startup an operator is asking about. Recovery happens EXACTLY ONCE per engine
+/// open, so this series normally carries ONE sample per process — read it as a
+/// value, not as a distribution.
+///
+/// **Why a histogram and not a gauge, which is what one-sample-per-process argues
+/// for**: the gauge plane in this crate is `i64` (`Gauge<i64>`, and OTel's gauge
+/// builders here are `i64`/`u64`), and this value is sub-second in the common case.
+/// An `i64` gauge in base-unit SECONDS would report `0` for a 400 ms recovery — a
+/// FABRICATED zero, which is the precise defect class epic #1686 exists to remove,
+/// and worse than the wart of a one-sample distribution. Reporting milliseconds
+/// instead would break the catalog's base-unit rule (see the `read.phase.*`
+/// naming note). So the instrument follows the value's precision, and every other
+/// duration in this catalog is an `f64` histogram in seconds anyway.
+///
+/// **Recorded unconditionally at every engine open, including the 0-entry case**: a
+/// fresh WAL with nothing to recover genuinely took ~0s, and that IS a measurement —
+/// the absence rule forbids inventing a value nobody measured, not reporting a real
+/// one that happens to be small. It is also recorded when replay found CORRUPTION,
+/// before the lossy-recovery branch, because that is exactly when an operator cares
+/// what open cost. Absence of this series therefore means "no engine was opened in
+/// this process", never "recovery was skipped".
+///
+/// **Healthy vs alarming**: near-zero after a clean shutdown; seconds means a crash
+/// left a large log to validate and replay, which directly delays open — pair it
+/// with [`WAL_SIZE`], whose growth is what makes this number grow.
+/// **Attributes**: none.
+pub const WAL_RECOVERY_DURATION: &str = "cqlite.wal.recovery.duration";
+
 /// `cqlite.flush.duration` — histogram `s`.
 ///
 /// Distribution of memtable→SSTable flush durations in seconds. No
@@ -756,32 +805,32 @@ pub const MERGE_PRODUCER_THREADS: &str = "cqlite.merge.producer_threads";
 /// per-channel `sync_channel` capacity every new merge receives is
 /// `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)`, so this gauge makes
 /// the otherwise-invisible backpressure throttle legible — a level well above
-/// `EGRESS_ROW_BUDGET / 256` means concurrent merges are being squeezed toward
-/// `MIN_CAP`. Deliberately DISTINCT from [`MERGE_PRODUCER_THREADS`], which
-/// counts per-SOURCE producer threads (`O(K × active_merges)`): this counts
-/// MERGES, the unit the budget is keyed on. No high-cardinality attributes.
+/// `EGRESS_ROW_BUDGET / 256` means merges are being squeezed toward `MIN_CAP`.
+/// DISTINCT from [`MERGE_PRODUCER_THREADS`] (per-SOURCE producer threads,
+/// `O(K × active_merges)`): this counts MERGES, the budget's unit.
 pub const MERGE_ACTIVE_MERGES: &str = "cqlite.merge.active_merges";
 
 /// `cqlite.merge.egress_channel_depth` — gauge `{entry}` (issue #2419, WS2).
 ///
-/// Live occupancy of the bounded producer→consumer `sync_channel` (capacity up
-/// to `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent
-/// merges — see [`MERGE_ACTIVE_MERGES`] / issue #2765, `merge/mod.rs`) that carries merged
-/// entries from each per-input producer thread toward the consumer (the k-way
-/// merge that feeds the Flight `do_get` egress or the write-engine compaction
-/// output). `std::sync::mpsc::sync_channel` exposes no `len()`, so occupancy is
-/// tracked by a process-wide atomic incremented on a successful data-entry send
-/// and decremented on the matching receive (mirroring the #2316
-/// `producer_threads` gauge pattern), floored at 0.
+/// Live occupancy, in ENTRIES (rows), of the bounded producer→consumer
+/// `sync_channel` carrying merged entries from each per-input producer thread to
+/// the k-way merge feeding `do_get` egress or compaction output. `sync_channel`
+/// exposes no `len()`, so occupancy is a process-wide atomic incremented on a
+/// successful data send and decremented on the matching receive (the #2316
+/// pattern), floored at 0. The ROW budget is `STREAMING_CHANNEL_CAPACITY` = 256,
+/// adaptively reduced under concurrent merges ([`MERGE_ACTIVE_MERGES`] / #2765);
+/// since #2820 a MESSAGE carries a BATCH of up to
+/// `merge::egress_batch::batch_limit_ceiling(rows_cap)` rows, moving the level by
+/// `n` not 1. THIS gauge's per-source ceiling is therefore
+/// `merge::egress_batch::rows_resident_in_channel(rows_cap)` = `2 × rows_cap` —
+/// **512 at the shipped default**. Do NOT threshold on `max_inflight_rows`
+/// (`4 × rows_cap`, 1024): that is the MEMORY bound, which also counts the
+/// consumer-HELD batch (already decremented here) and the one a PARKED producer
+/// owns — 2× a level this gauge cannot reach.
 ///
-/// **Healthy vs alarming**: a depth near zero means the consumer is keeping up
-/// (or a producer is stalled, e.g. disk-bound — cross-check `cqlite.rpc.rows`);
-/// a depth riding near the channel capacity means the producer is outrunning a
-/// slower consumer (the egress is back-pressured, distinguishing a "stuck in
-/// `do_get`" stall from a disk-bound one). OS-independent (always emits, on
-/// every platform), unlike the `cqlite.proc.*` gauges. No high-cardinality
-/// attributes. Lives in `cqlite.merge.*` alongside [`MERGE_PRODUCER_THREADS`]
-/// (both merge-scoped, shared by compaction + Flight).
+/// **Healthy vs alarming**: near zero = the consumer keeps up (or a producer is
+/// stalled, e.g. disk-bound — cross-check `cqlite.rpc.rows`); riding near that
+/// ceiling = back-pressured egress. OS-independent; no high-cardinality attrs.
 pub const MERGE_EGRESS_CHANNEL_DEPTH: &str = "cqlite.merge.egress_channel_depth";
 
 // ---------------------------------------------------------------------------
@@ -923,158 +972,30 @@ pub const FLIGHT_WARM_TABLES: &str = "cqlite.flight.warm_tables";
 /// an application error.
 pub const ERRORS_TOTAL: &str = "cqlite.errors.total";
 
-// ---------------------------------------------------------------------------
-// Arrow Flight gRPC service (issue #1041) — emitted from `cqlite-flight`.
-// ---------------------------------------------------------------------------
+/// Read-path PHASE timing histograms + the reader-reported fd gauge (issue #1707)
+/// live in a sibling file so `catalog.rs` stays inside the campsite-rule source
+/// target (#1116). Re-exported so every public path (`catalog::READ_PHASE_IO`, …)
+/// is unchanged.
+#[path = "catalog_read_phase.rs"]
+mod read_phase;
 
-/// `cqlite.rpc.requests` — counter `1`.
-///
-/// Total Arrow Flight RPC requests served, one increment per completed RPC.
-/// Bounded attributes: [`attr::RPC_METHOD`] (fixed `FlightService` method set)
-/// and [`attr::RPC_STATUS`] (`ok`/`error`) so a dashboard computes per-method
-/// error rate from one series. NEVER carries request payloads or ticket data.
-pub const RPC_REQUESTS: &str = "cqlite.rpc.requests";
+pub use read_phase::{
+    READER_FDS_OPEN, READ_PHASE_DECODE, READ_PHASE_DECOMPRESS, READ_PHASE_IO, READ_PHASE_MERGE,
+};
 
-/// `cqlite.rpc.duration` — histogram `s`.
-///
-/// Distribution of Arrow Flight RPC handler durations in seconds (handler entry
-/// to response/stream construction). Bounded attributes: [`attr::RPC_METHOD`],
-/// [`attr::RPC_STATUS`].
-pub const RPC_DURATION: &str = "cqlite.rpc.duration";
+/// Arrow Flight gRPC metric names (`cqlite.rpc.*`, `cqlite.warm.cache.*`,
+/// `cqlite.flight.admission.*`) live in a sibling file so `catalog.rs` stays
+/// inside the campsite-rule source target (#1116, split by #1707). Re-exported so
+/// every public path (`catalog::RPC_DURATION`, …) is unchanged.
+#[path = "catalog_flight.rs"]
+mod flight;
 
-/// `cqlite.rpc.in_flight` — gauge `1`.
-///
-/// Number of Arrow Flight RPCs currently being handled (incremented on entry,
-/// decremented on completion). Bounded attributes: [`attr::RPC_METHOD`].
-pub const RPC_IN_FLIGHT: &str = "cqlite.rpc.in_flight";
-
-/// `cqlite.rpc.rows` — counter `{row}`.
-///
-/// Total rows returned to clients by `do_get` (summed across emitted record
-/// batches). Emitted incrementally during a long-running scan (issue #2162): a
-/// monotonic counter delta per record batch as it passes toward the client, so a
-/// climbing value reads as a healthy long scan and a flat one (while
-/// [`RPC_IN_FLIGHT`] > 0) as a stall. The counter total over a fully-drained
-/// stream is unchanged — only the emission cadence moved from stream-end to
-/// per-batch. Bounded attributes: [`attr::RPC_METHOD`].
-pub const RPC_ROWS: &str = "cqlite.rpc.rows";
-
-/// `cqlite.rpc.bytes` — counter `By`.
-///
-/// Total record-batch payload bytes streamed to clients by `do_get` (in-memory
-/// Arrow batch size, pre-IPC-framing). Emitted incrementally during a
-/// long-running scan (issue #2162): a monotonic counter delta per record batch;
-/// the total over a fully-drained stream is byte-identical to the pre-#2162
-/// single end-of-stream emission. Bounded attributes: [`attr::RPC_METHOD`].
-pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
-
-/// `cqlite.rpc.phase.duration` — histogram `s` (issue #2162; `admission` phase
-/// added #2420 roborev-1700; `validate` phase added #2420 roborev-1702).
-///
-/// Wall time a `do_get` spends in each of a bounded, closed set of execution
-/// phases — `validate` (parsing the ticket bytes, BEFORE any admission-permit
-/// acquire — a syntactically malformed ticket records ONLY this phase),
-/// `admission` (queued waiting for, or immediately granted, an admission permit
-/// — see #2420 — AFTER validation but BEFORE any producer/schema construction
-/// or filesystem access), `resolve` (producer/schema construction + path
-/// discovery/token prune), `merge_setup` (opening input SSTables + building the
-/// k-way merger, the #2157 stall suspect), and `stream` (partitions stepping +
-/// batches flowing to the client). Recorded once per phase transition, so a
-/// `do_get` dominated by opening SSTables shows its wall time accumulating in
-/// `merge_setup` BEFORE the first batch, and a `do_get` queued behind a
-/// saturated admission ceiling shows it accumulating in `admission` BEFORE
-/// `resolve` even starts — a stall (or queueing delay, or a flood of malformed
-/// tickets) that emits zero rows still localizes to a phase. `cqlite.rpc.duration`
-/// already includes admission wait time in the RPC total; this is the per-phase
-/// breakdown field triage uses to localize WHERE that time went (e.g. #2398).
-/// Bounded attributes: [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed
-/// five-value set). NEVER carries a ticket, key, token range, or query-text
-/// attribute.
-pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
-
-/// `cqlite.rpc.phase.active` — gauge `1` (issue #2361; `admission` phase added
-/// #2420 roborev-1700; `validate` phase added #2420 roborev-1702).
-///
-/// In-flight visibility of the phase a `do_get` is CURRENTLY executing, set to 1
-/// on phase entry and back to 0 on exit (via [`super::super`]'s `PhaseTimer`
-/// transition/`Drop`). [`RPC_PHASE_DURATION`] only records a sample once a phase
-/// COMPLETES, so a `do_get` wedged forever in `stream` (the #2361 hang: a merge
-/// that never returns a batch) recorded NOTHING — this gauge shows `stream = 1`
-/// for the entire hang, so a stall is observable BEFORE completion; likewise a
-/// `do_get` queued behind a saturated admission ceiling shows `admission = 1`
-/// for the whole wait. Bounded attributes: [`attr::RPC_METHOD`],
-/// [`attr::RPC_PHASE`] (the closed five-value set) — low cardinality (methods ×
-/// 5 phases). NEVER a ticket/key/query value.
-pub const RPC_PHASE_ACTIVE: &str = "cqlite.rpc.phase.active";
-
-/// `cqlite.warm.cache.hits` — counter `{1}` (issue #2310).
-///
-/// Flight warm-handle cache hits: a request whose probed SSTable generation set
-/// matched the cached set, served from warm parsed state with ZERO reader-open
-/// and zero Index/Summary/Statistics/bloom parse. No attributes (bounded).
-pub const WARM_CACHE_HITS: &str = "cqlite.warm.cache.hits";
-
-/// `cqlite.warm.cache.misses` — counter `{1}` (issue #2310).
-///
-/// Flight warm-handle cache misses: no cached entry, or the generation set
-/// changed so a (delta) rebuild was required. No attributes (bounded).
-pub const WARM_CACHE_MISSES: &str = "cqlite.warm.cache.misses";
-
-/// `cqlite.warm.cache.evicts` — counter `{1}` (issue #2310).
-///
-/// Warm generations evicted, whether by LRU (byte-budget pressure) or because a
-/// rebuild found them removed on disk. No attributes (bounded).
-pub const WARM_CACHE_EVICTS: &str = "cqlite.warm.cache.evicts";
-
-/// `cqlite.warm.cache.refresh` — counter `{1}` (issue #2310).
-///
-/// Warm-handle refresh outcomes, tagged by [`attr::WARM_REFRESH_OUTCOME`]
-/// (`unchanged` / `rebuilt_delta` / `fail_closed_retained`) — the single bounded
-/// dimension. Distinguishes a warm hit from a delta rebuild from a fail-closed
-/// retention in metrics alone (spec Requirement 6).
-pub const WARM_CACHE_REFRESH: &str = "cqlite.warm.cache.refresh";
-
-/// `cqlite.flight.admission.limit` — gauge `1` (issue #2420, WS4).
-///
-/// The configured `do_get` admission ceiling `K` (the `--max-concurrent-scans`
-/// value). A constant level while the server runs; recorded on startup so a
-/// dashboard can chart `in_use` against the limit. No attributes (bounded).
-/// DISTINCT from [`RPC_IN_FLIGHT`]: this is the CONFIGURED ceiling, not a live
-/// count.
-pub const FLIGHT_ADMISSION_LIMIT: &str = "cqlite.flight.admission.limit";
-
-/// `cqlite.flight.admission.in_use` — gauge `1` (issue #2420, WS4).
-///
-/// `do_get` admission permits currently held — the number of scans ADMITTED and
-/// in-flight (an up/down level like [`RPC_IN_FLIGHT`], but counting only admitted
-/// scans, not every accepted RPC incl. the ones parked waiting for a permit).
-/// Returns to zero when every admitted scan completes/cancels/disconnects (the
-/// RAII permit release). No attributes (bounded). DISTINCT from [`RPC_IN_FLIGHT`].
-pub const FLIGHT_ADMISSION_IN_USE: &str = "cqlite.flight.admission.in_use";
-
-/// `cqlite.flight.admission.waiting` — gauge `1` (issue #2420, WS4).
-///
-/// `do_get` requests currently parked on `acquire`, waiting for an admission
-/// permit to free within the permit-wait timeout. A non-zero value is the
-/// backpressure signal: offered concurrency has exceeded the ceiling and requests
-/// are queuing rather than degrading together. No attributes (bounded).
-pub const FLIGHT_ADMISSION_WAITING: &str = "cqlite.flight.admission.waiting";
-
-/// `cqlite.flight.admission.rejected_total` — counter `{1}` (issue #2420, WS4).
-///
-/// `do_get` requests rejected because no admission permit freed within the
-/// permit-wait timeout — each returned to the client as gRPC `UNAVAILABLE` (so the
-/// connector's #2241 replica-failover treats it as retry-safe), before any record
-/// batch was delivered. A monotonic total; scale-free. No attributes (bounded).
-pub const FLIGHT_ADMISSION_REJECTED_TOTAL: &str = "cqlite.flight.admission.rejected_total";
-
-/// `cqlite.flight.admission.wait_seconds` — histogram `s` (issue #2420, WS4).
-///
-/// Distribution of how long a `do_get` waited on `acquire` before it was admitted
-/// (a permit freed) OR rejected (the wait timeout elapsed). Localizes admission
-/// pressure: a rising tail means requests are increasingly queuing for permits.
-/// No attributes (bounded).
-pub const FLIGHT_ADMISSION_WAIT_SECONDS: &str = "cqlite.flight.admission.wait_seconds";
+pub use flight::{
+    FLIGHT_ADMISSION_IN_USE, FLIGHT_ADMISSION_LIMIT, FLIGHT_ADMISSION_REJECTED_TOTAL,
+    FLIGHT_ADMISSION_WAITING, FLIGHT_ADMISSION_WAIT_SECONDS, RPC_BYTES, RPC_DURATION,
+    RPC_IN_FLIGHT, RPC_PHASE_ACTIVE, RPC_PHASE_DURATION, RPC_REQUESTS, RPC_ROWS, WARM_CACHE_EVICTS,
+    WARM_CACHE_HITS, WARM_CACHE_MISSES, WARM_CACHE_REFRESH,
+};
 
 /// Metric-name registry tables (`ALL_METRICS`, `SATURATION_GAUGES`,
 /// `ADMISSION_METRICS`, `STATS_ONLY_METRICS`) live in a sibling file so

@@ -46,6 +46,15 @@ pub(crate) enum BlockSource {
     Buffered {
         reader: BufReader<File>,
         len: Option<u64>,
+        /// One descriptor's presence in `cqlite.reader.fds.open` (issue #1707).
+        /// Every buffered source owns its own `open(2)` — the reader's cold-open
+        /// handle and each per-scan reopen alike (issue #815: no reader pool) — so
+        /// the gauge falls back to the real level when the scan's cursor drops.
+        ///
+        /// Declared LAST on purpose: variant fields drop in declaration order, so
+        /// `reader` (and with it the descriptor) closes BEFORE this guard records
+        /// the decrement. Do not reorder while tidying.
+        _fd: super::fd_gauge::OpenFdGauge,
     },
     /// Memory-mapped file view served directly from the page cache.
     Mapped(MmapCursor),
@@ -63,6 +72,7 @@ impl BlockSource {
         BlockSource::Buffered {
             reader: BufReader::new(file),
             len: None,
+            _fd: super::fd_gauge::OpenFdGauge::minted(),
         }
     }
 
@@ -72,6 +82,7 @@ impl BlockSource {
         BlockSource::Buffered {
             reader: BufReader::new(file),
             len: Some(len),
+            _fd: super::fd_gauge::OpenFdGauge::minted(),
         }
     }
 
@@ -80,7 +91,7 @@ impl BlockSource {
     /// immutable) rather than re-probed with `seek(End)` per chunk (issue #1586).
     pub(crate) async fn len(&mut self) -> io::Result<u64> {
         match self {
-            BlockSource::Buffered { reader, len } => match *len {
+            BlockSource::Buffered { reader, len, .. } => match *len {
                 Some(l) => Ok(l),
                 None => {
                     let l = reader.get_ref().metadata().await?.len();
@@ -412,7 +423,19 @@ const DIRECT_IO_ALIGN: usize = 4096;
 /// already perform synchronous page faults.
 #[cfg(unix)]
 pub(crate) struct DirectCursor {
+    // FIELD ORDER IS LOAD-BEARING (issue #1707): Rust drops fields in DECLARATION
+    // order, so `file` must be declared BEFORE `_fd`. The descriptor then closes
+    // first and the gauge records the decrement afterwards; declared the other way
+    // round, the gauge would emit the lower level while the process still held the
+    // fd — under-reporting, the wrong direction for a metric whose job is spotting
+    // `EMFILE` pressure. (The `Buffered` variant above is already in this order:
+    // enum-variant fields drop in declaration order too.) Do not reorder while
+    // tidying.
     file: std::fs::File,
+    /// One descriptor's presence in `cqlite.reader.fds.open` (issue #1707) — the
+    /// direct-I/O twin of the `Buffered` variant's `_fd`. Declared AFTER `file` on
+    /// purpose — see the field-order note above.
+    _fd: super::fd_gauge::OpenFdGauge,
     /// Total file length, used for EOF detection.
     len: u64,
     /// Logical read position (may sit past EOF; reads then yield zero bytes).
@@ -455,6 +478,10 @@ impl DirectCursor {
             .unwrap_or(usize::MAX & !(align - 1));
         let buf = AlignedBuf::new(window, align)?;
         Ok(Self {
+            // Accounted only on the SUCCESSFUL direct open (issue #1707), for the
+            // same reason the read-work counter above is: a refused direct open
+            // falls back to a buffered one, which counts its own descriptor.
+            _fd: super::fd_gauge::OpenFdGauge::minted(),
             file,
             len,
             pos: 0,

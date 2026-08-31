@@ -134,10 +134,22 @@ pub fn memory_optimized(py: Python<'_>) -> PyResult<Py<PyDict>> {
 
 /// Returns a performance-optimized configuration preset as a Python dict.
 ///
-/// This preset maximizes performance at the cost of higher memory usage:
-/// - max_memory: 4 GB
-/// - Fast compression (LZ4)
-/// - Larger caches and more I/O threads
+/// This preset trades memory for throughput. What it actually sets:
+/// - `storage.memtable_size_threshold`: 128 MB — LIVE, drives flush through the
+///   `WriteEngineConfig` bridge (#1697)
+/// - `memory.block_cache.max_size`: 1 GB — LIVE, the decompressed-chunk cache
+///   budget (#1568)
+/// - `memory.max_memory`: 4 GB
+/// - `storage.compression`: LZ4, enabled
+///
+/// Two honesty notes, because a preset that advertises effects it does not have is
+/// the defect #1696 exists to remove:
+/// - This no longer mentions I/O threads: `storage.io_threads` had zero production
+///   readers and was deleted by #1696, along with this preset's assignment to it.
+/// - `storage.compression.*` still has no production reader — read-path compression
+///   comes from `CompressionInfo.db` and the write path is uncompressed-only (#1406)
+///   — so setting it here changes no behaviour today. It is recorded as a disclosed
+///   residual rather than silently implying a speedup.
 ///
 /// # Example
 ///
@@ -209,17 +221,25 @@ pub fn config_from_py(
     py: Python<'_>,
     config: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<cqlite_core::Config> {
-    let core_config = parse_config_from_py(py, config)?;
+    let (core_config, removed_key_warning) = parse_config_from_py(py, config)?;
 
     // Validate the parsed config before returning
     core_config
         .validate()
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
+    // Raised on the SUCCESS path only (#1696 roborev r2 F2): a caller whose
+    // config was rejected gets the rejection alone, not a deprecation warning
+    // about a document that never took effect. The warning's TEXT is safe
+    // wherever it is raised — since r5 F1 it claims nothing about the outcome —
+    // so this is a clarity choice, not a correctness precondition.
+    raise_removed_key_warning(py, removed_key_warning)?;
+
     Ok(core_config)
 }
 
-/// Parse a Python configuration value into a core Config WITHOUT validating it.
+/// Parse a Python configuration value into a core Config WITHOUT validating it,
+/// returning it alongside any REMOVED-key warning the document earned.
 ///
 /// Split out of [`config_from_py`] for the one caller that must fold a
 /// documented override into the config *before* it is judged (issue #1697,
@@ -231,12 +251,26 @@ pub fn config_from_py(
 /// Every other caller wants [`config_from_py`], which validates. This returns an
 /// UNVALIDATED config, so the caller owns validating the config it finally uses;
 /// returning one that is never validated is a bug.
+///
+/// # The warning is RETURNED, not raised (#1696 roborev r2 F2)
+///
+/// This function used to raise it here, so a document naming a removed key AND
+/// carrying an invalid surviving value warned before the public operation
+/// REJECTED it. The warning therefore travels with the config and the caller
+/// raises it only once its own validation has succeeded, so a rejected caller
+/// gets the rejection alone.
+///
+/// Note what this ordering is and is not. It is not what makes the TEXT true:
+/// chasing that was the r5 F1 defect, since the text used to promise "the
+/// configuration still loads" and there is always a later stage that can falsify
+/// such a promise. The text now claims nothing about the outcome, and the
+/// ordering survives purely so a failed operation reports one thing, not two.
 pub fn parse_config_from_py(
     py: Python<'_>,
     config: Option<&Bound<'_, PyAny>>,
-) -> PyResult<cqlite_core::Config> {
-    let core_config = match config {
-        None => cqlite_core::Config::default(),
+) -> PyResult<(cqlite_core::Config, Option<String>)> {
+    let parsed = match config {
+        None => (cqlite_core::Config::default(), None),
         Some(obj) => {
             // Check if it's a string (JSON or preset name)
             if let Ok(s) = obj.extract::<String>() {
@@ -252,7 +286,7 @@ pub fn parse_config_from_py(
         }
     };
 
-    Ok(core_config)
+    Ok(parsed)
 }
 
 /// Assemble the public `Config` for `cqlite.open`: parse it, fold the optional
@@ -280,7 +314,7 @@ pub fn config_for_open(
     config: Option<&Bound<'_, PyAny>>,
     flush_threshold: Option<u64>,
 ) -> PyResult<cqlite_core::Config> {
-    let mut core_config = parse_config_from_py(py, config)?;
+    let (mut core_config, removed_key_warning) = parse_config_from_py(py, config)?;
 
     if let Some(v) = flush_threshold {
         // The ceiling check MUST compare against the CALLER's
@@ -303,36 +337,105 @@ pub fn config_for_open(
         .validate()
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
+    // Raised LAST, after the override fold and the merged validation both
+    // succeeded: every earlier `return Err` above leaves the caller with the
+    // rejection alone, not a deprecation warning about a document that never
+    // took effect (#1696 roborev r2 F2).
+    raise_removed_key_warning(py, removed_key_warning)?;
+
     Ok(core_config)
 }
 
-/// Parse a string as either a preset name or JSON config.
-fn config_from_string(s: &str) -> PyResult<cqlite_core::Config> {
+/// Parse a string as either a preset name or JSON config, returning the config
+/// and any REMOVED-key deprecation warning it earned (issue #1696).
+///
+/// A preset is CQLite's own current shape and can never name a removed key, so it
+/// carries no warning by construction.
+fn config_from_string(s: &str) -> PyResult<(cqlite_core::Config, Option<String>)> {
     // Check for preset names
     match s {
-        "memory_optimized" => Ok(cqlite_core::Config::memory_optimized()),
-        "performance_optimized" => Ok(cqlite_core::Config::performance_optimized()),
-        _ => {
-            // Try parsing as JSON
-            serde_json::from_str(s).map_err(|e| {
-                PyValueError::new_err(format!(
-                    "Invalid config: not a preset name and invalid JSON: {}",
-                    e
-                ))
-            })
-        }
+        "memory_optimized" => Ok((cqlite_core::Config::memory_optimized(), None)),
+        "performance_optimized" => Ok((cqlite_core::Config::performance_optimized(), None)),
+        // Try parsing as JSON
+        _ => cqlite_core::Config::from_json_str_reporting_removed(s, "JSON config string").map_err(
+            |e| PyValueError::new_err(format!("Invalid config: not a preset name and {e}")),
+        ),
     }
 }
 
-/// Convert a Python dict to Config via JSON bridge.
-fn config_from_dict(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<cqlite_core::Config> {
+/// Convert a Python dict to Config via JSON bridge, returning the config and any
+/// REMOVED-key deprecation warning it earned (issue #1696).
+fn config_from_dict(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<(cqlite_core::Config, Option<String>)> {
     // Use Python's json module to serialize the dict
     let json_module = py.import("json")?;
     let json_str: String = json_module.call_method1("dumps", (dict,))?.extract()?;
 
-    // Parse JSON to Config
-    serde_json::from_str(&json_str)
-        .map_err(|e| PyValueError::new_err(format!("Invalid config dict: {}", e)))
+    cqlite_core::Config::from_json_str_reporting_removed(&json_str, "config dict")
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Raise a Python `UserWarning` naming every REMOVED key the caller's config
+/// still sets (issue #1696, roborev F1).
+///
+/// # Why the bindings need this
+///
+/// `cqlite_core::Config` is a Rust struct, so an embedder writing Rust who still
+/// sets a deleted field gets a compile error — the loudest signal available.
+/// Through this bridge there is no compile step: serde DISCARDS unknown fields, so
+/// a pre-change config naming `performance`, `storage.block_size` or
+/// `query.parallel` loaded SUCCESSFULLY and was silently ignored, the user
+/// believing they had configured something. #1696 requires a LOUD signal at the
+/// layer where a knob is set, and this is that layer for every non-Rust caller.
+///
+/// The posture matches the CLI's config file, deliberately and crate-wide:
+/// **parse-and-ignore PLUS a named warning**, never `deny_unknown_fields`, which
+/// would hard-fail an existing caller with no migration path over keys that never
+/// did anything.
+///
+/// SCOPE, stated so this is not read as universal coverage: this makes the rule
+/// true for callers who come through THESE entry points, which is every Python
+/// caller. A Rust embedder who deserializes a `cqlite_core::Config` document with
+/// plain serde bypasses the reporting constructor and still gets silence — issue
+/// #3520 (#1696 roborev r2 F3).
+///
+/// A Python warning — not a `tracing` log (nothing subscribes in a Python
+/// process) and not stderr — so it obeys the caller's own `warnings` filters and
+/// is assertable from a test.
+///
+/// # Why `UserWarning` and not `DeprecationWarning` (#1696 roborev r2 F1)
+///
+/// Because Python HIDES `DeprecationWarning` under its default filters: the
+/// stdlib installs `ignore::DeprecationWarning` with a single `default::…:__main__`
+/// exception, so an ordinary user importing `cqlite` from any module other than
+/// `__main__` saw NOTHING — the "loud signal at the layer where the knob is set"
+/// was silent at exactly the layer this fix exists for. `UserWarning` matches no
+/// `ignore` entry in the default list, so it is displayed without `-W` or a
+/// `PYTHONWARNINGS` setting.
+///
+/// `UserWarning` over `FutureWarning` deliberately: `FutureWarning` means
+/// "behaviour WILL change", while these keys are ALREADY removed and already
+/// ignored. Nothing about them is pending.
+///
+/// The visibility itself is pinned by
+/// `bindings/python/tests/test_config.py::test_removed_key_warning_is_visible_under_default_filters`,
+/// which runs a subprocess under Python's own default filters — `pytest.warns`
+/// enables ALL warnings, so it would pass for a hidden category too.
+///
+/// Called only once the operation has SUCCEEDED, so a rejected caller gets the
+/// rejection alone rather than a deprecation warning about a document that never
+/// took effect (#1696 roborev r2 F2). The warning's own text asserts NOTHING
+/// about whether the load succeeds (r5 F1), so this placement is about signal
+/// clarity, not about making the text true.
+fn raise_removed_key_warning(py: Python<'_>, warning: Option<String>) -> PyResult<()> {
+    if let Some(warning) = warning {
+        let warnings = py.import("warnings")?;
+        let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
+        warnings.call_method1("warn", (warning, category))?;
+    }
+    Ok(())
 }
 
 /// Convert a core Config to a Python dict via JSON bridge.
@@ -400,13 +503,13 @@ mod tests {
 
     #[test]
     fn test_config_from_preset_memory_optimized() {
-        let config = config_from_string("memory_optimized").unwrap();
+        let (config, _) = config_from_string("memory_optimized").unwrap();
         assert_eq!(config.memory.max_memory, 256 * 1024 * 1024);
     }
 
     #[test]
     fn test_config_from_preset_performance_optimized() {
-        let config = config_from_string("performance_optimized").unwrap();
+        let (config, _) = config_from_string("performance_optimized").unwrap();
         assert_eq!(config.memory.max_memory, 4 * 1024 * 1024 * 1024);
     }
 
@@ -421,7 +524,7 @@ mod tests {
     #[test]
     fn test_config_from_json_string() {
         let json = r#"{"memory": {"max_memory": 134217728}}"#;
-        let config = config_from_string(json).unwrap();
+        let (config, _) = config_from_string(json).unwrap();
         assert_eq!(config.memory.max_memory, 128 * 1024 * 1024);
     }
 

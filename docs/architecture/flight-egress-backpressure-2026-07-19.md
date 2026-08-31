@@ -3,6 +3,26 @@
 **Issue:** #2600 (oracle-driven exploration) · **Field signal:** #2367 round 12 ·
 **Date:** 2026-07-19 · **Status:** characterization complete; follow-up filed.
 
+> **SUPERSEDED IN PART by issue #2820 (2026-08).** Every measurement below was
+> taken when the egress `sync_channel` carried ONE ENTRY per message, so its
+> "bounded 256-slot channel", "blocking at 256" and "ceiling is `256 ×
+> concurrent scans`" statements describe that shape. The channel now carries
+> BATCHES (`merge::egress_batch`): its capacity argument is in MESSAGES,
+> converted from the same 256-ROW budget. Two per-source bounds must not be
+> conflated: what THIS GAUGE can reach is `rows_resident_in_channel` =
+> `2 x rows_cap` = **512** rows (channel-resident), while the MEMORY bound is
+> `max_inflight_rows` = `4 x rows_cap` = **1024** rows, which also counts the
+> consumer-held and producer-blocked batches the gauge never sees — so a
+> per-source alert threshold at 1024 can never fire. Every AGGREGATE product
+> below is a pre-#2820 figure for the same reason — where a bullet says the
+> working set is bounded "instead of `256 × active_merges`", the per-source
+> multiplicand is now `max_inflight_rows` = `4 × rows_cap`, so each such product
+> is 4× what it reads here (the ATTRIBUTION and the lever are unaffected; only
+> the constant moved). The measured peaks below
+> (1473, 8080) are PROCESS-GLOBAL sums across concurrent starved scans and are
+> unaffected by either per-source figure. The gauge's unit is unchanged (ENTRIES), and the ATTRIBUTION and the lever (a concurrency-aware
+> per-merge ROW budget, #2765) are unaffected — the row budget is still the knob.
+
 ## TL;DR
 
 - **Attribution: (a) consumer-side drain latency**, amplified into an unbounded

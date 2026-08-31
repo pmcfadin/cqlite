@@ -66,7 +66,57 @@ fi
 # The six canonical .cql the gate's dataset-backed components consume. Kept here as a
 # LITERAL list rather than read back from agent-gate.sh: if someone shrinks
 # CANONICAL_SCHEMA_FILES, this file must redden, not agree with the shrink.
-CANONICAL=(basic-types.cql da-test.cql time-series.cql wide-table-bti.cql collections.cql wide-rows.cql)
+# DERIVED from the gate, not restated here (#3493). This list was a hand-written copy of
+# `CANONICAL_SCHEMA_FILES`, so when that constant grew from 6 entries to 8 (the node suite
+# needs `oa-test.cql` and `write-test.cql`, and since #3522 the gate runs that whole suite)
+# THIS file silently began building synthetic roots that were missing two schemas — and two
+# cases failed for a reason that had nothing to do with what they test. Deriving it means
+# the next change to that constant cannot drift them apart.
+#
+# A failed derivation is a FAIL naming the derivation, never a fallback to a hard-coded
+# list: a fallback would restore exactly the copy this removes.
+CANONICAL=()
+while IFS= read -r _cf; do [ -n "$_cf" ] && CANONICAL+=("$_cf"); done < <(
+  sed -n 's/^CANONICAL_SCHEMA_FILES="\(.*\)"$/\1/p' "$GATE" | head -1 | tr ' ' '\n')
+if [ "${#CANONICAL[@]}" -eq 0 ]; then
+  echo "FAIL - could not derive CANONICAL_SCHEMA_FILES from $GATE; refusing to run against a guessed list" >&2
+  exit 1
+fi
+
+# DERIVATION IS FOR BUILDING FIXTURES; MEMBERSHIP IS ASSERTED INDEPENDENTLY (roborev #3493).
+# Deriving BOTH sides is a tautology: deleting a schema from the production list would delete
+# it from the expectation too, and the regression would stay green. So the entries this repo
+# depends on are named HERE, on purpose, as a second source.
+#
+# `oa-test.cql` and `write-test.cql` are required because the gate runs the WHOLE node suite
+# (#3522) and its OA parity and write cases resolve those schemas; if they leave
+# CANONICAL_SCHEMA_FILES, the #3148 preflight stops guarding them and their absence surfaces
+# as a suite failure instead of a named preflight FAIL.
+# THE COMPLETE SET, not a sample (roborev, post-rebase round 3). Naming only three left the
+# other five derivable-away: removing `time-series.cql`, `wide-table-bti.cql` or
+# `collections.cql` from production would have deleted them from the expectation too and
+# this test would have stayed green — the same tautology, just smaller.
+#
+# Every entry here is a schema the corpus or the node suite resolves, so dropping ANY of them
+# stops the #3148 preflight guarding a file something reads.
+for _req in basic-types.cql da-test.cql oa-test.cql write-test.cql \
+            time-series.cql wide-table-bti.cql collections.cql wide-rows.cql; do
+  case " ${CANONICAL[*]} " in
+    *" $_req "*) : ;;
+    *) echo "FAIL - $_req is no longer in the gate's CANONICAL_SCHEMA_FILES; the #3148 preflight" >&2
+       echo "       has stopped guarding a schema the node suite resolves. If that is intended," >&2
+       echo "       remove it from this list too — deliberately, in the same diff." >&2
+       exit 1 ;;
+  esac
+done
+
+# And the reverse direction: an ADDITION to production must be acknowledged here too, or this
+# list silently stops being the complete set it claims to be.
+if [ "${#CANONICAL[@]}" -ne 8 ]; then
+  echo "FAIL - the gate's CANONICAL_SCHEMA_FILES has ${#CANONICAL[@]} entries, this test expects 8." >&2
+  echo "       If a schema was added, add it to the required list above — deliberately." >&2
+  exit 1
+fi
 
 # A dataset root whose canonical corpus IS present, so the #2078 corpus guard is
 # satisfied and the run reaches the #3148 schemas guard.
@@ -398,7 +448,9 @@ fi
 # …and the POSITIVE line must still appear when the check DID run, otherwise the two
 # asserts above would be satisfied by simply never stamping anything.
 full_line=$(line_field "$(bash "$GATE" --preflight-schemas-line 2>/dev/null)")
-if grep -q "^schemas: 6/6 canonical .cql readable under $REPO/test-data/schemas" <<<"$full_line"; then
+# COUNT DERIVED TOO: a literal here is the same copy one level down.
+_n_canon=${#CANONICAL[@]}
+if grep -q "^schemas: $_n_canon/$_n_canon canonical .cql readable under $REPO/test-data/schemas" <<<"$full_line"; then
   ok "3148-full-positive-line: a FULL-mode check that ran stamps the positive N/N readable line"
 else
   bad "3148-full-positive-line: expected the positive line for a real check (got '$full_line')"

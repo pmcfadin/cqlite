@@ -122,7 +122,7 @@ exempt:
     reason: Feature-matrix build lane; the merge-gating minimal-features build runs in the local gate.
     issue: "#2910"
   - workflow: ci.yml
-    reason: Broad opt-in lane (ci:broad); its merge-gating content is covered by the local agent gate.
+    reason: "Broad opt-in lane; exempt because it is ci:broad-label-gated and does not run on an unlabelled PR at all — NOT because the local agent gate is a superset of it. It is not: ci.yml executes `cargo test -p cqlite-core --features delta-scan --lib`, and the local gate only COMPILES those tests (feature-iso-delta-scan is `--lib --no-run`). Audited in #3522."
     issue: "#2910"
   - workflow: compaction-parity.yml
     reason: Byte-parity lane whose merge-gating half is the local gate's compaction-byte-parity component.
@@ -149,7 +149,31 @@ exempt:
     reason: Docker-backed live-cell parity lane; not merge-gating today.
     issue: "#2910"
   - workflow: node-ci.yml
-    reason: Node binding lane; the merge-gating half is the local gate's node-bindings component.
+    reason: >-
+      Node binding lane; the merge-gating half is the local gate's node-bindings
+      component, which since #3522 runs the WHOLE jest suite (it ran 1 of 27 files
+      before), plus binding-rust-tests for cqlite-node's Rust unit tests, which ran
+      nowhere. Since #3493 it also runs `npm run typecheck` (this workflow's
+      always-run PR smoke job; it is `tsc --noEmit` over the examples project, so it
+      COMPILES against the shipped index.d.ts, which #3581's typescript-definitions
+      test does not — that one reads the declarations as TEXT and asserts the runtime
+      surface is declared. Different properties, both wanted) and pairs `npm test` with check-dataset-manifest.sh, which checks
+      the CORPUS is complete rather than that the suite ran — the parity cases derive
+      their table set from disk, so a partial extraction is green by omission. The
+      multi-platform build matrix is release coverage, not merge-gating.
+      TWO OPT-OUT STATES, WHICH DIFFER AND ARE NAMED SEPARATELY RATHER THAN LEFT TO BE
+      DISCOVERED. With AGENT_GATE_ALLOW_MISSING_FIXTURES=1 and NO usable corpus,
+      node-bindings SKIPs BEFORE npm ci, so neither typecheck nor the jest suite runs.
+      With the same opt-out and an INCOMPLETE corpus, install, build and typecheck have
+      already run — only the manifest check and the jest suite are skipped, so the
+      typecheck claim above still holds there. Both are DECLARED skips, recorded in the
+      gate SUMMARY by name, never a silent pass. Stating which coverage each state
+      actually gives is the whole point of #3493: an exemption is only as true as what
+      the named component does, in every state it can be in.
+      KEEP THIS ENTRY AND run_node_bindings IN STEP: an exemption that defers to a
+      local component is only as true as that component's scope, and #1255's narrowing
+      to 1 file in 27 is what made this entry false for ~2 days of a deterministic
+      main-red without blocking a merge.
     issue: "#2910"
   - workflow: observability-gate.yml
     reason: Observability correctness plus label-gated overhead bench; overhead is advisory.

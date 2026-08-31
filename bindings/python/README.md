@@ -73,6 +73,36 @@ db = cqlite.open(data_dir, schema=schema_path)
 db.close()
 ```
 
+#### Cleanup on garbage collection (safety net, not the recommended path)
+
+A handle that is garbage-collected without `close()` still cleans up
+best-effort: the write engine is closed (flushing any remaining memtable to an
+SSTable), the read engine's shutdown hook is called (today a no-op), and
+buffered telemetry is flushed. Some things are worth knowing about relying on it:
+
+- **It runs with the GIL held**, because CPython frees the object from its
+  deallocator. The flush and fsync therefore block other Python threads for
+  their duration, where `close()` releases the GIL around the same work. Prefer
+  `with` or an explicit `close()` in threaded code.
+- **It is best-effort by design.** If the handle is dropped from inside a
+  running **Tokio runtime context** — CQLite driven from a Rust async host — the
+  cleanup is skipped rather than risk an unsafe teardown, so unflushed rows stay
+  in the write-ahead log (replayable) instead of being flushed. `close()` is the
+  only path with a guarantee.
+- **A Python `asyncio` event loop is NOT such a context.** These bindings have no
+  asyncio integration, so an asyncio thread has no Tokio runtime and nothing is
+  skipped: a handle collected there runs the full flush + fsync with the GIL
+  held, **blocking the event loop** (and up to ~5s more if OpenTelemetry export
+  is enabled and the collector is unreachable). In asyncio code, close handles
+  explicitly — ideally off the loop thread.
+
+A `StreamingIterator` that outlives its `Database` is **unaffected** by the
+handle being collected, for both read-only and writable handles: it keeps
+yielding its remaining rows. Its rows come from a background task holding its own
+reference to the storage engine, so dropping the handle cannot stop the stream,
+and this cleanup deliberately does not invalidate it. (An explicit `close()`
+still does — that is a user stating intent, and is unchanged; see issue #1462.)
+
 ### Executing Queries
 
 ```python
@@ -275,7 +305,38 @@ CQL types are automatically converted to Python native types:
 | `map<K,V>` | `dict` |
 | `tuple<...>` | `tuple` |
 | `frozen<T>` | Unwrapped inner type |
-| UDT | `dict` with `_type` and `_keyspace` keys |
+| UDT | `cqlite.Udt` — `.type_name` / `.keyspace` / `.fields` (see below) |
+
+### UDT type identity is carried out of band
+
+A CQL user-defined type decodes to a `cqlite.Udt`:
+
+```python
+udt = row["address"]
+udt.type_name          # 'address_type'  — the declared UDT type
+udt.keyspace           # 'test_collections'
+udt.fields             # mappingproxy({'street': '1 Main St', 'city': 'SF'}) — declared fields ONLY
+udt["street"]          # mapping access, delegating to .fields
+"city" in udt, len(udt), sorted(udt.keys())
+```
+
+**Breaking change (issue #3504).** `_type` and `_keyspace` used to be *injected as dict keys*, i.e.
+into the same namespace as the UDT's own field names — so a UDT declaring a field named `_type` or
+`_keyspace` (legal CQL via a quoted identifier) silently **overwrote** the marker and the type name
+became unrecoverable. Migration:
+
+| Before | Now |
+|---|---|
+| `udt["_type"]` | `udt.type_name` |
+| `udt["_keyspace"]` | `udt.keyspace` |
+| `udt["street"]` | `udt["street"]` (unchanged) or `udt.fields["street"]` |
+| `isinstance(v, dict)` to spot a UDT | `isinstance(v, cqlite.Udt)` |
+
+`udt["_type"]` now reaches a FIELD of that name, raising `KeyError` when the UDT declares none.
+`Udt` is frozen, and equality/hashing are over `(keyspace, type_name, fields)`, so it can be used as
+a `dict` key whenever its field values are hashable. `udt.fields` is therefore a **read-only**
+`types.MappingProxyType` view: `udt.fields["z"] = 1` raises `TypeError` rather than moving a `Udt`
+already used as a key out of its hash bucket. Take `dict(udt.fields)` for a mutable copy.
 
 ### CQL `decimal` rendering policy
 

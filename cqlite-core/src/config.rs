@@ -3,7 +3,70 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Main configuration structure for CQLite database
+/// Main configuration structure for CQLite database.
+///
+/// # Every knob in #1696's CENSUS is read or deleted — and the exception (#1696 roborev r5 F3)
+///
+/// Scoped to the census deliberately, because the unqualified version ("every
+/// field here is read by something") is contradicted by our own standing guard,
+/// `cqlite-core/tests/config_knob_behavior_guard.rs`, which records every
+/// [`CompressionConfig`] field as DECORATIVE with zero production readers.
+///
+/// What #1696 (epic #1685, "config honesty") examined, it either kept because
+/// something reads it, or DELETED: `storage`'s `max_sstable_size` /
+/// `block_size` / `enable_bloom_filters` / `bloom_filter_fp_rate` /
+/// `io_threads` / `sync_mode`, `query`'s `plan_cache_size` /
+/// `enable_optimization` / `parallel`, and the entire `performance` tree are
+/// gone — setting any of them changed nothing, silently.
+///
+/// The KNOWN exception is [`CompressionConfig`] (`enabled` / `algorithm` /
+/// `level` / `min_block_size`). Those four were NOT in #1696's census and are
+/// deliberately left in place: the read path takes its algorithm from
+/// `CompressionInfo.db` as the no-heuristics mandate requires, and the write
+/// surface is uncompressed-only (**#1406** owns that boundary and the
+/// compressed-write wiring), so there is nothing for them to steer today. No dedicated
+/// removal issue exists; they belong to the open epic **#1685**. The guard is the
+/// authority on which fields are decorative — read it, do not read a claim of
+/// universal coverage into this heading.
+///
+/// Deleting a field is deliberately a COMPILE error for an embedder writing
+/// Rust: that is the loudest signal available, and it is preferred over a field
+/// that keeps deserializing while doing nothing.
+///
+/// # But this is ALSO a deserialization surface (#1696 roborev F1)
+///
+/// `Config` derives `Deserialize`, and serde DISCARDS unknown fields — so a
+/// caller who configures CQLite through JSON or a dict (the Python bindings'
+/// bridge) gets no compile step and, before #1696's F1 fix, no signal at all: a
+/// pre-change document naming a deleted knob loaded successfully and was
+/// silently ignored. The rule is stated at the layer where a knob is SET, so the
+/// authoring surfaces report removed keys by name instead:
+/// [`Self::from_json_str`] / [`Self::from_json_str_reporting_removed`] for this
+/// crate's JSON surface (see [`crate::config_removed_keys`]), and
+/// `cqlite_cli::config::removed_keys` for the CLI's file surface. Both use the
+/// same posture — parse-and-ignore PLUS a named warning, never
+/// `deny_unknown_fields` — because ONE posture crate-wide is the requirement,
+/// and hard-failing would leave an existing caller with no migration path over
+/// keys that never did anything.
+///
+/// # ENFORCED where, exactly — and the ONE surface that is not (#3520)
+///
+/// Those constructors are OPTIONAL, so they do not cover the serde boundary
+/// itself: `serde_json::from_str::<Config>` / `from_value::<Config>` bypass them
+/// and still DISCARD removed keys in SILENCE. Enforced surfaces are the CLI
+/// config-file loader, the Python bindings entry points, and Rust field access (a
+/// compile error, for Rust callers only). The unenforced one is a direct serde
+/// deserialization by an embedder — **issue #3520**, scoped out of #1696
+/// deliberately (roborev r2 F3) and pinned by
+/// `direct_serde_deserialization_is_the_unreported_surface`. Nothing here should
+/// be read as universal coverage.
+///
+/// The standing guard is `cqlite-core/tests/config_knob_behavior_guard.rs`:
+/// every leaf field below must be registered there with either a set-knob →
+/// assert-observable-difference test or an explicit reason why no observable
+/// difference is expressible. A newly added `pub` field with neither FAILS that
+/// test — which is the point, since "nobody asked whether this knob is read" is
+/// how the removed ones accumulated.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     /// Storage engine configuration
@@ -15,9 +78,6 @@ pub struct Config {
     /// Query engine configuration
     pub query: QueryConfig,
 
-    /// Performance and optimization settings
-    pub performance: PerformanceConfig,
-
     /// WASM-specific configuration
     #[cfg(target_arch = "wasm32")]
     pub wasm: WasmConfig,
@@ -26,9 +86,6 @@ pub struct Config {
 /// Storage engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// Maximum SSTable file size in bytes (default: 64MB)
-    pub max_sstable_size: u64,
-
     /// MemTable size threshold for flushing, in bytes (default: 64MB).
     ///
     /// This is the AUTHORITATIVE flush trigger for the write path: it is the
@@ -64,23 +121,8 @@ pub struct StorageConfig {
     /// Compaction configuration
     pub compaction: CompactionConfig,
 
-    /// Block size for SSTable data blocks (default: 64KB)
-    pub block_size: u32,
-
     /// Compression configuration
     pub compression: CompressionConfig,
-
-    /// Enable bloom filters for SSTables
-    pub enable_bloom_filters: bool,
-
-    /// Bloom filter false positive rate (default: 0.01)
-    pub bloom_filter_fp_rate: f64,
-
-    /// Number of background threads for I/O operations
-    pub io_threads: usize,
-
-    /// Sync mode for durability
-    pub sync_mode: SyncMode,
 
     /// Legacy promote-only flag: it upgrades an **explicit**
     /// [`DiskAccessMode::Buffered`] request to [`DiskAccessMode::Mmap`].
@@ -155,9 +197,15 @@ pub struct StorageConfig {
 
     /// Fraction of total system memory above which [`DiskAccessMode::Auto`]
     /// switches a file from memory-mapped to direct I/O. Defaults to `0.5`
-    /// (half of RAM). Clamped to `(0.0, 1.0]`; values outside that range fall
-    /// back to the default. Ignored when system memory cannot be determined
-    /// (in which case `Auto` never escalates to direct I/O).
+    /// (half of RAM). Ignored when system memory cannot be determined (in which
+    /// case `Auto` never escalates to direct I/O).
+    ///
+    /// The legal range is `(0.0, 1.0]` and [`Config::validate`] REJECTS anything
+    /// outside it, NaN and the infinities included (issue #1696). It used to be
+    /// silently clamped instead — a `2.0` or a `-1` quietly became the `0.5`
+    /// default — so the value an operator set was not the value that ran. It is a
+    /// FRACTION, never a byte count; to always bypass the page cache, ask for
+    /// [`DiskAccessMode::Direct`].
     #[serde(default = "default_direct_io_memory_fraction")]
     pub direct_io_memory_fraction: f64,
 
@@ -257,18 +305,12 @@ fn default_direct_io_prefetch_bytes() -> usize {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            max_sstable_size: 64 * 1024 * 1024, // 64MB
             // 64MB / 256MB: the values the write engine always used (#1697).
             // Shared with the serde defaults so the two can never drift.
             memtable_size_threshold: 64 * 1024 * 1024,
             memtable_hard_limit: default_memtable_hard_limit(),
             compaction: CompactionConfig::default(),
-            block_size: 64 * 1024, // 64KB
             compression: CompressionConfig::default(),
-            enable_bloom_filters: true,
-            bloom_filter_fp_rate: 0.01,
-            io_threads: num_cpus::get().min(4),
-            sync_mode: SyncMode::Normal,
             // Opt-in; buffered I/O is the portable, safe default. Shared with
             // the serde defaults so the two can never drift.
             use_mmap: default_use_mmap(),
@@ -511,15 +553,6 @@ pub struct QueryConfig {
     #[serde(default = "default_max_result_bytes")]
     pub max_result_bytes: u64,
 
-    /// Query plan cache size
-    pub plan_cache_size: usize,
-
-    /// Enable query optimization
-    pub enable_optimization: bool,
-
-    /// Parallel query execution configuration
-    pub parallel: ParallelQueryConfig,
-
     /// Query cache size (for plan caching)
     pub query_cache_size: Option<usize>,
 
@@ -537,89 +570,9 @@ impl Default for QueryConfig {
             forced_read_path: None,
             max_result_rows: 1_000_000,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
-            plan_cache_size: 1000,
-            enable_optimization: true,
-            parallel: ParallelQueryConfig::default(),
             query_cache_size: Some(100),
             query_parallelism: Some(num_cpus::get()),
             analyze_iterations: Some(5),
-        }
-    }
-}
-
-/// Parallel query execution configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParallelQueryConfig {
-    /// Enable parallel query execution
-    pub enabled: bool,
-
-    /// Maximum number of parallel threads
-    pub max_threads: usize,
-
-    /// Minimum result set size to trigger parallel execution
-    pub min_parallel_rows: u64,
-}
-
-impl Default for ParallelQueryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_threads: num_cpus::get(),
-            min_parallel_rows: 10_000,
-        }
-    }
-}
-
-/// Performance and optimization configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerformanceConfig {
-    /// Enable performance metrics collection
-    pub enable_metrics: bool,
-
-    /// Metrics collection interval
-    pub metrics_interval: Duration,
-
-    /// Enable detailed profiling
-    pub enable_profiling: bool,
-
-    /// Background task configuration
-    pub background_tasks: BackgroundTaskConfig,
-}
-
-impl Default for PerformanceConfig {
-    fn default() -> Self {
-        Self {
-            enable_metrics: true,
-            metrics_interval: Duration::from_secs(60),
-            enable_profiling: false,
-            background_tasks: BackgroundTaskConfig::default(),
-        }
-    }
-}
-
-/// Background task configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackgroundTaskConfig {
-    /// Enable background statistics collection
-    pub enable_stats: bool,
-
-    /// Statistics collection interval
-    pub stats_interval: Duration,
-
-    /// Enable background cleanup tasks
-    pub enable_cleanup: bool,
-
-    /// Cleanup task interval
-    pub cleanup_interval: Duration,
-}
-
-impl Default for BackgroundTaskConfig {
-    fn default() -> Self {
-        Self {
-            enable_stats: true,
-            stats_interval: Duration::from_secs(300), // 5 minutes
-            enable_cleanup: true,
-            cleanup_interval: Duration::from_secs(3600), // 1 hour
         }
     }
 }
@@ -699,17 +652,6 @@ impl Default for CompressionConfig {
     }
 }
 
-/// Durability sync modes
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SyncMode {
-    /// No explicit syncing (fastest, least durable)
-    None,
-    /// Normal syncing (balanced)
-    Normal,
-    /// Full sync for every write (slowest, most durable)
-    Full,
-}
-
 impl Config {
     /// Create a configuration optimized for memory usage
     pub fn memory_optimized() -> Self {
@@ -717,7 +659,6 @@ impl Config {
 
         // Reduce memory usage
         config.storage.memtable_size_threshold = 4 * 1024 * 1024; // 4MB
-        config.storage.max_sstable_size = 16 * 1024 * 1024; // 16MB
         config.memory.max_memory = 256 * 1024 * 1024; // 256MB
         config.memory.block_cache.max_size = 64 * 1024 * 1024; // 64MB
 
@@ -736,7 +677,6 @@ impl Config {
         // Above the 64MB default (#1697 raised the default to the value that
         // always ran), so this preset still trades memory for throughput.
         config.storage.memtable_size_threshold = 128 * 1024 * 1024; // 128MB
-        config.storage.max_sstable_size = 256 * 1024 * 1024; // 256MB
         config.memory.max_memory = 4 * 1024 * 1024 * 1024; // 4GB
 
         // Use faster compression
@@ -745,9 +685,6 @@ impl Config {
 
         // More aggressive caching
         config.memory.block_cache.max_size = 1024 * 1024 * 1024; // 1GB
-
-        // More I/O threads
-        config.storage.io_threads = num_cpus::get();
 
         config
     }
@@ -765,12 +702,9 @@ impl Config {
         // Reduce overall memory usage for WASM
         config.memory.max_memory = 128 * 1024 * 1024; // 128MB
         config.storage.memtable_size_threshold = 2 * 1024 * 1024; // 2MB
-        config.storage.max_sstable_size = 8 * 1024 * 1024; // 8MB
 
-        // Disable background tasks that may not work well in WASM
+        // Disable background compaction, which may not work well in WASM.
         config.storage.compaction.auto_compaction = false;
-        config.performance.background_tasks.enable_stats = false;
-        config.performance.background_tasks.enable_cleanup = false;
 
         config
     }
@@ -780,172 +714,41 @@ impl Config {
     pub fn test_config() -> Self {
         let mut config = Config::default();
 
-        // Disable background tasks that can cause test hangs
+        // Disable background compaction, which can cause test hangs.
         config.storage.compaction.auto_compaction = false;
-        config.performance.background_tasks.enable_stats = false;
-        config.performance.background_tasks.enable_cleanup = false;
 
         // Reduce timeouts for faster test execution
         config.query.max_execution_time = std::time::Duration::from_secs(1);
 
-        // Smaller memory usage for tests
+        // Smaller memory usage for tests. The cache budget is scaled WITH
+        // `max_memory` (the same 1/4 ratio `MemoryConfig::default` uses), not
+        // left at the 1GB default's 256MB: `validate` requires
+        // `block_cache.max_size <= max_memory`, and a constructor that emits a
+        // config its own `validate` rejects is a latent contradiction — it went
+        // unnoticed only because nothing on the open path ever validated.
+        //
+        // This is NO LONGER load-bearing for any open path: `Database::open`
+        // enforces the `direct_io_memory_fraction` range alone, not the cache
+        // budget (#1696 roborev r3 F3 narrowed it, residual #3525). It is kept
+        // because it is correct on its own merits — the fix is to the
+        // constructor's self-consistency, not to whoever happens to validate.
         config.memory.max_memory = 64 * 1024 * 1024; // 64MB
+        config.memory.block_cache.max_size = config.memory.max_memory / 4; // 16MB
         config.storage.memtable_size_threshold = 1024 * 1024; // 1MB
-        config.storage.max_sstable_size = 4 * 1024 * 1024; // 4MB
 
         config
     }
-
-    /// Validate the configuration
-    pub fn validate(&self) -> crate::Result<()> {
-        // Validate memory limits
-        if self.memory.max_memory == 0 {
-            return Err(crate::Error::configuration(
-                "max_memory must be greater than 0",
-            ));
-        }
-
-        // Validate the (single) cache budget does not exceed total memory.
-        if self.memory.block_cache.max_size > self.memory.max_memory {
-            return Err(crate::Error::configuration(
-                "block_cache.max_size exceeds max_memory",
-            ));
-        }
-
-        // Validate storage settings
-        if self.storage.block_size == 0 {
-            return Err(crate::Error::configuration(
-                "block_size must be greater than 0",
-            ));
-        }
-
-        if self.storage.memtable_size_threshold == 0 {
-            return Err(crate::Error::configuration(
-                "memtable_size_threshold must be greater than 0",
-            ));
-        }
-
-        // Both memtable byte knobs are `u64` on the public surface but `usize`
-        // in the engine (see `WriteEngineConfig::from_config`). On a 32-bit or
-        // wasm32 target a value above `usize::MAX` cannot be represented, and
-        // the bridge's clamp would land it exactly on `usize::MAX` — the state
-        // `memtable.rs` names degenerate: `should_flush` never fires and
-        // `check_admission`'s `projected > hard_limit` is UNREACHABLE because
-        // `saturating_add` caps at `usize::MAX`. That is never-flush AND
-        // never-reject: grow until OOM. Reject it here instead (#1697).
-        //
-        // `usize_max_bytes` is the target's `usize::MAX` widened to `u64` — via
-        // `try_from`, never an `as` cast — so on a 64-bit target it equals
-        // `u64::MAX` and the comparisons below are trivially false rather than
-        // ill-typed. A hypothetical target with `usize` WIDER than `u64` falls
-        // back to `u64::MAX`, which is also correct: every `u64` value is then
-        // addressable. The bridge keeps its clamp as defense in depth for any
-        // path that skips `validate`.
-        let usize_max_bytes = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
-        for (knob, bytes) in [
-            (
-                "memtable_size_threshold",
-                self.storage.memtable_size_threshold,
-            ),
-            ("memtable_hard_limit", self.storage.memtable_hard_limit),
-        ] {
-            if bytes > usize_max_bytes {
-                return Err(crate::Error::configuration(format!(
-                    "{knob} ({bytes} bytes) exceeds this target's addressable maximum \
-                     ({usize_max_bytes} bytes); a memtable that large can never flush \
-                     and can never reject a write"
-                )));
-            }
-        }
-
-        // A hard limit below the flush threshold wedges the write engine for
-        // EVERY write: the memtable is rejected at the ceiling before a flush can
-        // relieve it. Only expressible as a rule now that both knobs live here
-        // (#1697).
-        //
-        // SCOPE OF THIS RULE, stated because it is narrower than it looks
-        // (#1697 roborev r2; the engine defect is #3404): passing it does NOT
-        // make the write path wedge-free. `WriteEngine::check_admission` rejects
-        // `memtable_size + incoming > memtable_hard_limit` without attempting a
-        // flush, while auto-flush fires only AFTER a successful insert. So any
-        // single mutation larger than `memtable_hard_limit - memtable_size` is
-        // rejected while the memtable sits below the flush threshold, and
-        // retrying it is rejected forever.
-        //
-        // NO INEQUALITY BETWEEN THESE TWO KNOBS CAN CLOSE THAT: with one byte of
-        // headroom a 3-byte mutation still wedges, and the wedge is a function of
-        // the largest single mutation, which config cannot know. So this rule is
-        // NOT a wedge-freedom guarantee and must not be read as one; #3404 owns
-        // the real fix (flush a nonempty memtable before rejecting a mutation
-        // that fits by itself).
-        //
-        // It nonetheless requires STRICT headroom, because equality is
-        // qualitatively worse than any positive headroom rather than merely one
-        // step along a continuum. For a mutation of `m` bytes the wedge window is
-        // `m - headroom` bytes wide, so at equality an ORDINARY 4 KiB write
-        // wedges over a 4 KiB window of memtable sizes — a state normal operation
-        // passes through routinely — while at the default 192 MiB of headroom
-        // even a 64 MiB mutation cannot wedge at all. Equality also has no
-        // legitimate use: it asks the engine to flush at exactly the size where
-        // it must instead reject. Rejecting it removes the only regime in which
-        // everyday writes livelock, which is worth doing even though it proves
-        // nothing about the general case.
-        if self.storage.memtable_hard_limit <= self.storage.memtable_size_threshold {
-            return Err(crate::Error::configuration(format!(
-                "memtable_hard_limit ({} bytes) must be strictly greater than \
-                 memtable_size_threshold ({} bytes); with no headroom between them \
-                 an ordinary write is rejected at the ceiling while the memtable \
-                 sits below the flush trigger, and retrying it never recovers",
-                self.storage.memtable_hard_limit, self.storage.memtable_size_threshold
-            )));
-        }
-
-        // Validate the STCS thresholds threaded into the write engine (#1697).
-        // `STCSPolicy::new` rejects these too, but failing here surfaces the
-        // problem at config time rather than at engine construction.
-        //
-        // ONLY when `auto_compaction` is on (#1697 roborev r4). Both fields are
-        // documented as "Ignored when `auto_compaction` is `false`", and that is
-        // literally true of the code: `WriteEngine::new` constructs
-        // `STCSPolicy::new(min, max, ..)` inside `if config.auto_compaction`, and
-        // leaves the policy unset otherwise. Judging them unconditionally
-        // therefore rejected configurations that work — the thresholds are never
-        // read — while contradicting their own documented contract.
-        let compaction = &self.storage.compaction;
-        if compaction.auto_compaction && compaction.min_threshold == 0 {
-            return Err(crate::Error::configuration(
-                "compaction.min_threshold must be greater than 0",
-            ));
-        }
-        if compaction.auto_compaction && compaction.max_threshold < compaction.min_threshold {
-            return Err(crate::Error::configuration(format!(
-                "compaction.max_threshold ({}) must be >= compaction.min_threshold ({})",
-                compaction.max_threshold, compaction.min_threshold
-            )));
-        }
-
-        // Query execution budget (issue #1695). `Duration::ZERO` is the documented
-        // "no timeout" sentinel and is therefore explicitly LEGAL: validation must
-        // never reject it (pinned by `config_validate_accepts_the_zero_sentinel`
-        // in `tests/issue_1695_query_timeout.rs`). Every non-zero value is a real
-        // budget honoured at the engine chokepoint — a `Duration` cannot be
-        // negative and any positive budget is enforceable — so there is nothing
-        // further to reject here. This arm exists so a future "must be > 0" rule
-        // cannot be added without confronting the sentinel contract.
-
-        // Validate bloom filter settings
-        if self.storage.enable_bloom_filters
-            && (self.storage.bloom_filter_fp_rate <= 0.0
-                || self.storage.bloom_filter_fp_rate >= 1.0)
-        {
-            return Err(crate::Error::configuration(
-                "bloom_filter_fp_rate must be between 0 and 1",
-            ));
-        }
-
-        Ok(())
-    }
 }
+
+/// JSON deserialization entry points (`Config::from_json_str`), split out under
+/// the campsite rule (epic #1116).
+#[path = "config_json.rs"]
+mod json;
+
+/// `Config::validate` and the rules it enforces, split out under the campsite
+/// rule (epic #1116).
+#[path = "config_validate.rs"]
+mod validate;
 
 #[cfg(test)]
 #[path = "config_tests.rs"]

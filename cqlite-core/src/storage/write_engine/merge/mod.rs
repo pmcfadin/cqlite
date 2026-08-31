@@ -35,18 +35,25 @@
 //!
 //! ## Memory Budget (Issue #754 groundwork, Issue #827 streaming read)
 //!
-//! The bounded `sync_channel` (capacity up to [`STREAMING_CHANNEL_CAPACITY`],
-//! adaptively reduced under concurrent merges — see [`egress_budget`]) limits
-//! how many converted `MergeEntry` values from each source live in memory
-//! simultaneously between producer and consumer. The consumer/heap pulls
-//! lazily via cursors, so the channel acts as a backpressure valve.
+//! The bounded `sync_channel` limits how many converted `MergeEntry` values from
+//! each source live in memory simultaneously between producer and consumer. The
+//! consumer/heap pulls lazily via cursors, so the channel acts as a backpressure
+//! valve. Its ROW budget is [`STREAMING_CHANNEL_CAPACITY`], adaptively reduced
+//! under concurrent merges (see [`egress_budget`]); since issue #2820 the channel
+//! carries BATCHES, so that budget is converted to a message capacity and the
+//! TOTAL IN-FLIGHT rows worst case per source is
+//! `egress_batch::max_inflight_rows` = `4 × rows_cap` (1024 at the default, 32
+//! at the throttled floor — bounded BY the row capacity, plus a byte budget) —
+//! see [`egress_batch`]. That is the MEMORY bound; the strictly smaller
+//! CHANNEL-RESIDENT figure `rows_resident_in_channel` = `2 × rows_cap` (512) is
+//! what the #2419 depth gauge can reach, and the two must not be conflated.
 //!
 //! The producer thread streams its source via
 //! [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
 //! which uses a sliding-window incremental stitch+parse: it decompresses one
 //! chunk at a time, drains every fully-decoded partition out of the window, and
-//! forwards each entry through the bounded channel before pulling the next
-//! chunk. The blocking `SyncSender::send` backpressure plus the bounded window
+//! forwards each entry through the bounded channel (batched since issue #2820)
+//! before pulling the next chunk. The blocking `SyncSender::send` backpressure plus the bounded window
 //! mean a source's decompressed content is NEVER fully resident — peak memory
 //! is bounded by roughly `max_partition_size + one_chunk + channel_capacity`
 //! per source, independent of total input size (issue #827). The dhat test
@@ -73,7 +80,10 @@ use crate::storage::write_engine::mutation::{
 };
 #[cfg(feature = "write-support")]
 use crate::storage::write_engine::reconcile_rules;
-#[cfg(feature = "write-support")]
+// `Value` is no longer used by this file's production code (#2820 moved the
+// per-value size walk to `entry_size`), but the in-file test modules reach it
+// through `use super::*`.
+#[cfg(all(test, feature = "write-support"))]
 use crate::types::Value;
 
 #[cfg(feature = "write-support")]
@@ -314,8 +324,12 @@ impl RunReader {
             let next = crate::observability::stream_subphase::time_recv(|| self.reader.next());
             match next {
                 Some(Ok(entry)) => {
-                    // Estimate entry size for buffer management
-                    bytes_buffered += Self::estimate_entry_size(&entry);
+                    // Estimate entry size for buffer management. `saturating_add`:
+                    // the estimator fails CLOSED at `usize::MAX` for a
+                    // pathologically deep/wide value (#2820), which must stop
+                    // read-ahead, never overflow this accumulator.
+                    bytes_buffered =
+                        bytes_buffered.saturating_add(Self::estimate_entry_size(&entry));
                     self.buffer.push_back(entry);
                 }
                 Some(Err(e)) => return Err(e),
@@ -331,69 +345,14 @@ impl RunReader {
 
     /// Estimate the memory size of an entry
     ///
-    /// This is approximate - just for buffer management.
+    /// Delegates to [`entry_size::estimate_entry_size`], a
+    /// sibling module (#1116 campsite rule) that walks nested values with a
+    /// bounded iterative traversal and an EXHAUSTIVE `Value` match. The previous
+    /// inline version ended in `_ => 32` for every complex variant, which made
+    /// both byte budgets denominated in this figure — this read-ahead buffer and
+    /// the #2820 egress batch budget — bypassable by large nested payloads.
     fn estimate_entry_size(entry: &MergeEntry) -> usize {
-        let base_size = std::mem::size_of::<MergeEntry>();
-        let key_size = entry.key.key.len();
-        let clustering_size = entry
-            .clustering_key
-            .as_ref()
-            .map(|ck| {
-                ck.columns
-                    .iter()
-                    .map(|(name, value)| name.len() + Self::estimate_value_size(value))
-                    .sum()
-            })
-            .unwrap_or(0);
-
-        let data_size = match &entry.row_data {
-            RowData::Live { cells } => cells
-                .iter()
-                .map(|cell| {
-                    std::mem::size_of::<CellData>()
-                        + cell.column.len()
-                        + Self::estimate_value_size(&cell.value)
-                        // Epic #899: per-element cells carry cell-path bytes; count
-                        // them so the streaming buffer's memory accounting stays
-                        // accurate against the 128 MiB bound (#827).
-                        + cell.cell_path.as_ref().map_or(0, |p| p.len())
-                })
-                .sum(),
-            RowData::Tombstone { .. } => 16,
-        };
-
-        // Epic #899: complex-deletion markers carried on the entry also occupy
-        // memory; account for their column-name + fixed-size fields.
-        let complex_deletion_size: usize = entry
-            .complex_deletions
-            .iter()
-            .map(|cd| std::mem::size_of::<ComplexDeletion>() + cd.column.len())
-            .sum();
-
-        base_size + key_size + clustering_size + data_size + complex_deletion_size
-    }
-
-    /// Estimate the memory size of a Value
-    fn estimate_value_size(value: &Value) -> usize {
-        match value {
-            Value::Null => 0,
-            Value::Boolean(_) => 1,
-            Value::TinyInt(_) => 1,
-            Value::SmallInt(_) => 2,
-            Value::Integer(_) => 4,
-            Value::BigInt(_) | Value::Counter(_) | Value::Timestamp(_) | Value::Time(_) => 8,
-            Value::Float32(_) => 4,
-            Value::Float(_) => 8,
-            Value::Text(s) => s.len() + std::mem::size_of::<String>(),
-            Value::Blob(b) => b.len() + std::mem::size_of::<Vec<u8>>(),
-            Value::Uuid(_) => 16,
-            Value::Inet(b) => b.len() + std::mem::size_of::<Vec<u8>>(),
-            Value::Varint(b) => b.len() + std::mem::size_of::<Vec<u8>>(),
-            Value::Decimal { unscaled, .. } => unscaled.len() + 4 + std::mem::size_of::<Vec<u8>>(),
-            Value::Date(_) => 4,
-            Value::Duration { .. } => 20,
-            _ => 32, // Default estimate for complex types
-        }
+        entry_size::estimate_entry_size(entry)
     }
 }
 
@@ -412,8 +371,22 @@ pub trait SSTableRowIterator: Send {
     /// wiring test can prove the adaptive per-channel capacity actually reaches
     /// the construction site. `None` for runs that have no such channel
     /// (synthetic/seeked `Vec`-backed iterators).
+    ///
+    /// Issue #2820: that argument is in MESSAGES (the channel carries BATCHES),
+    /// so the hook reports BOTH halves of the conversion — the message capacity
+    /// AND the `egress_budget` ROW snapshot it was derived from — and a wiring
+    /// test asserts the equivalence. Reporting only one would let a channel
+    /// silently built with the ROW budget as its message capacity (a 256x
+    /// resident-row blow-up) read as correct.
     #[cfg(test)]
     fn egress_channel_capacity(&self) -> Option<usize> {
+        None
+    }
+
+    /// Test-only sibling of [`Self::egress_channel_capacity`] (issue #2820): the
+    /// ROW capacity that message capacity was derived from.
+    #[cfg(test)]
+    fn egress_rows_capacity(&self) -> Option<usize> {
         None
     }
 }
@@ -451,21 +424,37 @@ use producer_iter::SSTableRowIteratorAdapter;
 #[cfg(feature = "write-support")]
 mod producer_iter_convert;
 
-/// The producer→consumer CHANNEL PROTOCOL (issue #3120): `MergeMsg` (the DATA
-/// item plus the two TERMINATORS that make "this run finished" an observed fact
-/// rather than an inference from a channel disconnect) and the channel-safe
-/// `MergeProducerError` payload (issue #2264, moved here out of this file per
-/// #1116). Both producer shapes send it; `producer_iter`'s adapter consumes it.
+// The producer→consumer CHANNEL PROTOCOL (issue #3120): `MergeMsg` (the DATA
+// item plus the two TERMINATORS that make "this run finished" an observed fact
+// rather than an inference from a channel disconnect) and the channel-safe
+// `MergeProducerError` payload (issue #2264, moved here out of this file per
+// #1116). Both producer shapes send it; `producer_iter`'s adapter consumes it.
+//
+// Deliberately a PLAIN comment, not `///` (issue #2820 roborev r3): an OUTER doc
+// on the declaration merges with this file's own inner `//!` header and drags the
+// merged fragment's link-resolution scope up to `merge`, so every `[`MergeMsg`]`
+// / `super::*` link in producer_msg.rs's module doc silently stops resolving.
+// The sibling `producer_gauge`/`channel_depth`/`egress_budget`/`entry_size`/
+// `egress_batch` declarations use a plain comment for the same reason.
 #[cfg(feature = "write-support")]
 mod producer_msg;
 
-/// MAXIMUM pre-fetched `MergeEntry` objects buffered per source in the streaming
-/// channel — the capacity used at LOW concurrency (a single active merge). Each
-/// entry is a few hundred bytes; balances producer/consumer sync overhead
-/// against memory footprint. Issue #2765: now the UPPER clamp of an adaptive
-/// per-merge capacity (see [`egress_budget`]) — under concurrent merges the
-/// effective capacity shrinks so the aggregate buffered working set tracks a
-/// fixed budget instead of growing as `256 × active_merges`.
+/// The per-source streaming-channel ROW budget used at LOW concurrency (a single
+/// active merge). Each entry is a few hundred bytes; balances producer/consumer
+/// sync overhead against memory footprint. Issue #2765: the UPPER clamp of an
+/// adaptive per-merge capacity (see [`egress_budget`]) — under concurrent merges
+/// the effective capacity shrinks so the aggregate buffered working set tracks a
+/// fixed budget instead of growing as `active_merges × K × per_source`. Both
+/// sides of that comparison are in `per_source` units, which is `4 × rows_cap`
+/// since #2820 (see [`egress_budget`]'s `per_source` section) — NOT `rows_cap`,
+/// which is what this sentence multiplied before the channel carried batches.
+///
+/// Issue #2820: this stays a ROW budget and stays 256 — every `egress_budget`
+/// name, doc and test speaks in rows. It is NOT the `sync_channel` argument any
+/// more: the channel carries BATCHES, so the argument is
+/// `egress_batch::message_capacity_for_rows(this)`, the per-batch ceiling is
+/// `egress_batch::batch_limit_ceiling(this)` and the resident-rows worst case is
+/// `egress_batch::max_inflight_rows(this)` = `4 × this`.
 #[cfg(feature = "write-support")]
 const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
@@ -490,6 +479,23 @@ mod channel_depth;
 mod egress_budget;
 #[cfg(feature = "write-support")]
 pub use egress_budget::{active_merge_count, egress_channel_capacity_for};
+
+// Per-entry heap-size estimation (issue #2820): the EXHAUSTIVE, bounded,
+// iterative `MergeEntry`/`Value` size walk that both byte budgets — this
+// reader's read-ahead buffer and the egress batcher's `BATCH_EMIT_BYTES_MERGE` —
+// are denominated in. Sibling module to bound this file (#1116).
+#[cfg(feature = "write-support")]
+mod entry_size;
+
+// Batched egress fan-in (issue #2820): the ROWS->MESSAGES capacity conversion for
+// the bounded channel, the resident-rows bound, and the producer-side batch
+// accumulator that turns one channel message per ROW (measured at 49.9% of
+// single-stream CPU, ~94% kernel park/wake) into one per BATCH. Sibling module to
+// bound this file; also owns the doc-hidden `merge_egress_batch_probe` hook.
+#[cfg(feature = "write-support")]
+mod egress_batch;
+#[cfg(feature = "write-support")]
+pub use egress_batch::{merge_egress_batch_probe, EgressBatchProbe};
 
 // Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
 // merge adapter.
@@ -6436,269 +6442,11 @@ mod merge_property_tests {
         }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Streaming channel / cursor mechanism tests (Issue #754)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// These tests verify that the bounded sync_channel and RunReader cursor
-// machinery work correctly: entries are forwarded without deadlock, ordering
-// is preserved, and the channel provides backpressure between producer and
-// consumer.
-//
-// NOTE: these tests verify the channel/cursor mechanism in isolation; they do
-// NOT themselves prove the end-to-end memory bound. The end-to-end bound — the
-// real producer streaming its source via stream_all_partitions_for_compaction
-// (issue #827) — is asserted by the dhat test
-// tests/test_issue_827_merge_streaming_memory.rs.
-
+// Streaming channel / cursor mechanism tests (issues #754 / #2820), moved to a
+// `*_tests.rs` sibling per the #1116 campsite rule — see that file's header.
 #[cfg(all(test, feature = "write-support"))]
-mod streaming_tests {
-    use super::*;
-
-    /// Channel capacity constant is accessible and matches documented value.
-    ///
-    /// This test checks only the constant's value — it does NOT prove an
-    /// end-to-end memory bound. The bound on in-flight MergeEntry objects
-    /// between producer and consumer is STREAMING_CHANNEL_CAPACITY; the
-    /// end-to-end memory bound (the producer streaming its source one partition
-    /// at a time, issue #827) is asserted by the dhat test
-    /// tests/test_issue_827_merge_streaming_memory.rs.
-    #[test]
-    fn test_streaming_channel_capacity_constant() {
-        // The constant must be large enough to amortise scheduling overhead but
-        // small enough to limit in-flight MergeEntry objects. 256 is the
-        // documented value.
-        assert_eq!(STREAMING_CHANNEL_CAPACITY, 256);
-    }
-
-    /// A synthetic `SSTableRowIterator` backed by a bounded channel. The
-    /// producer thread is started immediately and blocks once the channel is
-    /// full, demonstrating true backpressure — memory is bounded to `capacity`
-    /// entries regardless of `count`.
-    struct SyntheticStreamingIterator {
-        rx: std::sync::mpsc::Receiver<Result<MergeEntry>>,
-        _tx_thread: std::thread::JoinHandle<()>,
-    }
-
-    impl SyntheticStreamingIterator {
-        /// Produce `count` entries with sequential tokens and the given
-        /// `run_index`, streamed through a channel of size `capacity`.
-        fn new(count: usize, run_index: usize, capacity: usize) -> Self {
-            let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
-            let tx_thread = std::thread::spawn(move || {
-                for i in 0..count {
-                    let entry = MergeEntry::new(
-                        run_index,
-                        DecoratedKey::new(i as i64, vec![i as u8]),
-                        None,
-                        (i as i64) * 1000,
-                        RowData::Live { cells: vec![] },
-                    );
-                    if tx.send(Ok(entry)).is_err() {
-                        return;
-                    }
-                }
-            });
-            Self {
-                rx,
-                _tx_thread: tx_thread,
-            }
-        }
-    }
-
-    impl SSTableRowIterator for SyntheticStreamingIterator {
-        fn next(&mut self) -> Option<Result<MergeEntry>> {
-            self.rx.recv().ok()
-        }
-    }
-
-    /// Merge two synthetic streaming sources (channel capacity = 4, 20 entries
-    /// each) and assert that all 40 unique tokens survive and global order is
-    /// preserved.
-    ///
-    /// This verifies that the RunReader / heap machinery correctly drains
-    /// bounded-channel sources: with capacity=4 the channel holds ≤ 4 entries
-    /// per source (≤ 8 total) while the test runs, demonstrating correct
-    /// ordering and completeness through a small-capacity channel.
-    ///
-    /// NOTE: this test exercises the synthetic streaming-iterator path only; the
-    /// end-to-end memory bound for the real SSTableRowIteratorAdapter (whose
-    /// producer streams its source one partition at a time, issue #827) is
-    /// asserted by the dhat test tests/test_issue_827_merge_streaming_memory.rs.
-    #[test]
-    fn test_kway_merge_with_streaming_sources_preserves_order() {
-        use crate::schema::{KeyColumn, TableSchema};
-        use std::collections::HashMap;
-
-        let schema = TableSchema {
-            keyspace: "stream_ks".to_string(),
-            table: "stream_tbl".to_string(),
-            partition_keys: vec![KeyColumn {
-                name: "id".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-            }],
-            clustering_keys: vec![],
-            columns: vec![],
-            comments: HashMap::new(),
-            dropped_columns: HashMap::new(),
-        };
-
-        // Two sources with disjoint tokens:
-        //   source 0 → even tokens 0, 2, 4, …, 38
-        //   source 1 → odd  tokens 1, 3, 5, …, 39
-        // Channel capacity = 4 << total per source (20). At steady state
-        // ≤ 4 entries per source live in the channel, ≤ 8 total.
-        // (These are synthetic in-memory producers, not real SSTableReaders.)
-        const N: usize = 20;
-        const CHANNEL_CAP: usize = 4;
-
-        let (tx0, rx0) = std::sync::mpsc::sync_channel::<Result<MergeEntry>>(CHANNEL_CAP);
-        let (tx1, rx1) = std::sync::mpsc::sync_channel::<Result<MergeEntry>>(CHANNEL_CAP);
-
-        // Producer thread 0: even tokens.
-        std::thread::spawn(move || {
-            for i in 0..N {
-                let token = (i * 2) as i64;
-                let entry = MergeEntry::new(
-                    0,
-                    DecoratedKey::new(token, vec![(i * 2) as u8]),
-                    None,
-                    1000,
-                    RowData::Live { cells: vec![] },
-                );
-                if tx0.send(Ok(entry)).is_err() {
-                    return;
-                }
-            }
-        });
-
-        // Producer thread 1: odd tokens.
-        std::thread::spawn(move || {
-            for i in 0..N {
-                let token = (i * 2 + 1) as i64;
-                let entry = MergeEntry::new(
-                    1,
-                    DecoratedKey::new(token, vec![(i * 2 + 1) as u8]),
-                    None,
-                    1000,
-                    RowData::Live { cells: vec![] },
-                );
-                if tx1.send(Ok(entry)).is_err() {
-                    return;
-                }
-            }
-        });
-
-        struct ChannelIterator(std::sync::mpsc::Receiver<Result<MergeEntry>>);
-        impl SSTableRowIterator for ChannelIterator {
-            fn next(&mut self) -> Option<Result<MergeEntry>> {
-                self.0.recv().ok()
-            }
-        }
-
-        let runs: Vec<RunReader> = vec![
-            RunReader::new(Box::new(ChannelIterator(rx0))),
-            RunReader::new(Box::new(ChannelIterator(rx1))),
-        ];
-
-        let mut merger = KWayMerger {
-            runs,
-            heap: BinaryHeap::new(),
-            current_partition: None,
-            gc_before_secs: None,
-            now_secs: None,
-            purge_safe: false,
-            max_purgeable_timestamp: None,
-            schema_arc: std::sync::Arc::new(schema.clone()),
-            schema,
-            _egress_slot: None,
-        };
-
-        // Drain all partitions and verify ordering + completeness.
-        let mut token_set = std::collections::BTreeSet::new();
-        let mut prev_token: Option<i64> = None;
-        loop {
-            match merger.step().expect("step must not fail") {
-                MergeStep::Complete => break,
-                MergeStep::Partition { key, .. } => {
-                    // Tokens must arrive in ascending order.
-                    if let Some(pt) = prev_token {
-                        assert!(
-                            key.token >= pt,
-                            "out-of-order token {} after {}",
-                            key.token,
-                            pt
-                        );
-                    }
-                    prev_token = Some(key.token);
-                    token_set.insert(key.token);
-                }
-            }
-        }
-
-        // All 2×N unique tokens must be present.
-        assert_eq!(
-            token_set.len(),
-            N * 2,
-            "expected {} unique partitions, got {}",
-            N * 2,
-            token_set.len()
-        );
-        for expected in 0..(N as i64 * 2) {
-            assert!(
-                token_set.contains(&expected),
-                "token {} is missing from merged output",
-                expected
-            );
-        }
-    }
-
-    /// Verify that the streaming adapter drains all entries correctly when the
-    /// channel capacity is smaller than the total number of entries (1000 entries,
-    /// capacity 256). This confirms the producer blocks on sends and the consumer
-    /// pulls them out one at a time without deadlock.
-    #[test]
-    fn test_streaming_iterator_drains_all_entries_with_backpressure() {
-        const TOTAL: usize = 1000;
-        // capacity < TOTAL: forces producer to block when channel is full.
-        let mut iter = SyntheticStreamingIterator::new(TOTAL, 0, STREAMING_CHANNEL_CAPACITY);
-        let mut count = 0usize;
-        while let Some(result) = iter.next() {
-            result.expect("entry must not be an error");
-            count += 1;
-        }
-        assert_eq!(count, TOTAL, "all {} entries must be produced", TOTAL);
-    }
-
-    /// Verify the RunReader correctly wraps a streaming iterator: peek and
-    /// advance work, exhaustion is detected, buffer refills lazily even when
-    /// the channel capacity (4) is far smaller than the total entries (50).
-    #[test]
-    fn test_run_reader_with_streaming_source() {
-        const N: usize = 50;
-        // Channel capacity 4 << N: tests lazy refill under backpressure.
-        let iter = SyntheticStreamingIterator::new(N, 0, 4);
-        let mut reader = RunReader::new(Box::new(iter));
-
-        let mut seen = 0usize;
-        loop {
-            match reader.peek().expect("peek must not error") {
-                None => break,
-                Some(_) => {
-                    reader.advance().expect("advance must not error");
-                    seen += 1;
-                }
-            }
-        }
-
-        assert_eq!(seen, N, "RunReader must surface all {} entries", N);
-        assert!(
-            reader.is_exhausted(),
-            "RunReader must be exhausted after drain"
-        );
-    }
-}
+#[path = "streaming_channel_tests.rs"]
+mod streaming_channel_tests;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Issue #823 (Epic #817): complex-column (multi-cell collection / non-frozen UDT)

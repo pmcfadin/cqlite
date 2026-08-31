@@ -56,8 +56,11 @@ per sample.
 ### Requirement: The egress channel-depth gauge reflects real bounded-channel occupancy
 
 The server SHALL expose `cqlite.merge.egress_channel_depth` (unit `{entry}`), tracking the live
-occupancy of the bounded producer→consumer `sync_channel` (capacity `STREAMING_CHANNEL_CAPACITY`,
-merge/mod.rs) that carries merged entries toward the `do_get` client. Because `std::sync::mpsc`'s
+occupancy of the bounded producer→consumer `sync_channel` (row budget `STREAMING_CHANNEL_CAPACITY`,
+merge/mod.rs) that carries merged entries toward the `do_get` client. Since issue #2820 that channel
+carries BATCHES, so its capacity argument is in MESSAGES and the per-source level this gauge can
+reach is `merge::egress_batch::rows_resident_in_channel` = `2 × rows_cap` (512 at the default), NOT
+the row budget itself and NOT the `4 × rows_cap` total-in-flight memory bound. Because `std::sync::mpsc`'s
 `sync_channel` exposes no length, occupancy SHALL be tracked by a process-wide atomic incremented on a
 successful send and decremented on a successful receive (mirroring the #2316 producer-thread-gauge
 pattern), and the resulting level SHALL be recorded to the gauge. A rising depth (channel near

@@ -46,6 +46,61 @@
 //! [`catalog::ERRORS_TOTAL`] keyed by the bounded `{category, subsystem}` label
 //! set and marks the active span errored. Never attach the raw error message.
 //!
+//! # Why was this query slow? (issue #1707)
+//!
+//! [`catalog::READ_DURATION`] tells you a read was slow. These four histograms tell
+//! you WHERE the time went, so the next step is a decision rather than a profiler:
+//!
+//! 1. **Localise with `cqlite.read.phase.*`.** One sample per phase per completed
+//!    scan — [`catalog::READ_PHASE_IO`], [`catalog::READ_PHASE_DECOMPRESS`],
+//!    [`catalog::READ_PHASE_DECODE`], [`catalog::READ_PHASE_MERGE`]. Compare them
+//!    against EACH OTHER:
+//!    * **io dominant** → disk / page-cache bound (cold storage, evicted cache, a
+//!      network filesystem). Decode and merge tuning cannot help this read.
+//!    * **decompress dominant** → chunk length / compressor choice, or the same
+//!      chunks being decompressed repeatedly (a decompressed-chunk cache too small
+//!      for the scan's window).
+//!    * **decode dominant** → normally HEALTHY on a warm scan (decode is the CPU
+//!      work of a read). Suspicious only when it grows relative to the rows
+//!      DELIVERED: wide partitions, many collection/UDT cells, or a schema-less
+//!      fallback decode.
+//!    * **merge dominant** → too many overlapping generations, or heavy reconcile
+//!      (tombstones, LWW collapse). Cross-check [`catalog::COMPACTION_LAG`]; the
+//!      recv-wait is already excluded, so this really is merge work and not a
+//!      producer starving.
+//! 2. **Read the ABSENCES, they are informative.** A phase that never ran records NO
+//!    sample rather than `0.0`: no `decompress` series means the SSTable is
+//!    uncompressed (the #1406 write-surface shape), and no `merge` series means the
+//!    read had a single generation. Absence is a fact about the read; `0.0` would be
+//!    a claim that a measurement was taken.
+//! 3. **Know which surfaces are instrumented before you read an absence.** The
+//!    phases come from the STREAMING scan surfaces and the streaming
+//!    cross-generation merge. The materializing `SSTableManager::scan`, the BIG
+//!    reverse-clustering scan, the BTI trie walk, point reads and compaction reads
+//!    emit [`catalog::READ_DURATION`] with NO phase series at all — for those, an
+//!    empty breakdown means NOT MEASURED, never "fast". The full list, and why
+//!    instrumenting them needs async-safe propagation rather than another seam, is in
+//!    [`read_phase`]'s "Coverage boundary" section.
+//! 4. **Check fd pressure.** [`catalog::READER_FDS_OPEN`] is what the readers hold
+//!    (exact, every platform, no `/proc`); [`catalog::PROC_FDS`] is the whole process
+//!    (sampled ~2s, Linux). A reader level climbing toward `ulimit -n` explains
+//!    latency that is really queueing behind failing/retried opens — and it is
+//!    visible BEFORE the first `EMFILE`. `PROC_FDS` minus the reader level is roughly
+//!    the non-reader footprint (sockets, WAL).
+//! 5. **Check startup / durability stalls.** [`catalog::WAL_SIZE`] should saw-tooth;
+//!    a level that only climbs means flushes are not keeping up, and next open's
+//!    [`catalog::WAL_RECOVERY_DURATION`] grows with it. A slow FIRST query after a
+//!    restart is usually WAL recovery, not the read path.
+//!
+//! **The accounting caveat, and it matters for step 1:** the read pipeline is
+//! CONCURRENT — an IO/decompress feed thread, a blocking parse thread, a merge
+//! producer thread — so the phases OVERLAP in wall-clock and DO NOT sum to
+//! `read.duration`. Their sum can even exceed it. They are per-phase TOTALS for
+//! attribution ("which phase dominates, and how did that move between two runs?"),
+//! never a decomposition of latency, and a dashboard that stacks them as a
+//! breakdown of wall time will mislead. Same caveat as the #2819 `stream_*`
+//! sub-phases.
+//!
 //! # Always-compiled vs feature-gated
 //!
 //! [`catalog`], [`config`], the [`ObsErrorCategory`] taxonomy, and the helper
@@ -63,10 +118,34 @@ pub mod partition_access;
 // that makes cqlite.read.{rows,bytes,partitions,duration} live instruments
 // instead of documented-but-never-written ones.
 pub(crate) mod read_metrics;
+// Per-SCAN read-phase accumulator (issue #1707): the io/decompress/decode/merge
+// buckets `ReadOpMeter` emits as `cqlite.read.phase.*` when a scan completes.
+//
+// `pub(crate)`, NOT `pub`: its seams live across the storage layer but entirely
+// INSIDE this crate, and no downstream crate consumes any of it. That is the
+// difference from `stream_subphase`, which is genuinely `pub` because
+// `cqlite-flight` installs its sink. Exporting this module made ~12 items part of
+// `cqlite-core`'s public API — a surface nobody asked for, that nothing in this
+// repo detects a change to (#3366), and that would then have to be kept
+// compatible. The ONE item a test outside the crate needs is re-exported below.
+pub(crate) mod read_phase;
 pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
 pub use error_schema::ObsErrorCategory;
+// `ReadPhaseGuard` is deliberately NOT re-exported: it is only ever named as
+// `install`'s return type, which callers bind with `let _g = …`.
+pub(crate) use read_phase::{ReadPhase, ReadPhaseTimings};
+
+/// TEST-ONLY arming surface for the read-phase io delay (issue #1707), the ONE
+/// item of the crate-internal [`read_phase`] module an out-of-crate test needs.
+///
+/// Hidden from the rendered docs and compiled out entirely unless
+/// `observability-testing` (or `cfg(test)`) is on, so a production build of
+/// `cqlite-core` exports nothing here.
+#[cfg(any(test, feature = "observability-testing"))]
+#[doc(hidden)]
+pub use read_phase::io_delay;
 pub use stream_subphase::{StreamSubPhase, StreamSubPhaseGuard, StreamSubPhaseTimings};
 
 use crate::error::{Error, Result};

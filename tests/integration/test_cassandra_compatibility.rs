@@ -81,9 +81,6 @@ async fn main() -> Result<()> {
                 enabled: true,
                 algorithm: cqlite_core::config::CompressionAlgorithm::Lz4,
             },
-            enable_bloom_filters: true,
-            bloom_filter_fp_rate: 0.01,
-            block_size: 64 * 1024,
         },
         ..Default::default()
     };

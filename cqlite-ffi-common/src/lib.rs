@@ -27,8 +27,12 @@
 //! bindings/node   (napi)  ─┘        (pure Rust)
 //! ```
 //!
-//! This crate depends on `cqlite-core` and `num-bigint` and **nothing else**.
-//! `cqlite-core` does not depend on it, so no cycle is possible.
+//! This crate depends on `cqlite-core`, `num-bigint` and `serde_json` and
+//! **nothing else**. `cqlite-core` does not depend on it, so no cycle is
+//! possible. (`serde_json` joined the list in #3505: [`json_number`] classifies
+//! a `serde_json::Number`, which is the type both bindings already hold when
+//! they convert a `Value::Json` cell. It adds no external code to either
+//! binding — both binding manifests already declare it.)
 //!
 //! # No FFI framework, at any depth
 //!
@@ -59,6 +63,7 @@
 pub mod decimal;
 pub mod error_contract;
 pub mod inet;
+pub mod json_number;
 pub mod otel_keys;
 pub mod varint;
 pub mod vectors;
@@ -68,5 +73,9 @@ pub use decimal::{
     DECIMAL_POSITIONAL_MAX_BYTES,
 };
 pub use inet::{inet_bytes_to_string, inet_kind, InetError, InetKind};
+pub use json_number::{
+    beyond_range_message, beyond_text_to_bigint, beyond_text_to_sign_and_le_words,
+    classify_json_number, JsonNumberClass,
+};
 pub use otel_keys::KNOWN_OTEL_KEYS;
 pub use varint::{varint_to_bigint, varint_to_sign_and_le_words};

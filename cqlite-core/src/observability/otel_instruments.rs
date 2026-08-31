@@ -442,6 +442,39 @@ fn register_histograms(reg: &mut Registry<'_>) {
         catalog::unit::SECONDS,
         "do_get admission acquire wait time in seconds (#2420).",
     );
+    // Per-scan read PHASE timings (#1707): ONE sample per phase per completed
+    // scan, base-unit seconds (the issue's `_ms` spelling was normalised — see
+    // the catalog doc comments).
+    // WAL recovery at engine open (#1707) — the CRC validation scan plus the
+    // replay, which is why it is `recovery` and not `replay`. A histogram, not a
+    // gauge, because the gauge plane is i64 and a sub-second recovery would truncate
+    // to a fabricated 0 — see the catalog doc comment. Normally ONE sample per
+    // process.
+    reg.histogram(
+        catalog::WAL_RECOVERY_DURATION,
+        catalog::unit::SECONDS,
+        "Duration in seconds of WAL recovery (validation scan + replay) at engine open (#1707).",
+    );
+    reg.histogram(
+        catalog::READ_PHASE_IO,
+        catalog::unit::SECONDS,
+        "Per-scan Data.db read time in seconds (#1707).",
+    );
+    reg.histogram(
+        catalog::READ_PHASE_DECOMPRESS,
+        catalog::unit::SECONDS,
+        "Per-scan chunk decompression time in seconds (#1707).",
+    );
+    reg.histogram(
+        catalog::READ_PHASE_DECODE,
+        catalog::unit::SECONDS,
+        "Per-scan row/cell decode time in seconds (#1707).",
+    );
+    reg.histogram(
+        catalog::READ_PHASE_MERGE,
+        catalog::unit::SECONDS,
+        "Per-scan k-way merge time in seconds, recv-wait excluded (#1707).",
+    );
 }
 
 /// Gauge registrations.
@@ -550,5 +583,17 @@ fn register_gauges(reg: &mut Registry<'_>) {
         catalog::FLIGHT_WARM_TABLES,
         catalog::unit::ENTRIES,
         "Tables with a live warm reader set in the registry (#2684).",
+    );
+    // Reader-reported resource gauges (#1707): fds the READERS hold (no /proc read
+    // — that is PROC_FDS), plus the write engine's WAL size + last-replay duration.
+    reg.gauge(
+        catalog::READER_FDS_OPEN,
+        catalog::unit::FDS,
+        "OS fds the SSTable readers currently hold open (#1707).",
+    );
+    reg.gauge(
+        catalog::WAL_SIZE,
+        catalog::unit::BYTES,
+        "Current write-ahead log size in bytes (#1707).",
     );
 }
