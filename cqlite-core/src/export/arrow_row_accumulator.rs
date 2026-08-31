@@ -156,7 +156,7 @@ impl<'a> ArrowRowAccumulator<'a> {
             // batch's amortized growth; the store reaches the same steady state
             // after one batch either way (issue #3552 review B1).
             cells: (0..columns.len()).map(|_| Vec::new()).collect(),
-            staged: (0..columns.len()).map(|_| None).collect(),
+            staged: vec![None; columns.len()],
             has_staged: false,
             rows: 0,
         }
