@@ -82,16 +82,23 @@ DEFER_MARKER = re.compile(
 )
 DEFER_PREFIX = "roborev-defer: findings "
 
-REQUIRED_FORMS = {
-    WAIVE_KIND: (
-        "'roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>' — "
-        "every field is required, in that order, with single-space separators"
-    ),
-    DEFER_KIND: (
-        "'roborev-defer: findings issues=<N>[,<N>...] count=<n> base=<40-hex> head=<40-hex> "
-        "job=<id> reason=<why>' — every field is required, in that order, with single-space separators"
-    ),
-}
+# ===== NO EMITTED DIAGNOSTIC CARRIES ANY PART OF THE MARKER FORM (#3312 job 23, layer 3) =====
+# The MALFORMED detail used to quote the whole required form, and that detail is interpolated into the
+# summary block's `waiver:`/`deferral:` key — so a block naming a live base/head/job printed a
+# complete, fillable authorization. Pasting a summary block into a PR comment is the documented
+# practice throughout this repository, which is how an artifact that DESCRIBED the escape hatch BECAME
+# it. Two later layers (the sole-content rule; the placeholder refusal on `reason=<why>`) do stop a
+# pasted form from granting, but the rule is stated absolutely — "no emitted diagnostic SHALL carry
+# any part of the marker, not even its prefix" — because a rule with an exception for "the layers
+# below catch it anyway" is a rule that decays the next time a layer moves. So the detail names the
+# DEFECT and points at `--help`, which is the ONE place the form lives.
+MALFORMED_FORM_DETAIL = (
+    "the line begins an authorization of this kind but does not match its required form — every "
+    "field is required, in the documented order, with single-space separators. THE FORM IS "
+    "DELIBERATELY NOT REPRODUCED HERE, not even its prefix: run 'bash scripts/flow/"
+    "roborev-review.sh --help' for it, because this text reaches the summary block and a block "
+    "carrying a fillable marker would authorize the next run by being quoted (#3312 job 23)"
+)
 EMIT_KEYS = {
     WAIVE_KIND: ("state", "author", "scope", "reason", "detail"),
     DEFER_KIND: ("state", "author", "scope", "reason", "detail", "issues", "count"),
@@ -187,10 +194,7 @@ def judge_waive_line(line, author, base, head, job, allowlist):
     """Return (state, fields) for a line that starts with the absence-waiver prefix."""
     match = WAIVE_MARKER.match(line)
     if match is None:
-        return "malformed", {
-            "author": author,
-            "detail": "the line does not match the required form %s" % REQUIRED_FORMS[WAIVE_KIND],
-        }
+        return "malformed", {"author": author, "detail": MALFORMED_FORM_DETAIL}
     m_base, m_head, m_job, m_reason = match.groups()
     reason = m_reason.strip()
     scope = "base=%s head=%s job=%s" % (m_base, m_head, m_job)
@@ -226,13 +230,86 @@ def unauthorized_detail(author, allowlist, what):
             % (author, what, " ".join(allowlist)))
 
 
-def body_references_issue(pr_body, issue):
-    """Is `#<issue>` referenced by the pull-request body, as a WHOLE number?
+# ===== A LOCAL ISSUE REFERENCE, WITH TOKEN *AND* REPOSITORY BOUNDARIES (roborev job 225) =====
+# THE PR BODY IS WRITTEN BY THE WORKER — THE CONSTRAINED PARTY. So this predicate decides whether the
+# party being constrained satisfied its own constraint, and it must not be satisfiable by a reference
+# that names something else or renders as inert text. The first version bounded DIGITS only, so three
+# shapes passed while `gh issue view <N>` (which the caller runs) validated the unrelated LOCAL issue:
+#   * `other/repo#3602`  — a CROSS-REPOSITORY reference. GitHub resolves it to a different repository
+#                          entirely, so it records no disposition here.
+#   * `#3602suffix`      — not an autolink at all; a token boundary was missing on the right.
+#   * a copy inside a ``` fence, a `code span` or an <!-- HTML comment --> — content that a human
+#                          reading the PR does not see as a link, so the requirement "it must name
+#                          WHERE THE FINDING WENT" is not met by it.
+#
+# WHY REGEX AND NOT STRUCTURED LINK DATA. `gh pr view --json` exposes `closingIssuesReferences`, which
+# is a DIFFERENT relation: it lists issues a closing KEYWORD would close on merge. A deferred finding's
+# issue must stay OPEN — that is the whole point of deferring it — so a deferral PR closes nothing and
+# that field is empty for exactly the case this predicate exists for. GitHub exposes no "issues
+# mentioned by this body" field. So the reference is read from the body text, with the inert regions
+# removed first.
+#
+# EVERY AMBIGUITY IS RESOLVED TOWARD *NOT FOUND*, which is the fail-closed direction here: an
+# unrecognised shape yields `pr-unlinked`, whose remedy is one line in the PR body ("add `#<N>`"),
+# while the opposite error lets a deferred finding be dropped with no recorded disposition. The full
+# URL form (`https://github.com/<owner>/<repo>/issues/<N>`) is therefore NOT accepted either — this
+# scanner is not told which repository is local, and guessing is the shape being removed.
+FENCE_OPEN = re.compile(r"^(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 
-    Bounded on both sides so `#3602` is not "found" inside `#36021`: a substring match would let one
-    filed issue stand in for another, which is the disposition requirement satisfied by accident.
+
+def strip_inert_regions(body):
+    """The body with HTML comments, fenced code blocks and inline code spans removed.
+
+    CONSERVATIVE BY CONSTRUCTION, and that is what makes this bounded rather than the unbounded
+    "data or control?" game #3312 job 29 closed: every unterminated construct swallows the REST of
+    its scope (an unterminated `<!--` the rest of the body, an unclosed fence the rest of the body,
+    an unmatched backtick the rest of its line), so a malformed body removes MORE text and can only
+    make a reference harder to find.
+
+    THE FENCE CLOSER FOLLOWS CommonMark, deliberately: a closing fence uses the SAME character, is at
+    least as long as the opener, and carries NO info string. A naive "any fence line toggles" rule
+    desynchronises on a ```` ```bash ```` line INSIDE a fence — GitHub's renderer keeps that as code
+    while the naive rule would leave it as text, which is a reference the human sees as code and the
+    machine counts as a link. That is fail-OPEN, in the one direction this predicate must not fail.
     """
-    return re.search(r"(?<![0-9])#%s(?![0-9])" % re.escape(issue), pr_body) is not None
+    # HTML comments first: they can span lines and can contain fences.
+    body = re.sub(r"<!--.*?-->", " ", body, flags=re.S)
+    body = re.sub(r"<!--.*\Z", " ", body, flags=re.S)
+    kept = []
+    open_fence = None
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if open_fence is None:
+            match = FENCE_OPEN.match(stripped)
+            if match is not None:
+                open_fence = match.group("fence")
+                continue
+            # Inline code spans, and an unmatched backtick to end of line.
+            line = re.sub(r"`[^`]*`", " ", line)
+            line = re.sub(r"`.*$", " ", line)
+            kept.append(line)
+            continue
+        closer = FENCE_OPEN.match(stripped)
+        if (closer is not None
+                and closer.group("fence")[0] == open_fence[0]
+                and len(closer.group("fence")) >= len(open_fence)
+                and not closer.group("info").strip()):
+            open_fence = None
+    return "\n".join(kept)
+
+
+# A LOCAL `#<N>`: no repository qualifier or word character before it, no token character after it.
+# The left class covers `owner/repo#N`, `GH-`-style prefixes and any `word#N`; the right class covers
+# `#Nsuffix`. `.` and `)` are NOT in the right class, so `#3602.` and `(#3602)` still count.
+LOCAL_REF_LEFT = r"(?<![0-9A-Za-z._/-])"
+LOCAL_REF_RIGHT = r"(?![0-9A-Za-z_-])"
+
+
+def body_references_issue(pr_body, issue):
+    """Is `#<issue>` referenced by the pull-request body as a LOCAL issue, in visible text?"""
+    visible = strip_inert_regions(pr_body)
+    pattern = LOCAL_REF_LEFT + "#" + re.escape(issue) + LOCAL_REF_RIGHT
+    return re.search(pattern, visible) is not None
 
 
 def judge_defer_line(line, author, base, head, job, allowlist, observed_count, pr_body):
@@ -246,10 +323,7 @@ def judge_defer_line(line, author, base, head, job, allowlist, observed_count, p
     """
     match = DEFER_MARKER.match(line)
     if match is None:
-        return "malformed", {
-            "author": author,
-            "detail": "the line does not match the required form %s" % REQUIRED_FORMS[DEFER_KIND],
-        }
+        return "malformed", {"author": author, "detail": MALFORMED_FORM_DETAIL}
     m_issues, m_count, m_base, m_head, m_job, m_reason = match.groups()
     reason = m_reason.strip()
     scope = "base=%s head=%s job=%s" % (m_base, m_head, m_job)

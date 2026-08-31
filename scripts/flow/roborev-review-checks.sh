@@ -202,6 +202,15 @@ roborev_check_prompt_content() {
         case "$ROBOREV_WAIVER_STATE" in
           # NOT EVEN THE MARKER PREFIX IS PRINTED (layer 3, job 23): no emitted diagnostic may carry any
           # part of the marker, so no pasted block can be mistaken for one, and the rule is assertable.
+          # THIS COMMENT WAS FALSE UNTIL #3626 (roborev job 225). The `*)` branch below interpolates
+          # `ROBOREV_WAIVER_DETAIL`, which comes from the scanner — and for a MALFORMED marker the
+          # scanner's detail QUOTED THE WHOLE REQUIRED FORM. So this block printed a complete, fillable
+          # marker beside a live base/head/job while the comment two lines up asserted it never did. A
+          # comment asserting a property the code violates is worse than no comment: it is what stops
+          # the next reader checking. The form now lives ONLY in `--help`; the scanner's
+          # `MALFORMED_FORM_DETAIL` is what makes that true for BOTH kinds, and the guard suite asserts
+          # the absence against every diagnostic-emitting case rather than only the one where it holds
+          # trivially.
           # THE CAUSE TEACHES BOTH RULES, not just the absence (#3312 jobs 27/29): the marker must be the
           # SOLE NONBLANK CONTENT of the comment, and the comment must be TOP-LEVEL. An authorizer told
           # merely "no waiver line exists" re-checks their SYNTAX — not the shape of the comment or the
@@ -632,6 +641,11 @@ roborev_check_findings_deferral() {
     # THE EXACT MARKER FORM IS NOT PRINTED HERE, and not even its prefix — summary blocks are pasted
     # into PR comments as a matter of course in this repository, and an artifact that DESCRIBED the
     # escape hatch became it once already (#3312 job 23). The form lives ONLY in `--help`.
+    # AND THAT WAS FALSE FOR THE MALFORMED STATE UNTIL roborev job 225: the `*)` branch above
+    # interpolates `ROBOREV_DEFERRAL_DETAIL`, and the scanner's MALFORMED detail quoted the whole
+    # required form — so this key printed a fillable marker while the sentence above denied it. The
+    # deferral inherited the leak from the waiver, and one fix (the scanner's MALFORMED_FORM_DETAIL)
+    # closed both, because both kinds get their detail from the same structured parse.
     DETAILS+=("NOTICE: findings: $observed finding(s) are reported for job ${JOB:-<unknown>} and NONE of them is covered by an authorized deferral (deferral: ${DEFERRAL_REPORT}). Triage and fix them, or — if a lead has DEFERRED them to filed issues — that lead may authorize the deferral for THIS review only (base ${RANGE_BASE_SHA:-<unknown>} — the merge-base of ${BASE} and HEAD, which is the base of the reviewed range and NOT the tip of ${BASE}, head ${HEAD_SHA:-<unknown>}, job ${JOB:-<unknown>}, count $observed) with a dedicated PR-comment line naming the filed issue numbers. THE EXACT FORM IS DELIBERATELY NOT PRINTED HERE — run 'bash scripts/flow/roborev-review.sh --help' for it — because a summary block gets pasted into PR comments as a matter of course, and a block that carried a complete authorization would authorize the next run by being quoted. A deferral covers ONLY the findings of the job it names, only when the authorized count equals the observed count, and only when every named issue is retrievable and referenced from the PR body.")
   fi
 }
