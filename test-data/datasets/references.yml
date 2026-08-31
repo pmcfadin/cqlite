@@ -1063,22 +1063,22 @@ tables:
   # (issue #3500).
   - keyspace: test_nested_udt_keys
     table: nested_udt_keys
-    sstable_dir: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-83a407b0a4bf11f18f2385b935a43c8b"
+    sstable_dir: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-a0e9ca80a4dd11f185314dd6ea9c00d5"
     prefix: nb-1-big
     references:
       data_jsonl:
         present: true
-        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-83a407b0a4bf11f18f2385b935a43c8b/nb-1-big-Data.db.jsonl"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-a0e9ca80a4dd11f185314dd6ea9c00d5/nb-1-big-Data.db.jsonl"
       statistics_txt:
         present: true
-        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-83a407b0a4bf11f18f2385b935a43c8b/nb-1-big-Statistics.db.txt"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-a0e9ca80a4dd11f185314dd6ea9c00d5/nb-1-big-Statistics.db.txt"
       toc_txt:
         present: true
-        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-83a407b0a4bf11f18f2385b935a43c8b/nb-1-big-TOC.txt"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-a0e9ca80a4dd11f185314dd6ea9c00d5/nb-1-big-TOC.txt"
       digest_crc32:
         present: true
-        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-83a407b0a4bf11f18f2385b935a43c8b/nb-1-big-Digest.crc32"
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-a0e9ca80a4dd11f185314dd6ea9c00d5/nb-1-big-Digest.crc32"
       summary_txt:
         present: false
-        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-83a407b0a4bf11f18f2385b935a43c8b/nb-1-big-Summary.db.txt"
-    generated_at: 2026-08-30T22:09:56Z
+        path: "test-data/datasets/sstables/test_nested_udt_keys/nested_udt_keys-a0e9ca80a4dd11f185314dd6ea9c00d5/nb-1-big-Summary.db.txt"
+    generated_at: 2026-08-31T01:45:29Z
