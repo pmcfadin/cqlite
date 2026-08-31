@@ -2435,7 +2435,15 @@ supervisor_lock_publish() {
   # word-splitting and globbing and does nothing about option parsing.
   if ! mv -f -- "$tmpf" "$SUPERVISOR_LOCK/pid" 2>/dev/null; then
     rm -f -- "$tmpf" 2>/dev/null || true
-    printf '%s' 'rename-failed'
+    # A RACE AND AN I/O ERROR SHARE THIS FAILURE, AND THEY WANT OPPOSITE ACTIONS (#3601, job 244 sweep).
+    # The rename fails with ENOENT when a peer has removed the directory under us — contention, where the
+    # answer is "re-run" — and with EACCES/ENOSPC when the filesystem is broken, where the answer is "fix
+    # the box" and re-running loops forever. They are told apart by whether the directory is still there.
+    if [[ ! -d "$SUPERVISOR_LOCK" ]]; then
+      printf '%s' 'rename-failed-lock-gone'
+    else
+      printf '%s' 'rename-failed'
+    fi
     return 1
   fi
   state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='unparseable read-back-aborted'
@@ -2606,7 +2614,15 @@ supervisor_lock_take() {
   # the publish is what makes it the narrowest window available to this code, and nothing here can make it
   # zero — that needs serialisation of the complete claim-and-publication operation, which is #3683,
   # together with the reclaim ABA and the release read-then-remove. Do not read the marker as a guarantee.
-  if ! { : >"$marker"; } 2>/dev/null; then
+  # SAME PREDICATE AS THE RENAME BELOW (#3601, job 244 sweep): this write fails with ENOENT when a peer
+  # has already removed the directory we just created — contention — and with EACCES/ENOSPC when the
+  # filesystem cannot take a zero-byte file. Reporting the first as the second sends an operator to check
+  # a disk that is fine.
+  if ! { : >"$marker"; } 2>/dev/null && [[ ! -d "$SUPERVISOR_LOCK" ]]; then
+    SUPERVISOR_LOCK_TAKE_CAUSE='marker-failed-lock-gone cleanup-declined-lock-already-gone'
+    return 3
+  fi
+  if [[ ! -e "$marker" && ! -L "$marker" ]]; then
     # NO OWNERSHIP EVIDENCE, SO NO REMOVAL. We know we created the directory and we cannot PROVE the one
     # at that name now is still ours, so it is left in place and reported. That risks the empty-lock wedge
     # B1 removed — but the cause is a filesystem that cannot take a zero-byte file, the same failure the
@@ -2740,48 +2756,91 @@ supervisor_lock_refuse_publish_failed() {
   case "$cause" in
     *' '*) cleanup="${cause#* }" ;;
   esac
+  # THE NATURE OF THE FAILURE IS CARRIED SEPARATELY FROM THE STEP THAT FAILED (#3601, job 244 sweep). The
+  # same step fails for two reasons that want OPPOSITE actions — a peer removing the directory (re-run)
+  # versus a broken filesystem (fix the box, and re-running loops) — so the first action an operator is
+  # given is selected by the nature, not by the step.
+  local nature='' nature_line='' first_action=''
   case "$pub" in
-    marker-failed) what='writing our OWNERSHIP MARKER into the lock FAILED — this run got the lock name and could not record, even provisionally, that the directory is its own' ;;
-    write-failed)  what='writing our pid into the lock FAILED — no byte of it was written' ;;
-    rename-failed) what='publishing our pid into the lock FAILED at the rename — the staging file was written and could not be moved into place' ;;
-    *)             what="recording our pid in the lock FAILED ([$pub])" ;;
+    marker-failed)
+      what='writing our OWNERSHIP MARKER into the lock FAILED — this run got the lock name and could not record, even provisionally, that the directory is its own'
+      nature='filesystem'
+      ;;
+    marker-failed-lock-gone)
+      what='writing our OWNERSHIP MARKER into the lock FAILED because the lock directory this run had just created was ALREADY GONE'
+      nature='contention'
+      ;;
+    write-failed)
+      what='writing our pid into the lock FAILED — no byte of it was written'
+      nature='filesystem'
+      ;;
+    rename-failed)
+      what='publishing our pid into the lock FAILED at the rename — the staging file was written and could not be moved into place'
+      nature='filesystem'
+      ;;
+    rename-failed-lock-gone)
+      what='publishing our pid into the lock FAILED at the rename because the lock directory this run had created was ALREADY GONE'
+      nature='contention'
+      ;;
+    *)
+      what="recording our pid in the lock FAILED ([$pub])"
+      nature='unestablished'
+      ;;
+  esac
+  case "$nature" in
+    filesystem)
+      nature_line='This is a FILESYSTEM failure, not contention: no other holder is implied by the failure itself. The usual causes are a full filesystem (ENOSPC — routine on this fleet) or a read-only mount'
+      first_action='check free space and mount options for the filesystem holding the path named above (df, mount) — re-running without changing either will fail the same way'
+      ;;
+    contention)
+      nature_line='This is CONTENTION, not a filesystem fault: something removed or replaced the directory this run had just created, while this run was recording itself in it. No disk or permission problem is implied'
+      first_action='re-run this supervisor — nothing needs fixing and nothing needs clearing; the next start will either take the lock or name whoever holds it'
+      ;;
+    *)
+      nature_line='Whether this was a filesystem fault or contention is NOT established by the failure itself, so this refusal does not claim either'
+      first_action='inspect the path named above and the filesystem holding it (df, mount) before re-running: this run could not tell a broken filesystem from a peer taking the name'
+      ;;
   esac
   # EVERY SENTENCE BELOW IS BOUND TO AN OBSERVATION `supervisor_lock_take` ACTUALLY MADE (#3601 B9).
   case "$cleanup" in
     cleanup-verified-absent)
       aftermath='The directory this run created has been removed again and its absence was VERIFIED after the removal, so this failure leaves no pid-less lock behind for the next start to have to refuse over'
-      remedy='check free space and mount options for the filesystem holding the path named above (df, mount), then re-run this supervisor. Nothing needs clearing by hand'
+      remedy="$first_action. Nothing needs clearing by hand"
       ;;
     'cleanup-failed-foreign-holder '*)
       aftermath="This run then tried to remove the directory it had created and it REMAINS — and it now holds a holder record that is NOT ours ([${cleanup#cleanup-failed-foreign-holder }]). A peer published into it while our publish was failing; the removal is NON-RECURSIVE precisely so that it cannot delete that record, and nothing of that peer's has been touched"
-      remedy='nothing to clear: the path named above belongs to another holder, which this run left intact. Fix the filesystem problem named above and re-run; the next start will read that holder and report it by pid'
+      remedy="nothing to clear: the path named above belongs to another holder, which this run left intact. $first_action; the next start will read that holder and report it by pid"
+      ;;
+    cleanup-declined-lock-already-gone)
+      aftermath='There was nothing for this run to remove: the directory it created was already gone when it looked. Nothing was removed and nothing is left behind by this run'
+      remedy="$first_action"
       ;;
     cleanup-declined-no-ownership-evidence)
       aftermath='This run therefore did NOT attempt to remove the directory it created: with no marker written it cannot prove the directory now at that name is still its own, and a removal on that guess is how a peer that took the name in the meantime loses its lock. A lock MAY be sitting at that path — this run makes no claim either way'
-      remedy="fix the filesystem problem named above and re-run. If starts keep refusing over a lock at that path, inspect it and clear it with the next line, which is NON-RECURSIVE and refuses if anything is inside that you have not examined$(supervisor_lock_shape_note)"
+      remedy="$first_action. If starts keep refusing over a lock at that path, inspect it and clear it with the next line, which is NON-RECURSIVE and refuses if anything is inside that you have not examined$(supervisor_lock_shape_note)"
       cmd="$(supervisor_lock_clear_command)"
       ;;
     'cleanup-declined-foreign-holder '*)
       aftermath="This run then found that the directory at that name is NOT the one it created — its ownership marker is gone from it — and that it holds a holder record ([${cleanup#cleanup-declined-foreign-holder }]). Another supervisor took the name while our publish was failing, so this run removed NOTHING"
-      remedy='nothing to clear: the path named above belongs to another holder, which this run left intact. Fix the filesystem problem named above and re-run; the next start will read that holder and report it by pid'
+      remedy="nothing to clear: the path named above belongs to another holder, which this run left intact. $first_action; the next start will read that holder and report it by pid"
       ;;
     'cleanup-declined-foreign-instance '*)
       aftermath="This run then found that the directory at that name is NOT the one it created — its ownership marker is gone from it — and that it carries no holder record yet ([${cleanup#cleanup-declined-foreign-instance }]). That is another supervisor's start in progress, which is exactly the lock a blind removal would have destroyed, so this run removed NOTHING"
-      remedy='nothing to clear: another supervisor is starting at that path and this run left it alone. Fix the filesystem problem named above and re-run; the next start will read that holder and report it by pid'
+      remedy="nothing to clear: another supervisor is starting at that path and this run left it alone. $first_action; the next start will read that holder and report it by pid"
       ;;
     'cleanup-failed-residual '*)
       aftermath="This run then tried to remove the directory it had created and it REMAINS ([${cleanup#cleanup-failed-residual }]) — the removal did NOT succeed, so a lock DOES sit at that path and the next start will refuse over it until it is cleared"
-      remedy="fix the filesystem problem named above, then clear the leftover lock with the next line, on its own, exactly as printed — it is NON-RECURSIVE, so it refuses if anything is inside that you have not examined$(supervisor_lock_shape_note)"
+      remedy="$first_action. Then clear the leftover lock with the next line, on its own, exactly as printed — it is NON-RECURSIVE, so it refuses if anything is inside that you have not examined$(supervisor_lock_shape_note)"
       cmd="$(supervisor_lock_clear_command)"
       ;;
     *)
       aftermath='The removal outcome for the directory this run created was NOT ESTABLISHED, so this refusal makes no claim about whether a lock remains at that path'
-      remedy='fix the filesystem problem named above, then inspect the path named above before re-running: this run could not establish whether it left a lock there'
+      remedy="$first_action. Then inspect the path named above before re-running: this run could not establish whether it left a lock there"
       ;;
   esac
   supervisor_lock_refuse \
     "refusing to start — the lock name became ours and this run could not record itself in it" \
-    "$what. This is a FILESYSTEM failure, not contention: no other holder is implied by the failure itself. The usual causes are a full filesystem (ENOSPC — routine on this fleet) or a read-only mount. $aftermath" \
+    "$what. $nature_line. $aftermath" \
     "$remedy" \
     "$cmd"
 }
@@ -2858,6 +2917,19 @@ supervisor_lock_refuse_lost_race() {
     "nothing is wrong: re-run this supervisor. If it keeps losing, the winner is a live supervisor for this lane and the next start will name its pid"
 }
 
+# supervisor_lock_refuse_uncreatable [<phase-note>] — `mkdir` failed AND nothing is at that name, so the
+# failure is about the PATH and not about a holder (#3601 AC7 addendum; reused post-reclaim by job 244 B20).
+#
+# TWO CALL SITES, ONE TEXT, because the operator's problem is identical in both: the lock path cannot be
+# created. The optional phase note says WHERE in the start we were, which is the only thing that differs.
+supervisor_lock_refuse_uncreatable() {
+  local phase="${1:-}"
+  supervisor_lock_refuse \
+    "refusing to start — the lock directory could NOT BE CREATED, and nothing exists at that path" \
+    "this is NOT contention: no lock is there and no holder is implied${phase:+ ($phase)}. \`mkdir\` failed for a reason to do with the PATH itself — the parent directory missing, not a directory, or not writable by this user, or the filesystem being full" \
+    "check the parent directory of the path named above: it must exist, be a directory, and be writable by this user, and the filesystem must have space. The path is \${TMPDIR:-/tmp}-derived unless this run's launcher named it, so a TMPDIR pointing somewhere absent, read-only or full is the usual cause. Re-running WITHOUT changing any of that will fail exactly the same way"
+}
+
 acquire_lock() {
   # IDENTITY FIRST: both the lock path and the claim actor are derived FROM it, so resolving it after
   # them would leave them on a stale inference.
@@ -2890,10 +2962,7 @@ acquire_lock() {
   # `mkdir` also fails when the parent is missing, unwritable, or not a directory. So before attributing
   # the failure to a holder, check that something IS at that name.
   if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then
-    supervisor_lock_refuse \
-      "refusing to start — the lock directory could NOT BE CREATED, and nothing exists at that path" \
-      "this is NOT contention: no lock is there and no holder is implied. \`mkdir\` failed for a reason to do with the PATH itself — the parent directory missing, not a directory, or not writable by this user" \
-      "check the parent directory of the path named above: it must exist, be a directory, and be writable by this user. The path is \${TMPDIR:-/tmp}-derived unless this run's launcher named it, so a TMPDIR pointing somewhere absent or read-only is the usual cause"
+    supervisor_lock_refuse_uncreatable ''
   fi
 
   # THE NAME IS TAKEN. WHO HOLDS IT? Three-valued, and only an AFFIRMATIVE `dead` reclaims.
@@ -3058,7 +3127,21 @@ acquire_lock() {
   if [[ "$takerc" -eq 3 ]]; then
     supervisor_lock_refuse_publish_failed "$SUPERVISOR_LOCK_TAKE_CAUSE"
   fi
-  supervisor_lock_refuse_lost_race
+  # STATUS 1 IS `mkdir` FAILING, AND THAT IS TWO DIFFERENT FACTS WITH OPPOSITE REMEDIES (#3601, roborev
+  # job 244 B20). EEXIST means someone else took the name — a race, and re-running is exactly right.
+  # EACCES/ENOSPC/ENOENT mean the path cannot hold a lock — and then "a stale lock was cleared and the
+  # name was claimed by someone else, re-run this supervisor" tells an operator that nothing is wrong and
+  # sends them into a retry loop over a state that cannot resolve until permissions or disk are fixed.
+  #
+  # THIS IS #3601'S OWN HEADLINE DEFECT, ONE BRANCH OVER: the AC7 addendum exists because the pre-fix code
+  # "blames the lock rather than the path shape, and an operator goes looking for a stale lock that isn't
+  # there". Shipping this issue with a fresh instance of its own rationale is not defensible. The FIRST
+  # take already disambiguates exactly this way, which is what makes the omission here an oversight rather
+  # than a design choice — so the same existence test decides it.
+  if [[ -e "$SUPERVISOR_LOCK" || -L "$SUPERVISOR_LOCK" ]]; then
+    supervisor_lock_refuse_lost_race
+  fi
+  supervisor_lock_refuse_uncreatable 'after a stale lock was successfully cleared, so the name was free a moment ago'
 }
 
 # ---------------------------------------------------------------------------
