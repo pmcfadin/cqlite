@@ -474,6 +474,24 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
             .unwrap(),
         Value::blob(vec![1, 2, 3])
     );
+    // A BARE, unqualified marshal name (a hand-written schema, or a marshal
+    // string whose package prefix was stripped upstream): the declared-blob test
+    // must recognise it, or the diagnostic below would fire on a CORRECT decode.
+    assert_eq!(
+        p.parse_cell_path_key(&[1, 2, 3], "BytesType", "k").unwrap(),
+        Value::blob(vec![1, 2, 3])
+    );
+    // CQL's CUSTOM-type spelling is the marshal class name in SINGLE QUOTES; the
+    // trailing quote defeats a naive `ends_with` suffix match.
+    assert_eq!(
+        p.parse_cell_path_key(
+            &[1, 2, 3],
+            "'org.apache.cassandra.db.marshal.BytesType'",
+            "k"
+        )
+        .unwrap(),
+        Value::blob(vec![1, 2, 3])
+    );
     assert_eq!(
         p.parse_cell_path_key(
             &[1, 2, 3],
@@ -486,67 +504,141 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
 }
 
 // ---------------------------------------------------------------------------
-// FAIL CLOSED on a key the decoder could not decode (issue #3612, option B)
+// A type this reader CANNOT MODEL: opaque bytes + a warning, NEVER an `Err`
 // ---------------------------------------------------------------------------
 //
-// The residual after delegation: `parse_value_from_raw_bytes`'s SHARED default
-// hands back `Value::Blob` for a type it does not recognise. That default is
-// reached by every value read in the codebase and is deliberately NOT changed
-// (blast radius); instead THIS call site rejects the result, because at a map-key
-// position an opaque blob for a NON-blob declared type is silently wrong data —
-// the key would compare, sort and render as bytes. No-heuristics (#28): decode
-// from authoritative metadata or fail, never surface a guess.
+// MEASURED in review round 1 (see the module header): an `Err` from this site is
+// SWALLOWED by row assembly's complex-column `Err(e) => { debug!(); break; }`
+// arm, which drops the column AND every later on-disk column from the row. A
+// silently truncated row is more destructive than one opaque value, and
+// Cassandra reads such a key without complaint, so the rule is: `Err` ONLY where
+// Cassandra's own `validate`/`split` throws. A type CQLite merely cannot model
+// is not that case.
 
-/// A bare UDT name that is ABSENT from the registry reaches the shared opaque
-/// default. That is an UNDECODED key — a schema naming a UDT the registry does
-/// not carry — so it fails closed rather than surfacing bytes.
+/// A bare UDT name ABSENT from the registry reaches the shared decoder's opaque
+/// default. It must surface as the opaque `Value::Blob` — NOT an `Err`, which
+/// would truncate the row — leaving the rest of the row intact.
 #[test]
-fn unregistered_udt_name_cell_path_key_fails_closed() {
-    let err = parser()
+fn unregistered_udt_name_cell_path_key_stays_opaque_without_erroring() {
+    let got = parser()
         .parse_cell_path_key(&collide_key_bytes(), "absent_udt", "cm")
-        .expect_err("an unresolvable UDT-named map key must not surface as bytes");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("absent_udt"),
-        "the error must name the DECLARED key type, got: {msg}"
+        .expect(
+            "an unmodellable key type must NOT return Err: row assembly swallows it \
+             into a silently truncated row (issue #3612 review round 1)",
+        );
+    assert_eq!(
+        got,
+        Value::blob(collide_key_bytes()),
+        "the key surfaces as the raw cell-path bytes, unchanged"
     );
+}
+
+/// A parameterised marshal type CQLite models nowhere (here a custom
+/// comparator) takes the same route: opaque, not an error.
+#[test]
+fn unmodelled_custom_marshal_cell_path_key_stays_opaque_without_erroring() {
+    let declared = format!("{MARSHAL}.DynamicCompositeType(s=>{MARSHAL}.UTF8Type)");
+    let got = parser()
+        .parse_cell_path_key(&[1, 2, 3], &declared, "ck")
+        .expect("an unmodellable marshal key type must NOT return Err");
+    assert_eq!(got, Value::blob(vec![1, 2, 3]));
+}
+
+// ---------------------------------------------------------------------------
+// COMPOSITE keys: trailing bytes are corruption (Cassandra `TupleType.split`)
+// ---------------------------------------------------------------------------
+
+/// Appending bytes to a UDT cell-path key must be REFUSED, not decoded from the
+/// prefix — otherwise two distinct corrupted encodings yield the same logical
+/// key. Cassandra 5.0.8 `TupleType.split` throws `"Expected N values … but got
+/// more"` on exactly this input.
+#[test]
+fn trailing_bytes_after_a_composite_cell_path_key_are_rejected() {
+    let p = parser();
+    let mut corrupt = collide_key_bytes();
+    corrupt.extend_from_slice(b"\xde\xad");
+    let err = p
+        .parse_cell_path_key(&corrupt, "frozen<collide>", "cm")
+        .expect_err("trailing bytes after a composite key must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("trailing"), "got: {msg}");
     assert!(
         msg.contains("cm"),
         "the error must name the column, got: {msg}"
     );
-    assert!(
-        msg.contains("opaque bytes"),
-        "the error must say the decoder returned opaque bytes, so the next \
-         reader is not sent back to first principles, got: {msg}"
-    );
-    // The message is a multi-line Rust string literal, which is easy to mangle:
-    // a lost `\` continuation leaves the source indentation embedded in the
-    // rendered text. That happened once in this very diff and the substring
-    // assertions above did NOT see it, so it is pinned as its own property.
-    assert!(
-        !msg.contains("   "),
-        "the error text must not carry source indentation from a lost line \
-         continuation, got: {msg}"
+    // The control: the SAME bytes without the appended pair still decode.
+    assert_collide_fields(
+        &p.parse_cell_path_key(&collide_key_bytes(), "frozen<collide>", "cm")
+            .expect("the un-appended key is the control and must still decode"),
     );
 }
 
-/// A parameterised marshal type CQLite models nowhere (here a custom comparator)
-/// also reaches the shared opaque default, and also fails closed.
+/// Same for a tuple key, the other composite spelling.
 #[test]
-fn unmodelled_custom_marshal_cell_path_key_fails_closed() {
-    let declared = format!("{MARSHAL}.DynamicCompositeType(s=>{MARSHAL}.UTF8Type)");
+fn trailing_bytes_after_a_tuple_cell_path_key_are_rejected() {
+    let mut corrupt = encode_components(&[Some(b"abc"), Some(&42i32.to_be_bytes())]);
+    corrupt.push(0x00);
     let err = parser()
-        .parse_cell_path_key(&[1, 2, 3], &declared, "ck")
-        .expect_err("an unmodelled map key type must not surface as bytes");
-    let msg = err.to_string();
-    assert!(msg.contains("DynamicCompositeType"), "got: {msg}");
-    assert!(msg.contains("opaque bytes"), "got: {msg}");
+        .parse_cell_path_key(&corrupt, "tuple<text, int>", "tk")
+        .expect_err("trailing bytes after a tuple key must be rejected");
+    assert!(err.to_string().contains("trailing"), "got: {err}");
 }
 
-/// The check must not fire for any type the decoder DOES handle — including the
-/// families this issue newly reaches — or it would turn a working read into an
-/// error. Asserted over the whole set so a future decode regression surfaces as
-/// this named failure rather than as a silent blob.
+/// A SHORT composite encoding — fewer components present than declared, the
+/// trailing fields absent — is LEGAL and must NOT be rejected. Cassandra's
+/// `TupleType.split` returns early on `position == length`
+/// (`Arrays.copyOfRange(components, 0, i)`), so refusing this would red on valid
+/// Cassandra-written data.
+#[test]
+fn a_short_composite_cell_path_key_is_accepted() {
+    let short = encode_components(&[Some(b"only-the-first-field")]);
+    let value = parser()
+        .parse_cell_path_key(&short, "frozen<collide>", "cm")
+        .expect("a short composite encoding is legal per TupleType.split");
+    let u = udt_of(&value);
+    assert_eq!(text(field(u, "_type")), "only-the-first-field");
+    assert_eq!(
+        field(u, "real_field"),
+        None,
+        "components the encoding omits are absent, i.e. null"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `inet` is 4 OR 16 bytes — the one family the single-width table cannot express
+// ---------------------------------------------------------------------------
+
+/// Cassandra's `InetAddressSerializer.validate` delegates to
+/// `InetAddress.getByAddress`, which accepts ONLY a 4-byte (IPv4) or 16-byte
+/// (IPv6) address.
+#[test]
+fn inet_cell_path_key_accepts_only_4_or_16_bytes() {
+    let p = parser();
+    assert_eq!(
+        p.parse_cell_path_key(&[127, 0, 0, 1], "inet", "k").unwrap(),
+        Value::Inet(vec![127, 0, 0, 1].into()),
+        "IPv4"
+    );
+    assert_eq!(
+        p.parse_cell_path_key(&[0u8; 16], "inet", "k").unwrap(),
+        Value::Inet(vec![0u8; 16].into()),
+        "IPv6"
+    );
+    for bad in [1usize, 3, 5, 8, 15, 17] {
+        let err = p
+            .parse_cell_path_key(&vec![0u8; bad], "inet", "k")
+            .expect_err("only 4 or 16 bytes is a valid inet");
+        assert!(
+            err.to_string().contains("4 or 16"),
+            "the message must name BOTH accepted widths, got: {err}"
+        );
+    }
+    // The marshal spelling goes through the same table.
+    assert!(p
+        .parse_cell_path_key(&[0u8; 5], &format!("{MARSHAL}.InetAddressType"), "k")
+        .is_err());
+}
+
 #[test]
 fn every_decodable_cell_path_key_type_passes_the_fail_closed_check() {
     let p = parser();
