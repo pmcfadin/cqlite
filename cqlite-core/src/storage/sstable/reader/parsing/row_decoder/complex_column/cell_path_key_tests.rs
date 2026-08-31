@@ -961,3 +961,109 @@ fn a_minus_one_component_length_is_still_a_null_field() {
     assert_eq!(text(field(u, "_keyspace")), "key-keyspace-marker");
     assert_eq!(field(u, "real_field"), Some(Value::Integer(100)));
 }
+
+// ---------------------------------------------------------------------------
+// The width table mirrors Cassandra's THREE-WAY serializer split, not a uniform
+// `!= N` (issue #3612 round 3 addendum)
+// ---------------------------------------------------------------------------
+//
+// Verified at the pinned `cassandra-5.0.8` tag, per serializer:
+//   `N` or `0`  : Int32(4) Long(8) Float(4) Double(8) UUID(16) Timestamp(8)
+//                 Counter(8, `extends LongSerializer`)   -- `!= N && !isEmpty`
+//   strict `!= N`: Short(2) Byte(1) SimpleDate(4) Time(8)
+//   `> 1`        : Boolean
+//   Inet         : THROWS on empty, then 4 or 16 only
+// An earlier revision of the module header claimed a uniform `!= N`; that was
+// wrong, and a table disagreeing with Cassandra is a false rejection of legal
+// data waiting to happen. Both directions of the asymmetry are pinned below,
+// because only the pair is evidence.
+
+/// The `N`-or-`0` family: a 0-byte key passes the WIDTH table (Cassandra's
+/// serializer accepts an empty buffer for these). It still fails to DECODE, from
+/// the decoder's own minimum-length guard — so the observable outcome is an
+/// error either way, which is exactly why encoding the `0` is a fidelity fix and
+/// not a behaviour change. Asserted on the MESSAGE, which is the only thing that
+/// distinguishes "the width table refused it" from "the decoder refused it".
+#[test]
+fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
+    let p = parser();
+    for type_str in [
+        "int",
+        "bigint",
+        "float",
+        "double",
+        "uuid",
+        "timeuuid",
+        "timestamp",
+        "counter",
+        "boolean",
+    ] {
+        let err = p
+            .parse_cell_path_key(&[], type_str, "k")
+            .expect_err("a 0-byte fixed-width value still cannot be decoded");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("requires exactly"),
+            "{type_str}: Cassandra's serializer ACCEPTS an empty buffer for this \
+             type, so the refusal must come from the decoder, not from the width \
+             table — got the width table's message: {msg}"
+        );
+    }
+}
+
+/// The STRICT family: a 0-byte key IS refused by the width table, because these
+/// four serializers have no `isEmpty` allowance. This is the half that makes the
+/// split load-bearing rather than decorative.
+#[test]
+fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
+    let p = parser();
+    for (type_str, width) in [
+        ("smallint", "2"),
+        ("tinyint", "1"),
+        ("date", "4"),
+        ("time", "8"),
+    ] {
+        let err = p
+            .parse_cell_path_key(&[], type_str, "k")
+            .expect_err("a strict fixed-width type admits no empty buffer");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires exactly") && msg.contains(width),
+            "{type_str}: the WIDTH TABLE must refuse an empty key and name {width}, \
+             got: {msg}"
+        );
+    }
+    // `inet` is the fifth strict case: `InetAddressSerializer.validate` THROWS on
+    // empty before it ever reaches `getByAddress`.
+    let err = p
+        .parse_cell_path_key(&[], "inet", "k")
+        .expect_err("inet admits no empty buffer");
+    assert!(err.to_string().contains("4 or 16"), "got: {err}");
+}
+
+/// Over-width is still refused for EVERY fixed-width family, empty-allowance or
+/// not — the `0` entries must not have widened the accepted set upwards.
+#[test]
+fn admitting_an_empty_width_did_not_widen_the_upper_bound() {
+    let p = parser();
+    for (type_str, over) in [
+        ("int", 5usize),
+        ("bigint", 9),
+        ("float", 5),
+        ("double", 9),
+        ("uuid", 17),
+        ("timestamp", 9),
+        ("boolean", 2),
+        ("smallint", 3),
+        ("tinyint", 2),
+        ("date", 5),
+        ("time", 9),
+        ("inet", 5),
+    ] {
+        assert!(
+            p.parse_cell_path_key(&vec![0u8; over], type_str, "k")
+                .is_err(),
+            "{type_str}: {over} bytes must still be refused"
+        );
+    }
+}

@@ -28,20 +28,38 @@
 //!    which is precisely the no-schema `Statistics.db` path, where the key type
 //!    arrives in marshal form.
 //!
-//! 2. **Fixed-width keys are validated for EXACT width.**
+//! 2. **Fixed-width keys are validated against the widths CASSANDRA accepts.**
 //!    `parse_value_from_raw_bytes` rejects only UNDER-width input (`< N`) because
 //!    its other callers hand it element bytes already bounded by an outer length
 //!    prefix, so trailing bytes cannot occur. A CellPath has no such outer bound
 //!    here: the whole slice is the key, so an over-long slice is corruption and
-//!    must not be decoded from its prefix. Cassandra agrees, and is the authority
-//!    (5.0.8, `org.apache.cassandra.serializers.*.validate`): `Int32Serializer`
-//!    `size != 4`, `LongSerializer`/`TimestampSerializer`/`DoubleSerializer`/
-//!    `TimeSerializer` `!= 8`, `FloatSerializer`/`SimpleDateSerializer` `!= 4`,
-//!    `UUIDSerializer` `!= 16`, `ShortSerializer` `!= 2`, `ByteSerializer`
-//!    `!= 1`, `BooleanSerializer` `size > 1` — all raising `MarshalException`.
-//!    (Cassandra additionally admits a ZERO-length buffer for most of these; a
-//!    zero-length path cannot reach here because the caller only decodes a
-//!    NON-EMPTY `path_bytes`.)
+//!    must not be decoded from its prefix.
+//!
+//!    The authority is `org.apache.cassandra.serializers.*.validate`, read at the
+//!    pinned `cassandra-5.0.8` tag (there is no clone on the build hosts; read via
+//!    `git show cassandra-5.0.8:src/java/org/apache/cassandra/serializers/<X>.java`
+//!    or the raw tag URL). **It is NOT a uniform `!= N`** — an earlier revision of
+//!    this header claimed that and was WRONG, which is why the rule is written out
+//!    per type here and mirrored literally by `cql_short_allowed_widths`:
+//!
+//!    * **`N` or `0`** (`size != N && !isEmpty` → an EMPTY buffer is LEGAL):
+//!      `Int32Serializer` 4, `LongSerializer` 8, `FloatSerializer` 4,
+//!      `DoubleSerializer` 8, `UUIDSerializer` 16, `TimestampSerializer` 8, and
+//!      `CounterSerializer` (which `extends LongSerializer`) 8.
+//!    * **strict `!= N`** (no empty buffer): `ShortSerializer` 2,
+//!      `ByteSerializer` 1, `SimpleDateSerializer` 4, `TimeSerializer` 8.
+//!    * **`size > 1`**, i.e. 0 or 1: `BooleanSerializer`.
+//!    * **`InetAddressSerializer`** THROWS on empty, then delegates to
+//!      `InetAddress.getByAddress` → 4 or 16 only.
+//!
+//!    Encoding the `0` allowances is a FIDELITY fix with no behaviour change, and
+//!    both halves of that are worth stating. No behaviour change: the sole caller
+//!    only decodes a NON-EMPTY `path_bytes`, so a 0-byte slice never reaches here;
+//!    and even if it did, `parse_value_from_raw_bytes` refuses a 0-byte
+//!    fixed-width value on its own. Worth doing anyway: a table that disagrees
+//!    with Cassandra is a false rejection waiting for the day someone moves the
+//!    call site, and "correct only because the caller filters" is a coupling one
+//!    file away from being silently broken.
 //!
 //! # When this site may return `Err` — and why the line is drawn at Cassandra
 //!
@@ -86,8 +104,8 @@
 //! | blob / bytes | whole slice by construction |
 //! | varint, inet | whole slice by construction (borrowed entire) |
 //! | decimal | whole slice by construction (`scale` = `data[..4]`, unscaled = `data[4..]`) |
-//! | int, bigint/counter, boolean, uuid/timeuuid, float, double, smallint, tinyint, timestamp, date, time | caller's EXACT-width table (stronger than a consumption compare) |
-//! | inet (widths) | same table, `[4, 16]` |
+//! | int, bigint/counter, boolean, uuid/timeuuid, float, double, smallint, tinyint, timestamp, date, time | caller's ALLOWED-width table, per type, mirroring Cassandra's serializers (stronger than a consumption compare) |
+//! | inet (widths) | same table, `[4, 16]` — empty THROWS in Cassandra |
 //! | frozen list (`parse_frozen_list_value_raw`) | reported offset, was DISCARDED — now checked |
 //! | frozen set (`parse_frozen_set_value_raw`) | reported offset, was DISCARDED — now checked |
 //! | frozen map (`parse_frozen_map_value_raw`) | reported offset, was DISCARDED — now checked |
@@ -451,14 +469,20 @@ impl V5CompressedLegacyParser {
     /// into two different opinions about a family's width.
     fn cql_short_allowed_widths(short: &str) -> &'static [usize] {
         match short {
-            "boolean" | "tinyint" | "byte" => &[1],
+            // --- `N` OR `0`: `size != N && !isEmpty` throws, so EMPTY is legal ---
+            "int" | "float" => &[0, 4],
+            "bigint" | "counter" | "double" | "timestamp" => &[0, 8],
+            "uuid" | "timeuuid" => &[0, 16],
+            // `BooleanSerializer` is spelled `size > 1`, i.e. 0 or 1.
+            "boolean" => &[0, 1],
+            // --- STRICT `!= N`: these four admit no empty buffer ---
+            "tinyint" | "byte" => &[1],
             "smallint" | "short" => &[2],
-            "int" | "float" | "date" => &[4],
-            "bigint" | "counter" | "double" | "timestamp" | "time" => &[8],
-            "uuid" | "timeuuid" => &[16],
-            // Cassandra `InetAddressSerializer.validate` delegates to
-            // `InetAddress.getByAddress`, which accepts ONLY a 4- or 16-byte
-            // address.
+            "date" => &[4],
+            "time" => &[8],
+            // `InetAddressSerializer.validate` THROWS on empty and otherwise
+            // delegates to `InetAddress.getByAddress`, which takes a 4- or
+            // 16-byte address and nothing else.
             "inet" => &[4, 16],
             // Variable-width by definition: text/ascii/varchar, blob/bytes,
             // varint, decimal, duration — plus every composite.
