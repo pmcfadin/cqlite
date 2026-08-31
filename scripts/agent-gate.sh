@@ -3481,57 +3481,100 @@ _component_set_extract_declaration() {
 #
 # NO EXTERNAL COMMAND: this is a local file read plus string compares, so it cannot hang and
 # needs no bound — which is also why it runs BEFORE the fetch.
-# _component_set_running_gate_check: does the gate script ON DISK still declare what THIS PROCESS
-# loaded? Sets `_CS_KIND=gate-script-changed` and returns 1 on disagreement.
+# _component_set_running_gate_check: is the gate script ON DISK still the script THIS PROCESS is
+# executing? Sets `_CS_KIND=gate-script-changed` and returns 1 on disagreement.
 #
-# WHY (roborev job 292, High — the FOURTH instance of one family). Round 20 moved the pre-flight
-# INSIDE the certification window that `_tree_recapture_after_slot` opens. But one of its INPUTS
-# still came from outside it: `COMPONENTS` is an array bash loaded when it sourced this file, before
-# the queue. So a gate script that GAINED a component while the run was queued was validated against
-# the OLD in-memory array — which matched the unchanged manifest — and the recaptured tree could take
-# a full PASS for a component that never executed. The rule needs stating one level up from round
-# 20's wording:
+# WHY (roborev jobs 290, 292 and 293 — three consecutive rounds in ONE place, which is the tell
+# that the granularity was wrong). Round 20 (job 290) moved the pre-flight INSIDE the certification
+# window that `_tree_recapture_after_slot` opens. Job 292 then observed that one of its INPUTS still
+# came from outside that window: `COMPONENTS` is an array bash loaded when it sourced this file,
+# before the queue — so a gate script that GAINED a component while the run was queued was validated
+# against the OLD in-memory array. Job 293 observed that the fix was still too NARROW: comparing
+# selected FIELDS leaves every other in-queue edit invisible, and an edit to a component's EXECUTOR
+# FUNCTION is the harmful one — the recaptured tree becomes the certification window while this
+# process keeps running the OLD function definitions, so a full PASS certifies gate code that never
+# executed. The rule, one level up from round 20's wording:
 #
 #     A CHECK AND EVERY INPUT IT REASONS ABOUT MUST BE INSIDE THE WINDOW IT CERTIFIES.
 #     Being inside yourself is not enough if you compare against a snapshot taken outside.
 #
+# THIS IS A `tree-integrity`-FAMILY PROPERTY, NOT A COMPONENT-SET ONE. The question is "did the code
+# that is EXECUTING change under us"; the component SET is the wrong granularity for it, and that
+# mis-granularity is exactly why jobs 290/292/293 all landed here. So the AUTHORITY is a WHOLE-FILE
+# content digest taken at startup (`_GATE_SELF_DIGEST`), which strictly SUBSUMES every field
+# comparison. Growing the field list instead would be the "rarer delimiter" shape this repository's
+# own doctrine forbids (CLAUDE.md #3312: remove the shared channel, do not pick a rarer delimiter).
+# It is reported through `component-set:` only because that is the pre-flight the window repeats.
+#
+# THE FIELD COMPARISONS ARE KEPT AS THE MESSAGE, NEVER AS THE TEST. A digest can only say "changed";
+# the field checks can say "now declares 37 and this process is dispatching 36", or "pins a different
+# canonical upstream" — a materially better diagnostic for the two shapes an author is likeliest to
+# hit. They run ONLY after the digest has already refused, and they can never produce a PASS the
+# digest did not.
+#
 # FAIL CLOSED RATHER THAN RE-EXEC, and I agree with that call: re-exec is friendlier but adds a loop
 # risk (a script being edited repeatedly) and a second code path, while a queued run that raced an
 # edit is a legitimate thing to refuse. The remedy is a re-run, which is always available.
-#
-# TWO INPUTS ARE CHECKED, and the boundary is deliberate: this verdict asserts (a) the component SET
-# and (b) which upstream the baseline came from, so both are re-read from the tree being certified.
-# WHAT IS NOT CHECKED, stated so it is not mistaken for coverage: any OTHER edit to the gate script
-# during the queue — logic, a bound, a comment — is invisible here. That is a residual, not an
-# oversight: a digest of the whole script captured at startup would close it, and it needs an
-# external hasher (`cksum`) plus its own tool-list entries, so it is a decision rather than a
-# detail. Recorded for whoever takes it.
 _component_set_running_gate_check() {
-  local gate_disk="$REPO_ROOT/scripts/$(basename "$GATE_SELF")" disk_canon="" line
+  # ONE SPELLING OF THE PATH: `$GATE_SELF` is "$REPO_ROOT/scripts/$(basename "$0")" (set near the
+  # top of this file), which is the value this expression used to re-derive. The startup digest is
+  # taken from `$GATE_SELF` too, so both halves provably read the SAME file.
+  local gate_disk="$GATE_SELF" disk_canon="" line rc digest_changed=0
   if [ ! -f "$gate_disk" ] || [ ! -r "$gate_disk" ]; then
     _CS_KIND=gate-script-changed
-    _CS_DETAIL="the gate script this process is executing is no longer readable at $gate_disk, so its own component set cannot be compared with the tree being certified — remedy: re-run the gate"
+    _CS_DETAIL="the gate script this process is executing is no longer a readable regular file at $gate_disk, so it cannot be compared with the tree being certified — remedy: re-run the gate against a stable on-disk script"
     return 1
+  fi
+  # THE AUTHORITY. `_gate_self_digest_compare` is DEFINED at script level, at a point that precedes
+  # the mode dispatch, the #1825 slot queue and every component — so its ABSENCE is affirmative
+  # evidence that we are executing EARLIER than that point, i.e. inside the `--component-set-line`
+  # report-only hook in the argument dispatch, which prints and exits before `acquire_gate_slot` and
+  # therefore certifies nothing. That is the ONLY case in which this check proceeds without a digest,
+  # and it is a measured region rather than an assumption.
+  if declare -F _gate_self_digest_compare >/dev/null 2>&1; then
+    _gate_self_digest_compare "$gate_disk"; rc=$?
+    case "$rc" in
+      0) return 0 ;;   # byte-identical: the digest subsumes every comparison below
+      2) return 1 ;;   # UNMEASURABLE — a named refusal, already in _CS_KIND/_CS_DETAIL
+    esac
+    digest_changed=1
   fi
   if ! _component_set_extract_declaration "$gate_disk"; then
     _CS_KIND=gate-script-changed
-    _CS_DETAIL="the COMPONENTS declaration in the gate script ON DISK could not be read ($_CS_DECL_ERR), so this run cannot show that what it dispatches is what the certified tree declares — remedy: re-run the gate"
+    _CS_DETAIL="the COMPONENTS declaration in the gate script ON DISK could not be read ($_CS_DECL_ERR), so this run cannot show that what it dispatches is what the certified tree declares — remedy: re-run the gate against a stable on-disk script"
     return 1
   fi
   if [ "$_CS_PARSED_SET" != "${COMPONENTS[*]}" ]; then
     _CS_KIND=gate-script-changed
-    _CS_DETAIL="the gate script CHANGED while this run was queued: it now declares $_CS_PARSED_N component(s) and this process is dispatching ${#COMPONENTS[@]} (the array was loaded before the queue). A PASS would certify the tree on disk for a set it never ran — remedy: re-run the gate"
+    _CS_DETAIL="the gate script CHANGED while this run was queued: it now declares $_CS_PARSED_N component(s) and this process is dispatching ${#COMPONENTS[@]} (the array was loaded before the queue). A PASS would certify the tree on disk for a set it never ran — remedy: re-run the gate against a stable on-disk script"
     return 1
   fi
-  # …and the upstream identity, the other thing the verdict asserts. Read with the shell only.
+  # …and the upstream identity, the other field with a message worth writing. Read with the shell.
+  # THE PATTERN NAMES THE CONSTANT AND THE EXTRACTION DOES NOT, deliberately: the self-test asserts
+  # that no line mentioning `_CS_CANONICAL_REMOTE=` also contains a `${…}`, `$(…)` or `git config`,
+  # because a CONFIGURABLE expected identity would be the hole one level out. A parse of the file is
+  # not a second source for the constant — but it must not LOOK like one either, so the name appears
+  # only in the anchored case pattern and the value is peeled with `#*=` (measured: the first cut put
+  # `${line#_CS_CANONICAL_REMOTE="}` on one line and red that assert).
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      '_CS_CANONICAL_REMOTE="'*'"') disk_canon="${line#_CS_CANONICAL_REMOTE=\"}"; disk_canon="${disk_canon%\"}" ;;
+      _CS_CANONICAL_REMOTE=*)
+        disk_canon="${line#*=}"
+        disk_canon="${disk_canon%\"}"
+        disk_canon="${disk_canon#\"}" ;;
     esac
   done <"$gate_disk"
   if [ "$disk_canon" != "$_CS_CANONICAL_REMOTE" ]; then
     _CS_KIND=gate-script-changed
-    _CS_DETAIL="the gate script on disk pins a DIFFERENT canonical upstream than this process is comparing against, so the baseline identity in this verdict is not the one the certified tree would use — remedy: re-run the gate"
+    _CS_DETAIL="the gate script on disk pins a DIFFERENT canonical upstream than this process is comparing against, so the baseline identity in this verdict is not the one the certified tree would use — remedy: re-run the gate against a stable on-disk script"
+    return 1
+  fi
+  # THE DIGEST SAID CHANGED AND NO FIELD EXPLAINS IT: the edit is elsewhere in the script — an
+  # executor function, a bound, a comment. This is the job-293 case, and it is exactly as fatal as
+  # the field cases: the tree being certified holds definitions this process never loaded.
+  if [ "$digest_changed" -eq 1 ]; then
+    _CS_KIND=gate-script-changed
+    _CS_DETAIL="the gate script CHANGED while this run was queued: its whole-file content digest no longer matches the one taken at startup. The COMPONENTS declaration and the canonical pin are UNCHANGED, so the edit is elsewhere in the script (an executor function, a bound, a comment) — this process is running the definitions it loaded BEFORE the queue while the tree being certified holds the new ones, so a PASS would certify gate code that never executed — remedy: re-run the gate against a stable on-disk script"
     return 1
   fi
   return 0
@@ -4830,6 +4873,21 @@ _component_set_line() {
       # `origin`, and a wrong remedy in a fail-closed diagnostic is what makes an author
       # suspect their own diff (the #3148 lesson).
       case "$_CS_KIND" in
+        gate-script-changed)
+          # ITS OWN SENTENCE (roborev job 293, Low). The generic arm below tells the reader the
+          # BASELINE could not be measured and (in apply_component_set_preflight) to restore access
+          # to origin/main. BOTH statements are FALSE for this kind and actively misleading: the
+          # baseline was fine and the LOCAL script moved under the running process. A wrong remedy in
+          # a fail-closed diagnostic is what makes an author suspect their own diff (the #3148
+          # lesson), so the remedy here is a re-run against a stable on-disk script and nothing to do
+          # with `origin`.
+          if [ -n "$lenient" ]; then
+            printf 'component-set: ADVISORY-UNMEASURED (#3544) — the gate script THIS PROCESS is executing is not the script on disk (%s: %s); the baseline was not the problem%s; this block asserts NOTHING about the component set' \
+              "$_CS_KIND" "$_CS_DETAIL" "$lenient"
+          else
+            printf 'component-set: FAIL-CLOSED (#3544) — the gate script THIS PROCESS is executing is not the script on disk (%s: %s); the baseline was NOT the problem — the local script moved while this run was in flight, so a PASS would certify gate code that never executed; overall verdict FAIL' \
+              "$_CS_KIND" "$_CS_DETAIL"
+          fi ;;
         manifest-*)
           if [ -n "$lenient" ]; then
             printf 'component-set: ADVISORY-UNMEASURED (#3544) — the LOCAL component manifest is not usable (%s: %s), so no baseline comparison was made%s; this block asserts NOTHING about the component set' \
@@ -4921,6 +4979,21 @@ apply_component_set_preflight() {
       # reader of a re-pointed/fork `origin` to fix the wrong thing, and a wrong remedy in a
       # fail-closed diagnostic is what makes an agent suspect its own diff (the #3148 lesson).
       case "$_CS_KIND" in
+        gate-script-changed)
+          # ITS OWN ARM (roborev job 293, Low). The generic arm below says the BASELINE could not be
+          # measured and sends the reader to `git fetch origin main`. Both are FALSE here: the
+          # baseline was fine, and what moved is the LOCAL gate script under the running process —
+          # so the remedy is a re-run on a stable script, and NOT the origin/main text.
+          why_summary="preflight: FAIL (component-set: the gate script CHANGED under this run — the executing code is not the code on disk)"
+          hint="hint: re-run scripts/agent-gate.sh against a stable on-disk script (do not edit scripts/agent-gate.sh, and do not switch branches, while a gate is running or queued)"
+          echo "agent-gate: the gate script on disk is NOT the script this process is executing, so the" >&2
+          echo "            code that ran and the code in the tree this run would certify are different" >&2
+          echo "            documents. The certification window is re-opened when the #1825 slot is" >&2
+          echo "            granted, so an edit made while the run was QUEUED becomes part of the" >&2
+          echo "            certified tree while this process keeps the definitions it loaded before" >&2
+          echo "            the queue — a PASS would certify gate code that never executed (#3544" >&2
+          echo "            roborev jobs 290/292/293). The baseline was not involved." >&2
+          echo "agent-gate: remedy: re-run the gate against a stable on-disk script." >&2 ;;
         manifest-missing|manifest-garbage|manifest-stale)
           why_summary="preflight: FAIL (component-set: the LOCAL component manifest $_CS_MANIFEST_REL is not usable — $_CS_KIND)"
           hint="hint: regenerate the manifest — { sed -n -e '/^[^#]/q' -e p $_CS_MANIFEST_REL; scripts/agent-gate.sh --list; } >\$TMPDIR/agent-gate.components && mv \$TMPDIR/agent-gate.components $_CS_MANIFEST_REL — then COMMIT it and re-run scripts/agent-gate.sh"
@@ -6569,6 +6642,72 @@ _tree_digest_ok() {
   # sha256sum/shasum always produce 64, so a 40-char digest from those is a short read.
   if [ "${#1}" -eq 40 ] && [ "$TREE_SHA_TOOL" != git ]; then return 1; fi
   return 0
+}
+
+# ---- issue #3544 (roborev jobs 290, 292, 293): the EXECUTING gate script must be the one
+# ---- in the tree this run certifies -----------------------------------------------------
+#
+# _GATE_SELF_DIGEST / _GATE_SELF_DIGEST_STATE: a WHOLE-FILE content digest of the gate script
+# this process is executing, taken HERE — at startup, before the mode dispatch, before the
+# #1825 slot queue and before any component.
+#
+# WHY THE WHOLE FILE. This is a `tree-integrity`-family property, NOT a component-set one:
+# the question is "did the code that is EXECUTING change under us", and the component set is
+# the wrong granularity for it. That mis-granularity is why THREE consecutive review rounds
+# landed in the same place — job 290 moved the pre-flight inside the certification window,
+# job 292 pulled the `COMPONENTS` array (an input taken outside the window) in after it, and
+# job 293 observed that any OTHER in-queue edit was still invisible: change a component's
+# EXECUTOR FUNCTION while the run is queued and `_tree_recapture_after_slot` adopts the new
+# tree as the certification window while this process keeps running the OLD definitions, so a
+# full PASS certifies gate code that never executed. Growing the list of compared fields is
+# the "rarer delimiter" shape this issue's own doctrine forbids (CLAUDE.md #3312): the digest
+# SUBSUMES every field comparison, so it is the authority and the fields are only the message.
+#
+# THREE-VALUED, FAIL-CLOSED. "Could not digest the script" must never collapse onto
+# "unchanged" — that is the permissive-branch-for-an-unmeasured-signal shape (CLAUDE.md: a
+# positive verdict requires an AFFIRMATIVE measurement). The state is therefore `ok` or
+# `unmeasured:<why>`, and an unmeasured startup digest is its own named refusal at every
+# consumer, exactly like `_component_set_manifest_presence`'s `could-not-tell`.
+#
+# ONE SPELLING OF THE PATH. `$GATE_SELF` (set at line ~842 as
+# "$REPO_ROOT/scripts/$(basename "$0")") is used both here and by the comparison, so the
+# startup digest and the post-queue digest provably read the SAME file; two derivations of
+# one path are two things to drift.
+_GATE_SELF_DIGEST=""
+_GATE_SELF_DIGEST_STATE="unmeasured:not-attempted"
+if [ ! -f "$GATE_SELF" ] || [ ! -r "$GATE_SELF" ]; then
+  _GATE_SELF_DIGEST_STATE="unmeasured:the gate script is not a readable regular file at $GATE_SELF"
+else
+  _GATE_SELF_DIGEST="$(_tree_digest_file "$GATE_SELF" 2>/dev/null)" || _GATE_SELF_DIGEST=""
+  if _tree_digest_ok "$_GATE_SELF_DIGEST"; then
+    _GATE_SELF_DIGEST_STATE=ok
+  else
+    _GATE_SELF_DIGEST=""
+    _GATE_SELF_DIGEST_STATE="unmeasured:the hashing tool ($TREE_SHA_TOOL) produced no usable digest for $GATE_SELF"
+  fi
+fi
+
+# _gate_self_digest_compare <path-on-disk>: rc 0 the executing script's content is UNCHANGED
+# on disk; rc 1 it CHANGED (the caller turns that into a sentence naming what changed); rc 2
+# the comparison could NOT be made, in which case _CS_KIND/_CS_DETAIL are already set.
+#
+# rc 2 is a REFUSAL, not a pass: both halves must be affirmatively measured, so an unmeasured
+# startup digest and an unmeasurable on-disk digest are each fatal in a certifying mode.
+_gate_self_digest_compare() {
+  local disk_digest=""
+  if [ "$_GATE_SELF_DIGEST_STATE" != ok ]; then
+    _CS_KIND=gate-script-changed
+    _CS_DETAIL="the content digest of the gate script THIS PROCESS is executing could not be taken at startup (${_GATE_SELF_DIGEST_STATE#unmeasured:}), so this run cannot show that the code it ran is the code in the tree it would certify; 'could not measure' is not 'unchanged' — remedy: re-run the gate against a stable on-disk script"
+    return 2
+  fi
+  disk_digest="$(_tree_digest_file "$1" 2>/dev/null)" || disk_digest=""
+  if ! _tree_digest_ok "$disk_digest"; then
+    _CS_KIND=gate-script-changed
+    _CS_DETAIL="the gate script on disk at $1 could not be digested now (the hashing tool produced no usable value), so it cannot be shown to be the script this process is executing — remedy: re-run the gate against a stable on-disk script"
+    return 2
+  fi
+  [ "$disk_digest" = "$_GATE_SELF_DIGEST" ] && return 0
+  return 1
 }
 
 # _tree_split_identity <line>: split "<head>\t<dirty>\t<digest>\t<fallbacks>" into

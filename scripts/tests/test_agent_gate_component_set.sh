@@ -41,8 +41,8 @@
 #                  gate-script-changed (7u);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10).
-# TWENTY is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is set
-# from several places, and `ok` is the twenty-first value). THE SET CHANGED SHAPE with #3544
+# NINETEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is set
+# from several places, and `ok` is the twentieth value). THE SET CHANGED SHAPE with #3544
 # REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
 # `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
 # fail at (`baseline-unreadable`, `baseline-set-garbage`, `baseline-set-empty`,
@@ -2557,9 +2557,17 @@ for win_edit in manifest gate-script; do
           grep -vx -- 'smoke' "$win_fx/scripts/agent-gate.components" >"$tmp/window-manifest.txt"
           cp "$tmp/window-manifest.txt" "$win_fx/scripts/agent-gate.components" ;;
         gate-script)
+          # AN ATOMIC RENAME, NEVER `cp` OVER THE RUNNING SCRIPT. Bash reads a script
+          # INCREMENTALLY as it executes, so truncating and rewriting the file in place corrupts
+          # the running process's own read stream — measured the hard way: the suite HUNG for 35
+          # minutes on this line. `mv` replaces the directory entry while the running process keeps
+          # its open inode, so the gate executes what it loaded and the TREE holds the new bytes,
+          # which is both the realistic shape (an editor saving, `git checkout`, `git stash`) and
+          # the only one that tests the property instead of perturbing the subject.
           sed 's|^COMPONENTS=(file-size|COMPONENTS=(zz-added-while-queued file-size|' \
-              "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate.sh"
-          cp "$tmp/window-gate.sh" "$win_fx/scripts/agent-gate.sh" ;;
+              "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate-$win_edit.sh"
+          chmod +x "$tmp/window-gate-$win_edit.sh"
+          mv "$tmp/window-gate-$win_edit.sh" "$win_fx/scripts/agent-gate.sh" ;;
       esac
     fi
     kill "$win_holder" 2>/dev/null || true
@@ -2693,7 +2701,7 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=20   # +gate-script-changed: the gate script (its COMPONENTS declaration or
+DECLARED_KIND_COUNT=19   # +gate-script-changed: the gate script (its COMPONENTS declaration or
                          # its canonical-upstream pin) differs from what THIS PROCESS loaded —
                          # an input crossing the certification window (job 292)
                          # -baseline-transfer-mismatch: the transfer it detected is GONE (job
@@ -4006,11 +4014,17 @@ fi
 # expected identity would be the same hole one level out — the constrained party choosing its
 # own enforcer — and requirement 9's "no opt-out" would be satisfied only in spelling.
 canon_assign=$(grep -n '^_CS_CANONICAL_REMOTE=' "$GATE")
+# THE NEGATIVE SCAN READS CODE, NOT PROSE ABOUT CODE. A COMMENT explaining why the constant must
+# not be `${…}`-derived necessarily contains both the name and a `${`, so scanning the whole file
+# made this assert red on a correct tree — the same defect the pgid structural case hit from the
+# other side, and the same rule: a structural check must read code. The POSITIVE greps below stay
+# whole-file because they are `^`-anchored and a comment cannot satisfy them.
+canon_code=$(grep -v '^[[:space:]]*#' "$GATE")
 if [ -n "$canon_assign" ] \
    && [ "$(printf '%s\n' "$canon_assign" | grep -c .)" -eq 1 ] \
    && grep -q '^_CS_CANONICAL_REMOTE="[A-Za-z0-9._/-]*"$' "$GATE" \
    && grep -q '^_CS_CANONICAL_REMOTE="[A-Za-z0-9.-]*\.[A-Za-z]*/[A-Za-z0-9._-]*/[A-Za-z0-9._-]*"$' "$GATE" \
-   && ! grep -qE '_CS_CANONICAL_REMOTE=.*(\$\{|\$\(|git config)' "$GATE"; then
+   && ! grep -qE '_CS_CANONICAL_REMOTE=.*(\$\{|\$\(|git config)' <<<"$canon_code"; then
   ok "3544-canonical-literal: the expected upstream identity is a single hard-coded literal NAMING A HOST (no env/config/subshell source)"
 else
   bad "3544-canonical-literal: expected exactly one literal <host>/<owner>/<repo> _CS_CANONICAL_REMOTE= assignment, got: $canon_assign"
