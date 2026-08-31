@@ -2535,7 +2535,7 @@ for win_edit in manifest gate-script executor unrelated; do
   win_sum="$tmp/window-summary-$win_edit.txt"
   win_log="$tmp/window-$win_edit.log"
   win_done="$tmp/window-done-$win_edit.rc"
-  rm -f "$win_done"
+  rm -f "$win_done" "$win_done.part"
   mkdir -p "$win_slots"
   # HOLD THE ONLY SLOT with a second instance of the gate's own daemon, tied to a throwaway pid.
   sleep 300 &
@@ -2565,7 +2565,7 @@ for win_edit in manifest gate-script executor unrelated; do
     ( fx "$win_fx" && CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_SLOTS_DIR="$win_slots" \
         AGENT_GATE_SUMMARY_FILE="$win_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
         bash scripts/agent-gate.sh >"$win_log" 2>&1
-      printf 'RC=%s\n' "$?" >"$win_done" ) &
+      printf 'RC=%s\n' "$?" >"$win_done.part" && mv "$win_done.part" "$win_done" ) &
     win_pid=$!
     # WAIT ON THE CONDITION, not a timer: the gate prints its queued notice once.
     win_queued=0
@@ -2673,7 +2673,14 @@ for win_edit in manifest gate-script executor unrelated; do
     # converts a hang into a silent non-execution, which is the exact defect class #3544 is about.
     #
     # POLLED ON THE COMPLETENESS MARKER, not on `kill -0`: an exited-but-unreaped child is a ZOMBIE
-    # and `kill -0` SUCCEEDS for it, so a liveness poll would never break.
+    # and `kill -0` SUCCEEDS for it, so a liveness poll would never break. (The queue-detection loop
+    # above polls a LOG LINE, which has no such problem; this one needs a signal that means
+    # TERMINATED, and only the child can give it.)
+    #
+    # THE MARKER IS WRITTEN BY A RENAME, so its PRESENCE implies its CONTENT: `> "$win_done"` creates
+    # the file BEFORE printf writes into it, so a poll could observe an EMPTY marker and read "no exit
+    # status recorded" from a run that completed fine — an existence test standing in for a
+    # completeness test. `printf > .part && mv` makes the two the same observation.
     #
     # THE KILL IS BY A PID WE OWN — never a pattern kill. `pkill -f gate_slot_daemon` (or
     # `agent-gate`) selects by what a process IS, not whose it is, and has destroyed a peer lane's
@@ -2692,6 +2699,14 @@ for win_edit in manifest gate-script executor unrelated; do
       kill -KILL "$win_pid" 2>/dev/null || true
     fi
     win_rc=$(sed -n 's/^RC=//p' "$win_done" 2>/dev/null)
+    # THE REAP IS BOUNDED ON BOTH PATHS, and it is bounded by construction rather than by a second
+    # timer. The verdict has already been read out of the marker, so nothing below needs this child
+    # alive: on the timeout path it has been SIGKILLed (unignorable), and on the normal path the
+    # marker's rename was the subshell's LAST action, so all that remains is its exit — and the
+    # signal makes even that not something this suite waits on. A bare `wait` here (what this line
+    # used to be) is the last place a future wedge could hang `tooling-tests` inside the gate of
+    # record, which is the whole point of #3698.
+    kill "$win_pid" 2>/dev/null || true
     wait "$win_pid" 2>/dev/null || true
     kill "$win_daemon" 2>/dev/null || true
     wait "$win_holder" 2>/dev/null
