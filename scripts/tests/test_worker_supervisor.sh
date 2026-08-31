@@ -8599,6 +8599,156 @@ test_lane_lock_sweep_no_unobserved_attribution() {
 t test_lane_lock_sweep_no_unobserved_attribution
 
 
+
+
+# ---------------------------------------------------------------------------
+# THE UN-CREATE IS BOUND TO THE DIRECTORY INSTANCE THIS RUN CREATED (#3601, roborev job 236 B12).
+#
+# THE DEFECT, AND IT WAS A REGRESSION THIS DIFF INTRODUCED. B1 made a failed publish remove the directory
+# it had created, so a run would stop manufacturing the pid-less lock every other branch refuses to
+# reclaim. But the removal was an UNCONDITIONAL `rmdir`, not bound to the instance: a legacy peer can
+# rename ours aside and `mkdir` its OWN pid-less lock at the same name, and a non-recursive `rmdir`
+# SUCCEEDS against that empty startup directory. B1 therefore traded "we wedge our own lane with an empty
+# lock" for "we can delete a peer's startup lock" — the worse of the two.
+#
+# WHY NON-RECURSIVE WAS NOT ENOUGH, which is the whole subtlety: `rmdir` protects a peer that has already
+# PUBLISHED (non-empty directory, removal fails harmlessly) and protects nothing at all against a peer
+# that has `mkdir`'d and not yet published. The dangerous case is precisely the empty one.
+#
+# WHAT IS FIXED AND WHAT IS NOT: the UNCONDITIONAL DESTRUCTION is gone. The race is not closed — creating
+# the marker is a second step after `mkdir`, so a peer that replaces the directory inside THAT window
+# still receives our marker — and the site says so with the bound (two adjacent syscalls, no intervening
+# I/O, versus the whole publish attempt before). #3683 closes it.
+# ---------------------------------------------------------------------------
+test_lane_lock_uncreate_is_bound_to_the_created_instance() {
+  local d tmp lane lock out rc ovr swap contents
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601inst$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) THE MARKER DOES NOT OUTLIVE THE ACQUIRE. A held lock carrying an extra file would make the
+  # non-recursive clear command handed to operators elsewhere refuse, so this is a property of the fix and
+  # not an incidental detail.
+  rm -rf "$lock"
+  local body_peek
+  body_peek="${SV_DRIVE_BODY/'exit 0'/'printf "CONTENTS=[%s]\n" "$(ls -A "$SUPERVISOR_LOCK" | tr "\n" " ")"; trap - EXIT; exit 0'}"
+  if [[ "$body_peek" == "$SV_DRIVE_BODY" ]]; then
+    fail "lane-lock-b12-premise: the contents-peek drive body was not derived from the shipped one"
+    return 0
+  fi
+  out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+            bash -c "$body_peek" _ "$SUPERVISOR" 2>&1 )"
+  contents="$(printf '%s\n' "$out" | grep -o 'CONTENTS=\[[^]]*\]' || true)"
+  if [[ "$contents" == 'CONTENTS=[pid ]' ]]; then
+    pass "lane-lock B12: an acquired lock holds exactly \`pid\` — the ownership marker is removed the moment ownership is verified, so it cannot make a later manual clear refuse"
+  else
+    fail "lane-lock-b12-marker-outlives: $contents — the marker must not survive a successful acquire"
+  fi
+  rm -rf "$lock"
+
+  # ---- (2) THE REPORTED INTERLEAVING, STAGED FOR REAL. The publish fails, and BEFORE it does, a peer
+  # renames our directory aside and `mkdir`s its own PID-LESS lock at the same name — the exact case a
+  # non-recursive `rmdir` succeeds against. Fault-injected on the publish; `take`'s un-create decision,
+  # which is what is being asserted, is shipped code.
+  swap='  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
+  mv -- "$SUPERVISOR_LOCK" "$SUPERVISOR_LOCK.peeraside" 2>/dev/null || true
+  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+  if true; then printf "%s" write-failed; return 1; fi'
+  ovr="$d/f-swap.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" "$swap"; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ -d "$lock" ]]; then
+      pass "lane-lock B12: with a peer's PID-LESS lock at that name the run refuses and the peer's lock SURVIVES — the case a bare non-recursive removal destroys"
+    else
+      fail "lane-lock-b12-peer-lock-destroyed: rc=$rc lock=[$([[ -d "$lock" ]] && echo present || echo DESTROYED)] — this is the regression B1 introduced and B12 removes"
+    fi
+    if [[ "$out" == *"NOT the one it created"* ]] && [[ "$out" == *"removed NOTHING"* ]] \
+       && [[ "$out" == *"start in progress"* ]] && [[ "$out" != *"absence was VERIFIED"* ]]; then
+      pass "lane-lock B12: and the refusal says WHY it removed nothing — the marker is gone, so the directory is another run's start in progress — instead of claiming a removal (the B9 family)"
+    else
+      fail "lane-lock-b12-diagnostic: out=[$out]"
+    fi
+  fi
+  rm -rf "$lock" "$lock.peeraside"
+
+  # ---- (3) NON-VACUITY: with NO peer, the same failed publish still un-creates its own directory and the
+  # absence is verified. Without this, (2) is satisfied by code that never removes anything at all — which
+  # would reinstate the wedge B1 fixed.
+  ovr="$d/f-write.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || true
+    if [[ "$out" == *"absence was VERIFIED after the removal"* ]] && [[ ! -e "$lock" ]]; then
+      pass "lane-lock B12 NON-VACUITY: with no peer involved the run still removes the directory it created and verifies its absence — the instance binding costs the legitimate path nothing"
+    else
+      fail "lane-lock-b12-nonvacuity: lock=[$([[ -e "$lock" ]] && echo present || echo gone)] out=[$out] — declining to remove our OWN empty lock would reinstate the wedge B1 fixed"
+    fi
+  fi
+
+  # ---- (4) MUTANT CONTRAST: the marker check disabled, which is the pre-B12 spelling. The identical
+  # staging from (2) must then DESTROY the peer's lock.
+  rm -rf "$lock" "$lock.peeraside"
+  local ovrm mout
+  ovrm="$d/m-uncond.sh"; : >"$ovrm"
+  if sv_mutant_override "$ovrm" supervisor_lock_take \
+       '  if [[ ! -e "$marker" && ! -L "$marker" ]]; then' \
+       '  if false; then'; then
+    # the same peer-swap fault, appended so ONE override carries both
+    if sv_mutant_override "$ovrm" supervisor_lock_publish \
+         '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" "$swap"; then
+      mout="$(lane_lock_drive_at "$d" "$ovrm" "$tmp" "$lane")" || true
+      if [[ ! -d "$lock" ]] && [[ "$mout" == *"absence was VERIFIED"* ]]; then
+        pass "lane-lock B12 MUTANT: with the instance binding removed the identical case DELETES the peer's pid-less lock and reports the absence as its own success — the regression, measured, so (2) is the marker doing the work"
+      else
+        fail "lane-lock-mutant-b12: lock=[$([[ -d "$lock" ]] && echo present || echo gone)] out=[$mout] — the unconditional form must be shown to destroy the peer's lock"
+      fi
+    fi
+  fi
+  rm -rf "$lock" "$lock.peeraside"
+
+  # ---- (5) A MARKER THAT CANNOT BE WRITTEN IS NOT OWNERSHIP EVIDENCE, so nothing is removed. Staged with
+  # a lock directory whose creation succeeds and whose contents cannot be written — the parent is
+  # writable-and-searchable, the created directory is not writable, which `mkdir -m` cannot express, so
+  # the marker write is faulted instead and the DECISION is shipped.
+  local ovrk
+  ovrk="$d/f-marker.sh"; : >"$ovrk"
+  if sv_mutant_override "$ovrk" supervisor_lock_take \
+       '  if ! { : >"$marker"; } 2>/dev/null; then' \
+       '  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovrk" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"did NOT attempt to remove"* ]] \
+       && [[ "$out" == *"cannot prove"* ]] && [[ "$out" == *"makes no claim either way"* ]]; then
+      pass "lane-lock B12: a marker that could not be written leaves the directory ALONE and says so — no ownership evidence means no removal, and the refusal claims nothing about what is at that path"
+    else
+      fail "lane-lock-b12-marker-failed: rc=$rc out=[$out] — with no marker the run must neither remove nor claim"
+    fi
+  fi
+  rm -rf "$lock"
+
+  # ---- (6) THE RESIDUAL IS STATED AT THE SITE, in the same NARROWED-NOT-CLOSED form as the other two,
+  # and does not present the marker as airtight. The comment is the artifact a reviewer is asked to trust
+  # about a window that is still open, which is the B9 family if it overclaims.
+  local body
+  body="$(sed -n '/^supervisor_lock_take()/,/^}/p' "$SUPERVISOR")"
+  if [[ "$body" == *'NARROWED, NOT CLOSED'* ]] && [[ "$body" == *'#3683'* ]] \
+     && [[ "$body" == *'two adjacent syscalls'* ]] \
+     && [[ "$body" == *'not read the marker as a guarantee'* ]]; then
+    pass "lane-lock B12: the site states the marker's OWN window, bounds it (two adjacent syscalls), names #3683 and says explicitly not to read it as a guarantee"
+  else
+    fail "lane-lock-b12-comment-overclaims: the marker's own absence window must be stated with its bound; presenting it as airtight is the alibi family"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_uncreate_is_bound_to_the_created_instance
+
+
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
 #
