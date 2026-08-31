@@ -1386,8 +1386,11 @@ fi
 # Path 2b — a `gtimeout`-ONLY PATH: the macOS-with-coreutils shape (#3650 review
 # R2). GNU coreutils installs its timeout as `gtimeout`, and the code used to
 # resolve `timeout` alone — so on the EXACT configuration the skip diagnostic
-# recommends, the advisory still skipped. The fleet is macOS, so this is a
-# supported platform and not a hypothetical. (Same reasoning, same shape, as
+# recommends, the advisory still skipped. This fleet is LINUX (D5's own
+# measurement is git 2.43.0 on the lanes), so the rationale is NOT "the fleet is
+# macOS": it is that the repo SUPPORTS stock macOS, which makes the
+# gtimeout-only shape a supported configuration rather than a hypothetical.
+# (Same reasoning, same shape, as
 # scripts/tests/test_bootstrap_agent_machine.sh's gtimeout-only credential case.)
 #
 # `timeout` cannot be hidden by shadowing, so PATH is rebuilt from an explicit
