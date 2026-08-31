@@ -678,8 +678,8 @@ fi
 # file; that block is where the SET of pinned ambient inputs is visible in one
 # place (#3650 review R6 F1). They stay pinned HERE, per-invocation, because the
 # plumbing side must NOT inherit them.
-if ! git -c diff.renames=false -c diff.relative=false \
-  diff --name-only -z "$merge_base...$subject_sha" >"$TMPD/diff-paths" 2>/dev/null; then
+if ! { git -c diff.renames=false -c diff.relative=false \
+  diff --name-only -z "$merge_base...$subject_sha" >"$TMPD/diff-paths"; } 2>/dev/null; then
   unmeasured "git diff --name-only -z $merge_base...$subject_sha failed"
 fi
 DIFF_PATHS=()
@@ -746,9 +746,16 @@ matches_diff_paths() {
 # Written to a FILE and read by redirection, not iterated as an unquoted
 # expansion: the header claims shellcheck-clean, and `for c in $commits` was the
 # one word-splitting expansion in the file.
-: >"$TMPD/behind-commits"
+# The truncation is CHECKED and its diagnostic SUPPRESSED for the same reason as
+# every other scratch open (D2a): an unchecked `: >file` that fails leaves the
+# shell printing an UNPREFIXED diagnostic, and `behind == 0` is the one path on
+# which no later write re-attempts the file, so nothing else would notice.
+if ! { : >"$TMPD/behind-commits"; } 2>/dev/null; then
+  unmeasured "the scratch file for the commits behind the merge-base could not be" \
+    "created at $(sane "$TMPD/behind-commits")"
+fi
 if [ "$behind" -gt 0 ]; then
-  if ! git rev-list "$merge_base..$main_sha" >"$TMPD/behind-commits" 2>/dev/null; then
+  if ! { git rev-list "$merge_base..$main_sha" >"$TMPD/behind-commits"; } 2>/dev/null; then
     unmeasured "git rev-list $merge_base..$main_sha failed"
   fi
 fi
@@ -771,8 +778,8 @@ while IFS= read -r c; do
   # NO `-M` here, deliberately — see the rename-symmetry note on the porcelain
   # call above. `diff-tree` does not rename-detect without it, which is exactly
   # the behaviour the diff side is pinned to match.
-  if ! git diff-tree -r -z --no-commit-id --name-only -m --first-parent --root "$c" \
-    >"$TMPD/commit-paths" 2>/dev/null; then
+  if ! { git diff-tree -r -z --no-commit-id --name-only -m --first-parent --root "$c" \
+    >"$TMPD/commit-paths"; } 2>/dev/null; then
     unmeasured "git diff-tree failed on commit $c — the scan is INCOMPLETE, so it is" \
       "unmeasurable rather than partially reported (#3650 D9)."
   fi

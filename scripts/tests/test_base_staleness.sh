@@ -1198,7 +1198,10 @@ if run 4 "a renamed PR path + a commit behind editing the OLD path is STALE" "$R
 fi
 # The plant: drop the porcelain pin. It must FAIL OPEN — exit 0, blast-radius 0.
 MUT_REN="$T/mutant-renames.sh"
-sed 's/^if ! git -c diff\.renames=false -c diff\.relative=false \\$/if ! git \\/' \
+# The pin lives inside a `{ ...; } 2>/dev/null` group (the scratch-write
+# suppression, D2a): the brace is PRESERVED by the plant so the mutant differs
+# from the shipped script in the PIN ALONE and stays syntactically valid.
+sed 's/^if ! { git -c diff\.renames=false -c diff\.relative=false \\$/if ! { git \\/' \
   "$ADVISORY" >"$MUT_REN"
 if [ "$(diff "$ADVISORY" "$MUT_REN" | grep -c '^[<>]')" -eq 2 ] &&
   ! grep -q 'diff.renames=false' "$MUT_REN" && grep -q 'diff.renames=false' "$ADVISORY"; then
@@ -1692,3 +1695,58 @@ fi
 # three rounds of REPOSITIONING a manually placed check each re-opened the same
 # hole. Do not add a `whole_suite_checks` or `finish` call at the end of this
 # file; that would be a position again, and the count reconciliation reds it.
+
+# --- Case 44: a scratch file that cannot be WRITTEN is unmeasurable, and the
+# shell's own redirect diagnostic stays suppressed ----------------------------
+# roborev job 258 (Low; promoted to BLOCKER because D2a is a SHALL over stdout
+# AND stderr -- every output line begins with `BASE-STALENESS: `).
+#
+# The READ sites were pinned in an earlier round with `{ exec 3<file; }
+# 2>/dev/null` -- the GROUP form, which installs the stderr redirect BEFORE the
+# inner open is attempted. The four WRITE sites used `cmd >file 2>/dev/null`,
+# and redirections are processed LEFT TO RIGHT: `>file` is opened while stderr is
+# still the real stderr, so a failed open emitted an UNPREFIXED shell diagnostic
+# -- breaking the anchor from a line no `sane` call can reach. One of the four,
+# the `behind-commits` truncation, was additionally UNCHECKED, and `behind == 0`
+# is the one path on which no later write re-attempts that file.
+#
+# ANCHOR CHOICE: each anchor is a line present in BOTH the pre-fix and fixed
+# script, so every case is mutation-verifiable against the pre-fix source. An
+# earlier draft anchored behind-commits on a comment the FIX itself introduced;
+# the plant then could not be applied to the pre-fix script at all, so that case
+# silently proved nothing while reading as covered.
+# The plant makes the target path a DIRECTORY so the open fails with EISDIR.
+# Deliberately NOT `chmod`: chmod denies nothing to root (the read cases must
+# skip for exactly that reason, so a root run would cover nothing), and an
+# unwritable scratch dir also defeats the EXIT trap's own cleanup. EISDIR is
+# root-proof and leaves the scratch dir removable.
+while IFS='|' read -r wp_label wp_anchor wp_inject; do
+  [ -n "$wp_label" ] || continue
+  MUT_W="$T/mutant-write-$wp_label.sh"
+  awk -v anchor="$wp_anchor" -v inject="$wp_inject" \
+    '$0 == anchor { print inject } { print }' "$ADVISORY" >"$MUT_W"
+  if [ "$(diff "$ADVISORY" "$MUT_W" | grep -c '^[<>]')" -eq 1 ] &&
+    bash -n "$MUT_W" 2>/dev/null; then
+    ok "scratch-write($wp_label): the plant injects exactly one line and nothing else"
+  else
+    bad "scratch-write($wp_label): the plant is not narrow (or the anchor line moved)"
+    continue
+  fi
+  USE_SCRIPT="$MUT_W"
+  if run 5 "scratch-write($wp_label): an unwritable scratch file is UNMEASURED" "$R_DIFF"; then
+    has "scratch-write($wp_label): the verdict is UNMEASURED" "verdict UNMEASURED"
+    lacks "scratch-write($wp_label): no permissive verdict is emitted" "NO-STALENESS-RECOGNISED"
+    lacks "scratch-write($wp_label): and no blast-radius count at all" "blast-radius"
+    if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+      bad "scratch-write($wp_label): an output line lacks the prefix: $(printf '%s\n' "$OUT" |
+        grep -m1 -v '^BASE-STALENESS: ')"
+    else
+      ok "scratch-write($wp_label): every line stays anchored — the shell's own redirect diagnostic is suppressed"
+    fi
+  fi
+  unset USE_SCRIPT
+done <<'WRITE_PLANTS'
+diff-paths|# plumbing side must NOT inherit them.|mkdir -p "$TMPD/diff-paths"
+behind-commits|# one word-splitting expansion in the file.|mkdir -p "$TMPD/behind-commits"
+commit-paths|  # the behaviour the diff side is pinned to match.|mkdir -p "$TMPD/commit-paths"
+WRITE_PLANTS
