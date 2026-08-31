@@ -388,6 +388,307 @@ a stale override, so an escape hatch could only buy a vacuous green.
 The schemas root itself is resolved **checkout-relative**, never as a `..` sibling of
 `$CQLITE_DATASETS_ROOT` — see [Test data](/cqlite/agents-developing/test-data/).
 
+**Component-set skew fail-closed (issue #3544).** `scripts/agent-gate.sh` is read **from the
+tree under test**, so a branch whose copy predates a component-set expansion on `main` runs the
+OLD script, reports a true `N/N nonpass=0`, and is **silent about every component added since**.
+Merge-cleanliness cannot see it (`git merge-tree` returns CLEAN — the skew is semantic), and
+`required` cannot backstop it: `.github/ci-gating-tiers.yml` exempts the CI feature-matrix lane
+*because the local gate owns it*, so each side's coverage is justified by the other's and the
+component is exercised by neither. Measured: PR #3467's gate would have certified **31 of 35**
+components.
+
+At the mode dispatch — before the #1825 slot and before any component — every mode now compares
+its component **set** against `origin/main`'s (never a line count, never a blob hash: a
+2,000-line refactor that leaves the set alone is not a coverage problem). The branch side is the
+running gate's own in-process `COMPONENTS` array; the baseline side is **read as DATA**, from the
+committed manifest `scripts/agent-gate.components` — see *The baseline is data, never code* below.
+The baseline is **fetched in the same invocation as the comparison**, because a remote-tracking
+ref is a *cached observable* and a stale one returns "no skew" against a superseded `main`. Every
+SUMMARY block carries a `component-set:` line:
+
+- `component-set: PASS (36/36 vs origin/main <sha40> via the committed manifest)` — affirmative,
+  and it **names the baseline sha and how the baseline was read**: a verdict that does not name
+  its baseline cannot be audited;
+- `component-set: FAIL-CLOSED (#3544) — this tree is BEHIND origin/main <sha40>; N …
+  MISSING … : <names>` — the branch is behind (`origin/main` is **not** an ancestor of `HEAD`).
+  Remedy: `git fetch origin && git rebase origin/main`;
+- `component-set: DECLARED (#3544) — this branch REMOVES … <names>` — components are missing,
+  `origin/main` IS an ancestor of `HEAD`, **and the components are absent at `HEAD` too**, so the
+  removal is in this branch's own **committed** diff. Loud, **not fatal**: the author has nothing
+  to rebase, only the information is actionable, and a guard that reds on correct input is the
+  guard agents learn to waive. (Behind **and** removing fails as BEHIND first, and reaches
+  DECLARED only after a rebase.)
+- `component-set: FAIL-CLOSED (#3544) — … PRESENT in the gate script AT HEAD …` — the
+  `UNCOMMITTED` verdict. **Ancestry alone is not provenance**: "is `origin/main` reachable from
+  `HEAD`?" is not "did this branch's committed diff remove the component?", and answering the
+  first while asserting the second was a reproduced false PASS — deleting one component from the
+  **working copy** alone produced a non-fatal `DECLARED` in a certifying mode, so a full gate
+  would have certified 35 of 36 components under a factually false line. The provenance is
+  therefore measured against **`HEAD`'s own component set**, not the proxy "is the tree dirty"
+  (which would red every mid-edit branch and still prove nothing on a clean-but-stale one). An
+  uncommitted **addition** still PASSes — extra components are never skew. Remedy: commit the
+  removal, or restore the component; never rebase.
+- `component-set: FAIL-CLOSED (#3544) — baseline NOT measured (<kind>: <detail>)` — the fetch
+  failed, `origin` is missing, **`origin` does not NAME the canonical upstream**, `git` is
+  absent, neither the baseline's manifest nor its gate script could be read, the manifest was
+  empty or ungrammatical, the gate script's `COMPONENTS=(…)` declaration could not be read as
+  text, **whether the baseline carries a manifest could not be determined at all**
+  (`baseline-probe-unmeasured`), `HEAD`'s own set is unmeasurable, or the probe could not be
+  BOUNDED. **Never a
+  SKIP and never a fallback to an empty baseline**: an empty baseline excuses every branch,
+  which is the vacuous pass inverted. The bound is itself a named capability
+  (`timeout`/`gtimeout`/a pure-bash watchdog/`none`) and an **unboundable host does not run
+  the fetch at all** — a missing capability must not inherit the permissive branch, and an
+  unbounded fetch could hang `--lite` on a network stall or an auth prompt.
+
+- `component-set: FAIL-CLOSED (#3544) — the LOCAL component manifest is not usable
+  (`manifest-missing` | `manifest-garbage` | `manifest-stale`)` — **this tree's own**
+  `scripts/agent-gate.components` is absent, ungrammatical, or out of step with its `COMPONENTS`
+  array (order included). Remedy: regenerate and commit it — never anything to do with `origin`.
+
+A component present on the branch but absent from `main` is **not** skew (this branch may be the
+one adding it) and is recorded as `[branch-only, NOT skew: …]` inside a PASS.
+
+**The baseline is data, never code (`REQ-3544-01`).** The first design derived the baseline set
+by extracting `origin/main:scripts/agent-gate.sh` and **running** it (`bash <fetched> --list`).
+**Six of that mechanism's seven High-severity review findings traced to that one decision**, and
+its three fixes each moved the hole one layer outward — a symbolic remote name, then the validated
+URL, then the URL in `argv`. That is the signature of a **shared channel between data and
+control**, where this project's standing ruling (issue #3312) is to *remove* the channel rather
+than choose a rarer delimiter. So the baseline now comes from `git show
+<sha>:scripts/agent-gate.components`, parsed under a **closed grammar**: one component name per
+line, blank lines and `#` comments skipped, and anything else — including a name with leading or
+trailing whitespace — a **named refusal** (a parser that trims is a parser that guesses).
+
+State what this **converts** the findings into rather than claiming they are gone: a redirected or
+hostile baseline now yields a **wrong component list, which the comparison itself detects**,
+instead of arbitrary code execution with the developer's credentials. Everything built for the old
+mechanism is **kept as defence in depth**: the canonical-identity and transport/host/port/path
+pinning, the isolated fetch (the validated URL written into a `0600` config by a shell builtin, so
+it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
+handling and the redact-and-flatten detail path.
+
+**A check must be inside the window it certifies — not before it, not after the harm.** The
+pre-flight ran *before* the concurrency-slot wait, and the post-slot tree recapture then reset the
+certification window: an edit made while the run was queued became the new starting tree under a
+stale `component-set:` verdict. The recapture is deliberate, so the pre-flight is repeated inside
+the window it opens. And HEAD's manifest was *trusted* while the local one is *verified* against the
+local declaration every run — so provenance now reads HEAD's committed `COMPONENTS` declaration
+directly and does not consult HEAD's manifest: remove the second source rather than reconcile it.
+
+**A symlink is a blob, and a graft outlives `--no-replace-objects`.** The presence probe accepted
+every `blob`, but a symlink is one — the difference is the mode — so the working-tree validation
+*followed* the link and saw a full manifest while `git show <rev>:<path>` printed the link's target
+text: `agent-gate.components -> fmt` validated locally and published a one-component baseline. And
+`$GIT_DIR/info/grafts` rewrites parentage while `--no-replace-objects` does **not** disable it, so
+on the object-reuse path (where ancestry still ran in the live repository) a graft could reclassify
+missing components from a fatal `BEHIND` to a non-fatal `DECLARED`. Ancestry now runs in the
+isolated repository on **both** paths. The pattern worth carrying: every live-repository read
+preserved for speed has turned into a route.
+
+**Stop rendering the value rather than sanitising it again.** The rejected-origin diagnostic was
+the *fifth* finding in one family — raw URL, then unflattened, then unredacted stderr, then
+scheme-only redaction, then query strings and multi-`@` authorities. Every fix improved the
+sanitiser, and the set of places a secret can hide in a URL does not close, so the URL is no longer
+published at all: the line names the **axis** the origin was rejected on, plus the normalised
+identity only when that identity is itself grammatically clean. Note the layer distinction that
+cost a regression on the way: the normalised value is a **comparison key**, not a diagnostic
+string — reducing it made every local path compare equal.
+
+**An allowlist has to reach the sites a later change adds.** The migrated object reads ran under a
+bare `env`, inheriting the caller's environment — the same hole as round 13, re-opened at the new
+sites. Every git call in the pre-flight now runs under `env -i` plus the one allowlist, including
+the state probes (injected config could have made a real partial clone look non-partial and
+re-opened the fast path). Two corrections came with it: a config file does **not** keep a URL out
+of every argv — git passes the configured URL to a transport *helper*, whose command line then
+carries the token — so a credential-bearing origin is **refused** (userinfo must be absent or
+exactly `git`); and a specified control must be required to have *worked* — the `chmod 600` on the
+isolated config is fail-closed with the resulting mode verified.
+
+**A local read can be a network operation.** In a *partial* clone, `ls-tree`/`show`/`cat-file`
+answer a missing object by fetching it from the **promisor remote** — under the live repository's
+local config, so an `insteadOf` plus an enabled external protocol executes a remote helper, and the
+lazy fetch also writes objects into the shared store. That was the third route of one family, so
+**every baseline and HEAD object read, and the ancestry walk, now run inside the isolated scratch
+repository**, with the lane's object directory supplied as an alternate — pure object storage,
+carrying no config and therefore no promisor and nothing for a helper to be invoked from. Ancestry
+compares against HEAD *resolved to a sha in the checkout*, because inside the scratch the ref `HEAD`
+would mean the scratch's own unborn HEAD. The fast path is gated on the clone not being partial,
+and `GIT_NO_LAZY_FETCH=1` is carried as a belt rather than the control (git ≥ 2.36; an unset
+variable does nothing silently).
+
+**Untrusted repository state is bigger than config.** Closing git's *config* sources and treating
+"untrusted repository state" as closed with them left three holes. **Replacement refs**:
+`refs/replace/<sha>` transparently substitutes another commit, so the pre-flight reported the
+canonical sha while reading a forged, smaller manifest — and passed. `GIT_NO_REPLACE_OBJECTS=1`
+plus `--no-replace-objects` on every lane-local object read closes it. **The transfer hop could
+execute**: `git fetch` in the *live* repository reads its *local* config — only the environment is
+sanitisable, a `.git/config` is a file — so a local `url.*.insteadOf` with
+`protocol.ext.allow=always` rewrote the scratch path to an `ext::` remote helper and ran commands
+**during** the fetch, before the sha comparison that was supposed to make the hop "untrusted but
+safe". A check placed **after** a harmful effect can only *report* it, never *prevent* it — so where the
+harm is execution, the control must be that the execution cannot be **reached**. The test asserts
+unreachability, with a positive control proving the attack does execute in a plain repository. There is therefore
+**no import**: the scratch object store is exposed through `GIT_ALTERNATE_OBJECT_DIRECTORIES` (an
+object *source*, not a transport), and nothing is written into the shared `.git` — no pack, no
+ref, no `FETCH_HEAD`. That is safe for the reason the transport was not: every read is by a **sha**
+whose provenance is the isolated chain, and git objects are content-addressed. **A leaked scp-form
+credential**, the third instance of one family, is fixed by *narrowing what is accepted* (scp
+userinfo must be exactly `git`) rather than widening the scrubber a third time. And **cleanup now
+runs on signals** (INT/TERM/HUP), because bash runs no EXIT trap for a signal that still has its
+default disposition — the second axis of "cleanup registration precedes resource creation".
+
+**The isolated hop's environment is an allowlist, and objects are fetched only when absent.**
+Neutralising `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and stopping there left the hop inheriting
+`GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`, `GIT_CONFIG_PARAMETERS` and `GIT_TEMPLATE_DIR` — all three
+measured to redirect a fetch through `url.<attacker>.insteadOf` (the template by seeding the new
+repository's own *local* config, which global/system neutralisation cannot touch). A redirect of
+the **isolated** hop is worse than one of the transfer: both observations then come from the
+attacker, so the equality assert compares two values that agree and emits a **false PASS**. Every
+isolated git call therefore runs under **`env -i` plus an allowlist** — admit what git needs to
+*reach and authenticate to* the remote (each entry with its reason), clear everything that can
+change *what it fetches* or *what it runs* — so a new git environment variable is cleared by
+default instead of having to be discovered. Lane-local reads are deliberately not wrapped: the
+only value needing provenance is the **sha**, and everything addressed by it is content-addressed.
+
+The sha itself comes from a **ref oracle** (`git ls-remote`, no objects), and objects are fetched
+only when this repository does not already hold that commit. Measured on one fleet box: a plain
+fetch into the fresh scratch repository cost **3.74 s and 92 MB of full history on every gate
+invocation**; the oracle costs 0.29 s and 120 KB, and the whole pre-flight went 3.9 s → 0.51 s.
+`--filter=blob:none` (0.73 s, 6.4 MB) was rejected **on measurement**: the manifest and gate
+blobs are read in this repository at the baseline sha, so a blob-filtered transfer leaves them
+absent exactly when `main` has changed them — a correct tree failing. "Fetched in this
+invocation" is about the staleness of the *ref value*, which is still read live; and the oracle's
+output is remote-controlled text, so it is **validated** (object id of a known length plus the
+ref name that was asked for) rather than parsed — `baseline-ref-unparsable` otherwise.
+
+**The local manifest is asserted against the running array on every run**, fail-closed, before
+anything is fetched. That assert is what makes a manifest baseline trustworthy at all: without it
+the file is an unverified claim, and a branch that grew `COMPONENTS` without regenerating the
+manifest would — once merged — leave `main`'s manifest **short**, so every later branch would
+compare against a too-small baseline and silently excuse real skew. Regenerate with:
+
+```bash
+{ sed -n -e '/^[^#]/q' -e p scripts/agent-gate.components; scripts/agent-gate.sh --list; } \
+  > /tmp/agent-gate.components && mv /tmp/agent-gate.components scripts/agent-gate.components
+```
+
+**One transitional fallback, also data-only — and it is unreachable by *assertion*, not by
+reasoning.** The baseline's tree is **probed first**, as its own step, with **three** outcomes:
+
+| probe result | behaviour |
+|---|---|
+| `present` | the manifest and **nothing else**. Every failure of that read — unreadable, bound exceeded, ungrammatical, empty — is an **error**; the textual path is a **hard refusal** here. |
+| `verified-absent` | the transitional text extraction, and the `component-set:` line **names it**. |
+| `could-not-tell` | **REFUSE** (`baseline-probe-unmeasured`). Not the fallback. |
+
+"The fallback is self-limiting — unreachable once the manifest is on `main`" was true and **not
+enough**: that is a property somebody *reasoned about* and nothing measured, so a refactor, a
+baseline pointed at an older commit, or an accidentally deleted manifest would silently re-enable
+the brittle path — a pass derived from the **absence** of a bad signal. And **`git show` cannot
+answer the question**: its non-zero exit conflates "no such path" with "bad object" with "the
+repository could not be read", which is the two-valued-predicate error (a predicate that must
+collapse "cannot tell" onto one of its answers always picks the permissive one). `git ls-tree
+<rev> -- <path>` separates them affirmatively — rc 0 with an entry, rc 0 with **no** entry, rc ≠ 0
+— and an entry that is not a `blob` is its own refusal. The payoff is **mechanical expiry instead
+of trust**: once the manifest is on `main`, every later baseline measures `present`, so path 2 is
+dead code that any attempt to enter *errors*, at the cost of one extra bounded probe.
+
+When it does run, the extractor reads the gate script's single-line top-level `COMPONENTS=(…)`
+declaration **as text** — never executed — and **refuses loudly on any shape it does not
+recognise, naming it** ("is not a SINGLE-LINE literal"; a multi-line or computed array, more than
+one declaration, a character outside the name grammar). That refusal branch is itself tested with
+a reflowed array, because an untested refusal on the exact axis known to be brittle is not
+coverage. It is format-brittle in a **shared** direction — a reflow on `main` refuses for every
+branch at once, which is fail-closed rather than a false green, and the named diagnostic turns a
+fleet-wide stop into a five-minute fix. Every baseline-bearing verdict line ends by naming its
+baseline source (`— baseline read via the committed manifest` / `— baseline read via the TEXTUAL
+FALLBACK: … VERIFIED ABSENT at that sha`), so use of the fallback is visible rather than inferred.
+
+**And it ends by naming the OBJECT provenance too, because the shared object store is TRUSTED, not
+verified** (`; objects: baseline REUSED from this lane's SHARED store` / `baseline FETCHED from the
+canonical remote, HEAD's own from this lane's SHARED store` / `provenance NOT RECORDED` — each
+followed by `store TRUSTED, not verified (#3746)`). Git does not rehash a packed object against the
+id it was asked for on an ordinary read, and on this fleet **every lane on a box is a worktree of
+one shared `.git`**, so a peer lane planting a forged pack/index can make a canonical sha resolve to
+a shortened manifest — a false `PASS`, and a non-invoker route, hence a defect.
+
+It is **declared rather than closed** because removal does not close it. The ancestry walk and the
+provenance leg read HEAD's **committed** content, which has no source other than that store — the
+working tree cannot substitute, since the `UNCOMMITTED` verdict exists precisely to compare against
+what is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal) into `DECLARED`
+(non-fatal) after removal, while charging every `--lite` round for a half-closure (measured
+3.41 s / 93 MB full, 3.58 s / 45 MB at `--depth=1`; shallow is *not* cheaper — it still ships the
+tip's whole tree). A check that claims nothing false is worth more than one claiming a closure it
+does not deliver. Closing it properly — including the possibility that the real subject is the
+infrastructure decision that lanes share an object store at all — is **#3746**.
+
+**The baseline's identity is validated before the fetch.** Trusting a remote merely *named*
+`origin` made `git remote set-url origin <anything>` a git-config-shaped opt-out — and it fires
+**by accident** in the fork workflow, where `origin` legitimately names a contributor's fork whose
+`main` may be months stale, so the guard compares against the wrong baseline and stamps a `PASS`.
+`origin` must therefore name the canonical upstream **host included** —
+`github.com/pmcfadin/cqlite`, one hard-coded literal, matched by **exact equality** after
+normalising the spellings git accepts for that one repository (`https://`, `http://`, `git://`,
+`ssh://`, scp-like `git@host:owner/repo`, optional userinfo, an `ssh://` port, an optional `www.`,
+an optional `.git`, any case).
+
+**Owner/repo alone is not enough, and "err toward accepting an ambiguous host" was wrong here.**
+It accepted `https://evil.example/pmcfadin/cqlite` and — needing no hostile host at all — **any
+local path** ending in those two segments. While the pre-flight still *ran* the baseline's copy
+of the gate that admitted arbitrary code and not merely a wrong baseline; under `REQ-3544-01` what
+it buys is a baseline of unknown **provenance**, from which no PASS may be derived, so the check
+stays exactly as strict — as defence in depth. Anything unverifiable from the string (an ssh config
+alias, a mirror, a bare local path, `file://`, a look-alike host such as `github.com.evil.tld`) is
+a **named non-PASS** (`remote-not-canonical`), as is an `origin` with no URL
+(`remote-unreadable`) — each with its own remedy, never a silent pass and never a SKIP.
+
+**The grammar is closed axis by axis** — transport, userinfo, host, port, path — each with one
+stated rule, because three successive rounds were "too permissive" in a *new* place (no host;
+host but no transport; `http://`/`git://` accepted). **`https://` is now the ONLY accepted
+transport.** `http://` and `git://` authenticate nothing, so an on-path impersonator of the
+hostname supplies the objects this run certifies against — and when the rule was written those
+objects were *executed*, which is why it was a High.
+
+**`ssh://`, `git+ssh://`, `ssh+git://` and scp-form `git@host:path` were accepted and are now
+REFUSED** (`ssh-transport:<form>`). The isolated environment must admit `HOME` so OpenSSH can find
+keys and `known_hosts`, and OpenSSH then also honours **`~/.ssh/config`**, where a `Host github.com`
+rule can rewrite `HostName` or run `ProxyCommand`/`Match exec`. That is a redirected baseline *and*
+arbitrary execution behind a URL string that passes the identity check. It is **in model because
+HOME is shared**: every lane runs as one user with a writable home, so the planter is a **peer
+lane**, not the invoker. It was met by **descope, not hardening** — a bounded residual was
+unavailable because `ProxyCommand` executes, and the usual mitigation (a redirected baseline
+degrades to a wrong component list the comparison detects) does not reach a harm that lands during
+*transport*, before any comparison. Measured cost: nil — every lane and CI already use `https://`,
+so an ssh-form checkout fails closed with the remedy named. A non-default port is a
+different endpoint and is rejected. **Userinfo is accepted** — GitHub Actions rewrites `origin`
+to `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red a legitimate CI
+checkout — and is therefore **redacted** from every rendering, because SUMMARY blocks are routinely
+pasted into PR comments.
+
+Two related properties of the same pre-flight. The baseline is fetched into a **private per-run
+`refs/worktree/…` ref**, never `FETCH_HEAD`: `--refmap=` removed the shared *tracking-ref* write
+and left `FETCH_HEAD` carrying the baseline, and `FETCH_HEAD` is itself a single shared mutable
+file that a concurrent fetch overwrites between the fetch and the read — the run would then
+compare against a commit it never fetched. And `git merge-base --is-ancestor`'s
+**rc 1 is three-valued too**: in a shallow clone it also means "the connecting history is
+absent", so it is read as "not an ancestor" only in a repository *proven* complete (unmeasurable
+shallowness ⇒ `INDETERMINATE`); otherwise a legitimate committed removal in a shallow checkout
+reds as `BEHIND` — a false FAIL on correct input.
+
+Hermetic self-tests use **local** origins, which are deliberately not canonical, so they
+**substitute the artifact**: one shared helper
+(`scripts/tests/lib/agent-gate-canonical-pin.sh`) rewrites the canonical literal in the fixture's
+own scratch copy of the gate and then verifies the pin took. Never a settable seam — the first
+design accepted local paths *so that the fixtures would work*, which made the test hook and the
+vulnerability the same fact.
+
+Fail-closed in the **certifying** modes only — the full gate and `--delta`, the two whose blocks
+are recorded in a PR. `--lite` and `--only` stamp the same line with an `ADVISORY-*` token and
+cannot fail on it: `--lite` runs every fix round and must not require the network to function.
+**There is deliberately no opt-out**, for the same reason as `missing-schemas:` — a branch behind
+`main` can always rebase, so an escape hatch could only buy a vacuous green.
+
 ## Running the gate
 
 ```bash
