@@ -81,6 +81,42 @@ export CQLITE_BOOTSTRAP_TEST_MODE=1
 export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
 : >"$CQLITE_BOOTSTRAP_ENV_FILE"
 
+# --- CARGO_HOME isolation: THIS SUITE WAS BREAKING cargo FOR THE WHOLE BOX ---------
+# The mold section writes `${CARGO_HOME:-$HOME/.cargo}/config.toml`, and on this fleet
+# /etc/environment sets CARGO_HOME=/usr/local/cargo — root-owned and SHARED BY EVERY
+# USER. So every bootstrap invocation here rewrote the machine-wide cargo config, and a
+# peer lane took three spurious red clusters from `could not load Cargo configuration ...
+# Permission denied` while it sat root-owned mode 600.
+#
+# TWO HALVES OF THE CAUSE, both worth recording. The hazard is OLD — that section has
+# always written $CARGO_HOME — but this suite makes **37 bootstrap invocations**, so what
+# was "occasionally, when someone runs the suite" became constant. We did not introduce
+# the bug; we crossed a threshold on someone else's latent one, and a tooling test that
+# mutates shared host state is a fleet-wide false-red generator whatever it asserts —
+# including inside a gate of record, where it voids a 20-minute certification and invites
+# misattribution to the diff under test.
+#
+# Sandboxed rather than restored-afterwards: a restore leaves a window in which peers red,
+# does not survive a killed run, and still clobbers whatever the real file legitimately
+# holds. The sibling suite test_perf_capability_bootstrap.sh already pairs
+# CARGO_HOME with its sandbox HOME per invocation; this is the same fact from a second
+# channel, so a case added later that sets HOME and forgets CARGO_HOME is still contained.
+# NOTE the export does NOT cover `sudo` invocations — sudoers' env_reset drops it — so
+# those must pass CARGO_HOME explicitly on the command line; see the root cases in block 11.
+export CARGO_HOME="$tmp/cargo-home"
+mkdir -p "$CARGO_HOME"
+
+# Baseline for the hermeticity assertion at the end of the suite. Captured as
+# mode+mtime+content so a rewrite is caught even if it happens to restore the bytes.
+PIN_SHARED_CARGO=/usr/local/cargo/config.toml
+pin_shared_cargo_state() {
+  [ -e "$PIN_SHARED_CARGO" ] || { printf 'absent'; return 0; }
+  printf '%s %s %s' "$(stat -c '%a' "$PIN_SHARED_CARGO" 2>/dev/null)" \
+                    "$(stat -c '%Y' "$PIN_SHARED_CARGO" 2>/dev/null)" \
+                    "$(md5sum "$PIN_SHARED_CARGO" 2>/dev/null | cut -d' ' -f1)"
+}
+PIN_SHARED_CARGO_BEFORE=$(pin_shared_cargo_state)
+
 # --- REAL-ORIGIN isolation for the push probe (issue #3369) ----------------
 # Section 3b now MEASURES push capability by actually pushing a throwaway
 # refs/claims/smoke-<commit-sha> ref (scripts/flow/claim.sh smoke). Every case that runs
@@ -3184,9 +3220,15 @@ else
   #      and `tee -a` is privileged anyway, so an env var could aim a root write at any
   #      absolute path. Asserted at the level the guard now uses: a real root invocation
   #      with the seam set must REFUSE, not write.
+  # A sandbox for the ROOT invocations below. It must be cleaned with sudo, because root
+  # writing here leaves root-owned files that the suite's own `rm -rf "$tmp"` trap (running
+  # as the invoking user) cannot remove — a leak of the same shape as the one being fixed,
+  # one directory over.
+  pin_root_sandbox="$tmp/pin-root-sandbox"; mkdir -p "$pin_root_sandbox/.cargo"
   pin_seam_probe="$tmp/pin-seam-root-target"; rm -f "$pin_seam_probe"
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     out_ak=$(sudo -n env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_seam_probe" \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
     if printf '%s' "$out_ak" | grep -q 'gate-pin: SKIPPED' \
@@ -3199,6 +3241,7 @@ else
       ls -l "$pin_seam_probe" 2>/dev/null
     fi
     sudo -n rm -f "$pin_seam_probe" 2>/dev/null || true
+    sudo -n rm -rf "$pin_root_sandbox" 2>/dev/null || true; mkdir -p "$pin_root_sandbox/.cargo"
   else
     skip "gate-pin root-seam refusal (no passwordless sudo here to stage a real root invocation)"
   fi
@@ -3219,6 +3262,7 @@ else
   #      back to answering about root.
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     out_am=$(sudo -n env SUDO_USER=cqlite-no-such-account-3414 \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_am" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
@@ -3230,6 +3274,7 @@ else
       printf '%s\n' "$out_am" | grep -i 'gate-pin' | head -2
     fi
     out_an=$(sudo -n env SUDO_USER="$(id -un)" \
+      HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_an" | grep -q "the account that invoked sudo"; then
@@ -3351,6 +3396,19 @@ if [ -z "$pin_skip_offenders" ]; then
 else
   bad "suite hygiene: a SKIP is announced through ok(), so it counts as a PASS and not as a skip:"
   printf '%s\n' "$pin_skip_offenders"
+fi
+
+# --- 14. THIS SUITE MUST NOT TOUCH SHARED HOST STATE -----------------------------------
+# Asserted affirmatively rather than by inspection, because the reach is easy to
+# reintroduce (a new case that sets HOME and forgets CARGO_HOME, or a `sudo` invocation
+# where the exported value is dropped by env_reset) and the cost lands on OTHER lanes as
+# unexplained red gates, which is the worst possible place for it to surface.
+pin_shared_cargo_after=$(pin_shared_cargo_state)
+if [ "$pin_shared_cargo_after" = "$PIN_SHARED_CARGO_BEFORE" ]; then
+  ok "host hygiene: $PIN_SHARED_CARGO is untouched by this suite (mode+mtime+content unchanged)"
+else
+  bad "host hygiene: this suite MUTATED the shared $PIN_SHARED_CARGO — it breaks cargo for every other user on the box"
+  printf '  before: %s\n  after:  %s\n' "$PIN_SHARED_CARGO_BEFORE" "$pin_shared_cargo_after"
 fi
 
 echo
