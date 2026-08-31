@@ -35,9 +35,22 @@
 //! "the whole ring" and "the range" would be the same answer and the test could
 //! not discriminate.
 //!
-//! Requires the gitignored `Data.db` binaries; SKIPs (never passes with zero rows)
-//! when absent. `CQLITE_DATASETS_ROOT` is honored first, else the in-repo
-//! `test-data/datasets` corpus is used.
+//! This fixture is COMMITTED SOURCE, not part of the gitignored fetched corpus:
+//! `git ls-files` lists its `da-1-bti-*` components and `git check-ignore` does not
+//! match them, so it is present in every complete checkout and appears in a fresh
+//! `git worktree add` without any fetch. Absence therefore means a BROKEN CHECKOUT,
+//! never an expected condition — so every case here is `must_run` and fails CLOSED
+//! (issue #3220). It deliberately does NOT skip: this file is the only end-to-end
+//! pin of #3358, a silent-wrong-data defect, and a skip would leave a green suite
+//! that certified nothing. The reachable way to lose the file is real and already
+//! documented — #3310 added reporting for git-tracked fixtures a SIGKILLed fetch
+//! left deleted — which is exactly the case a skip would swallow.
+//!
+//! `CQLITE_DATASETS_ROOT` is honored first, then the in-repo `test-data/datasets`
+//! corpus; EVERY candidate root is walked for this TABLE's own `Data.db` rather than
+//! committing to a root by keyspace (issue #3220), because neither root is a superset
+//! — the root `fetch-datasets.sh` prints does not carry this fixture and the checkout
+//! does.
 
 #![cfg(feature = "state_machine")]
 
@@ -66,7 +79,8 @@ fn repo_root() -> PathBuf {
 }
 
 /// The `<table>-<cfid>` generation dir, requiring a real `Data.db` so a JSONL-only
-/// checkout SKIPs rather than passing with zero rows.
+/// root is passed over rather than yielding zero rows. `None` means no candidate root
+/// held it, which [`fixture`] turns into a hard failure (this fixture is committed).
 fn fixture_dir() -> Option<PathBuf> {
     let roots = std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
@@ -204,9 +218,38 @@ struct Fixture {
 
 /// The fixture's partitions in ring order, with the golden's row count each.
 ///
-/// Returns `None` when the `Data.db` binaries are absent, which is the SKIP.
-fn fixture() -> Option<Fixture> {
-    let dir = fixture_dir()?;
+/// PANICS when the fixture is absent — it is committed source, so absence is a broken
+/// checkout and #3220 requires `must_run`, fail-closed unconditionally. There is no
+/// opt-out env var and none may be added: committed source in a checkout is never
+/// legitimately absent, so an escape hatch could only buy a vacuous green.
+fn fixture() -> Fixture {
+    let dir = fixture_dir().unwrap_or_else(|| {
+        // A glob PATHSPEC, not a literal path: the tracked directory carries a CFID
+        // suffix this code does not know, and a `<cfid>` placeholder would be both
+        // wrong AND unrunnable (`<` is shell input redirection). Quoted so the shell
+        // passes the `*` through to git rather than expanding it against a tree where
+        // the directory is, by definition, missing.
+        let restore_pathspec = format!("test-data/datasets/sstables/{KEYSPACE}/{TABLE}-*");
+        let default_root = repo_root().join("test-data/datasets").display().to_string();
+        panic!(
+            "{KEYSPACE}.{TABLE} `{SSTABLE_PREFIX}-Data.db` was not found under any \
+             candidate dataset root (CQLITE_DATASETS_ROOT, then {default_root}).\n\
+             \n\
+             This fixture is COMMITTED SOURCE (git-tracked, not gitignored), so this \
+             is a broken checkout rather than a missing optional corpus, and it fails \
+             closed rather than skipping: this file is the only end-to-end pin of \
+             #3358 and a skip would leave a green suite that certified nothing \
+             (issue #3220).\n\
+             \n\
+             Remedy: restore the tracked fixture (a SIGKILLed \
+             `test-data/scripts/fetch-datasets.sh` can delete tracked files — #3310):\n\
+             \n\
+             \x20   git restore -- '{restore_pathspec}'\n\
+             \n\
+             `bash test-data/scripts/fetch-datasets.sh --verify-only` names any such \
+             deletions and prints the exact restore command."
+        )
+    });
     let golden = golden_rows_by_pk(&dir);
     let mut by_token: Vec<(i32, i64, usize)> = golden
         .iter()
@@ -214,11 +257,11 @@ fn fixture() -> Option<Fixture> {
         .collect();
     by_token.sort_by_key(|(_, token, _)| *token);
     let ring: Vec<(i32, usize)> = by_token.iter().map(|(pk, _, rows)| (*pk, *rows)).collect();
-    Some(Fixture {
+    Fixture {
         data_db: dir.join(format!("{SSTABLE_PREFIX}-Data.db")),
         ring,
         golden,
-    })
+    }
 }
 
 fn token_of(pk: i32) -> i64 {
@@ -229,13 +272,9 @@ fn token_of(pk: i32) -> i64 {
 /// narrowed answer below is a narrowing rather than a failure to read.
 #[test]
 fn unbounded_scan_matches_the_golden() {
-    let Some(Fixture {
+    let Fixture {
         data_db, golden, ..
-    }) = fixture()
-    else {
-        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
-        return;
-    };
+    } = fixture();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let reader = rt.block_on(open_reader(&data_db));
     let got = rt.block_on(emitted_rows_by_pk(&reader, None));
@@ -254,10 +293,7 @@ fn unbounded_scan_matches_the_golden() {
 /// table.
 #[test]
 fn non_wraparound_range_emits_only_its_segment() {
-    let Some(Fixture { data_db, ring, .. }) = fixture() else {
-        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
-        return;
-    };
+    let Fixture { data_db, ring, .. } = fixture();
     // A mid-ring segment: every partition above the lowest and below the highest.
     // The two it excludes are what makes the case discriminating.
     let last = ring.len() - 1;
@@ -301,10 +337,7 @@ fn non_wraparound_range_emits_only_its_segment() {
 /// that the fix takes no early exit it is not entitled to.
 #[test]
 fn wraparound_range_emits_both_segments_and_nothing_between() {
-    let Some(Fixture { data_db, ring, .. }) = fixture() else {
-        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
-        return;
-    };
+    let Fixture { data_db, ring, .. } = fixture();
     // `(highest-but-one, MAX] ∪ [MIN, lowest]`: the highest partition and the
     // lowest one, with everything between them excluded.
     let last = ring.len() - 1;
