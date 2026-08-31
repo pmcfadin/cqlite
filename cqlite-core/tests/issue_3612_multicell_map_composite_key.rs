@@ -463,17 +463,23 @@ mod datasets_root;
 const TUPLE_KEYSPACE: &str = "test_nested_udt_keys";
 const TUPLE_TABLE: &str = "nested_udt_keys";
 
+/// One `m_tuple_udt` key as the golden RENDERS it: `key_part.label`,
+/// `key_part.rank`, and the tuple's second component, each as the string the
+/// golden carries (`None` for a null UDT field) — so the comparison is against
+/// sstabledump's own text rather than a re-encoding of it.
+type GoldenTupleKey = (Option<String>, Option<String>, String);
+
 /// One golden `m_tuple_udt` cell path, decoded from sstabledump's composite
-/// rendering into `(udt_label, udt_n, tuple_second)`.
+/// rendering into a [`GoldenTupleKey`].
 ///
 /// The rendering nests two levels: the tuple's components are joined with `:`,
 /// and the inner UDT's own fields are joined with an ESCAPED `\:`, with `\@`
 /// standing for a null field. So `charlie\:3:8` is
-/// `tuple(key_part{label: "charlie", n: 3}, 8)`. Validated against all three
+/// `tuple(key_part{label: "charlie", rank: 3}, 8)`. Validated against all three
 /// shapes the golden actually contains — a plain one, an all-null UDT
 /// (`\@\:\@:0`) and an empty-label one (`\:0:0`) — and the arity is asserted, so
 /// a change in sstabledump's escaping reds here instead of silently mis-parsing.
-fn parse_tuple_golden_path(path: &str) -> (Option<String>, Option<String>, String) {
+fn parse_tuple_golden_path(path: &str) -> GoldenTupleKey {
     // Split on UNESCAPED ':' only.
     let mut parts: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -557,11 +563,13 @@ async fn multicell_tuple_keys_match_the_sstabledump_golden() {
         })
         .expect("committed golden");
     let raw = std::fs::read_to_string(&jsonl).expect("golden readable");
-    let mut expected: BTreeMap<String, Vec<(Option<String>, Option<String>, String)>> =
-        BTreeMap::new();
+    let mut expected: BTreeMap<String, Vec<GoldenTupleKey>> = BTreeMap::new();
     for line in raw.lines().filter(|l| !l.trim().is_empty()) {
         let doc: serde_json::Value = serde_json::from_str(line).expect("golden json");
-        let pk = doc["partition"]["key"][0].as_str().unwrap_or_default().to_string();
+        let pk = doc["partition"]["key"][0]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         for row in doc["rows"].as_array().into_iter().flatten() {
             for cell in row["cells"].as_array().into_iter().flatten() {
                 if cell["name"].as_str() != Some("m_tuple_udt") {
@@ -624,7 +632,7 @@ async fn multicell_tuple_keys_match_the_sstabledump_golden() {
             want.len(),
             "id={id}: entry count must match the golden — a COLLAPSE would show here"
         );
-        let mut got: Vec<(Option<String>, Option<String>, String)> = Vec::new();
+        let mut got: Vec<GoldenTupleKey> = Vec::new();
         for (k, _v) in pairs {
             // The AC-4 property: a structured TUPLE whose first component is a
             // structured UDT — not opaque bytes, and not a flattened blob.

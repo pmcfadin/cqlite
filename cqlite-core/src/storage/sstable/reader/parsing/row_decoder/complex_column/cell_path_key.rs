@@ -173,7 +173,19 @@
 //! patched with a second framing walk here: a call-site validator that must know
 //! about every decoder is precisely the shape this module replaced.
 //!
-//! ## The residual's CONSEQUENCE, measured (issue #3612, R6-F1)
+//! ## SYMPTOM: A PYTHON READ CAN SILENTLY LOSE A MAP ENTRY (issue #3612, R6-F1)
+//!
+//! Stated symptom-first and in the LOSING direction on purpose. If you arrived
+//! here because a `map<frozen<list<...>>, ...>` came back from the Python binding
+//! with FEWER ENTRIES than `sstabledump` shows, this is the reason, and #3723 is
+//! the issue. The lead ruling on it is ACCEPT-AND-DOCUMENT, so nothing below is a
+//! justification for the loss — it is the record of it.
+//!
+//! Two cell paths that differ only in a nested element's declared length collapse
+//! to ONE decoded key. Where `origin/main` returned two distinct opaque keys and
+//! Python kept two dict entries, HEAD returns one key and **Python keeps one
+//! entry: the other is gone, with no error and no warning.**
+//!
 //! Recorded because the earlier statement of this residual described only the
 //! collapse and not what the collapse costs, and the difference is a behaviour
 //! change this diff introduces:
@@ -183,11 +195,16 @@
 //!   `Frozen(List([Integer(7)])))` — equal. On `origin/main` they decoded to two
 //!   DISTINCT `Value::Blob`s of 12 and 13 bytes. (Both measured, each with a
 //!   control proving distinct payloads still compare unequal.)
-//! * `Value::Map` is a `Vec<(Value, Value)>` and does not deduplicate, so the
-//!   RUST surface keeps both entries; so do the CLI JSON writer, Arrow, and Node
-//!   (a JS `Map` keyed by object identity). **Python is the exception**: its
-//!   hashable projection makes two equal-projecting keys ONE dict entry (measured
-//!   1 vs a control's 2), so an entry is LOST there where `main` kept two.
+//! * Entry count per surface, for two colliding keys — Python is the ONLY one
+//!   that loses an entry:
+//!
+//!   | surface | entries | why |
+//!   |---|---|---|
+//!   | Rust `Value::Map` | 2 | a `Vec<(Value, Value)>`; no deduplication |
+//!   | CLI JSON writer | 2 | one `{key, value}` object per pair |
+//!   | Arrow / parquet | 2 | `MapArray` offsets, one slot per pair |
+//!   | Node | 2 | a JS `Map` keyed by OBJECT IDENTITY, so equal shapes stay two |
+//!   | **Python** | **1** | the hashable projection makes both one `dict` key |
 //!
 //! **Scope, from Cassandra rather than from judgement:** that 13-byte path cannot
 //! occur in a well-formed SSTable. `ListSerializer.validate` (5.0.8) validates
