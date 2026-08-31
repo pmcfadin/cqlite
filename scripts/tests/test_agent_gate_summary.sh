@@ -833,11 +833,28 @@ while IFS= read -r _b32f; do
   # Comment lines are skipped: this suite DOCUMENTS these constructs in prose (the
   # paragraph above names one), and a lint that matches its own documentation is the
   # self-matching defect this repo keeps re-learning.
-  if sed 's/#.*$//' "$SCRIPT_DIR/../../$_b32f" 2>/dev/null | grep -qE \
+  # REDIRECTION, NOT A PIPE (#3685). `grep -q` exits on the first match, so under this file's
+  # `set -o pipefail` the producer takes SIGPIPE and the PIPELINE returns 141 — which `if`
+  # reads as NO MATCH. That is a FALSE NEGATIVE in a portability lint: measured here, the
+  # single real match in test_roborev_guard_portability.sh was silently lost this way, so the
+  # lint reported `0 of 4` clean while a match existed. Process substitution keeps grep's own
+  # status as the verdict. This is the THIRD instance of #3685 in this branch — the first two
+  # were in the annotation guard, and this one was written AFTER filing that issue.
+  # THE NEEDLES ARE ASSEMBLED FROM PIECES so this lint cannot match ITS OWN pattern
+  # literals. Measured: with the patterns written out, the lint flagged THIS FILE — the
+  # self-matching defect the paragraph above names, committed in the very code that warns
+  # about it. Comment-stripping is not enough, because these are CODE lines, not comments.
+  # Each variable below holds a fragment that is harmless alone; only the concatenation is
+  # the construct, and the concatenation exists solely at run time.
+  _p_caret='\^'; _p_comma=','
+  _p_case='\$\{[A-Za-z_][A-Za-z0-9_]*('"$_p_caret$_p_caret"'|'"$_p_comma$_p_comma"'|'"$_p_caret"'|'"$_p_comma"')\}'
+  _p_amp='&'; _p_redir="$_p_amp"'>''>'
+  _p_bs='\\'; _p_gnub='grep [^|]*'"$_p_bs"'b'
+  if grep -qE < <(sed 's/#.*$//' "$SCRIPT_DIR/../../$_b32f" 2>/dev/null) \
        -e '^[[:space:]]*(declare|local|typeset)[[:space:]]+-[A-Za-z]*A' \
-       -e '\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,|\^|,)\}' \
-       -e '&>>' \
-       -e 'grep [^|]*\\b'; then
+       -e "$_p_case" \
+       -e "$_p_redir" \
+       -e "$_p_gnub"; then
     b32_offenders="$b32_offenders $_b32f"
   fi
 done <<EOF
@@ -846,9 +863,9 @@ EOF
 if [ "$b32_scanned" -lt 20 ]; then
   bad "portability-8c: derived only $b32_scanned gate-invoked script(s) from $GATE — the derivation looks broken, so this lint would pass having scanned almost nothing"
 elif [ -n "$b32_offenders" ]; then
-  bad "portability-8c: gate-invoked script(s) use a NON-PORTABLE construct (bash-4 associative array / case-conversion expansion / '&>>', or GNU-only grep '\\b' which POSIX ERE leaves undefined and BSD grep does not honour), which fails on macOS — a first-class gate host:$b32_offenders"
+  bad "portability-8c: gate-invoked script(s) use a NON-PORTABLE construct (bash-4 associative array, bash-4 case-conversion parameter expansion, bash-4 append-redirection, or a GNU-only word-boundary escape in grep -E which POSIX ERE leaves undefined and BSD grep does not honour), which fails on macOS — a first-class gate host:$b32_offenders"
 else
-  ok "portability-8c: 0 of 4 RECOGNISED non-portable constructs (bash-4 associative array, bash-4 case-conversion expansion, bash-4 '&>>', GNU-only grep '\\b') found across $b32_scanned gate-invoked scripts — NOT an exhaustive portability proof: \`bash -n\` does not catch the bash-4 class (measured: rc=0 for all three) and nothing here executes under a BSD userland; only EXECUTION on a macOS host establishes either"
+  ok "portability-8c: 0 of 4 RECOGNISED non-portable constructs (bash-4 associative array, bash-4 case-conversion parameter expansion, bash-4 append-redirection, GNU-only word-boundary escape in grep -E) found across $b32_scanned gate-invoked scripts — NOT an exhaustive portability proof: \`bash -n\` does not catch the bash-4 class (measured: rc=0 for all three) and nothing here executes under a BSD userland; only EXECUTION on a macOS host establishes either. The constructs are deliberately NOT spelled in this message: it would make the lint flag its own diagnostic."
 fi
 
 # 9. Accelerator absence WARN + state markers (issue #1848). The gate must:
