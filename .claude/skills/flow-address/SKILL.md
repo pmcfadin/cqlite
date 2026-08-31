@@ -41,6 +41,9 @@ Resolve them in the worktree and reply per thread.
    path. A `lane-occupied-by-live-peer` refusal is its opposite: a DIFFERENT live process on this box is
    in that lane — adopt nothing, reap nothing, stop. Same for a `lane-lock` `OCCUPIED` with
    `liveness=ALIVE`: do not edit. Only a verifiably DEAD holder is auto-reclaimed.
+   `lane-lock=occupied-alive-unattributed` (or a `lane-evidence=…unattributed…`) means a live holder
+   exists and the run could NOT establish whether it is you — run `lane-lock.sh verify <N>` from
+   INSIDE the lane before writing anything.
 5. **Fix in the worktree** (`.claude/worktrees/issue-<N>-<slug>`), spawning `sstable-developer` for
    non-trivial code changes. Set the transient `addressing` sub-marker (a skill-managed marker the
    board→label mirror #2855 does not own); clear the sibling transient `spec-review` marker. Do NOT

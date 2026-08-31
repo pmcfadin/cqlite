@@ -3088,17 +3088,37 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   supervisor as reused); a new record could do it right from the start, and does.
   **Liveness is a CLOSED set and only a `DEAD-*` verdict permits auto-reclaim** — every `UNKNOWN-*`
   refuses. That is the affirmative-measurement rule: an unknown liveness state must not inherit the
-  permissive branch. The sharpest instance is the **ephemeral pid**: the lock records the outermost
-  ancestor of `$$` whose `/proc/<pid>/cwd` is inside the lane dir (on this fleet the long-lived
-  `claude` session process — deliberately NOT the tmux server, whose cwd is the root checkout and
-  which is SHARED by all 4 lanes on a box, so recording it would make every lane read mutually-alive
-  forever); when no ancestor matches, the pid is the tool call's own shell, which dies between calls,
-  so calling it dead would auto-reclaim a LIVE lane. Hence `pid-scope=ephemeral` ⇒
-  `UNKNOWN-EPHEMERAL` ⇒ refuse.
+  permissive branch. The identity is resolved by walking up from `$$` and taking the outermost
+  ancestor whose `/proc/<pid>/cwd` is inside the lane dir (on this fleet the long-lived `claude`
+  session process — deliberately NOT the tmux server, whose cwd is the root checkout and which is
+  SHARED by all 4 lanes on a box, so recording it would make every lane read mutually-alive forever).
+  **THAT RESOLUTION ONLY SUCCEEDS WHEN THE CALLER'S OWN CWD IS INSIDE THE LANE, which is a constraint
+  on how you INVOKE it, not an implementation detail**: `acquire <N> --lane-dir "$(cd "$wt" && pwd)"`
+  computes a PATH and leaves the process in the root checkout, resolving nothing. So **an `acquire`
+  (or `reclaim`) that cannot name a durable owner REFUSES** — `ERROR reason=unresolved-identity`,
+  exit 1 — and **writes nothing**, printing its own correction (cwd inside the lane, or `--pid`). The
+  alternative was measured and is worse: recording the tool call's own shell, which exits
+  immediately, leaves a record reading `UNKNOWN-EPHEMERAL` forever, and every `UNKNOWN-*` refuses —
+  **including the owning session's own later acquire** — so ONE acquire from outside the lane BRICKED
+  the lane on first use, which is strictly worse than no lock because it reds on correct input.
+  `flow-activate` therefore does not acquire at worktree-creation time at all (the session is acting
+  from the root checkout and is not in the lane yet, so no durable owner exists to record); the lock
+  belongs to the session that works IN the lane, taken from inside it.
+  **How a stale lock gets cleared, and by whom** — answered before it was built, because *a guard
+  that never permits work is broken, not fail-closed*: `DEAD-*` is auto-reclaimed by the next
+  `acquire`, recorded in the audit log, no human involved; **a reboot clears everything** (the boot id
+  changes, so every pre-reboot record reads `DEAD-REBOOT` — a box restart is a global un-brick);
+  `UNKNOWN-*` is cleared deliberately with `reclaim <N> --expect <token> --reason <why>` (CAS,
+  recorded) or `release <N> --force`, which only DELETES, needs no identity of its own and therefore
+  works from anywhere.
   **Scope, stated because a lock read as covering more than it does is its own false-clean**: it is
   machine-local and says NOTHING cross-machine (that is `refs/claims/issue-<N>`'s job — the two are
-  complements, not alternatives); it is Linux-`/proc`-specific and degrades to a loud refusing
-  `UNKNOWN-NO-PROC` elsewhere; and **a lane whose session never acquired is invisible to it**, which
+  complements, not alternatives); it is Linux-`/proc`-specific — on a host without `/proc` no durable
+  identity can be resolved, so `acquire` REFUSES with `reason=unresolved-identity` and writes nothing,
+  and an existing record's liveness refuses as `UNKNOWN-*` (this used to be written as "degrades to a
+  loud refusing `UNKNOWN-NO-PROC`"; that verdict is in the set but is NOT what the resolution
+  produces, and a doctrine line naming a verdict the code does not emit is the decay this repo treats
+  as a defect); and **a lane whose session never acquired is invisible to it**, which
   is why `claim.sh claim` now *reports* the lane-lock state on its verdict line rather than relying on
   every session having taken it.
 
@@ -3121,13 +3141,28 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `reason=released-then-resumed` **only** when the machine-local lane lock holds this session's EXACT
   five-component token (its text says the branch is "almost certainly YOUR OWN" and points at
   adoption, which nothing weaker licenses); `reason=lane-occupied-by-live-peer` when a live LOCAL
-  holder's token DIFFERS from ours — a peer session on this box is in that lane, so adopting the claim
-  is #3436's own damage and the abandonment tests (`should-reap`, board Status, branch author) describe
-  a lane nobody is in; and `reason=legacy-branch-lock`, unchanged, for everything else **including
-  worktree-only evidence** (a lane directory on the issue's branch says nobody is necessarily in it,
-  and nothing about WHICH session put it there). All three carry `lane-evidence=<tokens>` naming the
-  rungs that were observed — a worktree observation is REPORTED there and decides nothing — and all
-  three fail closed toward the generic verdict when a signal cannot be read.
+  holder exists, **this run ESTABLISHED ITS OWN IDENTITY**, and the holder's token DIFFERS from ours —
+  a peer session on this box is in that lane, so adopting the claim is #3436's own damage and the
+  abandonment tests (`should-reap`, board Status, branch author) describe a lane nobody is in; and
+  `reason=legacy-branch-lock`, unchanged, for everything else **including worktree-only evidence** (a
+  lane directory on the issue's branch says nobody is necessarily in it, and nothing about WHICH
+  session put it there) **and including a live local holder this run could not ATTRIBUTE**. All three
+  carry `lane-evidence=<tokens>` naming the rungs that were observed — a worktree observation is
+  REPORTED there and decides nothing — and all three fail closed toward the generic verdict when a
+  signal cannot be read.
+  **THE OWN-IDENTITY CLAUSE IS NOT A DETAIL, IT IS THE COMMON PATH.** `claim` normally runs from the
+  ROOT checkout, where no durable in-lane process exists, so `probe` cannot resolve our identity, our
+  token matches NOBODY, and a lane held by THIS session reads `ALIVE` rather than `SELF`. Naming a
+  peer from that is **asserting a positive from the FAILURE to prove its opposite** — the rule this
+  repo keeps relearning — and it told sessions their own lane belonged to someone else. It is
+  fail-SAFE (it refuses rather than handing the lane over), which is exactly why it is dangerous: a
+  refusal that fires on correct input is the refusal agents learn to waive. So `probe` publishes
+  `our-identity=session|explicit|UNRESOLVED` (a DEGRADED identity is `UNRESOLVED` even when the pid
+  was EXPLICIT, because a token carrying placeholders is evidence of nothing), a consumer may not
+  distinguish SELF from a peer without it, and the AC5 `lane-lock=` field follows the same rule with
+  `occupied-alive-unattributed` meaning "a live holder exists and this run could not establish whether
+  it is you". Being the READ side, `probe` never refuses for this — "I could not tell" is the useful
+  answer there, unlike a WRITE, which must refuse (above).
   **None prints a runnable resume command** — the #2945 ruling stands: the readers are
   agents that execute printed remediations literally, and an older-fleet worker holds only the BRANCH,
   so a printed empty-lease adopt WOULD succeed against a live lane.
