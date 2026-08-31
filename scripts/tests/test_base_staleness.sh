@@ -1149,7 +1149,7 @@ if run 4 "reserved-substring / space / NEWLINE / CR-TAB-ESC-DEL matched paths" "
   if printf '%s' "$OUT" | LC_ALL=C grep -q '[[:cntrl:]]'; then
     bad "reserved: a RAW control byte survived into the output"
   else
-    ok "reserved: NO raw control byte anywhere in the output (every C0/DEL escaped)"
+    ok "reserved: no raw control byte grep can SEE survives (C0/DEL except LF; a raw LF is invisible to a line-oriented grep and is covered by the prefix assert above)"
   fi
   if [ "$(verdict_lines)" -eq 1 ]; then
     ok "reserved: exactly ONE 'verdict ' line, despite paths carrying foreign verdict tokens"
@@ -1212,10 +1212,17 @@ fi
 # curated: it was hard-coded as 4 and adding ONE fixture path (the CR/TAB/ESC/DEL
 # case above) broke it at 5/6 — a red on correct input, from a constant standing in
 # for the invariant this comment already states. Deriving it asserts the REAL
-# property, "the listing agrees with the count it reports", and cannot drift when
-# the fixture grows. A derivation that yields nothing is a FAIL naming the
-# derivation, never a default: an unmeasured expectation would make the whole
-# comparison vacuous.
+# property, "the listing agrees with the count it reports". A derivation that
+# yields nothing is a FAIL naming the derivation, never a default: an unmeasured
+# expectation would make the whole comparison vacuous, and `-gt 0` refuses the
+# degenerate 0 == 0 that the old `-eq 4` rejected in place.
+#
+# SCOPED, because the first version of this comment claimed the derivation "cannot
+# drift when the fixture grows" and that is FALSE above MATCHED_LIST_LIMIT (20):
+# the overflow line `matched (+N further staling commits scanned but not listed)`
+# also begins `matched `, so ship_matched SATURATES at 21 and this assert would red
+# on CORRECT input once the fixture reaches 22 staling commits (17 more than today).
+# Deriving removes the drift that BIT (4 -> 5); it does not remove all of it.
 OUT=$(cd "$R_RES" && bash "$MUT_SANE" 2>&1)
 mut_matched=$(printf '%s\n' "$OUT" | grep -c '^BASE-STALENESS: matched ')
 OUT=$(cd "$R_RES" && bash "$ADVISORY" 2>&1)
@@ -1225,10 +1232,11 @@ ship_declared=$(printf '%s\n' "$OUT" |
   sed -n 's/^BASE-STALENESS: blast-radius \([0-9][0-9]*\) RECOGNISED .*/\1/p' | head -1)
 if [ -z "$ship_declared" ]; then
   bad "sane-mutant: could NOT derive the shipped blast-radius count from its own output (derivation failed; not defaulted)"
-elif [ "$ship_matched" -eq "$ship_declared" ] && [ "$mut_matched" -gt "$ship_matched" ]; then
+elif [ "$ship_declared" -gt 0 ] && [ "$ship_matched" -eq "$ship_declared" ] &&
+  [ "$mut_matched" -gt "$ship_matched" ]; then
   ok "sane-mutant: unsanitized, a control-char-bearing PATH inflates the listing ($mut_matched vs $ship_matched matched lines; declared $ship_declared)"
 else
-  bad "sane-mutant: expected the shipped listing to equal its declared count ($ship_declared) and the mutant to exceed it (got $ship_matched / $mut_matched)"
+  bad "sane-mutant: expected a NONZERO declared count equal to the shipped listing, and the mutant to exceed it (declared $ship_declared, shipped $ship_matched, mutant $mut_matched)"
 fi
 
 # --- Case 16 (BLOCKER A): rename symmetry — the fail-open the pin closes -----
