@@ -71,6 +71,16 @@ const TABLE: &str = "wide_multiclustering_small";
 const SSTABLE_PREFIX: &str = "da-1-bti";
 
 /// Repo root = the parent of this crate's manifest dir (`<repo>/cqlite-core`).
+/// Single-quote a path for safe pasting into a shell.
+///
+/// Checkout paths on this fleet contain no spaces today, but a remedy is copied by
+/// hand into a terminal, so a path holding a space or a shell metacharacter would
+/// silently run a different command. Single quotes disable all expansion; an embedded
+/// single quote is closed, escaped and reopened, the standard POSIX form.
+fn shell_quote(p: &Path) -> String {
+    format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -224,24 +234,30 @@ struct Fixture {
 /// legitimately absent, so an escape hatch could only buy a vacuous green.
 fn fixture() -> Fixture {
     let dir = fixture_dir().unwrap_or_else(|| {
-        // A glob PATHSPEC, not a literal path: the tracked directory carries a CFID
-        // suffix this code does not know, and a `<cfid>` placeholder would be both
-        // wrong AND unrunnable (`<` is shell input redirection). Quoted so the shell
-        // passes the `*` through to git rather than expanding it against a tree where
-        // the directory is, by definition, missing.
+        // DELIBERATELY NOT a synthesized `git restore` command. Five review rounds
+        // produced five different defects in one hand-built remedy string — an
+        // unsubstituted `<cfid>`, shell-redirection from the `<`, crate-relative paths
+        // that resolve to nothing when run from `cqlite-core/`, a glob that would
+        // restore the WHOLE fixture directory and silently discard a reader's unrelated
+        // uncommitted changes, and a repo-root anchor that still fails when pasted
+        // outside the checkout. The variant list was not closing.
         //
-        // `:(top)` anchors it at the repository root, because `cargo test -p cqlite-core`
-        // is routinely run FROM `cqlite-core/`, where a crate-relative `test-data/...`
-        // names nothing. The verification script is printed absolute for the same reason:
-        // a remedy that only works from one directory is a remedy that will be pasted
-        // and fail.
-        let restore_pathspec = format!(":(top)test-data/datasets/sstables/{KEYSPACE}/{TABLE}-*");
-        let root = repo_root();
-        let default_root = root.join("test-data/datasets").display().to_string();
-        let verify_cmd = root
-            .join("test-data/scripts/fetch-datasets.sh")
-            .display()
-            .to_string();
+        // `fetch-datasets.sh --verify-only` already emits a precise, safe restore
+        // command for exactly this case (#3310: it names git-tracked fixtures a
+        // SIGKILLed fetch deleted). Pointing at the tested emitter is strictly better
+        // than reproducing it here badly, so this message names ONE command and lets
+        // that tool produce the restore line. Do not "helpfully" add one back.
+        //
+        // `env -u CQLITE_DATASETS_ROOT` is LOAD-BEARING, not tidiness. The probe is
+        // scoped to whatever root it is given, and on a fleet box that variable points
+        // at a machine-local corpus OUTSIDE any git work tree — where it correctly
+        // reports `NO SUBJECT` and exits 0, detecting nothing. Measured: with the
+        // variable set to /data/datasets the remedy finds none of the 10 deleted files;
+        // unset, it names all 10. The fixture we are hunting is the COMMITTED one in
+        // this checkout, so the probe must be pointed there. Removing `env -u` turns
+        // this remedy into a no-op that looks like an all-clear.
+        let verify_cmd = shell_quote(&repo_root().join("test-data/scripts/fetch-datasets.sh"));
+        let default_root = repo_root().join("test-data/datasets").display().to_string();
         panic!(
             "{KEYSPACE}.{TABLE} `{SSTABLE_PREFIX}-Data.db` was not found under any \
              candidate dataset root (CQLITE_DATASETS_ROOT, then {default_root}).\n\
@@ -252,13 +268,14 @@ fn fixture() -> Fixture {
              #3358 and a skip would leave a green suite that certified nothing \
              (issue #3220).\n\
              \n\
-             Remedy: restore the tracked fixture (a SIGKILLed \
-             `test-data/scripts/fetch-datasets.sh` can delete tracked files — #3310):\n\
+             Remedy: a SIGKILLed `fetch-datasets.sh` can delete tracked files \
+             (#3310). Run:\n\
              \n\
-             \x20   git restore -- '{restore_pathspec}'\n\
+             \x20   env -u CQLITE_DATASETS_ROOT bash {verify_cmd} --verify-only\n\
              \n\
-             `bash {verify_cmd} --verify-only` names any such deletions and prints \
-             the exact restore command."
+             It names every git-tracked fixture that is missing and prints the exact, \
+             correctly-scoped restore command for them — which is why this message \
+             does not try to construct one."
         )
     });
     let golden = golden_rows_by_pk(&dir);
