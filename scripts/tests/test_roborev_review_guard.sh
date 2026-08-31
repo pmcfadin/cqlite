@@ -5926,6 +5926,131 @@ if grep -qF "$_seam_needle" "$TEST_SELF"; then
 else
   ok 'structural: the harness substitutes the scanner file rather than redirecting its path'
 fi
+# ===== THE DEFERRAL HAS NO CHANNEL THE REVIEWED PARTY CAN WRITE IN ITS OWN NAME (#3626) =====
+# THE TRAP THIS PINS, and it is the whole design problem of #3626: the obvious fix — let a lane mark
+# findings deferred so the tool passes — HANDS THE CONSTRAINED PARTY THE POWER TO SATISFY ITS OWN
+# CONSTRAINT. A `--defer-finding` flag, a deferral file in the worktree and an env var are each that
+# shape, so all three are asserted ABSENT here. Behavioural cases cover only the channels someone
+# already thought of; this covers the class.
+_dfs_bad=""
+# (a) NO CLI FLAG. Read from the wrapper's OWN option parser, so a `--defer`-shaped string in the
+#     header doctrine or in `--help` (where the marker form legitimately lives) can neither satisfy
+#     nor break this assert.
+# EXTRACTED TO A FILE, NEVER PIPED INTO `grep -q` (#3416, and this suite's own documented
+# instance): `grep -q` exits at the first match, SIGPIPEs the writer, and `pipefail` takes the
+# 141 — so a MATCH is reported as a NON-match, fail-open BY BYTE POSITION. Measured here: the
+# reset loop below reported the LAST variable missing while the file plainly contained it.
+_dfs_opts="$tmp/dfs-opts.txt"
+awk '/^while \[ \$# -gt 0 \]; do/ { inb = 1 } inb { print } inb && /^done$/ { exit }' "$WRAPPER_REAL" >"$_dfs_opts"
+if [ ! -s "$_dfs_opts" ]; then
+  _dfs_bad="$_dfs_bad option-parser-not-locatable"
+elif grep -qiE -- '--defer' "$_dfs_opts"; then
+  _dfs_bad="$_dfs_bad deferral-cli-flag"
+fi
+# (b) NO ENVIRONMENT CHANNEL. Two halves: no deferral variable is ever DERIVED from the environment,
+#     and the check RESETS every field the verdict reads before it decides anything — so an exported
+#     value cannot stand in for one this run established. The reset is the mechanism; the grep is the
+#     backstop.
+for _dfs_f in "$WRAPPER_REAL" "$ORACLES" "$CHECKS_FILE"; do
+  if grep -qE '(ROBOREV_DEFERRAL_[A-Z_]+|DEFERRAL_REPORT)="?\$\{(ROBOREV_DEFERRAL|DEFERRAL_REPORT)' "$_dfs_f"; then
+    _dfs_bad="$_dfs_bad deferral-env-derived-in-$(basename "$_dfs_f")"
+  fi
+done
+_dfs_reset="$tmp/dfs-reset.txt"
+awk '/^roborev_check_findings_deferral\(\) \{/ { inb = 1 } inb { print } inb && /RECHECK_JOB:-}" \]/ { exit }' \
+  "$CHECKS_FILE" >"$_dfs_reset"
+if [ ! -s "$_dfs_reset" ]; then
+  _dfs_bad="$_dfs_bad deferral-check-prologue-not-locatable"
+else
+  for _dfs_v in STATE AUTHOR SCOPE REASON DETAIL ISSUES COUNT OBSERVED_COUNT; do
+    grep -qE "^  ROBOREV_DEFERRAL_$_dfs_v=\"\"$" "$_dfs_reset" \
+      || _dfs_bad="$_dfs_bad unreset-ROBOREV_DEFERRAL_$_dfs_v"
+  done
+  grep -qE '^  DEFERRAL_REPORT=""$' "$_dfs_reset" || _dfs_bad="$_dfs_bad unreset-DEFERRAL_REPORT"
+fi
+# (c) NO FILE CHANNEL. A deferral read from the worktree is the same hole as the flag, plus the
+#     daemon-vs-root class that has already bitten three lanes on a config the tool reads from root.
+for _dfs_f in "$WRAPPER_REAL" "$ORACLES" "$CHECKS_FILE" "$SCAN_TOOL"; do
+  if grep -qE '\.roborev[-_]?defer|defer(red|rals?)[-_.](txt|json|toml|list|file)' "$_dfs_f"; then
+    _dfs_bad="$_dfs_bad deferral-file-channel-in-$(basename "$_dfs_f")"
+  fi
+done
+if [ -z "$_dfs_bad" ]; then
+  ok 'structural (#3626): a deferral cannot be asserted by a flag, a file or an environment variable — the authorization is a PR comment only, and the check resets every field the verdict reads'
+else
+  bad "structural (#3626): the deferral has a channel the reviewed party can write in its own name —$_dfs_bad. A worker could then clear its own findings, which is the constrained party satisfying its own constraint (#3312)"
+fi
+# ===== ONE ENFORCER, ONE MARKER FORM, TWO KINDS SELECTED EXPLICITLY (#3626) =====
+# The channel rules are inherited BY CALL, not by copy: the deferral asks the SAME scanner, resolved
+# from the SAME literal path, selecting its kind explicitly. A second scanner (or a second copy of the
+# marker pattern in the shell) would be a second place for the channel rule to diverge, and a
+# divergence in a channel rule is an authorization bypass — which is exactly how the in-band author
+# channel came back once already (#3312 job 26).
+_dfe_bad=""
+grep -qF 'python3 "$WAIVER_SCAN_TOOL" findings-deferral' "$ORACLES" || _dfe_bad="$_dfe_bad deferral-does-not-call-the-one-scanner"
+grep -qF 'python3 "$WAIVER_SCAN_TOOL" prompt-content-absent' "$ORACLES" || _dfe_bad="$_dfe_bad waiver-kind-not-named-explicitly"
+grep -qF 'roborev-defer: findings' "$SCAN_TOOL" || _dfe_bad="$_dfe_bad marker-form-absent-from-the-scanner"
+# THE MARKER FORM MAY NOT LIVE IN THE SHELL. Executable lines only: the comment blocks in these files
+# describe the mechanism, and scanning prose would make writing it down a violation — the same mistake
+# as the job-18 census assert.
+for _dfe_f in "$ORACLES" "$CHECKS_FILE"; do
+  if grep -v '^[[:space:]]*#' "$_dfe_f" | grep -qF 'roborev-defer'; then
+    _dfe_bad="$_dfe_bad marker-form-in-$(basename "$_dfe_f")"
+  fi
+done
+# AND NO TEST SEAM MAY INTRODUCE A SECOND ENFORCER PATH. The needle is SPLIT so this assert cannot
+# match its own line — a self-matching grep is a guard that can only ever be red.
+_dfe_seam="DEFERRAL_SCAN""_TOOL"
+for _dfe_f in "$TEST_SELF" "$WRAPPER_REAL" "$ORACLES" "$CHECKS_FILE"; do
+  if grep -qF "$_dfe_seam" "$_dfe_f"; then
+    _dfe_bad="$_dfe_bad second-scanner-path-in-$(basename "$_dfe_f")"
+  fi
+done
+if [ -z "$_dfe_bad" ]; then
+  ok 'structural (#3626): the deferral calls the ONE scanner at the ONE literal path, names its kind explicitly, and the marker form exists only there — no second enforcer and no shell-side parse'
+else
+  bad "structural (#3626): the deferral does not share the waiver enforcer —$_dfe_bad. Two implementations of a channel rule drift, and a drift in a channel rule is an authorization bypass (#3312 job 26/27)"
+fi
+# ===== ONE COUPLED GRANTED STATE, READ BY ALL THREE GATES (#3626) =====
+# `DEFERRED` is non-failing ONLY when the oracle granted, and the grammar scan, the `findings:` gate
+# and the affirmation backstop must read ONE state rather than each deciding for itself: two tests of
+# "was it granted?" are two things that can drift apart. This pins that the admission is decided once
+# and that the findings gate keeps BOTH halves — the token-exact `NONE` requirement (#3564, whose own
+# structural case is (fd7)) and the coupling to that single state.
+_dfc_bad=""
+[ "$(grep -cE '^deferral_admits=0$' "$WRAPPER_REAL")" -eq 1 ] || _dfc_bad="$_dfc_bad admission-not-initialised-once"
+[ "$(grep -cE '^  deferral_admits=1$' "$WRAPPER_REAL")" -eq 1 ] || _dfc_bad="$_dfc_bad admission-not-decided-in-exactly-one-place"
+[ "$(grep -cF 'deferral_admits' "$WRAPPER_REAL")" -ge 5 ] || _dfc_bad="$_dfc_bad admission-not-read-by-all-three-gates"
+grep -qF 'if [ "$failed" -eq 0 ] && [ "${FINDINGS%% *}" != NONE ] && [ "$findings_deferred" -ne 1 ]; then' "$WRAPPER_REAL" \
+  || _dfc_bad="$_dfc_bad findings-gate-lost-a-half"
+grep -qF 'if [ "$deferral_admits" -eq 1 ] && [ "${FINDINGS%% *}" = DEFERRED ]; then' "$WRAPPER_REAL" \
+  || _dfc_bad="$_dfc_bad findings-deferral-admission-not-token-exact-or-not-coupled"
+# The admission's own terms: a granted state is not enough — the provenance must be complete, the
+# scope must equal THIS run's, the counts must match, and the mode must be recheck.
+_dfc_admit="$tmp/dfc-admit.txt"
+awk '/^deferral_admits=0$/ { inb = 1 } inb { print } inb && /^fi$/ { exit }' "$WRAPPER_REAL" >"$_dfc_admit"
+[ -s "$_dfc_admit" ] || _dfc_bad="$_dfc_bad admission-block-not-locatable"
+for _dfc_term in 'ROBOREV_DEFERRAL_STATE:-}" = "granted"' 'RECHECK_JOB:-}" ]' 'ROBOREV_DEFERRAL_AUTHOR:-}" ]' \
+  'ROBOREV_DEFERRAL_REASON:-}" ]' 'ROBOREV_DEFERRAL_ISSUES:-}" ]' \
+  'ROBOREV_DEFERRAL_COUNT:-}" = "${ROBOREV_DEFERRAL_OBSERVED_COUNT:-}"' \
+  'ROBOREV_DEFERRAL_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"'; do
+  grep -qF -- "$_dfc_term" "$_dfc_admit" || _dfc_bad="$_dfc_bad admission-missing-term:${_dfc_term%%:*}"
+done
+if [ -z "$_dfc_bad" ]; then
+  ok 'structural (#3626): the deferral admission is decided ONCE, on complete provenance, a matching scope, equal counts and recheck mode, and all three gates read that one state'
+else
+  bad "structural (#3626): the deferral admission is not one coupled state —$_dfc_bad. A second derivation of 'was it granted?' can drift from the first, and a DEFERRED token that no authorization backs is indistinguishable from an authorized one to every reader of the block"
+fi
+# ===== `findings:` NEVER REPORTS `NONE` ON ACCOUNT OF A DEFERRAL (#3626) =====
+# `NONE` stays reachable ONLY from the job record's structured `verdict` letter, so nobody grepping
+# `findings: NONE` reads a deferred run as a clean review. Asserted at the assignment site, because
+# the behavioural cases can only show it for the shapes they fixture.
+if grep -qF 'FINDINGS="DEFERRED (' "$CHECKS_FILE" \
+  && ! grep -nF 'FINDINGS="NONE"' "$CHECKS_FILE" | grep -qi 'defer'; then
+  ok 'structural (#3626): a granted deferral assigns the DISTINCT token DEFERRED, and no deferral path can assign NONE'
+else
+  bad 'structural (#3626): a deferral can reach findings: NONE, or no longer reports the distinct DEFERRED token — either way a reader grepping for a clean review would count a deferred one (#3626)'
+fi
 # THE SCOPED RESIDUAL IS STATED ON EVERY SURFACE, in its NARROW form.
 _resid_missing=""
 for _f in "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL"; do
