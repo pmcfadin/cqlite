@@ -35,10 +35,11 @@ Ordered so every later task has a red test to turn green. Surfaces named per `op
       measured two failure modes, why this is NOT a `__proto__` literal check, and the accepted cost
       (`'toString' in row` stays true; `Object.hasOwn` is the correct probe) — the standard
       `udt_to_object` sets at `value.rs:479-509`.
-- [ ] 2.3 **Measure** a wide-table scan (`test_wide_rows`) through the Node binding, rows/s before
-      vs after, and report it in the PR. A regression outside noise selects **M2** (raw
-      `napi_define_properties` with per-result prebuilt descriptors carrying the interned
-      `napi_value` names, `design.md` D1) — adopt it then, and only then.
+- [ ] 2.3 **Measure** per `design.md` **D1b**, whose decision rule is FIXED BEFORE MEASUREMENT (lead
+      condition on 3630-R1): `test_wide_rows` scan through the Node binding, 1 warmup + 7 timed runs,
+      alternated baseline/candidate; check the **validity precondition first** (baseline relative
+      half-range ≤ 2.5%); then adopt M1 iff median regression ≤ **5%**, else **M2**. Quote the rule
+      AND the numbers in the PR body. Never widen the threshold to fit a noisy harness.
 - [ ] 2.4 Rust unit coverage in `bindings/node/src/value_tests.rs` for whatever is unit-reachable
       (descriptor construction, the unrepresentable-name refusal). *Component*: `binding-rust-tests`.
 

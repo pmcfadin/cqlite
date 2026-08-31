@@ -24,6 +24,25 @@ It applies identically to **both** write paths in `row_to_object`: the interned-
 `metadata.columns`) and the extras path (a value the authoritative column list does not cover). A
 change reaching only one leaves the other live.
 
+**Why a row keeps `Object.prototype` while #3504's UDT field bag does NOT — the two are consistent,
+and the axis is what the surface can be probed AGAINST.** `udt_to_object`'s doc comment
+(`bindings/node/src/value.rs:496-500`) rejects own-property definition for the field bag precisely
+because it leaves `'toString' in fields` true and `fields.constructor` truthy, so an absence probe on
+the bag still reads inherited junk; a null prototype makes `fields[name] === undefined` mean exactly
+"no such field". That reasoning is **sound and is not overturned here** — it just does not transfer,
+because a row and a field bag differ in whether an authoritative key list travels WITH the value:
+
+- A **row** arrives beside `result.columns`, the authoritative SELECT column list. "Is there such a
+  column?" is answered by that list, or by `Object.hasOwn(row, name)`. The row never needs `in` or
+  truthiness to answer it, so the inherited-junk cost is one the caller has a better instrument than.
+- A **UDT field bag** arrives with NO declared key list of its own — the fields are all there is. Its
+  only absence instrument IS the object, so an object that answers `in` for names it does not hold
+  cannot express absence at all.
+
+So the same tradeoff is refused there and accepted here, on a real structural difference rather than
+a preference. The accepted cost is stated in the declared-surface requirement below, which obliges
+`index.d.ts` to name `Object.hasOwn` as the row's absence probe.
+
 #### Scenario: A string-valued column named `__proto__` arrives as a column
 
 - **GIVEN** a Cassandra-written table declaring a quoted column `"__proto__"` and a row whose

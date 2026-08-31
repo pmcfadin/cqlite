@@ -32,6 +32,40 @@ order:
    concurrent consumer could observe if the construction ever became reentrant. Recorded and
    rejected, not deferred.
 
+## D1b — The M1→M2 decision rule, FIXED BEFORE ANY NUMBER IS SEEN
+
+Lead ruling on `3630-R1` (2026-08-31), and the reason it is a ruling: **a threshold chosen after
+seeing numbers is not a gate.** So the whole rule is pinned here, in the committed artifact, before
+the harness is written — and it is quoted in the PR body beside the result.
+
+**Harness.** A full scan of the `test_wide_rows` corpus through the Node binding's public query
+surface. 1 discarded warmup, then 7 timed runs. Report **median rows/s** and the **relative
+half-range** `((max − min) / 2) / median` as the run-to-run noise estimate.
+
+**Comparison.** Baseline = this branch's merge-base commit; candidate = the same tree with M1
+applied. Same box, same node/toolchain, built the same way, runs **alternated**
+(baseline, candidate, baseline, …) so machine drift cannot masquerade as an effect.
+
+**Decision — a single inequality, no judgement at read time.**
+Adopt **M1** iff `median_candidate ≥ 0.95 × median_baseline` (regression ≤ **5%**).
+Otherwise adopt **M2**.
+
+**Validity precondition, checked FIRST.** The **baseline's** relative half-range must be
+**≤ 2.5%** — half the decision threshold — or the harness cannot resolve a 5% effect and the
+measurement DOES NOT DECIDE anything. In that case increase the run count or the corpus and
+re-measure. **The 5% threshold is never widened to accommodate a noisy harness**; that is the
+after-the-fact threshold the ruling forbids, arrived at from the other direction.
+
+**Escape hatches, closed explicitly:** no "close enough", no re-running until a pass appears (the
+7-run median is the measurement; a second full measurement replaces it only if the validity
+precondition failed, and both are reported), and no substituting a different corpus after the fact.
+
+**`unsafe` budget.** The lead's "all four approved as recommended" is read as approving the whole
+M1→measure→M2 ladder, i.e. **M2's `unsafe` + `napi::sys` block is pre-authorized CONDITIONAL on the
+measurement selecting M2** — it is not a fresh ask at that point. Recorded explicitly so that reading
+is correctable rather than assumed; if M2 is selected, the PR body says so and names the measurement
+that selected it.
+
 **One behavioural difference M1 carries and M2 does not:** `Property::new(name)` builds a `CString`,
 which **fails on an interior NUL byte** in a column name. That is a fail-closed error rather than
 silent loss, which is the right direction — but it is a new refusal on a name Cassandra could in
