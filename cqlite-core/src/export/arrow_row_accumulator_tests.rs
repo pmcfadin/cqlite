@@ -458,13 +458,13 @@ fn rotating_density_does_not_accumulate_per_column_capacity() {
         .collect();
 
     let mut acc = ArrowRowAccumulator::new(&columns);
-    for dense in 0..N_COLS {
+    for (dense, dense_name) in names.iter().enumerate() {
         // Every row of THIS batch carries exactly one present cell, in column
         // `dense` — so this batch's store for `dense` grows to ROWS_PER_BATCH while
         // every other store stays empty. Next batch moves to the next column.
         for r in 0..ROWS_PER_BATCH {
             acc.stage(row(vec![(
-                names[dense].as_str(),
+                dense_name.as_str(),
                 text(&format!("b{dense}r{r}")),
             )]));
             acc.commit();
