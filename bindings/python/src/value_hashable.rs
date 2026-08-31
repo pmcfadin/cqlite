@@ -105,7 +105,9 @@ use cqlite_core::Value;
 /// [`value_to_py`] (`udt_to_py`), so a UDT with a collection field is
 /// unhashable even though the [`crate::value::Udt`] class itself implements `__hash__`
 /// (issue #3504).
-/// This function is the TOTAL hashable projection over `cqlite_core::Value`:
+/// This function is the TOTAL hashable projection over `cqlite_core::Value` —
+/// total in the sense of SHAPE and variant coverage (see *Totality is enforced
+/// by the COMPILER* below), NOT in the sense of being infallible:
 ///
 /// - `List`, `Tuple` → `tuple` (elements recursively projected)
 /// - `Set` → `frozenset` (elements recursively projected)
@@ -113,7 +115,9 @@ use cqlite_core::Value;
 /// - `Udt` → a [`crate::value::Udt`] instance carrying the type identity OUT OF BAND, with
 ///   every field value recursively projected (issue #3504)
 /// - `Frozen` → unwrap and recurse
-/// - `Json` → `tuple` (array) / `frozenset` of pairs (object), recursively
+/// - `Json` → `tuple` (array) / `frozenset` of pairs (object), recursively; its
+///   SCALAR arm delegates to [`json_to_py`] and is since #3505 the ONE arm that
+///   can return `Err` — see [`json_to_hashable_key`]
 ///   (reachability: the one statement of it is at the `Value::Json` arm)
 /// - every other variant → its ordinary [`value_to_py`] projection, which is
 ///   already hashable
@@ -356,13 +360,28 @@ pub(crate) fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<P
 /// hashable position can never be the unhashable `list`/`dict` that
 /// [`json_to_py`] would build.
 ///
-/// Scalars delegate to [`json_to_py`], so its NUMBER projection is inherited and
-/// with it a known collapse: JSON `1`/`1.0`/`true` become Python
-/// `int`/`float`/`bool`, which compare equal with equal hashes, so `{"a": 1}`
-/// and `{"a": 1.0}` are the same frozenset. That is one instance of the
-/// projection-collapse class tracked by **#3615** (whose other members —
-/// `-0.0`/`+0.0`, `_type` field shadowing, `Null`/`Tombstone` — have nothing to
-/// do with JSON); recorded in full at the `Value::Json` arm.
+/// Scalars delegate to [`json_to_py`], so its NUMBER projection is inherited
+/// WHOLE — since **#3505** that means both its precision and its one error arm.
+/// Two consequences, pulling in opposite directions:
+///
+/// * A known collapse: JSON `1`/`1.0`/`true` become Python
+///   `int`/`float`/`bool`, which compare equal with equal hashes, so `{"a": 1}`
+///   and `{"a": 1.0}` are the same frozenset. That is one instance of the
+///   projection-collapse class tracked by **#3615** (whose other members —
+///   `-0.0`/`+0.0`, `_type` field shadowing, `Null`/`Tombstone` — have nothing
+///   to do with JSON); recorded in full at the `Value::Json` arm. #3505 leaves
+///   it UNCHANGED — `1` classifies `I64` → `int` and `1.0` classifies `F64` →
+///   `float` exactly as before — and adds no new member, because a `Beyond`
+///   number becomes an exact `int` or an `Err`, never a `str`, so it cannot
+///   collide with a genuine `Value::Text`.
+/// * An inherited REFUSAL, which is why the totality claimed above is about
+///   SHAPE and not about infallibility: a JSON number no host type can
+///   represent exactly yields `Err` rather than a wrong-but-hashable value.
+///   That is the direction #3500's AC3 asked for ("prefer an explicit error
+///   over silently producing an unhashable value"), and it is UNREACHABLE in
+///   this build: without `arbitrary_precision`, `serde_json` rounds such a
+///   literal to an `f64` in the PARSER, before any binding code runs — measured
+///   and test-asserted in `cqlite-ffi-common/src/json_number.rs`.
 #[deny(clippy::wildcard_enum_match_arm)]
 fn json_to_hashable_key(py: Python<'_>, json: &serde_json::Value) -> PyResult<PyObject> {
     match json {
