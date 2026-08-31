@@ -146,6 +146,27 @@ else
   ok "B3: the cargo/env observers are not exported (no nested-run attribution)"
 fi
 
+# B6: `command -v cargo` is UNSAFE once the observer defines a shell function named
+# `cargo` — `command -v` finds FUNCTIONS, so a toolchain-presence probe would answer
+# "present" on a box with no cargo binary and turn a SKIP into a FAIL (measured: it did,
+# in run_oom_audit and the python-bindings build probe). Any such probe must use
+# `type -P`, which searches PATH only. The rule is positional and therefore sound: code
+# textually AFTER the definition block always runs after it (top-level flow reaches the
+# block first, and every function defined below it is called later), while the one probe
+# above the block — the PATH-augmentation check near the top — runs before any function
+# exists and is correct as written.
+fm_begin=$(grep -n '^# ==== BEGIN feature-matrix annotation' "$GATE" | head -1 | cut -d: -f1)
+if [ -z "$fm_begin" ]; then
+  bad "B6: could not locate the '==== BEGIN feature-matrix annotation' marker in $GATE"
+else
+  late_probes=$(grep -nE 'command -v (cargo|rustc)\b' "$GATE" | awk -F: -v b="$fm_begin" '$1 > b')
+  if [ -z "$late_probes" ]; then
+    ok "B6: no 'command -v cargo/rustc' probe below the observer definition (they use type -P, which cannot match the shell function)"
+  else
+    bad "B6: a 'command -v cargo/rustc' probe below the observer would always answer 'present' (use type -P): $late_probes"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Unit cases for the descriptor / render / annotate path
 # ---------------------------------------------------------------------------

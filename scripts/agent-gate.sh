@@ -2551,7 +2551,12 @@ _python_build_verify_venv() {
   # (cargo+rustc present, maturin still failed) propagates as-is: a REAL compile
   # error of our bindings.
   _pbv_build() {
-    if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+    # `type -P`, not `command -v` (#3453): the feature-matrix observer defines a shell
+    # FUNCTION named `cargo`, and `command -v` finds functions — so on a box with no
+    # cargo BINARY this probe would answer "present" and the toolchain-absent rc 4 (an
+    # offline/toolchain gap, reported as SKIP upstream) would be misreported as a real
+    # compile failure of our bindings. `type -P` searches PATH only.
+    if ! type -P cargo >/dev/null 2>&1 || ! type -P rustc >/dev/null 2>&1; then
       return 4
     fi
     (
@@ -7748,7 +7753,10 @@ run_oom_audit() {
   local start end status
   start=$(date +%s)
   local xtask_dir="${OOM_AUDIT_XTASK_DIR:-$REPO_ROOT/xtask}"
-  if ! command -v cargo >/dev/null 2>&1; then
+  # `type -P`, not `command -v` (#3453): `command -v` also finds the shell FUNCTION named
+  # `cargo` that the feature-matrix observer defines, so this SKIP would never fire on a
+  # box without a cargo binary and the component would FAIL instead of SKIPping.
+  if ! type -P cargo >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no cargo on PATH)"
     record_result "$name" "$status" 0
