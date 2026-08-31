@@ -8075,6 +8075,34 @@ test_lane_lock_failed_reclaim_rename_is_named() {
   else
     fail "lane-lock-mv-misattributed: rc=$rc out=[$out] — the pre-fix path printed the lost-race refusal plus 're-run this supervisor', which loops"
   fi
+  # ---- B18: THE IDENTITY IS UNESTABLISHED BY NOW, AND THE PRINTED COMMAND MUST BE SAFE IF THE LOCK IS
+  # LIVE (#3601, roborev job 242). The liveness verdict describes the pid file as it was BEFORE the
+  # rename was attempted; the path can be replaced in between. The pre-B18 text declared "this lock IS
+  # stale and this run is entitled to it" and printed the non-recursive REMOVAL for it — the code
+  # destroys nothing, but the operator pasting that line does, and these remedies exist to be pasted.
+  if [[ "$out" == *"IDENTITY OF WHAT IS THERE IS NOW UNESTABLISHED"* ]] \
+     && [[ "$out" == *"does not declare the lock stale"* ]] \
+     && [[ "$out" == *"Do NOT remove anything on the strength of this message"* ]]; then
+    pass "lane-lock B18: after a failed rename the refusal reports the identity as UNESTABLISHED, declines to call the lock stale, and tells the operator not to remove anything on its word"
+  else
+    fail "lane-lock-b18-declares-stale: out=[$out] — a lock whose identity is unverified must not be declared stale or removable"
+  fi
+  local b18_bare b18_rc=0
+  b18_bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | grep -v '^$' | head -1)"
+  if [[ "$b18_bare" == 'ls -ldn -- '* ]] && [[ "$out" != *$'\n''rmdir -- '* ]] \
+     && ! printf '%s\n' "$out" | grep -qE '^(rmdir|rm) '; then
+    pass "lane-lock B18: the ONLY command printed on this branch is a READ-ONLY inspection and no removal appears anywhere in the refusal — the one command shape that is safe if the lock turns out to be live"
+  else
+    fail "lane-lock-b18-prints-removal: bare=[$b18_bare] — a paste-ready removal aimed at a possibly-live holder is harm via the operator's hands"
+  fi
+  # ...and it must RUN verbatim, or it is the "remedy that cannot work" defect in the other direction.
+  eval "$b18_bare" >/dev/null 2>&1 || b18_rc=$?
+  if [[ "$b18_rc" -eq 0 && -d "$lock" && -f "$lock/pid" ]]; then
+    pass "lane-lock B18: that line runs verbatim (rc=0) and removes nothing — the lock and its record are untouched after the operator's inspection"
+  else
+    fail "lane-lock-b18-remedy-unrunnable: rc=$b18_rc lock=[$([[ -d "$lock" ]] && echo present || echo GONE)]"
+  fi
+
   # It also must not have destroyed the dead holder's lock on the way out, and must not have claimed it.
   if [[ -d "$lock" && -f "$lock/pid" ]] && [[ "$out" != *"ACQUIRED="* ]]; then
     pass "lane-lock B2: the lock is left exactly as found and nothing was claimed"
@@ -8097,6 +8125,55 @@ test_lane_lock_failed_reclaim_rename_is_named() {
       pass "lane-lock B2 MUTANT: with the rename's failure swallowed the identical case falls through to the lost-race refusal — a claim contest that did not happen — so the assert above is the new branch doing the work"
     else
       fail "lane-lock-mutant-mv: out=[$mout] — the pre-fix swallow must be shown to misattribute"
+    fi
+  fi
+  chmod 0755 "$ro" 2>/dev/null || true
+
+  # ---- B18 (b): A DIFFERENT HOLDER APPEARS between the liveness verdict and the failed rename — the
+  # interleaving the finding is about. Fault-injected on the liveness probe so it publishes a foreign pid
+  # and THEN answers `dead`, which is exactly the ordering the real race produces; the branch under test
+  # (`acquire_lock`'s post-rename reclassification) is shipped code.
+  local ovrb mout
+  ovrb="$d/f-swap-holder.sh"; : >"$ovrb"
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if sv_mutant_override "$ovrb" supervisor_lock_holder_liveness \
+       '  local pid="$1" msg='"''"' rc=0' \
+       '  local pid="$1" msg='"''"' rc=0
+  printf "%s\n" 987654 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  printf "%s" dead
+  return 0'; then
+    mout="$(lane_lock_drive_at "$d" "$ovrb" "$ro" "$lane")" || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    if [[ "$mout" == *"now records a DIFFERENT holder, pid 987654"* ]] \
+       && [[ "$mout" == *"may be ALIVE"* ]] \
+       && ! printf '%s\n' "$mout" | grep -qE '^(rmdir|rm) '; then
+      pass "lane-lock B18 (different holder): when the record changed under us the refusal names the NEW pid, says it may be alive, and still prints no removal — the case where the pre-B18 text would have aimed a paste-ready delete at a live holder"
+    else
+      fail "lane-lock-b18-different-holder: out=[$mout]"
+    fi
+  fi
+  chmod 0755 "$ro" 2>/dev/null || true
+
+  # ---- B18 MUTANT: the pre-B18 remedy restored — the removal command comes back, aimed at a lock whose
+  # identity this run cannot vouch for.
+  local ovrm2
+  ovrm2="$d/m-b18.sh"; : >"$ovrm2"
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if sv_mutant_override "$ovrm2" acquire_lock \
+       '      "ls -ldn -- $(supervisor_shell_quote "$SUPERVISOR_LOCK") && ls -lna -- $(supervisor_shell_quote "$SUPERVISOR_LOCK")"' \
+       '      "$(supervisor_lock_clear_command)"'; then
+    mout="$(lane_lock_drive_at "$d" "$ovrm2" "$ro" "$lane")" || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    if printf '%s\n' "$mout" | grep -qE '^rmdir -- '; then
+      pass "lane-lock B18 MUTANT: with the pre-fix remedy restored the refusal prints a paste-ready REMOVAL for a lock it cannot vouch for — the harm, reproduced, so the read-only assert above is doing the work"
+    else
+      fail "lane-lock-mutant-b18: out=[$mout] — the pre-fix remedy must be shown to print a removal"
     fi
   fi
   chmod 0755 "$ro" 2>/dev/null || true
@@ -8458,6 +8535,17 @@ test_lane_lock_publish_declines_instead_of_clobbering() {
       pass "lane-lock B15: the holder record is byte-for-byte as the peer left it — the refusal's one load-bearing claim is measured, not asserted"
     else
       fail "lane-lock-b15-record-not-preserved: pid=[$(cat "$lock/pid" 2>/dev/null || true)]"
+    fi
+    # NEGATIVE CONTROL for B19: the refusal must not name a CAUSE it did not observe. Finding a `pid`
+    # record proves publication must be declined; it does not identify how the record got there, and
+    # directory-instance identity is unverifiable on this path (#3683). The pre-B19 text asserted a
+    # specific race ("a peer renamed ours aside and published its own between our two steps").
+    if [[ "$out" == *"APPEARED in the lock"* ]] \
+       && [[ "$out" == *"HOW that record got there is NOT established"* ]] \
+       && [[ "$out" != *"renamed ours aside"* ]]; then
+      pass "lane-lock B19: the refusal reports that a holder record APPEARED and was preserved, and says outright that how it got there is not established — the invented race is gone"
+    else
+      fail "lane-lock-b19-invents-a-race: out=[$out] — naming one of several possible causes as the cause is a claim beyond the evidence"
     fi
     # NEGATIVE CONTROL for the wording: the refusal must NOT claim the path is untouched, because it is
     # not. This is the assert that stops the false claim being reintroduced by a well-meaning edit.
