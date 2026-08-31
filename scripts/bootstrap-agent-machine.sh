@@ -2222,7 +2222,14 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
            | ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} tee "$PIN_ENV_FILE" >/dev/null 2>&1 \
          && ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} chmod 0644 "$PIN_ENV_FILE" 2>/dev/null; then
       PIN_FILE_HAS_LINE=yes; PIN_FILE_VALUE="$PIN_ENV_VALUE"
-      info "CREATED $PIN_ENV_FILE (root:root 0644) carrying '$PIN_ENV_LINE' — pam_env reads it at session creation, so NEW sessions pick it up"
+      # REPORT WHAT IT ACTUALLY IS, read back — not what the write intended. An earlier
+      # draft of this line asserted "root:root 0644" unconditionally, which is false
+      # wherever the write was unprivileged (the test seam forces PIN_ROOT empty, so the
+      # file belongs to the invoking user). A message claiming an ownership it did not
+      # establish is the same presence-for-fact substitution this section exists to remove,
+      # in the section's own output.
+      pin_made=$(ls -ld -- "$PIN_ENV_FILE" 2>/dev/null | awk '{print $1" "$3":"$4}')
+      info "CREATED $PIN_ENV_FILE (${pin_made:-mode/owner unreadable}) carrying '$PIN_ENV_LINE' — pam_env reads it at session creation, so NEW sessions pick it up"
     else
       PIN_PERSIST_NOTE="could not create $PIN_ENV_FILE"
       warn "gate-pin: could not create $PIN_ENV_FILE — the pin was NOT persisted"

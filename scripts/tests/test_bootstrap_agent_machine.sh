@@ -3696,6 +3696,33 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the
   #      production path certifies the production path by accident).
+  # 11ba. A MISSING env file is CREATED under authorisation, and NOT created without it
+  #      (#3414 final roborev). Before this, --fix-gate-pin declined to create the file, so a
+  #      MINIMAL Linux install — where /etc/environment does not ship — could never be
+  #      repaired and failed --strict onboarding forever: a repair flag that cannot repair the
+  #      one case it exists for. BOTH directions are asserted because a repair that fires
+  #      unasked is as wrong as one that never fires, and the create path was previously
+  #      verified BY HAND only, which is the gap this case closes.
+  envf_ba="$tmp/pin-env-ba"; rm -f "$envf_ba"
+  out_ba=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_ba" \
+    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke --fix-gate-pin 2>&1)
+  ba_created=0; [ -s "$envf_ba" ] && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_ba" && ba_created=1
+  envf_bb="$tmp/pin-env-bb"; rm -f "$envf_bb"
+  out_bb=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_bb" \
+    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  if [ "$ba_created" = 1 ] \
+     && printf '%s' "$out_ba" | grep -q 'CREATED' \
+     && [ ! -e "$envf_bb" ] \
+     && printf '%s' "$out_bb" | grep -q 'will be CREATED'; then
+    ok "gate-pin: a MISSING env file is created under --fix-gate-pin (with the pin in it), and is NOT created without authorisation — which SAYS it would be"
+  else
+    bad "gate-pin: the create path is wrong (created=$ba_created, unauthorised-file-exists=$([ -e "$envf_bb" ] && echo yes || echo no))"
+    printf '%s\n' "$out_ba" | grep -iE 'CREATED|gate-pin' | head -2
+    printf '%s\n' "$out_bb" | grep -iE 'CREATED|gate-pin' | head -2
+  fi
+
   envf_k="$tmp/pin-env-k"; : >"$envf_k"
   # `-u CQLITE_BOOTSTRAP_TEST_MODE` is the point of this half: the marker is exported
   # suite-wide for host safety, and the case is about a seam set WITHOUT it.
