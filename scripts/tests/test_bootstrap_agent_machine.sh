@@ -92,6 +92,67 @@ if [ "$pin_suite_euid" = 0 ]; then
   exit 1
 fi
 
+# The sandbox and the shared-state guard are created BEFORE the first case, because the
+# guard wraps every bootstrap invocation and case 2 (`--help`) is one of them. Creating it
+# later left that invocation calling an undefined "$PIN_BS" — coverage that reads as
+# complete while one call site silently is not, which is the shape this guard exists for.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+
+# Baseline for the hermeticity assertion at the end of the suite. Captured as
+# mode+mtime+content so a rewrite is caught even if it happens to restore the bytes.
+PIN_SHARED_CARGO=/usr/local/cargo/config.toml
+pin_shared_cargo_state() {
+  [ -e "$PIN_SHARED_CARGO" ] || { printf 'absent'; return 0; }
+  printf '%s %s %s' "$(stat -c '%a' "$PIN_SHARED_CARGO" 2>/dev/null)" \
+                    "$(stat -c '%Y' "$PIN_SHARED_CARGO" 2>/dev/null)" \
+                    "$(md5sum "$PIN_SHARED_CARGO" 2>/dev/null | cut -d' ' -f1)"
+}
+PIN_SHARED_CARGO_BEFORE=$(pin_shared_cargo_state)
+
+# --- ATTRIBUTABLE, NOT MERELY DETECTED (#3414 roborev round 10) ------------------------
+# The tripwire used to snapshot the shared file around the WHOLE suite, so ANY concurrent
+# writer — a peer lane's bootstrap, an administrator, or a human at a prompt — made it FAIL
+# claiming this suite mutated the file. That is not hypothetical: the lead ran bootstrap by
+# hand mid-session and moved that file's mode and mtime; had the suite been running, its
+# tripwire would have blamed itself for someone else's shell.
+#
+# NOT weakened to a notice — a guard that cannot red cannot catch the reintroduced reach it
+# exists for. Made ATTRIBUTABLE instead: every bootstrap invocation this suite makes goes
+# through the guard below, which snapshots immediately either side of THAT invocation. A
+# change observed across a known invocation is attributable to it; a change observed across
+# 188 cases and several minutes is not.
+#
+# A SCRIPT, not a shell function, because several call sites run under `timeout`, which
+# execs a binary and cannot invoke a function. Violations are appended to a FILE rather
+# than a variable for the same reason plus one more: several invocations run inside `$( )`,
+# and a variable assigned in a subshell is discarded — the exact defect round 6 found one
+# directory over. A file survives both.
+export PIN_SHARED_VIOLATIONS="$tmp/shared-state-violations.log"
+: >"$PIN_SHARED_VIOLATIONS"
+PIN_BS="$tmp/pin-bs-guard"
+cat >"$PIN_BS" <<'PINBS'
+#!/usr/bin/env bash
+# pin-bs-guard <bootstrap-path> [args...] — run one bootstrap invocation and record any
+# change to the shared cargo config across THAT invocation. stdout/stderr and the exit
+# status pass through untouched: callers capture output and assert on rc.
+_st() {
+  [ -e "$PIN_SHARED_CARGO" ] || { printf 'absent'; return 0; }
+  printf '%s %s %s' "$(stat -c '%a' "$PIN_SHARED_CARGO" 2>/dev/null)"                     "$(stat -c '%Y' "$PIN_SHARED_CARGO" 2>/dev/null)"                     "$(md5sum "$PIN_SHARED_CARGO" 2>/dev/null | cut -d' ' -f1)"
+}
+_before=$(_st)
+bash "$@"
+_rc=$?
+_after=$(_st)
+[ "$_before" = "$_after" ] || printf 'invocation: %s
+  before: %s
+  after:  %s
+'   "$*" "$_before" "$_after" >>"$PIN_SHARED_VIOLATIONS"
+exit $_rc
+PINBS
+chmod +x "$PIN_BS"
+export PIN_SHARED_CARGO
+
 # --- 1. syntax check (bash -n) ---
 if bash -n "$BOOTSTRAP" 2>/dev/null; then
   ok "bootstrap script parses (bash -n)"
@@ -100,7 +161,7 @@ else
 fi
 
 # --- 2. --help exits 0 and prints usage ---
-help_out=$(bash "$BOOTSTRAP" --help 2>&1); help_rc=$?
+help_out=$("$PIN_BS" "$BOOTSTRAP" --help 2>&1); help_rc=$?
 if [ "$help_rc" -eq 0 ] && printf '%s' "$help_out" | grep -q "bootstrap"; then
   ok "--help exits 0 and prints usage"
 else
@@ -110,8 +171,6 @@ fi
 # --- 3. Pure-check run must NOT install. Shadow brew/cargo/roborev with a tripwire
 #        on PATH so ANY install attempt is recorded, then assert nothing ran an
 #        install subcommand. ---
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-test.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
 tripwire="$tmp/tripwire.log"
 : >"$tripwire"
 
@@ -169,16 +228,6 @@ export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
 export CARGO_HOME="$tmp/cargo-home"
 mkdir -p "$CARGO_HOME"
 
-# Baseline for the hermeticity assertion at the end of the suite. Captured as
-# mode+mtime+content so a rewrite is caught even if it happens to restore the bytes.
-PIN_SHARED_CARGO=/usr/local/cargo/config.toml
-pin_shared_cargo_state() {
-  [ -e "$PIN_SHARED_CARGO" ] || { printf 'absent'; return 0; }
-  printf '%s %s %s' "$(stat -c '%a' "$PIN_SHARED_CARGO" 2>/dev/null)" \
-                    "$(stat -c '%Y' "$PIN_SHARED_CARGO" 2>/dev/null)" \
-                    "$(md5sum "$PIN_SHARED_CARGO" 2>/dev/null | cut -d' ' -f1)"
-}
-PIN_SHARED_CARGO_BEFORE=$(pin_shared_cargo_state)
 
 # --- REAL-ORIGIN isolation for the push probe (issue #3369) ----------------
 # Section 3b now MEASURES push capability by actually pushing a throwaway
@@ -229,7 +278,7 @@ host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
 # Run with the shims FIRST on PATH, default mode (no --yes), skipping the smoke.
 run_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1); run_rc=$?
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1); run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then
   ok "default (no --yes) run exits 0"
@@ -260,7 +309,7 @@ done
 # Reset the tripwire so the no-install assertion below reflects ONLY this run.
 : >"$tripwire"
 guard_out=$(PATH="$tmp:/usr/bin:/bin" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$guard_out" | grep -Eq "install sccache:|sccache MISSING"; then
   ok "missing accelerator prints install guidance (does not auto-install)"
 else
@@ -348,7 +397,7 @@ stub_net "$stubA"
 mk_stub "$stubA" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubA" cc 'exit 0'
 outA=$(PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 cfgA="$sbA/.cargo/config.toml"
 if printf '%s' "$outA" | grep -q "Link accelerator: mold"; then
   ok "mold: Linux run emits the mold section"
@@ -376,7 +425,7 @@ fi
 #     identical to the first run.
 firstA=$(cat "$cfgA")
 PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 secondA=$(cat "$cfgA")
 if [ "$(count_begin "$cfgA")" = 1 ] && [ "$firstA" = "$secondA" ]; then
   ok "mold: re-run idempotent (exactly one block, file byte-identical)"
@@ -389,7 +438,7 @@ sbC=$(mktemp -d "$tmp/moldC.XXXXXX"); mkdir -p "$sbC/.cargo"
 cfgC="$sbC/.cargo/config.toml"
 printf '[build]\njobs = 7\n\n[net]\nretry = 9\n' >"$cfgC"
 PATH="$stubA:$PATH" HOME="$sbC" CARGO_HOME="$sbC/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -qx 'jobs = 7' "$cfgC" && grep -qx 'retry = 9' "$cfgC" \
    && grep -qx '\[build\]' "$cfgC" && grep -qx '\[net\]' "$cfgC" \
    && grep -q '^# BEGIN cqlite-mold' "$cfgC"; then
@@ -401,7 +450,7 @@ fi
 # Idempotent even with user content present.
 firstC=$(cat "$cfgC")
 PATH="$stubA:$PATH" HOME="$sbC" CARGO_HOME="$sbC/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if [ "$firstC" = "$(cat "$cfgC")" ] && [ "$(count_begin "$cfgC")" = 1 ]; then
   ok "mold: re-run with user content stays byte-identical (one block)"
 else
@@ -416,7 +465,7 @@ mk_stub "$stubD" mold 'exit 0'
 mk_stub "$stubD" cc 'exit 1'
 mk_stub "$stubD" clang 'exit 1'
 outD=$(PATH="$stubD:$PATH" HOME="$sbD" CARGO_HOME="$sbD/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outD" | grep -q "link probe FAILED" \
    && [ ! -f "$sbD/.cargo/config.toml" ]; then
   ok "mold: failed link probe warns and writes no linker config"
@@ -433,7 +482,7 @@ mk_stub "$stubE" mold 'exit 0'
 mk_stub "$stubE" cc 'exit 1'
 mk_stub "$stubE" clang 'exit 0'
 PATH="$stubE:$PATH" HOME="$sbE" CARGO_HOME="$sbE/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 cfgE="$sbE/.cargo/config.toml"
 if [ -f "$cfgE" ] && [ "$(grep -c '^linker = "clang"' "$cfgE")" = 2 ]; then
   ok "mold: clang-only probe writes linker = \"clang\" for both triples"
@@ -449,7 +498,7 @@ stub_net "$stubF"
 mk_stub "$stubF" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubF" cc 'exit 0'
 outF=$(PATH="$stubF:$PATH" HOME="$sbF" CARGO_HOME="$sbF/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if ! printf '%s' "$outF" | grep -q "Link accelerator: mold" \
    && [ ! -f "$sbF/.cargo/config.toml" ]; then
   ok "mold: Darwin performs no mold detection/config (no-op)"
@@ -466,7 +515,7 @@ mk_hermetic_bin "$stubG"
 tripG="$stubG/tripwire.log"; : >"$tripG"
 mk_stub "$stubG" apt-get "echo \"apt-get \$*\" >>\"$tripG\"; exit 0"
 outG=$(PATH="$stubG" HOME="$sbG" CARGO_HOME="$sbG/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outG" | grep -q "mold MISSING" \
    && printf '%s' "$outG" | grep -q "install mold:.*apt-get install -y mold" \
    && [ ! -s "$tripG" ] \
@@ -482,7 +531,7 @@ fi
 sbH=$(mktemp -d "$tmp/moldH.XXXXXX"); stubH="$tmp/stubH"
 mk_hermetic_bin "$stubH"
 outH=$(PATH="$stubH" HOME="$sbH" CARGO_HOME="$sbH/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outH" | grep -q "no supported package manager" \
    && [ ! -f "$sbH/.cargo/config.toml" ]; then
   ok "mold: missing + no package manager warns and writes no config"
@@ -497,7 +546,7 @@ fi
 sbJ=$(mktemp -d "$tmp/moldJ.XXXXXX"); mkdir -p "$sbJ/.cargo"
 printf '[net]\nretry = 4\n' >"$sbJ/.cargo/config"
 PATH="$stubA:$PATH" HOME="$sbJ" CARGO_HOME="$sbJ/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbJ/.cargo/config" \
    && grep -qx 'retry = 4' "$sbJ/.cargo/config" \
    && [ ! -f "$sbJ/.cargo/config.toml" ]; then
@@ -516,7 +565,7 @@ cfgK="$sbK/.cargo/config.toml"
 printf '[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgK"
 beforeK=$(cat "$cfgK")
 outK=$(PATH="$stubA:$PATH" HOME="$sbK" CARGO_HOME="$sbK/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outK" | grep -q "existing \[target" \
    && [ "$beforeK" = "$(cat "$cfgK")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgK"; then
@@ -533,7 +582,7 @@ printf '[net]\nretry = 1\n' >"$sbL/.cargo/config"
 printf '[net]\nretry = 2\n' >"$sbL/.cargo/config.toml"
 tomlL_before=$(cat "$sbL/.cargo/config.toml")
 PATH="$stubA:$PATH" HOME="$sbL" CARGO_HOME="$sbL/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config" \
    && ! grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config.toml" \
    && [ "$tomlL_before" = "$(cat "$sbL/.cargo/config.toml")" ]; then
@@ -550,7 +599,7 @@ cfgM="$sbM/.cargo/config.toml"
 printf '[build]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgM"
 beforeM=$(cat "$cfgM")
 outM=$(PATH="$stubA:$PATH" HOME="$sbM" CARGO_HOME="$sbM/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outM" | grep -q "existing \[build\] rustflags" \
    && [ "$beforeM" = "$(cat "$cfgM")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgM"; then
@@ -575,7 +624,7 @@ mk_stub "$stubN" sudo 'exec "$@"'   # passthrough so `sudo apt-get …` runs the
 apt_body='installed=0; for a in "$@"; do [ "$a" = mold ] && installed=1; done; if [ "$installed" = 1 ]; then printf "#!/usr/bin/env bash\n[ \"\$1\" = --version ] && echo \"mold 2.4.0\"\nexit 0\n" > "'"$stubN/mold"'"; chmod +x "'"$stubN/mold"'"; fi; exit 0'
 mk_stub "$stubN" apt-get "$apt_body"
 PATH="$stubN" HOME="$sbN" CARGO_HOME="$sbN/.cargo" \
-  bash "$nrepo/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
+  "$PIN_BS" "$nrepo/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbN/.cargo/config.toml" 2>/dev/null; then
   ok "mold: --yes installs mold then wires the managed block in the same run"
 else
@@ -594,7 +643,7 @@ printf '[registries.example]\nindex = "sparse+https://example.invalid/"\n' >"$re
 repo_before=$(cat "$repo_cfg")
 sbI=$(mktemp -d "$tmp/moldI.XXXXXX"); mkdir -p "$sbI/.cargo"
 PATH="$stubA:$PATH" HOME="$sbI" CARGO_HOME="$sbI/.cargo" \
-  bash "$fakerepo/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1
+  "$PIN_BS" "$fakerepo/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1
 if [ "$repo_before" = "$(cat "$repo_cfg")" ] \
    && grep -q '^# BEGIN cqlite-mold' "$sbI/.cargo/config.toml"; then
   ok "mold: repo-committed .cargo/config.toml untouched; block written to per-machine CARGO_HOME"
@@ -644,7 +693,7 @@ mk_hermetic_bin "$stub7a"
 repo7a="$tmp/repo7a"; mk_fake_repo "$repo7a" "https://github.com/pmcfadin/cqlite.git"
 gc7a="$sb7a/gitconfig"   # deliberately absent
 out7a=$(PATH="$stub7a" HOME="$sb7a" CARGO_HOME="$sb7a/.cargo" GIT_CONFIG_GLOBAL="$gc7a" \
-  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7a/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7a/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7a" | grep -q "git push credentials"; then
   ok "cred: bootstrap emits the git-credential section"
 else
@@ -681,7 +730,7 @@ exit 0"   # setup-git succeeds but wires nothing; `auth token` answers as real g
 repo7b="$tmp/repo7b"; mk_fake_repo "$repo7b" "https://github.com/pmcfadin/cqlite.git"
 gc7b="$sb7b/gitconfig"
 out7b=$(PATH="$stub7b" HOME="$sb7b" CARGO_HOME="$sb7b/.cargo" GIT_CONFIG_GLOBAL="$gc7b" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo7b/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+  GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7b/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 if grep -q "auth setup-git" "$gh7b_log"; then
   ok "cred: --yes prefers 'gh auth setup-git' first"
 else
@@ -730,7 +779,7 @@ exit 0'
 repo7c="$tmp/repo7c"; mk_fake_repo "$repo7c" "https://github.com/pmcfadin/cqlite.git"
 gc7c="$sb7c/gitconfig"
 out7c=$(PATH="$stub7c" HOME="$sb7c" CARGO_HOME="$sb7c/.cargo" GIT_CONFIG_GLOBAL="$gc7c" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo7c/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+  GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7c/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 if [ -f "$gc7c" ] && grep -q 'gh-stub' "$gc7c" && ! grep -q 'x-access-token' "$gc7c" \
    && printf '%s' "$out7c" | grep -q "gh auth setup-git"; then
   ok "cred: a working 'gh auth setup-git' is preferred; no \$GH_TOKEN fallback added"
@@ -746,7 +795,7 @@ mk_hermetic_bin "$stub7d"
 repo7d="$tmp/repo7d"; mk_fake_repo "$repo7d" "git@github.com:pmcfadin/cqlite.git"
 gc7d="$sb7d/gitconfig"
 out7d=$(PATH="$stub7d" HOME="$sb7d" CARGO_HOME="$sb7d/.cargo" GIT_CONFIG_GLOBAL="$gc7d" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo7d/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+  GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7d/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 if printf '%s' "$out7d" | grep -qi "SSH" \
    && ! { [ -f "$gc7d" ] && grep -q 'x-access-token' "$gc7d"; }; then
   ok "cred: SSH origin reported as its own credential path; no helper written"
@@ -789,7 +838,7 @@ if ! grep -q 'x-access-token' "$gc7g" 2>/dev/null; then
   bad "cred: 7g precondition FAILED — no helper installed, the warn below would be vacuous"
 fi
 out7g=$(PATH="$stub7g" HOME="$sb7g" CARGO_HOME="$sb7g/.cargo" GIT_CONFIG_GLOBAL="$gc7g" \
-  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7g/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7g/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7g" | grep -q "\[warn\].*git push has NO credentials" \
    && ! printf '%s' "$out7g" | grep -Eq '\[ok\].*git push credentials resolve'; then
   ok "cred: helper present but GH_TOKEN unset -> WARN (a declining helper is not a credential)"
@@ -819,7 +868,7 @@ else
   bad "cred: (precondition) expected git to accept an empty password line"
 fi
 out7ge=$(PATH="$stub7ge" HOME="$sb7ge" CARGO_HOME="$sb7ge/.cargo" GIT_CONFIG_GLOBAL="$gc7ge" \
-  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7ge/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  GH_TOKEN="" GITHUB_TOKEN="" "$PIN_BS" "$repo7ge/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7ge" | grep -q "\[warn\].*git push has NO credentials" \
    && ! printf '%s' "$out7ge" | grep -Eq '\[ok\].*git push credentials resolve'; then
   ok "cred: a helper answering with an EMPTY password is not accepted as a credential"
@@ -886,7 +935,7 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
   git config --file "$gc7h" --add 'credential.https://github.com.helper' '!f(){ sleep 120; };f'
   rc7h=0
   "$TIMEOUT_BIN_TEST" 60 env PATH="$stub7h" HOME="$sb7h" CARGO_HOME="$sb7h/.cargo" GIT_CONFIG_GLOBAL="$gc7h" \
-    GH_TOKEN="" bash "$repo7h/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7h=$?
+    GH_TOKEN="" "$PIN_BS" "$repo7h/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7h=$?
   if [ "$rc7h" -ne 124 ]; then
     ok "cred: a hanging credential helper is bounded — bootstrap still completes (rc=$rc7h)"
   else
@@ -906,7 +955,7 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
   rc7hm=0
   "$TIMEOUT_BIN_TEST" 60 env PATH="$stub7hm" HOME="$sb7hm" CARGO_HOME="$sb7hm/.cargo" \
     GIT_CONFIG_GLOBAL="$gc7hm" GH_TOKEN="" \
-    bash "$repo7hm/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7hm=$?
+    "$PIN_BS" "$repo7hm/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7hm=$?
   if [ "$rc7hm" -ne 124 ]; then
     ok "cred: the hang bound also applies on a gtimeout-only (macOS-shaped) host (rc=$rc7hm)"
   else
@@ -927,10 +976,10 @@ repo7e="$tmp/repo7e"; mk_fake_repo "$repo7e" "https://github.com/pmcfadin/cqlite
 gc7e="$sb7e/gitconfig"
 for _ in 1 2; do
   PATH="$stub7e" HOME="$sb7e" CARGO_HOME="$sb7e/.cargo" GIT_CONFIG_GLOBAL="$gc7e" \
-    GH_TOKEN="$FAKE_TOKEN" bash "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
+    GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
 done
 out7e=$(PATH="$stub7e" HOME="$sb7e" CARGO_HOME="$sb7e/.cargo" GIT_CONFIG_GLOBAL="$gc7e" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+  GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 helper_count=$(grep -c 'x-access-token' "$gc7e" 2>/dev/null); helper_count="${helper_count:-0}"
 if [ "$helper_count" = 1 ]; then
   ok "cred: repeated --yes runs keep exactly one credential helper (idempotent)"
@@ -957,7 +1006,7 @@ repo7i="$tmp/repo7i"; mk_fake_repo "$repo7i" "https://github.com/pmcfadin/cqlite
 git -C "$repo7i" config --local --add 'credential.https://github.com.helper' \
   '!f(){ test "$1" = get || exit 0; echo username=x; echo password=local-only-secret; };f'
 out7i=$(PATH="$stub7i" HOME="$sb7i" CARGO_HOME="$sb7i/.cargo" GIT_CONFIG_GLOBAL="$sb7i/gitconfig" \
-  GH_TOKEN="" bash "$repo7i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  GH_TOKEN="" "$PIN_BS" "$repo7i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7i" | grep -q 'REPO-LOCAL scope only'; then
   ok "cred: repo-local-scope note fires for a HOST-SCOPED local helper"
 else
@@ -1104,7 +1153,7 @@ run_push() {
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
-    bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
+    "$PIN_BS" "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
 }
 # ANSI colour is stripped with a printf-built ESC, not a `\x1b` escape: BSD sed (the
 # fleet's macOS hosts) does not understand \x1b and would silently match nothing.
@@ -1509,7 +1558,7 @@ if [ -n "$TIMEOUT_KILL_TEST" ]; then
     CARGO_HOME="$repo7pm/.home/.cargo" GIT_CONFIG_GLOBAL="$gc7pm" GIT_CONFIG_NOSYSTEM=1 \
     CLAIM_MACHINE=push-probe-test CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
-    bash "$repo7pm/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1) || hang_rc=$?
+    "$PIN_BS" "$repo7pm/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1) || hang_rc=$?
   hang_elapsed=$(( $(date +%s) - hang_start ))
   # rc 124 OR 137 both mean the OUTER ceiling fired (137 = the watchdog had to SIGKILL
   # bootstrap itself), i.e. the inner bound failed to bound. Either is a failure here.
@@ -1896,7 +1945,7 @@ fi
 #   git push probe vs the gate fmt run) and the name similarity is a live hazard, so
 #   both must be documented and each must skip only its own thing. 7p-a ran with
 #   --skip-smoke ALONE and still probed; 7p-d ran with BOTH and skipped only the probe.
-push_help=$(bash "$BOOTSTRAP" --help 2>&1)
+push_help=$("$PIN_BS" "$BOOTSTRAP" --help 2>&1)
 if printf '%s' "$push_help" | grep -q -- '--skip-push-probe' \
    && printf '%s' "$push_help" | grep -q -- '--skip-smoke' \
    && printf '%s' "$push_help" | grep -q -- '--fix-credentials' \
@@ -2012,7 +2061,7 @@ run_board_case() {
   repo="$tmp/repo-board-$name"; mk_fake_repo "$repo" "https://github.com/pmcfadin/cqlite.git"
   BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
     CQLITE_PROJECT_ACCOUNT=tester CQLITE_PROJECT_NUMBER=1 \
-    GH_TOKEN="" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    GH_TOKEN="" "$PIN_BS" "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 }
 
 # run_board_auth_case <name> <auth-status-body> [env...] -> BOARD_OUT/BOARD_LOG
@@ -2043,7 +2092,7 @@ EOF
   # override would silently do nothing and the case would assert against the default.
   BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
     CQLITE_PROJECT_NUMBER=1 \
-    GH_TOKEN="" env "$@" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    GH_TOKEN="" env "$@" "$PIN_BS" "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 }
 
 # 8a. THE false-OK case: `project` scope present, `read:org` missing, `gh project`
@@ -2225,7 +2274,7 @@ log8i="$tmp/gh8i.log"; : >"$log8i"; state8i="$tmp/gh8i.state"
 mk_switch_gh "$stub8i" "$log8i" "$state8i" other-emu pmcfadin   # EMU active at start
 repo8i="$tmp/repo8i"; mk_fake_repo "$repo8i" "https://github.com/pmcfadin/cqlite.git"
 out8i=$(PATH="$stub8i" HOME="$sb8i" CARGO_HOME="$sb8i/.cargo" GIT_CONFIG_GLOBAL="$sb8i/gitconfig" \
-  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="" bash "$repo8i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="" "$PIN_BS" "$repo8i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if grep -q -- 'auth switch --user pmcfadin' "$log8i"; then
   ok "board: switches to CQLITE_PROJECT_ACCOUNT before probing (mirrors flow-board)"
 else
@@ -2252,7 +2301,7 @@ log8j="$tmp/gh8j.log"; : >"$log8j"; state8j="$tmp/gh8j.state"
 mk_switch_gh "$stub8j" "$log8j" "$state8j" other-emu pmcfadin
 repo8j="$tmp/repo8j"; mk_fake_repo "$repo8j" "https://github.com/pmcfadin/cqlite.git"
 out8j=$(PATH="$stub8j" HOME="$sb8j" CARGO_HOME="$sb8j/.cargo" GIT_CONFIG_GLOBAL="$sb8j/gitconfig" \
-  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="$FAKE_TOKEN" bash "$repo8j/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="$FAKE_TOKEN" "$PIN_BS" "$repo8j/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if ! grep -q -- 'auth switch' "$log8j" && [ "$(cat "$state8j")" = other-emu ]; then
   ok "board: an env token suppresses the switch entirely (no pointless host mutation)"
 else
@@ -2289,7 +2338,7 @@ EOF
 chmod +x "$stub8k/gh"
 repo8k="$tmp/repo8k"; mk_fake_repo "$repo8k" "https://github.com/pmcfadin/cqlite.git"
 out8k=$(PATH="$stub8k" HOME="$sb8k" CARGO_HOME="$sb8k/.cargo" GIT_CONFIG_GLOBAL="$sb8k/gitconfig" \
-  CQLITE_PROJECT_ACCOUNT=tester GH_TOKEN="" bash "$repo8k/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  CQLITE_PROJECT_ACCOUNT=tester GH_TOKEN="" "$PIN_BS" "$repo8k/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out8k" | grep -Eq '\[ok\].*board #.*reachable'; then
   bad "board: unexported CQLITE_PROJECT_NUMBER still produced a green 'reachable' verdict"
 elif printf '%s' "$out8k" | grep -q 'CQLITE_PROJECT_NUMBER is NOT exported'; then
@@ -2384,7 +2433,7 @@ fi
 # reported value must name the HOST only.
 redact_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
   CODEX_NOTIFY_WEBHOOK='https://alice:s3cr3t-token@ntfy.example.com/private-topic' \
-  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
+  "$PIN_BS" "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$redact_out" | grep -q 'notify target configured' \
    && ! printf '%s' "$redact_out" | grep -qE 's3cr3t-token|alice:'; then
   ok "notify: URL userinfo is redacted from the reported target"
@@ -2435,7 +2484,7 @@ MUT
 runnotifyroot() { # runnotifyroot <dir> [env assignments...]
   local dir="$1"; shift
   env PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" "$@" \
-    timeout -s KILL 300 bash "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
+    timeout -s KILL 300 "$PIN_BS" "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
 }
 
 # (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
@@ -2566,7 +2615,7 @@ runpin() {
     PATH="$shims" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envfile" \
     ${pin_env[@]+"${pin_env[@]}"} \
-    timeout -s KILL 300 bash "$root/scripts/bootstrap-agent-machine.sh" \
+    timeout -s KILL 300 "$PIN_BS" "$root/scripts/bootstrap-agent-machine.sh" \
       --skip-smoke ${pin_flags[@]+"${pin_flags[@]}"} 2>&1
 }
 
@@ -2641,9 +2690,9 @@ else
   out_d=$(runpin "$pinroot" "$shims_pw" "$envf_d" HOME="$pin_home_plain" \
     CQLITE_GATE_MAX_CONCURRENCY=7)
   if printf '%s' "$out_d" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
-     && printf '%s' "$out_d" | grep -q 'sudo needs a password' \
+     && printf '%s' "$out_d" | grep -q 'will not open a session as' \
      && ! printf '%s' "$out_d" | grep -qE '\[ok\].*gate-pin'; then
-    ok "gate-pin: passwordless sudo unavailable => UNMEASURED as a [warn], with its own cause"
+    ok "gate-pin: a sudo that cannot open a self-session => UNMEASURED as a [warn], with its own cause"
   else
     bad "gate-pin: a password-requiring sudo did not report UNMEASURED-as-a-warn"
     printf '%s\n' "$out_d" | grep -i 'gate-pin' | head -3
@@ -2732,7 +2781,7 @@ else
   envf_j="$tmp/pin-env-j"; : >"$envf_j"
   out_j=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_j" \
-    timeout -s KILL 300 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
       --skip-smoke --skip-gate-pin 2>&1)
   if printf '%s' "$out_j" | grep -qE '\[warn\].*gate-pin: OPT-OUT' \
      && ! printf '%s' "$out_j" | grep -qE '\[ok\].*gate-pin'; then
@@ -2921,7 +2970,7 @@ else
     # shellcheck disable=SC2086
     pin_t_out=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
       CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$tmp/pin-env-t" \
-      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke $pin_order 2>&1)
     pin_t_rc=$?
     if [ "$pin_t_rc" -eq 2 ] && printf '%s' "$pin_t_out" | grep -q 'contradictory'; then
@@ -3295,7 +3344,7 @@ else
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     out_ak=$(sudo -n env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_seam_probe" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
     if printf '%s' "$out_ak" | grep -q 'gate-pin: SKIPPED' \
        && printf '%s' "$out_ak" | grep -q 'PRIVILEGED write' \
@@ -3329,7 +3378,7 @@ else
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     out_am=$(sudo -n env SUDO_USER=cqlite-no-such-account-3414 \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_am" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
        && printf '%s' "$out_am" | grep -qE 'does not resolve to an account|INCONSISTENT sudo metadata' \
@@ -3341,7 +3390,7 @@ else
     fi
     out_an=$(sudo -n env SUDO_USER="$(id -un)" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_an" | grep -q "the account that invoked sudo"; then
       ok "gate-pin: a resolvable sudo invoker becomes the probe subject, and the run says so"
@@ -3369,7 +3418,7 @@ else
     out_at=$(sudo -n env PATH="$pin_liar:$PATH" \
       CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_liar_target" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
     if printf '%s' "$out_at" | grep -q 'gate-pin: SKIPPED' && [ ! -e "$pin_liar_target" ]; then
       ok "gate-pin: a lying 'id' on PATH cannot make a ROOT run look unprivileged (the decision reads \$EUID)"
@@ -3386,7 +3435,7 @@ else
     #      wrong-subject defect the retarget exists to fix, wearing the retarget's clothes.
     out_au=$(sudo -n env SUDO_UID=1000 SUDO_USER=root \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_au" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
        && printf '%s' "$out_au" | grep -q 'INCONSISTENT sudo metadata' \
@@ -3400,7 +3449,7 @@ else
     # 11av. ...and root invoking sudo (SUDO_UID=0) tells us nothing about a gate's account.
     out_av=$(sudo -n env SUDO_UID=0 SUDO_USER=root \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
-      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
     if printf '%s' "$out_av" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
        && printf '%s' "$out_av" | grep -q 'sudo was invoked BY root'; then
@@ -3446,10 +3495,10 @@ else
   out_k=$(env -u CQLITE_BOOTSTRAP_TEST_MODE \
     PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_ENV_FILE="$envf_k" \
-    timeout -s KILL 300 bash "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
   out_k2=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="relative/env" \
-    timeout -s KILL 300 bash "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    timeout -s KILL 300 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
   if printf '%s' "$out_k" | grep -q 'gate-pin: SKIPPED' \
      && printf '%s' "$out_k2" | grep -q 'gate-pin: SKIPPED' \
      && ! printf '%s' "$out_k" | grep -qE '\[ok\].*gate-pin'; then
@@ -3507,12 +3556,21 @@ fi
 # reintroduce (a new case that sets HOME and forgets CARGO_HOME, or a `sudo` invocation
 # where the exported value is dropped by env_reset) and the cost lands on OTHER lanes as
 # unexplained red gates, which is the worst possible place for it to surface.
+# ATTRIBUTED, not inferred: this reports only changes observed across one of THIS suite's
+# own bootstrap invocations. A concurrent external writer no longer reds it, and a
+# reintroduced reach still does — with the offending invocation named.
 pin_shared_cargo_after=$(pin_shared_cargo_state)
-if [ "$pin_shared_cargo_after" = "$PIN_SHARED_CARGO_BEFORE" ]; then
-  ok "host hygiene: $PIN_SHARED_CARGO is untouched by this suite (mode+mtime+content unchanged)"
+if [ ! -s "$PIN_SHARED_VIOLATIONS" ]; then
+  ok "host hygiene: no bootstrap invocation in this suite touched $PIN_SHARED_CARGO"
+  if [ "$pin_shared_cargo_after" != "$PIN_SHARED_CARGO_BEFORE" ]; then
+    # Deliberately an `info`, not a `bad`: the file moved while the suite ran but NOT
+    # across any invocation of ours, so it was someone else — a peer lane, an admin, a
+    # human at a prompt. Reporting it is useful; blaming ourselves for it is the defect.
+    info "note: $PIN_SHARED_CARGO changed during this run but NOT across any of our invocations — another writer on this box (before: $PIN_SHARED_CARGO_BEFORE / after: $pin_shared_cargo_after)"
+  fi
 else
-  bad "host hygiene: this suite MUTATED the shared $PIN_SHARED_CARGO — it breaks cargo for every other user on the box"
-  printf '  before: %s\n  after:  %s\n' "$PIN_SHARED_CARGO_BEFORE" "$pin_shared_cargo_after"
+  bad "host hygiene: a bootstrap invocation in THIS suite mutated the shared $PIN_SHARED_CARGO — it breaks cargo for every other user on the box"
+  cat "$PIN_SHARED_VIOLATIONS"
 fi
 
 # --- 15. THE THREE GREEN-PATH CASES MUST HAVE RUN, BY NAME (#3414 roborev round 7) -----
