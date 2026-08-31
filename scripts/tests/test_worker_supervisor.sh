@@ -7633,8 +7633,12 @@ test_lane_lock_uncreatable_path_is_not_reported_as_contention() {
   fi
   out="$(lane_lock_drive_at "$d" - "$ro" "$lane")"; rc=$?
   chmod 0755 "$ro" 2>/dev/null || true
-  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"could NOT BE CREATED"* ]] \
-     && [[ "$out" == *"NOT contention"* ]] && [[ "$out" != *"reclaiming stale lock"* ]] \
+  # B21 removed the confident "NOT contention": a post-failure existence test cannot establish the cause.
+  # What must survive is the OBSERVATION (nothing is at that name) and the operator's first check (the
+  # parent), which is the half of #3601's AC7 fix that has operator value.
+  if [[ "$rc" -ne 0 ]] && [[ "$out" == *"NOTHING is at that name now"* ]] \
+     && [[ "$out" == *"check the PARENT directory"* ]] && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+     && [[ "$out" != *"reclaiming stale lock"* ]] \
      && [[ "$out" != *"already running"* ]]; then
     pass "lane-lock (uncreatable path): a lock that cannot be created is reported as a PATH problem and explicitly not as contention — no invented stale lock, no invented holder"
   else
@@ -9091,11 +9095,11 @@ test_lane_lock_race_and_io_error_are_not_conflated() {
   export SV_SECOND_TAKE=1
   mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
-    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"could NOT BE CREATED"* ]] \
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"NOTHING is at that name now"* ]] \
        && [[ "$out" == *"after a stale lock was successfully cleared"* ]] \
-       && [[ "$out" == *"Re-running WITHOUT changing any of that will fail exactly the same way"* ]] \
+       && [[ "$out" == *"ORDER TO TELL THEM APART"* ]] \
        && [[ "$out" != *"taken again before this run could claim it"* ]]; then
-      pass "lane-lock B20: a post-reclaim claim that fails with NOTHING at the name is reported as a PATH failure, says the phase it happened in, and warns that re-running changes nothing — not as a lost race"
+      pass "lane-lock B20/B21: a post-reclaim claim that fails with NOTHING at the name reports that observation and the phase it happened in, and hands the operator both candidate causes in order — never the lost-race story"
     else
       fail "lane-lock-b20-conflated: rc=$rc out=[$out] — reporting a filesystem failure as a lost race sends the operator into a retry loop over a state that cannot resolve"
     fi
@@ -9115,7 +9119,7 @@ test_lane_lock_race_and_io_error_are_not_conflated() {
   mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
     if [[ "$rc" -ne 0 ]] && [[ "$out" == *"taken again before this run could claim it"* ]] \
-       && [[ "$out" != *"could NOT BE CREATED"* ]]; then
+       && [[ "$out" != *"NOTHING is at that name now"* ]]; then
       pass "lane-lock B20 NON-VACUITY: when the name IS occupied the same failure is still reported as a lost race — the existence test discriminates, it does not just relabel everything as a path failure"
     else
       fail "lane-lock-b20-nonvacuity: rc=$rc out=[$out] — a genuine race must still read as a race"
@@ -9132,11 +9136,13 @@ test_lane_lock_race_and_io_error_are_not_conflated() {
        '  rm -rf -- "$SUPERVISOR_LOCK"
   if true; then'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
-    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"ALREADY GONE"* ]] \
-       && [[ "$out" == *"This is CONTENTION, not a filesystem fault"* ]] \
-       && [[ "$out" == *"nothing needs fixing"* ]] \
-       && [[ "$out" != *"This is a FILESYSTEM failure"* ]]; then
-      pass "lane-lock sweep (publish rename): a rename that fails because the directory vanished is reported as CONTENTION with 're-run' as the action — not as a disk problem the operator would go looking for"
+    # B21: the vanished directory is an OBSERVATION and may be reported; the CAUSE may not be claimed from
+    # it, because a peer can remove or recreate that name between the failure and the check either way.
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"was GONE when this run looked"* ]] \
+       && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+       && [[ "$out" == *"ORDER TO TELL THEM APART"* ]] \
+       && [[ "$out" != *"This is CONTENTION"* ]] && [[ "$out" != *"This is a FILESYSTEM failure"* ]]; then
+      pass "lane-lock sweep/B21 (publish rename): the vanished directory is reported as what was OBSERVED, the cause is explicitly not established, and the operator gets both candidates in order"
     else
       fail "lane-lock-sweep-rename: rc=$rc out=[$out]"
     fi
@@ -9150,11 +9156,11 @@ test_lane_lock_race_and_io_error_are_not_conflated() {
        '  if { : >"$marker"; } 2>/dev/null; then marker_written=1; fi' \
        '  rm -rf -- "$SUPERVISOR_LOCK" 2>/dev/null || true'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
-    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"ALREADY GONE"* ]] \
-       && [[ "$out" == *"This is CONTENTION, not a filesystem fault"* ]] \
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"was GONE when this run looked"* ]] \
+       && [[ "$out" == *"NOT ESTABLISHED"* ]] \
        && [[ "$out" == *"already gone when it looked"* ]] \
-       && [[ "$out" != *"This is a FILESYSTEM failure"* ]]; then
-      pass "lane-lock sweep (marker write): a marker write that fails because the directory vanished is CONTENTION, and the refusal also states that nothing was left behind — because nothing was there to remove"
+       && [[ "$out" != *"This is CONTENTION"* ]] && [[ "$out" != *"This is a FILESYSTEM failure"* ]]; then
+      pass "lane-lock sweep/B21 (marker write): same at the marker step — the observation is reported, the cause is not claimed, and it still states that nothing was left behind because nothing was there to remove"
     else
       fail "lane-lock-sweep-marker: rc=$rc out=[$out]"
     fi
@@ -9168,10 +9174,18 @@ test_lane_lock_race_and_io_error_are_not_conflated() {
        '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
        '  if true; then'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || true
-    if [[ "$out" == *"This is a FILESYSTEM failure"* ]] \
-       && [[ "$out" == *"check free space and mount options"* ]] \
-       && [[ "$out" != *"This is CONTENTION"* ]]; then
-      pass "lane-lock sweep NON-VACUITY: a genuine filesystem failure still reports as one and still sends the operator to df/mount — the nature discriminates both ways"
+    # B21 RETIRED THIS CONTROL'S ORIGINAL PROPERTY, AND THE REPLACEMENT IS THE ONE THAT IS TRUE. It used
+    # to require a genuine filesystem failure to be REPORTED as one — but this code cannot know that it
+    # was one (no errno, and the path's later state cannot decide it), so requiring the confident verdict
+    # was requiring a claim beyond the evidence: a test pinning an overclaim, the shape that kept this
+    # family alive. What must hold instead: the step that failed is named, both candidate causes are
+    # given with the order to check them, and NEITHER is asserted.
+    if [[ "$out" == *"no byte of it was written"* ]] \
+       && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+       && [[ "$out" == *"check the PARENT directory"* ]] \
+       && [[ "$out" == *"CONTENTION: if all of those are clean"* ]] \
+       && [[ "$out" != *"This is a FILESYSTEM failure"* ]] && [[ "$out" != *"This is CONTENTION,"* ]]; then
+      pass "lane-lock B21: a failed write names the STEP that failed, states the cause is not established, and gives both candidates in order — the confident verdict is gone in BOTH directions, not swapped for the other one"
     else
       fail "lane-lock-sweep-nonvacuity: out=[$out]"
     fi
@@ -9200,6 +9214,112 @@ test_lane_lock_race_and_io_error_are_not_conflated() {
 }
 
 t test_lane_lock_race_and_io_error_are_not_conflated
+
+
+
+
+# ---------------------------------------------------------------------------
+# A FAILURE'S CAUSE IS NOT INFERRED FROM THE PATH'S LATER STATE (#3601, roborev job 245 B21).
+#
+# THE TWO DIRECTIONS, INTRODUCED TWO ROUNDS APART, BOTH FROM THE SAME PREDICATE:
+#   * job 244 (B20): `mkdir` fails with EEXIST, the name is present, and the code called it a PATH failure
+#     — contention reported as a disk problem, retry-able state reported as needing repair.
+#   * job 245 (B21): contender A moves the old lock aside; B's operation fails while the name is ABSENT;
+#     A republishes before B reaches the check. B reports a FILESYSTEM fault and sends an operator to
+#     repair permissions on a box that is fine — a disk problem reported where there was contention.
+#
+# A post-failure existence test cannot decide this in either direction, because a peer can remove or
+# recreate that name between the failure and the check. The failing call's errno is the only thing that
+# could, and this script cannot see it; recovering it from `mv`/`mkdir` stderr is locale-dependent guessing
+# dressed as a verdict (the cargo-output-parse class, CLAUDE.md #3400). So the ambiguity is PRESERVED —
+# and made actionable, because "retry versus fix the box" was the sweep's whole value and a shrug would
+# throw it away: the text names both candidates with what to check for each, in order.
+#
+# THE INTERLEAVING IS STAGED FOR REAL — the operation fails while the name is absent and the name is then
+# recreated with a foreign holder record before the code looks, which is exactly A republishing.
+# ---------------------------------------------------------------------------
+test_lane_lock_failure_cause_is_not_inferred_from_later_state() {
+  local d tmp lane lock out rc ovr
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601cause$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # ---- (1) THE B21 INTERLEAVING: disappearance, then reappearance, before the check.
+  rm -rf "$lock"
+  ovr="$d/f-gone-then-back.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! mv -f -- "$tmpf" "$SUPERVISOR_LOCK/pid" 2>/dev/null; then' \
+       '  rm -rf -- "$SUPERVISOR_LOCK"
+  mkdir -p -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+  printf "%s\n" 424242 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true
+  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"NOT ESTABLISHED"* ]] \
+       && [[ "$out" != *"This is a FILESYSTEM failure"* ]] \
+       && [[ "$out" != *"This is CONTENTION,"* ]]; then
+      pass "lane-lock B21: when the name vanishes and REAPPEARS before the check, the refusal asserts NEITHER cause — the interleaving that made the post-failure existence test report a disk fault over pure contention"
+    else
+      fail "lane-lock-b21-infers-cause: rc=$rc out=[$out] — a cause inferred from the path's later state is wrong in this interleaving whichever way it lands"
+    fi
+    # ...and it is still ACTIONABLE, which is the constraint that makes ambiguity acceptable here.
+    if [[ "$out" == *"ORDER TO TELL THEM APART"* ]] \
+       && [[ "$out" == *"A FILESYSTEM FAULT: check the PARENT directory"* ]] \
+       && [[ "$out" == *"CONTENTION: if all of those are clean"* ]]; then
+      pass "lane-lock B21: and the ambiguity is ACTIONABLE — both candidates are named, each with what to check, in the order to check them; an honest 'one of these two, here is how to tell' rather than a shrug"
+    else
+      fail "lane-lock-b21-unactionable: out=[$out] — going ambiguous without telling the operator how to discriminate gives up the sweep's whole value"
+    fi
+  fi
+
+  # ---- (2) THE PATH IS STILL NAMED FIRST, so #3601's own AC7 value survives the ambiguity: an operator
+  # facing an option-shaped or unwritable TMPDIR is still pointed at the parent before anything else.
+  local ro
+  ro="$d/ro-parent"
+  mkdir -p "$ro"
+  chmod 0555 "$ro" 2>/dev/null || true
+  if ( : >"$ro/.probe" ) 2>/dev/null; then
+    rm -f "$ro/.probe" 2>/dev/null || true
+    chmod 0755 "$ro" 2>/dev/null || true
+    skip "lane-lock B21 (2): this uid can write a 0555 directory (running as root), so an uncreatable lock path is not stageable here"
+  else
+    out="$(lane_lock_drive_at "$d" - "$ro" "$lane")"; rc=$?
+    chmod 0755 "$ro" 2>/dev/null || true
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"NOTHING is at that name now"* ]] \
+       && [[ "$out" == *"A FILESYSTEM FAULT: check the PARENT directory"* ]] \
+       && [[ "$out" == *"TMPDIR"* ]]; then
+      pass "lane-lock B21: the uncreatable-path refusal still reports what it OBSERVED and still puts the parent directory and TMPDIR first — the useful half of AC7's fix survives dropping the confident verdict"
+    else
+      fail "lane-lock-b21-lost-ac7-value: rc=$rc out=[$out] — dropping the false claim must not drop the operator's first check"
+    fi
+  fi
+
+  # ---- (3) STRUCTURAL: no site may reintroduce a confident cause. The two emitters are the ONLY place a
+  # cause is described, so a new failure branch cannot quietly assert one — which is how B20 and B21 each
+  # arrived, one branch at a time.
+  local confident
+  confident="$(grep -nE "This is a FILESYSTEM failure|This is CONTENTION|not contention|nature='(filesystem|contention)'" "$SUPERVISOR" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  if [[ -z "$confident" ]]; then
+    pass "lane-lock B21 STRUCTURAL: no code line in the supervisor asserts a failure's cause as contention or filesystem — every site routes through the shared ambiguity emitters, so a new branch cannot claim one by accident"
+  else
+    fail "lane-lock-b21-confident-nature-returned: [$confident] — a cause asserted from a post-failure state check is unsound in both directions"
+  fi
+  # ...and both emitters must actually exist and be used, or (3) passes vacuously on a file that says
+  # nothing at all about causes.
+  local uses
+  uses="$(grep -c 'supervisor_lock_nature_unestablished\|supervisor_lock_nature_actions' "$SUPERVISOR" || true)"
+  if [[ "$uses" -ge 6 ]]; then
+    pass "lane-lock B21 STRUCTURAL: the ambiguity emitters are defined and referenced $uses times — (3) is asserting an absence over a file that does discuss causes, not over silence"
+  else
+    fail "lane-lock-b21-emitters-missing: only $uses reference(s) — the absence assert above would be vacuous"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_failure_cause_is_not_inferred_from_later_state
 
 
 # ---------------------------------------------------------------------------
