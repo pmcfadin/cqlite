@@ -266,6 +266,13 @@ def strip_inert_regions(body):
     an unmatched backtick the rest of its line), so a malformed body removes MORE text and can only
     make a reference harder to find.
 
+    DECLARED RESIDUAL: a 4-space INDENTED code block is NOT stripped (#3626, tracked separately).
+    The same 4-space indent is both an indented code block and a LIST CONTINUATION line, and the two
+    are indistinguishable without a full block-structure parse — so a naive stripper would remove
+    ordinary visible prose and produce false `PR-UNLINKED` refusals, which is worse than the narrow
+    case it closes (a guard that reds on correct input is the guard agents learn to waive). Fences,
+    inline spans and HTML comments ARE stripped.
+
     THE FENCE CLOSER FOLLOWS CommonMark, deliberately: a closing fence uses the SAME character, is at
     least as long as the opener, and carries NO info string. A naive "any fence line toggles" rule
     desynchronises on a ```` ```bash ```` line INSIDE a fence — GitHub's renderer keeps that as code

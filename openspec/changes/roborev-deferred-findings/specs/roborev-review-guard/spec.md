@@ -153,6 +153,24 @@ removing prose reconstruction, and it SHALL NOT be reopened.
 - **WHEN** `issues=` names retrievable issues and the PR body references each as a bare `#N` in visible text (parenthesised or sentence-final included), beside unrelated inert content
 - **THEN** the disposition half is satisfied, so a granted, matching marker still reports `deferral: GRANTED (…)`, `findings: DEFERRED (…)` and `RESULT: PASS`
 
+**DECLARED RESIDUAL — a 4-space INDENTED code block is NOT stripped, deliberately (#3626).** A
+`    #3602` line inside an indented code block therefore still counts as a reference. This is
+**measured, not overlooked**, and it is left open on purpose: in CommonMark the *same* 4-space indent
+is both an indented code block (which should be stripped) and a **list continuation line** (which is
+ordinary visible prose and MUST NOT be stripped), and the predicate cannot tell them apart without a
+full block-structure parse. Both shapes were probed and both currently report `True`:
+
+| body | today | a naive 4-space stripper |
+|---|---|---|
+| `text\n\n    #3602` (code block) | `True` | `False` — desired |
+| `- item\n    see #3602` (list continuation) | `True` | `False` — **WRONG, legitimate prose** |
+
+So a naive stripper buys the narrow case at the price of **false `PR-UNLINKED` refusals on ordinary
+Markdown**, and a deferral has no waiver-of-the-waiver to recover with — *a guard that reds on
+correct input is the guard agents learn to waive*. The fence, inline-span and HTML-comment shapes the
+reviewers named ARE closed. Closing the indented case properly needs a CommonMark block parse and is
+tracked separately; until then this residual is STATED rather than silently carried.
+
 #### Scenario: The authorization names an unretrievable issue
 - **WHEN** an `issues=` number cannot be retrieved
 - **THEN** the run reports `deferral: ISSUE-UNRESOLVABLE (…)` and `RESULT: FAIL` — the unretrievable case fails closed rather than being skipped
