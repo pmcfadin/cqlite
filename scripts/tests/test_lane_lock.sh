@@ -1823,5 +1823,49 @@ else
 fi
 kill "$Z39_PARENT" 2>/dev/null || true
 
+# ===========================================================================
+echo 'TEST 40: a directory guard that could not read every record SAYS SO (roborev round 23)'
+# ===========================================================================
+# `same_dir_other_issue` had THREE skips that were each "cannot tell" taking the PERMISSIVE
+# branch: a non-regular-file entry, a parse failure, and REC_UNREADABLE=1 — which returns 0 while
+# leaving REC_LANE_DIR empty, so the record reads as "a different directory". Any of them hides a
+# live holder of THIS directory while the guard reports clean.
+#
+# NOT fatal, deliberately: one unreadable record would refuse EVERY acquire for EVERY issue on the
+# box, and a guard that bricks lanes on a permissions problem is worse than the hole (FIX 5/14).
+# So the scan counts what it could not read and the verdict DISCLOSES it.
+#
+# ASSERTED ON THE OBSERVABLE, NOT ON THE SOURCE. Three "fixes" in this branch were only messages
+# that never appeared (r12 reordered nothing, r19 assigned in a subshell, r21 only noted), each
+# shipped without a test that the message shows up. This is that test.
+D40="$(mktemp -d)"; mkdir -p "$D40/.lane-locks" "$D40/lane40"
+printf 'version=1\nissue=888\n' > "$D40/.lane-locks/lane-888.lock"
+chmod 000 "$D40/.lane-locks/lane-888.lock" 2>/dev/null       # present, enumerable, UNREADABLE
+sleep 300 & P40=$!
+out40="$(env -u LANE_LOCK_PID LANE_ROOT="$D40" bash "$LL" acquire 940 --lane-dir "$D40/lane40" --actor flow --pid "$P40" 2>&1)"; rc40=$?
+chmod 644 "$D40/.lane-locks/lane-888.lock" 2>/dev/null
+if [ "$rc40" -eq 0 ] && printf '%s' "$out40" | grep -q 'dir-guard=NOT-EXHAUSTIVE'; then
+  ok "(a) an unreadable record does not block the acquire, and the ACQUIRED line DISCLOSES that the directory guard was partial"
+else
+  bad "(a) rc=$rc40 — expected ACQUIRED carrying dir-guard=NOT-EXHAUSTIVE:
+$out40"
+fi
+kill "$P40" 2>/dev/null || true
+rm -rf "$D40"
+
+# CONTROL: with every record readable the caveat must be ABSENT — a disclosure that always fires
+# is noise, and would make the partial case indistinguishable from the ordinary one.
+D40B="$(mktemp -d)"; mkdir -p "$D40B/.lane-locks" "$D40B/lane40b"
+sleep 300 & P40B=$!
+out40b="$(env -u LANE_LOCK_PID LANE_ROOT="$D40B" bash "$LL" acquire 941 --lane-dir "$D40B/lane40b" --actor flow --pid "$P40B" 2>&1)"; rc40b=$?
+if [ "$rc40b" -eq 0 ] && ! printf '%s' "$out40b" | grep -q 'dir-guard='; then
+  ok "(b) CONTROL: with every record readable the ACQUIRED line carries no caveat"
+else
+  bad "(b) CONTROL: the caveat fired on a clean scan: rc=$rc40b
+$out40b"
+fi
+kill "$P40B" 2>/dev/null || true
+rm -rf "$D40B"
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

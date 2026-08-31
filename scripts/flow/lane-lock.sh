@@ -972,17 +972,49 @@ dir_mutex() {
 # Scans the lock root for a record naming the SAME lane dir under a DIFFERENT issue. A DEAD
 # holder does not block (its record is reclaimable and stale), and our OWN issue never blocks
 # (that is the ordinary re-entrant/reclaim path).
+# SETS SAME_DIR_UNREADABLE: the count of records this scan could NOT read (#3436, roborev
+# round 23). Three separate skips here were each "cannot tell" taking the PERMISSIVE branch —
+# a non-regular-file entry, a parse failure, and REC_UNREADABLE=1, which returns 0 while
+# leaving REC_LANE_DIR empty so the record reads as "a different directory". Any of them
+# hides a live holder of THIS directory and the guard reports clean.
+#
+# NOT MADE FATAL, and the reason is the same one that governs every other refusal in this file:
+# one unreadable record in the lock root would refuse EVERY acquire for EVERY issue on the box,
+# and a guard that bricks lanes on a permissions problem is worse than the hole (FIX 5/14). So
+# the scan COUNTS what it could not read and the caller DISCLOSES it on the verdict line — the
+# same "declare the narrowing" rule the gate uses for a scan it knows is non-exhaustive. An
+# ACQUIRED that says its directory guard was partial is still a claim a reader can check; a
+# silent one is not.
+# REPORTS THROUGH GLOBALS AND PRINTS NOTHING (#3436, roborev round 23, second attempt). The
+# first attempt counted unreadable records and had the caller read the count — but BOTH callers
+# invoke this inside a COMMAND SUBSTITUTION to capture the printed conflict, so the counter was
+# set in a SUBSHELL and discarded and the disclosure could never appear. That is the THIRD time
+# in this branch (rounds 19, 22, here) a value crossed a `$(...)` boundary and vanished, and the
+# third time the symptom was "a fix that is only a message that never fires" — this one AFTER I
+# had written that rule down. So the printing is removed: both outputs are globals, matching
+# REPLY_PID and REPLY_LANE_PATH, and a caller cannot re-introduce the boundary by capturing
+# output there is none of.
 same_dir_other_issue() {
   local issue="$1" canon="$2" f base other
+  SAME_DIR_UNREADABLE=0
+  REPLY_SAME_DIR=""
   for f in "$(lock_root)"/lane-*.lock; do
-    [ -f "$f" ] || continue
+    [ -e "$f" ] || continue                 # the glob's literal self when nothing matches
+    if [ ! -f "$f" ]; then
+      SAME_DIR_UNREADABLE=$((SAME_DIR_UNREADABLE + 1)); continue
+    fi
     base="${f##*/}"; other="${base#lane-}"; other="${other%.lock}"
     [ "$other" = "$issue" ] && continue
-    parse_record "$f" || continue
+    if ! parse_record "$f"; then
+      SAME_DIR_UNREADABLE=$((SAME_DIR_UNREADABLE + 1)); continue
+    fi
+    if [ "${REC_UNREADABLE:-0}" = "1" ] || [ -z "${REC_LANE_DIR:-}" ]; then
+      SAME_DIR_UNREADABLE=$((SAME_DIR_UNREADABLE + 1)); continue
+    fi
     [ "${REC_LANE_DIR:-}" = "$canon" ] || continue
     case "$(record_liveness '')" in
       DEAD-*) continue ;;
-      *) printf '%s|%s|%s\n' "$other" "${REC_PID:-<none>}" "${REC_ACQUIRED_TS:-<none>}"; return 0 ;;
+      *) REPLY_SAME_DIR="$other|${REC_PID:-<none>}|${REC_ACQUIRED_TS:-<none>}"; return 0 ;;
     esac
   done
   return 1
@@ -1195,6 +1227,9 @@ _resolve_lane_path() {
 
 G_ISSUE=""; G_LANE=""; G_ACTOR=""; G_MACHINE=""; G_PID=""; G_SCOPE=""
 G_BOOT=""; G_TICKS=""; G_TOKEN=""; G_RECORD=""; G_LOG=""; G_MUTEX=""
+G_DIR_GUARD=""     # non-empty only when same_dir_other_issue could not read every record
+REPLY_SAME_DIR=""  # the conflicting holder; same_dir_other_issue sets it and PRINTS NOTHING
+SAME_DIR_UNREADABLE=0
 
 # prepare_identity <issue> <lane-real> <actor-raw> <pid-opt> — resolve OUR identity
 # and the file paths. Every value is sanitized here, once, so the token we WRITE and
@@ -1314,7 +1349,7 @@ _acquire_locked() {
           emit "OCCUPIED issue=$G_ISSUE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. The record protects the recorded directory only, so returning re-entrant here would advertise protection this lock does not provide. Release it under this issue first, or take the other directory under its own issue number.) lane-dir=$G_LANE"
           return 2
         fi
-        emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE"
+        emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE${G_DIR_GUARD}"
         return 0
         ;;
       DEAD-*)
@@ -1328,7 +1363,7 @@ _acquire_locked() {
           return 1
         fi
         append_audit "$G_LOG" "verdict=ACQUIRED-RECLAIMED issue=$G_ISSUE token=$G_TOKEN prev-token=$prev_token prev-liveness=$liveness reason=auto-reclaim-dead-holder"
-        emit "ACQUIRED (reclaimed) issue=$G_ISSUE $(self_fields) prev-liveness=$liveness prev-token=$prev_token record=$G_RECORD lane-dir=$G_LANE"
+        emit "ACQUIRED (reclaimed) issue=$G_ISSUE $(self_fields) prev-liveness=$liveness prev-token=$prev_token record=$G_RECORD lane-dir=$G_LANE${G_DIR_GUARD}"
         return 0
         ;;
       *)
@@ -1343,7 +1378,7 @@ _acquire_locked() {
     return 1
   fi
   append_audit "$G_LOG" "verdict=ACQUIRED issue=$G_ISSUE token=$G_TOKEN prev-token=<none> prev-liveness=<none> reason=free-lane"
-  emit "ACQUIRED issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE"
+  emit "ACQUIRED issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE${G_DIR_GUARD}"
   return 0
 }
 
@@ -1375,9 +1410,18 @@ cmd_acquire() {
   # BOTH mutexes: directory first (so two issues on one directory contend), then per-issue.
   _acquire_under_dir_lock() {
     local conflict
-    if conflict="$(same_dir_other_issue "$G_ISSUE" "$G_LANE")"; then
+    if same_dir_other_issue "$G_ISSUE" "$G_LANE"; then
+      conflict="$REPLY_SAME_DIR"
       emit "OCCUPIED issue=$G_ISSUE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is already locked under a DIFFERENT issue by a live holder. The record is keyed by issue so readers need no path, but the DIRECTORY is what must not have two writers — so this refuses. If the other issue number is the mistake, fix the caller; if that lane is genuinely finished, release or reclaim it under ITS issue number.) lane-dir=$G_LANE"
       return 2
+    fi
+    # DISCLOSE A NON-EXHAUSTIVE DIRECTORY GUARD (#3436, roborev round 23). Exported so the
+    # emit sites can name it; empty when the scan read everything, so an ordinary ACQUIRED is
+    # unchanged and only a partial one carries the caveat.
+    if [ "${SAME_DIR_UNREADABLE:-0}" -gt 0 ]; then
+      G_DIR_GUARD=" dir-guard=NOT-EXHAUSTIVE(unreadable-records=$SAME_DIR_UNREADABLE; a live holder of this directory could be hidden behind one of them)"
+    else
+      G_DIR_GUARD=""
     fi
     with_lock 9 "$G_MUTEX" _acquire_locked
   }
@@ -1826,7 +1870,8 @@ cmd_reclaim() {
   # must answer the same directory question acquire answers.
   _reclaim_under_dir_lock() {
     local conflict
-    if conflict="$(same_dir_other_issue "$G_ISSUE" "$G_LANE")"; then
+    if same_dir_other_issue "$G_ISSUE" "$G_LANE"; then
+      conflict="$REPLY_SAME_DIR"
       emit "OCCUPIED issue=$G_ISSUE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is held under a DIFFERENT issue by a live holder, so reclaiming this issue's stale record would create a SECOND writer of one directory. Reclaim or release the conflicting issue instead.) lane-dir=$G_LANE"
       return 2
     fi
