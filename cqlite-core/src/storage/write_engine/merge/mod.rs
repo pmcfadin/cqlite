@@ -345,7 +345,7 @@ impl RunReader {
 
     /// Estimate the memory size of an entry
     ///
-    /// Delegates to [`entry_size::estimate_entry_size`](super::entry_size), a
+    /// Delegates to [`entry_size::estimate_entry_size`], a
     /// sibling module (#1116 campsite rule) that walks nested values with a
     /// bounded iterative traversal and an EXHAUSTIVE `Value` match. The previous
     /// inline version ended in `_ => 32` for every complex variant, which made
@@ -424,11 +424,18 @@ use producer_iter::SSTableRowIteratorAdapter;
 #[cfg(feature = "write-support")]
 mod producer_iter_convert;
 
-/// The producer→consumer CHANNEL PROTOCOL (issue #3120): `MergeMsg` (the DATA
-/// item plus the two TERMINATORS that make "this run finished" an observed fact
-/// rather than an inference from a channel disconnect) and the channel-safe
-/// `MergeProducerError` payload (issue #2264, moved here out of this file per
-/// #1116). Both producer shapes send it; `producer_iter`'s adapter consumes it.
+// The producer→consumer CHANNEL PROTOCOL (issue #3120): `MergeMsg` (the DATA
+// item plus the two TERMINATORS that make "this run finished" an observed fact
+// rather than an inference from a channel disconnect) and the channel-safe
+// `MergeProducerError` payload (issue #2264, moved here out of this file per
+// #1116). Both producer shapes send it; `producer_iter`'s adapter consumes it.
+//
+// Deliberately a PLAIN comment, not `///` (issue #2820 roborev r3): an OUTER doc
+// on the declaration merges with this file's own inner `//!` header and drags the
+// merged fragment's link-resolution scope up to `merge`, so every `[`MergeMsg`]`
+// / `super::*` link in producer_msg.rs's module doc silently stops resolving.
+// The sibling `producer_gauge`/`channel_depth`/`egress_budget`/`entry_size`/
+// `egress_batch` declarations use a plain comment for the same reason.
 #[cfg(feature = "write-support")]
 mod producer_msg;
 
