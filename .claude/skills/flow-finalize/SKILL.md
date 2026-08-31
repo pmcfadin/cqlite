@@ -157,15 +157,25 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    # the lock files live in a lock root OUTSIDE the worktree (`$LANE_ROOT/.lane-locks`),
    # so removing the worktree does NOT delete the record. An earlier version of this note
    # said it did, which made a real release read as optional.
-   # It needs NO --lane-dir and works from anywhere: the record is keyed by ISSUE, so a
-   # release cannot miss a lane that was locked under a non-default path (#3436 FIX 8 --
+   # KEYED BY ISSUE FIXES THE SUBJECT, NOT THE IDENTITY (#3436, roborev round 12). It needs
+   # no --lane-dir, so it cannot miss a lane locked under a non-default path -- but proving
+   # you are the HOLDER resolves an identity by walking up from your cwd INSIDE the lane, and
+   # step 5 above has already removed the worktree. Run from a deleted lane, release is
+   # refused as not-holder, and the `|| true` below turned that into a silent leak: the record
+   # outlives the lane and the next session for this issue meets a lock nobody can clear.
+   # SO: RELEASE BEFORE THE WORKTREE IS REMOVED, from inside the lane. If it is already gone,
+   # the sanctioned fallbacks are `--pid <durable-holder>` or `--force` (which only DELETES and
+   # needs no identity). Do not suppress the failure, and verify the record is actually gone.
+   # (#3436 FIX 8 --
    # measured before the lock root existed: `release 9600` printed
    # `RELEASED (already free) ... record=absent` rc=0 while the record sat in
    # `.claude/worktrees/issue-9600-slug/`, i.e. a finalize reported a successful release
    # having released nothing).
    # A lock left behind by a killed session is still not a leak: its holder reads DEAD-*
    # and the next acquire reclaims it automatically.
-   bash scripts/flow/lane-lock.sh release <N> || true
+   bash scripts/flow/lane-lock.sh release <N>   # NO `|| true`: a refused release is a LEAK, not noise
+   # VERIFY, do not assume — `status` must report no record for this issue:
+   bash scripts/flow/lane-lock.sh status <N>
    # confirm gone: `claim.sh status <N>` prints `CLAIM: STATUS none`.
    ```
    Then clear this machine's claim heartbeat so it doesn't linger on origin until `flow-board`'s 4h reap

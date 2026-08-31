@@ -827,10 +827,10 @@ runAerr() { local errf="$1"; shift; ( cd "$A" && CLAIM_MACHINE=machineA CLAIM_RE
 # as unremarkable (a distinct state, not a warning).
 out21a=$(runA claim 30); rc21a=$?
 if [ "$rc21a" -eq 0 ] && printf '%s\n' "$out21a" | grep -q 'CLAIM: HELD' \
-   && printf '%s\n' "$out21a" | grep -q 'lane-lock=no-lane-dir'; then
-  ok "(a) AC5: a claim with no lane directory reports lane-lock=no-lane-dir and still HELD (exit 0)"
+   && printf '%s\n' "$out21a" | grep -q 'lane-lock=no-lock-record(default-path-absent)'; then
+  ok "(a) AC5: with no record and no default lane dir, the state is what was MEASURED (no-lock-record) and the absent default path is a NAMED parenthetical, never a lane census (#3436 round 12)"
 else
-  bad "(a) expected HELD + lane-lock=no-lane-dir exit 0; got rc=$rc21a
+  bad "(a) expected HELD + lane-lock=no-lock-record(default-path-absent) exit 0; got rc=$rc21a
 $out21a"
 fi
 

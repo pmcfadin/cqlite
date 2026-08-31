@@ -749,7 +749,16 @@ lane_lock_probe() {
         # header.
         LANE_LOCK_STATE="no-lock-record"
       else
-        LANE_LOCK_STATE="no-lane-dir"
+        # ALSO `no-lock-record`, AND THE PARENTHETICAL IS A SEPARATE FACT (#3436, roborev
+        # round 12). With no record, the probe can only derive the DEFAULT
+        # `$LANE_ROOT/lane-<N>`; this repo's sanctioned worktrees also live at
+        # `.claude/worktrees/issue-<N>-<slug>` and `~/projects/cqlite-wt/issue-<N>`. Emitting
+        # a bare `no-lane-dir` therefore reported "there is no lane" when all that was
+        # measured is "the DEFAULT path is absent" — a lane census the probe never took, and
+        # a false all-clear in the AC5 warning whose whole job is to say a lane may be
+        # occupied. The state is what was measured (no lock record); the default-path
+        # observation rides along NAMED, and asserts nothing about a custom path.
+        LANE_LOCK_STATE="no-lock-record(default-path-absent)"
       fi
       ;;
     HELD)
