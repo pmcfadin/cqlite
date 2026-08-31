@@ -25,13 +25,29 @@
 //! `row_decoder/complex_column/cell_path_key.rs`.
 //!
 //! ## How the error is provoked, and why this is honest
-//! The committed Cassandra fixture `test_udt_collision.udt_collide` stores `cm`'s
-//! key as a 70-byte serialized `collide` UDT cell path (four components: 16
-//! bytes of `[i32 BE len]` prefixes plus 15+19+16+4 bytes of data). This test hands the reader a schema
-//! that declares that same column `map<int, int>` — ONE substitution, applied to
-//! the committed `.cql` at run time so the mutation is visible and cannot drift —
-//! so the exact-width check refuses the key. That is a genuine, reachable
-//! cell-path-key error over real Cassandra-written bytes.
+//! The Cassandra fixture `test_types.cx_nested_frozen_collections` stores
+//! `m_list_vals map<text, frozen<list<int>>>` with the TEXT cell-path keys
+//! `evens` (5 bytes) and `odds` (4). This test hands the reader a schema
+//! declaring that key `int` — ONE substitution, applied to the committed `.cql` at
+//! run time so the mutation is visible and cannot drift — so `evens` fails the
+//! exact-width check. That is a genuine, reachable cell-path-key error over real
+//! Cassandra-written bytes.
+//!
+//! THE SUBJECT MOVED, AND WHY IT HAD TO (issue #3612, R7). This test originally
+//! provoked the error on `test_udt_collision.udt_collide`'s `cm` by declaring its
+//! `frozen<collide>` key `int`. R7 made the multicell branch prefer the
+//! AUTHORITATIVE MARSHAL key type over the schema, so for a UDT-keyed map a
+//! mismatched schema is now correctly IGNORED and the key decodes fine —
+//! desirable (authoritative metadata wins, issue #28), and it silently DISARMED
+//! this test: both cases went green while asserting nothing, caught only because
+//! the gate ran them. The provocation therefore has to be a column whose marshal
+//! key type is NOT UDT-bearing, so `prefer_udt_marshal_element` keeps the schema
+//! form. `m_list_vals`'s marshal key is `UTF8Type`, which qualifies.
+//!
+//! Its on-disk cell order — measured from the golden: `l_set_vals`,
+//! `m_list_vals`, `s_map_vals` — also gives all three roles in ONE row, so the
+//! control that a column decoded BEFORE the subject SURVIVES is now an in-vector
+//! assertion on `complex` rather than an indirect one on `simple`.
 //!
 //! NOT covered here, and stated rather than implied: the *unmodellable type*
 //! class cannot be reached through a schema-provided public read at all. The CQL
@@ -59,21 +75,35 @@ use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::types::Value;
 use cqlite_core::Config;
 
-const KEYSPACE: &str = "test_udt_collision";
-const TABLE: &str = "udt_collide";
-const QUERY: &str = "SELECT * FROM test_udt_collision.udt_collide";
+const KEYSPACE: &str = "test_types";
+const TABLE: &str = "cx_nested_frozen_collections";
+const QUERY: &str = "SELECT * FROM test_types.cx_nested_frozen_collections";
 const SUBJECT_ROW_ID: i32 = 1;
 
-/// The declared type of `cm` in the committed schema, and the mismatching type
-/// this test substitutes for it. `map<int, int>` makes the 70-byte on-disk UDT
-/// key fail the exact-width check (`int` is exactly 4 bytes).
-const DECLARED_CM: &str = "cm  map<frozen<collide>, int>,";
-const MISMATCHED_CM: &str = "cm  map<int, int>,";
+/// The declared type of the subject column, and the mismatching type this test
+/// substitutes for it. The on-disk cell-path keys are the TEXT strings `evens`
+/// (5 bytes) and `odds` (4), so declaring the key `int` makes `evens` fail the
+/// exact-width check.
+///
+/// WHY THIS COLUMN AND NOT `cm` (issue #3612, R7): the provocation must be a
+/// column whose AUTHORITATIVE MARSHAL key type is not UDT-bearing. R7 made the
+/// multicell branch prefer the marshal spelling over the schema, so for a
+/// UDT-keyed map like `cm` a mismatched schema is now correctly IGNORED and the
+/// key decodes fine — a desirable consequence (authoritative metadata wins,
+/// issue #28) that silently disarmed this test's original provocation. This
+/// column's marshal key is `UTF8Type`, so `prefer_udt_marshal_element` keeps the
+/// schema form and the mismatch still bites.
+const DECLARED_CM: &str = "m_list_vals map<text, frozen<list<int>>>,";
+const MISMATCHED_CM: &str = "m_list_vals map<int, frozen<list<int>>>,";
 
-/// Columns that appear in the fixture's on-disk cell order AFTER `cm`. The
-/// `break` drops these too, which is the property that makes the swallow worse
-/// than an opaque value — it is not confined to the offending column.
-const COLUMNS_AFTER_CM_ON_DISK: [&str; 1] = ["tm"];
+/// Columns in the fixture's on-disk cell order AFTER the subject. The `break`
+/// drops these too — the property that makes the swallow worse than an opaque
+/// value, since it is not confined to the offending column. Measured from the
+/// golden: `l_set_vals`, `m_list_vals`, `s_map_vals`.
+const COLUMNS_AFTER_CM_ON_DISK: [&str; 1] = ["s_map_vals"];
+/// Decoded BEFORE the subject, so it must SURVIVE — the control proving this is a
+/// positional truncation and not a whole-row failure.
+const COLUMNS_BEFORE_CM_ON_DISK: [&str; 1] = ["l_set_vals"];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -82,18 +112,22 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Resolved PER TABLE (issue #3220): neither the env root nor the checkout is a
+/// superset of the other, so a fixed root can silently yield zero rows.
 fn fixture_root() -> PathBuf {
-    workspace_root()
-        .join("test-data")
-        .join("fixtures")
-        .join("issue_3504")
+    datasets_root::sstables_root_for_table(KEYSPACE, TABLE).unwrap_or_else(|| {
+        panic!("no candidate root holds {KEYSPACE}.{TABLE}; fetch the datasets corpus")
+    })
 }
+
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
 
 fn committed_schema() -> PathBuf {
     workspace_root()
         .join("test-data")
         .join("schemas")
-        .join("issue-3504-udt-collision.cql")
+        .join("cql-type-parity.cql")
 }
 
 fn table_dir() -> PathBuf {
@@ -157,7 +191,7 @@ async fn select_subject_row(schema: PathBuf) -> BTreeMap<String, Value> {
         "zero rows from a PRESENT fixture is a decode failure, never a skip"
     );
     for row in &result.rows {
-        if row.values.get("id") == Some(&Value::Integer(SUBJECT_ROW_ID)) {
+        if row.values.get("pk") == Some(&Value::Integer(SUBJECT_ROW_ID)) {
             return row
                 .values
                 .iter()
@@ -165,7 +199,7 @@ async fn select_subject_row(schema: PathBuf) -> BTreeMap<String, Value> {
                 .collect();
         }
     }
-    panic!("fixture row id={SUBJECT_ROW_ID} not found");
+    panic!("fixture row pk={SUBJECT_ROW_ID} not found");
 }
 
 fn is_absent(v: Option<&Value>) -> bool {
@@ -183,9 +217,9 @@ async fn a_cell_path_key_error_silently_truncates_the_row_it_does_not_fail_the_s
     // (1) The SELECT succeeded — asserted by `select_subject_row`'s `expect`.
     // (2) The offending column is GONE, not wrong.
     assert!(
-        is_absent(row.get("cm")),
+        is_absent(row.get("m_list_vals")),
         "cm should be absent/null after its key failed to decode, got {:?}",
-        row.get("cm")
+        row.get("m_list_vals")
     );
     // (3) THE DAMAGE: later on-disk columns are gone too. This is what makes an
     //     `Err` from the key decoder worse than an opaque value, and it is the
@@ -199,7 +233,7 @@ async fn a_cell_path_key_error_silently_truncates_the_row_it_does_not_fail_the_s
     }
     // (4) The CONTROL: columns decoded BEFORE cm survive, so this really is a
     //     positional truncation and not a whole-row failure.
-    for col in ["id", "c", "p", "fcm", "ftm", "fs"] {
+    for col in COLUMNS_BEFORE_CM_ON_DISK {
         assert!(
             !is_absent(row.get(col)),
             "'{col}' precedes cm on disk and must survive, got {:?}",
@@ -257,51 +291,49 @@ async fn the_compaction_read_swallows_the_same_error() {
         .expect("the compaction read must not error either — that is the finding");
     assert!(!rows.is_empty(), "the fixture has partitions");
 
-    // The property, asserted where it is OBSERVABLE. `cm` is a COMPLEX column, so
-    // it can only ever appear in `complex` — asserting its absence from `simple`
-    // would hold no matter what the decoder did (a vacuous assertion this test
-    // shipped with for one round, caught by a mutant check).
+    // The property, asserted where it is OBSERVABLE. `m_list_vals` is a COMPLEX
+    // column, so it can only ever appear in `complex` — asserting its absence from
+    // `simple` would hold no matter what the decoder did (a vacuous assertion this
+    // test shipped with for one round, caught by a mutant check).
     //
-    // This fixture's ONLY complex columns are `cm` and `tm` (every other
-    // collection column is FROZEN, hence a single cell and therefore `simple`),
-    // so there is no earlier complex column to use as an in-vector control. The
-    // control is the `simple` vector instead: its frozen map columns prove the
-    // row really was read and is not simply empty.
+    // Here the IN-VECTOR control is available and is used: `l_set_vals` is decoded
+    // BEFORE the subject on disk, so it must be PRESENT in `complex` while the
+    // subject and `s_map_vals` after it are gone. That is a strictly better control
+    // than the previous fixture allowed, where every non-subject collection column
+    // was frozen and so landed in `simple`.
     let mut checked_rows = 0usize;
     for row in &rows {
         if let CompactionRowData::Live {
             simple, complex, ..
         } = &row.row_data
         {
-            let simple_names: Vec<&str> = simple.iter().map(|c| c.column.as_str()).collect();
-            if !simple_names.contains(&"fcm") {
-                // Not the subject row (rows 2/3 carry no map columns).
+            let _ = simple;
+            let complex_pre: Vec<&str> = complex.iter().map(|c| c.column.as_str()).collect();
+            if !complex_pre.contains(&COLUMNS_BEFORE_CM_ON_DISK[0]) {
+                // Not a row carrying the subject's neighbours.
                 continue;
             }
             checked_rows += 1;
-            // CONTROL: the frozen siblings decoded, so the read happened.
+            // CONTROL: the column decoded BEFORE the subject is present, so the
+            // read really happened and the row is not simply empty.
+            let complex_names = complex_pre;
             assert!(
-                simple_names.contains(&"ftm"),
-                "control: the frozen map columns must be present; got {simple_names:?}"
-            );
-            let complex_names: Vec<&str> = complex.iter().map(|c| c.column.as_str()).collect();
-            assert!(
-                !complex_names.contains(&"cm"),
-                "cm's key failed to decode, so the swallow drops it from the \
-                 compaction read's complex columns; got {complex_names:?}"
+                !complex_names.contains(&"m_list_vals"),
+                "m_list_vals's key failed to decode, so the swallow drops it from \
+                 the compaction read's complex columns; got {complex_names:?}"
             );
             for later in COLUMNS_AFTER_CM_ON_DISK {
                 assert!(
                     !complex_names.contains(&later),
-                    "'{later}' follows cm on disk and is dropped by the same \
-                     `break`; got {complex_names:?}"
+                    "'{later}' follows the subject on disk and is dropped by the \
+                     same `break`; got {complex_names:?}"
                 );
             }
         }
     }
     assert_eq!(
         checked_rows, 1,
-        "exactly one fixture row carries the map columns; if this is 0 the \
-         assertions above ran against nothing"
+        "exactly one fixture row carries the subject's neighbours; if this is 0 \
+         the assertions above ran against nothing"
     );
 }
