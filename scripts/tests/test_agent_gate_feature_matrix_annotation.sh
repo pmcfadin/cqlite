@@ -952,6 +952,19 @@ got=$(py_run "$py_plan_pure" 2)
   && ok "P4: rc 2 (maturin RAN and failed) still records the maturin invocation — a failed build is an invocation that happened" \
   || bad "P4: got '$got' want '$want_via'"
 
+# (P5) run_scoped_tests' OWN TERMINAL PATHS RECORD, THOUGH THEY BYPASS record_result —
+# roborev job 273, F4. This function appends its verdict DIRECTLY to NAMES/STATUSES/TIMES,
+# so the note every other component gets from record_result was simply absent: the
+# fail-closed no-parser exit (#2658), taken before any cargo runs, rendered `[UNDECLARED]`
+# ("nobody said") instead of the fact we know exactly. Driven through the REAL function via
+# the AGENT_GATE_TEST_NO_METADATA_PARSER hook the gate already ships for this branch.
+got=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 py_run "$py_plan_pure" 0)
+case "$got" in
+  *'FAILed before its first cargo build/test invocation'*)
+    ok "P5: the no-parser fail-closed exit — which bypasses record_result — records that it FAILed before any cargo call, instead of reading UNDECLARED" ;;
+  *) bad "P5: got '$got'" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # (PB) THE PYTHON-BINDINGS DRIVER RECORD, DRIVEN END TO END — roborev job 273, F3
 # ---------------------------------------------------------------------------
