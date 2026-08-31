@@ -766,6 +766,66 @@ $out18c"
 fi
 
 # ===========================================================================
+echo "TEST 19: the RECORD's lane-dir is authoritative for every reader"
+# ===========================================================================
+# The record is found by ISSUE, so no reader needs a lane path — and re-deriving
+# ${LANE_ROOT}/lane-<N> made `probe` describe a directory nobody was working in, because
+# this repo's sanctioned worktrees are `.claude/worktrees/issue-<N>-<slug>` and
+# `~/projects/cqlite-wt/issue-<N>`. So: lock a lane OUTSIDE the lane root, then probe and
+# verify with NO --lane-dir at all.
+OUT_LANE="$T/out-of-tree/worktrees/issue-891-slug"
+mkdir -p "$OUT_LANE"
+sleeper; W6=$REPLY_SLEEPER
+ll acquire 891 --lane-dir "$OUT_LANE" --actor flow --pid "$W6"; rc19a=$RC
+ll probe 891; rc19b=$RC; out19b=$OUT
+ll verify 891 --pid "$W6"; rc19c=$RC
+if [ "$rc19a" -eq 0 ] && [ "$rc19b" -eq 0 ] \
+   && [ "$(field "$out19b" lane-dir)" = "$OUT_LANE" ] \
+   && [ "$(field "$out19b" liveness)" = "ALIVE" ] \
+   && [ "$rc19c" -eq 0 ]; then
+  ok "a lane locked OUTSIDE the lane root is reported at its RECORDED path by a probe with no --lane-dir, and verify with no --lane-dir still passes"
+else
+  bad "the recorded lane-dir is not authoritative: acquire=$rc19a probe=$rc19b verify=$rc19c lane-dir='$(field "$out19b" lane-dir)' (expected $OUT_LANE)
+$out19b"
+fi
+
+# ...and a caller-supplied --lane-dir that DISAGREES is reported as information, never
+# silently preferred, and must not change the liveness verdict.
+ll probe 891 --lane-dir "$LANES/lane-891" --actor flow --pid "$W6"; rc19d=$RC; out19d=$OUT
+# The identity passed here is the HOLDER's, so the verdict is SELF — and it must STAY
+# SELF with a disagreeing --lane-dir. That is the sharp form of "a mismatch is
+# information, not a verdict change": a wrong lane path must not demote a session's own
+# lock to a peer's.
+if [ "$rc19d" -eq 0 ] \
+   && [ "$(field "$out19d" lane-dir)" = "$OUT_LANE" ] \
+   && [ "$(field "$out19d" lane-dir-mismatch)" = "$LANES/lane-891" ] \
+   && [ "$(field "$out19d" liveness)" = "SELF" ]; then
+  ok "a disagreeing --lane-dir is reported as lane-dir-mismatch=, the RECORDED path still wins, and liveness stays SELF (a mismatch is information, not a verdict change)"
+else
+  bad "expected lane-dir=$OUT_LANE + lane-dir-mismatch=$LANES/lane-891 + liveness=SELF; got lane-dir='$(field "$out19d" lane-dir)' mismatch='$(field "$out19d" lane-dir-mismatch)' liveness='$(field "$out19d" liveness)'
+$out19d"
+fi
+
+# our-identity= (#3436 FIX 7a): the READ side must SAY whether it established its own
+# identity, because a consumer cannot tell SELF from a live PEER without it. Two calls,
+# same record: one with a live --pid (established), one from outside the lane with no pid
+# at all (unresolvable). Both stay exit 0 — a report never refuses.
+ll probe 891 --actor flow --pid "$W6"; out19e=$OUT
+ll probe 891; out19f=$OUT
+# AND THE PAIR IS THE POINT: the SAME record reads SELF when our identity was
+# established and ALIVE when it could not be. Without `our-identity=` those two ALIVEs
+# are indistinguishable, which is how a session got told its own lane belonged to a peer.
+if [ "$(field "$out19e" our-identity)" = "explicit" ] \
+   && [ "$(field "$out19f" our-identity)" = "UNRESOLVED" ] \
+   && [ "$(field "$out19e" liveness)" = "SELF" ] && [ "$(field "$out19f" liveness)" = "ALIVE" ]; then
+  ok "probe declares our-identity=explicit vs UNRESOLVED on the SAME record, and the unresolved read is ALIVE where the resolved one is SELF — the exact ambiguity a consumer must not guess at"
+else
+  bad "our-identity= is not three-valued as documented: with-pid='$(field "$out19e" our-identity)' without='$(field "$out19f" our-identity)'
+$out19e
+$out19f"
+fi
+
+# ===========================================================================
 echo
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

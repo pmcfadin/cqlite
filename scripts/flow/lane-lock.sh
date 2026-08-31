@@ -866,6 +866,25 @@ require_durable_identity() {
   return 1
 }
 
+# identity_state — did THIS run establish its OWN durable identity? Three-valued, and
+# the value is PUBLISHED (probe's `our-identity=`) because a consumer cannot tell SELF
+# from a live PEER without it: when our identity is unresolved, our token cannot match
+# ANY live holder's, so the record reads ALIVE whether or not the holder is us. Asserting
+# "someone else" from that is asserting a positive from the FAILURE to prove its
+# opposite, which is the rule this repo keeps relearning (#3436 FIX 7).
+#
+# A DEGRADED identity is UNRESOLVED even when the pid was given explicitly: without
+# boot-id AND start-ticks the token carries '-' placeholders and cannot match a live
+# holder's token either, so `explicit` alone is not evidence of anything.
+identity_state() {
+  if [ -z "$G_BOOT" ] || [ -z "$G_TICKS" ]; then printf 'UNRESOLVED'; return 0; fi
+  case "$G_SCOPE" in
+    session)  printf 'session' ;;
+    explicit) printf 'explicit' ;;
+    *)        printf 'UNRESOLVED' ;;
+  esac
+}
+
 self_fields() {
   printf 'token=%s machine=%s actor=%s pid=%s pid-scope=%s' \
     "$G_TOKEN" "$G_MACHINE" "$G_ACTOR" "$G_PID" "$G_SCOPE"
@@ -963,10 +982,19 @@ cmd_verify() {
     esac
   done
   require_numeric_issue "$issue" verify
-  lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+  # Same authority rule as `probe` (#3436 FIX 6): if a record exists, ITS lane-dir is the
+  # subject — that is the lane the holder was in, so it is the only correct input to the
+  # identity walk. Without this, `verify` from a session whose lane is
+  # `.claude/worktrees/issue-<N>-<slug>` walked ancestors against
+  # `${LANE_ROOT}/lane-<N>` and could never match its own lock.
+  if parse_record "$(lock_record "$issue")" && [ -n "${REC_LANE_DIR:-}" ]; then
+    lane="$REC_LANE_DIR"
+  else
+    lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+  fi
   prepare_identity "$issue" "$lane" "$actor" "$pid_opt"   # sets G_RECORD from the lock root
   if ! parse_record "$G_RECORD"; then
-    emit "VERIFY-FAIL issue=$issue lane-dir=$lane reason=no-lock $(self_fields)"
+    emit "VERIFY-FAIL issue=$issue reason=no-lock $(self_fields) lane-dir=$lane"
     return 2
   fi
   liveness="$(record_liveness "$G_TOKEN")"
@@ -1002,11 +1030,29 @@ cmd_probe() {
     esac
   done
   require_numeric_issue "$issue" probe
-  lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
-  local record; record="$(lock_record "$issue")"
+  local record mismatch=""
+  record="$(lock_record "$issue")"
   if ! parse_record "$record"; then
-    emit "FREE issue=$issue lane-dir=$lane liveness=NO-RECORD record=absent"
+    lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+    emit "FREE issue=$issue liveness=NO-RECORD record=absent lane-dir=$lane"
     return 0
+  fi
+  # THE RECORD'S OWN `lane-dir` IS AUTHORITATIVE (#3436 FIX 6). The record is found by
+  # ISSUE, so a probe needs no lane path — and re-deriving `${LANE_ROOT}/lane-<N>` made
+  # every reader describe a directory nobody was working in, because this repo's
+  # sanctioned worktrees are `.claude/worktrees/issue-<N>-<slug>` and
+  # `~/projects/cqlite-wt/issue-<N>`. The recorded value is also the lane the HOLDER was
+  # in, so it is the right subject for the identity walk below, not just for display.
+  # A caller-supplied --lane-dir that DISAGREES is reported as information
+  # (`lane-dir-mismatch=`) and never silently preferred, and it never changes the
+  # liveness verdict.
+  if [ -n "${REC_LANE_DIR:-}" ]; then
+    lane="$REC_LANE_DIR"
+    if [ -n "$lane_opt" ] && [ "$lane_opt" != "$REC_LANE_DIR" ]; then
+      mismatch="$lane_opt"
+    fi
+  else
+    lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
   fi
   # A probe RESOLVES OUR IDENTITY — in COMPARE mode, which writes nothing and refuses
   # nothing — so that `SELF` is reachable. It has to be: with an impossible token
@@ -1029,7 +1075,7 @@ cmd_probe() {
   parse_record "$record" || true
   liveness="$(record_liveness "$G_TOKEN")"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
-  emit "HELD issue=$issue lane-dir=$lane liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN record=$record"
+  emit "HELD issue=$issue liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN our-identity=$(identity_state) record=$record${mismatch:+ lane-dir-mismatch=$mismatch} lane-dir=$lane"
   return 0
 }
 
@@ -1224,12 +1270,12 @@ cmd_reclaim() {
 status_one() {
   local record="$1" lane_hint="$2" issue_hint="$3" liveness reclaimable=no
   if ! parse_record "$record"; then
-    emit "FREE issue=$issue_hint lane-dir=$lane_hint liveness=NO-RECORD record=absent"
+    emit "FREE issue=$issue_hint liveness=NO-RECORD record=absent lane-dir=$lane_hint"
     return 0
   fi
   liveness="$(record_liveness '')"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
-  emit "HELD issue=${REC_ISSUE:-$issue_hint} lane-dir=${REC_LANE_DIR:-$lane_hint} liveness=$liveness reclaimable=$reclaimable $(holder_fields) record=$record"
+  emit "HELD issue=${REC_ISSUE:-$issue_hint} liveness=$liveness reclaimable=$reclaimable $(holder_fields) record=$record lane-dir=${REC_LANE_DIR:-$lane_hint}"
 }
 
 cmd_status() {
