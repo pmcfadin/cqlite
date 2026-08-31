@@ -69,8 +69,13 @@ push_claim() {    # <issue> — hold refs/claims/issue-<N>
 }
 
 # mk_gh <dir> <issue...> — a fake `gh` whose board read answers with those issue
-# numbers, one per line, exactly as the real `--jq '.items[]|.content.number'`
-# does. It also RECORDS its argv, so a case can assert HOW the board was read.
+# numbers, one row per line in the shape the real `--jq` now produces:
+# `<type>|<owner/repo>|<number>` (#3436, roborev round 14 — the row used to be the bare
+# number, so a Ready PULL REQUEST or another repository's item collided with the
+# identically-numbered issue here). A bare number argument is expanded to an ordinary Issue
+# on the scanned repo; an argument already containing `|` is passed through VERBATIM, which
+# is how the drift/draft/PR/foreign-repo cases inject their own shapes.
+# It also RECORDS its argv, so a case can assert HOW the board was read.
 mk_gh() {
   local dir="$1"; shift
   mkdir -p "$dir"
@@ -78,7 +83,12 @@ mk_gh() {
     printf '#!/usr/bin/env bash\n'
     printf 'printf "%%s\\n" "$@" >>"%s/gh-args.txt"\n' "$dir"
     local n
-    for n in "$@"; do printf 'printf "%%s\\n" %s\n' "$n"; done
+    for n in "$@"; do
+      case "$n" in
+        *"|"*) printf 'printf "%%s\\n" %s\n' "$(printf '%q' "$n")" ;;
+        *)     printf 'printf "%%s\\n" %s\n' "$(printf '%q' "Issue|pmcfadin/cqlite|$n")" ;;
+      esac
+    done
     printf 'exit 0\n'
   } >"$dir/gh"
   chmod +x "$dir/gh"
@@ -441,17 +451,18 @@ echo "TEST 14: the page-truncation notice counts the RAW page, not the filtered 
 # the 100-row limit, so a Ready column of exactly 100 containing 3 drafts counted 97, no
 # notice fired, and the run printed `measured=yes` for a page that may have been
 # TRUNCATED — a fail-OPEN, and a truncated Ready column can only ever HIDE rows.
-# The fake gh emits one line per row exactly as the real `--jq` does, with a draft as the
-# literal `null`, so the two counts differ by construction here.
+# The fake gh emits one line per row exactly as the real `--jq` does — since #3436 round 14
+# that is `<type>|<owner/repo>|<number>`, with a draft as `DraftIssue|null|null` — so the two
+# counts differ by construction here.
 mk_ready_page() {   # <dir> <numeric-rows> <draft-rows>
   local dir="$1" nums="$2" drafts="$3" i=0
   mkdir -p "$dir"
   {
     printf '#!/usr/bin/env bash\n'
     i=0
-    while [ "$i" -lt "$nums" ]; do printf 'printf "%%s\\n" %s\n' "$((7000 + i))"; i=$((i + 1)); done
+    while [ "$i" -lt "$nums" ]; do printf 'printf "%%s\\n" %s\n' "Issue\\|pmcfadin/cqlite\\|$((7000 + i))"; i=$((i + 1)); done
     i=0
-    while [ "$i" -lt "$drafts" ]; do printf 'printf "null\\n"\n'; i=$((i + 1)); done
+    while [ "$i" -lt "$drafts" ]; do printf 'printf "DraftIssue|null|null\\n"\n'; i=$((i + 1)); done
     printf 'exit 0\n'
   } >"$dir/gh"
   chmod +x "$dir/gh"
@@ -567,6 +578,73 @@ if printf '%s' "$out16c" | grep -qF "$ORIGIN" && ! printf '%s' "$out16c" | grep 
 else
   bad "control: a credential-free remote was altered:
 $out16c"
+fi
+
+# ===========================================================================
+# ROUND 14: a board NUMBER is not an ISSUE NUMBER ON THIS REMOTE.
+# ===========================================================================
+# The row used to be `.content.number` alone, so a Ready PULL REQUEST — or an item from
+# ANOTHER repository — produced a candidate for the identically-numbered issue here, i.e. a
+# reported collision window for a lane that does not exist. All three kinds legitimately sit
+# on this board. Branch + no-claim-ref are held CONSTANT across these cases; only the board
+# row's KIND changes, so the row's kind is the only thing under test.
+GHPR="$T/gh-pr-600"; mk_gh "$GHPR" 'PullRequest|pmcfadin/cqlite|600'
+out_pr=$(run_scan "$GHPR"); rc_pr=$?
+if [ "$rc_pr" -eq 1 ] && ! printf '%s\n' "$out_pr" | grep -q '^COLLISION-WINDOW: issue=600 '; then
+  ok "a Ready PULL REQUEST numbered 600 is NOT a collision candidate (exit 1, no row)"
+else
+  bad "a Ready PR was treated as issue 600: rc=$rc_pr
+$out_pr"
+fi
+
+GHFR="$T/gh-foreign-600"; mk_gh "$GHFR" 'Issue|someone-else/other-repo|600'
+out_fr=$(run_scan "$GHFR"); rc_fr=$?
+if [ "$rc_fr" -eq 1 ] && ! printf '%s\n' "$out_fr" | grep -q '^COLLISION-WINDOW: issue=600 '; then
+  ok "an Issue numbered 600 in ANOTHER repository is NOT a collision candidate (exit 1, no row)"
+else
+  bad "another repo's issue 600 was treated as ours: rc=$rc_fr
+$out_fr"
+fi
+
+# CONTROL: the SAME number, as an Issue on the scanned repo, still IS a candidate — so the two
+# refusals above are the kind filter working, not the case having stopped reaching the report.
+GHOK="$T/gh-ctl-600"; mk_gh "$GHOK" 600
+out_ok=$(run_scan "$GHOK"); rc_ok=$?
+if [ "$rc_ok" -eq 3 ] && printf '%s\n' "$out_ok" | grep -q '^COLLISION-WINDOW: issue=600 '; then
+  ok "CONTROL: the same number as an Issue on the scanned repo IS still reported (exit 3)"
+else
+  bad "CONTROL: the kind filter is refusing everything, not just PRs/foreign repos: rc=$rc_ok
+$out_ok"
+fi
+
+# An UNRECOGNISED kind is UNMEASURABLE, not a silent non-candidate — round 5's rule, which the
+# new three-field row must not weaken.
+GHUK="$T/gh-unknown-kind"; mk_gh "$GHUK" 'Sponsorship|pmcfadin/cqlite|600'
+out_uk=$(run_scan "$GHUK"); rc_uk=$?
+if [ "$rc_uk" -eq 1 ] && printf '%s\n' "$out_uk" | grep -q 'UNMEASURABLE'; then
+  ok "an unrecognised board row KIND is UNMEASURABLE, not silently dropped"
+else
+  bad "unrecognised kind was dropped instead of reported unmeasurable: rc=$rc_uk
+$out_uk"
+fi
+
+# ===========================================================================
+# ROUND 14: the JSON branch must not contradict the text branch on `measured`.
+# ===========================================================================
+# Round 12 fixed the HUMAN line to make `measured=` follow coverage and left the JSON branch
+# emitting a hard-coded "yes" — the same defect, one branch over, found two rounds later. The
+# JSON is what an automated consumer reads, so it was the worse of the two to leave.
+mk_ready_page "$T/gh-page-100b" 97 3
+out_j=$(run_scan "$T/gh-page-100b" --json)
+out_t=$(run_scan "$T/gh-page-100b")
+if printf '%s\n' "$out_j" | grep -q '"board_page_at_limit":true' \
+   && printf '%s\n' "$out_j" | grep -q '"measured":"no"' \
+   && printf '%s\n' "$out_t" | grep -q 'measured=no'; then
+  ok "at the page limit, BOTH the JSON and the text report measured=no — the two branches agree"
+else
+  bad "JSON/text disagree on measured at the page limit:
+json=$out_j
+text=$out_t"
 fi
 
 echo "==== ADVERTISED-COLLISION-SCAN TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="

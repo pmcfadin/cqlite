@@ -1501,5 +1501,38 @@ $out33"
 fi
 kill "$DP" 2>/dev/null || true
 
+# ===========================================================================
+echo "TEST 34: reclaim asks the RECORD for the lane, like every other reader (roborev round 14)"
+# ===========================================================================
+# FIX 6 made every READER honour the record's lane-dir and round 11 rebuilt verify/probe around
+# a single snapshot; release already did. reclaim was the one path still deriving the DEFAULT
+# `$LANE_ROOT/lane-<N>`, so a lock taken under a sanctioned CUSTOM worktree could not be
+# reclaimed: the identity walk ran against a directory nobody was in. That is the break-glass
+# failing on exactly the lanes that need it — a custom-path lane whose holder is gone.
+CUSTOM34="$LANES/custom-wt/issue-934-slug"; mkdir -p "$CUSTOM34"
+sleep 300 & P34=$!
+ll acquire 934 --lane-dir "$CUSTOM34" --pid "$P34"; rc34a=$RC
+lease34=$(lease_of 934)
+# reclaim with NO --lane-dir: the record must supply the custom path
+ll reclaim 934 --pid "$P34" --expect "$lease34" --reason round14-record-supplies-the-lane
+rc34b=$RC; out34b=$OUT
+rec34=$(grep '^lane-dir=' "$(record_of 934)" 2>/dev/null | cut -d= -f2-)
+if [ "$rc34a" -eq 0 ] && [ "$rc34b" -eq 0 ] && [ "$rec34" = "$CUSTOM34" ]; then
+  ok "(a) reclaim with no --lane-dir resolves against the RECORDED custom path and succeeds"
+else
+  bad "(a) reclaim derived the default instead of reading the record: rc=$rc34a/$rc34b recorded='$rec34' want='$CUSTOM34'
+$out34b"
+fi
+# CONTROL: an explicit --lane-dir that DISAGREES is still the caller's business and must not be
+# silently overridden by the record — the record supplies the lane only when the caller did not.
+ll reclaim 934 --lane-dir "$LANES/somewhere-else" --pid "$P34" --expect "$lease34" --reason round14-control-explicit-wins
+if [ "$RC" -ne 0 ]; then
+  ok "(b) CONTROL: an explicit --lane-dir is still honoured (and here refused, since it is not the recorded lane)"
+else
+  bad "(b) CONTROL: an explicit --lane-dir was silently replaced by the record: rc=$RC
+$OUT"
+fi
+kill "$P34" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

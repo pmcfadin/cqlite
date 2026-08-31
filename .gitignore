@@ -383,7 +383,11 @@ bindings/parity/out/
 # env var (#3312: the constrained party must not choose its own enforcer), so the lock
 # path follows LANE_ROOT and nothing else. These are per-session machine state, never a
 # repo artifact.
+# SCOPED TO THE LOCK DIRECTORY (#3436, roborev round 14). These were basename-only, so they
+# matched at EVERY depth: measured, `docs/reports/lane-123.log` was ignored by the old set and
+# is not by this one. A gitignore that silently swallows an unrelated file is the quiet
+# direction of wrong — nothing errors, the file just never gets committed. The records only
+# ever live in a `.lane-locks/` directory, so say that instead of matching their basenames.
 .lane-lock*
-lane-[0-9]*.lock
-lane-[0-9]*.flock
-lane-[0-9]*.log
+.lane-locks/
+**/.lane-locks/

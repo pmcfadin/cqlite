@@ -108,6 +108,14 @@ prog="$(basename "$0")"
 REMOTE="${CLAIM_REMOTE:-origin}"
 BOARD_NUMBER=1
 BOARD_OWNER=pmcfadin
+# The owner/repo a board row must belong to (#3436, roborev round 14). HARD-CODED, exactly like
+# BOARD_OWNER and BOARD_NUMBER above, because this tool is already specific to ONE board and a
+# board is specific to its repositories. Deriving it from the remote URL was tried and reverted:
+# CLAIM_REMOTE may be a NAME, a URL or a local path (the suite uses a path), so `git remote
+# get-url` fails for legitimate inputs — and then every row is undeterminable, which either
+# fails the scan closed on valid input or, worse, takes the permissive branch and accepts rows
+# from any repository. A constant cannot be undeterminable.
+BOARD_EXPECT_REPO="${BOARD_OWNER}/cqlite"
 BOARD_LIMIT=100
 
 # Never let a remote read block on an interactive credential prompt: an unattended
@@ -314,7 +322,7 @@ scan_board() {
   # it belongs. One API call, no second page read.
   if ! raw="$(gh project item-list "$BOARD_NUMBER" --owner "$BOARD_OWNER" \
                  --query 'status:Ready' --format json -L "$BOARD_LIMIT" \
-                 --jq '.items[]|(.content.number // "null")' 2>/dev/null)"; then
+                 --jq '.items[]|[(.content.type // "null"),(.content.repository // "null"),(.content.number // "null")]|join("|")' 2>/dev/null)"; then
     return 1
   fi
   while IFS= read -r line; do
@@ -329,13 +337,31 @@ scan_board() {
     # number, and the literal `null` a DRAFT board item yields for `.content.number`.
     # Anything else nonempty means the board read is not the shape this parse was written
     # for, and the honest answer is that the fact could not be measured.
-    case "$line" in
-      null) continue ;;                       # a draft item: recognised, not a candidate
-      *[!0-9]*)
+    # A BOARD NUMBER IS NOT AN ISSUE NUMBER ON THIS REMOTE (#3436, roborev round 14). The row
+    # used to be `.content.number` alone, so a Ready PULL REQUEST — or an item from ANOTHER
+    # repository — collided with the identically-numbered issue here and produced a candidate
+    # for a lane that does not exist. The board legitimately carries all three kinds. So the
+    # row now carries type and repository too, and only an ISSUE on the SCANNED remote is a
+    # candidate. Everything else is RECOGNISED-and-skipped, which keeps round 5's rule intact:
+    # only a shape this parse does not know is UNMEASURABLE.
+    row_type="${line%%|*}"; rest="${line#*|}"
+    row_repo="${rest%%|*}"; row_num="${rest#*|}"
+    case "$row_type" in
+      DraftIssue) continue ;;                 # a draft: recognised, not a candidate
+      PullRequest) continue ;;                # a PR on the board: recognised, not a candidate
+      Issue) ;;                               # the only candidate kind
+      *)
         BOARD_UNPARSEABLE_ROW="$line"
         return 1 ;;                           # caller maps this to UNMEASURABLE
     esac
-    READY_ISSUES="${READY_ISSUES}${line}
+    case "$row_num" in
+      null) continue ;;
+      *[!0-9]*)
+        BOARD_UNPARSEABLE_ROW="$line"
+        return 1 ;;
+    esac
+    [ "$row_repo" = "$BOARD_EXPECT_REPO" ] || continue   # another repo's issue: not ours
+    READY_ISSUES="${READY_ISSUES}${row_num}
 "
     READY_COUNT=$((READY_COUNT + 1))
   done <<EOF
@@ -470,8 +496,9 @@ if [ "$AS_JSON" -eq 1 ]; then
   # board_page_at_limit is the literal `true`/`false` — those stay unquoted NUMBERS and
   # BOOLEANS. `remote` is CLAIM_REMOTE, i.e. caller-supplied, so it is escaped like every
   # other string.
-  printf '{"summary":"advertised-collision","result":%s,"rows":%s,"ready":%s,"board_page_rows":%s,"branch_issues":%s,"remote":%s,"board_page_at_limit":%s,"measured":"yes"}\n' \
-    "$(json_str "$VERDICT")" "$ROWS" "$READY_COUNT" "$READY_PAGE_ROWS" "$BRANCH_ISSUE_COUNT" "$(json_str "$(redact_remote "$REMOTE")")" "$BOARD_AT_LIMIT"
+  printf '{"summary":"advertised-collision","result":%s,"rows":%s,"ready":%s,"board_page_rows":%s,"branch_issues":%s,"remote":%s,"board_page_at_limit":%s,"measured":%s}\n' \
+    "$(json_str "$VERDICT")" "$ROWS" "$READY_COUNT" "$READY_PAGE_ROWS" "$BRANCH_ISSUE_COUNT" "$(json_str "$(redact_remote "$REMOTE")")" "$BOARD_AT_LIMIT" \
+    "$(json_str "$([ "$BOARD_AT_LIMIT" = true ] && printf 'no' || printf 'yes')")"
 else
   # `measured=` MUST FOLLOW THE COVERAGE, NOT THE EXIT PATH (#3436, roborev round 11). This
   # printed a flat `measured=yes` even when the Ready page came back AT the limit, i.e. exactly

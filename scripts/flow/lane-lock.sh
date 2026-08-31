@@ -1698,7 +1698,23 @@ cmd_reclaim() {
   [ -n "$expect" ] || die_usage "reclaim: --expect '' is rejected on purpose — pass the holder token you expect, or the literal 'none'"
   [ "$reason_given" -eq 1 ] || die_usage "reclaim requires --reason saying what the reclaim IS (it is recorded in the record and the audit log next to who took it), e.g. --reason lane-holder-oom-killed-pid-4211"
   reason_token="$(validate_reason "$reason")"
-  lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+  # THE RECORD'S lane-dir IS AUTHORITATIVE HERE TOO (#3436, roborev round 14). FIX 6 made every
+  # READER honour it and round 11 rebuilt verify/probe around a single snapshot; release already
+  # did. reclaim was the one path left deriving the DEFAULT `$LANE_ROOT/lane-<N>`, so reclaiming
+  # a lock taken under a sanctioned custom worktree (`.claude/worktrees/issue-<N>-<slug>`) walked
+  # ancestors against a directory nobody was in, could not resolve an identity, and refused the
+  # BREAK-GLASS on exactly the lanes that need it most.
+  #
+  # Swept rather than patched this time: of the six sites deriving a lane, acquire correctly uses
+  # the REQUESTED directory (it is creating the lock, and the re-entrant mismatch check covers the
+  # disagreement), verify/probe/release already ask the record, and this was the only one left.
+  local have_rec=0
+  parse_record "$(lock_record "$issue")" && have_rec=1
+  if [ "$have_rec" -eq 1 ] && [ -n "${REC_LANE_DIR:-}" ] && [ -z "$lane_opt" ]; then
+    lane="$REC_LANE_DIR"
+  else
+    lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+  fi
   if ! mkdir -p "$(lock_root)" 2>/dev/null; then
     emit_infra "detail=lock-root-uncreatable path=$(lock_root)"
     return 1
