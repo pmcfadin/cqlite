@@ -250,10 +250,16 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `session-N.scope`), but **AC2 landed as a PARTIAL: a sufficient, demonstrated mechanism with
   alternatives ruled out — NOT a confirmed diagnosis** of the original deaths, whose correlation with
   ~10 minutes nothing measured here explains. So **"lanes cannot run a full gate" is RETRACTED** — a
-  lane can, detached. `gate-detached.sh` forwards the caller's whole environment (a
-  transient systemd unit inherits **none** of it, and an allowlist of remembered variables fails
-  silently) and **refuses with exit 69** where it cannot deliver a separate cgroup, rather than
-  falling back to a session-scoped launch the caller would believe was protected.
+  lane can, detached. `gate-detached.sh` forwards the caller's environment **except the three
+  build-flag variables it deliberately drops** — `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+  `RUSTDOCFLAGS`, named in the launch banner's `SKIPPED` list, because `systemd-run --scope`
+  inherits the caller's shell and a non-empty `RUSTFLAGS` SUPPRESSES cargo's managed
+  `target.rustflags` block, so a lane that exported it once poisons every detached gate it starts
+  (that contamination reddened a clean tree and halted the fleet on a P0 that did not exist).
+  Everything else is carried across (a transient systemd unit inherits **none** of it, and an
+  allowlist of remembered variables fails silently), and it **refuses with exit 69** where it
+  cannot deliver a separate cgroup, rather than falling back to a session-scoped launch the caller
+  would believe was protected.
   **And the killed-vs-running ambiguity is now answerable without `ps` on the box**: the gate beats
   `<summary-file>.heartbeat` every 20s for as long as it lives (the startup sentinel names the path),
   and `gate-liveness.sh <summary-file> [--run-id <id>]` reports `COMPLETE`(0) / `RUNNING`(2) /

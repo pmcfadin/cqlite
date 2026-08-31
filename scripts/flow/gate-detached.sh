@@ -296,8 +296,8 @@ while IFS= read -r -d '' kv; do
     # contamination made binding-rust-tests FAIL on a CLEAN tree, was diagnosed as a source defect,
     # and halted the fleet for about an hour on a P0 that did not exist.
     #
-    # THIS LAUNCHER IS THE PROPAGATION VECTOR, which is why the drop belongs here: it forwards the
-    # caller's whole environment, so a lane that exported RUSTFLAGS once poisons every detached gate
+    # THIS LAUNCHER IS THE PROPAGATION VECTOR, which is why the drop belongs here: it forwarded the
+    # caller's WHOLE environment, so a lane that exported RUSTFLAGS once poisoned every detached gate
     # it starts -- invisibly, because the flag arrives through systemd-run rather than a command line
     # anyone can read. Verified by capturing the generated wrapper: before this arm it carried
     # RUSTFLAGS twice and CARGO_ENCODED_RUSTFLAGS once.

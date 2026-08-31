@@ -299,6 +299,31 @@ mk_beat "$TMP/a.txt.heartbeat" run-a 60 20
 expect_reader "5.1 age 60s, well inside the 90s floor => RUNNING"  RUNNING 2 "" -- "$TMP/a.txt"
 mk_beat "$TMP/a.txt.heartbeat" run-a 85 20
 expect_reader "5.2 age 85s, just inside the 90s floor => RUNNING"  RUNNING 2 "" -- "$TMP/a.txt"
+# 5.2b/5.2c (roborev-adjacent, found by doing the C audit myself after the auditor went idle):
+# RUNNING's disclosure used to hand the reader a MEASURABLY WRONG recipe — compare
+# utime+stime+cutime+cstime from /proc/<gate-pid>/stat against elapsed, "a working one is >=1"
+# core. Those fields count REAPED children only, and a gate's work lives in cargo/maturin children
+# that are still alive: MEASURED on a healthy 37/37 run, the parent read 0.15 cores at 89s and 0.09
+# at 905s while producing ~5.7 GB/min with 60 pids turning over per 20s. So the shipped advice made
+# a working gate look queued — the exact misreading it existed to prevent, and one I made twice
+# (once about a peer's gate). Asserted on the EMITTED text, both directions: the retracted claim
+# must be GONE and a sound signal must be NAMED, because deleting the bad advice without replacing
+# it would leave the reader with no way to answer the question the note raises.
+mk_beat "$TMP/a.txt.heartbeat" run-a 60 20
+run_reader -- "$TMP/a.txt"
+if printf '%s' "$OUT" | grep -qE 'a working one is >=?1|sits near 0\.01 cores'; then
+  bad "5.2b RUNNING no longer claims the parent pid's cumulative cpu shows progress" \
+      "the retracted >=1-core recipe is still emitted"
+else
+  ok "5.2b RUNNING no longer claims the parent pid's cumulative cpu shows progress"
+fi
+if printf '%s' "$OUT" | grep -q 'PID-SET TURNOVER' \
+   && printf '%s' "$OUT" | grep -qi 'REAPED children only'; then
+  ok "5.2c RUNNING names a sound progress signal AND why the pid reading fails"
+else
+  bad "5.2c RUNNING names a sound progress signal and why the pid reading fails" \
+      "$(printf '%s' "$OUT" | grep -c . ) lines, no turnover/reaped explanation"
+fi
 mk_beat "$TMP/a.txt.heartbeat" run-a 120 1
 expect_reader "5.3 age 120s, well past the 90s floor => STALLED" STALLED 3 "window 90s" -- "$TMP/a.txt"
 # The window ARITHMETIC itself, asserted at the source: max(3 x interval, 90). Exact, and immune to

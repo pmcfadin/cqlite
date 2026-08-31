@@ -1406,7 +1406,7 @@ zero is distinguishable from a future silence.
 and the gate then appends its own, producing a doubled `-D warnings` applied to components the gate
 deliberately scopes it away from. That contamination made `binding-rust-tests` fail on a **clean** tree,
 was diagnosed as a source defect, and halted the fleet for about an hour on a P0 that did not exist.
-`gate-detached.sh` forwards the caller's entire environment, so it propagated the poison **invisibly** —
+`gate-detached.sh` forwarded the caller's ENTIRE environment, so it propagated the poison **invisibly** —
 through `systemd-run`, where no command line shows it. `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and
 `RUSTDOCFLAGS` are now dropped and **named in `SKIPPED`**, which the banner emits; a silent drop of a
 caller's variable would be this same defect in miniature. Verified on the generated wrapper, both

@@ -352,10 +352,17 @@ verdict() { # verdict <STATUS> <exit> <detail>
   # not a disclosure to whoever reads the artifact.
   if [ "$1" = RUNNING ]; then
     echo "note: RUNNING means this run is ALIVE, not that it is PROGRESSING — a gate queued for the"
-    echo "      gate slot beats identically to one doing work. For progress, compare CUMULATIVE cpu"
-    echo "      (utime+stime+cutime+cstime from /proc/<gate-pid>/stat) against elapsed: a queued gate"
-    echo "      sits near 0.01 cores sustained, a working one is >=1. A single delta is NOT enough;"
-    echo "      component load swings 0 -> 2+ cores inside one component."
+    echo "note: RUNNING means this run is ALIVE, not that it is PROGRESSING — a gate queued for the"
+    echo "      gate slot beats identically to one doing work."
+    echo "      Do NOT judge progress from /proc/<gate-pid>/stat: utime+stime+cutime+cstime counts"
+    echo "      REAPED children only, and a gate's work lives in cargo/maturin children that are"
+    echo "      still ALIVE, so the parent reads near 0.1 cores while the run consumes GB/min."
+    echo "      MEASURED on a healthy 37/37 run: 0.15 cores at 89s and 0.09 at 905s, while it was"
+    echo "      producing ~5.7 GB/min of build output with 60 pids turning over per 20s."
+    echo "      Sound signals: PID-SET TURNOVER in the run's cgroup (processes entering and leaving"
+    echo "      = advancing), and GROWTH of the build target/ (a build's output evidences a build)."
+    echo "      Sample either more than once: component load swings 0 -> 2+ cores, and one spot check"
+    echo "      under-reads a bursty writer as surely as it over-reads a lull."
   fi
   echo "summary: $SUMMARY"
   echo "heartbeat: $HB"
