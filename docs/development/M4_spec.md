@@ -765,9 +765,17 @@ nesting space and therefore cannot be closed. `Value::Frozen` adds no row: it re
 Reading rule: a shape with no collision needs no thought; a **benign** collision needs none either
 (that is what benign means); the **three** rows carrying a divergent source — `list`, `tuple` (for
 a projected `map` only) and `dict` — are the ones requiring #1455 to act, and their instances are
-named in the next table. Since #3500 **no projection position raises**: `value_to_hashable_key` is
-total, so a `udt` in a projection position projects to a `cqlite.Udt`, a `set` to a `frozenset` and
-a `list`/`tuple` to a `tuple`, and every value reaches the normalizer. (A UDT-bearing *set* COLUMN
+named in the next table. Since #3500 **no projection position raises for an unhashable shape**:
+`value_to_hashable_key` is total over `Value` — every variant named, no `_ =>` arm — so a `udt` in
+a projection position projects to a `cqlite.Udt`, a `set` to a `frozenset` and a `list`/`tuple` to
+a `tuple`, and every value reaches the normalizer. **Scope that claim to SHAPE**, not to
+infallibility: the function's JSON scalar arm delegates to `json_to_py`, which since **#3505**
+can REFUSE a JSON number no host type represents exactly (`Beyond` → an exact `int` via `BigInt`,
+else an `unsupported_format` error). A refusal is fail-closed and is never an unhashable value —
+it is the direction #3500's own AC3 asked for — and it is UNREACHABLE in this build, because
+without `arbitrary_precision` `serde_json` rounds such a literal to an `f64` in the PARSER before
+any binding code runs (measured and test-asserted in `cqlite-ffi-common/src/json_number.rs`).
+(A UDT-bearing *set* COLUMN
 is a separate matter — `contains_udt` routes it to `set_to_py`'s `list` branch, which is row
 **`list`** above, not a projection.)
 
