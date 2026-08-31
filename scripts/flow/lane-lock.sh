@@ -316,6 +316,24 @@ require_numeric_issue() {
   esac
 }
 
+# require_abs_path <flag> <value> — path validation happens AT THE ARGUMENT BOUNDARY,
+# in the MAIN shell, and must never be left to resolve_lane_dir alone.
+#
+# WHY (measured, not theoretical): callers resolve the lane dir inside a command
+# substitution, and `die_usage`'s `exit 64` there exits only the SUBSHELL. A single
+# substitution is still fatal by accident (`set -e` propagates the assignment's
+# status), but a NESTED one — `lane="$(lane_real "$(resolve_lane_dir …)")"` — swallows
+# it completely: `verify --lane-dir ./lane` printed the usage error to stderr AND THEN
+# a `VERIFY-FAIL … lane-dir=` verdict for an empty lane directory, i.e. a refusal
+# about a lane nobody named. Validating here removes the reliance on `set -e` reaching
+# out of a subshell at all.
+require_abs_path() {
+  case "${2:-}" in
+    /*) ;;
+    *) die_usage "$1 must be an ABSOLUTE path (got '${2:-<empty>}'): a relative path resolves against each caller's cwd, so two callers would lock two different directories while believing they shared one" ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # /proc readers
 # ---------------------------------------------------------------------------
@@ -745,7 +763,7 @@ cmd_acquire() {
   local issue="" lane_opt="" actor="${LANE_LOCK_ACTOR:-flow}" pid_opt="" lane
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; lane_opt="$2"; shift 2 ;;
+      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
       --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value";      pid_opt="$2";  shift 2 ;;
       -*) die_usage "acquire: unknown flag $1" ;;
@@ -773,7 +791,7 @@ cmd_verify() {
   local issue="" lane_opt="" actor="${LANE_LOCK_ACTOR:-flow}" pid_opt="" lane liveness
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; lane_opt="$2"; shift 2 ;;
+      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
       --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value";      pid_opt="$2";  shift 2 ;;
       -*) die_usage "verify: unknown flag $1" ;;
@@ -812,7 +830,7 @@ cmd_probe() {
   local issue="" lane_opt="" lane liveness reclaimable=no
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; lane_opt="$2"; shift 2 ;;
+      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       -*) die_usage "probe: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "probe: unexpected argument $1"; issue="$1"; shift ;;
     esac
@@ -866,7 +884,7 @@ cmd_release() {
   local issue="" lane_opt="" actor="${LANE_LOCK_ACTOR:-flow}" force=0 lane
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; lane_opt="$2"; shift 2 ;;
+      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
       --force)    force=1; shift ;;
       -*) die_usage "release: unknown flag $1" ;;
@@ -980,7 +998,7 @@ cmd_reclaim() {
   local expect="" expect_given=0 reason="" reason_given=0 reason_token
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; lane_opt="$2"; shift 2 ;;
+      --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
       --pid)      [ "$#" -ge 2 ] || die_usage "--pid requires a value";      pid_opt="$2";  shift 2 ;;
       --expect)   [ "$#" -ge 2 ] || die_usage "--expect requires a value"; expect="$2"; expect_given=1; shift 2 ;;
@@ -1025,8 +1043,8 @@ cmd_status() {
   local issue="" root_opt="" root lane count=0 f
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --lane-root) [ "$#" -ge 2 ] || die_usage "--lane-root requires a value"; root_opt="$2"; shift 2 ;;
-      --lane-dir)  [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; root_opt="";   lane="$2"; shift 2 ;;
+      --lane-root) [ "$#" -ge 2 ] || die_usage "--lane-root requires a value"; require_abs_path --lane-root "$2"; root_opt="$2"; shift 2 ;;
+      --lane-dir)  [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; root_opt="";   lane="$2"; shift 2 ;;
       -*) die_usage "status: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "status: unexpected argument $1"; issue="$1"; shift ;;
     esac
