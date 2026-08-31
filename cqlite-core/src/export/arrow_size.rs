@@ -358,7 +358,11 @@ impl<'a> PreparedColumns<'a> {
     ///
     /// Fails closed to `usize::MAX` on an arity mismatch or a row index outside
     /// any column, for the same reason as [`Self::row_bytes`].
-    pub(in crate::export) fn row_bytes_columnar(&self, cells: &[Vec<Option<Value>>], row: usize) -> usize {
+    pub(in crate::export) fn row_bytes_columnar(
+        &self,
+        cells: &[Vec<Option<Value>>],
+        row: usize,
+    ) -> usize {
         if cells.len() != self.shapes.len() || cells.iter().any(|col| row >= col.len()) {
             return usize::MAX;
         }
