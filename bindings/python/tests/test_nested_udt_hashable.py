@@ -93,6 +93,7 @@ skipping behind its siblings).
 """
 
 import ast
+import hashlib
 import os
 import re
 from pathlib import Path, PurePosixPath
@@ -533,8 +534,14 @@ def _resolve_declared_generation(
       another root does carry the declared generation: an operator whose
       exported corpus holds unreviewed bytes for this table has to hear it,
       because that corpus WAS the oracle before this check existed;
-    * two roots both carrying the declared generation is AMBIGUITY — refused
-      rather than picked;
+    * two roots both carrying the declared generation are compared BY CONTENT.
+      Byte-identical copies are not ambiguity — they are the same fixture reached
+      by two paths, which becomes the NORMAL state as soon as the fetched corpus
+      ships a git-committed fixture (roborev job 302, Medium: refusing it would
+      red every environment that has both an exported root and the checkout).
+      Copies resolve to the first; generations that DIFFER are still refused,
+      because that is the shadowing case this check exists for. Decided by
+      evidence, never by a preference ordering (#3220);
     * no root carrying it names every root searched. The fixture is
       git-committed, so this is a broken checkout or a broken resolver, never a
       reason to skip (#3220).
@@ -566,13 +573,31 @@ def _resolve_declared_generation(
             "the undeclared generation (#3500)"
         )
     if len(matches) > 1:
-        raise AssertionError(
-            f"AMBIGUOUS: {len(matches)} candidate roots carry the declared "
-            f"{keyspace}.{table} generation {dirname!r} — "
-            + ", ".join(str(m) for m in matches)
-            + ". Refused rather than picking one, because a preference ordering "
-            "is exactly what cannot tell two same-named generations apart (#3500)"
-        )
+        # COMPARE THE BYTES rather than refusing on count. Two roots carrying the
+        # declared generation are ambiguous only if they carry DIFFERENT bytes;
+        # identical copies are one fixture reached two ways, which is what an
+        # exported corpus plus a git-committed fixture looks like. Refusing that
+        # would red every normal environment once the corpus ships this table
+        # (roborev job 302). A preference ordering still cannot tell two
+        # generations apart — so this does not use one; it uses the evidence.
+        digests: dict[str, list[Path]] = {}
+        for root in matches:
+            data = root / keyspace / dirname / f"{prefix}-Data.db"
+            digest = hashlib.sha256(data.read_bytes()).hexdigest()
+            digests.setdefault(digest, []).append(root)
+        if len(digests) > 1:
+            detail = "; ".join(
+                f"{d[:12]}: " + ", ".join(str(r) for r in roots)
+                for d, roots in sorted(digests.items())
+            )
+            raise AssertionError(
+                f"AMBIGUOUS: {len(matches)} candidate roots carry the declared "
+                f"{keyspace}.{table} generation {dirname!r} with "
+                f"{len(digests)} DIFFERENT contents — {detail}. Refused rather "
+                "than picking one: same-named generations with different bytes "
+                "are the shadowing case this resolver exists to catch, and no "
+                "preference ordering can tell them apart (#3500)"
+            )
     if not matches:
         raise AssertionError(
             f"the COMMITTED {keyspace}.{table} generation declared by "
@@ -1784,10 +1809,16 @@ class TestFixtureResolutionContract:
     def test_declared_generation_in_two_roots_is_ambiguous_not_picked(
         self, tmp_path, monkeypatch
     ):
-        """Two roots carrying the declared generation is AMBIGUITY, not a choice.
+        """Two roots carrying the declared generation with DIFFERENT bytes is
+        AMBIGUITY, not a choice.
 
-        Both copies match the manifest, so no evidence separates them and
-        picking either would be the preference ordering this resolver refuses.
+        The decoy writes ``b"not a real sstable"``, so the two copies match the
+        manifest but NOT each other — which is the shadowing case this resolver
+        exists to catch, and no preference ordering can tell them apart.
+
+        An earlier version of this test said "no evidence separates them", which
+        was wrong: the BYTES separate them, and that is precisely what the
+        byte-identical sibling case below relies on (roborev job 302).
         """
         dirname, prefix = _manifest_declared_generation(KEYSPACE, TABLE)
         decoy = self._decoy_root(tmp_path, monkeypatch, dirname, f"{prefix}-Data.db")
@@ -1798,6 +1829,39 @@ class TestFixtureResolutionContract:
         assert str(decoy) in message
         checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
         assert str(checkout) in message
+
+    def test_two_roots_with_byte_identical_copies_resolve_rather_than_refuse(
+        self, tmp_path, monkeypatch
+    ):
+        """A byte-identical copy in a second root is ONE fixture, not ambiguity.
+
+        This is the state that arrives the day the fetched corpus ships this
+        git-committed fixture: an operator has an exported ``CQLITE_DATASETS_ROOT``
+        AND the checkout, both carrying the declared generation, byte for byte the
+        same. Refusing it would red every such environment (roborev job 302,
+        Medium) — so the resolver compares CONTENT and treats identical copies as
+        the same fixture reached two ways.
+
+        Note what this does NOT relax: the sibling test above still refuses two
+        roots whose bytes DIFFER. The discriminator is evidence, not a preference
+        ordering, which is the property #3220 asks for.
+        """
+        dirname, prefix = _manifest_declared_generation(KEYSPACE, TABLE)
+        checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
+        real = checkout / KEYSPACE / dirname / f"{prefix}-Data.db"
+        assert real.is_file(), f"committed fixture missing: {real}"
+
+        copy_root = tmp_path / "copy"
+        table_dir = copy_root / "sstables" / KEYSPACE / dirname
+        table_dir.mkdir(parents=True)
+        (table_dir / f"{prefix}-Data.db").write_bytes(real.read_bytes())
+        monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(copy_root))
+
+        resolved = _sstables_root_for_table(KEYSPACE, TABLE)
+        assert (resolved / KEYSPACE / dirname / f"{prefix}-Data.db").is_file(), (
+            "an identical copy in a second root must resolve to a usable root, "
+            f"got {resolved}"
+        )
 
     def test_a_symlinked_env_root_is_one_root_not_an_ambiguity(
         self, tmp_path, monkeypatch
