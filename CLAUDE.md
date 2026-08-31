@@ -1011,9 +1011,56 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   stops, emits a `NEEDS-SPAWN {role: spec-auditor, …}` packet, and the lead spawns `spec-auditor`
   then re-invokes with the verdict; a src-design fix respawns `sstable-developer` the same way).
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha>` (#2456) — refusing to merge unless the PR
-  head still equals the certified SHA — and re-reads comments for a fresh `HOLD:` order. With `--auto`
-  armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]`
+  (#2456/#3465) — refusing to merge unless the PR head still equals the certified SHA **AND** a gate
+  of record exists for it — and re-reads comments for a fresh `HOLD:` order. **The third argument is
+  REQUIRED, and that is the #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
+  certified sha EXISTS. **Two distinct escapes, one mechanism.** #3408 = **no gate at all** (merged on
+  22 `--lite` PASSes and not one full `scripts/agent-gate.sh` run, because nothing in the merge path
+  ever asked for the block). #3616 = **a real gate, someone else's** — a closer located its run dir by
+  RECENCY (`ls -t /tmp/agent-gate.*`), read a PEER LANE's dir, saw 33 of 37 components PASS and was
+  about to merge #3616 on PR #3580's verdict; the count, the dir and the timestamps were all real, and
+  only the `run-id:` line exposed it, read by a human. With 14000-27000 stale run dirs per box and up
+  to 4 concurrent gates, recency picks a peer ROUTINELY. **That second class is what the
+  `commit:`+`tree-start:` binding refuses**: a peer's summary carries the OTHER PR's branch head, so
+  requiring both abbreviations to match the certified sha converts "a human might notice the `run-id:`
+  line" into a mechanical refusal at the merge point — the sha compare is the guard, not bookkeeping.
+  The script now requires the summary file to hold exactly ONE
+  `==== AGENT-GATE SUMMARY ====` block (whole-line-anchored; `--lite`/`--delta` headers are distinct
+  and refused by name, as is a second or unterminated block) with `RESULT: PASS` and
+  `tree-integrity: PASS` compared **token-exactly** (`INCOMPLETE` is the launch sentinel, not a
+  verdict — #3041; a mutated-mid-run tree is not a certification — #2926), and with BOTH `commit:`
+  (7 hex) and `tree-start:` (12 hex) prefix-matching the certified sha **at each value's own width**
+  — a non-hex placeholder REFUSES rather than being skipped. It cannot verify `run-id:` (it did not
+  launch the gate — #2874's reader contract needs the launcher) and it cannot prove the summary came
+  from a real run rather than a hand-written file: a **hostile invoker is out of the threat model**;
+  what this closes is **accident and drift** — a diligent worker with no step in its path telling it
+  the gate of record was never run. `dirty:` is REPORTED in the success line, not enforced (failing on it
+  is proposed separately in #3648). **The FOURTH argument is optional and is the ONLY way a `--delta`
+  re-cert can certify a merge** — because #1892 *mandates* `--delta`, "never a repeat full gate", for a
+  test/docs-only diff on top of a full PASS at anchor `X`, and mandates that the PR record BOTH blocks.
+  A 3-arg-only guard therefore red on correct, doctrine-mandated input, which is the guard agents learn
+  to waive. So: **Case A (3 args)** the full block's `commit:`/`tree-start:` must cover the certified
+  sha; **Case B (4 args)** the third argument is the ANCHOR's full PASS (its sha need NOT be the
+  certified sha) and the fourth must be one `==== AGENT-GATE DELTA SUMMARY ====` block with
+  `MODE: delta` (asserted affirmatively — the inverse of Case A's belt), `RESULT: PASS`,
+  `tree-integrity: PASS`, a `delta-anchor:` naming exactly that anchor (an `(UNRESOLVED)` anchor
+  refuses), and its OWN `commit:`/`tree-start:` at the certified sha. Either way a full-gate PASS must
+  EXIST and the merged tree is covered — directly, or by an anchored delta re-cert on top of it. A
+  block carrying `nested-under:` (#2874) is refused outright: a nested sub-gate runs at the SAME tree,
+  so the sha binding provably cannot see it.
+  **What a `PREMERGE: OK` does NOT prove (#3650) — it says so itself, on a `PREMERGE: SCOPE` line.**
+  It proves the diff is unchanged since certification and that a full gate PASSed on **that exact
+  tree**. It does NOT prove the change was certified against the `main` it will join: a squash-merge
+  composes the diff with main's CURRENT tip, so for any PR whose base is behind main **the certified
+  tree and the merged tree are different objects**. Measured on #3358/PR #3362: base `2bde26a7c` with
+  main 10 commits ahead, whose head gate FAILed `core-tests` only because a known flake's fix
+  (`5e08db201`, #3514) was on main and absent from that base — the benign direction; the malign one is
+  a PASS at a stale head hiding an interaction with something that landed in between. A gate on the
+  MERGE RESULT is #3650 and is deliberately not implemented here (nor is a staleness bound or a "your
+  base is N commits behind" advisory). Report the verdict as "gate of record verified at `<sha>`",
+  never "certified against main". With
+  `--auto` armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
   are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration
   target) → re-review` (#2087). **Nits** never trigger

@@ -58,6 +58,19 @@ Resolve them in the worktree and reply per thread.
    ```
 7. **Re-certify and re-arm merge-on-green (#2667).** The owner's comments are input, NOT a merge
    gate — unless a comment is an explicit `HOLD:` or raises a product/scope question. After addressing
-   them, re-certify (lite + any diff-relevant targets; a full/delta gate per the gate contract if the
-   certified SHA changed), re-run `bash scripts/flow/premerge-assert.sh <pr> <certified-sha>`, then re-arm
-   `gh pr merge --auto --squash --delete-branch`.
+   them, re-certify (lite + any diff-relevant targets), then re-run premerge-assert in the shape that
+   matches what you changed (#3465) and re-arm `gh pr merge --auto --squash --delete-branch`:
+   ```bash
+   # A CODE fix moved the certified SHA -> it needs a NEW full gate at the new head:
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <full-gate-summary>
+   # A TEST/DOCS-ONLY fix on top of a full PASS at anchor X -> #1892's --delta re-cert,
+   # never a repeat full gate; pass BOTH the anchor's full summary AND the delta summary:
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <anchor-full-summary> <delta-summary>
+   ```
+   The third argument is REQUIRED and must always be a FULL-gate `RESULT: PASS` block; `--lite` is
+   refused by name everywhere, and a `--delta` block is accepted ONLY as the optional fourth argument
+   (where the script checks that its `delta-anchor:` names the third argument's block and that its own
+   `commit:`/`tree-start:` are at the certified SHA). `--lite` is never the gate of record.
+   Exit 0 proves the diff is unchanged since certification and that a full gate PASSed on that exact
+   tree — **not** that it was certified against current `main` (a squash-merge composes the diff with
+   main's tip; #3650). Report it that way.
