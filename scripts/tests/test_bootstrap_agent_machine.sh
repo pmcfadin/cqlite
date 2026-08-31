@@ -176,6 +176,11 @@ chmod +x "$PIN_BS"
 PIN_SANDBOX_ROOT="$tmp"
 export PIN_SANDBOX_ROOT
 
+# `--help` gets a sandbox like every other invocation. It exits before any section and so
+# cannot write — but the guard asserts INPUTS, and excusing an invocation because we
+# reasoned it is harmless is how a guard's coverage erodes into a claim. No exemptions.
+mkdir -p "$tmp/help-home/.cargo"
+
 # --- 1. syntax check (bash -n) ---
 if bash -n "$BOOTSTRAP" 2>/dev/null; then
   ok "bootstrap script parses (bash -n)"
@@ -184,7 +189,7 @@ else
 fi
 
 # --- 2. --help exits 0 and prints usage ---
-help_out=$("$PIN_BS" "$BOOTSTRAP" --help 2>&1); help_rc=$?
+help_out=$(env HOME="$tmp/help-home" CARGO_HOME="$tmp/help-home/.cargo" "$PIN_BS" "$BOOTSTRAP" --help 2>&1); help_rc=$?
 if [ "$help_rc" -eq 0 ] && printf '%s' "$help_out" | grep -q "bootstrap"; then
   ok "--help exits 0 and prints usage"
 else
@@ -1968,7 +1973,7 @@ fi
 #   git push probe vs the gate fmt run) and the name similarity is a live hazard, so
 #   both must be documented and each must skip only its own thing. 7p-a ran with
 #   --skip-smoke ALONE and still probed; 7p-d ran with BOTH and skipped only the probe.
-push_help=$("$PIN_BS" "$BOOTSTRAP" --help 2>&1)
+push_help=$(env HOME="$tmp/help-home" CARGO_HOME="$tmp/help-home/.cargo" "$PIN_BS" "$BOOTSTRAP" --help 2>&1)
 if printf '%s' "$push_help" | grep -q -- '--skip-push-probe' \
    && printf '%s' "$push_help" | grep -q -- '--skip-smoke' \
    && printf '%s' "$push_help" | grep -q -- '--fix-credentials' \
