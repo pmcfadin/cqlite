@@ -81,13 +81,20 @@ case "$INTERVAL" in ''|*[!0-9]*) echo "gate-heartbeat: --interval must be numeri
 # is gone. `ps -o lstart=` is portable, stable, and empty for an absent pid; its one-second
 # granularity is immaterial for reuse detection, which requires cycling the whole pid space.
 _starttime() {
-  local pid="$1" raw rest ls
+  local pid="$1" raw rest ls _had_f
   raw=$(cat "/proc/$pid/stat" 2>/dev/null)
   if [ -n "$raw" ]; then
     rest="${raw##*) }"
     # rest begins at field 3 (state); starttime is field 22 => the 20th of rest.
-    # shellcheck disable=SC2086  # deliberate word-split into positional params
+    # SPLITTING IS WANTED; GLOBBING IS NOT (round-48 class audit, class 1). The blanket SC2086 disable
+    # suppressed both warnings, which is why the enumerator was silent at this site. `set -f` says
+    # exactly what is meant: split, do not glob. The previous state of `-f` is restored rather than
+    # assumed, so a caller's own setting cannot be cleared. Same fix as gate-detached.sh's copy.
+    case $- in *f*) _had_f=1 ;; *) _had_f=0 ;; esac
+    set -f
+    # shellcheck disable=SC2086  # the split is deliberate; `set -f` above means it cannot also glob
     set -- $rest
+    [ "$_had_f" = 1 ] || set +f
     if [ $# -ge 20 ]; then printf 'proc:%s' "${20}"; return 0; fi
   fi
   ls=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ')

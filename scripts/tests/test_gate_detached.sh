@@ -2243,7 +2243,16 @@ fi
 # shape this issue has already produced twice.
 _split_hits=0
 for _f in "$LAUNCHER" "$REPO_ROOT/scripts/lib/gate-heartbeat.sh"; do
-  grep -qE '^[[:space:]]*set -- \$' "$_f" && _split_hits=$((_split_hits+1))
+  # An UNGUARDED split is the defect. Where splitting is genuinely wanted (/proc stat field 20 =
+  # starttime) it must say so with `set -f` on the same line, so globbing is off while splitting is on
+  # — a blanket `disable=SC2086` suppressed BOTH warnings and is why the enumerator was silent at
+  # exactly the site that needed it. So: every `set -- $...` line must also carry `set -f`.
+  _split_hits=$((_split_hits + $(awk '
+    /set -f/                          { guard = 3 }
+    /(^|;)[[:space:]]*set -- \$/       { if (guard <= 0) bad++ }
+                                      { if (guard > 0) guard-- }
+    END                               { print bad+0 }
+  ' "$_f")))
 done
 if [ "$_split_hits" = 0 ]; then
   ok "4b.162 neither copy of _proc_is_zombie word-splits /proc stat (class 1, both files)"

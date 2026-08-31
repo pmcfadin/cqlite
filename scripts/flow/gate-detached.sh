@@ -672,12 +672,21 @@ _proc_is_zombie() {  # <pid> -> 0 = provably a zombie, 1 = not, or unmeasurable
 }
 
 _proc_identity() {
-  local raw rest ls
+  local raw rest ls _had_f
   raw=$(cat "/proc/$1/stat" 2>/dev/null)
   if [ -n "$raw" ]; then
     rest="${raw##*) }"
-    # shellcheck disable=SC2086
+    # SPLITTING IS WANTED HERE; GLOBBING IS NOT, and a blanket SC2086 disable suppressed both
+    # (round-48 class audit, class 1). Field 20 of /proc/<pid>/stat is the process start time, so this
+    # genuinely needs word splitting -- but pathname expansion of those fields is never wanted, and the
+    # disable is why the enumerator was silent at the one site that needed it. `set -f` for the
+    # duration expresses exactly that: split, do not glob. The previous state of `-f` is restored
+    # rather than assumed, so this cannot clear a caller's own setting.
+    case $- in *f*) _had_f=1 ;; *) _had_f=0 ;; esac
+    set -f
+    # shellcheck disable=SC2086  # the split is deliberate; `set -f` above means it cannot also glob
     set -- $rest
+    [ "$_had_f" = 1 ] || set +f
     if [ $# -ge 20 ]; then printf 'proc:%s' "${20}"; return 0; fi
   fi
   ls=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ')
