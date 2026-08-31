@@ -931,16 +931,33 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   new finding at the same head raises the observed count and fails** — that is how the UNDEFERRED set is
   computed without a per-finding identity roborev's prose does not provide, and **no such identity is
   reconstructed from that prose** (the class #3564 closed by REMOVING prose reconstruction stays closed).
-  `issues=` records that the finding is **TRACKED**, and RETRIEVABILITY is the leg that enforces it:
-  each number must be a retrievable GitHub issue, asked **THREE-VALUED** — only a payload affirmatively
-  naming that number is `present` and may grant; an issue GitHub answers does not exist is
-  `ISSUE-ABSENT`; an issue whose existence could NOT BE ASKED (no `gh`, no auth, a network/API failure,
-  an unparseable payload, or any diagnostic that does not say the issue is missing) is
-  `ISSUE-UNVERIFIABLE`. The two are **textually distinct** because they are different operator actions
-  ("that issue number is wrong" vs "this box cannot reach GitHub"), and **`gh issue view` EXITS 1 FOR
-  BOTH** (measured, gh 2.98.0) — so an exit-code-only test is the two-valued predicate that always picks
+  `issues=` records that the finding is **TRACKED**, and THE ISSUE-STATE LEG is what enforces it:
+  each number must be an **OPEN** GitHub issue, asked **FOUR-VALUED** — only a payload affirmatively
+  naming that number **and an OPEN state** is `present` and may grant; an issue GitHub answers does not
+  exist is `ISSUE-ABSENT`; an issue GitHub answers is CLOSED is `ISSUE-CLOSED`; an issue whose existence
+  could NOT BE ASKED (no `gh`, no auth, a network/API failure, an unparseable payload, or any diagnostic
+  that does not say the issue is missing) is `ISSUE-UNVERIFIABLE`. They are **textually distinct**
+  because they are different operator actions ("that issue number is wrong" / "that issue is closed" /
+  "this box cannot reach GitHub"), and **`gh issue view` EXITS 1 FOR BOTH THE FIRST AND THE LAST**
+  (measured, gh 2.98.0) — so an exit-code-only test is the two-valued predicate that always picks
   the permissive answer and would grant over issues nobody confirmed exist. Unrecognised ⇒ could-not-ask,
   and a could-not-ask is NEVER read as verified.
+  **AND "RETRIEVABLE" WAS NOT ENOUGH, WHICH IS WHY THE CHECK IS STRONGER THAN THE CONDITION THAT ASKED
+  FOR IT (#3626 round 3).** `gh issue view` returns the number and **exits 0 for a CLOSED issue**, so a
+  number-only test made "the finding is tracked" satisfiable by an issue closed as a duplicate three
+  weeks ago: `present` ⇒ `GRANTED` ⇒ `RESULT: PASS`, the finding permanently untracked while the block
+  asserted it was filed. The condition said *retrievable* and closed-is-retrievable satisfies the letter
+  — but three separate statements of this leg claim it enforces **not-dropped**, so the claim was made
+  TRUE rather than weakened to match a weaker implementation. **The generalisable ruling: when the
+  implementation satisfies the LETTER of a condition and contradicts the PROPERTY every statement of it
+  claims, strengthen the implementation — do not narrow three claims.** A false refusal here is
+  recoverable (reopen it, or file a fresh tracking issue) and is the fail-closed direction.
+  **The disposition backstop COUNTS VERIFICATIONS PERFORMED; it does not test the string.** It was
+  `[ -z "$ISSUES" ]` — a non-emptiness test standing in for a verification test — and `ISSUES=","`
+  passes it, splits into ZERO words, runs the loop body never, and returns with the state still
+  `granted`: a `DEFERRED` ⇒ `PASS` with not one `gh issue view` executed. Unreachable only because the
+  `issues=` PATTERN forbade that value, i.e. **exactly the upstream dependency a backstop must not
+  have**. Now the count of verifications must EQUAL the count of declared comma-separated fields.
   **A PR-BODY LINK WAS ALSO REQUIRED, AND THAT LEG IS DELETED — DO NOT REINSTATE IT (#3626, lead
   ruling).** An earlier revision demanded each number also appear as a local, visible `#N` in the PR
   BODY (`PR-UNLINKED` otherwise), with recognisers for `owner/repo#N`, `#Nsuffix`, fences, code spans and
@@ -965,9 +982,16 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `NONE`** (which stays reachable only from the record's structured verdict letter, so nobody grepping
   `findings: NONE` reads a deferred run as clean) — beside a `deferral:` key that speaks even when
   nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAUTHORIZED`/`COUNT-MISMATCH`/`ISSUE-ABSENT`/
-  `ISSUE-UNVERIFIABLE`/`UNAVAILABLE`, each leaving the FAIL). A marker **attempt** is the stem plus
-  whitespace **or end-of-line**, so a marker-only comment that is exactly the stem is `MALFORMED`, never
-  a fail-quiet `NONE`. **`findings: UNKNOWN` and `SKIP` are NOT
+  `ISSUE-CLOSED`/`ISSUE-UNVERIFIABLE`/`UNAVAILABLE`, each leaving the FAIL). A marker **attempt** is the
+  stem plus whitespace **or end-of-line**, so a marker-only comment that is exactly the stem is
+  `MALFORMED`, never a fail-quiet `NONE`. Three field rules, both kinds, one parser: `base=`/`head=` are
+  **exactly 40 hex** (an abbreviated sha is `MALFORMED`, never `STALE` — it names THIS review in a
+  spelling the form forbids, and an authorizer sent to re-check *which review* finds nothing wrong); a
+  recorded `reason` keeps its internal whitespace **VERBATIM** (only the BLOCK boundary renders a
+  control character as a visible escape, because the property required is one line per value, not
+  collapsed whitespace); and a `reason` may **not contain either marker stem** — refused, not escaped,
+  since **the structural assert covers the CODE while a RUNTIME value can inject what no source scan
+  sees, so an invariant over OUTPUT needs a check on the OUTPUT PATH**. **`findings: UNKNOWN` and `SKIP` are NOT
   deferrable in any mode**: those states were never ESTABLISHED, and a pass may not rest on a state that
   could not be read. **The two authorizations stay SEPARATELY SCOPED and neither falls back to the
   other** — an absence waiver confers no authority over `findings:`, a findings deferral none over

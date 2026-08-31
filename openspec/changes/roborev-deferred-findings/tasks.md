@@ -23,8 +23,9 @@
       base+head.
 - [x] 2.3 Assert `count=` equals the **observed** findings count and `issues=` is non-empty →
       otherwise `COUNT-MISMATCH`.
-- [x] 2.4 Assert disposition per issue: **retrievable**, asked THREE-VALUED — `present` (the only
-      granting state) / `absent` ⇒ `ISSUE-ABSENT` / could-not-ask ⇒ `ISSUE-UNVERIFIABLE`, textually
+- [x] 2.4 Assert disposition per issue: an **OPEN** issue, asked FOUR-VALUED — `present` (the only
+      granting state) / `absent` ⇒ `ISSUE-ABSENT` / `closed` ⇒ `ISSUE-CLOSED` / could-not-ask ⇒
+      `ISSUE-UNVERIFIABLE`, textually
       distinct, keyed on the DIAGNOSTIC because `gh issue view` exits 1 for both, unrecognised ⇒
       could-not-ask. **The PR-body link requirement is DELETED** (lead ruling, option A): a PR body is
       editable by anyone with write access with no per-edit attribution while a comment is permanent
@@ -40,7 +41,8 @@
 - [x] 3.1 `findings: DEFERRED (<n>, issues=#…, authorized @<login>, job <id>)`; never `NONE` for a
       deferral (`NONE` stays reachable only from the record's structured verdict letter).
 - [x] 3.2 Add `deferral:` key with the full cause set: `GRANTED` / `NONE` / `STALE` / `MALFORMED` /
-      `UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE`;
+      `UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-ABSENT` / `ISSUE-CLOSED` / `ISSUE-UNVERIFIABLE` /
+      `UNAVAILABLE`;
       every non-`GRANTED` value leaves the FAIL. `GRANTED` names author, issues, count, scope and the
       **verbatim** reason. The `NONE` cause teaches both the sole-content and top-level rules.
 - [x] 3.3 Extend the **closed** verdict grammar: `DEFERRED` non-failing only when the oracle granted;
@@ -58,7 +60,7 @@
 ## 5. Hermetic coverage (`scripts/tests/test_roborev_review_guard.sh`, gate `tooling-tests`)
 - [x] 5.1 Grant case: findings-bearing recheck + matching marker ⇒ `DEFERRED` + `RESULT: PASS`.
 - [x] 5.2 A case per refusal state: `NONE`, `STALE`, `MALFORMED`, `UNAUTHORIZED`, `COUNT-MISMATCH`,
-      `ISSUE-ABSENT`, `ISSUE-UNVERIFIABLE` (with a naive-two-valued mutant control proving the
+      `ISSUE-ABSENT`, `ISSUE-CLOSED`, `ISSUE-UNVERIFIABLE` (each with a naive mutant control proving the
       could-not-ask case is not vacuous), `UNAVAILABLE`.
 - [x] 5.3 Non-deferrable: `findings: UNKNOWN` and `SKIP` with a granted-shaped marker ⇒ FAIL.
 - [x] 5.4 Sole-content refusals: indented, `>`-quoted, bulleted, mid-sentence, fenced, HTML
@@ -88,3 +90,23 @@
 - [ ] 7.2 PR body states: the wrapper cannot certify itself; the live demonstration is **post-merge**;
       the deferral is confined to the roborev verdict. **(For whoever opens the PR — not the
       implementer's to tick.)**
+
+## 5. Round-3 review (roborev job 229 + rust-reviewer)
+
+- [x] 5.1 The three WAIVER-side piped `grep -q` guards over whole-file writers extract to a file and
+      grep the file, matching their already-hardened DEFERRAL siblings; the whole-file sweep census
+      (31 piped sites, 13 fail-open by polarity, 3 fixed) is recorded in the suite (#3387).
+- [x] 5.2 The disposition backstop is AFFIRMATIVE — it counts verifications performed and requires
+      that count to equal the number of declared `issues=` fields — with a probe and a naive-`-z`
+      mutant contrast.
+- [x] 5.3 A CLOSED issue is a fourth, non-granting state (`ISSUE-CLOSED`), deliberately stronger than
+      the lead's literal "retrievable" condition, with a number-only mutant contrast.
+- [x] 5.4 Dead `roborev_waiver_author_allowed()` deleted (zero callers; a second shell-side
+      authorization path waiting to happen).
+- [x] 5.5 Both markers' `base=`/`head=` require exactly 40 hex, so an abbreviated sha is `MALFORMED`
+      rather than `STALE`; malformed coverage added for both kinds.
+- [x] 5.6 A recorded `reason` keeps internal whitespace verbatim (only the block boundary escapes
+      control characters); covered with repeated spaces and a tab.
+- [x] 5.7 A `reason` containing either marker stem is refused, with grant-path coverage for both kinds.
+- [x] 5.8 Edit scars fixed: the mangled "EDITABLE AT ANY TIME" rationale, the un-reflowed help wrap,
+      and the scanner's missing PEP8 blank lines.

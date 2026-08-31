@@ -86,10 +86,15 @@ could not read". Only an affirmatively measured `PRESENT (n)` is deferrable.
 The issue requires a finding be *addressed*, and a deferral naming an issue that does not exist is a
 dropped finding wearing a link. So each `issues=` number must be:
 
-1. **A retrievable GitHub issue, asked THREE-VALUED.** `present` (a payload affirmatively naming that
+1. **An OPEN GitHub issue, asked FOUR-VALUED.** `present` (a payload affirmatively naming that
    number) is the only state that permits a grant. `absent` — GitHub answered that it does not exist —
-   is `ISSUE-ABSENT`. `could-not-ask` — no `gh`, no auth, a network/API failure, an unparseable
-   payload, or **any diagnostic that does not say the issue is missing** — is `ISSUE-UNVERIFIABLE`.
+   is `ISSUE-ABSENT`. `closed` — GitHub answers, and exits 0, with a `CLOSED` state — is
+   `ISSUE-CLOSED`; that state is why the check reads `state` at all, and why it is DELIBERATELY
+   STRONGER than the lead's literal "retrievable" condition: a closed-as-duplicate issue is
+   retrievable and tracks nothing, so accepting it would contradict the not-dropped property every
+   statement of this leg claims. `could-not-ask` — no `gh`, no auth, a network/API failure, an
+   unparseable payload, or **any diagnostic that does not say the issue is missing** — is
+   `ISSUE-UNVERIFIABLE`.
    `gh issue view` **exits 1 for both** (measured on gh 2.98.0: `GraphQL: Could not resolve to an
    issue or pull request with the number of N.` vs `HTTP 401: Bad credentials`), so an exit-code-only
    test is the two-valued predicate that always picks the permissive answer, and it would grant over
@@ -112,7 +117,7 @@ top-level comment is permanent and attributable.** So the body-link leg was the 
 and it would stay weaker **even if Markdown parsed trivially** — an authorization the constrained
 party can silently rewrite after it is granted evidences nothing. The recogniser problem was a
 symptom. The wording invited it too: *"name where the finding went"* invited a **prose scan**, when
-the property wanted is that the finding is **TRACKED**, which retrievability enforces.
+the property wanted is that the finding is **TRACKED**, which the issue-state leg enforces.
 
 The bypass census, kept because it is the evidence the class does not close (Markdown-handling
 references in that one predicate: **0 → 11**):
@@ -158,7 +163,8 @@ unconfined admission would let one authorization excuse a check nobody authorize
 the accident that no other key emits the token.
 
 `deferral:` states its own state even when nothing was granted — `NONE` / `STALE` / `MALFORMED` /
-`UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE` — each
+`UNAUTHORIZED` / `COUNT-MISMATCH` / `ISSUE-ABSENT` / `ISSUE-CLOSED` / `ISSUE-UNVERIFIABLE` /
+`UNAVAILABLE` — each
 leaving the FAIL in place. This is the `waiver:` key's lesson: *"your marker names the wrong job"*
 and *"there is no marker"* are different operator actions, and a bare FAIL distinguishes neither.
 Per #3312's own finding, a **marker-only comment with bad fields is `MALFORMED`; a comment with other

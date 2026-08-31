@@ -706,19 +706,51 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    roborev's prose does not provide, and **none is reconstructed from that prose**: the class closed above
    by *removing* prose reconstruction stays closed.
 
-   **`issues=` records that the finding is TRACKED, and retrievability is the leg that enforces it.**
-   Each number must be a **retrievable** GitHub issue, asked **three-valued**: only a payload
-   affirmatively naming that number is `present` and permits a grant; an issue GitHub answers does not
-   exist is `ISSUE-ABSENT`; and an issue whose existence could **not be asked** — no `gh`, no auth, a
+   **`issues=` records that the finding is TRACKED, and the issue-state leg is what enforces it.**
+   Each number must be an **OPEN** GitHub issue, asked **four-valued**: only a payload
+   affirmatively naming that number **and an OPEN state** is `present` and permits a grant; an issue
+   GitHub answers does not exist is `ISSUE-ABSENT`; an issue GitHub answers is CLOSED is
+   `ISSUE-CLOSED`; and an issue whose existence could **not be asked** — no `gh`, no auth, a
    network/API failure, an unparseable payload, or **any diagnostic that does not say the issue is
-   missing** — is `ISSUE-UNVERIFIABLE`. The two non-granting states are **textually distinct** because
-   they are different operator actions: *"that issue number is wrong"* versus *"this box cannot reach
-   GitHub"*. **`gh issue view` exits 1 for both** (measured on gh 2.98.0: `GraphQL: Could not resolve to
+   missing** — is `ISSUE-UNVERIFIABLE`. The non-granting states are **textually distinct** because
+   they are different operator actions: *"that issue number is wrong"* / *"that issue is closed"* /
+   *"this box cannot reach GitHub"*. **`gh issue view` exits 1 for both** (measured on gh 2.98.0: `GraphQL: Could not resolve to
    an issue or pull request with the number of N.` versus `HTTP 401: Bad credentials`), so an
    exit-code-only test is exactly the two-valued predicate that always picks the permissive answer — it
    would grant a deferral over issues **nobody confirmed exist**. The verdict therefore comes from the
    diagnostic, anything unrecognised is a could-not-ask, and a could-not-ask is **never** read as
    verified.
+
+   **AND "RETRIEVABLE" WAS NOT ENOUGH — THE CHECK IS DELIBERATELY STRONGER THAN THE CONDITION THAT
+   ASKED FOR IT (#3626 round 3).** `gh issue view` returns the number and **exits 0 for a CLOSED
+   issue**, so a number-only test made *"the finding is tracked"* satisfiable by an issue closed as a
+   duplicate three weeks ago: `present` ⇒ `GRANTED` ⇒ `RESULT: PASS`, the finding permanently untracked
+   while the block asserted it was filed. The lead's condition said *retrievable*, and
+   closed-is-retrievable satisfies the letter — but the call site, the scanner and the spec all state the
+   stronger **not-dropped** claim, and a closed-as-duplicate issue means the finding IS dropped. So the
+   claim was made TRUE rather than three claims weakened to match a weaker implementation. **The
+   generalisable ruling: when an implementation satisfies the LETTER of a condition while contradicting
+   the PROPERTY every statement of it claims, strengthen the implementation.** A false refusal is
+   recoverable (reopen the issue, or file a fresh tracking issue and re-authorize) and is the fail-closed
+   direction.
+
+   **The disposition backstop counts VERIFICATIONS PERFORMED; it does not test the string.** It was
+   `[ -z "$ISSUES" ]` — a non-emptiness test standing in for a verification test — and `ISSUES=","`
+   passes it, splits into **zero words**, never runs the loop body, and returns with the state still
+   `granted`: `findings: DEFERRED` and `RESULT: PASS` with not one `gh issue view` executed. It was
+   unreachable only because the `issues=` *pattern* forbade that value, which is **precisely the upstream
+   dependency a backstop must not have**. The count of verifications must now EQUAL the count of declared
+   comma-separated fields.
+
+   **Three field rules, both marker kinds, one parser.** `base=`/`head=` are **exactly 40 hex** — an
+   abbreviated sha is `MALFORMED`, never `STALE`, because it names *this* review in a spelling the form
+   forbids and an authorizer sent to re-check *which review* they named would find nothing wrong with it.
+   A recorded `reason` keeps its internal whitespace **verbatim**; only the **block boundary** renders a
+   control character as a visible escape, because the property required is one line per value, not
+   collapsed whitespace. And a `reason` may **not contain either marker stem** — refused rather than
+   escaped, since an authorizer has no legitimate need for one. That last one carries its own lesson:
+   **the structural assert covers the CODE, while a RUNTIME value can inject what no source scan sees —
+   an invariant over OUTPUT needs a check on the OUTPUT PATH.**
 
    **A PR-BODY LINK WAS ALSO REQUIRED, AND THAT LEG WAS DELETED (#3626, lead ruling).** An earlier
    revision demanded each `issues=` number also appear as a local, visible `#N` in the **PR body**
@@ -767,7 +799,7 @@ mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
    `NONE` stays reachable **only** from the record's structured `verdict` letter, so nobody grepping
    `findings: NONE` reads a deferred run as a clean review. The `deferral:` key states its own state even
    when nothing was granted — `NONE` / `STALE` / `MALFORMED` / `UNAUTHORIZED` / `COUNT-MISMATCH` /
-   `ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE`, every one leaving the FAIL — because *"your
+   `ISSUE-ABSENT` / `ISSUE-CLOSED` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE`, every one leaving the FAIL — because *"your
    marker names the wrong job"* and *"there is no marker"* are different operator actions and a bare FAIL
    distinguishes neither. Per #3312's own finding, a **marker-only** comment with bad fields is
    `MALFORMED` while a comment carrying the marker **plus other content** is ignored **silently**

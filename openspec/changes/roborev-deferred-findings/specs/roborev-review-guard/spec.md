@@ -125,18 +125,36 @@ resolved from base+head, or a re-run could inherit an authorization written for 
 marker written before its job's findings were read, and any **new** finding arriving at the same
 head, each raise or lower the observed count and therefore fail.
 
-**Disposition.** Each issue number in `issues=` SHALL be **retrievable** from GitHub, and that
-retrievability SHALL be **three-valued**: an issue GitHub answers does not exist SHALL leave the run
-FAILing under `deferral: ISSUE-ABSENT (…)`; an issue whose existence could **not be asked** — no `gh`,
+**Disposition.** Each issue number in `issues=` SHALL be an **OPEN** issue GitHub confirms, and that
+check SHALL be **four-valued**: an issue GitHub answers does not exist SHALL leave the run FAILing
+under `deferral: ISSUE-ABSENT (…)`; an issue GitHub answers is **CLOSED** SHALL leave the run FAILing
+under `deferral: ISSUE-CLOSED (…)`; an issue whose existence could **not be asked** — no `gh`,
 no auth, a network or API failure, an unparseable payload, or any diagnostic that does not say the
-issue is missing — SHALL leave the run FAILing under `deferral: ISSUE-UNVERIFIABLE (…)`, a
+issue is missing — SHALL leave the run FAILing under `deferral: ISSUE-UNVERIFIABLE (…)`, each a
 **textually distinct** state. A could-not-ask SHALL NEVER be read as verified-present, and only a
-payload affirmatively naming that issue's number SHALL count as present. `gh issue view` exits 1 for
-BOTH a missing issue and an auth failure (measured on gh 2.98.0), so the two SHALL NOT be
-distinguished by exit code; where they cannot be told apart, the verdict SHALL be the could-not-ask.
-The two non-granting states are separate because they are **different operator actions** ("that issue
-number is wrong" vs "this box cannot reach GitHub"). A deferral naming an issue that does not exist is
-a dropped finding wearing a link.
+payload affirmatively naming that issue's number **and an OPEN state** SHALL count as present. `gh
+issue view` exits 1 for BOTH a missing issue and an auth failure (measured on gh 2.98.0), so the two
+SHALL NOT be distinguished by exit code; where they cannot be told apart, the verdict SHALL be the
+could-not-ask. The non-granting states are separate because they are **different operator actions**
+("that issue number is wrong" / "that issue is closed" / "this box cannot reach GitHub"). A deferral
+naming an issue that does not exist is a dropped finding wearing a link.
+
+**OPEN IS DELIBERATELY STRONGER THAN "RETRIEVABLE", AND THE STRENGTHENING IS THE POINT.** The lead's
+literal condition said *retrievable*, and a CLOSED issue is retrievable: `gh issue view` returns its
+number and exits 0. So a number-only test made "the finding is tracked" satisfiable by an issue closed
+as a duplicate three weeks ago — `present` ⇒ `GRANTED` ⇒ `RESULT: PASS`, the finding permanently
+untracked while the block asserted it was filed. Every other statement of this leg, here and in the
+implementation, claims it enforces **not-dropped**; a closed-as-duplicate issue means the finding IS
+dropped, so the claim is made TRUE rather than three statements of it weakened to match a weaker
+implementation. A false refusal is recoverable — reopen the issue, or file a fresh tracking issue and
+re-authorize with its number — and is the fail-closed direction.
+
+**The disposition backstop SHALL be AFFIRMATIVE.** It SHALL count the verifications actually
+**performed** and require that count to EQUAL the number of **declared** `issues=` fields; it SHALL
+NOT test the issue-list string for non-emptiness. A non-emptiness test is satisfiable by a list the
+split does not traverse (`,` splits into ZERO words), which leaves a grant standing with no `gh issue
+view` executed at all — and its unreachability depends on the `issues=` **pattern** still forbidding
+that value, which is precisely the upstream dependency a backstop must not have.
 
 **SUPERSEDED — the PR-body reference requirement is REMOVED (lead ruling, option A).** This
 requirement previously ALSO demanded that each `issues=` number be **referenced from the
@@ -167,7 +185,7 @@ because the reason is the durable part:
 **Subtraction cannot introduce a false PASS**: with nothing predicted about the PR body, nothing is
 excused by it. The property is now carried by three legs — (1) the marker **names** the issue numbers,
 on the permanent, attributable, allowlisted comment channel; (2) each named issue must be
-**retrievable**, three-valued as above, which is the leg that enforces **not-dropped**; (3) the
+an **OPEN** issue, four-valued as above, which is the leg that enforces **not-dropped**; (3) the
 summary block **records** the numbers, the count, the scope and the reason verbatim. Any future
 strengthening of the disposition SHALL come from an **immutable or attributed** artifact, never from
 parsing the mutable body of the pull request under review.
@@ -190,6 +208,14 @@ removing prose reconstruction, and it SHALL NOT be reopened.
 #### Scenario: The authorization names an issue GitHub says does not exist
 - **WHEN** an `issues=` number is answered by GitHub as not existing in this repository
 - **THEN** the run reports `deferral: ISSUE-ABSENT (…)` and `RESULT: FAIL` — an issue that does not exist fails closed rather than being skipped, and the remedy named is the marker or the missing issue
+
+#### Scenario: The authorization names an issue GitHub says is CLOSED
+- **WHEN** an `issues=` number is answered by GitHub as existing but `CLOSED`, every other part of the authorization being perfect
+- **THEN** the run reports `deferral: ISSUE-CLOSED (…)` and `RESULT: FAIL`, textually distinct from both `ISSUE-ABSENT` and `ISSUE-UNVERIFIABLE`, naming the issue, its state, and the recoverable remedy (reopen it, or file a fresh tracking issue and re-authorize) — a closed issue tracks nothing, so a deferral to one is the finding being dropped with a link attached
+
+#### Scenario: A granted deferral declares more issue fields than were verified
+- **WHEN** the disposition leg is reached with an issue list whose comma-separated fields do not each traverse to a verification (for example a comma-only list, or one carrying an empty field)
+- **THEN** the run reports `deferral: UNAVAILABLE (…)` naming how many fields were declared and how many were affirmatively verified, and `RESULT: FAIL` — a grant requires as many verifications as declared fields, never merely a non-empty string
 
 #### Scenario: The existence of a named issue could not be asked
 - **WHEN** `gh issue view` fails with a diagnostic that does **not** say the issue is missing (for example `HTTP 401: Bad credentials`), every other part of the authorization being perfect
@@ -286,12 +312,30 @@ excuse a real defect.
 The block SHALL carry a `deferral:` key whenever the findings branch had a deferral to look for, and
 it SHALL state its own state even when nothing was granted, with one cause per distinguishable
 operator action: `GRANTED` / `NONE` / `STALE` / `MALFORMED` / `UNAUTHORIZED` / `COUNT-MISMATCH` /
-`ISSUE-ABSENT` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE`. Every non-`GRANTED` value SHALL leave the
-existing FAIL in place.
+`ISSUE-ABSENT` / `ISSUE-CLOSED` / `ISSUE-UNVERIFIABLE` / `UNAVAILABLE`. Every non-`GRANTED` value
+SHALL leave the existing FAIL in place.
 
 A `GRANTED` record SHALL name the authorizing author, the issue numbers, the count, the bound scope
 (base, head, job) and the reason **verbatim**, so that the disposition of every deferred finding is
 legible from a pasted block alone and the authorization is permanently attributable.
+
+**Verbatim means verbatim.** The structured scanner SHALL NOT rewrite internal whitespace in a
+recorded value: repeated spaces and tabs SHALL survive byte-for-byte. The only transformation
+permitted is at the **block boundary**, which SHALL render a control character as a **visible**
+escape so that no value can span lines — a value occupying one line is the property actually required,
+and whitespace collapsing is not it.
+
+**A reason SHALL NOT contain either marker stem** (`roborev-waive`, `roborev-defer`). A granted reason
+is interpolated into the summary block, and no emitted diagnostic may carry any part of a marker form.
+It is REFUSED rather than escaped, because an authorizer has no legitimate need for one; the structural
+assert covers the *code*, while a *runtime* reason can inject what no source scan sees — an invariant
+over OUTPUT needs a check on the OUTPUT PATH.
+
+**Both markers' `base=`/`head=` fields SHALL be exactly 40 hex.** An abbreviated sha SHALL report
+`MALFORMED`, never `STALE`: it names THIS review in a spelling the form does not permit, and an
+authorizer sent to re-check *which review* they named will find nothing wrong with it. The rule holds
+for both kinds together — they share one parser, and a field rule that holds for one marker and not
+the other is a divergence in a channel rule.
 
 The `NONE` cause SHALL teach both channel rules — **sole nonblank content** and **top-level comment**
 — because a marker posted inside a review body or a review-thread reply is silently not applied, and
@@ -336,10 +380,15 @@ key, and SHALL NOT become a general "override any check" mechanism.
 
 `scripts/tests/test_roborev_review_guard.sh` — already executed by the agent gate's `tooling-tests`
 component — SHALL gain a case for **every** state named above: the grant, and each of `NONE`,
-`STALE`, `MALFORMED`, `UNAUTHORIZED`, `COUNT-MISMATCH`, `ISSUE-ABSENT`, `ISSUE-UNVERIFIABLE`,
+`STALE`, `MALFORMED`, `UNAUTHORIZED`, `COUNT-MISMATCH`, `ISSUE-ABSENT`, `ISSUE-CLOSED`,
+`ISSUE-UNVERIFIABLE`,
 `UNAVAILABLE`, plus the non-deferrable `UNKNOWN`/`SKIP` states, the sole-content refusals (indented,
 quoted, bulleted, mid-sentence, fenced, HTML-wrapped), the diagnostic-is-not-a-credential property,
-and the separate-scoping pair. Each case SHALL plant its artifacts in its **own scratch copy of the
+the affirmative-count backstop, the abbreviated-sha `MALFORMED` verdict for **both** marker kinds,
+the verbatim recording of a reason carrying repeated spaces and a tab, the refusal of a stem-bearing
+reason for **both** kinds, and the separate-scoping pair. Every case whose subject is a leg that can
+GRANT SHALL carry a **planted-defect contrast** — the naive form of that leg, applied to a scratch
+copy, granting the fixture the real code refuses, with the unpatched copy's refusal measured FIRST. Each case SHALL plant its artifacts in its **own scratch copy of the
 tree**.
 
 Because a pull request whose subject is how the wrapper reads authorizations **cannot certify
