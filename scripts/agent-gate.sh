@@ -13585,7 +13585,19 @@ dispatch_component() {
       --test issue_1578_streaming_aggregate_multigen_parity \
       --test issue_2069_global_aggregate_empty_table ;;
     arrow-parity-guard) run_component arrow-parity-guard run_arrow_parity_guard_cmd ;;
-    memory-budget) run_component memory-budget bash -c '
+    memory-budget)
+      # #3453: ONE variable per feature set, expanded into BOTH the `bash -c` argv below
+      # and the _fm_observe_cargo_argv calls that record the matrix — the `bash -c` body
+      # runs in a child bash that does NOT inherit the observer functions (they are
+      # deliberately not `export -f`-ed; see scripts/ci/gate-feature-matrix.sh), so the
+      # sets are declared here FROM THE SAME VARIABLE rather than re-typed.
+      local mb_pkg=cqlite-core mb_feats=cli-helpers,dhat-heap,arrow
+      local mb_flight_pkg=cqlite-flight mb_flight_feats=dhat-heap
+      _fm_observe_cargo_argv test --package "$mb_pkg" --features "$mb_feats"
+      _fm_observe_cargo_argv test --package "$mb_pkg" --features "$mb_feats"
+      _fm_observe_cargo_argv test --package "$mb_flight_pkg" --features "$mb_flight_feats"
+      _fm_observe_cargo_argv test --package "$mb_pkg" --features "$mb_feats"
+      run_component memory-budget bash -c '
   # Read-path dhat budgets (issue #1565) + the export/Flight dhat budgets
   # (issue #1494, AD5): the converter per-row allocation guard (needs `arrow`)
   # and the Flight producer total/peak-memory guard (cqlite-flight, dhat-heap) +
@@ -13599,11 +13611,11 @@ dispatch_component() {
   # component FAILs if ANY lane failed (rc sticks at 1). --test-threads=1 is
   # mandatory on every lane (the dhat profiler is a process-global allocator).
   rc=0
-  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+  cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test memory_budget -- --test-threads=1 || rc=1
-  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+  cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_1494_converter_alloc_budget -- --test-threads=1 || rc=1
-  cargo test --package cqlite-flight --features dhat-heap \
+  cargo test --package '"$mb_flight_pkg"' --features '"$mb_flight_feats"' \
     --test issue_1494_producer_mem_budget -- --test-threads=1 || rc=1
   # (d) row-assembly (RowCells) path — issue #2075: absolute allocs/row AND
   # allocs/cell budgets for the decode -> RowCells (Vec<(Arc<str>,Value)>) ->
@@ -13611,12 +13623,18 @@ dispatch_component() {
   # #1046 width-SCALING guard (which lacks a per-cell metric); measures/gates the
   # #1645 item 2 (smallvec RowCells) win. Same feature set as the sibling lanes to
   # reuse build artifacts.
-  cargo test --package cqlite-core --features cli-helpers,dhat-heap,arrow \
+  cargo test --package '"$mb_pkg"' --features '"$mb_feats"' \
     --test issue_2075_row_assembly_alloc_budget -- --test-threads=1 || rc=1
   exit $rc' ;;
-    integration-tests) run_component integration-tests bash -c '
-  cargo test --package cqlite-integration-tests --no-run &&
-  cargo test --package cqlite-integration-tests \
+    integration-tests)
+      # #3453: see the memory-budget branch — package hoisted so the recorded scope and
+      # the executed scope cannot drift. This lane passes NO --features (default set).
+      local it_pkg=cqlite-integration-tests
+      _fm_observe_cargo_argv test --package "$it_pkg" --no-run
+      _fm_observe_cargo_argv test --package "$it_pkg"
+      run_component integration-tests bash -c '
+  cargo test --package '"$it_pkg"' --no-run &&
+  cargo test --package '"$it_pkg"' \
     --test comprehensive_component_integration_tests \
     --test fixture_specific_integration_tests \
     --test golden_path_get_operations_tests \
@@ -13624,11 +13642,25 @@ dispatch_component() {
     --test golden_path_scan_operations_tests \
     --test golden_path_summary_index_integration_tests' ;;
     format-compat) run_component format-compat cargo test --package format-compatibility-tests ;;
-    write-tests) run_component write-tests bash -c '
-  cargo test --package cqlite-core --features write-support --lib &&
-  cargo test --package cqlite-core --features write-support --test write_read_roundtrip &&
-  cargo test --package cqlite-core --features write-support --test compaction_integration' ;;
-    cli-tests) run_component cli-tests bash -c '
+    write-tests)
+      # #3453: one hoisted (package, features) pair, expanded into all three invocations
+      # AND into the three records below (see the memory-budget branch).
+      local wt_pkg=cqlite-core wt_feats=write-support
+      _fm_observe_cargo_argv test --package "$wt_pkg" --features "$wt_feats"
+      _fm_observe_cargo_argv test --package "$wt_pkg" --features "$wt_feats"
+      _fm_observe_cargo_argv test --package "$wt_pkg" --features "$wt_feats"
+      run_component write-tests bash -c '
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --lib &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test write_read_roundtrip &&
+  cargo test --package '"$wt_pkg"' --features '"$wt_feats"' --test compaction_integration' ;;
+    cli-tests)
+      # #3453: cli-tests runs TWO passes at DIFFERENT feature sets (default, then
+      # write-support) and a single-value annotation would be false for it — both are
+      # recorded, from the same hoisted variables the argv uses (see memory-budget).
+      local ct_pkg=cqlite-cli ct_ws_feats=write-support
+      _fm_observe_cargo_argv test --package "$ct_pkg"
+      _fm_observe_cargo_argv test --package "$ct_pkg" --features "$ct_ws_feats"
+      run_component cli-tests bash -c '
   # issue #2039: ENUMERATE every cqlite-cli/tests/*.rs integration-test target
   # instead of a hardcoded 3-target allowlist. The old allowlist
   # (unit_tests + write_readback_content_tests + graceful_shutdown_tests) made any
@@ -13779,12 +13811,12 @@ dispatch_component() {
   # two bare mktemps are the only ones nobody else collects.
   trap "rm -rf \"$_cli_tmp\"" EXIT
 
-  cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
+  cargo test --package '"$ct_pkg"' "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
   check_no_unexpected_zero_tests "cli-tests Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
 
-  cargo test --package cqlite-cli --features write-support "${ws_flags[@]}" 2>&1 | tee "$log2"
+  cargo test --package '"$ct_pkg"' --features '"$ct_ws_feats"' "${ws_flags[@]}" 2>&1 | tee "$log2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
   check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2"' ;;
@@ -13819,7 +13851,13 @@ dispatch_component() {
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     pub-surface) run_pub_surface ;;
     tooling-tests) run_tooling_tests ;;
-    minimal-build) run_component minimal-build bash -c '
+    minimal-build)
+      # #3453: the minimal lane's DEFINING property is --no-default-features, so the
+      # SUMMARY must say so; hoisted here and expanded into both invocations below.
+      local mn_pkg=cqlite-core mn_feats=all-compression
+      _fm_observe_cargo_argv build --package "$mn_pkg" --no-default-features --features "$mn_feats"
+      _fm_observe_cargo_argv test --package "$mn_pkg" --no-default-features --features "$mn_feats" --lib --no-run
+      run_component minimal-build bash -c '
   # Match the CI "All Compression Build & Test" job byte-for-byte (issue #1981):
   # that job sets RUSTFLAGS=-D warnings, so a warning-class error (e.g. an unused
   # `#[cfg(test)]` helper whose only caller is feature-gated out under the minimal
@@ -13828,17 +13866,21 @@ dispatch_component() {
   # Export it for BOTH the build and the test-compile so this component enforces
   # exactly what CI enforces.
   export RUSTFLAGS="-D warnings" &&
-  cargo build --package cqlite-core --no-default-features --features all-compression &&
+  cargo build --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' &&
   # Test-compile the minimal lane (issue #1978): the CI "All Compression Build &
   # Test" job runs `cargo test --no-default-features --features=all-compression
   # --lib`, which compiles the test targets. A plain `cargo build` never does, so
   # a `#[cfg(test)]` module referencing a write-support-gated item (e.g.
   # storage::serialization) silently escaped this gate. Compile-only (--no-run)
   # keeps it fast; no data fixtures needed for a compile check.
-  cargo test --package cqlite-core --no-default-features --features all-compression --lib --no-run' ;;
+  cargo test --package '"$mn_pkg"' --no-default-features --features '"$mn_feats"' --lib --no-run' ;;
     all-features-check) run_all_features_check ;;
-    smoke) run_component smoke bash -c '
-  cargo build --package cqlite-cli --bin cqlite &&
+    smoke)
+      # #3453: smoke builds the CLI at DEFAULT features and then runs a shell script.
+      local sm_pkg=cqlite-cli
+      _fm_observe_cargo_argv build --package "$sm_pkg" --bin cqlite
+      run_component smoke bash -c '
+  cargo build --package '"$sm_pkg"' --bin cqlite &&
   CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh' ;;
     *) echo "dispatch_component: unknown component $1" >&2; return 2 ;;
   esac

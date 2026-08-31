@@ -101,6 +101,16 @@ _fm_describe_cargo() {
     test|build|check|clippy|run|bench|fmt|doc|nextest|rustc) ;;
     *) return 1 ;;
   esac
+  # A VERSION PROBE compiles nothing, even when its subcommand is in the list above:
+  # `cargo nextest --version` is how the gate detects nextest, and describing it as a
+  # feature set would put a set nobody compiled into a component's annotation. Scan only
+  # the flags BEFORE a bare `--` (a later `--version` belongs to the test binary).
+  for tok in "$@"; do
+    case "$tok" in
+      --) break ;;
+      --version|-V) return 1 ;;
+    esac
+  done
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -p|--package) pkgs+=("${2:-?}"); shift ;;
