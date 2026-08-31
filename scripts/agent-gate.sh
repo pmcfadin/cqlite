@@ -4380,7 +4380,11 @@ _cs_live_refuse() {
       # for one fact — the drift this pre-flight keeps removing. Caught by the pre-existing
       # `3544-unboundable` case, which knew what to expect because the kind was already there.
       _CS_KIND=unboundable
-      _CS_DETAIL="this host offers no way to BOUND reading $1 from $REPO_ROOT (no timeout/gtimeout and no usable watchdog, or no capture file), so the read was not run: an unbounded repository read can hang the gate outright, and a missing capability must not inherit the permissive branch"
+      # "UNBOUNDED" IS UPPERCASE TO MATCH THE FETCH PATH'S DETAIL, and that is a contract, not
+      # decoration: `3544-unboundable` requires the emitted line to NAME the refusal with that
+      # token, and this branch now fires FIRST (at the git-directory read), so it — not the
+      # fetch's — is the text a reader greps. Same idiom, same word, one refusal vocabulary.
+      _CS_DETAIL="no bounded-run mechanism available (no timeout, no gtimeout, no sleep for the bash watchdog, or no capture file) — refusing to run an UNBOUNDED read of $1 from $REPO_ROOT, which could hang the gate outright; a missing capability must not inherit the permissive branch"
       return 0 ;;
   esac
   return 1
