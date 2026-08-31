@@ -8508,6 +8508,90 @@ test_lane_lock_cleanup_outcome_is_verified_not_claimed() {
 t test_lane_lock_cleanup_outcome_is_verified_not_claimed
 
 
+
+
+# ---------------------------------------------------------------------------
+# THE OTHER TWO SITES THE B9 CLASS SWEEP FOUND (#3601, roborev job 231 B9).
+#
+# Neither was in the finding. Both are the same shape: an artifact whose text is not bound to what the run
+# actually observed.
+#
+#   (1) THE LOST-RACE REFUSAL attributed the clearing and the new ownership to specific actors — "a stale
+#       lock was cleared and the name was immediately claimed by someone else" — when all the run observed
+#       is that its own claim found the name taken. It does not know its own rename is what cleared the
+#       lock (a racer may have), and it never read the new holder.
+#   (2) THE RELEASE'S REMOVAL made NO claim, silently: `rm -rf … || true`. The silence is the same problem
+#       one step earlier — a lock left behind by a supervisor that exited cleanly is unattributable, and
+#       the next start has to deal with it. It is self-healing, so it reports rather than escalates.
+# ---------------------------------------------------------------------------
+test_lane_lock_sweep_no_unobserved_attribution() {
+  local d tmp lane lock out rc dead ovr
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601sweep$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+
+  # ---- (1) THE LOST-RACE PATH, reached by failing every claim attempt while a genuinely dead holder's
+  # lock is present: the reclaim runs, the claim that follows finds the name unavailable, and this is the
+  # refusal. Fault-injected on `take`'s return, so the refusal text under test is shipped.
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  ovr="$d/f-take.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1' \
+       '  return 1'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"taken again before this run could claim it"* ]] \
+       && [[ "$out" == *"both unestablished"* ]] \
+       && [[ "$out" != *"immediately claimed by someone else"* ]] \
+       && [[ "$out" != *"Only one racer can win"* ]]; then
+      pass "lane-lock B9 sweep (lost race): the refusal reports what the run OBSERVED — the name was taken again — and states that who cleared the lock and who holds it now are both unestablished, instead of attributing either"
+    else
+      fail "lane-lock-sweep-lostrace: rc=$rc out=[$out] — the pre-sweep wording attributed a clearing and an ownership this run never established"
+    fi
+  fi
+  rm -rf "$lock"
+
+  # ---- (2) THE RELEASE PATH, with its own removal made to FAIL for real: the lock's parent is made
+  # unwritable after the lock is taken, so the EXIT trap cannot remove it. Derived from the shipped drive
+  # body by one insertion, so the startup path is the ordinary one.
+  local rop body_ro
+  rop="$d/ro-parent"
+  mkdir -p "$rop"
+  body_ro="${SV_DRIVE_BODY/'exit 0'/'chmod 0555 "$2" 2>/dev/null || true; exit 0'}"
+  if [[ "$body_ro" == "$SV_DRIVE_BODY" ]]; then
+    fail "lane-lock-sweep-release-premise: the read-only drive body was not derived from the shipped one"
+  elif ( : >"$rop/.probe" ) 2>/dev/null && { rm -f "$rop/.probe"; chmod 0555 "$rop" 2>/dev/null; ( : >"$rop/.probe2" ) 2>/dev/null; }; then
+    rm -f "$rop/.probe2" 2>/dev/null || true
+    chmod 0755 "$rop" 2>/dev/null || true
+    skip "lane-lock B9 sweep (release): this uid can write a 0555 directory (running as root), so a failed self-removal is not stageable here — unmeasurable on this host rather than passing vacuously"
+  else
+    chmod 0755 "$rop" 2>/dev/null || true
+    out="$( cd "$d" && env -u SUPERVISOR_LOCK TMPDIR="$rop" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+              bash -c "$body_ro" _ "$SUPERVISOR" "$rop" 2>&1 )"; rc=$?
+    chmod 0755 "$rop" 2>/dev/null || true
+    if [[ "$out" == *"ACQUIRED="* ]] && [[ "$out" == *"FAILED to remove our own lock"* ]] \
+       && [[ "$out" == *"next start will find its holder affirmatively dead and reclaim it"* ]]; then
+      pass "lane-lock B9 sweep (release): a self-removal that FAILS is reported, with what happens next — a lock outliving a clean exit is otherwise unattributable, and silence there is the same defect one step earlier"
+    else
+      fail "lane-lock-sweep-release: rc=$rc out=[$out] — the failed removal must be reported rather than swallowed"
+    fi
+    chmod 0755 "$rop" 2>/dev/null || true
+    rm -rf "$rop" 2>/dev/null || true
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_lane_lock_sweep_no_unobserved_attribution
+
+
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
 #
