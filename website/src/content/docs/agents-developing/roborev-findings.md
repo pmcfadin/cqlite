@@ -230,6 +230,14 @@ reverse. Exit codes: `0` PASS, `1` FAIL, `3` NOTHING-TO-REVIEW, `2` usage error.
 terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and a blocked merge, never
 "roborev clean".
 
+**And "roborev clean" means NO UNADDRESSED FINDINGS, not "the tool printed zero" (issue #3626).** A
+lead-deferred finding is re-reported by every later round, so the (correct, unwaivable)
+affirmative-`NONE` requirement below blocked such a merge **forever**. The route past it is a
+`roborev-defer: findings` authorization on the absence waiver's channel, reported as
+`findings: DEFERRED (…)` — never `NONE` — beside its own `deferral:` key. Every **other** non-PASS
+verdict still blocks exactly as before, and `findings: UNKNOWN`/`SKIP` are **not** deferrable. Full
+mechanism below, under *"the unwaivable rule made one merge unobtainable"*.
+
 ### The four rules
 
 1. **The wrapper is the only sanctioned roborev invocation.** Three direct-CLI forms are
@@ -650,6 +658,94 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    structured path and still PASSes, so the #3312 break-glass is intact, and the verdict-less branch is
    **defensive**, for a payload shape no observed record produces. Making a defensive path fail closed
    is free; making it guess is how a merge gate passes over live findings.
+
+   **The unwaivable rule made one merge unobtainable, which is its own defect class (issue #3626).**
+   #3586's requirement is right, and it interacted with a fact nobody designed for: **roborev re-reports a
+   lead-deferred finding on every later round.** So once a lead defers a finding — as a nit, as a batched
+   follow-up, or by explicit ruling — `findings: PRESENT (n)` persists, `RESULT` stays `FAIL`, and *"any
+   non-PASS terminal RESULT is a blocked merge"* blocks that merge **forever**. Neither escape hatch
+   applies: the absence waiver excuses `prompt-content` **absence only**, by design, and a correct
+   `--recheck-job` of a findings-bearing job re-reports the same `FAIL`. Measured on PR #3572 job 262: two
+   findings, **zero new** — both already filed (#3602, #3613) and both already lead-deferred — 5,937,937
+   input / 5,703,168 cached tokens (the largest of 21 rounds), every deterministic key PASS, and the merge
+   required an out-of-band lead comment.
+
+   The lane the fix protects is the one that behaved **correctly**: it refused to arm `--auto` over a
+   `FAIL`, refused to fix the deferrals to manufacture a green, refused a waiver that does not apply, and
+   asked the owner instead. **A rule that punishes the correct behaviour will not survive contact.**
+
+   So *"roborev clean"* is redefined as **NO UNADDRESSED FINDINGS**, and the distinction is made
+   mechanical rather than a matter of lead memory. A **second marker** travels the absence waiver's
+   channel:
+
+   ```
+   roborev-defer: findings issues=<N>[,<N>...] count=<n> base=<40-hex> head=<40-hex> job=<id> reason=<why>
+   ```
+
+   applied with `--recheck-job <id>`, which enqueues nothing. Everything about the channel is
+   **inherited by call, never copied** — the same scanner, with the kind selected explicitly — because a
+   second implementation of a channel rule is a second place for it to diverge, and a divergence in a
+   channel rule is an authorization bypass: sole nonblank content of a **top-level** PR comment, an author
+   on the hard-coded `ROBOREV_WAIVER_AUTHORS` allowlist, author association parsed **structurally** from
+   `gh --json`, placeholder reasons refused, and **no part of the marker in any emitted diagnostic** (the
+   form lives only in `--help`, because summary blocks get pasted into PR comments as a matter of course).
+
+   **There is deliberately no flag, no file in the worktree and no environment variable.** Each would hand
+   the constrained party the power to satisfy its own constraint — #3312's corollary, *the constrained
+   party must not choose its own enforcer* — and a worker could then clear its own findings. That absence
+   is asserted **structurally** in the guard suite, because behavioural cases only cover the channels
+   someone already thought of.
+
+   **The match is affirmative, which is what makes this a match and not a mute button.** `count=` must
+   **equal** the observed findings count and `issues=` must be non-empty. A job is a completed review and
+   its findings do not change, so `job=` already fixes the finding *set*; the count equality is the
+   affirmative evidence that the findings the authorizer judged are the findings this run observed. Two
+   consequences, both deliberate: a **pre-authorization** written before the findings were read fails on a
+   count mismatch instead of passing silently, and **any new finding at the same head** raises the observed
+   count and fails. That is how the *undeferred* set is computed without a per-finding identity — which
+   roborev's prose does not provide, and **none is reconstructed from that prose**: the class closed above
+   by *removing* prose reconstruction stays closed.
+
+   **`issues=` names where the finding went.** Each number must be a **retrievable** issue
+   (`ISSUE-UNRESOLVABLE` otherwise) **and** be **referenced from the PR body** (`PR-UNLINKED` otherwise),
+   because a deferral without a linked issue is a **dropped** finding. The nit rule already requires one
+   follow-up issue at merge time; this makes the link mechanical instead of remembered, and the ruling
+   needs no separate artifact — the authorization comment is permanent, attributable and in the PR.
+
+   **What it reports** is a distinct token, and never `NONE`:
+
+   ```
+   findings: DEFERRED (2, issues=#3602,#3613, authorized @<login>, job 262)
+   deferral: GRANTED (author=@<login> issues=3602,3613 count=2 scope=base=<…> head=<…> job=262 reason=<…>)
+   RESULT: PASS
+   ```
+
+   `NONE` stays reachable **only** from the record's structured `verdict` letter, so nobody grepping
+   `findings: NONE` reads a deferred run as a clean review. The `deferral:` key states its own state even
+   when nothing was granted — `NONE` / `STALE` / `MALFORMED` / `UNAUTHORIZED` / `COUNT-MISMATCH` /
+   `ISSUE-UNRESOLVABLE` / `PR-UNLINKED` / `UNAVAILABLE`, every one leaving the FAIL — because *"your
+   marker names the wrong job"* and *"there is no marker"* are different operator actions and a bare FAIL
+   distinguishes neither. Per #3312's own finding, a **marker-only** comment with bad fields is
+   `MALFORMED` while a comment carrying the marker **plus other content** is ignored **silently**
+   (`NONE`): someone documenting the form never attempted an authorization, and a false accusation
+   reprinted on every later run is worse than silence.
+
+   **`findings: UNKNOWN` and `findings: SKIP` are not deferrable, in any mode.** Those values mean the
+   findings state was never *established* — we cannot count what we cannot see, so a deferral over one
+   would be precisely a pass resting on a state we could not read. Only an affirmatively measured
+   `PRESENT (n)` is deferrable, and a bare `PRESENT` with no count is refused for the same reason.
+
+   **The two authorizations stay separately scoped and neither falls back to the other.** Distinct marker
+   keywords, distinct summary keys (`waiver:` / `deferral:`), distinct verdict tokens (`WAIVED` /
+   `DEFERRED`). An absence waiver confers **no** authority over `findings:`; a findings deferral confers
+   **none** over `prompt-content:`. A run may legitimately carry both, each granted on its own marker and
+   reported under its own key. Collapsing them would let a delivery-artifact waiver excuse a real defect —
+   which is exactly the false PASS #3564 removed.
+
+   `DEFERRED` is a value of the **closed** verdict grammar, non-failing **only** on the single coupled
+   granted state that the grammar scan, the `findings:` gate and the affirmation backstop **all** read —
+   one state, not three, so they cannot drift into two opinions about whether one authorization was
+   granted. Re-deriving the provenance per gate would *be* that drift.
 
    **Two transferable lessons.** (1) *Delegating a key's failure to its neighbour is a latent false PASS* —
    the coupling is invisible while both keys are populated by the same event and evaporates in the first mode

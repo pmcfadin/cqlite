@@ -580,7 +580,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `AGENT-GATE *SUMMARY` blocks so neither can be pasted as the other), never the transcript — that goes
   to the `log:` path named in the block. Exit `0` PASS / `1` FAIL / `3` NOTHING-TO-REVIEW / `2` usage
   error; **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and
-  a blocked merge, never "roborev clean". Four rules: **(1)** the NON-SANCTIONED direct forms are
+  a blocked merge, never "roborev clean". **"ROBOREV CLEAN" MEANS NO UNADDRESSED FINDINGS, NOT "THE TOOL
+  PRINTED ZERO" (#3626)** — a LEAD-DEFERRED finding is re-reported by every later round, so the (correct,
+  unwaivable) affirmative-`NONE` rule below blocked such a merge FOREVER; the route past it is a
+  `roborev-defer: findings` authorization reported as `findings: DEFERRED (…)`, never `NONE`, and every
+  OTHER non-PASS verdict still blocks exactly as before. Four rules: **(1)** the NON-SANCTIONED direct forms are
   `--branch` **WITHOUT** an explicit `--repo` (from a worktree it resolves against the ROOT checkout),
   the two-positional commit-range form (its range base is git's EMPTY TREE), and a SINGLE-SHA review (it
   covers ONE COMMIT, certifying a multi-commit branch from its last commit alone). `--repo` is what makes
@@ -899,7 +903,49 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   original argument holds unchanged. An intermediate version of this fix DID add a separate
   `block_measured` flag; it went away with the prose reconstruction it guarded, and this sentence
   described it for one round after it was deleted — caught by the C audit. **A doctrine line naming a
-  mechanism is a claim about code, and it decays exactly like a comment: re-grep the symbol.** So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
+  mechanism is a claim about code, and it decays exactly like a comment: re-grep the symbol.**
+  **AND THE UNWAIVABLE RULE MADE ONE MERGE UNOBTAINABLE, WHICH IS ITS OWN DEFECT CLASS (#3626).** #3586's
+  requirement is right, and it interacted with a fact nobody designed for: **roborev re-reports a
+  LEAD-DEFERRED finding on every later round.** So once a lead defers a finding — as a nit, as a batched
+  follow-up, or by explicit ruling — `findings: PRESENT (n)` persists, `RESULT` stays `FAIL`, and *"any
+  non-PASS terminal RESULT is a blocked merge"* blocks that merge **forever**: neither escape hatch applies
+  (the absence waiver excuses `prompt-content` ABSENCE only, by design, and a correct `--recheck-job` of a
+  findings-bearing job re-reports the same `FAIL`). Measured on PR #3572 job 262: two findings, **ZERO
+  new** — both already filed (#3602, #3613) and both already lead-deferred — 5.9M input / 5.7M cached
+  tokens, every deterministic key PASS, and the merge required an out-of-band lead comment. The lane the
+  fix protects is the one that behaved CORRECTLY: it refused to arm `--auto` over a `FAIL`, refused to fix
+  the deferrals to manufacture a green, refused a waiver that does not apply, and asked the owner instead.
+  **A rule that punishes the correct behaviour will not survive contact.** So *"roborev clean"* is
+  redefined as **NO UNADDRESSED FINDINGS**, and the distinction is made MECHANICAL rather than a matter of
+  lead memory: a **second marker**, `roborev-defer: findings issues=<N>[,<N>...] count=<n> base=<40-hex>
+  head=<40-hex> job=<id> reason=<why>`, travels the **absence waiver's channel** (top-level PR comment,
+  column-zero, **sole nonblank content**, hard-coded `ROBOREV_WAIVER_AUTHORS` allowlist, structured
+  `gh --json` author parsing, applied via `--recheck-job`, placeholder reasons refused, no part of the
+  marker in any diagnostic) and inherits those rules **BY CALL** — the same scanner, kind selected
+  explicitly — never by copy, because a second implementation of a channel rule is a second place for it
+  to diverge and a divergence there is an authorization bypass. **There is deliberately NO flag, NO file
+  in the worktree and NO env var**, each of which would hand the constrained party the power to satisfy
+  its own constraint (#3312's corollary). **The match is AFFIRMATIVE, which is what makes this a match
+  and not a mute button**: `count=` must EQUAL the observed findings count and `issues=` must be
+  non-empty, so a PRE-AUTHORIZATION written before the findings were read fails on a mismatch, and **any
+  new finding at the same head raises the observed count and fails** — that is how the UNDEFERRED set is
+  computed without a per-finding identity roborev's prose does not provide, and **no such identity is
+  reconstructed from that prose** (the class #3564 closed by REMOVING prose reconstruction stays closed).
+  `issues=` also names **where the finding went**: each number must be a RETRIEVABLE issue **and** be
+  REFERENCED FROM THE PR BODY, because a deferral without a linked issue is a DROPPED finding. It reports
+  a **distinct token** — `findings: DEFERRED (<n>, issues=#…, authorized @<login>, job <id>)`, **NEVER
+  `NONE`** (which stays reachable only from the record's structured verdict letter, so nobody grepping
+  `findings: NONE` reads a deferred run as clean) — beside a `deferral:` key that speaks even when
+  nothing was granted (`NONE`/`STALE`/`MALFORMED`/`UNAUTHORIZED`/`COUNT-MISMATCH`/`ISSUE-UNRESOLVABLE`/
+  `PR-UNLINKED`/`UNAVAILABLE`, each leaving the FAIL). **`findings: UNKNOWN` and `SKIP` are NOT
+  deferrable in any mode**: those states were never ESTABLISHED, and a pass may not rest on a state that
+  could not be read. **The two authorizations stay SEPARATELY SCOPED and neither falls back to the
+  other** — an absence waiver confers no authority over `findings:`, a findings deferral none over
+  `prompt-content:` — because collapsing them would let a delivery-artifact waiver excuse a real defect;
+  a run may legitimately carry both, each under its own key. `DEFERRED` is a value of the **closed**
+  verdict grammar, non-failing **only** on the single coupled granted state that the grammar scan, the
+  findings gate and the affirmation backstop all read — one state, not three, so they cannot drift into
+  two opinions about whether one authorization was granted. So: never derive a pass from the ABSENCE of a bad signal; where an oracle is the SOLE evidence
   for a claim and could not be consulted the verdict is NON-PASSING and its text names what was
   unverifiable; key a permissive branch on the AFFIRMATIVE value (`= OK`), never on `!= <bad>`; and where a
   signal genuinely SHOULD be permissive, record the reason IN CODE at the branch. The wrapper's verdict
@@ -989,6 +1035,12 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   target) → re-review` (#2087). **Nits** never trigger
   a re-verify round: batch all of a PR's nits into ONE linked follow-up issue at merge time. When in
   doubt, blocker. Every pre-roborev self-check class below is BLOCKER by definition.
+  **A DEFERRED finding still has to get PAST roborev, and since #3626 that is mechanical rather than a
+  matter of lead memory**: roborev re-reports a deferred finding on every later round, so batching nits
+  into a follow-up issue does not by itself make `findings:` read `NONE`. The lead records the deferral
+  with a `roborev-defer: findings` PR comment naming the filed issue numbers and the observed count, and
+  applies it with `--recheck-job`; the run then reports `findings: DEFERRED (…)` (never `NONE`) and may
+  reach `PASS`. See the roborev-invocation bullet above for the marker and its constraints.
 - **Post-gate polish (#1892)**: after a full PASS at `X`, a test/docs-only diff `X..Y` re-certifies
   with `--delta` (fail-closed; see gate table above), never a repeat full gate. The nightly
   `gate.yml` deep-check re-runs the FULL gate on `main` as the standing backstop.
