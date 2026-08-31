@@ -708,4 +708,64 @@ fn the_container_map_key_gap_suppresses_only_a_well_formed_map_pair() {
         !ask(&golden_map, &cli_map, &scalar_key_map),
         "a map with a SCALAR key type is comparable and must not match this gap"
     );
+
+    // AN ARRAY IS NOT ENOUGH — every element must be a `{key,value}` object
+    // (roborev job 305). Validating only the outer shape let malformed entries
+    // through, which is the same defect one level deeper.
+    for malformed in [
+        json!([null]),
+        json!([1]),
+        json!(["k"]),
+        json!([[]]),
+        json!([{"key": 1}]),
+        json!([{"value": 1}]),
+        json!([{"key": 1, "value": 2, "extra": 3}]),
+        json!([{"key": 1, "value": 2}, null]),
+    ] {
+        assert!(
+            !ask(&golden_map, &malformed, &container_key_map),
+            "a CLI array whose elements are not {{key,value}} objects must NOT be \
+             suppressed: {malformed:?}"
+        );
+    }
+}
+
+/// `NestedFrozenValueLeftUndecodedByGolden` must require the CLI's ARRAY spelling.
+///
+/// An earlier version also accepted `Value::Object`, reasoning that the CLI spells a
+/// UDT as an object. The arm was unreachable — the type guard admits only
+/// list/set/map/tuple — but still permissive, so it would have excused an object
+/// rendered where only an array is legal (roborev job 305). An
+/// unreachable-but-permissive arm is worse than no arm.
+#[test]
+fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
+    let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
+    let inner_set = CqlType::Set(Box::new(CqlType::Text("text".into())));
+    let golden_hex = json!("000000020000001100000005616c706861");
+    let ask = |cli: &Value, ty: &CqlType| {
+        gap.matched(
+            &golden_hex,
+            cli,
+            ty,
+            Egress::Json,
+            Depth::TopLevel,
+            Kinding::Natural,
+        )
+    };
+
+    assert!(
+        ask(&json!([{"label": "alpha"}]), &inner_set),
+        "an undecoded golden scalar against a DECODED CLI array is the declared gap"
+    );
+    for not_an_array in [
+        json!({"label": "alpha"}),
+        json!(null),
+        json!(0),
+        json!("000000020000001100000005616c706861"),
+    ] {
+        assert!(
+            !ask(&not_an_array, &inner_set),
+            "only the CLI's ARRAY spelling is this gap: {not_an_array:?}"
+        );
+    }
 }

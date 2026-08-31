@@ -149,8 +149,10 @@ pub enum Divergence {
     /// sstabledump's colon-joined tuple spelling for a nested frozen tuple
     /// (`set<frozen<tuple<frozen<key_part>, int>>>` gives `alpha\:1:1`).
     ///
-    /// EGRESS SHAPE: a DECODED structure — a JSON array or object — at that same
-    /// position.
+    /// EGRESS SHAPE: a DECODED JSON **array** at that same position. All four
+    /// declared types this variant admits (list/set/map/tuple) are rendered by the
+    /// CLI as arrays; an object is not one of their spellings, so accepting one
+    /// would excuse a regression rather than describe a divergence.
     ///
     /// NOTE THE DIRECTION. It is the OPPOSITE of
     /// [`Divergence::NestedFrozenUdtRendersAsBlobHex`], where the GOLDEN decodes and
@@ -179,9 +181,9 @@ pub enum Divergence {
     /// alone, via the same `super::is_scalar_type` predicate `compare_map` refuses
     /// on, so the gap and the refusal can never disagree about what a container is.
     ///
-    /// EGRESS SHAPE: both sides must still BE maps — the golden a JSON object, the
-    /// CLI its `{key,value}` pair-list array — but neither side's CONTENTS are
-    /// examined. That split is the whole point: what this lane cannot do is pair the
+    /// EGRESS SHAPE: both sides must still BE maps — the golden a JSON object, and
+    /// the CLI an array EVERY element of which is an object carrying exactly `key`
+    /// and `value` — but neither the keys nor the values themselves are examined. That split is the whole point: what this lane cannot do is pair the
     /// KEY SET, and it says nothing about the values behind those keys. It does NOT
     /// follow that the column may be anything at all: an earlier version decided from
     /// the DDL alone and thereby suppressed a null or malformed rendering of the
@@ -320,12 +322,20 @@ impl Divergence {
                 ) {
                     return false;
                 }
-                // The EGRESS side: a DECODED structure. Both spellings the CLI uses
-                // for a container are accepted (it spells list/set/map as a JSON
-                // array and a UDT as an object), and nothing else is — a flat
-                // scalar, a null or a number at this position is NOT this gap and is
-                // reported as an ordinary diff.
-                matches!(cli, Value::Array(_) | Value::Object(_))
+                // The EGRESS side: a DECODED ARRAY, and nothing else.
+                //
+                // An earlier version also accepted `Value::Object`, on the reasoning
+                // that the CLI spells a UDT as an object. That arm was unreachable by
+                // design — the type guard above admits only list/set/map/tuple, never
+                // `Udt` — but it was still PERMISSIVE: it would have suppressed an
+                // object rendered where only an array is legal (roborev job 305,
+                // Medium). An unreachable-but-permissive arm is worse than no arm,
+                // because it excuses exactly the regression it can never legitimately
+                // describe. The CLI renders every one of these four types as a JSON
+                // array (`super::compare_map` reads a map as an array of
+                // `{key,value}` objects), so an object, a scalar, a null or a number
+                // here is NOT this gap and is reported as an ordinary diff.
+                matches!(cli, Value::Array(_))
             }
             Divergence::ContainerMapKeyNotPairableByThisLane => {
                 // The DDL side: a map whose KEY type is a container. The SAME
@@ -351,7 +361,29 @@ impl Divergence {
                 // do — but a column that stopped being a map at all is NOT this gap
                 // and is reported as an ordinary diff.
                 let _ = (egress, depth, kinding);
-                matches!(golden, Value::Object(_)) && matches!(cli, Value::Array(_))
+                // The golden's map spelling is a JSON object.
+                if !matches!(golden, Value::Object(_)) {
+                    return false;
+                }
+                // The CLI's map spelling is an array of `{key,value}` OBJECTS, and
+                // every element must BE one. Validating only "is an array" (the
+                // previous version) let `[null]`, `[1]` or entries missing `key`/
+                // `value` through — malformed output suppressed by a gap that claims
+                // only to excuse KEY PAIRING (roborev job 305, Medium). Shape is
+                // checked to the depth at which this lane's limitation actually
+                // begins, and no further: the keys and values themselves are NEVER
+                // read, because pairing them is the thing it cannot do.
+                let Value::Array(entries) = cli else {
+                    return false;
+                };
+                entries.iter().all(|entry| match entry {
+                    Value::Object(fields) => {
+                        fields.len() == 2
+                            && fields.contains_key("key")
+                            && fields.contains_key("value")
+                    }
+                    _ => false,
+                })
             }
         }
     }
