@@ -2384,13 +2384,17 @@ fi
 
 # The matcher must be an exact ARGV ELEMENT, never a substring of the joined cmdline: a searching shell
 # carries the pattern INSIDE an element, so it is excluded by construction with no exclusion list.
+# Exact argv element, AND no mode exclusion: ownership is not the same question as gate-of-record.
+# Excluding --lite/--delta/--only here would let a LIVE partial run's reservation be reclaimed (4b.153,
+# 4b.155 create their live owners with --only file-size), putting two writers on one summary path.
 if grep -q 'read -r -d "" a' "$LAUNCHER" \
-   && grep -qE '^\s+\*agent-gate\.sh\)' "$LAUNCHER" \
-   && grep -qE '^\s+--lite\|--delta\|--only\)' "$LAUNCHER" \
-   && ! grep -q '\*agent-gate\.sh\*' "$LAUNCHER"; then
-  ok "4b.168 the gate matcher is an exact argv element, not a cmdline substring"
+   && grep -qE 'case "\$a" in \*agent-gate\.sh\)' "$LAUNCHER" \
+   && ! grep -q '\*agent-gate\.sh\*' "$LAUNCHER" \
+   && ! sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER" | grep -qE '^\s+--lite\|--delta\|--only\)'; then
+  ok "4b.168 exact argv element, and ownership does NOT exclude partial-mode runs"
 else
-  bad "4b.168 the gate matcher is an exact argv element" "$(grep -n 'agent-gate\.sh[*)]' "$LAUNCHER" | head -3)"
+  bad "4b.168 exact argv element, ownership does not exclude partial modes" \
+      "$(sed -n '/^_unit_runs_a_gate() {/,/^}$/p' "$LAUNCHER" | grep -nE 'agent-gate|--lite' | head -4)"
 fi
 
 # And scope state must no longer be consulted where the owner is affirmatively dead.

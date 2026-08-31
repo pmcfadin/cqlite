@@ -723,7 +723,7 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
   # answers "is any task left in the scope", which a single ORPHANED `sleep` satisfies forever -- one box
   # was measured with 12 orphaned sleeps and 0 gate scopes. That let an affirmative "owner is dead" reading
   # be overridden into `live`, so the path was refused FOREVER with nothing to reap the orphan.
-  local unit="$1" cg procs p a hit lite _pdir found=1
+  local unit="$1" cg procs p a hit _pdir found=1
   cg=$(systemctl --user show -p ControlGroup --value "$unit" 2>/dev/null) || return 2   # could not ASK
   # AN EMPTY ControlGroup IS AN AFFIRMATIVE ANSWER, NOT AN UNKNOWN. `systemctl show` returns rc=0 with an
   # EMPTY value for a unit that no longer exists, so treating empty as unmeasurable made every stale
@@ -744,6 +744,12 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
     [ -n "$p" ] || continue
     [ -r "/proc/$p/cmdline" ] || continue   # exited mid-scan: not evidence either way
     hit=0; lite=0
+    # OWNERSHIP, NOT GATE-OF-RECORD: do NOT exclude --lite/--delta/--only here. That exclusion is right
+    # for a waiter asking "is THE full gate running", and I over-applied it to a different question. This
+    # helper answers "is another run still using this summary path", and a --lite/--only run is using it
+    # exactly as much as a full one -- excluding them let a LIVE partial run's reservation be reclaimed,
+    # putting two writers on one summary. Caught by 4b.153/4b.155, whose live owners use --only file-size.
+    #
     # MATCH AN EXACT ARGV ELEMENT, NUL-delimited -- never a substring of the joined cmdline. A searching
     # shell carries the pattern INSIDE an element (`pgrep -f agent-gate\.sh`), so no element ever ENDS in
     # `agent-gate.sh` and the searcher is excluded BY CONSTRUCTION. A `$$` exclusion list is both
@@ -751,12 +757,9 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
     # Measured: the argv form found 7 full gates and excluded both a --lite run and the searching shell;
     # the substring-of-cmdline form counted 10, over-counting searchers.
     while IFS= read -r -d "" a; do
-      case "$a" in
-        *agent-gate.sh)        hit=1 ;;
-        --lite|--delta|--only) lite=1 ;;   # exact element: a summary PATH containing "--only" cannot trip it
-      esac
+      case "$a" in *agent-gate.sh) hit=1; break ;; esac
     done < "/proc/$p/cmdline"
-    if [ "$hit" = 1 ] && [ "$lite" = 0 ]; then found=0; break; fi
+    if [ "$hit" = 1 ]; then found=0; break; fi
   done < "$procs"
   return $found
 }
