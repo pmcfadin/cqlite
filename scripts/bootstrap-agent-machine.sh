@@ -1890,11 +1890,22 @@ fi
 # macOS persistence (a launchd equivalent) is deliberately NOT implemented: there is no
 # Mac on this fleet, so it could not be verified, and an unverifiable persistence path is
 # worse than a documented gap. macOS is SCOPED OUT here, not supported.
+# THE MECHANISM IS LINUX-SPECIFIC; THE REQUIREMENT IS NOT (#3414 final roborev). An
+# earlier form emitted `ok "NOT-APPLICABLE"` here unconditionally, which let `--strict`
+# CERTIFY AN UNPINNED non-Linux host: no /etc/environment exists to persist into, so the
+# section declared inapplicability and passed — while every gate on that box resolved the
+# #1825 cap from the formula. Inapplicability of the PERSISTENCE step was standing in for
+# absence of the REQUIREMENT, which is this issue's own defect wearing a platform label.
+#
+# So the platform no longer earns an exemption; it earns a NARROWER QUESTION. We cannot
+# ask "is it in the system env file" (there is none), but "does a fresh session see a
+# value the GATE HONOURS" is platform-independent and is the fact that matters. That is
+# decided below, in the same probe the Linux path uses, minus the file-correlation half.
+PIN_PLATFORM_UNMANAGED=0
 if [ "$PIN_SECTION_OK" = 1 ] && [ "$PLATFORM" != linux ]; then
-  ok "gate-pin: NOT-APPLICABLE (the single-gate pin is persisted in /etc/environment and read by PAM's pam_env — a Linux mechanism; $PLATFORM has no equivalent here, so there is nothing to verify rather than something failing)"
-  info "on this platform the per-run authority is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) means that gate resolved the #1825 cap from the formula)"
-  info "to cap gates here, export CQLITE_GATE_MAX_CONCURRENCY in whatever this host's session-startup mechanism is; bootstrap does not manage it"
-  PIN_SECTION_OK=0
+  PIN_PLATFORM_UNMANAGED=1
+  info "gate-pin: no PAM-read system-wide env file on this $PLATFORM host, so bootstrap does not MANAGE the pin here — but it still VERIFIES it: the probe below asks whether a fresh session sees a value the gate honours"
+  info "to cap gates here, export CQLITE_GATE_MAX_CONCURRENCY in whatever this host's session-startup mechanism is"
 fi
 
 # Effective privilege, resolved BEFORE the seam guard because the guard now depends on it.
@@ -2504,6 +2515,18 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
           # non-passing" (the probe is ALWAYS sudo-scoped, so that reds every box's
           # onboarding forever — an always-firing alarm is one people learn to waive,
           # which is the same reason the fleet does not just let verify red).
+          # ON A PLATFORM WITH NO PAM-READ SYSTEM FILE, the file half does not exist and
+          # asking for it would manufacture a permanent failure on a correctly-pinned host
+          # — the red-on-correct-input shape refused elsewhere in this section. The
+          # remaining question is still affirmative and still platform-independent: a fresh
+          # scrubbed session sees a value, and the GATE HONOURS it. That is a narrower
+          # claim than the Linux verdict and is worded as one; it is NOT an exemption, and
+          # an unpinned host still lands in the non-passing branch below (#3414 final
+          # roborev — the earlier `NOT-APPLICABLE` ok certified exactly that host).
+          if [ "${PIN_PLATFORM_UNMANAGED:-0}" = 1 ]; then
+            ok "gate-pin: VERIFIED-NO-SYSTEM-FILE (a fresh, profile-free session on this $PLATFORM host sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate HONOURS it verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first. There is no PAM-read system-wide file here, so this does NOT establish the pin is system-wide — only that a fresh session gets it)"
+            pin_scope_note
+          else
           case "$PIN_FILE_HAS_LINE" in
             yes)
               # STRING equality on the raw effective value, deliberately not a numeric
@@ -2539,6 +2562,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
               fi
               ;;
           esac
+          fi
           ;;
         invalid)
           # Its OWN verdict, not FAILED: the pin is present and visible, so "persist the
