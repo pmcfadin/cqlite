@@ -731,8 +731,16 @@ matches_diff_paths() {
 }
 
 # --- the scan ---------------------------------------------------------------
-# One rev-list, then one diff-tree per commit behind (D9: ~1.5s warm on the
-# 107-commit case). A pathological N is reported and scanned, never silently
+# One rev-list, then one diff-tree per commit behind. Cost, quoted from D9 with
+# BOTH figures AND their pin, because this comment previously read "~1.5s warm on
+# the 107-commit case" and cited D9 for a number D9 contradicts: the ~1.5 s was
+# COLD (and was measured against the `show`-per-commit shape this call replaced),
+# while WARM is 0.43 s, re-measured 2026-08-31 on this lane against a base 110
+# commits behind. The pin for the 107-commit base is subject 4bc6b913a,
+# origin/main b1e8598a2 — the same pin the gate-global selectivity measurement
+# above quotes. A bare number here rots the moment it moves, which is why both
+# figures and the pin are named rather than one overwriting the other.
+# A pathological N is reported and scanned, never silently
 # truncated — a truncated scan would have to be an UNMEASURED, so truncating
 # would trade a slow answer for a fail-closed one.
 # Written to a FILE and read by redirection, not iterated as an unquoted
