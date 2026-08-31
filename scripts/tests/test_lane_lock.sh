@@ -1932,5 +1932,50 @@ fi
 kill "$P41" 2>/dev/null || true
 rm -rf "$D41"
 
+# ===========================================================================
+echo 'TEST 42: a reboot really is a global un-brick, and the two status views agree (round 26)'
+# ===========================================================================
+# (a) CLAUDE.md states "a reboot is a global un-brick: boot-id changes, so every pre-reboot record
+#     reads DEAD-REBOOT and auto-reclaims", and FIX 5/14 leans on that as the escape hatch for a
+#     lane an EPHEMERAL record would otherwise brick. record_liveness tested pid-scope and pid
+#     validity BEFORE the boot id, so a pre-reboot record with pid-scope=ephemeral read
+#     UNKNOWN-EPHEMERAL and was never reclaimed — the one state the reboot was promised to clear
+#     was the one it did not. This asserts the documented guarantee, not the code path.
+D42="$(mktemp -d)"; mkdir -p "$D42/.lane-locks"
+printf 'version=1\nissue=950\nlane-dir=%s/l\nmachine=%s\nactor=flow\npid=99999\npid-scope=ephemeral\nboot-id=00000000-dead-beef-0000-000000000000\nstart-ticks=1\nacquired-ts=2020-01-01T00:00:00Z\nnonce=x\n' \
+  "$D42" "$(hostname -s 2>/dev/null || hostname)" > "$D42/.lane-locks/lane-950.lock"
+out42="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 950 2>&1)"
+if printf '%s' "$out42" | grep -q 'liveness=DEAD-REBOOT' && printf '%s' "$out42" | grep -q 'reclaimable=yes'; then
+  ok "(a) a PRE-REBOOT record with pid-scope=ephemeral is DEAD-REBOOT and reclaimable — the documented un-brick holds"
+else
+  bad "(a) a pre-reboot ephemeral record is still not reclaimable:
+$out42"
+fi
+# CONTROL: an ABSENT recorded boot id must stay UNKNOWN. "Cannot tell which boot" is not "dead",
+# and a reordering that turned the unknown into a DEAD verdict would auto-reclaim a live lane.
+printf 'version=1\nissue=952\nlane-dir=%s/l\nmachine=%s\nactor=flow\npid=99999\npid-scope=ephemeral\nstart-ticks=1\nnonce=x\n' \
+  "$D42" "$(hostname -s 2>/dev/null || hostname)" > "$D42/.lane-locks/lane-952.lock"
+out42b="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 952 2>&1)"
+if printf '%s' "$out42b" | grep -q 'liveness=UNKNOWN-NO-BOOT-ID'; then
+  ok "(b) CONTROL: a record with NO boot id stays UNKNOWN-NO-BOOT-ID — cannot-tell is not dead"
+else
+  bad "(b) CONTROL: an absent boot id produced a non-UNKNOWN verdict:
+$out42b"
+fi
+
+# (c) The two STATUS VIEWS must agree. Round 25 made direct `status <N>` classify a non-regular
+#     record path as UNKNOWN-UNREADABLE; the unscoped enumeration still filtered on `-f` and
+#     omitted it, so `locks=` undercounted a state that blocks every acquire.
+mkdir -p "$D42/.lane-locks/lane-951.lock"
+ln -sfn /nonexistent "$D42/.lane-locks/lane-953.lock"
+locks42="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 2>&1 | grep -oE 'locks=[0-9]+' | head -1 | cut -d= -f2)"
+dir42="$(env -u LANE_LOCK_PID LANE_ROOT="$D42" bash "$LL" status 951 2>&1 | grep -oE 'liveness=[A-Z-]+' | head -1)"
+if [ "${locks42:-0}" -eq 4 ] && [ "$dir42" = "liveness=UNKNOWN-UNREADABLE" ]; then
+  ok "(c) unscoped status counts the directory and broken symlink too (locks=$locks42), agreeing with direct status"
+else
+  bad "(c) the two status views disagree: locks=$locks42 (want 4: 950, 951 dir, 952, 953 symlink), direct 951=$dir42"
+fi
+rm -rf "$D42"
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

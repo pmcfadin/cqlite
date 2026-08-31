@@ -807,10 +807,20 @@ record_liveness() {
   if [ "$REC_UNREADABLE" -eq 1 ]; then printf 'UNKNOWN-UNREADABLE\n'; return 0; fi
   if record_is_self; then printf 'SELF\n'; return 0; fi
   if [ "$REC_MACHINE" != "$(this_machine)" ]; then printf 'UNKNOWN-FOREIGN\n'; return 0; fi
-  if [ "$REC_PID_SCOPE" = "ephemeral" ]; then printf 'UNKNOWN-EPHEMERAL\n'; return 0; fi
-  case "${REC_PID:-}" in
-    '' | *[!0-9]*) printf 'UNKNOWN-NO-PID\n'; return 0 ;;
-  esac
+  # BOOT ID BEFORE PID SCOPE (#3436, roborev round 26). A record from a PREVIOUS boot is dead
+  # whatever its pid fields say — the pid namespace it named no longer exists. This tested
+  # `pid-scope=ephemeral` and pid validity FIRST, so such a record returned UNKNOWN-EPHEMERAL or
+  # UNKNOWN-NO-PID and was never auto-reclaimed.
+  #
+  # THAT FALSIFIED A DOCUMENTED GUARANTEE, which is why it outranks its severity. CLAUDE.md says
+  # "a reboot is a global un-brick: boot-id changes, so every pre-reboot record reads DEAD-REBOOT
+  # and auto-reclaims", and FIX 5/14 leans on exactly that as the escape hatch for a lane an
+  # EPHEMERAL record would otherwise brick. Measured before this change: a pre-reboot record with
+  # pid-scope=ephemeral read `UNKNOWN-EPHEMERAL reclaimable=no` — the one state the reboot was
+  # promised to clear was the one it did not.
+  #
+  # Order: identity (SELF/FOREIGN) -> BOOT -> pid scope -> pid fields. An ABSENT recorded boot id
+  # still yields UNKNOWN-NO-BOOT-ID: "cannot tell which boot" must never become "dead".
   if ! proc_available; then printf 'UNKNOWN-NO-PROC\n'; return 0; fi
   live_boot="$(live_boot_id)"
   if [ -z "$live_boot" ]; then
@@ -824,6 +834,10 @@ record_liveness() {
     # one DEAD verdict that needs no pid read at all.
     printf 'DEAD-REBOOT\n'; return 0
   fi
+  if [ "$REC_PID_SCOPE" = "ephemeral" ]; then printf 'UNKNOWN-EPHEMERAL\n'; return 0; fi
+  case "${REC_PID:-}" in
+    '' | *[!0-9]*) printf 'UNKNOWN-NO-PID\n'; return 0 ;;
+  esac
   case "${REC_START_TICKS:-}" in
     '' | *[!0-9]*) printf 'UNKNOWN-NO-START-TICKS\n'; return 0 ;;
   esac
@@ -1953,7 +1967,17 @@ cmd_status() {
     return 0
   fi
   for f in "$lock"/lane-*.lock; do
-    [ -f "$f" ] || continue
+    # ENUMERATE WHAT `status <N>` WOULD REPORT (#3436, roborev round 26). This filtered on `-f`, so
+    # a DIRECTORY, FIFO or BROKEN SYMLINK at a record path was omitted entirely — while round 25
+    # made direct `status <N>` classify exactly those as UNKNOWN-UNREADABLE. Measured before this
+    # change: a lock root holding one real record, one directory and one broken symlink reported
+    # `locks=1`, and `status 951` on the directory reported UNKNOWN-UNREADABLE — two views of one
+    # lock root disagreeing, with the enumeration hiding a state that blocks every acquire.
+    #
+    # Round 25 fixed one path and this is its sibling. My own pre-submit item 1 ("both callers")
+    # did NOT catch it, because it counts REFERENCES to a changed helper rather than asking which
+    # PATHS consume the changed behaviour — `status_one` reaches parse_record indirectly.
+    [ -e "$f" ] || [ -L "$f" ] || continue
     base="${f##*/}"; base="${base%.lock}"
     status_one "$f" "$root/$base" "${base#lane-}"
     count=$((count + 1))
