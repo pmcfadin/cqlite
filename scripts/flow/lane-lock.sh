@@ -628,6 +628,15 @@ resolve_pid() {
   # caller typo, not an environment state.
   if [ "$scope" = explicit ] && [ "$purpose" = compare ] && proc_available && [ ! -e "/proc/$candidate" ]; then
     note "pid $candidate is not live on this host (no /proc/$candidate); a compare-only identity cannot match the holder's, so SELF is unreachable for this call"
+  elif [ "$scope" = explicit ] && [ "$purpose" = write ] && proc_available && [ "$(proc_state "$candidate" 2>/dev/null)" = "Z" ]; then
+    # A ZOMBIE HAS /proc AND IS DEAD (#3436, roborev round 20). The existence test below is
+    # satisfied by a zombie — `/proc/<pid>` and its stat/start-ticks stay readable until the
+    # parent reaps it — while `record_liveness` maps state `Z` to DEAD-NO-PROCESS. So
+    # `acquire --pid <zombie>` wrote a record whose own liveness reads DEAD, i.e. an ACQUIRED
+    # that any next acquire immediately auto-reclaims: a lock that returns success and protects
+    # nothing, which is FIX 14's defect reached by a different route. Refused at write time
+    # against the SAME state test record_liveness uses, so the two cannot disagree.
+    die_usage "--pid $candidate is a ZOMBIE (state Z) on this host — /proc/$candidate still exists but the process is dead, and a record naming it would read DEAD-NO-PROCESS and be reclaimed by the next acquire. Name the live durable holder."
   elif [ "$scope" = explicit ] && [ "$purpose" = write ] && proc_available && [ ! -e "/proc/$candidate" ]; then
     die_usage "--pid $candidate is not a live process on this host (no /proc/$candidate) — a lock records the HOLDER's process identity (boot id + start ticks), which cannot be read for a pid that does not exist"
   fi
@@ -859,6 +868,17 @@ write_record() {
       [ -n "$extra" ] && printf '%s\n' "$extra"
     done
   } >"$tmp" || { rm -f "$tmp"; return 1; }
+  # THE TARGET MUST BE A REGULAR FILE OR ABSENT (#3436, roborev round 20). `parse_record`
+  # requires `-f`, so a DIRECTORY (or a symlink to one) at the record path reads as "no record"
+  # — and then `mv -f "$tmp" "$path"` moves the temp file INSIDE that directory and succeeds.
+  # The command reports ACQUIRED while no record exists at the path every reader looks at, so
+  # the lane is unprotected and the next acquire also "succeeds". Refuse instead: this is an
+  # environment state nothing in this tool creates, so proceeding could only be a guess.
+  if [ -e "$path" ] && [ ! -f "$path" ]; then
+    rm -f "$tmp"
+    emit_infra "detail=record-path-not-a-regular-file path=$path (a directory or special file occupies the record path; parse_record would read it as ABSENT and the write would land inside it, reporting success while the lane stayed unprotected)"
+    return 1
+  fi
   mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
   return 0
 }
@@ -1080,8 +1100,16 @@ lane_real() {
   # So: walk the components LEFT TO RIGHT and resolve each existing prefix physically, which
   # is the order the kernel uses. `realpath -m` would do it in one call and is GNU-only; this
   # file is declared macOS bash 3.2 compatible (see the header), so it is done here.
+  # SET A GLOBAL, DO NOT CAPTURE A SUBSHELL (#3436, roborev round 20). Round 19 added the
+  # warning below and called this helper in a COMMAND SUBSTITUTION, so its assignment to
+  # LANE_REAL_UNRESOLVED happened in a subshell and was discarded — the note could never fire.
+  # A fix for a silent failure that was itself silent, and shipped without a test that the note
+  # appears. `_resolve_lane_path` now reports through REPLY_LANE_PATH, the same idiom
+  # resolve_pid already uses for REPLY_PID, so both outputs cross the call boundary.
   LANE_REAL_UNRESOLVED=""
-  real="$(_resolve_lane_path "$p")"
+  REPLY_LANE_PATH=""
+  _resolve_lane_path "$p"
+  real="$REPLY_LANE_PATH"
   if [ -n "$LANE_REAL_UNRESOLVED" ]; then
     note "lane dir '$p': could not physically resolve existing component(s) [$LANE_REAL_UNRESOLVED] (unsearchable, or a dangling symlink target). The path is used as spelled, so a DIFFERENT spelling of the same directory may take a different directory mutex. The record is keyed by ISSUE, so the lock itself is still found."
   fi
@@ -1093,6 +1121,8 @@ lane_real() {
 }
 
 # _resolve_lane_path <abs-path> — physical canonicalisation that tolerates a MISSING LEAF.
+# Sets REPLY_LANE_PATH (and appends to LANE_REAL_UNRESOLVED); it does NOT print, so callers must
+# not wrap it in a command substitution — that is what silently discarded round 19's warning.
 # Each component is appended in turn; whenever the accumulated prefix exists it is replaced by
 # its PHYSICAL form, so a later `..` is taken against the resolved location rather than the
 # spelling. Components after the last existing prefix cannot be resolved (they name nothing
@@ -1100,7 +1130,7 @@ lane_real() {
 # the kernel itself would ENOENT, so it falls back to a lexical parent and says nothing more.
 _resolve_lane_path() {
   local p="$1" cur="/" comp next phys had_f=1 oldifs
-  case "$p" in /*) ;; *) printf '%s\n' "$p"; return 0 ;; esac
+  case "$p" in /*) ;; *) REPLY_LANE_PATH="$p"; return 0 ;; esac
   case "$-" in *f*) had_f=0 ;; esac      # remember the caller's glob setting, restore it below
   set -f                                  # a lane path may legitimately contain a glob char
   oldifs="$IFS"; IFS='/'; set -- $p; IFS="$oldifs"
@@ -1140,7 +1170,7 @@ _resolve_lane_path() {
     esac
   done
   [ "$had_f" -eq 0 ] || set +f
-  printf '%s\n' "$cur"
+  REPLY_LANE_PATH="$cur"
 }
 
 G_ISSUE=""; G_LANE=""; G_ACTOR=""; G_MACHINE=""; G_PID=""; G_SCOPE=""

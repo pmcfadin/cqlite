@@ -1666,5 +1666,67 @@ $out39"
 fi
 kill "$SPA" "$SPB" 2>/dev/null || true
 
+# ===========================================================================
+echo 'TEST 38: a ZOMBIE --pid, a record path that is a DIRECTORY, and the note that never fired (round 20)'
+# ===========================================================================
+# (a) A ZOMBIE HAS /proc AND IS DEAD. The write-time check was `[ ! -e /proc/<pid> ]`, which a
+#     zombie satisfies — its stat and start-ticks stay readable until the parent reaps it — while
+#     record_liveness maps state Z to DEAD-NO-PROCESS. So `acquire --pid <zombie>` wrote a record
+#     whose own liveness reads DEAD and which the next acquire auto-reclaims: ACQUIRED that
+#     protects nothing, FIX 14's defect by another route.
+#     The zombie is made with `exec`, so the parent never reaps it: `sh -c 'sleep & exec sleep'`.
+sh -c 'sleep 0.1 & exec sleep 30' &
+Z_PARENT=$!
+i=0; Z=""
+while [ "$i" -lt 30 ] && [ -z "$Z" ]; do
+  Z=$(ps -o pid=,stat= --ppid "$Z_PARENT" 2>/dev/null | awk '$2 ~ /^Z/ {print $1}' | head -1)
+  [ -n "$Z" ] || { sleep 0.1; i=$((i + 1)); }
+done
+if [ -n "$Z" ]; then
+  ll acquire 940 --lane-dir "$LANES/zlane" --pid "$Z"; rc38a=$RC; out38a=$OUT
+  if [ "$rc38a" -ne 0 ] && printf '%s' "$out38a" | grep -qi 'zombie'; then
+    ok "(a) acquire --pid <zombie> is refused and names the state (a record naming it would read DEAD)"
+  else
+    bad "(a) a zombie pid was accepted as a holder: rc=$rc38a
+$out38a"
+  fi
+else
+  bad "(a) could not construct a zombie — this case must not pass vacuously"
+fi
+kill "$Z_PARENT" 2>/dev/null || true
+
+# (b) parse_record requires `-f`, so a DIRECTORY at the record path reads as "no record" — and
+#     `mv -f "$tmp" "$path"` then moves the temp INSIDE it and succeeds. ACQUIRED reported, no
+#     record where every reader looks, lane unprotected, and the next acquire "succeeds" too.
+mkdir -p "$LOCKS" "$(record_of 941)"      # the record PATH is a directory
+sleep 300 & DP38=$!
+ll acquire 941 --lane-dir "$LANES/dirlane" --pid "$DP38"; rc38b=$RC; out38b=$OUT
+if [ "$rc38b" -ne 0 ] && printf '%s' "$out38b" | grep -q 'record-path-not-a-regular-file'; then
+  ok "(b) a DIRECTORY at the record path is refused, not reported as a successful acquire"
+else
+  bad "(b) acquire succeeded with a directory at the record path: rc=$rc38b
+$out38b"
+fi
+kill "$DP38" 2>/dev/null || true
+rmdir "$(record_of 941)" 2>/dev/null || true
+
+# (c) THE NOTE ROUND 19 ADDED COULD NEVER FIRE — the helper ran in a command substitution, so its
+#     assignment to LANE_REAL_UNRESOLVED happened in a subshell and was discarded. A fix for a
+#     silent failure that was itself silent, shipped without a test that the warning appears.
+#     THIS is that test. An unsearchable ancestor is a real case: `cd -P` fails on it, so the
+#     component cannot be canonicalised and two spellings could take two mutexes.
+UNS="$LANES/unsearch38"; mkdir -p "$UNS/inner"
+chmod 000 "$UNS/inner" 2>/dev/null
+sleep 300 & UP38=$!
+ll acquire 942 --lane-dir "$UNS/inner/lane" --pid "$UP38"; out38c="$OUT"
+chmod 755 "$UNS/inner" 2>/dev/null
+if printf '%s' "$out38c" | grep -q 'could not physically resolve existing component'; then
+  ok "(c) an unsearchable existing component is REPORTED — the round-19 note actually fires now"
+else
+  bad "(c) the unresolved-component note did not appear (round 19's subshell defect):
+$out38c"
+fi
+kill "$UP38" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
