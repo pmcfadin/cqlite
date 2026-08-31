@@ -604,7 +604,7 @@ impl V5CompressedLegacyParser {
     /// DECLARED type. `frozen<…>`/`FrozenType(…)` is peeled first: CQL does not
     /// permit `frozen<blob>` as a map key, but a blob is still a blob under any
     /// spelling and must not be misdiagnosed as undecoded.
-    fn cell_path_key_declares_blob(&self, type_str: &str) -> bool {
+    pub(super) fn cell_path_key_declares_blob(&self, type_str: &str) -> bool {
         let t = self.peel_frozen_spellings(type_str);
         // CQL spells a CUSTOM type as a SINGLE-QUOTED marshal class name
         // (`'org.apache.cassandra.db.marshal.BytesType'`), so strip the quotes.
