@@ -80,13 +80,16 @@ FAIL-CLOSED, NEVER SKIP (issue #3220)
 so an in-repo COMMITTED fixture is invisible to it and ``skip_if_no_datasets()``
 would skip green forever. Neither root is a superset of the other, so no fixed
 env-first/checkout-first rule is correct. This module therefore resolves the
-corpus root PER TABLE by walking EVERY candidate root for that table's
-``*-Data.db`` (the Python mirror of
-``cqlite-core/tests/support/datasets_root.rs::sstables_root_for_table``) and
-asserts PER CASE: the fixture is git-committed, so it is ``must_run`` and
-fail-closed UNCONDITIONALLY — there is no ``pytest.skip`` in this file and no
-suite-wide ``assert ran > 0`` (which cannot see one case skipping behind its
-siblings).
+corpus root PER TABLE by searching EVERY candidate root — and it searches for
+the GENERATION the committed ``references.yml`` declares (directory basename +
+SSTable prefix), not merely for the table NAME, because a table name does not
+identify bytes: this fixture has six retired generations, and any leftover copy
+of one shadowed the committed fixture and became the oracle. An undeclared
+generation, an ambiguous pair of roots and a declared generation present nowhere
+each FAIL, named. Assertions are PER CASE: the fixture is git-committed, so it
+is ``must_run`` and fail-closed UNCONDITIONALLY — there is no ``pytest.skip`` in
+this file and no suite-wide ``assert ran > 0`` (which cannot see one case
+skipping behind its siblings).
 """
 
 import ast
@@ -325,10 +328,12 @@ def _sstables_root_candidates() -> list[Path]:
     """Every ``sstables/`` root to search, in order.
 
     An ORDER, not a preference: ``_sstables_root_for_table`` picks by EVIDENCE
-    (which root actually holds the table), because neither root is a superset of
-    the other — the fetched corpus carries keyspaces the checkout does not, and
-    the checkout carries committed fixtures (this one) the fetched corpus does
-    not (#3104/#3220).
+    (which root holds the generation ``references.yml`` DECLARES), because
+    neither root is a superset of the other — the fetched corpus carries
+    keyspaces the checkout does not, and the checkout carries committed fixtures
+    (this one) the fetched corpus does not (#3104/#3220). Every candidate is
+    inspected on every call; nothing short-circuits on the first hit, because an
+    undeclared or duplicated generation in a LATER root is itself a failure.
     """
     candidates: list[Path] = []
     env_root = os.environ.get("CQLITE_DATASETS_ROOT")
