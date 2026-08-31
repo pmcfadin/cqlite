@@ -74,7 +74,63 @@ impl V5CompressedLegacyParser {
         // depth 0: a cell-path key is a top-level value, exactly as the SET
         // branch treats a set member's cell path.
         let decoded = self.parse_value_from_raw_bytes(data, type_str, column_name, 0)?;
-        Ok(Self::unwrap_frozen_cell_path_key(decoded))
+        let decoded = Self::unwrap_frozen_cell_path_key(decoded);
+        // FAIL CLOSED on a key the decoder could not decode.
+        //
+        // `parse_value_from_raw_bytes`'s SHARED default returns `Value::Blob` for
+        // a type it does not recognise. That default is reached by every value
+        // read in this crate and is deliberately left alone; the judgement is made
+        // HERE, where the value's position gives it meaning. At a map-key position
+        // an opaque blob for a NON-blob declared type is silently wrong data: the
+        // key would compare, sort and render as raw bytes and no caller could tell
+        // that from a real blob key. No-heuristics (#28): decode from
+        // authoritative metadata or fail, never surface a guess.
+        if matches!(decoded, Value::Blob(_)) && !Self::cell_path_key_declares_blob(type_str) {
+            return Err(Error::schema(format!(
+                "Map key for column '{}' is declared as type '{}', but the decoder                  returned opaque bytes ({} bytes) instead of a decoded value. The                  key type is not one this reader can decode — check that the schema                  (or the on-disk SerializationHeader) resolves it, e.g. that a UDT                  named here is registered.",
+                column_name,
+                type_str,
+                data.len()
+            )));
+        }
+        Ok(decoded)
+    }
+
+    /// Whether `type_str` DECLARES a blob key, i.e. whether `Value::Blob` is the
+    /// CORRECT decode result rather than the shared opaque default.
+    ///
+    /// The distinction cannot be made from the RESULT — a declared `blob` key and
+    /// an undecodable key both yield `Value::Blob` — so it is made from the
+    /// DECLARED type. `frozen<…>`/`FrozenType(…)` is peeled first: CQL does not
+    /// permit `frozen<blob>` as a map key, but a blob is still a blob under any
+    /// spelling and must not be misdiagnosed as undecoded.
+    fn cell_path_key_declares_blob(type_str: &str) -> bool {
+        let mut t = type_str.trim();
+        // Bounded peel: `frozen<…>` nesting is not legal CQL beyond one level, and
+        // a loop bound keeps a pathological type string from spinning.
+        for _ in 0..MAX_TYPE_NESTING_DEPTH {
+            let inner = t
+                .strip_prefix("frozen<")
+                .and_then(|r| r.strip_suffix('>'))
+                .or_else(|| {
+                    let lower = t.to_ascii_lowercase();
+                    lower
+                        .starts_with("org.apache.cassandra.db.marshal.frozentype(")
+                        .then(|| {
+                            t["org.apache.cassandra.db.marshal.frozentype(".len()..]
+                                .strip_suffix(')')
+                        })
+                        .flatten()
+                });
+            match inner {
+                Some(i) => t = i.trim(),
+                None => break,
+            }
+        }
+        if t.contains("org.apache.cassandra.db.marshal.") {
+            return Self::primitive_marshal_to_cql_short(t) == Some("blob");
+        }
+        matches!(t.to_ascii_lowercase().as_str(), "blob" | "bytes")
     }
 
     /// Drop the `Value::Frozen` wrapper the structural decoder adds for a

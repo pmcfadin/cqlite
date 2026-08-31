@@ -430,9 +430,12 @@ fn fixed_width_cell_path_keys_reject_a_wrong_width() {
 }
 
 // ---------------------------------------------------------------------------
-// A `blob` key is a blob BY DECLARATION, not by fallback
+// A `blob` key is a blob BY DECLARATION, not by fallback (issue #3612 option B)
 // ---------------------------------------------------------------------------
 
+/// The one case where `Value::Blob` is the RIGHT answer. The fail-closed check
+/// below must distinguish "declared blob" from "undecoded", so this is its
+/// control: if the check ever keyed on the RESULT alone it would reject these.
 #[test]
 fn a_declared_blob_cell_path_key_is_a_blob() {
     let p = parser();
@@ -441,8 +444,116 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
         Value::blob(vec![1, 2, 3])
     );
     assert_eq!(
+        p.parse_cell_path_key(&[1, 2, 3], "BLOB", "k").unwrap(),
+        Value::blob(vec![1, 2, 3]),
+        "the declared-blob test is case-insensitive, like the decode match itself"
+    );
+    assert_eq!(
+        p.parse_cell_path_key(&[1, 2, 3], "bytes", "k").unwrap(),
+        Value::blob(vec![1, 2, 3])
+    );
+    assert_eq!(
         p.parse_cell_path_key(&[1, 2, 3], &format!("{MARSHAL}.BytesType"), "k")
             .unwrap(),
         Value::blob(vec![1, 2, 3])
     );
+    // CQL does not permit `frozen<blob>` as a map key (freezing applies to
+    // composites), but if such a spelling ever reaches here it is still a
+    // DECLARED blob and must not be misdiagnosed as an undecoded key.
+    assert_eq!(
+        p.parse_cell_path_key(&[1, 2, 3], "frozen<blob>", "k")
+            .unwrap(),
+        Value::blob(vec![1, 2, 3])
+    );
+    assert_eq!(
+        p.parse_cell_path_key(
+            &[1, 2, 3],
+            &format!("{MARSHAL}.FrozenType({MARSHAL}.BytesType)"),
+            "k"
+        )
+        .unwrap(),
+        Value::blob(vec![1, 2, 3])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FAIL CLOSED on a key the decoder could not decode (issue #3612, option B)
+// ---------------------------------------------------------------------------
+//
+// The residual after delegation: `parse_value_from_raw_bytes`'s SHARED default
+// hands back `Value::Blob` for a type it does not recognise. That default is
+// reached by every value read in the codebase and is deliberately NOT changed
+// (blast radius); instead THIS call site rejects the result, because at a map-key
+// position an opaque blob for a NON-blob declared type is silently wrong data —
+// the key would compare, sort and render as bytes. No-heuristics (#28): decode
+// from authoritative metadata or fail, never surface a guess.
+
+/// A bare UDT name that is ABSENT from the registry reaches the shared opaque
+/// default. That is an UNDECODED key — a schema naming a UDT the registry does
+/// not carry — so it fails closed rather than surfacing bytes.
+#[test]
+fn unregistered_udt_name_cell_path_key_fails_closed() {
+    let err = parser()
+        .parse_cell_path_key(&collide_key_bytes(), "absent_udt", "cm")
+        .expect_err("an unresolvable UDT-named map key must not surface as bytes");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("absent_udt"),
+        "the error must name the DECLARED key type, got: {msg}"
+    );
+    assert!(
+        msg.contains("cm"),
+        "the error must name the column, got: {msg}"
+    );
+    assert!(
+        msg.contains("opaque bytes"),
+        "the error must say the decoder returned opaque bytes, so the next          reader is not sent back to first principles, got: {msg}"
+    );
+}
+
+/// A parameterised marshal type CQLite models nowhere (here a custom comparator)
+/// also reaches the shared opaque default, and also fails closed.
+#[test]
+fn unmodelled_custom_marshal_cell_path_key_fails_closed() {
+    let declared = format!("{MARSHAL}.DynamicCompositeType(s=>{MARSHAL}.UTF8Type)");
+    let err = parser()
+        .parse_cell_path_key(&[1, 2, 3], &declared, "ck")
+        .expect_err("an unmodelled map key type must not surface as bytes");
+    let msg = err.to_string();
+    assert!(msg.contains("DynamicCompositeType"), "got: {msg}");
+    assert!(msg.contains("opaque bytes"), "got: {msg}");
+}
+
+/// The check must not fire for any type the decoder DOES handle — including the
+/// families this issue newly reaches — or it would turn a working read into an
+/// error. Asserted over the whole set so a future decode regression surfaces as
+/// this named failure rather than as a silent blob.
+#[test]
+fn every_decodable_cell_path_key_type_passes_the_fail_closed_check() {
+    let p = parser();
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("text", b"x".to_vec()),
+        ("ascii", b"x".to_vec()),
+        ("int", 1i32.to_be_bytes().to_vec()),
+        ("bigint", 1i64.to_be_bytes().to_vec()),
+        ("boolean", vec![1]),
+        ("tinyint", vec![1]),
+        ("smallint", 1i16.to_be_bytes().to_vec()),
+        ("float", 1.0f32.to_be_bytes().to_vec()),
+        ("double", 1.0f64.to_be_bytes().to_vec()),
+        ("decimal", vec![0, 0, 0, 0, 1]),
+        ("varint", vec![1]),
+        ("inet", vec![127, 0, 0, 1]),
+        ("time", 1i64.to_be_bytes().to_vec()),
+        ("date", 0x8000_0000u32.to_be_bytes().to_vec()),
+        ("timestamp", 1i64.to_be_bytes().to_vec()),
+        ("uuid", vec![0u8; 16]),
+        ("timeuuid", vec![0u8; 16]),
+        ("frozen<collide>", collide_key_bytes()),
+        ("collide", collide_key_bytes()),
+    ];
+    for (type_str, bytes) in cases {
+        p.parse_cell_path_key(&bytes, type_str, "k")
+            .unwrap_or_else(|e| panic!("{type_str} must still decode, got: {e}"));
+    }
 }
