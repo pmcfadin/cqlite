@@ -3627,9 +3627,18 @@ fi
 #     one is the discriminator:
 #       * THE CONTROL above proves the route is live in this fixture (a read of an absent object
 #         reaches the promisor and EXECUTES the helper).
-#       * `BASELINE_OBJECTS: fetched` is THE DISCRIMINATOR: a partial clone must never take the
-#         fast path, because that path is the one that reads the baseline in this repository.
-#         RED-verified — removing the partial-clone gate reds exactly this assertion.
+#       * `BASELINE_OBJECTS: fetched` is THE DISCRIMINATOR, and since job 299 it holds FOR A NEW
+#         REASON worth stating, because the old one is gone. It used to be "a partial clone must
+#         never take the fast path, because that path READS THE BASELINE IN THIS REPOSITORY" — a
+#         config-derived gate, removed with the live read it protected. What forces the isolated
+#         path now is OBJECT COMPLETENESS: this lane holds c2's COMMIT and not its trees or blobs,
+#         so the baseline content cannot be read from here at all. RED-verified in this very
+#         fixture, and it is why the precondition is a conjunction rather than `cat-file -e`:
+#             cat-file -e <c2>^{commit}                          -> 0  (PRESENT)
+#             rev-list --objects --missing=print --no-walk <c2>   -> ?<blob>  (ABSENT)
+#         With commit-presence as the whole precondition the run took the fast path and then FAILed
+#         `baseline-unreadable` — a false FAIL-CLOSED on a correct partial checkout, which is what
+#         this assertion caught.
 #       * "no helper ran" is a BELT. Its reachability depends on git's filtered-fetch behaviour for
 #         the specific blobs this fixture leaves absent, which is why it is not relied on: with the
 #         gate removed the case reds on the assertion above BEFORE this one can speak. Kept because
@@ -3729,19 +3738,39 @@ fi
 base_anc=$(mkbaseline base-ancestry "$ADD_SENTINEL")
 anc_no=$(mkbranch ancestry-no "$base_anc" - )
 anc_no_out=$(hook "$anc_no")
-# THE `yes` DIRECTION CANNOT BE REACHED THE SAME WAY, and the reason is worth stating because it
-# looks like a gap: a repository that HOLDS a descendant of the baseline necessarily holds the
-# baseline commit too (history is complete in a normal clone), so "ancestor = yes" and "the
-# baseline objects are absent locally" cannot both be true — the fast path would take it. The
-# direction is therefore driven through a PARTIAL clone, which is forced onto the isolated path
-# regardless of what it holds. That reuses 7n's fixture (already a partial clone) rather than
-# building a second one, and its HEAD descends from the FIRST baseline commit.
+# THE `yes` DIRECTION CANNOT BE REACHED IN A NORMAL CLONE, and the reason is worth stating because
+# it looks like a gap: a repository that HOLDS a descendant of the baseline necessarily holds the
+# baseline commit too (history is complete in a normal clone), so "ancestor = yes" and "the baseline
+# objects are absent locally" cannot both be true — the fast path would take it. The direction is
+# therefore driven through the PARTIAL clone from 7n, which HOLDS c2's commit while its trees and
+# blobs are filtered out.
+#
+# HOW THE FIXTURE WAS REBUILT (job 299). It used to push origin/main BACK to the commit the partial
+# clone was made from, relying on "a partial clone always takes the isolated path". That premise is
+# GONE: the fast path's precondition is now OBJECT COMPLETENESS at the baseline commit, and a
+# partial clone that has CHECKED OUT that commit holds its blobs, so it legitimately reuses them —
+# which reddened this case with BASELINE_OBJECTS='reused', a same-store read that cannot exercise
+# the join at all. Asserting `KIND ok` and calling it covered would have been a proxy for a
+# property no longer measured.
+#
+# SO THE LANE IS GIVEN A HEAD THAT DESCENDS FROM THE COMMIT WHOSE CONTENT IT LACKS. `commit-tree`
+# on the lane's OWN index tree with c2 as the parent does it without a checkout — a checkout of c2
+# would lazily FETCH exactly the blobs whose absence this case needs, and would also revert the
+# pinned gate. HEAD's own objects are all local (the index tree was just written here), so HEAD's
+# committed declaration still reads; the BASELINE's are not, so the run is forced onto the isolated
+# path and ancestry is computed with the baseline native to the scratch and HEAD arriving through
+# the alternate — the two-store join, in the `yes` direction.
 anc_yes_ok=0
 anc_yes_out=""
-if [ "${pc_ok:-0}" -eq 1 ] && [ "${pc_promisor:-0}" -ge 1 ]; then
-  # Move origin/main BACK to the commit this partial clone was made from, so the baseline IS an
-  # ancestor of its HEAD; the reads still happen in the isolated repository because it is partial.
-  if ( fx "$pc_src" && git push -qf "$pc_bare" "HEAD~1:refs/heads/main" ) >/dev/null 2>&1; then
+if [ "${pc_ok:-0}" -eq 1 ] && [ "${pc_promisor:-0}" -ge 1 ] && [ -n "${pc_tip:-}" ]; then
+  anc_tree=""; anc_head=""
+  if ( fx "$pc_lane" && git add -A ) >/dev/null 2>&1; then
+    anc_tree=$( fx "$pc_lane" && git write-tree 2>/dev/null )
+  fi
+  if [ -n "$anc_tree" ]; then
+    anc_head=$( fx "$pc_lane" && git "${GIT_ID[@]}" commit-tree "$anc_tree" -p "$pc_tip" -m local-descendant 2>/dev/null )
+  fi
+  if [ -n "$anc_head" ] && ( fx "$pc_lane" && git update-ref HEAD "$anc_head" ) >/dev/null 2>&1; then
     anc_yes_out=$( fx "$pc_lane" && bash "$pc_lane/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
     anc_yes_ok=1
   fi
