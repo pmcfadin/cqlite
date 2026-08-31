@@ -434,3 +434,65 @@ fn a_zero_column_projection_tracks_rows_that_its_batch_cannot_carry() {
         ),
     }
 }
+
+/// `clear` retains capacity, and it retains it **per column** — so across batches
+/// whose dense column MOVES, the resident total converges on the SUM of per-column
+/// high-water marks rather than the high-water mark of the sum. Rotating one dense
+/// column per batch therefore reached the full dense `n_cols × rows_per_batch`
+/// residency that the sparse store exists to avoid, and NEITHER cap bounds it: the
+/// byte cap bounds a batch's PAYLOAD and says nothing about what survives between
+/// batches (issue #3552, roborev round 6).
+///
+/// Two comments in `arrow_row_accumulator.rs` asserted the opposite — "the store
+/// reaches its steady state after one batch regardless" — which holds only for a
+/// STABLE density pattern. This is the case that falsifies it.
+#[test]
+fn rotating_density_does_not_accumulate_per_column_capacity() {
+    const N_COLS: usize = 48;
+    const ROWS_PER_BATCH: usize = 96;
+
+    let names: Vec<String> = (0..N_COLS).map(|i| format!("c{i}")).collect();
+    let columns: Vec<ColumnInfo> = names
+        .iter()
+        .map(|n| col(n, DataType::Text, Some(CqlType::Text)))
+        .collect();
+
+    let mut acc = ArrowRowAccumulator::new(&columns);
+    for dense in 0..N_COLS {
+        // Every row of THIS batch carries exactly one present cell, in column
+        // `dense` — so this batch's store for `dense` grows to ROWS_PER_BATCH while
+        // every other store stays empty. Next batch moves to the next column.
+        for r in 0..ROWS_PER_BATCH {
+            acc.stage(row(vec![(
+                names[dense].as_str(),
+                text(&format!("b{dense}r{r}")),
+            )]));
+            acc.commit();
+        }
+        assert_eq!(acc.len(), ROWS_PER_BATCH, "batch {dense}: committed rows");
+        acc.clear();
+        assert_eq!(acc.len(), 0, "batch {dense}: cleared");
+    }
+
+    let retained = acc.retained_cell_slots();
+
+    // DISCRIMINATING, not a tautology: without the trim each of the N_COLS stores
+    // keeps its own ROWS_PER_BATCH high-water mark, so the retained total is the full
+    // dense product. Asserting against that computed value means this test fails if
+    // the trim is removed, rather than passing for any implementation.
+    let unbounded = N_COLS * ROWS_PER_BATCH;
+    assert!(
+        retained < unbounded,
+        "retained {retained} slots after rotating density across {N_COLS} columns; \
+         without the per-column trim this reaches the dense product {unbounded}"
+    );
+
+    // And the bound is the DOCUMENTED one, not merely "less than dense": a batch's
+    // own peak is ROWS_PER_BATCH present cells, so the allowance is
+    // max(peak × SLACK, FLOOR), plus at most one warm slot per column.
+    let allowance = (ROWS_PER_BATCH * 2).max(1024) + N_COLS;
+    assert!(
+        retained <= allowance,
+        "retained {retained} slots exceeds the documented allowance {allowance}"
+    );
+}

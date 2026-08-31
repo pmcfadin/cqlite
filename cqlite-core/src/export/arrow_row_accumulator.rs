@@ -126,6 +126,15 @@ use super::arrow_size::PreparedColumns;
 /// Borrows the column set (it is stable for the whole scan) and owns the cells it
 /// has taken out of the rows. See the module documentation for the stage/commit
 /// contract and why it is shaped that way.
+/// Total retained cell slots tolerated after a batch, as a multiple of the largest
+/// batch's own present-cell count. Slack, not a hard equality, so an ordinary
+/// batch-to-batch density wobble does not reallocate.
+const RETAINED_SLOT_SLACK: usize = 2;
+
+/// Floor below which retained slots are never trimmed, so a small-batch workload
+/// never pays repeated reallocation to reclaim a few hundred slots.
+const RETAINED_SLOT_FLOOR: usize = 1024;
+
 pub struct ArrowRowAccumulator<'a> {
     /// The projected output columns, in output order.
     columns: &'a [ColumnInfo],
@@ -183,6 +192,10 @@ pub struct ArrowRowAccumulator<'a> {
     /// projection is reachable on the `do_get`/streaming path is unresolved; issue
     /// #3742 owns both questions.
     rows: usize,
+    /// Largest total PRESENT-cell count any single batch has held — the basis for
+    /// how much capacity may stay resident between batches. A batch's own present
+    /// cells are what the byte cap bounds, so they are the only sound basis.
+    peak_cells: usize,
 }
 
 impl<'a> ArrowRowAccumulator<'a> {
@@ -227,12 +240,17 @@ impl<'a> ArrowRowAccumulator<'a> {
             // <128 MB target, on ONE stream, times `--max-concurrent-scans`, and
             // `batch_size` is operator-settable with no upper clamp. Because
             // `clear` RETAINS capacity, pre-sizing only ever bought the FIRST
-            // batch's amortized growth; the store reaches the same steady state
-            // after one batch either way (issue #3552 review B1).
+            // batch's amortized growth (issue #3552 review B1).
+            //
+            // An earlier revision added "the store reaches the same steady state after
+            // one batch either way" here. That is FALSE for a density pattern that MOVES
+            // between columns, and `clear` now BOUNDS what survives rather than resting
+            // on that argument — see the trim there.
             cells: (0..columns.len()).map(|_| Vec::new()).collect(),
             staged: vec![None; columns.len()],
             has_staged: false,
             rows: 0,
+            peak_cells: 0,
         }
     }
 
@@ -242,9 +260,12 @@ impl<'a> ArrowRowAccumulator<'a> {
     /// `capacity` is accepted for call-site clarity — the caller knows the row cap
     /// its batches are bounded by — and is DELIBERATELY not used to pre-allocate
     /// the per-column cell stores: that product is exactly the eager
-    /// `n_cols × batch_size` residency [`Self::new`] documents, and `clear`
-    /// retains capacity, so the store reaches its steady state after one batch
-    /// regardless (issue #3552 review B1).
+    /// `n_cols × batch_size` residency [`Self::new`] documents (issue #3552
+    /// review B1).
+    ///
+    /// This doc previously argued the store "reaches its steady state after one
+    /// batch regardless" because `clear` retains capacity. True only for a STABLE
+    /// density pattern; see [`Self::clear`], which bounds the resident total.
     pub fn with_capacity(columns: &'a [ColumnInfo], capacity: usize) -> Self {
         let _ = capacity;
         Self::new(columns)
@@ -399,10 +420,52 @@ impl<'a> ArrowRowAccumulator<'a> {
     /// A staged-but-uncommitted row is deliberately left staged: it belongs to the
     /// NEXT batch, which is what makes the test-then-push boundary work.
     pub fn clear(&mut self) {
+        // A batch's OWN present-cell count is what the byte cap bounds, so it is the
+        // only sound basis for what may stay resident. Measured BEFORE the clear.
+        let used: usize = self.cells.iter().map(Vec::len).sum();
+        self.peak_cells = self.peak_cells.max(used);
+
         for column in &mut self.cells {
             column.clear();
         }
+
+        // WHY A TRIM IS NEEDED AT ALL. `Vec::clear` retains capacity, and capacity is
+        // retained PER COLUMN — so across batches whose density MOVES BETWEEN COLUMNS
+        // the resident total converges on the SUM of per-column high-water marks, not
+        // the high-water mark of the sum. One dense column per batch, rotating,
+        // reaches the full dense `n_cols × batch_size` residency this sparse
+        // representation exists to avoid, and NEITHER cap bounds it: the byte cap
+        // bounds a batch's PAYLOAD and says nothing about what survives BETWEEN
+        // batches. Two comments in this file asserted the opposite until issue #3552
+        // roborev round 6; pinned by
+        // `rotating_density_does_not_accumulate_per_column_capacity`.
+        let allowance = self
+            .peak_cells
+            .saturating_mul(RETAINED_SLOT_SLACK)
+            .max(RETAINED_SLOT_FLOOR);
+        let retained: usize = self.cells.iter().map(Vec::capacity).sum();
+        if retained > allowance {
+            // An EQUAL per-column share, so the bound holds for ANY density
+            // distribution rather than for the one that happened to occur. Stores are
+            // shrunk, never dropped: the next batch re-grows only what it uses. The
+            // `.max(1)` keeps one warm slot per column on a projection wider than the
+            // floor, where an equal share would round to zero and churn every batch.
+            let share = (allowance / self.cells.len().max(1)).max(1);
+            for column in &mut self.cells {
+                if column.capacity() > share {
+                    column.shrink_to(share);
+                }
+            }
+        }
         self.rows = 0;
+    }
+
+    /// Total retained cell slots across every column store — the quantity
+    /// [`Self::clear`]'s trim bounds. Exposed so that bound is TESTED rather than
+    /// merely asserted in a comment.
+    #[cfg(test)]
+    pub(crate) fn retained_cell_slots(&self) -> usize {
+        self.cells.iter().map(Vec::capacity).sum()
     }
 
     /// Re-derive the payload estimate of exactly the COMMITTED rows, charged from
