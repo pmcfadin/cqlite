@@ -7985,11 +7985,15 @@ test_lane_lock_publish_failure_is_named_and_leaves_nothing() {
        '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
        '  if true; then'; then
     out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    # B21 retired the confident "FILESYSTEM failure, not contention" here too: this code cannot know which
+    # it was. What B1 is actually about survives unchanged — the refusal is its OWN refusal, it names the
+    # step that failed, and it does not claim a read-back that never ran.
     if [[ "$rc" -ne 0 ]] && [[ "$out" == *"could not record itself in it"* ]] \
-       && [[ "$out" == *"FILESYSTEM failure, not contention"* ]] \
+       && [[ "$out" == *"no byte of it was written"* ]] \
+       && [[ "$out" == *"NOT ESTABLISHED"* ]] \
        && [[ "$out" != *"reading it back did not return our pid"* ]] \
        && [[ "$out" != *"ACQUIRED="* ]]; then
-      pass "lane-lock B1: a publish that never wrote produces its OWN refusal naming a filesystem failure, and does NOT claim a read-back that never ran"
+      pass "lane-lock B1/B21: a publish that never wrote produces its OWN refusal naming the step that failed, does NOT claim a read-back that never ran, and does not assert a cause it cannot establish"
     else
       fail "lane-lock-publish-misdiagnosed: rc=$rc out=[$out] — the refusal must not assert steps that did not run"
     fi
@@ -8072,10 +8076,13 @@ test_lane_lock_failed_reclaim_rename_is_named() {
   out="$(lane_lock_drive_at "$d" - "$ro" "$lane")"; rc=$?
   chmod 0755 "$ro" 2>/dev/null || true
 
+  # B21: "names a filesystem cause" was itself a claim beyond the evidence. What B2 is about survives — the
+  # failure is reported rather than swallowed, and no race is invented.
   if [[ "$rc" -ne 0 ]] && [[ "$out" == *"could not be cleared"* ]] \
-     && [[ "$out" == *"FILESYSTEM failure, not contention"* ]] \
+     && [[ "$out" == *"nothing was cleared and nothing was claimed"* ]] \
+     && [[ "$out" == *"NOT ESTABLISHED"* ]] \
      && [[ "$out" != *"immediately claimed by someone else"* ]]; then
-    pass "lane-lock B2: a reclaim whose rename FAILS says so, names a filesystem cause, and never claims a race that did not happen"
+    pass "lane-lock B2/B21: a reclaim whose rename FAILS says so, states plainly that nothing was cleared or claimed, never invents a race, and does not assert a cause it cannot establish"
   else
     fail "lane-lock-mv-misattributed: rc=$rc out=[$out] — the pre-fix path printed the lost-race refusal plus 're-run this supervisor', which loops"
   fi
