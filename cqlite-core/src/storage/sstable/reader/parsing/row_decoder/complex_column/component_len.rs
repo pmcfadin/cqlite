@@ -11,13 +11,16 @@
 //! pass and the slice index panics instead). CLAUDE.md forbids a reachable panic
 //! in a parser on untrusted bytes, so this is a hard failure, not a nit.
 //!
-//! Sites, all now routed through here:
+//! The UDT field loops, ALL FIVE now routed through here:
+//! * `udt.rs` `parse_udt_value` — the one that already rejected `< 0`
+//!   explicitly, i.e. the control that this was an inconsistency and not a
+//!   design; routed anyway so its duplicated arm could go away.
 //! * `udt.rs` `parse_nested_udt_from_registry`
 //! * `udt.rs` `parse_inline_udt_value`
-//! * `raw_type_value.rs`'s registry-backed frozen-UDT branch
-//!
-//! `udt.rs` `parse_udt_value` already rejected `< 0` explicitly and is the
-//! control that this was an inconsistency rather than a design.
+//! * `raw_type_value.rs`'s two INLINE loops inside `parse_raw_type_value` — the
+//!   MARSHAL one (the branch the committed `cm` fixture key actually takes) and
+//!   the REGISTRY-BARE one. Neither is a call to `parse_udt_value`; an earlier
+//!   revision of this header and of the enumeration table said it was.
 //!
 //! # Why the guard lives HERE, of all places
 //! Not for elegance. Those three branches became reachable from a MULTICELL map's

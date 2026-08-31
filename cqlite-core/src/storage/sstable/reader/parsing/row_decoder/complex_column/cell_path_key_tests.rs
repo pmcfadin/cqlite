@@ -33,17 +33,23 @@
 //!   `Statistics.db` path, where the key type arrives in marshal form. Several
 //!   cases below therefore use ORIGINAL-CASE marshal spellings and would red if
 //!   a future refactor re-lowercased the delegated type string.
-//! * **Exact-width validation is preserved and generalized.** For a cell path the
-//!   ENTIRE stripped slice IS the key, so an over-long slice is corruption;
-//!   `parse_value_from_raw_bytes` only rejects UNDER-width (`< N`) because its
-//!   other callers hand it already-length-bounded element bytes. Authority for
-//!   exact width is Cassandra 5.0.8 itself, e.g.
-//!   `org.apache.cassandra.serializers.Int32Serializer.validate`:
-//!   `if (accessor.size(value) != 4 && !accessor.isEmpty(value)) throw new
-//!   MarshalException(...)` — and the same `!= N` shape in
-//!   `LongSerializer`/`UUIDSerializer`/`TimestampSerializer`/`FloatSerializer`/
-//!   `DoubleSerializer`/`ShortSerializer`/`ByteSerializer`/`SimpleDateSerializer`/
-//!   `TimeSerializer` (`BooleanSerializer` spells it `size > 1`).
+//! * **Width validation follows Cassandra's THREE-WAY serializer split**, which is
+//!   NOT a uniform `!= N`. For a cell path the ENTIRE stripped slice IS the key, so
+//!   an over-long slice is corruption, while `parse_value_from_raw_bytes` only
+//!   rejects UNDER-width (`< N`) because its other callers hand it
+//!   already-length-bounded element bytes. Read at the pinned `cassandra-5.0.8`
+//!   tag, `org.apache.cassandra.serializers.*.validate` splits:
+//!     * `N` **or `0`** (`!= N && !isEmpty`): Int32(4) Long(8) Float(4) Double(8)
+//!       UUID(16) Timestamp(8), and Counter(8) which `extends LongSerializer`;
+//!     * **strict `!= N`**: Short(2) Byte(1) SimpleDate(4) Time(8);
+//!     * `> 1`, i.e. 0 or 1: Boolean;
+//!     * Inet: RETURNS EARLY on empty, then `getByAddress` → 0, 4 or 16.
+//!   An earlier revision of THIS header claimed a uniform `!= N` while
+//!   `cell_path_key.rs` said in bold that that claim was wrong — two files in one
+//!   diff giving contradictory Cassandra authority for the table's load-bearing
+//!   distinction. The split above is the measured one; see
+//!   `an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table` and its
+//!   strict-family sibling, which pin both directions.
 //! * **A `blob` key is a legitimate blob**, not a fallback — pinned so the
 //!   diagnostic that used to claim every unhandled key was "parsed as blob"
 //!   cannot come back.
@@ -96,6 +102,21 @@ fn encode_components(components: &[Option<&[u8]>]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The MARSHAL spelling of the `collide` UDT, exactly as an on-disk
+/// `SerializationHeader` carries it. Built once: four tests need it, and a copy
+/// per test is how one of them ends up spelling a field type differently.
+fn udt_marshal_type() -> String {
+    format!(
+        "{MARSHAL}.UserType({KEYSPACE},{},{}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.UTF8Type,\
+         {}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.Int32Type)",
+        hex::encode("collide"),
+        hex::encode("_type"),
+        hex::encode("_keyspace"),
+        hex::encode("__proto__"),
+        hex::encode("real_field"),
+    )
 }
 
 /// The fixture's map key: `{_type: "key-type-marker", _keyspace:
@@ -216,15 +237,7 @@ fn null_field_inside_a_composite_cell_path_key_round_trips_as_null() {
 /// case-SENSITIVE `primitive_marshal_to_cql_short`.
 #[test]
 fn marshal_form_usertype_cell_path_key_keeps_its_case_and_decodes_fields() {
-    let marshal = format!(
-        "{MARSHAL}.UserType({KEYSPACE},{},{}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.UTF8Type,\
-         {}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.Int32Type)",
-        hex::encode("collide"),
-        hex::encode("_type"),
-        hex::encode("_keyspace"),
-        hex::encode("__proto__"),
-        hex::encode("real_field"),
-    );
+    let marshal = udt_marshal_type();
     let value = parser()
         .parse_cell_path_key(&collide_key_bytes(), &marshal, "cm")
         .expect("a marshal-form UserType cell-path key must decode");
@@ -424,6 +437,49 @@ fn fixed_width_cell_path_keys_reject_a_wrong_width() {
     assert!(p
         .parse_cell_path_key(&[0u8; 5], &format!("{MARSHAL}.Int32Type"), "k")
         .is_err());
+    // FROZEN-SPELLED fixed-width keys must be width-checked too (finding B1).
+    // The classifier used to run on the RAW string, so `frozen<int>` took the
+    // "contains '<' => variable width" branch, the dispatcher's frozen arm then
+    // recursed to `"int"` and returned `None` consumption, and a 5-byte key
+    // decoded `Integer` from `data[0..4]` silently. The composite drift guard
+    // could not see this: it enumerates COMPOSITES only.
+    for (type_str, bytes) in [
+        ("frozen<int>", vec![0u8; 5]),
+        ("frozen<int>", vec![0u8; 3]),
+        ("Frozen<BIGINT>", vec![0u8; 9]),
+        ("frozen<inet>", vec![0u8; 5]),
+        ("frozen<uuid>", vec![0u8; 17]),
+        ("frozen<smallint>", vec![0u8; 3]),
+    ] {
+        assert!(
+            p.parse_cell_path_key(&bytes, type_str, "k").is_err(),
+            "{type_str}: {} bytes must be refused — a frozen-spelled fixed-width \
+             key must not bypass the width table (B1)",
+            bytes.len()
+        );
+    }
+    for marshal_inner in ["Int32Type", "LongType", "InetAddressType", "UUIDType"] {
+        let t = format!("{MARSHAL}.FrozenType({MARSHAL}.{marshal_inner})");
+        assert!(
+            p.parse_cell_path_key(&[0u8; 5], &t, "k").is_err(),
+            "{t}: 5 bytes must be refused (B1, marshal spelling)"
+        );
+    }
+    // ...and the CORRECT widths still decode through the frozen spelling, so B1's
+    // fix is a narrowing and not a ban.
+    assert!(p
+        .parse_cell_path_key(&7i32.to_be_bytes(), "frozen<int>", "k")
+        .is_ok());
+    assert!(p
+        .parse_cell_path_key(&[127, 0, 0, 1], "frozen<inet>", "k")
+        .is_ok());
+    assert!(p
+        .parse_cell_path_key(
+            &7i32.to_be_bytes(),
+            &format!("{MARSHAL}.FrozenType({MARSHAL}.Int32Type)"),
+            "k"
+        )
+        .is_ok());
     // Variable-width families are unaffected.
     assert!(p.parse_cell_path_key(&[0u8; 5], "text", "k").is_ok());
     assert!(p.parse_cell_path_key(&[0u8; 5], "blob", "k").is_ok());
@@ -433,9 +489,13 @@ fn fixed_width_cell_path_keys_reject_a_wrong_width() {
 // A `blob` key is a blob BY DECLARATION, not by fallback (issue #3612 option B)
 // ---------------------------------------------------------------------------
 
-/// The one case where `Value::Blob` is the RIGHT answer. The fail-closed check
-/// below must distinguish "declared blob" from "undecoded", so this is its
-/// control: if the check ever keyed on the RESULT alone it would reject these.
+/// The one case where `Value::Blob` is the RIGHT answer. The opaque-value
+/// DIAGNOSTIC below must distinguish "declared blob" from "undecoded", so this is
+/// its control: a check keyed on the RESULT alone would fire on these. Note the
+/// failure mode it guards is a SPURIOUS WARNING, not a rejection — the
+/// undecodable case returns opaque bytes plus a `warn!` and never an `Err` (see
+/// the module header's error-budget rule); an earlier revision of this comment
+/// said "reject", which described a fail-closed check that no longer exists.
 #[test]
 fn a_declared_blob_cell_path_key_is_a_blob() {
     let p = parser();
@@ -877,10 +937,14 @@ fn every_composite_cell_path_key_spelling_is_consumption_checked() {
         // `parse_value_from_raw_bytes`, but this dispatcher sees the raw
         // string), so it is enumerated separately rather than assumed.
         (format!("{MARSHAL}.DurationType"), &[0u8, 0, 0]),
+        // The marshal `UserType(..)` is a THIRD UDT route: a different inline
+        // field loop in `raw_type_value.rs` from the registry-bare one above, and
+        // the one the committed `cm` fixture key actually takes.
+        (udt_marshal_type(), &udt_bytes),
     ];
     assert_eq!(
         cases.len(),
-        16,
+        17,
         "keep this count in step with the case list, so a deleted case is visible"
     );
     for (type_str, clean) in cases {
@@ -920,15 +984,7 @@ fn components_with_leading_len(raw: i32) -> Vec<u8> {
 fn a_component_length_below_minus_one_errors_and_never_panics() {
     let p = parser();
     // Both UDT spellings the cell-path route can take, and the boundary values.
-    let marshal = format!(
-        "{MARSHAL}.UserType({KEYSPACE},{},{}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.UTF8Type,\
-         {}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.Int32Type)",
-        hex::encode("collide"),
-        hex::encode("_type"),
-        hex::encode("_keyspace"),
-        hex::encode("__proto__"),
-        hex::encode("real_field"),
-    );
+    let marshal = udt_marshal_type();
     for spelling in ["collide", "frozen<collide>", marshal.as_str()] {
         for raw in [-2i32, -7, i32::MIN, -1_000_000] {
             let bytes = components_with_leading_len(raw);
@@ -1011,9 +1067,11 @@ fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
     }
 }
 
-/// The STRICT family: a 0-byte key IS refused by the width table, because these
-/// four serializers have no `isEmpty` allowance. This is the half that makes the
-/// split load-bearing rather than decorative.
+/// The STRICT family — Short, Byte, SimpleDate, Time: a 0-byte key IS refused by
+/// the WIDTH TABLE, because these four serializers alone have no `isEmpty`
+/// allowance. This is the half that makes the three-way split load-bearing rather
+/// than decorative. (`inet` is NOT one of them — see
+/// `an_empty_inet_key_is_legal_and_decodes`.)
 #[test]
 fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
     let p = parser();
@@ -1033,12 +1091,36 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
              got: {msg}"
         );
     }
-    // `inet` is the fifth strict case: `InetAddressSerializer.validate` THROWS on
-    // empty before it ever reaches `getByAddress`.
-    let err = p
-        .parse_cell_path_key(&[], "inet", "k")
-        .expect_err("inet admits no empty buffer");
-    assert!(err.to_string().contains("4 or 16"), "got: {err}");
+}
+
+/// `inet` is NOT a fifth strict case, and it is the ONE family where the empty
+/// buffer decodes rather than merely passing the width table.
+///
+/// `InetAddressSerializer.validate` RETURNS EARLY on empty
+/// (`if (accessor.isEmpty(value)) return;`) and only then delegates to
+/// `getByAddress`, so an empty `inet` is legal to Cassandra — and CQLite's inet
+/// arm borrows the whole slice with no minimum, so it round-trips as an empty
+/// `Value::Inet`. Pinned because THREE places in this diff previously called inet
+/// "the fifth strict case", on the strength of a grep whose output line ran the
+/// `isEmpty` test together with the `throw` from the `catch (UnknownHostException)`
+/// block below it. Read whole methods, not greps of their `if`s.
+#[test]
+fn an_empty_inet_key_is_legal_and_decodes() {
+    let p = parser();
+    assert_eq!(
+        p.parse_cell_path_key(&[], "inet", "k").unwrap(),
+        Value::Inet(Vec::new().into()),
+        "Cassandra returns early on an empty inet, so it is a legal value"
+    );
+    // The two NON-empty widths still work, and nothing between or beyond does.
+    assert!(p.parse_cell_path_key(&[127, 0, 0, 1], "inet", "k").is_ok());
+    assert!(p.parse_cell_path_key(&[0u8; 16], "inet", "k").is_ok());
+    for bad in [1usize, 3, 5, 15, 17] {
+        assert!(
+            p.parse_cell_path_key(&vec![0u8; bad], "inet", "k").is_err(),
+            "inet: {bad} bytes is neither empty, IPv4 nor IPv6"
+        );
+    }
 }
 
 /// Over-width is still refused for EVERY fixed-width family, empty-allowance or
@@ -1090,15 +1172,7 @@ fn multicell_and_frozen_sides_present_every_key_type_identically() {
     let seq = encode_sequence(&[&1i32.to_be_bytes()]);
     let mp = encode_frozen_map(&[(b"k", &7i32.to_be_bytes())]);
     let tup = encode_components(&[Some(b"abc"), Some(&42i32.to_be_bytes())]);
-    let udt_marshal = format!(
-        "{MARSHAL}.UserType({KEYSPACE},{},{}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.UTF8Type,\
-         {}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.Int32Type)",
-        hex::encode("collide"),
-        hex::encode("_type"),
-        hex::encode("_keyspace"),
-        hex::encode("__proto__"),
-        hex::encode("real_field"),
-    );
+    let udt_marshal = udt_marshal_type();
     // (the type string the FROZEN side hands its key decoder, the key bytes,
     //  whether a `Value::Frozen` wrapper is EXPECTED on both sides)
     let cases: Vec<(String, &[u8], bool)> = vec![

@@ -49,8 +49,14 @@
 //!    * **strict `!= N`** (no empty buffer): `ShortSerializer` 2,
 //!      `ByteSerializer` 1, `SimpleDateSerializer` 4, `TimeSerializer` 8.
 //!    * **`size > 1`**, i.e. 0 or 1: `BooleanSerializer`.
-//!    * **`InetAddressSerializer`** THROWS on empty, then delegates to
-//!      `InetAddress.getByAddress` → 4 or 16 only.
+//!    * **`InetAddressSerializer`** RETURNS EARLY on empty
+//!      (`if (accessor.isEmpty(value)) return;`) and otherwise delegates to
+//!      `InetAddress.getByAddress`, so 0, 4 or 16. It is an `N`-or-`0` type, NOT
+//!      a strict one — an earlier revision of this header called it "the fifth
+//!      strict case" on the strength of a `grep` whose output line had run the
+//!      `isEmpty` test together with the `throw` from the
+//!      `catch (UnknownHostException)` block below it. Read the whole method, not
+//!      a grep of its `if`s.
 //!
 //!    Encoding the `0` allowances is a FIDELITY fix with no behaviour change, and
 //!    both halves of that are worth stating. No behaviour change: the sole caller
@@ -72,7 +78,7 @@
 //! `parse_result`). `break` leaves the column loop, so the failing column AND
 //! EVERY LATER ON-DISK COLUMN silently vanish from the row. Reproduced with a
 //! real `SELECT` over the committed Cassandra fixture: declaring `cm` as
-//! `map<int,int>` against its 26-byte on-disk UDT key returned exit 0 and
+//! `map<int,int>` against its 70-byte on-disk UDT cell path returned exit 0 and
 //! `"cm": null, "tm": null` with every other column intact.
 //!
 //! A silently TRUNCATED ROW is more destructive than one wrongly-typed value, so
@@ -105,13 +111,13 @@
 //! | varint, inet | whole slice by construction (borrowed entire) |
 //! | decimal | whole slice by construction (`scale` = `data[..4]`, unscaled = `data[4..]`) |
 //! | int, bigint/counter, boolean, uuid/timeuuid, float, double, smallint, tinyint, timestamp, date, time | caller's ALLOWED-width table, per type, mirroring Cassandra's serializers (stronger than a consumption compare) |
-//! | inet (widths) | same table, `[4, 16]` — empty THROWS in Cassandra |
+//! | inet (widths) | same table, `[0, 4, 16]` — `N`-or-`0`, two non-empty widths |
 //! | frozen list (`parse_frozen_list_value_raw`) | reported offset, was DISCARDED — now checked |
 //! | frozen set (`parse_frozen_set_value_raw`) | reported offset, was DISCARDED — now checked |
 //! | frozen map (`parse_frozen_map_value_raw`) | reported offset, was DISCARDED — now checked |
 //! | tuple (`parse_tuple_elements_raw`) | reported `&mut offset`, was DISCARDED — now checked |
-//! | UDT, marshal + registry-bare-name (`parse_raw_type_value` → `parse_udt_value`) | reported offset, was DISCARDED — now checked |
-//! | `frozen<T>` / `FrozenType(T)` | recursion; exactness is the inner arm's |
+//! | UDT, marshal + registry-bare-name (`parse_raw_type_value`, whose UDT work is TWO inline field loops in `raw_type_value.rs` — the marshal one and the registry-bare one — not a call to `parse_udt_value`) | reported offset, was DISCARDED — now checked |
+//! | `frozen<T>` / `FrozenType(T)` | recursion for the VALUE; exactness is the inner arm's, and for a fixed-width inner it comes from the width table, which is why that table peels frozen first (B1) |
 //! | duration | measured from its own three-VInt framing (the decoder ignores the remainder) |
 //! | unknown type → opaque `Value::Blob` | whole slice by construction; also `warn!`s |
 //!
@@ -142,11 +148,19 @@
 //!
 //! # The asymmetry across the three cell-path/key readers (issue #3612)
 //!
-//! For a key type CQLite models nowhere, all three readers agree — each serves
-//! an opaque `Value::Blob`: this multicell path (plus a `warn!`), the frozen-map
-//! reader (`parse_frozen_map_value`, via `read_frozen_element`), and the
-//! multi-generation merge reader (`read_assembly`'s `key_is_opaque_composite`,
-//! tracked by issue #2339). There is deliberately NO availability difference.
+//! For a key type CQLite models nowhere, TWO of the three serve an opaque
+//! `Value::Blob`: this multicell path (plus a `warn!`) and the frozen-map reader
+//! (`parse_frozen_map_value`, via `read_frozen_element`). The THIRD — the
+//! multi-generation MERGED read — FAILS CLOSED instead, returning
+//! `Error::unsupported_format` from `composite_collection_unsupported` before any
+//! ordering decision is reached; serving an opaque blob there was deliberately
+//! abandoned. So there IS an availability difference between the single-generation
+//! readers and the merged read, and issue #2339 tracks closing it.
+//!
+//! (Do not cite `key_is_opaque_composite` for this: it decides ELEMENT ORDERING
+//! for the opaque case and is consulted only after the fail-closed check above,
+//! so it is the wrong symbol for the availability question. An earlier revision
+//! of this header cited it and claimed "NO availability difference" — both wrong.)
 //!
 //! They DIVERGE on CORRUPTION: only this path validates fixed widths and full
 //! consumption, so a multicell key with a wrong width or trailing bytes is
@@ -173,7 +187,7 @@ impl V5CompressedLegacyParser {
         type_str: &str,
         column_name: &str,
     ) -> Result<Value> {
-        let allowed = Self::cell_path_key_allowed_widths(type_str);
+        let allowed = self.cell_path_key_allowed_widths(type_str);
         if !allowed.is_empty() && !allowed.contains(&data.len()) {
             return Err(Error::corruption(format!(
                 "Map key '{}' of type '{}' requires exactly {} bytes, got {}",
@@ -345,9 +359,11 @@ impl V5CompressedLegacyParser {
     /// value": text/ascii/varchar (validated UTF-8 over all of `data`), blob/bytes,
     /// varint and inet (each borrows the whole slice), and decimal (scale from
     /// `data[..4]`, unscaled from `data[4..]`). Fixed-width scalars also return
-    /// `None` because the caller's width table has ALREADY pinned `data.len()` to
-    /// the exact width — a stronger check than a consumption compare. The opaque
-    /// `Value::Blob` default likewise borrows all of `data`.
+    /// `None`, and for them exactness comes from the caller's ALLOWED-width table
+    /// instead — which is why that table must be consulted on the PEELED type
+    /// (finding B1: while it classified the raw string, a `frozen<int>` reached
+    /// this `None` with no width pinned anywhere). The opaque `Value::Blob`
+    /// default likewise borrows all of `data`.
     ///
     /// # Dispatch must mirror `parse_value_from_raw_bytes`
     /// The guards below are the same predicates, in the same ORDER (frozen before
@@ -369,35 +385,42 @@ impl V5CompressedLegacyParser {
             )));
         }
         let lower = type_str.to_ascii_lowercase();
-        const M: &str = "org.apache.cassandra.db.marshal.";
+        // Full literals rather than `format!("{M}…")`: this runs once per map
+        // ENTRY per row, and the six allocations were pure waste on a hot path.
+        const M_FROZEN: &str = "org.apache.cassandra.db.marshal.frozentype(";
+        const M_LIST: &str = "org.apache.cassandra.db.marshal.listtype(";
+        const M_SET: &str = "org.apache.cassandra.db.marshal.settype(";
+        const M_MAP: &str = "org.apache.cassandra.db.marshal.maptype(";
+        const M_TUPLE: &str = "org.apache.cassandra.db.marshal.tupletype(";
+        const M_DURATION: &str = "org.apache.cassandra.db.marshal.durationtype";
 
         // frozen<T> / FrozenType(T): recurse on the inner type. Deliberately
         // BEFORE the UDT arm, and deliberately without re-wrapping in
         // `Value::Frozen` (see `unwrap_frozen_cell_path_key`).
-        if lower.starts_with("frozen<") || lower.starts_with(&format!("{M}frozentype(")) {
+        if lower.starts_with("frozen<") || lower.starts_with(M_FROZEN) {
             let inner = self.extract_frozen_inner_type(type_str)?;
             return self.decode_reporting_consumption(data, &inner, column_name, depth + 1);
         }
 
-        if lower.starts_with("list<") || lower.starts_with(&format!("{M}listtype(")) {
+        if lower.starts_with("list<") || lower.starts_with(M_LIST) {
             let elem = self.extract_collection_element_type(type_str, "list")?;
             let (val, off) =
                 self.parse_frozen_list_value_raw(data, 0, &elem, column_name, depth + 1)?;
             return Ok((val, Some(off)));
         }
-        if lower.starts_with("set<") || lower.starts_with(&format!("{M}settype(")) {
+        if lower.starts_with("set<") || lower.starts_with(M_SET) {
             let elem = self.extract_collection_element_type(type_str, "set")?;
             let (val, off) =
                 self.parse_frozen_set_value_raw(data, 0, &elem, column_name, depth + 1)?;
             return Ok((val, Some(off)));
         }
-        if lower.starts_with("map<") || lower.starts_with(&format!("{M}maptype(")) {
+        if lower.starts_with("map<") || lower.starts_with(M_MAP) {
             let (k, v) = self.extract_map_types(type_str)?;
             let (val, off) =
                 self.parse_frozen_map_value_raw(data, 0, &k, &v, column_name, depth + 1)?;
             return Ok((val, Some(off)));
         }
-        if lower.starts_with("tuple<") || lower.starts_with(&format!("{M}tupletype(")) {
+        if lower.starts_with("tuple<") || lower.starts_with(M_TUPLE) {
             let element_types = self.extract_tuple_element_types(type_str)?;
             if element_types.is_empty() {
                 return Err(Error::schema(format!(
@@ -421,10 +444,14 @@ impl V5CompressedLegacyParser {
         // the last field it consumed — including the "trailing fields omitted"
         // early exit, which is what makes a partial trailing header visible here.
         if Self::is_udt_type(type_str)
+            // ORIGINAL case, not `lower`: the callee re-looks-up with `type_str`
+            // and `get_udt` is a deliberately case-SENSITIVE map get, so a
+            // lowercased probe here would make this guard fire on keys the callee
+            // cannot resolve (and miss ones it can).
             || self
                 .udt_registry
                 .as_ref()
-                .is_some_and(|r| r.get_udt_qualified(&self.keyspace, &lower).is_some())
+                .is_some_and(|r| r.get_udt_qualified(&self.keyspace, type_str).is_some())
         {
             let (val, off) = self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
             return Ok((val, Some(off)));
@@ -433,7 +460,7 @@ impl V5CompressedLegacyParser {
         // whatever follows the third, so its consumption is measured here from the
         // same framing (`parse_vint` reports the remaining slice). Framing only —
         // the VALUE still comes from the one shared decode below.
-        if lower == "duration" || lower == format!("{M}durationtype") {
+        if lower == "duration" || lower == M_DURATION {
             let value = self.parse_value_from_raw_bytes(data, type_str, column_name, depth)?;
             let mut pos = 0usize;
             for _ in 0..3 {
@@ -460,17 +487,7 @@ impl V5CompressedLegacyParser {
     /// permit `frozen<blob>` as a map key, but a blob is still a blob under any
     /// spelling and must not be misdiagnosed as undecoded.
     fn cell_path_key_declares_blob(&self, type_str: &str) -> bool {
-        let mut t = type_str.trim().to_string();
-        // Peel via the ONE existing frozen-unwrapper (`extract_frozen_inner_type`,
-        // which accepts `frozen<T>` and `FrozenType(T)` case-insensitively), so
-        // this cannot form a second opinion about what "frozen" means. Bounded by
-        // the decoder's own nesting limit; `Err` simply means "not frozen".
-        for _ in 0..MAX_TYPE_NESTING_DEPTH {
-            match self.extract_frozen_inner_type(&t) {
-                Ok(inner) => t = inner.trim().to_string(),
-                Err(_) => break,
-            }
-        }
+        let t = self.peel_frozen_spellings(type_str);
         // CQL spells a CUSTOM type as a SINGLE-QUOTED marshal class name
         // (`'org.apache.cassandra.db.marshal.BytesType'`); the quotes would
         // defeat the `ends_with` suffix match below, so strip them first.
@@ -489,6 +506,26 @@ impl V5CompressedLegacyParser {
             return true;
         }
         matches!(t.to_ascii_lowercase().as_str(), "blob" | "bytes")
+    }
+
+    /// Strip every `frozen<T>` / `FrozenType(T)` layer off a DECLARED TYPE STRING.
+    ///
+    /// Shared by the width classifier and the declared-blob test so the two cannot
+    /// form different opinions about which spellings are frozen — they did, and the
+    /// disagreement was finding B1: the blob test peeled and the width classifier
+    /// did not. Peels via the ONE existing unwrapper
+    /// (`extract_frozen_inner_type`, which accepts both spellings
+    /// case-insensitively); `Err` simply means "not frozen". Bounded by the
+    /// decoder's own nesting limit so a pathological string cannot spin.
+    fn peel_frozen_spellings(&self, type_str: &str) -> String {
+        let mut t = type_str.trim().to_string();
+        for _ in 0..MAX_TYPE_NESTING_DEPTH {
+            match self.extract_frozen_inner_type(&t) {
+                Ok(inner) => t = inner.trim().to_string(),
+                Err(_) => break,
+            }
+        }
+        t
     }
 
     /// Drop the `Value::Frozen` wrapper the structural decoder adds for a
@@ -511,12 +548,31 @@ impl V5CompressedLegacyParser {
     /// the CASE-SENSITIVE [`Self::primitive_marshal_to_cql_short`], which returns
     /// `None` for anything parameterised (`UserType(…)`, `TupleType(…)`,
     /// `FrozenType(…)`, collections), so a composite key is never width-checked.
-    /// The byte widths a fixed-width cell-path key MAY have. Empty = variable
-    /// width (no invariant). Two entries only for `inet`, which Cassandra's
-    /// `InetAddressSerializer.validate` accepts at 4 (IPv4) or 16 (IPv6) bytes
-    /// and nothing else — a single-width table cannot express that, which is why
-    /// this returns a slice rather than one `usize`.
-    fn cell_path_key_allowed_widths(type_str: &str) -> &'static [usize] {
+    /// The byte widths a fixed-width cell-path key MAY have. Empty slice =
+    /// variable width (no invariant). A SLICE rather than one `usize` because
+    /// several families admit more than one width: every `N`-or-`0` type admits
+    /// the empty buffer, and `inet` admits 4 (IPv4) or 16 (IPv6) as well.
+    ///
+    /// # The declared type is PEELED of `frozen<…>` first, and that is load-bearing
+    /// Classifying the RAW string sent every frozen-spelled FIXED-WIDTH key down
+    /// the "variable width" branch (`frozen<int>` contains `'<'`;
+    /// `FrozenType(Int32Type)` makes `primitive_marshal_to_cql_short` return `None`
+    /// on the `(`). `decode_reporting_consumption` then takes its frozen arm,
+    /// recurses on `"int"`, matches no composite guard and returns `None`
+    /// consumption — so a 5-byte `frozen<int>` cell path decoded
+    /// `Value::Integer` from `data[0..4]` with NO width check, NO consumption
+    /// check and NO `warn!`: exactly the two-distinct-byte-strings-one-key defect
+    /// this module exists to close. `frozen<inet>` accepted a 5-byte address the
+    /// same way.
+    ///
+    /// "`frozen<int>` is not legal CQL" is not a defence, and was not treated as
+    /// one: `cell_path_key_declares_blob` two functions below already peels frozen
+    /// so `frozen<blob>` is recognised, and the tests pin all three of its
+    /// spellings. A spelling cannot be handled in one helper and assumed
+    /// impossible in the other.
+    fn cell_path_key_allowed_widths(&self, type_str: &str) -> &'static [usize] {
+        let peeled = self.peel_frozen_spellings(type_str);
+        let type_str: &str = &peeled;
         let short: &str = if type_str.contains("org.apache.cassandra.db.marshal.") {
             match Self::primitive_marshal_to_cql_short(type_str) {
                 Some(s) => s,
@@ -551,10 +607,11 @@ impl V5CompressedLegacyParser {
             "smallint" | "short" => &[2],
             "date" => &[4],
             "time" => &[8],
-            // `InetAddressSerializer.validate` THROWS on empty and otherwise
-            // delegates to `InetAddress.getByAddress`, which takes a 4- or
-            // 16-byte address and nothing else.
-            "inet" => &[4, 16],
+            // `InetAddressSerializer.validate` RETURNS EARLY on empty and
+            // otherwise delegates to `InetAddress.getByAddress`, which takes a 4-
+            // or 16-byte address. So `inet` belongs to the `N`-or-`0` family, with
+            // TWO non-empty widths.
+            "inet" => &[0, 4, 16],
             // Variable-width by definition: text/ascii/varchar, blob/bytes,
             // varint, decimal, duration — plus every composite.
             _ => &[],
