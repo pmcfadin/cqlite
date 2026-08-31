@@ -34,12 +34,16 @@
 #     certification fresh exactly when it is not;
 #   * "any churn behind the base" is what the owner's ruling refuses — 107 of
 #     107 commits, forcing re-gate loops on a repo where main moves 12x in 4h;
-#   * intersection ∪ gate-global fires on 28 of 107 (26%): the motivating case
+#   * intersection ∪ gate-global fires on 37 of 107 (35%): the motivating case
 #     is caught -- and named, `matched 5e08db201 gate-global .config/nextest.toml`
-#     -- while 74% of the churn on an 8-day-old base still does not stale.
+#     -- while 65% of the churn on an 8-day-old base still does not stale.
 #     That count is THIS SCRIPT's own output, not a figure to be trusted from a
 #     comment; re-derive it with
 #       bash scripts/flow/base-staleness.sh 4bc6b913a6afc63d2fe7f234152da9b03ea03a89
+#     MEASURED AT origin/main b1e8598a2 (committed 2026-08-30). The sha is pinned
+#     here on purpose: `behind` and therefore the count are functions of where
+#     origin/main was, so a bare figure reads as a defect the moment main moves.
+#     It was 28 of 107 before `scripts/tests/**` joined the set (see below).
 # The gate-global set is content that can change ANY gate's verdict regardless of
 # the diff. It is ONE list in ONE place below, hard-coded, with NO env override —
 # #3312's second rule: an override is settable by the party it constrains, and
@@ -181,12 +185,13 @@ set -uo pipefail
 # the gate does not only READ that roster, it EXECUTES it — `tooling-tests` runs
 # ~16 `scripts/tests/*.sh` — so a commit touching only, say,
 # scripts/tests/test_worker_supervisor.sh reds EVERY lane's full gate regardless
-# of that lane's diff, which is the membership predicate verbatim. Measured over
-# the same 107-commit base as the rest of the set: it takes the fired count from
-# 26 to 35 of 107, and 9 of those commits touch NOTHING ELSE in the set. Two
-# neighbours were measured and DELIBERATELY NOT ADDED because they fire ZERO
-# times there — `deny.toml` and the loose `scripts/*.sh` helpers — since an
-# unmeasured entry only buys false positives.
+# of that lane's diff, which is the membership predicate verbatim. Measured with
+# THIS script over the same 107-commit base (subject 4bc6b913a, origin/main
+# b1e8598a2): it takes the fired count from 28 to 37 of 107, so 9 commits behind
+# stale ONLY because of it. Two neighbours were measured and DELIBERATELY NOT
+# ADDED because they fire ZERO times there — `deny.toml`, and the 14 loose
+# `scripts/*.sh` helpers enumerated as exact entries (both left 37 unchanged) —
+# since an entry that has never fired buys only false positives.
 # ---------------------------------------------------------------------------
 GATE_GLOBAL_PATTERNS='
 .config/nextest.toml
