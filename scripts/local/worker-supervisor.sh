@@ -2022,9 +2022,10 @@ supervisor_legacy_lock_guard() {
 # cases drive the shipped values.
 #
 # The re-read window is sized for PRODUCTION, not for the tests: the state it waits out is ONE rename
-# wide (microseconds), so 2s is five orders of magnitude of margin and survives a heavily loaded box,
+# wide (microseconds), so 1s is four orders of magnitude of margin and survives a heavily loaded box,
 # and it is paid ONLY on a start that finds a peer's lock pid-less — never on an ordinary start.
-SUPERVISOR_LOCK_PID_TRIES=40
+# 20 x 0.05s = 1s.
+SUPERVISOR_LOCK_PID_TRIES=20
 SUPERVISOR_LOCK_PID_WAIT=0.05
 # How far into the pid file the NUL scan looks. Any legitimate pid file is a handful of bytes, so this is
 # four orders of magnitude of headroom; beyond it the scan reports `could-not-measure`, never `nul-free`.
