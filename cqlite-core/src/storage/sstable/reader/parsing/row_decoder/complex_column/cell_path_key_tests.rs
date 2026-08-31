@@ -1378,7 +1378,10 @@ fn list_and_map_keyed_multicell_keys_present_identically_too() {
     let list_bytes = encode_set_of_collide(); // same framing: [count][len][elem]
     for (multicell_marshal, frozen_marshal, schema, bytes) in [
         (
-            format!("{MARSHAL}.FrozenType({MARSHAL}.ListType({}))", udt_marshal_type()),
+            format!(
+                "{MARSHAL}.FrozenType({MARSHAL}.ListType({}))",
+                udt_marshal_type()
+            ),
             format!("{MARSHAL}.ListType({})", udt_marshal_type()),
             "frozen<list<frozen<collide>>>",
             list_bytes.clone(),
@@ -1388,7 +1391,10 @@ fn list_and_map_keyed_multicell_keys_present_identically_too() {
                 "{MARSHAL}.FrozenType({MARSHAL}.MapType({MARSHAL}.UTF8Type,{}))",
                 udt_marshal_type()
             ),
-            format!("{MARSHAL}.MapType({MARSHAL}.UTF8Type,{})", udt_marshal_type()),
+            format!(
+                "{MARSHAL}.MapType({MARSHAL}.UTF8Type,{})",
+                udt_marshal_type()
+            ),
             "frozen<map<text, frozen<collide>>>",
             {
                 let v = collide_key_bytes();
@@ -1405,7 +1411,10 @@ fn list_and_map_keyed_multicell_keys_present_identically_too() {
             V5CompressedLegacyParser::map_key_type_for_decode(Some(&multicell_marshal), schema);
         let fz_type =
             V5CompressedLegacyParser::map_key_type_for_decode(Some(&frozen_marshal), schema);
-        assert_eq!(mc_type, fz_type, "{multicell_marshal}: rule must normalize both");
+        assert_eq!(
+            mc_type, fz_type,
+            "{multicell_marshal}: rule must normalize both"
+        );
         let multicell = p
             .parse_cell_path_key(&bytes, &mc_type, "k")
             .unwrap_or_else(|e| panic!("{multicell_marshal} must decode: {e}"));
