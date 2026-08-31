@@ -168,6 +168,30 @@ all do. Measured on git 2.43.0 against a `--filter=tree:0` clone: the diff call 
 store from 4 files to 12. The variable is exported once, before any object access; a missing object then
 fails its git call, which every call site already routes to `UNMEASURED`.
 
+**And the scratch location is the other half of the same claim, which is only as strong as its ORDERING
+and its SUBJECT (#3650 review job 239).** `mktemp -d` honours `TMPDIR`, so a `TMPDIR` inside the checkout
+makes this script write in the repository. Two properties, both learned the hard way:
+
+* **Validate BEFORE creating.** The first version created the scratch dir and *then* rejected an
+  in-repository location — so the no-write contract was already violated in exactly the case the check
+  exists to prevent, and a SIGKILL between the two stranded the directory in the checkout. The requested
+  root is now canonicalized (`cd`+`pwd -P`, no `realpath` dependency) and refused before `mktemp` runs;
+  the created dir is revalidated afterwards (symlink swap, unexpected `mktemp` resolution) and removed
+  before routing to `UNMEASURED`.
+* **Check BOTH repository roots.** A work-tree-only check is blind in this fleet's standard
+  configuration: every lane is a `git worktree`, so `--git-common-dir` is *always* outside the lane's
+  toplevel (measured on lane-3650: toplevel `/data/lanes/lane-3650`, common dir
+  `/data/lanes/repo/.git`). A `TMPDIR` there writes into state every lane on the box shares. An
+  unresolvable root is `UNMEASURED`, never a fallback to whichever one resolved — a check that silently
+  narrows its own subject is the permissive-branch shape this issue refuses.
+
+The ordering half is **not observable by a `find` after the run**: `mktemp -d` creates an empty
+*directory* and the EXIT trap removes it on the unmeasured path too, so create-then-check leaves no
+residue once the process has exited (verified — the pre-fix script passes a directory-inclusive
+snapshot). The test therefore observes the create itself, via a `PATH` shim recording every `mktemp`
+invocation, and asserts the reject path invokes it **zero** times, with a non-vacuity assert that a
+measuring run invokes the shim exactly once.
+
 **And the "any failed git invocation ⇒ `UNMEASURED`" claim is SCOPED, not absolute (#3650 review B3).**
 The calls feeding the measurement (`rev-parse` of either ref, `merge-base`, `rev-list`, `diff`,
 `diff-tree`) yield `UNMEASURED`. The **informational** `origin/main` commit date is explicitly excepted
