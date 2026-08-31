@@ -1897,6 +1897,33 @@ if [ "$PIN_SECTION_OK" = 1 ] && [ "$PLATFORM" != linux ]; then
   PIN_SECTION_OK=0
 fi
 
+# Effective privilege, resolved BEFORE the seam guard because the guard now depends on it.
+# Unknown is treated as privileged (fail closed): a seam that steers a write must not be
+# admitted because we could not establish who we are.
+PIN_EUID=$(id -u 2>/dev/null || true)
+
+if [ "$PIN_SECTION_OK" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_ENV_FILE:-}" ] \
+   && { [ "$PIN_EUID" = 0 ] || [ -z "$PIN_EUID" ]; }; then
+  # THE SEAM IS REFUSED OUTRIGHT UNDER ROOT (#3414 roborev round 5, HIGH).
+  #
+  # THIS IS THE SIXTH INSTANCE OF THIS ISSUE'S OWN DEFECT IN THIS LANE, AND IT WAS INSIDE
+  # THE SAFETY GUARD ITSELF. The invariant below used to read `${#PIN_ROOT[@]} -gt 0`,
+  # i.e. "are we going through sudo" — a PROXY for the fact that matters, which is
+  # EFFECTIVE PRIVILEGE. When bootstrap is itself EUID 0, PIN_ROOT is empty and the
+  # `tee -a` is privileged anyway, so "no env var can ever steer a PRIVILEGED write" was
+  # FALSE under root: CQLITE_BOOTSTRAP_ENV_FILE could aim a root write at any absolute
+  # path. Presence of a sudo prefix stood in for being privileged exactly as presence in
+  # ~/.bashrc stood in for a gate seeing the pin.
+  #
+  # Refused rather than made safe: dropping to a validated UID would put MORE machinery
+  # in the privileged path, and the seam exists precisely to avoid privileged writes. The
+  # cost is real and accepted — the section cannot be exercised through the seam as root,
+  # so a test that needs it must SKIP (counted), never report ok.
+  warn "gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set and this process is root or of unknown identity — refusing a seam that could steer a PRIVILEGED write at an env-chosen path)"
+  info "the seam is for unprivileged self-tests only; run them as a normal user"
+  PIN_SECTION_OK=0
+fi
+
 if [ "$PIN_SECTION_OK" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_ENV_FILE:-}" ]; then
   # TEST-ONLY SEAM — fail-closed, with NO production fallback (the #3249 lesson: a test
   # seam that degrades to the real path certifies the real path by accident). It exists
@@ -1942,9 +1969,37 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   PIN_ROOT=()
   PIN_PRIV_STATE=unknown
   PIN_SELF_USER=$(id -un 2>/dev/null || true)
-  PIN_SELF_UID=$(id -u 2>/dev/null || true)
+  PIN_SELF_UID="$PIN_EUID"   # one source: resolved before the seam guard, which needs it
+  # UNDER `sudo bash bootstrap …` THE ANSWER TO `id -un` IS root, WHICH IS THE WRONG
+  # SUBJECT (#3414 roborev round 5). Gates run as the agent account, and the two genuinely
+  # diverge: a per-user `~/.pam_environment` on that account, or a sudoers rule that
+  # supplies a value only for root's sessions, both make root's session say VERIFIED while
+  # the account that matters gets something else. So when we are root and sudo told us who
+  # invoked us, probe THAT account.
+  #
+  # The name is VALIDATED before use, and an unresolvable one is UNMEASURED rather than a
+  # silent fall back to root: falling back would answer a question about the wrong user
+  # and report it as if it were the right one, which is the substitution this whole
+  # section exists to stop.
+  PIN_PROBE_SUBJECT_NOTE=""
+  if [ "$PIN_EUID" = 0 ]; then
+    pin_invoker="${SUDO_USER:-}"
+    if [ -z "$pin_invoker" ] && [ -n "${SUDO_UID:-}" ]; then
+      pin_invoker=$(id -un "$SUDO_UID" 2>/dev/null || true)
+    fi
+    if [ -n "$pin_invoker" ]; then
+      if id -u "$pin_invoker" >/dev/null 2>&1; then
+        PIN_SELF_USER="$pin_invoker"
+        PIN_PROBE_SUBJECT_NOTE="probed as '$pin_invoker' (the account that invoked sudo), not root — root's session is not the one a gate runs in"
+      else
+        PIN_SELF_USER=""
+        PIN_PROBE_SUBJECT_NOTE="sudo named invoker '$pin_invoker', which does not resolve to an account"
+      fi
+    fi
+  fi
   if [ -z "$PIN_SELF_USER" ]; then
     PIN_PRIV_STATE=no-identity
+    [ -n "$PIN_PROBE_SUBJECT_NOTE" ] && PIN_PRIV_STATE=invoker-unresolvable
   elif ! have sudo; then
     PIN_PRIV_STATE=no-sudo-binary
   elif ! bounded 10 sudo -n true >/dev/null 2>&1; then
@@ -2076,9 +2131,13 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     PIN_PERSIST_NOTE="no privilege to write $PIN_ENV_FILE ($PIN_PRIV_STATE)"
     warn "gate-pin: cannot write $PIN_ENV_FILE ($PIN_PRIV_STATE) — the pin was NOT persisted"
     info "add these two lines as root:  $PIN_ENV_COMMENT / $PIN_ENV_LINE"
-  elif [ "${#PIN_ROOT[@]}" -gt 0 ] && [ "$PIN_ENV_FILE" != /etc/environment ]; then
-    # INVARIANT, enforced rather than argued. The seam forces PIN_ROOT empty above, so
-    # this can only fire if that coupling is ever broken by a later edit.
+  elif { [ "$PIN_EUID" = 0 ] || [ -z "$PIN_EUID" ] || [ "${#PIN_ROOT[@]}" -gt 0 ]; } \
+       && [ "$PIN_ENV_FILE" != /etc/environment ]; then
+    # INVARIANT, enforced rather than argued — and keyed on EFFECTIVE PRIVILEGE, not on
+    # the presence of a sudo prefix (#3414 roborev round 5). `${#PIN_ROOT[@]} -gt 0` alone
+    # was a proxy: under EUID 0 the array is empty and the write is privileged regardless,
+    # so the old form could not fire on the one path where it mattered most. An unknown
+    # EUID counts as privileged, because a guard that abstains is not a guard.
     PIN_PERSIST_NOTE="internal invariant refused the write"
     warn "gate-pin: INTERNAL — refusing a PRIVILEGED write to a non-production path ($PIN_ENV_FILE)"
   else
@@ -2197,8 +2256,76 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # every PAM stack (sshd, login, su, sudo), so the claim is not limited to the one
     # session type the probe could open. What it does NOT buy is a launch path with no
     # PAM in its ancestry at all — that residual is real and is stated, not implied.
-    info "scope: the line is in $PIN_ENV_FILE, which pam_env reads for EVERY PAM-created session (sshd, login, su, sudo) — but a process tree created WITHOUT PAM, a systemd unit or a container entrypoint, never has it applied, so this does not prove every gate on this box is pinned"
+    info "scope: the line is in $PIN_ENV_FILE and the sshd/login session stacks were CHECKED to read it, so the claim is not limited to the sudo session probed — but a process tree created WITHOUT PAM, a systemd unit or a container entrypoint, never has it applied, so this does not prove every gate on this box is pinned"
     info "the authoritative per-run confirmation is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) there means that gate did not see the pin)"
+    [ -n "$PIN_PROBE_SUBJECT_NOTE" ] && info "subject: $PIN_PROBE_SUBJECT_NOTE"
+    [ -n "$PIN_PAM_UNCHECKED" ] && info "unchecked: $PIN_PAM_UNCHECKED — those service stacks could not be read, so this run says nothing about them either way"
+  }
+
+  # pin_pam_services_missing_readenv: the sshd/login session stacks that do NOT read
+  # $PIN_ENV_FILE. Echoes the offending service names, empty when none.
+  #
+  # A WEAKEN-ONLY SIGNAL, AND THAT IS WHAT MAKES CONSULTING CONFIG LEGITIMATE HERE
+  # (#3414 roborev round 5). Reading configuration to CREATE a positive verdict is the
+  # proxy reasoning this whole issue exists to remove — a file saying pam_env is loaded is
+  # not evidence that a session got the value, exactly as a line in ~/.bashrc was not. But
+  # the converse is sound: if the stack a gate's session is actually created by does not
+  # read the file at all, then a SUDO-verified pin is not evidence about that session. So
+  # this may only ever DOWNGRADE a would-be VERIFIED and can never produce one. Same
+  # asymmetry as the negative-probe rule above: an unmeasurable or absent half may weaken
+  # a positive claim and may never strengthen one.
+  #
+  # THE PREDICATE IS MEASURED, NOT GUESSED. `readenv` DEFAULTS TO ON (pam_env(8): "By
+  # default this option is on"), so a BARE `pam_env.so` reads the file and only an
+  # explicit `readenv=0` disables it — requiring the literal `readenv=1` would flag this
+  # very box, whose /etc/pam.d/sshd carries a bare `pam_env.so`, and weaken a correctly
+  # configured machine. A line with an explicit `envfile=` pointing somewhere ELSE (sshd
+  # and login both carry one for /etc/default/locale) is likewise not evidence for this
+  # file. So: a session line invoking pam_env.so, without readenv=0, and either without an
+  # envfile= or with one naming $PIN_ENV_FILE.
+  #
+  # A service whose config is ABSENT is not a gap — a box with no sshd needs no sshd
+  # stack. A service whose config is present but UNREADABLE is recorded as unchecked
+  # (PIN_PAM_UNCHECKED) rather than treated as missing: "cannot tell" must not manufacture
+  # a downgrade any more than it may manufacture a pass.
+  #
+  # THE DIRECTORY IS OVERRIDABLE ONLY INSIDE AN ALREADY-VALIDATED SEAM, and deliberately
+  # not by a switch of its own. `CQLITE_BOOTSTRAP_PAM_DIR` is honoured ONLY when
+  # PIN_ENV_FILE_IS_SEAM is 1 — i.e. when the env-file seam has already passed test-mode,
+  # absolute-path, not-production and NOT-ROOT validation — so it adds no new reachable
+  # surface and cannot be set independently of that gate. It matters that this is the
+  # direction it is: pointing the check at a directory that looks healthy could SUPPRESS a
+  # downgrade, and suppressing a downgrade is how a VERIFIED gets manufactured. Tying it
+  # to the seam keeps that reachable only where the section is already non-production.
+  PIN_PAM_DIR=/etc/pam.d
+  if [ "$PIN_ENV_FILE_IS_SEAM" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_PAM_DIR:-}" ]; then
+    case "$CQLITE_BOOTSTRAP_PAM_DIR" in
+      /etc/pam.d) : ;;                      # never the production directory
+      /*) [ -d "$CQLITE_BOOTSTRAP_PAM_DIR" ] && PIN_PAM_DIR="$CQLITE_BOOTSTRAP_PAM_DIR" ;;
+    esac
+  fi
+  PIN_PAM_UNCHECKED=""
+  pin_pam_services_missing_readenv() {
+    local svc f missing=""
+    for svc in sshd login; do
+      f="$PIN_PAM_DIR/$svc"
+      [ -e "$f" ] || continue
+      if [ ! -r "$f" ]; then
+        PIN_PAM_UNCHECKED="${PIN_PAM_UNCHECKED:+$PIN_PAM_UNCHECKED }$svc"
+        continue
+      fi
+      if ! awk -v envfile="$PIN_ENV_FILE" '
+            /^[[:space:]]*#/ { next }
+            $1 == "session" && /pam_env\.so/ {
+              if ($0 ~ /readenv=0/) next
+              if ($0 ~ /envfile=/) { if ($0 !~ ("envfile=" envfile "([[:space:]]|$)")) next }
+              found = 1
+            }
+            END { exit(found ? 0 : 1) }' "$f" 2>/dev/null; then
+        missing="${missing:+$missing }$svc"
+      fi
+    done
+    printf '%s' "$missing"
   }
 
   # pin_value_remedy: the remedy for a VISIBLE but NOT-HONOURED value. Shared by both
@@ -2255,6 +2382,9 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   if [ -z "$TIMEOUT_BIN" ]; then
     warn "gate-pin: UNMEASURED (no timeout/gtimeout on PATH — refusing to run an UNBOUNDED session probe during bootstrap)"
     info "install GNU coreutils so the probe can be bounded (macOS: brew install coreutils), then re-run"
+  elif [ "$PIN_PRIV_STATE" = invoker-unresolvable ]; then
+    warn "gate-pin: UNMEASURED ($PIN_PROBE_SUBJECT_NOTE, and root's own session is NOT the subject a gate runs in — refusing to answer about the wrong user)"
+    info "re-run as the agent account, or fix SUDO_USER/SUDO_UID so the invoking account can be resolved"
   elif [ "$PIN_PRIV_STATE" = no-identity ]; then
     warn "gate-pin: UNMEASURED ('id -un' reported no identity, so there is no user to open a probe session as — pin visibility is UNKNOWN, not ok)"
   elif [ "$PIN_PRIV_STATE" = no-sudo-binary ]; then
@@ -2358,8 +2488,18 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
               # free to disagree with the gate — the thing avoided by asking the gate what
               # it honours instead of re-deriving its rules.
               if [ "$PIN_FILE_VALUE" = "$pin_probe_seen" ]; then
+                pin_pam_gap=$(pin_pam_services_missing_readenv)
+                if [ -n "$pin_pam_gap" ]; then
+                  # WEAKEN ONLY. Both affirmative halves hold, but the session stacks a
+                  # gate is actually created by do not read this file, so what was
+                  # measured through sudo is not evidence about them.
+                  warn "gate-pin: NOT-SYSTEM-WIDE ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE and a sudo session sees it, but the PAM stack for [$pin_pam_gap] does NOT read $PIN_ENV_FILE — sessions created by those services, which is how gates are launched, will not get it)"
+                  info "add a session-stage 'pam_env.so' (readenv defaults to on) to /etc/pam.d/{$(printf '%s' "$pin_pam_gap" | tr ' ' ',')}, then re-run"
+                  info "the sudo-session result above is real but does not generalise; the per-run authority stays the gate's own cpu-budget: max-concurrency=N(...) token"
+                else
                 ok "gate-pin: VERIFIED ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE AND a fresh PAM-created, profile-free session sees that SAME value, which the gate HONOURS verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first)"
                 pin_scope_note
+                fi
               else
                 warn "gate-pin: NOT-SYSTEM-WIDE ($PIN_ENV_FILE sets CQLITE_GATE_MAX_CONCURRENCY='$PIN_FILE_VALUE' but this session sees '$pin_probe_seen' — a sudo- or user-specific source is OVERRIDING the system-wide file, so ordinary PAM sessions get the file's value and the gate will act on THAT, not on the one measured here)"
                 info "fix the VALUE in $PIN_ENV_FILE (bootstrap never rewrites an existing value), or remove the per-user/sudoers override so the two agree"

@@ -2472,7 +2472,13 @@ runpin() {
 }
 
 pinroot="$tmp/pin-root"
-if ! mknotifyroot "$pinroot" good; then
+# THE SEAM IS REFUSED UNDER ROOT BY DESIGN (#3414 roborev round 5, HIGH), so this entire
+# block is unexercisable as root. Reported as ONE counted `skip` rather than an `ok`:
+# announcing a skip through ok() was round 2's finding, and reintroducing it inside the
+# block that fixed it would be galling. The capability loss is accepted, not worked around.
+if [ "$(id -u)" = 0 ]; then
+  skip "gate-pin: the ENTIRE block (the test seam is refused under root, so section 5b cannot be driven here)"
+elif ! mknotifyroot "$pinroot" good; then
   bad "gate-pin: could not stage the bootstrap tree"
 elif ! cp "$SCRIPT_DIR/../agent-gate.sh" "$pinroot/scripts/agent-gate.sh"; then
   # The verdict asks the GATE what it will do with the probed value (rather than
@@ -2955,10 +2961,14 @@ else
   #      the sudo session the probe opened — while still naming the residual it cannot
   #      cover. A note that under-claims after the correlation is as wrong as one that
   #      over-claimed before it.
-  if printf '%s' "$out_x" | grep -q 'pam_env reads for EVERY PAM-created session' \
+  # The claim STRENGTHENED with the weaken-only PAM check (roborev round 5): the note used
+  # to assert that pam_env reads the file in every stack; it now says those stacks were
+  # CHECKED. Asserting the checked wording is the point — the earlier phrasing was a
+  # statement about PAM in general, this one is a statement about THIS box.
+  if printf '%s' "$out_x" | grep -q 'session stacks were CHECKED to read it' \
      && printf '%s' "$out_x" | grep -q 'created WITHOUT PAM' \
      && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)'; then
-    ok "gate-pin: the scope note claims the correlated scope and still names the no-PAM residual"
+    ok "gate-pin: the scope note claims the CHECKED scope and still names the no-PAM residual"
   else
     bad "gate-pin: the scope note does not match the correlated verdict"
     printf '%s\n' "$out_x" | grep -iA 3 'gate-pin: VERIFIED' | head -4
@@ -3165,6 +3175,116 @@ else
   else
     bad "gate-pin: the profile append stopped happening even with no system-wide value (11ai would pass vacuously)"
     cat "$pin_home_aj/.bashrc"
+  fi
+
+  # 11ak. THE SEAM MUST NOT STEER A ROOT-PRIVILEGED WRITE (issue #3414 roborev round 5,
+  #      HIGH — the SIXTH instance of this issue's defect, and it was inside the safety
+  #      guard). The old invariant tested `${#PIN_ROOT[@]} -gt 0`, i.e. "are we going
+  #      through sudo" — a proxy for EFFECTIVE PRIVILEGE. Under EUID 0 the array is empty
+  #      and `tee -a` is privileged anyway, so an env var could aim a root write at any
+  #      absolute path. Asserted at the level the guard now uses: a real root invocation
+  #      with the seam set must REFUSE, not write.
+  pin_seam_probe="$tmp/pin-seam-root-target"; rm -f "$pin_seam_probe"
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    out_ak=$(sudo -n env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_seam_probe" \
+      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe --yes 2>&1)
+    if printf '%s' "$out_ak" | grep -q 'gate-pin: SKIPPED' \
+       && printf '%s' "$out_ak" | grep -q 'PRIVILEGED write' \
+       && [ ! -e "$pin_seam_probe" ]; then
+      ok "gate-pin: a ROOT run with the seam set refuses and writes nothing to the env-chosen path"
+    else
+      bad "gate-pin: the seam was honoured under root (a privileged write could be steered)"
+      printf '%s\n' "$out_ak" | grep -i 'gate-pin' | head -2
+      ls -l "$pin_seam_probe" 2>/dev/null
+    fi
+    sudo -n rm -f "$pin_seam_probe" 2>/dev/null || true
+  else
+    skip "gate-pin root-seam refusal (no passwordless sudo here to stage a real root invocation)"
+  fi
+
+  # 11al. ...and the guard keys on EFFECTIVE PRIVILEGE, not on the sudo-prefix array.
+  #      Structural, because the behavioural case above needs root to run at all and a
+  #      future edit could revert the predicate while every unprivileged case still passes.
+  if grep -q 'PIN_EUID" = 0 \] || \[ -z "\$PIN_EUID" \] || \[ "\${#PIN_ROOT\[@\]}" -gt 0' "$BOOTSTRAP"; then
+    ok "gate-pin: the privileged-write invariant tests EUID, not merely the presence of a sudo prefix"
+  else
+    bad "gate-pin: the privileged-write invariant is back to keying on PIN_ROOT alone"
+  fi
+
+  # 11am. THE PROBE SUBJECT IS THE ACCOUNT THAT WILL RUN GATES (roborev round 5). Under
+  #      `sudo bash bootstrap`, `id -un` is root — the wrong subject, since a per-user
+  #      ~/.pam_environment on the agent account diverges from root's session. An
+  #      invoker sudo names but that does not resolve is UNMEASURED, never a silent fall
+  #      back to answering about root.
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    out_am=$(sudo -n env SUDO_USER=cqlite-no-such-account-3414 \
+      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe 2>&1)
+    if printf '%s' "$out_am" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+       && printf '%s' "$out_am" | grep -q 'does not resolve to an account' \
+       && ! printf '%s' "$out_am" | grep -qE '\[ok\].*gate-pin'; then
+      ok "gate-pin: an unresolvable sudo invoker is UNMEASURED, never answered about root instead"
+    else
+      bad "gate-pin: an unresolvable invoker fell back to probing the wrong user"
+      printf '%s\n' "$out_am" | grep -i 'gate-pin' | head -2
+    fi
+    out_an=$(sudo -n env SUDO_USER="$(id -un)" \
+      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke --skip-push-probe 2>&1)
+    if printf '%s' "$out_an" | grep -q "the account that invoked sudo"; then
+      ok "gate-pin: a resolvable sudo invoker becomes the probe subject, and the run says so"
+    else
+      bad "gate-pin: the sudo invoker was not adopted as the probe subject"
+      printf '%s\n' "$out_an" | grep -i 'gate-pin\|subject' | head -2
+    fi
+  else
+    skip "gate-pin sudo-invocation-mode cases (no passwordless sudo here)"
+  fi
+
+  # 11ao. PAM CONFIG IS A WEAKEN-ONLY SIGNAL (roborev round 5). If the sshd/login stacks
+  #      do not read the env file, a sudo-verified pin says nothing about the sessions
+  #      gates are launched from — so it DOWNGRADES. It may never create a VERIFIED, which
+  #      is what makes consulting config legitimate at all here.
+  #
+  #      The predicate is MEASURED, not guessed: pam_env's `readenv` DEFAULTS TO ON
+  #      (pam_env(8): "By default this option is on"), so a BARE `pam_env.so` reads the
+  #      file — requiring a literal `readenv=1` would flag this very box, whose
+  #      /etc/pam.d/sshd carries a bare one, and weaken a correct machine.
+  pin_pamd_ok="$tmp/pin-pamd-ok"; pin_pamd_gap="$tmp/pin-pamd-gap"
+  mkdir -p "$pin_pamd_ok" "$pin_pamd_gap"
+  printf 'session required pam_env.so\n'            >"$pin_pamd_ok/sshd"     # bare == reads it
+  printf 'session required pam_env.so readenv=1\n'  >"$pin_pamd_ok/login"
+  printf 'session required pam_unix.so\n'           >"$pin_pamd_gap/sshd"    # no pam_env
+  printf 'session required pam_env.so readenv=1\n'  >"$pin_pamd_gap/login"
+  envf_ao="$tmp/pin-env-ao"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ao"
+  out_ao_ok=$(runpin "$pinroot" "$shims_one" "$envf_ao" HOME="$pin_home_plain" \
+    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_ok")
+  out_ao_gap=$(runpin "$pinroot" "$shims_one" "$envf_ao" HOME="$pin_home_plain" \
+    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_gap")
+  if printf '%s' "$out_ao_ok" | grep -qE '\[ok\].*gate-pin: VERIFIED' \
+     && printf '%s' "$out_ao_gap" | grep -q 'gate-pin: NOT-SYSTEM-WIDE' \
+     && printf '%s' "$out_ao_gap" | grep -q 'does NOT read' \
+     && ! printf '%s' "$out_ao_gap" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: a service stack that does not read the env file DOWNGRADES a would-be VERIFIED"
+  else
+    bad "gate-pin: the PAM-config signal did not weaken (or a bare pam_env.so was misread as a gap)"
+    printf '%s\n' "$out_ao_ok"  | grep -i 'gate-pin' | head -1
+    printf '%s\n' "$out_ao_gap" | grep -i 'gate-pin' | head -1
+  fi
+
+  # 11ap. ...and it is WEAKEN-ONLY: config alone must never CREATE a VERIFIED. A healthy
+  #      pam.d with the pin NOT visible to the session stays FAILED. Without this, 11ao's
+  #      positive half would pass against an implementation that let config decide.
+  envf_ap="$tmp/pin-env-ap"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ap"
+  out_ap=$(runpin "$pinroot" "$shims_none" "$envf_ap" HOME="$pin_home_plain" \
+    CQLITE_BOOTSTRAP_PAM_DIR="$pin_pamd_ok")
+  if printf '%s' "$out_ap" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_ap" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: a healthy PAM config cannot CREATE a VERIFIED when the session sees nothing"
+  else
+    bad "gate-pin: config was allowed to manufacture a positive verdict"
+    printf '%s\n' "$out_ap" | grep -i 'gate-pin' | head -2
   fi
 
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
