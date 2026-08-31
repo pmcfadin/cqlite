@@ -336,6 +336,20 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **NEVER SIGNAL A PROCESS GROUP YOU NO LONGER OWN — AND OWNERSHIP ENDS AT REAP, NOT AT EXIT
+  (roborev job 279).** The bounded runner's watchdog arm backgrounded the COMMAND, so the pgid was
+  the command's pid, and after TERM + a 1s grace it sent an unconditional `kill -KILL -$pid` — by
+  which time bash may already have REAPED the leader, releasing that id. On a four-lane box the
+  group that inherits it is most likely **a peer lane's gate** (this repo has the incident: a
+  pattern-based `pkill` killed a peer's gate at component 28 of 30). The leader is now a
+  **supervisor kept alive on purpose** — it runs the command, records the status to a file with a
+  completeness marker, then parks (bounded at `secs+5` so a SIGKILLed gate leaves nothing) — so
+  every signal targets an id we still hold. Two things fall out: a successful call now reaps its
+  STRAY descendants, and **the race itself cannot be tested** (pid reuse is not controllable), so
+  the coverage is the observable before/after difference plus a **structural** assert of the
+  ownership invariant, labelled as such rather than dressed up as behavioural. Related, from the
+  same round: `[ -z "$(find …)" ]` collapses "the scan FAILED" onto "no match" — a three-valued
+  signal read two-valued — and this repo LINTS for that shape (`1699-find-tristate`).
   **THE ALLOWLIST HAS TO REACH THE SITES A LATER CHANGE ADDS (roborev job 276).** The migrated
   object reads ran under a bare `env`, inheriting the caller's environment — the round-13 hole
   re-opened at the NEW sites, not a new route: an inherited `GIT_DIR` points a read at another
