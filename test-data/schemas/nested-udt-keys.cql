@@ -55,23 +55,21 @@
 --
 -- THE TWO FROZEN MAPS ARE THE ONLY COLUMNS THAT REACH THE HASHABLE PROJECTION'S
 -- NEW ARMS, AND THAT IS WHY THEY EXIST (issue #3500).
--- The four issue-named columns above do NOT. Two independent routes divert them:
---   * A `set` whose elements contain a UDT takes `set_to_py`'s LIST fallback
---     (bindings/python/src/value.rs), which converts elements with `value_to_py`
---     and never calls `value_to_hashable_key` at all. Making `contains_udt`
---     total — issue #3500's own AC1 — makes that true of EVERY UDT-bearing set
---     column, including the four above.
---   * A MULTICELL map's keys arrive from `parse_cell_path_key`, a scalar-only
---     allowlist whose catch-all yields `Value::Blob`, so `m_tuple_udt`'s keys
---     are opaque bytes rather than a structured tuple (a cqlite-core gap,
---     filed as #3612).
--- A FROZEN map takes neither route. It arrives as one value cell and
--- `parse_frozen_map_value` -> `read_frozen_element` -> `parse_value_from_raw_bytes`
--- decodes each KEY STRUCTURALLY, so `map_to_py` hands a real `Value::Tuple` /
--- `Value::Set` (with a real `Value::Udt` inside) to `value_to_hashable_key`.
--- f_map_tuple_udt therefore drives its `Tuple` arm and f_map_set_udt its `Set`
--- arm, end to end, from Cassandra-written bytes. Without these two columns both
--- arms could regress with zero test failures.
+-- f_map_tuple_udt drives `value_to_hashable_key`'s `Tuple` arm and f_map_set_udt
+-- its `Set` arm, end to end, from Cassandra-written bytes; without these two
+-- columns both arms could regress with zero test failures. That is the reason
+-- the two columns are in this table.
+--
+-- The ROUTING that establishes it — which columns reach `value_to_hashable_key`
+-- and on which arm, per column, for all nine — is stated in exactly ONE place
+-- and is NOT restated here: the ROUTING section of
+-- bindings/python/src/value_hashable.rs. This header asserts nothing about it.
+-- (The version that lived here said a UDT-bearing `set` column "never calls
+-- `value_to_hashable_key` at all", which is false — s_map_udt_key /
+-- s_map_udt_val reach it through their INNER frozen map's keys, and
+-- m_tuple_udt's keys reach it as a `Value::Blob`. Five of the nine columns
+-- reach the function; only these two reach the NEW arms. Scope such a claim to
+-- the ARM, never to the function.)
 --
 -- The four issue-named columns are deliberately NON-frozen at the top level, so
 -- each set element / map key is written as a CELL PATH — which is the shape a
@@ -80,12 +78,10 @@
 -- COVERAGE NOTES
 --   * Multiple distinct elements per collection, inserted OUT of sorted order,
 --     so element ordering + uniqueness are exercised by Cassandra's own writer.
---   * A row whose nested UDTs carry a NULL FIELD (`rank:null`, `label:null`).
---     In the FROZEN-MAP columns that field is what reaches
---     `value_to_hashable_key`'s Udt-arm `None => py.None()` branch — the only
---     place in this repository that branch is exercised. (The set columns'
---     null fields travel `udt_to_py`'s own `None` branch instead, a different
---     function, so they do not cover it.)
+--   * A row whose nested UDTs carry a NULL FIELD (`rank:null`, `label:null`),
+--     in a set column and in the frozen-map columns both. Which of those
+--     null fields reaches which `None` branch is part of the ROUTING statement
+--     named above, and is not restated here.
 --   * An EMPTY-string UDT field, distinct from null.
 --
 -- DETERMINISM / SIMPLICITY CONTRACT

@@ -56,6 +56,12 @@
 //!   it. `set_to_py`'s `list` branch converts each element with `value_to_py`,
 //!   and nothing below those elements is a map.
 //!
+//! Those first two are also the ONLY values in this repository that reach the
+//! `Udt` arm's `None => py.None()` field branch with `convert =
+//! value_to_hashable_key`: every other null UDT field in the fixture travels
+//! `value::udt_to_py`'s own `None` branch, which is `build_udt` with `convert =
+//! value_to_py` — a different projection.
+//!
 //! Two conclusions, both of which have been got wrong in the other direction:
 //!
 //! * "the frozen maps are the only columns that reach this function AT ALL" is

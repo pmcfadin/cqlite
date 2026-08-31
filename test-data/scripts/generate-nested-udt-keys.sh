@@ -29,13 +29,13 @@
 # SEPARATE columns because `||` short-circuits, so one column with a UDT in both
 # halves cannot distinguish a k-only from a v-only regression (roborev job 245).
 #
-# The two FROZEN MAPS are the only columns whose values reach the Python
-# binding's `value_to_hashable_key` at all: a frozen map's keys are decoded
-# STRUCTURALLY (parse_frozen_map_value -> read_frozen_element ->
-# parse_value_from_raw_bytes) and handed to `map_to_py`, which projects every key
-# through that function. Every `set` column instead takes `set_to_py`'s
-# UDT list fallback, and a MULTICELL map's keys arrive as opaque `Value::Blob`
-# from the scalar-only `parse_cell_path_key` (#3612). See the schema header.
+# WHICH of these columns reach the Python binding's `value_to_hashable_key`, and
+# on WHICH arm, is stated in exactly ONE place and is NOT restated here:
+# the ROUTING section of bindings/python/src/value_hashable.rs. This header
+# asserts nothing about it. (It was restated in four places in the test file and
+# in both fixture headers, and drifted in all but one — the version that lived
+# here claimed the two frozen maps were the only columns reaching that function
+# "at all", which is false: five of the nine columns do.)
 #
 # This is a READ-fidelity fixture, not a compaction byte-parity fixture: there
 # is ONE flush and therefore ONE SSTable generation per table, no explicit
