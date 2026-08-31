@@ -1413,21 +1413,37 @@ roborev_check_findings_deferral
 failed=0
 unrecognised=""
 ungranted_deferral=""
-# ====== ONE COUPLED STATE FOR THE DEFERRAL, READ BY ALL THREE GATES (#3626) ======
+misplaced_deferral=""
+# ====== ONE COUPLED STATE FOR THE DEFERRAL, READ BY BOTH GATES THAT NEED IT (#3626) ======
 # `DEFERRED` is a NEW value of the closed grammar below, and it is non-failing ONLY when the deferral
-# oracle affirmatively GRANTED. The grammar scan, the `findings:` gate and the affirmation backstop
-# must therefore read ONE state, not three: two independent tests of "was it granted?" are two things
-# that can drift apart, and the drift would be an authorization bypass rather than an inconsistency.
-# So the whole admission is decided HERE, once, and each gate asks this variable.
+# oracle affirmatively GRANTED. The grammar scan and the `findings:` gate must therefore read ONE
+# state, not two: two independent tests of "was it granted?" are two things that can drift apart, and
+# the drift would be an authorization bypass rather than an inconsistency. So the whole admission is
+# decided HERE, once, and each gate asks this variable. (The deterministic-key affirmation backstop
+# reads it NOT AT ALL — see the comment at its `case`: the coupling was right, its SCOPE was not.)
 #
 # EVERY TERM IS AFFIRMATIVE, and every one of them is required (#3586). It is not enough that the
 # oracle said `granted`: the provenance must be COMPLETE (an authorizer, a reason, at least one filed
 # issue), the SCOPE must equal this run's own base/head/job — the same equality the absence waiver's
 # admission asserts — the declared count must equal the count this run OBSERVED, and the mode must be
 # `--recheck-job`, the only path an authorization can travel. A `DEFERRED` produced by some future code
-# path that measured nothing therefore cannot ride to a PASS, and the test is not keyed on WHICH key
-# carries the token: a key-scoped exemption is the shape that has to be re-argued every time a key is
-# added, while the provenance is the property that actually matters.
+# path that measured nothing therefore cannot ride to a PASS.
+#
+# AND THE ADMISSION IS CONFINED TO ONE KEY, `findings:`, BY CONSTRUCTION (roborev job 225). An earlier
+# version of this block admitted `DEFERRED` from this state FOR ANY KEY, on the reasoning that the
+# PROVENANCE is what matters and that a key-scoped test has to be re-argued whenever a key is added.
+# That reasoning is wrong HERE, and the difference is worth stating because it is the opposite of the
+# absence waiver's: a waiver authorizes a PROPERTY (an absence) that only one key can ever report,
+# while a deferral authorizes a NAMED SET OF FINDINGS — nothing a lead writes in a deferral marker
+# says anything about whether the reviewer's diff arrived, whether the push landed or whether the
+# reviewed range matched. So an unconfined admission let ONE authorization excuse a check NOBODY
+# authorized, and the only thing standing between it and a false PASS was that no other key HAPPENS
+# to emit the token. That is #3564's lesson exactly — delegating a key's failure to its neighbour is
+# a latent false pass — so the question asked here is "what fails the run if THIS key alone goes
+# bad", and the answer must not be "nothing, because today nothing else says DEFERRED".
+# The confinement is therefore structural: the scan below carries the KEY NAME beside each value and
+# admits `DEFERRED` only for `findings`, and the deterministic-key affirmation loop carries no
+# `DEFERRED` arm at all.
 deferral_admits=0
 if [ "${ROBOREV_DEFERRAL_STATE:-}" = "granted" ] \
   && [ -n "${RECHECK_JOB:-}" ] \
@@ -1439,8 +1455,15 @@ if [ "${ROBOREV_DEFERRAL_STATE:-}" = "granted" ] \
   && [ "${ROBOREV_DEFERRAL_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}" ]; then
   deferral_admits=1
 fi
-for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$SHA_ASSERT" \
-  "$REVIEW_COMPLETED" "$PROMPT_CONTENT" "$TIER1" "$TIER2" "$FINDINGS" "$ROBOREV_EXIT"; do
+# EACH ENTRY CARRIES ITS KEY NAME, `<key>=<value>`, because one arm of the grammar below is
+# key-scoped (`DEFERRED`, admitted for `findings` alone) and a scan over bare values cannot express
+# that. The split is the same one the affirmation loop uses: the key name is everything before the
+# first `=` (no key contains one), the value is the rest, so a value containing `=` is unaffected.
+for scan_keyed in "push-assert=$PUSH_ASSERT" "census-check=$CENSUS_CHECK" "code-free=$CODE_FREE" \
+  "sha-assert=$SHA_ASSERT" "review-completed=$REVIEW_COMPLETED" "prompt-content=$PROMPT_CONTENT" \
+  "vacuity-tier1=$TIER1" "vacuity-tier2=$TIER2" "findings=$FINDINGS" "roborev-exit=$ROBOREV_EXIT"; do
+  scan_key="${scan_keyed%%=*}"
+  verdict="${scan_keyed#*=}"
   # The VERDICT TOKEN: the value up to its first space. An empty or all-detail value yields a
   # token that matches nothing, which is the intended fail-closed outcome.
   verdict_token="${verdict%% *}"
@@ -1449,12 +1472,20 @@ for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$SHA_ASSERT" \
   # is that an unplanned value must not inherit the non-failing branch.
   case "$verdict_token" in
     FAIL|FINDINGS|ERROR|INCONSISTENT) ;;
-    # ===== `DEFERRED` IS RECOGNISED ONLY WHEN IT WAS AFFIRMATIVELY GRANTED (#3626) =====
-    # Recognition is coupled to the oracle's state, so the token cannot be non-failing on its own: an
-    # ungranted (or fabricated) `DEFERRED` lands in the failing arm with its own diagnostic, which is
-    # the same treatment an unrecognised value gets and for the same reason.
+    # ===== `DEFERRED`: ONLY ON `findings:`, AND ONLY WHEN AFFIRMATIVELY GRANTED (#3626) =====
+    # TWO independent requirements, each with its own diagnostic, because they are different defects
+    # with different remedies. (i) The KEY must be `findings` — a deferral authorizes a named set of
+    # FINDINGS and confers no authority over any other check, so a `DEFERRED` anywhere else is a
+    # wrapper defect, not something the branch under review can fix. (ii) The oracle must have
+    # affirmatively GRANTED, so a fabricated token that measured nothing cannot ride to a PASS.
+    # Ordered (i) then (ii) deliberately: a misplaced token is a defect whether or not an
+    # authorization exists, and reporting it as "ungranted" would send the reader to look for a
+    # marker that would not have helped.
     DEFERRED)
-      if [ "$deferral_admits" -ne 1 ]; then
+      if [ "$scan_key" != findings ]; then
+        failed=1
+        misplaced_deferral="${misplaced_deferral:+$misplaced_deferral; }$scan_key: '$verdict'"
+      elif [ "$deferral_admits" -ne 1 ]; then
         failed=1
         ungranted_deferral="${ungranted_deferral:+$ungranted_deferral; }'$verdict'"
       fi
@@ -1543,7 +1574,9 @@ done
 # `deferral_admits` -- the single coupled state above, which requires the authorization's scope, its
 # author, its reason, its filed issues and its declared count to all match what this run measured. It
 # is NOT a waiver of the findings requirement: nothing here admits `PRESENT`, `UNKNOWN` or `SKIP`, and
-# `findings:` never reports `NONE` on account of a deferral.
+# `findings:` never reports `NONE` on account of a deferral. And this is the ONLY key the mechanism can
+# reach: the grammar scan above admits the token for `findings` alone, and the affirmation backstop
+# below admits it for nothing.
 findings_deferred=0
 if [ "$deferral_admits" -eq 1 ] && [ "${FINDINGS%% *}" = DEFERRED ]; then
   findings_deferred=1
@@ -1578,15 +1611,15 @@ if [ "$failed" -eq 0 ]; then
           && [ "${ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}" ] \
           && [ "${ROBOREV_WAIVER_STATE:-}" = "granted" ]; then continue; fi
         ;;
-      # ===== `DEFERRED`: THE SAME COUPLED STATE, NOT A SECOND TEST OF IT (#3626) =====
-      # `findings:` is excluded from this loop (its affirmative value is `NONE`, not `PASS`) and is the
-      # only key that carries `DEFERRED` today — so this arm is a STRUCTURAL backstop for a future key
-      # that acquires the token. It reads `deferral_admits`, the same variable the grammar scan and the
-      # findings gate read, so the grammar and the backstop cannot drift apart into two opinions about
-      # whether one authorization was granted. Re-deriving the provenance here would BE that drift.
-      DEFERRED)
-        if [ "$deferral_admits" -eq 1 ]; then continue; fi
-        ;;
+      # ===== AND THERE IS DELIBERATELY NO `DEFERRED` ARM HERE (#3626, roborev job 225) =====
+      # One existed, admitting the token from `deferral_admits` for any of these six keys, described as
+      # a "structural backstop for a future key that acquires the token". It was the opposite: a
+      # findings deferral says nothing about whether the reviewer's diff arrived or the reviewed range
+      # matched, so admitting it here let ONE authorization excuse a check nobody authorized, and the
+      # only thing preventing that was that no other key HAPPENS to emit `DEFERRED` (#3564: delegating
+      # a key's failure to its neighbour is a latent false pass). `findings:` is not in this loop, and
+      # the grammar scan above admits `DEFERRED` for `findings` alone — so a deterministic key holding
+      # the token now fails there, by key name, with its own diagnostic. Do not add an arm back.
     esac
     not_affirmed="${not_affirmed:+$not_affirmed; }$det_key: '$det_value'"
   done
@@ -1594,6 +1627,9 @@ if [ "$failed" -eq 0 ]; then
     failed=1
     DETAILS+=("ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — $not_affirmed. A PASS must rest on POSITIVE evidence from every deterministic check (push-assert, census-check, code-free, sha-assert, review-completed, prompt-content); a non-failing value that is not a measurement — 'SKIP' above all, which means the check NEVER RAN — is exactly the vacuous pass this wrapper exists to prevent, and it is textually indistinguishable from a genuine one. Failing closed. This is a structural backstop, so its cause is a defect in the wrapper or its sourced files (a check that returned before assigning its key), NOT something to fix in the branch under review.")
   fi
+fi
+if [ -n "$misplaced_deferral" ]; then
+  DETAILS+=("ERROR: verdict-grammar: a per-check key OTHER THAN 'findings:' reports a DEFERRED state — $misplaced_deferral. A lead-authorized deferral (#3626) defers a NAMED SET OF FINDINGS and confers authority over the 'findings:' key and nothing else: it says nothing about whether the reviewer's diff arrived (prompt-content), whether the branch was pushed, or whether the reviewed range matched this base and head, so it may not excuse any of them. Admitting it elsewhere would let ONE authorization excuse a check NOBODY authorized. This holds even when a deferral WAS granted, and it is not waivable. Failing closed: the cause is a defect in the wrapper or its sourced files — a check that assigned DEFERRED to its own key — NOT something to fix in the branch under review. An absence of prompt-content evidence has its OWN separate authorization (the #3312 waiver, reported as 'prompt-content: WAIVED'); every other key must simply pass.")
 fi
 if [ -n "$ungranted_deferral" ]; then
   DETAILS+=("ERROR: verdict-grammar: a per-check key reports a DEFERRED state that the deferral oracle did not affirmatively GRANT: $ungranted_deferral. DEFERRED is non-failing ONLY on a complete, matching authorization — a top-level PR comment from an allowlisted author, whose SOLE NONBLANK CONTENT names THIS base, head and job, whose authorized count EQUALS the count this run observed, and each of whose named issues is retrievable and referenced from the PR body — and only on --recheck-job. Deferral state for this run: ${DEFERRAL_REPORT:-<none looked for>}. Failing closed: a DEFERRED token that no authorization backs is indistinguishable from an authorized one to every reader of this block, which is the false-assurance shape this wrapper exists to prevent.")

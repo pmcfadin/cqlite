@@ -5936,7 +5936,7 @@ _dfs_bad=""
 # (a) NO CLI FLAG. Read from the wrapper's OWN option parser, so a `--defer`-shaped string in the
 #     header doctrine or in `--help` (where the marker form legitimately lives) can neither satisfy
 #     nor break this assert.
-# EXTRACTED TO A FILE, NEVER PIPED INTO `grep -q` (#3416, and this suite's own documented
+# EXTRACTED TO A FILE, NEVER PIPED INTO `grep -q` (#3387, and this suite's own documented
 # instance): `grep -q` exits at the first match, SIGPIPEs the writer, and `pipefail` takes the
 # 141 — so a MATCH is reported as a NON-match, fail-open BY BYTE POSITION. Measured here: the
 # reset loop below reported the LAST variable missing while the file plainly contained it.
@@ -5993,8 +5993,16 @@ grep -qF 'roborev-defer: findings' "$SCAN_TOOL" || _dfe_bad="$_dfe_bad marker-fo
 # THE MARKER FORM MAY NOT LIVE IN THE SHELL. Executable lines only: the comment blocks in these files
 # describe the mechanism, and scanning prose would make writing it down a violation — the same mistake
 # as the job-18 census assert.
+# EXTRACTED TO A FILE, NEVER PIPED INTO `grep -q` (#3387, and this suite's own measured instance
+# documented at the `_dfs_opts` extraction above): `grep -q` exits at its FIRST match, SIGPIPEs the
+# upstream writer, and this file's `pipefail` takes the 141 — so on a MATCH the pipeline reports a
+# NON-match and a real violation reads as clean, fail-open BY BYTE POSITION. The oracles file's
+# non-comment output is ~500 lines carrying several 200-400 character detail strings, i.e. tens of
+# kilobytes against a 64 KB pipe buffer, so this is not a theoretical margin.
+_dfe_exec="$tmp/dfe-exec.txt"
 for _dfe_f in "$ORACLES" "$CHECKS_FILE"; do
-  if grep -v '^[[:space:]]*#' "$_dfe_f" | grep -qF 'roborev-defer'; then
+  grep -v '^[[:space:]]*#' "$_dfe_f" >"$_dfe_exec" || true
+  if grep -qF 'roborev-defer' "$_dfe_exec"; then
     _dfe_bad="$_dfe_bad marker-form-in-$(basename "$_dfe_f")"
   fi
 done
@@ -6020,7 +6028,14 @@ fi
 _dfc_bad=""
 [ "$(grep -cE '^deferral_admits=0$' "$WRAPPER_REAL")" -eq 1 ] || _dfc_bad="$_dfc_bad admission-not-initialised-once"
 [ "$(grep -cE '^  deferral_admits=1$' "$WRAPPER_REAL")" -eq 1 ] || _dfc_bad="$_dfc_bad admission-not-decided-in-exactly-one-place"
-[ "$(grep -cF 'deferral_admits' "$WRAPPER_REAL")" -ge 5 ] || _dfc_bad="$_dfc_bad admission-not-read-by-all-three-gates"
+# EXECUTABLE READS ONLY, and there are exactly FOUR: the initialisation, the one decision, the
+# grammar scan's `findings`-scoped arm and the findings gate. A FIFTH would be a third gate reading
+# the state — which is how the unconfined admission got into the affirmation backstop (job 225).
+# Extracted to a FILE and counted there: `grep -c` over a pipe would lose its status to SIGPIPE.
+_dfc_reads="$tmp/dfc-reads.txt"
+grep -vE '^[[:space:]]*#' "$WRAPPER_REAL" >"$_dfc_reads" || true
+[ "$(grep -cF 'deferral_admits' "$_dfc_reads")" -eq 4 ] \
+  || _dfc_bad="$_dfc_bad admission-reads=$(grep -cF 'deferral_admits' "$_dfc_reads")-expected-4"
 grep -qF 'if [ "$failed" -eq 0 ] && [ "${FINDINGS%% *}" != NONE ] && [ "$findings_deferred" -ne 1 ]; then' "$WRAPPER_REAL" \
   || _dfc_bad="$_dfc_bad findings-gate-lost-a-half"
 grep -qF 'if [ "$deferral_admits" -eq 1 ] && [ "${FINDINGS%% *}" = DEFERRED ]; then' "$WRAPPER_REAL" \
@@ -6058,8 +6073,14 @@ fi
 # `NONE` stays reachable ONLY from the job record's structured `verdict` letter, so nobody grepping
 # `findings: NONE` reads a deferred run as a clean review. Asserted at the assignment site, because
 # the behavioural cases can only show it for the shapes they fixture.
+# THE `NONE` ASSIGNMENT SITES ARE EXTRACTED TO A FILE, not piped into a negated `grep -q` (#3387).
+# The polarity is the fail-open one: a SIGPIPE-141 from the downstream `grep -q` reads as "no
+# deferral spelling found", i.e. this change's OWN never-`NONE` property would report clean exactly
+# when it is violated.
+_dfn_none="$tmp/dfn-none-sites.txt"
+grep -nF 'FINDINGS="NONE"' "$CHECKS_FILE" >"$_dfn_none" || true
 if grep -qF 'FINDINGS="DEFERRED (' "$CHECKS_FILE" \
-  && ! grep -nF 'FINDINGS="NONE"' "$CHECKS_FILE" | grep -qi 'defer'; then
+  && ! grep -qi 'defer' "$_dfn_none"; then
   ok 'structural (#3626): a granted deferral assigns the DISTINCT token DEFERRED, and no deferral path can assign NONE'
 else
   bad 'structural (#3626): a deferral can reach findings: NONE, or no longer reports the distinct DEFERRED token — either way a reader grepping for a clean review would count a deferred one (#3626)'
@@ -6250,7 +6271,11 @@ printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
 #   _scan_keys  = the `for … ; do` KEY LIST alone (continuation-aware; this is what must
 #                 name every per-check key)
 #   _scan_case  = the classifying `case` line from within the loop
-_scan_start=$(grep -nE '^[[:space:]]*for verdict in ' "$WRAPPER_REAL" | head -1 | cut -d: -f1 || printf '')
+# ANCHORED ON `for scan_keyed in` (#3626): the scan carries each key's NAME beside its value,
+# because one arm of its grammar is key-scoped (`DEFERRED`, admitted for `findings` alone). The
+# needle is distinct from the affirmation backstop's `for keyed in "push-assert=` so the two
+# extractions cannot pick each other up.
+_scan_start=$(grep -nE '^[[:space:]]*for scan_keyed in ' "$WRAPPER_REAL" | head -1 | cut -d: -f1 || printf '')
 _scan_end=''
 if [ -n "$_scan_start" ]; then
   _scan_end=$(awk -v s="$_scan_start" 'NR>s && /^[[:space:]]*done[[:space:]]*$/ {print NR; exit}' "$WRAPPER_REAL")
@@ -6265,7 +6290,7 @@ if [ -n "$_scan_start" ] && [ -n "$_scan_end" ]; then
   _scan_case=$(printf '%s\n' "$_scan_block" | grep -E 'case "\$verdict_token" in' | head -1 || printf '')
 fi
 if [ -z "$_scan_block" ] || [ -z "$_scan_keys" ] || [ -z "$_scan_case" ]; then
-  bad 'structural: could not locate the wrapper verdict scan STATEMENT (for verdict in … case … done) to inspect'
+  bad 'structural: could not locate the wrapper verdict scan STATEMENT (for scan_keyed in … case … done) to inspect'
 else
   ok "structural: the verdict scan is a single case over the per-check keys (lines $_scan_start-$_scan_end)"
   if printf '%s\n' "$_scan_keys" | grep -qE '; do[[:space:]]*$'; then
@@ -6353,7 +6378,14 @@ else
   # reach `finish PASS` on a non-measurement, which is the whole defect class). Read from the
   # backstop's own `case` body, so a `NOTICE*)` arm elsewhere in the wrapper cannot satisfy or
   # break it.
-  _aff_body=$(awk '/for keyed in "push-assert=/ { inb = 1 } inb { print } inb && /^[[:space:]]*esac[[:space:]]*$/ { exit }' "$WRAPPER_REAL")
+  # EXTRACTED TO A FILE and matched AS A FILE (#3387): every member of the chain below would
+  # otherwise be `printf … | grep -q`, whose status this file's `pipefail` takes from a SIGPIPE-141
+  # on a successful match — fail-open for the NEGATED members, which are the ones that forbid the
+  # escape hatch. Same remedy as the `_dfs_opts` extraction documented above.
+  _aff_body_f="$tmp/aff-body.txt"
+  awk '/for keyed in "push-assert=/ { inb = 1 } inb { print } inb && /^[[:space:]]*esac[[:space:]]*$/ { exit }' \
+    "$WRAPPER_REAL" >"$_aff_body_f"
+  _aff_body=$(cat "$_aff_body_f")
   if [ -z "$_aff_body" ]; then
     bad 'structural: could not locate the affirmation backstop case body to inspect for per-key exemptions'
   else
@@ -6364,26 +6396,58 @@ else
     # and a sha equal to the certified head — and is deliberately NOT keyed on `det_key`, so it cannot
     # become the "which keys are exempt" argument again. A third `continue`, or a provenance-free
     # admission, is the escape hatch #3229 forbade.
-    # EXACTLY TWO NON-`PASS` ADMISSIONS ARE AUTHORISED, each on its own human authorization: the
-    # #3312 absence WAIVER and the #3626 findings DEFERRAL. Both are gated on a COMPLETE provenance
-    # and NEITHER is keyed on `det_key`. The deferral's arm reads `deferral_admits` — the SINGLE
-    # coupled state the grammar scan and the findings gate also read — rather than re-deriving the
-    # provenance here: two derivations of "was it granted?" are two things that can drift apart, and
-    # the drift would be an authorization bypass rather than an inconsistency. A FOURTH `continue`,
-    # a provenance-free admission, or a deferral arm that re-derives its own state, is the escape
-    # hatch #3229 forbade.
-    _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '\bcontinue\b' || true)
-    if [ "$_aff_continues" -eq 3 ] &&
-      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;' &&
-      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' &&
-      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' &&
-      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*DEFERRED\)$' &&
-      printf '%s\n' "$_aff_body" | grep -qF 'if [ "$deferral_admits" -eq 1 ]; then continue; fi' &&
-      ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"' &&
-      ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "findings"'; then
-      ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED and DEFERRED admissions, each gated on a complete provenance (the deferral on the one coupled deferral_admits state) and neither keyed on the key'
+    # EXACTLY ONE NON-`PASS` ADMISSION IS AUTHORISED HERE: the #3312 absence WAIVER, gated on a
+    # COMPLETE provenance and not keyed on `det_key` — because a waiver authorizes a PROPERTY (an
+    # absence) that only one of these keys can ever report, so the provenance IS the whole test.
+    #
+    # AND THE #3626 FINDINGS DEFERRAL IS NOT ADMITTED HERE AT ALL — this assert is the INVERSE of the
+    # one it replaces (roborev job 225). The replaced assert required a `DEFERRED)` arm reading
+    # `deferral_admits` and required it NOT to be keyed on a key, i.e. it PINNED AS A PROPERTY the very
+    # thing the spec forbids: "the deferral SHALL NOT be readable by, or applicable to, any check other
+    # than the wrapper's `findings:` key". An assert that pins a spec violation is worse than no
+    # assert, because it converts the defect into something a later fix has to fight. A deferral
+    # authorizes a NAMED SET OF FINDINGS and says nothing about whether the reviewer's diff arrived or
+    # the reviewed range matched, so admitting it for these six keys let ONE authorization excuse a
+    # check nobody authorized. It is now confined by KEY NAME in the grammar scan (asserted just
+    # below), and this loop must carry no `DEFERRED` arm and no read of the state. A THIRD `continue`,
+    # a provenance-free admission, or any reappearance of `DEFERRED`/`deferral_admits` here, is the
+    # escape hatch #3229 forbade.
+    _aff_continues=$(grep -cE '\bcontinue\b' "$_aff_body_f" || true)
+    if [ "$_aff_continues" -eq 2 ] &&
+      grep -qE '^[[:space:]]*PASS\) continue ;;' "$_aff_body_f" &&
+      grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' "$_aff_body_f" &&
+      grep -qF '"${ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' "$_aff_body_f" &&
+      ! grep -qE '^[[:space:]]*DEFERRED\)' "$_aff_body_f" &&
+      ! grep -qF 'deferral_admits' "$_aff_body_f" &&
+      ! grep -qF 'det_key" = "prompt-content"' "$_aff_body_f" &&
+      ! grep -qF 'det_key" = "findings"' "$_aff_body_f"; then
+      ok 'structural (#3626): the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED admission, gated on a complete provenance, and admits no DEFERRED and reads no deferral state — the findings deferral is confined to the findings key elsewhere'
     else
-      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s), admits WAIVED or DEFERRED without complete provenance, or is keyed on det_key — the per-key escape hatch #3229 forbade and ruling (4) deleted (#3312/#3626)"
+      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s), admits WAIVED without complete provenance, admits a DEFERRED (which would let a findings deferral excuse a check nobody authorized — spec: a deferral SHALL NOT be applicable to any check other than findings:), or is keyed on det_key (#3312/#3626 job 225)"
+    fi
+    # ===== AND THE CONFINEMENT IS ASSERTED WHERE IT LIVES: THE GRAMMAR SCAN, BY KEY NAME (#3626) =====
+    # Both halves, because either alone is satisfiable by a scan that confines nothing: the scan must
+    # CARRY the key name beside each value (a scan over bare values cannot express the confinement at
+    # all), and its `DEFERRED` arm must REFUSE every key but `findings`. Read from the scan statement
+    # extracted above, so a `scan_key` mentioned elsewhere in the wrapper can neither satisfy nor
+    # break it.
+    # THE EXTRACTS ARE WRITTEN TO FILES AND MATCHED AS FILES (#3387) — see the `_aff_body_f` note
+    # above. Every member here is a POSITIVE requirement, so a SIGPIPE-141 would false-RED rather
+    # than false-GREEN, but the shape is the one this suite has already measured inverting and the
+    # remedy costs two lines.
+    _dfk_bad=""
+    _dfk_keys="$tmp/dfk-scan-keys.txt"
+    _dfk_block="$tmp/dfk-scan-block.txt"
+    printf '%s\n' "$_scan_keys" >"$_dfk_keys"
+    printf '%s\n' "$_scan_block" >"$_dfk_block"
+    grep -qF 'findings=$FINDINGS' "$_dfk_keys" || _dfk_bad="$_dfk_bad scan-does-not-carry-key-names"
+    grep -qF 'scan_key="${scan_keyed%%=*}"' "$_dfk_block" || _dfk_bad="$_dfk_bad scan-key-not-split-from-the-pair"
+    grep -qF 'if [ "$scan_key" != findings ]; then' "$_dfk_block" \
+      || _dfk_bad="$_dfk_bad deferred-arm-not-confined-to-findings"
+    if [ -z "$_dfk_bad" ]; then
+      ok 'structural (#3626): the verdict scan carries each key NAME and admits DEFERRED for findings ALONE — a deferral cannot be read by, or applied to, any other check'
+    else
+      bad "structural (#3626): the DEFERRED admission is not confined to the findings key —$_dfk_bad. One authorization would then excuse a check nobody authorized, and the only thing preventing it would be that no other key HAPPENS to emit the token — #3564's latent-false-pass shape (roborev job 225)"
     fi
   fi
   # And the wrapper must STATE the rule, not just implement it: the next key added to this
