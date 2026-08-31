@@ -1080,42 +1080,36 @@ class TestFrozenMapWithTupleBorneNestedListUdtKey:
     fixture schema and the generator point here and restate none of it.
 
     THE GAP THIS CLOSES (issue #3500, roborev job 275). Sibling
-    :class:`TestFrozenMapWithTupleBorneUdtKey` was described as "the column that
-    covers the ``Tuple`` arm", and for the arm's OUTPUT SHAPE it is. But its key
-    is ``tuple<frozen<key_part>, int>`` and ``key_part`` has only SCALAR fields,
-    so since #3504 the ordinary projection of that key — ``value_to_py`` →
-    ``tuple_to_py`` → ``udt_to_py`` — is ALREADY a hashable ``tuple`` holding a
-    ``cqlite.Udt``, byte-for-byte the same object the hashable route builds. An
-    exhaustive, Clippy-clean regression that replaced the ``Tuple`` arm with
-    ``value_to_py(py, value)`` therefore passed EVERY test in this module. The
-    arm's recursion was pinned by nothing behavioural: only by the compiler
-    (which enforces that an arm EXISTS, not what it does) and by the ``Set``-arm
-    sibling (a different arm).
+    :class:`TestFrozenMapWithTupleBorneUdtKey` pins the arm's OUTPUT SHAPE, but
+    it cannot pin the recursion: its key is ``tuple<frozen<key_part>, int>`` and
+    ``key_part`` has only SCALAR fields, so since #3504 the ORDINARY projection
+    of that key (``value_to_py`` → ``tuple_to_py`` → ``udt_to_py``) is already a
+    hashable ``tuple`` holding a ``cqlite.Udt`` — the same object the hashable
+    route builds. An exhaustive, Clippy-clean regression replacing the ``Tuple``
+    arm with ``value_to_py(py, value)`` therefore passed EVERY test in this
+    module: the recursion was pinned only by the compiler (which enforces that an
+    arm EXISTS, not what it does) and by the ``Set``-arm sibling, a different arm.
 
     WHY THIS KEY DISCRIMINATES. Its first tuple component is a
-    ``frozen<list<frozen<key_part>>>``, which the frozen-map decode delivers as a
-    real ``Value::List``:
+    ``frozen<list<frozen<key_part>>>``, delivered by the frozen-map decode as a
+    real ``Value::List``. The HASHABLE route recurses — ``Tuple`` → the same
+    ``List | Tuple`` arm → ``Udt`` — and yields ``((Udt, Udt), int)``, a usable
+    ``dict`` key. The ORDINARY route reaches ``list_to_py``, which builds a
+    Python ``list`` UNCONDITIONALLY; a ``tuple`` holding a ``list`` is
+    unhashable, so ``map_to_py``'s ``dict.set_item`` raises
+    ``TypeError: unhashable type: 'list'`` and the column cannot be read at all.
 
-    * the HASHABLE route recurses — ``Tuple`` → the same ``List | Tuple`` arm →
-      ``Udt`` — and yields ``((Udt, Udt), int)``, a hashable ``dict`` key;
-    * the ORDINARY route reaches ``list_to_py``, which builds a Python ``list``
-      UNCONDITIONALLY, and a ``tuple`` holding a ``list`` is unhashable, so
-      ``map_to_py``'s ``dict.set_item`` raises
-      ``TypeError: unhashable type: 'list'`` and the column cannot be read at
-      all.
-
-    So the two routes differ OBSERVABLY here, and the difference is the loud
-    kind. RED-VERIFIED, not argued: with the ``Tuple`` arm split out of the
-    ``List | Tuple`` arm and delegated to ``value_to_py``, the three value cases
-    below raise that ``TypeError`` while every pre-existing case in this module —
-    including all of :class:`TestFrozenMapWithTupleBorneUdtKey` — stays green.
-    That contrast is the whole point of the column; a regression that survived
-    the old suite reds here.
+    RED-VERIFIED, not argued: with that delegation planted (clippy ``-D
+    warnings`` clean), all five cases below raise that ``TypeError`` — as do the
+    four :class:`TestSelectStarWholeRow` cases, since ``SELECT *`` now reads this
+    column — while the other 51 cases in this module stay green, including all
+    of :class:`TestFrozenMapWithTupleBorneUdtKey`. That contrast is the point of
+    the column: a regression that survived the old suite reds here.
 
     A SECOND property comes free and is asserted: the ``List`` projection must
     preserve ORDER. id=1 holds two keys carrying the SAME two list elements in
-    OPPOSITE order with the same trailing int, so a projection that answered with
-    a ``frozenset`` (or that sorted) would collapse them into ONE dict entry.
+    OPPOSITE order with the same trailing int, so a projection answering with a
+    ``frozenset`` (or one that sorted) would collapse them into ONE dict entry.
     """
 
     def test_key_is_usable_as_a_dict_key(self, db):
