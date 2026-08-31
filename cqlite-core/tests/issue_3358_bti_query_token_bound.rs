@@ -300,18 +300,28 @@ fn fixture() -> Fixture {
              \n\
              \x20   CQLITE_DATASETS_ROOT={verify_root} bash {verify_cmd} --verify-only\n\
              \n\
-             READ ONLY ITS FIRST LINE, `Tracked-fixture probe (#3310)`: that is the \
-             half that answers this failure, naming every git-tracked fixture that is \
-             missing and printing the exact, correctly-scoped `git restore` for them — \
-             which is why this message does not try to construct one.\n\
+             It writes to STDERR, so keep `2>&1` if you pipe it. Read the FIRST line \
+             and branch on it — the two outcomes are different conditions with \
+             different answers:\n\
              \n\
-             IGNORE the `ERROR:` lines that follow it, and do NOT run the remedy they \
-             suggest. They report a DIFFERENT condition — the checkout corpus is not a \
-             complete FETCHED corpus, which it is never meant to be — and the command \
-             exits 1 with 7 such lines even when nothing is missing. One of them \
-             proposes clearing `.dataset-pin` and re-running the fetch, whose default \
-             path is destructive (`rm -rf` on the dataset root): against this checkout \
-             root that would DELETE the committed fixtures you are trying to restore."
+             (1) `ERROR: TRACKED FIXTURES MISSING … (issue #3310)` — this is your case. \
+             That block names every tracked fixture that is absent and then prints an \
+             exact `git -C <repo> restore` command covering ONLY those paths (a second \
+             one with `--staged --worktree` if any deletion was staged). Run it \
+             verbatim. The probe reports only: it creates, deletes and restores \
+             nothing. This is why this message does not construct a restore command \
+             itself — five earlier attempts to hand-build one produced five different \
+             defects, and the tool's version is scoped and tested.\n\
+             \n\
+             (2) `Tracked-fixture probe (#3310): OK` — every tracked fixture is \
+             present, so the fault is NOT a deleted fixture and this test's own \
+             resolution is what to look at next. ONLY in this case are the `ERROR:` \
+             lines that follow unrelated noise: they report that the corpus is not a \
+             complete FETCHED corpus, which a checkout is never meant to be, and the \
+             command exits 1 with 7 such lines even though nothing is missing. Do NOT \
+             run the remedy they propose there — clearing `.dataset-pin` and re-running \
+             the fetch takes its destructive path (`rm -rf` on the dataset root), which \
+             against a checkout root DELETES the committed fixtures."
         )
     });
     let golden = golden_rows_by_pk(&dir);
