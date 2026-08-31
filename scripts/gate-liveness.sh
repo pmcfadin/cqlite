@@ -352,7 +352,6 @@ verdict() { # verdict <STATUS> <exit> <detail>
   # not a disclosure to whoever reads the artifact.
   if [ "$1" = RUNNING ]; then
     echo "note: RUNNING means this run is ALIVE, not that it is PROGRESSING — a gate queued for the"
-    echo "note: RUNNING means this run is ALIVE, not that it is PROGRESSING — a gate queued for the"
     echo "      gate slot beats identically to one doing work."
     echo "      Do NOT judge progress from /proc/<gate-pid>/stat: utime+stime+cutime+cstime counts"
     echo "      REAPED children only, and a gate's work lives in cargo/maturin children that are"

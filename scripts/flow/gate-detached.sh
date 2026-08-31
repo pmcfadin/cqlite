@@ -339,15 +339,20 @@ printf 'export AGENT_GATE_SUMMARY_FILE=%q\n' "$SUMMARY" >> "$ENV_SCRIPT"
 # script does not control: a PATH without `rm` makes the self-unlink fail SILENTLY, leaving the
 # 0600 file holding every forwarded secret on disk indefinitely, and a PATH that shadows `bash`
 # decides what we exec. Resolve both in the LAUNCHER's PATH and require absolute executables.
+# `env` joins them (roborev job 318, Low): the systemd-run command line below used to hard-code
+# /usr/bin/env and /bin/bash while these resolved paths sat unused, so a valid systemd host without
+# an FHS layout passed every capability check and then failed to exec the wrapper. Resolve what we
+# actually exec.
 _rm_abs="$(command -v rm || true)"; _bash_abs="$(command -v bash || true)"
-for _tool_pair in "rm:$_rm_abs" "bash:$_bash_abs"; do
+_env_abs="$(command -v env || true)"
+for _tool_pair in "rm:$_rm_abs" "bash:$_bash_abs" "env:$_env_abs"; do
   _tool_name="${_tool_pair%%:*}"; _tool_path="${_tool_pair#*:}"
   case "$_tool_path" in
     /*) [ -x "$_tool_path" ] && continue
         echo "gate-detached: resolved '$_tool_name' to '$_tool_path', which is not executable." >&2 ;;
     *)  echo "gate-detached: cannot resolve '$_tool_name' to an absolute path (got '${_tool_path:-nothing}')." >&2 ;;
   esac
-  echo "               The wrapper needs both to delete its own secret-bearing copy and to exec" >&2
+  echo "               The wrapper needs all three: to delete its own secret-bearing copy, to exec" >&2
   echo "               the gate. Refusing rather than emitting a wrapper that may leak it (#3473)." >&2
   rm -f "$ENV_SCRIPT" 2>/dev/null || true
   exit 1
@@ -1198,7 +1203,7 @@ if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
      --property=StandardInput=null \
      --property="StandardOutput=append:$LOGFILE" \
      --property="StandardError=append:$LOGFILE" \
-     /usr/bin/env -i /bin/bash "$ENV_SCRIPT" "${GATE_ARGS[@]}"; then
+     "$_env_abs" -i "$_bash_abs" "$ENV_SCRIPT" "${GATE_ARGS[@]}"; then
   echo "gate-detached: systemd-run failed to start unit $UNIT (see $LOGFILE)" >&2
   exit 1
 fi
@@ -1296,8 +1301,18 @@ while [ "$_i" -lt 40 ]; do
     # can answer about this run AT ALL, and --no-wait can only weaken a verdict to UNKNOWN, which this
     # loop already treats as "keep waiting".
     bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" --no-wait >/dev/null 2>&1
+    # A BEAT IS NOT PROOF THE UNIT STILL LIVES (roborev job 318, Medium). COMPLETE (0) is
+    # self-sufficient: a terminal verdict exists. RUNNING (2) only says the reader could ANSWER
+    # about this run — and a gate that published ONE heartbeat and then died before writing its
+    # terminal summary answers RUNNING for the whole staleness window, so accepting 2 blindly made
+    # this launcher exit 0 for a run whose verdict will NEVER arrive. Gate 2 on the unit, using the
+    # same closed grammar as everywhere else: only `inactive|failed` are affirmative deaths, so an
+    # unmeasurable unit still accepts (it can only weaken, never invent, liveness). When the unit IS
+    # affirmatively dead we deliberately do NOT break — control falls through to the settled-snapshot
+    # check below, which is the path that can still find a terminal summary written in the gap.
     case "$?" in
-      0|2) _hb_seen=1; break ;;   # COMPLETE or RUNNING — the reader can answer about this run
+      0) _hb_seen=1; break ;;                                  # COMPLETE — a verdict exists
+      2) if _unit_is_live "$UNIT"; then _hb_seen=1; break; fi ;; # RUNNING — only if not dead
     esac
   fi
   # If the unit already died, stop waiting — but take ONE SETTLED SNAPSHOT first (roborev job 213).
@@ -1370,8 +1385,13 @@ if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ]; then
   # different path than its name claims and still pass — which is why the case now uses a component slow
   # enough that liveness, not completion, is what answers.
   bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1
+  # Same distinction as the in-loop probe above (roborev job 318, Medium): RUNNING is not evidence
+  # the unit survives, so it is accepted only while the unit is not affirmatively dead. Here there is
+  # no fall-through to gain — this is the last check — so an affirmatively dead unit leaves
+  # `_hb_seen` at 0 and the launcher refuses, which is the correct outcome: no verdict is coming.
   case "$?" in
-    0|2) _hb_seen=1 ;;   # COMPLETE or RUNNING — the reader can answer about THIS run
+    0) _hb_seen=1 ;;                              # COMPLETE — a verdict exists
+    2) _unit_is_live "$UNIT" && _hb_seen=1 ;;     # RUNNING — only if not affirmatively dead
   esac
 fi
 if [ "$_hb_seen" -ne 1 ]; then
