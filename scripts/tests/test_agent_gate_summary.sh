@@ -4941,6 +4941,70 @@ else
   bad "3453-declares: the lane no longer declares what it measured — issue #3453's own remedy is 'report a measurement, not a decision'"
 fi
 
+# --- 54. #3453: EVERY component line in the emitted block NAMES its feature matrix -----
+#
+# WHY THIS IS HERE and not only in the dedicated guard: this suite owns the SUMMARY BLOCK
+# CONTRACT, and "each component line states what it certified" is now part of that
+# contract (owner ruling 2026-08-30). A bare `core-tests: PASS (412s)` cannot distinguish a
+# run that certified the OTLP stack from one that never enabled it — the whole subject of
+# #3453 — so a block whose lines lost their matrix is a REGRESSION OF THIS BLOCK, whatever
+# the annotation machinery itself does.
+#
+# DIVISION OF LABOUR, stated so neither side is mistaken for the other: the COMPLETENESS
+# census (every name in COMPONENTS resolves to a declared class, and the declared-vs-
+# EXECUTED differential over the eight `bash -c` bodies) lives in
+# scripts/tests/test_agent_gate_feature_matrix_annotation.sh, which runs in tooling-tests.
+# Case 54e asserts that guard is still REGISTERED there, so the census cannot be silently
+# dropped and leave only these block-shape checks behind.
+#
+# Host-INDEPENDENT: bash plus --emit-summary-selftest (no cargo, no python3, no jq, no
+# network, no datasets), so none of these five can become a declared tooling skip.
+fm_sum="$tmp/3453-annot-summary.txt"
+if AGENT_GATE_SUMMARY_FILE="$fm_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1; then
+  fm_lines=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\)' "$fm_sum")
+  fm_annot=$(grep -cE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP) \([0-9]+s\) +\[.+\]$' "$fm_sum")
+  if [ "$fm_lines" -gt 0 ] && [ "$fm_annot" = "$fm_lines" ]; then
+    ok "3453-annot-a: all $fm_lines component line(s) carry a bracketed feature matrix"
+  else
+    bad "3453-annot-a: only $fm_annot of $fm_lines component lines carry a feature matrix"
+    grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" || true
+  fi
+  if grep -qE '^[a-z][a-z-]*: +(PASS|FAIL|SKIP).*\[(UNDECLARED|UNCLASSIFIED)' "$fm_sum"; then
+    bad "3453-annot-b: a component line reads UNDECLARED/UNCLASSIFIED in the reference block"
+  else
+    ok "3453-annot-b: no component line reads UNDECLARED/UNCLASSIFIED in the reference block"
+  fi
+  if grep -E '^[a-z][a-z-]*: +(PASS|FAIL|SKIP)' "$fm_sum" | grep -q 'RESULT:'; then
+    bad "3453-annot-c: an annotation embeds the RESULT: token — it would break the #2908 poll predicate"
+  else
+    ok "3453-annot-c: no annotation embeds the RESULT: token (the one-RESULT invariant is safe)"
+  fi
+else
+  bad "3453-annot-a: --emit-summary-selftest exited non-zero"
+  bad "3453-annot-b: not evaluated (selftest failed)"
+  bad "3453-annot-c: not evaluated (selftest failed)"
+fi
+# The FOUR non-observed renderings are a CLOSED set, each explicit. This is the property
+# that makes a blank annotation unrepresentable: every branch that cannot report an
+# observed matrix still prints a NAMED state.
+fm_tokens_missing=()
+grep -q "printf '\[no-cargo\]'" "$GATE" || fm_tokens_missing+=(no-cargo)
+grep -q 'feature set NOT observed' "$GATE" || fm_tokens_missing+=(via-driver-not-observed)
+grep -q "printf '\[UNDECLARED\]'" "$GATE" || fm_tokens_missing+=(UNDECLARED)
+grep -q 'UNCLASSIFIED' "$GATE" || fm_tokens_missing+=(UNCLASSIFIED)
+grep -q 'component SKIPped' "$GATE" || fm_tokens_missing+=(skipped-before-cargo)
+if [ "${#fm_tokens_missing[@]}" -eq 0 ]; then
+  ok "3453-annot-d: every non-observed state has an EXPLICIT rendering (no-cargo / via <driver> NOT observed / UNDECLARED / UNCLASSIFIED / SKIPped) — a blank annotation is unrepresentable"
+else
+  bad "3453-annot-d: missing explicit rendering(s): ${fm_tokens_missing[*]}"
+fi
+fm_guard=scripts/tests/test_agent_gate_feature_matrix_annotation.sh
+if [ -r "$SCRIPT_DIR/../../$fm_guard" ] && grep -q "$fm_guard" "$GATE"; then
+  ok "3453-annot-e: the completeness/no-drift guard exists AND is registered in the gate (tooling-tests)"
+else
+  bad "3453-annot-e: $fm_guard missing (looked under $SCRIPT_DIR/../..) or not registered in $GATE — the COMPONENTS completeness census would be silently gone"
+fi
+
 # TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
 # coordination lead authorised, taken on the evidence below).
 #
@@ -4984,6 +5048,9 @@ fi
 # not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
 # and a better derivation than an exact count (a floor on the number of distinct verdict
 # LABELS observed, which is structurally immune to the displacement problem).
+# 405 -> 410 on #3453 (Phase B): section 54 adds 5 asserts, host-INDEPENDENT for the same
+# reason (bash plus --emit-summary-selftest; no cargo/python3/jq/network/datasets), so the
+# same "raise by exactly the number added" rule applies and the ~9 margin is preserved.
 # 392 -> 405 on #3453: section 53 adds 13 asserts, every one of them host-INDEPENDENT
 # (bash plus the gate's own --list/--lite-list/--delta-list hooks; no cargo, no python3,
 # no jq, no network), so none of them can turn into a declared skip on any of the eight
@@ -4991,7 +5058,7 @@ fi
 # preserves the deliberate ~9 margin rather than widening it — a floor that stays put
 # while the suite grows is a floor that stops detecting a silently-dying section, which
 # is the only thing it is for.
-ASSERT_FLOOR=405
+ASSERT_FLOOR=410
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
