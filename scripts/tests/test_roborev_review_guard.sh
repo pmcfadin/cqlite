@@ -5171,6 +5171,60 @@ else
 fi
 reset_stub
 
+printf '== (df18) #3626: a GRANTED deferral does NOT excuse a NON-findings key (mutant) ==\n'
+# THE CONFINEMENT, ASSERTED AGAINST A HOSTILE CODE PATH (roborev job 225; spec: "the deferral SHALL
+# NOT be readable by, or applicable to, any check other than the wrapper's `findings:` key", and "a
+# findings deferral SHALL confer no authority over `prompt-content:`"). The wrapper used to admit
+# `DEFERRED` from the coupled granted state for ANY key, so ONE authorization — over a named set of
+# findings, which says nothing about whether the reviewer's diff ever arrived — would have excused
+# `prompt-content:` too. It was not reachable at the time, because no other key emitted the token;
+# that is precisely the latent false pass of #3564 (delegating a key's failure to its neighbour), so
+# it is pinned here against a key that DOES emit it.
+#
+# THE CONTROL RUNS FIRST AND IS NOT OPTIONAL, and here it carries the whole weight of the case: the
+# UNPATCHED copy must reach PASS on this very fixture (a granted, matching deferral), so the FAIL
+# below cannot be the copy failing for some unrelated reason — the ONLY difference between the two
+# runs is which key carries the token.
+reset_stub
+_dfk_dir="$tmp/deferral-confinement"
+mkdir -p "$_dfk_dir"
+cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+  "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfk_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfk_dir/"
+fi
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper --wrapper "$_dfk_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+assert_verdict 'case (df18 control) the UNPATCHED copy reaches PASS on the granted deferral' PASS 0
+assert_says 'case (df18 control) with the findings deferred under their own key' \
+  '^findings: DEFERRED \(2, issues=#3602,#3613'
+assert_says 'case (df18 control) and prompt-content affirmatively PASSing' \
+  '^prompt-content: PASS \(2/2 code census paths present\)$'
+if sed_inplace_verified "$_dfk_dir/roborev-review-checks.sh" \
+  's/^roborev_check_prompt_content() {$/roborev_check_prompt_content() {\
+  PROMPT_CONTENT="DEFERRED (a key other than findings claiming the token)"\
+  return 0/' \
+  'a key other than findings claiming the token' ''; then
+  ok 'case (df18): the misplaced-DEFERRED patch was really applied to the copy'
+  run_wrapper --wrapper "$_dfk_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+  assert_verdict 'case (df18)' FAIL 1
+  assert_says 'case (df18) the misplaced token is named under its own diagnostic, WITH its key' \
+    "^ERROR: verdict-grammar: a per-check key OTHER THAN 'findings:' reports a DEFERRED state — prompt-content: 'DEFERRED "
+  assert_says 'case (df18) the diagnostic states the authorization scope a deferral actually has' \
+    "confers authority over the 'findings:' key and nothing else"
+  assert_says 'case (df18) and that a granted deferral changes nothing about it' \
+    'This holds even when a deferral WAS granted, and it is not waivable'
+  # THE GRANT ITSELF IS UNAFFECTED — separate scoping in the direction (df13/df13b) cover from the
+  # marker side, here from the VERDICT side: the deferral still does its own job under its own key.
+  assert_says 'case (df18) the findings are still deferred under their own key' \
+    '^findings: DEFERRED \(2, issues=#3602,#3613'
+  assert_lacks 'case (df18) one authorization can never excuse a check nobody authorized' '^RESULT: PASS$'
+else
+  bad 'case (df18): could not patch the copied checks file, so the misplaced-DEFERRED path was never exercised (a green run here would be a probe failing in the direction that looks like success)'
+fi
+reset_stub
+
 printf '== case (mb9): the ENQUEUED range is IMMUTABLE against a mid-review base-ref move ==\n'
 # THE RESIDUAL SECOND-ORDER RACE, CLOSED BY CONSTRUCTION (roborev round 1, Medium). The wrapper used
 # to pass the SYMBOLIC base ref to `roborev review --base`, so roborev re-resolved the mirror ref
