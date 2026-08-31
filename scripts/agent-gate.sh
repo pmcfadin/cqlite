@@ -2849,10 +2849,41 @@ _CS_UNBOUNDABLE_RC=199
 # 292). Distinct from 199 ("not run") and from 124/137 ("bound exceeded"), because the remedy and
 # the sentence differ: the command succeeded and its OUTPUT is unusable.
 _CS_REPLAY_RC=198
-# Largest stdout a bounded pre-flight call may produce. Every real one is a git read of a
-# manifest or a sha (tens of bytes to a few KiB); 1 MiB is far beyond any legitimate output and
-# far below the 4.1 GB a runaway writer produced in 6s when this was unbounded.
-_CS_CAP_MAX_BYTES=1048576
+# Largest stdout a bounded pre-flight call may produce.
+#
+# THE FIRST VALUE WAS 1 MiB, AND IT WAS BELOW ITS OWN LARGEST LEGITIMATE INPUT (found while
+# verifying roborev job 299 — a defect NOT among that round's findings). Its stated rationale was
+# "every real one is a git read of a manifest or a sha (tens of bytes to a few KiB)", and that was
+# FALSE WHEN IT WAS WRITTEN: the transitional declaration path reads `<rev>:scripts/agent-gate.sh`
+# — THE WHOLE OF THIS SCRIPT — through this same capture, and this script had already passed
+# 1,049,943 bytes. So the cap sat ~1.3 KB BELOW its largest legitimate input and EVERY declaration
+# read was refused as unreplayable. MEASURED at HEAD bb6c71525, on a clean checkout:
+#
+#   scripts/tests/test_agent_gate_component_set.sh   passed: 105  failed: 9
+#   8 of those 9 carry the refusal verbatim: "... succeeded but its captured output could not be
+#   replayed in full (rc 198)"; the 9th is the pair-control that depends on DECLARED working.
+#
+# The affected verdicts are UNCOMMITTED / DECLARED / head provenance — i.e. a false FAIL-CLOSED on
+# any branch that legitimately REMOVES a component. A cap below a legitimate input is not a bound,
+# it is an outage, and this one grew into existence silently as the script grew.
+#
+# SO THE VALUE IS SET FROM THE LARGEST LEGITIMATE INPUT, WITH STATED HEADROOM, not from a guess at
+# what "looks big": 64 MiB is ~64x this script's current size, so ordinary growth cannot reach it,
+# while a runaway writer (measured: 4.1 GB in ~6s when this was unbounded) crosses it in well under
+# a second — the bound still bounds. It is deliberately NOT derived from the script's size on disk:
+# that would make a bound on a read depend on a filesystem read, and the input is a git BLOB at a
+# baseline sha, not the file in the worktree.
+_CS_CAP_MAX_BYTES=67108864
+# Largest STDERR a bounded pre-flight call may replay. A SEPARATE constant, because the two bounds
+# answer different questions and one number cannot answer both:
+#   * the stdout cap is set from BELOW, by the largest LEGITIMATE output — under it, a correct run
+#     is REFUSED (the outage above);
+#   * this one is set from ABOVE, by what a diagnostic is for. Nothing parses stderr; a git error
+#     message is a few hundred bytes, and past a screenful the excess is noise a human will not
+#     read. Reusing the 64 MiB stdout cap here would let a runaway writer dump 64 MiB into the gate
+#     log, which is the spirit of the defect job 299 raised rather than a fix for it.
+# 64 KiB is ~100x the largest real diagnostic and ~0.001x the stdout cap.
+_CS_CAP_ERR_MAX_BYTES=65536
 # Bound applied to every network-capable operation in this pre-flight, in seconds. ONE
 # variable, read by every call site AND by the diagnostics, so the enumeration below cannot
 # describe a bound the code does not apply — it used to be a `120` literal at five call sites
@@ -2869,6 +2900,43 @@ _CS_BOUND_STRICT_SECS=120
 _CS_BOUND_LENIENT_SECS=15
 _CS_BOUND_SECS="$_CS_BOUND_STRICT_SECS"   # resolved per mode at probe entry
 _CS_BOUND_HINT="$_CS_BOUND_SECS"          # legacy alias kept in step with the above
+# _component_set_replay_err: replay a bounded call's captured STDERR into the caller's stderr,
+# BOUNDED, and never change the caller's status.
+#
+# THE DEFECT (roborev job 299, Medium). This was a bare `cat "$_CS_CAP_ERR" >&2 || true` at four
+# sites. That is the SAME defect the stdout replay was capped for one round earlier, on the other
+# stream: a descendant that outlives a SUCCESSFUL child keeps the stderr fd it inherited, and `cat`
+# on a regular file only stops at EOF — which never arrives while a writer outpaces the reader. So
+# the replay HANGS past the execution deadline and the file grows while it hangs (measured on the
+# stdout side with a fast writer: no termination in 6s, 4.1 GB written — and on this fleet a full
+# disk breaks every lane, presenting as a link-time bus error that names the wrong subsystem).
+#
+# THE TWO STREAMS GET OPPOSITE DISPOSITIONS, DELIBERATELY, AND THE ASYMMETRY IS THE POINT:
+#
+#   stdout, OVERSIZE => REFUSAL (`$_CS_REPLAY_RC`, job 292). Its bytes are PARSED, and a TRUNCATED
+#           manifest is still perfectly GRAMMATICAL — every surviving line a valid component name —
+#           so the closed-grammar parser cannot see the loss and the missing trailing components
+#           produce a FALSE PASS. A partial stdout is therefore a failed MEASUREMENT.
+#
+#   stderr, OVERSIZE => TRUNCATION, and the caller's status is returned UNCHANGED. Nothing parses
+#           this stream (its own bound is `$_CS_CAP_ERR_MAX_BYTES`, argued where it is set); it
+#           feeds DIAGNOSTICS only, and the rule already recorded at the replay site
+#           is that losing part of a message must not turn a MEASURED result into a refusal.
+#           Refusing here would convert a runaway writer on a stream nobody reads into a failed
+#           pre-flight — a false FAIL on a correct measurement, which is the class that teaches
+#           agents to waive a lane.
+#
+# So every failure of this function's own is swallowed, exactly as the `|| true` it replaces did:
+# it returns 0 always, and no caller derives a verdict from it.
+_component_set_replay_err() {
+  [ -n "$_CS_CAP_ERR" ] || return 0
+  # `head -c N` reads AT MOST N bytes and exits, so this terminates against a growing file where
+  # `cat` does not. The truncation is silent BY DESIGN (see the asymmetry above): announcing it
+  # would itself be a diagnostic line competing with the diagnostic being truncated.
+  head -c "$_CS_CAP_ERR_MAX_BYTES" "$_CS_CAP_ERR" >&2 2>/dev/null || true
+  return 0
+}
+
 _component_set_bounded() {
   local secs="$1"; shift
   # THE LADDER IS TERM -> grace -> unconditional group KILL, AND IT IS COMPLETE. There is
@@ -3025,7 +3093,10 @@ _component_set_bounded() {
   # child's own status is therefore NOT returned when its output did not survive.
   #
   # Stderr's replay stays best-effort: it feeds diagnostics only, and losing part of a message must
-  # not turn a measured result into a refusal.
+  # not turn a measured result into a refusal. It is nonetheless BOUNDED (job 299) — an unbounded
+  # `cat` on a stream a stray descendant is still writing hangs past the deadline and fills the
+  # disk, whichever stream it is. `_component_set_replay_err` truncates and returns 0; the
+  # asymmetry with stdout's refusal is argued in full at that function.
   # ---- DECLARED RESIDUAL: DESCENDANTS ARE NOT TERMINATED (roborev job 298, tracked as #3717) ----
   #
   # The cap below bounds the READ. It does NOT bound a surviving descendant's WRITES. On the
@@ -3091,18 +3162,18 @@ _component_set_bounded() {
   _cap_n=$(head -c "$((_CS_CAP_MAX_BYTES + 1))" "$_CS_CAP_OUT" 2>/dev/null | wc -c 2>/dev/null)
   case "$_cap_n" in
     ''|*[!0-9]*)
-      cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
+      _component_set_replay_err
       return "$_CS_REPLAY_RC" ;;
   esac
   if [ "$_cap_n" -gt "$_CS_CAP_MAX_BYTES" ]; then
-    cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
+    _component_set_replay_err
     return "$_CS_REPLAY_RC"
   fi
   if ! head -c "$_CS_CAP_MAX_BYTES" "$_CS_CAP_OUT" 2>/dev/null; then
-    cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
+    _component_set_replay_err
     return "$_CS_REPLAY_RC"
   fi
-  cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
+  _component_set_replay_err
   return "$rc"
 }
 
@@ -5030,7 +5101,15 @@ apply_component_set_preflight() {
       case "$_CS_KIND" in
         manifest-missing|manifest-garbage|manifest-stale)
           why_summary="preflight: FAIL (component-set: the LOCAL component manifest $_CS_MANIFEST_REL is not usable — $_CS_KIND)"
-          hint="hint: regenerate the manifest — { sed -n -e '/^[^#]/q' -e p $_CS_MANIFEST_REL; scripts/agent-gate.sh --list; } >\$TMPDIR/agent-gate.components && mv \$TMPDIR/agent-gate.components $_CS_MANIFEST_REL — then COMMIT it and re-run scripts/agent-gate.sh"
+          # THE HINT AND THE MANIFEST HEADER ARE THE SAME INSTRUCTION WRITTEN TWICE — keep them
+          # in step (roborev job 299, Low). It used to name a PREDICTABLE `\$TMPDIR/agent-gate.
+          # components` AND expand an unset `TMPDIR` to the filesystem ROOT. Every lane on this
+          # fleet is the same user with a shared writable `/tmp`, so a peer can pre-plant that
+          # path as a symlink and the truncating `>` follows it — after which the `mv` publishes
+          # an attacker-chosen file as the manifest this guard derives its verdict from. `mktemp`
+          # creates the file itself under a name it chooses, and the `&&` chain makes creation a
+          # PRECONDITION rather than an assumption.
+          hint="hint: regenerate the manifest — t=\$(mktemp \"\${TMPDIR:-/tmp}/agent-gate.components.XXXXXX\") && { sed -n -e '/^[^#]/q' -e p $_CS_MANIFEST_REL; scripts/agent-gate.sh --list; } >\"\$t\" && mv \"\$t\" $_CS_MANIFEST_REL — then COMMIT it and re-run scripts/agent-gate.sh"
           echo "agent-gate: $_CS_MANIFEST_REL is the DATA this gate publishes as its component" >&2
           echo "            set, and the baseline every future branch compares against is read" >&2
           echo "            from it (never by executing a fetched script — #3544 REQ-3544-01)." >&2

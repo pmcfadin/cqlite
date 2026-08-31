@@ -25,8 +25,24 @@
 # so every later branch would compare against a too-small set and the guard would silently
 # excuse real skew. Regenerate, header included:
 #
-#   { sed -n -e '/^[^#]/q' -e p scripts/agent-gate.components; scripts/agent-gate.sh --list; } \
-#     > /tmp/agent-gate.components && mv /tmp/agent-gate.components scripts/agent-gate.components
+#   t=$(mktemp "${TMPDIR:-/tmp}/agent-gate.components.XXXXXX") \
+#     && { sed -n -e '/^[^#]/q' -e p scripts/agent-gate.components; scripts/agent-gate.sh --list; } >"$t" \
+#     && mv "$t" scripts/agent-gate.components
+#
+# THE TEMPORARY IS `mktemp`, NOT A PREDICTABLE NAME (roborev job 299, Low). This used to write
+# through a fixed `/tmp/agent-gate.components`. On this fleet EVERY lane runs as the same user
+# with a shared writable `/tmp`, so a same-user peer can pre-plant that path as a SYMLINK and the
+# truncating `>` redirect follows it — writing the component list wherever the link points, and
+# then `mv`ing an attacker-chosen file over the manifest this guard's whole verdict is derived
+# from. `mktemp` creates the file itself with O_EXCL under a name it chooses, so there is nothing
+# to pre-plant; the `&&` chain makes CREATION a precondition rather than an assumption (a failed
+# `mktemp` must not leave the redirect writing to an empty `$t`, which is `>` on the CWD); and the
+# `mv` is the atomic publish, so a reader never sees a half-written manifest. `${TMPDIR:-/tmp}`
+# rather than a bare `$TMPDIR`: an unset `TMPDIR` expands to the empty string, which makes the
+# path `/agent-gate.components` — the filesystem ROOT.
+#
+# THIS COMMAND AND THE HINT `scripts/agent-gate.sh` EMITS ON A STALE MANIFEST ARE THE SAME
+# INSTRUCTION WRITTEN TWICE. Change one, change the other.
 file-size
 fmt
 clippy
