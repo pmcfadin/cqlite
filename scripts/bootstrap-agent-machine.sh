@@ -2047,20 +2047,40 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     [ -n "$PIN_PROBE_SUBJECT_NOTE" ] && PIN_PRIV_STATE=invoker-unresolvable
   elif ! have sudo; then
     PIN_PRIV_STATE=no-sudo-binary
-  elif ! bounded 10 sudo -n true >/dev/null 2>&1; then
-    PIN_PRIV_STATE=sudo-needs-password
-  elif ! bounded 10 sudo -n -u "$PIN_SELF_USER" true >/dev/null 2>&1; then
-    PIN_PRIV_STATE=sudo-runas-denied
+  elif [ -z "$TIMEOUT_BIN" ]; then
+    # THE BOUND IS CHECKED BEFORE THE FIRST PROBE, NOT AFTER (#3414 roborev round 10).
+    # `bounded` DEGRADES TO RUNNING THE COMMAND DIRECTLY when no timeout utility exists,
+    # and both sudo probes used to execute ABOVE the later no-timeout guard — so on a host
+    # with neither `timeout` nor `gtimeout` a stalled sudo/PAM/NSS lookup hung bootstrap
+    # indefinitely WHILE THE CODE CLAIMED IT REFUSES UNBOUNDED SESSION PROBING. The false
+    # claim is the worse half: a comment asserting a safety property the code does not
+    # have is worse than not having it, because it stops the next person checking.
+    PIN_PRIV_STATE=no-timeout-binary
   else
-    PIN_PRIV_STATE=sudo-nopasswd
+    # ROOT-WRITE PERMISSION AND SESSION-PROBE PERMISSION ARE INDEPENDENT FACTS, and gating
+    # the probe on the WRITE one was a false red (#3414 roborev round 10). `sudo -n true`
+    # asks "may I run ANYTHING as root"; the probe needs only "may I open a session as
+    # MYSELF". A host granting the second but not the first — a narrowly-scoped sudoers
+    # rule, or a box already correctly pinned — was reported sudo-needs-password and
+    # failed --strict on a legitimately configured machine.
+    #
+    # This finishes a split started two rounds ago: PIN_WRITE_PRIV was separated from
+    # PIN_PRIV_STATE in USE, but their ACQUISITION stayed entangled, so the weaker
+    # permission still depended on the stronger one being granted first.
+    if bounded 10 sudo -n -u "$PIN_SELF_USER" true >/dev/null 2>&1; then
+      PIN_PRIV_STATE=sudo-nopasswd
+    else
+      PIN_PRIV_STATE=sudo-runas-denied
+    fi
   fi
-  # WRITE privilege and PROBE capability are separate facts: a root shell with no sudo
-  # binary can persist the pin but cannot open a probe session, and saying so is more
-  # useful than collapsing both into one state.
+  # WRITE privilege: a SEPARATE question, asked separately and only where persistence is
+  # attempted. A root shell with no sudo binary can persist but cannot probe; a box that
+  # permits the runas-self session but not unrestricted root can probe but not persist.
+  # Neither fact implies the other, so neither is derived from the other's answer.
   PIN_WRITE_PRIV=0
   if [ "$PIN_SELF_UID" = 0 ]; then
     PIN_WRITE_PRIV=1; PIN_ROOT=()
-  elif [ "$PIN_PRIV_STATE" = sudo-nopasswd ]; then
+  elif have sudo && [ -n "$TIMEOUT_BIN" ] && bounded 10 sudo -n true >/dev/null 2>&1; then
     PIN_WRITE_PRIV=1; PIN_ROOT=(sudo -n)
   fi
   # Test mode never runs a PRIVILEGED write; the sandbox file belongs to the invoking
@@ -2386,8 +2406,8 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # is NOT tolerated is running it UNBOUNDED: hanging the fleet's provisioning entry
   # point is worse than an unmeasured verdict.
   PIN_PROBE_BOUND=20
-  if [ -z "$TIMEOUT_BIN" ]; then
-    warn "gate-pin: UNMEASURED (no timeout/gtimeout on PATH — refusing to run an UNBOUNDED session probe during bootstrap)"
+  if [ "$PIN_PRIV_STATE" = no-timeout-binary ] || [ -z "$TIMEOUT_BIN" ]; then
+    warn "gate-pin: UNMEASURED (no timeout/gtimeout on PATH — refusing to run an UNBOUNDED session probe during bootstrap; NOTHING was probed)"
     info "install GNU coreutils so the probe can be bounded (macOS: brew install coreutils), then re-run"
   elif [ "$PIN_PRIV_STATE" = invoker-unresolvable ]; then
     warn "gate-pin: UNMEASURED ($PIN_PROBE_SUBJECT_NOTE — refusing to answer about the wrong user)"
@@ -2398,11 +2418,9 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     warn "gate-pin: UNMEASURED (no 'sudo' on this box, so no fresh PAM session can be created — pin visibility is UNKNOWN, not ok)"
     info "check by hand:  env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV sudo -u \"\$(id -un)\" bash -c 'printf \"[%s]\\n\" \"\${CQLITE_GATE_MAX_CONCURRENCY-UNSET}\"'"
     info "(the scrub and the '-' — not ':-' — are load-bearing: without them an INHERITED value, or a set-but-EMPTY one, reads as a healthy pin, which is the defect this section exists to remove)"
-  elif [ "$PIN_PRIV_STATE" = sudo-needs-password ]; then
-    warn "gate-pin: UNMEASURED (sudo needs a password here and bootstrap probes with 'sudo -n', which never prompts — pin visibility is UNKNOWN, not ok)"
-    info "authenticate first, then re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh --yes"
   elif [ "$PIN_PRIV_STATE" = sudo-runas-denied ]; then
-    warn "gate-pin: UNMEASURED (sudo works but will not run a command as '$PIN_SELF_USER', so no probe session could be opened — pin visibility is UNKNOWN, not ok)"
+    warn "gate-pin: UNMEASURED (sudo will not open a session as '$PIN_SELF_USER' without a password, so no probe session could be created — pin visibility is UNKNOWN, not ok)"
+    info "this needs only a session as YOURSELF, not root — authenticate once and re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh"
   else
     pin_probe_rc=0
     # TWO markers, because SET-BUT-EMPTY and UNSET are different facts with different
