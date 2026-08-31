@@ -1052,78 +1052,72 @@ resolve_lane_dir() {
 # correctness input: the record is found by ISSUE, so falling back to the given path is
 # both safe and the honest answer — we report what we were told when we cannot improve on
 # it, and we say so on stderr rather than dying.
-# lex_norm_path <abs-path> — LEXICAL normalisation: collapse `//`, drop `.`, resolve `..`,
-# strip trailing slashes. No filesystem access, so it works on a path that does NOT EXIST YET —
-# which is the whole point, because `acquire` legitimately runs BEFORE `git worktree add`
-# creates the lane.
-#
-# WHY (#3436, roborev round 7, REPRODUCED): the recorded `lane-dir` is copied into the cwd
-# identity walk, and `/proc/<pid>/cwd` is always canonical. So a path recorded as
-# `.../lane-961/` or `.../x/../lane-962` never matched the holder's own cwd once the directory
-# existed: probe reported `liveness=ALIVE` instead of `SELF`, claim.sh then read its OWN lock as
-# a live PEER, and `release` without `--pid` was refused to the holder. Comparing a
-# non-canonical string as though it were a canonical path — the same shape as comparing a
-# truncated boot id.
-lex_norm_path() {
-  local in="$1" out="" seg
-  case "$in" in /*) ;; *) printf '%s\n' "$in"; return 0 ;; esac
-  # NOGLOB WHILE SPLITTING (#3436, roborev round 8). `for seg in $in` with IFS=/ is subject to
-  # PATHNAME EXPANSION, so a not-yet-existing lane path containing `*`, `?` or `[...]` expanded
-  # against the CURRENT DIRECTORY and was recorded as an unrelated path — measured:
-  # `.../dec*y-expanded` was recorded as `.../decoy-expanded`. The recorded path then never
-  # matches the holder's cwd, which is the same identity breakage this function was added to
-  # fix. Save and restore the caller's setting rather than assuming it: this is a library
-  # function and leaving `-f` on would silently change globbing for everything after it.
-  local _glob_was_off=0
-  case "$-" in *f*) _glob_was_off=1 ;; esac
-  set -f
-  local IFS=/
-  for seg in $in; do
-    case "$seg" in
-      ''|.) ;;
-      ..)   out="${out%/*}" ;;
-      *)    out="$out/$seg" ;;
-    esac
-  done
-  [ "$_glob_was_off" -eq 1 ] || set +f
-  printf '%s\n' "${out:-/}"
-}
 
 lane_real() {
   local p="$1" real=""
-  if [ -d "$p" ]; then
-    real="$( cd "$p" 2>/dev/null && pwd -P )" || real=""
-    if [ -z "$real" ]; then
-      note "could not canonicalise lane dir '$p' (unsearchable or vanished); using the path as given. The record is keyed by ISSUE, so this does not change which lock is read."
-      real="$p"
-    fi
-  else
-    # Does not exist yet (acquire-before-worktree-add). The LEAF cannot be canonicalised
-    # physically, but its ANCESTORS can — and leaving them lexical was a directory-alias hole
-    # (#3436, roborev round 10): `/real/lane` and `/alias/lane`, where `/alias` -> `/real`,
-    # normalise to DIFFERENT strings, so they take DIFFERENT directory mutexes and the
-    # cross-issue scan never compares them. Both issues acquire what is one directory.
-    # So: physically resolve the DEEPEST EXISTING ancestor and re-append the remainder.
-    local lex head tail_ hreal
-    lex="$(lex_norm_path "$p")"
-    head="$lex"; tail_=""
-    while [ -n "$head" ] && [ "$head" != "/" ] && [ ! -d "$head" ]; do
-      tail_="${head##*/}${tail_:+/$tail_}"
-      head="${head%/*}"
-      [ -z "$head" ] && head="/"
-    done
-    real="$lex"
-    if [ -d "$head" ]; then
-      hreal="$( cd "$head" 2>/dev/null && pwd -P )" || hreal=""
-      if [ -n "$hreal" ]; then
-        case "$hreal" in
-          */) real="${hreal}${tail_}" ;;
-          *)  real="${hreal}${tail_:+/$tail_}" ;;
-        esac
-      fi
-    fi
+  # ONE PHYSICAL RESOLVER FOR BOTH CASES (#3436, roborev round 16). Two defects, one cause —
+  # `..` was resolved LEXICALLY, and POSIX resolves it AFTER the symlink:
+  #
+  #   /base/link/../lane   with   link -> /other/sub     names   /other/lane
+  #   lexical `..` removal instead yields                        /base/lane
+  #
+  # so two spellings of ONE directory took TWO directory mutexes and both acquired — the alias
+  # hole round 10 closed for a symlinked ANCESTOR, reopened by `..`. Measured both ways:
+  # `cd -P` and `realpath -m` agree on /other/lane; `lex_norm_path` returned /base/lane.
+  #
+  # AND IT WAS NOT ONLY THE NOT-YET-EXISTS BRANCH the review named. The existing-directory
+  # branch used a LOGICAL `cd` (then `pwd -P`), which is the same mistake: with both
+  # /base/lane and /other/lane present, logical lands on /base/lane and physical on
+  # /other/lane. A first test agreed only because bash FALLS BACK to physical when the
+  # logical target does not exist — the disagreement is invisible until both paths exist.
+  #
+  # So: walk the components LEFT TO RIGHT and resolve each existing prefix physically, which
+  # is the order the kernel uses. `realpath -m` would do it in one call and is GNU-only; this
+  # file is declared macOS bash 3.2 compatible (see the header), so it is done here.
+  real="$(_resolve_lane_path "$p")"
+  if [ -z "$real" ]; then
+    note "could not canonicalise lane dir '$p' (unsearchable or vanished); using the path as given. The record is keyed by ISSUE, so this does not change which lock is read."
+    real="$p"
   fi
   printf '%s\n' "$real"
+}
+
+# _resolve_lane_path <abs-path> — physical canonicalisation that tolerates a MISSING LEAF.
+# Each component is appended in turn; whenever the accumulated prefix exists it is replaced by
+# its PHYSICAL form, so a later `..` is taken against the resolved location rather than the
+# spelling. Components after the last existing prefix cannot be resolved (they name nothing
+# yet) and are appended literally — and a `..` in that tail is genuinely unresolvable, since
+# the kernel itself would ENOENT, so it falls back to a lexical parent and says nothing more.
+_resolve_lane_path() {
+  local p="$1" cur="/" comp next phys had_f=1 oldifs
+  case "$p" in /*) ;; *) printf '%s\n' "$p"; return 0 ;; esac
+  case "$-" in *f*) had_f=0 ;; esac      # remember the caller's glob setting, restore it below
+  set -f                                  # a lane path may legitimately contain a glob char
+  oldifs="$IFS"; IFS='/'; set -- $p; IFS="$oldifs"
+  for comp in "$@"; do
+    [ -n "$comp" ] || continue
+    case "$comp" in
+      .) continue ;;
+      ..)
+        if [ -d "$cur" ]; then
+          phys="$( cd -P "$cur/.." 2>/dev/null && pwd -P )" || phys=""
+          if [ -n "$phys" ]; then cur="$phys"; continue; fi
+        fi
+        cur="${cur%/*}"; [ -n "$cur" ] || cur="/"
+        ;;
+      *)
+        case "$cur" in */) next="${cur}${comp}" ;; *) next="${cur}/${comp}" ;; esac
+        if [ -d "$next" ]; then
+          phys="$( cd -P "$next" 2>/dev/null && pwd -P )" || phys=""
+          if [ -n "$phys" ]; then cur="$phys"; else cur="$next"; fi
+        else
+          cur="$next"
+        fi
+        ;;
+    esac
+  done
+  [ "$had_f" -eq 0 ] || set +f
+  printf '%s\n' "$cur"
 }
 
 G_ISSUE=""; G_LANE=""; G_ACTOR=""; G_MACHINE=""; G_PID=""; G_SCOPE=""

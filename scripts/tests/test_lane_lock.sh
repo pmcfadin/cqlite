@@ -1264,7 +1264,8 @@ kill "$SH_B" "$SH_C" 2>/dev/null || true
 # (e) GLOB CHARACTERS in a not-yet-existing lane path must be taken LITERALLY. `for seg in $in`
 # with IFS=/ is subject to pathname expansion, so `.../dec*y-x` expanded against the CURRENT
 # directory and was recorded as an unrelated path — which then never matches the holder's cwd,
-# the very identity breakage lex_norm_path was added to fix.
+# the very identity breakage path normalisation was added to fix (now _resolve_lane_path,
+# which superseded the lexical normaliser in round 16 — see TEST 36).
 GLOBD="$LANES/dec*y-830"
 : > "$LANES/decoy-830"
 sleep 300 & GL_H=$!
@@ -1570,6 +1571,53 @@ if [ -r "$FIN_SKILL" ]; then
 else
   bad "(a) cannot read $FIN_SKILL — this assertion covers a doctrine file and must not pass vacuously"
 fi
+
+# ===========================================================================
+echo 'TEST 36: a .. component is resolved AFTER the symlink, as the kernel does (roborev round 16)'
+# ===========================================================================
+# `/base/link/../lane` with `link -> /other/sub` NAMES `/other/lane`, because POSIX resolves the
+# symlink before `..`. Lexical `..` removal yields `/base/lane` instead — so two spellings of ONE
+# directory take TWO directory mutexes and BOTH acquire. That is the alias hole round 10 closed
+# for a symlinked ancestor, reopened through `..`.
+#
+# BOTH branches are covered on purpose. The review named the not-yet-exists path; the EXISTING
+# path had the same defect via a LOGICAL `cd`, and it is invisible unless BOTH candidate
+# directories exist — bash falls back to physical when the logical target is missing, so a
+# single-directory test passes while the bug is present.
+SYM36="$LANES/sym36"; mkdir -p "$SYM36/base" "$SYM36/other/sub"
+ln -sfn "$SYM36/other/sub" "$SYM36/base/link"
+SPELL_A="$SYM36/base/link/../lane"
+SPELL_B="$SYM36/other/lane"
+
+# (a) MISSING LEAF — the reported case. Two spellings, one directory, one lock.
+sleep 300 & S36_A=$!
+sleep 300 & S36_B=$!
+ll acquire 936 --lane-dir "$SPELL_A" --pid "$S36_A"; rc36a=$RC
+ll acquire 937 --lane-dir "$SPELL_B" --pid "$S36_B"; rc36b=$RC; out36b=$OUT
+rec36=$(grep '^lane-dir=' "$(record_of 936)" 2>/dev/null | cut -d= -f2-)
+if [ "$rc36a" -eq 0 ] && [ "$rc36b" -eq 2 ] \
+   && printf '%s' "$out36b" | grep -q 'reason=same-lane-dir-other-issue' \
+   && [ "$rec36" = "$SPELL_B" ]; then
+  ok "(a) missing leaf: '<sym>/../lane' and the physical path contend, and the RECORDED path is the physical one"
+else
+  bad "(a) '..' resolved lexically: rc=$rc36a/$rc36b recorded='$rec36' want='$SPELL_B'
+$out36b"
+fi
+kill "$S36_A" "$S36_B" 2>/dev/null || true
+rm -f "$(record_of 936)" "$(record_of 937)" 2>/dev/null || true
+
+# (b) BOTH DIRECTORIES EXIST — the case a single-directory test cannot see, because bash's `cd`
+#     falls back to physical only when the LOGICAL target is absent.
+mkdir -p "$SYM36/base/lane" "$SYM36/other/lane"
+sleep 300 & S36_C=$!
+ll acquire 938 --lane-dir "$SPELL_A" --pid "$S36_C"; rc36c=$RC
+rec38=$(grep '^lane-dir=' "$(record_of 938)" 2>/dev/null | cut -d= -f2-)
+if [ "$rc36c" -eq 0 ] && [ "$rec38" = "$SPELL_B" ]; then
+  ok "(b) both directories exist: the recorded path is still the PHYSICAL one, not the logical spelling"
+else
+  bad "(b) logical resolution won when both exist: recorded='$rec38' want='$SPELL_B'"
+fi
+kill "$S36_C" 2>/dev/null || true
 
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
