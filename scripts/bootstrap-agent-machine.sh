@@ -1968,6 +1968,44 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # write" true IN CODE rather than merely by construction.
   if [ "$PIN_ENV_FILE_IS_SEAM" = 1 ]; then PIN_ROOT=(); PIN_WRITE_PRIV=1; fi
 
+  # pin_strip_pam_quotes <raw>: reproduce pam_env's own de-quoting, so the value compared
+  # below is the value a session actually RECEIVES.
+  #
+  # STRIPPING QUOTES IS READING THE FILE'S FORMAT; NORMALISING THE VALUE IS REINTERPRETING
+  # IT. The first is mandatory, the second is forbidden. Without this, a legitimately
+  # quoted line — `CQLITE_GATE_MAX_CONCURRENCY="1"`, and quoting IS the convention in this
+  # file, which opens with `PATH="/usr/local/sbin:..."` — parses as `"1"`, the session
+  # reports `1`, and a correctly-pinned box gets a non-passing verdict: red on correct
+  # input, produced by the fix for a false green. But ` 1 ` must still mismatch `1`,
+  # because the gate genuinely discards the former; that asymmetry is why the gate is
+  # asked rather than second-guessed.
+  #
+  # THE RULE IS MEASURED, NOT ASSUMED (pam 1.5.3-5ubuntu5.7, this fleet's platform), by
+  # writing shapes into the real /etc/environment and reading them back out of a fresh
+  # session. It is NOT "a matched pair": a LEADING quote is stripped whether or not it is
+  # closed, and single quotes behave like double ones — the symmetry this was told not to
+  # assume, checked rather than guessed:
+  #     "1"  -> 1        '1' -> 1        1   -> 1        "a b"  -> a b
+  #     "1   -> 1        '1  -> 1        1"  -> 1"       a"b    -> a"b
+  #     ""   -> (empty)  "   -> (empty)  " 1 " -> ` 1 `  ""1""  -> "1"
+  # i.e. drop a leading `"` or `'`, then drop a trailing one of the SAME kind if present.
+  #
+  # WHY A WRONG ANSWER HERE IS SAFE IN THE DIRECTION THAT MATTERS: the session side of the
+  # comparison is pam_env's OWN output, so any disagreement between this parser and a
+  # different pam build moves the two values APART, never together. Over-stripping and
+  # under-stripping both yield a non-passing verdict; neither can manufacture a VERIFIED.
+  pin_strip_pam_quotes() {
+    local v="$1" q
+    case "$v" in
+      '"'*) q='"' ;;
+      "'"*) q="'" ;;
+      *) printf '%s' "$v"; return 0 ;;
+    esac
+    v=${v#?}
+    case "$v" in *"$q") v=${v%?} ;; esac
+    printf '%s' "$v"
+  }
+
   # Does the file ALREADY carry a pin line? Read ONCE, here, because two very different
   # boxes reach the FAILED verdict below and they need different remedies: a box with no
   # line (persist it) and a box whose line is present yet invisible to a fresh session
@@ -2008,7 +2046,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # gate, re-created in the parser that checks it.
       pin_file_raw=$(sed -n 's/^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=/VAL:/p' "$PIN_ENV_FILE" 2>/dev/null | tail -1)
       case "$pin_file_raw" in
-        VAL:*) PIN_FILE_VALUE=${pin_file_raw#VAL:}; PIN_FILE_HAS_LINE=yes ;;
+        VAL:*) PIN_FILE_VALUE=$(pin_strip_pam_quotes "${pin_file_raw#VAL:}"); PIN_FILE_HAS_LINE=yes ;;
         *)     PIN_FILE_HAS_LINE=unparseable ;;
       esac
     else

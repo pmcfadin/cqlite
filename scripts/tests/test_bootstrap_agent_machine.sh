@@ -3062,6 +3062,38 @@ else
     printf '%s\n' "$out_ad" | grep -i 'gate-pin' | head -2
   fi
 
+  # 11ae. A QUOTED-BUT-CORRECT FILE MUST STILL VERIFY (issue #3414, lead correction).
+  #      pam_env strips surrounding quotes, and quoting IS the convention in this file —
+  #      /etc/environment on this fleet opens with PATH="/usr/local/sbin:...". Comparing
+  #      the RAW string would make `CQLITE_GATE_MAX_CONCURRENCY="1"` parse as `"1"` while
+  #      the session reports `1`, and a properly pinned box would get a non-passing
+  #      verdict: red on correct input, produced by the fix for a false green. Both quote
+  #      kinds, because pam was MEASURED to treat them alike rather than assumed to.
+  for pin_q in '"1"' "'1'" '"1' '1'; do
+    envf_ae="$tmp/pin-env-ae"; printf 'CQLITE_GATE_MAX_CONCURRENCY=%s\n' "$pin_q" >"$envf_ae"
+    out_ae=$(runpin "$pinroot" "$shims_one" "$envf_ae" HOME="$pin_home_plain")
+    if printf '%s' "$out_ae" | grep -qE '\[ok\].*gate-pin: VERIFIED'; then
+      ok "gate-pin: a file value written as $pin_q still VERIFIES (pam_env's quoting is read, not reinterpreted)"
+    else
+      bad "gate-pin: a correctly-pinned box written as $pin_q was reported non-passing"
+      printf '%s\n' "$out_ae" | grep -i 'gate-pin' | head -2
+    fi
+  done
+
+  # 11af. ...and de-quoting must not become normalisation. The INTERIOR is untouched, so a
+  #      quoted `" 1 "` still mismatches a session reporting `1` — the gate discards ` 1 `
+  #      (it matches *[!0-9]*), so calling them equal here would certify a value the gate
+  #      rejects. This is the line between reading the file's format and reinterpreting
+  #      its content, and it is the half a future "just trim it" refactor would erase.
+  envf_af="$tmp/pin-env-af"; printf 'CQLITE_GATE_MAX_CONCURRENCY=" 1 "\n' >"$envf_af"
+  out_af=$(runpin "$pinroot" "$shims_one" "$envf_af" HOME="$pin_home_plain")
+  if ! printf '%s' "$out_af" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: de-quoting leaves the interior alone — a quoted ' 1 ' still mismatches '1'"
+  else
+    bad "gate-pin: de-quoting slid into normalisation and certified a value the gate discards"
+    printf '%s\n' "$out_af" | grep -i 'gate-pin' | head -2
+  fi
+
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the
