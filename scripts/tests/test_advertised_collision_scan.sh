@@ -364,7 +364,19 @@ rc13ok=0
 out13ok=$(run_scan "$GH13" --json --issue 600) || rc13ok=$?
 
 json_verdict=""
-if command -v python3 >/dev/null 2>&1; then
+# PRESENT IS NOT USABLE (#3436, found by measuring rather than reading). `command -v python3`
+# only proves the name RESOLVES. A python3 that exists and cannot run — a truncated install,
+# a broken venv shim, a wrapper on a full disk — took the python3 branch, failed the inner
+# check, and made this case report "--json escaping broken": a FALSE RED blaming the code
+# under test for a TOOLING failure. Same wrong-cause defect as the board parse reporting an
+# auth fault for schema drift, in a test I wrote to catch wrong-cause defects.
+#
+# So probe that python3 actually EXECUTES before trusting it, and treat unusable exactly like
+# absent — which is what makes this suite genuinely python3-OPTIONAL, as its header claims,
+# rather than python3-optional-only-when-python3-is-missing-entirely.
+py_usable=no
+if command -v python3 >/dev/null 2>&1 && python3 -c 'pass' >/dev/null 2>&1; then py_usable=yes; fi
+if [ "$py_usable" = yes ]; then
   # python3 is used WHEN PRESENT and never required: this suite runs in `tooling-tests`
   # before the gate's python3 gate, so the fallback below must be able to carry the case
   # alone.
@@ -397,7 +409,7 @@ else
   case "$out13" in *'\t'*)  esc_t=yes ;; esac
   case "$out13" in *"$(printf '\t')"*) raw_tab=yes ;; *) raw_tab=no ;; esac
   if [ "$esc_q" = yes ] && [ "$esc_b" = yes ] && [ "$esc_t" = yes ] && [ "$raw_tab" = no ]; then
-    json_verdict="escapes-present-no-raw-control (python3 absent)"
+    json_verdict="escapes-present-no-raw-control (python3 absent or unusable)"
   fi
 fi
 
