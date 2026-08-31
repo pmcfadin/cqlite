@@ -5036,9 +5036,16 @@ grep -q 'component SKIPped' "$GATE" || fm_tokens_missing+=(skipped-before-cargo)
 # blocker 2), a component that FAILs before its first cargo call legitimately leaves an
 # EMPTY sidecar. That state is NAMED too — it is a fact we know exactly, and UNDECLARED
 # would understate it.
-grep -q 'FAILed before its first cargo invocation' "$GATE" || fm_tokens_missing+=(failed-before-cargo)
+grep -q 'FAILed before its first cargo build/test invocation' "$GATE" || fm_tokens_missing+=(failed-before-cargo)
+# …and the TWO states added by roborev job 273: `unobservable:<why>` (F2 — cargo may run in
+# child processes and this shell can say neither what nor whether), and an indirect
+# component whose DRIVER was never reached (F3 — the state the old code mis-reported as an
+# unobserved cargo invocation).
+grep -q 'cargo not observable' "$GATE" || fm_tokens_missing+=(cargo-not-observable)
+grep -q 'never reached' "$GATE" || fm_tokens_missing+=(driver-never-reached)
+grep -q 'before reaching its driver' "$GATE" || fm_tokens_missing+=(failed-before-driver)
 if [ "${#fm_tokens_missing[@]}" -eq 0 ]; then
-  ok "3453-annot-d: every non-observed state has an EXPLICIT rendering (no-cargo / via <driver> NOT observed / UNDECLARED / UNCLASSIFIED / SKIPped / FAILed-before-cargo) — a blank annotation is unrepresentable"
+  ok "3453-annot-d: every non-observed state has an EXPLICIT rendering (no-cargo / via <driver> NOT observed / cargo-not-observable / driver-never-reached / UNDECLARED / UNCLASSIFIED / SKIPped / FAILed-before-cargo / FAILed-before-driver) — a blank annotation is unrepresentable"
 else
   bad "3453-annot-d: missing explicit rendering(s): ${fm_tokens_missing[*]}"
 fi

@@ -75,10 +75,13 @@ trap 'rm -rf "$tmp"' EXIT
 # this guard could pass having tested nothing. (Extraction also defines the `cargo`/`env`
 # wrappers in THIS shell; harmless, since AGENT_GATE_FM_COMPONENT is unset except where a
 # case sets it.)
-for fn in _fm_active _fm_sidecar _fm_note _fm_indirect_desc _fm_abbrev_features \
-          _fm_describe_cargo _fm_observe_cargo_argv _fm_observe_child cargo env \
+for fn in _fm_active _fm_sidecar _fm_note _fm_indirect_desc _fm_unobservable_desc \
+          _fm_abbrev_features \
+          _fm_describe_cargo _fm_observe_cargo_argv _fm_observe_child _fm_observe_driver \
+          cargo env \
           _fm_component_class _fm_render _fm_annotate _fm_summary_line \
-          _fm_note_if_no_cargo_observed _fm_note_python_tier run_scoped_tests; do
+          _fm_note_if_no_cargo_observed _fm_note_driver _fm_note_maturin_rc \
+          run_scoped_tests run_python_bindings; do
   src=$(sed -n "/^$fn() {/,/^}$/p" "$GATE")
   if [ -z "$src" ]; then
     echo "FAIL - could not extract $fn from $GATE — renamed or reshaped; this guard must not pass having tested nothing (#3453)" >&2
@@ -221,14 +224,21 @@ fi
 # node-bindings) and the scoped python tier's per-invocation record must both come from
 # _fm_indirect_desc — two spellings of one state read as two states.
 b10=()
-grep -qF '$(_fm_indirect_desc "${class#indirect:}")' "$GATE" \
-  || b10+=("the-class-arm-does-not-use-_fm_indirect_desc")
-grep -qE '_fm_note "\$1" "\$\(_fm_indirect_desc maturin\)"' "$GATE" \
-  || b10+=("the-python-tier-record-does-not-use-_fm_indirect_desc")
+grep -qF '"${class#indirect:}"' "$GATE" \
+  || b10+=("the-class-arm-does-not-name-the-driver-of-an-unrecorded-indirect-component")
+# The per-invocation driver-reach records (roborev job 273, F3) must use the same spelling:
+# _fm_note_driver is the parent-side recorder and _fm_observe_driver the child-callable one,
+# and BOTH must render through _fm_indirect_desc.
+grep -qE 'reached\) _fm_note "\$1" "\$\(_fm_indirect_desc "\$2"\)"' "$GATE" \
+  || b10+=("_fm_note_driver-does-not-use-_fm_indirect_desc")
+grep -qE '_fm_indirect_desc "\$driver"' "$GATE" \
+  || b10+=("_fm_observe_driver-does-not-use-_fm_indirect_desc")
 n_literal=$(grep -c "printf 'via %s: feature set NOT observed'" "$GATE")
 [ "$n_literal" = 1 ] || b10+=("the-literal-appears-$n_literal-times-outside-_fm_indirect_desc")
+n_unobs=$(grep -c "printf 'cargo not observable: %s'" "$GATE")
+[ "$n_unobs" = 1 ] || b10+=("the-unobservable-literal-appears-$n_unobs-times-outside-_fm_unobservable_desc")
 if [ "${#b10[@]}" -eq 0 ]; then
-  ok "B10: the 'via <driver>: feature set NOT observed' text has exactly ONE definition, used by both the class arm and the python-tier record"
+  ok "B10: the 'via <driver>' and 'cargo not observable' texts each have exactly ONE definition, used by the class arm AND by both driver-reach recorders"
 else
   bad "B10: ${b10[*]}"
 fi
@@ -237,13 +247,43 @@ fi
 # merely reaching the branch. rc 1 (venv/pip setup) and rc 4 (no cargo/rustc) mean maturin
 # was never invoked, so claiming an unobserved cargo invocation there would be this
 # issue's own defect one level down.
+# B11: EVERY indirect component records its driver's REACH from an explicit signal, in ONE
+# shared implementation (roborev job 273, F3). The rc-aware record existed for the scoped
+# python tier alone; python-bindings discarded its rc (a bare if/else on success) and
+# node-bindings had no record at all, so both claimed an unobserved cargo invocation on a
+# failure that never reached the driver. Asserted structurally as well as behaviourally
+# (sections R/PB below) because a NEW indirect component is the case behaviour cannot cover.
 b11=()
-grep -qE '_fm_note_python_tier "\$name" "\$pbv_rc"' "$GATE" \
+grep -qE '_fm_note_maturin_rc "\$name" "\$pbv_rc"' "$GATE" \
   || b11+=("run_scoped_tests-does-not-record-the-python-tier-from-its-rc")
-grep -qE '^    0\|2\|3\) _fm_note "\$1" "\$\(_fm_indirect_desc maturin\)" ;;' "$GATE" \
-  || b11+=("_fm_note_python_tier-no-longer-conditions-on-rc-0-2-3")
+grep -qE '^    0\|2\|3\) _fm_note_driver "\$1" maturin reached ;;' "$GATE" \
+  || b11+=("_fm_note_maturin_rc-no-longer-conditions-on-rc-0-2-3")
+# python-bindings: the rc must be CAPTURED (it used to be discarded) and fed to the shared
+# mapper — one call, in the component that owns the driver.
+grep -qE '\|\| pbv_rc=\$\?' "$GATE" \
+  || b11+=("run_python_bindings-does-not-capture-the-build-verify-rc")
+grep -qE '_fm_note_maturin_rc "\$name" "\$pbv_rc"' "$GATE" \
+  || b11+=("run_python_bindings-does-not-feed-its-rc-to-the-shared-mapper")
+# node-bindings: the recorder must sit IMMEDIATELY BEFORE the driver, inside the body — the
+# adjacency IS the property (a record anywhere earlier would describe intent again, which is
+# the defect job 269 blocker 2 fixed one level up).
+nb_next=$(grep -A2 '_fm_observe_driver node-bindings' "$GATE" \
+  | grep -vE '_fm_observe_driver|^--$' | grep -vE '^\s*#' | head -1 | sed 's/^[[:space:]]*//')
+case "$nb_next" in
+  'npm run build'*) ;;
+  *) b11+=("node-bindings-recorder-is-not-immediately-before-npm-run-build(next-line:'${nb_next:-<none>}')") ;;
+esac
+# …and every `indirect:` class declared must have SOME recording site naming its component,
+# derived from the class table rather than a list typed here.
+for _ic in python-bindings node-bindings; do
+  case "$(_fm_component_class "$_ic")" in
+    indirect:*)
+      grep -qE "(_fm_observe_driver $_ic|_fm_note_maturin_rc \"\\\$name\")" "$GATE" \
+        || b11+=("$_ic-declares-a-driver-but-records-no-reach") ;;
+  esac
+done
 if [ "${#b11[@]}" -eq 0 ]; then
-  ok "B11: the scoped python tier records via maturin ONLY for the rcs that mean maturin ran (0/2/3), from the real build-verify rc"
+  ok "B11: every indirect component records its driver's reach from an explicit signal (rc 0/2/3 for both maturin callers; an in-body recorder immediately before node's napi build)"
 else
   bad "B11: ${b11[*]}"
 fi
@@ -391,11 +431,22 @@ got=$(_fm_annotate minimal-build)   # cargo class, no sidecar
 got=$(_fm_annotate file-size)       # declared no-cargo, no sidecar
 [ "$got" = '[no-cargo]' ] && ok "R4: a declared no-cargo component renders no-cargo" || bad "R4: got '$got'"
 
-got=$(_fm_annotate python-bindings) # indirect
+# An indirect component with NO record at all: the driver is NAMED and the state is a
+# visible recording gap. It is deliberately NOT the via-driver text (roborev job 273, F3):
+# rendering "cargo ran under maturin" for a component that recorded nothing is a claim, and
+# the whole point of the class is that the claim must come from an observation.
+got=$(_fm_annotate python-bindings) # indirect, empty sidecar
 case "$got" in
-  *maturin*'NOT observed'*) ok "R5: an indirect (driver-built) component names the driver AND that the feature set is NOT observed" ;;
+  *UNDECLARED*maturin*) ok "R5: an indirect component with NO recorded driver outcome NAMES the driver and reads UNDECLARED — it does not assume the driver ran" ;;
   *) bad "R5: got '$got'" ;;
 esac
+# …and WITH a recorded reach it renders the via-driver text.
+AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_driver python-bindings maturin reached
+got=$(_fm_annotate python-bindings)
+[ "$got" = '[via maturin: feature set NOT observed]' ] \
+  && ok "R5b: a recorded driver reach renders 'via <driver>: feature set NOT observed'" \
+  || bad "R5b: got '$got'"
+rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
 
 # Observation BEATS declaration: a mis-declared no-cargo component that really ran cargo
 # must show the observed sets AND be flagged, not have its declaration believed.
@@ -424,18 +475,105 @@ got=$(_fm_annotate pub-surface)
 AGENT_GATE_FM_COMPONENT=cli-tests _fm_note_if_no_cargo_observed cli-tests FAIL
 got=$(_fm_annotate cli-tests)
 case "$got" in
-  *'FAILed before its first cargo invocation'*)
-    ok "R10: a FAIL before any cargo call renders 'no cargo invoked (component FAILed before its first cargo invocation)', not UNDECLARED" ;;
+  *'FAILed before its first cargo build/test invocation'*'metadata probes are not recorded'*)
+    ok "R10: a FAIL before any cargo call names that state — and names the METADATA-PROBE exclusion, because a `cargo tree` probe may well have run (measured: three components FAIL exactly there)" ;;
   *) bad "R10: got '$got'" ;;
 esac
 rm -f "$AGENT_GATE_FM_DIR/cli-tests.features"
-# …but an INDIRECT component that FAILs DID run cargo (under its driver), so claiming "no
-# cargo invoked" there would be affirmatively false. It keeps the via-driver rendering.
+# …and an INDIRECT component that FAILs with an EMPTY sidecar did NOT reach its driver
+# (roborev job 273, F3). The old rule kept the via-driver rendering here on the reasoning
+# that "an indirect component that FAILs DID run cargo" — but python-bindings can fail in
+# venv/pip setup before maturin, and node-bindings in `npm ci` before `npm run build`, and
+# both then claimed a cargo invocation that never happened. The assumption is unnecessary
+# now that every indirect component RECORDS its driver's reach, so an empty sidecar is
+# positive evidence and this case is the regression test for the inversion.
+rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
+AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_if_no_cargo_observed python-bindings FAIL
+got=$(_fm_annotate python-bindings)
+case "$got" in
+  *'FAILed before reaching its driver'*maturin*)
+    ok "R11: an INDIRECT component that FAILs with NO driver record says it never reached the driver — it does NOT claim an unobserved cargo run" ;;
+  *) bad "R11: got '$got'" ;;
+esac
+rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
+# …and when the driver WAS reached (recorded at execution time), the same terminal FAIL
+# keeps the via-driver rendering: a failed build is an invocation that happened.
+AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_driver python-bindings maturin reached
 AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_if_no_cargo_observed python-bindings FAIL
 got=$(_fm_annotate python-bindings)
 [ "$got" = '[via maturin: feature set NOT observed]' ] \
-  && ok "R11: an INDIRECT component that FAILs keeps its via-driver rendering (cargo DID run, unobserved)" \
-  || bad "R11: got '$got'"
+  && ok "R11b: a recorded driver reach survives a terminal FAIL (a failed build IS an invocation)" \
+  || bad "R11b: got '$got'"
+rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
+# An indirect component with NO record and NO terminal note is a RECORDING GAP, and it must
+# read as one — UNDECLARED, carrying the token every existing detector greps for, and NAMING
+# the driver whose outcome is missing. This is what makes a fourth indirect component that
+# forgets to record mechanically visible instead of silently claiming a cargo run.
+got=$(_fm_annotate node-bindings)
+case "$got" in
+  *UNDECLARED*'npm run build (napi)'*)
+    ok "R11c: an indirect component with no recorded driver outcome renders UNDECLARED naming the driver (a visible recording gap, not a claim)" ;;
+  *) bad "R11c: got '$got'" ;;
+esac
+# The rc→reach mapping is the ONE place both maturin callers agree, so it is measured as a
+# table rather than at one call site.
+rc_bad=()
+for _rc in 0 2 3; do
+  rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
+  AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc"
+  got=$(_fm_annotate python-bindings)
+  [ "$got" = '[via maturin: feature set NOT observed]' ] || rc_bad+=("rc$_rc:'$got'")
+done
+for _rc in 1 4 none 7; do
+  rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
+  AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc"
+  got=$(_fm_annotate python-bindings)
+  case "$got" in *'never reached maturin'*) ;; *) rc_bad+=("rc$_rc:'$got'") ;; esac
+done
+rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
+if [ "${#rc_bad[@]}" -eq 0 ]; then
+  ok "R11d: the shared rc table is exact — 0/2/3 record the maturin invocation, 1/4/unknown record that it was never reached"
+else
+  bad "R11d: ${rc_bad[*]}"
+fi
+# THE CHILD-CALLABLE RECORDER really works from a CHILD SHELL. `_fm_observe_driver` is
+# exported for exactly this (node's napi build is inside a `bash -c` body); an unexported
+# recorder would silently record nothing and the component would read UNDECLARED. Driven
+# through `bash -c` deliberately — the property IS the export.
+rm -f "$AGENT_GATE_FM_DIR/node-bindings.features"
+( export -f _fm_observe_driver _fm_indirect_desc _fm_sidecar
+  bash -c '_fm_observe_driver node-bindings "npm run build (napi)"' )
+got=$(_fm_annotate node-bindings)
+[ "$got" = '[via npm run build (napi): feature set NOT observed]' ] \
+  && ok "R11e: _fm_observe_driver records from a CHILD shell (the exported-recorder property node-bindings depends on)" \
+  || bad "R11e: got '$got'"
+rm -f "$AGENT_GATE_FM_DIR/node-bindings.features"
+# UNOBSERVABLE (roborev job 273, F2): tooling-tests' cargo runs in ~60 nested child
+# scripts and no single driver can be named, so the class asserts NOTHING in either
+# direction — and a terminal FAIL must NOT add a "no cargo invoked" note, because that is
+# precisely the fact this shell cannot know (the false claim F2 names).
+got=$(_fm_annotate tooling-tests)
+case "$got" in
+  *'cargo not observable'*'nested test scripts'*)
+    ok "R12: an UNOBSERVABLE component names that state, claiming neither that cargo ran nor that it did not" ;;
+  *) bad "R12: got '$got'" ;;
+esac
+AGENT_GATE_FM_COMPONENT=tooling-tests _fm_note_if_no_cargo_observed tooling-tests FAIL
+got=$(_fm_annotate tooling-tests)
+case "$got" in
+  *'cargo not observable'*) ok "R12b: a terminal FAIL adds NO 'no cargo invoked' note to an unobservable component (a child cargo build may well have run)" ;;
+  *) bad "R12b: got '$got'" ;;
+esac
+# …and an in-shell observation rides ADDITIVELY beside the class text: the observed sets are
+# real, and they are not the whole story.
+printf 'test cqlite-core --features x\n' > "$AGENT_GATE_FM_DIR/tooling-tests.features"
+got=$(_fm_annotate tooling-tests)
+case "$got" in
+  *'test cqlite-core --features x'*'| + cargo not observable'*)
+    ok "R12c: an observed set on an unobservable component is ADDITIVE — both facts are named" ;;
+  *) bad "R12c: got '$got'" ;;
+esac
+rm -f "$AGENT_GATE_FM_DIR/tooling-tests.features"
 
 # The env wrapper must be a pass-through for everything that is not cargo.
 got=$(env FM_TEST_VAR=hello sh -c 'printf %s "$FM_TEST_VAR"')
