@@ -7503,8 +7503,11 @@ test_lane_lock_release_only_removes_a_lock_we_still_own() {
   else
     fail "lane-lock-release-deleted-foreign: lock=[$([[ -d "$lock" ]] && echo present || echo GONE)] pid=[$(cat "$lock/pid" 2>/dev/null || true)] — the exit path removed a lock this run did not own"
   fi
-  if [[ "$out" == *"NOT removing"* && "$out" == *"no longer holds this process's pid"* ]]; then
-    pass "lane-lock ownership: and it SAYS so — 'my lock vanished' is otherwise unattributable, so the non-removal is logged rather than silent"
+  # The fixture writes a PARSED foreign pid, so B17's foreign branch is the one that must fire — matched
+  # on the wording that branch now uses (#3601, roborev job 240 B17 reworded this: "no longer holds this
+  # process's pid" was said for unparseable states too, where no holder had been read).
+  if [[ "$out" == *"NOT removing"* && "$out" == *"records holder pid $foreign, not this process"* ]]; then
+    pass "lane-lock ownership: and it SAYS so, naming the holder it read — 'my lock vanished' is otherwise unattributable, so the non-removal is logged rather than silent"
   else
     fail "lane-lock-release-silent: out=[$out]"
   fi
