@@ -8277,6 +8277,119 @@ test_lane_lock_nul_probe_primary_and_fallback_agree() {
 t test_lane_lock_nul_probe_primary_and_fallback_agree
 
 
+
+
+# ---------------------------------------------------------------------------
+# THE PUBLISH DECLINES A PRE-EXISTING HOLDER RECORD RATHER THAN OVERWRITING IT (#3601, job 231 B11).
+#
+# THE DEFECT: publication was not tied to the directory instance this process created. A peer can rename
+# our pid-less directory away, create and publish its OWN lock at the same name, and our forced `mv` then
+# overwrote THAT peer's ownership record — destroying the evidence of who holds the lane, which is
+# strictly worse than failing to start.
+#
+# WHAT IS FIXED HERE AND WHAT IS NOT: the OVERWRITE is refused, so we decline instead of corrupting. The
+# RACE is not closed — test-then-move is not an atomic create-exclusive — and closing it needs
+# serialisation across the whole claim-and-publication operation, which is #3683 together with the
+# reclaim ABA and the release read-then-remove. The asserts below are about the non-destruction only, and
+# the site comment says the same, because a comment claiming more than the code does is the B9 family.
+# ---------------------------------------------------------------------------
+test_lane_lock_publish_declines_instead_of_clobbering() {
+  local d tmp lane lock verdict out rc ovr peer_pid
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601decl$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+  peer_pid=515151
+
+  # ---- (1) THE SHIPPED PUBLISH against a directory that already carries a record.
+  mkdir -p "$lock"
+  printf '%s\n' "$peer_pid" >"$lock/pid"
+  verdict="$(env SUP="$SUPERVISOR" L="$lock" bash -c 'source "$SUP"; SUPERVISOR_LOCK="$L"; printf "%s" "$(supervisor_lock_publish)"' 2>&1 || true)"
+  if [[ "$verdict" == "declined pid $peer_pid" ]] && [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "$peer_pid" ]]; then
+    pass "lane-lock B11: the publish DECLINES when a holder record already exists [$verdict] and the peer's pid is untouched — it reports the record it found rather than replacing it"
+  else
+    fail "lane-lock-publish-clobbers: verdict=[$verdict] pid=[$(cat "$lock/pid" 2>/dev/null || true)] — a peer's ownership record must never be overwritten"
+  fi
+  # ...and the staging file it wrote on the way is cleaned up, so declining leaves no debris either.
+  if [[ -z "$(ls -A "$lock" 2>/dev/null | grep 'pid\.tmp\.' || true)" ]]; then
+    pass "lane-lock B11: the declined publish removed its own staging file — declining leaves nothing behind"
+  else
+    fail "lane-lock-publish-decline-residue: [$(ls -A "$lock" | tr '\n' ' ')]"
+  fi
+
+  # ---- (2) THE LEGITIMATE CASE IS UNCHANGED: a directory we just created has no `pid`, so the branch is
+  # never taken and the publish succeeds. Without this the assert above is satisfied by code that never
+  # publishes at all.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  verdict="$(env SUP="$SUPERVISOR" L="$lock" bash -c 'source "$SUP"; SUPERVISOR_LOCK="$L"; printf "%s|%s" "$(supervisor_lock_publish)" "$(cat "$L/pid" 2>/dev/null)"' 2>&1 || true)"
+  if [[ "$verdict" == "ok|"* ]]; then
+    pass "lane-lock B11 NON-VACUITY: an empty lock directory still publishes normally [$verdict] — the non-overwrite costs the legitimate path nothing"
+  else
+    fail "lane-lock-publish-broken: verdict=[$verdict]"
+  fi
+
+  # ---- (3) END TO END: a peer publishes into the directory we created. The refusal must say we wrote
+  # NOTHING, must say the path is untouched, and the peer's record must survive.
+  rm -rf "$lock"
+  ovr="$d/f-peerpub.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''" \
+       '  local tmpf="$SUPERVISOR_LOCK/pid.tmp.$$" state='"''"'
+  printf "%s\n" 626262 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"declined to overwrite it and wrote NOTHING"* ]] \
+       && [[ "$out" == *"NOTHING at that path has been modified by this run"* ]] \
+       && [[ "$out" == *"[pid 626262]"* ]] && [[ "$out" != *"ACQUIRED"* ]]; then
+      pass "lane-lock B11: with a peer's record published into the directory we created, the run refuses, names the record it found, and states it modified nothing"
+    else
+      fail "lane-lock-b11-endtoend: rc=$rc out=[$out]"
+    fi
+    if [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "626262" ]]; then
+      pass "lane-lock B11: and the peer's record survives the whole refusal path — nothing on the way out removed or rewrote it"
+    else
+      fail "lane-lock-b11-peer-record-lost: pid=[$(cat "$lock/pid" 2>/dev/null || true)]"
+    fi
+  fi
+
+  # ---- (4) MUTANT CONTRAST: the pre-B11 spelling — the decline branch removed, so the forced rename
+  # overwrites whatever is there. One literal substitution.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$peer_pid" >"$lock/pid"
+  ovr="$d/m-clobber.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if [[ -e "$SUPERVISOR_LOCK/pid" || -L "$SUPERVISOR_LOCK/pid" ]]; then' \
+       '  if false; then'; then
+    verdict="$(env SUP="$SUPERVISOR" OVR="$ovr" L="$lock" bash -c 'source "$SUP"; source "$OVR"; SUPERVISOR_LOCK="$L"; printf "%s" "$(supervisor_lock_publish)"' 2>&1 || true)"
+    if [[ "$verdict" == 'ok' ]] && [[ "$(cat "$lock/pid" 2>/dev/null || true)" != "$peer_pid" ]]; then
+      pass "lane-lock B11 MUTANT: with the decline removed the publish reports [$verdict] and the peer's record $peer_pid is GONE, replaced by ours — the measured pre-B11 behaviour, so the assert above is the non-overwrite doing the work"
+    else
+      fail "lane-lock-mutant-clobber: verdict=[$verdict] pid=[$(cat "$lock/pid" 2>/dev/null || true)] — the pre-fix form must be shown to destroy the peer's record"
+    fi
+  fi
+
+  # ---- (5) THE RESIDUAL IS STATED AT THE SITE, IN THE NARROWED-NOT-CLOSED FORM, and does not claim
+  # atomicity. Structural, because no behavioural case can observe a comment — and the comment is the
+  # artifact a reviewer is asked to trust about a race that is still open.
+  local body
+  body="$(sed -n '/^supervisor_lock_publish()/,/^}/p' "$SUPERVISOR")"
+  if [[ "$body" == *'NARROWED, NOT CLOSED'* ]] && [[ "$body" == *'#3683'* ]] \
+     && [[ "$body" == *'NOT bound to the directory instance'* || "$body" == *'NOT bound to the directory'* ]] \
+     && [[ "$body" == *'not equivalent to an atomic'* || "$body" == *'NOT equivalent to an atomic'* ]]; then
+    pass "lane-lock B11: the site states that publication is not bound to the created directory instance, that test-then-move is not atomic, and that closing it is #3683 — the comment claims exactly what the code does"
+  else
+    fail "lane-lock-b11-comment-overclaims: the publish's comment must name the residual and the follow-up; a comment claiming more than the code does is the B9 family"
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_publish_declines_instead_of_clobbering
+
+
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
 #
