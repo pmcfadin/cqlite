@@ -73,6 +73,43 @@
 //! The swallow itself is a PRE-EXISTING defect of row assembly, not of this
 //! module, and is tracked separately (see the PR for #3612).
 //!
+//! # Decoder enumeration and exactness disposition (issue #3612 round 2)
+//!
+//! Followed from `parse_value_from_raw_bytes`'s arms, not from a list. 19 decode
+//! paths are reachable from a cell-path key; each is EXACT here, by one of three
+//! mechanisms:
+//!
+//! | reachable decoder | how it is made exact |
+//! |---|---|
+//! | text / ascii / varchar (+3 marshal aliases) | whole slice by construction (UTF-8 validated over all of `data`) |
+//! | blob / bytes | whole slice by construction |
+//! | varint, inet | whole slice by construction (borrowed entire) |
+//! | decimal | whole slice by construction (`scale` = `data[..4]`, unscaled = `data[4..]`) |
+//! | int, bigint/counter, boolean, uuid/timeuuid, float, double, smallint, tinyint, timestamp, date, time | caller's EXACT-width table (stronger than a consumption compare) |
+//! | inet (widths) | same table, `[4, 16]` |
+//! | frozen list (`parse_frozen_list_value_raw`) | reported offset, was DISCARDED — now checked |
+//! | frozen set (`parse_frozen_set_value_raw`) | reported offset, was DISCARDED — now checked |
+//! | frozen map (`parse_frozen_map_value_raw`) | reported offset, was DISCARDED — now checked |
+//! | tuple (`parse_tuple_elements_raw`) | reported `&mut offset`, was DISCARDED — now checked |
+//! | UDT, marshal + registry-bare-name (`parse_raw_type_value` → `parse_udt_value`) | reported offset, was DISCARDED — now checked |
+//! | `frozen<T>` / `FrozenType(T)` | recursion; exactness is the inner arm's |
+//! | duration | measured from its own three-VInt framing (the decoder ignores the remainder) |
+//! | unknown type → opaque `Value::Blob` | whole slice by construction; also `warn!`s |
+//!
+//! ## The ONE residual, stated rather than left to be rediscovered
+//! A NESTED element of a collection or tuple is bounded by its OWN `[i32 BE len]`
+//! prefix, and the element decode then uses `parse_value_from_raw_bytes`, whose
+//! fixed-width guards are `data.len() < N`, not `!= N`. So for e.g.
+//! `frozen<list<int>>` the byte strings `[count=1][len=4][4B]` and
+//! `[count=1][len=5][5B]` BOTH satisfy the top-level consumption rule (each
+//! consumes its own full length) and decode to the same `List([Integer(x)])`.
+//! Making that exact is a one-token change per fixed-width arm in
+//! `parse_value_from_raw_bytes`, which every value read in this crate goes
+//! through, and that file is already over the file-size threshold so it cannot
+//! grow — out of #3612's scope, and deliberately NOT patched with a second
+//! framing walk here: a call-site validator that must know about every decoder
+//! is precisely the shape this module replaced.
+//!
 //! # The asymmetry across the three cell-path/key readers (issue #3612)
 //!
 //! For a key type CQLite models nowhere, all three readers agree — each serves

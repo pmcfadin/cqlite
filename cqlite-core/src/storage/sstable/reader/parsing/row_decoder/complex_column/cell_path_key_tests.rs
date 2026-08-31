@@ -872,10 +872,15 @@ fn every_composite_cell_path_key_spelling_is_consumption_checked() {
             &int_elem,
         ),
         ("duration".to_string(), &[0u8, 0, 0]),
+        // The marshal spelling reaches the duration arm through a DIFFERENT
+        // route (`primitive_marshal_to_cql_short` normalizes it inside
+        // `parse_value_from_raw_bytes`, but this dispatcher sees the raw
+        // string), so it is enumerated separately rather than assumed.
+        (format!("{MARSHAL}.DurationType"), &[0u8, 0, 0]),
     ];
     assert_eq!(
         cases.len(),
-        15,
+        16,
         "keep this count in step with the case list, so a deleted case is visible"
     );
     for (type_str, clean) in cases {
