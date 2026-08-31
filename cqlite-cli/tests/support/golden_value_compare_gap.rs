@@ -167,36 +167,6 @@ pub enum Divergence {
     /// re-implementing Cassandra's collection and tuple serializers here. This gap
     /// costs the nested value's content; what it does not cost is the shape.
     NestedFrozenValueLeftUndecodedByGolden,
-    /// THIS LANE HAS NO RULE FOR PAIRING CONTAINER-TYPED MAP KEYS.
-    ///
-    /// **A LANE LIMITATION, NOT A VALUE DISAGREEMENT.** The two sides are never
-    /// compared at this position, so nothing here asserts that they differ. A
-    /// reader grepping declared divergences for parity defects must NOT count this
-    /// one: it records a capability the COMPARATOR lacks, not a defect in either
-    /// side's output. `super::compare_map` pairs entries by their canonical SCALAR
-    /// key form and refuses outright when the declared key type is a container.
-    ///
-    /// ORACLE/DDL: the position's declared type is `map<K, V>` where `K` is a
-    /// container (`list`/`set`/`map`/`tuple`/UDT). Decided from the COMMITTED DDL
-    /// alone, via the same `super::is_scalar_type` predicate `compare_map` refuses
-    /// on, so the gap and the refusal can never disagree about what a container is.
-    ///
-    /// EGRESS SHAPE: both sides must still BE maps — the golden a JSON object, and
-    /// the CLI an array EVERY element of which is an object carrying exactly `key`
-    /// and `value` — but neither the keys nor the values themselves are examined. That split is the whole point: what this lane cannot do is pair the
-    /// KEY SET, and it says nothing about the values behind those keys. It does NOT
-    /// follow that the column may be anything at all: an earlier version decided from
-    /// the DDL alone and thereby suppressed a null or malformed rendering of the
-    /// entire column, which is the blind spot this module exists to remove.
-    ///
-    /// NOT COVERED: a map with a SCALAR key type (compared normally in both
-    /// formats), and any non-map position.
-    ///
-    /// EXPIRY: a scaffold, not an end state. Real container-key comparison support
-    /// is issue #3726; when it lands this variant stops matching, every skip naming
-    /// it is reported STALE by `Report::stale_skips`, and the lane FAILS until they
-    /// are removed. That is what stops the scaffold becoming permanent.
-    ContainerMapKeyNotPairableByThisLane,
 }
 
 impl Divergence {
@@ -228,11 +198,6 @@ impl Divergence {
                  UNDECODED as a flat scalar (raw bytes as hex for a collection, \
                  colon-joined text for a tuple) while the egress decodes it into a \
                  structure"
-            }
-            Divergence::ContainerMapKeyNotPairableByThisLane => {
-                "the declared map KEY type is a container, which this lane has no rule \
-                 for pairing, so the two sides are not compared at all — a limitation of \
-                 this comparator, NOT a disagreement between the two sides (issue #3726)"
             }
         }
     }
@@ -336,54 +301,6 @@ impl Divergence {
                 // `{key,value}` objects), so an object, a scalar, a null or a number
                 // here is NOT this gap and is reported as an ordinary diff.
                 matches!(cli, Value::Array(_))
-            }
-            Divergence::ContainerMapKeyNotPairableByThisLane => {
-                // The DDL side: a map whose KEY type is a container. The SAME
-                // predicate `super::compare_map` refuses on, so the gap and the
-                // refusal cannot disagree about what counts as a container key.
-                if !matches!(ty, CqlType::Map(key_ty, _) if !is_scalar_type(key_ty)) {
-                    return false;
-                }
-                // AND BOTH SIDES MUST STILL BE WELL-FORMED MAPS (roborev job 302,
-                // Medium). An earlier version of this arm decided from the DDL alone
-                // and read no values, reasoning that a lane limitation is not a claim
-                // about output. That reasoning was half right and the wrong half was
-                // load-bearing: declining to pair the ENTRIES is correct, but
-                // declining to look at the SHAPE made this gap suppress a null, a
-                // scalar or any malformed rendering of its whole column — which is
-                // exactly the "permanent blind spot for its whole column" this module
-                // was written to remove (see the module header). What is unpairable is
-                // the KEY SET, not the column's existence.
-                //
-                // So: the golden must be a JSON object (its map spelling) and the CLI
-                // an array (its `{key,value}` pair-list spelling). Neither side's
-                // CONTENTS are examined — that is the part this lane genuinely cannot
-                // do — but a column that stopped being a map at all is NOT this gap
-                // and is reported as an ordinary diff.
-                let _ = (egress, depth, kinding);
-                // The golden's map spelling is a JSON object.
-                if !matches!(golden, Value::Object(_)) {
-                    return false;
-                }
-                // The CLI's map spelling is an array of `{key,value}` OBJECTS, and
-                // every element must BE one. Validating only "is an array" (the
-                // previous version) let `[null]`, `[1]` or entries missing `key`/
-                // `value` through — malformed output suppressed by a gap that claims
-                // only to excuse KEY PAIRING (roborev job 305, Medium). Shape is
-                // checked to the depth at which this lane's limitation actually
-                // begins, and no further: the keys and values themselves are NEVER
-                // read, because pairing them is the thing it cannot do.
-                let Value::Array(entries) = cli else {
-                    return false;
-                };
-                entries.iter().all(|entry| match entry {
-                    Value::Object(fields) => {
-                        fields.len() == 2
-                            && fields.contains_key("key")
-                            && fields.contains_key("value")
-                    }
-                    _ => false,
-                })
             }
         }
     }

@@ -699,30 +699,6 @@ const CASES: &[Case] = &[
                 divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
                 why: "golden leaves the frozen inner map (UDT as VALUE) as raw serialized hex; the CLI decodes it",
             },
-            Skip {
-                path: "m_tuple_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "map key is tuple<key_part, int>; this lane pairs map keys by scalar form only (#3726)",
-            },
-            Skip {
-                path: "f_map_tuple_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "frozen map key is tuple<key_part, int>; no container-key pairing rule (#3726)",
-            },
-            Skip {
-                path: "f_map_set_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "frozen map key is set<key_part>; no container-key pairing rule (#3726)",
-            },
-            Skip {
-                path: "f_map_tuple_list_udt",
-                formats: BOTH,
-                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
-                why: "frozen map key is tuple<list<key_part>, int>; no container-key pairing rule (#3726)",
-            },
         ],
     },
 ];
