@@ -84,6 +84,11 @@ The owner's ruling exists to keep hot-repo lanes out of a re-gate loop, so the w
 only legitimate if it stays far from "every commit stales everything". Measured over all 107
 commits behind that base:
 
+> **SUPERSEDED BY FINDING 4 — the "AS SHIPPED" row below is 28, and the SHIPPED number is 37.** This
+> section is kept as the chronological record of the round in which it was measured (the convention of
+> this file), not as a statement of the final set: Finding 4 added `scripts/tests/**` afterwards. Read
+> every "AS SHIPPED"/"shipped" claim in Finding 3 as *as shipped at the time of this round*.
+
 | definition | commits that stale the certification | share |
 |---|---|---|
 | any churn (the shape the ruling rejects) | 107 | 100% |
@@ -92,7 +97,8 @@ commits behind that base:
 | gate-global only, root-`Cargo.*` (first hand measurement) | 22 | 21% |
 | path-intersection with PR #3362's 2 paths, alone | 2 | 2% |
 
-**The shipped number is 28, and the four rows above are shown because the first draft of this
+**The shipped number is 28** — *at this round; superseded by Finding 4, where it is 37* — **and the
+four rows above are shown because the first draft of this
 document published 22 and that number was stale within one implementation round.** The delta is
 fully attributed, not hand-waved: `+4` from spelling the manifest patterns `**/Cargo.toml` /
 `**/Cargo.lock` rather than root-only (any workspace member's manifest moves any gate's verdict, so
@@ -103,7 +109,7 @@ gate-global-only rows exclude by construction. Re-derive with
 its own count, and **the script is the authority here, not this file**.
 
 **74% of the churn on an 8-day-old base does not stale a certification** under the shipped
-definition. The ruling's purpose survives — this is nowhere near "every commit stales everything" —
+definition *at this round* (Finding 4 supersedes it: 65% under the set that actually shipped). The ruling's purpose survives — this is nowhere near "every commit stales everything" —
 and the motivating case is caught **for the right reason**: the shipped run names it explicitly,
 `matched 5e08db201 gate-global .config/nextest.toml`, so the detection is attributable to the
 culprit rather than coincidental on a count.
