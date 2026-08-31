@@ -2,9 +2,20 @@
 #
 # Regression tests for scripts/flow/premerge-assert.sh (issues #2668, #3465).
 #
-# Fast + hermetic: `gh` is shimmed by a PATH-prepended mock that emits the
-# two-token line the script's `--jq '.headRefOid + " " + .state'` expression
-# would produce (or a failure), driven by env vars — no network, no GitHub.
+# `gh` is shimmed by a PATH-prepended mock that emits the two-token line the
+# script's `--jq '.headRefOid + " " + .state'` expression would produce (or a
+# failure), driven by env vars — no network, no GitHub.
+#
+# NOT fully hermetic since #3650 slice 1, and the exception is named rather than
+# implied: the success-path cases that run the SHIPPED premerge-assert.sh invoke
+# the SHIPPED base-staleness.sh, which reads the AMBIENT checkout this suite is
+# running in. Deliberate — it is the only case that proves the wiring points at
+# scripts/flow/base-staleness.sh rather than at a stub — so those cases pin only
+# the advisory's PREFIX, never a measured value (the ambient checkout's base
+# staleness is not a property of this suite). Runtime therefore varies a little
+# with how far the lane's base is behind; the advisory is bounded by a 60s
+# timeout in the script under test. Every case that pins advisory CONTENT
+# substitutes a stub artifact in a scratch tree instead.
 #
 # #3465 adds the gate-of-record half: the assert now takes a THIRD, REQUIRED
 # argument naming the FULL gate's summary file, and refuses to merge without a

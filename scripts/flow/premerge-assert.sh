@@ -284,8 +284,29 @@ refuse_tool_failure() {
 # exists to remove, and slice 2 will CONSUME this report. If the certified commit
 # is not present in this checkout the advisory reports UNMEASURED — correct, and
 # non-fatal here by the paragraph above.
-self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-advisory_script="$self_dir/base-staleness.sh"
+# Resolved WITHOUT letting `set -e` kill the run: this executes before argument
+# validation, so an unreadable script directory would exit 1 — a code outside the
+# documented 0/2/3 set, from a line that only feeds a NON-BLOCKING advisory. An
+# unresolvable directory degrades to the ABSENT branch below, which is reported
+# and not fatal, exactly like a deleted advisory.
+self_dir=""
+if ! self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"; then
+  self_dir=""
+fi
+if [ -n "$self_dir" ]; then
+  advisory_script="$self_dir/base-staleness.sh"
+else
+  advisory_script="<unresolvable script directory>/base-staleness.sh"
+fi
+
+# The advisory is BOUNDED (60s). It sits on the merge critical path, its cost
+# grows with how far the base is behind, and an unbounded child of the merge
+# gate is a hang the closer cannot distinguish from a slow gh call. A timeout is
+# just another non-zero exit here: REPORTED on an ADVISORY line (`exit 124`) and
+# ignored, per the paragraph above. `timeout` is not POSIX and is absent on a
+# stock macOS, so its absence degrades to the unbounded call rather than
+# skipping the advisory.
+ADVISORY_TIMEOUT_SECS=60
 
 print_base_staleness_advisory() {
   local adv_out adv_rc=0 line
@@ -296,7 +317,12 @@ print_base_staleness_advisory() {
     printf 'PREMERGE: ADVISORY advisory changes no verdict, so its absence changes none either.\n'
     return 0
   fi
-  adv_out=$(bash "$advisory_script" "$certified" 2>&1) || adv_rc=$?
+  if command -v timeout >/dev/null 2>&1; then
+    adv_out=$(timeout "$ADVISORY_TIMEOUT_SECS" bash "$advisory_script" "$certified" 2>&1) ||
+      adv_rc=$?
+  else
+    adv_out=$(bash "$advisory_script" "$certified" 2>&1) || adv_rc=$?
+  fi
   if [ -z "$adv_out" ]; then
     printf 'PREMERGE: ADVISORY base-staleness.sh produced NO output (exit %s) — reported, and\n' \
       "$adv_rc"
