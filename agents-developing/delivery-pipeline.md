@@ -623,12 +623,25 @@ The pipeline measures itself so improvement is data-driven, not anecdotal — **
   reports those records as their own SLICE class rather than as completed issues. `--slice` asserts the
   issue was open **when the PR merged**, which its CURRENT state cannot decide (GitHub records an
   auto-close AFTER the merge, so an ordinary completed delivery and a late-stamped slice have
-  indistinguishable timestamps), so it is refused fail-closed for a currently-CLOSED issue, for one
-  open only because it was REOPENED, and inside GitHub's post-merge auto-close propagation window —
-  there a completed delivery presents identically to a never-closed issue (`closed_at` null AND
-  `stateReason` empty), and only the PR's own `closingIssuesReferences` tells them apart, since a
-  slice PR closes NOTHING. Stamp a slice before its issue is ever closed, until #3559 lands
-  timeline-based classification. The two available
+  indistinguishable timestamps). Since issue #3559 the tool decides it by replaying the issue's own
+  **timeline** to the PR's `mergedAt`, and the rule is a **conjunction**: slice ⟺ the issue was OPEN at
+  `mergedAt` **AND** this PR closes NOTHING. Both halves are permanent — every auto-closing PR's issue
+  was *also* open at `mergedAt`, because the close is recorded afterwards, so only the PR's own
+  `closingIssuesReferences` separates "open because the issue is never closing" from "open because the
+  close lands five seconds later" (a slice PR closes NOTHING). A slice is therefore stampable after its
+  issue has been closed or reopened — which is what unblocked the three owed #3393 records
+  (#3407/#3429/#3467) — and is refused when the **last** `closed`/`reopened` event
+  STRICTLY BEFORE `mergedAt` is a `closed`, because that delivery COMPLETED the issue and a later
+  reopen does not change it. The *last* one decides, so a close FOLLOWED by a reopen before the merge
+  leaves the issue open at `mergedAt` and is ACCEPTED. An
+  event in the SAME SECOND as `mergedAt` is a third answer, neither before nor after: both GitHub
+  timestamps are one-second resolution, so the tie is **unmeasurable** and is refused as such rather
+  than resolved permissively.
+  `--slice` is an operator **assertion**: the tool refuses it wherever it can be **disproved**, and
+  where it cannot be, the assertion stands. One residual is genuinely **undecidable** and is not
+  claimed: a completed delivery whose PR omits `Closes #N` and whose issue is closed by hand later is
+  observationally identical to a genuine slice completed later by another PR, so the difference is
+  intent — bounded by doctrine (`flow-implement` mandates `Closes #<N>`), not by mechanism. The two available
   workarounds are FORBIDDEN: closing the issue to satisfy the tool (a tool's data model must never
   decide whether a problem is recorded as solved), and hand-appending a line to the JSONL past the
   validator (the tool is the gate on the ledger's shape).

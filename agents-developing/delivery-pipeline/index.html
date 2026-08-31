@@ -683,12 +683,25 @@ The same holds for an issue that ships one or more <strong>slices</strong> while
 reports those records as their own SLICE class rather than as completed issues. <code dir="auto">--slice</code> asserts the
 issue was open <strong>when the PR merged</strong>, which its CURRENT state cannot decide (GitHub records an
 auto-close AFTER the merge, so an ordinary completed delivery and a late-stamped slice have
-indistinguishable timestamps), so it is refused fail-closed for a currently-CLOSED issue, for one
-open only because it was REOPENED, and inside GitHub’s post-merge auto-close propagation window —
-there a completed delivery presents identically to a never-closed issue (<code dir="auto">closed_at</code> null AND
-<code dir="auto">stateReason</code> empty), and only the PR’s own <code dir="auto">closingIssuesReferences</code> tells them apart, since a
-slice PR closes NOTHING. Stamp a slice before its issue is ever closed, until #3559 lands
-timeline-based classification. The two available
+indistinguishable timestamps). Since issue #3559 the tool decides it by replaying the issue’s own
+<strong>timeline</strong> to the PR’s <code dir="auto">mergedAt</code>, and the rule is a <strong>conjunction</strong>: slice ⟺ the issue was OPEN at
+<code dir="auto">mergedAt</code> <strong>AND</strong> this PR closes NOTHING. Both halves are permanent — every auto-closing PR’s issue
+was <em>also</em> open at <code dir="auto">mergedAt</code>, because the close is recorded afterwards, so only the PR’s own
+<code dir="auto">closingIssuesReferences</code> separates “open because the issue is never closing” from “open because the
+close lands five seconds later” (a slice PR closes NOTHING). A slice is therefore stampable after its
+issue has been closed or reopened — which is what unblocked the three owed #3393 records
+(#3407/#3429/#3467) — and is refused when the <strong>last</strong> <code dir="auto">closed</code>/<code dir="auto">reopened</code> event
+STRICTLY BEFORE <code dir="auto">mergedAt</code> is a <code dir="auto">closed</code>, because that delivery COMPLETED the issue and a later
+reopen does not change it. The <em>last</em> one decides, so a close FOLLOWED by a reopen before the merge
+leaves the issue open at <code dir="auto">mergedAt</code> and is ACCEPTED. An
+event in the SAME SECOND as <code dir="auto">mergedAt</code> is a third answer, neither before nor after: both GitHub
+timestamps are one-second resolution, so the tie is <strong>unmeasurable</strong> and is refused as such rather
+than resolved permissively.
+<code dir="auto">--slice</code> is an operator <strong>assertion</strong>: the tool refuses it wherever it can be <strong>disproved</strong>, and
+where it cannot be, the assertion stands. One residual is genuinely <strong>undecidable</strong> and is not
+claimed: a completed delivery whose PR omits <code dir="auto">Closes #N</code> and whose issue is closed by hand later is
+observationally identical to a genuine slice completed later by another PR, so the difference is
+intent — bounded by doctrine (<code dir="auto">flow-implement</code> mandates <code dir="auto">Closes #&#x3C;N></code>), not by mechanism. The two available
 workarounds are FORBIDDEN: closing the issue to satisfy the tool (a tool’s data model must never
 decide whether a problem is recorded as solved), and hand-appending a line to the JSONL past the
 validator (the tool is the gate on the ledger’s shape).
