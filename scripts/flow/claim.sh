@@ -722,7 +722,14 @@ lane_lock_probe() {
   LANE_LOCK_OUR_IDENTITY="$(msg_field "$line" our-identity)"
   LANE_LOCK_OUR_PID="$(msg_field "$line" our-pid)"
   LANE_LOCK_OUR_TICKS="$(msg_field "$line" our-start-ticks)"
-  LANE_LOCK_OUR_MACHINE="$(printf '%s' "$LANE_LOCK_OUR_TOKEN" | cut -d: -f1)"
+  # STRUCTURAL FIELD, NOT A TOKEN SPLIT (#3436, roborev round 5 — the THIRD instance of
+  # this family). `sanitize_field` permits `:`, so a legitimate LANE_LOCK_MACHINE like
+  # `site:host` made `cut -d: -f1` yield `site`, the machine comparison failed, and a
+  # PROVEN live peer never reached reason=lane-occupied-by-live-peer. Rounds 2 and 3 fixed
+  # the token COMPARISONS for exactly this reason and left this EXTRACTION behind — which
+  # is why the rule is the one #3312 states: do not parse a delimited channel, ask for the
+  # field. `lane-lock.sh` now publishes `our-machine=` beside `our-token=`.
+  LANE_LOCK_OUR_MACHINE="$(msg_field "$line" our-machine)"
 
   case "$verdict" in
     FREE)

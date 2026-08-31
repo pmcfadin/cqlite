@@ -1028,5 +1028,41 @@ else
 $out22b"
 fi
 
+# ===========================================================================
+echo "TEST 23: release --force needs NO identity (roborev round 5)"
+# ===========================================================================
+# --force is the documented break-glass for a stale lock -- it is the answer to "how does a
+# stale instance get cleared, and by whom?". prepare_identity RESOLVES AND VALIDATES the
+# actor/pid, and an explicit-or-INHERITED LANE_LOCK_PID naming a process that is gone is a
+# usage error (exit 64), so a stale env var defeated the one path documented as
+# unconditional -- making the documentation FALSE, which is worse than the refusal.
+LANE_980="$LANES/lane-980"; mkdir -p "$LANE_980"
+sleep 300 & DEADP=$!
+ll acquire 980 --pid "$DEADP" --lane-dir "$LANE_980" >/dev/null 2>&1
+kill "$DEADP" 2>/dev/null; wait "$DEADP" 2>/dev/null
+# the holder is now DEAD and LANE_LOCK_PID in the environment still names it
+rc23a=0; out23a="$(LANE_ROOT="$LANES" LANE_LOCK_PID="$DEADP" bash "$LL" release 980 --force 2>&1)" || rc23a=$?
+if [ "$rc23a" -eq 0 ] && printf '%s' "$out23a" | grep -q '^LANE-LOCK: RELEASED issue=980 ' \
+   && [ ! -f "$LANES/.lane-locks/lane-980.lock" ]; then
+  ok "(a) release --force succeeds with a DEAD inherited LANE_LOCK_PID and removes the record — the break-glass needs no identity"
+else
+  bad "(a) expected --force to release regardless of a dead inherited pid; got rc=$rc23a
+$out23a"
+fi
+
+# (b) CONTROL: without --force the same call must still REFUSE, so (a) is not passing
+# because identity checking was removed everywhere.
+sleep 300 & LIVEP=$!
+ll acquire 981 --pid "$LIVEP" --lane-dir "$LANES/lane-981" >/dev/null 2>&1
+rc23b=0; out23b="$(LANE_ROOT="$LANES" LANE_LOCK_PID="$$" bash "$LL" release 981 2>&1)" || rc23b=$?
+if [ "$rc23b" -eq 2 ] && printf '%s' "$out23b" | grep -q 'RELEASE-REFUSED' \
+   && [ -f "$LANES/.lane-locks/lane-981.lock" ]; then
+  ok "(b) control: WITHOUT --force a non-holder release is still RELEASE-REFUSED and the record survives"
+else
+  bad "(b) expected RELEASE-REFUSED without --force; got rc=$rc23b
+$out23b"
+fi
+kill "$LIVEP" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

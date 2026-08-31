@@ -1293,6 +1293,25 @@ $out22m"
 fi
 kill "$OCC49" 2>/dev/null || true
 
+# (n) A COLON-BEARING MACHINE IDENTITY (roborev round 5) — the THIRD instance of the
+# token-parsing family. `sanitize_field` permits `:`, so a legitimate LANE_LOCK_MACHINE like
+# `site:host` made `cut -d: -f1` on the display token yield `site`; the machine comparison
+# then failed and a PROVEN live peer never reached lane-occupied-by-live-peer. Rounds 2 and 3
+# fixed the token COMPARISONS and left this EXTRACTION, which is why the rule is #3312's:
+# ask for the field, do not parse the channel.
+push_legacy_branch 50
+sleep 900 &
+OCC50=$!
+LANE_LOCK_MACHINE='site:host' LANE_LOCK_PID=$OCC50 bash "$LANELOCK" acquire 50 >/dev/null 2>&1
+rc=0; out22n=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_MACHINE='site:host' LANE_LOCK_PID=$$ bash "$CLAIM" claim 50 2>/dev/null ) || rc=$?
+if [ "$rc" -eq 2 ] && printf '%s\n' "$out22n" | grep -q 'reason=lane-occupied-by-live-peer'; then
+  ok "(n) AC6/round-5: a colon-bearing machine identity ('site:host') still reaches lane-occupied-by-live-peer — the machine is read as a FIELD, not split out of the token"
+else
+  bad "(n) expected lane-occupied-by-live-peer with a colon-bearing machine; got rc=$rc
+$out22n"
+fi
+kill "$OCC50" 2>/dev/null || true
+
 # (j) COMPOSED EVIDENCE — rungs (b) AND (c) fire together (implementer residual 3).
 # Reachable and previously untested: a LIVE LOCAL peer holds the lane lock AND the lane
 # directory is a git checkout on this issue's branch. The point of the case is that the

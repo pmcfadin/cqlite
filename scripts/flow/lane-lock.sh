@@ -1243,7 +1243,7 @@ cmd_probe() {
   # for "is this a different process". Publishing the fields separately keeps the
   # comparison structural rather than making a caller split the token (#3312: do not
   # reintroduce a delimiter to parse).
-  emit "HELD issue=$issue liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN our-pid=$G_PID our-start-ticks=${G_TICKS:-<none>} our-identity=$(identity_state) record=$record${mismatch:+ lane-dir-mismatch=$mismatch} lane-dir=$lane"
+  emit "HELD issue=$issue liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN our-machine=$G_MACHINE our-pid=$G_PID our-start-ticks=${G_TICKS:-<none>} our-identity=$(identity_state) record=$record${mismatch:+ lane-dir-mismatch=$mismatch} lane-dir=$lane"
   return 0
 }
 
@@ -1317,7 +1317,23 @@ cmd_release() {
     emit "RELEASED (already free) issue=$issue record=absent lane-dir=$lane"
     return 0
   fi
-  prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
+  # --force IS THE BREAK-GLASS AND MUST NOT NEED AN IDENTITY (#3436, roborev round 5).
+  # `prepare_identity` resolves and VALIDATES actor/pid, and an explicit-or-inherited
+  # LANE_LOCK_PID naming a process that is gone is a usage error (exit 64) — so a stale
+  # env var defeated the one path documented as unconditional. That documentation is the
+  # answer to "how does a stale instance get cleared, and by whom?", so a --force that can
+  # refuse makes the answer FALSE, which is worse than the refusal itself. Forced release
+  # therefore initialises only the PATHS it needs and skips identity entirely: it deletes
+  # the record without comparing holders, which is exactly what a reaper does.
+  if [ "$force" -eq 1 ]; then
+    G_ISSUE="$issue"; G_LANE="$lane"
+    G_RECORD="$(lock_record "$issue")"; G_MUTEX="$(lock_mutex "$issue")"
+    G_LOG="$(lock_audit "$issue")"
+    G_TOKEN="<forced-no-identity>"; G_MACHINE="$(this_machine)"
+    G_ACTOR="$(resolve_actor "$actor")"; G_PID="<none>"; G_SCOPE="forced"
+  else
+    prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
+  fi
   with_lock "$G_MUTEX" _release_locked "$force"
 }
 

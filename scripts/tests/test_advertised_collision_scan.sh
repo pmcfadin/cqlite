@@ -476,5 +476,42 @@ fi
 
 # ===========================================================================
 echo
+# ===========================================================================
+echo "TEST 15: an UNRECOGNISED board row is UNMEASURABLE, not a silent non-candidate (round 5)"
+# ===========================================================================
+# `*[!0-9]*) continue` dropped ANY unexpected value, so gh schema drift or a malformed --jq
+# produced measured=yes with rows HIDDEN -- the fail-open direction, in the one tool whose
+# entire contract is that it never gives a clean bill of health.
+#
+# The measured= assertions are anchored to the SUMMARY line on purpose. The scan reports
+# measurement PER FACT, so a run whose board read failed still legitimately prints
+# measured=yes for the BRANCHES fact -- an unanchored `! grep measured=yes` fails on correct
+# output. Found by this case failing while the behaviour was right.
+mk_gh "$T/bin13" not-an-issue-number
+rc13=0; out13="$( run_scan "$T/bin13" 2>&1 )" || rc13=$?
+if [ "$rc13" -eq 1 ] \
+   && printf '%s' "$out13" | grep -q 'UNMEASURABLE what=board-status' \
+   && printf '%s' "$out13" | grep -q 'not-an-issue-number' \
+   && printf '%s' "$out13" | grep -q 'schema drift' \
+   && printf '%s' "$out13" | grep -qE '^SCAN: advertised-collision .*measured=no' \
+   && ! printf '%s' "$out13" | grep -qE '^SCAN: advertised-collision .*measured=yes'; then
+  ok "an unrecognised board row is UNMEASURABLE (exit 1), NAMES the offending value and says gh ANSWERED — never measured=yes with rows hidden"
+else
+  bad "expected UNMEASURABLE naming the row and schema drift; got rc=$rc13
+$out13"
+fi
+
+# CONTROL: a DRAFT row (`null` for .content.number) is a RECOGNISED non-candidate and must
+# NOT trip the guard -- otherwise every board with a draft item reads as unmeasurable.
+mk_gh "$T/bin13b" null 600
+rc13b=0; out13b="$( run_scan "$T/bin13b" 2>&1 )" || rc13b=$?
+if printf '%s' "$out13b" | grep -qE '^SCAN: advertised-collision .*measured=yes' \
+   && ! printf '%s' "$out13b" | grep -q 'UNMEASURABLE'; then
+  ok "control: a DRAFT row (null) is a recognised non-candidate — measured=yes, no UNMEASURABLE, so the guard does not fire on ordinary boards"
+else
+  bad "expected a null draft row to be skipped with measured=yes; got rc=$rc13b
+$out13b"
+fi
+
 echo "==== ADVERTISED-COLLISION-SCAN TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

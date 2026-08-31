@@ -302,9 +302,20 @@ scan_board() {
     line="$(printf '%s' "$line" | tr -d ' \r')"
     [ -n "$line" ] || continue
     READY_PAGE_ROWS=$((READY_PAGE_ROWS + 1))
-    # A row that is not an issue number (a draft, or anything else the board holds) still
-    # COUNTS toward the page length; it just is not a candidate.
-    case "$line" in *[!0-9]*) continue ;; esac
+    # A ROW THIS PARSE DOES NOT RECOGNISE IS UNMEASURABLE, NOT A NON-CANDIDATE
+    # (#3436, roborev round 5). `*[!0-9]*) continue` silently dropped ANY unexpected value,
+    # so gh schema drift or a malformed `--jq` result produced `measured=yes` with rows
+    # HIDDEN — the fail-open direction, in the one tool whose whole contract is that it
+    # never claims a clean bill of health. Only two shapes are expected: a decimal issue
+    # number, and the literal `null` a DRAFT board item yields for `.content.number`.
+    # Anything else nonempty means the board read is not the shape this parse was written
+    # for, and the honest answer is that the fact could not be measured.
+    case "$line" in
+      null) continue ;;                       # a draft item: recognised, not a candidate
+      *[!0-9]*)
+        BOARD_UNPARSEABLE_ROW="$line"
+        return 1 ;;                           # caller maps this to UNMEASURABLE
+    esac
     READY_ISSUES="${READY_ISSUES}${line}
 "
     READY_COUNT=$((READY_COUNT + 1))
@@ -377,6 +388,15 @@ if ! scan_claims; then
   exit 1
 fi
 if ! scan_board; then
+  # NAME THE RIGHT CAUSE. scan_board fails for two unrelated reasons and reporting the
+  # wrong one sends the reader to the wrong problem — the same principle as #3436 AC2
+  # ("a collision diagnosed generically sends the reader to the wrong problem"). An
+  # unrecognised ROW is schema drift or a bad --jq, not an auth/network fault, and
+  # telling someone to fix auth when the board answered fine wastes the whole trip.
+  if [ -n "${BOARD_UNPARSEABLE_ROW:-}" ]; then
+    unmeasurable "board-status" "the board read returned a row this parse does not recognise: '$BOARD_UNPARSEABLE_ROW' (expected a decimal issue number, or the literal 'null' a DRAFT item yields for .content.number). gh ANSWERED — this is schema drift or a changed --jq, NOT an auth or network fault, so do not go looking at credentials. Treated as UNMEASURABLE rather than skipped, because silently dropping unexpected rows would print measured=yes while HIDING collisions"
+    exit 1
+  fi
   if command -v gh >/dev/null 2>&1; then
     unmeasurable "board-status" "gh project item-list $BOARD_NUMBER --owner $BOARD_OWNER --query status:Ready FAILED — the board fact could not be read (auth/scope/network). Fix auth; never label-dispatch instead"
   else
@@ -385,6 +405,7 @@ if ! scan_board; then
   exit 1
 fi
 
+BOARD_UNPARSEABLE_ROW=""   # set by scan_board when a row is not a recognised shape
 BOARD_AT_LIMIT=false
 if [ "$READY_PAGE_ROWS" -ge "$BOARD_LIMIT" ]; then
   # A page returned exactly at the limit is the one shape that could still be truncated,
