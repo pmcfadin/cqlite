@@ -155,8 +155,19 @@ cat >"$PIN_BS" <<'PINBS'
 # here. That is a different defect (a hardcoded destination rather than an unsandboxed
 # caller), and claiming this guard covers it would be the false-assurance shape this whole
 # branch is about. #3673 is where a destination-side guard belongs.
+# FAIL CLOSED ON AN UNUSABLE SANDBOX ROOT, FIRST. Without this the patterns below read
+# `"$PIN_SANDBOX_ROOT"/*`, which with an empty root degenerates to `/*` and matches EVERY
+# absolute path — so the guard would silently permit everything it exists to catch. That is
+# the permissive-branch-on-an-unmeasured-input shape, inside the guard written to catch that
+# shape (#3414, lead self-review). An unusable root is a violation in its own right, never a
+# pass: unable to tell is not permission.
 _v=""
-case "${CARGO_HOME-}" in
+case "${PIN_SANDBOX_ROOT-}" in
+  '') _v="PIN_SANDBOX_ROOT is unset, so the sandbox test would match every absolute path — refusing to certify this invocation" ;;
+  /*) ;;
+  *) _v="PIN_SANDBOX_ROOT='$PIN_SANDBOX_ROOT' is not an absolute path, so the sandbox test is meaningless" ;;
+esac
+[ -n "$_v" ] || case "${CARGO_HOME-}" in
   '') _v="CARGO_HOME is unset, so bootstrap would resolve \${HOME}/.cargo — on this fleet HOME-derived or /etc/environment-derived paths reach the SHARED root-owned config" ;;
   "$PIN_SANDBOX_ROOT"/*) ;;
   *) _v="CARGO_HOME='$CARGO_HOME' is outside the suite sandbox ($PIN_SANDBOX_ROOT)" ;;
@@ -3656,12 +3667,19 @@ PIN_SHARED_VIOLATIONS="$pin_guard_out" HOME="$tmp/sb-selftest" CARGO_HOME=/usr/l
 pin_guard_clean="$tmp/guard-selftest-clean.log"; : >"$pin_guard_clean"
 PIN_SHARED_VIOLATIONS="$pin_guard_clean" HOME="$tmp/sb-selftest" CARGO_HOME="$tmp/sb-selftest/.cargo" \
   "$PIN_BS" -c 'true' >/dev/null 2>&1
-if [ -s "$pin_guard_log" ] && [ -s "$pin_guard_out" ] && [ ! -s "$pin_guard_clean" ]; then
-  ok "host hygiene: the guard FIRES on an unset CARGO_HOME and on one outside the sandbox, and stays quiet on a sandboxed pair"
+# ...and the guard's OWN unmeasured-input case: with PIN_SANDBOX_ROOT unset the sandbox
+# patterns would degenerate to `/*` and match every absolute path, so a guard that did not
+# fail closed here would silently permit everything it exists to catch. Planted with an
+# otherwise-PERFECTLY-SANDBOXED pair, so the only thing under test is the missing root.
+pin_guard_noroot="$tmp/guard-selftest-noroot.log"; : >"$pin_guard_noroot"
+PIN_SHARED_VIOLATIONS="$pin_guard_noroot" HOME="$tmp/sb-selftest" CARGO_HOME="$tmp/sb-selftest/.cargo" \
+  env -u PIN_SANDBOX_ROOT "$PIN_BS" -c 'true' >/dev/null 2>&1
+if [ -s "$pin_guard_log" ] && [ -s "$pin_guard_out" ] && [ -s "$pin_guard_noroot" ] && [ ! -s "$pin_guard_clean" ]; then
+  ok "host hygiene: the guard FIRES on an unset CARGO_HOME, on one outside the sandbox, and on an unusable PIN_SANDBOX_ROOT; and stays quiet on a sandboxed pair"
 else
   bad "host hygiene: the input guard cannot fire (or fires unconditionally) — case 14 would be vacuous"
-  printf '  unset: %s bytes; outside: %s bytes; sandboxed: %s bytes\n' \
-    "$(wc -c <"$pin_guard_log")" "$(wc -c <"$pin_guard_out")" "$(wc -c <"$pin_guard_clean")"
+  printf '  unset: %s bytes; outside: %s bytes; no-root: %s bytes; sandboxed: %s bytes\n' \
+    "$(wc -c <"$pin_guard_log")" "$(wc -c <"$pin_guard_out")" "$(wc -c <"$pin_guard_noroot")" "$(wc -c <"$pin_guard_clean")"
 fi
 
 # --- 14. THIS SUITE MUST NOT TOUCH SHARED HOST STATE -----------------------------------
@@ -3678,6 +3696,39 @@ if [ ! -s "$PIN_SHARED_VIOLATIONS" ]; then
 else
   bad "host hygiene: a bootstrap invocation in THIS suite ran with an UNSANDBOXED CARGO_HOME or HOME, so it could reach the shared $PIN_SHARED_CARGO — that breaks cargo for every other user on the box"
   cat "$PIN_SHARED_VIOLATIONS"
+fi
+
+# --- 14b. GUARD COVERAGE AS A COUNT, NOT A CLAIM (#3414 roborev round 11) --------------
+# Case 14 says no invocation escaped the sandbox. That is only as strong as the number of
+# invocations actually routed THROUGH the guard: an unwrapped one is invisible to it, so a
+# guard covering 49 of 50 sites reports exactly the same green as one covering 50. "Routed
+# the direct calls through the wrapper" is a sentence that was true the day it was written
+# and unverifiable afterwards; a count is checkable on every run.
+#
+# Measured from this file's own source: every line that launches bootstrap must do so via
+# "$PIN_BS". Excluded, and each for a stated reason rather than by convenience — `bash -n`
+# is a syntax check that never executes the script, and a match inside single quotes is a
+# grep PATTERN in an assertion about bootstrap's OUTPUT, not an invocation.
+pin_cov_total=0; pin_cov_wrapped=0; pin_cov_missing=""
+while IFS= read -r pin_cov_line; do
+  case "$pin_cov_line" in
+    *"bash -n "*) continue ;;
+    *"'"*"bootstrap-agent-machine.sh"*"'"*) continue ;;
+  esac
+  pin_cov_total=$((pin_cov_total + 1))
+  case "$pin_cov_line" in
+    *'"$PIN_BS"'*) pin_cov_wrapped=$((pin_cov_wrapped + 1)) ;;
+    *) pin_cov_missing="${pin_cov_missing:+$pin_cov_missing
+}  ${pin_cov_line#"${pin_cov_line%%[![:space:]]*}"}" ;;
+  esac
+done <<EOF
+$(grep -nE '(^|[^-a-zA-Z0-9_])bash [^|;]*bootstrap-agent-machine\.sh|"\$PIN_BS" "\$(BOOTSTRAP|[A-Za-z_][A-Za-z0-9_]*)' "$0" || true)
+EOF
+if [ "$pin_cov_total" -gt 0 ] && [ -z "$pin_cov_missing" ]; then
+  ok "host hygiene: guard coverage is $pin_cov_wrapped/$pin_cov_total bootstrap invocations — none unwrapped"
+else
+  bad "host hygiene: guard coverage is $pin_cov_wrapped/$pin_cov_total — an unwrapped invocation is INVISIBLE to case 14, which would still report green:"
+  printf '%s\n' "$pin_cov_missing"
 fi
 
 # --- 15. THE THREE GREEN-PATH CASES MUST HAVE RUN, BY NAME (#3414 roborev round 7) -----
