@@ -635,6 +635,17 @@ resolve_pid() {
     # mode NOTES rather than dies, because a read-only report must never change its caller's
     # verdict — but it must not report SELF for a corpse.
     note "pid $candidate is a ZOMBIE (state Z) on this host: /proc/$candidate still exists but the process is dead, so a compare-only identity must not match the holder's."
+    # AND THE NOTE MUST NOT BE THE WHOLE FIX (#3436, roborev round 22). Round 21 printed this
+    # warning and changed nothing: a zombie's start-ticks are still readable, so
+    # prepare_identity recorded them and record_is_self still returned SELF — probe reported a
+    # DEAD record as ours, which claim.sh reads to decide `released-then-resumed`. That is the
+    # third time in this branch a "fix" for a silent failure was itself only a message (round 12
+    # reordered nothing, round 19 assigned in a subshell, this one only noted). So the identity
+    # is made UNUSABLE for matching: an empty scope, which record_is_self rejects at its first
+    # two guards (G_TOKEN / G_TICKS non-empty) and every caller treats as unresolved.
+    REPLY_PID=""
+    REPLY_PID_SCOPE="ephemeral"
+    return 0
   elif [ "$scope" = explicit ] && [ "$purpose" = compare ] && proc_available && [ ! -e "/proc/$candidate" ]; then
     note "pid $candidate is not live on this host (no /proc/$candidate); a compare-only identity cannot match the holder's, so SELF is unreachable for this call"
   elif [ "$scope" = explicit ] && [ "$purpose" = write ] && proc_available && [ "$(proc_state "$candidate" 2>/dev/null)" = "Z" ]; then
@@ -1563,7 +1574,16 @@ cmd_release() {
       --lane-dir) [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane_opt="$2"; shift 2 ;;
       --actor)    [ "$#" -ge 2 ] || die_usage "--actor requires a value";    actor="$2";    shift 2 ;;
       --force)    force=1; shift ;;
-    --expect)   [ "$#" -ge 2 ] || die_usage "--expect requires a value"; expect="$2"; shift 2 ;;
+    --expect)   [ "$#" -ge 2 ] || die_usage "--expect requires a value"
+                # AN EMPTY VALUE IS REFUSED, AS reclaim ALREADY REFUSES IT (#3436, roborev
+                # round 22). `release --expect ""` was treated as though --expect were omitted,
+                # silently disabling the incarnation check — so the classic `--expect "$LEASE"`
+                # with an UNSET variable deletes a newly reacquired lock while the caller
+                # believes it asked for compare-and-swap. reclaim has refused this since an
+                # earlier round; release did not, which is the same distinction made in one
+                # subcommand and not its sibling that produced the ABA hole itself.
+                [ -n "$2" ] || die_usage "release: --expect '' is rejected on purpose — an unset lease variable would silently disable the incarnation check and could delete a live lock. Pass the lease from probe/status's lease= field, or omit --expect entirely."
+                expect="$2"; shift 2 ;;
       # --pid: name the holder explicitly. WHY release needs it (#3436, roborev round 2):
       # the holder gate is our exact token, and the auto-resolved pid comes from the cwd
       # walk — so a holder that has MOVED CWD (or whose lane directory has been removed,

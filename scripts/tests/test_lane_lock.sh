@@ -1698,17 +1698,29 @@ kill "$Z_PARENT" 2>/dev/null || true
 # (b) parse_record requires `-f`, so a DIRECTORY at the record path reads as "no record" — and
 #     `mv -f "$tmp" "$path"` then moves the temp INSIDE it and succeeds. ACQUIRED reported, no
 #     record where every reader looks, lane unprotected, and the next acquire "succeeds" too.
-mkdir -p "$LOCKS" "$(record_of 941)"      # the record PATH is a directory
+# HERMETIC, IN ITS OWN LANE_ROOT (#3436, roborev round 22). Run against the shared suite root
+# this case was observed passing on one run and failing on the next, and the instrumented cause
+# was that the directory existed right after `mkdir` and was GONE by the time acquire read it —
+# so it sometimes exercised the ordinary acquire path while claiming to test the guard. The
+# interaction was never isolated; the case does not need the shared root, so it no longer uses
+# one. A case that can be hermetic should be, and one that cannot establish its precondition
+# must FAIL SAYING SO rather than silently test something else.
+D38="$(mktemp -d)"
+mkdir -p "$D38/.lane-locks/lane-941.lock" "$D38/dirlane"   # the record PATH is a directory
 sleep 300 & DP38=$!
-ll acquire 941 --lane-dir "$LANES/dirlane" --pid "$DP38"; rc38b=$RC; out38b=$OUT
-if [ "$rc38b" -ne 0 ] && printf '%s' "$out38b" | grep -q 'record-path-not-a-regular-file'; then
-  ok "(b) a DIRECTORY at the record path is refused, not reported as a successful acquire"
+if [ ! -d "$D38/.lane-locks/lane-941.lock" ]; then
+  bad "(b) PRECONDITION: could not place a directory at the record path — this case must not pass vacuously"
 else
-  bad "(b) acquire succeeded with a directory at the record path: rc=$rc38b
+  out38b="$(env -u LANE_LOCK_PID LANE_ROOT="$D38" bash "$LL" acquire 941 --lane-dir "$D38/dirlane" --actor flow --pid "$DP38" 2>&1)"; rc38b=$?
+  if [ "$rc38b" -ne 0 ] && printf '%s' "$out38b" | grep -q 'record-path-not-a-regular-file'; then
+    ok "(b) a DIRECTORY at the record path is refused, not reported as a successful acquire"
+  else
+    bad "(b) acquire succeeded with a directory at the record path: rc=$rc38b
 $out38b"
+  fi
 fi
 kill "$DP38" 2>/dev/null || true
-rmdir "$(record_of 941)" 2>/dev/null || true
+rm -rf "$D38"
 
 # (c) THE NOTE ROUND 19 ADDED COULD NEVER FIRE — the helper ran in a command substitution, so its
 #     assignment to LANE_REAL_UNRESOLVED happened in a subshell and was discarded. A fix for a
@@ -1769,27 +1781,45 @@ fi
 kill "$A39" 2>/dev/null || true
 
 # (b) COMPARE mode had the same zombie hole the WRITE branch got in round 20 — a sibling in the
-#     same if/elif chain, one line above the arm I added. A zombie keeps /proc and start-ticks,
-#     so `probe` could match a DEAD record as SELF, which claim.sh reads to decide
-#     `released-then-resumed`. Compare mode NOTES rather than dies: a read-only report must not
-#     change its caller's verdict, but it must not report SELF for a corpse either.
-sh -c 'sleep 0.1 & exec sleep 30' &
+#     same if/elif chain, one line above the arm I added. A zombie keeps /proc and start-ticks, so
+#     `probe` could match a DEAD record as SELF, which claim.sh reads to decide
+#     `released-then-resumed`.
+#
+#     THE FIRST VERSION OF THIS CASE WAS VACUOUS AND PASSED ANYWAY (roborev round 22). It probed
+#     an issue with NO RECORD, so `cmd_probe` returned `FREE … NO-RECORD` before identity ever
+#     mattered and the required output was unreachable. Measured after the fact:
+#     `DBG39b[LANE-LOCK: FREE issue=944 liveness=NO-RECORD …]`. So the record must EXIST and its
+#     holder must BE the zombie — which means acquiring while that pid is still ALIVE (round 20
+#     refuses a zombie at write time) and letting it die afterwards.
+Z39_LANE="$LANES/z39"; mkdir -p "$Z39_LANE"
+sh -c 'sleep 3 & exec sleep 60' &
 Z39_PARENT=$!
 i=0; Z39=""
-while [ "$i" -lt 30 ] && [ -z "$Z39" ]; do
-  Z39=$(ps -o pid=,stat= --ppid "$Z39_PARENT" 2>/dev/null | awk '$2 ~ /^Z/ {print $1}' | head -1)
+while [ "$i" -lt 40 ] && [ -z "$Z39" ]; do
+  Z39=$(ps -o pid=,stat= --ppid "$Z39_PARENT" 2>/dev/null | awk '$2 !~ /^Z/ {print $1}' | head -1)
   [ -n "$Z39" ] || { sleep 0.1; i=$((i + 1)); }
 done
 if [ -n "$Z39" ]; then
-  out39b="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" probe 944 --lane-dir "$LANES/z39" --pid "$Z39" 2>&1)"
-  if printf '%s' "$out39b" | grep -qi 'zombie' && ! printf '%s' "$out39b" | grep -q 'liveness=SELF'; then
-    ok "(b) compare-mode names the ZOMBIE and does not report SELF for a dead pid"
-  else
-    bad "(b) compare mode accepted a zombie identity:
+  ll acquire 944 --lane-dir "$Z39_LANE" --pid "$Z39"; rc39b_acq=$RC
+  # now wait for that very holder to become a ZOMBIE (its parent never reaps it)
+  i=0; zstate=""
+  while [ "$i" -lt 80 ] && [ "$zstate" != "Z" ]; do
+    zstate=$(awk '{print $3}' "/proc/$Z39/stat" 2>/dev/null)
+    [ "$zstate" = "Z" ] || { sleep 0.1; i=$((i + 1)); }
+  done
+  if [ "$rc39b_acq" -eq 0 ] && [ "$zstate" = "Z" ]; then
+    out39b="$(env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash "$LL" probe 944 --lane-dir "$Z39_LANE" --pid "$Z39" 2>&1)"
+    if ! printf '%s' "$out39b" | grep -q 'liveness=SELF' && printf '%s' "$out39b" | grep -q 'issue=944'; then
+      ok "(b) probe does NOT report SELF for a record whose holder is now a zombie"
+    else
+      bad "(b) compare mode matched a dead holder as SELF:
 $out39b"
+    fi
+  else
+    bad "(b) precondition failed: acquire rc=$rc39b_acq, holder state='$zstate' (wanted Z) — this case must not pass vacuously"
   fi
 else
-  bad "(b) could not construct a zombie — this case must not pass vacuously"
+  bad "(b) could not obtain a live child pid — this case must not pass vacuously"
 fi
 kill "$Z39_PARENT" 2>/dev/null || true
 
