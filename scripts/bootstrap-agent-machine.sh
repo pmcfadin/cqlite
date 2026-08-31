@@ -2189,6 +2189,28 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   fi
 
   PIN_CREATE_RESIDUE=""
+  # pin_create_env_file: CREATE-IF-ABSENT, atomically (roborev job 314, Medium). The
+  # `[ ! -e "$PIN_ENV_FILE" ]` test in the caller and the write are two separate steps, and
+  # the write used to be a TRUNCATING `tee` — so a file created in between, by cloud-init, a
+  # provisioning run or a peer agent on the same box, was silently OVERWRITTEN and whatever
+  # it held was destroyed. On a fleet that runs bootstrap on several lanes per box that is a
+  # live race, not a theoretical one.
+  #
+  # `set -C` (noclobber) opens with O_EXCL, so the KERNEL arbitrates and a loser writes
+  # nothing — the same reason the claim protocol pushes a ref instead of checking for one.
+  # `umask 022` establishes the mode AT CREATION instead of chmod-ing afterwards, which also
+  # closes the window where the file briefly exists at a mode nobody chose. The readback in
+  # pin_create_mode_ok stays as verification: setting a umask is an instruction, and this
+  # section's whole rule is that an instruction is not a measurement.
+  pin_create_env_file() {
+    ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} bash -c '
+      umask 022
+      set -C
+      printf "%s\n%s\n" "$1" "$2" > "$3"
+    ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null || return 1
+    pin_create_mode_ok "$PIN_ENV_FILE"
+  }
+
   # pin_create_mode_ok: establish 0644 on a JUST-CREATED env file and CONFIRM it by reading
   # the mode BACK. chmod's exit status answers a different question than "is the mode
   # right": a chmod that fails on a file already at 0644 is harmless, and one that reports
@@ -2245,9 +2267,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       PIN_PERSIST_NOTE="no $PIN_ENV_FILE and no privilege to create it ($PIN_PRIV_STATE)"
       warn "gate-pin: $PIN_ENV_FILE does not exist and this run cannot create it ($PIN_PRIV_STATE) — the pin was NOT persisted"
       info "create it as root:  printf '%s\n' '$PIN_ENV_COMMENT' '$PIN_ENV_LINE' > $PIN_ENV_FILE && chmod 0644 $PIN_ENV_FILE"
-    elif printf '%s\n%s\n' "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" \
-           | ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} tee "$PIN_ENV_FILE" >/dev/null 2>&1 \
-         && pin_create_mode_ok "$PIN_ENV_FILE"; then
+    elif pin_create_env_file; then
       PIN_FILE_HAS_LINE=yes; PIN_FILE_VALUE="$PIN_ENV_VALUE"
       # REPORT WHAT IT ACTUALLY IS, read back — not what the write intended. An earlier
       # draft of this line asserted "root:root 0644" unconditionally, which is false

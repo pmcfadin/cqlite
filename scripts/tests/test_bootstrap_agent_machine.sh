@@ -3765,14 +3765,20 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   #      the mode — one run's reported failure becoming the next run's silent success at a
   #      permission nothing chose.
   #
-  #      `chmod` is STUBBED TO FAIL rather than removed from the PATH, so the case models
-  #      exactly one thing going wrong. `umask 077` forces `tee` to create 0600, so the mode
-  #      genuinely cannot reach 0644 — set explicitly rather than inherited, or the case
-  #      would silently stop testing anything on a runner whose ambient umask is 022.
-  shims_nochmod="$tmp/pin-shims-nochmod"; mkpinshims "$shims_nochmod" 1
-  mk_stub "$shims_nochmod" chmod 'exit 1'
+  #      DRIVEN THROUGH ITS ORACLE, and the reason is the third instance of premise-staleness
+  #      in this block. The first version stubbed `chmod` to fail and forced `umask 077` so
+  #      `tee` created 0600. The job-314 fix then made the create atomic — one privileged
+  #      `bash -c` with `umask 022` and `set -C` — which establishes 0644 AT CREATION, so a
+  #      failing chmod can no longer produce a wrong mode and that route to the state is
+  #      closed. The rollback branch is still LIVE in production (a default ACL or an odd
+  #      filesystem can yield a mode the readback rejects), so it is exercised by making the
+  #      readback itself report a non-0644 mode. Stubbing `stat` is only possible because
+  #      mk_stub now removes the hermetic symlink first — before that, this stub would have
+  #      silently not installed and the case would have passed against the real `stat`.
+  shims_badstat="$tmp/pin-shims-badstat"; mkpinshims "$shims_badstat" 1
+  mk_stub "$shims_badstat" stat 'echo 600'
   envf_bc="$tmp/pin-env-bc"; rm -f "$envf_bc"
-  out_bc=$( (umask 077; runpin "$pinroot" "$shims_nochmod" "$envf_bc" HOME="$pin_home_plain" --fix-gate-pin) )
+  out_bc=$(runpin "$pinroot" "$shims_badstat" "$envf_bc" HOME="$pin_home_plain" --fix-gate-pin)
   if [ ! -e "$envf_bc" ] \
      && printf '%s' "$out_bc" | grep -q 'the pin was NOT persisted' \
      && printf '%s' "$out_bc" | grep -q 'was REMOVED'; then
@@ -3781,6 +3787,22 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     bad "gate-pin: the failed create left a residue, or did not report rolling it back"
     printf '%s\n' "$out_bc" | grep -iE 'gate-pin|CREATED|REMOVED|persisted' | head -4
     echo "  file-exists=$([ -e "$envf_bc" ] && echo yes || echo no) content=[$(cat "$envf_bc" 2>/dev/null | tr '\n' '|')]"
+  fi
+
+  # 11bg. THE MODE IS ESTABLISHED AT CREATION, NOT INHERITED FROM THE CALLER (roborev job
+  #      314, Medium). The create used to be truncating `tee` followed by `chmod`, so the
+  #      file briefly existed at whatever the invoking shell's umask gave it. It is now one
+  #      privileged `bash -c` setting `umask 022` before the redirect, so a caller running
+  #      under a restrictive umask must STILL get 0644 — asserted by running under 077,
+  #      which is the value that would produce 0600 if the caller's umask still decided.
+  envf_bg="$tmp/pin-env-bg"; rm -f "$envf_bg"
+  out_bg=$( (umask 077; runpin "$pinroot" "$shims_one" "$envf_bg" HOME="$pin_home_plain" --fix-gate-pin) )
+  bg_mode=$(stat -c %a "$envf_bg" 2>/dev/null)
+  if [ "$bg_mode" = 644 ] && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_bg"; then
+    ok "gate-pin: a created env file comes out 0644 even under a restrictive caller umask (mode set at creation, not inherited)"
+  else
+    bad "gate-pin: the created env file took the caller's umask (mode=${bg_mode:-unreadable})"
+    printf '%s\n' "$out_bg" | grep -iE 'CREATED|gate-pin:' | head -3
   fi
 
   # 11bd. A REMEDY MUST BE CHOSEN BY THE FACT THAT DISCRIMINATES IT (roborev job 311, Low).
