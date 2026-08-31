@@ -58,14 +58,24 @@
 //!      `catch (UnknownHostException)` block below it. Read the whole method, not
 //!      a grep of its `if`s.
 //!
-//!    Encoding the `0` allowances is a FIDELITY fix with no behaviour change, and
-//!    both halves of that are worth stating. No behaviour change: the sole caller
-//!    only decodes a NON-EMPTY `path_bytes`, so a 0-byte slice never reaches here;
-//!    and even if it did, `parse_value_from_raw_bytes` refuses a 0-byte
-//!    fixed-width value on its own. Worth doing anyway: a table that disagrees
-//!    with Cassandra is a false rejection waiting for the day someone moves the
-//!    call site, and "correct only because the caller filters" is a coupling one
-//!    file away from being silently broken.
+//!    Encoding the `0` allowances is a FIDELITY fix with no behaviour change: the
+//!    sole caller only decodes a NON-EMPTY `path_bytes`, so a 0-byte slice never
+//!    reaches here. Worth doing anyway, because a table that disagrees with
+//!    Cassandra is a false rejection waiting for the day someone moves the call
+//!    site, and "correct only because the caller filters" is a coupling one file
+//!    away from being silently broken.
+//!
+//!    **That filter is itself a defect, and the `0` rows do NOT claim otherwise
+//!    (issue #3612, R6-F2).** Because the caller skips an empty cell path, a
+//!    LEGAL empty `text`/`blob` map key — `{'': 1}` is valid CQL, and Cassandra's
+//!    `CollectionSerializer` rejects only a NULL (-1) key, never a zero-length one
+//!    — is not merely left undecoded: the entry is DROPPED from the reconstructed
+//!    `Value::Map`, because the caller's `if let Some(key_value) = decoded_key`
+//!    never fires. So an empty-keyed entry silently disappears from query and
+//!    compaction results. That filter is PRE-EXISTING and governs every complex
+//!    column, so it is filed separately rather than changed under #3612, and the
+//!    empty-key unit tests are labelled UNIT-ONLY so they cannot be read as
+//!    end-to-end support.
 //!
 //! # When this site may return `Err` — and why the line is drawn at Cassandra
 //!

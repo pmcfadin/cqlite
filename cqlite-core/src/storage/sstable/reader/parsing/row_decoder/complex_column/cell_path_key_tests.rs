@@ -1022,6 +1022,24 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 // `!= N` (issue #3612 round 3 addendum)
 // ---------------------------------------------------------------------------
 //
+// !! REACHABILITY: THE EMPTY-KEY CASES BELOW ARE UNIT-ONLY. A READ CANNOT REACH
+// !! THEM (issue #3612, R6-F2(a)).
+//
+// The sole production caller decodes a key only `if !cell.path_bytes.is_empty()`
+// (`complex_column.rs`, the multicell map branch), so a zero-length cell path
+// never reaches `parse_cell_path_key` at all — and, worse, that branch drops the
+// whole entry rather than surfacing it, because the `if let Some(key_value) =
+// decoded_key` below it never fires. So these cases pin what the FUNCTION does
+// with an empty slice, which is what makes the width table a faithful mirror of
+// Cassandra's serializers; they do NOT evidence end-to-end support for an empty
+// map key, and must not be cited as such (CLAUDE.md wiring evidence: a feature is
+// done only when its public surface exercises it).
+//
+// That filter is PRE-EXISTING, not part of #3612, and it means a legal empty
+// `text`/`blob` map key is silently dropped from query and compaction results —
+// filed separately rather than changed here, since the filter governs every
+// complex column.
+//
 // Verified at the pinned `cassandra-5.0.8` tag, per serializer:
 //   `N` or `0`  : Int32(4) Long(8) Float(4) Double(8) UUID(16) Timestamp(8)
 //                 Counter(8, `extends LongSerializer`)   -- `!= N && !isEmpty`
@@ -1039,6 +1057,7 @@ fn a_minus_one_component_length_is_still_a_null_field() {
 /// error either way, which is exactly why encoding the `0` is a fidelity fix and
 /// not a behaviour change. Asserted on the MESSAGE, which is the only thing that
 /// distinguishes "the width table refused it" from "the decoder refused it".
+/// UNIT-ONLY: see the REACHABILITY note above — no read reaches an empty key.
 #[test]
 fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
     let p = parser();
@@ -1070,7 +1089,8 @@ fn an_empty_key_of_an_n_or_zero_type_is_not_refused_by_the_width_table() {
 /// the WIDTH TABLE, because these four serializers alone have no `isEmpty`
 /// allowance. This is the half that makes the three-way split load-bearing rather
 /// than decorative. (`inet` is NOT one of them — see
-/// `an_empty_inet_key_is_legal_and_decodes`.)
+/// `an_empty_inet_key_decodes_at_the_function_unreachable_by_a_read`.)
+/// UNIT-ONLY: see the REACHABILITY note above — no read reaches an empty key.
 #[test]
 fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
     let p = parser();
@@ -1095,6 +1115,15 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
 /// `inet` is NOT a fifth strict case, and it is the ONE family where the empty
 /// buffer decodes rather than merely passing the width table.
 ///
+/// UNIT-ONLY, and this one needs saying loudest because its NAME reads like a
+/// capability claim: "is legal and decodes" is a statement about THIS FUNCTION,
+/// not about a read. No `SELECT` or compaction read can reach it — the caller
+/// filters an empty `path_bytes` and drops the entry (see the REACHABILITY note
+/// above, issue #3612 R6-F2(a)). Kept rather than deleted because it is the only
+/// thing pinning the corrected `[0, 4, 16]` row against the three places that
+/// previously called `inet` "the fifth strict case"; renamed so the name states
+/// the scope.
+///
 /// `InetAddressSerializer.validate` RETURNS EARLY on empty
 /// (`if (accessor.isEmpty(value)) return;`) and only then delegates to
 /// `getByAddress`, so an empty `inet` is legal to Cassandra — and CQLite's inet
@@ -1104,7 +1133,7 @@ fn an_empty_key_of_a_strict_type_is_refused_by_the_width_table() {
 /// `isEmpty` test together with the `throw` from the `catch (UnknownHostException)`
 /// block below it. Read whole methods, not greps of their `if`s.
 #[test]
-fn an_empty_inet_key_is_legal_and_decodes() {
+fn an_empty_inet_key_decodes_at_the_function_unreachable_by_a_read() {
     let p = parser();
     assert_eq!(
         p.parse_cell_path_key(&[], "inet", "k").unwrap(),
