@@ -627,6 +627,35 @@ const CASES: &[Case] = &[
             },
         ],
     },
+    // test-data/schemas/nested-udt-keys.cql — (id int PRIMARY KEY) plus ten
+    // columns nesting the `key_part` UDT inside tuples, sets, lists and maps,
+    // both as map KEYS and as map VALUES (issue #3500). Comparable: the golden
+    // carries no shape `unsupported_shapes` refuses — no partition or row
+    // deletion, no TTL, no static block, and only `row` elements. Its
+    // `marked_deleted` markers are all CELL-level collection tombstones on the
+    // six non-frozen columns, which reconcile to a value this lane compares
+    // (see `coverage_census::NOT_COMPARABLE`'s note on cell deletions), so an
+    // exclusion here would be coverage loss rather than a reason.
+    //
+    // `multicell` names exactly the six NON-frozen collections from the DDL;
+    // the four `f_*` columns are `frozen<…>` and therefore single-cell.
+    Case {
+        presence: Presence::Committed,
+        keyspace: "test_nested_udt_keys",
+        table: "nested_udt_keys",
+        schema: "nested-udt-keys",
+        pk: &["id"],
+        ck: &[],
+        multicell: &[
+            ("s_tuple_udt", Multicell::Set),
+            ("s_set_udt", Multicell::Set),
+            ("m_tuple_udt", Multicell::Map),
+            ("s_list_udt", Multicell::Set),
+            ("s_map_udt_key", Multicell::Set),
+            ("s_map_udt_val", Multicell::Set),
+        ],
+        skips: &[],
+    },
 ];
 
 fn repo_root() -> PathBuf {
