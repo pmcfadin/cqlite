@@ -399,6 +399,36 @@ _alias_of=""
 [ -z "$_alias_of" ] && [ "$_c_log" = "$_c_lock" ] && _alias_of="the launch reservation"
 _c_mutex=$(_canon "$SUMMARY.launch-lock.mutex")
 [ -z "$_alias_of" ] && [ "$_c_log" = "$_c_mutex" ] && _alias_of="the reclamation mutex"
+if [ -z "$_alias_of" ] && [ -e "$LOGFILE" ]; then
+  [ -e "$SUMMARY" ] && [ "$LOGFILE" -ef "$SUMMARY" ] && _alias_of="the summary (same inode)"
+  [ -z "$_alias_of" ] && [ -e "$SUMMARY.heartbeat" ] && [ "$LOGFILE" -ef "$SUMMARY.heartbeat" ] \
+    && _alias_of="the heartbeat (same inode)"
+  [ -z "$_alias_of" ] && [ -e "$SUMMARY.launch-lock" ] && [ "$LOGFILE" -ef "$SUMMARY.launch-lock" ] \
+    && _alias_of="the launch reservation (same inode)"
+fi
+if [ -n "$_alias_of" ]; then
+  echo "gate-detached: the log path '$LOGFILE' is $_alias_of. Refusing (#3473)." >&2
+  # The REASON differs by which path was aliased, and a diagnosis that names the wrong mechanism
+  # sends the reader looking in the wrong place (roborev job 200).
+  case "$_alias_of" in
+    *reservation*)
+      echo "               This script creates a SYMLINK at the reservation path, and the log is" >&2
+      echo "               truncated with '>', which FOLLOWS a symlink — so the gate's output would" >&2
+      echo "               land in a file named after the link's own owner text, not at this path." >&2 ;;
+    *)
+      echo "               The gate rewrites its summary with '>' and the beater publishes by" >&2
+      echo "               rename, so one of them would destroy the other's file and the advertised" >&2
+      echo "               log would hold the wrong data." >&2 ;;
+  esac
+  echo "               Give --log a path of its own." >&2
+  exit 1
+fi
+
+# PLACED AFTER the tailored `_alias_of` diagnoses ON PURPOSE (test 4b.93). This assert is the
+# BACKSTOP for the pairs those checks do not cover; putting it first made it PREEMPT them, so a
+# `--log <summary>.launch-lock` stopped naming the symlink-follows-truncate mechanism and printed
+# this generic cause instead — and this file already records why that is a defect in its own
+# right: "a diagnosis that names the wrong mechanism sends the reader looking in the wrong place".
 # EVERY OUTPUT PATH MUST BE DISJOINT FROM EVERY GENERATED RESERVATION PATH, IN BOTH DIRECTIONS
 # (roborev job 316, Medium). The checks above only ask "is the LOG one of the SUMMARY's derived
 # paths". The reverse was unguarded, so `--summary /tmp/gate.log.launch-lock --log /tmp/gate.log`
@@ -435,30 +465,6 @@ for _o_name in summary heartbeat log; do
 $_res_paths
 _RESEOF
 done
-if [ -z "$_alias_of" ] && [ -e "$LOGFILE" ]; then
-  [ -e "$SUMMARY" ] && [ "$LOGFILE" -ef "$SUMMARY" ] && _alias_of="the summary (same inode)"
-  [ -z "$_alias_of" ] && [ -e "$SUMMARY.heartbeat" ] && [ "$LOGFILE" -ef "$SUMMARY.heartbeat" ] \
-    && _alias_of="the heartbeat (same inode)"
-  [ -z "$_alias_of" ] && [ -e "$SUMMARY.launch-lock" ] && [ "$LOGFILE" -ef "$SUMMARY.launch-lock" ] \
-    && _alias_of="the launch reservation (same inode)"
-fi
-if [ -n "$_alias_of" ]; then
-  echo "gate-detached: the log path '$LOGFILE' is $_alias_of. Refusing (#3473)." >&2
-  # The REASON differs by which path was aliased, and a diagnosis that names the wrong mechanism
-  # sends the reader looking in the wrong place (roborev job 200).
-  case "$_alias_of" in
-    *reservation*)
-      echo "               This script creates a SYMLINK at the reservation path, and the log is" >&2
-      echo "               truncated with '>', which FOLLOWS a symlink — so the gate's output would" >&2
-      echo "               land in a file named after the link's own owner text, not at this path." >&2 ;;
-    *)
-      echo "               The gate rewrites its summary with '>' and the beater publishes by" >&2
-      echo "               rename, so one of them would destroy the other's file and the advertised" >&2
-      echo "               log would hold the wrong data." >&2 ;;
-  esac
-  echo "               Give --log a path of its own." >&2
-  exit 1
-fi
 if [ -L "$LOGFILE" ] || { [ -e "$LOGFILE" ] && [ ! -f "$LOGFILE" ]; }; then
   echo "gate-detached: log path '$LOGFILE' is a symlink or not a regular file — refusing to" >&2
   echo "               truncate it (#3473)." >&2

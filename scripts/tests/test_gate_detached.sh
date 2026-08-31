@@ -923,10 +923,34 @@ fi
 # holds the reservation: the launcher pid (alive throughout its own acquisition) and the unit.
 # Re-pointed again (R6 inversion): the raw `kill -0` moved inside `_pid_state`, so assert the two
 # READINGS are consulted — the owner pid's state and the unit's — not the spelling of either.
-if grep -qF '_pid_state "$_own_pid"' "$LAUNCHER" && grep -q '_unit_is_live "$_own_unit"' "$LAUNCHER"; then
+# Re-pointed AGAIN (roborev job 316): this asserted `_unit_is_live "$_own_unit"` — a SPELLING, in a
+# case whose own comment directly above says "not the spelling of either". The reclamation site now
+# asks the STRONGER `_unit_runs_a_gate`, so the old grep FAILED on a fix that satisfies the stated
+# property BETTER. Assert the PROPERTY: both readings are consulted — the owner pid's state, and
+# the unit through EITHER of the file's two unit predicates. 4b.74b then pins WHICH one the
+# reclamation path must use, so a strengthening stays free while a weakening reds.
+if grep -qF '_pid_state "$_own_pid"' "$LAUNCHER" \
+   && grep -qE '_unit_(is_live|runs_a_gate) "\$_own_unit"' "$LAUNCHER"; then
   ok "4b.74 a reservation is only honoured while its owner is LIVE (self-healing)"
 else
   bad "4b.74 a reservation is only honoured while its owner is live" "no staleness test"
+fi
+# 4b.74b (roborev job 316, Medium): the RECLAMATION site must ask whether a GATE RUNS, not whether
+# the unit is merely non-inactive. `_unit_is_live` returns 0 for "live OR unmeasurable", and an
+# ORPHANED process keeps a unit active indefinitely — so an affirmatively dead owner was promoted
+# back to live and the path was refused FOREVER: the exact permanent-refusal defect that
+# `_unit_runs_a_gate` exists to prevent. Scoped to the reclamation site, because the OTHER
+# `_unit_is_live` caller (post-launch monitorability of our OWN unit) is correct as it stands —
+# there the gate may not have exec'd yet, so the gate-aware predicate would refuse a healthy launch.
+if grep -qE '_unit_runs_a_gate "\$_own_unit"' "$LAUNCHER"; then
+  if grep -qE '_unit_is_live "\$_own_unit"' "$LAUNCHER"; then
+    bad "4b.74b the reclamation site asks whether a GATE runs, not whether the unit is active" \
+        "_unit_is_live is still applied to \$_own_unit — the orphan case would refuse forever"
+  else
+    ok "4b.74b the reclamation site asks whether a GATE runs (an orphan cannot block forever)"
+  fi
+else
+  bad "4b.74b the reclamation site asks whether a GATE runs" "_unit_runs_a_gate \$_own_unit absent"
 fi
 if [ "$HAVE_SYSTEMD" = yes ]; then
   cp1="$TMP/concurrent.txt"
@@ -2453,6 +2477,38 @@ else
   bad "4b.171 the drop is disclosed via SKIPPED on the banner" \
       "$(grep -n 'SKIPPED' "$LAUNCHER" | tail -2)"
 fi
+# 4b.172 (roborev job 316, Medium): an OUTPUT path that is also a GENERATED RESERVATION path must be
+# refused BEFORE any launch. `--summary <log>.launch-lock --log <log>` made the extra-lock loop plant
+# its reservation SYMLINK at the advertised summary path; the gate then wrote its summary through the
+# link and the exit-time reclamation deleted it.
+#
+# THE EXIT CODE IS NOT THE DISCRIMINATOR AND MEASURING IT WOULD BE A VACUOUS TEST: the pre-fix
+# launcher ALSO exits 1 — it launches, waits 20-65s for a heartbeat that can never appear, and stops
+# the unit. The discriminators are (a) that NO unit was launched at all, and (b) that the refusal
+# NAMES the collision. Both are required: a bare non-zero exit is produced by the defect too.
+rp_t=$(mktemp -d)
+rp_out=$(bash "$LAUNCHER" --summary "$rp_t/g.log.launch-lock" --log "$rp_t/g.log" 2>&1 </dev/null)
+rp_u=$(printf '%s' "$rp_out" | sed -n 's/^unit:  *//p'); [ -n "$rp_u" ] && echo "$rp_u" >> "$UNITS_FILE"
+if printf '%s' "$rp_out" | grep -q 'is also a reservation path this launcher creates'; then
+  if [ -z "$rp_u" ] && ! printf '%s' "$rp_out" | grep -q 'gate started but published no'; then
+    ok "4b.172 an output path that doubles as a reservation path is refused BEFORE any launch"
+  else
+    bad "4b.172 an output path that doubles as a reservation path is refused before any launch" \
+        "named the collision but a unit was launched anyway (unit=${rp_u:-none})"
+  fi
+else
+  bad "4b.172 an output path that doubles as a reservation path is refused" \
+      "did not name the collision: $(printf '%s' "$rp_out" | head -3)"
+fi
+# 4b.173: the tailored diagnoses must WIN over that backstop, or a reader is sent to the wrong
+# mechanism (4b.93 caught exactly this when the backstop was placed first).
+if printf '%s' "$rp_out" | grep -q 'SYMLINK at every reservation path'; then
+  ok "4b.173 the backstop refusal explains the symlink-then-remove mechanism"
+else
+  bad "4b.173 the backstop refusal explains the mechanism" "$(printf '%s' "$rp_out" | head -3)"
+fi
+rm -rf "$rp_t"
+
 
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
