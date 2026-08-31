@@ -37,6 +37,33 @@
 //! permissive branch (a 32-byte guess for an arbitrarily large nested value is
 //! exactly that shape).
 //!
+//! # Every container costs THREE things (roborev round 4)
+//!
+//! The undercount above was the first of three instances of ONE class:
+//! *a container's ELEMENT ALLOCATION is not counted, only its header and its
+//! element payloads.* The three were the `_ => 32` wildcard, `range_deletion`'s
+//! uncounted `ClusteringKey` bounds, and `add_clustering_key`'s uncounted
+//! `Vec<(String, Value)>` element array (a `(String, Value)` slot is ~8x the
+//! payload of a `BigInt` clustering component, so a wide scalar clustering key
+//! underestimated by roughly the whole array).
+//!
+//! So every container this module walks is accounted in three parts:
+//!
+//! 1. its **header** — `size_of::<Vec<_>>()` etc., or already inside the
+//!    enclosing `size_of` when the container is an inline field;
+//! 2. its **element array** — `capacity() × size_of::<Element>()`, via
+//!    [`SizeAcc::add_element_array`]. `capacity()`, not `len()`: capacity is
+//!    what is allocated, and over-counting is the safe direction. `Element` is
+//!    the container's own slot type — `(Value, Value)` for a `Map`,
+//!    `UdtField` for a UDT, `(String, Value)` for a clustering key;
+//! 3. each element's own **heap payload** — the `String`/`Bytes` bytes, and
+//!    nested `Value`s via the worklist.
+//!
+//! A field that owns heap through something other than a `Vec` needs the same
+//! three-part treatment: `RowKey`'s `Arc<[u8]>` bounds inside a
+//! `Value::Tombstone` are counted as [`ARC_CONTROL_BLOCK`] + bytes, having
+//! previously been swallowed by a flat `size_of + 16`.
+//!
 //! # Unit convention
 //!
 //! Bytes of heap *owned by* the entry, plus the entry's own `size_of`. The
@@ -65,15 +92,24 @@ use std::mem::size_of;
 #[cfg(feature = "write-support")]
 pub(super) const MAX_ESTIMATE_NODES: usize = 1_000_000;
 
+/// Bytes of `Arc` control block (strong + weak counters) in front of an
+/// `Arc<[u8]>`'s payload — the allocation a `RowKey` owns beyond its bytes.
+#[cfg(feature = "write-support")]
+const ARC_CONTROL_BLOCK: usize = 2 * size_of::<usize>();
+
 /// Estimate the heap bytes one `MergeEntry` occupies.
 ///
 /// Covers every variable-sized field of `MergeEntry`: partition key bytes, the
-/// clustering key's column names and values, live cells (column name, value,
-/// cell path), complex-deletion markers, and — new in #2820 — the clustering
-/// bounds carried by `range_deletion`, whose `ClusteringKey` columns were not
-/// counted at all. The remaining fields (`run_index`, `timestamp`,
-/// `row_deletion`, `partition_deletion`, `row_liveness`) are fixed-size and
-/// already inside `size_of::<MergeEntry>()`.
+/// clustering key's element array plus column names and values, live cells
+/// (column name, value, cell path), complex-deletion markers, and — new in
+/// #2820 — the clustering bounds carried by `range_deletion`, whose
+/// `ClusteringKey` columns were not counted at all. The remaining fields
+/// (`run_index`, `timestamp`, `row_deletion`, `partition_deletion`,
+/// `row_liveness`) are fixed-size and already inside `size_of::<MergeEntry>()`
+/// (`row_liveness` is `Copy` and owns no heap).
+///
+/// Container accounting follows the three-part rule in the module doc
+/// (header + element array + element payloads).
 #[cfg(feature = "write-support")]
 pub(super) fn estimate_entry_size(entry: &MergeEntry) -> usize {
     let mut acc = SizeAcc::new(size_of::<MergeEntry>());
@@ -147,12 +183,31 @@ impl SizeAcc {
         self.total = self.total.saturating_add(bytes);
     }
 
+    /// `ClusteringKey.columns: Vec<(String, Value)>` — header, ELEMENT ARRAY,
+    /// then each element's own heap payload (issue #2820, roborev round 4).
+    ///
+    /// The element array is the half that was missing: a `(String, Value)` slot
+    /// is `size_of::<String>()` + `size_of::<Value>()` bytes, ~8x the 8-byte
+    /// payload of a `BigInt` component, so a row with many small clustering
+    /// components underestimated by roughly the whole array — bypassing both
+    /// the batch byte budget and read-ahead. Sized from `capacity()`, not
+    /// `len()`: capacity is what is actually allocated, and over-counting is
+    /// the safe direction for a budget.
     fn add_clustering_key(&mut self, ck: &ClusteringKey) {
         self.add(size_of::<Vec<(String, Value)>>());
+        self.add_element_array(ck.columns.capacity(), size_of::<(String, Value)>());
         for (name, value) in &ck.columns {
             self.add(name.len());
             self.add_value(value);
         }
+    }
+
+    /// `count` element slots of `elem_size` bytes each — the heap array a
+    /// container owns, distinct from its header and from the elements' own
+    /// payloads. Saturating in BOTH operations: an attacker-shaped `capacity`
+    /// must not wrap the product (and `usize::MAX` makes `+`/`*` a debug panic).
+    fn add_element_array(&mut self, count: usize, elem_size: usize) {
+        self.add(count.saturating_mul(elem_size));
     }
 
     /// The measured estimate, or `usize::MAX` when the node budget was exhausted.
@@ -215,8 +270,18 @@ impl SizeAcc {
                         .saturating_add(4)
                         .saturating_add(size_of::<Vec<u8>>()),
                 ),
-                Value::Tombstone(_) => {
-                    self.add(size_of::<crate::types::TombstoneInfo>().saturating_add(16))
+                Value::Tombstone(info) => {
+                    // Base figure carried over VERBATIM so a tombstone with no
+                    // range bounds estimates byte-identically to before.
+                    self.add(size_of::<crate::types::TombstoneInfo>().saturating_add(16));
+                    // Issue #2820 (roborev round 4): the `RowKey(Arc<[u8]>)`
+                    // range bounds own UNBOUNDED bytes the flat figure above
+                    // ignored — the same class as the clustering-key array.
+                    for bound in [&info.range_start, &info.range_end] {
+                        if let Some(rk) = bound.as_ref() {
+                            self.add(rk.0.len().saturating_add(ARC_CONTROL_BLOCK));
+                        }
+                    }
                 }
                 Value::Json(json) => {
                     self.add(size_of::<serde_json::Value>());
@@ -227,7 +292,7 @@ impl SizeAcc {
                 }
                 Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
                     self.add(size_of::<Vec<Value>>());
-                    self.add(items.len().saturating_mul(size_of::<Value>()));
+                    self.add_element_array(items.capacity(), size_of::<Value>());
                     if self.would_exceed_cap(worklist.len(), items.len()) {
                         self.exhausted = true;
                         return;
@@ -236,7 +301,7 @@ impl SizeAcc {
                 }
                 Value::Map(entries) => {
                     self.add(size_of::<Vec<(Value, Value)>>());
-                    self.add(entries.len().saturating_mul(size_of::<(Value, Value)>()));
+                    self.add_element_array(entries.capacity(), size_of::<(Value, Value)>());
                     // Each entry enqueues both a key and a value.
                     let incoming = entries.len().saturating_mul(2);
                     if self.would_exceed_cap(worklist.len(), incoming) {
@@ -252,10 +317,9 @@ impl SizeAcc {
                     self.add(size_of::<crate::types::UdtValue>());
                     self.add(udt.type_name.len());
                     self.add(udt.keyspace.len());
-                    self.add(
-                        udt.fields
-                            .len()
-                            .saturating_mul(size_of::<crate::types::UdtField>()),
+                    self.add_element_array(
+                        udt.fields.capacity(),
+                        size_of::<crate::types::UdtField>(),
                     );
                     if self.would_exceed_cap(worklist.len(), udt.fields.len()) {
                         self.exhausted = true;
@@ -305,7 +369,7 @@ impl SizeAcc {
                 }
                 serde_json::Value::Array(items) => {
                     self.add(size_of::<Vec<serde_json::Value>>());
-                    self.add(items.len().saturating_mul(size_of::<serde_json::Value>()));
+                    self.add_element_array(items.capacity(), size_of::<serde_json::Value>());
                     if self.would_exceed_cap(worklist.len(), items.len()) {
                         self.exhausted = true;
                         return;

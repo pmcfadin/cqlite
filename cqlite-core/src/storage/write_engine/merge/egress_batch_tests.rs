@@ -804,3 +804,162 @@ fn a_value_past_the_node_budget_fails_closed_rather_than_undercounting() {
          flushes immediately and read-ahead stops"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2820, roborev round 4 (FINDING 2) — and the CLASS behind it.
+//
+// The class: *a container's ELEMENT ALLOCATION is not counted, only its header
+// and its element PAYLOADS.* This is the THIRD instance found in
+// `estimate_entry_size` (after the `_ => 32` wildcard and `range_deletion`'s
+// uncounted bounds), so the tests below pin the two shapes that maximise it:
+//
+//   * a WIDE SCALAR clustering key — `Vec<(String, Value)>`, whose element slot
+//     is `size_of::<(String, Value)>()` = 24 + `size_of::<Value>()` bytes, i.e.
+//     ~8x the 8-byte payload of a `BigInt` component. `add_clustering_key`
+//     counted the 24-byte Vec HEADER plus each name/value payload and never the
+//     array those elements live in, so a row with many small clustering
+//     components underestimated by roughly the whole array.
+//   * a range-`Tombstone` VALUE whose `RowKey` bounds (`Arc<[u8]>`) carry
+//     unbounded bytes the flat `size_of::<TombstoneInfo>() + 16` arm ignored.
+//
+// Both bypass BOTH consumers of this estimate (the 1 MiB batch budget and
+// `RunReader::refill_buffer`'s read-ahead limit), which is why they are pinned
+// against the estimator directly rather than only through a batch.
+// ---------------------------------------------------------------------------
+
+/// Bytes of `Vec<(String, Value)>` element array for `n` clustering components.
+#[cfg(test)]
+fn clustering_element_array(n: usize) -> usize {
+    use crate::types::Value;
+    n * std::mem::size_of::<(String, Value)>()
+}
+
+/// An entry whose clustering key has `components` small SCALAR columns.
+fn wide_clustering_entry(n: i64, components: usize) -> MergeEntry {
+    use crate::storage::write_engine::mutation::ClusteringKey;
+    use crate::types::Value;
+    MergeEntry::new(
+        0,
+        DecoratedKey::new(n, n.to_be_bytes().to_vec()),
+        Some(ClusteringKey::new(
+            (0..components)
+                .map(|i| (format!("c{i}"), Value::BigInt(i as i64)))
+                .collect(),
+        )),
+        100 + n,
+        RowData::Live { cells: vec![] },
+    )
+}
+
+/// A wide SCALAR clustering key is estimated at the array it allocates.
+///
+/// RED before the fix: 64 components estimated at ~1 KiB (header + 64 × (name +
+/// 8 B payload)) against a 64 × `size_of::<(String, Value)>()` = 4 KiB element
+/// array — the array itself was invisible to both budgets.
+#[test]
+fn a_wide_scalar_clustering_key_is_estimated_at_the_array_it_allocates() {
+    const COMPONENTS: usize = 64;
+    let array = clustering_element_array(COMPONENTS);
+    let size = super::super::RunReader::estimate_entry_size(&wide_clustering_entry(0, COMPONENTS));
+    assert!(
+        size >= std::mem::size_of::<MergeEntry>() + array,
+        "a {COMPONENTS}-component clustering key allocates a {array} B element \
+         array; estimated at only {size} B — both the batch byte budget and \
+         read-ahead are bypassable for wide scalar clustering keys"
+    );
+}
+
+/// ...and the estimate must GROW with the array, not just clear one threshold.
+///
+/// Constant-independent form of the same finding: widening the key by `D`
+/// components must add at least `D` element slots. Under the old arithmetic it
+/// added only `D × (name.len() + 8)`.
+#[test]
+fn widening_a_scalar_clustering_key_grows_the_estimate_by_its_element_slots() {
+    const NARROW: usize = 8;
+    const WIDE: usize = 64;
+    let narrow = super::super::RunReader::estimate_entry_size(&wide_clustering_entry(0, NARROW));
+    let wide = super::super::RunReader::estimate_entry_size(&wide_clustering_entry(0, WIDE));
+    let delta = clustering_element_array(WIDE) - clustering_element_array(NARROW);
+    assert!(
+        wide - narrow >= delta,
+        "widening {NARROW}→{WIDE} components adds a {delta} B element array, but \
+         the estimate grew only {} B ({narrow} → {wide})",
+        wide - narrow
+    );
+}
+
+/// A batch of wide-clustering-key rows must flush on BYTES, not the row ceiling.
+///
+/// The wiring half: the undercount is only a defect because these two budgets
+/// consume it. `COMPONENTS` is chosen so a 256-row batch of these rows stays
+/// UNDER 1 MiB at the OLD arithmetic (~3.3 KiB/row: header + name + 8 B payload)
+/// and well over it once the ~16 KiB/row element array is counted — so this
+/// assert is RED before the fix and GREEN after, rather than tripping either way.
+#[test]
+fn the_byte_bound_trips_for_wide_clustering_keys_not_the_row_ceiling() {
+    const ROWS: usize = 512;
+    const COMPONENTS: usize = 250;
+    let row_ceiling = batch_limit_ceiling(super::super::STREAMING_CHANNEL_CAPACITY);
+    let (tx, rx) = std::sync::mpsc::sync_channel(ROWS + 4);
+    let local_sent = AtomicI64::new(0);
+    let mut batcher =
+        EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
+    for n in 0..ROWS {
+        assert!(matches!(
+            batcher.push(wide_clustering_entry(n as i64, COMPONENTS)),
+            ControlFlow::Continue(())
+        ));
+    }
+    let _ = batcher.flush();
+    drop(tx);
+
+    let mut biggest_rows = 0usize;
+    let mut total_rows = 0usize;
+    while let Ok(MergeMsg::Batch(batch)) = rx.recv() {
+        biggest_rows = biggest_rows.max(batch.len());
+        total_rows += batch.len();
+    }
+    assert_eq!(total_rows, ROWS, "no row may be dropped by the byte flush");
+    assert!(
+        biggest_rows < row_ceiling,
+        "the BYTE budget must trip before the {row_ceiling}-row ceiling for rows \
+         carrying a {COMPONENTS}-component clustering key (biggest batch \
+         {biggest_rows} rows)"
+    );
+}
+
+/// A range-`Tombstone` value's `RowKey` bounds are counted, not flat-16'd.
+///
+/// RED before the fix: `Value::Tombstone` added `size_of::<TombstoneInfo>() + 16`
+/// however many bytes its `range_start`/`range_end` `Arc<[u8]>` carried.
+#[test]
+fn a_tombstone_values_range_bounds_are_counted() {
+    use crate::storage::write_engine::merge::model::CellData;
+    use crate::types::{RowKey, TombstoneInfo, TombstoneType, Value};
+    const BOUND: usize = 32 * 1024;
+    let tombstone = Value::Tombstone(Box::new(TombstoneInfo {
+        deletion_time: 100,
+        tombstone_type: TombstoneType::RangeTombstone,
+        local_deletion_time: 1,
+        ttl: None,
+        range_start: Some(RowKey::new(vec![0x11; BOUND])),
+        range_end: Some(RowKey::new(vec![0x22; BOUND])),
+    }));
+    let entry = MergeEntry::new(
+        0,
+        DecoratedKey::new(0, vec![0]),
+        None,
+        100,
+        RowData::Live {
+            cells: vec![CellData::new("rt".to_string(), tombstone, 100)],
+        },
+    );
+    let size = super::super::RunReader::estimate_entry_size(&entry);
+    assert!(
+        size >= 2 * BOUND,
+        "a tombstone carrying {} B of range-bound bytes estimated at only \
+         {size} B — the bound bytes are invisible to both budgets",
+        2 * BOUND
+    );
+}
