@@ -97,6 +97,34 @@
 //! The swallow itself is a PRE-EXISTING defect of row assembly, not of this
 //! module, and is tracked separately (see the PR for #3612).
 //!
+//! ## Why the `warn!` below is NOT deduplicated (assessed, then declined)
+//! It fires once per undecodable map ENTRY, per row — the call site is inside
+//! `complex_column`'s `for i in 0..cell_count_usize` entry loop — so a scan of a
+//! table with an unmodelled map key type emits `entries × rows` lines. The volume
+//! is real and it is a poor disclosure: an operator stops reading a flood.
+//!
+//! It is left alone anyway, because the two available places to hold "already
+//! warned" state are both worse than the flood:
+//!
+//! * **Per reader instance.** There is no natural home — `V5CompressedLegacyParser`
+//!   is plain owned data with no interior mutability and `parse_cell_path_key`
+//!   takes `&self`, so this needs a new `Mutex`/`RefCell` field taken once per map
+//!   entry on the hot decode path. And it would not even work: the instance is
+//!   built PER BLOCK (`parsing/block_entries.rs`'s `parse_block_entries_at_now`,
+//!   called per block from the scan stream) and per point read, so the dedupe
+//!   window is one block, not one scan. That buys a constant factor — thousands of
+//!   lines instead of millions — for a lock on every entry.
+//! * **A process-lifetime `static` latch** (`Once`/`AtomicBool`) is worse than the
+//!   flood, not merely insufficient: it would suppress the warning for a DIFFERENT
+//!   table read later in the same process, turning a noisy disclosure into a
+//!   missing one.
+//!
+//! A middle option exists and is deliberately NOT taken here: aggregating in the
+//! caller's entry loop into one line per column per ROW carrying the entry count
+//! costs nothing structurally (a local counter, no shared state) but is still
+//! per-row, i.e. the same constant-factor argument. Doing it is a call for whoever
+//! owns the logging contract, not something to slip into a decode fix.
+//!
 //! # Decoder enumeration and exactness disposition (issue #3612 round 2)
 //!
 //! Enumerated by following `parse_value_from_raw_bytes`'s `match` rather than
