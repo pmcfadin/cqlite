@@ -363,3 +363,14 @@ bindings/parity/out/
 # Sidecar files of the per-lane drive-issue state marker (#3822): the flock lockfile and
 # the atomic-replace temporaries. The marker itself is ignored above.
 .drive-issue-state.md.*
+
+# Machine-local lane-directory lock (#3436): scripts/flow/lane-lock.sh writes
+# <lane-dir>/.lane-lock (the holder record), .lane-lock.flock (the mutex),
+# .lane-lock.log (the append-only audit) and .lane-lock.tmp.* (the atomic-rename
+# staging file) INSIDE the lane worktree. They MUST stay untracked AND ignored:
+# agent-gate.sh's tree-integrity capture (#2926) takes its untracked set from
+# `git ls-files --others --exclude-standard`, so an un-ignored lock file written or
+# refreshed mid-gate would trip `tree-mutated-midrun` and VOID a gate of record —
+# i.e. this lock would break the very check that caught the #3436 collision. They are
+# also per-session machine state, never a repo artifact.
+.lane-lock*
