@@ -617,16 +617,53 @@ else
   bad "no side effects: the advisory changed refs or files in the repository"
 fi
 
-# --- Case 13d: TMPDIR inside the checkout is REFUSED (#3650 review R4) ------
+# --- Case 13d: TMPDIR inside the checkout is REFUSED, AND NOTHING IS CREATED --
 # `mktemp -d` honours TMPDIR, so the no-write-in-the-repository contract Case 13
 # asserts is only as strong as the SCRATCH LOCATION. Point TMPDIR at a directory
-# inside the work tree: the run must be UNMEASURED naming TMPDIR, and the repo
-# must be byte-identical afterwards. Both halves matter — an UNMEASURED that
-# still wrote a scratch dir would satisfy the verdict and violate the contract.
+# inside the work tree: the run must be UNMEASURED naming TMPDIR, and NOTHING
+# must have been created. Both halves matter — an UNMEASURED that still wrote a
+# scratch dir would satisfy the verdict and violate the contract.
+#
+# THE ORDERING HALF NEEDS AN OBSERVATION THAT SURVIVES THE RUN, AND A `find`
+# AFTERWARDS IS NOT ONE (#3650 review job 239). Two reasons the obvious form is
+# blind: `mktemp -d` creates an empty DIRECTORY (so `find -type f` sees nothing
+# even while the defect is live), and the script's EXIT trap removes the scratch
+# dir on the unmeasured path too — so a create-then-check ordering leaves no
+# residue at all once the process has exited. Verified: the pre-fix script passes
+# a directory-inclusive post-run snapshot.
+#
+# So the ordering is observed AT THE CREATE ITSELF, with a PATH shim recording
+# every `mktemp` invocation. On the reject path the fixed script must not call
+# `mktemp` AT ALL — the check precedes the create — while the pre-fix ordering
+# calls it once, with an in-repository template. The post-run snapshot is kept as
+# well (it covers a leftover the trap failed to remove), directory-inclusive
+# rather than `-type f`; `.git` internals are excluded because a read-only git
+# run may legitimately refresh the index, and the scratch dir the defect creates
+# is not under `.git`.
+MKTEMP_SHIM_DIR="$T/mktemp-shim"
+mkdir -p "$MKTEMP_SHIM_DIR"
+REAL_MKTEMP=$(command -v mktemp || true)
+if [ -z "$REAL_MKTEMP" ]; then
+  bad "tmpdir: no mktemp on PATH — the ordering observation cannot run"
+else
+  {
+    printf '#!/usr/bin/env bash\n'
+    # The real mktemp by ABSOLUTE path: the shim dir is first on PATH, so a bare
+    # `mktemp` here would re-enter this script forever.
+    printf '# Test shim: record the invocation, then delegate to the real mktemp.\n'
+    printf 'printf %%s\\\\n "$*" >>"$MKTEMP_CALL_LOG"\n'
+    printf 'exec %s "$@"\n' "$REAL_MKTEMP"
+  } >"$MKTEMP_SHIM_DIR/mktemp"
+  chmod +x "$MKTEMP_SHIM_DIR/mktemp"
+fi
 TMPDIR_IN_REPO="$R_MOTIV/scratch-inside-the-repo"
 mkdir -p "$TMPDIR_IN_REPO"
-find "$R_MOTIV" -type f | sort >"$T/tmpdir-files-before"
-OUT=$(cd "$R_MOTIV" && TMPDIR="$TMPDIR_IN_REPO" bash "$ADVISORY" 2>&1)
+snap_worktree() { find "$R_MOTIV" -mindepth 1 -not -path "$R_MOTIV/.git/*" | sort >"$1"; }
+snap_worktree "$T/tmpdir-entries-before"
+MKTEMP_LOG_REJECT="$T/mktemp-calls-reject.txt"
+: >"$MKTEMP_LOG_REJECT"
+OUT=$(cd "$R_MOTIV" && PATH="$MKTEMP_SHIM_DIR:$PATH" MKTEMP_CALL_LOG="$MKTEMP_LOG_REJECT" \
+  TMPDIR="$TMPDIR_IN_REPO" bash "$ADVISORY" 2>&1)
 RC=$?
 record_out "TMPDIR inside the checkout"
 if [ "$RC" -eq 5 ]; then
@@ -637,24 +674,129 @@ fi
 has "tmpdir: the verdict token is UNMEASURED" "verdict UNMEASURED"
 has "tmpdir: the cause NAMES TMPDIR, so the fix is actionable" "TMPDIR"
 has "tmpdir: the cause names the in-repository resolution" "INSIDE the repository"
-find "$R_MOTIV" -type f | sort >"$T/tmpdir-files-after"
-if diff -q "$T/tmpdir-files-before" "$T/tmpdir-files-after" >/dev/null; then
-  ok "tmpdir: no file was left inside the repository by the refused run"
+has "tmpdir: the cause names the work tree as the enclosing root" "the work tree"
+REJECT_CALLS=$(wc -l <"$MKTEMP_LOG_REJECT" | tr -d ' ')
+if [ "$REJECT_CALLS" -eq 0 ]; then
+  ok "tmpdir: NOTHING was created — the refused run never invokes mktemp (the check PRECEDES the create)"
 else
-  bad "tmpdir: the refused run left files in the repository: $(diff "$T/tmpdir-files-before" "$T/tmpdir-files-after" | head -3)"
+  bad "tmpdir: the refused run created a scratch dir in the repository: mktemp was invoked $REJECT_CALLS time(s): $(tr '\n' ' ' <"$MKTEMP_LOG_REJECT")"
 fi
-rmdir "$TMPDIR_IN_REPO" 2>/dev/null || rm -rf "$TMPDIR_IN_REPO"
+snap_worktree "$T/tmpdir-entries-after"
+if diff -q "$T/tmpdir-entries-before" "$T/tmpdir-entries-after" >/dev/null; then
+  ok "tmpdir: the refused run left NOTHING in the repository (no file AND no directory)"
+else
+  bad "tmpdir: the refused run left entries in the repository: $(diff "$T/tmpdir-entries-before" "$T/tmpdir-entries-after" | tr '\n' ' ' | head -c 300)"
+fi
+rm -rf "$TMPDIR_IN_REPO"
 # NON-VACUITY: the refusal is caused by the LOCATION, not by TMPDIR being set at
-# all. The same run with TMPDIR outside the work tree must still MEASURE.
+# all. The same run with TMPDIR outside the work tree must still MEASURE — and it
+# must invoke the SHIM, or the zero above would be the shim never running rather
+# than the create never happening.
 TMPDIR_OUTSIDE="$T/scratch-outside"
 mkdir -p "$TMPDIR_OUTSIDE"
-OUT=$(cd "$R_MOTIV" && TMPDIR="$TMPDIR_OUTSIDE" bash "$ADVISORY" 2>&1)
+MKTEMP_LOG_OK="$T/mktemp-calls-measured.txt"
+: >"$MKTEMP_LOG_OK"
+OUT=$(cd "$R_MOTIV" && PATH="$MKTEMP_SHIM_DIR:$PATH" MKTEMP_CALL_LOG="$MKTEMP_LOG_OK" \
+  TMPDIR="$TMPDIR_OUTSIDE" bash "$ADVISORY" 2>&1)
 RC=$?
 record_out "TMPDIR outside the checkout"
 if [ "$RC" -eq 4 ]; then
   ok "tmpdir: an out-of-repo TMPDIR is honoured and still MEASURES (the case is not vacuous)"
 else
   bad "tmpdir: an out-of-repo TMPDIR must still measure (exit 4), got $RC (output: $OUT)"
+fi
+if [ "$(wc -l <"$MKTEMP_LOG_OK" | tr -d ' ')" -eq 1 ]; then
+  ok "tmpdir: the shim IS wired — a measuring run invokes mktemp exactly once (so the reject-path zero is real)"
+else
+  bad "tmpdir: the shim recorded $(wc -l <"$MKTEMP_LOG_OK" | tr -d ' ') mktemp call(s) on a measuring run, wanted 1 — the reject-path zero would be vacuous"
+fi
+
+# --- Case 13e: TMPDIR under the GIT COMMON DIR is REFUSED (job 239 half 2) ---
+# A toplevel-only check is BLIND in this fleet's standard configuration: every
+# lane is a `git worktree`, so `--git-common-dir` is ALWAYS OUTSIDE the lane's
+# toplevel (measured on lane-3650: toplevel /data/lanes/lane-3650, common dir
+# /data/lanes/repo/.git). A TMPDIR there writes into state EVERY lane on the box
+# shares. This case reds against a check that consults only the work tree root.
+WT_LINKED="$T/motiv-linked-worktree"
+if ! g "$R_MOTIV" worktree add --detach "$WT_LINKED" feature >/dev/null 2>&1; then
+  bad "common-dir: could not create the linked-worktree fixture (case cannot run)"
+else
+  # FIXTURE SELF-CONSISTENCY (the Case 1 idiom): assert with git that this
+  # fixture really has the property under test — a common dir OUTSIDE its own
+  # toplevel — or the case would pass against a fixture that never had it.
+  WT_TOP=$(cd "$WT_LINKED" && git rev-parse --show-toplevel)
+  WT_COMMON=$(cd "$WT_LINKED" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+  case "$WT_COMMON/" in
+    "$WT_TOP"/*)
+      bad "common-dir fixture: the linked worktree's common dir ($WT_COMMON) is INSIDE its toplevel ($WT_TOP) — the case would be vacuous"
+      ;;
+    *)
+      ok "common-dir fixture: the linked worktree's common dir is outside its own toplevel (as every lane on this fleet is)"
+      ;;
+  esac
+  TMPDIR_IN_COMMON="$WT_COMMON/scratch-inside-the-common-dir"
+  mkdir -p "$TMPDIR_IN_COMMON"
+  find "$TMPDIR_IN_COMMON" -mindepth 1 | sort >"$T/common-entries-before"
+  OUT=$(cd "$WT_LINKED" && TMPDIR="$TMPDIR_IN_COMMON" bash "$ADVISORY" 2>&1)
+  RC=$?
+  record_out "TMPDIR inside the git common dir"
+  if [ "$RC" -eq 5 ]; then
+    ok "common-dir: a TMPDIR under the git common dir is UNMEASURED (exit 5)"
+  else
+    bad "common-dir: a TMPDIR under the git common dir must exit 5, got $RC (output: $OUT)"
+  fi
+  has "common-dir: the verdict token is UNMEASURED" "verdict UNMEASURED"
+  has "common-dir: the cause NAMES TMPDIR" "TMPDIR"
+  has "common-dir: the cause names the git common directory as the enclosing root" \
+    "the git common directory"
+  lacks "common-dir: never reports a zero finding" "NO-STALENESS-RECOGNISED"
+  find "$TMPDIR_IN_COMMON" -mindepth 1 | sort >"$T/common-entries-after"
+  if diff -q "$T/common-entries-before" "$T/common-entries-after" >/dev/null; then
+    ok "common-dir: the refused run created NOTHING under the shared git directory"
+  else
+    bad "common-dir: the refused run created entries under the shared git dir: $(diff "$T/common-entries-before" "$T/common-entries-after" | tr '\n' ' ' | head -c 300)"
+  fi
+  rm -rf "$TMPDIR_IN_COMMON"
+  # NON-VACUITY: the linked worktree itself MEASURES with an out-of-repo TMPDIR,
+  # so the refusal above is the LOCATION and not the fixture being unusable.
+  OUT=$(cd "$WT_LINKED" && TMPDIR="$TMPDIR_OUTSIDE" bash "$ADVISORY" 2>&1)
+  RC=$?
+  record_out "linked worktree, TMPDIR outside the repository"
+  if [ "$RC" -eq 4 ]; then
+    ok "common-dir: the same linked worktree MEASURES with an out-of-repo TMPDIR (not vacuous)"
+  else
+    bad "common-dir: the linked worktree must measure (exit 4) with an out-of-repo TMPDIR, got $RC (output: $OUT)"
+  fi
+  g "$R_MOTIV" worktree remove --force "$WT_LINKED" >/dev/null 2>&1 || rm -rf "$WT_LINKED"
+fi
+
+# --- Case 13f: an UNRESOLVABLE work tree root is UNMEASURED, never a pass ----
+# The scratch check compares against two roots, and if either cannot be resolved
+# it must NOT fall back to checking whichever one it got — a check that silently
+# narrows its own subject is the permissive-branch shape #3650 refuses. A BARE
+# repo is the fixture that separates the two: `git rev-parse --git-dir` SUCCEEDS
+# there (so the work-tree probe passes) while `--show-toplevel` fails.
+BARE="$T/bare-repo.git"
+if ! git init -q --bare "$BARE" >/dev/null 2>&1; then
+  bad "bare-repo: could not create the bare-repo fixture (case cannot run)"
+else
+  if (cd "$BARE" && git rev-parse --git-dir >/dev/null 2>&1) &&
+    ! (cd "$BARE" && git rev-parse --show-toplevel >/dev/null 2>&1); then
+    ok "bare-repo fixture: --git-dir resolves and --show-toplevel does not (the case is not vacuous)"
+  else
+    bad "bare-repo fixture: expected a resolvable --git-dir and an unresolvable --show-toplevel"
+  fi
+  OUT=$(cd "$BARE" && bash "$ADVISORY" 2>&1)
+  RC=$?
+  record_out "bare repo (unresolvable work tree root)"
+  if [ "$RC" -eq 5 ]; then
+    ok "bare-repo: an unresolvable work tree root is UNMEASURED (exit 5)"
+  else
+    bad "bare-repo: an unresolvable work tree root must exit 5, got $RC (output: $OUT)"
+  fi
+  has "bare-repo: the verdict token is UNMEASURED" "verdict UNMEASURED"
+  lacks "bare-repo: never reports a zero finding" "NO-STALENESS-RECOGNISED"
+  lacks "bare-repo: prints no blast-radius count" "blast-radius"
 fi
 
 # --- Case 12b: the USAGE path needs no external command (#3650 B4) ---------
