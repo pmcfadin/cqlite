@@ -9038,6 +9038,164 @@ test_lane_lock_uncreate_is_bound_to_the_created_instance() {
 t test_lane_lock_uncreate_is_bound_to_the_created_instance
 
 
+
+
+# ---------------------------------------------------------------------------
+# A RACE AND AN I/O ERROR MUST NOT SHARE A DIAGNOSTIC (#3601, roborev job 244 B20 + class sweep).
+#
+# THE DEFECT: `supervisor_lock_take` returns 1 when its `mkdir` fails, and `mkdir` fails BOTH because
+# someone else took the name (EEXIST — a race, where re-running is exactly right) and because the path
+# cannot hold a lock (EACCES/ENOSPC/ENOENT — where re-running loops forever over a state that cannot
+# resolve until permissions or disk are fixed). After a SUCCESSFUL rename-aside, every status 1 was
+# reported as a lost race: "a stale lock was cleared and the name was claimed by someone else … re-run
+# this supervisor". On a broken filesystem that tells an operator nothing is wrong and sends them into a
+# retry loop.
+#
+# WHY THIS ONE IS NOT JUST ANOTHER OVERCLAIM: it is #3601'S OWN HEADLINE DEFECT, one branch over. The AC7
+# addendum exists because the pre-fix code "blames the lock rather than the path shape, and an operator
+# goes looking for a stale lock that isn't there". The two facts want OPPOSITE actions — retry versus fix
+# the box — which is what makes conflating them a misdirection rather than an imprecision.
+#
+# THE SWEEP: three sites in this file shared that predicate and did not disambiguate (the post-reclaim
+# take, the publish's rename, the marker write); two others already did (the FIRST take, and the reclaim
+# rename), which is what made the omissions oversights rather than design. All five are asserted here.
+# ---------------------------------------------------------------------------
+test_lane_lock_race_and_io_error_are_not_conflated() {
+  local d tmp lane lock out rc dead ovr
+
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"
+  lane="lane3601conflate$$"
+  mkdir -p "$tmp"
+  lock="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+
+  # ---- (1) B20: the SECOND take's mkdir fails while NOTHING is at the name. Fault-injected so only the
+  # second call fails, which is the interleaving the finding describes; the branch under test — the
+  # existence check that picks the refusal — is shipped code.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  ovr="$d/f-second-take.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1' \
+       '  if [[ -n "${SV_SECOND_TAKE:-}" ]]; then return 1; fi
+  export SV_SECOND_TAKE=1
+  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"could NOT BE CREATED"* ]] \
+       && [[ "$out" == *"after a stale lock was successfully cleared"* ]] \
+       && [[ "$out" == *"Re-running WITHOUT changing any of that will fail exactly the same way"* ]] \
+       && [[ "$out" != *"taken again before this run could claim it"* ]]; then
+      pass "lane-lock B20: a post-reclaim claim that fails with NOTHING at the name is reported as a PATH failure, says the phase it happened in, and warns that re-running changes nothing — not as a lost race"
+    else
+      fail "lane-lock-b20-conflated: rc=$rc out=[$out] — reporting a filesystem failure as a lost race sends the operator into a retry loop over a state that cannot resolve"
+    fi
+  fi
+
+  # ---- (2) NON-VACUITY: a real lost race must still be reported as one, or (1) is satisfied by code
+  # that has simply stopped recognising contention. The name is occupied by a LIVE holder at the moment
+  # the second take runs, so the existence check must select the race refusal.
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$dead" >"$lock/pid"
+  ovr="$d/f-second-take-occupied.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1' \
+       '  if [[ -n "${SV_SECOND_TAKE:-}" ]]; then mkdir -p -- "$SUPERVISOR_LOCK" 2>/dev/null || true; printf "%s\n" 313131 >"$SUPERVISOR_LOCK/pid" 2>/dev/null || true; return 1; fi
+  export SV_SECOND_TAKE=1
+  mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"taken again before this run could claim it"* ]] \
+       && [[ "$out" != *"could NOT BE CREATED"* ]]; then
+      pass "lane-lock B20 NON-VACUITY: when the name IS occupied the same failure is still reported as a lost race — the existence test discriminates, it does not just relabel everything as a path failure"
+    else
+      fail "lane-lock-b20-nonvacuity: rc=$rc out=[$out] — a genuine race must still read as a race"
+    fi
+  fi
+
+  # ---- (3) SWEEP SITE: the publish's RENAME fails because the lock directory vanished under it. That is
+  # contention, and the pre-sweep text called every rename failure a FILESYSTEM failure and sent the
+  # operator to check a disk that is fine.
+  rm -rf "$lock"
+  ovr="$d/f-rename-gone.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! mv -f -- "$tmpf" "$SUPERVISOR_LOCK/pid" 2>/dev/null; then' \
+       '  rm -rf -- "$SUPERVISOR_LOCK"
+  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"ALREADY GONE"* ]] \
+       && [[ "$out" == *"This is CONTENTION, not a filesystem fault"* ]] \
+       && [[ "$out" == *"nothing needs fixing"* ]] \
+       && [[ "$out" != *"This is a FILESYSTEM failure"* ]]; then
+      pass "lane-lock sweep (publish rename): a rename that fails because the directory vanished is reported as CONTENTION with 're-run' as the action — not as a disk problem the operator would go looking for"
+    else
+      fail "lane-lock-sweep-rename: rc=$rc out=[$out]"
+    fi
+  fi
+
+  # ---- (4) SWEEP SITE: the MARKER write fails because the directory vanished under it. Same predicate,
+  # same two natures, one step earlier.
+  rm -rf "$lock"
+  ovr="$d/f-marker-gone.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_take \
+       '  if ! { : >"$marker"; } 2>/dev/null && [[ ! -d "$SUPERVISOR_LOCK" ]]; then' \
+       '  rm -rf -- "$SUPERVISOR_LOCK"
+  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && [[ "$out" == *"ALREADY GONE"* ]] \
+       && [[ "$out" == *"This is CONTENTION, not a filesystem fault"* ]] \
+       && [[ "$out" == *"already gone when it looked"* ]] \
+       && [[ "$out" != *"This is a FILESYSTEM failure"* ]]; then
+      pass "lane-lock sweep (marker write): a marker write that fails because the directory vanished is CONTENTION, and the refusal also states that nothing was left behind — because nothing was there to remove"
+    else
+      fail "lane-lock-sweep-marker: rc=$rc out=[$out]"
+    fi
+  fi
+
+  # ---- (5) NON-VACUITY for (3)/(4): a REAL filesystem failure must still read as one. The write fails
+  # with the directory intact, so the nature must be `filesystem` and the action must be to check the box.
+  rm -rf "$lock"
+  ovr="$d/f-write-fs.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_lock_publish \
+       '  if ! { printf '"'"'%s\n'"'"' "$$" >"$tmpf"; } 2>/dev/null; then' \
+       '  if true; then'; then
+    out="$(lane_lock_drive_at "$d" "$ovr" "$tmp" "$lane")" || true
+    if [[ "$out" == *"This is a FILESYSTEM failure"* ]] \
+       && [[ "$out" == *"check free space and mount options"* ]] \
+       && [[ "$out" != *"This is CONTENTION"* ]]; then
+      pass "lane-lock sweep NON-VACUITY: a genuine filesystem failure still reports as one and still sends the operator to df/mount — the nature discriminates both ways"
+    else
+      fail "lane-lock-sweep-nonvacuity: out=[$out]"
+    fi
+  fi
+
+  # ---- (6) STRUCTURAL: every remedy branch in the publish-failure refusal takes its FIRST ACTION from
+  # the failure's nature rather than hard-coding one. This is what stops a new cleanup branch being added
+  # with "fix the filesystem problem" baked in, which is how sites 3 and 4 came to misdirect.
+  local body hardcoded
+  body="$(sed -n '/^supervisor_lock_refuse_publish_failed()/,/^}/p' "$SUPERVISOR")"
+  if [[ -z "$body" || "$body" != *'supervisor_lock_refuse_publish_failed() {'* ]]; then
+    fail "lane-lock-sweep-structural-premise: could not extract the refusal from $SUPERVISOR"
+  else
+    hardcoded="$(printf '%s\n' "$body" | grep -n 'remedy=' | grep -v 'first_action' || true)"
+    if [[ -z "$hardcoded" ]]; then
+      pass "lane-lock sweep STRUCTURAL: every remedy branch derives its first action from the failure's NATURE — no branch hard-codes an action that could be aimed at the wrong cause"
+    else
+      fail "lane-lock-sweep-hardcoded-remedy: [$hardcoded] — a remedy that names an action without consulting the nature is how a race gets reported as a disk problem"
+    fi
+  fi
+
+  rm -rf "$lock" "$tmp"
+}
+
+t test_lane_lock_race_and_io_error_are_not_conflated
+
+
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
 #
