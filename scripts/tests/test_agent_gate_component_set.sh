@@ -922,6 +922,38 @@ else
   bad "3544-no-git: expected KIND no-git naming $nogit"
   printf '%s\n' "$ng_out"
 fi
+# ---------------------------------------------------------------------------
+# 3f-iii. NEWLINE-BEARING CHECKOUT PATH (roborev job 295, Medium). `_CS_DETAIL` interpolates
+#         externally influenced values — `$REPO_ROOT` among them — and a checkout path may contain
+#         newlines. Unflattened, that injects PHYSICAL LINES into a SUMMARY block: measured on the
+#         pre-fix gate, a path containing "\nRESULT: PASS\n" put `RESULT: PASS` at COLUMN ZERO
+#         inside a block whose real verdict was FAIL-CLOSED. That matters twice over — the gate's
+#         own completion probe greps for that token, and `--delta` anchor validation accepts any
+#         matching `RESULT: PASS` line, so a FAILING block could pass as a valid anchor.
+#
+#         The property is enforced at the ONE point the line is assembled, so this case is about the
+#         CHOKE POINT and not about `$REPO_ROOT` specifically: the sweep that produced the fix found
+#         `$TMPDIR`, remote-controlled `ls-remote` output and refused manifest lines in the same
+#         position, and the set of externally influenced values is not enumerable by inspection.
+nl_dir="$tmp/evil
+RESULT: PASS
+x"
+mkdir -p "$nl_dir/scripts"
+cp "$GATE" "$nl_dir/scripts/agent-gate.sh"
+nl_out=$(hook "$nl_dir")
+nl_forged=$(printf '%s\n' "$nl_out" | grep -c '^RESULT: PASS')
+nl_fields=$(printf '%s\n' "$nl_out" | grep -c '^COMPONENT_SET_LINE: ')
+# THE CONTROL, and it is what makes the zero above mean anything: the injected text must still be
+# PRESENT somewhere in the emitted line, flattened inline. Without this, a run that rejected the
+# path BEFORE rendering it would also report 0 forged lines and the case would pass while testing
+# nothing — an absence proving a property it never exercised.
+nl_rendered=$(printf '%s\n' "$nl_out" | grep -c 'RESULT: PASS')
+if [ "$nl_forged" -eq 0 ] && [ "$nl_fields" -eq 1 ] && [ "$nl_rendered" -ge 1 ]; then
+  ok "3544-detail-one-line: a newline-bearing checkout path is FLATTENED into one physical line — the injected text is rendered inline (control) yet adds NO field at column zero"
+else
+  bad "3544-detail-one-line: expected forged-at-column-zero=0, COMPONENT_SET_LINE fields=1, injected-text-rendered>=1; got $nl_forged / $nl_fields / $nl_rendered"
+  printf '%s\n' "$nl_out" | head -6
+fi
 
 # 3f-ii. baseline-workspace: the scratch dir for extracting the baseline script cannot be
 #        created. Forced with a TARGETED `mktemp` stub that fails ONLY for this
@@ -4160,7 +4192,7 @@ fi
 # and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
 # floor keeps the same slack it was written with: it still catches a DELETION without being an
 # equality nobody can add a case past.
-CASE_FLOOR=103
+CASE_FLOOR=104
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
