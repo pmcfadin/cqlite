@@ -806,6 +806,7 @@ minimal-build:     PASS|FAIL (<Ns>)  [build cqlite-core --no-default-features --
 all-features-check: PASS|FAIL (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]
 pub-surface:       PASS|FAIL (<Ns>)  [no-cargo]
 python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]
+tooling-tests:     PASS|FAIL (<Ns>)  [cargo not observable: cargo may run inside ~60 nested test scripts (child processes)]
 smoke:             PASS|FAIL (<Ns>)  [build cqlite-cli default-features]
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
