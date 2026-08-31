@@ -1102,5 +1102,45 @@ $out23b"
 fi
 kill "$LIVEP" 2>/dev/null || true
 
+# ===========================================================================
+echo "TEST 24: the SCOPE LIMIT is in the EMITTED line, not only the header"
+# ===========================================================================
+# `locks=0` reads as "no lanes occupied". It MEANS "no lane RECORDED a lock" — this tool can
+# only see occupants that CALLED acquire. That limit was documented in the header, which is
+# where a caveat-hunter looks and NOT where the person who needs it looks. Same shape a peer
+# found in a census line reading only "not compared": disclosed in the SOURCE is not disclosed
+# in the ARTIFACT. So the test asserts what a reader SEES, and it asserts the empty case
+# explicitly, because that is the one that reads as an all-clear.
+# A FRESH lock root: by this point the suite has created many locks, so the shared root is
+# non-empty and would test the wrong precondition (my first attempt at this case did exactly
+# that and failed against a 20-lock render).
+EMPTY_ROOT="$T/empty-root"; mkdir -p "$EMPTY_ROOT"
+OUT="$(env -u LANE_LOCK_PID LANE_ROOT="$EMPTY_ROOT" bash "$LL" status 2>&1)"
+if printf '%s' "$OUT" | grep -q 'locks=0' \
+   && printf '%s' "$OUT" | grep -q 'scope=lock-takers-only' \
+   && printf '%s' "$OUT" | grep -qi 'does NOT.*mean no lane is occupied' \
+   && printf '%s' "$OUT" | grep -qi 'not a clean bill of health'; then
+  ok "(a) an EMPTY status render states that 0 means no lane RECORDED a lock, not that no lane is occupied, and refuses to read as a clean bill of health"
+else
+  bad "(a) the empty status render does not carry its own scope limit:
+$OUT"
+fi
+
+# (b) the NON-EMPTY render carries it too — a count of recorded locks is still not a census of
+# occupied lanes, and someone reading locks=3 needs that as much as someone reading locks=0.
+sleep 300 & SCOPE_H=$!
+mkdir -p "$LANES/lane-906"
+( cd "$LANES/lane-906" && env LANE_ROOT="$LANES" bash "$LL" acquire 906 --pid "$SCOPE_H" >/dev/null 2>&1 )
+ll status
+if printf '%s' "$OUT" | grep -qE 'locks=[1-9]' \
+   && printf '%s' "$OUT" | grep -q 'scope=lock-takers-only' \
+   && printf '%s' "$OUT" | grep -qi 'not occupied lanes'; then
+  ok "(b) a NON-EMPTY status render also states it counts RECORDED locks rather than occupied lanes"
+else
+  bad "(b) the non-empty status render lost its scope limit:
+$OUT"
+fi
+kill "$SCOPE_H" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

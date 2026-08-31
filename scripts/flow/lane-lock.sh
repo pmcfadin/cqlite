@@ -1546,7 +1546,7 @@ cmd_status() {
     return 0
   fi
   if [ ! -d "$lock" ]; then
-    emit "STATUS lock-root=$lock lane-root=$root locks=0 detail=lock-root-absent"
+    emit "STATUS lock-root=$lock lane-root=$root locks=0 detail=lock-root-absent scope=lock-takers-only (0 means NO LANE RECORDED A LOCK — it does NOT mean no lane is occupied. This tool can only report occupants that CALLED acquire; a session working a lane without taking the lock is invisible to it, which is why claim.sh reports the lane-lock state on every grant. Not a clean bill of health.)"
     return 0
   fi
   for f in "$lock"/lane-*.lock; do
@@ -1555,7 +1555,16 @@ cmd_status() {
     status_one "$f" "$root/$base" "${base#lane-}"
     count=$((count + 1))
   done
-  emit "STATUS lock-root=$lock lane-root=$root locks=$count"
+  # Same disclosure on the non-empty render, and for the same reason: a count of RECORDED
+  # locks is not a census of OCCUPIED lanes. Emitted rather than left in the header, because
+  # a caveat that lives only where the caveat-hunter looks is not a disclosure to the person
+  # who needs it (#3436; the shape lane-3500 found in a census line reading only
+  # "not compared").
+  if [ "$count" -eq 0 ]; then
+    emit "STATUS lock-root=$lock lane-root=$root locks=0 scope=lock-takers-only (0 means NO LANE RECORDED A LOCK — NOT that no lane is occupied. Only occupants that CALLED acquire are visible here. Not a clean bill of health.)"
+  else
+    emit "STATUS lock-root=$lock lane-root=$root locks=$count scope=lock-takers-only (counts RECORDED locks, not occupied lanes; a session that never called acquire is invisible)"
+  fi
   return 0
 }
 
