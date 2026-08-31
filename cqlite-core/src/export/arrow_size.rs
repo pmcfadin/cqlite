@@ -249,10 +249,36 @@ pub const MAX_ESTIMATE_LEAF_SLOTS: usize = 1 << 20;
 /// );
 /// ```
 pub fn estimate_arrow_row_bytes(columns: &[ColumnInfo], row: &QueryRow) -> usize {
+    // Resolution: one `values.get(name)` probe per projected column. The FUSED
+    // accounting (`PreparedColumns`, issue #3552) resolves the same cells the
+    // build pass's transpose does instead; both then charge through
+    // `charge_row`, so only the RESOLUTION differs between them.
+    charge_row(
+        columns
+            .iter()
+            .map(|col| (column_shape(col), row.values.get(col.name.as_str()))),
+    )
+}
+
+/// The charging core BOTH accountings share (issue #3552).
+///
+/// Takes one `(slot shape, resolved cell)` pair per projected column, in column
+/// order, and charges the model this file documents. `None` is an ABSENT column
+/// and is charged exactly like a present-but-null one: its validity byte, its
+/// shape's structural overhead and its per-column residual are all still owed,
+/// because the converter materializes a slot for every projected column of every
+/// row whether the row carries the cell or not.
+///
+/// Sharing this is what stops the standalone estimator and the push-time fused
+/// accounting from drifting into two charging models — they differ ONLY in how a
+/// column's cell is resolved, which is the property the fused accounting's
+/// equivalence test pins.
+fn charge_row<'a, I>(cells: I) -> usize
+where
+    I: IntoIterator<Item = (Shape<'a>, Option<&'a Value>)>,
+{
     let mut est = Estimator::new();
-    for col in columns {
-        let cell = row.values.get(col.name.as_str());
-        let shape = column_shape(col);
+    for (shape, cell) in cells {
         // Both node budgets are per COLUMN (review C2).
         est.begin_column();
         // The per-column residual, charged exactly once per row and only for a
@@ -268,6 +294,66 @@ pub fn estimate_arrow_row_bytes(columns: &[ColumnInfo], row: &QueryRow) -> usize
         }
     }
     est.total
+}
+
+/// Per-column Arrow slot shapes resolved ONCE for a column set, so the fused
+/// push-time accounting does not re-run `column_shape` per row (issue #3552).
+///
+/// Crate-private: this is the seam between the estimator and
+/// `super::arrow_row_accumulator`, not a public contract. `estimate_arrow_row_bytes`
+/// remains the public surface.
+pub(crate) struct PreparedColumns<'a> {
+    shapes: Vec<Shape<'a>>,
+}
+
+impl<'a> PreparedColumns<'a> {
+    /// Resolve every column's Arrow slot shape once.
+    pub(crate) fn new(columns: &'a [ColumnInfo]) -> Self {
+        Self {
+            shapes: columns.iter().map(column_shape).collect(),
+        }
+    }
+
+    /// Number of prepared columns.
+    pub(crate) fn len(&self) -> usize {
+        self.shapes.len()
+    }
+
+    /// Width of one row whose cells are ALREADY resolved in column order:
+    /// `cells[c]` is column `c`'s cell, `None` when the row does not carry it.
+    ///
+    /// Fails closed to `usize::MAX` on an arity mismatch. A short `cells` would
+    /// otherwise silently drop the trailing columns' charges (`zip` truncates)
+    /// and UNDER-count, the one direction the conservatism contract forbids.
+    pub(crate) fn row_bytes(&self, cells: &[Option<Value>]) -> usize {
+        if cells.len() != self.shapes.len() {
+            return usize::MAX;
+        }
+        charge_row(
+            self.shapes
+                .iter()
+                .copied()
+                .zip(cells.iter().map(Option::as_ref)),
+        )
+    }
+
+    /// Width of row `row` of a COLUMN-MAJOR cell store (`cells[c][row]`) — the
+    /// layout the accumulator commits into, so a buffered row's width can be
+    /// re-derived from the stored cells rather than from a remembered number.
+    ///
+    /// Fails closed to `usize::MAX` on an arity mismatch or a row index outside
+    /// any column, for the same reason as [`Self::row_bytes`].
+    pub(crate) fn row_bytes_columnar(&self, cells: &[Vec<Option<Value>>], row: usize) -> usize {
+        if cells.len() != self.shapes.len() || cells.iter().any(|col| row >= col.len()) {
+            return usize::MAX;
+        }
+        charge_row(
+            self.shapes
+                .iter()
+                .copied()
+                .zip(cells.iter().map(|col| col.get(row).and_then(Option::as_ref))),
+        )
+    }
 }
 
 /// Sum of Arrow buffer **lengths** across `batch`, recursively including child
