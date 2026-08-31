@@ -314,23 +314,23 @@ where
 /// Per-column Arrow slot shapes resolved ONCE for a column set, so the fused
 /// push-time accounting does not re-run `column_shape` per row (issue #3552).
 ///
-/// Crate-private: this is the seam between the estimator and
-/// `super::arrow_row_accumulator`, not a public contract. `estimate_arrow_row_bytes`
-/// remains the public surface.
-pub(crate) struct PreparedColumns<'a> {
+/// Visible ONLY inside `crate::export`: this is the seam between the estimator and
+/// `super::arrow_row_accumulator`, not a public contract and not a crate-wide one
+/// (issue #3552 review N5). `estimate_arrow_row_bytes` remains the public surface.
+pub(in crate::export) struct PreparedColumns<'a> {
     shapes: Vec<Shape<'a>>,
 }
 
 impl<'a> PreparedColumns<'a> {
     /// Resolve every column's Arrow slot shape once.
-    pub(crate) fn new(columns: &'a [ColumnInfo]) -> Self {
+    pub(in crate::export) fn new(columns: &'a [ColumnInfo]) -> Self {
         Self {
             shapes: columns.iter().map(column_shape).collect(),
         }
     }
 
     /// Number of prepared columns.
-    pub(crate) fn len(&self) -> usize {
+    pub(in crate::export) fn len(&self) -> usize {
         self.shapes.len()
     }
 
@@ -340,7 +340,7 @@ impl<'a> PreparedColumns<'a> {
     /// Fails closed to `usize::MAX` on an arity mismatch. A short `cells` would
     /// otherwise silently drop the trailing columns' charges (`zip` truncates)
     /// and UNDER-count, the one direction the conservatism contract forbids.
-    pub(crate) fn row_bytes(&self, cells: &[Option<Value>]) -> usize {
+    pub(in crate::export) fn row_bytes(&self, cells: &[Option<Value>]) -> usize {
         if cells.len() != self.shapes.len() {
             return usize::MAX;
         }
@@ -358,7 +358,7 @@ impl<'a> PreparedColumns<'a> {
     ///
     /// Fails closed to `usize::MAX` on an arity mismatch or a row index outside
     /// any column, for the same reason as [`Self::row_bytes`].
-    pub(crate) fn row_bytes_columnar(&self, cells: &[Vec<Option<Value>>], row: usize) -> usize {
+    pub(in crate::export) fn row_bytes_columnar(&self, cells: &[Vec<Option<Value>>], row: usize) -> usize {
         if cells.len() != self.shapes.len() || cells.iter().any(|col| row >= col.len()) {
             return usize::MAX;
         }
