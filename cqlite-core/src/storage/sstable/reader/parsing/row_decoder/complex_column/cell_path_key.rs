@@ -169,9 +169,35 @@
 //! Making that exact is a one-token change per fixed-width arm in
 //! `parse_value_from_raw_bytes`, which every value read in this crate goes
 //! through, and that file is already over the file-size threshold so it cannot
-//! grow — out of #3612's scope, and deliberately NOT patched with a second
-//! framing walk here: a call-site validator that must know about every decoder
-//! is precisely the shape this module replaced.
+//! grow — out of #3612's scope (tracked as issue #3723), and deliberately NOT
+//! patched with a second framing walk here: a call-site validator that must know
+//! about every decoder is precisely the shape this module replaced.
+//!
+//! ## The residual's CONSEQUENCE, measured (issue #3612, R6-F1)
+//! Recorded because the earlier statement of this residual described only the
+//! collapse and not what the collapse costs, and the difference is a behaviour
+//! change this diff introduces:
+//!
+//! * At HEAD, `[count=1][len=4][4B]` (12 bytes) and `[count=1][len=5][5B]`
+//!   (13 bytes) as `frozen<list<int>>` cell paths BOTH decode to
+//!   `Frozen(List([Integer(7)])))` — equal. On `origin/main` they decoded to two
+//!   DISTINCT `Value::Blob`s of 12 and 13 bytes. (Both measured, each with a
+//!   control proving distinct payloads still compare unequal.)
+//! * `Value::Map` is a `Vec<(Value, Value)>` and does not deduplicate, so the
+//!   RUST surface keeps both entries; so do the CLI JSON writer, Arrow, and Node
+//!   (a JS `Map` keyed by object identity). **Python is the exception**: its
+//!   hashable projection makes two equal-projecting keys ONE dict entry (measured
+//!   1 vs a control's 2), so an entry is LOST there where `main` kept two.
+//!
+//! **Scope, from Cassandra rather than from judgement:** that 13-byte path cannot
+//! occur in a well-formed SSTable. `ListSerializer.validate` (5.0.8) validates
+//! every element with its own type's `validate` — so a 5-byte `int` element is
+//! rejected by `Int32Serializer` — and then throws
+//! `"Unexpected extraneous bytes after list value"`. So the collapse needs input
+//! Cassandra ITSELF refuses to read, on which `main` returned two opaque keys and
+//! HEAD returns one merged key; neither matches Cassandra, which errors. That is
+//! why #3723's fix is STRICT REJECTION of such a path, not preserving the
+//! distinctness of two corrupt encodings.
 //!
 //! # Presenting the key EXACTLY as the FROZEN spelling does (issue #3612, R3-F2)
 //!
