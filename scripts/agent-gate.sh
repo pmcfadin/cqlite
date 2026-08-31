@@ -2850,6 +2850,10 @@ _CS_UNBOUNDABLE_RC=199
 # 292). Distinct from 199 ("not run") and from 124/137 ("bound exceeded"), because the remedy and
 # the sentence differ: the command succeeded and its OUTPUT is unusable.
 _CS_REPLAY_RC=198
+# Largest stdout a bounded pre-flight call may produce. Every real one is a git read of a
+# manifest or a sha (tens of bytes to a few KiB); 1 MiB is far beyond any legitimate output and
+# far below the 4.1 GB a runaway writer produced in 6s when this was unbounded.
+_CS_CAP_MAX_BYTES=1048576
 # Bound applied to every network-capable operation in this pre-flight, in seconds. ONE
 # variable, read by every call site AND by the diagnostics, so the enumeration below cannot
 # describe a bound the code does not apply — it used to be a `120` literal at five call sites
@@ -3023,7 +3027,45 @@ _component_set_bounded() {
   #
   # Stderr's replay stays best-effort: it feeds diagnostics only, and losing part of a message must
   # not turn a measured result into a refusal.
-  if ! cat "$_CS_CAP_OUT" 2>/dev/null; then
+  # THE REPLAY IS BOUNDED (roborev job 297, Medium). An unbounded `cat` on `$_CS_CAP_OUT` is not
+  # bounded by the execution deadline: a descendant that OUTLIVES a successful child keeps writing to
+  # that fd, and `cat` on a regular file only stops when it reaches EOF — which never happens while a
+  # writer outpaces the reader. MEASURED, and my first attempt to measure it was wrong in the
+  # permissive direction: a slow bash-loop writer let `cat` terminate, which looked like a refutation.
+  # With a fast writer (`yes`):
+  #
+  #   cat on the growing capture -> DID NOT terminate in 6s (rc 124)
+  #   the capture grew to 4.1 GB in those ~6s
+  #
+  # So the practical consequence is not only a hang, it is filling the filesystem — and on this fleet
+  # a full disk breaks every lane (link-time ENOSPC even presents as a bus error, which names the
+  # wrong subsystem entirely).
+  #
+  # WHY NOT THE REVIEW'S OTHER OPTION (kill the process group after success): this function ALREADY
+  # rejected that, on record, and re-adding it would reintroduce roborev job 279's defect. Two
+  # reasons, both still true — bash reaps the leader as soon as it exits, so the pgid is free for
+  # REUSE and the kill could land on an unrelated group (this repo's incident: a pattern kill
+  # destroyed a peer's gate at component 28 of 30); and the group kill is expressible only in the
+  # bash-watchdog arm, because GNU `timeout`'s child pgid is unknown to us — while the finding is
+  # specifically about the `timeout`/`gtimeout` path. So the bound goes on the READ, which is
+  # expressible in every arm.
+  #
+  # OVERSIZE IS A REFUSAL, NOT A TRUNCATION, for job 292's reason: a truncated manifest is still
+  # perfectly GRAMMATICAL, so the closed-grammar parser cannot see the loss and the missing trailing
+  # components produce a false PASS. An unmeasurable size is likewise a refusal — not a permissive
+  # branch for a measurement that did not happen.
+  local _cap_n
+  _cap_n=$(head -c "$((_CS_CAP_MAX_BYTES + 1))" "$_CS_CAP_OUT" 2>/dev/null | wc -c 2>/dev/null)
+  case "$_cap_n" in
+    ''|*[!0-9]*)
+      cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
+      return "$_CS_REPLAY_RC" ;;
+  esac
+  if [ "$_cap_n" -gt "$_CS_CAP_MAX_BYTES" ]; then
+    cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
+    return "$_CS_REPLAY_RC"
+  fi
+  if ! head -c "$_CS_CAP_MAX_BYTES" "$_CS_CAP_OUT" 2>/dev/null; then
     cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
     return "$_CS_REPLAY_RC"
   fi
@@ -3444,7 +3486,17 @@ _CS_MANIFEST_REL="scripts/agent-gate.components"
 _component_set_valid_name() {
   case "$1" in
     ''|-*) return 1 ;;
-    *[![:alnum:]._-]*) return 1 ;;
+    # ASCII RANGES, NOT `[:alnum:]` (roborev job 297, Low). `[:alnum:]` is LOCALE-DEPENDENT, so the
+    # same manifest was valid on one host and invalid on another. Measured across three locales:
+    #
+    #   LC_ALL=C            "café" -> REJECTED     "фmt" -> REJECTED
+    #   LC_ALL=en_US.UTF-8  "café" -> ACCEPTED (!) "фmt" -> REJECTED by the range form
+    #   LC_ALL=C.UTF-8      "café" -> ACCEPTED (!)
+    #
+    # The explicit range REJECTS both under every locale tested, so it is used rather than forcing a
+    # locale globally. (If a host is ever found whose collation breaks `A-Za-z`, the fully enumerated
+    # character list gives the same answers and is the fallback — measured alongside these.)
+    *[!A-Za-z0-9._-]*) return 1 ;;
   esac
   return 0
 }
@@ -4544,16 +4596,20 @@ _component_set_probe_inner() {
   # colon PATH separator only, so a space-bearing path is expressible and a colon-bearing one is
   # not. Only the actual separator is refused. (The URL whitespace check elsewhere STAYS: a URL has
   # no legitimate whitespace, so there the rejection is not a false FAIL.)
-  case "$csdir" in
-    *:*)
-      # `GIT_ALTERNATE_OBJECT_DIRECTORIES` is a COLON-separated list, so a colon (or whitespace)
-      # in the path would silently split it into paths that are not this one. Refused, never
-      # quoted-and-hoped: the scratch dir comes from `mktemp` under $TMPDIR, so this is a
-      # pathological-TMPDIR guard rather than an expected state.
-      _CS_KIND=baseline-workspace
-      _CS_DETAIL="the isolated scratch repository's path contains a COLON, the separator GIT_ALTERNATE_OBJECT_DIRECTORIES splits on, so it cannot be expressed there; refusing rather than reading objects from a path this run cannot name exactly"
-      return 0 ;;
-  esac
+  # NO CHECK ON `$csdir` HERE (roborev job 297, Low). It used to be refused for containing a colon,
+  # on the `GIT_ALTERNATE_OBJECT_DIRECTORIES` reasoning above — but `$csdir` NEVER ENTERS that
+  # variable. Only `$lane_objects` does (see `_CS_READ_ENV` below); `$csdir` is passed as a quoted
+  # `git -C` argument, where a colon is inert.
+  #
+  # The check was worse than merely redundant: it lived on the objects-ABSENT path only, so an
+  # otherwise valid colon-bearing `TMPDIR` failed the gate **only when the baseline object happened
+  # to need fetching** — the same checkout passing or failing depending on cache state. A
+  # cache-dependent refusal is harder to diagnose than either a consistent pass or a consistent fail,
+  # and this one had no property to defend.
+  #
+  # Introduced by the fix for job 296, which narrowed whitespace-or-colon to colon at BOTH sites
+  # without asking whether each site needed a check at all. Narrowing a guard is not the same as
+  # establishing that the guard has a subject.
   _CS_SHA="$cssha"
   fi
 
