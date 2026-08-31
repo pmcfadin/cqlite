@@ -38,6 +38,16 @@ directory is checkout-relative, so no env var can hide it. Precedent:
 | **CLI `--format json`** (`cqlite-cli/src/output/json.rs`) | **#3629** | `cqlite-cli/tests/issue_3629_cli_udt_json_namespace.rs` |
 | **`cqlite-core` `ToJson for Value`** (`src/query/result.rs`) | **#3629** | `cqlite-core/tests/issue_3629_core_tojson_udt_namespace.rs` |
 
+**#3612 changed WHICH COLUMNS reach three of these four sites, without changing
+the sites themselves.** Before it, only the FROZEN columns (`fcm`/`ftm`/`fs`)
+delivered a structured `Value::Udt`; the multicell `cm`/`tm` keys arrived as an
+opaque `Value::Blob` from the cell-path fallback and reached no UDT renderer at
+all. They now decode structurally, so `cm`/`tm` additionally exercise the two
+bindings and the CLI's `--format json` — a second, MULTICELL route into the same
+renderers. `cqlite-core`'s `ToJson` is the exception and stays a non-subject for
+these columns, because its `Map` arm `Display`-stringifies every key regardless of
+type.
+
 The two #3629 sites were an independent SECOND COPY of the same defect and are now
 one shared rule, `cqlite-core/src/util/udt_json.rs::udt_to_json_object` — declared
 fields and nothing else, generic over the field-VALUE renderer because the two

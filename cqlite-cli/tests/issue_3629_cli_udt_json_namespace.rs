@@ -341,25 +341,50 @@ async fn nondiscriminating_passes_on_unfixed_code_shapes_table_collide_nestings(
     );
 }
 
-/// MEASURED NON-SUBJECT, asserted as documentation of a known gap: `cm`/`tm` are
-/// NON-FROZEN `map<frozen<udt>, int>`, whose key lives in the cell path, and
-/// `parse_cell_path_key` falls back to `Value::Blob` for a UDT. Such a key never
-/// becomes a `Value::Udt`, so these columns CANNOT exercise the UDT renderer and
-/// must not be claimed as coverage of #3629.
+/// A SUBJECT SINCE #3612, and it used to be a documented NON-subject.
+///
+/// `cm`/`tm` are NON-FROZEN `map<frozen<udt>, int>`, so each key lives in the cell
+/// PATH. This test asserted that such a key rendered as a `0x…` hex string,
+/// because `parse_cell_path_key` matched a closed set of primitive cell-path types
+/// and fell back to `Value::Blob` for a UDT — so the key never became a
+/// `Value::Udt` and could not reach the UDT renderer. Every clause of that is now
+/// false: #3612 made that site
+/// (`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs`)
+/// delegate to the structural decoder.
+///
+/// So these columns now STRENGTHEN #3629's coverage instead of being excluded
+/// from it: the CLI's `Map` arm emits `{"key": …, "value": …}`, and the key is a
+/// JSON-rendered UDT, which is a second independent route into the very renderer
+/// #3629 fixed — one reached through a MULTICELL cell path rather than a frozen
+/// value cell.
+///
+/// ORACLE: the expectation is NOT derived from what our decoder now emits, which
+/// would be circular. It mirrors, field for field, the frozen sibling
+/// `nondiscriminating_passes_on_unfixed_code_frozen_map_udt_key_is_json_rendered`
+/// above — #3629's own contract for this shape, written for the columns that
+/// always did reach the renderer, by someone with no stake in #3612. `cm`/`fcm`
+/// and `tm`/`ftm` are the two legal spellings of one map and the fixture stores
+/// the same key in both, so mirroring is exactly the right expectation: the map
+/// VALUES differ (1/2 vs 3/4) and the KEYS must not.
 #[tokio::test]
-async fn measured_non_subject_non_frozen_map_udt_key_never_reaches_the_udt_arm() {
+async fn non_frozen_map_udt_key_is_json_rendered_like_the_frozen_spelling() {
     let rows = rows_by_id("udt_collide").await;
-    for column in ["cm", "tm"] {
-        let m = cell(&rows, 1, column);
-        let key = m
-            .get(0)
-            .and_then(|e| e.get("key"))
-            .and_then(J::as_str)
-            .unwrap_or_else(|| panic!("{column} must render as [{{key, value}}]; got {m}"));
-        assert!(
-            key.starts_with("0x"),
-            "{column}'s UDT key decodes to Value::Blob (cell-path fallback), so it \
-             never reaches the UDT JSON arm; got {key}"
+    // Byte-for-byte the frozen sibling's `expected_key`. Declared fields and
+    // nothing else — the fields are LITERALLY named `_type`/`_keyspace`/`__proto__`
+    // in this fixture, which is the collision #3504/#3629 exist for; no marker is
+    // injected ahead of them.
+    let expected_key = json!({
+        "_type": "key-type-marker",
+        "_keyspace": "key-keyspace-marker",
+        "__proto__": "key-proto-marker",
+        "real_field": 100
+    });
+    for (column, value) in [("cm", 1), ("tm", 2)] {
+        assert_eq!(
+            cell(&rows, 1, column),
+            json!([{"key": expected_key, "value": value}]),
+            "{column}: a multicell UDT map key must JSON-render as its declared \
+             fields, exactly as the frozen spelling's does (issues #3612, #3629)"
         );
     }
 }

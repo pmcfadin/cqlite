@@ -359,15 +359,35 @@ async fn nondiscriminating_passes_on_unfixed_code_shapes_table_collide_nestings(
     assert_eq!(obj.len(), 1, "`mtu` has one golden entry");
 }
 
-/// MEASURED NON-SUBJECT, asserted as documentation of a known gap: `cm`/`tm` are
-/// NON-FROZEN `map<frozen<udt>, int>`, whose key lives in the cell path, and
-/// `parse_cell_path_key` falls back to `Value::Blob` for a UDT. Such a key never
-/// becomes a `Value::Udt`, so these columns CANNOT exercise the UDT renderer and
-/// must not be claimed as coverage of #3629.
+/// STILL A MEASURED NON-SUBJECT for THIS renderer — but the ORIGINAL REASON IS
+/// NOW FALSE, and that distinction is the whole point of this docstring.
+///
+/// It used to read: `parse_cell_path_key` falls back to `Value::Blob` for a UDT,
+/// such a key never becomes a `Value::Udt`, so these columns cannot exercise the
+/// UDT renderer. #3612 falsified every clause — that site
+/// (`row_decoder/complex_column/cell_path_key.rs`) now delegates to the structural
+/// decoder, so `cm`/`tm` keys ARE `Value::Udt`, and the assertion below changed
+/// from `BLOB(` to the UDT's `Display` form to prove it.
+///
+/// The CONCLUSION nevertheless survives, for the reason its own frozen siblings
+/// already carry: `cqlite-core`'s `Map` arm stringifies every key with `Display`
+/// (`format!("{}", k)`), so a map key of ANY type never reaches the `Value::Udt`
+/// JSON arm on this side. These columns therefore still must not be counted as
+/// coverage of #3629 HERE — exactly like `fcm`/`ftm` in
+/// `nondiscriminating_passes_on_unfixed_code_frozen_map_udt_key_is_display_stringified`
+/// above. They DO reach the renderer in the CLI, whose `Map` arm emits
+/// `{"key": …, "value": …}`; that is asserted in the CLI half, which is where
+/// #3612 turned these columns into a genuine subject.
+///
+/// ORACLE: the expected shape is NOT taken from what our decoder now emits, which
+/// would be circular. It mirrors that frozen sibling's `format!("{type_name}{{")`
+/// — #3629's own contract for a Display-stringified UDT key, written for columns
+/// with no stake in #3612. A `Value::Blob` renders `BLOB(…)`, so this assertion
+/// still discriminates: it fails if the cell-path fallback ever returns.
 #[tokio::test]
-async fn measured_non_subject_non_frozen_map_udt_key_never_reaches_the_udt_arm() {
+async fn non_frozen_map_udt_key_is_display_stringified_like_the_frozen_spelling() {
     let rows = rows_by_id("udt_collide").await;
-    for column in ["cm", "tm"] {
+    for (column, type_name) in [("cm", "collide"), ("tm", "collide_twin")] {
         let m = cell(&rows, 1, column);
         let obj = m
             .as_object()
@@ -377,9 +397,10 @@ async fn measured_non_subject_non_frozen_map_udt_key_never_reaches_the_udt_arm()
             .next()
             .unwrap_or_else(|| panic!("{column} rendered no entries"));
         assert!(
-            key.starts_with("BLOB("),
-            "{column}'s UDT key decodes to Value::Blob (cell-path fallback), so it \
-             never reaches the UDT JSON arm; got {key}"
+            key.starts_with(&format!("{type_name}{{")),
+            "{column}'s key must be a structured UDT that the core Map arm \
+             Display-stringifies as `{type_name}{{…}}` — a `BLOB(…)` here means the \
+             cell-path Blob fallback has returned (issues #3612, #3629); got {key}"
         );
     }
 }
