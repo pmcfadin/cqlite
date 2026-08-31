@@ -389,18 +389,36 @@ if [ "${STUB_GH_RC:-0}" -ne 0 ]; then
   printf 'gh: simulated failure\n' >&2
   exit "${STUB_GH_RC}"
 fi
-# ===== `gh issue view`: THE RETRIEVABILITY HALF OF THE DEFERRAL DISPOSITION (#3626) =====
+# ===== `gh issue view`: THE RETRIEVABILITY LEG OF THE DEFERRAL DISPOSITION (#3626) =====
 # A findings deferral must name a FILED issue, so retrievability is modelled EXPLICITLY:
 # STUB_GH_ISSUES lists the issue numbers that exist. It defaults to EMPTY, so a case that wants a
 # grant has to SAY which issues are retrievable — the fail-closed direction, and it stops a case
 # passing because the test double happened to be permissive about a question the wrapper asks.
+#
+# THREE-VALUED, BECAUSE THE REAL `gh` IS (#3626, lead condition 1). `gh issue view` exits 1 for a
+# missing issue AND for an auth/network failure, so the two are told apart by the DIAGNOSTIC and the
+# stub reproduces the REAL TEXT of each, measured on gh 2.98.0:
+#   not found : GraphQL: Could not resolve to an issue or pull request with the number of N. (repository.issue)
+#   no auth   : HTTP 401: Bad credentials (https://api.github.com/graphql)
+# STUB_GH_ISSUE_ERR overrides the diagnostic (and forces exit 1) so a COULD-NOT-ASK can be fixtured
+# without also disabling `gh pr view`, which STUB_GH_RC would do — the deferral would then never reach
+# the retrievability leg at all and the case would pass for the wrong reason.
 if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
+  if [ -n "${STUB_GH_ISSUE_ERR:-}" ]; then
+    printf '%s\n' "$STUB_GH_ISSUE_ERR" >&2
+    exit 1
+  fi
   for _stub_known in ${STUB_GH_ISSUES:-}; do
     [ "$_stub_known" = "${3:-}" ] || continue
-    printf '{"number":%s}\n' "$_stub_known"
+    # `--jq .number` is what the wrapper asks for, so the stub answers in BOTH shapes: the bare
+    # integer when a jq expression selects it, the object otherwise.
+    case " $* " in
+      *" --jq "*) printf '%s\n' "$_stub_known" ;;
+      *) printf '{"number":%s}\n' "$_stub_known" ;;
+    esac
     exit 0
   done
-  printf 'gh: could not resolve to an Issue with the number of %s\n' "${3:-}" >&2
+  printf 'GraphQL: Could not resolve to an issue or pull request with the number of %s. (repository.issue)\n' "${3:-}" >&2
   exit 1
 fi
 if [ -n "${STUB_GH_COMMENTS_JSON:-}" ]; then
@@ -413,7 +431,7 @@ else
   STUB_GH_SRC=$(printf '%b' "${STUB_GH_COMMENTS:-}")
 fi
 printf '%s' "$STUB_GH_SRC" | python3 -c '
-import json, os, sys
+import json, sys
 raw = sys.stdin.read()
 comments = []
 author = None
@@ -428,11 +446,11 @@ for line in raw.split("\n"):
         body.append(line)
 if author is not None:
     comments.append({"author": {"login": author}, "body": "\n".join(body)})
-# `body` is the PULL-REQUEST body, always present, exactly as `gh pr view --json body` always
-# returns it (#3626): the deferral disposition asks whether the PR body references each deferred
-# issue, and a payload MISSING the field is a different state (UNAVAILABLE) that its own case
-# fixtures with STUB_GH_COMMENTS_JSON.
-json.dump({"comments": comments, "body": os.environ.get("STUB_PR_BODY", "")}, sys.stdout)
+# COMMENTS ONLY, exactly as `gh pr view --json comments` returns them. NO `body` FIELD IS
+# SYNTHESISED (#3626): the PR-body link check was deleted rather than patched — a body is editable at
+# any time by anyone with write access with no per-edit attribution, while a comment is permanent and
+# attributable — so a stub that still offered a body would model a channel the code does not read.
+json.dump({"comments": comments}, sys.stdout)
 '
 exit 0
 GHSTUB
@@ -1152,11 +1170,12 @@ export STUB_GH_COMMENTS=''
 export STUB_GH_COMMENTS_JSON=''
 export STUB_GH_COMMENTS_FILE=''
 export STUB_GH_RC=0
-# #3626: the FINDINGS-DEFERRAL knobs. STUB_PR_BODY is the pull-request body the disposition half
-# reads (an issue must be REFERENCED from it); STUB_GH_ISSUES is the set of issue numbers that
-# EXIST, so retrievability is a fixture decision and not a stub default.
-export STUB_PR_BODY=''
+# #3626: the FINDINGS-DEFERRAL knobs. STUB_GH_ISSUES is the set of issue numbers that EXIST, so
+# retrievability is a fixture decision and not a stub default; STUB_GH_ISSUE_ERR fixtures a
+# COULD-NOT-ASK by giving `gh issue view` a diagnostic that does NOT say the issue is missing.
+# There is deliberately no STUB_PR_BODY: the PR body is read by nothing (see the stub above).
 export STUB_GH_ISSUES=''
+export STUB_GH_ISSUE_ERR=''
 export STUB_ON_REVIEW=''
 reset_stub() {
   STUB_JOB=4656
@@ -1181,8 +1200,8 @@ reset_stub() {
   STUB_GH_COMMENTS_JSON=''
   STUB_GH_COMMENTS_FILE=''
   STUB_GH_RC=0
-  STUB_PR_BODY=''
   STUB_GH_ISSUES=''
+  STUB_GH_ISSUE_ERR=''
   STUB_ON_REVIEW=''
 }
 
@@ -4109,6 +4128,32 @@ assert_says 'case (wv24) an unbounded field value does not match the required fo
   '^waiver: MALFORMED \(the line begins an authorization of this kind but does not match its required form'
 reset_stub
 
+printf '== (wv24b) ROUND 2: a marker-only comment that is the BARE STEM is MALFORMED, not silent ==\n'
+# THE SAME FAIL-QUIET AS (df4d), ON THE OTHER KIND — fixtured for BOTH because the attempt test is
+# shared BY CALL, and a fix applied to one kind only would leave the other silent on a truncated
+# authorization.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent"
+run_wrapper "$w_work"
+assert_verdict 'case (wv24b bare stem)' FAIL 1
+assert_no_marker_form 'case (wv24b bare stem)'
+assert_says 'case (wv24b) the bare stem is a MALFORMED attempt' \
+  '^waiver: MALFORMED \(the line begins an authorization of this kind but does not match its required form'
+assert_lacks 'case (wv24b) and not reported as an absent waiver' '^waiver: NONE'
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent\n"
+run_wrapper "$w_work"
+assert_verdict 'case (wv24b stem plus newline)' FAIL 1
+assert_no_marker_form 'case (wv24b stem plus newline)'
+assert_says 'case (wv24b stem plus newline) is MALFORMED too' \
+  '^waiver: MALFORMED \(the line begins an authorization of this kind but does not match its required form'
+assert_lacks 'case (wv24b stem plus newline) not silent' '^waiver: NONE'
+reset_stub
+
 printf '== (wv25) JOB 25: a well-formed marker from a NON-ALLOWLISTED author is UNAUTHORIZED ==\n'
 # THE HOLE: the author was recorded but never authorized, and this is a PUBLIC repository whose failing
 # block PRINTS base, head and job — so any commenter could copy them and pass the merge gate. The state is
@@ -4621,9 +4666,21 @@ reset_stub
 # WHAT IS PINNED HERE: a deferral is granted ONLY by a marker on the ABSENCE WAIVER'S CHANNEL (sole
 # nonblank content of a top-level PR comment, allowlisted author, structured author association),
 # ONLY on `--recheck-job`, ONLY over an affirmatively measured `PRESENT (n)`, and only when the
-# authorized count EQUALS the observed count with every named issue retrievable AND referenced from
-# the PR body. It reports a DISTINCT `DEFERRED` token, NEVER `NONE`. Every refusal state leaves the
-# FAIL in place under its own name, and the deferral cannot touch any other verdict.
+# authorized count EQUALS the observed count with every named issue RETRIEVABLE from GitHub — asked
+# three-valued, so "the issue does not exist" and "this box could not ask" are separate non-granting
+# states and neither reads as verified. It reports a DISTINCT `DEFERRED` token, NEVER `NONE`. Every
+# refusal state leaves the FAIL in place under its own name, and the deferral cannot touch any other
+# verdict.
+#
+# NO PR-BODY LINK IS REQUIRED, AND THE CASES THAT PINNED ONE ARE GONE (#3626, lead ruling). An earlier
+# revision also demanded a visible local `#<N>` in the PR BODY, and (df8, df8b–df8f, df9b) pinned its
+# Markdown recognisers. The leg was DELETED, not patched: a PR body is editable at any time by anyone
+# with write access with NO per-edit attribution, while a top-level comment is permanent and
+# attributable — so the body was the WEAKER artifact and would stay weaker even if Markdown parsed
+# trivially. Two more bypasses (a multi-backtick code span, an explicit link) were found in the round
+# after five were closed, with more unhandled; the census and the argument are recorded at the deleted
+# site in `scripts/flow/roborev-waiver-scan.py`. Retrievability, not prose, is what enforces
+# NOT-DROPPED.
 #
 # BOTH DIRECTIONS, as #3564 required of its own fix: a one-direction family cannot distinguish a
 # correct gate from one that fails everything, and `--recheck-job` is the only path either
@@ -4632,17 +4689,15 @@ reset_stub
 FINDINGS_TEXT_3='## Findings\n- **Severity**: High\nProblem: the first one.\n- **Severity**: Medium\nProblem: the second one.\n- **Severity**: Low\nProblem: a third one arrived.\n## Summary\n3 findings.'
 d_issues='3602,3613'
 d_reason='both already filed and lead-deferred; 5937937 in / 5703168 cached'
-d_body='Defers two roborev findings: #3602 (the naming nit) and #3613 (the doc drift).'
 d_grant="roborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=$d_reason"
 # The fixture state EVERY grant case needs: a findings-bearing record for job 4656, a prompt that
 # matches this fixture's own census (so `prompt-content:` PASSes and the deferral is the SOLE thing
-# under test), a PR body that links both issues, and both issues retrievable.
+# under test), and both deferred issues retrievable.
 df_grant_fixture() {
   STUB_ANNOUNCE_SHA="$w_head"
   STUB_PROMPT="$PROMPT_WITH_W_PATHS"
   STUB_VERDICT_FIELD='F'
   STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
-  STUB_PR_BODY="$d_body"
   STUB_GH_ISSUES='3602 3613'
 }
 
@@ -4764,6 +4819,44 @@ assert_says 'case (df4c) the trimmed value is judged' \
   "^deferral: MALFORMED \(the marker is missing a-substantive-reason \(the reason 'TODO' is a bare placeholder\)"
 reset_stub
 
+printf '== (df4d) #3626: a marker-only comment that is the BARE STEM is MALFORMED, not silent ==\n'
+# ROBOREV ROUND 2 (Low): the attempt test was the stem plus a MANDATORY TRAILING SPACE, so a comment
+# reading EXACTLY `roborev-defer: findings` — an authorization someone plainly meant to write and then
+# truncated — was not recognised as an attempt at all and reported `NONE` ("no authorization exists").
+# That is a FAIL-QUIET on an attempted authorization: the author re-reads the syntax they typed, sees
+# the prefix, and concludes the mechanism is broken. An attempt is now the stem plus whitespace OR
+# END OF LINE, and the one anchored pattern decides malformed-ness. Both spellings are fixtured,
+# because they are two different code paths through the line-splitting (`rest == ""` vs a trailing
+# newline making the marker the sole NONBLANK line).
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df4d bare stem)' FAIL 1
+assert_no_marker_form 'case (df4d bare stem)'
+assert_says 'case (df4d) the bare stem is a MALFORMED attempt, not an absent authorization' \
+  '^deferral: MALFORMED \(the line begins an authorization of this kind but does not match its required form'
+assert_lacks 'case (df4d) and it is NOT reported as if no marker existed' '^deferral: NONE'
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df4d stem plus newline)' FAIL 1
+assert_no_marker_form 'case (df4d stem plus newline)'
+assert_says 'case (df4d stem plus newline) is MALFORMED too' \
+  '^deferral: MALFORMED \(the line begins an authorization of this kind but does not match its required form'
+assert_lacks 'case (df4d stem plus newline) not silent' '^deferral: NONE'
+reset_stub
+# A DIFFERENT WORD IS STILL NOT AN ATTEMPT: the boundary is TESTED rather than dropped, so
+# `roborev-defer: findingsfoo` stays silent — nobody attempted this authorization.
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findingsfoo issues=3602 count=2 base=$w_base head=$w_head job=4656 reason=a different word\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df4d different word)' FAIL 1
+assert_says 'case (df4d different word) is not an attempt at this marker' \
+  '^deferral: NONE \(no findings-deferral comment'
+reset_stub
+
 printf '== (df5) #3626: the same marker from a NON-ALLOWLISTED author is UNAUTHORIZED ==\n'
 # This is a PUBLIC repository and a failing block PRINTS base/head/job and the observed count, so
 # without the allowlist any commenter could copy them and clear a merge gate's findings.
@@ -4822,9 +4915,14 @@ assert_says 'case (df6b) a count that was guessed does not match' \
   '^deferral: COUNT-MISMATCH \(the marker authorizes 1 finding\(s\) but this job reports 2'
 reset_stub
 
-printf '== (df7) #3626: an UNRETRIEVABLE issue is ISSUE-UNRESOLVABLE, not skipped ==\n'
-# A deferral must name a FILED issue: one that cannot be retrieved is a deferral into a void, i.e. a
-# DROPPED finding wearing a link. Fail-closed under its own cause.
+printf '== (df7) #3626: an issue GitHub says DOES NOT EXIST is ISSUE-ABSENT, not skipped ==\n'
+# A deferral must name a FILED issue: one GitHub answers does not exist is a deferral into a void,
+# i.e. a DROPPED finding wearing a link. Fail-closed under its own cause.
+#
+# RETRIEVABILITY IS NOW THE LOAD-BEARING LEG of the disposition — the PR-body link check it used to
+# share that job with was deleted (see this family's header) — so it is pinned THREE-VALUED here:
+# (df7) the issue is verifiably absent, (df7b) its existence could not be ASKED, and each has its own
+# cause because they are different operator actions.
 reset_stub
 df_grant_fixture
 STUB_GH_ISSUES='3602'
@@ -4832,115 +4930,80 @@ STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
 run_wrapper "$w_work" --recheck-job 4656
 assert_verdict 'case (df7)' FAIL 1
 assert_no_marker_form 'case (df7)'
-assert_says 'case (df7) the unretrievable issue is named' \
-  '^deferral: ISSUE-UNRESOLVABLE \(issue #3613 could not be retrieved'
+assert_says 'case (df7) the absent issue is named, as an ANSWER from GitHub' \
+  '^deferral: ISSUE-ABSENT \(GitHub answered that issue #3613 DOES NOT EXIST in this repository'
 assert_says 'case (df7) and it says a deferral must name a filed issue' 'A deferral must name a FILED issue'
+assert_says 'case (df7) the remedy is the marker or the missing issue, not the network' \
+  'Check the number in the marker, file the issue, then re-authorize'
 assert_lacks 'case (df7) nothing is deferred' '^findings: DEFERRED'
 reset_stub
 
-printf '== (df8) #3626: an issue the PR body never references is PR-UNLINKED ==\n'
-# WHERE THE FINDING WENT has to be legible from the PR itself. The nit rule already requires one
-# follow-up issue at merge time; this makes the link mechanical instead of remembered.
+printf '== (df7b) #3626: a COULD-NOT-ASK is ISSUE-UNVERIFIABLE — never read as verified ==\n'
+# THE FAIL-OPEN THIS LEG MUST NOT HAVE (lead condition 1). `gh issue view` EXITS 1 FOR BOTH a missing
+# issue and an auth failure — measured on gh 2.98.0, `HTTP 401: Bad credentials` vs `GraphQL: Could
+# not resolve to an issue or pull request with the number of N.` — so an exit-code-only test is the
+# two-valued predicate that always picks the permissive answer, and it would grant a deferral over
+# issues NOBODY CONFIRMED EXIST. Everything else about this fixture is a PERFECT authorization: the
+# same marker that grants in (df1), the right author, the right scope, the matching count. The ONLY
+# difference is that the box cannot ask GitHub — and that alone must block the grant.
 reset_stub
 df_grant_fixture
-STUB_PR_BODY='This PR defers a finding to #36021, which is a different issue entirely.'
+STUB_GH_ISSUE_ERR='HTTP 401: Bad credentials (https://api.github.com/graphql)'
 STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
 run_wrapper "$w_work" --recheck-job 4656
-assert_verdict 'case (df8)' FAIL 1
-assert_no_marker_form 'case (df8)'
-assert_says 'case (df8) both unlinked issues are named' \
-  '^deferral: PR-UNLINKED \(the pull-request body does not reference issue\(s\) #3602, #3613'
-assert_says 'case (df8) and it says an unlinked deferral is a dropped finding' \
-  'a deferral without a linked issue is a DROPPED finding'
-# `#36021` MUST NOT satisfy `#3602`: a substring match would let one filed issue stand in for another,
-# which is the disposition requirement satisfied by accident.
-assert_lacks 'case (df8) a longer number does not prove a shorter one' '^findings: DEFERRED'
+assert_verdict 'case (df7b)' FAIL 1
+assert_no_marker_form 'case (df7b)'
+assert_says 'case (df7b) the could-not-ask has its OWN state, textually distinct from ISSUE-ABSENT' \
+  "^deferral: ISSUE-UNVERIFIABLE \('gh issue view 3602' failed WITHOUT answering that the issue does not exist"
+assert_says 'case (df7b) it carries the diagnostic it could not interpret' 'HTTP 401: Bad credentials'
+assert_says 'case (df7b) it says this is not an answer' 'this is a could-not-ask, not an answer'
+assert_says 'case (df7b) and it sends the operator at the network, NOT at the marker' \
+  'fix the ability to reach GitHub (auth, network, rate limit) and re-run; do NOT change the marker'
+# THE TWO NON-GRANTING STATES MUST NOT BE CONFUSABLE: a run that could not ask must never print the
+# state that means GitHub gave an answer.
+assert_lacks 'case (df7b) a could-not-ask never reports itself as an absent issue' '^deferral: ISSUE-ABSENT'
+assert_lacks 'case (df7b) and nothing is deferred' '^findings: DEFERRED'
 reset_stub
 
-printf '== (df8b) #3626: a CROSS-REPOSITORY reference is not a local disposition ==\n'
-# THE PR BODY IS WRITTEN BY THE WORKER — THE CONSTRAINED PARTY — so this half of the authorization is
-# the one place the reviewed party could satisfy its own constraint (roborev job 225). The first
-# implementation bounded DIGITS only, so `owner/repo#3602` satisfied "referenced from the PR body"
-# while the caller's `gh issue view 3602` retrieved the unrelated LOCAL issue: two different issues,
-# one of which nobody filed the finding against. GitHub resolves `owner/repo#N` to a different
-# repository, so it records no disposition here.
+printf '== (df7c) #3626: the NAIVE two-valued form WOULD have granted the (df7b) fixture (mutant) ==\n'
+# THE RED/GREEN CONTRAST FOR (df7b), because an assert that a run FAILs is satisfied by a run that
+# fails for any reason at all. The mutant is the realistic naive implementation — "verified unless
+# GitHub explicitly said not-found", i.e. a could-not-ask collapsed onto PRESENT — applied to a COPY.
+# If it grants and reaches PASS on the very fixture (df7b) refuses, then (df7b) is measuring the
+# three-valued logic and nothing else.
+#
+# THE CONTROL RUNS FIRST AND IS NOT OPTIONAL: the UNPATCHED copy must FAIL this fixture exactly as the
+# real wrapper does, so a mutant PASS cannot be an artefact of how the copy was made.
 reset_stub
+_dfr_dir="$tmp/deferral-retrievability"
+mkdir -p "$_dfr_dir"
+cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+  "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_dfr_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_dfr_dir/"
+fi
 df_grant_fixture
-STUB_PR_BODY='Deferred to apache/cassandra#3602 and other/repo#3613.'
+STUB_GH_ISSUE_ERR='HTTP 401: Bad credentials (https://api.github.com/graphql)'
 STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
-run_wrapper "$w_work" --recheck-job 4656
-assert_verdict 'case (df8b)' FAIL 1
-assert_no_marker_form 'case (df8b)'
-assert_says 'case (df8b) both cross-repository references are reported unlinked' \
-  '^deferral: PR-UNLINKED \(the pull-request body does not reference issue\(s\) #3602, #3613'
-assert_lacks 'case (df8b) a reference to another repository cannot grant' '^findings: DEFERRED'
-reset_stub
-
-printf '== (df8c) #3626: an ALPHANUMERIC SUFFIX is not a reference (#Nsuffix) ==\n'
-# `#3602suffix` is not an autolink on GitHub at all — the right-hand token boundary was missing, so a
-# string that renders as plain text satisfied a requirement whose whole purpose is that a human can
-# SEE where the finding went.
-reset_stub
-df_grant_fixture
-STUB_PR_BODY='Deferred to #3602suffix and #3613x.'
-STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
-run_wrapper "$w_work" --recheck-job 4656
-assert_verdict 'case (df8c)' FAIL 1
-assert_no_marker_form 'case (df8c)'
-assert_says 'case (df8c) neither suffixed token is a reference' \
-  '^deferral: PR-UNLINKED \(the pull-request body does not reference issue\(s\) #3602, #3613'
-assert_lacks 'case (df8c) a suffixed number cannot grant' '^findings: DEFERRED'
-reset_stub
-
-printf '== (df8d) #3626: a reference ONLY inside a fenced code block does not count ==\n'
-# Content a reader sees as CODE is not a recorded disposition. The fence rule follows CommonMark's
-# closer (same character, at least as long, no info string), because a naive "any fence line toggles"
-# rule desynchronises on a ```-with-info line INSIDE a fence — GitHub keeps that as code while the
-# naive rule would read the lines after it as text. That is the fail-OPEN direction, so the nested
-# shape is fixtured here rather than argued.
-reset_stub
-df_grant_fixture
-STUB_PR_BODY=$'Deferred, see below.\n```\n#3602\n```bash\n#3613\n```\n'
-STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
-run_wrapper "$w_work" --recheck-job 4656
-assert_verdict 'case (df8d)' FAIL 1
-assert_no_marker_form 'case (df8d)'
-assert_says 'case (df8d) neither fenced reference counts, including the one after a nested info-string fence' \
-  '^deferral: PR-UNLINKED \(the pull-request body does not reference issue\(s\) #3602, #3613'
-assert_lacks 'case (df8d) a reference inside code cannot grant' '^findings: DEFERRED'
-reset_stub
-
-printf '== (df8e) #3626: a reference ONLY inside an HTML COMMENT or a code span does not count ==\n'
-# An HTML comment is INVISIBLE in the rendered PR, which is the strongest form of "the reader cannot
-# see where the finding went". A `code span` is the inline case of (df8d).
-reset_stub
-df_grant_fixture
-STUB_PR_BODY=$'Deferred.\n<!-- #3602 -->\nand `#3613` in a span.\n'
-STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
-run_wrapper "$w_work" --recheck-job 4656
-assert_verdict 'case (df8e)' FAIL 1
-assert_no_marker_form 'case (df8e)'
-assert_says 'case (df8e) an invisible reference and a code span are both unlinked' \
-  '^deferral: PR-UNLINKED \(the pull-request body does not reference issue\(s\) #3602, #3613'
-assert_lacks 'case (df8e) an invisible reference cannot grant' '^findings: DEFERRED'
-reset_stub
-
-printf '== (df8f) #3626: the CONTROL — ordinary visible references still grant (not over-strict) ==\n'
-# THE OTHER DIRECTION, as #3564 required of its own fix: a predicate that refused everything would
-# break the break-glass instead of the bypass, and every negative case above would still pass. So the
-# shapes an author actually writes are fixtured: parenthesised, sentence-final, and beside an inert
-# region that must NOT swallow the visible text after it.
-reset_stub
-df_grant_fixture
-STUB_PR_BODY=$'Defers two findings (#3602) and closes nothing.\n<!-- internal note -->\nSecond one is #3613.\n'
-STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
-run_wrapper "$w_work" --recheck-job 4656
-assert_verdict 'case (df8f)' PASS 0
-assert_no_marker_form 'case (df8f)'
-assert_says 'case (df8f) the visible references satisfy the disposition half' \
-  '^deferral: GRANTED \(author=@pmcfadin'
-assert_says 'case (df8f) and the findings are deferred under their own key' \
-  '^findings: DEFERRED \(2, issues=#3602,#3613'
+run_wrapper --wrapper "$_dfr_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+assert_verdict 'case (df7c control) the UNPATCHED copy refuses the could-not-ask' FAIL 1
+assert_says 'case (df7c control) under the three-valued state' '^deferral: ISSUE-UNVERIFIABLE'
+if sed_inplace_verified "$_dfr_dir/roborev-review-oracles.sh" \
+  's/^roborev_issue_retrievability() {$/roborev_issue_retrievability() {\
+  ROBOREV_ISSUE_STATE="present"; ROBOREV_ISSUE_DETAIL="naive two-valued form"\
+  _naive=$(cd "$REPO" \&\& gh issue view "$1" --json number 2>\&1) || true\
+  case "$_naive" in *"not resolve to an issue"*) ROBOREV_ISSUE_STATE="absent" ;; esac\
+  return 0/' \
+  'naive two-valued form' ''; then
+  ok 'case (df7c): the naive-retrievability patch was really applied to the copy'
+  run_wrapper --wrapper "$_dfr_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+  assert_verdict 'case (df7c) the naive form GRANTS over issues nobody confirmed exist' PASS 0
+  assert_says 'case (df7c) the mutant reaches a GRANTED deferral on the (df7b) fixture' \
+    '^deferral: GRANTED \(author=@pmcfadin'
+  assert_says 'case (df7c) and defers the findings' '^findings: DEFERRED \(2, issues=#3602,#3613'
+else
+  bad 'case (df7c): could not patch the copied oracles file, so the naive form was never exercised — without this contrast (df7b) proves only that SOMETHING failed'
+fi
 reset_stub
 
 printf '== (df9) #3626: a gh failure (no PR / no auth / API error) is UNAVAILABLE and FAILs closed ==\n'
@@ -4953,25 +5016,8 @@ STUB_GH_RC=0
 assert_verdict 'case (df9)' FAIL 1
 assert_no_marker_form 'case (df9)'
 assert_says 'case (df9) an unconsultable oracle is UNAVAILABLE, naming what could not be read' \
-  "^deferral: UNAVAILABLE \(.gh pr view --json comments,body. failed"
+  "^deferral: UNAVAILABLE \(.gh pr view --json comments. failed"
 assert_lacks 'case (df9) and nothing is deferred' '^findings: DEFERRED'
-reset_stub
-
-printf '== (df9b) #3626: a payload with NO readable PR body cannot grant ==\n'
-# The PR body is the SOLE evidence for the disposition half, so a payload that does not carry it has
-# no verdict to give — reported apart from PR-UNLINKED, because "the body says nothing about #N" and
-# "there is no body to read" are different operator actions.
-reset_stub
-df_grant_fixture
-STUB_GH_COMMENTS_JSON=$(DF_GRANT="$d_grant" python3 -c '
-import json, os
-print(json.dumps({"comments": [{"author": {"login": "pmcfadin"}, "body": os.environ["DF_GRANT"]}]}))
-')
-run_wrapper "$w_work" --recheck-job 4656
-assert_verdict 'case (df9b)' FAIL 1
-assert_no_marker_form 'case (df9b)'
-assert_says 'case (df9b) an absent body field is UNAVAILABLE' \
-  "^deferral: UNAVAILABLE \(the 'gh pr view' payload carries no readable 'body' field"
 reset_stub
 
 printf '== (df10) #3626: findings UNKNOWN is NOT deferrable, even with a granted-shaped marker ==\n'
@@ -4981,7 +5027,6 @@ reset_stub
 STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITH_W_PATHS"
 STUB_RECORD_OUTPUT='## Summary\\nsomething happened, in prose, with no severity marker.'
-STUB_PR_BODY="$d_body"
 STUB_GH_ISSUES='3602 3613'
 STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
 run_wrapper "$w_work" --recheck-job 4656
@@ -5079,11 +5124,11 @@ printf '== (df11c) #3626: the SANCTIONED workflow — commentary and authorizati
 # included) and authorizes in another. The marker-only comment grants; the documentation is inert.
 reset_stub
 df_grant_fixture
-STUB_GH_COMMENTS_JSON=$(DF_GRANT="$d_grant" DF_BODY="$d_body" python3 -c '
+STUB_GH_COMMENTS_JSON=$(DF_GRANT="$d_grant" python3 -c '
 import json, os
 m = os.environ["DF_GRANT"]
 doc = "Both findings are filed and deferred. The form is:\n\n```\n" + m + "\n```"
-print(json.dumps({"body": os.environ["DF_BODY"], "comments": [
+print(json.dumps({"comments": [
     {"author": {"login": "pmcfadin"}, "body": doc},
     {"author": {"login": "pmcfadin"}, "body": m}]}))
 ')
@@ -5122,7 +5167,6 @@ STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_VERDICT_FIELD='F'
 STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
-STUB_PR_BODY="$d_body"
 STUB_GH_ISSUES='3602 3613'
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\n"
 run_wrapper "$w_work" --recheck-job 4656
@@ -5144,7 +5188,6 @@ STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_VERDICT_FIELD='F'
 STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
-STUB_PR_BODY="$d_body"
 STUB_GH_ISSUES='3602 3613'
 STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
 run_wrapper "$w_work" --recheck-job 4656
@@ -5168,7 +5211,6 @@ STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_VERDICT_FIELD='F'
 STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
-STUB_PR_BODY="$d_body"
 STUB_GH_ISSUES='3602 3613'
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\n\001pmcfadin\n$d_grant\n"
 run_wrapper "$w_work" --recheck-job 4656
@@ -5196,7 +5238,6 @@ STUB_GIT_REF="$df14_base..$df14_head"
 STUB_PROMPT="$PROMPT_WITH_PATHS"
 STUB_VERDICT_FIELD='F'
 STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
-STUB_PR_BODY="$d_body"
 STUB_GH_ISSUES='3602 3613'
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$df14_base head=$df14_head job=4656 reason=deferred against the reviewed range\n"
 run_wrapper "$df14_work" --recheck-job 4656
@@ -5217,7 +5258,6 @@ STUB_GIT_REF="$df14_base..$df14_head"
 STUB_PROMPT="$PROMPT_WITH_PATHS"
 STUB_VERDICT_FIELD='F'
 STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
-STUB_PR_BODY="$d_body"
 STUB_GH_ISSUES='3602 3613'
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$df14_tip head=$df14_head job=4656 reason=bound to the wrong base\n"
 run_wrapper "$df14_work" --recheck-job 4656
@@ -5238,7 +5278,6 @@ STUB_ANNOUNCE_SHA="$w_head"
 STUB_PROMPT="$PROMPT_WITH_W_PATHS"
 STUB_VERDICT=$'## Findings\n- **Severity**: High\nProblem: the first one.\n- **Severity**: Medium\nProblem: the second one.\n## Summary\n2 findings.'
 STUB_REVIEW_RC=1
-STUB_PR_BODY="$d_body"
 STUB_GH_ISSUES='3602 3613'
 STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
 run_wrapper "$w_work"
