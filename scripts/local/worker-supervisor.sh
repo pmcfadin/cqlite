@@ -2693,6 +2693,15 @@ supervisor_lock_refuse_unowned() {
   local cause="${1:-not-owned unrecorded}" detail=''
   case "$cause" in
     'declined'*)
+      # AND IT DOES NOT NAME A CAUSE IT DID NOT OBSERVE (#3601, roborev job 242 B19). It used to conclude
+      # "the directory at that name is therefore not the one this process created: a peer renamed ours
+      # aside and published its own between our two steps". Finding a `pid` record proves only that
+      # publication must be DECLINED. It does not identify how the record got there: a peer renaming ours
+      # aside and publishing is one way, and something writing a `pid` file straight into the directory we
+      # created — an external writer, an operator, a stray tool — is another, and this code cannot tell
+      # them apart. Directory-instance identity is not verifiable on this path and per #3683 cannot be
+      # made so here, so the specific race is a story, not an observation.
+      #
       # WHAT THIS PATH MAY CLAIM, NARROWED TO WHAT IS TRUE (#3601, roborev job 238 B15 — the SEVENTH
       # instance of the alibi family, and it is in the text written to FIX the family's second instance).
       # It used to say the run "wrote NOTHING" and that "NOTHING at that path has been modified", and
@@ -2702,7 +2711,7 @@ supervisor_lock_refuse_unowned() {
       # the only one this path establishes — is that THE EXISTING HOLDER RECORD WAS NOT OVERWRITTEN OR
       # PUBLISHED OVER. That is what it says now, and the test asserts PRESERVATION OF THAT RECORD rather
       # than an absence of modification the code never provided.
-      detail="the lock directory was created by this process and then found to ALREADY CONTAIN a holder record, so this run declined to publish over it; that record reads [${cause#declined }] and is INTACT — it was neither overwritten nor replaced. The directory at that name is therefore not the one this process created: a peer renamed ours aside and published its own between our two steps. This run did write and then remove its own scratch entries in that directory (a staging file, and an ownership marker), so it is not true that nothing there was touched — what is true, and what matters, is that the holder record itself was left exactly as found"
+      detail="the lock directory was created by this process and a holder record then APPEARED in the lock before this run could publish its own, so it declined to publish over it; that record reads [${cause#declined }] and is INTACT — it was neither overwritten nor replaced. HOW that record got there is NOT established by this run: another supervisor may have taken the name, or something may have written a pid file into the directory directly, and nothing here can tell those apart. This run did write and then remove its own scratch entries in that directory (a staging file, and an ownership marker), so it is not true that nothing there was touched — what is true, and what matters, is that the holder record itself was left exactly as found"
       ;;
     *)
       # This path DID write: `pid` at that name currently holds OUR pid, over whatever was there. Saying
