@@ -61,7 +61,22 @@
 //! every shape, enforced by the property test in `arrow_size_tests.rs` over a
 //! corpus covering fixed-width columns, `text`, `blob`, `list`/`set`, `map`,
 //! `tuple`/UDT, JSON, deeply nested empty collections, all-null rows, empty
-//! strings and empty collections. The three pre-existing per-`Value` estimators
+//! strings and empty collections.
+//!
+//! **The production consumer of that contract is the FUSED accounting, not this
+//! function (issue #3552).** `cqlite-flight`'s two `do_get` row routes take each
+//! row's width from [`super::ArrowRowAccumulator::stage`], which charges it from
+//! the cells it resolved for the Arrow build pass instead of re-resolving them
+//! here; `estimate_arrow_row_bytes` remains the aggregate route's estimator, this
+//! module's tested surface, and the ORACLE the fused width is pinned against.
+//! Both charge through the private `charge_row` core and differ ONLY in cell
+//! resolution, and their per-row equality over the SHARED shape corpus — absent
+//! columns, duplicate output columns and the saturating fan-out included — is
+//! asserted by `arrow_row_accumulator`'s
+//! `fused_width_equals_the_standalone_estimate_over_the_shape_corpus`. That test
+//! is what transfers the conservatism contract above to the fused path: weaken it
+//! and the contract stops covering production. Read the `# Cross-issue
+//! dependency` section below with that substitution in mind. The three pre-existing per-`Value` estimators
 //! are all *under*-estimators for this purpose (see the issue-#2825 design §d):
 //! `Value::size_estimate` models the SERIALIZED size (a 1-byte vint prefix where
 //! Arrow spends a 4-byte offset plus a validity bit), and

@@ -80,12 +80,23 @@ impl MergeProducer {
     /// This reservation is a true upper bound on the realized capacity only
     /// because BOTH of these hold:
     ///
-    /// 1. `Σ estimate_arrow_row_bytes(columns, row) >= arrow_payload_bytes(batch)`
-    ///    — `cqlite-core/src/export/arrow_size.rs`, "Conservatism is a contract,
-    ///    not an aspiration", enforced by the property test in
+    /// 1. `Σ width(columns, row) >= arrow_payload_bytes(batch)` —
+    ///    `cqlite-core/src/export/arrow_size.rs`, "Conservatism is a contract, not
+    ///    an aspiration", enforced by the property test in
     ///    `cqlite-core/src/export/arrow_size_tests.rs` over fixed-width, text,
     ///    blob, list/set, map, tuple/UDT, JSON, nested-empty, all-null and
     ///    empty-string shapes.
+    ///
+    ///    `width` on BOTH row routes is now `ArrowRowAccumulator::stage`'s return
+    ///    value, NOT a call to `estimate_arrow_row_bytes` — issue #3552 folded the
+    ///    charge into the build pass's cell resolution, so neither row route calls
+    ///    the standalone estimator at all (the aggregate route still does, through
+    ///    `BatchByteCap::row_width`). The two are the same number by construction
+    ///    (one shared charging core, `arrow_size::charge_row`, differing only in
+    ///    how a cell is resolved) and BY TEST: the equivalence is pinned per row
+    ///    over the shared shape corpus by
+    ///    `export::arrow_row_accumulator::arrow_row_accumulator_tests::fused_width_equals_the_standalone_estimate_over_the_shape_corpus`,
+    ///    which is what carries the conservatism property above onto this path.
     /// 2. `get_array_memory_size() <= worst_case_batch_capacity_bytes(payload,
     ///    n_array_nodes, 0)` — `crate::batch_bytes`, from `MutableBuffer`'s
     ///    power-of-two growth.
