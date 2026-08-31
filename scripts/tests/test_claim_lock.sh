@@ -1039,6 +1039,24 @@ else
 $out22g"
 fi
 
+# (h) Evidence (b) — a LIVE LOCAL holder that is NOT this session. The lane lock is
+# acquired for the sleeper's pid but the claim runs WITHOUT LANE_LOCK_PID, so
+# lane-lock `verify` fails (the token is not ours) and evidence (a) cannot fire;
+# the probe still reports ALIVE with the holder machine equal to ours, which is
+# (b). The lane directory here is the one lane-lock.sh created — NOT a git
+# checkout — so (c) cannot fire either, which is what makes this case attribute
+# the verdict to (b) alone.
+push_legacy_branch 44
+LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 44 >/dev/null 2>&1
+out22h=$(runA claim 44 2>/dev/null); rc22h=$?
+if [ "$rc22h" -eq 2 ] && printf '%s\n' "$out22h" | grep -q 'reason=released-then-resumed' \
+   && printf '%s\n' "$out22h" | grep -q 'lane-evidence=lane-lock-alive-local'; then
+  ok "(h) AC6: a LIVE LOCAL lane-lock holder that is not this session is evidence (b) (lane-evidence=lane-lock-alive-local)"
+else
+  bad "(h) expected released-then-resumed via lane-lock-alive-local; got rc=$rc22h
+$out22h"
+fi
+
 kill "$OCCUPANT_PID" 2>/dev/null || true
 wait "$OCCUPANT_PID" 2>/dev/null || true
 
