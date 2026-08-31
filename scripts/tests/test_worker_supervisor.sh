@@ -8148,17 +8148,75 @@ test_lane_lock_pid_bound_is_the_platform_pid_space() {
     fi
   fi
 
-  # ---- (2) THE WIDTH INCONSISTENCY THE BOUND EXISTS FOR. A 10-digit and a 15-digit corruption used to
-  # get OPPOSITE verdicts — the narrower one accepted, probed, reported dead and RECLAIMED. Asserted only
-  # as "the same verdict", so the case stays true on a platform that publishes no bound (where both are
-  # refused by the arithmetic guard, or both accepted) rather than pinning this host's answer.
-  local ten fifteen
+  # ---- (2) THE WIDTH INCONSISTENCY THE BOUND EXISTS FOR. A 10-digit and a 15-digit corruption used to get
+  # OPPOSITE verdicts — the narrower one accepted, probed, reported dead and RECLAIMED.
+  #
+  # THE COMPARISON IS BETWEEN ACCEPT/REJECT CLASSES, NOT BETWEEN VERDICT STRINGS (#3601, roborev job 236
+  # B13). This case compared the two strings EXACTLY while its own comment claimed it "stays true on a
+  # platform that publishes no bound … rather than pinning this host's answer". That claim was FALSE, and
+  # falsifiable without leaving this file: where no bound is published the gate does not apply, both pids
+  # are ACCEPTED, and the two strings then differ by construction (`pid 9999999999` vs
+  # `pid 999999999999999`) — so the case RED on macOS/bash 3.2, a platform this file explicitly supports,
+  # and the first person to run it there would have spent an hour deciding whether they had broken
+  # something. It is the alibi family again — a comment describing a tolerance the code does not have —
+  # and it is fixed here rather than downgraded, because a suite that reds on a supported platform is not
+  # a nit. The property that actually matters is that BOTH WIDTHS LAND IN THE SAME CLASS, and the expected
+  # class is then asserted EXPLICITLY per ceiling branch, which is stronger than either version.
+  pid_verdict_class() {
+    case "$1" in
+      'pid '*)         printf '%s' accepted ;;
+      'unparseable '*) printf '%s' refused ;;
+      *)               printf '%s' unrecognised ;;
+    esac
+  }
+  local ten fifteen ten_class fifteen_class want_class
   ten="$(probe_pid 9999999999)"
   fifteen="$(probe_pid 999999999999999)"
-  if [[ "$ten" == "$fifteen" ]]; then
-    pass "lane-lock B3: a 10-digit and a 15-digit corruption now get the SAME verdict [$ten] — the width-dependent inconsistency is gone, and the accepting half of it (which reclaimed) with it"
+  ten_class="$(pid_verdict_class "$ten")"
+  fifteen_class="$(pid_verdict_class "$fifteen")"
+  if [[ "$ten_class" == "$fifteen_class" && "$ten_class" != unrecognised ]]; then
+    pass "lane-lock B3: a 10-digit and a 15-digit corruption land in the SAME class [$ten_class] — the width-dependent inconsistency is gone, and the accepting half of it (which reclaimed) with it"
   else
-    fail "lane-lock-pid-bound-inconsistent: ten=[$ten] fifteen=[$fifteen] — a corruption that reclaims at one width and refuses at another is the hole this closes"
+    fail "lane-lock-pid-bound-inconsistent: ten=[$ten]($ten_class) fifteen=[$fifteen]($fifteen_class) — a corruption that reclaims at one width and refuses at another is the hole this closes"
+  fi
+  # ...and WHICH class it is, is decided by the ceiling branch, stated rather than left to the host.
+  case "$ceiling" in
+    'authoritative '*) want_class=refused ;;
+    *)                 want_class=accepted ;;
+  esac
+  if [[ "$ten_class" == "$want_class" ]]; then
+    pass "lane-lock B13: with the ceiling [${ceiling%% *}] the expected class for an out-of-range corruption is [$want_class], and that is what both widths got — the case asserts the platform's own consequence instead of this host's string"
+  else
+    fail "lane-lock-pid-bound-class: ceiling=[$ceiling] want=[$want_class] got=[$ten_class] — where a bound IS published an out-of-range pid must be refused; where none is, the gate does not apply and the pid is accepted"
+  fi
+
+  # ---- (2b) THE NO-BOUND BRANCH IS EXERCISED ON THIS HOST TOO, not left to a platform nobody runs the
+  # suite on. `supervisor_pid_space_ceiling` is made to report `unknown` by a shipped-derived override, so
+  # the macOS/no-`/proc` path is measured here: both widths must be ACCEPTED (the gate cannot apply) and
+  # the parser must still reject on its own structural gates.
+  local ovru u_ten u_wide
+  ovru="$d/f-unknown-ceiling.sh"; : >"$ovru"
+  if sv_mutant_override "$ovru" supervisor_pid_space_ceiling \
+       "  printf 'authoritative %s' \"\$((b - 1))\"" \
+       "  printf '%s' 'unknown forced-for-test'"; then
+    probe_pid_ovr() {
+      printf '%s\n' "$1" >"$d/pidfile"
+      env SUP="$SUPERVISOR" OVR="$ovru" F="$d/pidfile" bash -c 'source "$SUP"; source "$OVR"; printf "%s" "$(supervisor_lock_pid_read "$F")"' 2>/dev/null || true
+    }
+    u_ten="$(pid_verdict_class "$(probe_pid_ovr 9999999999)")"
+    u_wide="$(pid_verdict_class "$(probe_pid_ovr 999999999999999)")"
+    if [[ "$u_ten" == accepted && "$u_wide" == accepted ]]; then
+      pass "lane-lock B13: forced onto the no-published-bound path (the macOS shape) both widths are ACCEPTED and consistent — so the case above is correct on a platform without /proc, which is what its comment used to claim without being true"
+    else
+      fail "lane-lock-b13-unknown-branch: ten=[$u_ten] wide=[$u_wide] — with no bound published the gate cannot apply, so both must be accepted"
+    fi
+    # ...and the structural gates still bite on that path, so "the gate does not apply" is not "anything goes".
+    if [[ "$(pid_verdict_class "$(probe_pid_ovr 9999999999999999999999)")" == refused ]]; then
+      pass "lane-lock B13: on the same no-bound path a pid past the arithmetic guard is still REFUSED — an unapplied platform gate is not licence to accept anything"
+    else
+      fail "lane-lock-b13-unknown-unbounded: a 22-digit value must still be refused with no platform bound published"
+    fi
+    unset -f probe_pid_ovr
   fi
 
   # ---- (3) NO INVENTED CONSTANT SURVIVES. The rejected design substituted Linux's PID_MAX_LIMIT
@@ -8189,7 +8247,7 @@ test_lane_lock_pid_bound_is_the_platform_pid_space() {
     fi
   fi
 
-  unset -f probe_pid
+  unset -f probe_pid pid_verdict_class
 }
 
 t test_lane_lock_pid_bound_is_the_platform_pid_space
