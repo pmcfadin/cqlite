@@ -4310,6 +4310,65 @@ _component_set_probe() {
 # _component_set_probe_inner: perform the fetch + the two set derivations + the ancestry
 # probe, recording everything in the _CS_* globals. NEVER exits, never emits; the
 # verdict mapping and the emit live in the two functions below.
+# _cs_live_git <git args…>: run a git call against THE LIVE REPOSITORY under the bound, and
+# report a THREE-VALUED outcome. Stdout lands in `$_CS_LIVE_OUT`, the state in `$_CS_LIVE_STATE`.
+#
+# WHY THESE CALLS ARE BOUNDED AND NOT ANNOTATED `# local-only` (roborev job 312, Medium). Four
+# live-repository probes carried a `# local-only:` annotation whose justification was about the
+# NETWORK — "touches no remote", "cannot lazily fetch", "NAMES a remote; it does not contact one" —
+# and was SILENT about blocking. But this pre-flight's stated invariant is "there is NO branch on
+# which it can hang", and EVERY git command reads the repository config, where `include.path` names
+# a file git OPENS AND READS. Point it at a FIFO and the command never returns.
+#
+# MEASURED, with a positive control (an isolated scratch repo; the same commands with no include
+# answer in 5 ms):
+#
+#   include.path -> FIFO:  rev-parse --git-dir            BLOCKED (bound fired at 5s)
+#                          remote get-url origin          BLOCKED
+#                          rev-parse --git-path objects   BLOCKED
+#                          rev-parse --verify HEAD        BLOCKED
+#
+# `env -i` does NOT help, and that is job 264's lesson verbatim: only the ENVIRONMENT is
+# sanitisable — a `.git/config` is a FILE. On this fleet every lane on a box is a worktree of ONE
+# shared `.git`, so the planter is a PEER LANE, which under the triage rule makes it a defect and
+# not an out-of-model invoker bypass. The blast radius is every gate on the box, and it presents as
+# a gate that simply never finishes.
+#
+# THREE-VALUED ON PURPOSE. Wrapping the calls and keeping their two-valued `if !` tests would
+# collapse "the bound fired" onto "this is not a git worktree" / "there is no origin" — the
+# permissive-answer error this issue keeps ruling against, and here it would report a confidently
+# WRONG cause for a hang. `unboundable` is its own state for the same reason the fetch refuses on a
+# host that cannot bound: a missing capability must never inherit the permissive branch.
+_CS_LIVE_OUT=""
+_CS_LIVE_STATE=""
+_cs_live_git() {
+  local rc
+  _CS_LIVE_OUT=""; _CS_LIVE_STATE=""
+  _CS_LIVE_OUT=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git "$@" 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ]; then _CS_LIVE_STATE=ok
+  elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then _CS_LIVE_STATE=unboundable
+  elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then _CS_LIVE_STATE=blocked
+  else _CS_LIVE_STATE=failed
+  fi
+  return 0
+}
+
+# _cs_live_refuse <what>: the two states every caller of _cs_live_git handles identically, so the
+# remedy text exists once. Returns 0 when it SET a refusal (the caller must return), 1 otherwise.
+_cs_live_refuse() {
+  case "$_CS_LIVE_STATE" in
+    blocked)
+      _CS_KIND=repo-read-blocked
+      _CS_DETAIL="reading $1 from $REPO_ROOT EXCEEDED its ${_CS_BOUND_HINT}s bound — the read never returned. Every git command reads the repository config, and a \`include.path\` there naming a FIFO or other blocking file hangs it; on this fleet that config is SHARED by every lane on the box. Inspect it with \`git config --show-origin --get-all include.path\`"
+      return 0 ;;
+    unboundable)
+      _CS_KIND=bound-unavailable
+      _CS_DETAIL="this host offers no way to BOUND reading $1 from $REPO_ROOT (no timeout/gtimeout and no usable watchdog), so the read was not run: an unbounded repository read can hang the gate outright, and a missing capability must not inherit the permissive branch"
+      return 0 ;;
+  esac
+  return 1
+}
+
 _component_set_probe_inner() {
   # `_CS_READ_ENV` now carries ONLY what is specific to a read location (the alternate). The
   # neutralisers — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, the config suppressors — live in
@@ -4327,8 +4386,11 @@ _component_set_probe_inner() {
   if ! command -v git >/dev/null 2>&1; then
     _CS_KIND=no-tool; _CS_DETAIL="git is not on PATH"; return 0
   fi
-  # local-only: reads .git; touches no remote and cannot lazily fetch (no object read).
-  if ! env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  # BOUNDED, not annotated local-only (job 312): a config `include.path` naming a FIFO blocks this,
+  # and it is the FIRST repository call the pre-flight makes — see _cs_live_git's header.
+  _cs_live_git -C "$REPO_ROOT" rev-parse --git-dir
+  if _cs_live_refuse "the git directory"; then return 0; fi
+  if [ "$_CS_LIVE_STATE" != ok ]; then
     _CS_KIND=no-git; _CS_DETAIL="$REPO_ROOT is not a git worktree"; return 0
   fi
   local origin_url origin_rc
@@ -4340,9 +4402,12 @@ _component_set_probe_inner() {
   # rewrite-INDEPENDENT: the raw configured URL is what is validated and, below, what is
   # fetched. A contributor who legitimately uses `insteadOf` for convenience is unaffected —
   # the raw canonical URL is fetched directly, which is what their rewrite was aiming at.
-  # local-only: a config read. It NAMES a remote; it does not contact one.
-  origin_url=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" remote get-url origin 2>/dev/null); origin_rc=$?
-  if [ "$origin_rc" -ne 0 ]; then
+  # BOUNDED, not annotated local-only (job 312): a config read is exactly the operation an
+  # `include.path` FIFO blocks, and "no origin" must not absorb "the read never returned".
+  _cs_live_git -C "$REPO_ROOT" remote get-url origin
+  if _cs_live_refuse "the 'origin' remote URL"; then return 0; fi
+  origin_url="$_CS_LIVE_OUT"; origin_rc=0
+  if [ "$_CS_LIVE_STATE" != ok ]; then
     _CS_KIND=no-remote
     _CS_DETAIL="no 'origin' remote is configured in $REPO_ROOT, so the baseline is unobtainable"
     return 0
@@ -4648,8 +4713,12 @@ _component_set_probe_inner() {
   # THE LANE'S OBJECT DIR, resolved rather than assumed: in a `git worktree` this is the SHARED
   # store of the parent checkout, which is exactly the one HEAD's objects live in.
   local lane_objects
-  # local-only: resolves a PATH inside the git dir. No object is read and no remote is contacted.
-  lane_objects=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --git-path objects 2>/dev/null || true)
+  # BOUNDED, not annotated local-only (job 312): same config read, same FIFO exposure. And the
+  # `|| true` that used to swallow the failure would have turned a HANG-then-kill into an EMPTY
+  # value, i.e. `baseline-workspace` — a fail-closed refusal naming a confidently WRONG cause.
+  _cs_live_git -C "$REPO_ROOT" rev-parse --git-path objects
+  if _cs_live_refuse "the object-directory path"; then return 0; fi
+  lane_objects="$_CS_LIVE_OUT"
   # MADE ABSOLUTE, because `--git-path` answers RELATIVE TO THE REPOSITORY ROOT for a plain clone
   # (`.git/objects`) and absolute only for a worktree (`/…/repo/.git/objects` — the SHARED store).
   # A relative value would be resolved against the SCRATCH repository, which is a different
@@ -4942,8 +5011,12 @@ _component_set_probe_inner() {
   # (unborn) HEAD, silently answering a different question. Commit objects are never omitted by any
   # partial-clone filter, so resolving it is genuinely local; an unresolvable HEAD (unborn, or a
   # broken detached HEAD) is INDETERMINATE below, exactly as an unanswerable probe was before.
-  # local-only: resolves a ref plus a COMMIT object, neither of which a filter omits.
-  _CS_HEAD_SHA=$(env -i "${_CS_GIT_ENV[@]}" git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || true)
+  # BOUNDED, not annotated local-only (job 312): same config read, same FIFO exposure; and the
+  # `|| true` would have turned a kill into an empty sha, taking the rc=128 branch below with a
+  # cause that names HEAD rather than the blocked read.
+  _cs_live_git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}"
+  if _cs_live_refuse "HEAD's commit sha"; then return 0; fi
+  _CS_HEAD_SHA="$_CS_LIVE_OUT"
   if [ -z "$_CS_HEAD_SHA" ]; then
     rc=128
   else

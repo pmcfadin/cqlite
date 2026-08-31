@@ -629,6 +629,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3a-iv-bis. A BLOCKING CONFIG INCLUDE MUST REFUSE, NOT HANG (roborev job 312, Medium). Four
+#     live-repository probes carried a `# local-only:` annotation justified against the NETWORK
+#     ("touches no remote", "NAMES a remote; it does not contact one") and SILENT about blocking —
+#     while the invariant this region claims is "there is NO branch on which it can hang". Every
+#     git command reads the repository config, and `include.path` names a file git OPENS AND READS,
+#     so a FIFO there never returns. `env -i` cannot help: only the ENVIRONMENT is sanitisable, and
+#     a `.git/config` is a FILE (job 264's lesson). On this fleet every lane on a box is a worktree
+#     of ONE shared `.git`, so the planter is a PEER LANE — a defect under the triage rule, whose
+#     blast radius is every gate on the box, presenting as a gate that simply never finishes.
+#
+#     THE CASE IS THE MEASUREMENT, and it is bounded by construction: the fixture's own config gets
+#     the include, so nothing outside the scratch tree is touched. The POSITIVE CONTROL is the same
+#     fixture WITHOUT the include — without it a refusal proves nothing, since any breakage in a
+#     fixture produces a non-`ok` kind. And the assertion is on the KIND, not merely on
+#     "it returned": collapsing "the bound fired" onto `no-git`/`no-remote` would report a
+#     confidently WRONG cause for a hang, which is the permissive-answer error one level down.
+# ---------------------------------------------------------------------------
+base_fifo=$(mkbaseline base-fifo - )
+fifo_fx=$(mkbranch fifo-include "$base_fifo" - )
+fifo_ctl=$(hook "$fifo_fx")
+fifo_path="$tmp/fifo-include-blocker"
+if ! mkfifo "$fifo_path" 2>/dev/null; then
+  bad "3544-config-include-blocks: could not create a FIFO under \$tmp, so this case CANNOT be measured (fail-closed: not reported as a pass)"
+elif [ "$(field KIND "$fifo_ctl")" != ok ]; then
+  bad "3544-config-include-blocks: the POSITIVE CONTROL (same fixture, no include) did not reach KIND ok (got '$(field KIND "$fifo_ctl")') — the case cannot discriminate"
+else
+  git -C "$fifo_fx" config include.path "$fifo_path"
+  fifo_out=$( fx "$fifo_fx" && bash "$fifo_fx/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
+  fifo_kind=$(field KIND "$fifo_out")
+  fifo_line=$(field COMPONENT_SET_LINE "$fifo_out")
+  git -C "$fifo_fx" config --unset include.path 2>/dev/null || true
+  rm -f "$fifo_path"
+  case "$fifo_kind" in
+    repo-read-blocked)
+      if grep -q 'include.path' <<<"$fifo_line" && grep -q 'SHARED by every lane' <<<"$fifo_line"; then
+        ok "3544-config-include-blocks: a config include.path naming a FIFO is REFUSED by name (repo-read-blocked) instead of hanging, and the detail names the mechanism AND that the config is shared"
+      else
+        bad "3544-config-include-blocks: refused as repo-read-blocked but the detail does not name include.path / the shared config: $fifo_line"
+      fi ;;
+    no-git|no-remote|baseline-workspace)
+      bad "3544-config-include-blocks: the blocked read was reported as '$fifo_kind' — a two-valued collapse naming a WRONG cause for a hang" ;;
+    *)
+      bad "3544-config-include-blocks: expected KIND repo-read-blocked, got '$fifo_kind'"
+      printf '%s\n' "$fifo_out" ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
 # 3a-v. THE REF ORACLE'S OUTPUT IS REMOTE-CONTROLLED TEXT, SO IT IS VALIDATED (job 258). The
 #     pre-flight now learns the baseline sha from `git ls-remote` — which downloads no objects
 #     and replaced a 92 MB full-history fetch — and that value is interpolated into later `git`
@@ -4503,7 +4551,7 @@ fi
 # and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
 # floor keeps the same slack it was written with: it still catches a DELETION without being an
 # equality nobody can add a case past.
-CASE_FLOOR=107
+CASE_FLOOR=108
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))
