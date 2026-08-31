@@ -2,7 +2,7 @@
 //!
 //! # What this exists to do
 //!
-//! [`row_to_object`](crate::value::row_to_object) must write **user-controlled**
+//! [`row_to_object`](crate::row::row_to_object) must write **user-controlled**
 //! column names onto a row object. An ordinary property assignment is a
 //! JavaScript `[[Set]]`, which consults the prototype chain, so a column named
 //! `__proto__` reaches `Object.prototype`'s inherited accessor instead of

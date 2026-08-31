@@ -25,6 +25,8 @@ mod error;
 mod observability;
 mod prepared;
 mod refresh;
+/// Result-row construction (interned keys #1446 + own-property writes #3630).
+mod row;
 /// Own-property definition for result rows — the #3630 write mechanism.
 mod row_properties;
 mod runtime;
