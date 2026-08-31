@@ -2576,8 +2576,11 @@ apply_schemas_preflight() {
 #     git update-ref -d <private ref>    deletes a ref in this worktree's own namespace.
 #
 #   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, rm, cat, tr, cut, sed,
-#     basename, kill, sleep, true, chmod, env — plus `timeout`/`gtimeout` themselves, which ARE
-#     the bounding mechanism (local, and bounded by construction: they take the bound).
+#     basename, kill, sleep, true, chmod, env, find — plus `timeout`/`gtimeout` themselves, which
+#     ARE the bounding mechanism (local, and bounded by construction: they take the bound).
+#     `find` is the PORTABLE exact-mode test on the isolated fetch config (`find <file> -perm
+#     600`): one named path, no tree traversal, no network. It is used rather than `stat` because
+#     that is `-c %a` on GNU and `-f %Lp` on BSD (job 279).
 #     `env` is the ALLOWLISTED-ENVIRONMENT wrapper for every isolated git call (`env -i` plus
 #     _component_set_build_git_env's entries — job 258). It execs the command it is given and
 #     adds no network or shell of its own; the self-test's audit looks THROUGH it so the `git`

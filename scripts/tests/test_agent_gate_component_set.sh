@@ -2493,10 +2493,57 @@ function annotated(i) {
        || line[i-2] ~ /# local-only:[ \t]*[^ \t]/ \
        || line[i-3] ~ /# local-only:[ \t]*[^ \t]/)
 }
+# classify(text, i, bounded, probe): emit EXT for the first word of <text> and GAP if it is an
+# unbounded, unannotated `git`. ONE implementation, called from BOTH the de-quoted fragment loop
+# and the substitution scan below — the blind spot this fixes came from having only the former.
+function classify(t, i, bounded, probe,   w, cmd) {
+  sub(/^[ \t]*/, "", t)
+  sub(/^![ \t]*/, "", t)
+  while (t ~ /^(if|while|until|then|else|elif|do|not)[ \t]+/ || t ~ /^![ \t]*/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/) {
+    sub(/^![ \t]*/, "", t)
+    sub(/^([A-Za-z_][A-Za-z0-9_]*=[^ \t]*|[a-z]+)[ \t]+/, "", t)
+  }
+  split(t, w, /[ \t]/)
+  cmd = w[1]
+  if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) return
+  printf "EXT\t%s\n", cmd
+  # `env -i VAR=… git …` (job 258): the ENVIRONMENT WRAPPER is not the command. `env` is recorded
+  # above as the real external it is, and then this looks THROUGH it — otherwise wrapping a call in
+  # `env` would silently EXEMPT the git behind it from the bound check.
+  if (cmd == "env") {
+    sub(/^env[ \t]+/, "", t)
+    while (t ~ /^-[iu][ \t]+/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)
+      sub(/^(-[iu]|[A-Za-z_][A-Za-z0-9_]*=[^ \t]*)[ \t]+/, "", t)
+    split(t, w, /[ \t]/)
+    cmd = w[1]
+    if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) return
+    printf "EXT\t%s\n", cmd
+  }
+  if (cmd == "git" && !bounded && !probe && !annotated(i))
+    printf "GAP\t%d\t%s\n", i, substr(line[i], 1, 60)
+}
 END {
   for (i = 1; i <= NR; i++) {
     if (line[i] ~ /^[ \t]*#/) continue
     l = line[i]
+    # COMMAND SUBSTITUTIONS ARE CLASSIFIED FIRST, BEFORE THE QUOTE STRIP (roborev job 279). The
+    # quote strip below removes `"$(` … `)"` as a matched pair, which ERASED the command inside a
+    # quoted substitution — `[ -z "$(find "$f" -perm 600)" ]` left no trace of `find`, so it was
+    # missing from declared_externals and the promised structural check did not notice. The claim
+    # exceeded the check, inside the guard that exists to stop exactly that.
+    #
+    # The scan is deliberately naive — content up to the next `)` — because only the FIRST WORD is
+    # needed and it is at the start. A nested substitution truncates the tail, which can lose a
+    # SECOND command inside one substitution; that is a stated limit, not a silent one.
+    subj = line[i]
+    while (match(subj, /\$\(/)) {
+      rest = substr(subj, RSTART + 2)
+      subj = rest
+      pclose = index(rest, ")")
+      inner = (pclose > 0) ? substr(rest, 1, pclose - 1) : rest
+      if (inner !~ /^\(/)   # `$((` is arithmetic, not a command
+        classify(inner, i, (inner ~ /_component_set_bounded/), (inner ~ /command -v/))
+    }
     # ORDER IS LOAD-BEARING: quoted spans come off BEFORE the comment strip. Stripping
     # comments first truncates at a `#` INSIDE a string (`"… (measured: PR #3467, 31 of
     # 35)."`), which leaves an unbalanced quote, defeats the quote strip and reported
@@ -2517,40 +2564,8 @@ END {
     gsub(/\$\(/, "\n", l); gsub(/`/, "\n", l)
     gsub(/&&|\|\||[;|&(){}]/, "\n", l)
     n = split(l, frag, "\n")
-    for (f = 1; f <= n; f++) {
-      t = frag[f]
-      sub(/^[ \t]*/, "", t)
-      sub(/^![ \t]*/, "", t)
-      # A LEADING `!` IS STRIPPED INSIDE THE LOOP, not once before it: `if ! VAR=x git init …`
-      # leaves the `!` at the front only AFTER `if ` comes off, and a `!` is not a program name,
-      # so the whole fragment was DISCARDED and the git call was invisible to this audit
-      # (measured: `git init` in the isolated-fetch hop had never been audited). One more
-      # instance of the same family this awk keeps finding — a strip whose ORDER decides
-      # whether the check sees anything at all.
-      while (t ~ /^(if|while|until|then|else|elif|do|not)[ \t]+/ || t ~ /^![ \t]*/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/) {
-        sub(/^![ \t]*/, "", t)
-        sub(/^([A-Za-z_][A-Za-z0-9_]*=[^ \t]*|[a-z]+)[ \t]+/, "", t)
-      }
-      split(t, w, /[ \t]/)
-      cmd = w[1]
-      if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) continue
-      printf "EXT\t%s\n", cmd
-      # `env -i VAR=… git …` (job 258): the ENVIRONMENT WRAPPER is not the command. `env` is
-      # recorded above as the real external it is, and then this looks THROUGH it — otherwise
-      # wrapping a call in `env` would silently EXEMPT the git behind it from the bound check,
-      # which is the audit reporting a clean bill of health on a region it stopped parsing.
-      if (cmd == "env") {
-        sub(/^env[ \t]+/, "", t)
-        while (t ~ /^-[iu][ \t]+/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)
-          sub(/^(-[iu]|[A-Za-z_][A-Za-z0-9_]*=[^ \t]*)[ \t]+/, "", t)
-        split(t, w2, /[ \t]/)
-        cmd = w2[1]
-        if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) continue
-        printf "EXT\t%s\n", cmd
-      }
-      if (cmd == "git" && !bounded && !probe && !annotated(i))
-        printf "GAP\t%d\t%s\n", i, substr(line[i], 1, 60)
-    }
+    for (f = 1; f <= n; f++)
+      classify(frag[f], i, bounded, probe)
   }
 }
 GIT_AUDIT_PROG
@@ -2582,7 +2597,13 @@ else
   # plus the entries _component_set_build_git_env admits. It is a LOCAL UTILITY that execs the
   # command it is given (no network of its own, no shell), and the audit program above looks
   # THROUGH it so the git behind it is still checked for its bound.
-  declared_externals="basename cat chmod cut env git gtimeout kill mktemp rm sed sleep timeout tr true"
+  # `find` (job 279): the PORTABLE exact-mode test on the isolated fetch config
+  # (`find <file> -perm 600`), used because `stat` is `-c %a` on GNU and `-f %Lp` on BSD and this
+  # script must run on both. LOCAL UTILITY — one named path, no recursion into a tree, no network,
+  # no spawn. It was ABSENT from this list while being used, because the audit erased it: the
+  # quote strip removed `"$(find …)"` as a matched pair, which is the blind spot job 279 found and
+  # the substitution scan above now closes.
+  declared_externals="basename cat chmod cut env find git gtimeout kill mktemp rm sed sleep timeout tr true"
   externals=$(printf '%s\n' "$audit_out" | sed -n 's/^EXT\t//p' | sort -u)
   undeclared=""
   for _w in $externals; do
@@ -2616,17 +2637,24 @@ else
   {   cat "$region"; printf 'run_probe() { curl -sS https://example.invalid/x >/dev/null; }\n'; } >"$ctl_curl"
   # …and the same defect WRAPPED IN `env`, which is the shape job 258 introduced: if the audit
   # stopped at the wrapper, every isolated call would become unauditable at once.
+  # …and the NESTED-QUOTE SUBSTITUTION shape, which is the blind spot itself: a command inside
+  # `"$( … )"` was erased by the quote strip, so `find` went undeclared while being used. The
+  # control plants the exact shape and requires the census to SEE it.
+  ctl_qsub="$tmp/region-quoted-subst.sh"
+  {   cat "$region"
+      printf 'run_probe() { [ -z "$(newprog7279 "$CONF" -perm 600 -print 2>/dev/null)" ]; }\n'; } >"$ctl_qsub"
   ctl_envwrap="$tmp/region-envwrap.sh"
   {   cat "$region"; printf 'run_probe() { env -i PATH="$PATH" git -C "$REPO_ROOT" fetch origin main >/dev/null 2>&1; }\n'; } >"$ctl_envwrap"
   ctl_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_unbounded" | grep -c '^GAP	')
   ctl_ann_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_annotated" | grep -c '^GAP	')
   ctl_curl_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_curl" | sed -n 's/^EXT\t//p' | grep -cx curl)
   ctl_envwrap_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_envwrap" | grep -c '^GAP	')
+  ctl_qsub_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_qsub" | sed -n 's/^EXT\t//p' | grep -cx newprog7279)
   if [ "$ctl_gaps" -eq 1 ] && [ "$ctl_ann_gaps" -eq 0 ] && [ "$ctl_curl_seen" -ge 1 ] \
-     && [ "$ctl_envwrap_gaps" -eq 1 ]; then
-    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), the same defect WRAPPED IN env (1), stays silent on an ANNOTATED one (0), and the census sees a planted network program — live in both directions"
+     && [ "$ctl_envwrap_gaps" -eq 1 ] && [ "$ctl_qsub_seen" -ge 1 ]; then
+    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), the same defect WRAPPED IN env (1), a program inside a QUOTED SUBSTITUTION (the job-279 blind spot), stays silent on an ANNOTATED one (0), and the census sees a planted network program — live in both directions"
   else
-    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, env-wrapped=$ctl_envwrap_gaps expected 1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
+    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, env-wrapped=$ctl_envwrap_gaps expected 1, quoted-subst seen=$ctl_qsub_seen expected >=1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
   fi
 fi
 
