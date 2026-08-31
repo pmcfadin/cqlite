@@ -346,8 +346,11 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `git fetch` in the LIVE repository reads its LOCAL config (only the *environment* is sanitisable
   — a `.git/config` is a file), so a local `url.*.insteadOf` + `protocol.ext.allow=always` rewrote
   the scratch path to an `ext::` helper and ran commands DURING the fetch, before the sha
-  comparison that was meant to make the hop "untrusted but safe". **A check after the fact cannot
-  defend against harm that happens during.** A protocol allowlist is not expressible either
+  comparison that was meant to make the hop "untrusted but safe". **A check placed AFTER a harmful effect can only REPORT it, never PREVENT it — so if the harm is
+  EXECUTION, the control must be that the execution cannot be REACHED, not that its result is
+  detected** (lead ruling, round 14; the sha-equality assert sat downstream of the fetch it was
+  meant to validate). The corollary for tests: assert UNREACHABILITY, with a positive control
+  proving the attack executes in a plain repository, or the green means nothing. A protocol allowlist is not expressible either
   (`-c protocol.allow=never` loses to a more specific local `protocol.<name>.allow=always`, and
   the helper-name space is whatever `git-remote-*` is on PATH). So there is **no import at all**:
   the scratch object store is made visible via `GIT_ALTERNATE_OBJECT_DIRECTORIES` — an object

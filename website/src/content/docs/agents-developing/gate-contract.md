@@ -477,7 +477,9 @@ execute**: `git fetch` in the *live* repository reads its *local* config — onl
 sanitisable, a `.git/config` is a file — so a local `url.*.insteadOf` with
 `protocol.ext.allow=always` rewrote the scratch path to an `ext::` remote helper and ran commands
 **during** the fetch, before the sha comparison that was supposed to make the hop "untrusted but
-safe". A check after the fact cannot defend against harm that happens during. There is therefore
+safe". A check placed **after** a harmful effect can only *report* it, never *prevent* it — so where the
+harm is execution, the control must be that the execution cannot be **reached**. The test asserts
+unreachability, with a positive control proving the attack does execute in a plain repository. There is therefore
 **no import**: the scratch object store is exposed through `GIT_ALTERNATE_OBJECT_DIRECTORIES` (an
 object *source*, not a transport), and nothing is written into the shared `.git` — no pack, no
 ref, no `FETCH_HEAD`. That is safe for the reason the transport was not: every read is by a **sha**
