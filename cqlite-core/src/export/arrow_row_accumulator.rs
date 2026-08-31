@@ -196,18 +196,32 @@ impl<'a> ArrowRowAccumulator<'a> {
     /// The row does NOT join the batch here: the caller may flush the committed
     /// rows first (test-then-push) and must then call [`Self::commit`].
     ///
-    /// Staging twice without committing would be a caller-sequence bug. Rather
-    /// than DROP the earlier row (silent data loss), the pending row is committed
-    /// first; a debug build asserts instead, so the misuse is loud where it can be.
+    /// # Precondition — one `stage` per `commit`
+    ///
+    /// The caller MUST call [`Self::commit`] (or abandon the accumulator) before
+    /// the next `stage`; both `do_get` row routes do exactly that, in straight-line
+    /// code. There is deliberately NO recovery for staging twice, and debug and
+    /// release behave the SAME WAY (issue #3552 review B2): a debug build fails the
+    /// assertion below, and a release build resets the staging slot, so the earlier
+    /// row's cells are dropped and it never joins a batch.
+    ///
+    /// That is a lost row in a hypothetical mis-sequenced caller — but it is NOT a
+    /// byte-budget violation, which is the property AC2 forbids moving: the width
+    /// is `accumulate`d by the caller only AFTER `commit`, so a row that never
+    /// commits is never charged either, and `byte_cap.accumulated()` still
+    /// describes exactly the committed rows (the invariant `flush_credited`
+    /// asserts). An earlier version *recovered* by committing the pending row here,
+    /// which was the unsafe direction: that row would have joined the batch with
+    /// its width never accumulated, under-counting the accumulator and so
+    /// UNDER-RESERVING issue #2821's pre-materialization egress credit — silently,
+    /// and only in release, since the `debug_assert` made the recovery branch
+    /// unreachable in every debug build and untestable.
     pub fn stage(&mut self, row: QueryRow) -> usize {
         debug_assert!(
             !self.has_staged,
             "ArrowRowAccumulator::stage called with a row still staged — the \
              contract is stage -> (flush) -> commit per row (issue #3552)"
         );
-        if self.has_staged {
-            self.commit();
-        }
         // Reset the staging slot: an ABSENT column must arrive at the charging
         // core as `None`, exactly as a failed `row.values.get(name)` does.
         for slot in &mut self.staged {
