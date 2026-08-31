@@ -82,7 +82,9 @@ pub enum StreamSubPhase {
     /// Until #3552 this bucket was recorded in exactly one place, around
     /// `cqlite-flight`'s `flush_buffer`, and covered the row→column transpose plus
     /// the Arrow array build. #3552 folded the transpose into the byte-cap's
-    /// push-time cell resolution (`ArrowRowAccumulator::stage`), so the bucket is
+    /// push-time cell resolution AND column-major commit (`ArrowRowAccumulator::stage`
+    /// then `::commit` — BOTH are inside the timed window; naming only `stage` is what
+    /// made this bucket under-report wide projections until roborev round 7), so the bucket is
     /// now recorded from TWO places that sum into it: the push-time resolution
     /// (`cqlite_flight::egress_flush::StageEncodeAccum`, folded in once per merge)
     /// and the flush-time build (still `flush_buffer`).
