@@ -111,7 +111,7 @@ fn record(level: i64) {
 }
 
 /// Apply `delta` to `atomic` and return the resulting level — the exact
-/// arithmetic [`sent`], [`received`], and [`reconcile_residual`] apply to the
+/// arithmetic [`sent_n`], [`received_n`], and [`reconcile_residual`] apply to the
 /// shared [`DEPTH`]. Parameterized over the atomic (issue #2419 roborev job
 /// 1733, the #2451 flake class) so a test can pin this SAME logic against a
 /// private, per-test atomic instead of racing every other concurrently-running
