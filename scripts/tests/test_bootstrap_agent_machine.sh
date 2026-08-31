@@ -3789,21 +3789,22 @@ exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
     echo "  file-exists=$([ -e "$envf_bc" ] && echo yes || echo no) content=[$(cat "$envf_bc" 2>/dev/null | tr '\n' '|')]"
   fi
 
-  # 11bg. THE MODE IS ESTABLISHED AT CREATION, NOT INHERITED FROM THE CALLER (roborev job
-  #      314, Medium). The create used to be truncating `tee` followed by `chmod`, so the
-  #      file briefly existed at whatever the invoking shell's umask gave it. It is now one
-  #      privileged `bash -c` setting `umask 022` before the redirect, so a caller running
-  #      under a restrictive umask must STILL get 0644 — asserted by running under 077,
-  #      which is the value that would produce 0600 if the caller's umask still decided.
-  envf_bg="$tmp/pin-env-bg"; rm -f "$envf_bg"
-  out_bg=$( (umask 077; runpin "$pinroot" "$shims_one" "$envf_bg" HOME="$pin_home_plain" --fix-gate-pin) )
-  bg_mode=$(stat -c %a "$envf_bg" 2>/dev/null)
-  if [ "$bg_mode" = 644 ] && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_bg"; then
-    ok "gate-pin: a created env file comes out 0644 even under a restrictive caller umask (mode set at creation, not inherited)"
-  else
-    bad "gate-pin: the created env file took the caller's umask (mode=${bg_mode:-unreadable})"
-    printf '%s\n' "$out_bg" | grep -iE 'CREATED|gate-pin:' | head -3
-  fi
+  # 11bg WAS HERE AND WAS DELETED, because it passed against the defect it was written for
+  #      — the vacuous-case class this block keeps finding, produced this time by me.
+  #      It asserted that a create under `umask 077` still comes out 0644, intending to pin
+  #      the job-314 fix's "mode established AT CREATION" half. RED-verified against the
+  #      pre-fix bootstrap: PASS=199 FAIL=0 — it did not discriminate. The old code was
+  #      `tee` (0600 under that umask) followed by a real `chmod 0644` that SUCCEEDS, so both
+  #      implementations end at 0644. The difference exists only in the window BETWEEN the
+  #      two steps, which is exactly as unobservable from the CLI as the O_EXCL race.
+  #
+  #      Both halves of that fix are therefore DECLARED UNCOVERED rather than faked: an
+  #      implementation-neutral test would have to inject a file between the caller's
+  #      `[ ! -e ]` test and the write, and the two implementations share NO step there — so
+  #      any test that could fire would be pinning the implementation, not the property. The
+  #      remaining option is a source grep for `set -C`, which is nit 5's antipattern
+  #      (#3758). The reachable halves ARE covered: 11ba (create happens / does not without
+  #      authorisation) and 11bc (rollback when the mode cannot be confirmed).
 
   # 11bd. A REMEDY MUST BE CHOSEN BY THE FACT THAT DISCRIMINATES IT (roborev job 311, Low).
   #      The verdict `case` dispatches on the GATE's classification of what the SESSION saw,
