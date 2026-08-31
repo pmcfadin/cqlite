@@ -273,6 +273,17 @@ refuse_tool_failure() {
 # `PREMERGE: ADVISORY` line and then ignored. That is slice 1's whole contract:
 # an enforcement built on an information source nobody has read yet would be the
 # vacuous-pass shape one level up.
+#
+# IT MEASURES THE CERTIFIED SHA, NOT THIS CHECKOUT'S HEAD (#3650 review F1)
+# ------------------------------------------------------------------------
+# The advisory is invoked with `"$certified"` EXPLICITLY. Invoked with no rev it
+# defaults to `HEAD`, which is the LOCAL CHECKOUT's head — and the whole point of
+# the surrounding assert is that the local head and the sha being approved can
+# differ (a foreign push, a stale un-pushed rebase). A report about a DIFFERENT
+# diff than the one being merged is the "satisfied and wrong" shape this issue
+# exists to remove, and slice 2 will CONSUME this report. If the certified commit
+# is not present in this checkout the advisory reports UNMEASURED — correct, and
+# non-fatal here by the paragraph above.
 self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 advisory_script="$self_dir/base-staleness.sh"
 
@@ -285,7 +296,7 @@ print_base_staleness_advisory() {
     printf 'PREMERGE: ADVISORY advisory changes no verdict, so its absence changes none either.\n'
     return 0
   fi
-  adv_out=$(bash "$advisory_script" 2>&1) || adv_rc=$?
+  adv_out=$(bash "$advisory_script" "$certified" 2>&1) || adv_rc=$?
   if [ -z "$adv_out" ]; then
     printf 'PREMERGE: ADVISORY base-staleness.sh produced NO output (exit %s) — reported, and\n' \
       "$adv_rc"

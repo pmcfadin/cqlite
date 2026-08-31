@@ -1019,6 +1019,47 @@ if flow_copy adv-absent ABSENT &&
   esac
 fi
 
+# The advisory must measure the CERTIFIED SHA, not this checkout's HEAD (#3650
+# review F1). Invoked with no rev the advisory defaults to HEAD — the LOCAL head,
+# which is exactly what the surrounding assert exists because it can differ from
+# the sha being approved. A report about a different diff than the one being
+# merged is the "satisfied and wrong" shape. The stub ECHOES its own argv, so the
+# case observes the argument rather than reasoning about it.
+ARGV_ADV='#!/usr/bin/env bash
+printf "BASE-STALENESS: argv-count %s\n" "$#"
+printf "BASE-STALENESS: argv1 %s\n" "${1-NO-REV-PASSED}"
+exit 0'
+# NON-VACUITY: the stub genuinely reports its argv, so `argv1 <sha>` cannot be a
+# constant it prints regardless. Run it with NO argument and require the
+# no-rev marker — otherwise the case below would pass against a stub that always
+# printed the sha.
+printf '%s\n' "$ARGV_ADV" >"$T/argv-probe.sh"
+if [ "$(bash "$T/argv-probe.sh" | grep -c 'argv1 NO-REV-PASSED')" -eq 1 ] &&
+  [ "$(bash "$T/argv-probe.sh" whatever | grep -c 'argv1 whatever')" -eq 1 ]; then
+  ok "advisory fixture: the argv stub really echoes its own argument list"
+else
+  bad "advisory fixture: the argv stub does not report its argv (the case would be vacuous)"
+fi
+if flow_copy adv-argv "$ARGV_ADV" &&
+  run_copy 0 "the advisory is invoked with the CERTIFIED sha, not the local HEAD" \
+    "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: argv1 $CERTIFIED"*)
+      ok "advisory: the certified sha is passed to the advisory as its subject rev (#3650 F1)" ;;
+    *) bad "advisory: the advisory must receive the certified sha as \$1 (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: argv-count 1"*)
+      ok "advisory: exactly ONE argument is passed (a second positional is a usage error there)" ;;
+    *) bad "advisory: exactly one argument must be passed (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"argv1 NO-REV-PASSED"*)
+      bad "advisory: the advisory was invoked with NO rev — it would measure the local HEAD" ;;
+    *) ok "advisory: the advisory is never invoked bare (which would default to local HEAD)" ;;
+  esac
+fi
+
 # An advisory printing NOTHING is reported too (an empty report is not a clean one).
 SILENT_ADV='#!/usr/bin/env bash
 exit 0'
