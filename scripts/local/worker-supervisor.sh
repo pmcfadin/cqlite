@@ -2471,6 +2471,15 @@ supervisor_lock_release() {
   state="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || state='unparseable read-aborted'
   if [[ "$state" == "pid $$" ]]; then
     rm -rf -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+    # THE REMOVAL'S OUTCOME IS CHECKED, AND A FAILURE IS REPORTED (#3601, roborev job 231 B9 class sweep).
+    # This branch made no false claim — it made NO claim, silently — but the silence is the same problem
+    # one step earlier: a lock left behind by a supervisor that exited cleanly is unattributable, and the
+    # next start has to refuse over it or reclaim it. It is self-healing (the pid recorded is ours, and we
+    # are about to be gone, so the next start gets an affirmative `dead` and reclaims), which is why this
+    # reports rather than escalates.
+    if [[ -e "$SUPERVISOR_LOCK" || -L "$SUPERVISOR_LOCK" ]]; then
+      log "$(supervisor_one_line "exit: FAILED to remove our own lock $(supervisor_shell_quote "$SUPERVISOR_LOCK") — it still exists after the removal. It records this process's pid ($$), so the next start will find its holder affirmatively dead and reclaim it automatically; no action is needed unless starts keep refusing (#3601).")"
+    fi
     return 0
   fi
   # Rendered, not interpolated raw (#3549 job 201 F1 class, at a new site — #3601 roborev job 231 B7):
@@ -2556,6 +2565,27 @@ supervisor_lock_take() {
   # holder's record. Our own staging file is removed first because it is unambiguously ours.
   rm -f -- "$SUPERVISOR_LOCK/pid.tmp.$$" 2>/dev/null || true
   rmdir -- "$SUPERVISOR_LOCK" 2>/dev/null || true
+  # ...AND THE OUTCOME IS VERIFIED, NOT ASSUMED (#3601, roborev job 231 B9). Both removals above ignore
+  # their exit status — deliberately, because a peer populating the directory is a legitimate reason for
+  # `rmdir` to refuse — so NOTHING here knows whether the lock is gone until it looks. The refusal built
+  # from this cause used to state unconditionally that the directory "has been REMOVED AGAIN": with a
+  # peer's record inside, or a filesystem that refuses the removal, the lock REMAINED while the operator
+  # was told there was nothing to clear. Same defect family as the refusal that claimed a read-back it
+  # never made (B1) and the mutant comment that claimed an isolation it did not have (B4) — an artifact
+  # asserting a step that did not run, which is worse than no artifact because it is what stops the next
+  # reader looking. So the verdict carries what was OBSERVED after the attempt, and the three cases are
+  # distinguished because their remedies differ: nothing to do, a foreign holder to leave alone, or a
+  # residual to clear.
+  if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then
+    SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-verified-absent"
+    return 3
+  fi
+  local residual=''
+  residual="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || residual='unparseable residual-probe-aborted'
+  case "$residual" in
+    'pid '*) SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-failed-foreign-holder $residual" ;;
+    *)       SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-failed-residual $residual" ;;
+  esac
   return 3
 }
 
@@ -2570,15 +2600,20 @@ supervisor_lock_refuse_unowned() {
   local cause="${1:-not-owned unrecorded}" detail=''
   case "$cause" in
     'declined'*)
-      detail="the lock directory was created by this process and then found to ALREADY CONTAIN a holder record, so this run declined to overwrite it and wrote NOTHING; that record reads [${cause#declined }]. The directory at that name is therefore not the one this process created — a peer renamed ours aside and published its own between our two steps"
+      # Only THIS path may claim the path is untouched: the publish saw a record already there and
+      # returned without writing (its staging file is removed on the way out).
+      detail="the lock directory was created by this process and then found to ALREADY CONTAIN a holder record, so this run declined to overwrite it and wrote NOTHING; that record reads [${cause#declined }]. The directory at that name is therefore not the one this process created — a peer renamed ours aside and published its own between our two steps. NOTHING at that path has been modified by this run"
       ;;
     *)
-      detail="the lock directory was created by this process and our pid was published into it; reading it back did not return our pid ($$) — the read-back said [${cause#not-owned }] — so between those two steps something else took the lock name"
+      # This path DID write: `pid` at that name currently holds OUR pid, over whatever was there. Saying
+      # "nothing has been modified" here would be false, and it was — for about an hour, until the B9
+      # class sweep read it back (#3601, roborev job 231 B9).
+      detail="the lock directory was created by this process and our pid WAS published into it; reading it back did not return our pid ($$) — the read-back said [${cause#not-owned }] — so between those two steps something else took the lock name, and our published pid may have overwritten that holder's record (the race #3683 closes)"
       ;;
   esac
   supervisor_lock_refuse \
     "refusing to start — this run CREATED the lock and then could not verify it OWNS it" \
-    "$detail. The most likely cause is a supervisor running PRE-#3601 code on this box: it reads a lock whose pid file is not yet present as STALE and renames it aside, which is the defect #3601 fixes. Starting now would put two supervisors in one worktree, so this run stops instead. NOTHING at that path has been modified by this run" \
+    "$detail. The most likely cause is a supervisor running PRE-#3601 code on this box: it reads a lock whose pid file is not yet present as STALE and renames it aside, which is the defect #3601 fixes. Starting now would put two supervisors in one worktree, so this run stops instead" \
     "re-run this supervisor: if the other holder is a real one, the next start will say so and name its pid; if it was a pre-#3601 reclaim, upgrade every checkout on this box that can launch a supervisor past #3601 so no peer reclaims a pid-less lock again"
 }
 
@@ -2591,16 +2626,41 @@ supervisor_lock_refuse_unowned() {
 # reports that the directory we created was REMOVED AGAIN, because an operator who reads "could not
 # start" and then finds a lock sitting there will otherwise go looking for a holder.
 supervisor_lock_refuse_publish_failed() {
-  local cause="$1" what=''
+  local cause="$1" pub="$1" cleanup='' what='' aftermath='' remedy='' cmd=''
+  pub="${cause%% *}"
   case "$cause" in
+    *' '*) cleanup="${cause#* }" ;;
+  esac
+  case "$pub" in
     write-failed)  what='writing our pid into the lock FAILED — no byte of it was written' ;;
     rename-failed) what='publishing our pid into the lock FAILED at the rename — the staging file was written and could not be moved into place' ;;
-    *)             what="recording our pid in the lock FAILED ([$cause])" ;;
+    *)             what="recording our pid in the lock FAILED ([$pub])" ;;
+  esac
+  # EVERY SENTENCE BELOW IS BOUND TO AN OBSERVATION `supervisor_lock_take` ACTUALLY MADE (#3601 B9).
+  case "$cleanup" in
+    cleanup-verified-absent)
+      aftermath='The directory this run created has been removed again and its absence was VERIFIED after the removal, so this failure leaves no pid-less lock behind for the next start to have to refuse over'
+      remedy='check free space and mount options for the filesystem holding the path named above (df, mount), then re-run this supervisor. Nothing needs clearing by hand'
+      ;;
+    'cleanup-failed-foreign-holder '*)
+      aftermath="This run then tried to remove the directory it had created and it REMAINS — and it now holds a holder record that is NOT ours ([${cleanup#cleanup-failed-foreign-holder }]). A peer published into it while our publish was failing; the removal is NON-RECURSIVE precisely so that it cannot delete that record, and nothing of that peer's has been touched"
+      remedy='nothing to clear: the path named above belongs to another holder, which this run left intact. Fix the filesystem problem named above and re-run; the next start will read that holder and report it by pid'
+      ;;
+    'cleanup-failed-residual '*)
+      aftermath="This run then tried to remove the directory it had created and it REMAINS ([${cleanup#cleanup-failed-residual }]) — the removal did NOT succeed, so a lock DOES sit at that path and the next start will refuse over it until it is cleared"
+      remedy="fix the filesystem problem named above, then clear the leftover lock with the next line, on its own, exactly as printed — it is NON-RECURSIVE, so it refuses if anything is inside that you have not examined$(supervisor_lock_shape_note)"
+      cmd="$(supervisor_lock_clear_command)"
+      ;;
+    *)
+      aftermath='The removal outcome for the directory this run created was NOT ESTABLISHED, so this refusal makes no claim about whether a lock remains at that path'
+      remedy='fix the filesystem problem named above, then inspect the path named above before re-running: this run could not establish whether it left a lock there'
+      ;;
   esac
   supervisor_lock_refuse \
     "refusing to start — the lock name became ours and this run could not record itself in it" \
-    "$what. This is a FILESYSTEM failure, not contention: no other holder is implied. The usual causes are a full filesystem (ENOSPC — routine on this fleet) or a read-only mount. The directory this run created has been REMOVED AGAIN, non-recursively, so this failure leaves no pid-less lock behind for the next start to have to refuse over" \
-    "check free space and mount options for the filesystem holding the path named above (df, mount), then re-run this supervisor. Nothing needs clearing by hand"
+    "$what. This is a FILESYSTEM failure, not contention: no other holder is implied by the failure itself. The usual causes are a full filesystem (ENOSPC — routine on this fleet) or a read-only mount. $aftermath" \
+    "$remedy" \
+    "$cmd"
 }
 
 # supervisor_lock_refuse_undecidable <cause> <what-was-observed> — the "cannot tell" refusal, and the
@@ -2665,7 +2725,7 @@ supervisor_lock_shape_note() {
 supervisor_lock_refuse_lost_race() {
   supervisor_lock_refuse \
     "refusing to start — the lock name was taken again before this run could claim it" \
-    "a stale lock left by a dead holder was cleared and the name was immediately claimed by someone else, so this run did NOT get the lock. Only one racer can win the rename, which is what stops both from believing they did; the loser stops here rather than co-running" \
+    "a stale lock left by a dead holder is gone from that name and the name was claimed again before this run could take it, so this run did NOT get the lock. WHO cleared it and WHO holds it now are both unestablished — this run reached its own claim and found the name taken, which is all it observed; it does not know that its own rename is what cleared the lock, and it has not read the new holder. The loser stops here rather than co-running" \
     "nothing is wrong: re-run this supervisor. If it keeps losing, the winner is a live supervisor for this lane and the next start will name its pid"
 }
 
