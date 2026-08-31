@@ -105,8 +105,24 @@ carry).
   the diff with main's CURRENT tip, so for any PR whose base is behind main the certified tree and the
   merged tree are **different objects** (measured on #3358/PR #3362 — a head gate FAILing only because
   a known flake's fix was on main and not in that base; the malign direction is a PASS at a stale head
-  hiding an interaction with something that landed in between). A gate on the merge result is #3650 and
-  is deliberately not part of this mechanism. **The sha half of the same check closes a second, different escape (PR
+  hiding an interaction with something that landed in between). A gate on the merge result is #3650
+  **slice 2** and is deliberately not part of this mechanism.
+  **#3650 slice 1 DID land, as a non-blocking advisory: `PREMERGE: ADVISORY` lines.** They carry
+  `scripts/flow/base-staleness.sh`'s report — `N` commits behind the **merge-base** with `origin/main`
+  (never the base ref's tip, #3392) and `M` of those touching the diff's blast radius, defined as
+  *(paths the diff touches) + (a hard-coded, no-env-override gate-global set)*: content that can change
+  ANY gate's verdict regardless of the diff (`.config/nextest.toml`, the toolchain pin, the Cargo
+  manifests, `scripts/agent-gate.sh`, `scripts/ci/**`, `cqlite-core/tests/support/**`, `test-data/**`,
+  `.github/workflows/**`). Measured against the case that produced the issue: on PR #3362 the culprit
+  commit and the diff share NO path, so path intersection alone would call that certification fresh
+  exactly when it was not; intersection + gate-global fires on 22 of 107 commits behind (21%). **It is
+  information, not a verdict** — it cannot change `premerge-assert.sh`'s exit code, and an absent,
+  failing or `UNMEASURED` advisory is reported and non-fatal — which is why its vocabulary carries no
+  `PASS`, no `OK` and no `RESULT:`, why its no-finding verdict is `NO-STALENESS-RECOGNISED` (a scan
+  result, never `FRESH`/`CLEAN`), why `M = 0` prints `0 RECOGNISED` and never a bare `0`, and why every
+  run declares that the blast radius is **not a dependency closure**. A consumer that acts on it (slice
+  2) MUST treat exit `5`/`UNMEASURED` as STALE, never as fresh. The three `PREMERGE: SCOPE` lines are
+  RETAINED, because the advisory does not close the gap they disclose. **The sha half of the same check closes a second, different escape (PR
   #3616): a real gate, someone else's.** A closer located its gate run dir by recency
   (`ls -t /tmp/agent-gate.*`), read a PEER LANE's dir, saw 33 of 37 components PASS and was about to
   merge #3616 on PR #3580's verdict — everything about it was real, and only the `run-id:` line

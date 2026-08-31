@@ -213,8 +213,18 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    composes this diff with main's CURRENT tip, so for any PR whose base is behind main the
    certified tree and the merged tree are different objects (measured on #3358/PR #3362). The
    script says so itself on the success path (`PREMERGE: SCOPE`); a gate on the merge result is
-   #3650. Report the verdict as "gate of record verified at `<sha>`", never as "certified
-   against main".
+   #3650 **slice 2**. Report the verdict as "gate of record verified at `<sha>`", never as
+   "certified against main".
+   **The `PREMERGE: ADVISORY` lines are #3650 slice 1 and are NOT a verdict.** They carry
+   `scripts/flow/base-staleness.sh`'s report: `N` commits behind the merge-base with `origin/main`
+   and `M` of those touching this diff's blast radius (paths the diff touches + a hard-coded
+   gate-global set; **not** a dependency closure, which every run declares). The advisory **cannot
+   change the exit code** — absent, failing or `UNMEASURED`, it is reported and non-fatal in slice 1
+   — so **never treat `STALE-RECOGNISED` as a refusal, and never treat its silence as certification
+   against main**. If you act on it at all, act the way a consumer must: `UNMEASURED` (exit 5) counts
+   as STALE, never as fresh. The useful move on a `STALE-RECOGNISED` is the cheap one the advisory
+   exists for — rebase on `origin/main` and re-run the gate of record — not a claim in either
+   direction.
    On exit `2` → **do NOT merge**: `PREMERGE: NO-GATE-OF-RECORD` → return terminal packet
    `verdict: no-gate-of-record` (the remedy is to RUN the full gate — or, for a test/docs-only
    polish diff, the anchored delta pair above — never to hand-edit a summary); stale head or

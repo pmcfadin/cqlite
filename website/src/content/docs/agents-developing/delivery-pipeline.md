@@ -170,7 +170,13 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   PASSed on THAT EXACT TREE — not that the change was certified against the `main` it will join. A
   squash-merge composes the diff with main's CURRENT tip, so for any PR whose base is behind main the
   certified tree and the merged tree are different objects (measured on #3358/PR #3362). A gate on the
-  MERGE RESULT is #3650; it is deliberately not implemented here, and neither is a staleness bound.
+  MERGE RESULT is #3650 **slice 2** and is deliberately not implemented here. What slice 1 DID add is
+  a **non-blocking base-staleness advisory** on `PREMERGE: ADVISORY` lines
+  (`scripts/flow/base-staleness.sh`): `N` commits behind the merge-base with `origin/main` and `M` of
+  those touching the diff's blast radius (paths the diff touches + a hard-coded gate-global set — not a
+  dependency closure, which every run declares). It is information, never a verdict: it cannot change
+  the exit code, an absent/failing/`UNMEASURED` advisory is non-fatal, and any consumer of it must
+  treat `UNMEASURED` as STALE rather than fresh.
   Report a pass as "gate of record verified at `<sha>`", never "certified against main". The closer **refuses to merge on any
   non-zero exit** (fail closed). It also re-reads issue/PR comments for a fresh `HOLD:` order in the
   same pre-merge pass. Motivated by the 2026-07-14 stale-merge escape on

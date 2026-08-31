@@ -73,4 +73,9 @@ Resolve them in the worktree and reply per thread.
    `commit:`/`tree-start:` are at the certified SHA). `--lite` is never the gate of record.
    Exit 0 proves the diff is unchanged since certification and that a full gate PASSed on that exact
    tree — **not** that it was certified against current `main` (a squash-merge composes the diff with
-   main's tip; #3650). Report it that way.
+   main's tip; the merge-result gate is #3650 **slice 2**). Report it that way.
+   Its `PREMERGE: ADVISORY` lines (#3650 slice 1) report `N` commits behind the merge-base and `M`
+   of those in this diff's blast radius (paths the diff touches + a hard-coded gate-global set, not a
+   dependency closure). They are **information, never a verdict**: the advisory cannot change the exit
+   code, an absent/failing/`UNMEASURED` advisory is non-fatal, and a consumer that ever acts on it
+   must treat `UNMEASURED` as STALE rather than fresh.

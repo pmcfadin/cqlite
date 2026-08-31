@@ -1582,9 +1582,36 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   main 10 commits ahead, whose head gate FAILed `core-tests` only because a known flake's fix
   (`5e08db201`, #3514) was on main and absent from that base — the benign direction; the malign one is
   a PASS at a stale head hiding an interaction with something that landed in between. A gate on the
-  MERGE RESULT is #3650 and is deliberately not implemented here (nor is a staleness bound or a "your
-  base is N commits behind" advisory). Report the verdict as "gate of record verified at `<sha>`",
-  never "certified against main". With
+  MERGE RESULT is **#3650 SLICE 2** and is still not implemented here. Report the verdict as "gate of
+  record verified at `<sha>`", never "certified against main".
+  **What #3650 SLICE 1 DID add — a non-blocking BASE-STALENESS ADVISORY, which is information and
+  not a verdict.** `scripts/flow/base-staleness.sh` (runnable by hand — it is the mechanization of
+  the standing triage question *"is the fix for this red already on main and merely absent from my
+  base?"*) reports `N` commits behind the **merge-base** with `origin/main` (never the base ref's
+  tip — #3392) and `M` of those touching the diff's **blast radius**, which is
+  *(paths the diff touches) + (a hard-coded gate-global set)* — content that can change ANY gate's
+  verdict regardless of the diff (`.config/nextest.toml`, the toolchain pin, the Cargo manifests,
+  `scripts/agent-gate.sh`, `scripts/ci/**`, `cqlite-core/tests/support/**`, `test-data/**`,
+  `.github/workflows/**`). That set is **one hard-coded list with no env override**: an override is
+  settable by the party it constrains, and *"which paths stale my certification"* is exactly what a
+  lane wanting to skip a re-gate would widen. `premerge-assert.sh` prints the finding on
+  `PREMERGE: ADVISORY` lines and **can never fail on it** — an absent, failing or `UNMEASURED`
+  advisory is REPORTED and is not fatal in slice 1 — and the three `PREMERGE: SCOPE` lines are
+  RETAINED, because slice 1 does not close the gap they disclose. Three properties to carry:
+  **(1)** the vocabulary is chosen so it cannot be pasted or grepped as a certification — no `PASS`,
+  no `OK`, no `RESULT:` in any run, prefix `BASE-STALENESS:`, and the no-finding verdict is
+  `NO-STALENESS-RECOGNISED` (a *scan result*, never `FRESH`/`CLEAN`); **(2)** `M = 0` prints
+  `0 RECOGNISED`, never a bare `0`, and every run prints its own `NON-EXHAUSTIVE` lines, because the
+  blast radius is **not a dependency closure** — a commit changing an item the diff CALLS while
+  touching neither the diff's paths nor a gate-global path is reported as NOT staling, a real
+  false-negative class that is declared, filed, and not closed; **(3)** exit `4` is
+  `STALE-RECOGNISED`, `5` is `UNMEASURED`, and **a consumer MUST treat `5`/`UNMEASURED` as STALE,
+  never as fresh** — the standing rule against deriving a pass from the absence of a bad signal.
+  The definition was chosen BY MEASUREMENT against the case that produced the issue
+  (`docs/round-artifacts/issue-3650-blast-radius-measurements.md`): on PR #3362 the culprit commit
+  and the diff share **no path**, so path intersection alone would call that certification fresh
+  exactly when it was not, while intersection + gate-global fires on 22 of 107 commits behind (21%),
+  leaving 79% of the churn non-staling. With
   `--auto` armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
   are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration
