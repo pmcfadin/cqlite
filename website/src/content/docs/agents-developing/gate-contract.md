@@ -115,7 +115,9 @@ carry).
   manifests, `scripts/agent-gate.sh`, `scripts/ci/**`, `cqlite-core/tests/support/**`, `test-data/**`,
   `.github/workflows/**`). Measured against the case that produced the issue: on PR #3362 the culprit
   commit and the diff share NO path, so path intersection alone would call that certification fresh
-  exactly when it was not; intersection + gate-global fires on 22 of 107 commits behind (21%). **It is
+  exactly when it was not; intersection + gate-global fires on 28 of 107 commits behind (26%), and the
+  run NAMES the culprit (`matched 5e08db201 gate-global .config/nextest.toml`) so the detection is
+  attributable rather than coincidental on a count. **It is
   information, not a verdict** — it cannot change `premerge-assert.sh`'s exit code, and an absent,
   failing or `UNMEASURED` advisory is reported and non-fatal — which is why its vocabulary carries no
   `PASS`, no `OK` and no `RESULT:`, why its no-finding verdict is `NO-STALENESS-RECOGNISED` (a scan

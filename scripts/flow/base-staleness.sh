@@ -34,8 +34,12 @@
 #     certification fresh exactly when it is not;
 #   * "any churn behind the base" is what the owner's ruling refuses — 107 of
 #     107 commits, forcing re-gate loops on a repo where main moves 12x in 4h;
-#   * intersection ∪ gate-global fires on 22 of 107 (21%): the motivating case
-#     is caught and 79% of the churn on an 8-day-old base still does not stale.
+#   * intersection ∪ gate-global fires on 28 of 107 (26%): the motivating case
+#     is caught -- and named, `matched 5e08db201 gate-global .config/nextest.toml`
+#     -- while 74% of the churn on an 8-day-old base still does not stale.
+#     That count is THIS SCRIPT's own output, not a figure to be trusted from a
+#     comment; re-derive it with
+#       bash scripts/flow/base-staleness.sh 4bc6b913a6afc63d2fe7f234152da9b03ea03a89
 # The gate-global set is content that can change ANY gate's verdict regardless of
 # the diff. It is ONE list in ONE place below, hard-coded, with NO env override —
 # #3312's second rule: an override is settable by the party it constrains, and

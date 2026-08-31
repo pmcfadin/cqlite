@@ -1610,8 +1610,11 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   The definition was chosen BY MEASUREMENT against the case that produced the issue
   (`docs/round-artifacts/issue-3650-blast-radius-measurements.md`): on PR #3362 the culprit commit
   and the diff share **no path**, so path intersection alone would call that certification fresh
-  exactly when it was not, while intersection + gate-global fires on 22 of 107 commits behind (21%),
-  leaving 79% of the churn non-staling. With
+  exactly when it was not, while intersection + gate-global fires on 28 of 107 commits behind (26%),
+  leaving 74% of the churn non-staling. The run NAMES the culprit
+  (`matched 5e08db201 gate-global .config/nextest.toml`), so the detection is attributable rather
+  than a coincidence on a count — and the count is reported BY THE SCRIPT, which is the authority
+  for it; a number quoted in prose here decays exactly like a comment. With
   `--auto` armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
   are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration

@@ -87,11 +87,26 @@ commits behind that base:
 | definition | commits that stale the certification | share |
 |---|---|---|
 | any churn (the shape the ruling rejects) | 107 | 100% |
-| gate-global set above | **22** | **21%** |
-| path-intersection with PR #3362's 2 paths | 2 | 2% |
+| **AS SHIPPED — diff paths \u222a gate-global (`**/Cargo.*`)** | **28** | **26%** |
+| gate-global only, `**/Cargo.*` (any member's manifest) | 26 | 24% |
+| gate-global only, root-`Cargo.*` (first hand measurement) | 22 | 21% |
+| path-intersection with PR #3362's 2 paths, alone | 2 | 2% |
 
-79% of the churn on an 8-day-old base does **not** stale a certification under the widened
-definition. The ruling's purpose survives; the motivating case is caught.
+**The shipped number is 28, and the four rows above are shown because the first draft of this
+document published 22 and that number was stale within one implementation round.** The delta is
+fully attributed, not hand-waved: `+4` from spelling the manifest patterns `**/Cargo.toml` /
+`**/Cargo.lock` rather than root-only (any workspace member's manifest moves any gate's verdict, so
+the superset is correct and can only ever *add* staleness — it cannot manufacture a false
+`NO-STALENESS-RECOGNISED`), and `+2` from the union with the diff's own paths, which the
+gate-global-only rows exclude by construction. Re-derive with
+`bash scripts/flow/base-staleness.sh 4bc6b913a6afc63d2fe7f234152da9b03ea03a89` — the script reports
+its own count, and **the script is the authority here, not this file**.
+
+**74% of the churn on an 8-day-old base does not stale a certification** under the shipped
+definition. The ruling's purpose survives — this is nowhere near "every commit stales everything" —
+and the motivating case is caught **for the right reason**: the shipped run names it explicitly,
+`matched 5e08db201 gate-global .config/nextest.toml`, so the detection is attributable to the
+culprit rather than coincidental on a count.
 
 ## What is still NOT covered, declared rather than implied
 

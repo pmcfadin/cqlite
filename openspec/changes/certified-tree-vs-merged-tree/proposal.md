@@ -51,11 +51,14 @@ gate-global set**, and that widening is what makes the ruling non-vacuous:
 | definition | of 107 commits behind, how many stale the certification | share |
 |---|---|---|
 | any churn (the shape the ruling rejects) | 107 | 100% |
-| **path-intersection ∪ gate-global (adopted)** | **22** | **21%** |
+| **path-intersection ∪ gate-global (adopted, as shipped)** | **28** | **26%** |
 | path-intersection alone (unsound) | 2 | 2% |
 
-79% of the churn on an 8-day-old base still does not stale a certification, and the motivating case is
-detected.
+74% of the churn on an 8-day-old base still does not stale a certification, and the motivating case is
+detected **and named** in the output (`matched 5e08db201 gate-global .config/nextest.toml`) rather than
+merely counted. (An earlier draft of this proposal said 28→22 / 26%→21%: a hand measurement over
+root-only `Cargo.*` that excluded the diff's own paths. Attributed row-by-row in the measurements
+artifact; the script reports its own count and is the authority.)
 
 ## What Changes
 

@@ -82,7 +82,8 @@ an override is settable by the party it constrains.
 *Verified by:* `scripts/tests/test_base_staleness.sh` (gate-global match case; unrelated-churn case).
 *Rationale (measured):* `docs/round-artifacts/issue-3650-blast-radius-measurements.md` — on PR #3362 the
 culprit commit and the diff share no path, so intersection alone is unsound; intersection ∪ gate-global
-fires on 22 of 107 commits behind (21%), so unrelated churn still does not stale.
+fires on 28 of 107 commits behind (26%) as shipped, so unrelated churn still does not stale. The
+count is reported by the script, which is the authority for it.
 
 ### Requirement: The advisory cannot be read as a certification
 

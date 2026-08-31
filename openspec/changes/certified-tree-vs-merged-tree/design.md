@@ -13,8 +13,13 @@ issue's own warning is that a mechanism here can be *satisfied and wrong*.
   malign direction.
 - *Rejected: any churn behind the base.* 107 of 107 commits — this is the shape the owner's ruling exists
   to refuse, and it forces re-gate loops on a repo where `main` moves 12× in 4 hours.
-- **Adopted: intersection ∪ gate-global.** 22 of 107 (21%). Catches the motivating case; leaves 79% of
-  churn non-staling.
+- **Adopted: intersection ∪ gate-global.** **28 of 107 (26%)** as shipped, leaving 74% of churn
+  non-staling. Catches the motivating case, and names it (`matched 5e08db201 gate-global
+  .config/nextest.toml`), so the detection is attributable and not a coincidence on a count. *An
+  earlier draft of this decision said 22 of 107 (21%); that was a hand measurement using root-only
+  `Cargo.*` and excluding the diff's own paths, and it was stale within one implementation round —
+  the delta is attributed row-by-row in the measurements artifact. The script reports its own count
+  and is the authority for it.*
 
 The gate-global list is **content that can change ANY gate's verdict regardless of the diff**:
 
