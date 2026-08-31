@@ -97,8 +97,13 @@ pub enum StreamSubPhase {
     /// sub-phase at all. So across #3552 this counter LOSES nothing and GAINS the
     /// charge — it can read higher on identical work, and a naive before/after diff
     /// of `stream_encode` alone across that commit is not a like-for-like
-    /// comparison. What IS comparable: rows/s, and `merge + encode` together (the
-    /// charge was previously outside both). The fold's whole point is that the
+    /// comparison. What IS comparable: rows/s.
+    ///
+    /// `merge + encode` is NOT, and an earlier revision of this comment said it was —
+    /// citing the very fact that refutes it. The charge sat outside BOTH buckets
+    /// before and is inside `encode` now, so the SUM gains it exactly as `encode`
+    /// does; summing two buckets cannot cancel work that was in neither
+    /// (issue #3552, roborev round 11). Use throughput, or normalise per row. The fold's whole point is that the
     /// resolution and the charge are no longer separable, so no honest split of the
     /// fused region into two buckets exists.
     Encode,

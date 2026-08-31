@@ -95,8 +95,10 @@ pub struct SubPhaseNanos {
     /// M15 item 1 asks to be reported SEPARATELY from the vectorized-exec delta.
     ///
     /// NOT COMPARABLE ACROSS #3552 in either direction: it gained the push-time work
-    /// above and lost the flush-time transpose, which moved into it. Compare
-    /// `merge + encode` together across that boundary.
+    /// above and lost the flush-time transpose, which moved into it. `merge + encode`
+    /// is NOT a workaround — the per-row width charge sat in NEITHER bucket before
+    /// #3552 and is inside `encode` now, so the sum gains it too. Use throughput
+    /// (rows/s), or normalise per row.
     pub encode: u64,
     /// Egress channel send incl. backpressure park — `None` when the sink that
     /// served the scan does not instrument it.

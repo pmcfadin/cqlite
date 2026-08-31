@@ -65,7 +65,14 @@ The `stream_encode` sub-phase **changed scope in both directions**:
 
 So it can read **lower or higher** on identical work, and there is no honest split of a fused region
 into two buckets — that is what fusing means. **The comparable quantities are `rows/s` and
-`merge + encode` together. A `stream_encode`-only comparison across this commit is meaningless in
+throughput (rows/s), or a per-row-normalised figure.
+
+**`merge + encode` is NOT a valid workaround, though an earlier revision of this report implied it
+was.** The per-row width charge sat in NO sub-phase before #3552 and is inside `stream_encode` now,
+so the SUM gains it exactly as `stream_encode` does — summing two buckets cannot cancel work that
+was in neither (roborev round 11).
+
+A `stream_encode`-only comparison across this commit is meaningless in
 both directions.** Stated in code at `StreamSubPhase::Encode`, `PHASE_STREAM_ENCODE`, `streaming.rs`
 and `flush_credited`.
 
