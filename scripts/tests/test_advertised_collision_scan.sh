@@ -334,11 +334,19 @@ echo "TEST 12: --help exits 0 and DOCUMENTS the exit codes; a bad flag is refuse
 # ===========================================================================
 outHelp=$(bash "$SCAN" --help); rcHelp=$?
 rcBad=0; outBad=$(bash "$SCAN" --bogus 2>&1) || rcBad=$?
+# `grep` WITHOUT -q, output discarded — NOT `grep -q` (#3436). This capture is 5959 bytes,
+# above the 4096-byte pipe buffer, so `grep -q` can exit on its match while `printf` is still
+# writing, take SIGPIPE, and — under this suite's `set -o pipefail` — report the pipeline as
+# failed even though the pattern MATCHED. That is the shape that flaked the lane-lock --help
+# case ~1 in 3 full-suite runs at any load. Without -q, grep must read all input to emit all
+# matches, so there is no early exit and no race. The regexes are kept because `case` cannot
+# express `^ *3 +…`; this is the minimal change that removes the race and not the assertion.
+# Fixed here BEFORE it flaked, because the writer is the same size class.
 if [ "$rcHelp" -eq 0 ] \
-   && printf '%s\n' "$outHelp" | grep -q 'POSITIVE-DETECTION ONLY' \
-   && printf '%s\n' "$outHelp" | grep -qE '^ *3 +at least one row' \
-   && printf '%s\n' "$outHelp" | grep -qE '^ *1 +no row was reported' \
-   && printf '%s\n' "$outHelp" | grep -qE '^ *64 +usage error' \
+   && printf '%s\n' "$outHelp" | grep 'POSITIVE-DETECTION ONLY' >/dev/null \
+   && printf '%s\n' "$outHelp" | grep -E '^ *3 +at least one row' >/dev/null \
+   && printf '%s\n' "$outHelp" | grep -E '^ *1 +no row was reported' >/dev/null \
+   && printf '%s\n' "$outHelp" | grep -E '^ *64 +usage error' >/dev/null \
    && [ "$rcBad" -eq 64 ] && printf '%s\n' "$outBad" | grep -q 'unknown argument'; then
   ok "--help exits 0 documenting exit 3/1/64 and never-exit-0; an unknown flag is REFUSED (exit 64), not ignored"
 else
