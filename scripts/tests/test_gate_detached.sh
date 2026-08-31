@@ -1351,7 +1351,14 @@ fi
 # The fallback must accept 0 OR 2. As first written it was `if bash ...; then`, which succeeds only on
 # exit 0 — so a healthy unproven-clock gate returning 2 (RUNNING) was DISCARDED and the unit stopped
 # anyway. The fix job 251 added did not work for the case it was added for (job 256).
-if sed -n '/THIS ONE CALL IS ALLOWED TO BLOCK/,/esac/p' "$LAUNCHER" | grep -q '0|2) _hb_seen=1'; then
+# Re-pointed (roborev job 318): this grepped the SPELLING `0|2) _hb_seen=1`, which the job-318 fix
+# replaced with separate `0)` and `2)` arms so RUNNING can be gated on the unit still existing. The
+# STATED property -- the fallback accepts RUNNING too, not only COMPLETE -- is unchanged and still
+# holds. Asserted as TWO ARMS rather than one alternation: a fallback with only an `0)` arm is the
+# defect job 251 was written for, and that is what this case exists to catch.
+_j147=$(sed -n '/THIS ONE CALL IS ALLOWED TO BLOCK/,/esac/p' "$LAUNCHER")
+if printf '%s' "$_j147" | grep -qE '^[[:space:]]*0\)[[:space:]]*_hb_seen=1' \
+   && printf '%s' "$_j147" | grep -qE '^[[:space:]]*2\)'; then
   ok "4b.147 the blocking fallback accepts COMPLETE or RUNNING, not just COMPLETE"
 else
   bad "4b.147 the blocking fallback accepts COMPLETE or RUNNING" "a RUNNING gate would still be stopped"
@@ -1821,13 +1828,23 @@ fi
 # supply the same names. The concrete danger is an opt-out reaching a gate that never asked for it —
 # a manager-set AGENT_GATE_ALLOW_MISSING_FIXTURES or CQLITE_ALLOW_FILE_GROWTH silently relaxes the
 # gate's own validation.
-if grep -qF '/usr/bin/env -i /bin/bash "$ENV_SCRIPT"' "$LAUNCHER"; then
+# Re-pointed (roborev job 318): the interpreters are RESOLVED variables now, not literal
+# /usr/bin/env and /bin/bash, so the fixed-string grep failed on a change that KEEPS the property.
+# What matters here is the `-i`: the unit must start from an EMPTY environment.
+if grep -qE '"[$]_env_abs" -i "[$]_bash_abs" "[$]ENV_SCRIPT"' "$LAUNCHER"; then
   ok "4b.121 the unit starts from an EMPTY environment (manager leakage cannot reach the gate)"
 else
   bad "4b.121 the unit starts from an empty environment" "no env -i; manager variables reach the gate"
 fi
 # Absolute paths, because env -i leaves no PATH to find them with.
-if grep -qF '/usr/bin/env -i /bin/bash' "$LAUNCHER"; then
+# Re-pointed (roborev job 318): absoluteness is ESTABLISHED now rather than hard-coded -- both are
+# resolved with `command -v` and the launcher REFUSES unless each is an absolute executable, which is
+# strictly stronger than a literal. Hence the CONJUNCTION: the exec uses the resolved variables AND
+# both went through the validate-or-refuse loop. Asserting only the first would let a future edit
+# resolve without validating -- the same hole, one step later.
+if grep -qE '"[$]_env_abs" -i "[$]_bash_abs"' "$LAUNCHER" \
+   && grep -qE 'for _tool_pair in .*"bash:[$]_bash_abs".*"env:[$]_env_abs"' "$LAUNCHER" \
+   && grep -qE 'cannot resolve .* to an absolute path' "$LAUNCHER"; then
   ok "4b.122 env and bash are absolute paths (there is no PATH after env -i)"
 else
   bad "4b.122 env and bash are absolute paths" "a bare name cannot resolve with an empty PATH"
