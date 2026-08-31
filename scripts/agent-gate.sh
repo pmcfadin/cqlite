@@ -7450,10 +7450,28 @@ EOF
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
-# delivery-telemetry: run the delivery-pipeline telemetry tool's unit tests
-# (scripts/tests/test_delivery_telemetry.py) with the stdlib unittest runner.
-# SKIP-aware like python-bindings: no python3 -> SKIP (loud, never silent PASS);
-# any test failure -> hard FAIL. No third-party deps, no datasets, no network.
+# delivery-telemetry: run the delivery-pipeline telemetry tool's unit test
+# modules (scripts/tests/test_delivery_telemetry*.py) with the stdlib unittest
+# runner. SKIP-aware like python-bindings: no python3 -> SKIP (loud, never silent
+# PASS); any test failure -> hard FAIL. No third-party deps, no datasets, no
+# network.
+#
+# DERIVED, NEVER CURATED (issue #3559): the module set is globbed from committed
+# source at run time, so a new sibling module (the #3559 timeline-replay suite
+# was the first) is EXECUTED with no gate edit. A named single file is how a test
+# module comes to exist that no lane runs — the coverage hole CLAUDE.md's feature
+# and package sections are both about. A glob that matches NOTHING is a FAIL
+# naming the derivation, never a vacuous PASS over an empty subject set.
+#
+# AND THE DERIVATION SHIPS WITH A PER-MODULE ZERO-TEST GUARD, deliberately in
+# the same change (issue #3559). Deriving the subject set removes the gate edit
+# that a new module used to require — and with it the human who would have
+# noticed that the new module executes nothing. `python3 <module>` exits 0 on
+# `Ran 0 tests`, so without the guard a module can join this lane, cover
+# nothing, and green it, with no edit anywhere. An UNMEASURABLE count fails the
+# same way as a zero one: a module that ran nothing and a module whose output
+# could not be read are the same observation to a guard, and only the
+# permissive reading of that is a lie.
 run_delivery_telemetry() {
   local name=delivery-telemetry
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -7468,15 +7486,94 @@ run_delivery_telemetry() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] python3 scripts/tests/test_delivery_telemetry.py"
-  if python3 "$REPO_ROOT/scripts/tests/test_delivery_telemetry.py" >"$log" 2>&1; then
-    status=PASS
-  else
+  local modules=() m
+  while IFS= read -r m; do
+    [ -n "$m" ] && modules+=("$m")
+  done < <(ls -1 "$REPO_ROOT"/scripts/tests/test_delivery_telemetry*.py 2>/dev/null | sort)
+  if [ "${#modules[@]}" -eq 0 ]; then
     status=FAIL
-    echo "--- [$name] FAILED; last 40 lines of $log ---"
-    tail -40 "$log"
-    echo "--- end of $name output ---"
+    echo "--- [$name] FAILED: no scripts/tests/test_delivery_telemetry*.py module found ---"
+    echo "    (the module set is DERIVED from committed source; an empty set is a"
+    echo "     failed derivation, never a pass over nothing)"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
   fi
+  status=PASS
+  : >"$log"
+  echo ">>> [$name] python3 ${#modules[@]} module(s): $(basename -a "${modules[@]}" | tr '\n' ' ')"
+  local mlog ran
+  for m in "${modules[@]}"; do
+    echo "=== $m ===" >>"$log"
+    mlog="$log.$(basename "$m").out"
+    if ! python3 "$m" >"$mlog" 2>&1; then
+      status=FAIL
+      cat "$mlog" >>"$log"
+      echo "--- [$name] FAILED in $(basename "$m"); last 40 lines of $log ---"
+      tail -40 "$log"
+      echo "--- end of $name output ---"
+      continue
+    fi
+    cat "$mlog" >>"$log"
+    # ZERO-TEST GUARD, per module (issue #3559) — the "tier runs and silently
+    # executes 0 tests" class CLAUDE.md names. The DERIVED set above makes it
+    # more reachable, not less: the lane auto-adopts any sibling module, so the
+    # mechanism that removes the gate edit also removes the human who would
+    # have noticed the new module covering nothing.
+    #
+    # SCOPE, MEASURED RATHER THAN ASSUMED — this guard is DEFENCE IN DEPTH, not
+    # the only thing standing between us and a vacuous lane, and saying
+    # otherwise in a comment would be the overclaim this repo keeps paying for.
+    # On the Python that runs it here (3.12.3) a bare `unittest.main()` with no
+    # tests prints `NO TESTS RAN` and EXITS 5, so the plain rename-everything
+    # case is already caught one line up by the exit status. What this guard
+    # adds is every way a module exits 0 having run nothing: `unittest.main(
+    # exit=False)` (verified — a realistic authoring slip), a custom runner, and
+    # any interpreter older than 3.12, where NO TESTS RAN exits 0 and nothing
+    # here pins the version. It also makes the lane's coverage independent of
+    # that interpreter detail, and prints an affirmative per-module count so a
+    # healthy run SHOWS what it executed instead of only not complaining.
+    #
+    # Read by REDIRECTION, never a pipe: a piped `read` runs in a subshell whose
+    # verdict is discarded (CLAUDE.md #3400) — a second, independent silent pass.
+    # No _ansi_stripped_log here, and the reason is NOT obvious from the code:
+    # this is unittest's own stderr, not cargo's, and the stdlib runner emits no
+    # SGR escapes at all (cargo colours a STATUS WORD; unittest has none), so
+    # there is nothing to strip. If this ever parses cargo output, route it.
+    ran=""
+    while IFS= read -r line; do
+      case "$line" in
+        "Ran "*" test"*) ran="${line#Ran }"; ran="${ran%% *}" ;;
+      esac
+    done < "$mlog"
+    # DIGITS-ONLY BEFORE ARITHMETIC, and this is not defensive padding — the
+    # first version of this guard was itself the fail-open shape it exists to
+    # catch (roborev finding, #3559). `[ "$ran" -eq 0 ] 2>/dev/null` on a
+    # non-numeric $ran (`Ran unknown tests`) makes test(1) EXIT 2 with its
+    # complaint swallowed by the redirect, `if` reads that non-zero exit as
+    # "not zero tests", and the module is marked PASS on a count nobody could
+    # read. An empty and a non-numeric count are the same state — UNMEASURABLE —
+    # so they take one branch, and the arithmetic below runs only on digits.
+    case "$ran" in
+      ''|*[!0-9]*)
+        status=FAIL
+        echo "--- [$name] FAILED: $(basename "$m") gave no readable test count (parsed ${ran:-<nothing>} from its 'Ran N tests' line) ---"
+        echo "    (an unmeasurable count is a FAIL, never an assumed pass: a module"
+        echo "     that ran nothing and one whose count could not be read are the"
+        echo "     same observation to this guard — issue #3559)"
+        continue
+        ;;
+    esac
+    if [ "$ran" -eq 0 ]; then
+      status=FAIL
+      echo "--- [$name] FAILED: $(basename "$m") executed 0 tests ---"
+      echo "    (the module is in the DERIVED set and exited 0, which is exactly"
+      echo "     how a suite joins the gate and covers nothing — issue #3559)"
+      continue
+    fi
+    echo ">>> [$name]   $(basename "$m"): $ran test(s)"
+  done
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"

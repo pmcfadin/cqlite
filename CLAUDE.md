@@ -1308,12 +1308,21 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `--slice` and carrying `closed_at: null` (cycle time then bounded by the PR's `mergedAt`), which
   `retro` reports as its own class rather than as completed issues (#3550). `--slice` asserts the issue
   was open **when the PR merged**, which current state cannot decide (GitHub auto-closes AFTER the
-  merge), so it is refused fail-closed for a currently-CLOSED issue, for one open only because it was
-  REOPENED, and inside GitHub's post-merge auto-close propagation window (where a completed delivery
-  looks exactly like a never-closed issue and only the PR's own `closingIssuesReferences`
-  distinguishes them — a slice PR closes NOTHING) — a slice must be stamped before its issue is ever
-  closed, until #3559 lands timeline-based classification; closing an issue to
-  satisfy the tool, or hand-appending past the validator, are both FORBIDDEN. Records hold authoritative
+  merge), so since #3559 it is decided by replaying the issue's own **timeline** to the PR's
+  `mergedAt` — the only record that can place a close/reopen relative to the merge. The rule is a
+  **conjunction**: slice ⟺ the issue was OPEN at `mergedAt` **AND** this PR closes NOTHING. Both
+  halves are permanent: open-at-`mergedAt` alone never becomes sufficient, because the auto-close is
+  recorded *after* the merge, so an ordinary completed delivery whose PR declares `Closes #N` was
+  **also** literally open at `mergedAt` and only `closingIssuesReferences` tells the two apart (a
+  slice PR closes NOTHING). So `--slice` is now ACCEPTED for an issue that has since been closed or
+  reopened — the three owed #3393 records (#3407/#3429/#3467) were what this unblocked — and REFUSED
+  when the LAST `closed`/`reopened` event STRICTLY BEFORE `mergedAt` is a `closed` (the last one decides — a close then reopen before the merge is ACCEPTED; that delivery COMPLETED the
+  issue; a later reopen does not change it) or when the PR declares the close. **`--slice` is an
+  operator ASSERTION and the tool refuses it wherever it can be DISPROVED**; where it cannot be, the
+  assertion stands — a completed delivery whose PR omits `Closes #N` and whose issue is closed by
+  hand later is observationally identical to a genuine slice completed later by another PR, and the
+  difference is intent (doctrine bounds it: `flow-implement` mandates `Closes #<N>` in every PR body).
+  Closing an issue to satisfy the tool, or hand-appending past the validator, are both FORBIDDEN. Records hold authoritative
   data only (a counter not observed is an error, never a fabricated 0; a delivery with no full gate
   of record is `gate: not-run` + `gate_runs: 0`, coupled both ways and reported by `retro` as its own
   ungated class — #3448). On a cadence the manager
