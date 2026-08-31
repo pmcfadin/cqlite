@@ -137,7 +137,28 @@ else
   # for the construct, so a reintroduction here is caught mechanically.
   n_cargo=0; n_nocargo=0; n_indirect=0; n_unobservable=0
   export AGENT_GATE_FM_DIR="$tmp/empty"; mkdir -p "$AGENT_GATE_FM_DIR"
-  for c in "${comps_arr[@]}" scoped-tests; do
+  # THE NAME DOMAIN IS DERIVED FROM THE EMIT PATH, NOT FROM COMPONENTS (roborev job 277 F2).
+  # Every name that can appear on a component line must be classifiable. Those names come from
+  # COMPONENTS *plus* the dynamic `NAMES+=("<literal>")` appends in the run_delta_* helpers
+  # (node-tests, shell-selftests, scoped-tests today). This loop previously hardcoded
+  # `scoped-tests` alone, so the other two rendered [UNCLASSIFIED] in a legitimate --delta
+  # block and no case here could see it: the enumeration was narrower than its domain, which is
+  # the same defect shape as the round-2 findings one level up.
+  #
+  # Derived, so a FUTURE dynamic append joins this check with no edit here. Only literal
+  # appends are derivable; the `NAMES+=("$var")` sites are the COMPONENTS-driven paths already
+  # covered by comps_arr, so nothing is silently dropped.
+  dyn_names=$(grep -oE 'NAMES\+=\("[a-z0-9][a-z0-9-]*"\)' "$GATE" \
+    | sed -E 's/.*\("(.*)"\)/\1/' | sort -u)
+  dyn_n=$(printf '%s\n' "$dyn_names" | grep -c . || true)
+  # Fail-closed on a broken derivation: an empty set would silently shrink the domain back to
+  # COMPONENTS and re-open exactly this finding. There are 3 such names today.
+  if [ "${dyn_n:-0}" -lt 1 ]; then
+    bad "A0b: derivation of the dynamic summary-name set from $GATE yielded ${dyn_n:-0} names — the domain would silently collapse to COMPONENTS (this is how job 277 F2 escaped)"
+  else
+    ok "A0b: dynamic summary-name set DERIVED from the emit path: ${dyn_n} name(s) [$(printf '%s' "$dyn_names" | tr '\n' ' ')]"
+  fi
+  for c in "${comps_arr[@]}" $dyn_names; do
     if cls=$(_fm_component_class "$c"); then
       case "$cls" in
         indirect:*)      n_indirect=$((n_indirect + 1)) ;;
@@ -153,7 +174,7 @@ else
     [ -n "$ann" ] || blank+=("$c")
   done
   if [ "${#unclassified[@]}" -eq 0 ]; then
-    ok "A1: every COMPONENTS name (+scoped-tests) resolves to one of the FOUR declared classes in _fm_component_class"
+    ok "A1: every COMPONENTS name + every DERIVED dynamic summary name resolves to one of the FOUR declared classes in _fm_component_class"
   else
     bad "A1: undeclared, or declared with a class this guard does not recognise (cargo / no-cargo / indirect:<driver> / unobservable:<why>): ${unclassified[*]}"
   fi

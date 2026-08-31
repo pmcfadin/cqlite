@@ -3247,6 +3247,19 @@ _fm_component_class() {
     # job 273, F2).
     tooling-tests) printf 'unobservable:cargo may run inside ~60 nested test scripts (child processes)' ;;
     scoped-tests) printf 'cargo' ;;
+    # The DYNAMIC --delta entries (roborev job 277 F2). These reach a SUMMARY line via
+    # `NAMES+=("<literal>")` in run_delta_*, NOT via COMPONENTS, so classifying only
+    # COMPONENTS left a legitimate delta block rendering [UNCLASSIFIED].
+    #   node-tests: jest against the ALREADY-BUILT module. run_delta refuses up front
+    #     unless node is ready, so this path builds nothing — the component's own log line
+    #     says `already-built module; no cargo build`. Verified: no cargo in its body.
+    node-tests) printf 'no-cargo' ;;
+    #   shell-selftests: executes the diff's changed scripts/tests/*.sh. Those are arbitrary
+    #     shell guards and some DO invoke cargo, in child processes the unexported
+    #     interceptors cannot see — so this is `unobservable`, never `no-cargo` (which would
+    #     be an affirmative claim that no cargo ran) and never `cargo` (nothing is observable
+    #     in the gate's own shell).
+    shell-selftests) printf 'unobservable:cargo may run inside the changed scripts/tests/*.sh (child processes)' ;;
     *) return 1 ;;
   esac
   return 0
