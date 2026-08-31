@@ -324,21 +324,41 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare
   `PASS (412s)` could not distinguish a run that certified the OTLP stack from one that never
   enabled it, which is this issue's whole subject. It is **DERIVED, never curated**: `cargo` and `env` are shell FUNCTIONS in the gate, so a
-  matrix is described from the REAL argv about to execute, and the six components whose cargo calls
-  live in a single-quoted `bash -c` body hoist package+features into ONE variable expanded into both
-  the argv and the record. The observers are deliberately NOT `export -f`-ed — exporting them would
-  make every bash DESCENDANT record, so `tooling-tests` (which runs nested agent-gate self-tests)
-  would attribute a nested run's cargo to itself, and a false rationale in a gate log is worse than
-  none. It **never renders blank**: `[UNDECLARED]` (cargo expected, nothing observed), `[no-cargo]`,
-  `[via maturin: feature set NOT observed]`, or a named SKIP; a long list abbreviates as
-  `33:a,b,c,+30 more`, never a silent truncation. **Observation beats declaration** — a component
+  matrix is described from the REAL argv about to execute. **AND IT RECORDS EXECUTION, NOT INTENT.**
+  The eight components whose cargo calls live in a single-quoted `bash -c` body (core-tests'
+  nextest branch, memory-budget, integration-tests, write-tests, cli-tests,
+  compaction-byte-parity, minimal-build, smoke) first declared their sets in the PARENT, before the
+  child ran — so `cli-tests: FAIL` named BOTH of its feature sets even when Pass 1, or the
+  fail-closed target derivation above it, died before Pass 2 started, and write-tests claimed the
+  same set `x3` after failing on the first of three `&&`-chained passes. **A failure summary that
+  claims an invocation which never occurred is affirmatively false, and strictly worse than
+  silence** — it is what stops the next person looking. Each body now calls the EXPLICIT recorder
+  `_fm_observe_child` on the line immediately BEFORE each cargo command, from the same hoisted
+  package/feature variables the argv is built from, so a short-circuit records nothing later. The
+  cargo/env INTERCEPTORS stay deliberately NOT `export -f`-ed — exporting an interceptor would make
+  every bash DESCENDANT record, so `tooling-tests` (which runs nested agent-gate self-tests) would
+  attribute a nested run's cargo to itself — while `_fm_observe_child`, which intercepts nothing and
+  fires only where a body calls it by name, IS exported (with the gate's own `_fm_describe_cargo`,
+  so there is no second formatter to drift). It **never renders blank**: `[UNDECLARED]` (cargo
+  expected, nothing observed), `[no-cargo]`, `[via <driver>: feature set NOT observed]`, or a named
+  SKIP / FAILed-before-its-first-cargo state; a long list abbreviates as `33:a,b,c,+30 more`, never
+  a silent truncation. **A driver we cannot see is NAMED, not guessed** — `python-bindings`,
+  `node-bindings` and the `--lite` scoped-tests PYTHON TIER (whose maturin build runs in a child
+  process) render `via <driver>: feature set NOT observed`, ADDITIVELY beside the rust sets a mixed
+  diff also observes (`[test cqlite-core --features cli-helpers | via maturin: feature set NOT
+  observed]`), and only for the build-verify rcs that mean maturin actually ran: "nobody said" and
+  "known to be indirect, therefore unobservable" are different facts and only one of them is a
+  defect. **Observation beats declaration** — a component
   declared `no-cargo` that IS observed running cargo renders the observed sets plus
-  `!declared-no-cargo`, so a mis-declaration self-corrects. Guard (hermetic, ~3s, in
+  `!declared-no-cargo`, so a mis-declaration self-corrects. Guard (hermetic, in
   `tooling-tests`): `scripts/tests/test_agent_gate_feature_matrix_annotation.sh` — every
   `COMPONENTS` name must resolve to a declared class (a new component cannot join with a blank
-  matrix), all six emit sites must route through the one renderer, and for the six `bash -c`
-  components the DECLARED matrix must equal the argv that ACTUALLY EXECUTED under a recording
-  PATH-shim `cargo`, described through the gate's own `_fm_describe_cargo` rather than re-derived.
+  matrix), all six emit sites must route through the one renderer, the DECLARED matrix of each
+  `bash -c` component must equal the argv that ACTUALLY EXECUTED under a recording PATH-shim
+  `cargo` (described through the gate's own `_fm_describe_cargo`, never re-derived), and the same
+  differential is re-run under a FAILING shim, where each body must name exactly the one invocation
+  it reached — with the short-circuit proved by measurement (strictly fewer invocations than the
+  passing run) rather than assumed.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
