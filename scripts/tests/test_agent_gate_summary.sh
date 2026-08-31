@@ -4913,6 +4913,10 @@ fi
 
 # The two fast-loop sets, read from the script's OWN listing hooks rather than the source.
 for _afc_mode in lite delta; do
+  # Uppercase via `tr`, NOT bash-4 case-conversion expansion (the `${v` + `^^}` form):
+  # that throws `bad substitution` on macOS's stock /bin/bash 3.2, a first-class gate
+  # host, and this file is ALWAYS invoked by tooling-tests (roborev job 277, #3453).
+  _afc_MODE=$(printf '%s' "$_afc_mode" | tr '[:lower:]' '[:upper:]')
   _afc_f="$tmp/3453-$_afc_mode-list.txt"
   _afc_rc=0
   bash "$GATE" "--$_afc_mode-list" >"$_afc_f" 2>/dev/null || _afc_rc=$?
@@ -4920,9 +4924,9 @@ for _afc_mode in lite delta; do
   if [ "$_afc_rc" -ne 0 ] || [ "${_afc_n:-0}" -eq 0 ]; then
     bad "3453-$_afc_mode-absent: \`--$_afc_mode-list\` did not produce a readable list (rc=$_afc_rc, lines=${_afc_n:-0}) — the absence check has no subject"
   elif grep -qxF "$AFC_LANE" "$_afc_f" 2>/dev/null; then
-    bad "3453-$_afc_mode-absent: $AFC_LANE leaked into ${_afc_mode^^}_COMPONENTS — it is a full-gate component (a cold --all-features build), and --$_afc_mode is the fast loop"
+    bad "3453-$_afc_mode-absent: $AFC_LANE leaked into ${_afc_MODE}_COMPONENTS — it is a full-gate component (a cold --all-features build), and --$_afc_mode is the fast loop"
   else
-    ok "3453-$_afc_mode-absent: $AFC_LANE is correctly absent from ${_afc_mode^^}_COMPONENTS (${_afc_n} entries read)"
+    ok "3453-$_afc_mode-absent: $AFC_LANE is correctly absent from ${_afc_MODE}_COMPONENTS (${_afc_n} entries read)"
   fi
 done
 
