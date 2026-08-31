@@ -576,11 +576,49 @@ What it guarantees:
     REFUSES with a `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane
     "another instance is already running"). Remedy: stop that supervisor, or upgrade its checkout past
     #3467.
-  - **verified-absent** → the start proceeds.
+  - **verified-absent** → the start proceeds, and it says so: one `[worker-supervisor] legacy-lock
+    check: nothing at <path>, which is the ONLY path this check tested …` line, naming the resolved
+    path. Read it as the narrow statement it is — see **the check's reach**, below — not as "no
+    pre-#3467 supervisor can be holding a lock on this box".
   - **could-not-tell** → the start REFUSES, and the cause says **THE EXISTENCE PROBE FAILED**. That is
     not a report that a legacy lock exists; it is a report that this run could not decide whether one
     does. Today the one reachable cause is a container (`$TMPDIR`) that is missing or not searchable by
     this user — remedy: make it exist and `chmod +x` it, then re-run.
+
+  **THE CHECK'S REACH — one path, and it is derived from the checking process's own `TMPDIR` (#3549,
+  roborev job 222 F1).** This is a scope statement, not a caveat to skim. The guard stats exactly
+  `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock` **as resolved by the environment of the supervisor
+  doing the checking**, and nothing else, in any state. So a pre-#3467 supervisor launched with a
+  **different `TMPDIR`** resolves its machine-global default to a different absolute path, and one
+  launched with an **explicit `SUPERVISOR_LOCK`** (the pre-#3467 script honours that variable too, and
+  there it names the machine-global lock) holds whatever path its own launcher chose. In both cases that
+  lock is at a path this check never looks at, and a `verified-absent` is a true statement about the path
+  it tested and says nothing about the one that supervisor holds. **Do not read a clean start as "there
+  is no legacy supervisor here."**
+
+  **Why that is not fixed, and why it is not going to be.** Another process's environment is unknowable
+  from inside this one — we cannot read the `TMPDIR` a supervisor we have never seen was launched with,
+  nor a lock path its launcher picked. The tempting reading, "fail closed when the path cannot be
+  established", degenerates: the path can never be established for an arbitrary launcher, so
+  fail-closed would mean refuse **always**, and a guard that never permits a start is broken rather than
+  safe. Probing extra candidate paths was **rejected**, not merely skipped: the guard has no way to tell
+  a stale lock from a live one (the classifier is deleted — see the paragraph above), so every extra
+  probed path is one more place where a leftover directory refuses **every lane, permanently, with no
+  remedy**. That inverts the trade the refusal is worth making at one canonical path an operator can
+  reason about. So the scope is **declared** — in this paragraph, in the proceed-path line, in the
+  refusal's own text, and in a RESIDUAL block at the guard — instead of being papered over with probes
+  that would look complete.
+
+  **Operationally, that means the guard has TWO residuals, one in time and one in space, and they retire
+  together.** In **time**: a pre-#3467 supervisor that starts *after* the check is not stopped by it
+  (#3596). In **space**: a pre-#3467 supervisor whose lock is not at the path we tested is not seen by
+  it (this paragraph). Both close under the **same** condition as the guard's own deletion — every
+  checkout a launcher can reach at or past #3467, at which point no pre-#3467 supervisor can run under
+  any `TMPDIR` or lock name. When you check that condition by hand, note that
+  `ls -d "${TMPDIR:-/tmp}"/cqlite-worker-supervisor.lock` answers for **the `TMPDIR` of the shell you
+  run it in and no other**; the ancestry half (`git -C <checkout> merge-base --is-ancestor f33f726c4
+  HEAD`, for every checkout a launcher can reach) is the half that actually closes it, because it holds
+  whatever path a launcher would have picked.
 
   **Read what the refusal does and does not say, because this changed (#3549).** It names the path and
   it says a path exists there. It makes **NO claim** about what the object is, whether a holder is
@@ -651,7 +689,8 @@ What it guarantees:
   **It is a STARTUP check, not machine-global exclusion: it REDUCES the collision window, it does not
   eliminate it** — a pre-#3467 supervisor that starts *after* the check cannot be stopped without
   reimposing machine-global exclusion, which #3393 forbids (N lanes per box). That residual is tracked
-  as **#3596** and recorded in a RESIDUAL block at the guard.
+  as **#3596** and recorded in a RESIDUAL block at the guard, beside the **spatial** residual described
+  under "the check's reach" above; neither is the only one, and both are in that block.
   The guard is deletable once every checkout on the box is at or past #3467 — the condition is recorded
   at the guard in `scripts/local/worker-supervisor.sh`. (The Claude probe keys on the supervisor's own `-p … --agent flow-lead`
   spawn shape, so a legitimate interactive `claude` REPL or an interactive `claude --agent flow-lead`
