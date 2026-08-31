@@ -3485,6 +3485,64 @@ else
     fi
   fi
 
+  # 11ax. NO TIMEOUT UTILITY => NO PROBE RUNS AT ALL (issue #3414 roborev round 10).
+  #      `bounded` degrades to running the command DIRECTLY when neither timeout nor
+  #      gtimeout exists, and both sudo probes used to execute ABOVE the no-timeout guard —
+  #      so a stalled sudo/PAM/NSS lookup hung bootstrap indefinitely while the code
+  #      CLAIMED it refuses unbounded session probing. Asserting the verdict alone would
+  #      not have caught it: the verdict was already correct, and only the ORDER was wrong.
+  #      So this counts sudo invocations with a recording shim — the fact that distinguishes
+  #      "refused" from "ran it anyway and then said it refused".
+  pin_nt="$tmp/pin-no-timeout"; mkdir -p "$pin_nt"
+  for pin_t in bash env grep sed awk head tail tr cut wc stat mktemp dirname basename cat \
+               cp mv rm mkdir chmod ln find date id uname nproc tee sort xargs expr sleep; do
+    pin_tp=$(type -P "$pin_t" 2>/dev/null) || continue
+    [ -n "$pin_tp" ] && ln -sf "$pin_tp" "$pin_nt/$pin_t" 2>/dev/null || true
+  done
+  pin_nt_trip="$tmp/pin-no-timeout-sudo.log"; : >"$pin_nt_trip"
+  mk_stub "$pin_nt" sudo "echo \"sudo \$*\" >>\"$pin_nt_trip\"; exit 0"
+  envf_ax="$tmp/pin-env-ax"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ax"
+  # NOT through runpin: that wraps the invocation in `timeout`, which this case has
+  # deliberately removed from PATH, so bootstrap would never launch and the assertion would
+  # fail for the harness's reason rather than the code's. The outer timeout is invoked by
+  # ABSOLUTE path so the bound on the test itself survives while bootstrap's OWN PATH still
+  # has none — which is the condition under test.
+  pin_ax_timeout=$(command -v timeout 2>/dev/null || true)
+  out_ax=$(env PATH="$pin_nt" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo"     CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_ax"     ${pin_ax_timeout:+"$pin_ax_timeout" -s KILL 120}     "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke --skip-push-probe 2>&1)
+  if printf '%s' "$out_ax" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+     && printf '%s' "$out_ax" | grep -q 'NOTHING was probed' \
+     && [ ! -s "$pin_nt_trip" ]; then
+    ok "gate-pin: with no timeout utility the section refuses AND invokes sudo zero times"
+  else
+    bad "gate-pin: a probe ran unbounded (or the refusal was not reported): $(wc -l <"$pin_nt_trip") sudo call(s)"
+    printf '%s\n' "$out_ax" | grep -i 'gate-pin' | head -2
+    cat "$pin_nt_trip"
+  fi
+
+  # 11ay. A BOX THAT PERMITS THE SELF-SESSION BUT NOT UNRESTRICTED ROOT MUST STILL BE
+  #      MEASURED (roborev round 10). Probe capability was gated on `sudo -n true`
+  #      succeeding as ROOT, but that asks "may I run ANYTHING as root" while the probe
+  #      needs only "may I open a session as MYSELF". A narrowly-scoped sudoers rule — or a
+  #      box already correctly pinned — was reported sudo-needs-password and failed
+  #      --strict on a legitimately configured machine.
+  pin_ab="$tmp/pin-shims-selfonly"; mkpinshims "$pin_ab" 1
+  mk_stub "$pin_ab" sudo 'args="$*"
+case "$args" in
+  "-n true")  exit 1 ;;                 # root execution DENIED
+esac
+while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
+  envf_ay="$tmp/pin-env-ay"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_ay"
+  out_ay=$(runpin "$pinroot" "$pin_ab" "$envf_ay" HOME="$pin_home_plain")
+  if printf '%s' "$out_ay" | grep -qE '\[ok\].*gate-pin: VERIFIED' \
+     && ! printf '%s' "$out_ay" | grep -q 'needs a password'; then
+    ok "gate-pin: root execution denied but the self-session permitted still MEASURES (no false red)"
+  else
+    bad "gate-pin: a box permitting the self-session was failed for lacking unrestricted root"
+    printf '%s\n' "$out_ay" | grep -i 'gate-pin' | head -2
+  fi
+
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the
