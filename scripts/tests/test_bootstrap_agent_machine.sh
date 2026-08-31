@@ -15,8 +15,20 @@ BOOTSTRAP="$SCRIPT_DIR/../bootstrap-agent-machine.sh"
 
 PASS=0
 FAIL=0
+SKIPS=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# SKIPS ARE NEITHER PASS NOR FAIL, so they must be COUNTED and REPORTED (issue #3414
+# review B1). Three end-to-end cases silently became skips when section 5b started adding
+# one warning to every sandbox, and the suite still said FAIL=0 — including the case whose
+# own comment records that its absence "let a defect through with 102 tests green". A
+# total that cannot distinguish "ran and passed" from "did not run" is the proxy-for-a-fact
+# shape this issue exists to remove, so the tail now prints SKIP= alongside PASS/FAIL.
+# Deliberately NOT a failure in itself: some skips here are honest reports about the HOST
+# (no timeout that accepts --kill-after), and a suite that reds on correct input is one
+# agents learn to waive. The DRIFT that silently disables cases is caught at its root
+# instead, by the base_warns assertion in block 7p.
+skip() { printf 'skip - %s\n' "$1"; SKIPS=$((SKIPS + 1)); }
 
 # --- 1. syntax check (bash -n) ---
 if bash -n "$BOOTSTRAP" 2>/dev/null; then
@@ -802,7 +814,7 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
     bad "cred: bootstrap HUNG on a gtimeout-only host — the bound is inert on macOS"
   fi
 else
-  echo "skip - cred: hanging-helper guard needs timeout/gtimeout (neither on this host)"
+  skip "cred: hanging-helper guard needs timeout/gtimeout (neither on this host)"
 fi
 
 # 7e. Re-running --yes must not STACK a second copy of the helper. Bootstrap is
@@ -883,6 +895,16 @@ mk_push_repo() {
   mkdir -p "$dir/scripts/lib" "$dir/test-data/datasets/sstables/ks/tbl" "$dir/.home/.cargo"
   cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh"
   cp "$SCRIPT_DIR/../perf-capability.sh" "$dir/scripts/perf-capability.sh"
+  # agent-gate.sh is staged for SECTION 5b, not for the push probe (issue #3414 review B1).
+  # 5b's verdict asks the gate what it will do with the probed value, so a sandbox without
+  # it yields `gate-pin: UNMEASURED` — one extra [warn] in EVERY case built on this helper,
+  # which pushed base_warns from 1 to 2 and silently turned three end-to-end assertions
+  # below (the absolute-green, AC1+AC3 exit-0, and one-warning cases) into `skip`s. Skips
+  # are neither pass nor fail, so the suite stayed at FAIL=0 while the case whose own
+  # comment records that its absence "let a defect through with 102 tests green" stopped
+  # running. Staging it here plus the pinned `sudo` shim in mk_push_bin makes 5b contribute
+  # ZERO warnings deterministically — on a pinned host and an unpinned one alike.
+  cp "$SCRIPT_DIR/../agent-gate.sh" "$dir/scripts/agent-gate.sh"
   : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
 }
 
@@ -945,6 +967,17 @@ mk_push_bin() {
   mk_stub "$dir" cargo-nextest 'exit 0'
   mk_stub "$dir" cargo 'exit 0'
   mk_stub "$dir" roborev 'exit 0'
+  # A `sudo` that stands in for a PAM session on a PINNED box (issue #3414 review B1).
+  # Without it these sandboxes fall through to the REAL sudo and the REAL /etc/environment,
+  # so section 5b's verdict — and therefore the warning count every case here measures —
+  # would depend on whether the HOST running the suite happens to be pinned. That is the
+  # host-dependence this file removes everywhere else (GIT_CONFIG_GLOBAL, the board env,
+  # the datasets stub); 5b is simply the newest place it could leak in. Section 3b never
+  # invokes sudo and the perf section is skipped here (`uname` reports Darwin), so this
+  # shim's only subject is 5b.
+  mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=1 "$@"'
   mk_push_gh "$dir" "$setup"
 }
 
@@ -1013,6 +1046,20 @@ fi
 # Absolute-green assertions need the sandbox to be otherwise-warning-free. MEASURE that
 # (baseline = exactly the one OPT-OUT warning) instead of assuming it: an exotic host
 # that warns for its own reasons must not produce a mystery red here.
+# THE BASELINE ITSELF IS AN ASSERTION (issue #3414 review B1). The three cases below are
+# guarded on `base_warns -eq 1` and print a `skip` otherwise — which is correct as a safety
+# net but SILENT as a signal: when section 5b began emitting an extra warning in every
+# sandbox, base_warns went 1 -> 2, all three stopped running, and the suite still reported
+# FAIL=0. Asserting the baseline catches that drift at its cause instead of letting it
+# disable assertions one by one. If this reds, a section has started warning in the clean
+# sandbox; find it before touching the cases below.
+if [ "$base_warns" -eq 1 ]; then
+  ok "push: the clean sandbox costs exactly ONE warning (the opt-out) — the exit-0/green cases below can run"
+else
+  bad "push: sandbox baseline drifted to $base_warns warnings — the three end-to-end cases below will SKIP, not fail"
+  push_plain "$out7pd" | grep -E '^[[:space:]]+\[warn\] ' | head -4
+fi
+
 if [ "$base_warns" -eq 1 ]; then
   if push_green "$out7pa" && [ "$rc7pa" -eq 0 ]; then
     ok "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)"
@@ -1021,7 +1068,7 @@ if [ "$base_warns" -eq 1 ]; then
     push_verdict "$out7pa"
   fi
 else
-  echo "skip - push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  skip "push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
   printf '%s' "$out7pd" | grep -F '[warn]' | sed 's/\x1b\[[0-9;]*m//g' | head -5
 fi
 
@@ -1221,7 +1268,7 @@ if [ "$base_warns" -eq 1 ]; then
     push_plain "$out7pj" | grep -E '\[warn\]' | head -5
   fi
 else
-  echo "skip - push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  skip "push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
 fi
 
 # 7p-k. AN UNSUCCESSFUL CLEANUP DELETE (#3369 blocker 2). `cmd_smoke` used to emit SMOKE-OK — text and
@@ -1368,7 +1415,7 @@ else
   # Deliberately SKIP rather than run unbounded: this fixture ignores SIGTERM, so without
   # a hard-kill-capable watchdog the case could hang the gate forever. A skip that says
   # so is honest; a case that can hang is not.
-  echo "skip - push: bound-escalation guard needs a timeout/gtimeout accepting --kill-after (its fixture ignores SIGTERM)"
+  skip "push: bound-escalation guard needs a timeout/gtimeout accepting --kill-after (its fixture ignores SIGTERM)"
 fi
 
 # 7p-n. SSH REMOTES GET SSH ADVICE (#3369 review). `gh auth setup-git` configures an
@@ -1477,7 +1524,7 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
     push_plain "$out7po" | grep -E 'git-push|kill-after' | head -4
   fi
 else
-  echo "skip - push: --kill-after fallback case needs a real timeout/gtimeout to delegate to"
+  skip "push: --kill-after fallback case needs a real timeout/gtimeout to delegate to"
 fi
 
 # 7p-p. A REMOTE WITH SEVERAL PUSH URLs (#3369 review). `git push <remote>` writes to
@@ -1664,7 +1711,7 @@ if [ "$base_warns" -eq 1 ]; then
     push_plain "$out7pr" | grep -E '^[[:space:]]+\[warn\] ' | head -4
   fi
 else
-  echo "skip - push: one-warning assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  skip "push: one-warning assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
 fi
 
 # (ii) POSITIVE CONTROL: the SAME sandbox and the SAME fallback path, the ONLY change being
@@ -1733,7 +1780,7 @@ if [ "$divergence" -eq 0 ] && [ "$green_runs" -ge 1 ] && [ "$nongreen_runs" -ge 
 elif [ "$divergence" -ne 0 ]; then
   bad "push: --strict and the 'All checks green.' string DIVERGED (see the divergence lines above)"
 else
-  echo "skip - push: divergence check needs both directions (green=$green_runs nongreen=$nongreen_runs on this host)"
+  skip "push: divergence check needs both directions (green=$green_runs nongreen=$nongreen_runs on this host)"
 fi
 
 # 7p-h. FLAG HYGIENE. --skip-push-probe and --skip-smoke are different subjects (the
@@ -2150,7 +2197,7 @@ if [ -n "$jqp" ]; then
     printf '%s\n' "$out8k" | grep -i "PROJECT_NUMBER"
   fi
 else
-  echo "skip - board: title discovery needs jq (absent on this host)"
+  skip "board: title discovery needs jq (absent on this host)"
 fi
 
 # 8k-ii: not discoverable -> point at setup-project-board.sh, still no green.
@@ -2777,6 +2824,60 @@ else
   fi
 
 
+  # 11w. BASH_ENV MUST NOT BE ABLE TO FORGE A PIN (issue #3414 roborev, Medium).
+  #      A NON-INTERACTIVE bash sources $BASH_ENV before running its command. On a box
+  #      whose sudoers lacks `Defaults env_reset` an inherited BASH_ENV survives into the
+  #      probe, and that file can `export CQLITE_GATE_MAX_CONCURRENCY` — so scrubbing the
+  #      variable while leaving the mechanism that re-injects it is not a scrub, and the
+  #      run reports VERIFIED with nothing persisted anywhere. The `-` shim models exactly
+  #      that box: it strips sudo's flags and execs, passing the environment straight
+  #      through, which is what a missing env_reset does.
+  pin_bashenv="$tmp/pin-bashenv.sh"
+  printf 'export CQLITE_GATE_MAX_CONCURRENCY=9\n' >"$pin_bashenv"
+  envf_w="$tmp/pin-env-w"; : >"$envf_w"
+  out_w=$(runpin "$pinroot" "$shims_none" "$envf_w" HOME="$pin_home_plain" \
+    BASH_ENV="$pin_bashenv")
+  if printf '%s' "$out_w" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_w" | grep -qE '\[ok\].*gate-pin' \
+     && ! printf '%s' "$out_w" | grep -q 'CQLITE_GATE_MAX_CONCURRENCY=9'; then
+    ok "gate-pin: a BASH_ENV file exporting the pin cannot forge VERIFIED (BASH_ENV is scrubbed)"
+  else
+    bad "gate-pin: BASH_ENV injected a pin the box does not have"
+    printf '%s\n' "$out_w" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11x. ...and its POSITIVE twin, so 11w cannot pass against a probe that is simply
+  #      broken: the same shim and the same BASH_ENV file, but with the pin genuinely
+  #      persisted, must still reach VERIFIED. Without this, deleting the probe entirely
+  #      would green 11w.
+  envf_x="$tmp/pin-env-x"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_x"
+  shims_pam_x="$tmp/pin-shims-pam-x"; mkpinshims "$shims_pam_x" "file:$envf_x"
+  out_x=$(runpin "$pinroot" "$shims_pam_x" "$envf_x" HOME="$pin_home_plain" \
+    BASH_ENV="$pin_bashenv")
+  if printf '%s' "$out_x" | grep -q 'gate-pin: VERIFIED' \
+     && printf '%s' "$out_x" | grep -q 'max-concurrency=1(pinned)'; then
+    ok "gate-pin: scrubbing BASH_ENV does not break a genuinely pinned box"
+  else
+    bad "gate-pin: the BASH_ENV scrub broke the positive path"
+    printf '%s\n' "$out_x" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11y. VERIFIED STATES ITS OWN SCOPE (issue #3414 review B2). The probe measures a
+  #      PAM-created sudo session; a gate launched from a systemd unit or a container
+  #      entrypoint has no PAM in its ancestry and never has /etc/environment applied, so
+  #      an unqualified VERIFIED reads as a guarantee the probe cannot give. The verdict
+  #      must therefore carry the limit AND name the gate's own cpu-budget token as the
+  #      authoritative per-run confirmation — and must not re-assert the attribution it
+  #      cannot establish ("came from the system env file").
+  if printf '%s' "$out_x" | grep -q 'does NOT prove every gate on this box is pinned' \
+     && printf '%s' "$out_x" | grep -q 'max-concurrency=N(pinned)' \
+     && ! printf '%s' "$out_x" | grep -q 'came from the system env file'; then
+    ok "gate-pin: VERIFIED states what it did NOT measure and names cpu-budget as authoritative"
+  else
+    bad "gate-pin: VERIFIED claims more than the probe measured (missing scope note?)"
+    printf '%s\n' "$out_x" | grep -iA 2 'gate-pin: VERIFIED' | head -4
+  fi
+
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the
@@ -2818,5 +2919,5 @@ else
 fi
 
 echo
-echo "PASS=$PASS FAIL=$FAIL"
+echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIPS"
 [ "$FAIL" -eq 0 ]

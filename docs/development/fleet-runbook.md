@@ -52,9 +52,22 @@ bash scripts/flow/claim.sh smoke               # same probe the bootstrap runs (
 **The single-gate pin is provisioned and VERIFIED the same way (#3414).** Bootstrap persists
 `CQLITE_GATE_MAX_CONCURRENCY=1` into **`/etc/environment`** under `--yes` — read by PAM's
 `pam_env` at session creation, with no interactivity guard — and then reports one
-`gate-pin: VERIFIED / FAILED / UNMEASURED` line taken from an **affirmative probe**: it scrubs
-its own inherited value and reads the variable back out of a fresh, profile-free session. It is
-never a grep of the file it just wrote. Two facts to keep in mind when you touch this:
+`gate-pin:` line taken from an **affirmative probe**: it scrubs its own inherited value —
+**and `BASH_ENV`/`ENV` with it**, since a non-interactive bash sources `$BASH_ENV` and that file
+could re-export the very variable just removed — then reads the variable back out of a fresh,
+profile-free session. It is never a grep of the file it just wrote. Five verdicts ship, only the
+first an `[ok]`: **`VERIFIED`** (visible AND honoured by the gate), **`NOT-HONOURED`** (visible,
+but the gate discards or clamps the value), **`FAILED`** (not visible), **`UNMEASURED`** (the
+probe could not run, or the gate could not be consulted), **`OPT-OUT`/`SKIPPED`**.
+Three facts to keep in mind when you touch this:
+
+* **`VERIFIED` is SCOPED, and the line says so.** The probe measures a PAM-created (sudo)
+  session, because that is the only session an unprivileged process can create. A gate is not
+  launched through sudo: a supervisor or lane tree started from a systemd unit or a container
+  entrypoint has no PAM in its ancestry, so `/etc/environment` never applies to it. `VERIFIED`
+  therefore means "a PAM-created session here sees a value the gate honours", never "every gate
+  on this box is pinned" — the authoritative per-run confirmation is that gate's own
+  `cpu-budget: max-concurrency=N(pinned)` token.
 
 * **A shell profile is the wrong place and a grep of it is the wrong check.** Stock Ubuntu
   `~/.bashrc` opens with `case $- in *i*) ;; *) return;; esac`, so an export appended there is
@@ -67,8 +80,11 @@ never a grep of the file it just wrote. Two facts to keep in mind when you touch
   overrides the pin; bootstrap leaves the line exactly as it is and verifies effectiveness.
 
 ```bash
-# how to ask the question yourself, the only way that answers it:
-sudo -u "$(id -un)" bash -c 'echo "${CQLITE_GATE_MAX_CONCURRENCY:-UNSET}"'
+# how to ask the question yourself. The scrub and the '-' (NOT ':-') are load-bearing:
+# without the scrub an INHERITED value reads as a healthy pin, and ':-' collapses "unset"
+# with "set but empty" — the exact defect this issue removed from the gate's own resolver.
+env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV \
+  sudo -u "$(id -un)" bash -c 'printf "[%s]\n" "${CQLITE_GATE_MAX_CONCURRENCY-UNSET}"'
 # and what the gate then stamps on its own cpu-budget line:
 #   max-concurrency=1(pinned)   <- provisioned    max-concurrency=3(default) <- NOT provisioned
 ```

@@ -2043,6 +2043,14 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     esac
   }
 
+  # pin_scope_note: what VERIFIED does NOT cover. Printed with the verdict, not buried in
+  # a doc, because an unqualified VERIFIED reads as "gates on this box are pinned" and the
+  # probe cannot see a gate launched from a non-PAM parent (#3414 review B2).
+  pin_scope_note() {
+    info "scope: this measured a PAM-created (sudo) session. A process tree created WITHOUT PAM — a systemd unit, a container entrypoint — never has $PIN_ENV_FILE applied, so this does NOT prove every gate on this box is pinned"
+    info "the authoritative per-run confirmation is the gate's own SUMMARY line:  cpu-budget: ... max-concurrency=N(pinned)   (N(default) there means that gate did not see the pin)"
+  }
+
   # pin_value_remedy: the remedy for a VISIBLE but NOT-HONOURED value. Shared by both
   # not-honoured branches so neither can silently lose it.
   pin_value_remedy() {
@@ -2063,11 +2071,30 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # is belt, not braces, since a box without env_reset would pass an inherited value
   # straight through.
   #
-  # NO `-i`. With no profile file read, a value that comes back can only have come from
-  # PAM, so the probe ATTRIBUTES as well as detects. Negative control, run by hand on
-  # the box this was written on: a variable exported in the parent shell but absent
-  # from /etc/environment reads UNSET through this probe, while the persisted pin
-  # reads 1.
+  # BASH_ENV AND ENV ARE SCRUBBED FOR THE SAME REASON, and they are the hole that
+  # "belt, not braces" actually admits (#3414 review). A NON-INTERACTIVE bash SOURCES
+  # $BASH_ENV before running its command — so on a box whose sudoers lacks env_reset an
+  # inherited BASH_ENV survives into the probe, that file can `export
+  # CQLITE_GATE_MAX_CONCURRENCY=1`, and the probe reports the box pinned with NOTHING in
+  # /etc/environment. Scrubbing the variable while leaving the mechanism that can
+  # re-inject it is not a scrub. (`ENV` is POSIX sh's equivalent, scrubbed with it.)
+  #
+  # NO `-i`, so no PROFILE file is read (`~/.bash_profile`, `~/.bashrc`, `/etc/profile`)
+  # — which is the point, since those are exactly the files #3414 showed a gate never
+  # reads. Note the claim is "no profile file", NOT "no file at all": with BASH_ENV and
+  # ENV scrubbed the remaining sources are the session's own (pam_env's /etc/environment
+  # and ~/.pam_environment, a sudoers env_file). Negative control, run by hand on the box
+  # this was written on: a variable exported in the parent shell but absent from
+  # /etc/environment reads UNSET through this probe, while the persisted pin reads 1.
+  #
+  # WHAT THIS PROBE DOES **NOT** COVER, stated here because the verdict text says it too
+  # (#3414 review B2). It measures a PAM-CREATED session, because `sudo` is the only way
+  # to create one unprivileged. A gate is NOT launched through sudo, and a process tree
+  # created WITHOUT PAM — a systemd unit, a container entrypoint — never has
+  # /etc/environment applied to it at all. So VERIFIED means "a PAM-created session on
+  # this box sees a value the gate honours", never "every gate on this box is pinned".
+  # The authoritative per-run confirmation is the gate's OWN `cpu-budget:
+  # max-concurrency=N(pinned)` token, which reports what that gate actually resolved.
   #
   # The bound may degrade to SIGTERM-only (a `timeout` without --kill-after) — tolerated
   # HERE, unlike the §3b push probe, because this probe is LOCAL, NON-MUTATING and
@@ -2082,7 +2109,8 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     warn "gate-pin: UNMEASURED ('id -un' reported no identity, so there is no user to open a probe session as — pin visibility is UNKNOWN, not ok)"
   elif [ "$PIN_PRIV_STATE" = no-sudo-binary ]; then
     warn "gate-pin: UNMEASURED (no 'sudo' on this box, so no fresh PAM session can be created — pin visibility is UNKNOWN, not ok)"
-    info "check by hand from a session that reads no profile:  sudo -u <you> bash -c 'echo \${CQLITE_GATE_MAX_CONCURRENCY:-UNSET}'"
+    info "check by hand:  env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV sudo -u \"\$(id -un)\" bash -c 'printf \"[%s]\\n\" \"\${CQLITE_GATE_MAX_CONCURRENCY-UNSET}\"'"
+    info "(the scrub and the '-' — not ':-' — are load-bearing: without them an INHERITED value, or a set-but-EMPTY one, reads as a healthy pin, which is the defect this section exists to remove)"
   elif [ "$PIN_PRIV_STATE" = sudo-needs-password ]; then
     warn "gate-pin: UNMEASURED (sudo needs a password here and bootstrap probes with 'sudo -n', which never prompts — pin visibility is UNKNOWN, not ok)"
     info "authenticate first, then re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh --yes"
@@ -2095,7 +2123,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     # `(invalid)`, which is a misconfigured box, not an unprovisioned one. `${VAR+1}`
     # separates them; `${VAR-}` alone cannot, and collapsing them here would put the
     # `:-` defect this issue removed from the gate back into the tool that verifies it.
-    pin_probe_out=$(bounded "$PIN_PROBE_BOUND" env -u CQLITE_GATE_MAX_CONCURRENCY \
+    pin_probe_out=$(bounded "$PIN_PROBE_BOUND" env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV \
       sudo -n -u "$PIN_SELF_USER" \
       bash -c 'printf "cqlite-gate-pin-probe-set=%s\ncqlite-gate-pin-probe=%s\n" "${CQLITE_GATE_MAX_CONCURRENCY+1}" "${CQLITE_GATE_MAX_CONCURRENCY-}"' 2>/dev/null) || pin_probe_rc=$?
     # Anchored on our own markers at line start, and each value is read from the FIRST
@@ -2115,7 +2143,14 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       pin_gate_src=$(pin_gate_source_for "$pin_probe_seen") || pin_gate_src=""
       case "$pin_gate_src" in
         pinned)
-          ok "gate-pin: VERIFIED (a fresh profile-free session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate HONOURS it verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value was scrubbed first, so it came from the system env file via PAM, not from inheritance)"
+          # The text says what was MEASURED and nothing more. It used to assert the value
+          # "came from the system env file via PAM, not from inheritance" — the second
+          # half is establishable (this run's value, BASH_ENV and ENV were all scrubbed),
+          # the FIRST half is not: ~/.pam_environment or a sudoers env_file satisfies the
+          # observation identically. Claiming an attribution the probe cannot make is the
+          # proxy-for-a-fact shape this whole section exists to remove.
+          ok "gate-pin: VERIFIED (a PAM-created, profile-free session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen and the gate HONOURS it verbatim — max-concurrency=$pin_probe_seen(pinned); this run's own value, BASH_ENV and ENV were scrubbed first, so it is not inherited from this shell)"
+          pin_scope_note
           ;;
         invalid)
           # Its OWN verdict, not FAILED: the pin is present and visible, so "persist the
@@ -2143,6 +2178,7 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
           info "the pin IS in $PIN_ENV_FILE and a fresh session still does not see it — this is a PAM condition, NOT a missing pin"
           info "re-running with --yes / --fix-gate-pin will NOT help: either finds the line already present and changes nothing"
           info "check the session stack reads it:  grep -n pam_env /etc/pam.d/sudo /etc/pam.d/login /etc/pam.d/sshd   (each needs 'pam_env.so readenv=1')"
+          info "and re-check by hand:  env -u CQLITE_GATE_MAX_CONCURRENCY -u BASH_ENV -u ENV sudo -u \"\$(id -un)\" bash -c 'printf \"[%s]\\n\" \"\${CQLITE_GATE_MAX_CONCURRENCY-UNSET}\"'"
           ;;
         absent-file)
           # No remedy that names a file this host does not have (the ruling on #3414's

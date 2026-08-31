@@ -753,8 +753,14 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   Read `N(default)` on a fleet box as **the pin is not provisioned** — `3` and `3 because nothing set
   it` are different operational facts, and the second one is what ran unseen for months. `invalid`
   and `clamped` exist because `${VAR:-dflt}` cannot tell unset from set-empty (`${VAR+set}` can), so a
-  mis-set variable was textually identical to a healthy defaulted box. Fix a `default`/`invalid` box
-  with `bash scripts/bootstrap-agent-machine.sh --yes` and check its `gate-pin:` line.
+  mis-set variable was textually identical to a healthy defaulted box.
+  **THE REMEDY DIFFERS BY TOKEN, and getting that wrong sends an operator in a circle.** A
+  `default` box has NO pin line, so `bash scripts/bootstrap-agent-machine.sh --fix-gate-pin`
+  (or `--yes`) persists one. An `invalid`/`clamped` box ALREADY HAS the line, with a bad value —
+  and bootstrap deliberately never rewrites an existing value (a box running >1 gate on purpose
+  must not be clobbered), so re-running it is a **silent no-op**: fix the VALUE in
+  `/etc/environment` by hand. Bootstrap says the same thing at the same fork, as
+  `gate-pin: NOT-HONOURED`.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
@@ -1940,8 +1946,17 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   given an isolation guarantee the semaphore was not providing. Bootstrap now persists to
   `/etc/environment` (read by PAM at session creation, no interactivity guard; bash itself never
   reads it, login shell or not) and takes its verdict from an AFFIRMATIVE PROBE — it SCRUBS its own
-  inherited value and reads the variable back out of a fresh, profile-free session — reported as
-  `gate-pin: VERIFIED / FAILED / UNMEASURED` in the same posture as `git-push:`. The generalisation,
+  inherited value — **and `BASH_ENV`/`ENV` with it, since a non-interactive bash SOURCES `$BASH_ENV`
+  and that file can re-export the variable just scrubbed** — and reads it back out of a fresh,
+  profile-free session, in the same posture as `git-push:`. FIVE verdicts ship and only the first is
+  an `[ok]`: **`VERIFIED`** (visible AND the gate honours the value), **`NOT-HONOURED`** (visible,
+  but the gate discards or clamps it — the remedy is to fix the VALUE, not the presence),
+  **`FAILED`** (not visible), **`UNMEASURED`** (the probe could not run, or the gate could not be
+  consulted about the value), **`OPT-OUT`/`SKIPPED`**. **`VERIFIED` IS SCOPED AND SAYS SO**: it
+  measures a PAM-created (sudo) session, so a gate launched from a systemd unit or a container
+  entrypoint — no PAM in its ancestry, so `/etc/environment` never applies — is NOT covered, and the
+  authoritative per-run confirmation stays that gate's own `cpu-budget: max-concurrency=N(pinned)`
+  token. The generalisation,
   which is the same one #3369 landed one section over: **presence in a config file and visibility to
   the process that reads it are different facts, and only the second one is a verdict** — so never
   certify a setting by re-reading the file you just wrote, and never let an INHERITED value answer a
