@@ -569,20 +569,35 @@ impl V5CompressedLegacyParser {
     fn cell_path_key_declares_blob(&self, type_str: &str) -> bool {
         let t = self.peel_frozen_spellings(type_str);
         // CQL spells a CUSTOM type as a SINGLE-QUOTED marshal class name
-        // (`'org.apache.cassandra.db.marshal.BytesType'`); the quotes would
-        // defeat the `ends_with` suffix match below, so strip them first.
-        let t = t.trim_matches('\'').trim().to_string();
-        if t.contains("org.apache.cassandra.db.marshal.") {
-            return Self::primitive_marshal_to_cql_short(&t) == Some("blob");
-        }
-        // A BARE, unqualified marshal name also occurs (a hand-written schema, or
-        // a marshal string whose package prefix was already stripped), so ask the
-        // same normalizer with the canonical prefix restored before falling back
-        // to the CQL short forms. Both routes reach ONE table, so a blob spelling
-        // cannot be recognised by one and rejected by the other.
-        if Self::primitive_marshal_to_cql_short(&format!("org.apache.cassandra.db.marshal.{}", t))
-            == Some("blob")
-        {
+        // (`'org.apache.cassandra.db.marshal.BytesType'`), so strip the quotes.
+        let t = t.trim_matches('\'').trim();
+
+        // EXACT NAMES ONLY — never a suffix match, and never a synthesised package
+        // prefix (issue #3612, roborev round 9 finding 2).
+        //
+        // This used to ask `primitive_marshal_to_cql_short`, whose match is
+        // `s.ends_with("BytesType")`, and for a bare name it PREFIXED the canonical
+        // package first: `format!("org.apache.cassandra.db.marshal.{t}")`. That
+        // defeated the guard every other consumer relies on. `parse_value_from_raw_
+        // bytes` (raw_value.rs) and `cell_path_key_allowed_widths` both consult the
+        // normalizer ONLY when the name already `contains` the Cassandra package, so
+        // a foreign `com.acme.CustomBytesType` never reaches the suffix matcher and
+        // correctly decodes to an opaque `Value::Blob`. Synthesising the prefix here
+        // made that same name look like `BytesType`, so this function reported "a
+        // declared blob" and SUPPRESSED the warning — silencing the diagnostic in
+        // precisely the case it exists for, an unmodelled custom type.
+        //
+        // Deciding a type's identity from a name SUFFIX is inference from a name
+        // pattern, which #28 forbids; a closed set of exact names is not.
+        //
+        // Marshal names are matched CASE-SENSITIVELY on purpose: the decoder's own
+        // normalizer is case-sensitive, so `bytestype` does NOT decode as a blob and
+        // must NOT be reported as a declared one, or the two would disagree. The CQL
+        // short forms are case-INSENSITIVE because the decoder lowercases before
+        // matching them.
+        const CANONICAL_BLOB_MARSHAL: &str = "org.apache.cassandra.db.marshal.BytesType";
+        const BARE_BLOB_MARSHAL: &str = "BytesType";
+        if t == CANONICAL_BLOB_MARSHAL || t == BARE_BLOB_MARSHAL {
             return true;
         }
         matches!(t.to_ascii_lowercase().as_str(), "blob" | "bytes")

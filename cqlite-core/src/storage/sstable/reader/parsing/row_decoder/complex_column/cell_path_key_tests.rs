@@ -1438,3 +1438,67 @@ fn hash_of_value(v: &Value) -> u64 {
     v.hash(&mut h);
     h.finish()
 }
+
+// ---------------------------------------------------------------------------
+// R9-F2: a FOREIGN type whose name merely ENDS IN `BytesType` is not a blob
+// ---------------------------------------------------------------------------
+//
+// `cell_path_key_declares_blob` used to prefix a bare name with the canonical
+// Cassandra package and ask the SUFFIX normalizer, so `com.acme.CustomBytesType`
+// normalized to `blob`, the key was reported as a DECLARED blob, and the opaque-key
+// warning was suppressed — in exactly the case the warning exists for. Deciding a
+// type's identity from a name suffix is inference from a name pattern (#28); the
+// closed set of exact names below is not.
+//
+// The property is observable without capturing logs: `declares_blob` is what
+// separates "opaque because DECLARED blob" from "opaque because UNMODELLED", and
+// only the latter is counted for the aggregated warning. So the test asserts the
+// decode outcome for both, and that the foreign name still yields opaque bytes.
+
+#[test]
+fn a_foreign_type_ending_in_bytes_type_is_not_treated_as_a_declared_blob() {
+    let p = parser();
+    // Foreign, unmodelled, and merely SUFFIXED — must decode opaque (the decoder
+    // never reaches its normalizer, since the name lacks the Cassandra package)
+    // and must NOT be mistaken for a declared blob.
+    for foreign in [
+        "com.acme.CustomBytesType",
+        "com.example.marshal.MyBytesType",
+        "org.apache.cassandra.db.marshal.vendor.CustomBytesType",
+    ] {
+        let got = p
+            .parse_cell_path_key(&[1, 2, 3], foreign, "k")
+            .unwrap_or_else(|e| panic!("{foreign} must still decode opaquely: {e}"));
+        assert_eq!(
+            got,
+            Value::blob(vec![1, 2, 3]),
+            "{foreign}: an unmodelled type surfaces as opaque bytes"
+        );
+        assert!(
+            !p.cell_path_key_declares_blob(foreign),
+            "{foreign} merely ENDS IN `BytesType`; treating it as a declared blob \
+             suppresses the very warning that discloses an unmodelled key (#3612 R9-F2)"
+        );
+    }
+    // The exact names that ARE a declared blob still are — the fix is a narrowing,
+    // not a ban, and these are the spellings the decoder itself accepts.
+    for real in [
+        "blob",
+        "BLOB",
+        "bytes",
+        "BytesType",
+        "org.apache.cassandra.db.marshal.BytesType",
+        "'org.apache.cassandra.db.marshal.BytesType'",
+        "frozen<blob>",
+    ] {
+        assert!(
+            p.cell_path_key_declares_blob(real),
+            "{real} is a declared blob spelling"
+        );
+    }
+    // CASE-SENSITIVE for marshal names, deliberately: the decoder's normalizer is
+    // case-sensitive, so a lowercased marshal name does NOT decode as a blob and
+    // must not be reported as one, or the two would disagree.
+    assert!(!p.cell_path_key_declares_blob("org.apache.cassandra.db.marshal.bytestype"));
+    assert!(!p.cell_path_key_declares_blob("bytestype"));
+}
