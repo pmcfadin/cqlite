@@ -192,6 +192,34 @@ export PIN_SANDBOX_ROOT
 # reasoned it is harmless is how a guard's coverage erodes into a claim. No exemptions.
 mkdir -p "$tmp/help-home/.cargo"
 
+# --- TREE IDENTITY, STAMPED AT BOTH ENDS (#3414, shared-worktree incident) -------------
+# This suite is run by more than one actor against ONE shared worktree, and a run that
+# spans an edit CANNOT BE ATTRIBUTED — its failures may belong to the tree it started on,
+# the tree it ended on, or neither. That is not hypothetical twice over: a run died with a
+# parse error at a line nobody had touched (bash was still reading the file as it changed),
+# and separately a `FAIL=1` followed by four clean runs was read as an intermittent case
+# when it was actually one measurement across a moving tree.
+#
+# Neither was visible in the log. The mtime forensics that found them are not something the
+# next reader will think to do, so the run now SAYS what tree it ran on, at both ends, in
+# the same shape agent-gate.sh uses (tree-start / tree-end / tree-integrity). A moving tree
+# then shows up as itself instead of as a flaky case.
+#
+# Portable and non-fatal: `git` may be absent or this may not be a checkout, in which case
+# the stamp says UNKNOWN rather than pretending. It never fails the suite on its own —
+# the point is that the log can be read, not that the tree must be still.
+pin_tree_id() {
+  if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    printf '%s dirty=%s' \
+      "$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || printf 'UNKNOWN')" \
+      "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  else
+    printf 'UNKNOWN dirty=UNKNOWN'
+  fi
+}
+PIN_TREE_START=$(pin_tree_id)
+printf 'tree-start: %s\n' "$PIN_TREE_START"
+
 # --- 1. syntax check (bash -n) ---
 if bash -n "$BOOTSTRAP" 2>/dev/null; then
   ok "bootstrap script parses (bash -n)"
@@ -3768,6 +3796,17 @@ if [ -z "$pin_decline_bad" ] && grep -qE '^  exit 1$' "$0"; then
   ok "suite hygiene: the wholesale-decline path exits NONZERO (a declined suite is not a passing suite)"
 else
   bad "suite hygiene: a wholesale decline exits 0 — the gate reads only exit status, so it would certify a suite that ran nothing"
+fi
+
+PIN_TREE_END=$(pin_tree_id)
+printf 'tree-end:   %s\n' "$PIN_TREE_END"
+if [ "$PIN_TREE_START" = "$PIN_TREE_END" ]; then
+  printf 'tree-integrity: STABLE\n'
+else
+  # Reported, not failed: the run may still be entirely valid. What it must not do is look
+  # like a clean measurement of one tree when it spanned two.
+  printf 'tree-integrity: MOVED (%s -> %s) — this run spanned an edit; do not attribute its verdicts to either tree without re-running on a still one\n' \
+    "$PIN_TREE_START" "$PIN_TREE_END"
 fi
 
 echo
