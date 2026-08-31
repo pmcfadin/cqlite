@@ -818,31 +818,62 @@ because eight hermetic self-tests build a synthetic repo by copying that one fil
 - `cargo` and `env` are shell **functions** in the gate, so every cargo invocation made
   in the gate's own shell is described **from the real argv about to execute**. There is
   no second copy of a feature list to drift from.
-- The six components whose cargo calls live inside a single-quoted `bash -c` body
-  (`cli-tests`, `memory-budget`, `write-tests`, `integration-tests`, `minimal-build`,
-  `smoke`) hoist their package/features into **one variable** that is expanded both into
-  the argv and into the recorded matrix. The observer functions are deliberately **not**
-  `export -f`-ed: exporting them would make every bash descendant record too, so
+- The eight components whose cargo calls live inside a single-quoted `bash -c` body
+  (`core-tests`' nextest branch, `memory-budget`, `integration-tests`, `write-tests`,
+  `cli-tests`, `compaction-byte-parity`, `minimal-build`, `smoke`) hoist their
+  package/features into **one variable** that is expanded both into the argv and into the
+  recorded matrix. The cargo/env **interceptors** are deliberately **not** `export -f`-ed:
+  exporting an interceptor would make every bash descendant record too, so
   `tooling-tests` (which runs nested agent-gate self-tests) would attribute a nested
   run's cargo invocations to itself — a false rationale in a gate log is worse than none.
+  Each body instead calls the **explicitly named** recorder `_fm_observe_child` (which IS
+  exported, and which intercepts nothing) with the gate's own `_fm_describe_cargo`, so
+  there is no second formatter either.
+
+**It records EXECUTION, not intent** (roborev job 269, blocker 2). Those eight records
+used to be written by the *parent*, before the child body ran: `cli-tests: FAIL` then
+named **both** of its feature sets even when Pass 1 — or the fail-closed target
+derivation above it — died before Pass 2 ever started, and `write-tests` claimed the same
+set `x3` after failing on the first of three `&&`-chained passes. A failure summary that
+claims an invocation which never occurred is affirmatively false, and strictly worse than
+silence: it is what stops the next person looking. Every record is now appended on the
+line immediately **before** its own cargo command, from inside the body, so a
+short-circuit records nothing later. A body that dies before its first cargo call
+legitimately leaves an empty sidecar, and that state is named too.
 
 **It never renders blank.** A component with no observed invocation renders an explicit
-`[UNDECLARED]`; one that runs no cargo at all renders `[no-cargo]`; one whose extension
-is built by a driver this observer cannot see renders `[via maturin: feature set NOT
-observed]` rather than guessing a feature set. A `SKIP` that never reached cargo says so.
+`[UNDECLARED]`; one that runs no cargo at all renders `[no-cargo]`; a `SKIP` that never
+reached cargo — or a `FAIL` before its first cargo call — says exactly that.
 And **observation beats declaration**: a component declared `no-cargo` that is observed
 running cargo shows the observed sets with a `!declared-no-cargo` marker, so a
 mis-declaration self-corrects instead of being believed.
 
+**A driver we cannot see is NAMED, not guessed** (roborev job 269, blocker 1).
+`python-bindings`, `node-bindings`, and the `--lite` `scoped-tests` **python tier** —
+whose `maturin develop` runs in a child process — render
+`[via <driver>: feature set NOT observed]`, and the python tier's entry is **additive**:
+a mixed rust+python diff reads
+`[test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]`,
+never one at the expense of the other. It is recorded only for the build-verify exit
+codes that mean maturin actually ran (a venv/pip failure or an absent cargo/rustc records
+that the tier never reached maturin). This is deliberately **distinct from
+`UNDECLARED`**: "nobody said" and "known to be indirect, therefore unobservable" are
+different facts, and only one of them is a defect.
+
 **Guard:** `scripts/tests/test_agent_gate_feature_matrix_annotation.sh` (in
-`tooling-tests`, hermetic, ~3s) asserts that every name in `COMPONENTS` resolves to a
+`tooling-tests`, hermetic) asserts that every name in `COMPONENTS` resolves to a
 declared class — a new component cannot join the set with a blank matrix — that all six
-per-component emit sites render through the one `_fm_summary_line`, and, for the six
+per-component emit sites render through the one `_fm_summary_line`, and, for the
 `bash -c` components, that the **declared matrix equals the argv that actually
 executed** under a recording PATH-shim `cargo`, described through the gate's own
-`_fm_describe_cargo` rather than re-derived in the test. That last section is
-RED-verified: changing a feature literal in one of those bodies without the hoisted
-variable reds it.
+`_fm_describe_cargo` rather than re-derived in the test. It then re-runs that same
+differential under a **failing** shim, where each body must name exactly the one
+invocation it reached — with the short-circuit itself proved by measurement (strictly
+fewer invocations than the passing run), never assumed. And it drives the real
+`run_scoped_tests` for a pure-python and a mixed route. RED-verified: reintroducing a
+parent-side pre-record, or dropping the python-tier record, reds these sections with the
+exact pre-fix renderings (`[test cqlite-cli default-features | test cqlite-cli --features
+write-support]` on a run that executed one pass; `[UNDECLARED]` on a python-only diff).
 
 **A long feature list is abbreviated, and the abbreviation declares itself**:
 `33:all-compression,arrow,bench-internals,+30 more`, never a silent truncation. Beyond
