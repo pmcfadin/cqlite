@@ -128,23 +128,36 @@ def test_the_row_is_a_plain_dict_with_no_attribute_shadowing(rows) -> None:
 
 
 def test_null_valued_proto_column_changes_nothing(rows) -> None:
-    """The null case — harmless in Python, and the SHAPE differs from Node's.
+    """The null case — harmless in Python, and the SHAPE DIFFERS FROM NODE'S.
 
-    MEASURED on the generated golden: row 2's explicit CQL NULL is a CELL
-    TOMBSTONE with no value cell, so the column arrives ABSENT rather than as a
-    `None` value (see `test-data/fixtures/issue_3630/README.md`). Asserted as
-    absence rather than as `None`, because asserting `row[col] is None` would be
-    asserting a decoder behaviour that measurement contradicts.
+    In JavaScript this same input is the harsher failure mode: assigning null to
+    `__proto__` REPLACES the object's prototype. Python has no analogue — there is
+    nothing a string key can assign to — so the only thing to assert is that the
+    value arrives and the mapping is unremarkable.
 
-    In JavaScript this same input is the harsher failure mode — assigning null to
-    `__proto__` REPLACES the object's prototype. Python has no analogue: there is
-    nothing a key can assign to.
+    **MEASURED CROSS-BINDING DIVERGENCE, and this test asserts PYTHON'S ACTUAL
+    behaviour rather than Node's.** Row 2's explicit CQL NULL is a cell tombstone
+    with no value cell. The two bindings render that differently:
+
+    * **Node SKIPS** it — the column is absent from the row object. Deliberate,
+      and documented in `row_to_object`: null-filling would emit a phantom
+      `col_0: null` beside a real cell for aggregate queries, where core's
+      metadata name and the value key differ (#1446).
+    * **Python NULL-FILLS** it — the key is present with `None`.
+
+    Neither is obviously wrong and this change does not alter either. It is
+    asserted here, rather than assumed away, because the first draft of this file
+    asserted ABSENCE — carried over from the Node measurement — and FAILED. That
+    failure is the finding: the bindings disagree on a row's KEY SET for any
+    declared-but-valueless column, which is a semantic difference a consumer
+    porting between them would hit immediately. Recorded in
+    `.phase2-measurements.md` and reported for a follow-up issue; it is orthogonal
+    to #3630's prototype class and deliberately NOT fixed here.
     """
     row = rows[2]
-    assert ACCESSOR_COL not in row, (
-        "a tombstoned cell must be ABSENT, not null-filled — the same "
-        "declared-but-valueless contract the Node binding preserves"
-    )
+    # Python's shape: the tombstoned column is PRESENT with a None value.
+    assert ACCESSOR_COL in row
+    assert row[ACCESSOR_COL] is None
     # The siblings on the same row are unaffected.
     assert row["constructor"] == "user-supplied-constructor-2"
     assert row["toString"] == "user-supplied-tostring-2"
@@ -153,8 +166,19 @@ def test_null_valued_proto_column_changes_nothing(rows) -> None:
 
 
 def test_contrast_row_has_no_collision_columns(rows) -> None:
-    """Row 3 pins that the shape is a property of the CONSTRUCTION, not the data."""
+    """Row 3: no collision cell on disk — every declared column is None-filled.
+
+    Same divergence as the test above: Node yields `{"id", "real_col"}` for this
+    row, Python yields all six keys with `None` for the four unset ones. Asserted
+    as PYTHON's measured shape.
+
+    What this row still pins, and it is the point of having it: the key set is a
+    property of the SCHEMA, not of the values, so no collision column name is
+    treated specially in either direction — a `__proto__` key appears here for
+    exactly the same reason `real_col` does.
+    """
     row = rows[3]
-    assert set(row) == {"id", "real_col"}
+    assert set(row) == {"id", "real_col", *ALL_COLLISION_COLS}
     for col in ALL_COLLISION_COLS:
-        assert col not in row
+        assert row[col] is None, f"{col!r} should be None-filled on the contrast row"
+    assert row["real_col"] == 44
