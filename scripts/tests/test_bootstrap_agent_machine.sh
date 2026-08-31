@@ -2362,7 +2362,21 @@ mkpinshims() {
     bin=$(type -P "$t" 2>/dev/null) || continue
     [ -n "$bin" ] && ln -sf "$bin" "$dir/$t" 2>/dev/null || true
   done
-  if [ "$val" = "-" ]; then
+  if [ "${val#file:}" != "$val" ]; then
+    # PAM STAND-IN: read the env file AT SESSION CREATION, exactly as pam_env does, so a
+    # write performed earlier in the same bootstrap run is visible to this probe. Presence
+    # of the line and its VALUE are separated (grep vs sed) so a present-but-empty line
+    # injects an empty value rather than being treated as absent — the distinction the
+    # gate's (invalid) classification turns on.
+    mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
+if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+pam_file='${val#file:}'
+if [ -f \"\$pam_file\" ] && grep -Eq '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' \"\$pam_file\"; then
+  pam_val=\$(sed -n 's/^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=//p' \"\$pam_file\" | head -1)
+  exec env CQLITE_GATE_MAX_CONCURRENCY=\"\$pam_val\" \"\$@\"
+fi
+exec \"\$@\""
+  elif [ "$val" = "-" ]; then
     mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
 if [ "${1:-}" = "-u" ]; then shift 2; fi
 exec "$@"'
@@ -2646,6 +2660,123 @@ else
     printf '%s\n' "$out_p" | grep -i 'gate-pin\|nowhere\|fix:' | head -4
   fi
 
+  # 11q. PERSIST-THEN-PROBE WITHIN ONE RUN — the property `verify.run` depends on.
+  #      `--fix-gate-pin` writes the env file and the probe then opens a NEW session, which
+  #      reads that file at session creation, so a box that starts unpinned must come out
+  #      of the SAME invocation VERIFIED — no --yes, no re-login, no second run. If this
+  #      does not hold, putting the flag in .agent-ami/profile.yaml's verify.run buys
+  #      nothing. The `sudo` shim here stands in for pam_env by reading the file, so the
+  #      case exercises the ORDERING rather than a canned answer.
+  envf_q="$tmp/pin-env-q"; : >"$envf_q"
+  shims_pam_q="$tmp/pin-shims-pam-q"; mkpinshims "$shims_pam_q" "file:$envf_q"
+  out_q=$(runpin "$pinroot" "$shims_pam_q" "$envf_q" HOME="$pin_home_plain" --fix-gate-pin)
+  if printf '%s' "$out_q" | grep -q 'gate-pin: VERIFIED' \
+     && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_q"; then
+    ok "gate-pin: --fix-gate-pin persists AND the same run's probe then sees it (no --yes, no re-login)"
+  else
+    bad "gate-pin: persist-then-probe did not close within one run"
+    printf '%s\n' "$out_q" | grep -i 'gate-pin' | head -3
+    cat "$envf_q"
+  fi
+
+  # 11r. The NEGATIVE twin of 11q, so it cannot pass for the wrong reason: with the SAME
+  #      pam-stand-in shim and no repair flag, an unpinned box must still come out FAILED.
+  #      Without this, 11q would also pass against a shim that injects unconditionally.
+  envf_r="$tmp/pin-env-r"; : >"$envf_r"
+  shims_pam_r="$tmp/pin-shims-pam-r"; mkpinshims "$shims_pam_r" "file:$envf_r"
+  out_r=$(runpin "$pinroot" "$shims_pam_r" "$envf_r" HOME="$pin_home_plain")
+  if printf '%s' "$out_r" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_r" | grep -qE '\[ok\].*gate-pin' \
+     && [ ! -s "$envf_r" ]; then
+    ok "gate-pin: without a repair flag the same unpinned box stays FAILED and nothing is written"
+  else
+    bad "gate-pin: the no-flag twin did not stay FAILED (or wrote without being asked)"
+    printf '%s\n' "$out_r" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11s. --fix-gate-pin must stay NON-PASSING on a box it cannot certify. An onboarding
+  #      instance without passwordless sudo has to red loudly — that is the whole point of
+  #      putting the flag behind --strict in verify.run, and `--strict` keys off exactly
+  #      this: a [warn] rather than an [ok].
+  #
+  #      It deliberately does NOT also assert "wrote nothing". Under the test seam the
+  #      write is forced UNPRIVILEGED (that is what makes "no env var can steer a
+  #      PRIVILEGED write" true), so a broken `sudo` cannot stop the sandbox write and the
+  #      file-emptiness half would be asserting a property of the seam, not of the code.
+  #      The refuse-to-persist path is covered behaviourally by 11s2 below instead.
+  envf_s="$tmp/pin-env-s"; : >"$envf_s"
+  out_s=$(runpin "$pinroot" "$shims_pw" "$envf_s" HOME="$pin_home_plain" --fix-gate-pin)
+  if ! printf '%s' "$out_s" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_s" | grep -qE '\[warn\].*gate-pin:'; then
+    ok "gate-pin: --fix-gate-pin on a box it cannot certify stays non-passing (so --strict exits 1)"
+  else
+    bad "gate-pin: --fix-gate-pin reported ok on a box without passwordless sudo"
+    printf '%s\n' "$out_s" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11s2. ...and a genuine COULD-NOT-PERSIST condition refuses the write, says why, and
+  #      still does not pass. An unreadable env file is the one such condition reachable
+  #      through the seam: bootstrap will not append blind, because it cannot tell whether
+  #      a line is already there and a blind append could duplicate or contradict it.
+  #      Root can read a 0000 file, so the case would assert nothing as root — skipped
+  #      rather than silently inverted.
+  if [ "$(id -u)" = 0 ]; then
+    ok "SKIP gate-pin unreadable-env-file case (running as root: 0000 is still readable)"
+  else
+    envf_s2="$tmp/pin-env-s2"; printf 'FOO=bar\n' >"$envf_s2"; chmod 0000 "$envf_s2"
+    # shims_none (a session that injects nothing) is the right stand-in here: the append
+    # was refused, so the box IS unpinned and the probe must say so. Using a shim bound to
+    # some OTHER case's file would report that file's pin and green this case for a reason
+    # that has nothing to do with it.
+    out_s2=$(runpin "$pinroot" "$shims_none" "$envf_s2" HOME="$pin_home_plain" --fix-gate-pin)
+    chmod 0644 "$envf_s2"
+    if printf '%s' "$out_s2" | grep -q 'cannot read' \
+       && printf '%s' "$out_s2" | grep -q 'gate-pin: FAILED' \
+       && ! printf '%s' "$out_s2" | grep -qE '\[ok\].*gate-pin' \
+       && [ "$(cat "$envf_s2")" = "FOO=bar" ]; then
+      ok "gate-pin: an unreadable env file refuses the append, says why, and does not pass"
+    else
+      bad "gate-pin: an unreadable env file was appended to blind (or still passed)"
+      printf '%s\n' "$out_s2" | grep -i 'gate-pin\|cannot read' | head -3
+      cat "$envf_s2"
+    fi
+  fi
+
+  # 11t. Contradictory intents do not resolve silently: an explicit --skip-gate-pin beside
+  #      --fix-gate-pin is a usage error, and flag ORDER must not change that.
+  #      The MESSAGE is asserted too, not just the exit code: an unrecognised flag also
+  #      exits 2, so a bare rc check would pass against a build that never learned
+  #      --fix-gate-pin at all — a vacuous green in the exact place this case exists.
+  for pin_order in "--skip-gate-pin --fix-gate-pin" "--fix-gate-pin --skip-gate-pin"; do
+    # shellcheck disable=SC2086
+    pin_t_out=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+      CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$tmp/pin-env-t" \
+      timeout -s KILL 120 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+        --skip-smoke $pin_order 2>&1)
+    pin_t_rc=$?
+    if [ "$pin_t_rc" -eq 2 ] && printf '%s' "$pin_t_out" | grep -q 'contradictory'; then
+      ok "gate-pin: '$pin_order' is a usage error naming the contradiction, whatever the order"
+    else
+      bad "gate-pin: '$pin_order' did not exit 2 naming the contradiction (rc=$pin_t_rc)"
+      printf '%s\n' "$pin_t_out" | head -2
+    fi
+  done
+
+  # 11u. ...but the weaker ENV opt-out yields to an explicit --fix-gate-pin, so a harness
+  #      that exports CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 cannot neuter a caller's repair.
+  envf_u="$tmp/pin-env-u"; : >"$envf_u"
+  shims_pam_u="$tmp/pin-shims-pam-u"; mkpinshims "$shims_pam_u" "file:$envf_u"
+  out_u=$(runpin "$pinroot" "$shims_pam_u" "$envf_u" HOME="$pin_home_plain" \
+    CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 --fix-gate-pin)
+  if printf '%s' "$out_u" | grep -q 'gate-pin: VERIFIED' \
+     && ! printf '%s' "$out_u" | grep -q 'gate-pin: OPT-OUT'; then
+    ok "gate-pin: an explicit --fix-gate-pin overrides the weaker env opt-out"
+  else
+    bad "gate-pin: the env opt-out neutered an explicit --fix-gate-pin"
+    printf '%s\n' "$out_u" | grep -i 'gate-pin' | head -3
+  fi
+
+
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the
@@ -2669,6 +2800,21 @@ else
     printf '%s\n' "$out_k" | grep -i 'gate-pin' | head -2
     printf '%s\n' "$out_k2" | grep -i 'gate-pin' | head -2
   fi
+fi
+
+# 11v. THE COUPLING THAT MOTIVATES THE FLAG. --fix-gate-pin exists because a launched box's
+#      ONLY bootstrap invocation is .agent-ami/profile.yaml's verify.run. If that command
+#      string ever loses the flag, every new instance silently arrives unpinned again and
+#      nothing else in this suite would notice — the flag would still work perfectly and be
+#      called by nobody.
+pin_profile="$SCRIPT_DIR/../../.agent-ami/profile.yaml"
+if [ ! -r "$pin_profile" ]; then
+  bad "gate-pin: .agent-ami/profile.yaml is not readable — cannot check verify.run carries --fix-gate-pin"
+elif grep -E '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile" | grep -q -- '--fix-gate-pin'; then
+  ok "gate-pin: .agent-ami/profile.yaml's verify.run persists the pin on a launched box (--fix-gate-pin)"
+else
+  bad "gate-pin: verify.run no longer passes --fix-gate-pin — launched boxes will arrive UNPINNED"
+  grep -nE '^[[:space:]]*run:.*bootstrap-agent-machine\.sh' "$pin_profile" | head -2
 fi
 
 echo
