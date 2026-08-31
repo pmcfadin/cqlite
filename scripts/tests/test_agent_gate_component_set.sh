@@ -768,15 +768,28 @@ anc_fx=$(mkbranch anc-fifo "$(mkbaseline base-anc - )" - )
 anc_ctl=$(hook "$anc_fx")
 anc_objdir=$(git -C "$anc_fx" rev-parse --git-path objects 2>/dev/null)
 case "$anc_objdir" in /*) : ;; *) anc_objdir="$anc_fx/$anc_objdir" ;; esac
-anc_parent=$(git -C "$anc_fx" rev-parse --verify --quiet 'HEAD^^{commit}' 2>/dev/null || true)
+# THE CASE MAKES ITS OWN PARENT. A `mkbranch` fixture is a clone of the baseline plus ONE commit,
+# and measured, its HEAD has NO parent — so `HEAD~1` was empty and this case refused itself. Rather
+# than depend on a builder's history depth (which is not this case's subject and can change), add
+# an empty commit: HEAD~1 is then the fixture's original branch commit, which is LOOSE in the
+# fixture's own store and — the property that makes this a test of the WALK — is read by nothing
+# earlier. HEAD's own object is resolved by `rev-parse --verify HEAD^{commit}`; the baseline's
+# objects are read in the scratch; only `merge-base` has to traverse HEAD~1.
+( fx "$anc_fx" && git "${GIT_ID[@]}" commit -q --allow-empty -m anc-parent ) >/dev/null 2>&1 || true
+anc_parent=$(git -C "$anc_fx" rev-parse --verify --quiet 'HEAD~1^{commit}' 2>/dev/null || true)
 # BLAST-RADIUS GUARD, AND IT MATTERS MORE HERE THAN FOR THE CONFIG CASE. A WORKTREE's object
 # directory is NOT under its own path — it is the SHARED /data/lanes/repo/.git/objects on this
 # fleet. So planting a FIFO in "the fixture's" object store without resolving and checking that
 # path would hang EVERY LANE ON THE BOX. The resolved objects dir must itself lie strictly under
 # $tmp; the fixture path being under $tmp is NOT sufficient evidence for that.
-if [ -z "$anc_parent" ] || [ -z "$anc_objdir" ] \
-   || case "$anc_objdir" in "$tmp"/?*) false ;; *) true ;; esac; then
-  bad "3544-ancestry-bounded: refusing to plant a blocking object: resolved objects dir '$anc_objdir' is not strictly under \$tmp ('$tmp'), or HEAD has no parent commit ('$anc_parent') — a FIFO in a SHARED object store would hang every lane on this box"
+if [ -z "$anc_objdir" ] || case "$anc_objdir" in "$tmp"/?*) false ;; *) true ;; esac; then
+  # SEPARATE CAUSES, SEPARATE MESSAGES. The first cut reported "the objects dir is not under \$tmp,
+  # OR HEAD has no parent" as one sentence, and when it fired I spent a minute suspecting the path
+  # check — which had in fact passed. A diagnostic that ORs two causes is the two-valued collapse
+  # this whole file argues against, in the diagnostic rather than in the predicate.
+  bad "3544-ancestry-bounded: refusing to plant a blocking object: resolved objects dir '$anc_objdir' is not strictly under \$tmp ('$tmp') — a FIFO in a SHARED object store would hang every lane on this box"
+elif [ -z "$anc_parent" ]; then
+  bad "3544-ancestry-bounded: the fixture's HEAD has no parent commit even after adding one, so there is no object the ancestry walk must traverse — the plant has no subject"
 elif [ "$(field KIND "$anc_ctl")" != ok ]; then
   bad "3544-ancestry-bounded: the POSITIVE CONTROL (same fixture, no FIFO) did not reach KIND ok (got '$(field KIND "$anc_ctl")') — the case cannot discriminate"
 else
