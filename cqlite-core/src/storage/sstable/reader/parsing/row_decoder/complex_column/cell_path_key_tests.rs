@@ -640,7 +640,7 @@ fn inet_cell_path_key_accepts_only_4_or_16_bytes() {
 }
 
 #[test]
-fn every_decodable_cell_path_key_type_passes_the_fail_closed_check() {
+fn every_decodable_cell_path_key_type_decodes_without_erroring() {
     let p = parser();
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("text", b"x".to_vec()),
@@ -666,5 +666,219 @@ fn every_decodable_cell_path_key_type_passes_the_fail_closed_check() {
     for (type_str, bytes) in cases {
         p.parse_cell_path_key(&bytes, type_str, "k")
             .unwrap_or_else(|e| panic!("{type_str} must still decode, got: {e}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE CLASS, not the arm: "two distinct corrupted paths, one logical key"
+// ---------------------------------------------------------------------------
+//
+// Round 2 of review found the round-1 framing validator covered only tuple and
+// UDT, so a frozen list/set/map key or a `duration` key still decoded from a
+// PREFIX — two different byte strings yielding the SAME logical map key, which
+// is the defect this whole check exists to close. Each case below appends bytes
+// to a VALID encoding and asserts (1) the clean form decodes, (2) the appended
+// form is REFUSED, and (3) — the property that actually matters — that the two
+// are DISTINCT byte strings, so a silent accept really would be a collision.
+
+/// Assert the collision shape for one declared type: `clean` decodes, `clean +
+/// junk` is refused, and the two inputs differ. Written once so no per-decoder
+/// case can end up quietly weaker than its siblings.
+fn assert_no_prefix_collision(type_str: &str, clean: &[u8], junk: &[u8]) {
+    let p = parser();
+    let decoded_clean = p
+        .parse_cell_path_key(clean, type_str, "k")
+        .unwrap_or_else(|e| panic!("{type_str}: the clean encoding must decode, got: {e}"));
+    let mut corrupt = clean.to_vec();
+    corrupt.extend_from_slice(junk);
+    assert_ne!(
+        corrupt.as_slice(),
+        clean,
+        "{type_str}: the test is only meaningful if the two inputs differ"
+    );
+    match p.parse_cell_path_key(&corrupt, type_str, "k") {
+        Ok(also) => panic!(
+            "{type_str}: appending {} byte(s) was ACCEPTED and produced {:?} — the \
+             clean encoding produced {decoded_clean:?}; two distinct cell paths now \
+             collapse to one logical key",
+            junk.len(),
+            also
+        ),
+        Err(e) => {
+            // Any of THREE layers may refuse, and which one does is not the
+            // property under test — that the two byte strings do not collapse is.
+            // The message is still constrained, so a refusal for an unrelated
+            // reason (say a registry miss) cannot be mistaken for this one:
+            //   * the consumption rule       -> "decoded only N of M byte(s)";
+            //   * the caller's width table   -> "requires exactly N bytes";
+            //   * the decoder's own element
+            //     bounds check, which already
+            //     rejected a dangling FULL
+            //     4-byte header pre-change    -> "available in blob".
+            let msg = e.to_string();
+            assert!(
+                msg.contains("decoded only")
+                    || msg.contains("requires exactly")
+                    || msg.contains("available in blob"),
+                "{type_str}: the refusal must name a length/consumption problem, \
+                 got: {msg}"
+            );
+        }
+    }
+}
+
+/// `[i32 BE count]` then per element `[i32 BE len][bytes]` — the framing
+/// `parse_frozen_sequence_value_raw` reads for a frozen list/set.
+fn encode_sequence(elements: &[&[u8]]) -> Vec<u8> {
+    let mut out = (elements.len() as i32).to_be_bytes().to_vec();
+    for e in elements {
+        out.extend_from_slice(&(e.len() as i32).to_be_bytes());
+        out.extend_from_slice(e);
+    }
+    out
+}
+
+/// `[i32 BE count]` then per entry `[i32 len][key][i32 len][value]`.
+fn encode_frozen_map(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let mut out = (entries.len() as i32).to_be_bytes().to_vec();
+    for (k, v) in entries {
+        out.extend_from_slice(&(k.len() as i32).to_be_bytes());
+        out.extend_from_slice(k);
+        out.extend_from_slice(&(v.len() as i32).to_be_bytes());
+        out.extend_from_slice(v);
+    }
+    out
+}
+
+#[test]
+fn frozen_list_cell_path_key_rejects_trailing_bytes() {
+    let clean = encode_sequence(&[&1i32.to_be_bytes(), &2i32.to_be_bytes()]);
+    assert_no_prefix_collision("frozen<list<int>>", &clean, b"\xde\xad");
+}
+
+#[test]
+fn frozen_set_cell_path_key_rejects_trailing_bytes() {
+    let clean = encode_sequence(&[b"a", b"b"]);
+    assert_no_prefix_collision("frozen<set<text>>", &clean, b"\x00");
+}
+
+#[test]
+fn frozen_map_cell_path_key_rejects_trailing_bytes() {
+    let clean = encode_frozen_map(&[(b"k", &7i32.to_be_bytes())]);
+    assert_no_prefix_collision("frozen<map<text, int>>", &clean, b"\xff\xff\xff");
+}
+
+#[test]
+fn duration_cell_path_key_rejects_trailing_bytes() {
+    // Three signed VInts: months=0, days=0, nanos=0 (each one byte under
+    // Cassandra's zigzag VInt encoding).
+    let clean = vec![0u8, 0, 0];
+    assert_no_prefix_collision("duration", &clean, b"\x01");
+}
+
+#[test]
+fn marshal_form_composite_cell_path_keys_reject_trailing_bytes_too() {
+    // The marshal spellings take the same dispatch arms, so the check must not
+    // be reachable only through the CQL short forms.
+    let clean = encode_sequence(&[&1i32.to_be_bytes()]);
+    assert_no_prefix_collision(
+        &format!("{MARSHAL}.ListType({MARSHAL}.Int32Type)"),
+        &clean,
+        b"\x07",
+    );
+    let clean_map = encode_frozen_map(&[(b"k", &7i32.to_be_bytes())]);
+    assert_no_prefix_collision(
+        &format!("{MARSHAL}.MapType({MARSHAL}.UTF8Type,{MARSHAL}.Int32Type)"),
+        &clean_map,
+        b"\x07",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R2-F2: a PARTIAL trailing component-length header is corruption, not omission
+// ---------------------------------------------------------------------------
+
+/// The subtle half of the class. A composite decoder treats "fewer than 4 bytes
+/// remain" as "the trailing components are omitted", which is LEGAL per
+/// `TupleType.split`'s `position == length` early return — but only when nothing
+/// remains at all. Appending 1-3 junk bytes hits that same early exit, so before
+/// the consumption rule it produced the SAME decoded key as the clean short
+/// encoding: a collision reachable by appending one byte.
+#[test]
+fn a_partial_trailing_component_header_is_rejected_for_a_udt_key() {
+    let clean = encode_components(&[Some(b"only-the-first-field")]);
+    for junk_len in 1..=3usize {
+        assert_no_prefix_collision("frozen<collide>", &clean, &vec![0xABu8; junk_len]);
+    }
+}
+
+#[test]
+fn a_partial_trailing_component_header_is_rejected_for_a_tuple_key() {
+    let clean = encode_components(&[Some(b"abc")]);
+    for junk_len in 1..=3usize {
+        assert_no_prefix_collision("tuple<text, int>", &clean, &vec![0x5Au8; junk_len]);
+    }
+}
+
+/// A FULL 4-byte header with no body is also `pos < len` and must be refused —
+/// the boundary immediately above the 1-3 byte case.
+#[test]
+fn a_dangling_component_length_header_is_rejected() {
+    let clean = encode_components(&[Some(b"abc")]);
+    assert_no_prefix_collision("tuple<text, int>", &clean, &7i32.to_be_bytes());
+}
+
+// ---------------------------------------------------------------------------
+// The enumeration itself: every COMPOSITE spelling must report a consumption
+// ---------------------------------------------------------------------------
+
+/// The drift guard for the dispatch table. `decode_reporting_consumption` mirrors
+/// `parse_value_from_raw_bytes`'s composite arms, and an arm added there but not
+/// here would silently fall through to the `None` ("whole slice by construction")
+/// default — i.e. straight back to a prefix decode. Rather than inspect the
+/// private return value, this asserts the OBSERVABLE consequence for every
+/// composite spelling the decoder supports: appending a byte must be refused.
+#[test]
+fn every_composite_cell_path_key_spelling_is_consumption_checked() {
+    let int_elem = encode_sequence(&[&1i32.to_be_bytes()]);
+    let map_bytes = encode_frozen_map(&[(b"k", &7i32.to_be_bytes())]);
+    let udt_bytes = collide_key_bytes();
+    let tuple_bytes = encode_components(&[Some(b"abc"), Some(&42i32.to_be_bytes())]);
+    let cases: Vec<(String, &[u8])> = vec![
+        ("list<int>".to_string(), &int_elem),
+        ("set<int>".to_string(), &int_elem),
+        ("map<text, int>".to_string(), &map_bytes),
+        ("tuple<text, int>".to_string(), &tuple_bytes),
+        ("frozen<list<int>>".to_string(), &int_elem),
+        ("frozen<set<int>>".to_string(), &int_elem),
+        ("frozen<map<text, int>>".to_string(), &map_bytes),
+        ("frozen<collide>".to_string(), &udt_bytes),
+        ("collide".to_string(), &udt_bytes),
+        (
+            format!("{MARSHAL}.ListType({MARSHAL}.Int32Type)"),
+            &int_elem,
+        ),
+        (format!("{MARSHAL}.SetType({MARSHAL}.Int32Type)"), &int_elem),
+        (
+            format!("{MARSHAL}.MapType({MARSHAL}.UTF8Type,{MARSHAL}.Int32Type)"),
+            &map_bytes,
+        ),
+        (
+            format!("{MARSHAL}.TupleType({MARSHAL}.UTF8Type,{MARSHAL}.Int32Type)"),
+            &tuple_bytes,
+        ),
+        (
+            format!("{MARSHAL}.FrozenType({MARSHAL}.ListType({MARSHAL}.Int32Type))"),
+            &int_elem,
+        ),
+        ("duration".to_string(), &[0u8, 0, 0]),
+    ];
+    assert_eq!(
+        cases.len(),
+        15,
+        "keep this count in step with the case list, so a deleted case is visible"
+    );
+    for (type_str, clean) in cases {
+        assert_no_prefix_collision(&type_str, clean, b"\x01");
     }
 }
