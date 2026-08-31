@@ -32,6 +32,22 @@
 --   f_map_tuple_udt  — frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>
 --   f_map_set_udt    — frozen<map<frozen<set<frozen<key_part>>>, int>>
 --
+-- Plus ONE column whose map KEY is a tuple carrying a NESTED LIST, so that the
+-- ordinary and the hashable projections of the SAME key DIVERGE:
+--   f_map_tuple_list_udt
+--     frozen<map<frozen<tuple<frozen<list<frozen<key_part>>>, int>>, int>>
+-- WHY IT IS NOT REDUNDANT WITH f_map_tuple_udt (issue #3500, roborev job 275).
+-- f_map_tuple_udt's key is a tuple of a SCALAR-FIELD UDT, and since #3504 the
+-- ordinary projection of that tuple is ALREADY hashable (a `tuple` holding a
+-- `cqlite.Udt`) — the two routes produce the SAME object, so no assertion on
+-- that column can tell the `Tuple` arm's RECURSION from a delegation to
+-- `value_to_py`. A regression that delegated the arm would pass every other
+-- test in this fixture. This column's key holds a `list`, whose ordinary
+-- projection is a Python `list` — UNHASHABLE, so it cannot be a `dict` key at
+-- all — while the hashable route recurses and yields a `tuple`. The two routes
+-- therefore differ OBSERVABLY, and a delegated `Tuple` arm raises
+-- `TypeError: unhashable type: 'list'` on this column alone.
+--
 -- Plus TWO columns that put a UDT inside a frozen MAP that is itself a SET
 -- ELEMENT, which is the only shape that exercises `contains_udt`'s MAP arm
 -- (roborev job 245, F3):
@@ -148,6 +164,7 @@ CREATE TABLE IF NOT EXISTS nested_udt_keys (
     f_set_tuple_udt frozen<set<frozen<tuple<frozen<key_part>, int>>>>,
     f_map_tuple_udt frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>,
     f_map_set_udt   frozen<map<frozen<set<frozen<key_part>>>, int>>,
+    f_map_tuple_list_udt frozen<map<frozen<tuple<frozen<list<frozen<key_part>>>, int>>, int>>,
     s_map_udt_key   set<frozen<map<frozen<key_part>, int>>>,
     s_map_udt_val   set<frozen<map<int, frozen<key_part>>>>
 ) WITH compression = {'enabled': 'false'}

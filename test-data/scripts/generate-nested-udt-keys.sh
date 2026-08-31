@@ -21,6 +21,8 @@
 #   f_set_tuple_udt frozen<set<frozen<tuple<frozen<key_part>, int>>>>
 #   f_map_tuple_udt frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>
 #   f_map_set_udt   frozen<map<frozen<set<frozen<key_part>>>, int>>
+#   f_map_tuple_list_udt
+#                   frozen<map<frozen<tuple<frozen<list<frozen<key_part>>>, int>>, int>>
 #   s_map_udt_key   set<frozen<map<frozen<key_part>, int>>>      (contains_udt k)
 #   s_map_udt_val   set<frozen<map<int, frozen<key_part>>>>      (contains_udt v)
 #
@@ -583,9 +585,15 @@ flush_ks() {
 #     frozen map written out of key order: so the element is a real multi-pair
 #     `Value::Map` when `contains_udt`'s Map arm walks it, and `any(...)` is not
 #     trivially answered by a single pair.
+#   * f_map_tuple_list_udt holds TWO keys carrying the SAME two list elements in
+#     OPPOSITE ORDER with the same trailing int. They are distinct frozen-list
+#     values, so Cassandra stores two entries — and the hashable projection must
+#     keep them distinct, which it can only do by preserving the list's ORDER.
+#     A projection that answered with a `frozenset` (or that sorted) would
+#     collapse them into one dict entry.
 insert_full() {
   log "=== nested_udt_keys id=1 (fully populated, multi-element) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, s_map_udt_key, s_map_udt_val) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, f_map_tuple_list_udt, s_map_udt_key, s_map_udt_val) VALUES (
     1,
     { ({label:'zulu', rank:26}, 7), ({label:'alpha', rank:1}, 2), ({label:'alpha', rank:1}, 1) },
     { { {label:'beta', rank:2}, {label:'alpha', rank:1} }, { {label:'gamma', rank:3} } },
@@ -594,6 +602,7 @@ insert_full() {
     { ({label:'frozen-b', rank:12}, 2), ({label:'frozen-a', rank:11}, 1) },
     { ({label:'mkey-b', rank:22}, 2): 220, ({label:'mkey-a', rank:21}, 1): 210 },
     { { {label:'mset-b', rank:32}, {label:'mset-a', rank:31} }: 310, { {label:'mset-c', rank:33} }: 330 },
+    { ([ {label:'lb', rank:2}, {label:'la', rank:1} ], 1): 210, ([ {label:'la', rank:1}, {label:'lb', rank:2} ], 1): 120 },
     { { {label:'kb', rank:2}: 20, {label:'ka', rank:1}: 10 }, { {label:'kc', rank:3}: 30 } },
     { { 2: {label:'vb', rank:12}, 1: {label:'va', rank:11} }, { 3: {label:'vc', rank:13} } }
   )"
@@ -619,7 +628,7 @@ insert_full() {
 # this generator asserts neither.
 insert_null_fields() {
   log "=== nested_udt_keys id=2 (null UDT fields + empty-string field) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, s_map_udt_key, s_map_udt_val) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, f_map_tuple_list_udt, s_map_udt_key, s_map_udt_val) VALUES (
     2,
     { ({label:'nullrank', rank:null}, 1), ({label:null, rank:5}, 2) },
     { { {label:'nullrank2', rank:null}, {label:null, rank:null} } },
@@ -628,6 +637,7 @@ insert_null_fields() {
     { ({label:null, rank:7}, 3) },
     { ({label:'nullrank3', rank:null}, 1): 51, ({label:null, rank:5}, 2): 52 },
     { { {label:null, rank:null} }: 61, { {label:'', rank:0} }: 62 },
+    { ([ {label:'nulllist', rank:null}, {label:null, rank:8} ], 3): 380 },
     { { {label:'', rank:0}: 1, {label:'zz', rank:9}: 2 } },
     { { 1: {label:null, rank:null}, 2: {label:'', rank:0} } }
   )"
@@ -637,7 +647,7 @@ insert_null_fields() {
 # five columns, so a decoder that confuses two columns is visible.
 insert_minimal() {
   log "=== nested_udt_keys id=3 (single element per collection) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, s_map_udt_key, s_map_udt_val) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, f_map_tuple_list_udt, s_map_udt_key, s_map_udt_val) VALUES (
     3,
     { ({label:'solo', rank:99}, 42) },
     { { {label:'solo', rank:99} } },
@@ -646,6 +656,7 @@ insert_minimal() {
     { ({label:'solo', rank:99}, 42) },
     { ({label:'solo', rank:99}, 42): 7 },
     { { {label:'solo', rank:99} }: 7 },
+    { ([ {label:'solo', rank:99} ], 42): 7 },
     { { {label:'solo', rank:99}: 42 } },
     { { 42: {label:'solo', rank:99} } }
   )"
