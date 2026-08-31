@@ -139,6 +139,71 @@ impl V5CompressedLegacyParser {
             _ => schema_short,
         }
     }
+
+    /// THE ONE RULE FOR A MAP KEY'S DECODE TYPE, shared by BOTH map readers
+    /// (issue #3612, roborev round 8 finding 1).
+    ///
+    /// The multicell reader (`complex_column`'s map branch) and the frozen reader
+    /// (`cell_value_complex`'s `map<` branch) must hand the SAME string to the same
+    /// decoder, or they produce `Value` keys that compare and hash differently for
+    /// one CQL value. They previously did not, and the difference was invisible for
+    /// UDT keys and visible for COLLECTION keys:
+    ///
+    /// * multicell `map<frozen<set<frozen<U>>>, int>` → Cassandra records
+    ///   `MapType(FrozenType(SetType(UserType(..))),..)`, so the key marshal KEEPS
+    ///   its `FrozenType` — a multicell map key must be explicitly frozen;
+    /// * frozen `frozen<map<frozen<set<frozen<U>>>, int>>` → Cassandra records
+    ///   `FrozenType(MapType(SetType(UserType(..)),..))`, with the INNER marker
+    ///   OMITTED, because everything inside a frozen collection is already frozen.
+    ///
+    /// Decoding those two strings yields `Frozen(Set(Udt))` and `Set(Udt)`. Hence
+    /// the strip below: it normalizes the marshal form to the shape the frozen
+    /// reader already receives, so both readers decode an identical string and
+    /// parity holds BY CONSTRUCTION rather than by a second, value-level
+    /// normalizer bolted onto one side (which is what round 3 did, and what left
+    /// this hole one nesting level down).
+    ///
+    /// The strip is applied ONLY to the marshal form. When
+    /// `prefer_udt_marshal_element` keeps the SCHEMA short form — every non
+    /// UDT-bearing key — both readers already receive that same unstripped string
+    /// (e.g. `frozen<set<int>>` on both sides), so stripping it would break the
+    /// parity it is meant to preserve.
+    ///
+    /// On the FROZEN reader this call is a NO-OP in both branches, by
+    /// construction: its marshal key never carries the outer marker (Cassandra
+    /// omits it, measured on `f_map_tuple_udt` and `fcm`), and its schema branch is
+    /// untouched. It is wired there anyway so the rule has ONE home and cannot
+    /// drift into two opinions.
+    pub(super) fn map_key_type_for_decode(marshal: Option<&str>, schema_short: &str) -> String {
+        match marshal {
+            // This guard MUST stay identical to `prefer_udt_marshal_element`'s, since
+            // it decides the same choice; the `debug_assert` pins them together so a
+            // change to one cannot silently diverge from the other.
+            Some(m) if Self::is_udt_type(m) => {
+                debug_assert!(
+                    std::ptr::eq(
+                        Self::prefer_udt_marshal_element(marshal, schema_short),
+                        m as &str
+                    ),
+                    "map_key_type_for_decode's guard diverged from prefer_udt_marshal_element"
+                );
+                Self::strip_one_outer_frozen_marshal(m).to_string()
+            }
+            _ => schema_short.to_string(),
+        }
+    }
+
+    /// Strip at most ONE outer `FrozenType(..)` from a MARSHAL type string,
+    /// case-insensitively; return the input unchanged if it carries none.
+    fn strip_one_outer_frozen_marshal(marshal: &str) -> &str {
+        const PREFIX: &str = "org.apache.cassandra.db.marshal.frozentype(";
+        let t = marshal.trim();
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with(PREFIX) && lower.ends_with(')') {
+            return t[PREFIX.len()..t.len() - 1].trim();
+        }
+        t
+    }
 }
 
 #[cfg(test)]

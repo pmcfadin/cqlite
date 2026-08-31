@@ -71,9 +71,16 @@ impl V5CompressedLegacyParser {
                     Some(MarshalCollectionElements::Map(k, v)) => (Some(*k), Some(*v)),
                     _ => (None, None),
                 };
-                let key_type = Self::prefer_udt_marshal_element(marshal_key, &schema_key);
+                // Same shared rule as the MULTICELL map reader uses, so the two
+                // cannot form two opinions about a map key's decode type (issue
+                // #3612, roborev round 8 finding 1). A NO-OP here in both branches
+                // by construction: this side's marshal key never carries the outer
+                // `FrozenType` (Cassandra omits it inside a frozen collection) and
+                // its schema branch is untouched — wired anyway so the rule has ONE
+                // home.
+                let key_type = Self::map_key_type_for_decode(marshal_key, &schema_key);
                 let value_type = Self::prefer_udt_marshal_element(marshal_val, &schema_val);
-                self.parse_frozen_map_value(data, off, key_type, value_type, column, reader)?
+                self.parse_frozen_map_value(data, off, &key_type, value_type, column, reader)?
             } else if Self::is_udt_type(&column.data_type) {
                 // Frozen UDT - parse using UDT parser
                 // The column.data_type contains the full Cassandra type string including UserType

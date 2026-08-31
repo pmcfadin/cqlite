@@ -720,8 +720,11 @@ impl V5CompressedLegacyParser {
                 Some(MarshalCollectionElements::Map(k, v)) => (Some(*k), Some(*v)),
                 _ => (None, None),
             };
-            let key_type =
-                Self::prefer_udt_marshal_element(marshal_key, &schema_key_type).to_string();
+            // ONE shared rule, `map_key_type_for_decode` — see its doc. It picks the
+            // same string the FROZEN map reader receives, so both decode identically
+            // and key parity holds by construction rather than by a value-level
+            // wrapper fixup on this side (roborev round 8, finding 1).
+            let key_type = Self::map_key_type_for_decode(marshal_key, &schema_key_type);
             // DECLARED GAP — THE VALUE HALF IS EXERCISED BY NO TEST AT ANY TIER.
             //
             // Stated affirmatively rather than left silent, because a green gate over

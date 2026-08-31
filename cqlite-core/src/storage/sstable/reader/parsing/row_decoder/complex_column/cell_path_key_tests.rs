@@ -526,13 +526,21 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
             .unwrap(),
         Value::blob(vec![1, 2, 3])
     );
+    // A FROZEN-SPELLED blob keeps its wrapper, because this reader mirrors
+    // `parse_value_from_raw_bytes` exactly — that is what makes it agree with the
+    // frozen map reader for every spelling (roborev round 8). Before that the
+    // multicell side peeled and re-applied a wrapper of its own, and these three
+    // cases asserted the BARE value; the wrapper is the frozen reader's answer for
+    // this string, so it is now the right expectation.
+    //
     // CQL does not permit `frozen<blob>` as a map key (freezing applies to
-    // composites), but if such a spelling ever reaches here it is still a
-    // DECLARED blob and must not be misdiagnosed as an undecoded key.
+    // composites), but if such a spelling ever reaches here it is still a DECLARED
+    // blob and must not be misdiagnosed as an undecoded key — the diagnostic reads
+    // a PEELED view, so the wrapper does not hide the `Blob` from it.
     assert_eq!(
         p.parse_cell_path_key(&[1, 2, 3], "frozen<blob>", "k")
             .unwrap(),
-        Value::blob(vec![1, 2, 3])
+        Value::Frozen(Box::new(Value::blob(vec![1, 2, 3])))
     );
     // Case-INSENSITIVELY, because `parse_value_from_raw_bytes` routes off a
     // LOWERCASED guard: were the declared-blob test case-sensitive where the
@@ -541,7 +549,7 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
     assert_eq!(
         p.parse_cell_path_key(&[1, 2, 3], "Frozen<BLOB>", "k")
             .unwrap(),
-        Value::blob(vec![1, 2, 3])
+        Value::Frozen(Box::new(Value::blob(vec![1, 2, 3])))
     );
     // A BARE, unqualified marshal name (a hand-written schema, or a marshal
     // string whose package prefix was stripped upstream): the declared-blob test
@@ -561,6 +569,7 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
         .unwrap(),
         Value::blob(vec![1, 2, 3])
     );
+    // Frozen-spelled marshal: same wrapper, same reason as the two above.
     assert_eq!(
         p.parse_cell_path_key(
             &[1, 2, 3],
@@ -568,7 +577,7 @@ fn a_declared_blob_cell_path_key_is_a_blob() {
             "k"
         )
         .unwrap(),
-        Value::blob(vec![1, 2, 3])
+        Value::Frozen(Box::new(Value::blob(vec![1, 2, 3])))
     );
 }
 
@@ -1261,4 +1270,162 @@ fn a_wrapper_divergence_would_be_observable_through_value_equality() {
         !set.contains(&format!("{wrapped:?}")),
         "the two shapes are distinct as map keys too"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R8-F1: a COLLECTION-keyed multicell map presents its key exactly as the frozen
+// spelling does — the class the tuple/UDT tests left open
+// ---------------------------------------------------------------------------
+//
+// WHY A UNIT TEST AND NOT A FIXTURE, recorded so nobody "upgrades" it later.
+// #3042's rule — the oracle must be Cassandra-written bytes — governs FRAMING and
+// ENCODING properties, where a CQLite-written/CQLite-read round trip is invariant
+// to a uniform error and therefore proves nothing. This property is different in
+// kind: it is that our decoder NORMALISES TWO TYPE SPELLINGS TO ONE PRESENTATION.
+// Both spellings are INPUTS, stated exactly from the marshal grammar, and there is
+// no framing to get symmetrically wrong — the same bytes are fed to both sides, so
+// a shared encoding mistake cannot hide the divergence being tested.
+//
+// It is a unit test because the corpus has no subject: MEASURED, the committed
+// schemas contain no multicell `map<frozen<set<…>>, …>`, `map<frozen<list<…>>, …>`
+// or `map<frozen<map<…>>, …>` at all (the 5 multicell map columns are keyed by
+// text, UDT, UDT and tuple). If such a fixture is ever added, prefer it — measured
+// beats reasoned — and keep this test as the cheap guard.
+//
+// The two spellings are Cassandra's own, and the asymmetry is Cassandra's:
+//   multicell  `map<frozen<set<frozen<U>>>, int>`
+//              -> MapType(FrozenType(SetType(UserType(..))), Int32Type)
+//              -> key marshal KEEPS FrozenType (a multicell map key must be frozen)
+//   frozen     `frozen<map<frozen<set<frozen<U>>>, int>>`
+//              -> FrozenType(MapType(SetType(UserType(..)), Int32Type))
+//              -> key marshal OMITS it (all inside a frozen collection is frozen)
+
+/// A frozen `set<frozen<collide>>` body: `[i32 count][i32 len][udt bytes]…`.
+fn encode_set_of_collide() -> Vec<u8> {
+    let member = collide_key_bytes();
+    let mut out = 1i32.to_be_bytes().to_vec();
+    out.extend_from_slice(&(member.len() as i32).to_be_bytes());
+    out.extend_from_slice(&member);
+    out
+}
+
+/// THE R8-F1 ASSERTION: the two readers' key-type spellings must decode to the
+/// SAME `Value`, with equal `hash`, and with NO peeling on either side.
+#[test]
+fn set_of_udt_key_presents_identically_across_both_marshal_spellings() {
+    let p = parser();
+    let bytes = encode_set_of_collide();
+    let schema = "frozen<set<frozen<collide>>>";
+
+    // The two spellings Cassandra records, each passed through the ONE shared rule
+    // exactly as its own reader does — the rule lives in the CALLER, so a test that
+    // handed these strings straight to the decoder would model neither reader and
+    // would fail for a reason unrelated to the property.
+    let multicell_key_type = V5CompressedLegacyParser::map_key_type_for_decode(
+        Some(&format!(
+            "{MARSHAL}.FrozenType({MARSHAL}.SetType({}))",
+            udt_marshal_type()
+        )),
+        schema,
+    );
+    let frozen_key_type = V5CompressedLegacyParser::map_key_type_for_decode(
+        Some(&format!("{MARSHAL}.SetType({})", udt_marshal_type())),
+        schema,
+    );
+    // The rule's whole job: two different recorded spellings, one decode type.
+    assert_eq!(
+        multicell_key_type, frozen_key_type,
+        "the shared rule must normalize both recorded spellings to ONE string"
+    );
+
+    let multicell = p
+        .parse_cell_path_key(&bytes, &multicell_key_type, "k")
+        .expect("the multicell spelling must decode");
+    let frozen = p
+        .parse_value_from_raw_bytes(&bytes, &frozen_key_type, "k", 0)
+        .expect("the frozen spelling must decode");
+
+    // The property, unpeeled and both ways round.
+    assert_eq!(
+        multicell, frozen,
+        "a set-of-UDT map key must present IDENTICALLY under both spellings \
+         (issue #3612, roborev round 8 finding 1); multicell={multicell:?} frozen={frozen:?}"
+    );
+    assert_eq!(
+        hash_of_value(&multicell),
+        hash_of_value(&frozen),
+        "equal keys must hash equally, or they are two entries in any hashed \
+         projection"
+    );
+
+    // And it is a STRUCTURED set of a structured UDT, not an opaque blob — so the
+    // equality above cannot be satisfied by both sides failing the same way.
+    match &multicell {
+        Value::Set(items) => {
+            assert_eq!(items.len(), 1);
+            let u = udt_of(&items[0]);
+            assert_eq!(u.type_name, "collide");
+        }
+        other => panic!("expected a structured Value::Set, got {other:?}"),
+    }
+}
+
+/// The same for a LIST-keyed and a MAP-keyed multicell map: the other two members
+/// of this class, neither of which has a fixture either.
+#[test]
+fn list_and_map_keyed_multicell_keys_present_identically_too() {
+    let p = parser();
+    let list_bytes = encode_set_of_collide(); // same framing: [count][len][elem]
+    for (multicell_marshal, frozen_marshal, schema, bytes) in [
+        (
+            format!("{MARSHAL}.FrozenType({MARSHAL}.ListType({}))", udt_marshal_type()),
+            format!("{MARSHAL}.ListType({})", udt_marshal_type()),
+            "frozen<list<frozen<collide>>>",
+            list_bytes.clone(),
+        ),
+        (
+            format!(
+                "{MARSHAL}.FrozenType({MARSHAL}.MapType({MARSHAL}.UTF8Type,{}))",
+                udt_marshal_type()
+            ),
+            format!("{MARSHAL}.MapType({MARSHAL}.UTF8Type,{})", udt_marshal_type()),
+            "frozen<map<text, frozen<collide>>>",
+            {
+                let v = collide_key_bytes();
+                let mut out = 1i32.to_be_bytes().to_vec();
+                out.extend_from_slice(&1i32.to_be_bytes());
+                out.extend_from_slice(b"k");
+                out.extend_from_slice(&(v.len() as i32).to_be_bytes());
+                out.extend_from_slice(&v);
+                out
+            },
+        ),
+    ] {
+        let mc_type =
+            V5CompressedLegacyParser::map_key_type_for_decode(Some(&multicell_marshal), schema);
+        let fz_type =
+            V5CompressedLegacyParser::map_key_type_for_decode(Some(&frozen_marshal), schema);
+        assert_eq!(mc_type, fz_type, "{multicell_marshal}: rule must normalize both");
+        let multicell = p
+            .parse_cell_path_key(&bytes, &mc_type, "k")
+            .unwrap_or_else(|e| panic!("{multicell_marshal} must decode: {e}"));
+        let frozen = p
+            .parse_value_from_raw_bytes(&bytes, &fz_type, "k", 0)
+            .unwrap_or_else(|e| panic!("{frozen_marshal} must decode: {e}"));
+        assert_eq!(
+            multicell, frozen,
+            "{multicell_marshal}: must present identically to its frozen spelling"
+        );
+        assert_eq!(hash_of_value(&multicell), hash_of_value(&frozen));
+    }
+}
+
+/// Hashing helper, local to this file so the assertions above can state `hash`
+/// equality alongside `==` (the pair is the property; `==` alone would miss a
+/// `Hash` impl that disagreed with `PartialEq`).
+fn hash_of_value(v: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
 }
