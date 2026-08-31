@@ -38,7 +38,7 @@ impl ChildIo {
     /// than a mock of it, and dropping a handle marks that pipe closed exactly as
     /// a reader thread ending does.
     fn synthetic() -> (Self, ReaderHandle, ReaderHandle) {
-        let (io, handles) = Self::with_readers(2);
+        let (io, handles) = Self::with_readers(&[Stream::Stdout, Stream::Stderr]);
         let mut handles = handles.into_iter();
         let out = handles.next().expect("stdout reader handle");
         let err = handles.next().expect("stderr reader handle");
@@ -111,7 +111,7 @@ fn observed_progress_never_extends_the_deadline() {
             // reader thread uses. There is only one store to record into, so the
             // count the failure reports and the transcript it renders come from
             // the same read by construction.
-            err.record(Stream::Stderr, "still working");
+            err.record("still working");
             thread::sleep(slice);
             None::<()>
         });
@@ -190,10 +190,7 @@ fn observed_progress_never_extends_the_deadline() {
 fn a_line_recorded_before_the_deadline_is_matched_after_it_lapses() {
     let (io, out, err) = ChildIo::synthetic();
     let mark = io.mark_from_the_start();
-    err.record(
-        Stream::Stderr,
-        format!("cqlite: {MARKER_HANDLER_ENTERED} before exit..."),
-    );
+    err.record(format!("cqlite: {MARKER_HANDLER_ENTERED} before exit..."));
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
@@ -318,7 +315,7 @@ fn read_side_buffers_delivered_before_the_deadline_are_collected_after_it_lapses
 #[test]
 fn a_line_recorded_before_the_wait_began_does_not_satisfy_it() {
     let (io, out, err) = ChildIo::synthetic();
-    out.record(Stream::Stdout, "OK");
+    out.record("OK");
     // The mark is taken AFTER the earlier stage's line, exactly as a call site
     // takes it after the previous ack returned and before the next statement is
     // written. Moving the mark EARLIER (job 243, finding 1) closes a race at the
@@ -382,7 +379,7 @@ fn a_matched_acknowledgement_cannot_satisfy_the_next_wait() {
     let first_mark = io.mark_from_the_start();
 
     // Write N's acknowledgement, recorded by the reader.
-    out.record(Stream::Stdout, "OK");
+    out.record("OK");
 
     let deadline = TestDeadline::start(Duration::from_secs(30), Duration::from_secs(30));
     let first = deadline.stage("ack-N");
@@ -444,7 +441,7 @@ fn a_matched_acknowledgement_cannot_satisfy_the_next_wait() {
 fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
     let (io, out, err) = ChildIo::synthetic();
     let mark = io.mark_from_the_start();
-    err.record(Stream::Stderr, "some other output");
+    err.record("some other output");
     drop((out, err));
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
@@ -469,6 +466,11 @@ fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
         ),
         Err(WaitEnd::ReaderFailed { .. }) => panic!(
             "both readers here ended at EOF, yet the wait reported one of them as having failed"
+        ),
+        Err(WaitEnd::AwaitedStreamEnded { .. }) => panic!(
+            "EVERY reader had ended here, so the established fact is the stronger whole-store one \
+             — output is over on BOTH pipes — and narrowing the verdict to the awaited stream \
+             alone would report less than this snapshot measured (round 18)"
         ),
         Ok((line, _)) => panic!("nothing matching was ever recorded, yet {line:?} matched"),
     }
@@ -521,10 +523,10 @@ fn wait_for_readers_to_end(io: &ChildIo) -> bool {
 /// green.
 #[test]
 fn a_reader_thread_records_a_failed_read_rather_than_ending_silently() {
-    let (io, handles) = ChildIo::with_readers(1);
+    let (io, handles) = ChildIo::with_readers(&[Stream::Stdout]);
     let mark = io.mark();
     let handle = handles.into_iter().next().expect("one reader handle");
-    spawn_reader(Stream::Stdout, FailsAfterOneLine::default(), handle);
+    spawn_reader(FailsAfterOneLine::default(), handle);
 
     assert!(
         wait_for_readers_to_end(&io),
@@ -605,12 +607,9 @@ fn a_collector_thread_that_fails_mid_read_delivers_nothing() {
 fn a_reader_that_ends_in_an_io_error_is_not_reported_as_eof() {
     let (io, out, err) = ChildIo::synthetic();
     let mark = io.mark_from_the_start();
-    err.record(Stream::Stderr, "some other output");
+    err.record("some other output");
     // The same path a real reader thread takes when `BufRead::lines` yields `Err`.
-    err.read_failed(
-        Stream::Stderr,
-        std::io::Error::other("simulated pipe failure"),
-    );
+    err.read_failed(std::io::Error::other("simulated pipe failure"));
     drop((out, err));
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
@@ -646,6 +645,11 @@ fn a_reader_that_ends_in_an_io_error_is_not_reported_as_eof() {
         Err(WaitEnd::DeadlineReached { .. }) => {
             panic!("every reader had ended, yet the wait reported the pipes still open")
         }
+        Err(WaitEnd::AwaitedStreamEnded { .. }) => panic!(
+            "EVERY reader had ended here, so the established fact is the stronger whole-store one \
+             — output is over on BOTH pipes — and narrowing the verdict to the awaited stream \
+             alone would report less than this snapshot measured (round 18)"
+        ),
         Ok((line, _)) => panic!("nothing matching was ever recorded, yet {line:?} matched"),
     }
 }
@@ -774,7 +778,7 @@ fn a_read_side_collector_that_fails_mid_stream_is_reported_as_a_read_failure() {
 fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let (io, out, err) = ChildIo::synthetic();
-    err.record(Stream::Stderr, "some output");
+    err.record("some output");
     drop((out, err));
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
@@ -820,12 +824,9 @@ fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
 fn a_poll_that_gives_up_after_a_failed_read_does_not_report_eof() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let (io, out, err) = ChildIo::synthetic();
-    err.record(Stream::Stderr, "some output");
+    err.record("some output");
     // The same path a real reader thread takes when `BufRead::lines` yields `Err`.
-    err.read_failed(
-        Stream::Stderr,
-        std::io::Error::other("simulated pipe failure"),
-    );
+    err.read_failed(std::io::Error::other("simulated pipe failure"));
     drop((out, err));
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
@@ -870,7 +871,7 @@ fn a_poll_that_gives_up_after_a_failed_read_does_not_report_eof() {
 fn a_poll_with_one_reader_still_attached_reports_partial_closure() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let (io, out, err) = ChildIo::synthetic();
-    err.record(Stream::Stderr, "some output");
+    err.record("some output");
     // stderr's reader ends AT EOF; stdout's stays attached.
     drop(err);
 
@@ -1068,7 +1069,7 @@ fn a_line_recorded_before_the_wait_started_is_matched_at_expiry() {
     let marker = format!("cqlite: {MARKER_HANDLER_ENTERED} — flushing memtable before exit...");
     // ...the "operation" happens here, and its response is recorded before the
     // wait is entered.
-    err.record(Stream::Stderr, marker.clone());
+    err.record(marker.clone());
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
@@ -1132,10 +1133,7 @@ fn a_line_appended_after_the_decision_cannot_contradict_the_failure() {
 
     // The reader thread lands the awaited marker AFTER the verdict was taken —
     // which on the real path is the window between the decision and the panic.
-    err.record(
-        Stream::Stderr,
-        format!("cqlite: {MARKER_HANDLER_ENTERED} — flushing..."),
-    );
+    err.record(format!("cqlite: {MARKER_HANDLER_ENTERED} — flushing..."));
 
     let rendered = end.transcript();
     assert!(
@@ -1194,7 +1192,7 @@ fn the_measured_acknowledgement_includes_the_write_itself() {
     // The ack lands as part of the write, i.e. BEFORE the wait is ever entered —
     // exactly the case a timer started after the write cannot see. A wait that
     // returns instantly is what makes the mis-measurement invisible.
-    out.record(Stream::Stdout, "OK");
+    out.record("OK");
 
     let t_ack = await_write_ack(&io, mark, "the stand-in write", &stage);
     assert!(
@@ -1256,7 +1254,7 @@ fn an_operation_initiated_after_expiry_cannot_satisfy_its_wait() {
     // Half two: the evidence such a write would have produced satisfies the wait,
     // which is why the guard above is the fix and `wait_for` is deliberately NOT
     // changed.
-    out.record(Stream::Stdout, "OK");
+    out.record("OK");
     let accepted = io.wait_for(mark, Stream::Stdout, |l| l.trim() == "OK", &stage);
     assert!(
         accepted.is_ok(),

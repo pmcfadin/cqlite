@@ -110,16 +110,22 @@ struct Transcript {
     /// explicitly because a [`Mark`] is a SEQ, and windowing by seq stays correct
     /// even if this store ever stops being a bare append-only `Vec`.
     next_seq: usize,
-    /// Reader threads still attached. `0` means every reader has ENDED, so no
-    /// further record can ever appear — but NOT that each of them ended at EOF:
-    /// see `read_failures`.
-    readers_open: usize,
-    /// How many readers were EVER attached, so a snapshot can say how many of
-    /// them have ended rather than only whether ALL of them have (round 16). A
-    /// bare `readers_open` cannot express PARTIAL closure, which is what let a
-    /// poll report "the child's pipes were still open" about a child one of whose
-    /// pipes had already ended — in an I/O error, at that.
-    readers_total: usize,
+    /// **THE PER-STREAM READER STATE — one slot per stream, never a pair of
+    /// counts** (round 18).
+    ///
+    /// A wait awaits a line on ONE stream, so "how many readers are left" cannot
+    /// answer the question a wait actually has: can the line I am waiting for
+    /// still arrive? With counts alone it could not, and the answer it gave was
+    /// the permissive one — the reader of the AWAITED stream ending while its
+    /// sibling stayed attached counted as "output is still possible", so a wait
+    /// whose line had become impossible ran to the full deadline (up to the 360s
+    /// and 600s bases in `budgets.rs`) and then reported a DEADLINE as the cause.
+    /// That is a wrong cause for an unsatisfiable wait, which is the very defect
+    /// class #3515 exists to remove — one level up.
+    ///
+    /// The two counts `PipeStatus` needs are DERIVED from this, so a count can
+    /// never disagree with the per-stream state it summarises.
+    readers: ReaderSlots,
     /// **THE READERS' TERMINAL RESULTS, for the ones that did not end at EOF**
     /// (roborev job 255, finding 2). A reader's `Err` used to be dropped on the
     /// floor, so an I/O failure on a pipe ended the reader exactly as EOF does and
@@ -131,12 +137,11 @@ struct Transcript {
 }
 
 impl Transcript {
-    fn new(readers: usize) -> Self {
+    fn new(streams: &[Stream]) -> Self {
         Self {
             records: Vec::new(),
             next_seq: 0,
-            readers_open: readers,
-            readers_total: readers,
+            readers: ReaderSlots::new(streams),
             read_failures: Vec::new(),
         }
     }
@@ -153,6 +158,97 @@ impl Transcript {
     }
 }
 
+/// ONE reader's state, as the store knows it (round 18).
+///
+/// Three states and not a bool, for the same reason [`PipeStatus`] is not one: a
+/// stream nothing was ever attached to and a stream whose reader has ENDED are both
+/// finished, but only the first is a defect in this harness — and neither is the
+/// "still open" a two-valued field would have to collapse one of them onto.
+///
+/// A failed read is NOT a fourth state here: which of EOF and an I/O error ended a
+/// reader is read from the terminal results this store already holds, so the two
+/// cannot disagree about one reader.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReaderSlot {
+    Unattached,
+    Open,
+    Ended,
+}
+
+/// **ONE SLOT PER STREAM** — the store's whole knowledge of its readers.
+///
+/// A FIXED pair rather than a `Vec<Stream>` of attachments, for two reasons. It
+/// makes "two readers on one stream" unrepresentable, so a per-stream verdict
+/// cannot be ambiguous; and it is `Copy` and 2 bytes wide, which keeps
+/// [`TranscriptSnapshot`] — and therefore `WaitEnd`, which every wait returns by
+/// value — small enough that `clippy::result_large_err` is satisfied without
+/// boxing a type this file's tests match on by variant.
+#[derive(Clone, Copy, Debug)]
+struct ReaderSlots {
+    stdout: ReaderSlot,
+    stderr: ReaderSlot,
+}
+
+impl ReaderSlots {
+    /// Every named stream `Open`, every other one `Unattached`.
+    ///
+    /// A stream named TWICE is rejected rather than silently merged: two handles
+    /// on one stream would make "that stream's reader has ended" true as soon as
+    /// EITHER dropped, which is exactly the misattribution the per-stream verdict
+    /// is decided from.
+    fn new(streams: &[Stream]) -> Self {
+        let mut slots = Self {
+            stdout: ReaderSlot::Unattached,
+            stderr: ReaderSlot::Unattached,
+        };
+        for stream in streams {
+            assert_eq!(
+                slots.get(*stream),
+                ReaderSlot::Unattached,
+                "one reader per stream: {} was named twice",
+                stream.tag()
+            );
+            slots.set(*stream, ReaderSlot::Open);
+        }
+        slots
+    }
+
+    fn get(&self, stream: Stream) -> ReaderSlot {
+        match stream {
+            Stream::Stdout => self.stdout,
+            Stream::Stderr => self.stderr,
+        }
+    }
+
+    fn set(&mut self, stream: Stream, slot: ReaderSlot) {
+        match stream {
+            Stream::Stdout => self.stdout = slot,
+            Stream::Stderr => self.stderr = slot,
+        }
+    }
+
+    fn count(&self, want: ReaderSlot) -> usize {
+        [self.stdout, self.stderr]
+            .into_iter()
+            .filter(|slot| *slot == want)
+            .count()
+    }
+
+    /// Readers EVER attached, and readers still attached — derived from the slots,
+    /// so no count can disagree with the per-stream state.
+    fn total(&self) -> usize {
+        2 - self.count(ReaderSlot::Unattached)
+    }
+
+    fn open(&self) -> usize {
+        self.count(ReaderSlot::Open)
+    }
+
+    fn ended(&self) -> usize {
+        self.count(ReaderSlot::Ended)
+    }
+}
+
 /// A reader's handle on the one store: the ONLY way anything is recorded.
 ///
 /// Real reader threads and the unit tests' stand-ins use the SAME type, so the
@@ -164,16 +260,34 @@ impl Transcript {
 /// believing more output is possible.
 pub struct ReaderHandle {
     log: Arc<Mutex<Transcript>>,
+    /// **WHICH PIPE THIS READER IS ATTACHED TO — a FIELD of the handle** (round
+    /// 18), so the stream a line is attributed to and the stream marked ENDED
+    /// when this handle drops are ONE fact and cannot disagree.
+    ///
+    /// It is why `record` and `read_failed` no longer take a stream: an
+    /// attribution passed per call is a SECOND channel carrying the same control
+    /// information, and a handle whose caller passed the other stream would
+    /// record lines as one pipe's while ending the other's — the exact
+    /// misattribution the per-stream verdict below is decided from (CLAUDE.md,
+    /// #3312: control and data must not share a channel).
+    stream: Stream,
 }
 
 impl ReaderHandle {
-    /// Append one line the child emitted.
+    /// The pipe this reader is attached to, so a caller pairs a handle with its
+    /// own pipe rather than by position in a list.
+    pub(super) fn stream(&self) -> Stream {
+        self.stream
+    }
+
+    /// Append one line the child emitted, attributed to THIS reader's stream.
     ///
     /// A poisoned lock loses the line — the same outcome the old transcript had,
     /// and it is REPORTED rather than rendered as silence: a snapshot taken
     /// through a poisoned lock says "a reader thread panicked".
-    pub fn record(&self, stream: Stream, line: impl Into<String>) {
+    pub fn record(&self, line: impl Into<String>) {
         if let Ok(mut log) = self.log.lock() {
+            let stream = self.stream;
             log.append(stream, line.into());
         }
     }
@@ -186,8 +300,9 @@ impl ReaderHandle {
     /// stake is the CAUSE a failure reports, not a verdict: the awaited line is
     /// absent in both cases. It is stored, never rendered from the reader thread,
     /// so the message and the decision still come from one snapshot.
-    pub fn read_failed(&self, stream: Stream, error: impl std::fmt::Display) {
+    pub fn read_failed(&self, error: impl std::fmt::Display) {
         if let Ok(mut log) = self.log.lock() {
+            let stream = self.stream;
             log.read_failures.push((stream, error.to_string()));
         }
     }
@@ -196,7 +311,10 @@ impl ReaderHandle {
 impl Drop for ReaderHandle {
     fn drop(&mut self) {
         if let Ok(mut log) = self.log.lock() {
-            log.readers_open = log.readers_open.saturating_sub(1);
+            // WHICH pipe ended, not merely that one did (round 18): a bare count
+            // cannot tell a wait whether the reader IT is waiting on is the one
+            // that went away.
+            log.readers.set(self.stream, ReaderSlot::Ended);
         }
     }
 }
@@ -331,6 +449,46 @@ impl PipeStatus {
     }
 }
 
+/// **WHY THE AWAITED READER'S OWN STATE CAN PRODUCE NOTHING FURTHER** (round 18).
+///
+/// A closed variant rather than a bool for the same reason [`PipeStatus`] is one:
+/// each way an awaited stream can be finished has a DIFFERENT cause to report, and
+/// exactly one of them is a defect in this harness rather than an observation
+/// about the child.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamEnded {
+    /// That stream's reader ended AT EOF: the child closed it, or exited.
+    Eof,
+    /// That stream's reader ended in an I/O ERROR, so this harness could not read
+    /// the pipe to its end. A statement about the pipe, NOT about the child
+    /// (roborev job 255, finding 2, asked of ONE stream).
+    ReadFailed { note: String },
+    /// No reader was EVER attached to that stream, so nothing could ever be
+    /// recorded on it. `ChildIo::attach` always attaches both, so this is
+    /// reachable only from a harness helper that attached fewer — a defect in this
+    /// test harness, and it is named as one rather than waited out.
+    NeverAttached,
+}
+
+/// **WHAT THE AWAITED STREAM'S OWN READER ESTABLISHES** — the derivation a wait
+/// consults about the pipe IT is waiting on (round 18).
+///
+/// [`PipeStatus`] answers "is output over ANYWHERE", which is the question a poll
+/// has; a wait names a stream, and for a wait `PartiallyClosed` is not one answer
+/// but two — the surviving pipe's and the ended one's — so consulting it alone
+/// collapsed "the line can still arrive" and "the line has become impossible" onto
+/// the permissive one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamStatus {
+    /// The store could not be read, so NOTHING is established about that stream:
+    /// not that its reader is attached, and not that it has ended.
+    Unavailable,
+    /// That stream's reader is still attached: the awaited line can still arrive.
+    Open,
+    /// That stream's reader can produce nothing further, for this reason.
+    Ended(StreamEnded),
+}
+
 /// ONE read of the one store, used for BOTH the decision and the message.
 ///
 /// DECIDE AND RENDER FROM THE SAME SNAPSHOT, NOT MERELY THE SAME STORE (roborev
@@ -346,13 +504,14 @@ pub struct TranscriptSnapshot {
     records: Vec<Record>,
     /// The awaiting wait's window start: records with `seq >= mark`.
     mark: usize,
-    /// Readers still attached at the moment of this read, and how many were ever
-    /// attached — read under the SAME lock as `records`. TWO COUNTS RATHER THAN A
-    /// BOOL (round 16): `pipes_closed` collapsed "one of two pipes has ended" onto
-    /// "the pipes are still open", so a verdict could report that more output was
-    /// possible on a pipe that had already ended.
-    readers_open: usize,
-    readers_total: usize,
+    /// The per-stream reader state at the moment of this read — copied under the
+    /// SAME lock as `records`. PER STREAM rather than two counts (round 18): the
+    /// counts below are derived from it, and a wait asks about the ONE stream it
+    /// awaits, which no count can answer. Round 16 replaced a `pipes_closed` bool
+    /// with those counts because "one of two pipes has ended" read as "the pipes
+    /// were still open"; round 18 is the same collapse one level in — for a NAMED
+    /// stream.
+    readers: ReaderSlots,
     /// The lock was readable. `false` means a reader thread panicked, which is
     /// reported rather than rendered as an empty transcript.
     available: bool,
@@ -388,6 +547,51 @@ impl TranscriptSnapshot {
             .map(|r| r.text.as_str())
     }
 
+    /// Readers ever attached, and readers still attached — DERIVED from the two
+    /// per-stream lists, so a count and the per-stream state can never disagree.
+    fn readers_total(&self) -> usize {
+        self.readers.total()
+    }
+
+    fn readers_open(&self) -> usize {
+        self.readers.open()
+    }
+
+    /// **THE ONE PLACE THE AWAITED STREAM'S OWN STATE IS DERIVED** (round 18),
+    /// from the same snapshot every other verdict in this harness reads.
+    ///
+    /// Answered in the order the facts are established: an unreadable store
+    /// establishes nothing; a stream nothing was ever attached to can never carry
+    /// a record; an attached-and-not-ended reader can still deliver; and only when
+    /// that stream's reader HAS ended does its terminal result decide which cause
+    /// is named — from the recorded result and never from the count, which is
+    /// identical for EOF and for a failed read (job 255, finding 2).
+    pub fn stream_status(&self, want: Stream) -> StreamStatus {
+        if !self.available {
+            return StreamStatus::Unavailable;
+        }
+        match self.readers.get(want) {
+            ReaderSlot::Unattached => StreamStatus::Ended(StreamEnded::NeverAttached),
+            ReaderSlot::Open => StreamStatus::Open,
+            ReaderSlot::Ended => match self.stream_failure_note(want) {
+                Some(note) => StreamStatus::Ended(StreamEnded::ReadFailed { note }),
+                None => StreamStatus::Ended(StreamEnded::Eof),
+            },
+        }
+    }
+
+    /// That ONE stream's recorded terminal result, rendered for a failure message;
+    /// `None` when its reader recorded no read failure.
+    fn stream_failure_note(&self, want: Stream) -> Option<String> {
+        let notes = self
+            .read_failures
+            .iter()
+            .filter(|(stream, _)| *stream == want)
+            .map(|(stream, error)| format!("{} reader: {error}", stream.tag()))
+            .collect::<Vec<_>>();
+        (!notes.is_empty()).then(|| notes.join("; "))
+    }
+
     /// **THE ONE PLACE PIPE STATE IS DERIVED** — from the readers' counts AND their
     /// recorded terminal results, read under the one lock this snapshot was taken
     /// under (round 16).
@@ -404,28 +608,28 @@ impl TranscriptSnapshot {
         if !self.available {
             return PipeStatus::Unavailable;
         }
-        let ended = self.readers_total.saturating_sub(self.readers_open);
+        let ended = self.readers.ended();
         // CHECKED BEFORE ANY EOF CLAIM: a failed reader ends exactly as one at EOF
         // does, so the terminal results — not the count — decide (job 255, finding
         // 2, now applied to every consumer).
         let failure_note = self.read_failure_note();
-        if self.readers_open == 0 {
+        if self.readers_open() == 0 {
             return match failure_note {
                 Some(note) => PipeStatus::ReaderFailed { note },
                 None => PipeStatus::AllEof {
-                    readers: self.readers_total,
+                    readers: self.readers_total(),
                 },
             };
         }
         if ended > 0 {
             return PipeStatus::PartiallyClosed {
-                open: self.readers_open,
+                open: self.readers_open(),
                 ended,
                 failure_note,
             };
         }
         PipeStatus::AllOpen {
-            open: self.readers_open,
+            open: self.readers_open(),
         }
     }
 
@@ -506,6 +710,27 @@ pub enum WaitEnd {
         after: Duration,
         snapshot: TranscriptSnapshot,
     },
+    /// **THE READER FOR THE STREAM THIS WAIT WAS WATCHING HAD ENDED**, while at
+    /// least one OTHER reader was still attached (round 18).
+    ///
+    /// No further line can arrive ON THE AWAITED STREAM, so the awaited line has
+    /// become impossible — even though output is still possible on the surviving
+    /// pipe, which is why neither `PipesClosed` nor `ReaderFailed` may be built
+    /// here: both state that output is over everywhere.
+    ///
+    /// WHY IT IS A VARIANT AND NOT A NOTE ON `DeadlineReached`. Before this
+    /// existed, `ended` consulted only the WHOLE-store state, so a partial closure
+    /// was nonterminal whichever stream had gone: the wait slept out its entire
+    /// remaining budget and then named the DEADLINE as the cause of a wait no
+    /// deadline could have satisfied. #3515's own subject is a wrong cause — a
+    /// bare timeout reported as "no graceful shutdown handler" — so a new
+    /// wrong-cause path is this change's own defect, one level up.
+    AwaitedStreamEnded {
+        want: Stream,
+        ended: StreamEnded,
+        after: Duration,
+        snapshot: TranscriptSnapshot,
+    },
 }
 
 impl WaitEnd {
@@ -550,6 +775,44 @@ impl WaitEnd {
                     .unwrap_or_else(|| "(no terminal result recorded)".to_string()),
                 snapshot.examined()
             ),
+            WaitEnd::AwaitedStreamEnded {
+                want,
+                ended,
+                after,
+                snapshot,
+            } => format!(
+                "how the wait ended: the child's {} reader — the ONE this wait was watching — had \
+                 ENDED after {after:.3?}, so the awaited line could never arrive on it and the \
+                 wait returned instead of sleeping out the rest of its budget. {}. The {} \
+                 record(s) sequenced since this wait began, printed below, are the snapshot the \
+                 verdict was taken from — the records, the per-stream reader state and the \
+                 readers' terminal results were read under ONE lock.\n\
+                 the WHOLE store's pipe state at the verdict, because the surviving pipe is where \
+                 a reader of this failure should look next: {}",
+                want.tag(),
+                match ended {
+                    StreamEnded::Eof => format!(
+                        "IT ENDED AT EOF: the child closed its {} or exited (this measurement does \
+                         not say which)",
+                        want.tag()
+                    ),
+                    StreamEnded::ReadFailed { note } => format!(
+                        "IT ENDED IN AN I/O ERROR rather than at EOF, so this is NOT an EOF \
+                         measurement: {note}. WHAT THAT ESTABLISHES: only that this harness could \
+                         not read that pipe to its end. It is a statement about the pipe, NOT \
+                         about the child, and NOT about the property under test"
+                    ),
+                    StreamEnded::NeverAttached => format!(
+                        "NO READER WAS EVER ATTACHED to the child's {}, so nothing could ever be \
+                         recorded on it. This is a defect in this test harness — \
+                         `ChildIo::attach` attaches both pipes — and it is NOT a statement about \
+                         the child",
+                        want.tag()
+                    ),
+                },
+                snapshot.examined(),
+                snapshot.pipe_status().describe()
+            ),
         }
     }
 
@@ -559,6 +822,7 @@ impl WaitEnd {
             WaitEnd::DeadlineReached { snapshot } => snapshot.render(),
             WaitEnd::PipesClosed { snapshot, .. } => snapshot.render(),
             WaitEnd::ReaderFailed { snapshot, .. } => snapshot.render(),
+            WaitEnd::AwaitedStreamEnded { snapshot, .. } => snapshot.render(),
         }
     }
 }
@@ -572,18 +836,49 @@ impl WaitEnd {
 ///
 /// **IT ANSWERS "IS OUTPUT OVER?" AND NAMES THE VERDICT IN ONE STEP** (round 16),
 /// returning the snapshot back on `Err` when the state does NOT establish that
-/// output is over — a live pipe, a PARTIAL closure, or an unreadable store. A
-/// caller therefore cannot ask the question through one derivation and build its
-/// verdict from another, and no arm of this match is unreachable.
-fn ended(after: Duration, snapshot: TranscriptSnapshot) -> Result<WaitEnd, TranscriptSnapshot> {
+/// output is over — a live awaited pipe, or an unreadable store. A caller
+/// therefore cannot ask the question through one derivation and build its verdict
+/// from another, and no arm of this match is unreachable.
+///
+/// **IT IS ASKED ABOUT THE STREAM THE WAIT NAMED, NOT ONLY ABOUT THE STORE**
+/// (round 18). "Is output over" is the question a POLL has; a wait awaits a line
+/// on ONE pipe, and for it a PARTIAL closure is two different answers depending on
+/// WHICH pipe ended. Consulting the whole-store state alone gave the permissive
+/// one for both: with the awaited reader gone and its sibling attached the wait
+/// slept out its whole remaining budget — up to the 360s/600s bases in
+/// `budgets.rs` — and then named the DEADLINE for a wait no deadline could have
+/// satisfied.
+///
+/// ORDER MATTERS, AND IT IS THE WHOLE-STORE STATE FIRST. When EVERY reader has
+/// ended, the established fact is the stronger one — output is over on both pipes
+/// — and that is what `PipesClosed`/`ReaderFailed` say; narrowing those to the
+/// awaited stream would report less than was measured. The awaited stream's own
+/// state decides only where the store's does not: a partial closure, an
+/// all-open store (where a stream nothing was attached to is still finished), and
+/// an unreadable store (where it establishes nothing either, so the wait
+/// continues).
+fn ended(
+    want: Stream,
+    after: Duration,
+    snapshot: TranscriptSnapshot,
+) -> Result<WaitEnd, TranscriptSnapshot> {
     match snapshot.pipe_status() {
         PipeStatus::ReaderFailed { .. } => Ok(WaitEnd::ReaderFailed { after, snapshot }),
         PipeStatus::AllEof { .. } => Ok(WaitEnd::PipesClosed { after, snapshot }),
-        // NOT established: output may still arrive (or the store could not be
-        // read), so no "no further line could arrive" variant may be built.
         PipeStatus::PartiallyClosed { .. }
         | PipeStatus::AllOpen { .. }
-        | PipeStatus::Unavailable => Err(snapshot),
+        | PipeStatus::Unavailable => match snapshot.stream_status(want) {
+            StreamStatus::Ended(ended) => Ok(WaitEnd::AwaitedStreamEnded {
+                want,
+                ended,
+                after,
+                snapshot,
+            }),
+            // NOT established for the awaited pipe: its line may still arrive (or
+            // the store could not be read), so no "could never arrive" verdict may
+            // be built.
+            StreamStatus::Open | StreamStatus::Unavailable => Err(snapshot),
+        },
     }
 }
 
@@ -599,14 +894,10 @@ pub struct ChildIo {
 /// `pub(super)` so the harness's own tests can drive THIS function with a reader
 /// that fails mid-stream, rather than only the store beneath it (roborev job 255,
 /// finding 2 lived in the loop below, so that is where a test has to reach).
-pub(super) fn spawn_reader<R: std::io::Read + Send + 'static>(
-    stream: Stream,
-    reader: R,
-    handle: ReaderHandle,
-) {
+pub(super) fn spawn_reader<R: std::io::Read + Send + 'static>(reader: R, handle: ReaderHandle) {
     thread::spawn(move || {
         // Dropped when this thread ends by ANY path — normal return or unwind —
-        // which is what marks this pipe closed exactly once.
+        // which is what marks THIS handle's stream closed exactly once.
         let handle = handle;
         let buf = BufReader::new(reader);
         for line in buf.lines() {
@@ -614,9 +905,9 @@ pub(super) fn spawn_reader<R: std::io::Read + Send + 'static>(
             // finding 2): `break` alone made an I/O failure indistinguishable from
             // EOF, and the wait then reported EOF as the cause.
             match line {
-                Ok(line) => handle.record(stream, line),
+                Ok(line) => handle.record(line),
                 Err(error) => {
-                    handle.read_failed(stream, error);
+                    handle.read_failed(error);
                     break;
                 }
             }
@@ -636,34 +927,47 @@ impl ChildIo {
     /// Returning it — rather than letting the call site take one after `attach` —
     /// is what makes that structural instead of a convention.
     pub(super) fn attach(child: &mut std::process::Child) -> (Self, Mark) {
-        let (io, handles) = Self::with_readers(2);
+        let (io, handles) = Self::with_readers(&[Stream::Stdout, Stream::Stderr]);
         let mark = io.mark();
-        let out = child.stdout.take().expect("child stdout");
-        let err = child.stderr.take().expect("child stderr");
-        let mut handles = handles.into_iter();
-        spawn_reader(
-            Stream::Stdout,
-            out,
-            handles.next().expect("stdout reader handle"),
-        );
-        spawn_reader(
-            Stream::Stderr,
-            err,
-            handles.next().expect("stderr reader handle"),
-        );
+        let mut out = Some(child.stdout.take().expect("child stdout"));
+        let mut err = Some(child.stderr.take().expect("child stderr"));
+        // EACH HANDLE IS PAIRED WITH ITS OWN PIPE BY THE HANDLE'S OWN STREAM, not
+        // by position in the list (round 18): the handle's stream is what marks a
+        // pipe ended, so pairing it positionally would let a reader of stdout end
+        // stderr — and a wait would then be told the wrong pipe had finished.
+        for handle in handles {
+            match handle.stream() {
+                Stream::Stdout => {
+                    spawn_reader(out.take().expect("stdout attached exactly once"), handle)
+                }
+                Stream::Stderr => {
+                    spawn_reader(err.take().expect("stderr attached exactly once"), handle)
+                }
+            }
+        }
         (io, mark)
     }
 
-    /// A harness over a fresh store with `readers` reader handles outstanding.
+    /// A harness over a fresh store with one reader handle per named stream, in
+    /// the order named.
     ///
     /// The one constructor: `attach` hands its handles to reader threads, and the
     /// unit tests keep theirs, so a test drives the same recording and
     /// end-of-stream paths a real reader does.
-    pub(super) fn with_readers(readers: usize) -> (Self, Vec<ReaderHandle>) {
-        let log = Arc::new(Mutex::new(Transcript::new(readers)));
-        let handles = (0..readers)
-            .map(|_| ReaderHandle {
+    ///
+    /// TAKES THE STREAMS AND NOT A COUNT (round 18): every handle carries the
+    /// stream it will record on and mark ended, so a caller cannot create a reader
+    /// whose stream is decided later by whoever calls `record`. A helper may name
+    /// FEWER streams than a real child has — that is how the "no reader was ever
+    /// attached" state is reachable at all, and a wait on such a stream is
+    /// answered rather than waited out.
+    pub(super) fn with_readers(streams: &[Stream]) -> (Self, Vec<ReaderHandle>) {
+        let log = Arc::new(Mutex::new(Transcript::new(streams)));
+        let handles = streams
+            .iter()
+            .map(|stream| ReaderHandle {
                 log: Arc::clone(&log),
+                stream: *stream,
             })
             .collect();
         (Self { log }, handles)
@@ -698,16 +1002,14 @@ impl ChildIo {
             Ok(log) => TranscriptSnapshot {
                 records: log.records.clone(),
                 mark: mark.0,
-                readers_open: log.readers_open,
-                readers_total: log.readers_total,
+                readers: log.readers,
                 available: true,
                 read_failures: log.read_failures.clone(),
             },
             Err(_) => TranscriptSnapshot {
                 records: Vec::new(),
                 mark: 0,
-                readers_open: 0,
-                readers_total: 0,
+                readers: ReaderSlots::new(&[]),
                 available: false,
                 read_failures: Vec::new(),
             },
@@ -757,7 +1059,7 @@ impl ChildIo {
                 }
                 // Only now can a cause be named, and it comes from the same read:
                 // a store whose readers have all ended reports closed pipes, one
-                // whose readers are live reports the deadline (roborev job 236,
+                // whose AWAITED reader is live reports the deadline (job 236,
                 // finding 3 — collapsing the two reported "pipes still open"
                 // about a child whose readers had both ended).
                 //
@@ -766,7 +1068,7 @@ impl ChildIo {
                 // (job 255, finding 2). A state that establishes neither — including
                 // a PARTIAL closure and an unreadable store — hands the snapshot
                 // back, and the deadline is then the cause.
-                return Err(match ended(stage.spent(), snapshot) {
+                return Err(match ended(want, stage.spent(), snapshot) {
                     Ok(end) => end,
                     Err(snapshot) => WaitEnd::DeadlineReached { snapshot },
                 });
@@ -780,7 +1082,7 @@ impl ChildIo {
             // delay the same verdict. `ended` is what decides that — asking it is
             // the same act as naming the verdict — and on `Err` the wait continues
             // because output is still possible (or the store could not be read).
-            match ended(stage.spent(), snapshot) {
+            match ended(want, stage.spent(), snapshot) {
                 Ok(end) => return Err(end),
                 Err(_still_possible) => {}
             }
@@ -864,7 +1166,7 @@ mod pipe_status_tests {
     #[test]
     fn each_reader_state_is_derived_distinctly() {
         // ALL OPEN: nothing has ended.
-        let (io, handles) = ChildIo::with_readers(2);
+        let (io, handles) = ChildIo::with_readers(&[Stream::Stdout, Stream::Stderr]);
         let mark = io.mark();
         assert_eq!(
             io.snapshot(mark).pipe_status(),
@@ -902,10 +1204,10 @@ mod pipe_status_tests {
         // READER FAILED: every reader ended and one recorded an I/O error. Chosen
         // from the TERMINAL RESULTS and never from the count, which is identical in
         // both cases (job 255, finding 2).
-        let (io, handles) = ChildIo::with_readers(1);
+        let (io, handles) = ChildIo::with_readers(&[Stream::Stdout]);
         let mark = io.mark();
         let handle = handles.into_iter().next().expect("one handle");
-        handle.read_failed(Stream::Stdout, std::io::Error::other("simulated failure"));
+        handle.read_failed(std::io::Error::other("simulated failure"));
         drop(handle);
         match io.snapshot(mark).pipe_status() {
             PipeStatus::ReaderFailed { note } => assert!(
@@ -918,7 +1220,7 @@ mod pipe_status_tests {
 
         // UNAVAILABLE: the store could not be read, so NOTHING is established —
         // which a bool had to render as "still open" (round 16).
-        let (io, _handles) = ChildIo::with_readers(2);
+        let (io, _handles) = ChildIo::with_readers(&[Stream::Stdout, Stream::Stderr]);
         let mark = io.mark();
         poison(&io);
         assert_eq!(io.snapshot(mark).pipe_status(), PipeStatus::Unavailable);
@@ -937,7 +1239,7 @@ mod pipe_status_tests {
     /// state the failed read could not establish.
     #[test]
     fn a_wait_against_an_unreadable_store_does_not_claim_the_pipes_were_open() {
-        let (io, _handles) = ChildIo::with_readers(2);
+        let (io, _handles) = ChildIo::with_readers(&[Stream::Stdout, Stream::Stderr]);
         let mark = io.mark();
         poison(&io);
 
