@@ -1,8 +1,9 @@
 //! Issue #3358: `stream_all_partitions_for_query` must narrow to its
 //! `token_bound` on a BTI (`da`) reader, as it already does on an `nb` one.
 //!
-//! `ScanTokenBound::contains` is called in one place, the Summary-guided walk in
-//! `summary_scan/mod.rs`, and `stream_all_partitions_for_query` gates that walk on
+//! When #3358 was filed, `ScanTokenBound::contains` had ONE caller, the Summary-guided
+//! walk in `summary_scan/mod.rs`; the fix this file pins added a second,
+//! `TokenGate::admits`. `stream_all_partitions_for_query` gates that walk on
 //! `self.index_reader.is_some() && self.bti_partitions_db.is_none() &&
 //! summary_usable`. Every BTI generation has a `Partitions.db`, so the second term
 //! is false for every `da` reader on every call: the "full-ring fallback" below the
@@ -285,10 +286,40 @@ fn fixture() -> Fixture {
         let root = datasets_root::repo_root();
         let verify_cmd = shell_quote(&root.join("test-data/scripts/fetch-datasets.sh"));
         let verify_root = shell_quote(&root.join("test-data/datasets"));
-        let searched = datasets_root::describe_search(KEYSPACE, TABLE);
+        // NOT `describe_search`: it reports "no *-Data.db for <keyspace>.<table>", a
+        // BROADER absence than this lookup measured. The probe is generation-specific
+        // on purpose (see `fixture_dir`), so in the very case that predicate exists
+        // for — a root holding some OTHER generation of this table — that wording
+        // would be false. And NOT `describe_roots` either: its text advertises a bare
+        // `fetch-datasets.sh`, the destructive invocation the rest of this message
+        // spends six lines warning against. So the root list is taken from the
+        // resolver and the sentence is composed here, naming what was actually
+        // required.
+        let roots = datasets_root::sstables_root_candidates()
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Named because a stray value hard-FAILs a CORRECT checkout: the seam removes
+        // the checkout candidate, which is the safe direction but an opaque one to
+        // debug if the reader does not know the var exists.
+        let seam = datasets_root::CHECKOUT_SSTABLES_ROOT_OVERRIDE_ENV;
+        let seam_note = match std::env::var_os(seam) {
+            Some(v) if !v.is_empty() => format!(
+                "NOTE: the test-harness seam {seam} is SET to '{}', which REPLACED the \
+                 checkout candidate root. If you did not mean to set it, unset it and \
+                 re-run — that alone may resolve this.\n\n",
+                v.to_string_lossy()
+            ),
+            _ => String::new(),
+        };
         panic!(
-            "{KEYSPACE}.{TABLE} `{SSTABLE_PREFIX}-Data.db` was not found: {searched}.\n\
+            "{KEYSPACE}.{TABLE}: no directory `{TABLE}-*` holding \
+             `{SSTABLE_PREFIX}-Data.db` under any candidate sstables root [{roots}]. \
+             The probe is GENERATION-specific, so a root carrying a different \
+             generation of this table does not satisfy it.\n\
              \n\
+             {seam_note}\
              This fixture is COMMITTED SOURCE (git-tracked, not gitignored), so this \
              is a broken checkout rather than a missing optional corpus, and it fails \
              closed rather than skipping: this file is the only end-to-end pin of \

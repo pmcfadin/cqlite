@@ -22,11 +22,23 @@ readme = "../README.md"
 # exist. A skip would reintroduce exactly the vacuous green #3220 removed, and a
 # "am I a git checkout?" runtime probe would be the environment heuristic #28 forbids.
 #
-# This test JOINS a pre-existing class rather than creating it: #3677 measured 106
+# Measured effective, not assumed: `cargo package -p cqlite-core --no-verify --list`
+# lists 1015 files, 0 of them this test, and 454 other `tests/` entries survive — so the
+# key drops exactly one target and nothing else. (There is no `include` key, which would
+# make cargo ignore `exclude` entirely.) Note this does NOT assert the crate packages
+# end-to-end: `readme = "../README.md"` also points outside the package, so a full
+# `cargo package` may fail on that first. Packageability is #3677's, not this lane's.
+#
+# This test JOINS a pre-existing class rather than creating it. #3677 measured 106
 # `cqlite-core` integration tests reading repo-root `test-data/datasets`, 104 of which
-# already fail hard rather than skip. Fixing the class (its recommended option (a),
-# `exclude = ["tests/**"]`) is a packaging call it holds open deliberately, so the
+# already fail hard rather than skip. Fixing the class — its recommended option (a),
+# `exclude = ["tests/**"]` — is a packaging call it holds open deliberately, so the
 # narrow single-file exclusion here is scoped to what this lane may decide.
+#
+# An earlier draft of this comment said "454 sibling integration tests have the same
+# repo-root-fixture property". 454 is a real number and it is the one above — packaged
+# `tests/` ENTRIES, most of which read no fixture at all — attached to a claim about a
+# property it does not measure. The two counts answer different questions.
 exclude = ["tests/issue_3358_bti_query_token_bound.rs"]
 
 # docs.rs build: document the commonly used features. Deliberately excludes
