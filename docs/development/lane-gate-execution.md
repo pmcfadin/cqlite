@@ -1354,6 +1354,72 @@ splits, 2 per file) each fail on the pre-fix tree and pass after; `4b.160` is th
 both, so `4b.161` cannot be satisfied by a function that answers `unknown` for everything. Suites:
 detached **195/0**, liveness **251/0**.
 
+### Round 49-51: four lessons, three of them about my own instruments
+
+**1. AUDIT BY CALL SITE, NOT BY PRIMITIVE** (lead's corrected rule, adopted). Round 48's class audit
+enumerated predicates and paths — the *definitions* of the safe primitives — and never their **call
+sites**. Both round-49 defects were sites that BYPASSED a primitive already present and correct a few
+lines away: `_unit_is_live` had the closed grammar the unit-death check needed, and `_snap_pair` existed
+for exactly the two-read race and was called twice immediately above. **An audit organised around
+definitions is structurally blind to omission at the point of use, and the helper's existence makes the
+omission feel handled.**
+
+Corollary, seen twice: a structural test anchored on implementation *spelling* both fails on a correct
+refactor and passes on the defect it was written to catch. `4b.124` bounded its range with the literal
+`is-active --quiet` line and accepted any `_new_rid=` inside it — so it broke when that line was fixed,
+**and** it had been passing on the unsafe two-grep form it nominally guarded.
+
+**2. `RUNNING` MEANS ALIVE, NOT PROGRESSING — and the disclosure must be in the EMITTED LINE.**
+`STALLED`'s emitted text already carried its own limitation ("NOT a claim that the process is dead…");
+`RUNNING` carried none. **The asymmetry was the defect**: the verdict that could over-claim DEATH was
+disclosed carefully in the artifact, and the one that over-claims PROGRESS was not disclosed at all. A
+queued gate beats identically to a compiling one, so this reader answered `RUNNING` for **4.9 hours**
+about a run with 61 CPU-seconds, and both a lane and its coordination lead read that as progress. The
+note now lands at the single point in `verdict()`, so all five `verdict RUNNING` sites and any sixth
+inherit it.
+
+The measurement hierarchy behind that note, after three instruments each failed in a different direction:
+
+| instrument | verdict |
+|---|---|
+| `cum-cpu ÷ elapsed` (cores sustained) | **THE discriminator** — cumulative *and* normalised |
+| descendant PID-set turnover | rules out *wedged*, but a poll loop fakes it — corroborator only |
+| any CPU **delta** | noise both ways: deltas false-negative on a bursty producer, turnover false-positives on a busy waiter |
+
+Cumulative can **refute** a hang claim (a total is a lower bound on work done); no delta can **establish**
+one. Measured: a working gate 1.32 cores, two queued gates 0.010 and 0.011 — and the same gate swung
+105 → 0 → 103 CPU-sec/min *inside one component*, so no window length repairs a delta.
+
+**3. A GREEN CASE IS NOT EVIDENCE THAT ITS PROBE RAN.** Narrowing `11c.8` from a spelling test to its
+stated property introduced an awk regex that was a **syntax error**, so the scan returned zero hits on
+*every* input including the reader — and the case reported `ok` while testing nothing. **The only thing
+that caught it was `11c.8b`, the control added in the same commit**, which plants a genuine `/proc` read
+and requires a hit. Nothing else in 251 cases noticed. An erroring probe and a clean subject produce
+identical output, so any structural check whose scan can fail needs a control that fails when the scan
+breaks — written at the same time, because a silently-erroring scan looks exactly like a clean subject.
+Each discriminating behaviour is now measured individually (catches a real read; ignores a pure `echo`
+mention; still catches `echo "$(cat /proc/…)"`), and the verdict messages carry their counts so a future
+zero is distinguishable from a future silence.
+
+**4. THIS LAUNCHER WAS A CONTAMINATION VECTOR, and forwarding-everything is why.** `agent-gate.sh` says
+*"never export global RUSTFLAGS on a worker"* — a non-empty `RUSTFLAGS` suppresses cargo's managed block
+and the gate then appends its own, producing a doubled `-D warnings` applied to components the gate
+deliberately scopes it away from. That contamination made `binding-rust-tests` fail on a **clean** tree,
+was diagnosed as a source defect, and halted the fleet for about an hour on a P0 that did not exist.
+`gate-detached.sh` forwards the caller's entire environment, so it propagated the poison **invisibly** —
+through `systemd-run`, where no command line shows it. `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS` and
+`RUSTDOCFLAGS` are now dropped and **named in `SKIPPED`**, which the banner emits; a silent drop of a
+caller's variable would be this same defect in miniature. Verified on the generated wrapper, both
+directions: before, `RUSTFLAGS` ×2 and `CARGO_ENCODED_RUSTFLAGS` ×1; after, zero, with 50 other exports
+still present so the zero is not an empty capture.
+
+**The through-line of all four, and of this issue: a check that can only see a TOKEN cannot decide a
+STATE.** `PASS*` accepting `PASSthisNeverRan`; a flag enumeration treating any unlisted flag as a full
+gate; an empty `ControlGroup` read as unmeasurable rather than as an answer; a name-grep counting a prose
+mention as a live reference; a guard whose comment said *depend on* while it grepped for a substring. The
+fix is never a rarer delimiter — it is to strip the channel that carries non-semantic occurrences, then
+require the shape that means what you are claiming, and to prove the requirement fires.
+
 ## Doctrine
 
 - A lane **may** run its own full gate, via `gate-detached.sh`. The claim "lanes cannot
