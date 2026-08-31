@@ -534,7 +534,11 @@ def _resolve_declared_generation(
       another root does carry the declared generation: an operator whose
       exported corpus holds unreviewed bytes for this table has to hear it,
       because that corpus WAS the oracle before this check existed;
-    * two roots both carrying the declared generation are compared BY CONTENT.
+    * two roots both carrying the declared generation are compared BY CONTENT —
+      the WHOLE component set (every file in the generation directory, plus the
+      TOC.txt manifest and the file NAMES), not just ``Data.db``: the reader
+      consumes Index/Statistics/Summary/TOC too, so matching data files alone do
+      not make two roots the same fixture (roborev job 305).
       Byte-identical copies are not ambiguity — they are the same fixture reached
       by two paths, which becomes the NORMAL state as soon as the fetched corpus
       ships a git-committed fixture (roborev job 302, Medium: refusing it would
@@ -580,10 +584,35 @@ def _resolve_declared_generation(
         # would red every normal environment once the corpus ships this table
         # (roborev job 302). A preference ordering still cannot tell two
         # generations apart — so this does not use one; it uses the evidence.
+        # THE WHOLE COMPONENT SET, not just Data.db (roborev job 305, Medium).
+        # A root carrying the same Data.db but a different or missing Index.db,
+        # Statistics.db, Summary.db or TOC.txt is NOT the same fixture — the reader
+        # consumes all of them, so two such roots can produce different reads while
+        # their data files match byte for byte. Hashing one component would have
+        # called them identical and picked one.
+        #
+        # The component set is derived from TOC.txt where present (Cassandra's own
+        # manifest of what it wrote) and cross-checked against the directory, so a
+        # component TOC lists but the directory lacks is a difference too — and the
+        # digest covers the file NAMES as well as their bytes, so an extra or
+        # missing component separates the roots rather than being ignored.
         digests: dict[str, list[Path]] = {}
         for root in matches:
-            data = root / keyspace / dirname / f"{prefix}-Data.db"
-            digest = hashlib.sha256(data.read_bytes()).hexdigest()
+            gen_dir = root / keyspace / dirname
+            present = sorted(q.name for q in gen_dir.iterdir() if q.is_file())
+            toc = gen_dir / f"{prefix}-TOC.txt"
+            declared: list[str] = []
+            if toc.is_file():
+                declared = sorted(
+                    line.strip()
+                    for line in toc.read_text().splitlines()
+                    if line.strip()
+                )
+            parts: list[str] = [f"TOC:{','.join(declared)}", f"DIR:{','.join(present)}"]
+            for name in present:
+                body = hashlib.sha256((gen_dir / name).read_bytes()).hexdigest()
+                parts.append(f"{name}:{body}")
+            digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()
             digests.setdefault(digest, []).append(root)
         if len(digests) > 1:
             detail = "; ".join(
@@ -1851,10 +1880,17 @@ class TestFixtureResolutionContract:
         real = checkout / KEYSPACE / dirname / f"{prefix}-Data.db"
         assert real.is_file(), f"committed fixture missing: {real}"
 
+        # Copy the WHOLE generation, not just Data.db. An earlier version of this
+        # test copied the data file alone and called it identical — which the
+        # component-set comparison then correctly refused, because a root missing
+        # Index/Statistics/Summary/TOC is not the same fixture (roborev job 305).
+        # The test was weaker than its own name claimed.
+        src_dir = real.parent
         copy_root = tmp_path / "copy"
         table_dir = copy_root / "sstables" / KEYSPACE / dirname
         table_dir.mkdir(parents=True)
-        (table_dir / f"{prefix}-Data.db").write_bytes(real.read_bytes())
+        for component in sorted(q for q in src_dir.iterdir() if q.is_file()):
+            (table_dir / component.name).write_bytes(component.read_bytes())
         monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(copy_root))
 
         resolved = _sstables_root_for_table(KEYSPACE, TABLE)
@@ -1862,6 +1898,34 @@ class TestFixtureResolutionContract:
             "an identical copy in a second root must resolve to a usable root, "
             f"got {resolved}"
         )
+
+    def test_a_root_with_the_same_data_db_but_a_missing_component_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """Matching ``Data.db`` is NOT sufficient to call two roots identical.
+
+        The reader consumes Index/Statistics/Summary/TOC as well, so a root whose
+        data file matches byte for byte while a component is absent can produce a
+        DIFFERENT read. Comparing one component would have called these identical
+        and picked one (roborev job 305, Medium).
+        """
+        dirname, prefix = _manifest_declared_generation(KEYSPACE, TABLE)
+        checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
+        real = checkout / KEYSPACE / dirname / f"{prefix}-Data.db"
+        assert real.is_file(), f"committed fixture missing: {real}"
+
+        partial_root = tmp_path / "partial"
+        table_dir = partial_root / "sstables" / KEYSPACE / dirname
+        table_dir.mkdir(parents=True)
+        # ONLY the data file — byte-identical, component set deliberately short.
+        (table_dir / f"{prefix}-Data.db").write_bytes(real.read_bytes())
+        monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(partial_root))
+
+        with pytest.raises(AssertionError) as excinfo:
+            _sstables_root_for_table(KEYSPACE, TABLE)
+        message = str(excinfo.value)
+        assert "AMBIGUOUS" in message, message
+        assert "DIFFERENT contents" in message, message
 
     def test_a_symlinked_env_root_is_one_root_not_an_ambiguity(
         self, tmp_path, monkeypatch
