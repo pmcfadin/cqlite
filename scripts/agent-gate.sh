@@ -3534,6 +3534,40 @@ _component_set_running_gate_check() {
     _CS_DETAIL="the gate script this process is executing is no longer a readable regular file at $gate_disk, so it cannot be compared with the tree being certified — remedy: re-run the gate against a stable on-disk script"
     return 1
   fi
+  # ---- A SYMLINK IS NOT A CERTIFIABLE GATE SCRIPT (roborev job 294, High) -------------------
+  #
+  # `-f` above FOLLOWS symlinks, so it is TRUE for a `scripts/agent-gate.sh` that is a link to an
+  # external, untracked file. Both halves of this check would then read that target while
+  # `tree-integrity` records only the LINK (a 120000 blob whose content is the target's PATH TEXT) —
+  # a PASS certifying a tree that does not contain the code that ran.
+  #
+  # SECOND INSTANCE OF ONE CLASS. Job 285 was the same defect for the MANIFEST ("a symlink IS a
+  # blob; the difference is the MODE"), and the fix there validates 120000 against 100644/100755.
+  # A second instance five rounds later means the enumeration is still open, so this ALLOWLISTS the
+  # safe shape rather than blocklisting the one shape just observed: the path must be a regular file
+  # AND the index must agree that it is one. `-L` alone would close only the final component; the
+  # index mode is what ties "what I executed" to "what the certified tree contains".
+  #
+  # THREE-VALUED. An index mode that cannot be READ is its own refusal, never a permissive pass —
+  # a missing measurement must not inherit the passing branch.
+  if [ -L "$gate_disk" ]; then
+    _CS_KIND=gate-script-unverifiable
+    _CS_DETAIL="the gate script at $gate_disk is a SYMLINK: this process executes the link's TARGET while tree-integrity records only the link itself (a 120000 blob holding the target's path text), so a PASS would certify a tree that does not contain the code that ran — remedy: run the gate from a checkout where scripts/agent-gate.sh is a regular file"
+    return 1
+  fi
+  local gate_rel_idx="${gate_disk#"$REPO_ROOT"/}" idx_mode=""
+  idx_mode=$(cd "$REPO_ROOT" 2>/dev/null && git ls-files -s -- "$gate_rel_idx" 2>/dev/null | awk 'NR==1{print $1}')
+  case "$idx_mode" in
+    100644|100755) : ;;                      # the ONLY accepted shapes: a regular file
+    "")
+      _CS_KIND=gate-script-unverifiable
+      _CS_DETAIL="the git index mode of $gate_rel_idx could not be read, so this run cannot show that the script it executes is a regular file tracked in the tree being certified — an unmeasured mode is not a passing one; remedy: re-run the gate in a checkout where that path is tracked"
+      return 1 ;;
+    *)
+      _CS_KIND=gate-script-unverifiable
+      _CS_DETAIL="the git index records $gate_rel_idx with mode $idx_mode, not a regular file (100644/100755): the bytes this process executes are then not the bytes the certified tree carries at that path — remedy: restore scripts/agent-gate.sh as a regular file"
+      return 1 ;;
+  esac
   # THE AUTHORITY. `_gate_self_digest_compare` is DEFINED at script level, at a point that precedes
   # the mode dispatch, the #1825 slot queue and every component — so its ABSENCE is affirmative
   # evidence that we are executing EARLIER than that point, i.e. inside the `--component-set-line`

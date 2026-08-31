@@ -923,6 +923,35 @@ else
   bad "3544-no-git: expected KIND no-git naming $nogit"
   printf '%s\n' "$ng_out"
 fi
+# ---------------------------------------------------------------------------
+# 3f-ii. SYMLINKED GATE (roborev job 294, High). `-f` FOLLOWS symlinks, so the readable-regular-file
+#        check above is TRUE for a `scripts/agent-gate.sh` that links to an external, untracked file.
+#        Both halves of the running-gate check then read that target while `tree-integrity` records
+#        only the LINK — a 120000 blob whose content is the target's PATH TEXT — so a PASS would
+#        certify a tree that does not contain the code that ran.
+#
+#        SECOND INSTANCE OF ONE CLASS: job 285 was the same defect for the MANIFEST ("a symlink IS a
+#        blob; the difference is the MODE"). Hence the fixture ASSERTS the index mode is really
+#        120000 before reading any verdict — otherwise a fixture that silently produced a regular
+#        file would make this case pass while testing nothing.
+sl_bare=$(mkbaseline sl-base -)
+mkbranch sl-br "$sl_bare" -
+sl_fx="$tmp/sl-br"; sl_ext="$tmp/sl-br-external-gate.sh"; sl_ok=1
+mv "$sl_fx/scripts/agent-gate.sh" "$sl_ext" 2>/dev/null || sl_ok=0
+( fx "$sl_fx" && ln -s "$sl_ext" scripts/agent-gate.sh \
+    && git add -A && git "${GIT_ID[@]}" commit -qm "gate script is a symlink" ) >/dev/null 2>&1 || sl_ok=0
+sl_mode=$( ( fx "$sl_fx" && git ls-files -s -- scripts/agent-gate.sh ) 2>/dev/null | awk 'NR==1{print $1}')
+if [ "$sl_ok" -ne 1 ] || [ "$sl_mode" != 120000 ]; then
+  bad "3544-gate-symlink: FIXTURE did not build a symlinked gate (ok=$sl_ok, index mode='$sl_mode', wanted 120000) — the case cannot discriminate, so it is a FAIL and not a skip"
+else
+  sl_out=$(hook "$sl_fx")
+  if [ "$(field KIND "$sl_out")" = gate-script-unverifiable ] \
+     && grep -q 'FAIL-CLOSED (#3544)' <<<"$(field COMPONENT_SET_LINE "$sl_out")"; then
+    ok "3544-gate-symlink: a symlinked gate script is REFUSED by name (index mode 120000 asserted first) — the executed bytes live outside the certified tree, which -f cannot see"
+  else
+    bad "3544-gate-symlink: expected KIND gate-script-unverifiable + a FAIL-CLOSED line; got KIND='$(field KIND "$sl_out")' line='$(field COMPONENT_SET_LINE "$sl_out")'"
+  fi
+fi
 
 # 3f-ii. baseline-workspace: the scratch dir for extracting the baseline script cannot be
 #        created. Forced with a TARGETED `mktemp` stub that fails ONLY for this
@@ -2861,7 +2890,12 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=19   # gate-script-changed: the gate script ON DISK is not the script THIS
+DECLARED_KIND_COUNT=20   # +gate-script-unverifiable: the script this process executes is not a
+                         # regular TRACKED file — a SYMLINK, an index mode that is not
+                         # 100644/100755, or a mode that could not be READ (unmeasured is not
+                         # passing). Job 294, and the SECOND instance of job 285's "a symlink
+                         # IS a blob; the difference is the MODE" class.
+                         # gate-script-changed: the gate script ON DISK is not the script THIS
                          # PROCESS is executing — an input crossing the certification window
                          # (job 292). Since job 293 the test is a WHOLE-FILE content digest, so
                          # the kind also covers an edit to a component's EXECUTOR FUNCTION; the
