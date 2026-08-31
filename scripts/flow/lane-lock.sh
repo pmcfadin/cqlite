@@ -150,7 +150,7 @@
 #
 # FILES — IN A SIBLING LOCK ROOT, *NOT* IN THE LANE DIRECTORY
 # -----------------------------------------------------------
-#   `${LANE_LOCK_ROOT:-$LANE_ROOT/.lane-locks}/`, keyed by issue:
+#   `$LANE_ROOT/.lane-locks/`, keyed by issue:
 #
 #   lane-<N>.lock     the record: `key=value`, ONE PER LINE. There are NO in-band
 #                     delimiters and no multi-field lines — CLAUDE.md #3312: control
@@ -197,13 +197,27 @@
 #
 # GITIGNORE / tree-integrity INTERACTION (do not undo)
 # ----------------------------------------------------
-# The default lock root is OUTSIDE any worktree, which is what actually keeps this lock
-# away from agent-gate.sh's `tree-integrity` capture (#2926) — that check takes its
-# untracked set from `git ls-files --others --exclude-standard`, so a lock file written
-# or refreshed mid-gate INSIDE a worktree would trip `tree-mutated-midrun` and VOID a
-# gate of record. `.lane-lock*` stays gitignored (see .gitignore, #3436) as a BELT for
-# the case where an operator points `LANE_LOCK_ROOT` at an in-tree path; the ignore rule
-# is not the thing that makes this safe.
+# The lock root is OUTSIDE any worktree, which is what actually keeps this lock away
+# from agent-gate.sh's `tree-integrity` capture (#2926) — that check takes its untracked
+# set from `git ls-files --others --exclude-standard`, so a lock file written or
+# refreshed mid-gate INSIDE a worktree would trip `tree-mutated-midrun` and VOID a gate
+# of record. `.lane-lock*` and `lane-[0-9]*.lock` stay gitignored (see .gitignore,
+# #3436) as a BELT, for a pre-move record and for a `LANE_ROOT` pointed inside a
+# checkout; the ignore rule is not the thing that makes this safe.
+#
+# THERE IS NO LOCK-ROOT ENV VAR, AND ONE MAY NEVER BE ADDED (#3312, owner ruling on
+# #3436). "The constrained party must not choose its own enforcer. A lock a worker can
+# trivially remove or relocate is not a lock." A dedicated lock-root knob is precisely a
+# relocation knob: point it at a fresh empty directory and your `acquire` succeeds while
+# the real lane's lock still says OCCUPIED, so the lock is defeated by one variable. The
+# direct precedent is #3312's `WAIVER_SCAN_TOOL`, removed for this reason after the same
+# argument — "theoretically redundant" did not justify leaving it.
+#   `LANE_ROOT` is DIFFERENT and stays: it relocates THE WHOLE WORLD — the lane
+#   directories AND their locks, consistently — so it is a fleet-layout parameter, and
+#   moving it is a different deployment rather than a bypass. A lock-ONLY root would
+#   move the ENFORCER while leaving the lanes where they are. That asymmetry is the
+#   entire justification, which is why it is written here rather than assumed.
+#   The tests isolate by setting `LANE_ROOT`, for the same reason.
 #
 # LANE DIRECTORY RESOLUTION — the lane is the SUBJECT, not where the lock lives
 # ----------------------------------------------------------------------------
@@ -264,12 +278,6 @@
 #
 # ENV
 #   LANE_ROOT         lane-directory root (default /data/lanes)
-#   LANE_LOCK_ROOT    where the lock FILES live (default $LANE_ROOT/.lane-locks). MUST
-#                     be absolute, for resolve_lane_dir's reason: a relative root
-#                     resolves against each caller's cwd, so two callers would take two
-#                     different locks while believing they shared one. Point it at an
-#                     in-tree path only if you accept the tree-integrity interaction
-#                     above.
 #   LANE_LOCK_MACHINE machine identity (default `hostname -s`). A fleet whose boxes
 #                     do NOT have unique short hostnames MUST set this per box, for
 #                     the same reason claim.sh's CLAIM_MACHINE says so.
@@ -738,7 +746,11 @@ lane_root() { printf '%s\n' "${LANE_ROOT:-/data/lanes}"; }
 # validated ONCE in the main shell at startup, not here: this runs inside command
 # substitutions, where a `die_usage` exit escapes only the subshell (see
 # require_abs_path's measured rationale).
-lock_root()   { printf '%s\n' "${LANE_LOCK_ROOT:-$(lane_root)/.lane-locks}"; }
+# NO env override, no `${…:-…}` fallback, and no flag on any mutating subcommand: a
+# lock-root knob is a relocation knob, and relocating the enforcer defeats the lock (see
+# the header's "THERE IS NO LOCK-ROOT ENV VAR"). It is derived from LANE_ROOT alone,
+# which moves the lanes and their locks together.
+lock_root()   { printf '%s\n' "$(lane_root)/.lane-locks"; }
 lock_record() { printf '%s/lane-%s.lock\n'  "$(lock_root)" "$1"; }
 lock_mutex()  { printf '%s/lane-%s.flock\n' "$(lock_root)" "$1"; }
 lock_audit()  { printf '%s/lane-%s.log\n'   "$(lock_root)" "$1"; }
@@ -1173,10 +1185,11 @@ cmd_status() {
   # The lock root is named directly, else derived from the LANE root — the same default
   # the mutating subcommands use, so `status --lane-root X` still reports the locks a
   # `LANE_ROOT=X acquire` took.
+  # `--lock-root` exists on `status` ONLY — a read-only render may be pointed at another
+  # machine's copied lock root for inspection. No MUTATING subcommand takes it, and
+  # there is no env form, because that would be the relocation knob the header refuses.
   if [ -n "$lock_opt" ]; then
     lock="$lock_opt"
-  elif [ -n "${LANE_LOCK_ROOT:-}" ]; then
-    lock="$LANE_LOCK_ROOT"
   else
     lock="$root/.lane-locks"
   fi
@@ -1201,16 +1214,6 @@ cmd_status() {
 }
 
 # ---------------------------------------------------------------------------
-# LANE_LOCK_ROOT is validated HERE, in the main shell, for require_abs_path's measured
-# reason: a `die_usage` inside a command substitution exits only the subshell, and
-# lock_root() is only ever called from one.
-if [ -n "${LANE_LOCK_ROOT:-}" ]; then
-  case "$LANE_LOCK_ROOT" in
-    /*) ;;
-    *) die_usage "LANE_LOCK_ROOT must be an ABSOLUTE path (got '$LANE_LOCK_ROOT'): a relative lock root resolves against each caller's cwd, so two callers would take two DIFFERENT locks while believing they shared one" ;;
-  esac
-fi
-
 SUBCOMMAND="${1:-}"
 [ "$#" -eq 0 ] || shift
 case "$SUBCOMMAND" in
