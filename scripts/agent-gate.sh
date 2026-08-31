@@ -3467,6 +3467,15 @@ _component_set_extract_declaration() {
 # needs no bound — which is also why it runs BEFORE the fetch.
 _component_set_local_manifest_check() {
   local f="$REPO_ROOT/$_CS_MANIFEST_REL" rc only_gate="" only_man="" c padded_man padded_gate
+  # A SYMLINK IS REFUSED HERE TOO, and this is the half that made the attack work (job 285): `-f`
+  # FOLLOWS a symlink, so a link to a full manifest passed local validation while the COMMITTED
+  # object published its target text as the whole baseline. Both halves must read the same
+  # document, so both require a regular file.
+  if [ -L "$f" ]; then
+    _CS_KIND=manifest-garbage
+    _CS_DETAIL="$_CS_MANIFEST_REL is a SYMLINK: this check would FOLLOW it while the committed object published to every future branch is the link's TARGET TEXT — two different documents, so a link is refused rather than resolved. The manifest must be a regular file"
+    return 1
+  fi
   if [ ! -f "$f" ] || [ ! -r "$f" ]; then
     _CS_KIND=manifest-missing
     _CS_DETAIL="the component manifest $_CS_MANIFEST_REL is missing or unreadable in $REPO_ROOT; it is COMMITTED SOURCE and the baseline comparison is derived from it, so its absence is not an excusable state — remedy: regenerate it from this gate's own --list"
@@ -3561,7 +3570,7 @@ _component_set_local_manifest_check() {
 _CS_PRESENCE=""
 _CS_PRESENCE_ERR=""
 _component_set_manifest_presence() {
-  local rev="$1" tmpd="$2" rc line ltype lpath
+  local rev="$1" tmpd="$2" rc line lmode ltype lpath
   _CS_PRESENCE=""; _CS_PRESENCE_ERR=""
   _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
   rc=$?
@@ -3593,15 +3602,29 @@ _component_set_manifest_presence() {
   # shellcheck disable=SC2086  # deliberate field split of git's own `<mode> <type> <oid> <path>`
   set -- $line
   set +f
+  lmode="${1:-}"
   ltype="${2:-}"
   lpath="${4:-}"
   if [ "$lpath" != "$_CS_MANIFEST_REL" ]; then
     _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL returned an entry this parse does not recognise: '$(_component_set_flatten "$line")'"
     return 1
   fi
-  case "$ltype" in
-    blob) _CS_PRESENCE=present; return 0 ;;
-    *)    _CS_PRESENCE_ERR="$rev:$_CS_MANIFEST_REL is a '$(_component_set_flatten "$ltype")', not a regular file, so the manifest can neither be read nor called absent"
+  # THE MODE, NOT ONLY THE TYPE (roborev job 285, High). A SYMLINK IS A BLOB — the difference is
+  # the mode (`120000` against `100644`/`100755`) — and accepting every blob made the two halves of
+  # this check read DIFFERENT THINGS:
+  #   * the LOCAL validation opens the working-tree path, which FOLLOWS the symlink, so it sees a
+  #     full, matching manifest and passes;
+  #   * `git show <rev>:<path>` on a symlink blob prints its TARGET TEXT, so the published baseline
+  #     is one line — `agent-gate.components -> fmt` publishes a ONE-COMPONENT baseline.
+  # Every future skew then passes silently, which is the exact vacuous green this guard exists to
+  # close, arriving through the guard's own data file. A tree (`040000`) or a submodule gitlink
+  # (`160000`) is refused by the same check.
+  case "$lmode/$ltype" in
+    100644/blob|100755/blob) _CS_PRESENCE=present; return 0 ;;
+    120000/*)
+      _CS_PRESENCE_ERR="$rev:$_CS_MANIFEST_REL is a SYMLINK (mode 120000): reading it in the working tree would FOLLOW the link while reading it from the commit yields the link's TARGET TEXT, so local validation and the published baseline would be different documents — the manifest must be a regular file"
+      return 1 ;;
+    *)    _CS_PRESENCE_ERR="$rev:$_CS_MANIFEST_REL is mode '$(_component_set_flatten "$lmode")' type '$(_component_set_flatten "$ltype")', not a regular file, so the manifest can neither be read nor called absent"
           return 1 ;;
   esac
 }
@@ -4318,7 +4341,19 @@ _component_set_probe_inner() {
   if [ "$_CS_PARTIAL" = no ] && _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1; then
     _CS_SHA="$remote_sha"
     _CS_BASE_OBJ=reused
-    _component_set_drop_scratch_dir
+    # THE SCRATCH REPOSITORY IS KEPT EVEN HERE (roborev job 285, High — and a decision the lead
+    # made explicitly). It used to be dropped, because "nothing was fetched, so nothing needs an
+    # isolated store" — and that left the ancestry walk running in the LIVE repository, where
+    # `$GIT_DIR/info/grafts` applies. `--no-replace-objects` does NOT disable grafts (they are a
+    # separate, legacy mechanism), so a graft could make `origin/main` look like an ancestor of
+    # HEAD and reclassify missing components from BEHIND to the non-fatal DECLARED: a false green,
+    # which is what this guard exists to prevent.
+    #
+    # The reuse path keeps what it was for — no fetch, no object transfer — and gives up only
+    # "creates no scratch repository", which is a `mktemp -d` plus a `git init` against a
+    # 15-second bound. THE PATTERN THIS CLOSES: every live-repository read preserved for speed has
+    # become a route (round 16's partial-clone lazy fetch, now grafts). If a third lands here, the
+    # reuse optimisation should be removed rather than carved again.
   else
     _CS_BASE_OBJ=fetched
   err=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline" 2>&1); rc=$?
@@ -4374,16 +4409,6 @@ _component_set_probe_inner() {
   # substitute different bytes for a given sha; that is why exposing the store is safe where
   # invoking a transport was not. `baseline-transfer-mismatch` is gone with the transfer: the
   # class is ELIMINATED rather than detected.
-  # THE READS MOVE INTO THE SCRATCH REPOSITORY, and the LANE's object store comes to THEM as an
-  # alternate — the reverse of the previous round, and the point of job 268: the live repository is
-  # never asked to RESOLVE a baseline object, so no promisor of its can turn a read into a fetch.
-  #
-  # A KNOWN, REASONED BOUNDARY, recorded rather than left to be rediscovered: this makes the lane's
-  # object directory an INPUT to the isolated repository. That is accepted. Object storage is not a
-  # control channel — an alternate carries no config, so a peer writing objects there cannot cause
-  # execution, and objects are content-addressed so it cannot substitute bytes for a sha we ask
-  # for — and comparing two histories requires both of them to be readable in one place. Do not
-  # "fix" it by copying objects instead; that would reintroduce a transfer.
   case "$csdir" in
     *[:[:space:]]*)
       # `GIT_ALTERNATE_OBJECT_DIRECTORIES` is a COLON-separated list, so a colon (or whitespace)
@@ -4394,9 +4419,27 @@ _component_set_probe_inner() {
       _CS_DETAIL="the isolated scratch repository's path contains a colon or whitespace, which cannot be expressed in GIT_ALTERNATE_OBJECT_DIRECTORIES; refusing rather than reading objects from a path this run cannot name exactly"
       return 0 ;;
   esac
+  _CS_SHA="$cssha"
+  fi
+
+  # ---- EVERY OBJECT READ, ON BOTH PATHS, HAPPENS IN THE ISOLATED REPOSITORY ------------------
+  #
+  # The live repository is never asked to RESOLVE a baseline object (job 268), and never to answer
+  # an ANCESTRY question either (job 285): in a partial clone a read there is a lazy fetch through
+  # its promisor, and its `$GIT_DIR/info/grafts` — which `--no-replace-objects` does NOT disable —
+  # can forge parentage. Both are properties of the live repository that no per-call flag removes,
+  # so the reads move instead. The LANE's object store comes to THEM as an alternate.
+  #
+  # A KNOWN, REASONED BOUNDARY, recorded rather than left to be rediscovered: this makes the lane's
+  # object directory an INPUT to the isolated repository. That is accepted. Object storage is not a
+  # control channel — an alternate carries no config, so it brings no promisor, no `insteadOf`, no
+  # grafts, and a peer writing objects there cannot cause execution; objects are content-addressed,
+  # so it cannot substitute bytes for a sha we ask for — and comparing two histories requires both
+  # of them to be readable in one place. Do not "fix" it by copying objects instead; that would
+  # reintroduce a transfer.
   if [ ! -d "$csdir/repo/.git/objects" ]; then
     _CS_KIND=baseline-workspace
-    _CS_DETAIL="the isolated scratch repository has no object directory after a successful fetch"
+    _CS_DETAIL="the isolated scratch repository has no object directory"
     return 0
   fi
   # THE LANE'S OBJECT DIR, resolved rather than assumed: in a `git worktree` this is the SHARED
@@ -4422,8 +4465,6 @@ _component_set_probe_inner() {
   esac
   _CS_READ_DIR="$csdir/repo"
   _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=$lane_objects")
-  _CS_SHA="$cssha"
-  fi
   # ---- end of the OBJECTS-ABSENT (slow) path. Both paths have now set `_CS_SHA` to a commit
   # this run can READ, whose value came from the canonical remote in THIS invocation: the fast
   # path took it from the ref oracle and the objects were already here; the slow path took it from
