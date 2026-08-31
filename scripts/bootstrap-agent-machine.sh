@@ -2198,8 +2198,35 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
     PIN_PERSIST_NOTE="not persisted (no PAM-read system-wide env file on $PLATFORM)"
     info "not touching $PIN_ENV_FILE on this $PLATFORM host — pam_env is a Linux mechanism and this platform does not consume that file, so writing it would change host state for nothing"
   elif [ ! -e "$PIN_ENV_FILE" ]; then
-    PIN_PERSIST_NOTE="no $PIN_ENV_FILE on this host"
-    info "no $PIN_ENV_FILE on this $PLATFORM host — there is no PAM-read system-wide env file to persist the pin into"
+    # CREATE IT ON LINUX WHEN AUTHORISED (#3414 final roborev). Refusing here meant a
+    # MINIMAL Linux install — where /etc/environment simply does not ship — could never be
+    # repaired: --fix-gate-pin declined, the probe found no pin, and --strict failed that
+    # box's onboarding FOREVER. A repair flag that cannot repair the one case it exists for
+    # is the "red on correct input" shape inverted: the box is fixable and we refuse to fix
+    # it. pam_env consumes the file once it exists, so creating it is the repair.
+    #
+    # Created with the ownership and mode pam_env expects and every other consumer assumes:
+    # root:root 0644. Explicitly NOT 0600 — this file is read by PAM for every login
+    # session, and a mode nothing else on the box uses is its own trap. Guarded the same way
+    # the append is: only under an explicit authorisation, only with write privilege, and
+    # only at the literal production path (the seam forces PIN_ROOT empty, and the invariant
+    # below still refuses a privileged write to a non-production path).
+    if [ "$AUTO_YES" != 1 ] && [ "$FIX_GATE_PIN" != 1 ]; then
+      PIN_PERSIST_NOTE="no $PIN_ENV_FILE and no authorisation to create it"
+      info "no $PIN_ENV_FILE on this $PLATFORM host — pass --yes or --fix-gate-pin and it will be CREATED (root:root 0644) so pam_env can consume it"
+    elif [ "$PIN_WRITE_PRIV" != 1 ]; then
+      PIN_PERSIST_NOTE="no $PIN_ENV_FILE and no privilege to create it ($PIN_PRIV_STATE)"
+      warn "gate-pin: $PIN_ENV_FILE does not exist and this run cannot create it ($PIN_PRIV_STATE) — the pin was NOT persisted"
+      info "create it as root:  printf '%s\n' '$PIN_ENV_COMMENT' '$PIN_ENV_LINE' > $PIN_ENV_FILE && chmod 0644 $PIN_ENV_FILE"
+    elif printf '%s\n%s\n' "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" \
+           | ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} tee "$PIN_ENV_FILE" >/dev/null 2>&1 \
+         && ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} chmod 0644 "$PIN_ENV_FILE" 2>/dev/null; then
+      PIN_FILE_HAS_LINE=yes; PIN_FILE_VALUE="$PIN_ENV_VALUE"
+      info "CREATED $PIN_ENV_FILE (root:root 0644) carrying '$PIN_ENV_LINE' — pam_env reads it at session creation, so NEW sessions pick it up"
+    else
+      PIN_PERSIST_NOTE="could not create $PIN_ENV_FILE"
+      warn "gate-pin: could not create $PIN_ENV_FILE — the pin was NOT persisted"
+    fi
   elif [ -L "$PIN_ENV_FILE" ]; then
     PIN_PERSIST_NOTE="$PIN_ENV_FILE is a SYMLINK"
     warn "gate-pin: $PIN_ENV_FILE is a SYMLINK — refusing a privileged write that would follow it; nothing was persisted"
