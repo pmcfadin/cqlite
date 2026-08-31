@@ -370,7 +370,15 @@ else
   fm_block=$(sed -n "${fm_begin},${fm_end_ln}p" "$GATE")
   b7=()
   for fn in _fm_describe_cargo _fm_annotate _fm_summary_line cargo env; do
-    printf '%s\n' "$fm_block" | grep -q "^$fn() {" || b7+=("$fn-not-defined-inside-the-block")
+    # HERE-STRING, NOT A PIPE. `grep -q` exits on the FIRST match, so under this file's
+    # `set -o pipefail` a piped `printf` of a large block gets SIGPIPE and the PIPELINE
+    # returns 141 — discarding a successful match and reporting a present function as
+    # MISSING. Measured: this made B7 false-FAIL ~2 runs in 3, and WHICH functions were
+    # reported missing tracked their offset in the block (the two earliest, at offsets 140
+    # and 235 of 577, lost the race; the ones at 365+ did not). This is #3400's rule —
+    # "read by redirection, never a pipe" — via a second mechanism: not a subshell
+    # swallowing the verdict, but SIGPIPE inverting it.
+    grep -q "^$fn() {" <<<"$fm_block" || b7+=("$fn-not-defined-inside-the-block")
   done
   # (b) unconditional assignment of both state variables.
   var_dir="AGENT_GATE_FM""_DIR"
@@ -383,7 +391,10 @@ else
     b7+=("an-env-default-selects-the-annotation-state")
   fi
   # (c) no sourcing of a variable path inside the block.
-  if printf '%s\n' "$fm_block" | grep -qE '^[[:space:]]*(\.|source)[[:space:]]+"?\$'; then
+  # Here-string for the same SIGPIPE-under-pipefail reason as the loop above; this one is
+  # the more dangerous direction, since a discarded match would report a REAL sourcing of a
+  # variable path as absent.
+  if grep -qE '^[[:space:]]*(\.|source)[[:space:]]+"?\$' <<<"$fm_block"; then
     b7+=("the-block-sources-a-variable-named-file")
   fi
   if [ "${#b7[@]}" -eq 0 ]; then
