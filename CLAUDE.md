@@ -336,6 +336,25 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
   the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
   stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **A SYMLINK IS A BLOB, AND A GRAFT OUTLIVES `--no-replace-objects` (roborev job 285).** Two
+  false-green routes, both closed by moving rather than flagging. (1) The presence probe accepted
+  every `blob`, but a symlink IS one — the difference is the MODE (`120000`) — so the two halves of
+  the manifest check read DIFFERENT DOCUMENTS: the working-tree validation FOLLOWS the link and
+  sees a full manifest while `git show <rev>:<path>` prints the link's TARGET TEXT, so
+  `agent-gate.components -> fmt` validated locally and published a ONE-COMPONENT baseline. The mode
+  is now validated on both halves. (2) `$GIT_DIR/info/grafts` rewrites parentage and
+  `--no-replace-objects` does **not** disable it (measured: no → YES → YES across
+  before-graft/plain/`--no-replace-objects`), so on the object-REUSE path — where ancestry still ran
+  in the live repository — a graft could reclassify missing components from fatal `BEHIND` to
+  non-fatal `DECLARED`. **Ancestry now runs in the isolated repository on BOTH paths**, live objects
+  exposed only through an alternate; the reuse path keeps what it was for (no fetch, no transfer)
+  and loses only a `mktemp`+`git init`. **The pattern the owner named while ruling on it: every
+  live-repository read preserved for speed has turned into a route** (round 16's partial-clone lazy
+  fetch, now grafts) — so a third finding there should remove the reuse optimisation rather than
+  carve it again. **And a test-suite lesson from the same round: a span-replacing edit silently
+  deleted FOUR cases and the suite reported `failed: 0` at 102 instead of 105 for a whole round —
+  a green tally over a shrunken suite is #3544's own subject inside its own test file. That suite
+  now asserts a CASE FLOOR**, the idiom `test_agent_gate_summary.sh` already used.
   **STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN — AND A FIX THAT ADDS A RESOURCE INHERITS
   THAT RESOURCE'S LIFETIME BUGS (roborev job 282).** Two closures. (1) The rejected-origin
   diagnostic was the FIFTH finding in one family — raw URL rendered (227) → redacted but not

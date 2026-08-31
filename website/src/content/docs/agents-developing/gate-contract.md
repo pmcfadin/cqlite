@@ -468,6 +468,16 @@ pinning, the isolated fetch (the validated URL written into a `0600` config by a
 it never enters `argv`), the verified transfer hop, the mode-dependent bound, shallow-ancestry
 handling and the redact-and-flatten detail path.
 
+**A symlink is a blob, and a graft outlives `--no-replace-objects`.** The presence probe accepted
+every `blob`, but a symlink is one — the difference is the mode — so the working-tree validation
+*followed* the link and saw a full manifest while `git show <rev>:<path>` printed the link's target
+text: `agent-gate.components -> fmt` validated locally and published a one-component baseline. And
+`$GIT_DIR/info/grafts` rewrites parentage while `--no-replace-objects` does **not** disable it, so
+on the object-reuse path (where ancestry still ran in the live repository) a graft could reclassify
+missing components from a fatal `BEHIND` to a non-fatal `DECLARED`. Ancestry now runs in the
+isolated repository on **both** paths. The pattern worth carrying: every live-repository read
+preserved for speed has turned into a route.
+
 **Stop rendering the value rather than sanitising it again.** The rejected-origin diagnostic was
 the *fifth* finding in one family — raw URL, then unflattened, then unredacted stderr, then
 scheme-only redaction, then query strings and multi-`@` authorities. Every fix improved the
