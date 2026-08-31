@@ -2260,6 +2260,65 @@ else
   bad "4b.162 neither copy word-splits /proc stat" "$_split_hits file(s) still use 'set -- \$...'"
 fi
 
+# --- roborev job 272: two sites that BYPASSED a safe primitive this file already had ---------------
+# Both findings were the same shape, and it is a shape the round-48 class audit did NOT catch: the
+# audit enumerated PREDICATES and PATHS, i.e. the definitions of the safe primitives, and never
+# enumerated their CALL SITES to check that none was bypassed. So the tests below are PROPERTY tests
+# over call sites, not spelling tests. The guard that missed job 272's second finding looked for the
+# literal `grep -q "^run-id: ` while the live defect read `grep -m1 '^run-id: '` — a NAME, not a
+# PROPERTY, which is the failure mode this repo has already recorded twice.
+
+# (a) EVERY direct read of the run-id must live inside _snap_pair, whatever variable it reads from and
+#     however the grep is spelled. Two separate greps against a LIVE artifact can pair our nonce with a
+#     peer's run-id; _snap_pair takes one immutable copy and reads both fields from it.
+_sp_start=$(grep -n '_snap_pair() {' "$LAUNCHER" | head -1 | cut -d: -f1)
+if [ -z "$_sp_start" ]; then
+  bad "4b.163 every run-id read is inside _snap_pair" "_snap_pair not found"
+else
+  _sp_end=$(awk -v s="$_sp_start" 'NR>s && /^[[:space:]]*\}[[:space:]]*$/ { print NR; exit }' "$LAUNCHER")
+  _rid_outside=0; _rid_total=0
+  while IFS=: read -r _ln _rest; do
+    [ -n "$_ln" ] || continue
+    case "$_rest" in *'#'*) ;; esac
+    _rid_total=$((_rid_total+1))
+    if [ "$_ln" -lt "$_sp_start" ] || [ "$_ln" -gt "$_sp_end" ]; then
+      _rid_outside=$((_rid_outside+1)); echo "     direct run-id read outside _snap_pair at line $_ln"
+    fi
+  done < <(grep -nE "grep[^|]*'\^run-id: '" "$LAUNCHER" || true)
+  # Non-vacuity: there must BE at least one such read, or the property is trivially satisfied by a
+  # file that reads the run-id nowhere.
+  if [ "$_rid_total" -ge 1 ] && [ "$_rid_outside" = 0 ]; then
+    ok "4b.163 every direct run-id read is inside _snap_pair ($_rid_total total, 0 outside)"
+  else
+    bad "4b.163 every direct run-id read is inside _snap_pair" \
+        "total=$_rid_total outside=$_rid_outside (total 0 would make this vacuous)"
+  fi
+fi
+
+# (b) The unit-death decision must go through _unit_is_live, never `is-active --quiet`.
+#     `is-active --quiet` exits nonzero for every TRANSITIONAL state and for every QUERY FAILURE, so a
+#     healthy-but-unsettled gate (or one we could not ask about) read as dead and got stopped as
+#     unmonitorable. _unit_is_live treats only `inactive|failed` as affirmative terminal answers.
+_ua_start=$(grep -n '_unit_is_live() {' "$LAUNCHER" | head -1 | cut -d: -f1)
+if [ -z "$_ua_start" ]; then
+  bad "4b.164 unit liveness decided by _unit_is_live" "_unit_is_live not found"
+else
+  _ua_end=$(awk -v s="$_ua_start" 'NR>s && /^[[:space:]]*\}[[:space:]]*$/ { print NR; exit }' "$LAUNCHER")
+  _ia_outside=0
+  while IFS=: read -r _ln _rest; do
+    [ -n "$_ln" ] || continue
+    case "$_rest" in [[:space:]]*'#'*|'#'*) continue ;; esac
+    if [ "$_ln" -lt "$_ua_start" ] || [ "$_ln" -gt "$_ua_end" ]; then
+      _ia_outside=$((_ia_outside+1)); echo "     is-active --quiet in a decision at line $_ln"
+    fi
+  done < <(grep -n 'is-active --quiet' "$LAUNCHER" | grep -v ':[[:space:]]*#' || true)
+  if [ "$_ia_outside" = 0 ]; then
+    ok "4b.164 unit liveness is decided by _unit_is_live, never a bare 'is-active --quiet'"
+  else
+    bad "4b.164 unit liveness is decided by _unit_is_live" "$_ia_outside bare is-active decision(s)"
+  fi
+fi
+
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
 [ "$fail" -eq 0 ] || exit 1

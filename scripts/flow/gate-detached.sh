@@ -1178,13 +1178,25 @@ while [ "$_i" -lt 40 ]; do
   # post-loop terminal check is guarded on it, and a launch that had actually produced a verdict was
   # REFUSED — and its unit stopped — on the grounds that no heartbeat appeared. Once the unit is
   # inactive the artifacts can no longer change, so re-deriving here races nothing.
-  if ! systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+  # `_unit_is_live`, NOT `is-active --quiet` (roborev job 272, Medium). `is-active --quiet` exits
+  # NONZERO for every transitional state (activating, deactivating, reloading, refreshing) AND for
+  # every query failure (no user bus, systemctl absent) — so a HEALTHY gate that had not yet settled,
+  # or one we simply could not ask about, read as "the unit already died". The loop then broke early
+  # and the launcher stopped a live gate as unmonitorable. This file ALREADY had the correct closed
+  # grammar in `_unit_is_live` — only `inactive|failed` are affirmative terminal answers, everything
+  # else is live-or-unmeasurable — and this site simply did not use it. Same class as the audited
+  # two-valued file predicates, one level out: a multi-state signal read through a two-valued probe.
+  if ! _unit_is_live "$UNIT"; then
+    # ONE IMMUTABLE SNAPSHOT, via _snap_pair (roborev job 272, Medium). This read the nonce and the
+    # run-id with two SEPARATE greps against a LIVE file, so a concurrent direct gate rewriting it
+    # between them pairs OUR nonce with the PEER's run-id, and the launcher then advertises a poll
+    # command bound to someone else's run -- the exact failure `_snap_pair` was built for (job 190).
+    # The primitive existed and was already used twice above; this site re-implemented the unsafe
+    # version instead of calling it.
     if [ -z "$_new_rid" ]; then
       for _src in "$_hbdest" "$SUMMARY"; do
-        if grep -qxF "launch-nonce: $LAUNCH_NONCE" "$_src" 2>/dev/null; then
-          _cur=$(grep -m1 '^run-id: ' "$_src" 2>/dev/null || true)
-          [ -n "$_cur" ] && { _new_rid="${_cur#run-id: }"; break; }
-        fi
+        _cur=$(_snap_pair "$_src" 2>/dev/null || true)
+        [ -n "$_cur" ] && { _new_rid="$_cur"; break; }
       done
     fi
     break
