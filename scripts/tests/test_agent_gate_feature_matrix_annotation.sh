@@ -572,24 +572,54 @@ case "$got" in
     ok "R11c: an indirect component with no recorded driver outcome renders UNDECLARED naming the driver (a visible recording gap, not a claim)" ;;
   *) bad "R11c: got '$got'" ;;
 esac
-# The rc→reach mapping is the ONE place both maturin callers agree, so it is measured as a
-# table rather than at one call site.
+# The reach mapping is the ONE place both maturin callers agree, so it is measured as a table
+# rather than at one call site. THREE INPUT STATES since roborev job 285, because the rc alone
+# cannot express execution history: the self-heal path returns 1 or 4 from a SECOND setup
+# attempt AFTER a first build already invoked maturin, so an rc-only table claimed
+# "never reached maturin" about a maturin run that happened.
+_rc_marker="$tmp/pbv-reach-marker"
 rc_bad=()
+# (i) POSITIVE EVIDENCE WINS. Marker present => reached, whatever the rc says. rc 1 and 4 are
+#     the two the old table called not-reached, so they are the cases that matter here.
+for _rc in 0 1 2 3 4 none 7; do
+  rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
+  : > "$_rc_marker"
+  AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc" "$_rc_marker"
+  got=$(_fm_annotate python-bindings)
+  [ "$got" = '[via maturin: feature set NOT observed]' ] || rc_bad+=("marker+rc$_rc:'$got'")
+done
+rm -f "$_rc_marker"
+# (ii) Marker mechanism ACTIVE but marker ABSENT => the negative is MEASURED, and the rc
+#      explains why. 0/2/3 still mean the build ran (maturin exited, however it exited).
 for _rc in 0 2 3; do
   rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
-  AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc"
+  AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc" "$_rc_marker"
   got=$(_fm_annotate python-bindings)
-  [ "$got" = '[via maturin: feature set NOT observed]' ] || rc_bad+=("rc$_rc:'$got'")
+  [ "$got" = '[via maturin: feature set NOT observed]' ] || rc_bad+=("absent+rc$_rc:'$got'")
 done
-for _rc in 1 4 none 7; do
+# (iii) NO marker path at all => UNKNOWN, never a negative. Asserting a not-reached we did not
+#       measure is the same unfounded claim this annotation exists to prevent.
+for _rc in 1 4 none; do
   rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
   AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc"
   got=$(_fm_annotate python-bindings)
-  case "$got" in *'never reached maturin'*) ;; *) rc_bad+=("rc$_rc:'$got'") ;; esac
+  case "$got" in
+    *'UNKNOWN'*'not measured'*) ;;
+    *) rc_bad+=("nomarker+rc$_rc:'$got'") ;;
+  esac
+done
+# (iv) Marker mechanism ACTIVE, marker ABSENT, and an rc that means the driver was never
+#      entered => a MEASURED not-reached, with the rc supplying the reason. This is the only
+#      state in which a negative claim is legitimate.
+for _rc in 1 4 none 7; do
+  rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
+  AGENT_GATE_FM_COMPONENT=python-bindings _fm_note_maturin_rc python-bindings "$_rc" "$_rc_marker"
+  got=$(_fm_annotate python-bindings)
+  case "$got" in *'never reached maturin'*) ;; *) rc_bad+=("absent+rc$_rc:'$got'") ;; esac
 done
 rm -f "$AGENT_GATE_FM_DIR/python-bindings.features"
 if [ "${#rc_bad[@]}" -eq 0 ]; then
-  ok "R11d: the shared rc table is exact — 0/2/3 record the maturin invocation, 1/4/unknown record that it was never reached"
+  ok "R11d: the shared reach table is exact in all THREE input states — a present marker records the invocation whatever the rc (the job-285 false negative), an absent marker with the mechanism active records a MEASURED not-reached, and no marker at all records UNKNOWN rather than a guessed negative"
 else
   bad "R11d: ${rc_bad[*]}"
 fi

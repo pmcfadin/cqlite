@@ -2616,6 +2616,12 @@ _python_build_verify_venv() {
     fi
     (
       set -euo pipefail
+      # RECORD THE REACH AT EXECUTION TIME, not by inferring it from the final aggregate rc
+      # (roborev job 285). The self-heal path calls _pbv_setup a SECOND time and returns 1
+      # (or 4) on its failure — AFTER this function has already invoked maturin once — so the
+      # rc cannot express execution history and "never reached maturin" was a false claim.
+      # A file, not a variable: this is a subshell, so a variable would not survive it.
+      [ -n "${_pbv_reach_marker:-}" ] && : > "$_pbv_reach_marker"
       # shellcheck disable=SC1091
       . "$active_venv/bin/activate"
       eval "$maturin_cmd"
@@ -3412,6 +3418,9 @@ _fm_note_driver() {
   _fm_active || return 0
   case "${3:-}" in
     reached) _fm_note "$1" "$(_fm_indirect_desc "$2")" ;;
+    # UNKNOWN is a distinct state, not a synonym for not-reached: claiming a negative we did
+    # not measure is the same unfounded assertion this annotation exists to prevent.
+    unknown) _fm_note "$1" "cargo reach via $2 UNKNOWN${4:+ ($4)}" ;;
     *)       _fm_note "$1" "no cargo build/test invoked (never reached $2${4:+; $4})" ;;
   esac
   return 0
@@ -3426,9 +3435,25 @@ _fm_note_driver() {
 # (no cargo/rustc on PATH) mean the driver was never entered, and any other value is
 # unknown, which is also not evidence that it ran.
 _fm_note_maturin_rc() {
+  # POSITIVE EVIDENCE FIRST (roborev job 285). $3 is the reach marker _pbv_build touches
+  # immediately before invoking maturin. If it EXISTS, maturin ran — whatever the final rc
+  # says — because the rc is an AGGREGATE and the self-heal path can return 1 or 4 from a
+  # SECOND setup attempt after a first build already happened.
+  if [ -n "${3:-}" ] && [ -e "${3:-}" ]; then
+    _fm_note_driver "$1" maturin reached
+    return 0
+  fi
+  # No marker file. If the marker mechanism was ACTIVE ($3 given, i.e. a path we would have
+  # written), its absence is real negative evidence and the rc explains WHY. If no marker
+  # path was supplied at all we have not measured anything, so say so rather than asserting a
+  # negative from an aggregate rc — that inference is the defect this fixes.
+  if [ -z "${3:-}" ]; then
+    _fm_note_driver "$1" maturin unknown "reach not measured (no marker); build-verify rc '${2:-none}'"
+    return 0
+  fi
   case "${2:-}" in
     0|2|3) _fm_note_driver "$1" maturin reached ;;
-    1)     _fm_note_driver "$1" maturin not-reached "venv/pip setup failed" ;;
+    1)     _fm_note_driver "$1" maturin not-reached "venv/pip setup failed before maturin" ;;
     4)     _fm_note_driver "$1" maturin not-reached "no cargo/rustc on PATH" ;;
     *)     _fm_note_driver "$1" maturin not-reached "build-verify rc '${2:-none}'" ;;
   esac
@@ -6996,8 +7021,13 @@ run_python_bindings() {
   # cargo ran when nothing had. Captured here and mapped by the SHARED _fm_note_maturin_rc,
   # the same helper the --lite python tier uses.
   local pbv_rc=0
-  bash "$GATE_SELF" --python-build-verify "$venv" "maturin develop -m bindings/python/Cargo.toml" "$active_venv_file" >"$log" 2>&1 || pbv_rc=$?
-  _fm_note_maturin_rc "$name" "$pbv_rc"
+  # The reach marker travels by ENV because the verifier runs as a CHILD process; _pbv_build
+  # touches it immediately before invoking maturin, so the reach is MEASURED rather than
+  # inferred from this aggregate rc (roborev job 285).
+  local pbv_reach="$LOG_DIR/$name.maturin-reached"
+  rm -f "$pbv_reach"
+  _pbv_reach_marker="$pbv_reach" bash "$GATE_SELF" --python-build-verify "$venv" "maturin develop -m bindings/python/Cargo.toml" "$active_venv_file" >"$log" 2>&1 || pbv_rc=$?
+  _fm_note_maturin_rc "$name" "$pbv_rc" "$pbv_reach"
   if [ "$pbv_rc" -eq 0 ]; then
     active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
     if RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
@@ -13434,12 +13464,18 @@ run_scoped_tests() {
   # compile of the extension (seconds warm via the persistent venv + sccache,
   # ~1-3 min cold).
   if [ "$python_diff" -eq 1 ]; then
+    # ONE reach-marker path for BOTH branches below. Defined before the branch so it is never
+    # unbound under `set -u`, and so the no-python3 branch can pass it too: the marker mechanism
+    # being ACTIVE is what makes its ABSENCE real evidence of not-reached, rather than an
+    # unmeasured guess (roborev job 285).
+    local pbv_reach="$LOG_DIR/$name.maturin-reached"
+    rm -f "$pbv_reach"
     if ! command -v python3 >/dev/null 2>&1; then
       echo ">>> [$name] python binding diff but no python3 on PATH — SKIP python tier (run the full gate)"
       # #3453 blocker 1: the tier is not reached at all, so record THAT — never a maturin
       # invocation that did not happen. `none` is any non-{0,2,3} value; see
       # _fm_note_maturin_rc.
-      _fm_note_maturin_rc "$name" none
+      _fm_note_maturin_rc "$name" none "$pbv_reach"
       PYTHON_TIER_NOTE="python-tier: SKIPPED (no python3 on PATH) — python-binding diff NOT validated by this lite run; run the full gate"
     else
       local venv="$REPO_ROOT/target/agent-gate-venv"
@@ -13459,14 +13495,14 @@ run_scoped_tests() {
       # venv (possibly a private self-heal venv — Finding B; the shared $venv is
       # never torn down).
       active_venv_file=$(mktemp "${TMPDIR:-/tmp}/agent-gate-active-venv.XXXXXX")
-      RUN_SLOW_TESTS=0 bash "$GATE_SELF" --python-build-verify "$venv" "$PYTHON_LITE_MATURIN_CMD" "$active_venv_file" >>"$log" 2>&1
+      RUN_SLOW_TESTS=0 _pbv_reach_marker="$pbv_reach" bash "$GATE_SELF" --python-build-verify "$venv" "$PYTHON_LITE_MATURIN_CMD" "$active_venv_file" >>"$log" 2>&1
       pbv_rc=$?
       # #3453 blocker 1: maturin invokes cargo in a CHILD process, so no argv passes
       # through this shell's observer — record the honest `via maturin: feature set NOT
       # observed` entry, ADDITIVELY (the rust blast-radius loop above already appended its
       # OBSERVED sets to the same sidecar, so a MIXED diff renders both), and only for the
       # rc values that mean maturin actually ran.
-      _fm_note_maturin_rc "$name" "$pbv_rc"
+      _fm_note_maturin_rc "$name" "$pbv_rc" "$pbv_reach"
       active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
       if [ "$pbv_rc" -eq 2 ]; then
         status=FAIL
