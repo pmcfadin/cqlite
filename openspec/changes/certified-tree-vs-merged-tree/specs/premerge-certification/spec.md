@@ -229,11 +229,22 @@ rediscovered (#3650 review B3).
 its exit code or any refusal on account of it. An advisory that fails to run, is absent, or reports
 `UNMEASURED` SHALL be reported on those lines and SHALL NOT be fatal in slice 1.
 
-The advisory SHALL be invoked under a **time bound**, and where no timeout mechanism is available (`timeout`
-is not POSIX and is absent on a stock macOS) the advisory SHALL NOT be run at all: the unavailability
+The advisory SHALL be invoked under a **time bound whose enforcement does not depend on the child
+cooperating**: the bound SHALL carry a SIGKILL escalation (`--kill-after`), because plain
+`timeout <secs>` sends SIGTERM and then waits, so a child that traps or ignores TERM keeps the merge
+critical path blocked indefinitely and the advertised bound bounds nothing (#3650 review R1). The
+runner SHALL be resolved as `timeout` then `gtimeout` — GNU coreutils installs its timeout as
+`gtimeout` on stock macOS, which this repo supports (#3650 review R2) — and each candidate's
+`--kill-after` support SHALL be PROBED rather than assumed, following
+`_gate_notify_bounded_timeout` in `scripts/lib/gate-notify.sh`. A candidate that rejects the flag
+SHALL count as no bounding tool at all, since an escapable bound is not a bound.
+
+Where no such runner is available the advisory SHALL NOT be run at all: the unavailability
 SHALL be reported on a `PREMERGE: ADVISORY` line naming the missing bound, and the exit code SHALL be
 unaffected. An UNBOUNDED child on the merge critical path is the hang the bound exists to prevent, so the
-bound SHALL NOT silently degrade (#3650 review B1). The three existing
+bound SHALL NOT silently degrade (#3650 review B1). The diagnostic SHALL name what the code actually
+accepts: a message recommending `gtimeout` while the code resolves only `timeout` is the defect R2
+records. The three existing
 `PREMERGE: SCOPE` lines naming #3650 SHALL be retained, since slice 1 does not close the gap they
 disclose; they MAY be extended to point at the advisory.
 
@@ -254,16 +265,26 @@ disclose; they MAY be extended to point at the advisory.
 
 #### Scenario: The bound is never silently dropped
 - **GIVEN** an otherwise-passing `premerge-assert.sh` invocation and an advisory that hangs
-- **WHEN** a timeout mechanism is available
+- **WHEN** a supported timeout runner is available
 - **THEN** the advisory is bounded, its timeout is reported with its exit code, and the assert exits `0`
-- **WHEN** no timeout mechanism is available
+- **WHEN** no supported timeout runner is available
 - **THEN** the advisory is NOT executed, the missing bound is named on a `PREMERGE: ADVISORY` line, and
   the assert exits `0` with its `PREMERGE: SCOPE` lines intact
 
+#### Scenario: The bound holds against a child that ignores SIGTERM
+- **GIVEN** an otherwise-passing `premerge-assert.sh` invocation
+- **AND** an advisory that installs `trap '' TERM` and then sleeps
+- **WHEN** `premerge-assert.sh` runs
+- **THEN** the advisory is killed rather than awaited, its exit is reported on a `PREMERGE: ADVISORY`
+  line, and the assert exits `0`
+
 *Verified by:* `scripts/tests/test_premerge_assert.sh` (advisory-printed case; broken-advisory
-non-fatal case; extended Case 39 for the retained SCOPE wording; Case 41b's two BOUND cases — one
-hanging stub, bounded through a `timeout` shim that records the requested bound, and the same stub NOT
-EXECUTED with `timeout` off PATH, each asserting the exit code and the SCOPE lines survive).
+non-fatal case; extended Case 39 for the retained SCOPE wording; Case 41b's BOUND cases — one
+hanging stub bounded through a `timeout` shim that records the requested bound AND whether
+`--kill-after` was passed, the same stub NOT EXECUTED with no supported runner on PATH, and a
+TERM-IGNORING stub delegated to the real runner, each asserting the exit code and the SCOPE lines
+survive; Case 41c's shipped-wiring case, which is decisive on BOTH configurations — advisory output
+where a supported runner exists, the documented skip output where none does).
 
 ### Requirement: The advisory's blast-radius definition is mutation-checked against the motivating case
 

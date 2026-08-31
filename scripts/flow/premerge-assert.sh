@@ -305,7 +305,7 @@ fi
 # just another non-zero exit here: REPORTED on an ADVISORY line (`exit 124`) and
 # ignored, per the paragraph above.
 #
-# AN ABSENT `timeout` SKIPS THE ADVISORY — IT DOES NOT DEGRADE TO AN UNBOUNDED
+# AN UNAVAILABLE BOUND SKIPS THE ADVISORY — IT DOES NOT DEGRADE TO AN UNBOUNDED
 # CALL (#3650 review B1). `timeout` is not POSIX and is absent on a stock macOS,
 # which this repo supports, and the earlier code took the UNBOUNDED branch there
 # and said so in this comment as though it were a considered trade. It was not:
@@ -315,10 +315,51 @@ fi
 # dropped, and the advisory still cannot touch this script's exit code, because
 # the unavailability is REPORTED on a `PREMERGE: ADVISORY` line naming the
 # missing mechanism, exactly like an absent artifact.
+#
+# TWO THINGS THE FIRST VERSION OF THAT BOUND GOT WRONG (#3650 review R1/R2):
+#
+#  R1 — `timeout <secs>` SENDS SIGTERM AND THEN WAITS, so a child that traps or
+#  ignores TERM runs on indefinitely and the advertised bound bounds NOTHING.
+#  The escalation `--kill-after=<grace>` follows with SIGKILL, which cannot be
+#  trapped, and it IS the bound. This is the same finding, with the same
+#  measurement, that scripts/lib/gate-notify.sh records for the gate's notify
+#  path and scripts/bootstrap-agent-machine.sh for its network probes.
+#
+#  R2 — only `timeout` was resolved, while GNU coreutils installs its timeout as
+#  `gtimeout` on stock macOS. The skip diagnostic below TOLD the reader to
+#  install coreutils for `gtimeout`, and the code then never looked for it: on
+#  the exact configuration the message recommends, the advisory still skipped.
+#
+# So the resolution follows the repository's existing convention verbatim
+# (`_gate_notify_bounded_timeout`, scripts/lib/gate-notify.sh): try `timeout`
+# then `gtimeout`, PROBE each for `--kill-after` rather than assuming it (BusyBox
+# and older implementations reject the flag, and a non-GNU `timeout` earlier on
+# PATH must not win a first-match-wins lookup), and treat a candidate that
+# rejects it as NO bounding tool at all. That last part is the B1 rule applied
+# one level down: an escapable bound is not a bound, and running behind one
+# would be the silent degrade B1 forbids.
 ADVISORY_TIMEOUT_SECS=60
+# The grace is ADDITIVE wall-clock: the true worst case of the advisory call is
+# ADVISORY_TIMEOUT_SECS + ADVISORY_KILL_GRACE. 5s is ample for a well-behaved
+# child to finish its own cleanup after TERM.
+ADVISORY_KILL_GRACE=5
+
+# resolve_advisory_timeout — print a timeout(1) that supports `--kill-after`, or
+# return 1 when no such runner exists. Capability is PROBED, never assumed; see
+# the R1/R2 paragraphs above.
+resolve_advisory_timeout() {
+  local c
+  for c in timeout gtimeout; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    "$c" --kill-after=1 1 true >/dev/null 2>&1 || continue
+    printf '%s\n' "$c"
+    return 0
+  done
+  return 1
+}
 
 print_base_staleness_advisory() {
-  local adv_out adv_rc=0 line
+  local adv_out adv_rc=0 line adv_to
   if [ ! -f "$advisory_script" ]; then
     printf 'PREMERGE: ADVISORY base-staleness.sh is ABSENT at %s — the base-staleness\n' \
       "$advisory_script"
@@ -326,19 +367,22 @@ print_base_staleness_advisory() {
     printf 'PREMERGE: ADVISORY advisory changes no verdict, so its absence changes none either.\n'
     return 0
   fi
-  if ! command -v timeout >/dev/null 2>&1; then
-    printf 'PREMERGE: ADVISORY base-staleness.sh was NOT RUN: no `timeout` on PATH, so the\n'
-    printf 'PREMERGE: ADVISORY %ss bound could not be applied, and the bound is not droppable\n' \
+  if ! adv_to=$(resolve_advisory_timeout); then
+    printf 'PREMERGE: ADVISORY base-staleness.sh was NOT RUN: no `timeout`/`gtimeout` on PATH\n'
+    printf 'PREMERGE: ADVISORY supporting `--kill-after`, so the %ss bound could not be applied\n' \
       "$ADVISORY_TIMEOUT_SECS"
-    printf 'PREMERGE: ADVISORY (#3650 review B1) — an UNBOUNDED child here is the merge-path\n'
-    printf 'PREMERGE: ADVISORY hang the bound exists to prevent, so the advisory is SKIPPED.\n'
+    printf 'PREMERGE: ADVISORY with a SIGKILL escalation, and the bound is not droppable (#3650\n'
+    printf 'PREMERGE: ADVISORY review B1/R1) — an UNBOUNDED child here, or one behind a\n'
+    printf 'PREMERGE: ADVISORY SIGTERM-only bound a child can ignore, is the merge-path hang the\n'
+    printf 'PREMERGE: ADVISORY bound exists to prevent, so the advisory is SKIPPED.\n'
     printf 'PREMERGE: ADVISORY NOT fatal in #3650 slice 1: the advisory changes no verdict, so\n'
-    printf 'PREMERGE: ADVISORY its absence changes none either. Install coreutils (GNU/`gtimeout`\n'
-    printf 'PREMERGE: ADVISORY on macOS) to get the report back.\n'
+    printf 'PREMERGE: ADVISORY its absence changes none either. Install GNU coreutils (its\n'
+    printf 'PREMERGE: ADVISORY timeout is `gtimeout` on macOS, and IS accepted here) to get the\n'
+    printf 'PREMERGE: ADVISORY report back.\n'
     return 0
   fi
-  adv_out=$(timeout "$ADVISORY_TIMEOUT_SECS" bash "$advisory_script" "$certified" 2>&1) ||
-    adv_rc=$?
+  adv_out=$("$adv_to" --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" \
+    bash "$advisory_script" "$certified" 2>&1) || adv_rc=$?
   if [ -z "$adv_out" ]; then
     printf 'PREMERGE: ADVISORY base-staleness.sh produced NO output (exit %s) — reported, and\n' \
       "$adv_rc"

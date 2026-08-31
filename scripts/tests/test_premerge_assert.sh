@@ -1114,17 +1114,33 @@ exit 0
 STUB
 }
 
-# Path 1 — `timeout` PRESENT. A shim stands in for it (the suite cannot wait 60s
-# for the real bound): it RECORDS the bound the script requested, then applies a
-# short one of its own and reports 124 the way `timeout` does. So the case
-# asserts both halves of the contract: the constant really reaches `timeout`, and
-# a hanging advisory really is cut off without touching the exit code.
+# Path 1 — a supported runner PRESENT. A shim stands in for it (the suite cannot
+# wait 60s for the real bound): it RECORDS what the script requested — the kill
+# grace AND the bound — then applies a short one of its own and reports 124 the
+# way `timeout` does. So the case asserts every half of the contract: the
+# constants really reach the runner, `--kill-after` really is passed, and a
+# hanging advisory really is cut off without touching the exit code.
+#
+# THE SHIM MUST ALSO ANSWER THE CAPABILITY PROBE (#3650 review R1/R2): the script
+# now resolves its runner by PROBING `--kill-after=1 1 true`, and a shim that
+# failed that probe would make the script take the SKIP path — the bounded case
+# would then pass for the wrong reason, asserting nothing about the bound. The
+# probe is answered by delegating a plain `<secs> <cmd...>` invocation.
 SHIMD="$T/timeout-shim-bin"
 mkdir -p "$SHIMD"
 cat >"$SHIMD/timeout" <<'SHIM'
 #!/usr/bin/env bash
-printf 'BASE-STALENESS: timeout-shim requested %s\n' "$1"
+grace=none
+case "$1" in
+  --kill-after=*) grace="${1#--kill-after=}"; shift ;;
+esac
+printf 'BASE-STALENESS: bound-shim requested %s grace %s\n' "$1" "$grace"
 shift
+# The capability probe (`--kill-after=1 1 true`) must SUCCEED, or the script
+# concludes there is no supported runner and skips the advisory entirely.
+if [ "$#" -eq 1 ] && [ "$1" = true ]; then
+  exit 0
+fi
 "$@" &
 child=$!
 ( sleep 2; kill -9 "$child" 2>/dev/null ) &
@@ -1155,9 +1171,11 @@ if flow_copy adv-hang-bounded "$(hang_stub "$MARK_A")"; then
     bad "advisory bound: the hanging stub never ran — the bounded case proves nothing"
   fi
   case "$OUT" in
-    *"PREMERGE: ADVISORY BASE-STALENESS: timeout-shim requested 60"*)
-      ok "advisory bound: the 60s bound is what is handed to \`timeout\`" ;;
-    *) bad "advisory bound: the advisory must be invoked through \`timeout <secs>\` (got: $OUT)" ;;
+    *"PREMERGE: ADVISORY BASE-STALENESS: bound-shim requested 60 grace 5"*)
+      ok "advisory bound: the 60s bound AND a 5s kill grace are what reach the runner" ;;
+    *"bound-shim requested 60 grace none"*)
+      bad "advisory bound: the runner was invoked WITHOUT --kill-after — a SIGTERM-only bound a child can ignore (#3650 R1)" ;;
+    *) bad "advisory bound: the advisory must be invoked through \`<runner> --kill-after=<grace> <secs>\` (got: $OUT)" ;;
   esac
   case "$OUT" in
     *"hanging stub FINISHED"*)
@@ -1197,10 +1215,15 @@ for tool in bash awk tr basename dirname sleep; do
 done
 cp "$BIN/gh" "$NOBIN/gh"
 chmod +x "$NOBIN/gh"
-if [ "$(PATH="$NOBIN" command -v timeout 2>/dev/null)" != "" ]; then
-  bad "advisory bound: the no-timeout PATH still resolves \`timeout\` (the case would be vacuous)"
-  nobin_ok=0
-fi
+# Vacuity guard over BOTH candidate names: the script resolves `timeout` THEN
+# `gtimeout` (#3650 review R2), so leaving `gtimeout` reachable would let it
+# escape the constructed PATH and take the BOUNDED path instead.
+for cand in timeout gtimeout; do
+  if [ "$(PATH="$NOBIN" command -v "$cand" 2>/dev/null)" != "" ]; then
+    bad "advisory bound: the no-timeout PATH still resolves \`$cand\` (the case would be vacuous)"
+    nobin_ok=0
+  fi
+done
 
 MARK_B="$T/hang-marker-unbounded"
 rm -f "$MARK_B"
@@ -1218,9 +1241,9 @@ if [ "$nobin_ok" -eq 1 ] && flow_copy adv-hang-no-timeout "$(hang_stub "$MARK_B"
     ok "advisory bound: with no \`timeout\`, the advisory is NOT executed at all"
   fi
   case "$OUT" in
-    *"PREMERGE: ADVISORY"*"NOT RUN"*"timeout"*)
-      ok "advisory bound: the missing bound is NAMED on an ADVISORY line" ;;
-    *) bad "advisory bound: the unavailable bound must be reported (got: $OUT)" ;;
+    *"PREMERGE: ADVISORY"*"NOT RUN"*"gtimeout"*)
+      ok "advisory bound: the missing bound is NAMED on an ADVISORY line, naming BOTH candidates" ;;
+    *) bad "advisory bound: the unavailable bound must be reported, naming what the code accepts (got: $OUT)" ;;
   esac
   case "$OUT" in
     *"hanging stub REACHED"*)
@@ -1235,6 +1258,175 @@ if [ "$nobin_ok" -eq 1 ] && flow_copy adv-hang-no-timeout "$(hang_stub "$MARK_B"
     *"PREMERGE: SCOPE"*"#3650"*) ok "advisory bound: the SCOPE lines survive an unavailable bound" ;;
     *) bad "advisory bound: the SCOPE lines must survive (got: $OUT)" ;;
   esac
+fi
+
+# Path 2b — a `gtimeout`-ONLY PATH: the macOS-with-coreutils shape (#3650 review
+# R2). GNU coreutils installs its timeout as `gtimeout`, and the code used to
+# resolve `timeout` alone — so on the EXACT configuration the skip diagnostic
+# recommends, the advisory still skipped. The fleet is macOS, so this is a
+# supported platform and not a hypothetical. (Same reasoning, same shape, as
+# scripts/tests/test_bootstrap_agent_machine.sh's gtimeout-only credential case.)
+#
+# `timeout` cannot be hidden by shadowing, so PATH is rebuilt from an explicit
+# symlink set — the recording shim installed under the name `gtimeout` and NO
+# plain `timeout` anywhere.
+GTD="$T/gtimeout-only-bin"
+mkdir -p "$GTD"
+gtd_ok=1
+for tool in bash awk tr basename dirname sleep; do
+  tp=$(command -v "$tool" 2>/dev/null) || tp=""
+  if [ -z "$tp" ]; then
+    bad "advisory bound: cannot build the gtimeout-only PATH — \`$tool\` is not on PATH"
+    gtd_ok=0
+    continue
+  fi
+  ln -sf "$tp" "$GTD/$tool"
+done
+cp "$BIN/gh" "$GTD/gh"
+chmod +x "$GTD/gh"
+cp "$SHIMD/timeout" "$GTD/gtimeout"
+chmod +x "$GTD/gtimeout"
+if [ "$(PATH="$GTD" command -v timeout 2>/dev/null)" != "" ]; then
+  bad "advisory bound: the gtimeout-only PATH still resolves plain \`timeout\` (the case would be vacuous)"
+  gtd_ok=0
+fi
+MARK_G="$T/hang-marker-gtimeout"
+rm -f "$MARK_G"
+if [ "$gtd_ok" -eq 1 ] && flow_copy adv-hang-gtimeout "$(hang_stub "$MARK_G")"; then
+  OUT=$(PATH="$GTD" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    bad "advisory bound: a gtimeout-only host must not change the exit code (exit $RC, wanted 0)"
+  else
+    ok "advisory bound: a gtimeout-only (macOS-shaped) host still reaches exit 0"
+  fi
+  if [ -f "$MARK_G" ]; then
+    ok "advisory bound: on a gtimeout-only host the advisory IS RUN (bounded), not skipped (#3650 R2)"
+  else
+    bad "advisory bound: the advisory was SKIPPED on a gtimeout-only host — the exact configuration the diagnostic recommends (#3650 R2)"
+  fi
+  case "$OUT" in
+    *"bound-shim requested 60 grace 5"*)
+      ok "advisory bound: \`gtimeout\` is invoked with the same bound and kill grace" ;;
+    *) bad "advisory bound: the advisory must be bounded through \`gtimeout\` (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"NOT RUN"*)
+      bad "advisory bound: a gtimeout-only host reported the bound UNAVAILABLE (got: $OUT)" ;;
+    *) ok "advisory bound: no unavailable-bound report is printed when \`gtimeout\` exists" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory bound: the verdict survives the gtimeout-only path" ;;
+    *) bad "advisory bound: the verdict must be unchanged (got: $OUT)" ;;
+  esac
+fi
+
+# Path 3 — a child that IGNORES SIGTERM (#3650 review R1). `timeout <secs>` sends
+# SIGTERM and then WAITS, so a stub containing `trap '' TERM` outlives the bound
+# entirely and the merge-critical path stays blocked: the advertised bound bounds
+# nothing. `--kill-after=<grace>` follows with SIGKILL, which cannot be trapped.
+#
+# THE DELEGATING SHIM IS THE ONLY HONEST WAY TO TEST THIS. A hand-written shim
+# would have to REIMPLEMENT the escalation, and would then be asserting its own
+# signal handling rather than the script's invocation; so this shim delegates to
+# the REAL runner with short values and reflects FAITHFULLY whether the script
+# passed `--kill-after`. A regression that drops the flag therefore gets a real
+# SIGTERM-only bound and is caught by the observable difference measured on this
+# repo's own boxes: with the flag, rc=137 and the stub never reaches its FINISHED
+# line; without it, rc=124 and FINISHED is printed after the stub's own sleep.
+# Both assertions below are OBSERVABLE OUTPUT, never elapsed time — a wall-clock
+# threshold in a correctness test is the #2642 defect class.
+#
+# THE CASE BOUNDS ITSELF: the stub sleeps 20s, not forever, so even a total
+# regression of both the flag and the resolution ends the case rather than
+# hanging the suite, and the sleep's stdout goes to /dev/null so a surviving
+# grandchild cannot hold the command-substitution pipe open (the way a bound can
+# "work" and the caller hang anyway).
+term_ignoring_stub() {
+  cat <<STUB
+#!/usr/bin/env bash
+trap '' TERM
+printf 'BASE-STALENESS: TERM-ignoring stub REACHED\\n'
+: >"$1"
+sleep 20 >/dev/null 2>&1
+printf 'BASE-STALENESS: TERM-ignoring stub FINISHED - the bound was ESCAPED\\n'
+exit 0
+STUB
+}
+
+REAL_TO=""
+for cand in timeout gtimeout; do
+  cp=$(command -v "$cand" 2>/dev/null) || cp=""
+  [ -n "$cp" ] || continue
+  if "$cp" --kill-after=1 1 true >/dev/null 2>&1; then REAL_TO="$cp"; break; fi
+done
+if [ -z "$REAL_TO" ]; then
+  echo "skip - advisory bound: the TERM-ignoring case needs a real timeout/gtimeout supporting --kill-after"
+else
+  KILLD="$T/killafter-shim-bin"
+  mkdir -p "$KILLD"
+  cat >"$KILLD/timeout" <<SHIM
+#!/usr/bin/env bash
+# Delegates to the REAL runner with short values, reflecting faithfully whether
+# the caller asked for a kill grace. Never reimplements the escalation.
+grace=none
+case "\$1" in
+  --kill-after=*) grace="\${1#--kill-after=}"; shift ;;
+esac
+shift   # the bound the script asked for; a short one is substituted below
+printf 'BASE-STALENESS: killafter-shim grace %s\\n' "\$grace"
+# Answer the script's capability probe (\`--kill-after=1 1 true\`) affirmatively,
+# or it concludes there is no supported runner and skips the advisory.
+if [ "\$#" -eq 1 ] && [ "\$1" = true ]; then exit 0; fi
+if [ "\$grace" = none ]; then
+  exec "$REAL_TO" 2 "\$@"
+fi
+exec "$REAL_TO" --kill-after=1 2 "\$@"
+SHIM
+  chmod +x "$KILLD/timeout"
+  MARK_C="$T/hang-marker-term-ignoring"
+  rm -f "$MARK_C"
+  if flow_copy adv-term-ignoring "$(term_ignoring_stub "$MARK_C")"; then
+    OUT=$(PATH="$KILLD:$BIN:$PATH" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+    RC=$?
+    if [ "$RC" -ne 0 ]; then
+      bad "advisory bound: a TERM-ignoring advisory must not change the exit code (exit $RC, wanted 0)"
+    else
+      ok "advisory bound: a TERM-IGNORING advisory still reaches exit 0"
+    fi
+    if [ -f "$MARK_C" ]; then
+      ok "advisory bound: the TERM-ignoring stub really executed (the case is not vacuous)"
+    else
+      bad "advisory bound: the TERM-ignoring stub never ran — the case proves nothing"
+    fi
+    case "$OUT" in
+      *"killafter-shim grace 5"*)
+        ok "advisory bound: the 5s kill grace reaches the runner on the TERM-ignoring path" ;;
+      *"killafter-shim grace none"*)
+        bad "advisory bound: no --kill-after was passed — a TERM-ignoring child escapes the bound (#3650 R1)" ;;
+      *) bad "advisory bound: the runner was not invoked as expected (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"TERM-ignoring stub FINISHED"*)
+        bad "advisory bound: the TERM-ignoring advisory ran to COMPLETION — the bound was escaped" ;;
+      *) ok "advisory bound: the TERM-ignoring advisory was KILLED, not awaited" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY"*"exit 137"*)
+        ok "advisory bound: the SIGKILL escalation is REPORTED (exit 137), and is not fatal" ;;
+      *"exit 124"*)
+        bad "advisory bound: exit 124 means TERM-only — the child was awaited, not killed (got: $OUT)" ;;
+      *) bad "advisory bound: a killed advisory must be reported with its exit code (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK $CERTIFIED"*) ok "advisory bound: the verdict survives a TERM-ignoring advisory" ;;
+      *) bad "advisory bound: the verdict must be unchanged (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: SCOPE"*"#3650"*) ok "advisory bound: the SCOPE lines survive a TERM-ignoring advisory" ;;
+      *) bad "advisory bound: the SCOPE lines must survive (got: $OUT)" ;;
+    esac
+  fi
 fi
 
 # A REFUSAL is unaffected: the advisory runs only on the success path, so a
