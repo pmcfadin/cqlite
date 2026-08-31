@@ -41,9 +41,12 @@
 //! valve. Its ROW budget is [`STREAMING_CHANNEL_CAPACITY`], adaptively reduced
 //! under concurrent merges (see [`egress_budget`]); since issue #2820 the channel
 //! carries BATCHES, so that budget is converted to a message capacity and the
-//! resident-rows worst case per source is `egress_batch::max_inflight_rows` =
-//! `4 × rows_cap` (1024 at the default, 32 at the throttled floor — bounded BY
-//! the row capacity, plus a byte budget) — see [`egress_batch`].
+//! TOTAL IN-FLIGHT rows worst case per source is
+//! `egress_batch::max_inflight_rows` = `4 × rows_cap` (1024 at the default, 32
+//! at the throttled floor — bounded BY the row capacity, plus a byte budget) —
+//! see [`egress_batch`]. That is the MEMORY bound; the strictly smaller
+//! CHANNEL-RESIDENT figure `rows_resident_in_channel` = `2 × rows_cap` (512) is
+//! what the #2419 depth gauge can reach, and the two must not be conflated.
 //!
 //! The producer thread streams its source via
 //! [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),

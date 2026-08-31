@@ -64,7 +64,9 @@
 //! range instead of being a constant, and the 4× multiplier over the pre-change
 //! flat capacity is uniform at EVERY setting.
 //!
-//! [`max_inflight_rows`] is the resulting explicit rows-resident bound, the
+//! [`max_inflight_rows`] is the resulting explicit TOTAL IN-FLIGHT bound (never
+//! called "resident": that word is reserved for the strictly smaller
+//! channel-resident figure the gauge can reach), the
 //! sibling of `scan_stream_windowed::MAX_INFLIGHT_BATCH_ROWS` and derived the
 //! same way (channel-resident + consumer-held + producer-blocked-in-send).
 //!
