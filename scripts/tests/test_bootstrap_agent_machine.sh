@@ -179,7 +179,26 @@ if [ -z "$_v" ]; then
     *) _v="HOME='$HOME' is outside the suite sandbox ($PIN_SANDBOX_ROOT)" ;;
   esac
 fi
-[ -z "$_v" ] || printf 'invocation: %s\n  unsandboxed input: %s\n' "$*" "$_v" >>"$PIN_SHARED_VIOLATIONS"
+if [ -n "$_v" ]; then
+  printf 'invocation: %s\n  unsandboxed input: %s\n' "$*" "$_v" >>"$PIN_SHARED_VIOLATIONS"
+  # AND REFUSE TO RUN (roborev job 321, Medium). Recording a violation and then executing
+  # anyway lets the damage land BEFORE the suite reports it — and the damage is not
+  # hypothetical: an unsandboxed run on this box left /usr/local/cargo/config.toml root-owned
+  # 0600 and broke cargo for every other lane, three times (#3673). A guard that observes but
+  # does not stop is a log, not a guard. The violation is still recorded, so case 14 reports
+  # it exactly as before; what changes is that bootstrap never runs.
+  printf 'FATAL: refusing to run bootstrap with unsandboxed input: %s\n' "$_v" >&2
+  # IF THIS FIRES ON A SUDO INVOCATION, THE CAUSE IS ALMOST CERTAINLY env_reset, NOT A REAL
+  # UNSANDBOXED INPUT. sudo repopulates the environment from /etc/environment, so
+  # PIN_SANDBOX_ROOT and PIN_SHARED_VIOLATIONS — both exported by the suite — do NOT survive
+  # the boundary, and the guard then fail-closes on an unusable sandbox root while the actual
+  # HOME/CARGO_HOME it was handed are perfectly sandboxed. Every `sudo -n env` call site
+  # therefore re-passes BOTH vars explicitly. Measured when this refusal was added: 6 root
+  # cases broke at once, and the same env_reset drop had ALSO been silently discarding every
+  # violation record from a sudo invocation (`>>""`), so that half of the guard had never
+  # worked across the boundary at all.
+  exit 97
+fi
 bash "$@"
 exit $?
 PINBS
@@ -3525,7 +3544,7 @@ else
   pin_root_sandbox="$tmp/pin-root-sandbox"; mkdir -p "$pin_root_sandbox/.cargo"
   pin_seam_probe="$tmp/pin-seam-root-target"; rm -f "$pin_seam_probe"
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    out_ak=$(sudo -n env CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_seam_probe" \
+    out_ak=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_seam_probe" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe --yes 2>&1)
@@ -3559,7 +3578,7 @@ else
   #      invoker sudo names but that does not resolve is UNMEASURED, never a silent fall
   #      back to answering about root.
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    out_am=$(sudo -n env SUDO_USER=cqlite-no-such-account-3414 \
+    out_am=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_USER=cqlite-no-such-account-3414 \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
@@ -3571,7 +3590,7 @@ else
       bad "gate-pin: an unresolvable invoker fell back to probing the wrong user"
       printf '%s\n' "$out_am" | grep -i 'gate-pin' | head -2
     fi
-    out_an=$(sudo -n env SUDO_USER="$(id -un)" \
+    out_an=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_USER="$(id -un)" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
@@ -3598,7 +3617,7 @@ else
     pin_liar="$tmp/pin-liar-bin"; mkdir -p "$pin_liar"
     printf '#!/usr/bin/env bash\necho 1000\n' >"$pin_liar/id"; chmod +x "$pin_liar/id"
     pin_liar_target="$tmp/pin-liar-target"; rm -f "$pin_liar_target"
-    out_at=$(sudo -n env PATH="$pin_liar:$PATH" \
+    out_at=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" PATH="$pin_liar:$PATH" \
       CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$pin_liar_target" \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
@@ -3616,7 +3635,7 @@ else
     #      accepts stale metadata — `SUDO_UID=1000 SUDO_USER=root` would probe root and
     #      could report VERIFIED while the agent account differs, which is the
     #      wrong-subject defect the retarget exists to fix, wearing the retarget's clothes.
-    out_au=$(sudo -n env SUDO_UID=1000 SUDO_USER=root \
+    out_au=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_UID=1000 SUDO_USER=root \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)
@@ -3630,7 +3649,7 @@ else
     fi
 
     # 11av. ...and root invoking sudo (SUDO_UID=0) tells us nothing about a gate's account.
-    out_av=$(sudo -n env SUDO_UID=0 SUDO_USER=root \
+    out_av=$(sudo -n env PIN_SANDBOX_ROOT="$PIN_SANDBOX_ROOT" PIN_SHARED_VIOLATIONS="$PIN_SHARED_VIOLATIONS" SUDO_UID=0 SUDO_USER=root \
       HOME="$pin_root_sandbox" CARGO_HOME="$pin_root_sandbox/.cargo" \
       timeout -s KILL 120 "$PIN_BS" "$pinroot/scripts/bootstrap-agent-machine.sh" \
         --skip-smoke --skip-push-probe 2>&1)

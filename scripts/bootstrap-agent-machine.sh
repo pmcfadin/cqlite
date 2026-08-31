@@ -2257,17 +2257,33 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # pin_create_mode_ok stays as verification: setting a umask is an instruction, and this
   # section's whole rule is that an instruction is not a measurement.
   pin_create_env_file() {
+    # THE CREATE AND THE WRITE ARE SEPARATE STEPS SO THEIR FAILURES ARE DISTINGUISHABLE
+    # (roborev job 321, Medium). Collapsing them and then asking `[ -e "$FILE" ]` cannot tell
+    # SOMEONE ELSE'S file from OUR OWN partially-written one — both exist — and the two
+    # dispositions are opposite: leave someone else's alone, roll our own back. Getting it
+    # wrong falsely blamed a concurrent writer AND left a truncated assignment that a later
+    # run would read as an existing pin and decline to repair.
+    #   exit 4 = exclusive create refused, i.e. the file already existed  -> LOST RACE
+    #   exit 5 = we created it and the write then failed                  -> OUR partial file
+    local pin_child_rc
     ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} bash -c '
       umask 022
-      set -C
-      printf "%s\n%s\n" "$1" "$2" > "$3"
-    ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null || {
-      # O_EXCL refuses when the file APPEARED between the caller's `[ ! -e ]` and here, which
-      # is a LOST RACE and not a failure — distinguished from a genuine write error so the
-      # caller can refresh its cache instead of reporting a broken box.
-      [ -e "$PIN_ENV_FILE" ] && { pin_create_rc=3; return 3; }
+      f="$3"
+      ( set -C; : > "$f" ) 2>/dev/null || exit 4
+      printf "%s\n%s\n" "$1" "$2" > "$f" 2>/dev/null || exit 5
+    ' _ "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" "$PIN_ENV_FILE" 2>/dev/null
+    pin_child_rc=$?
+    if [ "$pin_child_rc" = 4 ]; then pin_create_rc=3; return 3; fi
+    if [ "$pin_child_rc" != 0 ]; then
+      # OUR file, incomplete. Roll it back for the same reason pin_create_mode_ok does: a
+      # reported failure must match the filesystem, or the next run inherits it as a pin.
+      if ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} rm -f "$PIN_ENV_FILE" 2>/dev/null && [ ! -e "$PIN_ENV_FILE" ]; then
+        PIN_CREATE_RESIDUE="the write failed after the file was created (rc $pin_child_rc); the incomplete file was REMOVED"
+      else
+        PIN_CREATE_RESIDUE="the write failed after the file was created (rc $pin_child_rc) AND the incomplete file could not be removed — inspect $PIN_ENV_FILE by hand"
+      fi
       pin_create_rc=1; return 1
-    }
+    fi
     pin_create_mode_ok "$PIN_ENV_FILE"; pin_create_rc=$?; return "$pin_create_rc"
   }
 
