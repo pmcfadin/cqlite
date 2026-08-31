@@ -168,7 +168,7 @@ _slurp() { cat -- "$1" 2>/dev/null; }
 # included — is of that immutable copy. `cp` is a single open of the original, and nothing else
 # can write our snapshot.
 SNAP_DIR=""
-# shellcheck disable=SC2317  # runs via the EXIT trap
+# shellcheck disable=SC2317,SC2329  # invoked indirectly, by the EXIT trap below
 _cleanup_snaps() { [ -n "$SNAP_DIR" ] && rm -rf "$SNAP_DIR" 2>/dev/null; return 0; }
 trap _cleanup_snaps EXIT
 # _ensure_snap_dir — create the private snapshot directory, IN THE CALLING SHELL.
@@ -207,7 +207,7 @@ _snap_of() {
 # values with _field.
 BEAT_ERR=""
 _beat_valid() {
-  local t="$1" n_start n_end n_rid n_seq n_ep open_ln close_ln pc iv ep sq l ln
+ local t="$1" n_start n_end open_ln close_ln pc iv ep sq ln
   n_start=$(printf '%s\n' "$t" | grep -cxF '==== AGENT-GATE HEARTBEAT ====')
   n_end=$(printf '%s\n' "$t" | grep -cxF '==== END AGENT-GATE HEARTBEAT ====')
   if [ "$n_start" -ne 1 ] || [ "$n_end" -ne 1 ]; then
@@ -325,6 +325,7 @@ _beat_valid() {
 # slurped string: `$( )` silently strips NULs, so the evidence is gone by the time the text
 # reaches a variable. A NUL is the fingerprint of the sparse hole an interleaved O_TRUNC
 # write leaves behind (see the note above); no legitimate gate artifact contains one.
+# shellcheck disable=SC2094  # reads $1 twice (redirect + cmp arg) and writes it never
 _has_nul() {
   LC_ALL=C tr -d '\000' < "$1" 2>/dev/null | cmp -s - "$1" 2>/dev/null && return 1
   return 0
@@ -659,8 +660,6 @@ RESULT_TOKEN="${RESULT_VALUE%% *}"
 # summary already falls through to the heartbeat, which is the conservative direction, and
 # a block truncated before its `RESULT:` line has no result to misread — it lands on
 # `no-result-line` above.
-_has_line() { printf '%s\n' "$SUM_TEXT" | grep -qE "$1"; }
-_START_RE='^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
 _END_RE='^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
 case "$RESULT_TOKEN" in
   PASS|FAIL|PARTIAL|ERROR|REFUSED)

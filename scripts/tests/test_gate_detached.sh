@@ -2204,6 +2204,53 @@ else
   fi
 fi
 
+# --- round-48 class audit: the two-valued predicate at the base of the pre-check -------------------
+# _foreign_reservation opened with `[ -L $lk ] || [ -e $lk ] || { printf free; return 0; }`. Both
+# predicates are two-valued, so "no such path" and "not permitted to look" both come back FALSE and
+# the branch answered `free` -- the PERMISSIVE value -- for BOTH. That licenses this launch to take a
+# path a LIVE peer may hold. Tested by EXTRACTING the function rather than driving the whole launcher,
+# because (as the 4b.155 retraction established) the launcher validates its directories before it ever
+# reaches the pre-check, so the blind case is not reachable from the CLI -- the same reason the
+# rollback is not. A unit test reaches it; a launcher-level test would pass vacuously.
+_fr_src=$(sed -n '/^_foreign_reservation() {/,/^}$/p' "$LAUNCHER")
+if [ -z "$_fr_src" ] || ! printf '%s' "$_fr_src" | grep -q 'launch-lock'; then
+  bad "4b.160 _foreign_reservation could be extracted for unit test" "extraction produced nothing usable"
+else
+  # POSITIVE CONTROL FIRST: a searchable directory with no lock must still answer `free`, or the case
+  # below passes because the function answers `unknown` for everything and the launcher is broken.
+  _frd="$TMP/fr-free"; mkdir -p "$_frd"
+  _fr1=$(eval "$_fr_src"; _foreign_reservation "$_frd/s" 2>/dev/null)
+  if [ "$_fr1" = free ]; then
+    ok "4b.160 control: a searchable dir with no lock answers 'free'"
+  else
+    bad "4b.160 control: a searchable dir with no lock answers 'free'" "got '${_fr1:-empty}'"
+  fi
+  # THE DEFECT: the containing directory cannot be searched, so absence is UNVERIFIABLE.
+  _frb="$TMP/fr-blind"; mkdir -p "$_frb"; chmod 000 "$_frb"
+  _fr2=$(eval "$_fr_src"; _foreign_reservation "$_frb/s" 2>/dev/null)
+  chmod 700 "$_frb"
+  if [ "$_fr2" = unknown ]; then
+    ok "4b.161 an UNVERIFIABLE absence answers 'unknown', never 'free'"
+  else
+    bad "4b.161 an unverifiable absence answers 'unknown', never 'free'" \
+        "got '${_fr2:-empty}' — 'free' hands a live peer's path to this launch"
+  fi
+fi
+
+# Class 1, and it was DUPLICATED: `set -- $_state` word-split and glob-expanded every
+# /proc/<pid>/stat field in BOTH gate-detached.sh and scripts/lib/gate-heartbeat.sh. shellcheck found
+# the copy; reading the file did not. Pinned in both, since fixing one and leaving its mirror is a
+# shape this issue has already produced twice.
+_split_hits=0
+for _f in "$LAUNCHER" "$REPO_ROOT/scripts/lib/gate-heartbeat.sh"; do
+  grep -qE '^[[:space:]]*set -- \$' "$_f" && _split_hits=$((_split_hits+1))
+done
+if [ "$_split_hits" = 0 ]; then
+  ok "4b.162 neither copy of _proc_is_zombie word-splits /proc stat (class 1, both files)"
+else
+  bad "4b.162 neither copy word-splits /proc stat" "$_split_hits file(s) still use 'set -- \$...'"
+fi
+
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="
 [ "$fail" -eq 0 ] || exit 1
