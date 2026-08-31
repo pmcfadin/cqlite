@@ -3077,8 +3077,18 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   worktree add` gives no collision signal, and the `/data/lanes/lane-<N>` convention *guarantees* two
   sessions on one issue pick the same directory; and the board said **`Ready`** throughout, so it was
   actively inviting a third claimant.
-  So: **`scripts/flow/lane-lock.sh acquire <N>` before the first write to a lane directory**, and
-  release at finalize. Its identity is the FULL PROCESS identity — machine, actor, pid, boot-id and
+  So: **`scripts/flow/lane-lock.sh acquire <N>` before the first write to a lane directory, RUN FROM
+  INSIDE THAT DIRECTORY** (`( cd "$wt" && bash scripts/flow/lane-lock.sh acquire <N> )` — the cwd is
+  what makes the durable session process findable; see the identity note below), and
+  `release <N>` at finalize. **Neither needs a `--lane-dir`, and no reader does either**: the lock
+  files live in `$LANE_ROOT/.lane-locks/lane-<N>.*`, OUTSIDE any worktree, so the record is found by
+  ISSUE alone. That is what makes `release`, the AC5 probe and the collision scan agree with the
+  `acquire` — they used to re-derive `${LANE_ROOT}/lane-<N>` while acquires passed an explicit
+  `--lane-dir`, so a `release 9600` printed `RELEASED (already free) … record=absent` rc=0 while the
+  record sat in `.claude/worktrees/issue-9600-slug/`: **a finalize reporting a successful release
+  having released nothing**. Being outside the worktree also means `git worktree remove` cannot
+  destroy a live lock, and the lock can never appear in the untracked set `agent-gate.sh`'s
+  `tree-integrity` captures. Its identity is the FULL PROCESS identity — machine, actor, pid, boot-id and
   `/proc/<pid>/stat` start-ticks — **NOT `machine+actor`, and that distinction IS the fix**:
   `claim.sh`'s re-entrancy is keyed on machine+actor, and two Claude sessions on one box are both
   `machine=<box> actor=flow`, so a machine+actor lock grants the second session a re-entrant win on

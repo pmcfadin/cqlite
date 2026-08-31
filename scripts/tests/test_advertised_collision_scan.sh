@@ -405,6 +405,70 @@ $out13ok"
 fi
 
 # ===========================================================================
+echo "TEST 14: the page-truncation notice counts the RAW page, not the filtered rows"
+# ===========================================================================
+# NO CASE COVERED THIS PATH AT ALL. The guard compared the ISSUE-NUMBERED subset against
+# the 100-row limit, so a Ready column of exactly 100 containing 3 drafts counted 97, no
+# notice fired, and the run printed `measured=yes` for a page that may have been
+# TRUNCATED — a fail-OPEN, and a truncated Ready column can only ever HIDE rows.
+# The fake gh emits one line per row exactly as the real `--jq` does, with a draft as the
+# literal `null`, so the two counts differ by construction here.
+mk_ready_page() {   # <dir> <numeric-rows> <draft-rows>
+  local dir="$1" nums="$2" drafts="$3" i=0
+  mkdir -p "$dir"
+  {
+    printf '#!/usr/bin/env bash\n'
+    i=0
+    while [ "$i" -lt "$nums" ]; do printf 'printf "%%s\\n" %s\n' "$((7000 + i))"; i=$((i + 1)); done
+    i=0
+    while [ "$i" -lt "$drafts" ]; do printf 'printf "null\\n"\n'; i=$((i + 1)); done
+    printf 'exit 0\n'
+  } >"$dir/gh"
+  chmod +x "$dir/gh"
+}
+
+# (a) 97 issues + 3 drafts = a 100-row page AT the limit. The old guard saw 97.
+mk_ready_page "$T/gh-page-100" 97 3
+out14a=$(run_scan "$T/gh-page-100" --json); rc14a=$?
+out14at=$(run_scan "$T/gh-page-100"); rc14at=$?
+if [ "$rc14a" -eq 1 ] && [ "$rc14at" -eq 1 ] \
+   && printf '%s\n' "$out14a" | grep -q '"board_page_at_limit":true' \
+   && printf '%s\n' "$out14a" | grep -q '"board_page_rows":100' \
+   && printf '%s\n' "$out14a" | grep -q '"ready":97' \
+   && printf '%s\n' "$out14at" | grep -q 'notice=board-page-at-limit'; then
+  ok "(a) a 100-row page whose limit is reached partly by DRAFTS is reported at-limit (page-rows=100, ready=97) in both output modes"
+else
+  bad "(a) expected board_page_at_limit=true with board_page_rows=100 and ready=97; got rc=$rc14a/$rc14at
+$out14a
+$out14at"
+fi
+
+# (b) NEGATIVE CONTROL, so the guard is not simply always-on: 96 + 3 = 99 rows.
+mk_ready_page "$T/gh-page-99" 96 3
+out14b=$(run_scan "$T/gh-page-99" --json); rc14b=$?
+out14bt=$(run_scan "$T/gh-page-99"); rc14bt=$?
+if [ "$rc14b" -eq 1 ] \
+   && printf '%s\n' "$out14b" | grep -q '"board_page_at_limit":false' \
+   && printf '%s\n' "$out14b" | grep -q '"board_page_rows":99' \
+   && ! printf '%s\n' "$out14bt" | grep -q 'notice=board-page-at-limit'; then
+  ok "(b) control: a 99-row page is NOT reported at-limit and prints no notice — the guard is measuring, not asserting"
+else
+  bad "(b) expected board_page_at_limit=false with board_page_rows=99 and no notice; got rc=$rc14b
+$out14b
+$out14bt"
+fi
+
+# (c) A DRAFT ROW IS NOT A CANDIDATE. The `null` rows must never be read as issue numbers
+# — otherwise the fix would trade a fail-open guard for a fabricated row.
+if ! printf '%s\n' "$out14a" | grep -q '"issue":null' \
+   && ! printf '%s\n' "$out14a" | grep -q '"issue":"null"'; then
+  ok "(c) draft rows count toward the page length but are never emitted as candidate issues"
+else
+  bad "(c) a draft row leaked into the candidate set:
+$out14a"
+fi
+
+# ===========================================================================
 echo
 echo "==== ADVERTISED-COLLISION-SCAN TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

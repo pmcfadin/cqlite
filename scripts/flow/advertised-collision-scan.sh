@@ -253,17 +253,29 @@ EOF
 # FACT (1): board Status=Ready, SERVER-SIDE FILTERED (see the header).
 READY_ISSUES=""
 READY_COUNT=0
+READY_PAGE_ROWS=0     # RAW rows the page returned, drafts included (see below)
 scan_board() {
   local raw line
   command -v gh >/dev/null 2>&1 || return 1
+  # THE jq DELIBERATELY DOES NOT FILTER (#3436 FIX 10). The truncation guard has to
+  # compare the RAW PAGE LENGTH against the limit, and a jq `select(.content.number !=
+  # null)` hid draft rows from the count: a Ready column of exactly 100 containing 3
+  # drafts yielded 97, no `notice=board-page-at-limit` fired, and the run printed
+  # `measured=yes` for a page that may have been TRUNCATED — and a truncated Ready column
+  # can only ever HIDE rows. So every row is emitted (a draft as the literal `null`),
+  # READY_PAGE_ROWS counts them all, and the numeric filter happens below in bash, where
+  # it belongs. One API call, no second page read.
   if ! raw="$(gh project item-list "$BOARD_NUMBER" --owner "$BOARD_OWNER" \
                  --query 'status:Ready' --format json -L "$BOARD_LIMIT" \
-                 --jq '.items[]|select(.content.number != null)|.content.number' 2>/dev/null)"; then
+                 --jq '.items[]|(.content.number // "null")' 2>/dev/null)"; then
     return 1
   fi
   while IFS= read -r line; do
     line="$(printf '%s' "$line" | tr -d ' \r')"
     [ -n "$line" ] || continue
+    READY_PAGE_ROWS=$((READY_PAGE_ROWS + 1))
+    # A row that is not an issue number (a draft, or anything else the board holds) still
+    # COUNTS toward the page length; it just is not a candidate.
     case "$line" in *[!0-9]*) continue ;; esac
     READY_ISSUES="${READY_ISSUES}${line}
 "
@@ -346,12 +358,14 @@ if ! scan_board; then
 fi
 
 BOARD_AT_LIMIT=false
-if [ "$READY_COUNT" -ge "$BOARD_LIMIT" ]; then
-  # A page returned exactly at the limit is the one shape that could still be
-  # truncated, and a truncated Ready column can only ever HIDE rows.
+if [ "$READY_PAGE_ROWS" -ge "$BOARD_LIMIT" ]; then
+  # A page returned exactly at the limit is the one shape that could still be truncated,
+  # and a truncated Ready column can only ever HIDE rows. THE QUANTITY IS THE RAW PAGE
+  # LENGTH, not the issue-numbered subset: filtering first made the guard fail OPEN on any
+  # page whose limit was reached partly by drafts (#3436 FIX 10).
   BOARD_AT_LIMIT=true
   [ "$AS_JSON" -eq 1 ] || \
-    say "SCAN: notice=board-page-at-limit ready=$READY_COUNT limit=$BOARD_LIMIT (the Ready column may be truncated; rows below are still true, absences are not)"
+    say "SCAN: notice=board-page-at-limit page-rows=$READY_PAGE_ROWS ready=$READY_COUNT limit=$BOARD_LIMIT (the Ready column may be truncated; rows below are still true, absences are not)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -388,8 +402,8 @@ if [ "$AS_JSON" -eq 1 ]; then
   # board_page_at_limit is the literal `true`/`false` — those stay unquoted NUMBERS and
   # BOOLEANS. `remote` is CLAIM_REMOTE, i.e. caller-supplied, so it is escaped like every
   # other string.
-  printf '{"summary":"advertised-collision","result":%s,"rows":%s,"ready":%s,"branch_issues":%s,"remote":%s,"board_page_at_limit":%s,"measured":"yes"}\n' \
-    "$(json_str "$VERDICT")" "$ROWS" "$READY_COUNT" "$BRANCH_ISSUE_COUNT" "$(json_str "$REMOTE")" "$BOARD_AT_LIMIT"
+  printf '{"summary":"advertised-collision","result":%s,"rows":%s,"ready":%s,"board_page_rows":%s,"branch_issues":%s,"remote":%s,"board_page_at_limit":%s,"measured":"yes"}\n' \
+    "$(json_str "$VERDICT")" "$ROWS" "$READY_COUNT" "$READY_PAGE_ROWS" "$BRANCH_ISSUE_COUNT" "$(json_str "$REMOTE")" "$BOARD_AT_LIMIT"
 else
   say "SCAN: advertised-collision rows=$ROWS ready=$READY_COUNT branch-issues=$BRANCH_ISSUE_COUNT remote=$REMOTE measured=yes"
   if [ "$ROWS" -gt 0 ]; then

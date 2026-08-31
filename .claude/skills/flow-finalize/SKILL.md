@@ -153,11 +153,18 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    open-PR guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize):
    ```bash
    bash scripts/flow/claim.sh release <N>   # deletes refs/claims/issue-<N> → CLAIM: RELEASED
-   # ...and drop the MACHINE-LOCAL lane lock (#3436). Removing the worktree already
-   # deletes the lock FILE, so this is for the audit line rather than correctness —
-   # run it BEFORE the worktree removal above if you want the release recorded. A lock
-   # left behind by a killed session is not a leak either: its holder reads DEAD-* and
-   # the next acquire reclaims it automatically.
+   # ...and drop the MACHINE-LOCAL lane lock (#3436). THIS IS NOW REQUIRED, not cosmetic:
+   # the lock files live in a lock root OUTSIDE the worktree (`$LANE_ROOT/.lane-locks`),
+   # so removing the worktree does NOT delete the record. An earlier version of this note
+   # said it did, which made a real release read as optional.
+   # It needs NO --lane-dir and works from anywhere: the record is keyed by ISSUE, so a
+   # release cannot miss a lane that was locked under a non-default path (#3436 FIX 8 --
+   # measured before the lock root existed: `release 9600` printed
+   # `RELEASED (already free) ... record=absent` rc=0 while the record sat in
+   # `.claude/worktrees/issue-9600-slug/`, i.e. a finalize reported a successful release
+   # having released nothing).
+   # A lock left behind by a killed session is still not a leak: its holder reads DEAD-*
+   # and the next acquire reclaims it automatically.
    bash scripts/flow/lane-lock.sh release <N> || true
    # confirm gone: `claim.sh status <N>` prints `CLAIM: STATUS none`.
    ```
