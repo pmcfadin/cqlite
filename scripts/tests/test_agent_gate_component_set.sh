@@ -654,12 +654,35 @@ if ! mkfifo "$fifo_path" 2>/dev/null; then
   bad "3544-config-include-blocks: could not create a FIFO under \$tmp, so this case CANNOT be measured (fail-closed: not reported as a pass)"
 elif [ "$(field KIND "$fifo_ctl")" != ok ]; then
   bad "3544-config-include-blocks: the POSITIVE CONTROL (same fixture, no include) did not reach KIND ok (got '$(field KIND "$fifo_ctl")') — the case cannot discriminate"
+elif [ -z "$fifo_fx" ] || [ ! -d "$fifo_fx" ] || [ ! -d "$fifo_fx/.git" ] \
+     || case "$fifo_fx" in "$tmp"/?*) false ;; *) true ;; esac; then
+  # BLAST-RADIUS GUARD, AFFIRMATIVE AND BEFORE THE WRITE. `git -C "" config include.path <fifo>`
+  # targets the CURRENT directory, and on this fleet that is a worktree of the SHARED
+  # /data/lanes/repo/.git — so one empty variable would hang EVERY lane and EVERY concurrent gate
+  # on the box, for as long as nobody notices. `fx` already refuses an empty path for exactly this
+  # reason when it `cd`s; `git -C` had no such guard. So the target must be a non-empty DIRECTORY
+  # holding its own `.git` and lying STRICTLY under $tmp — checked, not assumed.
+  #
+  # No separate "and it is not the real checkout" clause: the $tmp-prefix test already implies it,
+  # and the obvious spelling (`$SCRIPT_DIR/../..`) is not canonicalised, so comparing it against an
+  # absolute fixture path could never fire — a guard that reads as meaningful and cannot act is
+  # worse than its absence, because it invites reliance it does not support.
+  bad "3544-config-include-blocks: refusing to plant a blocking config include: fixture path '$fifo_fx' is not a git directory strictly under \$tmp ('$tmp') — writing include.path outside the scratch tree would hang every lane on this box"
 else
   git -C "$fifo_fx" config include.path "$fifo_path"
   fifo_out=$( fx "$fifo_fx" && bash "$fifo_fx/scripts/agent-gate.sh" --component-set-line full 2>/dev/null )
   fifo_kind=$(field KIND "$fifo_out")
   fifo_line=$(field COMPONENT_SET_LINE "$fifo_out")
-  git -C "$fifo_fx" config --unset include.path 2>/dev/null || true
+  # REMOVE THE FIFO **FIRST**, AND NEVER RUN ANOTHER `git config` HERE (measured: this cleanup
+  # hung for 10m43s). `git config --unset include.path` must itself READ the config to rewrite it,
+  # so it blocks on the very FIFO the case just planted — the case's own subject, one line down,
+  # and `2>/dev/null || true` cannot rescue a HANG (it only handles a non-zero exit). Deleting the
+  # FIFO is enough: git treats a MISSING include path as a silent no-op, and the fixture is a
+  # throwaway under $tmp, so the stale `include.path` entry never needs unsetting at all.
+  #
+  # THE LESSON, because it is this file's own subject: reading a test tells you what it INTENDS to
+  # measure, never that it TERMINATES. The assertion and the positive control were both right; the
+  # cleanup was what never returned.
   rm -f "$fifo_path"
   case "$fifo_kind" in
     repo-read-blocked)
@@ -3045,7 +3068,7 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=18   # 20 -> 18: -gate-script-changed and -gate-script-unverifiable. Both
+DECLARED_KIND_COUNT=19   # 20 -> 18: -gate-script-changed and -gate-script-unverifiable. Both
                          # belonged to the in-queue "is the code I am executing the code in the
                          # tree I certify" check, which MOVED OUT of this pre-flight to issue
                          # #3705 — the question needs a bootstrap/re-exec handshake at startup
@@ -3173,12 +3196,23 @@ function classify(t, i, bounded, probe,   w, cmd) {
   # The BOUND ARGUMENT is stripped by an ALLOWLIST of the shapes that survive the quote strip
   # (digits, or a `$`-expansion remnant), never by position: a blind "drop one token" would eat
   # the command itself at the sites where the bound was quoted and is therefore already blank.
-  while (cmd == "env" || cmd == "_component_set_bounded") {
+  # `_cs_live_git` JOINED THE WRAPPER LIST, AND NOT COSMETICALLY. Routing the four live-repository
+  # probes through it (job 312) took them OUT of this census: measured, the OP set lost `remote`
+  # ENTIRELY and `rev-parse` fell 6 -> 3, and the GAP half could not see them either, since no
+  # `git` sits at command position any more. So the very calls that were just BOUNDED became
+  # invisible to the audit that checks boundedness — a coverage regression created by a fix, which
+  # is why this list is derived at run time rather than believed. The wrapper supplies its own
+  # bound, so a call through it is bounded BY CONSTRUCTION and the GAP half is satisfied.
+  while (cmd == "env" || cmd == "_component_set_bounded" || cmd == "_cs_live_git") {
     prev = t
     if (cmd == "env") {
       sub(/^env[ \t]+/, "", t)
       while (t ~ /^-[iu][ \t]+/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)
         sub(/^(-[iu]|[A-Za-z_][A-Za-z0-9_]*=[^ \t]*)[ \t]+/, "", t)
+    } else if (cmd == "_cs_live_git") {
+      # its arguments ARE the git arguments; synthesise the `git` the census keys on.
+      sub(/^_cs_live_git[ \t]+/, "git ", t)
+      bounded = 1
     } else {
       sub(/^_component_set_bounded[ \t]+/, "", t)
       sub(/^([0-9]+|\$[A-Za-z_{][^ \t]*)[ \t]+/, "", t)
@@ -3204,8 +3238,19 @@ function classify(t, i, bounded, probe,   w, cmd) {
     if (op ~ /^git[ \t]/) sub(/^git[ \t]+/, "", op)
     else sub(/^.*[ \t]git[ \t]+/, "", op)
     while (op ~ /^-[^ \t]*[ \t]+/) sub(/^-[^ \t]*[ \t]+/, "", op)
+    # REDIRECTIONS ARE NOT SUBCOMMANDS, anywhere. They are stripped here rather than special-cased
+    # below, because `2>/dev/null` reaching the subcommand slot is what made the wrapper's own line
+    # read as an operation named `2>/dev/null`.
+    while (op ~ /^[0-9]*[<>]+[&]?[^ \t]*[ \t]*/) sub(/^[0-9]*[<>]+[&]?[^ \t]*[ \t]*/, "", op)
+    sub(/^[ \t]+/, "", op)
     split(op, gw, /[ \t]/)
-    printf "OP\t%s\n", (gw[1] ~ /^[a-z][a-z-]*$/ ? gw[1] : "<unrecognised:" gw[1] ">")
+    # AN EMPTY SUBCOMMAND SLOT IS THE WRAPPER'S OWN PASS-THROUGH, and it is emitted as its own
+    # token rather than skipped. `git "$@"` cannot be matched literally: the quote strip above
+    # removes `"$@"` as a quoted span, so nothing of it survives to compare against — the slot is
+    # simply empty. That is the ONE legitimate variable subcommand here (the operation is decided
+    # by `_cs_live_git`'s CALLERS, censused above), and the consumer asserts it appears AT MOST
+    # ONCE: an excusal with no count is an excusal a second site can hide behind.
+    printf "OP\t%s\n", (gw[1] ~ /^[a-z][a-z-]*$/ ? gw[1] : (gw[1] == "" ? "<wrapper-passthrough>" : "<unrecognised:" gw[1] ">"))
   }
 }
 END {
@@ -3325,7 +3370,9 @@ else
   git_ops=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | sort -u)
   declared_git_ops="cat-file fetch init ls-remote ls-tree merge-base remote rev-list rev-parse show"
   undeclared_ops=""; stale_ops=""; stale_externals=""
+  passthrough_n=$(printf '%s\n' "$audit_out" | sed -n 's/^OP\t//p' | grep -cx '<wrapper-passthrough>')
   for _o in $git_ops; do
+    [ "$_o" = "<wrapper-passthrough>" ] && continue
     case " $declared_git_ops " in *" $_o "*) continue ;; esac
     undeclared_ops="${undeclared_ops:+$undeclared_ops }$_o"
   done
@@ -3337,7 +3384,9 @@ else
     printf '%s\n' "$externals" | grep -qx -- "$_w" && continue
     stale_externals="${stale_externals:+$stale_externals }$_w"
   done
-  if [ -z "$git_ops" ]; then
+  if [ "$passthrough_n" -gt 1 ]; then
+    bad "3544-no-unbounded: $passthrough_n \`git \"\$@\"\` pass-through sites in the pre-flight region — exactly ONE is legitimate (_cs_live_git, whose operation is decided by its callers). A second would let a variable subcommand escape the operation census behind the first one's excusal"
+  elif [ -z "$git_ops" ]; then
     bad "3544-no-unbounded: the git-operation census came back EMPTY on a region of $region_lines lines — the derivation broke (fail-closed: an empty subject set would declare every operation classified)"
   elif [ -n "$git_gaps" ]; then
     bad "3544-no-unbounded: git invocation(s) in the pre-flight neither bounded nor annotated '# local-only: <reason>':"

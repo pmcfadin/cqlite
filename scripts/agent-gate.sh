@@ -4344,6 +4344,19 @@ _CS_LIVE_STATE=""
 _cs_live_git() {
   local rc
   _CS_LIVE_OUT=""; _CS_LIVE_STATE=""
+  # THE CAPTURE TRIPLE IS CREATED **HERE, IN THE PARENT**, AND THAT IS NOT A STYLE CHOICE. The
+  # bounded call below is a COMMAND SUBSTITUTION, so everything it assigns — including
+  # `_CS_CAP_OUT/_ERR/_RC` — dies with the subshell, while the three `mktemp` FILES survive on
+  # disk with nobody holding their paths. Measured: `3544-signal-cleanup[host]` and `[watchdog]`
+  # reported `capture files left=6` (two calls x three files) the moment these probes became the
+  # FIRST bounded calls in the probe. The gate says this out loud one function up — "DIRECT call,
+  # never `$( … )`: this one sets process state, and a substitution would discard it" — and the
+  # pre-existing `err=$( _component_set_bounded … fetch … )` site is safe only BY ACCIDENT of
+  # ordering, because a direct bounded call had already memoized the paths in the parent.
+  #
+  # This is the family CLAUDE.md names as "a fix that adds a resource inherits that resource's
+  # lifetime bugs": bounding four calls to close a hang introduced a leak on the signal path.
+  if ! _component_set_capture_paths; then _CS_LIVE_STATE=unboundable; return 0; fi
   _CS_LIVE_OUT=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git "$@" 2>/dev/null); rc=$?
   if [ "$rc" -eq 0 ]; then _CS_LIVE_STATE=ok
   elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then _CS_LIVE_STATE=unboundable
@@ -4362,8 +4375,12 @@ _cs_live_refuse() {
       _CS_DETAIL="reading $1 from $REPO_ROOT EXCEEDED its ${_CS_BOUND_HINT}s bound — the read never returned. Every git command reads the repository config, and a \`include.path\` there naming a FIFO or other blocking file hangs it; on this fleet that config is SHARED by every lane on the box. Inspect it with \`git config --show-origin --get-all include.path\`"
       return 0 ;;
     unboundable)
-      _CS_KIND=bound-unavailable
-      _CS_DETAIL="this host offers no way to BOUND reading $1 from $REPO_ROOT (no timeout/gtimeout and no usable watchdog), so the read was not run: an unbounded repository read can hang the gate outright, and a missing capability must not inherit the permissive branch"
+      # THE EXISTING KIND, NOT A NEW ONE. `unboundable` already names exactly this condition for
+      # the fetch (and already has its verdict mapping), so a second spelling would be two names
+      # for one fact — the drift this pre-flight keeps removing. Caught by the pre-existing
+      # `3544-unboundable` case, which knew what to expect because the kind was already there.
+      _CS_KIND=unboundable
+      _CS_DETAIL="this host offers no way to BOUND reading $1 from $REPO_ROOT (no timeout/gtimeout and no usable watchdog, or no capture file), so the read was not run: an unbounded repository read can hang the gate outright, and a missing capability must not inherit the permissive branch"
       return 0 ;;
   esac
   return 1
