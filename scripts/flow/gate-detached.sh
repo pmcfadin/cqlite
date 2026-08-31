@@ -743,7 +743,7 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     [ -r "/proc/$p/cmdline" ] || continue   # exited mid-scan: not evidence either way
-    hit=0; lite=0
+    hit=0
     # OWNERSHIP, NOT GATE-OF-RECORD: do NOT exclude --lite/--delta/--only here. That exclusion is right
     # for a waiter asking "is THE full gate running", and I over-applied it to a different question. This
     # helper answers "is another run still using this summary path", and a --lite/--only run is using it
@@ -754,8 +754,8 @@ _unit_runs_a_gate() {  # <unit> -> 0 = a FULL gate is live in that cgroup | 1 = 
     # shell carries the pattern INSIDE an element (`pgrep -f agent-gate\.sh`), so no element ever ENDS in
     # `agent-gate.sh` and the searcher is excluded BY CONSTRUCTION. A `$$` exclusion list is both
     # insufficient (the pgrep child and command-substitution subshells match too) and a thing to forget.
-    # Measured: the argv form found 7 full gates and excluded both a --lite run and the searching shell;
-    # the substring-of-cmdline form counted 10, over-counting searchers.
+    # Measured: the argv form found 7 gate processes and excluded the searching shell; the
+    # substring-of-cmdline form counted 10, over-counting searchers.
     while IFS= read -r -d "" a; do
       case "$a" in *agent-gate.sh) hit=1; break ;; esac
     done < "/proc/$p/cmdline"
