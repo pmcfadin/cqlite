@@ -382,54 +382,117 @@ fi
 
 BASE_REF=refs/remotes/origin/main
 
-# Scratch space for the NUL-separated git output (see the -z note below). In
-# TMPDIR, never in the repository: this script writes nothing in the repo.
-# `2>/dev/null` on both: an unredirected tool writing to stderr would emit a line
-# with no `BASE-STALENESS: ` prefix, breaking D2a's anchor.
-if ! TMPD=$(mktemp -d "${TMPDIR:-/tmp}/base-staleness.XXXXXX" 2>/dev/null); then
-  unmeasured "could not create a scratch dir under $(sane "${TMPDIR:-/tmp}")"
-fi
-trap 'rm -rf "$TMPD" 2>/dev/null' EXIT
+# --- the scratch location is VALIDATED BEFORE ANYTHING IS CREATED (#3650 R4) --
+#
+# THE ORDER IS THE POINT. `mktemp -d` honours TMPDIR, so creating first and
+# checking afterwards HAS ALREADY WRITTEN A DIRECTORY IN THE CHECKOUT in exactly
+# the case the check exists to prevent — and D5's argument for this tool is that
+# a verifier with a side effect is a worse verifier, so the contract is
+# load-bearing rather than tidy. The REQUESTED location is canonicalized and
+# refused BEFORE `mktemp` runs, so nothing is created on the reject path.
+#
+# BOTH REPOSITORY ROOTS ARE CHECKED, NOT JUST THE WORK TREE. Every lane on this
+# fleet is a `git worktree`, so `--git-common-dir` is ALWAYS outside the lane's
+# toplevel (measured on this lane: toplevel /data/lanes/lane-3650, common dir
+# /data/lanes/repo/.git) — a TMPDIR under the shared git directory writes into
+# state EVERY lane on the box shares, and a toplevel-only check cannot see it.
+# "Inside either" is in-repository.
+#
+# UNRESOLVABLE IS `UNMEASURED`, NEVER A PASS: if the work tree root or the common
+# dir cannot be resolved, this does NOT fall back to checking whichever one it
+# got. A check that silently narrows its own subject is the permissive-branch
+# shape #3650 exists to refuse.
+#
+# Deliberately NOT relocated silently to /tmp: a tool that quietly ignores the
+# environment it was handed is the same defect one layer down, and an UNMEASURED
+# naming TMPDIR is actionable.
+#
+# INTERRUPTION residual, RESTATED for this ordering: the reject path creates
+# nothing, so a SIGKILL can no longer strand a scratch dir INSIDE the repository
+# (the earlier create-then-check ordering could). What a SIGKILL between
+# `mktemp` and exit can still strand is the already-validated, provably
+# out-of-repo scratch dir, left for the OS to reap — an unignorable signal cannot
+# be cleaned up from inside the process.
+#
+# `2>/dev/null` throughout: an unredirected tool writing to stderr would emit a
+# line with no `BASE-STALENESS: ` prefix, breaking D2a's anchor.
 
-# TMPDIR IS NOT TRUSTED (#3650 review R4). `mktemp -d` honours TMPDIR, so a
-# TMPDIR pointing inside the checkout makes this script write IN THE REPOSITORY
-# — and D5's argument for this tool is precisely that a verifier with a side
-# effect is a worse verifier, so the contract is load-bearing rather than tidy.
-# The RESOLVED dir is canonicalized (`cd`+`pwd -P`, the convention in
-# scripts/flow/finalize-cleanup.sh — no `realpath` dependency) and an
-# in-repository location is REFUSED, routed to UNMEASURED naming TMPDIR like
-# every other unmeasurable condition. Deliberately NOT relocated silently to
-# /tmp: a tool that quietly ignores the environment it was handed is the same
-# defect one layer down, and an UNMEASURED naming the cause is actionable.
-# INTERRUPTION is a separate, ACCEPTED residual: the trap above covers a normal
-# exit and a trappable signal, so a SIGKILL between `mktemp` and exit leaves the
-# (now provably out-of-repo) scratch dir for the OS to reap. An unignorable
-# signal cannot be cleaned up from inside the process; what this check
-# guarantees is that whatever survives is never inside the repository.
-tmpd_canon=$( (cd "$TMPD" 2>/dev/null && pwd -P) || true )
-if [ -z "$tmpd_canon" ]; then
-  unmeasured "the scratch dir $(sane "$TMPD") could not be canonicalized"
-fi
-repo_top=$(git rev-parse --show-toplevel 2>/dev/null) || repo_top=""
-repo_canon=""
-if [ -n "$repo_top" ]; then
-  repo_canon=$( (cd "$repo_top" 2>/dev/null && pwd -P) || true )
-fi
-if [ -n "$repo_canon" ]; then
-  case "$tmpd_canon/" in
-    "$repo_canon"/*)
-      unmeasured "the scratch dir resolves INSIDE the repository:" \
-        "$(sane "$tmpd_canon") is under $(sane "$repo_canon"). TMPDIR points into the" \
-        "checkout and this script writes nothing in the repo (#3650 D5). Re-run with a" \
-        "TMPDIR outside the work tree."
-      ;;
-  esac
-fi
-
-# --- resolve the three inputs, each failure being UNMEASURED (never a zero) ---
+# The work-tree probe comes FIRST: the two roots below are what the scratch check
+# compares against, so it cannot be deferred to the input-resolution block.
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   unmeasured "not inside a git work tree (cwd $(sane "$(pwd)"))"
 fi
+# canon <dir> — canonicalize with `cd`+`pwd -P` (the convention in
+# scripts/flow/finalize-cleanup.sh; no `realpath` dependency). EMPTY on failure,
+# and every caller treats empty as UNMEASURED rather than as "outside".
+canon() { (cd "$1" 2>/dev/null && pwd -P) || true; }
+
+repo_canon=$(canon "$(git rev-parse --show-toplevel 2>/dev/null || true)")
+if [ -z "$repo_canon" ]; then
+  unmeasured "the work tree root (git rev-parse --show-toplevel) could not be resolved," \
+    "so the scratch location cannot be proven outside the repository. That is" \
+    "UNMEASURED, never a pass (#3650 D3)."
+fi
+# `--git-common-dir` may be RELATIVE (a plain `.git`), hence the canonicalize.
+common_canon=$(canon "$(git rev-parse --git-common-dir 2>/dev/null || true)")
+if [ -z "$common_canon" ]; then
+  unmeasured "the git common directory (git rev-parse --git-common-dir) could not be" \
+    "resolved, so the scratch location cannot be proven outside the shared git dir." \
+    "That is UNMEASURED, never a pass (#3650 D3)."
+fi
+
+# in_repository <canonical-dir> — NAMES the repository root the dir lies inside
+# (work tree OR git common dir); prints nothing when it is outside both. The dir
+# itself counts as inside (`"$root"/*` matches `"$root/"`).
+in_repository() {
+  case "$1/" in
+    "$repo_canon"/*) printf 'the work tree %s' "$repo_canon" ;;
+    "$common_canon"/*) printf 'the git common directory %s' "$common_canon" ;;
+  esac
+}
+
+tmpdir_req=${TMPDIR:-/tmp}
+tmpdir_canon=$(canon "$tmpdir_req")
+if [ -z "$tmpdir_canon" ]; then
+  unmeasured "the requested scratch root TMPDIR=$(sane "$tmpdir_req") could not be" \
+    "resolved (absent, unreadable, or not a directory). Re-run with a TMPDIR that" \
+    "exists outside the work tree."
+fi
+tmpdir_enclosing=$(in_repository "$tmpdir_canon")
+if [ -n "$tmpdir_enclosing" ]; then
+  unmeasured "the requested scratch root resolves INSIDE the repository:" \
+    "$(sane "$tmpdir_canon") is under $(sane "$tmpdir_enclosing"). TMPDIR points into" \
+    "the checkout and this script writes nothing in the repo (#3650 D5) — NOTHING WAS" \
+    "CREATED. Re-run with a TMPDIR outside the work tree and outside the git dir."
+fi
+
+# Scratch space for the NUL-separated git output (see the -z note below), under
+# the now-validated root.
+if ! TMPD=$(mktemp -d "$tmpdir_canon/base-staleness.XXXXXX" 2>/dev/null); then
+  unmeasured "could not create a scratch dir under $(sane "$tmpdir_canon")"
+fi
+trap 'rm -rf "$TMPD" 2>/dev/null' EXIT
+
+# REVALIDATE WHAT WAS ACTUALLY CREATED. The pre-check answers about the path as
+# it resolved a moment ago; a symlink swapped between check and create, or a
+# `mktemp` resolving somewhere unexpected, lands the real dir elsewhere. On a
+# post-create failure the dir is REMOVED before routing to UNMEASURED, so the
+# no-write contract holds on this path too.
+tmpd_canon=$(canon "$TMPD")
+if [ -z "$tmpd_canon" ]; then
+  rm -rf "$TMPD" 2>/dev/null
+  unmeasured "the scratch dir $(sane "$TMPD") could not be canonicalized"
+fi
+tmpd_enclosing=$(in_repository "$tmpd_canon")
+if [ -n "$tmpd_enclosing" ]; then
+  rm -rf "$TMPD" 2>/dev/null
+  unmeasured "the CREATED scratch dir resolves INSIDE the repository:" \
+    "$(sane "$tmpd_canon") is under $(sane "$tmpd_enclosing") — the scratch root" \
+    "resolved into the checkout between the pre-create check and the create. It has" \
+    "been removed; this script writes nothing in the repo (#3650 D5)."
+fi
+
+# --- resolve the remaining inputs, each failure being UNMEASURED (never a zero)
 if ! subject_sha=$(git rev-parse --verify --quiet "$rev^{commit}" 2>/dev/null) ||
   [ -z "$subject_sha" ]; then
   unmeasured "the subject rev '$(sane "$rev")' does not resolve to a commit"
