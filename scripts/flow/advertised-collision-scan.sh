@@ -83,6 +83,11 @@
 #                  filesystem-derived, and one `"` used to emit output that CLAIMED to
 #                  be JSON and was not. Counters and `board_page_at_limit` are emitted
 #                  as JSON numbers/booleans, unquoted.
+#                 KNOWN LIMIT: a value carrying INVALID UTF-8 still reaches the output
+#                 raw, and a conforming parser rejects the document (JSON is defined
+#                 over Unicode text). Measured, not assumed. Deliberately unfixed —
+#                 validating UTF-8 needs either a hand-rolled bash validator or an
+#                 interpreter this component must not depend on; see json_str's header.
 #
 # ENV
 #   CLAIM_REMOTE   origin remote name or URL (default: origin) — the same variable
@@ -133,6 +138,29 @@ say()       { printf '%s\n' "$*"; }
 # every byte above it pass through — JSON requires no escape for them, and passing
 # UTF-8 bytes through unchanged keeps valid UTF-8 valid. NUL cannot occur: bash cannot
 # hold it in a variable.
+#
+# STATED LIMIT, MEASURED RATHER THAN ASSUMED (#3436). Passing high bytes through keeps
+# VALID UTF-8 valid; it does not MAKE invalid UTF-8 valid. A value carrying malformed
+# UTF-8 therefore reaches the output raw, and JSON is defined over Unicode text, so a
+# conforming consumer rejects the document:
+#
+#   $ CLAIM_REMOTE="$(printf 'ori\xffgin')" advertised-collision-scan.sh --json
+#     -> the 0xFF byte survives into the value; a STRICT UTF-8 decode of the line
+#        fails ("invalid start byte"), so no conforming parser accepts it.
+#
+# It is the same defect class as an unescaped quote, with a rarer trigger, and it is
+# NOT fixed here deliberately. The options are a hand-rolled UTF-8 validator in bash or
+# a new interpreter dependency, and this suite runs before the gate's python3 gate by
+# design (see PURE BASH ON PURPOSE above). Shipping an untested byte-level validator
+# into a merge-gating component is the worse trade — the same reasoning that removed
+# #3229's `census-exclusion:` predictor and #3400's parse-site lint: a guard with
+# unknown false verdicts invites reliance it cannot support.
+#
+# Worth recording how the limit was confirmed, because the first attempt got it wrong:
+# a check that piped the output into a lenient decoder reported "parses OK", because
+# the decoder replaced the bad byte before the parse ever ran. Re-running against RAW
+# BYTES with a strict decode inverted the result. A JSON-validity test that decodes
+# leniently is not a JSON-validity test.
 json_str() {
   local LC_ALL=C
   local s="${1:-}" out="" i=0 len c code

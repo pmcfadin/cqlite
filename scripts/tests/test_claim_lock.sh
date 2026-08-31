@@ -1219,6 +1219,39 @@ for v in a b f h i; do
   fi
 done
 if [ -z "$d22_bad" ]; then
+# (j) COMPOSED EVIDENCE — rungs (b) AND (c) fire together (implementer residual 3).
+# Reachable and previously untested: a LIVE LOCAL peer holds the lane lock AND the lane
+# directory is a git checkout on this issue's branch. The point of the case is that the
+# two rungs have different jobs and composing them must not blur either: (b) DECIDES the
+# verdict, (c) is only ever REPORTED. So the verdict must be lane-occupied-by-live-peer
+# — the strongest true statement — while `lane-evidence=` carries BOTH observations, in
+# that order, so a reader can see the whole basis rather than the winning half.
+# A single-rung implementation, or one that let (c) override (b), fails here.
+push_legacy_branch 45
+mkdir -p "$LANE_ROOT/lane-45"
+(
+  cd "$LANE_ROOT/lane-45" || exit 1
+  gg init -q .
+  echo x >x.txt; gg add x.txt; gg commit -qm x
+  gg checkout -q -b issue-45-slug
+)
+sleep 900 &
+OCCUPANT45=$!
+LANE_LOCK_PID=$OCCUPANT45 bash "$LANELOCK" acquire 45 --lane-dir "$LANE_ROOT/lane-45" >/dev/null 2>&1
+rc=0; out22j=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 45 2>/dev/null ) || rc=$?
+rc22j=$rc
+if [ "$rc22j" -eq 2 ] && printf '%s\n' "$out22j" | grep -q 'reason=lane-occupied-by-live-peer' \
+   && printf '%s\n' "$out22j" | grep -q 'lane-evidence=lane-lock-alive-local-peer,lane-worktree-branch:issue-45-slug' \
+   && printf '%s\n' "$out22j" | grep -q "lane-holder-pid=$OCCUPANT45" \
+   && ! printf '%s\n' "$out22j" | grep -q 'reason=released-then-resumed' \
+   && ! printf '%s\n' "$out22j" | grep -q 'reason=legacy-branch-lock'; then
+  ok "(j) AC6: composed evidence (live LOCAL peer + a checkout on issue-45-*) is reason=lane-occupied-by-live-peer, and lane-evidence carries BOTH rungs — (b) decides, (c) only reports"
+else
+  bad "(j) expected reason=lane-occupied-by-live-peer with lane-evidence=lane-lock-alive-local-peer,lane-worktree-branch:issue-45-slug; got rc=$rc22j
+$out22j"
+fi
+kill "$OCCUPANT45" 2>/dev/null || true
+
   ok "(d) AC6: no refusal prints a runnable resume command (no 'claim.sh adopt', no '--expect none') — checked on all five"
 else
   bad "(d) a refusal printed a runnable resume command (#2945 violation):$d22_bad
