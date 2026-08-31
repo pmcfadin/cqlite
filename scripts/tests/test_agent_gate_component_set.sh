@@ -2497,6 +2497,12 @@ done
 #     yet started work when it was made), because otherwise this case could pass by editing after
 #     the run had already finished the pre-flight for unrelated reasons.
 # ---------------------------------------------------------------------------
+# THE BOUND on each arm's post-release wait (#3698). Generous on purpose: after the slot is granted
+# the fixture gate does one ref-oracle round trip against a LOCAL origin, then file-size, then the
+# dataset preflight — seconds on an idle box, and this suite shares boxes with up to four gates. The
+# number is a HANG BOUND, not a performance assertion: nothing here compares elapsed time, and a case
+# that trips it FAILS naming the unmet wait rather than making a claim about speed.
+WIN_BOUND_SECS=120
 base_win=$(mkbaseline base-window - )
 win_fx=$(mkbranch windowed "$base_win" - --from-origin)
 # The fixture needs the gate's OWN slot daemon, or `acquire_gate_slot` reports it missing and
@@ -2528,6 +2534,8 @@ for win_edit in manifest gate-script executor unrelated; do
   win_ready="$tmp/window-holder-$win_edit.ready"
   win_sum="$tmp/window-summary-$win_edit.txt"
   win_log="$tmp/window-$win_edit.log"
+  win_done="$tmp/window-done-$win_edit.rc"
+  rm -f "$win_done"
   mkdir -p "$win_slots"
   # HOLD THE ONLY SLOT with a second instance of the gate's own daemon, tied to a throwaway pid.
   sleep 300 &
@@ -2547,9 +2555,17 @@ for win_edit in manifest gate-script executor unrelated; do
     kill "$win_holder" 2>/dev/null || true
     kill "$win_daemon" 2>/dev/null || true
   else
+    # THE STATUS IS RECORDED TO A FILE WITH A COMPLETENESS MARKER, not read from `wait`. Two
+    # reasons, and the second is why the marker exists at all: (1) the bounded wait below may have
+    # to KILL this child, and a killed child's `wait` status says nothing about the gate's verdict;
+    # (2) "no status was recorded" and "the gate exited 0" must not be the same observation — an
+    # unmeasured rc is a FAIL of its own, never a passing one. Same shape as the gate's own bounded
+    # runner (`_component_set_bounded`), which records its status to a file with a marker for
+    # exactly this reason.
     ( fx "$win_fx" && CQLITE_GATE_MAX_CONCURRENCY=1 CQLITE_GATE_SLOTS_DIR="$win_slots" \
         AGENT_GATE_SUMMARY_FILE="$win_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
-        bash scripts/agent-gate.sh >"$win_log" 2>&1 ) &
+        bash scripts/agent-gate.sh >"$win_log" 2>&1
+      printf 'RC=%s\n' "$?" >"$win_done" ) &
     win_pid=$!
     # WAIT ON THE CONDITION, not a timer: the gate prints its queued notice once.
     win_queued=0
@@ -2579,16 +2595,30 @@ for win_edit in manifest gate-script executor unrelated; do
       grep -q 'gate slot acquired' "$win_log" 2>/dev/null && win_raced=1
       case "$win_edit" in
         manifest)
+          # `cp` IS CORRECT HERE, and the asymmetry with the two arms below is deliberate: the
+          # manifest is DATA the gate re-reads from disk, not a file any process is EXECUTING, so an
+          # in-place overwrite corrupts nobody's read stream. Do not "unify" these three plants on
+          # one verb — the verb is chosen per target, and the reason is in each arm.
           grep -vx -- 'smoke' "$win_fx/scripts/agent-gate.components" >"$tmp/window-manifest.txt"
           cp "$tmp/window-manifest.txt" "$win_fx/scripts/agent-gate.components" ;;
         gate-script)
-          # AN ATOMIC RENAME, NEVER `cp` OVER THE RUNNING SCRIPT. Bash reads a script
-          # INCREMENTALLY as it executes, so truncating and rewriting the file in place corrupts
-          # the running process's own read stream — measured the hard way: the suite HUNG for 35
-          # minutes on this line. `mv` replaces the directory entry while the running process keeps
-          # its open inode, so the gate executes what it loaded and the TREE holds the new bytes,
-          # which is both the realistic shape (an editor saving, `git checkout`, `git stash`) and
-          # the only one that tests the property instead of perturbing the subject.
+          # USE `mv`. NEVER `cp` OVER A SCRIPT A PROCESS IS EXECUTING. Three facts, in order,
+          # because `cp` is the more obvious verb and someone will "simplify" this back:
+          #   1. BASH READS A SCRIPT INCREMENTALLY as it executes — it keeps a byte offset into an
+          #      open file, it does not slurp the file at startup.
+          #   2. `cp` OVERWRITES IN PLACE, SAME INODE. The running gate's next read therefore comes
+          #      from the MODIFIED file at its old offset, and it re-executes whatever region now
+          #      lives there. MEASURED, not theorised: the fixture gate re-entered
+          #      `acquire_gate_slot`, so TWO slot daemons appeared for ONE gate-pid (both carrying
+          #      the gate's own `--poll-secs 2`, not the fixture holder's `1`, which is what proved
+          #      both were gate-spawned), the ready-file was never written, and the queue wedged —
+          #      this arm HUNG FOREVER and the suite never printed a tally. A hang and a pass are
+          #      indistinguishable to a log filter, which is how it survived a commit.
+          #   3. `mv` IS A RENAME: it replaces the directory ENTRY while the running process keeps
+          #      the ORIGINAL inode open, so its read stream is untouched. The gate executes what it
+          #      loaded and the TREE holds the new bytes — which is also the realistic shape (an
+          #      editor saving, `git checkout`, `git stash`) and the only one that tests the property
+          #      instead of perturbing the subject.
           sed 's|^COMPONENTS=(file-size|COMPONENTS=(zz-added-while-queued file-size|' \
               "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate-$win_edit.sh"
           chmod +x "$tmp/window-gate-$win_edit.sh"
@@ -2598,7 +2628,14 @@ for win_edit in manifest gate-script executor unrelated; do
           # EXECUTOR FUNCTION BODY changes while the COMPONENTS declaration and the canonical pin
           # stay byte-identical. The running process keeps the OLD function definitions, so the
           # recaptured tree would be certified for code it never executed. Only a WHOLE-FILE digest
-          # catches it. Same atomic-rename discipline as the arm above, for the same reason.
+          # catches it.
+          #
+          # USE `mv`, FOR THE REASON SPELLED OUT AT ITS OWN SITE (a comment one arm away is a comment
+          # that gets deleted): bash reads a script INCREMENTALLY, so a `cp` overwrites the inode the
+          # running gate is still reading and it re-executes from a shifted offset — measured on the
+          # arm above as a SECOND slot daemon for one gate-pid and a permanently wedged queue, i.e. a
+          # hang, not a failure. `mv` renames, so the running process keeps its original inode and
+          # only the TREE changes, which is the property under test.
           sed 's|^  local name=file-size$|  local name=file-size\n  : "edited-while-queued-3544"|' \
               "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate-$win_edit.sh"
           # AFFIRMATIVE: if the anchor line has been reworded the sed is a no-op and this case would
@@ -2613,6 +2650,10 @@ for win_edit in manifest gate-script executor unrelated; do
           # over the gate script alone, so this must pass the pre-flight; a red here would mean the
           # guard fires on any mid-flight tree change, which `tree-integrity` already owns and which
           # would make the positive arms above meaningless.
+          #
+          # DELIBERATELY NOT `mv`: this writes a NEW file, so there is no running reader and nothing
+          # to rename over. Making it `mv` for symmetry with the arms above would hide what the `mv`
+          # there is FOR — not corrupting a process's own read stream.
           mkdir -p "$win_fx/docs"
           printf 'edited while the gate was queued — #3544 negative control\n' \
             >"$win_fx/docs/3544-window-negative-control.md" ;;
@@ -2620,12 +2661,50 @@ for win_edit in manifest gate-script executor unrelated; do
       grep -q 'gate slot acquired' "$win_log" 2>/dev/null && win_raced=1
     fi
     kill "$win_holder" 2>/dev/null || true
-    wait "$win_pid" 2>/dev/null; win_rc=$?
+    # ---- THE WAIT IS BOUNDED (#3698). `wait "$win_pid"` was unbounded, and this arm HUNG FOREVER
+    # under the in-place `cp` plant it used to carry (see the plant sites below): the fixture gate
+    # re-executed `acquire_gate_slot`, a second slot daemon appeared for the same gate-pid, and the
+    # queue wedged permanently. THE ROOT CAUSE IS FIXED, AND THE BOUND STAYS ANYWAY: this suite runs
+    # in `tooling-tests` on the FULL GATE, so an unbounded wait here hangs the gate of record — and a
+    # gate that hangs gets waived by the next agent rather than investigated. The bound is what
+    # contains the NEXT unknown wedge.
+    #
+    # ON EXPIRY THIS CASE FAILS. It does NOT skip: a case that cannot run is a FAIL, because a skip
+    # converts a hang into a silent non-execution, which is the exact defect class #3544 is about.
+    #
+    # POLLED ON THE COMPLETENESS MARKER, not on `kill -0`: an exited-but-unreaped child is a ZOMBIE
+    # and `kill -0` SUCCEEDS for it, so a liveness poll would never break.
+    #
+    # THE KILL IS BY A PID WE OWN — never a pattern kill. `pkill -f gate_slot_daemon` (or
+    # `agent-gate`) selects by what a process IS, not whose it is, and has destroyed a peer lane's
+    # gate at component 28 of 30 on this fleet. The gate's own slot daemon self-reaps once its
+    # `--gate-pid` is gone, so killing the gate is enough to release the fixture's slot dir.
+    win_timedout=0
+    win_k=0
+    while [ ! -f "$win_done" ]; do
+      if [ "$win_k" -ge $((WIN_BOUND_SECS * 5)) ]; then win_timedout=1; break; fi
+      sleep 0.2
+      win_k=$((win_k + 1))
+    done
+    if [ "$win_timedout" -eq 1 ]; then
+      kill "$win_pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL "$win_pid" 2>/dev/null || true
+    fi
+    win_rc=$(sed -n 's/^RC=//p' "$win_done" 2>/dev/null)
+    wait "$win_pid" 2>/dev/null || true
     kill "$win_daemon" 2>/dev/null || true
     wait "$win_holder" 2>/dev/null
     if [ "$win_queued" -ne 1 ]; then
       bad "3544-preflight-in-window: the gate never reported queueing for a slot, so the edit could not be made INSIDE the window — the case cannot discriminate"
       sed -n '1,5p' "$win_log" 2>/dev/null
+    elif [ "$win_timedout" -eq 1 ]; then
+      bad "3544-preflight-in-window[$win_edit]: the fixture gate did not COMPLETE within ${WIN_BOUND_SECS}s of the slot being released — the unmet wait is the gate exiting after its post-slot pre-flight; FAILED rather than skipped or waited on forever (#3698)"
+      grep -n 'gate slot' "$win_log" 2>/dev/null | head -3
+      tail -3 "$win_log" 2>/dev/null
+    elif ! printf '%s' "$win_rc" | grep -qE '^[0-9]+$'; then
+      bad "3544-preflight-in-window[$win_edit]: the fixture gate recorded NO exit status (marker '$win_done' absent or unparseable: '$win_rc'), so no verdict can be derived from it — an unmeasured status is not a passing one"
+      tail -3 "$win_log" 2>/dev/null
     elif [ "$win_raced" -eq 1 ]; then
       bad "3544-preflight-in-window[$win_edit]: the gate had ALREADY been granted its slot when the edit was made, so the edit did not land inside the queue window — this case cannot discriminate (a loaded box or a dead holder daemon, NOT a verdict about the guard)"
       grep -n 'gate slot' "$win_log" 2>/dev/null | head -3

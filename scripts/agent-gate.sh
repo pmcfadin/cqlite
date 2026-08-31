@@ -3512,6 +3512,15 @@ _component_set_extract_declaration() {
 # hit. They run ONLY after the digest has already refused, and they can never produce a PASS the
 # digest did not.
 #
+# WHAT THIS CATCHES IS WORSE THAN SKEW, and that raises the severity of the whole check: bash reads a
+# script INCREMENTALLY, so an edit written IN PLACE (`cp`, `>` redirection, an editor without atomic
+# save) hands the running gate a modified file at its existing byte offset and it re-executes whatever
+# now lives there — ARBITRARY RE-EXECUTION of the running script, not merely a stale component set.
+# Measured while building this issue's own test for it: a fixture gate re-entered
+# `acquire_gate_slot`, spawned a SECOND slot daemon for one gate-pid, and wedged its queue forever.
+# So a mid-flight change to this file is refused because the process's behaviour is no longer derivable
+# from any version of the file, not just because a component list might differ.
+#
 # FAIL CLOSED RATHER THAN RE-EXEC, and I agree with that call: re-exec is friendlier but adds a loop
 # risk (a script being edited repeatedly) and a second code path, while a queued run that raced an
 # edit is a legitimate thing to refuse. The remedy is a re-run, which is always available.
