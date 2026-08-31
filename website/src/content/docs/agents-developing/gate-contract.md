@@ -129,7 +129,12 @@ carry).
   and plumbing `git diff-tree` does not, so unpinned, a PR that renames a path would lose the old path
   and report `blast-radius 0 RECOGNISED` on a genuinely stale base (a fail-open). **It is
   information, not a verdict** — it cannot change `premerge-assert.sh`'s exit code, and an absent,
-  failing, timed-out or `UNMEASURED` advisory is reported and non-fatal — which is why its output is
+  failing, timed-out or `UNMEASURED` advisory is reported and non-fatal. Its 60s bound carries a
+  **SIGKILL escalation** (`--kill-after`), because plain `timeout <secs>` only SIGTERMs and then waits,
+  so a child ignoring TERM would keep the merge critical path blocked indefinitely; the runner is
+  resolved as `timeout` then `gtimeout` (GNU coreutils on macOS) with `--kill-after` support PROBED, and
+  where none exists the advisory is **SKIPPED and reported**, never run unbounded or behind a bound a
+  child can ignore. Anchoring is the other half of "information, not a verdict", so its output is
   **ANCHORED**: every line, stdout and stderr, begins with `BASE-STALENESS: `, every dynamic field is
   control-character sanitized (git permits newlines in paths, and one would otherwise emit an
   unprefixed line), the verdict appears only on a `verdict ` line carrying a closed-set token, and the
