@@ -307,6 +307,13 @@ three <code dir="auto">AGENT-GATE *SUMMARY</code> blocks, so a review verdict ca
 reverse. Exit codes: <code dir="auto">0</code> PASS, <code dir="auto">1</code> FAIL, <code dir="auto">3</code> NOTHING-TO-REVIEW, <code dir="auto">2</code> usage error. <strong>Any</strong> non-PASS
 terminal <code dir="auto">RESULT</code> — <code dir="auto">NOTHING-TO-REVIEW</code> included — is a failed review round and a blocked merge, never
 “roborev clean”.</p>
+<p><strong>And “roborev clean” means NO UNADDRESSED FINDINGS, not “the tool printed zero” (issue #3626).</strong> A
+lead-deferred finding is re-reported by every later round, so the (correct, unwaivable)
+affirmative-<code dir="auto">NONE</code> requirement below blocked such a merge <strong>forever</strong>. The route past it is a
+<code dir="auto">roborev-defer: findings</code> authorization on the absence waiver’s channel, reported as
+<code dir="auto">findings: DEFERRED (…)</code> — never <code dir="auto">NONE</code> — beside its own <code dir="auto">deferral:</code> key. Every <strong>other</strong> non-PASS
+verdict still blocks exactly as before, and <code dir="auto">findings: UNKNOWN</code>/<code dir="auto">SKIP</code> are <strong>not</strong> deferrable. Full
+mechanism below, under <em>“the unwaivable rule made one merge unobtainable”</em>.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="the-four-rules">The four rules</h3><a class="sl-anchor-link" href="#the-four-rules"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “The four rules”</span></a></div>
 <ol>
 <li>
@@ -720,6 +727,234 @@ nothing, <strong>measured rather than assumed</strong>: <code dir="auto">roborev
 structured path and still PASSes, so the #3312 break-glass is intact, and the verdict-less branch is
 <strong>defensive</strong>, for a payload shape no observed record produces. Making a defensive path fail closed
 is free; making it guess is how a merge gate passes over live findings.</p>
+<p><strong>The unwaivable rule made one merge unobtainable, which is its own defect class (issue #3626).</strong>
+#3586’s requirement is right, and it interacted with a fact nobody designed for: <strong>roborev re-reports a
+lead-deferred finding on every later round.</strong> So once a lead defers a finding — as a nit, as a batched
+follow-up, or by explicit ruling — <code dir="auto">findings: PRESENT (n)</code> persists, <code dir="auto">RESULT</code> stays <code dir="auto">FAIL</code>, and <em>“any
+non-PASS terminal RESULT is a blocked merge”</em> blocks that merge <strong>forever</strong>. Neither escape hatch
+applies: the absence waiver excuses <code dir="auto">prompt-content</code> <strong>absence only</strong>, by design, and a correct
+<code dir="auto">--recheck-job</code> of a findings-bearing job re-reports the same <code dir="auto">FAIL</code>. Measured on PR #3572 job 262: two
+findings, <strong>zero new</strong> — both already filed (#3602, #3613) and both already lead-deferred — 5,937,937
+input / 5,703,168 cached tokens (the largest of 21 rounds), every deterministic key PASS, and the merge
+required an out-of-band lead comment.</p>
+<p>The lane the fix protects is the one that behaved <strong>correctly</strong>: it refused to arm <code dir="auto">--auto</code> over a
+<code dir="auto">FAIL</code>, refused to fix the deferrals to manufacture a green, refused a waiver that does not apply, and
+asked the owner instead. <strong>A rule that punishes the correct behaviour will not survive contact.</strong></p>
+<p>So <em>“roborev clean”</em> is redefined as <strong>NO UNADDRESSED FINDINGS</strong>, and the distinction is made
+mechanical rather than a matter of lead memory. A <strong>second marker</strong> travels the absence waiver’s
+channel:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">roborev-defer: findings issues=&#x3C;N>[,&#x3C;N>...] count=&#x3C;n> base=&#x3C;40-hex> head=&#x3C;40-hex> job=&#x3C;id> reason=&#x3C;why></span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="roborev-defer: findings issues=<N>[,<N>...] count=<n> base=<40-hex> head=<40-hex> job=<id> reason=<why>"><div></div></button></div></figure></div>
+<p>applied with <code dir="auto">--recheck-job &#x3C;id></code>, which enqueues nothing. Everything about the channel is
+<strong>inherited by call, never copied</strong> — the same scanner, with the kind selected explicitly — because a
+second implementation of a channel rule is a second place for it to diverge, and a divergence in a
+channel rule is an authorization bypass: sole nonblank content of a <strong>top-level</strong> PR comment, an author
+on the hard-coded <code dir="auto">ROBOREV_WAIVER_AUTHORS</code> allowlist, author association parsed <strong>structurally</strong> from
+<code dir="auto">gh --json</code>, placeholder reasons refused, and <strong>no part of the marker in any emitted diagnostic</strong> (the
+form lives only in <code dir="auto">--help</code>, because summary blocks get pasted into PR comments as a matter of course).</p>
+<p><strong>There is deliberately no flag, no file in the worktree and no environment variable.</strong> Each would hand
+the constrained party the power to satisfy its own constraint — #3312’s corollary, <em>the constrained
+party must not choose its own enforcer</em> — and a worker could then clear its own findings. That absence
+is asserted <strong>structurally</strong> in the guard suite, because behavioural cases only cover the channels
+someone already thought of.</p>
+<p><strong>The match is affirmative, which is what makes this a match and not a mute button.</strong> <code dir="auto">count=</code> must
+<strong>equal</strong> the observed findings count and <code dir="auto">issues=</code> must be non-empty. A job is a completed review and
+its findings do not change, so <code dir="auto">job=</code> already fixes the finding <em>set</em>; the count equality is the
+affirmative evidence that the findings the authorizer judged are the findings this run observed. Two
+consequences, both deliberate: a <strong>pre-authorization</strong> written before the findings were read fails on a
+count mismatch instead of passing silently, and <strong>any new finding at the same head</strong> raises the observed
+count and fails. That is how the <em>undeferred</em> set is computed without a per-finding identity — which
+roborev’s prose does not provide, and <strong>none is reconstructed from that prose</strong>: the class closed above
+by <em>removing</em> prose reconstruction stays closed.</p>
+<p><strong><code dir="auto">issues=</code> records that the finding is TRACKED, and the issue-state leg is what enforces it.</strong>
+Each number must be an <strong>OPEN</strong> GitHub issue, asked <strong>four-valued</strong>: only a payload
+affirmatively naming that number <strong>and an OPEN state</strong> is <code dir="auto">present</code> and permits a grant; an issue
+GitHub answers does not exist is <code dir="auto">ISSUE-ABSENT</code>; an issue GitHub answers is CLOSED is
+<code dir="auto">ISSUE-CLOSED</code>; and an issue whose existence could <strong>not be asked</strong> — no <code dir="auto">gh</code>, no auth, a
+network/API failure, an unparseable payload, or <strong>any diagnostic that does not say the issue is
+missing</strong> — is <code dir="auto">ISSUE-UNVERIFIABLE</code>. The non-granting states are <strong>textually distinct</strong> because
+they are different operator actions: <em>“that issue number is wrong”</em> / <em>“that issue is closed”</em> /
+<em>“this box cannot reach GitHub”</em>. <strong><code dir="auto">gh issue view</code> exits 1 for both</strong> (measured on gh 2.98.0: <code dir="auto">GraphQL: Could not resolve to an issue or pull request with the number of N.</code> versus <code dir="auto">HTTP 401: Bad credentials</code>), so an
+exit-code-only test is exactly the two-valued predicate that always picks the permissive answer — it
+would grant a deferral over issues <strong>nobody confirmed exist</strong>. The verdict therefore comes from the
+diagnostic, anything unrecognised is a could-not-ask, and a could-not-ask is <strong>never</strong> read as
+verified.</p>
+<p><strong>AND “RETRIEVABLE” WAS NOT ENOUGH — THE CHECK IS DELIBERATELY STRONGER THAN THE CONDITION THAT
+ASKED FOR IT (#3626 round 3).</strong> <code dir="auto">gh issue view</code> returns the number and <strong>exits 0 for a CLOSED
+issue</strong>, so a number-only test made <em>“the finding is tracked”</em> satisfiable by an issue closed as a
+duplicate three weeks ago: <code dir="auto">present</code> ⇒ <code dir="auto">GRANTED</code> ⇒ <code dir="auto">RESULT: PASS</code>, the finding permanently untracked
+while the block asserted it was filed. The lead’s condition said <em>retrievable</em>, and
+closed-is-retrievable satisfies the letter — but the call site, the scanner and the spec all state the
+stronger <strong>not-dropped</strong> claim, and a closed-as-duplicate issue means the finding IS dropped. So the
+claim was made TRUE rather than three claims weakened to match a weaker implementation. <strong>The
+generalisable ruling: when an implementation satisfies the LETTER of a condition while contradicting
+the PROPERTY every statement of it claims, strengthen the implementation.</strong> A false refusal is
+recoverable (reopen the issue, or file a fresh tracking issue and re-authorize) and is the fail-closed
+direction.</p>
+<p><strong>The disposition backstop counts VERIFICATIONS PERFORMED; it does not test the string.</strong> It was
+<code dir="auto">[ -z "$ISSUES" ]</code> — a non-emptiness test standing in for a verification test — and <code dir="auto">ISSUES=","</code>
+passes it, splits into <strong>zero words</strong>, never runs the loop body, and returns with the state still
+<code dir="auto">granted</code>: <code dir="auto">findings: DEFERRED</code> and <code dir="auto">RESULT: PASS</code> with not one <code dir="auto">gh issue view</code> executed. It was
+unreachable only because the <code dir="auto">issues=</code> <em>pattern</em> forbade that value, which is <strong>precisely the upstream
+dependency a backstop must not have</strong>. The count of verifications must now EQUAL the count of declared
+comma-separated fields.</p>
+<p><strong>Three field rules, both marker kinds, one parser.</strong> <code dir="auto">base=</code>/<code dir="auto">head=</code> are <strong>exactly 40 hex</strong> — an
+abbreviated sha is <code dir="auto">MALFORMED</code>, never <code dir="auto">STALE</code>, because it names <em>this</em> review in a spelling the form
+forbids and an authorizer sent to re-check <em>which review</em> they named would find nothing wrong with it.
+A recorded <code dir="auto">reason</code> keeps its internal whitespace <strong>verbatim</strong>; only the <strong>block boundary</strong> renders a
+control character as a visible escape, because the property required is one line per value, not
+collapsed whitespace. And a <code dir="auto">reason</code> may <strong>not contain either marker stem</strong> — refused rather than
+escaped, since an authorizer has no legitimate need for one. That last one carries its own lesson:
+<strong>the structural assert covers the CODE, while a RUNTIME value can inject what no source scan sees —
+an invariant over OUTPUT needs a check on the OUTPUT PATH.</strong></p>
+<p><strong>AND THE RULE IS OVER EVERY EMITTED VALUE, NOT OVER THE <code dir="auto">reason</code> FIELD (roborev job 230).</strong> Fixing
+the field and leaving the class cost a review round — the same guarantee one field over. The <code dir="auto">reason</code>
+is the field an authorizer <em>chooses</em>, so refusing it removes that class outright; but a marker keyword
+also arrives through fields nobody chooses: an unauthorized commenter’s <strong>GitHub login</strong> (which
+<code dir="auto">UNAUTHORIZED</code> has to report in order to say who was refused), <strong><code dir="auto">gh issue view</code>’s stdout and
+stderr</strong> (which reach <code dir="auto">deferral:</code> as an <code dir="auto">ISSUE-UNVERIFIABLE</code> cause), the allowlist, and whatever a
+future key interpolates. So each of the two processes neutralises the keywords at its <strong>one emit
+boundary</strong> — <code dir="auto">safe_value</code> in the structured scanner, <code dir="auto">roborev_safe_line</code> in the wrapper (already the
+single gate for every block value and every DETAILS line) — and never per interpolation site, because
+<strong>a per-site escape is a list to keep complete</strong>. There, unlike the reason, the value is <strong>redacted
+rather than refused</strong>: it is an identity or a diagnostic the run must still report.</p>
+<p>Only where the keyword is <strong>not continued by another letter</strong>, because <strong>a longer word is a different
+word</strong> — the rule the parser already applies to <code dir="auto">roborev-defer: findingsfoo</code>. That boundary is
+load-bearing, not cosmetic: the scanner’s own file name embeds a keyword and is printed by the
+fail-closed <code dir="auto">waiver: UNAVAILABLE (… tool: &#x3C;path>)</code> cause an operator must read to fix the state, and a
+blanket substring redaction turns it into a diagnostic nobody can act on. Declared residual: a
+keyword <em>inside</em> a longer word is left alone — it carries no marker <strong>form</strong>.</p>
+<p>Two boundaries rather than one is safe because the transformation is <strong>display-only</strong>: every
+authorization decision (allowlist, scope, count, retrievability) is made on the <strong>raw</strong> value before
+any renderer runs, so a divergence between the two spellings can only redact differently — never
+grant. <strong>That is why the same rule at two emit boundaries is fine where two marker PARSERS would not
+be: a parser decides, a renderer does not.</strong> And it is deliberately <strong>not</strong> a security layer: a
+GitHub login admits letters, digits and hyphens and not colons or spaces, so it can contain
+<code dir="auto">roborev-defer</code> but never a full stem, and an emitted line begins <code dir="auto">deferral: UNAUTHORIZED (</code>, which
+the sole-content rule refuses. Spec conformance and invariant coverage — nothing more.</p>
+<p><strong>A PR-BODY LINK WAS ALSO REQUIRED, AND THAT LEG WAS DELETED (#3626, lead ruling).</strong> An earlier
+revision demanded each <code dir="auto">issues=</code> number also appear as a local, visible <code dir="auto">#N</code> in the <strong>PR body</strong>
+(<code dir="auto">PR-UNLINKED</code> otherwise), with recognisers for cross-repository references, alphanumeric suffixes,
+fenced blocks, code spans and HTML comments. It is gone, and <strong>the reason is not the bypasses</strong>:</p>
+<blockquote>
+<p><strong>A PR body is editable at any time by anyone with write access, with NO per-edit attribution. A
+top-level comment is permanent and attributable.</strong></p>
+</blockquote>
+<p>So the body-link leg was the <strong>weaker artifact</strong>, and it would stay weaker <strong>even if Markdown parsed
+trivially</strong> — an authorization the constrained party can silently rewrite after it is granted
+evidences nothing. The Markdown-recogniser problem was a <strong>symptom</strong>, not the cause. The requirement’s
+own wording invited it: <em>“name where the finding went”</em> invited a <strong>prose scan</strong>, when the property
+actually wanted is that the finding is <strong>TRACKED</strong>. The census is kept because it is the evidence the
+class does not close — Markdown-handling references in that one predicate went <strong>0 → 11</strong> across two
+review rounds:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>shape</th><th>round</th><th>status when the leg was deleted</th></tr></thead><tbody><tr><td><code dir="auto">other/repo#3602</code> cross-repository</td><td>R1</td><td>closed</td></tr><tr><td><code dir="auto">#3602suffix</code></td><td>R1</td><td>closed</td></tr><tr><td>fenced code block</td><td>R1</td><td>closed</td></tr><tr><td><code dir="auto">&#x3C;!-- #3602 --></code> HTML comment</td><td>R1</td><td>closed</td></tr><tr><td><code dir="auto">`#3602`</code> single-backtick span</td><td>R1</td><td>closed</td></tr><tr><td><code dir="auto">``#3602``</code> multi-backtick span</td><td><strong>R2</strong></td><td><strong>ACCEPTED (bypass)</strong></td></tr><tr><td><code dir="auto">[#3602](https://example.com)</code> explicit link</td><td><strong>R2</strong></td><td><strong>ACCEPTED (bypass)</strong></td></tr><tr><td>4-space indented code block</td><td>—</td><td>ACCEPTED (declared residual)</td></tr><tr><td>GFM autolinks, <code dir="auto">[#N][ref]</code>, raw HTML, entity refs, nested emphasis</td><td>—</td><td>unhandled by any generation</td></tr></tbody></table>
+<p>#3312 (<em>remove the shared channel, do not pick a rarer delimiter</em>) and #3229’s owner ruling (<em>a guard
+with known documented false-PASSes is worse than no guard, because it invites reliance it cannot
+support</em>) both apply. <strong>Subtraction cannot introduce a false PASS</strong>: with nothing predicted about the
+body, nothing is excused by it. Any future strengthening of the disposition must come from an
+<strong>immutable or attributed</strong> artifact — a structured GitHub relation, or the authorization comment
+itself — never from parsing the mutable body of the PR under review. <strong>Reinstating a body scan is
+reinstating generation three.</strong></p>
+<p><strong>What it reports</strong> is a distinct token, and never <code dir="auto">NONE</code>:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">findings: DEFERRED (2, issues=#3602,#3613, authorized @&#x3C;login>, job 262)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">deferral: GRANTED (author=@&#x3C;login> issues=3602,3613 count=2 scope=base=&#x3C;…> head=&#x3C;…> job=262 reason=&#x3C;…>)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">RESULT: PASS</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="findings: DEFERRED (2, issues=#3602,#3613, authorized @<login>, job 262)deferral: GRANTED (author=@<login> issues=3602,3613 count=2 scope=base=<…> head=<…> job=262 reason=<…>)RESULT: PASS"><div></div></button></div></figure></div>
+<p><code dir="auto">NONE</code> stays reachable <strong>only</strong> from the record’s structured <code dir="auto">verdict</code> letter, so nobody grepping
+<code dir="auto">findings: NONE</code> reads a deferred run as a clean review. The <code dir="auto">deferral:</code> key states its own state even
+when nothing was granted — <code dir="auto">NONE</code> / <code dir="auto">STALE</code> / <code dir="auto">MALFORMED</code> / <code dir="auto">UNAUTHORIZED</code> / <code dir="auto">COUNT-MISMATCH</code> /
+<code dir="auto">ISSUE-ABSENT</code> / <code dir="auto">ISSUE-CLOSED</code> / <code dir="auto">ISSUE-UNVERIFIABLE</code> / <code dir="auto">UNAVAILABLE</code>, every one leaving the FAIL — because <em>“your
+marker names the wrong job”</em> and <em>“there is no marker”</em> are different operator actions and a bare FAIL
+distinguishes neither. Per #3312’s own finding, a <strong>marker-only</strong> comment with bad fields is
+<code dir="auto">MALFORMED</code> while a comment carrying the marker <strong>plus other content</strong> is ignored <strong>silently</strong>
+(<code dir="auto">NONE</code>): someone documenting the form never attempted an authorization, and a false accusation
+reprinted on every later run is worse than silence. A marker <strong>attempt</strong> is the stem followed by
+whitespace <strong>or the end of the line</strong>, so a marker-only comment that is exactly the stem
+(<code dir="auto">roborev-defer: findings</code>) is <code dir="auto">MALFORMED</code> and not a fail-quiet <code dir="auto">NONE</code> — an author told “no
+authorization exists” re-reads syntax they typed and concludes the mechanism is broken.</p>
+<p><strong><code dir="auto">findings: UNKNOWN</code> and <code dir="auto">findings: SKIP</code> are not deferrable, in any mode.</strong> Those values mean the
+findings state was never <em>established</em> — we cannot count what we cannot see, so a deferral over one
+would be precisely a pass resting on a state we could not read. Only an affirmatively measured
+<code dir="auto">PRESENT (n)</code> is deferrable, and a bare <code dir="auto">PRESENT</code> with no count is refused for the same reason.</p>
+<p><strong>The two authorizations stay separately scoped and neither falls back to the other.</strong> Distinct marker
+keywords, distinct summary keys (<code dir="auto">waiver:</code> / <code dir="auto">deferral:</code>), distinct verdict tokens (<code dir="auto">WAIVED</code> /
+<code dir="auto">DEFERRED</code>). An absence waiver confers <strong>no</strong> authority over <code dir="auto">findings:</code>; a findings deferral confers
+<strong>none</strong> over <code dir="auto">prompt-content:</code>. A run may legitimately carry both, each granted on its own marker and
+reported under its own key. Collapsing them would let a delivery-artifact waiver excuse a real defect —
+which is exactly the false PASS #3564 removed.</p>
+<p><code dir="auto">DEFERRED</code> is a value of the <strong>closed</strong> verdict grammar, non-failing <strong>only</strong> on the single coupled
+granted state that the grammar scan and the <code dir="auto">findings:</code> gate <strong>both</strong> read — one state, not two, so
+they cannot drift into two opinions about whether one authorization was granted. Re-deriving the
+provenance per gate would <em>be</em> that drift.</p>
+<p><strong>And that admission is confined to one key, <code dir="auto">findings:</code>, by construction</strong> (roborev job 225). The
+scan carries each key’s <strong>name</strong> beside its value and admits the token for <code dir="auto">findings</code> alone; the
+deterministic-key affirmation backstop carries <strong>no</strong> <code dir="auto">DEFERRED</code> arm and does not read the state at
+all. It was first written unconfined, on the reasoning that provenance is what matters and a
+key-scoped test has to be re-argued whenever a key is added — a real argument, and wrong here. <strong>A
+waiver authorizes a <em>property</em></strong> (an absence) that only one key can ever report, so its provenance is
+the whole test and it is correctly not key-scoped. <strong>A deferral authorizes a <em>named set of
+findings</em></strong> and says nothing about whether the reviewer’s diff arrived, whether the push landed or
+whether the reviewed range matched — so an unconfined admission let <strong>one</strong> authorization excuse a
+check <strong>nobody</strong> authorized, and the only thing standing between it and a false PASS was that no other
+key <em>happened</em> to emit the token. That is lesson (1) below, verbatim.</p>
+<p>Relatedly, <strong>no emitted diagnostic reproduces any part of either marker — not even its prefix.</strong> The
+<code dir="auto">MALFORMED</code> detail used to quote the whole required form, and that detail is interpolated into the
+<code dir="auto">waiver:</code>/<code dir="auto">deferral:</code> summary key: the block printed a complete, fillable authorization beside a live
+base/head/job, while a comment two lines from the interpolation asserted it never did. One fix in the
+shared scanner closed it for <strong>both</strong> kinds, because both details come from the one structured parse.
+The absence is now asserted against <strong>every</strong> diagnostic-emitting case rather than only the <code dir="auto">NONE</code>
+state, where it held trivially — <strong>a property asserted only where it cannot fail is not asserted.</strong></p>
 <p><strong>Two transferable lessons.</strong> (1) <em>Delegating a key’s failure to its neighbour is a latent false PASS</em> —
 the coupling is invisible while both keys are populated by the same event and evaporates in the first mode
 where they are not. Ask of every key: <strong>what fails the run if this key alone goes bad?</strong> (2) <em>A
