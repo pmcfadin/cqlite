@@ -788,6 +788,7 @@ pub struct V5CompressedLegacyParser {
 mod block_emit;
 mod block_emit_windowed;
 mod cell_kind;
+mod cell_path_key; // issue #3612 (split out of `complex_column`, campsite #1116)
 mod cell_value;
 // campsite split of `cell_value` (issue #1795): scalar arms + complex ladder.
 mod cell_value_complex;

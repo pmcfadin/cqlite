@@ -16,7 +16,7 @@ impl V5CompressedLegacyParser {
     /// decode the corresponding scalar UDT field values — e.g. `ShortType`/
     /// `ByteType` are needed to read `smallint`/`tinyint` UDT fields, which
     /// otherwise fall through to the blob default.
-    fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
+    pub(super) fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
         // Composite marshal forms carry a `(` after the type name; primitives do
         // not. Reject anything parameterised so we never misread a collection /
         // UDT as a scalar.

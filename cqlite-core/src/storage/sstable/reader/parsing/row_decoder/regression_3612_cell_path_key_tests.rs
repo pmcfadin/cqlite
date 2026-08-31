@@ -271,7 +271,10 @@ fn decimal_cell_path_key_decodes_as_decimal() {
     // scale=2, unscaled=12345 (varint) → 123.45
     let mut bytes = 2i32.to_be_bytes().to_vec();
     bytes.extend_from_slice(&[0x30, 0x39]);
-    match parser().parse_cell_path_key(&bytes, "decimal", "dk").unwrap() {
+    match parser()
+        .parse_cell_path_key(&bytes, "decimal", "dk")
+        .unwrap()
+    {
         Value::Decimal { scale, unscaled } => {
             assert_eq!(scale, 2);
             assert_eq!(unscaled, vec![0x30, 0x39]);
@@ -358,7 +361,8 @@ fn previously_handled_scalar_cell_path_keys_are_unchanged() {
         Value::Uuid([7u8; 16])
     );
     assert_eq!(
-        p.parse_cell_path_key(&5i32.to_be_bytes(), "int", "k").unwrap(),
+        p.parse_cell_path_key(&5i32.to_be_bytes(), "int", "k")
+            .unwrap(),
         Value::Integer(5)
     );
     assert_eq!(
