@@ -3224,6 +3224,76 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7q. THE OBJECT READS RUN UNDER THE ALLOWLIST TOO (roborev job 276, High). They used to run under
+#     a bare `env`, inheriting the caller's environment — the round-13 hole re-opened at the sites
+#     the job-268 migration ADDED. An inherited `GIT_DIR` points a read at ANOTHER repository, and
+#     `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0` injects a promisor remote or an `insteadOf`, which is
+#     the lazy-fetch-and-execute path the migration removed.
+#
+#     TWO VECTORS, EACH WITH ITS OWN POSITIVE CONTROL proving it takes effect on a plain git here:
+#       GIT_DIR         — a plain `git rev-parse --git-dir` must report the INJECTED directory.
+#       GIT_CONFIG_*    — a plain `git config --get` must return the INJECTED value.
+#     Then the pre-flight must be unaffected: same verdict, same baseline sha, same missing set as
+#     an unpolluted run of the SAME fixture. Comparing against that run rather than against a
+#     hard-coded expectation is deliberate — it makes the case about the environment and nothing
+#     else.
+#
+#     WHICH VECTOR DISCRIMINATES, measured rather than assumed: with the fix reverted (a bare
+#     `env`), `GIT_DIR` reds this case — the reads land in the decoy repository and the verdict
+#     becomes `baseline-probe-unmeasured`. The two config-injection vectors do NOT change the
+#     outcome in this fixture even unfixed, because a promisor pointing at a remote that does not
+#     exist alters nothing the reads need; they are kept because they cost one run each and would
+#     catch a future read that DOES consult remote config. Saying so is the point: a case that
+#     silently relies on one of three inputs reads as three times the coverage it has.
+# ---------------------------------------------------------------------------
+base_ei=$(mkbaseline base-envread "$ADD_SENTINEL")
+ei_fx=$(mkbranch envread "$base_ei" - )
+ei_decoy="$tmp/envread-decoy"
+mkdir -p "$ei_decoy"
+git init -q "$ei_decoy/other" >/dev/null 2>&1
+ei_clean=$(hook "$ei_fx")
+# CONTROL 1: GIT_DIR really redirects a plain git in this environment.
+ei_gd_ctl=$( cd "$ei_fx" && GIT_DIR="$ei_decoy/other/.git" git rev-parse --git-dir 2>/dev/null )
+# CONTROL 2: GIT_CONFIG_COUNT really injects config.
+ei_cc_ctl=$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=cs3544.injected GIT_CONFIG_VALUE_0=yes \
+              git config --get cs3544.injected 2>/dev/null)
+if [ "$(field KIND "$ei_clean")" != ok ]; then
+  bad "3544-read-env-allowlisted: the unpolluted baseline run did not reach KIND ok ('$(field KIND "$ei_clean")') — nothing to compare a polluted run against"
+elif [ -z "$ei_gd_ctl" ] || [ "$ei_gd_ctl" = ".git" ]; then
+  bad "3544-read-env-allowlisted: the GIT_DIR CONTROL did not redirect a plain git (got '$ei_gd_ctl') — the vector is not reproducible here, so the pre-flight being unaffected proves nothing"
+elif [ "$ei_cc_ctl" != yes ]; then
+  bad "3544-read-env-allowlisted: the GIT_CONFIG_COUNT CONTROL did not inject config (got '$ei_cc_ctl') — the vector is not reproducible here"
+else
+  ei_bad=""
+  for _ei_vec in git-dir config-count config-parameters; do
+    case "$_ei_vec" in
+      git-dir)   _ei_env=("GIT_DIR=$ei_decoy/other/.git") ;;
+      config-count)
+        # A promisor remote plus an insteadOf: the exact pair that turns a read into an executing
+        # fetch. If any of it reached the read, the baseline set would change or the run would fail.
+        _ei_env=(GIT_CONFIG_COUNT=2
+                 "GIT_CONFIG_KEY_0=remote.injected.promisor" "GIT_CONFIG_VALUE_0=true"
+                 "GIT_CONFIG_KEY_1=extensions.partialclone" "GIT_CONFIG_VALUE_1=injected") ;;
+      config-parameters)
+        _ei_env=("GIT_CONFIG_PARAMETERS='extensions.partialclone'='injected'") ;;
+    esac
+    _ei_out=$( fx "$ei_fx" && env "${_ei_env[@]}" bash "$ei_fx/scripts/agent-gate.sh" \
+                 --component-set-line full 2>/dev/null )
+    if [ "$(field KIND "$_ei_out")" != "$(field KIND "$ei_clean")" ] \
+       || [ "$(field SHA "$_ei_out")" != "$(field SHA "$ei_clean")" ] \
+       || [ "$(field VERDICT "$_ei_out")" != "$(field VERDICT "$ei_clean")" ] \
+       || [ "$(field MISSING "$_ei_out")" != "$(field MISSING "$ei_clean")" ]; then
+      ei_bad="${ei_bad:+$ei_bad }$_ei_vec(kind=$(field KIND "$_ei_out") sha=$(field SHA "$_ei_out") verdict=$(field VERDICT "$_ei_out"))"
+    fi
+  done
+  if [ -z "$ei_bad" ]; then
+    ok "3544-read-env-allowlisted: GIT_DIR and injected git config both take effect on a plain git here (controls) yet change NOTHING about the pre-flight's verdict, baseline sha or missing set — every read runs under env -i plus the one allowlist"
+  else
+    bad "3544-read-env-allowlisted: the inherited environment changed the pre-flight: $ei_bad (clean run was kind=$(field KIND "$ei_clean") sha=$(field SHA "$ei_clean") verdict=$(field VERDICT "$ei_clean"))"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 7i. THE URL NEVER ENTERS ANY ARGV (job 242). An accepted canonical URL may carry a token, and
 #     a URL in a `git` argument is readable via `ps` / /proc/<pid>/cmdline. SOURCE-SHAPE assert,
 #     said plainly: proving absence from argv behaviourally would mean sampling /proc against a

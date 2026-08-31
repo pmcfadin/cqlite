@@ -3387,6 +3387,21 @@ _component_set_local_manifest_check() {
 # route of one family, after `insteadOf` on the fetch and `ext::` on the transfer hop. Suppressing
 # it per call site had failed three times; this removes the mechanism instead.
 #
+# EVERY ONE OF THESE READS RUNS UNDER `env -i` PLUS THE ONE ALLOWLIST (roborev job 276, High).
+# They used to run under a bare `env`, inheriting the caller's environment — which is the round-13
+# hole re-opened at the sites this migration ADDED, not a new route: an inherited `GIT_DIR` points
+# the read at another repository, and `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*` or
+# `GIT_CONFIG_PARAMETERS` inject a promisor remote or an `insteadOf`, restoring exactly the
+# lazy-fetch-and-execute path the migration removed. The rationale for the bare `env` expired when
+# the reads moved: it was "these are lane reads, governed by the same environment as the rest of
+# the gate", and they are now scratch reads whose environment must be ours.
+#
+# ONE SCHEME, NOT TWO: `_CS_GIT_ENV` first (transport reachability plus every neutraliser), then
+# `_CS_READ_ENV` on top for what is specific to the read LOCATION. `GIT_ALTERNATE_OBJECT_DIRECTORIES`
+# has to be IN that array rather than inherited — with `env -i` an inherited alternate is gone, and
+# the object join with it (measured while building this: dropping the alternate makes every
+# cross-source ancestry answer `unknown`).
+#
 # `$_CS_READ_ENV` carries `GIT_ALTERNATE_OBJECT_DIRECTORIES=<the LANE's object dir>` when reading
 # in the scratch, because HEAD's objects live in the lane; it expands to NOTHING when reading in
 # the lane itself (the `${x[@]+…}` form is the bash-3.2-safe spelling for an empty array under
@@ -3402,7 +3417,7 @@ _CS_PRESENCE_ERR=""
 _component_set_manifest_presence() {
   local rev="$1" tmpd="$2" rc line ltype lpath
   _CS_PRESENCE=""; _CS_PRESENCE_ERR=""
-  _component_set_bounded "$_CS_BOUND_SECS" env ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -3494,7 +3509,7 @@ _component_set_set_at_rev() {
     # PATH 1 — THE COMMITTED MANIFEST, AND NOTHING ELSE. Bounded for the same reason as every
     # read here (job 210, finding 1): `git show <rev>:<path>` reads a BLOB, and in a PARTIAL
     # clone (`--filter=blob:none`) the blob is fetched LAZILY.
-    _component_set_bounded "$_CS_BOUND_SECS" env ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
+    _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then
       # PRESENT BUT UNREADABLE IS AN ERROR, NEVER A FALLBACK: the data is there, so a run that
@@ -3524,7 +3539,7 @@ _component_set_set_at_rev() {
   fi
 
   # PATH 2 — THE TRANSITIONAL TEXT EXTRACTION, reachable ONLY from `verified-absent` above.
-  _component_set_bounded "$_CS_BOUND_SECS" env ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
+  _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_REV_ERRKIND=unreadable
@@ -3572,16 +3587,16 @@ _component_set_set_at_rev() {
 _component_set_is_partial() {
   local out
   # local-only: a config read (does a promisor remote exist?). Contacts nothing.
-  out=$(git -C "$REPO_ROOT" config --get-regexp 'remote\..*\.promisor' 2>/dev/null || true)
+  out=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" config --get-regexp 'remote\..*\.promisor' 2>/dev/null || true)
   if [ -n "$out" ]; then printf yes; return 0; fi
   # local-only: the repository-format extension a partial clone records. Config read only.
-  out=$(git -C "$REPO_ROOT" config --get extensions.partialclone 2>/dev/null || true)
+  out=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" config --get extensions.partialclone 2>/dev/null || true)
   if [ -n "$out" ]; then printf yes; return 0; fi
   # An AFFIRMATIVE "no" requires the config to have been READABLE. `git config --get` exits 1 for
   # "not found" and something else for "cannot read", so a definite answer needs one successful
   # config read; otherwise the state is unknown and the caller takes the conservative branch.
   # local-only: config read.
-  if git -C "$REPO_ROOT" config --list >/dev/null 2>&1; then printf no; return 0; fi
+  if env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" config --list >/dev/null 2>&1; then printf no; return 0; fi
   printf unknown
 }
 
@@ -3606,13 +3621,13 @@ _component_set_is_partial() {
 _component_set_is_shallow() {
   local out sf
   # local-only: reads repository state; no object access, no remote contact.
-  out=$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null || true)
+  out=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null || true)
   case "$out" in
     true)  printf yes; return 0 ;;
     false) printf no;  return 0 ;;
   esac
   # local-only: resolves a path INSIDE the git dir (no object read, no network).
-  sf=$(git -C "$REPO_ROOT" rev-parse --git-path shallow 2>/dev/null || true)
+  sf=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --git-path shallow 2>/dev/null || true)
   if [ -n "$sf" ]; then
     if [ -s "$sf" ]; then printf yes; else printf no; fi
     return 0
@@ -3797,10 +3812,10 @@ _component_set_probe() {
 # probe, recording everything in the _CS_* globals. NEVER exits, never emits; the
 # verdict mapping and the emit live in the two functions below.
 _component_set_probe_inner() {
-  # `GIT_NO_LAZY_FETCH=1` on EVERY object read, in both paths: a no-op in the scratch (no promisor
-  # there) and a no-op in a non-partial clone, protective only if the partial-clone probe is ever
-  # wrong about an exotic promisor setup. Belt; see the allowlist for why it is not the control.
-  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=("GIT_NO_LAZY_FETCH=1"); _CS_HEAD_SHA=""; _CS_PARTIAL=""
+  # `_CS_READ_ENV` now carries ONLY what is specific to a read location (the alternate). The
+  # neutralisers — `GIT_NO_LAZY_FETCH`, `GIT_NO_REPLACE_OBJECTS`, the config suppressors — live in
+  # the ONE allowlist (`_CS_GIT_ENV`) that every git call in this pre-flight now runs under.
+  _CS_READ_DIR="$REPO_ROOT"; _CS_READ_ENV=(); _CS_HEAD_SHA=""; _CS_PARTIAL=""
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""; _CS_BASE_OBJ=""
@@ -3814,7 +3829,7 @@ _component_set_probe_inner() {
     _CS_KIND=no-tool; _CS_DETAIL="git is not on PATH"; return 0
   fi
   # local-only: reads .git; touches no remote and cannot lazily fetch (no object read).
-  if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  if ! env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     _CS_KIND=no-git; _CS_DETAIL="$REPO_ROOT is not a git worktree"; return 0
   fi
   local origin_url origin_rc
@@ -4163,7 +4178,7 @@ _component_set_probe_inner() {
   # store of the parent checkout, which is exactly the one HEAD's objects live in.
   local lane_objects
   # local-only: resolves a PATH inside the git dir. No object is read and no remote is contacted.
-  lane_objects=$(git -C "$REPO_ROOT" rev-parse --git-path objects 2>/dev/null || true)
+  lane_objects=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --git-path objects 2>/dev/null || true)
   # MADE ABSOLUTE, because `--git-path` answers RELATIVE TO THE REPOSITORY ROOT for a plain clone
   # (`.git/objects`) and absolute only for a worktree (`/…/repo/.git/objects` — the SHARED store).
   # A relative value would be resolved against the SCRATCH repository, which is a different
@@ -4181,7 +4196,7 @@ _component_set_probe_inner() {
       return 0 ;;
   esac
   _CS_READ_DIR="$csdir/repo"
-  _CS_READ_ENV=("GIT_NO_LAZY_FETCH=1" "GIT_ALTERNATE_OBJECT_DIRECTORIES=$lane_objects")
+  _CS_READ_ENV=("GIT_ALTERNATE_OBJECT_DIRECTORIES=$lane_objects")
   _CS_SHA="$cssha"
   fi
   # ---- end of the OBJECTS-ABSENT (slow) path. Both paths have now set `_CS_SHA` to a commit
@@ -4253,14 +4268,14 @@ _component_set_probe_inner() {
   # partial-clone filter, so resolving it is genuinely local; an unresolvable HEAD (unborn, or a
   # broken detached HEAD) is INDETERMINATE below, exactly as an unanswerable probe was before.
   # local-only: resolves a ref plus a COMMIT object, neither of which a filter omits.
-  _CS_HEAD_SHA=$(env GIT_NO_LAZY_FETCH=1 git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || true)
+  _CS_HEAD_SHA=$(env -i "${_CS_GIT_ENV[@]}" git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "HEAD^{commit}" 2>/dev/null || true)
   if [ -z "$_CS_HEAD_SHA" ]; then
     rc=128
   else
   # local-only: walks COMMIT parents in `$_CS_READ_DIR`, whose objects are either its own or come
   # from the lane via an alternate. No filter omits commits, the scratch configures no promisor,
   # and an alternate carries no config — so this read has no route to the network at all.
-  env ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" merge-base --is-ancestor "$_CS_SHA" "$_CS_HEAD_SHA" >/dev/null 2>&1; rc=$?
+  env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" merge-base --is-ancestor "$_CS_SHA" "$_CS_HEAD_SHA" >/dev/null 2>&1; rc=$?
   fi
   local shallow
   case "$rc" in
