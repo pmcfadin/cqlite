@@ -2816,6 +2816,10 @@ _component_set_drop_capture_files() {
 # granularity is 1s, which is irrelevant against a 120s bound and costs the normal path
 # nothing: the loop exits as soon as the child is gone.
 _CS_UNBOUNDABLE_RC=199
+# Returned when the child ran but its captured STDOUT could not be replayed in full (roborev job
+# 292). Distinct from 199 ("not run") and from 124/137 ("bound exceeded"), because the remedy and
+# the sentence differ: the command succeeded and its OUTPUT is unusable.
+_CS_REPLAY_RC=198
 # Bound applied to every network-capable operation in this pre-flight, in seconds. ONE
 # variable, read by every call site AND by the diagnostics, so the enumeration below cannot
 # describe a bound the code does not apply — it used to be a `120` literal at five call sites
@@ -2980,7 +2984,19 @@ _component_set_bounded() {
   # REPLAY, in the caller's own streams, AFTER the child is done. Stdout and stderr stay
   # SEPARATE (a caller that wants them merged says `2>&1` at its own call site, and gets
   # exactly that); interleaving order is lost, which nothing here depends on.
-  cat "$_CS_CAP_OUT" 2>/dev/null || true
+  # A FAILED STDOUT REPLAY IS A FAILED MEASUREMENT, NOT A COSMETIC PROBLEM (roborev job 292). This
+  # used to be `|| true`. Every caller that PARSES output redirects this stdout into a file and then
+  # reads it, so a partial replay — storage filling, a broken pipe — leaves a TRUNCATED manifest
+  # that is still perfectly GRAMMATICAL: every line a valid component name, so the closed-grammar
+  # parser cannot see the loss, and the missing trailing components produce a false PASS. The
+  # child's own status is therefore NOT returned when its output did not survive.
+  #
+  # Stderr's replay stays best-effort: it feeds diagnostics only, and losing part of a message must
+  # not turn a measured result into a refusal.
+  if ! cat "$_CS_CAP_OUT" 2>/dev/null; then
+    cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
+    return "$_CS_REPLAY_RC"
+  fi
   cat "$_CS_CAP_ERR" >&2 2>/dev/null || true
   return "$rc"
 }
@@ -3465,8 +3481,68 @@ _component_set_extract_declaration() {
 #
 # NO EXTERNAL COMMAND: this is a local file read plus string compares, so it cannot hang and
 # needs no bound — which is also why it runs BEFORE the fetch.
+# _component_set_running_gate_check: does the gate script ON DISK still declare what THIS PROCESS
+# loaded? Sets `_CS_KIND=gate-script-changed` and returns 1 on disagreement.
+#
+# WHY (roborev job 292, High — the FOURTH instance of one family). Round 20 moved the pre-flight
+# INSIDE the certification window that `_tree_recapture_after_slot` opens. But one of its INPUTS
+# still came from outside it: `COMPONENTS` is an array bash loaded when it sourced this file, before
+# the queue. So a gate script that GAINED a component while the run was queued was validated against
+# the OLD in-memory array — which matched the unchanged manifest — and the recaptured tree could take
+# a full PASS for a component that never executed. The rule needs stating one level up from round
+# 20's wording:
+#
+#     A CHECK AND EVERY INPUT IT REASONS ABOUT MUST BE INSIDE THE WINDOW IT CERTIFIES.
+#     Being inside yourself is not enough if you compare against a snapshot taken outside.
+#
+# FAIL CLOSED RATHER THAN RE-EXEC, and I agree with that call: re-exec is friendlier but adds a loop
+# risk (a script being edited repeatedly) and a second code path, while a queued run that raced an
+# edit is a legitimate thing to refuse. The remedy is a re-run, which is always available.
+#
+# TWO INPUTS ARE CHECKED, and the boundary is deliberate: this verdict asserts (a) the component SET
+# and (b) which upstream the baseline came from, so both are re-read from the tree being certified.
+# WHAT IS NOT CHECKED, stated so it is not mistaken for coverage: any OTHER edit to the gate script
+# during the queue — logic, a bound, a comment — is invisible here. That is a residual, not an
+# oversight: a digest of the whole script captured at startup would close it, and it needs an
+# external hasher (`cksum`) plus its own tool-list entries, so it is a decision rather than a
+# detail. Recorded for whoever takes it.
+_component_set_running_gate_check() {
+  local gate_disk="$REPO_ROOT/scripts/$(basename "$GATE_SELF")" disk_canon="" line
+  if [ ! -f "$gate_disk" ] || [ ! -r "$gate_disk" ]; then
+    _CS_KIND=gate-script-changed
+    _CS_DETAIL="the gate script this process is executing is no longer readable at $gate_disk, so its own component set cannot be compared with the tree being certified — remedy: re-run the gate"
+    return 1
+  fi
+  if ! _component_set_extract_declaration "$gate_disk"; then
+    _CS_KIND=gate-script-changed
+    _CS_DETAIL="the COMPONENTS declaration in the gate script ON DISK could not be read ($_CS_DECL_ERR), so this run cannot show that what it dispatches is what the certified tree declares — remedy: re-run the gate"
+    return 1
+  fi
+  if [ "$_CS_PARSED_SET" != "${COMPONENTS[*]}" ]; then
+    _CS_KIND=gate-script-changed
+    _CS_DETAIL="the gate script CHANGED while this run was queued: it now declares $_CS_PARSED_N component(s) and this process is dispatching ${#COMPONENTS[@]} (the array was loaded before the queue). A PASS would certify the tree on disk for a set it never ran — remedy: re-run the gate"
+    return 1
+  fi
+  # …and the upstream identity, the other thing the verdict asserts. Read with the shell only.
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '_CS_CANONICAL_REMOTE="'*'"') disk_canon="${line#_CS_CANONICAL_REMOTE=\"}"; disk_canon="${disk_canon%\"}" ;;
+    esac
+  done <"$gate_disk"
+  if [ "$disk_canon" != "$_CS_CANONICAL_REMOTE" ]; then
+    _CS_KIND=gate-script-changed
+    _CS_DETAIL="the gate script on disk pins a DIFFERENT canonical upstream than this process is comparing against, so the baseline identity in this verdict is not the one the certified tree would use — remedy: re-run the gate"
+    return 1
+  fi
+  return 0
+}
+
 _component_set_local_manifest_check() {
   local f="$REPO_ROOT/$_CS_MANIFEST_REL" rc only_gate="" only_man="" c padded_man padded_gate
+  # FIRST: is the array this process holds still what the tree declares? Everything below compares
+  # against `${COMPONENTS[@]}`, so if that snapshot is stale every later comparison is against the
+  # wrong document (job 292).
+  _component_set_running_gate_check || return 1
   # A SYMLINK IS REFUSED HERE TOO, and this is the half that made the attack work (job 285): `-f`
   # FOLLOWS a symlink, so a link to a full manifest passed local validation while the COMMITTED
   # object published its target text as the whole baseline. Both halves must read the same
@@ -3575,7 +3651,9 @@ _component_set_manifest_presence() {
   _component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" ${_CS_READ_ENV[@]+"${_CS_READ_ENV[@]}"} git --no-replace-objects -C "$_CS_READ_DIR" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    if [ "$rc" -eq "$_CS_REPLAY_RC" ]; then
+      _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL ran but its captured output could not be replayed in full (rc $rc), so the presence answer would rest on a TRUNCATED read"
+    elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
       _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the tree lazily is the usual cause)"
     elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
       _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL could not be run under a bound, so it was NOT RUN (rc $rc)"
@@ -3703,7 +3781,9 @@ _component_set_set_at_rev() {
       # cannot read it has not measured the baseline — and reading the script text instead
       # would substitute a different, brittler source for one that exists.
       _CS_REV_ERRKIND=unreadable
-      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      if [ "$rc" -eq "$_CS_REPLAY_RC" ]; then
+        _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL and the read succeeded, but its captured output could not be replayed in full (rc $rc) — a TRUNCATED manifest is still grammatical, so it is refused rather than parsed"
+      elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL but reading it EXCEEDED the ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause); the TEXT fallback is not taken when the manifest EXISTS"
       elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
         _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL but 'git show' could not be run under a bound, so it was NOT RUN (rc $rc); the TEXT fallback is not taken when the manifest EXISTS"
@@ -3749,7 +3829,9 @@ _component_set_declaration_at_rev() {
   rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_REV_ERRKIND=unreadable
-    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    if [ "$rc" -eq "$_CS_REPLAY_RC" ]; then
+      _CS_REV_ERR="${pre}reading $rev:$gate_rel succeeded but its captured output could not be replayed in full (rc $rc) — a TRUNCATED declaration could parse to a SHORT component set, so it is refused"
+    elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
       _CS_REV_ERR="${pre}reading $rev:$gate_rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
     elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
       _CS_REV_ERR="${pre}git show $rev:$gate_rel could not be run under a bound, so it was NOT RUN (rc $rc)"

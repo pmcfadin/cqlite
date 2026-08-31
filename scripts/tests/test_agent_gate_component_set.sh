@@ -38,10 +38,11 @@
 #                  manifest-stale (3e2); no-git, baseline-workspace, no-tool (3f);
 #                  unboundable (3g);
 #                  baseline-probe-unmeasured (3a-iv); baseline-ref-unparsable (3a-v);
+#                  gate-script-changed (7u);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10).
-# EIGHTEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
-# set from several places, and `ok` is the nineteenth value). THE SET CHANGED SHAPE with #3544
+# TWENTY is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is set
+# from several places, and `ok` is the twenty-first value). THE SET CHANGED SHAPE with #3544
 # REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
 # `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
 # fail at (`baseline-unreadable`, `baseline-set-garbage`, `baseline-set-empty`,
@@ -2493,14 +2494,25 @@ win_fx=$(mkbranch windowed "$base_win" - --from-origin)
 # DISABLES the cap — and then the run never queues, so the edit could not land inside the window.
 mkdir -p "$win_fx/scripts/lib"
 cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$win_fx/scripts/lib/" 2>/dev/null
-win_slots="$tmp/window-slots"
-win_ready="$tmp/window-holder.ready"
-win_sum="$tmp/window-summary.txt"
-win_log="$tmp/window.log"
-mkdir -p "$win_slots"
 if [ ! -f "$win_fx/scripts/lib/gate_slot_daemon.py" ] || ! command -v python3 >/dev/null 2>&1; then
-  echo "skip - 3544-preflight-in-window: the slot daemon or python3 is unavailable, so the queue window cannot be held open"
+  echo "skip - 3544-preflight-in-window[manifest]: the slot daemon or python3 is unavailable, so the queue window cannot be held open"
+  echo "skip - 3544-preflight-in-window[gate-script]: same precondition"
 else
+for win_edit in manifest gate-script; do
+  case "$win_edit" in
+    manifest)    win_want=manifest-stale ;;
+    gate-script) win_want=gate-script-changed ;;
+  esac
+  # A FRESH FIXTURE PER EDIT: the previous iteration leaves its edit in place, and reusing it would
+  # make the second case observe the first case's damage rather than its own.
+  win_fx=$(mkbranch "windowed-$win_edit" "$base_win" - --from-origin)
+  mkdir -p "$win_fx/scripts/lib"
+  cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$win_fx/scripts/lib/" 2>/dev/null
+  win_slots="$tmp/window-slots-$win_edit"
+  win_ready="$tmp/window-holder-$win_edit.ready"
+  win_sum="$tmp/window-summary-$win_edit.txt"
+  win_log="$tmp/window-$win_edit.log"
+  mkdir -p "$win_slots"
   # HOLD THE ONLY SLOT with a second instance of the gate's own daemon, tied to a throwaway pid.
   sleep 300 &
   win_holder=$!
@@ -2532,11 +2544,23 @@ else
       sleep 0.2
       win_j=$((win_j + 1))
     done
-    # THE EDIT, made while the run is QUEUED: drop a component from the manifest so it no longer
-    # matches the gate's own COMPONENTS array. Post-recapture that must FAIL the run.
+    # THE EDIT, made while the run is QUEUED. Two shapes, one harness (job 292 added the second):
+    #   manifest    — drop a component from the manifest so it no longer matches the array
+    #                 -> `manifest-stale`
+    #   gate-script — ADD a component to the on-disk COMPONENTS array while leaving the manifest
+    #                 alone. The running process still holds the OLD array, so the manifest and the
+    #                 array agree and the manifest check passes; only comparing the array against
+    #                 the DECLARATION ON DISK catches it -> `gate-script-changed`
     if [ "$win_queued" -eq 1 ]; then
-      grep -vx -- 'smoke' "$win_fx/scripts/agent-gate.components" >"$tmp/window-manifest.txt"
-      cp "$tmp/window-manifest.txt" "$win_fx/scripts/agent-gate.components"
+      case "$win_edit" in
+        manifest)
+          grep -vx -- 'smoke' "$win_fx/scripts/agent-gate.components" >"$tmp/window-manifest.txt"
+          cp "$tmp/window-manifest.txt" "$win_fx/scripts/agent-gate.components" ;;
+        gate-script)
+          sed 's|^COMPONENTS=(file-size|COMPONENTS=(zz-added-while-queued file-size|' \
+              "$win_fx/scripts/agent-gate.sh" >"$tmp/window-gate.sh"
+          cp "$tmp/window-gate.sh" "$win_fx/scripts/agent-gate.sh" ;;
+      esac
     fi
     kill "$win_holder" 2>/dev/null || true
     wait "$win_pid" 2>/dev/null; win_rc=$?
@@ -2547,13 +2571,14 @@ else
       sed -n '1,5p' "$win_log" 2>/dev/null
     elif [ "$win_rc" -ne 0 ] \
        && grep -q '^component-set: FAIL-CLOSED (#3544)' "$win_sum" 2>/dev/null \
-       && grep -q 'manifest-stale' "$win_sum" 2>/dev/null; then
-      ok "3544-preflight-in-window: a manifest edited WHILE THE RUN WAS QUEUED is caught after the slot wait — the pre-flight is repeated inside the window the recapture opens, so the emitted line describes the tree that actually ran"
+       && grep -q "$win_want" "$win_sum" 2>/dev/null; then
+      ok "3544-preflight-in-window[$win_edit]: an edit made WHILE THE RUN WAS QUEUED is caught after the slot wait ($win_want) — the check AND the input it reasons about are both inside the window the recapture opens"
     else
-      bad "3544-preflight-in-window: expected a FAIL-CLOSED component-set line naming manifest-stale after an in-queue edit (rc=$win_rc)"
+      bad "3544-preflight-in-window[$win_edit]: expected a FAIL-CLOSED component-set line naming $win_want after an in-queue edit (rc=$win_rc)"
       grep -E '^(RESULT|component-set|preflight)' "$win_sum" 2>/dev/null | head -4
     fi
   fi
+done
 fi
 
 # ---------------------------------------------------------------------------
@@ -2668,7 +2693,10 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=18   # -baseline-transfer-mismatch: the transfer it detected is GONE (job
+DECLARED_KIND_COUNT=20   # +gate-script-changed: the gate script (its COMPONENTS declaration or
+                         # its canonical-upstream pin) differs from what THIS PROCESS loaded —
+                         # an input crossing the certification window (job 292)
+                         # -baseline-transfer-mismatch: the transfer it detected is GONE (job
                          # 264) — the baseline objects are read out of the isolated scratch
                          # store instead of being fetched into this repository, so the class is
                          # ELIMINATED rather than detected.
