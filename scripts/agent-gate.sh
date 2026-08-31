@@ -2993,7 +2993,7 @@ LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
 #   (3) NAMED-AS-UNOBSERVABLE, where cargo genuinely runs under a driver whose argv this
 #       shell can never see: python-bindings / node-bindings (declared `indirect:<driver>`
 #       in _fm_component_class) and the scoped-tests --lite PYTHON TIER, whose maturin
-#       build runs in a child process (_fm_note_python_tier appends the same
+#       build runs in a child process (_fm_note_maturin_rc appends the same
 #       `via <driver>: feature set NOT observed` text, ADDITIVELY beside the rust sets a
 #       mixed diff also observes). This is deliberately DISTINCT from `UNDECLARED`:
 #       "nobody said" and "known to be indirect, therefore unobservable" are different
@@ -3036,7 +3036,8 @@ _fm_note() {
 # _fm_indirect_desc <driver>: THE ONE SPELLING of "cargo ran, under a driver this
 # observer cannot see". Used by BOTH the class-based rendering (_fm_annotate's
 # `indirect:<driver>` arm, for python-bindings / node-bindings) AND the per-invocation
-# record the scoped python tier appends (_fm_note_python_tier). One function, because a
+# record the driver-reach recorders append (_fm_note_driver / _fm_observe_driver). One
+# function, because a
 # reader must see ONE concept: two spellings of the same state read as two states, and
 # the whole subject of this issue is that a block's words are load-bearing.
 #
@@ -3045,6 +3046,15 @@ _fm_note() {
 # and we KNOW this observer structurally cannot see its argv" — a different, and more
 # honest, statement (roborev job 269, blocker 1).
 _fm_indirect_desc() { printf 'via %s: feature set NOT observed' "$1"; }
+
+# _fm_unobservable_desc <why>: THE ONE SPELLING of "this shell cannot say whether cargo ran
+# at all, let alone under what features" (roborev job 273, F2). Distinct from
+# _fm_indirect_desc in exactly one way, and it is the important one: _fm_indirect_desc
+# ASSERTS that cargo ran (under a named driver whose reach was recorded), while this asserts
+# NOTHING in either direction. A component with no nameable single driver — tooling-tests,
+# whose ~60 child scripts may or may not compile — gets this, because the alternative is a
+# claim we cannot support.
+_fm_unobservable_desc() { printf 'cargo not observable: %s' "$1"; }
 
 # _fm_abbrev_features <csv>: render a feature list at bounded width. Up to 5 features
 # print in full; beyond that the count leads and the remainder is named as elided
@@ -3181,14 +3191,28 @@ env() {
 }
 
 # ---------------------------------------------------------------------------
-# _fm_component_class <name>: the DECLARATION site (see the header). Three classes:
-#   cargo             — invokes cargo in the gate's own shell (or records its own sets
-#                       from a hoisted variable); the annotation must be OBSERVED, and
-#                       its absence renders UNDECLARED.
+# _fm_component_class <name>: the DECLARATION site (see the header). FOUR classes:
+#   cargo             — invokes cargo IN THE GATE'S OWN SHELL, or records its own sets
+#                       from inside a `bash -c` body via _fm_observe_child; the annotation
+#                       must be OBSERVED, and its absence renders UNDECLARED.
 #   no-cargo          — invokes no cargo at all, anywhere: git/wc, shell guards, python.
-#   indirect:<driver> — cargo DOES run, under a driver this observer cannot see, so the
-#                       feature set is honestly reported as not observed rather than
-#                       guessed at.
+#   indirect:<driver> — cargo DOES run, under a NAMED driver this observer cannot see, so
+#                       the feature set is honestly reported as not observed rather than
+#                       guessed at. Such a component MUST record whether its driver was
+#                       REACHED, at execution time, from an explicit signal (an rc, or a
+#                       recorder call on the line before the driver runs) — never assumed
+#                       from the terminal status (roborev job 273, F3).
+#   unobservable:<why> — this shell can say NEITHER what cargo ran NOR whether any did,
+#                       and no single driver can be named to record a reach against. The
+#                       class text states the reason; no claim is made in either direction.
+#
+# THE RULE THAT DECIDES BETWEEN THEM (roborev job 273, F2): the cargo/env interceptors are
+# deliberately NOT exported (see the header), so class `cargo` means "observable in the
+# gate's own shell, or self-recorded from a body". A component whose cargo runs only in a
+# CHILD PROCESS is therefore NOT class `cargo` — it is `indirect:<driver>` (one nameable
+# driver, whose reach is recorded) or `unobservable:<why>` (no such driver). Declaring one
+# `cargo` makes a PASSing run read UNDECLARED and — worse — lets a FAILing run claim it
+# "FAILed before its first cargo invocation" when a child cargo build really ran.
 # scoped-tests is not in COMPONENTS (run_scoped_tests appends it to NAMES in --lite /
 # --delta) but appears in those blocks, so it is classified here too.
 _fm_component_class() {
@@ -3211,7 +3235,17 @@ _fm_component_class() {
     bti-multiclustering|query-semantics-oracle|flight-query-semantics-oracle) printf 'cargo' ;;
     flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf 'cargo' ;;
     binding-rust-tests|oom-audit|parity-report|operator-metrics-doc) printf 'cargo' ;;
-    kit-dashboard-drift|tooling-tests|minimal-build|all-features-check|smoke) printf 'cargo' ;;
+    kit-dashboard-drift|minimal-build|all-features-check|smoke) printf 'cargo' ;;
+    # unobservable: tooling-tests shells out to ~60 nested test scripts. At least one
+    # really compiles (test_bti_perf_scan.sh does `cargo build -p cqlite-core --example
+    # bti_perf_scan --features cli-helpers`), several drive NESTED agent-gate runs, and the
+    # interceptors are unexported by design — so this shell sees no cargo argv, and there is
+    # no ONE driver whose reach could be recorded (enumerating which children compile would
+    # be exactly the curation this annotation refuses). It was declared `cargo`, which made a
+    # PASSing run render UNDECLARED and a FAILing one claim "FAILed before its first cargo
+    # invocation" while a child cargo build had in fact run — affirmatively false (roborev
+    # job 273, F2).
+    tooling-tests) printf 'unobservable:cargo may run inside ~60 nested test scripts (child processes)' ;;
     scoped-tests) printf 'cargo' ;;
     *) return 1 ;;
   esac
@@ -3256,14 +3290,25 @@ _fm_annotate() {
   if obs=$(_fm_render "$1") && [ -n "$obs" ]; then
     case "$class" in
       no-cargo) printf '[%s !declared-no-cargo]' "$obs" ;;
+      # An `unobservable` component may ALSO run cargo in this shell. Naming both is the
+      # only truthful rendering: the observed sets are real, and they are not the whole
+      # story, so the class text rides along ADDITIVELY rather than being displaced.
+      unobservable:*) printf '[%s | + %s]' "$obs" "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
       *)        printf '[%s]' "$obs" ;;
     esac
     return 0
   fi
   case "$class" in
-    no-cargo)   printf '[no-cargo]' ;;
-    indirect:*) printf '[%s]' "$(_fm_indirect_desc "${class#indirect:}")" ;;
-    *)          printf '[UNDECLARED]' ;;
+    no-cargo)       printf '[no-cargo]' ;;
+    unobservable:*) printf '[%s]' "$(_fm_unobservable_desc "${class#unobservable:}")" ;;
+    # An `indirect` component with an EMPTY sidecar is a RECORDING GAP, not a licence to
+    # claim its driver ran (roborev job 273, F3): every indirect component records its
+    # driver's reach at execution time, and record_result's
+    # _fm_note_if_no_cargo_observed names a SKIP/FAIL that never got that far. Reaching
+    # here means neither happened, so the honest report is UNDECLARED — carrying the same
+    # token every existing detector greps for — naming the driver whose outcome is missing.
+    indirect:*)     printf '[UNDECLARED — the outcome of driver '\''%s'\'' was never recorded (#3453)]' "${class#indirect:}" ;;
+    *)              printf '[UNDECLARED]' ;;
   esac
   return 0
 }
@@ -3293,51 +3338,110 @@ _fm_summary_line() {
 #          legitimately leaves an EMPTY sidecar, and `UNDECLARED` there would understate a
 #          fact we know exactly.
 #
-# Declared-no-cargo components are left alone so their `[no-cargo]` rendering stays exact.
-# The FAIL note is restricted to the `cargo` class: an `indirect:<driver>` component that
-# FAILs (maturin exiting non-zero) DID run cargo, unobserved — claiming "no cargo invoked"
-# there would be affirmatively false, so those keep their `via <driver>` rendering.
+# Declared-no-cargo components are left alone so their `[no-cargo]` rendering stays exact,
+# and so are `unobservable:<why>` ones — for those, "nothing ran" is precisely what this
+# shell cannot know, and its class text already says so.
+#
+# `indirect:<driver>` components DO get a note, and that is roborev job 273 F3's fix. The
+# previous rule ("an indirect component that FAILs DID run cargo, so keep the via-driver
+# rendering") ASSUMED the failure happened at or after the driver. It does not have to:
+# python-bindings can fail in venv/pip setup before maturin, and node-bindings in `npm ci`
+# before `npm run build` — both then claimed an unobserved cargo invocation that never
+# happened. The assumption is now unnecessary, because every indirect component RECORDS its
+# driver's reach at execution time (_fm_note_driver / _fm_observe_driver, and
+# _fm_note_maturin_rc for the two maturin callers). So an EMPTY sidecar at a terminal SKIP
+# or FAIL is positive evidence that the driver was never reached, and the note says exactly
+# that, naming the driver.
+#
+# WORDING (same family, one instance further down): the note says "cargo build/test" and
+# names the exclusion, because `cargo metadata`/`tree`/`--version` PROBES are deliberately
+# not recorded (_fm_describe_cargo rejects them) — three components measured under a
+# recording shim FAILed after running a `cargo tree` probe, where a bare "no cargo invoked"
+# would have been literally false.
 _fm_note_if_no_cargo_observed() {
-  local class f
+  local class f drv=""
   _fm_active || return 0
   class=$(_fm_component_class "$1" 2>/dev/null) || class=cargo
-  [ "$class" = no-cargo ] && return 0
+  case "$class" in
+    no-cargo|unobservable:*) return 0 ;;
+    indirect:*) drv="${class#indirect:}" ;;
+  esac
   f=$(_fm_sidecar "$1")
   [ -s "$f" ] && return 0
+  local what="its first cargo build/test invocation"
+  [ -n "$drv" ] && what="reaching its driver '$drv'"
   case "${2:-}" in
-    SKIP) _fm_note "$1" "no cargo invoked (component SKIPped)" ;;
-    FAIL) [ "$class" = cargo ] || return 0
-          _fm_note "$1" "no cargo invoked (component FAILed before its first cargo invocation)" ;;
+    SKIP) _fm_note "$1" "no cargo build/test invoked (component SKIPped before $what; metadata probes are not recorded)" ;;
+    FAIL) _fm_note "$1" "no cargo build/test invoked (component FAILed before $what; metadata probes are not recorded)" ;;
   esac
   return 0
 }
 
-# _fm_note_python_tier <component> <python-build-verify-rc>: record what the scoped
-# --lite python tier ACTUALLY did (roborev job 269, blocker 1).
+# _fm_note_driver <component> <driver> <reached|not-reached> [detail]: THE ONE PLACE that
+# turns a driver's reach into a record (roborev job 273, F3). Every `indirect:<driver>`
+# component routes through here — or through _fm_observe_driver, its child-callable twin —
+# so a fourth indirect component cannot get the direction wrong by writing its own text.
 #
-# The tier builds the extension by running `maturin develop` inside a CHILD process
-# (`bash "$GATE_SELF" --python-build-verify …`), so the cargo invocation maturin makes is
-# structurally unobservable from this shell — exactly the state _fm_indirect_desc names.
-# Before this, a python-only --lite reported `scoped-tests: PASS … [UNDECLARED]` (nobody
-# said) and a MIXED rust+python diff listed only the rust matrix, silently omitting the
-# maturin build altogether.
-#
-# ADDITIVE, never replacing: this appends ONE line to the same per-component sidecar the
-# rust blast-radius loop appends its observed sets to, so a mixed diff renders
-# `[test cqlite-core --features cli-helpers | via maturin: feature set NOT observed]`.
-#
-# CONDITIONED ON THE OUTCOME, not on reaching the branch: rc 0/2/3 are the three returns
-# of _python_build_verify_venv that mean maturin was actually INVOKED (built+imported;
-# maturin exited non-zero; imports failed after a clean rebuild). rc 1 (venv/pip setup
-# failed) and rc 4 (no cargo/rustc on PATH) mean the tier never reached maturin — so
-# claiming an unobserved cargo invocation there would be this issue's own defect one level
-# down. Those record the honest alternative instead.
-_fm_note_python_tier() {
+# `reached` is an OBSERVATION, never a default: callers pass it only from an explicit signal
+# (a build-verify rc that means the driver was entered, or a recorder call on the line
+# before the driver runs). Anything that is not literally `reached` records the honest
+# alternative, so a mis-typed or missing third argument fails toward "no claim".
+_fm_note_driver() {
   _fm_active || return 0
-  case "${2:-}" in
-    0|2|3) _fm_note "$1" "$(_fm_indirect_desc maturin)" ;;
-    *)     _fm_note "$1" "python tier: no cargo invoked (never reached maturin)" ;;
+  case "${3:-}" in
+    reached) _fm_note "$1" "$(_fm_indirect_desc "$2")" ;;
+    *)       _fm_note "$1" "no cargo build/test invoked (never reached $2${4:+; $4})" ;;
   esac
+  return 0
+}
+
+# _fm_note_maturin_rc <component> <rc>: the rc→reach mapping for the TWO maturin callers
+# (run_python_bindings and run_scoped_tests' --lite python tier), in ONE copy.
+#
+# rc 0/2/3 are the three _python_build_verify_venv returns that mean `maturin develop` was
+# actually INVOKED (built+imported; maturin exited non-zero; imports failed after a clean
+# rebuild) — a FAILED build is an invocation that happened. rc 1 (venv/pip setup) and rc 4
+# (no cargo/rustc on PATH) mean the driver was never entered, and any other value is
+# unknown, which is also not evidence that it ran.
+_fm_note_maturin_rc() {
+  case "${2:-}" in
+    0|2|3) _fm_note_driver "$1" maturin reached ;;
+    1)     _fm_note_driver "$1" maturin not-reached "venv/pip setup failed" ;;
+    4)     _fm_note_driver "$1" maturin not-reached "no cargo/rustc on PATH" ;;
+    *)     _fm_note_driver "$1" maturin not-reached "build-verify rc '${2:-none}'" ;;
+  esac
+  return 0
+}
+
+# NOTE (roborev job 273, F3): _fm_note_python_tier is GONE. It was the FIRST instance of
+# the rc-aware driver record — "condition on the OUTCOME, not on reaching the branch" — and
+# the other two indirect components (python-bindings, node-bindings) were left assuming
+# their driver ran. One rule, one implementation: both maturin callers now use
+# _fm_note_maturin_rc above, and node-bindings records from inside its `bash -c` body with
+# _fm_observe_driver below. The scoped --lite python tier's specifics are unchanged (its
+# maturin build runs inside `bash "$GATE_SELF" --python-build-verify …`, a child process, so
+# no cargo argv passes through this shell) and the ADDITIVE property is unchanged too: the
+# record is appended to the same per-component sidecar the rust blast-radius loop writes, so
+# a MIXED diff renders `[test cqlite-core --features cli-helpers | via maturin: …]`.
+
+# _fm_observe_driver <component> <driver>: EXECUTION-TIME "this driver was reached"
+# recorder, callable from INSIDE a `bash -c` component body (roborev job 273, F3) — the
+# driver-reach twin of _fm_observe_child, and exported for the same reason.
+#
+# node-bindings' napi build is `npm run build`, chained after `npm ci` inside a single
+# `bash -c` body. A parent-side record would describe INTENT and would claim cargo ran when
+# `npm ci` failed first; recording on the line immediately BEFORE the driver runs makes the
+# record mean "execution reached this point", which is the only thing this shell can know.
+#
+# ONE SPELLING: the text comes from _fm_indirect_desc, exported alongside, so the child and
+# the parent cannot drift into two descriptions of one state.
+_fm_observe_driver() {
+  local comp="${1:-}" driver="${2:-}"
+  [ -n "$comp" ] || return 0
+  [ -n "$driver" ] || return 0
+  [ -n "${AGENT_GATE_FM_DIR:-}" ] || return 0
+  [ -d "${AGENT_GATE_FM_DIR:-/nonexistent}" ] || return 0
+  printf '%s\n' "$(_fm_indirect_desc "$driver")" >> "$(_fm_sidecar "$comp")" 2>/dev/null || true
   return 0
 }
 
@@ -3403,9 +3507,10 @@ AGENT_GATE_FM_COMPONENT=""
 # INTERCEPTOR must not be exported (every bash descendant would record, and a nested
 # agent-gate self-test under tooling-tests would attribute its cargo to the parent's
 # component), while an EXPLICITLY CALLED recorder fires only where a body calls it by
-# name. _fm_describe_cargo/_fm_abbrev_features/_fm_sidecar ride along because
-# _fm_observe_child calls them — the formatter must be the gate's own, never a copy.
-export -f _fm_observe_child _fm_describe_cargo _fm_abbrev_features _fm_sidecar
+# name. _fm_describe_cargo/_fm_abbrev_features/_fm_sidecar/_fm_indirect_desc ride along
+# because _fm_observe_child and _fm_observe_driver call them — the formatter and the
+# via-driver spelling must be the gate's own, never a copy.
+export -f _fm_observe_child _fm_observe_driver _fm_indirect_desc _fm_describe_cargo _fm_abbrev_features _fm_sidecar
 # The sidecar DIRECTORY is inherited by those children (they are told WHERE to write; they
 # do not choose it). AGENT_GATE_FM_COMPONENT is deliberately NOT exported — each body
 # passes its own name — so an inherited component name can never arm recording in a nested
@@ -6861,7 +6966,17 @@ run_python_bindings() {
   # clean up afterward.
   local active_venv_file active_venv
   active_venv_file=$(mktemp "${TMPDIR:-/tmp}/agent-gate-active-venv.XXXXXX")
-  if bash "$GATE_SELF" --python-build-verify "$venv" "maturin develop -m bindings/python/Cargo.toml" "$active_venv_file" >"$log" 2>&1; then
+  # #3453 (roborev job 273, F3): the build-verify RC is the only signal that says whether
+  # `maturin develop` — the driver that invokes cargo, in a child process this shell cannot
+  # observe — was actually ENTERED. rc 1 (venv/pip setup) and rc 4 (no cargo/rustc) mean it
+  # was not, and this component previously discarded the rc (a bare if/else on success), so
+  # a venv failure was reported as `[via maturin: feature set NOT observed]` — a claim that
+  # cargo ran when nothing had. Captured here and mapped by the SHARED _fm_note_maturin_rc,
+  # the same helper the --lite python tier uses.
+  local pbv_rc=0
+  bash "$GATE_SELF" --python-build-verify "$venv" "maturin develop -m bindings/python/Cargo.toml" "$active_venv_file" >"$log" 2>&1 || pbv_rc=$?
+  _fm_note_maturin_rc "$name" "$pbv_rc"
+  if [ "$pbv_rc" -eq 0 ]; then
     active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
     if RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
         set -euo pipefail
@@ -7178,6 +7293,15 @@ run_node_bindings() {
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
       if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      # #3453 (roborev job 273, F3): record that execution REACHED the cargo-driving step,
+      # on the line immediately before it runs. `npm run build` is the napi build, i.e. the
+      # driver that invokes cargo in a child process this shell cannot observe -- and it is
+      # chained AFTER `npm ci`, so a failure in the install used to be summarised as
+      # "via npm run build (napi): feature set NOT observed", claiming a cargo invocation
+      # that never happened. With no record, the _fm_note_if_no_cargo_observed call in
+      # record_result reports the honest "FAILed before reaching its driver" instead.
+      # (No apostrophes in this comment -- see the note below.)
+      _fm_observe_driver node-bindings "npm run build (napi)"
       npm run build
       # npm run typecheck (#3493). node-ci.yml runs it as an ALWAYS-RUN PR smoke job, and
       # this component is the declared merge-gating half of that workflow -- so leaving it
@@ -13115,6 +13239,12 @@ run_scoped_tests() {
     status=FAIL
     OVERALL=FAIL
     end=$(date +%s)
+    # #3453 (roborev job 273, F4): run_scoped_tests appends its verdict DIRECTLY to
+    # NAMES/STATUSES/TIMES and never calls record_result, which is where every other
+    # component's "ended without a cargo invocation" note is written. So this fail-closed
+    # exit — taken before any cargo runs — rendered `[UNDECLARED]` ("nobody said") instead
+    # of the fact we know exactly. Both of this function's terminal paths now note it.
+    _fm_note_if_no_cargo_observed "$name" "$status"
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
     echo ">>> [$name] $status ($((end - start))s)"
     return
@@ -13286,8 +13416,8 @@ run_scoped_tests() {
       echo ">>> [$name] python binding diff but no python3 on PATH — SKIP python tier (run the full gate)"
       # #3453 blocker 1: the tier is not reached at all, so record THAT — never a maturin
       # invocation that did not happen. `none` is any non-{0,2,3} value; see
-      # _fm_note_python_tier.
-      _fm_note_python_tier "$name" none
+      # _fm_note_maturin_rc.
+      _fm_note_maturin_rc "$name" none
       PYTHON_TIER_NOTE="python-tier: SKIPPED (no python3 on PATH) — python-binding diff NOT validated by this lite run; run the full gate"
     else
       local venv="$REPO_ROOT/target/agent-gate-venv"
@@ -13314,7 +13444,7 @@ run_scoped_tests() {
       # observed` entry, ADDITIVELY (the rust blast-radius loop above already appended its
       # OBSERVED sets to the same sidecar, so a MIXED diff renders both), and only for the
       # rc values that mean maturin actually ran.
-      _fm_note_python_tier "$name" "$pbv_rc"
+      _fm_note_maturin_rc "$name" "$pbv_rc"
       active_venv=$(cat "$active_venv_file" 2>/dev/null); [ -n "$active_venv" ] || active_venv="$venv"
       if [ "$pbv_rc" -eq 2 ]; then
         status=FAIL
@@ -13357,6 +13487,9 @@ run_scoped_tests() {
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
+  # #3453 (F4): the SECOND terminal path of this function — see the note at the no-parser
+  # exit. record_result is never called here either, so the note is written explicitly.
+  _fm_note_if_no_cargo_observed "$name" "$status"
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
 }
