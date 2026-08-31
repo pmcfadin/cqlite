@@ -75,9 +75,10 @@
 //!
 //! # Decoder enumeration and exactness disposition (issue #3612 round 2)
 //!
-//! Followed from `parse_value_from_raw_bytes`'s arms, not from a list. 19 decode
-//! paths are reachable from a cell-path key; each is EXACT here, by one of three
-//! mechanisms:
+//! Enumerated by following `parse_value_from_raw_bytes`'s `match` rather than
+//! from anyone's list: **24 top-level arms**, plus the registry-bare-name UDT
+//! sub-path inside the final `other` arm — **25 reachable decode paths**. Every
+//! one is EXACT here, by exactly one of three mechanisms:
 //!
 //! | reachable decoder | how it is made exact |
 //! |---|---|
