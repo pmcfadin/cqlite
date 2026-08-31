@@ -834,14 +834,16 @@ else
 $out21a"
 fi
 
-# (b) the lane directory exists but nobody locked it -> free (also distinct).
+# (b) the lane directory exists but nobody locked it -> no-lock-record (a DISTINCT state,
+# and deliberately not called 'free': absence of a record is not evidence of an empty lane).
 mkdir -p "$LANE_ROOT/lane-31"
 out21b=$(runA claim 31); rc21b=$?
 if [ "$rc21b" -eq 0 ] && printf '%s\n' "$out21b" | grep -q 'CLAIM: HELD' \
-   && printf '%s\n' "$out21b" | grep -q 'lane-lock=free'; then
-  ok "(b) AC5: an existing but unlocked lane directory reports lane-lock=free, still HELD (exit 0)"
+   && printf '%s\n' "$out21b" | grep -q 'lane-lock=no-lock-record' \
+   && ! printf '%s\n' "$out21b" | grep -q 'lane-lock=free'; then
+  ok "(b) AC5: an existing but unlocked lane directory reports lane-lock=no-lock-record — NOT 'free', which would assert the lane is unoccupied when all that was measured is the absence of a record — and the claim is still HELD (exit 0)"
 else
-  bad "(b) expected HELD + lane-lock=free exit 0; got rc=$rc21b
+  bad "(b) expected HELD + lane-lock=no-lock-record (never 'free') exit 0; got rc=$rc21b
 $out21b"
 fi
 
@@ -969,11 +971,11 @@ out21h=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_ROOT="$SPAC
 rc21h=$rc
 err21h=$(cat "$T/err21h" 2>/dev/null)
 if [ "$rc21h" -eq 0 ] && printf '%s\n' "$out21h" | grep -q 'CLAIM: HELD' \
-   && printf '%s\n' "$out21h" | grep -q 'lane-lock=free' \
+   && printf '%s\n' "$out21h" | grep -q 'lane-lock=no-lock-record' \
    && ! printf '%s\n' "$out21h" | grep -q 'no-lane-dir'; then
-  ok "(h) FIX9b: an EXISTING lane directory whose path contains a SPACE reports lane-lock=free, not no-lane-dir"
+  ok "(h) FIX9b: an EXISTING lane directory whose path contains a SPACE reports lane-lock=no-lock-record, not no-lane-dir"
 else
-  bad "(h) expected lane-lock=free for a space-bearing lane path; got rc=$rc21h
+  bad "(h) expected lane-lock=no-lock-record for a space-bearing lane path; got rc=$rc21h
 $out21h
 $err21h"
 fi

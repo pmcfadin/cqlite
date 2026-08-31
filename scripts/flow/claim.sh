@@ -110,7 +110,8 @@
 #                                             `lane-lock=<state>` WARNING field read from
 #                                             the machine-local lane-directory lock
 #                                             (scripts/flow/lane-lock.sh, #3436 AC5):
-#                                             free / no-lane-dir / self / occupied-alive /
+#                                             no-lock-record / no-lane-dir / self /
+#                                             occupied-alive / occupied-alive-unattributed /
 #                                             occupied-alive-unattributed (a live holder,
 #                                             and this run could not establish whether it
 #                                             is US — see #3436 FIX 7) /
@@ -739,7 +740,14 @@ lane_lock_probe() {
       if [ -z "$LANE_LOCK_DIR" ]; then
         LANE_LOCK_STATE="unmeasured(probe-named-no-lane-dir)"
       elif [ -d "$LANE_LOCK_DIR" ]; then
-        LANE_LOCK_STATE="free"
+        # `no-lock-record`, NOT `free` (#3436, applying lane-3500's lens one level over).
+        # `free` ASSERTS the lane is unoccupied. All that was measured is that no lock RECORD
+        # exists — and the lock only ever sees occupants that CALLED acquire, so an unlocked
+        # lane directory says nothing about whether a session is working in it. Same defect as
+        # `status` emitting `locks=0`, which reads as an all-clear and means "no lane recorded
+        # a lock". The field name is the disclosure here: a reader greps the value, not the
+        # header.
+        LANE_LOCK_STATE="no-lock-record"
       else
         LANE_LOCK_STATE="no-lane-dir"
       fi
