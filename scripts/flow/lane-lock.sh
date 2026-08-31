@@ -568,6 +568,26 @@ resolve_pid() {
     # the lane directory (or inside it). Stop at pid 1 and never record pid 1 or a
     # non-matching ancestor — see the header for why the shared tmux server must be
     # excluded.
+    #
+    # SCOPE LIMIT, STATED BECAUSE IT CANNOT BE CLOSED HERE (#3436, roborev round 13).
+    # TWO WORKERS SPAWNED BY THE SAME IN-LANE PARENT RESOLVE TO THAT PARENT AND SHARE A
+    # TOKEN, so the second is granted `ACQUIRED (re-entrant)`. It is the same shape as the
+    # defect this file exists to fix — claim.sh's machine+actor could not express "another
+    # process on this box"; ancestry cannot express "two siblings under one in-lane parent"
+    # — and it is INHERENT to an ancestry-derived identity, because siblings share every
+    # ancestor. No refinement of this walk closes it.
+    #
+    # THE OBVIOUS GUARD WAS MEASURED AND REJECTED: "refuse if the resolved ancestor has an
+    # in-lane child outside my own chain" fires on an ORDINARY single session — measured on
+    # a live one, whose resolved ancestor had an in-lane child that was simply its own
+    # earlier backgrounded shell. A refusing acquire BRICKS the lane (FIX 5/14), which is
+    # strictly worse than the hole: bricking is reliable, the hole is conditional.
+    #
+    # THE CONTRACT INSTEAD: any integration that launches MORE THAN ONE worker per lane from
+    # a shared in-lane parent MUST pass `--pid` (or LANE_LOCK_PID) naming each worker's own
+    # durable process. Auto-resolution is a convenience for the one-worker-per-lane case and
+    # says so in the record: `pid-scope=cwd-match` marks an ancestry-derived identity,
+    # `explicit` a caller-supplied one, and every verdict line carries it via self_fields.
     local p="$$" best="" cwd ppid guard=0
     while [ -n "$p" ] && [ "$p" != "1" ] && [ "$guard" -lt 64 ]; do
       cwd="$(readlink "/proc/$p/cwd" 2>/dev/null || true)"
@@ -880,9 +900,26 @@ append_audit() {
 # invoker-class (whoever sets LANE_ROOT controls the namespace) and out of the threat model
 # per CLAUDE.md's triage rule; the accident this closes is the same-root, different-issue one.
 dir_mutex() {
-  local canon="$1" key
+  local canon="$1" key name sum tail_
   key="$(printf '%s' "$canon" | tr '/' '_')"
-  printf '%s/dir-%s.flock\n' "$(lock_root)" "$key"
+  name="dir-${key}.flock"
+  # BOUND THE FILENAME (#3436, roborev round 13). Flattening the WHOLE canonical path into
+  # one component can exceed the filesystem's per-component limit (NAME_MAX, 255 here), and
+  # the failure is `mutex-unopenable` on a path that is perfectly VALID — a refusal caused by
+  # the key, not by the lane. Measured: this lane is 31 bytes, a deeply nested sanctioned
+  # worktree (`.claude/worktrees/issue-<N>-<slug>`) is 125, so it is not triggered today and
+  # is reachable. Short paths keep the readable form; only an over-long one falls back.
+  #
+  # A cksum COLLISION would give two different directories one mutex, i.e. they would contend
+  # when they need not. That is over-serialisation, the SAFE direction — the unsafe direction
+  # is two directories getting two mutexes when they are one, which is the alias this whole
+  # mutex exists to close and which the full canonical path in the key still prevents.
+  if [ "${#name}" -gt 255 ]; then
+    sum="$(printf '%s' "$canon" | cksum | awk '{print $1}')"
+    tail_="$(printf '%s' "$key" | tail -c 180)"
+    name="dir-x${sum}-${tail_}.flock"
+  fi
+  printf '%s/%s\n' "$(lock_root)" "$name"
 }
 
 # same_dir_other_issue <issue> <canonical-lane-dir> — prints a live conflicting holder, if any.

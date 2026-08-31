@@ -1428,5 +1428,78 @@ case "$rec31" in
 esac
 kill "$A31" "$B31" 2>/dev/null || true
 
+# ===========================================================================
+echo "TEST 32: siblings under one in-lane parent — the DOCUMENTED limit, and its mitigation (roborev round 13)"
+# ===========================================================================
+# THIS TEST PINS A LIMITATION, NOT A GUARANTEE, AND THAT IS DELIBERATE. Two workers spawned by
+# the SAME in-lane parent both auto-resolve to that parent, share a token, and the second is
+# granted re-entrant — the same shape as the defect this file fixes, one level up, and inherent
+# to an ancestry-derived identity because siblings share every ancestor. The obvious guard was
+# measured and rejected (it refuses an ordinary single session, and a refusing acquire BRICKS
+# the lane, FIX 5/14). The contract is `--pid`. If someone later closes this properly, (a)
+# SHOULD fail — that is the signal to update the header's scope limit, not to relax the test.
+#
+# THE EXPOSURE IS NARROWER THAN IT FIRST LOOKS, and the first draft of this test found that by
+# accident: written with two DIFFERENT issues on one directory it FAILED, because the directory
+# mutex plus same_dir_other_issue refused the second outright. So siblings on different issues
+# are already covered by the DIRECTORY guard; the hole is only two processes on the SAME issue
+# in the SAME lane, which is why the test now uses one issue for both.
+SIB="$LANES/sib32"; mkdir -p "$SIB"
+# a durable parent whose cwd IS the lane, spawning two acquires as its children
+env -u LANE_LOCK_PID LANE_ROOT="$LANES" bash -c '
+  cd "$1" || exit 1
+  bash "$2" acquire 932 --lane-dir "$1" --actor flow >"$3/sib.a" 2>&1
+  bash "$2" acquire 932 --lane-dir "$1" --actor flow >"$3/sib.b" 2>&1
+  sleep 300
+' _ "$SIB" "$LL" "$T" &
+SIB_PARENT=$!
+# wait for both children to have written their verdicts (bounded, no bare sleep race)
+i=0; while [ "$i" -lt 60 ] && { [ ! -s "$T/sib.a" ] || [ ! -s "$T/sib.b" ]; }; do sleep 1; i=$((i+1)); done
+sib_a="$(cat "$T/sib.a" 2>/dev/null)"; sib_b="$(cat "$T/sib.b" 2>/dev/null)"
+sib_a_pid=$(printf '%s' "$sib_a" | sed -n 's/.* pid=\([0-9]*\).*/\1/p' | head -1)
+sib_b_pid=$(printf '%s' "$sib_b" | sed -n 's/.* pid=\([0-9]*\).*/\1/p' | head -1)
+if printf '%s' "$sib_a" | grep -q 'ACQUIRED issue=932' && printf '%s' "$sib_b" | grep -q 'ACQUIRED (re-entrant)' \
+   && [ -n "$sib_a_pid" ] && [ "$sib_a_pid" = "$sib_b_pid" ] \
+   && printf '%s' "$sib_a" | grep -q 'pid-scope=cwd-match'; then
+  ok "(a) DOCUMENTED LIMIT: two SEPARATE processes under one in-lane parent, SAME issue, resolve to the SAME pid ($sib_a_pid); the second is granted (re-entrant) though it is a different process. Record discloses pid-scope=cwd-match. Mitigation is --pid (b)."
+else
+  bad "(a) expected both to resolve to one shared ancestor pid under auto-resolution (this pins the header's scope limit; if it is now FIXED, update the header rather than the test)
+a=$sib_a
+b=$sib_b"
+fi
+kill "$SIB_PARENT" 2>/dev/null || true
+# (b) THE MITIGATION: with an explicit --pid each worker has its own identity, so the DIRECTORY
+#     guard sees two distinct holders and refuses the second — one directory, one writer.
+SIB2="$LANES/sib32b"; mkdir -p "$SIB2"
+sleep 300 & SB_A=$!
+sleep 300 & SB_B=$!
+ll acquire 934 --lane-dir "$SIB2" --pid "$SB_A"; rc32a=$RC
+ll acquire 935 --lane-dir "$SIB2" --pid "$SB_B"; rc32b=$RC; out32b=$OUT
+if [ "$rc32a" -eq 0 ] && [ "$rc32b" -eq 2 ] && printf '%s' "$out32b" | grep -q 'reason=same-lane-dir-other-issue'; then
+  ok "(b) MITIGATION: with explicit --pid the two workers are distinct identities and the second is refused — the contract in the header works"
+else
+  bad "(b) --pid did not separate the workers: rc=$rc32a/$rc32b
+$out32b"
+fi
+kill "$SB_A" "$SB_B" 2>/dev/null || true
+
+# ===========================================================================
+echo "TEST 33: the directory mutex filename is bounded (roborev round 13)"
+# ===========================================================================
+# Flattening the whole canonical path into one component can exceed NAME_MAX (255), failing as
+# `mutex-unopenable` on a VALID path. Short paths keep the readable form.
+DEEP="$LANES/$(printf 'd%.0s' $(seq 1 60))/$(printf 'e%.0s' $(seq 1 60))/$(printf 'f%.0s' $(seq 1 60))/$(printf 'g%.0s' $(seq 1 60))/lane33"
+mkdir -p "$DEEP" 2>/dev/null
+sleep 300 & DP=$!
+ll acquire 936 --lane-dir "$DEEP" --pid "$DP"; rc33=$RC; out33=$OUT
+longest=$(ls "$LOCKS" 2>/dev/null | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }')
+if [ "$rc33" -eq 0 ] && [ "$longest" -le 255 ]; then
+  ok "(a) a deeply nested lane acquires, and no lock filename exceeds NAME_MAX (longest=$longest)"
+else
+  bad "(a) deep lane path: rc=$rc33 longest-lock-filename=$longest
+$out33"
+fi
+kill "$DP" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
