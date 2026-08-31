@@ -1,19 +1,37 @@
 #!/usr/bin/env python3
-"""Decide the absence-waiver state for ONE review, from `gh pr view --json comments` JSON.
+"""Decide ONE authorization state for ONE review, from `gh pr view --json ...` JSON.
 
-Usage:  roborev-waiver-scan.py <base-sha> <head-sha> <job-id> <allowlist> < comments.json
+Usage:
+    roborev-waiver-scan.py prompt-content-absent <base> <head> <job> <allowlist> < comments.json
+    roborev-waiver-scan.py findings-deferral     <base> <head> <job> <allowlist> <observed-count> \
+        < comments-and-body.json
 
-`<allowlist>` is a space-separated list of GitHub logins permitted to GRANT a waiver.
-Prints a facts-style result on stdout (one `key=value` per line, values whitespace-collapsed):
+`<allowlist>` is a space-separated list of GitHub logins permitted to GRANT. Prints a facts-style
+result on stdout (one `key=value` per line, values whitespace-collapsed):
 
-    state=granted|unauthorized|stale|malformed|none
+    state=granted|unauthorized|stale|malformed|none      (both kinds)
+          |count-mismatch|pr-unlinked                    (findings-deferral only)
     author=<login>
     scope=base=<sha> head=<sha> job=<id>
     reason=<why>
     detail=<why the state is not `granted`>
+    issues=<N>,<N>       (findings-deferral only)
+    count=<n>            (findings-deferral only)
 
 Exit 0 whenever the JSON parsed; exit 1 if it did not (the caller treats that as UNAVAILABLE and
-keeps the absence FAILing).
+keeps the underlying FAIL in place); exit 2 on a usage error.
+
+===================== TWO MARKER KINDS, ONE CHANNEL (issue #3626) =====================
+`roborev-waive: prompt-content-absent` excuses a prompt-content ABSENCE (#3312). `roborev-defer:
+findings` records that a LEAD DEFERRED the findings of one completed review (#3626). They are
+SEPARATE authorizations producing separate summary keys and separate verdict tokens, and NEITHER
+reads the other's marker: collapsing them would let a delivery-artifact waiver excuse a real defect.
+
+They share this FILE, and that is the point: the CHANNEL rules — sole-nonblank-content, top-level
+comment, structured author association, placeholder refusal, one anchored pattern per marker — are
+expressed ONCE and reused BY CALL, never by copy. Five recogniser generations were superseded before
+the channel rule closed (see below); a second implementation of it would be a second place for it to
+diverge, and the divergence would be an authorization bypass.
 
 ===================== WHY THIS IS A SEPARATE, STRUCTURED PARSE (#3312 job 26) =====================
 CONTROL AND DATA MUST NOT SHARE A CHANNEL WHEN THE DATA IS ATTACKER-CONTROLLED. The previous
@@ -41,13 +59,43 @@ import json
 import re
 import sys
 
-# The marker, matched against a WHOLE body line: every field required, in the documented order, with
-# single-space separators. This is the one place the form is expressed.
-MARKER = re.compile(
+# ===== THE MARKER FORMS, EXPRESSED ONCE EACH, AS ONE ANCHORED PATTERN =====
+# Matched against a WHOLE body line: every field required, in the documented order, with single-space
+# separators. Field ORDER and field-value BOUNDARIES are both properties of these patterns and of
+# nothing else — a per-field extraction enforced neither, which is how `job=4656x` once survived.
+WAIVE_KIND = "prompt-content-absent"
+DEFER_KIND = "findings-deferral"
+
+WAIVE_MARKER = re.compile(
     r"^roborev-waive: prompt-content-absent"
     r" base=([0-9a-f]{7,40}) head=([0-9a-f]{7,40}) job=([0-9]+) reason=(.*)$"
 )
-PREFIX = "roborev-waive: prompt-content-absent "
+WAIVE_PREFIX = "roborev-waive: prompt-content-absent "
+# `issues=` admits ONE OR MORE comma-separated integers, so "non-empty" is a property of the pattern
+# rather than a later check that could be forgotten. `count=` is the AFFIRMATIVE half of the binding
+# (#3626): the wrapper requires it to equal the OBSERVED findings count, so a marker written before
+# its job's findings were read, and any NEW finding arriving at the same head, both fail on it.
+DEFER_MARKER = re.compile(
+    r"^roborev-defer: findings"
+    r" issues=([0-9]+(?:,[0-9]+)*) count=([0-9]+)"
+    r" base=([0-9a-f]{7,40}) head=([0-9a-f]{7,40}) job=([0-9]+) reason=(.*)$"
+)
+DEFER_PREFIX = "roborev-defer: findings "
+
+REQUIRED_FORMS = {
+    WAIVE_KIND: (
+        "'roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>' — "
+        "every field is required, in that order, with single-space separators"
+    ),
+    DEFER_KIND: (
+        "'roborev-defer: findings issues=<N>[,<N>...] count=<n> base=<40-hex> head=<40-hex> "
+        "job=<id> reason=<why>' — every field is required, in that order, with single-space separators"
+    ),
+}
+EMIT_KEYS = {
+    WAIVE_KIND: ("state", "author", "scope", "reason", "detail"),
+    DEFER_KIND: ("state", "author", "scope", "reason", "detail", "issues", "count"),
+}
 # ===== AN AUTHORIZATION MUST BE THE SOLE NONBLANK CONTENT OF ITS COMMENT (#3312 job 29) =====
 # THE FIFTH VARIATION OF ONE DEFECT, and the reason this rule replaces a parser rather than extending it.
 # Four recognisers were tried, each correct about the case in front of it and each superseded:
@@ -76,64 +124,55 @@ PREFIX = "roborev-waive: prompt-content-absent "
 # (this repository's own PR threads do) has not attempted an authorization, and reporting MALFORMED on their
 # comment would be a false accusation printed on every later run. A marker-only comment whose FIELDS are
 # wrong is still MALFORMED — there the author plainly meant to authorize. The `NONE` cause teaches the rule.
+#
+# ONE IMPLEMENTATION, TWO KINDS (#3626): the prefix is a PARAMETER, so the deferral marker inherits this
+# rule by CALL. A copy of it for the second kind would be a second place for the channel rule to diverge,
+# and a divergence here is an authorization bypass, not a cosmetic difference.
 
 
-def sole_marker_line(body):
-    """The comment's only nonblank line when it is a marker line, else None."""
+def sole_marker_line(body, prefix):
+    """The comment's only nonblank line when it is a marker line of this kind, else None."""
     lines = [raw.rstrip("\r") for raw in body.split("\n")]
     nonblank = [line for line in lines if line.strip()]
     if len(nonblank) != 1:
         return None
     line = nonblank[0]
-    return line if line.startswith(PREFIX) else None
+    return line if line.startswith(prefix) else None
 
 
 PLACEHOLDERS = {
     "why", "todo", "tbd", "tba", "reason", "n/a", "na", "none", "-", "placeholder",
 }
-REQUIRED_FORM = (
-    "'roborev-waive: prompt-content-absent base=<40-hex> head=<40-hex> job=<id> reason=<why>' — every "
-    "field is required, in that order, with single-space separators"
-)
 
 
 def collapse(value):
     return " ".join(str(value).split())
 
 
-def emit(result):
-    for key in ("state", "author", "scope", "reason", "detail"):
+def emit(kind, result):
+    for key in EMIT_KEYS[kind]:
         sys.stdout.write("%s=%s\n" % (key, collapse(result.get(key, ""))))
 
 
-def judge_line(line, author, base, head, job, allowlist):
-    """Return (state, fields) for a line that starts with the marker prefix."""
-    match = MARKER.match(line)
-    if match is None:
-        return "malformed", {
-            "author": author,
-            "detail": "the line does not match the required form %s" % REQUIRED_FORM,
-        }
-    m_base, m_head, m_job, m_reason = match.groups()
-    reason = m_reason.strip()
-    scope = "base=%s head=%s job=%s" % (m_base, m_head, m_job)
+def judge_reason(reason):
+    """Return a MALFORMED detail for a reason that cannot carry an authorization, else None.
+
+    Shared by both kinds, and the reason is TRIMMED BEFORE IT IS JUDGED, so `reason=TODO ` and a
+    whitespace-only reason are refused exactly as their untrimmed forms are.
+    """
     if not reason:
-        return "malformed", {
-            "author": author,
-            "detail": "the marker is missing a-non-empty-reason (the reason is empty or whitespace only)",
-        }
+        return "the marker is missing a-non-empty-reason (the reason is empty or whitespace only)"
     if "<" in reason and ">" in reason:
-        return "malformed", {
-            "author": author,
-            "detail": "the marker is missing a-substituted-reason (the reason still holds an "
-                      "unsubstituted <…> placeholder)",
-        }
+        return ("the marker is missing a-substituted-reason (the reason still holds an "
+                "unsubstituted <…> placeholder)")
     if reason.lower() in PLACEHOLDERS:
-        return "malformed", {
-            "author": author,
-            "detail": "the marker is missing a-substantive-reason (the reason '%s' is a bare "
-                      "placeholder)" % reason,
-        }
+        return ("the marker is missing a-substantive-reason (the reason '%s' is a bare "
+                "placeholder)" % reason)
+    return None
+
+
+def judge_scope(m_base, m_head, m_job, base, head, job):
+    """Return the list of scope fields that name a DIFFERENT review, in report order."""
     diverged = []
     if m_base != base:
         diverged.append("base (%s != %s)" % (m_base, base))
@@ -141,6 +180,24 @@ def judge_line(line, author, base, head, job, allowlist):
         diverged.append("head (%s != %s)" % (m_head, head))
     if m_job != job:
         diverged.append("job (%s != %s)" % (m_job, job))
+    return diverged
+
+
+def judge_waive_line(line, author, base, head, job, allowlist):
+    """Return (state, fields) for a line that starts with the absence-waiver prefix."""
+    match = WAIVE_MARKER.match(line)
+    if match is None:
+        return "malformed", {
+            "author": author,
+            "detail": "the line does not match the required form %s" % REQUIRED_FORMS[WAIVE_KIND],
+        }
+    m_base, m_head, m_job, m_reason = match.groups()
+    reason = m_reason.strip()
+    scope = "base=%s head=%s job=%s" % (m_base, m_head, m_job)
+    bad_reason = judge_reason(reason)
+    if bad_reason is not None:
+        return "malformed", {"author": author, "detail": bad_reason}
+    diverged = judge_scope(m_base, m_head, m_job, base, head, job)
     if diverged:
         return "stale", {
             "author": author,
@@ -158,32 +215,93 @@ def judge_line(line, author, base, head, job, allowlist):
             "author": author,
             "scope": scope,
             "reason": reason,
-            "detail": "the marker is well-formed and names this review, but its author '@%s' is not on "
-                      "the waiver allowlist (%s) — this is a public repository, so the base/head/job "
-                      "values printed in a failing block are public knowledge and authorship is the "
-                      "only thing that separates an authorization from a stranger"
-                      % (author, " ".join(allowlist)),
+            "detail": unauthorized_detail(author, allowlist, "waiver"),
         }
     return "granted", {"author": author, "scope": scope, "reason": reason}
+def unauthorized_detail(author, allowlist, what):
+    return ("the marker is well-formed and names this review, but its author '@%s' is not on "
+            "the %s allowlist (%s) — this is a public repository, so the base/head/job "
+            "values printed in a failing block are public knowledge and authorship is the "
+            "only thing that separates an authorization from a stranger"
+            % (author, what, " ".join(allowlist)))
 
 
-def main(argv):
-    if len(argv) != 5:
-        sys.stderr.write(
-            "usage: roborev-waiver-scan.py <base-sha> <head-sha> <job-id> <allowlist> < comments.json\n")
-        return 2
-    base, head, job = argv[1], argv[2], argv[3]
-    allowlist = [a for a in argv[4].split() if a]
-    try:
-        data = json.load(sys.stdin)
-    except ValueError:
-        return 1
-    comments = data.get("comments") if isinstance(data, dict) else data
-    if not isinstance(comments, list):
-        comments = []
+def body_references_issue(pr_body, issue):
+    """Is `#<issue>` referenced by the pull-request body, as a WHOLE number?
 
+    Bounded on both sides so `#3602` is not "found" inside `#36021`: a substring match would let one
+    filed issue stand in for another, which is the disposition requirement satisfied by accident.
+    """
+    return re.search(r"(?<![0-9])#%s(?![0-9])" % re.escape(issue), pr_body) is not None
+
+
+def judge_defer_line(line, author, base, head, job, allowlist, observed_count, pr_body):
+    """Return (state, fields) for a line that starts with the findings-deferral prefix.
+
+    THE MATCH IS AFFIRMATIVE, NEVER PERMISSIVE (#3626, on #3586's rule). A grant needs the scope to
+    match, the declared `count=` to EQUAL the observed findings count, and every declared issue to be
+    referenced from the PR body. Nothing here is derived from the ABSENCE of a contrary signal, and
+    there is deliberately NO reconstruction of per-finding identity from the review's prose: that is a
+    recogniser over author-controlled text, the class #3564 closed by REMOVING prose reconstruction.
+    """
+    match = DEFER_MARKER.match(line)
+    if match is None:
+        return "malformed", {
+            "author": author,
+            "detail": "the line does not match the required form %s" % REQUIRED_FORMS[DEFER_KIND],
+        }
+    m_issues, m_count, m_base, m_head, m_job, m_reason = match.groups()
+    reason = m_reason.strip()
+    scope = "base=%s head=%s job=%s" % (m_base, m_head, m_job)
+    fields = {"author": author, "scope": scope, "issues": m_issues, "count": m_count}
+    bad_reason = judge_reason(reason)
+    if bad_reason is not None:
+        return "malformed", {"author": author, "detail": bad_reason}
+    fields["reason"] = reason
+    diverged = judge_scope(m_base, m_head, m_job, base, head, job)
+    if diverged:
+        return "stale", dict(fields, detail=(
+            "the marker names a different review — %s — and a deferral may not outlive the review "
+            "its authorizer judged; a push, a different base or a re-run each need a fresh one "
+            "(re-decide a completed job with --recheck-job <id>, which enqueues nothing)"
+            % ", ".join(diverged)))
+    # ===== THE AFFIRMATIVE HALF: THE DECLARED COUNT MUST EQUAL THE OBSERVED ONE =====
+    # A job is a completed review and its findings do not change, so the job binding already fixes the
+    # finding SET; this is what makes the match affirmative rather than "not listed as new". Two
+    # consequences, both deliberate: a PRE-AUTHORIZATION written before the findings were read fails
+    # on a count mismatch instead of passing silently, and ANY new finding at the same head raises the
+    # observed count and therefore fails. That is how "the UNDEFERRED set" is computed without a
+    # per-finding identity that does not exist.
+    if m_count != observed_count:
+        return "count-mismatch", dict(fields, detail=(
+            "the marker authorizes %s finding(s) but this job reports %s — the counts must match "
+            "EXACTLY, because that equality is the only affirmative evidence that the findings the "
+            "authorizer judged are the findings this run observed. A new finding at the same head "
+            "raises the observed count and must not ride an older authorization; re-triage, then "
+            "re-authorize for the count actually observed" % (m_count, observed_count)))
+    # ===== THE DISPOSITION HALF: A DEFERRAL WITHOUT A LINKED ISSUE IS A DROPPED FINDING =====
+    # The nit rule already requires one follow-up issue at merge time; requiring the PR body to
+    # reference each deferred issue makes that link MECHANICAL instead of remembered. Retrievability
+    # is asserted by the caller (it needs the network); this half is decidable from the same JSON the
+    # comments came from, so it lives with the rest of the structured parse.
+    unlinked = [n for n in m_issues.split(",") if not body_references_issue(pr_body, n)]
+    if unlinked:
+        return "pr-unlinked", dict(fields, detail=(
+            "the pull-request body does not reference issue(s) %s, so the deferred finding(s) have "
+            "no recorded disposition — a deferral without a linked issue is a DROPPED finding. Add "
+            "the reference to the PR body (the authorization comment records the ruling; the body "
+            "records where the finding went)" % ", ".join("#" + n for n in unlinked)))
+    # AUTHORIZATION IS THE LAST GATE, exactly as it is for the waiver.
+    if author not in allowlist:
+        return "unauthorized", dict(fields, detail=unauthorized_detail(author, allowlist, "deferral"))
+    return "granted", fields
+
+
+def scan(kind, comments, base, head, job, allowlist, observed_count, pr_body):
+    """The LAST GRANTED marker wins; otherwise the FIRST refusal is reported."""
     granted = None
     first_refusal = None
+    prefix = WAIVE_PREFIX if kind == WAIVE_KIND else DEFER_PREFIX
     for comment in comments:
         if not isinstance(comment, dict):
             continue
@@ -200,21 +318,76 @@ def main(argv):
         if not isinstance(body, str):
             continue
         # ONE DECISION, NO PARSE: is the marker the whole comment?
-        line = sole_marker_line(body)
-        if line is not None:
-            state, fields = judge_line(line, author, base, head, job, allowlist)
-            if state == "granted":
-                granted = fields
-            elif first_refusal is None:
-                first_refusal = (state, fields)
-
+        line = sole_marker_line(body, prefix)
+        if line is None:
+            continue
+        if kind == WAIVE_KIND:
+            state, fields = judge_waive_line(line, author, base, head, job, allowlist)
+        else:
+            state, fields = judge_defer_line(
+                line, author, base, head, job, allowlist, observed_count, pr_body)
+        if state == "granted":
+            granted = fields
+        elif first_refusal is None:
+            first_refusal = (state, fields)
     if granted is not None:
-        emit(dict(granted, state="granted"))
-    elif first_refusal is not None:
+        return dict(granted, state="granted")
+    if first_refusal is not None:
         state, fields = first_refusal
-        emit(dict(fields, state=state))
-    else:
-        emit({"state": "none"})
+        return dict(fields, state=state)
+    return {"state": "none"}
+
+
+def main(argv):
+    kinds = (WAIVE_KIND, DEFER_KIND)
+    if len(argv) < 6 or argv[1] not in kinds:
+        sys.stderr.write(
+            "usage: roborev-waiver-scan.py <%s> <base-sha> <head-sha> <job-id> <allowlist> "
+            "[<observed-findings-count>] < pr.json\n" % "|".join(kinds))
+        return 2
+    kind, base, head, job = argv[1], argv[2], argv[3], argv[4]
+    allowlist = [a for a in argv[5].split() if a]
+    observed_count = ""
+    # THE COUNT IS REQUIRED FOR THE DEFERRAL AND REFUSED FOR THE WAIVER — a usage error, never a
+    # default. An absent count would make the affirmative half of the deferral binding unenforceable,
+    # and a default would let that happen SILENTLY, which is the shape a positive verdict must never
+    # rest on. The waiver has no count to bind, so accepting one there would invite the two kinds'
+    # arguments to be confused.
+    if kind == DEFER_KIND:
+        if len(argv) != 7:
+            sys.stderr.write(
+                "usage: roborev-waiver-scan.py findings-deferral <base> <head> <job> <allowlist> "
+                "<observed-findings-count>\n")
+            return 2
+        observed_count = argv[6]
+        if not re.match(r"^[0-9]+$", observed_count):
+            sys.stderr.write(
+                "roborev-waiver-scan.py: the observed findings count must be a non-negative "
+                "integer, got '%s' — a deferral is matched against a MEASURED count, so an "
+                "unmeasurable one fails closed rather than defaulting\n" % observed_count)
+            return 2
+    elif len(argv) != 6:
+        sys.stderr.write(
+            "usage: roborev-waiver-scan.py prompt-content-absent <base> <head> <job> <allowlist>\n")
+        return 2
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        return 1
+    comments = data.get("comments") if isinstance(data, dict) else data
+    if not isinstance(comments, list):
+        comments = []
+    pr_body = data.get("body") if isinstance(data, dict) else None
+    if kind == DEFER_KIND and not isinstance(pr_body, str):
+        # THE PR BODY IS THE SOLE EVIDENCE for the disposition half, so a payload that does not carry
+        # it cannot yield a grant. Reported as its own state rather than as `pr-unlinked`: "the body
+        # says nothing about #N" and "there is no body to read" are different operator actions.
+        emit(kind, {"state": "unavailable",
+                    "detail": "the 'gh pr view' payload carries no readable 'body' field, so the "
+                              "disposition of a deferred finding could not be established"})
+        return 0
+    emit(kind, scan(kind, comments, base, head, job, allowlist,
+                    observed_count, pr_body if isinstance(pr_body, str) else ""))
     return 0
 
 
