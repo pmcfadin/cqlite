@@ -434,11 +434,29 @@ fi
 mk_stub() {
   # mk_stub <dir> <name> <body>
   local dir="$1" name="$2" body="$3"
+  # REMOVE FIRST — never write THROUGH the path. mk_hermetic_bin populates these same dirs
+  # with SYMLINKS to the real tools, and `cat >` FOLLOWS a symlink, so stubbing a name that
+  # is ALSO hermetically linked has two failure modes and neither is visible: where the link
+  # target is not writable (a root-owned /usr/bin tool, and the suite runs unprivileged) the
+  # redirect fails, no stub is installed, and every case relying on it passes VACUOUSLY
+  # against the REAL tool; where the target IS writable it TRUNCATES THE REAL BINARY.
+  # Measured when this bit: `chmod` is the one name in both sets, the stub never installed,
+  # and case 11bc read the real chmod's success as its own.
+  rm -f "$dir/$name"
   cat >"$dir/$name" <<EOF
 #!/usr/bin/env bash
 $body
 EOF
   chmod +x "$dir/$name"
+  # AND FAIL LOUDLY. A harness that cannot install a stub does not produce a failing case,
+  # it produces a PASSING one that tested nothing — the exact shape this suite exists to
+  # refuse, so it aborts rather than reporting a verdict it did not earn.
+  if [ -L "$dir/$name" ] || [ ! -f "$dir/$name" ] || [ ! -x "$dir/$name" ]; then
+    printf 'FATAL: mk_stub could not install a real stub at %s/%s (symlink=%s file=%s exec=%s) — refusing to run cases that would pass vacuously against the real tool\n' \
+      "$dir" "$name" "$([ -L "$dir/$name" ] && echo yes || echo no)" \
+      "$([ -f "$dir/$name" ] && echo yes || echo no)" "$([ -x "$dir/$name" ] && echo yes || echo no)" >&2
+    exit 1
+  fi
 }
 # count_begin <file>: number of managed-block BEGIN markers. grep -c already prints
 # a count (0 on no match) AND exits 1 — a `|| echo 0` would DOUBLE-print "0\n0", so
