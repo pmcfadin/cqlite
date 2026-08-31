@@ -206,6 +206,19 @@ the common case is unaffected at any version and pays three `git config` calls o
 on an old git that shape would be reported non-promisor. Named rather than implied; closing it needs an
 alternates walk, which is more mechanism than this advisory's scope allows.
 
+**AND EVERY SCRATCH READ IS A CHECKED OPEN, BECAUSE `done <"$file"` IS A FAIL-OPEN (#3650 review R6 F2).**
+The NUL-separated git output is written to files under the scratch dir and read back by redirection (never
+`$( )`, which discards NULs). An unchecked `done <"$file"` does two things when the file cannot be opened,
+and both are the shapes this design refuses: bash emits an **unprefixed** diagnostic — breaking D2a's
+anchor from a line no `sane` call can reach — and the loop body **never runs**, so the path set reads as
+empty, `M` is undercounted and the verdict lands on the permissive `NO-STALENESS-RECOGNISED`. All three
+reads (`diff-paths`, `commit-paths`, `behind-commits`) therefore open their file explicitly on a numbered
+fd, check the open, and route a failure to `UNMEASURED` naming the file and what it held. The open is
+wrapped in a brace group so the suppression applies to the shell's own redirect diagnostic: redirections
+are processed left to right, so `exec 3<"$f" 2>/dev/null` prints the diagnostic *before* the suppression
+takes effect (measured on bash 5.2), and `exec 2>/dev/null 3<"$f"` would silence the script's stderr for
+the rest of the run; a brace group does not fork, so the fd persists.
+
 **AMBIENT GIT STATE IS PINNED IN ONE PLACE, AND `refs/replace/*` JOINED THE LIST (#3650 review R6 F1).**
 `GIT_NO_LAZY_FETCH` is one instance of a family: repository- or invoker-controlled git state that changes
 what `merge-base`, `rev-list`, `diff` or `diff-tree` REPORT *without failing*, so the answer is confidently

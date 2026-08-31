@@ -1326,6 +1326,94 @@ if [ "$repl_shape" -eq 1 ]; then
   unset USE_SCRIPT
 fi
 
+# --- Case 21 (#3650 review R6 F2): AN UNAVAILABLE SCRATCH READ IS UNMEASURED -
+#
+# `done <"$TMPD/file"` is an UNCHECKED redirect, and an unchecked redirect is a
+# FAIL-OPEN with two halves, both of them shapes this suite exists to refuse: the
+# shell emits an UNPREFIXED diagnostic (breaking D2a's anchor from a line no
+# `sane` call can reach), AND the loop body never runs — so the path set reads as
+# EMPTY, `M` is UNDERCOUNTED and the verdict lands on the permissive
+# `NO-STALENESS-RECOGNISED`.
+#
+# All three scratch reads are pinned (`diff-paths`, `commit-paths`,
+# `behind-commits`), each by a ONE-LINE plant that makes that file unavailable at
+# the moment it is read — `rm` for the missing case, `chmod 000` for the
+# unreadable one. The plant is verified narrow (exactly one injected line) before
+# it is trusted, and `$R_DIFF` measures STALE under the shipped script, so exit 5
+# is attributable to the plant rather than to the fixture.
+while IFS='|' read -r sp_label sp_anchor sp_inject sp_cause; do
+  [ -n "$sp_label" ] || continue
+  # `chmod 000` denies nothing to root, which would make that case pass for the
+  # wrong reason — a visible skip, never a silent one.
+  case "$sp_inject" in
+    chmod*)
+      if [ "$(id -u)" -eq 0 ]; then
+        echo "skip - scratch-read($sp_label): running as root, chmod 000 denies nothing; the missing-file plants still cover the guard"
+        continue
+      fi
+      ;;
+  esac
+  MUT_SCRATCH="$T/mutant-scratch-$sp_label.sh"
+  awk -v anchor="$sp_anchor" -v inject="$sp_inject" \
+    '$0 == anchor { print inject } { print }' "$ADVISORY" >"$MUT_SCRATCH"
+  if [ "$(diff "$ADVISORY" "$MUT_SCRATCH" | grep -c '^[<>]')" -eq 1 ] &&
+    bash -n "$MUT_SCRATCH" 2>/dev/null; then
+    ok "scratch-read($sp_label): the plant injects exactly one line and nothing else"
+  else
+    bad "scratch-read($sp_label): the plant is not narrow (or the anchor line '$sp_anchor' moved)"
+    continue
+  fi
+  USE_SCRIPT="$MUT_SCRATCH"
+  if run 5 "scratch-read($sp_label): an unavailable scratch read is UNMEASURED" "$R_DIFF"; then
+    # The needle stops before the closing paren: the commit-paths cause names the
+    # SHA of the commit whose paths it holds, which no fixture can predict.
+    has "scratch-read($sp_label): the cause names the file and what it held" \
+      "$sp_label ($sp_cause"
+    has "scratch-read($sp_label): the verdict is UNMEASURED" "verdict UNMEASURED"
+    lacks "scratch-read($sp_label): no permissive verdict is emitted" "NO-STALENESS-RECOGNISED"
+    lacks "scratch-read($sp_label): and no blast-radius count at all" "blast-radius"
+    if printf '%s\n' "$OUT" | grep -qv '^BASE-STALENESS: '; then
+      bad "scratch-read($sp_label): an output line lacks the prefix: $(printf '%s\n' "$OUT" |
+        grep -m1 -v '^BASE-STALENESS: ')"
+    else
+      ok "scratch-read($sp_label): every line stays anchored — the shell's own redirect diagnostic is suppressed"
+    fi
+  fi
+  unset USE_SCRIPT
+done <<'SCRATCH_PLANTS'
+diff-paths|DIFF_PATHS=()|rm -f "$TMPD/diff-paths"|the paths this diff itself touches
+behind-commits|MATCHED_LIST_LIMIT=20|rm -f "$TMPD/behind-commits"|the commits behind the merge-base
+commit-paths|  hit=""|chmod 000 "$TMPD/commit-paths" 2>/dev/null|the paths of commit
+SCRATCH_PLANTS
+
+# THE FALSIFYING CONTRAST, on the diff-paths site: the same missing file with the
+# guard's REFUSAL neutered (the `scratch_unreadable` call replaced by `:`), which
+# is the PRE-FIX behaviour — bash reports a bad file descriptor on an UNPREFIXED
+# line and the loop runs ZERO times, so the scan undercounts and reports the
+# permissive verdict on a fixture that is genuinely stale. Without this contrast
+# the case above could pass on a guard that was never load-bearing. NOT recorded
+# into $ALL_OUT: it is the violation the suite forbids.
+MUT_SCRATCH_OPEN="$T/mutant-scratch-fail-open.sh"
+sed 's|^  scratch_unreadable "\$TMPD/diff-paths" .*$|  :|' \
+  "$T/mutant-scratch-diff-paths.sh" >"$MUT_SCRATCH_OPEN"
+if [ -f "$T/mutant-scratch-diff-paths.sh" ] &&
+  [ "$(diff "$T/mutant-scratch-diff-paths.sh" "$MUT_SCRATCH_OPEN" | grep -c '^[<>]')" -eq 2 ] &&
+  bash -n "$MUT_SCRATCH_OPEN" 2>/dev/null; then
+  ok "scratch-read(fail-open): the contrast plant neuters exactly the refusal and nothing else"
+else
+  bad "scratch-read(fail-open): the contrast plant is not narrow (or the refusal's spelling moved)"
+fi
+SO_OUT=$(cd "$R_DIFF" && bash "$MUT_SCRATCH_OPEN" 2>&1)
+SO_RC=$?
+so_unpref=$(printf '%s\n' "$SO_OUT" | grep -m1 -v '^BASE-STALENESS: ')
+if [ "$SO_RC" -eq 0 ] && [ -n "$so_unpref" ] &&
+  [ "${SO_OUT#*blast-radius 0 RECOGNISED}" != "$SO_OUT" ] &&
+  [ "${SO_OUT#*verdict NO-STALENESS-RECOGNISED}" != "$SO_OUT" ]; then
+  ok "scratch-read(fail-open): UNCHECKED, the same missing file UNDERCOUNTS to zero AND emits an unprefixed line ($so_unpref)"
+else
+  bad "scratch-read(fail-open): the contrast did not reproduce the fail-open (exit $SO_RC, unprefixed='$so_unpref')"
+fi
+
 # --- Case 17 (WHOLE SUITE, was Case 7): the ANCHORED output guarantee -------
 # Accumulated across EVERY case above and asserted HERE, after the last one. The
 # old placement covered Cases 2-6 only, so the UNMEASURED, usage and mutant runs

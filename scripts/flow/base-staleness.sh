@@ -406,6 +406,35 @@ unmeasured() {
   exit 5
 }
 
+# --- EVERY SCRATCH READ IS A CHECKED OPEN (#3650 review R6 F2) --------------
+#
+# `done <"$TMPD/file"` IS AN UNCHECKED REDIRECT, AND THAT IS A FAIL-OPEN. If the
+# file cannot be opened, bash does TWO things and both are shapes this script
+# exists to refuse: it emits an UNPREFIXED diagnostic — breaking D2a's anchor
+# from a line no `sane` call can reach — and the loop body NEVER RUNS, so the
+# path set reads as EMPTY, `M` is UNDERCOUNTED and the verdict lands on the
+# permissive `NO-STALENESS-RECOGNISED`. Neither half may be reached, so the three
+# scratch reads below (`diff-paths`, `commit-paths`, `behind-commits`) open their
+# file EXPLICITLY on a numbered fd and check the open.
+#
+# THE OPEN IS WRAPPED IN A BRACE GROUP so the suppression applies to the SHELL'S
+# OWN redirect diagnostic. Measured on bash 5.2: redirections are processed left
+# to right, so `exec 3<"$f" 2>/dev/null` prints the diagnostic BEFORE the
+# suppression takes effect; and `exec 2>/dev/null 3<"$f"` would silence THIS
+# SCRIPT'S stderr for the rest of the run, which would suppress the anchored
+# lines too. A brace group does not fork, so the fd persists in the current
+# shell, and the group's stderr redirect wraps the failing redirect.
+#
+# `unmeasured` is the only outcome of a failed open: an unreadable scratch file
+# is a scan that did not happen, and a scan that did not happen is never a zero
+# finding (D3).
+scratch_unreadable() {
+  unmeasured "the scratch file $(sane "$1") ($2) could not be opened for reading," \
+    "so the loop that reads it would run ZERO times, UNDERCOUNTING the blast" \
+    "radius. A scan that did not happen is UNMEASURED, never a zero finding" \
+    "(#3650 D3)."
+}
+
 rev=HEAD
 rev_set=0
 while [ "$#" -gt 0 ]; do
@@ -813,11 +842,15 @@ if ! git -c diff.renames=false -c diff.relative=false \
 fi
 DIFF_PATHS=()
 diff_path_count=0
+if ! { exec 3<"$TMPD/diff-paths"; } 2>/dev/null; then
+  scratch_unreadable "$TMPD/diff-paths" "the paths this diff itself touches"
+fi
 while IFS= read -r -d '' p; do
   [ -n "$p" ] || continue
   DIFF_PATHS+=("$p")
   diff_path_count=$((diff_path_count + 1))
-done <"$TMPD/diff-paths"
+done <&3
+exec 3<&-
 
 # matches_gate_global <path> -> 0 if the path is in the gate-global set. Three
 # entry shapes are recognised and NOTHING else: an exact path, `<prefix>/**`, and
@@ -877,6 +910,9 @@ MATCHED_LIST_LIMIT=20
 
 m=0
 matched_lines=""
+if ! { exec 3<"$TMPD/behind-commits"; } 2>/dev/null; then
+  scratch_unreadable "$TMPD/behind-commits" "the commits behind the merge-base"
+fi
 while IFS= read -r c; do
   [ -n "$c" ] || continue
   # `-m --first-parent` so a MERGE commit reports its change against its first
@@ -892,6 +928,10 @@ while IFS= read -r c; do
   fi
   hit=""
   why=""
+  # fd 4, not 3: fd 3 is the OUTER loop's own open scratch read.
+  if ! { exec 4<"$TMPD/commit-paths"; } 2>/dev/null; then
+    scratch_unreadable "$TMPD/commit-paths" "the paths of commit $c"
+  fi
   while IFS= read -r -d '' cp; do
     [ -n "$cp" ] || continue
     if matches_diff_paths "$cp"; then
@@ -904,7 +944,8 @@ while IFS= read -r c; do
       why=gate-global
       break
     fi
-  done <"$TMPD/commit-paths"
+  done <&4
+  exec 4<&-
   if [ -n "$hit" ]; then
     m=$((m + 1))
     # SANITIZED HERE, at capture (D2b). `matched_lines` is newline-delimited, so a
@@ -918,7 +959,8 @@ while IFS= read -r c; do
     matched_lines="$matched_lines${c:0:9} $why $(sane "$hit")
 "
   fi
-done <"$TMPD/behind-commits"
+done <&3
+exec 3<&-
 
 # --- report ----------------------------------------------------------------
 printf '%s subject %s (%s)\n' "$P" "$(sane "$rev")" "$subject_sha"

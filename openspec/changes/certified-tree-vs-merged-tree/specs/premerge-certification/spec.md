@@ -237,6 +237,15 @@ rediscovered (#3650 review B3).
 - **AND** a `lazy-fetch-guard` line names the version field, that the variable is not honoured, and the
   affirmative `promisor NO` state
 
+#### Scenario: A scratch file that cannot be read is unmeasurable, not a zero blast radius
+- **GIVEN** a run whose scratch file for the diff's paths, a commit's paths, or the commits behind cannot
+  be opened for reading
+- **WHEN** the advisory is run
+- **THEN** the verdict is `UNMEASURED`, naming the file and what it held, and it exits `5`
+- **AND** no blast-radius count is printed and the permissive verdict does not appear
+- **AND** every emitted line still carries the `BASE-STALENESS: ` prefix — the shell's own redirect
+  diagnostic is suppressed
+
 #### Scenario: A local replacement ref cannot hide a blast-radius path
 - **GIVEN** a checkout carrying a `refs/replace/*` entry that substitutes a commit behind the base so that
   `git diff-tree` reports none of the paths that commit really touches
