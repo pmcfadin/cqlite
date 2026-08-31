@@ -391,6 +391,41 @@ if ! TMPD=$(mktemp -d "${TMPDIR:-/tmp}/base-staleness.XXXXXX" 2>/dev/null); then
 fi
 trap 'rm -rf "$TMPD" 2>/dev/null' EXIT
 
+# TMPDIR IS NOT TRUSTED (#3650 review R4). `mktemp -d` honours TMPDIR, so a
+# TMPDIR pointing inside the checkout makes this script write IN THE REPOSITORY
+# — and D5's argument for this tool is precisely that a verifier with a side
+# effect is a worse verifier, so the contract is load-bearing rather than tidy.
+# The RESOLVED dir is canonicalized (`cd`+`pwd -P`, the convention in
+# scripts/flow/finalize-cleanup.sh — no `realpath` dependency) and an
+# in-repository location is REFUSED, routed to UNMEASURED naming TMPDIR like
+# every other unmeasurable condition. Deliberately NOT relocated silently to
+# /tmp: a tool that quietly ignores the environment it was handed is the same
+# defect one layer down, and an UNMEASURED naming the cause is actionable.
+# INTERRUPTION is a separate, ACCEPTED residual: the trap above covers a normal
+# exit and a trappable signal, so a SIGKILL between `mktemp` and exit leaves the
+# (now provably out-of-repo) scratch dir for the OS to reap. An unignorable
+# signal cannot be cleaned up from inside the process; what this check
+# guarantees is that whatever survives is never inside the repository.
+tmpd_canon=$( (cd "$TMPD" 2>/dev/null && pwd -P) || true )
+if [ -z "$tmpd_canon" ]; then
+  unmeasured "the scratch dir $(sane "$TMPD") could not be canonicalized"
+fi
+repo_top=$(git rev-parse --show-toplevel 2>/dev/null) || repo_top=""
+repo_canon=""
+if [ -n "$repo_top" ]; then
+  repo_canon=$( (cd "$repo_top" 2>/dev/null && pwd -P) || true )
+fi
+if [ -n "$repo_canon" ]; then
+  case "$tmpd_canon/" in
+    "$repo_canon"/*)
+      unmeasured "the scratch dir resolves INSIDE the repository:" \
+        "$(sane "$tmpd_canon") is under $(sane "$repo_canon"). TMPDIR points into the" \
+        "checkout and this script writes nothing in the repo (#3650 D5). Re-run with a" \
+        "TMPDIR outside the work tree."
+      ;;
+  esac
+fi
+
 # --- resolve the three inputs, each failure being UNMEASURED (never a zero) ---
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   unmeasured "not inside a git work tree (cwd $(sane "$(pwd)"))"

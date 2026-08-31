@@ -617,6 +617,46 @@ else
   bad "no side effects: the advisory changed refs or files in the repository"
 fi
 
+# --- Case 13d: TMPDIR inside the checkout is REFUSED (#3650 review R4) ------
+# `mktemp -d` honours TMPDIR, so the no-write-in-the-repository contract Case 13
+# asserts is only as strong as the SCRATCH LOCATION. Point TMPDIR at a directory
+# inside the work tree: the run must be UNMEASURED naming TMPDIR, and the repo
+# must be byte-identical afterwards. Both halves matter — an UNMEASURED that
+# still wrote a scratch dir would satisfy the verdict and violate the contract.
+TMPDIR_IN_REPO="$R_MOTIV/scratch-inside-the-repo"
+mkdir -p "$TMPDIR_IN_REPO"
+find "$R_MOTIV" -type f | sort >"$T/tmpdir-files-before"
+OUT=$(cd "$R_MOTIV" && TMPDIR="$TMPDIR_IN_REPO" bash "$ADVISORY" 2>&1)
+RC=$?
+record_out "TMPDIR inside the checkout"
+if [ "$RC" -eq 5 ]; then
+  ok "tmpdir: an in-repository TMPDIR is UNMEASURED (exit 5), never a measurement"
+else
+  bad "tmpdir: an in-repository TMPDIR must exit 5, got $RC (output: $OUT)"
+fi
+has "tmpdir: the verdict token is UNMEASURED" "verdict UNMEASURED"
+has "tmpdir: the cause NAMES TMPDIR, so the fix is actionable" "TMPDIR"
+has "tmpdir: the cause names the in-repository resolution" "INSIDE the repository"
+find "$R_MOTIV" -type f | sort >"$T/tmpdir-files-after"
+if diff -q "$T/tmpdir-files-before" "$T/tmpdir-files-after" >/dev/null; then
+  ok "tmpdir: no file was left inside the repository by the refused run"
+else
+  bad "tmpdir: the refused run left files in the repository: $(diff "$T/tmpdir-files-before" "$T/tmpdir-files-after" | head -3)"
+fi
+rmdir "$TMPDIR_IN_REPO" 2>/dev/null || rm -rf "$TMPDIR_IN_REPO"
+# NON-VACUITY: the refusal is caused by the LOCATION, not by TMPDIR being set at
+# all. The same run with TMPDIR outside the work tree must still MEASURE.
+TMPDIR_OUTSIDE="$T/scratch-outside"
+mkdir -p "$TMPDIR_OUTSIDE"
+OUT=$(cd "$R_MOTIV" && TMPDIR="$TMPDIR_OUTSIDE" bash "$ADVISORY" 2>&1)
+RC=$?
+record_out "TMPDIR outside the checkout"
+if [ "$RC" -eq 4 ]; then
+  ok "tmpdir: an out-of-repo TMPDIR is honoured and still MEASURES (the case is not vacuous)"
+else
+  bad "tmpdir: an out-of-repo TMPDIR must still measure (exit 4), got $RC (output: $OUT)"
+fi
+
 # --- Case 12b: the USAGE path needs no external command (#3650 B4) ---------
 # The usage block prints the program name, and it used to come from
 # `$(basename "$0")` — an external command whose stderr is NOT captured, so a
