@@ -859,6 +859,52 @@ append_audit() {
 # sibling lock root (see the header's "WHY THE LOCK IS NOT IN THE LANE DIRECTORY"), so
 # nothing here may write inside a lane.
 # ---------------------------------------------------------------------------
+# dir_mutex <canonical-lane-dir> — a mutex keyed by the LANE DIRECTORY, not by the issue.
+#
+# WHY THIS EXISTS (#3436, roborev round 8 — a regression I introduced). The record is keyed by
+# issue so that `release`/`probe` can find it WITHOUT being told a path (round 2 fix). But
+# keying the MUTEX by issue alone means two DIFFERENT issue numbers naming the SAME directory
+# take DIFFERENT mutexes and BOTH acquire — measured: `acquire 800 --lane-dir X` and
+# `acquire 801 --lane-dir X` both returned ACQUIRED, which is the core collision protection
+# bypassed. Before FIX 2 the record lived AT `<lane-dir>/.lane-lock`, so the DIRECTORY was the
+# key and this could not happen; moving the lock out (necessary, because `git worktree add`
+# refuses any existing target) re-keyed it and opened the alias.
+#
+# So acquire holds BOTH: this directory mutex (which makes two issues on one directory contend
+# for real, closing the RACE) and the per-issue mutex (which keeps the by-issue record path
+# working). The filename is the canonical path with `/` mapped to `_`, so it is deterministic,
+# needs no hash tool, and is readable in a listing.
+#
+# RESIDUAL, stated rather than implied: two callers with DIFFERENT `LANE_ROOT` values naming the
+# same directory still take different mutexes, because both live under the lock root. That is
+# invoker-class (whoever sets LANE_ROOT controls the namespace) and out of the threat model
+# per CLAUDE.md's triage rule; the accident this closes is the same-root, different-issue one.
+dir_mutex() {
+  local canon="$1" key
+  key="$(printf '%s' "$canon" | tr '/' '_')"
+  printf '%s/dir-%s.flock\n' "$(lock_root)" "$key"
+}
+
+# same_dir_other_issue <issue> <canonical-lane-dir> — prints a live conflicting holder, if any.
+# Scans the lock root for a record naming the SAME lane dir under a DIFFERENT issue. A DEAD
+# holder does not block (its record is reclaimable and stale), and our OWN issue never blocks
+# (that is the ordinary re-entrant/reclaim path).
+same_dir_other_issue() {
+  local issue="$1" canon="$2" f base other
+  for f in "$(lock_root)"/lane-*.lock; do
+    [ -f "$f" ] || continue
+    base="${f##*/}"; other="${base#lane-}"; other="${other%.lock}"
+    [ "$other" = "$issue" ] && continue
+    parse_record "$f" || continue
+    [ "${REC_LANE_DIR:-}" = "$canon" ] || continue
+    case "$(record_liveness '')" in
+      DEAD-*) continue ;;
+      *) printf '%s|%s|%s\n' "$other" "${REC_PID:-<none>}" "${REC_ACQUIRED_TS:-<none>}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 with_lock() {
   local flock_file="$1"; shift
   if ! command -v flock >/dev/null 2>&1; then
@@ -960,6 +1006,16 @@ resolve_lane_dir() {
 lex_norm_path() {
   local in="$1" out="" seg
   case "$in" in /*) ;; *) printf '%s\n' "$in"; return 0 ;; esac
+  # NOGLOB WHILE SPLITTING (#3436, roborev round 8). `for seg in $in` with IFS=/ is subject to
+  # PATHNAME EXPANSION, so a not-yet-existing lane path containing `*`, `?` or `[...]` expanded
+  # against the CURRENT DIRECTORY and was recorded as an unrelated path — measured:
+  # `.../dec*y-expanded` was recorded as `.../decoy-expanded`. The recorded path then never
+  # matches the holder's cwd, which is the same identity breakage this function was added to
+  # fix. Save and restore the caller's setting rather than assuming it: this is a library
+  # function and leaving `-f` on would silently change globbing for everything after it.
+  local _glob_was_off=0
+  case "$-" in *f*) _glob_was_off=1 ;; esac
+  set -f
   local IFS=/
   for seg in $in; do
     case "$seg" in
@@ -968,6 +1024,7 @@ lex_norm_path() {
       *)    out="$out/$seg" ;;
     esac
   done
+  [ "$_glob_was_off" -eq 1 ] || set +f
   printf '%s\n' "${out:-/}"
 }
 
@@ -1159,7 +1216,16 @@ cmd_acquire() {
   prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
   # BEFORE the mutex, so a refused acquire creates NOTHING at all (#3436 FIX 5a).
   require_durable_identity acquire || return 1
-  with_lock "$G_MUTEX" _acquire_locked
+  # BOTH mutexes: directory first (so two issues on one directory contend), then per-issue.
+  _acquire_under_dir_lock() {
+    local conflict
+    if conflict="$(same_dir_other_issue "$G_ISSUE" "$G_LANE")"; then
+      emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is already locked under a DIFFERENT issue by a live holder. The record is keyed by issue so readers need no path, but the DIRECTORY is what must not have two writers — so this refuses. If the other issue number is the mistake, fix the caller; if that lane is genuinely finished, release or reclaim it under ITS issue number.)"
+      return 2
+    fi
+    with_lock "$G_MUTEX" _acquire_locked
+  }
+  with_lock "$(dir_mutex "$G_LANE")" _acquire_under_dir_lock
 }
 
 # ---------------------------------------------------------------------------

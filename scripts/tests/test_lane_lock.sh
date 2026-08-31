@@ -1217,5 +1217,65 @@ $rel_out"
   kill "$CN_H" 2>/dev/null || true
 done
 
+# ===========================================================================
+echo "TEST 26: the DIRECTORY is what must not have two writers (roborev round 8)"
+# ===========================================================================
+# A REGRESSION INTRODUCED BY FIX 2. The record is keyed by ISSUE so readers need no path; the
+# mutex was keyed by issue too, so two DIFFERENT issues naming the SAME directory took
+# DIFFERENT mutexes and BOTH acquired — the core collision protection bypassed. Before FIX 2
+# the record lived AT `<lane-dir>/.lane-lock`, so the DIRECTORY was the key; moving the lock
+# out (necessary: `git worktree add` refuses any existing target) re-keyed it. acquire now
+# holds a DIRECTORY-keyed mutex as well, and refuses a live holder under another issue.
+SHARED="$LANES/shared-826"; mkdir -p "$SHARED"
+sleep 300 & SH_A=$!
+sleep 300 & SH_B=$!
+ll acquire 826 --lane-dir "$SHARED" --pid "$SH_A"; rc26a=$RC
+ll acquire 827 --lane-dir "$SHARED" --pid "$SH_B"; rc26b=$RC; out26b=$OUT
+if [ "$rc26a" -eq 0 ] && [ "$rc26b" -eq 2 ] \
+   && printf '%s' "$out26b" | grep -q 'reason=same-lane-dir-other-issue' \
+   && printf '%s' "$out26b" | grep -q 'conflicting-issue=826'; then
+  ok "(a) a SECOND issue naming the SAME lane directory is OCCUPIED and NAMES the conflicting issue — one directory, one writer"
+else
+  bad "(a) expected the second issue to be refused; got rc=$rc26a/$rc26b
+$out26b"
+fi
+
+# CONTROLS. A guard that never permits work is broken, not fail-closed — so all three of these
+# must still ACQUIRE, and each rules out a different way of over-refusing.
+ll acquire 826 --lane-dir "$SHARED" --pid "$SH_A"
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 're-entrant'; then
+  ok "(b) control: the SAME issue re-acquiring its own directory is re-entrant, not blocked by itself"
+else bad "(b) same-issue re-acquire was refused: $OUT"; fi
+
+OTHERD="$LANES/other-828"; mkdir -p "$OTHERD"
+ll acquire 828 --lane-dir "$OTHERD" --pid "$SH_B"
+if [ "$RC" -eq 0 ]; then
+  ok "(c) control: a different issue on a DIFFERENT directory still acquires — the guard couples directories, not issues"
+else bad "(c) a different issue on a different dir was refused: $OUT"; fi
+
+kill "$SH_A" 2>/dev/null; wait "$SH_A" 2>/dev/null
+sleep 300 & SH_C=$!
+ll acquire 829 --lane-dir "$SHARED" --pid "$SH_C"
+if [ "$RC" -eq 0 ]; then
+  ok "(d) control: once the holder is DEAD, another issue CAN take that directory — a dead holder does not block forever"
+else bad "(d) a dead holder blocked another issue: $OUT"; fi
+kill "$SH_B" "$SH_C" 2>/dev/null || true
+
+# (e) GLOB CHARACTERS in a not-yet-existing lane path must be taken LITERALLY. `for seg in $in`
+# with IFS=/ is subject to pathname expansion, so `.../dec*y-x` expanded against the CURRENT
+# directory and was recorded as an unrelated path — which then never matches the holder's cwd,
+# the very identity breakage lex_norm_path was added to fix.
+GLOBD="$LANES/dec*y-830"
+: > "$LANES/decoy-830"
+sleep 300 & GL_H=$!
+ll acquire 830 --lane-dir "$GLOBD" --pid "$GL_H"
+rec830=$(grep '^lane-dir=' "$LANES/.lane-locks/lane-830.lock" 2>/dev/null | cut -d= -f2-)
+if [ "$rec830" = "$GLOBD" ]; then
+  ok "(e) a lane path containing a glob character is recorded LITERALLY ($(basename "$rec830")), not expanded against cwd"
+else
+  bad "(e) glob expanded: recorded '$rec830' want '$GLOBD'"
+fi
+kill "$GL_H" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
