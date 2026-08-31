@@ -129,6 +129,17 @@
 //! framing walk here: a call-site validator that must know about every decoder
 //! is precisely the shape this module replaced.
 //!
+//! # Presenting the key EXACTLY as the FROZEN spelling does (issue #3612, R3-F2)
+//!
+//! Two spellings of one logical map must present the same key value, or `Value`'s
+//! `PartialEq`/`Hash` tell them apart on the public Rust surface. That rule, its
+//! per-type measurement, and the reason it is type-dependent live on
+//! `frozen_presentation_wrapper`. Read that before changing the strip: an earlier
+//! revision of this header claimed the key "presents EXACTLY as the FROZEN
+//! spelling" while stripping UNCONDITIONALLY, which was true for UDT keys and
+//! FALSE for collection keys — the gap that survived two review rounds because
+//! the parity tests covered only UDTs.
+//!
 //! # The asymmetry across the three cell-path/key readers (issue #3612)
 //!
 //! For a key type CQLite models nowhere, all three readers agree — each serves
@@ -234,7 +245,84 @@ impl V5CompressedLegacyParser {
                  named here is registered."
             );
         }
-        Ok(decoded)
+        // PRESENTATION, last: re-apply the `Value::Frozen` wrapper exactly where the
+        // FROZEN spelling of the same map would carry one (see
+        // `frozen_presentation_wrapper`). Deliberately after the opaque-value test
+        // above, which must see the PEELED value.
+        Ok(Self::frozen_presentation_wrapper(decoded, type_str))
+    }
+
+    /// Re-apply the `Value::Frozen` wrapper iff the FROZEN spelling of the same map
+    /// would present one, so the two spellings of one map compare EQUAL on the
+    /// public Rust surface (`Value`'s `PartialEq`/`Hash` distinguish
+    /// `Frozen(Set(..))` from `Set(..)`).
+    ///
+    /// # The rule is TYPE-DEPENDENT, and that is not a bug — it is what parity
+    /// requires. Measured, per key type (issue #3612, R3-F2):
+    ///
+    /// | key type the frozen side is handed | frozen side | multicell must present |
+    /// |---|---|---|
+    /// | `UserType(..)` marshal (a UDT)     | `Udt`          | `Udt` (BARE) |
+    /// | `frozen<set<int>>`                 | `Frozen(Set)`  | `Frozen(Set)` |
+    /// | `frozen<list<int>>`                | `Frozen(List)` | `Frozen(List)` |
+    /// | `frozen<map<text,int>>`            | `Frozen(Map)`  | `Frozen(Map)` |
+    /// | `tuple<text,int>`                  | `Tuple`        | `Tuple` (BARE) |
+    /// | `frozen<tuple<text,int>>`          | `Frozen(Tuple)`| `Frozen(Tuple)` |
+    ///
+    /// # Why the asymmetry exists, from CASSANDRA'S OWN metadata
+    /// The committed fixture's `Statistics.db` (`nb-1-big-Statistics.db.txt`,
+    /// `test_udt_collision.udt_collide`) shows Cassandra writing DIFFERENT strings
+    /// for the two spellings of the same logical map:
+    ///
+    /// * MULTICELL `cm map<frozen<collide>, int>` →
+    ///   `MapType(FrozenType(UserType(..)),Int32Type)` — the key IS
+    ///   `FrozenType`-wrapped, because a multicell map's key must be explicitly
+    ///   frozen.
+    /// * FROZEN `fcm frozen<map<frozen<collide>, int>>` →
+    ///   `FrozenType(MapType(UserType(..),Int32Type))` — the key is NOT wrapped,
+    ///   because everything inside a frozen collection is already frozen so
+    ///   Cassandra omits the marker (same for `fs`:
+    ///   `FrozenType(SetType(UserType(..)))`).
+    ///
+    /// So the two sides are handed genuinely different type strings by Cassandra,
+    /// and the wrapper cannot be equalised by threading metadata — one side has to
+    /// normalise. For a UDT the frozen side ends up BARE (its string carries no
+    /// `FrozenType`, and `prefer_udt_marshal_element` prefers that marshal string
+    /// over the schema spelling anyway, issue #1340), so the multicell side strips.
+    /// For a COLLECTION key the frozen side receives no UDT-bearing marshal, so
+    /// `prefer_udt_marshal_element` falls back to the SCHEMA short form
+    /// `frozen<set<int>>` — which IS frozen-spelled — and wraps. The multicell side
+    /// therefore must wrap too.
+    ///
+    /// # A note recorded rather than acted on
+    /// The collection wrapper on the frozen side traces to CQLite's schema-spelling
+    /// FALLBACK, not to Cassandra's metadata (whose frozen-collection header omits
+    /// the marker). By that authority BARE is arguably right for both sides. Making
+    /// that call means changing the frozen read path, which is a cross-path parity
+    /// decision for the lead, not this issue's — so this matches the frozen side as
+    /// it behaves TODAY and the question is reported upward instead.
+    ///
+    /// Scalars are deliberately excluded: `frozen<blob>` and friends are not legal
+    /// CQL for a map key, so there is no frozen-side behaviour to match, and
+    /// wrapping them would blind the opaque-value diagnostic above.
+    fn frozen_presentation_wrapper(value: Value, type_str: &str) -> Value {
+        let composite = matches!(
+            value,
+            Value::List(_) | Value::Set(_) | Value::Map(_) | Value::Tuple(_)
+        );
+        if composite && Self::is_frozen_spelled(type_str) {
+            return Value::Frozen(Box::new(value));
+        }
+        value
+    }
+
+    /// Whether `type_str` is spelled `frozen<..>` / `FrozenType(..)` — the exact
+    /// predicate `parse_value_from_raw_bytes`'s frozen arm dispatches on, so this
+    /// cannot form a second opinion about what the frozen side would have done.
+    fn is_frozen_spelled(type_str: &str) -> bool {
+        let lower = type_str.trim().trim_matches('\'').to_ascii_lowercase();
+        lower.starts_with("frozen<")
+            || lower.starts_with("org.apache.cassandra.db.marshal.frozentype(")
     }
 
     /// Decode a cell-path key AND report how many bytes the decode consumed.
@@ -404,27 +492,10 @@ impl V5CompressedLegacyParser {
     }
 
     /// Drop the `Value::Frozen` wrapper the structural decoder adds for a
-    /// `frozen<…>`-spelled type, so a MULTICELL map key presents EXACTLY as the
-    /// FROZEN spelling of the same map presents it.
-    ///
-    /// MEASURED, not assumed (issue #3612): reading the committed Cassandra
-    /// fixture `test_udt_collision.udt_collide`, the frozen control
-    /// `fcm frozen<map<frozen<collide>, int>>` yields a BARE `Value::Udt` key,
-    /// because [`super::cell_value_complex`] prefers the on-disk marshal element
-    /// type (`UserType(…)`, issue #1340) over the schema's `frozen<collide>` and
-    /// so never enters the `frozen<` arm. The multicell sibling
-    /// `cm map<frozen<collide>, int>` resolves its key type from
-    /// `column.data_type`, which DOES carry the `frozen<…>` (or `FrozenType(…)`)
-    /// spelling, so delegation would wrap where the control does not — leaving
-    /// the two spellings of one map with different internal shapes.
-    ///
-    /// The wrapper carries no information at this position: CQL requires a
-    /// composite map key to be frozen (`map<collide, int>` is rejected;
-    /// `map<frozen<collide>, int>` is the only legal spelling), so `Frozen` here
-    /// is constant-true. Every render surface already unwraps it transparently
-    /// (`ValueFormatter::format_value`, the CLI JSON writer, Arrow's
-    /// `unwrap_frozen_value`, and both bindings), so this normalizes the internal
-    /// shape rather than changing any rendered output.
+    /// `frozen<…>`-spelled type, so the opaque-value test and the consumption rule
+    /// see the real value. The wrapper is re-applied for PRESENTATION, only where
+    /// the frozen spelling would carry one — see `frozen_presentation_wrapper`,
+    /// which owns the parity rule and its measurement.
     fn unwrap_frozen_cell_path_key(mut value: Value) -> Value {
         while let Value::Frozen(inner) = value {
             value = *inner;

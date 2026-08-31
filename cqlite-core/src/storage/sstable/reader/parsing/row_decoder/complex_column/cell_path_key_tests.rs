@@ -1067,3 +1067,88 @@ fn admitting_an_empty_width_did_not_widen_the_upper_bound() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// R3-F2: the multicell key presents EXACTLY as the FROZEN spelling, per type
+// ---------------------------------------------------------------------------
+//
+// The differential the earlier parity tests were missing: they covered only UDT
+// keys, where both sides happen to agree because Cassandra's frozen-collection
+// header omits the `FrozenType` marker and `prefer_udt_marshal_element` prefers
+// that marshal string anyway (#1340). For a COLLECTION key the frozen side falls
+// back to the SCHEMA spelling `frozen<set<int>>`, which IS frozen-spelled, and
+// wraps — so an unconditional strip on the multicell side diverged.
+//
+// Both sides funnel a key through `parse_value_from_raw_bytes`, so measuring that
+// function with the type string the frozen side would supply IS measuring the
+// frozen side. Asserted as EQUALITY of the two, per type, so neither can drift.
+
+#[test]
+fn multicell_and_frozen_sides_present_every_key_type_identically() {
+    let p = parser();
+    let udt = collide_key_bytes();
+    let seq = encode_sequence(&[&1i32.to_be_bytes()]);
+    let mp = encode_frozen_map(&[(b"k", &7i32.to_be_bytes())]);
+    let tup = encode_components(&[Some(b"abc"), Some(&42i32.to_be_bytes())]);
+    let udt_marshal = format!(
+        "{MARSHAL}.UserType({KEYSPACE},{},{}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.UTF8Type,\
+         {}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.Int32Type)",
+        hex::encode("collide"),
+        hex::encode("_type"),
+        hex::encode("_keyspace"),
+        hex::encode("__proto__"),
+        hex::encode("real_field"),
+    );
+    // (the type string the FROZEN side hands its key decoder, the key bytes,
+    //  whether a `Value::Frozen` wrapper is EXPECTED on both sides)
+    let cases: Vec<(String, &[u8], bool)> = vec![
+        (udt_marshal, &udt, false),
+        ("frozen<set<int>>".into(), &seq, true),
+        ("frozen<list<int>>".into(), &seq, true),
+        ("frozen<map<text, int>>".into(), &mp, true),
+        ("tuple<text, int>".into(), &tup, false),
+        ("frozen<tuple<text, int>>".into(), &tup, true),
+        (
+            format!("{MARSHAL}.FrozenType({MARSHAL}.SetType({MARSHAL}.Int32Type))"),
+            &seq,
+            true,
+        ),
+    ];
+    assert_eq!(cases.len(), 7, "keep in step with the case list");
+    for (type_str, bytes, expect_wrapped) in cases {
+        let frozen_side = p
+            .parse_value_from_raw_bytes(bytes, &type_str, "k", 0)
+            .unwrap_or_else(|e| panic!("{type_str}: frozen-side decode failed: {e}"));
+        let multicell = p
+            .parse_cell_path_key(bytes, &type_str, "k")
+            .unwrap_or_else(|e| panic!("{type_str}: multicell decode failed: {e}"));
+        assert_eq!(
+            matches!(frozen_side, Value::Frozen(_)),
+            expect_wrapped,
+            "{type_str}: the FROZEN side's wrapper shape changed — re-derive the \
+             expectation from a measurement before touching the multicell side"
+        );
+        assert_eq!(
+            multicell, frozen_side,
+            "{type_str}: the multicell key must present EXACTLY as the frozen \
+             spelling (issue #3612 R3-F2)"
+        );
+    }
+}
+
+/// The consequence that makes it matter: `Value` equality/hashing distinguish
+/// `Frozen(Set(..))` from `Set(..)`, so a divergence is observable on the public
+/// Rust surface and not merely a shape detail.
+#[test]
+fn a_wrapper_divergence_would_be_observable_through_value_equality() {
+    let inner = Value::Set(vec![Value::Integer(1)]);
+    let wrapped = Value::Frozen(Box::new(inner.clone()));
+    assert_ne!(inner, wrapped, "PartialEq distinguishes the two shapes");
+    use std::collections::HashSet;
+    let mut set: HashSet<String> = HashSet::new();
+    set.insert(format!("{inner:?}"));
+    assert!(
+        !set.contains(&format!("{wrapped:?}")),
+        "the two shapes are distinct as map keys too"
+    );
+}
