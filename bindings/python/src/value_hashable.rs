@@ -57,9 +57,14 @@
 //!   (through `Frozen`), the inner key type being `frozen<key_part>`.
 //! * `s_map_udt_val` — REACHES, same route; its inner map keys are `int`. Arm:
 //!   SCALAR (`Integer`).
-//! * `m_tuple_udt` — REACHES, but its keys arrive as opaque `Value::Blob` from
-//!   the scalar-only `parse_cell_path_key` (a cqlite-core gap, #3612). Arm:
-//!   SCALAR (`Blob`).
+//! * `m_tuple_udt` — REACHES, via `map_to_py` over a MULTICELL map's decoded
+//!   keys. Arm: `Tuple`, then `Udt` through `Frozen` — the SAME arms and the
+//!   same output as its frozen sibling `f_map_tuple_udt`. Until #3612 its keys
+//!   arrived as opaque `Value::Blob` from a then scalar-only
+//!   `parse_cell_path_key`, so this entry read `Arm: SCALAR (Blob)`; #3612 made
+//!   that site delegate to the structural decoder, and
+//!   `TestTupleBorneUdtAsMapKey` flipped from a documented gap to the positive
+//!   case in the same change.
 //! * `s_tuple_udt`, `s_set_udt`, `s_list_udt`, `f_set_tuple_udt` — do NOT reach
 //!   it. `set_to_py`'s `list` branch converts each element with `value_to_py`,
 //!   and nothing below those elements is a map.

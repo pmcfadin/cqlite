@@ -987,15 +987,17 @@ values and a `dict` would be unhashable. A collection field inside a frozen UDT 
 `Value::Blob`, so it arrives as hashable `bytes`. That decode gap is orthogonal to both issues and is
 pinned as characterization in `bindings/python/tests/test_issue_3504_udt_field_namespace.py`.
 
-**The remaining gap is MULTICELL map keys only, filed as #3612.** A non-frozen (multicell)
-`map<K, V>` carries each key in the cell PATH, and `parse_cell_path_key`
-(`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs`) decodes cell-path
+**MULTICELL map keys were the remaining gap; #3612 CLOSED it.** A non-frozen (multicell)
+`map<K, V>` carries each key in the cell PATH, and `parse_cell_path_key` used to decode cell-path
 keys from a **scalar-only allowlist** (text/ascii/varchar, uuid/timeuuid, int, bigint/counter, date,
-timestamp) with a `_ => Value::Blob` fallback. So a COMPOSITE multicell map key — a `frozen<udt>`,
-`frozen<tuple<…>>` or nested collection — arrives as an opaque `Blob`, i.e. the Python side never
-sees a structured key to project at all. This is a **core decode** gap, not a binding gap, and it is
-upstream of everything in this section. A **frozen** map is unaffected: its keys are decoded
-structurally by the frozen-collection path and reach `value_to_hashable_key` normally.
+timestamp) with a `_ => Value::Blob` fallback, so a COMPOSITE multicell map key — a `frozen<udt>`,
+`frozen<tuple<…>>` or nested collection — arrived as an opaque `Blob` and the Python side never saw
+a structured key to project. That site is now
+`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column/cell_path_key.rs` and it
+delegates to the structural decoder, so a multicell composite key decodes exactly as the **frozen**
+spelling's always did and reaches `value_to_hashable_key` normally. The residual is narrower and
+tracked separately: a nested element's declared width is not validated exactly (#3723), which only
+bites on input Cassandra itself refuses to read.
 
 Consequence for #1455: a harness no longer gets an exception for these shapes, so there is no
 unsupported-shape error to special-case. It compares them like any other row, against the
