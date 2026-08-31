@@ -159,19 +159,50 @@
 //! | duration | measured from its own three-VInt framing (the decoder ignores the remainder) |
 //! | unknown type → opaque `Value::Blob` | whole slice by construction; also `warn!`s |
 //!
-//! ## The ONE residual, stated rather than left to be rediscovered
-//! A NESTED element of a collection or tuple is bounded by its OWN `[i32 BE len]`
-//! prefix, and the element decode then uses `parse_value_from_raw_bytes`, whose
-//! fixed-width guards are `data.len() < N`, not `!= N`. So for e.g.
+//! ## The residual: NESTED CONSUMPTION IS UNCHECKED AT EVERY LEVEL BELOW THE FIRST
+//!
+//! Stated broadly because an earlier revision stated it too narrowly — it named
+//! only fixed-width scalars, and roborev round 9 was right that the class is
+//! wider. The consumption rule above applies to the OUTER value only. A nested
+//! value is bounded by its own `[i32 BE len]` prefix, the parent advances by that
+//! DECLARED length, and nothing compares it with what the child actually read. So
+//! trailing bytes inside any nested value are silently ignored:
+//!
+//! * **fixed-width scalars** — `parse_value_from_raw_bytes`'s guards are
+//!   `data.len() < N`, not `!= N`, so a 5-byte `int` element decodes from its
+//!   first 4 bytes;
+//! * **nested tuples and UDTs** — the decoders iterate the DECLARED components and
+//!   stop, leaving any extra components unread;
+//! * **nested collections** — the element loop runs the DECLARED count and stops;
+//! * **`duration`** — reads three VInts and ignores whatever follows.
+//!
+//! Consequence, and it is this PR's own headline symptom one level down: for
 //! `frozen<list<int>>` the byte strings `[count=1][len=4][4B]` and
-//! `[count=1][len=5][5B]` BOTH satisfy the top-level consumption rule (each
-//! consumes its own full length) and decode to the same `List([Integer(x)])`.
-//! Making that exact is a one-token change per fixed-width arm in
-//! `parse_value_from_raw_bytes`, which every value read in this crate goes
-//! through, and that file is already over the file-size threshold so it cannot
-//! grow — out of #3612's scope (tracked as issue #3723), and deliberately NOT
-//! patched with a second framing walk here: a call-site validator that must know
-//! about every decoder is precisely the shape this module replaced.
+//! `[count=1][len=5][5B]` both satisfy the OUTER rule and decode to the same
+//! `List([Integer(x)])`, so two distinct cell paths become one logical key and can
+//! collapse a Python map entry.
+//!
+//! WHY IT IS NOT FIXED HERE, measured rather than asserted. The root cause is that
+//! `parse_value_from_raw_bytes` has NO consumption channel at all — it returns a
+//! `Value` — so no caller could check even if it wanted to. Adding one is a
+//! recursive signature change across 44 call sites of that function plus 8 further
+//! decoders in the same path (`parse_raw_type_value`, `parse_udt_value`,
+//! `parse_nested_udt_from_registry`, `parse_inline_udt_value`,
+//! `parse_tuple_elements_raw`, `parse_frozen_sequence_value_raw`,
+//! `parse_frozen_map_value_raw`, `read_frozen_element`), ~100 sites in total. That
+//! is a shared-decoder tightening with its own oracle, i.e. its own PR — NOT the
+//! one map-key path this module consolidated, which is two call sites.
+//!
+//! It is also deliberately NOT patched with a second framing walk here: a
+//! call-site validator that must know about every decoder is precisely the shape
+//! this module replaced.
+//!
+//! Tracked as issue **#3723**. Worth recording for whoever takes it: nothing found
+//! depends on the lenient acceptance, so the tightening looks SAFE in principle —
+//! Cassandra cannot drop a UDT field (`AlterTypeStatement` at `cassandra-5.0.8`
+//! offers only `AddField`, `RenameFields`, `AlterField`), so schema evolution
+//! yields SHORT encodings, which are legal and already handled, never trailing
+//! ones. The blocker is scope and oracle, not risk.
 //!
 //! ## SYMPTOM: A PYTHON READ CAN SILENTLY LOSE A MAP ENTRY (issue #3612, R6-F1)
 //!
