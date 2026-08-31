@@ -2876,6 +2876,25 @@ EXPLICIT_SUMMARY_FILE=0
 [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && EXPLICIT_SUMMARY_FILE=1
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
+# #3453: the SUMMARY feature-matrix annotation. Sourced HERE — immediately after
+# LOG_DIR exists and BEFORE any component runs — because it defines the `cargo`/`env`
+# shell wrappers that OBSERVE each component's real cargo argv, plus the single
+# _fm_summary_line renderer every emit site uses. FAIL CLOSED: this is committed source
+# in the same checkout as this script, so an unreadable file is never a legitimate
+# state, and continuing would emit component lines with no matrix at all — the exact
+# blank-annotation shape #3453 exists to remove.
+GATE_FEATURE_MATRIX_LIB="${GATE_FEATURE_MATRIX_LIB:-$REPO_ROOT/scripts/ci/gate-feature-matrix.sh}"
+if [ ! -r "$GATE_FEATURE_MATRIX_LIB" ]; then
+  echo "agent-gate: FAIL-CLOSED — cannot read $GATE_FEATURE_MATRIX_LIB (#3453)." >&2
+  echo "agent-gate: it carries the SUMMARY feature-matrix annotation; without it every" >&2
+  echo "agent-gate: component line would state nothing about what it certified." >&2
+  exit 1
+fi
+# shellcheck source=scripts/ci/gate-feature-matrix.sh
+. "$GATE_FEATURE_MATRIX_LIB"
+# The per-run sidecar directory. AGENT_GATE_FM_COMPONENT (set per component, below) is
+# what ARMS recording; until then cargo probes belong to no component and are ignored.
+AGENT_GATE_FM_DIR="$LOG_DIR"
 # Per-run nonce (#1175 roborev finding 1): the LOG_DIR is a fresh per-run mktemp
 # path, so it uniquely identifies THIS invocation. We stamp it into every SUMMARY
 # block as `run-id:` so completeness can be verified for THIS run, never a stale
@@ -4835,8 +4854,16 @@ if [ "$SELFTEST" -eq 1 ]; then
     "$TREE_END_LINE"
     "$TREE_INTEGRITY_LINE"
   )
+  # #3453: drive the feature-matrix annotation through its REAL path (describe the argv
+  # -> sidecar -> render) so the self-test proves the annotated line survives capture,
+  # instead of asserting on a hand-written string. These argvs are representative of the
+  # four named components; no cargo is executed (_fm_observe_cargo_argv only records).
+  AGENT_GATE_FM_COMPONENT=fmt        _fm_observe_cargo_argv fmt --all --check
+  AGENT_GATE_FM_COMPONENT=clippy     _fm_observe_cargo_argv clippy --workspace --all-targets --all-features --exclude cqlite-core
+  AGENT_GATE_FM_COMPONENT=core-tests _fm_observe_cargo_argv test --package cqlite-core --features cli-helpers
+  AGENT_GATE_FM_COMPONENT=smoke      _fm_observe_cargo_argv build --package cqlite-cli --bin cqlite
   for i in "${!NAMES[@]}"; do
-    meta+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+    meta+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
   # #2078: when the opt-out is engaged, drive the visible missing-fixtures marker
   # through the real emit path so the self-test can assert it lands in the block.
@@ -4961,6 +4988,11 @@ esac
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
   printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+  # #3453: two whitespace fields ONLY — ~60 call sites and a 2-field `read -r _st _secs`
+  # reader, which would silently absorb a third into $_secs. The feature matrix rides a
+  # per-component SIDECAR instead. A SKIP that never reached cargo records that fact
+  # here, so its SUMMARY line says so rather than reading UNDECLARED.
+  _fm_note_if_skipped "$1" "$2"
   # #2874: every component records its verdict through here, so this is the natural
   # component-boundary chokepoint for the mid-run summary-integrity guard.
   _assert_summary_integrity "$1"
@@ -6256,6 +6288,10 @@ run_component() { # run_component <name> <cmd...>
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
     return 0
   fi
+  # #3453: attribute every cargo invocation made while this component runs to it. Set
+  # here AND at the top of dispatch_component so --lite/--delta (which call
+  # run_component directly, bypassing the pool) annotate exactly like the full gate.
+  AGENT_GATE_FM_COMPONENT="$name"
   local log="$LOG_DIR/$name.log"
   local start end status
   echo ">>> [$name] $*"
@@ -12638,7 +12674,7 @@ run_lite() {
   SUMMARY_META+=("${TREE_META_LINES[@]}")
   local i
   for i in "${!NAMES[@]}"; do
-    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+    SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -13002,7 +13038,7 @@ run_delta() {
     SUMMARY_META+=("${TREE_META_LINES[@]}")
     SUMMARY_META+=("${file_meta[@]}")
     for i in "${!DN[@]}"; do
-      SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
+      SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
     done
     SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
     emit_summary "$(_tree_result REFUSED)" "${SUMMARY_META[@]}"
@@ -13036,7 +13072,7 @@ run_delta() {
   SUMMARY_META+=("${TREE_META_LINES[@]}")
   SUMMARY_META+=("${file_meta[@]}")
   for i in "${!DN[@]}"; do
-    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
+    SUMMARY_META+=("$(_fm_summary_line "${DN[$i]}" "${DS[$i]}" "${DT[$i]}")")
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -13201,7 +13237,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   # #2926: synthetic tree identity (no git state needed for the aggregation self-test).
   SUMMARY_META+=("$TREE_START_LINE" "$TREE_END_LINE" "$TREE_INTEGRITY_LINE")
   for _i in "${!NAMES[@]}"; do
-    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$_i]}:" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
+    SUMMARY_META+=("$(_fm_summary_line "${NAMES[$_i]}" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
@@ -13510,6 +13546,11 @@ _pool_selected() {
 # records its verdict to $LOG_DIR/<name>.result (see record_result), so it is safe
 # to run in a backgrounded subshell.
 dispatch_component() {
+  # #3453: arm the feature-matrix observer for THIS component. Each component runs in
+  # its own subshell (the #1737 bounded pool), so the assignment cannot leak across
+  # components; the runners that do their own timing/record_result (run_core_tests,
+  # run_flight_tests, run_python_bindings, …) are covered here rather than one by one.
+  AGENT_GATE_FM_COMPONENT="$1"
   case "$1" in
     fmt) run_component fmt cargo fmt --all --check ;;
     clippy) run_component clippy run_clippy ;;
@@ -14003,7 +14044,7 @@ if [ -n "$ONLY" ]; then
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
 fi
 for i in "${!NAMES[@]}"; do
-  SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+  SUMMARY_META+=("$(_fm_summary_line "${NAMES[$i]}" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
 # #1465: node-bindings' leak lane is skippable under the #2078 opt-out, so the block states
 # which of RAN / SKIPPED / NOT-RUN happened. Absent file = the component was not selected,
