@@ -2701,6 +2701,36 @@ _component_set_flatten() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | cut -c1-200
 }
 
+# _component_set_one_line: enforce ONE PHYSICAL LINE, with NO truncation.
+#
+# Distinct from `_component_set_flatten` on purpose: that one `cut -c1-200`s, which is right for an
+# embedded DETAIL fragment and catastrophic for the whole verdict — a `component-set:` line carries a
+# sha40, a remedy sentence and a MISSING list, so truncating it would decapitate the verdict itself.
+#
+# WHY THIS EXISTS AS A CHOKE POINT RATHER THAN N CALL-SITE FIXES (roborev job 295, Medium). The
+# injection class here is now FIVE rounds old — 227 (raw URL), 234 (redacted, not flattened), 239
+# (flattened, not redacted), 264 (scp form), 282 (query strings) — and every fix patched the sites
+# someone had NAMED. Job 295 named two more (`$REPO_ROOT` in the manifest and no-remote details), and
+# sweeping for the report found MORE than it named: `$REPO_ROOT` at a third site, `$TMPDIR` (an
+# environment variable), `$lsr_line` (remote-controlled `ls-remote` output) and refused manifest lines
+# (file content). The pattern is unmistakable: the set of "externally influenced values" is not
+# enumerable by inspection, and `_component_set_safe_detail` only ever removed the choice for the
+# values I had already CLASSIFIED as external. A checkout path did not feel external; it is chosen by
+# whoever creates the worktree.
+#
+# So the property is enforced where it is actually needed — at the ONE point the line is assembled —
+# and no call site can violate it. A newline in ANY interpolated value, present or future, can no
+# longer add a physical line to a SUMMARY block. That matters concretely: this repo's workflow tells
+# agents to paste SUMMARY blocks into PR comments, `RESULT: PASS` at column zero is the token the
+# gate's own completion probe greps for, and `--delta` anchor validation accepts any matching
+# `RESULT: PASS` line — so a forged field in a FAILING block could pass as a valid anchor.
+#
+# Redaction stays per-value in `_component_set_safe_detail`: flattening is universal, redaction is a
+# judgement about what a specific value may contain, and conflating them is how 239 happened.
+_component_set_one_line() {
+  printf '%s' "$1" | tr '\n\r' '  '
+}
+
 # _component_set_bound_mechanism: WHICH bounded-run mechanism is available, as one token —
 # `timeout` | `gtimeout` | `bash-watchdog` | `none`. Never "unbounded".
 #
@@ -4801,7 +4831,10 @@ apply_component_set_preflight() {
 
   _component_set_probe
   verdict="$(_component_set_verdict)"
-  COMPONENT_SET_LINE="$(_component_set_line)"
+  # ONE PHYSICAL LINE, enforced HERE — the single point the line is assembled — so that no
+  # interpolated value at any call site can add a field to a SUMMARY block (job 295; see
+  # `_component_set_one_line` for why this is a choke point and not another call-site sweep).
+  COMPONENT_SET_LINE="$(_component_set_one_line "$(_component_set_line)")"
 
   # DECLARED is deliberately NON-FATAL, and this is the whole reason the ancestry probe
   # exists: when origin/main is an ancestor of HEAD **and the components are absent at HEAD
