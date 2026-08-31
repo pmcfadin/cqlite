@@ -793,12 +793,27 @@ fi
 #     appears in agent-gate.sh, read out of the gate SOURCE, so a newly-wired script joins
 #     the lint with no edit here and a new file cannot enter the gate path unchecked.
 #
-#     ONE construct class, deliberately: the ASSOCIATIVE ARRAY (`declare/local/typeset -A`).
-#     It is the construct that actually bit us, it has no bash-3.2 fallback, and it cannot
-#     produce a false positive — an associative array on a gate path IS the defect. A wider
-#     bash-4-feature lint (`mapfile`, `${v^^}`, `&>>`, negative subscripts) was NOT written:
-#     each needs context to judge, and a lint with false positives is the lint agents learn
-#     to waive (#3400's descoped parse lint, #3229's removed census oracle).
+#     THREE construct classes, and the split is deliberate AND was corrected by measurement.
+#     Linted, because each has exactly one meaning, no bash-3.2 fallback, and cannot be a
+#     false positive on a gate path: the ASSOCIATIVE ARRAY (`declare/local/typeset -A`),
+#     CASE-CONVERSION PARAMETER EXPANSION (the `${v` + `^^}` / `,,}` / `^}` / `,}` forms),
+#     and `&>>` append-redirection.
+#     NOT linted, because judging them needs context a grep does not have: `mapfile` /
+#     `readarray` (a script may define its own function of that name) and COMPUTED negative
+#     subscripts (`${a[$i]}` with i<0 is undetectable statically anyway). A lint with false
+#     positives is the lint agents learn to waive (#3400's descoped parse lint, #3229's
+#     removed census oracle) — so the line is drawn at unambiguity, not at convenience.
+#
+#     THIS PARAGRAPH PREVIOUSLY SAID NO WIDER LINT WAS WRITTEN AND NAMED THE
+#     CASE-CONVERSION FORM AS DELIBERATELY EXCLUDED. Roborev job 277 then found exactly
+#     that construct, twice, IN THIS FILE. The 'needs context to judge' argument was true
+#     for `mapfile` and false for the expansions; keeping it whole cost a review round.
+#
+#     AND THE VERDICT DECLARES ITS OWN INCOMPLETENESS (`0 of 3 RECOGNISED`, never a bare
+#     all-clear), because this scan is NOT a bash-3.2 proof. Measured against docker
+#     bash:3.2 (3.2.57): `bash -n` returns rc=0 for `declare -A`, for the case-conversion
+#     expansion and for `mapfile` — they are RUNTIME failures, and `declare -A` is not even
+#     fatal without `set -e`. Only EXECUTION under 3.2 establishes compatibility.
 b32_scripts=$(grep -oE 'scripts/(ci|tests)/[a-z0-9_-]+\.sh' "$GATE" | sort -u)
 b32_offenders=""
 b32_scanned=0
@@ -806,8 +821,16 @@ while IFS= read -r _b32f; do
   [ -n "$_b32f" ] || continue
   [ -r "$SCRIPT_DIR/../../$_b32f" ] || continue
   b32_scanned=$((b32_scanned + 1))
-  if grep -nE '^[[:space:]]*(declare|local|typeset)[[:space:]]+-[A-Za-z]*A' \
-       "$SCRIPT_DIR/../../$_b32f" >/dev/null 2>&1; then
+  # Three UNAMBIGUOUS bash-4 constructs. Each has exactly one meaning, none has a 3.2
+  # fallback, and none can be a false positive on a gate path — see the rationale above
+  # for why `mapfile` and computed negative subscripts are deliberately NOT here.
+  # Comment lines are skipped: this suite DOCUMENTS these constructs in prose (the
+  # paragraph above names one), and a lint that matches its own documentation is the
+  # self-matching defect this repo keeps re-learning.
+  if sed 's/#.*$//' "$SCRIPT_DIR/../../$_b32f" 2>/dev/null | grep -qE \
+       -e '^[[:space:]]*(declare|local|typeset)[[:space:]]+-[A-Za-z]*A' \
+       -e '\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,|\^|,)\}' \
+       -e '&>>'; then
     b32_offenders="$b32_offenders $_b32f"
   fi
 done <<EOF
@@ -816,9 +839,9 @@ EOF
 if [ "$b32_scanned" -lt 20 ]; then
   bad "bash-compat-8c: derived only $b32_scanned gate-invoked script(s) from $GATE — the derivation looks broken, so this lint would pass having scanned almost nothing"
 elif [ -n "$b32_offenders" ]; then
-  bad "bash-compat-8c: gate-invoked script(s) use a bash-4.0-only ASSOCIATIVE ARRAY, which aborts under macOS /bin/bash 3.2:$b32_offenders"
+  bad "bash-compat-8c: gate-invoked script(s) use a bash-4.0-only construct (associative array / case-conversion expansion / '&>>'), which fails under macOS /bin/bash 3.2:$b32_offenders"
 else
-  ok "bash-compat-8c: none of the $b32_scanned gate-invoked scripts/{ci,tests} scripts uses a bash-4.0-only associative array (macOS /bin/bash 3.2 floor)"
+  ok "bash-compat-8c: 0 of 3 RECOGNISED bash-4-only constructs (associative array, case-conversion expansion, '&>>') found across $b32_scanned gate-invoked scripts — NOT an exhaustive bash-3.2 proof: \`bash -n\` does not catch this class (measured: rc=0 for all three) and only EXECUTION under 3.2 establishes compatibility"
 fi
 
 # 9. Accelerator absence WARN + state markers (issue #1848). The gate must:
