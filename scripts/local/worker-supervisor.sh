@@ -2537,21 +2537,58 @@ supervisor_lock_take() {
   SUPERVISOR_LOCK_TAKE_CAUSE=''
   # `--` because the operand is `TMPDIR`-derived and may be option-shaped (#3601 AC7).
   mkdir -- "$SUPERVISOR_LOCK" 2>/dev/null || return 1
-  local pub=''
+  local marker="$SUPERVISOR_LOCK/own.$$" pub=''
+  # THE OWNERSHIP MARKER, WRITTEN BEFORE ANYTHING ELSE (#3601, roborev job 236 B12).
+  #
+  # WHY IT EXISTS. The un-create below used to be an UNCONDITIONAL `rmdir`, which is not bound to the
+  # directory this process created: a legacy peer can rename ours aside and `mkdir` its OWN pid-less lock
+  # at the same name, and a non-recursive `rmdir` then SUCCEEDS against the peer's empty startup
+  # directory — deleting a live peer's lock and freeing the name for a third claimant. That is a
+  # regression the previous round introduced, not a pre-existing defect: it traded "we wedge our own lane
+  # with an empty lock" for "we can delete a peer's startup lock", which is the worse of the two. The
+  # marker makes the removal conditional on the directory still being the instance we made.
+  #
+  # WHY A STALE MARKER CANNOT ALIAS US. This path is reached only when OUR `mkdir` succeeded, which means
+  # the directory did not exist a moment ago — so it cannot already contain an `own.<pid>` left by a dead
+  # process that happened to have our pid. Pid reuse therefore cannot forge this token for this decision.
+  #
+  # NARROWED, NOT CLOSED — AND HERE IS THE BOUND, BECAUSE THE MARKER IS NOT AIRTIGHT. Creating it is a
+  # SECOND step after `mkdir`, so there is a window in which the directory exists without it. A peer that
+  # replaces the directory inside THAT window receives our marker in its own directory, and the un-create
+  # would then remove the peer's directory exactly as before. What makes this worth doing anyway is the
+  # window's SIZE: it is two adjacent syscalls with no intervening I/O, where the window it replaces
+  # spanned the whole publish attempt (a write, a decline test and a rename). Ordering the marker before
+  # the publish is what makes it the narrowest window available to this code, and nothing here can make it
+  # zero — that needs serialisation of the complete claim-and-publication operation, which is #3683,
+  # together with the reclaim ABA and the release read-then-remove. Do not read the marker as a guarantee.
+  if ! { : >"$marker"; } 2>/dev/null; then
+    # NO OWNERSHIP EVIDENCE, SO NO REMOVAL. We know we created the directory and we cannot PROVE the one
+    # at that name now is still ours, so it is left in place and reported. That risks the empty-lock wedge
+    # B1 removed — but the cause is a filesystem that cannot take a zero-byte file, the same failure the
+    # remedy names, and guessing our way to a deletion is how a peer's lock gets destroyed.
+    SUPERVISOR_LOCK_TAKE_CAUSE='marker-failed cleanup-declined-no-ownership-evidence'
+    return 3
+  fi
   # `supervisor_lock_publish` runs in a command substitution, which is a SUBSHELL — fine, because it
   # installs no trap. The `trap` below must NOT be inside one, which is why the cause travels back
   # through a variable instead of this function echoing it.
   pub="$(supervisor_lock_publish)" || true
   if [[ "$pub" == 'ok' ]]; then
+    # The marker's job is done the moment ownership is verified, and it must not outlive it: a held lock
+    # carrying an extra file makes the non-recursive clear command an operator is handed elsewhere refuse.
+    if ! rm -f -- "$marker" 2>/dev/null; then
+      log "$(supervisor_one_line "startup: could not remove our own ownership marker $(supervisor_shell_quote "$marker") after acquiring the lock. Harmless to this run — the lock is held and its release removes the directory wholesale — but a non-recursive manual clear of that lock would refuse until the marker is gone (#3601).")"
+    fi
     trap 'supervisor_lock_release' EXIT
     return 0
   fi
   SUPERVISOR_LOCK_TAKE_CAUSE="$pub"
   # `declined` joins `not-owned` (#3601 B11): both mean the directory at that name is not ours, so both
-  # LEAVE IT ALONE. The difference is only whether we wrote into it, and the refusal says which.
+  # LEAVE IT ALONE. The difference is only whether we wrote into it, and the refusal says which. Our own
+  # marker is removed either way — it is unambiguously ours by name, and on the `declined` path it may be
+  # sitting in the PEER's directory, where leaving it would be litter in someone else's lock.
   if [[ "$pub" == 'not-owned'* || "$pub" == 'declined'* ]]; then
-    # The NAME became ours and the directory now holds someone else's pid. Leaving it alone is the whole
-    # point: it is a live holder's lock as far as we can tell.
+    rm -f -- "$marker" 2>/dev/null || true
     return 2
   fi
   # WE CREATED THE DIRECTORY AND NEVER PUBLISHED INTO IT (#3601, roborev job 231 B1). Leaving it would
@@ -2559,10 +2596,21 @@ supervisor_lock_take() {
   # its own lane until an operator cleared it, which is the lead's ruling 2 inverted: we would have
   # created the undecidable state ourselves and then refused over it.
   #
-  # THE REMOVAL IS NON-RECURSIVE, AND THAT IS WHAT MAKES IT SAFE. Between our `mkdir` and here a peer
-  # running pre-#3601 code could have reclaimed our pid-less directory and written its OWN pid into it;
-  # `rmdir` REFUSES a non-empty directory, so it can only ever remove the empty shell we made, never a
-  # holder's record. Our own staging file is removed first because it is unambiguously ours.
+  # SO THE REMOVAL IS BOUND TO THE INSTANCE WE CREATED, not merely non-recursive (#3601 B12). The
+  # non-recursive `rmdir` protects a peer that has already PUBLISHED — the directory is then non-empty and
+  # the removal fails harmlessly — and protects nothing at all against a peer that has `mkdir`'d and not
+  # yet published, which is an EMPTY directory a `rmdir` succeeds against. The marker is what distinguishes
+  # those: if it is gone, the directory at that name is not the one we made, and we remove NOTHING.
+  if [[ ! -e "$marker" && ! -L "$marker" ]]; then
+    local foreign=''
+    foreign="$(supervisor_lock_pid_read "$SUPERVISOR_LOCK/pid")" || foreign='unparseable residual-probe-aborted'
+    case "$foreign" in
+      'pid '*) SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-declined-foreign-holder $foreign" ;;
+      *)       SUPERVISOR_LOCK_TAKE_CAUSE="$pub cleanup-declined-foreign-instance $foreign" ;;
+    esac
+    return 3
+  fi
+  rm -f -- "$marker" 2>/dev/null || true
   rm -f -- "$SUPERVISOR_LOCK/pid.tmp.$$" 2>/dev/null || true
   rmdir -- "$SUPERVISOR_LOCK" 2>/dev/null || true
   # ...AND THE OUTCOME IS VERIFIED, NOT ASSUMED (#3601, roborev job 231 B9). Both removals above ignore
@@ -2573,7 +2621,7 @@ supervisor_lock_take() {
   # was told there was nothing to clear. Same defect family as the refusal that claimed a read-back it
   # never made (B1) and the mutant comment that claimed an isolation it did not have (B4) — an artifact
   # asserting a step that did not run, which is worse than no artifact because it is what stops the next
-  # reader looking. So the verdict carries what was OBSERVED after the attempt, and the three cases are
+  # reader looking. So the verdict carries what was OBSERVED after the attempt, and the cases are
   # distinguished because their remedies differ: nothing to do, a foreign holder to leave alone, or a
   # residual to clear.
   if [[ ! -e "$SUPERVISOR_LOCK" && ! -L "$SUPERVISOR_LOCK" ]]; then
@@ -2632,6 +2680,7 @@ supervisor_lock_refuse_publish_failed() {
     *' '*) cleanup="${cause#* }" ;;
   esac
   case "$pub" in
+    marker-failed) what='writing our OWNERSHIP MARKER into the lock FAILED — this run got the lock name and could not record, even provisionally, that the directory is its own' ;;
     write-failed)  what='writing our pid into the lock FAILED — no byte of it was written' ;;
     rename-failed) what='publishing our pid into the lock FAILED at the rename — the staging file was written and could not be moved into place' ;;
     *)             what="recording our pid in the lock FAILED ([$pub])" ;;
@@ -2645,6 +2694,19 @@ supervisor_lock_refuse_publish_failed() {
     'cleanup-failed-foreign-holder '*)
       aftermath="This run then tried to remove the directory it had created and it REMAINS — and it now holds a holder record that is NOT ours ([${cleanup#cleanup-failed-foreign-holder }]). A peer published into it while our publish was failing; the removal is NON-RECURSIVE precisely so that it cannot delete that record, and nothing of that peer's has been touched"
       remedy='nothing to clear: the path named above belongs to another holder, which this run left intact. Fix the filesystem problem named above and re-run; the next start will read that holder and report it by pid'
+      ;;
+    cleanup-declined-no-ownership-evidence)
+      aftermath='This run therefore did NOT attempt to remove the directory it created: with no marker written it cannot prove the directory now at that name is still its own, and a removal on that guess is how a peer that took the name in the meantime loses its lock. A lock MAY be sitting at that path — this run makes no claim either way'
+      remedy="fix the filesystem problem named above and re-run. If starts keep refusing over a lock at that path, inspect it and clear it with the next line, which is NON-RECURSIVE and refuses if anything is inside that you have not examined$(supervisor_lock_shape_note)"
+      cmd="$(supervisor_lock_clear_command)"
+      ;;
+    'cleanup-declined-foreign-holder '*)
+      aftermath="This run then found that the directory at that name is NOT the one it created — its ownership marker is gone from it — and that it holds a holder record ([${cleanup#cleanup-declined-foreign-holder }]). Another supervisor took the name while our publish was failing, so this run removed NOTHING"
+      remedy='nothing to clear: the path named above belongs to another holder, which this run left intact. Fix the filesystem problem named above and re-run; the next start will read that holder and report it by pid'
+      ;;
+    'cleanup-declined-foreign-instance '*)
+      aftermath="This run then found that the directory at that name is NOT the one it created — its ownership marker is gone from it — and that it carries no holder record yet ([${cleanup#cleanup-declined-foreign-instance }]). That is another supervisor's start in progress, which is exactly the lock a blind removal would have destroyed, so this run removed NOTHING"
+      remedy='nothing to clear: another supervisor is starting at that path and this run left it alone. Fix the filesystem problem named above and re-run; the next start will read that holder and report it by pid'
       ;;
     'cleanup-failed-residual '*)
       aftermath="This run then tried to remove the directory it had created and it REMAINS ([${cleanup#cleanup-failed-residual }]) — the removal did NOT succeed, so a lock DOES sit at that path and the next start will refuse over it until it is cleared"
@@ -2711,7 +2773,13 @@ supervisor_lock_shape_note() {
   if [[ -L "$SUPERVISOR_LOCK" ]]; then
     printf '%s' '. NOTE: that name is a SYMLINK, not a lock directory — the line below removes the LINK and does not touch whatever it points at, which is why it is not an rmdir'
   elif [[ -d "$SUPERVISOR_LOCK" ]]; then
-    printf ''
+    # THE ONE CASE WHERE A CORRECT `rmdir` STILL REFUSES, NAMED RATHER THAN LEFT TO SURPRISE (#3601 B12).
+    # This is NOT the B2 defect of printing a command that could never work for the shape at that name:
+    # `rmdir` is the right command for a directory, and it refuses only when there is content the
+    # operator must look at first, which is the safety property it was chosen for. A supervisor killed
+    # between creating its lock and recording its pid leaves an ownership marker behind — a state this
+    # change introduced — so the note says so and says what to do when the line refuses.
+    printf '%s' '. NOTE: the line below is NON-RECURSIVE and will REFUSE if anything is inside — including an `own.<pid>` ownership marker or a `pid.tmp.<pid>` staging file left by a supervisor killed between creating this lock and recording its pid. If it refuses, list the contents (ls -lna on the path above) and decide before removing anything'
   elif [[ -e "$SUPERVISOR_LOCK" ]]; then
     printf '%s' '. NOTE: that name is NOT a directory, so it is not a lock this script could ever have written — the line below removes that one file, non-recursively'
   else
