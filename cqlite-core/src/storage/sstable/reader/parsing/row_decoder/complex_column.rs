@@ -8,6 +8,10 @@ use super::*;
 mod cell_path_key;
 #[cfg(test)]
 mod cell_path_key_tests;
+// Issue #3612 (R3-F1): the guarded component-length conversion, shared with the
+// UDT field loops in `udt.rs` / `raw_type_value.rs` (see that module's header for
+// why it lives here).
+mod component_len;
 
 /// Issue #2038 (roborev Medium finding): the shape of ONE visible collection
 /// element's expiry, as input to [`ExpiryHomogeneity::fold`].

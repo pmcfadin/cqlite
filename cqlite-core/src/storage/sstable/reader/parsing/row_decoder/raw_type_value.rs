@@ -971,15 +971,12 @@ impl V5CompressedLegacyParser {
                                     Self::parse_simple_udt_field_value(&[], &field_def.field_type)?;
                                 Some(value)
                             } else {
-                                let field_len = field_len as usize;
-                                if current_offset + field_len > udt_data.len() {
-                                    return Err(Error::corruption(format!(
-                                        "Frozen UDT field '{}' extends beyond data (need {}, have {})",
-                                        field_def.name,
-                                        field_len,
-                                        udt_data.len() - current_offset
-                                    )));
-                                }
+                                let field_len = Self::checked_component_len(
+                                    field_len,
+                                    &field_def.name,
+                                    current_offset,
+                                    udt_data.len(),
+                                )?;
 
                                 let field_data =
                                     &udt_data[current_offset..current_offset + field_len];

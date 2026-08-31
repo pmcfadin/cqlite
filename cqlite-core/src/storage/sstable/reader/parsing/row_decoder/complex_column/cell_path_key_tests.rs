@@ -887,3 +887,77 @@ fn every_composite_cell_path_key_spelling_is_consumption_checked() {
         assert_no_prefix_collision(&type_str, clean, b"\x01");
     }
 }
+
+// ---------------------------------------------------------------------------
+// R3-F1: a component length below -1 must ERROR, never panic (untrusted bytes)
+// ---------------------------------------------------------------------------
+//
+// A component is `[i32 BE len][bytes]` with `-1` meaning null. Three UDT field
+// loops handled `-1` and `0` and then cast the remainder with a bare `as usize`,
+// so `-2` became ~1.8e19 and the following `offset + len > data.len()` test
+// OVERFLOWED — a debug-build panic, and in release a wrap after which the bounds
+// test can pass and the slice index panics instead. CLAUDE.md forbids a reachable
+// panic in a parser on untrusted bytes.
+//
+// Reachable from a cell-path key only since #3612 delegated the key to the
+// structural decoder, which routes a registry-resolved bare name and a marshal
+// `UserType(..)` through `parse_raw_type_value`. Every negative other than `-1`
+// is now refused BEFORE conversion by `checked_component_len`.
+
+/// Component bytes whose FIRST length header is `raw`, followed by three valid
+/// components — so the poison is at the head and the rest is well-formed.
+fn components_with_leading_len(raw: i32) -> Vec<u8> {
+    let mut out = raw.to_be_bytes().to_vec();
+    out.extend_from_slice(&encode_components(&[
+        Some(b"key-keyspace-marker"),
+        Some(b"key-proto-marker"),
+        Some(&100i32.to_be_bytes()),
+    ]));
+    out
+}
+
+#[test]
+fn a_component_length_below_minus_one_errors_and_never_panics() {
+    let p = parser();
+    // Both UDT spellings the cell-path route can take, and the boundary values.
+    let marshal = format!(
+        "{MARSHAL}.UserType({KEYSPACE},{},{}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.UTF8Type,\
+         {}:{MARSHAL}.UTF8Type,{}:{MARSHAL}.Int32Type)",
+        hex::encode("collide"),
+        hex::encode("_type"),
+        hex::encode("_keyspace"),
+        hex::encode("__proto__"),
+        hex::encode("real_field"),
+    );
+    for spelling in ["collide", "frozen<collide>", marshal.as_str()] {
+        for raw in [-2i32, -7, i32::MIN, -1_000_000] {
+            let bytes = components_with_leading_len(raw);
+            // The ONLY acceptable outcome is a returned error. A panic fails the
+            // test by aborting it, which is the point of driving real bytes here.
+            let err = p
+                .parse_cell_path_key(&bytes, spelling, "cm")
+                .expect_err(&format!(
+                    "{spelling}: component length {raw} must be REFUSED, not decoded"
+                ));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("negative") || msg.contains("beyond data"),
+                "{spelling}/{raw}: the error must name the length problem, got: {msg}"
+            );
+        }
+    }
+}
+
+/// `-1` stays legal — the guard must not have swept the null marker up with the
+/// corrupt values. This is the control that the fix is a narrowing, not a ban.
+#[test]
+fn a_minus_one_component_length_is_still_a_null_field() {
+    let bytes = components_with_leading_len(-1);
+    let value = parser()
+        .parse_cell_path_key(&bytes, "frozen<collide>", "cm")
+        .expect("-1 is the NULL marker and must still decode");
+    let u = udt_of(&value);
+    assert_eq!(field(u, "_type"), None, "-1 is null, not an error");
+    assert_eq!(text(field(u, "_keyspace")), "key-keyspace-marker");
+    assert_eq!(field(u, "real_field"), Some(Value::Integer(100)));
+}
