@@ -168,6 +168,44 @@ all do. Measured on git 2.43.0 against a `--filter=tree:0` clone: the diff call 
 store from 4 files to 12. The variable is exported once, before any object access; a missing object then
 fails its git call, which every call site already routes to `UNMEASURED`.
 
+**But the variable alone is not the guarantee: it is honoured only from git 2.36, so the claim is now
+MEASURED rather than scoped (#3650 review R5 F1).** The paragraph above used to end by noting that older
+git ignores the variable and calling that "pre-existing behaviour" — a contract contradicting itself in
+its own next sentence, and on an old git in a promisor clone the object reads really do fetch and write
+packfiles. Detection is cheap, so the fix makes the absolute TRUE instead of qualifying it. Before **any**
+object access the script decides between exactly three cases and prints what it decided on a
+`BASE-STALENESS: lazy-fetch-guard` line (version field, whether the variable is honoured, promisor state
+plus evidence), so D5's claim is checkable in the OUTPUT rather than promised in a comment:
+
+* **git >= 2.36, affirmatively parsed** — the variable is honoured, a would-be lazy fetch becomes an
+  ordinary git failure, and every call site routes that to `UNMEASURED`. Nothing further is needed at any
+  clone shape, so the promisor probe is **not run** (`promisor NOT-PROBED`).
+* **git < 2.36, or an unparseable version** — the variable buys nothing, so the contract rests on the
+  repository not being a promisor clone. That is probed **affirmatively** from three sources: config
+  `extensions.partialclone`, config `remote.<name>.promisor` (re-read through `--bool`, so `false` is not
+  read as promisor), and the object store's own promisor markers (`objects/info/promisor` and
+  `objects/pack/*.promisor`) under the **git common dir** — every lane here is a worktree, so that is
+  where the shared object state lives (the R4 lesson). An affirmative NO means object reads have nothing
+  to lazily fetch *from*, and the no-fetch contract holds unchanged at any git version.
+* **promisor, or a promisor state that could not be determined** — `UNMEASURED`, naming the git version
+  **and** the promisor state (with either the evidence or the reason it is undetermined). A consumer must
+  treat that as stale (D3).
+
+Three properties of that design are deliberate. The **version parse is conservative**: `git --version` has
+several shapes (`2.43.0`, `2.39.3 (Apple Git-146)`, `2.44.0.windows.1`), so the numeric run is taken up to
+the first character that is neither digit nor dot and both fields must be sane digit runs — anything else
+is UNSUPPORTED, never assumed-good, because a positive verdict requires an affirmative measurement. The
+**promisor probe is three-valued** (`YES`/`NO`/`UNKNOWN`), since a `test` file predicate is two-valued and
+would collapse "cannot tell" onto its permissive answer: an unreadable `objects`, `objects/info` or
+`objects/pack` yields `UNKNOWN`, not "no marker found". And **no repo-wide git 2.36 prerequisite is
+imposed** — that is a project-policy decision outside this issue, and the measurement does not need one;
+the common case is unaffected at any version and pays three `git config` calls only on an old git.
+
+*Declared residual:* the probe reads THIS repository. A promisor **alternate** object store
+(`objects/info/alternates` naming another repository that is itself a partial clone) is not followed, so
+on an old git that shape would be reported non-promisor. Named rather than implied; closing it needs an
+alternates walk, which is more mechanism than this advisory's scope allows.
+
 **And the scratch location is the other half of the same claim, which is only as strong as its ORDERING
 and its SUBJECT (#3650 review job 239).** `mktemp -d` honours `TMPDIR`, so a `TMPDIR` inside the checkout
 makes this script write in the repository. Two properties, both learned the hard way:
