@@ -94,7 +94,7 @@
 #                                             `lane-lock=<state>` WARNING field read from
 #                                             the machine-local lane-directory lock
 #                                             (scripts/flow/lane-lock.sh, #3436 AC5):
-#                                             free / no-lane-dir / occupied-alive /
+#                                             free / no-lane-dir / self / occupied-alive /
 #                                             occupied-unknown-<verdict> /
 #                                             reclaimable-<DEAD-verdict> /
 #                                             unmeasured(<cause>). An occupied state also
@@ -659,7 +659,15 @@ lane_lock_probe() {
       # the reader to the wrong problem.
       LANE_LOCK_HOLDER="lane-dir=${LANE_LOCK_DIR:-unknown} liveness=${LANE_LOCK_LIVENESS:-unstated} holder-machine=${LANE_LOCK_HOLDER_MACHINE:-unknown} holder-actor=${hactor:-unknown} holder-pid=${hpid:-unknown} acquired-ts=${hts:-unknown} age=${hage:-unknown}"
       case "${LANE_LOCK_LIVENESS:-}" in
-        ALIVE|SELF)  LANE_LOCK_STATE="occupied-alive" ;;
+        # SELF and ALIVE are DIFFERENT STATES, not one state with two notes
+        # (#3436 review). Both mean "a live process holds this lane", but their
+        # urgency is opposite: our own lock is unremarkable, a PEER's is the #3436
+        # incident itself. This field's whole job is triage, so "is it me" IS the
+        # classification -- collapsing them left anyone grepping
+        # `lane-lock=occupied-alive` in a log unable to tell the two apart, which
+        # was the implementer's own recorded residual.
+        SELF)        LANE_LOCK_STATE="self" ;;
+        ALIVE)       LANE_LOCK_STATE="occupied-alive" ;;
         DEAD-*)      LANE_LOCK_STATE="reclaimable-$(sanitize_field "$LANE_LOCK_LIVENESS")" ;;
         UNKNOWN-*)   LANE_LOCK_STATE="occupied-unknown-$(sanitize_field "$LANE_LOCK_LIVENESS")" ;;
         # Fail closed toward OCCUPIED: a verdict word this mapping does not know
@@ -678,14 +686,17 @@ lane_lock_probe() {
   # occupant is not you..." about its own lock is a warning that trains readers to
   # ignore the warning. The STATE stays occupied-alive — the lane is occupied, and
   # by a live process; who it is belongs in the text, not in the classification.
-  case "$LANE_LOCK_STATE:${LANE_LOCK_LIVENESS:-}" in
-    occupied-alive:SELF)
+  case "$LANE_LOCK_STATE" in
+    self)
+      # Deliberately NOT the alarming note below: telling a session "if that
+      # occupant is not you..." about its OWN lock is a warning that trains readers
+      # to ignore the warning, and AC5 asks for a warning about an occupied lane,
+      # which a self-held lane is not.
       note "lane-lock: the lane directory is held by THIS session (liveness=SELF) — $LANE_LOCK_HOLDER"
       ;;
   esac
   case "$LANE_LOCK_STATE" in
     occupied-*)
-      [ "${LANE_LOCK_LIVENESS:-}" != "SELF" ] || return 0
       note "lane-lock: the lane DIRECTORY is ALREADY OCCUPIED — $LANE_LOCK_HOLDER"
       note "lane-lock: this is a WARNING ONLY; the claim verdict below is unaffected. If that occupant is not you, do NOT write in that lane directory — two sessions in one worktree is #3436, and 'git add -A' there launders one session's work into the other's commit."
       ;;

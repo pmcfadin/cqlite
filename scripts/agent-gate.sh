@@ -18181,10 +18181,16 @@ run_tooling_tests() {
     return 0
   fi
 
-  # advertised-collision scan guard (#3436 AC5): pins the other half of #3436 — the
-  # scan that makes `claim.sh claim` WARN when it grants a claim for an issue whose lane
-  # directory already exists and is occupied, i.e. the half that makes the two locks
-  # (the remote claim ref and the machine-local lane lock) know about each other. Same
+  # advertised-collision scan guard (#3436, the coordination lead's deliverable 2 --
+  # NOT AC5, which is the `claim.sh claim` lane-lock warning and is pinned by
+  # test_claim_lock.sh): pins scripts/flow/advertised-collision-scan.sh, which reports
+  # the machine-visible signature of an ADVERTISED collision window -- board
+  # Status=Ready AND a pushed issue-<N>-* branch AND no refs/claims/issue-<N>, three
+  # facts ANDed. Measured instance: #3393 ran 20+ commits in exactly that state after a
+  # legitimate release-on-finalize while the board invited a second claimant. The suite
+  # pins each fact's absence separately (a detector firing on two of three facts fails),
+  # every unmeasurable input landing on exit 1 WITH the input named, that the tool never
+  # exits 0, and that it mutates nothing. Same
   # hermetic, python3-free profile as the lane-lock suite above. A failure FAILs the
   # component, mirroring the keyspace-scoping guard.
   echo ">>> [$name] bash scripts/tests/test_advertised_collision_scan.sh"

@@ -902,16 +902,50 @@ else
 $out21e"
 fi
 
-# (f) control: the field is not a constant. Three claims above measured three
-# different lane states, so a hard-coded value cannot satisfy all of them.
+# (f) A SELF-HELD lane is its OWN state, not `occupied-alive` (#3436 review).
+# Both mean "a live process holds this lane", but the urgency is opposite: our own
+# lock is unremarkable, a peer's is the #3436 incident. Conflating them left anyone
+# grepping `lane-lock=occupied-alive` in a log unable to triage, so the field --
+# whose whole job IS triage -- must separate them. The lock here is taken for the
+# claim process's OWN resolved identity, so `probe` reports liveness=SELF.
+# `$$` (this suite's own shell) is a REAL live process, and passing the SAME pid to
+# the acquire and to claim.sh's probe makes both compute the same five-component
+# token -- which is what SELF means. No test-only seam: LANE_LOCK_PID is a shipped
+# env var of lane-lock.sh, used here exactly as a supervisor would.
+mkdir -p "$LANE_ROOT/lane-33"
+LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 33 >/dev/null 2>&1
+out21f=$(LANE_LOCK_PID=$$ runAerr "$T/err21f" claim 33); rc21f=$?
+err21f=$(cat "$T/err21f" 2>/dev/null)
+if [ "$rc21f" -eq 0 ] && printf '%s\n' "$out21f" | grep -q 'CLAIM: HELD' \
+   && printf '%s\n' "$out21f" | grep -q 'lane-lock=self'; then
+  ok "(f) AC5: a lane held by THIS session reports lane-lock=self, still HELD (exit 0)"
+else
+  bad "(f) expected HELD + lane-lock=self exit 0; got rc=$rc21f
+$out21f"
+fi
+# ...and it must NOT emit the alarming peer-occupancy note about our own lock: a
+# warning fired on correct input is the warning readers learn to ignore.
+if printf '%s\n' "$err21f" | grep -q 'held by THIS session' \
+   && ! printf '%s\n' "$err21f" | grep -q 'ALREADY OCCUPIED'; then
+  ok "(f) AC5: a self-held lane gets the THIS-session note and NOT the peer-occupancy warning"
+else
+  bad "(f) expected the THIS-session note without the ALREADY OCCUPIED warning; got:
+$err21f"
+fi
+
+# (g) control: the field is not a constant. Four claims above measured four
+# different lane states, so a hard-coded value cannot satisfy all of them, and
+# `self` vs `occupied-alive` in particular cannot be one value.
 s21a=$(printf '%s\n' "$out21a" | grep -o 'lane-lock=[^ ]*' | head -1)
 s21b=$(printf '%s\n' "$out21b" | grep -o 'lane-lock=[^ ]*' | head -1)
 s21c=$(printf '%s\n' "$out21c" | grep -o 'lane-lock=[^ ]*' | head -1)
-if [ -n "$s21a" ] && [ -n "$s21b" ] && [ -n "$s21c" ] \
-   && [ "$s21a" != "$s21b" ] && [ "$s21b" != "$s21c" ] && [ "$s21a" != "$s21c" ]; then
-  ok "(f) AC5 control: the three lane states are three DISTINCT values ($s21a / $s21b / $s21c)"
+s21f=$(printf '%s\n' "$out21f" | grep -o 'lane-lock=[^ ]*' | head -1)
+uniq_states=$(printf '%s\n%s\n%s\n%s\n' "$s21a" "$s21b" "$s21c" "$s21f" | sort -u | grep -c .)
+if [ -n "$s21a" ] && [ -n "$s21b" ] && [ -n "$s21c" ] && [ -n "$s21f" ] \
+   && [ "$uniq_states" -eq 4 ]; then
+  ok "(g) AC5 control: the four lane states are four DISTINCT values ($s21a / $s21b / $s21c / $s21f)"
 else
-  bad "(f) expected three distinct lane-lock states; got '$s21a' '$s21b' '$s21c'"
+  bad "(g) expected four distinct lane-lock states; got '$s21a' '$s21b' '$s21c' '$s21f' (uniq=$uniq_states)"
 fi
 
 # ===========================================================================
