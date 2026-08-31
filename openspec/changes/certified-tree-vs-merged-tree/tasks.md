@@ -9,15 +9,25 @@ Surface exercised by each task is named, per `openspec/config.yaml` rules.
       ("is the fix for this red already on main and merely absent from my base?").
       - Resolve the merge-base (`git merge-base origin/main HEAD`), NOT `origin/main`'s tip (D4/#3392).
       - `N` = `git rev-list --count <merge-base>..origin/main`.
-      - Diff paths = `git diff --name-only -z <merge-base>...HEAD` (**`-z`**, per #3229's path-normalisation
-        invariant — no path-reading `git diff` without `-z`).
+      - Diff paths = `git -c diff.renames=false -c diff.relative=false diff --name-only -z
+        <merge-base>...HEAD` (**`-z`**, per #3229's path-normalisation invariant — no path-reading
+        `git diff` without `-z`; and both configs pinned OFF, per 1.5 below).
       - `M` = commits in that range touching (diff paths ∪ gate-global set).
       - Print the merge-base, the `origin/main` sha AND its commit date (D5).
       - Never fetch; never write; never mutate a ref.
-- [x] 1.2 Hard-code the gate-global list in ONE place, no env override (D1/#3312).
-- [x] 1.3 Output vocabulary (D2): `BASE-STALENESS:` prefix; verdicts
-      `STALE-RECOGNISED` / `NO-STALENESS-RECOGNISED` / `UNMEASURED`; zero prints `0 RECOGNISED`;
-      `NON-EXHAUSTIVE` lines on **every** run. No `PASS`, no `OK`, no `RESULT:` anywhere.
+- [x] 1.2 Hard-code the gate-global list in ONE NAMED place (`GATE_GLOBAL_PATTERNS`), no env override
+      (D1/D1a/#3312), with a comment stating the MEMBERSHIP PREDICATE and how to add an entry.
+- [x] 1.3 Output ANCHORING (D2 as revised — the absolute substring form was FALSIFIED BY REVIEW):
+      `BASE-STALENESS: ` on **every** line of stdout AND stderr; every dynamic field
+      control-character SANITIZED; the verdict only on a `verdict ` line carrying a token from the
+      closed set `STALE-RECOGNISED` / `NO-STALENESS-RECOGNISED` / `UNMEASURED` (prose on
+      `verdict-detail`); zero prints `0 RECOGNISED`; `NON-EXHAUSTIVE` lines on every run declaring
+      BOTH gaps. The script's own STATIC TEMPLATE TEXT carries no `PASS`/`OK`/`RESULT:` — a
+      structural property of the source, not a claim about a run.
+- [x] 1.5 Add `scripts/tests/**` to the gate-global set (D1b, measured: 28 → 37 of 107); declare the
+      list NON-CLOSED in the output (D1c); pin `diff.renames`/`diff.relative` OFF on the porcelain
+      call so the two path sources are rename-symmetric and root-relative (D1d — unpinned this is a
+      FAIL-OPEN on any PR that renames a path).
 - [x] 1.4 Exit codes (D3): `0` no-staleness, `4` stale, `5` unmeasured, `3` usage. State the
       **`UNMEASURED` MUST be treated as stale** consumer contract in the header.
 
@@ -34,7 +44,17 @@ Surface exercised by each task is named, per `openspec/config.yaml` rules.
       `.config/nextest.toml` → `STALE-RECOGNISED`. This is PR #3362's shape and the case the narrow
       definition fails.
 - [x] 2.6 Case: unrelated churn only → counted in `N`, not in `M`, verdict `NO-STALENESS-RECOGNISED`.
-- [x] 2.7 Case (AC5, vocabulary): no run's output contains `PASS`, `OK`, or `RESULT:`.
+- [x] 2.7 Cases (AC5 as revised — ANCHORED, evaluated after the LAST case over the accumulated output
+      of every case; the predecessor ran MID-SUITE and inspected Cases 2-6 only):
+      every nonempty output line of every case, stdout and stderr, carries the `BASE-STALENESS: `
+      prefix; every `verdict ` token is from the closed set; every measurement run emits exactly one
+      `verdict ` line; a structural assert over the script SOURCE for the static-template property;
+      fixtures whose MATCHED paths contain `OK`, `PASS`, a space and a NEWLINE, printed verbatim
+      (newline escaped visibly); and a planted mutant reducing the sanitizer to a pass-through, which
+      must break the anchor.
+- [x] 2.13 Cases (D1d): a PR that RENAMES a path plus a commit behind editing the OLD path is
+      `STALE-RECOGNISED`, and reds against a copy with the porcelain pin removed; and
+      `diff.relative=true` with cwd in a subdirectory still stales.
 - [x] 2.8 Case (AC5): a zero blast radius prints `0 RECOGNISED`, never a bare `0`; `NON-EXHAUSTIVE` present.
 - [x] 2.9 Case: missing `origin/main` → `UNMEASURED`, exit 5, and output contains neither
       `NO-STALENESS-RECOGNISED` nor a bare blast-radius `0`.

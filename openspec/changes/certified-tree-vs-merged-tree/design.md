@@ -13,35 +13,110 @@ issue's own warning is that a mechanism here can be *satisfied and wrong*.
   malign direction.
 - *Rejected: any churn behind the base.* 107 of 107 commits — this is the shape the owner's ruling exists
   to refuse, and it forces re-gate loops on a repo where `main` moves 12× in 4 hours.
-- **Adopted: intersection ∪ gate-global.** **28 of 107 (26%)** as shipped, leaving 74% of churn
-  non-staling. Catches the motivating case, and names it (`matched 5e08db201 gate-global
-  .config/nextest.toml`), so the detection is attributable and not a coincidence on a count. *An
-  earlier draft of this decision said 22 of 107 (21%); that was a hand measurement using root-only
-  `Cargo.*` and excluding the diff's own paths, and it was stale within one implementation round —
-  the delta is attributed row-by-row in the measurements artifact. The script reports its own count
-  and is the authority for it.*
+- **Adopted: intersection ∪ gate-global.** **37 of 107 (35%)** as shipped, measured at `origin/main`
+  **`b1e8598a2`** with subject `4bc6b913a`, leaving 65% of churn non-staling. Catches the motivating
+  case, and names it (`matched 5e08db201 gate-global .config/nextest.toml`), so the detection is
+  attributable and not a coincidence on a count. *This figure has moved twice under measurement and
+  the history is kept rather than tidied: an early hand count said 22 of 107 (21%) using root-only
+  `Cargo.*` and excluding the diff's own paths; the script itself then reported 28 of 107 (26%); and
+  review added `scripts/tests/**` to the set (D1b below), taking it to 37. `behind` is a function of
+  where `origin/main` was, so every figure here is quoted WITH that sha — a bare percentage reads as
+  a defect the moment main moves. The script reports its own count and is the authority for it:*
+  `bash scripts/flow/base-staleness.sh 4bc6b913a6afc63d2fe7f234152da9b03ea03a89`
 
-The gate-global list is **content that can change ANY gate's verdict regardless of the diff**:
+### D1a — What membership ASSERTS, and how to add an entry
+
+The predicate is not "is important" or "is shared". It is: **content at this path can change a gate's
+verdict INDEPENDENTLY OF THE DIFF UNDER TEST** — a commit touching only it can flip any lane's full gate
+while that lane's own diff is unchanged.
 
 ```
-.config/nextest.toml   rust-toolchain.toml   Cargo.toml   Cargo.lock
-scripts/agent-gate.sh  scripts/ci/**   cqlite-core/tests/support/**
-test-data/**           .github/workflows/**
+.config/nextest.toml   rust-toolchain.toml   **/Cargo.toml   **/Cargo.lock
+scripts/agent-gate.sh  scripts/ci/**   scripts/tests/**
+cqlite-core/tests/support/**   test-data/**   .github/workflows/**
 ```
 
-It is **one list in one place, hard-coded in the script, with no env override**. Rationale is #3312's
-second rule: an override is settable by the party it constrains, and *"which paths stale my certification"*
-is precisely what a lane wanting to skip a re-gate would widen. One visible location keeps it inside a diff
-a reviewer already reads.
+It is **one NAMED, COMMITTED list in one place (`GATE_GLOBAL_PATTERNS`), hard-coded in the script, with no
+env override** — not an inline glob, because the next person adding a shared test-support directory has to
+be able to FIND it. Rationale for the no-override half is #3312's second rule: an override is settable by
+the party it constrains, and *"which paths stale my certification"* is precisely what a lane wanting to
+skip a re-gate would widen. To add an entry: add one line, and state in the commit message which gate
+COMPONENT it can flip and how you MEASURED its selectivity over the commits behind a real base.
+
+### D1b — `scripts/tests/**` is in the set, measured (review finding)
+
+`scripts/agent-gate.sh` was listed but the roster it *executes* was not: `tooling-tests` runs ~16
+`scripts/tests/*.sh`, so a commit touching only e.g. `scripts/tests/test_worker_supervisor.sh` reds
+**every** lane's full gate regardless of the diff — the membership predicate verbatim — and was reported
+as not staling. Measured with the script over the 107-commit base (subject `4bc6b913a`, `origin/main`
+`b1e8598a2`): **28 → 37 of 107**, i.e. **9** commits behind stale only because of it. Two neighbours were
+measured and **deliberately not added** because they fire **zero** times there — `deny.toml`, and the 14
+loose `scripts/*.sh` helpers enumerated as exact entries (both leave the count at 37). An entry that has
+never fired buys only false positives.
+
+### D1c — The list is DECLARED NON-CLOSED, in the output
+
+The set is a curated, measured list of **recognised** gate-global content, never an enumeration of all of
+it, so a gate-global path absent from it is a false negative reported as *not staling*. The output declares
+this as **gap 2 of 2** on every run, beside the dependency-closure gap. The earlier text named only the
+closure gap, which affirmed a completeness the list does not have.
+
+### D1d — The two path sources must be rename-symmetric and root-relative (review finding)
+
+The blast radius compares a **porcelain** path set (`git diff --name-only -z <merge-base>...<subject>`)
+against a **plumbing** one (`git diff-tree` per commit behind), and the two answer differently under
+default config. Measured (git 2.43.0, `git mv src/foo.rs src/foo_renamed.rs` plus an edit):
+
+| call | result |
+|---|---|
+| `git diff --name-only` (porcelain, `diff.renames` default **true** since 2.9) | **destination only** |
+| `git diff-tree`, default | **both** paths |
+| `git diff-tree -c diff.renames=true` (forced) | **both** — plumbing ignores the config |
+| `git diff-tree -M` (explicit) | destination only |
+| porcelain with `diff.relative=true`, run from a subdirectory | `foo_renamed.rs` — **no `src/` prefix** |
+
+Asymmetric, a PR that renames a file — routine here, the campsite rule makes splits normal — loses the OLD
+path from the diff set, so a commit behind that edited the old path matches **neither** half and the scan
+reports `blast-radius 0 RECOGNISED` on a genuinely stale base. **A fail-open.** `diff.relative` is the same
+class and is the live hazard because the **invoker** controls it: it makes `M` a function of cwd.
+
+**Decision:** pin **both off on the porcelain call** (`-c diff.renames=false -c diff.relative=false`). The
+plumbing call needs no pin — it does not rename-detect without an explicit `-M`, and the comment says so
+rather than claiming the config reaches it (a claim that would be false and would rot). The plumbing-side
+risk runs the **other** way: adding `-M` to `diff-tree` to "improve" the commit scan would reintroduce the
+asymmetry from the opposite direction. **Do not add it.**
 
 ## D2 — The verdict vocabulary is chosen so the advisory CANNOT be read as a certification
 
 AC5 says the advisory must not itself become a false certification. That is a property of its **words**,
 not of its intent, because this repo's failure mode is someone grepping a token.
 
-- **No `PASS`, no `OK`, no `RESULT:`** anywhere in its output — those three tokens are the verdict
-  vocabulary of `AGENT-GATE *SUMMARY`, `ROBOREV REVIEW SUMMARY` and `PREMERGE:`. Its prefix is
-  `BASE-STALENESS:`, distinct from all of them.
+**THE ABSOLUTE FORM OF THIS DECISION WAS FALSIFIED BY REVIEW (roborev job 233, F2) AND IS RECORDED AS
+CHANGED, NOT QUIETLY SOFTENED.** It read *"no `PASS`, no `OK`, no `RESULT:` anywhere in its output"*. That
+is false: the advisory prints repository-controlled paths **verbatim** in its dynamic fields, and a path
+may contain any of those substrings. Confirmed against this tree — `test-data/**` is gate-global and the
+tracked path `test-data/scripts/CI_SMOKE_TEST_USAGE.md` contains `OK` (inside `SMOKE`), so a commit
+touching it emits `OK` on a `matched` line; three tracked paths contain `OK` today. The AC5 test passed
+only because the sampled run's matched set happened to exclude them — **a test passing for the wrong
+reason**. Worse, git **permits newlines in paths**, so an unsanitized matched path could emit a line with
+no prefix at all, breaking the very anchor everything else rests on.
+
+**The ANCHORED form replaces it** (#3312's rule: anchor or remove the channel, never pick a rarer
+delimiter — and masking a path would also mangle it for the reader):
+
+- **(a)** EVERY output line, stdout **and** stderr, begins with `BASE-STALENESS: `. Its prefix is distinct
+  from `AGENT-GATE *SUMMARY`, `ROBOREV REVIEW SUMMARY` and `PREMERGE:`, so no line of this output can be
+  mistaken for a line of theirs.
+- **(b)** Every dynamic field is **control-character sanitized** (newline, CR, other C0, DEL → a visible
+  `\n`/`\r`/`\xNN` escape), so (a) cannot be broken by repository- or caller-controlled data. The path is
+  otherwise kept **verbatim**.
+- **(c)** The verdict appears **only** on a `BASE-STALENESS: verdict ` line, its token from the **closed
+  set** {`STALE-RECOGNISED`, `NO-STALENESS-RECOGNISED`, `UNMEASURED`}; continuation prose goes on
+  `verdict-detail` lines.
+- **(d)** The script's own **static template text** carries none of `PASS`, `OK`, `RESULT:` — asserted
+  **structurally over the source file**, which is provable, unlike a claim about one sample run.
+- **DECLARED RESIDUAL:** a repository path *can* contain a reserved substring, and when it does the
+  advisory prints it. The anchor is what makes that harmless.
 - The no-finding verdict is **`NO-STALENESS-RECOGNISED`**, never `FRESH` and never `CLEAN`. It names a
   *scan result*, not a *state of the world* — the distinction the whole issue turns on.
 - `M = 0` prints **`0 RECOGNISED`**, never a bare `0`. Precedent: `cfg-gated-subtree gaps: N RECOGNISED`
@@ -117,8 +192,17 @@ already runs `test_premerge_assert.sh`). Beyond ordinary cases it carries:
 2. **A planted-mutant case** following `scripts/tests/test_ws0_perf_invocation_lint.sh:812-830`: copy the
    script, plant the narrow-definition defect, assert the suite catches it — so the guard is shown to fire
    rather than assumed to.
-3. **A vocabulary case**: the output contains none of `PASS`, `OK`, `RESULT:` in any run, and `M = 0`
-   never appears as a bare `0`. This is the AC5 property, tested directly rather than reasoned about.
+3. **The anchored-output cases** (D2 as revised). Fixtures whose matched paths contain `OK`, `PASS`, a
+   space and a **newline**; a whole-suite assertion, accumulated across **every** case and evaluated after
+   the **last** one, that every nonempty output line (stdout and stderr) carries the prefix and that every
+   `verdict ` token is from the closed set; a structural assertion over the script source for (d); and a
+   planted mutant reducing the sanitizer to a pass-through, which must break the anchor. `M = 0` never
+   appears as a bare `0`. *The predecessor of these ran MID-SUITE, so it inspected Cases 2–6 only and never
+   saw the `UNMEASURED`, usage or mutant runs, and its prefix check recorded success on both branches while
+   asking the wrong question.*
+5. **Rename/relative symmetry cases** (D1d): a PR that renames a path plus a commit behind editing the OLD
+   path must be `STALE-RECOGNISED`, and it reds when the porcelain pin is removed; likewise
+   `diff.relative=true` with cwd in a subdirectory.
 4. **An `UNMEASURED`-is-not-`0` case**: a git failure yields exit 5, never exit 0.
 
 ## D9 — Cost

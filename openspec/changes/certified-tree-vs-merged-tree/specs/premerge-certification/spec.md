@@ -82,22 +82,84 @@ an override is settable by the party it constrains.
 *Verified by:* `scripts/tests/test_base_staleness.sh` (gate-global match case; unrelated-churn case).
 *Rationale (measured):* `docs/round-artifacts/issue-3650-blast-radius-measurements.md` — on PR #3362 the
 culprit commit and the diff share no path, so intersection alone is unsound; intersection ∪ gate-global
-fires on 28 of 107 commits behind (26%) as shipped, so unrelated churn still does not stale. The
-count is reported by the script, which is the authority for it.
+fires on 37 of 107 commits behind (35%) as shipped — measured with the script at `origin/main`
+`b1e8598a2`, subject `4bc6b913a` — so unrelated churn still does not stale. The count is reported by
+the script, which is the authority for it, and it is quoted WITH the `origin/main` sha because
+`behind` is a function of where main was.
+
+The gate-global set SHALL include `scripts/tests/**`: the gate does not only read that roster, it
+EXECUTES it (`tooling-tests` runs ~16 `scripts/tests/*.sh`), so a commit touching only one of them reds
+every lane's full gate regardless of the diff. Measured: it takes the fired count from 28 to 37 of 107,
+9 commits staling only because of it.
+
+The gate-global set is **DECLARED NON-CLOSED**: it is a curated, measured list of RECOGNISED gate-global
+content, not an enumeration of all of it, and the output SHALL declare that as a second gap alongside the
+dependency-closure gap.
+
+The two path sources SHALL be rename-symmetric and root-relative on both sides. The porcelain
+`git diff --name-only -z` SHALL be invoked with `diff.renames` and `diff.relative` pinned OFF, because
+porcelain honours both (git's `diff.renames` default is true since 2.9) while the plumbing `git diff-tree`
+rename-detects only under an explicit `-M`. Unpinned, a PR that renames a path loses the OLD path from
+the diff set and a commit behind editing it matches neither half — a FAIL-OPEN reporting
+`blast-radius 0 RECOGNISED` on a genuinely stale base; and `diff.relative` would make the count a
+function of the invoker's cwd.
+
+#### Scenario: A renamed path in the diff still stales via a commit editing the OLD path
+- **GIVEN** a diff that renames `<old>` to `<new>` and a commit behind the base editing `<old>`
+- **WHEN** the advisory is run
+- **THEN** the verdict is `STALE-RECOGNISED` and the matched line names `<old>`
+- **AND** the same case reports `NO-STALENESS-RECOGNISED` against a copy with the porcelain pin removed
+
+#### Scenario: `diff.relative` and the invoker's cwd cannot change the count
+- **GIVEN** a repository with `diff.relative=true` and a stale path intersection
+- **WHEN** the advisory is run with cwd in a subdirectory
+- **THEN** the verdict is `STALE-RECOGNISED` and the matched path is root-relative
 
 ### Requirement: The advisory cannot be read as a certification
 
-The advisory's output SHALL NOT contain the tokens `PASS`, `OK`, or `RESULT:` in any run, since those are
-the verdict vocabulary of `AGENT-GATE *SUMMARY`, `ROBOREV REVIEW SUMMARY` and `PREMERGE:` blocks. Its
-lines SHALL carry the distinct prefix `BASE-STALENESS:`. A blast-radius count of zero SHALL be printed as
+**The absolute substring form of this requirement was FALSIFIED BY REVIEW (roborev job 233, F2) and is
+recorded as CHANGED, not quietly softened.** It read: *"the advisory's output SHALL NOT contain the tokens
+`PASS`, `OK`, or `RESULT:` in any run"*. That is unachievable: the advisory prints repository-controlled
+paths **verbatim** in its dynamic fields. `test-data/**` is gate-global and the tracked path
+`test-data/scripts/CI_SMOKE_TEST_USAGE.md` contains `OK`, so a commit touching it emits `OK` on a
+`matched` line; three tracked paths contain `OK` today. The verifying test passed only because the sampled
+run's matched set happened to exclude them — a test passing for the wrong reason.
+
+The **ANCHORED** form replaces it. The advisory SHALL satisfy all four:
+
+1. EVERY output line, on **stdout and stderr**, SHALL begin with `BASE-STALENESS: ` — a prefix distinct
+   from the `AGENT-GATE *SUMMARY`, `ROBOREV REVIEW SUMMARY` and `PREMERGE:` block vocabularies.
+2. Every **dynamic field** SHALL be control-character sanitized (newline, CR, other C0, DEL → a visible
+   escape) so requirement 1 cannot be broken by repository- or caller-controlled data. Git permits
+   newlines in paths; unsanitized, such a path emits a line with no prefix at all. The field SHALL
+   otherwise be printed **verbatim** — masking a reserved substring would mangle the path for the reader.
+3. The verdict SHALL appear **only** on a `BASE-STALENESS: verdict ` line, carrying a token from the
+   **closed set** {`STALE-RECOGNISED`, `NO-STALENESS-RECOGNISED`, `UNMEASURED`}; continuation prose SHALL
+   use `verdict-detail` lines.
+4. The script's own **static template text** SHALL contain none of `PASS`, `OK`, `RESULT:`, asserted
+   **structurally over the source file** — a provable property, unlike a claim about one sample run.
+
+**DECLARED RESIDUAL:** a repository path may contain a reserved substring and the advisory will print it.
+The anchor is what makes that harmless.
+
+A blast-radius count of zero SHALL be printed as
 `0 RECOGNISED`, never as a bare `0`. Every run SHALL print its own non-exhaustiveness: the scan is path
 intersection ∪ gate-global and is **not** a dependency closure, so a commit changing an item the diff
-calls without touching the diff's paths or a gate-global path is reported as not staling.
+calls without touching the diff's paths or a gate-global path is reported as not staling; and the
+gate-global list itself is declared non-closed.
 
-#### Scenario: No verdict token from another artifact appears in any run
-- **GIVEN** any of the stale, non-stale, or unmeasurable cases
+#### Scenario: Every output line of every case is anchored
+- **GIVEN** the stale, non-stale, unmeasurable AND usage-error cases, and paths containing `OK`, `PASS`,
+  a space and a newline
 - **WHEN** the advisory is run
-- **THEN** its complete output contains no occurrence of `PASS`, `OK`, or `RESULT:`
+- **THEN** every nonempty output line, stdout and stderr, begins with `BASE-STALENESS: `
+- **AND** every `verdict ` line carries a token from the closed set
+- **AND** the assertion is evaluated after the LAST case, over the accumulated output of all of them
+
+#### Scenario: The script's own static text carries no foreign verdict token
+- **GIVEN** the shipped `scripts/flow/base-staleness.sh` with whole-line comments stripped
+- **WHEN** the remaining text is searched for `PASS`, `OK` and `RESULT:`
+- **THEN** none occurs
 
 #### Scenario: A zero blast radius is affirmative, not bare
 - **GIVEN** a run in which no commit behind the base touches the blast radius
@@ -105,8 +167,9 @@ calls without touching the diff's paths or a gate-global path is reported as not
 - **THEN** it reads `0 RECOGNISED` and names the scan's scope
 - **AND** the same run prints the `NON-EXHAUSTIVE` statement
 
-*Verified by:* `scripts/tests/test_base_staleness.sh` (vocabulary case; `0 RECOGNISED` case;
-non-exhaustiveness-present case).
+*Verified by:* `scripts/tests/test_base_staleness.sh` (reserved-substring/space/newline fixture case;
+whole-suite anchor + closed-verdict-set case; structural template case; sanitizer planted-mutant case;
+`0 RECOGNISED` case; non-exhaustiveness-present case).
 
 ### Requirement: An unmeasurable scan is UNMEASURED and is fail-closed by contract
 

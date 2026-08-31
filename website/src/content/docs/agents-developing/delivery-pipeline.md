@@ -173,8 +173,9 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   MERGE RESULT is #3650 **slice 2** and is deliberately not implemented here. What slice 1 DID add is
   a **non-blocking base-staleness advisory** on `PREMERGE: ADVISORY` lines
   (`scripts/flow/base-staleness.sh`): `N` commits behind the merge-base with `origin/main` and `M` of
-  those touching the diff's blast radius (paths the diff touches + a hard-coded gate-global set — not a
-  dependency closure, which every run declares). It is information, never a verdict: it cannot change
+  those touching the diff's blast radius — measured at the **certified sha**, not the local checkout's
+  `HEAD` (paths the diff touches + a hard-coded gate-global set; every run declares TWO gaps: it is not
+  a dependency closure, and the gate-global list is itself curated and NON-CLOSED). It is information, never a verdict: it cannot change
   the exit code, an absent/failing/`UNMEASURED` advisory is non-fatal, and any consumer of it must
   treat `UNMEASURED` as STALE rather than fresh.
   Report a pass as "gate of record verified at `<sha>`", never "certified against main". The closer **refuses to merge on any

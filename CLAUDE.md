@@ -1591,16 +1591,53 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   tip — #3392) and `M` of those touching the diff's **blast radius**, which is
   *(paths the diff touches) + (a hard-coded gate-global set)* — content that can change ANY gate's
   verdict regardless of the diff (`.config/nextest.toml`, the toolchain pin, the Cargo manifests,
-  `scripts/agent-gate.sh`, `scripts/ci/**`, `cqlite-core/tests/support/**`, `test-data/**`,
-  `.github/workflows/**`). That set is **one hard-coded list with no env override**: an override is
-  settable by the party it constrains, and *"which paths stale my certification"* is exactly what a
-  lane wanting to skip a re-gate would widen. `premerge-assert.sh` prints the finding on
+  `scripts/agent-gate.sh`, `scripts/ci/**`, **`scripts/tests/**`**, `cqlite-core/tests/support/**`,
+  `test-data/**`, `.github/workflows/**`). That set is **one NAMED, COMMITTED list
+  (`GATE_GLOBAL_PATTERNS`) with no env override**, never an inline glob: an override is
+  settable by the party it constrains, *"which paths stale my certification"* is exactly what a
+  lane wanting to skip a re-gate would widen, and the next person adding a shared test-support
+  directory has to be able to FIND the list. **Membership asserts ONE predicate** — *content here can
+  change a gate's verdict INDEPENDENTLY OF THE DIFF* — not "is important" or "is shared"; to add an
+  entry, state which gate COMPONENT it can flip and how you MEASURED its selectivity.
+  `scripts/tests/**` is in the set because the gate does not merely READ that roster, it EXECUTES it
+  (`tooling-tests` runs ~16 of them), so one commit touching one of those files reds EVERY lane's
+  full gate — the predicate verbatim — and it was measured before being added (28 → 37 of 107, 9
+  commits staling only because of it), while `deny.toml` and the loose `scripts/*.sh` helpers were
+  measured and NOT added because they fire zero times. **And the list is DECLARED NON-CLOSED in the
+  output**: it is a curated, measured list of RECOGNISED gate-global content, so a gate-global path
+  absent from it is a false negative — declared as gap 2 of 2 beside the dependency-closure gap,
+  because declaring one gap while having two affirms a completeness the list does not have.
+  **The two path sources are RENAME-SYMMETRIC by construction, and that is a FAIL-OPEN if broken.**
+  The diff side is porcelain (`git diff`), which honours `diff.renames` (git default TRUE since 2.9)
+  and reports a rename's DESTINATION ONLY; the commit side is plumbing (`git diff-tree`), which
+  rename-detects only under an explicit `-M`. Unpinned, a PR that renames a path — routine here, the
+  campsite rule makes splits normal — loses the OLD path, a commit behind editing it matches NEITHER
+  half, and the scan reports `blast-radius 0 RECOGNISED` on a genuinely stale base. `diff.relative`
+  is the same class and is worse because the INVOKER controls it: set, porcelain run from a
+  subdirectory strips the prefix, making the count a function of cwd. Both are pinned off on the
+  porcelain call; **do NOT add `-M` to the `diff-tree` call**, which would reintroduce the asymmetry
+  from the other direction. `premerge-assert.sh` prints the finding on
   `PREMERGE: ADVISORY` lines and **can never fail on it** — an absent, failing or `UNMEASURED`
   advisory is REPORTED and is not fatal in slice 1 — and the three `PREMERGE: SCOPE` lines are
   RETAINED, because slice 1 does not close the gap they disclose. Three properties to carry:
-  **(1)** the vocabulary is chosen so it cannot be pasted or grepped as a certification — no `PASS`,
-  no `OK`, no `RESULT:` in any run, prefix `BASE-STALENESS:`, and the no-finding verdict is
-  `NO-STALENESS-RECOGNISED` (a *scan result*, never `FRESH`/`CLEAN`); **(2)** `M = 0` prints
+  **(1)** the output is ANCHORED so it cannot be pasted or grepped as a certification. **The
+  absolute form of this property was FALSIFIED BY REVIEW and the correction is recorded rather than
+  softened**: it read *"no `PASS`, no `OK`, no `RESULT:` in any run"*, which is impossible because the
+  advisory prints repository-controlled paths VERBATIM — `test-data/**` is gate-global and the tracked
+  path `test-data/scripts/CI_SMOKE_TEST_USAGE.md` contains `OK`; three tracked paths do today, and the
+  test asserting the absolute form passed only because the sampled run's matched set happened to
+  exclude them, a test passing for the wrong reason. What holds instead: **every** output line, stdout
+  AND stderr, begins with `BASE-STALENESS: `; every dynamic field is CONTROL-CHARACTER SANITIZED
+  (git PERMITS NEWLINES IN PATHS, and unsanitized such a path emits a line with NO prefix, breaking the
+  anchor everything rests on) while otherwise printing the path verbatim, because masking it would
+  mangle it for the reader — #3312's rule is to anchor or remove the channel, never to pick a rarer
+  delimiter; the verdict appears ONLY on a `verdict ` line carrying a token from the closed set
+  {`STALE-RECOGNISED`, `NO-STALENESS-RECOGNISED`, `UNMEASURED`}, prose going on `verdict-detail` lines;
+  and the script's own STATIC TEMPLATE TEXT carries none of the three tokens, asserted STRUCTURALLY
+  over the source file, which is provable where a claim about one sample run is not. **Declared
+  residual: a repository path CAN contain a reserved substring and the advisory prints it — the anchor
+  is what makes that harmless.** The no-finding verdict is `NO-STALENESS-RECOGNISED` (a *scan result*,
+  never `FRESH`/`CLEAN`); **(2)** `M = 0` prints
   `0 RECOGNISED`, never a bare `0`, and every run prints its own `NON-EXHAUSTIVE` lines, because the
   blast radius is **not a dependency closure** — a commit changing an item the diff CALLS while
   touching neither the diff's paths nor a gate-global path is reported as NOT staling, a real
@@ -1610,8 +1647,9 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   The definition was chosen BY MEASUREMENT against the case that produced the issue
   (`docs/round-artifacts/issue-3650-blast-radius-measurements.md`): on PR #3362 the culprit commit
   and the diff share **no path**, so path intersection alone would call that certification fresh
-  exactly when it was not, while intersection + gate-global fires on 28 of 107 commits behind (26%),
-  leaving 74% of the churn non-staling. The run NAMES the culprit
+  exactly when it was not, while intersection + gate-global fires on 37 of 107 commits behind (35%)
+  — measured at `origin/main` `b1e8598a2`, subject `4bc6b913a`, the sha quoted because `behind` is a
+  function of where main was — leaving 65% of the churn non-staling. The run NAMES the culprit
   (`matched 5e08db201 gate-global .config/nextest.toml`), so the detection is attributable rather
   than a coincidence on a count — and the count is reported BY THE SCRIPT, which is the authority
   for it; a number quoted in prose here decays exactly like a comment. With

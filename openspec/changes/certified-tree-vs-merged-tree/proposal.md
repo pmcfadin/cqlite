@@ -48,17 +48,24 @@ The interaction ran through content that changes **any** gate's verdict regardle
 nextest config and a shared test-support module. So blast radius here means path intersection **∪ a
 gate-global set**, and that widening is what makes the ruling non-vacuous:
 
+All figures below are measured with the script at `origin/main` **`b1e8598a2`**, subject `4bc6b913a`.
+The sha is quoted because `behind` — and therefore every count — is a function of where main was.
+
 | definition | of 107 commits behind, how many stale the certification | share |
 |---|---|---|
 | any churn (the shape the ruling rejects) | 107 | 100% |
-| **path-intersection ∪ gate-global (adopted, as shipped)** | **28** | **26%** |
+| **path-intersection ∪ gate-global (adopted, as shipped)** | **37** | **35%** |
+| the same set before review added `scripts/tests/**` | 28 | 26% |
 | path-intersection alone (unsound) | 2 | 2% |
 
-74% of the churn on an 8-day-old base still does not stale a certification, and the motivating case is
+65% of the churn on an 8-day-old base still does not stale a certification, and the motivating case is
 detected **and named** in the output (`matched 5e08db201 gate-global .config/nextest.toml`) rather than
-merely counted. (An earlier draft of this proposal said 28→22 / 26%→21%: a hand measurement over
-root-only `Cargo.*` that excluded the diff's own paths. Attributed row-by-row in the measurements
-artifact; the script reports its own count and is the authority.)
+merely counted. (The figure has moved twice under measurement and the history is kept rather than tidied:
+an early hand count over root-only `Cargo.*` excluding the diff's own paths said 22 / 21%; the script
+itself reported 28 / 26%; review then added `scripts/tests/**` — the roster `tooling-tests` EXECUTES —
+taking it to 37, with **9** commits staling only because of it. `deny.toml` and the 14 loose
+`scripts/*.sh` helpers were measured and **not** added: both leave the count at 37. Attributed
+row-by-row in the measurements artifact; the script reports its own count and is the authority.)
 
 ## What Changes
 
@@ -71,10 +78,17 @@ the information source; slice 2 consumes it.
 1. **A new `scripts/flow/base-staleness.sh`**: given a branch/PR, report **`N` commits behind
    `origin/main`** and **`M` of those touching the diff's blast radius**, blast radius being path
    intersection ∪ a single declared gate-global list.
-2. **Non-blocking by construction, not by intent.** Its vocabulary contains no `PASS`, no `OK`, no
-   `RESULT:` — the three tokens every other verdict-bearing artifact in this repo uses — so its output
-   cannot be pasted or grepped as a certification. It exits `0` whether or not it finds staleness;
-   *unmeasurable* is `UNMEASURED`, never a permissive `0`.
+2. **Non-blocking by construction, not by intent — via an ANCHOR, not an absolute substring ban.**
+   The first draft of this proposal claimed its vocabulary *"contains no `PASS`, no `OK`, no `RESULT:`"*.
+   **Review falsified that** (roborev job 233, F2) and it is recorded as changed rather than softened: the
+   advisory prints repository-controlled paths verbatim, and the tracked path
+   `test-data/scripts/CI_SMOKE_TEST_USAGE.md` contains `OK`. What holds instead is that **every** output
+   line, stdout and stderr, begins with `BASE-STALENESS: `; every dynamic field is control-character
+   sanitized so that anchor cannot be broken by a path containing a newline (git permits them); the
+   verdict appears only on a `verdict ` line carrying a closed-set token; and the script's own static
+   template text carries none of the three tokens, asserted structurally over the source. **Declared
+   residual:** a path may contain a reserved substring, and the anchor is what makes that harmless. It
+   exits `0` whether or not it finds staleness; *unmeasurable* is `UNMEASURED`, never a permissive `0`.
 3. **`M = 0` prints `0 RECOGNISED`, never a bare `0`**, and every run states its own non-exhaustiveness
    (it is not a dependency closure). Precedent: `cfg-gated-subtree gaps: N RECOGNISED`, for the same
    reason — a bare zero in a log reads as a verified all-clear from a scan documented as incomplete.

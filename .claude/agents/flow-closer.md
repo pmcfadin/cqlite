@@ -218,8 +218,13 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    **The `PREMERGE: ADVISORY` lines are #3650 slice 1 and are NOT a verdict.** They carry
    `scripts/flow/base-staleness.sh`'s report: `N` commits behind the merge-base with `origin/main`
    and `M` of those touching this diff's blast radius (paths the diff touches + a hard-coded
-   gate-global set; **not** a dependency closure, which every run declares). The advisory **cannot
-   change the exit code** — absent, failing or `UNMEASURED`, it is reported and non-fatal in slice 1
+   gate-global set). It is invoked with the **CERTIFIED SHA**, not the local checkout's `HEAD` — the
+   two can differ, and this script is invoked by a relative path, so nothing binds cwd to the PR's
+   worktree; a report about a different diff than the one being approved would be the
+   "satisfied and wrong" shape this whole issue is about. **Every run declares TWO gaps**: it is not a
+   dependency closure, AND the gate-global list is itself curated and NON-CLOSED. The advisory **cannot
+   change the exit code** — absent, failing, timed out (it is bounded at 60s) or `UNMEASURED`, it is
+   reported and non-fatal in slice 1
    — so **never treat `STALE-RECOGNISED` as a refusal, and never treat its silence as certification
    against main**. If you act on it at all, act the way a consumer must: `UNMEASURED` (exit 5) counts
    as STALE, never as fresh. The useful move on a `STALE-RECOGNISED` is the cheap one the advisory

@@ -75,7 +75,8 @@ Resolve them in the worktree and reply per thread.
    tree — **not** that it was certified against current `main` (a squash-merge composes the diff with
    main's tip; the merge-result gate is #3650 **slice 2**). Report it that way.
    Its `PREMERGE: ADVISORY` lines (#3650 slice 1) report `N` commits behind the merge-base and `M`
-   of those in this diff's blast radius (paths the diff touches + a hard-coded gate-global set, not a
-   dependency closure). They are **information, never a verdict**: the advisory cannot change the exit
+   of those in this diff's blast radius, measured at the **CERTIFIED SHA** rather than the local
+   `HEAD` (paths the diff touches + a hard-coded gate-global set; every run declares TWO gaps — it is
+   not a dependency closure, and the gate-global list is itself curated and NON-CLOSED). They are **information, never a verdict**: the advisory cannot change the exit
    code, an absent/failing/`UNMEASURED` advisory is non-fatal, and a consumer that ever acts on it
    must treat `UNMEASURED` as STALE rather than fresh.
