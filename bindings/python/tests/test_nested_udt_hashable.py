@@ -1675,15 +1675,120 @@ class TestFixtureResolutionContract:
         (table_dir / "nb-1-big-Data.db").write_bytes(b"\x00")
         assert _table_has_data(tmp_path, KEYSPACE, TABLE) is True
 
-    def test_unresolvable_table_fails_closed_naming_every_root(self):
-        """An unresolvable table RAISES and names every root searched.
+    @staticmethod
+    def _decoy_root(tmp_path, monkeypatch, dirname: str, data_db: str) -> Path:
+        """Point ``CQLITE_DATASETS_ROOT`` at a root holding ONE fabricated dir."""
+        decoy = tmp_path / "decoy"
+        table_dir = decoy / "sstables" / KEYSPACE / dirname
+        table_dir.mkdir(parents=True)
+        (table_dir / data_db).write_bytes(b"not a real sstable")
+        monkeypatch.setenv("CQLITE_DATASETS_ROOT", str(decoy))
+        return decoy / "sstables"
+
+    def test_manifest_declares_the_generation_the_checkout_carries(self):
+        """The declared basename/prefix must be the one the checkout ships.
+
+        The live cross-check that keeps the discriminator honest: a manifest
+        naming a generation the committed tree does not carry would make every
+        rejection below fire for the wrong reason. Derived from
+        ``references.yml``, never hard-coded — the UUID changes on every
+        regeneration, and this fixture has had six.
+        """
+        dirname, prefix = _manifest_declared_generation(KEYSPACE, TABLE)
+        checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
+        declared = checkout / KEYSPACE / dirname / f"{prefix}-Data.db"
+        assert declared.is_file(), (
+            f"references.yml declares {dirname}/{prefix}-Data.db but the "
+            f"checkout does not carry it at {declared}"
+        )
+        assert _table_generations(checkout, KEYSPACE, TABLE) == [dirname], (
+            "the checkout carries a generation references.yml does not declare "
+            f"— {_table_generations(checkout, KEYSPACE, TABLE)} vs {dirname!r}"
+        )
+
+    def test_undeclared_generation_in_an_env_root_is_rejected_not_shadowed(
+        self, tmp_path, monkeypatch
+    ):
+        """A same-named dir with a DIFFERENT uuid must not become the oracle.
+
+        The defect this class exists for, measured before the fix: the decoy was
+        selected and the suite reported ``got []`` for the four committed
+        partitions. A decoy that happened to be a VALID older generation would
+        instead have passed against bytes nobody reviewed. Rejection is loud and
+        names the root, the basename found and the basename declared — never a
+        silent fallback to the checkout.
+        """
+        dirname, prefix = _manifest_declared_generation(KEYSPACE, TABLE)
+        stale = f"{TABLE}-cfc55f10a4dd11f185314dd6ea9c00d5"
+        assert stale != dirname
+        decoy = self._decoy_root(tmp_path, monkeypatch, stale, f"{prefix}-Data.db")
+        with pytest.raises(AssertionError) as excinfo:
+            _sstables_root_for_table(KEYSPACE, TABLE)
+        message = str(excinfo.value)
+        assert str(decoy) in message
+        assert stale in message
+        assert dirname in message
+
+    def test_declared_directory_lacking_the_declared_prefix_is_rejected(
+        self, tmp_path, monkeypatch
+    ):
+        """The right basename with the wrong SSTable prefix is not a match."""
+        dirname, prefix = _manifest_declared_generation(KEYSPACE, TABLE)
+        decoy = self._decoy_root(tmp_path, monkeypatch, dirname, "nb-2-big-Data.db")
+        with pytest.raises(AssertionError) as excinfo:
+            _sstables_root_for_table(KEYSPACE, TABLE)
+        message = str(excinfo.value)
+        assert str(decoy) in message
+        assert f"no {prefix}-Data.db" in message
+
+    def test_declared_generation_in_two_roots_is_ambiguous_not_picked(
+        self, tmp_path, monkeypatch
+    ):
+        """Two roots carrying the declared generation is AMBIGUITY, not a choice.
+
+        Both copies match the manifest, so no evidence separates them and
+        picking either would be the preference ordering this resolver refuses.
+        """
+        dirname, prefix = _manifest_declared_generation(KEYSPACE, TABLE)
+        decoy = self._decoy_root(tmp_path, monkeypatch, dirname, f"{prefix}-Data.db")
+        with pytest.raises(AssertionError) as excinfo:
+            _sstables_root_for_table(KEYSPACE, TABLE)
+        message = str(excinfo.value)
+        assert "AMBIGUOUS" in message
+        assert str(decoy) in message
+        checkout = _workspace_root() / "test-data" / "datasets" / "sstables"
+        assert str(checkout) in message
+
+    def test_table_absent_from_the_manifest_fails_closed(self):
+        """A table the manifest does not declare cannot be resolved at all.
+
+        Refused before any root is searched: with no declared generation there
+        is nothing to resolve BY, and falling back to table-name matching is the
+        shadowing this resolver removes.
+        """
+        with pytest.raises(AssertionError) as excinfo:
+            _sstables_root_for_table(KEYSPACE, "no_such_table_3500")
+        message = str(excinfo.value)
+        assert "references.yml" in message
+        assert "declares 0 entries" in message
+
+    def test_declared_generation_present_in_no_root_fails_closed_naming_every_root(
+        self,
+    ):
+        """A declared generation nowhere on disk RAISES, naming every root.
+
+        Exercised through ``_resolve_declared_generation`` with a fabricated
+        declaration, because the real one resolves: the two steps are separable
+        precisely so this branch is reachable without corrupting the manifest.
 
         Never ``pytest.skip``: this fixture is git-committed, so "not found" is a
         broken checkout or a broken resolver, and a skip here would be a green
         report about a test that never ran.
         """
         with pytest.raises(AssertionError) as excinfo:
-            _sstables_root_for_table(KEYSPACE, "no_such_table_3500")
+            _resolve_declared_generation(
+                KEYSPACE, "no_such_table_3500", "no_such_table_3500-0badc0de", "nb-1-big"
+            )
         message = str(excinfo.value)
         for root in _sstables_root_candidates():
             assert str(root) in message, f"diagnostic omits candidate root {root}"
