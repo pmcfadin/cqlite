@@ -4318,6 +4318,16 @@ assert_says 'case (wv31) an unusable scanner is UNAVAILABLE and fails closed' \
   '^waiver: UNAVAILABLE \(the structured waiver scanner is unusable'
 assert_says 'case (wv31) and it says a waiver is never decided from a text stream' \
   'NEVER decided from a flattened text stream'
+# THE LOAD-BEARING CONTROL FOR THE KEYWORD REDACTION'S WORD BOUNDARY (roborev job 230). This cause names
+# the SCANNER'S OWN FILE, whose name embeds `roborev-waive` as a substring, and the operator has to read
+# that path to fix a fail-closed UNAVAILABLE. A blanket substring redaction mangles it into an
+# unactionable diagnostic, so the denylist fires only where the keyword is not continued by a letter —
+# and this is the assert that would catch it being loosened back. (`assert_no_marker_form` is
+# deliberately NOT attached to this case: its grep for the bare keyword is unanchored, i.e. stricter
+# than the renderer, and it would red on the very path this case exists to preserve.)
+assert_says 'case (wv31) the scanner PATH survives the keyword redaction, so the cause can be acted on' \
+  'tool: [^ ]*roborev-waiver-scan\.py'
+assert_lacks 'case (wv31) and nothing in this cause was redacted at all' 'authorization-keyword-redacted'
 assert_lacks 'case (wv31) no grant without the scanner' '^prompt-content: WAIVED'
 reset_stub
 
@@ -5256,6 +5266,75 @@ assert_verdict 'case (df7i) waiver' FAIL 1
 assert_says 'case (df7i) the waiver kind inherits the refusal BY CALL' \
   '^waiver: MALFORMED \(the marker is missing a-stem-free-reason'
 assert_no_marker_form 'case (df7i) waiver'
+reset_stub
+
+printf '== (df7j) #3626 round 4: an AUTHOR whose LOGIN carries a marker keyword, both kinds ==\n'
+# ROBOREV ROUND 4 (Low): THE SAME GUARANTEE, ONE FIELD OVER. Round 3 refused a stem-bearing REASON
+# (df7i) and left the AUTHOR unguarded — and `unauthorized_detail()` interpolated the untrusted GitHub
+# login VERBATIM into `waiver:`/`deferral: UNAUTHORIZED (... its author '@<login>' ...)`, which reaches
+# the summary block. So the invariant held for the field the tests happened to cover and not for the
+# field beside it: A PROPERTY ASSERTED ONLY WHERE IT CANNOT FAIL IS NOT ASSERTED, the same shape as the
+# `assert_lacks` that was attached to the `NONE` state alone.
+#
+# WHAT THIS IS AND IS NOT, so a later reader neither treats it as a closed bypass nor reopens it as an
+# open one: a GitHub login admits letters, digits and hyphens and NOT colons or spaces, so a login can
+# contain `roborev-defer` but can NEVER contain a full stem (`roborev-defer: findings`); and the emitted
+# line begins `deferral: UNAUTHORIZED (`, so `sole_marker_line`'s `startswith` test refuses it. This is
+# spec conformance and invariant coverage, NOT a security layer — a two-token denylist at each process's
+# ONE emit boundary (`safe_value` in the scanner, `roborev_safe_line` in the wrapper), so every value
+# and every future key inherits it rather than needing its own fix.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001roborev-defer-fan\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=copied from the public failing block\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7j) deferral' FAIL 1
+assert_says 'case (df7j) the keyword is redacted out of the login, the rest of it intact' \
+  "^deferral: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@\[authorization-keyword-redacted\]-fan' is not on the deferral allowlist"
+assert_no_marker_form 'case (df7j) deferral'
+assert_lacks 'case (df7j) a stranger cannot defer, whatever they are called' '^findings: DEFERRED'
+reset_stub
+# THE WAIVER KIND INHERITS THE SAME BOUNDARY — asserted, not assumed, because the two kinds share a
+# renderer only as long as nobody gives one its own.
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT='no census path appears here at all'
+STUB_GH_COMMENTS="\001Roborev-Waive-Guy\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=copied from the public failing block\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7j) waiver' FAIL 1
+assert_says 'case (df7j) the redaction is case-insensitive, as the marker keyword check is' \
+  "^waiver: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@\[authorization-keyword-redacted\]-Guy' is not on the waiver allowlist"
+assert_no_marker_form 'case (df7j) waiver'
+assert_lacks 'case (df7j) and nothing is waived' '^prompt-content: WAIVED'
+reset_stub
+# THE SHELL HALF OF THE CLASS, WHICH THE TWO CASES ABOVE DO NOT REACH: an author is redacted inside the
+# SCANNER, so the wrapper only ever renders text python already cleaned. `gh issue view`'s stderr is
+# different — it enters `ROBOREV_ISSUE_DETAIL` in the shell, reaches `deferral:` without passing through
+# the scanner at all, and is exactly the kind of value that grows an interpolation later. So the wrapper
+# boundary (`roborev_safe_line`, already the one gate for every block value and every DETAILS line) is
+# asserted on its own fixture rather than assumed from the python one.
+reset_stub
+df_grant_fixture
+STUB_GH_ISSUE_ERR='HTTP 502 from roborev-defer: upstream connect error'
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7j gh stderr)' FAIL 1
+assert_says 'case (df7j gh stderr) the could-not-ask still names what it could not interpret' \
+  "^deferral: ISSUE-UNVERIFIABLE \('gh issue view 3602' failed WITHOUT answering"
+assert_says 'case (df7j gh stderr) with the keyword redacted by the WRAPPER boundary' \
+  'HTTP 502 from \[authorization-keyword-redacted\]: upstream connect error'
+assert_no_marker_form 'case (df7j gh stderr)'
+assert_lacks 'case (df7j gh stderr) and nothing is deferred' '^findings: DEFERRED'
+reset_stub
+# AND AN ALLOWLISTED AUTHOR IS STILL UNTOUCHED: redaction is DISPLAY ONLY and the authorization decision
+# is made on the RAW login before any renderer runs, so a normal login must reach the block verbatim.
+# Without this control, a redaction that mangled every author would satisfy the two asserts above.
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7j control) an ordinary login is not redacted' PASS 0
+assert_says 'case (df7j control) the granted author is recorded as GitHub gave it' \
+  '^deferral: GRANTED \(author=@pmcfadin '
+assert_lacks 'case (df7j control) no value was redacted on a clean run' 'authorization-keyword-redacted'
+assert_no_marker_form 'case (df7j control)'
 reset_stub
 
 printf '== (df9) #3626: a gh failure (no PR / no auth / API error) is UNAVAILABLE and FAILs closed ==\n'
@@ -6781,6 +6860,46 @@ if [ -n "$_fin_start" ] && [ -n "$_fin_end" ] \
   ok "structural: finish neutralises every DETAILS line (lines $_fin_start-$_fin_end)"
 else
   bad 'structural: finish does not neutralise DETAILS lines'
+fi
+
+printf '== structural: the authorization-keyword denylist lives at the TWO emit boundaries ==\n'
+# ROBOREV ROUND 4 (job 230). The finding named ONE field — the GitHub login in `unauthorized_detail` —
+# and the defect is a CLASS: any externally-sourced value can carry a marker keyword into the block (a
+# login; `gh issue view`'s stdout and stderr, which reach `deferral:` through ROBOREV_ISSUE_DETAIL; the
+# argv-sourced allowlist; any key added later). A per-site escape is a list to keep complete, which is
+# the same argument that put control-character neutralising in `emit_kv`/`finish` — so this is asserted
+# STRUCTURALLY: the denylist must be INSIDE the two renderers and NOWHERE ELSE, or the next value to
+# grow an interpolation silently reopens it.
+_rd_bad=""
+_rl_start=$(grep -nE '^roborev_safe_line\(\) \{' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
+_rl_end=""
+[ -z "$_rl_start" ] || _rl_end=$(awk -v s="$_rl_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER_REAL")
+if [ -z "$_rl_start" ] || [ -z "$_rl_end" ]; then
+  bad 'structural: could not locate roborev_safe_line() to inspect the keyword denylist — a failure to measure, not a measurement'
+else
+  sed -n "${_rl_start},${_rl_end}p" "$WRAPPER_REAL" | grep -q 'ROBOREV_MARKER_REDACTION' \
+    || _rd_bad="$_rd_bad wrapper-boundary-does-not-redact"
+  # The word boundary is part of the rule, not an optimisation: without it the scanner's own file name
+  # is mangled in the `waiver: UNAVAILABLE (... tool: <path>)` cause (case wv31).
+  sed -n "${_rl_start},${_rl_end}p" "$WRAPPER_REAL" | grep -qF '[^a-zA-Z]|$' \
+    || _rd_bad="$_rd_bad wrapper-redaction-has-no-word-boundary"
+  # EVERY other mention is a per-site escape — the definition line is the one exception.
+  _rd_out=$(grep -n 'ROBOREV_MARKER_REDACTION' "$WRAPPER_REAL" \
+    | awk -F: -v s="$_rl_start" -v e="$_rl_end" '$1 < s || $1 > e' \
+    | grep -vE '^[0-9]+:ROBOREV_MARKER_REDACTION=' || true)
+  [ -z "$_rd_out" ] || _rd_bad="$_rd_bad per-site-redaction-in-the-wrapper:${_rd_out%%$'\n'*}"
+fi
+grep -qF 'return MARKER_KEYWORD.sub(MARKER_KEYWORD_REDACTION, "".join(out))' "$SCAN_TOOL" \
+  || _rd_bad="$_rd_bad scanner-emit-boundary-does-not-redact"
+grep -qF '(?![A-Za-z])' "$SCAN_TOOL" || _rd_bad="$_rd_bad scanner-redaction-has-no-word-boundary"
+# ONE SPELLING OF THE KEYWORD LIST: `judge_reason` must ASK the shared pattern, never carry its own
+# copy, or the class gets fixed in one half again (which is what job 230 was).
+grep -qF 'if MARKER_KEYWORD.search(reason):' "$SCAN_TOOL" \
+  || _rd_bad="$_rd_bad reason-refusal-has-its-own-keyword-list"
+if [ -z "$_rd_bad" ]; then
+  ok 'structural: the keyword denylist is at safe_value + roborev_safe_line, word-bounded, with one spelling of the list'
+else
+  bad "structural: the authorization-keyword denylist is not a single boundary —$_rd_bad. A login, a gh diagnostic or any future value would carry a marker keyword into a block that gets pasted into PR comments (#3312 job 23 / roborev job 230)"
 fi
 
 printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
