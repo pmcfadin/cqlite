@@ -86,7 +86,7 @@
 #   model: / census: /
 #   tokens: / push-assert: / census-check: / code-free: / job-record: /
 #   sha-assert: / review-completed: / prompt-content: /
-#   vacuity-tier1: / vacuity-tier2: / findings: / roborev-exit: / log:
+#   vacuity-tier1: / vacuity-tier2: / findings: / [deferral:] / roborev-exit: / log:
 #   RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 #
 # EVERY value is ONE LINE, guaranteed (#3229 blocker 2). Diff-derived text reaches these
@@ -139,11 +139,40 @@
 #                     NOTICE (phrase present in a findings-bearing review) |
 #                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
 #   vacuity-tier2     PASS | FAIL (...) | UNAVAILABLE | SKIP
-#   findings          NONE | PRESENT [(<n>)] | INCONSISTENT (...) | UNKNOWN | SKIP
+#   findings          NONE | PRESENT [(<n>)] | INCONSISTENT (...) | UNKNOWN | SKIP |
+#                     DEFERRED (<n>, issues=#<N>[,#<N>...], authorized @<login>, job <id>)
 #                     ONLY an affirmative `NONE` permits a PASS, IN EVERY MODE including
 #                     `--recheck-job`, and that requirement is NOT WAIVABLE (#3564). It is
 #                     enforced in step 7 on its own terms rather than by the neighbouring
 #                     `roborev-exit` key, which is legitimately `SKIP` on a recheck.
+#                     THE ONE OTHER PERMITTED VALUE IS `DEFERRED` (#3626): "roborev clean"
+#                     means NO UNADDRESSED FINDINGS, not "the tool printed zero", and a
+#                     LEAD-DEFERRED finding is re-reported by every later round — so the
+#                     affirmative-`NONE` rule, correct in itself, blocked such a merge
+#                     forever. `DEFERRED` rides ONLY on an authorized, affirmatively matched
+#                     deferral (see `deferral` below); it is NEVER `NONE`, so nobody grepping
+#                     `findings: NONE` reads a deferred run as clean.
+#   deferral          GRANTED (author=@<login> issues=<N>,<N> count=<n> scope=base=<…>
+#                     head=<…> job=<id> reason=<why>) | NONE (...) | STALE (...) |
+#                     MALFORMED (...) | UNAUTHORIZED (...) | COUNT-MISMATCH (...) |
+#                     ISSUE-UNRESOLVABLE (...) | PR-UNLINKED (...) | UNAVAILABLE (...)
+#                     PRESENT ONLY WHEN THE FINDINGS BRANCH HAD A DEFERRAL TO LOOK FOR (a
+#                     `--recheck-job` over an affirmatively measured `PRESENT (n)`), so it is
+#                     absent rather than placeholdered otherwise. INFORMATIONAL, exactly like
+#                     `waiver:`: it is not in the verdict scan and cannot make anything pass
+#                     by itself. A deferral is a DEDICATED, column-zero line that is the SOLE
+#                     NONBLANK CONTENT of a TOP-LEVEL PR comment from an author on
+#                     ROBOREV_WAIVER_AUTHORS, binding base AND head AND job AND the finding
+#                     COUNT AND the filed issue numbers (see --help for the exact form, which
+#                     is deliberately not repeated in any emitted diagnostic). It is granted
+#                     by the OWNER or the coordination LEAD; a worker may only REQUEST one.
+#                     SEPARATELY SCOPED FROM THE WAIVER, and that separation is load-bearing:
+#                     an absence waiver confers NO authority over `findings:`, a findings
+#                     deferral confers NONE over `prompt-content:`, and neither falls back to
+#                     the other — collapsing them would let a delivery-artifact waiver excuse
+#                     a real defect. `findings: UNKNOWN` and `SKIP` are NOT deferrable in any
+#                     mode: those states were never ESTABLISHED, and a pass may not rest on a
+#                     state that could not be read.
 #   roborev-exit      PASS | FINDINGS (exit N) | ERROR (exit N) | SKIP
 #   model             <model> | <model> (SUBSTITUTED — requested '<r>') |
 #                     <model> (UNCONFIRMED — no model field in the job record) | -
@@ -188,7 +217,7 @@
 # range), `review-completed` (job status + an allow-list of terminal verdict markers),
 # `prompt-content` (the CODE subset of our census inside the prompt actually sent). Prose matching (`vacuity-tier1`) and token accounting (`vacuity-tier2`)
 # CORROBORATE; tier 1 can only ever raise a NOTICE. `base:`, `head-sha:`, `reviewed-sha:`,
-# `assert-base:`, `census:`, `tokens:` and `waiver:` are INFORMATIONAL — they are in neither
+# `assert-base:`, `census:`, `tokens:`, `waiver:` and `deferral:` are INFORMATIONAL — they are in neither
 # the verdict-grammar scan nor the affirmation loop (both enumerate the verdict-carrying keys
 # by name), so none of them can make a run pass or fail on its own.
 #
@@ -468,6 +497,64 @@ The earlier, broader claim ("authorship cannot be verified at all") is what just
 having NO author check, which is how any commenter could grant one — an unenforceable
 claim gets SCOPED to what is true, never dropped whole.
 
+THE FINDINGS DEFERRAL (issue #3626) — A SECOND, SEPARATELY SCOPED AUTHORIZATION.
+"roborev clean" means NO UNADDRESSED FINDINGS, not "the tool printed zero". A
+lead-deferred finding is re-reported by every later round, so 'findings: PRESENT (n)'
+persists and the affirmative-NONE requirement — correct in itself — blocked such a
+merge FOREVER (measured on PR #3572 job 262: two findings, ZERO new, both already
+filed and both already lead-deferred). The OWNER or the coordination LEAD may record
+that deferral with a PR comment carrying this as a DEDICATED LINE, at column zero,
+every field present:
+
+    roborev-defer: findings issues=<N>[,<N>...] count=<n> base=<40-hex> head=<40-hex> job=<id> reason=<why>
+
+AND THEN APPLY IT WITH A RECHECK, exactly as the absence waiver is applied:
+
+    bash scripts/flow/roborev-review.sh --repo <abs> --recheck-job <id> \
+      --agent <agent> --model <model>
+
+count= IS THE AFFIRMATIVE HALF OF THE BINDING, and it is why this is a match rather
+than a mute button. A job is a completed review and its findings do not change, so
+job= already fixes the finding SET; requiring the declared count to EQUAL the observed
+one means a PRE-AUTHORIZATION (written before the findings were read) fails on a
+mismatch instead of passing silently, and ANY NEW finding at the same head raises the
+observed count and fails too. That is how the UNDEFERRED set is computed without a
+per-finding identity, which roborev's prose does not provide — and no such identity is
+reconstructed from that prose, because a recogniser over author-controlled text is the
+class #3564 closed by REMOVING prose reconstruction.
+
+issues= NAMES WHERE THE FINDING WENT, and each number must be (a) a RETRIEVABLE
+GitHub issue and (b) REFERENCED FROM THE PR BODY. A deferral without a linked issue is
+a DROPPED finding; the nit rule already requires one follow-up issue at merge time, and
+this makes that link mechanical instead of remembered. The ruling itself needs no
+separate artifact: the authorization comment is permanent, attributable and in the PR.
+
+WHAT IT REPORTS: 'findings: DEFERRED (<n>, issues=#…, authorized @<login>, job <id>)'
+— a DISTINCT token, NEVER 'NONE', so no reader grepping for a clean review finds a
+deferred one — beside a 'deferral: GRANTED (...)' key recording the author, the issue
+numbers, the count, the bound scope and the reason VERBATIM. Every non-granting state
+speaks under its own name and leaves the FAIL: NONE / STALE / MALFORMED / UNAUTHORIZED
+/ COUNT-MISMATCH / ISSUE-UNRESOLVABLE / PR-UNLINKED / UNAVAILABLE.
+
+NOT DEFERRABLE, IN ANY MODE: 'findings: UNKNOWN' and 'findings: SKIP'. Those values
+mean the findings state was never ESTABLISHED — we cannot count what we cannot see, and
+a deferral over one would be a pass resting on a state we could not read.
+
+SEPARATELY SCOPED FROM THE ABSENCE WAIVER, and that is a constraint rather than an
+accident: distinct marker keywords, distinct summary keys, distinct verdict tokens, and
+NEITHER reads the other's marker or falls back to it. An absence waiver confers no
+authority over findings; a findings deferral confers none over prompt-content. A run may
+legitimately carry both, each granted on its own marker. Collapsing them would let a
+delivery-artifact waiver excuse a real defect.
+
+THE CHANNEL, THE ALLOWLIST, THE PLACEHOLDER REFUSAL, THE CREDENTIAL RULE AND THE THREAT
+MODEL ARE THE WAIVER'S, INHERITED BY CALL: sole nonblank content of a TOP-LEVEL comment,
+an author on ROBOREV_WAIVER_AUTHORS, a substantive reason (no '<...>', no bare
+why/todo/tbd), no part of the form in any emitted diagnostic, one enforcer resolved from
+the wrapper's own directory with no override. There is deliberately NO flag, NO file in
+the worktree and NO environment variable by which a deferral can be asserted: each would
+hand the reviewed party the power to satisfy its own constraint.
+
 LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
 Only this probe can show the REAL binary honours the explicit --repo from inside
 a worktree; the gate's hermetic check uses a stub reviewer.
@@ -622,6 +709,10 @@ PROMPT_CONTENT="SKIP"
 # The waiver record for the absence branch (owner ruling (4), #3312). Empty means the branch never
 # ran — the census paths were present — so the key is ABSENT from the block rather than placeholdered.
 WAIVER_REPORT=""
+# The findings-deferral record (#3626). Empty means the findings branch never had a deferral to look
+# for — a fresh review, or a findings state that is not an affirmatively measured `PRESENT (n)` — so
+# the key is ABSENT from the block rather than placeholdered with a lookup that never happened.
+DEFERRAL_REPORT=""
 TIER1="SKIP"
 TIER2="SKIP"
 FINDINGS="SKIP"
@@ -743,6 +834,15 @@ emit_summary() {
   emit_kv 'vacuity-tier1' "$TIER1"
   emit_kv 'vacuity-tier2' "$TIER2"
   emit_kv 'findings' "$FINDINGS"
+  # THE DEFERRAL RECORD (#3626). INFORMATIONAL, exactly like `waiver:`/`census:`/`tokens:` — it is NOT
+  # in the verdict scan and cannot make anything pass on its own; `findings:` alone carries that
+  # verdict, and its `DEFERRED` token is admitted only on the coupled granted state read in step 7.
+  # Emitted ONLY when the findings branch had a deferral to look for, and then it states its own state
+  # even when nothing was granted: "your marker names the wrong job", "the count moved" and "there is
+  # no marker" are different operator actions, and a bare FAIL distinguishes none of them.
+  if [ -n "${DEFERRAL_REPORT:-}" ]; then
+    emit_kv 'deferral' "$DEFERRAL_REPORT"
+  fi
   emit_kv 'roborev-exit' "$ROBOREV_EXIT"
   emit_kv 'log' "$LOG"
   emit_kv 'RESULT' "$RESULT"
@@ -834,7 +934,7 @@ fi
 # shellcheck source=roborev-review-checks.sh
 . "$CHECKS_FILE"
 for roborev_required_check in roborev_check_review_completed roborev_check_prompt_content \
-  roborev_check_findings roborev_check_tier1 roborev_check_tier2; do
+  roborev_check_findings roborev_check_tier1 roborev_check_tier2 roborev_check_findings_deferral; do
   if [ "$(type -t "$roborev_required_check")" != function ]; then
     DETAILS+=("ERROR: '$CHECKS_FILE' did not define $roborev_required_check, so that check cannot run. Failing closed — the file is truncated or corrupt.")
     finish FAIL 1
@@ -1246,6 +1346,11 @@ roborev_check_prompt_content
 roborev_check_findings
 roborev_check_tier1
 roborev_check_tier2
+# AFTER BOTH TIERS, DELIBERATELY (#3626): `vacuity-tier1` GATES on `findings:` reading `PRESENT*`, so
+# rewriting that value before it runs would move a correct advisory NOTICE to a HARD FAIL. A deferral
+# changes what the VERDICT does with an established findings state; it must not change what any other
+# check saw.
+roborev_check_findings_deferral
 
 # --- step 7: the verdict ------------------------------------------------------
 # The findings COUNT is best-effort (it counts severity markers in the transcript);
@@ -1307,6 +1412,33 @@ roborev_check_tier2
 # ADDITION rather than a rewrite of a scan whose set is pinned.
 failed=0
 unrecognised=""
+ungranted_deferral=""
+# ====== ONE COUPLED STATE FOR THE DEFERRAL, READ BY ALL THREE GATES (#3626) ======
+# `DEFERRED` is a NEW value of the closed grammar below, and it is non-failing ONLY when the deferral
+# oracle affirmatively GRANTED. The grammar scan, the `findings:` gate and the affirmation backstop
+# must therefore read ONE state, not three: two independent tests of "was it granted?" are two things
+# that can drift apart, and the drift would be an authorization bypass rather than an inconsistency.
+# So the whole admission is decided HERE, once, and each gate asks this variable.
+#
+# EVERY TERM IS AFFIRMATIVE, and every one of them is required (#3586). It is not enough that the
+# oracle said `granted`: the provenance must be COMPLETE (an authorizer, a reason, at least one filed
+# issue), the SCOPE must equal this run's own base/head/job — the same equality the absence waiver's
+# admission asserts — the declared count must equal the count this run OBSERVED, and the mode must be
+# `--recheck-job`, the only path an authorization can travel. A `DEFERRED` produced by some future code
+# path that measured nothing therefore cannot ride to a PASS, and the test is not keyed on WHICH key
+# carries the token: a key-scoped exemption is the shape that has to be re-argued every time a key is
+# added, while the provenance is the property that actually matters.
+deferral_admits=0
+if [ "${ROBOREV_DEFERRAL_STATE:-}" = "granted" ] \
+  && [ -n "${RECHECK_JOB:-}" ] \
+  && [ -n "${ROBOREV_DEFERRAL_AUTHOR:-}" ] \
+  && [ -n "${ROBOREV_DEFERRAL_REASON:-}" ] \
+  && [ -n "${ROBOREV_DEFERRAL_ISSUES:-}" ] \
+  && [ -n "${ROBOREV_DEFERRAL_OBSERVED_COUNT:-}" ] \
+  && [ "${ROBOREV_DEFERRAL_COUNT:-}" = "${ROBOREV_DEFERRAL_OBSERVED_COUNT:-}" ] \
+  && [ "${ROBOREV_DEFERRAL_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}" ]; then
+  deferral_admits=1
+fi
 for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$SHA_ASSERT" \
   "$REVIEW_COMPLETED" "$PROMPT_CONTENT" "$TIER1" "$TIER2" "$FINDINGS" "$ROBOREV_EXIT"; do
   # The VERDICT TOKEN: the value up to its first space. An empty or all-detail value yields a
@@ -1317,6 +1449,16 @@ for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$CODE_FREE" "$SHA_ASSERT" \
   # is that an unplanned value must not inherit the non-failing branch.
   case "$verdict_token" in
     FAIL|FINDINGS|ERROR|INCONSISTENT) ;;
+    # ===== `DEFERRED` IS RECOGNISED ONLY WHEN IT WAS AFFIRMATIVELY GRANTED (#3626) =====
+    # Recognition is coupled to the oracle's state, so the token cannot be non-failing on its own: an
+    # ungranted (or fabricated) `DEFERRED` lands in the failing arm with its own diagnostic, which is
+    # the same treatment an unrecognised value gets and for the same reason.
+    DEFERRED)
+      if [ "$deferral_admits" -ne 1 ]; then
+        failed=1
+        ungranted_deferral="${ungranted_deferral:+$ungranted_deferral; }'$verdict'"
+      fi
+      ;;
     PASS|WAIVED|SKIP|NOTICE|UNAVAILABLE|DEGRADED|NONE|PRESENT|UNKNOWN) ;;
     *)
       failed=1
@@ -1392,9 +1534,23 @@ done
 # Evaluated only on a would-be PASS, and BEFORE the affirmation loop: where both this and the
 # structural backstop would fire, OPEN FINDINGS are what the reader must act on, and a wrapper
 # defect reported over them would bury it.
-if [ "$failed" -eq 0 ] && [ "${FINDINGS%% *}" != NONE ]; then
+# ====== AND `DEFERRED` IS THE ONE OTHER VALUE THAT MAY RIDE, ON AN AUTHORIZED DEFERRAL (#3626) ======
+# "roborev clean" means NO UNADDRESSED FINDINGS, not "the tool printed zero". A lead-deferred finding
+# is re-reported by every later round, so the affirmative-`NONE` requirement -- correct in itself --
+# blocked such a merge FOREVER, and the lane that behaved correctly (refused to manufacture a green,
+# asked instead) was the one it punished. So the terminal verdict is gated on the UNDEFERRED set: the
+# `NONE` requirement is unchanged, and a `DEFERRED` findings value additionally rides ONLY on
+# `deferral_admits` -- the single coupled state above, which requires the authorization's scope, its
+# author, its reason, its filed issues and its declared count to all match what this run measured. It
+# is NOT a waiver of the findings requirement: nothing here admits `PRESENT`, `UNKNOWN` or `SKIP`, and
+# `findings:` never reports `NONE` on account of a deferral.
+findings_deferred=0
+if [ "$deferral_admits" -eq 1 ] && [ "${FINDINGS%% *}" = DEFERRED ]; then
+  findings_deferred=1
+fi
+if [ "$failed" -eq 0 ] && [ "${FINDINGS%% *}" != NONE ] && [ "$findings_deferred" -ne 1 ]; then
   failed=1
-  DETAILS+=("ERROR: findings: this run would have PASSED while 'findings:' reads '$FINDINGS' — and only an affirmative 'NONE' certifies that the review found nothing. A review with OPEN FINDINGS is not \"roborev clean\", whatever the neighbouring keys say: on --recheck-job no reviewer process runs, so 'roborev-exit' is legitimately SKIP and CANNOT be the thing that fails a findings-bearing run (#3564). If this is PRESENT, triage the findings in the review record ($LOG), fix them, then push and re-review. 'UNKNOWN' or 'SKIP' means the findings state was never ESTABLISHED, which fails closed for the same reason — a pass may not rest on a state we could not read. This requirement is NOT waivable in any mode: the absence waiver excuses prompt-content absence only.")
+  DETAILS+=("ERROR: findings: this run would have PASSED while 'findings:' reads '$FINDINGS' — and only an affirmative 'NONE' certifies that the review found nothing. A review with OPEN FINDINGS is not \"roborev clean\", whatever the neighbouring keys say: on --recheck-job no reviewer process runs, so 'roborev-exit' is legitimately SKIP and CANNOT be the thing that fails a findings-bearing run (#3564). If this is PRESENT, triage the findings in the review record ($LOG), fix them, then push and re-review. 'UNKNOWN' or 'SKIP' means the findings state was never ESTABLISHED, which fails closed for the same reason — a pass may not rest on a state we could not read. This requirement is NOT waivable in any mode: the absence waiver excuses prompt-content absence only. THE ONE OTHER ROUTE PAST A 'PRESENT' IS A LEAD-AUTHORIZED DEFERRAL (#3626), which is a SEPARATE authorization on its own marker: it reports 'findings: DEFERRED (...)' beside a 'deferral: GRANTED (...)' key, never NONE, and it requires the authorized count to EQUAL the observed count with every deferred finding filed as an issue the PR body references. Deferral state for this run: ${DEFERRAL_REPORT:-<not looked for: a deferral is decided only on --recheck-job, over an affirmatively measured PRESENT (n)>}.")
 fi
 # Evaluated ONLY when the run would otherwise PASS, deliberately: on an already-failing run
 # every non-affirmative key has its own diagnostic under its own name, and repeating them here
@@ -1422,6 +1578,15 @@ if [ "$failed" -eq 0 ]; then
           && [ "${ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}" ] \
           && [ "${ROBOREV_WAIVER_STATE:-}" = "granted" ]; then continue; fi
         ;;
+      # ===== `DEFERRED`: THE SAME COUPLED STATE, NOT A SECOND TEST OF IT (#3626) =====
+      # `findings:` is excluded from this loop (its affirmative value is `NONE`, not `PASS`) and is the
+      # only key that carries `DEFERRED` today — so this arm is a STRUCTURAL backstop for a future key
+      # that acquires the token. It reads `deferral_admits`, the same variable the grammar scan and the
+      # findings gate read, so the grammar and the backstop cannot drift apart into two opinions about
+      # whether one authorization was granted. Re-deriving the provenance here would BE that drift.
+      DEFERRED)
+        if [ "$deferral_admits" -eq 1 ]; then continue; fi
+        ;;
     esac
     not_affirmed="${not_affirmed:+$not_affirmed; }$det_key: '$det_value'"
   done
@@ -1430,8 +1595,11 @@ if [ "$failed" -eq 0 ]; then
     DETAILS+=("ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — $not_affirmed. A PASS must rest on POSITIVE evidence from every deterministic check (push-assert, census-check, code-free, sha-assert, review-completed, prompt-content); a non-failing value that is not a measurement — 'SKIP' above all, which means the check NEVER RAN — is exactly the vacuous pass this wrapper exists to prevent, and it is textually indistinguishable from a genuine one. Failing closed. This is a structural backstop, so its cause is a defect in the wrapper or its sourced files (a check that returned before assigning its key), NOT something to fix in the branch under review.")
   fi
 fi
+if [ -n "$ungranted_deferral" ]; then
+  DETAILS+=("ERROR: verdict-grammar: a per-check key reports a DEFERRED state that the deferral oracle did not affirmatively GRANT: $ungranted_deferral. DEFERRED is non-failing ONLY on a complete, matching authorization — a top-level PR comment from an allowlisted author, whose SOLE NONBLANK CONTENT names THIS base, head and job, whose authorized count EQUALS the count this run observed, and each of whose named issues is retrievable and referenced from the PR body — and only on --recheck-job. Deferral state for this run: ${DEFERRAL_REPORT:-<none looked for>}. Failing closed: a DEFERRED token that no authorization backs is indistinguishable from an authorized one to every reader of this block, which is the false-assurance shape this wrapper exists to prevent.")
+fi
 if [ -n "$unrecognised" ]; then
-  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / WAIVED / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper), introduced a state this scan has never judged, or glued extra characters onto a recognised token (the token is matched EXACTLY, up to the value's first space, so 'PASSthisNeverRan' is unrecognised rather than a pass) — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
+  DETAILS+=("ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: $unrecognised. Every key must report one of FAIL / FINDINGS / ERROR / INCONSISTENT (failing) or PASS / WAIVED / SKIP / NOTICE / UNAVAILABLE / DEGRADED / NONE / PRESENT / UNKNOWN (non-failing), or DEFERRED (non-failing ONLY on an affirmatively granted deferral). An unrecognised value means a check did not reach an assignment (an early return, an aborted helper), introduced a state this scan has never judged, or glued extra characters onto a recognised token (the token is matched EXACTLY, up to the value's first space, so 'PASSthisNeverRan' is unrecognised rather than a pass) — so the run FAILs closed rather than letting the unplanned value inherit the non-failing branch. An EMPTY value ('') is this same defect with nothing to print. Fix the check that produced it; do not add the value to the recognised set without deciding what it MEANS for the verdict.")
 fi
 
 if [ "$failed" -eq 0 ]; then
