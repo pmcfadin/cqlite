@@ -691,35 +691,24 @@ impl V5CompressedLegacyParser {
             // this rule, so the justification lives there too.
             let (schema_key_type, schema_value_type) = self.extract_map_types(&column.data_type)?;
             let marshal_map_elements = Self::extract_marshal_collection_elements(complex_type);
-            let (marshal_key, marshal_value) = match &marshal_map_elements {
-                Some(MarshalCollectionElements::Map(k, v)) => (Some(*k), Some(*v)),
-                _ => (None, None),
+            let marshal_key = match &marshal_map_elements {
+                Some(MarshalCollectionElements::Map(k, _v)) => Some(*k),
+                _ => None,
             };
             // ONE shared rule, `map_key_type_for_decode` — see its doc. It picks the
             // same string the FROZEN map reader receives, so both decode identically
             // and key parity holds by construction rather than by a value-level
             // wrapper fixup on this side (roborev round 8, finding 1).
             let key_type = Self::map_key_type_for_decode(marshal_key, &schema_key_type);
-            // DECLARED GAP — THE VALUE HALF IS EXERCISED BY NO TEST AT ANY TIER.
-            // Stated affirmatively, not left silent: a green gate over this line would
-            // read as coverage and is not. The question is never whether a line is
-            // right, it is WHICH LANE EXECUTES IT, and here the answer is none.
-            //
-            // MEASURED over the committed schemas, with the detector proved against
-            // planted positives first so its "no" is evidence and not a broken parse:
-            // the corpus has 5 multicell `map<..>` columns (`mm`, `m_list_vals`, `cm`,
-            // `tm`, `m_tuple_udt`), 3 UDT-bearing on the KEY and 0 on the VALUE (value
-            // types: `int`, `frozen<list<int>>`, `int`, `int`, `int`). So this returns
-            // the schema form for every map value that exists, and is observably inert.
-            //
-            // Kept, not removed: removing it would leave KEY selection on the marshal
-            // and VALUE selection on the schema, an asymmetry that is itself a latent
-            // defect and one nobody would find, since no fixture reaches either side.
-            // Same justification as the key half (see `map_key_type_for_decode`). What
-            // closes it is a UDT-VALUED multicell map fixture (`map<text,
-            // frozen<collide>>`); the corpus has none.
-            let value_type =
-                Self::prefer_udt_marshal_element(marshal_value, &schema_value_type).to_string();
+            // VALUE type selection stays on the SCHEMA form, exactly as before R7. R7's
+            // marshal preference was widened to the value half too, but MEASURED over the
+            // committed corpus it was a strict no-op -- 5 multicell `map<..>` columns, 3
+            // UDT-bearing on the KEY and 0 on the VALUE -- so it shipped a behaviour change
+            // no lane executed. Removing it restores the pre-R7 status quo rather than
+            // creating an asymmetry (value selection was on the schema form all along);
+            // the key half's marshal preference is justified separately in
+            // `map_key_type_for_decode`'s doc. #3612 is about KEYS.
+            let value_type = schema_value_type;
             let mut entries = Vec::with_capacity(prealloc_cap);
             // Issue #3612 (roborev round 8, finding 2): count the entries whose key
             // could not be modelled, and report ONCE below. The decoder used to
