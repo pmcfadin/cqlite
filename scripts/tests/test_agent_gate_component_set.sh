@@ -546,6 +546,12 @@ mkgitshim() {
       # other shims cannot produce: 64 lowercase hex characters and `refs/heads/main`, i.e. a
       # value the old grammar ACCEPTED. It must be refused, because the isolated scratch
       # repository is created in git's default object format and could not read it.
+      # HANG ONLY AT `--is-shallow-repository`, so the earlier probes succeed and execution
+      # actually REACHES `_component_set_is_shallow` (roborev job 314 asked for exactly this
+      # coverage). A blocking config include cannot express it: it would stop the FIRST
+      # repository read, and the probe would refuse before this helper is ever called.
+      hang-is-shallow)
+        printf 'for a in "$@"; do if [ "$a" = --is-shallow-repository ]; then sleep 90; fi; done\n' ;;
       lsremote-sha256)
         printf 'for a in "$@"; do if [ "$a" = ls-remote ]; then printf "%%s\\t%%s\\n" "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "refs/heads/main"; exit 0; fi; done\n' ;;
       *) echo "FATAL: mkgitshim: unknown mode '$mode'" >&2; exit 1 ;;
@@ -697,6 +703,48 @@ else
       bad "3544-config-include-blocks: expected KIND repo-read-blocked, got '$fifo_kind'"
       printf '%s\n' "$fifo_out" ;;
   esac
+fi
+
+# ---------------------------------------------------------------------------
+# 3a-iv-ter. THE SHALLOWNESS PROBE IS BOUNDED TOO (roborev job 314, Medium) — the job-312 class in
+#     a helper the job-312 fix did not reach. That fix converted the four live-repository calls in
+#     the probe BODY; `_component_set_is_shallow` is defined ABOVE the body, so the enumeration
+#     window that found the four could not see its two. Patching the reported sites and stopping
+#     would have been defensible and wrong; a SWEEP of the whole file is what found them.
+#
+#     REACHING THE HELPER IS THE HARD PART, and it is why this case uses a git shim rather than a
+#     config include: the helper is consulted ONLY when `merge-base --is-ancestor` answers rc 1, so
+#     the fixture must be BEHIND — and a blocking `include.path` would stop the FIRST repository
+#     read, refusing long before this code runs. The shim hangs on `--is-shallow-repository`
+#     ALONE, so every earlier probe succeeds.
+#
+#     RUN UNDER THE LITE BOUND ON PURPOSE: 15s lenient vs 120s strict. The property under test is
+#     "this read is bounded at all", which either bound demonstrates, and a case that costs two
+#     minutes to prove a 15-second fact is a case people delete.
+#
+#     AND THE REFUSAL IS NAMED IN THE PARENT. The helper runs inside `$( … )`, so it cannot set
+#     `_CS_KIND` — it prints a fourth token and the caller converts it. Mapping the blocked read
+#     onto `unknown` would also have been fail-closed, but it would have blamed "shallowness could
+#     not be determined" for a poisoned config: a true refusal with a misleading cause.
+# ---------------------------------------------------------------------------
+sh_bin=$(mkgitshim hang-is-shallow hang-is-shallow)
+sh_ctl=$( fx "$behind" && bash "$behind/scripts/agent-gate.sh" --component-set-line lite 2>/dev/null )
+if [ "$(field KIND "$sh_ctl")" != ok ]; then
+  bad "3544-is-shallow-bounded: the POSITIVE CONTROL (same BEHIND fixture, no shim, lite) did not reach KIND ok (got '$(field KIND "$sh_ctl")') — the case cannot discriminate"
+else
+  sh_t0=$(date +%s)
+  sh_out=$( fx "$behind" && PATH="$sh_bin:$PATH" bash "$behind/scripts/agent-gate.sh" \
+              --component-set-line lite 2>/dev/null )
+  sh_el=$(( $(date +%s) - sh_t0 ))
+  sh_kind=$(field KIND "$sh_out")
+  sh_line=$(field COMPONENT_SET_LINE "$sh_out")
+  if [ "$sh_kind" = repo-read-blocked ] && [ "$sh_el" -lt 80 ] \
+     && grep -q 'SHALLOW' <<<"$sh_line" && grep -q 'include.path' <<<"$sh_line"; then
+    ok "3544-is-shallow-bounded: a hanging shallowness probe is BOUNDED and refused by name (repo-read-blocked in ${sh_el}s, well inside the shim's 90s sleep), and the detail names both the shallow decision and the include.path mechanism"
+  else
+    bad "3544-is-shallow-bounded: expected KIND repo-read-blocked well under the shim's 90s sleep (got '$sh_kind' in ${sh_el}s) — an unbounded read here would have run to the shim's sleep"
+    printf '%s\n' "$sh_out"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -4603,7 +4651,7 @@ fi
 # and `unrelated` arms of `3544-preflight-in-window`). Lowered by EXACTLY the four removed, so the
 # floor keeps the same slack it was written with: it still catches a DELETION without being an
 # equality nobody can add a case past.
-CASE_FLOOR=108
+CASE_FLOOR=109
 if [ "$PASS" -lt "$CASE_FLOOR" ] && [ "$FAIL" -eq 0 ]; then
   printf 'FAIL - 3544-case-floor: %d cases ran but this suite declares a floor of %d — cases were REMOVED (or are skipping) without the floor being lowered deliberately. A green tally over a shrunken suite is the exact defect #3544 is about.\n' "$PASS" "$CASE_FLOOR"
   FAIL=$((FAIL + 1))

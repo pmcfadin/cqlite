@@ -4071,16 +4071,33 @@ _component_set_declaration_at_rev() {
 # capability could not be measured. Two independent readings, because
 # `--is-shallow-repository` is git >= 2.15 and this script supports older hosts: the command
 # first, then the `shallow` FILE, and only then `unknown`.
+# A FOURTH VALUE, `blocked`, AND WHY IT IS PRINTED RATHER THAN SET (roborev job 314). Both reads
+# below were UNBOUNDED live-repository calls — the job-312 class, in a helper the job-312 fix did
+# not reach, because that fix enumerated the probe BODY and this helper is defined above it. I
+# patched the reported sites and did not SWEEP the file; the sweep is what found these.
+#
+# This helper is consumed as `$( … )`, i.e. IN A SUBSHELL, so it cannot set `_CS_KIND` — an
+# assignment there dies with the subshell, which is the same fact that leaked capture files one
+# round ago. Its only channel to the parent is STDOUT, so a blocked read is a fourth PRINTED
+# token and the caller (which runs in the parent) turns it into the named refusal. Mapping it onto
+# `unknown` would have been fail-closed too, but it would report "shallowness could not be
+# determined" for a poisoned config — a true refusal with a misleading cause, which is the thing
+# this pre-flight keeps ruling against.
 _component_set_is_shallow() {
-  local out sf
-  # local-only: reads repository state; no object access, no remote contact.
-  out=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null || true)
-  case "$out" in
+  local sf
+  _cs_live_git -C "$REPO_ROOT" rev-parse --is-shallow-repository
+  case "$_CS_LIVE_STATE" in
+    blocked|unboundable) printf blocked; return 0 ;;
+  esac
+  case "$_CS_LIVE_OUT" in
     true)  printf yes; return 0 ;;
     false) printf no;  return 0 ;;
   esac
-  # local-only: resolves a path INSIDE the git dir (no object read, no network).
-  sf=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" rev-parse --git-path shallow 2>/dev/null || true)
+  _cs_live_git -C "$REPO_ROOT" rev-parse --git-path shallow
+  case "$_CS_LIVE_STATE" in
+    blocked|unboundable) printf blocked; return 0 ;;
+  esac
+  sf="$_CS_LIVE_OUT"
   if [ -n "$sf" ]; then
     if [ -s "$sf" ]; then printf yes; else printf no; fi
     return 0
@@ -4402,6 +4419,20 @@ _component_set_probe_inner() {
   # is cheap, and a stale copy would be a second source of truth for the one thing this
   # function exists to control.
   _component_set_build_git_env
+
+  # THE CAPTURE TRIPLE IS OWNED BY THE PARENT, STRUCTURALLY — NOT BY LUCK OF ORDERING (job 314).
+  # `_cs_live_git` creates it on first use, and that was safe only because the first such call
+  # happens here in the probe body. But `_component_set_is_shallow` is consumed as `$( … )`, so a
+  # `_cs_live_git` reached through it runs in a SUBSHELL: if the triple did not already exist, its
+  # three `mktemp` files would be created there and survive with nobody holding their paths — the
+  # exact leak `3544-signal-cleanup` measured one round ago. Relying on "the parent happens to go
+  # first" is the ordering argument I criticised in the pre-existing `err=$( … fetch … )` site, so
+  # it is made explicit instead: create it ONCE, HERE, before any subshell can.
+  if ! _component_set_capture_paths; then
+    _CS_KIND=unboundable
+    _CS_DETAIL="no capture file could be created for a bounded run (mktemp failed under \${TMPDIR:-/tmp}) — refusing to run an UNBOUNDED read of this repository, which could hang the gate outright"
+    return 0
+  fi
 
   local err rc
   if ! command -v git >/dev/null 2>&1; then
@@ -5056,6 +5087,13 @@ _component_set_probe_inner() {
        # and never a permissive default for a host whose state could not be measured.
        shallow="$(_component_set_is_shallow)"
        case "$shallow" in
+         # THE BLOCKED READ IS NAMED HERE, IN THE PARENT (job 314). The helper runs in a subshell
+         # and cannot set `_CS_KIND`; this is the first frame that can, so the poisoned config is
+         # reported as itself rather than as an unmeasurable shallowness.
+         blocked)
+           _CS_KIND=repo-read-blocked
+           _CS_DETAIL="deciding whether $REPO_ROOT is a SHALLOW clone required reading its repository state, and that read EXCEEDED its ${_CS_BOUND_HINT}s bound — the read never returned. Every git command reads the repository config, and an \`include.path\` there naming a FIFO or other blocking file hangs it; on this fleet that config is SHARED by every lane on the box. Inspect it with \`git config --show-origin --get-all include.path\`"
+           return 0 ;;
          no) _CS_ANCESTOR=no ;;
          yes) _CS_ANCESTOR=unknown
               _CS_DETAIL="git merge-base --is-ancestor ${_CS_SHA} <HEAD> answered 'not an ancestor', but this is a SHALLOW clone, where that answer is indistinguishable from 'the connecting history is absent' — remedy: git fetch --unshallow (then re-run)" ;;
