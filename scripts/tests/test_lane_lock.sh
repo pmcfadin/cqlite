@@ -979,5 +979,54 @@ else
 $out21c"
 fi
 
+# ===========================================================================
+echo "TEST 22: a DEGRADED identity is refused like an ephemeral one (roborev round 4)"
+# ===========================================================================
+# The rule is "never WRITE a record that cannot be re-identified", and the guard checked
+# only pid-scope=ephemeral. A record whose boot-id or start-ticks could not be captured is
+# the same thing: UNKNOWN-* forever, refusing every later acquire including its own
+# holder's, clearable only by --force/reclaim. An earlier round ACCEPTED this as a
+# residual, which contradicted the principle adopted one fix later.
+#
+# Reachable deterministically with an explicit --pid whose /proc entry vanishes between
+# argument validation and identity capture. Simulated the only way that does not need a
+# test-only seam: a pid that is live at validation and gone at capture is a race we cannot
+# schedule, so instead assert the GUARD's own contract directly — a pid with no readable
+# start-ticks must not produce a record. `--pid 1` is live and readable, so it is the
+# control; a KERNEL thread pid is live with a readable stat, so also unsuitable. What we
+# CAN do without a seam: prove the guard is not a refuse-everything guard (a live explicit
+# --pid still captures both fields and writes a healthy record), and prove the EPHEMERAL
+# refusal writes nothing and names its own cause. The DEGRADED branch itself is covered by
+# INSPECTION ONLY and this suite says so rather than implying otherwise — an unreadable
+# boot-id or start-ticks for a LIVE pid cannot be produced on a /proc host without a
+# test-only seam, which doctrine forbids (#3312: substitute the artifact, never add a path
+# variable). Tracked with the other inspection-only verdicts in the #3436 follow-up.
+LANE_970="$LANES/lane-970"; mkdir -p "$LANE_970"
+sleep 300 & DG=$!
+ll acquire 970 --pid "$DG" --lane-dir "$LANE_970"; rc22a=$RC
+REC970="$LANES/.lane-locks/lane-970.lock"
+if [ "$rc22a" -eq 0 ] && [ -f "$REC970" ] \
+   && grep -q '^boot-id=..*' "$REC970" && grep -qE '^start-ticks=[0-9]+' "$REC970"; then
+  ok "(a) control: a live explicit --pid DOES capture both boot-id and start-ticks, so the refusal below is not a refuse-everything guard"
+else
+  bad "(a) expected a healthy record with boot-id and start-ticks for a live --pid; got rc=$rc22a
+$(cat "$REC970" 2>/dev/null)"
+fi
+kill "$DG" 2>/dev/null || true
+
+# (b) The DEGRADED refusal must be textually distinct from the EPHEMERAL one, so a reader
+# is sent to the right remedy: "run from inside the lane / pass --pid" is useless advice
+# when the problem is that /proc could not be read at all.
+ll acquire 971 --lane-dir "$LANES/lane-971"; rc22b=$RC; out22b=$OUT
+if [ "$rc22b" -eq 1 ] && printf '%s' "$out22b" | grep -q 'reason=unresolved-identity' \
+   && printf '%s' "$out22b" | grep -q 'detail=no-durable-session-process' \
+   && printf '%s' "$out22b" | grep -q 'NOTHING WAS WRITTEN' \
+   && [ ! -f "$LANES/.lane-locks/lane-971.lock" ]; then
+  ok "(b) the EPHEMERAL refusal names its own cause (detail=no-durable-session-process), writes nothing, and exits 1. NOT ASSERTED HERE: the DEGRADED branch (detail=degraded-process-identity) — it needs an unreadable boot-id or start-ticks for a live pid, which is not producible on a /proc host without a test-only seam, so it is covered by inspection only, like UNKNOWN-STATE and UNKNOWN-NO-PROC"
+else
+  bad "(b) expected reason=unresolved-identity detail=no-durable-session-process exit 1 with no record; got rc=$rc22b
+$out22b"
+fi
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

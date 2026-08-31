@@ -136,6 +136,10 @@ On start, BEFORE anything else: `git fetch origin`, then check whether this mach
   lane directory, so an acquire from elsewhere can name no durable owner and is refused with
   `reason=unresolved-identity` (#3436 FIX 5). An `OCCUPIED` refusal names the
   occupant, and you STOP rather than edit a lane a live process owns.
+- **Resuming → take the board OFF `Ready` too, not just the claim ref (#3436 AC6).** The ref stops a
+  session that reads the ref; the board is what a session reads FIRST, and #3393 ran 20+ commits with
+  no ref while the board advertised the issue as available. Point-read it with a filtered
+  `item-list --query 'status:Ready'` and set Status=In Progress if it is still there.
 - **Not held → fresh start**: claim per worker.md step 3, then route (oracle-driven → straight to
   implement; design-driven → `flow-activate` to Seam 1, render the spec INLINE in an issue comment
   as the approval request, then Delta 3). The spec render and the coord request are **ONE combined

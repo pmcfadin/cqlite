@@ -767,7 +767,24 @@ lane_lock_probe() {
           # `occupied-alive` there is a false accusation on a routine path — claim.sh
           # normally runs from the ROOT checkout, where no durable in-lane process exists
           # — so the undetermined case gets its OWN state and says so.
-          if lane_lock_identity_established; then
+          # ...AND "SOMEONE ELSE" IS A PID/START-TICKS DIFFERENCE, NOT A TOKEN ONE
+          # (#3436, roborev round 4). The evidence ladder below was fixed for this and
+          # THIS SITE WAS MISSED — two places classifying one fact, which is the same
+          # miss shape as probe/verify-vs-release and the CAS-vs-re-entrant compare. A
+          # same-process actor change reached `occupied-alive` here and emitted the
+          # "do NOT write in that lane directory" warning about the caller's OWN process.
+          if lane_lock_identity_established \
+             && [ -n "$LANE_LOCK_HOLDER_PID" ] && [ -n "$LANE_LOCK_OUR_PID" ] \
+             && [ "$LANE_LOCK_HOLDER_PID" = "$LANE_LOCK_OUR_PID" ] \
+             && [ -n "$LANE_LOCK_HOLDER_TICKS" ] && [ -n "$LANE_LOCK_OUR_TICKS" ] \
+             && [ "$LANE_LOCK_HOLDER_TICKS" = "$LANE_LOCK_OUR_TICKS" ]; then
+            # Demonstrably OUR process, under a different actor. Not `self` (the actor
+            # gates verify/release, so we do not hold it as the actor we are claiming
+            # with) and provably not a peer. Naming it either way exceeds the measurement.
+            LANE_LOCK_STATE="self-other-actor"
+          elif lane_lock_identity_established \
+             && [ -n "$LANE_LOCK_HOLDER_PID" ] && [ -n "$LANE_LOCK_OUR_PID" ] \
+             && [ -n "$LANE_LOCK_HOLDER_TICKS" ] && [ -n "$LANE_LOCK_OUR_TICKS" ]; then
             LANE_LOCK_STATE="occupied-alive"
           else
             LANE_LOCK_STATE="occupied-alive-unattributed"
@@ -799,6 +816,14 @@ lane_lock_probe() {
       # to ignore the warning, and AC5 asks for a warning about an occupied lane,
       # which a self-held lane is not.
       note "lane-lock: the lane directory is held by THIS session (liveness=SELF) — $LANE_LOCK_HOLDER"
+      ;;
+    self-other-actor)
+      # Our own PROCESS, under a different actor. Not the alarming occupancy warning —
+      # the occupant is us — but not silent either, because the actor gates
+      # verify/release: this run cannot release that lock as the actor it is claiming
+      # with, which is a real thing to know and not an accusation.
+      note "lane-lock: the lane directory is held by THIS PROCESS under a DIFFERENT actor (holder-actor=${LANE_LOCK_HOLDER_ACTOR:-unstated}) — $LANE_LOCK_HOLDER"
+      note "lane-lock: not a peer, and not 'self' either: the actor is part of holder identity, so 'lane-lock.sh verify/release' as the actor you are claiming with will NOT match this lock. Use --actor ${LANE_LOCK_HOLDER_ACTOR:-<the holder actor>} for those, or release and re-acquire under one actor. The claim verdict below is unaffected."
       ;;
   esac
   case "$LANE_LOCK_STATE" in

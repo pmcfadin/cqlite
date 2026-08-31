@@ -1005,7 +1005,7 @@ s21c2=$(printf '%s\n' "$out21c2" | grep -o 'lane-lock=[^ ]*' | head -1)
 uniq_states=$(printf '%s\n%s\n%s\n%s\n%s\n' "$s21a" "$s21b" "$s21c" "$s21c2" "$s21f" | sort -u | grep -c .)
 if [ -n "$s21a" ] && [ -n "$s21b" ] && [ -n "$s21c" ] && [ -n "$s21c2" ] && [ -n "$s21f" ] \
    && [ "$uniq_states" -eq 5 ]; then
-  ok "(g) AC5 control: the five lane states are five DISTINCT values ($s21a / $s21b / $s21c / $s21c2 / $s21f)"
+  ok "(g) AC5 control: the lane states measured here are all DISTINCT values ($s21a / $s21b / $s21c / $s21c2 / $s21f)"
 else
   bad "(g) expected five distinct lane-lock states; got '$s21a' '$s21b' '$s21c' '$s21c2' '$s21f' (uniq=$uniq_states)"
 fi
@@ -1255,6 +1255,43 @@ else
 $out22k2"
 fi
 kill "$OCC47" 2>/dev/null || true
+
+# (l) THE AC5 STATE MAPPING HAD THE SAME ACTOR BUG AS THE EVIDENCE LADDER (round 4).
+# Two sites classified one fact and only the ladder was fixed, so a same-process actor
+# change still reported `lane-lock=occupied-alive` and emitted the "do NOT write in that
+# lane directory" warning about the caller's OWN process. Same miss shape as
+# probe/verify-vs-release and the CAS-vs-re-entrant compare, which is why this asserts the
+# STATE and the NOTE, not just the verdict.
+push_legacy_branch 48
+LANE_LOCK_PID=$$ bash "$LANELOCK" acquire 48 --actor flow >/dev/null 2>&1
+rc=0; out22l=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ CLAIM_ACTOR=other bash "$CLAIM" claim 48 --actor other 2>"$T/err22l" ) || rc=$?
+err22l=$(cat "$T/err22l" 2>/dev/null)
+if printf '%s\n' "$out22l" | grep -q 'lane-lock=self-other-actor' \
+   && ! printf '%s\n' "$out22l" | grep -q 'lane-lock=occupied-alive' \
+   && printf '%s\n' "$err22l" | grep -q 'DIFFERENT actor' \
+   && ! printf '%s\n' "$err22l" | grep -q 'ALREADY OCCUPIED'; then
+  ok "(l) AC5/round-4: our own PROCESS under another actor is lane-lock=self-other-actor, NOT occupied-alive, and the note does not warn about a peer"
+else
+  bad "(l) expected lane-lock=self-other-actor and no ALREADY OCCUPIED note; got rc=$rc
+$out22l
+--- stderr ---
+$err22l"
+fi
+
+# (l2) POSITIVE CONTROL: a genuinely different live process still reports occupied-alive.
+push_legacy_branch 49
+sleep 900 &
+OCC49=$!
+LANE_LOCK_PID=$OCC49 bash "$LANELOCK" acquire 49 >/dev/null 2>&1
+rc=0; out22m=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 49 2>/dev/null ) || rc=$?
+if printf '%s\n' "$out22m" | grep -q 'lane-lock=occupied-alive' \
+   && ! printf '%s\n' "$out22m" | grep -q 'self-other-actor'; then
+  ok "(l2) control: a DIFFERENT live pid still reports lane-lock=occupied-alive — so (l) is not satisfied by never reporting occupancy"
+else
+  bad "(l2) expected lane-lock=occupied-alive for a different live pid; got
+$out22m"
+fi
+kill "$OCC49" 2>/dev/null || true
 
 # (j) COMPOSED EVIDENCE — rungs (b) AND (c) fire together (implementer residual 3).
 # Reachable and previously untested: a LIVE LOCAL peer holds the lane lock AND the lane

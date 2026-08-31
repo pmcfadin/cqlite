@@ -40,6 +40,19 @@ Resolve them in the worktree and reply per thread.
    cd <worktree> || exit 1
    bash scripts/flow/lane-lock.sh acquire <N> --lane-dir "$PWD" || exit 0
    ```
+   **AND TAKE THE BOARD OFF `Ready` IN THE SAME BREATH (#3436 AC6).** Re-acquiring the claim
+   closes the window for a session that reads the *ref*; the board is what a session reads
+   *first*. #3393 ran 20+ commits with no claim ref **while the board advertised the issue as
+   available**, so a well-behaved peer doing exactly what doctrine says — read the board, take a
+   `Ready` item — would have collided, and the claim ref could not stop it because no ref existed.
+   ```bash
+   gh project item-list 1 --owner pmcfadin --query 'status:Ready' --format json -L 100 \
+     --jq '.items[]|select(.content.number==<N>)|.id'      # empty => already off Ready
+   # still Ready? set board Status=In Progress -- board Status ONLY, never a status:* label,
+   # which the #2855 mirror owns and will revert.
+   ```
+   `advertised-collision-scan.sh` reports exactly this shape (Ready + a pushed branch + no claim
+   ref), so leaving it unfixed on resume is a row someone else has to chase.
    A `released-then-resumed` refusal is NOT a stale lock and NOT an abandoned peer lane — it means the
    lane lock holds THIS SESSION's own token; take the documented `adopt --expect none --reason <why>`
    path. A `lane-occupied-by-live-peer` refusal is its opposite: a DIFFERENT live process on this box is

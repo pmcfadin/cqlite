@@ -1007,6 +1007,19 @@ prepare_identity() {
 # process with --pid.
 require_durable_identity() {
   local sub="$1"
+  # DEGRADED IDENTITY IS THE SAME DEFECT AS AN EPHEMERAL ONE, AND THIS CHECKED ONLY THE
+  # LATTER (#3436, roborev round 4). The rule is "never WRITE a record that cannot be
+  # re-identified" — and a record whose boot-id or start-ticks could not be captured is
+  # exactly that: it evaluates `UNKNOWN-*` forever, refuses every later acquire including
+  # its own holder's, and is clearable only by `release --force` / `reclaim`. Rejecting
+  # `ephemeral` alone left two live paths to it: an explicit `--pid` on a host without
+  # `/proc` (deterministic), and a process exiting between argument validation and
+  # identity capture (a race). An earlier round ACCEPTED this as a residual, which was
+  # inconsistent with the principle adopted one fix later; this closes it.
+  if [ -z "${G_BOOT:-}" ] || [ -z "${G_TICKS:-}" ]; then
+    emit "ERROR reason=unresolved-identity detail=degraded-process-identity sub=$sub issue=$G_ISSUE pid=$G_PID pid-scope=$G_SCOPE boot-id=${G_BOOT:-<unreadable>} start-ticks=${G_TICKS:-<unreadable>} (NOTHING WAS WRITTEN. A lock records boot-id + /proc/<pid>/stat start-ticks so the holder can be re-identified exactly; neither could be read for this pid, so any record written now would evaluate UNKNOWN-* forever and refuse every later acquire — including yours. Causes: a host without /proc (this lock is Linux-specific), or a pid that exited between validation and capture. Remedies: name a live durable process with '--pid <pid>' on a /proc host, or do not take a lane lock on this platform — the cross-machine control is refs/claims/issue-<N> via claim.sh, which needs no /proc) lane-dir=$G_LANE"
+    return 1
+  fi
   [ "$G_SCOPE" = "ephemeral" ] || return 0
   emit "ERROR reason=unresolved-identity detail=no-durable-session-process sub=$sub issue=$G_ISSUE pid-scope=$G_SCOPE candidate-pid=$G_PID (NOTHING WAS WRITTEN. This lock records the HOLDER's full process identity, and the only process it could find here is THIS invocation's own shell, which exits when this command returns. A record naming it reads UNKNOWN-EPHEMERAL forever, and every UNKNOWN-* refuses — including YOUR OWN later acquire — so writing it would BRICK the lane rather than lock it. Two corrections, both one line: (1) run this from a shell whose cwd is INSIDE the lane directory, which is what makes the long-lived session process findable — 'cd <lane-dir> && lane-lock.sh $sub $G_ISSUE'; or (2) name the durable process explicitly with '--pid <pid>'. If you are at worktree-CREATION time, do not acquire at all: the session is not in the lane yet, so no durable owner exists — the lock belongs to the session that works IN the lane) lane-dir=$G_LANE"
   return 1
