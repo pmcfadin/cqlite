@@ -2251,6 +2251,27 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # pin_scope_note: what VERIFIED does NOT cover. Printed with the verdict, not buried in
   # a doc, because an unqualified VERIFIED reads as "gates on this box are pinned" and the
   # probe cannot see a gate launched from a non-PAM parent (#3414 review B2).
+  # pin_scope_note: what VERIFIED does and does NOT cover.
+  #
+  # A CHECK USED TO LIVE HERE AND WAS DELETED ON PURPOSE (#3414 round 7). It parsed
+  # /etc/pam.d/{sshd,login} and downgraded a would-be VERIFIED when those stacks did not
+  # appear to read this file. Do not helpfully reintroduce it. Four reasons it went:
+  #   * it accumulated two defects in two review rounds, both invisible on the happy path
+  #     (its result assigned inside `$( )` so an unreadable config silently passed; then a
+  #     substring match on `pam_env.so` that a comment or another module's args satisfied);
+  #   * IT WAS CONFIG INSPECTION STANDING IN FOR RUNTIME BEHAVIOUR — reading a file to
+  #     infer what a session will receive is the proxy reasoning this whole section exists
+  #     to remove, and it was only ever admissible because it could not create a pass;
+  #   * what it approximated is measured DIRECTLY, every run, by the gate itself:
+  #     `cpu-budget: max-concurrency=N(pinned)` is the actual resolved cap of the actual
+  #     gate, not an inference about one;
+  #   * the only remaining fix was to make anything unparseable WEAKEN — but a weaken is
+  #     non-passing, non-passing fails --strict, and --strict is what verify.run uses, so a
+  #     PAM layout we could not parse would have failed ONBOARDING for that box. Exactly
+  #     one layout has ever been validated.
+  # The residual it addressed is therefore DOCUMENTED, not measured, and the honest text
+  # below says so. Settling it needs a runtime probe of the real launch path, not a better
+  # parser.
   pin_scope_note() {
     # What the correlation DOES buy: the line is in the system-wide file pam_env reads in
     # every PAM stack (sshd, login, su, sudo), so the claim is not limited to the one
