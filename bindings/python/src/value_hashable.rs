@@ -19,9 +19,10 @@
 //! `bindings/python/tests/test_nested_udt_hashable.py` POINT here and assert no
 //! routing of their own. That is not tidiness: the fact was restated in every
 //! file that mentioned it and DRIFTED in all but one — wrong in four places in
-//! the test file (roborev job 245) and then in the two fixture headers (job
-//! 267), each time as the same over-broad "only the frozen maps reach it at
-//! all". It lives here because this is the file whose code decides the routing,
+//! the test file (#3500 review round 10) and then in both fixture headers
+//! (round 11, roborev job 267), each time as the same over-broad "only the
+//! frozen maps reach it at all".
+//! It lives here because this is the file whose code decides the routing,
 //! so the person who invalidates the claim is the person editing it. Same
 //! treatment, for the same reason, as the `Value::Json` reachability claim
 //! stated once at its own arm.
@@ -179,7 +180,10 @@ pub(crate) fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<P
             // nested UDT, so `set_to_py` routes that column to its `list`
             // branch and this arm is never reached for it. (PRE-fix that column
             // did reach a frozenset holding an unhashable element — that was the
-            // #3500 failure, and it is history, not current behaviour.)
+            // #3500 failure, and it is history, not current behaviour.) Which
+            // FIXTURE COLUMN takes which route is not restated here: it is in
+            // this module's ROUTING section, and this comment must stay
+            // consistent with it.
             let converted: Vec<PyObject> = items
                 .iter()
                 .map(|v| value_to_hashable_key(py, v))
