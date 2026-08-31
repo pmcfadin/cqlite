@@ -1442,17 +1442,19 @@ roborev_findings_deferral_lookup() {
   # operator actions, and a deferral pointing at nothing is a dropped finding wearing a link.
   # ONE GRANT IS UNDONE BY ANY FAILURE — the loop cannot leave a partial grant standing, because the
   # state is overwritten before the first failure returns.
-  local IFS_SAVE="$IFS"
-  IFS=','
-  # shellcheck disable=SC2086 # deliberate word split of the comma-separated issue list
-  set -- $ROBOREV_DEFERRAL_ISSUES
-  IFS="$IFS_SAVE"
-  if [ "$#" -eq 0 ]; then
+  # A STRUCTURAL BACKSTOP, unreachable through the marker pattern (`issues=` admits one or more
+  # integers, so a grant always carries at least one): the point of a backstop is not to depend on an
+  # upstream check still being there. An empty list would otherwise skip the loop entirely and leave a
+  # grant standing with NO recorded disposition — a deferral into a void.
+  if [ -z "$ROBOREV_DEFERRAL_ISSUES" ]; then
     ROBOREV_DEFERRAL_STATE="unavailable"
-    ROBOREV_DEFERRAL_DETAIL="the scanner granted without an issue list, which cannot happen through the marker pattern (issues= admits one or more integers); failing closed rather than granting a deferral with no recorded disposition"
+    ROBOREV_DEFERRAL_DETAIL="the scanner granted without an issue list, which cannot happen through the marker pattern; failing closed rather than granting a deferral with no recorded disposition"
     return 0
   fi
-  for issue in "$@"; do
+  # The list is comma-separated integers (the marker pattern guarantees the shape), so the commas are
+  # replaced with spaces and the default IFS does the split — no global IFS to save and restore, which
+  # is one fewer thing to leave broken on an early return.
+  for issue in ${ROBOREV_DEFERRAL_ISSUES//,/ }; do
     if ! (cd "$REPO" && gh issue view "$issue" --json number >/dev/null 2>&1); then
       ROBOREV_DEFERRAL_STATE="issue-unresolvable"
       ROBOREV_DEFERRAL_DETAIL="issue #$issue could not be retrieved ('gh issue view $issue' failed: it does not exist, is in another repository, or 'gh' could not reach it), so the disposition of a deferred finding rests on nothing. A deferral must name a FILED issue; fail-closed rather than deferring into a void"
