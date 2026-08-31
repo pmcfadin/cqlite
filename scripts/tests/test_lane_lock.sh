@@ -1556,6 +1556,17 @@ if [ -r "$FIN_SKILL" ]; then
   else
     bad "(a) finalize would release a lock after deleting the lane that proves who holds it: release=$ln_release cleanup=$ln_cleanup (release must come FIRST)"
   fi
+  # AND THE DOCUMENTED CALLER MUST USE THE ABA PROTECTION IT WAS GIVEN (#3436, roborev round 24).
+  # `release --expect` was added in round 21 and the finalize path still called `release <N>`
+  # bare, so a delayed or duplicated finalize could still delete a NEWER lock held by the same
+  # process. An option nobody passes fixes nothing in the flow that actually runs — the same
+  # shape as a fix that is only a message. Asserted on the OBSERVABLE text of the step.
+  if grep -q 'release <N> --expect' "$FIN_SKILL"; then
+    ok "(c) the documented finalize release passes --expect <lease>, so the ABA guard is actually used"
+  else
+    bad "(c) finalize still calls release without --expect — the option exists and the flow does not use it"
+  fi
+
   # AND THE FAILURE MUST STAY LOUD: `|| true` on the release is what turned the leak silent.
   # READ THE COMMAND, NOT THE LINE. The first version of this assertion grepped the whole line
   # for `|| true` and matched the COMMENT explaining its absence (`# NO \`|| true\`: a refused
@@ -1846,6 +1857,16 @@ out40="$(env -u LANE_LOCK_PID LANE_ROOT="$D40" bash "$LL" acquire 940 --lane-dir
 chmod 644 "$D40/.lane-locks/lane-888.lock" 2>/dev/null
 if [ "$rc40" -eq 0 ] && printf '%s' "$out40" | grep -q 'dir-guard=NOT-EXHAUSTIVE'; then
   ok "(a) an unreadable record does not block the acquire, and the ACQUIRED line DISCLOSES that the directory guard was partial"
+  # AND lane-dir MUST STILL BE THE LAST FIELD (round 17's contract, re-broken in round 23 by
+  # appending the caveat AFTER it — a to-end-of-line read then swallowed the guard text into the
+  # path). Asserted HERE, on the ACQUIRE line, because that is where the displacement happened;
+  # the same check on reclaim cannot red against pre-fix code, which had no caveat there at all.
+  got40="$(printf '%s' "$out40" | sed -n 's/.* lane-dir=\(.*\)$/\1/p' | head -1)"
+  if [ "$got40" = "$D40/lane40" ]; then
+    ok "(a2) lane-dir is still the LAST field on ACQUIRED with the caveat present"
+  else
+    bad "(a2) the caveat displaced lane-dir from the end: got '$got40' want '$D40/lane40'"
+  fi
 else
   bad "(a) rc=$rc40 — expected ACQUIRED carrying dir-guard=NOT-EXHAUSTIVE:
 $out40"
@@ -1866,6 +1887,40 @@ $out40b"
 fi
 kill "$P40B" 2>/dev/null || true
 rm -rf "$D40B"
+
+# ===========================================================================
+echo 'TEST 41: RECLAIM carries the same non-exhaustive-guard disclosure as acquire (round 24)'
+# ===========================================================================
+# Round 23 computed the caveat in ACQUIRE's wrapper only, so `reclaim` ran the same cross-issue
+# scan and minted a record with no disclosure. An expected-count assert had already forced me to
+# convert BOTH callers to the new calling convention, and I still wired the caveat into ONE — so
+# it is now computed where the COUNT is produced, inside the scan, and the two callers cannot
+# diverge. This case exists to keep them from diverging again.
+D41="$(mktemp -d)"; mkdir -p "$D41/.lane-locks" "$D41/lane41"
+printf 'version=1\nissue=887\n' > "$D41/.lane-locks/lane-887.lock"
+chmod 000 "$D41/.lane-locks/lane-887.lock" 2>/dev/null
+sleep 300 & P41=$!
+out41="$(env -u LANE_LOCK_PID LANE_ROOT="$D41" bash "$LL" reclaim 946 --lane-dir "$D41/lane41" --actor flow --pid "$P41" --expect none --reason round24-disclosure-on-reclaim 2>&1)"; rc41=$?
+chmod 644 "$D41/.lane-locks/lane-887.lock" 2>/dev/null
+if [ "$rc41" -eq 0 ] && printf '%s' "$out41" | grep -q 'dir-guard=NOT-EXHAUSTIVE'; then
+  ok "(a) RECLAIM discloses a partial directory guard, exactly as acquire does"
+else
+  bad "(a) reclaim minted a record with no disclosure: rc=$rc41
+$out41"
+fi
+# CONTRACT: lane-dir stays the LAST field even with the caveat present (round 17, re-broken in
+# round 23 by appending the guard AFTER it — a to-end-of-line read then swallowed the guard text).
+got41="$(printf '%s' "$out41" | sed -n 's/.* lane-dir=\(.*\)$/\1/p' | head -1)"
+# NOTE: unlike TEST 40(a2) this half CANNOT red-proof against pre-fix code — reclaim carried no
+# caveat there, so lane-dir was already last on its line. It guards the two paths from diverging
+# from here on, which is its purpose; TEST 40(a2) is the one that catches the original defect.
+if [ "$got41" = "$D41/lane41" ]; then
+  ok "(b) lane-dir is still the LAST field with the caveat present ('$got41')"
+else
+  bad "(b) the caveat displaced lane-dir from the end: got '$got41' want '$D41/lane41'"
+fi
+kill "$P41" 2>/dev/null || true
+rm -rf "$D41"
 
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

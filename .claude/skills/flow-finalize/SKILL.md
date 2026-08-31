@@ -169,7 +169,22 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    # having released nothing).
    # A lock left behind by a killed session is still not a leak: its holder reads DEAD-*
    # and the next acquire reclaims it automatically.
-   bash scripts/flow/lane-lock.sh release <N>   # NO `|| true`: a refused release is a LEAK, not noise
+   # PASS THE LEASE (#3436, roborev round 24). `release --expect` exists precisely so a DELAYED
+   # or DUPLICATED release cannot delete a NEWER lock: the five-component token is IDENTICAL
+   # across a release-and-reacquire by the same process, so only the lease (`<token>#<nonce>`,
+   # the record INCARNATION) tells the two apart. Adding the option and leaving the documented
+   # caller without it fixes nothing in the flow that actually runs — a second finalize, or a
+   # retried one, still deletes a live lock. Read the lease immediately before releasing; if the
+   # record changed in between, the CAS refuses, which is the point.
+   LEASE="$(bash scripts/flow/lane-lock.sh status <N> 2>/dev/null | grep -oE 'lease=[^ ]*' | head -1 | cut -d= -f2-)"
+   if [ -n "$LEASE" ]; then
+     bash scripts/flow/lane-lock.sh release <N> --expect "$LEASE"
+   else
+     # No lease means no record to protect — release plainly so a genuinely absent lock is still
+     # cleaned up. `--expect ''` is refused by design, so it must not be passed through.
+     bash scripts/flow/lane-lock.sh release <N>
+   fi
+   # NO `|| true` on either branch: a refused release is a LEAK, not noise
    # VERIFY, do not assume — `status` must report no record for this issue:
    bash scripts/flow/lane-lock.sh status <N>
    # confirm gone: `claim.sh status <N>` prints `CLAIM: STATUS none`.

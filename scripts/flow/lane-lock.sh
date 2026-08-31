@@ -1017,6 +1017,16 @@ same_dir_other_issue() {
       *) REPLY_SAME_DIR="$other|${REC_PID:-<none>}|${REC_ACQUIRED_TS:-<none>}"; return 0 ;;
     esac
   done
+  # SET THE DISCLOSURE HERE, NOT IN THE CALLER (#3436, roborev round 24). Round 23 computed it
+  # in acquire's wrapper only, so `reclaim` ran the same scan and minted a record with no caveat
+  # — I converted BOTH callers to the new calling convention (an expected-count assert forced
+  # that) and still wired the disclosure into ONE. Computing it where the count is produced makes
+  # the two callers unable to diverge, which is the only version of this that stays fixed.
+  if [ "${SAME_DIR_UNREADABLE:-0}" -gt 0 ]; then
+    G_DIR_GUARD=" dir-guard=NOT-EXHAUSTIVE(unreadable-records=$SAME_DIR_UNREADABLE; a live holder of this directory could be hidden behind one of them)"
+  else
+    G_DIR_GUARD=""
+  fi
   return 1
 }
 
@@ -1349,7 +1359,7 @@ _acquire_locked() {
           emit "OCCUPIED issue=$G_ISSUE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. The record protects the recorded directory only, so returning re-entrant here would advertise protection this lock does not provide. Release it under this issue first, or take the other directory under its own issue number.) lane-dir=$G_LANE"
           return 2
         fi
-        emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE${G_DIR_GUARD}"
+        emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
         return 0
         ;;
       DEAD-*)
@@ -1363,7 +1373,7 @@ _acquire_locked() {
           return 1
         fi
         append_audit "$G_LOG" "verdict=ACQUIRED-RECLAIMED issue=$G_ISSUE token=$G_TOKEN prev-token=$prev_token prev-liveness=$liveness reason=auto-reclaim-dead-holder"
-        emit "ACQUIRED (reclaimed) issue=$G_ISSUE $(self_fields) prev-liveness=$liveness prev-token=$prev_token record=$G_RECORD lane-dir=$G_LANE${G_DIR_GUARD}"
+        emit "ACQUIRED (reclaimed) issue=$G_ISSUE $(self_fields) prev-liveness=$liveness prev-token=$prev_token record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
         return 0
         ;;
       *)
@@ -1378,7 +1388,7 @@ _acquire_locked() {
     return 1
   fi
   append_audit "$G_LOG" "verdict=ACQUIRED issue=$G_ISSUE token=$G_TOKEN prev-token=<none> prev-liveness=<none> reason=free-lane"
-  emit "ACQUIRED issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE${G_DIR_GUARD}"
+  emit "ACQUIRED issue=$G_ISSUE $(self_fields) record=$G_RECORD${G_DIR_GUARD} lane-dir=$G_LANE"
   return 0
 }
 
@@ -1414,14 +1424,6 @@ cmd_acquire() {
       conflict="$REPLY_SAME_DIR"
       emit "OCCUPIED issue=$G_ISSUE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is already locked under a DIFFERENT issue by a live holder. The record is keyed by issue so readers need no path, but the DIRECTORY is what must not have two writers — so this refuses. If the other issue number is the mistake, fix the caller; if that lane is genuinely finished, release or reclaim it under ITS issue number.) lane-dir=$G_LANE"
       return 2
-    fi
-    # DISCLOSE A NON-EXHAUSTIVE DIRECTORY GUARD (#3436, roborev round 23). Exported so the
-    # emit sites can name it; empty when the scan read everything, so an ordinary ACQUIRED is
-    # unchanged and only a partial one carries the caveat.
-    if [ "${SAME_DIR_UNREADABLE:-0}" -gt 0 ]; then
-      G_DIR_GUARD=" dir-guard=NOT-EXHAUSTIVE(unreadable-records=$SAME_DIR_UNREADABLE; a live holder of this directory could be hidden behind one of them)"
-    else
-      G_DIR_GUARD=""
     fi
     with_lock 9 "$G_MUTEX" _acquire_locked
   }
@@ -1766,7 +1768,7 @@ _reclaim_locked() {
     # was unreachable: every re-entrant reclaim reported a mismatch. Two comparison sites
     # for one precondition is the bug; both now read `prev_lease`.
     if [ "$expect" = "$prev_lease" ]; then
-      emit "RECLAIMED (re-entrant) issue=$G_ISSUE $(self_fields) from=$expect lane-dir=$G_LANE"
+      emit "RECLAIMED (re-entrant) issue=$G_ISSUE $(self_fields) from=$expect${G_DIR_GUARD} lane-dir=$G_LANE"
     else
       # A DISTINCT VERDICT WORD (#3436 FIX 13i): the FIRST token is what a caller matches
       # on, and both this and a satisfied CAS exit 0 — so calling this one `RECLAIMED` made
@@ -1810,7 +1812,7 @@ _reclaim_locked() {
     return 1
   fi
   append_audit "$G_LOG" "verdict=RECLAIMED issue=$G_ISSUE token=$G_TOKEN prev-token=${prev_token:-<none>} prev-liveness=$liveness reason=$reason"
-  emit "RECLAIMED issue=$G_ISSUE $(self_fields) from=$expect prev-token=${prev_token:-<none>} prev-liveness=$liveness reason=$reason lane-dir=$G_LANE"
+  emit "RECLAIMED issue=$G_ISSUE $(self_fields) from=$expect prev-token=${prev_token:-<none>} prev-liveness=$liveness reason=$reason${G_DIR_GUARD} lane-dir=$G_LANE"
   return 0
 }
 
