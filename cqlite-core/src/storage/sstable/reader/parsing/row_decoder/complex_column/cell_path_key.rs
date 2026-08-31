@@ -120,26 +120,43 @@ impl V5CompressedLegacyParser {
                 data.len()
             )));
         }
-        // depth 0: a cell-path key is a top-level value, exactly as the SET
-        // branch treats a set member's cell path.
-        let decoded = self.parse_value_from_raw_bytes(data, type_str, column_name, 0)?;
+        // ONE decode, which also REPORTS what it consumed (see
+        // `decode_reporting_consumption`).
+        let (decoded, consumed) =
+            self.decode_reporting_consumption(data, type_str, column_name, 0)?;
         // ORDER IS LOAD-BEARING: strip BEFORE the opaque-value test below. A
-        // `frozen<absent_udt>` key comes back as `Frozen(Blob)`, so only after
+        // `frozen<absent_udt>` key can come back as `Frozen(Blob)`, so only after
         // the strip does `matches!(decoded, Value::Blob(_))` see it. Reordering
         // these two lines silently disables the diagnostic for every
         // frozen-spelled undecodable key — which is the common spelling, since a
         // composite map key must be frozen.
         let decoded = Self::unwrap_frozen_cell_path_key(decoded);
-        // Composite keys get the FULL-CONSUMPTION half of the same argument the
-        // width check makes for scalars (issue #3612 review round 1).
-        match &decoded {
-            Value::Udt(u) => {
-                Self::reject_trailing_composite_bytes(data, u.fields.len(), type_str, column_name)?
+        // THE EXACTNESS RULE. For a cell path the whole slice IS the key, so a
+        // decoder that stopped short read a PREFIX and two distinct byte strings
+        // would collapse to one logical key. Where the decoder can say how far it
+        // got, require it to have reached the end.
+        //
+        // This one comparison subsumes three separate behaviours, which is why it
+        // replaced the hand-rolled framing validator that preceded it (issue #3612
+        // review round 2): trailing bytes after the components (`pos < len`) are
+        // REFUSED; a partial 1-3 byte component-length header (also `pos < len`,
+        // because the decoders treat it as "trailing fields omitted" and do NOT
+        // advance past it) is REFUSED; and a genuinely SHORT encoding, whose
+        // omitted components leave `pos == len`, is ACCEPTED — which is exactly
+        // Cassandra 5.0.8 `TupleType.split`'s pair of rules (`if (position ==
+        // length) return copyOfRange(...)` and `if (position < length) throw`).
+        if let Some(consumed) = consumed {
+            if consumed != data.len() {
+                return Err(Error::corruption(format!(
+                    "Map key '{}' of type '{}' decoded only {} of {} byte(s); the whole \
+                     cell path must be the key (trailing bytes, or a partial trailing \
+                     component header, are corruption)",
+                    column_name,
+                    type_str,
+                    consumed,
+                    data.len()
+                )));
             }
-            Value::Tuple(items) => {
-                Self::reject_trailing_composite_bytes(data, items.len(), type_str, column_name)?
-            }
-            _ => {}
         }
         // The declared type is one this reader cannot model, so the shared
         // decoder handed back the raw bytes. Report it LOUDLY but do NOT return
@@ -155,84 +172,139 @@ impl V5CompressedLegacyParser {
                 column = column_name,
                 declared_type = type_str,
                 bytes = data.len(),
-                "multicell map key type is not one this reader can decode; the key                  is surfaced as opaque bytes (issue #3612). Check that the schema                  (or the on-disk SerializationHeader) resolves it, e.g. that a UDT                  named here is registered."
+                "multicell map key type is not one this reader can decode; the key \
+                 is surfaced as opaque bytes (issue #3612). Check that the schema \
+                 (or the on-disk SerializationHeader) resolves it, e.g. that a UDT \
+                 named here is registered."
             );
         }
         Ok(decoded)
     }
 
-    /// Refuse a composite (tuple / UDT) cell-path key that leaves TRAILING BYTES
-    /// after its declared components.
+    /// Decode a cell-path key AND report how many bytes the decode consumed.
     ///
-    /// This is the composite half of the module header's "the whole slice IS the
-    /// key" argument, which the width table can only make for fixed-width
-    /// scalars. Without it, a key with appended garbage decodes from its prefix
-    /// and two distinct corrupted encodings collapse to the SAME logical key.
+    /// `Ok((value, Some(n)))` — the decoder reported that it consumed `n` bytes.
+    /// `Ok((value, None))`    — the arm consumes the WHOLE slice by construction,
+    ///                          so there is nothing to compare (see below).
     ///
-    /// Authority is Cassandra 5.0.8 `TupleType.split` (which `UserType`
-    /// inherits), whose tail is exactly this check:
+    /// # Why this exists rather than a post-hoc framing validator
+    /// Round 1 of review added a hand-rolled walk over the component framing to
+    /// catch trailing bytes. Round 2 found two more holes in the SAME class —
+    /// frozen list/set/map keys and `duration`, plus a partial trailing header —
+    /// because a validator at the call site has to know about every decoder, and
+    /// this one knew about two. Every composite decoder ALREADY reports a consumed
+    /// offset and `parse_value_from_raw_bytes` merely DISCARDS it (`let (val, _)`),
+    /// so the correct shape is to keep that offset instead of re-deriving it.
     ///
-    /// ```text
-    /// if (position < length)
-    ///     throw new MarshalException(String.format(
-    ///         "Expected %s %s for %s column, but got more", …));
-    /// ```
+    /// # The `None` arms are exact, not unchecked
+    /// `None` is returned only where the arm's contract IS "the entire slice is the
+    /// value": text/ascii/varchar (validated UTF-8 over all of `data`), blob/bytes,
+    /// varint and inet (each borrows the whole slice), and decimal (scale from
+    /// `data[..4]`, unscaled from `data[4..]`). Fixed-width scalars also return
+    /// `None` because the caller's width table has ALREADY pinned `data.len()` to
+    /// the exact width — a stronger check than a consumption compare. The opaque
+    /// `Value::Blob` default likewise borrows all of `data`.
     ///
-    /// and whose head is equally load-bearing here — `if (position == length)
-    /// return Arrays.copyOfRange(components, 0, i)` — so a SHORT encoding (fewer
-    /// components than declared, the trailing fields absent) is LEGAL and must
-    /// NOT be rejected. The walk therefore stops when the slice is exhausted and
-    /// only complains when all `component_count` components have been consumed
-    /// and bytes remain.
-    ///
-    /// It re-walks only the FRAMING (`[i32 BE len][bytes]`, `-1` = null), never
-    /// the component types, so it is single-level exactly as Cassandra's `split`
-    /// is: a component's own bytes are skipped by length and validated (or not)
-    /// by whatever decoded them.
-    ///
-    /// Scoped to the cell-path route on purpose. `parse_tuple_elements_raw` and
-    /// the UDT decoders are shared with the frozen-element and SET-member paths,
-    /// where the caller's outer length prefix already bounds the slice, so
-    /// widening the check there is out of #3612's scope (noted in the PR).
-    fn reject_trailing_composite_bytes(
+    /// # Dispatch must mirror `parse_value_from_raw_bytes`
+    /// The guards below are the same predicates, in the same ORDER (frozen before
+    /// UDT, because `is_udt_type` is a substring match that also matches
+    /// `FrozenType(UserType(..))`). `cell_path_key_tests` asserts that every
+    /// composite spelling reports `Some`, so an arm added there and not here shows
+    /// up as a failing test rather than as a silent prefix decode.
+    fn decode_reporting_consumption(
+        &self,
         data: &[u8],
-        component_count: usize,
         type_str: &str,
         column_name: &str,
-    ) -> Result<()> {
-        let mut pos = 0usize;
-        for _ in 0..component_count {
-            if pos == data.len() {
-                // Cassandra's early return: the remaining components are absent.
-                return Ok(());
-            }
-            // A partial length header or body is a DIFFERENT corruption, already
-            // diagnosed by the decoder that just ran; stop rather than
-            // second-guess it with a worse message.
-            if pos + 4 > data.len() {
-                return Ok(());
-            }
-            let len = i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-            pos += 4;
-            if len > 0 {
-                let len = len as usize;
-                if pos + len > data.len() {
-                    return Ok(());
-                }
-                pos += len;
-            }
-        }
-        if pos < data.len() {
+        depth: usize,
+    ) -> Result<(Value, Option<usize>)> {
+        if depth > MAX_TYPE_NESTING_DEPTH {
             return Err(Error::corruption(format!(
-                "Map key '{}' of composite type '{}' has {} trailing byte(s) after its \
-                 {} component(s); the whole cell path must be the key",
-                column_name,
-                type_str,
-                data.len() - pos,
-                component_count
+                "Map key '{}': type nesting depth {} exceeds maximum {}",
+                column_name, depth, MAX_TYPE_NESTING_DEPTH
             )));
         }
-        Ok(())
+        let lower = type_str.to_ascii_lowercase();
+        const M: &str = "org.apache.cassandra.db.marshal.";
+
+        // frozen<T> / FrozenType(T): recurse on the inner type. Deliberately
+        // BEFORE the UDT arm, and deliberately without re-wrapping in
+        // `Value::Frozen` (see `unwrap_frozen_cell_path_key`).
+        if lower.starts_with("frozen<") || lower.starts_with(&format!("{M}frozentype(")) {
+            let inner = self.extract_frozen_inner_type(type_str)?;
+            return self.decode_reporting_consumption(data, &inner, column_name, depth + 1);
+        }
+
+        if lower.starts_with("list<") || lower.starts_with(&format!("{M}listtype(")) {
+            let elem = self.extract_collection_element_type(type_str, "list")?;
+            let (val, off) =
+                self.parse_frozen_list_value_raw(data, 0, &elem, column_name, depth + 1)?;
+            return Ok((val, Some(off)));
+        }
+        if lower.starts_with("set<") || lower.starts_with(&format!("{M}settype(")) {
+            let elem = self.extract_collection_element_type(type_str, "set")?;
+            let (val, off) =
+                self.parse_frozen_set_value_raw(data, 0, &elem, column_name, depth + 1)?;
+            return Ok((val, Some(off)));
+        }
+        if lower.starts_with("map<") || lower.starts_with(&format!("{M}maptype(")) {
+            let (k, v) = self.extract_map_types(type_str)?;
+            let (val, off) =
+                self.parse_frozen_map_value_raw(data, 0, &k, &v, column_name, depth + 1)?;
+            return Ok((val, Some(off)));
+        }
+        if lower.starts_with("tuple<") || lower.starts_with(&format!("{M}tupletype(")) {
+            let element_types = self.extract_tuple_element_types(type_str)?;
+            if element_types.is_empty() {
+                return Err(Error::schema(format!(
+                    "Map key '{}': empty tuple type '{}'",
+                    column_name, type_str
+                )));
+            }
+            let mut off = 0usize;
+            let elements = self.parse_tuple_elements_raw(
+                data,
+                &mut off,
+                data.len(),
+                &element_types,
+                column_name,
+                depth + 1,
+            )?;
+            return Ok((Value::Tuple(elements), Some(off)));
+        }
+        // UDT: both the marshal `UserType(..)` form and a registry-resolved bare
+        // name route through `parse_raw_type_value`, which reports the offset after
+        // the last field it consumed — including the "trailing fields omitted"
+        // early exit, which is what makes a partial trailing header visible here.
+        if Self::is_udt_type(type_str)
+            || self
+                .udt_registry
+                .as_ref()
+                .is_some_and(|r| r.get_udt_qualified(&self.keyspace, &lower).is_some())
+        {
+            let (val, off) = self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
+            return Ok((val, Some(off)));
+        }
+        // `duration` is three consecutive signed VInts and the decoder ignores
+        // whatever follows the third, so its consumption is measured here from the
+        // same framing (`parse_vint` reports the remaining slice). Framing only —
+        // the VALUE still comes from the one shared decode below.
+        if lower == "duration" || lower == format!("{M}durationtype") {
+            let value = self.parse_value_from_raw_bytes(data, type_str, column_name, depth)?;
+            let mut pos = 0usize;
+            for _ in 0..3 {
+                let (rest, _) = parse_vint(&data[pos..]).map_err(|e| {
+                    Error::corruption(format!("Map key '{}': duration VInt: {:?}", column_name, e))
+                })?;
+                pos = data.len() - rest.len();
+            }
+            return Ok((value, Some(pos)));
+        }
+        // Everything else consumes the whole slice by construction (see above).
+        Ok((
+            self.parse_value_from_raw_bytes(data, type_str, column_name, depth)?,
+            None,
+        ))
     }
 
     /// Whether `type_str` DECLARES a blob key, i.e. whether `Value::Blob` is the
