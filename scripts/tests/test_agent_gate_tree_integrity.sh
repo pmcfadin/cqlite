@@ -50,15 +50,41 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
+
 # ---------------------------------------------------------------------------
 # Fixture: a FAKE checkout. Copying ONLY the gate into <root>/scripts/ makes the gate's
 # `cd "$(dirname "$0")/.."` resolve REPO_ROOT to <root>, so every capture, default
 # summary path and mutation stays inside this run's mktemp namespace.
 # ---------------------------------------------------------------------------
 mkrepo() { # mkrepo <name> [extra `git init` args…] -> echoes the repo path
+  # `$tmp` is validated at the top of this file and `$1` is a literal at every call site, so
+  # `$root` cannot be empty here — but `cd ""` SUCCEEDS in bash and would run the fixture's
+  # git commands in the LIVE checkout, so the invariant is asserted rather than assumed.
+  [ -n "${1:-}" ] && [ -n "${tmp:-}" ] \
+    || { echo "FATAL: mkrepo needs a name and a scratch root" >&2; exit 1; }
   local root="$tmp/$1"; shift
   mkdir -p "$root/scripts"
   cp "$GATE" "$root/scripts/agent-gate.sh"
+  # PIN THE CANONICAL IDENTITY in this fixture's own copy, BEFORE the commit below (#3544 /
+  # roborev job 225). The pre-flight validates that `origin` NAMES the canonical upstream
+  # before fetching, and the LOCAL bare origin created further down is deliberately NOT
+  # canonical — so without the pin every fixture would stop at the pre-flight as
+  # `remote-not-canonical` instead of exercising the tree-integrity guard under test.
+  # Substituting the ARTIFACT in the scratch copy is the sanctioned pattern (CLAUDE.md); a
+  # settable seam would reopen the hole the check closes. Pinning BEFORE the commit keeps the
+  # fixture CLEAN — a post-commit pin would leave it dirty, which is itself an input these
+  # cases assert on. FATAL rather than silent: an unpinned fixture measures nothing.
+  agent_gate_pin_canonical_remote "$root/scripts/agent-gate.sh" "$root.origin.git" \
+    || { echo "FATAL: could not pin the canonical identity in fixture '$root'" >&2; exit 1; }
+  # …and the component MANIFEST beside the copy (#3544 REQ-3544-01), for the same reason and
+  # with the same timing: the pre-flight asserts the working tree's manifest matches the
+  # running COMPONENTS array before it fetches, so a gate copy without one stops at
+  # `manifest-missing` in the certifying modes; and writing it BEFORE the commit keeps the
+  # fixture CLEAN, which these cases assert on.
+  agent_gate_install_components_manifest "$root/scripts/agent-gate.sh" \
+    || { echo "FATAL: could not install the component manifest in fixture '$root'" >&2; exit 1; }
   # The DISPOSABLE-CHECKOUT MARKER (#2926 review B5): the gate's mutating self-test hooks
   # refuse to write into any checkout that does not carry it, so they can never append to
   # — or commit into — a live repo. Committed, so it is inside the digest yet clean.
@@ -72,6 +98,18 @@ mkrepo() { # mkrepo <name> [extra `git init` args…] -> echoes the repo path
   # `${1+"$@"}` (never a bare "$@"): expanding an EMPTY "$@" under `set -u` on bash 3.2 —
   # the floor this script declares — is an unbound-variable error (#2926 review B8).
   ( cd "$root" && git init -q ${1+"$@"} . && git add -A && git "${GIT_ID[@]}" commit -qm init ) >/dev/null 2>&1
+  # A LOCAL bare `origin` holding this fixture's own commit as `main` (#3544): the gate's
+  # component-set pre-flight fetches origin/main and FAILS CLOSED in the certifying modes
+  # when the baseline is unobtainable, so a fixture with no remote would now exit at that
+  # pre-flight instead of exercising the tree-integrity guard under test. A path remote
+  # keeps the fetch REAL and the fixture hermetic (no network), and pushing this very
+  # commit makes origin/main an ancestor of HEAD with an identical component set — so the
+  # pre-flight PASSes and every case below still measures what it says it measures.
+  git init -q --bare "$root.origin.git" >/dev/null 2>&1
+  git -C "$root.origin.git" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
+  ( cd "$root" \
+      && git remote add origin "$root.origin.git" \
+      && git push -q origin HEAD:refs/heads/main ) >/dev/null 2>&1
   printf '%s\n' "$root"
 }
 

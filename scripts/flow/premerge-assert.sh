@@ -109,12 +109,31 @@
 #     proves FACT 1 — the diff is unchanged since certification and a full gate
 #     of record PASSed on that exact tree — and it explicitly does NOT prove
 #     FACT 2 — that the diff was certified against the main it will join. Fact 2
-#     is a gate on the MERGE RESULT and is filed as #3650; it is deliberately
-#     NOT implemented here, and neither is a staleness bound or a "your base is N
-#     commits behind" advisory. The success path SAYS so (`PREMERGE: SCOPE`),
-#     because an enforcement that certifies the wrong tree while CLAIMING to
-#     close #3465 would be the vacuous-pass shape one level up — worse than the
-#     gap it replaces, which is at least visible.
+#     is a gate on the MERGE RESULT and is STILL NOT implemented here: it is
+#     #3650's SLICE 2, filed separately. The success path SAYS so
+#     (`PREMERGE: SCOPE`), because an enforcement that certifies the wrong tree
+#     while CLAIMING to close #3465 would be the vacuous-pass shape one level up
+#     — worse than the gap it replaces, which is at least visible.
+#
+#     WHAT SLICE 1 ADDED, AND WHAT IT DELIBERATELY DID NOT. This script now runs
+#     `scripts/flow/base-staleness.sh` (resolved from its OWN directory, with no
+#     env override — #3312's enforcer rule) and reports its finding on
+#     `PREMERGE: ADVISORY` lines: `N` commits behind the merge-base and `M` of
+#     those touching this diff's blast radius (paths the diff touches + a
+#     hard-coded gate-global set). That is INFORMATION, not enforcement:
+#     **the advisory can never change this script's exit code.** An advisory that
+#     is absent, fails, or reports `UNMEASURED` is REPORTED and is not fatal in
+#     slice 1. Two properties of it a reader must carry:
+#       * `UNMEASURED` MUST be treated as STALE by any consumer, never as fresh
+#         (#3650 D3) — the standing rule against deriving a pass from the absence
+#         of a bad signal. Slice 2 is the consumer that will act on it.
+#       * the blast radius is NOT a dependency closure. A commit changing an item
+#         this diff CALLS, touching neither this diff's paths nor a gate-global
+#         path, is reported as NOT staling. The advisory declares that on every
+#         run; it is a real false-negative class, filed, not closed.
+#     So the three `PREMERGE: SCOPE` lines are RETAINED: slice 1 does not close
+#     the gap they disclose, and removing them would be exactly the overclaim
+#     this residual exists to prevent.
 #
 # USAGE
 #   scripts/flow/premerge-assert.sh <pr-number> <certified-sha> \
@@ -127,7 +146,9 @@
 # EXIT CODES
 #   0   gate of record verified + head matches + PR OPEN
 #       — prints "PREMERGE: OK <sha>", "PREMERGE: SCOPE ..." (what was and was
-#         NOT proven, #3650) and "PREMERGE: GATE-OF-RECORD ..."
+#         NOT proven, #3650), "PREMERGE: ADVISORY ..." (the non-blocking
+#         base-staleness report, #3650 slice 1 — it NEVER changes this exit
+#         code) and "PREMERGE: GATE-OF-RECORD ..."
 #         (plus "PREMERGE: DELTA-RECERT ..." in Case B)
 #   2   no/invalid gate of record, OR head moved (mismatch), OR PR closed/merged
 #       — LOUD multi-line refusal
@@ -236,6 +257,148 @@ refuse_tool_failure() {
   printf '  assert — do NOT re-run the gate. Refusing to merge (fail closed).\n' >&2
   printf '========================================================\n' >&2
   exit 3
+}
+
+# ---------------------------------------------------------------------------
+# THE BASE-STALENESS ADVISORY (#3650 slice 1) — INFORMATION, NEVER A VERDICT
+# ---------------------------------------------------------------------------
+# Resolved from THIS script's own directory, with NO env override and no
+# `${...:-...}` fallback: #3312's second rule is that the constrained party must
+# not choose its own enforcer, and "which paths stale my certification" is
+# exactly what a lane wanting to skip a re-gate would redirect. A test needing a
+# different advisory substitutes the ARTIFACT in a scratch copy of the tree.
+#
+# NOTHING here may alter this script's exit code. Every failure mode — absent,
+# not executable, non-zero, empty output, UNMEASURED — is REPORTED on a
+# `PREMERGE: ADVISORY` line and then ignored. That is slice 1's whole contract:
+# an enforcement built on an information source nobody has read yet would be the
+# vacuous-pass shape one level up.
+#
+# IT MEASURES THE CERTIFIED SHA, NOT THIS CHECKOUT'S HEAD (#3650 review F1)
+# ------------------------------------------------------------------------
+# The advisory is invoked with `"$certified"` EXPLICITLY. Invoked with no rev it
+# defaults to `HEAD`, which is the LOCAL CHECKOUT's head — and the whole point of
+# the surrounding assert is that the local head and the sha being approved can
+# differ (a foreign push, a stale un-pushed rebase). A report about a DIFFERENT
+# diff than the one being merged is the "satisfied and wrong" shape this issue
+# exists to remove, and slice 2 will CONSUME this report. If the certified commit
+# is not present in this checkout the advisory reports UNMEASURED — correct, and
+# non-fatal here by the paragraph above.
+# Resolved WITHOUT letting `set -e` kill the run: this executes before argument
+# validation, so an unreadable script directory would exit 1 — a code outside the
+# documented 0/2/3 set, from a line that only feeds a NON-BLOCKING advisory. An
+# unresolvable directory degrades to the ABSENT branch below, which is reported
+# and not fatal, exactly like a deleted advisory.
+self_dir=""
+if ! self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"; then
+  self_dir=""
+fi
+if [ -n "$self_dir" ]; then
+  advisory_script="$self_dir/base-staleness.sh"
+else
+  advisory_script="<unresolvable script directory>/base-staleness.sh"
+fi
+
+# The advisory is BOUNDED (60s). It sits on the merge critical path, its cost
+# grows with how far the base is behind, and an unbounded child of the merge
+# gate is a hang the closer cannot distinguish from a slow gh call. A timeout is
+# just another non-zero exit here: REPORTED on an ADVISORY line (`exit 124`) and
+# ignored, per the paragraph above.
+#
+# AN UNAVAILABLE BOUND SKIPS THE ADVISORY — IT DOES NOT DEGRADE TO AN UNBOUNDED
+# CALL (#3650 review B1). `timeout` is not POSIX and is absent on a stock macOS,
+# which this repo supports, and the earlier code took the UNBOUNDED branch there
+# and said so in this comment as though it were a considered trade. It was not:
+# an unbounded child on the MERGE CRITICAL PATH is precisely the hang the bound
+# exists to prevent, and a rationale written down is what stops the next reader
+# questioning it. Skipping keeps BOTH invariants — the bound is never silently
+# dropped, and the advisory still cannot touch this script's exit code, because
+# the unavailability is REPORTED on a `PREMERGE: ADVISORY` line naming the
+# missing mechanism, exactly like an absent artifact.
+#
+# TWO THINGS THE FIRST VERSION OF THAT BOUND GOT WRONG (#3650 review R1/R2):
+#
+#  R1 — `timeout <secs>` SENDS SIGTERM AND THEN WAITS, so a child that traps or
+#  ignores TERM runs on indefinitely and the advertised bound bounds NOTHING.
+#  The escalation `--kill-after=<grace>` follows with SIGKILL, which cannot be
+#  trapped, and it IS the bound. This is the same finding, with the same
+#  measurement, that scripts/lib/gate-notify.sh records for the gate's notify
+#  path and scripts/bootstrap-agent-machine.sh for its network probes.
+#
+#  R2 — only `timeout` was resolved, while GNU coreutils installs its timeout as
+#  `gtimeout` on stock macOS. The skip diagnostic below TOLD the reader to
+#  install coreutils for `gtimeout`, and the code then never looked for it: on
+#  the exact configuration the message recommends, the advisory still skipped.
+#
+# So the resolution follows the repository's existing convention verbatim
+# (`_gate_notify_bounded_timeout`, scripts/lib/gate-notify.sh): try `timeout`
+# then `gtimeout`, PROBE each for `--kill-after` rather than assuming it (BusyBox
+# and older implementations reject the flag, and a non-GNU `timeout` earlier on
+# PATH must not win a first-match-wins lookup), and treat a candidate that
+# rejects it as NO bounding tool at all. That last part is the B1 rule applied
+# one level down: an escapable bound is not a bound, and running behind one
+# would be the silent degrade B1 forbids.
+ADVISORY_TIMEOUT_SECS=60
+# The grace is ADDITIVE wall-clock: the true worst case of the advisory call is
+# ADVISORY_TIMEOUT_SECS + ADVISORY_KILL_GRACE. 5s is ample for a well-behaved
+# child to finish its own cleanup after TERM.
+ADVISORY_KILL_GRACE=5
+
+# resolve_advisory_timeout — print a timeout(1) that supports `--kill-after`, or
+# return 1 when no such runner exists. Capability is PROBED, never assumed; see
+# the R1/R2 paragraphs above.
+resolve_advisory_timeout() {
+  local c
+  for c in timeout gtimeout; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    "$c" --kill-after=1 1 true >/dev/null 2>&1 || continue
+    printf '%s\n' "$c"
+    return 0
+  done
+  return 1
+}
+
+print_base_staleness_advisory() {
+  local adv_out adv_rc=0 line adv_to
+  if [ ! -f "$advisory_script" ]; then
+    printf 'PREMERGE: ADVISORY base-staleness.sh is ABSENT at %s — the base-staleness\n' \
+      "$advisory_script"
+    printf 'PREMERGE: ADVISORY report could not be produced. NOT fatal in #3650 slice 1: the\n'
+    printf 'PREMERGE: ADVISORY advisory changes no verdict, so its absence changes none either.\n'
+    return 0
+  fi
+  if ! adv_to=$(resolve_advisory_timeout); then
+    printf 'PREMERGE: ADVISORY base-staleness.sh was NOT RUN: no `timeout`/`gtimeout` on PATH\n'
+    printf 'PREMERGE: ADVISORY supporting `--kill-after`, so the %ss bound could not be applied\n' \
+      "$ADVISORY_TIMEOUT_SECS"
+    printf 'PREMERGE: ADVISORY with a SIGKILL escalation, and the bound is not droppable (#3650\n'
+    printf 'PREMERGE: ADVISORY review B1/R1) — an UNBOUNDED child here, or one behind a\n'
+    printf 'PREMERGE: ADVISORY SIGTERM-only bound a child can ignore, is the merge-path hang the\n'
+    printf 'PREMERGE: ADVISORY bound exists to prevent, so the advisory is SKIPPED.\n'
+    printf 'PREMERGE: ADVISORY NOT fatal in #3650 slice 1: the advisory changes no verdict, so\n'
+    printf 'PREMERGE: ADVISORY its absence changes none either. Install GNU coreutils (its\n'
+    printf 'PREMERGE: ADVISORY timeout is `gtimeout` on macOS, and IS accepted here) to get the\n'
+    printf 'PREMERGE: ADVISORY report back.\n'
+    return 0
+  fi
+  adv_out=$("$adv_to" --kill-after="$ADVISORY_KILL_GRACE" "$ADVISORY_TIMEOUT_SECS" \
+    bash "$advisory_script" "$certified" 2>&1) || adv_rc=$?
+  if [ -z "$adv_out" ]; then
+    printf 'PREMERGE: ADVISORY base-staleness.sh produced NO output (exit %s) — reported, and\n' \
+      "$adv_rc"
+    printf 'PREMERGE: ADVISORY not fatal in #3650 slice 1.\n'
+    return 0
+  fi
+  while IFS= read -r line; do
+    printf 'PREMERGE: ADVISORY %s\n' "$line"
+  done <<EOF
+$adv_out
+EOF
+  printf 'PREMERGE: ADVISORY exit %s — advisory ONLY (#3650 slice 1): it did NOT affect this\n' \
+    "$adv_rc"
+  printf 'PREMERGE: ADVISORY assert. A CONSUMER of the advisory (slice 2) must treat exit 5 /\n'
+  printf 'PREMERGE: ADVISORY UNMEASURED as STALE, never as fresh.\n'
+  return 0
 }
 
 # assert_readable_summary <file> <what> — the three file-level preconditions.
@@ -624,6 +787,27 @@ fi
 [ -n "$full_dirty" ] || full_dirty=unknown
 
 # ---------------------------------------------------------------------------
+# THE ADVISORY IS MEASURED **BEFORE** THE HEAD CHECK (#3650, roborev job 250)
+# ---------------------------------------------------------------------------
+# The advisory is bounded at ADVISORY_TIMEOUT_SECS + ADVISORY_KILL_GRACE (65s).
+# Running it AFTER the `gh pr view` head/state check would leave up to 65s
+# between the instant the head was verified and the instant `PREMERGE: OK` is
+# emitted -- so a push inside that window would leave this script emitting OK for
+# a sha that is no longer the PR head, which is precisely the stale-head merge
+# #2456 exists to refuse. The fix is ordering, not a re-check: the advisory is
+# MEASURED here and PRINTED later in its original position, so the gh head/state
+# check remains the LAST thing that happens before OK.
+#
+# Capturing changes no output: every line of the report is written to stdout by
+# `print_base_staleness_advisory`, and printing it at the original call site keeps
+# the order identical -- which matters, because the `PREMERGE: SCOPE ... ADVISORY
+# lines below` clause asserts the advisory appears BELOW it.
+#
+# Cost, accepted: on a refusal path the 65s is already spent. Correctness of the
+# approval beats latency of a refusal, and nothing is printed on those paths.
+advisory_out=$(print_base_staleness_advisory)
+
+# ---------------------------------------------------------------------------
 # PR HEAD + STATE (#2456)
 # ---------------------------------------------------------------------------
 
@@ -682,6 +866,15 @@ printf 'PREMERGE: SCOPE this proves a full gate PASSed on THIS tree (%s); it doe
   "$certified"
 printf 'PREMERGE: SCOPE the tree was certified against current main (#3650) — a squash-merge\n'
 printf 'PREMERGE: SCOPE composes this diff with main tip, which no gate here has executed.\n'
+# One added SCOPE line pointing at the advisory (#3650 slice 1). The three lines
+# above are RETAINED verbatim: slice 1 ships INFORMATION, not the merge-result
+# gate, so the disclaimer they carry is still true.
+printf 'PREMERGE: SCOPE the PREMERGE: ADVISORY lines below measure that gap (non-blocking, #3650 slice 1).\n'
+# Printed here, MEASURED earlier (see the note above the head check): the
+# advisory's 65s bound must not sit between the head check and OK.
+if [ -n "$advisory_out" ]; then
+  printf '%s\n' "$advisory_out"
+fi
 printf 'PREMERGE: GATE-OF-RECORD commit: %s tree-start: %s tree-integrity: PASS dirty: %s summary: %s\n' \
   "$full_commit" "$full_ts" "$full_dirty" "$summary_file"
 if [ -n "$delta_file" ]; then

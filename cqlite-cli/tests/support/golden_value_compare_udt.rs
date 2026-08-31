@@ -26,16 +26,32 @@ fn udt_spelling(egress: Egress) -> &'static str {
 /// A UDT: always a field→value object in the dump. On the CLI side the accepted
 /// representation is FORMAT-SCOPED, because each format has exactly one:
 ///
-///   * **JSON** — a field→value object, plus a `_type` discriminator the CLI adds
-///     and the golden does not carry. It is REQUIRED to be present, to be a
-///     string, and to name the type the committed `CREATE TYPE` declares (folded
-///     for case, because an unquoted CQL identifier is case-insensitive); only
-///     then is it dropped from the field set, and only from the CLI side. It used
-///     to be stripped unconditionally, so a missing or wrongly-named
-///     discriminator passed even though the DDL knows the answer (issue #1491
-///     review finding R3). A `{key,value}` pair array is the CLI's *map*
-///     spelling, so accepting one here would let a UDT that regressed to the map
-///     representation pass; it is therefore rejected (review finding F3).
+///   * **JSON** — a field→value object holding the DECLARED FIELDS AND NOTHING
+///     ELSE, which is exactly what the golden carries. It used to also carry a
+///     `_type` discriminator the CLI injected into the same namespace, checked
+///     here against the DDL and then dropped from the CLI side; issue #3629
+///     removed that injection, because
+///     `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java:261`
+///     (`toJSONString`) iterates `types.size()` over `stringFieldNames` alone and
+///     emits `{"field": value, …}` with NO type key and NO keyspace key — so the
+///     discriminator was output the reference tool never writes, and it collided
+///     with any UDT declaring a field of that name. With it gone the
+///     two sides' field sets are directly comparable and nothing is dropped from
+///     either. KNOWN COVERAGE REDUCTION, stated rather than argued away: this
+///     lane can no longer detect a UDT resolved against the wrong `CREATE TYPE`
+///     when two types declare the same field NAMES, ORDER and TYPES — the
+///     committed `collide`/`collide_twin` pair is exactly that case, and the
+///     deleted `_type` check is what used to catch it. The DDL-derived
+///     presence/order rules below are unchanged, but they catch a wrong-type
+///     resolution only where the field SETS differ. The loss is unavoidable: the
+///     JSON egress no longer carries type identity at all, so there is nothing
+///     here to check it against. Note the old code was ALREADY blind on this
+///     fixture — it REFUSED outright to compare any UDT declaring a `_type`
+///     field — so this converts a refusal into a direct comparison, not a
+///     working check into a missing one. A
+///     `{key,value}` pair array is the CLI's *map* spelling, so accepting one
+///     here would let a UDT that regressed to the map representation pass; it is
+///     therefore rejected (review finding F3).
 ///   * **CSV** — a `{key,value}` list, and only that. CSV delivers the whole cell
 ///     as one flat `{k: v, …}` text carrying nothing that could distinguish a map
 ///     from a UDT, so [`super::csv_container`] decodes EVERY brace-delimited body
@@ -53,14 +69,10 @@ pub(super) fn compare_udt(
     at: &At<'_, '_>,
 ) -> Result<(), String> {
     let c: Map<String, Value> = match (egress, cli) {
-        (Egress::Json, Value::Object(fields)) => {
-            check_udt_discriminator(fields, udt)?;
-            fields
-                .iter()
-                .filter(|(k, _)| k.as_str() != DISCRIMINATOR)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        }
+        // No key is filtered out (issue #3629): every key in the CLI object is a
+        // declared field, so filtering one would hide a real field named like
+        // whatever we filtered.
+        (Egress::Json, Value::Object(fields)) => fields.clone(),
         (Egress::Csv, Value::Array(entries)) => {
             let mut out = Map::new();
             for entry in entries {
@@ -219,65 +231,6 @@ pub(super) fn compare_udt(
             .map_err(|why| format!(".{field} {why}"))?;
     }
     Ok(())
-}
-
-/// The field name the JSON egress adds to a UDT object to name its type.
-const DISCRIMINATOR: &str = "_type";
-
-/// The JSON egress's UDT `_type` field must be PRESENT, a STRING, and the type
-/// name the committed `CREATE TYPE` declares.
-///
-/// Stripping it unconditionally (the first cut of this file) made the
-/// discriminator untestable in the one lane that renders it: a UDT object with no
-/// `_type` at all, or one naming the wrong type — which is what a UDT resolved
-/// against the wrong `CREATE TYPE` would produce — compared equal (issue #1491
-/// review finding R3). The expected name comes from the DDL, so this is an
-/// assertion against the committed schema and not against CQLite's own output.
-///
-/// The comparison folds ASCII case because an UNQUOTED CQL identifier is
-/// case-insensitive — Cassandra stores `Person` and `person` as the same type
-/// name — so requiring exact case would assert something CQL does not mean. Every
-/// `CREATE TYPE` in `test-data/schemas/` is unquoted.
-fn check_udt_discriminator(fields: &Map<String, Value>, udt: &UdtType) -> Result<(), String> {
-    // `_type` is a LEGAL CQL field name, and a UDT declaring one would make the
-    // discriminator indistinguishable from that field: the discriminator is
-    // dropped from the CLI's field set, so the declared field would then read as
-    // absent from the CLI and the DDL-presence rule above would report a field the
-    // egress did render. No committed `CREATE TYPE` declares one; the collision is
-    // REFUSED rather than resolved by guessing which of the two the value is.
-    if udt
-        .fields
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case(DISCRIMINATOR))
-    {
-        return Err(format!(
-            "udt `{}`: the committed CREATE TYPE declares a field named `{DISCRIMINATOR}`, \
-             which is also the name the JSON egress uses for its type discriminator — the \
-             two are indistinguishable in the emitted object, so this lane cannot compare \
-             such a UDT",
-            udt.name
-        ));
-    }
-    match fields.get(DISCRIMINATOR) {
-        Some(Value::String(name)) if name.eq_ignore_ascii_case(&udt.name) => Ok(()),
-        Some(Value::String(name)) => Err(format!(
-            "udt `{}`: the JSON egress names the type `{name}` in its `{DISCRIMINATOR}` \
-             discriminator, but the committed CREATE TYPE declares `{}`",
-            udt.name, udt.name
-        )),
-        Some(other) => Err(format!(
-            "udt `{}`: the JSON egress's `{DISCRIMINATOR}` discriminator is {}, not a \
-             string naming the type",
-            udt.name,
-            brief(&describe(other, Egress::Json))
-        )),
-        None => Err(format!(
-            "udt `{}`: the JSON egress object carries no `{DISCRIMINATOR}` discriminator \
-             — the committed CREATE TYPE declares this value as `{}`, and the JSON \
-             egress names a UDT's type in that field",
-            udt.name, udt.name
-        )),
-    }
 }
 
 #[cfg(test)]

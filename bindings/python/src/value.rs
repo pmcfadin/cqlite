@@ -2,12 +2,19 @@
 //!
 //! This module handles conversion of all CQL data types to their Python equivalents.
 //! The mapping follows M4 spec section 5.2 for type fidelity.
+//!
+//! It owns the ORDINARY host conversion only. The HASHABLE PROJECTION — what a
+//! value becomes in a `dict`-key or `frozenset`-element position, which
+//! deliberately DIFFERS for a `list` and for a UDT-bearing `set` — lives in
+//! [`crate::value_hashable`] (split out by issue #3500). `set_to_py` and
+//! `map_to_py` call into it; it calls back for the scalar arms.
 
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFrozenSet, PyList, PyTuple};
 
 use crate::error::to_py_err;
+use crate::value_hashable::{contains_udt, value_to_hashable_key};
 use cqlite_core::Value;
 
 /// Convert a CQL Value to a Python object.
@@ -71,73 +78,6 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
         Value::Frozen(v) => value_to_py(py, v),
         Value::Inet(b) => inet_to_py(py, b),
         Value::Tombstone(_) => Ok(py.None()), // Treat deleted data as None
-    }
-}
-
-/// Convert a Value for use as a Python dict key (must be hashable).
-///
-/// Python dicts require hashable keys. This converts:
-/// - List → tuple (recursively)
-/// - Map → tuple of (key, value) tuples
-/// - Set → frozenset (elements recursively made hashable)
-/// - Frozen → unwrap and recurse
-/// - UDT → [`Udt`] instance carrying the type identity out of band, with each
-///   field value recursively projected (issue #3504)
-/// - Other types → as-is (already hashable)
-///
-/// Note: `SET<FROZEN<UDT>>` is handled at the `set_to_py` level by
-/// returning a `list` instead of a `frozenset` (see `set_to_py`). This
-/// function is still called for UDTs that appear as MAP keys, which are
-/// unusual but possible in CQL.
-pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
-    match value {
-        Value::List(items) => {
-            // Convert list to tuple for hashability
-            let converted: Vec<PyObject> = items
-                .iter()
-                .map(|v| value_to_hashable_key(py, v))
-                .collect::<PyResult<Vec<_>>>()?;
-            Ok(PyTuple::new(py, converted)?.into_any().unbind())
-        }
-        Value::Map(pairs) => {
-            // Maps as keys are rare but possible - convert to tuple of tuples
-            let converted: Vec<PyObject> = pairs
-                .iter()
-                .map(|(k, v)| {
-                    let key = value_to_hashable_key(py, k)?;
-                    let val = value_to_hashable_key(py, v)?;
-                    Ok(PyTuple::new(py, [key, val])?.into_any().unbind())
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            Ok(PyTuple::new(py, converted)?.into_any().unbind())
-        }
-        Value::Frozen(inner) => {
-            // Unwrap Frozen and recurse so that FROZEN<UDT> and FROZEN<collection>
-            // are handled by the appropriate arm rather than falling through to
-            // value_to_py, whose conversions are not projected for hashability.
-            value_to_hashable_key(py, inner)
-        }
-        Value::Udt(udt) => {
-            // UDT as a map/set key (issue #3504): project to a `Udt` instance, so
-            // the type name and keyspace ride OUTSIDE the field namespace.
-            //
-            // The previous projection pushed a pair for `_type`, then one for
-            // `_keyspace`, then one per field, into a single `frozenset` — so a
-            // field named `_type` produced TWO `_type` pairs with different values
-            // and nothing deduped them. The pair set now holds exactly one entry
-            // per declared field and no metadata entry at all, while
-            // `Udt.__eq__`/`__hash__` keep the identity in the comparison, so two
-            // UDTs of different declared types with identical fields still hash
-            // differently and compare unequal.
-            //
-            // Field values are recursively projected, so a `Udt` reaching this
-            // position is hashable and usable as a `dict` key / set member.
-            // Totality is unchanged: `Tuple` and `Set` still have no arm here and
-            // still fall through to `value_to_py` (issue #3500).
-            Ok(build_udt(py, udt, value_to_hashable_key)?.into_any())
-        }
-        // Other types are already hashable or handled by value_to_py
-        _ => value_to_py(py, value),
     }
 }
 
@@ -565,7 +505,7 @@ fn json_number_to_py(py: Python<'_>, n: &serde_json::Number) -> PyResult<PyObjec
 }
 
 /// Convert serde_json::Value to Python object.
-fn json_to_py(py: Python<'_>, json: &serde_json::Value) -> PyResult<PyObject> {
+pub(crate) fn json_to_py(py: Python<'_>, json: &serde_json::Value) -> PyResult<PyObject> {
     match json {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
@@ -632,22 +572,6 @@ fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
     }
 }
 
-/// Return `true` if `value` is or wraps a UDT value.
-///
-/// Used by `set_to_py` to decide whether a `SET` should be returned as a
-/// `frozenset` (scalars) or a `list` (UDT elements, rendered as a list for CLI
-/// parity — issue #804).
-///
-/// Not total over `Value`: a UDT nested inside a `Tuple` or a `Set` element is not
-/// detected, which is issue #3500 and is neither fixed nor worsened by #3504.
-fn contains_udt(value: &Value) -> bool {
-    match value {
-        Value::Udt(_) => true,
-        Value::Frozen(inner) => contains_udt(inner),
-        _ => false,
-    }
-}
-
 /// Convert CQL map to Python dict.
 fn map_to_py(py: Python<'_>, pairs: &[(Value, Value)]) -> PyResult<PyObject> {
     let dict = PyDict::new(py);
@@ -688,7 +612,7 @@ fn udt_to_py(py: Python<'_>, udt: &cqlite_core::UdtValue) -> PyResult<PyObject> 
 /// keeps the two shapes identical by construction — the previous code built the
 /// dict and the frozenset independently, which is how the projection came to emit
 /// a DUPLICATE `_type` pair while `udt_to_py` merely overwrote one.
-fn build_udt(
+pub(crate) fn build_udt(
     py: Python<'_>,
     udt: &cqlite_core::UdtValue,
     convert: impl Fn(Python<'_>, &Value) -> PyResult<PyObject>,

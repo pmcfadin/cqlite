@@ -357,6 +357,324 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
     shows the check RAN. **There is deliberately NO opt-out env var, and none may be added**:
     committed source in a checkout is never legitimately absent, so an escape hatch could only buy a
     vacuous green.
+- **A gate script BEHIND `origin/main` cannot certify (#3544).** `agent-gate.sh` is read from
+  the tree under test, so a branch cut before a component-set expansion runs the OLD script and
+  reports a true `N/N nonpass=0` while being **silent about every component added since**
+  (measured: PR #3467's gate would have certified 31 of 35). Merge-cleanliness cannot see it
+  (`git merge-tree` returns CLEAN — the skew is semantic), and `required` cannot backstop it:
+  `.github/ci-gating-tiers.yml` exempts the CI feature-matrix lane *because the local gate owns
+  it*, so each side's coverage is justified by the other's and the component is exercised by
+  neither. At the mode dispatch — before the #1825 slot and any component — every mode compares
+  its component **SET** (never a line count or blob hash) against a
+  baseline **fetched in that same invocation** (a remote-tracking ref is a *cached observable*;
+  a stale one returns "no skew" against a superseded `main`), and stamps `component-set:` into
+  every SUMMARY: `PASS (36/36 vs origin/main <sha40> via the committed manifest)` — affirmative,
+  **naming its baseline sha AND how the baseline was read**; `FAIL-CLOSED (#3544) — this tree is BEHIND …; MISSING: <names>` (remedy: `git fetch
+  origin && git rebase origin/main`); `DECLARED (#3544) — this branch REMOVES <names>` when
+  `origin/main` IS an ancestor of `HEAD` **AND the components are absent at `HEAD` too** — **loud,
+  not fatal**, because the author has nothing to rebase and a guard that reds on correct input
+  is the guard agents learn to waive. **ANCESTRY ALONE IS NOT PROVENANCE, and trusting it was a
+  reproduced false PASS**: `is origin/main reachable from HEAD?` is not `did this branch's
+  committed diff remove the component?`, so deleting one component from the WORKING COPY alone
+  yielded a non-fatal `DECLARED` in a certifying mode (a full gate would have certified 35 of 36)
+  under a line that asserted committed provenance for an uncommitted edit. A removal still
+  PRESENT at `HEAD` is therefore its own fail-closed `UNCOMMITTED` verdict (remedy: commit or
+  restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
+  the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
+  stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  **A CHECK MUST BE INSIDE THE WINDOW IT CERTIFIES — NOT BEFORE IT, NOT AFTER THE HARM (roborev
+  job 290).** The mirror of this issue's earlier ruling ("a check placed AFTER the harmful effect
+  can only report it"), and the same family as the two sha-equality failures. The component-set
+  pre-flight ran BEFORE `acquire_gate_slot`, and `_tree_recapture_after_slot` then RESET the
+  certification window to the tree present when the slot was granted — so an edit made WHILE QUEUED
+  became the new starting tree under a STALE `component-set:` verdict. The recapture is deliberate
+  and stays; the pre-flight is **repeated inside the window** (the earlier call is kept, because it
+  is what stops an uncertifiable run from queueing or compiling at all). **Second half, one
+  asymmetry down:** the LOCAL manifest is verified against the LOCAL declaration every run, so it is
+  a checked claim — while HEAD's manifest was TRUSTED, letting a stale one at HEAD excuse an
+  uncommitted removal as `DECLARED`. Provenance now reads HEAD's committed `COMPONENTS`
+  **declaration** as data and does not consult HEAD's manifest at all: **remove the second source
+  rather than reconcile it.**
+  **AND EVERY INPUT THE CHECK REASONS ABOUT MUST BE INSIDE THAT WINDOW TOO (roborev jobs 292–294) —
+  BUT "IS THE CODE I AM EXECUTING THE CODE I CERTIFY" IS NOT ANSWERABLE FROM INSIDE THE RUNNING
+  PROCESS, AND IS SPLIT OUT TO #3705.** Being inside the window yourself is not enough if you compare
+  against a snapshot taken outside it: `COMPONENTS` is an array bash loaded before the queue, so a
+  script that GAINED a component while queued was validated against the OLD array (292); and change a
+  component's **executor function** while queued and the recaptured tree becomes the certification
+  window while the process keeps running the definitions it loaded before it (293). **The RULE stands.
+  The MECHANISM built for it does not**: a whole-file startup digest of `$GATE_SELF` (with the field
+  comparisons demoted to the message) is REMOVED, because **bash parses a script INCREMENTALLY** — the
+  digest is taken only after thousands of lines are already parsed, so an atomic replace before that
+  point leaves bash executing the OLD inode while the digest reads the NEW path (294). Answering the
+  question needs a **bootstrap/re-exec handshake**, i.e. a change to how `agent-gate.sh` STARTS UP,
+  and it cannot ride inside a component-set comparison. **Five consecutive rounds landed in that one
+  mechanism (290/292/293/294) while #3544's own property produced one finding in five** — the standing
+  signal to SPLIT rather than carve the same place again. What stays here: job 290's REPEAT of the
+  pre-flight after the slot is granted (cheap, and it makes the component-set verdict current with
+  respect to the recaptured tree), and job 285's MANIFEST mode validation. The gate-script symlink
+  refusal went to #3705 with the check it belonged to; a `gate-script-*` kind no longer exists.
+  **A SYMLINK IS A BLOB, AND A GRAFT OUTLIVES `--no-replace-objects` (roborev job 285).** Two
+  false-green routes, both closed by moving rather than flagging. (1) The presence probe accepted
+  every `blob`, but a symlink IS one — the difference is the MODE (`120000`) — so the two halves of
+  the manifest check read DIFFERENT DOCUMENTS: the working-tree validation FOLLOWS the link and
+  sees a full manifest while `git show <rev>:<path>` prints the link's TARGET TEXT, so
+  `agent-gate.components -> fmt` validated locally and published a ONE-COMPONENT baseline. The mode
+  is now validated on both halves. (2) `$GIT_DIR/info/grafts` rewrites parentage and
+  `--no-replace-objects` does **not** disable it (measured: no → YES → YES across
+  before-graft/plain/`--no-replace-objects`), so on the object-REUSE path — where ancestry still ran
+  in the live repository — a graft could reclassify missing components from fatal `BEHIND` to
+  non-fatal `DECLARED`. **Ancestry now runs in the isolated repository on BOTH paths**, live objects
+  exposed only through an alternate; the reuse path keeps what it was for (no fetch, no transfer)
+  and loses only a `mktemp`+`git init`. **The pattern the owner named while ruling on it: every
+  live-repository read preserved for speed has turned into a route** (round 16's partial-clone lazy
+  fetch, now grafts) — so a third finding there should remove the reuse optimisation rather than
+  carve it again. **And a test-suite lesson from the same round: a span-replacing edit silently
+  deleted FOUR cases and the suite reported `failed: 0` at 102 instead of 105 for a whole round —
+  a green tally over a shrunken suite is #3544's own subject inside its own test file. That suite
+  now asserts a CASE FLOOR**, the idiom `test_agent_gate_summary.sh` already used.
+  **THE SHARED OBJECT STORE IS TRUSTED, NOT VERIFIED — DECLARED IN THE EMITTED LINE, AND OWNED BY
+  #3746 (roborev job 311; lead ruling on `REQ-3544-OBJTRUST`).** Git does not rehash a packed
+  object against the id it was asked for on an ordinary read, and on this fleet **every lane on a
+  box is a worktree of ONE shared `.git`** (measured: `/data/lanes/repo/.git/objects` for
+  lane-3544, lane-3473 and lane-3629 alike), so a peer lane planting a forged pack/index can make
+  a canonical sha resolve to a shortened manifest — a **false PASS**, and a NON-INVOKER route,
+  hence a defect. **The recorded "a third finding here should REMOVE the reuse optimisation"
+  ruling does NOT dispose of it, because removal does not CLOSE it:** the ancestry walk and the
+  provenance leg read HEAD's **committed** content, which has no source other than that store —
+  the working tree cannot substitute, since `UNCOMMITTED` exists precisely to compare against what
+  is committed — so a forged HEAD object still turns `UNCOMMITTED` (fatal) into `DECLARED`
+  (non-fatal) after removal, while charging every `--lite` round for the privilege (measured
+  2026-08-31: **3.41 s / 93 MB** full, **3.58 s / 45 MB** at `--depth=1` — shallow is NOT cheaper,
+  it still ships the tip's whole tree). **A permanent tax for a half-closure is the guard agents
+  learn to waive**, and a bounded re-hash of the consumed objects is the FOURTH carve in this
+  family. So the boundary is **DECLARED**: every baseline-bearing verdict line ends by naming the
+  object provenance (`REUSED` from the shared store / `FETCHED` from the canonical remote / `NOT
+  RECORDED`) plus `store TRUSTED, not verified (#3746)`. **A check that claims nothing false is
+  worth more than one claiming a closure it does not deliver** — the same move the roborev
+  waiver's threat model makes where a dependency cannot be removed. The declaration is folded into
+  the ONE `src_note` suffix eleven printf arms already consume, never appended per-arm, and the
+  self-test pins it as a **closed set of three renderings** by string equality: pinning one
+  literal would red on correct input (which clause fires depends on whether this box's store
+  already held the commit), pinning nothing would let a wording pass delete it. **#3746 may
+  conclude the subject is not this pre-flight at all but the infrastructure decision that lanes
+  share an object store** — a peer able to plant objects there is a hazard to every gate on the
+  box, not to one component-set comparison.
+  **STOP RENDERING THE VALUE, DO NOT SANITISE IT AGAIN — AND A FIX THAT ADDS A RESOURCE INHERITS
+  THAT RESOURCE'S LIFETIME BUGS (roborev job 282).** Two closures. (1) The rejected-origin
+  diagnostic was the FIFTH finding in one family — raw URL rendered (227) → redacted but not
+  flattened (234) → flattened but not redacted (239) → scheme-only redaction (264) → **query
+  strings verbatim and multi-`@` authorities redacted only to the first `@`** (282). Every fix
+  improved the sanitiser, which is the "rarer delimiter" the mechanism ruling warns against, so the
+  URL is **no longer published**: the diagnostic names the AXIS it was rejected on, plus the
+  normalised identity **only when that identity is itself grammatically clean** (a
+  `…/repo?token=SECRET` normalises to a value CARRYING the query, so the shape is checked rather
+  than assumed). Two self-inflicted defects on the way, both worth knowing: a fall-through printed
+  `${v%%:*}` which with no colon **is the whole value**, reproducing the finding; and reducing the
+  NORMALISER's output instead of the RENDERED text made every local path normalise identically, so
+  a canonical identity pinned to a local path matched **any** local path — **the normalised value
+  is a COMPARISON KEY, not a diagnostic string.** (2) Round 17's own fix created the owned
+  supervisor and never registered it with the signal path — the third instance of one family
+  (round 9 register-before-create, round 14 clean-up-on-signals), i.e. **fixing a resource-lifetime
+  bug added a resource with the same bug**. Any owned child is now registered the moment it exists
+  and cleared the moment it is reaped, and cleanup reaps it BEFORE deleting the files it could
+  otherwise recreate.
+  **NEVER SIGNAL A PROCESS GROUP YOU NO LONGER OWN — AND OWNERSHIP ENDS AT REAP, NOT AT EXIT
+  (roborev job 279).** The bounded runner's watchdog arm backgrounded the COMMAND, so the pgid was
+  the command's pid, and after TERM + a 1s grace it sent an unconditional `kill -KILL -$pid` — by
+  which time bash may already have REAPED the leader, releasing that id. On a four-lane box the
+  group that inherits it is most likely **a peer lane's gate** (this repo has the incident: a
+  pattern-based `pkill` killed a peer's gate at component 28 of 30). The leader is now a
+  **supervisor kept alive on purpose** — it runs the command, records the status to a file with a
+  completeness marker, then parks (bounded at `secs+5` so a SIGKILLed gate leaves nothing) — so
+  every signal targets an id we still hold. Two things fall out: a successful call now reaps its
+  STRAY descendants, and **the race itself cannot be tested** (pid reuse is not controllable), so
+  the coverage is the observable before/after difference plus a **structural** assert of the
+  ownership invariant, labelled as such rather than dressed up as behavioural. Related, from the
+  same round: `[ -z "$(find …)" ]` collapses "the scan FAILED" onto "no match" — a three-valued
+  signal read two-valued — and this repo LINTS for that shape (`1699-find-tristate`).
+  **THE ALLOWLIST HAS TO REACH THE SITES A LATER CHANGE ADDS (roborev job 276).** The migrated
+  object reads ran under a bare `env`, inheriting the caller's environment — the round-13 hole
+  re-opened at the NEW sites, not a new route: an inherited `GIT_DIR` points a read at another
+  repository, and `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` injects a promisor or an `insteadOf`.
+  Every git call in the pre-flight now runs under `env -i` + the ONE allowlist, with only
+  location-specific values (the alternate) layered on top — **including the STATE probes**, since
+  injected config could have made a real partial clone look non-partial and re-opened the fast
+  path. Two corrections came with it: **a config file does NOT keep a URL out of every argv** —
+  git passes the configured URL to a transport HELPER, whose command line then carries the token —
+  so a credential-bearing origin is now **refused** (userinfo must be absent or exactly `git`;
+  refusing ALL userinfo red the standard `ssh://git@github.com/…`, a false FAIL on correct input — **that ssh example is now moot, since job 296 refuses ssh forms outright; what KEEPS the rule is CI's `https://x-access-token:<TOKEN>@github.com/…`**);
+  and **a specified control must be required to have WORKED** — the `chmod 600 … || true` on the
+  isolated config is now fail-closed with the resulting mode VERIFIED (`find -perm 600`, since
+  `stat` is GNU-vs-BSD incompatible), because "chmod exited 0" and "the file is 0600" are
+  different claims.
+  **AND A LOCAL READ CAN BE A NETWORK OPERATION (roborev job 268).** In a PARTIAL clone,
+  `ls-tree`/`show`/`cat-file` answer a missing object by fetching it from the **promisor remote**,
+  under the live repository's **local config** — so `url.*.insteadOf` plus an enabled external
+  protocol executes a remote helper, and the lazy fetch writes objects into the shared store. That
+  was the THIRD route of one family (`insteadOf` on the fetch, `ext::` on the transfer hop, the
+  promisor), and per-call-site suppression had failed each time — so **every baseline/HEAD object
+  read and the ancestry walk moved INTO the isolated scratch repository**, with the lane's object
+  directory supplied as an alternate (pure object storage: no config, hence no promisor, no
+  `insteadOf`, nothing for a helper to be invoked from; a missing object there is a named refusal).
+  Ancestry compares against **HEAD resolved to a sha in the checkout**, because inside the scratch
+  the ref `HEAD` means the SCRATCH's own unborn HEAD. **The fast path is gated on the clone not
+  being partial** (`_component_set_is_partial`, three-valued, UNKNOWN ⇒ treated as partial: the
+  conservative branch costs a fetch, not correctness), because that path reads the baseline in the
+  live repository — and `cat-file -e` cannot even probe presence there: measured with
+  `GIT_NO_LAZY_FETCH=1` set, it answered 0 for a blob whose `show` then FAILED, since it answers
+  about PROMISED objects. `GIT_NO_LAZY_FETCH=1` is carried as a **belt, not the control** (git ≥ 2.36;
+  an unset variable does nothing silently, which is exactly why it cannot be the control).
+  **UNTRUSTED REPOSITORY STATE IS BIGGER THAN CONFIG (roborev job 264).** Closing git's *config*
+  sources and treating "untrusted repository state" as closed with them left three holes, and the
+  shape of the error is the recurring one — one axis closed, space declared done. **(1) Replacement
+  refs**: `refs/replace/<sha>` transparently substitutes another commit, so the pre-flight reported
+  the CANONICAL sha while reading a FORGED, smaller manifest, and PASSed — the worst pairing, since
+  the audit trail looks right. Now `GIT_NO_REPLACE_OBJECTS=1` in the allowlist plus
+  `--no-replace-objects` on every lane-local object read. **(2) The transfer hop could EXECUTE**:
+  `git fetch` in the LIVE repository reads its LOCAL config (only the *environment* is sanitisable
+  — a `.git/config` is a file), so a local `url.*.insteadOf` + `protocol.ext.allow=always` rewrote
+  the scratch path to an `ext::` helper and ran commands DURING the fetch, before the sha
+  comparison that was meant to make the hop "untrusted but safe". **A check placed AFTER a harmful effect can only REPORT it, never PREVENT it — so if the harm is
+  EXECUTION, the control must be that the execution cannot be REACHED, not that its result is
+  detected** (lead ruling, round 14; the sha-equality assert sat downstream of the fetch it was
+  meant to validate). The corollary for tests: assert UNREACHABILITY, with a positive control
+  proving the attack executes in a plain repository, or the green means nothing. A protocol allowlist is not expressible either
+  (`-c protocol.allow=never` loses to a more specific local `protocol.<name>.allow=always`, and
+  the helper-name space is whatever `git-remote-*` is on PATH). So there is **no import at all**:
+  the scratch object store is made visible via `GIT_ALTERNATE_OBJECT_DIRECTORIES` — an object
+  SOURCE, not a transport — and NOTHING is written into the shared `.git` (no pack, no ref, no
+  `FETCH_HEAD`). Safe for the reason the transport was not: every read is BY A SHA whose provenance
+  is the isolated chain, and objects are **content-addressed**. `baseline-transfer-mismatch` and the
+  private-ref machinery are gone with it — the class is ELIMINATED, not detected. **(3) The scp-form
+  leak, third instance of one family** (raw → flattened-not-redacted → scheme-only redaction):
+  `TOKEN@github.com:owner/repo` was canonical because the normaliser dropped userinfo before
+  comparing, and an ssh error then echoed it into the SUMMARY. Fixed by **narrowing what is
+  accepted** (scp userinfo must be exactly `git`) rather than widening the scrubber again — though
+  the scrubber covers scp form too, since a REJECTED value is still rendered. **(4) Cleanup on
+  SIGNALS**, the second axis of round 9's "cleanup registration precedes resource creation": bash
+  runs no EXIT trap for a signal with its default disposition, so INT/TERM/HUP now have handlers,
+  installed before the resources exist, saving and restoring the caller's.
+  **THE ISOLATED HOP'S ENVIRONMENT IS AN ALLOWLIST, AND THE OBJECTS ARE FETCHED ONLY WHEN
+  ABSENT (roborev job 258).** Neutralising `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and stopping
+  there left the "isolated" hop inheriting `GIT_CONFIG_COUNT`/`KEY_*`/`VALUE_*`,
+  `GIT_CONFIG_PARAMETERS` and `GIT_TEMPLATE_DIR` — each measured to redirect a fetch via
+  `url.<attacker>.insteadOf`, the template by seeding the *new* repo's own LOCAL config. A HOP 1
+  redirect is worse than a hop 2 one: the sha the isolated hop observes and the commit
+  transferred in then BOTH come from the attacker, so the equality assert compares two values
+  that AGREE and emits a **false PASS**. That was **enumerating one axis and declaring the space
+  enumerated** — so every isolated git call now runs under **`env -i` plus an allowlist**
+  (`ADMIT` what git needs to REACH and AUTHENTICATE to the remote, each entry carrying its
+  reason; `CLEAR` everything that can change WHAT it fetches or WHAT it runs), which makes new
+  git environment variables cleared BY DEFAULT rather than needing to be discovered. Lane-local
+  reads are deliberately NOT wrapped: the only value needing provenance is the SHA, and
+  everything addressed by it is **content-addressed**. **And the baseline sha now comes from a
+  ref ORACLE (`git ls-remote`), with objects fetched only when this repository lacks that
+  commit** — measured 3.74 s / **92 MB of full history per invocation** → 0.51 s / no transfer;
+  `--filter=blob:none` was rejected on measurement (it leaves the manifest blob absent exactly
+  when `main` changed it, failing a correct tree). The ref value is still read live, which is
+  what "fetched in THIS invocation" is about; the oracle's output is remote-controlled text and
+  is VALIDATED (`baseline-ref-unparsable`), never merely parsed.
+  **THE BASELINE IS READ AS DATA; NOTHING FETCHED IS EVER EXECUTED (REQ-3544-01, lead ruling).**
+  The first design derived the baseline set by extracting `origin/main:scripts/agent-gate.sh` and
+  RUNNING it (`bash <fetched> --list`). **Six of that mechanism's seven High-severity findings
+  traced to that one decision**, and its three fixes each moved the hole one layer outward (a
+  symbolic remote name ⇒ the validated URL ⇒ the URL in `argv`) — the signature of a **shared
+  channel between data and control**, where the standing ruling (#3312) is to REMOVE the channel,
+  not to choose a rarer delimiter. So: the branch side is the **in-process `COMPONENTS` array**
+  (what this run will actually dispatch), and the baseline side is **`git show
+  <sha>:scripts/agent-gate.components`** — a committed DATA manifest, parsed under a CLOSED
+  grammar (one name per line; blank lines and `#` comments skipped; anything else, INCLUDING a
+  name with leading/trailing whitespace, is a NAMED refusal — a parser that trims is a parser
+  that guesses). **What this CONVERTS the six findings into, rather than eliminating:** a
+  redirected or hostile baseline now yields a **wrong component list, which the comparison itself
+  detects**, instead of arbitrary code execution with the developer's credentials. Everything
+  built for the old mechanism is **KEPT as defence in depth** — identity/transport/host/path
+  pinning, the isolated fetch (URL written into a 0600 config by a shell builtin so it never
+  enters `argv`), the verified transfer hop, the mode-dependent bound, shallow ancestry, the
+  redact+flatten detail path. **The local manifest is ASSERTED against the running array on every
+  run** (`manifest-missing`/`-garbage`/`-stale`, fail-closed, ORDER included), and that assert is
+  what makes a manifest baseline trustworthy at all: without it the file is an unverified claim,
+  and a branch that grew `COMPONENTS` without regenerating the manifest would — once merged —
+  leave `main`'s manifest SHORT, so every later branch would compare against a too-small baseline
+  and silently excuse real skew. Regenerate with `{ sed -n -e '/^[^#]/q' -e p
+  scripts/agent-gate.components; scripts/agent-gate.sh --list; }` and commit it.
+  **One TRANSITIONAL fallback, also data-only, and it is UNREACHABLE BY ASSERTION rather than by
+  reasoning:** the baseline's tree is **probed first**, as its own step, with **three** outcomes —
+  `present` ⇒ the manifest and NOTHING ELSE (every failure of that read is an ERROR; the textual
+  path is a **hard refusal** here), `verified-absent` ⇒ the gate script's **single-line top-level
+  `COMPONENTS=(…)` declaration extracted AS TEXT** (never executed), `could-not-tell` ⇒ **REFUSE**
+  (`baseline-probe-unmeasured`). "The fallback is self-limiting" was true and **not enough**: that
+  is a property someone reasoned about and nothing measured, so a refactor or a deleted manifest
+  would silently re-enable the brittle path — a pass derived from the ABSENCE of a bad signal.
+  **`git show` cannot answer the question**: its non-zero exit conflates "no such path" with "bad
+  object" with "unreadable repository", so absence is never inferred from it; `git ls-tree <rev> --
+  <path>` separates them affirmatively (rc 0 + an entry / rc 0 + NO entry / rc ≠ 0), and a non-blob
+  entry is its own refusal. The payoff is **mechanical expiry instead of trust**: once the manifest
+  is on `main` every baseline measures `present`, so path 2 is dead code that any attempt to enter
+  ERRORS. The extractor refuses loudly on any shape it does not recognise and **NAMES it** ("is not
+  a SINGLE-LINE literal"), so a future reflow on `main` — which would refuse for **every branch at
+  once**, fail-closed rather than a false green — surfaces as that sentence and not as a mystery.
+  Every baseline-bearing verdict line ends by naming its baseline source, so use of the fallback is
+  visible rather than inferred.
+  And `origin` must **NAME the canonical upstream**, HOST INCLUDED
+  (`github.com/pmcfadin/cqlite`, one hard-coded literal, EXACT equality after normalising the
+  spellings git accepts — scheme forms, scp-like, userinfo, an ssh port, `www.`, `.git`, case):
+  `origin` merely EXISTING made `git remote set-url origin <anything>` a git-config-shaped
+  opt-out, and it fires BY ACCIDENT in the fork workflow, where a contributor's fork `main` is a
+  stale baseline stamped `PASS`. **An OWNER/REPO-only match is NOT enough, and "err toward
+  accepting an ambiguous host" was WRONG here** — it accepted `evil.example/pmcfadin/cqlite` and,
+  needing no hostile host at all, ANY LOCAL PATH ending in those two segments — which, while the
+  pre-flight still RAN the baseline's copy of the gate, admitted arbitrary code and not merely a
+  wrong baseline (identity and execution were one concern, not two). Under REQ-3544-01 what a
+  loose identity buys is a baseline of unknown PROVENANCE, from which no PASS may be derived, so
+  the check stays exactly as strict — as defence in depth rather than as the only thing standing
+  between a re-pointed remote and code execution. Anything unverifiable from the string (an ssh alias, a mirror, a local
+  path, `file://`, a look-alike host) is a NAMED non-PASS, as is a URL-less `origin`. **And the URL grammar is CLOSED AXIS BY AXIS, because three rounds were "too permissive" in
+  a NEW place each time** (no host; host but no transport; then `http://`/`git://` accepted):
+  transport (**`https://` ONLY since #3544/job 296** — `http://` and `git://` authenticate
+  nothing, so an on-path impersonator supplies the objects this run certifies against; when the
+  rule was written those objects were EXECUTED, which is why it was a High. **`ssh://`,
+  `git+ssh://`, `ssh+git://` and scp-form `git@host:path` WERE accepted and are now REFUSED
+  (`ssh-transport:<form>`)**: the isolated environment must admit `HOME` for key and
+  `known_hosts` discovery, so OpenSSH still honours **`~/.ssh/config`**, where a
+  `Host github.com` rule rewrites `HostName` or runs `ProxyCommand`/`Match exec`. That is a
+  redirected baseline AND arbitrary execution behind a URL string that passes the identity check.
+  It is IN MODEL because HOME IS SHARED — every lane runs as one user with a writable
+  `/home/ubuntu`, so the planter is a PEER LANE, not the invoker (an invoker editing their own
+  config is out of model; a non-invoker route is a defect — same shape as #3617). It was met by
+  **DESCOPE, not hardening**, under the standing ruling on this family: a bounded residual was
+  unavailable because `ProxyCommand` EXECUTES, and the usual mitigation — a redirected baseline
+  degrades to a wrong component list the comparison detects — does not reach a harm that lands
+  during TRANSPORT, before any comparison. Measured cost: nil, every lane and CI already use
+  https; an ssh-form checkout now fails closed with the remedy named), host,
+  port (default only), path, and userinfo (ACCEPTED — GitHub Actions writes
+  `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red a legitimate CI
+  checkout — and therefore REDACTED everywhere it is rendered, since SUMMARY blocks get pasted
+  into PR comments). Each axis has one stated rule beside the check; a new variant would be a
+  change to git's URL syntax, not a gap. **The baseline is fetched into a PRIVATE per-run
+  `refs/worktree/…` ref, never `FETCH_HEAD`**: `--refmap=` removed the shared *tracking* write
+  and left `FETCH_HEAD`, which is itself one shared mutable file a concurrent fetch overwrites
+  between the fetch and the read — the run would then compare against a commit it never fetched. **And `--is-ancestor`'s rc 1 is itself three-valued**: in a SHALLOW clone it
+  also means "the connecting history is absent", so rc 1 is definitive only in a repo PROVEN
+  complete (`unknown` shallowness ⇒ INDETERMINATE) — otherwise a legitimate committed removal
+  in a shallow checkout reds as BEHIND. **Corollary
+  for tests**: hermetic fixtures use local origins, so they SUBSTITUTE THE ARTIFACT — one shared
+  helper rewrites the canonical literal in the fixture's own scratch copy of the gate and verifies
+  the pin took (`scripts/tests/lib/agent-gate-canonical-pin.sh`) — never a settable seam. The
+  first design let local paths through so the fixtures would work, i.e. **the test hook and the
+  vulnerability were the same fact**; and the check REGRESSED three suites whose local origins it
+  rejected (`test_agent_gate_delta.sh`'s two real `--delta` fixtures stopped at the pre-flight
+  instead of reaching their REFUSED paths — a `tooling-tests` FAIL invisible to `--lite`). Or `FAIL-CLOSED … baseline NOT measured (<kind>)` for a
+  failed fetch/absent `origin`/an empty or ungrammatical baseline manifest/a baseline declaration
+  that cannot be read as text/an unreadable baseline-or-`HEAD` set/**a host on which the probe
+  cannot be BOUNDED** (in which case the fetch is not run at all — an unbounded fetch
+  could hang `--lite` on a stall or an auth prompt, and a missing capability must not inherit
+  the permissive branch) — **never a SKIP and never a fallback to an empty baseline**, which
+  would excuse every branch. A branch-only
+  component is NOT skew. Fail-closed in the **certifying** modes (full, `--delta`); `--lite`
+  and `--only` stamp the same line `ADVISORY-*` and cannot fail on it. **No opt-out env var,
+  and none may be added** — rebasing is always available, so an escape hatch could only buy a
+  vacuous green.
 - **A run whose worktree mutates MID-RUN cannot certify (#2926).** Every mode captures a tree
   identity at start, re-verifies it at each component boundary + the terminal emit, and FAILs closed
   with `tree-integrity: FAIL (tree-mutated-midrun; head <a>→<b>; changed: …)`. Every SUMMARY carries
@@ -1310,9 +1628,77 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   main 10 commits ahead, whose head gate FAILed `core-tests` only because a known flake's fix
   (`5e08db201`, #3514) was on main and absent from that base — the benign direction; the malign one is
   a PASS at a stale head hiding an interaction with something that landed in between. A gate on the
-  MERGE RESULT is #3650 and is deliberately not implemented here (nor is a staleness bound or a "your
-  base is N commits behind" advisory). Report the verdict as "gate of record verified at `<sha>`",
-  never "certified against main". With
+  MERGE RESULT is **#3650 SLICE 2** and is still not implemented here. Report the verdict as "gate of
+  record verified at `<sha>`", never "certified against main".
+  **What #3650 SLICE 1 DID add — a non-blocking BASE-STALENESS ADVISORY, which is information and
+  not a verdict.** `scripts/flow/base-staleness.sh` (runnable by hand — it is the mechanization of
+  the standing triage question *"is the fix for this red already on main and merely absent from my
+  base?"*) reports `N` commits behind the **merge-base** with `origin/main` (never the base ref's
+  tip — #3392) and `M` of those touching the diff's **blast radius**, which is
+  *(paths the diff touches) + (a hard-coded gate-global set)* — content that can change ANY gate's
+  verdict regardless of the diff (`.config/nextest.toml`, the toolchain pin, the Cargo manifests,
+  `scripts/agent-gate.sh`, `scripts/ci/**`, **`scripts/tests/**`**, `cqlite-core/tests/support/**`,
+  `test-data/**`, `.github/workflows/**`). That set is **one NAMED, COMMITTED list
+  (`GATE_GLOBAL_PATTERNS`) with no env override**, never an inline glob: an override is
+  settable by the party it constrains, *"which paths stale my certification"* is exactly what a
+  lane wanting to skip a re-gate would widen, and the next person adding a shared test-support
+  directory has to be able to FIND the list. **Membership asserts ONE predicate** — *content here can
+  change a gate's verdict INDEPENDENTLY OF THE DIFF* — not "is important" or "is shared"; to add an
+  entry, state which gate COMPONENT it can flip and how you MEASURED its selectivity.
+  `scripts/tests/**` is in the set because the gate does not merely READ that roster, it EXECUTES it
+  (`tooling-tests` runs ~16 of them), so one commit touching one of those files reds EVERY lane's
+  full gate — the predicate verbatim — and it was measured before being added (28 → 37 of 107, 9
+  commits staling only because of it), while `deny.toml` and the loose `scripts/*.sh` helpers were
+  measured and NOT added because they fire zero times. **And the list is DECLARED NON-CLOSED in the
+  output**: it is a curated, measured list of RECOGNISED gate-global content, so a gate-global path
+  absent from it is a false negative — declared as gap 2 of 2 beside the dependency-closure gap,
+  because declaring one gap while having two affirms a completeness the list does not have.
+  **The two path sources are RENAME-SYMMETRIC by construction, and that is a FAIL-OPEN if broken.**
+  The diff side is porcelain (`git diff`), which honours `diff.renames` (git default TRUE since 2.9)
+  and reports a rename's DESTINATION ONLY; the commit side is plumbing (`git diff-tree`), which
+  rename-detects only under an explicit `-M`. Unpinned, a PR that renames a path — routine here, the
+  campsite rule makes splits normal — loses the OLD path, a commit behind editing it matches NEITHER
+  half, and the scan reports `blast-radius 0 RECOGNISED` on a genuinely stale base. `diff.relative`
+  is the same class and is worse because the INVOKER controls it: set, porcelain run from a
+  subdirectory strips the prefix, making the count a function of cwd. Both are pinned off on the
+  porcelain call; **do NOT add `-M` to the `diff-tree` call**, which would reintroduce the asymmetry
+  from the other direction. `premerge-assert.sh` prints the finding on
+  `PREMERGE: ADVISORY` lines and **can never fail on it** — an absent, failing or `UNMEASURED`
+  advisory is REPORTED and is not fatal in slice 1 — and the three `PREMERGE: SCOPE` lines are
+  RETAINED, because slice 1 does not close the gap they disclose. Three properties to carry:
+  **(1)** the output is ANCHORED so it cannot be pasted or grepped as a certification. **The
+  absolute form of this property was FALSIFIED BY REVIEW and the correction is recorded rather than
+  softened**: it read *"no `PASS`, no `OK`, no `RESULT:` in any run"*, which is impossible because the
+  advisory prints repository-controlled paths VERBATIM — `test-data/**` is gate-global and the tracked
+  path `test-data/scripts/CI_SMOKE_TEST_USAGE.md` contains `OK`; three tracked paths do today, and the
+  test asserting the absolute form passed only because the sampled run's matched set happened to
+  exclude them, a test passing for the wrong reason. What holds instead: **every** output line, stdout
+  AND stderr, begins with `BASE-STALENESS: `; every dynamic field is CONTROL-CHARACTER SANITIZED
+  (git PERMITS NEWLINES IN PATHS, and unsanitized such a path emits a line with NO prefix, breaking the
+  anchor everything rests on) while otherwise printing the path verbatim, because masking it would
+  mangle it for the reader — #3312's rule is to anchor or remove the channel, never to pick a rarer
+  delimiter; the verdict appears ONLY on a `verdict ` line carrying a token from the closed set
+  {`STALE-RECOGNISED`, `NO-STALENESS-RECOGNISED`, `UNMEASURED`}, prose going on `verdict-detail` lines;
+  and the script's own STATIC TEMPLATE TEXT carries none of the three tokens, asserted STRUCTURALLY
+  over the source file, which is provable where a claim about one sample run is not. **Declared
+  residual: a repository path CAN contain a reserved substring and the advisory prints it — the anchor
+  is what makes that harmless.** The no-finding verdict is `NO-STALENESS-RECOGNISED` (a *scan result*,
+  never `FRESH`/`CLEAN`); **(2)** `M = 0` prints
+  `0 RECOGNISED`, never a bare `0`, and every run prints its own `NON-EXHAUSTIVE` lines, because the
+  blast radius is **not a dependency closure** — a commit changing an item the diff CALLS while
+  touching neither the diff's paths nor a gate-global path is reported as NOT staling, a real
+  false-negative class that is declared, filed, and not closed; **(3)** exit `4` is
+  `STALE-RECOGNISED`, `5` is `UNMEASURED`, and **a consumer MUST treat `5`/`UNMEASURED` as STALE,
+  never as fresh** — the standing rule against deriving a pass from the absence of a bad signal.
+  The definition was chosen BY MEASUREMENT against the case that produced the issue
+  (`docs/round-artifacts/issue-3650-blast-radius-measurements.md`): on PR #3362 the culprit commit
+  and the diff share **no path**, so path intersection alone would call that certification fresh
+  exactly when it was not, while intersection + gate-global fires on 37 of 107 commits behind (35%)
+  — measured at `origin/main` `b1e8598a2`, subject `4bc6b913a`, the sha quoted because `behind` is a
+  function of where main was — leaving 65% of the churn non-staling. The run NAMES the culprit
+  (`matched 5e08db201 gate-global .config/nextest.toml`), so the detection is attributable rather
+  than a coincidence on a count — and the count is reported BY THE SCRIPT, which is the authority
+  for it; a number quoted in prose here decays exactly like a comment. With
   `--auto` armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
   are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration

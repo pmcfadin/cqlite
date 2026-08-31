@@ -352,7 +352,7 @@ fn a_numeric_looking_text_udt_field_is_compared_exactly() {
         ("id", json!(1)),
         (
             "ma",
-            json!([{"key": "home", "value": {"_type": "address", "street": "1 Navy Way",
+            json!([{"key": "home", "value": {"street": "1 Navy Way",
                     "city": "Arlington", "zip": "00000"}}]),
         ),
     ])];
@@ -365,7 +365,7 @@ fn a_numeric_looking_text_udt_field_is_compared_exactly() {
             ("id", json!(1)),
             (
                 "ma",
-                json!([{"key": "home", "value": {"_type": "address",
+                json!([{"key": "home", "value": {
                         "street": "1 Navy Way", "city": "Arlington", "zip": wrong}}]),
             ),
         ])];
@@ -760,8 +760,9 @@ fn a_text_map_key_is_compared_by_kind_and_a_numeric_one_still_pairs() {
     let schema = schema_of(UDT_MAP_DDL, "t");
     let address = json!({"street": "s", "city": "c", "zip": "z"});
     let golden = vec![row(&[("id", json!(1)), ("ma", json!({"0": address}))])];
-    // The JSON egress names a UDT's type in `_type`; the golden does not carry it.
-    let cli_address = json!({"_type": "address", "street": "s", "city": "c", "zip": "z"});
+    // Since #3629 the JSON egress renders a UDT as its declared fields and
+    // nothing else, i.e. the same shape the golden carries.
+    let cli_address = json!({"street": "s", "city": "c", "zip": "z"});
 
     let right = vec![row(&[
         ("id", json!(1)),
@@ -798,61 +799,38 @@ fn a_text_map_key_is_compared_by_kind_and_a_numeric_one_still_pairs() {
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
 }
 
-/// R3: the JSON egress's `_type` discriminator is REQUIRED — present, a string,
-/// and the name the committed `CREATE TYPE` declares. It used to be stripped
-/// unconditionally, so all three of these regressions passed.
+/// R3, INVERTED BY #3629. The JSON egress used to inject a `_type` discriminator
+/// naming the UDT's type, and this lane required it to be present, a string, and
+/// the name the committed `CREATE TYPE` declares. `cassandra-5.0.8`'s
+/// `UserType.toJSONString` writes `{"field": value, …}` and NO type key, so that
+/// requirement demanded output the reference tool never produces — and it
+/// collided with any UDT declaring a field of that name. The injection is gone,
+/// and what this lane must now catch is its REINTRODUCTION: an object key the
+/// `CREATE TYPE` does not declare is a divergence, whatever it is called.
 #[test]
-fn the_json_udt_discriminator_must_name_the_declared_type() {
+fn a_json_udt_key_the_ddl_does_not_declare_is_a_divergence() {
     let schema = schema_of(PERSON_DDL, "t");
-    let golden = vec![row(&[
-        ("id", json!(1)),
-        ("p", json!({"first_name": "A", "last_name": "B", "age": 30})),
-    ])];
     let fields = json!({"first_name": "A", "last_name": "B", "age": 30});
+    let golden = vec![row(&[("id", json!(1)), ("p", fields.clone())])];
 
-    // The shape that must PASS: the declared name, in the field the egress uses.
-    let right = vec![row(&[
-        ("id", json!(1)),
-        (
-            "p",
-            json!({"_type": "person", "first_name": "A", "last_name": "B", "age": 30}),
-        ),
-    ])];
+    // The shape that must PASS: the declared fields and nothing else, i.e. the
+    // golden's own shape.
+    let right = vec![row(&[("id", json!(1)), ("p", fields.clone())])];
     let report = compare_rows(&golden, &right, &schema, &["id"], &[], &[], Egress::Json);
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
 
-    // An unquoted CQL identifier is case-insensitive, so the case of the name is
-    // not a divergence.
-    let folded = vec![row(&[
-        ("id", json!(1)),
-        (
-            "p",
-            json!({"_type": "PERSON", "first_name": "A", "last_name": "B", "age": 30}),
-        ),
-    ])];
-    let report = compare_rows(&golden, &folded, &schema, &["id"], &[], &[], Egress::Json);
-    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
-
-    // The three shapes that must FAIL, each naming the column and the type.
-    for (why, cli_value) in [
-        ("absent", fields.clone()),
-        ("wrong name", {
-            let mut o = fields.clone();
-            o["_type"] = json!("address");
-            o
-        }),
-        ("not a string", {
-            let mut o = fields.clone();
-            o["_type"] = json!(7);
-            o
-        }),
-    ] {
-        let cli = vec![row(&[("id", json!(1)), ("p", cli_value)])];
+    // Any undeclared key FAILS, naming the column and the type. `_type` is the
+    // historical injection (issue #3629); `_keyspace` was its sibling; `zzz`
+    // shows the rule is about DECLARATION, not about a marker denylist.
+    for extra in ["_type", "_keyspace", "zzz"] {
+        let mut o = fields.clone();
+        o[extra] = json!("person");
+        let cli = vec![row(&[("id", json!(1)), ("p", o)])];
         let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
         assert_eq!(
             report.diffs.len(),
             1,
-            "a `_type` that is {why} must fail: {:?}",
+            "an undeclared `{extra}` key must fail: {:?}",
             report.diffs
         );
         assert!(
@@ -927,10 +905,8 @@ fn a_duplicate_json_egress_column_is_a_named_failure_even_when_the_last_one_matc
 /// because the duplicate was gone before it ran.
 #[test]
 fn a_duplicate_json_udt_field_is_refused_before_the_comparison_sees_it() {
-    let why = cli_json_rows(
-        r#"[{"id":1,"p":{"_type":"person","first_name":"SPURIOUS","first_name":"A"}}]"#,
-    )
-    .expect_err("a duplicate UDT field is malformed egress");
+    let why = cli_json_rows(r#"[{"id":1,"p":{"first_name":"SPURIOUS","first_name":"A"}}]"#)
+        .expect_err("a duplicate UDT field is malformed egress");
     assert!(
         why.contains("duplicate object key `first_name`") && why.contains("egress[0].p"),
         "the failure must name the field path and the duplicated field: {why}"
@@ -985,13 +961,13 @@ fn the_accepted_udt_representation_is_scoped_to_the_egress_format() {
         ),
     ])];
 
-    // JSON renders a UDT as a field→value object (plus the `_type` the golden
-    // does not carry).
+    // JSON renders a UDT as a field→value object: since #3629 the declared
+    // fields and nothing else, i.e. the golden's own shape.
     let json_object = vec![row(&[
         ("id", json!(1)),
         (
             "p",
-            json!({"_type": "person", "first_name": "Ada",
+            json!({"first_name": "Ada",
                      "last_name": "Lovelace", "age": 36}),
         ),
     ])];
@@ -1123,8 +1099,9 @@ fn an_empty_csv_member_does_not_satisfy_a_null_udt_field() {
 }
 
 /// The `udt_nested` golden's `e` value, with `home` decoded as `sstabledump`
-/// decodes it. The CLI's spelling of the same value carries the `_type`
-/// discriminator and, until the `e.home` gap closes, blob hex for `home`.
+/// decodes it. The CLI's spelling of the same value carries the same declared
+/// fields (issue #3629 removed the injected type key) and, until the `e.home`
+/// gap closes, blob hex for `home`.
 fn nested_udt_golden() -> Vec<Row> {
     vec![row(&[
         ("id", json!(1)),
@@ -1154,7 +1131,7 @@ fn a_field_scoped_skip_still_compares_the_sibling_fields() {
         ("id", json!(1)),
         (
             "e",
-            json!({"_type": "employee", "name": "Grace",
+            json!({"name": "Grace",
                      "home": "0x0000000a31204e617679205761790000000941726c696e67746f6e",
                      "level": 9}),
         ),
@@ -1179,7 +1156,6 @@ fn a_field_scoped_skip_still_compares_the_sibling_fields() {
     // could never do.
     for wrong in ["name", "level"] {
         let mut fields = serde_json::Map::new();
-        fields.insert("_type".into(), json!("employee"));
         fields.insert("name".into(), json!("Grace"));
         fields.insert(
             "home".into(),
@@ -1215,7 +1191,7 @@ fn a_skip_that_matches_nothing_is_reported() {
         ("id", json!(1)),
         (
             "p",
-            json!({"_type": "person", "first_name": "Ada",
+            json!({"first_name": "Ada",
                      "last_name": "Lovelace", "age": 36}),
         ),
     ])];

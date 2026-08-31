@@ -78,6 +78,68 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-delta-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.bash
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.bash"
+
+# add_local_origin <repo> (#3544): give a scratch fixture a LOCAL bare `origin` whose
+# `main` is the fixture's own current commit. The gate's component-set pre-flight fetches
+# origin/main and FAILS CLOSED in the certifying modes (--delta is one) when the baseline
+# is unobtainable, so a remote-less fixture would exit at that pre-flight instead of
+# reaching the --delta classification these cases are about. A path remote keeps the fetch
+# REAL while staying hermetic (no network), and pushing the fixture's own commit makes
+# origin/main an ancestor of HEAD with an identical component set — so the pre-flight
+# PASSes and the case still measures what it says it measures.
+add_local_origin() {
+  local repo="${1:-}"
+  # An EMPTY/absent path would make the `( cd "$repo" && git remote add … )` below run in the
+  # CURRENT tree — `cd ""` succeeds in bash and stays put. Refused loudly instead (the class
+  # cost a real `git remote set-url origin` on a live checkout in the component-set suite).
+  [ -n "$repo" ] && [ -d "$repo" ] \
+    || { echo "FATAL: add_local_origin needs an existing fixture dir (got '${1:-}')" >&2; exit 1; }
+  git init -q --bare "$repo.origin.git" >/dev/null 2>&1
+  git -C "$repo.origin.git" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
+  ( cd "$repo" \
+      && git remote add origin "$repo.origin.git" \
+      && git push -q origin HEAD:refs/heads/main ) >/dev/null 2>&1
+}
+
+# copy_gate_with_pin <repo> (#3544 / roborev job 225): copy the gate into a fixture AND pin
+# its canonical-identity literal to the LOCAL origin add_local_origin will create.
+#
+# The pre-flight validates that `origin` NAMES the canonical upstream
+# (`github.com/pmcfadin/cqlite`) before fetching a baseline — `origin` merely EXISTING made
+# `git remote set-url origin <anything>` a git-config-shaped opt-out, and a baseline of unknown
+# provenance is not a measurement (while the pre-flight still RAN the fetched gate, it admitted
+# code as well; #3544 REQ-3544-01 reads the baseline as DATA and the check remains, as defence
+# in depth). A LOCAL PATH is therefore deliberately not canonical, and without
+# this pin both --delta fixtures below stop at the pre-flight as `remote-not-canonical`
+# instead of reaching the REFUSED paths they exist to test. That was the job-225 regression:
+# it would have surfaced as a full-gate FAIL under `tooling-tests`, which neither `--lite` nor
+# the component-set suite executes. Substituting the ARTIFACT in the fixture's own scratch
+# copy is the sanctioned pattern (CLAUDE.md); a settable seam would reopen the hole.
+#
+# BEFORE THE FIXTURE'S FIRST COMMIT, deliberately: pinning afterwards leaves the gate copy as
+# a DIRTY working-tree change, which the node fixture's later `git commit -am` swept into the
+# anchor..HEAD diff — so that case REFUSED naming `scripts/agent-gate.sh` instead of the
+# unbuilt module, i.e. passed/failed for a reason unrelated to what it tests (measured).
+copy_gate_with_pin() {
+  local repo="${1:-}"
+  [ -n "$repo" ] \
+    || { echo "FATAL: copy_gate_with_pin needs a fixture dir" >&2; exit 1; }
+  mkdir -p "$repo/scripts"
+  cp "$GATE" "$repo/scripts/agent-gate.sh"
+  agent_gate_pin_canonical_remote "$repo/scripts/agent-gate.sh" "$repo.origin.git" \
+    || { echo "FATAL: could not pin the canonical identity in fixture '$repo'" >&2; exit 1; }
+  # …and the component MANIFEST beside it (#3544 REQ-3544-01): the pre-flight reads its
+  # baseline as DATA and first asserts the working tree's manifest matches the running
+  # COMPONENTS array, so a gate copy without one stops at `manifest-missing` — in `--delta`,
+  # a CERTIFYING mode, that is fail-closed and no case below would reach its REFUSED path.
+  # BEFORE the fixture's first commit, for the same reason the pin is: a post-commit write
+  # leaves the fixture DIRTY and gets swept into an anchor..HEAD diff.
+  agent_gate_install_components_manifest "$repo/scripts/agent-gate.sh" \
+    || { echo "FATAL: could not install the component manifest in fixture '$repo'" >&2; exit 1; }
+}
+
 # assert_verdict <label> <expected> <paths...>: pipe the paths through the hidden
 # --delta-classify hook and assert the final VERDICT line equals <expected>.
 assert_verdict() {
@@ -459,7 +521,7 @@ fi
 #     real working tree is never touched.
 rn_repo="$tmp/rename-repo"
 mkdir -p "$rn_repo/scripts"
-cp "$GATE" "$rn_repo/scripts/agent-gate.sh"
+copy_gate_with_pin "$rn_repo"
 (
   cd "$rn_repo" \
     && git init -q \
@@ -469,6 +531,7 @@ cp "$GATE" "$rn_repo/scripts/agent-gate.sh"
     && printf '#!/usr/bin/env bash\necho production\n' > scripts/deploy.sh \
     && git add -A && git commit -qm anchor
 ) >/dev/null 2>&1 && rn_ok=1 || rn_ok=0
+add_local_origin "$rn_repo"   # #3544 component-set pre-flight baseline
 if [ "$rn_ok" = 1 ]; then
   rn_anchor=$(cd "$rn_repo" && git rev-parse HEAD 2>/dev/null)
   ( cd "$rn_repo" && git mv scripts/deploy.sh docs/deploy.md && git commit -qm rename ) >/dev/null 2>&1
@@ -550,7 +613,7 @@ esac
 #      green. Mirrors the rename-refuses harness (copies agent-gate.sh into a temp repo).
 nd_repo="$tmp/node-refuse-repo"
 mkdir -p "$nd_repo/scripts" "$nd_repo/bindings/node/__test__"
-cp "$GATE" "$nd_repo/scripts/agent-gate.sh"
+copy_gate_with_pin "$nd_repo"
 (
   cd "$nd_repo" \
     && git init -q \
@@ -558,6 +621,7 @@ cp "$GATE" "$nd_repo/scripts/agent-gate.sh"
     && printf 'test("x", () => {});\n' > bindings/node/__test__/probe.test.js \
     && git add -A && git commit -qm anchor
 ) >/dev/null 2>&1 && nd_ok=1 || nd_ok=0
+add_local_origin "$nd_repo"   # #3544 component-set pre-flight baseline
 if [ "$nd_ok" = 1 ]; then
   nd_anchor=$(cd "$nd_repo" && git rev-parse HEAD 2>/dev/null)
   ( cd "$nd_repo" && printf 'test("x", () => { expect(1).toBe(1); });\n' > bindings/node/__test__/probe.test.js \

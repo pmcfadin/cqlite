@@ -2,9 +2,47 @@
 #
 # Regression tests for scripts/flow/premerge-assert.sh (issues #2668, #3465).
 #
-# Fast + hermetic: `gh` is shimmed by a PATH-prepended mock that emits the
-# two-token line the script's `--jq '.headRefOid + " " + .state'` expression
-# would produce (or a failure), driven by env vars — no network, no GitHub.
+# `gh` is shimmed by a PATH-prepended mock that emits the two-token line the
+# script's `--jq '.headRefOid + " " + .state'` expression would produce (or a
+# failure), driven by env vars — no network, no GitHub.
+#
+# FAST + HERMETIC, AND THAT CLAIM IS AGAIN TRUE (#3650 review R5 F2). It was not:
+# `run()` invoked the SHIPPED premerge-assert.sh, which invokes the SHIPPED
+# base-staleness.sh, which read the AMBIENT checkout — so 13 success-path cases
+# ran repeated repository-dependent scans whose cost scales with how far this
+# lane's base is behind, and on a stock macOS (no GNU coreutils) they ran with the
+# bound DISCARDED by the runner shim below. A suite header saying "hermetic" while
+# every green case measured the surrounding repository is the same defect class as
+# a contract stating an absolute the code violates.
+#
+# TWO CHANGES REMOVE IT, AND NO CASE IS LOST:
+#   * `run()` now invokes a SCRATCH COPY of premerge-assert.sh beside an
+#     IMMEDIATE advisory stub. Those cases are about refusals, provenance and the
+#     scope disclaimer — the advisory only has to be invoked and reported, never
+#     to scan anything.
+#   * the ONE wiring case (the only case whose subject IS "the shipped script
+#     really invokes the shipped advisory") runs the shipped artifacts against a
+#     3-commit SYNTHETIC repository built here, with the certified sha being that
+#     repository's own HEAD. It is bounded by construction, independent of the
+#     ambient checkout, and — unlike the ambient version, which could only pin the
+#     advisory's PREFIX — it pins MEASURED values (`behind 1 commits`,
+#     `blast-radius 1 RECOGNISED`, `verdict STALE-RECOGNISED`), because a
+#     synthetic fixture's staleness IS a property of this suite.
+# Nothing here reads the surrounding repository any more; every case that pins
+# advisory CONTENT substitutes a stub artifact in a scratch tree, and Case 41d
+# asserts BOTH halves of that — behaviourally (an ordinary case carries the
+# neutral stub's line and NOT the shipped advisory's `NON-EXHAUSTIVE` block) and
+# STRUCTURALLY (exactly ONE invocation of the shipped artifact exists in this
+# file), because the F2 defect was invisible: 161 assertions were green while 13
+# cases scanned the surrounding repository and nothing said so.
+#
+# THE RUNTIME CLAIM, MEASURED RATHER THAN ASSERTED (this lane, git 2.43.0): one
+# shipped-advisory scan costs ~0.03s on a freshly-rebased base (behind 0) and
+# 0.43s on a base 110 commits behind. So the ambient dependency cost the suite
+# 13 x that — ~0.4s rebased but ~5.6s on an 8-day-old base, growing with the
+# lane's staleness, and UNBOUNDED on a stock macOS where the runner shim
+# discarded the bound. That is why the suite's runtime used to be a function of
+# the checkout it happened to sit in; it is now a constant.
 #
 # #3465 adds the gate-of-record half: the assert now takes a THIRD, REQUIRED
 # argument naming the FULL gate's summary file, and refuses to merge without a
@@ -24,7 +62,19 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-T=$(mktemp -d "${TMPDIR:-/tmp}/premerge-assert-test.XXXXXX")
+# THE SCRATCH DIR IS VALIDATED BEFORE ANY PATH IS BUILT FROM IT (#3650 review
+# B5). An unchecked `mktemp` leaves `$T` EMPTY, after which every `"$T/..."` in
+# this suite resolves to an ABSOLUTE path at the ROOT — `/all-output.txt` and
+# synthetic git repos directly under `/` — which a privileged run would really
+# create. Aborting here, BEFORE the trap is installed, also keeps the trap from
+# ever running `rm -rf ""`.
+if ! T=$(mktemp -d "${TMPDIR:-/tmp}/premerge-assert-test.XXXXXX" 2>/dev/null) ||
+  [ -z "$T" ] || [ ! -d "$T" ]; then
+  printf 'FAIL - could not create a scratch directory under %s: refusing to run, because\n' \
+    "${TMPDIR:-/tmp}" >&2
+  printf 'FAIL - every path in this suite would resolve under / instead.\n' >&2
+  exit 1
+fi
 trap 'rm -rf "$T"' EXIT
 
 # --- gh mock -----------------------------------------------------------------
@@ -46,12 +96,105 @@ exit 0
 MOCK
 chmod +x "$BIN/gh"
 
-# run <expected-exit> <description> <args...> — invokes the assert with the gh
-# mock on PATH, captures combined output + exit code. Sets $OUT and $RC.
+# REAL_TO — the HOST's own supported timeout runner, resolved by the SAME
+# algorithm the script under test uses (`timeout` THEN `gtimeout`, each PROBED
+# for `--kill-after`, since BusyBox and older implementations reject the flag).
+# Resolving `timeout` alone here would answer a different question than the
+# script asks and would red on a supported gtimeout-only host (#3650 review R2).
+REAL_TO=""
+for _rt_cand in timeout gtimeout; do
+  _rt_path=$(command -v "$_rt_cand" 2>/dev/null) || _rt_path=""
+  [ -n "$_rt_path" ] || continue
+  if "$_rt_path" --kill-after=1 1 true >/dev/null 2>&1; then
+    REAL_TO="$_rt_path"
+    break
+  fi
+done
+unset _rt_cand _rt_path
+
+# $BIN/timeout — A TEST-ONLY RUNNER SHIM, AND WHY THE WHOLE SUITE NEEDS ONE
+# (#3650 review R3). The script under test requires a runner supporting
+# `--kill-after` and SKIPS the advisory when there is none, which is correct
+# behaviour — so every case asserting advisory CONTENT through `run`/`run_copy`
+# was implicitly asserting that the HOST has GNU coreutils. On a stock macOS
+# without it, 10 assertions demanded advisory output the shipped script is
+# documented not to produce: the suite contradicted its own documented
+# behaviour. The content cases are about the REPORT, not about the bound — the
+# bound is owned, decisively and on both configurations, by Case 41b's four
+# paths, which construct their own PATHs and are unaffected by this shim.
+#
+# It DELEGATES to the host's real runner when there is one, so a real bound
+# still applies wherever one is available, and runs the command directly only
+# when the host has none. It deliberately does NOT implement a bound in bash: a
+# second timing implementation is the kind of mechanism #3650's scope discipline
+# forbids.
+#
+# THE DISCARD BRANCH IS SAFE ONLY BECAUSE EVERY COMMAND IT CAN RUN IS BOUNDED BY
+# CONSTRUCTION, AND THAT WAS NOT TRUE UNTIL #3650 review R5 F2. It used to be
+# reached by 13 success-path cases running the SHIPPED advisory against the
+# AMBIENT checkout — repeated repository-dependent scans whose runtime scales
+# with how far this lane's base is behind, with no bound at all on a stock macOS.
+# Now the only commands that reach this shim are (a) IMMEDIATE advisory stubs
+# that print a line and exit, and (b) the ONE wiring case, whose advisory scans a
+# 3-commit SYNTHETIC repository. Both are bounded by their own construction, not
+# by the runner, on every host shape.
+if [ -n "$REAL_TO" ]; then
+  cat >"$BIN/timeout" <<SHIM
+#!/usr/bin/env bash
+exec "$REAL_TO" "\$@"
+SHIM
+else
+  cat >"$BIN/timeout" <<'SHIM'
+#!/usr/bin/env bash
+# No real runner on this host: accept and discard the bound, then run directly.
+case "$1" in --kill-after=*) shift ;; esac
+shift   # the bound in seconds
+exec "$@"
+SHIM
+fi
+chmod +x "$BIN/timeout"
+
+# --- THE NEUTRAL SCRATCH COPY (#3650 review R5 F2) --------------------------
+# `run()` invokes THIS, not the shipped artifact, so no ordinary case reads the
+# ambient checkout. It is a byte copy of premerge-assert.sh beside an IMMEDIATE
+# advisory stub: the script resolves `base-staleness.sh` from its OWN directory
+# with no env override (#3312's enforcer rule), so substituting the ARTIFACT is
+# the only way to change which advisory runs — never a path variable, which would
+# be one more seam a real invoker could set.
+#
+# The stub is DELIBERATELY not silent and not failing: `PREMERGE: ADVISORY`
+# reporting is a property several of these cases inspect in passing, and a silent
+# or erroring advisory has its own dedicated cases in Case 41. It exits 0 with a
+# no-staleness verdict — the boring shape — so nothing here can pass because of an
+# unusual advisory result.
+#
+# Copy failure ABORTS the suite rather than falling back to $ASSERT: a silent
+# fallback would restore the ambient-scan behaviour this exists to remove, and it
+# would do so invisibly.
+NEUTRAL_ADV='#!/usr/bin/env bash
+printf "BASE-STALENESS: neutral immediate stub — this case is not about the advisory\n"
+printf "BASE-STALENESS: verdict NO-STALENESS-RECOGNISED\n"
+exit 0'
+NEUTRAL_DIR="$T/neutral-flow"
+mkdir -p "$NEUTRAL_DIR"
+if ! cp "$ASSERT" "$NEUTRAL_DIR/premerge-assert.sh"; then
+  printf 'FAIL - could not build the neutral scratch copy of premerge-assert.sh: refusing
+' >&2
+  printf 'FAIL - to run, because every case would fall back to scanning the ambient repo.
+' >&2
+  exit 1
+fi
+printf '%s\n' "$NEUTRAL_ADV" >"$NEUTRAL_DIR/base-staleness.sh"
+chmod +x "$NEUTRAL_DIR/base-staleness.sh"
+NEUTRAL_ASSERT="$NEUTRAL_DIR/premerge-assert.sh"
+
+# run <expected-exit> <description> <args...> — invokes the NEUTRAL COPY of the
+# assert with the gh mock on PATH, captures combined output + exit code. Sets
+# $OUT and $RC. The shipped artifact is exercised by the wiring case alone.
 run() {
   local want="$1" desc="$2"
   shift 2
-  OUT=$(PATH="$BIN:$PATH" bash "$ASSERT" "$@" 2>&1)
+  OUT=$(PATH="$BIN:$PATH" bash "$NEUTRAL_ASSERT" "$@" 2>&1)
   RC=$?
   if [ "$RC" -ne "$want" ]; then
     bad "$desc (exit $RC, wanted $want)"
@@ -769,7 +912,10 @@ BADBIN="$T/badbin"
 mkdir -p "$BADBIN"
 printf '#!/bin/sh\necho "awk: cannot allocate" >&2\nexit 1\n' >"$BADBIN/awk"
 chmod +x "$BADBIN/awk"
-OUT=$(PATH="$BADBIN:$BIN:$PATH" bash "$ASSERT" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+# The NEUTRAL copy (#3650 review R5 F2), like every non-advisory case: this one
+# refuses at exit 3 before the advisory is reached, but running the shipped
+# artifact here would leave a second path that could regress into an ambient scan.
+OUT=$(PATH="$BADBIN:$BIN:$PATH" bash "$NEUTRAL_ASSERT" 2421 "$CERTIFIED" "$GOOD" 2>&1)
 RC=$?
 if [ "$RC" -eq 3 ]; then
   case "$OUT" in
@@ -865,6 +1011,740 @@ if run 0 "success path prints SCOPE in the anchored-delta case too" \
     *) bad "scope: the delta pair must carry the SCOPE clause too (got: $OUT)" ;;
   esac
 fi
+# #3650 SLICE 1 EXTENSION. Slice 1 ships the base-staleness ADVISORY, which does
+# NOT close the merge-result gap, so all THREE original SCOPE lines are RETAINED
+# verbatim and only ONE line is added pointing at the advisory. Pinning the three
+# by their own text (not just by the marker) is what makes "retained" checkable:
+# a reword that quietly dropped one would otherwise still satisfy Case 39 above.
+SCOPE1="this proves a full gate PASSed on THIS tree"
+SCOPE2="the tree was certified against current main (#3650)"
+SCOPE3="composes this diff with main tip, which no gate here has executed"
+for shape in direct delta; do
+  if [ "$shape" = direct ]; then
+    run 0 "SCOPE retained (direct)" 2421 "$CERTIFIED" "$GOOD" || continue
+  else
+    run 0 "SCOPE retained (anchored delta)" 2421 "$CERTIFIED" "$ANCHORFULL" "$GOODDELTA" || continue
+  fi
+  missing=""
+  for needle in "$SCOPE1" "$SCOPE2" "$SCOPE3"; do
+    [ "${OUT#*"$needle"}" = "$OUT" ] && missing="$missing | $needle"
+  done
+  if [ -z "$missing" ]; then
+    ok "scope($shape): all THREE #3465 SCOPE lines are retained verbatim (#3650 slice 1)"
+  else
+    bad "scope($shape): a SCOPE line was dropped:$missing"
+  fi
+  case "$OUT" in
+    *"PREMERGE: SCOPE the PREMERGE: ADVISORY lines below measure that gap"*)
+      ok "scope($shape): the added SCOPE line points at the advisory" ;;
+    *) bad "scope($shape): the added SCOPE line must point at the advisory (got: $OUT)" ;;
+  esac
+done
+
+# --- Case 41: the base-staleness ADVISORY (#3650 slice 1) -------------------
+# Slice 1's whole contract is that it changes NO verdict. The advisory is
+# resolved from premerge-assert.sh's OWN directory with no env override
+# (#3312's enforcer rule), so a case needing a different advisory SUBSTITUTES
+# THE ARTIFACT in a scratch copy of the tree — never a path variable, which
+# would be one more seam a real invoker could set.
+#
+# flow_copy <name> <advisory-body|ABSENT> — builds the scratch copy and sets the
+# global $COPY. It sets a GLOBAL rather than printing a path on purpose: a
+# command-substitution form runs in a SUBSHELL, so a bad() inside it would
+# increment a counter that dies with the subshell, and a failed copy would make
+# the caller's `&&` chain skip the case SILENTLY — a vacuous pass. The `local`
+# declarations are split too: `local a="$1" d="$T/$a/x"` reads $a before the
+# assignment takes effect and dies under `set -u`.
+flow_copy() {
+  local name="$1" body="$2"
+  local d="$T/$name/flow"
+  COPY=""
+  mkdir -p "$d"
+  if ! cp "$ASSERT" "$d/premerge-assert.sh"; then
+    bad "flow_copy($name): could not copy premerge-assert.sh into the scratch tree"
+    return 1
+  fi
+  if [ "$body" != ABSENT ]; then
+    printf '%s\n' "$body" >"$d/base-staleness.sh"
+    chmod +x "$d/base-staleness.sh"
+  fi
+  if [ ! -f "$d/premerge-assert.sh" ]; then
+    bad "flow_copy($name): the scratch copy is missing after cp"
+    return 1
+  fi
+  COPY="$d/premerge-assert.sh"
+  return 0
+}
+
+# run_copy <expected-exit> <desc> <copied-assert> <args...>
+run_copy() {
+  local want="$1" desc="$2" script="$3"
+  shift 3
+  OUT=$(PATH="$BIN:$PATH" bash "$script" "$@" 2>&1)
+  RC=$?
+  if [ "$RC" -ne "$want" ]; then
+    bad "$desc (exit $RC, wanted $want)"
+    printf '     output: %s\n' "$OUT"
+    return 1
+  fi
+  return 0
+}
+
+STALE_ADV='#!/usr/bin/env bash
+printf "BASE-STALENESS: behind 107 commits (on origin/main, not reachable from the merge-base)\n"
+printf "BASE-STALENESS: blast-radius 22 RECOGNISED of 107 commits behind\n"
+printf "BASE-STALENESS: verdict STALE-RECOGNISED\n"
+exit 4'
+if flow_copy adv-stale "$STALE_ADV" &&
+  run_copy 0 "a STALE-RECOGNISED advisory still merges (slice 1 changes no verdict)" \
+    "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory: a stale base still reaches PREMERGE: OK" ;;
+    *) bad "advisory: the verdict must be unchanged by the advisory (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: verdict STALE-RECOGNISED"*)
+      ok "advisory: the finding is printed on PREMERGE: ADVISORY lines" ;;
+    *) bad "advisory: STALE-RECOGNISED must be reported on ADVISORY lines (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: behind 107 commits"*)
+      ok "advisory: every line of the advisory's report is carried through" ;;
+    *) bad "advisory: the behind-count line must be carried through (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: SCOPE"*"#3650"*) ok "advisory: the SCOPE disclaimer is STILL printed alongside it" ;;
+    *) bad "advisory: the SCOPE lines must survive (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"treat exit 5 /"*"UNMEASURED as STALE"*)
+      ok "advisory: the UNMEASURED-is-stale consumer contract is stated at the merge point" ;;
+    *) bad "advisory: the UNMEASURED-is-stale contract must be stated (got: $OUT)" ;;
+  esac
+fi
+
+# NON-VACUITY for the four stub cases below: the STALE stub above genuinely
+# carries the shape the case claims (exit 4 + the verdict token), so a case
+# asserting "a stale advisory does not change the verdict" is not testing a stub
+# that silently exits 0.
+if [ "${STALE_ADV#*exit 4}" != "$STALE_ADV" ] &&
+  [ "${STALE_ADV#*STALE-RECOGNISED}" != "$STALE_ADV" ]; then
+  ok "advisory fixture: the stub really exits 4 and really reports STALE-RECOGNISED"
+else
+  bad "advisory fixture: the stale stub does not have the shape the case claims"
+fi
+
+for pair in "5:an UNMEASURED (exit 5) advisory" "9:a BROKEN (exit 9) advisory" \
+  "0:a NO-STALENESS (exit 0) advisory"; do
+  code="${pair%%:*}"
+  what="${pair#*:}"
+  body="#!/usr/bin/env bash
+printf 'BASE-STALENESS: verdict from a stub exiting %s\n' $code
+exit $code"
+  if flow_copy "adv-exit-$code" "$body" &&
+    run_copy 0 "$what cannot change the exit code" "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+    case "$OUT" in
+      *"PREMERGE: ADVISORY"*"exit $code"*)
+        ok "advisory: $what is REPORTED with its exit code, and is not fatal" ;;
+      *) bad "advisory: $what must be reported with exit $code (got: $OUT)" ;;
+    esac
+  fi
+done
+
+# An ABSENT advisory is reported, not fatal — the artifact is simply not copied.
+if flow_copy adv-absent ABSENT &&
+  run_copy 0 "an ABSENT advisory cannot fail the assert" "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: ADVISORY base-staleness.sh is ABSENT"*)
+      ok "advisory: an absent advisory is named on an ADVISORY line, and is not fatal" ;;
+    *) bad "advisory: an absent advisory must be reported (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory: the verdict is unchanged when the advisory is absent" ;;
+    *) bad "advisory: an absent advisory must not change the verdict (got: $OUT)" ;;
+  esac
+fi
+
+# The advisory must measure the CERTIFIED SHA, not this checkout's HEAD (#3650
+# review F1). Invoked with no rev the advisory defaults to HEAD — the LOCAL head,
+# which is exactly what the surrounding assert exists because it can differ from
+# the sha being approved. A report about a different diff than the one being
+# merged is the "satisfied and wrong" shape. The stub ECHOES its own argv, so the
+# case observes the argument rather than reasoning about it.
+ARGV_ADV='#!/usr/bin/env bash
+printf "BASE-STALENESS: argv-count %s\n" "$#"
+printf "BASE-STALENESS: argv1 %s\n" "${1-NO-REV-PASSED}"
+exit 0'
+# NON-VACUITY: the stub genuinely reports its argv, so `argv1 <sha>` cannot be a
+# constant it prints regardless. Run it with NO argument and require the
+# no-rev marker — otherwise the case below would pass against a stub that always
+# printed the sha.
+printf '%s\n' "$ARGV_ADV" >"$T/argv-probe.sh"
+if [ "$(bash "$T/argv-probe.sh" | grep -c 'argv1 NO-REV-PASSED')" -eq 1 ] &&
+  [ "$(bash "$T/argv-probe.sh" whatever | grep -c 'argv1 whatever')" -eq 1 ]; then
+  ok "advisory fixture: the argv stub really echoes its own argument list"
+else
+  bad "advisory fixture: the argv stub does not report its argv (the case would be vacuous)"
+fi
+if flow_copy adv-argv "$ARGV_ADV" &&
+  run_copy 0 "the advisory is invoked with the CERTIFIED sha, not the local HEAD" \
+    "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: argv1 $CERTIFIED"*)
+      ok "advisory: the certified sha is passed to the advisory as its subject rev (#3650 F1)" ;;
+    *) bad "advisory: the advisory must receive the certified sha as \$1 (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: argv-count 1"*)
+      ok "advisory: exactly ONE argument is passed (a second positional is a usage error there)" ;;
+    *) bad "advisory: exactly one argument must be passed (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"argv1 NO-REV-PASSED"*)
+      bad "advisory: the advisory was invoked with NO rev — it would measure the local HEAD" ;;
+    *) ok "advisory: the advisory is never invoked bare (which would default to local HEAD)" ;;
+  esac
+fi
+
+# An advisory printing NOTHING is reported too (an empty report is not a clean one).
+SILENT_ADV='#!/usr/bin/env bash
+exit 0'
+if flow_copy adv-silent "$SILENT_ADV" &&
+  run_copy 0 "a SILENT advisory is reported, not read as clean" "$COPY" 2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"produced NO output"*) ok "advisory: an empty report is named rather than read as a finding" ;;
+    *) bad "advisory: an empty report must be named (got: $OUT)" ;;
+  esac
+fi
+
+# --- Case 41b: the 60s BOUND is never silently dropped (#3650 review B1) -----
+# Two paths, one HANGING stub, and the stub TOUCHES A MARKER FILE before it
+# sleeps — so "was it executed?" is answered by an artifact on disk rather than
+# by reading elapsed time, which would be a wall-clock assert in a correctness
+# test. The stub sleeps a BOUNDED 20s (not forever) so a REGRESSION of either
+# path fails the case instead of hanging the suite, and it redirects the sleep's
+# stdout to /dev/null: a surviving grandchild holding the command-substitution
+# pipe would block the parent for the full sleep even after the bounded child was
+# killed, which is a way for the timeout to "work" and the caller to hang anyway.
+hang_stub() {
+  cat <<STUB
+#!/usr/bin/env bash
+printf 'BASE-STALENESS: hanging stub REACHED\\n'
+: >"$1"
+sleep 20 >/dev/null 2>&1
+printf 'BASE-STALENESS: hanging stub FINISHED - the bound did not apply\\n'
+exit 0
+STUB
+}
+
+# Path 1 — a supported runner PRESENT. A shim stands in for it (the suite cannot
+# wait 60s for the real bound): it RECORDS what the script requested — the kill
+# grace AND the bound — then applies a short one of its own and reports 124 the
+# way `timeout` does. So the case asserts every half of the contract: the
+# constants really reach the runner, `--kill-after` really is passed, and a
+# hanging advisory really is cut off without touching the exit code.
+#
+# THE SHIM MUST ALSO ANSWER THE CAPABILITY PROBE (#3650 review R1/R2): the script
+# now resolves its runner by PROBING `--kill-after=1 1 true`, and a shim that
+# failed that probe would make the script take the SKIP path — the bounded case
+# would then pass for the wrong reason, asserting nothing about the bound. The
+# probe is answered by delegating a plain `<secs> <cmd...>` invocation.
+SHIMD="$T/timeout-shim-bin"
+mkdir -p "$SHIMD"
+cat >"$SHIMD/timeout" <<'SHIM'
+#!/usr/bin/env bash
+grace=none
+case "$1" in
+  --kill-after=*) grace="${1#--kill-after=}"; shift ;;
+esac
+printf 'BASE-STALENESS: bound-shim requested %s grace %s\n' "$1" "$grace"
+shift
+# The capability probe (`--kill-after=1 1 true`) must SUCCEED, or the script
+# concludes there is no supported runner and skips the advisory entirely.
+if [ "$#" -eq 1 ] && [ "$1" = true ]; then
+  exit 0
+fi
+"$@" &
+child=$!
+( sleep 2; kill -9 "$child" 2>/dev/null ) &
+killer=$!
+wait "$child"
+rc=$?
+kill "$killer" 2>/dev/null
+[ "$rc" -ge 128 ] && rc=124
+exit "$rc"
+SHIM
+chmod +x "$SHIMD/timeout"
+
+MARK_A="$T/hang-marker-bounded"
+rm -f "$MARK_A"
+if flow_copy adv-hang-bounded "$(hang_stub "$MARK_A")"; then
+  OUT=$(PATH="$SHIMD:$BIN:$PATH" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    bad "advisory bound: a hanging advisory must not change the exit code (exit $RC, wanted 0)"
+  else
+    ok "advisory bound: a HANGING advisory still reaches exit 0 (the bound applied)"
+  fi
+  # NON-VACUITY: the stub really ran, so "not FINISHED" below is a bound and not
+  # a stub that never started.
+  if [ -f "$MARK_A" ]; then
+    ok "advisory bound: the hanging stub really executed (the case is not vacuous)"
+  else
+    bad "advisory bound: the hanging stub never ran — the bounded case proves nothing"
+  fi
+  case "$OUT" in
+    *"PREMERGE: ADVISORY BASE-STALENESS: bound-shim requested 60 grace 5"*)
+      ok "advisory bound: the 60s bound AND a 5s kill grace are what reach the runner" ;;
+    *"bound-shim requested 60 grace none"*)
+      bad "advisory bound: the runner was invoked WITHOUT --kill-after — a SIGTERM-only bound a child can ignore (#3650 R1)" ;;
+    *) bad "advisory bound: the advisory must be invoked through \`<runner> --kill-after=<grace> <secs>\` (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"hanging stub FINISHED"*)
+      bad "advisory bound: the advisory was AWAITED to completion — the bound did not apply" ;;
+    *) ok "advisory bound: the hanging advisory was cut off before completing" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: ADVISORY"*"exit 124"*)
+      ok "advisory bound: the timeout is REPORTED with its exit code, and is not fatal" ;;
+    *) bad "advisory bound: a timed-out advisory must be reported as exit 124 (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory bound: the verdict survives a timed-out advisory" ;;
+    *) bad "advisory bound: the verdict must be unchanged by a timed-out advisory (got: $OUT)" ;;
+  esac
+fi
+
+# Path 2 — `timeout` ABSENT (stock macOS). The advisory must NOT be executed
+# unbounded; it must be reported unavailable, and the exit code must be
+# untouched. `timeout` cannot be hidden by shadowing (a non-executable file is
+# skipped by PATH lookup, which then finds the real one), so PATH is rebuilt from
+# an explicit symlink set holding every tool the assert needs and NOT `timeout`.
+# `sleep` IS included deliberately: with it present a regression genuinely hangs
+# for the stub's 20s and is caught by the marker, rather than dying instantly for
+# an unrelated reason and passing for the wrong one.
+NOBIN="$T/no-timeout-bin"
+mkdir -p "$NOBIN"
+nobin_ok=1
+for tool in bash awk tr basename dirname sleep; do
+  tp=$(command -v "$tool" 2>/dev/null) || tp=""
+  if [ -z "$tp" ]; then
+    bad "advisory bound: cannot build the no-timeout PATH — \`$tool\` is not on PATH"
+    nobin_ok=0
+    continue
+  fi
+  ln -sf "$tp" "$NOBIN/$tool"
+done
+cp "$BIN/gh" "$NOBIN/gh"
+chmod +x "$NOBIN/gh"
+# Vacuity guard over BOTH candidate names: the script resolves `timeout` THEN
+# `gtimeout` (#3650 review R2), so leaving `gtimeout` reachable would let it
+# escape the constructed PATH and take the BOUNDED path instead.
+for cand in timeout gtimeout; do
+  if [ "$(PATH="$NOBIN" command -v "$cand" 2>/dev/null)" != "" ]; then
+    bad "advisory bound: the no-timeout PATH still resolves \`$cand\` (the case would be vacuous)"
+    nobin_ok=0
+  fi
+done
+
+MARK_B="$T/hang-marker-unbounded"
+rm -f "$MARK_B"
+if [ "$nobin_ok" -eq 1 ] && flow_copy adv-hang-no-timeout "$(hang_stub "$MARK_B")"; then
+  OUT=$(PATH="$NOBIN" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    bad "advisory bound: an unavailable bound must not change the exit code (exit $RC, wanted 0)"
+  else
+    ok "advisory bound: no \`timeout\` on PATH still reaches exit 0"
+  fi
+  if [ -f "$MARK_B" ]; then
+    bad "advisory bound: the advisory RAN UNBOUNDED with no \`timeout\` available (#3650 B1)"
+  else
+    ok "advisory bound: with no \`timeout\`, the advisory is NOT executed at all"
+  fi
+  case "$OUT" in
+    *"PREMERGE: ADVISORY"*"NOT RUN"*"gtimeout"*)
+      ok "advisory bound: the missing bound is NAMED on an ADVISORY line, naming BOTH candidates" ;;
+    *) bad "advisory bound: the unavailable bound must be reported, naming what the code accepts (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"hanging stub REACHED"*)
+      bad "advisory bound: the advisory's output appears — it was executed unbounded" ;;
+    *) ok "advisory bound: no advisory report is produced when it cannot be bounded" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory bound: the verdict survives an unavailable bound" ;;
+    *) bad "advisory bound: the verdict must be unchanged (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: SCOPE"*"#3650"*) ok "advisory bound: the SCOPE lines survive an unavailable bound" ;;
+    *) bad "advisory bound: the SCOPE lines must survive (got: $OUT)" ;;
+  esac
+fi
+
+# Path 2b — a `gtimeout`-ONLY PATH: the macOS-with-coreutils shape (#3650 review
+# R2). GNU coreutils installs its timeout as `gtimeout`, and the code used to
+# resolve `timeout` alone — so on the EXACT configuration the skip diagnostic
+# recommends, the advisory still skipped. This fleet is LINUX (D5's own
+# measurement is git 2.43.0 on the lanes), so the rationale is NOT "the fleet is
+# macOS": it is that the repo SUPPORTS stock macOS, which makes the
+# gtimeout-only shape a supported configuration rather than a hypothetical.
+# (Same reasoning, same shape, as
+# scripts/tests/test_bootstrap_agent_machine.sh's gtimeout-only credential case.)
+#
+# `timeout` cannot be hidden by shadowing, so PATH is rebuilt from an explicit
+# symlink set — the recording shim installed under the name `gtimeout` and NO
+# plain `timeout` anywhere.
+GTD="$T/gtimeout-only-bin"
+mkdir -p "$GTD"
+gtd_ok=1
+for tool in bash awk tr basename dirname sleep; do
+  tp=$(command -v "$tool" 2>/dev/null) || tp=""
+  if [ -z "$tp" ]; then
+    bad "advisory bound: cannot build the gtimeout-only PATH — \`$tool\` is not on PATH"
+    gtd_ok=0
+    continue
+  fi
+  ln -sf "$tp" "$GTD/$tool"
+done
+cp "$BIN/gh" "$GTD/gh"
+chmod +x "$GTD/gh"
+cp "$SHIMD/timeout" "$GTD/gtimeout"
+chmod +x "$GTD/gtimeout"
+if [ "$(PATH="$GTD" command -v timeout 2>/dev/null)" != "" ]; then
+  bad "advisory bound: the gtimeout-only PATH still resolves plain \`timeout\` (the case would be vacuous)"
+  gtd_ok=0
+fi
+MARK_G="$T/hang-marker-gtimeout"
+rm -f "$MARK_G"
+if [ "$gtd_ok" -eq 1 ] && flow_copy adv-hang-gtimeout "$(hang_stub "$MARK_G")"; then
+  OUT=$(PATH="$GTD" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    bad "advisory bound: a gtimeout-only host must not change the exit code (exit $RC, wanted 0)"
+  else
+    ok "advisory bound: a gtimeout-only (macOS-shaped) host still reaches exit 0"
+  fi
+  if [ -f "$MARK_G" ]; then
+    ok "advisory bound: on a gtimeout-only host the advisory IS RUN (bounded), not skipped (#3650 R2)"
+  else
+    bad "advisory bound: the advisory was SKIPPED on a gtimeout-only host — the exact configuration the diagnostic recommends (#3650 R2)"
+  fi
+  case "$OUT" in
+    *"bound-shim requested 60 grace 5"*)
+      ok "advisory bound: \`gtimeout\` is invoked with the same bound and kill grace" ;;
+    *) bad "advisory bound: the advisory must be bounded through \`gtimeout\` (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"NOT RUN"*)
+      bad "advisory bound: a gtimeout-only host reported the bound UNAVAILABLE (got: $OUT)" ;;
+    *) ok "advisory bound: no unavailable-bound report is printed when \`gtimeout\` exists" ;;
+  esac
+  case "$OUT" in
+    *"PREMERGE: OK $CERTIFIED"*) ok "advisory bound: the verdict survives the gtimeout-only path" ;;
+    *) bad "advisory bound: the verdict must be unchanged (got: $OUT)" ;;
+  esac
+fi
+
+# Path 3 — a child that IGNORES SIGTERM (#3650 review R1). `timeout <secs>` sends
+# SIGTERM and then WAITS, so a stub containing `trap '' TERM` outlives the bound
+# entirely and the merge-critical path stays blocked: the advertised bound bounds
+# nothing. `--kill-after=<grace>` follows with SIGKILL, which cannot be trapped.
+#
+# THE DELEGATING SHIM IS THE ONLY HONEST WAY TO TEST THIS. A hand-written shim
+# would have to REIMPLEMENT the escalation, and would then be asserting its own
+# signal handling rather than the script's invocation; so this shim delegates to
+# the REAL runner with short values and reflects FAITHFULLY whether the script
+# passed `--kill-after`. A regression that drops the flag therefore gets a real
+# SIGTERM-only bound and is caught by the observable difference measured on this
+# repo's own boxes: with the flag, rc=137 and the stub never reaches its FINISHED
+# line; without it, rc=124 and FINISHED is printed after the stub's own sleep.
+# Both assertions below are OBSERVABLE OUTPUT, never elapsed time — a wall-clock
+# threshold in a correctness test is the #2642 defect class.
+#
+# THE CASE BOUNDS ITSELF: the stub sleeps 20s, not forever, so even a total
+# regression of both the flag and the resolution ends the case rather than
+# hanging the suite, and the sleep's stdout goes to /dev/null so a surviving
+# grandchild cannot hold the command-substitution pipe open (the way a bound can
+# "work" and the caller hang anyway).
+term_ignoring_stub() {
+  cat <<STUB
+#!/usr/bin/env bash
+trap '' TERM
+printf 'BASE-STALENESS: TERM-ignoring stub REACHED\\n'
+: >"$1"
+sleep 20 >/dev/null 2>&1
+printf 'BASE-STALENESS: TERM-ignoring stub FINISHED - the bound was ESCAPED\\n'
+exit 0
+STUB
+}
+
+# REAL_TO is resolved once near the top of the suite, by the same algorithm the
+# script uses. This path needs a REAL runner (it delegates to it rather than
+# reimplementing the escalation it is testing), so it skips where there is none.
+if [ -z "$REAL_TO" ]; then
+  echo "skip - advisory bound: the TERM-ignoring case needs a real timeout/gtimeout supporting --kill-after"
+else
+  KILLD="$T/killafter-shim-bin"
+  mkdir -p "$KILLD"
+  cat >"$KILLD/timeout" <<SHIM
+#!/usr/bin/env bash
+# Delegates to the REAL runner with short values, reflecting faithfully whether
+# the caller asked for a kill grace. Never reimplements the escalation.
+grace=none
+case "\$1" in
+  --kill-after=*) grace="\${1#--kill-after=}"; shift ;;
+esac
+shift   # the bound the script asked for; a short one is substituted below
+printf 'BASE-STALENESS: killafter-shim grace %s\\n' "\$grace"
+# Answer the script's capability probe (\`--kill-after=1 1 true\`) affirmatively,
+# or it concludes there is no supported runner and skips the advisory.
+if [ "\$#" -eq 1 ] && [ "\$1" = true ]; then exit 0; fi
+if [ "\$grace" = none ]; then
+  exec "$REAL_TO" 2 "\$@"
+fi
+exec "$REAL_TO" --kill-after=1 2 "\$@"
+SHIM
+  chmod +x "$KILLD/timeout"
+  MARK_C="$T/hang-marker-term-ignoring"
+  rm -f "$MARK_C"
+  if flow_copy adv-term-ignoring "$(term_ignoring_stub "$MARK_C")"; then
+    OUT=$(PATH="$KILLD:$BIN:$PATH" bash "$COPY" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+    RC=$?
+    if [ "$RC" -ne 0 ]; then
+      bad "advisory bound: a TERM-ignoring advisory must not change the exit code (exit $RC, wanted 0)"
+    else
+      ok "advisory bound: a TERM-IGNORING advisory still reaches exit 0"
+    fi
+    if [ -f "$MARK_C" ]; then
+      ok "advisory bound: the TERM-ignoring stub really executed (the case is not vacuous)"
+    else
+      bad "advisory bound: the TERM-ignoring stub never ran — the case proves nothing"
+    fi
+    case "$OUT" in
+      *"killafter-shim grace 5"*)
+        ok "advisory bound: the 5s kill grace reaches the runner on the TERM-ignoring path" ;;
+      *"killafter-shim grace none"*)
+        bad "advisory bound: no --kill-after was passed — a TERM-ignoring child escapes the bound (#3650 R1)" ;;
+      *) bad "advisory bound: the runner was not invoked as expected (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"TERM-ignoring stub FINISHED"*)
+        bad "advisory bound: the TERM-ignoring advisory ran to COMPLETION — the bound was escaped" ;;
+      *) ok "advisory bound: the TERM-ignoring advisory was KILLED, not awaited" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY"*"exit 137"*)
+        ok "advisory bound: the SIGKILL escalation is REPORTED (exit 137), and is not fatal" ;;
+      *"exit 124"*)
+        bad "advisory bound: exit 124 means TERM-only — the child was awaited, not killed (got: $OUT)" ;;
+      *) bad "advisory bound: a killed advisory must be reported with its exit code (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK $CERTIFIED"*) ok "advisory bound: the verdict survives a TERM-ignoring advisory" ;;
+      *) bad "advisory bound: the verdict must be unchanged (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: SCOPE"*"#3650"*) ok "advisory bound: the SCOPE lines survive a TERM-ignoring advisory" ;;
+      *) bad "advisory bound: the SCOPE lines must survive (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+# A REFUSAL is unaffected: the advisory runs only on the success path, so a
+# refusing invocation carries no ADVISORY lines and still exits 2.
+if flow_copy adv-refuse "$STALE_ADV" &&
+  run_copy 2 "a refusal is unaffected by the advisory" "$COPY" 2421 "$CERTIFIED" "$T/lite-only.txt"; then
+  case "$OUT" in
+    *"PREMERGE: ADVISORY"*) bad "advisory: a refusal must not carry ADVISORY lines (got: $OUT)" ;;
+    *) ok "advisory: a refusal path prints no ADVISORY lines and still exits 2" ;;
+  esac
+fi
+
+# --- Case 41c: THE WIRING CASE — shipped artifacts, SYNTHETIC repository -----
+#
+# NON-VACUITY for the wiring itself: every stub case above would pass if the real
+# script invoked some OTHER path. This is the ONE case whose subject is "the
+# shipped premerge-assert really runs scripts/flow/base-staleness.sh", so it is
+# the ONE case that runs the shipped artifacts.
+#
+# IT NO LONGER READS THE AMBIENT CHECKOUT (#3650 review R5 F2). It used to run
+# with the suite's own cwd, so the shipped advisory scanned the surrounding
+# repository — repository-dependent, ambient-staleness-dependent runtime, and on a
+# stock macOS with the runner shim's discard branch it ran UNBOUNDED. It now runs
+# against a 3-commit SYNTHETIC repository built right here, which is bounded by
+# CONSTRUCTION rather than by a runner and is identical on every host.
+#
+# THAT MAKES THE CASE STRONGER, NOT WEAKER. The ambient version could only pin the
+# advisory's PREFIX — a measured line would have red on a correct run, since the
+# lane's own base staleness is not a property of this suite. A synthetic
+# fixture's staleness IS, so this pins MEASURED values: the fixture is stale by
+# exactly one commit, which stales via the gate-global `.config/nextest.toml`
+# while the diff touches only a src path. A stub could not produce those numbers
+# from this fixture by accident.
+#
+# THE CERTIFIED SHA IS THE FIXTURE'S OWN HEAD, which is what lets the advisory
+# resolve its subject rev and actually measure: premerge-assert passes the
+# CERTIFIED sha to the advisory (#3650 F1), not the local HEAD, so a fabricated
+# sha would make the advisory report UNMEASURED and the numbers would be
+# unassertable. The gate summary fixture therefore carries this sha's own two
+# abbreviations, the same two widths the gate writes.
+#
+# A supported runner is still guaranteed (the $BIN shim), so the expectation
+# below is the only correct one on every host — Case 41b Path 2 owns the
+# no-runner configuration and asserts the documented skip.
+WIRE_REPO="$T/wiring-repo"
+wire_shape=0
+mkdir -p "$WIRE_REPO"
+if git init -q -b mainline "$WIRE_REPO" >/dev/null 2>&1; then
+  git -C "$WIRE_REPO" config user.email t@t
+  git -C "$WIRE_REPO" config user.name t
+  wire_commit() {
+    local msg="$1" path="$2"
+    mkdir -p "$WIRE_REPO/$(dirname "$path")"
+    printf 'content for %s at %s\n' "$path" "$msg" >>"$WIRE_REPO/$path"
+    git -C "$WIRE_REPO" add -- "$path" >/dev/null &&
+      git -C "$WIRE_REPO" commit -q -m "$msg" >/dev/null
+  }
+  wire_commit "c0 initial" "README.md" &&
+    git -C "$WIRE_REPO" checkout -q -b feature &&
+    wire_commit "the PR: a src path only" "cqlite-core/src/storage/sstable/mod.rs" &&
+    git -C "$WIRE_REPO" checkout -q mainline &&
+    wire_commit "behind: a gate-global commit" ".config/nextest.toml" &&
+    git -C "$WIRE_REPO" update-ref refs/remotes/origin/main mainline &&
+    git -C "$WIRE_REPO" checkout -q feature &&
+    wire_shape=1
+fi
+WIRE_SHA=""
+if [ "$wire_shape" -eq 1 ]; then
+  WIRE_SHA=$(git -C "$WIRE_REPO" rev-parse HEAD 2>/dev/null) || WIRE_SHA=""
+fi
+# FIXTURE SELF-CONSISTENCY: the sha must be a real 40-hex, and the fixture must
+# genuinely be behind by exactly one commit that touches a gate-global path — or
+# the measured expectations below would be asserting the wrong thing.
+wire_behind=""
+if [ -n "$WIRE_SHA" ]; then
+  wire_behind=$(git -C "$WIRE_REPO" rev-list --count \
+    "$(git -C "$WIRE_REPO" merge-base refs/remotes/origin/main HEAD)..refs/remotes/origin/main" \
+    2>/dev/null) || wire_behind=""
+fi
+case "$WIRE_SHA" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) wire_shape=0 ;;
+esac
+[ "$wire_behind" = 1 ] || wire_shape=0
+if [ "$wire_shape" -eq 1 ]; then
+  ok "wiring fixture: the synthetic repo is behind by exactly 1 gate-global commit at a real 40-hex HEAD"
+else
+  bad "wiring fixture: the synthetic repo does not have the shape the case claims (sha '$WIRE_SHA', behind '$wire_behind') — the case would be vacuous"
+fi
+
+if [ "$wire_shape" -eq 1 ]; then
+  WIREGOOD="$T/wiring-full-pass.txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$WIRE_SHA")" "$(printf '%.12s' "$WIRE_SHA")" PASS PASS >"$WIREGOOD"
+  WIRE_OUT=$(cd "$WIRE_REPO" &&
+    PATH="$BIN:$PATH" MOCK_GH_OUT="$WIRE_SHA OPEN" MOCK_GH_FAIL=0 \
+    bash "$ASSERT" 2421 "$WIRE_SHA" "$WIREGOOD" 2>&1)
+  WIRE_RC=$?
+  if [ "$WIRE_RC" -ne 0 ]; then
+    bad "the SHIPPED script invokes the SHIPPED advisory (exit $WIRE_RC, wanted 0)"
+    printf '     output: %s\n' "$WIRE_OUT"
+  else
+    ok "the SHIPPED script reaches PREMERGE: OK against the synthetic repository"
+    OUT="$WIRE_OUT"
+    case "$OUT" in
+      *"PREMERGE: ADVISORY BASE-STALENESS:"*)
+        ok "advisory: the shipped premerge-assert really runs scripts/flow/base-staleness.sh" ;;
+      *) bad "advisory: the shipped script must invoke the shipped advisory (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY"*"NON-EXHAUSTIVE"*)
+        ok "advisory: the advisory's own non-exhaustiveness travels to the merge point" ;;
+      *) bad "advisory: the NON-EXHAUSTIVE lines must travel with the report (got: $OUT)" ;;
+    esac
+    # THE MEASURED HALF — unassertable while this case read the ambient checkout.
+    case "$OUT" in
+      *"PREMERGE: ADVISORY BASE-STALENESS: behind 1 commits"*)
+        ok "advisory: the shipped advisory really MEASURED the synthetic fixture (behind 1)" ;;
+      *) bad "advisory: the shipped advisory must report the fixture's own behind count (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY BASE-STALENESS: blast-radius 1 RECOGNISED of 1 commits behind"*)
+        ok "advisory: the gate-global half of the blast radius fired on the shipped path" ;;
+      *) bad "advisory: the shipped advisory must report blast-radius 1 RECOGNISED (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY BASE-STALENESS: verdict STALE-RECOGNISED"*)
+        ok "advisory: a STALE-RECOGNISED shipped advisory still reaches PREMERGE: OK" ;;
+      *) bad "advisory: the shipped advisory's verdict must be STALE-RECOGNISED here (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY"*"exit 4"*)
+        ok "advisory: the shipped advisory's exit 4 is reported and is not fatal" ;;
+      *) bad "advisory: exit 4 must be reported on an ADVISORY line (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"NOT RUN"*)
+        bad "advisory: a runner IS on PATH here, so the bound must not be reported unavailable (got: $OUT)" ;;
+      *) ok "advisory: with a supported runner on PATH the advisory is not reported unavailable" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: SCOPE"*"#3650"*)
+        ok "advisory: the SCOPE lines and the literal #3650 print on the shipped path" ;;
+      *) bad "advisory: the SCOPE lines must print on the shipped path (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK $WIRE_SHA"*)
+        ok "advisory: the verdict names the certified sha on the shipped path" ;;
+      *) bad "advisory: PREMERGE: OK must name the certified sha (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+
+# --- Case 41d: the AMBIENT SCAN CANNOT COME BACK (#3650 review R5 F2) --------
+#
+# Two assertions, because the F2 defect was INVISIBLE: every case was green while
+# 13 of them scanned the surrounding repository, and nothing in the suite said so.
+#
+# (1) BEHAVIOURAL. An ordinary success case must carry the NEUTRAL stub's own line
+#     and must NOT carry the shipped advisory's `NON-EXHAUSTIVE` block — which
+#     every real run of base-staleness.sh prints, measured or unmeasured. So its
+#     absence is direct evidence that no scan of any repository happened.
+# (2) STRUCTURAL. Exactly ONE invocation of the shipped artifact may exist in this
+#     file: the wiring case. A behavioural check can only speak for the cases
+#     someone remembered to check; a new case added later would slip past it. The
+#     needle is SPLIT so this guard cannot match its own line.
+if run 0 "an ordinary success case runs the NEUTRAL advisory, not the shipped one" \
+  2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"neutral immediate stub"*)
+      ok "no-ambient-scan: an ordinary case really reaches the neutral immediate stub" ;;
+    *) bad "no-ambient-scan: the neutral stub did not run — the case proves nothing (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"NON-EXHAUSTIVE"*)
+      bad "no-ambient-scan: the SHIPPED advisory ran — an ordinary case is scanning a repository again (#3650 R5 F2)" ;;
+    *) ok "no-ambient-scan: no shipped-advisory report appears, so nothing scanned a repository" ;;
+  esac
+fi
+SUITE_SELF="${BASH_SOURCE[0]}"
+# Assembled from two halves so this guard cannot match its own line.
+_shipped_a='bash "$AS'
+_shipped_b='SERT"'
+SHIPPED_NEEDLE="$_shipped_a$_shipped_b"
+if [ -r "$SUITE_SELF" ]; then
+  shipped_calls=$(grep -c -F -- "$SHIPPED_NEEDLE" "$SUITE_SELF" | tr -d ' ')
+  if [ "$shipped_calls" = 1 ]; then
+    ok "no-ambient-scan: exactly ONE invocation of the shipped assert exists (the wiring case)"
+  else
+    bad "no-ambient-scan: $shipped_calls invocations of the shipped assert — only the wiring case may run it against a synthetic repo (#3650 R5 F2)"
+  fi
+else
+  bad "no-ambient-scan: could not read this suite's own source ($SUITE_SELF) to check the invocation count"
+fi
 
 # --- Case 40: the three exit-3 causes are DISTINGUISHABLE (nit 8) ------------
 # Exit 3 covers a usage error, a tool failure and a gh failure. The CODES are
@@ -889,6 +1769,72 @@ if run 3 "gh failure prints PREMERGE: GH-FAILURE only" 2421 "$CERTIFIED" "$GOOD"
   esac
 fi
 export MOCK_GH_FAIL=0
+
+# --- Case 43: the advisory is MEASURED BEFORE the head/state check -----------
+# REGRESSION GUARD (roborev job 250, Medium -> promoted to blocker). The advisory
+# is bounded at 60s + a 5s kill grace. When it ran AFTER the final `gh pr view`
+# head/state check, up to 65s separated "the head equals the certified sha" from
+# `PREMERGE: OK` -- and the caller's very next action is `gh pr merge --auto`,
+# which merges whatever head is current when `required` goes green. So a push in
+# that window turned a stale OK into a merge of an UNCERTIFIED head: the escape
+# #2456/#3465 exist to refuse, reintroduced by the advisory call site itself.
+#
+# The property asserted is ORDER, not duration: a duration assert here would be a
+# wall-clock race in the correctness path (the very thing roborev-lints forbids).
+# Both the advisory and `gh` append a token to one log; the advisory's must come
+# FIRST. That is observable, deterministic, and fails against the old ordering.
+ORDER_LOG="$T/order-43.log"
+ORDBIN="$T/bin-order-43"
+ORDFLOW="$T/flow-order-43"
+mkdir -p "$ORDBIN" "$ORDFLOW"
+# gh stub that RECORDS its invocation, then behaves like the standard mock.
+cat >"$ORDBIN/gh" <<'ORDGH'
+#!/usr/bin/env bash
+printf 'GH\n' >>"$PREMERGE_ORDER_LOG"
+if [ "${MOCK_GH_FAIL:-0}" = "1" ]; then echo "gh: could not connect" >&2; exit 1; fi
+printf '%s\n' "${MOCK_GH_OUT:-}"
+exit 0
+ORDGH
+chmod +x "$ORDBIN/gh"
+if ! cp "$ASSERT" "$ORDFLOW/premerge-assert.sh"; then
+  bad "order: could not build the scratch copy of premerge-assert.sh"
+else
+  cat >"$ORDFLOW/base-staleness.sh" <<'ORDADV'
+#!/usr/bin/env bash
+printf 'ADV\n' >>"$PREMERGE_ORDER_LOG"
+printf "BASE-STALENESS: ordering-case stub\n"
+printf "BASE-STALENESS: verdict NO-STALENESS-RECOGNISED\n"
+exit 0
+ORDADV
+  chmod +x "$ORDFLOW/base-staleness.sh"
+  : >"$ORDER_LOG"
+  ORDOUT=$(PATH="$ORDBIN:$BIN:$PATH" PREMERGE_ORDER_LOG="$ORDER_LOG" \
+    MOCK_GH_OUT="$CERTIFIED OPEN" MOCK_GH_FAIL=0 \
+    bash "$ORDFLOW/premerge-assert.sh" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+  ORDRC=$?
+  if [ "$ORDRC" -ne 0 ]; then
+    bad "order: the success-path case did not exit 0 (rc=$ORDRC, got: $ORDOUT)"
+  else
+    ok "order: the ordering case runs the success path"
+    # Non-vacuity: BOTH tokens must be present, or an absent stub would "pass".
+    if ! grep -qx 'ADV' "$ORDER_LOG" || ! grep -qx 'GH' "$ORDER_LOG"; then
+      bad "order: NON-VACUITY -- expected both ADV and GH to be recorded (got: $(tr '\n' ',' <"$ORDER_LOG"))"
+    else
+      ok "order: non-vacuity -- both the advisory and gh were actually invoked"
+      if [ "$(head -n 1 "$ORDER_LOG")" = "ADV" ]; then
+        ok "order: the advisory is MEASURED BEFORE the gh head/state check (job 250)"
+      else
+        bad "order: the advisory ran AFTER the gh head check -- up to 65s of staleness sits between the head check and PREMERGE: OK (got: $(tr '\n' ',' <"$ORDER_LOG"))"
+      fi
+    fi
+    # The report must still be printed BELOW the SCOPE clause that promises it.
+    case "$ORDOUT" in
+      *"ADVISORY lines below measure that gap"*"BASE-STALENESS: ordering-case stub"*)
+        ok "order: the report is still PRINTED below the SCOPE clause that promises it" ;;
+      *) bad "order: capturing the advisory must not move its output (got: $ORDOUT)" ;;
+    esac
+  fi
+fi
 
 # --- summary -----------------------------------------------------------------
 printf '\n=== premerge-assert: %d passed, %d failed ===\n' "$PASS" "$FAIL"

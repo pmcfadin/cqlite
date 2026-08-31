@@ -35,10 +35,7 @@ fn employee_golden() -> Vec<Row> {
 fn employee_cli(id: Value, home: Value) -> Vec<Row> {
     vec![row(&[
         ("id", id),
-        (
-            "e",
-            json!({"_type": "employee", "name": "Grace", "home": home, "level": 9}),
-        ),
+        ("e", json!({"name": "Grace", "home": home, "level": 9})),
     ])]
 }
 
@@ -83,7 +80,7 @@ fn a_skip_whose_divergence_is_gone_is_reported_as_stale() {
     // gap is declared, so the value is not compared), but the GAP must.
     let fixed = employee_cli(
         json!(1),
-        json!({"_type": "address", "street": "1 Navy Way", "city": "Arlington", "zip": "22201"}),
+        json!({"street": "1 Navy Way", "city": "Arlington", "zip": "22201"}),
     );
     let report = compare_rows(
         &golden,
@@ -115,8 +112,7 @@ fn a_skip_whose_divergence_is_gone_is_reported_as_stale() {
 fn one_diverging_row_keeps_a_skip_applied() {
     let schema = schema_of(NESTED_UDT_DDL, "t");
     let home = json!({"street": "1 Navy Way", "city": "Arlington", "zip": "22201"});
-    let decoded =
-        json!({"_type": "address", "street": "1 Navy Way", "city": "Arlington", "zip": "22201"});
+    let decoded = json!({"street": "1 Navy Way", "city": "Arlington", "zip": "22201"});
     let golden = vec![
         employee_golden()[0].clone(),
         row(&[
@@ -402,7 +398,7 @@ fn the_nested_udt_gap_does_not_cover_arbitrary_text_or_wrong_content() {
         json!("0xnothex"),
         json!("0xabc"),
         // Decoded — which is what closing the gap looks like — but WRONG.
-        json!({"_type": "address", "street": "9 Apollo", "city": "Arlington", "zip": "22201"}),
+        json!({"street": "9 Apollo", "city": "Arlington", "zip": "22201"}),
         json!(null),
         json!(9),
     ] {
@@ -633,4 +629,44 @@ fn a_refusal_at_a_gaps_path_wins_over_a_divergence_match() {
         "the cause must be the unevaluable one, not a suppression: {:?}",
         report.stale_skips
     );
+}
+
+/// `NestedFrozenValueLeftUndecodedByGolden` must require the CLI's ARRAY spelling.
+///
+/// An earlier version also accepted `Value::Object`, reasoning that the CLI spells a
+/// UDT as an object. The arm was unreachable — the type guard admits only
+/// list/set/map/tuple — but still permissive, so it would have excused an object
+/// rendered where only an array is legal (roborev job 305). An
+/// unreachable-but-permissive arm is worse than no arm.
+#[test]
+fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
+    let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
+    let inner_set = CqlType::Set(Box::new(CqlType::Text("text".into())));
+    let golden_hex = json!("000000020000001100000005616c706861");
+    let ask = |cli: &Value, ty: &CqlType| {
+        gap.matched(
+            &golden_hex,
+            cli,
+            ty,
+            Egress::Json,
+            Depth::TopLevel,
+            Kinding::Natural,
+        )
+    };
+
+    assert!(
+        ask(&json!([{"label": "alpha"}]), &inner_set),
+        "an undecoded golden scalar against a DECODED CLI array is the declared gap"
+    );
+    for not_an_array in [
+        json!({"label": "alpha"}),
+        json!(null),
+        json!(0),
+        json!("000000020000001100000005616c706861"),
+    ] {
+        assert!(
+            !ask(&not_an_array, &inner_set),
+            "only the CLI's ARRAY spelling is this gap: {not_an_array:?}"
+        );
+    }
 }

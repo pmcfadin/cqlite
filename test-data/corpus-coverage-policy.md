@@ -115,7 +115,20 @@ goldens):
 
 `test_basic`, `test_collections`, `test_timeseries`, `test_wide_rows`,
 `test_oa`, `test_da`, `test_deltas`, `test_big`, `test_comp`, `test_tomb`,
-`test_types`.
+`test_types`, `test_nested_udt_keys`.
+
+`test_nested_udt_keys` (issue #3500) is **in-scope and ENFORCED — not a skip and
+not skip-pending.** It is a first-class type-fidelity fixture: a UDT reached
+through a tuple or through a nested collection inside a *hashable position* (a
+set element or a map key), which is the shape the Python/Node bindings must
+reduce to a hashable object. Every one of its partitions has live rows, so the
+"must emit >=1 row" rule applies unchanged and nothing about it needs the
+zero-live-row exemption `test_tomb`/`test_types` carry. It therefore appears in
+the `IN_SCOPE_KEYSPACES` map of `bindings/python/tests/corpus.py` and
+`bindings/node/__test__/parity-utils.js`, and in **no** `SKIP_KEYSPACE*` /
+`SKIP_PENDING_KEYSPACES` set anywhere — including
+`smoke-test-all-tables.sh`, which enumerates in-scope keyspaces from the
+committed directory structure and mirrors only the SKIP sets.
 
 ### Run-mode tiers within the in-scope corpus
 

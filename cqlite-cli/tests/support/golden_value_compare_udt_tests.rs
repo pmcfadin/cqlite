@@ -67,7 +67,7 @@ fn a_declared_field_missing_from_both_sides_is_a_failure() {
         ("id", json!(1)),
         (
             "p",
-            json!({"_type": "person", "first_name": "Ada", "last_name": null, "age": 36}),
+            json!({"first_name": "Ada", "last_name": null, "age": 36}),
         ),
     ])];
     let report = compare_rows(
@@ -93,10 +93,7 @@ fn a_declared_field_missing_from_both_sides_is_a_failure() {
     ])];
     let short_cli = vec![row_of(&[
         ("id", json!(1)),
-        (
-            "p",
-            json!({"_type": "person", "first_name": "Ada", "age": 36}),
-        ),
+        ("p", json!({"first_name": "Ada", "age": 36})),
     ])];
     let report = compare_rows(
         &short_golden,
@@ -218,7 +215,7 @@ fn an_exclusion_cannot_excuse_an_absent_field() {
         ("id", json!(1)),
         (
             "e",
-            json!({"_type": "employee", "name": "Grace",
+            json!({"name": "Grace",
                      "home": "0x0000000a31204e617679205761790000000941726c696e67746f6e",
                      "level": 9}),
         ),
@@ -248,10 +245,7 @@ fn an_exclusion_cannot_excuse_an_absent_field() {
     ])];
     let dropped_cli = vec![row_of(&[
         ("id", json!(1)),
-        (
-            "e",
-            json!({"_type": "employee", "name": "Grace", "level": 9}),
-        ),
+        ("e", json!({"name": "Grace", "level": 9})),
     ])];
     let report = compare_rows(
         &dropped_golden,
@@ -288,15 +282,16 @@ fn an_exclusion_cannot_excuse_an_absent_field() {
     assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
 }
 
-/// A `CREATE TYPE` declaring a field literally named `_type` collides with the name
-/// the JSON egress uses for its discriminator, which is dropped from the CLI's field
-/// set — so the declared field would read as absent from an egress that DID render
-/// it, and the presence rule above would report a field nobody dropped. The
-/// collision is REFUSED rather than resolved by guessing which of the two a value
-/// is. No committed `CREATE TYPE` declares such a field; this pins the refusal so a
-/// future one cannot silently produce that false report.
+/// A `CREATE TYPE` declaring a field literally named `_type` USED TO BE REFUSED:
+/// the JSON egress injected a `_type` discriminator into the same object, so the
+/// declared field and the injected key were indistinguishable, and this lane
+/// could not say which of the two a value was. Issue #3629 removed the
+/// injection — `cassandra-5.0.8`'s `UserType.toJSONString` emits declared fields
+/// and no type key, and the committed `sstabledump` golden for
+/// `test-data/fixtures/issue_3504/` shows exactly that — so such a UDT is now an
+/// ORDINARY value: comparable field by field, with no name reserved by us.
 #[test]
-fn a_udt_declaring_a_type_field_is_refused_rather_than_misreported() {
+fn a_udt_declaring_a_type_field_is_compared_like_any_other() {
     let schema = match from_ddl(
         "CREATE TYPE odd (_type text, v int); \
          CREATE TABLE t (id int PRIMARY KEY, o frozen<odd>);",
@@ -309,15 +304,37 @@ fn a_udt_declaring_a_type_field_is_refused_rather_than_misreported() {
         ("id", json!(1)),
         ("o", json!({"_type": "x", "v": 2})),
     ])];
-    let cli = vec![row_of(&[
+
+    let agreeing = vec![row_of(&[
         ("id", json!(1)),
         ("o", json!({"_type": "x", "v": 2})),
     ])];
-    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
+    let report = compare_rows(&golden, &agreeing, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(
+        report.diffs.is_empty(),
+        "a UDT declaring `_type` is an ordinary value now: {:?}",
+        report.diffs
+    );
+
+    // And its VALUE is really compared — the field is not silently dropped, which
+    // is what the old discriminator strip did to it.
+    let diverging = vec![row_of(&[
+        ("id", json!(1)),
+        ("o", json!({"_type": "WRONG", "v": 2})),
+    ])];
+    let report = compare_rows(
+        &golden,
+        &diverging,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
     assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
     assert!(
-        report.diffs[0].contains("_type") && report.diffs[0].contains("indistinguishable"),
-        "the refusal must name the collision: {:?}",
+        report.diffs[0].contains("_type"),
+        "the divergence must name the declared field: {:?}",
         report.diffs
     );
 }

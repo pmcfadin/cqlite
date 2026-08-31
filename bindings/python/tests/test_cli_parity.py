@@ -40,6 +40,11 @@ Collection Identity Asymmetries (issue #1454):
       but **NOT a sorted one**, because the Python value is indistinguishable
       from a genuine `list<T>` here, so this row's canonical form is
       order-SENSITIVE (a documented limitation, see M4_spec §5.3).
+      Since #3500 the fallback triggers whenever a UDT appears ANYWHERE in the
+      element subtree (`contains_udt` is a full traversal), so
+      `set<frozen<list<frozen<udt>>>>`, `set<frozen<set<frozen<udt>>>>` and
+      `set<frozen<tuple<frozen<udt>, int>>>` are `list`s of ordinary UDT `dict`s
+      too — see `test_udt_nested_deeper_in_a_projection_position_is_unsupported`.
     - `map<k,v>` → Python `dict`, whose keys **collapse** by hash/`__eq__`
       (structurally equal non-scalar keys merge, last value wins), while a Node
       `Map` compares object keys by *reference* so equal keys stay distinct.
@@ -206,31 +211,34 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
     if isinstance(value, cqlite.Udt):
         # UDT — recognised STRUCTURALLY (#3504). The type identity arrives out of
         # band on a `cqlite.Udt`, so no content sniff is involved and no field name
-        # can affect the classification. Canonical form follows the CLI's UDT JSON:
-        # `{"_type": <type name>, **fields}`.
+        # can affect the classification. Canonical form is the DECLARED FIELDS AND
+        # NOTHING ELSE: `{**fields}`.
+        #
+        # JUSTIFIED AGAINST THE GOLDEN, NOT AGAINST THE CLI'S PREVIOUS OUTPUT.
+        # `cassandra-5.0.8`'s `UserType.toJSONString` writes `{"field": value, …}`
+        # and emits NO type key, and the committed `sstabledump` golden for
+        # `test-data/fixtures/issue_3504/` shows exactly that (the non-colliding
+        # `p` cell dumps as `{"label": …, "real_field": 7}`). The CLI used to
+        # inject `"_type"` ahead of the fields and this rule mirrored it; issue
+        # #3629 removed the injection from both JSON renderers, so the canonical
+        # form is now the reference tool's shape rather than a CQLite invention.
         #
         # The old `_keyspace` filter is GONE, and its removal is the observable
-        # half of the fix. The binding used to INJECT `_keyspace` into the field
+        # half of #3504. The binding used to INJECT `_keyspace` into the field
         # namespace, and this rule dropped that key because the CLI omits it for
         # UDTs — which silently discarded a genuine FIELD of that name. Nothing is
-        # injected now, so every entry in `.fields` is a real field, and the CLI
-        # (which never injected `_keyspace`) emits it as a field too.
+        # injected now, so every entry in `.fields` is a real field.
         #
-        # RESIDUAL, CLI-side and deliberately out of scope: the CLI's JSON writer
-        # (`cqlite-cli/src/output/json.rs`, `Value::Udt`) still inserts `"_type"`
-        # and THEN the fields, so a UDT field named `_type` overwrites the marker
-        # in the canonical form below, exactly as it does in the CLI's own output.
-        # Both sides agree, so parity holds — the collision is the CLI's, raised as
-        # a follow-up on #3504. The binding-side identity is unaffected either way:
-        # `value.type_name` is never read from the fields.
-        canonical: dict = {"_type": value.type_name}
-        canonical.update(
-            {
-                str(k): normalize_python_value(v, is_row_level=False)
-                for k, v in value.fields.items()
-            }
-        )
-        return canonical
+        # CONSEQUENCE, recorded rather than worked around: `--format json` carries
+        # no type channel at all, so two UDTs of DIFFERENT declared types with
+        # identical field values canonicalize IDENTICALLY. That is true of
+        # `sstabledump` too. The binding-side identity is unaffected:
+        # `value.type_name`/`value.keyspace` are read from the instance, never
+        # from the fields.
+        return {
+            str(k): normalize_python_value(v, is_row_level=False)
+            for k, v in value.fields.items()
+        }
 
     if isinstance(value, dict):
         # THE CALLER'S EXPLICIT SIGNAL BEATS SNIFFING THE CONTENT (#1454).
@@ -254,7 +262,10 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
         # `cqlite.Udt`, handled structurally above. What remains is exactly
         # LIMITATION b-2's cell-level site plus b-5: a `map<text,X>` — or a JSON
         # object — that happens to carry a literal `"_type"` key is still
-        # canonicalized as if it were a UDT, with a `"_keyspace"` entry dropped.
+        # canonicalized as an object rather than the documented `{key,value}`
+        # array, with a `"_keyspace"` entry dropped. (Since #3629 that object is
+        # not even the CLI's UDT shape any more, which renders declared fields
+        # only — one more reason the sniff is a recorded GAP and not a rule.)
         # The sniff is KEPT rather than deleted because that is the behaviour those
         # two recorded gaps pin; it is no longer a UDT classifier, it is the
         # map/JSON misclassification itself. Requiring `_keyspace` too would only
@@ -916,17 +927,27 @@ class TestCollectionIdentityContract:
     the family's live instance. The site-"UDT fields" half of **b-2** is closed the
     same way: the markers are no longer injected into the field namespace at all.
 
-    Not pinned here: the nested shapes that RAISE instead of diverging
+    Pinned ELSEWHERE, and no longer a crash: the nested shapes that used to raise
+    `TypeError: unhashable type` inside the binding
     (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`).
-    `contains_udt` and `value_to_hashable_key` are not total over `Value`, so
-    those fail with `TypeError: unhashable type` **inside the binding**, before
-    any normalizer runs — a production `value.rs` defect tracked as #3500, which
-    #1454 cannot touch and which no normalizer-level test can observe.
+    `contains_udt` and `value_to_hashable_key` are now TOTAL and exhaustive over
+    `Value` (#3500), so those columns read successfully; they are pinned
+    end-to-end against the real fixture in
+    `bindings/python/tests/test_nested_udt_hashable.py`, which is the right level
+    — the defect lived in `value.rs`, so a pure normalizer test could neither
+    observe it nor certify its fix. What remains observable HERE is the shape
+    those fixes produce, asserted below.
+
+    The residual gap is core-side and out of this file's reach: a MULTICELL map's
+    composite key decodes as an opaque `Blob` (`parse_cell_path_key` has a
+    scalar-only allowlist), filed as #3612. A FROZEN map decodes its keys
+    structurally and does not have that gap.
 
     These tests are intentionally pure: they feed the normalizer the host values
     the Python binding is documented to produce (`bindings/python/src/value.rs`:
-    `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`,
-    `value_to_hashable_key`) and need no dataset and no query, so a failure here
+    `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`; and
+    `bindings/python/src/value_hashable.rs`: `value_to_hashable_key`) and need no
+    dataset and no query, so a failure here
     is unambiguously a contract violation and never a fixture problem.
     """
 
@@ -946,8 +967,13 @@ class TestCollectionIdentityContract:
     def test_set_of_hashable_collections_stays_a_frozenset(self):
         """`set<frozen<list<int>>>` → `frozenset` of tuples → sorted array of arrays.
 
-        The `list` fallback in `set_to_py` triggers on UDTs only
-        (`contains_udt`), so nested *collections* still arrive as a frozenset.
+        The `list` fallback in `set_to_py` triggers on UDTs only, so a nested
+        collection with **no UDT anywhere inside it** still arrives as a
+        frozenset. That scope matters post-#3500: `contains_udt` is now a FULL
+        subtree traversal, so the fallback catches a UDT at any depth — the claim
+        is "no UDT in the subtree", not "the outermost element is a collection"
+        (an earlier wording said the latter, which was false the moment a UDT sat
+        under the nested collection).
         """
         normalized = normalize_python_value(frozenset({(1, 2), (3,)}), is_row_level=False)
         assert sorted(normalized, key=_sort_key) == normalized
@@ -958,14 +984,15 @@ class TestCollectionIdentityContract:
 
         `set_to_py` returns a `list` for CLI parity (#804); Node keeps a JS `Set`
         of objects. Canonical form on both sides is an array of UDT objects
-        carrying `_type` — the CLI's UDT JSON shape. Since #3504 the keyspace is
-        not in the field namespace at all, so there is no longer a `_keyspace`
-        entry to drop.
+        holding the declared fields and nothing else — the CLI's UDT JSON shape
+        since #3629, and `UserType.toJSONString`'s shape all along. Since #3504
+        the keyspace is not in the field namespace at all, so there is no
+        `_keyspace` entry to drop either.
         """
         value = [_udt("address", street="1 Main St"), _udt("address", street="2 Oak Ave")]
         assert normalize_python_value(value, is_row_level=False) == [
-            {"_type": "address", "street": "1 Main St"},
-            {"_type": "address", "street": "2 Oak Ave"},
+            {"street": "1 Main St"},
+            {"street": "2 Oak Ave"},
         ]
 
     def test_set_of_frozen_udt_canonical_form_is_order_sensitive(self):
@@ -1035,12 +1062,18 @@ class TestCollectionIdentityContract:
     def test_udt_nested_deeper_in_a_projection_position_now_canonicalizes(self):
         """a-3 (was LIMITATION): a UDT inside a projected value canonicalizes again.
 
-        `set<frozen<list<frozen<udt>>>>`: `value_to_hashable_key`'s `List` arm
-        recurses into the inner UDT. That inner projection used to FLATTEN the UDT
-        into a `frozenset` of `(field_name, value)` pairs — so the element
-        canonicalized to `[[["_keyspace", …], ["_type", …], ["street", …]]]`, an
-        array of `[name, value]` pairs, while Node and the CLI produce
-        `[[{"_type": …, "street": …}]]`, an array holding a UDT **object**.
+        The position that still forces a hashable projection is a MAP KEY:
+        `map<frozen<list<frozen<udt>>>, int>` routes its key through
+        `value_to_hashable_key` **unconditionally** — `map_to_py` has no
+        `contains_udt` gate, because a Python `dict` key must be hashable whatever
+        it holds — and its `List` arm recurses into the inner UDT. That inner
+        projection used to FLATTEN the UDT into a `frozenset` of
+        `(field_name, value)` pairs, so the key canonicalized to
+        `[[["_keyspace", …], ["_type", …], ["street", …]]]`, an array of
+        `[name, value]` pairs, while Node and the CLI produce
+        `[[{"street": …}]]`, an array holding a UDT **object** (since #3629 that
+        object holds the declared fields and nothing else, on every side).
+        Different in kind, not in ordering.
 
         Issue #3504 replaced that projection with a `cqlite.Udt` instance, so the
         projected value keeps its type and the two shapes agree. The a-1 instance
@@ -1055,25 +1088,49 @@ class TestCollectionIdentityContract:
         What #3504 removed is the UDT half, by making the projection type-preserving
         rather than by teaching the normalizer a shape.
 
-        The sibling nested shapes that RAISE rather than diverge
+        SCOPE CORRECTION (#3500). This instance used to be asserted in a SET
+        ELEMENT position (`set<frozen<list<frozen<udt>>>>`), and it is **no longer
+        live there**: `contains_udt` now traverses the whole subtree, so
+        `set_to_py` takes its `list` branch for that column and the inner UDT
+        arrives as an ordinary `dict`. The second assertion below pins that new
+        shape and shows it MATCHES the Node/CLI form — so a-3 is closed for the
+        set-element position and survives only where a hashable projection is
+        unavoidable, i.e. map keys. The change was taken deliberately (#3500 AC1
+        over AC5) because it removes the nesting-dependent asymmetry that was the
+        defect's own tell.
+
+        The sibling shapes that used to RAISE
         (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`)
-        are still NOT pinned here: `contains_udt`/`value_to_hashable_key` are not
-        total over `Value`, so those fail with `TypeError` inside the binding before
-        the normalizer is reached. That is #3500, untouched by #3504.
+        now read successfully and are pinned end-to-end in
+        `bindings/python/tests/test_nested_udt_hashable.py`; the residual gap is
+        core-side multicell map keys (#3612).
         """
-        # What the binding hands over: a tuple (the projected inner list) holding
-        # the projected inner UDT, which is now a `cqlite.Udt` whose field values
-        # have themselves been projected.
+        # What the binding hands over for a map KEY of `map<frozen<list<frozen<udt>>>, int>`:
+        # a tuple (the projected inner list) holding the projected inner UDT, which
+        # is now a `cqlite.Udt` whose field values have themselves been projected.
         projected_udt = cqlite.Udt("address", "test_collections", {"street": "1 Main St"})
         element = (projected_udt,)
-        assert normalize_python_value(frozenset({element}), is_row_level=False) == [
-            [{"_type": "address", "street": "1 Main St"}]
+        assert normalize_python_value({element: 7}, is_row_level=False) == [
+            {"key": [{"street": "1 Main St"}], "value": 7}
         ]
 
-        # ...which is EXACTLY the shape Node/the CLI produce for the same CQL
-        # value, i.e. what a UDT in a non-projection position normalizes to. The
-        # two used to differ in kind; that is the fix, asserted as an equality
-        # rather than as a shape somebody wrote down twice.
+        # CLOSED for the set-element position too, by the other half of the merge
+        # (#3500): `set<frozen<list<frozen<udt>>>>` no longer reaches a `frozenset`
+        # at all, because `contains_udt` sees the UDT under the inner list and
+        # `set_to_py` takes its `list` branch. That column arrives as a `list` of
+        # `list`s of UDTs. The rendered UDT holds its DECLARED FIELDS AND NOTHING
+        # ELSE since #3629 — the CLI and `cqlite-core`'s `ToJson` stopped injecting
+        # `_type`, so the canonical form no longer carries it on any side.
+        assert normalize_python_value(
+            [[_udt("address", street="1 Main St")]], is_row_level=False
+        ) == [[{"street": "1 Main St"}]]
+
+        # A `frozenset` of projected elements is still REACHABLE — one level deeper,
+        # as a `map<frozen<set<frozen<list<frozen<udt>>>>>, int>` key, where
+        # `value_to_hashable_key`'s `Set` arm builds it — and it canonicalizes to the
+        # same shape as the non-projection route. Asserted as an EQUALITY rather than
+        # as a shape somebody wrote down twice; the two used to differ in kind, and
+        # that is the fix.
         assert normalize_python_value(
             frozenset({element}), is_row_level=False
         ) == normalize_python_value([[_udt("address", street="1 Main St")]], is_row_level=False)
@@ -1121,16 +1178,16 @@ class TestCollectionIdentityContract:
         filter. A field named `_keyspace` survives canonicalization and matches
         what the CLI emits.
 
-        WHAT IS **NOT** FIXED, and why it is asserted here rather than left
-        implicit: the CLI's own JSON writer (`cqlite-cli/src/output/json.rs`,
-        `Value::Udt`; a second copy in `cqlite-core/src/query/result.rs`'s
-        `ToJson`) still inserts `"_type"` and THEN the fields, so a field named
-        `_type` still overwrites the marker **in the CLI's output** — and the
-        canonical form above deliberately mirrors the CLI, so it collides the same
-        way. Both sides agree, so PARITY holds and this suite stays green; the
-        residual is a CLI-surface defect, raised as a follow-up on #3504 and
-        excluded from it because the CLI is this suite's comparison ORACLE and
-        moving an oracle with its subject is how a guard goes blind.
+        THE CLI-SIDE RESIDUAL THIS TEST USED TO PIN IS **NOW FIXED** (#3629). The
+        CLI's JSON writer (`cqlite-cli/src/output/json.rs`, `Value::Udt`) and its
+        second copy in `cqlite-core/src/query/result.rs` (`ToJson`) inserted
+        `"_type"` ahead of the fields, so a field of that name overwrote the
+        marker in the CLI's own output and the canonical form mirrored the
+        collision. Both now render the declared fields and nothing else — the
+        shape `cassandra-5.0.8`'s `UserType.toJSONString` writes and the committed
+        `sstabledump` golden for `test-data/fixtures/issue_3504/` shows — so
+        neither side has a marker left to collide with, and the expectations below
+        are the golden's shape rather than a mirror of CQLite's old output.
 
         The binding-side identity is intact regardless of either field name, which
         is the property #3504 actually delivers — asserted last.
@@ -1138,22 +1195,20 @@ class TestCollectionIdentityContract:
         # A UDT whose field is genuinely named "_keyspace".
         colliding = cqlite.Udt("address", "test_collections", {"_keyspace": "user-supplied-value"})
         assert normalize_python_value(colliding, is_row_level=False) == {
-            "_type": "address",
             "_keyspace": "user-supplied-value",
         }, "the `_keyspace` FIELD now survives canonicalization (#3504)"
 
         # An ordinary field is unaffected, as before.
         assert normalize_python_value(
             _udt("address", street="1 Main St"), is_row_level=False
-        ) == {"_type": "address", "street": "1 Main St"}
+        ) == {"street": "1 Main St"}
 
-        # The CLI-side residual, pinned so it is not mistaken for fixed: a field
-        # named `_type` still displaces the marker in the CANONICAL form, because
-        # the canonical form is the CLI's shape and the CLI still injects `_type`.
+        # And the field named `_type` is now just a FIELD, on both sides: it
+        # displaces nothing, because nothing is injected beside it (#3629).
         type_field = cqlite.Udt("address", "test_collections", {"_type": "user-supplied-type"})
         assert normalize_python_value(type_field, is_row_level=False) == {
             "_type": "user-supplied-type",
-        }, "canonical form still mirrors the CLI's `_type` collision (CLI-side follow-up)"
+        }, "a `_type` FIELD is carried as itself; no marker shares the namespace"
 
         # ...and the fix that matters: the BINDING's type identity is recoverable
         # in every one of those cases, from a namespace no field name can address.
@@ -1181,12 +1236,13 @@ class TestCollectionIdentityContract:
         array of `{"key": ..., "value": ...}`, where the CLI keeps an object. A
         JSON object carrying a literal `"_type"` key is additionally read as a UDT.
 
-        Reachability, stated honestly: the reader does produce `Value::Json` for a
-        `"json"` comparator (`custom_scalar.rs`,
-        `comparator_value_parsing.rs`), but no current fixture uses one, so this is
-        unreachable from today's corpus while being a real hole in the type
-        lattice. #1455 must exclude columns whose comparator is `"json"`; the fix
-        is the declared type (#3497).
+        Reachability is stated in exactly ONE place — the `Value::Json` arm of
+        `value_to_hashable_key` in `bindings/python/src/value_hashable.rs` — and this
+        docstring asserts nothing about it (earlier wording here blamed fixture
+        absence, which is not the blocker). What this test pins is the SHAPE
+        divergence, which holds for any `dict`-shaped cell however it arrives:
+        #1455 must exclude columns whose comparator is `"json"`; the fix is the
+        declared type (#3497).
 
         Characterization only — this pins current behavior as a known gap.
         """
@@ -1329,7 +1385,7 @@ class TestCollectionIdentityContract:
         """
         key = cqlite.Udt("address", "test_collections", {"street": "1 Main St"})
         assert normalize_python_value({key: 7}, is_row_level=False) == [
-            {"key": {"_type": "address", "street": "1 Main St"}, "value": 7},
+            {"key": {"street": "1 Main St"}, "value": 7},
         ]
 
         # The property that makes it CANONICALIZABLE: key position and value
@@ -1346,15 +1402,26 @@ class TestCollectionIdentityContract:
             normalize_python_value({key: 7}, is_row_level=False)[0]["key"], list
         )
 
-        # Identity still discriminates: the old projection told two same-fields
-        # UDTs apart only via its injected `_type`/`_keyspace` PAIRS. Removing
-        # those pairs would have collapsed the two keys into one had identity not
-        # moved onto the instance — so this is what keeps the closure from being a
-        # regression at the normalizer level too.
+        # Identity discriminates ON THE INSTANCE, which is where #3504 put it: two
+        # same-fields UDTs of DIFFERENT declared types remain distinct dict keys and
+        # produce two entries.
         twin = cqlite.Udt("address_v2", "test_collections", {"street": "1 Main St"})
         both = normalize_python_value({key: 7, twin: 8}, is_row_level=False)
         assert len(both) == 2
-        assert {entry["key"]["_type"] for entry in both} == {"address", "address_v2"}
+        assert key != twin and len({key, twin}) == 2, (
+            "the declared type participates in equality/hash on the instance"
+        )
+
+        # ...and it does NOT survive into the canonical form, because the CANONICAL
+        # FORM MIRRORS `--format json`, WHICH CARRIES NO TYPE CHANNEL AT ALL
+        # (#3629). `sstabledump` is the same: `UserType.toJSONString` emits declared
+        # fields only, so a dump cannot tell these two apart either. Asserted rather
+        # than left implicit — this is a real consequence of the fix, not an
+        # oversight, and the place to notice it is here.
+        assert both[0]["key"] == both[1]["key"], (
+            "two UDT types with identical fields are indistinguishable in JSON, on "
+            "every side including sstabledump"
+        )
 
     def test_tuple_is_an_array(self):
         """`tuple<...>` → JSON array (asymmetry row 3)."""
@@ -1498,5 +1565,5 @@ class TestCollectionIdentityContract:
             {"key": "k", "value": ["y", "z"]},
         ]
         assert normalize_python_value([_udt("point", x=1)], is_row_level=False) == [
-            {"_type": "point", "x": 1},
+            {"x": 1},
         ]
