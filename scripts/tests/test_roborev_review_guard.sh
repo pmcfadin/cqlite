@@ -5608,7 +5608,10 @@ else
     # and a sha equal to the certified head — and is deliberately NOT keyed on `det_key`, so it cannot
     # become the "which keys are exempt" argument again. A third `continue`, or a provenance-free
     # admission, is the escape hatch #3229 forbade.
-    _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '\bcontinue\b' || true)
+    # Portable word boundaries, not GNU `\b`: POSIX ERE leaves `\b` undefined and BSD grep on
+    # macOS (a first-class gate host) does not honour it, so this count would come back 0 there
+    # and the affirmation check would silently measure nothing (roborev job 285, #3453).
+    _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '(^|[^[:alnum:]_])continue([^[:alnum:]_]|$)' || true)
     if [ "$_aff_continues" -eq 2 ] &&
       printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;' &&
       printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' &&

@@ -500,7 +500,10 @@ for plant in "${PLANTS[@]}"; do
       for l in $planted_component_logs; do
         # Redirection, not a pipe: `grep -q` exits on first match and this file runs
         # `pipefail`, so a piped producer can take SIGPIPE and invert the verdict (#3685).
-        grep -qE "pass ${want_n}/2 .*: ${want_v}\b" "$l" && hit=1
+        # Portable boundary, not GNU `\b` (undefined in POSIX ERE, not honoured by BSD grep
+        # on macOS). This one was introduced by the previous round's fix — the same defect it
+        # was warning about, one file over.
+        grep -qE "pass ${want_n}/2 .*: ${want_v}([^[:alnum:]_]|$)" "$l" && hit=1
       done
       [ "$hit" = 1 ] || { passes_ok=0; passes_detail="$passes_detail pass${want_n}!=${want_v}"; }
     done

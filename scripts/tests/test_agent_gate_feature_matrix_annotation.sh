@@ -228,7 +228,10 @@ fi
 # components would read UNDECLARED.
 b8=()
 for fn in _fm_observe_child _fm_describe_cargo _fm_abbrev_features _fm_sidecar; do
-  grep -qE "^export -f .*\b$fn\b" "$GATE" || b8+=("$fn-not-exported")
+  # PORTABLE word boundary, not GNU `\b`: POSIX ERE leaves `\b` UNDEFINED and BSD grep on
+  # macOS — a first-class gate host — does not interpret it, so the match would silently fail
+  # and this MANDATORY guard would report false failures there (roborev job 285).
+  grep -qE "^export -f ([^[:space:]]+[[:space:]]+)*$fn([[:space:]]|$)" "$GATE" || b8+=("$fn-not-exported")
 done
 if [ "${#b8[@]}" -eq 0 ]; then
   ok "B8: the child-body recorder + its formatter are exported (the bash -c bodies can record), while the interceptors are not (B3)"
@@ -245,7 +248,9 @@ fi
 b9=()
 for c in core-tests memory-budget integration-tests write-tests cli-tests \
          compaction-byte-parity minimal-build smoke; do
-  grep -qE "_fm_observe_child $c\b" "$GATE" || b9+=("$c-does-not-record-in-body")
+  # Portable boundary (see B8). The class excludes `-` as well as alnum/underscore, because
+  # component names contain hyphens and `write-tests` must not match `write-tests-extra`.
+  grep -qE "_fm_observe_child $c([^[:alnum:]_-]|$)" "$GATE" || b9+=("$c-does-not-record-in-body")
 done
 fm_end_for_b9=$(grep -n '^# ==== END feature-matrix annotation' "$GATE" | head -1 | cut -d: -f1)
 # COMMENT lines are excluded: this file's own prose names the function repeatedly, and a

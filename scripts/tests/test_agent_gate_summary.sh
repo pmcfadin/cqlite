@@ -798,6 +798,12 @@ fi
 #     false positive on a gate path: the ASSOCIATIVE ARRAY (`declare/local/typeset -A`),
 #     CASE-CONVERSION PARAMETER EXPANSION (the `${v` + `^^}` / `,,}` / `^}` / `,}` forms),
 #     and `&>>` append-redirection.
+#     FOURTH, added on roborev job 285: GNU-only `\b` in a `grep -E` pattern. POSIX ERE leaves
+#     `\b` UNDEFINED and BSD grep on macOS does not honour it, so a match silently FAILS and a
+#     mandatory guard reports false failures — the same first-class-host argument as the bash-4
+#     floor, one tool over. Unambiguous by the same test: there is no legitimate portable use of
+#     `\b` in `grep -E`, so it cannot false-positive. Found in 4 sites, one of which the PREVIOUS
+#     round's own fix had just introduced.
 #     NOT linted, because judging them needs context a grep does not have: `mapfile` /
 #     `readarray` (a script may define its own function of that name) and COMPUTED negative
 #     subscripts (`${a[$i]}` with i<0 is undetectable statically anyway). A lint with false
@@ -830,18 +836,19 @@ while IFS= read -r _b32f; do
   if sed 's/#.*$//' "$SCRIPT_DIR/../../$_b32f" 2>/dev/null | grep -qE \
        -e '^[[:space:]]*(declare|local|typeset)[[:space:]]+-[A-Za-z]*A' \
        -e '\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,|\^|,)\}' \
-       -e '&>>'; then
+       -e '&>>' \
+       -e 'grep [^|]*\\b'; then
     b32_offenders="$b32_offenders $_b32f"
   fi
 done <<EOF
 $b32_scripts
 EOF
 if [ "$b32_scanned" -lt 20 ]; then
-  bad "bash-compat-8c: derived only $b32_scanned gate-invoked script(s) from $GATE — the derivation looks broken, so this lint would pass having scanned almost nothing"
+  bad "portability-8c: derived only $b32_scanned gate-invoked script(s) from $GATE — the derivation looks broken, so this lint would pass having scanned almost nothing"
 elif [ -n "$b32_offenders" ]; then
-  bad "bash-compat-8c: gate-invoked script(s) use a bash-4.0-only construct (associative array / case-conversion expansion / '&>>'), which fails under macOS /bin/bash 3.2:$b32_offenders"
+  bad "portability-8c: gate-invoked script(s) use a NON-PORTABLE construct (bash-4 associative array / case-conversion expansion / '&>>', or GNU-only grep '\\b' which POSIX ERE leaves undefined and BSD grep does not honour), which fails on macOS — a first-class gate host:$b32_offenders"
 else
-  ok "bash-compat-8c: 0 of 3 RECOGNISED bash-4-only constructs (associative array, case-conversion expansion, '&>>') found across $b32_scanned gate-invoked scripts — NOT an exhaustive bash-3.2 proof: \`bash -n\` does not catch this class (measured: rc=0 for all three) and only EXECUTION under 3.2 establishes compatibility"
+  ok "portability-8c: 0 of 4 RECOGNISED non-portable constructs (bash-4 associative array, bash-4 case-conversion expansion, bash-4 '&>>', GNU-only grep '\\b') found across $b32_scanned gate-invoked scripts — NOT an exhaustive portability proof: \`bash -n\` does not catch the bash-4 class (measured: rc=0 for all three) and nothing here executes under a BSD userland; only EXECUTION on a macOS host establishes either"
 fi
 
 # 9. Accelerator absence WARN + state markers (issue #1848). The gate must:
