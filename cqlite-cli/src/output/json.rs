@@ -7,9 +7,10 @@
 use crate::config::OutputConfig;
 use crate::output::{OutputError, StreamingWriter};
 use cqlite_core::query::{QueryMetadata, QueryResult, QueryRow};
+use cqlite_core::util::udt_json::udt_to_json_object;
 use cqlite_core::Value;
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
-use serde_json::{json, Map, Value as JsonValue};
+use serde_json::{json, Value as JsonValue};
 use std::error::Error as StdError;
 use std::io::Write;
 
@@ -207,24 +208,10 @@ impl JSONWriter {
                 let json_list: Vec<JsonValue> = tuple.iter().map(Self::value_to_json).collect();
                 JsonValue::Array(json_list)
             }
-            Value::Udt(udt) => {
-                let mut udt_obj = Map::new();
-                udt_obj.insert(
-                    "_type".to_string(),
-                    JsonValue::String(udt.type_name.clone()),
-                );
-
-                // Preserve field order from UDT definition
-                for field in &udt.fields {
-                    let field_json = match &field.value {
-                        Some(value) => Self::value_to_json(value),
-                        None => JsonValue::Null,
-                    };
-                    udt_obj.insert(field.name.clone(), field_json);
-                }
-
-                JsonValue::Object(udt_obj)
-            }
+            // Declared fields and NOTHING else — no injected `_type` (issue
+            // #3629): type identity must not share the user's field namespace.
+            // One shared rule, each writer keeping its own field-value renderer.
+            Value::Udt(udt) => udt_to_json_object(udt, Self::value_to_json),
             Value::Frozen(boxed_value) => Self::value_to_json(boxed_value),
             // Tombstoned cells represent deleted values. Emit JSON null to match
             // cqlsh and Python binding behaviour (issue #806).

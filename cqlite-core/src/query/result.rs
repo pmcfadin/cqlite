@@ -3,6 +3,7 @@
 //! This module provides result types and utilities for query execution results.
 //! It includes result set management, row iteration, and result metadata.
 
+use crate::util::udt_json::udt_to_json_object;
 use crate::{schema::CqlType, RowKey, Value};
 // Re-export cell metadata types that now live in crate::types so the storage
 // layer can use them without a cyclic dependency.
@@ -1063,18 +1064,10 @@ impl ToJson for Value {
                     .collect();
                 serde_json::Value::Object(json_map)
             }
-            Value::Udt(udt) => {
-                let mut json_obj = serde_json::Map::new();
-                json_obj.insert("_type".to_string(), json!(udt.type_name));
-                for field in &udt.fields {
-                    let field_json = field
-                        .value
-                        .as_ref()
-                        .map_or(serde_json::Value::Null, ToJson::to_json);
-                    json_obj.insert(field.name.clone(), field_json);
-                }
-                serde_json::Value::Object(json_obj)
-            }
+            // Declared fields and NOTHING else — no injected `_type` (issue
+            // #3629): type identity must not share the user's field namespace.
+            // One shared rule, each writer keeping its own field-value renderer.
+            Value::Udt(udt) => udt_to_json_object(udt, ToJson::to_json),
             Value::Frozen(boxed) => boxed.to_json(),
             Value::Decimal { scale, unscaled } => json!({
                 "scale": *scale,
