@@ -1167,15 +1167,14 @@ ROBOREV_WAIVER_AUTHORS="pmcfadin"
 # production resolution stays single, literal and unreachable from any invocation.
 WAIVER_SCAN_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/roborev-waiver-scan.py"
 
-# roborev_waiver_author_allowed <login>: is this comment author permitted to GRANT a waiver?
-roborev_waiver_author_allowed() {
-  local want="$1" allowed
-  [ -n "$want" ] || return 1
-  for allowed in $ROBOREV_WAIVER_AUTHORS; do
-    [ "$want" = "$allowed" ] && return 0
-  done
-  return 1
-}
+# ===== NO SHELL-SIDE AUTHORIZATION HELPER (roborev job 229; #3312 job 26/27) =====
+# A `roborev_waiver_author_allowed <login>` shell predicate used to sit here. It had ZERO callers
+# repo-wide — the decision moved into the structured scanner at #3312 job 26, where author and body stay
+# separate FIELDS of one object so no body can forge its author — and it is DELETED rather than left
+# dormant. A live-looking allowlist check next to `ROBOREV_WAIVER_AUTHORS` is an invitation: a future
+# edit calling it instead of the scanner would reintroduce a SECOND, shell-side authorization path, and
+# two implementations of an authorization rule drift, and a drift in an authorization rule is a bypass.
+# The allowlist is still expressed once, above, and consumed only by the scanner it is passed to.
 
 # roborev_absence_waiver_lookup <base-sha> <head-sha> <job-id>: does the PR for this branch carry a
 # waiver for THIS REVIEW? Sets, and never returns non-zero:
@@ -1267,7 +1266,12 @@ roborev_absence_waiver_lookup() {
   # The scanner owns the WHOLE decision — shape, scope, reason and authorization — so this shell never
   # associates an author with a body. Its output is `key=value` lines with whitespace-collapsed values,
   # the same shape `roborev-job-facts.py` emits, so a free-text reason cannot introduce a second channel.
-  if ! result=$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null); then
+  # THE MARKER KIND IS NAMED EXPLICITLY (#3626). The scanner now decides TWO authorizations — the
+  # absence waiver and the findings deferral — and each call selects exactly one, so neither can ever
+  # read the other's marker: an absence waiver confers no authority over `findings:` and a findings
+  # deferral confers none over `prompt-content:`. There is no default kind, deliberately: a default
+  # would be the one thing that could make a call read a marker its caller did not ask for.
+  if ! result=$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" prompt-content-absent "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" 2>/dev/null); then
     ROBOREV_WAIVER_STATE="unavailable"
     ROBOREV_WAIVER_DETAIL="the PR comments could not be parsed as JSON, so no waiver could be established"
     return 0
@@ -1286,5 +1290,313 @@ roborev_absence_waiver_lookup() {
       ROBOREV_WAIVER_STATE="unavailable"
       ;;
   esac
+  return 0
+}
+
+# ============== THE FINDINGS DEFERRAL (issue #3626) ==============
+# WHY THIS EXISTS. Since #3586 a would-be PASS requires `findings:` to reduce token-exactly to `NONE`,
+# in every mode including `--recheck-job`, and that requirement is correctly NOT waivable. The
+# consequence nobody designed for: a LEAD-DEFERRED finding is re-reported by every later round, so
+# `findings: PRESENT (n)` persists, `RESULT` stays `FAIL`, and the doctrine rule "any non-PASS terminal
+# RESULT is a blocked merge" blocks the merge FOREVER. Measured on PR #3572 job 262: two findings, ZERO
+# new, both already filed (#3602, #3613) and both already lead-deferred, 5.9M input tokens, every
+# deterministic key PASS — and the merge required an out-of-band lead comment. The tooling was behaving
+# properly; the doctrine was unobtainable, and a rule that punishes the correct behaviour (#3515's lane
+# refused to manufacture a green and asked instead) will not survive contact.
+#
+# So "roborev clean" is redefined as NO UNADDRESSED FINDINGS rather than "the tool printed zero", and
+# the distinction is made MECHANICAL instead of resting on lead memory.
+#
+# ===== THE TRAP, AND WHY THE AUTHORIZATION LIVES IN A PR COMMENT =====
+# The obvious fix — let a lane mark findings deferred so the tool passes — HANDS THE CONSTRAINED PARTY
+# THE POWER TO SATISFY ITS OWN CONSTRAINT. That is the shape #3312 spent four High-severity rounds on,
+# and its corollary is binding here: THE CONSTRAINED PARTY MUST NOT CHOOSE ITS OWN ENFORCER. A
+# `--defer-finding` flag, a deferral file in the worktree and an env var are therefore all
+# non-starters — a worker could clear its own findings. The authorization must live somewhere the
+# worker cannot write in its own name, so it travels the ABSENCE WAIVER'S CHANNEL: a top-level PR
+# comment whose SOLE NONBLANK CONTENT is one anchored marker line, from an author on the hard-coded
+# allowlist above, associated with its body STRUCTURALLY by `gh --json`.
+#
+# REUSE, DO NOT REINVENT: the channel rules are inherited BY CALL (the same scanner, selected by kind),
+# never by copy. Five recogniser generations were superseded before that class closed; a second
+# implementation of it would be a second place for it to diverge, and a divergence is a bypass.
+#
+# ===== SEPARATELY SCOPED FROM THE WAIVER, AND THAT SEPARATION IS THE POINT =====
+# Distinct marker keywords, distinct summary keys (`waiver:` / `deferral:`), distinct verdict tokens
+# (`WAIVED` / `DEFERRED`). Neither reads the other's marker and neither falls back to the other. A
+# delivery-artifact waiver may never excuse a real defect, and a findings deferral may never excuse an
+# absent prompt. A run may legitimately carry both, each granted on its own marker.
+#
+# ===== WHAT IS AFFIRMATIVE HERE, AND WHAT IS NOT DEFERRABLE AT ALL =====
+# `count=` must EQUAL the observed findings count and `issues=` must be non-empty, so a grant rests on
+# a measurement rather than on the absence of a contrary signal (#3586). `findings: UNKNOWN` and
+# `findings: SKIP` are NOT deferrable in any mode: those values mean the findings state was never
+# ESTABLISHED, and a pass may not rest on a state that could not be read. And nothing here
+# reconstructs per-finding identity from the review's prose — that is a recogniser over
+# author-controlled text, the class #3564 closed by REMOVING prose reconstruction, and it stays closed.
+#
+# THE THREAT MODEL AND THE TRIAGE RULE ARE THE WAIVER'S, VERBATIM (see above): a hostile INVOKER is out
+# of model by construction; what this defends is (1) parties who do not control the invocation — this
+# is a public repository and a failing block PRINTS base/head/job — and (2) accident and drift, the
+# larger category. "The invoker can bypass this" => record it, do not patch it. "A non-invoker can
+# bypass this", or "this can be bypassed BY ACCIDENT" => defect.
+#
+# RESIDUALS, named rather than implied: the marker is read from TOP-LEVEL PR COMMENTS ONLY, so one
+# posted inside a review body or a review-thread reply is silently not applied (the run reports
+# `deferral: NONE` and the FAIL stands — fail-closed, but it reads as "my authorization was ignored");
+# and an authorized human can authorize carelessly — pre-authorizing a job, or deferring without
+# checking that the findings really are the tracked ones. Nothing mechanical detects either; the
+# control is the permanent, attributable comment, which is why a substantive reason is required and
+# recorded verbatim.
+
+# ===== RETRIEVABILITY IS THREE-VALUED: PRESENT / ABSENT / COULD-NOT-ASK (#3626, lead condition 1) =====
+# This is the LOAD-BEARING leg of a deferral's disposition — the PR-body link check it used to share
+# that job with was DELETED, not patched (the full census and the reason live at the deleted site in
+# `roborev-waiver-scan.py`; in one line: a PR body is editable by anyone with write access with no
+# per-edit attribution, so it was the weaker artifact even before its Markdown recognisers leaked). A
+# load-bearing leg MUST NOT collapse "cannot tell" onto an answer.
+#
+# `gh issue view` EXITS 1 FOR BOTH A MISSING ISSUE AND AN AUTH/NETWORK FAILURE — measured on gh 2.98.0:
+#   not found : `GraphQL: Could not resolve to an issue or pull request with the number of N.`  exit 1
+#   no auth   : `HTTP 401: Bad credentials (https://api.github.com/graphql)`                    exit 1
+# so an exit-code-only test is exactly the two-valued predicate that always picks the permissive
+# answer. The verdict therefore comes from the DIAGNOSTIC, and EVERY unrecognised diagnostic is
+# COULD-NOT-ASK: both non-present states are non-granting, and what differs is the OPERATOR ACTION
+# ("that issue number is wrong" vs "this box cannot reach GitHub"), so guessing between them buys
+# nothing and guessing wrong sends the operator to fix the wrong thing.
+#
+# ===== AND A CLOSED ISSUE IS NOT A DISPOSITION (#3626 round 3) =====
+# `gh issue view` answers, and exits 0, for a CLOSED issue, so a number test alone made "the finding
+# is tracked" satisfiable by an issue closed as a duplicate three weeks ago — the finding permanently
+# untracked while the block asserted it was filed. That is the exact thing this leg exists to prevent,
+# so `state` is read alongside `number` and only an OPEN issue may grant.
+#
+# THIS IS DELIBERATELY STRONGER THAN THE LEAD'S LITERAL CONDITION, which said RETRIEVABLE, and a closed
+# issue is retrievable. The claim made at the call site, in the scanner and in the spec is the stronger
+# "enforces NOT-DROPPED", and a closed-as-duplicate issue means the finding IS dropped — so the claim is
+# made true rather than three statements of it weakened to match a weaker implementation. A false refusal
+# here is recoverable (reopen the issue, or file a fresh tracking issue and re-authorize) and is the
+# fail-closed direction.
+#
+# Sets ROBOREV_ISSUE_STATE = present | closed | absent | unverifiable, and ROBOREV_ISSUE_DETAIL for the
+# three non-granting ones. It never returns non-zero, because a two-valued RETURN would re-import the
+# very collapse this function exists to remove.
+roborev_issue_retrievability() {
+  local issue="$1" out errfile errtext folded ok num state
+  ROBOREV_ISSUE_STATE="unverifiable"
+  ROBOREV_ISSUE_DETAIL="'gh issue view $issue' was never asked"
+  if ! command -v gh >/dev/null 2>&1; then
+    ROBOREV_ISSUE_DETAIL="'gh' is not on PATH, so whether issue #$issue exists could not be asked"
+    return 0
+  fi
+  if ! errfile="$(mktemp 2>/dev/null)"; then
+    ROBOREV_ISSUE_DETAIL="no temporary file could be created to capture the 'gh' diagnostic, so a missing issue could not be told apart from a could-not-ask — the two must never read alike, so this is the could-not-ask"
+    return 0
+  fi
+  # `--jq` lets `gh` do the JSON parse and yields ONE line, `<number> <state>`, so the AFFIRMATIVE test
+  # is an exact string comparison instead of a regex over JSON. (The COMMENTS payload is deliberately
+  # NOT read through `--jq`: there, author and body must stay separate FIELDS of one object so no body
+  # can forge its author. Here there is no association to preserve — only two scalars.)
+  if out="$(cd "$REPO" && gh issue view "$issue" --json number,state --jq '"\(.number) \(.state)"' 2>"$errfile")"; then
+    ok=1
+  else
+    ok=0
+  fi
+  errtext="$(tr -d '\r' <"$errfile" | tr '\n' ' ')"
+  rm -f "$errfile"
+  folded="$(printf '%s' "$errtext" | tr '[:upper:]' '[:lower:]')"
+  if [ "$ok" -eq 1 ]; then
+    # THE PERMISSIVE BRANCH IS KEYED ON THE AFFIRMATIVE PAIR: the payload must name THIS issue AND say
+    # it is OPEN. Anything else — a different number, a missing or `null` state, a state this code has
+    # never judged — takes a non-granting branch rather than inheriting the permissive one.
+    if [ "$out" = "$issue OPEN" ]; then
+      ROBOREV_ISSUE_STATE="present"
+      ROBOREV_ISSUE_DETAIL=""
+      return 0
+    fi
+    num="${out%% *}"
+    state="${out#* }"
+    if [ "$num" = "$issue" ] && [ "$state" = "CLOSED" ]; then
+      ROBOREV_ISSUE_STATE="closed"
+      ROBOREV_ISSUE_DETAIL="GitHub answered that issue #$issue is CLOSED"
+      return 0
+    fi
+    ROBOREV_ISSUE_STATE="unverifiable"
+    ROBOREV_ISSUE_DETAIL="'gh issue view $issue' succeeded but returned '$out' rather than that issue's number and an OPEN state, so its availability to track a deferred finding was never AFFIRMATIVELY established"
+    return 0
+  fi
+  case "$folded" in
+    *"could not resolve to an issue"*)
+      ROBOREV_ISSUE_STATE="absent"
+      ROBOREV_ISSUE_DETAIL="GitHub answered that issue #$issue DOES NOT EXIST in this repository ($errtext)"
+      ;;
+    *)
+      ROBOREV_ISSUE_STATE="unverifiable"
+      ROBOREV_ISSUE_DETAIL="'gh issue view $issue' failed WITHOUT answering that the issue does not exist (${errtext:-no diagnostic was produced}), so whether #$issue exists is UNKNOWN — this is a could-not-ask, not an answer"
+      ;;
+  esac
+  return 0
+}
+
+# roborev_findings_deferral_lookup <base-sha> <head-sha> <job-id> <observed-findings-count>:
+# does the PR for this branch carry a findings deferral for THIS REVIEW, covering exactly this many
+# findings, with every named issue an OPEN issue GitHub confirms? Sets, and never returns non-zero:
+#   ROBOREV_DEFERRAL_STATE   granted | unauthorized | stale | malformed | none | count-mismatch |
+#                            issue-absent | issue-closed | issue-unverifiable | unavailable
+#   ROBOREV_DEFERRAL_AUTHOR / _SCOPE / _REASON / _DETAIL / _ISSUES / _COUNT
+#
+# FAIL-CLOSED EVERYWHERE: no `gh`, no PR, a `gh` error, an unusable scanner, a marker for another
+# scope, a count that does not match, an issue GitHub says does not exist, an issue whose existence
+# could not be ASKED, a placeholder reason, a missing field — every one of them leaves the findings
+# FAILing, under its own named state, because "your marker names the wrong job" and "there is no
+# marker" are different operator actions and a bare FAIL distinguishes neither.
+roborev_findings_deferral_lookup() {
+  local base="$1" head="$2" job="$3" observed="$4" json result issue
+  local declared_issues verified_issues
+  ROBOREV_DEFERRAL_STATE="none"
+  ROBOREV_DEFERRAL_AUTHOR=""
+  ROBOREV_DEFERRAL_SCOPE=""
+  ROBOREV_DEFERRAL_REASON=""
+  ROBOREV_DEFERRAL_DETAIL=""
+  ROBOREV_DEFERRAL_ISSUES=""
+  ROBOREV_DEFERRAL_COUNT=""
+  if [ -z "$base" ] || [ -z "$head" ] || [ -z "$job" ] || [ "$job" = "-" ]; then
+    ROBOREV_DEFERRAL_STATE="unavailable"
+    ROBOREV_DEFERRAL_DETAIL="this run has no complete review scope (base='$base' head='$head' job='$job') for a deferral to be bound to"
+    return 0
+  fi
+  # THE OBSERVED COUNT IS THE AFFIRMATIVE HALF OF THE BINDING, so an unmeasurable one is a state, never
+  # a default: with no measured count there is nothing for `count=` to match and a grant would rest on
+  # exactly the absence #3586 forbids.
+  case "$observed" in
+    ''|*[!0-9]*)
+      ROBOREV_DEFERRAL_STATE="unavailable"
+      ROBOREV_DEFERRAL_DETAIL="the observed findings count is not a measured number ('$observed'), so the marker's count= has nothing to be matched against; only an affirmatively measured 'PRESENT (n)' is deferrable"
+      return 0
+      ;;
+  esac
+  if ! command -v gh >/dev/null 2>&1; then
+    ROBOREV_DEFERRAL_STATE="unavailable"
+    ROBOREV_DEFERRAL_DETAIL="'gh' is not on PATH, so no PR comment could be read"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$WAIVER_SCAN_TOOL" ]; then
+    ROBOREV_DEFERRAL_STATE="unavailable"
+    ROBOREV_DEFERRAL_DETAIL="the structured authorization scanner is unusable (python3 present: $(command -v python3 >/dev/null 2>&1 && printf yes || printf no); tool: $WAIVER_SCAN_TOOL) — an authorization is NEVER decided from a flattened text stream, so this fails closed rather than falling back to line parsing"
+    return 0
+  fi
+  # ONE `gh` CALL, RAW JSON, DECIDED STRUCTURALLY — AND `comments` IS THE WHOLE PAYLOAD (#3626).
+  # `body` was fetched here for a PR-body link check that has been DELETED rather than patched: a PR
+  # body is editable at any time by anyone with write access with NO per-edit attribution, while a
+  # top-level comment is permanent and attributable, so the body was the weaker artifact and is now
+  # evidence for nothing (the full bypass census is at the deleted site in `roborev-waiver-scan.py`).
+  # No `--jq`: author and body must stay SEPARATE FIELDS of the same object all the way to the
+  # decision, so nothing inside a body can change whose comment it is.
+  if ! json=$(cd "$REPO" && gh pr view --json comments 2>/dev/null); then
+    ROBOREV_DEFERRAL_STATE="unavailable"
+    ROBOREV_DEFERRAL_DETAIL="'gh pr view --json comments' failed (no PR for this branch, no auth, or an API error), so no deferral could be read"
+    return 0
+  fi
+  [ -n "$json" ] || return 0
+  if ! result=$(printf '%s' "$json" | python3 "$WAIVER_SCAN_TOOL" findings-deferral "$base" "$head" "$job" "$ROBOREV_WAIVER_AUTHORS" "$observed" 2>/dev/null); then
+    ROBOREV_DEFERRAL_STATE="unavailable"
+    ROBOREV_DEFERRAL_DETAIL="the PR payload could not be parsed as JSON, so no deferral could be established"
+    return 0
+  fi
+  ROBOREV_DEFERRAL_STATE=$(printf '%s\n' "$result" | sed -n 's/^state=//p' | head -1)
+  ROBOREV_DEFERRAL_AUTHOR=$(printf '%s\n' "$result" | sed -n 's/^author=//p' | head -1)
+  ROBOREV_DEFERRAL_SCOPE=$(printf '%s\n' "$result" | sed -n 's/^scope=//p' | head -1)
+  ROBOREV_DEFERRAL_REASON=$(printf '%s\n' "$result" | sed -n 's/^reason=//p' | head -1)
+  ROBOREV_DEFERRAL_DETAIL=$(printf '%s\n' "$result" | sed -n 's/^detail=//p' | head -1)
+  ROBOREV_DEFERRAL_ISSUES=$(printf '%s\n' "$result" | sed -n 's/^issues=//p' | head -1)
+  ROBOREV_DEFERRAL_COUNT=$(printf '%s\n' "$result" | sed -n 's/^count=//p' | head -1)
+  # A STATE THIS CODE HAS NEVER JUDGED IS NOT A GRANT: an unrecognised (or empty) verdict from the
+  # scanner fails closed instead of inheriting the permissive path.
+  case "$ROBOREV_DEFERRAL_STATE" in
+    # `unavailable` is RETAINED here as a pass-through, though the scanner emits no such state today
+    # (the one it had reported a payload with no readable PR body, and the PR body is no longer read at
+    # all — #3626). A scanner that ever reports its own unavailability keeps its PRECISE cause instead
+    # of being rewritten to a generic "unrecognised state", which is the diagnostic-quality failure
+    # this case exists to avoid; nothing becomes permissive either way, because `unavailable` is
+    # non-granting on both paths. `pr-unlinked` is GONE with the check that produced it.
+    granted|unauthorized|stale|malformed|none|count-mismatch|unavailable) ;;
+    *)
+      ROBOREV_DEFERRAL_DETAIL="the deferral scanner returned the unrecognised state '$ROBOREV_DEFERRAL_STATE'; failing closed"
+      ROBOREV_DEFERRAL_STATE="unavailable"
+      return 0
+      ;;
+  esac
+  [ "$ROBOREV_DEFERRAL_STATE" = "granted" ] || return 0
+  # ===== DISPOSITION: EACH DEFERRED ISSUE MUST BE AN OPEN, FILED ISSUE — AND THAT IS THE WHOLE OF IT =
+  # This is the ONE leg that enforces NOT-DROPPED, since the PR-body scan was removed (#3626). It needs
+  # a network read, so it lives here rather than in the structured scanner. It is THREE-VALUED: an
+  # issue GitHub says does not exist and an issue whose existence could not be ASKED are separate
+  # states with separate causes, because they are different operator actions — and neither is ever read
+  # as verified. A deferral pointing at nothing is a dropped finding wearing a link.
+  # ONE GRANT IS UNDONE BY ANY FAILURE — the loop cannot leave a partial grant standing, because the
+  # state is overwritten before the first failure returns.
+  # ===== THE BACKSTOP COUNTS VERIFICATIONS PERFORMED — IT DOES NOT TEST THE STRING (#3626 round 3) ====
+  # It used to be `[ -z "$ROBOREV_DEFERRAL_ISSUES" ]`, i.e. a NON-EMPTINESS test standing in for a
+  # VERIFICATION test, which is the fail-open shape this whole file is written against: never derive a
+  # pass from the absence of a bad signal. Reproduced directly — `ROBOREV_DEFERRAL_ISSUES=","` passes
+  # `[ -z ]`, `${//,/ }` yields `" "`, the UNQUOTED expansion splits into ZERO WORDS, the loop body
+  # never runs, and the function returns with the state still `granted`: `findings: DEFERRED` and
+  # `RESULT: PASS` with not one `gh issue view` executed and the block recording `issues=,`.
+  #
+  # That value is unreachable TODAY only because the marker pattern's `issues=([0-9]+(?:,[0-9]+)*)`
+  # forbids it — precisely the upstream dependency a backstop must not have. So the test is
+  # AFFIRMATIVE: count the verifications actually performed and require that count to EQUAL the number
+  # of DECLARED comma-separated fields. Any list the split does not traverse one-for-one is then a
+  # mismatch and fails closed, whatever a future loosening of `issues=` lets through. Measured, so the
+  # claim is not broader than the check: `,` (declared 2, traversed 0) and `3602,,3613` (declared 3,
+  # traversed 2) are refused, and so is a whitespace-only string. `3602, 3613` is NOT refused and does
+  # not need to be — one comma declares 2 fields and the split yields 2 words, so each number is still
+  # put through retrievability individually, which is the property. This clause is spelled out because
+  # an inaccurate comment on a security-relevant check is what stops the next reader looking.
+  declared_issues=$(( $(printf '%s' "$ROBOREV_DEFERRAL_ISSUES" | tr -cd ',' | wc -c) + 1 ))
+  verified_issues=0
+  # The precise diagnostic for the empty list is kept, because "granted with no issue list at all" and
+  # "granted with a list the split could not traverse" send the operator to different places. It is no
+  # longer what enforces the property: the count equality below catches the empty list too.
+  if [ -z "$ROBOREV_DEFERRAL_ISSUES" ]; then
+    ROBOREV_DEFERRAL_STATE="unavailable"
+    ROBOREV_DEFERRAL_DETAIL="the scanner granted without an issue list, which cannot happen through the marker pattern; failing closed rather than granting a deferral with no recorded disposition"
+    return 0
+  fi
+  # The list is comma-separated integers (the marker pattern guarantees the shape), so the commas are
+  # replaced with spaces and the default IFS does the split — no global IFS to save and restore, which
+  # is one fewer thing to leave broken on an early return.
+  for issue in ${ROBOREV_DEFERRAL_ISSUES//,/ }; do
+    roborev_issue_retrievability "$issue"
+    # KEYED ON THE AFFIRMATIVE VALUE: only `present` continues. Every other value — including one this
+    # code has never judged — takes a non-granting branch, so an unplanned state cannot inherit the
+    # permissive path. ONE GRANT IS UNDONE BY ANY FAILURE: the state is overwritten before the return,
+    # so the loop can never leave a partial grant standing.
+    case "$ROBOREV_ISSUE_STATE" in
+      present) verified_issues=$(( verified_issues + 1 )) ;;
+      closed)
+        ROBOREV_DEFERRAL_STATE="issue-closed"
+        ROBOREV_DEFERRAL_DETAIL="$ROBOREV_ISSUE_DETAIL — so a deferred finding is tracked by an issue nobody will look at again, which is the finding being DROPPED with a link attached. This is stricter than 'retrievable' on purpose: reopen #$issue, or file a fresh tracking issue and re-authorize with its number"
+        return 0
+        ;;
+      absent)
+        ROBOREV_DEFERRAL_STATE="issue-absent"
+        ROBOREV_DEFERRAL_DETAIL="$ROBOREV_ISSUE_DETAIL — so the disposition of a deferred finding rests on nothing. A deferral must name a FILED issue; fail-closed rather than deferring into a void. Check the number in the marker, file the issue, then re-authorize"
+        return 0
+        ;;
+      *)
+        ROBOREV_DEFERRAL_STATE="issue-unverifiable"
+        ROBOREV_DEFERRAL_DETAIL="$ROBOREV_ISSUE_DETAIL — and a deferral may not be granted on an UNVERIFIED disposition: 'the issue does not exist' and 'this box could not ask GitHub' are different operator actions, and only the first is an answer. This one is reported separately BECAUSE it is not an answer — fix the ability to reach GitHub (auth, network, rate limit) and re-run; do NOT change the marker"
+        return 0
+        ;;
+    esac
+  done
+  # THE AFFIRMATIVE REQUIREMENT ITSELF. Reached only when every traversed issue verified `present`, so
+  # this is the one remaining way a grant can stand: as many verifications as declared fields.
+  if [ "$verified_issues" -ne "$declared_issues" ]; then
+    ROBOREV_DEFERRAL_STATE="unavailable"
+    ROBOREV_DEFERRAL_DETAIL="the deferral declares $declared_issues issue field(s) in '$ROBOREV_DEFERRAL_ISSUES' but only $verified_issues were AFFIRMATIVELY verified as open and filed, so at least one declared field was never checked; failing closed rather than granting on an unverified disposition"
+    return 0
+  fi
   return 0
 }
