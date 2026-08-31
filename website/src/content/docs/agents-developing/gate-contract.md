@@ -765,15 +765,17 @@ ci-pins: DATASET_TAG: <tag>  DATASET_ASSET: <asset>  DATASET_SHA256: <sha>
 tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
-fmt:               PASS|FAIL (<Ns>)
-clippy:            PASS|FAIL (<Ns>)
-core-tests:        PASS|FAIL (<Ns>)
-integration-tests: PASS|FAIL (<Ns>)
-write-tests:       PASS|FAIL (<Ns>)
-cli-tests:         PASS|FAIL (<Ns>)
-minimal-build:     PASS|FAIL (<Ns>)
-all-features-check: PASS|FAIL (<Ns>)
-smoke:             PASS|FAIL (<Ns>)
+fmt:               PASS|FAIL (<Ns>)  [fmt workspace default-features]
+clippy:            PASS|FAIL (<Ns>)  [clippy workspace(excl 5) --all-features | clippy cqlite-core --features 33:all-compression,arrow,bench-internals,+30 more | ...]
+core-tests:        PASS|FAIL (<Ns>)  [test cqlite-core --features cli-helpers]
+integration-tests: PASS|FAIL (<Ns>)  [test cqlite-integration-tests default-features x2]
+write-tests:       PASS|FAIL (<Ns>)  [test cqlite-core --features write-support x3]
+cli-tests:         PASS|FAIL (<Ns>)  [test cqlite-cli default-features | test cqlite-cli --features write-support]
+minimal-build:     PASS|FAIL (<Ns>)  [build cqlite-core --no-default-features --features all-compression | test cqlite-core --no-default-features --features all-compression]
+all-features-check: PASS|FAIL (<Ns>)  [check cqlite-core --all-features | clippy cqlite-core --all-features]
+pub-surface:       PASS|FAIL (<Ns>)  [no-cargo]
+python-bindings:   PASS|SKIP (<Ns>)  [via maturin: feature set NOT observed]
+smoke:             PASS|FAIL (<Ns>)  [build cqlite-cli default-features]
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PASS
@@ -791,13 +793,59 @@ tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
 tree-integrity: PASS
 mode: PARTIAL (--only fmt,clippy) - does NOT count as the gate
-fmt:               PASS (<Ns>)
-clippy:            PASS (<Ns>)
+fmt:               PASS (<Ns>)  [fmt workspace default-features]
+clippy:            PASS (<Ns>)  [clippy workspace(excl 5) --all-features | ...]
 logs: /tmp/agent-gate.<random>
 summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
+
+### Every component line NAMES the feature matrix it ran (#3453)
+
+Owner ruling, 2026-08-30: *"the gate SUMMARY should name the feature matrix each
+component ran so a pasted block states what it certified."* A bare
+`core-tests: PASS (412s)` cannot distinguish a run that certified the OTLP stack from
+one that never enabled it — which is the whole subject of #3453 (220 cqlite-core
+`--lib` tests execute in `pr-gate-core`'s `--all-features` lane and nowhere in the gate
+of record). So every component line, in **every** mode (full, `--lite`, `--delta`),
+carries a bracketed feature matrix. Read it as `<subcommand> <scope> <features>`, one
+entry per distinct invocation, `xN` when the same set ran N times.
+
+**It is DERIVED, not curated** (`scripts/ci/gate-feature-matrix.sh`):
+
+- `cargo` and `env` are shell **functions** in the gate, so every cargo invocation made
+  in the gate's own shell is described **from the real argv about to execute**. There is
+  no second copy of a feature list to drift from.
+- The six components whose cargo calls live inside a single-quoted `bash -c` body
+  (`cli-tests`, `memory-budget`, `write-tests`, `integration-tests`, `minimal-build`,
+  `smoke`) hoist their package/features into **one variable** that is expanded both into
+  the argv and into the recorded matrix. The observer functions are deliberately **not**
+  `export -f`-ed: exporting them would make every bash descendant record too, so
+  `tooling-tests` (which runs nested agent-gate self-tests) would attribute a nested
+  run's cargo invocations to itself — a false rationale in a gate log is worse than none.
+
+**It never renders blank.** A component with no observed invocation renders an explicit
+`[UNDECLARED]`; one that runs no cargo at all renders `[no-cargo]`; one whose extension
+is built by a driver this observer cannot see renders `[via maturin: feature set NOT
+observed]` rather than guessing a feature set. A `SKIP` that never reached cargo says so.
+And **observation beats declaration**: a component declared `no-cargo` that is observed
+running cargo shows the observed sets with a `!declared-no-cargo` marker, so a
+mis-declaration self-corrects instead of being believed.
+
+**Guard:** `scripts/tests/test_agent_gate_feature_matrix_annotation.sh` (in
+`tooling-tests`, hermetic, ~3s) asserts that every name in `COMPONENTS` resolves to a
+declared class — a new component cannot join the set with a blank matrix — that all six
+per-component emit sites render through the one `_fm_summary_line`, and, for the six
+`bash -c` components, that the **declared matrix equals the argv that actually
+executed** under a recording PATH-shim `cargo`, described through the gate's own
+`_fm_describe_cargo` rather than re-derived in the test. That last section is
+RED-verified: changing a feature literal in one of those bodies without the hoisted
+variable reds it.
+
+**A long feature list is abbreviated, and the abbreviation declares itself**:
+`33:all-compression,arrow,bench-internals,+30 more`, never a silent truncation. Beyond
+six distinct sets the remainder renders as `+K more sets`.
 
 ## A mid-run tree mutation invalidates the run (#2926)
 

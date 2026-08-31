@@ -289,6 +289,27 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   block's `commit:`/`dirty:` are derived from that verified capture, never a fresh emit-time git
   read. No env var bypasses it; remedy is to re-run on a stable tree (don't edit a worktree while
   its gate runs).
+- **Every component line NAMES the feature matrix it ran, in ALL THREE modes (#3453).**
+  `core-tests: PASS (412s)  [test cqlite-core --features cli-helpers]` — read as
+  `<subcommand> <scope> <features>`, one entry per distinct invocation, `xN` for repeats. A bare
+  `PASS (412s)` could not distinguish a run that certified the OTLP stack from one that never
+  enabled it, which is this issue's whole subject. It is **DERIVED, never curated**
+  (`scripts/ci/gate-feature-matrix.sh`): `cargo` and `env` are shell FUNCTIONS in the gate, so a
+  matrix is described from the REAL argv about to execute, and the six components whose cargo calls
+  live in a single-quoted `bash -c` body hoist package+features into ONE variable expanded into both
+  the argv and the record. The observers are deliberately NOT `export -f`-ed — exporting them would
+  make every bash DESCENDANT record, so `tooling-tests` (which runs nested agent-gate self-tests)
+  would attribute a nested run's cargo to itself, and a false rationale in a gate log is worse than
+  none. It **never renders blank**: `[UNDECLARED]` (cargo expected, nothing observed), `[no-cargo]`,
+  `[via maturin: feature set NOT observed]`, or a named SKIP; a long list abbreviates as
+  `33:a,b,c,+30 more`, never a silent truncation. **Observation beats declaration** — a component
+  declared `no-cargo` that IS observed running cargo renders the observed sets plus
+  `!declared-no-cargo`, so a mis-declaration self-corrects. Guard (hermetic, ~3s, in
+  `tooling-tests`): `scripts/tests/test_agent_gate_feature_matrix_annotation.sh` — every
+  `COMPONENTS` name must resolve to a declared class (a new component cannot join with a blank
+  matrix), all six emit sites must route through the one renderer, and for the six `bash -c`
+  components the DECLARED matrix must equal the argv that ACTUALLY EXECUTED under a recording
+  PATH-shim `cargo`, described through the gate's own `_fm_describe_cargo` rather than re-derived.
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state, plus a `mold=` token and
   a `perf=` profiling-capability token on Linux hosts, #2859/#3249) — degradation there is
   actionable, not noise. `perf=paranoid-<N>`/`kptr-restricted` means THIS BOX CANNOT BE PROFILED (a
