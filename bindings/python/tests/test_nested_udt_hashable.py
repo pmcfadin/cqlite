@@ -91,7 +91,8 @@ siblings).
 
 import ast
 import os
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -341,51 +342,216 @@ def _sstables_root_candidates() -> list[Path]:
     return candidates
 
 
-def _table_has_data(root: Path, keyspace: str, table: str) -> bool:
-    """True when ``<root>/<keyspace>/<table>-*/`` holds a ``*-Data.db`` FILE.
+def _table_generations(root: Path, keyspace: str, table: str) -> list[str]:
+    """Sorted basenames of ``<root>/<keyspace>/<table>-*/`` dirs holding a Data.db.
 
-    Presence is judged by a real Data.db component, never by directory
+    Presence is judged by a real ``*-Data.db`` component, never by directory
     existence: this repo commits JSONL sidecars for fixtures whose binaries are
     gitignored, so a ``<table>-<uuid>/`` dir can exist with no SSTable in it.
+    Sorted so every diagnostic built from it is deterministic.
     """
     ks_dir = root / keyspace
     if not ks_dir.is_dir():
-        return False
+        return []
     prefix = f"{table}-"
     try:
         table_dirs = [
             d for d in ks_dir.iterdir() if d.is_dir() and d.name.startswith(prefix)
         ]
     except OSError:
-        return False
+        return []
+    found: list[str] = []
     for table_dir in table_dirs:
         try:
             entries = list(table_dir.iterdir())
         except OSError:
             continue
         if any(e.is_file() and e.name.endswith("-Data.db") for e in entries):
-            return True
-    return False
+            found.append(table_dir.name)
+    return sorted(found)
+
+
+def _table_has_data(root: Path, keyspace: str, table: str) -> bool:
+    """True when ``root`` carries ANY generation of ``<keyspace>.<table>``."""
+    return bool(_table_generations(root, keyspace, table))
+
+
+#: Manifest keys this module reads out of a ``references.yml`` table entry.
+_MANIFEST_ENTRY_KEYS = ("keyspace", "table", "sstable_dir", "prefix")
+
+
+def _manifest_declared_generation(keyspace: str, table: str) -> tuple[str, str]:
+    """``(table-dir basename, sstable prefix)`` that ``references.yml`` DECLARES.
+
+    THE DISCRIMINATOR, and the reason it is needed: a table NAME does not
+    identify a generation. This fixture has been regenerated six times, each
+    time minting a NEW Cassandra table UUID and hence a new directory basename,
+    so any leftover generation in any searched root matched by name and became
+    the oracle — a stale, corrupt or merely DIFFERENT set of bytes nobody
+    reviewed. Resolving against the manifest asks "is this the generation the
+    committed manifest names?" instead of "which root do I prefer?", which is
+    why it is taken over a checkout-first preference ordering: neither root is a
+    superset of the other (#3220), and this test is strictly stronger — it
+    rejects a stale generation in EITHER root, the checkout included.
+
+    ``references.yml`` is committed source, so it is read checkout-relative,
+    exactly like the CQL schemas (#3148), never from ``CQLITE_DATASETS_ROOT`` —
+    a manifest inside the corpus being validated could not discriminate anything.
+    The basename (not the recorded path) is the subject, mirroring
+    ``dataset_helpers::resolve_table_dir_via_manifest``, which also takes
+    ``file_name()`` and re-roots it: older entries in that file carry the
+    generating machine's absolute paths.
+
+    NOT A YAML PARSER. It reads the flat, machine-emitted block shape
+    ``test-data/scripts/generate-nested-udt-keys.sh`` writes (a ``tables:``
+    sequence of two-space list items whose scalars sit at four spaces) and
+    FAILS CLOSED on anything else — a missing ``tables:``, no parsed entries, a
+    duplicated key, zero or several entries for this table, an unusable
+    basename or prefix. PyYAML is deliberately not used: the gate's throwaway
+    venv installs only ``maturin`` and ``pytest``, so an ``import yaml`` here
+    would be an ImportError in the one lane that matters.
+    """
+    manifest = _workspace_root() / "test-data" / "datasets" / "references.yml"
+    try:
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise AssertionError(
+            f"the committed dataset manifest {manifest} is unreadable ({exc}) — "
+            "it declares which fixture GENERATION is the oracle, so the run is "
+            "refused rather than resolved by table name alone (#3500)"
+        ) from exc
+
+    entries: list[dict[str, str]] = []
+    in_tables = False
+    for raw in lines:
+        line = raw.rstrip()
+        if not in_tables:
+            if line == "tables:":
+                in_tables = True
+            continue
+        if line.startswith("  - "):
+            entries.append({})
+            line = "    " + line[4:]
+        if not entries:
+            continue
+        field = re.fullmatch(r" {4}([a-z_]+): *(.*)", line)
+        if field is None:
+            continue
+        key, value = field.group(1), field.group(2).strip().strip('"')
+        if key not in _MANIFEST_ENTRY_KEYS:
+            continue
+        if key in entries[-1]:
+            raise AssertionError(
+                f"{manifest} declares {key!r} twice in one table entry "
+                f"({entries[-1][key]!r} then {value!r}) — refused rather than "
+                "letting last-one-wins choose the fixture generation (#3500)"
+            )
+        entries[-1][key] = value
+
+    if not in_tables or not entries:
+        raise AssertionError(
+            f"{manifest} yielded no table entries (tables: header "
+            f"{'found' if in_tables else 'ABSENT'}) — the manifest shape this "
+            "reader expects has changed, so it can no longer say which fixture "
+            "generation is the oracle; fix the reader, do not fall back to "
+            "resolving by table name (#3500)"
+        )
+
+    matching = [
+        e for e in entries if e.get("keyspace") == keyspace and e.get("table") == table
+    ]
+    if len(matching) != 1:
+        raise AssertionError(
+            f"{manifest} declares {len(matching)} entries for {keyspace}.{table}, "
+            f"expected exactly 1 (parsed {len(entries)} entries in total) — with "
+            "no single declared generation this run cannot tell the committed "
+            "fixture from a leftover one, so it is refused (#3500)"
+        )
+    entry = matching[0]
+    dirname = PurePosixPath(entry.get("sstable_dir", "")).name
+    prefix = entry.get("prefix", "")
+    if not dirname.startswith(f"{table}-") or not prefix or "/" in prefix:
+        raise AssertionError(
+            f"{manifest} entry for {keyspace}.{table} is unusable: sstable_dir "
+            f"basename {dirname!r} (expected '{table}-<uuid>'), prefix "
+            f"{prefix!r} (expected e.g. 'nb-1-big')"
+        )
+    return dirname, prefix
+
+
+def _resolve_declared_generation(
+    keyspace: str, table: str, dirname: str, prefix: str
+) -> Path:
+    """The ONE candidate root carrying the manifest-declared generation.
+
+    Fail-closed, loudly, in all three bad states — never a silent skip and
+    never a silent fallback to another root:
+
+    * a root holding a generation of this table that the manifest does NOT
+      declare (or the declared directory without the declared ``prefix``) is
+      REJECTED naming the root, what was found and what is declared, even when
+      another root does carry the declared generation: an operator whose
+      exported corpus holds unreviewed bytes for this table has to hear it,
+      because that corpus WAS the oracle before this check existed;
+    * two roots both carrying the declared generation is AMBIGUITY — refused
+      rather than picked;
+    * no root carrying it names every root searched. The fixture is
+      git-committed, so this is a broken checkout or a broken resolver, never a
+      reason to skip (#3220).
+    """
+    candidates = _sstables_root_candidates()
+    searched = ", ".join(str(c) for c in candidates)
+    matches: list[Path] = []
+    rejected: list[str] = []
+    for root in candidates:
+        generations = _table_generations(root, keyspace, table)
+        if (root / keyspace / dirname / f"{prefix}-Data.db").is_file():
+            matches.append(root)
+        elif dirname in generations:
+            rejected.append(
+                f"{root} holds the declared directory {dirname!r} but it carries "
+                f"no {prefix}-Data.db"
+            )
+        for other in sorted(set(generations) - {dirname}):
+            rejected.append(
+                f"{root} holds {other!r}, which is NOT the declared generation"
+            )
+    if rejected:
+        raise AssertionError(
+            f"corpus root(s) carry a {keyspace}.{table} generation the committed "
+            f"references.yml does not declare — declared {dirname!r} (prefix "
+            f"{prefix!r}); found: " + "; ".join(rejected) + ". A same-named table "
+            "directory used to SHADOW the committed fixture and silently become "
+            "the oracle, so this is refused rather than resolved: delete or move "
+            "the undeclared generation (#3500)"
+        )
+    if len(matches) > 1:
+        raise AssertionError(
+            f"AMBIGUOUS: {len(matches)} candidate roots carry the declared "
+            f"{keyspace}.{table} generation {dirname!r} — "
+            + ", ".join(str(m) for m in matches)
+            + ". Refused rather than picking one, because a preference ordering "
+            "is exactly what cannot tell two same-named generations apart (#3500)"
+        )
+    if not matches:
+        raise AssertionError(
+            f"the COMMITTED {keyspace}.{table} generation declared by "
+            f"references.yml ({dirname}/{prefix}-Data.db) is present under no "
+            f"candidate root — searched [{searched}]. This fixture is checked "
+            "into git (issue #3500), so this is a broken checkout or a broken "
+            "resolver, not a missing download; it must never be skipped (#3220)."
+        )
+    return matches[0]
 
 
 def _sstables_root_for_table(keyspace: str, table: str) -> Path:
-    """The candidate root that really carries ``<keyspace>/<table>-*/…-Data.db``.
+    """The candidate root carrying the MANIFEST-DECLARED generation of the table.
 
-    FAIL-CLOSED, naming every root searched. This fixture is git-committed, so
-    "not found" is a broken checkout or a broken resolver — never a reason to
-    skip.
+    Two steps, deliberately separable so each is testable on its own: what the
+    committed manifest declares, then which root actually holds THAT.
     """
-    candidates = _sstables_root_candidates()
-    for root in candidates:
-        if _table_has_data(root, keyspace, table):
-            return root
-    searched = ", ".join(str(c) for c in candidates)
-    raise AssertionError(
-        f"COMMITTED fixture {keyspace}.{table} carries no *-Data.db under any "
-        f"candidate root — searched [{searched}]. This fixture is checked into git "
-        "(issue #3500), so this is a broken checkout or a broken resolver, not a "
-        "missing download; it must never be skipped (#3220)."
-    )
+    dirname, prefix = _manifest_declared_generation(keyspace, table)
+    return _resolve_declared_generation(keyspace, table, dirname, prefix)
 
 
 @pytest.fixture(scope="module")
