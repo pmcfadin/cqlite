@@ -695,7 +695,14 @@ parse_record() {
   REC_ISSUE=""; REC_LANE_DIR=""; REC_MACHINE=""; REC_ACTOR=""; REC_PID=""
   REC_PID_SCOPE=""; REC_BOOT_ID=""; REC_START_TICKS=""; REC_ACQUIRED_TS=""
   REC_ACQUIRED_EPOCH=""; REC_NONCE=""; REC_VERSION=""
-  [ -f "$f" ] || return 1
+  # ABSENT MEANS ABSENT (#3436, roborev round 25). This tested `-f` alone, so a DIRECTORY, a
+  # FIFO or a BROKEN SYMLINK at the record path read as "no record" — and `probe`, `status` and
+  # forced `release` then reported FREE / "already free" for a path that acquire refuses. Two
+  # commands disagreeing about the same state is the defect; round 20 fixed the WRITE side and
+  # left the READ side saying the opposite. A broken symlink fails `-e` and passes `-L`, so both
+  # are tested.
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then return 1; fi
+  if [ ! -f "$f" ]; then REC_UNREADABLE=1; return 0; fi
   if [ ! -r "$f" ]; then REC_UNREADABLE=1; return 0; fi
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -1027,6 +1034,17 @@ same_dir_other_issue() {
   else
     G_DIR_GUARD=""
   fi
+  # A DISCLOSURE IS NOT A GUARD (#3436, roborev round 25). Round 23 counted the records this scan
+  # could not read and let the WRITE proceed with a caveat — but if one of those records is a
+  # live holder of THIS directory, the caveat is printed AFTER two processes already own the
+  # lane. Reporting a collision risk is not preventing one.
+  #
+  # I ARGUED FOR THE DISCLOSURE ON FIX 5/14 GROUNDS AND MIS-APPLIED MY OWN RULE. That ruling is
+  # "a guard must not red on CORRECT input" — an unreadable record in the lock root is a BROKEN
+  # ENVIRONMENT, not correct input, so refusing there reds on nothing legitimate. The remedy is
+  # named in the message and the state is loud, diagnosable and rare; two silent writers are
+  # none of those. Readers (probe/status) still only REPORT: a read-only command must never
+  # refuse, and it is the write that has to be safe.
   return 1
 }
 

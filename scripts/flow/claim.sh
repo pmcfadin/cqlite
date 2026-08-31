@@ -335,7 +335,17 @@ require_numeric_issue() {
     # identity from the number refuses a spelling it did not choose, because the raw string
     # becomes the identity; a tool that MATCHES numbers it FOUND (advertised-collision-scan)
     # canonicalises, because it must reconcile spellings other tools created.
-    0*) die_usage "$2: issue number '${1}' has a leading zero. refs/claims/issue-$1 is derived from this string RAW, so '$1' and its canonical form would be two DIFFERENT claim refs for one issue — pass the canonical number" ;;
+    # ONLY WHERE THE COMMAND MINTS A REF (#3436, roborev round 25). Round 19 applied this to
+    # EVERY subcommand, so an existing `refs/claims/issue-03436` — creatable before that round —
+    # could no longer be inspected, verified or RELEASED through this script: the fix stranded
+    # exactly the refs it was added to prevent. That is my own mint-vs-match rule violated by the
+    # commit that stated it: a tool that MATCHES a ref it FOUND must accept the spelling that ref
+    # actually has. `claim` and `adopt` create; `status`, `verify` and `release` do not.
+    0*) case "$2" in
+          claim|adopt) : ;;
+          *) return 0 ;;
+        esac
+        die_usage "$2: issue number '${1}' has a leading zero. refs/claims/issue-$1 is derived from this string RAW, so '$1' and its canonical form would be two DIFFERENT claim refs for one issue — pass the canonical number" ;;
   esac
 }
 

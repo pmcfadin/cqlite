@@ -1393,13 +1393,28 @@ echo 'TEST: a LEADING-ZERO issue is refused, because the claim ref is built from
 #
 # REFUSE, not canonicalise: a tool that MINTS an identity from the number refuses a spelling it
 # did not choose; a tool that MATCHES numbers it FOUND (advertised-collision-scan) canonicalises.
-for sub in status verify claim; do
+# MINT vs MATCH (#3436, roborev round 25). Round 19 refused padding on EVERY subcommand, which
+# stranded any `refs/claims/issue-03436` created before that round — it could no longer be
+# inspected, verified or RELEASED, i.e. the fix blocked cleanup of exactly the refs it existed to
+# prevent. `claim` and `adopt` MINT a ref from the string and must refuse a spelling they did not
+# choose; `status`, `verify` and `release` MATCH a ref that already exists and must accept the
+# spelling it actually has.
+for sub in claim adopt; do
   out_z="$(bash "$CLAIM" "$sub" 03436 2>&1)"; rc_z=$?
   if [ "$rc_z" -ne 0 ] && printf '%s' "$out_z" | grep -q 'leading zero'; then
-    ok "($sub) a zero-padded issue is refused with the raw-derivation reason"
+    ok "($sub) MINTS a ref, so a zero-padded issue is refused with the raw-derivation reason"
   else
-    bad "($sub) a zero-padded issue was accepted: rc=$rc_z
+    bad "($sub) a zero-padded issue was accepted by a ref-creating command: rc=$rc_z
 $out_z"
+  fi
+done
+for sub in status verify release; do
+  out_r="$(bash "$CLAIM" "$sub" 03436 2>&1)"; rc_r=$?
+  if ! printf '%s' "$out_r" | grep -q 'leading zero'; then
+    ok "($sub) MATCHES an existing ref, so a legacy zero-padded issue is still reachable"
+  else
+    bad "($sub) a read/cleanup command refused a legacy padded ref, stranding it: rc=$rc_r
+$out_r"
   fi
 done
 # CONTROL: the canonical spelling still works — a guard that refuses everything is broken.

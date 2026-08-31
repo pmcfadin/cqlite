@@ -1723,11 +1723,21 @@ if [ ! -d "$D38/.lane-locks/lane-941.lock" ]; then
   bad "(b) PRECONDITION: could not place a directory at the record path — this case must not pass vacuously"
 else
   out38b="$(env -u LANE_LOCK_PID LANE_ROOT="$D38" bash "$LL" acquire 941 --lane-dir "$D38/dirlane" --actor flow --pid "$DP38" 2>&1)"; rc38b=$?
-  if [ "$rc38b" -ne 0 ] && printf '%s' "$out38b" | grep -q 'record-path-not-a-regular-file'; then
-    ok "(b) a DIRECTORY at the record path is refused, not reported as a successful acquire"
+  st38b="$(env -u LANE_LOCK_PID LANE_ROOT="$D38" bash "$LL" status 941 2>&1)"
+  inside38="$(ls -A "$D38/.lane-locks/lane-941.lock" 2>/dev/null | wc -l | tr -d ' ')"
+  # ASSERTED ON THE PROPERTY, NOT ON ONE MESSAGE (#3436, roborev round 25). The refusal now comes
+  # EARLIER — the read path classifies a non-regular record path as UNKNOWN-UNREADABLE rather than
+  # absent, so acquire refuses before reaching write_record's guard. Both refusals are correct and
+  # pinning either message would red on the other. What must hold is: refused, NOTHING written
+  # into the directory, and the READERS agreeing rather than reporting FREE — that last one is the
+  # actual defect round 25 named, where status said FREE for a state acquire refused.
+  if [ "$rc38b" -ne 0 ] && [ "$inside38" -eq 0 ] \
+     && ! printf '%s' "$st38b" | grep -q 'FREE'; then
+    ok "(b) a DIRECTORY at the record path: acquire refused (rc=$rc38b), nothing written into it, and status does NOT report FREE"
   else
-    bad "(b) acquire succeeded with a directory at the record path: rc=$rc38b
-$out38b"
+    bad "(b) rc=$rc38b entries-written-inside=$inside38
+acquire: $out38b
+status:  $st38b"
   fi
 fi
 kill "$DP38" 2>/dev/null || true
