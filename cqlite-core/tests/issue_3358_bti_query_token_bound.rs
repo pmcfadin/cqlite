@@ -229,8 +229,19 @@ fn fixture() -> Fixture {
         // wrong AND unrunnable (`<` is shell input redirection). Quoted so the shell
         // passes the `*` through to git rather than expanding it against a tree where
         // the directory is, by definition, missing.
-        let restore_pathspec = format!("test-data/datasets/sstables/{KEYSPACE}/{TABLE}-*");
-        let default_root = repo_root().join("test-data/datasets").display().to_string();
+        //
+        // `:(top)` anchors it at the repository root, because `cargo test -p cqlite-core`
+        // is routinely run FROM `cqlite-core/`, where a crate-relative `test-data/...`
+        // names nothing. The verification script is printed absolute for the same reason:
+        // a remedy that only works from one directory is a remedy that will be pasted
+        // and fail.
+        let restore_pathspec = format!(":(top)test-data/datasets/sstables/{KEYSPACE}/{TABLE}-*");
+        let root = repo_root();
+        let default_root = root.join("test-data/datasets").display().to_string();
+        let verify_cmd = root
+            .join("test-data/scripts/fetch-datasets.sh")
+            .display()
+            .to_string();
         panic!(
             "{KEYSPACE}.{TABLE} `{SSTABLE_PREFIX}-Data.db` was not found under any \
              candidate dataset root (CQLITE_DATASETS_ROOT, then {default_root}).\n\
@@ -246,8 +257,8 @@ fn fixture() -> Fixture {
              \n\
              \x20   git restore -- '{restore_pathspec}'\n\
              \n\
-             `bash test-data/scripts/fetch-datasets.sh --verify-only` names any such \
-             deletions and prints the exact restore command."
+             `bash {verify_cmd} --verify-only` names any such deletions and prints \
+             the exact restore command."
         )
     });
     let golden = golden_rows_by_pk(&dir);
