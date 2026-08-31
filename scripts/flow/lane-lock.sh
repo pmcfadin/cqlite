@@ -131,7 +131,7 @@
 #
 # ATOMICITY
 # ---------
-# `flock` on `<lane-dir>/.lane-lock.flock` is held for the WHOLE read-modify-write of
+# `flock` on `<lock-root>/lane-<N>.flock` is held for the WHOLE read-modify-write of
 # every MUTATING subcommand — including acquire's decide-then-write, which is the
 # race that matters (two sessions both reading "free" and both writing). The mutex is
 # a SEPARATE file from the record so the record can be replaced by rename without
@@ -148,9 +148,11 @@
 # would be exercised only on the hosts nobody tests, which is how a lock silently
 # stops locking. Fail closed instead.
 #
-# FILES (all inside the lane directory)
-# -------------------------------------
-#   .lane-lock        the record: `key=value`, ONE PER LINE. There are NO in-band
+# FILES — IN A SIBLING LOCK ROOT, *NOT* IN THE LANE DIRECTORY
+# -----------------------------------------------------------
+#   `${LANE_LOCK_ROOT:-$LANE_ROOT/.lane-locks}/`, keyed by issue:
+#
+#   lane-<N>.lock     the record: `key=value`, ONE PER LINE. There are NO in-band
 #                     delimiters and no multi-field lines — CLAUDE.md #3312: control
 #                     and data must not share a channel. Keys: version, issue,
 #                     lane-dir, machine, actor, pid, pid-scope, boot-id, start-ticks,
@@ -168,26 +170,48 @@
 #                     (forward compatibility); a DUPLICATE key is UNKNOWN-UNREADABLE
 #                     — fail closed, because two values for one key means the record
 #                     cannot be said to state anything.
-#   .lane-lock.flock  the mutex (see ATOMICITY)
-#   .lane-lock.log    append-only audit: one line per acquire / reclaim / release
+#   lane-<N>.flock    the mutex (see ATOMICITY)
+#   lane-<N>.log      append-only audit: one line per acquire / reclaim / release
 #                     with ts, verdict, token, prev-token, prev-liveness, reason.
 #                     NEVER truncated. This is #3436 AC3's "the reclaim is recorded".
 #
-# The lane directory MAY NOT EXIST YET: `acquire` (and `reclaim`) create it with
-# `mkdir -p`. A lane lock that could only be taken AFTER `git worktree add` would be
-# useless, because AC1 is "detects an existing occupant BEFORE writing".
+# WHY THE LOCK IS NOT IN THE LANE DIRECTORY — MEASURED, and it makes AC1 true
+# ---------------------------------------------------------------------------
+# AC1 is "detects an existing occupant BEFORE writing", i.e. `acquire` must be
+# takeable BEFORE `git worktree add` creates the lane. An earlier version of this file
+# put the record at `<lane-dir>/.lane-lock` and `mkdir -p`'d the lane directory, which
+# makes that order IMPOSSIBLE — `git worktree add` refuses a target that exists AT ALL,
+# dotfiles included, and it creates the branch BEFORE failing, leaving a stray branch
+# behind. Measured on this host (2026-08-31):
+#
+#   $ mkdir -p lane-777 && touch lane-777/.lane-lock
+#   $ git worktree add lane-777 -b tmp origin/main
+#   Preparing worktree (new branch 'tmp')
+#   fatal: '.../lane-777' already exists          <- exit 128, and branch `tmp` now EXISTS
+#
+# So the lock files live in a SIBLING LOCK ROOT keyed by issue, and `acquire` creates
+# ONLY that root — it does not create the lane directory at all. Two further properties
+# come free and must not be given back: `git worktree remove` (or an `rm -rf` of a
+# finished lane) cannot destroy a live lock, and the lock never appears inside a
+# worktree whose untracked set agent-gate.sh's `tree-integrity` (#2926) captures.
 #
 # GITIGNORE / tree-integrity INTERACTION (do not undo)
 # ----------------------------------------------------
-# `.lane-lock*` is gitignored (see .gitignore, #3436). agent-gate.sh's
-# `tree-integrity` capture (#2926) takes its untracked set from
-# `git ls-files --others --exclude-standard`, so an UN-ignored lock file written or
-# refreshed mid-gate would trip `tree-mutated-midrun` and VOID a gate of record —
-# this lock would break the very check that caught the incident it was written for.
+# The default lock root is OUTSIDE any worktree, which is what actually keeps this lock
+# away from agent-gate.sh's `tree-integrity` capture (#2926) — that check takes its
+# untracked set from `git ls-files --others --exclude-standard`, so a lock file written
+# or refreshed mid-gate INSIDE a worktree would trip `tree-mutated-midrun` and VOID a
+# gate of record. `.lane-lock*` stays gitignored (see .gitignore, #3436) as a BELT for
+# the case where an operator points `LANE_LOCK_ROOT` at an in-tree path; the ignore rule
+# is not the thing that makes this safe.
 #
-# LANE DIRECTORY RESOLUTION
-# -------------------------
+# LANE DIRECTORY RESOLUTION — the lane is the SUBJECT, not where the lock lives
+# ----------------------------------------------------------------------------
 #   `--lane-dir <abs path>`, else `${LANE_ROOT:-/data/lanes}/lane-<issue>`.
+#   It is recorded as the record's `lane-dir=` field and reported on every verdict
+#   line, and it is what the pid ancestor-walk matches cwds against (that is a question
+#   about the SESSION, so its semantics are unchanged). The record's own PATH is
+#   derived from the LOCK ROOT and the issue number, never from the lane directory.
 #   A RELATIVE --lane-dir is a usage error, on CLAUDE.md's CQLITE_SCHEMAS_ROOT
 #   precedent: a relative root resolves against each caller's cwd, so two callers
 #   would lock two different directories while believing they shared one — the exact
@@ -232,12 +256,20 @@
 #           todo, tbd, xxx, …) and any RAW value still carrying an unsubstituted
 #           '<…>' (checked BEFORE sanitization, so a copied template fails) are each
 #           exit 64.
-#   status  [<N>] [--lane-root <p>]
+#   status  [<N>] [--lane-root <p>] [--lock-root <p>] [--lane-dir <p>]
 #           render one line per lane lock; with no <N>, enumerate
-#           <lane-root>/lane-*/.lane-lock.
+#           <lock-root>/lane-*.lock. `--lane-root` names the LANE root the lock root is
+#           derived from; `--lock-root` names the lock root directly. `--lane-dir` names
+#           the SUBJECT lane for a single <N> and no longer locates the record.
 #
 # ENV
 #   LANE_ROOT         lane-directory root (default /data/lanes)
+#   LANE_LOCK_ROOT    where the lock FILES live (default $LANE_ROOT/.lane-locks). MUST
+#                     be absolute, for resolve_lane_dir's reason: a relative root
+#                     resolves against each caller's cwd, so two callers would take two
+#                     different locks while believing they shared one. Point it at an
+#                     in-tree path only if you accept the tree-integrity interaction
+#                     above.
 #   LANE_LOCK_MACHINE machine identity (default `hostname -s`). A fleet whose boxes
 #                     do NOT have unique short hostnames MUST set this per box, for
 #                     the same reason claim.sh's CLAIM_MACHINE says so.
@@ -667,14 +699,16 @@ append_audit() {
 }
 
 # ---------------------------------------------------------------------------
-# with_lock <lane-dir> <fn> [args…] — hold the flock for the whole read-modify-write
-# of a mutating subcommand, then propagate the callee's exit status.
+# with_lock <mutex-path> <fn> [args…] — hold the flock for the whole read-modify-write
+# of a mutating subcommand, then propagate the callee's exit status. The mutex PATH is
+# passed in rather than derived from the lane directory: the lock files live in the
+# sibling lock root (see the header's "WHY THE LOCK IS NOT IN THE LANE DIRECTORY"), so
+# nothing here may write inside a lane.
 # ---------------------------------------------------------------------------
 with_lock() {
-  local lane="$1"; shift
-  local flock_file="$lane/.lane-lock.flock"
+  local flock_file="$1"; shift
   if ! command -v flock >/dev/null 2>&1; then
-    emit_unsupported "detail=flock-unavailable lane-dir=$lane (this lock needs flock for its read-modify-write; no fallback mutex is invented on purpose — see the header)"
+    emit_unsupported "detail=flock-unavailable mutex=$flock_file (this lock needs flock for its read-modify-write; no fallback mutex is invented on purpose — see the header)"
     return 1
   fi
   if ! exec 9>"$flock_file"; then
@@ -697,6 +731,17 @@ with_lock() {
 # Lane-directory resolution
 # ---------------------------------------------------------------------------
 lane_root() { printf '%s\n' "${LANE_ROOT:-/data/lanes}"; }
+
+# lock_root — where the lock FILES live: a SIBLING of the lane directories, never
+# inside one (header: `git worktree add` refuses a target that exists at all, so a lock
+# under the lane dir makes acquire-before-worktree-add impossible). Absoluteness is
+# validated ONCE in the main shell at startup, not here: this runs inside command
+# substitutions, where a `die_usage` exit escapes only the subshell (see
+# require_abs_path's measured rationale).
+lock_root()   { printf '%s\n' "${LANE_LOCK_ROOT:-$(lane_root)/.lane-locks}"; }
+lock_record() { printf '%s/lane-%s.lock\n'  "$(lock_root)" "$1"; }
+lock_mutex()  { printf '%s/lane-%s.flock\n' "$(lock_root)" "$1"; }
+lock_audit()  { printf '%s/lane-%s.log\n'   "$(lock_root)" "$1"; }
 
 # resolve_lane_dir <issue> <--lane-dir value or ""> — a RELATIVE --lane-dir is a
 # usage error (header: it would resolve differently per caller cwd, so two callers
@@ -721,7 +766,7 @@ lane_real() {
 }
 
 G_ISSUE=""; G_LANE=""; G_ACTOR=""; G_MACHINE=""; G_PID=""; G_SCOPE=""
-G_BOOT=""; G_TICKS=""; G_TOKEN=""; G_RECORD=""; G_LOG=""
+G_BOOT=""; G_TICKS=""; G_TOKEN=""; G_RECORD=""; G_LOG=""; G_MUTEX=""
 
 # prepare_identity <issue> <lane-real> <actor-raw> <pid-opt> — resolve OUR identity
 # and the file paths. Every value is sanitized here, once, so the token we WRITE and
@@ -745,8 +790,12 @@ prepare_identity() {
     note "degraded process identity for pid $G_PID (boot-id='${G_BOOT:-<unreadable>}' start-ticks='${G_TICKS:-<unreadable>}') — this record's liveness will read UNKNOWN-* and will therefore REFUSE rather than auto-reclaim"
   fi
   G_TOKEN="$(build_token "$G_MACHINE" "$G_ACTOR" "$G_PID" "$(boot_short "$G_BOOT")" "$G_TICKS")"
-  G_RECORD="$G_LANE/.lane-lock"
-  G_LOG="$G_LANE/.lane-lock.log"
+  # The record path is derived from the LOCK ROOT and the issue, never from the lane
+  # directory (header). The lane directory is the SUBJECT of the lock, recorded as a
+  # field.
+  G_RECORD="$(lock_record "$G_ISSUE")"
+  G_LOG="$(lock_audit "$G_ISSUE")"
+  G_MUTEX="$(lock_mutex "$G_ISSUE")"
 }
 
 self_fields() {
@@ -814,16 +863,18 @@ cmd_acquire() {
     esac
   done
   require_numeric_issue "$issue" acquire
-  lane="$(resolve_lane_dir "$issue" "$lane_opt")"
-  # The lane dir may not exist yet: AC1 is "detect an occupant BEFORE writing", so the
-  # lock must be takeable before `git worktree add` ever runs.
-  if ! mkdir -p "$lane" 2>/dev/null; then
-    emit_infra "detail=lane-dir-uncreatable path=$lane"
+  lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+  # ONLY the LOCK ROOT is created. The lane directory is deliberately NOT created here:
+  # AC1 is "detect an occupant BEFORE writing", so acquire must precede
+  # `git worktree add` — and `git worktree add` refuses a target that exists at all
+  # (measured; see the header), so creating the lane dir would forbid the very order AC1
+  # requires.
+  if ! mkdir -p "$(lock_root)" 2>/dev/null; then
+    emit_infra "detail=lock-root-uncreatable path=$(lock_root)"
     return 1
   fi
-  lane="$(lane_real "$lane")"
   prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
-  with_lock "$lane" _acquire_locked
+  with_lock "$G_MUTEX" _acquire_locked
 }
 
 # ---------------------------------------------------------------------------
@@ -843,7 +894,7 @@ cmd_verify() {
   done
   require_numeric_issue "$issue" verify
   lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
-  prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
+  prepare_identity "$issue" "$lane" "$actor" "$pid_opt"   # sets G_RECORD from the lock root
   if ! parse_record "$G_RECORD"; then
     emit "VERIFY-FAIL issue=$issue lane-dir=$lane reason=no-lock $(self_fields)"
     return 2
@@ -882,7 +933,8 @@ cmd_probe() {
   done
   require_numeric_issue "$issue" probe
   lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
-  if ! parse_record "$lane/.lane-lock"; then
+  local record; record="$(lock_record "$issue")"
+  if ! parse_record "$record"; then
     emit "FREE issue=$issue lane-dir=$lane liveness=NO-RECORD record=absent"
     return 0
   fi
@@ -904,10 +956,10 @@ cmd_probe() {
   # parse_record above populated the REC_* globals; prepare_identity does not touch
   # them, but re-read anyway so the parse and the comparison are adjacent and no future
   # edit can separate them.
-  parse_record "$lane/.lane-lock" || true
+  parse_record "$record" || true
   liveness="$(record_liveness "$G_TOKEN")"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
-  emit "HELD issue=$issue lane-dir=$lane liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN"
+  emit "HELD issue=$issue lane-dir=$lane liveness=$liveness reclaimable=$reclaimable $(holder_fields) our-token=$G_TOKEN record=$record"
   return 0
 }
 
@@ -954,12 +1006,15 @@ cmd_release() {
   done
   require_numeric_issue "$issue" release
   lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
-  if [ ! -d "$lane" ]; then
+  # No lock root means no record anywhere, and release is IDEMPOTENT — answer without
+  # creating the root (a release must not have to make a directory to say "already
+  # free"). The check moved from the lane dir to the lock root with the files.
+  if [ ! -d "$(lock_root)" ]; then
     emit "RELEASED (already free) issue=$issue lane-dir=$lane record=absent"
     return 0
   fi
   prepare_identity "$issue" "$lane" "$actor" ""
-  with_lock "$lane" _release_locked "$force"
+  with_lock "$G_MUTEX" _release_locked "$force"
 }
 
 # ---------------------------------------------------------------------------
@@ -1076,69 +1131,86 @@ cmd_reclaim() {
   [ -n "$expect" ] || die_usage "reclaim: --expect '' is rejected on purpose — pass the holder token you expect, or the literal 'none'"
   [ "$reason_given" -eq 1 ] || die_usage "reclaim requires --reason saying what the reclaim IS (it is recorded in the record and the audit log next to who took it), e.g. --reason lane-holder-oom-killed-pid-4211"
   reason_token="$(validate_reason "$reason")"
-  lane="$(resolve_lane_dir "$issue" "$lane_opt")"
-  if ! mkdir -p "$lane" 2>/dev/null; then
-    emit_infra "detail=lane-dir-uncreatable path=$lane"
+  lane="$(lane_real "$(resolve_lane_dir "$issue" "$lane_opt")")"
+  if ! mkdir -p "$(lock_root)" 2>/dev/null; then
+    emit_infra "detail=lock-root-uncreatable path=$(lock_root)"
     return 1
   fi
-  lane="$(lane_real "$lane")"
   prepare_identity "$issue" "$lane" "$actor" "$pid_opt"
-  with_lock "$lane" _reclaim_locked "$expect" "$reason_token"
+  with_lock "$G_MUTEX" _reclaim_locked "$expect" "$reason_token"
 }
 
 # ---------------------------------------------------------------------------
-# status — read-only render. With no issue it enumerates <lane-root>/lane-*/.lane-lock.
+# status — read-only render. With no issue it enumerates <lock-root>/lane-*.lock.
 # ---------------------------------------------------------------------------
+# status_one <record-path> <lane-hint> <issue-hint> — the record is located by the LOCK
+# ROOT and the issue; the lane directory is REPORTED, preferring the record's own
+# `lane-dir=` field (the subject the holder actually named) over the caller's hint.
 status_one() {
-  local lane="$1" issue_hint="$2" liveness reclaimable=no
-  if ! parse_record "$lane/.lane-lock"; then
-    emit "FREE issue=$issue_hint lane-dir=$lane liveness=NO-RECORD record=absent"
+  local record="$1" lane_hint="$2" issue_hint="$3" liveness reclaimable=no
+  if ! parse_record "$record"; then
+    emit "FREE issue=$issue_hint lane-dir=$lane_hint liveness=NO-RECORD record=absent"
     return 0
   fi
   liveness="$(record_liveness '')"
   case "$liveness" in DEAD-*) reclaimable=yes ;; esac
-  emit "HELD issue=${REC_ISSUE:-$issue_hint} lane-dir=$lane liveness=$liveness reclaimable=$reclaimable $(holder_fields)"
+  emit "HELD issue=${REC_ISSUE:-$issue_hint} lane-dir=${REC_LANE_DIR:-$lane_hint} liveness=$liveness reclaimable=$reclaimable $(holder_fields) record=$record"
 }
 
 cmd_status() {
-  local issue="" root_opt="" root lane count=0 f
+  local issue="" root_opt="" lock_opt="" root lock lane base count=0 f
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --lane-root) [ "$#" -ge 2 ] || die_usage "--lane-root requires a value"; require_abs_path --lane-root "$2"; root_opt="$2"; shift 2 ;;
-      --lane-dir)  [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; root_opt="";   lane="$2"; shift 2 ;;
+      --lock-root) [ "$#" -ge 2 ] || die_usage "--lock-root requires a value"; require_abs_path --lock-root "$2"; lock_opt="$2"; shift 2 ;;
+      --lane-dir)  [ "$#" -ge 2 ] || die_usage "--lane-dir requires a value"; require_abs_path --lane-dir "$2"; lane="$2"; shift 2 ;;
       -*) die_usage "status: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "status: unexpected argument $1"; issue="$1"; shift ;;
     esac
   done
-  if [ -n "$issue" ]; then
-    require_numeric_issue "$issue" status
-    if [ -n "${lane:-}" ]; then
-      case "$lane" in /*) ;; *) die_usage "--lane-dir must be an ABSOLUTE path (got '$lane')" ;; esac
-    else
-      root="${root_opt:-$(lane_root)}"
-      case "$root" in /*) ;; *) die_usage "--lane-root must be an ABSOLUTE path (got '$root')" ;; esac
-      lane="$root/lane-$issue"
-    fi
-    status_one "$(lane_real "$lane")" "$issue"
-    return 0
-  fi
   root="${root_opt:-$(lane_root)}"
   case "$root" in /*) ;; *) die_usage "--lane-root must be an ABSOLUTE path (got '$root')" ;; esac
-  if [ ! -d "$root" ]; then
-    emit "STATUS lane-root=$root locks=0 detail=lane-root-absent"
+  # The lock root is named directly, else derived from the LANE root — the same default
+  # the mutating subcommands use, so `status --lane-root X` still reports the locks a
+  # `LANE_ROOT=X acquire` took.
+  if [ -n "$lock_opt" ]; then
+    lock="$lock_opt"
+  elif [ -n "${LANE_LOCK_ROOT:-}" ]; then
+    lock="$LANE_LOCK_ROOT"
+  else
+    lock="$root/.lane-locks"
+  fi
+  if [ -n "$issue" ]; then
+    require_numeric_issue "$issue" status
+    # --lane-dir names the SUBJECT lane only; it no longer locates the record.
+    status_one "$lock/lane-$issue.lock" "$(lane_real "${lane:-$root/lane-$issue}")" "$issue"
     return 0
   fi
-  for f in "$root"/lane-*/.lane-lock; do
+  if [ ! -d "$lock" ]; then
+    emit "STATUS lock-root=$lock lane-root=$root locks=0 detail=lock-root-absent"
+    return 0
+  fi
+  for f in "$lock"/lane-*.lock; do
     [ -f "$f" ] || continue
-    lane="$(dirname "$f")"
-    status_one "$lane" "${lane##*/lane-}"
+    base="${f##*/}"; base="${base%.lock}"
+    status_one "$f" "$root/$base" "${base#lane-}"
     count=$((count + 1))
   done
-  emit "STATUS lane-root=$root locks=$count"
+  emit "STATUS lock-root=$lock lane-root=$root locks=$count"
   return 0
 }
 
 # ---------------------------------------------------------------------------
+# LANE_LOCK_ROOT is validated HERE, in the main shell, for require_abs_path's measured
+# reason: a `die_usage` inside a command substitution exits only the subshell, and
+# lock_root() is only ever called from one.
+if [ -n "${LANE_LOCK_ROOT:-}" ]; then
+  case "$LANE_LOCK_ROOT" in
+    /*) ;;
+    *) die_usage "LANE_LOCK_ROOT must be an ABSOLUTE path (got '$LANE_LOCK_ROOT'): a relative lock root resolves against each caller's cwd, so two callers would take two DIFFERENT locks while believing they shared one" ;;
+  esac
+fi
+
 SUBCOMMAND="${1:-}"
 [ "$#" -eq 0 ] || shift
 case "$SUBCOMMAND" in

@@ -13,13 +13,15 @@
 #   * a refusal for the WRONG REASON cannot satisfy case 2, which asserts the OCCUPIED
 #     line's holder-pid is the FIRST holder's pid (AC2's "name the occupant");
 #   * a reclaim that merely exits 0 cannot satisfy case 4/5, which assert the record's
-#     token actually CHANGED and that .lane-lock.log gained a line naming the previous
+#     token actually CHANGED and that the audit log gained a line naming the previous
 #     token, the previous liveness verdict and the reason (AC3);
 #   * every UNKNOWN-* case asserts the record token is UNCHANGED afterwards — a
 #     refusal that silently rewrote the record would pass a naive exit-code check.
 #
-# HERMETIC: a mktemp lane root, real `sleep` processes for liveness, and nothing else.
-# No network, no gh, no git, no cargo, no dataset corpus. Runs in seconds, so it is
+# HERMETIC: a mktemp lane root, real `sleep` processes for liveness, and a throwaway
+# `git init` repo in that same temp dir for TEST 17 (the acquire-then-`worktree add`
+# ordering case, which cannot be proved without a real git). No network, no gh, no
+# cargo, no dataset corpus, and nothing outside the temp dir. Runs in seconds, so it is
 # wired into the gate's `tooling-tests` component.
 #
 # NO TEST-ONLY SEAMS (CLAUDE.md #3312: "a case needing a different enforcer
@@ -29,7 +31,7 @@
 # (`sleep 300 &` / `kill`), and the verdicts that cannot be produced on demand
 # (DEAD-PID-REUSED, DEAD-REBOOT, UNKNOWN-FOREIGN, UNKNOWN-EPHEMERAL,
 # UNKNOWN-NO-PID, UNKNOWN-UNREADABLE) are produced by SUBSTITUTING THE ARTIFACT — the
-# record file in this suite's own scratch lane dir — which is exactly what a hand-made
+# record file in this suite's own scratch lock root — which is exactly what a hand-made
 # or format-drifted record looks like in the field.
 #
 # Run standalone:   bash scripts/tests/test_lane_lock.sh
@@ -49,12 +51,17 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 T=$(mktemp -d "${TMPDIR:-/tmp}/lane-lock-test.XXXXXX")
 LANES="$T/lanes"
+LOCKS="$LANES/.lane-locks"
 mkdir -p "$LANES"
 SLEEPERS=""
+WORKTREES=""      # scratch git worktrees to remove on exit (see TEST 17)
+# cleanup KILLS but never `wait`s — see kill_sleeper below for why a `wait` on a
+# signal-killed child is unsafe in a script carrying an EXIT trap. The killed children
+# are reparented and reaped when this shell exits moments later.
 cleanup() {
-  local p
+  local p w
   for p in $SLEEPERS; do kill "$p" 2>/dev/null || true; done
-  wait 2>/dev/null || true
+  for w in $WORKTREES; do rm -rf "$w" 2>/dev/null || true; done
   rm -rf "$T"
 }
 trap cleanup EXIT
@@ -75,8 +82,12 @@ field() {
   printf '%s\n' "$1" | tr ' ' '\n' | grep -m1 "^$2=" | cut -d= -f2- || true
 }
 
+# The lock FILES live in a sibling LOCK ROOT, never inside the lane directory: `git
+# worktree add` refuses a target that exists at all, so a lock under the lane dir makes
+# acquire-before-worktree-add impossible (TEST 17 proves the order works now).
 lane_of()   { printf '%s/lane-%s\n' "$LANES" "$1"; }
-record_of() { printf '%s/lane-%s/.lane-lock\n' "$LANES" "$1"; }
+record_of() { printf '%s/lane-%s.lock\n' "$LOCKS" "$1"; }
+log_of()    { printf '%s/lane-%s.log\n' "$LOCKS" "$1"; }
 
 # token_of <issue> — the holder token as the PUBLIC surface reports it (probe), so the
 # assertions read the same value another tool would.
@@ -105,21 +116,60 @@ del_rec_field() {
 
 # sleeper — a real, long-lived process to stand in for a session. Its pid is a
 # genuine live pid with genuine /proc start ticks; nothing about it is simulated.
+#
+# IT RETURNS THE PID IN A GLOBAL, NOT ON STDOUT, and that is the whole point. Called as
+# `A=$(sleeper)`, the append to SLEEPERS happened in the command substitution's
+# SUBSHELL and was discarded, so the EXIT trap saw an empty list and most `sleep 300`
+# processes OUTLIVED the suite — real litter on a box running four lanes. Starting the
+# child in the PARENT shell keeps `$!` and the bookkeeping in the same shell, which is
+# the REPLY_* convention lane-lock.sh itself uses for exactly this reason.
+#
+# THE PID IS PUBLISHED THROUGH A FILE, AND THE PROCESS TOPOLOGY IS DELIBERATE. The
+# `sleep` is started inside a subshell that exits immediately, so it is a GRANDCHILD of
+# this shell — reparented to init, never in this shell's job table. The bookkeeping
+# (`SLEEPERS`) happens in the PARENT, which is the bug being fixed: with
+# `A=$(sleeper)`, the append ran in the command substitution's subshell and was
+# discarded, so the EXIT trap saw an empty list and most `sleep 300` processes OUTLIVED
+# the suite — real litter on a box running four lanes.
+#
+# MAKING THE SLEEPERS DIRECT CHILDREN INSTEAD WAS TRIED AND REVERTED, and the reason is
+# worth keeping: bash runs the EXIT TRAP ONCE, MID-SCRIPT, when it reaps a CHILD that
+# died from a signal, then carries on. `cleanup` therefore fired while the suite ran and
+# `rm -rf`'d the scratch tree under it — measured, and INTERMITTENTLY (2 of 3 runs green,
+# one with 8 cases failing on a vanished record), which is the worst kind of harness bug.
+# A grandchild is never reaped by this shell, so that interaction cannot arise.
+REPLY_SLEEPER=""
 sleeper() {
-  # stdout/stderr MUST be redirected: this function is called in a command
-  # substitution, and a background child inheriting that pipe keeps it open, so
-  # `A=$(sleeper)` would block for the sleep's full duration.
-  sleep 300 >/dev/null 2>&1 &
-  local p=$!
-  SLEEPERS="$SLEEPERS $p"
-  printf '%s\n' "$p"
+  local pidfile="$T/sleeper.pid"
+  rm -f "$pidfile"
+  # stdout/stderr redirected inside the subshell: an inherited pipe held open by the
+  # background child would make any caller in a command substitution block for the
+  # sleep's full duration.
+  ( sleep 300 >/dev/null 2>&1 & printf '%s\n' "$!" >"$pidfile" ) >/dev/null 2>&1
+  REPLY_SLEEPER="$(cat "$pidfile" 2>/dev/null)"
+  SLEEPERS="$SLEEPERS $REPLY_SLEEPER"
+}
+
+# kill_sleeper <pid> — end a stand-in session and CONFIRM against /proc that it is gone
+# (the sleeper is not this shell's child, so `wait` cannot answer). Bounded at ~2s; the
+# assertions that follow read the same /proc lane-lock.sh reads, so an unreaped straggler
+# shows up as a failed liveness assertion rather than as silence.
+kill_sleeper() {
+  local pid="$1" i=0
+  kill "$pid" 2>/dev/null || true
+  while [ "$i" -lt 100 ]; do
+    [ -e "/proc/$pid" ] || return 0
+    i=$((i + 1))
+    sleep 0.02
+  done
+  return 0
 }
 
 # ===========================================================================
 echo "TEST 1: acquire on a FREE lane succeeds, verify then confirms it"
 # POSITIVE CONTROL (AC4 non-vacuity): a refuse-everything implementation fails here.
 # ===========================================================================
-A=$(sleeper)
+sleeper; A=$REPLY_SLEEPER
 ll acquire 101 --pid "$A"; rc1=$RC; out1="$OUT"
 ll verify 101 --pid "$A"; rc2=$RC; out2="$OUT"
 if [ "$rc1" -eq 0 ] && printf '%s' "$out1" | grep -q '^LANE-LOCK: ACQUIRED issue=101 ' \
@@ -141,7 +191,7 @@ echo "TEST 2: SAME machine, SAME actor, DIFFERENT live pid -> OCCUPIED naming th
 # a refusal for the WRONG REASON from satisfying the case. NEVER relax this to
 # machine+actor.
 # ===========================================================================
-B=$(sleeper)
+sleeper; B=$REPLY_SLEEPER
 tok_before=$(token_of 101)
 ll acquire 101 --actor flow --pid "$B"; rc=$RC; out="$OUT"
 tok_after=$(token_of 101)
@@ -175,11 +225,11 @@ echo "TEST 4: holder killed -> DEAD-NO-PROCESS, auto-reclaimed, and RECORDED (AC
 # and the audit log must name the previous token, the previous liveness and the reason.
 # ===========================================================================
 tok_dead=$(token_of 101)
-kill "$A" 2>/dev/null; wait "$A" 2>/dev/null
+kill_sleeper "$A"
 ll acquire 101 --actor flow --pid "$B"; rc=$RC; out="$OUT"
 tok_new=$(token_of 101)
-logline="$(grep -c 'verdict=ACQUIRED-RECLAIMED' "$(lane_of 101)/.lane-lock.log" 2>/dev/null || echo 0)"
-logtext="$(grep 'verdict=ACQUIRED-RECLAIMED' "$(lane_of 101)/.lane-lock.log" 2>/dev/null || true)"
+logline="$(grep -c 'verdict=ACQUIRED-RECLAIMED' "$(log_of 101)" 2>/dev/null || echo 0)"
+logtext="$(grep 'verdict=ACQUIRED-RECLAIMED' "$(log_of 101)" 2>/dev/null || true)"
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ACQUIRED (reclaimed)' \
    && [ "$(field "$out" prev-liveness)" = "DEAD-NO-PROCESS" ] \
    && [ -n "$tok_new" ] && [ "$tok_new" != "$tok_dead" ] \
@@ -206,7 +256,7 @@ set_rec_field 101 start-ticks 424242
 tok_stale=$(token_of 101)
 ll acquire 101 --actor flow --pid "$B"; rc=$RC; out="$OUT"
 tok_after=$(token_of 101)
-logtext="$(tail -1 "$(lane_of 101)/.lane-lock.log" 2>/dev/null || true)"
+logtext="$(tail -1 "$(log_of 101)" 2>/dev/null || true)"
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'ACQUIRED (reclaimed)' \
    && [ "$(field "$out" prev-liveness)" = "DEAD-PID-REUSED" ] \
    && [ "$(field "$out" prev-token)" = "$tok_stale" ] \
@@ -261,7 +311,7 @@ unknown_case() {
 $out_l"
   fi
 }
-C=$(sleeper)
+sleeper; C=$REPLY_SLEEPER
 unknown_case UNKNOWN-FOREIGN     201 set_rec_field 201 machine some-other-box
 unknown_case UNKNOWN-EPHEMERAL   202 set_rec_field 202 pid-scope ephemeral
 unknown_case UNKNOWN-NO-PID      203 del_rec_field 203 pid
@@ -285,8 +335,8 @@ fi
 # ===========================================================================
 echo "TEST 8: verify/release from a DIFFERENT pid are refused; release by the holder works"
 # ===========================================================================
-D=$(sleeper)
-E=$(sleeper)
+sleeper; D=$REPLY_SLEEPER
+sleeper; E=$REPLY_SLEEPER
 ll acquire 301 --actor flow --pid "$D" >/dev/null 2>&1
 ll verify 301 --actor flow --pid "$E"; rcv=$RC; outv="$OUT"
 tok_before=$(token_of 301)
@@ -347,19 +397,22 @@ echo "TEST 10: probe is read-only — it writes NOTHING and never exits non-zero
 ll probe 401; rcf=$RC; outf="$OUT"
 created="$(ls -A "$(lane_of 401)" 2>/dev/null | wc -l | tr -d ' ')"
 dir_exists=$([ -d "$(lane_of 401)" ] && echo yes || echo no)
+rec_exists=$([ -e "$(record_of 401)" ] && echo yes || echo no)
+mutex_exists=$([ -e "$LOCKS/lane-401.flock" ] && echo yes || echo no)
 ll acquire 402 --actor flow --pid "$D" >/dev/null 2>&1
 ll probe 402; rch=$RC; outh2="$OUT"
 if [ "$rcf" -eq 0 ] && printf '%s' "$outf" | grep -q '^LANE-LOCK: FREE ' \
    && [ "$(field "$outf" liveness)" = "NO-RECORD" ] \
    && [ "$dir_exists" = "no" ] && [ "${created:-0}" = "0" ] \
+   && [ "$rec_exists" = "no" ] && [ "$mutex_exists" = "no" ] \
    && [ "$rch" -eq 0 ] && printf '%s' "$outh2" | grep -q '^LANE-LOCK: HELD ' \
    && [ "$(field "$outh2" liveness)" = "ALIVE" ] \
    && [ "$(field "$outh2" holder-pid)" = "$D" ] \
    && [ -n "$(field "$outh2" acquired-ts)" ] && [ -n "$(field "$outh2" age)" ] \
    && [ "$(field "$outh2" reclaimable)" = "no" ]; then
-  ok "probe: FREE rc=0 creating nothing (no lane dir, no mutex); HELD rc=0 carrying liveness/holder-*/acquired-ts/age"
+  ok "probe: FREE rc=0 creating nothing (no lane dir, no record, no mutex); HELD rc=0 carrying liveness/holder-*/acquired-ts/age"
 else
-  bad "probe contract violated: rcFREE=$rcf dir-created=$dir_exists entries=$created rcHELD=$rch
+  bad "probe contract violated: rcFREE=$rcf dir-created=$dir_exists entries=$created record=$rec_exists mutex=$mutex_exists rcHELD=$rch
 $outf
 $outh2"
 fi
@@ -372,16 +425,19 @@ echo "TEST 10b: probe distinguishes SELF from a live LOCAL PEER"
 # keys on the distinction. With no identity to compare against, probe reported ALIVE for
 # BOTH, which is the gap this case pins. Both calls must stay exit 0 and write nothing.
 # ===========================================================================
-before_entries="$(ls -A "$(lane_of 402)" | sort | tr '\n' ',')"
+# NOT an `ls` of the lane directory: acquire no longer creates it, so that comparison
+# would be "" = "" — vacuously true. The lock ROOT is where writes would land, and its
+# listing is non-empty here (issue 402 is locked), so the comparison has real content.
+before_entries="$(ls -A "$LOCKS" | sort | tr '\n' ',')"
 ll probe 402 --actor flow --pid "$D"; rcs=$RC; outs="$OUT"
 ll probe 402 --actor flow --pid "$E"; rcp=$RC; outp="$OUT"
-after_entries="$(ls -A "$(lane_of 402)" | sort | tr '\n' ',')"
+after_entries="$(ls -A "$LOCKS" | sort | tr '\n' ',')"
 if [ "$rcs" -eq 0 ] && [ "$(field "$outs" liveness)" = "SELF" ] \
    && [ "$rcp" -eq 0 ] && [ "$(field "$outp" liveness)" = "ALIVE" ] \
    && [ "$(field "$outp" holder-pid)" = "$D" ] \
    && [ "$(field "$outs" reclaimable)" = "no" ] && [ "$(field "$outp" reclaimable)" = "no" ] \
-   && [ "$before_entries" = "$after_entries" ]; then
-  ok "probe: SELF for the holder's own identity, ALIVE (holder-pid=$D) for a live peer, both rc=0, lane dir unchanged"
+   && [ "$before_entries" = "$after_entries" ] && [ -n "$before_entries" ]; then
+  ok "probe: SELF for the holder's own identity, ALIVE (holder-pid=$D) for a live peer, both rc=0, lock root unchanged"
 else
   bad "probe could not distinguish SELF from a live peer: rcSELF=$rcs liveness=$(field "$outs" liveness) / rcPEER=$rcp liveness=$(field "$outp" liveness) holder-pid=$(field "$outp" holder-pid); entries '$before_entries' -> '$after_entries'
 $outs
@@ -391,7 +447,7 @@ fi
 # A non-live --pid on probe must NOT refuse and must NOT change the reported liveness:
 # probe is called on another tool's SUCCESS path, so a read-only report may never alter
 # its caller's verdict. It simply cannot match SELF.
-dead_pid=$(sleeper); kill "$dead_pid" 2>/dev/null; wait "$dead_pid" 2>/dev/null
+sleeper; dead_pid=$REPLY_SLEEPER; kill_sleeper "$dead_pid"
 ll probe 402 --actor flow --pid "$dead_pid"; rcd=$RC; outd="$OUT"
 if [ "$rcd" -eq 0 ] && [ "$(field "$outd" liveness)" = "ALIVE" ] && [ "$(field "$outd" holder-pid)" = "$D" ]; then
   ok "probe with a NON-LIVE --pid still reports the holder's liveness and exits 0 (never refuses)"
@@ -410,7 +466,7 @@ if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^LANE-LOCK: RECLAIMED ' \
    && [ "$tok_new" != "$tok" ] && printf '%s' "$tok_new" | grep -q ":$E:" \
    && grep -q "reclaim-reason=lane-holder-oom-killed-verified-by-dmesg" "$(record_of 402)" \
    && grep -q "reclaimed-from=$tok" "$(record_of 402)" \
-   && grep -q 'verdict=RECLAIMED' "$(lane_of 402)/.lane-lock.log"; then
+   && grep -q 'verdict=RECLAIMED' "$(log_of 402)"; then
   ok "matched --expect: RECLAIMED rc=0, token replaced, record carries reclaimed-from + reclaim-reason, audit line written"
 else
   bad "expected a satisfied CAS to RECLAIM; got rc=$rc tok '$tok' -> '$tok_new'
@@ -525,8 +581,13 @@ usage_case "acquire --pid non-numeric"    acquire 404 --pid abc
 # An ABSOLUTE --lane-dir is the accepted form — the control that stops "refuse every
 # --lane-dir" from satisfying the three relative cases above.
 ll acquire 405 --lane-dir "$T/explicit-lane" --actor flow --pid "$D"; rc=$RC; out="$OUT"
-if [ "$rc" -eq 0 ] && [ -f "$T/explicit-lane/.lane-lock" ] && printf '%s' "$out" | grep -q "lane-dir=$T/explicit-lane"; then
-  ok "an ABSOLUTE --lane-dir is honoured (control for the relative-path refusals)"
+# The record is keyed by ISSUE in the lock root; --lane-dir names the SUBJECT lane and is
+# recorded as a field. It must NOT create the lane directory (TEST 17).
+if [ "$rc" -eq 0 ] && [ -f "$(record_of 405)" ] \
+   && grep -q "^lane-dir=$T/explicit-lane$" "$(record_of 405)" \
+   && [ ! -e "$T/explicit-lane" ] \
+   && printf '%s' "$out" | grep -q "lane-dir=$T/explicit-lane"; then
+  ok "an ABSOLUTE --lane-dir is honoured and RECORDED, and the lane directory is NOT created (control for the relative-path refusals)"
 else
   bad "expected an absolute --lane-dir to be honoured; got rc=$rc
 $out"
@@ -542,7 +603,7 @@ CONC_LANE="$T/conc-lane"
 pids=""
 i=0
 while [ "$i" -lt 8 ]; do
-  p=$(sleeper)
+  sleeper; p=$REPLY_SLEEPER
   pids="$pids $p"
   i=$((i + 1))
 done
@@ -561,7 +622,7 @@ for p in $pids; do
   elif grep -q '^LANE-LOCK: OCCUPIED ' "$T/conc.$p.out" 2>/dev/null; then occ=$((occ + 1))
   else other=$((other + 1)); fi
 done
-winner_tok=$(field "$(cat "$T/conc-lane/.lane-lock" 2>/dev/null | tr '\n' ' ')" pid)
+winner_tok=$(field "$(tr '\n' ' ' <"$(record_of 500)" 2>/dev/null)" pid)
 if [ "$acq" -eq 1 ] && [ "$occ" -eq 7 ] && [ "$other" -eq 0 ] && [ -n "$winner_tok" ]; then
   ok "8 concurrent acquires: exactly 1 ACQUIRED, 7 OCCUPIED, 0 other outcomes (winner pid=$winner_tok)"
 else
@@ -598,6 +659,56 @@ if [ "$rc" -eq 0 ] && [ -z "$missing" ] && printf '%s' "$out" | grep -q '3436'; 
   ok "--help exits 0 and documents acquire/verify/probe/release/reclaim/status (and cites #3436)"
 else
   bad "--help incomplete: rc=$rc undocumented:${missing:-<none>}"
+fi
+
+# ===========================================================================
+echo "TEST 17: acquire PRECEDES 'git worktree add' — the order AC1 requires"
+# THE POINT OF THE LOCK LIVING OUTSIDE THE LANE DIRECTORY. AC1 is "detects an existing
+# occupant BEFORE writing", so the lock must be takeable before the worktree exists —
+# and `git worktree add` REFUSES a target that exists at all, a single dotfile being
+# enough, creating the branch before it fails and leaving a stray branch behind:
+#
+#   $ mkdir -p lane-777 && touch lane-777/.lane-lock
+#   $ git worktree add lane-777 -b tmp origin/main
+#   Preparing worktree (new branch 'tmp')
+#   fatal: '.../lane-777' already exists
+#
+# So this case asserts the whole sequence a real lane entry performs: acquire, THEN
+# `git worktree add` at the very path the lock names, and the lock is still ours after.
+# It also pins the second property the move buys — `git worktree remove` cannot destroy
+# a live lock, because the record was never inside the worktree.
+# git is required rather than skipped, exactly as scripts/tests/test_claim_lock.sh
+# requires it: this repository IS a git checkout, so a git-less host cannot run its
+# tooling at all, and a SKIP here would hide the one case that justifies the layout.
+# ===========================================================================
+if ! command -v git >/dev/null 2>&1; then
+  bad "git is not on PATH, so the acquire-then-worktree-add ordering case cannot run (deliberately NOT a skip — it is the case that justifies the lock root layout)"
+else
+  WT_REPO="$T/wt-repo"
+  WT_LANE="$LANES/lane-777"
+  gwt() { git -C "$WT_REPO" -c user.email=t@example.invalid -c user.name=t "$@"; }
+  mkdir -p "$WT_REPO"
+  ( cd "$WT_REPO" && git init -q . && git -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m base ) >/dev/null 2>&1
+  sleeper; W=$REPLY_SLEEPER
+  ll acquire 777 --lane-dir "$WT_LANE" --actor flow --pid "$W"; rc17=$RC; out17="$OUT"
+  lane_absent=$([ -e "$WT_LANE" ] && echo no || echo yes)
+  wt_rc=0
+  gwt worktree add "$WT_LANE" -b issue-777-slug HEAD >"$T/wt17.out" 2>&1 || wt_rc=$?
+  WORKTREES="$WORKTREES $WT_LANE"
+  ll verify 777 --lane-dir "$WT_LANE" --actor flow --pid "$W"; rc17v=$RC
+  # ...and removing the worktree leaves the lock intact (it was never inside it).
+  gwt worktree remove --force "$WT_LANE" >/dev/null 2>&1
+  gwt branch -q -D issue-777-slug >/dev/null 2>&1
+  rec_survived=$([ -f "$(record_of 777)" ] && echo yes || echo no)
+  stray_branch=$(gwt branch --list issue-777-slug 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$rc17" -eq 0 ] && [ "$lane_absent" = "yes" ] && [ "$wt_rc" -eq 0 ] \
+     && [ "$rc17v" -eq 0 ] && [ "$rec_survived" = "yes" ] && [ "${stray_branch:-0}" = "0" ]; then
+    ok "acquire 777 leaves the lane dir ABSENT, so 'git worktree add' at that path then SUCCEEDS (rc=0), the lock still verifies, and 'worktree remove' does not destroy the record"
+  else
+    bad "acquire-then-worktree-add ordering broken: acquire-rc=$rc17 lane-dir-absent-after-acquire=$lane_absent worktree-add-rc=$wt_rc verify-rc=$rc17v record-survived-removal=$rec_survived stray-branches=$stray_branch
+$out17
+$(cat "$T/wt17.out" 2>/dev/null)"
+  fi
 fi
 
 # ===========================================================================

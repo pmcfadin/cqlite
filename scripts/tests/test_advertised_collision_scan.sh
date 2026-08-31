@@ -251,14 +251,18 @@ LANELOCK="$SCRIPT_DIR/../flow/lane-lock.sh"
 sleep 900 &
 SLEEPER=$!
 LANE_LOCK_PID=$SLEEPER bash "$LANELOCK" acquire 600 >/dev/null 2>&1
-recordBefore=$(cat "$LANE_ROOT/lane-600/.lane-lock" 2>/dev/null)
+# The lock record lives in the sibling LOCK ROOT, not in the lane directory (#3436:
+# `git worktree add` refuses a target that exists at all, so a lock inside the lane
+# would forbid acquire-before-worktree-add).
+LANE_LOCK_RECORD_600="$LANE_ROOT/.lane-locks/lane-600.lock"
+recordBefore=$(cat "$LANE_LOCK_RECORD_600" 2>/dev/null)
 refsBefore=$(refs_snapshot)
 treeBefore=$(tree_snapshot)
 GH9="$T/gh-mutate"; mk_gh "$GH9" 600 601 602 603
 out=$(run_scan "$GH9"); rc=$?
 refsAfter=$(refs_snapshot)
 treeAfter=$(tree_snapshot)
-recordAfter=$(cat "$LANE_ROOT/lane-600/.lane-lock" 2>/dev/null)
+recordAfter=$(cat "$LANE_LOCK_RECORD_600" 2>/dev/null)
 if [ "$refsBefore" = "$refsAfter" ] && [ "$treeBefore" = "$treeAfter" ] \
    && [ -n "$recordBefore" ] && [ "$recordBefore" = "$recordAfter" ] && [ "$rc" -eq 3 ]; then
   ok "a FOUND run left every ref, the whole lane tree AND an existing lane-lock record byte-identical"
