@@ -1398,6 +1398,54 @@ else
       "launcher advertises ${_adv_cap}s, reader enforces ${_reader_cap}s"
 fi
 
+# --- roborev job 266: a STALE extra marker must be RECLAIMED, not tolerated -----------------------
+# Job 261 reserved every write destination. When one of those paths already carried a marker whose owner
+# was provably dead, the first version left it in place — with the comment "a stale marker of our own
+# shape; harmless". That comment was FALSE, and it is the second time in this change that a confident
+# comment licensed the defect beneath it (the first: `host` described as "not an input to any verdict"
+# directly above `|| echo unknown`). A wrong comment is worse than none, because it tells the next reader
+# the branch was considered.
+#
+# The consequence: a LIVE run's heartbeat or log stays represented by a DEAD owner, so a later launch
+# reads the path as reclaimable, takes it as ITS summary, and two writers land on one file. Reproduced: a
+# launch succeeded with its heartbeat lock still naming pid 999999999.
+if sed -n '/A STALE MARKER MUST BE REPLACED/,/esac/p' "$LAUNCHER" | grep -q 'rm -f "$_art.launch-lock"'; then
+  ok "4b.151 a provably-stale extra marker is reclaimed, not left naming a dead owner"
+else
+  bad "4b.151 a stale extra marker is reclaimed" "a live run would stay represented by a dead owner"
+fi
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  _sm="$TMP/stalemark"
+  ln -s "unit=cqlite-gate-dead.service|pid=999999999|start=proc:1" "$_sm.txt.heartbeat.launch-lock"
+  ln -s "unit=cqlite-gate-dead2.service|pid=999999998|start=proc:1" "$_sm.log.launch-lock"
+  _so=$(bash "$LAUNCHER" --summary "$_sm.txt" --log "$_sm.log" -- --only roborev-lints 2>&1); _sr=$?
+  _su=$(printf '%s' "$_so" | sed -n 's/^unit:  *//p'); [ -n "$_su" ] && echo "$_su" >> "$UNITS_FILE"
+  _stale_left=0
+  for _f in "$_sm.txt.heartbeat.launch-lock" "$_sm.log.launch-lock"; do
+    case "$(readlink "$_f" 2>/dev/null)" in
+      *999999*) _stale_left=$((_stale_left+1)); echo "     still names a dead owner: $(basename "$_f")" ;;
+    esac
+  done
+  if [ "$_sr" = 0 ] && [ "$_stale_left" = 0 ] && [ -n "$_su" ]; then
+    ok "4b.152 stale heartbeat AND log markers are both reclaimed to the live unit"
+  else
+    bad "4b.152 stale extra markers are reclaimed to the live unit" \
+        "exit=$_sr stale_left=$_stale_left unit='${_su:-none}'"
+  fi
+  [ -n "$_su" ] && systemctl --user stop "$_su" >/dev/null 2>&1
+  # CONTROL: a LIVE foreign marker must still refuse, or reclamation has become "take everything".
+  _lv="$TMP/livemark"
+  _lo=$(bash "$LAUNCHER" --summary "$_lv-a" --log "$_lv-shared" -- --only roborev-lints 2>&1)
+  _lu=$(printf '%s' "$_lo" | sed -n 's/^unit:  *//p'); [ -n "$_lu" ] && echo "$_lu" >> "$UNITS_FILE"
+  _l2=$(bash "$LAUNCHER" --summary "$_lv-b" --log "$_lv-shared" -- --only fmt 2>&1); _l2r=$?
+  _l2u=$(printf '%s' "$_l2" | sed -n 's/^unit:  *//p'); [ -n "$_l2u" ] && echo "$_l2u" >> "$UNITS_FILE"
+  [ "$_l2r" != 0 ] && ok "4b.153 control: a LIVE foreign marker still refuses (exit $_l2r)" \
+                   || bad "4b.153 control: a live foreign marker still refuses" "accepted: $_l2"
+  for _u in $_lu $_l2u; do systemctl --user stop "$_u" >/dev/null 2>&1; done
+else
+  skip=$((skip+2)); echo "SKIP 4b.152/4b.153 (no user systemd manager on this host)"
+fi
+
 # --- roborev job 251: an UNPROVEN clock domain must not get a healthy gate killed ------------------
 # Two earlier fixes interacted. Job 221 made an unverifiable hostname ABSENT, so the clock domain reads
 # unproven. Job 231 put `--no-wait` on every launcher call, so the reader cannot take a second sample.

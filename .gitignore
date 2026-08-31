@@ -273,10 +273,16 @@ docs/sstable-guide-audit/
 #     !<path>/     ->  1 descendant visible    (trailing slash matches the DIRECTORY, re-including it)
 # Glob entries take the same form (`!<glob>/`), verified the same way.
 /.agent-gate-summary.txt.heartbeat
+/.agent-gate-summary.txt.heartbeat.launch-lock
+!/.agent-gate-summary.txt.heartbeat.launch-lock/
 !/.agent-gate-summary.txt.heartbeat/
 /.agent-gate-lite-summary.txt.heartbeat
+/.agent-gate-lite-summary.txt.heartbeat.launch-lock
+!/.agent-gate-lite-summary.txt.heartbeat.launch-lock/
 !/.agent-gate-lite-summary.txt.heartbeat/
 /.agent-gate-delta-summary.txt.heartbeat
+/.agent-gate-delta-summary.txt.heartbeat.launch-lock
+!/.agent-gate-delta-summary.txt.heartbeat.launch-lock/
 !/.agent-gate-delta-summary.txt.heartbeat/
 /.agent-gate-summary.txt.launch-lock
 !/.agent-gate-summary.txt.launch-lock/

@@ -642,6 +642,46 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### What the audit questions DO and DO NOT catch — measured, one finding on each side
+
+Job 266 returned two findings, and they fell either side of the line cleanly enough to record as the
+boundary of this whole apparatus:
+
+| finding | severity | found by |
+|---|---|---|
+| a provably-stale extra marker was left in place, so a LIVE run stayed represented by a DEAD owner | **High** | review |
+| `<summary>.heartbeat.launch-lock` was not gitignored | Low | **the sixth audit question, ~20 minutes earlier** |
+
+**The six questions clear MECHANICAL debris and do not touch SEMANTIC judgement.** The gitignore gap is
+mechanical: a fix created a new artifact name and a guard written against the old set did not cover it —
+exactly what "what does this fix create?" asks. The stale-marker defect is semantic: *what should happen
+when a path is already marked but its owner is dead?* No question about artifacts, orderings, sleeps or
+weakened guarantees asks that. So run the audits to clear the cheap debris, and keep review rounds for
+the judgement calls; expecting the audits to replace review would be the same overreach as expecting a
+green suite to prove semantics.
+
+**And the gitignore gap was a REPEAT.** Commit `82a878d02` in this same change exists solely to remove a
+runtime heartbeat artifact committed by accident. A `git add -A` would have done it again. Prevention here
+came from asking what the fix created, not from remembering the earlier mistake.
+
+### A confident comment can license the defect beneath it — twice now
+
+The stale-marker branch carried the comment `# a stale marker of our own shape; harmless`. That claim was
+**false**: leaving the marker means this live run's heartbeat or log is represented by a dead owner, so a
+later launch reads the path as reclaimable, takes it as its own summary, and two writers land on one file.
+Reproduced — a launch succeeded with its heartbeat lock still naming pid 999999999.
+
+This is the second instance in this change. The first was `host` described as "a DIAGNOSTIC ... not an
+input to any verdict" sitting directly above `|| echo unknown`. **In both cases the comment's damage was
+that it told the next reader the branch had been considered**, so the branch was not looked at again — by
+me, on my own re-read. A wrong comment is worse than no comment, and the two here cost a High severity
+finding each.
+
+The reclamation itself is one line of `rm` plus one `ln -s`, and that simplicity is what the global launch
+lock buys: no other launcher can interleave, so the summary lock's compare-and-swap machinery is not
+needed for the extra markers. `4b.153` is the control that keeps reclamation honest — a LIVE foreign
+marker must still refuse, or "reclaim the stale one" has quietly become "take everything".
+
 ### The sixth audit question: WHAT DOES THIS FIX CREATE, AND WHICH GUARD IS NOW BLIND TO IT?
 
 Job 261 was one finding and produced SIX fixes, five of them consequences of the first. That ratio is the

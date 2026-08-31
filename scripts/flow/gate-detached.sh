@@ -921,8 +921,24 @@ for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
   if ln -s "$_res_target" "$_art.launch-lock" 2>/dev/null; then
     _extra_locks="$_extra_locks $_art.launch-lock"
   else
+    # A STALE MARKER MUST BE REPLACED, NOT TOLERATED (roborev job 266, High). The first version treated
+    # `free` here as "a stale marker of our own shape; harmless" — and that comment was FALSE, in the same
+    # way the `host` comment that licensed `|| echo unknown` was false. Leaving it means THIS LIVE RUN's
+    # heartbeat or log is represented by a DEAD owner, so a later launch reads the path as reclaimable,
+    # takes it as its own summary, and two writers land on one file. Reproduced: a launch succeeded with
+    # its heartbeat lock still naming pid 999999999.
+    #
+    # Remove-then-recreate is sufficient BECAUSE the global launch lock is held: no other launcher can
+    # interleave, so the summary lock's compare-and-swap machinery is not needed here. That is what the
+    # single lock buys.
     case "$(_foreign_reservation "$_art")" in
-      free) ;;                       # a stale marker of our own shape; harmless
+      free)
+        rm -f "$_art.launch-lock" 2>/dev/null || true
+        if ln -s "$_res_target" "$_art.launch-lock" 2>/dev/null; then
+          _extra_locks="$_extra_locks $_art.launch-lock"
+        else
+          _extra_ok=0; break            # could not take a path we proved reclaimable: refuse, never proceed
+        fi ;;
       *) _extra_ok=0; break ;;
     esac
   fi
