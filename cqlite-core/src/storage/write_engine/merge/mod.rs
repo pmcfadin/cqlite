@@ -444,7 +444,10 @@ mod producer_msg;
 /// sync overhead against memory footprint. Issue #2765: the UPPER clamp of an
 /// adaptive per-merge capacity (see [`egress_budget`]) — under concurrent merges
 /// the effective capacity shrinks so the aggregate buffered working set tracks a
-/// fixed budget instead of growing as `256 × active_merges`.
+/// fixed budget instead of growing as `active_merges × K × per_source`. Both
+/// sides of that comparison are in `per_source` units, which is `4 × rows_cap`
+/// since #2820 (see [`egress_budget`]'s `per_source` section) — NOT `rows_cap`,
+/// which is what this sentence multiplied before the channel carried batches.
 ///
 /// Issue #2820: this stays a ROW budget and stays 256 — every `egress_budget`
 /// name, doc and test speaks in rows. It is NOT the `sync_channel` argument any

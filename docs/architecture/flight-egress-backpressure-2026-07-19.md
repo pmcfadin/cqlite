@@ -13,7 +13,12 @@
 > `2 x rows_cap` = **512** rows (channel-resident), while the MEMORY bound is
 > `max_inflight_rows` = `4 x rows_cap` = **1024** rows, which also counts the
 > consumer-held and producer-blocked batches the gauge never sees — so a
-> per-source alert threshold at 1024 can never fire. The measured peaks below
+> per-source alert threshold at 1024 can never fire. Every AGGREGATE product
+> below is a pre-#2820 figure for the same reason — where a bullet says the
+> working set is bounded "instead of `256 × active_merges`", the per-source
+> multiplicand is now `max_inflight_rows` = `4 × rows_cap`, so each such product
+> is 4× what it reads here (the ATTRIBUTION and the lever are unaffected; only
+> the constant moved). The measured peaks below
 > (1473, 8080) are PROCESS-GLOBAL sums across concurrent starved scans and are
 > unaffected by either per-source figure. The gauge's unit is unchanged (ENTRIES), and the ATTRIBUTION and the lever (a concurrency-aware
 > per-merge ROW budget, #2765) are unaffected — the row budget is still the knob.

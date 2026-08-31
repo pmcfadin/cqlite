@@ -2,13 +2,42 @@
 //! (issues #2765/#2600/#2367).
 //!
 //! A k-way merge streams each of its `K` input SSTables through a bounded
-//! producer→consumer `sync_channel` that buffers up to a per-channel capacity of
-//! prefetched `MergeEntry` values (see `STREAMING_CHANNEL_CAPACITY`,
-//! `merge/mod.rs`). With a FIXED per-channel capacity of 256, the rows buffered
-//! by a SINGLE merge grew as `256 × K`, and across the process as
-//! `256 × K × active_merges` — an unbounded aggregate working set under
-//! concurrent scan/compaction load (the #2600/#2367 backpressure gap; the field
-//! signal was ~80 producer threads live at once).
+//! producer→consumer `sync_channel` that buffers prefetched `MergeEntry` values
+//! (see `STREAMING_CHANNEL_CAPACITY`, `merge/mod.rs`). With a FIXED per-channel
+//! capacity, the rows buffered by a SINGLE merge grew as `K × per_source`, and
+//! across the process as `active_merges × K × per_source` — an unbounded
+//! aggregate working set under concurrent scan/compaction load (the #2600/#2367
+//! backpressure gap; the field signal was ~80 producer threads live at once).
+//!
+//! ## `per_source` — the ONE quantity every aggregate here multiplies (#2820)
+//!
+//! Every figure below is a PRODUCT of a per-source row bound, so it is stated in
+//! terms of that quantity rather than a literal — the literals moved once
+//! already. Since #2820 an egress channel carries BATCHES, and three populations
+//! coexist at one instant (channel-resident, consumer-held, and the batch a
+//! producer is PARKED holding in `send`), so:
+//!
+//! ```text
+//! per_source = egress_batch::max_inflight_rows(cap_per_channel)
+//!            = (msg_cap + 2) × batch_ceiling
+//!            = 4 × cap_per_channel        (at every reachable setting)
+//! ```
+//!
+//! of which `egress_batch::rows_resident_in_channel(cap_per_channel)` =
+//! `2 × cap_per_channel` is the strictly smaller half the #2419 depth gauge can
+//! observe, and a cold-started producer parks holding less again
+//! (`egress_batch::rows_in_full_channel(cap) + batch_ceiling + 1`, the ramp sum).
+//!
+//! The pre-#2820 per-source figure was `cap_per_channel` ITSELF (one row per
+//! channel slot), so **every product in this module is 4× what the same sentence
+//! said before #2820**. That 4× is the envelope of record for #2820 — the
+//! reconciliation that makes a ~256× reduction in cross-thread sends safe — not
+//! an accidental regression, and it is measured, not argued (dhat peak FELL
+//! against the pre-change baseline, because batching also shortens the interval
+//! over which a producer holds rows at all). Two substitutions to refuse:
+//! putting the channel-resident figure in for `per_source` understates the
+//! MEMORY bound 2×, and putting `cap_per_channel` in understates it 4× — which
+//! is exactly how the four aggregate sentences below went stale.
 //!
 //! ## The unit is a MERGE, not a source channel
 //!
@@ -46,22 +75,37 @@
 //! honest worst-case global working set is
 //!
 //! ```text
-//! working_set ≈ active_merges × K × cap_per_channel
+//! working_set ≈ active_merges × K × per_source
+//!             = active_merges × K × max_inflight_rows(cap_per_channel)
+//!             = 4 × active_merges × K × cap_per_channel
 //! ```
 //!
-//! which for `active_merges ≥ EGRESS_ROW_BUDGET / MAX_CAP` is `≈ K × budget`
+//! which for `active_merges ≥ EGRESS_ROW_BUDGET / MAX_CAP` is `≈ 4 × K × budget`
 //! (the `/active` division cancels the outer `active` factor down to ONE budget
-//! per source-fanout), and is floored by `active_merges × K × MIN_CAP` — the
-//! deliberate cost of the forward-progress floor. The win vs. the fixed cap is
-//! the removal of the `× 256` per-source constant: caps fall toward [`MIN_CAP`]
-//! as concurrency climbs, instead of every channel holding a fixed 256. Do NOT
-//! read this as a strict `≤ EGRESS_ROW_BUDGET` global bound.
+//! per source-fanout, and `per_source` keeps its 4×), and is floored by
+//! `active_merges × K × max_inflight_rows(MIN_CAP)` = `4 × active_merges × K ×
+//! MIN_CAP` — the deliberate cost of the forward-progress floor. Of that working
+//! set, half is channel-RESIDENT (`2 ×` rather than `4 ×`); the other half is the
+//! consumer-held and producer-parked batches, which are just as real to the
+//! allocator and so belong in a MEMORY figure. The win vs. the fixed cap is
+//! unchanged and is the removal of the per-source CONSTANT: `per_source` is a
+//! multiple of `cap_per_channel` at every setting, so caps fall toward
+//! [`MIN_CAP`] as concurrency climbs instead of every channel holding a fixed
+//! `MAX_CAP` worth. Do NOT read this as a strict `≤ EGRESS_ROW_BUDGET` global
+//! bound — it never was one, and since #2820 it is 4× further from one.
 //!
 //! Residual K-linear dimension: the budget divides by merge COUNT only, never by
-//! per-merge fanout `K`, so a SINGLE wide merge still buffers up to `K × 256`
-//! entries (~60MB at `K = 100`) invariant to concurrency — intended (the owner's
-//! "a solo merge is unchanged for any `K`" contract). The high-`K` envelope is
-//! validated by the #2895 loadgen sweep (deferred follow-up).
+//! per-merge fanout `K`, so a SINGLE wide merge still buffers up to
+//! `K × max_inflight_rows(MAX_CAP)` = `4 × K × MAX_CAP` entries invariant to
+//! concurrency — intended (the owner's "a solo merge is unchanged for any `K`"
+//! contract), and 4× the pre-#2820 `K × MAX_CAP`, so the ~60 MB this doc used to
+//! quote at `K = 100` is ~240 MB at the same ~2.4 KB/row. For any row shape fat
+//! enough to matter the BYTE budget binds first and is the figure to reason with:
+//! `K × egress_batch::max_inflight_bytes(cap, max_row_bytes)` =
+//! `4 × K × (BATCH_EMIT_BYTES_MERGE + max_row_bytes)`, ≈ 4 MiB per source. Both
+//! are worst-case row bounds against a STALLED consumer, not steady state. The
+//! high-`K` envelope is validated by the #2895 loadgen sweep (deferred
+//! follow-up).
 //!
 //! The snapshot is taken ONCE at construction and never revised, so it is
 //! order-dependent, not fair: a long-lived merge that starts during a burst
@@ -115,9 +159,14 @@ use crate::observability;
 /// that at the pre-change fixed capacity of 256 the budget is fully consumed by
 /// ~8 concurrent merges; beyond that, per-channel capacity shrinks (down to
 /// [`MIN_CAP`]) instead of every channel holding a fixed 256. See the module doc
-/// for why this is a per-slot budget, NOT a strict global ceiling. `2048`
-/// entries of a few hundred bytes each keeps a solo merge's `K × 256` footprint
-/// well within the 128MB memory target.
+/// for why this is a per-slot budget, NOT a strict global ceiling — and for
+/// `per_source`, the quantity a solo merge's footprint actually multiplies:
+/// `K × per_source` = `4 × K × MAX_CAP` rows since #2820, NOT `K × 256`. The
+/// module doc carries the one derivation and the one per-row constant; do not
+/// re-derive a second here, which is how these two figures drifted apart in the
+/// first place. For a fat-row workload the BYTE term
+/// (`egress_batch::max_inflight_bytes`, ≈4 MiB/source) binds first, and the
+/// high-`K` envelope is #2895's to validate.
 pub(super) const EGRESS_ROW_BUDGET: usize = 2048;
 
 /// DEFAULT minimum per-channel capacity (issue #2765) — overridable at runtime
