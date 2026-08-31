@@ -11,6 +11,21 @@ rust-version.workspace = true
 description = "Core engine for CQLite — read Apache Cassandra 5.0 SSTables locally without a cluster"
 readme = "../README.md"
 
+# Not packaged: this integration test reads a fixture that lives at REPO ROOT
+# (`test-data/datasets/…`), outside this package, so `cargo package` cannot carry it.
+# The test fails CLOSED on a missing fixture by design (#3220) — committed source is
+# never legitimately absent in a checkout — so shipping it in the published crate
+# would make `cargo test` fail for a consumer who can never satisfy it.
+#
+# Excluding it from the PACKAGE is the fix that keeps both properties: fail-closed in
+# a repository checkout, and absent (rather than skipping) where the fixture cannot
+# exist. A skip would reintroduce exactly the vacuous green #3220 removed, and a
+# "am I a git checkout?" runtime probe would be the environment heuristic #28 forbids.
+#
+# 454 sibling integration tests have the same repo-root-fixture property; fixing the
+# class (likely `exclude = ["tests/**"]`) is a packaging decision tracked in #3677.
+exclude = ["tests/issue_3358_bti_query_token_bound.rs"]
+
 # docs.rs build: document the commonly used features. Deliberately excludes
 # `wasm` (wasm32-only deps would fail the default x86_64 docs.rs target).
 [package.metadata.docs.rs]
