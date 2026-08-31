@@ -29,14 +29,14 @@ WHICH COLUMNS COVER ``value_to_hashable_key``, AND WHICH DO NOT
 ---------------------------------------------------------------
 Stated in exactly ONE place, and deliberately not restated here: the ROUTING
 section of ``bindings/python/src/value_hashable.rs``, which gives the route and
-the ARM for all nine columns. Read it before adding, deleting or re-scoping any
+the ARM for all ten columns. Read it before adding, deleting or re-scoping any
 coverage claim in this module.
 
 This module asserts nothing about that routing, because restating it is what
 went wrong: the claim was made in four places in this file and in both fixture
 headers, and drifted in all but one — every drifted version was the same
-over-broad "only the frozen maps reach the function at all", when five of the
-nine columns do and only two reach the NEW ``Tuple``/``Set`` arms. Hence the one
+over-broad "only the frozen maps reach the function at all", when six of the ten
+columns do and only three reach the NEW ``Tuple``/``Set`` arms. Hence the one
 rule that survives here: scope a coverage claim to the ARM, never to the
 function.
 
@@ -883,13 +883,17 @@ class TestTupleBorneUdtAsMapKey:
 class TestFrozenMapWithTupleBorneUdtKey:
     """``f_map_tuple_udt`` — ``frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>``.
 
-    THE COLUMN THAT COVERS ``value_to_hashable_key``'s ``Tuple`` ARM. Read this
-    before deleting it as redundant with ``s_tuple_udt``.
+    ONE OF THE TWO COLUMNS THAT REACH ``value_to_hashable_key``'s ``Tuple`` ARM.
+    Read this before deleting it as redundant with ``s_tuple_udt``.
 
-    That no other column in this fixture reaches the ``Tuple`` arm is a
-    CONSEQUENCE of the ROUTING section of ``value_hashable.rs``, which states the
-    per-column routes and the two mechanisms behind them once; this docstring
-    derives its purpose from that section and asserts no routing of its own.
+    Which columns reach that arm is a CONSEQUENCE of the ROUTING section of
+    ``value_hashable.rs``, which states the per-column routes and the mechanisms
+    behind them once; this docstring derives its purpose from that section and
+    asserts no routing of its own. The other one is
+    :class:`TestFrozenMapWithTupleBorneNestedListUdtKey`, and the division of
+    labour matters: this column pins the arm's OUTPUT SHAPE, that one pins its
+    RECURSION, because only there do the ordinary and hashable projections
+    diverge.
 
     What this class depends on is the one route that DOES reach it: a FROZEN
     map arrives as ONE value cell, ``parse_frozen_map_value`` →
@@ -931,14 +935,19 @@ class TestFrozenMapWithTupleBorneUdtKey:
         hashable and CAN be a key — and for a scalar-field UDT like ``key_part``
         the two routes produce the same object, because ``build_udt`` differs
         only in a per-field converter that is identical for ``text`` and ``int``.
-        So NO value assertion on this column can distinguish the two routes any
+        So NO value assertion on THIS column can distinguish the two routes any
         more. That is exactly the "succeeded INCIDENTALLY" measurement recorded
         in ``docs/development/M4_spec.md`` §5.3.
 
-        What still pins the ``Tuple`` arm, therefore: (1) the compiler, via the
-        exhaustive match and its ``#[deny(clippy::wildcard_enum_match_arm)]``
-        (RED-verified — a planted ``_ =>`` errors); and (2) the ``Set``-arm
-        sibling, ``TestFrozenMapWithNestedSetUdtKey``'s
+        What pins the ``Tuple`` arm, therefore, is not this column. It is
+        (1) :class:`TestFrozenMapWithTupleBorneNestedListUdtKey`, whose key
+        nests a ``list`` under the tuple so that the ordinary route cannot
+        produce a usable key at all and the arm's RECURSION becomes
+        behaviourally falsifiable (RED-verified against a ``Tuple``-arm
+        delegation); (2) the compiler, via the exhaustive match and its
+        ``#[deny(clippy::wildcard_enum_match_arm)]`` (RED-verified — a planted
+        ``_ =>`` errors); and (3) the ``Set``-arm sibling,
+        ``TestFrozenMapWithNestedSetUdtKey``'s
         ``test_key_is_a_frozenset_of_udts``, where the fall-through answers with
         an unhashable ``list`` and the discrimination survives outright.
 
@@ -1061,6 +1070,129 @@ class TestFrozenMapWithNestedSetUdtKey:
     def test_absent_in_sparse_row(self, db):
         """id=4 never wrote this column."""
         assert _rows_by_id(db, "f_map_set_udt")[4].get("f_map_set_udt") is None
+
+
+class TestFrozenMapWithTupleBorneNestedListUdtKey:
+    """``f_map_tuple_list_udt`` — ``frozen<map<frozen<tuple<frozen<list<frozen<key_part>>>, int>>, int>>``.
+
+    THE COLUMN THAT MAKES THE ``Tuple`` ARM'S *RECURSION* BEHAVIOURALLY
+    FALSIFIABLE. This docstring is the ONE statement of that argument; the
+    fixture schema and the generator point here and restate none of it.
+
+    THE GAP THIS CLOSES (issue #3500, roborev job 275). Sibling
+    :class:`TestFrozenMapWithTupleBorneUdtKey` was described as "the column that
+    covers the ``Tuple`` arm", and for the arm's OUTPUT SHAPE it is. But its key
+    is ``tuple<frozen<key_part>, int>`` and ``key_part`` has only SCALAR fields,
+    so since #3504 the ordinary projection of that key — ``value_to_py`` →
+    ``tuple_to_py`` → ``udt_to_py`` — is ALREADY a hashable ``tuple`` holding a
+    ``cqlite.Udt``, byte-for-byte the same object the hashable route builds. An
+    exhaustive, Clippy-clean regression that replaced the ``Tuple`` arm with
+    ``value_to_py(py, value)`` therefore passed EVERY test in this module. The
+    arm's recursion was pinned by nothing behavioural: only by the compiler
+    (which enforces that an arm EXISTS, not what it does) and by the ``Set``-arm
+    sibling (a different arm).
+
+    WHY THIS KEY DISCRIMINATES. Its first tuple component is a
+    ``frozen<list<frozen<key_part>>>``, which the frozen-map decode delivers as a
+    real ``Value::List``:
+
+    * the HASHABLE route recurses — ``Tuple`` → the same ``List | Tuple`` arm →
+      ``Udt`` — and yields ``((Udt, Udt), int)``, a hashable ``dict`` key;
+    * the ORDINARY route reaches ``list_to_py``, which builds a Python ``list``
+      UNCONDITIONALLY, and a ``tuple`` holding a ``list`` is unhashable, so
+      ``map_to_py``'s ``dict.set_item`` raises
+      ``TypeError: unhashable type: 'list'`` and the column cannot be read at
+      all.
+
+    So the two routes differ OBSERVABLY here, and the difference is the loud
+    kind. RED-VERIFIED, not argued: with the ``Tuple`` arm split out of the
+    ``List | Tuple`` arm and delegated to ``value_to_py``, the three value cases
+    below raise that ``TypeError`` while every pre-existing case in this module —
+    including all of :class:`TestFrozenMapWithTupleBorneUdtKey` — stays green.
+    That contrast is the whole point of the column; a regression that survived
+    the old suite reds here.
+
+    A SECOND property comes free and is asserted: the ``List`` projection must
+    preserve ORDER. id=1 holds two keys carrying the SAME two list elements in
+    OPPOSITE order with the same trailing int, so a projection that answered with
+    a ``frozenset`` (or that sorted) would collapse them into ONE dict entry.
+    """
+
+    def test_key_is_usable_as_a_dict_key(self, db):
+        """The property the ordinary route cannot satisfy: the key HASHES.
+
+        Asserted directly rather than only via an equality on the whole mapping,
+        because that is the operation a delegated ``Tuple`` arm makes impossible:
+        the value arrives as a ``dict``, so ``hash(key)`` and a round trip
+        through a fresh ``dict`` must both work.
+        """
+        value = _rows_by_id(db, "f_map_tuple_list_udt")[3].get(
+            "f_map_tuple_list_udt"
+        )
+        assert type(value) is dict
+        [key] = list(value)
+        hash(key)
+        assert {key: "sentinel"}[key] == "sentinel"
+
+    def test_key_projects_to_a_tuple_of_a_tuple_of_udts(self, db):
+        """id=3: the exact projected STRUCTURE, container type by container type.
+
+        ``((Udt,), 42)`` — a ``tuple`` whose first element is a ``tuple`` (NOT a
+        ``list``, which is what the ordinary route builds and what cannot be a
+        key) of ``cqlite.Udt``, and whose second is an ``int``.
+        """
+        value = _rows_by_id(db, "f_map_tuple_list_udt")[3].get(
+            "f_map_tuple_list_udt"
+        )
+        assert value == {((kp_hashable("solo", 99),), 42): 7}
+        [key] = list(value)
+        assert type(key) is tuple
+        assert type(key[0]) is tuple, (
+            "the nested list projected to a "
+            f"{type(key[0]).__name__}; the Tuple arm did not recurse through "
+            "value_to_hashable_key"
+        )
+        assert isinstance(key[0][0], cqlite.Udt)
+        assert type(key[1]) is int
+
+    def test_list_order_is_preserved_so_the_two_keys_stay_distinct(self, db):
+        """id=1: same two elements, opposite order — TWO keys, not one.
+
+        Cassandra stores two entries (the frozen lists differ bytewise); the
+        projection must keep them distinct, which it can only do by preserving
+        order. A ``frozenset`` projection would collapse them.
+        """
+        value = _rows_by_id(db, "f_map_tuple_list_udt")[1].get(
+            "f_map_tuple_list_udt"
+        )
+        assert value == {
+            ((kp_hashable("la", 1), kp_hashable("lb", 2)), 1): 120,
+            ((kp_hashable("lb", 2), kp_hashable("la", 1)), 1): 210,
+        }
+        assert len(value) == 2, (
+            "the two order-reversed list keys collapsed — the List projection "
+            "is not order-preserving"
+        )
+
+    def test_null_udt_fields_inside_the_nested_list(self, db):
+        """id=2: ``None`` fields two levels down, through ``Tuple`` → ``List``.
+
+        The deepest route in this fixture to ``build_udt``'s
+        ``None => py.None()`` branch with ``convert = value_to_hashable_key``.
+        """
+        value = _rows_by_id(db, "f_map_tuple_list_udt")[2].get(
+            "f_map_tuple_list_udt"
+        )
+        assert value == {
+            ((kp_hashable("nulllist", None), kp_hashable(None, 8)), 3): 380
+        }
+
+    def test_absent_in_sparse_row(self, db):
+        """id=4 never wrote this column, so it must be ``None``, not ``{}``."""
+        assert (
+            _rows_by_id(db, "f_map_tuple_list_udt")[4].get("f_map_tuple_list_udt")
+            is None
+        )
 
 
 class TestSetElementFrozenMapWithUdtKeyHalf:
@@ -1247,7 +1379,7 @@ class TestSelectStarWholeRow:
         )
 
     def test_select_star_returns_every_column(self, db):
-        """``SELECT *`` yields exactly the nine declared columns plus ``id``.
+        """``SELECT *`` yields exactly the ten declared columns plus ``id``.
 
         Pinned so the ``is None`` assertions in the sparse-row test below cannot
         be satisfied by a column having been dropped from the projection
@@ -1264,6 +1396,7 @@ class TestSelectStarWholeRow:
                 "f_set_tuple_udt",
                 "f_map_tuple_udt",
                 "f_map_set_udt",
+                "f_map_tuple_list_udt",
                 "s_map_udt_key",
                 "s_map_udt_val",
             ]
@@ -1287,11 +1420,14 @@ class TestSelectStarWholeRow:
         assert row.get("f_map_set_udt") == {
             frozenset({kp_hashable("solo", 99)}): 7
         }
+        assert row.get("f_map_tuple_list_udt") == {
+            ((kp_hashable("solo", 99),), 42): 7
+        }
         assert row.get("s_map_udt_key") == [{kp_hashable("solo", 99): 42}]
         assert row.get("s_map_udt_val") == [{42: kp("solo", 99)}]
 
     def test_select_star_sparse_row_values(self, db):
-        """id=4: one populated column, EIGHT absent ones, in one ``SELECT *``."""
+        """id=4: one populated column, NINE absent ones, in one ``SELECT *``."""
         result = db.execute(f"SELECT * FROM {KEYSPACE}.{TABLE}")
         rows = {row.get("id"): row for row in result.rows}
         row = rows[4]
@@ -1303,6 +1439,7 @@ class TestSelectStarWholeRow:
             "m_tuple_udt",
             "f_map_tuple_udt",
             "f_map_set_udt",
+            "f_map_tuple_list_udt",
             "s_map_udt_key",
             "s_map_udt_val",
         ):

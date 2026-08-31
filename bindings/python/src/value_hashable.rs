@@ -45,6 +45,13 @@
 //!   `Udt` (including its `None => py.None()` field branch).
 //! * `f_map_set_udt` — REACHES, same route. Arm: `Set`, recursing into `Udt`
 //!   (including that same `None` branch).
+//! * `f_map_tuple_list_udt` — REACHES, same route. Arm: `Tuple`, recursing
+//!   through the SAME `List | Tuple` arm for the key's nested `frozen<list>` and
+//!   then into `Udt` (including that same `None` branch). It is the ONLY column
+//!   whose key the ORDINARY projection cannot produce at all — `value_to_py`
+//!   answers with a `tuple` holding an unhashable Python `list` — which is what
+//!   makes the arm's RECURSION observable rather than merely compiled; the
+//!   argument is stated once, in that column's test class.
 //! * `s_map_udt_key` — REACHES, via the INNER frozen map's keys:
 //!   `set_to_py`'s `list` branch → `value_to_py` → `map_to_py`. Arm: `Udt`
 //!   (through `Frozen`), the inner key type being `frozen<key_part>`.
@@ -57,9 +64,9 @@
 //!   it. `set_to_py`'s `list` branch converts each element with `value_to_py`,
 //!   and nothing below those elements is a map.
 //!
-//! Those first two are also the ONLY values in this repository that reach
+//! Those first three are also the ONLY values in this repository that reach
 //! `build_udt`'s `None => py.None()` field branch with
-//! `convert = value_to_hashable_key`, i.e. through this module's `Udt` arm — one
+//! `convert = value_to_hashable_key`, i.e. through this module's `Udt` arm — two
 //! through `Tuple`, one through `Set`. The BRANCH itself is not this arm's
 //! property: `build_udt` is shared with `value::udt_to_py` since #3504, so the
 //! set columns' null fields execute the same branch with
@@ -69,12 +76,12 @@
 //! Two conclusions, both of which have been got wrong in the other direction:
 //!
 //! * "the frozen maps are the only columns that reach this function AT ALL" is
-//!   FALSE — FIVE of the nine columns do.
+//!   FALSE — SIX of the ten columns do.
 //! * "the frozen maps are the only columns that reach the NEW `Tuple`/`Set`
-//!   arms" is TRUE, and is why those two columns exist: `s_map_udt_key`'s inner
-//!   map key is a UDT (`Udt` arm), `s_map_udt_val`'s is an `int` (scalar arm)
-//!   and `m_tuple_udt`'s is a `Blob` (scalar arm), so no other route lands on
-//!   `Tuple` or `Set`.
+//!   arms" is TRUE, and is why those THREE columns exist: `s_map_udt_key`'s
+//!   inner map key is a UDT (`Udt` arm), `s_map_udt_val`'s is an `int` (scalar
+//!   arm) and `m_tuple_udt`'s is a `Blob` (scalar arm), so no other route lands
+//!   on `Tuple` or `Set`.
 //!
 //! Hence the rule the drift keeps proving: scope a coverage claim to the ARM it
 //! reaches, NEVER to the function.

@@ -23,6 +23,7 @@
 #   f_map_set_udt   frozen<map<frozen<set<frozen<key_part>>>, int>>
 #   f_map_tuple_list_udt
 #                   frozen<map<frozen<tuple<frozen<list<frozen<key_part>>>, int>>, int>>
+#                                                                (Tuple-arm recursion)
 #   s_map_udt_key   set<frozen<map<frozen<key_part>, int>>>      (contains_udt k)
 #   s_map_udt_val   set<frozen<map<int, frozen<key_part>>>>      (contains_udt v)
 #
