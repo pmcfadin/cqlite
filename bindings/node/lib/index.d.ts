@@ -136,7 +136,37 @@ export type Value =
   | Value[]
   | Set<Value>
   | Map<Value, Value>
-  | UdtValue;
+  | UdtValue
+  | JsonObject;
+
+/**
+ * A JSON-object cell, as rendered by the binding.
+ *
+ * **This object has a NULL PROTOTYPE** (`Object.getPrototypeOf(obj) === null`),
+ * deliberately and for every JSON object at every nesting depth (issue #3630).
+ * A JSON object's keys ARE the data — there is no declared key set — which makes
+ * it the sibling of {@link UdtValue.fields} rather than of {@link Row}, and it
+ * takes the same contract: `obj[key] === undefined` means exactly "no such key",
+ * and no key can reach an inherited accessor. On an ordinary object a key named
+ * `__proto__` would be intercepted by `Object.prototype`'s inherited setter — a
+ * string value silently discarded, a null value replacing the object's prototype.
+ *
+ * **Consequence for callers**: `obj.hasOwnProperty(...)` does NOT exist on this
+ * object. Use `Object.hasOwn(obj, key)` or
+ * `Object.prototype.hasOwnProperty.call(obj, key)` — which is also the only form
+ * that is correct on a mapping whose keys are user-controlled. `Object.keys`,
+ * `in`, indexing, spread, destructuring, `JSON.stringify` and `Object.entries`
+ * all behave identically to a plain object.
+ *
+ * NOTE ON REACHABILITY, measured for #3630: no route from a Cassandra-written
+ * SSTable currently produces a JSON cell (CQLite's `json` schema type is not a
+ * Cassandra type, and a `.cql` schema declaring `json` is rejected as an unknown
+ * UDT). This type documents the contract the binding guarantees if and when such
+ * a route exists; it is not currently produced.
+ */
+export interface JsonObject {
+  [key: string]: Value;
+}
 
 /**
  * A single row from a query result.
@@ -153,6 +183,41 @@ export type Value =
  *   console.log(row.age);  // number
  * }
  * ```
+ *
+ * ## Guaranteed shape (issue #3630)
+ *
+ * * Every column is an **own, enumerable, writable, configurable DATA property**.
+ * * The prototype is `Object.prototype` — a row is an ordinary object, so
+ *   `row.hasOwnProperty(...)`, `row.toString()`, spread and `JSON.stringify` all
+ *   work. (This is why rows do NOT get the null prototype that
+ *   {@link JsonObject} and {@link UdtValue.fields} have: a row travels beside
+ *   `result.columns`, so it has an authoritative key list to be probed against,
+ *   which a bare mapping does not.)
+ * * A column name is never interpreted. Columns are DEFINED, not assigned, so a
+ *   column named `__proto__`, `constructor` or `toString` — reachable via a
+ *   quoted CQL identifier or a `SELECT ... AS` alias — arrives as an ordinary
+ *   column and can neither be silently dropped nor alter the object's prototype.
+ *
+ * ## Probing for a column: use `Object.hasOwn`, not `in` and not truthiness
+ *
+ * Because the prototype is `Object.prototype`, inherited names still answer `in`
+ * and are still truthy:
+ *
+ * ```typescript
+ * 'toString' in row              // true even when there is no such COLUMN
+ * if (row.constructor) { ... }   // truthy even when there is no such COLUMN
+ * Object.hasOwn(row, 'toString') // CORRECT: true only if the column exists
+ * ```
+ *
+ * That is the accepted cost of keeping the plain-object contract above, and
+ * `result.columns` is the authoritative list when you need one.
+ *
+ * ## One caveat outside the binding's control
+ *
+ * `Object.assign(target, row)` performs an ordinary assignment onto `target`, so
+ * a column named `__proto__` is lost by that copy. `{...row}` and
+ * `Object.fromEntries(Object.entries(row))` are safe — both define rather than
+ * assign.
  */
 export interface Row {
   [column: string]: Value;
