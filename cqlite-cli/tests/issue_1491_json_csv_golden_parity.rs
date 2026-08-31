@@ -654,10 +654,17 @@ const CASES: &[Case] = &[
             ("s_map_udt_key", Multicell::Set),
             ("s_map_udt_val", Multicell::Set),
         ],
-        // Eight of the eleven columns are excluded, in TWO distinct classes. What
-        // survives is compared: `id` and `f_set_tuple_udt` — so this entry still
-        // compares one genuinely nested frozen column, which is why it is a CASES
-        // entry rather than a NOT_COMPARABLE one.
+        // EVERY column except `id` and `f_set_tuple_udt` is excluded, in TWO
+        // distinct classes. Stated as the SURVIVING SET rather than as a count of
+        // the excluded: a count here drifted once already (roborev job 308 caught
+        // "Eight" after a ninth skip was added), and it drifted even though it sits
+        // in the same file as the `Skip` list that invalidates it — co-location is
+        // not enough when the edit that changes the number is not the edit that
+        // reads it. The surviving set is also what a reader needs: `f_set_tuple_udt`
+        // is a genuinely nested frozen column that IS compared, which is why this is
+        // a CASES entry rather than a NOT_COMPARABLE one. The authoritative count is
+        // emitted by the census line itself ("N cells compared, M of them
+        // containers") and needs no prose duplicate.
         //
         // CLASS 1 — the golden leaves the nested frozen element UNDECODED (raw
         // bytes as hex for a collection, colon-joined text for a tuple) while the
