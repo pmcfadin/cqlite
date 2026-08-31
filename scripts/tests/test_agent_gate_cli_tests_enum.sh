@@ -42,8 +42,16 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-# Extract the `cli-tests) run_component ... ;;` dispatch block from the gate.
-CLI_BLOCK=$(awk '/cli-tests\) run_component cli-tests bash -c/{f=1} f{print} f&&/;;$/{exit}' "$GATE")
+# Extract the `cli-tests)` dispatch block from the gate.
+#
+# ANCHORED ON THE DISPATCH LABEL, not on `cli-tests) run_component cli-tests bash -c` all
+# on ONE line (#3453): the branch now hoists its package/feature literals into `local`
+# variables ABOVE the run_component call (so the SUMMARY's feature-matrix annotation is
+# built from the same variables the argv is, and cannot drift). That split silently made
+# this extraction return NOTHING, and an empty block turned all nine structural asserts
+# below into a cascade of false FAILs — the reason the guard reports the location failure
+# FIRST and loudly.
+CLI_BLOCK=$(awk '/^[[:space:]]*cli-tests\)[[:space:]]*$/ || /cli-tests\) run_component cli-tests bash -c/{f=1} f{print} f&&/;;$/{exit}' "$GATE")
 
 if [ -z "$CLI_BLOCK" ]; then
   bad "could not locate the cli-tests dispatch block in $GATE"
@@ -51,18 +59,31 @@ else
   ok "located the cli-tests dispatch block"
 fi
 
+# The package/feature literals are HOISTED into `local` variables (#3453) so that the
+# SUMMARY's feature-matrix annotation is built from the same variables the argv is —
+# `--package '"$ct_pkg"'` inside the single-quoted body, never a second copy of the
+# literal. Pin the hoist itself, then accept EITHER spelling in the two pass asserts
+# below: what matters there is that each pass is glob/metadata-DERIVED, and an assert
+# keyed on a package spelling would red on a refactor that changed nothing it cares about.
+if grep -qE "^ +local ct_pkg=cqlite-cli ct_ws_feats=write-support$" <<<"$CLI_BLOCK"; then
+  ok "the cli-tests package/features are hoisted into ONE pair of variables (the argv and the SUMMARY matrix cannot drift; #3453)"
+else
+  bad "the cli-tests package/features hoist is gone — the SUMMARY feature matrix would be a second copy of the literals (#3453)"
+fi
+ct_pkg_re='(cqlite-cli|'"'"'"\$ct_pkg"'"'"')'
+
 # 1. PASS 1 — default-feature enumeration: derives its target set from the tests/*.rs
 #    glob (all_targets) minus required-features minus quarantine (def_flags), run
 #    under default features (no --features flag on the first cargo invocation).
 if grep -q 'all_targets=' <<<"$CLI_BLOCK" && grep -q 'def_flags' <<<"$CLI_BLOCK" \
-   && grep -qE 'cargo test --package cqlite-cli "\$\{def_flags\[@\]\}"' <<<"$CLI_BLOCK"; then
+   && grep -qE "cargo test --package $ct_pkg_re \"\\\$\{def_flags\[@\]\}\"" <<<"$CLI_BLOCK"; then
   ok "PASS 1 runs a glob-derived default-feature target set (def_flags), not a hardcoded list"
 else
   bad "PASS 1 does NOT enumerate a glob-derived default target set (regressed to an allowlist?)"
 fi
 
 # 2. PASS 2 — write-support pass exists and is DERIVED, not hardcoded.
-if grep -qE 'cargo test --package cqlite-cli --features write-support' <<<"$CLI_BLOCK"; then
+if grep -qE "cargo test --package $ct_pkg_re --features (write-support|'\"\\\$ct_ws_feats\"')" <<<"$CLI_BLOCK"; then
   ok "PASS 2 runs the write-support pass under --features write-support"
 else
   bad "PASS 2 (write-support) is missing"

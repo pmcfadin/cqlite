@@ -4993,8 +4993,13 @@ grep -q 'feature set NOT observed' "$GATE" || fm_tokens_missing+=(via-driver-not
 grep -q "printf '\[UNDECLARED\]'" "$GATE" || fm_tokens_missing+=(UNDECLARED)
 grep -q 'UNCLASSIFIED' "$GATE" || fm_tokens_missing+=(UNCLASSIFIED)
 grep -q 'component SKIPped' "$GATE" || fm_tokens_missing+=(skipped-before-cargo)
+# …and, since the eight `bash -c` bodies record at EXECUTION time (#3453 roborev job 269
+# blocker 2), a component that FAILs before its first cargo call legitimately leaves an
+# EMPTY sidecar. That state is NAMED too — it is a fact we know exactly, and UNDECLARED
+# would understate it.
+grep -q 'FAILed before its first cargo invocation' "$GATE" || fm_tokens_missing+=(failed-before-cargo)
 if [ "${#fm_tokens_missing[@]}" -eq 0 ]; then
-  ok "3453-annot-d: every non-observed state has an EXPLICIT rendering (no-cargo / via <driver> NOT observed / UNDECLARED / UNCLASSIFIED / SKIPped) — a blank annotation is unrepresentable"
+  ok "3453-annot-d: every non-observed state has an EXPLICIT rendering (no-cargo / via <driver> NOT observed / UNDECLARED / UNCLASSIFIED / SKIPped / FAILed-before-cargo) — a blank annotation is unrepresentable"
 else
   bad "3453-annot-d: missing explicit rendering(s): ${fm_tokens_missing[*]}"
 fi
