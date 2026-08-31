@@ -301,11 +301,39 @@ already runs `test_premerge_assert.sh`). Beyond ordinary cases it carries:
    path must be `STALE-RECOGNISED`, and it reds when the porcelain pin is removed; likewise
    `diff.relative=true` with cwd in a subdirectory.
 4. **An `UNMEASURED`-is-not-`0` case**: a git failure yields exit 5, never exit 0.
+7. **The lazy-fetch-guard cases** (D5 as revised, #3650 review R5 F1): a REAL `--filter=tree:0 --no-local`
+   promisor clone plus a `git` shim that both reports an old version AND unsets `GIT_NO_LAZY_FETCH` —
+   simulating an old git faithfully takes both halves, since reporting the version alone leaves the real
+   git still honouring the variable and the object-store assertion would pass for the wrong reason. The
+   primary assertion is an ARTIFACT ON DISK: the object-store file count across the run. Measured
+   contrast — the pre-fix script took it from 4 files to 8 (a packfile written into the repository) and
+   reported `NO-STALENESS-RECOGNISED`; the fixed script leaves it at 4 and reports `UNMEASURED`. Both
+   config sources and both object-store marker shapes are fixtured separately, the 2.36 floor is pinned
+   from both sides (2.36.0 honoured, 2.35.9 not), an unparseable version is pinned as UNSUPPORTED, and a
+   failing `git config` probe is pinned as `UNKNOWN` rather than "absent".
+
+**AND THE SUITE'S OWN HERMETICITY IS NOW ASSERTED, NOT CLAIMED (#3650 review R5 F2).**
+`scripts/tests/test_premerge_assert.sh` had a header saying "fast + hermetic" while `run()` invoked the
+SHIPPED `premerge-assert.sh`, which invokes the SHIPPED `base-staleness.sh`, which read the **ambient
+checkout** — so 13 success-path cases ran repeated repository-dependent scans, and on a stock macOS the
+suite's own runner shim DISCARDED the bound, so they ran unbounded. Measured cost of that dependency on
+this lane: ~0.03 s per scan on a freshly-rebased base but 0.43 s on a base 110 commits behind, i.e. ~5.6 s
+of ambient-dependent work in one suite run, growing with the lane's staleness. `run()` now invokes a
+scratch copy beside an IMMEDIATE advisory stub, and the ONE wiring case uses the synthetic repository
+described in the spec. The defect was INVISIBLE — every assertion was green while 13 cases scanned the
+surrounding repository — so Case 41d asserts both halves: behaviourally (an ordinary case carries the
+neutral stub's line and NOT the shipped advisory's `NON-EXHAUSTIVE` block, which every real run prints)
+and STRUCTURALLY (exactly ONE invocation of the shipped artifact exists in the file, with the needle split
+so the guard cannot match its own line). Verified by planting the regression: restoring `run()` to the
+shipped artifact reds all three assertions.
 
 ## D9 — Cost
 
-Git plumbing: one `rev-list`, then one `show --name-only` per commit behind. Measured on the 107-commit
-case at **≈1.5 s** warm. It is **not** added to `--lite` and adds nothing to the full gate's critical path
+Git plumbing: one `rev-list`, then one `diff-tree -r -z --name-only` per commit behind (**not** `show`,
+which this text used to name — plumbing is what keeps the commit side rename-symmetric with the porcelain
+diff side, per D1d). Re-measured 2026-08-31 on this lane at **0.43 s** warm for a base **110** commits
+behind (the earlier **≈1.5 s** figure was taken on a cold object cache; both are recorded rather than one
+overwriting the other, since a bare figure in committed prose reads as a defect the moment it moves). It is **not** added to `--lite` and adds nothing to the full gate's critical path
 beyond `tooling-tests`' own suite. A pathological N is bounded by reporting and continuing, never by
 silently truncating the scan (a truncated scan would be an `UNMEASURED`, per D3).
 

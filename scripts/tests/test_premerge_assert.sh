@@ -6,16 +6,43 @@
 # script's `--jq '.headRefOid + " " + .state'` expression would produce (or a
 # failure), driven by env vars — no network, no GitHub.
 #
-# NOT fully hermetic since #3650 slice 1, and the exception is named rather than
-# implied: the success-path cases that run the SHIPPED premerge-assert.sh invoke
-# the SHIPPED base-staleness.sh, which reads the AMBIENT checkout this suite is
-# running in. Deliberate — it is the only case that proves the wiring points at
-# scripts/flow/base-staleness.sh rather than at a stub — so those cases pin only
-# the advisory's PREFIX, never a measured value (the ambient checkout's base
-# staleness is not a property of this suite). Runtime therefore varies a little
-# with how far the lane's base is behind; the advisory is bounded by a 60s
-# timeout in the script under test. Every case that pins advisory CONTENT
-# substitutes a stub artifact in a scratch tree instead.
+# FAST + HERMETIC, AND THAT CLAIM IS AGAIN TRUE (#3650 review R5 F2). It was not:
+# `run()` invoked the SHIPPED premerge-assert.sh, which invokes the SHIPPED
+# base-staleness.sh, which read the AMBIENT checkout — so 13 success-path cases
+# ran repeated repository-dependent scans whose cost scales with how far this
+# lane's base is behind, and on a stock macOS (no GNU coreutils) they ran with the
+# bound DISCARDED by the runner shim below. A suite header saying "hermetic" while
+# every green case measured the surrounding repository is the same defect class as
+# a contract stating an absolute the code violates.
+#
+# TWO CHANGES REMOVE IT, AND NO CASE IS LOST:
+#   * `run()` now invokes a SCRATCH COPY of premerge-assert.sh beside an
+#     IMMEDIATE advisory stub. Those cases are about refusals, provenance and the
+#     scope disclaimer — the advisory only has to be invoked and reported, never
+#     to scan anything.
+#   * the ONE wiring case (the only case whose subject IS "the shipped script
+#     really invokes the shipped advisory") runs the shipped artifacts against a
+#     3-commit SYNTHETIC repository built here, with the certified sha being that
+#     repository's own HEAD. It is bounded by construction, independent of the
+#     ambient checkout, and — unlike the ambient version, which could only pin the
+#     advisory's PREFIX — it pins MEASURED values (`behind 1 commits`,
+#     `blast-radius 1 RECOGNISED`, `verdict STALE-RECOGNISED`), because a
+#     synthetic fixture's staleness IS a property of this suite.
+# Nothing here reads the surrounding repository any more; every case that pins
+# advisory CONTENT substitutes a stub artifact in a scratch tree, and Case 41d
+# asserts BOTH halves of that — behaviourally (an ordinary case carries the
+# neutral stub's line and NOT the shipped advisory's `NON-EXHAUSTIVE` block) and
+# STRUCTURALLY (exactly ONE invocation of the shipped artifact exists in this
+# file), because the F2 defect was invisible: 161 assertions were green while 13
+# cases scanned the surrounding repository and nothing said so.
+#
+# THE RUNTIME CLAIM, MEASURED RATHER THAN ASSERTED (this lane, git 2.43.0): one
+# shipped-advisory scan costs ~0.03s on a freshly-rebased base (behind 0) and
+# 0.43s on a base 110 commits behind. So the ambient dependency cost the suite
+# 13 x that — ~0.4s rebased but ~5.6s on an 8-day-old base, growing with the
+# lane's staleness, and UNBOUNDED on a stock macOS where the runner shim
+# discarded the bound. That is why the suite's runtime used to be a function of
+# the checkout it happened to sit in; it is now a constant.
 #
 # #3465 adds the gate-of-record half: the assert now takes a THIRD, REQUIRED
 # argument naming the FULL gate's summary file, and refuses to merge without a
@@ -100,8 +127,17 @@ unset _rt_cand _rt_path
 # still applies wherever one is available, and runs the command directly only
 # when the host has none. It deliberately does NOT implement a bound in bash: a
 # second timing implementation is the kind of mechanism #3650's scope discipline
-# forbids, and it is unnecessary here because every content-case advisory stub
-# exits immediately.
+# forbids.
+#
+# THE DISCARD BRANCH IS SAFE ONLY BECAUSE EVERY COMMAND IT CAN RUN IS BOUNDED BY
+# CONSTRUCTION, AND THAT WAS NOT TRUE UNTIL #3650 review R5 F2. It used to be
+# reached by 13 success-path cases running the SHIPPED advisory against the
+# AMBIENT checkout — repeated repository-dependent scans whose runtime scales
+# with how far this lane's base is behind, with no bound at all on a stock macOS.
+# Now the only commands that reach this shim are (a) IMMEDIATE advisory stubs
+# that print a line and exit, and (b) the ONE wiring case, whose advisory scans a
+# 3-commit SYNTHETIC repository. Both are bounded by their own construction, not
+# by the runner, on every host shape.
 if [ -n "$REAL_TO" ]; then
   cat >"$BIN/timeout" <<SHIM
 #!/usr/bin/env bash
@@ -118,12 +154,47 @@ SHIM
 fi
 chmod +x "$BIN/timeout"
 
-# run <expected-exit> <description> <args...> — invokes the assert with the gh
-# mock on PATH, captures combined output + exit code. Sets $OUT and $RC.
+# --- THE NEUTRAL SCRATCH COPY (#3650 review R5 F2) --------------------------
+# `run()` invokes THIS, not the shipped artifact, so no ordinary case reads the
+# ambient checkout. It is a byte copy of premerge-assert.sh beside an IMMEDIATE
+# advisory stub: the script resolves `base-staleness.sh` from its OWN directory
+# with no env override (#3312's enforcer rule), so substituting the ARTIFACT is
+# the only way to change which advisory runs — never a path variable, which would
+# be one more seam a real invoker could set.
+#
+# The stub is DELIBERATELY not silent and not failing: `PREMERGE: ADVISORY`
+# reporting is a property several of these cases inspect in passing, and a silent
+# or erroring advisory has its own dedicated cases in Case 41. It exits 0 with a
+# no-staleness verdict — the boring shape — so nothing here can pass because of an
+# unusual advisory result.
+#
+# Copy failure ABORTS the suite rather than falling back to $ASSERT: a silent
+# fallback would restore the ambient-scan behaviour this exists to remove, and it
+# would do so invisibly.
+NEUTRAL_ADV='#!/usr/bin/env bash
+printf "BASE-STALENESS: neutral immediate stub — this case is not about the advisory\n"
+printf "BASE-STALENESS: verdict NO-STALENESS-RECOGNISED\n"
+exit 0'
+NEUTRAL_DIR="$T/neutral-flow"
+mkdir -p "$NEUTRAL_DIR"
+if ! cp "$ASSERT" "$NEUTRAL_DIR/premerge-assert.sh"; then
+  printf 'FAIL - could not build the neutral scratch copy of premerge-assert.sh: refusing
+' >&2
+  printf 'FAIL - to run, because every case would fall back to scanning the ambient repo.
+' >&2
+  exit 1
+fi
+printf '%s\n' "$NEUTRAL_ADV" >"$NEUTRAL_DIR/base-staleness.sh"
+chmod +x "$NEUTRAL_DIR/base-staleness.sh"
+NEUTRAL_ASSERT="$NEUTRAL_DIR/premerge-assert.sh"
+
+# run <expected-exit> <description> <args...> — invokes the NEUTRAL COPY of the
+# assert with the gh mock on PATH, captures combined output + exit code. Sets
+# $OUT and $RC. The shipped artifact is exercised by the wiring case alone.
 run() {
   local want="$1" desc="$2"
   shift 2
-  OUT=$(PATH="$BIN:$PATH" bash "$ASSERT" "$@" 2>&1)
+  OUT=$(PATH="$BIN:$PATH" bash "$NEUTRAL_ASSERT" "$@" 2>&1)
   RC=$?
   if [ "$RC" -ne "$want" ]; then
     bad "$desc (exit $RC, wanted $want)"
@@ -841,7 +912,10 @@ BADBIN="$T/badbin"
 mkdir -p "$BADBIN"
 printf '#!/bin/sh\necho "awk: cannot allocate" >&2\nexit 1\n' >"$BADBIN/awk"
 chmod +x "$BADBIN/awk"
-OUT=$(PATH="$BADBIN:$BIN:$PATH" bash "$ASSERT" 2421 "$CERTIFIED" "$GOOD" 2>&1)
+# The NEUTRAL copy (#3650 review R5 F2), like every non-advisory case: this one
+# refuses at exit 3 before the advisory is reached, but running the shipped
+# artifact here would leave a second path that could regress into an ambient scan.
+OUT=$(PATH="$BADBIN:$BIN:$PATH" bash "$NEUTRAL_ASSERT" 2421 "$CERTIFIED" "$GOOD" 2>&1)
 RC=$?
 if [ "$RC" -eq 3 ]; then
   case "$OUT" in
@@ -1485,49 +1559,189 @@ if flow_copy adv-refuse "$STALE_ADV" &&
   esac
 fi
 
-# NON-VACUITY for the wiring itself: the stub cases above would all pass if the
-# real script invoked some OTHER path. Run the REAL, shipped script and require
-# the REAL advisory's own prefix to appear — that is the only case that proves
-# the wiring points at scripts/flow/base-staleness.sh.
+# --- Case 41c: THE WIRING CASE — shipped artifacts, SYNTHETIC repository -----
 #
-# IT IS NOW DECISIVE ON EVERY HOST (#3650 review R3). It ran with the ambient
-# PATH and unconditionally demanded advisory output, while Case 41b declares "no
-# supported runner ⇒ SKIP" correct — so on a stock macOS with no GNU coreutils
-# the suite contradicted its own documented behaviour. `run` puts $BIN first, and
-# $BIN now carries the test-only runner shim documented at the top of this file,
-# so a supported runner is GUARANTEED here and the expectation below is the only
-# correct one. The no-runner configuration is not dropped: Case 41b's Path 2
-# owns it, constructing a PATH with neither candidate and asserting the
-# documented skip output plus the advisory's ABSENCE. Deliberately NOT loosened
-# to accept either output: that would turn a contradiction into a case that
-# proves nothing.
-if run 0 "the SHIPPED script invokes the SHIPPED advisory" 2421 "$CERTIFIED" "$GOOD"; then
-  # The needle is the shipped advisory's own PREFIX, not one of its measured
-  # lines: the suite's cwd is not guaranteed to be a git work tree, and an
-  # UNMEASURED run is a perfectly good demonstration that the shipped artifact
-  # ran. Pinning a measured line here would red on a correct run.
-  case "$OUT" in
-    *"PREMERGE: ADVISORY BASE-STALENESS:"*)
-      ok "advisory: the shipped premerge-assert really runs scripts/flow/base-staleness.sh" ;;
-    *) bad "advisory: the shipped script must invoke the shipped advisory (got: $OUT)" ;;
-  esac
-  case "$OUT" in
-    *"PREMERGE: ADVISORY"*"NON-EXHAUSTIVE"*)
-      ok "advisory: the advisory's own non-exhaustiveness travels to the merge point" ;;
-    *) bad "advisory: the NON-EXHAUSTIVE lines must travel with the report (got: $OUT)" ;;
-  esac
-  case "$OUT" in
-    *"NOT RUN"*)
-      bad "advisory: a runner IS on PATH here, so the bound must not be reported unavailable (got: $OUT)" ;;
-    *) ok "advisory: with a supported runner on PATH the advisory is not reported unavailable" ;;
-  esac
-  case "$OUT" in
-    *"PREMERGE: SCOPE"*"#3650"*)
-      ok "advisory: the SCOPE lines and the literal #3650 print on the shipped path" ;;
-    *) bad "advisory: the SCOPE lines must print on the shipped path (got: $OUT)" ;;
-  esac
+# NON-VACUITY for the wiring itself: every stub case above would pass if the real
+# script invoked some OTHER path. This is the ONE case whose subject is "the
+# shipped premerge-assert really runs scripts/flow/base-staleness.sh", so it is
+# the ONE case that runs the shipped artifacts.
+#
+# IT NO LONGER READS THE AMBIENT CHECKOUT (#3650 review R5 F2). It used to run
+# with the suite's own cwd, so the shipped advisory scanned the surrounding
+# repository — repository-dependent, ambient-staleness-dependent runtime, and on a
+# stock macOS with the runner shim's discard branch it ran UNBOUNDED. It now runs
+# against a 3-commit SYNTHETIC repository built right here, which is bounded by
+# CONSTRUCTION rather than by a runner and is identical on every host.
+#
+# THAT MAKES THE CASE STRONGER, NOT WEAKER. The ambient version could only pin the
+# advisory's PREFIX — a measured line would have red on a correct run, since the
+# lane's own base staleness is not a property of this suite. A synthetic
+# fixture's staleness IS, so this pins MEASURED values: the fixture is stale by
+# exactly one commit, which stales via the gate-global `.config/nextest.toml`
+# while the diff touches only a src path. A stub could not produce those numbers
+# from this fixture by accident.
+#
+# THE CERTIFIED SHA IS THE FIXTURE'S OWN HEAD, which is what lets the advisory
+# resolve its subject rev and actually measure: premerge-assert passes the
+# CERTIFIED sha to the advisory (#3650 F1), not the local HEAD, so a fabricated
+# sha would make the advisory report UNMEASURED and the numbers would be
+# unassertable. The gate summary fixture therefore carries this sha's own two
+# abbreviations, the same two widths the gate writes.
+#
+# A supported runner is still guaranteed (the $BIN shim), so the expectation
+# below is the only correct one on every host — Case 41b Path 2 owns the
+# no-runner configuration and asserts the documented skip.
+WIRE_REPO="$T/wiring-repo"
+wire_shape=0
+mkdir -p "$WIRE_REPO"
+if git init -q -b mainline "$WIRE_REPO" >/dev/null 2>&1; then
+  git -C "$WIRE_REPO" config user.email t@t
+  git -C "$WIRE_REPO" config user.name t
+  wire_commit() {
+    local msg="$1" path="$2"
+    mkdir -p "$WIRE_REPO/$(dirname "$path")"
+    printf 'content for %s at %s\n' "$path" "$msg" >>"$WIRE_REPO/$path"
+    git -C "$WIRE_REPO" add -- "$path" >/dev/null &&
+      git -C "$WIRE_REPO" commit -q -m "$msg" >/dev/null
+  }
+  wire_commit "c0 initial" "README.md" &&
+    git -C "$WIRE_REPO" checkout -q -b feature &&
+    wire_commit "the PR: a src path only" "cqlite-core/src/storage/sstable/mod.rs" &&
+    git -C "$WIRE_REPO" checkout -q mainline &&
+    wire_commit "behind: a gate-global commit" ".config/nextest.toml" &&
+    git -C "$WIRE_REPO" update-ref refs/remotes/origin/main mainline &&
+    git -C "$WIRE_REPO" checkout -q feature &&
+    wire_shape=1
+fi
+WIRE_SHA=""
+if [ "$wire_shape" -eq 1 ]; then
+  WIRE_SHA=$(git -C "$WIRE_REPO" rev-parse HEAD 2>/dev/null) || WIRE_SHA=""
+fi
+# FIXTURE SELF-CONSISTENCY: the sha must be a real 40-hex, and the fixture must
+# genuinely be behind by exactly one commit that touches a gate-global path — or
+# the measured expectations below would be asserting the wrong thing.
+wire_behind=""
+if [ -n "$WIRE_SHA" ]; then
+  wire_behind=$(git -C "$WIRE_REPO" rev-list --count \
+    "$(git -C "$WIRE_REPO" merge-base refs/remotes/origin/main HEAD)..refs/remotes/origin/main" \
+    2>/dev/null) || wire_behind=""
+fi
+case "$WIRE_SHA" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) wire_shape=0 ;;
+esac
+[ "$wire_behind" = 1 ] || wire_shape=0
+if [ "$wire_shape" -eq 1 ]; then
+  ok "wiring fixture: the synthetic repo is behind by exactly 1 gate-global commit at a real 40-hex HEAD"
+else
+  bad "wiring fixture: the synthetic repo does not have the shape the case claims (sha '$WIRE_SHA', behind '$wire_behind') — the case would be vacuous"
 fi
 
+if [ "$wire_shape" -eq 1 ]; then
+  WIREGOOD="$T/wiring-full-pass.txt"
+  emit_summary_block "$FULL_S" "$FULL_E" "-" \
+    "$(printf '%.7s' "$WIRE_SHA")" "$(printf '%.12s' "$WIRE_SHA")" PASS PASS >"$WIREGOOD"
+  WIRE_OUT=$(cd "$WIRE_REPO" &&
+    PATH="$BIN:$PATH" MOCK_GH_OUT="$WIRE_SHA OPEN" MOCK_GH_FAIL=0 \
+    bash "$ASSERT" 2421 "$WIRE_SHA" "$WIREGOOD" 2>&1)
+  WIRE_RC=$?
+  if [ "$WIRE_RC" -ne 0 ]; then
+    bad "the SHIPPED script invokes the SHIPPED advisory (exit $WIRE_RC, wanted 0)"
+    printf '     output: %s\n' "$WIRE_OUT"
+  else
+    ok "the SHIPPED script reaches PREMERGE: OK against the synthetic repository"
+    OUT="$WIRE_OUT"
+    case "$OUT" in
+      *"PREMERGE: ADVISORY BASE-STALENESS:"*)
+        ok "advisory: the shipped premerge-assert really runs scripts/flow/base-staleness.sh" ;;
+      *) bad "advisory: the shipped script must invoke the shipped advisory (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY"*"NON-EXHAUSTIVE"*)
+        ok "advisory: the advisory's own non-exhaustiveness travels to the merge point" ;;
+      *) bad "advisory: the NON-EXHAUSTIVE lines must travel with the report (got: $OUT)" ;;
+    esac
+    # THE MEASURED HALF — unassertable while this case read the ambient checkout.
+    case "$OUT" in
+      *"PREMERGE: ADVISORY BASE-STALENESS: behind 1 commits"*)
+        ok "advisory: the shipped advisory really MEASURED the synthetic fixture (behind 1)" ;;
+      *) bad "advisory: the shipped advisory must report the fixture's own behind count (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY BASE-STALENESS: blast-radius 1 RECOGNISED of 1 commits behind"*)
+        ok "advisory: the gate-global half of the blast radius fired on the shipped path" ;;
+      *) bad "advisory: the shipped advisory must report blast-radius 1 RECOGNISED (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY BASE-STALENESS: verdict STALE-RECOGNISED"*)
+        ok "advisory: a STALE-RECOGNISED shipped advisory still reaches PREMERGE: OK" ;;
+      *) bad "advisory: the shipped advisory's verdict must be STALE-RECOGNISED here (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: ADVISORY"*"exit 4"*)
+        ok "advisory: the shipped advisory's exit 4 is reported and is not fatal" ;;
+      *) bad "advisory: exit 4 must be reported on an ADVISORY line (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"NOT RUN"*)
+        bad "advisory: a runner IS on PATH here, so the bound must not be reported unavailable (got: $OUT)" ;;
+      *) ok "advisory: with a supported runner on PATH the advisory is not reported unavailable" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: SCOPE"*"#3650"*)
+        ok "advisory: the SCOPE lines and the literal #3650 print on the shipped path" ;;
+      *) bad "advisory: the SCOPE lines must print on the shipped path (got: $OUT)" ;;
+    esac
+    case "$OUT" in
+      *"PREMERGE: OK $WIRE_SHA"*)
+        ok "advisory: the verdict names the certified sha on the shipped path" ;;
+      *) bad "advisory: PREMERGE: OK must name the certified sha (got: $OUT)" ;;
+    esac
+  fi
+fi
+
+
+# --- Case 41d: the AMBIENT SCAN CANNOT COME BACK (#3650 review R5 F2) --------
+#
+# Two assertions, because the F2 defect was INVISIBLE: every case was green while
+# 13 of them scanned the surrounding repository, and nothing in the suite said so.
+#
+# (1) BEHAVIOURAL. An ordinary success case must carry the NEUTRAL stub's own line
+#     and must NOT carry the shipped advisory's `NON-EXHAUSTIVE` block — which
+#     every real run of base-staleness.sh prints, measured or unmeasured. So its
+#     absence is direct evidence that no scan of any repository happened.
+# (2) STRUCTURAL. Exactly ONE invocation of the shipped artifact may exist in this
+#     file: the wiring case. A behavioural check can only speak for the cases
+#     someone remembered to check; a new case added later would slip past it. The
+#     needle is SPLIT so this guard cannot match its own line.
+if run 0 "an ordinary success case runs the NEUTRAL advisory, not the shipped one" \
+  2421 "$CERTIFIED" "$GOOD"; then
+  case "$OUT" in
+    *"neutral immediate stub"*)
+      ok "no-ambient-scan: an ordinary case really reaches the neutral immediate stub" ;;
+    *) bad "no-ambient-scan: the neutral stub did not run — the case proves nothing (got: $OUT)" ;;
+  esac
+  case "$OUT" in
+    *"NON-EXHAUSTIVE"*)
+      bad "no-ambient-scan: the SHIPPED advisory ran — an ordinary case is scanning a repository again (#3650 R5 F2)" ;;
+    *) ok "no-ambient-scan: no shipped-advisory report appears, so nothing scanned a repository" ;;
+  esac
+fi
+SUITE_SELF="${BASH_SOURCE[0]}"
+# Assembled from two halves so this guard cannot match its own line.
+_shipped_a='bash "$AS'
+_shipped_b='SERT"'
+SHIPPED_NEEDLE="$_shipped_a$_shipped_b"
+if [ -r "$SUITE_SELF" ]; then
+  shipped_calls=$(grep -c -F -- "$SHIPPED_NEEDLE" "$SUITE_SELF" | tr -d ' ')
+  if [ "$shipped_calls" = 1 ]; then
+    ok "no-ambient-scan: exactly ONE invocation of the shipped assert exists (the wiring case)"
+  else
+    bad "no-ambient-scan: $shipped_calls invocations of the shipped assert — only the wiring case may run it against a synthetic repo (#3650 R5 F2)"
+  fi
+else
+  bad "no-ambient-scan: could not read this suite's own source ($SUITE_SELF) to check the invocation count"
+fi
 
 # --- Case 40: the three exit-3 causes are DISTINGUISHABLE (nit 8) ------------
 # Exit 3 covers a usage error, a tool failure and a gh failure. The CODES are

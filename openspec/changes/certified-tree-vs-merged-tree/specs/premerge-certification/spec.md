@@ -301,8 +301,12 @@ non-fatal case; extended Case 39 for the retained SCOPE wording; Case 41b's BOUN
 hanging stub bounded through a `timeout` shim that records the requested bound AND whether
 `--kill-after` was passed, the same stub NOT EXECUTED with no supported runner on PATH, and a
 TERM-IGNORING stub delegated to the real runner, each asserting the exit code and the SCOPE lines
-survive; Case 41c's shipped-wiring case, which is decisive on BOTH configurations — advisory output
-where a supported runner exists, the documented skip output where none does).
+survive; Case 41c's shipped-wiring case, which runs the shipped artifacts against a **3-commit
+synthetic repository** whose own HEAD is the certified sha — so it is bounded by construction,
+identical on every host, and pins MEASURED advisory values (`behind 1 commits`,
+`blast-radius 1 RECOGNISED`, `verdict STALE-RECOGNISED`) rather than only the advisory's prefix;
+Case 41d, which asserts behaviourally AND structurally that no OTHER case invokes the shipped
+artifact, so an ambient-checkout scan cannot return).
 
 ### Requirement: The advisory's blast-radius definition is mutation-checked against the motivating case
 
