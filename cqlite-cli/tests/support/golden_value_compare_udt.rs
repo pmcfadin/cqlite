@@ -35,8 +35,18 @@ fn udt_spelling(egress: Egress) -> &'static str {
 ///     the discriminator was output the reference tool never writes and it
 ///     collided with any UDT declaring a field of that name. With it gone the
 ///     two sides' field sets are directly comparable and nothing is dropped from
-///     either — the DDL-derived presence/order rules below are unchanged and are
-///     what still catch a UDT resolved against the wrong `CREATE TYPE`. A
+///     either. KNOWN COVERAGE REDUCTION, stated rather than argued away: this
+///     lane can no longer detect a UDT resolved against the wrong `CREATE TYPE`
+///     when two types declare the same field NAMES, ORDER and TYPES — the
+///     committed `collide`/`collide_twin` pair is exactly that case, and the
+///     deleted `_type` check is what used to catch it. The DDL-derived
+///     presence/order rules below are unchanged, but they catch a wrong-type
+///     resolution only where the field SETS differ. The loss is unavoidable: the
+///     JSON egress no longer carries type identity at all, so there is nothing
+///     here to check it against. Note the old code was ALREADY blind on this
+///     fixture — it REFUSED outright to compare any UDT declaring a `_type`
+///     field — so this converts a refusal into a direct comparison, not a
+///     working check into a missing one. A
 ///     `{key,value}` pair array is the CLI's *map* spelling, so accepting one
 ///     here would let a UDT that regressed to the map representation pass; it is
 ///     therefore rejected (review finding F3).
