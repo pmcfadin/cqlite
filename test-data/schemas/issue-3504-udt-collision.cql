@@ -155,14 +155,35 @@ CREATE TABLE IF NOT EXISTS udt_collide (
 
 -- ── Second table: hashable-projection totality (roborev R1-2) ───────────────
 --
--- Python's `value_to_hashable_key` has arms for `List`, `Map`, `Frozen` and
--- `Udt`; `Tuple` and `Set` have NONE and fall through to `value_to_py`. Before
--- #3504 a UDT reached through that fallback became an unhashable `dict`, so a
--- tuple containing a UDT could not be a `dict` key or a `frozenset` member and
--- the read raised `TypeError` (issue #3500). Making a UDT a HASHABLE
--- `cqlite.Udt` incidentally resolved exactly the sub-family whose field values
--- are themselves hashable — and left the rest failing. This table carries one
--- column per side of that boundary, so the claim is measured rather than argued:
+-- HISTORICAL BOUNDARY — SUPERSEDED BY #3500, kept because the columns still exist.
+--
+-- As WRITTEN, this section described the pre-#3500 state: `value_to_hashable_key`
+-- had arms for `List`, `Map`, `Frozen` and `Udt` while `Tuple` and `Set` had NONE
+-- and fell through to `value_to_py`, so a UDT reached through that fallback became
+-- an unhashable `dict` and the read raised `TypeError` (issue #3500). #3504 made a
+-- UDT a HASHABLE `cqlite.Udt`, which incidentally resolved the sub-family whose
+-- field values are themselves hashable and left the rest failing.
+--
+-- THAT IS NO LONGER THE IMPLEMENTATION. #3500 made both `value_to_hashable_key`
+-- and `contains_udt` TOTAL over `cqlite_core::Value`: every variant is named, there
+-- is no wildcard arm, and the property is pinned by three
+-- `#[deny(clippy::wildcard_enum_match_arm)]` attributes in
+-- `bindings/python/src/value_hashable.rs`. Verified in that file: `Tuple` and `Set`
+-- now HAVE arms, and `contains_udt` traverses tuples
+-- (`Value::List(items) | Value::Set(items) | Value::Tuple(items)`).
+--
+-- So the two mechanisms the per-column notes below reason FROM are gone. The
+-- outcomes are NOT re-stated here, because the `udt_hashable_shapes` binaries are
+-- not in this corpus and could not be measured while making this correction —
+-- asserting a new outcome from the code alone is what produced the stale text in
+-- the first place. Treat each note below as a RECORD OF THE PRE-#3500 MEASUREMENT,
+-- to be re-measured against the current implementation when the fixture is
+-- available. The live, measured coverage for these shapes is the #3500 suite
+-- (`bindings/python/tests/test_nested_udt_hashable.py`) against
+-- `test_nested_udt_keys.nested_udt_keys`, whose `s_set_udt` column is this
+-- section's `ssu` shape.
+--
+-- PRE-#3500 MEASUREMENT, one column per side of the then-boundary:
 --
 --   * stu frozen<set<frozen<tuple<frozen<collide>, int>>>>
 --                    — NOW SUCCEEDS. The set has no UDT element at top level

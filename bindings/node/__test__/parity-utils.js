@@ -860,6 +860,8 @@ const IN_SCOPE_KEYSPACES = {
   test_tomb: 'tombstone read-parity corpus',
   test_types: 'extended CQL-type read-parity corpus',
   test_deltas: 'CDC-delta read-parity corpus (skip-pending, #701)',
+  test_nested_udt_keys:
+    'nested-UDT-in-a-hashable-position read-fidelity corpus (#3500): a UDT reached through a tuple or a nested collection inside a set element / map key. ENFORCED (not a skip): every partition has live rows',
 };
 
 /** Keyspaces this Node suite can EXECUTE queries against (have a schema map). */

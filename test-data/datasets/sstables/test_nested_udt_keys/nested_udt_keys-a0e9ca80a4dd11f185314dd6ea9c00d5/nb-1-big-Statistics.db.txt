@@ -1,0 +1,71 @@
+SSTable: /data/test_nested_udt_keys/nested_udt_keys-a0e9ca80a4dd11f185314dd6ea9c00d5/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 08/31/2026 01:45:22 (1788140722788578)
+Maximum timestamp: 08/31/2026 01:45:24 (1788140724317698)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 1
+SSTable min local deletion time: 08/31/2026 01:45:22 (1788140722)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: -
+TTL min: 0
+TTL max: 0
+First token: -4069959284402364209 (1)
+Last token: 9010454139840013625 (3)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: e4d8abb2-16a5-45ad-89ee-f0b21711ab51
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1788140659279, position=63048)=CommitLogPosition(segmentId=1788140659279, position=66646)}
+totalColumnsSet: 31
+totalRows: 4
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1788140760 (08/31/2026 01:46:00) |    19 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes)  | Count  (%)  Histogram 
+   72 (72 B)     |     1 ( 25) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   446 (446 B)   |     1 ( 25) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   642 (642 B)   |     1 ( 25) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1109 (1.1 kB) |     1 ( 25) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      446 (446 B)
+   75th      642 (642 B)
+   95th      1109 (1.1 kB)
+   98th      1109 (1.1 kB)
+   99th      1109 (1.1 kB)
+   Min       61 (61 B)
+   Max       1109 (1.1 kB)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   1       |     1 ( 25) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   10      |     1 ( 25) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   12      |     1 ( 25) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   17      |     1 ( 25) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      10
+   75th      12
+   95th      17
+   98th      17
+   99th      17
+   Min       0
+   Max       17
+Local token space coverage: NaN
+Estimated cardinality: 4
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 08/31/2026 01:45:22 (1788140722)
+EncodingStats minTimestamp: 08/31/2026 01:45:22 (1788140722788578)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: s_map_udt_val:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type)))), f_map_tuple_udt:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type)), m_tuple_udt:org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type), f_set_tuple_udt:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type))), f_map_set_udt:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type)),org.apache.cassandra.db.marshal.Int32Type)), s_tuple_udt:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type)), f_map_tuple_list_udt:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type)),org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type)), s_list_udt:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type)))), s_map_udt_key:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type),org.apache.cassandra.db.marshal.Int32Type))), s_set_udt:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.UserType(test_nested_udt_keys,6b65795f70617274,6c6162656c:org.apache.cassandra.db.marshal.UTF8Type,72616e6b:org.apache.cassandra.db.marshal.Int32Type))))
+IsTransient: false

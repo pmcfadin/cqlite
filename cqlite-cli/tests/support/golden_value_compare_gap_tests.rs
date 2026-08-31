@@ -634,3 +634,43 @@ fn a_refusal_at_a_gaps_path_wins_over_a_divergence_match() {
         report.stale_skips
     );
 }
+
+/// `NestedFrozenValueLeftUndecodedByGolden` must require the CLI's ARRAY spelling.
+///
+/// An earlier version also accepted `Value::Object`, reasoning that the CLI spells a
+/// UDT as an object. The arm was unreachable — the type guard admits only
+/// list/set/map/tuple — but still permissive, so it would have excused an object
+/// rendered where only an array is legal (roborev job 305). An
+/// unreachable-but-permissive arm is worse than no arm.
+#[test]
+fn the_undecoded_golden_gap_requires_the_cli_array_spelling() {
+    let gap = Divergence::NestedFrozenValueLeftUndecodedByGolden;
+    let inner_set = CqlType::Set(Box::new(CqlType::Text("text".into())));
+    let golden_hex = json!("000000020000001100000005616c706861");
+    let ask = |cli: &Value, ty: &CqlType| {
+        gap.matched(
+            &golden_hex,
+            cli,
+            ty,
+            Egress::Json,
+            Depth::TopLevel,
+            Kinding::Natural,
+        )
+    };
+
+    assert!(
+        ask(&json!([{"label": "alpha"}]), &inner_set),
+        "an undecoded golden scalar against a DECODED CLI array is the declared gap"
+    );
+    for not_an_array in [
+        json!({"label": "alpha"}),
+        json!(null),
+        json!(0),
+        json!("000000020000001100000005616c706861"),
+    ] {
+        assert!(
+            !ask(&not_an_array, &inner_set),
+            "only the CLI's ARRAY spelling is this gap: {not_an_array:?}"
+        );
+    }
+}

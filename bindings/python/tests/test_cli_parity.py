@@ -40,6 +40,11 @@ Collection Identity Asymmetries (issue #1454):
       but **NOT a sorted one**, because the Python value is indistinguishable
       from a genuine `list<T>` here, so this row's canonical form is
       order-SENSITIVE (a documented limitation, see M4_spec §5.3).
+      Since #3500 the fallback triggers whenever a UDT appears ANYWHERE in the
+      element subtree (`contains_udt` is a full traversal), so
+      `set<frozen<list<frozen<udt>>>>`, `set<frozen<set<frozen<udt>>>>` and
+      `set<frozen<tuple<frozen<udt>, int>>>` are `list`s of ordinary UDT `dict`s
+      too — see `test_udt_nested_deeper_in_a_projection_position_is_unsupported`.
     - `map<k,v>` → Python `dict`, whose keys **collapse** by hash/`__eq__`
       (structurally equal non-scalar keys merge, last value wins), while a Node
       `Map` compares object keys by *reference* so equal keys stay distinct.
@@ -916,17 +921,27 @@ class TestCollectionIdentityContract:
     the family's live instance. The site-"UDT fields" half of **b-2** is closed the
     same way: the markers are no longer injected into the field namespace at all.
 
-    Not pinned here: the nested shapes that RAISE instead of diverging
+    Pinned ELSEWHERE, and no longer a crash: the nested shapes that used to raise
+    `TypeError: unhashable type` inside the binding
     (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`).
-    `contains_udt` and `value_to_hashable_key` are not total over `Value`, so
-    those fail with `TypeError: unhashable type` **inside the binding**, before
-    any normalizer runs — a production `value.rs` defect tracked as #3500, which
-    #1454 cannot touch and which no normalizer-level test can observe.
+    `contains_udt` and `value_to_hashable_key` are now TOTAL and exhaustive over
+    `Value` (#3500), so those columns read successfully; they are pinned
+    end-to-end against the real fixture in
+    `bindings/python/tests/test_nested_udt_hashable.py`, which is the right level
+    — the defect lived in `value.rs`, so a pure normalizer test could neither
+    observe it nor certify its fix. What remains observable HERE is the shape
+    those fixes produce, asserted below.
+
+    The residual gap is core-side and out of this file's reach: a MULTICELL map's
+    composite key decodes as an opaque `Blob` (`parse_cell_path_key` has a
+    scalar-only allowlist), filed as #3612. A FROZEN map decodes its keys
+    structurally and does not have that gap.
 
     These tests are intentionally pure: they feed the normalizer the host values
     the Python binding is documented to produce (`bindings/python/src/value.rs`:
-    `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`,
-    `value_to_hashable_key`) and need no dataset and no query, so a failure here
+    `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`; and
+    `bindings/python/src/value_hashable.rs`: `value_to_hashable_key`) and need no
+    dataset and no query, so a failure here
     is unambiguously a contract violation and never a fixture problem.
     """
 
@@ -946,8 +961,13 @@ class TestCollectionIdentityContract:
     def test_set_of_hashable_collections_stays_a_frozenset(self):
         """`set<frozen<list<int>>>` → `frozenset` of tuples → sorted array of arrays.
 
-        The `list` fallback in `set_to_py` triggers on UDTs only
-        (`contains_udt`), so nested *collections* still arrive as a frozenset.
+        The `list` fallback in `set_to_py` triggers on UDTs only, so a nested
+        collection with **no UDT anywhere inside it** still arrives as a
+        frozenset. That scope matters post-#3500: `contains_udt` is now a FULL
+        subtree traversal, so the fallback catches a UDT at any depth — the claim
+        is "no UDT in the subtree", not "the outermost element is a collection"
+        (an earlier wording said the latter, which was false the moment a UDT sat
+        under the nested collection).
         """
         normalized = normalize_python_value(frozenset({(1, 2), (3,)}), is_row_level=False)
         assert sorted(normalized, key=_sort_key) == normalized
@@ -1035,12 +1055,17 @@ class TestCollectionIdentityContract:
     def test_udt_nested_deeper_in_a_projection_position_now_canonicalizes(self):
         """a-3 (was LIMITATION): a UDT inside a projected value canonicalizes again.
 
-        `set<frozen<list<frozen<udt>>>>`: `value_to_hashable_key`'s `List` arm
-        recurses into the inner UDT. That inner projection used to FLATTEN the UDT
-        into a `frozenset` of `(field_name, value)` pairs — so the element
-        canonicalized to `[[["_keyspace", …], ["_type", …], ["street", …]]]`, an
-        array of `[name, value]` pairs, while Node and the CLI produce
+        The position that still forces a hashable projection is a MAP KEY:
+        `map<frozen<list<frozen<udt>>>, int>` routes its key through
+        `value_to_hashable_key` **unconditionally** — `map_to_py` has no
+        `contains_udt` gate, because a Python `dict` key must be hashable whatever
+        it holds — and its `List` arm recurses into the inner UDT. That inner
+        projection used to FLATTEN the UDT into a `frozenset` of
+        `(field_name, value)` pairs, so the key canonicalized to
+        `[[["_keyspace", …], ["_type", …], ["street", …]]]`, an array of
+        `[name, value]` pairs, while Node and the CLI produce
         `[[{"_type": …, "street": …}]]`, an array holding a UDT **object**.
+        Different in kind, not in ordering.
 
         Issue #3504 replaced that projection with a `cqlite.Udt` instance, so the
         projected value keeps its type and the two shapes agree. The a-1 instance
@@ -1055,25 +1080,47 @@ class TestCollectionIdentityContract:
         What #3504 removed is the UDT half, by making the projection type-preserving
         rather than by teaching the normalizer a shape.
 
-        The sibling nested shapes that RAISE rather than diverge
+        SCOPE CORRECTION (#3500). This instance used to be asserted in a SET
+        ELEMENT position (`set<frozen<list<frozen<udt>>>>`), and it is **no longer
+        live there**: `contains_udt` now traverses the whole subtree, so
+        `set_to_py` takes its `list` branch for that column and the inner UDT
+        arrives as an ordinary `dict`. The second assertion below pins that new
+        shape and shows it MATCHES the Node/CLI form — so a-3 is closed for the
+        set-element position and survives only where a hashable projection is
+        unavoidable, i.e. map keys. The change was taken deliberately (#3500 AC1
+        over AC5) because it removes the nesting-dependent asymmetry that was the
+        defect's own tell.
+
+        The sibling shapes that used to RAISE
         (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`)
-        are still NOT pinned here: `contains_udt`/`value_to_hashable_key` are not
-        total over `Value`, so those fail with `TypeError` inside the binding before
-        the normalizer is reached. That is #3500, untouched by #3504.
+        now read successfully and are pinned end-to-end in
+        `bindings/python/tests/test_nested_udt_hashable.py`; the residual gap is
+        core-side multicell map keys (#3612).
         """
-        # What the binding hands over: a tuple (the projected inner list) holding
-        # the projected inner UDT, which is now a `cqlite.Udt` whose field values
-        # have themselves been projected.
+        # What the binding hands over for a map KEY of `map<frozen<list<frozen<udt>>>, int>`:
+        # a tuple (the projected inner list) holding the projected inner UDT, which
+        # is now a `cqlite.Udt` whose field values have themselves been projected.
         projected_udt = cqlite.Udt("address", "test_collections", {"street": "1 Main St"})
         element = (projected_udt,)
-        assert normalize_python_value(frozenset({element}), is_row_level=False) == [
-            [{"_type": "address", "street": "1 Main St"}]
+        assert normalize_python_value({element: 7}, is_row_level=False) == [
+            {"key": [{"_type": "address", "street": "1 Main St"}], "value": 7}
         ]
 
-        # ...which is EXACTLY the shape Node/the CLI produce for the same CQL
-        # value, i.e. what a UDT in a non-projection position normalizes to. The
-        # two used to differ in kind; that is the fix, asserted as an equality
-        # rather than as a shape somebody wrote down twice.
+        # CLOSED for the set-element position too, by the other half of the merge
+        # (#3500): `set<frozen<list<frozen<udt>>>>` no longer reaches a `frozenset`
+        # at all, because `contains_udt` sees the UDT under the inner list and
+        # `set_to_py` takes its `list` branch. That column arrives as a `list` of
+        # `list`s of UDTs.
+        assert normalize_python_value(
+            [[_udt("address", street="1 Main St")]], is_row_level=False
+        ) == [[{"_type": "address", "street": "1 Main St"}]]
+
+        # A `frozenset` of projected elements is still REACHABLE — one level deeper,
+        # as a `map<frozen<set<frozen<list<frozen<udt>>>>>, int>` key, where
+        # `value_to_hashable_key`'s `Set` arm builds it — and it canonicalizes to the
+        # same shape as the non-projection route. Asserted as an EQUALITY rather than
+        # as a shape somebody wrote down twice; the two used to differ in kind, and
+        # that is the fix.
         assert normalize_python_value(
             frozenset({element}), is_row_level=False
         ) == normalize_python_value([[_udt("address", street="1 Main St")]], is_row_level=False)
@@ -1181,12 +1228,13 @@ class TestCollectionIdentityContract:
         array of `{"key": ..., "value": ...}`, where the CLI keeps an object. A
         JSON object carrying a literal `"_type"` key is additionally read as a UDT.
 
-        Reachability, stated honestly: the reader does produce `Value::Json` for a
-        `"json"` comparator (`custom_scalar.rs`,
-        `comparator_value_parsing.rs`), but no current fixture uses one, so this is
-        unreachable from today's corpus while being a real hole in the type
-        lattice. #1455 must exclude columns whose comparator is `"json"`; the fix
-        is the declared type (#3497).
+        Reachability is stated in exactly ONE place — the `Value::Json` arm of
+        `value_to_hashable_key` in `bindings/python/src/value_hashable.rs` — and this
+        docstring asserts nothing about it (earlier wording here blamed fixture
+        absence, which is not the blocker). What this test pins is the SHAPE
+        divergence, which holds for any `dict`-shaped cell however it arrives:
+        #1455 must exclude columns whose comparator is `"json"`; the fix is the
+        declared type (#3497).
 
         Characterization only — this pins current behavior as a known gap.
         """

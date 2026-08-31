@@ -627,6 +627,123 @@ const CASES: &[Case] = &[
             },
         ],
     },
+    // test-data/schemas/nested-udt-keys.cql — (id int PRIMARY KEY) plus ten
+    // columns nesting the `key_part` UDT inside tuples, sets, lists and maps,
+    // both as map KEYS and as map VALUES (issue #3500). Comparable: the golden
+    // carries no shape `unsupported_shapes` refuses — no partition or row
+    // deletion, no TTL, no static block, and only `row` elements. Its
+    // `marked_deleted` markers are all CELL-level collection tombstones on the
+    // six non-frozen columns, which reconcile to a value this lane compares
+    // (see `coverage_census::NOT_COMPARABLE`'s note on cell deletions), so an
+    // exclusion here would be coverage loss rather than a reason.
+    //
+    // `multicell` names exactly the six NON-frozen collections from the DDL;
+    // the four `f_*` columns are `frozen<…>` and therefore single-cell.
+    Case {
+        presence: Presence::Committed,
+        keyspace: "test_nested_udt_keys",
+        table: "nested_udt_keys",
+        schema: "nested-udt-keys",
+        pk: &["id"],
+        ck: &[],
+        multicell: &[
+            ("s_tuple_udt", Multicell::Set),
+            ("s_set_udt", Multicell::Set),
+            ("m_tuple_udt", Multicell::Map),
+            ("s_list_udt", Multicell::Set),
+            ("s_map_udt_key", Multicell::Set),
+            ("s_map_udt_val", Multicell::Set),
+        ],
+        // EVERY column except `id` and `f_set_tuple_udt` is excluded, in TWO
+        // distinct classes. Stated as the SURVIVING SET rather than as a count of
+        // the excluded: a count here drifted once already (roborev job 308 caught
+        // "Eight" after a ninth skip was added), and it drifted even though it sits
+        // in the same file as the `Skip` list that invalidates it — co-location is
+        // not enough when the edit that changes the number is not the edit that
+        // reads it. The surviving set is also what a reader needs: `f_set_tuple_udt`
+        // is a genuinely nested frozen column that IS compared, which is why this is
+        // a CASES entry rather than a NOT_COMPARABLE one. The authoritative count is
+        // emitted by the census line itself ("N cells compared, M of them
+        // containers") and needs no prose duplicate.
+        //
+        // CLASS 1 — the golden leaves the nested frozen element UNDECODED (raw
+        // bytes as hex for a collection, colon-joined text for a tuple) while the
+        // CLI decodes it. A value disagreement, in the direction OPPOSITE to
+        // `NestedFrozenUdtRendersAsBlobHex`.
+        //
+        // CLASS 2 — a LANE LIMITATION, not a disagreement: the declared map KEY is
+        // a container and this lane has no pairing rule for one, so the two sides
+        // are never compared. Tracked for real support in #3726; when that lands
+        // these four skips go stale and FAIL, which is what removes them.
+        skips: &[
+            Skip {
+                path: "s_tuple_udt",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen tuple element as sstabledump's colon-joined text while the CLI decodes it; only the SHAPE is checked — the element CONTENT is NOT compared",
+            },
+            Skip {
+                path: "s_set_udt",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen inner set as raw serialized hex while the CLI decodes it; only the SHAPE is checked — the element CONTENT is NOT compared",
+            },
+            Skip {
+                path: "s_list_udt",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen inner list as raw serialized hex while the CLI decodes it; only the SHAPE is checked — the element CONTENT is NOT compared",
+            },
+            Skip {
+                path: "s_map_udt_key",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen inner map as raw serialized hex while the CLI decodes it; only the SHAPE is checked — the element CONTENT is NOT compared",
+            },
+            Skip {
+                path: "s_map_udt_val",
+                formats: BOTH,
+                divergence: Divergence::NestedFrozenValueLeftUndecodedByGolden,
+                why: "golden leaves the frozen inner map (UDT as VALUE) as raw serialized hex while the CLI decodes it; only the SHAPE is checked — the element CONTENT is NOT compared",
+            },
+            // THE FOUR CONTAINER-KEYED MAPS — a LANE limitation, not a value
+            // disagreement. `compare_map` pairs entries by canonical SCALAR key form
+            // and refuses a container key outright, so these columns are not compared
+            // AT ALL. The skip is whole-column and therefore OVER-SKIPS: it also
+            // suppresses a null, a malformed {key,value} array, a wrong entry count
+            // and a wrong tuple arity here. That cost is accepted and documented
+            // rather than bounded — three review rounds (roborev 302/305/306) showed
+            // that bounding it means reimplementing `compare_map`'s own feature list,
+            // because a Skip is path-scoped to a column and cannot express "compare
+            // everything except the keys". Real support needs a container
+            // representation in `Canon` (scalar-only today); tracked in #3726, and
+            // these four skips go stale and FAIL the lane when it lands.
+            Skip {
+                path: "m_tuple_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is tuple<key_part, int> — this lane pairs map keys by canonical scalar form only, so the column is NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
+            },
+            Skip {
+                path: "f_map_tuple_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is frozen tuple<key_part, int> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
+            },
+            Skip {
+                path: "f_map_set_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is frozen set<key_part> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array and a wrong entry COUNT are all UNCHECKED here (#3726)",
+            },
+            Skip {
+                path: "f_map_tuple_list_udt",
+                formats: BOTH,
+                divergence: Divergence::ContainerMapKeyNotPairableByThisLane,
+                why: "map key is frozen tuple<list<key_part>, int> — column NOT COMPARED AT ALL: a null, a malformed {key,value} array, a wrong entry COUNT and a wrong tuple ARITY are all UNCHECKED here (#3726)",
+            },
+        ],
+    },
 ];
 
 fn repo_root() -> PathBuf {
