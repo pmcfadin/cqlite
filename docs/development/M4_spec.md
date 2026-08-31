@@ -890,7 +890,18 @@ nothing" — the CLI's JSON writer (`cqlite-cli/src/output/json.rs`, `Value::Udt
 | **`_type`** | **nobody, since #3629.** The two bindings stopped injecting it in #3504; the CLI's JSON writer and `cqlite-core`'s `ToJson for Value` stopped in #3629 (one shared rule, `util/udt_json.rs`). | n/a — no injection left to detect | **`sstabledump` / the raw SSTable bytes** — and it remains the only valid oracle for a RENDERING rule, because the CLI is the parity suites' comparison oracle and cannot check itself. `cqlite-cli/tests/issue_3629_cli_udt_json_namespace.rs` and `cqlite-core/tests/issue_3629_core_tojson_udt_namespace.rs` assert against it, one per code copy. |
 | **`_keyspace`** | **nobody.** The bindings no longer inject it and the CLI never did, so a `_keyspace` field is a plain field everywhere. | n/a — no injection to detect | **the CLI** (and `sstabledump`) |
 
-**The class is now CLOSED across the family, and the way it closed is the lesson.** Before #3504 it
+**Primary source for the target shape** (a CQLite file:line would be circular):
+`cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java:261`
+(`toJSONString`) iterates `for (int i = 0; i < types.size(); i++)` over `stringFieldNames`
+alone, emitting **no type key and no keyspace key**, and appends the literal `null` where a
+field's buffer is absent (line 280) — which independently confirms that the fixture's `id 3`
+`"_type": null` is the CORRECT rendering of a null FIELD and not a residue of the marker.
+
+**The marker-INJECTION class is now closed across the family, and the way it closed is the lesson.**
+Scope, stated because two rows of the table above are still `OPEN — #3497`: what is closed is
+CQLite *injecting* a marker into a UDT's field namespace. The mirror-image defect — a consumer
+*sniffing* a `"_type"` key to decide an untyped `dict`/JSON object IS a UDT (instances b-5 and the
+cell-level map) — is untouched by #3504 and #3629 and remains open under #3497. Before #3504 it
 was *symmetric across the whole family*: Python, Node and the CLI made the identical mistake in the
 identical order, so a Python↔Node comparison could never reveal either half and a binding↔CLI
 comparison could not reveal the `_type` half. #3504 fixed the two bindings, which left one surface
@@ -901,7 +912,8 @@ renderer because the two writers differ materially in 11 other arms; convergence
 level would have been wrong. Confirmatory measurement on the #3504 fixture: `sstabledump` injects
 **no** marker of its own — the non-colliding cell dumps as `{"label": …, "real_field": 7}` — i.e. the
 authoritative reference tool already keeps type identity out of the field namespace, which is now
-what every CQLite surface does.
+what every CQLite RENDERING surface does (the two JSON writers via `util/udt_json.rs`, and the
+table/CSV path via `util/value_fmt.rs::format_udt`, which always did).
 
 **BEHAVIOUR CHANGE (#3629), stated for consumers.** `cqlite --format json` (and
 `QueryResult::to_json()`) used to emit a `_type` key inside every UDT object and now emits none:

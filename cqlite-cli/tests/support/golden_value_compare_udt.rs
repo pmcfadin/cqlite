@@ -30,10 +30,12 @@ fn udt_spelling(egress: Egress) -> &'static str {
 ///     ELSE, which is exactly what the golden carries. It used to also carry a
 ///     `_type` discriminator the CLI injected into the same namespace, checked
 ///     here against the DDL and then dropped from the CLI side; issue #3629
-///     removed that injection, because `cassandra-5.0.8`'s
-///     `UserType.toJSONString` emits `{"field": value, …}` and NO type key, so
-///     the discriminator was output the reference tool never writes and it
-///     collided with any UDT declaring a field of that name. With it gone the
+///     removed that injection, because
+///     `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java:261`
+///     (`toJSONString`) iterates `types.size()` over `stringFieldNames` alone and
+///     emits `{"field": value, …}` with NO type key and NO keyspace key — so the
+///     discriminator was output the reference tool never writes, and it collided
+///     with any UDT declaring a field of that name. With it gone the
 ///     two sides' field sets are directly comparable and nothing is dropped from
 ///     either. KNOWN COVERAGE REDUCTION, stated rather than argued away: this
 ///     lane can no longer detect a UDT resolved against the wrong `CREATE TYPE`

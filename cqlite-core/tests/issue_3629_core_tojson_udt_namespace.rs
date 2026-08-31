@@ -10,6 +10,13 @@
 //! does NOT declare one carried a key Cassandra never wrote.
 //!
 //! ## Oracle
+//! PRIMARY SOURCE:
+//! `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java:261`
+//! (`toJSONString`) iterates `types.size()` over `stringFieldNames` only and emits
+//! NO type key and NO keyspace key, appending the literal `null` for an absent
+//! field buffer (line 280) — which is also why row 3's `"_type": null` below is
+//! CORRECT output for a null FIELD rather than a leftover marker.
+//!
 //! The committed Cassandra-written fixture `test-data/fixtures/issue_3504/` and
 //! its `sstabledump` JSONL golden. sstabledump injects NOTHING: the non-colliding
 //! `p` cell dumps as `{"label": ..., "real_field": 7}`. That is the target shape.

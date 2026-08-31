@@ -45,6 +45,12 @@ writers deliberately differ elsewhere (hex vs base64 blobs, human vs raw
 timestamps, `[{key,value}]` vs Display-keyed maps). Consequence, by design:
 `--format json` carries **no type channel at all**, exactly like `sstabledump`.
 
+The rule's primary source is Cassandra, not this repo:
+`cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java:261`
+(`toJSONString`) iterates `types.size()` over `stringFieldNames` alone — no type key, no
+keyspace key — and appends the literal `null` for an absent field buffer (line 280), which is
+why `id 3`'s `"_type": null` below is CORRECT output for a null field.
+
 ## What the JSONL golden IS and IS NOT an oracle for
 
 The committed `*-Data.db.jsonl` (`sstabledump -l`) pins **decode** and proves the

@@ -14,12 +14,24 @@
 //! * every UDT that declares no such field carries a key Cassandra never wrote,
 //!   so the output diverges from `sstabledump` for ordinary data.
 //!
-//! # The reference rule
+//! # The reference rule, and its PRIMARY SOURCE
+//!
+//! Authority is Cassandra, read at the pinned tag — not CQLite's own code:
+//! `cassandra-5.0.8:src/java/org/apache/cassandra/db/marshal/UserType.java:261`
+//! (`toJSONString`) builds `{"<field>": <value>, …}` by iterating
+//! `for (int i = 0; i < types.size(); i++)` over `stringFieldNames` ALONE. It
+//! emits **no type key and no keyspace key**, and where a field's buffer is
+//! absent it appends the literal `null` (line 280). So "declared fields, nothing
+//! else, `null` for an absent one" is Cassandra's rule, not a CQLite convention.
+//!
+//! Corroborated by `sstabledump` on the committed Cassandra-written fixture
+//! `test-data/fixtures/issue_3504/`, whose non-colliding `p` cell dumps as
+//! `{"label": …, "real_field": 7}` — and whose `id 3` `c` cell dumps
+//! `"_type": null`, which line 280 says is the CORRECT rendering of a null
+//! FIELD and not a residue of the removed marker.
 //!
 //! `crate::util::value_fmt::ValueFormatter::format_udt` (the table/CSV display
-//! path) already renders fields only, matching the `sstabledump` golden
-//! (`test-data/fixtures/issue_3504/`, whose non-colliding `p` cell dumps as
-//! `{"label": …, "real_field": 7}`). This helper is that rule, for JSON.
+//! path) already followed that rule. This helper is the same rule, for JSON.
 //!
 //! # Why it is generic over the field renderer
 //!
