@@ -124,11 +124,6 @@ use crate::types::Value;
 use super::arrow_convert::{build_arrow_schema, convert_column_to_array, ArrowConvertError};
 use super::arrow_size::PreparedColumns;
 
-/// Reusable column-major row accumulator for one projected column set.
-///
-/// Borrows the column set (it is stable for the whole scan) and owns the cells it
-/// has taken out of the rows. See the module documentation for the stage/commit
-/// contract and why it is shaped that way.
 /// Total retained cell slots tolerated after a batch, as a multiple of the largest
 /// batch's own present-cell count. Slack, not a hard equality, so an ordinary
 /// batch-to-batch density wobble does not reallocate.
@@ -138,6 +133,11 @@ const RETAINED_SLOT_SLACK: usize = 2;
 /// never pays repeated reallocation to reclaim a few hundred slots.
 const RETAINED_SLOT_FLOOR: usize = 1024;
 
+/// Reusable column-major row accumulator for one projected column set.
+///
+/// Borrows the column set (it is stable for the whole scan) and owns the cells it
+/// has taken out of the rows. See the module documentation for the stage/commit
+/// contract and why it is shaped that way.
 pub struct ArrowRowAccumulator<'a> {
     /// The projected output columns, in output order.
     columns: &'a [ColumnInfo],
