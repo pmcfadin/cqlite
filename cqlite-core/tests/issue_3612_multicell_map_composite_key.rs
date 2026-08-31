@@ -437,3 +437,237 @@ async fn multicell_key_presents_identically_to_the_frozen_control() {
         );
     }
 }
+
+// ===========================================================================
+// SECOND SUBJECT: a MULTICELL TUPLE key, on Cassandra-written bytes (AC 4)
+// ===========================================================================
+//
+// The #3504 fixture's composite keys are all UDTs, so until `test_nested_udt_keys`
+// landed on main (#3647) the TUPLE shape rested only on unit tests built from
+// Cassandra's framing convention rather than on Cassandra-written bytes. This
+// closes that: `m_tuple_udt map<frozen<tuple<frozen<key_part>, int>>, int>` is a
+// MULTICELL map whose key is a tuple whose first component is a frozen UDT, so it
+// exercises the composite cell-path route one nesting level deeper than `cm`.
+//
+// Expectations are derived from the committed `sstabledump` golden at run time,
+// as for `cm`/`tm` — never from CQLite's own output (doctrine #3042).
+
+/// `test_nested_udt_keys` is git-tracked under the CHECKOUT's
+/// `test-data/datasets`, and MEASURED to be absent from the fleet-local
+/// `/data/datasets` root that `CQLITE_DATASETS_ROOT` usually names — reading it
+/// through that root yields ZERO rows, silently. So the root is resolved PER
+/// TABLE (issue #3220) rather than from the env var alone.
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
+const TUPLE_KEYSPACE: &str = "test_nested_udt_keys";
+const TUPLE_TABLE: &str = "nested_udt_keys";
+
+/// One golden `m_tuple_udt` cell path, decoded from sstabledump's composite
+/// rendering into `(udt_label, udt_n, tuple_second)`.
+///
+/// The rendering nests two levels: the tuple's components are joined with `:`,
+/// and the inner UDT's own fields are joined with an ESCAPED `\:`, with `\@`
+/// standing for a null field. So `charlie\:3:8` is
+/// `tuple(key_part{label: "charlie", n: 3}, 8)`. Validated against all three
+/// shapes the golden actually contains — a plain one, an all-null UDT
+/// (`\@\:\@:0`) and an empty-label one (`\:0:0`) — and the arity is asserted, so
+/// a change in sstabledump's escaping reds here instead of silently mis-parsing.
+fn parse_tuple_golden_path(path: &str) -> (Option<String>, Option<String>, String) {
+    // Split on UNESCAPED ':' only.
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // An escape: keep both bytes, so `\:` cannot end a component and
+            // `\@` survives for the null test below.
+            cur.push(c);
+            if let Some(n) = chars.next() {
+                cur.push(n);
+            }
+        } else if c == ':' {
+            parts.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    parts.push(cur);
+    assert_eq!(
+        parts.len(),
+        2,
+        "golden tuple path {path:?} must render exactly 2 tuple components"
+    );
+    let udt_fields: Vec<&str> = parts[0].split("\\:").collect();
+    assert_eq!(
+        udt_fields.len(),
+        2,
+        "golden UDT component {:?} must render exactly 2 fields",
+        parts[0]
+    );
+    let unnull = |s: &str| {
+        if s == "\\@" {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    };
+    (
+        unnull(udt_fields[0]),
+        unnull(udt_fields[1]),
+        parts[1].clone(),
+    )
+}
+
+/// THE AC-4 ASSERTION: every `m_tuple_udt` key on Cassandra-written bytes decodes
+/// to a structured tuple whose first component is a structured UDT, matching the
+/// golden component-for-component.
+#[tokio::test]
+async fn multicell_tuple_keys_match_the_sstabledump_golden() {
+    let Some(root) = datasets_root::sstables_root_for_table(TUPLE_KEYSPACE, TUPLE_TABLE) else {
+        panic!(
+            "{TUPLE_KEYSPACE}.{TUPLE_TABLE} is GIT-TRACKED, so no candidate root \
+             holding it is a checkout problem, not a skip (issue #3220)"
+        );
+    };
+    let schema = workspace_root()
+        .join("test-data")
+        .join("schemas")
+        .join("nested-udt-keys.cql");
+    assert!(schema.is_file(), "committed schema missing: {schema:?}");
+
+    // Golden: pk -> the set of (label, n, second) triples for m_tuple_udt.
+    let table_dir = std::fs::read_dir(root.join(TUPLE_KEYSPACE))
+        .expect("keyspace dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&format!("{TUPLE_TABLE}-")))
+        })
+        .expect("one nested_udt_keys-* dir");
+    let jsonl = std::fs::read_dir(&table_dir)
+        .expect("table dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db.jsonl"))
+        })
+        .expect("committed golden");
+    let raw = std::fs::read_to_string(&jsonl).expect("golden readable");
+    let mut expected: BTreeMap<String, Vec<(Option<String>, Option<String>, String)>> =
+        BTreeMap::new();
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let doc: serde_json::Value = serde_json::from_str(line).expect("golden json");
+        let pk = doc["partition"]["key"][0].as_str().unwrap_or_default().to_string();
+        for row in doc["rows"].as_array().into_iter().flatten() {
+            for cell in row["cells"].as_array().into_iter().flatten() {
+                if cell["name"].as_str() != Some("m_tuple_udt") {
+                    continue;
+                }
+                if let Some(p) = cell["path"][0].as_str() {
+                    expected
+                        .entry(pk.clone())
+                        .or_default()
+                        .push(parse_tuple_golden_path(p));
+                }
+            }
+        }
+    }
+    assert!(
+        !expected.is_empty(),
+        "the golden must carry m_tuple_udt entries; an empty expectation would \
+         make this test vacuous"
+    );
+
+    let db = ingest(IngestionConfig {
+        schema_paths: vec![schema],
+        data_dir: root.clone(),
+        version_hint: None,
+        core_config: cqlite_core::Config::default(),
+        table_directory_filter: Some(TUPLE_KEYSPACE.to_string()),
+    })
+    .await
+    .expect("ingesting the committed nested_udt_keys fixture must succeed")
+    .database;
+    let result = db
+        .execute(&format!(
+            "SELECT id, m_tuple_udt FROM {TUPLE_KEYSPACE}.{TUPLE_TABLE}"
+        ))
+        .await
+        .expect("SELECT must succeed");
+    assert!(
+        !result.rows.is_empty(),
+        "zero rows from a PRESENT fixture is a decode failure, never a skip"
+    );
+
+    let mut checked = 0usize;
+    for row in &result.rows {
+        let Some(Value::Integer(id)) = row.values.get("id") else {
+            continue;
+        };
+        let Some(want) = expected.get(&id.to_string()) else {
+            continue;
+        };
+        let cell = row
+            .values
+            .get("m_tuple_udt")
+            .unwrap_or_else(|| panic!("id={id}: SELECT must project m_tuple_udt"));
+        let pairs = match peel(cell) {
+            Value::Map(p) => p,
+            other => panic!("id={id}: expected a Value::Map, got {other:?}"),
+        };
+        assert_eq!(
+            pairs.len(),
+            want.len(),
+            "id={id}: entry count must match the golden — a COLLAPSE would show here"
+        );
+        let mut got: Vec<(Option<String>, Option<String>, String)> = Vec::new();
+        for (k, _v) in pairs {
+            // The AC-4 property: a structured TUPLE whose first component is a
+            // structured UDT — not opaque bytes, and not a flattened blob.
+            let items = match peel(k) {
+                Value::Tuple(items) => items,
+                other => panic!(
+                    "id={id}: a multicell TUPLE map key must decode structurally \
+                     (issue #3612), got {other:?}"
+                ),
+            };
+            assert_eq!(items.len(), 2, "id={id}: tuple<frozen<key_part>, int>");
+            let udt = udt_of("m_tuple_udt", &items[0]);
+            assert_eq!(udt.type_name, "key_part", "id={id}");
+            let f = |name: &str| -> Option<String> {
+                udt.fields
+                    .iter()
+                    .find(|f| f.name == name)
+                    .and_then(|f| f.value.clone())
+                    .and_then(|v| match v {
+                        Value::Text(s) => Some(String::from_utf8_lossy(&s).into_owned()),
+                        Value::Integer(i) => Some(i.to_string()),
+                        Value::Null => None,
+                        other => panic!("id={id}: unexpected field shape {other:?}"),
+                    })
+            };
+            let second = match peel(&items[1]) {
+                Value::Integer(i) => i.to_string(),
+                other => panic!("id={id}: tuple's second component is an int, got {other:?}"),
+            };
+            got.push((f("label"), f("rank"), second));
+        }
+        got.sort();
+        let mut want_sorted = want.clone();
+        want_sorted.sort();
+        assert_eq!(
+            got, want_sorted,
+            "id={id}: decoded tuple keys must match the sstabledump golden"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked,
+        expected.len(),
+        "every golden partition carrying m_tuple_udt must have been checked"
+    );
+}
