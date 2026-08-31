@@ -231,6 +231,21 @@ PENDING_AUTOMERGE_MIN_SECS="${PENDING_AUTOMERGE_MIN_SECS:-1200}"
 # an empty value. Two suite cases went red on it immediately. So: empty by default, filled in by
 # `supervisor_lock_path` at acquisition, using only bash substitution and arithmetic.
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-}"
+# `SUPERVISOR_LOCK` NAMES WHERE *OUR* LOCK LIVES, AND THAT IS ALL IT HAS EVER LEGITIMATELY DONE
+# (#3549, lead ruling 2026-08-30 — AC4 REMOVED AS UNSOUND).
+#
+# #3549's AC4 said "an explicit `SUPERVISOR_LOCK` override skips the legacy check entirely". It is
+# REMOVED, not descoped, and the proof is one sentence: an explicit `SUPERVISOR_LOCK` renames OUR lock,
+# while a pre-#3467 supervisor uses the machine-global path REGARDLESS — it has never heard of this
+# variable — so the skip disabled the check in a case where the collision is still LIVE. It conflated a
+# naming choice with an isolation guarantee.
+#
+# CONSEQUENCE, RECORDED SO NOBODY REINTRODUCES A SKIP AS A CONVENIENCE: `supervisor_legacy_lock_guard`
+# runs UNCONDITIONALLY. There is no opt-out, no provenance record and nothing for a caller to set to
+# make the check not happen. The tri-state provenance (`SUPERVISOR_LOCK_DERIVED`), the pinned path
+# beside it (`SUPERVISOR_LOCK_RESOLVED`) and every early return they fed were deleted with the skip:
+# four review rounds (jobs 209 F1, 214, 217 F1, 218) were each a new route to bypassing the check
+# through that record, and with no record there is no route. Do not add one back.
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
@@ -1362,9 +1377,554 @@ supervisor_msg_token() {
 }
 
 supervisor_lock_path() {
-  [[ -n "$SUPERVISOR_LOCK" ]] && return 0
+  # If the caller named a path, that is where OUR lock goes; otherwise derive the per-lane default.
+  # NOTHING ELSE IS RECORDED HERE, AND NOTHING DOWNSTREAM ASKS WHICH BRANCH RAN (#3549, lead ruling —
+  # AC4 removed as unsound; see the note beside `SUPERVISOR_LOCK`'s initialisation). The legacy-lock
+  # guard runs either way, so the provenance this function used to keep has no consumer left: it
+  # existed ONLY to switch that check off, and switching it off was the defect.
+  if [[ -n "$SUPERVISOR_LOCK" ]]; then
+    return 0
+  fi
   # FROM THE GIVEN IDENTITY (lead ruling B). `LANE_ID` is resolved before this is called.
   SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-${LANE_ID}.lock"
+}
+
+# ---------------------------------------------------------------------------
+# LEGACY GLOBAL LOCK COMPATIBILITY (#3549; the defect #3467 introduced).
+#
+# Before #3467 the single-instance lock was ONE MACHINE-GLOBAL path,
+# `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock`. After #3467 the derived default is per LANE, which
+# is the correct end state (#3393: N lanes per box). But the two paths are invisible to each other, so
+# a supervisor launched from a PRE-#3467 checkout holds a lock this one never looks at — and both then
+# run, in the same worktree, sharing markers, branch, logs and `.worker-last-iteration.json`. The
+# window opens during any rolling update of the fleet's checkouts.
+#
+# REMOVAL CONDITION (AC6). Delete `supervisor_legacy_lock_presence`, `supervisor_legacy_lock_refuse`,
+# `supervisor_legacy_lock_guard`, their call site in `acquire_lock`, and their suite cases once EVERY
+# checkout that can launch a supervisor on this fleet is at or past #3467 — i.e. once no pre-#3467
+# `worker-supervisor.sh` can run again. How to check it: on each box,
+#   git -C <checkout> merge-base --is-ancestor f33f726c4 HEAD   # f33f726c4 = the #3467 commit
+# for every checkout that a launcher can reach, and confirm no legacy lock is present
+# (`ls -d "${TMPDIR:-/tmp}"/cqlite-worker-supervisor.lock`). Both halves are required: an old checkout
+# that is merely idle can still be launched. Until then this guard is load-bearing.
+# THAT `ls` ANSWERS FOR THE `TMPDIR` OF THE SHELL YOU RUN IT IN, AND FOR NO OTHER (#3549, job 222 F1):
+# a launcher with a different `TMPDIR`, or one that named `SUPERVISOR_LOCK` itself, resolves a different
+# absolute path, so run it under each launcher's own environment — and treat the ANCESTRY half as the
+# one that actually closes the condition, since it holds for every path a launcher could pick. Same
+# scope limit as the guard's own check; see the SPATIAL GAP in the RESIDUAL block below.
+# (`supervisor_shell_quote` and `supervisor_one_line` are NOT part of that removal — see the note at
+# each; they are general emitters.)
+#
+# The legacy lock's ON-DISK SHAPE is a DIRECTORY containing a single file `pid` (atomic `mkdir` +
+# pid-liveness, never flock) — read out of the pre-#3467 file, not assumed. IT IS RECORDED HERE FOR
+# CONTEXT AND NOTHING READS IT: per the lead's second ruling the guard tests for EXISTENCE only, so no
+# behaviour of this script depends on that shape being what it says. Do not reintroduce a shape check.
+# ---------------------------------------------------------------------------
+
+# The two bytes that break the one-physical-line contract, held as VALUES rather than spelled as `$'…'`
+# literals at the use sites: a `case` pattern and a `${var//…}` pattern both need them expanded, and
+# inline they make the substitutions unreadable. Assigned BEFORE the function that reads them, so no
+# call can see them unset under `set -u`.
+SUPERVISOR_LF='
+'
+SUPERVISOR_CR=$'\r'
+# ESC joins them (#3549, roborev job 201 F1 class sweep): `ESC[G` moves the cursor to column 1 and
+# `ESC[2K` erases the line, so an escape sequence forges an apparently-unprefixed line WITHOUT a
+# newline or a carriage return anywhere in the bytes — the same defeat of the one-bare-line contract by
+# a third mechanism. Modern bash's `%q` already escapes it; bash 3.2's may not, which is why it joins
+# the verified-and-repaired set below rather than being assumed away.
+SUPERVISOR_ESC=$'\033'
+
+# supervisor_shell_quote <string> — render a string so a PRINTED command is PASTE-SAFE and stays on ONE
+# PHYSICAL LINE.
+#
+# The refusal below prints a command an operator is expected to RUN, and the path in it is derived from
+# `TMPDIR` — i.e. from the environment, not from a literal. A path containing a space, a quote or a
+# newline naively interpolated into `rm -f '<path>/pid'` produces a command that either fails or acts
+# on a DIFFERENT path than the one we diagnosed, which is the worst kind of operator-facing text: it
+# looks precise and is wrong.
+#
+# ONE PHYSICAL LINE IS PART OF THE CONTRACT, NOT A NICETY (#3549, roborev job 198 F4). The refusal's
+# contract is "select one bare line and paste it": diagnostics carry a `worker-supervisor:` prefix and
+# the runnable command is the one BARE line, which is what makes it identifiable without parsing prose.
+# A newline in `TMPDIR` survives SINGLE QUOTING LITERALLY — `'a<LF>b'` is one shell word spanning two
+# physical lines — so the previous single-quote-only form split the command across lines and left
+# fragments that are indistinguishable from command lines. The same is true of the DIAGNOSTIC paths, which
+# is why they are rendered through here too: an unquoted path with a newline turns one prose line into
+# two, and the second has no prefix.
+#
+# `%q` IS THE RENDERING, AND ITS RESULT IS CHECKED RATHER THAN ASSUMED. Bash's `printf '%q'` renders a
+# control character as an ANSI-C `$'\n'` escape, which keeps the word on one line. But %q's treatment of
+# non-printing characters has CHANGED ACROSS BASH VERSIONS, and this file deliberately supports the
+# bash 3.2 macOS ships (see the `read -d ''` loop note elsewhere), where a newline may instead come back
+# as a literal backslash-newline — still two physical lines. So the one-line property is VERIFIED here
+# and repaired if the builtin did not deliver it: an affirmative check, not a version assumption.
+# `printf -v` is used rather than `$(…)`, because command substitution STRIPS trailing newlines and would
+# silently truncate the rendering of a path that ends in one.
+#
+# THE REPAIR IS VERSION-INDEPENDENT: the single-quote form, with each newline/carriage return
+# re-expressed as `'$'\n''` — closing the quote, an ANSI-C quoted escape, reopening — which every bash
+# concatenates back into the original bytes on ONE line.
+#
+# THE OUTPUT IS BASH-SPECIFIC, and the remedy is documented as bash-pasteable: `$'…'` is a bash (and
+# ksh/zsh) construct, not POSIX `sh`. That is the same assumption the script itself makes — it runs under
+# `#!/usr/bin/env bash` and its operators paste into a bash shell.
+#
+# IT IS NOT OPTION-SAFETY, AND THE CALLER MUST NOT READ IT AS SUCH (#3549, roborev job 192 F2). Quoting
+# controls how the SHELL splits a word; option parsing happens inside the COMMAND, on bytes the shell
+# has already finished with. `rm -f '-scratch/pid'` is one quoted operand and still an "invalid option".
+# A printed command whose operands are derived from the environment therefore needs `--` as well.
+supervisor_shell_quote() {
+  local q=""
+  printf -v q '%q' "$1"
+  case "$q" in
+    *"$SUPERVISOR_LF"* | *"$SUPERVISOR_CR"* | *"$SUPERVISOR_ESC"*) ;;
+    *) printf '%s' "$q"; return 0 ;;
+  esac
+  # This bash rendered a control character literally. Rebuild from the ORIGINAL string (the partially
+  # escaped `$q` is not a safe base — it may end in a dangling backslash).
+  q="'${1//\'/\'\\\'\'}'"
+  q="${q//"$SUPERVISOR_LF"/\'\$\'\\n\'\'}"
+  q="${q//"$SUPERVISOR_CR"/\'\$\'\\r\'\'}"
+  q="${q//"$SUPERVISOR_ESC"/\'\$\'\\033\'\'}"
+  printf '%s' "$q"
+}
+
+# supervisor_one_line <string> — render PROSE onto ONE PHYSICAL LINE, without quoting it.
+#
+# THE THIRD INSTANCE OF ONE CLASS, SO IT IS A CHOKE POINT AND NOT A THIRD SPOT FIX (#3549, roborev job
+# 201 F1). The class is "a dynamic value reaches emitted text unrendered". Instance 1 was an em dash on
+# the runnable command line (job 185 F2); instance 2 a newline in the diagnostic PATHS (job 198 F4);
+# instance 3 a newline inside a STATE DESCRIPTION, which reaches the emitter as part of `$detail`. Each
+# fix was correct and each left the next call site raw — the signal that per-call-site correctness is
+# the wrong shape. So `supervisor_legacy_lock_refuse` renders EVERY prose argument it is handed, and no
+# caller can emit a raw multi-line value whatever it interpolates.
+#
+# WHY NOT `supervisor_shell_quote` FOR PROSE. That renders a VALUE for PASTING: `%q` backslash-escapes
+# every space, so a sentence comes back as `recorded\ pid\ 12\ is\ ACTIVE` — unreadable, and the prose
+# channel is never pasted. This renderer therefore leaves printable bytes alone and rewrites only the
+# three that break the contract; each has its own mechanism, so covering one is not covering the class:
+#   LF  — splits the line, and the second half carries no `worker-supervisor:` prefix, which is exactly
+#         the marker that identifies the ONE bare line as the runnable command;
+#   CR  — returns the cursor to column 0, so following text OVERWRITES the prefix and the same forged
+#         bare line appears with no newline in the bytes at all;
+#   ESC — repositions the cursor or erases the line, producing that effect a third way.
+# It is a DISPLAY rendering, NOT a reversible encoding: a literal two-character `\n` in the input comes
+# out indistinguishable from a rendered newline. That is fine here (an operator reads this text, nothing
+# parses it back) and is why the VALUE channel keeps the quoting renderer instead.
+supervisor_one_line() {
+  local s="$1"
+  s="${s//"$SUPERVISOR_LF"/\\n}"
+  s="${s//"$SUPERVISOR_CR"/\\r}"
+  s="${s//"$SUPERVISOR_ESC"/\\e}"
+  printf '%s' "$s"
+}
+# supervisor_legacy_lock_presence <path> — echo EXACTLY one of
+#   verified-absent | present | could-not-tell <cause>
+#
+# THE GUARD DETECTS THE LEGACY LOCK AND STOPS THERE — IT DOES NOT PARSE IT (#3549, lead ruling).
+#
+# WHAT WAS DELETED AND WHY, so nobody rebuilds it as an improvement. There used to be a classifier
+# (`supervisor_legacy_lock_state`) that opened the lock directory, enumerated it, parsed its `pid` file
+# and measured the recorded pid's liveness, producing `live <pid>` / `stale <pid>` / `unknown <cause>`;
+# it needed a pid-liveness probe (`supervisor_pid_liveness`, deleted with it — this was its only
+# caller), a platform pid bound read from `/proc/sys/kernel/pid_max`, a NUL probe, a single-line parse,
+# a collation-free digit test, and a wholesale neutralisation of the caller's inherited glob/match state
+# (`GLOBIGNORE`, `dotglob`, `nullglob`, `failglob`, `noglob`, `nocasematch`, …) with per-option
+# verification and an order-sensitive restore — because the enumeration's correctness depended on all of
+# it.
+#
+# THE ARGUMENT THAT ENDED IT: SINCE THE RECLAIM WAS REMOVED, `live`, `stale` AND `unknown` ALL REFUSE.
+# The classification therefore CANNOT CHANGE THE DECISION. Its only outputs were the wording of the
+# refusal and which remedy line printed — and the remedy it licensed was a DELETION, which is the one
+# thing a guard that mutates nothing has no business recommending about an object it does not own.
+# Machinery whose output cannot change the decision is not a guard; it is a description generator
+# sitting on the decision path. Every one of those parts had also been the subject of its own review
+# round (a false `{pid}` shape forged by `GLOBIGNORE`, a NUL silently discarded by `read`, an
+# out-of-range pid read as dead, a locale-dependent digit test, a `ps` fallback that called a live
+# BusyBox pid 1 dead) — one defect class, reached through a new door each time, all of it in service of
+# a distinction with no consumer.
+#
+# SO THE QUESTION IS NARROWED TO THE ONE THE DECISION ACTUALLY NEEDS: IS SOMETHING THERE?
+#   present         => refuse. Name the path. Claim NOTHING about staleness, about what the object is,
+#                      or about whether removing it is safe.
+#   verified-absent => proceed.
+#   could-not-tell  => refuse, with a cause that says THE PROBE FAILED — never that a lock exists.
+#
+# ABSENCE MUST BE VERIFIED ABSENCE, WHICH IS WHY THIS IS THREE-VALUED AT ALL. Every `test`/`[[ ]]` file
+# predicate is TWO-VALUED, so it must fold "cannot tell" onto one of its answers and always picks the
+# permissive one (named doctrine in CLAUDE.md). Existence of a known child name is decided by `lstat(2)`
+# on that name, which needs SEARCH (`-x`) on the container and nothing else — we never enumerate the
+# container, so `-r` on it is NOT required and demanding it would be a false STOP on a legitimate
+# write-and-search-only `TMPDIR` (mode 0311/0711). An UNSEARCHABLE container is the case that matters:
+# `[[ -e ]]` then answers "not there" for a lock that IS there, which is the permissive collapse this
+# probe exists to avoid, so it is `could-not-tell` and refuses.
+#
+# A SYMLINK COUNTS AS PRESENT, INCLUDING A DANGLING ONE. The existence test is `-e || -L`: `-e` follows
+# the link and is FALSE for a broken one, so `-e` alone would report a dangling symlink at the legacy
+# path as absence. No supervisor at any version creates that path as a symlink, so there is nothing
+# there to be compatible with — but something IS at the name, our own `mkdir` of a per-lane path is
+# unaffected, and a pre-#3467 supervisor's `mkdir` of THIS name would fail against it, so the honest
+# answer is `present` and the operator is told to look.
+#
+# WHAT THIS PROBE CAN AND CANNOT DISTINGUISH — RECORDED, NOT PAPERED OVER. Bash's file tests expose no
+# errno. `[[ -e X ]]` is false when `lstat(X)` fails for ANY reason, so an `lstat` that fails with EIO
+# (failing disk), ELOOP, ENOMEM or an ENOTCONN stale network mount is INDISTINGUISHABLE FROM ENOENT to
+# this program. Concretely:
+#   DECIDABLE, and each is measured by the suite:
+#     * the container is missing or not searchable => `could-not-tell` (refuse). This is the dominant
+#       real cause of a blind existence test, and it is the one the two-valued form got wrong.
+#     * `lstat` of the child SUCCEEDS => `present` (refuse), for every object type including a symlink.
+#     * container searchable AND `lstat` of the child reports ENOENT => `verified-absent` (proceed).
+#   NOT DECIDABLE, therefore reported as `verified-absent`:
+#     * an `lstat` of the CHILD that fails for a reason other than ENOENT, on a searchable container.
+#     * a divergence between `access(2)` (what `-x` asks) and actual traversal — a MAC layer
+#       (SELinux/AppArmor) or an NFS ACL can deny a traversal that `-x` permits; and as root, `-x` is
+#       false on a mode-0000 directory that root can nevertheless traverse (that direction lands on
+#       `could-not-tell`, i.e. the refusing side).
+# NO PROBE HERE CLOSES THE FIRST GAP, AND ONE IS DELIBERATELY NOT INVENTED. Distinguishing EIO from
+# ENOENT needs the errno, which means an external command (`stat`, `test` from coreutils) — PATH
+# exposure and an output format to parse, in a function that today executes NO external command and
+# whose verdicts therefore cannot be changed by the caller's `PATH`. Trading that for a rarer failure
+# mode would buy the appearance of completeness, which is worse than a written-down gap: an `lstat`
+# failing with EIO is a box with a broken filesystem, where a supervisor refusing to start is not the
+# problem anyone has. So the residual is stated here and left open.
+supervisor_legacy_lock_presence() {
+  local legacy="$1" dir
+  dir="${legacy%/*}"
+  # No slash at all => the current directory; a single LEADING slash (a `TMPDIR` of `/`) strips to the
+  # empty string, which is not a path and would misreport an undeterminable container.
+  # `if`, NOT `[[ … ]] && x`: both tests are FALSE in the ordinary case, so each statement's own value
+  # is 1, and the same line as a function's LAST statement would return 1 and abort an errexit caller.
+  # Writing them as `if` removes a correctness property that depends on where the line happens to sit.
+  if [[ "$dir" == "$legacy" ]]; then dir="."; fi
+  if [[ -z "$dir" ]]; then dir="/"; fi
+  if [[ ! -d "$dir" || ! -x "$dir" ]]; then
+    printf 'could-not-tell container-not-searchable:%s\n' "$(supervisor_shell_quote "$dir")"
+    return 0
+  fi
+  # `-e || -L`, in that order and both required: see the symlink note above.
+  if [[ -e "$legacy" || -L "$legacy" ]]; then
+    printf 'present\n'
+    return 0
+  fi
+  printf 'verified-absent\n'
+}
+
+# supervisor_legacy_lock_refuse <path> <detail> [remedy-prose] [remedy-command] — LOUD, DIAGNOSTIC, and
+# TEXTUALLY DISTINCT from the per-lane "another instance is already running" refusal, so an operator
+# (and a test) can tell which of the two locks stopped the start.
+#
+# A RUNNABLE COMMAND IS A SEPARATE ARGUMENT AND GETS A LINE OF ITS OWN — NEVER INLINED IN PROSE (#3549,
+# roborev job 185 F2). It was inlined once, with a trailing em dash and an explanatory clause after it,
+# and the consequence is worse than untidiness. Pasted verbatim, the prose becomes extra `rmdir`
+# OPERANDS and the command ALWAYS fails; what it leaves behind depends on the prose, and both measured
+# outcomes are bad (`scripts/tests/test_worker_supervisor.sh` runs them):
+#   - with the shipped em dash, `rm -f` succeeds and `rmdir` removes the directory AND THEN errors on
+#     each prose word ("failed to remove 'the'", …), so the operator gets a non-zero exit and three
+#     alarming messages with no way to tell whether the lock was actually cleared;
+#   - with any prose carrying an option-shaped token (`-x`), the outcome depends on whether the command
+#     terminates option parsing. The line now emits `--` (job 192 F2), so such a token is an OPERAND and
+#     the failure is the one above; on the PRE-F2 line `rmdir` read it as an OPTION and rejected the
+#     whole invocation before removing anything — leaving a PID-LESS lock directory, precisely the shape
+#     a pre-#3467 supervisor reads as stale and reclaims, i.e. the remedy manufacturing the hazard this
+#     guard exists to prevent. Both spellings are still MEASURED in the suite, so this note cannot
+#     outlive the behaviour it describes.
+# Do not re-inline it, and do not append punctuation: the command line must be the WHOLE line, and it is
+# printed BARE (no `worker-supervisor:` prefix) so that selecting the line is enough to paste it.
+#
+# EVERY LINE IS EMITTED WITH `printf '%s\n'`, NEVER `echo` — THE EMITTER MUST NOT UNDO THE RENDERERS
+# (#3549, roborev job 205 F2). `supervisor_one_line` and `supervisor_shell_quote` encode a control
+# character AS A BACKSLASH SEQUENCE, which is precisely what `echo` under bash's `xpg_echo` option
+# INTERPRETS: MEASURED, `shopt -s xpg_echo; echo 'a\nb'` emits TWO PHYSICAL LINES, so the renderer's
+# guarantee is thrown away at the last step and the second half of a prose line arrives with no
+# `worker-supervisor:` prefix — the forged bare line the whole one-line contract exists to prevent. It
+# is INHERITED STATE, not a local choice: `env BASHOPTS=xpg_echo` is imported by bash (measured), so
+# nothing in this file needs to have run `shopt` for it to be on.
+#
+# `printf` is a bash BUILTIN, so this introduces no PATH exposure, and it takes NO option that changes
+# how it treats its payload; the format is the LITERAL `'%s\n'`, so a payload that begins with `-` or
+# contains a `%` is data. Do not reintroduce `echo` here for any reason, including brevity.
+supervisor_legacy_lock_refuse() {
+  local legacy="$1" detail="$2" remedy="${3:-}" remedy_cmd="${4:-}"
+  # EVERY PROSE ARGUMENT IS RENDERED HERE, ONCE — A CHOKE POINT, NOT N CORRECT CALL SITES (#3549,
+  # roborev job 201 F1). `$detail` and `$remedy` carry values the callers interpolate from the
+  # environment and from disk (a `TMPDIR`-derived container path inside a state description, a pid
+  # file's bytes), and a raw newline in any of them splits a prose line so the second half has no
+  # `worker-supervisor:` prefix — indistinguishable from the ONE bare line an operator is told to select
+  # and paste. Rendering at the EMITTER makes that unreachable for every caller, present and future,
+  # rather than relying on each interpolation site being remembered: this class had already been fixed
+  # twice at call sites (jobs 185 F2, 198 F4) and re-appeared at a third.
+  # `|| true` ON THE RENDERER CAPTURES: this function's ONE job is to print a refusal, and an
+  # assignment-from-substitution is a genuine errexit abort site (#3549, roborev job 201 F3 class
+  # sweep — the `shopt -p` shape). The renderers return 0 on every path they take, so this is
+  # unreachable; if it ever fires, a rendering that could not be made costs THAT FIELD and never the
+  # refusal, and the one-physical-line contract still holds because an empty field cannot break it.
+  detail="$(supervisor_one_line "$detail")" || true
+  remedy="$(supervisor_one_line "$remedy")" || true
+  # THE COMMAND CHANNEL CANNOT BE RENDERED — a rendered command is not executable — SO IT IS VERIFIED,
+  # and a command that is not one physical line is DEMOTED TO PROSE rather than printed bare. The
+  # shipped callers build their commands through `supervisor_shell_quote`, which guarantees the
+  # property, so this branch is unreachable today; it exists so the emitted-output contract holds by the
+  # EMITTER's rules and not by a caller's discipline. Printing such a command is the worst outcome
+  # available here: several bare lines, each a fragment, where the contract promises exactly one.
+  local cmd_broken=""
+  case "$remedy_cmd" in
+    *"$SUPERVISOR_LF"* | *"$SUPERVISOR_CR"* | *"$SUPERVISOR_ESC"*)
+      cmd_broken="$(supervisor_one_line "$remedy_cmd")" || true
+      remedy_cmd=""
+      ;;
+  esac
+  # THE DIAGNOSTIC PATHS ARE RENDERED, NOT INTERPOLATED RAW (#3549, roborev job 198 F4). Both paths come
+  # from the environment, and a newline in `TMPDIR` interpolated raw SPLITS a prose line in two — the
+  # second half carrying no `worker-supervisor:` prefix, which is precisely the marker that identifies
+  # the one BARE line as the runnable command. So an unrendered diagnostic path does not merely wrap: it
+  # manufactures text that an operator (and this file's own structural test) cannot tell from a command.
+  # One physical line per emitted line is the contract; `supervisor_shell_quote` is what holds it.
+  local legacy_shown="" own_shown=""
+  legacy_shown="$(supervisor_shell_quote "$legacy")" || true
+  own_shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")" || true
+  printf '%s\n' "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy_shown: $detail" >&2
+  # THIS LINE DESCRIBES TWO RESOLVED PATHS; IT ASSERTS NO RELATIONSHIP IT HAS NOT ESTABLISHED (#3549,
+  # roborev job 222 F2). It used to say our own lock "is PER LANE" unconditionally and conclude that the
+  # two are therefore invisible to each other. Per-lane is only the DEFAULT: a caller may name our lock
+  # path itself, and that name may be machine-global — it may even BE the legacy path — in which case
+  # both halves of the old sentence were false at once. It also said "the" machine-global lock, as if
+  # one such path existed; the name is `TMPDIR`-derived, so it is the machine-global path only for a
+  # launcher whose environment resolves it the same way ours does (see the SPATIAL GAP in the RESIDUAL
+  # block above). So: print both paths as RESOLVED, and make the consequence conditional on them
+  # differing, which is the fact that actually produces the co-run. Naming the override VARIABLE here is
+  # separately forbidden (job 208 F1: a refused operator must not be handed something that reads as an
+  # escape hatch), which is why it describes the LAUNCHER rather than naming the variable.
+  printf '%s\n' "worker-supervisor: that path is the pre-#3467 machine-global single-instance lock name as THIS process's \${TMPDIR:-/tmp} resolves it; this run's own lock is at $own_shown (per lane by default, or wherever this run's launcher named it) — so unless those two are the SAME path, neither supervisor can see the other's lock and both would run in one worktree (#3549)." >&2
+  # A CASE-SPECIFIC remedy, when there is one. The two refusing states differ in what an operator should
+  # DO — a PRESENT lock means "something is at that path; find out what it is"; a probe that COULD NOT
+  # ANSWER means "the question was undecidable here; make it decidable" — so the generic line below is
+  # not sufficient on its own.
+  [[ -z "$remedy" ]] || printf '%s\n' "worker-supervisor: remedy for THIS state — $remedy" >&2
+  [[ -z "$cmd_broken" ]] || printf '%s\n' "worker-supervisor: a remedy command for this state was built with an embedded control character, so it is NOT printed as a runnable line (it could not be one); rendered for reading only: $cmd_broken" >&2
+  [[ -z "$remedy_cmd" ]] || printf '%s\n' "$remedy_cmd" >&2
+  # NO REFUSAL MENTIONS `SUPERVISOR_LOCK`, AND THE ABSENCE IS DELIBERATE (#3549, roborev job 208 F1).
+  # This line used to end with "…, or set SUPERVISOR_LOCK explicitly to opt out of this compatibility
+  # check", and it was printed by EVERY refusal. Read as an operator reads it, that was an instruction
+  # that CAUSED the harm this guard exists to prevent: naming the lock skipped the check, so a refused
+  # run started anyway and the two supervisors shared one worktree, invisible to each other. It
+  # survived fourteen review rounds of the surrounding code because it reads as helpful.
+  #
+  # THERE IS NOW NO SUCH ESCAPE HATCH AT ALL (lead ruling 2026-08-30, AC4 removed as unsound): setting
+  # `SUPERVISOR_LOCK` chooses where OUR lock lives and does not affect this check. So nothing may be
+  # printed here that even IMPLIES a way past the refusal — there is none, and inventing one in prose
+  # would send an operator looking for a knob that does not exist. The remedies are the two real ones:
+  # stop the pre-#3467 supervisor, or upgrade that checkout past #3467.
+  printf '%s\n' "worker-supervisor: remedy — stop the pre-#3467 supervisor on this box, or upgrade that checkout to #3467+." >&2
+  exit 1
+}
+
+# THIS GUARD DETECTS AND REFUSES. IT NEVER MUTATES THE FOREIGN LOCK (#3549, lead ruling).
+#
+# Nothing on this path touches an object this run does not own — no rename-aside, no delete, no
+# adoption, no re-creation, and since the lead's second ruling NO READ OF ITS CONTENTS EITHER: the
+# guard tests for EXISTENCE and stops. Anything other than a verified absence stops the start and names
+# the path. That is a deliberate REDUCTION in capability, twice over, and the reason is recorded here
+# because the deleted version was written three times and produced the same harm each time.
+#
+# WHY RECLAIMING WAS REMOVED. Reclaiming a stale lock means renaming it aside, and every abort path
+# after that rename must put it BACK — so a reclaim cannot be safer than its restore. Restoring a
+# DIRECTORY-WITH-CONTENTS is not expressible atomically with the primitives available here: the
+# formulation that was shipped, `mkdir "$legacy"` followed by `mv "$aside/pid" "$legacy/pid"`, is TWO
+# steps, and between them the lock is observable WITHOUT its pid file. A pre-#3467 supervisor that
+# looks in that window reads a pid-less directory as STALE, reclaims it, and our `mv` then writes into
+# ITS lock — corrupting a live holder's lock and leaving the real holder effectively lockless. That is
+# strictly worse than the check-then-act it replaced, which at least failed toward refusal. Three
+# successive fixes each produced that same harm, which is the signal that the shape, not the code, was
+# wrong.
+#
+# THE ATOMIC FORMULATION THAT WOULD WORK, recorded so nobody rediscovers it as novel: build the lock
+# COMPLETE in a private staging directory (`mkdir "$staging"`; write `"$staging/pid"`) and move it into
+# place with ONE `rename(2)`. The directory is then never observable without its pid, and the rename
+# FAILS against an existing non-empty target instead of nesting inside it. It needs true no-replace
+# rename semantics — `mv -T` / `RENAME_NOREPLACE` — which are GNU-ONLY, and this file deliberately
+# supports macOS (its own header records that macOS ships no `flock(1)`). So the atomic form was
+# AVAILABLE AND DECLINED: that portability cost, plus the lead's ruling that refusal is the default,
+# is why this guard refuses instead.
+#
+# AC2 OF #3549 ("reclaimed rather than blocking forever") IS SATISFIED BY THE REFUSAL, per the lead's
+# ruling: a LOUD refusal that names the legacy path, the precondition (stop or upgrade the legacy
+# launcher FIRST) and a READ-ONLY inspection line of its own is not "blocking forever" — an operator
+# who has established that no pre-#3467 supervisor can run on the box removes the path themselves, and
+# the alternative is a supervisor that silently mutates another supervisor's lock.
+#
+# AND THE PRINTED LINE IS AN INSPECTION, NOT A DELETION — WHICH IS WHAT THE SECOND RULING CHANGED
+# (#3549). While the classifier existed, an enumerated exactly-`{pid}` shape was what LICENSED printing
+# `rm -f -- <dir>/pid && rmdir -- <dir>`. With no inspection there is no such licence, and the deletion
+# line is not merely unjustified but measurably DESTRUCTIVE on a shape we no longer look at: MEASURED,
+# with a SYMLINK at the legacy path pointing at a foreign directory, `rm -f -- <legacy>/pid` follows the
+# link and DELETES THAT DIRECTORY'S `pid` FILE (rc=0), after which `rmdir -- <legacy>` fails with "Not a
+# directory" — so the operator destroys a file this run never examined and the lock is still there.
+# See the `present` branch for the line that is printed instead, and why printing one at all is right.
+
+# RESIDUAL (#3549, roborev job 178) — THIS GUARD REDUCES THE COLLISION WINDOW; IT DOES NOT ELIMINATE
+# IT. Read plainly: it is a STARTUP CHECK, not machine-wide mutual exclusion.
+#
+# 1. THE UNCLOSED WINDOW. A pre-#3467 supervisor that starts AFTER this check completes is not stopped
+#    by anything here. It consults ONLY the legacy global path and knows nothing of our per-lane lock,
+#    so once we have passed the check — or once an operator has removed a lock we refused over — it can
+#    take the legacy name and run alongside us in the same worktree. The check is a single existence
+#    test: the window is "after that test", and nothing here can shrink it further. Tracked as #3596.
+# 2. WHY IT IS NOT CLOSED HERE. The only construction that closes it is for THIS supervisor to acquire
+#    and HOLD the legacy global lock for its whole lifetime — which reimposes MACHINE-GLOBAL exclusion
+#    and would make the second post-#3467 lane on a box refuse to start. That is precisely what #3467
+#    removed and what #3393's owner ruling forbids (N lanes per box is the standing model; "one worker
+#    per machine" is RETRACTED). Closing this window would reverse a standing owner ruling, which a
+#    bug-fix does not get to do.
+# 3. WHY THAT IS TOLERABLE. The activation condition is a TRANSIENT ROLLING-UPDATE window, and its
+#    precondition is currently measurably EMPTY: the #3549 census found zero `refs/machine-claims/*`
+#    and zero `refs/lane-claims/*` fleet-wide and zero production supervisors running. It closes
+#    PERMANENTLY once every checkout a launcher can reach is at or past #3467 — the same condition as
+#    this guard's own REMOVAL CONDITION above.
+# 4. SO: do not read the guard as complete mutual exclusion. It refuses a start under a lock that is
+#    ALREADY PRESENT, whatever it is (the case #3467 regressed), and MUTATES NOTHING — it cannot destroy or
+#    corrupt any holder's lock, live or dead, because it never writes to the legacy path at all; a
+#    supervisor that starts later from an old checkout remains a documented, bounded risk. Per #3549's own doctrine: a
+#    deferred defect whose activation condition is unwritten is a landmine; one whose condition is
+#    written is a documented risk.
+#
+# AND THE SECOND GAP, WHICH IS SPATIAL WHERE #3596 IS TEMPORAL (#3549, roborev job 222 F1; lead ruling
+# 2026-08-31 — DECLARE IT, change no detection logic). Read the two together: #3596 above is a gap in
+# TIME (a pre-#3467 supervisor that starts AFTER our check); this is a gap in SPACE (a pre-#3467
+# supervisor whose lock is not at the path we tested).
+#
+# 5. WHAT IS DETECTED, EXACTLY. One path: `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock`, as THIS
+#    process's own environment resolves it at guard time. Nothing else is looked at, in any state.
+# 6. WHAT IS THEREFORE NOT DETECTED. A pre-#3467 supervisor launched with a DIFFERENT `TMPDIR` — its
+#    machine-global default then resolves to a different absolute path — or one launched with an
+#    explicit `SUPERVISOR_LOCK`: the pre-#3467 script honours that variable too — read out of the
+#    pre-image, `git show f33f726c4^:scripts/local/worker-supervisor.sh` line 215 is
+#    `SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"` — so its lock
+#    sits wherever its own launcher put it. In either case that supervisor holds a lock at a
+#    path this guard never stats, and our `verified-absent` is a true statement about the path we tested
+#    and says nothing about the one it holds. This is why the proceed-path line and the refusal's
+#    relationship line both state which path was resolved and by whose environment: a bare absence
+#    invites the falsely reassuring reading, and an unqualified "no legacy lock" would be a claim this
+#    check cannot support.
+# 7. WHY IT CANNOT BE CLOSED. Another process's environment is UNKNOWABLE from here — we cannot read the
+#    `TMPDIR` a supervisor we have never seen was launched with, nor a lock path its launcher chose —
+#    the missing input is not on this side of the process boundary, so no amount of care here produces
+#    it. And "fail closed when the path cannot be established" degenerates: since the path
+#    can NEVER be established for an arbitrary launcher, fail-closed would mean REFUSE ALWAYS, and a
+#    guard that never permits a start is broken, not fail-closed. The verdict stays scoped to the path
+#    it can name, and the SCOPE is declared instead.
+# 8. WHY EXTRA PROBES WERE REJECTED, and not merely "not done" (lead ruling). Probing further candidate
+#    paths (other plausible `TMPDIR`s, a glob of lock-shaped names) would each add a place where a
+#    STALE directory permanently refuses every lane with NO REMEDY: since the classifier was deleted
+#    (see `supervisor_legacy_lock_presence`) this guard cannot tell a stale lock from a live one, so
+#    every additional probed path buys detection of a rarer live collision at the price of a permanent
+#    false refusal — which inverts the trade the refusal is worth making at ONE canonical path an
+#    operator can reason about. More probes would also manufacture exactly the appearance of
+#    completeness this block exists to deny.
+# 9. WHEN IT CLOSES: the SAME condition as #3596 and as this guard's own REMOVAL CONDITION above —
+#    every checkout a launcher can reach is at or past #3467, at which point no pre-#3467 supervisor can
+#    run under ANY `TMPDIR` or lock name. All THREE retire together; do not close one and leave the
+#    others' records standing.
+supervisor_legacy_lock_guard() {
+  # THIS GUARD ALWAYS RUNS. THERE IS NO SKIP AND NO OPT-OUT (#3549, lead ruling 2026-08-30 — AC4
+  # REMOVED AS UNSOUND).
+  #
+  # AC4 used to exempt a run whose `SUPERVISOR_LOCK` was named by the caller, on the reasoning that
+  # such an operator had taken the placement decision. The reasoning does not hold: an explicit
+  # `SUPERVISOR_LOCK` renames OUR lock, and a pre-#3467 supervisor uses the machine-global path
+  # REGARDLESS — it has never heard of the variable — so the exemption skipped the check in exactly the
+  # case where the collision is still LIVE. A naming choice is not an isolation guarantee. Deleted with
+  # it: the tri-state provenance, its pinned path partner, and every early return here that read them.
+  #
+  # AND THE SUBJECT IS READ HERE, AT GUARD TIME, IN THE SAME BREATH AS THE DECISION IT FEEDS (#3549,
+  # roborev job 218 — unexpressible rather than patched). That finding was that the per-lane lock path
+  # was PINNED at first resolution while the legacy path was recomputed from the CURRENT `TMPDIR`, so a
+  # wrapper that changed `TMPDIR` between the two moments made the recorded provenance describe one
+  # path while the check looked at another. There is no longer a record, a pinned partner, or a second
+  # moment: this line is the only place a legacy path is computed, and its value cannot disagree with a
+  # decision taken elsewhere because no decision is taken elsewhere. `TMPDIR` at guard time is also the
+  # RIGHT reading on its own terms — a pre-#3467 supervisor derives the machine-global name from the
+  # environment it starts in, which our own resolution moment says nothing about.
+  local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state shown=""
+  # A PROBE THAT COULD NOT ANSWER IS A REFUSAL, NEVER A SILENT EXIT (#3549, roborev job 201 F3).
+  # The probe returns 0 on every path it takes, but under a caller with `inherit_errexit` any
+  # unforeseen non-zero inside the `$( )` makes THIS ASSIGNMENT non-zero, and with the script's own
+  # `set -e` that ends the whole supervisor with no message at all — a start neither permitted nor
+  # explained. This is the fail-closed backstop, and it lands in the `could-not-tell` branch, which
+  # refuses.
+  state="$(supervisor_legacy_lock_presence "$legacy")" || state="could-not-tell presence-probe-exited-nonzero"
+  case "$state" in
+    verified-absent)
+      # THE PROCEED PATH STATES WHAT WAS CHECKED, BECAUSE A BARE ABSENCE INVITES A FALSELY REASSURING
+      # NEGATIVE (#3549, roborev job 222 F1 — lead ruling: DECLARE THE SCOPE, change no detection
+      # logic). This branch used to be silent. Silence is not itself a false claim, but the guard runs
+      # on every start and an operator reading a clean start reasonably concludes "no pre-#3467
+      # supervisor can be holding a lock here" — which is NOT what was established. What WAS
+      # established is narrower, and the line says exactly it: ONE path was tested, and that path was
+      # derived from THIS process's `TMPDIR`. A pre-#3467 supervisor launched with a different `TMPDIR`,
+      # or with its own lock path named by its launcher, holds a path this check never looks at. That is
+      # the SPATIAL gap recorded in the RESIDUAL block above; it is stated here, in the operator's own
+      # output, because the RESIDUAL block is read by whoever edits this file and this line is read by
+      # whoever runs it.
+      #
+      # ONE LINE, at the level `log` already uses for startup facts, and only here — the refusing
+      # branches already NAME the path they found, so they assert no completeness that needs qualifying
+      # beyond the relationship line in the emitter. The path is rendered so a `TMPDIR` containing a
+      # control character cannot split this into two physical lines (the same contract the refusal
+      # emitter holds; `log` is `printf`-based, so `xpg_echo` cannot reinterpret the escape either).
+      # `|| true` because an assignment-from-substitution is an errexit abort site and a rendering that
+      # could not be made must cost the FIELD, never the line.
+      #
+      # IT NAMES NO VARIABLE. Job 208 F1's rule is about refusals, but the reason generalises: a line
+      # printed on every successful start is the most-read text this guard has, and there is no opt-out
+      # to advertise in it either (AC4 removed as unsound). The launcher, not the variable, is what an
+      # operator can act on.
+      shown="$(supervisor_shell_quote "$legacy")" || true
+      log "legacy-lock check: nothing at $shown, which is the ONLY path this check tested — it is the pre-#3467 machine-global lock name as THIS process's \${TMPDIR:-/tmp} resolves it. A pre-#3467 supervisor started under a different TMPDIR, or with its lock path named by its own launcher, would hold a path this check does not see; and one that starts after this moment is not stopped by it either (#3549 spatial gap, #3596 later-start gap)."
+      return 0
+      ;;
+    present)
+      # THE REFUSAL CLAIMS NOTHING ABOUT WHAT IS THERE (#3549, lead ruling). It does not say the holder
+      # is dead, it does not say the holder is alive, it does not say the object is a lock, and it does
+      # not promise that removing it will succeed — because this guard did not look. Every sentence
+      # below is a statement about what WE did, or an instruction whose precondition the OPERATOR must
+      # establish. The previous version's `live`/`stale` wordings asserted a process's fate from a bare
+      # pid, and each such assertion cost a review round.
+      #
+      # WHY A COMMAND IS PRINTED AT ALL, AND WHY IT IS READ-ONLY. The refusal's entire content is
+      # "something is at this path and we deliberately did not look inside", so the operator's next
+      # question is necessarily "what IS it?" — and that is precisely the question a read-only line can
+      # answer without this guard making a single claim. It is also the only shape whose mis-paste is
+      # harmless: `ls` cannot destroy anything, so the worst outcome is an uninformative line. (Same
+      # reasoning that kept the read-only `ps -p` line in the deleted `live` branch, and the exact
+      # opposite of the deletion line, which was measurably destructive on a symlink — see above.)
+      # `ls -ldn` names the OBJECT without following a symlink (link vs directory vs plain file);
+      # `ls -lna` then shows the CONTENTS when it is a directory. Measured rc=0 on all three shapes, so
+      # the line is not noise on any of them. `--` because the path is `TMPDIR`-derived and an
+      # option-shaped one would otherwise be parsed as flags (quoting is not option-safety); paths are
+      # rendered through `supervisor_shell_quote` so the line is paste-safe and stays on ONE physical
+      # line; and it is the FOURTH argument, so the emitter prints it BARE on its own line rather than
+      # inlined in prose where pasting it would append prose words as operands.
+      #
+      # NO REMOVAL COMMAND IS PRINTED, DELIBERATELY. A removal that is correct depends on what the
+      # object is, which is the thing we chose not to determine; and printing one would be an implicit
+      # claim that removal is safe now. The prose says removal is the operator's call once they have
+      # established the precondition, and says what makes it safe when they do (non-recursive, so it
+      # cannot silently delete contents nobody examined).
+      supervisor_legacy_lock_refuse "$legacy" "a path EXISTS there (this guard tests for EXISTENCE ONLY — it does not open, read, enumerate or inspect that path, so it makes NO claim about what the object is, whether any holder is alive, or whether removing it would be safe)" \
+        "PRECONDITION FIRST — stop the pre-#3467 supervisor(s) on this box, or upgrade that checkout past #3467. That path becomes removable only once YOU have established that no pre-#3467 supervisor can run here; this guard has established no such thing, and it has NOT verified that any removal will succeed. Removing it before the precondition frees the legacy name for a pre-#3467 supervisor to take at once, which is the concurrency this refusal exists to prevent. To see WHAT is actually there, run the next line, on its own, exactly as printed — it only reads. If you then remove the path, use a NON-RECURSIVE removal (rmdir refuses a non-empty directory) so nothing you have not examined is deleted" \
+        "ls -ldn -- $(supervisor_shell_quote "$legacy") && ls -lna -- $(supervisor_shell_quote "$legacy")"
+      ;;
+    *)
+      # THE CAUSE SAYS THE PROBE FAILED — IT DOES NOT SAY A LOCK EXISTS (#3549, lead ruling). "Cannot
+      # tell" and "something is there" are different facts with different remedies, and reporting the
+      # first as the second would send an operator hunting for a lock that may not exist. The refusal
+      # is identical in force, and only in force.
+      supervisor_legacy_lock_refuse "$legacy" "THE EXISTENCE PROBE FAILED (${state#could-not-tell }) — this is NOT a report that a legacy lock exists; it is a report that this run could not decide whether one does, and 'cannot tell' is a refusal here, never a green light" \
+        "make the question decidable and re-run: the container directory named in the cause must exist and be SEARCHABLE by this user (mode +x — the probe stats a known child name and never enumerates, so read permission is not needed). Until then a legacy lock sitting at that path would be invisible to this check"
+      ;;
+  esac
 }
 
 acquire_lock() {
@@ -1372,6 +1932,12 @@ acquire_lock() {
   # them would leave them on a stale inference.
   supervisor_resolve_lane_id
   supervisor_lock_path
+  # BEFORE any side effect (#3549). A refusal must leave nothing behind it: `supervisor_claim_actor`
+  # EXPORTS an actor into the environment and `supervisor_migrate_legacy_claim` performs a CAS ADOPT
+  # that pushes a ref to origin — neither is something a supervisor that is about to refuse to start
+  # should have done. It runs after `supervisor_lock_path` only so the refusal can NAME our own lock
+  # path in its diagnostic; the guard's VERDICT depends on nothing that call produces.
+  supervisor_legacy_lock_guard
   supervisor_claim_actor
   supervisor_migrate_legacy_claim
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
@@ -1379,6 +1945,16 @@ acquire_lock() {
     trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT
     return 0
   fi
+  # KNOWN RESIDUAL, recorded at the site (#3549 class sweep): this pid is used UNPARSED, the liveness
+  # test below is TWO-VALUED (a `kill -0` failing with EPERM — a live process owned by another user —
+  # reads as dead and the lock is RECLAIMED), and the message asserts "another instance" without
+  # corroborating the process identity. Out of scope for #3549 (a different lock, with reclaim
+  # semantics of its own), not an oversight. The three-valued liveness probe that used to be quoted
+  # here was DELETED with the legacy classifier (lead's second ruling), so this residual now stands on
+  # its own description rather than pointing at code.
+  # FOURTH SHAPE, same scope decision (#3549, job 205 F2 sweep): this lock's own refusals below still
+  # emit with `echo` and interpolate an unrendered `$SUPERVISOR_LOCK`, so they inherit `xpg_echo` and a
+  # control character in `TMPDIR` exactly as the legacy guard's did before F2. Listed, not fixed here.
   local holder_pid=""
   [[ -f "$SUPERVISOR_LOCK/pid" ]] && holder_pid="$(cat "$SUPERVISOR_LOCK/pid" 2>/dev/null || true)"
   if [[ -n "$holder_pid" ]] && kill -0 "$holder_pid" 2>/dev/null; then

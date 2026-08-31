@@ -112,6 +112,52 @@ impl ScanTokenBound {
     }
 }
 
+/// The token range applied to a walk whose signature does not take one.
+///
+/// [`SSTableReader::stream_all_partitions_for_query`] pushes its
+/// [`ScanTokenBound`] into the Summary-guided walk, which skips an out-of-range
+/// partition body rather than decoding it. Its full-ring fallback routes take no
+/// bound, so this gate applies the range to their emit instead. Correctness is
+/// then a property of the call rather than of which route the reader chose, which
+/// matters most for a BTI (`da`) reader: it fails the Summary-guided gate on every
+/// call, so the fallback is its only route (issue #3358).
+///
+/// The verdict is computed once per partition, not once per row. A token is a
+/// property of the partition key, and a walk emits a partition's rows
+/// consecutively, so a per-row hash would charge every row for an answer that
+/// changes at a partition boundary.
+struct TokenGate {
+    bound: Option<ScanTokenBound>,
+    /// The key `admits` below was computed for.
+    last: Option<std::sync::Arc<[u8]>>,
+    admits: bool,
+}
+
+impl TokenGate {
+    fn new(bound: Option<ScanTokenBound>) -> Self {
+        // `admits` starts true so an unbounded walk answers without touching
+        // `last` at all.
+        Self {
+            bound,
+            last: None,
+            admits: true,
+        }
+    }
+
+    /// Whether this row's partition is inside the range.
+    fn admits(&mut self, key: &std::sync::Arc<[u8]>) -> bool {
+        let Some(bound) = self.bound else {
+            return true;
+        };
+        if self.last.as_ref().is_none_or(|last| last != key) {
+            let token = crate::util::cassandra_murmur3::cassandra_murmur3_token(key);
+            self.admits = bound.contains(token);
+            self.last = Some(key.clone());
+        }
+        self.admits
+    }
+}
+
 impl SSTableReader {
     /// The `Index.db` path SIBLING of this reader's CURRENT `Data.db` path (issue
     /// #2412 §C, #2383-aware). Derived from [`Self::file_path`] (the ArcSwap that a
@@ -588,8 +634,20 @@ impl SSTableReader {
                  compaction stream (issue #2412)."
             );
         }
-        // Full-ring fallback (no usable summary/index): the downstream token filter
-        // still bounds the result set, so correctness holds without pushdown.
+        // Full-ring fallback: the routes below take no `token_bound` in their
+        // signatures, so the range is applied to their emit instead of being
+        // dropped (issue #3358). A BTI (`da`) reader reaches this fallback on
+        // EVERY call — `bti_partitions_db.is_some()` fails the gate above — so
+        // before this it was not a fallback for that format but the only route,
+        // and `stream_all_partitions_for_query(.., Some(bound), ..)` returned the
+        // whole ring. An `nb` generation holding the same rows returned exactly
+        // the range, which `issue_2412_wraparound_scan.rs` pins with
+        // `assert_eq!`, so the two formats disagreed about what the parameter
+        // means.
+        //
+        // The gate is applied here, once, rather than inside each route: it is
+        // the boundary the caller's range was handed to, and the two routes below
+        // reach three different walk implementations between them.
         //
         // QUERY-ARM caller-schema fidelity (issue #3097): the summary-guided walk
         // above honours the caller's authoritative `schema`, but this fallback
@@ -610,6 +668,13 @@ impl SSTableReader {
         // `stream_all_partitions_for_compaction`, whose stitch/BTI decode already
         // honours the passed `schema` (`schema.cloned().or_else(...)`), so no
         // divergence is introduced there.
+        let mut gate = TokenGate::new(token_bound);
+        let mut emit = move |row: super::super::compaction_row::CompactionRow| {
+            if !gate.admits(&row.key.0) {
+                return Ok(ControlFlow::Continue(()));
+            }
+            emit(row)
+        };
         if self.requires_chunk_stitching() || self.bti_partitions_db.is_some() {
             return self
                 .stream_all_partitions_for_compaction(schema, scan_cancel, emit)
@@ -682,5 +747,66 @@ mod tests {
             !wrap.can_stop_past(i64::MAX),
             "a wraparound range never early-stops a forward walk"
         );
+    }
+
+    /// The gate's own tests. The end-to-end pin, over a Cassandra-written BTI
+    /// generation through `stream_all_partitions_for_query`, is
+    /// `tests/issue_3358_bti_query_token_bound.rs`; these cover the parts that
+    /// file cannot isolate.
+    mod token_gate {
+        use super::super::{ScanTokenBound, TokenGate};
+        use crate::util::cassandra_murmur3::cassandra_murmur3_token;
+        use std::sync::Arc;
+
+        fn key(bytes: &[u8]) -> Arc<[u8]> {
+            Arc::from(bytes.to_vec().into_boxed_slice())
+        }
+
+        #[test]
+        fn no_bound_admits_every_key() {
+            let mut gate = TokenGate::new(None);
+            for bytes in [&b"a"[..], b"b", b"a"] {
+                assert!(gate.admits(&key(bytes)));
+            }
+        }
+
+        #[test]
+        fn a_bound_admits_its_own_partition_only() {
+            let inside = key(b"inside");
+            let outside = key(b"outside");
+            let token = cassandra_murmur3_token(&inside);
+            let bound = ScanTokenBound {
+                start_excl: token - 1,
+                end_incl: token,
+                wraparound: false,
+            };
+            assert!(
+                !bound.contains(cassandra_murmur3_token(&outside)),
+                "the two keys must fall either side of the bound, or this case \
+                 cannot discriminate"
+            );
+            let mut gate = TokenGate::new(Some(bound));
+            assert!(gate.admits(&inside));
+            assert!(!gate.admits(&outside));
+        }
+
+        /// The memo holds one key's verdict, so it must be recomputed the moment
+        /// the key changes — including when the walk returns to a key it has seen.
+        #[test]
+        fn the_memo_follows_the_partition_boundary() {
+            let inside = key(b"inside");
+            let outside = key(b"outside");
+            let token = cassandra_murmur3_token(&inside);
+            let mut gate = TokenGate::new(Some(ScanTokenBound {
+                start_excl: token - 1,
+                end_incl: token,
+                wraparound: false,
+            }));
+            let verdicts: Vec<bool> = [&inside, &inside, &outside, &outside, &inside]
+                .into_iter()
+                .map(|k| gate.admits(k))
+                .collect();
+            assert_eq!(verdicts, vec![true, true, false, false, true]);
+        }
     }
 }

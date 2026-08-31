@@ -1,0 +1,339 @@
+//! Issue #3358: `stream_all_partitions_for_query` must narrow to its
+//! `token_bound` on a BTI (`da`) reader, as it already does on an `nb` one.
+//!
+//! `ScanTokenBound::contains` is called in one place, the Summary-guided walk in
+//! `summary_scan/mod.rs`, and `stream_all_partitions_for_query` gates that walk on
+//! `self.index_reader.is_some() && self.bti_partitions_db.is_none() &&
+//! summary_usable`. Every BTI generation has a `Partitions.db`, so the second term
+//! is false for every `da` reader on every call: the "full-ring fallback" below the
+//! gate is not a fallback for that format but its only route. Both routes there
+//! (`stream_all_partitions_for_compaction` and `stream_all_partitions_cancellable`)
+//! take no bound in their signatures, so the caller's range was accepted and
+//! dropped, with no error and no WARN, and the call returned the whole ring.
+//!
+//! The asymmetry is what makes this a defect rather than a documented pushdown
+//! hint. `issue_2412_wraparound_scan.rs` drives the SAME public surface over an
+//! `nb` generation and pins its narrowing with `assert_eq!`: "a non-wraparound
+//! range must emit exactly its one contiguous segment". So one parameter meant two
+//! different things depending on the file format underneath, and a consumer that
+//! splits a scan by token range read every row once per split.
+//!
+//! Why no existing test caught it: every token-bound test builds its generation
+//! with `WriteEngine`, which writes `Summary.db`/`Index.db` and never a BTI
+//! generation. This test reads a COMMITTED, Cassandra-5.0.2-written `da` fixture
+//! instead, so the route under test is the one a Cassandra 5 node's files take.
+//!
+//! # Oracle
+//!
+//! The expected partitions are derived, never assumed. `test_da`'s
+//! `wide_multiclustering_small` fixture is 600 rows over 5 single-`int`-PK
+//! partitions, and its committed `sstabledump -l` golden records both numbers; the
+//! golden is re-read here, so a regenerated corpus fails loudly rather than
+//! quietly weakening the assertions. Each bound's expected set is then computed
+//! from `cassandra_murmur3_token` over the fixture's actual keys, and every case
+//! asserts that the bound genuinely excludes at least one partition — otherwise
+//! "the whole ring" and "the range" would be the same answer and the test could
+//! not discriminate.
+//!
+//! Requires the gitignored `Data.db` binaries; SKIPs (never passes with zero rows)
+//! when absent. `CQLITE_DATASETS_ROOT` is honored first, else the in-repo
+//! `test-data/datasets` corpus is used.
+
+#![cfg(feature = "state_machine")]
+
+use std::collections::BTreeMap;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use cqlite_core::platform::Platform;
+use cqlite_core::schema::{parse_cql_schema, TableSchema};
+use cqlite_core::storage::scan_cancel::ScanCancel;
+use cqlite_core::storage::sstable::reader::{SSTableReader, ScanTokenBound};
+use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
+use cqlite_core::Config;
+
+const KEYSPACE: &str = "test_da";
+const TABLE: &str = "wide_multiclustering_small";
+const SSTABLE_PREFIX: &str = "da-1-bti";
+
+/// Repo root = the parent of this crate's manifest dir (`<repo>/cqlite-core`).
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("cqlite-core has a parent repo dir")
+        .to_path_buf()
+}
+
+/// The `<table>-<cfid>` generation dir, requiring a real `Data.db` so a JSONL-only
+/// checkout SKIPs rather than passing with zero rows.
+fn fixture_dir() -> Option<PathBuf> {
+    let roots = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(std::iter::once(repo_root().join("test-data/datasets")));
+    for root in roots {
+        let keyspace_dir = root.join("sstables").join(KEYSPACE);
+        let Ok(entries) = std::fs::read_dir(&keyspace_dir) else {
+            continue;
+        };
+        let mut candidates: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&format!("{TABLE}-")))
+            })
+            .collect();
+        candidates.sort();
+        if let Some(dir) = candidates
+            .into_iter()
+            .find(|p| p.join(format!("{SSTABLE_PREFIX}-Data.db")).is_file())
+        {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// The DDL of the fixture, as `test-data/schemas/wide-multiclustering-small-bti.cql`
+/// declares it. A single `int` partition key, so a partition is labelled here by
+/// the 4-byte big-endian value its raw key holds.
+fn schema() -> TableSchema {
+    let cql = format!(
+        "CREATE TABLE {KEYSPACE}.{TABLE} (\
+             pk int, bucket text, seq int, payload text, \
+             PRIMARY KEY (pk, bucket, seq));"
+    );
+    parse_cql_schema(&cql).expect("parse the fixture schema")
+}
+
+/// Rows per partition, as Cassandra's own `sstabledump -l` recorded them.
+///
+/// The oracle is a dump of Cassandra-written bytes, never CQLite output (#3042).
+/// One line of the golden is one PARTITION and each `"type":"row"` within it one
+/// row, so the two are counted separately: a range that emits the right partitions
+/// with the wrong row counts is still wrong.
+fn golden_rows_by_pk(dir: &Path) -> BTreeMap<i32, usize> {
+    let golden = dir.join(format!("{SSTABLE_PREFIX}-Data.db.jsonl"));
+    let text = std::fs::read_to_string(&golden)
+        .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
+    let mut by_pk = BTreeMap::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        // `"key":["3"]` — one component, the `int` PK rendered as decimal text.
+        let marker = "\"key\":[\"";
+        let start = line
+            .find(marker)
+            .unwrap_or_else(|| panic!("golden line carries a partition key: {line}"))
+            + marker.len();
+        let end = start
+            + line[start..]
+                .find('"')
+                .unwrap_or_else(|| panic!("golden partition key is quoted: {line}"));
+        let pk: i32 = line[start..end].parse().unwrap_or_else(|e| {
+            panic!("golden partition key {} is an int: {e}", &line[start..end])
+        });
+        let rows = line.matches("\"type\":\"row\"").count();
+        assert!(rows > 0, "golden partition {pk} must hold at least one row");
+        assert!(
+            by_pk.insert(pk, rows).is_none(),
+            "golden must record partition {pk} once"
+        );
+    }
+    assert!(
+        by_pk.len() > 2,
+        "the fixture needs three or more partitions for a range to exclude one; \
+         the golden records {}",
+        by_pk.len()
+    );
+    by_pk
+}
+
+async fn open_reader(data_db: &Path) -> SSTableReader {
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let reader = SSTableReader::open(data_db, &config, platform)
+        .await
+        .expect("open the BTI SSTable reader");
+    assert!(
+        reader.is_bti(),
+        "fixture {} must open as a BTI (`da`) reader, else the dropped bound is \
+         never exercised",
+        data_db.display()
+    );
+    reader
+}
+
+/// Drive `stream_all_partitions_for_query` and count the rows it emits per
+/// partition key.
+///
+/// This is the public surface a consumer that splits a scan by token range calls
+/// (`write_engine::merge::from_readers::drive_query_stream` reaches it through
+/// `KWayMerger::new_from_readers`), and the same one
+/// `issue_2412_wraparound_scan.rs` drives for an `nb` generation.
+async fn emitted_rows_by_pk(
+    reader: &SSTableReader,
+    token_bound: Option<ScanTokenBound>,
+) -> BTreeMap<i32, usize> {
+    let schema = schema();
+    let cancel = ScanCancel::default();
+    let mut by_pk: BTreeMap<i32, usize> = BTreeMap::new();
+    reader
+        .stream_all_partitions_for_query(Some(&schema), &cancel, token_bound, |row| {
+            let key_bytes: &[u8] = &row.key.0;
+            let pk = i32::from_be_bytes(key_bytes.try_into().expect("4-byte int PK"));
+            *by_pk.entry(pk).or_default() += 1;
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .expect("stream_all_partitions_for_query");
+    by_pk
+}
+
+/// The fixture, as the golden describes it.
+struct Fixture {
+    data_db: PathBuf,
+    /// `(partition key, rows)` in ascending token order, which is the order the
+    /// ring is divided in and so the order a range is chosen from.
+    ring: Vec<(i32, usize)>,
+    /// The same counts keyed by partition, for comparing against a whole scan.
+    golden: BTreeMap<i32, usize>,
+}
+
+/// The fixture's partitions in ring order, with the golden's row count each.
+///
+/// Returns `None` when the `Data.db` binaries are absent, which is the SKIP.
+fn fixture() -> Option<Fixture> {
+    let dir = fixture_dir()?;
+    let golden = golden_rows_by_pk(&dir);
+    let mut by_token: Vec<(i32, i64, usize)> = golden
+        .iter()
+        .map(|(&pk, &rows)| (pk, cassandra_murmur3_token(&pk.to_be_bytes()), rows))
+        .collect();
+    by_token.sort_by_key(|(_, token, _)| *token);
+    let ring: Vec<(i32, usize)> = by_token.iter().map(|(pk, _, rows)| (*pk, *rows)).collect();
+    Some(Fixture {
+        data_db: dir.join(format!("{SSTABLE_PREFIX}-Data.db")),
+        ring,
+        golden,
+    })
+}
+
+fn token_of(pk: i32) -> i64 {
+    cassandra_murmur3_token(&pk.to_be_bytes())
+}
+
+/// Control: the surface reads the whole fixture when no range is given, so a
+/// narrowed answer below is a narrowing rather than a failure to read.
+#[test]
+fn unbounded_scan_matches_the_golden() {
+    let Some(Fixture {
+        data_db, golden, ..
+    }) = fixture()
+    else {
+        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
+        return;
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reader = rt.block_on(open_reader(&data_db));
+    let got = rt.block_on(emitted_rows_by_pk(&reader, None));
+    assert_eq!(
+        got, golden,
+        "an unbounded scan must emit every partition of the fixture, with the row \
+         counts Cassandra's own dump records"
+    );
+}
+
+/// THE pin: a non-wraparound range must emit exactly its one contiguous segment,
+/// which is what the `nb` surface already guarantees.
+///
+/// Before the fix this returned all five partitions and all 600 rows for any
+/// range, so N consumers splitting the ring between them each read the whole
+/// table.
+#[test]
+fn non_wraparound_range_emits_only_its_segment() {
+    let Some(Fixture { data_db, ring, .. }) = fixture() else {
+        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
+        return;
+    };
+    // A mid-ring segment: every partition above the lowest and below the highest.
+    // The two it excludes are what makes the case discriminating.
+    let last = ring.len() - 1;
+    let start_excl = token_of(ring[0].0);
+    let end_incl = token_of(ring[last - 1].0);
+    assert!(
+        start_excl < end_incl,
+        "a non-wraparound pair must have start < end; got {start_excl} and {end_incl}"
+    );
+    let expected: BTreeMap<i32, usize> = ring[1..last].iter().copied().collect();
+    assert!(
+        !expected.is_empty() && expected.len() < ring.len(),
+        "the range must hold something and exclude something, else it cannot \
+         discriminate a narrowed scan from a full one"
+    );
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reader = rt.block_on(open_reader(&data_db));
+    let bound = ScanTokenBound {
+        start_excl,
+        end_incl,
+        wraparound: false,
+    };
+    let got = rt.block_on(emitted_rows_by_pk(&reader, Some(bound)));
+
+    assert_eq!(
+        got,
+        expected,
+        "a non-wraparound range over a BTI (`da`) generation must emit exactly its \
+         one contiguous segment ({} of {} partitions), as the `nb` surface does \
+         (issue_2412_wraparound_scan.rs). Emitting all {} means the bound reached \
+         the full-ring fallback and was dropped there",
+        expected.len(),
+        ring.len(),
+        ring.len()
+    );
+}
+
+/// The wraparound arm: both segments, and nothing between them.
+///
+/// `can_stop_past` refuses to early-stop on a wraparound range, so this also pins
+/// that the fix takes no early exit it is not entitled to.
+#[test]
+fn wraparound_range_emits_both_segments_and_nothing_between() {
+    let Some(Fixture { data_db, ring, .. }) = fixture() else {
+        eprintln!("SKIP: {KEYSPACE}.{TABLE} Data.db is absent (gitignored corpus)");
+        return;
+    };
+    // `(highest-but-one, MAX] ∪ [MIN, lowest]`: the highest partition and the
+    // lowest one, with everything between them excluded.
+    let last = ring.len() - 1;
+    let start_excl = token_of(ring[last - 1].0);
+    let end_incl = token_of(ring[0].0);
+    assert!(
+        start_excl > end_incl,
+        "a wraparound pair must have start > end; got {start_excl} and {end_incl}"
+    );
+    let expected: BTreeMap<i32, usize> = [ring[0], ring[last]].into_iter().collect();
+    assert!(
+        expected.len() == 2 && ring.len() > 3,
+        "both segments must hold a partition, and at least one partition must lie \
+         between them"
+    );
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reader = rt.block_on(open_reader(&data_db));
+    let bound = ScanTokenBound {
+        start_excl,
+        end_incl,
+        wraparound: true,
+    };
+    let got = rt.block_on(emitted_rows_by_pk(&reader, Some(bound)));
+
+    assert_eq!(
+        got, expected,
+        "a wraparound range must emit the partitions of BOTH segments and none of \
+         those between them"
+    );
+}
