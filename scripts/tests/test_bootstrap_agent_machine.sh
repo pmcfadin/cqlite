@@ -101,14 +101,11 @@ trap 'rm -rf "$tmp"' EXIT
 
 # Baseline for the hermeticity assertion at the end of the suite. Captured as
 # mode+mtime+content so a rewrite is caught even if it happens to restore the bytes.
+# Named only for the diagnostic below; never stat'd or hashed. The GNU-only `stat -c` /
+# `md5sum` snapshot that used to live here is gone with the shared-state observation it
+# served (#3414 roborev round 11) — those probes yield empty fields on macOS, where this
+# suite runs as part of a MANDATORY gate component.
 PIN_SHARED_CARGO=/usr/local/cargo/config.toml
-pin_shared_cargo_state() {
-  [ -e "$PIN_SHARED_CARGO" ] || { printf 'absent'; return 0; }
-  printf '%s %s %s' "$(stat -c '%a' "$PIN_SHARED_CARGO" 2>/dev/null)" \
-                    "$(stat -c '%Y' "$PIN_SHARED_CARGO" 2>/dev/null)" \
-                    "$(md5sum "$PIN_SHARED_CARGO" 2>/dev/null | cut -d' ' -f1)"
-}
-PIN_SHARED_CARGO_BEFORE=$(pin_shared_cargo_state)
 
 # --- ATTRIBUTABLE, NOT MERELY DETECTED (#3414 roborev round 10) ------------------------
 # The tripwire used to snapshot the shared file around the WHOLE suite, so ANY concurrent
@@ -133,25 +130,51 @@ export PIN_SHARED_VIOLATIONS="$tmp/shared-state-violations.log"
 PIN_BS="$tmp/pin-bs-guard"
 cat >"$PIN_BS" <<'PINBS'
 #!/usr/bin/env bash
-# pin-bs-guard <bootstrap-path> [args...] — run one bootstrap invocation and record any
-# change to the shared cargo config across THAT invocation. stdout/stderr and the exit
-# status pass through untouched: callers capture output and assert on rc.
-_st() {
-  [ -e "$PIN_SHARED_CARGO" ] || { printf 'absent'; return 0; }
-  printf '%s %s %s' "$(stat -c '%a' "$PIN_SHARED_CARGO" 2>/dev/null)"                     "$(stat -c '%Y' "$PIN_SHARED_CARGO" 2>/dev/null)"                     "$(md5sum "$PIN_SHARED_CARGO" 2>/dev/null | cut -d' ' -f1)"
-}
-_before=$(_st)
+# pin-bs-guard <bootstrap-path> [args...] — run one bootstrap invocation with its
+# HOST-REACHING INPUTS asserted, and record a violation if they are not sandboxed.
+# stdout/stderr and the exit status pass through untouched: callers capture output and
+# assert on rc.
+#
+# ASSERTS THE INPUTS, DOES NOT OBSERVE THE OUTPUT (#3414 roborev round 11). The previous
+# form snapshotted the SHARED /usr/local/cargo/config.toml either side of each invocation.
+# That was already attributable in the common case — a change outside every invocation
+# window was reported as another writer's, not ours — but it had two defects it could not
+# shed: an external write landing INSIDE one of our windows was still recorded as ours (a
+# narrower race is a smaller race, not attribution), and `stat -c`/`md5sum` are GNU-only,
+# so on macOS both probes yield empty fields, the mutation self-test cannot detect its own
+# deliberate write, and a MANDATORY gate component fails on that platform.
+#
+# The property we actually need is "no invocation can reach the shared path". Bootstrap
+# resolves its cargo config as `${CARGO_HOME:-$HOME/.cargo}/config.toml`, so if BOTH
+# CARGO_HOME and HOME point inside the suite sandbox, that path is unreachable BY
+# CONSTRUCTION — no window, no race, no platform-specific probe, and nothing another
+# writer on the box can affect. So assert the inputs.
+#
+# HONEST RESIDUAL, stated because input-assertion does not cover it: a future bootstrap
+# edit that writes an ABSOLUTE path while ignoring CARGO_HOME/HOME would not be caught
+# here. That is a different defect (a hardcoded destination rather than an unsandboxed
+# caller), and claiming this guard covers it would be the false-assurance shape this whole
+# branch is about. #3673 is where a destination-side guard belongs.
+_v=""
+case "${CARGO_HOME-}" in
+  '') _v="CARGO_HOME is unset, so bootstrap would resolve \${HOME}/.cargo — on this fleet HOME-derived or /etc/environment-derived paths reach the SHARED root-owned config" ;;
+  "$PIN_SANDBOX_ROOT"/*) ;;
+  *) _v="CARGO_HOME='$CARGO_HOME' is outside the suite sandbox ($PIN_SANDBOX_ROOT)" ;;
+esac
+if [ -z "$_v" ]; then
+  case "${HOME-}" in
+    '') _v="HOME is unset" ;;
+    "$PIN_SANDBOX_ROOT"/*) ;;
+    *) _v="HOME='$HOME' is outside the suite sandbox ($PIN_SANDBOX_ROOT)" ;;
+  esac
+fi
+[ -z "$_v" ] || printf 'invocation: %s\n  unsandboxed input: %s\n' "$*" "$_v" >>"$PIN_SHARED_VIOLATIONS"
 bash "$@"
-_rc=$?
-_after=$(_st)
-[ "$_before" = "$_after" ] || printf 'invocation: %s
-  before: %s
-  after:  %s
-'   "$*" "$_before" "$_after" >>"$PIN_SHARED_VIOLATIONS"
-exit $_rc
+exit $?
 PINBS
 chmod +x "$PIN_BS"
-export PIN_SHARED_CARGO
+PIN_SANDBOX_ROOT="$tmp"
+export PIN_SANDBOX_ROOT
 
 # --- 1. syntax check (bash -n) ---
 if bash -n "$BOOTSTRAP" 2>/dev/null; then
@@ -3616,22 +3639,24 @@ fi
 # legitimately touches the shared file, so the guard's ability to DETECT is otherwise never
 # exercised: a plant that neutered it left the suite green.
 #
-# So the guard is self-tested against a STAND-IN file, never the real one: point
-# PIN_SHARED_CARGO at a throwaway, have the wrapped command mutate it, and require a
-# violation to be recorded.
-pin_guard_probe="$tmp/guard-selftest-target"; printf 'x\n' >"$pin_guard_probe"
+# So the guard is self-tested by PLANTING THE DEFECT IT EXISTS FOR — an invocation whose
+# CARGO_HOME is not sandboxed — into a throwaway violations log. Both directions, because
+# a guard that fires unconditionally is as useless as one that never fires.
 pin_guard_log="$tmp/guard-selftest-violations.log"; : >"$pin_guard_log"
-PIN_SHARED_CARGO="$pin_guard_probe" PIN_SHARED_VIOLATIONS="$pin_guard_log" \
-  "$PIN_BS" -c 'printf "mutated\n" >>"$1"' _ "$pin_guard_probe" >/dev/null 2>&1
-pin_guard_clean="$tmp/guard-selftest-clean.log"; : >"$pin_guard_clean"
-PIN_SHARED_CARGO="$pin_guard_probe" PIN_SHARED_VIOLATIONS="$pin_guard_clean" \
+PIN_SHARED_VIOLATIONS="$pin_guard_log" HOME="$tmp/sb-selftest" \
+  env -u CARGO_HOME "$PIN_BS" -c 'true' >/dev/null 2>&1
+pin_guard_out="$tmp/guard-selftest-outside.log"; : >"$pin_guard_out"
+PIN_SHARED_VIOLATIONS="$pin_guard_out" HOME="$tmp/sb-selftest" CARGO_HOME=/usr/local/cargo \
   "$PIN_BS" -c 'true' >/dev/null 2>&1
-if [ -s "$pin_guard_log" ] && [ ! -s "$pin_guard_clean" ]; then
-  ok "host hygiene: the tripwire DETECTS a mutation across a wrapped invocation (and stays quiet without one)"
+pin_guard_clean="$tmp/guard-selftest-clean.log"; : >"$pin_guard_clean"
+PIN_SHARED_VIOLATIONS="$pin_guard_clean" HOME="$tmp/sb-selftest" CARGO_HOME="$tmp/sb-selftest/.cargo" \
+  "$PIN_BS" -c 'true' >/dev/null 2>&1
+if [ -s "$pin_guard_log" ] && [ -s "$pin_guard_out" ] && [ ! -s "$pin_guard_clean" ]; then
+  ok "host hygiene: the guard FIRES on an unset CARGO_HOME and on one outside the sandbox, and stays quiet on a sandboxed pair"
 else
-  bad "host hygiene: the tripwire cannot fire — case 14's 'nothing touched it' would be vacuous"
-  printf '  mutating run recorded: %s bytes; clean run recorded: %s bytes\n' \
-    "$(wc -c <"$pin_guard_log")" "$(wc -c <"$pin_guard_clean")"
+  bad "host hygiene: the input guard cannot fire (or fires unconditionally) — case 14 would be vacuous"
+  printf '  unset: %s bytes; outside: %s bytes; sandboxed: %s bytes\n' \
+    "$(wc -c <"$pin_guard_log")" "$(wc -c <"$pin_guard_out")" "$(wc -c <"$pin_guard_clean")"
 fi
 
 # --- 14. THIS SUITE MUST NOT TOUCH SHARED HOST STATE -----------------------------------
@@ -3639,20 +3664,14 @@ fi
 # reintroduce (a new case that sets HOME and forgets CARGO_HOME, or a `sudo` invocation
 # where the exported value is dropped by env_reset) and the cost lands on OTHER lanes as
 # unexplained red gates, which is the worst possible place for it to surface.
-# ATTRIBUTED, not inferred: this reports only changes observed across one of THIS suite's
-# own bootstrap invocations. A concurrent external writer no longer reds it, and a
-# reintroduced reach still does — with the offending invocation named.
-pin_shared_cargo_after=$(pin_shared_cargo_state)
+# ATTRIBUTED BY CONSTRUCTION, not inferred and not observed: the guard asserts each
+# invocation's CARGO_HOME and HOME are inside the sandbox, which makes the shared path
+# unreachable for bootstrap's `${CARGO_HOME:-$HOME/.cargo}` resolution. No external writer
+# can affect this verdict, and it needs no GNU-only probe, so it holds on macOS too.
 if [ ! -s "$PIN_SHARED_VIOLATIONS" ]; then
-  ok "host hygiene: no bootstrap invocation in this suite touched $PIN_SHARED_CARGO"
-  if [ "$pin_shared_cargo_after" != "$PIN_SHARED_CARGO_BEFORE" ]; then
-    # Deliberately an `info`, not a `bad`: the file moved while the suite ran but NOT
-    # across any invocation of ours, so it was someone else — a peer lane, an admin, a
-    # human at a prompt. Reporting it is useful; blaming ourselves for it is the defect.
-    info "note: $PIN_SHARED_CARGO changed during this run but NOT across any of our invocations — another writer on this box (before: $PIN_SHARED_CARGO_BEFORE / after: $pin_shared_cargo_after)"
-  fi
+  ok "host hygiene: every bootstrap invocation in this suite ran with sandboxed CARGO_HOME and HOME, so the shared cargo config was unreachable"
 else
-  bad "host hygiene: a bootstrap invocation in THIS suite mutated the shared $PIN_SHARED_CARGO — it breaks cargo for every other user on the box"
+  bad "host hygiene: a bootstrap invocation in THIS suite ran with an UNSANDBOXED CARGO_HOME or HOME, so it could reach the shared $PIN_SHARED_CARGO — that breaks cargo for every other user on the box"
   cat "$PIN_SHARED_VIOLATIONS"
 fi
 
