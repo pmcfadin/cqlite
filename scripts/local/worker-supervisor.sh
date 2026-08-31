@@ -2749,6 +2749,13 @@ run_iteration() {
   local deadline=$((t0 + MAX_ITER_SECS))
   local stuck_notified=0 g now
   local last_scan_ts=$t0 prev_size=-1 prev_sig=0 cur_size cur_sig
+  # SWEPT AND LEFT TWO-VALUED, DELIBERATELY (#3601 call-site audit). `#3601` made the LOCK's liveness
+  # probe three-valued because that pid comes off DISK, from a process we have never seen, possibly
+  # owned by another user — so `kill -0` failing there could mean EPERM and reading it as death stole a
+  # live holder's lock. None of that applies here: `$wpid` is the pid of a child THIS SHELL just forked,
+  # same uid, same session, so EPERM is not reachable and a non-zero `kill -0` means exactly one thing.
+  # Recorded so a later sweep of the `kill -0` sites does not "fix" a correct one — the three-valued
+  # probe belongs where the pid's provenance is untrusted, not everywhere the primitive appears.
   while kill -0 "$wpid" 2>/dev/null; do
     now=$(date +%s)
     if [[ "$now" -ge "$deadline" ]]; then
