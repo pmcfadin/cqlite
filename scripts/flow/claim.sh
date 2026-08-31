@@ -377,6 +377,31 @@ msg_field() {
   return 0
 }
 
+# msg_rest_field <line> <key> — the value of `<key>=` taken as THE REST OF THE LINE.
+#
+# For the ONE field that may legitimately contain spaces: a lane DIRECTORY is a real
+# filesystem path. lane-lock.sh emits `lane-dir=` LAST on every machine-read line for
+# exactly this reason, so "rest of line" is well-defined. A space-delimited word scan
+# turned `/data/my lanes/lane-5` into `/data/my`, and AC5 then reported `no-lane-dir` for
+# a lane that WAS locked and occupied — a false clean, from a parser, about the lock whose
+# whole job is to prevent false cleans (#3436 FIX 9b).
+#
+# It is anchored the same way msg_field is: the key must start the line or be preceded by
+# a space, so `holder-lane-dir=` can never answer for `lane-dir`. Only the FIRST match is
+# taken.
+msg_rest_field() {
+  local line="$1" key="$2" rest
+  case "$line" in
+    "$key"=*) printf '%s\n' "${line#"$key"=}"; return 0 ;;
+    *" $key="*)
+      rest="${line#*" $key="}"
+      printf '%s\n' "$rest"
+      return 0
+      ;;
+  esac
+  return 0
+}
+
 # remote_claim_sha <N> — SHA of refs/claims/issue-<N> on origin ("" if absent).
 # Best-effort: an ls-remote failure yields "" (not a hard error) so callers that
 # only need "is there a holder" never trip `set -e`; use remote_claim_lookup when
@@ -619,6 +644,7 @@ LANE_LOCK_HOLDER_MACHINE=""
 LANE_LOCK_HOLDER_PID=""
 LANE_LOCK_HOLDER_TOKEN=""      # the record's holder token, verbatim from the probe
 LANE_LOCK_OUR_TOKEN=""         # the probe's OWN token for this session
+LANE_LOCK_OUR_IDENTITY=""      # session|explicit|UNRESOLVED, verbatim from the probe
 LANE_LOCK_OUR_MACHINE=""       # lane-lock.sh's OWN idea of this machine
 
 # lane_lock_available — 0 iff the sibling script is present and readable. It is
@@ -632,12 +658,17 @@ lane_lock_available() {
 # failure is a degraded REPORT, never a claim failure. Memoized per issue so the
 # four HELD emit sites cost one probe.
 lane_lock_probe() {
-  local issue="$1" rc=0 out="" line="" verdict=""
-  if [ "$LANE_LOCK_PROBED" = "$issue" ]; then return 0; fi
-  LANE_LOCK_PROBED="$issue"
+  # THE ACTOR IS PASSED THROUGH (#3436 FIX 13g). The lane lock's holder identity includes
+  # the actor, so probing under the default `flow` while the claim runs as another actor
+  # made a lane locked by THIS session read as a live PEER's — the same false sentence
+  # FIX 7 exists to remove, one field over. The memo is keyed on both.
+  local issue="$1" actor="${2:-${LANE_LOCK_ACTOR:-flow}}" rc=0 out="" line="" verdict=""
+  if [ "$LANE_LOCK_PROBED" = "$issue:$actor" ]; then return 0; fi
+  LANE_LOCK_PROBED="$issue:$actor"
   LANE_LOCK_STATE=""; LANE_LOCK_DIR=""; LANE_LOCK_LIVENESS=""
   LANE_LOCK_HOLDER=""; LANE_LOCK_HOLDER_MACHINE=""; LANE_LOCK_OUR_MACHINE=""
   LANE_LOCK_HOLDER_PID=""; LANE_LOCK_HOLDER_TOKEN=""; LANE_LOCK_OUR_TOKEN=""
+  LANE_LOCK_OUR_IDENTITY=""
 
   if ! lane_lock_available; then
     LANE_LOCK_STATE="unmeasured(lane-lock-script-unreadable)"
@@ -648,9 +679,9 @@ lane_lock_probe() {
   # and skipped when absent — a missing timeout is not a reason to skip the
   # report, and the probe reads local files only (no git, no gh, no network).
   if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout 20 bash "$LANE_LOCK_SH" probe "$issue" 2>/dev/null)" || rc=$?
+    out="$(timeout 20 bash "$LANE_LOCK_SH" probe "$issue" --actor "$actor" 2>/dev/null)" || rc=$?
   else
-    out="$(bash "$LANE_LOCK_SH" probe "$issue" 2>/dev/null)" || rc=$?
+    out="$(bash "$LANE_LOCK_SH" probe "$issue" --actor "$actor" 2>/dev/null)" || rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     LANE_LOCK_STATE="unmeasured(probe-exit-$rc)"
@@ -664,13 +695,19 @@ lane_lock_probe() {
     return 0
   fi
   verdict="$(printf '%s\n' "${line#LANE-LOCK: }" | awk '{print $1}')" || verdict=""
-  LANE_LOCK_DIR="$(msg_field "$line" lane-dir)"
+  # lane-dir is read as the REST OF THE LINE, not as a space-delimited word: it is the
+  # one field that can contain spaces (a real filesystem path), and lane-lock.sh emits it
+  # LAST for exactly this reason. A word scan turned `/data/my lanes/lane-N` into
+  # `/data/my`, so AC5 reported `no-lane-dir` for a lane that WAS locked and occupied
+  # (#3436 FIX 9b).
+  LANE_LOCK_DIR="$(msg_rest_field "$line" lane-dir)"
   LANE_LOCK_LIVENESS="$(msg_field "$line" liveness)"
   # lane-lock.sh's own machine token, taken from the `our-token` it printed, so
   # the holder-vs-us comparison below is apples-to-apples. CLAIM_MACHINE is a
   # DIFFERENT namespace's identity (and tests deliberately override it), so it is
   # never used to answer a question about the lane lock.
   LANE_LOCK_OUR_TOKEN="$(msg_field "$line" our-token)"
+  LANE_LOCK_OUR_IDENTITY="$(msg_field "$line" our-identity)"
   LANE_LOCK_OUR_MACHINE="$(printf '%s' "$LANE_LOCK_OUR_TOKEN" | cut -d: -f1)"
 
   case "$verdict" in
@@ -707,7 +744,19 @@ lane_lock_probe() {
         # `lane-lock=occupied-alive` in a log unable to tell the two apart, which
         # was the implementer's own recorded residual.
         SELF)        LANE_LOCK_STATE="self" ;;
-        ALIVE)       LANE_LOCK_STATE="occupied-alive" ;;
+        ALIVE)
+          # `occupied-alive` ASSERTS the occupant is someone else. That is only knowable
+          # when this run resolved its OWN identity: with an unresolved identity our token
+          # matches nobody, so our OWN lock also reads ALIVE (#3436 FIX 7). Reporting
+          # `occupied-alive` there is a false accusation on a routine path — claim.sh
+          # normally runs from the ROOT checkout, where no durable in-lane process exists
+          # — so the undetermined case gets its OWN state and says so.
+          if lane_lock_identity_established; then
+            LANE_LOCK_STATE="occupied-alive"
+          else
+            LANE_LOCK_STATE="occupied-alive-unattributed"
+          fi
+          ;;
         DEAD-*)      LANE_LOCK_STATE="reclaimable-$(sanitize_field "$LANE_LOCK_LIVENESS")" ;;
         UNKNOWN-*)   LANE_LOCK_STATE="occupied-unknown-$(sanitize_field "$LANE_LOCK_LIVENESS")" ;;
         # Fail closed toward OCCUPIED: a verdict word this mapping does not know
@@ -736,6 +785,14 @@ lane_lock_probe() {
       ;;
   esac
   case "$LANE_LOCK_STATE" in
+    occupied-alive-unattributed)
+      # DELIBERATELY DIFFERENT WORDING: this run could not establish its own identity, so
+      # it does not know whether the live holder is this session or a peer. Saying "if
+      # that occupant is not you" would be honest; saying it is occupied BY SOMEONE ELSE
+      # would not be, and that is the sentence being removed.
+      note "lane-lock: a LIVE process holds that lane, and this run could NOT establish whether it is YOU — $LANE_LOCK_HOLDER"
+      note "lane-lock: our-identity=${LANE_LOCK_OUR_IDENTITY:-unstated} (an acquire/probe can only identify the session process when its cwd is inside the lane, or when --pid names it). This is a WARNING ONLY; the claim verdict below is unaffected. Establish it before writing: run 'lane-lock.sh verify <N>' from INSIDE the lane directory. If the holder is NOT you, do NOT write there — two sessions in one worktree is #3436, and 'git add -A' launders one session's work into the other's commit."
+      ;;
     occupied-*)
       note "lane-lock: the lane DIRECTORY is ALREADY OCCUPIED — $LANE_LOCK_HOLDER"
       note "lane-lock: this is a WARNING ONLY; the claim verdict below is unaffected. If that occupant is not you, do NOT write in that lane directory — two sessions in one worktree is #3436, and 'git add -A' there launders one session's work into the other's commit."
@@ -748,9 +805,21 @@ lane_lock_probe() {
   return 0
 }
 
-# lane_lock_field <N> — the `lane-lock=<state>` token for a verdict line.
+# lane_lock_identity_established — did the PROBE resolve its own durable identity? The
+# permissive branch is keyed on the AFFIRMATIVE values (CLAUDE.md's affirmative-measurement
+# rule): an empty field (an older lane-lock.sh that does not emit it) or any value this
+# does not recognise is NOT established, so a claim about the occupant's identity is never
+# derived from a field that was never read.
+lane_lock_identity_established() {
+  case "${LANE_LOCK_OUR_IDENTITY:-}" in
+    session | explicit) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# lane_lock_field <N> [actor] — the `lane-lock=<state>` token for a verdict line.
 lane_lock_field() {
-  lane_lock_probe "$1"
+  lane_lock_probe "$1" "${2:-}"
   printf 'lane-lock=%s' "${LANE_LOCK_STATE:-unmeasured(not-probed)}"
 }
 
@@ -769,12 +838,20 @@ lane_lock_field() {
 #                                            `released-then-resumed` ("the branch is
 #                                            almost certainly YOUR OWN").
 #                                            -> LANE_LOCAL_VERDICT=self
-#   (b) probe says ALIVE, the holder machine is lane-lock.sh's own machine, AND the
-#       holder token differs from ours     -> a live process ON THIS BOX owns the lane
+#   (b) probe says ALIVE, the holder machine is lane-lock.sh's own machine, the probe
+#       ESTABLISHED ITS OWN IDENTITY (`our-identity=session|explicit`), AND the holder
+#       token differs from ours           -> a live process ON THIS BOX owns the lane
 #                                            and it is NOT US. That is #3436's own
 #                                            scenario, and its remedy is the OPPOSITE
 #                                            of (a)'s: find that session, do not adopt.
 #                                            -> LANE_LOCAL_VERDICT=live-peer
+#       THE OWN-IDENTITY CLAUSE IS LOAD-BEARING (#3436 FIX 7): with an unresolved
+#       identity our token matches NOBODY, so our OWN lane also reads ALIVE — and
+#       `lane-occupied-by-live-peer` is an AFFIRMATIVE claim, so it may not be derived
+#       from the FAILURE to prove SELF. claim.sh normally runs from the ROOT checkout,
+#       where no durable in-lane process exists, so this is the COMMON path: without the
+#       clause a session was told its own lane belonged to a peer. Unresolved ⇒ the
+#       GENERIC verdict, with both facts recorded in `lane-evidence=`.
 #   (c) a git checkout at the lane dir whose HEAD branch is issue-<N>-*
 #                                          -> almost nothing: a directory existing says
 #                                            nobody is necessarily in it, and the branch
@@ -794,7 +871,7 @@ lane_lock_field() {
 LANE_LOCAL_EVIDENCE=""
 LANE_LOCAL_VERDICT=""
 lane_local_evidence() {
-  local issue="$1" rc=0 branch="" verdict="" evidence=""
+  local issue="$1" actor="${2:-${LANE_LOCK_ACTOR:-flow}}" rc=0 branch="" verdict="" evidence=""
   LANE_LOCAL_EVIDENCE=""
   LANE_LOCAL_VERDICT=""
   lane_lock_available || return 0
@@ -802,13 +879,15 @@ lane_local_evidence() {
   # verdict line that consumes this evidence also reports `lane-lock=<state>`, and
   # returning early on (a) left that field reading `unmeasured(not-probed)` — a
   # measurement that did happen, reported as one that did not.
-  lane_lock_probe "$issue"
+  lane_lock_probe "$issue" "$actor"
 
-  # (a) SELF — the only subcommand that can answer "this very session".
+  # (a) SELF — the only subcommand that can answer "this very session". The actor is
+  # passed through for the same reason the probe's is (#3436 FIX 13g): it is part of the
+  # holder identity, so verifying under the wrong actor cannot match our own lock.
   if command -v timeout >/dev/null 2>&1; then
-    timeout 20 bash "$LANE_LOCK_SH" verify "$issue" >/dev/null 2>&1 || rc=$?
+    timeout 20 bash "$LANE_LOCK_SH" verify "$issue" --actor "$actor" >/dev/null 2>&1 || rc=$?
   else
-    bash "$LANE_LOCK_SH" verify "$issue" >/dev/null 2>&1 || rc=$?
+    bash "$LANE_LOCK_SH" verify "$issue" --actor "$actor" >/dev/null 2>&1 || rc=$?
   fi
   if [ "$rc" -eq 0 ]; then
     verdict="self"
@@ -821,11 +900,20 @@ lane_local_evidence() {
   # rather than the permissive branch (CLAUDE.md's affirmative-measurement rule).
   elif [ "${LANE_LOCK_LIVENESS:-}" = "ALIVE" ] \
      && [ -n "$LANE_LOCK_HOLDER_MACHINE" ] && [ -n "$LANE_LOCK_OUR_MACHINE" ] \
-     && [ "$LANE_LOCK_HOLDER_MACHINE" = "$LANE_LOCK_OUR_MACHINE" ] \
-     && [ -n "$LANE_LOCK_HOLDER_TOKEN" ] && [ -n "$LANE_LOCK_OUR_TOKEN" ] \
-     && [ "$LANE_LOCK_HOLDER_TOKEN" != "$LANE_LOCK_OUR_TOKEN" ]; then
-    verdict="live-peer"
-    evidence="lane-lock-alive-local-peer"
+     && [ "$LANE_LOCK_HOLDER_MACHINE" = "$LANE_LOCK_OUR_MACHINE" ]; then
+    if lane_lock_identity_established \
+       && [ -n "$LANE_LOCK_HOLDER_TOKEN" ] && [ -n "$LANE_LOCK_OUR_TOKEN" ] \
+       && [ "$LANE_LOCK_HOLDER_TOKEN" != "$LANE_LOCK_OUR_TOKEN" ]; then
+      verdict="live-peer"
+      evidence="lane-lock-alive-local-peer"
+    else
+      # A live LOCAL holder EXISTS, and this run cannot say whether it is us. Both facts
+      # go into the evidence so the reader can see WHY the tool declined to name the
+      # relationship — and the verdict stays the GENERIC one. No fourth verdict: the
+      # honest answer here is "I could not attribute this lane", and the generic remedy
+      # (confirm abandonment FIRST) is already the correct advice for it.
+      evidence="lane-lock-alive-local-unattributed:our-identity-${LANE_LOCK_OUR_IDENTITY:-unstated}"
+    fi
   fi
 
   # (c) OBSERVED AND REPORTED, NEVER DECISIVE: a local checkout at the lane dir on
@@ -868,7 +956,7 @@ cmd_claim() {
     if [ "$hrc" -eq 0 ]; then
       # AC5 (#3436): a WARNING field only. lane_lock_field NEVER changes the
       # verdict or the exit code — a granted claim stays granted.
-      emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$existing $(holder_desc "$existing") $(lane_lock_field "$issue") (re-entrant)"
+      emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$existing $(holder_desc "$existing") $(lane_lock_field "$issue" "$actor") (re-entrant)"
       return 0
     fi
     # UNREADABLE holder metadata is UNKNOWN, never "someone else" (#2945 review): the
@@ -918,7 +1006,7 @@ cmd_claim() {
     # whether ANY evidence exists. `lane-evidence=` reports every rung that fired on
     # all three verdicts (a worktree observation included), but only rung (a) —
     # our EXACT token in the lane lock — may say "this branch is yours".
-    lane_local_evidence "$issue"
+    lane_local_evidence "$issue" "$actor"
     if [ "$LANE_LOCAL_VERDICT" = "live-peer" ]; then
       emit "LOST issue=$issue reason=lane-occupied-by-live-peer detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free resume=documented-procedure lane-evidence=$LANE_LOCAL_EVIDENCE lane-lock=${LANE_LOCK_STATE:-unmeasured(not-probed)} lane-dir=${LANE_LOCK_DIR:-unknown} lane-holder-pid=${LANE_LOCK_HOLDER_PID:-unknown} (A DIFFERENT LIVE PROCESS ON THIS MACHINE HOLDS THAT LANE — its pid and its acquired-ts are in the lane-lock note on stderr above. It is NOT this session: the lane lock's record carries a different process token, which is the one thing that distinguishes 'my own lane' from a PEER's. So NEITHER of the other two remedies applies. DO NOT ADOPT THE CLAIM REF for this issue: that is #3436's own damage — two sessions in one worktree, where one session's 'git add -A' launders the other's uncommitted work into its commit. And the ABANDONED-LANE PROCEDURE DOES NOT APPLY EITHER — do not run claim-heartbeat.sh should-reap, and do not read the board Status or the branch author as evidence of abandonment: those tests describe a lane NOBODY is in, and someone is in this one. REMEDY: find that session (the stderr note names its pid and start time) and let it finish, or work a DIFFERENT issue. If you believe that process is dead, prove it against /proc rather than inferring it, and use the lane lock's own recorded reclaim path — deliberately NOT printed here as a runnable line (#2945): the readers are agents that run printed remediations literally, and this diagnosis rests on local evidence that can be wrong. Never hand-craft a claim commit)"
       return 2
@@ -971,7 +1059,7 @@ cmd_claim() {
     holder_identity "$now" "$actor" || hrc2=$?
     if [ "$hrc2" -eq 0 ]; then
       # AC5 (#3436): warning field only — see the pre-check site above.
-      emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") $(lane_lock_field "$issue") (re-entrant)"
+      emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") $(lane_lock_field "$issue" "$actor") (re-entrant)"
       return 0
     fi
     # Same rule as the pre-check: unreadable holder metadata is retryable infra, not a
@@ -995,7 +1083,7 @@ cmd_claim() {
   local confirmed="$REPLY_SHA"
   if [ "$confirmed" = "$sha" ]; then
     # AC5 (#3436): warning field only — see the pre-check site above.
-    emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$sha machine=$(this_machine) actor=$actor $(lane_lock_field "$issue")"
+    emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$sha machine=$(this_machine) actor=$actor $(lane_lock_field "$issue" "$actor")"
     return 0
   fi
   if [ -z "$confirmed" ]; then
@@ -1022,7 +1110,7 @@ cmd_claim() {
   holder_identity "$confirmed" "$actor" || crc=$?
   if [ "$crc" -eq 0 ]; then
     # AC5 (#3436): warning field only — see the pre-check site above.
-    emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$confirmed $(holder_desc "$confirmed") $(lane_lock_field "$issue") (re-entrant)"
+    emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$confirmed $(holder_desc "$confirmed") $(lane_lock_field "$issue" "$actor") (re-entrant)"
     return 0
   fi
   if [ "$crc" -eq 2 ]; then

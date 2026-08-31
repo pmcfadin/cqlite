@@ -845,9 +845,12 @@ else
 $out21b"
 fi
 
-# (c) THE CASE THIS EXISTS FOR: the lane is held by a DIFFERENT LIVE PROCESS.
-# A real `sleep` is the occupant, so liveness is measured against a real /proc
-# entry rather than a fabricated record.
+# (c) A LIVE HOLDER, AND THIS RUN CANNOT SAY WHETHER IT IS US — which is the COMMON path
+# (#3436 FIX 7): `claim` runs from the root checkout, so no durable in-lane process exists
+# and the probe's own token matches nobody. `occupied-alive` ASSERTS the occupant is
+# someone else, and that must not be asserted from the failure to prove SELF, so the state
+# is the distinct `occupied-alive-unattributed`. A real `sleep` is the occupant, so
+# liveness is measured against a real /proc entry rather than a fabricated record.
 sleep 900 &
 OCCUPANT_PID=$!
 LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 32 >/dev/null 2>&1
@@ -855,23 +858,43 @@ out21c=$(runAerr "$T/err21c" claim 32); rc21c=$?
 err21c=$(cat "$T/err21c" 2>/dev/null)
 ref32=$(ref_sha 32)
 if [ "$rc21c" -eq 0 ] && printf '%s\n' "$out21c" | grep -q 'CLAIM: HELD' \
-   && printf '%s\n' "$out21c" | grep -q 'lane-lock=occupied-alive' \
+   && printf '%s\n' "$out21c" | grep -q 'lane-lock=occupied-alive-unattributed' \
    && [ -n "$ref32" ]; then
-  ok "(c) AC5: a lane held by a LIVE other pid reports lane-lock=occupied-alive and the claim is STILL GRANTED (exit 0, ref created)"
+  ok "(c) AC5/FIX7: a live holder with our own identity UNRESOLVED reports lane-lock=occupied-alive-unattributed — not 'occupied-alive' — and the claim is STILL GRANTED (exit 0, ref created)"
 else
-  bad "(c) expected HELD + lane-lock=occupied-alive exit 0 with the ref created; got rc=$rc21c ref=$ref32
+  bad "(c) expected HELD + lane-lock=occupied-alive-unattributed exit 0 with the ref created; got rc=$rc21c ref=$ref32
 $out21c"
 fi
 # AC2's principle: a collision diagnosed generically sends the reader to the wrong
-# problem, so the note must NAME the occupant.
+# problem, so the note must NAME the occupant — while NOT claiming it is someone else.
 if printf '%s\n' "$err21c" | grep -q "holder-pid=$OCCUPANT_PID" \
    && printf '%s\n' "$err21c" | grep -q 'acquired-ts=' \
    && printf '%s\n' "$err21c" | grep -q 'age=' \
-   && printf '%s\n' "$err21c" | grep -q 'OCCUPIED'; then
-  ok "(c) AC5: the stderr note NAMES the occupant (pid=$OCCUPANT_PID, acquired-ts, age)"
+   && printf '%s\n' "$err21c" | grep -q 'could NOT establish whether it is YOU' \
+   && printf '%s\n' "$err21c" | grep -q 'our-identity=UNRESOLVED' \
+   && ! printf '%s\n' "$err21c" | grep -q 'ALREADY OCCUPIED'; then
+  ok "(c) AC5: the note NAMES the occupant (pid=$OCCUPANT_PID, acquired-ts, age) AND says the relationship is undetermined, without the 'ALREADY OCCUPIED' accusation"
 else
-  bad "(c) occupied note did not name the occupant (expected holder-pid=$OCCUPANT_PID + acquired-ts + age):
+  bad "(c) the unattributed note is wrong (want holder-pid=$OCCUPANT_PID + acquired-ts + age + 'could NOT establish whether it is YOU' + our-identity=UNRESOLVED, and NO 'ALREADY OCCUPIED'):
 $err21c"
+fi
+
+# (c2) POSITIVE CONTROL — otherwise a fix that ALWAYS reports `unattributed` would pass.
+# With a live --pid that is NOT the occupant, our identity IS established and the tokens
+# differ, so the occupant is KNOWN to be someone else: `occupied-alive`, the accusation
+# earned by measurement. `$$` is this suite's own shell: real, live, and not the sleeper.
+LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 36 >/dev/null 2>&1
+out21c2=$(LANE_LOCK_PID=$$ runAerr "$T/err21c2" claim 36); rc21c2=$?
+err21c2=$(cat "$T/err21c2" 2>/dev/null)
+if [ "$rc21c2" -eq 0 ] && printf '%s\n' "$out21c2" | grep -q 'CLAIM: HELD' \
+   && printf '%s\n' "$out21c2" | grep -q 'lane-lock=occupied-alive' \
+   && ! printf '%s\n' "$out21c2" | grep -q 'unattributed' \
+   && printf '%s\n' "$err21c2" | grep -q 'ALREADY OCCUPIED'; then
+  ok "(c2) AC5/FIX7 control: with our identity ESTABLISHED and a differing token the state IS occupied-alive and the note DOES accuse — so the unattributed state is not a blanket answer"
+else
+  bad "(c2) expected lane-lock=occupied-alive (not unattributed) with the ALREADY OCCUPIED note; got rc=$rc21c2
+$out21c2
+$err21c2"
 fi
 
 # (d) NON-VACUITY: with lane-lock.sh unavailable the claim must still succeed and
@@ -940,12 +963,13 @@ s21a=$(printf '%s\n' "$out21a" | grep -o 'lane-lock=[^ ]*' | head -1)
 s21b=$(printf '%s\n' "$out21b" | grep -o 'lane-lock=[^ ]*' | head -1)
 s21c=$(printf '%s\n' "$out21c" | grep -o 'lane-lock=[^ ]*' | head -1)
 s21f=$(printf '%s\n' "$out21f" | grep -o 'lane-lock=[^ ]*' | head -1)
-uniq_states=$(printf '%s\n%s\n%s\n%s\n' "$s21a" "$s21b" "$s21c" "$s21f" | sort -u | grep -c .)
-if [ -n "$s21a" ] && [ -n "$s21b" ] && [ -n "$s21c" ] && [ -n "$s21f" ] \
-   && [ "$uniq_states" -eq 4 ]; then
-  ok "(g) AC5 control: the four lane states are four DISTINCT values ($s21a / $s21b / $s21c / $s21f)"
+s21c2=$(printf '%s\n' "$out21c2" | grep -o 'lane-lock=[^ ]*' | head -1)
+uniq_states=$(printf '%s\n%s\n%s\n%s\n%s\n' "$s21a" "$s21b" "$s21c" "$s21c2" "$s21f" | sort -u | grep -c .)
+if [ -n "$s21a" ] && [ -n "$s21b" ] && [ -n "$s21c" ] && [ -n "$s21c2" ] && [ -n "$s21f" ] \
+   && [ "$uniq_states" -eq 5 ]; then
+  ok "(g) AC5 control: the five lane states are five DISTINCT values ($s21a / $s21b / $s21c / $s21c2 / $s21f)"
 else
-  bad "(g) expected four distinct lane-lock states; got '$s21a' '$s21b' '$s21c' '$s21f' (uniq=$uniq_states)"
+  bad "(g) expected five distinct lane-lock states; got '$s21a' '$s21b' '$s21c' '$s21c2' '$s21f' (uniq=$uniq_states)"
 fi
 
 # ===========================================================================
@@ -1079,9 +1103,14 @@ fi
 # telling a session that a lane an ACTIVELY-WORKED PEER holds was "almost certainly
 # YOUR OWN" and pointing it at claim adoption — the inverse of the right advice, and
 # the exact collision #3436 exists to prevent. It must now be its own verdict.
+# The claim runs with LANE_LOCK_PID=$$ — this suite's own live shell — so its OWN identity
+# is ESTABLISHED (`our-identity=explicit`) and differs from the occupant's. Without that,
+# our token matches nobody and the honest answer is the unattributed one, which case (i)
+# below covers; naming a peer requires the affirmative measurement (#3436 FIX 7).
 push_legacy_branch 44
 LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 44 >/dev/null 2>&1
-out22h=$(runA claim 44 2>/dev/null); rc22h=$?
+rc=0; out22h=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin LANE_LOCK_PID=$$ bash "$CLAIM" claim 44 2>/dev/null ) || rc=$?
+rc22h=$rc
 if [ "$rc22h" -eq 2 ] && printf '%s\n' "$out22h" | grep -q 'reason=lane-occupied-by-live-peer' \
    && printf '%s\n' "$out22h" | grep -q 'lane-evidence=lane-lock-alive-local-peer' \
    && printf '%s\n' "$out22h" | grep -q "lane-holder-pid=$OCCUPANT_PID" \
@@ -1105,6 +1134,35 @@ else
 $out22h"
 fi
 
+# (i) THE FIX-7 CASE, and it is the COMMON one: same setup as (h) but the claim runs with
+# NO LANE_LOCK_PID from a cwd OUTSIDE the lane — i.e. exactly how `claim` runs in the flow,
+# from the root checkout. Our own identity cannot be resolved, so our token matches nobody
+# and the record reads ALIVE whether or not the holder is us. Naming a peer there is
+# asserting a positive from the FAILURE to prove its opposite, and it told a session that
+# its OWN lane belonged to someone else. The honest answer is the GENERIC verdict with both
+# facts in the evidence.
+push_legacy_branch 45
+LANE_LOCK_PID=$OCCUPANT_PID bash "$LANELOCK" acquire 45 >/dev/null 2>&1
+out22i=$(runA claim 45 2>/dev/null); rc22i=$?
+if [ "$rc22i" -eq 2 ] && printf '%s\n' "$out22i" | grep -q 'reason=legacy-branch-lock' \
+   && ! printf '%s\n' "$out22i" | grep -q 'reason=lane-occupied-by-live-peer' \
+   && printf '%s\n' "$out22i" | grep -q 'lane-evidence=lane-lock-alive-local-unattributed:our-identity-UNRESOLVED' \
+   && printf '%s\n' "$out22i" | grep -q 'lane-lock=occupied-alive-unattributed'; then
+  ok "(i) AC6/FIX7: a live LOCAL holder with our own identity UNRESOLVED keeps reason=legacy-branch-lock, records BOTH facts in lane-evidence=, and reports the unattributed AC5 state"
+else
+  bad "(i) expected legacy-branch-lock + lane-evidence=lane-lock-alive-local-unattributed:our-identity-UNRESOLVED + lane-lock=occupied-alive-unattributed; got rc=$rc22i
+$out22i"
+fi
+# ...and (h) vs (i) differ ONLY in whether our own identity was resolvable. Same lane
+# state, same holder liveness, OPPOSITE attribution — so neither verdict can be a constant.
+r22h_chk=$(printf '%s\n' "$out22h" | grep -o 'reason=[^ ]*' | head -1)
+r22i_chk=$(printf '%s\n' "$out22i" | grep -o 'reason=[^ ]*' | head -1)
+if [ -n "$r22h_chk" ] && [ -n "$r22i_chk" ] && [ "$r22h_chk" != "$r22i_chk" ]; then
+  ok "(i) control: identical setup, identity established vs not, yields DIFFERENT verdicts ($r22h_chk vs $r22i_chk)"
+else
+  bad "(i) control: expected different verdicts for established vs unresolved identity; got '$r22h_chk' and '$r22i_chk'"
+fi
+
 kill "$OCCUPANT_PID" 2>/dev/null || true
 wait "$OCCUPANT_PID" 2>/dev/null || true
 
@@ -1115,7 +1173,7 @@ wait "$OCCUPANT_PID" 2>/dev/null || true
 # outputs above are checked, the live-peer one included — it is the one where a
 # printed adopt would do the most damage.
 d22_bad=""
-for v in a b f h; do
+for v in a b f h i; do
   eval "d22_out=\"\$out22$v\""
   if printf '%s\n' "$d22_out" | grep -q 'claim.sh adopt' \
      || printf '%s\n' "$d22_out" | grep -q -- '--expect none'; then
@@ -1123,7 +1181,7 @@ for v in a b f h; do
   fi
 done
 if [ -z "$d22_bad" ]; then
-  ok "(d) AC6: no refusal prints a runnable resume command (no 'claim.sh adopt', no '--expect none') — checked on all four"
+  ok "(d) AC6: no refusal prints a runnable resume command (no 'claim.sh adopt', no '--expect none') — checked on all five"
 else
   bad "(d) a refusal printed a runnable resume command (#2945 violation):$d22_bad
 generic:   $out22a
