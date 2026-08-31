@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `serde_json`'s `arbitrary_precision` is deliberately **not** enabled; the
     decision and its three reasons are recorded in
     `cqlite-ffi-common/src/json_number.rs`.
+  - Residual, out of reach at this layer (**#3636**): an integer literal outside
+    `[i64::MIN, u64::MAX]` is collapsed to `f64` by `serde_json`'s **parser**
+    before any CQLite code runs, so it still arrives rounded. Enabling
+    `arbitrary_precision` alone does NOT fix it — under that feature `as_f64`
+    parses the stored string, so such a literal still classifies `F64` lossily.
+    A real fix additionally needs an exact-integer parse of `Number::as_str()`
+    placed BEFORE the `as_f64()` arm.
   - Reachability, stated honestly: `Value::Json` requires a `"json"` comparator
     and no fixture in `test-data/` has one, so this path is unreachable from
     today's corpus.
