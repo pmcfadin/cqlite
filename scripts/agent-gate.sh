@@ -2589,6 +2589,39 @@ apply_schemas_preflight() {
 #     list: the self-test FAILs on an external program that has not been classified.
 #
 # Everything else here is a bash builtin/keyword or a function defined in this file.
+#
+# ---- WHAT COULD MAKE A GIT CALL EXECUTE SOMETHING, AND WHY NONE OF IT IS REACHED -------------
+# Enumerated because this is where the last two Highs came from, and both had the same shape: an
+# axis was closed (config sources; then the environment) and the SPACE was declared closed with
+# it. So the question is asked the other way round here — not "which variables are dangerous"
+# but "by what route could any git call below run a command at all":
+#
+#   REMOTE HELPERS (`ext::`, any `git-remote-*`) via `url.*.insteadOf` + `protocol.*.allow`
+#     — reachable ONLY where a URL is RESOLVED, i.e. from a fetch/ls-remote. Every one of those
+#     runs INSIDE the scratch repository, whose config this run wrote and whose environment is
+#     `env -i` + allowlist, so neither an `insteadOf` nor a `protocol.<name>.allow` from anywhere
+#     else is visible. There is NO fetch in the live repository (job 264): that hop was removed
+#     rather than hardened, because a check downstream of an execution can only report it.
+#     `scripts/tests/test_agent_gate_component_set.sh::3544-ext-helper-unreachable` asserts the
+#     unreachability, with a control proving the attack executes for a plain fetch.
+#   HOOKS (`core.hooksPath`, `reference-transaction`, …) — fire on REF WRITES and on operations
+#     this pre-flight does not perform. It writes NO ref in the live repository at all now, and
+#     the scratch's hooks come from a `git init` run with no template (see the isolated init).
+#   `core.fsmonitor` — a config-specified COMMAND, but git runs it only for operations that READ
+#     THE INDEX. None of the lane-local reads here do: `ls-tree <rev>`, `show <rev>:<path>`,
+#     `cat-file -e`, `merge-base`, `rev-parse` and `remote get-url` are all index-free. This one
+#     is listed precisely because it is NOT currently reachable: adding an index-touching command
+#     (`git status`, `git diff`, `git checkout`, `git stash`) to this pre-flight would open it.
+#   `core.pager`, `diff.external`, textconv and smudge filters — pagers need a TTY on stdout and
+#     every call here redirects to a file; `show <rev>:<path>` on a blob emits raw bytes (no
+#     textconv without `--textconv`, no smudge without a checkout). Adding a `git diff`, a
+#     `git archive` or an interactive-friendly invocation would change that.
+#   `alias.*` — git refuses to let an alias shadow a builtin, so no subcommand used here can be
+#     redefined.
+#
+# The rule that generalises all five: THIS PRE-FLIGHT ONLY EVER RESOLVES A URL INSIDE THE
+# ISOLATED SCRATCH REPOSITORY, AND ONLY EVER READS OBJECTS BY SHA IN THE LIVE ONE. A change that
+# breaks either half re-opens this list and belongs in review, not in a follow-up.
 
 # Probe state, set by _component_set_probe and read by the pure verdict/line helpers.
 # Globals rather than a parsed multi-line stdout: the probe does real I/O (fetch, git

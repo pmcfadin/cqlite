@@ -2962,6 +2962,83 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7m. THE REMOTE-HELPER ROUTE IS UNREACHABLE, NOT MERELY DETECTED (job 264, High + the lead's
+#     ruling). THE RULE THIS CASE ENFORCES: a check placed AFTER a harmful effect can only report
+#     it, never prevent it — so if the harm is EXECUTION, the control must be that the execution
+#     cannot be REACHED. The sha-equality assert that used to guard the transfer sat DOWNSTREAM of
+#     the fetch it was meant to validate, so `url.*.insteadOf` + `protocol.ext.allow=always` ran
+#     commands during that fetch and the comparison never got a turn.
+#
+#     THE MECHANISM IS GONE, so this case asserts absence of execution rather than detection of
+#     it: the pre-flight performs NO fetch in the live repository, so there is no URL for an
+#     `insteadOf` to rewrite and no point at which a remote helper could be named.
+#
+#     THE POSITIVE CONTROL IS THE WHOLE CASE. "No marker appeared" is worthless unless the same
+#     hostile configuration demonstrably EXECUTES here and now, so the control performs a plain
+#     `git fetch` of a scratch-shaped path in a throwaway repository carrying the SAME config and
+#     requires the helper to have run. Three details were measured rather than assumed: the
+#     rewrite is a PREFIX substitution, so the helper command must tolerate the random `mktemp`
+#     suffix being appended (a trailing `#` swallows it as an ignored argument); the helper must
+#     contain NO quotes or spaces, because `ext::` splits its own arguments and a quoted `sh -c`
+#     payload arrives mangled (measured: the shell ran but reported a syntax error, which is
+#     execution WITHOUT a usable marker — a control that would have looked like a failure); and
+#     the config goes into the fixture's own `.git/config` by `printf`, since `git config` splits
+#     a key at its dots and the subsection here is a path.
+#
+#     The hostile config lives in a THROWAWAY fixture repository. Never in a worktree of the real
+#     checkout: `.git/config` is shared there, and this lane has already taken `origin` out for
+#     four live lanes that way (#3617).
+# ---------------------------------------------------------------------------
+base_ext=$(mkbaseline base-extfx "$ADD_SENTINEL")
+ext_fx=$(mkbranch extfx "$base_ext" - )
+ext_tip=$(git -C "$base_ext" rev-parse refs/heads/main)
+ext_tmp="$tmp/ext-tmpdir"
+ext_helper="$tmp/ext-helper"
+ext_marker="$tmp/ext-EXECUTED"
+mkdir -p "$ext_tmp"
+{ printf '#!/bin/sh\n'; printf 'touch %s\n' "$ext_marker"; printf 'exit 1\n'; } >"$ext_helper"
+chmod +x "$ext_helper"
+# The hostile local config, in the exact shape that reached the removed hop: any URL beginning
+# with the scratch prefix becomes an `ext::` helper invocation.
+ext_conf() {
+  { printf '[protocol "ext"]\n\tallow = always\n'
+    printf '[url "ext::%s #"]\n\tinsteadOf = %s/cs-baseline.\n' "$ext_helper" "$ext_tmp"
+  } >>"$1/.git/config"
+}
+ext_conf "$ext_fx"
+# CONTROL: the same config, a plain fetch, a scratch-shaped source path.
+ext_ctl="$tmp/ext-control"
+mkdir -p "$ext_tmp/cs-baseline.CONTROL"
+cp -R "$base_ext" "$ext_tmp/cs-baseline.CONTROL/repo" 2>/dev/null
+git init -q "$ext_ctl" >/dev/null 2>&1
+ext_conf "$ext_ctl"
+rm -f "$ext_marker"
+git -C "$ext_ctl" fetch --quiet --refmap= --no-tags "$ext_tmp/cs-baseline.CONTROL/repo" \
+    "refs/heads/main:refs/csbaseline" >/dev/null 2>&1
+if [ ! -f "$ext_marker" ]; then
+  bad "3544-ext-helper-unreachable: the POSITIVE CONTROL did not execute the helper — protocol.ext.allow + url.*.insteadOf is not reproducible in this environment, so the pre-flight not executing it proves nothing"
+else
+  rm -f "$ext_marker"
+  ext_out=$( fx "$ext_fx" && env TMPDIR="$ext_tmp" bash "$ext_fx/scripts/agent-gate.sh" \
+               --component-set-line full 2>/dev/null )
+  ext_ran=no
+  [ -f "$ext_marker" ] && ext_ran=yes
+  if [ "$ext_ran" = yes ]; then
+    bad "3544-ext-helper-unreachable: THE HELPER RAN during the pre-flight — a remote helper is still reachable, and a downstream check cannot undo an execution"
+  elif [ "$(field BASELINE_OBJECTS "$ext_out")" != fetched ]; then
+    bad "3544-ext-helper-unreachable: the run did not take the SLOW path (BASELINE_OBJECTS='$(field BASELINE_OBJECTS "$ext_out")'), which is the path the removed hop lived on — the case cannot discriminate"
+  elif [ "$(field VERDICT "$ext_out")" = BEHIND ] \
+     && [ "$(field KIND "$ext_out")" = ok ] \
+     && [ "$(field SHA "$ext_out")" = "$ext_tip" ] \
+     && grep -qw -- "$SENTINEL" <<<"$(field MISSING "$ext_out")"; then
+    ok "3544-ext-helper-unreachable: a local insteadOf + protocol.ext.allow=always EXECUTES a helper for a plain fetch (control) yet the pre-flight — which performs no fetch in this repository at all — runs nothing and still measures the baseline correctly"
+  else
+    bad "3544-ext-helper-unreachable: no execution, but the baseline was not measured (kind='$(field KIND "$ext_out")' verdict='$(field VERDICT "$ext_out")' sha='$(field SHA "$ext_out")')"
+    printf '%s\n' "$ext_out"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 7i. THE URL NEVER ENTERS ANY ARGV (job 242). An accepted canonical URL may carry a token, and
 #     a URL in a `git` argument is readable via `ps` / /proc/<pid>/cmdline. SOURCE-SHAPE assert,
 #     said plainly: proving absence from argv behaviourally would mean sampling /proc against a
