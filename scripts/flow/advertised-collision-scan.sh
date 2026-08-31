@@ -241,7 +241,13 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --issue) [ "$#" -ge 2 ] || die_usage "--issue requires a value"
              case "$2" in *[!0-9]*|'') die_usage "--issue requires a numeric issue number (got '$2')" ;; esac
-             ONLY_ISSUE="$2"; shift 2 ;;
+             # CANONICALISE (#3436, roborev round 17). `03436` passes the numeric test above and
+             # then matches nothing, because every comparison downstream is TEXTUAL against
+             # canonical branch and board numbers — so a restricted scan reported "no rows" for
+             # an issue that has them. Silent, and in the direction of a false all-clear, in the
+             # one tool whose contract is that it never gives one.
+             ONLY_ISSUE="$(printf '%s' "$2" | sed 's/^0*\([0-9]\)/\1/')"
+             shift 2 ;;
     --json)  AS_JSON=1; shift ;;
     -h|--help) print_help; exit 0 ;;
     # Reject rather than ignore: an unrecognized flag in a sweep would otherwise

@@ -914,7 +914,13 @@ dir_mutex() {
   # when they need not. That is over-serialisation, the SAFE direction — the unsafe direction
   # is two directories getting two mutexes when they are one, which is the alias this whole
   # mutex exists to close and which the full canonical path in the key still prevents.
-  if [ "${#name}" -gt 255 ]; then
+  # BYTES, NOT CHARACTERS (#3436, roborev round 17). NAME_MAX is a BYTE limit and `${#name}`
+  # counts CHARACTERS under a multibyte locale — measured: a 410-byte name of `é` reports 210
+  # under en_US.UTF-8 and 410 under C. So a deeply nested Unicode lane path slipped past this
+  # test at its true 400+ bytes and failed as `mutex-unopenable` on a VALID path, which is the
+  # exact failure round 13 added the fallback to prevent: round 13 fixed the length and used
+  # the wrong unit.
+  if [ "$(printf '%s' "$name" | wc -c | tr -d ' ')" -gt 255 ]; then
     sum="$(printf '%s' "$canon" | cksum | awk '{print $1}')"
     tail_="$(printf '%s' "$key" | tail -c 180)"
     name="dir-x${sum}-${tail_}.flock"
@@ -1238,7 +1244,7 @@ _acquire_locked() {
         # not, which is the same alias the directory mutex closes for two issues,
         # reopened for one issue naming two directories.
         if [ "${REC_LANE_DIR:-}" != "$G_LANE" ]; then
-          emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. The record protects the recorded directory only, so returning re-entrant here would advertise protection this lock does not provide. Release it under this issue first, or take the other directory under its own issue number.)"
+          emit "OCCUPIED issue=$G_ISSUE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. The record protects the recorded directory only, so returning re-entrant here would advertise protection this lock does not provide. Release it under this issue first, or take the other directory under its own issue number.) lane-dir=$G_LANE"
           return 2
         fi
         emit "ACQUIRED (re-entrant) issue=$G_ISSUE $(self_fields) record=$G_RECORD lane-dir=$G_LANE"
@@ -1303,7 +1309,7 @@ cmd_acquire() {
   _acquire_under_dir_lock() {
     local conflict
     if conflict="$(same_dir_other_issue "$G_ISSUE" "$G_LANE")"; then
-      emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is already locked under a DIFFERENT issue by a live holder. The record is keyed by issue so readers need no path, but the DIRECTORY is what must not have two writers — so this refuses. If the other issue number is the mistake, fix the caller; if that lane is genuinely finished, release or reclaim it under ITS issue number.)"
+      emit "OCCUPIED issue=$G_ISSUE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is already locked under a DIFFERENT issue by a live holder. The record is keyed by issue so readers need no path, but the DIRECTORY is what must not have two writers — so this refuses. If the other issue number is the mistake, fix the caller; if that lane is genuinely finished, release or reclaim it under ITS issue number.) lane-dir=$G_LANE"
       return 2
     fi
     with_lock 9 "$G_MUTEX" _acquire_locked
@@ -1614,7 +1620,7 @@ _reclaim_locked() {
     # --lane-dir Y while the record still protects X — the command reports success for Y,
     # rewrites nothing, and another issue can then acquire Y against a lock that never covered it.
     if [ "${REC_LANE_DIR:-}" != "$G_LANE" ]; then
-      emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. Reclaiming it under this path would report protection the record does not provide. Reclaim under the recorded directory, or take this one under its own issue number.)"
+      emit "OCCUPIED issue=$G_ISSUE reason=reentrant-lane-dir-mismatch recorded-lane-dir=${REC_LANE_DIR:-<none>} (this issue's lock is held by THIS process for a DIFFERENT directory. Reclaiming it under this path would report protection the record does not provide. Reclaim under the recorded directory, or take this one under its own issue number.) lane-dir=$G_LANE"
       return 2
     fi
     # THE LEASE, HERE TOO. This branch compared the TOKEN while the CAS branch below
@@ -1727,7 +1733,7 @@ cmd_reclaim() {
   _reclaim_under_dir_lock() {
     local conflict
     if conflict="$(same_dir_other_issue "$G_ISSUE" "$G_LANE")"; then
-      emit "OCCUPIED issue=$G_ISSUE lane-dir=$G_LANE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is held under a DIFFERENT issue by a live holder, so reclaiming this issue's stale record would create a SECOND writer of one directory. Reclaim or release the conflicting issue instead.)"
+      emit "OCCUPIED issue=$G_ISSUE reason=same-lane-dir-other-issue conflicting-issue=${conflict%%|*} conflicting-pid=$(printf '%s' "$conflict" | cut -d'|' -f2) conflicting-acquired-ts=$(printf '%s' "$conflict" | cut -d'|' -f3) (that DIRECTORY is held under a DIFFERENT issue by a live holder, so reclaiming this issue's stale record would create a SECOND writer of one directory. Reclaim or release the conflicting issue instead.) lane-dir=$G_LANE"
       return 2
     fi
     with_lock 9 "$G_MUTEX" _reclaim_locked "$expect" "$reason_token"

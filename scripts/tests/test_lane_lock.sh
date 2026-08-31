@@ -1619,5 +1619,52 @@ else
 fi
 kill "$S36_C" 2>/dev/null || true
 
+# ===========================================================================
+echo 'TEST 37: the mutex-name limit is in BYTES, and lane-dir is emitted LAST (roborev round 17)'
+# ===========================================================================
+# (a) NAME_MAX is a BYTE limit; `${#name}` counts CHARACTERS under a multibyte locale. Measured:
+#     a 410-byte name of `e-acute` reports 210 chars under en_US.UTF-8 and 410 under C. So a deep
+#     UNICODE lane path slipped past the >255 test at its true size and failed as
+#     `mutex-unopenable` on a VALID path — the exact failure round 13's fallback exists to
+#     prevent. Round 13 fixed the length and used the wrong unit, so this runs under a UTF-8
+#     locale on purpose: under C the defect is invisible.
+U37="$LANES/$(printf 'é%.0s' $(seq 1 60))/$(printf 'ü%.0s' $(seq 1 60))/lane37"
+mkdir -p "$U37" 2>/dev/null
+sleep 300 & U37P=$!
+( export LC_ALL=en_US.UTF-8; : ) 2>/dev/null
+LC_ALL=en_US.UTF-8 ll acquire 937 --lane-dir "$U37" --pid "$U37P"; rc37=$RC; out37=$OUT
+longest_bytes=0
+for f in "$LOCKS"/*; do
+  [ -e "$f" ] || continue
+  b=$(printf '%s' "${f##*/}" | wc -c | tr -d ' ')
+  [ "$b" -gt "$longest_bytes" ] && longest_bytes=$b
+done
+if [ "$rc37" -eq 0 ] && [ "$longest_bytes" -le 255 ]; then
+  ok "(a) a deep UNICODE lane acquires and no lock filename exceeds NAME_MAX in BYTES (longest=$longest_bytes)"
+else
+  bad "(a) byte-vs-char: rc=$rc37 longest-lock-filename-bytes=$longest_bytes
+$out37"
+fi
+kill "$U37P" 2>/dev/null || true
+
+# (b) THE HEADER MANDATES lane-dir LAST (:225) and cites the incident that produced the rule:
+#     a space-delimited scan turned `/data/my lanes/lane-5` into `/data/my`. Four emit sites in
+#     this file and two in claim.sh violated it. Asserted BEHAVIOURALLY — a space-bearing lane
+#     dir must survive a field read intact, which is the property, not the field order.
+SP37="$LANES/my lane 37"; mkdir -p "$SP37"
+sleep 300 & SPA=$!
+sleep 300 & SPB=$!
+ll acquire 938 --lane-dir "$SP37" --pid "$SPA"
+ll acquire 939 --lane-dir "$SP37" --pid "$SPB"; out39="$OUT"
+# read lane-dir the way claim.sh does: everything after the key, to end of line
+got37="$(printf '%s' "$out39" | sed -n 's/.* lane-dir=\(.*\)$/\1/p' | head -1)"
+if printf '%s' "$out39" | grep -q 'reason=same-lane-dir-other-issue' && [ "$got37" = "$SP37" ]; then
+  ok "(b) a SPACE-BEARING lane dir survives a to-end-of-line field read intact ('$got37')"
+else
+  bad "(b) lane-dir was truncated or is not last: got='$got37' want='$SP37'
+$out39"
+fi
+kill "$SPA" "$SPB" 2>/dev/null || true
+
 echo "==== LANE-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
