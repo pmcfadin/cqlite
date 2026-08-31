@@ -3094,6 +3094,79 @@ else
     printf '%s\n' "$out_af" | grep -i 'gate-pin' | head -2
   fi
 
+  # 11ag. THE GATE ORACLE MUST NOT BE POLLUTABLE EITHER (issue #3414 roborev round 4).
+  #      The oracle launches its own fresh non-interactive bash to ask the gate what it
+  #      honours, and a non-interactive bash SOURCES $BASH_ENV — so the hole closed for
+  #      the probe in round 2 was still open one call site over. Persisted value `abc`,
+  #      a valid `1` injected through BASH_ENV: the oracle answers `1(pinned)` about a
+  #      value it never saw, and the run certifies a box whose gates will stamp
+  #      N(invalid). Two independent defences now: the scrub, and the requirement that
+  #      the oracle's resolved N equal the value actually probed.
+  pin_bashenv_v="$tmp/pin-bashenv-valid.sh"
+  printf 'export CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$pin_bashenv_v"
+  envf_ag="$tmp/pin-env-ag"; printf 'CQLITE_GATE_MAX_CONCURRENCY=abc\n' >"$envf_ag"
+  shims_ag="$tmp/pin-shims-ag"; mkpinshims "$shims_ag" abc     # session genuinely sees abc
+  out_ag=$(runpin "$pinroot" "$shims_ag" "$envf_ag" HOME="$pin_home_plain" \
+    BASH_ENV="$pin_bashenv_v")
+  if ! printf '%s' "$out_ag" | grep -qE '\[ok\].*gate-pin' \
+     && printf '%s' "$out_ag" | grep -q 'gate-pin: NOT-HONOURED'; then
+    ok "gate-pin: a BASH_ENV-injected valid value cannot make the ORACLE certify an invalid pin"
+  else
+    bad "gate-pin: the gate oracle was polluted into certifying a value it never saw"
+    printf '%s\n' "$out_ag" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11ah. ...and the SOURCE TOKEN ALONE is not the check: the oracle's resolved N must be
+  #      the value we handed it. A `(pinned)` suffix says only that *something* was a
+  #      valid pin. Asserted structurally as well as behaviourally, because a future edit
+  #      could drop the N comparison while every behavioural case above still passes —
+  #      the scrub alone would cover them.
+  if grep -q 'pin_gate_n" != "\$pin_probe_seen' "$BOOTSTRAP" \
+     && grep -q 'bounded 30 env -u BASH_ENV -u ENV' "$BOOTSTRAP"; then
+    ok "gate-pin: the oracle is scrubbed AND its resolved N is compared, not just its source token"
+  else
+    bad "gate-pin: the oracle check lost its scrub or its resolved-value comparison"
+  fi
+
+  # 11ai. THE PROFILE APPEND MUST NOT MANUFACTURE A DIVERGENCE (issue #3414 roborev
+  #      round 4). On a box deliberately pinned to 4, appending a hardcoded `export …=1`
+  #      to the shell profile gives interactive shells 1 while every non-interactive one
+  #      gets 4 — this issue's own subject, created by the tool that exists to remove it.
+  #      It is SKIPPED rather than value-derived because PAM already delivers the
+  #      system-wide value to interactive login shells, so the append could only override
+  #      it, and a derived value would go stale on the next edit of the env file.
+  pin_home_ai="$tmp/pin-home-ai"; mkdir -p "$pin_home_ai/.cargo"; : >"$pin_home_ai/.bashrc"
+  envf_ai="$tmp/pin-env-ai"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_ai"
+  shims_ai="$tmp/pin-shims-ai"; mkpinshims "$shims_ai" 4
+  out_ai=$(runpin "$pinroot" "$shims_ai" "$envf_ai" HOME="$pin_home_ai" SHELL=/bin/bash --yes)
+  if ! grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$pin_home_ai/.bashrc" \
+     && printf '%s' "$out_ai" | grep -q 'not touching' \
+     && printf '%s' "$out_ai" | grep -qE '\[ok\].*gate-pin: VERIFIED'; then
+    ok "gate-pin: --yes on a box pinned to 4 leaves the profile alone (no manufactured 1-vs-4 divergence)"
+  else
+    bad "gate-pin: the profile append manufactured a divergence with the system-wide value"
+    printf '%s\n' "$out_ai" | grep -i 'gate-pin\|profile\|not touching' | head -3
+    cat "$pin_home_ai/.bashrc"
+  fi
+
+  # 11aj. ...but where NO system-wide value can be established the append still happens,
+  #      so 11ai cannot pass against a build that simply stopped writing profiles. The
+  #      reachable state is a MISSING system env file: bootstrap writes nothing there, so
+  #      PAM delivers nothing, and the profile is the only lever left. (A box that merely
+  #      STARTS empty is not this case — `--yes` persists into it and the append is then
+  #      correctly skipped, because PAM now delivers the value to interactive shells too.
+  #      I discovered that by writing this case the obvious way first and watching it
+  #      fail, which is the distinction worth recording here.)
+  pin_home_aj="$tmp/pin-home-aj"; mkdir -p "$pin_home_aj/.cargo"; : >"$pin_home_aj/.bashrc"
+  envf_aj="$tmp/pin-env-aj-missing"; rm -f "$envf_aj"
+  out_aj=$(runpin "$pinroot" "$shims_none" "$envf_aj" HOME="$pin_home_aj" SHELL=/bin/bash --yes)
+  if grep -q '^export CQLITE_GATE_MAX_CONCURRENCY=1' "$pin_home_aj/.bashrc"; then
+    ok "gate-pin: on a box with no system-wide value the profile append still happens"
+  else
+    bad "gate-pin: the profile append stopped happening even with no system-wide value (11ai would pass vacuously)"
+    cat "$pin_home_aj/.bashrc"
+  fi
+
   # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
   #      marker, or relative, it SKIPS the section rather than silently persisting to
   #      the real /etc/environment (the #3249 lesson — a seam that degrades to the

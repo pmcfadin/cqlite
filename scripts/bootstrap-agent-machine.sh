@@ -2121,6 +2121,20 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   esac
   if [ -n "$PROFILE" ] && [ -f "$PROFILE" ] && grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$PROFILE" 2>/dev/null; then
     info "$PROFILE already carries the export — INTERACTIVE shells only (stock ~/.bashrc returns early for non-interactive ones), so it says nothing about the shell a gate runs in"
+  elif [ "$PIN_FILE_HAS_LINE" = yes ]; then
+    # SKIPPED, DELIBERATELY, when the system-wide file already carries a value (#3414
+    # roborev round 4). The append hardcodes `=1`, so on a box deliberately pinned to 4
+    # it would MANUFACTURE a divergence between two mechanisms on the same machine —
+    # this issue's own subject, created by the tool that exists to remove it.
+    #
+    # Skipping rather than deriving the value, for a reason stronger than "the profile is
+    # only convenience": /etc/environment is read by PAM at SESSION CREATION, which
+    # applies to interactive login shells too, so on such a box the interactive shell
+    # ALREADY receives the system-wide value — a profile export could only OVERRIDE it,
+    # handing interactive shells 1 while every non-interactive one gets 4. Deriving the
+    # value instead would agree today and go stale the moment someone edits
+    # /etc/environment, manufacturing the same divergence later and more quietly.
+    info "not touching $PROFILE — $PIN_ENV_FILE already sets CQLITE_GATE_MAX_CONCURRENCY=$PIN_FILE_VALUE, and PAM delivers that to interactive shells too; appending a hardcoded '=$PIN_ENV_VALUE' here could only override it"
   elif [ "$AUTO_YES" = 1 ] && [ -n "$PROFILE" ]; then
     if printf '%s\n' "$EXPORT_LINE" >>"$PROFILE" 2>/dev/null; then
       info "appended the export to $PROFILE for INTERACTIVE shells (convenience only — the verdict below comes from the session probe, not from this file)"
@@ -2141,17 +2155,31 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
   # #1825 slot logic so it creates no run directory and takes no slot. If the gate cannot
   # be consulted the answer is UNKNOWN, never an assumed `pinned` — a positive verdict
   # requires an affirmative measurement.
+  # Echoes "<source>:<resolved-N>" (e.g. `pinned:1`), or rc 1 if the gate could not be
+  # consulted. BOTH halves are returned because the SOURCE TOKEN ALONE CANNOT TELL YOU THE
+  # ORACLE WAS REASONING ABOUT YOUR VALUE (#3414 roborev round 4): `pinned` says only that
+  # *something* was a valid pin, and the caller must check that the N the gate resolved is
+  # the value we handed it.
+  #
+  # BASH_ENV AND ENV ARE SCRUBBED HERE TOO, and this is the same hole closed for the probe
+  # in round 2, sitting one call site over. This launches a FRESH NON-INTERACTIVE bash,
+  # which SOURCES $BASH_ENV before running anything — so on a box whose sudoers lacks
+  # env_reset an inherited BASH_ENV could export a valid integer into the ORACLE's shell,
+  # overriding the `CQLITE_GATE_MAX_CONCURRENCY="$v"` set on this very command line. A
+  # persisted value of `abc` would then get a `(pinned)` answer from an oracle that never
+  # saw `abc`. Fixing the probe and leaving the oracle open is fixing one instance of a
+  # class; the value check above is the belt to this braces, and vice versa.
   pin_gate_source_for() {
-    local v="$1" line tok
+    local v="$1" line tok n
     [ -r "$GATE" ] || return 1
-    line=$(bounded 30 env CQLITE_GATE_MAX_CONCURRENCY="$v" CQLITE_GATE_NO_NICE=1 \
+    line=$(bounded 30 env -u BASH_ENV -u ENV CQLITE_GATE_MAX_CONCURRENCY="$v" CQLITE_GATE_NO_NICE=1 \
              bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1)
     [ -n "$line" ] || return 1
     # The line is space-delimited key=value tokens; max-concurrency=N(source) is ONE of
     # them, which is exactly why that token carries no spaces.
     tok=$(printf '%s\n' "$line" | tr ' ' '\n' | sed -n 's/^max-concurrency=//p' | head -1)
     case "$tok" in
-      *"("*")") tok=${tok#*(}; printf '%s' "${tok%)}" ;;
+      *"("*")") n=${tok%%(*}; tok=${tok#*(}; printf '%s:%s' "${tok%)}" "$n" ;;
       *) return 1 ;;
     esac
   }
@@ -2282,7 +2310,16 @@ if [ "$PIN_SECTION_OK" = 1 ]; then
       # pin in name only, and certifying it here would be this issue's own shape one
       # level further out — presence of a VISIBLE value standing in for a value that has
       # EFFECT. So the gate is asked what it will actually do with it.
-      pin_gate_src=$(pin_gate_source_for "$pin_probe_seen") || pin_gate_src=""
+      pin_gate_out=$(pin_gate_source_for "$pin_probe_seen") || pin_gate_out=""
+      pin_gate_src=${pin_gate_out%%:*}
+      pin_gate_n=${pin_gate_out#*:}
+      # A `pinned` token whose N is NOT the value we handed the oracle means the oracle
+      # answered about something else — the BASH_ENV-pollution shape above, or any future
+      # way the two could drift. Demote it to the same non-answer as an unconsultable gate
+      # rather than trusting the suffix.
+      if [ "$pin_gate_src" = pinned ] && [ "$pin_gate_n" != "$pin_probe_seen" ]; then
+        pin_gate_src=""
+      fi
       case "$pin_gate_src" in
         pinned)
           # TWO AFFIRMATIVE HALVES, AND NEITHER SUFFICES ALONE (#3414 roborev round 2).
