@@ -389,6 +389,20 @@ if [ "${STUB_GH_RC:-0}" -ne 0 ]; then
   printf 'gh: simulated failure\n' >&2
   exit "${STUB_GH_RC}"
 fi
+# ===== `gh issue view`: THE RETRIEVABILITY HALF OF THE DEFERRAL DISPOSITION (#3626) =====
+# A findings deferral must name a FILED issue, so retrievability is modelled EXPLICITLY:
+# STUB_GH_ISSUES lists the issue numbers that exist. It defaults to EMPTY, so a case that wants a
+# grant has to SAY which issues are retrievable — the fail-closed direction, and it stops a case
+# passing because the test double happened to be permissive about a question the wrapper asks.
+if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
+  for _stub_known in ${STUB_GH_ISSUES:-}; do
+    [ "$_stub_known" = "${3:-}" ] || continue
+    printf '{"number":%s}\n' "$_stub_known"
+    exit 0
+  done
+  printf 'gh: could not resolve to an Issue with the number of %s\n' "${3:-}" >&2
+  exit 1
+fi
 if [ -n "${STUB_GH_COMMENTS_JSON:-}" ]; then
   printf '%s\n' "$STUB_GH_COMMENTS_JSON"
   exit 0
@@ -399,7 +413,7 @@ else
   STUB_GH_SRC=$(printf '%b' "${STUB_GH_COMMENTS:-}")
 fi
 printf '%s' "$STUB_GH_SRC" | python3 -c '
-import json, sys
+import json, os, sys
 raw = sys.stdin.read()
 comments = []
 author = None
@@ -414,7 +428,11 @@ for line in raw.split("\n"):
         body.append(line)
 if author is not None:
     comments.append({"author": {"login": author}, "body": "\n".join(body)})
-json.dump({"comments": comments}, sys.stdout)
+# `body` is the PULL-REQUEST body, always present, exactly as `gh pr view --json body` always
+# returns it (#3626): the deferral disposition asks whether the PR body references each deferred
+# issue, and a payload MISSING the field is a different state (UNAVAILABLE) that its own case
+# fixtures with STUB_GH_COMMENTS_JSON.
+json.dump({"comments": comments, "body": os.environ.get("STUB_PR_BODY", "")}, sys.stdout)
 '
 exit 0
 GHSTUB
@@ -1121,6 +1139,11 @@ export STUB_GH_COMMENTS=''
 export STUB_GH_COMMENTS_JSON=''
 export STUB_GH_COMMENTS_FILE=''
 export STUB_GH_RC=0
+# #3626: the FINDINGS-DEFERRAL knobs. STUB_PR_BODY is the pull-request body the disposition half
+# reads (an issue must be REFERENCED from it); STUB_GH_ISSUES is the set of issue numbers that
+# EXIST, so retrievability is a fixture decision and not a stub default.
+export STUB_PR_BODY=''
+export STUB_GH_ISSUES=''
 export STUB_ON_REVIEW=''
 reset_stub() {
   STUB_JOB=4656
@@ -1145,6 +1168,8 @@ reset_stub() {
   STUB_GH_COMMENTS_JSON=''
   STUB_GH_COMMENTS_FILE=''
   STUB_GH_RC=0
+  STUB_PR_BODY=''
+  STUB_GH_ISSUES=''
   STUB_ON_REVIEW=''
 }
 
@@ -4556,6 +4581,596 @@ else
 fi
 reset_stub
 
+# =============================================================================================
+# (df*) #3626: "ROBOREV CLEAN" MEANS NO UNADDRESSED FINDINGS — THE LEAD-AUTHORIZED DEFERRAL
+# =============================================================================================
+# THE DEADLOCK THIS FAMILY EXISTS FOR, measured on PR #3572 job 262: two findings, ZERO new, both
+# already filed (#3602, #3613) and both already LEAD-DEFERRED, 5.9M input tokens, every deterministic
+# key PASS — and `findings: PRESENT (2)` with `RESULT: FAIL`. Since #3586 that requirement is correct
+# and NOT waivable, but roborev re-reports a deferred finding on EVERY later round, so the doctrine
+# rule "any non-PASS terminal RESULT is a blocked merge" blocked that merge FOREVER. The lane the fix
+# protects is the one that behaved correctly: it refused to arm --auto over a FAIL, refused to
+# manufacture a green, and asked instead. A rule that punishes the correct behaviour will not survive
+# contact.
+#
+# WHAT IS PINNED HERE: a deferral is granted ONLY by a marker on the ABSENCE WAIVER'S CHANNEL (sole
+# nonblank content of a top-level PR comment, allowlisted author, structured author association),
+# ONLY on `--recheck-job`, ONLY over an affirmatively measured `PRESENT (n)`, and only when the
+# authorized count EQUALS the observed count with every named issue retrievable AND referenced from
+# the PR body. It reports a DISTINCT `DEFERRED` token, NEVER `NONE`. Every refusal state leaves the
+# FAIL in place under its own name, and the deferral cannot touch any other verdict.
+#
+# BOTH DIRECTIONS, as #3564 required of its own fix: a one-direction family cannot distinguish a
+# correct gate from one that fails everything, and `--recheck-job` is the only path either
+# authorization can travel — so a gate that over-fails would break the break-glass instead of the
+# deadlock.
+FINDINGS_TEXT_3='## Findings\n- **Severity**: High\nProblem: the first one.\n- **Severity**: Medium\nProblem: the second one.\n- **Severity**: Low\nProblem: a third one arrived.\n## Summary\n3 findings.'
+d_issues='3602,3613'
+d_reason='both already filed and lead-deferred; 5937937 in / 5703168 cached'
+d_body='Defers two roborev findings: #3602 (the naming nit) and #3613 (the doc drift).'
+d_grant="roborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=$d_reason"
+# The fixture state EVERY grant case needs: a findings-bearing record for job 4656, a prompt that
+# matches this fixture's own census (so `prompt-content:` PASSes and the deferral is the SOLE thing
+# under test), a PR body that links both issues, and both issues retrievable.
+df_grant_fixture() {
+  STUB_ANNOUNCE_SHA="$w_head"
+  STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+  STUB_VERDICT_FIELD='F'
+  STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+  STUB_PR_BODY="$d_body"
+  STUB_GH_ISSUES='3602 3613'
+}
+
+printf '== (df1) #3626: a GRANTED, MATCHED deferral reports DEFERRED and reaches PASS ==\n'
+# THE ACCEPTANCE CASE FOR THE WHOLE MECHANISM. Every other key is made to PASS (hence the
+# census-matching prompt), so the deferral is the SOLE reason this run reaches a verdict at all —
+# with any other key failing, the run would FAIL for a reason that was never in question and the case
+# would keep passing if the fix were reverted.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df1)' PASS 0
+assert_says 'case (df1) the findings token is DEFERRED, naming the count, the issues, the author and the job' \
+  "^findings: DEFERRED \(2, issues=#3602,#3613, authorized @pmcfadin, job 4656\)\$"
+assert_says 'case (df1) the deferral key records author, issues, count, the whole scope and the verbatim reason' \
+  "^deferral: GRANTED \(author=@pmcfadin issues=$d_issues count=2 scope=base=$w_base head=$w_head job=4656 reason=$d_reason\)\$"
+# A DEFERRED RUN IS NOT GREPPABLE AS CLEAN. `NONE` stays reachable only from the record's structured
+# verdict letter, so no reader looking for a clean review can find a deferred one.
+assert_lacks 'case (df1) a deferral NEVER yields findings: NONE' '^findings: NONE'
+assert_lacks 'case (df1) and never spells itself as a findings PASS' '^findings: PASS'
+# THE ISOLATION CLAIM, PINNED RATHER THAN ASSERTED IN PROSE: reaching PASS proves no key failed the
+# grammar scan, not that the others affirmatively passed.
+assert_says 'case (df1) the reviewer-diff delivery key affirmatively PASSed (the deferral is the SOLE cause)' \
+  '^prompt-content: PASS \(2/2 code census paths present\)$'
+assert_says 'case (df1) and completion was re-asserted from the record' '^review-completed: PASS$'
+# A DEFERRED PASS CAN NEVER BE PASTED AS A FRESH CLEAN REVIEW: the mode is declared in the first key.
+assert_says 'case (df1) the block still declares the recheck mode first' \
+  '^MODE: recheck \(job 4656 re-decided from its job record; NO review was enqueued — not evidence of a fresh review\)$'
+assert_says 'case (df1) the NOTICE records that this is NOT a clean review' 'This is NOT a clean review'
+reset_stub
+
+printf '== (df2) #3626: NO marker at all — deferral: NONE teaching both channel rules, FAIL ==\n'
+reset_stub
+df_grant_fixture
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df2)' FAIL 1
+assert_says 'case (df2) the findings stand as PRESENT' '^findings: PRESENT \(2\)$'
+assert_says 'case (df2) the NONE cause teaches the sole-content and top-level rules' \
+  '^deferral: NONE \(no findings-deferral comment for this review: the authorization must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment — one inside prose, a code fence, a quote or a review body is not read\)$'
+assert_lacks 'case (df2) nothing is deferred' '^findings: DEFERRED'
+# LAYER 3 (#3312 job 23): no emitted diagnostic carries ANY part of the marker, because a summary
+# block pasted into a PR comment would otherwise authorize the next run.
+assert_lacks 'case (df2) no part of the deferral marker appears anywhere in the output' 'roborev-defer'
+assert_says 'case (df2) the diagnostic points at --help instead of printing a form' \
+  'THE EXACT FORM IS DELIBERATELY NOT PRINTED HERE'
+assert_says 'case (df2) and it names the scope an authorization would have to bind' \
+  "head $w_head, job 4656, count 2"
+reset_stub
+
+printf '== (df3) #3626: a marker naming a DIFFERENT JOB is STALE (a re-run inherits nothing) ==\n'
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=9999 reason=judged an earlier review\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df3)' FAIL 1
+assert_says 'case (df3) the marker names another review' \
+  "^deferral: STALE \(the marker names a different review — job \(9999 != 4656\)"
+assert_says 'case (df3) and says an authorization may not outlive the review it judged' \
+  'a deferral may not outlive the review its authorizer judged'
+assert_lacks 'case (df3) nothing is deferred' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df3b) #3626: a marker naming a DIFFERENT HEAD is STALE (a push needs a fresh one) ==\n'
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=0000000000000000000000000000000000000000 job=4656 reason=written before the push\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df3b)' FAIL 1
+assert_says 'case (df3b) the head divergence is named' \
+  "^deferral: STALE \(the marker names a different review — head \(0000000000000000000000000000000000000000 != $w_head\)"
+reset_stub
+
+printf '== (df4) #3626: a marker-only comment MISSING a field is MALFORMED ==\n'
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues base=$w_base head=$w_head job=4656 reason=no count field\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df4)' FAIL 1
+assert_says 'case (df4) a missing field does not match the required form' \
+  '^deferral: MALFORMED \(the line does not match the required form'
+assert_lacks 'case (df4) and never grants' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df4b) #3626: the field ORDER and field-value BOUNDARIES are enforced by one pattern ==\n'
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings count=2 issues=$d_issues base=$w_base head=$w_head job=4656x reason=order and boundary\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df4b)' FAIL 1
+assert_says 'case (df4b) a re-ordered, unbounded marker is MALFORMED' \
+  '^deferral: MALFORMED \(the line does not match the required form'
+reset_stub
+
+printf '== (df4c) #3626: a PLACEHOLDER reason is refused, trimmed BEFORE it is judged ==\n'
+# Both classic defeats in one case: an unsubstituted <...> (a pasted template) and `TODO` with
+# trailing whitespace (compared before trimming, `TODO ` is not equal to `todo`).
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=<why>\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df4c)' FAIL 1
+assert_says 'case (df4c) a pasted template is MALFORMED' \
+  '^deferral: MALFORMED \(the marker is missing a-substituted-reason'
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=TODO   \n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df4c trailing whitespace)' FAIL 1
+assert_says 'case (df4c) the trimmed value is judged' \
+  "^deferral: MALFORMED \(the marker is missing a-substantive-reason \(the reason 'TODO' is a bare placeholder\)"
+reset_stub
+
+printf '== (df5) #3626: the same marker from a NON-ALLOWLISTED author is UNAUTHORIZED ==\n'
+# This is a PUBLIC repository and a failing block PRINTS base/head/job and the observed count, so
+# without the allowlist any commenter could copy them and clear a merge gate's findings.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001drive-by-contributor\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=copied from the public failing block\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df5)' FAIL 1
+assert_says 'case (df5) the marker was fine and the author was not' \
+  "^deferral: UNAUTHORIZED \(the marker is well-formed and names this review, but its author '@drive-by-contributor' is not on the deferral allowlist"
+assert_lacks 'case (df5) a stranger cannot defer' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df5b) #3626: an UNAUTHORIZED marker does not shadow an allowlisted one ==\n'
+# The refusal must not be sticky: the LAST GRANTED marker wins, so a stranger commenting first cannot
+# deny a legitimate authorization posted afterwards.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001drive-by-contributor\nroborev-defer: findings issues=$d_issues count=2 base=$w_base head=$w_head job=4656 reason=stranger first\n\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df5b)' PASS 0
+assert_says 'case (df5b) the allowlisted authorization still grants' '^deferral: GRANTED \(author=@pmcfadin'
+reset_stub
+
+printf '== (df6) #3626: the OBSERVED count must EQUAL the authorized one — COUNT-MISMATCH ==\n'
+# THE AFFIRMATIVE HALF OF THE BINDING (#3586: never derive a pass from the absence of a bad signal).
+# The authorization covers TWO findings and the job reports THREE, which is exactly what a NEW finding
+# arriving at the same head looks like — so the undeferred set is non-empty and the FAIL stands.
+reset_stub
+df_grant_fixture
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT_3"
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df6)' FAIL 1
+assert_says 'case (df6) the observed findings count is reported unchanged' '^findings: PRESENT \(3\)$'
+assert_says 'case (df6) the mismatch is its own cause, naming both numbers' \
+  '^deferral: COUNT-MISMATCH \(the marker authorizes 2 finding\(s\) but this job reports 3'
+assert_says 'case (df6) and it says a new finding must not ride an older authorization' \
+  'A new finding at the same head raises the observed count and must not ride an older authorization'
+assert_lacks 'case (df6) nothing is deferred' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df6b) #3626: a PRE-AUTHORIZATION (count declared before the findings were read) fails ==\n'
+# The residual #3312 names — an authorized human can authorize carelessly — is at least made
+# DETECTABLE for the count: a marker written before the job finished cannot know the number.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=1 base=$w_base head=$w_head job=4656 reason=pre-authorized before the review finished\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df6b)' FAIL 1
+assert_says 'case (df6b) a count that was guessed does not match' \
+  '^deferral: COUNT-MISMATCH \(the marker authorizes 1 finding\(s\) but this job reports 2'
+reset_stub
+
+printf '== (df7) #3626: an UNRETRIEVABLE issue is ISSUE-UNRESOLVABLE, not skipped ==\n'
+# A deferral must name a FILED issue: one that cannot be retrieved is a deferral into a void, i.e. a
+# DROPPED finding wearing a link. Fail-closed under its own cause.
+reset_stub
+df_grant_fixture
+STUB_GH_ISSUES='3602'
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df7)' FAIL 1
+assert_says 'case (df7) the unretrievable issue is named' \
+  '^deferral: ISSUE-UNRESOLVABLE \(issue #3613 could not be retrieved'
+assert_says 'case (df7) and it says a deferral must name a filed issue' 'A deferral must name a FILED issue'
+assert_lacks 'case (df7) nothing is deferred' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df8) #3626: an issue the PR body never references is PR-UNLINKED ==\n'
+# WHERE THE FINDING WENT has to be legible from the PR itself. The nit rule already requires one
+# follow-up issue at merge time; this makes the link mechanical instead of remembered.
+reset_stub
+df_grant_fixture
+STUB_PR_BODY='This PR defers a finding to #36021, which is a different issue entirely.'
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df8)' FAIL 1
+assert_says 'case (df8) both unlinked issues are named' \
+  '^deferral: PR-UNLINKED \(the pull-request body does not reference issue\(s\) #3602, #3613'
+assert_says 'case (df8) and it says an unlinked deferral is a dropped finding' \
+  'a deferral without a linked issue is a DROPPED finding'
+# `#36021` MUST NOT satisfy `#3602`: a substring match would let one filed issue stand in for another,
+# which is the disposition requirement satisfied by accident.
+assert_lacks 'case (df8) a longer number does not prove a shorter one' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df9) #3626: a gh failure (no PR / no auth / API error) is UNAVAILABLE and FAILs closed ==\n'
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+STUB_GH_RC=1
+run_wrapper "$w_work" --recheck-job 4656
+STUB_GH_RC=0
+assert_verdict 'case (df9)' FAIL 1
+assert_says 'case (df9) an unconsultable oracle is UNAVAILABLE, naming what could not be read' \
+  "^deferral: UNAVAILABLE \(.gh pr view --json comments,body. failed"
+assert_lacks 'case (df9) and nothing is deferred' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df9b) #3626: a payload with NO readable PR body cannot grant ==\n'
+# The PR body is the SOLE evidence for the disposition half, so a payload that does not carry it has
+# no verdict to give — reported apart from PR-UNLINKED, because "the body says nothing about #N" and
+# "there is no body to read" are different operator actions.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS_JSON=$(DF_GRANT="$d_grant" python3 -c '
+import json, os
+print(json.dumps({"comments": [{"author": {"login": "pmcfadin"}, "body": os.environ["DF_GRANT"]}]}))
+')
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df9b)' FAIL 1
+assert_says 'case (df9b) an absent body field is UNAVAILABLE' \
+  "^deferral: UNAVAILABLE \(the 'gh pr view' payload carries no readable 'body' field"
+reset_stub
+
+printf '== (df10) #3626: findings UNKNOWN is NOT deferrable, even with a granted-shaped marker ==\n'
+# `UNKNOWN` means the findings state was never ESTABLISHED. We cannot count what we cannot see, so a
+# deferral over it would be precisely "a pass resting on a state we could not read".
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT='## Summary\\nsomething happened, in prose, with no severity marker.'
+STUB_PR_BODY="$d_body"
+STUB_GH_ISSUES='3602 3613'
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df10)' FAIL 1
+assert_says 'case (df10) the findings state is UNKNOWN' '^findings: UNKNOWN$'
+assert_says 'case (df10) and UNKNOWN is refused as non-deferrable, in every mode' \
+  '^deferral: UNAVAILABLE \(findings: UNKNOWN — the findings state was never ESTABLISHED'
+assert_lacks 'case (df10) nothing is deferred' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df10b) #3626: SKIP and a countless PRESENT are NOT deferrable (direct unit probe) ==\n'
+# EXERCISED DIRECTLY because the wrapper cannot reach these states on a recheck: `findings:` is always
+# assigned there, and a run that never reaches the check also never reaches the deferral. That is
+# exactly why they are probed — a structural backstop must not depend on an upstream ordering still
+# being there. A bare `PRESENT` carries NO count, so the affirmative half of the binding would be
+# unenforceable, and only an affirmatively measured `PRESENT (n)` may be deferred.
+df10b_probe="$tmp/df10b-probe.sh"
+df10b_out="$tmp/df10b-out.txt"
+cat >"$df10b_probe" <<'DF10B'
+set -uo pipefail
+. "$1"   # oracles
+. "$2"   # checks
+RECHECK_JOB=4656
+JOB=4656
+BASE=origin/main
+LOG="$3/df10b.log"
+for probe_value in SKIP PRESENT; do
+  FINDINGS="$probe_value"
+  DETAILS=()
+  DEFERRAL_REPORT=""
+  roborev_check_findings_deferral
+  printf 'value=%s findings=%s deferral=%s\n' "$probe_value" "$FINDINGS" "$DEFERRAL_REPORT"
+done
+DF10B
+if [ "$HAVE_PYTHON3" -eq 1 ] && bash "$df10b_probe" "$ORACLES_SRC" "$CHECKS_SRC" "$tmp" >"$df10b_out" 2>&1; then
+  if grep -qE '^value=SKIP findings=SKIP deferral=UNAVAILABLE \(findings: SKIP — the findings state was never ESTABLISHED' "$df10b_out"; then
+    ok 'case (df10b): findings SKIP is refused as non-deferrable and the value is left untouched'
+  else
+    bad "case (df10b): SKIP was not refused as non-deferrable: $(grep '^value=SKIP' "$df10b_out" || cat "$df10b_out")"
+  fi
+  if grep -qE '^value=PRESENT findings=PRESENT deferral=UNAVAILABLE \(findings: PRESENT carries no measured count' "$df10b_out"; then
+    ok 'case (df10b): a countless PRESENT has no observed count to match, so it is refused'
+  else
+    bad "case (df10b): a countless PRESENT was not refused: $(grep '^value=PRESENT' "$df10b_out" || cat "$df10b_out")"
+  fi
+  if grep -q 'findings=DEFERRED' "$df10b_out"; then
+    bad 'case (df10b): a non-deferrable findings state was rewritten to DEFERRED'
+  else
+    ok 'case (df10b): neither non-deferrable state can be rewritten to DEFERRED'
+  fi
+else
+  bad "case (df10b): the unit probe did not run: $(cat "$df10b_out" 2>/dev/null)"
+fi
+reset_stub
+
+printf '== (df11) #3626: SOLE-CONTENT refusals — indented, quoted, bulleted, mid-sentence ==\n'
+# INHERITED BY CALL, NOT RE-DERIVED (#3312 job 29): four Markdown recognisers were superseded before
+# this rule closed, and the deferral uses the SAME scanner rather than a second copy of it. These
+# cases are the regression proof that the inheritance is real.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS="\001pmcfadin\n> $d_grant\n    $d_grant\n- $d_grant\nthe form is $d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df11)' FAIL 1
+assert_says 'case (df11) none of the four quoting shapes is an authorization' '^deferral: NONE \(no findings-deferral comment'
+assert_lacks 'case (df11) and none of them grants' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df11b) #3626: a FENCED and an HTML <pre>-wrapped marker are both inert ==\n'
+# The two contexts the fence state machine got wrong: ```bash inside a fence is CONTENT, not a closing
+# delimiter, and HTML <pre>/<code> was never handled at all. Under the sole-content rule neither needs
+# handling — both are simply extra content.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS_JSON=$(DF_GRANT="$d_grant" python3 -c '
+import json, os
+m = os.environ["DF_GRANT"]
+fenced = "Here is the form:\n\n```bash\n" + m + "\n```"
+html = "<pre><code>" + m + "</code></pre>"
+print(json.dumps({"body": "links #3602 and #3613", "comments": [
+    {"author": {"login": "pmcfadin"}, "body": fenced},
+    {"author": {"login": "pmcfadin"}, "body": html}]}))
+')
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df11b)' FAIL 1
+assert_says 'case (df11b) documenting the form grants nothing' '^deferral: NONE \(no findings-deferral comment'
+assert_lacks 'case (df11b) neither wrapper grants' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df11c) #3626: the SANCTIONED workflow — commentary and authorization as SEPARATE comments ==\n'
+# The cost of the rule, and the proof it is trivial: the lead explains in one comment (fenced example
+# included) and authorizes in another. The marker-only comment grants; the documentation is inert.
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS_JSON=$(DF_GRANT="$d_grant" DF_BODY="$d_body" python3 -c '
+import json, os
+m = os.environ["DF_GRANT"]
+doc = "Both findings are filed and deferred. The form is:\n\n```\n" + m + "\n```"
+print(json.dumps({"body": os.environ["DF_BODY"], "comments": [
+    {"author": {"login": "pmcfadin"}, "body": doc},
+    {"author": {"login": "pmcfadin"}, "body": m}]}))
+')
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df11c)' PASS 0
+assert_says 'case (df11c) the marker-only comment grants' '^deferral: GRANTED \(author=@pmcfadin'
+reset_stub
+
+printf '== (df12) #3626: the failing block REPOSTED as a PR comment authorizes nothing ==\n'
+# THE ARTIFACT MUST NOT BECOME THE CREDENTIAL (#3312 job 23), and the fixture IS the exploit: take the
+# ENTIRE output of a failing run — block plus diagnostics — post it as a PR comment, and run again.
+# Summary blocks are pasted into PR comments as a matter of course in this repository.
+reset_stub
+df_grant_fixture
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df12) step 1: the un-deferred findings FAIL' FAIL 1
+df12_paste="$tmp/df12-paste.txt"
+{ printf '\001pmcfadin\n'; cat "$OUT"; } >"$df12_paste"
+reset_stub
+df_grant_fixture
+STUB_GH_COMMENTS_FILE="$df12_paste"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df12)' FAIL 1
+assert_says 'case (df12) the reposted diagnostic is not an authorization' '^deferral: NONE \(no findings-deferral comment'
+assert_lacks 'case (df12) and it grants nothing' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df13) #3626: SEPARATE SCOPING — an absence waiver confers NO authority over findings ==\n'
+# A delivery-artifact waiver may never excuse a real defect. This is the pair that keeps the two
+# authorizations from collapsing into one.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_VERDICT_FIELD='F'
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+STUB_PR_BODY="$d_body"
+STUB_GH_ISSUES='3602 3613'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df13)' FAIL 1
+assert_says 'case (df13) the waiver still excuses exactly what it was authorized for' \
+  '^prompt-content: WAIVED \(2/2 code census paths absent'
+assert_says 'case (df13) but the findings are NOT deferred by it' '^findings: PRESENT \(2\)$'
+assert_says 'case (df13) and the deferral key reports its own, independent state' \
+  '^deferral: NONE \(no findings-deferral comment'
+assert_lacks 'case (df13) a waiver can never carry a findings-bearing recheck to a PASS' '^RESULT: PASS$'
+reset_stub
+
+printf '== (df13b) #3626: SEPARATE SCOPING — a findings deferral confers NO authority over the prompt ==\n'
+# The other direction, and the one a reader is likelier to assume: a granted deferral does its own job
+# (findings: DEFERRED) while the absent census paths still FAIL, because no human waived THAT.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_VERDICT_FIELD='F'
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+STUB_PR_BODY="$d_body"
+STUB_GH_ISSUES='3602 3613'
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df13b)' FAIL 1
+assert_says 'case (df13b) the deferral does its own job' \
+  '^findings: DEFERRED \(2, issues=#3602,#3613, authorized @pmcfadin, job 4656\)$'
+assert_says 'case (df13b) and is recorded as granted' '^deferral: GRANTED \(author=@pmcfadin'
+assert_says 'case (df13b) while the absent census paths still FAIL' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+assert_says 'case (df13b) the waiver key reports its own independent state' '^waiver: NONE \(no waiver comment'
+assert_lacks 'case (df13b) a deferral can never excuse another check' '^RESULT: PASS$'
+reset_stub
+
+printf '== (df13c) #3626: BOTH authorizations, each on its own marker, each under its own key ==\n'
+# A run may legitimately carry both. Asserted because "separately scoped" must not degrade into
+# "mutually exclusive": the failure mode of over-separating is as real as the failure mode of
+# collapsing, and only this case distinguishes them.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_VERDICT_FIELD='F'
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+STUB_PR_BODY="$d_body"
+STUB_GH_ISSUES='3602 3613'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$w_base head=$w_head job=4656 reason=snapshot-delivered; 541812 in / 472576 cached\n\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (df13c)' PASS 0
+assert_says 'case (df13c) the absence is WAIVED under its own key' '^prompt-content: WAIVED \(2/2 code census paths absent'
+assert_says 'case (df13c) the findings are DEFERRED under theirs' '^findings: DEFERRED \(2, issues=#3602,#3613'
+assert_says 'case (df13c) and each authorization is recorded separately' '^waiver: GRANTED \(author=@pmcfadin'
+assert_says 'case (df13c) both keys speak' '^deferral: GRANTED \(author=@pmcfadin'
+reset_stub
+
+printf '== (df14) #3626: the scope binds the MERGE-BASE, not the base ref tip ==\n'
+# THE STALENESS DEFECT #3392 FIXED, IN THE NEW BINDING. `<base>...HEAD` IS `merge-base..HEAD`, so an
+# authorization bound to the base ref's TIP goes spuriously STALE the moment the base ref advances —
+# which is what dead-lettered the #3312 break-glass under fleet load. The same mistake here would
+# dead-letter this one on any branch whose main moved, i.e. almost every branch.
+reset_stub
+df14_work=$(make_fixture case_df14 advanced-base)
+assert_base_advanced 'case (df14)' "$df14_work"
+df14_tip=$(git -C "$df14_work" rev-parse origin/main)
+df14_base=$(git -C "$df14_work" merge-base origin/main HEAD)
+df14_head=$(git -C "$df14_work" rev-parse HEAD)
+STUB_ANNOUNCE_SHA="$df14_base"
+STUB_GIT_REF="$df14_base..$df14_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_VERDICT_FIELD='F'
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+STUB_PR_BODY="$d_body"
+STUB_GH_ISSUES='3602 3613'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$df14_base head=$df14_head job=4656 reason=deferred against the reviewed range\n"
+run_wrapper "$df14_work" --recheck-job 4656
+assert_verdict 'case (df14)' PASS 0
+assert_says 'case (df14) a marker naming the MERGE-BASE grants' \
+  "^deferral: GRANTED \(author=@pmcfadin issues=$d_issues count=2 scope=base=$df14_base head=$df14_head job=4656 reason=deferred against the reviewed range\)\$"
+assert_says 'case (df14) and the findings are DEFERRED' '^findings: DEFERRED \(2, issues=#3602,#3613'
+reset_stub
+
+printf '== (df14b) #3626: a marker naming the STALE base ref TIP does NOT grant (the control) ==\n'
+# Only `base=` differs from (df14) — it names a REAL commit that is not the base of the reviewed range
+# — so the marker names a different review. This is what makes (df14) a measurement of the binding
+# rather than of the parser.
+reset_stub
+STUB_ANNOUNCE_SHA="$df14_base"
+STUB_GIT_REF="$df14_base..$df14_head"
+STUB_PROMPT="$PROMPT_WITH_PATHS"
+STUB_VERDICT_FIELD='F'
+STUB_RECORD_OUTPUT="$FINDINGS_TEXT"
+STUB_PR_BODY="$d_body"
+STUB_GH_ISSUES='3602 3613'
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-defer: findings issues=$d_issues count=2 base=$df14_tip head=$df14_head job=4656 reason=bound to the wrong base\n"
+run_wrapper "$df14_work" --recheck-job 4656
+assert_verdict 'case (df14b)' FAIL 1
+assert_says 'case (df14b) the tip-bound marker is STALE' \
+  "^deferral: STALE \(the marker names a different review — base \($df14_tip != $df14_base\)"
+assert_lacks 'case (df14b) and it grants nothing' '^findings: DEFERRED'
+reset_stub
+
+printf '== (df15) #3626: a deferral is NOT applied to a FRESH review, and no key is emitted ==\n'
+# RECHECK-ONLY is a property of the mechanism, not a convenience: the authorizer learns the job id AND
+# the findings from the FINISHED run, so a fresh run enqueues a DIFFERENT job than any marker names. A
+# fresh review with open findings therefore still FAILs under the reviewer's own exit status, and the
+# `deferral:` key is ABSENT rather than placeholdered — there was no deferral to look for.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_VERDICT=$'## Findings\n- **Severity**: High\nProblem: the first one.\n- **Severity**: Medium\nProblem: the second one.\n## Summary\n2 findings.'
+STUB_REVIEW_RC=1
+STUB_PR_BODY="$d_body"
+STUB_GH_ISSUES='3602 3613'
+STUB_GH_COMMENTS="\001pmcfadin\n$d_grant\n"
+run_wrapper "$w_work"
+assert_verdict 'case (df15)' FAIL 1
+assert_says 'case (df15) a reviewer that RAN reports its exit honestly' '^roborev-exit: FINDINGS \(exit 1\)$'
+assert_says 'case (df15) the findings are reported present' '^findings: PRESENT'
+assert_lacks 'case (df15) no deferral is applied to a fresh review' '^findings: DEFERRED'
+assert_lacks 'case (df15) and the key has no subject, so it is absent' '^deferral:'
+reset_stub
+
+printf '== (df16) #3626: a DEFERRED token with NO granted deferral FAILs (mutant) ==\n'
+# THE COUPLING, ASSERTED AGAINST A HOSTILE CODE PATH. `DEFERRED` is non-failing ONLY on the coupled
+# granted state, so a future check that emits the token having measured nothing must not ride to a
+# PASS — which is the exact shape (#3229/#3586) of a verdict resting on the absence of a bad signal.
+# THE CONTROL RUNS FIRST AND IS NOT OPTIONAL: an assert that a patched copy FAILs is satisfied by a
+# copy that fails because it was copied wrong, which is a probe failing in the direction that looks
+# like success.
+reset_stub
+_df_dir="$tmp/deferral-mutant"
+mkdir -p "$_df_dir"
+cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+  "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$SCAN_TOOL" "$_df_dir/"
+if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
+  cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_df_dir/"
+fi
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_VERDICT_FIELD='P'
+STUB_RECORD_OUTPUT="$CLEAN_TEXT"
+run_wrapper --wrapper "$_df_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+assert_verdict 'case (df16 control) the UNPATCHED copy reaches PASS on a clean recheck' PASS 0
+assert_says 'case (df16 control) with an affirmative NONE and no deferral key' '^findings: NONE$'
+assert_lacks 'case (df16 control) and no deferral was looked for' '^deferral:'
+if sed_inplace_verified "$_df_dir/roborev-review-checks.sh" \
+  's/^roborev_check_findings_deferral() {$/roborev_check_findings_deferral() {\
+  FINDINGS="DEFERRED (2, issues=#1, authorized @nobody, job 4656)"\
+  DEFERRAL_REPORT="GRANTED (fabricated by a code path that measured nothing)"\
+  return 0/' \
+  'fabricated by a code path that measured nothing' ''; then
+  ok 'case (df16): the fabricated-DEFERRED patch was really applied to the copy'
+  run_wrapper --wrapper "$_df_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+  assert_verdict 'case (df16)' FAIL 1
+  assert_says 'case (df16) the ungranted DEFERRED is named under its own diagnostic' \
+    '^ERROR: verdict-grammar: a per-check key reports a DEFERRED state that the deferral oracle did not affirmatively GRANT'
+  assert_says 'case (df16) it states what a grant requires' 'whose authorized count EQUALS the count this run observed'
+  assert_says 'case (df16) and why an unbacked token is refused' \
+    'indistinguishable from an authorized one to every reader of this block'
+  assert_lacks 'case (df16) a fabricated deferral can never reach a PASS' '^RESULT: PASS$'
+else
+  bad 'case (df16): could not patch the copied checks file, so the ungranted-DEFERRED path was never exercised (a green run here would be a probe failing in the direction that looks like success)'
+fi
+reset_stub
+
+printf '== (df17) #3626: the verdict token is matched EXACTLY — DEFERREDX is unrecognised ==\n'
+# A `DEFERRED*` prefix glob would accept `DEFERREDX` and check a SPELLING rather than a STATE, which
+# is the closure reopening the hole it exists to shut, one level down (#3229).
+if sed_inplace_verified "$_df_dir/roborev-review-checks.sh" \
+  's/  FINDINGS="DEFERRED (2, issues=#1, authorized @nobody, job 4656)"/  FINDINGS="DEFERREDX (2, issues=#1, authorized @nobody, job 4656)"/' \
+  'FINDINGS="DEFERREDX (2' 'FINDINGS="DEFERRED (2'; then
+  ok 'case (df17): the near-miss-token patch was really applied to the copy'
+  run_wrapper --wrapper "$_df_dir/roborev-review.sh" "$w_work" --recheck-job 4656
+  assert_verdict 'case (df17)' FAIL 1
+  assert_says 'case (df17) the near-miss token is UNRECOGNISED, not accepted as DEFERRED' \
+    "^ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: 'DEFERREDX "
+  assert_lacks 'case (df17) and it never reaches a PASS' '^RESULT: PASS$'
+else
+  bad 'case (df17): could not patch the copied checks file for the near-miss token, so token-exactness was never exercised'
+fi
+reset_stub
+
 printf '== case (mb9): the ENQUEUED range is IMMUTABLE against a mid-review base-ref move ==\n'
 # THE RESIDUAL SECOND-ORDER RACE, CLOSED BY CONSTRUCTION (roborev round 1, Medium). The wrapper used
 # to pass the SYMBOLIC base ref to `roborev review --base`, so roborev re-resolved the mirror ref
@@ -5208,7 +5823,10 @@ fi
 # The state machine must live in the SCANNER (one implementation of the parse) and must track both fence
 # characters; a shell-side copy is how the in-band channel of job 26 came back.
 _sole_ok=1
-grep -qF 'def sole_marker_line(body):' "$SCAN_TOOL" || _sole_ok=0
+# THE PREFIX IS A PARAMETER, so BOTH marker kinds (the absence waiver and the #3626 findings
+# deferral) inherit this rule BY CALL. A second copy of it for the second kind would be a second
+# place for the channel rule to diverge, and a divergence here is an authorization bypass.
+grep -qF 'def sole_marker_line(body, prefix):' "$SCAN_TOOL" || _sole_ok=0
 grep -qF 'if len(nonblank) != 1:' "$SCAN_TOOL" || _sole_ok=0
 grep -qF 'ONE DECISION, NO PARSE' "$SCAN_TOOL" || _sole_ok=0
 # AND NO MARKDOWN RECOGNISER MAY RETURN. Four were tried and superseded; reintroducing one would restore the
@@ -5608,15 +6226,26 @@ else
     # and a sha equal to the certified head — and is deliberately NOT keyed on `det_key`, so it cannot
     # become the "which keys are exempt" argument again. A third `continue`, or a provenance-free
     # admission, is the escape hatch #3229 forbade.
+    # EXACTLY TWO NON-`PASS` ADMISSIONS ARE AUTHORISED, each on its own human authorization: the
+    # #3312 absence WAIVER and the #3626 findings DEFERRAL. Both are gated on a COMPLETE provenance
+    # and NEITHER is keyed on `det_key`. The deferral's arm reads `deferral_admits` — the SINGLE
+    # coupled state the grammar scan and the findings gate also read — rather than re-deriving the
+    # provenance here: two derivations of "was it granted?" are two things that can drift apart, and
+    # the drift would be an authorization bypass rather than an inconsistency. A FOURTH `continue`,
+    # a provenance-free admission, or a deferral arm that re-derives its own state, is the escape
+    # hatch #3229 forbade.
     _aff_continues=$(printf '%s\n' "$_aff_body" | grep -cE '\bcontinue\b' || true)
-    if [ "$_aff_continues" -eq 2 ] &&
+    if [ "$_aff_continues" -eq 3 ] &&
       printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;' &&
       printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' &&
       printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' &&
-      ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
-      ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED admission, gated on the complete scope-matching provenance (base+head+job) and not on the key'
+      printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*DEFERRED\)$' &&
+      printf '%s\n' "$_aff_body" | grep -qF 'if [ "$deferral_admits" -eq 1 ]; then continue; fi' &&
+      ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"' &&
+      ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "findings"'; then
+      ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED and DEFERRED admissions, each gated on a complete provenance (the deferral on the one coupled deferral_admits state) and neither keyed on the key'
     else
-      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s), admits WAIVED without complete provenance, or is keyed on det_key — the per-key escape hatch #3229 forbade and ruling (4) deleted (#3312)"
+      bad "structural: the affirmation backstop carries $_aff_continues exempting arm(s), admits WAIVED or DEFERRED without complete provenance, or is keyed on det_key — the per-key escape hatch #3229 forbade and ruling (4) deleted (#3312/#3626)"
     fi
   fi
   # And the wrapper must STATE the rule, not just implement it: the next key added to this

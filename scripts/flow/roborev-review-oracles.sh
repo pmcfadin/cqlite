@@ -1422,7 +1422,12 @@ roborev_findings_deferral_lookup() {
   # A STATE THIS CODE HAS NEVER JUDGED IS NOT A GRANT: an unrecognised (or empty) verdict from the
   # scanner fails closed instead of inheriting the permissive path.
   case "$ROBOREV_DEFERRAL_STATE" in
-    granted|unauthorized|stale|malformed|none|count-mismatch|pr-unlinked) ;;
+    # `unavailable` IS a state the scanner itself emits (a payload with no readable PR body), and it
+    # arrives WITH its own detail — so it is recognised here rather than rewritten. Rewriting it
+    # replaced a precise cause ("there is no body to read") with a generic one ("unrecognised state"),
+    # which is the diagnostic-quality failure this key exists to avoid; nothing becomes permissive,
+    # because `unavailable` is non-granting on both paths.
+    granted|unauthorized|stale|malformed|none|count-mismatch|pr-unlinked|unavailable) ;;
     *)
       ROBOREV_DEFERRAL_DETAIL="the deferral scanner returned the unrecognised state '$ROBOREV_DEFERRAL_STATE'; failing closed"
       ROBOREV_DEFERRAL_STATE="unavailable"
